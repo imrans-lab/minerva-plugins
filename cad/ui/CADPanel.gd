@@ -19,6 +19,8 @@ extends MinervaPluginPanel
 ##   preload(...).new(). Property access and signal subscription works via
 ##   duck typing.
 
+const _DEBUG_EDGE_PICK: bool = true
+
 const _CadAnnotationHostScript: Script = preload("CadAnnotationHost.gd")
 const _ResponsiveContainerScript: Script = preload("res://Scripts/UI/Controls/responsive_container.gd")
 const _BuiltinKindsScript: Script = preload("res://Scripts/Services/Annotations/BuiltinKinds.gd")
@@ -610,6 +612,13 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	var mesh_data: Dictionary = eval_result.get("mesh", {}) as Dictionary
 	var edges_var: Variant = eval_result.get("edges", [])
 	var edges: Array = edges_var if edges_var is Array else []
+	if _DEBUG_EDGE_PICK:
+		print("[edge-pick] eval-response eval_result.keys=%s edges_var.type=%s edges.size=%d mesh.keys=%s" % [
+			str(eval_result.keys()),
+			str(typeof(edges_var)),
+			edges.size(),
+			str(mesh_data.keys()),
+		])
 
 	# Push mesh into all 5 MeshDisplay instances. The MeshRoot Node3D in each
 	# SubViewport has scripts/mesh_display.gd attached, exposing update_mesh().
@@ -911,6 +920,12 @@ func _push_mesh_to_geometry_overlays() -> void:
 	}
 	for ov_id in _geometry_overlays.keys():
 		var ov: Control = _geometry_overlays[ov_id] as Control
+		if _DEBUG_EDGE_PICK:
+			print("[edge-pick] connect ov_id=%s ov=%s script=%s" % [
+				ov_id,
+				str(ov),
+				str(ov.get_script()) if ov != null else "<null-node>",
+			])
 		if ov == null:
 			continue
 		if ov.has_method("set_mesh_data"):
@@ -923,9 +938,16 @@ func _push_mesh_to_geometry_overlays() -> void:
 		# Connect the overlay's pick signal to the panel's selection handler.
 		# Idempotent — repeated _push_mesh_to_geometry_overlays() calls
 		# (re-evaluate, layout swap) MUST NOT stack callbacks.
-		if ov.has_signal("edge_selected") \
-				and not ov.edge_selected.is_connected(_on_edge_selected):
+		var has_sig: bool = ov.has_signal("edge_selected")
+		var already: bool = has_sig and ov.edge_selected.is_connected(_on_edge_selected)
+		if has_sig and not already:
 			ov.edge_selected.connect(_on_edge_selected)
+		if _DEBUG_EDGE_PICK:
+			print("[edge-pick]   has_signal=%s already_connected=%s mouse_filter=%s" % [
+				str(has_sig),
+				str(already),
+				str(ov.mouse_filter),
+			])
 	_apply_mesh_visibility()
 
 
@@ -969,6 +991,8 @@ func _select_edge(edge_id: int) -> void:
 
 
 func _on_edge_selected(edge_id: int) -> void:
+	if _DEBUG_EDGE_PICK:
+		print("[edge-pick] CADPanel._on_edge_selected edge_id=%d" % edge_id)
 	_select_edge(edge_id)
 
 

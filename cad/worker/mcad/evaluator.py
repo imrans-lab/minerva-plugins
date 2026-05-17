@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import os
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .parser import ParseError, parse
 from .translator import Translator, TranslatorError, export_shape
+
+_DEBUG_EDGE_PICK = True
+_DEBUG_LOG_PATH = "/tmp/cad-worker-edges.log"
+
+
+def _dbg(msg: str) -> None:
+    if not _DEBUG_EDGE_PICK:
+        return
+    print(f"[edge-pick-worker] {msg}", file=sys.stderr, flush=True)
+    try:
+        with open(_DEBUG_LOG_PATH, "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} pid={os.getpid()} {msg}\n")
+    except OSError:
+        pass
 
 
 @dataclass
@@ -57,6 +74,24 @@ def evaluate_source(
         "faces": [list(face) for face in faces],
     }
     edge_registry = translator.get_edge_registry(shape_name)
+
+    shape_edges_attr = hasattr(shape, "edges")
+    try:
+        raw_edge_count = len(list(shape.edges())) if shape_edges_attr else -1
+    except Exception as exc:
+        raw_edge_count = -2
+        _dbg(f"shape.edges() raised: {type(exc).__name__}: {exc}")
+    registry_keys = list(translator._logical_edge_registry.keys())
+    _dbg(
+        f"evaluate_source shape_name={shape_name!r} "
+        f"shape_type={type(shape).__name__} "
+        f"shape_has_edges_attr={shape_edges_attr} "
+        f"raw_edges={raw_edge_count} "
+        f"registry[{shape_name!r}].size={len(edge_registry)} "
+        f"all_registry_keys={registry_keys} "
+        f"pending_size={len(translator._pending_edge_registry)}\n"
+        f"--- source ---\n{source}\n--- end source ---"
+    )
 
     return EvaluationResult(
         mesh=mesh,

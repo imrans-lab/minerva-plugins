@@ -1,5 +1,7 @@
 extends Control
 class_name Cad_GeometryOverlay
+
+const _DEBUG_EDGE_PICK: bool = true
 ## CAD geometry overlay: silhouette + selected-edge highlight + click-to-pick.
 ##
 ## Lives one-per-pane (Top / Front / Right / Iso / narrow-single). Responsibilities:
@@ -288,6 +290,13 @@ func _gui_input(event: InputEvent) -> void:
 	var mb := event as InputEventMouseButton
 	if mb.button_index != MOUSE_BUTTON_LEFT or not mb.pressed:
 		return
+	if _DEBUG_EDGE_PICK:
+		print("[edge-pick] Cad_GeometryOverlay._gui_input LMB at %s size=%s edges=%d cam=%s" % [
+			str(mb.position),
+			str(size),
+			_edge_registry.size(),
+			"set" if _camera != null else "null",
+		])
 	if _projection_dirty:
 		_rebuild_projected_edges()
 		_projection_dirty = false
@@ -299,17 +308,23 @@ func _gui_input(event: InputEvent) -> void:
 		_chooser_rects.clear()
 		_selected_edge_id = chooser_hit
 		queue_redraw()
+		if _DEBUG_EDGE_PICK:
+			print("[edge-pick]   path=chooser_hit emit=%d" % chooser_hit)
 		edge_selected.emit(chooser_hit)
 		accept_event()
 		return
 
 	# 2. Click on geometry → may match 0, 1, or many co-projected edges.
 	var candidates := _edges_at_position(mb.position)
+	if _DEBUG_EDGE_PICK:
+		print("[edge-pick]   candidates=%d" % candidates.size())
 	if candidates.size() == 1:
 		_chooser_edge_ids.clear()
 		_chooser_rects.clear()
 		_selected_edge_id = int(candidates[0])
 		queue_redraw()
+		if _DEBUG_EDGE_PICK:
+			print("[edge-pick]   path=single emit=%d" % _selected_edge_id)
 		edge_selected.emit(_selected_edge_id)
 		accept_event()
 		return
@@ -318,6 +333,8 @@ func _gui_input(event: InputEvent) -> void:
 		_chooser_edge_ids = candidates.duplicate()
 		_chooser_position = mb.position
 		queue_redraw()
+		if _DEBUG_EDGE_PICK:
+			print("[edge-pick]   path=chooser_open candidates=%d" % candidates.size())
 		accept_event()
 		return
 
