@@ -39,6 +39,7 @@ use crate::stage_walker::{self, LlmCaller, StageTrace};
 use crate::types::{Classification, ConditionNode, Rule, RuleSignal};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -492,6 +493,20 @@ pub fn run_with_stages(
     document_text: &str,
     llm: &mut dyn LlmCaller,
 ) -> RuleWalkOutcome {
+    run_with_stages_vision(classification, file_facts, rules, document_text, None, llm)
+}
+
+/// Vision-aware variant: when `page_images` is provided and non-empty,
+/// stage-walker calls are made multimodally with the page images instead of
+/// `document_text`. Used for image-only PDFs.
+pub fn run_with_stages_vision(
+    classification: &Classification,
+    file_facts: &FileFacts,
+    rules: &[Rule],
+    document_text: &str,
+    page_images: Option<&[Value]>,
+    llm: &mut dyn LlmCaller,
+) -> RuleWalkOutcome {
     let mut indexed: Vec<(usize, &Rule)> = rules
         .iter()
         .enumerate()
@@ -524,7 +539,7 @@ pub fn run_with_stages(
         let stage_outcome = if rule.stages.is_empty() {
             stage_walker::StageWalkOutcome::default()
         } else {
-            stage_walker::walk(rule, document_text, llm)
+            stage_walker::walk_with_images(rule, document_text, page_images, llm)
         };
 
         if stage_outcome.filtered {

@@ -15,7 +15,15 @@
     },
     {
       "name": "minerva_scansort_create_vault",
-      "description": "Create a new .ssort vault at the given path with the given display name."
+      "description": "Create a new .ssort vault at the given path with the given display name.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Absolute filesystem path where the new .ssort vault will be created."},
+          "name": {"type": "string", "description": "Human-readable display name for the vault."}
+        },
+        "required": ["path", "name"]
+      }
     },
     {
       "name": "minerva_scansort_set_password",
@@ -147,7 +155,15 @@
     },
     {
       "name": "minerva_scansort_session_open_vault",
-      "description": "Register an open vault in the plugin's session under a stable label. Panel-side call; LLM agents read state via session_state."
+      "description": "Register an open vault in the plugin's session under a stable label. Panel-side call; LLM agents read state via session_state.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "label": {"type": "string", "description": "Stable label to identify the vault in the session."},
+          "path": {"type": "string", "description": "Absolute filesystem path to the .ssort vault."}
+        },
+        "required": ["label", "path"]
+      }
     },
     {
       "name": "minerva_scansort_session_close_vault",
@@ -163,7 +179,15 @@
     },
     {
       "name": "minerva_scansort_session_open_source",
-      "description": "Register an incoming source directory in the plugin's session under a stable label."
+      "description": "Register an incoming source directory in the plugin's session under a stable label.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "label": {"type": "string", "description": "Stable label to identify the source in the session."},
+          "path": {"type": "string", "description": "Absolute filesystem path to the source directory containing files to classify."}
+        },
+        "required": ["label", "path"]
+      }
     },
     {
       "name": "minerva_scansort_session_close_source",
@@ -211,7 +235,15 @@
     },
     {
       "name": "minerva_scansort_process",
-      "description": "Run the path-free pipeline against the current session + enabled library rules. Optional args: model (string, default 'default') and model_spec (object, structured provider spec — wins over 'model'). Iterates every file in every open source, classifies via host.providers.chat, runs the deterministic rule engine, fans out to destinations whose labels match in session, marks unprocessable files in the source manifest. Returns {ok, summary, by_rule, by_destination, items}."
+      "description": "Run the path-free pipeline against the current session + enabled library rules. Iterates every file in every open source, classifies via host.providers.chat, runs the deterministic rule engine, fans out to destinations whose labels match in session, marks unprocessable files in the source manifest. Returns {ok, summary, by_rule, by_destination, items}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "model": {"type": "string", "description": "Plain model name (e.g. 'gemma4:26b'). Defaults to 'default' which routes to TurnRock/Core. Use model_spec for structured routing."},
+          "model_spec": {"type": "object", "description": "Structured provider spec — wins over 'model' when present. Shape: {kind: 'core_action', service_client_id: 'model-chat', action_name: '<model>'} routes via a specific Core service."},
+          "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"], "description": "B8 doc_type normalization strategy. 'enum' = constrain LLM prompt to rule's subtypes. 'canonicalize' = post-LLM alias→canonical mapping. 'both' = enum prompt + canonicalize safety net. Default 'none' (back-compat)."}
+        }
+      }
     }
   ],
   "ui": {

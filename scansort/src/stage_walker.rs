@@ -86,6 +86,19 @@ pub fn walk(
     document_text: &str,
     llm: &mut dyn LlmCaller,
 ) -> StageWalkOutcome {
+    walk_with_images(rule, document_text, None, llm)
+}
+
+/// Vision-aware variant: when `page_images` is `Some` and non-empty, stage
+/// messages are built multimodally (text instructions + page images) instead
+/// of injecting `document_text`. Used for image-only PDFs where text
+/// extraction yields no signal but rendered page images do.
+pub fn walk_with_images(
+    rule: &Rule,
+    document_text: &str,
+    page_images: Option<&[Value]>,
+    llm: &mut dyn LlmCaller,
+) -> StageWalkOutcome {
     let mut outcome = StageWalkOutcome::default();
     if rule.stages.is_empty() {
         return outcome;
@@ -99,6 +112,10 @@ pub fn walk(
     // current stage has `keep_when = Some`, the group ends with that stage.
     let groups = fold_groups(&rule.stages);
 
+    let use_vision = page_images
+        .map(|imgs| !imgs.is_empty())
+        .unwrap_or(false);
+
     for group in groups {
         let merged_ask: String = group
             .iter()
@@ -110,38 +127,48 @@ pub fn walk(
             .flat_map(|s| s.classify.iter())
             .collect();
 
-        let messages = build_stage_messages(&merged_ask, &merged_classify, document_text);
-        let response_text = match llm.call(messages) {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("stage_walker: LLM call failed: {e}");
-                // Defensive: treat LLM failure as if all slots in this group
-                // produced "unknown". Subsequent keep_when (if any) likely
-                // filters the doc out, which is the safe behavior.
-                for stage in &group {
-                    for name in stage.classify.keys() {
-                        outcome.slots.entry(name.clone()).or_insert_with(|| "unknown".to_string());
+        // Skip the LLM round-trip when the group asks for nothing — a stage
+        // with no classify slots can only contribute a keep_when gate, which
+        // evaluates against the slots collected so far. (In vision mode this
+        // also avoids re-sending the page images for zero benefit.)
+        let response_text = if merged_classify.is_empty() {
+            String::new()
+        } else {
+            let messages = if use_vision {
+                build_stage_messages_vision(&merged_ask, &merged_classify, page_images.unwrap())
+            } else {
+                build_stage_messages(&merged_ask, &merged_classify, document_text)
+            };
+            match llm.call(messages) {
+                Ok(t) => {
+                    outcome.llm_calls += 1;
+                    t
+                }
+                Err(e) => {
+                    log::warn!("stage_walker: LLM call failed: {e}");
+                    outcome.llm_calls += 1;
+                    for stage in &group {
+                        for name in stage.classify.keys() {
+                            outcome.slots.entry(name.clone()).or_insert_with(|| "unknown".to_string());
+                        }
                     }
+                    for stage in &group {
+                        outcome.stages_executed.push(StageTrace {
+                            ask: stage.ask.clone(),
+                            slot_values: stage
+                                .classify
+                                .keys()
+                                .map(|k| (k.clone(), outcome.slots.get(k).cloned().unwrap_or_else(|| "unknown".to_string())))
+                                .collect(),
+                            keep_when: stage.keep_when.clone(),
+                            kept: false,
+                        });
+                    }
+                    outcome.filtered = true;
+                    return outcome;
                 }
-                outcome.llm_calls += 1;
-                // Emit one trace per stage in the group so the failure is visible.
-                for stage in &group {
-                    outcome.stages_executed.push(StageTrace {
-                        ask: stage.ask.clone(),
-                        slot_values: stage
-                            .classify
-                            .keys()
-                            .map(|k| (k.clone(), outcome.slots.get(k).cloned().unwrap_or_else(|| "unknown".to_string())))
-                            .collect(),
-                        keep_when: stage.keep_when.clone(),
-                        kept: false,
-                    });
-                }
-                outcome.filtered = true;
-                return outcome;
             }
         };
-        outcome.llm_calls += 1;
 
         // Parse the response into slot values, validating closed-list slots.
         let parsed = parse_slot_response(&response_text, &merged_classify);
@@ -223,11 +250,24 @@ fn fold_groups<'a>(stages: &'a [Stage]) -> Vec<Vec<&'a Stage>> {
 // Prompt construction
 // ---------------------------------------------------------------------------
 
+/// Stage prompts are 1+ chats per matched rule, on top of the phase-1 classify.
+/// Without truncation, a 2MB PDF sends 50k+ chars to qwen and never returns —
+/// matching the cap that classifier::build_messages uses for phase-1 keeps each
+/// stage call inside the per-doc latency budget.
+const STAGE_DOC_MAX_CHARS: usize = 4000;
+
 fn build_stage_messages(
     ask: &str,
     classify: &BTreeMap<&String, &Slot>,
     document_text: &str,
 ) -> Vec<Value> {
+    let truncated_doc: String = if document_text.len() > STAGE_DOC_MAX_CHARS {
+        let mut s = document_text[..STAGE_DOC_MAX_CHARS].to_string();
+        s.push_str(&format!("\n\n[... truncated at {} chars]", STAGE_DOC_MAX_CHARS));
+        s
+    } else {
+        document_text.to_string()
+    };
     let mut lines: Vec<String> = Vec::new();
     lines.push("You are a document classifier. Answer the question(s) by filling in the named slots below.".to_string());
     lines.push(String::new());
@@ -260,7 +300,63 @@ fn build_stage_messages(
 
     vec![
         json!({"role": "system", "content": lines.join("\n")}),
-        json!({"role": "user", "content": format!("Document:\n\n{document_text}")}),
+        json!({"role": "user", "content": format!("Document:\n\n{truncated_doc}")}),
+    ]
+}
+
+/// Multimodal variant of `build_stage_messages` for image-only documents.
+/// System prompt is identical (slot definitions + output format); user content
+/// is a multimodal array (text instruction + base64-PNG image_url entries).
+/// Same JSON-object output expected from the model.
+fn build_stage_messages_vision(
+    ask: &str,
+    classify: &BTreeMap<&String, &Slot>,
+    page_images: &[Value],
+) -> Vec<Value> {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("You are a document classifier. Answer the question(s) by filling in the named slots below.".to_string());
+    lines.push(String::new());
+    lines.push("## Question(s)".to_string());
+    lines.push(ask.to_string());
+    lines.push(String::new());
+    lines.push("## Slots to fill".to_string());
+    for (name, slot) in classify {
+        let values_line = match &slot.values {
+            SlotValues::Closed(list) => {
+                let quoted: Vec<String> = list.iter().map(|s| format!("'{}'", s)).collect();
+                format!("Allowed values: {} (pick exactly one). If none apply, return 'unknown'.", quoted.join(", "))
+            }
+            SlotValues::Open(constraint) => {
+                format!("Expected: {}.", constraint)
+            }
+        };
+        lines.push(format!("- {name} — {}. {values_line}", slot.description));
+    }
+    lines.push(String::new());
+    lines.push("## Output format".to_string());
+    let example_keys: Vec<String> = classify
+        .keys()
+        .map(|k| format!("\"{}\": \"<value>\"", k))
+        .collect();
+    lines.push(format!(
+        "Respond with a single JSON object, no prose, no markdown fences:\n{{{}}}",
+        example_keys.join(", ")
+    ));
+
+    let mut user_content: Vec<Value> = vec![
+        json!({"type": "text", "text": "Document is image-only; classify from the page image(s):"}),
+    ];
+    for page in page_images {
+        let b64 = page.get("base64").and_then(|v| v.as_str()).unwrap_or("");
+        user_content.push(json!({
+            "type": "image_url",
+            "image_url": {"url": format!("data:image/png;base64,{}", b64)},
+        }));
+    }
+
+    vec![
+        json!({"role": "system", "content": lines.join("\n")}),
+        json!({"role": "user", "content": user_content}),
     ]
 }
 

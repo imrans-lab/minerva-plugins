@@ -48,7 +48,6 @@ const _ScanTree:       Script = preload("scan_tree.gd")
 const _SourceProvider: Script = preload("scan_tree_source_provider.gd")
 const _VaultProvider:  Script = preload("scan_tree_vault_provider.gd")
 const _StatusPanel:    Script = preload("status_panel.gd")
-const _RulesPane:      Script = preload("rules_pane.gd")
 
 ## R3: add-document dialog (off-tree: no class_name).
 const _AddDocumentDialog: Script = preload("add_document_dialog.gd")
@@ -222,8 +221,6 @@ var _process_cancelled: bool = false
 const LOW_CONFIDENCE_THRESHOLD := 0.5
 const DESTINATION_REGISTRY_FILENAME := "dest_registry.json"
 var _status_panel: HBoxContainer = null
-# W6 (DCR 019e33bf): rules pane below the columns, above the status bar.
-var _rules_pane: VBoxContainer = null
 
 ## U7: per-run counters shared across concurrent coroutines (Dictionary reference
 ## so coroutines can mutate them without capture-by-value issues).
@@ -281,6 +278,7 @@ var _last_dedup_disposition: String = ""
 func _ready() -> void:
 	_build_ui()
 	set_status("No vault open.")
+	_subscribe_broker_progress()
 
 
 func _on_panel_loaded(ctx: Dictionary) -> void:
@@ -470,13 +468,6 @@ func _build_ui() -> void:
 
 	columns.add_child(dest_col)
 
-	# --- W6: Rules pane (between the columns and the status bar) ---
-	_rules_pane = _RulesPane.new()
-	_rules_pane.name = "RulesPane"
-	_rules_pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_rules_pane.custom_minimum_size.y = 160
-	layout.add_child(_rules_pane)
-
 	# --- Status bar along the bottom ---
 	_status_panel = _StatusPanel.new()
 	_status_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -500,9 +491,6 @@ func _on_file_menu_id_pressed(id: int) -> void:
 		4: _on_rules_editor_pressed()
 		5: _on_vault_registry_pressed()
 		7: _on_checklist_pressed()
-		8: _on_library_rules_editor_pressed()
-		9: _on_create_vault_rules_pressed()
-		10: _on_use_library_rules_pressed()
 		11: _on_settings_pressed()
 		12: _on_export_marked_pressed()
 		13: _on_recovery_sheet_pressed()
@@ -804,10 +792,6 @@ func _on_vault_opened_r2(path: String, open_result: Dictionary) -> void:
 		_status_panel.init(conn)
 		_status_panel.set_vault(vault_name, 0)
 		_status_panel.set_status("Idle")
-
-	# W6: kick off the rules-pane refresh now that we have a live connection.
-	if _rules_pane != null and is_instance_valid(_rules_pane):
-		_rules_pane.init(conn)
 
 	# B1: register this vault in the session.
 	if conn != null:
@@ -2756,23 +2740,17 @@ func _ensure_destination_registry_path() -> bool:
 	return not _registry_path.is_empty()
 
 
-## Called when user picks "Vault Rules Editor…" from the File menu (id 4).
-## Edits the sibling .rules.json of the currently-open vault.
+## Called when user picks "Rules…" from the File menu (id 4).
+## Opens the library-only Classification Rules dialog (DCR 019e33bf — no per-vault sidecars).
 func _on_rules_editor_pressed() -> void:
-	if not _vault_is_open:
-		set_status("Open a vault first.")
-		return
 	var conn = _get_connection()
 	if conn == null:
 		set_status("ERROR: scansort plugin not running.")
 		return
 
-	var rules_path: String = _vault_rules_path()
-	var label: String = "Vault rules: " + rules_path.get_file()
-
 	var dlg = _RulesEditorDialog.new()
 	add_child(dlg)
-	dlg.init_with_rules_path(conn, rules_path, label)
+	dlg.init(conn)
 	dlg.rules_changed.connect(
 		func() -> void:
 			pass  # panel has no cached rules list to invalidate
@@ -2781,78 +2759,7 @@ func _on_rules_editor_pressed() -> void:
 		func() -> void:
 			dlg.queue_free()
 	)
-	dlg.popup_centered(Vector2i(880, 580))
-
-
-## Called when user picks "Library Rules Editor…" from the File menu (id 8).
-## Edits the user-level scansort_rules.json. Available without a vault open.
-func _on_library_rules_editor_pressed() -> void:
-	var conn = _get_connection()
-	if conn == null:
-		set_status("ERROR: scansort plugin not running.")
-		return
-
-	var rules_path: String = _library_rules_path()
-	var label: String = "Library rules"
-
-	var dlg = _RulesEditorDialog.new()
-	add_child(dlg)
-	dlg.init_with_rules_path(conn, rules_path, label)
-	dlg.rules_changed.connect(
-		func() -> void:
-			pass
-	)
-	dlg.closed.connect(
-		func() -> void:
-			dlg.queue_free()
-	)
-	dlg.popup_centered(Vector2i(880, 580))
-
-
-## Create a vault-specific rules file by copying the library file to the
-## sibling location. Only meaningful when a vault is open.
-func _on_create_vault_rules_pressed() -> void:
-	if not _vault_is_open:
-		set_status("Open a vault first.")
-		return
-	var sibling: String = _vault_rules_path()
-	if FileAccess.file_exists(sibling):
-		set_status("Vault already has its own rules file: " + sibling.get_file())
-		return
-	var library: String = _library_rules_path()
-	if not FileAccess.file_exists(library):
-		set_status("No library rules file to seed from. Use 'Library Rules Editor' first.")
-		return
-	var src := FileAccess.open(library, FileAccess.READ)
-	if src == null:
-		set_status("Could not read library rules: " + library)
-		return
-	var content: String = src.get_as_text()
-	src.close()
-	var dst := FileAccess.open(sibling, FileAccess.WRITE)
-	if dst == null:
-		set_status("Could not write sibling rules: " + sibling)
-		return
-	dst.store_string(content)
-	dst.close()
-	set_status("Created vault-specific rules: " + sibling.get_file())
-
-
-## Delete the sibling rules file so the vault falls back to the library file.
-## Only meaningful when a vault is open and a sibling rules file exists.
-func _on_use_library_rules_pressed() -> void:
-	if not _vault_is_open:
-		set_status("Open a vault first.")
-		return
-	var sibling: String = _vault_rules_path()
-	if not FileAccess.file_exists(sibling):
-		set_status("No vault-specific rules file to remove.")
-		return
-	var err := DirAccess.remove_absolute(sibling)
-	if err != OK:
-		set_status("Could not remove sibling rules file (error %d): %s" % [err, sibling])
-		return
-	set_status("Removed vault-specific rules; library rules will be used.")
+	dlg.popup_centered(Vector2i(1000, 700))
 
 
 # ---------------------------------------------------------------------------
@@ -3048,11 +2955,7 @@ func get_editor_actions() -> Array:
 	popup.add_item("Open Vault...", 1)
 	popup.add_separator()
 	popup.add_item("Add Document...", 3)
-	popup.add_item("Vault Rules Editor...", 4)
-	popup.add_item("Library Rules Editor...", 8)
-	popup.add_separator()
-	popup.add_item("Create Vault-Specific Rules", 9)
-	popup.add_item("Use Library Rules (remove sibling)", 10)
+	popup.add_item("Rules...", 4)
 	popup.add_separator()
 	popup.add_item("Vault Registry...", 5)
 	popup.add_item("Checklist...", 7)
@@ -3076,15 +2979,13 @@ func get_editor_actions() -> Array:
 
 
 ## Disable File-menu items that require an open vault when no vault is open.
-## Always enabled: New Vault (0), Open Vault (1), Vault Registry (5),
-##                 Library Rules Editor (8).
-## Vault-gated: Close (2), Add Document (3), Vault Rules Editor (4),
-##              Checklist (7), Create Vault-Specific Rules (9),
-##              Use Library Rules (10).
+## Always enabled: New Vault (0), Open Vault (1), Rules… (4), Vault Registry (5).
+## Vault-gated: Close (2), Add Document (3), Checklist (7),
+##              Extract Marked (12), Recovery Sheet (13).
 func _refresh_chrome_menu_state() -> void:
 	if _chrome_popup == null or not is_instance_valid(_chrome_popup):
 		return
-	var vault_gated: Array[int] = [2, 3, 4, 7, 9, 10, 12, 13]
+	var vault_gated: Array[int] = [2, 3, 7, 12, 13]
 	for item_id in vault_gated:
 		var idx: int = _chrome_popup.get_item_index(item_id)
 		if idx >= 0:
@@ -3635,3 +3536,43 @@ func has_open_vault() -> bool:
 ## Returns the absolute path of the open vault, or "" if none.
 func get_active_vault_path() -> String:
 	return _active_vault_path
+
+
+# ---------------------------------------------------------------------------
+# Broker progress subscription (visibility for plugin-driven chat calls)
+# ---------------------------------------------------------------------------
+
+var _broker_chat_count: int = 0
+var _broker_chat_last_ms: int = 0
+
+func _subscribe_broker_progress() -> void:
+	var so = Engine.get_main_loop().root.get_node_or_null("SingletonObject") if Engine.get_main_loop() else null
+	if so == null:
+		return
+	var broker = so.get("plugin_capability_broker") if "plugin_capability_broker" in so else null
+	if broker == null:
+		return
+	if broker.has_signal("plugin_chat_invoked"):
+		broker.plugin_chat_invoked.connect(_on_broker_chat_invoked)
+	if broker.has_signal("plugin_chat_completed"):
+		broker.plugin_chat_completed.connect(_on_broker_chat_completed)
+
+func _on_broker_chat_invoked(plugin_id: String, _provider_name: String, model_name: String) -> void:
+	if plugin_id != "scansort":
+		return
+	_broker_chat_count += 1
+	var last := ""
+	if _broker_chat_last_ms > 0:
+		last = "  (prev %.1fs)" % (_broker_chat_last_ms / 1000.0)
+	set_status("Classifying — call #%d via %s%s" % [_broker_chat_count, model_name, last])
+
+func _on_broker_chat_completed(plugin_id: String, _provider_name: String, _model_name: String, duration_ms: int, ok: bool, tokens_in: int, tokens_out: int, error: String) -> void:
+	if plugin_id != "scansort":
+		return
+	_broker_chat_last_ms = duration_ms
+	if ok:
+		set_status("Classified call #%d in %.1fs  (in=%d tok, out=%d tok)" % [
+			_broker_chat_count, duration_ms / 1000.0, tokens_in, tokens_out])
+	else:
+		set_status("Call #%d failed after %.1fs: %s" % [
+			_broker_chat_count, duration_ms / 1000.0, error])

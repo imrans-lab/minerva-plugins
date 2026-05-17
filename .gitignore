@@ -6,6 +6,11 @@
 */presentation-plugin
 */presentation-plugin.exe
 */presentation-plugin-*
+# Presentation plugin's Go binary is named just "presentation" inside its own dir.
+presentation/presentation
+# Scansort plugin's Rust binary.
+scansort/scansort-plugin
+scansort/scansort-plugin.exe
 # Generic catch for plugin binaries built at the plugin root.
 # Add new patterns here as additional plugins land.
 

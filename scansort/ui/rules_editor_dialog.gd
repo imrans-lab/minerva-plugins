@@ -1,623 +1,762 @@
 extends AcceptDialog
-## Classification Rules Editor dialog — T7 R4 / Rules-File R6.
+## Classification Rules Editor — DCR 019e33bf rewrite.
 ##
-## Full CRUD for classification rules. As of R6 the dialog operates on an
-## external rules JSON file (`rules_path`) rather than the vault's embedded
-## rules table — the embedded table is deprecated and read-only.
+## Edits rules in the GLOBAL LIBRARY via the `library_*` MCP tool family. No
+## per-vault sidecars, no path arguments — there is exactly one library, lived
+## at the plugin's OS app-data path.
 ##
-## Two entry points:
-##
-##   # Preferred — pass an explicit rules file path:
-##   dlg.init_with_rules_path(conn, rules_path, source_label)
-##
-##   # Back-compat — derive sibling path from vault_path:
-##   dlg.init(conn, vault_path, vault_password)   # password unused
+## Schema (new — DCR 019e33bf): a rule has flat fields (label, name,
+## instruction, subfolder, rename_pattern, confidence_threshold, flags) plus a
+## list of `stages`. Each stage = {ask, classify{slot_name: {description,
+## values: [...]|"..."}}, keep_when?}. Slot names must be unique across all
+## stages of a rule (enforced server-side by Rule::validate).
 ##
 ## Usage:
 ##   var dlg = preload("rules_editor_dialog.gd").new()
-##   dlg.init_with_rules_path(conn, "/path/to/rules.json", "Vault rules")
+##   dlg.init(conn)
 ##   add_child(dlg)
 ##   dlg.rules_changed.connect(_on_rules_changed)
-##   dlg.popup_centered(Vector2(860, 560))
+##   dlg.popup_centered(Vector2(1000, 700))
 ##
-## No class_name — off-tree plugin script; use preload().
+## Off-tree plugin script — no class_name; use preload().
 
-## Emitted after any write operation (insert, update, delete, import).
-## Caller may use this to refresh cached rule lists.
 signal rules_changed
-
-## Emitted when the dialog closes.
 signal closed
-
-# ---------------------------------------------------------------------------
-# Dependencies (injected via init())
-# ---------------------------------------------------------------------------
-
-var _conn: Object  = null
-var _rules_path:   String = ""    # external rules JSON file (R6)
-var _source_label: String = ""    # human-readable origin (e.g. "Library rules", "Vault rules")
-# Retained for back-compat callers; not forwarded to MCP after R4.
-var _vault_path:   String = ""
-var _vault_password: String = ""   # never logged
-
-# ---------------------------------------------------------------------------
-# Rule data
-# ---------------------------------------------------------------------------
-
-## All rules loaded from the vault.  Array of Dicts.
-var _rules: Array = []
-
-## Index of the rule currently loaded into the form (-1 = none).
-var _current_index: int = -1
-
-## True if the current item in the list is a newly-added unsaved rule.
-var _is_new_rule: bool = false
-
-# ---------------------------------------------------------------------------
-# Widgets
-# ---------------------------------------------------------------------------
-
-var _list:        ItemList   = null
-var _form_fields: Dictionary = {}   # field_name → widget
-var _error_label: Label      = null
-
-# Confirm-delete dialog (reused).
-var _confirm_dlg: ConfirmationDialog = null
-
-# FileDialogs for import / export.
-var _import_dialog: FileDialog = null
-var _export_dialog: FileDialog = null
-
 
 const _UiScale := preload("ui_scale.gd")
 
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
+
+var _conn: Object = null
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+
+# All rules loaded from the library (canonical, server order). Array[Dictionary].
+var _rules: Array = []
+# Index of currently selected rule in _rules (-1 = none).
+var _current_index: int = -1
+# The rule the form is currently bound to (a working copy — edits go here on
+# harvest, then we POST to the server on Save).
+var _working: Dictionary = {}
+# True if the working copy is a brand-new (unsaved) rule.
+var _is_new: bool = false
+
+# ---------------------------------------------------------------------------
+# Widgets (rules list)
+# ---------------------------------------------------------------------------
+
+var _list: ItemList = null
+var _new_btn: Button = null
+var _delete_btn: Button = null
+
+# Widgets (form — flat fields)
+var _f_label: LineEdit = null
+var _f_name: LineEdit = null
+var _f_order: SpinBox = null
+var _f_instruction: TextEdit = null
+var _f_subfolder: LineEdit = null
+var _f_rename_pattern: LineEdit = null
+var _f_threshold: SpinBox = null
+var _f_enabled: CheckBox = null
+var _f_encrypt: CheckBox = null
+var _f_stop: CheckBox = null
+var _f_default: CheckBox = null
+
+# Widgets (form — stages)
+var _stages_container: VBoxContainer = null
+var _add_stage_btn: Button = null
+
+# Widgets (form actions)
+var _save_btn: Button = null
+var _revert_btn: Button = null
+var _error_label: Label = null
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+func init(conn: Object) -> void:
+	_conn = conn
 
 func _ready() -> void:
 	_UiScale.apply_to(self)
-	if _source_label.is_empty():
-		title = "Classification Rules"
-	else:
-		title = "Classification Rules — %s" % _source_label
-	min_size = Vector2(860, 560)
-	# AcceptDialog OK button → save changes.
-	ok_button_text = "Save Changes"
-	confirmed.connect(_on_save_pressed)
-	canceled.connect(_on_close_pressed)
-
+	title = "Classification Rules"
+	get_ok_button().text = "Close"
+	confirmed.connect(_on_close)
+	canceled.connect(_on_close)
 	_build_ui()
+	call_deferred("_load_library")
 
-
-## Preferred (R6+) init: explicit rules file path + label.
-##
-## rules_path:   absolute path to the JSON file (e.g. <vault>.rules.json sibling
-##               or a user-level library file). Created on first save if absent.
-## source_label: short string shown in the dialog title to identify the source
-##               (e.g. "Library rules", "Vault rules: testvault.rules.json").
-func init_with_rules_path(conn: Object, rules_path: String, source_label: String) -> void:
-	_conn         = conn
-	_rules_path   = rules_path
-	_source_label = source_label
-	# refresh() requires the scene tree — defer until after add_child().
-	call_deferred("refresh")
-
-
-## Back-compat init (T7 R4 era): derives the sibling rules file path from the
-## vault path. `vault_password` is retained in the signature for ABI stability
-## but unused — rule operations no longer require the vault password.
-func init(conn: Object, vault_path: String, vault_password: String) -> void:
-	_conn          = conn
-	_vault_path    = vault_path
-	_vault_password = vault_password
-	# Derive sibling: /a/b/foo.ssort  →  /a/b/foo.rules.json
-	var rules_path: String = ""
-	if not vault_path.is_empty():
-		var base_dir: String = vault_path.get_base_dir()
-		var stem: String     = vault_path.get_file().get_basename()
-		rules_path = "%s/%s.rules.json" % [base_dir, stem]
-	var label: String = "Vault rules"
-	if not rules_path.is_empty():
-		label += ": " + rules_path.get_file()
-	init_with_rules_path(conn, rules_path, label)
-
+func _on_close() -> void:
+	emit_signal("closed")
 
 # ---------------------------------------------------------------------------
 # UI construction
 # ---------------------------------------------------------------------------
 
 func _build_ui() -> void:
-	var split := HSplitContainer.new()
-	split.size_flags_vertical   = Control.SIZE_EXPAND_FILL
+	var root := VBoxContainer.new()
+	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(root)
+
+	var split := HBoxContainer.new()
 	split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	split.add_theme_constant_override("separation", 8)
+	root.add_child(split)
 
-	# ------ Left: rule list + Add/Delete buttons ------
+	# Left: rules list + new/delete buttons. Fixed width — no expand.
 	var left := VBoxContainer.new()
-	left.custom_minimum_size.x = 240
-
-	_list = ItemList.new()
-	_list.size_flags_vertical   = Control.SIZE_EXPAND_FILL
-	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_list.item_selected.connect(_on_list_selected)
-	left.add_child(_list)
-
-	var btn_row := HBoxContainer.new()
-	var add_btn := Button.new()
-	add_btn.text = "Add Rule"
-	add_btn.pressed.connect(_on_add_pressed)
-	btn_row.add_child(add_btn)
-	var del_btn := Button.new()
-	del_btn.text = "Delete Rule"
-	del_btn.pressed.connect(_on_delete_pressed)
-	btn_row.add_child(del_btn)
-	left.add_child(btn_row)
-
-	var import_export_row := HBoxContainer.new()
-	var import_btn := Button.new()
-	import_btn.text = "Import JSON…"
-	import_btn.pressed.connect(_on_import_pressed)
-	import_export_row.add_child(import_btn)
-	var export_btn := Button.new()
-	export_btn.text = "Export JSON…"
-	export_btn.pressed.connect(_on_export_pressed)
-	import_export_row.add_child(export_btn)
-	left.add_child(import_export_row)
-
+	left.size_flags_horizontal = 0  # no expand
+	left.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	left.custom_minimum_size = Vector2(240, 0)
 	split.add_child(left)
 
-	# ------ Right: rule detail form ------
+	var list_label := Label.new()
+	list_label.text = "Library rules"
+	list_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.7))
+	left.add_child(list_label)
+
+	_list = ItemList.new()
+	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_list.item_selected.connect(_on_rule_selected)
+	left.add_child(_list)
+
+	var left_btns := HBoxContainer.new()
+	left.add_child(left_btns)
+
+	_new_btn = Button.new()
+	_new_btn.text = "New…"
+	_new_btn.pressed.connect(_on_new_pressed)
+	left_btns.add_child(_new_btn)
+
+	_delete_btn = Button.new()
+	_delete_btn.text = "Delete"
+	_delete_btn.pressed.connect(_on_delete_pressed)
+	_delete_btn.disabled = true
+	left_btns.add_child(_delete_btn)
+
+	# Right: scrollable form.
 	var right := VBoxContainer.new()
 	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.add_theme_constant_override("separation", 4)
-
-	# Single-line fields: label, name, subfolder, confidence_threshold.
-	var line_fields := [
-		["label",                "Label",               "machine-identifier (e.g. invoices)"],
-		["name",                 "Name",                "Human-readable name"],
-		["subfolder",            "Subfolder",           "Optional subfolder inside vault"],
-		["confidence_threshold", "Confidence Threshold","0.0–1.0, default 0.6"],
-	]
-	for def: Array in line_fields:
-		var key: String         = def[0]
-		var label_text: String  = def[1]
-		var placeholder: String = def[2]
-		var hbox := HBoxContainer.new()
-		hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var lbl := Label.new()
-		lbl.text = label_text
-		lbl.custom_minimum_size.x = 160
-		lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-		hbox.add_child(lbl)
-		var edit := LineEdit.new()
-		edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		edit.placeholder_text = placeholder
-		hbox.add_child(edit)
-		_form_fields[key] = edit
-		right.add_child(hbox)
-
-	# Instruction — multi-line TextEdit.
-	var instr_hbox := HBoxContainer.new()
-	instr_hbox.size_flags_vertical   = Control.SIZE_EXPAND_FILL
-	instr_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var instr_lbl := Label.new()
-	instr_lbl.text = "Instruction"
-	instr_lbl.custom_minimum_size.x = 160
-	instr_lbl.vertical_alignment = VERTICAL_ALIGNMENT_TOP
-	instr_hbox.add_child(instr_lbl)
-	var instr_edit := TextEdit.new()
-	instr_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	instr_edit.size_flags_vertical   = Control.SIZE_EXPAND_FILL
-	instr_edit.custom_minimum_size.y = 80
-	instr_edit.placeholder_text = "Describe what documents this rule should match."
-	instr_hbox.add_child(instr_edit)
-	_form_fields["instruction"] = instr_edit
-	right.add_child(instr_hbox)
-
-	# Signals — comma-separated.
-	var sig_hbox := HBoxContainer.new()
-	sig_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var sig_lbl := Label.new()
-	sig_lbl.text = "Signals"
-	sig_lbl.custom_minimum_size.x = 160
-	sig_lbl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	sig_hbox.add_child(sig_lbl)
-	var sig_edit := LineEdit.new()
-	sig_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	sig_edit.placeholder_text = "comma-separated keywords"
-	sig_hbox.add_child(sig_edit)
-	_form_fields["signals"] = sig_edit
-	right.add_child(sig_hbox)
-
-	# Enabled checkbox.
-	var en_hbox := HBoxContainer.new()
-	var en_lbl := Label.new()
-	en_lbl.text = "Enabled"
-	en_lbl.custom_minimum_size.x = 160
-	en_hbox.add_child(en_lbl)
-	var en_check := CheckBox.new()
-	en_check.button_pressed = true
-	en_hbox.add_child(en_check)
-	_form_fields["enabled"] = en_check
-	right.add_child(en_hbox)
-
-	# Encrypt documents checkbox.
-	var enc_hbox := HBoxContainer.new()
-	var enc_lbl := Label.new()
-	enc_lbl.text = "Encrypt Documents"
-	enc_lbl.custom_minimum_size.x = 160
-	enc_hbox.add_child(enc_lbl)
-	var enc_check := CheckBox.new()
-	enc_check.button_pressed = false
-	enc_hbox.add_child(enc_check)
-	_form_fields["encrypt"] = enc_check
-	right.add_child(enc_hbox)
-
-	# Error label.
-	_error_label = Label.new()
-	_error_label.text = ""
-	_error_label.add_theme_color_override("font_color", Color.RED)
-	right.add_child(_error_label)
-
+	right.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	split.add_child(right)
-	add_child(split)
 
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	right.add_child(scroll)
+
+	var form := VBoxContainer.new()
+	form.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(form)
+
+	_build_identity_section(form)
+	_build_output_section(form)
+	_build_stages_section(form)
+
+	# Bottom action row.
+	var action_row := HBoxContainer.new()
+	right.add_child(action_row)
+
+	_error_label = Label.new()
+	_error_label.add_theme_color_override("font_color", Color(0.95, 0.4, 0.4))
+	_error_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_error_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	action_row.add_child(_error_label)
+
+	_revert_btn = Button.new()
+	_revert_btn.text = "Revert"
+	_revert_btn.pressed.connect(_on_revert_pressed)
+	action_row.add_child(_revert_btn)
+
+	_save_btn = Button.new()
+	_save_btn.text = "Save"
+	_save_btn.pressed.connect(_on_save_pressed)
+	action_row.add_child(_save_btn)
+
+	_set_form_enabled(false)
+
+func _build_identity_section(parent: VBoxContainer) -> void:
+	parent.add_child(_section_header("Identity"))
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(grid)
+
+	grid.add_child(_label_for("Label*"))
+	_f_label = LineEdit.new()
+	_f_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_f_label.placeholder_text = "unique-key (required)"
+	grid.add_child(_f_label)
+
+	grid.add_child(_label_for("Name"))
+	_f_name = LineEdit.new()
+	_f_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grid.add_child(_f_name)
+
+	grid.add_child(_label_for("Order"))
+	_f_order = SpinBox.new()
+	_f_order.min_value = -10000
+	_f_order.max_value = 10000
+	_f_order.step = 1
+	grid.add_child(_f_order)
+
+	parent.add_child(_label_for("Instruction"))
+	_f_instruction = TextEdit.new()
+	_f_instruction.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_f_instruction.custom_minimum_size.y = 80
+	_f_instruction.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	parent.add_child(_f_instruction)
+
+func _build_output_section(parent: VBoxContainer) -> void:
+	parent.add_child(_section_header("Output"))
+
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(grid)
+
+	grid.add_child(_label_for("Subfolder"))
+	_f_subfolder = LineEdit.new()
+	_f_subfolder.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_f_subfolder.placeholder_text = "e.g. Tax/{year}"
+	grid.add_child(_f_subfolder)
+
+	grid.add_child(_label_for("Rename pattern"))
+	_f_rename_pattern = LineEdit.new()
+	_f_rename_pattern.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_f_rename_pattern.placeholder_text = "e.g. {year}_{issuer}_{doc_type}"
+	grid.add_child(_f_rename_pattern)
+
+	grid.add_child(_label_for("Confidence threshold"))
+	_f_threshold = SpinBox.new()
+	_f_threshold.min_value = 0.0
+	_f_threshold.max_value = 1.0
+	_f_threshold.step = 0.05
+	_f_threshold.value = 0.6
+	grid.add_child(_f_threshold)
+
+	var flags := HBoxContainer.new()
+	parent.add_child(flags)
+	_f_enabled = CheckBox.new()
+	_f_enabled.text = "Enabled"
+	_f_enabled.button_pressed = true
+	flags.add_child(_f_enabled)
+	_f_encrypt = CheckBox.new()
+	_f_encrypt.text = "Encrypt"
+	flags.add_child(_f_encrypt)
+	_f_stop = CheckBox.new()
+	_f_stop.text = "Stop processing on match"
+	flags.add_child(_f_stop)
+	_f_default = CheckBox.new()
+	_f_default.text = "Default (catch-all)"
+	flags.add_child(_f_default)
+
+func _build_stages_section(parent: VBoxContainer) -> void:
+	var header := HBoxContainer.new()
+	parent.add_child(header)
+
+	var t := Label.new()
+	t.text = "Stages"
+	t.add_theme_font_size_override("font_size", 16)
+	t.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(t)
+
+	_add_stage_btn = Button.new()
+	_add_stage_btn.text = "+ Add stage"
+	_add_stage_btn.pressed.connect(_on_add_stage_pressed)
+	header.add_child(_add_stage_btn)
+
+	_stages_container = VBoxContainer.new()
+	_stages_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(_stages_container)
 
 # ---------------------------------------------------------------------------
-# Public API
+# Stage / Slot widget factories
 # ---------------------------------------------------------------------------
 
-## Reload rules from the rules file and repopulate the list.
-func refresh() -> void:
-	if _conn == null or _rules_path.is_empty():
-		return
+func _make_stage_widget(stage_data: Dictionary) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 
-	var result: Dictionary = await _conn.call_tool(
-		"minerva_scansort_list_rules",
-		{"rules_path": _rules_path},
-	)
-	if not result.get("ok", false):
-		_show_error("list_rules failed: %s" % result.get("error", "unknown"))
-		return
+	var v := VBoxContainer.new()
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_child(v)
 
-	_rules = result.get("rules", [])
-	_populate_list()
+	# Stage header: label + move up/down/delete.
+	var head := HBoxContainer.new()
+	v.add_child(head)
+	var stage_label := Label.new()
+	stage_label.text = "Stage"
+	stage_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	stage_label.add_theme_color_override("font_color", Color(0.7, 0.7, 0.85))
+	head.add_child(stage_label)
+	var up_btn := Button.new()
+	up_btn.text = "▲"
+	up_btn.tooltip_text = "Move stage up"
+	up_btn.pressed.connect(_on_stage_move.bind(panel, -1))
+	head.add_child(up_btn)
+	var down_btn := Button.new()
+	down_btn.text = "▼"
+	down_btn.tooltip_text = "Move stage down"
+	down_btn.pressed.connect(_on_stage_move.bind(panel, 1))
+	head.add_child(down_btn)
+	var del_btn := Button.new()
+	del_btn.text = "✕"
+	del_btn.tooltip_text = "Delete stage"
+	del_btn.pressed.connect(_on_stage_delete.bind(panel))
+	head.add_child(del_btn)
 
-	if _list != null and _list.item_count > 0:
-		_list.select(0)
-		_current_index = 0
-		_load_rule_into_form(0)
+	# Ask.
+	v.add_child(_label_for("Ask the LLM"))
+	var ask_edit := TextEdit.new()
+	ask_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ask_edit.custom_minimum_size.y = 56
+	ask_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	ask_edit.text = String(stage_data.get("ask", ""))
+	ask_edit.set_meta("role", "ask")
+	v.add_child(ask_edit)
 
+	# keep_when.
+	var kw_row := HBoxContainer.new()
+	v.add_child(kw_row)
+	var kw_label := Label.new()
+	kw_label.text = "keep_when (optional)"
+	kw_row.add_child(kw_label)
+	var kw_edit := LineEdit.new()
+	kw_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	kw_edit.placeholder_text = "e.g.  doc_type in [\"1099\", \"W-2\"]"
+	kw_edit.text = String(stage_data.get("keep_when", ""))
+	kw_edit.set_meta("role", "keep_when")
+	kw_row.add_child(kw_edit)
 
-# ---------------------------------------------------------------------------
-# Private — list management
-# ---------------------------------------------------------------------------
+	# Slots header.
+	var slots_header := HBoxContainer.new()
+	v.add_child(slots_header)
+	var sh_label := Label.new()
+	sh_label.text = "Classify slots"
+	sh_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slots_header.add_child(sh_label)
+	var add_slot := Button.new()
+	add_slot.text = "+ Add slot"
+	slots_header.add_child(add_slot)
 
-func _populate_list() -> void:
-	if _list == null:
-		return
-	_list.clear()
-	for rule: Dictionary in _rules:
-		var display: String = str(rule.get("name", rule.get("label", "(unnamed)")))
-		if not rule.get("enabled", true):
-			display += " (disabled)"
-		_list.add_item(display)
+	# Slots container (named so _harvest can find it).
+	var slots_box := VBoxContainer.new()
+	slots_box.name = "_SlotsBox"
+	slots_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(slots_box)
 
+	add_slot.pressed.connect(_on_add_slot_pressed.bind(slots_box))
 
-func _load_rule_into_form(index: int) -> void:
-	if index < 0 or index >= _rules.size():
-		_clear_form()
-		return
-	var rule: Dictionary = _rules[index]
-	(_form_fields["label"] as LineEdit).text = str(rule.get("label", ""))
-	(_form_fields["name"] as LineEdit).text  = str(rule.get("name", ""))
-	(_form_fields["instruction"] as TextEdit).text = str(rule.get("instruction", ""))
-	var sigs: Variant = rule.get("signals", [])
-	if sigs is Array:
-		(_form_fields["signals"] as LineEdit).text = ", ".join(PackedStringArray(sigs))
+	# Populate existing slots.
+	var classify: Dictionary = stage_data.get("classify", {})
+	# Stable order: alphabetical (matches BTreeMap on save).
+	var keys: Array = classify.keys()
+	keys.sort()
+	for k in keys:
+		var slot_data: Dictionary = classify.get(k, {})
+		slots_box.add_child(_make_slot_widget(String(k), slot_data))
+
+	return panel
+
+func _make_slot_widget(slot_name: String, slot_data: Dictionary) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var v := VBoxContainer.new()
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	panel.add_child(v)
+
+	var top := HBoxContainer.new()
+	v.add_child(top)
+
+	var name_edit := LineEdit.new()
+	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_edit.placeholder_text = "slot_name (e.g. year, issuer, doc_type)"
+	name_edit.text = slot_name
+	name_edit.set_meta("role", "slot_name")
+	top.add_child(name_edit)
+
+	var del := Button.new()
+	del.text = "✕"
+	del.tooltip_text = "Delete slot"
+	del.pressed.connect(_on_slot_delete.bind(panel))
+	top.add_child(del)
+
+	var desc_edit := LineEdit.new()
+	desc_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	desc_edit.placeholder_text = "human-readable description"
+	desc_edit.text = String(slot_data.get("description", ""))
+	desc_edit.set_meta("role", "slot_desc")
+	v.add_child(desc_edit)
+
+	# Values: detect Open (string) vs Closed (array). Default Open.
+	var values_var = slot_data.get("values", "")
+	var is_closed: bool = values_var is Array
+	var values_row := HBoxContainer.new()
+	v.add_child(values_row)
+	var mode_lbl := Label.new()
+	mode_lbl.text = "Values:"
+	values_row.add_child(mode_lbl)
+	var mode_opt := OptionButton.new()
+	mode_opt.add_item("Open (natural language)", 0)
+	mode_opt.add_item("Closed (enumeration)", 1)
+	mode_opt.selected = 1 if is_closed else 0
+	mode_opt.set_meta("role", "slot_mode")
+	values_row.add_child(mode_opt)
+
+	var values_edit := TextEdit.new()
+	values_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	values_edit.custom_minimum_size.y = 56
+	values_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	values_edit.set_meta("role", "slot_values")
+	if is_closed:
+		values_edit.text = "\n".join(_array_to_string_lines(values_var))
+		values_edit.placeholder_text = "One value per line"
 	else:
-		(_form_fields["signals"] as LineEdit).text = str(sigs)
-	(_form_fields["subfolder"] as LineEdit).text            = str(rule.get("subfolder", ""))
-	(_form_fields["confidence_threshold"] as LineEdit).text = str(rule.get("confidence_threshold", 0.6))
-	(_form_fields["enabled"] as CheckBox).button_pressed    = rule.get("enabled", true)
-	(_form_fields["encrypt"] as CheckBox).button_pressed    = rule.get("encrypt", false)
-	_show_error("")
+		values_edit.text = String(values_var)
+		values_edit.placeholder_text = "Natural-language constraint, e.g. \"a 4-digit year\""
+	v.add_child(values_edit)
 
+	mode_opt.item_selected.connect(_on_slot_mode_changed.bind(values_edit))
 
-func _clear_form() -> void:
-	for key: String in _form_fields:
-		var w: Object = _form_fields[key]
-		if w is LineEdit:
-			(w as LineEdit).text = ""
-		elif w is TextEdit:
-			(w as TextEdit).text = ""
-		elif w is CheckBox:
-			(w as CheckBox).button_pressed = false
-	_show_error("")
+	return panel
 
-
-## Read current form values into a Dict.
-func _read_form() -> Dictionary:
-	var sig_text: String = (_form_fields["signals"] as LineEdit).text.strip_edges()
-	var signals: Array = []
-	for s: String in sig_text.split(","):
-		var trimmed: String = s.strip_edges()
-		if not trimmed.is_empty():
-			signals.append(trimmed)
-
-	var conf_str: String = (_form_fields["confidence_threshold"] as LineEdit).text.strip_edges()
-	var conf: float = 0.6
-	if conf_str.is_valid_float():
-		conf = float(conf_str)
-
-	return {
-		"label":                (_form_fields["label"] as LineEdit).text.strip_edges(),
-		"name":                 (_form_fields["name"] as LineEdit).text.strip_edges(),
-		"instruction":          (_form_fields["instruction"] as TextEdit).text.strip_edges(),
-		"signals":              signals,
-		"subfolder":            (_form_fields["subfolder"] as LineEdit).text.strip_edges(),
-		"confidence_threshold": conf,
-		"enabled":              (_form_fields["enabled"] as CheckBox).button_pressed,
-		"encrypt":              (_form_fields["encrypt"] as CheckBox).button_pressed,
-	}
-
+func _array_to_string_lines(arr_var) -> Array:
+	var arr: Array = arr_var if arr_var is Array else []
+	var out: Array = []
+	for x in arr:
+		out.append(String(x))
+	return out
 
 # ---------------------------------------------------------------------------
-# Handlers — list
+# Data load / select
 # ---------------------------------------------------------------------------
 
-func _on_list_selected(index: int) -> void:
-	# Commit the current form to the in-memory rule before switching.
-	if _current_index >= 0 and _current_index < _rules.size():
-		_rules[_current_index] = _read_form()
-		# Keep list text in sync.
-		var display: String = str(_rules[_current_index].get("name", _rules[_current_index].get("label", "(unnamed)")))
-		if not _rules[_current_index].get("enabled", true):
-			display += " (disabled)"
-		_list.set_item_text(_current_index, display)
+func _load_library() -> void:
+	if _conn == null:
+		_set_error("No MCP connection.")
+		return
+	var result: Dictionary = await _conn.call_tool("minerva_scansort_library_list_rules", {})
+	if not bool(result.get("ok", false)):
+		_set_error("library_list_rules failed: " + str(result.get("error", "?")))
+		return
+	_rules = result.get("rules", [])
+	_rebuild_list()
+	_set_error("")
+	# Auto-select first if any.
+	if _rules.size() > 0:
+		_list.select(0)
+		_on_rule_selected(0)
 
-	_current_index = index
-	_is_new_rule = false
-	_load_rule_into_form(index)
+func _rebuild_list() -> void:
+	_list.clear()
+	for r in _rules:
+		var label_text := String(r.get("label", "?"))
+		var enabled: bool = bool(r.get("enabled", true))
+		if not enabled:
+			label_text += "  (disabled)"
+		_list.add_item(label_text)
 
+func _on_rule_selected(idx: int) -> void:
+	if idx < 0 or idx >= _rules.size():
+		return
+	_current_index = idx
+	_is_new = false
+	_working = _deep_copy_dict(_rules[idx])
+	_delete_btn.disabled = false
+	_render_form()
+
+func _deep_copy_dict(d: Dictionary) -> Dictionary:
+	# JSON round-trip — small dicts only, fine for rule shape.
+	return JSON.parse_string(JSON.stringify(d))
 
 # ---------------------------------------------------------------------------
-# Handlers — CRUD buttons
+# Form render / harvest
 # ---------------------------------------------------------------------------
 
-func _on_add_pressed() -> void:
-	# Commit current form first.
-	if _current_index >= 0 and _current_index < _rules.size():
-		_rules[_current_index] = _read_form()
+func _render_form() -> void:
+	_set_form_enabled(true)
+	_f_label.text = String(_working.get("label", ""))
+	# Label is the primary key — only editable on new rules.
+	_f_label.editable = _is_new
+	_f_name.text = String(_working.get("name", ""))
+	_f_order.value = int(_working.get("order", 0))
+	_f_instruction.text = String(_working.get("instruction", ""))
+	_f_subfolder.text = String(_working.get("subfolder", ""))
+	_f_rename_pattern.text = String(_working.get("rename_pattern", ""))
+	_f_threshold.value = float(_working.get("confidence_threshold", 0.6))
+	_f_enabled.button_pressed = bool(_working.get("enabled", true))
+	_f_encrypt.button_pressed = bool(_working.get("encrypt", false))
+	_f_stop.button_pressed = bool(_working.get("stop_processing", false))
+	_f_default.button_pressed = bool(_working.get("is_default", false))
 
-	var new_rule: Dictionary = {
-		"label":                "new-rule",
-		"name":                 "New Rule",
-		"instruction":          "Describe what documents this rule should match.",
-		"signals":              [],
-		"subfolder":            "new-rule",
+	_clear_stages_container()
+	var stages: Array = _working.get("stages", [])
+	for st in stages:
+		_stages_container.add_child(_make_stage_widget(st))
+
+func _clear_stages_container() -> void:
+	for c in _stages_container.get_children():
+		_stages_container.remove_child(c)
+		c.queue_free()
+
+func _harvest_form() -> Dictionary:
+	var out := {}
+	out["label"] = _f_label.text.strip_edges()
+	out["name"] = _f_name.text
+	out["order"] = int(_f_order.value)
+	out["instruction"] = _f_instruction.text
+	out["subfolder"] = _f_subfolder.text
+	out["rename_pattern"] = _f_rename_pattern.text
+	out["confidence_threshold"] = float(_f_threshold.value)
+	out["enabled"] = _f_enabled.button_pressed
+	out["encrypt"] = _f_encrypt.button_pressed
+	out["stop_processing"] = _f_stop.button_pressed
+	out["is_default"] = _f_default.button_pressed
+	out["stages"] = _harvest_stages()
+	return out
+
+func _harvest_stages() -> Array:
+	var stages: Array = []
+	for stage_panel in _stages_container.get_children():
+		var stage_dict := {"ask": "", "classify": {}}
+		var slots_box: VBoxContainer = stage_panel.find_child("_SlotsBox", true, false)
+		# Walk the stage's children for ask + keep_when.
+		_walk_for_roles(stage_panel, stage_dict, slots_box)
+		# Walk slots.
+		if slots_box != null:
+			for slot_panel in slots_box.get_children():
+				var sd := _harvest_slot(slot_panel)
+				if sd.is_empty():
+					continue
+				var name_key := String(sd.get("_name", ""))
+				if name_key.is_empty():
+					continue
+				sd.erase("_name")
+				stage_dict["classify"][name_key] = sd
+		stages.append(stage_dict)
+	return stages
+
+func _walk_for_roles(root: Node, stage_dict: Dictionary, slots_box_skip: Node) -> void:
+	for c in root.get_children():
+		if c == slots_box_skip:
+			continue
+		var role_var = c.get_meta("role") if c.has_meta("role") else null
+		var role := String(role_var) if role_var != null else ""
+		if role == "ask" and c is TextEdit:
+			stage_dict["ask"] = c.text
+		elif role == "keep_when" and c is LineEdit:
+			var t: String = c.text.strip_edges()
+			if not t.is_empty():
+				stage_dict["keep_when"] = t
+		if c.get_child_count() > 0:
+			_walk_for_roles(c, stage_dict, slots_box_skip)
+
+func _harvest_slot(slot_panel: Node) -> Dictionary:
+	var out := {"description": "", "values": ""}
+	var name_text := ""
+	var mode_closed := false
+	var values_text := ""
+	_visit_slot_widgets(slot_panel, func(role: String, w: Node):
+		match role:
+			"slot_name":
+				name_text = (w as LineEdit).text.strip_edges()
+			"slot_desc":
+				out["description"] = (w as LineEdit).text
+			"slot_mode":
+				mode_closed = (w as OptionButton).selected == 1
+			"slot_values":
+				values_text = (w as TextEdit).text
+	)
+	if mode_closed:
+		var lines: Array = []
+		for ln in values_text.split("\n"):
+			var s: String = String(ln).strip_edges()
+			if not s.is_empty():
+				lines.append(s)
+		out["values"] = lines
+	else:
+		out["values"] = values_text.strip_edges()
+	out["_name"] = name_text
+	return out
+
+func _visit_slot_widgets(root: Node, fn: Callable) -> void:
+	for c in root.get_children():
+		var role_var = c.get_meta("role") if c.has_meta("role") else null
+		if role_var != null:
+			fn.call(String(role_var), c)
+		if c.get_child_count() > 0:
+			_visit_slot_widgets(c, fn)
+
+# ---------------------------------------------------------------------------
+# Button handlers
+# ---------------------------------------------------------------------------
+
+func _on_new_pressed() -> void:
+	_current_index = -1
+	_is_new = true
+	_working = {
+		"label": "",
+		"name": "",
+		"instruction": "",
+		"subfolder": "",
+		"rename_pattern": "",
 		"confidence_threshold": 0.6,
-		"enabled":              true,
-		"encrypt":              false,
+		"encrypt": false,
+		"enabled": true,
+		"is_default": false,
+		"order": 0,
+		"stop_processing": false,
+		"stages": [],
 	}
-	_rules.append(new_rule)
-	_list.add_item("New Rule")
-	var new_idx: int = _list.item_count - 1
-	_list.select(new_idx)
-	_current_index = new_idx
-	_is_new_rule = true
-	_load_rule_into_form(new_idx)
-
+	_delete_btn.disabled = true
+	_render_form()
+	_list.deselect_all()
+	_set_error("")
 
 func _on_delete_pressed() -> void:
-	if _current_index < 0 or _rules.size() <= 1:
-		_show_error("Cannot delete: must have at least one rule.")
-		return
-
-	# Build confirmation dialog lazily.
-	if _confirm_dlg == null:
-		_confirm_dlg = ConfirmationDialog.new()
-		_UiScale.apply_to(_confirm_dlg)
-		add_child(_confirm_dlg)
-		_confirm_dlg.confirmed.connect(_execute_delete)
-
-	var rule_label: String = str(_rules[_current_index].get("label", "(unknown)"))
-	_confirm_dlg.dialog_text = "Delete rule \"%s\"?\nThis cannot be undone." % rule_label
-	_confirm_dlg.popup_centered()
-
-
-func _execute_delete() -> void:
 	if _current_index < 0 or _current_index >= _rules.size():
 		return
-	var conn := _conn
-	if conn == null:
-		_show_error("Plugin not connected.")
+	var label: String = String(_rules[_current_index].get("label", ""))
+	if label.is_empty():
 		return
-
-	var rule_label: String = str(_rules[_current_index].get("label", ""))
-	if rule_label.is_empty():
-		_show_error("Cannot delete: rule has no label.")
-		return
-
-	var result: Dictionary = await conn.call_tool(
-		"minerva_scansort_delete_rule",
-		{"rules_path": _rules_path, "label": rule_label},
+	var result: Dictionary = await _conn.call_tool(
+		"minerva_scansort_library_delete_rule", {"label": label}
 	)
-	if not result.get("ok", false):
-		_show_error("delete_rule failed: %s" % result.get("error", "unknown"))
+	if not bool(result.get("ok", false)):
+		_set_error("Delete failed: " + str(result.get("error", "?")))
 		return
-
-	_show_error("")
-	rules_changed.emit()
-	await refresh()
-
-
-# ---------------------------------------------------------------------------
-# Handler — Save Changes (AcceptDialog "OK")
-# ---------------------------------------------------------------------------
+	emit_signal("rules_changed")
+	await _load_library()
+	_set_form_enabled(false)
+	_current_index = -1
 
 func _on_save_pressed() -> void:
-	# Commit current form values back to the in-memory rule.
-	if _current_index >= 0 and _current_index < _rules.size():
-		_rules[_current_index] = _read_form()
-
-	if _current_index < 0:
+	var dict := _harvest_form()
+	var label: String = String(dict.get("label", ""))
+	if label.is_empty():
+		_set_error("Label is required.")
 		return
-
-	var conn := _conn
-	if conn == null:
-		_show_error("Plugin not connected.")
-		return
-
-	var rule: Dictionary = _rules[_current_index]
-	var rule_label: String = str(rule.get("label", ""))
-	if rule_label.is_empty():
-		_show_error("Label is required.")
-		return
-
-	if _is_new_rule:
-		# Insert (upserts in R4 file-mode if label already exists).
-		var ins_args: Dictionary = {
-			"rules_path":           _rules_path,
-			"label":                rule_label,
-			"name":                 str(rule.get("name", "")),
-			"instruction":          str(rule.get("instruction", "")),
-			"signals":              rule.get("signals", []),
-			"subfolder":            str(rule.get("subfolder", "")),
-			"confidence_threshold": float(rule.get("confidence_threshold", 0.6)),
-			"enabled":              rule.get("enabled", true),
-			"encrypt":              rule.get("encrypt", false),
-		}
-		var ins_result: Dictionary = await conn.call_tool("minerva_scansort_insert_rule", ins_args)
-		if not ins_result.get("ok", false):
-			_show_error("insert_rule failed: %s" % ins_result.get("error", "unknown"))
-			return
-		_is_new_rule = false
+	# Sanity: slot-name uniqueness across stages (server enforces too, but we
+	# can give a friendlier message here).
+	var seen := {}
+	for st in dict.get("stages", []):
+		var classify: Dictionary = st.get("classify", {})
+		for k in classify.keys():
+			if seen.has(k):
+				_set_error("Slot name '%s' is used in multiple stages — names must be unique." % k)
+				return
+			seen[k] = true
+	var tool: String
+	if _is_new:
+		tool = "minerva_scansort_library_insert_rule"
 	else:
-		# Update — send the whole rule as the updates dict.
-		var upd_args: Dictionary = {
-			"rules_path": _rules_path,
-			"label":      rule_label,
-			"updates": {
-				"name":                 rule.get("name", ""),
-				"instruction":          rule.get("instruction", ""),
-				"signals":              rule.get("signals", []),
-				"subfolder":            rule.get("subfolder", ""),
-				"confidence_threshold": float(rule.get("confidence_threshold", 0.6)),
-				"enabled":              rule.get("enabled", true),
-				"encrypt":              rule.get("encrypt", false),
-			},
-		}
-		var upd_result: Dictionary = await conn.call_tool("minerva_scansort_update_rule", upd_args)
-		if not upd_result.get("ok", false):
-			_show_error("update_rule failed: %s" % upd_result.get("error", "unknown"))
-			return
-
-	_show_error("")
-	rules_changed.emit()
-	# AcceptDialog auto-hides on confirm; emit closed so the panel queue_frees us.
-	closed.emit()
-
-
-# ---------------------------------------------------------------------------
-# Handler — Import from JSON
-# ---------------------------------------------------------------------------
-
-func _on_import_pressed() -> void:
-	if _import_dialog == null:
-		_import_dialog = FileDialog.new()
-		_UiScale.apply_to(_import_dialog)
-		_import_dialog.access = FileDialog.ACCESS_FILESYSTEM
-		_import_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
-		_import_dialog.title = "Import Rules from JSON"
-		_import_dialog.filters = PackedStringArray(["*.json ; JSON files"])
-		_import_dialog.file_selected.connect(_on_import_file_selected)
-		add_child(_import_dialog)
-	_import_dialog.popup_centered(Vector2i(700, 500))
-
-
-func _on_import_file_selected(file_path: String) -> void:
-	var conn := _conn
-	if conn == null:
-		_show_error("Plugin not connected.")
+		tool = "minerva_scansort_library_update_rule"
+	var result: Dictionary = await _conn.call_tool(tool, dict)
+	if not bool(result.get("ok", false)):
+		_set_error("Save failed: " + str(result.get("error", "?")))
 		return
+	_set_error("Saved.")
+	emit_signal("rules_changed")
+	await _load_library()
+	# Try to re-select what we just saved.
+	for i in range(_rules.size()):
+		if String(_rules[i].get("label", "")) == label:
+			_list.select(i)
+			_on_rule_selected(i)
+			break
 
-	# Read the file via FileAccess and pass the contents (not the path) to the tool.
-	var fa := FileAccess.open(file_path, FileAccess.READ)
-	if fa == null:
-		_show_error("Could not open file: %s" % file_path)
+func _on_revert_pressed() -> void:
+	if _is_new:
+		_on_new_pressed()
+	elif _current_index >= 0 and _current_index < _rules.size():
+		_on_rule_selected(_current_index)
+
+func _on_add_stage_pressed() -> void:
+	_stages_container.add_child(_make_stage_widget({"ask": "", "classify": {}}))
+
+func _on_stage_move(panel: Node, delta: int) -> void:
+	var idx: int = panel.get_index()
+	var new_idx: int = idx + delta
+	if new_idx < 0 or new_idx >= _stages_container.get_child_count():
 		return
-	var json_text: String = fa.get_as_text()
-	fa.close()
+	_stages_container.move_child(panel, new_idx)
 
-	var result: Dictionary = await conn.call_tool(
-		"minerva_scansort_import_rules_from_json",
-		{"rules_path": _rules_path, "json_text": json_text},
-	)
-	if not result.get("ok", false):
-		_show_error("import_rules failed: %s" % result.get("error", "unknown"))
-		return
+func _on_stage_delete(panel: Node) -> void:
+	_stages_container.remove_child(panel)
+	panel.queue_free()
 
-	var count: int = int(result.get("count", 0))
-	_show_error("")  # clear errors
-	rules_changed.emit()
-	await refresh()
-	push_warning("[RulesEditorDialog] imported %d rules from %s" % [count, file_path.get_file()])
+func _on_add_slot_pressed(slots_box: VBoxContainer) -> void:
+	slots_box.add_child(_make_slot_widget("", {"description": "", "values": ""}))
 
+func _on_slot_delete(slot_panel: Node) -> void:
+	var parent: Node = slot_panel.get_parent()
+	parent.remove_child(slot_panel)
+	slot_panel.queue_free()
 
-# ---------------------------------------------------------------------------
-# Handler — Export to JSON
-# ---------------------------------------------------------------------------
-
-func _on_export_pressed() -> void:
-	if _export_dialog == null:
-		_export_dialog = FileDialog.new()
-		_UiScale.apply_to(_export_dialog)
-		_export_dialog.access = FileDialog.ACCESS_FILESYSTEM
-		_export_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
-		_export_dialog.title = "Export Rules to JSON"
-		_export_dialog.filters = PackedStringArray(["*.json ; JSON files"])
-		_export_dialog.file_selected.connect(_on_export_file_selected)
-		add_child(_export_dialog)
-	_export_dialog.current_file = "rules_export.json"
-	_export_dialog.popup_centered(Vector2i(700, 500))
-
-
-func _on_export_file_selected(file_path: String) -> void:
-	var conn := _conn
-	if conn == null:
-		_show_error("Plugin not connected.")
-		return
-
-	var result: Dictionary = await conn.call_tool(
-		"minerva_scansort_list_rules",
-		{"rules_path": _rules_path},
-	)
-	if not result.get("ok", false):
-		_show_error("list_rules failed: %s" % result.get("error", "unknown"))
-		return
-
-	var rules_data: Variant = result.get("rules", [])
-	var json_str: String = JSON.stringify(rules_data, "  ")
-
-	var fa := FileAccess.open(file_path, FileAccess.WRITE)
-	if fa == null:
-		_show_error("Could not write to file: %s" % file_path)
-		return
-	fa.store_string(json_str)
-	fa.close()
-	_show_error("")
-
-
-# ---------------------------------------------------------------------------
-# Handler — Close
-# ---------------------------------------------------------------------------
-
-func _on_close_pressed() -> void:
-	closed.emit()
-
+func _on_slot_mode_changed(idx: int, values_edit: TextEdit) -> void:
+	# Reset placeholder + content style; leave existing text so the user can
+	# convert manually if they want.
+	if idx == 1:
+		values_edit.placeholder_text = "One value per line"
+	else:
+		values_edit.placeholder_text = "Natural-language constraint, e.g. \"a 4-digit year\""
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-func _show_error(msg: String) -> void:
+func _section_header(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_font_size_override("font_size", 16)
+	return l
+
+func _label_for(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
+	return l
+
+func _set_form_enabled(en: bool) -> void:
+	for w in [
+		_f_label, _f_name, _f_order, _f_instruction, _f_subfolder,
+		_f_rename_pattern, _f_threshold, _f_enabled, _f_encrypt,
+		_f_stop, _f_default, _add_stage_btn, _save_btn, _revert_btn,
+	]:
+		_set_widget_enabled(w, en)
+	if _stages_container != null:
+		_stages_container.visible = en
+	if not en:
+		_f_label.text = ""
+		_f_name.text = ""
+		_f_instruction.text = ""
+		_f_subfolder.text = ""
+		_f_rename_pattern.text = ""
+		_clear_stages_container()
+
+func _set_widget_enabled(w: Node, en: bool) -> void:
+	if w == null:
+		return
+	if w is BaseButton:
+		(w as BaseButton).disabled = not en
+	elif w is LineEdit:
+		(w as LineEdit).editable = en
+	elif w is TextEdit:
+		(w as TextEdit).editable = en
+	elif w is SpinBox:
+		(w as SpinBox).editable = en
+
+func _set_error(text: String) -> void:
 	if _error_label != null:
-		_error_label.text = msg
+		_error_label.text = text

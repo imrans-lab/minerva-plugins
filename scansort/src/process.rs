@@ -37,6 +37,7 @@ use crate::doc_type_normalizer;
 use crate::extract;
 use crate::library;
 use crate::placement::{self, DirHashCache, DocMeta, PlacementStatus};
+use crate::render;
 use crate::rule_engine::{self, FileFacts};
 use crate::rules_file::FileRule;
 use crate::session;
@@ -47,6 +48,56 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
+
+// Vision-mode auto-fallback tuning. A doc is "image-only" when extracted text
+// is essentially empty OR every page reported by the extractor is image-only.
+// Threshold is intentionally conservative — a real text PDF will trivially
+// exceed it after pdftotext, while OCR-less scans return <10 chars.
+const VISION_FALLBACK_TEXT_THRESHOLD: usize = 50;
+const VISION_MAX_PAGES: i32 = 3;
+// 100 DPI letter-page renders to ~600 KB base64 (1100x850 PNG) — well inside
+// what qwen2.5vl:7b accepts in a single call. Going higher costs latency
+// without classification gains since vision models tile-tokenize at fixed
+// resolution.
+const VISION_DPI: i32 = 100;
+
+/// Returns `true` when the extraction result indicates the document has no
+/// usable text and should be handled via the multimodal/vision path.
+///
+/// Generalized — does NOT key off a particular file path or fixture. Two
+/// independent signals: (1) trimmed full_text is below the threshold, OR
+/// (2) extractor reports every counted page as image-only. Either suffices.
+fn is_image_only(extracted: &crate::types::ExtractionResult) -> bool {
+    if extracted.full_text.trim().chars().count() < VISION_FALLBACK_TEXT_THRESHOLD {
+        return true;
+    }
+    let pc = extracted.page_count;
+    if pc > 0 && extracted.image_only_pages.len() == pc as usize {
+        return true;
+    }
+    false
+}
+
+/// W2-vision runtime entry: like `apply_rule_engine_with_llm` but threads
+/// optional page-image content through to `rule_engine::run_with_stages_vision`.
+pub fn apply_rule_engine_with_llm_vision(
+    classification: &Classification,
+    file_facts: &FileFacts,
+    rules: &[FileRule],
+    document_text: &str,
+    page_images: Option<&[Value]>,
+    llm: &mut dyn LlmCaller,
+) -> rule_engine::RuleWalkOutcome {
+    let rule_objs: Vec<Rule> = rules.iter().map(|r| r.clone().into_rule()).collect();
+    rule_engine::run_with_stages_vision(
+        classification,
+        file_facts,
+        &rule_objs,
+        document_text,
+        page_images,
+        llm,
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Public output types
@@ -297,9 +348,9 @@ pub fn run(
                 continue;
             }
 
-            // Extract text.
-            let full_text = match extract::extract_file(abs_path) {
-                Ok(res) => res.full_text,
+            // Extract text. Keep the whole result so we can decide image-only.
+            let extracted = match extract::extract_file(abs_path) {
+                Ok(res) => res,
                 Err(e) => {
                     log::warn!("process: extract failed for {abs_path}: {e}");
                     let entry = source_state::make_entry(
@@ -323,11 +374,47 @@ pub fn run(
                 }
             };
 
-            // Classify via host.providers.chat.
+            let full_text = extracted.full_text.clone();
+
+            // Decide vision-mode auto-fallback. When the doc has effectively
+            // no extractable text, render its first few pages once and reuse
+            // those images for both Phase-1 classification and per-rule stage
+            // walks. Render failures fall back to the text path with whatever
+            // text we did get (which the LLM will see as near-empty).
+            let use_vision = is_image_only(&extracted);
+            let page_images: Option<Vec<Value>> = if use_vision {
+                match render::render_pages(abs_path, VISION_MAX_PAGES, VISION_DPI) {
+                    Ok(rr) => {
+                        if rr.pages.is_empty() {
+                            log::warn!("process: vision render produced 0 pages for {abs_path}; falling back to text");
+                            None
+                        } else {
+                            Some(
+                                rr.pages
+                                    .into_iter()
+                                    .map(|p| json!({"page_num": p.page_num, "base64": p.base64}))
+                                    .collect(),
+                            )
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("process: vision render failed for {abs_path}: {e}; falling back to text");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Classify via host.providers.chat. Vision path uses multimodal
+            // messages; text path keeps the original strategy-driven prompt.
             let rule_objs: Vec<Rule> = enabled_rules.iter().map(|r| r.clone().into_rule()).collect();
-            let messages = classifier::build_messages_with_strategy(
-                &full_text, 4000, &rule_objs, doc_type_strategy,
-            );
+            let messages = match &page_images {
+                Some(imgs) => classifier::build_vision_messages(imgs, &rule_objs),
+                None => classifier::build_messages_with_strategy(
+                    &full_text, 4000, &rule_objs, doc_type_strategy,
+                ),
+            };
 
             let mut chat_args = json!({
                 "messages": messages,
@@ -443,11 +530,12 @@ pub fn run(
                     model: &model,
                     model_spec: model_spec.as_ref(),
                 };
-                apply_rule_engine_with_llm(
+                apply_rule_engine_with_llm_vision(
                     &classification,
                     &file_facts,
                     &enabled_rules,
                     &full_text,
+                    page_images.as_deref(),
                     &mut caller,
                 )
             };
@@ -624,9 +712,20 @@ pub fn run(
                 target_labels: resolved_labels,
                 reason,
             });
+
+            // Per-doc manifest checkpoint. Lets external watchdogs measure
+            // per-file latency and recovers progress on crash. source_state::save
+            // is atomic (tmp+rename), and the manifest is small (~hundreds of
+            // bytes/doc) so the cost is negligible vs each LLM call.
+            if let Err(e) = source_state::save(source_path, &src_state) {
+                log::warn!(
+                    "process: could not checkpoint manifest for '{source_label}' after {rel_path}: {e}"
+                );
+            }
         }
 
-        // Write updated manifest back atomically.
+        // Final write for symmetry — also covers the empty-files case where
+        // the per-doc checkpoint never ran.
         if let Err(e) = source_state::save(source_path, &src_state) {
             log::warn!("process: could not save manifest for '{source_label}': {e}");
         }

@@ -2153,6 +2153,9 @@ fn handle_library_insert_rule(params: &Value, id: Value) -> RpcResponse {
     let subtypes: Vec<types::Subtype> = args.get("subtypes")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
+    let stages: Vec<types::Stage> = args.get("stages")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
 
     let rule = rules_file::FileRule {
         label: label.to_string(),
@@ -2171,7 +2174,7 @@ fn handle_library_insert_rule(params: &Value, id: Value) -> RpcResponse {
         stop_processing,
         copy_to,
         subtypes,
-        stages: Vec::new(),
+        stages,
     };
     match library::library_insert(rule) {
         Ok(r) => match serde_json::to_value(&r) {
@@ -2247,6 +2250,12 @@ fn handle_library_update_rule(params: &Value, id: Value) -> RpcResponse {
     if let Some(v) = args.get("stop_processing").and_then(|x| x.as_bool()) { rule.stop_processing = v; }
     if let Some(v) = args.get("copy_to").and_then(|x| x.as_array()) {
         rule.copy_to = v.iter().filter_map(|s| s.as_str().map(String::from)).collect();
+    }
+    if let Some(v) = args.get("stages") {
+        match serde_json::from_value::<Vec<types::Stage>>(v.clone()) {
+            Ok(stages) => rule.stages = stages,
+            Err(e) => return ok_response(id, tool_err(&format!("invalid stages: {e}"))),
+        }
     }
 
     let updated_rule = file.rules[idx].clone();
@@ -3324,6 +3333,7 @@ fn main() {
                                 "conditions":           {"type": "object",  "description": "Deterministic gate (ConditionNode) evaluated before LLM classification."},
                                 "exceptions":           {"type": "object",  "description": "When this evaluates true, the rule match is negated."},
                                 "subtypes":             {"type": "array",   "items": {"type": "object"}, "description": "B8 document subtypes: [{name, also_known_as: [alias...]}]. Used by process() doc_type_strategy=enum|both to constrain prompt, and canonicalize|both to normalize raw LLM output."},
+                                "stages":               {"type": "array",   "items": {"type": "object"}, "description": "DCR 019e33bf: per-rule classification pipeline. Each stage = {ask: string, classify: {slot_name: {description, values: [...]|string}}, keep_when?: string}. Slot names must be unique across all stages."},
                             },
                             "required": ["label"],
                         },
@@ -3369,6 +3379,7 @@ fn main() {
                                 "copy_to":              {"type": "array", "items": {"type": "string"}},
                                 "conditions":           {"type": "object"},
                                 "exceptions":           {"type": "object"},
+                                "stages":               {"type": "array", "items": {"type": "object"}, "description": "DCR 019e33bf classification pipeline. See library_insert_rule for shape."},
                             },
                             "required": ["label"],
                         },
