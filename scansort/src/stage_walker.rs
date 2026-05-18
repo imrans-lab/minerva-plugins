@@ -269,7 +269,7 @@ fn build_stage_messages(
         document_text.to_string()
     };
     let mut lines: Vec<String> = Vec::new();
-    lines.push("You are a document classifier. Answer the question(s) by filling in the named slots below.".to_string());
+    lines.push("Answer the question(s) by filling in the named slots below, using the input.".to_string());
     lines.push(String::new());
     lines.push("## Question(s)".to_string());
     lines.push(ask.to_string());
@@ -300,7 +300,7 @@ fn build_stage_messages(
 
     vec![
         json!({"role": "system", "content": lines.join("\n")}),
-        json!({"role": "user", "content": format!("Document:\n\n{truncated_doc}")}),
+        json!({"role": "user", "content": truncated_doc}),
     ]
 }
 
@@ -314,7 +314,7 @@ fn build_stage_messages_vision(
     page_images: &[Value],
 ) -> Vec<Value> {
     let mut lines: Vec<String> = Vec::new();
-    lines.push("You are a document classifier. Answer the question(s) by filling in the named slots below.".to_string());
+    lines.push("Answer the question(s) by filling in the named slots below, using the input.".to_string());
     lines.push(String::new());
     lines.push("## Question(s)".to_string());
     lines.push(ask.to_string());
@@ -343,20 +343,24 @@ fn build_stage_messages_vision(
         example_keys.join(", ")
     ));
 
-    let mut user_content: Vec<Value> = vec![
-        json!({"type": "text", "text": "Document is image-only; classify from the page image(s):"}),
-    ];
-    for page in page_images {
-        let b64 = page.get("base64").and_then(|v| v.as_str()).unwrap_or("");
-        user_content.push(json!({
-            "type": "image_url",
-            "image_url": {"url": format!("data:image/png;base64,{}", b64)},
-        }));
-    }
+    // Wire shape required by Minerva's CapabilityBroker: text in `content`
+    // (string), images in a SEPARATE `images` array of raw base64-PNG bytes
+    // (no data URI prefix). Broker decodes only PNG.
+    let images: Vec<Value> = page_images
+        .iter()
+        .map(|page| {
+            let b64 = page.get("base64").and_then(|v| v.as_str()).unwrap_or("");
+            Value::String(b64.to_string())
+        })
+        .collect();
 
     vec![
         json!({"role": "system", "content": lines.join("\n")}),
-        json!({"role": "user", "content": user_content}),
+        json!({
+            "role": "user",
+            "content": "Answer from the image(s):",
+            "images": images,
+        }),
     ]
 }
 

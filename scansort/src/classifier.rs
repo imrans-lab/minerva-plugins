@@ -37,7 +37,7 @@ pub fn build_messages_with_strategy(
 
     vec![
         json!({"role": "system", "content": system_prompt}),
-        json!({"role": "user", "content": format!("Classify this document:\n\n{}", truncated)}),
+        json!({"role": "user", "content": truncated}),
     ]
 }
 
@@ -47,21 +47,27 @@ pub fn build_messages_with_strategy(
 pub fn build_vision_messages(page_images: &[Value], rules: &[Rule]) -> Vec<Value> {
     let system_prompt = rules::build_prompt_context(rules);
 
-    let mut user_content: Vec<Value> = vec![
-        json!({"type": "text", "text": "Classify this scanned document from the page image(s):"}),
-    ];
-
-    for page in page_images {
-        let b64 = page.get("base64").and_then(|v| v.as_str()).unwrap_or("");
-        user_content.push(json!({
-            "type": "image_url",
-            "image_url": {"url": format!("data:image/png;base64,{}", b64)},
-        }));
-    }
+    // Wire shape required by Minerva's CapabilityBroker (host.providers.chat):
+    // text in `content` (string), images in a SEPARATE `images` array carrying
+    // raw base64-encoded PNG bytes (no data URI prefix). The broker only
+    // decodes PNG via Image.load_png_from_buffer, so non-PNG silently produces
+    // an empty Images list and the model never sees the image. See
+    // CapabilityBroker.gd:_handle_host_providers_chat.
+    let images: Vec<Value> = page_images
+        .iter()
+        .map(|page| {
+            let b64 = page.get("base64").and_then(|v| v.as_str()).unwrap_or("");
+            Value::String(b64.to_string())
+        })
+        .collect();
 
     vec![
         json!({"role": "system", "content": system_prompt}),
-        json!({"role": "user", "content": user_content}),
+        json!({
+            "role": "user",
+            "content": "Score the input against the categories described in the system prompt:",
+            "images": images,
+        }),
     ]
 }
 
@@ -447,34 +453,38 @@ mod tests {
         assert!(c.fallback_reason.is_none());
     }
 
-    // ── Test 4: build_prompt_context asks for facts + per-rule scores ──────
-
+    // ── Test 4: build_prompt_context — minimal scaffold contract ───────────
+    //
+    // The prompt MUST be content-agnostic scaffolding: a single algorithm
+    // contract (score every category, JSON shape) plus rule-driven content.
+    // It must NOT embed any document-specific framing (doc_date, issuer,
+    // amount, etc.) — those would bias the model toward documents and break
+    // classification of non-document inputs (e.g. photographs).
     #[test]
-    fn prompt_contains_facts_and_per_rule_score_request() {
+    fn prompt_is_minimal_scaffold_with_rule_signals_request() {
         let rules = two_rules();
         let prompt = rules::build_prompt_context(&rules);
 
-        // Must mention the facts block keys.
-        assert!(prompt.contains("doc_date"), "prompt must request doc_date");
-        assert!(prompt.contains("issuer"),   "prompt must request issuer");
-        assert!(prompt.contains("amount"),   "prompt must request amount");
-        assert!(prompt.contains("doc_type"), "prompt must request doc_type");
-        assert!(prompt.contains("confidence"), "prompt must request confidence");
-
-        // Must mention rule_signals.
+        // Algorithm contract:
         assert!(prompt.contains("rule_signals"), "prompt must request rule_signals");
+        assert!(prompt.contains("score"), "prompt must ask for a score per category");
+        assert!(
+            prompt.contains("every") || prompt.contains("EVERY") || prompt.contains("each"),
+            "prompt must instruct the LLM to score every category"
+        );
 
-        // Must embed each enabled rule label so the LLM knows what to score.
+        // Rule-driven content: each enabled rule label must appear.
         assert!(prompt.contains("tax"),     "prompt must list rule label 'tax'");
         assert!(prompt.contains("invoice"), "prompt must list rule label 'invoice'");
 
-        // Must ask for a score per rule, not just a single category.
-        assert!(prompt.contains("score"), "prompt must ask for a score per rule");
-        // Must make clear all rules should be scored.
-        assert!(
-            prompt.contains("ALL") || prompt.contains("every") || prompt.contains("EVERY") || prompt.contains("each"),
-            "prompt must instruct the LLM to score all rules"
-        );
+        // Anti-bias: no document-specific extraction fields baked in. These
+        // come from per-rule classify slots (phase-2 stage walks), not the
+        // phase-1 scaffold.
+        assert!(!prompt.contains("doc_date"), "doc_date must not be hardcoded in scaffold");
+        assert!(!prompt.contains("issuer"),   "issuer must not be hardcoded in scaffold");
+        assert!(!prompt.contains("amount"),   "amount must not be hardcoded in scaffold");
+        assert!(!prompt.contains("document classifier"),
+                "scaffold must not assume input is a document");
     }
 
     // ── Test 5: prompt omits disabled rules ────────────────────────────────

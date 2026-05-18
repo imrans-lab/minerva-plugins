@@ -613,7 +613,7 @@ def generate_report(ledger_path: Path = LEDGER_PATH, out: Path = HERE / "report.
 
 
 SMOKE_CLASSIFY_TIMEOUT_S = 14.0  # qwen2.5vl:7b warm ≈ 7s; fail at 2x.
-SMOKE_WARMUP_TIMEOUT_S = 60.0   # cold-start ceiling per operator (5 min) is wasteful; bound to 60s.
+SMOKE_WARMUP_TIMEOUT_S = 180.0  # observed cold-start variance on qwen2.5vl:7b: 1–43s typical, occasionally >60s. 180s gives headroom under the 5-min operator ceiling without wasting time on real hangs.
 SMOKE_WARMER_CHAT_NAME = "scansort_smoke_warmup"
 REAL_TEST_PER_DOC_TIMEOUT_S = 30.0  # qwen warm; product ceiling per operator.
 
@@ -936,6 +936,11 @@ def run_hitl(
     print(f"[hitl] opening source {source_path} as '{source_label}'")
     mcp.call("minerva_scansort_session_open_source",
              {"label": source_label, "path": source_path})
+
+    print(f"[hitl] warming {model} via Minerva chat (budget {SMOKE_WARMUP_TIMEOUT_S:.0f}s)")
+    if not warm_model_via_minerva_chat(mcp, model, SMOKE_WARMUP_TIMEOUT_S):
+        print("[hitl] FAIL: warmup failed")
+        return 1
 
     print(f"[hitl] running process(model={model}, strategy={strategy}, timeout={timeout_s}s)")
     t0 = time.time()
