@@ -3613,25 +3613,18 @@ func _subscribe_broker_progress() -> void:
 	if broker.has_signal("plugin_chat_completed"):
 		broker.plugin_chat_completed.connect(_on_broker_chat_completed)
 
-func _on_broker_chat_invoked(plugin_id: String, _provider_name: String, model_name: String) -> void:
+func _on_broker_chat_invoked(plugin_id: String, _provider_name: String, _model_name: String) -> void:
 	if plugin_id != "scansort":
 		return
+	# Counters retained for debugging; status text is now driven by the
+	# per-file kind=document event stream so "Processing <file>" stays
+	# stable across the chat call instead of flickering "Classifying — call #N".
 	_broker_chat_count += 1
-	var last := ""
-	if _broker_chat_last_ms > 0:
-		last = "  (prev %.1fs)" % (_broker_chat_last_ms / 1000.0)
-	set_status("Classifying — call #%d via %s%s" % [_broker_chat_count, model_name, last])
 
-func _on_broker_chat_completed(plugin_id: String, _provider_name: String, _model_name: String, duration_ms: int, ok: bool, tokens_in: int, tokens_out: int, error: String) -> void:
+func _on_broker_chat_completed(plugin_id: String, _provider_name: String, _model_name: String, duration_ms: int, _ok: bool, _tokens_in: int, _tokens_out: int, _error: String) -> void:
 	if plugin_id != "scansort":
 		return
 	_broker_chat_last_ms = duration_ms
-	if ok:
-		set_status("Classified call #%d in %.1fs  (in=%d tok, out=%d tok)" % [
-			_broker_chat_count, duration_ms / 1000.0, tokens_in, tokens_out])
-	else:
-		set_status("Call #%d failed after %.1fs: %s" % [
-			_broker_chat_count, duration_ms / 1000.0, error])
 
 
 ## Subscribe to PluginEventBroker so MCP-driven mutations (set_source_dir,
@@ -3682,17 +3675,31 @@ func _on_plugin_event(p_id: String, event_name: String, payload: Dictionary) -> 
 			_refresh_all_dest_trees_if_ready()
 		"document":
 			# Per-file progress event: payload carries file_path + status (+ target/reason).
-			# Update local map, push to source provider, refresh BOTH dest and source trees.
+			# Update local map, mirror in-flight file to bottom status bar, push to
+			# source provider, refresh BOTH dest and source trees.
 			var file_path: String = str(payload.get("file_path", ""))
 			if not file_path.is_empty():
-				var entry: Dictionary = {
-					"status": str(payload.get("status", "")),
-				}
+				var status_str: String = str(payload.get("status", ""))
+				var entry: Dictionary = { "status": status_str }
 				if payload.has("target"):
 					entry["target"] = str(payload.get("target", ""))
 				if payload.has("reason"):
 					entry["reason"] = str(payload.get("reason", ""))
 				_doc_progress[file_path] = entry
+				# Bottom status bar: show "Processing <file>" during classify and
+				# leave it on that filename across the per-file terminal events
+				# so the bar stays stable until the NEXT file's classifying
+				# event arrives. Errors override with "Error processing <file>:
+				# <reason>" so the user notices failures.
+				if _status_panel != null and is_instance_valid(_status_panel):
+					if status_str == "classifying":
+						_status_panel.set_status("Processing %s" % file_path)
+					elif status_str == "unprocessable":
+						var rsn: String = str(payload.get("reason", "unknown"))
+						_status_panel.set_status("Error processing %s: %s" % [file_path, rsn])
+					# "moved" / "conflict" → leave the bar on the previous
+					# "Processing <file>" text; it'll be replaced by the next
+					# file's classifying event or by an error.
 				_push_doc_progress_to_source_provider()
 				_refresh_source_tree_if_ready()
 			_refresh_all_dest_trees_if_ready()

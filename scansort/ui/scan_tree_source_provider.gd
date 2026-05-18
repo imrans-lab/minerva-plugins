@@ -114,8 +114,10 @@ func get_tree_data() -> Array:
 			var rsn: String = str(progress.get("reason", ""))
 			match st:
 				"classifying":
-					status_text = "classifying…"
-					status_color = Color(0.85, 0.75, 0.25)  # amber
+					# In-flight state is communicated via the bottom status bar
+					# ("Processing <file>") so the narrow Status column doesn't
+					# truncate it. Leave the row blank during classify.
+					status_text = ""
 				"moved":
 					status_text = "→ %s" % tgt if not tgt.is_empty() else "→ done"
 					status_color = Color(0.4, 0.85, 0.4)  # green
