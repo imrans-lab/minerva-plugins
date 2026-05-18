@@ -803,6 +803,15 @@ pub fn run(
 ///   - `SkippedAlreadyPresent`  → event=`skipped`,  disposition=`skipped-already-present`
 ///   - `Error`                  → event=`placement`, disposition=`error`
 ///
+/// `resolved_path` semantics (per [`audit::AuditRow`] docstring):
+///   - Directory destination → `pr.target_path` (the placed file path)
+///   - Vault destination     → vault file path from registry (includes `.ssort`)
+///
+/// `detail` enrichment for the happy path:
+///   - Vault placed → `"doc_id=N"` so the audit log carries provenance into
+///     the vault DB without requiring an external lookup.
+///   - All other cases → `pr.message` verbatim (carries error / skip reason).
+///
 /// `timestamp` is sampled per-row via [`crate::types::now_iso`].
 fn build_audit_rows_for_placements(
     placements: &[PlacementResult],
@@ -818,11 +827,38 @@ fn build_audit_rows_for_placements(
             PlacementStatus::SkippedAlreadyPresent => "skipped-already-present",
             PlacementStatus::Error => "error",
         };
-        // Resolve destination kind from the registry; fall back to the
+        // Resolve destination kind + path from the registry; fall back to the
         // PlacementResult's own `kind` field (set by fan_out), then "".
-        let dest_kind = crate::destinations::find_by_id(registry, &pr.destination_id)
+        let registry_dest = crate::destinations::find_by_id(registry, &pr.destination_id);
+        let dest_kind = registry_dest
             .map(|d| d.kind.as_str().to_string())
             .unwrap_or_else(|| pr.kind.clone());
+
+        // For vaults, target_path is empty (vault DB writes have no on-disk
+        // path per file); use the vault file path from the registry so the
+        // audit row is interpretable standalone. For directories,
+        // target_path is the placed file path.
+        let resolved_path = if dest_kind == "vault" {
+            registry_dest
+                .map(|d| d.path.clone())
+                .unwrap_or_else(|| pr.target_path.clone())
+        } else {
+            pr.target_path.clone()
+        };
+
+        // Happy-path enrichment: for placed vault rows, record the doc_id so
+        // the audit log can be cross-referenced against the vault DB without
+        // an external lookup. Other cases keep pr.message verbatim (error
+        // text or skip reason).
+        let detail = if pr.status == PlacementStatus::Placed
+            && dest_kind == "vault"
+            && pr.doc_id != 0
+        {
+            format!("doc_id={}", pr.doc_id)
+        } else {
+            pr.message.clone()
+        };
+
         let now = crate::types::now_iso();
         rows.push(audit::AuditRow::from_placement(
             source_sha256,
@@ -830,9 +866,9 @@ fn build_audit_rows_for_placements(
             rule_label,
             &pr.destination_id,
             &dest_kind,
-            &pr.target_path,
+            &resolved_path,
             status_str,
-            &pr.message,
+            &detail,
             &now,
         ));
     }
@@ -1484,6 +1520,12 @@ mod tests {
         assert_eq!(rows[1].disposition, "skipped-already-present");
         assert_eq!(rows[1].destination_id, "vault-archive");
         assert_eq!(rows[1].destination_kind, "vault");
+        // Vault dest: resolved_path comes from registry (includes .ssort),
+        // NOT from pr.target_path (which is empty for vaults in fan_out).
+        assert_eq!(rows[1].resolved_path, "/fake/vault-archive.ssort");
+        // Skipped-vault keeps pr.message verbatim — doc_id enrichment only
+        // applies to Placed rows, not skipped ones.
+        assert_eq!(rows[1].detail, "doc_id=42 already present");
 
         // Now drive the log file end-to-end — same call the run() loop makes.
         let dir = unique_tmp("audit-e2e");
@@ -1510,6 +1552,83 @@ mod tests {
         assert!(lines[2].contains("\"vault-archive\""),           "row2 vault dest: {}", lines[2]);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Placed vault row → resolved_path comes from registry (.ssort path),
+    // and detail carries doc_id=N for cross-reference with the vault DB.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn dcr_019e3ce0_placed_vault_uses_registry_path_and_doc_id_in_detail() {
+        use crate::placement::PlacementResult;
+
+        let registry = DestinationRegistry {
+            schema_version: crate::destinations::CURRENT_SCHEMA_VERSION,
+            destinations: vec![Destination {
+                id: "test".to_string(),
+                kind: "vault".to_string(),
+                path: "/home/user/test.ssort".to_string(),
+                label: "test".to_string(),
+                locked: false,
+            }],
+        };
+        let placements = vec![PlacementResult {
+            destination_id: "test".to_string(),
+            kind: "vault".to_string(),
+            target_path: String::new(), // fan_out leaves this empty for vault
+            doc_id: 17,
+            status: PlacementStatus::Placed,
+            message: String::new(), // happy path: no error message
+        }];
+
+        let rows = build_audit_rows_for_placements(
+            &placements, &registry, "sha", "doc.pdf", "tax",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event, "placement");
+        assert_eq!(rows[0].disposition, "placed");
+        assert_eq!(
+            rows[0].resolved_path, "/home/user/test.ssort",
+            "vault placed row must carry the .ssort path from registry"
+        );
+        assert_eq!(
+            rows[0].detail, "doc_id=17",
+            "vault placed row must carry doc_id in detail for vault-DB cross-ref"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Placed vault row with doc_id=0 (defensive: never seen in real fan_out,
+    // but guard against it) → no doc_id enrichment, detail stays empty.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn dcr_019e3ce0_placed_vault_doc_id_zero_does_not_enrich_detail() {
+        use crate::placement::PlacementResult;
+
+        let registry = DestinationRegistry {
+            schema_version: crate::destinations::CURRENT_SCHEMA_VERSION,
+            destinations: vec![Destination {
+                id: "test".to_string(),
+                kind: "vault".to_string(),
+                path: "/home/user/test.ssort".to_string(),
+                label: "test".to_string(),
+                locked: false,
+            }],
+        };
+        let placements = vec![PlacementResult {
+            destination_id: "test".to_string(),
+            kind: "vault".to_string(),
+            target_path: String::new(),
+            doc_id: 0, // defensive: shouldn't happen on success but guard anyway
+            status: PlacementStatus::Placed,
+            message: String::new(),
+        }];
+
+        let rows = build_audit_rows_for_placements(
+            &placements, &registry, "sha", "doc.pdf", "tax",
+        );
+        assert_eq!(rows[0].resolved_path, "/home/user/test.ssort");
+        assert_eq!(rows[0].detail, "", "doc_id=0 must not produce \"doc_id=0\" noise");
     }
 
     // -----------------------------------------------------------------------
