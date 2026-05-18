@@ -144,6 +144,16 @@ pub fn state() -> SessionState {
     })
 }
 
+/// (label, path) snapshot of one session category. Used by the panel for
+/// rendering — LLM agents must keep using `state()` (label-only) for safety.
+pub fn entries_full() -> (Vec<(String, PathBuf)>, Vec<(String, PathBuf)>, Vec<(String, PathBuf)>) {
+    with_session(|s| (
+        s.open_vaults.iter().map(|e| (e.label.clone(), e.path.clone())).collect(),
+        s.open_dirs.iter().map(|e| (e.label.clone(), e.path.clone())).collect(),
+        s.open_sources.iter().map(|e| (e.label.clone(), e.path.clone())).collect(),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // B3 helpers — label resolution for the process() pipeline
 // ---------------------------------------------------------------------------

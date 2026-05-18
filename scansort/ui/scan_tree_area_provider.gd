@@ -1,38 +1,23 @@
 extends "scan_tree_provider.gd"
 ## Aggregate scan_tree provider for a destination area (vault OR directory kind).
 ##
-## For vault areas: registry vault destinations are rendered for ALL entries
-## in the destination registry, regardless of whether a vault is currently
-## "open" in the panel.  When a vault IS open (_open_vault_path is non-empty)
-## it is rendered first and deduped from the registry loop below.  When no
-## vault is open, ALL registry vault destinations are shown directly.  This
-## ensures MCP-driven vault destinations are always visible.
+## Reads session_state with include_paths=true and renders one row per session
+## entry of the matching kind.  Session is the source of truth — dest_registry
+## is no longer consulted here.  See DCR 019e3c48f0da for rationale.
 ##
-## For directory areas: behaves as before — renders all "directory" entries
-## from the destination registry.
-##
-## Calls minerva_scansort_destination_list, filters by `area_kind`, and builds
-## a virtual-root node list where each top-level entry is one destination of
-## that kind.  The destination row is a folder node with key "dest:<id>" and
-## its children are the category/document nodes (for vault destinations) or
-## folder/file nodes (for directory destinations) fetched via the same per-
-## destination logic that scan_tree_destination_provider.gd uses.
-##
-## Top-level destination nodes carry two extra fields that scan_tree.gd reads
-## to add inline row buttons:
-##   dest_id: String  — the destination id for button dispatch
-##   locked:  bool    — current locked state (drives the lock button icon)
+## Top-level destination nodes carry two extra fields scan_tree.gd reads to add
+## inline row buttons:
+##   dest_id: String  — synthetic "session:<label>" id for button dispatch
+##   locked:  bool    — always false (session-tracked entries are not lockable)
 ##
 ## No class_name — off-tree plugin script; loaded via preload().
 
 var _conn: Object = null
-var _registry_path: String = ""
-var _area_kind: String = ""  # "vault" or "directory"
-## For vault areas: the currently-open vault path.  Always rendered first,
-## regardless of whether it appears in the registry.  Empty = no open vault.
-var _open_vault_path: String = ""
+var _registry_path: String = ""  # kept for backward-compat init() signature; unused
+var _area_kind: String = ""      # "vault" or "directory"
+var _open_vault_path: String = ""  # kept for backward-compat init() signature; unused
 
-## Latest destination list fetched (used by the panel to resolve dest_id from key).
+## Latest session entries fetched (for any caller wanting to resolve label→path).
 var last_destinations: Array = []
 
 ## W5d: vault path currently being built into category nodes (threaded through
@@ -58,106 +43,44 @@ func get_tree_data() -> Array:
 	if _conn == null:
 		return []
 
-	# For vault areas: render registry vault destinations regardless of whether
-	# a vault is panel-"open".  When _open_vault_path is set it is rendered
-	# first; otherwise only registry entries are shown.  Directory areas still
-	# require the registry path to be set.
-	if _area_kind == "directory" and _registry_path.is_empty():
+	# Read the session (with paths, panel-only opt-in).
+	var session_result: Dictionary = await _conn.call_tool(
+		"minerva_scansort_session_state",
+		{"include_paths": true},
+	)
+	if not session_result.get("ok", false):
+		push_warning("[AreaProvider] session_state failed: %s" % session_result.get("error", "unknown"))
 		return []
 
-	# Fetch the registry destination list (best-effort; may return empty on
-	# first open before auto-registration completes, or on a different machine).
-	var all_dests: Array = []
-	if not _registry_path.is_empty():
-		var result: Dictionary = await _conn.call_tool(
-			"minerva_scansort_destination_list",
-			{"registry_path": _registry_path},
-		)
-		if result.get("ok", false):
-			all_dests = result.get("destinations", [])
-		else:
-			push_warning("[AreaProvider] destination_list failed: %s" % result.get("error", "unknown"))
-	last_destinations = all_dests.duplicate(true)
+	var entries: Array = session_result.get("vaults" if _area_kind == "vault" else "dirs", [])
+	last_destinations = entries.duplicate(true)
 
 	var nodes: Array = []
-
-	if _area_kind == "vault":
-		# When a vault is open in the panel, render it first (sourced directly
-		# from its file path) and deduplicate it from the registry loop below.
-		if not _open_vault_path.is_empty():
-			# Find registry entry for the open vault (for dest_id + locked state).
-			var open_dest_id: String  = ""
-			var open_locked: bool     = false
-			var open_label: String    = _open_vault_path.get_file().get_basename()
-			for dest: Dictionary in all_dests:
-				if str(dest.get("kind", "")) == "vault" and str(dest.get("path", "")) == _open_vault_path:
-					open_dest_id = str(dest.get("id", ""))
-					open_locked  = bool(dest.get("locked", false))
-					var dlabel: String = str(dest.get("label", ""))
-					if not dlabel.is_empty():
-						open_label = dlabel
-					break
-
-			# Build children by querying the vault file directly.
-			var open_children: Array = await _get_vault_children_by_path(_open_vault_path)
-
-			nodes.append({
-				"kind":      "folder",
-				"name":      open_label,
-				"key":       "dest:%s" % (open_dest_id if not open_dest_id.is_empty() else _open_vault_path),
-				"date":      "",
-				"tooltip":   _open_vault_path,
-				"children":  open_children,
-				"dest_id":   open_dest_id,
-				"locked":    open_locked,
-				"node_role": "vault_dest",
-			})
-
-		# Render all registry vault destinations.  When _open_vault_path is set,
-		# skip it here (already rendered above).  When empty, all entries render.
-		for dest: Dictionary in all_dests:
-			var kind: String = str(dest.get("kind", ""))
-			if kind != "vault":
-				continue
-			var dest_path: String = str(dest.get("path", ""))
-			if not _open_vault_path.is_empty() and dest_path == _open_vault_path:
-				continue  # already rendered above
-			var dest_id: String  = str(dest.get("id", ""))
-			var label: String    = str(dest.get("label", dest.get("path", dest_id)))
-			var is_locked: bool  = bool(dest.get("locked", false))
-			var children: Array  = await _get_vault_children(dest)
-			nodes.append({
-				"kind":      "folder",
-				"name":      label,
-				"key":       "dest:%s" % dest_id,
-				"date":      "",
-				"tooltip":   label,
-				"children":  children,
-				"dest_id":   dest_id,
-				"locked":    is_locked,
-				"node_role": "vault_dest",
-			})
-	else:
-		# Directory area: registry-driven (unchanged from W5b).
-		for dest: Dictionary in all_dests:
-			var kind: String = str(dest.get("kind", ""))
-			if kind != _area_kind:
-				continue
-			var dest_id: String  = str(dest.get("id", ""))
-			var label: String    = str(dest.get("label", dest.get("path", dest_id)))
-			var is_locked: bool  = bool(dest.get("locked", false))
-			var children: Array  = await _get_directory_children(dest)
-			nodes.append({
-				"kind":      "folder",
-				"name":      label,
-				"key":       "dest:%s" % dest_id,
-				"date":      "",
-				"tooltip":   label,
-				"children":  children,
-				"dest_id":   dest_id,
-				"locked":    is_locked,
-				"node_role": "dir_dest",
-			})
+	for entry: Dictionary in entries:
+		var label: String     = str(entry.get("label", ""))
+		var entry_path: String = str(entry.get("path", ""))
+		if label.is_empty() or entry_path.is_empty():
+			continue
+		var synthetic_id: String = "session:%s" % label
+		var children: Array
+		var role: String
+		if _area_kind == "vault":
+			children = await _get_vault_children_by_path(entry_path)
+			role = "vault_dest"
+		else:
+			children = await _get_directory_children_by_path(entry_path, synthetic_id)
+			role = "dir_dest"
+		nodes.append({
+			"kind":      "folder",
+			"name":      label,
+			"key":       "dest:%s" % synthetic_id,
+			"date":      "",
+			"tooltip":   entry_path,
+			"children":  children,
+			"dest_id":   synthetic_id,
+			"locked":    false,
+			"node_role": role,
+		})
 
 	return nodes
 
@@ -184,25 +107,7 @@ func _get_vault_children_by_path(vault_path: String) -> Array:
 	return _build_category_nodes(result.get("documents", []))
 
 
-func _get_vault_children(dest: Dictionary) -> Array:
-	var vault_path: String = str(dest.get("path", ""))
-	if vault_path.is_empty():
-		return []
-
-	var result: Dictionary = await _conn.call_tool(
-		"minerva_scansort_query_documents",
-		{"vault_path": vault_path},
-	)
-	if not result.get("ok", false):
-		push_warning("[AreaProvider] vault query_documents failed: %s" % result.get("error", "unknown"))
-		return []
-
-	_building_vault_path = vault_path
-	return _build_category_nodes(result.get("documents", []))
-
-
 ## Build a category→document tree from a flat documents array.
-## Shared by both _get_vault_children and _get_vault_children_by_path.
 func _build_category_nodes(docs: Array) -> Array:
 	var by_category: Dictionary = {}
 	for doc: Dictionary in docs:
@@ -254,17 +159,11 @@ func _build_category_nodes(docs: Array) -> Array:
 	return nodes
 
 
-func _get_directory_children(dest: Dictionary) -> Array:
-	var dir_path: String = str(dest.get("path", ""))
-	var dest_id: String  = str(dest.get("id", ""))
+func _get_directory_children_by_path(dir_path: String, _dest_id: String) -> Array:
 	if dir_path.is_empty():
 		return []
 
 	var args: Dictionary = {"disk_root": dir_path}
-	if not _registry_path.is_empty():
-		args["registry_path"] = _registry_path
-	if not dest_id.is_empty():
-		args["destination_id"] = dest_id
 
 	var result: Dictionary = await _conn.call_tool(
 		"minerva_scansort_list_disk_files",

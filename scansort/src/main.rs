@@ -183,7 +183,8 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         | "minerva_scansort_extract_document"
         | "minerva_scansort_place_on_disk"
         | "minerva_scansort_place_fanout"
-        | "minerva_scansort_reprocess_destination" => Some("document"),
+        | "minerva_scansort_reprocess_destination"
+        | "minerva_scansort_process" => Some("document"),
         "minerva_scansort_insert_checklist"
         | "minerva_scansort_update_checklist"
         | "minerva_scansort_delete_checklist"
@@ -2131,23 +2132,6 @@ fn handle_session_open_vault(params: &Value, id: Value) -> RpcResponse {
     if path.is_empty() {
         return ok_response(id, tool_err("path is required"));
     }
-    // Bridge to the Minerva-managed destination registry so the panel's
-    // Vaults pane reflects this vault. Best-effort and idempotent; the
-    // session call is the source of truth and registry write failures do
-    // not fail the call. Mirrors handle_session_open_directory; see that
-    // function for the dual-store ratchet rationale.
-    if let Some(reg_path) = minerva_dest_registry_path() {
-        match destinations::load_or_init(&reg_path) {
-            Ok(mut reg) => {
-                if let Err(e) = destinations::add(&mut reg, "vault", path, Some(label), false) {
-                    log::warn!("vault dest-registry bridge add failed: {}", e.message);
-                } else if let Err(e) = destinations::save(&reg_path, &reg) {
-                    log::warn!("vault dest-registry bridge save failed: {}", e.message);
-                }
-            }
-            Err(e) => log::warn!("vault dest-registry bridge load failed: {}", e.message),
-        }
-    }
     match session::add_vault(label, std::path::PathBuf::from(path)) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "label": label}))),
         Err(e) => ok_response(id, tool_err(&e.message)),
@@ -2166,26 +2150,6 @@ fn handle_session_close_vault(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
-/// Best-effort path to the Minerva-managed destination registry. Mirrors the
-/// location the panel reads from via destination_list. Honors env override for
-/// non-Linux hosts and tests. None when HOME is unset.
-///
-/// Temporary bridge for the session→registry dual-store gap; see the matching
-/// bridge comment in handle_session_open_source. Goes away when panel-side
-/// providers read session_state directly (separate DCR).
-fn minerva_dest_registry_path() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("SCANSORT_MINERVA_DEST_REGISTRY") {
-        if !p.is_empty() {
-            return Some(std::path::PathBuf::from(p));
-        }
-    }
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".local/share/godot/app_userdata/Minerva/dest_registry.json"),
-    )
-}
-
 fn handle_session_open_directory(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let label = args.get("label").and_then(|v| v.as_str()).unwrap_or("");
@@ -2195,23 +2159,6 @@ fn handle_session_open_directory(params: &Value, id: Value) -> RpcResponse {
     }
     if path.is_empty() {
         return ok_response(id, tool_err("path is required"));
-    }
-    // Bridge to the Minerva-managed destination registry so the panel's
-    // Directories pane reflects this dir. Best-effort: registry write failures
-    // are logged but do not fail the session call. See the session_open_source
-    // bridge for the same dual-store ratchet; goes away when the panel reads
-    // session_state directly.
-    if let Some(reg_path) = minerva_dest_registry_path() {
-        match destinations::load_or_init(&reg_path) {
-            Ok(mut reg) => {
-                if let Err(e) = destinations::add(&mut reg, "directory", path, Some(label), false) {
-                    log::warn!("dest-registry bridge add failed: {}", e.message);
-                } else if let Err(e) = destinations::save(&reg_path, &reg) {
-                    log::warn!("dest-registry bridge save failed: {}", e.message);
-                }
-            }
-            Err(e) => log::warn!("dest-registry bridge load failed: {}", e.message),
-        }
     }
     match session::add_dir(label, std::path::PathBuf::from(path)) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "label": label}))),
@@ -2266,17 +2213,35 @@ fn handle_session_close_source(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
-fn handle_session_state(_params: &Value, id: Value) -> RpcResponse {
-    let st = session::state();
-    let vaults: Vec<Value> = st.vaults.iter().map(|l| json!({"label": l})).collect();
-    let dirs: Vec<Value> = st.dirs.iter().map(|l| json!({"label": l})).collect();
-    let sources: Vec<Value> = st.sources.iter().map(|l| json!({"label": l})).collect();
-    ok_response(id, tool_ok(json!({
-        "ok": true,
-        "vaults":  vaults,
-        "dirs":    dirs,
-        "sources": sources,
-    })))
+fn handle_session_state(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
+    if include_paths {
+        let (vaults_full, dirs_full, sources_full) = session::entries_full();
+        let to_obj = |entries: Vec<(String, std::path::PathBuf)>| -> Vec<Value> {
+            entries.into_iter().map(|(label, path)| json!({
+                "label": label,
+                "path":  path.to_string_lossy(),
+            })).collect()
+        };
+        ok_response(id, tool_ok(json!({
+            "ok": true,
+            "vaults":  to_obj(vaults_full),
+            "dirs":    to_obj(dirs_full),
+            "sources": to_obj(sources_full),
+        })))
+    } else {
+        let st = session::state();
+        let vaults: Vec<Value> = st.vaults.iter().map(|l| json!({"label": l})).collect();
+        let dirs: Vec<Value> = st.dirs.iter().map(|l| json!({"label": l})).collect();
+        let sources: Vec<Value> = st.sources.iter().map(|l| json!({"label": l})).collect();
+        ok_response(id, tool_ok(json!({
+            "ok": true,
+            "vaults":  vaults,
+            "dirs":    dirs,
+            "sources": sources,
+        })))
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -3668,7 +3668,7 @@ func _on_plugin_event(p_id: String, event_name: String, payload: Dictionary) -> 
 	match kind:
 		"source":
 			_refresh_source_tree_if_ready()
-		"destination", "registry", "vault":
+		"destination", "registry", "vault", "document":
 			_refresh_all_dest_trees_if_ready()
 		"library_rule":
 			# Rules editor is modal; nothing to refresh on the main pane today.

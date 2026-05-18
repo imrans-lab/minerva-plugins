@@ -203,7 +203,13 @@
     },
     {
       "name": "minerva_scansort_session_state",
-      "description": "Return the current session — open vaults, directories, and sources as label-only lists. Paths are never included. Returns {ok, vaults: [{label}], dirs: [{label}], sources: [{label}]}."
+      "description": "Return the current session — open vaults, directories, and sources. By default returns label-only lists (paths excluded, for LLM-agent safety). Pass include_paths=true (panel-only) to get {label,path} objects. Returns {ok, vaults, dirs, sources}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_paths": {"type": "boolean", "description": "When true, vault/dir/source entries include `path` alongside `label`. Default false (label-only). Panel-side callers set true; LLM agents should not."}
+        }
+      }
     },
     {
       "name": "minerva_scansort_library_insert_rule",

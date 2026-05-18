@@ -145,6 +145,7 @@ func _add_node(parent: TreeItem, node: Dictionary) -> void:
 		item.set_selectable(COL_CHECK, false)
 		item.set_selectable(COL_NAME, false)
 		item.set_selectable(COL_DATE, false)
+		item.set_collapsed(false)
 		var children: Array = node.get("children", []) if node.get("children") is Array else []
 		for child: Dictionary in children:
 			_add_node(item, child)
