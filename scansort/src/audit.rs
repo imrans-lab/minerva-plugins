@@ -4,7 +4,7 @@
 //!
 //! When the user enables the audit log in Settings, every placement and
 //! reprocess-supersede event is written here as an append-only CSV row.
-//! The file is intended for CPA/spreadsheet import — it is NEVER read back
+//! The file is intended for spreadsheet import — it is NEVER read back
 //! by the plugin for any processing decision (dedup, processed-state, etc.).
 //!
 //! ## Toggle / split of responsibility
@@ -201,7 +201,7 @@ impl AuditRow {
 ///
 /// Always wraps in `"..."`.  Internal `"` are doubled.  Embedded newlines
 /// (`\n`, `\r`) are replaced with a space so each logical row stays on
-/// one physical line — this is important for CPA spreadsheet import.
+/// one physical line — this is important for spreadsheet import.
 fn csv_quote(value: &str) -> String {
     // Replace newlines with space, then double any embedded quotes.
     let cleaned = value.replace('\n', " ").replace('\r', " ");

@@ -249,7 +249,7 @@ func _build_ui() -> void:
 
 	# --- W9: Audit Log section ---------------------------------------------
 	var audit_title := Label.new()
-	audit_title.text = "Audit Log (CPA export)"
+	audit_title.text = "Audit Log (CSV export)"
 	audit_title.add_theme_color_override("font_color", Color(0.9, 0.9, 0.9))
 	root.add_child(audit_title)
 

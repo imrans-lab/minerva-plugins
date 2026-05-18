@@ -1773,10 +1773,10 @@ mod tests {
         assert_eq!(outcome.filtered_count, 0);
     }
 
-    // ----- run_with_stages: lawyer rule with filter that DROPS the doc ------
+    // ----- run_with_stages: keep_when filter failure DROPS the doc ----------
 
     #[test]
-    fn run_with_stages_lawyer_rule_filter_failure_drops_doc() {
+    fn run_with_stages_keep_when_failure_drops_doc() {
         let c = make_classification(0, "", "", "", "", 0.9, vec![("witness", 0.85)]);
         let f = default_file_facts();
         let rule = rule_with_stages(

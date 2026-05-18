@@ -1580,11 +1580,11 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Persona-2 (Lawyer): multi-stage with filter on stage 1 then no filter.
+    /// Multi-stage rule where stage 0 has a keep_when filter and stage 1 has none.
     /// Confirms keep_when can be present on some stages and absent on others.
     #[test]
-    fn dcr_lawyer_persona_two_stage_round_trips() {
-        let dir = unique_tmp("dcr_lawyer");
+    fn dcr_two_stage_mixed_keep_when_round_trips() {
+        let dir = unique_tmp("dcr_two_stage_mixed");
         let path = dir.join("rules.json");
 
         let mut s0_classify = std::collections::BTreeMap::new();
@@ -1665,10 +1665,10 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Persona-3 (Citizen): single-stage with open-slot drawings extraction.
+    /// Single-stage rule with open-slot extraction (free-text fact value).
     #[test]
-    fn dcr_citizen_drawings_single_stage_round_trips() {
-        let dir = unique_tmp("dcr_citizen");
+    fn dcr_single_stage_open_slot_round_trips() {
+        let dir = unique_tmp("dcr_single_stage_open");
         let path = dir.join("rules.json");
 
         let mut classify = std::collections::BTreeMap::new();
