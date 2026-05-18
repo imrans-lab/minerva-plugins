@@ -182,7 +182,11 @@ func _add_node(parent: TreeItem, node: Dictionary) -> void:
 		item.set_editable(COL_CHECK, true)
 		item.set_custom_color(COL_NAME, COLOR_FILE)
 		item.set_text(COL_DATE, str(node.get("date", "")))
-		item.set_custom_color(COL_DATE, Color(0.6, 0.6, 0.6))
+		var date_color = node.get("date_color")
+		if date_color is Color:
+			item.set_custom_color(COL_DATE, date_color)
+		else:
+			item.set_custom_color(COL_DATE, Color(0.6, 0.6, 0.6))
 		var tooltip: String = str(node.get("tooltip", ""))
 		if not tooltip.is_empty():
 			item.set_tooltip_text(COL_NAME, tooltip)

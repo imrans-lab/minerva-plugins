@@ -153,6 +153,12 @@ var _dest_tree:   Tree = null
 ##     should migrate to the destinations array.
 var _disk_tree:   Tree = null
 var _source_provider: Object = null
+
+## Per-file progress map, populated from kind=document events with file_path
+## extras. Keys are rel_paths from the plugin; values are {status, target?, reason?}.
+## Pushed to _source_provider.set_doc_progress on each event so the source pane
+## renders live status badges in COL_DATE.
+var _doc_progress: Dictionary = {}
 ## W5: U7's fixed dest/disk providers are subsumed by the per-destination
 ## _dest_providers array; these two stay declared (null) for smoke-test
 ## member checks (R195) — the dynamic model replaces their function.
@@ -3667,8 +3673,28 @@ func _on_plugin_event(p_id: String, event_name: String, payload: Dictionary) -> 
 		f.close()
 	match kind:
 		"source":
+			# Source dir changed → invalidate per-file progress; old rel_paths
+			# no longer apply to the new source.
+			_doc_progress.clear()
+			_push_doc_progress_to_source_provider()
 			_refresh_source_tree_if_ready()
-		"destination", "registry", "vault", "document":
+		"destination", "registry", "vault":
+			_refresh_all_dest_trees_if_ready()
+		"document":
+			# Per-file progress event: payload carries file_path + status (+ target/reason).
+			# Update local map, push to source provider, refresh BOTH dest and source trees.
+			var file_path: String = str(payload.get("file_path", ""))
+			if not file_path.is_empty():
+				var entry: Dictionary = {
+					"status": str(payload.get("status", "")),
+				}
+				if payload.has("target"):
+					entry["target"] = str(payload.get("target", ""))
+				if payload.has("reason"):
+					entry["reason"] = str(payload.get("reason", ""))
+				_doc_progress[file_path] = entry
+				_push_doc_progress_to_source_provider()
+				_refresh_source_tree_if_ready()
 			_refresh_all_dest_trees_if_ready()
 		"library_rule":
 			# Rules editor is modal; nothing to refresh on the main pane today.
@@ -3694,6 +3720,15 @@ func receive(channel: String, payload: Dictionary) -> void:
 	super(channel, payload)
 
 
+## Push _doc_progress into the source provider so the next refresh renders
+## per-file status badges. No-op when the provider isn't initialized yet.
+func _push_doc_progress_to_source_provider() -> void:
+	if _source_provider == null:
+		return
+	if _source_provider.has_method("set_doc_progress"):
+		_source_provider.set_doc_progress(_doc_progress)
+
+
 ## Idempotent guarded refresh for the source tree. Works even with no vault
 ## open — the source dir is process-global plugin state, not vault-scoped.
 ## Bails only when the source tree node has been freed (panel teardown race)
@@ -3702,6 +3737,7 @@ func _refresh_source_tree_if_ready() -> void:
 	if _source_tree == null or not is_instance_valid(_source_tree):
 		return
 	_bootstrap_panel_state_if_needed()
+	_push_doc_progress_to_source_provider()
 	_source_tree.refresh()
 
 

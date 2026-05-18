@@ -24,12 +24,24 @@ var _source_dir: String = ""
 var _processed_keys: Dictionary = {}
 var _low_confidence_keys: Dictionary = {}
 
+## Per-file progress map pushed by ScansortPanel from kind=document events.
+## Key is relative path (matches source manifest semantics); value is a Dictionary
+## {status, target?, reason?}. Used to render live "classifying…" / "→ tax" /
+## "⚠ no_dest" badges in the source pane's COL_DATE.
+var _doc_progress: Dictionary = {}
+
 
 ## U5: called by ScansortPanel to push current session state so the source
 ## tree reflects batch-pipeline progress on the next refresh().
 func set_session_marks(processed: Dictionary, low_confidence: Dictionary) -> void:
 	_processed_keys = processed
 	_low_confidence_keys = low_confidence
+
+
+## Push per-file progress (status/target/reason keyed by relative path).
+## Panel calls this on every kind=document event.
+func set_doc_progress(progress: Dictionary) -> void:
+	_doc_progress = progress
 
 
 ## Attach the plugin connection + optional vault path (enables in_vault dedup).
@@ -76,6 +88,7 @@ func get_tree_data() -> Array:
 	for f: Dictionary in files:
 		var fpath: String = str(f.get("path", ""))
 		var fname: String = str(f.get("name", "unknown"))
+		var rel: String = str(f.get("rel_path", fname))
 		var in_vault: bool = bool(f.get("in_vault", false))
 		var size: int = int(f.get("size", 0))
 
@@ -90,11 +103,35 @@ func get_tree_data() -> Array:
 		if is_low_conf:
 			tooltip += "\n(low confidence)"
 
+		# Render per-file progress in the date column (repurposed as Status
+		# for source rows). Key lookup tries rel_path first, then bare filename.
+		var status_text: String = ""
+		var status_color: Color = Color(0.6, 0.6, 0.6)
+		var progress: Dictionary = _doc_progress.get(rel, _doc_progress.get(fname, {}))
+		if not progress.is_empty():
+			var st: String = str(progress.get("status", ""))
+			var tgt: String = str(progress.get("target", ""))
+			var rsn: String = str(progress.get("reason", ""))
+			match st:
+				"classifying":
+					status_text = "classifying…"
+					status_color = Color(0.85, 0.75, 0.25)  # amber
+				"moved":
+					status_text = "→ %s" % tgt if not tgt.is_empty() else "→ done"
+					status_color = Color(0.4, 0.85, 0.4)  # green
+				"conflict":
+					status_text = "conflict: %s" % tgt if not tgt.is_empty() else "conflict"
+					status_color = Color(0.85, 0.75, 0.25)
+				"unprocessable":
+					status_text = "⚠ %s" % rsn if not rsn.is_empty() else "⚠ failed"
+					status_color = Color(0.9, 0.4, 0.4)  # red
+
 		nodes.append({
 			"kind": "file",
 			"name": display_name,
 			"key": fpath,
-			"date": "",
+			"date": status_text,
+			"date_color": status_color,
 			"tooltip": tooltip,
 			"children": [],
 			"in_vault": in_vault,

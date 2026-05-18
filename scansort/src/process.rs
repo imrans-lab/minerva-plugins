@@ -429,6 +429,9 @@ pub fn run(
                 }
             }
 
+            // Live progress for panel: classifying… (~5-10s LLM call).
+            emit_doc_event(out, rel_path, "classifying", None, None);
+
             let chat_response = match request_capability(out, lines, next_id, "host.providers.chat", chat_args) {
                 Ok(v) => v,
                 Err(e) => {
@@ -442,6 +445,7 @@ pub fn run(
                     );
                     source_state::upsert(&mut src_state, &sha256, entry);
                     result.unprocessable += 1;
+                    emit_doc_event(out, rel_path, "unprocessable", None, Some(&format!("classify_error: {e}")));
                     result.items.push(ProcessItem {
                         source_label: source_label.clone(),
                         source_path_relative: rel_path.clone(),
@@ -622,6 +626,7 @@ pub fn run(
                 );
                 source_state::upsert(&mut src_state, &sha256, entry);
                 result.unprocessable += 1;
+                emit_doc_event(out, rel_path, "unprocessable", first_rule_label.as_deref(), Some("no_open_destination"));
                 result.items.push(ProcessItem {
                     source_label: source_label.clone(),
                     source_path_relative: rel_path.clone(),
@@ -704,6 +709,11 @@ pub fn run(
             );
             source_state::upsert(&mut src_state, &sha256, entry);
 
+            // Per-file terminal emit for panel source pane. Use rule_label as
+            // the target since copy_to may have fanned out to multiple labels
+            // — rule_label is the categorization the user actually cares about.
+            emit_doc_event(out, rel_path, status, first_rule_label.as_deref(), reason.as_deref());
+
             result.items.push(ProcessItem {
                 source_label: source_label.clone(),
                 source_path_relative: rel_path.clone(),
@@ -737,6 +747,26 @@ pub fn run(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Emit a per-file document progress event for the panel source pane.
+/// Wraps notify_state_changed_with so process() doesn't have to build the
+/// extras map at every site. status ∈ {"classifying","moved","conflict",
+/// "unprocessable"}; target = destination/rule label when relevant; reason =
+/// error category when status=unprocessable.
+fn emit_doc_event<W: io::Write>(
+    out: &mut W,
+    rel_path: &str,
+    status: &str,
+    target: Option<&str>,
+    reason: Option<&str>,
+) {
+    let mut extras = serde_json::Map::new();
+    extras.insert("file_path".to_string(), json!(rel_path));
+    extras.insert("status".to_string(), json!(status));
+    if let Some(t) = target { extras.insert("target".to_string(), json!(t)); }
+    if let Some(r) = reason { extras.insert("reason".to_string(), json!(r)); }
+    crate::notify_state_changed_with(out, "document", Some(&Value::Object(extras)));
+}
 
 /// List supported files under `source_path` as `(abs_path, rel_path, size)`.
 fn list_source_files_for_path(

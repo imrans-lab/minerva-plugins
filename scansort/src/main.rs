@@ -117,11 +117,14 @@ fn write_line(out: &mut impl Write, v: &impl Serialize) {
 // "vault", "registry", "rule", "library_rule", "document", "checklist".
 // Unknown kinds are ignored panel-side.
 fn notify_state_changed(out: &mut impl Write, kind: &str) {
-    // Append a debug marker to /tmp/scansort-debug.log so the autonomous test
-    // loop can prove an emit happened independent of whether a panel was
-    // subscribed to receive it. Minerva's SubProcess GDExtension captures
-    // plugin stderr into a pipe but never drains it, so eprintln! is
-    // invisible — the shared file works around that.
+    notify_state_changed_with(out, kind, None);
+}
+
+/// Like notify_state_changed but allows extra fields to be merged into the
+/// payload alongside `kind`. Used by process() for per-file progress events
+/// where panels need file_path + status + target/reason to update the right
+/// row in the source pane.
+pub fn notify_state_changed_with(out: &mut impl Write, kind: &str, extras: Option<&Value>) {
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -131,14 +134,24 @@ fn notify_state_changed(out: &mut impl Write, kind: &str) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let _ = writeln!(f, "{ts} [plugin] emit state_changed kind={kind}");
+        let extras_str = extras.map(|v| format!(" extras={v}")).unwrap_or_default();
+        let _ = writeln!(f, "{ts} [plugin] emit state_changed kind={kind}{extras_str}");
+    }
+    let mut payload = json!({ "kind": kind });
+    if let Some(extras_val) = extras {
+        if let Some(extras_obj) = extras_val.as_object() {
+            let payload_obj = payload.as_object_mut().expect("payload is object");
+            for (k, v) in extras_obj {
+                payload_obj.insert(k.clone(), v.clone());
+            }
+        }
     }
     let notif = json!({
         "jsonrpc": "2.0",
         "method": "minerva/plugin_event",
         "params": {
             "event": "state_changed",
-            "payload": { "kind": kind },
+            "payload": payload,
         },
     });
     write_line(out, &notif);
