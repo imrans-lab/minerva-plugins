@@ -279,6 +279,11 @@ func _ready() -> void:
 	_build_ui()
 	set_status("No vault open.")
 	_subscribe_broker_progress()
+	_subscribe_plugin_events()
+	# Bootstrap source/destination data loaders so the panel reflects plugin
+	# state immediately, without requiring the user to open a vault first.
+	# Deferred so the plugin connection has a chance to come up first.
+	call_deferred("_bootstrap_panel_state_if_needed")
 
 
 func _on_panel_loaded(ctx: Dictionary) -> void:
@@ -2176,7 +2181,7 @@ func _on_process_all_pressed() -> void:
 		_process_btn.disabled = true
 	if _stop_btn != null and is_instance_valid(_stop_btn):
 		_stop_btn.disabled = false
-	set_status("Processing…")
+	set_status("Run started — %d file%s" % [files.size(), "" if files.size() == 1 else "s"])
 
 	# Reset per-run shared counters. W10 extends U7's counter set with the new
 	# filing-engine outcomes.
@@ -2193,6 +2198,8 @@ func _on_process_all_pressed() -> void:
 	}
 	# Per-destination placement tally: dest_id -> count of "placed" results.
 	var per_dest: Dictionary = {}
+	# Per-rule placement tally: rule_label -> count of source files placed.
+	var per_rule: Dictionary = {}
 
 	var total: int = files.size()
 
@@ -2219,9 +2226,12 @@ func _on_process_all_pressed() -> void:
 				break
 			batch_remaining["n"] += 1
 			# Fire the worker — do NOT await. Worker decrements batch_remaining.
+			# Pass (seq_num, total) so the worker can emit live per-file status
+			# ("Processing <name> (k/N)…"). seq_num is 1-based for display.
 			_process_one_source_file(
 				files[idx], conn, batch_remaining,
-				audit_enabled, audit_path, per_dest
+				audit_enabled, audit_path, per_dest, per_rule,
+				idx + 1, total
 			)
 			idx += 1
 		# Wait for the batch to drain.
@@ -2260,10 +2270,21 @@ func _on_process_all_pressed() -> void:
 			parts.append("%s:%d" % [dest_id, int(per_dest[dest_id])])
 		dest_tail = " [" + ", ".join(parts) + "]"
 
+	# Per-rule tail: which rules fired and how often this run. Same suffix
+	# style as dest_tail so the summary line scans uniformly.
+	var rule_tail: String = ""
+	if not per_rule.is_empty():
+		var rparts: PackedStringArray = PackedStringArray()
+		var rule_labels: Array = per_rule.keys()
+		rule_labels.sort()
+		for rl: String in rule_labels:
+			rparts.append("%s:%d" % [rl, int(per_rule[rl])])
+		rule_tail = " rules=[" + ", ".join(rparts) + "]"
+
 	var head: String = "Stopped" if _process_cancelled else "Processed %d/%d" % [processed_this_run, total]
 	set_status(
-		"%s — %d placed, %d exact-dup, %d flagged, %d user-skip, %d failed, %d skipped%s" % [
-			head, placed, exact_dup, flagged, user_skip, failed, skipped, dest_tail
+		"%s — %d placed, %d exact-dup, %d flagged, %d user-skip, %d failed, %d skipped%s%s" % [
+			head, placed, exact_dup, flagged, user_skip, failed, skipped, dest_tail, rule_tail
 		]
 	)
 
@@ -2282,16 +2303,26 @@ func _process_one_source_file(
 		batch_remaining: Dictionary,
 		audit_enabled: bool = false,
 		audit_path: String = "",
-		per_dest: Dictionary = {}) -> void:
+		per_dest: Dictionary = {},
+		per_rule: Dictionary = {},
+		seq_num: int = 0,
+		total: int = 0) -> void:
 	const MAX_CLASSIFY_CHARS := 4000
 	const VISION_THRESHOLD := 50
 
 	var fpath: String = str(file.get("path", ""))
 	var fname: String = str(file.get("name", fpath.get_file()))
 
+	# Live per-file status. With concurrency>1 these race — last writer wins,
+	# which is fine: the user sees the latest in-flight file. With the default
+	# concurrency=1 the sequence is deterministic.
+	if total > 0:
+		set_status("Processing %s (%d/%d)…" % [fname, seq_num, total])
+
 	# Skip already-done files.
 	if bool(file.get("in_vault", false)) or _processed_keys.has(fpath):
 		_run_counters["skipped"] = int(_run_counters.get("skipped", 0)) + 1
+		set_status("Last: %s → skipped (already processed)" % fname)
 		batch_remaining["n"] -= 1
 		return
 
@@ -2305,6 +2336,7 @@ func _process_one_source_file(
 			fname, str(extract_res.get("error", "unknown"))
 		])
 		_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
+		set_status("Last: %s → unprocessable (extract_error)" % fname)
 		batch_remaining["n"] -= 1
 		return
 
@@ -2343,6 +2375,7 @@ func _process_one_source_file(
 				fname, str(render_res.get("error", "unknown"))
 			])
 			_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
+			set_status("Last: %s → unprocessable (render_error)" % fname)
 			batch_remaining["n"] -= 1
 			return
 		classify_args["mode"]        = "vision"
@@ -2357,6 +2390,7 @@ func _process_one_source_file(
 			fname, str(classify_res.get("error", "unknown"))
 		])
 		_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
+		set_status("Last: %s → unprocessable (classify_error)" % fname)
 		batch_remaining["n"] -= 1
 		return
 
@@ -2380,6 +2414,7 @@ func _process_one_source_file(
 			fname, str(rule_engine_res.get("error", "unknown"))
 		])
 		_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
+		set_status("Last: %s → unprocessable (rule_engine_error)" % fname)
 		batch_remaining["n"] -= 1
 		return
 
@@ -2391,6 +2426,7 @@ func _process_one_source_file(
 		# (the file is reviewed; it is NOT a failure and NOT lost).
 		_processed_keys[fpath] = true
 		_run_counters["no_rule"] = int(_run_counters.get("no_rule", 0)) + 1
+		set_status("Last: %s → unprocessable (no_rule_match)" % fname)
 		_push_session_marks_to_provider()
 		batch_remaining["n"] -= 1
 		return
@@ -2411,6 +2447,11 @@ func _process_one_source_file(
 	}
 
 	var any_placed: bool = false
+	# Capture the primary (first-fired) rule label so the per-file "Last:"
+	# status line and the per-rule tally can reference it after the
+	# fan-out loop. Subsequent fired rules are still placed; we just
+	# attribute the file to the first match in the status surface.
+	var primary_rule_label: String = ""
 
 	# -- Per fired action: dedup → disposition → place_fanout → audit --
 	for action: Dictionary in fired:
@@ -2423,6 +2464,8 @@ func _process_one_source_file(
 
 		var rule_dict: Dictionary = action.get("rule", {})
 		var rule_label: String = str(rule_dict.get("label", action.get("category", "")))
+		if primary_rule_label.is_empty():
+			primary_rule_label = rule_label
 		var resolved_subfolder: String = str(action.get("resolved_subfolder", ""))
 		var resolved_rename_pattern: String = str(action.get("resolved_rename_pattern", ""))
 		var encrypt: bool = bool(action.get("encrypt", false))
@@ -2547,6 +2590,13 @@ func _process_one_source_file(
 		if confidence < LOW_CONFIDENCE_THRESHOLD:
 			_low_confidence_keys[fpath] = true
 			_run_counters["low_conf"] = int(_run_counters.get("low_conf", 0)) + 1
+		if not primary_rule_label.is_empty():
+			per_rule[primary_rule_label] = int(per_rule.get(primary_rule_label, 0)) + 1
+		set_status("Last: %s → %s" % [fname, primary_rule_label if not primary_rule_label.is_empty() else "?"])
+	else:
+		# Fan-out ran but every placement was a dedup/skip/conflict — surface
+		# the rule we matched so the user can see why nothing was filed.
+		set_status("Last: %s → %s (not placed)" % [fname, primary_rule_label if not primary_rule_label.is_empty() else "?"])
 
 	_push_session_marks_to_provider()
 	batch_remaining["n"] -= 1
@@ -3576,3 +3626,137 @@ func _on_broker_chat_completed(plugin_id: String, _provider_name: String, _model
 	else:
 		set_status("Call #%d failed after %.1fs: %s" % [
 			_broker_chat_count, duration_ms / 1000.0, error])
+
+
+## Subscribe to PluginEventBroker so MCP-driven mutations (set_source_dir,
+## destination_add, library rule changes, …) refresh the panel in lockstep.
+## The plugin's main.rs emits a JSON-RPC `minerva/plugin_event` notification
+## after every successful mutating tools/call; the broker translates that
+## into the `plugin_event` signal on `SingletonObject.plugin_event_broker`.
+func _subscribe_plugin_events() -> void:
+	var so = Engine.get_main_loop().root.get_node_or_null("SingletonObject") if Engine.get_main_loop() else null
+	if so == null:
+		return
+	var event_broker = so.get("plugin_event_broker") if "plugin_event_broker" in so else null
+	if event_broker == null:
+		return
+	if event_broker.has_signal("plugin_event") and not event_broker.plugin_event.is_connected(_on_plugin_event):
+		event_broker.plugin_event.connect(_on_plugin_event)
+
+
+## Route scansort `state_changed` events to the matching refresh routine.
+## Other plugins' events and non-state-changed events are ignored. Refresh
+## paths are idempotent — re-firing them on a panel-originated mutation
+## just re-reads the same state and is harmless.
+func _on_plugin_event(p_id: String, event_name: String, payload: Dictionary) -> void:
+	if p_id != "scansort" or event_name != "state_changed":
+		return
+	var kind: String = str(payload.get("kind", ""))
+	# Append a debug marker to /tmp/scansort-debug.log so the autonomous test
+	# loop can confirm signal reception independent of whether the matching
+	# refresh actually rendered. instance_id distinguishes events in a
+	# multi-panel scenario (Option A — every panel still receives; this
+	# confirms the multi-subscribe works).
+	var f := FileAccess.open("/tmp/scansort-debug.log", FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open("/tmp/scansort-debug.log", FileAccess.WRITE)
+	if f != null:
+		f.seek_end()
+		var ts: int = int(Time.get_unix_time_from_system() * 1000.0)
+		f.store_line("%d [panel:%d] recv state_changed kind=%s" % [ts, get_instance_id(), kind])
+		f.close()
+	match kind:
+		"source":
+			_refresh_source_tree_if_ready()
+		"destination", "registry":
+			_refresh_all_dest_trees_if_ready()
+		"library_rule":
+			# Rules editor is modal; nothing to refresh on the main pane today.
+			# Kept as an explicit no-op so future rules-pane work has a hook.
+			pass
+		"session", "vault":
+			# Vault open/close is panel-driven today; MCP-only vault changes
+			# don't currently surface in the panel beyond destinations, which
+			# the `destination`/`registry` kinds already cover.
+			pass
+		_:
+			# Unknown kinds (document, checklist, rule) — no panel surface.
+			pass
+
+
+## Silence the base MinervaPluginPanel.receive() warning for state_changed
+## events. The actual handling is done via the direct plugin_event signal
+## subscription in _on_plugin_event — we don't need (or want) the implicit
+## push_to_panel path for these, because it only routes to the last-registered
+## panel instance, which would break multi-panel observability.
+func receive(channel: String, payload: Dictionary) -> void:
+	if channel == "state_changed":
+		return  # handled via direct signal subscription
+	super(channel, payload)
+
+
+## Idempotent guarded refresh for the source tree. Works even with no vault
+## open — the source dir is process-global plugin state, not vault-scoped.
+## Bails only when the source tree node has been freed (panel teardown race)
+## OR the plugin connection isn't available yet.
+func _refresh_source_tree_if_ready() -> void:
+	if _source_tree == null or not is_instance_valid(_source_tree):
+		return
+	_bootstrap_panel_state_if_needed()
+	_source_tree.refresh()
+
+
+## Idempotent guarded refresh for both destination areas (vault + directory).
+## The destinations registry lives independently of any vault, so this works
+## with no vault open. Bootstraps the area providers on first use.
+func _refresh_all_dest_trees_if_ready() -> void:
+	_bootstrap_panel_state_if_needed()
+	if _vault_area_provider == null or _dir_area_provider == null:
+		return
+	_refresh_all_dest_trees()
+
+
+## Lazy init for the source provider, registry path, and destination area
+## providers. Called from _ready (deferred) and from each refresh handler so
+## the panel works whether bootstrap happens first via _ready or via the
+## first state_changed event arriving. All steps are individually no-op if
+## already done. Triggers an initial refresh on first init so the panel
+## displays current plugin state without waiting for a user click.
+func _bootstrap_panel_state_if_needed() -> void:
+	var conn = _get_connection()
+	if conn == null:
+		return  # plugin not running yet; refresh handlers will retry
+
+	var did_init: bool = false
+
+	# Source provider with empty vault path — files have no in_vault flag.
+	if _source_provider == null:
+		_source_provider = _SourceProvider.new()
+		_source_provider.init(conn, "")
+		if _source_tree != null and is_instance_valid(_source_tree):
+			_source_tree.set_provider(_source_provider)
+		did_init = true
+
+	# Registry path defaults to per-user; idempotent.
+	_ensure_destination_registry_path()
+
+	# Destination area providers — these need _registry_path to fetch list.
+	if _vault_area_provider == null:
+		_vault_area_provider = _AreaProvider.new()
+		_vault_area_provider.init(conn, _registry_path, "vault", _active_vault_path)
+		if _vault_area_tree != null and is_instance_valid(_vault_area_tree):
+			_vault_area_tree.set_provider(_vault_area_provider)
+		did_init = true
+	if _dir_area_provider == null:
+		_dir_area_provider = _AreaProvider.new()
+		_dir_area_provider.init(conn, _registry_path, "directory")
+		if _dir_area_tree != null and is_instance_valid(_dir_area_tree):
+			_dir_area_tree.set_provider(_dir_area_provider)
+		did_init = true
+
+	# On first init, kick a refresh so the panel shows current plugin state
+	# without waiting for a state_changed event or user click.
+	if did_init:
+		if _source_tree != null and is_instance_valid(_source_tree):
+			_source_tree.refresh()
+		_refresh_all_dest_trees()

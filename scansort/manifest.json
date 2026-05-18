@@ -261,6 +261,12 @@
     "ipc_messages": []
   },
   "editor_items": [],
+  "events": [
+    {
+      "name": "state_changed",
+      "description": "Emitted after a successful mutating tools/call. payload.kind ∈ {source, destination, session, vault, registry, rule, library_rule, document, checklist} tells panels which area changed so they can refresh."
+    }
+  ],
   "permissions": {
     "host_capabilities": [
       "host.echo",

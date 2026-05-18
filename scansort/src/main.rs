@@ -106,6 +106,106 @@ fn write_line(out: &mut impl Write, v: &impl Serialize) {
     let _ = out.flush();
 }
 
+// notify_state_changed writes a JSON-RPC notification (no id, no response
+// expected) announcing that the plugin mutated some piece of state. The host
+// routes this through PluginEventBroker → `plugin_event` signal, which the
+// Scansort panel subscribes to so its visible state stays in lockstep with
+// MCP-driven mutations (e.g. an LLM calling set_source_dir while a user has
+// the panel open).
+//
+// `kind` is a short tag the panel switches on: "source", "destination",
+// "session", "rule", "library_rule", "vault", "registry", "document",
+// "checklist". Unknown kinds are ignored panel-side.
+fn notify_state_changed(out: &mut impl Write, kind: &str) {
+    // Append a debug marker to /tmp/scansort-debug.log so the autonomous test
+    // loop can prove an emit happened independent of whether a panel was
+    // subscribed to receive it. Minerva's SubProcess GDExtension captures
+    // plugin stderr into a pipe but never drains it, so eprintln! is
+    // invisible — the shared file works around that.
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/scansort-debug.log")
+    {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{ts} [plugin] emit state_changed kind={kind}");
+    }
+    let notif = json!({
+        "jsonrpc": "2.0",
+        "method": "minerva/plugin_event",
+        "params": {
+            "event": "state_changed",
+            "payload": { "kind": kind },
+        },
+    });
+    write_line(out, &notif);
+}
+
+// state_change_kind_for_tool maps a tools/call name to the panel-facing
+// state-kind tag, or None if the tool is read-only. Used post-dispatch to
+// decide whether to emit a state_changed notification.
+fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
+    match name {
+        "minerva_scansort_set_source_dir" => Some("source"),
+        "minerva_scansort_destination_add"
+        | "minerva_scansort_destination_remove"
+        | "minerva_scansort_set_destination"
+        | "minerva_scansort_set_destination_locked" => Some("destination"),
+        "minerva_scansort_session_open_vault"
+        | "minerva_scansort_session_close_vault"
+        | "minerva_scansort_session_open_directory"
+        | "minerva_scansort_session_close_directory"
+        | "minerva_scansort_session_open_source"
+        | "minerva_scansort_session_close_source" => Some("session"),
+        "minerva_scansort_create_vault"
+        | "minerva_scansort_set_password"
+        | "minerva_scansort_open_vault"
+        | "minerva_scansort_update_project_key" => Some("vault"),
+        "minerva_scansort_registry_add"
+        | "minerva_scansort_registry_remove" => Some("registry"),
+        "minerva_scansort_insert_rule"
+        | "minerva_scansort_update_rule"
+        | "minerva_scansort_delete_rule"
+        | "minerva_scansort_import_rules_from_json" => Some("rule"),
+        "minerva_scansort_library_insert_rule"
+        | "minerva_scansort_library_update_rule"
+        | "minerva_scansort_library_delete_rule"
+        | "minerva_scansort_library_enable_rule"
+        | "minerva_scansort_library_disable_rule"
+        | "minerva_scansort_library_reorder_rules"
+        | "minerva_scansort_library_import_from_sidecar" => Some("library_rule"),
+        "minerva_scansort_insert_document"
+        | "minerva_scansort_update_document"
+        | "minerva_scansort_set_document_encrypted"
+        | "minerva_scansort_extract_document"
+        | "minerva_scansort_place_on_disk"
+        | "minerva_scansort_place_fanout"
+        | "minerva_scansort_reprocess_destination" => Some("document"),
+        "minerva_scansort_insert_checklist"
+        | "minerva_scansort_update_checklist"
+        | "minerva_scansort_delete_checklist"
+        | "minerva_scansort_toggle_checklist_enabled" => Some("checklist"),
+        _ => None,
+    }
+}
+
+// is_tool_response_success returns true when the RpcResponse carries a
+// tool-success payload (no top-level error, no embedded "isError": true from
+// tool_err). Used to gate state_changed emissions so failed mutations don't
+// trigger spurious panel refreshes.
+fn is_tool_response_success(resp: &RpcResponse) -> bool {
+    if resp.error.is_some() {
+        return false;
+    }
+    match &resp.result {
+        Some(v) => v.get("isError").and_then(|x| x.as_bool()) != Some(true),
+        None => false,
+    }
+}
+
 // request_capability sends a minerva/capability request to Minerva and reads
 // the matching response. Safe only within a tools/call handler (re-entrancy
 // contract above).
@@ -2499,6 +2599,20 @@ fn main() {
 
         log::debug!("← {}", req.method);
 
+        // Captured before the match consumes `req`. Used post-dispatch to
+        // emit a state_changed notification for mutating tools so the panel
+        // can refresh in lockstep with MCP-driven changes.
+        let method_name: String = req.method.clone();
+        let tool_name: String = if method_name == "tools/call" {
+            req.params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
         let resp = match req.method.as_str() {
             "initialize" => ok_response(req.id, json!({
                 "protocolVersion": PROTOCOL_VERSION,
@@ -3751,6 +3865,16 @@ fn main() {
         };
 
         write_line(&mut out, &resp);
+
+        // Post-dispatch: if the request was a successful mutating tools/call,
+        // emit a state_changed notification so the panel can refresh. Read-only
+        // tools (list_*, get_*, query_*, render_*, extract_text, ...) return
+        // None from state_change_kind_for_tool and stay silent.
+        if method_name == "tools/call" && is_tool_response_success(&resp) {
+            if let Some(kind) = state_change_kind_for_tool(&tool_name) {
+                notify_state_changed(&mut out, kind);
+            }
+        }
     }
 
     log::info!("{SERVER_NAME} exiting");
