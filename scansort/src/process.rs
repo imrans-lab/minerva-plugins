@@ -31,12 +31,13 @@
 //! These tests construct Session + Library state in-process using the same
 //! helpers used by real handlers, but do NOT exercise the LLM capability path.
 
+use crate::audit;
 use crate::classifier;
 use crate::destinations::{Destination, DestinationRegistry};
 use crate::doc_type_normalizer;
 use crate::extract;
 use crate::library;
-use crate::placement::{self, DirHashCache, DocMeta, PlacementStatus};
+use crate::placement::{self, DirHashCache, DocMeta, PlacementResult, PlacementStatus};
 use crate::render;
 use crate::rule_engine::{self, FileFacts};
 use crate::rules_file::FileRule;
@@ -271,6 +272,14 @@ impl<'a, W: io::Write, I: Iterator<Item = Result<String, io::Error>>> LlmCaller
 /// - `model`   — model name to pass to host.providers.chat (default "default").
 /// - `model_spec` — optional structured provider spec (wins over `model` when present).
 /// - `doc_type_strategy` — B8 doc_type normalization: `"none" | "enum" | "canonicalize" | "both"`.
+/// - `audit_enabled` — when true AND `audit_path` is non-empty, append one
+///   audit-log CSV row per `PlacementResult` after each successful fan-out.
+///   Matches the W9 / panel batch-pipeline audit row shape (same column names,
+///   same `event` enum, same `disposition` values produced by
+///   [`audit::AuditRow::from_placement`]).
+/// - `audit_path` — absolute path to the CSV log file. Ignored when
+///   `audit_enabled` is false. Audit-write failures are NON-fatal: a warning
+///   is logged and the pipeline continues. NEVER panics, NEVER aborts the run.
 ///
 /// # Returns
 /// `Ok(ProcessResult)` on success.  Individual file errors are recorded in
@@ -282,6 +291,8 @@ pub fn run(
     model: &str,
     model_spec: Option<Value>,
     doc_type_strategy: &str,
+    audit_enabled: bool,
+    audit_path: &str,
 ) -> VaultResult<ProcessResult> {
     let mut result = ProcessResult::default();
 
@@ -667,6 +678,36 @@ pub fn run(
                 Some(&mut dir_cache),
             );
 
+            // W9 / DCR 019e3ce069b6 — write audit rows for this fan-out.
+            // One row per PlacementResult so the log is interchangeable with
+            // the panel batch pipeline (which also emits per-placement).
+            // Non-fatal on failure: log a warning and continue.
+            if audit_enabled && !audit_path.is_empty() && !placements.is_empty() {
+                let source_filename = Path::new(abs_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(rel_path.as_str())
+                    .to_string();
+                let rule_label_str = first_rule_label.clone().unwrap_or_default();
+                let audit_rows = build_audit_rows_for_placements(
+                    &placements,
+                    &registry,
+                    &sha256,
+                    &source_filename,
+                    &rule_label_str,
+                );
+                if !audit_rows.is_empty() {
+                    if let Err(e) = audit::append_rows(Path::new(audit_path), &audit_rows) {
+                        log::warn!(
+                            "process: audit append failed for '{}' at '{}': {} (continuing, non-fatal)",
+                            rel_path,
+                            audit_path,
+                            e.message
+                        );
+                    }
+                }
+            }
+
             // Determine overall outcome.
             let any_placed = placements.iter().any(|p| p.status == PlacementStatus::Placed);
             let any_conflict = placements.iter().any(|p| p.status == PlacementStatus::SkippedAlreadyPresent);
@@ -747,6 +788,56 @@ pub fn run(
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Build the audit-log rows for one fan-out's `placements` slice.
+///
+/// One row is produced per `PlacementResult`, mirroring the panel batch
+/// pipeline (`ui/ScansortPanel.gd:_run_batch_pipeline`) which also emits
+/// one audit row per `PlacementResult`. The `destination_kind` is looked
+/// up from `registry`; rows whose destination is not in the registry are
+/// stamped with an empty `kind` (same behaviour as the panel which reads
+/// `pr.get("kind", "")`).
+///
+/// Status → event mapping is delegated to [`audit::AuditRow::from_placement`]:
+///   - `Placed`                 → event=`placement`, disposition=`placed`
+///   - `SkippedAlreadyPresent`  → event=`skipped`,  disposition=`skipped-already-present`
+///   - `Error`                  → event=`placement`, disposition=`error`
+///
+/// `timestamp` is sampled per-row via [`crate::types::now_iso`].
+fn build_audit_rows_for_placements(
+    placements: &[PlacementResult],
+    registry: &DestinationRegistry,
+    source_sha256: &str,
+    source_filename: &str,
+    rule_label: &str,
+) -> Vec<audit::AuditRow> {
+    let mut rows: Vec<audit::AuditRow> = Vec::with_capacity(placements.len());
+    for pr in placements {
+        let status_str = match pr.status {
+            PlacementStatus::Placed => "placed",
+            PlacementStatus::SkippedAlreadyPresent => "skipped-already-present",
+            PlacementStatus::Error => "error",
+        };
+        // Resolve destination kind from the registry; fall back to the
+        // PlacementResult's own `kind` field (set by fan_out), then "".
+        let dest_kind = crate::destinations::find_by_id(registry, &pr.destination_id)
+            .map(|d| d.kind.as_str().to_string())
+            .unwrap_or_else(|| pr.kind.clone());
+        let now = crate::types::now_iso();
+        rows.push(audit::AuditRow::from_placement(
+            source_sha256,
+            source_filename,
+            rule_label,
+            &pr.destination_id,
+            &dest_kind,
+            &pr.target_path,
+            status_str,
+            &pr.message,
+            &now,
+        ));
+    }
+    rows
+}
 
 /// Emit a per-file document progress event for the panel source pane.
 /// Wraps notify_state_changed_with so process() doesn't have to build the
@@ -1310,5 +1401,176 @@ mod tests {
         assert!(all_labels.contains(&"dest-1".to_string()));
         assert!(all_labels.contains(&"dest-2".to_string()));
         assert!(all_labels.contains(&"dest-3".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // DCR 019e3ce069b6 — audit row construction from placements.
+    //
+    // The full process::run() pipeline requires the global session, the
+    // library, real files on disk, and an LLM JSON-RPC pump — too heavy for
+    // a unit test. Instead we test the helper that the run() loop calls,
+    // then write its output through the real audit::append_rows path so the
+    // on-disk file contents are exercised end-to-end.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn dcr_019e3ce0_audit_rows_match_panel_shape_and_write_to_log() {
+        use crate::placement::PlacementResult;
+
+        // Synthetic registry — `id == label` invariant matches what
+        // resolve_labels() produces inside the real run() loop.
+        let registry = DestinationRegistry {
+            schema_version: crate::destinations::CURRENT_SCHEMA_VERSION,
+            destinations: vec![
+                Destination {
+                    id: "vault-archive".to_string(),
+                    kind: "vault".to_string(),
+                    path: "/fake/vault-archive.ssort".to_string(),
+                    label: "vault-archive".to_string(),
+                    locked: false,
+                },
+                Destination {
+                    id: "dir-invoices".to_string(),
+                    kind: "directory".to_string(),
+                    path: "/fake/dir-invoices".to_string(),
+                    label: "dir-invoices".to_string(),
+                    locked: false,
+                },
+            ],
+        };
+
+        // Two placements — one Placed (directory), one SkippedAlreadyPresent
+        // (vault) — covers both event branches in from_placement.
+        let placements = vec![
+            PlacementResult {
+                destination_id: "dir-invoices".to_string(),
+                kind: "directory".to_string(),
+                target_path: "/fake/dir-invoices/2026/inv-001.pdf".to_string(),
+                doc_id: 0,
+                status: PlacementStatus::Placed,
+                message: String::new(),
+            },
+            PlacementResult {
+                destination_id: "vault-archive".to_string(),
+                kind: "vault".to_string(),
+                target_path: "/fake/vault-archive.ssort".to_string(),
+                doc_id: 42,
+                status: PlacementStatus::SkippedAlreadyPresent,
+                message: "doc_id=42 already present".to_string(),
+            },
+        ];
+
+        let rows = build_audit_rows_for_placements(
+            &placements,
+            &registry,
+            "deadbeefcafe",
+            "invoice-001.pdf",
+            "Invoice",
+        );
+        assert_eq!(rows.len(), 2, "one row per PlacementResult");
+
+        // Row 0 — Placed → event=placement, disposition=placed.
+        assert_eq!(rows[0].event, "placement");
+        assert_eq!(rows[0].disposition, "placed");
+        assert_eq!(rows[0].source_sha256, "deadbeefcafe");
+        assert_eq!(rows[0].source_filename, "invoice-001.pdf");
+        assert_eq!(rows[0].rule_label, "Invoice");
+        assert_eq!(rows[0].destination_id, "dir-invoices");
+        assert_eq!(rows[0].destination_kind, "directory");
+        assert_eq!(rows[0].resolved_path, "/fake/dir-invoices/2026/inv-001.pdf");
+        assert!(!rows[0].timestamp.is_empty(), "timestamp must be stamped");
+
+        // Row 1 — SkippedAlreadyPresent → event=skipped.
+        assert_eq!(rows[1].event, "skipped");
+        assert_eq!(rows[1].disposition, "skipped-already-present");
+        assert_eq!(rows[1].destination_id, "vault-archive");
+        assert_eq!(rows[1].destination_kind, "vault");
+
+        // Now drive the log file end-to-end — same call the run() loop makes.
+        let dir = unique_tmp("audit-e2e");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("process-audit.csv");
+        audit::append_rows(&log_path, &rows).expect("audit append must succeed");
+
+        let contents = std::fs::read_to_string(&log_path).expect("log file must exist");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3, "expected header + 2 rows, got:\n{}", contents);
+        assert!(
+            lines[0].starts_with("timestamp,event,source_sha256,source_filename,rule_label,destination_id,destination_kind,resolved_path,disposition,detail"),
+            "header must match the W9 column order: {}",
+            lines[0]
+        );
+        // Row 1 (data) — placement / placed / Invoice / dir-invoices.
+        assert!(lines[1].contains("\"placement\""), "row1 event=placement: {}", lines[1]);
+        assert!(lines[1].contains("\"placed\""),    "row1 disposition=placed: {}", lines[1]);
+        assert!(lines[1].contains("\"Invoice\""),   "row1 rule_label: {}", lines[1]);
+        assert!(lines[1].contains("\"dir-invoices\""), "row1 dest id: {}", lines[1]);
+        // Row 2 — skipped / skipped-already-present / vault.
+        assert!(lines[2].contains("\"skipped\""), "row2 event=skipped: {}", lines[2]);
+        assert!(lines[2].contains("\"skipped-already-present\""), "row2 disposition: {}", lines[2]);
+        assert!(lines[2].contains("\"vault-archive\""),           "row2 vault dest: {}", lines[2]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // DCR 019e3ce069b6 — error status maps to event=placement, disposition=error.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn dcr_019e3ce0_error_placement_logged_as_error_disposition() {
+        use crate::placement::PlacementResult;
+
+        let registry = DestinationRegistry {
+            schema_version: crate::destinations::CURRENT_SCHEMA_VERSION,
+            destinations: vec![Destination {
+                id: "dir-x".to_string(),
+                kind: "directory".to_string(),
+                path: "/fake/dir-x".to_string(),
+                label: "dir-x".to_string(),
+                locked: false,
+            }],
+        };
+        let placements = vec![PlacementResult {
+            destination_id: "dir-x".to_string(),
+            kind: "directory".to_string(),
+            target_path: String::new(),
+            doc_id: 0,
+            status: PlacementStatus::Error,
+            message: "permission denied".to_string(),
+        }];
+
+        let rows = build_audit_rows_for_placements(
+            &placements, &registry, "sha", "doc.pdf", "Rule",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event, "placement", "error rows are still placement events");
+        assert_eq!(rows[0].disposition, "error");
+        assert_eq!(rows[0].detail, "permission denied");
+    }
+
+    // -----------------------------------------------------------------------
+    // DCR 019e3ce069b6 — unknown destination id falls back to PlacementResult's
+    // own kind (defensive — registry lookup miss shouldn't blank the field).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn dcr_019e3ce0_unknown_dest_falls_back_to_placement_kind() {
+        use crate::placement::PlacementResult;
+
+        // Empty registry — every lookup misses.
+        let registry = DestinationRegistry {
+            schema_version: crate::destinations::CURRENT_SCHEMA_VERSION,
+            destinations: vec![],
+        };
+        let placements = vec![PlacementResult {
+            destination_id: "ghost-dest".to_string(),
+            kind: "vault".to_string(), // fall-back source
+            target_path: "/fake/v.ssort".to_string(),
+            doc_id: 7,
+            status: PlacementStatus::Placed,
+            message: String::new(),
+        }];
+        let rows = build_audit_rows_for_placements(
+            &placements, &registry, "sha", "doc.pdf", "Rule",
+        );
+        assert_eq!(rows[0].destination_kind, "vault", "must fall back to PlacementResult.kind");
     }
 }

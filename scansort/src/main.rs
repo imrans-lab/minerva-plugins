@@ -2539,7 +2539,18 @@ fn handle_process(
     let model_spec = args.get("model_spec").cloned();
     let doc_type_strategy = args.get("doc_type_strategy").and_then(|v| v.as_str())
         .unwrap_or("none");
-    match process::run(out, lines, next_id, model, model_spec, doc_type_strategy) {
+    // DCR 019e3ce069b6 — optional audit-log fan-out. Disabled by default to
+    // preserve back-compat. When enabled, requires a non-empty audit_path;
+    // an empty path with audit_enabled=true is silently a no-op (matches the
+    // panel batch pipeline which also short-circuits on empty path).
+    let audit_enabled = args.get("audit_enabled").and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let audit_path = args.get("audit_path").and_then(|v| v.as_str())
+        .unwrap_or("");
+    match process::run(
+        out, lines, next_id, model, model_spec, doc_type_strategy,
+        audit_enabled, audit_path,
+    ) {
         Err(e) => ok_response(id, tool_err(&e.message)),
         Ok(result) => {
             let items_json: Vec<Value> = result.items.iter().map(|item| {
@@ -3616,6 +3627,8 @@ fn main() {
                                 "model": {"type": "string", "description": "Optional model identifier to pass to host.providers.chat (default 'default' = TurnRock Core)."},
                                 "model_spec": {"type": "object", "description": "Optional structured provider spec (wins over 'model' when present). Use {kind:'core_action', service_client_id:'model-chat', action_name:'<model>'} to route through a specific Core service."},
                                 "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"], "description": "B8 doc_type normalization strategy. 'none' (default): raw LLM output. 'enum': prompt is augmented with the winning rule's allowed subtypes. 'canonicalize': post-LLM alias→canonical map applied. 'both': enum prompt + canonicalize safety net."},
+                                "audit_enabled": {"type": "boolean", "description": "DCR 019e3ce069b6: when true, append one CSV audit-log row per fan-out PlacementResult to `audit_path`. Default false (back-compat). Row shape matches the panel batch pipeline (minerva_scansort_audit_append) so logs are interchangeable. Audit write failures are non-fatal — pipeline continues and a warning is logged."},
+                                "audit_path": {"type": "string", "description": "DCR 019e3ce069b6: absolute path to the CSV audit log file. Required when `audit_enabled` is true; empty path with audit_enabled=true is a silent no-op. Ignored when `audit_enabled` is false."}
                             },
                             "required": [],
                         },
