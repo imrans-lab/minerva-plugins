@@ -171,7 +171,15 @@
     },
     {
       "name": "minerva_scansort_session_open_directory",
-      "description": "Register an open directory destination in the plugin's session under a stable label."
+      "description": "Register an open directory destination in the plugin's session under a stable label.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "label": {"type": "string", "description": "Stable label to identify the directory in the session."},
+          "path": {"type": "string", "description": "Absolute filesystem path to the destination directory."}
+        },
+        "required": ["label", "path"]
+      }
     },
     {
       "name": "minerva_scansort_session_close_directory",
