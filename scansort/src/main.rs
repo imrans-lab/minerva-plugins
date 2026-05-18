@@ -3940,3 +3940,45 @@ fn main() {
 
     log::info!("{SERVER_NAME} exiting");
 }
+
+#[cfg(test)]
+mod state_change_kind_tests {
+    use super::state_change_kind_for_tool;
+
+    #[test]
+    fn tool_to_state_kind_mapping() {
+        // Table: (tool_name, expected_return_value)
+        // Regression target: session_open/close_* must map to their distinct kinds,
+        // not all collapse to "session" (Bug 019e3c18e677).
+        let cases: Vec<(&str, Option<&str>)> = vec![
+            // --- session_* split cases (regression target) ---
+            ("minerva_scansort_session_open_source",      Some("source")),
+            ("minerva_scansort_session_close_source",     Some("source")),
+            ("minerva_scansort_session_open_directory",   Some("destination")),
+            ("minerva_scansort_session_close_directory",  Some("destination")),
+            ("minerva_scansort_session_open_vault",       Some("vault")),
+            ("minerva_scansort_session_close_vault",      Some("vault")),
+            // --- one representative per remaining kind ---
+            ("minerva_scansort_set_source_dir",           Some("source")),
+            ("minerva_scansort_destination_add",          Some("destination")),
+            ("minerva_scansort_create_vault",             Some("vault")),
+            ("minerva_scansort_registry_add",             Some("registry")),
+            ("minerva_scansort_insert_rule",              Some("rule")),
+            ("minerva_scansort_library_insert_rule",      Some("library_rule")),
+            ("minerva_scansort_insert_document",          Some("document")),
+            ("minerva_scansort_insert_checklist",         Some("checklist")),
+            // --- negative / read-only cases ---
+            ("minerva_scansort_probe",                    None),
+            ("some_unknown_tool",                         None),
+        ];
+
+        for (tool, expected) in cases {
+            assert_eq!(
+                state_change_kind_for_tool(tool),
+                expected,
+                "state_change_kind_for_tool({:?}) returned wrong value",
+                tool
+            );
+        }
+    }
+}
