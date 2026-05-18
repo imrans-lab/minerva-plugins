@@ -114,8 +114,8 @@ fn write_line(out: &mut impl Write, v: &impl Serialize) {
 // the panel open).
 //
 // `kind` is a short tag the panel switches on: "source", "destination",
-// "session", "rule", "library_rule", "vault", "registry", "document",
-// "checklist". Unknown kinds are ignored panel-side.
+// "vault", "registry", "rule", "library_rule", "document", "checklist".
+// Unknown kinds are ignored panel-side.
 fn notify_state_changed(out: &mut impl Write, kind: &str) {
     // Append a debug marker to /tmp/scansort-debug.log so the autonomous test
     // loop can prove an emit happened independent of whether a panel was
@@ -149,21 +149,21 @@ fn notify_state_changed(out: &mut impl Write, kind: &str) {
 // decide whether to emit a state_changed notification.
 fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
     match name {
-        "minerva_scansort_set_source_dir" => Some("source"),
+        "minerva_scansort_set_source_dir"
+        | "minerva_scansort_session_open_source"
+        | "minerva_scansort_session_close_source" => Some("source"),
         "minerva_scansort_destination_add"
         | "minerva_scansort_destination_remove"
         | "minerva_scansort_set_destination"
-        | "minerva_scansort_set_destination_locked" => Some("destination"),
-        "minerva_scansort_session_open_vault"
-        | "minerva_scansort_session_close_vault"
+        | "minerva_scansort_set_destination_locked"
         | "minerva_scansort_session_open_directory"
-        | "minerva_scansort_session_close_directory"
-        | "minerva_scansort_session_open_source"
-        | "minerva_scansort_session_close_source" => Some("session"),
+        | "minerva_scansort_session_close_directory" => Some("destination"),
         "minerva_scansort_create_vault"
         | "minerva_scansort_set_password"
         | "minerva_scansort_open_vault"
-        | "minerva_scansort_update_project_key" => Some("vault"),
+        | "minerva_scansort_update_project_key"
+        | "minerva_scansort_session_open_vault"
+        | "minerva_scansort_session_close_vault" => Some("vault"),
         "minerva_scansort_registry_add"
         | "minerva_scansort_registry_remove" => Some("registry"),
         "minerva_scansort_insert_rule"
@@ -2149,6 +2149,26 @@ fn handle_session_close_vault(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
+/// Best-effort path to the Minerva-managed destination registry. Mirrors the
+/// location the panel reads from via destination_list. Honors env override for
+/// non-Linux hosts and tests. None when HOME is unset.
+///
+/// Temporary bridge for the session→registry dual-store gap; see the matching
+/// bridge comment in handle_session_open_source. Goes away when panel-side
+/// providers read session_state directly (separate DCR).
+fn minerva_dest_registry_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("SCANSORT_MINERVA_DEST_REGISTRY") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".local/share/godot/app_userdata/Minerva/dest_registry.json"),
+    )
+}
+
 fn handle_session_open_directory(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let label = args.get("label").and_then(|v| v.as_str()).unwrap_or("");
@@ -2158,6 +2178,23 @@ fn handle_session_open_directory(params: &Value, id: Value) -> RpcResponse {
     }
     if path.is_empty() {
         return ok_response(id, tool_err("path is required"));
+    }
+    // Bridge to the Minerva-managed destination registry so the panel's
+    // Directories pane reflects this dir. Best-effort: registry write failures
+    // are logged but do not fail the session call. See the session_open_source
+    // bridge for the same dual-store ratchet; goes away when the panel reads
+    // session_state directly.
+    if let Some(reg_path) = minerva_dest_registry_path() {
+        match destinations::load_or_init(&reg_path) {
+            Ok(mut reg) => {
+                if let Err(e) = destinations::add(&mut reg, "directory", path, Some(label), false) {
+                    log::warn!("dest-registry bridge add failed: {}", e.message);
+                } else if let Err(e) = destinations::save(&reg_path, &reg) {
+                    log::warn!("dest-registry bridge save failed: {}", e.message);
+                }
+            }
+            Err(e) => log::warn!("dest-registry bridge load failed: {}", e.message),
+        }
     }
     match session::add_dir(label, std::path::PathBuf::from(path)) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "label": label}))),
@@ -2186,6 +2223,13 @@ fn handle_session_open_source(params: &Value, id: Value) -> RpcResponse {
     }
     if path.is_empty() {
         return ok_response(id, tool_err("path is required"));
+    }
+    // Bridge to the path-driven source store. The panel + tree providers still
+    // read via get_source_dir / list_source_files; without this, a label-only
+    // session.add_source leaves the panel blind. Goes away when the providers
+    // are migrated to read session_state directly (separate DCR).
+    if let Err(e) = source::set_source_dir(path, false) {
+        return ok_response(id, tool_err(&e.message));
     }
     match session::add_source(label, std::path::PathBuf::from(path)) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "label": label}))),
