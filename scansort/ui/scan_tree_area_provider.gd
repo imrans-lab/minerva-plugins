@@ -1,11 +1,12 @@
 extends "scan_tree_provider.gd"
 ## Aggregate scan_tree provider for a destination area (vault OR directory kind).
 ##
-## For vault areas: the currently-open vault is ALWAYS rendered first, sourced
-## directly from its file path (via query_documents on that path).  This
-## ensures vault contents are visible even when the destination registry is
-## empty, stale, or on a different machine.  Registry vault destinations that
-## are NOT the open vault are appended after it (deduped by path).
+## For vault areas: registry vault destinations are rendered for ALL entries
+## in the destination registry, regardless of whether a vault is currently
+## "open" in the panel.  When a vault IS open (_open_vault_path is non-empty)
+## it is rendered first and deduped from the registry loop below.  When no
+## vault is open, ALL registry vault destinations are shown directly.  This
+## ensures MCP-driven vault destinations are always visible.
 ##
 ## For directory areas: behaves as before — renders all "directory" entries
 ## from the destination registry.
@@ -57,12 +58,10 @@ func get_tree_data() -> Array:
 	if _conn == null:
 		return []
 
-	# W5c: For vault areas, the open vault is always rendered regardless of the
-	# registry.  We need a conn but do NOT require a registry_path to show the
-	# open vault row.  Directory areas do require the registry to be set.
-	if _area_kind == "vault" and _open_vault_path.is_empty():
-		# No vault open — nothing to show even if registry has entries.
-		return []
+	# For vault areas: render registry vault destinations regardless of whether
+	# a vault is panel-"open".  When _open_vault_path is set it is rendered
+	# first; otherwise only registry entries are shown.  Directory areas still
+	# require the registry path to be set.
 	if _area_kind == "directory" and _registry_path.is_empty():
 		return []
 
@@ -83,42 +82,45 @@ func get_tree_data() -> Array:
 	var nodes: Array = []
 
 	if _area_kind == "vault":
-		# --- W5c: open vault row always first, sourced directly from file ---
-		# Find registry entry for the open vault (for dest_id + locked state).
-		var open_dest_id: String  = ""
-		var open_locked: bool     = false
-		var open_label: String    = _open_vault_path.get_file().get_basename()
-		for dest: Dictionary in all_dests:
-			if str(dest.get("kind", "")) == "vault" and str(dest.get("path", "")) == _open_vault_path:
-				open_dest_id = str(dest.get("id", ""))
-				open_locked  = bool(dest.get("locked", false))
-				var dlabel: String = str(dest.get("label", ""))
-				if not dlabel.is_empty():
-					open_label = dlabel
-				break
+		# When a vault is open in the panel, render it first (sourced directly
+		# from its file path) and deduplicate it from the registry loop below.
+		if not _open_vault_path.is_empty():
+			# Find registry entry for the open vault (for dest_id + locked state).
+			var open_dest_id: String  = ""
+			var open_locked: bool     = false
+			var open_label: String    = _open_vault_path.get_file().get_basename()
+			for dest: Dictionary in all_dests:
+				if str(dest.get("kind", "")) == "vault" and str(dest.get("path", "")) == _open_vault_path:
+					open_dest_id = str(dest.get("id", ""))
+					open_locked  = bool(dest.get("locked", false))
+					var dlabel: String = str(dest.get("label", ""))
+					if not dlabel.is_empty():
+						open_label = dlabel
+					break
 
-		# Build children by querying the vault file directly.
-		var open_children: Array = await _get_vault_children_by_path(_open_vault_path)
+			# Build children by querying the vault file directly.
+			var open_children: Array = await _get_vault_children_by_path(_open_vault_path)
 
-		nodes.append({
-			"kind":      "folder",
-			"name":      open_label,
-			"key":       "dest:%s" % (open_dest_id if not open_dest_id.is_empty() else _open_vault_path),
-			"date":      "",
-			"tooltip":   _open_vault_path,
-			"children":  open_children,
-			"dest_id":   open_dest_id,
-			"locked":    open_locked,
-			"node_role": "vault_dest",
-		})
+			nodes.append({
+				"kind":      "folder",
+				"name":      open_label,
+				"key":       "dest:%s" % (open_dest_id if not open_dest_id.is_empty() else _open_vault_path),
+				"date":      "",
+				"tooltip":   _open_vault_path,
+				"children":  open_children,
+				"dest_id":   open_dest_id,
+				"locked":    open_locked,
+				"node_role": "vault_dest",
+			})
 
-		# Append any OTHER registry vault destinations (deduped: skip open vault).
+		# Render all registry vault destinations.  When _open_vault_path is set,
+		# skip it here (already rendered above).  When empty, all entries render.
 		for dest: Dictionary in all_dests:
 			var kind: String = str(dest.get("kind", ""))
 			if kind != "vault":
 				continue
 			var dest_path: String = str(dest.get("path", ""))
-			if dest_path == _open_vault_path:
+			if not _open_vault_path.is_empty() and dest_path == _open_vault_path:
 				continue  # already rendered above
 			var dest_id: String  = str(dest.get("id", ""))
 			var label: String    = str(dest.get("label", dest.get("path", dest_id)))
