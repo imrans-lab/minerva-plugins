@@ -3668,16 +3668,15 @@ func _on_plugin_event(p_id: String, event_name: String, payload: Dictionary) -> 
 	match kind:
 		"source":
 			_refresh_source_tree_if_ready()
-		"destination", "registry":
+		"destination", "registry", "vault":
 			_refresh_all_dest_trees_if_ready()
 		"library_rule":
 			# Rules editor is modal; nothing to refresh on the main pane today.
 			# Kept as an explicit no-op so future rules-pane work has a hook.
 			pass
-		"session", "vault":
-			# Vault open/close is panel-driven today; MCP-only vault changes
-			# don't currently surface in the panel beyond destinations, which
-			# the `destination`/`registry` kinds already cover.
+		"session":
+			# kind=session is no longer emitted by the plugin after W0 changes;
+			# kept as a harmless explicit no-op for safety.
 			pass
 		_:
 			# Unknown kinds (document, checklist, rule) — no panel surface.
