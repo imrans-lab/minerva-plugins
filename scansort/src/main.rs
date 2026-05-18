@@ -2131,6 +2131,23 @@ fn handle_session_open_vault(params: &Value, id: Value) -> RpcResponse {
     if path.is_empty() {
         return ok_response(id, tool_err("path is required"));
     }
+    // Bridge to the Minerva-managed destination registry so the panel's
+    // Vaults pane reflects this vault. Best-effort and idempotent; the
+    // session call is the source of truth and registry write failures do
+    // not fail the call. Mirrors handle_session_open_directory; see that
+    // function for the dual-store ratchet rationale.
+    if let Some(reg_path) = minerva_dest_registry_path() {
+        match destinations::load_or_init(&reg_path) {
+            Ok(mut reg) => {
+                if let Err(e) = destinations::add(&mut reg, "vault", path, Some(label), false) {
+                    log::warn!("vault dest-registry bridge add failed: {}", e.message);
+                } else if let Err(e) = destinations::save(&reg_path, &reg) {
+                    log::warn!("vault dest-registry bridge save failed: {}", e.message);
+                }
+            }
+            Err(e) => log::warn!("vault dest-registry bridge load failed: {}", e.message),
+        }
+    }
     match session::add_vault(label, std::path::PathBuf::from(path)) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "label": label}))),
         Err(e) => ok_response(id, tool_err(&e.message)),
