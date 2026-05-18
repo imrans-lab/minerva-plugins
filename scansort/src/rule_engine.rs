@@ -40,7 +40,7 @@ use crate::types::{Classification, ConditionNode, Rule, RuleSignal};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 // ---------------------------------------------------------------------------
 // Public output types
@@ -109,19 +109,46 @@ pub struct FileFacts {
 // ---------------------------------------------------------------------------
 
 /// All facts available to condition evaluation, unified into one flat map.
+///
+/// When `slots` is non-empty (B-fallback rule walk), per-rule extracted slot
+/// values shadow Phase-1 facts for any matching field name. This lets a
+/// rule's conditions reference facts the LLM only extracted while walking
+/// that rule's `stages` pipeline — e.g. `conditions: {field:"year"...}` is
+/// matched against the `year` slot extracted by the rule, not the (often
+/// empty) Phase-1 `year`.
 struct FactSet<'a> {
     classification: &'a Classification,
     file: &'a FileFacts,
+    slots: Option<&'a BTreeMap<String, String>>,
 }
 
 impl<'a> FactSet<'a> {
     fn new(c: &'a Classification, f: &'a FileFacts) -> Self {
-        FactSet { classification: c, file: f }
+        FactSet { classification: c, file: f, slots: None }
+    }
+
+    /// FactSet that overlays per-rule extracted slots onto the base facts.
+    fn with_slots(
+        c: &'a Classification,
+        f: &'a FileFacts,
+        slots: &'a BTreeMap<String, String>,
+    ) -> Self {
+        FactSet { classification: c, file: f, slots: Some(slots) }
     }
 
     /// Get a fact value by field name.
     /// Returns None for unknown fields (predicate evaluates false).
     fn get(&self, field: &str) -> Option<FactValue> {
+        // Slot overlay: if a slot with this name exists, it shadows the
+        // built-in fact. Numeric fields try to parse the slot string; if
+        // parse fails, the slot value is exposed as a String (predicates
+        // that need numeric coercion will fall through to false, matching
+        // the behavior for unparsable values elsewhere in the engine).
+        if let Some(slot_map) = self.slots {
+            if let Some(raw) = slot_map.get(field) {
+                return Some(typed_slot_value(field, raw));
+            }
+        }
         let c = self.classification;
         let f = self.file;
         match field {
@@ -139,6 +166,26 @@ impl<'a> FactSet<'a> {
             "size" => Some(FactValue::Int(f.size)),
             _ => None,
         }
+    }
+}
+
+/// Coerce a slot string into the right `FactValue` variant for a given field
+/// name. Numeric fields parse the slot's contents; non-numeric fields stay
+/// strings. An unparseable numeric slot ("unknown") falls back to a Str
+/// variant so the predicate evaluates against the string instead of panicking
+/// or silently treating it as zero.
+fn typed_slot_value(field: &str, raw: &str) -> FactValue {
+    match field {
+        "year" | "size" => match raw.trim().parse::<i64>() {
+            Ok(n) => FactValue::Int(n),
+            Err(_) => FactValue::Str(raw.to_string()),
+        },
+        "confidence" => match raw.trim().parse::<f64>() {
+            Ok(n) => FactValue::Float(n),
+            Err(_) => FactValue::Str(raw.to_string()),
+        },
+        "amount" => FactValue::Amount(raw.to_string()),
+        _ => FactValue::Str(raw.to_string()),
     }
 }
 
@@ -499,6 +546,31 @@ pub fn run_with_stages(
 /// Vision-aware variant: when `page_images` is provided and non-empty,
 /// stage-walker calls are made multimodally with the page images instead of
 /// `document_text`. Used for image-only PDFs.
+///
+/// ## B-fallback rule walk (DCR 019e3c91)
+///
+/// Replaces the prior order-based walk with a score-ranked walk that
+/// interleaves stage extraction with conditions evaluation. The motivating
+/// bug: Phase-1 classification doesn't extract per-rule field facts (year,
+/// issuer, doc_type), so rules with `conditions: {field:"year", ...}` always
+/// failed because the value the conditions referenced was never populated.
+///
+/// Algorithm:
+///   1. Drop rules below their `confidence_threshold` (per Phase-1 score).
+///   2. Sort surviving rules by score **descending**; tie-break by
+///      insertion order in the original `rule_signals` array (first emitted
+///      wins). Rules whose label is absent from `rule_signals` are sorted
+///      last among ties.
+///   3. Walk surviving rules in ranked order:
+///        - Run the rule's `stages` via `stage_walker` (extracts facts).
+///          Rules with no `stages` skip extraction (legacy back-compat).
+///        - Evaluate `conditions` against an overlaid `FactSet` where
+///          extracted slot values shadow Phase-1 facts of the same name.
+///        - Evaluate `exceptions` against the same overlaid `FactSet`.
+///        - If both gates pass (or are absent): the rule fires and the
+///          walk **STOPS**. First fire wins; no further rules considered.
+///   4. If no rule fires: `matched=false`, status reduces to
+///      `unprocessable / no_rule_match` upstream.
 pub fn run_with_stages_vision(
     classification: &Classification,
     file_facts: &FileFacts,
@@ -507,35 +579,47 @@ pub fn run_with_stages_vision(
     page_images: Option<&[Value]>,
     llm: &mut dyn LlmCaller,
 ) -> RuleWalkOutcome {
-    let mut indexed: Vec<(usize, &Rule)> = rules
+    // Build a label→signal-index map for the rule_signals insertion order.
+    // Used as the tie-breaker when two surviving rules share the same score.
+    let signal_idx: HashMap<&str, usize> = classification
+        .rule_signals
         .iter()
         .enumerate()
-        .filter(|(_, r)| r.enabled)
+        .map(|(i, s)| (s.label.as_str(), i))
         .collect();
-    indexed.sort_by_key(|(idx, r)| (r.order, *idx as i64));
+    let unranked_tie_key = classification.rule_signals.len();
 
-    let facts = FactSet::new(classification, file_facts);
+    // 1. Threshold filter: only rules whose Phase-1 score ≥ threshold survive.
+    let mut survivors: Vec<(f64, usize, &Rule)> = rules
+        .iter()
+        .filter(|r| r.enabled)
+        .filter_map(|r| {
+            let score = rule_score(&r.label, &classification.rule_signals);
+            if score < r.confidence_threshold {
+                return None;
+            }
+            let tie = signal_idx
+                .get(r.label.as_str())
+                .copied()
+                .unwrap_or(unranked_tie_key);
+            Some((score, tie, r))
+        })
+        .collect();
+
+    // 2. Sort: score descending, tie-break by signal insertion order ascending.
+    survivors.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+
     let mut fired: Vec<FiredRuleAction> = Vec::new();
     let mut halted = false;
     let mut filtered_count: u32 = 0;
 
-    for (_, rule) in &indexed {
-        let score = rule_score(&rule.label, &classification.rule_signals);
-        if score < rule.confidence_threshold {
-            continue;
-        }
-        if let Some(ref cond) = rule.conditions {
-            if !eval_condition(cond, &facts) {
-                continue;
-            }
-        }
-        if let Some(ref exc) = rule.exceptions {
-            if eval_condition(exc, &facts) {
-                continue;
-            }
-        }
-
-        // Pre-filter passed — walk the stages.
+    // 3. Walk ranked survivors: stages → conditions → fire-and-stop.
+    for (_score, _tie, rule) in &survivors {
+        // Walk stages first; conditions reference extracted facts.
         let stage_outcome = if rule.stages.is_empty() {
             stage_walker::StageWalkOutcome::default()
         } else {
@@ -544,7 +628,29 @@ pub fn run_with_stages_vision(
 
         if stage_outcome.filtered {
             filtered_count += 1;
-            continue; // doc_filtered for THIS rule; keep walking other rules
+            continue; // doc_filtered for THIS rule; try the next
+        }
+
+        // Build a FactSet that overlays this rule's extracted slots on top
+        // of the Phase-1 classification facts, so conditions and exceptions
+        // can reference fields like `year` populated by the rule's stages.
+        let facts = if stage_outcome.slots.is_empty() {
+            FactSet::new(classification, file_facts)
+        } else {
+            FactSet::with_slots(classification, file_facts, &stage_outcome.slots)
+        };
+
+        // Conditions gate (None = pass).
+        if let Some(ref cond) = rule.conditions {
+            if !eval_condition(cond, &facts) {
+                continue;
+            }
+        }
+        // Exceptions gate (Some(true) = skip this rule).
+        if let Some(ref exc) = rule.exceptions {
+            if eval_condition(exc, &facts) {
+                continue;
+            }
         }
 
         // Template resolution: slot-based when stages produced any, else legacy.
@@ -571,10 +677,9 @@ pub fn run_with_stages_vision(
             stages_executed: stage_outcome.stages_executed,
         });
 
-        if rule.stop_processing {
-            halted = true;
-            break;
-        }
+        // B-fallback: first fire wins. Stop immediately.
+        halted = rule.stop_processing;
+        break;
     }
 
     let effective_category = if let Some(first) = fired.first() {
@@ -1722,5 +1827,325 @@ mod tests {
         assert!(outcome.matched);
         assert_eq!(outcome.fired[0].resolved_subfolder, "2024");
         assert_eq!(outcome.fired[0].resolved_rename_pattern, "Acme.pdf");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-fallback integration tests (DCR 019e3c91)
+//
+// Score-ranked rule walk + per-rule stage extraction + post-extraction
+// conditions gate, with hard "first fire stops the walk" semantics.
+//
+// These are placed inline (rather than under `tests/`) because the crate
+// is a `[[bin]]` only — no `[lib]` target means `tests/*.rs` can't import
+// `rule_engine::*`. Same pattern as the existing `run_with_stages_*` tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests_b_fallback {
+    use super::*;
+    use crate::stage_walker::LlmCaller;
+    use crate::types::{Classification, ConditionNode, Rule, RuleSignal, Slot, SlotValues, Stage};
+    use serde_json::Value;
+    use std::cell::Cell;
+    use std::collections::BTreeMap;
+
+    // ---- helpers (paralleling the existing tests' helpers, kept local) ----
+
+    fn make_classification(signals: Vec<(&str, f64)>) -> Classification {
+        Classification {
+            category: String::new(),
+            confidence: 0.9,
+            issuer: String::new(),
+            description: String::new(),
+            doc_date: String::new(),
+            tags: vec![],
+            raw_response: String::new(),
+            fallback_reason: None,
+            doc_type: String::new(),
+            amount: String::new(),
+            year: 0,
+            rule_signals: signals
+                .into_iter()
+                .map(|(l, s)| RuleSignal { label: l.to_string(), score: s })
+                .collect(),
+        }
+    }
+
+    fn file_facts() -> FileFacts {
+        FileFacts {
+            filename: "doc.pdf".to_string(),
+            extension: "pdf".to_string(),
+            size: 1000,
+        }
+    }
+
+    fn slot_open(d: &str, c: &str) -> Slot {
+        Slot {
+            description: d.to_string(),
+            values: SlotValues::Open(c.to_string()),
+        }
+    }
+
+    /// Build a rule with a single stage that extracts a `year` slot. The
+    /// caller-controlled mock LLM decides what year value comes back.
+    fn rule_with_year_stage(
+        label: &str,
+        threshold: f64,
+        conditions: Option<ConditionNode>,
+    ) -> Rule {
+        let mut classify: BTreeMap<String, Slot> = BTreeMap::new();
+        classify.insert("year".to_string(), slot_open("year", "4-digit year"));
+        let stage = Stage {
+            ask: format!("What year is this {label} document?"),
+            classify,
+            keep_when: None,
+        };
+        Rule {
+            rule_id: 0,
+            label: label.to_string(),
+            name: label.to_string(),
+            instruction: String::new(),
+            signals: vec![],
+            subfolder: "{year}".to_string(),
+            rename_pattern: format!("{}_{{year}}.pdf", label),
+            confidence_threshold: threshold,
+            encrypt: false,
+            enabled: true,
+            is_default: false,
+            conditions,
+            exceptions: None,
+            order: 0,
+            stop_processing: false,
+            copy_to: vec![],
+            subtypes: Vec::new(),
+            stages: vec![stage],
+        }
+    }
+
+    /// Stage-less rule — runs no LLM calls, conditions evaluate against
+    /// Phase-1 facts (which are mostly empty in the B-fallback fixtures).
+    fn rule_no_stages(
+        label: &str,
+        threshold: f64,
+        conditions: Option<ConditionNode>,
+    ) -> Rule {
+        Rule {
+            rule_id: 0,
+            label: label.to_string(),
+            name: label.to_string(),
+            instruction: String::new(),
+            signals: vec![],
+            subfolder: String::new(),
+            rename_pattern: format!("{}.pdf", label),
+            confidence_threshold: threshold,
+            encrypt: false,
+            enabled: true,
+            is_default: false,
+            conditions,
+            exceptions: None,
+            order: 0,
+            stop_processing: false,
+            copy_to: vec![],
+            subtypes: Vec::new(),
+            stages: vec![],
+        }
+    }
+
+    fn year_eq(year: i64) -> ConditionNode {
+        ConditionNode::Predicate {
+            field: "year".to_string(),
+            op: "equals".to_string(),
+            value: serde_json::json!(year),
+        }
+    }
+
+    /// Scripted LLM caller that returns a fixed `year` for every call,
+    /// counting invocations so tests can assert no extra stages ran.
+    struct CountingYearLlm {
+        year: String,
+        calls: Cell<u32>,
+    }
+    impl CountingYearLlm {
+        fn new(year: &str) -> Self {
+            CountingYearLlm { year: year.to_string(), calls: Cell::new(0) }
+        }
+        fn call_count(&self) -> u32 {
+            self.calls.get()
+        }
+    }
+    impl LlmCaller for CountingYearLlm {
+        fn call(&mut self, _msgs: Vec<Value>) -> Result<String, String> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(format!(r#"{{"year": "{}"}}"#, self.year))
+        }
+    }
+
+    /// Panic-on-call LLM — used to assert that stage extraction did NOT run
+    /// for a particular rule (e.g. rule below threshold, or rule below the
+    /// first-fired rule in the ranked list).
+    struct PanicLlm;
+    impl LlmCaller for PanicLlm {
+        fn call(&mut self, _msgs: Vec<Value>) -> Result<String, String> {
+            panic!("stage walker must not have been invoked");
+        }
+    }
+
+    // ---- 1. Top rule fails, fallback fires ---------------------------------
+
+    #[test]
+    fn b_fallback_top_rule_fails_fallback_fires() {
+        // tax_2024 scores 0.9 (top), tax_2023 scores 0.8 (second).
+        // Extracted year is "2023", so tax_2024's conditions fail and the
+        // walk falls through to tax_2023, whose conditions pass.
+        let c = make_classification(vec![("tax_2024", 0.9), ("tax_2023", 0.8)]);
+        let f = file_facts();
+
+        let rule_2024 = rule_with_year_stage("tax_2024", 0.6, Some(year_eq(2024)));
+        let rule_2023 = rule_with_year_stage("tax_2023", 0.6, Some(year_eq(2023)));
+        let rules = vec![rule_2024, rule_2023];
+
+        let mut llm = CountingYearLlm::new("2023");
+        let outcome = run_with_stages(&c, &f, &rules, "doc text", &mut llm);
+
+        assert!(outcome.matched, "fallback rule must have fired");
+        assert_eq!(outcome.fired.len(), 1);
+        assert_eq!(outcome.fired[0].category, "tax_2023");
+        // Both rules' stage walks ran (top rule needed to extract year=2023
+        // before its conditions could be evaluated, then the fallback walked).
+        assert_eq!(llm.call_count(), 2);
+    }
+
+    // ---- 2. All conditions fail → no_rule_match ----------------------------
+
+    #[test]
+    fn b_fallback_all_conditions_fail_unprocessable() {
+        // Three rules, all above threshold, all condition on years that
+        // don't match the extracted "1999".
+        let c = make_classification(vec![
+            ("tax_2024", 0.9),
+            ("tax_2023", 0.85),
+            ("tax_2022", 0.8),
+        ]);
+        let f = file_facts();
+
+        let rules = vec![
+            rule_with_year_stage("tax_2024", 0.6, Some(year_eq(2024))),
+            rule_with_year_stage("tax_2023", 0.6, Some(year_eq(2023))),
+            rule_with_year_stage("tax_2022", 0.6, Some(year_eq(2022))),
+        ];
+
+        let mut llm = CountingYearLlm::new("1999");
+        let outcome = run_with_stages(&c, &f, &rules, "doc text", &mut llm);
+
+        assert!(!outcome.matched, "no rule should fire when all conditions fail");
+        assert_eq!(outcome.fired.len(), 0);
+        // All three rules walked their stages before failing conditions.
+        assert_eq!(llm.call_count(), 3);
+    }
+
+    // ---- 3. Single surviving rule, conditions pass -------------------------
+
+    #[test]
+    fn b_fallback_single_rule_conditions_pass_fires() {
+        let c = make_classification(vec![("tax_2024", 0.95)]);
+        let f = file_facts();
+
+        let rules = vec![rule_with_year_stage("tax_2024", 0.6, Some(year_eq(2024)))];
+
+        let mut llm = CountingYearLlm::new("2024");
+        let outcome = run_with_stages(&c, &f, &rules, "doc text", &mut llm);
+
+        assert!(outcome.matched);
+        assert_eq!(outcome.fired.len(), 1);
+        assert_eq!(outcome.fired[0].category, "tax_2024");
+        assert_eq!(outcome.fired[0].resolved_subfolder, "2024");
+        assert_eq!(outcome.fired[0].resolved_rename_pattern, "tax_2024_2024.pdf");
+        assert_eq!(llm.call_count(), 1);
+    }
+
+    // ---- 4. No conditions on top rule → fires, lower rules never walked ----
+
+    #[test]
+    fn b_fallback_top_rule_no_conditions_short_circuits() {
+        // Top rule has no conditions, no stages → fires immediately.
+        // Second rule's stages must NEVER be walked (PanicLlm would panic).
+        let c = make_classification(vec![("memories", 0.95), ("tax_2023", 0.85)]);
+        let f = file_facts();
+
+        let rules = vec![
+            rule_no_stages("memories", 0.6, None),
+            rule_with_year_stage("tax_2023", 0.6, Some(year_eq(2023))),
+        ];
+
+        let mut llm = PanicLlm;
+        let outcome = run_with_stages(&c, &f, &rules, "doc text", &mut llm);
+
+        assert!(outcome.matched);
+        assert_eq!(outcome.fired.len(), 1);
+        assert_eq!(outcome.fired[0].category, "memories");
+    }
+
+    // ---- 5. Tie in score → first emitted wins ------------------------------
+
+    #[test]
+    fn b_fallback_tie_in_score_first_emitted_wins() {
+        // Both rules score 0.8; both have no conditions and no stages.
+        // Whichever appears first in the rule_signals array fires.
+        let c = make_classification(vec![("alpha", 0.8), ("beta", 0.8)]);
+        let f = file_facts();
+
+        // Slice ORDER deliberately reversed vs signal order — proves
+        // tie-break uses signal-array position, not rule-slice position.
+        let rules = vec![
+            rule_no_stages("beta", 0.6, None),
+            rule_no_stages("alpha", 0.6, None),
+        ];
+
+        let mut llm = PanicLlm;
+        let outcome = run_with_stages(&c, &f, &rules, "doc text", &mut llm);
+
+        assert!(outcome.matched);
+        assert_eq!(outcome.fired.len(), 1);
+        assert_eq!(
+            outcome.fired[0].category, "alpha",
+            "first label emitted in rule_signals must win the tie"
+        );
+    }
+
+    // ---- 6. Threshold filter still applies ---------------------------------
+
+    #[test]
+    fn b_fallback_below_threshold_rule_never_walked() {
+        // tax_low scores 0.4, below its 0.6 threshold → must NOT be walked.
+        // tax_ok scores 0.7, above threshold → walks and fires.
+        let c = make_classification(vec![("tax_low", 0.4), ("tax_ok", 0.7)]);
+        let f = file_facts();
+
+        // Build tax_low with stages that would PANIC if walked, and a
+        // condition that would otherwise pass (year_eq(2024)).
+        let mut tax_low = rule_with_year_stage("tax_low", 0.6, Some(year_eq(2024)));
+        // Hijack the stage to assert it was never reached: rule_with_year_stage
+        // already produces a stage but it would only be invoked via the LLM
+        // caller — using PanicLlm proves "stage extraction happened iff LLM
+        // was called", which is what we want. We need a different LLM for
+        // tax_ok though, so we route everything through a single counting LLM
+        // and assert the count == 1 (only tax_ok extracted).
+        tax_low.rename_pattern = "low.pdf".into();
+
+        let tax_ok = rule_with_year_stage("tax_ok", 0.6, Some(year_eq(2024)));
+
+        let rules = vec![tax_low, tax_ok];
+
+        let mut llm = CountingYearLlm::new("2024");
+        let outcome = run_with_stages(&c, &f, &rules, "doc text", &mut llm);
+
+        assert!(outcome.matched);
+        assert_eq!(outcome.fired[0].category, "tax_ok");
+        assert_eq!(
+            llm.call_count(),
+            1,
+            "only the above-threshold rule should have had its stages walked"
+        );
     }
 }
