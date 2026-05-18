@@ -682,18 +682,17 @@ pub fn run(
             // One row per PlacementResult so the log is interchangeable with
             // the panel batch pipeline (which also emits per-placement).
             // Non-fatal on failure: log a warning and continue.
+            //
+            // `source_filename` carries the fully-qualified path of the source
+            // file (OS-native separators preserved — Windows backslashes /
+            // POSIX slashes — so the log is locator-style on every platform).
             if audit_enabled && !audit_path.is_empty() && !placements.is_empty() {
-                let source_filename = Path::new(abs_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(rel_path.as_str())
-                    .to_string();
                 let rule_label_str = first_rule_label.clone().unwrap_or_default();
                 let audit_rows = build_audit_rows_for_placements(
                     &placements,
                     &registry,
                     &sha256,
-                    &source_filename,
+                    abs_path,
                     &rule_label_str,
                 );
                 if !audit_rows.is_empty() {
@@ -1499,7 +1498,7 @@ mod tests {
             &placements,
             &registry,
             "deadbeefcafe",
-            "invoice-001.pdf",
+            "/srv/inbox/invoice-001.pdf",
             "Invoice",
         );
         assert_eq!(rows.len(), 2, "one row per PlacementResult");
@@ -1508,7 +1507,8 @@ mod tests {
         assert_eq!(rows[0].event, "placement");
         assert_eq!(rows[0].disposition, "placed");
         assert_eq!(rows[0].source_sha256, "deadbeefcafe");
-        assert_eq!(rows[0].source_filename, "invoice-001.pdf");
+        // source_filename is fully-qualified path; caller passed it through.
+        assert_eq!(rows[0].source_filename, "/srv/inbox/invoice-001.pdf");
         assert_eq!(rows[0].rule_label, "Invoice");
         assert_eq!(rows[0].destination_id, "dir-invoices");
         assert_eq!(rows[0].destination_kind, "directory");

@@ -39,7 +39,7 @@
 //! | `timestamp`       | ISO-8601 UTC (e.g. `2026-05-14T12:34:56Z`) |
 //! | `event`           | `placement`, `skipped`, or `superseded` |
 //! | `source_sha256`   | Hex SHA-256 of the source file content |
-//! | `source_filename` | Original filename (basename only, CSV-escaped) |
+//! | `source_filename` | Fully-qualified source path (OS-native separators, CSV-escaped) |
 //! | `rule_label`      | The classification rule label that fired |
 //! | `destination_id`  | Destination registry id |
 //! | `destination_kind`| `vault` or `directory` |
@@ -79,7 +79,9 @@ pub struct AuditRow {
     pub event: String,
     /// Hex SHA-256 of the source file.
     pub source_sha256: String,
-    /// Original source filename (basename).
+    /// Fully-qualified path of the source file. OS-native separators preserved
+    /// (Windows backslashes, POSIX slashes) so the value is a usable locator
+    /// on whichever host produced the log.
     pub source_filename: String,
     /// Rule label that fired.
     pub rule_label: String,
@@ -99,7 +101,7 @@ impl AuditRow {
     /// Build a row for a successful `placed` event from a `PlacementResult`.
     ///
     /// - `source_sha256`   — content hash of the source file.
-    /// - `source_filename` — basename of the source file.
+    /// - `source_filename` — fully-qualified source path (OS-native separators).
     /// - `rule_label`      — rule that fired for this document.
     /// - `placement`       — per-destination `PlacementResult` from W6.
     /// - `vault_path`      — vault path (used as `resolved_path` for vault dests).

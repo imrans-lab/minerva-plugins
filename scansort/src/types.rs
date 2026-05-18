@@ -177,9 +177,12 @@ pub fn compute_sha256(path: &Path) -> VaultResult<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Get current time as ISO8601 UTC string.
+/// Get current time as an RFC 3339 / ISO 8601 UTC string with the `Z`
+/// designator (e.g. `2026-05-18T23:08:48.895695645Z`). The `Z` form is
+/// the canonical UTC suffix; semantically identical to `+00:00` but more
+/// compact and unambiguous in audit logs and serialized JSON.
 pub fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339()
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
 }
 
 /// Compute Hamming distance between two 16-hex-digit SimHash strings.
@@ -496,4 +499,21 @@ fn normalize_text(text: &str) -> String {
         .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
         .collect();
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// now_iso shape tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod now_iso_tests {
+    use super::now_iso;
+
+    /// now_iso must use the RFC 3339 / ISO 8601 `Z` UTC designator, never `+00:00`.
+    #[test]
+    fn now_iso_uses_z_designator_not_plus_zero() {
+        let ts = now_iso();
+        assert!(ts.ends_with("Z"), "expected Z suffix, got: {}", ts);
+        assert!(!ts.contains("+00:00"), "must not contain +00:00, got: {}", ts);
+    }
 }
