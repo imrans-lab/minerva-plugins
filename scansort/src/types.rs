@@ -376,6 +376,36 @@ pub struct RuleSignal {
     pub score: f64,
 }
 
+/// Lax i32 deserializer — accepts `i64`, `f64`, or null, truncates float to int.
+///
+/// Needed because GDScript / Godot's JSON encoder serializes integer values as
+/// floating-point (`0` → `0.0`), and the panel forwards classification dicts
+/// verbatim to the rule_engine. Serde's default i32 deserializer rejects floats
+/// outright, breaking every Process All run when `year` defaults to 0.
+/// See `project_godot_json_int_to_float` memory + bug 019e41e1.
+fn deserialize_lax_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::Null => Ok(0),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i as i32)
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.trunc() as i32)
+            } else {
+                Err(D::Error::custom(format!("number out of i32 range: {n}")))
+            }
+        }
+        other => Err(D::Error::custom(format!(
+            "expected number or null, got {other:?}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Classification {
     // ── legacy fields (unchanged) ──────────────────────────────────────────
@@ -396,7 +426,7 @@ pub struct Classification {
     #[serde(default)]
     pub amount: String,
     /// Calendar year extracted from doc_date (0 when not parseable).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lax_i32")]
     pub year: i32,
     /// Per-rule semantic-match scores.  One entry per *enabled* rule in the
     /// rule set.  W3 consumes these to threshold, apply conditions, and pick

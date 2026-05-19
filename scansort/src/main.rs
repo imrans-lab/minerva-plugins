@@ -1591,23 +1591,31 @@ fn handle_run_rule_engine(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
 
     // ── Rules source ────────────────────────────────────────────────────────
-    // Accept a pre-loaded rules array or load from rules_path.
+    // Resolution order (bug 019e41e1 fix):
+    //   1. Explicit `rules` array (LLM agents pass it inline)
+    //   2. Legacy per-vault sidecar at `rules_path` — ONLY if the file exists.
+    //      `load_or_init` would otherwise create an empty file and silently
+    //      return zero rules, which is what was breaking Process All when the
+    //      panel passed a sidecar path that no longer exists.
+    //   3. Global library at the OS app-data path (the new source of truth).
     let rules_path = args.get("rules_path").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
-    let rule_list: Vec<types::Rule> = if let Some(rp) = rules_path {
-        let p = std::path::Path::new(rp);
-        let file = match rules_file::load_or_init(p) {
-            Ok(f) => f,
-            Err(e) => return ok_response(id, tool_err(&format!("Failed to load rules: {}", e.message))),
-        };
-        file.to_rules()
-    } else if let Some(rules_val) = args.get("rules") {
+    let rule_list: Vec<types::Rule> = if let Some(rules_val) = args.get("rules") {
         match serde_json::from_value::<Vec<types::Rule>>(rules_val.clone()) {
             Ok(v) => v,
             Err(e) => return ok_response(id, tool_err(&format!("Failed to parse rules: {e}"))),
         }
+    } else if let Some(rp) = rules_path.filter(|p| std::path::Path::new(p).exists()) {
+        let p = std::path::Path::new(rp);
+        match rules_file::load_or_init(p) {
+            Ok(f) => f.to_rules(),
+            Err(e) => return ok_response(id, tool_err(&format!("Failed to load rules: {}", e.message))),
+        }
     } else {
-        return ok_response(id, tool_err("rules_path or rules is required"));
+        match library::library_load() {
+            Ok(f) => f.to_rules(),
+            Err(e) => return ok_response(id, tool_err(&format!("Failed to load library: {}", e.message))),
+        }
     };
 
     // ── Classification (Phase-1 output) ─────────────────────────────────────
@@ -1925,10 +1933,25 @@ fn handle_place_fanout(params: &Value, id: Value) -> RpcResponse {
 
     // Load destination registry.
     let reg_path = std::path::Path::new(registry_path);
-    let registry = match destinations::load_or_init(reg_path) {
+    let base_registry = match destinations::load_or_init(reg_path) {
         Ok(r) => r,
         Err(e) => return ok_response(id, tool_err(&e.message)),
     };
+
+    // DCR 019e4281: resolve copy_to against the open-session vault list.
+    // Empty copy_to — or a copy_to whose entries name no open/registered
+    // destination — fans out to every open vault. fan_out then resolves the
+    // returned ids against `registry` (which has been augmented with any
+    // session vault that wasn't already registered).
+    let session_vaults = session::entries_full().0;
+    let (registry, copy_to) =
+        placement::resolve_copy_to(&copy_to, &base_registry, &session_vaults);
+    if copy_to.is_empty() {
+        return ok_response(
+            id,
+            tool_err("no destination: copy_to is empty and no vault is open"),
+        );
+    }
 
     // Build DocMeta from params.
     let meta = placement::DocMeta {

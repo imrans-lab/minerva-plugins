@@ -344,6 +344,84 @@ fn resolve_directory_target(
 }
 
 // ---------------------------------------------------------------------------
+// DCR 019e4281 — copy_to resolution against the open-session vault list
+// ---------------------------------------------------------------------------
+
+/// Resolve a rule's `copy_to` list into concrete destination IDs, augmenting
+/// the persistent registry with the caller's open session vaults.
+///
+/// Routing model (DCR 019e4281):
+///   - Empty `copy_to` → fan out to EVERY open session vault.
+///   - Non-empty `copy_to` → each entry resolved by registry id first, then by
+///     destination label (the session-list semantics the user authors against).
+///   - If `copy_to` was non-empty but NO entry resolved (e.g. a stale rule
+///     naming a vault that isn't open), fall back to the empty-copy_to
+///     behaviour. This keeps pre-existing rules working with no migration step.
+///
+/// `session_vaults` is the caller's open-vault list as `(label, path)` pairs
+/// (from `session::entries_full().0`). Any session vault not already present in
+/// `base` by path is appended as a synthetic `session:<label>` destination so
+/// `fan_out` can resolve it.
+///
+/// Returns `(augmented_registry, effective_copy_to_ids)`. The effective id list
+/// is de-duplicated so a document is never placed into the same vault twice.
+pub fn resolve_copy_to(
+    copy_to: &[String],
+    base: &DestinationRegistry,
+    session_vaults: &[(String, PathBuf)],
+) -> (DestinationRegistry, Vec<String>) {
+    use crate::destinations::Destination;
+
+    let mut reg = base.clone();
+    let mut open_vault_ids: Vec<String> = Vec::new();
+
+    for (label, path) in session_vaults {
+        let path_str = path.to_string_lossy().into_owned();
+        if let Some(existing) = reg.destinations.iter().find(|d| d.path == path_str) {
+            if !open_vault_ids.contains(&existing.id) {
+                open_vault_ids.push(existing.id.clone());
+            }
+        } else {
+            let synth_id = format!("session:{label}");
+            reg.destinations.push(Destination {
+                id: synth_id.clone(),
+                kind: "vault".to_string(),
+                path: path_str,
+                label: label.clone(),
+                locked: false,
+            });
+            open_vault_ids.push(synth_id);
+        }
+    }
+
+    // Resolve each requested entry: registry id first, then destination label.
+    let mut resolved: Vec<String> = copy_to
+        .iter()
+        .filter_map(|entry| {
+            if reg.destinations.iter().any(|d| &d.id == entry) {
+                Some(entry.clone())
+            } else {
+                reg.destinations
+                    .iter()
+                    .find(|d| &d.label == entry)
+                    .map(|d| d.id.clone())
+            }
+        })
+        .collect();
+
+    let mut effective = if resolved.is_empty() {
+        open_vault_ids
+    } else {
+        // De-dup while preserving order.
+        let mut seen = HashSet::new();
+        resolved.retain(|id| seen.insert(id.clone()));
+        resolved
+    };
+    effective.dedup();
+    (reg, effective)
+}
+
+// ---------------------------------------------------------------------------
 // Fan-out
 // ---------------------------------------------------------------------------
 
@@ -670,6 +748,97 @@ mod tests {
             doc_type: String::new(),
             amount: String::new(),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // DCR 019e4281 — resolve_copy_to
+    // -----------------------------------------------------------------------
+
+    fn sv(label: &str, path: &str) -> (String, PathBuf) {
+        (label.to_string(), PathBuf::from(path))
+    }
+
+    // Empty copy_to → fan out to every open session vault.
+    #[test]
+    fn resolve_copy_to_empty_fans_all_open_vaults() {
+        let base = DestinationRegistry::default();
+        let vaults = vec![
+            sv("v1", "/fake/v1.ssort"),
+            sv("v2", "/fake/v2.ssort"),
+        ];
+        let (reg, effective) = resolve_copy_to(&[], &base, &vaults);
+        assert_eq!(effective.len(), 2, "empty copy_to should target both vaults");
+        // Both synthetic destinations are resolvable in the augmented registry.
+        for id in &effective {
+            assert!(reg.destinations.iter().any(|d| &d.id == id));
+        }
+    }
+
+    // Non-empty copy_to naming a label that no open vault matches → falls back
+    // to all open vaults (the migration-free path for stale rules).
+    #[test]
+    fn resolve_copy_to_all_unresolvable_falls_back_to_all_vaults() {
+        let base = DestinationRegistry::default();
+        let vaults = vec![sv("ui_test", "/fake/ui_test.ssort")];
+        let (_reg, effective) =
+            resolve_copy_to(&["test".to_string()], &base, &vaults);
+        assert_eq!(effective.len(), 1, "stale label should fall back to the open vault");
+        assert_eq!(effective[0], "session:ui_test");
+    }
+
+    // Non-empty copy_to whose entry matches an open vault by LABEL resolves to
+    // that single destination — explicit routing is preserved.
+    #[test]
+    fn resolve_copy_to_label_match_routes_explicitly() {
+        let base = DestinationRegistry::default();
+        let vaults = vec![
+            sv("taxes", "/fake/taxes.ssort"),
+            sv("misc", "/fake/misc.ssort"),
+        ];
+        let (_reg, effective) =
+            resolve_copy_to(&["taxes".to_string()], &base, &vaults);
+        assert_eq!(effective, vec!["session:taxes".to_string()]);
+    }
+
+    // A session vault already present in the persistent registry reuses its
+    // registry id rather than synthesising a new one.
+    #[test]
+    fn resolve_copy_to_reuses_registered_vault_id() {
+        let mut base = DestinationRegistry::default();
+        base.destinations.push(crate::destinations::Destination {
+            id: "taxes-1".to_string(),
+            kind: "vault".to_string(),
+            path: "/fake/taxes.ssort".to_string(),
+            label: "taxes".to_string(),
+            locked: false,
+        });
+        let vaults = vec![sv("taxes", "/fake/taxes.ssort")];
+        let (reg, effective) = resolve_copy_to(&[], &base, &vaults);
+        assert_eq!(effective, vec!["taxes-1".to_string()]);
+        // No synthetic duplicate was appended.
+        assert_eq!(reg.destinations.len(), 1);
+    }
+
+    // Duplicate copy_to entries that point at the same destination collapse to
+    // a single placement target.
+    #[test]
+    fn resolve_copy_to_dedups_repeated_targets() {
+        let mut base = DestinationRegistry::default();
+        base.destinations.push(crate::destinations::Destination {
+            id: "taxes-1".to_string(),
+            kind: "vault".to_string(),
+            path: "/fake/taxes.ssort".to_string(),
+            label: "taxes".to_string(),
+            locked: false,
+        });
+        let vaults = vec![sv("taxes", "/fake/taxes.ssort")];
+        // "taxes-1" (id) and "taxes" (label) both name the same destination.
+        let (_reg, effective) = resolve_copy_to(
+            &["taxes-1".to_string(), "taxes".to_string()],
+            &base,
+            &vaults,
+        );
+        assert_eq!(effective, vec!["taxes-1".to_string()]);
     }
 
     // -----------------------------------------------------------------------
