@@ -158,7 +158,23 @@ fn test_events_contains_state_changed() {
     );
 }
 
-// ── Test 4: every manifest tool name has a handler in main.rs ──
+// ── Test 4: DCR 019e3d67 session_reset is registered ──
+
+#[test]
+fn test_session_reset_tool_present() {
+    let manifest = load_manifest();
+    let tool_list = tools(&manifest);
+    let found = tool_list
+        .iter()
+        .any(|t| t["name"].as_str() == Some("minerva_scansort_session_reset"));
+    assert!(
+        found,
+        "manifest.json must register 'minerva_scansort_session_reset' — \
+         regression guard for DCR 019e3d67."
+    );
+}
+
+// ── Test 5: every manifest tool name has a handler in main.rs ──
 //
 // We grep src/main.rs for `"minerva_scansort_…" =>` match arms and verify
 // each manifest tool appears at least once.

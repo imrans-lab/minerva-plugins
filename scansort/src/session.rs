@@ -135,6 +135,21 @@ pub fn remove_source(label: &str) -> VaultResult<()> {
     with_session(|s| Session::remove(&mut s.open_sources, label))
 }
 
+/// Drop the entire session — clears vaults, dirs, and sources in-place.
+///
+/// In-memory only: nothing on disk is touched (vault `.ssort` files, source
+/// `.scansort-state.json` manifests, and the rule library all stay put).
+/// Returns the pre-reset counts so the caller can report what was cleared.
+pub fn reset() -> (usize, usize, usize) {
+    with_session(|s| {
+        let counts = (s.open_vaults.len(), s.open_dirs.len(), s.open_sources.len());
+        s.open_vaults.clear();
+        s.open_dirs.clear();
+        s.open_sources.clear();
+        counts
+    })
+}
+
 /// Return a snapshot of session labels.  **No paths are included.**
 pub fn state() -> SessionState {
     with_session(|s| SessionState {
@@ -398,6 +413,57 @@ mod tests {
         av(&mut s, "Temp").unwrap();
         let st = state_of(&s);
         assert_eq!(st.vaults, vec!["Temp"]);
+    }
+
+    // Guard for tests that touch the global singleton — serializes them so
+    // parallel test threads don't race over the shared SESSION.
+    static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    // (j) reset() clears all three sets in-place. Touches the global singleton,
+    // so we serialize via GLOBAL_TEST_LOCK and use unique labels per kind.
+    #[test]
+    fn reset_clears_all_three_sets() {
+        let _g = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Start from a known-empty baseline.
+        let _ = reset();
+
+        // Populate: 2 vaults / 2 dirs / 1 source.
+        add_vault("reset_v1", PathBuf::from("/fake/reset_v1.ssort")).unwrap();
+        add_vault("reset_v2", PathBuf::from("/fake/reset_v2.ssort")).unwrap();
+        add_dir("reset_d1", PathBuf::from("/fake/dir/reset_d1")).unwrap();
+        add_dir("reset_d2", PathBuf::from("/fake/dir/reset_d2")).unwrap();
+        add_source("reset_s1", PathBuf::from("/fake/src/reset_s1")).unwrap();
+
+        // Sanity: state shows what we just added.
+        let pre = state();
+        assert_eq!(pre.vaults.len(), 2, "expected 2 vaults pre-reset");
+        assert_eq!(pre.dirs.len(), 2, "expected 2 dirs pre-reset");
+        assert_eq!(pre.sources.len(), 1, "expected 1 source pre-reset");
+
+        // Reset returns pre-reset counts and empties everything.
+        let (v, d, s) = reset();
+        assert_eq!(v, 2, "reset() should report 2 vaults cleared");
+        assert_eq!(d, 2, "reset() should report 2 dirs cleared");
+        assert_eq!(s, 1, "reset() should report 1 source cleared");
+
+        let post = state();
+        assert!(post.vaults.is_empty(), "vaults must be empty after reset");
+        assert!(post.dirs.is_empty(), "dirs must be empty after reset");
+        assert!(post.sources.is_empty(), "sources must be empty after reset");
+
+        // After reset, labels are free for re-use.
+        add_vault("reset_v1", PathBuf::from("/fake/reset_v1.ssort")).unwrap();
+        let _ = reset();
+    }
+
+    // (k) reset() on an empty session is a no-op and reports zero counts.
+    #[test]
+    fn reset_on_empty_returns_zeros() {
+        let _g = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = reset();
+        let (v, d, s) = reset();
+        assert_eq!((v, d, s), (0, 0, 0), "reset on empty session should report zeros");
     }
 
     // (i) sources have independent label namespace from vaults/dirs.

@@ -212,6 +212,10 @@
       }
     },
     {
+      "name": "minerva_scansort_session_reset",
+      "description": "DCR 019e3d67: drop the entire scansort session back to its initialized state (in-memory only — vault .ssort files, source .scansort-state.json manifests, and the rule library are NOT touched on disk). Clears the labeled vault, directory, and source sets in one shot. Returns {ok, cleared: {vaults: N, dirs: N, sources: N}} with the pre-reset counts."
+    },
+    {
       "name": "minerva_scansort_library_insert_rule",
       "description": "Upsert a rule into the global library (OS app-data path, no vault required). If a rule with the same label exists it is replaced. Returns {ok, rule}."
     },

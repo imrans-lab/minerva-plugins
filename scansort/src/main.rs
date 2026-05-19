@@ -177,6 +177,9 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         | "minerva_scansort_update_project_key"
         | "minerva_scansort_session_open_vault"
         | "minerva_scansort_session_close_vault" => Some("vault"),
+        // DCR 019e3d67: session_reset clears every kind at once. Pick "session"
+        // so panels know to refresh source + destinations + vault chrome together.
+        "minerva_scansort_session_reset" => Some("session"),
         "minerva_scansort_registry_add"
         | "minerva_scansort_registry_remove" => Some("registry"),
         "minerva_scansort_insert_rule"
@@ -2226,6 +2229,27 @@ fn handle_session_close_source(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
+/// DCR 019e3d67: drop the entire scansort session back to its initialized
+/// state — in-memory only. Vault `.ssort` files, source `.scansort-state.json`
+/// manifests, and the rule library are NOT touched on disk.
+///
+/// Returns the pre-reset counts of each cleared category so the panel can
+/// report what was let go.
+fn handle_session_reset(_params: &Value, id: Value) -> RpcResponse {
+    let (vaults, dirs, sources) = session::reset();
+    ok_response(
+        id,
+        tool_ok(json!({
+            "ok": true,
+            "cleared": {
+                "vaults":  vaults,
+                "dirs":    dirs,
+                "sources": sources,
+            },
+        })),
+    )
+}
+
 fn handle_session_state(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3476,6 +3500,15 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_session_reset",
+                        "description": "DCR 019e3d67: drop the entire scansort session back to its initialized state (in-memory only — vault .ssort files, source .scansort-state.json manifests, and the rule library are NOT touched on disk). Clears the labeled vault, directory, and source sets in one shot. Returns {ok, cleared: {vaults: N, dirs: N, sources: N}} where the counts are the pre-reset cardinalities.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    },
+                    {
                         "name": "minerva_scansort_library_insert_rule",
                         "description": "B2: Upsert a rule into the global library (OS app-data path, no vault required). If a rule with the same label exists it is replaced. Returns {ok, rule}.",
                         "inputSchema": {
@@ -3867,6 +3900,9 @@ fn main() {
                     "minerva_scansort_session_state" => {
                         handle_session_state(&req.params, req.id)
                     }
+                    "minerva_scansort_session_reset" => {
+                        handle_session_reset(&req.params, req.id)
+                    }
                     "minerva_scansort_library_insert_rule" => {
                         handle_library_insert_rule(&req.params, req.id)
                     }
@@ -3949,6 +3985,8 @@ mod state_change_kind_tests {
             ("minerva_scansort_session_close_directory",  Some("destination")),
             ("minerva_scansort_session_open_vault",       Some("vault")),
             ("minerva_scansort_session_close_vault",      Some("vault")),
+            // DCR 019e3d67: session-wide reset announces as "session".
+            ("minerva_scansort_session_reset",            Some("session")),
             // --- one representative per remaining kind ---
             ("minerva_scansort_set_source_dir",           Some("source")),
             ("minerva_scansort_destination_add",          Some("destination")),

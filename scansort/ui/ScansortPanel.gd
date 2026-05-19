@@ -497,7 +497,7 @@ func _on_file_menu_id_pressed(id: int) -> void:
 	match id:
 		0: _on_new_vault_pressed()
 		1: _on_open_vault_pressed()
-		2: _on_close_vault_pressed()
+		2: _on_close_session_pressed()
 		3: _on_add_document_pressed()
 		4: _on_rules_editor_pressed()
 		5: _on_vault_registry_pressed()
@@ -528,6 +528,52 @@ func _on_close_vault_pressed() -> void:
 	vault_closed.emit()
 	# R2: clear views.
 	_on_vault_closed_r2()
+	_refresh_chrome_menu_state()
+
+
+## DCR 019e3d67: File→Close drops the entire scansort session back to its
+## initialized state. Calls minerva_scansort_session_reset (in-memory only —
+## no disk side-effects), then mirrors the existing source/vault close paths
+## to clear local panel state + refresh both panes. Always safe to invoke on
+## an empty session (the MCP tool reports zero counts and the panel re-zeros
+## its local label bookkeeping).
+func _on_close_session_pressed() -> void:
+	var conn := _get_connection()
+	if conn != null:
+		var result: Dictionary = await conn.call_tool(
+			"minerva_scansort_session_reset",
+			{},
+		)
+		if not result.get("ok", false):
+			set_status("Close session failed: %s" % result.get("error", "unknown"))
+			return
+		var cleared: Dictionary = result.get("cleared", {})
+		set_status(
+			"Session closed (vaults: %d, dirs: %d, sources: %d)."
+			% [int(cleared.get("vaults", 0)), int(cleared.get("dirs", 0)), int(cleared.get("sources", 0))]
+		)
+	else:
+		set_status("Session closed.")
+
+	# Mirror _on_vault_closed_r2 to clear local vault chrome + emit close.
+	_active_vault_path = ""
+	_vault_is_open = false
+	_vault_password = ""
+	vault_closed.emit()
+	_on_vault_closed_r2()
+
+	# Drop our local label bookkeeping — the broker already cleared its side.
+	_session_vault_label = ""
+	_session_source_label = ""
+	_session_dir_labels.clear()
+
+	# Refresh the source pane (mirror of _do_set_source_dir / vault-close paths).
+	if _source_tree != null and is_instance_valid(_source_tree):
+		_source_tree.set_provider(null)
+		_source_tree.populate([])
+
+	# Refresh the destination trees if their providers are still wired up.
+	_refresh_all_dest_trees_if_ready()
 	_refresh_chrome_menu_state()
 
 # ---------------------------------------------------------------------------
@@ -3021,7 +3067,9 @@ func get_editor_actions() -> Array:
 	popup.add_item("Extract Marked To...", 12)
 	popup.add_item("Recovery Sheet...", 13)
 	popup.add_separator()
-	popup.add_item("Close Vault", 2)
+	# DCR 019e3d67: File→Close drops the entire session (vault + source + dirs)
+	# back to an initialized state in-memory. Disk side-effects: none.
+	popup.add_item("Close", 2)
 	popup.id_pressed.connect(_on_file_menu_id_pressed)
 	# Cache the popup so vault state changes can grey out gated items.
 	_chrome_popup = popup
@@ -3035,13 +3083,15 @@ func get_editor_actions() -> Array:
 
 
 ## Disable File-menu items that require an open vault when no vault is open.
-## Always enabled: New Vault (0), Open Vault (1), Rules… (4), Vault Registry (5).
-## Vault-gated: Close (2), Add Document (3), Checklist (7),
+## Always enabled: New Vault (0), Open Vault (1), Close (2 — DCR 019e3d67:
+## now session-wide and a no-op on an empty session), Rules… (4),
+## Vault Registry (5).
+## Vault-gated: Add Document (3), Checklist (7),
 ##              Extract Marked (12), Recovery Sheet (13).
 func _refresh_chrome_menu_state() -> void:
 	if _chrome_popup == null or not is_instance_valid(_chrome_popup):
 		return
-	var vault_gated: Array[int] = [2, 3, 7, 12, 13]
+	var vault_gated: Array[int] = [3, 7, 12, 13]
 	for item_id in vault_gated:
 		var idx: int = _chrome_popup.get_item_index(item_id)
 		if idx >= 0:
