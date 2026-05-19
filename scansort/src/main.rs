@@ -164,7 +164,11 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
     match name {
         "minerva_scansort_set_source_dir"
         | "minerva_scansort_session_open_source"
-        | "minerva_scansort_session_close_source" => Some("source"),
+        | "minerva_scansort_session_close_source"
+        // DCR 019e41a5: clearing a source manifest is a source-side disk
+        // change. Tag as "source" so the panel refreshes the source pane
+        // (where any user-visible cache indicators would render).
+        | "minerva_scansort_clear_source_cache" => Some("source"),
         "minerva_scansort_destination_add"
         | "minerva_scansort_destination_remove"
         | "minerva_scansort_set_destination"
@@ -2250,6 +2254,60 @@ fn handle_session_reset(_params: &Value, id: Value) -> RpcResponse {
     )
 }
 
+/// DCR 019e41a5: delete the `.scansort-state.json` manifest under every
+/// currently-open source so the next process() run re-scans those files
+/// instead of skipping them as already-processed. Vaults, vault dedup
+/// stores, the rule library, and the in-memory session are NOT touched.
+///
+/// Per-source result is reported in `sources[]`. `manifest_existed` is
+/// false when there was no manifest to remove (still counted as success).
+/// `error` is set when remove_file failed for a reason other than NotFound.
+/// Returns:
+///   {ok, attempted: N_sources_open, cleared: N_files_actually_removed,
+///    sources: [{label, manifest_existed, error?}]}
+fn handle_clear_source_cache(_params: &Value, id: Value) -> RpcResponse {
+    let sources = session::open_sources_sorted();
+    let attempted = sources.len();
+    let mut cleared: usize = 0;
+    let mut per_source: Vec<Value> = Vec::with_capacity(attempted);
+
+    for (label, path) in sources {
+        let manifest_path = path.join(source_state::STATE_FILENAME);
+        match std::fs::remove_file(&manifest_path) {
+            Ok(()) => {
+                cleared += 1;
+                per_source.push(json!({
+                    "label": label,
+                    "manifest_existed": true,
+                }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                per_source.push(json!({
+                    "label": label,
+                    "manifest_existed": false,
+                }));
+            }
+            Err(e) => {
+                per_source.push(json!({
+                    "label": label,
+                    "manifest_existed": true,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    ok_response(
+        id,
+        tool_ok(json!({
+            "ok": true,
+            "attempted": attempted,
+            "cleared": cleared,
+            "sources": per_source,
+        })),
+    )
+}
+
 fn handle_session_state(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3509,6 +3567,15 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_clear_source_cache",
+                        "description": "DCR 019e41a5: delete the `.scansort-state.json` source manifest under every currently-open source directory so the next process() run re-scans those files instead of skipping them. Vault `.ssort` files, vault dedup hash stores, the rule library, and the in-memory session are NOT touched. Per-source result reported in sources[]. Returns {ok, attempted, cleared, sources:[{label, manifest_existed, error?}]}.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                        },
+                    },
+                    {
                         "name": "minerva_scansort_library_insert_rule",
                         "description": "B2: Upsert a rule into the global library (OS app-data path, no vault required). If a rule with the same label exists it is replaced. Returns {ok, rule}.",
                         "inputSchema": {
@@ -3903,6 +3970,9 @@ fn main() {
                     "minerva_scansort_session_reset" => {
                         handle_session_reset(&req.params, req.id)
                     }
+                    "minerva_scansort_clear_source_cache" => {
+                        handle_clear_source_cache(&req.params, req.id)
+                    }
                     "minerva_scansort_library_insert_rule" => {
                         handle_library_insert_rule(&req.params, req.id)
                     }
@@ -3987,6 +4057,8 @@ mod state_change_kind_tests {
             ("minerva_scansort_session_close_vault",      Some("vault")),
             // DCR 019e3d67: session-wide reset announces as "session".
             ("minerva_scansort_session_reset",            Some("session")),
+            // DCR 019e41a5: clearing source manifests is a source-side event.
+            ("minerva_scansort_clear_source_cache",       Some("source")),
             // --- one representative per remaining kind ---
             ("minerva_scansort_set_source_dir",           Some("source")),
             ("minerva_scansort_destination_add",          Some("destination")),

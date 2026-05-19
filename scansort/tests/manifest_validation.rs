@@ -174,7 +174,23 @@ fn test_session_reset_tool_present() {
     );
 }
 
-// ── Test 5: every manifest tool name has a handler in main.rs ──
+// ── Test 5: DCR 019e41a5 clear_source_cache is registered ──
+
+#[test]
+fn test_clear_source_cache_tool_present() {
+    let manifest = load_manifest();
+    let tool_list = tools(&manifest);
+    let found = tool_list
+        .iter()
+        .any(|t| t["name"].as_str() == Some("minerva_scansort_clear_source_cache"));
+    assert!(
+        found,
+        "manifest.json must register 'minerva_scansort_clear_source_cache' — \
+         regression guard for DCR 019e41a5."
+    );
+}
+
+// ── Test 6: every manifest tool name has a handler in main.rs ──
 //
 // We grep src/main.rs for `"minerva_scansort_…" =>` match arms and verify
 // each manifest tool appears at least once.

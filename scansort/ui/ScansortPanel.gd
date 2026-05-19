@@ -502,6 +502,7 @@ func _on_file_menu_id_pressed(id: int) -> void:
 		4: _on_rules_editor_pressed()
 		5: _on_vault_registry_pressed()
 		7: _on_checklist_pressed()
+		8: _on_clear_cache_pressed()
 		11: _on_settings_pressed()
 		12: _on_export_marked_pressed()
 		13: _on_recovery_sheet_pressed()
@@ -575,6 +576,61 @@ func _on_close_session_pressed() -> void:
 	# Refresh the destination trees if their providers are still wired up.
 	_refresh_all_dest_trees_if_ready()
 	_refresh_chrome_menu_state()
+
+
+## DCR 019e41a5: File→Clear Cache deletes the `.scansort-state.json` source
+## manifest under every currently-open source so the next Start re-scans
+## those files instead of skipping them. Vault, vault dedup, library, and
+## in-memory session all untouched. Modal confirm before action.
+func _on_clear_cache_pressed() -> void:
+	# Get source count via broker (single source of truth — panel only tracks
+	# one label but the broker can have more).
+	var conn := _get_connection()
+	if conn == null:
+		set_status("ERROR: scansort plugin not running.")
+		return
+	var state: Dictionary = await conn.call_tool("minerva_scansort_session_state", {})
+	if not state.get("ok", false):
+		set_status("Clear cache: failed to read session state.")
+		return
+	var sources: Array = state.get("sources", [])
+	var n: int = sources.size()
+	if n == 0:
+		set_status("Clear cache: no sources open.")
+		return
+
+	var dlg := ConfirmationDialog.new()
+	dlg.title = "Clear Cache"
+	dlg.dialog_text = (
+		"Clear cache for %d source(s)?\n\nFiles will be re-processed on the next run.\n"
+		% n
+	)
+	dlg.confirmed.connect(func() -> void:
+		await _do_clear_cache()
+		dlg.queue_free()
+	)
+	dlg.canceled.connect(func() -> void:
+		dlg.queue_free()
+	)
+	add_child(dlg)
+	dlg.popup_centered(Vector2i(420, 160))
+
+
+func _do_clear_cache() -> void:
+	var conn := _get_connection()
+	if conn == null:
+		set_status("ERROR: scansort plugin not running.")
+		return
+	var result: Dictionary = await conn.call_tool(
+		"minerva_scansort_clear_source_cache",
+		{},
+	)
+	if not result.get("ok", false):
+		set_status("Clear cache failed: %s" % result.get("error", "unknown"))
+		return
+	var cleared: int = int(result.get("cleared", 0))
+	var attempted: int = int(result.get("attempted", 0))
+	set_status("Cleared cache for %d of %d source(s)." % [cleared, attempted])
 
 # ---------------------------------------------------------------------------
 # File dialog
@@ -1591,6 +1647,8 @@ func _do_set_source_dir(conn: Object, path: String) -> void:
 		"minerva_scansort_session_open_source",
 		{"label": src_label, "path": path},
 	)
+	# DCR 019e41a5: source-gated File→Clear Cache item must refresh now.
+	_refresh_chrome_menu_state()
 
 
 ## W5b: per-kind Add button handler — opens the add-destination dialog
@@ -3070,6 +3128,9 @@ func get_editor_actions() -> Array:
 	# DCR 019e3d67: File→Close drops the entire session (vault + source + dirs)
 	# back to an initialized state in-memory. Disk side-effects: none.
 	popup.add_item("Close", 2)
+	# DCR 019e41a5: File→Clear Cache wipes the .scansort-state.json source
+	# manifests so the next Start re-processes from scratch. Source-gated.
+	popup.add_item("Clear Cache", 8)
 	popup.id_pressed.connect(_on_file_menu_id_pressed)
 	# Cache the popup so vault state changes can grey out gated items.
 	_chrome_popup = popup
@@ -3088,6 +3149,7 @@ func get_editor_actions() -> Array:
 ## Vault Registry (5).
 ## Vault-gated: Add Document (3), Checklist (7),
 ##              Extract Marked (12), Recovery Sheet (13).
+## Source-gated: Clear Cache (8 — DCR 019e41a5: needs ≥1 open source).
 func _refresh_chrome_menu_state() -> void:
 	if _chrome_popup == null or not is_instance_valid(_chrome_popup):
 		return
@@ -3096,6 +3158,11 @@ func _refresh_chrome_menu_state() -> void:
 		var idx: int = _chrome_popup.get_item_index(item_id)
 		if idx >= 0:
 			_chrome_popup.set_item_disabled(idx, not _vault_is_open)
+	# DCR 019e41a5: Clear Cache enabled iff a source is open. Panel tracks
+	# one source label (multi-source is broker-only); empty string = no source.
+	var clear_cache_idx: int = _chrome_popup.get_item_index(8)
+	if clear_cache_idx >= 0:
+		_chrome_popup.set_item_disabled(clear_cache_idx, _session_source_label.is_empty())
 	# U5: enable Process All when a vault is open (and no run is in progress).
 	if _process_btn != null and is_instance_valid(_process_btn):
 		_process_btn.disabled = not _vault_is_open
