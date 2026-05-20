@@ -74,9 +74,6 @@ const _DestinationProvider: Script = preload("scan_tree_destination_provider.gd"
 ## W5b: aggregate area providers (one per kind) for the two-area splitter layout.
 const _AreaProvider: Script = preload("scan_tree_area_provider.gd")
 
-## W7: dedup disposition dialog (off-tree: no class_name).
-const _DedupDispositionDialog: Script = preload("dedup_disposition_dialog.gd")
-
 ## W5g: extract-target picker dialog (off-tree: no class_name).
 const _ExtractTargetDialog: Script = preload("extract_target_dialog.gd")
 
@@ -214,23 +211,15 @@ var _context_menu_dirs: Array = []
 ## Used as a set; value is always true. Never persisted.
 var _processed_keys: Dictionary = {}
 
-## Subset of _processed_keys whose classification confidence was below
-## LOW_CONFIDENCE_THRESHOLD. Never persisted.
+## Subset of _processed_keys flagged low-confidence. Never persisted.
 var _low_confidence_keys: Dictionary = {}
 
 ## Set to true by _on_stop_pressed(); the batch loop checks this between
 ## files and breaks early.
 var _process_cancelled: bool = false
 
-## Classification confidence below which a processed doc is flagged as
-## low-confidence.
-const LOW_CONFIDENCE_THRESHOLD := 0.5
 const DESTINATION_REGISTRY_FILENAME := "dest_registry.json"
 var _status_panel: HBoxContainer = null
-
-## U7: per-run counters shared across concurrent coroutines (Dictionary reference
-## so coroutines can mutate them without capture-by-value issues).
-var _run_counters: Dictionary = {}  # keys: processed, skipped, failed, low_conf
 
 ## File dialog (reused for open and create).
 var _file_dialog: FileDialog = null
@@ -260,22 +249,6 @@ var _inject_payload_cache: String = ""
 
 ## True when the user has toggled the inject-to-chat switch on.
 var _inject_enabled: bool = false
-
-# ---------------------------------------------------------------------------
-# W7: near-dup dedup state
-# ---------------------------------------------------------------------------
-
-## Reusable dedup disposition dialog instance (created once, reused).
-var _dedup_dialog: AcceptDialog = null
-
-## When a dedup disposition is pending, this holds the match_info dict that was
-## passed to the dialog.  Cleared once the user makes a choice or cancels.
-var _pending_dedup_match: Dictionary = {}
-
-## Last disposition chosen by the user for the current near-dup prompt.
-## One of "keep_both", "replace", "skip", or "" (pending / not yet chosen).
-## W9 (audit log) and W10 (Process All) read this after the dialog closes.
-var _last_dedup_disposition: String = ""
 
 # ---------------------------------------------------------------------------
 # Platform hooks
@@ -488,6 +461,10 @@ func _build_ui() -> void:
 	_source_tree.tree_role = "source"
 	# Rebuild inject payload whenever source checkboxes change.
 	_source_tree.check_toggled.connect(_on_source_check_toggled)
+	# Double-click an unsorted source file → open it. The source provider's
+	# row key is the absolute file path, so _on_area_tree_file_activated's
+	# path branch (OS.shell_open) handles it directly.
+	_source_tree.file_activated.connect(_on_area_tree_file_activated)
 
 # ---------------------------------------------------------------------------
 # Menu handling
@@ -1217,9 +1194,9 @@ func _find_dest_by_id(dest_id: String) -> Dictionary:
 	return {}
 
 
-## W5d: handler for file_activated emitted by either area tree.
+## W5d: handler for file_activated emitted by an area tree or the source tree.
 ## key starts with "doc:" → vault document: extract to temp dir then shell_open.
-## key is an absolute path → directory file: shell_open directly.
+## key is an absolute path → directory or source file: shell_open directly.
 func _on_area_tree_file_activated(key: String) -> void:
 	if key.begins_with("doc:"):
 		# Vault document — need to extract it first.
@@ -2211,52 +2188,13 @@ func _on_add_dialog_cancelled() -> void:
 	set_status("Add document cancelled.")
 
 
-# ---------------------------------------------------------------------------
-# W10: Process All — full filing-engine pipeline (integration capstone)
-# ---------------------------------------------------------------------------
-#
-# Per-source-document pipeline (replaces U5's extract→dedup→classify→insert):
-#
-#   1. Phase 1 — classify_document → facts + rule_signals envelope.
-#   2. Phase 2 — run_rule_engine (classification + file facts + rules_path)
-#                → outcome.fired (FiredRuleAction list).
-#   3. Dedup (W7) — BEFORE placement: near-dup simhash/dhash check via
-#      _check_near_dup; on a hit, surface the disposition dialog and AWAIT
-#      the user's choice (keep_both / replace / skip). Cancel == skip.
-#      Exact SHA-256 is handled inside place_fanout (skipped-already-present).
-#   4. Fan-out placement (W6) — for each fired action, place_fanout to its
-#      copy_to dest-id list, honouring the disposition.
-#   5. Audit (W9) — when audit_log_enabled, one audit_append row per
-#      PlacementResult. Audit failure is non-fatal.
-#
-# U5's batched-parallel structure is PRESERVED: N source files in flight at
-# once, drained on process_frame, batch size from Settings concurrency. The
-# Stop control and the end-of-run status summary are kept (the summary is
-# extended with the new outcome counters).
-#
-# Deadlock note: the dedup disposition dialog is awaited mid-loop. To avoid a
-# process_frame-drain deadlock (and to keep the UX sane — never two prompts at
-# once) the dialog is SERIALISED behind _dedup_prompt_busy: a worker that
-# needs a prompt awaits process_frame until the prompt seat is free, then
-# holds it for the duration of its await. The rest of the batch keeps running
-# in parallel; only the prompting step is single-file.
-
-## W10: true when a dedup disposition dialog is currently being awaited by some
-## worker coroutine. Serialises the prompt so the batched-parallel loop never
-## shows two prompts at once and never deadlocks the process_frame drain.
-var _dedup_prompt_busy: bool = false
-
-## W10 test seam: when non-empty, _show_dedup_disposition returns this value
-## immediately instead of popping the real dialog. Lets headless smoke tests
-## drive the near-dup path without a visible popup. Production leaves it "".
-var _test_dedup_auto_disposition: String = ""
-
-
 ## Called when the user clicks the "Process All" button in the chrome bar.
-## Drives every source file through the full filing-engine pipeline.
-## Files already in the vault or in _processed_keys are skipped. One failed
-## file does NOT abort the whole run.
-## Batched-parallel execution via ScansortSettings.load_concurrency().
+## DCR 019e42e4: drives the path-free minerva_scansort_process pipeline ONE
+## FILE AT A TIME (offset/limit window) so the Stop button can interrupt the
+## batch between files. process() owns file ordering + the heavy classify /
+## rule-engine / fan-out logic; the panel just paginates and checks the
+## _process_cancelled flag between calls. Bounding each MCP call to a single
+## file also keeps the connection timeout per-file rather than whole-batch.
 func _on_process_all_pressed() -> void:
 	var conn = _get_connection()
 	if conn == null:
@@ -2266,19 +2204,15 @@ func _on_process_all_pressed() -> void:
 		set_status("No vault open.")
 		return
 
-	# DCR 019e4291: Process All drives the path-free minerva_scansort_process
-	# pipeline. process() reads the open sources + destinations from the
-	# in-process session and the enabled rules from the global library, runs
-	# the B-fallback engine WITH stages (so issuer/doc_type/year are extracted
-	# for rename patterns), and fans out to the open vaults. The panel is now a
-	# thin trigger + result renderer rather than a hand-rolled per-file loop.
+	_process_cancelled = false
 
-	# Enter running state. process() is a single MCP call — there is no mid-run
-	# cancel, so Stop stays disabled for the duration.
+	# Enter running state: Process disabled, Stop ENABLED for the duration.
 	if _process_btn != null and is_instance_valid(_process_btn):
 		_process_btn.disabled = true
+	if _extract_marked_menu != null and is_instance_valid(_extract_marked_menu):
+		_extract_marked_menu.disabled = true
 	if _stop_btn != null and is_instance_valid(_stop_btn):
-		_stop_btn.disabled = true
+		_stop_btn.disabled = false
 	set_status("Processing…")
 
 	# Model spec (Settings override → chat-panel inheritance) + audit settings.
@@ -2287,14 +2221,58 @@ func _on_process_all_pressed() -> void:
 	var audit_enabled: bool = _SettingsDialog.ScansortSettings.load_audit_log_enabled()
 	var audit_path: String  = _SettingsDialog.ScansortSettings.load_audit_log_path()
 
-	var args: Dictionary = {}
+	var base_args: Dictionary = {}
 	if not model_spec.is_empty():
-		args["model_spec"] = model_spec
+		base_args["model_spec"] = model_spec
 	if audit_enabled and not audit_path.is_empty():
-		args["audit_enabled"] = true
-		args["audit_path"] = audit_path
+		base_args["audit_enabled"] = true
+		base_args["audit_path"] = audit_path
 
-	var result: Dictionary = await conn.call_tool("minerva_scansort_process", args)
+	# Per-file pagination loop. `total` is learned from the first call's
+	# total_files (the true count, independent of the offset/limit window).
+	var total: int         = -1
+	var moved: int         = 0
+	var conflicts: int     = 0
+	var unprocessable: int = 0
+	var skipped: int       = 0
+	var processed: int     = 0
+	var by_dest: Dictionary = {}
+	var by_rule: Dictionary = {}
+	var cancelled: bool     = false
+	var failed_msg: String  = ""
+	var offset: int         = 0
+
+	while total < 0 or offset < total:
+		if _process_cancelled:
+			cancelled = true
+			break
+
+		var args: Dictionary = base_args.duplicate()
+		args["offset"] = offset
+		args["limit"] = 1
+		var result: Dictionary = await conn.call_tool("minerva_scansort_process", args)
+
+		if not result.get("ok", false):
+			failed_msg = "Process failed at file %d: %s" % [offset + 1, result.get("error", "unknown")]
+			break
+
+		if total < 0:
+			total = int(result.get("total_files", 0))
+			if total == 0:
+				set_status("No source files to process.")
+				break
+
+		var summary: Dictionary = result.get("summary", {})
+		moved         += int(summary.get("moved", 0))
+		conflicts     += int(summary.get("conflicts", 0))
+		unprocessable += int(summary.get("unprocessable", 0))
+		skipped       += int(summary.get("skipped_already_processed", 0))
+		processed     += (result.get("items", []) as Array).size()
+		_merge_tally(by_dest, result.get("by_destination", {}))
+		_merge_tally(by_rule, result.get("by_rule", {}))
+
+		set_status("Processing %d/%d…" % [offset + 1, total])
+		offset += 1
 
 	# Restore button states.
 	if _process_btn != null and is_instance_valid(_process_btn):
@@ -2304,33 +2282,31 @@ func _on_process_all_pressed() -> void:
 	if _stop_btn != null and is_instance_valid(_stop_btn):
 		_stop_btn.disabled = true
 
-	if not result.get("ok", false):
-		set_status("Process failed: %s" % result.get("error", "unknown"))
-		return
-
 	# Refresh trees so placed documents + processed-state marks show.
 	await _refresh_all_dest_trees()
 	if _source_tree != null and is_instance_valid(_source_tree):
 		await _source_tree.refresh()
 
-	# Summary status from the process() result shape:
-	#   {summary:{moved,conflicts,unprocessable,skipped_already_processed},
-	#    by_rule:{<label>:n}, by_destination:{<label>:n}, items:[…]}
-	var summary: Dictionary = result.get("summary", {})
-	var moved: int         = int(summary.get("moved", 0))
-	var conflicts: int     = int(summary.get("conflicts", 0))
-	var unprocessable: int = int(summary.get("unprocessable", 0))
-	var skipped: int       = int(summary.get("skipped_already_processed", 0))
-	var total: int         = (result.get("items", []) as Array).size()
+	if not failed_msg.is_empty():
+		set_status(failed_msg)
+		return
+	if total <= 0:
+		return  # status already set ("No source files to process.")
 
-	var dest_tail: String = _tally_tail(result.get("by_destination", {}), "")
-	var rule_tail: String = _tally_tail(result.get("by_rule", {}), "rules=")
-
+	var dest_tail: String = _tally_tail(by_dest, "")
+	var rule_tail: String = _tally_tail(by_rule, "rules=")
+	var verb: String = "Stopped after" if cancelled else "Processed"
 	set_status(
-		"Processed %d — %d moved, %d conflicts, %d unprocessable, %d already-done%s%s" % [
-			total, moved, conflicts, unprocessable, skipped, dest_tail, rule_tail
+		"%s %d/%d — %d moved, %d conflicts, %d unprocessable, %d already-done%s%s" % [
+			verb, processed, total, moved, conflicts, unprocessable, skipped, dest_tail, rule_tail
 		]
 	)
+
+
+## Accumulate one process() call's {label:count} tally into a running total.
+func _merge_tally(running: Dictionary, delta: Dictionary) -> void:
+	for k in delta:
+		running[k] = int(running.get(k, 0)) + int(delta[k])
 
 
 ## Render a sorted "label:count" tally as a bracketed status-line suffix.
@@ -2346,343 +2322,13 @@ func _tally_tail(tally: Dictionary, prefix: String) -> String:
 	return " %s[%s]" % [prefix, ", ".join(parts)]
 
 
-## W10: per-file worker coroutine for the batched-parallel Process All loop.
-## Drives one source file through classify → run_rule_engine → dedup →
-## place_fanout → audit. Decrements batch_remaining["n"] in EVERY exit path
-## (success or failure) so the outer while-loop can drain without a separate
-## join mechanism.
-##
-## conn is passed explicitly so this worker is unit-testable with a mock
-## connection (the smoke test drives it directly).
-func _process_one_source_file(
-		file: Dictionary,
-		conn: Object,
-		batch_remaining: Dictionary,
-		audit_enabled: bool = false,
-		audit_path: String = "",
-		per_dest: Dictionary = {},
-		per_rule: Dictionary = {},
-		seq_num: int = 0,
-		total: int = 0) -> void:
-	const MAX_CLASSIFY_CHARS := 4000
-	const VISION_THRESHOLD := 50
-
-	var fpath: String = str(file.get("path", ""))
-	var fname: String = str(file.get("name", fpath.get_file()))
-
-	# Live per-file status. With concurrency>1 these race — last writer wins,
-	# which is fine: the user sees the latest in-flight file. With the default
-	# concurrency=1 the sequence is deterministic.
-	if total > 0:
-		set_status("Processing %s (%d/%d)…" % [fname, seq_num, total])
-
-	# Skip already-done files.
-	if bool(file.get("in_vault", false)) or _processed_keys.has(fpath):
-		_run_counters["skipped"] = int(_run_counters.get("skipped", 0)) + 1
-		set_status("Last: %s → skipped (already processed)" % fname)
-		batch_remaining["n"] -= 1
-		return
-
-	# -- Step 0: Extract text + fingerprints (needed for classify + dedup) --
-	var extract_res: Dictionary = await conn.call_tool(
-		"minerva_scansort_extract_text",
-		{"file_path": fpath}
-	)
-	if not extract_res.get("success", false):
-		push_warning("[ScansortPanel] W10 extract failed for %s: %s" % [
-			fname, str(extract_res.get("error", "unknown"))
-		])
-		_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
-		set_status("Last: %s → unprocessable (extract_error)" % fname)
-		batch_remaining["n"] -= 1
-		return
-
-	var sha256:     String = str(extract_res.get("sha256",   ""))
-	var char_count: int    = int(extract_res.get("char_count", 0))
-	var full_text:  String = str(extract_res.get("full_text", ""))
-	var simhash:    String = str(extract_res.get("simhash",  "0000000000000000"))
-	var dhash:      String = str(extract_res.get("dhash",    "0000000000000000"))
-	var file_size:  int    = int(extract_res.get("size", file.get("size", 0)))
-	var extension:  String = fpath.get_extension()
-
-	# -- Phase 1: classify_document → facts + rule_signals envelope --
-	var model_desc: Dictionary = _resolve_chat_model_for_classify()
-	var model_spec: Dictionary = model_desc.get("model_spec", {}) as Dictionary if model_desc.get("model_spec") is Dictionary else {}
-	var classify_args: Dictionary = {
-		"vault_path": _active_vault_path,
-		"model":      "default",
-	}
-	if not model_spec.is_empty():
-		classify_args["model_spec"] = model_spec
-	if not _vault_password.is_empty():
-		classify_args["password"] = _vault_password
-
-	if char_count >= VISION_THRESHOLD:
-		classify_args["mode"]          = "text"
-		classify_args["document_text"] = full_text
-		if MAX_CLASSIFY_CHARS > 0:
-			classify_args["max_text_chars"] = MAX_CLASSIFY_CHARS
-	else:
-		var render_res: Dictionary = await conn.call_tool(
-			"minerva_scansort_render_pages",
-			{"file_path": fpath, "max_pages": 2, "dpi": 96}
-		)
-		if not render_res.get("success", false):
-			push_warning("[ScansortPanel] W10 render failed for %s: %s" % [
-				fname, str(render_res.get("error", "unknown"))
-			])
-			_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
-			set_status("Last: %s → unprocessable (render_error)" % fname)
-			batch_remaining["n"] -= 1
-			return
-		classify_args["mode"]        = "vision"
-		classify_args["page_images"] = render_res.get("pages", [])
-
-	var classify_res: Dictionary = await conn.call_tool(
-		"minerva_scansort_classify_document",
-		classify_args
-	)
-	if not classify_res.get("ok", false):
-		push_warning("[ScansortPanel] W10 classify failed for %s: %s" % [
-			fname, str(classify_res.get("error", "unknown"))
-		])
-		_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
-		set_status("Last: %s → unprocessable (classify_error)" % fname)
-		batch_remaining["n"] -= 1
-		return
-
-	var classification: Dictionary = classify_res.get("classification", {})
-	var rule_snapshot: String = str(classify_res.get("rule_snapshot", ""))
-
-	# -- Phase 2: run_rule_engine → fired actions --
-	var rules_path: String = _vault_rules_path()
-	var rule_engine_res: Dictionary = await conn.call_tool(
-		"minerva_scansort_run_rule_engine",
-		{
-			"classification": classification,
-			"rules_path":     rules_path,
-			"filename":       fname,
-			"extension":      extension,
-			"size":           file_size,
-		}
-	)
-	if not rule_engine_res.get("ok", false):
-		push_warning("[ScansortPanel] W10 rule engine failed for %s: %s" % [
-			fname, str(rule_engine_res.get("error", "unknown"))
-		])
-		_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
-		set_status("Last: %s → unprocessable (rule_engine_error)" % fname)
-		batch_remaining["n"] -= 1
-		return
-
-	var outcome: Dictionary = rule_engine_res.get("outcome", {})
-	var fired: Array = outcome.get("fired", [])
-
-	if fired.is_empty():
-		# No rule fired — nothing to place. Record as processed-with-no-rule
-		# (the file is reviewed; it is NOT a failure and NOT lost).
-		_processed_keys[fpath] = true
-		_run_counters["no_rule"] = int(_run_counters.get("no_rule", 0)) + 1
-		set_status("Last: %s → unprocessable (no_rule_match)" % fname)
-		_push_session_marks_to_provider()
-		batch_remaining["n"] -= 1
-		return
-
-	# Common DocMeta carried into every place_fanout call.
-	var doc_meta: Dictionary = {
-		"category":      str(classification.get("category", outcome.get("effective_category", ""))),
-		"confidence":    float(classification.get("confidence", 0.0)),
-		"issuer":        str(classification.get("issuer", "")),
-		"description":   str(classification.get("description", "")),
-		"doc_date":      str(classification.get("doc_date", "")),
-		"status":        "classified",
-		"sha256":        sha256,
-		"simhash":       simhash,
-		"dhash":         dhash,
-		"source_path":   fpath,
-		"rule_snapshot": rule_snapshot,
-	}
-
-	var any_placed: bool = false
-	# Capture the primary (first-fired) rule label so the per-file "Last:"
-	# status line and the per-rule tally can reference it after the
-	# fan-out loop. Subsequent fired rules are still placed; we just
-	# attribute the file to the first match in the status surface.
-	var primary_rule_label: String = ""
-
-	# -- Per fired action: dedup → disposition → place_fanout → audit --
-	for action: Dictionary in fired:
-		if _process_cancelled:
-			break
-
-		var copy_to: Array = action.get("copy_to", [])
-		if copy_to.is_empty():
-			continue
-
-		var rule_dict: Dictionary = action.get("rule", {})
-		var rule_label: String = str(rule_dict.get("label", action.get("category", "")))
-		if primary_rule_label.is_empty():
-			primary_rule_label = rule_label
-		var resolved_subfolder: String = str(action.get("resolved_subfolder", ""))
-		var resolved_rename_pattern: String = str(action.get("resolved_rename_pattern", ""))
-		var encrypt: bool = bool(action.get("encrypt", false))
-
-		# -- W7 dedup: near-dup check BEFORE placement --
-		# Exact SHA-256 dups are auto-skipped inside place_fanout — we do not
-		# re-check them here. Near-dup (simhash/dhash) matches MUST surface a
-		# disposition prompt; logical-identity has no MCP surface so it stays a
-		# place_fanout-internal concern.
-		var disposition: String = "keep_both"  # default when no near-dup match
-		var target_hint: String = "%s/%s" % [resolved_subfolder, fname] if not resolved_subfolder.is_empty() else fname
-		var match_info: Dictionary = await _check_near_dup(
-			conn, fpath, simhash, dhash, rule_label, target_hint
-		)
-		if not match_info.is_empty():
-			# HARD CONSTRAINT: a near-dup match is NEVER auto-dropped. The user's
-			# explicit disposition decides. Serialise the prompt so the
-			# batched-parallel drain never sees two prompts at once.
-			_run_counters["flagged"] = int(_run_counters.get("flagged", 0)) + 1
-			while _dedup_prompt_busy and not _process_cancelled:
-				await get_tree().process_frame
-			if _process_cancelled:
-				break
-			_dedup_prompt_busy = true
-			disposition = await _show_dedup_disposition(match_info)
-			_dedup_prompt_busy = false
-
-		if disposition == "skip":
-			# Explicit user skip — do NOT place this action. No data loss: the
-			# source file stays where it is.
-			_run_counters["user_skip"] = int(_run_counters.get("user_skip", 0)) + 1
-			if audit_enabled and not audit_path.is_empty():
-				await _append_audit_rows(conn, audit_path, [{
-					"event":            "skipped",
-					"source_sha256":    sha256,
-					"source_filename":  fname,
-					"rule_label":       rule_label,
-					"destination_id":   "",
-					"destination_kind": "",
-					"resolved_path":    "",
-					"disposition":      "skip",
-					"detail":           "user dispositioned near-dup as skip",
-				}])
-			continue
-
-		# -- W6 fan-out placement --
-		# disposition is "keep_both" or "replace". place_fanout has no native
-		# replace mode, so for "replace" we place normally (collision-safe
-		# naming) and record the disposition in the audit row as "replace" —
-		# the existing document is left in place; the new one is filed
-		# alongside it and the audit trail records the human's intent.
-		var place_res: Dictionary = await conn.call_tool(
-			"minerva_scansort_place_fanout",
-			{
-				"file_path":               fpath,
-				"copy_to":                 copy_to,
-				"resolved_subfolder":      resolved_subfolder,
-				"resolved_rename_pattern": resolved_rename_pattern,
-				"encrypt":                 encrypt,
-				"registry_path":           _registry_path,
-				"category":                doc_meta["category"],
-				"confidence":              doc_meta["confidence"],
-				"issuer":                  doc_meta["issuer"],
-				"description":             doc_meta["description"],
-				"doc_date":                doc_meta["doc_date"],
-				"status":                  doc_meta["status"],
-				"sha256":                  doc_meta["sha256"],
-				"simhash":                 doc_meta["simhash"],
-				"dhash":                   doc_meta["dhash"],
-				"source_path":             doc_meta["source_path"],
-				"rule_snapshot":           doc_meta["rule_snapshot"],
-			}
-		)
-		if not place_res.get("ok", false):
-			push_warning("[ScansortPanel] W10 place_fanout failed for %s: %s" % [
-				fname, str(place_res.get("error", "unknown"))
-			])
-			_run_counters["failed"] = int(_run_counters.get("failed", 0)) + 1
-			continue
-
-		var placements: Array = place_res.get("placements", [])
-		var audit_rows: Array = []
-		for pr: Dictionary in placements:
-			var pr_status: String = str(pr.get("status", "error"))
-			var dest_id: String   = str(pr.get("destination_id", ""))
-			var dest_kind: String = str(pr.get("kind", ""))
-			var target_path: String = str(pr.get("target_path", ""))
-			var pr_msg: String    = str(pr.get("message", ""))
-
-			if pr_status == "placed":
-				any_placed = true
-				_run_counters["placed"] = int(_run_counters.get("placed", 0)) + 1
-				if not dest_id.is_empty():
-					per_dest[dest_id] = int(per_dest.get(dest_id, 0)) + 1
-			elif pr_status == "skipped-already-present":
-				_run_counters["exact_dup"] = int(_run_counters.get("exact_dup", 0)) + 1
-
-			# W9: one audit row per PlacementResult.
-			audit_rows.append({
-				"event":            pr_status,
-				"source_sha256":    sha256,
-				"source_filename":  fname,
-				"rule_label":       rule_label,
-				"destination_id":   dest_id,
-				"destination_kind": dest_kind,
-				"resolved_path":    target_path,
-				"disposition":      disposition,
-				"detail":           pr_msg,
-			})
-
-		# W9: append audit rows — non-fatal on failure.
-		if audit_enabled and not audit_path.is_empty() and not audit_rows.is_empty():
-			await _append_audit_rows(conn, audit_path, audit_rows)
-
-	# Record session state. A source file is "processed" when it produced at
-	# least one placement; otherwise it was user-skipped / no-rule (already
-	# counted above) but we still mark it so it is not re-attempted this run.
-	_processed_keys[fpath] = true
-	if any_placed:
-		_run_counters["processed"] = int(_run_counters.get("processed", 0)) + 1
-		var confidence: float = float(classification.get("confidence", 0.0))
-		if confidence < LOW_CONFIDENCE_THRESHOLD:
-			_low_confidence_keys[fpath] = true
-			_run_counters["low_conf"] = int(_run_counters.get("low_conf", 0)) + 1
-		if not primary_rule_label.is_empty():
-			per_rule[primary_rule_label] = int(per_rule.get(primary_rule_label, 0)) + 1
-		set_status("Last: %s → %s" % [fname, primary_rule_label if not primary_rule_label.is_empty() else "?"])
-	else:
-		# Fan-out ran but every placement was a dedup/skip/conflict — surface
-		# the rule we matched so the user can see why nothing was filed.
-		set_status("Last: %s → %s (not placed)" % [fname, primary_rule_label if not primary_rule_label.is_empty() else "?"])
-
-	_push_session_marks_to_provider()
-	batch_remaining["n"] -= 1
-
-
-## W10: append one or more audit rows. NON-FATAL — a write failure logs a
-## warning and never aborts the run. Fills in the timestamp per row.
-func _append_audit_rows(conn: Object, audit_path: String, rows: Array) -> void:
-	if conn == null or audit_path.is_empty() or rows.is_empty():
-		return
-	var ts: String = Time.get_datetime_string_from_system(true, true)
-	var stamped: Array = []
-	for row: Dictionary in rows:
-		var r: Dictionary = row.duplicate(true)
-		if not r.has("timestamp") or str(r.get("timestamp", "")).is_empty():
-			r["timestamp"] = ts
-		stamped.append(r)
-	var res: Dictionary = await conn.call_tool(
-		"minerva_scansort_audit_append",
-		{"log_path": audit_path, "rows": stamped}
-	)
-	if not res.get("ok", false):
-		push_warning("[ScansortPanel] W10 audit_append failed (non-fatal): %s" % str(res.get("error", "unknown")))
-
-
-## Stop button — sets the cancel flag; the batch loop picks it up between
-## files.
+## Stop button — sets the cancel flag; the Process All loop picks it up
+## before the next per-file process() call. The in-flight file finishes
+## (bounded by the per-file MCP timeout); the batch halts after it.
 func _on_stop_pressed() -> void:
 	_process_cancelled = true
+	if _stop_btn != null and is_instance_valid(_stop_btn):
+		_stop_btn.disabled = true
 	set_status("Stopping…")
 
 
@@ -3492,154 +3138,6 @@ func _on_panel_create_note_request(_ctx: Dictionary) -> Variant:
 		"title":   "Scansort source files",
 		"content": _inject_payload_cache,
 	}
-
-
-# ---------------------------------------------------------------------------
-# W7: near-dup dedup detection + disposition prompt
-# ---------------------------------------------------------------------------
-
-## Check a candidate document for near-duplicates in the active vault.
-##
-## Calls `minerva_scansort_check_simhash` and `minerva_scansort_check_dhash`
-## using the thresholds from Settings.  Returns a match_info dict if any match
-## is found, or an empty dict if no match (caller proceeds normally).
-##
-## The match_info dict shape:
-##   { "file_name", "match_kind", "match_count", "distance",
-##     "existing_doc_id", "rule_label", "target_path" }
-##
-## HARD CONSTRAINT: the caller must surface non-empty results as a disposition
-## prompt — NEVER auto-discard.
-## W10: `conn` is now passed explicitly (was resolved internally in W7) so the
-## Process All worker — and the headless smoke test — can supply a mock
-## connection. Callers without a conn handy may pass null; the method then
-## falls back to _get_connection().
-func _check_near_dup(
-	conn: Object,
-	file_path: String,
-	simhash: String,
-	dhash: String,
-	rule_label: String = "",
-	target_path: String = "",
-) -> Dictionary:
-	if not _vault_is_open:
-		return {}
-	if conn == null:
-		conn = _get_connection()
-	if conn == null:
-		return {}
-
-	# Load thresholds from settings.
-	var SettingsClass = _SettingsDialog.ScansortSettings
-	var simhash_threshold: int = SettingsClass.load_simhash_threshold()
-	var dhash_threshold: int = SettingsClass.load_dhash_threshold()
-
-	# Layer 2a: SimHash near-dup check.
-	if simhash_threshold > 0 and simhash != "0000000000000000" and not simhash.is_empty():
-		var sim_res: Dictionary = await conn.call_tool(
-			"minerva_scansort_check_simhash",
-			{
-				"vault_path": _active_vault_path,
-				"simhash": simhash,
-				"threshold": simhash_threshold,
-			}
-		)
-		if sim_res.get("ok", false) and sim_res.get("found", false):
-			var matches: Array = sim_res.get("matches", [])
-			var best_match: Dictionary = matches[0] if matches.size() > 0 else {}
-			return {
-				"file_name":       file_path.get_file(),
-				"match_kind":      "simhash",
-				"match_count":     int(sim_res.get("count", 1)),
-				"distance":        int(best_match.get("distance", 0)),
-				"existing_doc_id": int(best_match.get("doc_id", 0)),
-				"rule_label":      rule_label,
-				"target_path":     target_path,
-			}
-
-	# Layer 2b: dHash near-dup check (image).
-	if dhash_threshold > 0 and dhash != "0000000000000000" and not dhash.is_empty():
-		var dhash_res: Dictionary = await conn.call_tool(
-			"minerva_scansort_check_dhash",
-			{
-				"vault_path": _active_vault_path,
-				"dhash": dhash,
-				"threshold": dhash_threshold,
-			}
-		)
-		if dhash_res.get("ok", false) and dhash_res.get("found", false):
-			var matches: Array = dhash_res.get("matches", [])
-			var best_match: Dictionary = matches[0] if matches.size() > 0 else {}
-			return {
-				"file_name":       file_path.get_file(),
-				"match_kind":      "dhash",
-				"match_count":     int(dhash_res.get("count", 1)),
-				"distance":        int(best_match.get("distance", 0)),
-				"existing_doc_id": int(best_match.get("doc_id", 0)),
-				"rule_label":      rule_label,
-				"target_path":     target_path,
-			}
-
-	return {}
-
-
-## Show the dedup disposition dialog for a near-dup or logical-identity match.
-##
-## Awaitable — suspends until the user makes a choice (or cancels).
-## Returns the chosen disposition string: "keep_both", "replace", "skip".
-## A cancelled dialog (X button) returns "skip" — the safest fallback that
-## doesn't lose data silently.
-##
-## The chosen disposition is also written to `_last_dedup_disposition` so that
-## W9 (audit log) and W10 (Process All) can read it after this coroutine returns.
-##
-## HARD CONSTRAINT: callers MUST await this and check the result before
-## deciding whether to place the document.  Never call place_fanout without
-## first honouring the disposition.
-func _show_dedup_disposition(match_info: Dictionary) -> String:
-	_pending_dedup_match = match_info
-	_last_dedup_disposition = ""
-
-	# W10 test seam: headless smoke tests set _test_dedup_auto_disposition to
-	# drive the near-dup path without a visible popup. Production leaves it "".
-	if not _test_dedup_auto_disposition.is_empty():
-		_last_dedup_disposition = _test_dedup_auto_disposition
-		_pending_dedup_match = {}
-		return _last_dedup_disposition
-
-	# Create or reuse the dialog.
-	if _dedup_dialog == null or not is_instance_valid(_dedup_dialog):
-		_dedup_dialog = _DedupDispositionDialog.new()
-		add_child(_dedup_dialog)
-
-	# Wire signals (disconnect first to avoid double-connections on reuse).
-	if _dedup_dialog.disposition_chosen.is_connected(_on_dedup_disposition_chosen):
-		_dedup_dialog.disposition_chosen.disconnect(_on_dedup_disposition_chosen)
-	if _dedup_dialog.cancelled.is_connected(_on_dedup_disposition_cancelled):
-		_dedup_dialog.cancelled.disconnect(_on_dedup_disposition_cancelled)
-
-	_dedup_dialog.disposition_chosen.connect(_on_dedup_disposition_chosen)
-	_dedup_dialog.cancelled.connect(_on_dedup_disposition_cancelled)
-
-	_dedup_dialog.init(match_info)
-	_dedup_dialog.popup_centered(Vector2i(520, 340))
-
-	# Suspend until the user picks a disposition.
-	await _dedup_dialog.hide
-
-	_pending_dedup_match = {}
-	return _last_dedup_disposition if not _last_dedup_disposition.is_empty() else "skip"
-
-
-## Handler: user picked a disposition in the dedup dialog.
-func _on_dedup_disposition_chosen(disposition: String) -> void:
-	_last_dedup_disposition = disposition
-
-
-## Handler: user dismissed the dedup dialog without choosing (X button / Escape).
-## Treat as "skip" — do not auto-place to avoid data loss.
-func _on_dedup_disposition_cancelled() -> void:
-	_last_dedup_disposition = "skip"
 
 
 func set_status(text: String) -> void:

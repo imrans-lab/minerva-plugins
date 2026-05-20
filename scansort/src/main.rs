@@ -2652,9 +2652,21 @@ fn handle_process(
         .unwrap_or(false);
     let audit_path = args.get("audit_path").and_then(|v| v.as_str())
         .unwrap_or("");
+    // offset/limit window the flat source-file list so the panel can run a
+    // Stop-able per-file loop. GDScript serializes ints as floats, so accept
+    // either. Absent offset → 0; absent limit → None (whole batch, the
+    // pre-DCR-019e42e4 default behaviour).
+    let lax_usize = |v: Option<&Value>| -> Option<usize> {
+        let v = v?;
+        if let Some(u) = v.as_u64() { return Some(u as usize); }
+        if let Some(f) = v.as_f64() { if f >= 0.0 { return Some(f as usize); } }
+        None
+    };
+    let offset = lax_usize(args.get("offset")).unwrap_or(0);
+    let limit = lax_usize(args.get("limit"));
     match process::run(
         out, lines, next_id, model, model_spec, doc_type_strategy,
-        audit_enabled, audit_path,
+        audit_enabled, audit_path, offset, limit,
     ) {
         Err(e) => ok_response(id, tool_err(&e.message)),
         Ok(result) => {
@@ -2685,6 +2697,7 @@ fn handle_process(
                 "by_rule": result.by_rule,
                 "by_destination": result.by_destination,
                 "items": items_json,
+                "total_files": result.total_files,
             })))
         }
     }
@@ -3743,7 +3756,7 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_process",
-                        "description": "B3: Path-free process() pipeline. Reads all state from the in-process session (open sources + open destinations) and the global library (enabled rules). For every file under every open source: (1) skips files already processed (B4 manifest), (2) extracts text, (3) classifies via host.providers.chat, (4) runs the deterministic rule engine, (5) fans out to matching open destinations resolved by label, (6) records per-file outcome in the B4 source state manifest. Returns {ok, summary:{moved,conflicts,unprocessable,skipped_already_processed}, by_rule:{<rule_label>:count}, by_destination:{<dest_label>:count}, items:[{source_label,source_path_relative,status,rule_label?,target_labels,reason?}]}.",
+                        "description": "B3: Path-free process() pipeline. Reads all state from the in-process session (open sources + open destinations) and the global library (enabled rules). For every file under every open source: (1) skips files already processed (B4 manifest), (2) extracts text, (3) classifies via host.providers.chat, (4) runs the deterministic rule engine, (5) fans out to matching open destinations resolved by label, (6) records per-file outcome in the B4 source state manifest. The flat file list (sources sorted by label, files by relative path) can be windowed with offset/limit so a caller can run a cancellable per-file loop. Returns {ok, summary:{moved,conflicts,unprocessable,skipped_already_processed}, by_rule:{<rule_label>:count}, by_destination:{<dest_label>:count}, items:[{source_label,source_path_relative,status,rule_label?,target_labels,reason?}], total_files} where total_files is the true file count BEFORE windowing.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -3751,7 +3764,9 @@ fn main() {
                                 "model_spec": {"type": "object", "description": "Optional structured provider spec (wins over 'model' when present). Use {kind:'core_action', service_client_id:'model-chat', action_name:'<model>'} to route through a specific Core service."},
                                 "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"], "description": "B8 doc_type normalization strategy. 'none' (default): raw LLM output. 'enum': prompt is augmented with the winning rule's allowed subtypes. 'canonicalize': post-LLM alias→canonical map applied. 'both': enum prompt + canonicalize safety net."},
                                 "audit_enabled": {"type": "boolean", "description": "DCR 019e3ce069b6: when true, append one CSV audit-log row per fan-out PlacementResult to `audit_path`. Default false (back-compat). Row shape matches the panel batch pipeline (minerva_scansort_audit_append) so logs are interchangeable. Audit write failures are non-fatal — pipeline continues and a warning is logged."},
-                                "audit_path": {"type": "string", "description": "DCR 019e3ce069b6: absolute path to the CSV audit log file. Required when `audit_enabled` is true; empty path with audit_enabled=true is a silent no-op. Ignored when `audit_enabled` is false."}
+                                "audit_path": {"type": "string", "description": "DCR 019e3ce069b6: absolute path to the CSV audit log file. Required when `audit_enabled` is true; empty path with audit_enabled=true is a silent no-op. Ignored when `audit_enabled` is false."},
+                                "offset": {"type": "integer", "minimum": 0, "description": "DCR 019e42e4: index of the first source file to process in the flat ordered file list. Files before it are skipped cheaply. Default 0."},
+                                "limit": {"type": "integer", "minimum": 1, "description": "DCR 019e42e4: max files to process starting at `offset`. Omit for the whole batch. The panel's Stop-able loop passes limit=1 per file. `total_files` in the result is always the true pre-window count."}
                             },
                             "required": [],
                         },

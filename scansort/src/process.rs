@@ -125,6 +125,11 @@ pub struct ProcessResult {
     pub by_rule: HashMap<String, u64>,
     pub by_destination: HashMap<String, u64>,
     pub items: Vec<ProcessItem>,
+    /// Total source files across all open sources, BEFORE `offset`/`limit`
+    /// windowing. Always the true count regardless of the window, so a
+    /// caller paginating one file at a time learns the batch size from the
+    /// very first call. See [`run`]'s `offset`/`limit` params.
+    pub total_files: usize,
 }
 
 impl ProcessResult {
@@ -280,6 +285,18 @@ impl<'a, W: io::Write, I: Iterator<Item = Result<String, io::Error>>> LlmCaller
 /// - `audit_path` — absolute path to the CSV log file. Ignored when
 ///   `audit_enabled` is false. Audit-write failures are NON-fatal: a warning
 ///   is logged and the pipeline continues. NEVER panics, NEVER aborts the run.
+/// - `offset` — index of the first source file to process in the flat,
+///   deterministically-ordered file list (sources sorted by label, files
+///   sorted by relative path). Files before `offset` are skipped cheaply
+///   (no sha256/extract/classify). `0` = start at the first file.
+/// - `limit` — max number of files to process starting at `offset`.
+///   `None` = process every file from `offset` to the end (the whole-batch
+///   behaviour; this is what a caller passing no `offset`/`limit` gets).
+///   The panel's Stop-able loop calls with `limit = Some(1)` per file so it
+///   can check its cancel flag between files.
+///
+/// `result.total_files` always reports the true total (pre-windowing), so a
+/// one-file-at-a-time caller knows the batch size from the first call.
 ///
 /// # Returns
 /// `Ok(ProcessResult)` on success.  Individual file errors are recorded in
@@ -293,8 +310,14 @@ pub fn run(
     doc_type_strategy: &str,
     audit_enabled: bool,
     audit_path: &str,
+    offset: usize,
+    limit: Option<usize>,
 ) -> VaultResult<ProcessResult> {
     let mut result = ProcessResult::default();
+    // Flat index across ALL files of ALL open sources, in deterministic
+    // order. Drives the offset/limit window. Always advances — even for
+    // skipped files — so it equals the true file total once both loops end.
+    let mut file_index: usize = 0;
 
     // 1. Get open sources (sorted by label for deterministic order).
     let open_sources = session::open_sources_sorted();
@@ -327,6 +350,15 @@ pub fn run(
         let mut dir_cache = DirHashCache::new();
 
         for (abs_path, rel_path, file_size) in &files {
+            // offset/limit window. Advance the flat index for EVERY file so
+            // total_files stays accurate, but skip the expensive work
+            // (sha256/extract/classify/place) for files outside the window.
+            let idx = file_index;
+            file_index += 1;
+            if !in_offset_limit_window(idx, offset, limit) {
+                continue;
+            }
+
             // Compute sha256.
             let sha256 = match crate::types::compute_sha256(Path::new(abs_path)) {
                 Ok(h) => h,
@@ -797,12 +829,23 @@ pub fn run(
         }
     }
 
+    result.total_files = file_index;
     Ok(result)
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// True when flat file index `idx` falls inside the `offset`/`limit` window
+/// used by [`run`] to support a cancellable per-file caller loop.
+///
+/// `limit == None` means "no upper bound" — every file from `offset` to the
+/// end (the whole-batch default). `limit == Some(n)` admits exactly the `n`
+/// files `[offset, offset + n)`.
+fn in_offset_limit_window(idx: usize, offset: usize, limit: Option<usize>) -> bool {
+    idx >= offset && limit.map_or(true, |n| idx < offset + n)
+}
 
 /// Build the audit-log rows for one fan-out's `placements` slice.
 ///
@@ -1222,6 +1265,53 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // -----------------------------------------------------------------------
+    // DCR 019e42e4 — offset/limit window predicate (the cancellable
+    // per-file caller loop depends on this being exact).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn window_no_limit_admits_everything_from_offset() {
+        // limit=None is the whole-batch default.
+        assert!(in_offset_limit_window(0, 0, None));
+        assert!(in_offset_limit_window(999, 0, None));
+        // ...but still honours offset.
+        assert!(!in_offset_limit_window(2, 3, None));
+        assert!(in_offset_limit_window(3, 3, None));
+        assert!(in_offset_limit_window(4, 3, None));
+    }
+
+    #[test]
+    fn window_limit_one_admits_exactly_one_file() {
+        // The panel's per-file loop: offset=k, limit=1 → only file k.
+        for k in 0..5 {
+            for idx in 0..5 {
+                assert_eq!(
+                    in_offset_limit_window(idx, k, Some(1)),
+                    idx == k,
+                    "idx={idx} offset={k} limit=1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn window_limit_n_admits_half_open_range() {
+        // [offset, offset+n) — offset+n itself is excluded.
+        assert!(!in_offset_limit_window(1, 2, Some(3)));
+        assert!(in_offset_limit_window(2, 2, Some(3)));
+        assert!(in_offset_limit_window(4, 2, Some(3)));
+        assert!(!in_offset_limit_window(5, 2, Some(3)));
+    }
+
+    #[test]
+    fn window_offset_past_end_admits_nothing() {
+        // A caller that paginated past total_files gets an empty window.
+        for idx in 0..10 {
+            assert!(!in_offset_limit_window(idx, 100, Some(1)));
+        }
+    }
 
     fn unique_tmp(prefix: &str) -> PathBuf {
         let pid = std::process::id();
