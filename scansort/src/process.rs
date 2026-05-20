@@ -620,11 +620,27 @@ pub fn run(
                 );
             }
 
-            let resolved_labels: Vec<String> = registry
-                .destinations
-                .iter()
-                .map(|d| d.label.clone())
-                .collect();
+            // DCR 019e4291: empty copy_to — or a copy_to whose labels name no
+            // open destination — falls back to every open session vault, so the
+            // path-free pipeline routes identically to handle_place_fanout's
+            // resolve_copy_to (DCR 019e4281). Directories are never auto-targeted.
+            let (registry, resolved_labels) = {
+                let resolved: Vec<String> =
+                    registry.destinations.iter().map(|d| d.label.clone()).collect();
+                if resolved.is_empty() {
+                    let open_vault_labels: Vec<String> = session::entries_full()
+                        .0
+                        .into_iter()
+                        .map(|(label, _path)| label)
+                        .collect();
+                    let (fb_reg, _) = resolve_labels(&open_vault_labels);
+                    let fb_labels: Vec<String> =
+                        fb_reg.destinations.iter().map(|d| d.label.clone()).collect();
+                    (fb_reg, fb_labels)
+                } else {
+                    (registry, resolved)
+                }
+            };
 
             if resolved_labels.is_empty() {
                 // No destinations resolved.

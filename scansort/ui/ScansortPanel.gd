@@ -2266,92 +2266,35 @@ func _on_process_all_pressed() -> void:
 		set_status("No vault open.")
 		return
 
-	# Fetch the source file list.
-	var list_res: Dictionary = await conn.call_tool(
-		"minerva_scansort_list_source_files",
-		{"vault_path": _active_vault_path}
-	)
-	if not list_res.get("ok", false):
-		set_status("Process All: no source directory set or list failed.")
-		return
-	var files: Array = list_res.get("files", [])
-	if files.is_empty():
-		set_status("Process All: source directory is empty.")
-		return
+	# DCR 019e4291: Process All drives the path-free minerva_scansort_process
+	# pipeline. process() reads the open sources + destinations from the
+	# in-process session and the enabled rules from the global library, runs
+	# the B-fallback engine WITH stages (so issuer/doc_type/year are extracted
+	# for rename patterns), and fans out to the open vaults. The panel is now a
+	# thin trigger + result renderer rather than a hand-rolled per-file loop.
 
-	# Stable ordering — sort source files by path so runs are deterministic.
-	files.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return str(a.get("path", "")) < str(b.get("path", ""))
-	)
-
-	# Enter running state.
-	_process_cancelled = false
-	_dedup_prompt_busy = false
+	# Enter running state. process() is a single MCP call — there is no mid-run
+	# cancel, so Stop stays disabled for the duration.
 	if _process_btn != null and is_instance_valid(_process_btn):
 		_process_btn.disabled = true
 	if _stop_btn != null and is_instance_valid(_stop_btn):
-		_stop_btn.disabled = false
-	set_status("Run started — %d file%s" % [files.size(), "" if files.size() == 1 else "s"])
+		_stop_btn.disabled = true
+	set_status("Processing…")
 
-	# Reset per-run shared counters. W10 extends U7's counter set with the new
-	# filing-engine outcomes.
-	_run_counters = {
-		"processed":  0,  # source files that produced at least one placement
-		"skipped":    0,  # session-skipped (already processed / in vault)
-		"failed":     0,  # pipeline error (classify / rule engine / etc.)
-		"low_conf":   0,  # processed but classification confidence < threshold
-		"placed":     0,  # individual PlacementResults with status "placed"
-		"exact_dup":  0,  # PlacementResults skipped-already-present (exact SHA)
-		"user_skip":  0,  # source files the user dispositioned as "skip"
-		"flagged":    0,  # source files that surfaced a near-dup disposition
-		"no_rule":    0,  # source files where no rule fired (nothing to place)
-	}
-	# Per-destination placement tally: dest_id -> count of "placed" results.
-	var per_dest: Dictionary = {}
-	# Per-rule placement tally: rule_label -> count of source files placed.
-	var per_rule: Dictionary = {}
-
-	var total: int = files.size()
-
-	# Read concurrency from settings (default 1 = sequential).
-	var concurrency: int = _SettingsDialog.ScansortSettings.load_concurrency()
-
-	# Processed-state priming: place_fanout does its own per-destination
-	# processed-state check, so we rely on that rather than priming
-	# scan_directory_hashes here. Priming would be a pure optimisation and is
-	# skipped to keep the loop simple (documented W10 decision).
-
-	# Audit-log settings — read once at run start.
+	# Model spec (Settings override → chat-panel inheritance) + audit settings.
+	var model_desc: Dictionary = _resolve_chat_model_for_classify()
+	var model_spec: Dictionary = model_desc.get("model_spec", {}) as Dictionary if model_desc.get("model_spec") is Dictionary else {}
 	var audit_enabled: bool = _SettingsDialog.ScansortSettings.load_audit_log_enabled()
 	var audit_path: String  = _SettingsDialog.ScansortSettings.load_audit_log_path()
 
-	# Batched-parallel loop — structure preserved from U5/U7.
-	var idx: int = 0
-	while idx < total:
-		if _process_cancelled:
-			break
-		var batch_remaining: Dictionary = {"n": 0}
-		for _j: int in range(concurrency):
-			if idx >= total or _process_cancelled:
-				break
-			batch_remaining["n"] += 1
-			# Fire the worker — do NOT await. Worker decrements batch_remaining.
-			# Pass (seq_num, total) so the worker can emit live per-file status
-			# ("Processing <name> (k/N)…"). seq_num is 1-based for display.
-			_process_one_source_file(
-				files[idx], conn, batch_remaining,
-				audit_enabled, audit_path, per_dest, per_rule,
-				idx + 1, total
-			)
-			idx += 1
-		# Wait for the batch to drain.
-		while int(batch_remaining["n"]) > 0:
-			await get_tree().process_frame
+	var args: Dictionary = {}
+	if not model_spec.is_empty():
+		args["model_spec"] = model_spec
+	if audit_enabled and not audit_path.is_empty():
+		args["audit_enabled"] = true
+		args["audit_path"] = audit_path
 
-	# Run finished (or cancelled) — refresh trees.
-	await _refresh_all_dest_trees()
-	if _source_tree != null and is_instance_valid(_source_tree):
-		await _source_tree.refresh()
+	var result: Dictionary = await conn.call_tool("minerva_scansort_process", args)
 
 	# Restore button states.
 	if _process_btn != null and is_instance_valid(_process_btn):
@@ -2361,42 +2304,46 @@ func _on_process_all_pressed() -> void:
 	if _stop_btn != null and is_instance_valid(_stop_btn):
 		_stop_btn.disabled = true
 
-	# Summary status — extended with the new filing-engine outcome counters.
-	var processed_this_run: int = int(_run_counters.get("processed", 0))
-	var skipped: int    = int(_run_counters.get("skipped", 0))
-	var failed: int     = int(_run_counters.get("failed", 0))
-	var placed: int     = int(_run_counters.get("placed", 0))
-	var exact_dup: int  = int(_run_counters.get("exact_dup", 0))
-	var user_skip: int  = int(_run_counters.get("user_skip", 0))
-	var flagged: int    = int(_run_counters.get("flagged", 0))
+	if not result.get("ok", false):
+		set_status("Process failed: %s" % result.get("error", "unknown"))
+		return
 
-	# Per-destination tail (only when there were placements worth reporting).
-	var dest_tail: String = ""
-	if not per_dest.is_empty():
-		var parts: PackedStringArray = PackedStringArray()
-		var dest_ids: Array = per_dest.keys()
-		dest_ids.sort()
-		for dest_id: String in dest_ids:
-			parts.append("%s:%d" % [dest_id, int(per_dest[dest_id])])
-		dest_tail = " [" + ", ".join(parts) + "]"
+	# Refresh trees so placed documents + processed-state marks show.
+	await _refresh_all_dest_trees()
+	if _source_tree != null and is_instance_valid(_source_tree):
+		await _source_tree.refresh()
 
-	# Per-rule tail: which rules fired and how often this run. Same suffix
-	# style as dest_tail so the summary line scans uniformly.
-	var rule_tail: String = ""
-	if not per_rule.is_empty():
-		var rparts: PackedStringArray = PackedStringArray()
-		var rule_labels: Array = per_rule.keys()
-		rule_labels.sort()
-		for rl: String in rule_labels:
-			rparts.append("%s:%d" % [rl, int(per_rule[rl])])
-		rule_tail = " rules=[" + ", ".join(rparts) + "]"
+	# Summary status from the process() result shape:
+	#   {summary:{moved,conflicts,unprocessable,skipped_already_processed},
+	#    by_rule:{<label>:n}, by_destination:{<label>:n}, items:[…]}
+	var summary: Dictionary = result.get("summary", {})
+	var moved: int         = int(summary.get("moved", 0))
+	var conflicts: int     = int(summary.get("conflicts", 0))
+	var unprocessable: int = int(summary.get("unprocessable", 0))
+	var skipped: int       = int(summary.get("skipped_already_processed", 0))
+	var total: int         = (result.get("items", []) as Array).size()
 
-	var head: String = "Stopped" if _process_cancelled else "Processed %d/%d" % [processed_this_run, total]
+	var dest_tail: String = _tally_tail(result.get("by_destination", {}), "")
+	var rule_tail: String = _tally_tail(result.get("by_rule", {}), "rules=")
+
 	set_status(
-		"%s — %d placed, %d exact-dup, %d flagged, %d user-skip, %d failed, %d skipped%s%s" % [
-			head, placed, exact_dup, flagged, user_skip, failed, skipped, dest_tail, rule_tail
+		"Processed %d — %d moved, %d conflicts, %d unprocessable, %d already-done%s%s" % [
+			total, moved, conflicts, unprocessable, skipped, dest_tail, rule_tail
 		]
 	)
+
+
+## Render a sorted "label:count" tally as a bracketed status-line suffix.
+## prefix "" → " [a:1, b:2]"; prefix "rules=" → " rules=[a:1, b:2]".
+func _tally_tail(tally: Dictionary, prefix: String) -> String:
+	if tally.is_empty():
+		return ""
+	var parts: PackedStringArray = PackedStringArray()
+	var keys: Array = tally.keys()
+	keys.sort()
+	for k: String in keys:
+		parts.append("%s:%d" % [k, int(tally[k])])
+	return " %s[%s]" % [prefix, ", ".join(parts)]
 
 
 ## W10: per-file worker coroutine for the batched-parallel Process All loop.
