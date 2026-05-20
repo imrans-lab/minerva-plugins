@@ -123,6 +123,11 @@ var _last_mesh_data: Dictionary = {}
 ## "timeout" = worker didn't reply within the 30s budget.
 var _last_eval_result: Dictionary = {"status": "empty"}
 
+## Error banner shown over the 3D views when an evaluation fails (W8 / RCA
+## 019e46b5). Built in _ready; visibility is driven by _evaluate_and_render.
+var _error_banner: PanelContainer = null
+var _error_banner_label: Label = null
+
 ## Tree node in the wide sidebar listing all edges. Built in _ready().
 var _edge_tree: Tree = null
 
@@ -223,6 +228,39 @@ func _ready() -> void:
 	_canvas_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_canvas_overlay.z_index = 1
 	add_child(_canvas_overlay)
+
+	# ── Evaluation-error banner ───────────────────────────────────────────
+	# When cad.evaluate fails (timeout / worker error / connection lost) the
+	# 3D views render nothing; without this banner that empty render is silent
+	# — the user-facing symptom of RCA 019e46b5. A dedicated full-rect Control
+	# layer hosts a top-anchored banner so the PanelContainer's single-child
+	# layout does not stretch the banner across the whole panel.
+	var _error_layer := Control.new()
+	_error_layer.name = "EvalErrorLayer"
+	_error_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_error_layer.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_error_layer.z_index = 2
+	add_child(_error_layer)
+
+	_error_banner = PanelContainer.new()
+	_error_banner.name = "EvalErrorBanner"
+	_error_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_error_banner.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	_error_banner.visible = false
+	var _banner_style := StyleBoxFlat.new()
+	_banner_style.bg_color = Color(0.5, 0.12, 0.12, 0.96)
+	_banner_style.content_margin_left = 10.0
+	_banner_style.content_margin_right = 10.0
+	_banner_style.content_margin_top = 6.0
+	_banner_style.content_margin_bottom = 6.0
+	_error_banner.add_theme_stylebox_override("panel", _banner_style)
+	_error_layer.add_child(_error_banner)
+
+	_error_banner_label = Label.new()
+	_error_banner_label.name = "EvalErrorLabel"
+	_error_banner_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_error_banner_label.add_theme_color_override("font_color", Color(1, 0.9, 0.9))
+	_error_banner.add_child(_error_banner_label)
 
 	if _annotation_host.has_method("set_panel_root"):
 		_annotation_host.set_panel_root(_canvas_overlay)
@@ -517,6 +555,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			"ts": Time.get_unix_time_from_system(),
 		}
 		push_warning("[CADPanel] _evaluate_and_render: MinervaIPC helper not attached; cannot dispatch cad.evaluate")
+		_show_eval_error("CAD evaluation unavailable — the panel's IPC helper is not attached.")
 		return
 
 	var reply_id := "cad.evaluate:" + str(Time.get_ticks_usec())
@@ -531,6 +570,8 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		"request_id": request_id,
 		"ts": Time.get_unix_time_from_system(),
 	}
+	# A fresh evaluate supersedes any prior failure — clear a stale banner.
+	_hide_eval_error()
 	request.emit("cad.evaluate", args, reply_id)
 
 	# 30s timeout: build123d cold-start can take ~10s on first invocation; the
@@ -563,6 +604,9 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			"[CADPanel] cad.evaluate transport failure: %s — %s"
 			% [err_code, err_msg]
 		)
+		var _what: String = "timed out" if st == "timeout" else "failed"
+		_show_eval_error("CAD evaluation %s: %s" % [_what,
+			err_msg if err_msg != "" else err_code])
 		return
 
 	# PluginScenePanelBroker wraps the worker payload in PluginErrors.success(),
@@ -579,6 +623,7 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			"ts": Time.get_unix_time_from_system(),
 		}
 		push_warning("[CADPanel] cad.evaluate: missing worker payload")
+		_show_eval_error("CAD evaluation failed — the worker reply was malformed.")
 		return
 
 	if not bool(worker_payload.get("ok", false)):
@@ -606,6 +651,8 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 			"ts": Time.get_unix_time_from_system(),
 		}
 		push_warning("[CADPanel] cad.evaluate worker error [%s]: %s" % [kind, msg])
+		_show_eval_error("CAD evaluation failed (%s): %s" % [kind,
+			msg if msg != "" else "no detail provided"])
 		return
 
 	var eval_result: Dictionary = worker_payload.get("result", {}) as Dictionary
@@ -660,6 +707,24 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 		"request_id": request_id,
 		"ts": Time.get_unix_time_from_system(),
 	}
+	# Render succeeded — clear any error banner left by a prior failed evaluate.
+	_hide_eval_error()
+
+
+## Show the evaluation-error banner with a human-readable message. Called from
+## _evaluate_and_render's failure paths so a failed render is never silent
+## (the empty-render symptom of RCA 019e46b5).
+func _show_eval_error(message: String) -> void:
+	if _error_banner_label != null:
+		_error_banner_label.text = message
+	if _error_banner != null:
+		_error_banner.visible = true
+
+
+## Hide the evaluation-error banner — a fresh evaluate started, or one succeeded.
+func _hide_eval_error() -> void:
+	if _error_banner != null:
+		_error_banner.visible = false
 
 
 # ── Width-class handling ────────────────────────────────────────────────────
