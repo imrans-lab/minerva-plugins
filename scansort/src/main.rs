@@ -23,7 +23,6 @@
 // The synchronous read pattern below is safe under that guarantee.
 
 mod audit;
-mod checklists;
 mod classifier;
 mod crypto;
 mod db;
@@ -114,7 +113,7 @@ fn write_line(out: &mut impl Write, v: &impl Serialize) {
 // the panel open).
 //
 // `kind` is a short tag the panel switches on: "source", "destination",
-// "vault", "registry", "rule", "library_rule", "document", "checklist".
+// "vault", "registry", "rule", "library_rule", "document".
 // Unknown kinds are ignored panel-side.
 fn notify_state_changed(out: &mut impl Write, kind: &str) {
     notify_state_changed_with(out, kind, None);
@@ -205,10 +204,6 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         | "minerva_scansort_place_fanout"
         | "minerva_scansort_reprocess_destination"
         | "minerva_scansort_process" => Some("document"),
-        "minerva_scansort_insert_checklist"
-        | "minerva_scansort_update_checklist"
-        | "minerva_scansort_delete_checklist"
-        | "minerva_scansort_toggle_checklist_enabled" => Some("checklist"),
         _ => None,
     }
 }
@@ -1246,150 +1241,6 @@ fn handle_classify_document(
             })),
         ),
         Err(e) => ok_response(id, tool_err(&e.to_string())),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Checklist tool handlers (T7 R6)
-// ---------------------------------------------------------------------------
-
-fn handle_list_checklists(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let tax_year = args.get("tax_year").and_then(|v| v.as_i64()).map(|y| y as i32);
-    let item_type = args.get("item_type").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    match checklists::list_checklist_items(path, password, tax_year, item_type) {
-        Ok(items) => match serde_json::to_value(&items) {
-            Ok(v) => ok_response(id, tool_ok(json!({"ok": true, "items": v, "count": items.len()}))),
-            Err(e) => ok_response(id, tool_err(&e.to_string())),
-        },
-        Err(e) => ok_response(id, tool_err(&e.message)),
-    }
-}
-
-fn handle_insert_checklist(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let tax_year = match args.get("tax_year").and_then(|v| v.as_i64()) {
-        Some(y) => y as i32,
-        None => return ok_response(id, tool_err("tax_year is required")),
-    };
-    let item_type = args.get("item_type").and_then(|v| v.as_str()).unwrap_or("");
-    if item_type.is_empty() {
-        return ok_response(id, tool_err("item_type is required (auto_upload or expected_doc)"));
-    }
-    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    if name.is_empty() {
-        return ok_response(id, tool_err("name is required"));
-    }
-    let match_category = args.get("match_category").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let match_sender = args.get("match_sender").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    let match_pattern = args.get("match_pattern").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-    match checklists::add_checklist_item(path, password, tax_year, item_type, name, match_category, match_sender, match_pattern) {
-        Ok(checklist_id) => ok_response(id, tool_ok(json!({"ok": true, "checklist_id": checklist_id}))),
-        Err(e) => ok_response(id, tool_err(&e.message)),
-    }
-}
-
-fn handle_get_checklist(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let checklist_id = match args.get("checklist_id").and_then(|v| v.as_i64()) {
-        Some(cid) => cid,
-        None => return ok_response(id, tool_err("checklist_id is required")),
-    };
-    match checklists::get_checklist_item(path, password, checklist_id) {
-        Ok(item) => match serde_json::to_value(&item) {
-            Ok(v) => ok_response(id, tool_ok(json!({"ok": true, "item": v}))),
-            Err(e) => ok_response(id, tool_err(&e.to_string())),
-        },
-        Err(e) => ok_response(id, tool_err(&e.message)),
-    }
-}
-
-fn handle_update_checklist(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let checklist_id = match args.get("checklist_id").and_then(|v| v.as_i64()) {
-        Some(cid) => cid,
-        None => return ok_response(id, tool_err("checklist_id is required")),
-    };
-    let updates_val = args.get("updates").cloned().unwrap_or(Value::Object(Default::default()));
-    let updates: std::collections::HashMap<String, Value> = match updates_val {
-        Value::Object(map) => map.into_iter().collect(),
-        _ => return ok_response(id, tool_err("updates must be an object")),
-    };
-    match checklists::update_checklist_item(path, password, checklist_id, &updates) {
-        Ok(()) => ok_response(id, tool_ok(json!({"ok": true}))),
-        Err(e) => ok_response(id, tool_err(&e.message)),
-    }
-}
-
-fn handle_delete_checklist(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let checklist_id = match args.get("checklist_id").and_then(|v| v.as_i64()) {
-        Some(cid) => cid,
-        None => return ok_response(id, tool_err("checklist_id is required")),
-    };
-    match checklists::delete_checklist_item(path, password, checklist_id) {
-        Ok(()) => ok_response(id, tool_ok(json!({"ok": true}))),
-        Err(e) => ok_response(id, tool_err(&e.message)),
-    }
-}
-
-fn handle_toggle_checklist_enabled(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let checklist_id = match args.get("checklist_id").and_then(|v| v.as_i64()) {
-        Some(cid) => cid,
-        None => return ok_response(id, tool_err("checklist_id is required")),
-    };
-    let enabled = args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-    match checklists::toggle_checklist_enabled(path, password, checklist_id, enabled) {
-        Ok(()) => ok_response(id, tool_ok(json!({"ok": true}))),
-        Err(e) => ok_response(id, tool_err(&e.message)),
-    }
-}
-
-fn handle_run_checklist_check(params: &Value, id: Value) -> RpcResponse {
-    let args = params.get("arguments").unwrap_or(params);
-    let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if path.is_empty() {
-        return ok_response(id, tool_err("path is required"));
-    }
-    let tax_year = match args.get("tax_year").and_then(|v| v.as_i64()) {
-        Some(y) => y as i32,
-        None => return ok_response(id, tool_err("tax_year is required")),
-    };
-    match checklists::run_checklist(path, password, tax_year) {
-        Ok(result) => ok_response(id, tool_ok(result)),
-        Err(e) => ok_response(id, tool_err(&e.message)),
     }
 }
 
@@ -3184,105 +3035,6 @@ fn main() {
                         },
                     },
                     {
-                        "name": "minerva_scansort_list_checklists",
-                        "description": "List checklist items for a vault, optionally filtered by tax_year and/or item_type. Returns {ok, items, count}.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "tax_year": {"type": "integer", "description": "Filter by tax year (optional)."},
-                                "item_type": {"type": "string", "description": "Filter by type: 'auto_upload' or 'expected_doc' (optional)."},
-                            },
-                            "required": ["path"],
-                        },
-                    },
-                    {
-                        "name": "minerva_scansort_insert_checklist",
-                        "description": "Add a new checklist item (auto_upload or expected_doc). Returns {ok, checklist_id}.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "tax_year": {"type": "integer", "description": "Tax year this item belongs to."},
-                                "item_type": {"type": "string", "description": "Type: 'auto_upload' or 'expected_doc'."},
-                                "name": {"type": "string", "description": "Human-readable label for this checklist item."},
-                                "match_category": {"type": "string", "description": "Category to match against documents (optional)."},
-                                "match_sender": {"type": "string", "description": "Sender substring to match (optional)."},
-                                "match_pattern": {"type": "string", "description": "Description substring to match (optional)."},
-                            },
-                            "required": ["path", "tax_year", "item_type", "name"],
-                        },
-                    },
-                    {
-                        "name": "minerva_scansort_get_checklist",
-                        "description": "Get a single checklist item by checklist_id. Returns {ok, item}.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "checklist_id": {"type": "integer", "description": "Checklist item ID to retrieve."},
-                            },
-                            "required": ["path", "checklist_id"],
-                        },
-                    },
-                    {
-                        "name": "minerva_scansort_update_checklist",
-                        "description": "Update fields of a checklist item by checklist_id. Returns {ok}.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "checklist_id": {"type": "integer", "description": "Checklist item ID to update."},
-                                "updates": {"type": "object", "description": "Map of fields to update. Allowed: name, match_category, match_sender, match_pattern, status, type, tax_year, enabled, matched_doc_id."},
-                            },
-                            "required": ["path", "checklist_id", "updates"],
-                        },
-                    },
-                    {
-                        "name": "minerva_scansort_delete_checklist",
-                        "description": "Delete a checklist item by checklist_id. Returns {ok}.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "checklist_id": {"type": "integer", "description": "Checklist item ID to delete."},
-                            },
-                            "required": ["path", "checklist_id"],
-                        },
-                    },
-                    {
-                        "name": "minerva_scansort_toggle_checklist_enabled",
-                        "description": "Enable or disable a checklist item. Returns {ok}.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "checklist_id": {"type": "integer", "description": "Checklist item ID to toggle."},
-                                "enabled": {"type": "boolean", "description": "True to enable, false to disable."},
-                            },
-                            "required": ["path", "checklist_id", "enabled"],
-                        },
-                    },
-                    {
-                        "name": "minerva_scansort_run_checklist_check",
-                        "description": "Run all enabled checklist items for a tax year against vault documents. Updates status (found/missing) and returns a summary with expected doc results and auto_uploaded count.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "path": {"type": "string", "description": "Absolute path to the vault file."},
-                                "password": {"type": "string", "description": "Vault password (optional)."},
-                                "tax_year": {"type": "integer", "description": "Tax year to run the check for."},
-                            },
-                            "required": ["path", "tax_year"],
-                        },
-                    },
-                    {
                         "name": "minerva_scansort_set_source_dir",
                         "description": "Set the transitory source directory the plugin watches for incoming documents. State is process-memory only — not persisted. Returns {ok, path, recursive}.",
                         "inputSchema": {
@@ -3909,27 +3661,6 @@ fn main() {
                     "minerva_scansort_classify_document" => {
                         handle_classify_document(&req.params, req.id, &mut out, &mut lines, &mut next_id)
                     }
-                    "minerva_scansort_list_checklists" => {
-                        handle_list_checklists(&req.params, req.id)
-                    }
-                    "minerva_scansort_insert_checklist" => {
-                        handle_insert_checklist(&req.params, req.id)
-                    }
-                    "minerva_scansort_get_checklist" => {
-                        handle_get_checklist(&req.params, req.id)
-                    }
-                    "minerva_scansort_update_checklist" => {
-                        handle_update_checklist(&req.params, req.id)
-                    }
-                    "minerva_scansort_delete_checklist" => {
-                        handle_delete_checklist(&req.params, req.id)
-                    }
-                    "minerva_scansort_toggle_checklist_enabled" => {
-                        handle_toggle_checklist_enabled(&req.params, req.id)
-                    }
-                    "minerva_scansort_run_checklist_check" => {
-                        handle_run_checklist_check(&req.params, req.id)
-                    }
                     "minerva_scansort_set_source_dir" => {
                         handle_set_source_dir(&req.params, req.id)
                     }
@@ -4105,7 +3836,6 @@ mod state_change_kind_tests {
             ("minerva_scansort_insert_rule",              Some("rule")),
             ("minerva_scansort_library_insert_rule",      Some("library_rule")),
             ("minerva_scansort_insert_document",          Some("document")),
-            ("minerva_scansort_insert_checklist",         Some("checklist")),
             // --- negative / read-only cases ---
             ("minerva_scansort_probe",                    None),
             ("some_unknown_tool",                         None),

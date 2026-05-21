@@ -77,19 +77,6 @@ CREATE TABLE IF NOT EXISTS watch_folders (
     category_filter TEXT,
     enabled INTEGER DEFAULT 1
 );
-
-CREATE TABLE IF NOT EXISTS checklists (
-    checklist_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tax_year INTEGER NOT NULL,
-    type TEXT NOT NULL,
-    name TEXT NOT NULL,
-    match_category TEXT,
-    match_sender TEXT,
-    match_pattern TEXT,
-    enabled INTEGER DEFAULT 1,
-    matched_doc_id INTEGER REFERENCES documents(doc_id),
-    status TEXT DEFAULT 'pending'
-);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -98,22 +85,6 @@ CREATE TABLE IF NOT EXISTS checklists (
 
 /// Apply schema migrations for older vaults that may be missing tables/columns.
 pub fn migrate(conn: &Connection) -> VaultResult<()> {
-    // Create checklists table if missing (added in later version)
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS checklists (
-            checklist_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tax_year INTEGER NOT NULL,
-            type TEXT NOT NULL,
-            name TEXT NOT NULL,
-            match_category TEXT,
-            match_sender TEXT,
-            match_pattern TEXT,
-            enabled INTEGER DEFAULT 1,
-            matched_doc_id INTEGER REFERENCES documents(doc_id),
-            status TEXT DEFAULT 'pending'
-        );"
-    )?;
-
     // Add display_name and tags columns if missing
     let cols: Vec<String> = conn
         .prepare("PRAGMA table_info(documents)")?

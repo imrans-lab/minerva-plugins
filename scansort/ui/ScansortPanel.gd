@@ -59,8 +59,6 @@ const _RulesEditorDialog: Script  = preload("rules_editor_dialog.gd")
 ## R5: vault registry dialog (off-tree: no class_name).
 const _VaultRegistryDialog: Script = preload("vault_registry_dialog.gd")
 
-## R6: checklist dialog (off-tree: no class_name).
-const _ChecklistDialog: Script      = preload("checklist_dialog.gd")
 const _SettingsDialog: Script       = preload("settings_dialog.gd")
 const _RecoverySheetDialog: Script  = preload("recovery_sheet_dialog.gd")
 const _UiScale: Script         = preload("ui_scale.gd")
@@ -478,7 +476,6 @@ func _on_file_menu_id_pressed(id: int) -> void:
 		3: _on_add_document_pressed()
 		4: _on_rules_editor_pressed()
 		5: _on_vault_registry_pressed()
-		7: _on_checklist_pressed()
 		8: _on_clear_cache_pressed()
 		11: _on_settings_pressed()
 		12: _on_export_marked_pressed()
@@ -2601,34 +2598,6 @@ func _on_settings_pressed() -> void:
 	dlg.popup_centered(Vector2i(580, 420))
 
 
-# ---------------------------------------------------------------------------
-# R6: Checklist flow
-# ---------------------------------------------------------------------------
-
-## Called when user picks "Checklist…" from the File menu.
-func _on_checklist_pressed() -> void:
-	if not _vault_is_open:
-		set_status("Open a vault first.")
-		return
-	var conn = _get_connection()
-	if conn == null:
-		set_status("ERROR: scansort plugin not running.")
-		return
-
-	var dlg = _ChecklistDialog.new()
-	add_child(dlg)
-	dlg.init(conn, _active_vault_path, _vault_password)
-	dlg.checklist_changed.connect(
-		func() -> void:
-			pass  # panel has no cached checklist state to invalidate
-	)
-	dlg.closed.connect(
-		func() -> void:
-			dlg.queue_free()
-	)
-	dlg.popup_centered(Vector2i(660, 560))
-
-
 ## Called when user picks "Recovery Sheet…" from the File menu.
 func _on_recovery_sheet_pressed() -> void:
 	if not _vault_is_open:
@@ -2711,7 +2680,6 @@ func get_editor_actions() -> Array:
 	popup.add_item("Rules...", 4)
 	popup.add_separator()
 	popup.add_item("Vault Registry...", 5)
-	popup.add_item("Checklist...", 7)
 	popup.add_separator()
 	popup.add_item("Settings...", 11)
 	popup.add_separator()
@@ -2740,8 +2708,7 @@ func get_editor_actions() -> Array:
 ## Always enabled: New Vault (0), Open Vault (1), Close (2 — DCR 019e3d67:
 ## now session-wide and a no-op on an empty session), Rules… (4),
 ## Vault Registry (5).
-## Vault-gated: Add Document (3), Checklist (7),
-##              Extract Marked (12), Recovery Sheet (13).
+## Vault-gated: Add Document (3), Extract Marked (12), Recovery Sheet (13).
 ## Source-gated: Clear Cache (8 — DCR 019e41a5: needs ≥1 open source).
 func _refresh_chrome_menu_state() -> void:
 	if _chrome_popup == null or not is_instance_valid(_chrome_popup):
@@ -3274,7 +3241,7 @@ func _on_plugin_event(p_id: String, event_name: String, payload: Dictionary) -> 
 			# kept as a harmless explicit no-op for safety.
 			pass
 		_:
-			# Unknown kinds (document, checklist, rule) — no panel surface.
+			# Unknown kinds (document, rule) — no panel surface.
 			pass
 
 
