@@ -121,6 +121,22 @@
       }
     },
     {
+      "name": "minerva_scansort_move_document_to_vault",
+      "description": "Move a document from one vault to another in memory (no cleartext disk pivot). Decrypts the source with src_password, re-encrypts under dst_password (or stores plaintext if empty), verifies via sha256, then hard-deletes the source. Refuses encrypted→plaintext downgrades unless allow_encryption_downgrade is true.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "src_vault": {"type": "string", "description": "Absolute path to the source vault."},
+          "doc_id": {"type": "integer", "description": "Source document ID to move."},
+          "dst_vault": {"type": "string", "description": "Absolute path to the destination vault."},
+          "src_password": {"type": "string", "description": "Password for the source vault when its document is encrypted."},
+          "dst_password": {"type": "string", "description": "Password for the destination vault — non-empty encrypts at rest."},
+          "allow_encryption_downgrade": {"type": "boolean", "description": "Default false. Set true to permit moving an encrypted source into a plaintext destination."}
+        },
+        "required": ["src_vault", "doc_id", "dst_vault"]
+      }
+    },
+    {
       "name": "minerva_scansort_vault_inventory",
       "description": "List all documents in a vault with metadata (no file data blob)."
     },

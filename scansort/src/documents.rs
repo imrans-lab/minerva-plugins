@@ -13,6 +13,33 @@ use std::collections::HashMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
+// Shared blob pipeline helpers
+// ---------------------------------------------------------------------------
+
+/// Compress raw bytes with zstd and optionally encrypt with the vault's key.
+///
+/// Returns `(stored_blob, encryption_iv, encryption_tag)` — iv/tag are
+/// `Some(...)` when `password` is non-empty, `None` for plaintext storage.
+/// Shared by `insert_document`, `replace_document_content`, and
+/// `insert_document_with_metadata` so the compress→encrypt step has exactly
+/// one implementation.
+fn pack_blob_for_storage(
+    path: &str,
+    raw_data: &[u8],
+    password: &str,
+) -> VaultResult<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> {
+    let compressed = zstd::encode_all(raw_data, 3)
+        .map_err(|e| VaultError::new(format!("Compression failed: {e}")))?;
+    if !password.is_empty() {
+        let key = crypto::vault_key(path, password)?;
+        let (ct, iv, tag) = crypto::encrypt_bytes(&key, &compressed)?;
+        Ok((ct, Some(iv), Some(tag)))
+    } else {
+        Ok((compressed, None, None))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // insert_document
 // ---------------------------------------------------------------------------
 
@@ -51,20 +78,9 @@ pub fn insert_document(
     let raw_data = std::fs::read(fp)?;
     let original_size = raw_data.len() as i64;
 
-    // Compress with zstd
-    let compressed = zstd::encode_all(raw_data.as_slice(), 3)
-        .map_err(|e| VaultError::new(format!("Compression failed: {e}")))?;
-    let compressed_size = compressed.len();
-
-    // Optionally encrypt the compressed bytes (compress → encrypt, same as Python).
-    let (stored_data, enc_iv, enc_tag): (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) =
-        if !password.is_empty() {
-            let key = crypto::vault_key(path, password)?;
-            let (ct, iv, tag) = crypto::encrypt_bytes(&key, &compressed)?;
-            (ct, Some(iv), Some(tag))
-        } else {
-            (compressed, None, None)
-        };
+    // Compress + optionally encrypt via the shared blob pipeline.
+    let (stored_data, enc_iv, enc_tag) = pack_blob_for_storage(path, &raw_data, password)?;
+    let compressed_size = stored_data.len();
 
     // Compute SHA-256 if not provided
     let sha256_val = if sha256.is_empty() {
@@ -160,6 +176,109 @@ pub fn insert_document(
             format!(
                 "Imported {original_filename} ({original_size} bytes, \
                  compressed to {compressed_size} bytes)"
+            ),
+            doc_id,
+        ],
+    )?;
+
+    Ok(doc_id)
+}
+
+// ---------------------------------------------------------------------------
+// insert_document_with_metadata — bytes-based insert preserving full metadata
+// ---------------------------------------------------------------------------
+
+/// Insert a document from in-memory bytes + a populated `Document` struct.
+///
+/// Used by cross-vault transfer (`transfer::move_document_to_vault`) to avoid
+/// a cleartext-on-disk pivot. Carries every metadata field from the source
+/// (including classified_at, tags, rule_snapshot) and writes the new
+/// `doc_id` for the destination vault. Bytes run through the shared
+/// `pack_blob_for_storage` pipeline. The destination's UNIQUE sha256
+/// constraint surfaces as a structured duplicate error.
+pub(crate) fn insert_document_with_metadata(
+    path: &str,
+    doc: &Document,
+    raw_data: &[u8],
+    password: &str,
+) -> VaultResult<i64> {
+    let original_size = raw_data.len() as i64;
+    let (stored_data, enc_iv, enc_tag) = pack_blob_for_storage(path, raw_data, password)?;
+
+    let sha256_val = if doc.sha256.is_empty() {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(raw_data))
+    } else {
+        doc.sha256.clone()
+    };
+
+    let now = now_iso();
+    let classified_at = if doc.classified_at.is_empty() {
+        now.clone()
+    } else {
+        doc.classified_at.clone()
+    };
+    let tags_json = db::to_json_array(&doc.tags);
+
+    let conn = db::connect(path)?;
+
+    let doc_id: i64 = match conn.execute(
+        "INSERT INTO documents \
+         (original_filename, file_ext, category, confidence, issuer, \
+          description, doc_date, classified_at, sha256, simhash, dhash, \
+          status, file_data, file_size, compression, encryption_iv, encryption_tag, \
+          source_path, rule_snapshot, display_name, tags) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'zstd', \
+                 ?15, ?16, ?17, ?18, ?19, ?20)",
+        params![
+            doc.original_filename,
+            doc.file_ext,
+            doc.category,
+            doc.confidence,
+            doc.issuer,
+            doc.description,
+            doc.doc_date,
+            classified_at,
+            sha256_val,
+            doc.simhash,
+            doc.dhash,
+            doc.status,
+            stored_data,
+            original_size,
+            enc_iv,
+            enc_tag,
+            doc.source_path,
+            doc.rule_snapshot,
+            doc.display_name,
+            tags_json,
+        ],
+    ) {
+        Ok(_) => conn.last_insert_rowid(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.to_lowercase().contains("unique") || msg.to_lowercase().contains("sha256") {
+                return Err(VaultError::new(format!(
+                    "Duplicate document (SHA-256 already exists in destination vault): {sha256_val}"
+                )));
+            }
+            return Err(VaultError::new(format!("Failed to insert document: {e}")));
+        }
+    };
+
+    conn.execute(
+        "INSERT OR REPLACE INTO fingerprints (sha256, simhash, dhash, doc_id) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![sha256_val, doc.simhash, doc.dhash, doc_id],
+    )?;
+
+    conn.execute(
+        "INSERT INTO log (timestamp, level, component, message, doc_id) \
+         VALUES (?1, 'info', 'vault', ?2, ?3)",
+        params![
+            now,
+            format!(
+                "Imported {} ({} bytes via in-memory transfer)",
+                doc.original_filename, original_size
             ),
             doc_id,
         ],
@@ -314,6 +433,79 @@ pub fn get_document(path: &str, doc_id: i64) -> VaultResult<Document> {
 }
 
 // ---------------------------------------------------------------------------
+// read_document_bytes — decrypt + decompress in memory (no disk pivot)
+// ---------------------------------------------------------------------------
+
+/// Read a stored document's content, decrypt (if encrypted), and decompress.
+///
+/// Returns `(original_filename, plaintext_bytes)`. Used by `extract_document`
+/// (writes to disk) and `transfer::move_document_to_vault` (keeps the bytes
+/// in memory). Mirrors the inverse of `pack_blob_for_storage`. Single source
+/// of truth for the decrypt + decompress step.
+pub(crate) fn read_document_bytes(
+    path: &str,
+    doc_id: i64,
+    password: &str,
+) -> VaultResult<(String, Vec<u8>)> {
+    let conn = db::connect(path)?;
+
+    let (original_filename, file_data, compression, enc_iv, enc_tag): (
+        String,
+        Option<Vec<u8>>,
+        String,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+    ) = conn
+        .prepare(
+            "SELECT original_filename, file_data, compression, encryption_iv, encryption_tag \
+             FROM documents WHERE doc_id = ?",
+        )?
+        .query_row(params![doc_id], |row| {
+            Ok((
+                db::get_string(row, "original_filename"),
+                db::get_blob(row, "file_data"),
+                db::get_string(row, "compression"),
+                db::get_blob(row, "encryption_iv"),
+                db::get_blob(row, "encryption_tag"),
+            ))
+        })
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => {
+                VaultError::new(format!("Document not found: id={doc_id}"))
+            }
+            other => VaultError::from(other),
+        })?;
+
+    let raw_blob = file_data.ok_or_else(|| VaultError::new("Document has no file data"))?;
+
+    // Decrypt if the document was stored encrypted (insert order: compress → encrypt).
+    let decompressable: Vec<u8> = if let (Some(iv), Some(tag)) = (enc_iv, enc_tag) {
+        if password.is_empty() {
+            return Err(VaultError::new(
+                "Document is encrypted — a vault password is required to open it.",
+            ));
+        }
+        let key = crypto::vault_key(path, password).map_err(|e| {
+            VaultError::new(format!("Failed to derive vault key: {}", e.message))
+        })?;
+        crypto::decrypt_bytes(&key, &raw_blob, &iv, &tag).map_err(|_| {
+            VaultError::new("Incorrect vault password — could not decrypt the document.")
+        })?
+    } else {
+        raw_blob
+    };
+
+    let decompressed = if compression == "zstd" {
+        zstd::decode_all(decompressable.as_slice())
+            .map_err(|e| VaultError::new(format!("Decompression failed: {e}")))?
+    } else {
+        decompressable
+    };
+
+    Ok((original_filename, decompressed))
+}
+
+// ---------------------------------------------------------------------------
 // extract_document
 // ---------------------------------------------------------------------------
 
@@ -335,87 +527,22 @@ pub fn get_document(path: &str, doc_id: i64) -> VaultResult<Document> {
 ///
 /// Returns the final output path on success.
 pub fn extract_document(path: &str, doc_id: i64, dest: &str, password: &str) -> VaultResult<String> {
-    let conn = db::connect(path)?;
+    let (original_filename, decompressed) = read_document_bytes(path, doc_id, password)?;
 
-    let mut stmt = conn.prepare(
-        "SELECT original_filename, file_data, compression, encryption_iv, encryption_tag \
-         FROM documents WHERE doc_id = ?",
-    )?;
-
-    let (original_filename, file_data, compression, enc_iv, enc_tag): (
-        String,
-        Option<Vec<u8>>,
-        String,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-    ) = stmt
-        .query_row(params![doc_id], |row| {
-            Ok((
-                db::get_string(row, "original_filename"),
-                db::get_blob(row, "file_data"),
-                db::get_string(row, "compression"),
-                db::get_blob(row, "encryption_iv"),
-                db::get_blob(row, "encryption_tag"),
-            ))
-        })
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                VaultError::new(format!("Document not found: id={doc_id}"))
-            }
-            other => VaultError::from(other),
-        })?;
-
-    let raw_blob = file_data.ok_or_else(|| VaultError::new("Document has no file data"))?;
-
-    // Decrypt if the document was stored encrypted (compression then encryption).
-    let decompressable: Vec<u8> = if let (Some(iv), Some(tag)) = (enc_iv, enc_tag) {
-        // Document is encrypted — password is required.
-        if password.is_empty() {
-            return Err(VaultError::new(
-                "Document is encrypted — a vault password is required to open it.",
-            ));
-        }
-        // Derive the vault key using the same KDF + salt used at insert time.
-        let key = crypto::vault_key(path, password).map_err(|e| {
-            VaultError::new(format!("Failed to derive vault key: {}", e.message))
-        })?;
-        // Decrypt.  GCM tag mismatch means wrong password.
-        crypto::decrypt_bytes(&key, &raw_blob, &iv, &tag).map_err(|_| {
-            VaultError::new(
-                "Incorrect vault password — could not decrypt the document.",
-            )
-        })?
-    } else {
-        // Plaintext document — use blob as-is.
-        raw_blob
-    };
-
-    // Decompress
-    let decompressed = if compression == "zstd" {
-        zstd::decode_all(decompressable.as_slice())
-            .map_err(|e| VaultError::new(format!("Decompression failed: {e}")))?
-    } else {
-        decompressable
-    };
-
-    // Resolve destination path
     let dest_path = Path::new(dest);
     let final_path = if dest_path.is_dir() {
         dest_path.join(&original_filename)
     } else {
         dest_path.to_path_buf()
     };
-
-    // Create parent directories if needed
     if let Some(parent) = final_path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
     }
-
     std::fs::write(&final_path, &decompressed)?;
 
-    // Log extraction
+    let conn = db::connect(path)?;
     conn.execute(
         "INSERT INTO log (timestamp, level, component, message, doc_id) \
          VALUES (?1, 'info', 'vault', ?2, ?3)",
@@ -627,19 +754,10 @@ pub fn replace_document_content(
     // Recompute fingerprints from the new content (same pipeline as insert).
     let extraction = extract::extract_file(file_path)?;
 
-    // Read → compress → optionally encrypt, mirroring insert_document.
+    // Read → compress → optionally encrypt via the shared blob pipeline.
     let raw_data = std::fs::read(fp)?;
     let original_size = raw_data.len() as i64;
-    let compressed = zstd::encode_all(raw_data.as_slice(), 3)
-        .map_err(|e| VaultError::new(format!("Compression failed: {e}")))?;
-    let (stored_data, enc_iv, enc_tag): (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) =
-        if !password.is_empty() {
-            let key = crypto::vault_key(path, password)?;
-            let (ct, iv, tag) = crypto::encrypt_bytes(&key, &compressed)?;
-            (ct, Some(iv), Some(tag))
-        } else {
-            (compressed, None, None)
-        };
+    let (stored_data, enc_iv, enc_tag) = pack_blob_for_storage(path, &raw_data, password)?;
 
     let mut conn = db::connect(path)?;
     let tx = conn.transaction()?;
@@ -814,6 +932,7 @@ mod tests {
         replace_document_content, set_document_encrypted, update_document,
     };
     use std::collections::HashMap;
+    use crate::transfer;
     use crate::vault_lifecycle;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1200,5 +1319,165 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // T2 — move_document_to_vault covers clear→clear and clear→enc.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn move_document_clear_source_to_clear_and_encrypted_destinations() {
+        let body1 = b"docs that move from a plaintext source vault";
+        let (src_dir, src_vault, src_file) = setup("move-clr-src", body1);
+        let svp = src_vault.to_str().unwrap();
+        let doc_id1 = insert(&src_vault, &src_file, "");
+
+        // Build a plaintext destination vault.
+        let dst_dir1 = unique_tmp("move-clr-dst1");
+        std::fs::create_dir_all(&dst_dir1).unwrap();
+        let dst_vault1 = dst_dir1.join("dst_plain.ssort");
+        vault_lifecycle::create_vault(dst_vault1.to_str().unwrap(), "DstPlain").unwrap();
+        let dvp1 = dst_vault1.to_str().unwrap();
+
+        // clear → clear.
+        let new_id1 = transfer::move_document_to_vault(svp, doc_id1, dvp1, "", "", false)
+            .expect("clear→clear move");
+        assert!(get_document(svp, doc_id1).is_err(), "src must no longer have the doc");
+        let dst_doc1 = get_document(dvp1, new_id1).expect("dst has the doc");
+        assert!(!dst_doc1.encrypted, "dst doc must be plaintext");
+        let out1 = src_dir.join("ex1.txt");
+        let p1 = extract_document(dvp1, new_id1, out1.to_str().unwrap(), "").unwrap();
+        assert_eq!(std::fs::read(&p1).unwrap().as_slice(), body1);
+
+        // Now move a second doc from src into an encrypted dst (clear → enc).
+        let body2 = b"the second document, destined for an encrypted dst";
+        let src_file2 = src_dir.join("second.txt");
+        std::fs::write(&src_file2, body2).unwrap();
+        let doc_id2 = insert(&src_vault, &src_file2, "");
+
+        let dst_dir2 = unique_tmp("move-clr-dst2");
+        std::fs::create_dir_all(&dst_dir2).unwrap();
+        let dst_vault2 = dst_dir2.join("dst_enc.ssort");
+        vault_lifecycle::create_vault(dst_vault2.to_str().unwrap(), "DstEnc").unwrap();
+        let dvp2 = dst_vault2.to_str().unwrap();
+        crypto::set_password(dvp2, "destination-secret").unwrap();
+
+        let new_id2 =
+            transfer::move_document_to_vault(svp, doc_id2, dvp2, "", "destination-secret", false)
+                .expect("clear→enc move");
+        let dst_doc2 = get_document(dvp2, new_id2).expect("dst has the new doc");
+        assert!(dst_doc2.encrypted, "doc must be encrypted in dst");
+        let out2 = src_dir.join("ex2.txt");
+        let p2 =
+            extract_document(dvp2, new_id2, out2.to_str().unwrap(), "destination-secret").unwrap();
+        assert_eq!(std::fs::read(&p2).unwrap().as_slice(), body2);
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&dst_dir1);
+        let _ = std::fs::remove_dir_all(&dst_dir2);
+    }
+
+    // -----------------------------------------------------------------------
+    // T2 — move_document_to_vault between encrypted vaults, same and
+    // different passwords.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn move_document_encrypted_to_encrypted_same_and_different_passwords() {
+        let body1 = b"an encrypted document that survives a same-password move";
+        let (src_dir, src_vault, src_file) = setup("move-enc-src", body1);
+        let svp = src_vault.to_str().unwrap();
+        let pw_src = "src-vault-pw";
+        crypto::set_password(svp, pw_src).unwrap();
+        let doc_id1 = insert(&src_vault, &src_file, pw_src);
+
+        // enc → enc same password.
+        let dst_dir1 = unique_tmp("move-enc-same");
+        std::fs::create_dir_all(&dst_dir1).unwrap();
+        let dst_vault1 = dst_dir1.join("dst_same.ssort");
+        vault_lifecycle::create_vault(dst_vault1.to_str().unwrap(), "DstSame").unwrap();
+        let dvp1 = dst_vault1.to_str().unwrap();
+        crypto::set_password(dvp1, pw_src).unwrap();
+
+        let new_id1 = transfer::move_document_to_vault(svp, doc_id1, dvp1, pw_src, pw_src, false)
+            .expect("enc→enc same pw");
+        let dst_doc1 = get_document(dvp1, new_id1).unwrap();
+        assert!(dst_doc1.encrypted);
+        let out1 = src_dir.join("ex_same.txt");
+        let p1 = extract_document(dvp1, new_id1, out1.to_str().unwrap(), pw_src).unwrap();
+        assert_eq!(std::fs::read(&p1).unwrap().as_slice(), body1);
+
+        // A second doc, moved to a DIFFERENT-password dst.
+        let body2 = b"a second encrypted document for the different-password leg";
+        let src_file2 = src_dir.join("two.txt");
+        std::fs::write(&src_file2, body2).unwrap();
+        let doc_id2 = insert(&src_vault, &src_file2, pw_src);
+
+        let dst_dir2 = unique_tmp("move-enc-diff");
+        std::fs::create_dir_all(&dst_dir2).unwrap();
+        let dst_vault2 = dst_dir2.join("dst_diff.ssort");
+        vault_lifecycle::create_vault(dst_vault2.to_str().unwrap(), "DstDiff").unwrap();
+        let dvp2 = dst_vault2.to_str().unwrap();
+        let pw_dst = "different-destination-pw";
+        crypto::set_password(dvp2, pw_dst).unwrap();
+
+        let new_id2 = transfer::move_document_to_vault(svp, doc_id2, dvp2, pw_src, pw_dst, false)
+            .expect("enc→enc different pw");
+        let p2 = extract_document(
+            dvp2,
+            new_id2,
+            src_dir.join("ex_diff.txt").to_str().unwrap(),
+            pw_dst,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&p2).unwrap().as_slice(), body2);
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&dst_dir1);
+        let _ = std::fs::remove_dir_all(&dst_dir2);
+    }
+
+    // -----------------------------------------------------------------------
+    // T2 — encryption-downgrade gate: refused without the explicit flag,
+    // allowed (and the source is consumed) with it.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn move_document_encrypted_to_clear_downgrade_gate() {
+        let body = b"a secret that we may or may not be allowed to downgrade";
+        let (src_dir, src_vault, src_file) = setup("move-downgrade", body);
+        let svp = src_vault.to_str().unwrap();
+        let pw = "secret-vault-pw";
+        crypto::set_password(svp, pw).unwrap();
+        let doc_id = insert(&src_vault, &src_file, pw);
+
+        let dst_dir = unique_tmp("move-downgrade-dst");
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let dst_vault = dst_dir.join("dst_plain.ssort");
+        vault_lifecycle::create_vault(dst_vault.to_str().unwrap(), "DstPlain").unwrap();
+        let dvp = dst_vault.to_str().unwrap();
+
+        // Without the downgrade flag → refused; src untouched.
+        let err = transfer::move_document_to_vault(svp, doc_id, dvp, pw, "", false)
+            .expect_err("downgrade must be refused without the explicit flag");
+        assert!(
+            err.message.to_lowercase().contains("downgrade"),
+            "expected a downgrade refusal, got: {}",
+            err.message
+        );
+        assert!(
+            get_document(svp, doc_id).is_ok(),
+            "src doc must be untouched after a refused move"
+        );
+
+        // With the flag set → allowed; dst doc is plaintext, src deleted.
+        let new_id = transfer::move_document_to_vault(svp, doc_id, dvp, pw, "", true)
+            .expect("downgrade with explicit flag must succeed");
+        let dst_doc = get_document(dvp, new_id).unwrap();
+        assert!(!dst_doc.encrypted, "downgraded dst doc must be plaintext");
+        assert!(
+            get_document(svp, doc_id).is_err(),
+            "src doc must be deleted after a verified move"
+        );
+
+        let _ = std::fs::remove_dir_all(&src_dir);
+        let _ = std::fs::remove_dir_all(&dst_dir);
     }
 }

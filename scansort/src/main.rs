@@ -48,6 +48,7 @@ mod session;
 mod source;
 mod source_state;
 mod stage_walker;
+mod transfer;
 mod types;
 mod vault_lifecycle;
 
@@ -200,6 +201,7 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         | "minerva_scansort_update_document"
         | "minerva_scansort_replace_document_content"
         | "minerva_scansort_delete_document"
+        | "minerva_scansort_move_document_to_vault"
         | "minerva_scansort_set_document_encrypted"
         | "minerva_scansort_extract_document"
         | "minerva_scansort_place_on_disk"
@@ -711,6 +713,42 @@ fn handle_delete_document(params: &Value, id: Value) -> RpcResponse {
     };
     match documents::delete_document(vault_path, doc_id) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "doc_id": doc_id}))),
+        Err(e) => ok_response(id, tool_err(&e.message)),
+    }
+}
+
+fn handle_move_document_to_vault(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let src_vault = args.get("src_vault").and_then(|v| v.as_str()).unwrap_or("");
+    if src_vault.is_empty() {
+        return ok_response(id, tool_err("src_vault is required"));
+    }
+    let dst_vault = args.get("dst_vault").and_then(|v| v.as_str()).unwrap_or("");
+    if dst_vault.is_empty() {
+        return ok_response(id, tool_err("dst_vault is required"));
+    }
+    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
+        Some(d) => d,
+        None => return ok_response(id, tool_err("doc_id is required")),
+    };
+    let src_password = args.get("src_password").and_then(|v| v.as_str()).unwrap_or("");
+    let dst_password = args.get("dst_password").and_then(|v| v.as_str()).unwrap_or("");
+    let allow_encryption_downgrade = args
+        .get("allow_encryption_downgrade")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    match transfer::move_document_to_vault(
+        src_vault,
+        doc_id,
+        dst_vault,
+        src_password,
+        dst_password,
+        allow_encryption_downgrade,
+    ) {
+        Ok(new_doc_id) => ok_response(
+            id,
+            tool_ok(json!({"ok": true, "src_doc_id": doc_id, "dst_doc_id": new_doc_id})),
+        ),
         Err(e) => ok_response(id, tool_err(&e.message)),
     }
 }
@@ -2959,6 +2997,22 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_move_document_to_vault",
+                        "description": "Move a document from one vault to another in memory (no cleartext disk pivot). Decrypts the source with src_password, re-encrypts under dst_password (or stores plaintext if empty), verifies the round-trip via sha256, then hard-deletes the source. Refuses encrypted→plaintext downgrades unless allow_encryption_downgrade is true.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "src_vault": {"type": "string", "description": "Absolute path to the source vault."},
+                                "doc_id": {"type": "integer", "description": "Source document ID to move."},
+                                "dst_vault": {"type": "string", "description": "Absolute path to the destination vault."},
+                                "src_password": {"type": "string", "description": "Password for the source vault when its document is encrypted."},
+                                "dst_password": {"type": "string", "description": "Password for the destination vault — non-empty encrypts at rest."},
+                                "allow_encryption_downgrade": {"type": "boolean", "description": "Default false. Set true to permit moving an encrypted source into a plaintext destination."},
+                            },
+                            "required": ["src_vault", "doc_id", "dst_vault"],
+                        },
+                    },
+                    {
                         "name": "minerva_scansort_vault_inventory",
                         "description": "List all documents in a vault with metadata (no file data blob).",
                         "inputSchema": {
@@ -3708,6 +3762,9 @@ fn main() {
                     }
                     "minerva_scansort_delete_document" => {
                         handle_delete_document(&req.params, req.id)
+                    }
+                    "minerva_scansort_move_document_to_vault" => {
+                        handle_move_document_to_vault(&req.params, req.id)
                     }
                     "minerva_scansort_vault_inventory" => {
                         handle_vault_inventory(&req.params, req.id)
