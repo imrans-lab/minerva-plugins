@@ -349,13 +349,19 @@ fn handle_set_password(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    let hint = args.get("hint").and_then(|v| v.as_str()).unwrap_or("");
     if path.is_empty() {
         return ok_response(id, tool_err("path is required"));
     }
-    match crypto::set_password(path, password) {
-        Ok(()) => ok_response(id, tool_ok(json!({"ok": true}))),
-        Err(e) => ok_response(id, tool_err(&e.message)),
+    if let Err(e) = crypto::set_password(path, password) {
+        return ok_response(id, tool_err(&e.message));
     }
+    if !hint.is_empty() {
+        if let Err(e) = crypto::set_password_hint(path, hint) {
+            return ok_response(id, tool_err(&e.message));
+        }
+    }
+    ok_response(id, tool_ok(json!({"ok": true})))
 }
 
 fn handle_verify_password(params: &Value, id: Value) -> RpcResponse {
@@ -2661,12 +2667,13 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_set_password",
-                        "description": "Set the encryption password on a vault; writes verifier to project table.",
+                        "description": "Set the encryption password on a vault; writes verifier to project table. Optionally stores a password hint.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "path": {"type": "string", "description": "Absolute path to the vault file."},
                                 "password": {"type": "string", "description": "Password to set on the vault."},
+                                "hint": {"type": "string", "description": "Optional password hint stored in the vault's project table; surfaced by check_vault_has_password."},
                             },
                             "required": ["path", "password"],
                         },
@@ -2685,7 +2692,7 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_check_vault_has_password",
-                        "description": "Check whether a vault has a password set. Returns {has_password: bool}.",
+                        "description": "Check whether a vault has a password set. Returns {has_password: bool, hint: string}.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {

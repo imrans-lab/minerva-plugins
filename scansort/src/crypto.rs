@@ -198,6 +198,17 @@ pub fn set_password(path: &str, password: &str) -> VaultResult<()> {
     Ok(())
 }
 
+/// Store a password hint for a vault in the `password_hint` project key.
+///
+/// Kept separate from `set_password` so that function's signature stays stable
+/// for its existing callers; the hint is plain metadata, never used in key
+/// derivation. An empty hint clears any stored hint.
+pub fn set_password_hint(path: &str, hint: &str) -> VaultResult<()> {
+    let conn = db::connect(path)?;
+    db::set_project_key(&conn, "password_hint", hint)?;
+    Ok(())
+}
+
 /// Verify a password against the stored verifier. Returns true if correct.
 pub fn verify_password(path: &str, password: &str) -> VaultResult<bool> {
     let conn = db::connect(path)?;
@@ -269,4 +280,57 @@ pub fn vault_key(path: &str, password: &str) -> VaultResult<[u8; KEY_SIZE]> {
     let kdf = verifier["kdf"].as_str().unwrap_or("pbkdf2");
 
     derive_key(password, &salt, kdf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault_lifecycle;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Create a fresh on-disk vault, returning (temp_dir, vault_path).
+    fn tmp_vault(prefix: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let pid = std::process::id();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("scansort-crypto-{prefix}-{pid}-{ts}-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault_path = dir.join("archive.ssort");
+        vault_lifecycle::create_vault(vault_path.to_str().unwrap(), "TestArchive")
+            .expect("create vault");
+        (dir, vault_path)
+    }
+
+    /// Happy path: a hint set alongside a password round-trips through
+    /// check_vault_has_password.
+    #[test]
+    fn set_password_hint_round_trips() {
+        let (dir, vault_path) = tmp_vault("hint-ok");
+        let vp = vault_path.to_str().unwrap();
+        set_password(vp, "correct horse battery staple").expect("set_password");
+        set_password_hint(vp, "idiots luggage").expect("set_password_hint");
+
+        let (has_password, hint) = check_vault_has_password(vp).expect("check");
+        assert!(has_password, "vault should report a password");
+        assert_eq!(hint, "idiots luggage", "stored hint must round-trip");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Error path: writing a hint to a vault whose parent directory does not
+    /// exist fails loudly rather than silently no-op'ing.
+    #[test]
+    fn set_password_hint_bad_path_errors() {
+        let res = set_password_hint(
+            "/nonexistent-scansort-dir/no_such_vault.ssort",
+            "unreachable hint",
+        );
+        assert!(res.is_err(), "hint write to a missing vault must error");
+    }
 }

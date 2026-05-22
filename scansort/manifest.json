@@ -27,7 +27,16 @@
     },
     {
       "name": "minerva_scansort_set_password",
-      "description": "Set the encryption password on a vault; writes verifier to project table."
+      "description": "Set the encryption password on a vault; writes verifier to project table. Optionally stores a password hint.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Absolute path to the vault file."},
+          "password": {"type": "string", "description": "Password to set on the vault."},
+          "hint": {"type": "string", "description": "Optional password hint stored in the vault's project table; surfaced by check_vault_has_password."}
+        },
+        "required": ["path", "password"]
+      }
     },
     {
       "name": "minerva_scansort_verify_password",
@@ -35,7 +44,7 @@
     },
     {
       "name": "minerva_scansort_check_vault_has_password",
-      "description": "Check whether a vault has a password set. Returns {has_password: bool}."
+      "description": "Check whether a vault has a password set. Returns {has_password: bool, hint: string}."
     },
     {
       "name": "minerva_scansort_open_vault",
@@ -268,6 +277,7 @@
   "permissions": {
     "host_capabilities": [
       "host.echo",
+      "host.notify",
       "host.providers.chat",
       "host.files.read",
       "host.files.write",
