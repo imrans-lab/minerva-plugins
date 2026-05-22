@@ -75,6 +75,9 @@ const _AreaProvider: Script = preload("scan_tree_area_provider.gd")
 ## W5g: extract-target picker dialog (off-tree: no class_name).
 const _ExtractTargetDialog: Script = preload("extract_target_dialog.gd")
 
+## RCA 019e4ca264: per-vault password store (off-tree: no class_name).
+const _VaultPasswordStore: Script = preload("vault_password_store.gd")
+
 # ---------------------------------------------------------------------------
 # Signals
 # ---------------------------------------------------------------------------
@@ -114,9 +117,10 @@ var _session_source_label: String = ""
 ## Labels of directory destinations registered this session.
 var _session_dir_labels: Array[String] = []
 
-## R3: password for the currently open vault (empty if no password set).
-## Never logged.
-var _vault_password: String = ""
+## RCA 019e4ca264: per-vault password store. scansort allows multiple vaults
+## open at once, so the password cannot live in a single slot — it is keyed by
+## canonicalised vault path. Never logged. Replaces the old `_vault_password`.
+var _vault_password_store: RefCounted = _VaultPasswordStore.new()
 
 ## R3: FileDialog for picking a document to ingest (separate from vault picker).
 var _doc_file_dialog: FileDialog = null
@@ -496,9 +500,9 @@ func _on_close_vault_pressed() -> void:
 	if not _vault_is_open:
 		set_status("No vault is open.")
 		return
+	_vault_password_store.forget(_active_vault_path)  # drop just this vault's password
 	_active_vault_path = ""
 	_vault_is_open = false
-	_vault_password = ""  # R3: clear cached password
 	set_status("Vault closed.")
 	vault_closed.emit()
 	# R2: clear views.
@@ -531,9 +535,10 @@ func _on_close_session_pressed() -> void:
 		set_status("Session closed.")
 
 	# Mirror _on_vault_closed_r2 to clear local vault chrome + emit close.
+	# Session reset drops every vault, so clear the whole password store.
 	_active_vault_path = ""
 	_vault_is_open = false
-	_vault_password = ""
+	_vault_password_store.clear()
 	vault_closed.emit()
 	_on_vault_closed_r2()
 
@@ -665,8 +670,9 @@ func _begin_create_vault(path: String) -> void:
 
 func _on_create_vault_password_submitted(password: String, hint: String, _mode: int) -> void:
 	if password.is_empty():
-		# No password chosen — open the vault directly.
-		_vault_password = ""
+		# No password chosen — open the vault directly. Record it as a known
+		# (non-encrypted) vault so document opens don't ask to "open its vault".
+		_vault_password_store.set_password(_pending_vault_path, "")
 		await _do_open_vault(_pending_vault_path)
 		_pending_vault_path = ""
 		_pending_password_action = ""
@@ -695,8 +701,8 @@ func _on_create_vault_password_submitted(password: String, hint: String, _mode: 
 			{"path": _pending_vault_path, "key": "password_hint", "value": hint}
 		)
 
-	# R3: cache the password so the ingest pipeline can use it.
-	_vault_password = password
+	# R3: cache the password (per-vault) so the ingest pipeline can use it.
+	_vault_password_store.set_password(_pending_vault_path, password)
 	await _do_open_vault(_pending_vault_path)
 	_pending_vault_path = ""
 	_pending_password_action = ""
@@ -722,7 +728,9 @@ func _begin_open_vault(path: String) -> void:
 
 	var has_pw: bool = pw_check.get("has_password", false)
 	if not has_pw:
-		# No password — open directly.
+		# No password — open directly. Record it as a known (non-encrypted)
+		# vault so document opens don't ask to "open its vault".
+		_vault_password_store.set_password(path, "")
 		await _do_open_vault(path)
 		return
 
@@ -756,8 +764,8 @@ func _on_open_vault_password_submitted(password: String, _hint: String, _mode: i
 			_password_dialog.show_wrong_password_error()
 		return
 
-	# R3: cache the password for use in the ingest pipeline.
-	_vault_password = password
+	# R3: cache the password (per-vault) for use in the ingest pipeline.
+	_vault_password_store.set_password(_pending_vault_path, password)
 	await _do_open_vault(_pending_vault_path)
 	_pending_vault_path = ""
 	_pending_password_action = ""
@@ -1148,7 +1156,8 @@ func _on_doc_encrypt_toggle(doc_key: String, want_encrypted: bool) -> void:
 	if conn == null:
 		set_status("ERROR: scansort plugin not running.")
 		return
-	if _vault_password.is_empty():
+	var enc_pw: String = _vault_password_store.get_password(vault_path)
+	if enc_pw.is_empty():
 		set_status("Set a vault password first to encrypt/decrypt documents.")
 		return
 	set_status("%s document…" % ("Encrypting" if want_encrypted else "Decrypting"))
@@ -1158,7 +1167,7 @@ func _on_doc_encrypt_toggle(doc_key: String, want_encrypted: bool) -> void:
 			"vault_path": vault_path,
 			"doc_id": doc_id,
 			"encrypt": want_encrypted,
-			"password": _vault_password,
+			"password": enc_pw,
 		}
 	)
 	if not result.get("ok", false):
@@ -1214,16 +1223,16 @@ func _on_area_tree_file_activated(key: String) -> void:
 		# Extract to a temp subdir under the user data dir.
 		var tmp_dir: String = OS.get_user_data_dir().path_join("scansort_preview")
 		DirAccess.make_dir_recursive_absolute(tmp_dir)
-		# W5f: pass the cached vault password so encrypted documents can be
-		# decrypted on extract. The password is only cached for the currently
-		# open vault — a document that lives in a different (non-open) vault
-		# has no password available here, so an encrypted doc there cannot be
-		# opened until that vault is opened.
+		# W5f / RCA 019e4ca264: pass the document's own vault password so
+		# encrypted documents can be decrypted on extract. The per-vault store
+		# keeps a password for every opened vault, so a document in any open
+		# vault — not just the active one — gets the right password.
 		var extract_args: Dictionary = {
 			"vault_path": vault_path, "doc_id": doc_id, "dest": tmp_dir,
 		}
-		if vault_path == _active_vault_path and not _vault_password.is_empty():
-			extract_args["password"] = _vault_password
+		var pw: String = _vault_password_store.get_password(vault_path)
+		if not pw.is_empty():
+			extract_args["password"] = pw
 		set_status("Extracting document…")
 		var result: Dictionary = await conn.call_tool(
 			"minerva_scansort_extract_document",
@@ -1232,10 +1241,11 @@ func _on_area_tree_file_activated(key: String) -> void:
 		# extract_document returns {ok: true, path: "/abs/path/to/file"} on success.
 		if not result.get("ok", false):
 			var err_msg: String = str(result.get("error", "unknown"))
-			# W5f: encrypted document in a vault that isn't the open one — the
-			# password isn't cached, so give the user a clear, actionable hint
-			# instead of a raw backend error.
-			if vault_path != _active_vault_path and (
+			# W5f / RCA 019e4ca264: an encrypt/password error only means
+			# "open its vault first" when the document's vault genuinely is
+			# NOT in the store. An unlocked vault that still errors is a real
+			# backend failure and must surface as such.
+			if not _vault_password_store.has_vault(vault_path) and (
 				err_msg.to_lower().contains("encrypt")
 				or err_msg.to_lower().contains("password")
 			):
@@ -1482,8 +1492,9 @@ func _on_vault_doc_dropped_to_dir(drag_data: Dictionary, target_key: String) -> 
 		"doc_id":     doc_id,
 		"dest":       dest_dir,
 	}
-	if vault_path == _active_vault_path and not _vault_password.is_empty():
-		extract_args["password"] = _vault_password
+	var drag_pw: String = _vault_password_store.get_password(vault_path)
+	if not drag_pw.is_empty():
+		extract_args["password"] = drag_pw
 
 	set_status("Extracting…")
 	var result: Dictionary = await conn.call_tool(
@@ -2061,9 +2072,11 @@ func _ingest_pipeline(file_path: String) -> void:
 	# Only attach spec when non-empty — broker rejects empty {} as "unknown kind".
 	if not model_spec.is_empty():
 		classify_args["model_spec"] = model_spec
-	# Use password only if set (never log it).
-	if not _vault_password.is_empty():
-		classify_args["password"] = _vault_password
+	# Use password only if set (never log it). The ingest pipeline targets the
+	# active vault, so look it up by _active_vault_path.
+	var classify_pw: String = _vault_password_store.get_password(_active_vault_path)
+	if not classify_pw.is_empty():
+		classify_args["password"] = classify_pw
 
 	const VISION_THRESHOLD := 50
 	if char_count >= VISION_THRESHOLD:
@@ -2155,9 +2168,10 @@ func _on_add_dialog_accepted(
 		"source_path":  file_path,
 		"rule_snapshot": str(final.get("rule_snapshot", "")),
 	}
-	# Pass password only if set.
-	if not _vault_password.is_empty():
-		insert_args["password"] = _vault_password
+	# Pass password only if set. Ingest pipeline targets the active vault.
+	var insert_pw: String = _vault_password_store.get_password(_active_vault_path)
+	if not insert_pw.is_empty():
+		insert_args["password"] = insert_pw
 
 	var insert_res: Dictionary = await conn.call_tool(
 		"minerva_scansort_insert_document",
@@ -2382,10 +2396,11 @@ func _on_edit_doc_pressed(doc_id: int) -> void:
 		set_status("ERROR: scansort plugin not running.")
 		return
 
-	# Fetch current document metadata.
+	# Fetch current document metadata from the active vault.
 	var doc_args: Dictionary = {"vault_path": _active_vault_path, "doc_id": doc_id}
-	if not _vault_password.is_empty():
-		doc_args["password"] = _vault_password
+	var doc_pw: String = _vault_password_store.get_password(_active_vault_path)
+	if not doc_pw.is_empty():
+		doc_args["password"] = doc_pw
 
 	var doc_result: Dictionary = await conn.call_tool("minerva_scansort_get_document", doc_args)
 	if not doc_result.get("ok", false):
@@ -2432,8 +2447,9 @@ func _on_edit_dialog_accepted(doc_id: int, updated_fields: Dictionary) -> void:
 	# Merge updated fields into the call args.
 	for k: String in updated_fields:
 		upd_args[k] = updated_fields[k]
-	if not _vault_password.is_empty():
-		upd_args["password"] = _vault_password
+	var upd_pw: String = _vault_password_store.get_password(_active_vault_path)
+	if not upd_pw.is_empty():
+		upd_args["password"] = upd_pw
 
 	var upd_result: Dictionary = await conn.call_tool("minerva_scansort_update_document", upd_args)
 	if not upd_result.get("ok", false):
@@ -2610,7 +2626,7 @@ func _on_recovery_sheet_pressed() -> void:
 
 	var dlg = _RecoverySheetDialog.new()
 	add_child(dlg)
-	dlg.init(conn, _active_vault_path, _vault_password)
+	dlg.init(conn, _active_vault_path, _vault_password_store.get_password(_active_vault_path))
 	dlg.recovery_changed.connect(
 		func() -> void:
 			set_status("Recovery sheet metadata saved.")
@@ -2802,8 +2818,9 @@ func _on_tree_file_dropped(drag_data: Dictionary, target_key: String, _target_ki
 			"source_path":   drag_key,
 			"rule_snapshot": "",
 		}
-		if not _vault_password.is_empty():
-			insert_args["password"] = _vault_password
+		var dest_insert_pw: String = _vault_password_store.get_password(dest_vault)
+		if not dest_insert_pw.is_empty():
+			insert_args["password"] = dest_insert_pw
 
 		var insert_res: Dictionary = await conn.call_tool(
 			"minerva_scansort_insert_document",
@@ -2827,8 +2844,9 @@ func _on_tree_file_dropped(drag_data: Dictionary, target_key: String, _target_ki
 			"doc_id":     doc_id,
 			"category":   category,
 		}
-		if not _vault_password.is_empty():
-			upd_args["password"] = _vault_password
+		var dest_upd_pw: String = _vault_password_store.get_password(dest_vault)
+		if not dest_upd_pw.is_empty():
+			upd_args["password"] = dest_upd_pw
 
 		var upd_res: Dictionary = await conn.call_tool(
 			"minerva_scansort_update_document",
@@ -3002,9 +3020,19 @@ func _extract_doc_keys_to_directory(keys: Array, chosen_path: String, dest_label
 		return
 
 	var encrypted_count: int = _count_encrypted_doc_keys(keys)
-	if encrypted_count > 0 and _vault_password.is_empty():
-		set_status("Unlock the vault before extracting encrypted documents.")
-		return
+	# RCA 019e4ca264: keys may span multiple vaults. Block only when an
+	# encrypted document belongs to a vault with no recorded password.
+	if encrypted_count > 0:
+		for key: String in keys:
+			var item: TreeItem = _find_item_by_key(_vault_area_tree, key) if _vault_area_tree != null else null
+			if item == null or not bool(item.get_meta("encrypted", false)):
+				continue
+			var ev_path: String = _find_vault_path_for_doc_key(key)
+			if ev_path.is_empty():
+				ev_path = _active_vault_path
+			if _vault_password_store.get_password(ev_path).is_empty():
+				set_status("Unlock the vault before extracting encrypted documents.")
+				return
 	set_status("Extracting %d document(s)%s to %s..." % [
 		keys.size(),
 		" (%d encrypted)" % encrypted_count if encrypted_count > 0 else "",
@@ -3029,8 +3057,9 @@ func _extract_doc_keys_to_directory(keys: Array, chosen_path: String, dest_label
 			"doc_id":     doc_id,
 			"dest":       chosen_path,
 		}
-		if vault_path == _active_vault_path and not _vault_password.is_empty():
-			extract_args["password"] = _vault_password
+		var marked_pw: String = _vault_password_store.get_password(vault_path)
+		if not marked_pw.is_empty():
+			extract_args["password"] = marked_pw
 
 		var result: Dictionary = await conn.call_tool(
 			"minerva_scansort_extract_document",

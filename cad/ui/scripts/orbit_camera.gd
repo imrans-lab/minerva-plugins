@@ -92,6 +92,12 @@ func handle_pointer_input(event: InputEvent) -> bool:
 	# Mouse motion: orbit or pan
 	if event is InputEventMouseMotion:
 		var mme := event as InputEventMouseMotion
+		# Self-heal a lost middle-button release: if a drag latch is set but the
+		# live button_mask shows the middle button is not held, the release was
+		# never delivered (e.g. it happened outside the SubViewport). Clear it.
+		if (_dragging_orbit or _dragging_pan) and (mme.button_mask & MOUSE_BUTTON_MASK_MIDDLE) == 0:
+			_dragging_orbit = false
+			_dragging_pan = false
 		if _dragging_orbit and _view_preset == "Perspective":
 			handled = true
 			_yaw   -= mme.relative.x * ORBIT_SENSITIVITY
