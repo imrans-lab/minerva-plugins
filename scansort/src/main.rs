@@ -198,6 +198,7 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         | "minerva_scansort_library_import_from_sidecar" => Some("library_rule"),
         "minerva_scansort_insert_document"
         | "minerva_scansort_update_document"
+        | "minerva_scansort_replace_document_content"
         | "minerva_scansort_set_document_encrypted"
         | "minerva_scansort_extract_document"
         | "minerva_scansort_place_on_disk"
@@ -672,6 +673,27 @@ fn handle_update_document(params: &Value, id: Value) -> RpcResponse {
     };
     match documents::update_document(vault_path, doc_id, &updates) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true}))),
+        Err(e) => ok_response(id, tool_err(&e.message)),
+    }
+}
+
+fn handle_replace_document_content(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    if vault_path.is_empty() {
+        return ok_response(id, tool_err("vault_path is required"));
+    }
+    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
+        Some(d) => d,
+        None => return ok_response(id, tool_err("doc_id is required")),
+    };
+    let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+    if file_path.is_empty() {
+        return ok_response(id, tool_err("file_path is required"));
+    }
+    let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    match documents::replace_document_content(vault_path, doc_id, file_path, password) {
+        Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "doc_id": doc_id}))),
         Err(e) => ok_response(id, tool_err(&e.message)),
     }
 }
@@ -2882,15 +2904,29 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_update_document",
-                        "description": "Update document metadata fields (status, category, display_name, description, tags) by doc_id.",
+                        "description": "Update document metadata fields (status, category, display_name, description, tags, issuer, doc_date) by doc_id.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "vault_path": {"type": "string", "description": "Absolute path to the vault file."},
                                 "doc_id": {"type": "integer", "description": "Document ID to update."},
-                                "updates": {"type": "object", "description": "Map of field names to new values. Allowed: status, category, display_name, description, tags."},
+                                "updates": {"type": "object", "description": "Map of field names to new values. Allowed: status, category, display_name, description, tags, issuer, doc_date."},
                             },
                             "required": ["vault_path", "doc_id", "updates"],
+                        },
+                    },
+                    {
+                        "name": "minerva_scansort_replace_document_content",
+                        "description": "Replace a document's stored content with a new file, in place. Recompresses, re-encrypts when a password is given, and recomputes sha256/simhash fingerprints. doc_id and all metadata fields are preserved.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "vault_path": {"type": "string", "description": "Absolute path to the vault file."},
+                                "doc_id": {"type": "integer", "description": "Document ID whose content is replaced."},
+                                "file_path": {"type": "string", "description": "Absolute path to the new content file."},
+                                "password": {"type": "string", "description": "Vault password — required to store the document encrypted at rest. Empty stores plaintext."},
+                            },
+                            "required": ["vault_path", "doc_id", "file_path"],
                         },
                     },
                     {
@@ -3637,6 +3673,9 @@ fn main() {
                     }
                     "minerva_scansort_update_document" => {
                         handle_update_document(&req.params, req.id)
+                    }
+                    "minerva_scansort_replace_document_content" => {
+                        handle_replace_document_content(&req.params, req.id)
                     }
                     "minerva_scansort_vault_inventory" => {
                         handle_vault_inventory(&req.params, req.id)

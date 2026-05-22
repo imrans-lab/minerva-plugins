@@ -6,6 +6,7 @@
 
 use crate::crypto;
 use crate::db;
+use crate::extract;
 use crate::types::*;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -532,14 +533,16 @@ pub fn set_document_encrypted(
 
 /// Update document fields by doc_id.
 ///
-/// Allowed fields: status, category, display_name, description, tags.
+/// Allowed fields: status, category, display_name, description, tags, issuer, doc_date.
 /// Tags should be provided as a JSON array value (e.g. `["tax", "2024"]`).
 pub fn update_document(
     path: &str,
     doc_id: i64,
     updates: &HashMap<String, serde_json::Value>,
 ) -> VaultResult<()> {
-    const ALLOWED: &[&str] = &["status", "category", "display_name", "description", "tags"];
+    const ALLOWED: &[&str] = &[
+        "status", "category", "display_name", "description", "tags", "issuer", "doc_date",
+    ];
 
     let mut set_parts: Vec<String> = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -594,6 +597,106 @@ pub fn update_document(
         return Err(VaultError::new(format!("Document not found: id={doc_id}")));
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// replace_document_content — swap a document's stored bytes in place
+// ---------------------------------------------------------------------------
+
+/// Replace a document's stored content with a new file, in place.
+///
+/// Re-reads `file_path`, recompresses (zstd), re-encrypts when `password` is
+/// non-empty, and recomputes the sha256 + simhash fingerprints via the same
+/// `extract_file` pipeline used at classify/insert time. The documents row's
+/// blob columns (file_data, file_size, compression, encryption_iv,
+/// encryption_tag, sha256, simhash) and the fingerprints row are updated in a
+/// single transaction — doc_id and every metadata field (category, issuer,
+/// doc_date, description, tags, …) are deliberately left untouched.
+pub fn replace_document_content(
+    path: &str,
+    doc_id: i64,
+    file_path: &str,
+    password: &str,
+) -> VaultResult<()> {
+    let fp = Path::new(file_path);
+    if !fp.exists() {
+        return Err(VaultError::new(format!("File not found: {file_path}")));
+    }
+
+    // Recompute fingerprints from the new content (same pipeline as insert).
+    let extraction = extract::extract_file(file_path)?;
+
+    // Read → compress → optionally encrypt, mirroring insert_document.
+    let raw_data = std::fs::read(fp)?;
+    let original_size = raw_data.len() as i64;
+    let compressed = zstd::encode_all(raw_data.as_slice(), 3)
+        .map_err(|e| VaultError::new(format!("Compression failed: {e}")))?;
+    let (stored_data, enc_iv, enc_tag): (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) =
+        if !password.is_empty() {
+            let key = crypto::vault_key(path, password)?;
+            let (ct, iv, tag) = crypto::encrypt_bytes(&key, &compressed)?;
+            (ct, Some(iv), Some(tag))
+        } else {
+            (compressed, None, None)
+        };
+
+    let mut conn = db::connect(path)?;
+    let tx = conn.transaction()?;
+
+    // In-place blob swap. Metadata columns are deliberately not in this SET.
+    let rows_changed = tx
+        .execute(
+            "UPDATE documents SET file_data = ?1, file_size = ?2, compression = 'zstd', \
+             encryption_iv = ?3, encryption_tag = ?4, sha256 = ?5, simhash = ?6 \
+             WHERE doc_id = ?7",
+            params![
+                stored_data,
+                original_size,
+                enc_iv,
+                enc_tag,
+                extraction.sha256,
+                extraction.simhash,
+                doc_id,
+            ],
+        )
+        .map_err(|e| {
+            let msg = e.to_string().to_lowercase();
+            if msg.contains("unique") || msg.contains("sha256") {
+                VaultError::new(format!(
+                    "Cannot replace content: the new file is an exact duplicate of \
+                     another document already in this vault (sha256 {})",
+                    extraction.sha256
+                ))
+            } else {
+                VaultError::from(e)
+            }
+        })?;
+    if rows_changed == 0 {
+        // tx drops here → rollback; the vault is left untouched.
+        return Err(VaultError::new(format!("Document not found: id={doc_id}")));
+    }
+
+    // Refresh the fingerprints row. sha256 is its PRIMARY KEY, so the stale
+    // row is keyed by the old hash — delete by doc_id, then re-insert.
+    tx.execute("DELETE FROM fingerprints WHERE doc_id = ?1", params![doc_id])?;
+    tx.execute(
+        "INSERT OR REPLACE INTO fingerprints (sha256, simhash, dhash, doc_id) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![extraction.sha256, extraction.simhash, extraction.dhash, doc_id],
+    )?;
+
+    tx.execute(
+        "INSERT INTO log (timestamp, level, component, message, doc_id) \
+         VALUES (?1, 'info', 'vault', ?2, ?3)",
+        params![
+            now_iso(),
+            format!("Document content replaced from {file_path}"),
+            doc_id,
+        ],
+    )?;
+
+    tx.commit()?;
     Ok(())
 }
 
@@ -666,7 +769,11 @@ pub fn vault_inventory(path: &str) -> VaultResult<Vec<Document>> {
 #[cfg(test)]
 mod tests {
     use crate::crypto;
-    use crate::documents::{extract_document, insert_document, set_document_encrypted};
+    use crate::documents::{
+        extract_document, get_document, insert_document, replace_document_content,
+        set_document_encrypted, update_document,
+    };
+    use std::collections::HashMap;
     use crate::vault_lifecycle;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -922,6 +1029,100 @@ mod tests {
             "got: {}",
             werr.message
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // T3a — update_document accepts the widened issuer / doc_date fields.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn update_document_widens_to_issuer_and_doc_date() {
+        let (dir, vault_path, src_file) = setup("update-widen", b"misclassified issuer doc");
+        let vp = vault_path.to_str().unwrap();
+        let doc_id = insert(&vault_path, &src_file, "");
+
+        let mut updates: HashMap<String, serde_json::Value> = HashMap::new();
+        updates.insert("issuer".into(), serde_json::json!("Corrected Issuer LLC"));
+        updates.insert("doc_date".into(), serde_json::json!("2025-12-31"));
+        update_document(vp, doc_id, &updates).expect("update issuer + doc_date");
+
+        let doc = get_document(vp, doc_id).expect("get");
+        assert_eq!(doc.issuer, "Corrected Issuer LLC");
+        assert_eq!(doc.doc_date, "2025-12-31");
+
+        // Error path: a non-whitelisted field alone yields no valid updates.
+        let mut bad: HashMap<String, serde_json::Value> = HashMap::new();
+        bad.insert("sha256".into(), serde_json::json!("deadbeef"));
+        assert!(
+            update_document(vp, doc_id, &bad).is_err(),
+            "a non-whitelisted field must not be accepted"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // T3b — replace_document_content swaps the bytes + fingerprint in place,
+    // preserving doc_id; a missing source file errors.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn replace_document_content_swaps_bytes_and_fingerprint() {
+        let (dir, vault_path, src_file) = setup("replace-content", b"the original contents");
+        let vp = vault_path.to_str().unwrap();
+        let doc_id = insert(&vault_path, &src_file, "");
+        let before = get_document(vp, doc_id).expect("get before");
+
+        let new_file = dir.join("corrected.txt");
+        let new_body = b"the corrected contents that should now be stored instead";
+        std::fs::write(&new_file, new_body).unwrap();
+        replace_document_content(vp, doc_id, new_file.to_str().unwrap(), "")
+            .expect("replace content");
+
+        let after = get_document(vp, doc_id).expect("get after");
+        assert_ne!(before.sha256, after.sha256, "sha256 must change with content");
+        assert_eq!(after.doc_id, before.doc_id, "doc_id is preserved");
+
+        let out = dir.join("extracted.txt");
+        let out_path = extract_document(vp, doc_id, out.to_str().unwrap(), "")
+            .expect("extract replaced");
+        let got = std::fs::read(&out_path).expect("read extracted");
+        assert_eq!(got.as_slice(), new_body, "extracted bytes must be the new content");
+
+        // Error path: a missing source file.
+        assert!(
+            replace_document_content(vp, doc_id, "/nonexistent-scansort/missing.txt", "").is_err(),
+            "replacing from a non-existent file must error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // T3b — replace_document_content keeps an encrypted document encrypted and
+    // the new bytes decrypt with the vault password.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn replace_document_content_encrypted_round_trips() {
+        let (dir, vault_path, src_file) = setup("replace-enc", b"plain original");
+        let vp = vault_path.to_str().unwrap();
+        let pw = "correct horse battery staple";
+        crypto::set_password(vp, pw).expect("set_password");
+        let doc_id = insert(&vault_path, &src_file, pw);
+
+        let new_file = dir.join("new-secret.txt");
+        let new_body = b"the new secret contents stored encrypted at rest";
+        std::fs::write(&new_file, new_body).unwrap();
+        replace_document_content(vp, doc_id, new_file.to_str().unwrap(), pw)
+            .expect("replace encrypted");
+
+        let doc = get_document(vp, doc_id).expect("get");
+        assert!(doc.encrypted, "document must remain encrypted after replace");
+
+        let out = dir.join("ex.txt");
+        let out_path = extract_document(vp, doc_id, out.to_str().unwrap(), pw)
+            .expect("extract with password");
+        assert_eq!(std::fs::read(&out_path).unwrap().as_slice(), new_body);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

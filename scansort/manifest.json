@@ -92,7 +92,21 @@
     },
     {
       "name": "minerva_scansort_update_document",
-      "description": "Update document metadata fields (status, category, display_name, description, tags) by doc_id."
+      "description": "Update document metadata fields (status, category, display_name, description, tags, issuer, doc_date) by doc_id."
+    },
+    {
+      "name": "minerva_scansort_replace_document_content",
+      "description": "Replace a document's stored content with a new file, in place. Recompresses, re-encrypts when a password is given, and recomputes sha256/simhash fingerprints. doc_id and all metadata fields are preserved.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "vault_path": {"type": "string", "description": "Absolute path to the vault file."},
+          "doc_id": {"type": "integer", "description": "Document ID whose content is replaced."},
+          "file_path": {"type": "string", "description": "Absolute path to the new content file."},
+          "password": {"type": "string", "description": "Vault password — required to store the document encrypted at rest. Empty stores plaintext."}
+        },
+        "required": ["vault_path", "doc_id", "file_path"]
+      }
     },
     {
       "name": "minerva_scansort_vault_inventory",
