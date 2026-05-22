@@ -109,6 +109,18 @@
       }
     },
     {
+      "name": "minerva_scansort_delete_document",
+      "description": "Hard-delete a document from a vault: removes the documents row and its fingerprints row in one transaction. Irreversible.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "vault_path": {"type": "string", "description": "Absolute path to the vault file."},
+          "doc_id": {"type": "integer", "description": "Document ID to delete."}
+        },
+        "required": ["vault_path", "doc_id"]
+      }
+    },
+    {
       "name": "minerva_scansort_vault_inventory",
       "description": "List all documents in a vault with metadata (no file data blob)."
     },

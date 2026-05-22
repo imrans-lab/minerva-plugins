@@ -701,6 +701,46 @@ pub fn replace_document_content(
 }
 
 // ---------------------------------------------------------------------------
+// delete_document — hard-delete a document and its fingerprint
+// ---------------------------------------------------------------------------
+
+/// Hard-delete a document: removes the `documents` row and its `fingerprints`
+/// row in one transaction. `log` rows are intentionally kept as historical
+/// audit (their `doc_id` is allowed to dangle).
+///
+/// Returns an error if `doc_id` does not exist — never a silent no-op.
+pub fn delete_document(path: &str, doc_id: i64) -> VaultResult<()> {
+    let mut conn = db::connect(path)?;
+
+    // FK enforcement must be toggled outside the transaction (SQLite ignores
+    // the pragma inside one). Mirrors reprocess.rs's whole-table delete: the
+    // surviving log rows are allowed to reference a now-deleted doc_id.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let doc_deleted = {
+        let tx = conn.transaction()?;
+        // Child row first, then the document.
+        tx.execute("DELETE FROM fingerprints WHERE doc_id = ?1", params![doc_id])?;
+        let doc_deleted =
+            tx.execute("DELETE FROM documents WHERE doc_id = ?1", params![doc_id])?;
+        if doc_deleted > 0 {
+            tx.execute(
+                "INSERT INTO log (timestamp, level, component, message, doc_id) \
+                 VALUES (?1, 'info', 'vault', ?2, NULL)",
+                params![now_iso(), format!("Deleted document id={doc_id}")],
+            )?;
+        }
+        tx.commit()?;
+        doc_deleted
+    };
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+
+    if doc_deleted == 0 {
+        return Err(VaultError::new(format!("Document not found: id={doc_id}")));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // vault_inventory
 // ---------------------------------------------------------------------------
 
@@ -770,8 +810,8 @@ pub fn vault_inventory(path: &str) -> VaultResult<Vec<Document>> {
 mod tests {
     use crate::crypto;
     use crate::documents::{
-        extract_document, get_document, insert_document, replace_document_content,
-        set_document_encrypted, update_document,
+        delete_document, extract_document, get_document, insert_document,
+        replace_document_content, set_document_encrypted, update_document,
     };
     use std::collections::HashMap;
     use crate::vault_lifecycle;
@@ -1123,6 +1163,41 @@ mod tests {
         let out_path = extract_document(vp, doc_id, out.to_str().unwrap(), pw)
             .expect("extract with password");
         assert_eq!(std::fs::read(&out_path).unwrap().as_slice(), new_body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // T1 — delete_document hard-deletes the documents row + fingerprints row;
+    // a missing doc_id errors.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn delete_document_hard_deletes_doc_and_fingerprint() {
+        let (dir, vault_path, src_file) = setup("delete-doc", b"a misfiled document to remove");
+        let vp = vault_path.to_str().unwrap();
+        let doc_id = insert(&vault_path, &src_file, "");
+        assert!(get_document(vp, doc_id).is_ok(), "sanity: document exists");
+
+        delete_document(vp, doc_id).expect("delete");
+
+        // The documents row is gone.
+        assert!(get_document(vp, doc_id).is_err(), "deleted doc must not be found");
+        // The fingerprints row is gone too.
+        let conn = crate::db::connect(vp).unwrap();
+        let fp_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fingerprints WHERE doc_id = ?",
+                [doc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fp_count, 0, "fingerprints row must be deleted");
+
+        // Error path: deleting a non-existent doc_id.
+        assert!(
+            delete_document(vp, 999_999).is_err(),
+            "deleting a missing doc_id must error"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

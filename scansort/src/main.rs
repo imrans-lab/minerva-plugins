@@ -199,6 +199,7 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         "minerva_scansort_insert_document"
         | "minerva_scansort_update_document"
         | "minerva_scansort_replace_document_content"
+        | "minerva_scansort_delete_document"
         | "minerva_scansort_set_document_encrypted"
         | "minerva_scansort_extract_document"
         | "minerva_scansort_place_on_disk"
@@ -693,6 +694,22 @@ fn handle_replace_document_content(params: &Value, id: Value) -> RpcResponse {
     }
     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
     match documents::replace_document_content(vault_path, doc_id, file_path, password) {
+        Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "doc_id": doc_id}))),
+        Err(e) => ok_response(id, tool_err(&e.message)),
+    }
+}
+
+fn handle_delete_document(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    if vault_path.is_empty() {
+        return ok_response(id, tool_err("vault_path is required"));
+    }
+    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
+        Some(d) => d,
+        None => return ok_response(id, tool_err("doc_id is required")),
+    };
+    match documents::delete_document(vault_path, doc_id) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "doc_id": doc_id}))),
         Err(e) => ok_response(id, tool_err(&e.message)),
     }
@@ -2930,6 +2947,18 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_delete_document",
+                        "description": "Hard-delete a document from a vault: removes the documents row and its fingerprints row in one transaction. Irreversible.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "vault_path": {"type": "string", "description": "Absolute path to the vault file."},
+                                "doc_id": {"type": "integer", "description": "Document ID to delete."},
+                            },
+                            "required": ["vault_path", "doc_id"],
+                        },
+                    },
+                    {
                         "name": "minerva_scansort_vault_inventory",
                         "description": "List all documents in a vault with metadata (no file data blob).",
                         "inputSchema": {
@@ -3676,6 +3705,9 @@ fn main() {
                     }
                     "minerva_scansort_replace_document_content" => {
                         handle_replace_document_content(&req.params, req.id)
+                    }
+                    "minerva_scansort_delete_document" => {
+                        handle_delete_document(&req.params, req.id)
                     }
                     "minerva_scansort_vault_inventory" => {
                         handle_vault_inventory(&req.params, req.id)
