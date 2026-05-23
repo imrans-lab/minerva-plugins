@@ -297,6 +297,63 @@ fn tool_err(message: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Lax numeric arg parsing (T1 — DCR 019e564809a9)
+//
+// Minerva's MCP HTTP relay JSON-parses + re-serialises every request through
+// Godot, which has no int/float distinction — every JSON number comes back
+// as a float. A plugin handler using `Value::as_i64()` rejects `1.0` (a
+// valid integer arg from the caller's view) with two failure modes:
+//   - LOUD: the handler reports "<arg> is required" because the parse
+//     returned None.
+//   - SILENT: an Option<i64> field stays None and the filter is dropped,
+//     yielding superset results that look correct.
+//
+// The lesson from DCR 019e5068f584 is that cargo tests calling these
+// handlers with `Value::Number(i64)` will NEVER catch this — the wire
+// format must be exercised. See feedback_test_at_integration_boundary.md
+// and tests/mcp_wire_numeric_args.rs.
+// ---------------------------------------------------------------------------
+
+/// Accept a JSON value as an i64. Accepts integer JSON numbers AND
+/// integral, finite floats (1.0, -7.0). Rejects fractional floats,
+/// NaN, ±Inf, strings, booleans, null, missing.
+fn lax_i64(v: Option<&Value>) -> Option<i64> {
+    let v = v?;
+    if let Some(i) = v.as_i64() { return Some(i); }
+    if let Some(f) = v.as_f64() {
+        if f.is_finite() && f == f.trunc()
+            && f >= i64::MIN as f64 && f <= i64::MAX as f64
+        {
+            return Some(f as i64);
+        }
+    }
+    None
+}
+
+/// Like [`lax_i64`] but rejects negatives. Returns None for missing,
+/// malformed, or out-of-range values. Used for offsets, limits, sizes.
+fn lax_usize(v: Option<&Value>) -> Option<usize> {
+    let i = lax_i64(v)?;
+    if i < 0 { return None; }
+    Some(i as usize)
+}
+
+/// Look up a required integer arg. Distinguishes "missing" from
+/// "present but malformed" so callers see actionable errors:
+///   - absent → `Err("<key> is required")`
+///   - present but not a valid integer → `Err("<key> must be an integer")`
+fn require_i64(args: &Value, key: &str) -> Result<i64, String> {
+    match args.get(key) {
+        None => Err(format!("{} is required", key)),
+        Some(Value::Null) => Err(format!("{} is required", key)),
+        Some(v) => match lax_i64(Some(v)) {
+            Some(i) => Ok(i),
+            None => Err(format!("{} must be an integer", key)),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool handlers
 // ---------------------------------------------------------------------------
 
@@ -584,7 +641,7 @@ fn handle_query_documents(params: &Value, id: Value) -> RpcResponse {
         date_to: args.get("date_to").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
         pattern: args.get("pattern").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
         tag: args.get("tag").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from),
-        doc_id: args.get("doc_id").and_then(|v| v.as_i64()),
+        doc_id: lax_i64(args.get("doc_id")),
     };
     match documents::query_documents(vault_path, &filter) {
         Ok(docs) => match serde_json::to_value(&docs) {
@@ -601,9 +658,9 @@ fn handle_get_document(params: &Value, id: Value) -> RpcResponse {
     if vault_path.is_empty() {
         return ok_response(id, tool_err("vault_path is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     match documents::get_document(vault_path, doc_id) {
         Ok(doc) => match serde_json::to_value(&doc) {
@@ -620,9 +677,9 @@ fn handle_extract_document(params: &Value, id: Value) -> RpcResponse {
     if vault_path.is_empty() {
         return ok_response(id, tool_err("vault_path is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     let dest = args.get("dest").and_then(|v| v.as_str()).unwrap_or("");
     if dest.is_empty() {
@@ -641,9 +698,9 @@ fn handle_set_document_encrypted(params: &Value, id: Value) -> RpcResponse {
     if vault_path.is_empty() {
         return ok_response(id, tool_err("vault_path is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     let encrypt = match args.get("encrypt").and_then(|v| v.as_bool()) {
         Some(b) => b,
@@ -665,9 +722,9 @@ fn handle_update_document(params: &Value, id: Value) -> RpcResponse {
     if vault_path.is_empty() {
         return ok_response(id, tool_err("vault_path is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     let updates_val = args.get("updates").cloned().unwrap_or(Value::Object(Default::default()));
     let updates: std::collections::HashMap<String, Value> = match updates_val {
@@ -686,9 +743,9 @@ fn handle_replace_document_content(params: &Value, id: Value) -> RpcResponse {
     if vault_path.is_empty() {
         return ok_response(id, tool_err("vault_path is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     if file_path.is_empty() {
@@ -707,9 +764,9 @@ fn handle_delete_document(params: &Value, id: Value) -> RpcResponse {
     if vault_path.is_empty() {
         return ok_response(id, tool_err("vault_path is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     match documents::delete_document(vault_path, doc_id) {
         Ok(()) => ok_response(id, tool_ok(json!({"ok": true, "doc_id": doc_id}))),
@@ -727,9 +784,9 @@ fn handle_move_document_to_vault(params: &Value, id: Value) -> RpcResponse {
     if dst_vault.is_empty() {
         return ok_response(id, tool_err("dst_vault is required"));
     }
-    let doc_id = match args.get("doc_id").and_then(|v| v.as_i64()) {
-        Some(d) => d,
-        None => return ok_response(id, tool_err("doc_id is required")),
+    let doc_id = match require_i64(args, "doc_id") {
+        Ok(d) => d,
+        Err(msg) => return ok_response(id, tool_err(&msg)),
     };
     let src_password = args.get("src_password").and_then(|v| v.as_str()).unwrap_or("");
     let dst_password = args.get("dst_password").and_then(|v| v.as_str()).unwrap_or("");
@@ -792,8 +849,8 @@ fn handle_render_pages(params: &Value, id: Value) -> RpcResponse {
     if file_path.is_empty() {
         return ok_response(id, tool_err("file_path is required"));
     }
-    let max_pages = args.get("max_pages").and_then(|v| v.as_i64()).unwrap_or(2) as i32;
-    let dpi = args.get("dpi").and_then(|v| v.as_i64()).unwrap_or(96) as i32;
+    let max_pages = lax_i64(args.get("max_pages")).unwrap_or(2) as i32;
+    let dpi = lax_i64(args.get("dpi")).unwrap_or(96) as i32;
     match render::render_pages(file_path, max_pages, dpi) {
         Ok(result) => match serde_json::to_value(&result) {
             Ok(v) => ok_response(id, tool_ok(v)),
@@ -844,7 +901,7 @@ fn handle_insert_rule(params: &Value, id: Value) -> RpcResponse {
             .and_then(|v| serde_json::from_value(v.clone()).ok());
         let exceptions: Option<types::ConditionNode> = args.get("exceptions")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
-        let order = args.get("order").and_then(|v| v.as_i64()).unwrap_or(0);
+        let order = lax_i64(args.get("order")).unwrap_or(0);
         let stop_processing = args.get("stop_processing").and_then(|v| v.as_bool()).unwrap_or(false);
         let copy_to: Vec<String> = args.get("copy_to")
             .and_then(|v| v.as_array())
@@ -973,7 +1030,7 @@ fn handle_get_rule(params: &Value, id: Value) -> RpcResponse {
             Ok(None) => ok_response(id, tool_err(&format!("Rule not found: {label}"))),
             Err(e) => ok_response(id, tool_err(&e.message)),
         }
-    } else if let Some(rule_id) = args.get("rule_id").and_then(|v| v.as_i64()) {
+    } else if let Some(rule_id) = lax_i64(args.get("rule_id")) {
         match rules::get_rule_by_id(path, password, rule_id) {
             Ok(Some(r)) => match serde_json::to_value(&r) {
                 Ok(v) => ok_response(id, tool_ok(json!({"ok": true, "rule": v, "deprecated": true}))),
@@ -1565,7 +1622,7 @@ fn handle_run_rule_engine(params: &Value, id: Value) -> RpcResponse {
     let file_facts = rule_engine::FileFacts {
         filename: args.get("filename").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         extension: args.get("extension").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        size: args.get("size").and_then(|v| v.as_i64()).unwrap_or(0),
+        size: lax_i64(args.get("size")).unwrap_or(0),
     };
 
     // ── Run the walk ──────────────────────────────────────────────────────────
@@ -2113,15 +2170,6 @@ fn handle_audit_tail(params: &Value, id: Value) -> RpcResponse {
         return ok_response(id, tool_err("log_path is required"));
     }
 
-    // Accept int OR integral float for limit (Minerva's MCP HTTP relay
-    // routes JSON ints through Godot, which re-serializes them as floats).
-    // T1 will hoist this into a shared lax_usize helper alongside process()'s.
-    let lax_usize = |v: Option<&Value>| -> Option<usize> {
-        let v = v?;
-        if let Some(u) = v.as_u64() { return Some(u as usize); }
-        if let Some(f) = v.as_f64() { if f.is_finite() && f >= 0.0 { return Some(f as usize); } }
-        None
-    };
     let limit = lax_usize(args.get("limit")).unwrap_or(audit::TAIL_LIMIT_DEFAULT);
 
     let log_path = std::path::Path::new(log_path_str);
@@ -2378,7 +2426,7 @@ fn handle_library_insert_rule(params: &Value, id: Value) -> RpcResponse {
         .and_then(|v| serde_json::from_value(v.clone()).ok());
     let exceptions: Option<types::ConditionNode> = args.get("exceptions")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
-    let order = args.get("order").and_then(|v| v.as_i64()).unwrap_or(0);
+    let order = lax_i64(args.get("order")).unwrap_or(0);
     let stop_processing = args.get("stop_processing").and_then(|v| v.as_bool()).unwrap_or(false);
     let copy_to: Vec<String> = args.get("copy_to")
         .and_then(|v| v.as_array())
@@ -2643,15 +2691,10 @@ fn handle_process(
     let audit_path = args.get("audit_path").and_then(|v| v.as_str())
         .unwrap_or("");
     // offset/limit window the flat source-file list so the panel can run a
-    // Stop-able per-file loop. GDScript serializes ints as floats, so accept
-    // either. Absent offset → 0; absent limit → None (whole batch, the
-    // pre-DCR-019e42e4 default behaviour).
-    let lax_usize = |v: Option<&Value>| -> Option<usize> {
-        let v = v?;
-        if let Some(u) = v.as_u64() { return Some(u as usize); }
-        if let Some(f) = v.as_f64() { if f >= 0.0 { return Some(f as usize); } }
-        None
-    };
+    // Stop-able per-file loop. lax_usize accepts int OR integral float — the
+    // MCP HTTP relay routes JSON ints through Godot, which re-serializes
+    // them as floats. Absent offset → 0; absent limit → None (whole batch,
+    // the pre-DCR-019e42e4 default behaviour).
     let offset = lax_usize(args.get("offset")).unwrap_or(0);
     let limit = lax_usize(args.get("limit"));
     // T4 — DCR 019e5068. Optional map of destination label → password. When
@@ -4040,6 +4083,124 @@ fn main() {
     }
 
     log::info!("{SERVER_NAME} exiting");
+}
+
+#[cfg(test)]
+mod lax_numeric_tests {
+    //! T1 — DCR 019e564809a9. The wire-format failure mode is also exercised
+    //! end-to-end by `tests/mcp_wire_numeric_args.rs` which spawns the plugin
+    //! binary and feeds it post-Godot-mangled JSON over stdio. These unit
+    //! tests cover the parsing primitives in isolation.
+    use super::{lax_i64, lax_usize, require_i64};
+    use serde_json::{json, Value};
+
+    #[test]
+    fn lax_i64_accepts_integer_json_number() {
+        assert_eq!(lax_i64(Some(&json!(1))), Some(1));
+        assert_eq!(lax_i64(Some(&json!(-42))), Some(-42));
+        assert_eq!(lax_i64(Some(&json!(0))), Some(0));
+    }
+
+    #[test]
+    fn lax_i64_accepts_integral_float() {
+        // This is the bug repro: Godot turns JSON `1` into `1.0`.
+        assert_eq!(lax_i64(Some(&json!(1.0))), Some(1));
+        assert_eq!(lax_i64(Some(&json!(-7.0))), Some(-7));
+        assert_eq!(lax_i64(Some(&json!(0.0))), Some(0));
+        assert_eq!(lax_i64(Some(&json!(1.0e3))), Some(1000));
+    }
+
+    #[test]
+    fn lax_i64_rejects_fractional_float() {
+        assert_eq!(lax_i64(Some(&json!(1.5))), None);
+        assert_eq!(lax_i64(Some(&json!(-0.25))), None);
+    }
+
+    #[test]
+    fn lax_i64_rejects_non_finite() {
+        // serde_json normally refuses NaN/Inf in literals; build them directly.
+        let nan = serde_json::from_str::<Value>("null").unwrap(); // serde_json doesn't accept NaN/Inf literal — substitute null
+        assert_eq!(lax_i64(Some(&nan)), None);
+        // Float overflow guard: very large float beyond i64 range.
+        let huge = json!(1.0e30);
+        assert_eq!(lax_i64(Some(&huge)), None, "1e30 exceeds i64::MAX");
+    }
+
+    #[test]
+    fn lax_i64_rejects_non_numeric() {
+        assert_eq!(lax_i64(Some(&json!("1"))), None);
+        assert_eq!(lax_i64(Some(&json!(true))), None);
+        assert_eq!(lax_i64(Some(&json!(null))), None);
+        assert_eq!(lax_i64(Some(&json!([1]))), None);
+        assert_eq!(lax_i64(Some(&json!({"x":1}))), None);
+    }
+
+    #[test]
+    fn lax_i64_rejects_missing() {
+        assert_eq!(lax_i64(None), None);
+    }
+
+    #[test]
+    fn lax_usize_accepts_non_negative_int_and_float() {
+        assert_eq!(lax_usize(Some(&json!(0))), Some(0));
+        assert_eq!(lax_usize(Some(&json!(42))), Some(42));
+        assert_eq!(lax_usize(Some(&json!(50.0))), Some(50));
+        assert_eq!(lax_usize(Some(&json!(1000.0))), Some(1000));
+    }
+
+    #[test]
+    fn lax_usize_rejects_negative() {
+        assert_eq!(lax_usize(Some(&json!(-1))), None);
+        assert_eq!(lax_usize(Some(&json!(-1.0))), None);
+    }
+
+    #[test]
+    fn lax_usize_rejects_fractional() {
+        assert_eq!(lax_usize(Some(&json!(1.5))), None);
+    }
+
+    #[test]
+    fn require_i64_returns_value_when_int() {
+        let args = json!({"doc_id": 7});
+        assert_eq!(require_i64(&args, "doc_id"), Ok(7));
+    }
+
+    #[test]
+    fn require_i64_returns_value_when_integral_float() {
+        let args = json!({"doc_id": 7.0});
+        assert_eq!(require_i64(&args, "doc_id"), Ok(7));
+    }
+
+    #[test]
+    fn require_i64_missing_says_required() {
+        let args = json!({"other": 1});
+        let err = require_i64(&args, "doc_id").unwrap_err();
+        assert_eq!(err, "doc_id is required",
+            "missing must use 'is required' wording");
+    }
+
+    #[test]
+    fn require_i64_null_says_required() {
+        let args = json!({"doc_id": null});
+        let err = require_i64(&args, "doc_id").unwrap_err();
+        assert_eq!(err, "doc_id is required");
+    }
+
+    #[test]
+    fn require_i64_malformed_says_must_be_integer() {
+        // present-but-bad: string, fractional float, bool.
+        let cases = [
+            json!({"doc_id": "1"}),
+            json!({"doc_id": 1.5}),
+            json!({"doc_id": true}),
+            json!({"doc_id": [1]}),
+        ];
+        for args in cases {
+            let err = require_i64(&args, "doc_id").unwrap_err();
+            assert_eq!(err, "doc_id must be an integer",
+                "present-but-malformed must distinguish from missing: {args}");
+        }
+    }
 }
 
 #[cfg(test)]
