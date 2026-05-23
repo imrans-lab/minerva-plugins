@@ -2612,9 +2612,22 @@ fn handle_process(
                 .collect()
         })
         .unwrap_or_default();
+    // T6 — DCR 019e5068. Optional list of absolute file paths. When
+    // non-empty, process() iterates exactly these files (bypassing the open-
+    // source directory walk) and the .scansort-state.json manifest is not
+    // touched. Bad/missing paths surface as structured per-file errors.
+    let explicit_files: Vec<String> = args
+        .get("files")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     match process::run(
         out, lines, next_id, model, model_spec, doc_type_strategy,
-        audit_enabled, audit_path, offset, limit, &vault_passwords,
+        audit_enabled, audit_path, offset, limit, &vault_passwords, &explicit_files,
     ) {
         Err(e) => ok_response(id, tool_err(&e.message)),
         Ok(result) => {
@@ -3659,7 +3672,8 @@ fn main() {
                                 "audit_path": {"type": "string", "description": "DCR 019e3ce069b6: absolute path to the CSV audit log file. Required when `audit_enabled` is true; empty path with audit_enabled=true is a silent no-op. Ignored when `audit_enabled` is false."},
                                 "offset": {"type": "integer", "minimum": 0, "description": "DCR 019e42e4: index of the first source file to process in the flat ordered file list. Files before it are skipped cheaply. Default 0."},
                                 "limit": {"type": "integer", "minimum": 1, "description": "DCR 019e42e4: max files to process starting at `offset`. Omit for the whole batch. The panel's Stop-able loop passes limit=1 per file. `total_files` in the result is always the true pre-window count."},
-                                "vault_passwords": {"type": "object", "description": "DCR 019e5068: optional map of destination label → password. When a rule sets encrypt=true, the matching destination's password is used to post-encrypt the just-inserted document via the same set_document_encrypted helper. A missing password for an encrypt-flagged destination flips that placement to Error and rolls back the row — process() will NEVER silently store plaintext in an encrypt-flagged destination."}
+                                "vault_passwords": {"type": "object", "description": "DCR 019e5068: optional map of destination label → password. When a rule sets encrypt=true, the matching destination's password is used to post-encrypt the just-inserted document via the same set_document_encrypted helper. A missing password for an encrypt-flagged destination flips that placement to Error and rolls back the row — process() will NEVER silently store plaintext in an encrypt-flagged destination."},
+                                "files": {"type": "array", "items": {"type": "string"}, "description": "DCR 019e5068: optional explicit list of absolute file paths to process. When non-empty, the open-source directory walk is bypassed and exactly these files are processed (in supplied order). The .scansort-state.json source manifest is not read or written for this path. Bad/missing paths surface as structured per-file errors. offset/limit still window this list."}
                             },
                             "required": [],
                         },

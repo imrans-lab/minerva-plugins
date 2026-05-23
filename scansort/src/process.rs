@@ -368,6 +368,7 @@ pub fn run(
     offset: usize,
     limit: Option<usize>,
     vault_passwords: &HashMap<String, String>,
+    explicit_files: &[String],
 ) -> VaultResult<ProcessResult> {
     let mut result = ProcessResult::default();
     // Flat index across ALL files of ALL open sources, in deterministic
@@ -377,9 +378,22 @@ pub fn run(
 
     // 1. Get open sources (sorted by label for deterministic order).
     let open_sources = session::open_sources_sorted();
-    if open_sources.is_empty() {
+    if open_sources.is_empty() && explicit_files.is_empty() {
         return Ok(result);
     }
+
+    // T6 — DCR 019e5068: an `explicit_files` list bypasses the open-source
+    // walk entirely. A synthetic source "explicit-files" with an empty path
+    // feeds the supplied files into the same per-file pipeline; source_state
+    // operations are no-ops for this synthetic source (no manifest to read
+    // or write).
+    let synthetic_sources;
+    let sources: &[(String, std::path::PathBuf)] = if !explicit_files.is_empty() {
+        synthetic_sources = vec![(EXPLICIT_FILES_LABEL.to_string(), std::path::PathBuf::new())];
+        &synthetic_sources
+    } else {
+        &open_sources
+    };
 
     // 2. Load enabled rules from the global library, sorted by order asc.
     let all_rules = library::library_list()?;
@@ -390,16 +404,29 @@ pub fn run(
     let open_dest_labels: HashSet<String> = session::open_destination_labels();
 
     // 4. Iterate sources.
-    for (source_label, source_path) in &open_sources {
-        // Load (or init) per-source manifest.
-        let mut src_state = source_state::load_or_init(source_path);
+    for (source_label, source_path) in sources {
+        let is_explicit = source_label == EXPLICIT_FILES_LABEL;
+        // Load (or init) per-source manifest — except for the synthetic
+        // explicit-files source, which carries no manifest. A throwaway
+        // SourceState is used so the per-file upsert/should_skip calls keep
+        // working with no code duplication.
+        let mut src_state = if is_explicit {
+            crate::source_state::SourceState::default()
+        } else {
+            source_state::load_or_init(source_path)
+        };
 
-        // List files in the source directory.
-        let files = match list_source_files_for_path(source_path) {
-            Ok(f) => f,
-            Err(e) => {
-                log::warn!("process: cannot list files in source '{source_label}': {e}");
-                continue;
+        // List files: either the supplied explicit list or a walk of the
+        // source directory.
+        let files = if is_explicit {
+            build_explicit_file_entries(explicit_files)
+        } else {
+            match list_source_files_for_path(source_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("process: cannot list files in source '{source_label}': {e}");
+                    continue;
+                }
             }
         };
 
@@ -875,18 +902,23 @@ pub fn run(
             // Per-doc manifest checkpoint. Lets external watchdogs measure
             // per-file latency and recovers progress on crash. source_state::save
             // is atomic (tmp+rename), and the manifest is small (~hundreds of
-            // bytes/doc) so the cost is negligible vs each LLM call.
-            if let Err(e) = source_state::save(source_path, &src_state) {
-                log::warn!(
-                    "process: could not checkpoint manifest for '{source_label}' after {rel_path}: {e}"
-                );
+            // bytes/doc) so the cost is negligible vs each LLM call. Skipped
+            // for the synthetic explicit-files source (no manifest on disk).
+            if !is_explicit {
+                if let Err(e) = source_state::save(source_path, &src_state) {
+                    log::warn!(
+                        "process: could not checkpoint manifest for '{source_label}' after {rel_path}: {e}"
+                    );
+                }
             }
         }
 
         // Final write for symmetry — also covers the empty-files case where
-        // the per-doc checkpoint never ran.
-        if let Err(e) = source_state::save(source_path, &src_state) {
-            log::warn!("process: could not save manifest for '{source_label}': {e}");
+        // the per-doc checkpoint never ran. Skipped for explicit-files.
+        if !is_explicit {
+            if let Err(e) = source_state::save(source_path, &src_state) {
+                log::warn!("process: could not save manifest for '{source_label}': {e}");
+            }
         }
     }
 
@@ -1012,6 +1044,32 @@ fn emit_doc_event<W: io::Write>(
     if let Some(t) = target { extras.insert("target".to_string(), json!(t)); }
     if let Some(r) = reason { extras.insert("reason".to_string(), json!(r)); }
     crate::notify_state_changed_with(out, "document", Some(&Value::Object(extras)));
+}
+
+/// T6 — DCR 019e5068: source label for the synthetic explicit-files source
+/// used when `explicit_files` is supplied to process::run.
+const EXPLICIT_FILES_LABEL: &str = "explicit-files";
+
+/// T6 — DCR 019e5068: build a (abs_path, rel_path, size) entry list from a
+/// supplied explicit-files vector. Missing files surface a size of 0; the
+/// downstream sha256 step turns the bad path into a structured per-file
+/// "unprocessable" item, so the agent always sees a clear error rather than
+/// a silent skip. Factored out so it can be tested independently of the
+/// full process::run pipeline.
+fn build_explicit_file_entries(files: &[String]) -> Vec<(String, String, u64)> {
+    files
+        .iter()
+        .map(|fp| {
+            let p = std::path::Path::new(fp);
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let rel = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| fp.clone());
+            (fp.clone(), rel, size)
+        })
+        .collect()
 }
 
 /// List supported files under `source_path` as `(abs_path, rel_path, size)`.
@@ -1974,6 +2032,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // T6 — DCR 019e5068 — build_explicit_file_entries covers a happy file +
+    // a missing path (bad paths surface as size 0; downstream sha256 turns
+    // them into structured per-file errors, never silent skips).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn t6_build_explicit_file_entries_includes_missing_paths_with_zero_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "scansort-t6-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real_a = dir.join("a.pdf");
+        std::fs::write(&real_a, b"some bytes for the test").unwrap();
+        let real_a_size = std::fs::metadata(&real_a).unwrap().len();
+        let missing = dir.join("nope.pdf");
+
+        let supplied = vec![
+            real_a.to_str().unwrap().to_string(),
+            missing.to_str().unwrap().to_string(),
+        ];
+        let entries = build_explicit_file_entries(&supplied);
+
+        assert_eq!(entries.len(), 2, "every supplied path must produce an entry");
+        assert_eq!(entries[0].0, supplied[0], "abs_path preserved");
+        assert_eq!(entries[0].1, "a.pdf", "rel_path = file_name");
+        assert_eq!(entries[0].2, real_a_size, "real file's size is reported");
+        assert_eq!(entries[1].0, supplied[1]);
+        assert_eq!(entries[1].1, "nope.pdf");
+        assert_eq!(
+            entries[1].2, 0,
+            "missing file gets size 0 — downstream sha256 then errors loudly"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t6_build_explicit_file_entries_handles_empty_list() {
+        let entries = build_explicit_file_entries(&[]);
+        assert!(entries.is_empty());
     }
 
     #[test]
