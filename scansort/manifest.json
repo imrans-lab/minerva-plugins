@@ -225,6 +225,16 @@
       "description": "Remove a source directory from the plugin's session by label."
     },
     {
+      "name": "minerva_scansort_dryrun_session",
+      "description": "G3 (DCR 019e564809a9): Predict what process() would do across the current session WITHOUT calling the LLM. Per-rule: which copy_to labels resolve to open destinations vs fail. Per-file: filename-driven prediction (LLM-free) — rules whose conditions reference filename/extension/size fire deterministically; rules depending on LLM facts stay silent (predicted_rule_label=null). Catches copy_to label mismatches before paying the LLM cost. Read-only; no state change.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_paths": {"type": "boolean", "description": "When true, every file entry carries its absolute path. Default false (agent-safe)."}
+        }
+      }
+    },
+    {
       "name": "minerva_scansort_session_describe",
       "description": "G2 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats (has_password, hint, doc_count, has_sidecar_rules) + top-level rule_library_count and destination_registry_count. include_paths gates path disclosure (default false). Read-only; no state change. Per-vault errors are best-effort: a malformed/unreadable vault still appears with the label + an error string.",
       "input_schema": {

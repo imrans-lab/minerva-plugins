@@ -1073,7 +1073,10 @@ fn build_explicit_file_entries(files: &[String]) -> Vec<(String, String, u64)> {
 }
 
 /// List supported files under `source_path` as `(abs_path, rel_path, size)`.
-fn list_source_files_for_path(
+///
+/// Marked `pub` for [`crate::handle_dryrun_session`] (T3 — DCR
+/// `019e564809a9`) so the dryrun reuses the same walker process() does.
+pub fn list_source_files_for_path(
     source_path: &Path,
 ) -> VaultResult<Vec<(String, String, u64)>> {
     let mut files = Vec::new();

@@ -2760,6 +2760,192 @@ fn handle_library_import_from_sidecar(params: &Value, id: Value) -> RpcResponse 
     }
 }
 
+/// `minerva_scansort_dryrun_session` — G3 (DCR `019e564809a9`).
+///
+/// Predict what `process()` would do across the current session WITHOUT
+/// invoking the LLM classifier. Catches the configuration class of
+/// problems that the live HITL exercise of DCR `019e5068f584` surfaced
+/// — e.g. a rule with `copy_to:["test"]` while only `"test-3"` is open
+/// in the session ("unresolved targets").
+///
+/// What the dryrun CAN tell you:
+///   - Per rule: which `copy_to` labels resolve to open destinations vs
+///     which would fail at fan-out time.
+///   - Per file: a *filename-driven* prediction. The dryrun calls the
+///     existing rule_engine with a zeroed semantic threshold and an
+///     empty `Classification`, so rules whose conditions reference
+///     filename/extension/size will fire deterministically; rules that
+///     depend on LLM-extracted facts (doc_date, issuer, doc_type)
+///     stay silent and the file shows up with `predicted_rule_label:
+///     null`. This is intentional — predicting the LLM is dishonest.
+///
+/// Read-only — no state_changed event.
+fn handle_dryrun_session(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Load enabled rules from the global library, zero each rule's
+    // semantic-score gate so the file-fact conditions are the only gate
+    // that fires (otherwise no rule scores > 0 without LLM signals).
+    let library_rules = match library::library_list() {
+        Ok(r) => r,
+        Err(e) => return ok_response(id, tool_err(&e.message)),
+    };
+    let enabled_rules: Vec<types::Rule> = library_rules
+        .into_iter()
+        .filter(|r| r.enabled)
+        .map(|fr| {
+            let mut r = fr.into_rule();
+            r.confidence_threshold = 0.0;
+            r
+        })
+        .collect();
+
+    let open_destinations = session::open_destination_labels();
+
+    // Per-rule label resolution (deterministic, no file walk needed).
+    let mut unresolved_summary: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let active_rules: Vec<Value> = enabled_rules
+        .iter()
+        .map(|r| {
+            let (resolved, unresolved) = partition_copy_to(&r.copy_to, &open_destinations);
+            for label in &unresolved {
+                *unresolved_summary.entry(label.clone()).or_insert(0) += 1;
+            }
+            json!({
+                "label": r.label,
+                "copy_to": r.copy_to,
+                "resolved_targets": resolved,
+                "unresolved_targets": unresolved,
+            })
+        })
+        .collect();
+
+    // Per-file prediction across all open sources.
+    let mut files_json: Vec<Value> = Vec::new();
+    let mut total_files: usize = 0;
+    for (src_label, src_path) in session::open_sources_sorted() {
+        let listed = match process::list_source_files_for_path(&src_path) {
+            Ok(v) => v,
+            Err(e) => {
+                // Surface the error inline so the agent sees which source
+                // failed without aborting the whole tool.
+                let mut entry = serde_json::Map::new();
+                entry.insert("source_label".into(), json!(src_label));
+                entry.insert("error".into(), json!(e.message));
+                if include_paths {
+                    entry.insert("source_path".into(), json!(src_path.to_string_lossy()));
+                }
+                files_json.push(Value::Object(entry));
+                continue;
+            }
+        };
+        for (abs_path, rel_path, size) in listed {
+            total_files += 1;
+            let entry = predict_file(
+                &src_label,
+                &abs_path,
+                &rel_path,
+                size,
+                &enabled_rules,
+                &open_destinations,
+                include_paths,
+            );
+            files_json.push(entry);
+        }
+    }
+
+    let unresolved_json: Value = serde_json::to_value(&unresolved_summary)
+        .unwrap_or_else(|_| json!({}));
+
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "include_paths": include_paths,
+        "files_in_session": total_files,
+        "files": files_json,
+        "active_rules": active_rules,
+        "unresolved_targets_summary": unresolved_json,
+    })))
+}
+
+/// Split a rule's `copy_to` against the set of currently-open destination
+/// labels. Pure — no side effects, no IO. Used by `handle_dryrun_session`.
+fn partition_copy_to(
+    copy_to: &[String],
+    open_destinations: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut resolved = Vec::new();
+    let mut unresolved = Vec::new();
+    for label in copy_to {
+        if open_destinations.contains(label) {
+            resolved.push(label.clone());
+        } else {
+            unresolved.push(label.clone());
+        }
+    }
+    (resolved, unresolved)
+}
+
+/// Predict one file's routing without an LLM call. Runs the real
+/// rule_engine with a synthetic empty Classification, so only conditions
+/// against filename/extension/size will fire. First-fired-wins, matching
+/// process() semantics.
+fn predict_file(
+    source_label: &str,
+    abs_path: &str,
+    rel_path: &str,
+    size: u64,
+    enabled_rules: &[types::Rule],
+    open_destinations: &std::collections::HashSet<String>,
+    include_paths: bool,
+) -> Value {
+    let path = std::path::Path::new(abs_path);
+    let filename = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let extension = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let file_facts = rule_engine::FileFacts {
+        filename,
+        extension,
+        size: size as i64,
+    };
+    let empty_classification = types::Classification::default();
+    let outcome = rule_engine::run(&empty_classification, &file_facts, enabled_rules);
+    let first = outcome.fired.first();
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("source_label".into(), json!(source_label));
+    obj.insert("rel_path".into(), json!(rel_path));
+    obj.insert("size".into(), json!(size));
+    if include_paths {
+        obj.insert("path".into(), json!(abs_path));
+    }
+    match first {
+        Some(action) => {
+            let (resolved, unresolved) = partition_copy_to(&action.copy_to, open_destinations);
+            obj.insert("predicted_rule_label".into(), json!(action.category));
+            obj.insert("predicted_copy_to".into(), json!(action.copy_to));
+            obj.insert("resolved_targets".into(), json!(resolved));
+            obj.insert("unresolved_targets".into(), json!(unresolved));
+        }
+        None => {
+            obj.insert("predicted_rule_label".into(), Value::Null);
+            obj.insert("predicted_copy_to".into(), json!([]));
+            obj.insert("resolved_targets".into(), json!([]));
+            obj.insert("unresolved_targets".into(), json!([]));
+        }
+    }
+    Value::Object(obj)
+}
+
 // ---------------------------------------------------------------------------
 // B3: process() pipeline handler
 // ---------------------------------------------------------------------------
@@ -3887,6 +4073,17 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_dryrun_session",
+                        "description": "G3 (DCR 019e564809a9): Predict what process() would do across the current session WITHOUT calling the LLM. Per-rule: which copy_to labels resolve to open destinations and which would fail. Per-file: a filename-driven prediction (LLM-free) — rules whose conditions reference filename/extension/size will fire deterministically; rules depending on LLM-extracted facts stay silent (predicted_rule_label=null). Catches the configuration class of bugs (e.g. copy_to:[\"test\"] when only \"test-3\" is open). Read-only; no state change. Returns {ok, include_paths, files_in_session, files:[{source_label, path?, rel_path, size, predicted_rule_label, predicted_copy_to, resolved_targets, unresolved_targets}], active_rules:[{label, copy_to, resolved_targets, unresolved_targets}], unresolved_targets_summary:{label: count}}.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "include_paths": {"type": "boolean", "description": "When true, every file entry carries its absolute path. Default false (agent-safe)."}
+                            },
+                            "required": []
+                        }
+                    },
+                    {
                         "name": "minerva_scansort_dryrun_one",
                         "description": "W4 (DCR 019e33bf): Dry-run the full Phase-1 (rule scoring) + Phase-2 (per-rule stage walk) pipeline for ONE document, WITHOUT placing it anywhere. No filesystem moves, no `placement` trace event. Returns per-rule trace: {rule_label, score, threshold, fired, [reason], stages:[{ask,slot_values,keep_when,kept}], resolved_subfolder|null, resolved_filename|null, would_copy_to:[label,...]}. Used by the W7 row-menu 'Test on…' action.",
                         "inputSchema": {
@@ -4165,6 +4362,9 @@ fn main() {
                     "minerva_scansort_dryrun_one" => {
                         handle_dryrun_one(req.id, &req.params, &mut out, &mut lines, &mut next_id)
                     }
+                    "minerva_scansort_dryrun_session" => {
+                        handle_dryrun_session(&req.params, req.id)
+                    }
                     "minerva_scansort_process" => {
                         handle_process(req.id, &req.params, &mut out, &mut lines, &mut next_id)
                     }
@@ -4312,6 +4512,59 @@ mod lax_numeric_tests {
             assert_eq!(err, "doc_id must be an integer",
                 "present-but-malformed must distinguish from missing: {args}");
         }
+    }
+}
+
+#[cfg(test)]
+mod dryrun_session_tests {
+    //! T3 — DCR 019e564809a9. `partition_copy_to` is the pure piece of
+    //! handle_dryrun_session that's worth unit-testing in isolation —
+    //! the rest is wired up by the Layer-2 test at
+    //! `tests/dryrun_session.rs`.
+    use super::partition_copy_to;
+    use std::collections::HashSet;
+
+    fn open(labels: &[&str]) -> HashSet<String> {
+        labels.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn partition_all_resolved() {
+        let cp = vec!["A".to_string(), "B".to_string()];
+        let (resolved, unresolved) = partition_copy_to(&cp, &open(&["A", "B", "C"]));
+        assert_eq!(resolved, vec!["A".to_string(), "B".to_string()]);
+        assert!(unresolved.is_empty());
+    }
+
+    #[test]
+    fn partition_all_unresolved() {
+        // The G5 / live HITL repro: rule says copy_to ["test"] but only
+        // "test-3" is open. Every label is unresolved.
+        let cp = vec!["test".to_string()];
+        let (resolved, unresolved) = partition_copy_to(&cp, &open(&["test-3"]));
+        assert!(resolved.is_empty());
+        assert_eq!(unresolved, vec!["test".to_string()]);
+    }
+
+    #[test]
+    fn partition_mixed_preserves_order() {
+        let cp = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+        let (resolved, unresolved) =
+            partition_copy_to(&cp, &open(&["second"]));
+        // Order within each bucket matches input order, not HashSet order.
+        assert_eq!(resolved, vec!["second".to_string()]);
+        assert_eq!(unresolved, vec!["first".to_string(), "third".to_string()]);
+    }
+
+    #[test]
+    fn partition_empty_copy_to() {
+        let (r, u) = partition_copy_to(&[], &open(&["anything"]));
+        assert!(r.is_empty());
+        assert!(u.is_empty());
     }
 }
 
