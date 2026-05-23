@@ -766,8 +766,8 @@ pub fn replace_document_content(
     let rows_changed = tx
         .execute(
             "UPDATE documents SET file_data = ?1, file_size = ?2, compression = 'zstd', \
-             encryption_iv = ?3, encryption_tag = ?4, sha256 = ?5, simhash = ?6 \
-             WHERE doc_id = ?7",
+             encryption_iv = ?3, encryption_tag = ?4, sha256 = ?5, simhash = ?6, dhash = ?7 \
+             WHERE doc_id = ?8",
             params![
                 stored_data,
                 original_size,
@@ -775,6 +775,7 @@ pub fn replace_document_content(
                 enc_tag,
                 extraction.sha256,
                 extraction.simhash,
+                extraction.dhash,
                 doc_id,
             ],
         )
