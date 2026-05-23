@@ -53,8 +53,13 @@
 
 use crate::types::VaultError;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+
+/// Hard cap on `tail_rows`' `limit` argument to bound response size.
+pub const TAIL_LIMIT_CAP: usize = 1000;
+/// Default `tail_rows` limit when caller omits one.
+pub const TAIL_LIMIT_DEFAULT: usize = 50;
 
 // ---------------------------------------------------------------------------
 // CSV header
@@ -292,6 +297,144 @@ pub fn append_rows(log_path: &Path, rows: &[AuditRow]) -> Result<(), VaultError>
     })?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CSV row parsing (inverse of to_csv_line)
+// ---------------------------------------------------------------------------
+
+/// Parse one CSV-encoded audit row written by [`AuditRow::to_csv_line`].
+///
+/// Inverse of `to_csv_line` — single source of truth for the on-disk schema.
+/// Returns an error if the row does not have exactly 10 fields or if the
+/// quoting is malformed (unterminated quote, stray chars between fields).
+pub fn parse_row(line: &str) -> Result<AuditRow, VaultError> {
+    let fields = split_csv_fields(line)?;
+    if fields.len() != 10 {
+        return Err(VaultError::new(format!(
+            "audit log: expected 10 CSV fields, got {} in row: {}",
+            fields.len(),
+            line
+        )));
+    }
+    Ok(AuditRow {
+        timestamp:        fields[0].clone(),
+        event:            fields[1].clone(),
+        source_sha256:    fields[2].clone(),
+        source_filename:  fields[3].clone(),
+        rule_label:       fields[4].clone(),
+        destination_id:   fields[5].clone(),
+        destination_kind: fields[6].clone(),
+        resolved_path:    fields[7].clone(),
+        disposition:      fields[8].clone(),
+        detail:           fields[9].clone(),
+    })
+}
+
+/// RFC 4180 (subset) field splitter for rows produced by `csv_quote`.
+///
+/// We always quote every field, so the parser only needs to handle quoted
+/// fields with internal `""` escapes. An unquoted field is treated as an
+/// error to keep round-trip behaviour strict.
+fn split_csv_fields(line: &str) -> Result<Vec<String>, VaultError> {
+    let mut fields: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut chars = line.chars().peekable();
+
+    loop {
+        match chars.next() {
+            None => break,
+            Some('"') => {
+                // Quoted field — consume until the closing quote, doubling on "".
+                loop {
+                    match chars.next() {
+                        Some('"') => {
+                            if chars.peek() == Some(&'"') {
+                                chars.next();
+                                cur.push('"');
+                            } else {
+                                break;
+                            }
+                        }
+                        Some(c) => cur.push(c),
+                        None => return Err(VaultError::new(format!(
+                            "audit log: unterminated quoted field in row: {}", line
+                        ))),
+                    }
+                }
+                fields.push(std::mem::take(&mut cur));
+                match chars.next() {
+                    None => return Ok(fields),
+                    Some(',') => continue,
+                    Some(c) => return Err(VaultError::new(format!(
+                        "audit log: stray char {:?} after quoted field in row: {}", c, line
+                    ))),
+                }
+            }
+            Some(',') => {
+                // Empty unquoted field — produce empty string and continue.
+                fields.push(std::mem::take(&mut cur));
+            }
+            Some(c) => return Err(VaultError::new(format!(
+                "audit log: unquoted field starting with {:?} in row: {}", c, line
+            ))),
+        }
+    }
+    Ok(fields)
+}
+
+// ---------------------------------------------------------------------------
+// Tail read (last `limit` rows)
+// ---------------------------------------------------------------------------
+
+/// Read the last `limit` rows from a CSV audit log.
+///
+/// `limit` is clamped to [`TAIL_LIMIT_CAP`]. Returns rows in file order
+/// (oldest of the tail first). The header row is skipped. Empty file → `[]`.
+/// Missing file → `Err`. Malformed rows surface as `Err` from `parse_row`.
+pub fn tail_rows(log_path: &Path, limit: usize) -> Result<Vec<AuditRow>, VaultError> {
+    if !log_path.exists() {
+        return Err(VaultError::new(format!(
+            "audit log: no file at '{}'", log_path.display()
+        )));
+    }
+    let limit = limit.min(TAIL_LIMIT_CAP);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let file = File::open(log_path).map_err(|e| {
+        VaultError::new(format!(
+            "audit log: cannot open '{}' for read: {}", log_path.display(), e
+        ))
+    })?;
+    let reader = BufReader::new(file);
+
+    let mut tail: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(limit);
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| {
+            VaultError::new(format!(
+                "audit log: read error on '{}': {}", log_path.display(), e
+            ))
+        })?;
+        if idx == 0 && line.starts_with("timestamp,event,") {
+            continue; // skip header
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+
+    let mut rows: Vec<AuditRow> = Vec::with_capacity(tail.len());
+    for raw in tail.drain(..) {
+        rows.push(parse_row(&raw)?);
+    }
+    Ok(rows)
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +723,190 @@ mod tests {
         append_rows(&log, &[]).expect("empty batch should not error");
         assert!(!log.exists(), "empty batch must not create the log file");
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. parse_row: round-trip a row through to_csv_line + parse_row.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn parse_row_roundtrip() {
+        let original = AuditRow::from_placement(
+            "abc123", "invoice.pdf", "Invoice", "dest1", "vault",
+            "/archive.ssort", "placed", "doc_id=42",
+            "2026-05-14T12:00:00Z",
+        );
+        let line = original.to_csv_line();
+        let parsed = parse_row(&line).expect("round-trip must succeed");
+        assert_eq!(parsed.timestamp,        original.timestamp);
+        assert_eq!(parsed.event,            original.event);
+        assert_eq!(parsed.source_sha256,    original.source_sha256);
+        assert_eq!(parsed.source_filename,  original.source_filename);
+        assert_eq!(parsed.rule_label,       original.rule_label);
+        assert_eq!(parsed.destination_id,   original.destination_id);
+        assert_eq!(parsed.destination_kind, original.destination_kind);
+        assert_eq!(parsed.resolved_path,    original.resolved_path);
+        assert_eq!(parsed.disposition,      original.disposition);
+        assert_eq!(parsed.detail,           original.detail);
+    }
+
+    #[test]
+    fn parse_row_roundtrip_comma_quote_in_field() {
+        let original = AuditRow::from_placement(
+            "deadbeef",
+            "invoice, \"final\".pdf",
+            "Invoice",
+            "d1",
+            "directory",
+            "/dest/path with, comma.pdf",
+            "placed",
+            "note: he said \"ship it\"",
+            "2026-05-14T10:00:00Z",
+        );
+        let line = original.to_csv_line();
+        let parsed = parse_row(&line).expect("comma + quote round-trip");
+        assert_eq!(parsed.source_filename, original.source_filename);
+        assert_eq!(parsed.resolved_path,   original.resolved_path);
+        assert_eq!(parsed.detail,          original.detail);
+    }
+
+    #[test]
+    fn parse_row_rejects_wrong_field_count() {
+        let bad = "\"a\",\"b\",\"c\"";
+        let result = parse_row(bad);
+        assert!(result.is_err(), "3 fields must be rejected");
+        assert!(result.unwrap_err().message.contains("expected 10"));
+    }
+
+    #[test]
+    fn parse_row_rejects_unterminated_quote() {
+        let bad = "\"timestamp,\"event\"";
+        let result = parse_row(bad);
+        assert!(result.is_err(), "unterminated quote must be rejected");
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. tail_rows: basic happy path — returns last N rows in file order.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tail_rows_returns_last_n_in_file_order() {
+        let dir = unique_tmp("tail-basic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.csv");
+
+        let rows: Vec<AuditRow> = (0..5u64).map(|i| {
+            AuditRow::from_placement(
+                &format!("sha{i}"),
+                &format!("doc{i}.pdf"),
+                "Invoice",
+                &format!("dest{i}"),
+                "directory",
+                &format!("/dest{i}/doc{i}.pdf"),
+                "placed",
+                "",
+                "2026-05-14T00:00:00Z",
+            )
+        }).collect();
+        append_rows(&log, &rows).expect("seed");
+
+        let tail = tail_rows(&log, 3).expect("tail");
+        assert_eq!(tail.len(), 3);
+        // Should be the last 3 in file (oldest-of-tail first).
+        assert_eq!(tail[0].source_sha256, "sha2");
+        assert_eq!(tail[1].source_sha256, "sha3");
+        assert_eq!(tail[2].source_sha256, "sha4");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. tail_rows: limit > total rows returns all rows.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tail_rows_limit_exceeds_total() {
+        let dir = unique_tmp("tail-over");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.csv");
+        let rows: Vec<AuditRow> = (0..2u64).map(|i| {
+            AuditRow::from_placement(
+                &format!("sha{i}"), "d.pdf", "R", "d1", "vault",
+                "/v.ssort", "placed", "",
+                "2026-05-14T00:00:00Z",
+            )
+        }).collect();
+        append_rows(&log, &rows).expect("seed");
+
+        let tail = tail_rows(&log, 50).expect("tail");
+        assert_eq!(tail.len(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. tail_rows: empty log (no append yet) → Err (file missing).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tail_rows_missing_file_errs() {
+        let log = std::env::temp_dir()
+            .join(format!("scansort-tail-missing-{}.csv", std::process::id()));
+        // Ensure absent.
+        let _ = std::fs::remove_file(&log);
+        let result = tail_rows(&log, 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("no file at"));
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. tail_rows: header-only file (no data rows) → empty vec.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tail_rows_header_only_file() {
+        let dir = unique_tmp("tail-header-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.csv");
+        // Write header only by appending then truncating to header.
+        std::fs::write(&log, CSV_HEADER).unwrap();
+
+        let tail = tail_rows(&log, 10).expect("tail");
+        assert!(tail.is_empty(), "header-only file should yield empty vec");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. tail_rows: cap clamps limit to TAIL_LIMIT_CAP.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tail_rows_limit_clamped_to_cap() {
+        // Write TAIL_LIMIT_CAP + 5 rows; ask for cap + 100; expect cap returned.
+        let dir = unique_tmp("tail-cap");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.csv");
+        let rows: Vec<AuditRow> = (0..(TAIL_LIMIT_CAP + 5)).map(|i| {
+            AuditRow::from_placement(
+                &format!("sha{i}"), "d.pdf", "R", "d1", "vault",
+                "/v.ssort", "placed", "", "2026-05-14T00:00:00Z",
+            )
+        }).collect();
+        append_rows(&log, &rows).expect("seed");
+
+        let tail = tail_rows(&log, TAIL_LIMIT_CAP + 100).expect("tail");
+        assert_eq!(tail.len(), TAIL_LIMIT_CAP);
+        // First row in tail is at index (total - cap).
+        let first_expected = format!("sha{}", rows.len() - TAIL_LIMIT_CAP);
+        assert_eq!(tail[0].source_sha256, first_expected);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. tail_rows: limit=0 returns empty vec (no error, no read).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tail_rows_zero_limit() {
+        let dir = unique_tmp("tail-zero");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.csv");
+        std::fs::write(&log, CSV_HEADER).unwrap();
+        let tail = tail_rows(&log, 0).expect("tail");
+        assert!(tail.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 

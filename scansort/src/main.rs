@@ -2095,6 +2095,62 @@ fn handle_audit_append(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
+/// `minerva_scansort_audit_tail` — G4 (DCR `019e564809a9`).
+///
+/// Read the last `limit` rows of an append-only CSV audit log. Read-only;
+/// emits no state_changed event. Default limit 50, hard cap `TAIL_LIMIT_CAP`.
+///
+/// Returns:
+/// ```json
+/// { "ok": true, "log_path": "...", "rows": [...], "total_rows_returned": N }
+/// ```
+/// or a structured `tool_err` if the file is missing/unreadable or any row
+/// is malformed.
+fn handle_audit_tail(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let log_path_str = args.get("log_path").and_then(|v| v.as_str()).unwrap_or("");
+    if log_path_str.is_empty() {
+        return ok_response(id, tool_err("log_path is required"));
+    }
+
+    // Accept int OR integral float for limit (Minerva's MCP HTTP relay
+    // routes JSON ints through Godot, which re-serializes them as floats).
+    // T1 will hoist this into a shared lax_usize helper alongside process()'s.
+    let lax_usize = |v: Option<&Value>| -> Option<usize> {
+        let v = v?;
+        if let Some(u) = v.as_u64() { return Some(u as usize); }
+        if let Some(f) = v.as_f64() { if f.is_finite() && f >= 0.0 { return Some(f as usize); } }
+        None
+    };
+    let limit = lax_usize(args.get("limit")).unwrap_or(audit::TAIL_LIMIT_DEFAULT);
+
+    let log_path = std::path::Path::new(log_path_str);
+    match audit::tail_rows(log_path, limit) {
+        Ok(rows) => {
+            let rows_json: Vec<Value> = rows.iter().map(|r| json!({
+                "timestamp":        r.timestamp,
+                "event":            r.event,
+                "source_sha256":    r.source_sha256,
+                "source_filename":  r.source_filename,
+                "rule_label":       r.rule_label,
+                "destination_id":   r.destination_id,
+                "destination_kind": r.destination_kind,
+                "resolved_path":    r.resolved_path,
+                "disposition":      r.disposition,
+                "detail":           r.detail,
+            })).collect();
+            let count = rows_json.len();
+            ok_response(id, tool_ok(json!({
+                "ok": true,
+                "log_path": log_path_str,
+                "rows": rows_json,
+                "total_rows_returned": count,
+            })))
+        }
+        Err(e) => ok_response(id, tool_err(&e.message)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // B1: Session handlers
 // ---------------------------------------------------------------------------
@@ -3693,6 +3749,18 @@ fn main() {
                         }
                     },
                     {
+                        "name": "minerva_scansort_audit_tail",
+                        "description": "G4 (DCR 019e564809a9): Read the last `limit` rows from a CSV audit log written by minerva_scansort_audit_append. Read-only; no state change. Default limit 50, hard cap 1000. Returns {ok, log_path, rows:[{timestamp,event,source_sha256,source_filename,rule_label,destination_id,destination_kind,resolved_path,disposition,detail}], total_rows_returned}. Returns tool_err if the file is missing/unreadable or any row is malformed.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "log_path": {"type": "string", "description": "Absolute path to the CSV audit log file. Same path passed to minerva_scansort_audit_append."},
+                                "limit": {"type": "integer", "minimum": 0, "description": "Max rows to return from the tail of the log. Default 50, capped at 1000. Accepts integers or whole-number floats (Minerva's MCP HTTP relay routes integers through Godot, which re-serializes them as floats)."}
+                            },
+                            "required": ["log_path"]
+                        }
+                    },
+                    {
                         "name": "minerva_scansort_audit_append",
                         "description": "W9: Append one or more rows to the append-only CSV audit log. Creates the file with a header row on first write; never truncates. The toggle (audit_log_enabled) is checked by the panel — call this tool only when the toggle is ON. Non-fatal: if log_path is unwritable, returns {ok:false, error:...} without panicking. W10 MUST treat audit failure as non-fatal. CSV columns: timestamp, event, source_sha256, source_filename, rule_label, destination_id, destination_kind, resolved_path, disposition, detail. Returns {ok, log_path, rows_written}.",
                         "inputSchema": {
@@ -3878,6 +3946,9 @@ fn main() {
                     }
                     "minerva_scansort_audit_append" => {
                         handle_audit_append(&req.params, req.id)
+                    }
+                    "minerva_scansort_audit_tail" => {
+                        handle_audit_tail(&req.params, req.id)
                     }
                     "minerva_scansort_session_open_vault" => {
                         handle_session_open_vault(&req.params, req.id)

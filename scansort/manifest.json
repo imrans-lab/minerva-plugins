@@ -295,6 +295,18 @@
           "files": {"type": "array", "items": {"type": "string"}, "description": "DCR 019e5068: optional explicit list of absolute file paths to process. When non-empty, the open-source directory walk is bypassed and exactly these files are processed (in supplied order). The .scansort-state.json source manifest is not read or written for this path. Bad/missing paths surface as structured per-file errors. offset/limit still window this list."}
         }
       }
+    },
+    {
+      "name": "minerva_scansort_audit_tail",
+      "description": "G4 (DCR 019e564809a9): Read the last `limit` rows from a CSV audit log written by minerva_scansort_audit_append. Read-only; no state change. Default limit 50, hard cap 1000. Returns {ok, log_path, rows:[{timestamp,event,source_sha256,source_filename,rule_label,destination_id,destination_kind,resolved_path,disposition,detail}], total_rows_returned}. Returns tool_err if the file is missing/unreadable or any row is malformed.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "log_path": {"type": "string", "description": "Absolute path to the CSV audit log file. Same path passed to minerva_scansort_audit_append."},
+          "limit": {"type": "integer", "minimum": 0, "description": "Max rows to return. Default 50, capped at 1000. Accepts integers or whole-number floats (Minerva's MCP HTTP relay routes ints through Godot, which re-serializes them as floats)."}
+        },
+        "required": ["log_path"]
+      }
     }
   ],
   "ui": {
