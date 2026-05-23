@@ -2598,9 +2598,23 @@ fn handle_process(
     };
     let offset = lax_usize(args.get("offset")).unwrap_or(0);
     let limit = lax_usize(args.get("limit"));
+    // T4 — DCR 019e5068. Optional map of destination label → password. When
+    // a fan-out rule sets encrypt=true, the matching destination's password
+    // is looked up here so process() can post-encrypt the just-inserted doc
+    // via documents::set_document_encrypted. A missing password is a per-
+    // placement error (never a silent plaintext store).
+    let vault_passwords: std::collections::HashMap<String, String> = args
+        .get("vault_passwords")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     match process::run(
         out, lines, next_id, model, model_spec, doc_type_strategy,
-        audit_enabled, audit_path, offset, limit,
+        audit_enabled, audit_path, offset, limit, &vault_passwords,
     ) {
         Err(e) => ok_response(id, tool_err(&e.message)),
         Ok(result) => {
@@ -3644,7 +3658,8 @@ fn main() {
                                 "audit_enabled": {"type": "boolean", "description": "DCR 019e3ce069b6: when true, append one CSV audit-log row per fan-out PlacementResult to `audit_path`. Default false (back-compat). Row shape matches the panel batch pipeline (minerva_scansort_audit_append) so logs are interchangeable. Audit write failures are non-fatal — pipeline continues and a warning is logged."},
                                 "audit_path": {"type": "string", "description": "DCR 019e3ce069b6: absolute path to the CSV audit log file. Required when `audit_enabled` is true; empty path with audit_enabled=true is a silent no-op. Ignored when `audit_enabled` is false."},
                                 "offset": {"type": "integer", "minimum": 0, "description": "DCR 019e42e4: index of the first source file to process in the flat ordered file list. Files before it are skipped cheaply. Default 0."},
-                                "limit": {"type": "integer", "minimum": 1, "description": "DCR 019e42e4: max files to process starting at `offset`. Omit for the whole batch. The panel's Stop-able loop passes limit=1 per file. `total_files` in the result is always the true pre-window count."}
+                                "limit": {"type": "integer", "minimum": 1, "description": "DCR 019e42e4: max files to process starting at `offset`. Omit for the whole batch. The panel's Stop-able loop passes limit=1 per file. `total_files` in the result is always the true pre-window count."},
+                                "vault_passwords": {"type": "object", "description": "DCR 019e5068: optional map of destination label → password. When a rule sets encrypt=true, the matching destination's password is used to post-encrypt the just-inserted document via the same set_document_encrypted helper. A missing password for an encrypt-flagged destination flips that placement to Error and rolls back the row — process() will NEVER silently store plaintext in an encrypt-flagged destination."}
                             },
                             "required": [],
                         },

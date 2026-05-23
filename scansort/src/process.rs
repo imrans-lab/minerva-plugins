@@ -33,8 +33,9 @@
 
 use crate::audit;
 use crate::classifier;
-use crate::destinations::{Destination, DestinationRegistry};
+use crate::destinations::{find_by_id, Destination, DestinationRegistry};
 use crate::doc_type_normalizer;
+use crate::documents;
 use crate::extract;
 use crate::library;
 use crate::placement::{self, DirHashCache, DocMeta, PlacementResult, PlacementStatus};
@@ -299,6 +300,60 @@ impl<'a, W: io::Write, I: Iterator<Item = Result<String, io::Error>>> LlmCaller
 /// one-file-at-a-time caller knows the batch size from the first call.
 ///
 /// # Returns
+/// T4 — DCR 019e5068 — finalize_encrypted_placements
+///
+/// Honour a rule's `encrypt=true` intent for every successful vault placement
+/// in `placements`. For each Placed/vault result, look up the destination's
+/// password in `vault_passwords` (keyed by destination label) and call the
+/// existing `documents::set_document_encrypted` in-place toggle. A missing
+/// password is an error, NOT a silent plaintext store: the just-inserted row
+/// is rolled back (delete_document) and the placement flips to Error with a
+/// clear message. A set_document_encrypted failure does the same. When
+/// `encrypt` is false this is a no-op.
+pub(crate) fn finalize_encrypted_placements(
+    registry: &DestinationRegistry,
+    placements: &mut [PlacementResult],
+    encrypt: bool,
+    vault_passwords: &HashMap<String, String>,
+) {
+    if !encrypt {
+        return;
+    }
+    for p in placements.iter_mut() {
+        if p.status != PlacementStatus::Placed || p.kind != "vault" {
+            continue;
+        }
+        let dest = match find_by_id(registry, &p.destination_id) {
+            Some(d) => d,
+            None => continue,
+        };
+        let password = vault_passwords
+            .get(&dest.label)
+            .map(String::as_str)
+            .unwrap_or("");
+        if password.is_empty() {
+            // Refuse to leave plaintext where the rule said encrypt=true.
+            let _ = documents::delete_document(&dest.path, p.doc_id);
+            p.status = PlacementStatus::Error;
+            p.message = format!(
+                "rule requires encrypt=true but no password supplied in vault_passwords for destination label '{}' — refusing to store plaintext (the inserted row was rolled back)",
+                dest.label
+            );
+            p.doc_id = 0;
+            continue;
+        }
+        if let Err(e) = documents::set_document_encrypted(&dest.path, p.doc_id, true, password) {
+            let _ = documents::delete_document(&dest.path, p.doc_id);
+            p.status = PlacementStatus::Error;
+            p.message = format!(
+                "post-insert encryption failed for destination '{}': {}",
+                dest.label, e.message
+            );
+            p.doc_id = 0;
+        }
+    }
+}
+
 /// `Ok(ProcessResult)` on success.  Individual file errors are recorded in
 /// the result's `items` list rather than propagated as Err.
 pub fn run(
@@ -312,6 +367,7 @@ pub fn run(
     audit_path: &str,
     offset: usize,
     limit: Option<usize>,
+    vault_passwords: &HashMap<String, String>,
 ) -> VaultResult<ProcessResult> {
     let mut result = ProcessResult::default();
     // Flat index across ALL files of ALL open sources, in deterministic
@@ -715,7 +771,7 @@ pub fn run(
                 amount: classification.amount.clone(),
             };
 
-            let placements = placement::fan_out(
+            let mut placements = placement::fan_out(
                 abs_path,
                 &resolved_labels,
                 &action.resolved_subfolder,
@@ -725,6 +781,11 @@ pub fn run(
                 &meta,
                 Some(&mut dir_cache),
             );
+
+            // T4 — honour the rule's encrypt intent on every successful vault
+            // placement. Done BEFORE audit + status accounting so audit rows
+            // and the per-item status reflect the final post-encrypt outcome.
+            finalize_encrypted_placements(&registry, &mut placements, action.encrypt, vault_passwords);
 
             // W9 / DCR 019e3ce069b6 — write audit rows for this fan-out.
             // One row per PlacementResult so the log is interchangeable with
@@ -1797,5 +1858,140 @@ mod tests {
             &placements, &registry, "sha", "doc.pdf", "Rule",
         );
         assert_eq!(rows[0].destination_kind, "vault", "must fall back to PlacementResult.kind");
+    }
+
+    // -----------------------------------------------------------------------
+    // T4 — DCR 019e5068 — finalize_encrypted_placements covers happy path,
+    // the missing-password refusal, and the no-encrypt no-op.
+    // -----------------------------------------------------------------------
+
+    fn t4_unique_tmp(prefix: &str) -> std::path::PathBuf {
+        let pid = std::process::id();
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("scansort-t4-{prefix}-{pid}-{ts}-{n}"))
+    }
+
+    fn t4_make_vault(prefix: &str, password: Option<&str>) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = t4_unique_tmp(prefix);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault_path = dir.join("dest.ssort");
+        crate::vault_lifecycle::create_vault(vault_path.to_str().unwrap(), "T4").unwrap();
+        if let Some(pw) = password {
+            crate::crypto::set_password(vault_path.to_str().unwrap(), pw).unwrap();
+        }
+        (dir, vault_path)
+    }
+
+    fn t4_insert_plaintext(vault_path: &str, body: &[u8]) -> i64 {
+        let doc = crate::types::Document {
+            original_filename: "synth.txt".to_string(),
+            file_ext: ".txt".to_string(),
+            category: "test".to_string(),
+            confidence: 0.9,
+            issuer: "tester".to_string(),
+            description: "synthetic placement for T4 unit test".to_string(),
+            doc_date: "2026-01-01".to_string(),
+            status: "classified".to_string(),
+            simhash: "0000000000000000".to_string(),
+            dhash: "0000000000000000".to_string(),
+            ..Default::default()
+        };
+        crate::documents::insert_document_with_metadata(vault_path, &doc, body, "")
+            .expect("insert plaintext for T4")
+    }
+
+    fn t4_registry(label: &str, path: &str) -> DestinationRegistry {
+        let mut reg = DestinationRegistry::default();
+        reg.destinations.push(Destination {
+            id: label.to_string(),
+            kind: "vault".to_string(),
+            path: path.to_string(),
+            label: label.to_string(),
+            locked: false,
+        });
+        reg
+    }
+
+    fn t4_placement(label: &str, doc_id: i64) -> PlacementResult {
+        PlacementResult {
+            destination_id: label.to_string(),
+            kind: "vault".to_string(),
+            target_path: String::new(),
+            doc_id,
+            status: PlacementStatus::Placed,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn t4_finalize_encrypts_when_password_supplied() {
+        let (dir, vault) = t4_make_vault("enc-ok", Some("the-secret"));
+        let vp = vault.to_str().unwrap();
+        let doc_id = t4_insert_plaintext(vp, b"this should end up encrypted at rest");
+        let before = crate::documents::get_document(vp, doc_id).unwrap();
+        assert!(!before.encrypted, "doc starts plaintext");
+
+        let reg = t4_registry("myvault", vp);
+        let mut placements = vec![t4_placement("myvault", doc_id)];
+        let mut passwords: HashMap<String, String> = HashMap::new();
+        passwords.insert("myvault".to_string(), "the-secret".to_string());
+
+        finalize_encrypted_placements(&reg, &mut placements, true, &passwords);
+
+        assert_eq!(placements[0].status, PlacementStatus::Placed, "still Placed");
+        let after = crate::documents::get_document(vp, doc_id).unwrap();
+        assert!(after.encrypted, "doc must be encrypted at rest after finalize");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t4_finalize_refuses_silent_plaintext_when_password_missing() {
+        let (dir, vault) = t4_make_vault("enc-missing", Some("vault-pw"));
+        let vp = vault.to_str().unwrap();
+        let doc_id = t4_insert_plaintext(vp, b"refused: no password for an encrypt-flagged dest");
+
+        let reg = t4_registry("myvault", vp);
+        let mut placements = vec![t4_placement("myvault", doc_id)];
+        let passwords: HashMap<String, String> = HashMap::new(); // empty: no entry for "myvault"
+
+        finalize_encrypted_placements(&reg, &mut placements, true, &passwords);
+
+        assert_eq!(placements[0].status, PlacementStatus::Error, "must flip to Error");
+        assert!(
+            placements[0].message.to_lowercase().contains("encrypt"),
+            "error message should name the encrypt-required constraint, got: {}",
+            placements[0].message
+        );
+        assert_eq!(placements[0].doc_id, 0, "doc_id zeroed after rollback");
+        assert!(
+            crate::documents::get_document(vp, doc_id).is_err(),
+            "rolled-back doc must no longer exist in the vault"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn t4_finalize_is_a_noop_when_encrypt_flag_false() {
+        let (dir, vault) = t4_make_vault("encfalse", None);
+        let vp = vault.to_str().unwrap();
+        let doc_id = t4_insert_plaintext(vp, b"rule did not request encryption");
+
+        let reg = t4_registry("myvault", vp);
+        let mut placements = vec![t4_placement("myvault", doc_id)];
+        let passwords: HashMap<String, String> = HashMap::new();
+
+        finalize_encrypted_placements(&reg, &mut placements, /*encrypt=*/ false, &passwords);
+
+        assert_eq!(placements[0].status, PlacementStatus::Placed);
+        let doc = crate::documents::get_document(vp, doc_id).unwrap();
+        assert!(!doc.encrypted, "doc must remain plaintext");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
