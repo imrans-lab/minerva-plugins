@@ -225,6 +225,16 @@
       "description": "Remove a source directory from the plugin's session by label."
     },
     {
+      "name": "minerva_scansort_session_describe",
+      "description": "G2 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats (has_password, hint, doc_count, has_sidecar_rules) + top-level rule_library_count and destination_registry_count. include_paths gates path disclosure (default false). Read-only; no state change. Per-vault errors are best-effort: a malformed/unreadable vault still appears with the label + an error string.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "include_paths": {"type": "boolean", "description": "When true, every vault/dir/source entry carries its absolute path. Default false (agent-safe)."}
+        }
+      }
+    },
+    {
       "name": "minerva_scansort_session_state",
       "description": "Return the current session — open vaults, directories, and sources. By default returns label-only lists (paths excluded, for LLM-agent safety). Pass include_paths=true (panel-only) to get {label,path} objects. Returns {ok, vaults, dirs, sources}.",
       "input_schema": {

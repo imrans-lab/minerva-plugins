@@ -2400,6 +2400,104 @@ fn handle_session_state(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
+/// `minerva_scansort_session_describe` — G2 (DCR `019e564809a9`).
+///
+/// One-stop session shape for agents. Extends `session_state` with the
+/// concrete facts an agent needs to act: per-vault `has_password` +
+/// `doc_count` + `has_sidecar_rules`, plus top-level rule-library and
+/// destination-registry counts.
+///
+/// `include_paths` follows the same convention as `session_state`:
+/// default false (agent-safe), explicit true reveals filesystem paths.
+///
+/// Read-only — no state_changed event.
+///
+/// Vault stat-collection is best-effort per entry: a malformed or
+/// unreadable vault yields the label + an `error` string on that entry
+/// rather than failing the whole tool.
+fn handle_session_describe(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let (vaults_full, dirs_full, sources_full) = session::entries_full();
+
+    let vaults_json: Vec<Value> = vaults_full
+        .iter()
+        .map(|(label, path)| describe_vault_entry(label, path, include_paths))
+        .collect();
+
+    let entry_no_path_or_with = |label: &str, path: &std::path::Path| -> Value {
+        if include_paths {
+            json!({"label": label, "path": path.to_string_lossy()})
+        } else {
+            json!({"label": label})
+        }
+    };
+    let dirs_json: Vec<Value> = dirs_full
+        .iter()
+        .map(|(l, p)| entry_no_path_or_with(l, p))
+        .collect();
+    let sources_json: Vec<Value> = sources_full
+        .iter()
+        .map(|(l, p)| entry_no_path_or_with(l, p))
+        .collect();
+
+    let rule_library_count = library::library_list().map(|r| r.len()).unwrap_or(0);
+    let destination_registry_count = registry::registry_list(None)
+        .map(|r| r.len())
+        .unwrap_or(0);
+
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "include_paths": include_paths,
+        "vaults":  vaults_json,
+        "dirs":    dirs_json,
+        "sources": sources_json,
+        "rule_library_count": rule_library_count,
+        "destination_registry_count": destination_registry_count,
+    })))
+}
+
+/// Build the JSON object for a single open vault. Best-effort stats — a
+/// vault that can't be opened still appears in the list (so the agent
+/// can see the label is registered) with an `error` field instead of
+/// `doc_count` / `has_password`.
+fn describe_vault_entry(label: &str, path: &std::path::Path, include_paths: bool) -> Value {
+    let path_str = path.to_string_lossy();
+    let mut obj = serde_json::Map::new();
+    obj.insert("label".into(), json!(label));
+    if include_paths {
+        obj.insert("path".into(), json!(path_str));
+    }
+
+    match crypto::check_vault_has_password(&path_str) {
+        Ok((has_password, hint)) => {
+            obj.insert("has_password".into(), json!(has_password));
+            obj.insert("hint".into(), json!(hint));
+        }
+        Err(e) => {
+            obj.insert("error".into(), json!(e.message));
+        }
+    }
+
+    match documents::vault_inventory(&path_str) {
+        Ok(docs) => {
+            obj.insert("doc_count".into(), json!(docs.len()));
+        }
+        Err(e) => {
+            // Don't clobber a prior error from check_vault_has_password.
+            obj.entry("error".to_string()).or_insert(json!(e.message));
+        }
+    }
+
+    obj.insert(
+        "has_sidecar_rules".into(),
+        json!(rules_file::sibling_path(path).exists()),
+    );
+
+    Value::Object(obj)
+}
+
 // ---------------------------------------------------------------------------
 // B2: Library handlers — path-free global rules library
 // ---------------------------------------------------------------------------
@@ -3589,6 +3687,17 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_session_describe",
+                        "description": "G2 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats (has_password, hint, doc_count, has_sidecar_rules) + top-level rule_library_count and destination_registry_count. include_paths gates filesystem-path disclosure (default false, agent-safe). Read-only; no state change. Returns {ok, include_paths, vaults:[{label, path?, has_password, hint, doc_count, has_sidecar_rules, error?}], dirs:[{label, path?}], sources:[{label, path?}], rule_library_count, destination_registry_count}. Per-vault errors are best-effort: a malformed/unreadable vault still appears with the label + an error string.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "include_paths": {"type": "boolean", "description": "When true, every vault/dir/source entry carries its absolute path. Default false (agent-safe — keeps paths off the chat surface)."}
+                            },
+                            "required": []
+                        }
+                    },
+                    {
                         "name": "minerva_scansort_session_state",
                         "description": "B1: Return the current in-process session state — which vaults, directories, and source directories are currently open — as label-only lists. Paths are never included. Returns {ok, vaults: [{label}], dirs: [{label}], sources: [{label}]}.",
                         "inputSchema": {
@@ -4013,6 +4122,9 @@ fn main() {
                     }
                     "minerva_scansort_session_state" => {
                         handle_session_state(&req.params, req.id)
+                    }
+                    "minerva_scansort_session_describe" => {
+                        handle_session_describe(&req.params, req.id)
                     }
                     "minerva_scansort_session_reset" => {
                         handle_session_reset(&req.params, req.id)
