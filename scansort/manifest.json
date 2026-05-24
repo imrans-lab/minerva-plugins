@@ -266,8 +266,13 @@
     },
     {
       "name": "minerva_scansort_process_cancel",
-      "description": "G12 (DCR 019e564809a9): Request cancellation of the current process() run via the ProcessController's cancel_requested flag. process() honours it at the inter-file gate. Stdio caveat: cancel only takes effect when the agent runs process() in a polling loop (limit=1). Returns {ok, was_running, last_file_processed}.",
-      "input_schema": {"type": "object", "properties": {}}
+      "description": "C6 (DCR 019e564809a9): Set cancel_requested on the active batch. batch_id (optional) keys the cancel to a specific batch — wrong/stale id is an error; omitted = cancel any active batch. Returns {ok, was_running, cancelled_batch_id, last_file_processed}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "batch_id": {"type": "string"}
+        }
+      }
     },
     {
       "name": "minerva_scansort_dryrun_session",

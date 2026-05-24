@@ -3207,24 +3207,37 @@ fn handle_process_status(_params: &Value, id: Value) -> RpcResponse {
     ok_response(id, tool_ok(payload))
 }
 
-/// `minerva_scansort_process_cancel` — G12 (DCR `019e564809a9`).
+/// `minerva_scansort_process_cancel` — C6 (DCR `019e564809a9`).
 ///
-/// Sets the controller's cancel_requested flag. process() honours it at
-/// the inter-file gate within the current run. Stdio-blocking caveat
-/// from process_status applies: cancel only takes effect if the agent
-/// is running process() in a polling loop OR if a subsequent process()
-/// call sees the flag (it's cleared on begin_run, so the flag matters
-/// only for the current run).
+/// Sets `cancel_requested` on the active batch. `process_run` honours
+/// the flag at its inter-file gate; the next `process_run` iteration
+/// will bail with state=Cancelled and partial totals.
 ///
-/// Returns `{ok, was_running, last_file_processed}` so the agent can
-/// see whether the cancel actually targeted a live run.
-fn handle_process_cancel(_params: &Value, id: Value) -> RpcResponse {
-    let (was_running, last_file) = process::request_cancel();
-    ok_response(id, tool_ok(json!({
-        "ok": true,
-        "was_running": was_running,
-        "last_file_processed": last_file,
-    })))
+/// INPUT:
+///   batch_id — optional. When supplied, cancel ONLY fires if it
+///   matches the active batch's id (protects an agent from cancelling
+///   a fresh batch with a stale id). When omitted, cancels whatever's
+///   active (legacy behaviour).
+///
+/// RETURNS:
+///   {ok:true, was_running, cancelled_batch_id, last_file_processed}
+///
+/// Supersedes work_item 019e57bdf613 (G12).
+fn handle_process_cancel(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let want_id_str = args.get("batch_id").and_then(|v| v.as_str());
+    let want_id: Option<&str> = want_id_str.filter(|s| !s.is_empty());
+    match process::request_cancel_for(want_id) {
+        Ok((was_running, cancelled_batch_id, last_file)) => {
+            ok_response(id, tool_ok(json!({
+                "ok": true,
+                "was_running": was_running,
+                "cancelled_batch_id": cancelled_batch_id,
+                "last_file_processed": last_file,
+            })))
+        }
+        Err(m) => ok_response(id, tool_err(&m)),
+    }
 }
 
 fn handle_dryrun_session(params: &Value, id: Value) -> RpcResponse {
@@ -4574,8 +4587,14 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_process_cancel",
-                        "description": "G12 (DCR 019e564809a9): Set the ProcessController's cancel_requested flag. process() honours it at the inter-file gate within the current run. Stdio-blocking caveat from process_status applies: cancel only takes effect if the agent runs process() in a polling loop (limit=1) OR if a subsequent process() call has not yet started (begin_run clears the flag). Returns {ok, was_running, last_file_processed} so the agent can see whether the cancel actually targeted a live run.",
-                        "inputSchema": {"type": "object", "properties": {}, "required": []}
+                        "description": "C6 (DCR 019e564809a9): Set cancel_requested on the active batch. process_run honours the flag at its inter-file gate; the next iteration bails with state=Cancelled and partial totals. INPUT: batch_id (optional) — when supplied, cancel fires ONLY if it matches the active batch's id (protects against stale cancellation). When omitted, cancels whatever's active. Returns {ok, was_running, cancelled_batch_id, last_file_processed}. Supersedes G12 (019e57bdf613).",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "batch_id": {"type": "string", "description": "Optional. When supplied, cancel only fires if it matches the active batch's batch_id."}
+                            },
+                            "required": []
+                        }
                     },
                     {
                         "name": "minerva_scansort_dryrun_session",
