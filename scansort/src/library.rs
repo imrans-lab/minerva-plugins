@@ -360,17 +360,19 @@ pub fn library_import_from_legacy_json(
     })?;
     let raw_rules = root.get("rules").and_then(|v| v.as_array()).cloned()
         .unwrap_or_default();
+    // Partial-success per the docstring: parse failures on a single rule
+    // surface into errors[] (with index-based label fallback) but DO NOT
+    // abort the whole import. Subsequent rules continue.
     let mut legacy_rules: Vec<crate::rules_file::FileRule> = Vec::with_capacity(raw_rules.len());
+    let mut errors:  Vec<(String, String)> = Vec::new();
     for (idx, rv) in raw_rules.iter().enumerate() {
         match serde_json::from_value::<crate::rules_file::FileRule>(rv.clone()) {
             Ok(r) => legacy_rules.push(r),
             Err(e) => {
-                // Try to surface a useful label if present.
-                let label = rv.get("label").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-                return Err(VaultError::new(format!(
-                    "legacy file at {}: rule index {} (label '{}') is malformed: {}",
-                    path.display(), idx, label, e
-                )));
+                let label = rv.get("label").and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("(rule[{idx}])"));
+                errors.push((label, format!("parse: {e}")));
             }
         }
     }
@@ -384,7 +386,6 @@ pub fn library_import_from_legacy_json(
     let existing = library_load()?;
     let mut imported: usize = 0;
     let mut skipped: Vec<String> = Vec::new();
-    let mut errors:  Vec<(String, String)> = Vec::new();
 
     for rule in legacy_rules.into_iter() {
         let label = rule.label.clone();
@@ -1099,7 +1100,42 @@ mod tests {
             fs::remove_dir_all(&dir).ok();
         }
 
-        // 4. Missing file → Err.
+        // 4. Partial-success on a malformed rule — surfaces in errors[]
+        //    rather than aborting the whole import. T-Quality-2 finding #1.
+        {
+            let dir = unique_tmp("g9_partial");
+            fs::create_dir_all(&dir).unwrap();
+            let lib_path = dir.join("library.rules.json");
+            set_library_path_for_test(lib_path.clone());
+
+            // Write a legacy file with one good rule + one rule that's
+            // structurally bad (label as a number, not a string).
+            let legacy = dir.join("legacy_partial.json");
+            let body = r#"{
+  "rules": [
+    { "label": "good_one", "enabled": true, "rename_pattern": "{date}_{sender}_x" },
+    { "label": 42, "enabled": true }
+  ]
+}"#;
+            fs::write(&legacy, body).expect("write legacy");
+
+            let (imported, skipped, errors) =
+                library_import_from_legacy_json(&legacy, false).expect("import ok");
+            assert_eq!(imported, 1, "good rule imports");
+            assert!(skipped.is_empty());
+            assert_eq!(errors.len(), 1, "malformed rule surfaces in errors: {errors:?}");
+            assert!(errors[0].1.starts_with("parse:"),
+                "error must be labelled as parse failure: {errors:?}");
+
+            // Good rule is in the library and got the {sender} → {issuer} rewrite.
+            let good = library_get("good_one").expect("get").expect("found");
+            assert_eq!(good.rename_pattern, "{date}_{issuer}_x");
+
+            clear_library_path_for_test();
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        // 5. Missing file → Err.
         {
             let dir = unique_tmp("g9_missing");
             fs::create_dir_all(&dir).unwrap();
