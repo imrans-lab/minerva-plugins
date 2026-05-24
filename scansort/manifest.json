@@ -225,6 +225,26 @@
       "description": "Remove a source directory from the plugin's session by label."
     },
     {
+      "name": "minerva_scansort_process_plan",
+      "description": "C2 (DCR 019e564809a9): Pre-enumerate files that process_run would act on, no LLM/placement work. Installs the result as the CURRENT BATCH; subsequent process_run / process_status / process_cancel reference the batch_id. SCOPE shapes: {kind:'all_sources'} | {kind:'unprocessed_only', vault:'label|path'} | {kind:'explicit_files', files:[...]}. include_paths default false (agent-safe). Returns {ok, batch_id, scope, total, type_breakdown, already_in_vault, eligible, files, created_at}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "object",
+            "properties": {
+              "kind":  {"type": "string", "enum": ["all_sources", "unprocessed_only", "explicit_files"]},
+              "vault": {"type": "string"},
+              "files": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["kind"]
+          },
+          "include_paths": {"type": "boolean"}
+        },
+        "required": ["scope"]
+      }
+    },
+    {
       "name": "minerva_scansort_process_status",
       "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the most recent / current process() run: state, run_id, started_at/finished_at, current_source_label + relpath + index, current_file_total, cancel_requested, last_error, totals {placed, skipped, errored, total}. Stdio caveat: cannot be polled mid-process() on the same connection; useful after process() returns OR when the agent uses limit=1 loop pattern.",
       "input_schema": {"type": "object", "properties": {}}

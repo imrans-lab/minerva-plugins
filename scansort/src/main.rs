@@ -2896,6 +2896,217 @@ fn handle_library_import_from_sidecar(params: &Value, id: Value) -> RpcResponse 
 /// the final tally, (b) when the agent uses the limit=1 loop pattern to
 /// poll between single-file process() calls (the panel's Stop button
 /// does this).
+/// `minerva_scansort_process_plan` — C2 (DCR `019e564809a9`).
+///
+/// Pre-enumerates the files that `process_run` would act on without
+/// doing any LLM / placement work. Installs the result as the current
+/// batch in the per-process ProcessController (see C3); subsequent
+/// `process_run` / `process_status` / `process_cancel` calls reference
+/// the returned `batch_id`.
+///
+/// SCOPE shapes (mutually exclusive, choose via `scope.kind`):
+///   - `"all_sources"`  — every supported file under every open source
+///     (Scenario 1: new vault, all PDFs).
+///   - `"unprocessed_only"` — files whose SHA-256 is NOT already in
+///     `scope.vault` (Scenario 2: existing vault, unprocessed only).
+///   - `"explicit_files"` — exactly the absolute paths in `scope.files`
+///     (Scenario 3: process one named file, or a hand-picked subset).
+///
+/// Read-only side effect: stores the plan in the controller. If a
+/// Running batch already exists, refuses with `tool_err` naming the
+/// active batch_id — caller must cancel or wait.
+///
+/// PATH DISCLOSURE: per-file `abs_path` is included only when
+/// `include_paths=true` (mirrors session_describe's convention).
+fn handle_process_plan(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let scope = match parse_process_scope(args) {
+        Ok(s) => s,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+
+    // Enumerate files per scope.
+    let candidate_files: Vec<(String, String, String, u64)> = // (source_label, abs, rel, size)
+        match enumerate_for_scope(&scope) {
+            Ok(v) => v,
+            Err(m) => return ok_response(id, tool_err(&m)),
+        };
+
+    // For UnprocessedOnly: SHA-check each file against the named vault.
+    let vault_for_dedup: Option<String> = match &scope {
+        batch::ProcessScope::UnprocessedOnly { vault } => Some(vault.clone()),
+        _ => None,
+    };
+    let mut planned: Vec<batch::PlannedFile> = Vec::with_capacity(candidate_files.len());
+    let mut already_in_vault: usize = 0;
+    for (source_label, abs, rel, size) in candidate_files {
+        let extension = std::path::Path::new(&abs)
+            .extension().and_then(|e| e.to_str())
+            .map(|e| format!(".{}", e.to_lowercase()))
+            .unwrap_or_default();
+        let in_vault = if let Some(vault_path) = &vault_for_dedup {
+            // Compute sha256 lazily, only for the dedup scope.
+            match crate::types::compute_sha256(std::path::Path::new(&abs)) {
+                Ok(sha) => match fingerprints::check_sha256(vault_path, &sha) {
+                    Ok(Some(_)) => true,
+                    _ => false,
+                },
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        if in_vault { already_in_vault += 1; }
+        planned.push(batch::PlannedFile {
+            source_label,
+            abs_path: abs,
+            rel_path: rel,
+            size,
+            extension,
+            already_in_vault: in_vault,
+        });
+    }
+
+    let total = planned.len();
+    let eligible = total - already_in_vault;
+    let type_breakdown = batch::ProcessPlan::compute_type_breakdown(&planned);
+    let batch_id = format!("batch-{}-{}", std::process::id(), crate::types::now_iso());
+    let created_at = crate::types::now_iso();
+
+    // Build the wire response from the local list BEFORE handing the
+    // plan to the controller — avoids a round-trip through controller
+    // state, and keeps abs_path gating in one place.
+    let scope_json = serde_json::to_value(&scope).unwrap_or(Value::Null);
+    let files_json: Vec<Value> = planned.iter().map(|f| {
+        let mut o = serde_json::Map::new();
+        o.insert("source_label".into(), json!(f.source_label));
+        o.insert("rel_path".into(),     json!(f.rel_path));
+        o.insert("size".into(),         json!(f.size));
+        o.insert("extension".into(),    json!(f.extension));
+        o.insert("already_in_vault".into(), json!(f.already_in_vault));
+        if include_paths {
+            o.insert("abs_path".into(), json!(f.abs_path));
+        }
+        Value::Object(o)
+    }).collect();
+
+    let plan = batch::ProcessPlan {
+        batch_id: batch_id.clone(),
+        created_at: created_at.clone(),
+        scope,
+        files: planned,
+        total,
+        type_breakdown: type_breakdown.clone(),
+        already_in_vault,
+        eligible,
+    };
+
+    // Install as the current batch.
+    let installed_id = match process::set_current_batch(plan) {
+        Ok(id_) => id_,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "batch_id": installed_id,
+        "scope": scope_json,
+        "total": total,
+        "type_breakdown": type_breakdown,
+        "already_in_vault": already_in_vault,
+        "eligible": eligible,
+        "files": files_json,
+        "include_paths": include_paths,
+        "created_at": created_at,
+    })))
+}
+
+/// Parse the `scope` JSON object into a `batch::ProcessScope`. Returns
+/// a tool_err-formatted string on bad shape.
+fn parse_process_scope(args: &Value) -> Result<batch::ProcessScope, String> {
+    let scope_obj = args.get("scope")
+        .ok_or_else(|| "scope is required".to_string())?;
+    let kind = scope_obj.get("kind").and_then(|v| v.as_str())
+        .ok_or_else(|| "scope.kind is required (\"all_sources\" | \"unprocessed_only\" | \"explicit_files\")".to_string())?;
+    match kind {
+        "all_sources" => Ok(batch::ProcessScope::AllSources),
+        "unprocessed_only" => {
+            let vault = scope_obj.get("vault").and_then(|v| v.as_str())
+                .ok_or_else(|| "scope.vault (vault label OR path) is required for unprocessed_only".to_string())?
+                .to_string();
+            // Resolve label → path if it's an open session vault, else
+            // treat as a literal vault path. Same shape as G11.
+            let resolved = match session::resolve_label(&vault) {
+                Some((_, p, session::EntryKind::Vault)) => p.to_string_lossy().into_owned(),
+                Some(_) => return Err(format!("scope.vault '{vault}' is not a vault label")),
+                None    => vault, // fall through: treat as path
+            };
+            Ok(batch::ProcessScope::UnprocessedOnly { vault: resolved })
+        }
+        "explicit_files" => {
+            let arr = scope_obj.get("files").and_then(|v| v.as_array())
+                .ok_or_else(|| "scope.files (array of absolute paths) is required for explicit_files".to_string())?;
+            let paths: Vec<String> = arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if paths.is_empty() {
+                return Err("scope.files must contain at least one path".into());
+            }
+            Ok(batch::ProcessScope::ExplicitFiles { paths })
+        }
+        other => Err(format!("unknown scope.kind: '{other}'")),
+    }
+}
+
+/// Enumerate (source_label, abs_path, rel_path, size) tuples for the
+/// given scope. Reuses the existing walker + session helpers.
+fn enumerate_for_scope(
+    scope: &batch::ProcessScope,
+) -> Result<Vec<(String, String, String, u64)>, String> {
+    match scope {
+        batch::ProcessScope::AllSources | batch::ProcessScope::UnprocessedOnly { .. } => {
+            let sources = session::open_sources_sorted();
+            if sources.is_empty() {
+                return Err("no open sources in session — call session_open_source first".into());
+            }
+            let mut out: Vec<(String, String, String, u64)> = Vec::new();
+            for (label, path) in sources {
+                match process::list_source_files_for_path(&path) {
+                    Ok(files) => {
+                        for (abs, rel, size) in files {
+                            out.push((label.clone(), abs, rel, size));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(format!("cannot enumerate source '{label}': {}", e.message));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        batch::ProcessScope::ExplicitFiles { paths } => {
+            let mut out: Vec<(String, String, String, u64)> = Vec::with_capacity(paths.len());
+            for raw in paths {
+                let p = std::path::PathBuf::from(raw);
+                if !p.exists() {
+                    return Err(format!("scope.files: '{raw}' does not exist"));
+                }
+                let abs = p.canonicalize()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| raw.clone());
+                let rel = std::path::Path::new(raw).file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(raw).to_string();
+                let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                out.push(("explicit-files".to_string(), abs, rel, size));
+            }
+            Ok(out)
+        }
+    }
+}
+
 fn handle_process_status(_params: &Value, id: Value) -> RpcResponse {
     let mut payload = process::snapshot_json();
     payload.as_object_mut().map(|m| m.insert("ok".into(), json!(true)));
@@ -4227,6 +4438,27 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_process_plan",
+                        "description": "C2 (DCR 019e564809a9): Pre-enumerate the files that process_run would act on, WITHOUT doing any LLM / placement work. Installs the result as the CURRENT BATCH in the per-process controller; subsequent process_run / process_status / process_cancel calls reference the returned batch_id. SCOPE shapes: \"all_sources\" = every file under every open source; \"unprocessed_only\" + scope.vault = same minus files already SHA-matching the named vault; \"explicit_files\" + scope.files = exactly these paths. Refuses if a Running batch already exists (cancel or wait). include_paths gates per-file abs_path disclosure (default false). Returns {ok, batch_id, scope, total, type_breakdown, already_in_vault, eligible, files:[{source_label, rel_path, size, extension, already_in_vault, abs_path?}], created_at}.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "scope": {
+                                    "type": "object",
+                                    "description": "Scope specifier — one of {kind:'all_sources'} | {kind:'unprocessed_only', vault:'<label|path>'} | {kind:'explicit_files', files:[<abs_path>,...]}.",
+                                    "properties": {
+                                        "kind":  {"type": "string", "enum": ["all_sources", "unprocessed_only", "explicit_files"]},
+                                        "vault": {"type": "string", "description": "Required for unprocessed_only: vault label (resolved via session) OR absolute vault path."},
+                                        "files": {"type": "array", "items": {"type": "string"}, "description": "Required for explicit_files: absolute paths to process."}
+                                    },
+                                    "required": ["kind"]
+                                },
+                                "include_paths": {"type": "boolean", "description": "When true, every file entry carries abs_path. Default false."}
+                            },
+                            "required": ["scope"]
+                        }
+                    },
+                    {
                         "name": "minerva_scansort_process_status",
                         "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the per-process ProcessController. Returns the current state of the most recent process() run: state (idle|running|completed|cancelled|errored), run_id, started_at/finished_at, current_source_label + current_file_relpath + current_file_index, current_file_total, cancel_requested, last_error, and totals (placed/skipped/errored/total). Stdio caveat: the plugin handles one request at a time, so this tool can NOT be polled mid-process() on the same connection. Useful after a process() returns to read the final tally, or when the agent uses the limit=1 loop pattern (call process(limit=1) then process_status — the panel's Stop button does this).",
                         "inputSchema": {"type": "object", "properties": {}, "required": []}
@@ -4532,6 +4764,9 @@ fn main() {
                     "minerva_scansort_dryrun_session" => {
                         handle_dryrun_session(&req.params, req.id)
                     }
+                    "minerva_scansort_process_plan" => {
+                        handle_process_plan(&req.params, req.id)
+                    }
                     "minerva_scansort_process_status" => {
                         handle_process_status(&req.params, req.id)
                     }
@@ -4693,6 +4928,73 @@ mod lax_numeric_tests {
             assert_eq!(err, "doc_id must be an integer",
                 "present-but-malformed must distinguish from missing: {args}");
         }
+    }
+}
+
+#[cfg(test)]
+mod process_plan_scope_tests {
+    //! C2 — DCR 019e564809a9. The scope JSON parser is the only pure
+    //! piece of handle_process_plan worth unit-testing in isolation;
+    //! the enumeration + dedup paths are exercised by the Layer-2
+    //! wire test at tests/process_pipeline_v2.rs.
+    use super::parse_process_scope;
+    use crate::batch::ProcessScope;
+    use serde_json::json;
+
+    #[test]
+    fn all_sources_minimal_shape() {
+        let args = json!({"scope": {"kind": "all_sources"}});
+        let s = parse_process_scope(&args).expect("ok");
+        assert!(matches!(s, ProcessScope::AllSources));
+    }
+
+    #[test]
+    fn unprocessed_only_requires_vault() {
+        let args = json!({"scope": {"kind": "unprocessed_only"}});
+        let err = parse_process_scope(&args).unwrap_err();
+        assert!(err.contains("vault"), "{err}");
+    }
+
+    #[test]
+    fn unprocessed_only_with_path_passes_through() {
+        let args = json!({"scope": {"kind": "unprocessed_only", "vault": "/abs/v.ssort"}});
+        let s = parse_process_scope(&args).expect("ok");
+        match s {
+            ProcessScope::UnprocessedOnly { vault } => assert_eq!(vault, "/abs/v.ssort"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn explicit_files_requires_non_empty() {
+        let args = json!({"scope": {"kind": "explicit_files", "files": []}});
+        let err = parse_process_scope(&args).unwrap_err();
+        assert!(err.contains("at least one"), "{err}");
+    }
+
+    #[test]
+    fn explicit_files_carries_paths() {
+        let args = json!({"scope": {"kind": "explicit_files", "files": ["/a.pdf", "/b.pdf"]}});
+        let s = parse_process_scope(&args).expect("ok");
+        match s {
+            ProcessScope::ExplicitFiles { paths } => {
+                assert_eq!(paths, vec!["/a.pdf".to_string(), "/b.pdf".to_string()]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn unknown_kind_errs_with_value() {
+        let args = json!({"scope": {"kind": "bogus"}});
+        let err = parse_process_scope(&args).unwrap_err();
+        assert!(err.contains("bogus"), "error must name the bad kind: {err}");
+    }
+
+    #[test]
+    fn missing_scope_errs() {
+        let err = parse_process_scope(&json!({})).unwrap_err();
+        assert!(err.contains("scope is required"));
     }
 }
 
