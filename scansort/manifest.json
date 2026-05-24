@@ -261,7 +261,7 @@
     },
     {
       "name": "minerva_scansort_process_status",
-      "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the most recent / current process() run: state, run_id, started_at/finished_at, current_source_label + relpath + index, current_file_total, cancel_requested, last_error, totals {placed, skipped, errored, total}. Stdio caveat: cannot be polled mid-process() on the same connection; useful after process() returns OR when the agent uses limit=1 loop pattern.",
+      "description": "C5 (DCR 019e564809a9): Read-only snapshot of the current batch. Returns {ok:true, active_batch:null} when no batch installed, or {ok:true, active_batch:{batch_id, state, scope, plan, progress, totals, errors, started_at, finished_at, cancel_requested}}. Survives across process_run iterations under the same batch_id.",
       "input_schema": {"type": "object", "properties": {}}
     },
     {

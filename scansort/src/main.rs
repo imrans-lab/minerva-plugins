@@ -3191,9 +3191,19 @@ fn handle_process_run(
     }
 }
 
+/// `minerva_scansort_process_status` — C5 (DCR `019e564809a9`).
+///
+/// Returns the active batch's full state (plan + progress + totals +
+/// errors + cancel flag), or `{ok:true, active_batch:null}` when no
+/// batch has been created since plugin startup OR after an explicit
+/// reset. Supersedes bug `019e57bbe881`'s cycle-2 implementation.
 fn handle_process_status(_params: &Value, id: Value) -> RpcResponse {
-    let mut payload = process::snapshot_json();
-    payload.as_object_mut().map(|m| m.insert("ok".into(), json!(true)));
+    let snap = process::current_batch_snapshot_json();
+    let payload = if snap.is_null() {
+        json!({"ok": true, "active_batch": Value::Null})
+    } else {
+        json!({"ok": true, "active_batch": snap})
+    };
     ok_response(id, tool_ok(payload))
 }
 
@@ -4559,7 +4569,7 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_process_status",
-                        "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the per-process ProcessController. Returns the current state of the most recent process() run: state (idle|running|completed|cancelled|errored), run_id, started_at/finished_at, current_source_label + current_file_relpath + current_file_index, current_file_total, cancel_requested, last_error, and totals (placed/skipped/errored/total). Stdio caveat: the plugin handles one request at a time, so this tool can NOT be polled mid-process() on the same connection. Useful after a process() returns to read the final tally, or when the agent uses the limit=1 loop pattern (call process(limit=1) then process_status — the panel's Stop button does this).",
+                        "description": "C5 (DCR 019e564809a9): Read-only snapshot of the current batch. Returns {ok:true, active_batch:null} when no batch has been installed since plugin startup, or {ok:true, active_batch:{batch_id, state, scope, plan:{total,type_breakdown,already_in_vault,eligible,created_at}, progress:{current_file, current_index, files_done_in_batch}, totals:{placed,skipped,errored,total}, errors:[{rel_path,message}], started_at, finished_at, cancel_requested}}. Stdio caveat: the plugin handles one request at a time, so process_status cannot be polled mid-process_run on the same connection — call between process_run iterations (limit=1 loop pattern). Survives across iterations under the same batch_id.",
                         "inputSchema": {"type": "object", "properties": {}, "required": []}
                     },
                     {
