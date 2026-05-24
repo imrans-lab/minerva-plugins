@@ -295,6 +295,18 @@
       "description": "Write the current library to the resolved vault's sibling <stem>.rules.json (portable export). Resolves vault_label against the session. Returns {ok, sidecar_path, count}."
     },
     {
+      "name": "minerva_scansort_library_import_from_legacy_json",
+      "description": "G9 (DCR 019e564809a9): One-shot migration from the pre-plugin standalone ScanSort rules file into the global library. Rewrites {sender} → {issuer} placeholders. overwrite_existing controls label-conflict behaviour. Returns {ok, path, imported, skipped, errors}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Absolute path to a legacy scansort_rules.json file."},
+          "overwrite_existing": {"type": "boolean", "description": "When true, existing labels are replaced. Default false."}
+        },
+        "required": ["path"]
+      }
+    },
+    {
       "name": "minerva_scansort_library_import_from_sidecar",
       "description": "Read a vault's sibling <stem>.rules.json and upsert each rule into the library by label (last-write-wins). Resolves vault_label against the session. Returns {ok, sidecar_path, imported, conflicts, total_after}."
     },

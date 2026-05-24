@@ -321,6 +321,87 @@ pub fn library_import_from_sidecar(
     Ok((sidecar, imported, conflicts, total_after))
 }
 
+/// G9 (DCR `019e564809a9`): Import rules from a pre-plugin "standalone
+/// ScanSort" JSON file into the global library.
+///
+/// The legacy schema is mostly compatible — `FileRule`'s `#[serde(default)]`
+/// fields fill in missing `subtypes` / `stages`. The one semantic difference
+/// is the rename_pattern placeholder: legacy used `{sender}` where the
+/// plugin schema uses `{issuer}`. This is rewritten in-place during import.
+///
+/// `overwrite_existing` controls label-conflict behaviour:
+///   - false → existing labels are skipped (returned in `skipped`).
+///   - true  → existing labels are replaced (last-write-wins).
+///
+/// Returns `(imported, skipped_labels, errors)`. Errors collect per-rule
+/// failures (e.g. validate() rejects); the import does NOT abort on a
+/// single bad rule — partial success is preferred over rollback so the
+/// caller can fix and retry.
+pub fn library_import_from_legacy_json(
+    path: &std::path::Path,
+    overwrite_existing: bool,
+) -> VaultResult<(usize, Vec<String>, Vec<(String, String)>)> {
+    if !path.exists() {
+        return Err(VaultError::new(format!(
+            "legacy rules file not found at {}",
+            path.display()
+        )));
+    }
+
+    // Pre-plugin files lack the schema_version that rules_file::load requires.
+    // Parse the file as raw JSON, extract the `rules` array, and deserialize
+    // each rule individually via FileRule's serde-default fields. This lets
+    // us migrate files that wouldn't survive the strict RulesFile load.
+    let body = fs::read_to_string(path).map_err(|e| {
+        VaultError::new(format!("cannot read legacy file at {}: {}", path.display(), e))
+    })?;
+    let root: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        VaultError::new(format!("legacy file at {} is not valid JSON: {}", path.display(), e))
+    })?;
+    let raw_rules = root.get("rules").and_then(|v| v.as_array()).cloned()
+        .unwrap_or_default();
+    let mut legacy_rules: Vec<crate::rules_file::FileRule> = Vec::with_capacity(raw_rules.len());
+    for (idx, rv) in raw_rules.iter().enumerate() {
+        match serde_json::from_value::<crate::rules_file::FileRule>(rv.clone()) {
+            Ok(r) => legacy_rules.push(r),
+            Err(e) => {
+                // Try to surface a useful label if present.
+                let label = rv.get("label").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+                return Err(VaultError::new(format!(
+                    "legacy file at {}: rule index {} (label '{}') is malformed: {}",
+                    path.display(), idx, label, e
+                )));
+            }
+        }
+    }
+
+    // Field rename: legacy {sender} → plugin {issuer}.
+    for r in &mut legacy_rules {
+        r.rename_pattern = r.rename_pattern.replace("{sender}", "{issuer}");
+        r.subfolder      = r.subfolder.replace("{sender}", "{issuer}");
+    }
+
+    let existing = library_load()?;
+    let mut imported: usize = 0;
+    let mut skipped: Vec<String> = Vec::new();
+    let mut errors:  Vec<(String, String)> = Vec::new();
+
+    for rule in legacy_rules.into_iter() {
+        let label = rule.label.clone();
+        let already_present = rules_file::find_by_label(&existing.rules, &label).is_some();
+        if already_present && !overwrite_existing {
+            skipped.push(label);
+            continue;
+        }
+        match library_insert(rule) {
+            Ok(_) => imported += 1,
+            Err(e) => errors.push((label, e.message)),
+        }
+    }
+
+    Ok((imported, skipped, errors))
+}
+
 // ---------------------------------------------------------------------------
 // CRUD helpers
 // ---------------------------------------------------------------------------
@@ -672,6 +753,7 @@ mod tests {
         b7_cache_subtests();
         b5_sidecar_subtests();
         w5_migration_subtests();
+        g9_legacy_import_subtests();
     }
 
     // ----------------------------------------------------------------
@@ -896,6 +978,137 @@ mod tests {
                 "unexpected error: {}",
                 err.message
             );
+
+            clear_library_path_for_test();
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // G9: Legacy-schema import (DCR 019e564809a9 — work_item 019e57bd760e)
+    // Call this from library_all_tests, not standalone.
+    // ----------------------------------------------------------------
+    fn g9_legacy_import_subtests() {
+        // Helper: write a legacy-shape JSON file with the given rules.
+        fn write_legacy(path: &std::path::Path, rules: &[(&str, &str, &str)]) {
+            // rules tuples: (label, rename_pattern, subfolder)
+            let mut body = String::from("{\n  \"default_category\": \"memories\",\n  \"confidence_threshold\": 0.6,\n  \"rename_pattern\": \"{date}_{sender}_{description}\",\n  \"rules\": [\n");
+            for (i, (label, rp, sub)) in rules.iter().enumerate() {
+                if i > 0 { body.push_str(",\n"); }
+                body.push_str(&format!(
+                    "    {{ \"label\": \"{label}\", \"name\": \"{label}\", \"enabled\": true, \
+                     \"signals\": [\"signal-{label}\"], \"subfolder\": \"{sub}\", \
+                     \"rename_pattern\": \"{rp}\" }}"
+                ));
+            }
+            body.push_str("\n  ]\n}\n");
+            fs::write(path, body).expect("write legacy");
+        }
+
+        // 1. Happy path — 3 legacy rules import; {sender} → {issuer} rewrite.
+        {
+            let dir = unique_tmp("g9_happy");
+            fs::create_dir_all(&dir).unwrap();
+            let lib_path = dir.join("library.rules.json");
+            set_library_path_for_test(lib_path.clone());
+
+            let legacy = dir.join("legacy.json");
+            write_legacy(&legacy, &[
+                ("tax",       "{date}_{sender}_{description}", "tax"),
+                ("receipts",  "{date}_{sender}_{description}", "receipts"),
+                ("memories",  "{date}_{description}",          "memories"),
+            ]);
+
+            let (imported, skipped, errors) =
+                library_import_from_legacy_json(&legacy, false).expect("import ok");
+            assert_eq!(imported, 3, "3 rules in legacy file");
+            assert!(skipped.is_empty(), "no pre-existing labels");
+            assert!(errors.is_empty(), "no per-rule errors: {errors:?}");
+
+            // Verify the {sender} → {issuer} rewrite landed in the library.
+            let tax = library_get("tax").expect("get").expect("found");
+            assert_eq!(tax.rename_pattern, "{date}_{issuer}_{description}",
+                "rename_pattern must rewrite {{sender}} → {{issuer}}");
+            // Memories rule had no {sender} — unchanged.
+            let mem = library_get("memories").expect("get").expect("found");
+            assert_eq!(mem.rename_pattern, "{date}_{description}");
+
+            clear_library_path_for_test();
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        // 2. Skip-existing default — pre-existing label is left alone.
+        {
+            let dir = unique_tmp("g9_skip");
+            fs::create_dir_all(&dir).unwrap();
+            let lib_path = dir.join("library.rules.json");
+            set_library_path_for_test(lib_path.clone());
+
+            // Pre-populate library with "tax" — different instruction.
+            let mut existing = sample_rule("tax");
+            existing.instruction = "library version".to_string();
+            library_insert(existing).expect("seed");
+
+            let legacy = dir.join("legacy.json");
+            write_legacy(&legacy, &[
+                ("tax",     "{date}_{sender}_a", "tax"),       // pre-existing
+                ("auto",    "{date}_{sender}_b", "auto"),      // new
+            ]);
+
+            let (imported, skipped, errors) =
+                library_import_from_legacy_json(&legacy, false).expect("import ok");
+            assert_eq!(imported, 1, "only auto imported");
+            assert_eq!(skipped, vec!["tax".to_string()], "tax skipped because pre-existing");
+            assert!(errors.is_empty());
+
+            // Library tax must retain its instruction (NOT overwritten).
+            let tax = library_get("tax").expect("get").expect("found");
+            assert_eq!(tax.instruction, "library version",
+                "skip mode must not overwrite the pre-existing rule");
+
+            clear_library_path_for_test();
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        // 3. Overwrite mode — pre-existing label is replaced.
+        {
+            let dir = unique_tmp("g9_overwrite");
+            fs::create_dir_all(&dir).unwrap();
+            let lib_path = dir.join("library.rules.json");
+            set_library_path_for_test(lib_path.clone());
+
+            let mut existing = sample_rule("tax");
+            existing.instruction = "OLD".to_string();
+            library_insert(existing).expect("seed");
+
+            let legacy = dir.join("legacy.json");
+            write_legacy(&legacy, &[("tax", "{date}_{sender}_x", "tax")]);
+
+            let (imported, skipped, errors) =
+                library_import_from_legacy_json(&legacy, true).expect("import ok");
+            assert_eq!(imported, 1, "tax overwritten counts as imported");
+            assert!(skipped.is_empty(), "overwrite=true → no skips");
+            assert!(errors.is_empty());
+
+            // The library's tax must now have the legacy file's pattern.
+            let tax = library_get("tax").expect("get").expect("found");
+            assert_eq!(tax.rename_pattern, "{date}_{issuer}_x",
+                "overwrite must replace + rewrite {{sender}} → {{issuer}}");
+
+            clear_library_path_for_test();
+            fs::remove_dir_all(&dir).ok();
+        }
+
+        // 4. Missing file → Err.
+        {
+            let dir = unique_tmp("g9_missing");
+            fs::create_dir_all(&dir).unwrap();
+            let lib_path = dir.join("library.rules.json");
+            set_library_path_for_test(lib_path.clone());
+
+            let missing = dir.join("nonexistent.json");
+            let err = library_import_from_legacy_json(&missing, false).expect_err("must err");
+            assert!(err.message.contains("not found"), "unexpected: {}", err.message);
 
             clear_library_path_for_test();
             fs::remove_dir_all(&dir).ok();

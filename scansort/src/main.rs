@@ -196,7 +196,8 @@ fn state_change_kind_for_tool(name: &str) -> Option<&'static str> {
         | "minerva_scansort_library_enable_rule"
         | "minerva_scansort_library_disable_rule"
         | "minerva_scansort_library_reorder_rules"
-        | "minerva_scansort_library_import_from_sidecar" => Some("library_rule"),
+        | "minerva_scansort_library_import_from_sidecar"
+        | "minerva_scansort_library_import_from_legacy_json" => Some("library_rule"),
         "minerva_scansort_insert_document"
         | "minerva_scansort_update_document"
         | "minerva_scansort_replace_document_content"
@@ -2764,6 +2765,41 @@ fn handle_library_export_to_sidecar(params: &Value, id: Value) -> RpcResponse {
     }
 }
 
+/// `minerva_scansort_library_import_from_legacy_json` — G9
+/// (DCR `019e564809a9`).
+///
+/// One-shot migration from the pre-plugin standalone-app `scansort_rules.json`
+/// shape into the global library. Reads the file, rewrites `{sender}` →
+/// `{issuer}` in rename_pattern + subfolder, upserts each rule. `overwrite`
+/// false (default) skips labels that already exist; true replaces them
+/// last-write-wins. Partial-success on a per-rule basis: a single bad rule
+/// surfaces in `errors[]` and the rest still import.
+fn handle_library_import_from_legacy_json(params: &Value, id: Value) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    if path_str.is_empty() {
+        return ok_response(id, tool_err("path is required"));
+    }
+    let overwrite = args.get("overwrite_existing").and_then(|v| v.as_bool()).unwrap_or(false);
+    let path = std::path::Path::new(path_str);
+    match library::library_import_from_legacy_json(path, overwrite) {
+        Ok((imported, skipped, errors)) => {
+            let errors_json: Vec<Value> = errors.iter().map(|(label, message)| json!({
+                "label": label,
+                "message": message,
+            })).collect();
+            ok_response(id, tool_ok(json!({
+                "ok": true,
+                "path": path_str,
+                "imported": imported,
+                "skipped": skipped,
+                "errors": errors_json,
+            })))
+        }
+        Err(e) => ok_response(id, tool_err(&e.message)),
+    }
+}
+
 fn handle_library_import_from_sidecar(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let vault_label = args.get("vault_label").and_then(|v| v.as_str()).unwrap_or("");
@@ -4072,6 +4108,18 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_library_import_from_legacy_json",
+                        "description": "G9 (DCR 019e564809a9): One-shot migration from the pre-plugin standalone-app ScanSort rules file (`scansort_rules.json` shape) into the global library. Rewrites `{sender}` → `{issuer}` in rename_pattern + subfolder. Default behaviour skips rules whose label already exists; pass overwrite_existing=true to replace them last-write-wins. Per-rule errors are collected (no whole-import abort). Returns {ok, path, imported, skipped:[labels], errors:[{label, message}]}.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string", "description": "Absolute path to a legacy `scansort_rules.json` file (the pre-plugin standalone-app's rules file format)."},
+                                "overwrite_existing": {"type": "boolean", "description": "When true, existing labels are replaced (last-write-wins). Default false — existing labels are skipped and returned in `skipped`."}
+                            },
+                            "required": ["path"]
+                        }
+                    },
+                    {
                         "name": "minerva_scansort_library_import_from_sidecar",
                         "description": "B5: Import rules from a per-vault sidecar file (<vault-stem>.rules.json) into the global library. vault_label must be open in the current session (kind=Vault). Each rule is upserted (last-write-wins). Returns {ok, sidecar_path, imported, conflicts, total_after} where conflicts counts rules whose label already existed with different content (informational only — import still proceeds).",
                         "inputSchema": {
@@ -4387,6 +4435,9 @@ fn main() {
                     }
                     "minerva_scansort_library_import_from_sidecar" => {
                         handle_library_import_from_sidecar(&req.params, req.id)
+                    }
+                    "minerva_scansort_library_import_from_legacy_json" => {
+                        handle_library_import_from_legacy_json(&req.params, req.id)
                     }
                     "minerva_scansort_dryrun_one" => {
                         handle_dryrun_one(req.id, &req.params, &mut out, &mut lines, &mut next_id)
