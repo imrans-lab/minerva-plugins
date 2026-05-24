@@ -1304,22 +1304,36 @@ pub fn run(
 
     result.total_files = file_index;
 
-    // C3: write final totals into the current batch and mark the run
-    // done. Cancelled state takes priority over Completed when the
-    // cancel flag tripped between files.
+    // C3 + C4: ADD this run's contribution to the batch's accumulators.
+    // For one-shot callers (legacy process()) the batch starts at 0 so
+    // the add is identity. For multi-iteration callers (process_run in
+    // a loop), each iteration adds its own placements; the batch
+    // remembers totals across iterations under the same batch_id.
+    //
+    // plan.total is only synthesised by the back-compat shim
+    // (begin_run mints empty files; mark_file_start grows the list
+    // and sets total = files.len()). For real plans installed by
+    // process_plan, plan.total is already correct and must NOT be
+    // overwritten — it would clamp the drain check to this iteration's
+    // file count, prematurely flipping the batch to Completed.
     with_controller(|c| {
         let Some(b) = c.batch.as_mut() else { return };
-        b.placed  = result.moved as usize;
-        b.skipped = result.skipped_already_processed as usize;
-        b.errored = (result.unprocessable + result.conflicts) as usize;
-        b.plan.total = file_index;
+        b.placed  += result.moved as usize;
+        b.skipped += result.skipped_already_processed as usize;
+        b.errored += (result.unprocessable + result.conflicts) as usize;
+        if b.plan.files.is_empty() {
+            b.plan.total = b.files_done();
+            b.plan.eligible = b.plan.total;
+        }
     });
-    let final_state = if was_cancelled {
-        ProcessState::Cancelled
+    if was_cancelled {
+        finalize_as(ProcessState::Cancelled, None);
     } else {
-        ProcessState::Completed
-    };
-    finish_run(final_state, None);
+        // Only flip to Completed when the WHOLE batch is drained. For
+        // mid-batch process_run iterations, this is a no-op and the
+        // batch stays Running.
+        finalize_if_drained();
+    }
 
     Ok(result)
 }
