@@ -254,7 +254,10 @@
           "limit":    {"type": "integer", "minimum": 0},
           "model":    {"type": "string"},
           "model_spec": {"type": "object"},
-          "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"]}
+          "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"]},
+          "audit_enabled": {"type": "boolean"},
+          "audit_path":    {"type": "string"},
+          "vault_passwords": {"type": "object"}
         },
         "required": ["batch_id"]
       }
