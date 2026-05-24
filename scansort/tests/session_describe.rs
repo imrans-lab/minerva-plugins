@@ -78,8 +78,12 @@ fn session_describe_shape_with_and_without_paths() {
     std::fs::create_dir_all(&source_path).unwrap();
     let source_str = source_path.to_string_lossy().into_owned();
 
+    // G8: isolate the library to a per-test tmpdir via env var so the
+    // spawned binary doesn't read/write the user's real library.
+    let lib = work.join("library.rules.json");
     let bin = env!("CARGO_BIN_EXE_scansort-plugin");
     let mut child = Command::new(bin)
+        .env("SCANSORT_LIBRARY_PATH", &lib)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

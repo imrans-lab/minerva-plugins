@@ -121,9 +121,14 @@ fn wire_format_doc_id_is_float_query_and_delete() {
         .collect();
 
     // Spawn the plugin binary. Cargo sets CARGO_BIN_EXE_<name> for
-    // integration tests automatically.
+    // integration tests automatically. SCANSORT_LIBRARY_PATH isolates the
+    // library to a per-test tmpdir (DCR G8 — without this the spawned
+    // binary would read/write the user's real library at
+    // ~/.local/share/scansort/library.rules.json).
+    let lib = work.join("library.rules.json");
     let bin = env!("CARGO_BIN_EXE_scansort-plugin");
     let mut child = Command::new(bin)
+        .env("SCANSORT_LIBRARY_PATH", &lib)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

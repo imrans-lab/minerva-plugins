@@ -79,8 +79,12 @@ fn dryrun_session_surfaces_unresolved_copy_to_labels() {
     let dest_path = work.join("dest");
     std::fs::create_dir_all(&dest_path).unwrap();
 
+    // G8: isolate the library to a per-test tmpdir via env var so the
+    // spawned binary doesn't read/write the user's real library.
+    let lib = work.join("library.rules.json");
     let bin = env!("CARGO_BIN_EXE_scansort-plugin");
     let mut child = Command::new(bin)
+        .env("SCANSORT_LIBRARY_PATH", &lib)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

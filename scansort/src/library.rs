@@ -36,20 +36,45 @@ use std::time::SystemTime;
 // Path resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the library path from OS app-data dirs.
+/// Environment variable that, when set to a non-empty path, overrides the
+/// default `ProjectDirs`-derived library location. Honoured by ALL builds
+/// (production binary included) — not gated by `cfg(test)`. This is the
+/// safety surface for integration tests that spawn the production binary;
+/// the prior `#[cfg(test)]` override only applied to in-crate tests and
+/// failed to protect the user's real library against spawned-binary tests.
 ///
-/// Uses `ProjectDirs::from("", "Minerva", "Scansort")` — qualifier is empty,
-/// organization is "Minerva", application is "Scansort".
+/// See docket hint `019e57af4a8e` and DCR `019e564809a9` G8.
+pub const LIBRARY_PATH_ENV: &str = "SCANSORT_LIBRARY_PATH";
+
+/// Resolve the library path. Resolution order (first hit wins):
 ///
-/// Returns an error if `ProjectDirs::from` cannot determine the data dir
-/// (e.g. HOME / USERPROFILE is unset).
+/// 1. `#[cfg(test)]` in-crate override (`set_library_path_for_test`).
+/// 2. The `SCANSORT_LIBRARY_PATH` environment variable, when set to a
+///    non-empty string. **Honoured in production builds**, not gated by
+///    `cfg(test)`, so integration tests that spawn the binary can isolate
+///    the library to a tmpdir.
+/// 3. `ProjectDirs::from("", "Minerva", "Scansort").data_dir() /
+///    library.rules.json`.
+///
+/// Empty / whitespace-only env-var values are treated as unset so a user
+/// can `unset` semantically by exporting an empty string in shell.
 pub fn library_path() -> VaultResult<PathBuf> {
-    // In test builds, honour the override first.
+    // In test builds, honour the in-crate override first (used by unit
+    // tests inside this crate's #[cfg(test)] blocks).
     #[cfg(test)]
     {
         let guard = TEST_PATH.lock().unwrap();
         if let Some(ref p) = *guard {
             return Ok(p.clone());
+        }
+    }
+
+    // G8: SCANSORT_LIBRARY_PATH env override — honoured in ALL builds so
+    // spawned-binary integration tests can isolate the library safely.
+    if let Ok(raw) = std::env::var(LIBRARY_PATH_ENV) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
         }
     }
 
