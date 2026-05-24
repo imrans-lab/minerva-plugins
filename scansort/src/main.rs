@@ -2131,6 +2131,8 @@ fn handle_audit_append(params: &Value, id: Value) -> RpcResponse {
             resolved_path:    get("resolved_path").to_string(),
             disposition:      get("disposition").to_string(),
             detail:           get("detail").to_string(),
+            // G13: optional model_spec from caller; empty if absent.
+            model_spec:       get("model_spec").to_string(),
         });
         // Validate required fields per row.
         if audit_rows.last().map_or(true, |r| r.event.is_empty()) {
@@ -2186,6 +2188,8 @@ fn handle_audit_tail(params: &Value, id: Value) -> RpcResponse {
                 "resolved_path":    r.resolved_path,
                 "disposition":      r.disposition,
                 "detail":           r.detail,
+                // G13: empty string on legacy rows that pre-date the schema bump.
+                "model_spec":       r.model_spec,
             })).collect();
             let count = rows_json.len();
             ok_response(id, tool_ok(json!({

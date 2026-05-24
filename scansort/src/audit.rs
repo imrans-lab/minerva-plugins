@@ -65,8 +65,14 @@ pub const TAIL_LIMIT_DEFAULT: usize = 50;
 // CSV header
 // ---------------------------------------------------------------------------
 
+/// Current header (11 columns — G13 added `model_spec`).
 const CSV_HEADER: &str =
-    "timestamp,event,source_sha256,source_filename,rule_label,destination_id,destination_kind,resolved_path,disposition,detail\n";
+    "timestamp,event,source_sha256,source_filename,rule_label,destination_id,destination_kind,resolved_path,disposition,detail,model_spec\n";
+
+/// Legacy header prefix used by pre-G13 log files (10 columns). Recognised
+/// by [`tail_rows`] so old log files keep parsing after the schema bump.
+const CSV_HEADER_LEGACY: &str =
+    "timestamp,event,source_sha256,source_filename,rule_label,destination_id,destination_kind,resolved_path,disposition,detail";
 
 // ---------------------------------------------------------------------------
 // Row type
@@ -100,6 +106,12 @@ pub struct AuditRow {
     pub disposition: String,
     /// Human-readable detail (error msg, doc_id, etc.).
     pub detail: String,
+    /// G13 (DCR `019e564809a9`): identifier of the LLM model_spec /
+    /// model name that fired the classification — empty string for rows
+    /// that didn't involve an LLM call (reprocess clears, manual edits)
+    /// or when the caller didn't supply one. Stable string so the audit
+    /// log is greppable / pivotable by model.
+    pub model_spec: String,
 }
 
 impl AuditRow {
@@ -121,6 +133,7 @@ impl AuditRow {
         status_str: &str,    // "placed", "skipped-already-present", "error"
         detail: &str,
         timestamp: &str,
+        model_spec: &str,    // G13: LLM model identifier (empty if none)
     ) -> Self {
         let event = match status_str {
             "placed" => "placement",
@@ -139,6 +152,7 @@ impl AuditRow {
             resolved_path: target_path.to_string(),
             disposition: disposition.to_string(),
             detail: detail.to_string(),
+            model_spec: model_spec.to_string(),
         }
     }
 
@@ -172,6 +186,8 @@ impl AuditRow {
             resolved_path: destination_path.to_string(),
             disposition: "superseded".to_string(),
             detail: format!("reprocess cleared {} item(s)", cleared_count),
+            // No LLM involvement on reprocess clears.
+            model_spec: String::new(),
         }
     }
 
@@ -191,6 +207,7 @@ impl AuditRow {
             self.resolved_path.as_str(),
             self.disposition.as_str(),
             self.detail.as_str(),
+            self.model_spec.as_str(),
         ];
         fields
             .iter()
@@ -310,13 +327,17 @@ pub fn append_rows(log_path: &Path, rows: &[AuditRow]) -> Result<(), VaultError>
 /// quoting is malformed (unterminated quote, stray chars between fields).
 pub fn parse_row(line: &str) -> Result<AuditRow, VaultError> {
     let fields = split_csv_fields(line)?;
-    if fields.len() != 10 {
-        return Err(VaultError::new(format!(
-            "audit log: expected 10 CSV fields, got {} in row: {}",
-            fields.len(),
-            line
-        )));
-    }
+    // G13: schema bumped from 10 → 11 columns by adding model_spec at the
+    // end. Accept both so old log files keep parsing — missing model_spec
+    // becomes "" (no LLM attribution available).
+    let model_spec = match fields.len() {
+        11 => fields[10].clone(),
+        10 => String::new(),
+        n => return Err(VaultError::new(format!(
+            "audit log: expected 10 or 11 CSV fields, got {} in row: {}",
+            n, line
+        ))),
+    };
     Ok(AuditRow {
         timestamp:        fields[0].clone(),
         event:            fields[1].clone(),
@@ -328,6 +349,7 @@ pub fn parse_row(line: &str) -> Result<AuditRow, VaultError> {
         resolved_path:    fields[7].clone(),
         disposition:      fields[8].clone(),
         detail:           fields[9].clone(),
+        model_spec,
     })
 }
 
@@ -418,8 +440,12 @@ pub fn tail_rows(log_path: &Path, limit: usize) -> Result<Vec<AuditRow>, VaultEr
                 "audit log: read error on '{}': {}", log_path.display(), e
             ))
         })?;
-        if idx == 0 && line.starts_with("timestamp,event,") {
-            continue; // skip header
+        // Header detection — match both the current (G13, 11-col) header
+        // and the legacy (10-col) prefix to keep old log files parseable.
+        if idx == 0
+            && (line.starts_with(CSV_HEADER_LEGACY) || line.starts_with("timestamp,event,"))
+        {
+            continue;
         }
         if line.is_empty() {
             continue;
@@ -477,6 +503,7 @@ mod tests {
             "abc123", "invoice.pdf", "Invoice", "dest1", "vault",
             "/archive.ssort", "placed", "doc_id=42",
             "2026-05-14T12:00:00Z",
+        "",
         );
 
         append_rows(&log, &[row]).expect("append should succeed");
@@ -507,11 +534,13 @@ mod tests {
             "sha1", "a.pdf", "Invoice", "d1", "directory",
             "/dest/a.pdf", "placed", "",
             "2026-05-14T10:00:00Z",
+        "",
         );
         let row2 = AuditRow::from_placement(
             "sha2", "b.pdf", "Contract", "d2", "vault",
             "/vault.ssort", "placed", "doc_id=7",
             "2026-05-14T10:01:00Z",
+        "",
         );
 
         append_rows(&log, &[row1]).expect("first append");
@@ -547,6 +576,7 @@ mod tests {
             "deadbeef", "invoice, 2026.pdf", "Invoice", "d1", "directory",
             "/dest/invoice.pdf", "placed", "",
             "2026-05-14T10:00:00Z",
+        "",
         );
         append_rows(&log, &[row]).expect("append");
 
@@ -560,7 +590,7 @@ mod tests {
         // The row must parse into exactly 10 fields (not more).
         let data_line = contents.lines().nth(1).expect("data line");
         let field_count = count_csv_fields(data_line);
-        assert_eq!(field_count, 10, "CSV row must have exactly 10 fields: {}", data_line);
+        assert_eq!(field_count, 11, "CSV row must have exactly 11 fields: {}", data_line);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -578,6 +608,7 @@ mod tests {
             "deadbeef", "invoice \"final\".pdf", "Invoice", "d1", "vault",
             "/vault.ssort", "placed", "",
             "2026-05-14T10:00:00Z",
+        "",
         );
         append_rows(&log, &[row]).expect("append");
 
@@ -604,6 +635,7 @@ mod tests {
             "deadbeef", "invoice\npart2.pdf", "Invoice", "d1", "vault",
             "/vault.ssort", "placed", "",
             "2026-05-14T10:00:00Z",
+        "",
         );
         append_rows(&log, &[row]).expect("append");
 
@@ -627,6 +659,7 @@ mod tests {
             "sha", "doc.pdf", "Contract", "d1", "vault",
             "/v.ssort", "placed", "doc_id=3",
             "2026-05-14T00:00:00Z",
+        "",
         );
         assert_eq!(placed.event, "placement");
         assert_eq!(placed.disposition, "placed");
@@ -635,6 +668,7 @@ mod tests {
             "sha", "doc.pdf", "Contract", "d1", "vault",
             "/v.ssort", "skipped-already-present", "",
             "2026-05-14T00:00:00Z",
+        "",
         );
         assert_eq!(skipped.event, "skipped");
         assert_eq!(skipped.disposition, "skipped-already-present");
@@ -667,6 +701,7 @@ mod tests {
             "sha", "doc.pdf", "Invoice", "d1", "vault",
             "/v.ssort", "placed", "",
             "2026-05-14T00:00:00Z",
+        "",
         );
         let result = append_rows(log, &[row]);
         assert!(
@@ -698,6 +733,7 @@ mod tests {
                 "placed",
                 "",
                 "2026-05-14T00:00:00Z",
+            "",
             )
         }).collect();
 
@@ -735,6 +771,7 @@ mod tests {
             "abc123", "invoice.pdf", "Invoice", "dest1", "vault",
             "/archive.ssort", "placed", "doc_id=42",
             "2026-05-14T12:00:00Z",
+        "",
         );
         let line = original.to_csv_line();
         let parsed = parse_row(&line).expect("round-trip must succeed");
@@ -762,6 +799,7 @@ mod tests {
             "placed",
             "note: he said \"ship it\"",
             "2026-05-14T10:00:00Z",
+        "",
         );
         let line = original.to_csv_line();
         let parsed = parse_row(&line).expect("comma + quote round-trip");
@@ -775,7 +813,48 @@ mod tests {
         let bad = "\"a\",\"b\",\"c\"";
         let result = parse_row(bad);
         assert!(result.is_err(), "3 fields must be rejected");
-        assert!(result.unwrap_err().message.contains("expected 10"));
+        assert!(result.unwrap_err().message.contains("10 or 11"));
+    }
+
+    // G13: legacy 10-column rows (written before the model_spec bump) must
+    // keep parsing — model_spec defaults to empty string.
+    #[test]
+    fn parse_row_accepts_legacy_10_column_row() {
+        let legacy = r#""2026-05-14T12:00:00Z","placement","abc","invoice.pdf","Invoice","dest1","vault","/archive.ssort","placed","doc_id=42""#;
+        let parsed = parse_row(legacy).expect("legacy 10-col row must parse");
+        assert_eq!(parsed.rule_label, "Invoice");
+        assert_eq!(parsed.detail, "doc_id=42");
+        assert_eq!(parsed.model_spec, "", "missing model_spec must default to empty string");
+    }
+
+    #[test]
+    fn parse_row_carries_model_spec_on_11_column_row() {
+        let new = r#""2026-05-14T12:00:00Z","placement","abc","invoice.pdf","Invoice","dest1","vault","/archive.ssort","placed","doc_id=42","claude-haiku-4-5""#;
+        let parsed = parse_row(new).expect("11-col row must parse");
+        assert_eq!(parsed.model_spec, "claude-haiku-4-5");
+    }
+
+    // tail_rows must skip both the new (11-col) header and the legacy
+    // (10-col) header so old log files don't surface their header as a
+    // spurious data row.
+    #[test]
+    fn tail_rows_skips_legacy_header() {
+        let dir = unique_tmp("tail-legacy-header");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.csv");
+        // Write a legacy header + 1 legacy data row.
+        let body = format!(
+            "{}\n{}\n",
+            CSV_HEADER_LEGACY,
+            r#""2026-05-14T12:00:00Z","placement","abc","invoice.pdf","Invoice","dest1","vault","/v.ssort","placed","doc_id=42""#
+        );
+        std::fs::write(&log, body).unwrap();
+
+        let tail = tail_rows(&log, 10).expect("tail");
+        assert_eq!(tail.len(), 1, "legacy header must NOT count as a data row");
+        assert_eq!(tail[0].rule_label, "Invoice");
+        assert_eq!(tail[0].model_spec, "");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -805,6 +884,7 @@ mod tests {
                 "placed",
                 "",
                 "2026-05-14T00:00:00Z",
+            "",
             )
         }).collect();
         append_rows(&log, &rows).expect("seed");
@@ -832,6 +912,7 @@ mod tests {
                 &format!("sha{i}"), "d.pdf", "R", "d1", "vault",
                 "/v.ssort", "placed", "",
                 "2026-05-14T00:00:00Z",
+            "",
             )
         }).collect();
         append_rows(&log, &rows).expect("seed");
@@ -884,6 +965,7 @@ mod tests {
             AuditRow::from_placement(
                 &format!("sha{i}"), "d.pdf", "R", "d1", "vault",
                 "/v.ssort", "placed", "", "2026-05-14T00:00:00Z",
+            "",
             )
         }).collect();
         append_rows(&log, &rows).expect("seed");

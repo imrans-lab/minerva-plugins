@@ -371,6 +371,10 @@ pub fn run(
     explicit_files: &[String],
 ) -> VaultResult<ProcessResult> {
     let mut result = ProcessResult::default();
+    // G13: stable identifier for the audit log's model_spec column.
+    // Sampled once at run-start so every row in this run carries the
+    // same attribution.
+    let model_label_str = model_label_for_audit(model, model_spec.as_ref());
     // Flat index across ALL files of ALL open sources, in deterministic
     // order. Drives the offset/limit window. Always advances — even for
     // skipped files — so it equals the true file total once both loops end.
@@ -830,6 +834,7 @@ pub fn run(
                     &sha256,
                     abs_path,
                     &rule_label_str,
+                    &model_label_str,
                 );
                 if !audit_rows.is_empty() {
                     if let Err(e) = audit::append_rows(Path::new(audit_path), &audit_rows) {
@@ -964,12 +969,40 @@ fn in_offset_limit_window(idx: usize, offset: usize, limit: Option<usize>) -> bo
 ///   - All other cases → `pr.message` verbatim (carries error / skip reason).
 ///
 /// `timestamp` is sampled per-row via [`crate::types::now_iso`].
+/// Derive a stable, human-readable string identifying the LLM model_spec
+/// the caller requested. Used for the G13 audit-log `model_spec` column.
+///
+/// Priority:
+///   1. `model_spec.action_name` (the core_action service variant).
+///   2. `model_spec.model` (free-form override field).
+///   3. `model_spec.service_client_id` (last resort within model_spec).
+///   4. The plain `model` string (`"default"` if empty).
+///
+/// Always returns a non-empty string for predictability — `"default"`
+/// when truly nothing was configured.
+pub(crate) fn model_label_for_audit(model: &str, model_spec: Option<&Value>) -> String {
+    if let Some(spec) = model_spec {
+        for field in ["action_name", "model", "service_client_id"] {
+            if let Some(v) = spec.get(field).and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    return v.to_string();
+                }
+            }
+        }
+    }
+    if !model.is_empty() {
+        return model.to_string();
+    }
+    "default".to_string()
+}
+
 fn build_audit_rows_for_placements(
     placements: &[PlacementResult],
     registry: &DestinationRegistry,
     source_sha256: &str,
     source_filename: &str,
     rule_label: &str,
+    model_spec: &str,    // G13 — DCR 019e564809a9
 ) -> Vec<audit::AuditRow> {
     let mut rows: Vec<audit::AuditRow> = Vec::with_capacity(placements.len());
     for pr in placements {
@@ -1021,6 +1054,7 @@ fn build_audit_rows_for_placements(
             status_str,
             &detail,
             &now,
+            model_spec,
         ));
     }
     rows
@@ -1728,6 +1762,7 @@ mod tests {
             "deadbeefcafe",
             "/srv/inbox/invoice-001.pdf",
             "Invoice",
+            "",
         );
         assert_eq!(rows.len(), 2, "one row per PlacementResult");
 
@@ -1810,7 +1845,7 @@ mod tests {
         }];
 
         let rows = build_audit_rows_for_placements(
-            &placements, &registry, "sha", "doc.pdf", "tax",
+            &placements, &registry, "sha", "doc.pdf", "tax", "",
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event, "placement");
@@ -1853,7 +1888,7 @@ mod tests {
         }];
 
         let rows = build_audit_rows_for_placements(
-            &placements, &registry, "sha", "doc.pdf", "tax",
+            &placements, &registry, "sha", "doc.pdf", "tax", "",
         );
         assert_eq!(rows[0].resolved_path, "/home/user/test.ssort");
         assert_eq!(rows[0].detail, "", "doc_id=0 must not produce \"doc_id=0\" noise");
@@ -1886,7 +1921,7 @@ mod tests {
         }];
 
         let rows = build_audit_rows_for_placements(
-            &placements, &registry, "sha", "doc.pdf", "Rule",
+            &placements, &registry, "sha", "doc.pdf", "Rule", "",
         );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event, "placement", "error rows are still placement events");
@@ -1916,7 +1951,7 @@ mod tests {
             message: String::new(),
         }];
         let rows = build_audit_rows_for_placements(
-            &placements, &registry, "sha", "doc.pdf", "Rule",
+            &placements, &registry, "sha", "doc.pdf", "Rule", "",
         );
         assert_eq!(rows[0].destination_kind, "vault", "must fall back to PlacementResult.kind");
     }
