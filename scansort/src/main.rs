@@ -23,6 +23,7 @@
 // The synchronous read pattern below is safe under that guarantee.
 
 mod audit;
+mod batch;
 mod classifier;
 mod crypto;
 mod db;
