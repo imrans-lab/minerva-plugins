@@ -57,6 +57,205 @@ use std::path::Path;
 // exceed it after pdftotext, while OCR-less scans return <10 chars.
 const VISION_FALLBACK_TEXT_THRESHOLD: usize = 50;
 const VISION_MAX_PAGES: i32 = 3;
+
+// ---------------------------------------------------------------------------
+// ProcessController — bug `019e57bbe881` + G12 (DCR `019e564809a9`)
+//
+// Per-process global recording the state of the most recent (or in-flight)
+// process() run. Read via `minerva_scansort_process_status` and written by
+// process() as it walks files. Persists between tool calls so an agent can
+// poll the status of a previous run without re-running it.
+//
+// Stdio-only caveat: the plugin handles one JSON-RPC request at a time, so
+// during a process() invocation no concurrent status call can be served.
+// The controller is still useful (a) for post-run inspection and (b) when
+// the agent uses the limit=1 loop pattern (call process(limit=1), then
+// process_status — the panel does this for its Stop button). G12's
+// cancel_requested flag is honoured BETWEEN files within the current run.
+// ---------------------------------------------------------------------------
+
+/// State of a process() run, observable via process_status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    Idle,
+    Running,
+    Completed,
+    Cancelled,
+    Errored,
+}
+
+impl ProcessState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProcessState::Idle      => "idle",
+            ProcessState::Running   => "running",
+            ProcessState::Completed => "completed",
+            ProcessState::Cancelled => "cancelled",
+            ProcessState::Errored   => "errored",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProcessController {
+    pub state: ProcessState,
+    pub run_id: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    /// File being processed RIGHT NOW (None when idle / between files).
+    pub current_source_label: Option<String>,
+    pub current_file_relpath: Option<String>,
+    pub current_file_index: usize,
+    /// True file total when the walk has been enumerated; None until then.
+    pub current_file_total: Option<usize>,
+    /// G12: when true, process() should bail at the next inter-file gate.
+    pub cancel_requested: bool,
+    /// Last error message (set on Errored; persists through Idle for inspection).
+    pub last_error: Option<String>,
+    pub placed: usize,
+    pub skipped: usize,
+    pub errored: usize,
+}
+
+impl ProcessController {
+    fn new() -> Self {
+        ProcessController {
+            state: ProcessState::Idle,
+            run_id: None,
+            started_at: None,
+            finished_at: None,
+            current_source_label: None,
+            current_file_relpath: None,
+            current_file_index: 0,
+            current_file_total: None,
+            cancel_requested: false,
+            last_error: None,
+            placed: 0,
+            skipped: 0,
+            errored: 0,
+        }
+    }
+}
+
+static CONTROLLER: std::sync::OnceLock<std::sync::Mutex<ProcessController>> =
+    std::sync::OnceLock::new();
+
+fn controller() -> &'static std::sync::Mutex<ProcessController> {
+    CONTROLLER.get_or_init(|| std::sync::Mutex::new(ProcessController::new()))
+}
+
+fn with_controller<F, T>(f: F) -> T
+where
+    F: FnOnce(&mut ProcessController) -> T,
+{
+    let m = controller();
+    let mut guard = m.lock().unwrap_or_else(|p| p.into_inner());
+    f(&mut guard)
+}
+
+/// Start a new run. Returns the assigned run_id.
+pub fn begin_run() -> String {
+    let now = crate::types::now_iso();
+    let id = format!("run-{}-{}", std::process::id(), now);
+    with_controller(|c| {
+        c.state = ProcessState::Running;
+        c.run_id = Some(id.clone());
+        c.started_at = Some(now.clone());
+        c.finished_at = None;
+        c.current_source_label = None;
+        c.current_file_relpath = None;
+        c.current_file_index = 0;
+        c.current_file_total = None;
+        c.cancel_requested = false;
+        c.last_error = None;
+        c.placed = 0;
+        c.skipped = 0;
+        c.errored = 0;
+    });
+    id
+}
+
+pub fn mark_file_start(source_label: &str, relpath: &str, file_index: usize) {
+    with_controller(|c| {
+        c.current_source_label = Some(source_label.to_string());
+        c.current_file_relpath = Some(relpath.to_string());
+        c.current_file_index = file_index;
+    });
+}
+
+/// Disposition matches the audit-log shape: "placed" / "skipped" / "error".
+pub fn mark_file_done(disposition: &str) {
+    with_controller(|c| {
+        match disposition {
+            "placed" => c.placed += 1,
+            "skipped" | "skipped-already-present" => c.skipped += 1,
+            _ => c.errored += 1,
+        }
+    });
+}
+
+pub fn finish_run(state: ProcessState, last_error: Option<String>) {
+    let now = crate::types::now_iso();
+    with_controller(|c| {
+        c.state = state;
+        c.finished_at = Some(now);
+        c.current_source_label = None;
+        c.current_file_relpath = None;
+        c.last_error = last_error;
+    });
+}
+
+pub fn set_total_files(total: usize) {
+    with_controller(|c| c.current_file_total = Some(total));
+}
+
+/// G12: query the cancel flag. Process() checks this between files.
+pub fn is_cancel_requested() -> bool {
+    with_controller(|c| c.cancel_requested)
+}
+
+/// G12: request cancel. Returns `(was_running, last_file_processed)` so the
+/// agent can confirm whether the cancel actually targeted a live run.
+pub fn request_cancel() -> (bool, Option<String>) {
+    with_controller(|c| {
+        let was_running = c.state == ProcessState::Running;
+        c.cancel_requested = true;
+        (was_running, c.current_file_relpath.clone())
+    })
+}
+
+/// Read-only snapshot for the status tool.
+pub fn snapshot_json() -> Value {
+    with_controller(|c| {
+        json!({
+            "state":               c.state.as_str(),
+            "run_id":              c.run_id,
+            "started_at":          c.started_at,
+            "finished_at":         c.finished_at,
+            "current_source_label":c.current_source_label,
+            "current_file_relpath":c.current_file_relpath,
+            "current_file_index":  c.current_file_index,
+            "current_file_total":  c.current_file_total,
+            "cancel_requested":    c.cancel_requested,
+            "last_error":          c.last_error,
+            "totals": {
+                "placed":  c.placed,
+                "skipped": c.skipped,
+                "errored": c.errored,
+                "total":   c.placed + c.skipped + c.errored,
+            },
+        })
+    })
+}
+
+/// Reset to Idle while preserving last_error / totals for inspection.
+/// Used by tests; called between runs is optional (begin_run resets too).
+#[cfg(test)]
+pub fn reset_controller_for_test() {
+    with_controller(|c| {
+        *c = ProcessController::new();
+    });
+}
 // 100 DPI letter-page renders to ~600 KB base64 (1100x850 PNG) — well inside
 // what qwen2.5vl:7b accepts in a single call. Going higher costs latency
 // without classification gains since vision models tile-tokenize at fixed
@@ -371,6 +570,11 @@ pub fn run(
     explicit_files: &[String],
 ) -> VaultResult<ProcessResult> {
     let mut result = ProcessResult::default();
+    // process_status + G12: register this run with the per-process
+    // ProcessController so its progress is observable via
+    // `minerva_scansort_process_status` and cancellable via
+    // `minerva_scansort_process_cancel`.
+    let _run_id = begin_run();
     // G13: stable identifier for the audit log's model_spec column.
     // Sampled once at run-start so every row in this run carries the
     // same attribution.
@@ -383,6 +587,7 @@ pub fn run(
     // 1. Get open sources (sorted by label for deterministic order).
     let open_sources = session::open_sources_sorted();
     if open_sources.is_empty() && explicit_files.is_empty() {
+        finish_run(ProcessState::Completed, None);
         return Ok(result);
     }
 
@@ -408,7 +613,9 @@ pub fn run(
     let open_dest_labels: HashSet<String> = session::open_destination_labels();
 
     // 4. Iterate sources.
+    let mut was_cancelled = false;
     for (source_label, source_path) in sources {
+        if is_cancel_requested() { was_cancelled = true; break; }
         let is_explicit = source_label == EXPLICIT_FILES_LABEL;
         // Load (or init) per-source manifest — except for the synthetic
         // explicit-files source, which carries no manifest. A throwaway
@@ -445,6 +652,10 @@ pub fn run(
             if !in_offset_limit_window(idx, offset, limit) {
                 continue;
             }
+            // G12: inter-file cancellation gate. Honour the cancel flag
+            // BETWEEN files so process_status' partial counts are valid.
+            if is_cancel_requested() { was_cancelled = true; break; }
+            mark_file_start(source_label, rel_path, idx);
 
             // Compute sha256.
             let sha256 = match crate::types::compute_sha256(Path::new(abs_path)) {
@@ -928,6 +1139,23 @@ pub fn run(
     }
 
     result.total_files = file_index;
+
+    // process_status: write final totals into the controller and mark the
+    // run done. Cancelled state takes priority over Completed when the
+    // cancel flag tripped between files.
+    with_controller(|c| {
+        c.placed   = result.moved as usize;
+        c.skipped  = result.skipped_already_processed as usize;
+        c.errored  = (result.unprocessable + result.conflicts) as usize;
+        c.current_file_total = Some(file_index);
+    });
+    let final_state = if was_cancelled {
+        ProcessState::Cancelled
+    } else {
+        ProcessState::Completed
+    };
+    finish_run(final_state, None);
+
     Ok(result)
 }
 
@@ -1418,9 +1646,106 @@ mod tests {
     use crate::types::{Classification, RuleSignal};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    // Serializes tests that touch the per-process ProcessController
+    // singleton — they otherwise race over begin_run / finish_run.
+    static CONTROLLER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    // ---------------------------------------------------------------------
+    // ProcessController — bug 019e57bbe881 + G12 (DCR 019e564809a9)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn controller_idle_at_startup_after_reset() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        let snap = snapshot_json();
+        assert_eq!(snap["state"], "idle");
+        assert!(snap["run_id"].is_null());
+        assert_eq!(snap["totals"]["placed"],  0);
+        assert_eq!(snap["totals"]["skipped"], 0);
+        assert_eq!(snap["totals"]["errored"], 0);
+        assert_eq!(snap["cancel_requested"], false);
+    }
+
+    #[test]
+    fn controller_begin_run_marks_running() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        let id = begin_run();
+        let snap = snapshot_json();
+        assert_eq!(snap["state"], "running");
+        assert_eq!(snap["run_id"].as_str(), Some(id.as_str()));
+        assert!(snap["started_at"].is_string(), "started_at must be set");
+        assert!(snap["finished_at"].is_null(), "finished_at unset while running");
+        finish_run(ProcessState::Completed, None);
+    }
+
+    #[test]
+    fn controller_mark_file_start_updates_current() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        begin_run();
+        mark_file_start("Inbox", "invoice.pdf", 3);
+        let snap = snapshot_json();
+        assert_eq!(snap["current_source_label"], "Inbox");
+        assert_eq!(snap["current_file_relpath"], "invoice.pdf");
+        assert_eq!(snap["current_file_index"], 3);
+        finish_run(ProcessState::Completed, None);
+    }
+
+    #[test]
+    fn controller_finish_run_clears_current_file() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        begin_run();
+        mark_file_start("Inbox", "invoice.pdf", 0);
+        finish_run(ProcessState::Completed, None);
+        let snap = snapshot_json();
+        assert_eq!(snap["state"], "completed");
+        assert!(snap["current_source_label"].is_null());
+        assert!(snap["current_file_relpath"].is_null());
+        assert!(snap["finished_at"].is_string());
+    }
+
+    #[test]
+    fn controller_cancel_flag_returns_was_running_state() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        // Idle → cancel returns was_running=false.
+        let (was_running, _last) = request_cancel();
+        assert!(!was_running, "cancel on idle must return was_running=false");
+
+        // Running → cancel returns was_running=true and surfaces last file.
+        reset_controller_for_test();
+        begin_run();
+        mark_file_start("Inbox", "current.pdf", 5);
+        let (was_running, last) = request_cancel();
+        assert!(was_running);
+        assert_eq!(last.as_deref(), Some("current.pdf"));
+        assert!(is_cancel_requested(), "flag stays set until finish_run");
+        finish_run(ProcessState::Cancelled, None);
+    }
+
+    #[test]
+    fn controller_begin_run_clears_prior_cancel_flag() {
+        // Cancel of a prior run must NOT carry into a fresh run.
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        begin_run();
+        request_cancel();
+        assert!(is_cancel_requested());
+        finish_run(ProcessState::Cancelled, None);
+
+        begin_run();
+        assert!(!is_cancel_requested(),
+            "fresh run must start with cancel_requested=false");
+        finish_run(ProcessState::Completed, None);
+    }
 
     // -----------------------------------------------------------------------
     // DCR 019e42e4 — offset/limit window predicate (the cancellable

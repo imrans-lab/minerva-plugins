@@ -2845,6 +2845,45 @@ fn handle_library_import_from_sidecar(params: &Value, id: Value) -> RpcResponse 
 ///     null`. This is intentional — predicting the LLM is dishonest.
 ///
 /// Read-only — no state_changed event.
+/// `minerva_scansort_process_status` — bug `019e57bbe881`.
+///
+/// Read-only snapshot of the per-process ProcessController: state
+/// (idle/running/completed/cancelled/errored), current file (when known),
+/// running totals (placed/skipped/errored/total), and cancel_requested
+/// flag. Returns whatever the controller knows; never errors.
+///
+/// Stdio caveat (documented in process.rs): the plugin handles one
+/// JSON-RPC request at a time, so this tool can NOT be polled mid-process()
+/// over the same connection. Useful (a) after a process() returns to read
+/// the final tally, (b) when the agent uses the limit=1 loop pattern to
+/// poll between single-file process() calls (the panel's Stop button
+/// does this).
+fn handle_process_status(_params: &Value, id: Value) -> RpcResponse {
+    let mut payload = process::snapshot_json();
+    payload.as_object_mut().map(|m| m.insert("ok".into(), json!(true)));
+    ok_response(id, tool_ok(payload))
+}
+
+/// `minerva_scansort_process_cancel` — G12 (DCR `019e564809a9`).
+///
+/// Sets the controller's cancel_requested flag. process() honours it at
+/// the inter-file gate within the current run. Stdio-blocking caveat
+/// from process_status applies: cancel only takes effect if the agent
+/// is running process() in a polling loop OR if a subsequent process()
+/// call sees the flag (it's cleared on begin_run, so the flag matters
+/// only for the current run).
+///
+/// Returns `{ok, was_running, last_file_processed}` so the agent can
+/// see whether the cancel actually targeted a live run.
+fn handle_process_cancel(_params: &Value, id: Value) -> RpcResponse {
+    let (was_running, last_file) = process::request_cancel();
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "was_running": was_running,
+        "last_file_processed": last_file,
+    })))
+}
+
 fn handle_dryrun_session(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let include_paths = args.get("include_paths").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -4150,6 +4189,16 @@ fn main() {
                         },
                     },
                     {
+                        "name": "minerva_scansort_process_status",
+                        "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the per-process ProcessController. Returns the current state of the most recent process() run: state (idle|running|completed|cancelled|errored), run_id, started_at/finished_at, current_source_label + current_file_relpath + current_file_index, current_file_total, cancel_requested, last_error, and totals (placed/skipped/errored/total). Stdio caveat: the plugin handles one request at a time, so this tool can NOT be polled mid-process() on the same connection. Useful after a process() returns to read the final tally, or when the agent uses the limit=1 loop pattern (call process(limit=1) then process_status — the panel's Stop button does this).",
+                        "inputSchema": {"type": "object", "properties": {}, "required": []}
+                    },
+                    {
+                        "name": "minerva_scansort_process_cancel",
+                        "description": "G12 (DCR 019e564809a9): Set the ProcessController's cancel_requested flag. process() honours it at the inter-file gate within the current run. Stdio-blocking caveat from process_status applies: cancel only takes effect if the agent runs process() in a polling loop (limit=1) OR if a subsequent process() call has not yet started (begin_run clears the flag). Returns {ok, was_running, last_file_processed} so the agent can see whether the cancel actually targeted a live run.",
+                        "inputSchema": {"type": "object", "properties": {}, "required": []}
+                    },
+                    {
                         "name": "minerva_scansort_dryrun_session",
                         "description": "G3 (DCR 019e564809a9): Predict what process() would do across the current session WITHOUT calling the LLM. Per-rule: which copy_to labels resolve to open destinations and which would fail. Per-file: a filename-driven prediction (LLM-free) — rules whose conditions reference filename/extension/size will fire deterministically; rules depending on LLM-extracted facts stay silent (predicted_rule_label=null). Catches the configuration class of bugs (e.g. copy_to:[\"test\"] when only \"test-3\" is open). Read-only; no state change. Returns {ok, include_paths, files_in_session, files:[{source_label, path?, rel_path, size, predicted_rule_label, predicted_copy_to, resolved_targets, unresolved_targets}], active_rules:[{label, copy_to, resolved_targets, unresolved_targets}], unresolved_targets_summary:{label: count}}.",
                         "inputSchema": {
@@ -4444,6 +4493,12 @@ fn main() {
                     }
                     "minerva_scansort_dryrun_session" => {
                         handle_dryrun_session(&req.params, req.id)
+                    }
+                    "minerva_scansort_process_status" => {
+                        handle_process_status(&req.params, req.id)
+                    }
+                    "minerva_scansort_process_cancel" => {
+                        handle_process_cancel(&req.params, req.id)
                     }
                     "minerva_scansort_process" => {
                         handle_process(req.id, &req.params, &mut out, &mut lines, &mut next_id)
