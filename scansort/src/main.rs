@@ -3154,20 +3154,31 @@ fn handle_process_run(
     let limit = lax_usize(args.get("limit"));
     let doc_type_strategy = args.get("doc_type_strategy").and_then(|v| v.as_str())
         .unwrap_or("none").to_string();
+    let audit_enabled = args.get("audit_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let audit_path = args.get("audit_path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // vault_passwords map (label or path → password) for encrypt-flagged
+    // destinations. Optional; defaults to empty.
+    let mut vault_passwords: std::collections::HashMap<String, String> = Default::default();
+    if let Some(map) = args.get("vault_passwords").and_then(|v| v.as_object()) {
+        for (k, v) in map {
+            if let Some(s) = v.as_str() {
+                vault_passwords.insert(k.clone(), s.to_string());
+            }
+        }
+    }
 
     // Feed the batch's planned absolute paths into process::run's
     // explicit_files window so process()'s walk is bypassed (the plan
-    // already enumerated). Empty audit_path → no audit append; vault
-    // passwords default to empty (caller can extend later).
+    // already enumerated those files).
     let explicit_files = process::current_batch_file_paths();
-    let vault_passwords: std::collections::HashMap<String, String> = Default::default();
 
     let result = process::run(
         out, lines, next_id,
         &model, model_spec,
         &doc_type_strategy,
-        false, "",                 // audit_enabled, audit_path
-        0, limit,                  // offset, limit
+        audit_enabled, &audit_path,
+        0, limit,
         &vault_passwords,
         &explicit_files,
     );
@@ -4575,7 +4586,10 @@ fn main() {
                                 "limit":    {"type": "integer", "minimum": 0, "description": "Max files to process in this call. Default unlimited (drains the batch). Accepts integer or whole-number float."},
                                 "model":    {"type": "string"},
                                 "model_spec": {"type": "object"},
-                                "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"]}
+                                "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"]},
+                                "audit_enabled": {"type": "boolean", "description": "When true, append CSV audit-log rows for each placement to audit_path."},
+                                "audit_path":    {"type": "string", "description": "Required when audit_enabled=true. Absolute path to the CSV audit log."},
+                                "vault_passwords": {"type": "object", "description": "Optional {destination_label_or_path: password} map for encrypt-flagged destinations."}
                             },
                             "required": ["batch_id"]
                         }

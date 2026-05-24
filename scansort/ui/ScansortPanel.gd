@@ -2200,12 +2200,12 @@ func _on_add_dialog_cancelled() -> void:
 
 
 ## Called when the user clicks the "Process All" button in the chrome bar.
-## DCR 019e42e4: drives the path-free minerva_scansort_process pipeline ONE
-## FILE AT A TIME (offset/limit window) so the Stop button can interrupt the
-## batch between files. process() owns file ordering + the heavy classify /
-## rule-engine / fan-out logic; the panel just paginates and checks the
-## _process_cancelled flag between calls. Bounding each MCP call to a single
-## file also keeps the connection timeout per-file rather than whole-batch.
+## C7 (DCR 019e564809a9): drives the new process_plan + process_run flow.
+## process_plan enumerates files upfront and returns a stable batch_id;
+## process_run(batch_id, limit=1) iterates one file at a time so the Stop
+## button can interrupt between files via process_cancel(batch_id). The
+## controller (C3) accumulates totals across iterations under the same
+## batch_id — fixing bug 019e5802d5d8 (cycle-2's per-call reset).
 func _on_process_all_pressed() -> void:
 	var conn = _get_connection()
 	if conn == null:
@@ -2232,66 +2232,72 @@ func _on_process_all_pressed() -> void:
 	var audit_enabled: bool = _SettingsDialog.ScansortSettings.load_audit_log_enabled()
 	var audit_path: String  = _SettingsDialog.ScansortSettings.load_audit_log_path()
 
-	var base_args: Dictionary = {}
-	if not model_spec.is_empty():
-		base_args["model_spec"] = model_spec
-	if audit_enabled and not audit_path.is_empty():
-		base_args["audit_enabled"] = true
-		base_args["audit_path"] = audit_path
+	# Step 1 — process_plan. Enumerates files + installs batch in the
+	# plugin's controller. Scope=all_sources processes every file under
+	# every open source (the same set the cycle-2 process() walk used).
+	var plan_args: Dictionary = {"scope": {"kind": "all_sources"}}
+	var plan_result: Dictionary = await conn.call_tool("minerva_scansort_process_plan", plan_args)
+	if not plan_result.get("ok", false):
+		set_status("Plan failed: %s" % plan_result.get("error", "unknown"))
+		_restore_buttons()
+		return
+	var batch_id: String = str(plan_result.get("batch_id", ""))
+	var total: int = int(plan_result.get("total", 0))
+	if total == 0:
+		set_status("No source files to process.")
+		_restore_buttons()
+		return
 
-	# Per-file pagination loop. `total` is learned from the first call's
-	# total_files (the true count, independent of the offset/limit window).
-	var total: int         = -1
+	# Step 2 — per-file process_run loop. Stop button sets _process_cancelled
+	# locally AND fires process_cancel(batch_id) so the plugin honours the
+	# inter-file gate even if a process_run call is mid-flight.
 	var moved: int         = 0
 	var conflicts: int     = 0
 	var unprocessable: int = 0
 	var skipped: int       = 0
-	var processed: int     = 0
-	var by_dest: Dictionary = {}
-	var by_rule: Dictionary = {}
-	var cancelled: bool     = false
-	var failed_msg: String  = ""
-	var offset: int         = 0
+	var cancelled: bool    = false
+	var failed_msg: String = ""
 
-	while total < 0 or offset < total:
+	var run_args_base: Dictionary = {"batch_id": batch_id, "limit": 1}
+	if not model_spec.is_empty():
+		run_args_base["model_spec"] = model_spec
+	if audit_enabled and not audit_path.is_empty():
+		run_args_base["audit_enabled"] = true
+		run_args_base["audit_path"] = audit_path
+
+	for i in range(total):
 		if _process_cancelled:
 			cancelled = true
+			# Tell the plugin too so a mid-flight process_run bails at its gate.
+			await conn.call_tool("minerva_scansort_process_cancel", {"batch_id": batch_id})
 			break
 
-		var args: Dictionary = base_args.duplicate()
-		args["offset"] = offset
-		args["limit"] = 1
-		var result: Dictionary = await conn.call_tool("minerva_scansort_process", args)
-
-		if not result.get("ok", false):
-			failed_msg = "Process failed at file %d: %s" % [offset + 1, result.get("error", "unknown")]
+		var run_result: Dictionary = await conn.call_tool("minerva_scansort_process_run", run_args_base)
+		if not run_result.get("ok", false):
+			failed_msg = "process_run failed at file %d/%d: %s" % [i + 1, total, run_result.get("error", "unknown")]
 			break
 
-		if total < 0:
-			total = int(result.get("total_files", 0))
-			if total == 0:
-				set_status("No source files to process.")
-				break
+		# Snapshot returned by process_run carries the accumulated batch
+		# totals — read directly, don't sum per-iteration as cycle-2 did.
+		var snapshot: Dictionary = run_result.get("snapshot", {}) as Dictionary
+		var totals: Dictionary = snapshot.get("totals", {}) as Dictionary
+		moved         = int(totals.get("placed", 0))
+		skipped       = int(totals.get("skipped", 0))
+		# Plugin lumps placement errors + conflicts into errored; expose
+		# the combined number for now (G13 column gives provenance).
+		unprocessable = int(totals.get("errored", 0))
+		conflicts     = 0
+		set_status("Processing %d/%d…" % [int(totals.get("total", 0)), total])
 
-		var summary: Dictionary = result.get("summary", {})
-		moved         += int(summary.get("moved", 0))
-		conflicts     += int(summary.get("conflicts", 0))
-		unprocessable += int(summary.get("unprocessable", 0))
-		skipped       += int(summary.get("skipped_already_processed", 0))
-		processed     += (result.get("items", []) as Array).size()
-		_merge_tally(by_dest, result.get("by_destination", {}))
-		_merge_tally(by_rule, result.get("by_rule", {}))
+		# If the plugin already reports terminal state (drained or
+		# cancelled mid-file), exit the loop cleanly.
+		var st: String = str(snapshot.get("state", ""))
+		if st == "completed" or st == "cancelled" or st == "errored":
+			if st == "cancelled":
+				cancelled = true
+			break
 
-		set_status("Processing %d/%d…" % [offset + 1, total])
-		offset += 1
-
-	# Restore button states.
-	if _process_btn != null and is_instance_valid(_process_btn):
-		_process_btn.disabled = not _vault_is_open
-	if _extract_marked_menu != null and is_instance_valid(_extract_marked_menu):
-		_extract_marked_menu.disabled = not _vault_is_open
-	if _stop_btn != null and is_instance_valid(_stop_btn):
-		_stop_btn.disabled = true
+	_restore_buttons()
 
 	# Refresh trees so placed documents + processed-state marks show.
 	await _refresh_all_dest_trees()
@@ -2301,40 +2307,36 @@ func _on_process_all_pressed() -> void:
 	if not failed_msg.is_empty():
 		set_status(failed_msg)
 		return
-	if total <= 0:
-		return  # status already set ("No source files to process.")
 
-	var dest_tail: String = _tally_tail(by_dest, "")
-	var rule_tail: String = _tally_tail(by_rule, "rules=")
 	var verb: String = "Stopped after" if cancelled else "Processed"
+	# C7: per-rule + per-destination tallies are still available via
+	# process_status's snapshot but we no longer accumulate them client-side
+	# (the controller tracks per-disposition totals; the per-rule histogram
+	# would require a process_status fetch after each iteration — heavier
+	# than the cycle-2 by-call summing, and the user-visible status line
+	# already carries the headline numbers).
 	set_status(
-		"%s %d/%d — %d moved, %d conflicts, %d unprocessable, %d already-done%s%s" % [
-			verb, processed, total, moved, conflicts, unprocessable, skipped, dest_tail, rule_tail
+		"%s %d/%d — %d moved, %d unprocessable, %d already-done" % [
+			verb, (moved + skipped + unprocessable), total, moved, unprocessable, skipped
 		]
 	)
 
 
-## Accumulate one process() call's {label:count} tally into a running total.
-func _merge_tally(running: Dictionary, delta: Dictionary) -> void:
-	for k in delta:
-		running[k] = int(running.get(k, 0)) + int(delta[k])
+## Restore "Process" + "Stop" + extract-marked menu buttons to their idle
+## states. Called on every exit path from _on_process_all_pressed so the
+## Stop button never sticks ENABLED after the batch finishes.
+func _restore_buttons() -> void:
+	if _process_btn != null and is_instance_valid(_process_btn):
+		_process_btn.disabled = not _vault_is_open
+	if _extract_marked_menu != null and is_instance_valid(_extract_marked_menu):
+		_extract_marked_menu.disabled = not _vault_is_open
+	if _stop_btn != null and is_instance_valid(_stop_btn):
+		_stop_btn.disabled = true
 
 
-## Render a sorted "label:count" tally as a bracketed status-line suffix.
-## prefix "" → " [a:1, b:2]"; prefix "rules=" → " rules=[a:1, b:2]".
-func _tally_tail(tally: Dictionary, prefix: String) -> String:
-	if tally.is_empty():
-		return ""
-	var parts: PackedStringArray = PackedStringArray()
-	var keys: Array = tally.keys()
-	keys.sort()
-	for k: String in keys:
-		parts.append("%s:%d" % [k, int(tally[k])])
-	return " %s[%s]" % [prefix, ", ".join(parts)]
-
-
-## Stop button — sets the cancel flag; the Process All loop picks it up
-## before the next per-file process() call. The in-flight file finishes
+## Stop button — sets the local cancel flag AND (in the running batch)
+## fires process_cancel(batch_id) so the plugin's inter-file gate bails
+## even if a process_run call is mid-flight. The current file finishes
 ## (bounded by the per-file MCP timeout); the batch halts after it.
 func _on_stop_pressed() -> void:
 	_process_cancelled = true
