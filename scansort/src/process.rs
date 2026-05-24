@@ -59,89 +59,39 @@ const VISION_FALLBACK_TEXT_THRESHOLD: usize = 50;
 const VISION_MAX_PAGES: i32 = 3;
 
 // ---------------------------------------------------------------------------
-// ProcessController — bug `019e57bbe881` + G12 (DCR `019e564809a9`)
+// ProcessController — C3 rewrite (DCR `019e564809a9`)
 //
-// Per-process global recording the state of the most recent (or in-flight)
-// process() run. Read via `minerva_scansort_process_status` and written by
-// process() as it walks files. Persists between tool calls so an agent can
-// poll the status of a previous run without re-running it.
+// Resolves bug `019e5802d5d8` (cycle-2's controller reset on each
+// process() call, losing accumulated totals when the panel ran
+// process(limit=1) in a loop).
 //
-// Stdio-only caveat: the plugin handles one JSON-RPC request at a time, so
-// during a process() invocation no concurrent status call can be served.
-// The controller is still useful (a) for post-run inspection and (b) when
-// the agent uses the limit=1 loop pattern (call process(limit=1), then
-// process_status — the panel does this for its Stop button). G12's
-// cancel_requested flag is honoured BETWEEN files within the current run.
+// The new controller holds an optional ProcessBatch (see scansort/src/
+// batch.rs). A "batch" is a user-facing unit of work — clicking Start,
+// or asking the agent to "process these N files." Multiple process_run
+// iterations can execute against the SAME batch_id without resetting
+// the tally. The legacy `begin_run` API is preserved as a back-compat
+// shim that mints a synthetic batch; C4 will rewire process() to use
+// `set_current_batch` directly so the synthetic shim goes away.
 // ---------------------------------------------------------------------------
 
-/// State of a process() run, observable via process_status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProcessState {
-    Idle,
-    Running,
-    Completed,
-    Cancelled,
-    Errored,
-}
+use crate::batch::{BatchError, BatchState, PlannedFile, ProcessBatch, ProcessPlan, ProcessScope};
 
-impl ProcessState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ProcessState::Idle      => "idle",
-            ProcessState::Running   => "running",
-            ProcessState::Completed => "completed",
-            ProcessState::Cancelled => "cancelled",
-            ProcessState::Errored   => "errored",
-        }
-    }
-}
+/// Legacy `ProcessState` alias for the new `BatchState`. Kept so older
+/// in-tree call sites compile while C4 finishes the rewrite.
+pub use crate::batch::BatchState as ProcessState;
 
-#[derive(Debug, Clone)]
-pub struct ProcessController {
-    pub state: ProcessState,
-    pub run_id: Option<String>,
-    pub started_at: Option<String>,
-    pub finished_at: Option<String>,
-    /// File being processed RIGHT NOW (None when idle / between files).
-    pub current_source_label: Option<String>,
-    pub current_file_relpath: Option<String>,
-    pub current_file_index: usize,
-    /// True file total when the walk has been enumerated; None until then.
-    pub current_file_total: Option<usize>,
-    /// G12: when true, process() should bail at the next inter-file gate.
-    pub cancel_requested: bool,
-    /// Last error message (set on Errored; persists through Idle for inspection).
-    pub last_error: Option<String>,
-    pub placed: usize,
-    pub skipped: usize,
-    pub errored: usize,
-}
-
-impl ProcessController {
-    fn new() -> Self {
-        ProcessController {
-            state: ProcessState::Idle,
-            run_id: None,
-            started_at: None,
-            finished_at: None,
-            current_source_label: None,
-            current_file_relpath: None,
-            current_file_index: 0,
-            current_file_total: None,
-            cancel_requested: false,
-            last_error: None,
-            placed: 0,
-            skipped: 0,
-            errored: 0,
-        }
-    }
+#[derive(Debug, Default)]
+struct ProcessController {
+    /// Currently-active batch (None = no batch has ever been started, or
+    /// the controller was reset for a test).
+    batch: Option<ProcessBatch>,
 }
 
 static CONTROLLER: std::sync::OnceLock<std::sync::Mutex<ProcessController>> =
     std::sync::OnceLock::new();
 
 fn controller() -> &'static std::sync::Mutex<ProcessController> {
-    CONTROLLER.get_or_init(|| std::sync::Mutex::new(ProcessController::new()))
+    CONTROLLER.get_or_init(|| std::sync::Mutex::new(ProcessController::default()))
 }
 
 fn with_controller<F, T>(f: F) -> T
@@ -153,107 +103,302 @@ where
     f(&mut guard)
 }
 
-/// Start a new run. Returns the assigned run_id.
-pub fn begin_run() -> String {
+// ---------------------------------------------------------------------------
+// Primary batch API (used by process_plan / process_run / process_status /
+// process_cancel — wired up in C4/C5/C6).
+// ---------------------------------------------------------------------------
+
+fn next_batch_id() -> String {
+    format!("batch-{}-{}", std::process::id(), crate::types::now_iso())
+}
+
+/// Install a fresh batch. Refuses if a Running batch already exists —
+/// caller must cancel or wait for completion. Returns the batch_id.
+pub fn set_current_batch(plan: ProcessPlan) -> Result<String, String> {
+    with_controller(|c| {
+        if let Some(b) = &c.batch {
+            if b.state == BatchState::Running {
+                return Err(format!(
+                    "batch {} is already running — cancel or wait for completion",
+                    b.plan.batch_id
+                ));
+            }
+        }
+        let id = plan.batch_id.clone();
+        c.batch = Some(ProcessBatch::new(plan));
+        Ok(id)
+    })
+}
+
+/// Returns the batch_id of the current batch, if any.
+pub fn current_batch_id() -> Option<String> {
+    with_controller(|c| c.batch.as_ref().map(|b| b.plan.batch_id.clone()))
+}
+
+/// Flip Pending → Running. No-op if already Running; logs a warning if
+/// the batch is terminal. First call sets `started_at`.
+pub fn start_running() {
     let now = crate::types::now_iso();
-    let id = format!("run-{}-{}", std::process::id(), now);
     with_controller(|c| {
-        c.state = ProcessState::Running;
-        c.run_id = Some(id.clone());
-        c.started_at = Some(now.clone());
-        c.finished_at = None;
-        c.current_source_label = None;
-        c.current_file_relpath = None;
-        c.current_file_index = 0;
-        c.current_file_total = None;
-        c.cancel_requested = false;
-        c.last_error = None;
-        c.placed = 0;
-        c.skipped = 0;
-        c.errored = 0;
-    });
-    id
-}
-
-pub fn mark_file_start(source_label: &str, relpath: &str, file_index: usize) {
-    with_controller(|c| {
-        c.current_source_label = Some(source_label.to_string());
-        c.current_file_relpath = Some(relpath.to_string());
-        c.current_file_index = file_index;
-    });
-}
-
-/// Disposition matches the audit-log shape: "placed" / "skipped" / "error".
-pub fn mark_file_done(disposition: &str) {
-    with_controller(|c| {
-        match disposition {
-            "placed" => c.placed += 1,
-            "skipped" | "skipped-already-present" => c.skipped += 1,
-            _ => c.errored += 1,
+        let Some(b) = c.batch.as_mut() else { return };
+        match b.state {
+            BatchState::Pending => {
+                b.state = BatchState::Running;
+                b.started_at = Some(now);
+            }
+            BatchState::Running => {} // already running, no-op
+            _ => {
+                log::warn!("start_running called on terminal batch {} ({:?})",
+                    b.plan.batch_id, b.state);
+            }
         }
     });
 }
 
-pub fn finish_run(state: ProcessState, last_error: Option<String>) {
-    let now = crate::types::now_iso();
+/// Record that we're about to process the file at `plan.files[index]`.
+/// `index` is bounds-checked against the plan; out-of-range is logged
+/// and treated as "no specific file currently in flight" (the back-compat
+/// shim uses this when its synthetic plan has an empty files list).
+pub fn mark_file_at(index: usize) {
     with_controller(|c| {
-        c.state = state;
-        c.finished_at = Some(now);
-        c.current_source_label = None;
-        c.current_file_relpath = None;
-        c.last_error = last_error;
+        let Some(b) = c.batch.as_mut() else { return };
+        b.current_index = if index < b.plan.files.len() { Some(index) } else { None };
     });
 }
 
-pub fn set_total_files(total: usize) {
-    with_controller(|c| c.current_file_total = Some(total));
-}
-
-/// G12: query the cancel flag. Process() checks this between files.
-pub fn is_cancel_requested() -> bool {
-    with_controller(|c| c.cancel_requested)
-}
-
-/// G12: request cancel. Returns `(was_running, last_file_processed)` so the
-/// agent can confirm whether the cancel actually targeted a live run.
-pub fn request_cancel() -> (bool, Option<String>) {
+/// Increment the appropriate disposition counter and append an error
+/// if the disposition is "error". Accepted disposition strings match
+/// the audit log + process()'s internal status strings.
+pub fn record_file_disposition(disposition: &str, error_message: Option<String>) {
     with_controller(|c| {
-        let was_running = c.state == ProcessState::Running;
-        c.cancel_requested = true;
-        (was_running, c.current_file_relpath.clone())
+        let Some(b) = c.batch.as_mut() else { return };
+        match disposition {
+            "placed" => b.placed += 1,
+            "skipped" | "skipped-already-present" | "skipped_already_processed" => {
+                b.skipped += 1
+            }
+            _ => {
+                b.errored += 1;
+                let rel_path = b.current_index
+                    .and_then(|i| b.plan.files.get(i))
+                    .map(|f| f.rel_path.clone())
+                    .unwrap_or_else(|| format!("(index {})", b.current_index.unwrap_or(0)));
+                b.errors.push(BatchError {
+                    rel_path,
+                    message: error_message.unwrap_or_else(|| disposition.to_string()),
+                });
+            }
+        }
+    });
+}
+
+/// Flip Running → Completed when every planned file has been attempted.
+/// No-op otherwise. Also clears `current_index`.
+pub fn finalize_if_drained() {
+    let now = crate::types::now_iso();
+    with_controller(|c| {
+        let Some(b) = c.batch.as_mut() else { return };
+        if b.state == BatchState::Running && b.is_drained() {
+            b.state = BatchState::Completed;
+            b.finished_at = Some(now);
+            b.current_index = None;
+        }
+    });
+}
+
+/// Explicitly finalize the batch with a given terminal state. Used by
+/// the cancel path + back-compat shim's `finish_run`.
+pub fn finalize_as(state: BatchState, last_error: Option<String>) {
+    let now = crate::types::now_iso();
+    with_controller(|c| {
+        let Some(b) = c.batch.as_mut() else { return };
+        b.state = state;
+        b.finished_at = Some(now);
+        b.current_index = None;
+        if let Some(msg) = last_error {
+            // Surface as a final error entry so audit story is preserved.
+            b.errors.push(BatchError {
+                rel_path: "(run-level)".into(),
+                message: msg,
+            });
+        }
+    });
+}
+
+/// G12: request cancel. When `batch_id` is Some, the cancel only fires
+/// if it matches the current batch's id (protects an agent from
+/// cancelling a fresh batch with a stale id). Returns
+/// `(was_running, cancelled_batch_id, last_file_processed)`.
+pub fn request_cancel_for(
+    batch_id: Option<&str>,
+) -> Result<(bool, Option<String>, Option<String>), String> {
+    with_controller(|c| {
+        let Some(b) = c.batch.as_mut() else {
+            return Ok((false, None, None));
+        };
+        if let Some(want) = batch_id {
+            if want != b.plan.batch_id {
+                return Err(format!(
+                    "cancel batch_id mismatch: requested {}, active is {}",
+                    want, b.plan.batch_id
+                ));
+            }
+        }
+        let was_running = b.state == BatchState::Running;
+        b.cancel_requested = true;
+        let last_file = b.current_index
+            .and_then(|i| b.plan.files.get(i))
+            .map(|f| f.rel_path.clone());
+        Ok((was_running, Some(b.plan.batch_id.clone()), last_file))
     })
 }
 
-/// Read-only snapshot for the status tool.
+/// Query the cancel flag — process_run checks this between files.
+pub fn is_cancel_requested() -> bool {
+    with_controller(|c| {
+        c.batch.as_ref().map_or(false, |b| b.cancel_requested)
+    })
+}
+
+/// Snapshot the current batch (or null when no batch exists).
+pub fn current_batch_snapshot_json() -> Value {
+    with_controller(|c| {
+        match c.batch.as_ref() {
+            Some(b) => b.to_status_json(),
+            None    => Value::Null,
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Back-compat shims for cycle-2 callers (process()'s legacy call chain).
+// C4 will rewire process() to use the primary API and these shims go away.
+// ---------------------------------------------------------------------------
+
+/// Legacy entry-point. Mints a synthetic batch (scope=AllSources, empty
+/// files list — total updated as mark_file_start sees new indices) and
+/// flips it Running. Returns the synthetic batch_id so process()'s
+/// existing `_run_id` binding keeps working.
+pub fn begin_run() -> String {
+    let id = next_batch_id();
+    let plan = ProcessPlan {
+        batch_id: id.clone(),
+        created_at: crate::types::now_iso(),
+        scope: ProcessScope::AllSources,
+        files: Vec::new(),
+        total: 0,
+        type_breakdown: std::collections::BTreeMap::new(),
+        already_in_vault: 0,
+        eligible: 0,
+    };
+    // Force-clear any prior batch (cycle-2 semantics — each process() call
+    // wipes state). If/when C4 rewires process(), this shim retires.
+    with_controller(|c| {
+        c.batch = Some(ProcessBatch::new(plan));
+    });
+    start_running();
+    id
+}
+
+/// Legacy per-file marker. Extends the synthetic plan's `files` lazily
+/// so `current_file` in the status snapshot has something to point at.
+pub fn mark_file_start(source_label: &str, relpath: &str, file_index: usize) {
+    with_controller(|c| {
+        let Some(b) = c.batch.as_mut() else { return };
+        // Extend synthetic plan.files / total to cover this index.
+        while b.plan.files.len() <= file_index {
+            let placeholder_idx = b.plan.files.len();
+            let is_current = placeholder_idx == file_index;
+            b.plan.files.push(PlannedFile {
+                source_label: if is_current { source_label.to_string() } else { String::new() },
+                abs_path:     String::new(),
+                rel_path:     if is_current { relpath.to_string() } else { String::new() },
+                size:         0,
+                extension:    String::new(),
+                already_in_vault: false,
+            });
+        }
+        b.plan.total = b.plan.files.len();
+        b.plan.eligible = b.plan.total;
+        b.current_index = Some(file_index);
+    });
+}
+
+/// Legacy disposition recorder.
+pub fn mark_file_done(disposition: &str) {
+    record_file_disposition(disposition, None);
+}
+
+/// Legacy finalizer. Maps the cycle-2 ProcessState shape to BatchState.
+pub fn finish_run(state: ProcessState, last_error: Option<String>) {
+    finalize_as(state, last_error);
+}
+
+/// Legacy total-files setter — applies to the synthetic plan.
+pub fn set_total_files(total: usize) {
+    with_controller(|c| {
+        let Some(b) = c.batch.as_mut() else { return };
+        b.plan.total = total;
+        b.plan.eligible = total;
+    });
+}
+
+/// Legacy unkeyed cancel — equivalent to request_cancel_for(None).
+pub fn request_cancel() -> (bool, Option<String>) {
+    match request_cancel_for(None) {
+        Ok((was_running, _bid, last_file)) => (was_running, last_file),
+        Err(_) => (false, None),
+    }
+}
+
+/// Legacy snapshot for the cycle-2 process_status. Produces the OLD
+/// flat shape (state/run_id/totals/etc. at top level) so existing
+/// handlers keep parsing it; C5 will replace the handler with a call
+/// to current_batch_snapshot_json which returns the new shape.
 pub fn snapshot_json() -> Value {
     with_controller(|c| {
+        let Some(b) = c.batch.as_ref() else {
+            return json!({
+                "state": "idle",
+                "run_id": Value::Null,
+                "started_at": Value::Null,
+                "finished_at": Value::Null,
+                "current_source_label": Value::Null,
+                "current_file_relpath": Value::Null,
+                "current_file_index": 0,
+                "current_file_total": Value::Null,
+                "cancel_requested": false,
+                "last_error": Value::Null,
+                "totals": {"placed": 0, "skipped": 0, "errored": 0, "total": 0},
+            });
+        };
+        let current_file = b.current_index.and_then(|i| b.plan.files.get(i));
         json!({
-            "state":               c.state.as_str(),
-            "run_id":              c.run_id,
-            "started_at":          c.started_at,
-            "finished_at":         c.finished_at,
-            "current_source_label":c.current_source_label,
-            "current_file_relpath":c.current_file_relpath,
-            "current_file_index":  c.current_file_index,
-            "current_file_total":  c.current_file_total,
-            "cancel_requested":    c.cancel_requested,
-            "last_error":          c.last_error,
+            "state":               b.state.as_str(),
+            "run_id":              b.plan.batch_id,
+            "started_at":          b.started_at,
+            "finished_at":         b.finished_at,
+            "current_source_label":current_file.map(|f| f.source_label.clone()),
+            "current_file_relpath":current_file.map(|f| f.rel_path.clone()),
+            "current_file_index":  b.current_index.unwrap_or(0),
+            "current_file_total":  if b.plan.total > 0 { Value::from(b.plan.total) } else { Value::Null },
+            "cancel_requested":    b.cancel_requested,
+            "last_error":          b.errors.last().map(|e| e.message.clone()),
             "totals": {
-                "placed":  c.placed,
-                "skipped": c.skipped,
-                "errored": c.errored,
-                "total":   c.placed + c.skipped + c.errored,
+                "placed":  b.placed,
+                "skipped": b.skipped,
+                "errored": b.errored,
+                "total":   b.files_done(),
             },
         })
     })
 }
 
-/// Reset to Idle while preserving last_error / totals for inspection.
-/// Used by tests; called between runs is optional (begin_run resets too).
+/// Reset for tests — fully clears the singleton.
 #[cfg(test)]
 pub fn reset_controller_for_test() {
     with_controller(|c| {
-        *c = ProcessController::new();
+        c.batch = None;
     });
 }
 // 100 DPI letter-page renders to ~600 KB base64 (1100x850 PNG) — well inside
@@ -1140,14 +1285,15 @@ pub fn run(
 
     result.total_files = file_index;
 
-    // process_status: write final totals into the controller and mark the
-    // run done. Cancelled state takes priority over Completed when the
+    // C3: write final totals into the current batch and mark the run
+    // done. Cancelled state takes priority over Completed when the
     // cancel flag tripped between files.
     with_controller(|c| {
-        c.placed   = result.moved as usize;
-        c.skipped  = result.skipped_already_processed as usize;
-        c.errored  = (result.unprocessable + result.conflicts) as usize;
-        c.current_file_total = Some(file_index);
+        let Some(b) = c.batch.as_mut() else { return };
+        b.placed  = result.moved as usize;
+        b.skipped = result.skipped_already_processed as usize;
+        b.errored = (result.unprocessable + result.conflicts) as usize;
+        b.plan.total = file_index;
     });
     let final_state = if was_cancelled {
         ProcessState::Cancelled
@@ -1745,6 +1891,156 @@ mod tests {
         assert!(!is_cancel_requested(),
             "fresh run must start with cancel_requested=false");
         finish_run(ProcessState::Completed, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // C3 (DCR 019e564809a9) — batch-aware controller. These tests target the
+    // new primary API directly, NOT the legacy begin_run/finish_run shims.
+    // -----------------------------------------------------------------------
+
+    fn sample_plan(id: &str, total: usize) -> ProcessPlan {
+        use crate::batch::PlannedFile;
+        let files: Vec<PlannedFile> = (0..total).map(|i| PlannedFile {
+            source_label: "Inbox".into(),
+            abs_path: format!("/src/f{i}.pdf"),
+            rel_path: format!("f{i}.pdf"),
+            size: 100,
+            extension: ".pdf".into(),
+            already_in_vault: false,
+        }).collect();
+        ProcessPlan {
+            batch_id: id.into(),
+            created_at: "t".into(),
+            scope: ProcessScope::AllSources,
+            files,
+            total,
+            type_breakdown: std::collections::BTreeMap::new(),
+            already_in_vault: 0,
+            eligible: total,
+        }
+    }
+
+    #[test]
+    fn batch_set_then_running_then_drained_completes() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        let id = set_current_batch(sample_plan("b1", 3)).expect("set");
+        assert_eq!(current_batch_id().as_deref(), Some("b1"));
+
+        start_running();
+        for i in 0..3 {
+            mark_file_at(i);
+            record_file_disposition("placed", None);
+            finalize_if_drained();
+        }
+        let snap = current_batch_snapshot_json();
+        assert_eq!(snap["state"], "completed");
+        assert_eq!(snap["totals"]["placed"], 3);
+        assert_eq!(snap["totals"]["total"], 3);
+        assert_eq!(snap["batch_id"], id);
+    }
+
+    #[test]
+    fn batch_set_current_refuses_while_running() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        set_current_batch(sample_plan("first", 1)).expect("set");
+        start_running();
+        let err = set_current_batch(sample_plan("second", 1)).unwrap_err();
+        assert!(err.contains("first"), "error must name the in-flight batch: {err}");
+    }
+
+    #[test]
+    fn batch_cancel_keyed_by_id_only_fires_on_match() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        set_current_batch(sample_plan("real", 5)).expect("set");
+        start_running();
+        // Wrong id → error.
+        let err = request_cancel_for(Some("ghost")).unwrap_err();
+        assert!(err.contains("ghost") && err.contains("real"),
+            "mismatch error must name both ids: {err}");
+        assert!(!is_cancel_requested(), "wrong id must NOT set the flag");
+
+        // Correct id → fires.
+        let (was_running, bid, _) = request_cancel_for(Some("real")).expect("cancel");
+        assert!(was_running);
+        assert_eq!(bid.as_deref(), Some("real"));
+        assert!(is_cancel_requested());
+        finalize_as(BatchState::Cancelled, None);
+    }
+
+    #[test]
+    fn batch_cancel_unkeyed_fires_on_any_active_batch() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        set_current_batch(sample_plan("b", 2)).expect("set");
+        start_running();
+        let (was_running, _, _) = request_cancel_for(None).expect("cancel");
+        assert!(was_running);
+        assert!(is_cancel_requested());
+        finalize_as(BatchState::Cancelled, None);
+    }
+
+    #[test]
+    fn batch_cancel_with_no_batch_is_idempotent() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        let (was_running, bid, _) = request_cancel_for(None).expect("cancel");
+        assert!(!was_running);
+        assert!(bid.is_none());
+    }
+
+    #[test]
+    fn batch_disposition_errored_records_a_BatchError() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        set_current_batch(sample_plan("e", 2)).expect("set");
+        start_running();
+        mark_file_at(1);
+        record_file_disposition("error", Some("permission denied".into()));
+        let snap = current_batch_snapshot_json();
+        assert_eq!(snap["totals"]["errored"], 1);
+        let errors = snap["errors"].as_array().expect("errors");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["rel_path"], "f1.pdf");
+        assert!(errors[0]["message"].as_str().unwrap().contains("permission denied"));
+    }
+
+    /// Bug 019e5802d5d8 regression: the same batch_id accumulates across
+    /// many process_run-style iterations. THIS is what the cycle-2
+    /// controller failed at — proven dead by this test.
+    #[test]
+    fn batch_accumulates_across_iterations_resolves_bug_019e5802d5d8() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+
+        // Simulate the panel pattern: ONE batch, 7 files, processed via 7
+        // separate "iterations" (process_run-style). Pre-C3 this would
+        // have reset the controller on each iteration and the final
+        // total would be 1, not 7.
+        set_current_batch(sample_plan("seven", 7)).expect("set");
+        start_running();
+        for i in 0..7 {
+            mark_file_at(i);
+            record_file_disposition("placed", None);
+            finalize_if_drained();
+        }
+
+        let snap = current_batch_snapshot_json();
+        assert_eq!(snap["batch_id"], "seven", "batch_id must survive iterations");
+        assert_eq!(snap["state"], "completed");
+        assert_eq!(snap["totals"]["placed"], 7,
+            "BUG REGRESSION: panel-style iteration must accumulate to 7, NOT 1");
+        assert_eq!(snap["totals"]["total"], 7);
+    }
+
+    #[test]
+    fn batch_snapshot_is_null_when_no_active_batch() {
+        let _g = CONTROLLER_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        reset_controller_for_test();
+        let snap = current_batch_snapshot_json();
+        assert!(snap.is_null(), "no batch → snapshot must be Value::Null");
     }
 
     // -----------------------------------------------------------------------
