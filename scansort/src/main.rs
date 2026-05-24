@@ -580,11 +580,12 @@ fn handle_registry_remove(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_check_sha256(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let sha256 = args.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
     if sha256.is_empty() {
         return ok_response(id, tool_err("sha256 is required"));
     }
@@ -618,11 +619,12 @@ fn handle_check_sha256_all_vaults(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_insert_document(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
     if file_path.is_empty() {
         return ok_response(id, tool_err("file_path is required"));
     }
@@ -1294,11 +1296,12 @@ fn handle_classify_document(
     next_id: &mut u64,
 ) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let password = args.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
 
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("text");
     let max_chars = args.get("max_chars").and_then(|v| v.as_u64()).unwrap_or(4000) as usize;
@@ -1473,12 +1476,13 @@ fn handle_list_source_files(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_set_destination(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("");
     let disk_root = args.get("disk_root").and_then(|v| v.as_str());
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
     if mode.is_empty() {
         return ok_response(id, tool_err("mode is required"));
     }
@@ -1517,14 +1521,15 @@ fn handle_get_destination(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_place_on_disk(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
     let subfolder = args.get("subfolder").and_then(|v| v.as_str()).unwrap_or("");
     let doc_date = args.get("doc_date").and_then(|v| v.as_str()).unwrap_or("");
     let rename_pattern = args.get("rename_pattern").and_then(|v| v.as_str());
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
     if file_path.is_empty() {
         return ok_response(id, tool_err("file_path is required"));
     }
@@ -2220,20 +2225,10 @@ fn handle_audit_tail(params: &Value, id: Value) -> RpcResponse {
     let log_path = std::path::Path::new(log_path_str);
     match audit::tail_rows(log_path, limit) {
         Ok(rows) => {
-            let rows_json: Vec<Value> = rows.iter().map(|r| json!({
-                "timestamp":        r.timestamp,
-                "event":            r.event,
-                "source_sha256":    r.source_sha256,
-                "source_filename":  r.source_filename,
-                "rule_label":       r.rule_label,
-                "destination_id":   r.destination_id,
-                "destination_kind": r.destination_kind,
-                "resolved_path":    r.resolved_path,
-                "disposition":      r.disposition,
-                "detail":           r.detail,
-                // G13: empty string on legacy rows that pre-date the schema bump.
-                "model_spec":       r.model_spec,
-            })).collect();
+            // T-DRY-2 fix: AuditRow::to_json is the single source of truth
+            // for the wire shape — a new column at AuditRow gets picked up
+            // automatically here instead of silently dropping.
+            let rows_json: Vec<Value> = rows.iter().map(audit::AuditRow::to_json).collect();
             let count = rows_json.len();
             ok_response(id, tool_ok(json!({
                 "ok": true,

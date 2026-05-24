@@ -195,6 +195,26 @@ impl AuditRow {
     ///
     /// All fields are quoted; internal `"` are doubled; newlines in values
     /// are replaced with a space to keep each row on one line.
+    /// Serialise this row to its MCP wire-JSON shape. Single source of
+    /// truth for the response shape returned by `minerva_scansort_audit_tail`
+    /// so adding a new column at AuditRow doesn't silently get dropped by
+    /// a hand-built handler-side map.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "timestamp":        self.timestamp,
+            "event":            self.event,
+            "source_sha256":    self.source_sha256,
+            "source_filename":  self.source_filename,
+            "rule_label":       self.rule_label,
+            "destination_id":   self.destination_id,
+            "destination_kind": self.destination_kind,
+            "resolved_path":    self.resolved_path,
+            "disposition":      self.disposition,
+            "detail":           self.detail,
+            "model_spec":       self.model_spec,
+        })
+    }
+
     pub fn to_csv_line(&self) -> String {
         let fields = [
             self.timestamp.as_str(),
