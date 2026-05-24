@@ -3107,6 +3107,90 @@ fn enumerate_for_scope(
     }
 }
 
+/// `minerva_scansort_process_run` — C4 (DCR `019e564809a9`).
+///
+/// Execute the file pipeline against an already-installed batch (from
+/// `process_plan`). The batch's planned files are passed verbatim to
+/// `process::run` via its `explicit_files` arg, so the same per-file
+/// extract / classify / rule-engine / fan-out / audit pipeline runs.
+///
+/// Resolves bug `019e5802d5d8`: the controller's batch_id survives
+/// across `process_run` iterations, so a panel that calls
+/// `process_run(batch_id, limit=1)` in a loop sees totals accumulate
+/// instead of resetting per call.
+///
+/// INPUTS:
+///   batch_id    — required; must match the currently-installed batch
+///                 (or returns tool_err naming the active one).
+///   limit       — optional; max files to process this call. Default
+///                 unlimited (drains the batch in one shot).
+///   model       — optional model identifier passed to host.providers.chat.
+///   model_spec  — optional structured provider spec; wins over `model`.
+fn handle_process_run(
+    id: Value,
+    params: &Value,
+    out: &mut impl io::Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let batch_id = args.get("batch_id").and_then(|v| v.as_str()).unwrap_or("");
+    if batch_id.is_empty() {
+        return ok_response(id, tool_err("batch_id is required"));
+    }
+    let active = match process::current_batch_id() {
+        Some(b) => b,
+        None    => return ok_response(id, tool_err("no active batch — call process_plan first")),
+    };
+    if active != batch_id {
+        return ok_response(id, tool_err(&format!(
+            "batch_id mismatch: requested '{batch_id}', active is '{active}'"
+        )));
+    }
+
+    // Pull args that process::run consumes.
+    let model = args.get("model").and_then(|v| v.as_str()).unwrap_or("default").to_string();
+    let model_spec = args.get("model_spec").cloned();
+    let limit = lax_usize(args.get("limit"));
+    let doc_type_strategy = args.get("doc_type_strategy").and_then(|v| v.as_str())
+        .unwrap_or("none").to_string();
+
+    // Feed the batch's planned absolute paths into process::run's
+    // explicit_files window so process()'s walk is bypassed (the plan
+    // already enumerated). Empty audit_path → no audit append; vault
+    // passwords default to empty (caller can extend later).
+    let explicit_files = process::current_batch_file_paths();
+    let vault_passwords: std::collections::HashMap<String, String> = Default::default();
+
+    let result = process::run(
+        out, lines, next_id,
+        &model, model_spec,
+        &doc_type_strategy,
+        false, "",                 // audit_enabled, audit_path
+        0, limit,                  // offset, limit
+        &vault_passwords,
+        &explicit_files,
+    );
+    match result {
+        Ok(_) => {
+            // C3's run() writes final totals into the current batch and
+            // calls finish_run / finalize_as as appropriate. Return the
+            // snapshot so the caller sees state + totals + progress in
+            // one round trip.
+            let snap = process::current_batch_snapshot_json();
+            ok_response(id, tool_ok(json!({
+                "ok": true,
+                "batch_id": active,
+                "snapshot": snap,
+            })))
+        }
+        Err(e) => {
+            process::finalize_as(process::ProcessState::Errored, Some(e.message.clone()));
+            ok_response(id, tool_err(&e.message))
+        }
+    }
+}
+
 fn handle_process_status(_params: &Value, id: Value) -> RpcResponse {
     let mut payload = process::snapshot_json();
     payload.as_object_mut().map(|m| m.insert("ok".into(), json!(true)));
@@ -4459,6 +4543,21 @@ fn main() {
                         }
                     },
                     {
+                        "name": "minerva_scansort_process_run",
+                        "description": "C4 (DCR 019e564809a9): Execute the file pipeline against the batch installed by process_plan. Same per-file extract / classify / rule_engine / fan_out / audit pipeline as process(), but iterates the planned files (the plan was enumerated by process_plan, no second walk). Resolves bug 019e5802d5d8 by accumulating totals across iterations under the same batch_id (a panel limit=1 loop no longer wipes per-call). Returns {ok, batch_id, snapshot} where snapshot is the same shape as process_status's `active_batch`.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "batch_id": {"type": "string", "description": "Must match the batch_id from the most recent process_plan call."},
+                                "limit":    {"type": "integer", "minimum": 0, "description": "Max files to process in this call. Default unlimited (drains the batch). Accepts integer or whole-number float."},
+                                "model":    {"type": "string"},
+                                "model_spec": {"type": "object"},
+                                "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"]}
+                            },
+                            "required": ["batch_id"]
+                        }
+                    },
+                    {
                         "name": "minerva_scansort_process_status",
                         "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the per-process ProcessController. Returns the current state of the most recent process() run: state (idle|running|completed|cancelled|errored), run_id, started_at/finished_at, current_source_label + current_file_relpath + current_file_index, current_file_total, cancel_requested, last_error, and totals (placed/skipped/errored/total). Stdio caveat: the plugin handles one request at a time, so this tool can NOT be polled mid-process() on the same connection. Useful after a process() returns to read the final tally, or when the agent uses the limit=1 loop pattern (call process(limit=1) then process_status — the panel's Stop button does this).",
                         "inputSchema": {"type": "object", "properties": {}, "required": []}
@@ -4766,6 +4865,9 @@ fn main() {
                     }
                     "minerva_scansort_process_plan" => {
                         handle_process_plan(&req.params, req.id)
+                    }
+                    "minerva_scansort_process_run" => {
+                        handle_process_run(req.id, &req.params, &mut out, &mut lines, &mut next_id)
                     }
                     "minerva_scansort_process_status" => {
                         handle_process_status(&req.params, req.id)

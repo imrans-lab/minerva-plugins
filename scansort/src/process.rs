@@ -260,6 +260,16 @@ pub fn is_cancel_requested() -> bool {
     })
 }
 
+/// Return the absolute paths of files in the current batch's plan.
+/// Used by `process_run` to feed process::run's explicit_files arg.
+pub fn current_batch_file_paths() -> Vec<String> {
+    with_controller(|c| {
+        c.batch.as_ref()
+            .map(|b| b.plan.files.iter().map(|f| f.abs_path.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
 /// Snapshot the current batch (or null when no batch exists).
 pub fn current_batch_snapshot_json() -> Value {
     with_controller(|c| {
@@ -275,26 +285,35 @@ pub fn current_batch_snapshot_json() -> Value {
 // C4 will rewire process() to use the primary API and these shims go away.
 // ---------------------------------------------------------------------------
 
-/// Legacy entry-point. Mints a synthetic batch (scope=AllSources, empty
-/// files list — total updated as mark_file_start sees new indices) and
-/// flips it Running. Returns the synthetic batch_id so process()'s
-/// existing `_run_id` binding keeps working.
+/// Legacy entry-point. If a Pending/Running batch is already installed
+/// (e.g. process_plan + process_run flow from C2/C4), reuses it —
+/// caller's totals accumulate into the real batch. Otherwise mints a
+/// synthetic AllSources batch for backward-compat with direct process()
+/// callers. Returns the batch_id either way.
 pub fn begin_run() -> String {
-    let id = next_batch_id();
-    let plan = ProcessPlan {
-        batch_id: id.clone(),
-        created_at: crate::types::now_iso(),
-        scope: ProcessScope::AllSources,
-        files: Vec::new(),
-        total: 0,
-        type_breakdown: std::collections::BTreeMap::new(),
-        already_in_vault: 0,
-        eligible: 0,
-    };
-    // Force-clear any prior batch (cycle-2 semantics — each process() call
-    // wipes state). If/when C4 rewires process(), this shim retires.
-    with_controller(|c| {
+    let id = with_controller(|c| {
+        // Reuse if there's a pre-installed batch in a non-terminal state.
+        if let Some(b) = &c.batch {
+            match b.state {
+                BatchState::Pending | BatchState::Running => {
+                    return b.plan.batch_id.clone();
+                }
+                _ => {} // terminal → mint a fresh synthetic below
+            }
+        }
+        let new_id = next_batch_id();
+        let plan = ProcessPlan {
+            batch_id: new_id.clone(),
+            created_at: crate::types::now_iso(),
+            scope: ProcessScope::AllSources,
+            files: Vec::new(),
+            total: 0,
+            type_breakdown: std::collections::BTreeMap::new(),
+            already_in_vault: 0,
+            eligible: 0,
+        };
         c.batch = Some(ProcessBatch::new(plan));
+        new_id
     });
     start_running();
     id

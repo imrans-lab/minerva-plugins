@@ -245,6 +245,21 @@
       }
     },
     {
+      "name": "minerva_scansort_process_run",
+      "description": "C4 (DCR 019e564809a9): Execute the file pipeline against an already-installed batch (from process_plan). Resolves bug 019e5802d5d8 by accumulating totals under the same batch_id across iterations. Returns {ok, batch_id, snapshot}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "batch_id": {"type": "string"},
+          "limit":    {"type": "integer", "minimum": 0},
+          "model":    {"type": "string"},
+          "model_spec": {"type": "object"},
+          "doc_type_strategy": {"type": "string", "enum": ["none", "enum", "canonicalize", "both"]}
+        },
+        "required": ["batch_id"]
+      }
+    },
+    {
       "name": "minerva_scansort_process_status",
       "description": "Bug 019e57bbe881 (DCR 019e564809a9): Read-only snapshot of the most recent / current process() run: state, run_id, started_at/finished_at, current_source_label + relpath + index, current_file_total, cancel_requested, last_error, totals {placed, skipped, errored, total}. Stdio caveat: cannot be polled mid-process() on the same connection; useful after process() returns OR when the agent uses limit=1 loop pattern.",
       "input_schema": {"type": "object", "properties": {}}
