@@ -16,89 +16,27 @@
 //!
 //! See docket hint `019e57af4a8e` and work_item `019e57bd4c30` (G8).
 
+
+mod common;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn unique_tmp(prefix: &str) -> std::path::PathBuf {
-    let pid = std::process::id();
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("scansort-isol-{prefix}-{pid}-{ts}-{n}"))
-}
-
-fn rpc(
-    stdin: &mut std::process::ChildStdin,
-    out: &mut BufReader<std::process::ChildStdout>,
-    req: Value,
-) -> Value {
-    let req_id = req.get("id").cloned();
-    let line = req.to_string() + "\n";
-    stdin.write_all(line.as_bytes()).unwrap();
-    stdin.flush().unwrap();
-    loop {
-        let mut buf = String::new();
-        let n = out.read_line(&mut buf).expect("read");
-        if n == 0 {
-            panic!("plugin EOF awaiting reply for {:?}", req_id);
-        }
-        let trimmed = buf.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let v: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("id") == req_id.as_ref() {
-            return v;
-        }
-    }
-}
-
-fn unwrap_tool(reply: &Value) -> Value {
-    let r = reply.get("result").expect("result");
-    let text = r["content"][0]["text"].as_str().expect("text");
-    serde_json::from_str(text).unwrap_or_else(|e| panic!("inner JSON ({e}): {text}"))
-}
 
 #[test]
 fn env_var_isolates_library_from_real_path() {
     // Per-test tmpdir for the library file.
-    let work = unique_tmp("env-isolation");
+    let work = common::unique_tmp("env-isolation");
     std::fs::create_dir_all(&work).unwrap();
     let isolated_lib = work.join("library.rules.json");
     assert!(!isolated_lib.exists(), "fresh tmpdir must start empty");
 
     // Spawn with SCANSORT_LIBRARY_PATH pointing at the isolated path.
-    let bin = env!("CARGO_BIN_EXE_scansort-plugin");
-    let mut child = Command::new(bin)
-        .env("SCANSORT_LIBRARY_PATH", &isolated_lib)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
-    let mut stdin = child.stdin.take().unwrap();
-    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let (mut child, mut stdin, mut out) = common::spawn_plugin_with_isolated_library(&isolated_lib);
 
     // Handshake.
-    rpc(&mut stdin, &mut out, json!({
-        "jsonrpc":"2.0","id":1,"method":"initialize","params":{}
-    }));
-    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").unwrap();
-    stdin.flush().unwrap();
+    let _init = common::handshake(&mut stdin, &mut out);
 
     // Insert a uniquely-labeled rule into the (isolated) library.
     let probe_label = format!("__isolation_probe_{}", std::process::id());
-    let ins = rpc(&mut stdin, &mut out, json!({
+    let ins = common::rpc(&mut stdin, &mut out, json!({
         "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
             "name":"minerva_scansort_library_insert_rule",
             "arguments":{
@@ -108,7 +46,7 @@ fn env_var_isolates_library_from_real_path() {
             }
         }
     }));
-    let inner = unwrap_tool(&ins);
+    let inner = common::unwrap_tool_ok(&ins);
     assert_eq!(inner["ok"], json!(true), "library_insert_rule failed: {inner}");
 
     drop(stdin);
