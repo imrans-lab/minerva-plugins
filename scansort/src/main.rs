@@ -2447,19 +2447,44 @@ fn handle_session_describe(params: &Value, id: Value) -> RpcResponse {
         .collect();
 
     let rule_library_count = library::library_list().map(|r| r.len()).unwrap_or(0);
-    let destination_registry_count = registry::registry_list(None)
-        .map(|r| r.len())
-        .unwrap_or(0);
+    let registry_entries = registry::registry_list(None).unwrap_or_default();
+    let destination_registry_count = registry_entries.len();
 
-    ok_response(id, tool_ok(json!({
-        "ok": true,
-        "include_paths": include_paths,
-        "vaults":  vaults_json,
-        "dirs":    dirs_json,
-        "sources": sources_json,
-        "rule_library_count": rule_library_count,
-        "destination_registry_count": destination_registry_count,
-    })))
+    // G10 (DCR 019e564809a9): when paths are disclosed, also surface the
+    // full destination registry with an `is_open_in_session` flag per
+    // entry. Lets an agent see in one call which registered vaults are
+    // currently active vs dormant. Gated on include_paths because the
+    // registry entries always carry their paths.
+    let mut response_obj = serde_json::Map::new();
+    response_obj.insert("ok".into(), json!(true));
+    response_obj.insert("include_paths".into(), json!(include_paths));
+    response_obj.insert("vaults".into(), json!(vaults_json));
+    response_obj.insert("dirs".into(), json!(dirs_json));
+    response_obj.insert("sources".into(), json!(sources_json));
+    response_obj.insert("rule_library_count".into(), json!(rule_library_count));
+    response_obj.insert("destination_registry_count".into(), json!(destination_registry_count));
+
+    if include_paths {
+        // Build the set of currently-open vault paths for the join.
+        let open_paths: std::collections::HashSet<String> = vaults_full
+            .iter()
+            .map(|(_, p)| p.to_string_lossy().into_owned())
+            .collect();
+        let registry_json: Vec<Value> = registry_entries
+            .into_iter()
+            .map(|mut entry| {
+                let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if let Some(map) = entry.as_object_mut() {
+                    map.insert("is_open_in_session".into(),
+                               json!(open_paths.contains(&path)));
+                }
+                entry
+            })
+            .collect();
+        response_obj.insert("destination_registry".into(), json!(registry_json));
+    }
+
+    ok_response(id, tool_ok(Value::Object(response_obj)))
 }
 
 /// Build the JSON object for a single open vault. Best-effort stats — a
@@ -3878,7 +3903,7 @@ fn main() {
                     },
                     {
                         "name": "minerva_scansort_session_describe",
-                        "description": "G2 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats (has_password, hint, doc_count, has_sidecar_rules) + top-level rule_library_count and destination_registry_count. include_paths gates filesystem-path disclosure (default false, agent-safe). Read-only; no state change. Returns {ok, include_paths, vaults:[{label, path?, has_password, hint, doc_count, has_sidecar_rules, error?}], dirs:[{label, path?}], sources:[{label, path?}], rule_library_count, destination_registry_count}. Per-vault errors are best-effort: a malformed/unreadable vault still appears with the label + an error string.",
+                        "description": "G2 + G10 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats (has_password, hint, doc_count, has_sidecar_rules) + top-level rule_library_count and destination_registry_count. When include_paths=true, ALSO returns destination_registry: array of every registered vault with {path, name, doc_count?, error?, is_open_in_session} so the agent sees registered-vs-active in one call. include_paths default false (agent-safe). Read-only; no state change. Per-vault errors are best-effort: a malformed/unreadable vault still appears with the label + an error string.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {

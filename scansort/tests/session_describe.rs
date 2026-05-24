@@ -232,6 +232,22 @@ fn session_describe_shape_with_and_without_paths() {
     assert_eq!(dirs2[0]["path"], json!(dir_str));
     assert_eq!(sources2[0]["path"], json!(source_str));
 
+    // G10: when include_paths=true the response also carries the full
+    // destination_registry list with an is_open_in_session flag per entry.
+    // Default (include_paths=false) must NOT carry this field.
+    assert!(inner.get("destination_registry").is_none(),
+        "include_paths=false MUST omit destination_registry: {inner}");
+    let reg = inner2["destination_registry"].as_array()
+        .expect("destination_registry must be present when include_paths=true");
+    // We didn't add the test vault to the registry, so it may or may not
+    // be there. We just verify shape: every entry has path + is_open_in_session.
+    for entry in reg {
+        assert!(entry.get("path").and_then(|v| v.as_str()).is_some(),
+            "every registry entry must have a path: {entry}");
+        assert!(entry.get("is_open_in_session").and_then(|v| v.as_bool()).is_some(),
+            "every registry entry must have is_open_in_session bool: {entry}");
+    }
+
     // Cleanup.
     rpc(&mut stdin, &mut out, json!({
         "jsonrpc":"2.0","id":900,"method":"tools/call","params":{

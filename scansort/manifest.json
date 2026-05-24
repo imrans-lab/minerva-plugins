@@ -236,7 +236,7 @@
     },
     {
       "name": "minerva_scansort_session_describe",
-      "description": "G2 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats (has_password, hint, doc_count, has_sidecar_rules) + top-level rule_library_count and destination_registry_count. include_paths gates path disclosure (default false). Read-only; no state change. Per-vault errors are best-effort: a malformed/unreadable vault still appears with the label + an error string.",
+      "description": "G2 + G10 (DCR 019e564809a9): One-stop session shape for agents. Returns labels + per-vault stats + top-level counts. When include_paths=true, also returns destination_registry (full list with is_open_in_session flag) so the agent sees registered-vs-active in one call. Read-only.",
       "input_schema": {
         "type": "object",
         "properties": {
