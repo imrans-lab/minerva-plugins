@@ -266,16 +266,21 @@ fn bug_019e5802d5d8_panel_loop_pattern_accumulates() {
     let bid = common::unwrap_tool(&plan).expect("plan")["batch_id"].as_str().unwrap().to_string();
 
     // The pre-cycle-3 cycle-2 controller would have RESET state on each
-    // process_run call. Status snapshots BETWEEN iterations would show
-    // batch_id stays the same.
-    for _i in 0..3 {
+    // process_run call. We assert TWO things between iterations:
+    //   (a) batch_id stays the same
+    //   (b) totals.total grows monotonically — pre-cycle-3 the controller
+    //       wiped totals on each call, so this would have been 0 → 1 → 0
+    //       → 1 → 0 → 1 instead of 1 → 2 → 3. Even though the test
+    //       runs without a real LLM (so all 3 files end up in errored),
+    //       the errored counter still climbs — proving accumulation.
+    let mut prior_total: i64 = 0;
+    for i in 0..3 {
         let _r = common::rpc(&mut stdin, &mut out, json!({
             "jsonrpc":"2.0","id":10,"method":"tools/call","params":{
                 "name":"minerva_scansort_process_run",
                 "arguments":{"batch_id": &bid, "limit": 1}
             }
         }));
-        // Status check: batch_id MUST be the same across iterations.
         let st = common::rpc(&mut stdin, &mut out, json!({
             "jsonrpc":"2.0","id":11,"method":"tools/call","params":{
                 "name":"minerva_scansort_process_status","arguments":{}
@@ -288,7 +293,22 @@ fn bug_019e5802d5d8_panel_loop_pattern_accumulates() {
         assert_eq!(active["batch_id"], json!(bid),
             "BUG REGRESSION: batch_id MUST survive iterations (was {}, got {})",
             bid, active["batch_id"]);
+        let cur_total = active["totals"]["total"].as_i64().expect("totals.total");
+        assert!(cur_total > prior_total,
+            "BUG REGRESSION (iter {}): totals.total must climb monotonically; got {} after prior {}. \
+             Pre-cycle-3 the controller wiped totals on each call.",
+            i, cur_total, prior_total);
+        prior_total = cur_total;
     }
+    // Final assertion: 3 iterations against a 3-file batch ⇒ total=3.
+    let final_st = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":12,"method":"tools/call","params":{
+            "name":"minerva_scansort_process_status","arguments":{}
+        }
+    }));
+    let final_inner = common::unwrap_tool(&final_st).expect("final status");
+    assert_eq!(final_inner["active_batch"]["totals"]["total"], json!(3),
+        "BUG REGRESSION: after 3 iterations, total MUST be 3 (cycle-2 would have shown 1): {final_inner}");
 
     drop(stdin);
     let _ = child.wait();

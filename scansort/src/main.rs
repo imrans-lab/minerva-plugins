@@ -2970,7 +2970,10 @@ fn handle_process_plan(params: &Value, id: Value) -> RpcResponse {
     }
 
     let total = planned.len();
-    let eligible = total - already_in_vault;
+    // saturating_sub guards a future bug in the SHA-check path: by
+    // construction already_in_vault <= total, but an invariant-break
+    // shouldn't crash the plugin.
+    let eligible = total.saturating_sub(already_in_vault);
     let type_breakdown = batch::ProcessPlan::compute_type_breakdown(&planned);
     let batch_id = format!("batch-{}-{}", std::process::id(), crate::types::now_iso());
     let created_at = crate::types::now_iso();
