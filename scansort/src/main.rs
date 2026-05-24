@@ -4430,12 +4430,20 @@ mod lax_numeric_tests {
 
     #[test]
     fn lax_i64_rejects_non_finite() {
-        // serde_json normally refuses NaN/Inf in literals; build them directly.
-        let nan = serde_json::from_str::<Value>("null").unwrap(); // serde_json doesn't accept NaN/Inf literal — substitute null
-        assert_eq!(lax_i64(Some(&nan)), None);
-        // Float overflow guard: very large float beyond i64 range.
+        // NaN and ±Inf can't be expressed as JSON literals — build them
+        // directly via serde_json::Number::from_f64, which returns None for
+        // non-finite inputs. That's the OUTER wire-shape proof: a malicious
+        // or buggy producer can't even emit them through standard serde_json.
+        assert!(serde_json::Number::from_f64(f64::NAN).is_none(),
+            "serde_json refuses NaN at the encoder boundary");
+        assert!(serde_json::Number::from_f64(f64::INFINITY).is_none(),
+            "serde_json refuses +Inf at the encoder boundary");
+        // The is_finite() guard in lax_i64 is a belt-and-suspenders measure.
+        // Float overflow guard: very large finite float beyond i64 range.
         let huge = json!(1.0e30);
         assert_eq!(lax_i64(Some(&huge)), None, "1e30 exceeds i64::MAX");
+        let huge_neg = json!(-1.0e30);
+        assert_eq!(lax_i64(Some(&huge_neg)), None, "-1e30 below i64::MIN");
     }
 
     #[test]

@@ -102,6 +102,25 @@ fn session_describe_shape_with_and_without_paths() {
             "name":"minerva_scansort_session_reset","arguments":{}
         }
     }));
+    // Purge any rules a sibling test may have left in the on-disk library
+    // so this test's rule_library_count assertion is exact, not just present.
+    let list = rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":2001,"method":"tools/call","params":{
+            "name":"minerva_scansort_library_list_rules","arguments":{}
+        }
+    }));
+    if let Some(rules) = unwrap_tool(&list).get("rules").and_then(|v| v.as_array()) {
+        for r in rules {
+            if let Some(label) = r.get("label").and_then(|v| v.as_str()) {
+                rpc(&mut stdin, &mut out, json!({
+                    "jsonrpc":"2.0","id":2002,"method":"tools/call","params":{
+                        "name":"minerva_scansort_library_delete_rule",
+                        "arguments":{"label": label}
+                    }
+                }));
+            }
+        }
+    }
 
     // Create a vault and insert two docs so doc_count > 0.
     let cv = rpc(&mut stdin, &mut out, json!({
@@ -176,9 +195,12 @@ fn session_describe_shape_with_and_without_paths() {
     assert_eq!(v0["has_sidecar_rules"], json!(false),
         "no sidecar created in this test");
 
-    // Top-level counters present and non-negative.
-    assert!(inner["rule_library_count"].as_u64().is_some(),
-        "rule_library_count must be present: {inner}");
+    // Top-level counters present. After the library purge above
+    // rule_library_count must be exactly 0; destination_registry_count
+    // is environmental (host-managed registry file) so we only assert
+    // its presence as a number.
+    assert_eq!(inner["rule_library_count"], json!(0),
+        "after library purge, rule_library_count must be 0: {inner}");
     assert!(inner["destination_registry_count"].as_u64().is_some(),
         "destination_registry_count must be present: {inner}");
 
