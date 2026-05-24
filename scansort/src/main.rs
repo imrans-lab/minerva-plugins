@@ -339,6 +339,34 @@ fn lax_usize(v: Option<&Value>) -> Option<usize> {
     Some(i as usize)
 }
 
+/// G11 (DCR `019e564809a9`): resolve a vault argument from EITHER
+/// `vault_label` (resolved against the in-process session) OR
+/// `vault_path` (absolute path). The label form is the agent-safe path;
+/// the path form is retained for back-compat with panels / scripts that
+/// know the absolute location.
+///
+/// Resolution rule (label-first):
+/// 1. If `vault_label` is present and non-empty, resolve via
+///    `session::resolve_label`. The label MUST be a Vault entry —
+///    Directory/Source labels reject with "vault label not in session".
+/// 2. Else if `vault_path` is present and non-empty, return it verbatim.
+/// 3. Else `Err("vault_label or vault_path is required")`.
+fn resolve_vault_arg(args: &Value) -> Result<String, String> {
+    let label = args.get("vault_label").and_then(|v| v.as_str()).unwrap_or("");
+    if !label.is_empty() {
+        return match session::resolve_label(label) {
+            Some((_, p, session::EntryKind::Vault)) => Ok(p.to_string_lossy().into_owned()),
+            Some(_) => Err(format!("session label '{label}' is not a vault")),
+            None    => Err(format!("vault label not in session: {label}")),
+        };
+    }
+    let path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
+    if !path.is_empty() {
+        return Ok(path.to_string());
+    }
+    Err("vault_label or vault_path is required".to_string())
+}
+
 /// Look up a required integer arg. Distinguishes "missing" from
 /// "present but malformed" so callers see actionable errors:
 ///   - absent → `Err("<key> is required")`
@@ -489,10 +517,11 @@ fn handle_update_project_key(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_get_project_keys(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let keys: Vec<String> = match args.get("keys").and_then(|v| v.as_array()) {
         Some(arr) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
         None => return ok_response(id, tool_err("keys is required and must be an array")),
@@ -521,10 +550,11 @@ fn handle_registry_list(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_registry_add(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let registry_path = args.get("registry_path").and_then(|v| v.as_str());
     let rp: Option<&str> = registry_path.filter(|s| !s.is_empty());
     match registry::registry_add(vault_path, rp) {
@@ -535,10 +565,11 @@ fn handle_registry_add(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_registry_remove(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let registry_path = args.get("registry_path").and_then(|v| v.as_str());
     let rp: Option<&str> = registry_path.filter(|s| !s.is_empty());
     match registry::registry_remove(vault_path, rp) {
@@ -624,10 +655,11 @@ fn handle_insert_document(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_query_documents(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     // Accept "issuer" (canonical) with "sender" as backward-compat alias.
     let issuer_filter = args.get("issuer")
         .or_else(|| args.get("sender"))
@@ -655,10 +687,11 @@ fn handle_query_documents(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_get_document(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let doc_id = match require_i64(args, "doc_id") {
         Ok(d) => d,
         Err(msg) => return ok_response(id, tool_err(&msg)),
@@ -674,10 +707,11 @@ fn handle_get_document(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_extract_document(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let doc_id = match require_i64(args, "doc_id") {
         Ok(d) => d,
         Err(msg) => return ok_response(id, tool_err(&msg)),
@@ -695,10 +729,11 @@ fn handle_extract_document(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_set_document_encrypted(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let doc_id = match require_i64(args, "doc_id") {
         Ok(d) => d,
         Err(msg) => return ok_response(id, tool_err(&msg)),
@@ -719,10 +754,11 @@ fn handle_set_document_encrypted(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_update_document(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let doc_id = match require_i64(args, "doc_id") {
         Ok(d) => d,
         Err(msg) => return ok_response(id, tool_err(&msg)),
@@ -740,10 +776,11 @@ fn handle_update_document(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_replace_document_content(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let doc_id = match require_i64(args, "doc_id") {
         Ok(d) => d,
         Err(msg) => return ok_response(id, tool_err(&msg)),
@@ -761,10 +798,11 @@ fn handle_replace_document_content(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_delete_document(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let doc_id = match require_i64(args, "doc_id") {
         Ok(d) => d,
         Err(msg) => return ok_response(id, tool_err(&msg)),
@@ -813,10 +851,11 @@ fn handle_move_document_to_vault(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_vault_inventory(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     match documents::vault_inventory(vault_path) {
         Ok(docs) => match serde_json::to_value(&docs) {
             Ok(v) => ok_response(id, tool_ok(json!({"ok": true, "documents": v, "count": docs.len()}))),
@@ -1458,10 +1497,11 @@ fn handle_set_destination(params: &Value, id: Value) -> RpcResponse {
 
 fn handle_get_destination(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     match destination::get_destination(vault_path) {
         Ok((mode, disk_root)) => ok_response(
             id,
@@ -1797,10 +1837,11 @@ fn handle_set_destination_locked(params: &Value, id: Value) -> RpcResponse {
 fn handle_check_simhash(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
 
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let simhash = args.get("simhash").and_then(|v| v.as_str()).unwrap_or("");
     if simhash.is_empty() {
         return ok_response(id, tool_err("simhash is required"));
@@ -1845,10 +1886,11 @@ fn handle_check_simhash(params: &Value, id: Value) -> RpcResponse {
 fn handle_check_dhash(params: &Value, id: Value) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
 
-    let vault_path = args.get("vault_path").and_then(|v| v.as_str()).unwrap_or("");
-    if vault_path.is_empty() {
-        return ok_response(id, tool_err("vault_path is required"));
-    }
+    let __vault_path_owned = match resolve_vault_arg(args) {
+        Ok(p) => p,
+        Err(m) => return ok_response(id, tool_err(&m)),
+    };
+    let vault_path: &str = &__vault_path_owned;
     let dhash = args.get("dhash").and_then(|v| v.as_str()).unwrap_or("");
     if dhash.is_empty() {
         return ok_response(id, tool_err("dhash is required"));
