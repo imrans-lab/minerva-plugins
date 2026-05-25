@@ -1316,11 +1316,80 @@ pub fn run(
     // process_plan, plan.total is already correct and must NOT be
     // overwritten — it would clamp the drain check to this iteration's
     // file count, prematurely flipping the batch to Completed.
+    // Bug 019e5bc946: audit_append only ran on successful placement, so a
+    // run where every file errored produced zero audit rows — audit_tail
+    // returned "no file". Write one row per non-success ProcessItem here so
+    // failures appear in the audit log alongside placements. Use the
+    // existing audit::AuditRow shape (sha256 + destination columns left
+    // empty — the per-file failure happens BEFORE sha256 / routing in some
+    // paths). Source_filename uses "label/rel_path" as the locator since
+    // ProcessItem does not carry abs_path.
+    if audit_enabled && !audit_path.is_empty() {
+        let mut failure_rows: Vec<audit::AuditRow> = Vec::new();
+        for item in &result.items {
+            let is_failure = match item.status.as_str() {
+                "placed" | "skipped_already_processed" => false,
+                _ => true,
+            };
+            if is_failure {
+                let detail = item.reason.clone().unwrap_or_else(|| item.status.clone());
+                let rule_label = item.rule_label.clone().unwrap_or_default();
+                let source_filename = if item.source_label.is_empty() {
+                    item.source_path_relative.clone()
+                } else {
+                    format!("{}/{}", item.source_label, item.source_path_relative)
+                };
+                failure_rows.push(audit::AuditRow {
+                    timestamp: crate::types::now_iso(),
+                    event: "placement".to_string(),
+                    source_sha256: String::new(),
+                    source_filename,
+                    rule_label,
+                    destination_id: String::new(),
+                    destination_kind: String::new(),
+                    resolved_path: String::new(),
+                    disposition: item.status.clone(),
+                    detail,
+                    model_spec: model_label_str.clone(),
+                });
+            }
+        }
+        if !failure_rows.is_empty() {
+            if let Err(e) = audit::append_rows(Path::new(audit_path), &failure_rows) {
+                log::warn!(
+                    "process: failure audit append failed at '{}': {} (continuing, non-fatal)",
+                    audit_path,
+                    e.message
+                );
+            }
+        }
+    }
+
     with_controller(|c| {
         let Some(b) = c.batch.as_mut() else { return };
         b.placed  += result.moved as usize;
         b.skipped += result.skipped_already_processed as usize;
         b.errored += (result.unprocessable + result.conflicts) as usize;
+        // Bug 019e5bc927: counter was already bumped above, but result.items
+        // carries the per-file reason strings (extract_error, classify_error,
+        // empty LLM response, no rule matched, conflict, etc.). Propagate
+        // them into b.errors[] so process_status surfaces actual diagnoses
+        // to agents instead of just a "errored:N, errors:[]" pair.
+        for item in &result.items {
+            let is_failure = match item.status.as_str() {
+                "placed" | "skipped_already_processed" => false,
+                _ => true,
+            };
+            if is_failure {
+                let message = item.reason
+                    .clone()
+                    .unwrap_or_else(|| item.status.clone());
+                b.errors.push(BatchError {
+                    rel_path: item.source_path_relative.clone(),
+                    message,
+                });
+            }
+        }
         if b.plan.files.is_empty() {
             b.plan.total = b.files_done();
             b.plan.eligible = b.plan.total;

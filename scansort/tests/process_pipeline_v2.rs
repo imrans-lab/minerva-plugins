@@ -314,3 +314,128 @@ fn bug_019e5802d5d8_panel_loop_pattern_accumulates() {
     let _ = child.wait();
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// Bug `019e5bc927417448b09ef38f21db0b40` + `019e5bc946807b0db2dcfab842670782`
+/// — visibility holes surfaced during HITL on 2026-05-24.
+///
+/// Pre-fix:
+///   - `process::run` bulk-bumped `b.errored` from `result.unprocessable +
+///     result.conflicts` but never propagated per-file reasons from
+///     `result.items[]` into `b.errors[]`. So `process_status` always
+///     returned `errored:N, errors:[]` and agents had nothing to diagnose
+///     against.
+///   - Audit log was only written on successful placement. A run where
+///     every file failed (e.g. LLM backend down) produced ZERO audit rows
+///     — `audit_tail` returned "no file at <path>" instead of N failure
+///     rows.
+///
+/// This test exercises both fixes together. Without a real
+/// `host.providers.chat` bridge the classify call errors per file, so
+/// every file ends up `unprocessable`. After the run we assert:
+///   (a) `process_status.active_batch.errors[]` has one entry per file
+///       with a non-empty `message`.
+///   (b) `audit_tail(log_path)` returns one row per file with a
+///       non-empty `detail` carrying the failure reason.
+#[test]
+fn bug_019e5bc927_and_5bc946_failure_visibility() {
+    let work = common::unique_tmp("c8-fail-vis");
+    std::fs::create_dir_all(&work).unwrap();
+    let source = work.join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    // Distinct content per file so each has a unique sha256 — otherwise the
+    // first extract-fail records the sha in source_state and the rest get
+    // bucketed as skipped_already_processed instead of errored.
+    for i in 0..3 {
+        let contents = format!("%PDF-1.4\nfake-{i}-distinct-payload");
+        std::fs::write(source.join(format!("doc-{i}.pdf")), contents.as_bytes()).unwrap();
+    }
+    let audit_path = work.join("audit.csv");
+    let lib = work.join("library.rules.json");
+    let (mut child, mut stdin, mut out) = common::spawn_plugin_with_isolated_library(&lib);
+    let _ = common::handshake(&mut stdin, &mut out);
+
+    common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"minerva_scansort_session_open_source",
+            "arguments":{"label":"S","path": source.to_str().unwrap()}
+        }
+    }));
+    let plan = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"minerva_scansort_process_plan",
+            "arguments":{"scope":{"kind":"all_sources"}}
+        }
+    }));
+    let bid = common::unwrap_tool(&plan).expect("plan")["batch_id"].as_str().unwrap().to_string();
+
+    // Run the whole batch with audit_enabled — no real LLM, so every
+    // file fails at classify.
+    let _run = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"minerva_scansort_process_run",
+            "arguments":{
+                "batch_id": &bid,
+                "audit_enabled": true,
+                "audit_path": audit_path.to_str().unwrap()
+            }
+        }
+    }));
+
+    // (a) Bug 019e5bc927 — process_status errors[] must carry per-file
+    //     reasons, not be empty.
+    let st = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"minerva_scansort_process_status","arguments":{}
+        }
+    }));
+    let st_inner = common::unwrap_tool(&st).expect("status");
+    let active = &st_inner["active_batch"];
+    assert!(!active.is_null(), "active_batch must not be null after run");
+    let errored = active["totals"]["errored"].as_i64().expect("errored");
+    assert_eq!(errored, 3,
+        "totals.errored must equal 3 (all 3 files classify-failed without LLM): {st_inner}");
+    let errors_arr = active["errors"].as_array().expect("errors must be array");
+    assert_eq!(errors_arr.len(), 3,
+        "BUG 019e5bc927 REGRESSION: errors[] must carry one entry per failed \
+         file (was empty pre-fix); got {}: {st_inner}",
+        errors_arr.len());
+    for (i, e) in errors_arr.iter().enumerate() {
+        let rel = e["rel_path"].as_str().expect("rel_path");
+        let msg = e["message"].as_str().expect("message");
+        assert!(!rel.is_empty(),
+            "errors[{i}].rel_path must be non-empty: {e}");
+        assert!(!msg.is_empty(),
+            "BUG 019e5bc927 REGRESSION: errors[{i}].message must be non-empty (carried \
+             the classify_error reason); got empty: {e}");
+    }
+
+    // (b) Bug 019e5bc946 — audit log must exist and carry one row per
+    //     failed file with a non-empty detail.
+    let tail = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+            "name":"minerva_scansort_audit_tail",
+            "arguments":{"log_path": audit_path.to_str().unwrap(), "limit": 50}
+        }
+    }));
+    let tail_inner = common::unwrap_tool(&tail).expect(
+        "BUG 019e5bc946 REGRESSION: audit_tail must succeed (audit file must exist \
+         even when every file failed); was 'no file at <path>' pre-fix"
+    );
+    let rows = tail_inner["rows"].as_array().expect("rows must be array");
+    assert_eq!(rows.len(), 3,
+        "BUG 019e5bc946 REGRESSION: audit log must carry one row per failed file \
+         (was 0 pre-fix); got {}: {tail_inner}",
+        rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        let detail = row["detail"].as_str().unwrap_or("");
+        let disposition = row["disposition"].as_str().unwrap_or("");
+        assert!(!detail.is_empty(),
+            "audit row[{i}].detail must carry the failure reason: {row}");
+        assert!(!disposition.is_empty() && disposition != "placed",
+            "audit row[{i}].disposition must be a failure status, not 'placed': {row}");
+    }
+
+    drop(stdin);
+    let _ = child.wait();
+    std::fs::remove_dir_all(&work).ok();
+}
