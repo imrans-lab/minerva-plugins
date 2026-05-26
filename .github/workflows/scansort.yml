@@ -103,10 +103,12 @@ jobs:
           mkdir -p "$PACKDIR"
           cp target/release/scansort-plugin${{ matrix.ext }} "$PACKDIR/"
           cp manifest.json "$PACKDIR/"
+          # SHA256SUMS covers the binary AND manifest.json — Minerva's
+          # installer will need both verified for a trustworthy install.
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd "$PACKDIR" && sha256sum scansort-plugin${{ matrix.ext }} > scansort-plugin${{ matrix.ext }}.sha256)
+            (cd "$PACKDIR" && sha256sum scansort-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
           else
-            (cd "$PACKDIR" && shasum -a 256 scansort-plugin${{ matrix.ext }} > scansort-plugin${{ matrix.ext }}.sha256)
+            (cd "$PACKDIR" && shasum -a 256 scansort-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
           fi
           tar -czf "dist/scansort-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
           ls -la "dist/scansort-${VERSION}-${PLATFORM}.tar.gz"

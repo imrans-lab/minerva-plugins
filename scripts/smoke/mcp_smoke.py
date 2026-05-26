@@ -100,6 +100,19 @@ def main(argv: list) -> int:
         stderr=subprocess.PIPE,
         bufsize=0,
     )
+
+    # Drain stderr concurrently into a bounded list so a chatty plugin
+    # cannot deadlock by filling the pipe buffer (~64KB). On failure the
+    # captured tail is printed; on success it's discarded.
+    stderr_lines: list = []
+    def _drain_stderr():
+        assert proc.stderr is not None
+        for raw in iter(proc.stderr.readline, b""):
+            if len(stderr_lines) < 200:
+                stderr_lines.append(raw.decode("utf-8", errors="replace").rstrip())
+    drainer = threading.Thread(target=_drain_stderr, daemon=True)
+    drainer.start()
+
     watchdog = kill_after(proc, TIMEOUT_SECONDS + 2.0)
     deadline = time.monotonic() + TIMEOUT_SECONDS
 
@@ -177,6 +190,12 @@ def main(argv: list) -> int:
                     proc.wait(timeout=2.0)
             except Exception:
                 pass
+        # If we failed, surface a tail of stderr — invaluable for debugging
+        # CI failures where the binary printed an error before exiting.
+        if sys.exc_info()[0] is SystemExit and stderr_lines:
+            print("--- stderr (last 200 lines) ---", file=sys.stderr)
+            for line in stderr_lines[-50:]:
+                print(line, file=sys.stderr)
 
 
 if __name__ == "__main__":

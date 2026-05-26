@@ -108,10 +108,12 @@ jobs:
           mkdir -p "$PACKDIR"
           cp build/cad-plugin${{ matrix.ext }} "$PACKDIR/"
           cp manifest.json "$PACKDIR/"
+          # SHA256SUMS covers the binary AND manifest.json — Minerva's
+          # installer will need both verified for a trustworthy install.
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd "$PACKDIR" && sha256sum cad-plugin${{ matrix.ext }} > cad-plugin${{ matrix.ext }}.sha256)
+            (cd "$PACKDIR" && sha256sum cad-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
           else
-            (cd "$PACKDIR" && shasum -a 256 cad-plugin${{ matrix.ext }} > cad-plugin${{ matrix.ext }}.sha256)
+            (cd "$PACKDIR" && shasum -a 256 cad-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
           fi
           tar -czf "dist/cad-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
           ls -la "dist/cad-${VERSION}-${PLATFORM}.tar.gz"
