@@ -439,3 +439,145 @@ fn bug_019e5bc927_and_5bc946_failure_visibility() {
     let _ = child.wait();
     std::fs::remove_dir_all(&work).ok();
 }
+
+/// Bug `019e5802d5d8` — offset-advancement gap (C4 follow-up).
+///
+/// Pre-fix, `handle_process_run` hard-coded `offset=0` when calling
+/// `process::run`. A panel that calls `process_run(batch_id, limit=1)` in a
+/// loop (with NO explicit offset field — the production panel pattern) would
+/// therefore process `explicit_files[0]` on every iteration. The result:
+/// totals.total climbs correctly, but ALL three `errors[].rel_path` entries
+/// pointed at the same file (the first file, repeated).
+///
+/// Post-fix: `handle_process_run` derives `offset` from
+/// `process::current_batch_files_done()`, which equals `placed + skipped +
+/// errored` — exactly the number of files already consumed.
+///
+/// This test pins the fix by asserting that after three `process_run(limit=1)`
+/// calls (no offset field, matching the panel), the `errors[]` array contains
+/// THREE DISTINCT `rel_path` values — one per file — and those paths match the
+/// three files created in the source dir. Without a real LLM host every file
+/// fails at classify (empty/missing response), so `totals.errored == 3` and
+/// all three end up in `errors[]`. The distinctness assertion is the regression
+/// pin: pre-fix, all three entries had the same `rel_path` (file[0]).
+#[test]
+fn bug_offset_advancement_panel_loop_pattern() {
+    let work = common::unique_tmp("c8-offset-adv");
+    std::fs::create_dir_all(&work).unwrap();
+    let source = work.join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    // DISTINCT content per file — unique sha256 so the source-state manifest
+    // doesn't bucket later files as already-processed.
+    let file_names: Vec<String> = (0..3)
+        .map(|i| {
+            let name = format!("doc-{i}.pdf");
+            let content = format!("%PDF-1.4\nfake-{i}-unique-payload-for-offset-test");
+            std::fs::write(source.join(&name), content.as_bytes()).unwrap();
+            name
+        })
+        .collect();
+
+    let lib = work.join("library.rules.json");
+    let (mut child, mut stdin, mut out) = common::spawn_plugin_with_isolated_library(&lib);
+    let _ = common::handshake(&mut stdin, &mut out);
+
+    common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"minerva_scansort_session_open_source",
+            "arguments":{"label":"S","path": source.to_str().unwrap()}
+        }
+    }));
+
+    let plan = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"minerva_scansort_process_plan",
+            "arguments":{"scope":{"kind":"all_sources"}}
+        }
+    }));
+    let plan_inner = common::unwrap_tool(&plan).expect("plan");
+    let bid = plan_inner["batch_id"]
+        .as_str()
+        .expect("batch_id")
+        .to_string();
+    assert_eq!(
+        plan_inner["total"],
+        json!(3),
+        "plan must enumerate 3 files"
+    );
+
+    // Panel pattern: three calls with limit=1 and NO offset field.
+    for i in 0..3_u64 {
+        let _run = common::rpc(&mut stdin, &mut out, json!({
+            "jsonrpc":"2.0","id": 10 + i,"method":"tools/call","params":{
+                "name":"minerva_scansort_process_run",
+                "arguments":{"batch_id": &bid, "limit": 1}
+            }
+        }));
+    }
+
+    // Read final status.
+    let st = common::rpc(&mut stdin, &mut out, json!({
+        "jsonrpc":"2.0","id":20,"method":"tools/call","params":{
+            "name":"minerva_scansort_process_status","arguments":{}
+        }
+    }));
+    let st_inner = common::unwrap_tool(&st).expect("process_status");
+    let active = &st_inner["active_batch"];
+    assert!(!active.is_null(), "active_batch must not be null after loop");
+
+    // REGRESSION PIN 1: totals.total must be 3 (all files were attempted).
+    let total = active["totals"]["total"].as_i64().unwrap_or(0);
+    assert_eq!(
+        total, 3,
+        "OFFSET-ADV REGRESSION: totals.total must be 3 after 3 limit=1 iterations: {st_inner}"
+    );
+
+    // T-DRY-4 F4 defensive pin: without a host bridge, classify fails per
+    // file and every file is counted as errored — so placed must be 0 and
+    // errored must equal the file count. Pre-fix this still passed (1 placed
+    // + 2 conflict ≠ 0 + 3), but only because of an unrelated coincidence;
+    // pinning both halves protects future regressions where some files
+    // happen to succeed and mask the offset-zero pattern.
+    assert_eq!(
+        active["totals"]["placed"], json!(0),
+        "expected totals.placed == 0 without LLM bridge: {st_inner}"
+    );
+    assert_eq!(
+        active["totals"]["errored"], json!(3),
+        "expected totals.errored == 3 without LLM bridge: {st_inner}"
+    );
+
+    // REGRESSION PIN 2: errors[] must have DISTINCT rel_paths.
+    // Pre-fix: all 3 entries had the same rel_path (file[0] repeated).
+    // Post-fix: each entry names a different file.
+    let errors_arr = active["errors"].as_array().expect("errors must be an array");
+    assert_eq!(
+        errors_arr.len(), 3,
+        "OFFSET-ADV REGRESSION: errors[] must carry 3 entries (one per file — \
+         no LLM, all classify-fail): {st_inner}"
+    );
+    let mut distinct: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in errors_arr {
+        let rp = e["rel_path"].as_str().expect("errors[].rel_path must be a string");
+        assert!(!rp.is_empty(), "errors[].rel_path must not be empty: {e}");
+        distinct.insert(rp.to_string());
+    }
+    assert_eq!(
+        distinct.len(), 3,
+        "OFFSET-ADV REGRESSION: errors[] rel_paths are NOT distinct — \
+         pre-fix all 3 pointed at file[0]; got {:?}", distinct
+    );
+
+    // REGRESSION PIN 3: the 3 distinct rel_paths must match the 3 created files.
+    for name in &file_names {
+        assert!(
+            distinct.iter().any(|rp| rp.ends_with(name.as_str())),
+            "OFFSET-ADV REGRESSION: file '{}' not found in errors[] rel_paths {:?}",
+            name, distinct
+        );
+    }
+
+    drop(stdin);
+    let _ = child.wait();
+    std::fs::remove_dir_all(&work).ok();
+}

@@ -3176,12 +3176,23 @@ fn handle_process_run(
     // already enumerated those files).
     let explicit_files = process::current_batch_file_paths();
 
+    // Bug 019e5802d5d8 (offset-advancement gap, C4 follow-up): use the
+    // batch's completed-file count as the offset so successive limit=1
+    // iterations step through file[0], file[1], … not file[0] N times.
+    // Parent DCR: 019e564809a9.
+    //
+    // Any explicit `offset` arg from the caller is INTENTIONALLY ignored
+    // here — batch progress is the single source of truth on this code
+    // path. The cycle-2 back-compat `process` tool (handle_process) still
+    // honours an explicit offset arg for callers that pre-date the batch
+    // pipeline.
+    let offset = process::current_batch_files_done();
     let result = process::run(
         out, lines, next_id,
         &model, model_spec,
         &doc_type_strategy,
         audit_enabled, &audit_path,
-        0, limit,
+        offset, limit,
         &vault_passwords,
         &explicit_files,
     );

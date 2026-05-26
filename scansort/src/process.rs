@@ -135,6 +135,20 @@ pub fn current_batch_id() -> Option<String> {
     with_controller(|c| c.batch.as_ref().map(|b| b.plan.batch_id.clone()))
 }
 
+/// C4 follow-up (bug 019e5802d5d8, offset-advancement gap): derive the
+/// next-file offset from the current batch's completed-file count.
+///
+/// Used by `handle_process_run` so a panel that calls `process_run(limit=1)`
+/// in a loop processes `explicit_files[0]`, `explicit_files[1]`, …  rather
+/// than `explicit_files[0]` N times. `files_done()` = placed + skipped +
+/// errored, which is exactly the number of entries already consumed from the
+/// front of the explicit-files slice — so it is the correct next-file index.
+pub fn current_batch_files_done() -> usize {
+    with_controller(|c| {
+        c.batch.as_ref().map(|b| b.files_done()).unwrap_or(0)
+    })
+}
+
 /// Flip Pending → Running. No-op if already Running; logs a warning if
 /// the batch is terminal. First call sets `started_at`.
 pub fn start_running() {
@@ -1327,8 +1341,19 @@ pub fn run(
     if audit_enabled && !audit_path.is_empty() {
         let mut failure_rows: Vec<audit::AuditRow> = Vec::new();
         for item in &result.items {
+            // Status vocabulary (line 1230): "moved" = any destination took
+            // the file (success); "placed" = single-dest alias for moved;
+            // "conflict" = all destinations already had it (counted in
+            // result.conflicts / b.errored — audited as failure with detail);
+            // "unprocessable" = routing failed (no rule matched, LLM empty,
+            // extract error, etc.). "skipped_already_processed" = dedup hit.
+            // "moved" must be treated as success, not failure.
+            // NOTE: "classified" appears only on the in-flight `meta` struct
+            // (line 1184) — never on result.items[].status. The catch-all
+            // `_ => true` would still treat it as failure if that ever
+            // changed, which is the safe default.
             let is_failure = match item.status.as_str() {
-                "placed" | "skipped_already_processed" => false,
+                "placed" | "moved" | "skipped_already_processed" => false,
                 _ => true,
             };
             if is_failure {
@@ -1375,9 +1400,11 @@ pub fn run(
         // empty LLM response, no rule matched, conflict, etc.). Propagate
         // them into b.errors[] so process_status surfaces actual diagnoses
         // to agents instead of just a "errored:N, errors:[]" pair.
+        // "moved" is success (any destination took the file) — same exclusion
+        // set as the audit block above. See status vocabulary at line ~1230.
         for item in &result.items {
             let is_failure = match item.status.as_str() {
-                "placed" | "skipped_already_processed" => false,
+                "placed" | "moved" | "skipped_already_processed" => false,
                 _ => true,
             };
             if is_failure {
