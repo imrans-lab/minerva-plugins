@@ -26,11 +26,16 @@ from pathlib import Path
 
 PLUGIN_DIRS = ["cad", "presentation", "scansort"]  # sorted
 
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2
 
 REPO_OWNER = "imrans-lab"
 REPO_NAME = "minerva-plugins"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main"
+RELEASES_BASE = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download"
+
+# Per-platform tarball targets. Must stay in sync with the per-plugin
+# matrix workflows; if a target is added/removed there, update here too.
+TARGETS = ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"]
 
 
 def get_repo_root() -> Path:
@@ -86,18 +91,35 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path):
         # Plugin not yet released. Skip from marketplace registry —
         # users only see things they can actually install.
         return None
+
+    # Tarball file naming uses the MANIFEST's version field, not the
+    # version derived from the tag — the per-plugin workflows read
+    # manifest.json at pack time. Track both so the client knows which
+    # to use when constructing the download URL.
+    manifest_version = manifest.get("version", "0.0.0")
     prefix = f"{plugin_id}-v"
-    if tag.startswith(prefix):
-        version = tag[len(prefix):]
-    else:
-        version = manifest.get("version", "0.0.0")
+    tag_version = tag[len(prefix):] if tag.startswith(prefix) else manifest_version
+
     rel_manifest = manifest_path.relative_to(repo_root).as_posix()
+
+    # Build per-target download URLs deterministically from tag +
+    # manifest version + target. Tarball naming convention is
+    # `<id>-<manifest-version>-<target>.tar.gz` (see per-plugin workflow
+    # Pack step). The release lives at
+    # `<RELEASES_BASE>/<release_tag>/<tarball-filename>`.
+    downloads = {
+        target: f"{RELEASES_BASE}/{tag}/{plugin_id}-{manifest_version}-{target}.tar.gz"
+        for target in TARGETS
+    }
+
     return {
         "id": plugin_id,
         "name": manifest.get("name", plugin_id),
-        "version": version,
+        "version": tag_version,
+        "manifest_version": manifest_version,
         "release_tag": tag,
         "manifest_url": f"{RAW_BASE}/{rel_manifest}",
+        "downloads": downloads,
     }
 
 
