@@ -1,4 +1,12 @@
 {
   "registry_version": 1,
-  "plugins": []
+  "plugins": [
+    {
+      "id": "scansort",
+      "name": "Scansort",
+      "version": "0.0.0-pre",
+      "release_tag": "scansort-v0.0.0-pre",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/scansort/manifest.json"
+    }
+  ]
 }
