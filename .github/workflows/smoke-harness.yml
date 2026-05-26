@@ -1,0 +1,39 @@
+name: smoke-harness
+
+# W0 self-test: proves mcp_smoke.py runs under GitHub Actions against
+# the currently-committed plugin binaries. Will be deleted in W7 when
+# the committed binaries are purged; by then W1–W3's per-plugin build
+# workflows invoke the same harness against freshly-built artifacts.
+
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "scripts/smoke/**"
+      - ".github/workflows/smoke-harness.yml"
+  pull_request:
+    paths:
+      - "scripts/smoke/**"
+      - ".github/workflows/smoke-harness.yml"
+  workflow_dispatch:
+
+jobs:
+  harness-self-test:
+    name: harness self-test (linux-x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Smoke — scansort
+        run: python3 scripts/smoke/mcp_smoke.py scansort/scansort-plugin
+
+      - name: Smoke — cad
+        run: python3 scripts/smoke/mcp_smoke.py cad/cad-plugin
+
+      - name: Smoke — presentation
+        run: python3 scripts/smoke/mcp_smoke.py presentation/presentation-plugin
