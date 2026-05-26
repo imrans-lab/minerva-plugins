@@ -2,6 +2,20 @@
   "registry_version": 1,
   "plugins": [
     {
+      "id": "cad",
+      "name": "CAD",
+      "version": "0.0.0-pre",
+      "release_tag": "cad-v0.0.0-pre",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/cad/manifest.json"
+    },
+    {
+      "id": "presentation",
+      "name": "Presentation",
+      "version": "0.0.0-pre",
+      "release_tag": "presentation-v0.0.0-pre",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/presentation/manifest.json"
+    },
+    {
       "id": "scansort",
       "name": "Scansort",
       "version": "0.0.0-pre",
