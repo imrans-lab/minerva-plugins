@@ -1,5 +1,7 @@
 name: smoke-harness
 
+# retry-trigger: 2026-05-26 — Actions budget set; previous run was
+# scheduler-rejected with billing annotation.
 # W0 self-test: proves mcp_smoke.py runs under GitHub Actions against
 # the currently-committed plugin binaries. Will be deleted in W7 when
 # the committed binaries are purged; by then W1–W3's per-plugin build
