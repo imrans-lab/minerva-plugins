@@ -122,10 +122,11 @@ jobs:
           retention-days: 14
 
   release:
-    name: Publish ${{ github.ref_name }} GitHub Release
+    name: Publish release
     needs: build
-    # Only fires on `scansort-v*` tag pushes; quiet on branch pushes/PRs.
-    if: startsWith(github.ref, 'refs/tags/scansort-v')
+    # Auto-tag releases on every push (branch or explicit tag). Skip
+    # PRs — fork tokens are read-only and cannot publish releases.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -142,9 +143,38 @@ jobs:
       - name: List downloaded artifacts
         run: ls -la artifacts/
 
+      - name: Compute tag + prerelease flag
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("scansort/manifest.json"))["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            # Explicit tag push: honor the tag as-is, not a prerelease.
+            TAG="${GITHUB_REF#refs/tags/}"
+            PRE="false"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            # Clean version tag on main pushes.
+            TAG="scansort-v${VERSION}"
+            PRE="false"
+          else
+            # Auto-tag from any other branch (topic/development/etc.) with
+            # `-branch-<sanitized-branch>` sentinel so the marketplace
+            # registry filter can skip these test builds.
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="scansort-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "Computed: tag=$TAG prerelease=$PRE"
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
           files: artifacts/scansort-*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true

@@ -44,7 +44,13 @@ def get_repo_root() -> Path:
 
 
 def latest_tag_for(plugin_id: str, repo_root: Path):
-    """Return the highest semver `<plugin_id>-v*` tag, or None."""
+    """Return the highest semver `<plugin_id>-v*` tag, or None.
+
+    Skips tags containing the `-branch-` sentinel — those are auto-tagged
+    test builds from non-main branches and should NOT advertise in the
+    marketplace registry. Only main pushes and explicit tag pushes
+    produce clean release tags that surface to end users.
+    """
     out = subprocess.run(
         [
             "git",
@@ -60,7 +66,11 @@ def latest_tag_for(plugin_id: str, repo_root: Path):
         text=True,
     )
     tags = [t for t in out.stdout.strip().split("\n") if t]
-    return tags[0] if tags else None
+    for t in tags:
+        if "-branch-" in t:
+            continue
+        return t
+    return None
 
 
 def build_plugin_entry(plugin_dir: Path, repo_root: Path):
