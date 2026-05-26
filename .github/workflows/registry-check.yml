@@ -1,0 +1,53 @@
+name: registry-check
+
+# Fails the build if registry.json drifts from what scripts/regen_registry.py
+# would produce. The registry is committed (Minerva fetches it via raw URL)
+# so it must stay in sync with manifests + tags.
+
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "registry.json"
+      - "scripts/regen_registry.py"
+      - "*/manifest.json"
+      - ".github/workflows/registry-check.yml"
+    tags: ["*-v*"]
+  pull_request:
+    paths:
+      - "registry.json"
+      - "scripts/regen_registry.py"
+      - "*/manifest.json"
+      - ".github/workflows/registry-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: registry.json drift check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the generator can find git tags of the form
+          # <plugin>-v*.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Regenerate registry.json
+        run: python3 scripts/regen_registry.py
+
+      - name: Verify no drift
+        run: |
+          if ! git diff --exit-code registry.json; then
+            echo "::error::registry.json is stale."
+            echo "::error::Run: python3 scripts/regen_registry.py && git add registry.json && git commit"
+            exit 1
+          fi
+          echo "registry.json is in sync"
