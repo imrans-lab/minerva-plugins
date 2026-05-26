@@ -21,9 +21,8 @@ permissions:
 jobs:
   build:
     name: cad (${{ matrix.target }})
-    # Cost discipline: on PR, only run linux-x86_64. Full matrix on main +
-    # dcr branches + tag pushes + manual dispatch.
-    if: github.event_name != 'pull_request' || matrix.target == 'linux-x86_64'
+    # Public-repo standard runners are free across all OSes, so full matrix
+    # runs on every trigger. (Matrix context isn't valid in job-level `if:`.)
     strategy:
       fail-fast: false
       matrix:
