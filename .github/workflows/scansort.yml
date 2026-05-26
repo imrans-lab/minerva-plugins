@@ -1,0 +1,117 @@
+name: scansort
+
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "scansort/**"
+      - ".github/workflows/scansort.yml"
+      - "scripts/smoke/**"
+    tags: ["scansort-v*"]
+  pull_request:
+    paths:
+      - "scansort/**"
+      - ".github/workflows/scansort.yml"
+      - "scripts/smoke/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: scansort (${{ matrix.target }})
+    # Cost discipline: on PR, only run linux-x86_64. Full matrix on main +
+    # dcr branches + tag pushes + manual dispatch.
+    if: github.event_name != 'pull_request' || matrix.target == 'linux-x86_64'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            rust-targets: ""
+            ext: ""
+          - target: linux-arm64
+            runs-on: ubuntu-22.04-arm
+            rust-targets: ""
+            ext: ""
+          - target: macos-universal
+            runs-on: macos-14
+            rust-targets: "x86_64-apple-darwin,aarch64-apple-darwin"
+            ext: ""
+          - target: windows-x86_64
+            runs-on: windows-2022
+            rust-targets: ""
+            ext: ".exe"
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: scansort
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scansort -> target
+          key: ${{ matrix.target }}
+
+      - name: Build (native)
+        if: matrix.target != 'macos-universal'
+        run: cargo build --release --locked
+
+      - name: Build (macOS universal — lipo x86_64 + arm64)
+        if: matrix.target == 'macos-universal'
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/scansort-plugin \
+            target/aarch64-apple-darwin/release/scansort-plugin \
+            -output target/release/scansort-plugin
+          lipo -info target/release/scansort-plugin
+
+      - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
+        if: matrix.target == 'linux-x86_64'
+        run: cargo test --release --locked
+
+      - name: Smoke
+        run: python3 ../scripts/smoke/mcp_smoke.py target/release/scansort-plugin${{ matrix.ext }}
+
+      - name: Pack release tarball
+        run: |
+          PLATFORM="${{ matrix.target }}"
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
+          mkdir -p dist
+          PACKDIR="dist/scansort-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp target/release/scansort-plugin${{ matrix.ext }} "$PACKDIR/"
+          cp manifest.json "$PACKDIR/"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && sha256sum scansort-plugin${{ matrix.ext }} > scansort-plugin${{ matrix.ext }}.sha256)
+          else
+            (cd "$PACKDIR" && shasum -a 256 scansort-plugin${{ matrix.ext }} > scansort-plugin${{ matrix.ext }}.sha256)
+          fi
+          tar -czf "dist/scansort-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          ls -la "dist/scansort-${VERSION}-${PLATFORM}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scansort-${{ matrix.target }}
+          path: scansort/dist/scansort-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
