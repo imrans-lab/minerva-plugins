@@ -1,5 +1,7 @@
 name: scansort
 
+# retrigger 2026-05-26: validate that imrans-lab org now supports the
+# specialty runner labels (ubuntu-22.04-arm, macos-14, windows-2022).
 on:
   push:
     branches: [main, "dcr/**"]
