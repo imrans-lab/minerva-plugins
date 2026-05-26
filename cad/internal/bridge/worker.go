@@ -14,8 +14,17 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
+)
+
+// signalKind is a portable signal selector for terminateProcessGroup.
+// Windows collapses both kinds to immediate termination; Unix maps them
+// onto SIGTERM and SIGKILL respectively.
+type signalKind int
+
+const (
+	sigTerm signalKind = iota
+	sigKill
 )
 
 const (
@@ -147,7 +156,7 @@ func (w *Worker) startLocked(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, w.pythonPath, "-m", "mcad_worker") //nolint:gosec
 	cmd.Dir = w.workerDir
 	cmd.Env = buildEnv()
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -327,9 +336,9 @@ func (w *Worker) killLocked() {
 	if w.cmd == nil || w.cmd.Process == nil {
 		return
 	}
-	// Kill entire process group to catch any grandchildren.
-	pgid := w.cmd.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	// Kill entire process group to catch any grandchildren (Unix);
+	// terminates the bare process on Windows.
+	_ = terminateProcessGroup(w.cmd.Process, sigKill)
 	w.cmd = nil
 	w.stdin = nil
 	w.stdout = nil
@@ -463,9 +472,8 @@ func (w *Worker) Shutdown(timeout time.Duration) {
 	w.mu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
-		pgid := cmd.Process.Pid
 		log.Printf("[bridge.Worker] worker did not exit in %s — sending SIGTERM", timeout)
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		_ = terminateProcessGroup(cmd.Process, sigTerm)
 
 		select {
 		case <-doneC:
@@ -475,7 +483,7 @@ func (w *Worker) Shutdown(timeout time.Duration) {
 		}
 
 		log.Printf("[bridge.Worker] worker did not exit after SIGTERM — sending SIGKILL")
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = terminateProcessGroup(cmd.Process, sigKill)
 	}
 
 	// Best-effort wait.

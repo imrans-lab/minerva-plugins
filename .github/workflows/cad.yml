@@ -42,12 +42,11 @@ jobs:
             goos: darwin
             goarch: ""
             ext: ""
-          # NOTE: windows-x86_64 deliberately omitted — cad's
-          # internal/bridge/worker.go uses Unix-only syscalls
-          # (syscall.Kill, SysProcAttr.Setpgid) for subprocess
-          # process-group teardown. Source needs build-tag split before
-          # Windows can build. Tracked as follow-up work_item under
-          # DCR 019e62ad894d.
+          - target: windows-x86_64
+            runs-on: windows-2022
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
     runs-on: ${{ matrix.runs-on }}
     defaults:
       run:
