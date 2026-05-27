@@ -106,14 +106,23 @@ jobs:
           mkdir -p "$PACKDIR"
           cp build/presentation-plugin${{ matrix.ext }} "$PACKDIR/"
           cp manifest.json "$PACKDIR/"
-          # SHA256SUMS covers the binary AND manifest.json — Minerva's
-          # installer will need both verified for a trustworthy install.
+          # Include the ui/ directory — manifest declares godot_scene panels
+          # referencing ui/SlideEditorPanel.tscn + ui/*.gd tile-kind scripts.
+          # Without these the marketplace-installed plugin can start its
+          # backend but cannot open its panel ("Whitelisted script not
+          # found"). Side-load works because ui/ exists in the plugin source.
+          cp -r ui "$PACKDIR/"
+          # SHA256SUMS covers binary + manifest + every shipped ui/ file.
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd "$PACKDIR" && sha256sum presentation-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
           else
-            (cd "$PACKDIR" && shasum -a 256 presentation-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
           fi
           tar -czf "dist/presentation-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          echo "Packed contents (first 30):"
+          tar -tzf "dist/presentation-${VERSION}-${PLATFORM}.tar.gz" | head -30
           ls -la "dist/presentation-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact

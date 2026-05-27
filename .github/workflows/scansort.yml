@@ -103,14 +103,26 @@ jobs:
           mkdir -p "$PACKDIR"
           cp target/release/scansort-plugin${{ matrix.ext }} "$PACKDIR/"
           cp manifest.json "$PACKDIR/"
-          # SHA256SUMS covers the binary AND manifest.json — Minerva's
-          # installer will need both verified for a trustworthy install.
+          # Include the ui/ directory — manifest declares godot_scene panels
+          # referencing ui/ScansortPanel.tscn + ui/*.gd files, which Minerva's
+          # PluginScenePanelHost loads at panel-open time from the install
+          # directory. Without these the marketplace-installed plugin can
+          # start its backend (binary works) but cannot open its panel
+          # ("Whitelisted script not found"). Side-load worked because the
+          # ui/ tree exists in the plugin source dir on disk.
+          cp -r ui "$PACKDIR/"
+          # SHA256SUMS covers binary + manifest + every shipped ui/ file so
+          # tampering with any panel script is caught at install time.
           if command -v sha256sum >/dev/null 2>&1; then
-            (cd "$PACKDIR" && sha256sum scansort-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
           else
-            (cd "$PACKDIR" && shasum -a 256 scansort-plugin${{ matrix.ext }} manifest.json > SHA256SUMS)
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
           fi
           tar -czf "dist/scansort-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          echo "Packed contents:"
+          tar -tzf "dist/scansort-${VERSION}-${PLATFORM}.tar.gz" | head -30
           ls -la "dist/scansort-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
