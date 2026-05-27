@@ -1,6 +1,6 @@
 # plugins
 
-A repo of plugins for [Minerva](https://github.com/ipeerbhai/Minerva) and other agentic platforms that speak the same plugin manifest contract.
+A repo of plugins for [Minerva](https://github.com/turnrocklabs/Minerva) and other agentic platforms that speak the same plugin manifest contract.
 
 ## Layout
 
