@@ -4,43 +4,43 @@
     {
       "id": "cad",
       "name": "CAD",
-      "version": "0.0.0-pre",
+      "version": "0.1.0",
       "manifest_version": "0.1.0",
-      "release_tag": "cad-v0.0.0-pre",
+      "release_tag": "cad-v0.1.0",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/cad/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.0.0-pre/cad-0.1.0-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.0.0-pre/cad-0.1.0-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.0.0-pre/cad-0.1.0-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.0.0-pre/cad-0.1.0-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.0/cad-0.1.0-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.0/cad-0.1.0-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.0/cad-0.1.0-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.0/cad-0.1.0-windows-x86_64.tar.gz"
       }
     },
     {
       "id": "presentation",
       "name": "Presentation",
-      "version": "0.0.0-pre",
+      "version": "0.0.1",
       "manifest_version": "0.0.1",
-      "release_tag": "presentation-v0.0.0-pre",
+      "release_tag": "presentation-v0.0.1",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/presentation/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.0-pre/presentation-0.0.1-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.0-pre/presentation-0.0.1-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.0-pre/presentation-0.0.1-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.0-pre/presentation-0.0.1-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.1/presentation-0.0.1-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.1/presentation-0.0.1-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.1/presentation-0.0.1-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.1/presentation-0.0.1-windows-x86_64.tar.gz"
       }
     },
     {
       "id": "scansort",
       "name": "Scansort",
-      "version": "0.0.0-pre",
+      "version": "0.0.1",
       "manifest_version": "0.0.1",
-      "release_tag": "scansort-v0.0.0-pre",
+      "release_tag": "scansort-v0.0.1",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/scansort/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.0-pre/scansort-0.0.1-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.0-pre/scansort-0.0.1-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.0-pre/scansort-0.0.1-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.0-pre/scansort-0.0.1-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.1/scansort-0.0.1-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.1/scansort-0.0.1-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.1/scansort-0.0.1-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/scansort-v0.0.1/scansort-0.0.1-windows-x86_64.tar.gz"
       }
     }
   ]
