@@ -37,3 +37,10 @@ LAYER1_IMPORTS="import build123d; import cadquery_ocp"
 # and which directories to copy into the bundle's site-packages.
 WORKER_SOURCE_DIR="worker"
 WORKER_PACKAGES="mcad_worker mcad"
+
+# --- bundle output location -----------------------------------------------
+# Where the final tarball lands (relative to plugin dir). Must be a path
+# that go:embed can reach from the package using the embed (Go forbids `..`
+# in embed paths, so the bundle must live under the Go source tree). Scratch
+# state (PBS cache, extraction stage) still goes under runtime-build/.
+BUNDLE_OUT_DIR="internal/runtime/bundle"

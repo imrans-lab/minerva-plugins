@@ -58,7 +58,7 @@ fi
 . "$LOCK"
 
 # Sanity-check the lock provided the required vars
-for v in PBS_TAG CPYTHON PIP_PKGS WORKER_SOURCE_DIR WORKER_PACKAGES; do
+for v in PBS_TAG CPYTHON PIP_PKGS WORKER_SOURCE_DIR WORKER_PACKAGES BUNDLE_OUT_DIR; do
   if [ -z "${!v:-}" ]; then
     echo "lock file missing required var: $v" >&2
     exit 65
@@ -122,13 +122,14 @@ esac
 # paths
 # --------------------------------------------------------------------------
 
-BUILD_DIR="$PLUGIN_DIR/runtime-build"
+BUILD_DIR="$PLUGIN_DIR/runtime-build"          # scratch: PBS cache + extraction stage
 CACHE_DIR="$BUILD_DIR/cache/pbs"
 STAGE_DIR="$BUILD_DIR/runtime-stage/$TRIPLE"
-OUT_TARBALL="$BUILD_DIR/runtime-bundle-$TRIPLE.tar.zst"
-OUT_TARBALL_SHA="$BUILD_DIR/runtime-bundle-$TRIPLE.sha256"
+OUT_DIR="$PLUGIN_DIR/$BUNDLE_OUT_DIR"          # final: must be go:embed-reachable
+OUT_TARBALL="$OUT_DIR/runtime-bundle-$TRIPLE.tar.zst"
+OUT_TARBALL_SHA="$OUT_DIR/runtime-bundle-$TRIPLE.sha256"
 
-mkdir -p "$CACHE_DIR" "$BUILD_DIR"
+mkdir -p "$CACHE_DIR" "$BUILD_DIR" "$OUT_DIR"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 

@@ -169,7 +169,7 @@ func initWorker() {
 	}
 	workerDir := runtime.WorkerScriptDir(pluginRoot)
 
-	pythonPath, err := runtime.PythonPath(workerDir)
+	pythonPath, err := runtime.PythonPath(workerDir, serverName, serverVersion)
 	if err != nil {
 		log.Printf("cad-plugin: WARNING: %v — mcad_validate will fail until python3 is on PATH or .venv exists", err)
 		emitHostNotify("error",
