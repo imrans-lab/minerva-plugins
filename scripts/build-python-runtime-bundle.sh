@@ -185,10 +185,9 @@ fi
 
 if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   echo "[$TRIPLE] native build: pip install via bundled python"
-  # Windows pip needs USERPROFILE (native Windows python checks it first)
-  # for pathlib.Path.expanduser() during metadata bookkeeping. Git Bash may
-  # provide HOME but not USERPROFILE in the form the native Windows binary
-  # recognizes. Set defensively from cygpath(HOME) if needed.
+  # USERPROFILE defense (kept for resilience even though --no-compile sidesteps
+  # the parso install-time import; native Windows python checks USERPROFILE
+  # first for pathlib.Path.expanduser()).
   if [ "$TRIPLE" = "windows-x86_64" ]; then
     if [ -z "${USERPROFILE:-}" ] && [ -n "${HOME:-}" ]; then
       if command -v cygpath >/dev/null 2>&1; then
@@ -196,13 +195,19 @@ if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
       fi
     fi
     if [ -z "${USERPROFILE:-}" ] && [ -n "${LOCALAPPDATA:-}" ]; then
-      # LOCALAPPDATA is typically C:\Users\<user>\AppData\Local; user profile is one dir up.
       export USERPROFILE="$(dirname "$(dirname "$LOCALAPPDATA")")"
     fi
     echo "  USERPROFILE=${USERPROFILE:-<unset>} HOME=${HOME:-<unset>}"
   fi
   if [ ${#DEPS[@]} -gt 0 ]; then
-    "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input "${DEPS[@]}"
+    # --no-compile: pip skips byte-compiling .py → .pyc. Required on Windows
+    # because pip's compileall step imports each module, and parso (transitive
+    # via build123d → IPython → jedi → parso) does Path('~/.cache/parso')
+    # .expanduser() at module-load time. PBS python on Windows can fail this
+    # despite USERPROFILE being set (env propagation across Git Bash → native
+    # .exe is fragile). Compatible regardless: the script strips __pycache__
+    # + *.pyc later for reproducibility, so no .pyc files would survive anyway.
+    "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
   fi
 else
   echo "[$TRIPLE] cross build: pip install via host python with --platform=$WHEEL_PLATS"
