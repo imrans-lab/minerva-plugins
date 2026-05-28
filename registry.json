@@ -10,7 +10,6 @@
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/cad/manifest.json",
       "downloads": {
         "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.2/cad-0.1.2-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.2/cad-0.1.2-linux-arm64.tar.gz",
         "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.2/cad-0.1.2-macos-universal.tar.gz",
         "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/cad-v0.1.2/cad-0.1.2-windows-x86_64.tar.gz"
       }
