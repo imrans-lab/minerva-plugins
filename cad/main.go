@@ -36,7 +36,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "cad"
-	serverVersion   = "0.1.0"
+	serverVersion   = "0.1.1"
 
 	// workerShutdownTimeout is how long we give the worker on plugin shutdown
 	// before SIGTERM kicks in (§5).
@@ -169,7 +169,7 @@ func initWorker() {
 	}
 	workerDir := runtime.WorkerScriptDir(pluginRoot)
 
-	pythonPath, err := runtime.PythonPath(workerDir)
+	pythonPath, err := runtime.PythonPath(workerDir, serverName, serverVersion)
 	if err != nil {
 		log.Printf("cad-plugin: WARNING: %v — mcad_validate will fail until python3 is on PATH or .venv exists", err)
 		emitHostNotify("error",

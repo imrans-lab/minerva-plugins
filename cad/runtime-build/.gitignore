@@ -1,4 +1,9 @@
 # Build outputs (per-platform Python runtime archives) go here.
-# Gitignored to keep the source repo small.
-# Each platform's tar.zst is ~100MB; see parent README for context.
+# Gitignored to keep the source repo small. Each platform's tar.zst is
+# ~150-200MB compressed; uncompressed stage is ~1GB. CI rebuilds from scratch
+# per push; local dev caches the PBS download under cache/pbs/.
+
 *.tar.zst
+*.sha256
+cache/
+runtime-stage/

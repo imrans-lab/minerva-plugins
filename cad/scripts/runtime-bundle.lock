@@ -1,0 +1,46 @@
+# cad/scripts/runtime-bundle.lock — shell-sourceable lock file
+#
+# Source-of-truth pins for the cad-plugin embedded python runtime bundle.
+# Read by scripts/build-python-runtime-bundle.sh (repo root, plugin-agnostic).
+#
+# Format: shell-sourceable KEY=VALUE. Deviates from docket W1a TOML suggestion
+# because only bash reads this in v1; bash TOML parsers are heavyweight and
+# the rubric weighs cost vs readability against the extra dep. Switch to TOML
+# if a Go-side or other-language consumer is added later (cheap migration).
+#
+# Filed under DCR 019e6a4bcb0c71019723011d8f8c8cf1 (CAD plugin embedded PBS
+# python runtime, Plan A). Scope-amended 2026-05-27 to 5-target matrix.
+
+# --- python-build-standalone (PBS) ----------------------------------------
+# Release tag: https://github.com/astral-sh/python-build-standalone/releases
+# Pin a specific PBS release for reproducibility. Bump deliberately when a
+# CVE or new cpython patch matters.
+PBS_TAG="20260510"
+CPYTHON="3.12.13"
+
+# --- plugin python deps ---------------------------------------------------
+# Space-separated, version-pinned pip packages to install into the bundle's
+# site-packages. Transitive deps resolve via pip. For cad-plugin the important
+# transitive is cadquery-ocp (pinned by build123d <7.9,>=7.8 to the 7.8.x line;
+# verified at bundle-build-time via Layer 1 self-test below).
+PIP_PKGS="build123d==0.10.0"
+
+# --- Layer 1 import probe -------------------------------------------------
+# Semicolon-separated python statements run inside the freshly-built bundle
+# (env-isolated, PYTHONHOME=<stage>) to confirm the wheels resolve at import
+# time. Cross-target builds skip this (can't run a foreign binary); native
+# builds fail the script if any import raises.
+LAYER1_IMPORTS="import build123d; import cadquery_ocp"
+
+# --- worker package layout ------------------------------------------------
+# Where to find the plugin's python worker source (relative to plugin dir),
+# and which directories to copy into the bundle's site-packages.
+WORKER_SOURCE_DIR="worker"
+WORKER_PACKAGES="mcad_worker mcad"
+
+# --- bundle output location -----------------------------------------------
+# Where the final tarball lands (relative to plugin dir). Must be a path
+# that go:embed can reach from the package using the embed (Go forbids `..`
+# in embed paths, so the bundle must live under the Go source tree). Scratch
+# state (PBS cache, extraction stage) still goes under runtime-build/.
+BUNDLE_OUT_DIR="internal/runtime/bundle"
