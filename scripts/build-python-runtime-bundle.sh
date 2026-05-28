@@ -300,13 +300,36 @@ if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   done
   IMPORTS="${IMPORTS} print('Layer 1 OK')"
 
-  env -i \
-    HOME="$HOME" \
-    PATH="/usr/bin:/bin" \
-    PYTHONHOME="$STAGE_DIR" \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    "$STAGE_DIR/$PYTHON_BIN" -c "$IMPORTS"
+  # env -i wipes the host env so the bundle's python only sees what we hand
+  # it. On Windows, parso (transitive via build123d → IPython → jedi) reads
+  # LOCALAPPDATA + USERPROFILE at module-import time to construct its cache
+  # path; if either is missing, parso falls back to `Path('~')` and
+  # pathlib.expanduser raises "Could not determine home directory." So
+  # Windows needs the full Windows home-dir env set passed through.
+  if [ "$TRIPLE" = "windows-x86_64" ]; then
+    env -i \
+      HOME="${HOME:-}" \
+      PATH="${PATH:-/usr/bin:/bin}" \
+      USERPROFILE="${USERPROFILE:-}" \
+      LOCALAPPDATA="${LOCALAPPDATA:-}" \
+      HOMEDRIVE="${HOMEDRIVE:-}" \
+      HOMEPATH="${HOMEPATH:-}" \
+      APPDATA="${APPDATA:-}" \
+      TEMP="${TEMP:-}" \
+      TMP="${TMP:-}" \
+      PYTHONHOME="$STAGE_DIR" \
+      PYTHONDONTWRITEBYTECODE=1 \
+      PYTHONUNBUFFERED=1 \
+      "$STAGE_DIR/$PYTHON_BIN" -c "$IMPORTS"
+  else
+    env -i \
+      HOME="$HOME" \
+      PATH="/usr/bin:/bin" \
+      PYTHONHOME="$STAGE_DIR" \
+      PYTHONDONTWRITEBYTECODE=1 \
+      PYTHONUNBUFFERED=1 \
+      "$STAGE_DIR/$PYTHON_BIN" -c "$IMPORTS"
+  fi
 else
   echo "[$TRIPLE] cross-target: Layer 1 self-test skipped (verified at CI on native runner)"
 fi
