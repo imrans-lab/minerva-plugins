@@ -1,7 +1,7 @@
 {
   "id": "cad",
   "name": "CAD",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "host_api_version": "1",
   "backend": {
     "transport": "stdio",
@@ -49,7 +49,9 @@
           "ui/scripts/Cad_GeometryOverlay.gd",
           "ui/scripts/orbit_camera.gd"
         ],
-        "file_extensions": [".mcad"],
+        "file_extensions": [
+          ".mcad"
+        ],
         "render_mode": "paired_dsl",
         "layout_hint": "side_by_side",
         "ipc_channels": [
@@ -82,7 +84,11 @@
       "default_filename": "untitled.mcad"
     }
   ],
-  "capabilities": ["project_state", "host_owned_save", "project_export"],
+  "capabilities": [
+    "project_state",
+    "host_owned_save",
+    "project_export"
+  ],
   "project_file": {
     "serialize_channel": "cad.serialize",
     "deserialize_channel": "cad.deserialize"

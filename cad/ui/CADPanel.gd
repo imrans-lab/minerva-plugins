@@ -574,9 +574,12 @@ func _evaluate_and_render(dsl_text: String, request_id: String = "") -> void:
 	_hide_eval_error()
 	request.emit("cad.evaluate", args, reply_id)
 
-	# 30s timeout: build123d cold-start can take ~10s on first invocation; the
-	# default 10s is too tight for first-open of a fresh worker process.
-	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	# 90s timeout: build123d cold-start on macOS ARM takes >30s in practice
+	# (Python module import + cadquery-ocp dylib first-launch caching +
+	# Gatekeeper scans on every nested arm64 binary). The previous 30s value
+	# was too tight; warm-start evals complete in <1s so the headroom only
+	# costs us when something is genuinely broken.
+	var result: Dictionary = await ipc.await_reply(reply_id, 90000)
 
 	# Supersession: if a newer evaluate started while we were awaiting, drop
 	# this result. The newer evaluate set _inflight_request_id to its own id;
