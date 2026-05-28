@@ -6,13 +6,13 @@ on:
     paths:
       - "cad/**"
       - ".github/workflows/cad.yml"
-      - "scripts/smoke/**"
+      - "scripts/**"
     tags: ["cad-v*"]
   pull_request:
     paths:
       - "cad/**"
       - ".github/workflows/cad.yml"
-      - "scripts/smoke/**"
+      - "scripts/**"
   workflow_dispatch:
 
 permissions:
