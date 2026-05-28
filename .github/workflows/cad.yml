@@ -66,7 +66,58 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+
+      - name: Install zstd (Linux)
+        if: matrix.goos == 'linux'
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y zstd
+          fi
+          zstd --version
+
+      - name: Install zstd (macOS)
+        if: matrix.target == 'macos-universal'
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            brew install zstd
+          fi
+          zstd --version
+
+      - name: Install zstd (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          # zstd is bundled in the Windows runner's Git for Windows toolchain;
+          # confirm it's on PATH for the subsequent bash steps.
+          $env:Path = "$env:GITHUB_WORKSPACE\..\..\Program Files\Git\usr\bin;" + $env:Path
+          zstd --version
+
+      - name: Cache PBS downloads
+        uses: actions/cache@v4
+        with:
+          # Cache the python-build-standalone tarballs (~25-50MB each, ~5min
+          # download cold). Key on the lock file so a version bump invalidates.
+          path: cad/runtime-build/cache/pbs
+          key: pbs-${{ matrix.target }}-${{ hashFiles('cad/scripts/runtime-bundle.lock') }}
+
+      # ----- Build runtime bundle (per W1a) -----
+      # Native + cross targets each produce one bundle. macos-universal
+      # produces TWO (one per arch) — the lipo'd Go binary embeds both via
+      # the per-platform build tags in cad/internal/runtime/embed_darwin_*.go.
+
+      - name: Build runtime bundle (single arch)
+        if: matrix.target != 'macos-universal'
+        run: |
+          bash ../scripts/build-python-runtime-bundle.sh . ${{ matrix.target }}
+          ls -la internal/runtime/bundle/
+
+      - name: Build runtime bundle (macos arm64 + amd64 for lipo)
+        if: matrix.target == 'macos-universal'
+        run: |
+          bash ../scripts/build-python-runtime-bundle.sh . macos-arm64
+          bash ../scripts/build-python-runtime-bundle.sh . macos-amd64
+          ls -la internal/runtime/bundle/
 
       - name: Build (native)
         if: matrix.target != 'macos-universal'
@@ -92,8 +143,29 @@ jobs:
             -output build/cad-plugin
           lipo -info build/cad-plugin
 
+      - name: Binary-size assertion (catches go:embed silently consuming empty bundle)
+        run: |
+          # The embedded bundle is ~150-250MB per platform. A binary smaller
+          # than 100MB means go:embed didn't find / consumed an empty file.
+          # Portable byte-count via wc -c works across BSD/GNU stat.
+          BIN="build/cad-plugin${{ matrix.ext }}"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::built binary not found at $BIN"; exit 1
+          fi
+          SIZE=$(wc -c < "$BIN")
+          echo "binary size: $SIZE bytes ($((SIZE / 1024 / 1024)) MB)"
+          if [ "$SIZE" -lt 100000000 ]; then
+            echo "::error::binary too small ($SIZE bytes < 100MB) — go:embed likely failed"
+            exit 1
+          fi
+
       - name: Go test (linux-x86_64 only — Linux is the source of truth)
         if: matrix.target == 'linux-x86_64'
+        env:
+          # Speed up bridge tests: cold-start scenarios get a 5s ready window
+          # instead of the production 60s default. Long real-cold-start cases
+          # are covered by the embedded_python_spawn_test which doesn't override.
+          MINERVA_WORKER_READY_TIMEOUT_SEC: "5"
         run: go test ./...
 
       - name: Smoke
