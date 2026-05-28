@@ -13,9 +13,27 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
+	"strconv"
 	"sync"
 	"time"
+
+	cadruntime "github.com/ipeerbhai/plugins/cad/internal/runtime"
 )
+
+// readyTimeout returns readyTimeoutDefault, optionally overridden by the
+// MINERVA_WORKER_READY_TIMEOUT_SEC env var (positive integer seconds). The
+// env var is read each call so tests can change the timeout dynamically via
+// t.Setenv().
+func readyTimeout() time.Duration {
+	if v := os.Getenv("MINERVA_WORKER_READY_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return readyTimeoutDefault
+}
 
 // signalKind is a portable signal selector for terminateProcessGroup.
 // Windows collapses both kinds to immediate termination; Unix maps them
@@ -28,8 +46,16 @@ const (
 )
 
 const (
-	// readyTimeout is the hard deadline for the worker.ready notification (§5).
-	readyTimeout = 15 * time.Second
+	// readyTimeoutDefault is the hard deadline for the worker.ready notification (§5).
+	// Design called for 15s; bumped to 60s 2026-05-27 (W1c) because first-time
+	// cold-start of the embedded PBS bundle (cadquery-ocp + build123d + OCCT
+	// init) regularly exceeds 15s on slower disks even after extraction.
+	// Caught crashes still surface within 60s; warm starts complete in <5s
+	// and are unaffected by the bump.
+	//
+	// Override via MINERVA_WORKER_READY_TIMEOUT_SEC env var (integer seconds).
+	// Used by readyTimeout() — call that, not the constant, to honor the override.
+	readyTimeoutDefault = 60 * time.Second
 
 	// shutdownGrace is the window after sending "shutdown" before SIGTERM.
 	shutdownGrace = 2 * time.Second
@@ -154,8 +180,8 @@ func (w *Worker) startLocked(ctx context.Context) error {
 	}
 
 	cmd := exec.CommandContext(ctx, w.pythonPath, "-m", "mcad_worker") //nolint:gosec
-	cmd.Dir = w.workerDir
-	cmd.Env = buildEnv()
+	cmd.Dir = workerCwd(w.pythonPath, w.workerDir)
+	cmd.Env = buildEnv(w.pythonPath)
 	setProcessGroup(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
@@ -197,19 +223,20 @@ func (w *Worker) startLocked(ctx context.Context) error {
 	readyC := w.readyC
 	w.mu.Unlock()
 
+	timeout := readyTimeout()
 	select {
 	case <-readyC:
 		w.mu.Lock()
 		log.Printf("[bridge.Worker] worker ready (pid=%d)", w.cmd.Process.Pid)
 		return nil
-	case <-time.After(readyTimeout):
+	case <-time.After(timeout):
 		w.mu.Lock()
-		log.Printf("[bridge.Worker] worker.ready timeout after %s — killing", readyTimeout)
+		log.Printf("[bridge.Worker] worker.ready timeout after %s — killing", timeout)
 		w.killLocked()
 		w.recordCrash()
 		return &WorkerError{
 			Kind:    "crashed",
-			Message: fmt.Sprintf("worker did not emit worker.ready within %s", readyTimeout),
+			Message: fmt.Sprintf("worker did not emit worker.ready within %s", timeout),
 		}
 	case <-ctx.Done():
 		w.mu.Lock()
@@ -501,22 +528,131 @@ func (w *Worker) Shutdown(timeout time.Duration) {
 }
 
 // buildEnv constructs a scrubbed environment for the worker subprocess (§5).
-func buildEnv() []string {
+//
+// Two modes:
+//
+//  1. Extracted-runtime mode (pythonPath under <dataDir>/runtime/<ver>/):
+//     Sets PYTHONHOME + PYTHONPATH to lock the worker to the bundle's
+//     interpreter and site-packages, and prepends the bundle's bin/ to PATH.
+//     No host PYTHON* / VIRTUAL_ENV / CONDA_* leak in (we build the env list
+//     from scratch — anything we don't add is implicitly excluded).
+//
+//  2. Dev mode (.venv or system python3):
+//     Forwards host PATH only; omits PYTHONHOME / PYTHONPATH so the chosen
+//     interpreter's own sys.path applies.
+func buildEnv(pythonPath string) []string {
 	env := []string{
 		"PYTHONUNBUFFERED=1",
 		"PYTHONDONTWRITEBYTECODE=1",
 	}
-	// Forward PATH so the worker can find system utilities.
-	if path := os.Getenv("PATH"); path != "" {
-		env = append(env, "PATH="+path)
+
+	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+
+	if runtimeRoot != "" {
+		// Extracted-runtime (production marketplace install) path.
+		env = append(env, "PYTHONHOME="+runtimeRoot)
+		if sp := bundleSitePackages(runtimeRoot); sp != "" {
+			env = append(env, "PYTHONPATH="+sp)
+		}
+		// Prepend bundle bin/ to PATH so any nested subprocess (e.g. a
+		// future build123d → gmsh shellout) finds the bundled python first.
+		binDir := filepath.Join(runtimeRoot, "bin")
+		if goruntime.GOOS == "windows" {
+			binDir = runtimeRoot
+		}
+		existingPath := os.Getenv("PATH")
+		env = append(env, "PATH="+binDir+string(os.PathListSeparator)+existingPath)
+	} else {
+		// Dev mode: forward host PATH so the worker can find system utilities.
+		if path := os.Getenv("PATH"); path != "" {
+			env = append(env, "PATH="+path)
+		}
 	}
-	// Forward HOME so Python can find user site-packages if needed.
+
+	// Forward HOME (Unix) / USERPROFILE (Windows) so Python can locate per-user
+	// caches if it wants to. In extracted-runtime mode PYTHONHOME overrides any
+	// user-site discovery; harmless to include.
 	if home := os.Getenv("HOME"); home != "" {
 		env = append(env, "HOME="+home)
 	}
-	// Intentionally omit PYTHONHOME and PYTHONPATH to avoid polluting the
-	// worker's import path from the host environment (§5).
+	if up := os.Getenv("USERPROFILE"); up != "" {
+		env = append(env, "USERPROFILE="+up)
+	}
+	// TEMP / TMP needed on Windows for tempfile.gettempdir().
+	if t := os.Getenv("TEMP"); t != "" {
+		env = append(env, "TEMP="+t)
+	}
+	if t := os.Getenv("TMP"); t != "" {
+		env = append(env, "TMP="+t)
+	}
+
+	// Intentionally NOT forwarded (would contaminate the worker's interpreter):
+	//   PYTHONHOME / PYTHONPATH / PYTHONSTARTUP / PYTHONUSERBASE
+	//   VIRTUAL_ENV / CONDA_PREFIX / CONDA_DEFAULT_ENV / CONDA_SHLVL
+	// Because env starts as a fresh slice (not os.Environ() + filter), these
+	// vars are never present unless we add them above. This is safer than
+	// "inherit + strip" — no risk of forgetting a newly-discovered leakage var.
 	return env
+}
+
+// bundleSitePackages returns the absolute path to the site-packages dir
+// inside an extracted PBS runtime tree. Handles OS-specific PBS layout:
+//   - Unix:    <root>/lib/python3.X/site-packages
+//   - Windows: <root>/Lib/site-packages
+//
+// Picks the highest cpython 3.x directory under lib/ on Unix. Returns "" if
+// no site-packages can be located (caller should log + continue without
+// PYTHONPATH so the worker still finds packages via PYTHONHOME's own logic).
+func bundleSitePackages(runtimeRoot string) string {
+	if goruntime.GOOS == "windows" {
+		candidate := filepath.Join(runtimeRoot, "Lib", "site-packages")
+		if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+			return candidate
+		}
+		return ""
+	}
+	// Unix: scan lib/python3.X/site-packages for any X.
+	libDir := filepath.Join(runtimeRoot, "lib")
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 8 || name[:8] != "python3." {
+			continue
+		}
+		candidate := filepath.Join(libDir, name, "site-packages")
+		if st, statErr := os.Stat(candidate); statErr == nil && st.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// workerCwd returns the working directory for the worker subprocess.
+//
+//   - Extracted-runtime mode: a writable scratch sibling of the runtime root
+//     (<dataDir>/runtime/work/). The worker source lives inside the bundle's
+//     site-packages and is found via PYTHONHOME, NOT via cwd. The old
+//     "cmd.Dir = <plugin>/worker/" path doesn't exist in marketplace installs.
+//   - Dev mode: workerDir (matches pre-W1c behavior — the worker source
+//     is at <plugin>/worker/ and used as cwd for relative imports).
+func workerCwd(pythonPath, devWorkerDir string) string {
+	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+	if runtimeRoot == "" {
+		return devWorkerDir
+	}
+	// runtimeRoot is e.g. <dataDir>/runtime/<version>/. Sibling 'work/' dir.
+	scratch := filepath.Join(filepath.Dir(runtimeRoot), "work")
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		// Fall back to OS temp dir; not fatal.
+		return os.TempDir()
+	}
+	return scratch
 }
 
 // pumpStderr consumes a reader and forwards each line to stderr with [worker]
