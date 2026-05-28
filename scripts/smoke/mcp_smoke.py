@@ -25,8 +25,14 @@ import time
 from pathlib import Path
 
 
-TIMEOUT_SECONDS = 10.0
+TIMEOUT_SECONDS = 60.0
 PROTOCOL_VERSION = "2024-11-05"
+# 60s default: plugins that embed a runtime (e.g. cad's PBS python bundle)
+# extract on first start, which can take 20-40s on slow disks (Windows).
+# Scansort + presentation start fast (<2s) and are unaffected. Override
+# with PLUGIN_SMOKE_TIMEOUT_SECONDS env var if needed.
+import os as _os
+TIMEOUT_SECONDS = float(_os.getenv("PLUGIN_SMOKE_TIMEOUT_SECONDS", TIMEOUT_SECONDS))
 
 
 def fail(code: int, msg: str) -> "None":
