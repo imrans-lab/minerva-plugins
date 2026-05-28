@@ -36,7 +36,7 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "cad"
-	serverVersion   = "0.1.0"
+	serverVersion   = "0.1.1"
 
 	// workerShutdownTimeout is how long we give the worker on plugin shutdown
 	// before SIGTERM kicks in (§5).
