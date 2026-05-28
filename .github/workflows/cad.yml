@@ -32,11 +32,13 @@ jobs:
             goos: linux
             goarch: amd64
             ext: ""
-          - target: linux-arm64
-            runs-on: ubuntu-22.04-arm
-            goos: linux
-            goarch: arm64
-            ext: ""
+          # linux-arm64 dropped 2026-05-27 (DCR 019e6a4bcb0c): cadquery-ocp
+          # 7.8.x ships no manylinux_aarch64 wheels (only x86_64 + macos +
+          # win_amd64). build123d 0.10.0 pins cadquery-ocp<7.9. Restoring
+          # linux-arm64 requires either bumping to build123d 0.11+ (when it
+          # supports cadquery-ocp 7.9 with aarch64 wheels) or pulling
+          # cadquery-ocp aarch64 wheels from a private channel. Tracked as
+          # follow-up; user said linux-arm64 is nice-to-have, not MUST.
           - target: macos-universal
             runs-on: macos-14
             goos: darwin

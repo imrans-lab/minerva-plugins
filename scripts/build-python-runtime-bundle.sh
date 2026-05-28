@@ -185,6 +185,22 @@ fi
 
 if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   echo "[$TRIPLE] native build: pip install via bundled python"
+  # Windows pip needs USERPROFILE (native Windows python checks it first)
+  # for pathlib.Path.expanduser() during metadata bookkeeping. Git Bash may
+  # provide HOME but not USERPROFILE in the form the native Windows binary
+  # recognizes. Set defensively from cygpath(HOME) if needed.
+  if [ "$TRIPLE" = "windows-x86_64" ]; then
+    if [ -z "${USERPROFILE:-}" ] && [ -n "${HOME:-}" ]; then
+      if command -v cygpath >/dev/null 2>&1; then
+        export USERPROFILE="$(cygpath -w "$HOME")"
+      fi
+    fi
+    if [ -z "${USERPROFILE:-}" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+      # LOCALAPPDATA is typically C:\Users\<user>\AppData\Local; user profile is one dir up.
+      export USERPROFILE="$(dirname "$(dirname "$LOCALAPPDATA")")"
+    fi
+    echo "  USERPROFILE=${USERPROFILE:-<unset>} HOME=${HOME:-<unset>}"
+  fi
   if [ ${#DEPS[@]} -gt 0 ]; then
     "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input "${DEPS[@]}"
   fi
