@@ -185,29 +185,50 @@ fi
 
 if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   echo "[$TRIPLE] native build: pip install via bundled python"
-  # USERPROFILE defense (kept for resilience even though --no-compile sidesteps
-  # the parso install-time import; native Windows python checks USERPROFILE
-  # first for pathlib.Path.expanduser()).
   if [ "$TRIPLE" = "windows-x86_64" ]; then
-    if [ -z "${USERPROFILE:-}" ] && [ -n "${HOME:-}" ]; then
-      if command -v cygpath >/dev/null 2>&1; then
-        export USERPROFILE="$(cygpath -w "$HOME")"
-      fi
+    # Bundled PBS python on Windows is a native .exe invoked from Git Bash.
+    # Env propagation across that boundary is unreliable for the home-dir
+    # variables (USERPROFILE / HOMEDRIVE / HOMEPATH / LOCALAPPDATA). When
+    # parso (transitive via build123d → IPython → jedi → parso) imports at
+    # ANY time and calls Path('~/...').expanduser(), python's gethomedir
+    # raises "Could not determine home directory." We:
+    #   1. Resolve sensible defaults from whatever vars Git Bash exposes.
+    #   2. Print what the bundled python ACTUALLY sees (debug).
+    #   3. Explicitly pass the full set on the pip command line so the
+    #      child .exe gets them regardless of bash export propagation quirks.
+    if [ -z "${USERPROFILE:-}" ] && [ -n "${HOME:-}" ] && command -v cygpath >/dev/null 2>&1; then
+      export USERPROFILE="$(cygpath -w "$HOME")"
     fi
     if [ -z "${USERPROFILE:-}" ] && [ -n "${LOCALAPPDATA:-}" ]; then
       export USERPROFILE="$(dirname "$(dirname "$LOCALAPPDATA")")"
     fi
-    echo "  USERPROFILE=${USERPROFILE:-<unset>} HOME=${HOME:-<unset>}"
+    # Fallback to the known Windows runner default if nothing else worked.
+    : "${USERPROFILE:=C:\\Users\\runneradmin}"
+    : "${LOCALAPPDATA:=${USERPROFILE}\\AppData\\Local}"
+    : "${HOMEDRIVE:=${USERPROFILE%%:*}:}"
+    : "${HOMEPATH:=${USERPROFILE#${HOMEDRIVE}}}"
+    export USERPROFILE LOCALAPPDATA HOMEDRIVE HOMEPATH
+
+    echo "  bash sees: USERPROFILE=${USERPROFILE} HOMEDRIVE=${HOMEDRIVE} HOMEPATH=${HOMEPATH} LOCALAPPDATA=${LOCALAPPDATA}"
+    echo "  python sees:"
+    "$STAGE_DIR/$PYTHON_BIN" -c "import os
+for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','TEMP','TMP']:
+    print('    %s=%r' % (v, os.environ.get(v)))
+"
   fi
   if [ ${#DEPS[@]} -gt 0 ]; then
-    # --no-compile: pip skips byte-compiling .py → .pyc. Required on Windows
-    # because pip's compileall step imports each module, and parso (transitive
-    # via build123d → IPython → jedi → parso) does Path('~/.cache/parso')
-    # .expanduser() at module-load time. PBS python on Windows can fail this
-    # despite USERPROFILE being set (env propagation across Git Bash → native
-    # .exe is fragile). Compatible regardless: the script strips __pycache__
-    # + *.pyc later for reproducibility, so no .pyc files would survive anyway.
-    "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
+    # --no-compile sidesteps the byte-compile pass. For Windows we ALSO
+    # force-pass home-dir env on the command line in case bash export isn't
+    # propagating those vars to the native python subprocess.
+    if [ "$TRIPLE" = "windows-x86_64" ]; then
+      USERPROFILE="${USERPROFILE}" \
+      LOCALAPPDATA="${LOCALAPPDATA}" \
+      HOMEDRIVE="${HOMEDRIVE}" \
+      HOMEPATH="${HOMEPATH}" \
+        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
+    else
+      "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
+    fi
   fi
 else
   echo "[$TRIPLE] cross build: pip install via host python with --platform=$WHEEL_PLATS"
