@@ -494,7 +494,7 @@ func (b *PatchBuilder) Send() (opCount int, fault *toolFault) {
 	b.sent = true
 	raw, capErr := b.client.callCapability("host.documents.patch_state", map[string]interface{}{
 		"editor_name": b.editorName,
-		"patch":       b.ops,
+		"json_patch":  b.ops,
 	})
 	if capErr != nil {
 		return 0, &toolFault{

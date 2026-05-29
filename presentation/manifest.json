@@ -1,7 +1,7 @@
 {
   "id": "presentation",
   "name": "Presentation",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "host_api_version": "1",
   "backend": {
     "transport": "stdio",

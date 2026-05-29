@@ -1336,6 +1336,17 @@ func TestPatchBuilder_ChainedAddRemove_DispatchesOnePatch(t *testing.T) {
 	if !strings.Contains(wireOut, `"capability":"host.documents.patch_state"`) {
 		t.Errorf("expected patch_state capability, got: %s", wireOut)
 	}
+	// Host (CapabilityBroker._handle_host_documents_patch_state) reads
+	// args["json_patch"], NOT args["patch"]. A mismatch here surfaces as
+	// schema_validation_failed on every tab_name-mode write tool — silent
+	// because PatchBuilder tests mock callCapability and don't validate the
+	// field name otherwise. Lock the canonical wire shape.
+	if !strings.Contains(wireOut, `"json_patch":[`) {
+		t.Errorf("expected wire to carry args.json_patch (host contract), got: %s", wireOut)
+	}
+	if strings.Contains(wireOut, `"patch":[`) {
+		t.Errorf("wire must not use legacy args.patch — host rejects it as schema_validation_failed: %s", wireOut)
+	}
 
 	// Both ops must appear, add before remove.
 	addIdx := strings.Index(wireOut, `"op":"add"`)
