@@ -2845,17 +2845,21 @@ func sniffContentTypeFromBase64(b64 string) string {
 	return sniffImageContentType(raw)
 }
 
-// makeImageBgEnvelope wraps image bytes in the blob envelope shape required by
-// phase-5 R3 plugin-side adoption. The broker's strip walker recognises this
-// shape and swaps the bytes for a __blob_handle__ on capability responses —
-// keeping list_slides bounded on image-heavy decks.
+// makeImageBlobEnvelope wraps image bytes in the blob envelope shape required by
+// phase-5 R3 plugin-side adoption — for BOTH slide backgrounds and image-tile
+// `src`. The broker's strip walker recognises this shape and swaps the bytes for
+// a __blob_handle__ on capability responses — keeping list_slides bounded on
+// image-heavy decks.
 //
 // Shape matches slide_model.gd's make_blob_envelope() exactly:
 //
 //	{"__blob__": true, "content_type": "image/png", "bytes": "<base64>"}
 //
-// Any divergence breaks the broker's type gate at PluginScenePanelBroker.gd:1452.
-func makeImageBgEnvelope(b64, contentType string) map[string]interface{} {
+// A bare base64 String (the legacy raw-base64 shape) does NOT render: the
+// renderer's envelope_base64() returns empty for it (slide_model.gd), so the
+// tile draws blank. Any divergence breaks the broker's type gate at
+// PluginScenePanelBroker.gd:1452.
+func makeImageBlobEnvelope(b64, contentType string) map[string]interface{} {
 	return map[string]interface{}{
 		"__blob__":     true,
 		"content_type": contentType,
@@ -2906,10 +2910,10 @@ func toolSetSlideBackground(client *hostClient, rawArgs json.RawMessage) map[str
 		// Sniff content_type from the on-disk bytes (we have them already).
 		raw, _ := os.ReadFile(imagePath)
 		ct := sniffImageContentType(raw)
-		bg = map[string]interface{}{"kind": bgKindImage, "value": makeImageBgEnvelope(b64, ct)}
+		bg = map[string]interface{}{"kind": bgKindImage, "value": makeImageBlobEnvelope(b64, ct)}
 	default:
 		ct := sniffContentTypeFromBase64(imageBase64)
-		bg = map[string]interface{}{"kind": bgKindImage, "value": makeImageBgEnvelope(imageBase64, ct)}
+		bg = map[string]interface{}{"kind": bgKindImage, "value": makeImageBlobEnvelope(imageBase64, ct)}
 	}
 
 	// tab_name mode: single replace op on the slide's background field.
@@ -3928,7 +3932,9 @@ func toolModifyTile(client *hostClient, rawArgs json.RawMessage) map[string]inte
 					}
 				}
 			}
-			patch["src"] = b64
+			// Same blob-envelope requirement as add_image_tile: a bare base64
+			// String here renders blank (slide_model.gd envelope_base64).
+			patch["src"] = makeImageBlobEnvelope(b64, sniffContentTypeFromBase64(b64))
 		}
 
 		return patch, erase, nil
@@ -4172,6 +4178,9 @@ func toolAddImageTile(client *hostClient, rawArgs json.RawMessage) map[string]in
 
 	tileID := genID("tile")
 	buildTile := func(src string) map[string]interface{} {
+		// src arrives as bare base64; image-tile `src` MUST be a blob envelope
+		// or the renderer draws nothing (envelope_base64 returns empty for a
+		// bare String — slide_model.gd). Same shape as slide backgrounds.
 		tile := map[string]interface{}{
 			"id":   tileID,
 			"kind": "image",
@@ -4179,7 +4188,7 @@ func toolAddImageTile(client *hostClient, rawArgs json.RawMessage) map[string]in
 			"y":    y,
 			"w":    w,
 			"h":    h,
-			"src":  src,
+			"src":  makeImageBlobEnvelope(src, sniffContentTypeFromBase64(src)),
 		}
 		if rot, has := floatArg(args, "rotation"); has && rot != 0.0 {
 			tile["rotation"] = rot

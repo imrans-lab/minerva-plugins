@@ -2789,13 +2789,9 @@ func TestToolModifyTile_SolidColorSynthesisesPNG(t *testing.T) {
 	}
 	deck := readDeck(t, path)
 	tile := deck["slides"].([]interface{})[0].(map[string]interface{})["tiles"].([]interface{})[1].(map[string]interface{})
-	src, _ := tile["src"].(string)
-	if src == "" || src == "old" {
-		t.Fatalf("expected replaced src with PNG base64, got len=%d (%q)", len(src), src[:min(40, len(src))])
-	}
-	raw, err := base64.StdEncoding.DecodeString(src)
+	raw, err := base64.StdEncoding.DecodeString(blobEnvelopeBytes(t, tile["src"]))
 	if err != nil {
-		t.Fatalf("src is not base64: %v", err)
+		t.Fatalf("envelope bytes not base64: %v", err)
 	}
 	// PNG magic: 89 50 4E 47 0D 0A 1A 0A
 	if len(raw) < 8 || raw[0] != 0x89 || raw[1] != 'P' || raw[2] != 'N' || raw[3] != 'G' {
@@ -2870,8 +2866,8 @@ func TestToolModifyTile_SourceGraphicsEditorReplacesSrc(t *testing.T) {
 	// Verify tile.src was replaced with the canned PNG.
 	deck := readDeck(t, path)
 	tile := deck["slides"].([]interface{})[0].(map[string]interface{})["tiles"].([]interface{})[1].(map[string]interface{})
-	if src, _ := tile["src"].(string); src != pngB64 {
-		t.Errorf("tile.src should match exported PNG b64; got len=%d (head=%q)", len(src), src[:min(20, len(src))])
+	if got := blobEnvelopeBytes(t, tile["src"]); got != pngB64 {
+		t.Errorf("tile.src envelope bytes should match exported PNG b64; got len=%d", len(got))
 	}
 }
 
@@ -2910,6 +2906,61 @@ func TestParseAspectRatio_FallbackOnGarbage(t *testing.T) {
 // minerva_presentation_add_image_tile (T6 tail R4)
 // ---------------------------------------------------------------------------
 
+// blobEnvelopeBytes asserts an image tile's `src` is the blob-envelope shape
+// {__blob__:true, content_type, bytes} the renderer requires — NOT a bare
+// base64 String (which renders blank, slide_model.gd envelope_base64) — and
+// returns the base64 bytes for further checks.
+func blobEnvelopeBytes(t *testing.T, src interface{}) string {
+	t.Helper()
+	env, ok := src.(map[string]interface{})
+	if !ok {
+		t.Fatalf("image src must be a blob envelope map, got %T: %v", src, src)
+	}
+	if flag, _ := env["__blob__"].(bool); !flag {
+		t.Errorf("envelope __blob__ must be true, got %v", env["__blob__"])
+	}
+	if ct, _ := env["content_type"].(string); ct == "" {
+		t.Errorf("envelope content_type must be non-empty")
+	}
+	b64, _ := env["bytes"].(string)
+	if b64 == "" {
+		t.Fatalf("envelope bytes must be non-empty base64")
+	}
+	return b64
+}
+
+// Regression for the "invisible banner" bug: add_image_tile must wrap src in a
+// blob envelope, never a bare base64 String. A bare String passes the broker
+// but the renderer's envelope_base64() returns empty for it, so the tile draws
+// blank. The synthesized solid_color PNG must be sniffed as image/png.
+func TestToolAddImageTile_SrcIsBlobEnvelopeNotBareString(t *testing.T) {
+	path := writeBlankDeck(t)
+	var stdout bytes.Buffer
+	client := newMockClient(strings.NewReader(""), &stdout)
+	rawArgs, _ := json.Marshal(map[string]interface{}{
+		"path": path, "slide_index": 0,
+		"x": 0.0, "y": 0.0, "w": 1.0, "h": 0.1,
+		"solid_color": "#1F4E5A",
+	})
+	out := toolAddImageTile(client, rawArgs)
+	if success, _ := out["success"].(bool); !success {
+		t.Fatalf("expected success, got %+v", out)
+	}
+	deck := readDeck(t, path)
+	tile := deck["slides"].([]interface{})[0].(map[string]interface{})["tiles"].([]interface{})[0].(map[string]interface{})
+	if _, bare := tile["src"].(string); bare {
+		t.Fatalf("src is a bare base64 String — the invisible-image bug; must be a blob envelope")
+	}
+	env, _ := tile["src"].(map[string]interface{})
+	if ct, _ := env["content_type"].(string); ct != "image/png" {
+		t.Errorf("content_type: want image/png, got %q", ct)
+	}
+	raw, err := base64.StdEncoding.DecodeString(blobEnvelopeBytes(t, tile["src"]))
+	if err != nil || len(raw) < 4 || raw[1] != 'P' || raw[2] != 'N' || raw[3] != 'G' {
+		t.Errorf("envelope bytes must be a PNG")
+	}
+}
+
 func TestToolAddImageTile_FromBase64(t *testing.T) {
 	path := writeBlankDeck(t)
 	var stdout bytes.Buffer
@@ -2938,8 +2989,8 @@ func TestToolAddImageTile_FromBase64(t *testing.T) {
 	if tile["kind"] != "image" {
 		t.Errorf("kind: %v", tile["kind"])
 	}
-	if tile["src"] != "Zm9vYmFy" {
-		t.Errorf("src: %v", tile["src"])
+	if got := blobEnvelopeBytes(t, tile["src"]); got != "Zm9vYmFy" {
+		t.Errorf("envelope bytes: want Zm9vYmFy, got %q", got)
 	}
 	if tile["x"] != 0.1 {
 		t.Errorf("x: %v", tile["x"])
@@ -2974,8 +3025,8 @@ func TestToolAddImageTile_FromImagePath(t *testing.T) {
 	deck := readDeck(t, deckPath)
 	tile := deck["slides"].([]interface{})[0].(map[string]interface{})["tiles"].([]interface{})[0].(map[string]interface{})
 	expectedB64 := base64.StdEncoding.EncodeToString(pngBytes)
-	if tile["src"] != expectedB64 {
-		t.Errorf("src mismatch")
+	if got := blobEnvelopeBytes(t, tile["src"]); got != expectedB64 {
+		t.Errorf("envelope bytes mismatch")
 	}
 }
 
@@ -2997,10 +3048,9 @@ func TestToolAddImageTile_FromSolidColor(t *testing.T) {
 	}
 	deck := readDeck(t, path)
 	tile := deck["slides"].([]interface{})[0].(map[string]interface{})["tiles"].([]interface{})[0].(map[string]interface{})
-	src, _ := tile["src"].(string)
-	raw, err := base64.StdEncoding.DecodeString(src)
+	raw, err := base64.StdEncoding.DecodeString(blobEnvelopeBytes(t, tile["src"]))
 	if err != nil {
-		t.Fatalf("src not base64: %v", err)
+		t.Fatalf("envelope bytes not base64: %v", err)
 	}
 	if len(raw) < 8 || raw[1] != 'P' || raw[2] != 'N' || raw[3] != 'G' {
 		t.Errorf("solid_color should synthesize PNG; got %v", raw[:min(8, len(raw))])
@@ -3037,8 +3087,8 @@ func TestToolAddImageTile_FromSourceGraphicsEditor(t *testing.T) {
 	}
 	deck := readDeck(t, path)
 	tile := deck["slides"].([]interface{})[0].(map[string]interface{})["tiles"].([]interface{})[0].(map[string]interface{})
-	if tile["src"] != pngB64 {
-		t.Errorf("src should match exported PNG; got len=%d", len(tile["src"].(string)))
+	if got := blobEnvelopeBytes(t, tile["src"]); got != pngB64 {
+		t.Errorf("envelope bytes should match exported PNG; got len=%d", len(got))
 	}
 }
 

@@ -17,15 +17,15 @@
     {
       "id": "presentation",
       "name": "Presentation",
-      "version": "0.0.2",
-      "manifest_version": "0.0.2",
-      "release_tag": "presentation-v0.0.2",
+      "version": "0.0.3",
+      "manifest_version": "0.0.3",
+      "release_tag": "presentation-v0.0.3",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/presentation/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.2/presentation-0.0.2-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.2/presentation-0.0.2-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.2/presentation-0.0.2-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.2/presentation-0.0.2-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.3/presentation-0.0.3-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.3/presentation-0.0.3-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.3/presentation-0.0.3-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/presentation-v0.0.3/presentation-0.0.3-windows-x86_64.tar.gz"
       }
     },
     {
