@@ -299,12 +299,21 @@ if [ "$TRIPLE" = "$HOST_TRIPLE" ]; then
   # Plugin-agnostic: lock file declares LAYER1_IMPORTS (semicolon-separated
   # python statements). Each WORKER_PACKAGES entry is also import-probed so
   # missing worker source is caught here, not at first MCP call.
-  IMPORTS="${LAYER1_IMPORTS:-};"
+  # Start from LAYER1_IMPORTS only if the lock declared any — a stdlib-only
+  # worker (empty LAYER1_IMPORTS) must NOT produce a leading ';' which is a
+  # Python SyntaxError. The worker-package probe below is the real check there.
+  IMPORTS=""
+  if [ -n "${LAYER1_IMPORTS:-}" ]; then
+    IMPORTS="${LAYER1_IMPORTS};"
+  fi
   # shellcheck disable=SC2086
   for pkg in $WORKER_PACKAGES; do
     IMPORTS="${IMPORTS} import $pkg;"
   done
   IMPORTS="${IMPORTS} print('Layer 1 OK')"
+  # Trim any leading whitespace: when LAYER1_IMPORTS is empty the first loop
+  # append leaves a leading space, which Python rejects as an IndentationError.
+  IMPORTS="$(printf '%s' "$IMPORTS" | sed 's/^[[:space:]]*//')"
 
   # env -i wipes the host env so the bundle's python only sees what we hand
   # it. On Windows, parso (transitive via build123d → IPython → jedi) reads
@@ -369,7 +378,7 @@ echo "[$TRIPLE] packing tarball with zstd -19"
   find . \( -type f -o -type l \) -print | sort > /tmp/.bundle-files.$$ && \
   tar -cf - -T /tmp/.bundle-files.$$ && \
   rm -f /tmp/.bundle-files.$$
-) | zstd -19 -q -o "$OUT_TARBALL"
+) | zstd -19 -q -f -o "$OUT_TARBALL"
 
 # --------------------------------------------------------------------------
 # tarball sha256 — used by Go-side EmbeddedSHA256 verification
