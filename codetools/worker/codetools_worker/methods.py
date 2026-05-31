@@ -13,9 +13,7 @@ from __future__ import annotations
 import platform
 import sys
 
-from . import envelope
-
-WORKER_VERSION = "0.1.0"
+from . import WORKER_VERSION, envelope
 
 
 def ping(params):

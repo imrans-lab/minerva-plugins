@@ -260,12 +260,23 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 		return errResponse(id, -32603, fmt.Sprintf("tool error: %v", err))
 	}
 
-	// Wrap success symmetric with the error path: {ok:true, result:<result>}.
-	// PROVISIONAL P1.1 shape — P1.2's unified result envelope supersedes it.
+	// The worker result is the P1.2 unified envelope. Wrap it transport-side as
+	// {ok:true, result:<envelope>}. A handler-level failure comes back as an
+	// envelope with status=="error" (still a successful CALL) — mirror that onto
+	// the MCP isError flag so the host's one documented error signal (isError)
+	// never disagrees with the envelope's status.
 	envelopeJSON, _ := json.Marshal(map[string]interface{}{"ok": true, "result": json.RawMessage(result)})
-	return okResponse(id, map[string]interface{}{
+	var probe struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(result, &probe)
+	mcp := map[string]interface{}{
 		"content": []map[string]interface{}{{"type": "text", "text": string(envelopeJSON)}},
-	})
+	}
+	if probe.Status == "error" {
+		mcp["isError"] = true
+	}
+	return okResponse(id, mcp)
 }
 
 // criticalStderrPrefixes mark worker stderr lines worth surfacing as toasts.

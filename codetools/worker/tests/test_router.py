@@ -44,6 +44,21 @@ class TestRouter(unittest.TestCase):
         self.assertEqual(env["error"]["kind"], "parse")
         self.assertEqual(env["error"]["message"], "nope")
 
+    def test_handler_returning_error_envelope_passes_through(self):
+        # A handler may build a status='error' envelope directly (not via
+        # ToolError); the router must validate and pass it through unchanged.
+        def sad(_params):
+            return envelope.error("could not do the thing", kind="notfound")
+
+        router.ROUTES["__test_sad__"] = sad
+        try:
+            env = router.route("__test_sad__", {})
+        finally:
+            del router.ROUTES["__test_sad__"]
+        envelope.validate(env)
+        self.assertEqual(env["status"], "error")
+        self.assertEqual(env["error"]["kind"], "notfound")
+
     def test_malformed_handler_result_is_rejected(self):
         def bad(_params):
             return {"not": "an envelope"}

@@ -17,13 +17,11 @@ import logging
 import sys
 import traceback
 
-from . import router
+from . import WORKER_VERSION, router
 from .errors import MethodError
 from .framing import FramingError, read_frame, write_frame
 
 log = logging.getLogger(__name__)
-
-WORKER_VERSION = "0.1.0"
 
 
 def _write_response(stdout, resp: dict) -> None:
@@ -78,10 +76,14 @@ def run(stdin, stdout) -> None:
             # Unknown method / protocol fault — not a tool result.
             resp = {"id": req_id, "ok": False,
                     "error": {"kind": exc.kind, "message": str(exc)}}
-        except Exception as exc:  # noqa: BLE001 - any worker bug becomes a structured error
+        except Exception:  # noqa: BLE001 - any worker bug becomes a structured error
+            # Log full detail to stderr; return a GENERIC message so unbounded
+            # internal data (paths, values) never reaches the model context.
+            log.error("unhandled worker error in method %r:\n%s",
+                      method, traceback.format_exc())
             resp = {"id": req_id, "ok": False,
-                    "error": {"kind": "python", "message": str(exc),
-                              "traceback": traceback.format_exc()}}
+                    "error": {"kind": "internal",
+                              "message": "internal worker error (see plugin stderr)"}}
 
         # Notifications (no id) get no response; everything else does.
         if req_id is not None:

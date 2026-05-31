@@ -6,9 +6,13 @@ across all subsystems (files / code-visualizer / code-probe):
     {
       "status":           "ok" | "error",
       "summary":          str,        # one-line, agent-readable
-      "artifacts":        [ ... ],    # structured outputs produced (files, graphs, info)
-      "evidence_handles": [ ... ],    # opaque handles to fetch supporting evidence later
-      "follow_ups":       [ ... ],    # suggested next tool calls / actions
+      "artifacts":        [ ... ],    # structured outputs — EACH a dict with a
+                                      #   required string "type" discriminator the
+                                      #   agent dispatches on (query results, produced
+                                      #   files, diagnostics). type is mandatory.
+      "evidence_handles": [ ... ],    # opaque handles to fetch supporting evidence
+                                      #   later (item schema lands with code-probe, P3).
+      "follow_ups":       [ ... ],    # suggested next tool calls / actions (P3).
       "error":            {"kind": str, "message": str}   # present iff status == "error"
     }
 
@@ -31,6 +35,8 @@ _LIST_FIELDS = ("artifacts", "evidence_handles", "follow_ups")
 def make_envelope(status, summary, *, artifacts=None, evidence_handles=None,
                   follow_ups=None, error=None):
     """Build an envelope. Prefer the ok()/error() helpers for call sites."""
+    if status not in (STATUS_OK, STATUS_ERROR):
+        raise ValueError("status must be 'ok' or 'error', got %r" % status)
     env = {
         "status": status,
         "summary": str(summary),
@@ -49,13 +55,18 @@ def ok(summary, *, artifacts=None, evidence_handles=None, follow_ups=None):
                          evidence_handles=evidence_handles, follow_ups=follow_ups)
 
 
-def error(summary, *, kind="error", artifacts=None, evidence_handles=None,
-          follow_ups=None):
-    """A semantic-failure result envelope (the call succeeded, the work didn't)."""
+def error(summary, *, kind="error", message=None, artifacts=None,
+          evidence_handles=None, follow_ups=None):
+    """A semantic-failure result envelope (the call succeeded, the work didn't).
+
+    `summary` is the one-line agent-readable headline; `message` is the (often
+    longer) error detail — defaults to summary when not given.
+    """
     return make_envelope(STATUS_ERROR, summary,
                          artifacts=artifacts, evidence_handles=evidence_handles,
                          follow_ups=follow_ups,
-                         error={"kind": kind, "message": str(summary)})
+                         error={"kind": kind,
+                                "message": str(message if message is not None else summary)})
 
 
 def validate(env):
@@ -76,6 +87,19 @@ def validate(env):
     for field in _LIST_FIELDS:
         if not isinstance(env[field], list):
             raise ValueError("envelope field %r must be a list" % field)
-    if env["status"] == STATUS_ERROR and "error" not in env:
-        raise ValueError("error envelope must carry an 'error' object")
+    # Every artifact is a self-describing dict with a required string "type" so
+    # the agent can dispatch on it (the answer vs a produced file vs diagnostics).
+    for i, art in enumerate(env["artifacts"]):
+        if not isinstance(art, dict):
+            raise ValueError("artifacts[%d] must be a dict" % i)
+        if not isinstance(art.get("type"), str) or not art["type"]:
+            raise ValueError("artifacts[%d] must have a non-empty string 'type'" % i)
+    if env["status"] == STATUS_ERROR:
+        err = env.get("error")
+        if not isinstance(err, dict):
+            raise ValueError("error envelope must carry an 'error' object")
+        if not isinstance(err.get("kind"), str) or not isinstance(err.get("message"), str):
+            raise ValueError("envelope error must have string 'kind' and 'message'")
+    elif "error" in env:
+        raise ValueError("ok envelope must not carry an 'error' object")
     return env

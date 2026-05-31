@@ -63,6 +63,37 @@ class TestEnvelope(unittest.TestCase):
         with self.assertRaises(ValueError):
             envelope.validate(env)
 
+    def test_validate_rejects_untyped_artifact(self):
+        env = envelope.ok("x", artifacts=[{"no": "type"}])
+        with self.assertRaises(ValueError):
+            envelope.validate(env)
+
+    def test_validate_accepts_typed_artifact(self):
+        env = envelope.ok("x", artifacts=[{"type": "thing", "v": 1}])
+        self.assertIs(envelope.validate(env), env)
+
+    def test_validate_rejects_ok_with_error(self):
+        env = envelope.ok("x")
+        env["error"] = {"kind": "e", "message": "m"}
+        with self.assertRaises(ValueError):
+            envelope.validate(env)
+
+    def test_validate_rejects_malformed_error_object(self):
+        env = envelope.error("boom")
+        env["error"] = "not a dict"
+        with self.assertRaises(ValueError):
+            envelope.validate(env)
+
+    def test_error_message_can_differ_from_summary(self):
+        env = envelope.error("short", message="the long detailed reason", kind="parse")
+        self.assertEqual(env["summary"], "short")
+        self.assertEqual(env["error"]["message"], "the long detailed reason")
+        self.assertEqual(env["error"]["kind"], "parse")
+
+    def test_make_envelope_rejects_bad_status(self):
+        with self.assertRaises(ValueError):
+            envelope.make_envelope("weird", "x")
+
 
 if __name__ == "__main__":
     unittest.main()
