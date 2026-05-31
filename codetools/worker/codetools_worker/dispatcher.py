@@ -17,7 +17,8 @@ import logging
 import sys
 import traceback
 
-from . import methods
+from . import router
+from .errors import MethodError
 from .framing import FramingError, read_frame, write_frame
 
 log = logging.getLogger(__name__)
@@ -69,9 +70,12 @@ def run(stdin, stdout) -> None:
             sys.exit(0)
 
         try:
-            result = methods.handle(method, req.get("params") or {})
+            # route() returns a validated unified envelope on success (incl.
+            # in-domain ToolError, which becomes a status='error' envelope).
+            result = router.route(method, req.get("params") or {})
             resp = {"id": req_id, "ok": True, "result": result}
-        except methods.MethodError as exc:
+        except MethodError as exc:
+            # Unknown method / protocol fault — not a tool result.
             resp = {"id": req_id, "ok": False,
                     "error": {"kind": exc.kind, "message": str(exc)}}
         except Exception as exc:  # noqa: BLE001 - any worker bug becomes a structured error

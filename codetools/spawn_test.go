@@ -168,19 +168,28 @@ func TestPingRoundTrip(t *testing.T) {
 		t.Fatalf("decode envelope %q: %v", text, err)
 	}
 	if env["ok"] != true {
-		t.Fatalf("FUNCTIONAL FAIL: envelope ok != true: %v", env)
+		t.Fatalf("FUNCTIONAL FAIL: transport ok != true: %v", env)
 	}
-	inner, ok := env["result"].(map[string]any)
+	// result is the unified envelope {status, summary, artifacts, ...}.
+	envl, ok := env["result"].(map[string]any)
 	if !ok {
-		t.Fatalf("missing inner result: %v", env)
+		t.Fatalf("missing result envelope: %v", env)
 	}
-	if inner["pong"] != true {
-		t.Fatalf("FUNCTIONAL FAIL: pong != true: %v", inner)
+	if envl["status"] != "ok" {
+		t.Fatalf("FUNCTIONAL FAIL: envelope status != ok: %v", envl)
 	}
-	if inner["echo"] != "hi" {
-		t.Errorf("echo = %v, want \"hi\"", inner["echo"])
+	arts, ok := envl["artifacts"].([]any)
+	if !ok || len(arts) == 0 {
+		t.Fatalf("FUNCTIONAL FAIL: envelope has no artifacts: %v", envl)
 	}
-	t.Logf("FUNCTIONAL PASS: ping round-trip via real worker: %v", inner)
+	info, _ := arts[0].(map[string]any)
+	if info["pong"] != true {
+		t.Fatalf("FUNCTIONAL FAIL: artifact pong != true: %v", info)
+	}
+	if info["echo"] != "hi" {
+		t.Errorf("echo = %v, want \"hi\"", info["echo"])
+	}
+	t.Logf("FUNCTIONAL PASS: ping round-trip via real worker (envelope status=ok): %v", info)
 
 	// 4) graceful shutdown
 	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "shutdown"})

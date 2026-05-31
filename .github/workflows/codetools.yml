@@ -151,6 +151,11 @@ jobs:
           MINERVA_WORKER_READY_TIMEOUT_SEC: "15"
         run: go test ./...
 
+      - name: Worker unit tests (linux-x86_64 only — envelope + router coverage)
+        if: matrix.target == 'linux-x86_64'
+        working-directory: codetools/worker
+        run: python3 -m unittest discover -t . -s tests -p 'test_*.py' -v
+
       - name: Smoke
         run: python3 ../scripts/smoke/mcp_smoke.py build/codetools-plugin${{ matrix.ext }}
 
