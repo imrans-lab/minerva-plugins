@@ -48,8 +48,10 @@ type Response struct {
 }
 
 // WorkerError carries structured error information from the worker (design §7).
-// Kind must be one of: parse, translate, occt, python, timeout, cancelled,
-// internal, crashed.
+// Kind is a short machine-readable category. The codetools worker emits
+// "python" (uncaught worker exception) and "internal" (unknown method / bad
+// dispatch); the bridge itself adds "crashed", "cancelled", and "timeout" for
+// lifecycle failures. Subsystem phases may introduce further kinds.
 type WorkerError struct {
 	Kind      string          `json:"kind"`
 	Message   string          `json:"message"`

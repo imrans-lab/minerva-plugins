@@ -22,5 +22,5 @@
   },
   "data_directory": "",
   "autostart": false,
-  "auto_reload": true
+  "auto_reload": false
 }

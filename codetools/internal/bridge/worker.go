@@ -1,4 +1,4 @@
-// Package bridge — Worker manages the long-lived Python CAD worker subprocess.
+// Package bridge — Worker manages the long-lived Python worker subprocess.
 //
 // Design references: Go-python-bridge-design.md §2 (process model),
 // §4 (request/response), §5 (worker lifecycle), §7 (error surfaces).
@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	cadruntime "github.com/imrans-lab/minerva-plugins/codetools/internal/runtime"
+	pyrt "github.com/imrans-lab/minerva-plugins/codetools/internal/runtime"
 )
 
 // readyTimeout returns readyTimeoutDefault, optionally overridden by the
@@ -551,7 +551,7 @@ func buildEnv(pythonPath string) []string {
 		"PYTHONDONTWRITEBYTECODE=1",
 	}
 
-	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+	runtimeRoot := pyrt.RuntimeRoot(pythonPath)
 
 	if runtimeRoot != "" {
 		// Extracted-runtime (production marketplace install) path.
@@ -647,7 +647,7 @@ func bundleSitePackages(runtimeRoot string) string {
 //   - Dev mode: workerDir (matches pre-W1c behavior — the worker source
 //     is at <plugin>/worker/ and used as cwd for relative imports).
 func workerCwd(pythonPath, devWorkerDir string) string {
-	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+	runtimeRoot := pyrt.RuntimeRoot(pythonPath)
 	if runtimeRoot == "" {
 		return devWorkerDir
 	}

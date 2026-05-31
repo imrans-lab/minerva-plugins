@@ -234,12 +234,24 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 	if err != nil {
 		// Worker errors come back as MCP tool-result content (not MCP errors)
 		// so the model can inspect them; only protocol/internal errors become
-		// MCP errors. Preserve the {ok:false,error} envelope shape symmetric
-		// with the success path.
+		// MCP errors.
 		if we, ok := err.(*bridge.WorkerError); ok {
-			emitHostNotify("error",
-				fmt.Sprintf("Code Tools [%s]: worker error (%s) — %s", p.Name, we.Kind, we.Message), we)
-			errJSON, _ := json.Marshal(map[string]interface{}{"ok": false, "error": we})
+			// Toast only LIFECYCLE failures (crash/internal) — they're health
+			// signals. Ordinary tool-level errors already travel back in the
+			// result envelope; toasting every one would spam the user.
+			if we.Kind == "crashed" || we.Kind == "internal" {
+				emitHostNotify("error",
+					fmt.Sprintf("Code Tools [%s]: worker %s — %s", p.Name, we.Kind, we.Message), nil)
+			}
+			// PROVISIONAL P1.1 error envelope: {ok:false, error:{kind,message}}.
+			// Deliberately drops the worker's traceback/details (kept on stderr
+			// via the bridge stderr pump) so unbounded internal data never reaches
+			// the model. P1.2 introduces the CANONICAL unified result envelope +
+			// router and owns this shape — do not entrench this ad-hoc one.
+			errJSON, _ := json.Marshal(map[string]interface{}{
+				"ok":    false,
+				"error": map[string]string{"kind": we.Kind, "message": we.Message},
+			})
 			return okResponse(id, map[string]interface{}{
 				"content": []map[string]interface{}{{"type": "text", "text": string(errJSON)}},
 				"isError": true,
@@ -249,6 +261,7 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 	}
 
 	// Wrap success symmetric with the error path: {ok:true, result:<result>}.
+	// PROVISIONAL P1.1 shape — P1.2's unified result envelope supersedes it.
 	envelopeJSON, _ := json.Marshal(map[string]interface{}{"ok": true, "result": json.RawMessage(result)})
 	return okResponse(id, map[string]interface{}{
 		"content": []map[string]interface{}{{"type": "text", "text": string(envelopeJSON)}},
