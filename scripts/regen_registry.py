@@ -33,8 +33,11 @@ REPO_NAME = "minerva-plugins"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main"
 RELEASES_BASE = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/download"
 
-# Per-platform tarball targets. Must stay in sync with the per-plugin
-# matrix workflows; if a target is added/removed there, update here too.
+# The full set of platform targets the marketplace understands. This is the
+# valid superset / default only: the targets a given plugin actually ships are
+# declared per-plugin via `release_targets` in its manifest.json (the single
+# source of truth, kept in sync with that plugin's matrix workflow). A plugin
+# that omits `release_targets` defaults to the full set.
 TARGETS = ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"]
 
 
@@ -102,6 +105,19 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path):
 
     rel_manifest = manifest_path.relative_to(repo_root).as_posix()
 
+    # Targets this plugin actually builds. Declared per-plugin in manifest.json
+    # as `release_targets`; absent that, default to the full TARGETS set. This
+    # stops the registry advertising a tarball that was never built — e.g. cad
+    # ships no linux-arm64 (cadquery-ocp has no aarch64 wheels), so emitting a
+    # linux-arm64 URL would 404 at install time.
+    targets = manifest.get("release_targets") or TARGETS
+    unknown = [t for t in targets if t not in TARGETS]
+    if unknown:
+        raise SystemExit(
+            f"{plugin_id}: manifest release_targets has unknown target(s) "
+            f"{unknown}; valid targets are {TARGETS}"
+        )
+
     # Build per-target download URLs deterministically from tag +
     # manifest version + target. Tarball naming convention is
     # `<id>-<manifest-version>-<target>.tar.gz` (see per-plugin workflow
@@ -109,7 +125,7 @@ def build_plugin_entry(plugin_dir: Path, repo_root: Path):
     # `<RELEASES_BASE>/<release_tag>/<tarball-filename>`.
     downloads = {
         target: f"{RELEASES_BASE}/{tag}/{plugin_id}-{manifest_version}-{target}.tar.gz"
-        for target in TARGETS
+        for target in targets
     }
 
     return {

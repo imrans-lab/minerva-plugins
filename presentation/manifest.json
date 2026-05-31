@@ -3,6 +3,7 @@
   "name": "Presentation",
   "version": "0.0.3",
   "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"],
   "backend": {
     "transport": "stdio",
     "entrypoint": "./presentation-plugin",
