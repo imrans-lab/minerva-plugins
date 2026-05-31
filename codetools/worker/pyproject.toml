@@ -1,0 +1,16 @@
+# codetools worker — packaging metadata for local dev (`pip install -e .` into
+# a .venv for Tier-2 iteration). The shipped runtime is the embedded PBS bundle
+# built by scripts/build-python-runtime-bundle.sh, NOT this pyproject; deps that
+# must ship are pinned in scripts/runtime-bundle.lock (PIP_PKGS), not here.
+[project]
+name = "codetools-plugin-worker"
+version = "0.1.0"
+description = "Python worker for the Minerva Code Tools plugin"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["codetools_worker"]

@@ -57,13 +57,19 @@ fi
 # shellcheck disable=SC1090
 . "$LOCK"
 
-# Sanity-check the lock provided the required vars
-for v in PBS_TAG CPYTHON PIP_PKGS WORKER_SOURCE_DIR WORKER_PACKAGES BUNDLE_OUT_DIR; do
+# Sanity-check the lock provided the required vars. PIP_PKGS and LAYER1_IMPORTS
+# are intentionally NOT required: a plugin whose worker needs only the Python
+# stdlib (e.g. codetools' P1.1 substrate skeleton) declares an empty PIP_PKGS.
+# The empty-DEPS path below handles that and the worker-package import probe
+# still runs. Default them so `set -u` references stay safe.
+for v in PBS_TAG CPYTHON WORKER_SOURCE_DIR WORKER_PACKAGES BUNDLE_OUT_DIR; do
   if [ -z "${!v:-}" ]; then
     echo "lock file missing required var: $v" >&2
     exit 65
   fi
 done
+: "${PIP_PKGS:=}"
+: "${LAYER1_IMPORTS:=}"
 
 # --------------------------------------------------------------------------
 # triple → PBS asset + wheel platform tag + python launcher path

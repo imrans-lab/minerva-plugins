@@ -1,0 +1,236 @@
+name: codetools
+
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "codetools/**"
+      - ".github/workflows/codetools.yml"
+      - "scripts/**"
+    tags: ["codetools-v*"]
+  pull_request:
+    paths:
+      - "codetools/**"
+      - ".github/workflows/codetools.yml"
+      - "scripts/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: codetools (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            goos: linux
+            goarch: amd64
+            ext: ""
+          - target: macos-universal
+            runs-on: macos-14
+            goos: darwin
+            goarch: ""
+            ext: ""
+          - target: windows-x86_64
+            runs-on: windows-2022
+            goos: windows
+            goarch: amd64
+            ext: ".exe"
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: codetools
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          # codetools' only dep is klauspost/compress; no go.sum committed, so
+          # disable the module cache to avoid cache-dependency-path errors.
+          cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install zstd (Linux)
+        if: matrix.goos == 'linux'
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y zstd
+          fi
+          zstd --version
+
+      - name: Install zstd (macOS)
+        if: matrix.target == 'macos-universal'
+        run: |
+          if ! command -v zstd >/dev/null 2>&1; then
+            brew install zstd
+          fi
+          zstd --version
+
+      - name: Install zstd (Windows)
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $env:Path = "$env:GITHUB_WORKSPACE\..\..\Program Files\Git\usr\bin;" + $env:Path
+          zstd --version
+
+      - name: Cache PBS downloads
+        uses: actions/cache@v4
+        with:
+          path: codetools/runtime-build/cache/pbs
+          key: pbs-${{ matrix.target }}-${{ hashFiles('codetools/scripts/runtime-bundle.lock') }}
+
+      - name: Build runtime bundle (single arch)
+        if: matrix.target != 'macos-universal'
+        run: |
+          bash ../scripts/build-python-runtime-bundle.sh . ${{ matrix.target }}
+          ls -la internal/runtime/bundle/
+
+      - name: Build runtime bundle (macos arm64 + amd64 for lipo)
+        if: matrix.target == 'macos-universal'
+        run: |
+          bash ../scripts/build-python-runtime-bundle.sh . macos-arm64
+          bash ../scripts/build-python-runtime-bundle.sh . macos-amd64
+          ls -la internal/runtime/bundle/
+
+      - name: Build (native)
+        if: matrix.target != 'macos-universal'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p build
+          go build -o build/codetools-plugin${{ matrix.ext }} .
+
+      - name: Build (macOS universal — lipo amd64 + arm64)
+        if: matrix.target == 'macos-universal'
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p build
+          GOOS=darwin GOARCH=amd64 go build -o build/codetools-plugin.amd64 .
+          GOOS=darwin GOARCH=arm64 go build -o build/codetools-plugin.arm64 .
+          lipo -create \
+            build/codetools-plugin.amd64 \
+            build/codetools-plugin.arm64 \
+            -output build/codetools-plugin
+          lipo -info build/codetools-plugin
+
+      - name: Binary-size assertion (catches go:embed silently consuming empty bundle)
+        run: |
+          # codetools' worker is stdlib-only (no build123d/OCP), so the embedded
+          # PBS bundle is ~25-40MB compressed — far smaller than cad's ~200MB.
+          # A binary under 20MB means go:embed found an empty/placeholder bundle
+          # (a Go-only binary is ~6MB; a real PBS bundle pushes it past 25MB).
+          BIN="build/codetools-plugin${{ matrix.ext }}"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::built binary not found at $BIN"; exit 1
+          fi
+          SIZE=$(wc -c < "$BIN")
+          echo "binary size: $SIZE bytes ($((SIZE / 1024 / 1024)) MB)"
+          if [ "$SIZE" -lt 20000000 ]; then
+            echo "::error::binary too small ($SIZE bytes < 20MB) — go:embed likely consumed an empty/placeholder bundle"
+            exit 1
+          fi
+
+      - name: Go test (linux-x86_64 only — Linux is the source of truth)
+        if: matrix.target == 'linux-x86_64'
+        env:
+          MINERVA_WORKER_READY_TIMEOUT_SEC: "15"
+        run: go test ./...
+
+      - name: Smoke
+        run: python3 ../scripts/smoke/mcp_smoke.py build/codetools-plugin${{ matrix.ext }}
+
+      - name: Pack release tarball
+        run: |
+          PLATFORM="${{ matrix.target }}"
+          VERSION=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+          mkdir -p dist
+          PACKDIR="dist/codetools-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp build/codetools-plugin${{ matrix.ext }} "$PACKDIR/"
+          cp manifest.json "$PACKDIR/"
+          # No ui/ yet — P1.1 ships no panel; P1.4 adds the code-visualizer
+          # godot_scene panel and this step grows a `cp -r ui "$PACKDIR/"`.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
+          else
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
+          fi
+          tar -czf "dist/codetools-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          echo "Packed contents:"
+          tar -tzf "dist/codetools-${VERSION}-${PLATFORM}.tar.gz"
+          ls -la "dist/codetools-${VERSION}-${PLATFORM}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codetools-${{ matrix.target }}
+          path: codetools/dist/codetools-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all matrix tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codetools-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - name: Compute tag + prerelease flag
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("codetools/manifest.json"))["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            PRE="false"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="codetools-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="codetools-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "Computed: tag=$TAG prerelease=$PRE"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/codetools-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

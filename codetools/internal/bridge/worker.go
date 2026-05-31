@@ -1,0 +1,684 @@
+// Package bridge — Worker manages the long-lived Python CAD worker subprocess.
+//
+// Design references: Go-python-bridge-design.md §2 (process model),
+// §4 (request/response), §5 (worker lifecycle), §7 (error surfaces).
+package bridge
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	goruntime "runtime"
+	"strconv"
+	"sync"
+	"time"
+
+	cadruntime "github.com/imrans-lab/minerva-plugins/codetools/internal/runtime"
+)
+
+// readyTimeout returns readyTimeoutDefault, optionally overridden by the
+// MINERVA_WORKER_READY_TIMEOUT_SEC env var (positive integer seconds). The
+// env var is read each call so tests can change the timeout dynamically via
+// t.Setenv().
+func readyTimeout() time.Duration {
+	if v := os.Getenv("MINERVA_WORKER_READY_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return readyTimeoutDefault
+}
+
+// signalKind is a portable signal selector for terminateProcessGroup.
+// Windows collapses both kinds to immediate termination; Unix maps them
+// onto SIGTERM and SIGKILL respectively.
+type signalKind int
+
+const (
+	sigTerm signalKind = iota
+	sigKill
+)
+
+const (
+	// readyTimeoutDefault is the hard deadline for the worker.ready notification (§5).
+	// Design called for 15s; bumped to 60s 2026-05-27 (W1c) because first-time
+	// cold-start of the embedded PBS bundle (cadquery-ocp + build123d + OCCT
+	// init) regularly exceeds 15s on slower disks even after extraction.
+	// Caught crashes still surface within 60s; warm starts complete in <5s
+	// and are unaffected by the bump.
+	//
+	// Override via MINERVA_WORKER_READY_TIMEOUT_SEC env var (integer seconds).
+	// Used by readyTimeout() — call that, not the constant, to honor the override.
+	readyTimeoutDefault = 60 * time.Second
+
+	// shutdownGrace is the window after sending "shutdown" before SIGTERM.
+	shutdownGrace = 2 * time.Second
+
+	// sigkillDelay is how long after SIGTERM before SIGKILL.
+	sigkillDelay = 3 * time.Second
+
+	// circuitBreakerWindow is the sliding window for crash counting (§2).
+	circuitBreakerWindow = 60 * time.Second
+
+	// circuitBreakerLimit is the number of crashes that trip the breaker (§2).
+	circuitBreakerLimit = 3
+)
+
+// inflightEntry tracks a pending request.
+type inflightEntry struct {
+	ch chan Response
+}
+
+// Worker manages a single Python subprocess and the correlation of requests
+// to responses. It is safe for concurrent use from multiple goroutines.
+type Worker struct {
+	mu sync.Mutex
+
+	// Configuration (immutable after New).
+	pythonPath string
+	workerDir  string
+	module     string // python worker module, spawned as `python -m <module>`
+
+	// StderrCallback, if non-nil, is called for each line emitted by the worker
+	// on stderr (after the line has already been forwarded to Go's stderr via
+	// log.Printf). This allows the caller to apply additional filtering (e.g.,
+	// emitting Minerva toast notifications for critical lines).
+	StderrCallback func(line string)
+
+	// Subprocess state (guarded by mu).
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
+
+	// Crash timestamps for circuit breaker (§2).
+	crashTimes []time.Time
+
+	// In-flight request correlation table (guarded by mu).
+	inflight map[string]*inflightEntry
+
+	// readyC is closed when the worker emits worker.ready (or hits timeout).
+	// It is recreated each time the worker is spawned.
+	readyC chan struct{}
+
+	// doneC is closed when the reader goroutine exits (worker crashed/stopped).
+	doneC chan struct{}
+}
+
+// New creates a Worker that will use the given Python interpreter, worker
+// source directory, and python module name (spawned as `python -m <module>`).
+// It does NOT spawn the subprocess — spawning is lazy (§2). Keeping the module
+// name a parameter (not a hardcoded constant) is what makes this bridge
+// genuinely plugin-agnostic — the substrate every Code Tools subsystem reuses.
+func New(pythonPath, workerDir, module string) *Worker {
+	return &Worker{
+		pythonPath: pythonPath,
+		workerDir:  workerDir,
+		module:     module,
+		inflight:   make(map[string]*inflightEntry),
+	}
+}
+
+// IsAlive reports whether the worker subprocess is currently running.
+func (w *Worker) IsAlive() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.isAliveLocked()
+}
+
+// isAliveLocked requires mu held.
+func (w *Worker) isAliveLocked() bool {
+	return w.cmd != nil && w.cmd.ProcessState == nil
+}
+
+// circuitOpen reports whether the circuit breaker has tripped (§2).
+// Requires mu held.
+func (w *Worker) circuitOpen() bool {
+	cutoff := time.Now().Add(-circuitBreakerWindow)
+	recent := 0
+	for _, t := range w.crashTimes {
+		if t.After(cutoff) {
+			recent++
+		}
+	}
+	return recent >= circuitBreakerLimit
+}
+
+// recordCrash adds a crash timestamp for circuit-breaker tracking.
+// Requires mu held.
+func (w *Worker) recordCrash() {
+	cutoff := time.Now().Add(-circuitBreakerWindow)
+	// Prune old entries.
+	fresh := w.crashTimes[:0]
+	for _, t := range w.crashTimes {
+		if t.After(cutoff) {
+			fresh = append(fresh, t)
+		}
+	}
+	w.crashTimes = append(fresh, time.Now())
+}
+
+// Start spawns the Python worker subprocess and waits for it to emit
+// worker.ready (§5). Returns once the worker is ready for requests.
+func (w *Worker) Start(ctx context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.startLocked(ctx)
+}
+
+// startLocked requires mu held.
+func (w *Worker) startLocked(ctx context.Context) error {
+	if w.isAliveLocked() {
+		return nil // Already running.
+	}
+
+	if w.circuitOpen() {
+		return &WorkerError{
+			Kind:    "crashed",
+			Message: "circuit breaker open: worker crashed too many times; restart the plugin to reset",
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, w.pythonPath, "-m", w.module) //nolint:gosec
+	cmd.Dir = workerCwd(w.pythonPath, w.workerDir)
+	cmd.Env = buildEnv(w.pythonPath)
+	setProcessGroup(cmd)
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("bridge.Worker.Start: stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("bridge.Worker.Start: stdout pipe: %w", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("bridge.Worker.Start: stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("bridge.Worker.Start: exec: %w", err)
+	}
+
+	w.cmd = cmd
+	w.stdin = stdinPipe
+	w.stdout = bufio.NewReaderSize(stdoutPipe, 1<<20)
+	w.readyC = make(chan struct{})
+	w.doneC = make(chan struct{})
+
+	// Pump stderr to parent stderr with [worker] prefix (§5).
+	go pumpStderr(stderrPipe, w.StderrCallback)
+
+	// Reader goroutine: consumes frames from stdout and dispatches (§4).
+	go w.reader()
+
+	// Wait for cmd.Wait() to reap the process.
+	go func() {
+		w.cmd.Wait() //nolint:errcheck
+	}()
+
+	// Release mu while we wait for ready — reader goroutine holds its own lock
+	// for map ops only, so this is safe.
+	readyC := w.readyC
+	w.mu.Unlock()
+
+	timeout := readyTimeout()
+	select {
+	case <-readyC:
+		w.mu.Lock()
+		log.Printf("[bridge.Worker] worker ready (pid=%d)", w.cmd.Process.Pid)
+		return nil
+	case <-time.After(timeout):
+		w.mu.Lock()
+		log.Printf("[bridge.Worker] worker.ready timeout after %s — killing", timeout)
+		w.killLocked()
+		w.recordCrash()
+		return &WorkerError{
+			Kind:    "crashed",
+			Message: fmt.Sprintf("worker did not emit worker.ready within %s", timeout),
+		}
+	case <-ctx.Done():
+		w.mu.Lock()
+		w.killLocked()
+		return ctx.Err()
+	}
+}
+
+// reader is the goroutine that reads framed responses from stdout and
+// dispatches them to the in-flight correlation table (§4).
+// It also handles notifications (worker.ready, log, progress).
+func (w *Worker) reader() {
+	defer close(w.doneC)
+
+	for {
+		w.mu.Lock()
+		stdout := w.stdout
+		w.mu.Unlock()
+
+		if stdout == nil {
+			return
+		}
+
+		body, err := ReadFrame(stdout)
+		if err != nil {
+			// EOF or pipe close — worker exited.
+			w.mu.Lock()
+			w.failInflightLocked("crashed", "worker stdout closed unexpectedly")
+			w.mu.Unlock()
+			return
+		}
+
+		w.handleFrame(body)
+	}
+}
+
+// handleFrame dispatches a single incoming frame.
+func (w *Worker) handleFrame(body []byte) {
+	// Detect notification vs response by presence of "id" field.
+	var probe struct {
+		ID     string `json:"id"`
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		log.Printf("[bridge.Worker] unparse-able frame: %v", err)
+		return
+	}
+
+	if probe.ID == "" {
+		// Notification.
+		w.handleNotification(body, probe.Method)
+		return
+	}
+
+	// Response — correlate.
+	resp, err := UnmarshalResponse(body)
+	if err != nil {
+		log.Printf("[bridge.Worker] unmarshal response: %v", err)
+		return
+	}
+
+	w.mu.Lock()
+	entry, ok := w.inflight[resp.ID]
+	if ok {
+		delete(w.inflight, resp.ID)
+	}
+	w.mu.Unlock()
+
+	if !ok {
+		log.Printf("[bridge.Worker] unknown/stale response id=%q (dropped)", resp.ID)
+		return
+	}
+	entry.ch <- *resp
+}
+
+// handleNotification handles Python→Go notifications (§4).
+func (w *Worker) handleNotification(body []byte, method string) {
+	switch method {
+	case "worker.ready":
+		w.mu.Lock()
+		rc := w.readyC
+		w.mu.Unlock()
+		if rc != nil {
+			select {
+			case <-rc:
+				// Already closed.
+			default:
+				close(rc)
+			}
+		}
+	case "log":
+		var n Notification
+		if err := json.Unmarshal(body, &n); err == nil {
+			log.Printf("[worker] log: %s", string(n.Params))
+		}
+	case "progress":
+		var n Notification
+		if err := json.Unmarshal(body, &n); err == nil {
+			log.Printf("[worker] progress: %s", string(n.Params))
+		}
+	default:
+		log.Printf("[bridge.Worker] unknown notification method=%q", method)
+	}
+}
+
+// failInflightLocked cancels all pending in-flight requests with the given
+// error kind and message. Requires mu held.
+func (w *Worker) failInflightLocked(kind, message string) {
+	for id, entry := range w.inflight {
+		entry.ch <- Response{
+			ID: id,
+			OK: false,
+			Error: &WorkerError{
+				Kind:    kind,
+				Message: message,
+			},
+		}
+		delete(w.inflight, id)
+	}
+}
+
+// killLocked sends SIGKILL to the worker process group. Requires mu held.
+func (w *Worker) killLocked() {
+	if w.cmd == nil || w.cmd.Process == nil {
+		return
+	}
+	// Kill entire process group to catch any grandchildren (Unix);
+	// terminates the bare process on Windows.
+	_ = terminateProcessGroup(w.cmd.Process, sigKill)
+	w.cmd = nil
+	w.stdin = nil
+	w.stdout = nil
+}
+
+// Call sends a request to the worker and waits for the correlated response
+// (§4). It handles lazy spawn (§2) if the worker is not yet alive.
+func (w *Worker) Call(ctx context.Context, method string, params json.RawMessage) (json.RawMessage, error) {
+	// Ensure worker is alive (lazy spawn, §2).
+	w.mu.Lock()
+	if !w.isAliveLocked() {
+		if err := w.startLocked(ctx); err != nil {
+			w.mu.Unlock()
+			return nil, err
+		}
+	}
+	w.mu.Unlock()
+
+	id := NextID()
+
+	// Compute deadline for the request.
+	var deadlineMS int64
+	if dl, ok := ctx.Deadline(); ok {
+		deadlineMS = time.Until(dl).Milliseconds()
+		if deadlineMS <= 0 {
+			return nil, &WorkerError{Kind: "cancelled", Message: "context already expired"}
+		}
+	}
+
+	req := &Request{
+		ID:         id,
+		Method:     method,
+		Params:     params,
+		DeadlineMS: deadlineMS,
+	}
+	reqBytes, err := MarshalRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("bridge.Worker.Call: marshal: %w", err)
+	}
+
+	// Register inflight entry before writing so the reader goroutine never
+	// misses a very-fast response.
+	ch := make(chan Response, 1)
+	w.mu.Lock()
+	w.inflight[id] = &inflightEntry{ch: ch}
+	w.mu.Unlock()
+
+	// Write the framed request.
+	w.mu.Lock()
+	stdin := w.stdin
+	w.mu.Unlock()
+
+	if stdin == nil {
+		w.mu.Lock()
+		delete(w.inflight, id)
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "crashed", Message: "worker not running"}
+	}
+
+	if err := WriteFrame(stdin, reqBytes); err != nil {
+		w.mu.Lock()
+		delete(w.inflight, id)
+		// Record a crash and clean up.
+		w.recordCrash()
+		w.killLocked()
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "crashed", Message: fmt.Sprintf("write to worker: %v", err)}
+	}
+
+	// Wait for response, context cancellation, or worker crash.
+	select {
+	case resp := <-ch:
+		if resp.OK {
+			return resp.Result, nil
+		}
+		if resp.Error != nil {
+			return nil, resp.Error
+		}
+		return nil, &WorkerError{Kind: "internal", Message: "worker returned ok=false with no error"}
+	case <-ctx.Done():
+		// Remove inflight entry; the worker may still finish — we discard the
+		// result per §4 (v1 cancellation is deadline-only).
+		w.mu.Lock()
+		delete(w.inflight, id)
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "cancelled", Message: ctx.Err().Error()}
+	case <-w.doneC:
+		w.mu.Lock()
+		delete(w.inflight, id)
+		w.recordCrash()
+		w.cmd = nil
+		w.stdin = nil
+		w.stdout = nil
+		w.mu.Unlock()
+		return nil, &WorkerError{Kind: "crashed", Message: "worker process exited mid-request"}
+	}
+}
+
+// Shutdown sends a graceful shutdown request and waits for the process to exit
+// (§5). timeout controls how long to wait before SIGTERM; SIGKILL follows
+// sigkillDelay later.
+func (w *Worker) Shutdown(timeout time.Duration) {
+	w.mu.Lock()
+	if !w.isAliveLocked() {
+		w.mu.Unlock()
+		return
+	}
+	stdin := w.stdin
+	doneC := w.doneC
+	w.mu.Unlock()
+
+	// Send graceful shutdown request.
+	if stdin != nil {
+		shutdownReq := &Request{ID: NextID(), Method: "shutdown"}
+		reqBytes, _ := MarshalRequest(shutdownReq)
+		_ = WriteFrame(stdin, reqBytes)
+		_ = stdin.Close()
+	}
+
+	// Wait for worker to exit cleanly.
+	select {
+	case <-doneC:
+		log.Printf("[bridge.Worker] worker shut down cleanly")
+		return
+	case <-time.After(timeout):
+	}
+
+	// Graceful window elapsed — send SIGTERM then SIGKILL.
+	w.mu.Lock()
+	cmd := w.cmd
+	w.mu.Unlock()
+
+	if cmd != nil && cmd.Process != nil {
+		log.Printf("[bridge.Worker] worker did not exit in %s — sending SIGTERM", timeout)
+		_ = terminateProcessGroup(cmd.Process, sigTerm)
+
+		select {
+		case <-doneC:
+			log.Printf("[bridge.Worker] worker exited after SIGTERM")
+			return
+		case <-time.After(sigkillDelay):
+		}
+
+		log.Printf("[bridge.Worker] worker did not exit after SIGTERM — sending SIGKILL")
+		_ = terminateProcessGroup(cmd.Process, sigKill)
+	}
+
+	// Best-effort wait.
+	select {
+	case <-doneC:
+	case <-time.After(2 * time.Second):
+		log.Printf("[bridge.Worker] worker still alive after SIGKILL — giving up")
+	}
+
+	w.mu.Lock()
+	w.cmd = nil
+	w.stdin = nil
+	w.stdout = nil
+	w.mu.Unlock()
+}
+
+// buildEnv constructs a scrubbed environment for the worker subprocess (§5).
+//
+// Two modes:
+//
+//  1. Extracted-runtime mode (pythonPath under <dataDir>/runtime/<ver>/):
+//     Sets PYTHONHOME + PYTHONPATH to lock the worker to the bundle's
+//     interpreter and site-packages, and prepends the bundle's bin/ to PATH.
+//     No host PYTHON* / VIRTUAL_ENV / CONDA_* leak in (we build the env list
+//     from scratch — anything we don't add is implicitly excluded).
+//
+//  2. Dev mode (.venv or system python3):
+//     Forwards host PATH only; omits PYTHONHOME / PYTHONPATH so the chosen
+//     interpreter's own sys.path applies.
+func buildEnv(pythonPath string) []string {
+	env := []string{
+		"PYTHONUNBUFFERED=1",
+		"PYTHONDONTWRITEBYTECODE=1",
+	}
+
+	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+
+	if runtimeRoot != "" {
+		// Extracted-runtime (production marketplace install) path.
+		env = append(env, "PYTHONHOME="+runtimeRoot)
+		if sp := bundleSitePackages(runtimeRoot); sp != "" {
+			env = append(env, "PYTHONPATH="+sp)
+		}
+		// Prepend bundle bin/ to PATH so any nested subprocess (e.g. a
+		// future build123d → gmsh shellout) finds the bundled python first.
+		binDir := filepath.Join(runtimeRoot, "bin")
+		if goruntime.GOOS == "windows" {
+			binDir = runtimeRoot
+		}
+		existingPath := os.Getenv("PATH")
+		env = append(env, "PATH="+binDir+string(os.PathListSeparator)+existingPath)
+	} else {
+		// Dev mode: forward host PATH so the worker can find system utilities.
+		if path := os.Getenv("PATH"); path != "" {
+			env = append(env, "PATH="+path)
+		}
+	}
+
+	// Forward HOME (Unix) / USERPROFILE (Windows) so Python can locate per-user
+	// caches if it wants to. In extracted-runtime mode PYTHONHOME overrides any
+	// user-site discovery; harmless to include.
+	if home := os.Getenv("HOME"); home != "" {
+		env = append(env, "HOME="+home)
+	}
+	if up := os.Getenv("USERPROFILE"); up != "" {
+		env = append(env, "USERPROFILE="+up)
+	}
+	// TEMP / TMP needed on Windows for tempfile.gettempdir().
+	if t := os.Getenv("TEMP"); t != "" {
+		env = append(env, "TEMP="+t)
+	}
+	if t := os.Getenv("TMP"); t != "" {
+		env = append(env, "TMP="+t)
+	}
+
+	// Intentionally NOT forwarded (would contaminate the worker's interpreter):
+	//   PYTHONHOME / PYTHONPATH / PYTHONSTARTUP / PYTHONUSERBASE
+	//   VIRTUAL_ENV / CONDA_PREFIX / CONDA_DEFAULT_ENV / CONDA_SHLVL
+	// Because env starts as a fresh slice (not os.Environ() + filter), these
+	// vars are never present unless we add them above. This is safer than
+	// "inherit + strip" — no risk of forgetting a newly-discovered leakage var.
+	return env
+}
+
+// bundleSitePackages returns the absolute path to the site-packages dir
+// inside an extracted PBS runtime tree. Handles OS-specific PBS layout:
+//   - Unix:    <root>/lib/python3.X/site-packages
+//   - Windows: <root>/Lib/site-packages
+//
+// Picks the highest cpython 3.x directory under lib/ on Unix. Returns "" if
+// no site-packages can be located (caller should log + continue without
+// PYTHONPATH so the worker still finds packages via PYTHONHOME's own logic).
+func bundleSitePackages(runtimeRoot string) string {
+	if goruntime.GOOS == "windows" {
+		candidate := filepath.Join(runtimeRoot, "Lib", "site-packages")
+		if st, err := os.Stat(candidate); err == nil && st.IsDir() {
+			return candidate
+		}
+		return ""
+	}
+	// Unix: scan lib/python3.X/site-packages for any X.
+	libDir := filepath.Join(runtimeRoot, "lib")
+	entries, err := os.ReadDir(libDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 8 || name[:8] != "python3." {
+			continue
+		}
+		candidate := filepath.Join(libDir, name, "site-packages")
+		if st, statErr := os.Stat(candidate); statErr == nil && st.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// workerCwd returns the working directory for the worker subprocess.
+//
+//   - Extracted-runtime mode: a writable scratch sibling of the runtime root
+//     (<dataDir>/runtime/work/). The worker source lives inside the bundle's
+//     site-packages and is found via PYTHONHOME, NOT via cwd. The old
+//     "cmd.Dir = <plugin>/worker/" path doesn't exist in marketplace installs.
+//   - Dev mode: workerDir (matches pre-W1c behavior — the worker source
+//     is at <plugin>/worker/ and used as cwd for relative imports).
+func workerCwd(pythonPath, devWorkerDir string) string {
+	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+	if runtimeRoot == "" {
+		return devWorkerDir
+	}
+	// runtimeRoot is e.g. <dataDir>/runtime/<version>/. Sibling 'work/' dir.
+	scratch := filepath.Join(filepath.Dir(runtimeRoot), "work")
+	if err := os.MkdirAll(scratch, 0o755); err != nil {
+		// Fall back to OS temp dir; not fatal.
+		return os.TempDir()
+	}
+	return scratch
+}
+
+// pumpStderr consumes a reader and forwards each line to stderr with [worker]
+// prefix. If cb is non-nil it is called for each line after logging, allowing
+// the caller to apply additional filtering (e.g., Minerva toast notifications).
+func pumpStderr(r io.Reader, cb func(string)) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		log.Printf("[worker] %s", line)
+		if cb != nil {
+			cb(line)
+		}
+	}
+}
+
+// Error implements the error interface for WorkerError so callers can use
+// errors.As to inspect the kind.
+func (e *WorkerError) Error() string {
+	if e == nil {
+		return "<nil WorkerError>"
+	}
+	return fmt.Sprintf("worker error [%s]: %s", e.Kind, e.Message)
+}

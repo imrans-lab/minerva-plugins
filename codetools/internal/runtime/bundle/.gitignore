@@ -1,0 +1,9 @@
+# Embedded python runtime bundles land here. Built by
+# scripts/build-python-runtime-bundle.sh and consumed by go:embed in
+# embed_<triple>.go. The bundles are large (~150-250MB) and per-platform;
+# CI rebuilds them per matrix leg. Track only this .gitignore so the
+# directory exists on a fresh clone.
+
+*.tar.zst
+*.sha256
+!.gitignore

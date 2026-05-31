@@ -1,0 +1,34 @@
+# codetools/scripts/runtime-bundle.lock — shell-sourceable lock file
+#
+# Source-of-truth pins for the codetools-plugin embedded python runtime bundle.
+# Read by scripts/build-python-runtime-bundle.sh (repo root, plugin-agnostic).
+#
+# Filed under DCR 019e7b6609 (Code Tools extraction), P1.1 substrate skeleton.
+
+# --- python-build-standalone (PBS) ----------------------------------------
+# Pin a specific PBS release for reproducibility. Matches the cad plugin's pin
+# so both plugins share one cached PBS download in CI.
+PBS_TAG="20260510"
+CPYTHON="3.12.13"
+
+# --- plugin python deps ----------------------------------------------------
+# P1.1 substrate needs only the Python stdlib (json/platform/sys), so no wheels
+# are installed. Later phases append their pins here (e.g. tree-sitter wheels
+# for code-visualizer). The build script tolerates an empty PIP_PKGS and still
+# bundles the worker source + runs the worker-package import probe.
+PIP_PKGS=""
+
+# --- Layer 1 import probe --------------------------------------------------
+# Extra import statements run inside the freshly-built bundle (env-isolated) to
+# confirm deps resolve. Empty for P1.1 — the WORKER_PACKAGES probe below already
+# imports codetools_worker, which is the only thing to verify at this phase.
+LAYER1_IMPORTS=""
+
+# --- worker package layout -------------------------------------------------
+WORKER_SOURCE_DIR="worker"
+WORKER_PACKAGES="codetools_worker"
+
+# --- bundle output location ------------------------------------------------
+# Must be go:embed-reachable (Go forbids `..` in embed paths), so the bundle
+# lives under the Go source tree.
+BUNDLE_OUT_DIR="internal/runtime/bundle"

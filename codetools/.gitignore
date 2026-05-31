@@ -1,0 +1,12 @@
+# Built Go binaries — build from source per FCIB policy (embedded bundle makes
+# these 25-40MB; never commit them).
+build/
+codetools-plugin
+codetools-plugin.exe
+*.testbin
+*.testbin.exe
+
+# PBS runtime build scratch (download cache + extraction stage). The final
+# embedded bundle under internal/runtime/bundle/ is git-ignored separately
+# (see internal/runtime/bundle/.gitignore).
+runtime-build/
