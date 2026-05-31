@@ -12,21 +12,33 @@ PBS_TAG="20260510"
 CPYTHON="3.12.13"
 
 # --- plugin python deps ----------------------------------------------------
-# P1.1 substrate needs only the Python stdlib (json/platform/sys), so no wheels
-# are installed. Later phases append their pins here (e.g. tree-sitter wheels
-# for code-visualizer). The build script tolerates an empty PIP_PKGS and still
-# bundles the worker source + runs the worker-package import probe.
-PIP_PKGS=""
+# P1.3 (code-visualizer) needs:
+#   - `tree-sitter` binding from PyPI (~=0.22 per the vendored grammar pyproject)
+#   - `tree-sitter-gdscript` grammar — NOT on PyPI; built from the vendored
+#     source via pip. The build script's sourcing context exports PLUGIN_DIR
+#     before reading this file, so the absolute path resolves cleanly here.
+# NOTE: this file is no longer pure-config — it interpolates $PLUGIN_DIR (set
+# by build-python-runtime-bundle.sh before sourcing). The build script MUST
+# stay the only consumer; ad-hoc sourcing from another context will break.
+TS_GDSCRIPT_SRC="$PLUGIN_DIR/worker/vendored/code_visualizer/vendor/tree-sitter-gdscript"
+PIP_PKGS="tree-sitter~=0.22 $TS_GDSCRIPT_SRC"
 
 # --- Layer 1 import probe --------------------------------------------------
 # Extra import statements run inside the freshly-built bundle (env-isolated) to
-# confirm deps resolve. Empty for P1.1 — the WORKER_PACKAGES probe below already
-# imports codetools_worker, which is the only thing to verify at this phase.
-LAYER1_IMPORTS=""
+# confirm deps resolve. Semicolon-separated, single line — the build script
+# joins these into `python -c "..."`. The WORKER_PACKAGES probe below already
+# imports codetools_worker; this layer probes the tree-sitter pair so a
+# wheel-resolve regression fails the bundle build, not the first plugin start.
+LAYER1_IMPORTS="import tree_sitter; import tree_sitter_gdscript"
 
 # --- worker package layout -------------------------------------------------
+# `vendored` is a sibling package containing snapshots from upstream PoCs
+# (P1.3 added code_visualizer). The build script copies each WORKER_PACKAGES
+# entry as-is, so vendored/ MUST be listed here or `from vendored.* import ...`
+# fails with ModuleNotFoundError at first MCP call. Bundle Layer-1 import
+# probe (LAYER1_IMPORTS above) catches this regression at build time too.
 WORKER_SOURCE_DIR="worker"
-WORKER_PACKAGES="codetools_worker"
+WORKER_PACKAGES="codetools_worker vendored"
 
 # --- bundle output location ------------------------------------------------
 # Must be go:embed-reachable (Go forbids `..` in embed paths), so the bundle

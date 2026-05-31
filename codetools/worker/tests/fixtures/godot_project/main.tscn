@@ -1,0 +1,16 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://game_manager.gd" id="1_gm"]
+[ext_resource type="Script" path="res://player.gd" id="2_pl"]
+[ext_resource type="Script" path="res://enemy.gd" id="3_en"]
+
+[node name="Main" type="Node"]
+script = ExtResource("1_gm")
+
+[node name="Player" type="CharacterBody2D" parent="."]
+script = ExtResource("2_pl")
+
+[node name="Enemies" type="Node" parent="."]
+
+[node name="Enemy" type="CharacterBody2D" parent="Enemies"]
+script = ExtResource("3_en")

@@ -1,0 +1,1 @@
+# code-magic MCP server

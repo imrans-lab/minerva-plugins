@@ -223,17 +223,23 @@ for v in ['USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','LOCALAPPDATA','APPDATA','
 "
   fi
   if [ ${#DEPS[@]} -gt 0 ]; then
-    # --no-compile sidesteps the byte-compile pass. For Windows we ALSO
-    # force-pass home-dir env on the command line in case bash export isn't
-    # propagating those vars to the native python subprocess.
+    # --no-compile sidesteps the byte-compile pass.
+    # PYTHONNOUSERSITE=1 is REQUIRED: without it pip on dev boxes will see deps
+    # in ~/.local/lib/python3.12/site-packages (developer-installed) and skip
+    # installing them INTO the bundle. The bundle then shipping/extracting to a
+    # production user with no user-site triggers ModuleNotFoundError at runtime.
+    # For Windows we ALSO force-pass home-dir env on the command line in case
+    # bash export isn't propagating those vars to the native python subprocess.
     if [ "$TRIPLE" = "windows-x86_64" ]; then
+      PYTHONNOUSERSITE=1 \
       USERPROFILE="${USERPROFILE}" \
       LOCALAPPDATA="${LOCALAPPDATA}" \
       HOMEDRIVE="${HOMEDRIVE}" \
       HOMEPATH="${HOMEPATH}" \
         "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
     else
-      "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
+      PYTHONNOUSERSITE=1 \
+        "$STAGE_DIR/$PYTHON_BIN" -m pip install --no-cache-dir --no-input --no-compile "${DEPS[@]}"
     fi
   fi
 else

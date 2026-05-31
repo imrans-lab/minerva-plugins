@@ -141,11 +141,23 @@ var (
 	registry *tools.Registry
 )
 
-// initRegistry registers all MCP tools. Called once at startup. P1.1 ships
-// only the health tool; later phases append their subsystem tools here.
+// initRegistry registers all MCP tools. Called once at startup. P1.1 shipped
+// the health tool; P1.3 adds the 9 code-visualizer tools (vendored code-magic
+// behind the unified envelope). Later phases append files/code-probe here.
 func initRegistry() {
 	registry = tools.NewRegistry()
 	registry.Register(tools.Ping, tools.HandlePing)
+
+	// P1.3 — code-visualizer (vendored @9cc9403).
+	registry.Register(tools.Query, tools.HandleQuery)
+	registry.Register(tools.GetContext, tools.HandleGetContext)
+	registry.Register(tools.StaleCheck, tools.HandleStaleCheck)
+	registry.Register(tools.GetDiff, tools.HandleGetDiff)
+	registry.Register(tools.Analyze, tools.HandleAnalyze)
+	registry.Register(tools.SetDescription, tools.HandleSetDescription)
+	registry.Register(tools.DescribeSymbol, tools.HandleDescribeSymbol)
+	registry.Register(tools.SetTags, tools.HandleSetTags)
+	registry.Register(tools.Undescribed, tools.HandleUndescribed)
 }
 
 // initWorker resolves the Python interpreter and constructs the Worker. Called

@@ -31,9 +31,11 @@ func TestHandleInitialize(t *testing.T) {
 	}
 }
 
-// TestHandleToolsListExposesPing checks the registry surfaces exactly the
-// namespaced health tool at the substrate phase.
-func TestHandleToolsListExposesPing(t *testing.T) {
+// TestHandleToolsListExposesRegisteredTools checks tools/list returns every
+// registered tool: the substrate ping plus the 9 code-visualizer tools added
+// in P1.3. Asserting names (not just count) catches an accidental rename or
+// missing Register call.
+func TestHandleToolsListExposesRegisteredTools(t *testing.T) {
 	initRegistry()
 	resp := handleToolsList(json.RawMessage(`2`))
 	if resp.Error != nil {
@@ -48,10 +50,29 @@ func TestHandleToolsListExposesPing(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
-	if len(got.Tools) != 1 {
-		t.Fatalf("want 1 tool, got %d: %+v", len(got.Tools), got.Tools)
+	want := []string{
+		"minerva_codetools_ping",
+		// P1.3 — code-visualizer (vendored @9cc9403)
+		"minerva_codetools_query",
+		"minerva_codetools_get_context",
+		"minerva_codetools_stale_check",
+		"minerva_codetools_get_diff",
+		"minerva_codetools_analyze",
+		"minerva_codetools_set_description",
+		"minerva_codetools_describe_symbol",
+		"minerva_codetools_set_tags",
+		"minerva_codetools_undescribed",
 	}
-	if got.Tools[0].Name != "minerva_codetools_ping" {
-		t.Errorf("tool name = %q, want minerva_codetools_ping", got.Tools[0].Name)
+	if len(got.Tools) != len(want) {
+		t.Fatalf("want %d tools, got %d: %+v", len(want), len(got.Tools), got.Tools)
+	}
+	seen := make(map[string]bool, len(got.Tools))
+	for _, t := range got.Tools {
+		seen[t.Name] = true
+	}
+	for _, name := range want {
+		if !seen[name] {
+			t.Errorf("missing registered tool: %s", name)
+		}
 	}
 }
