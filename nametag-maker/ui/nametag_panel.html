@@ -6,9 +6,9 @@
 <title>Name Tags</title>
 <!--
   Name Tags panel (round 3) — single self-contained HTML file.
-  Data flow: CSV + icon PNG -> minerva.call('minerva_nametag-maker_nametag_generate')
+  Data flow: CSV + icon PNG -> minerva.call('minerva_nametag_maker_nametag_generate')
              -> preview every page with PDF.js
-             -> Save via minerva.call('minerva_nametag-maker_nametag_save')
+             -> Save via minerva.call('minerva_nametag_maker_nametag_save')
                 (backend regenerates + picks/grants/writes; PDF bytes never cross
                  the 64 KiB-capped webview IPC channel)
              -> human-in-the-loop print acceptance.
@@ -206,8 +206,8 @@ Grace Hopper,Compilers,2,B-205</textarea>
 (function () {
   "use strict";
 
-  var TOOL = "minerva_nametag-maker_nametag_generate";
-  var SAVE_TOOL = "minerva_nametag-maker_nametag_save";
+  var TOOL = "minerva_nametag_maker_nametag_generate";
+  var SAVE_TOOL = "minerva_nametag_maker_nametag_save";
   var PDFJS_VERSION = "3.11.174";
 
   // ---- PDF.js worker wired via a Blob URL (single-file friendly) -------------
