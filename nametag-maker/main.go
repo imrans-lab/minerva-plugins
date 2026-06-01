@@ -289,6 +289,43 @@ func saveInputSchema() map[string]interface{} {
 	return map[string]interface{}{"type": "object", "properties": props}
 }
 
+func buildFromSheetInputSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"rows_json": map[string]interface{}{"type": "string", "description": "JSON array of sheet row objects ({column: value}) — e.g. from minerva_get_spreadsheet_data. Passed as a STRING (columns are arbitrary per use case)."},
+			"mapping": map[string]interface{}{
+				"type":        "object",
+				"description": "Which spreadsheet columns map onto each tag field.",
+				"properties": map[string]interface{}{
+					"title":    map[string]interface{}{"type": "string", "description": "Column for the tag's big bold name."},
+					"subtitle": map[string]interface{}{"type": "string", "description": "Column for the subtitle line."},
+					"lines": map[string]interface{}{
+						"type":        "array",
+						"description": "Detail lines: each is a fixed label + the column holding the value (empty values are omitted).",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"label":  map[string]interface{}{"type": "string"},
+								"column": map[string]interface{}{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+			"layout":             map[string]interface{}{"type": "string", "description": "classic or detailed (default detailed)."},
+			"image_side":         map[string]interface{}{"type": "string", "description": "left (default) or right."},
+			"back_mode":          map[string]interface{}{"type": "string", "description": `"blank" (default) or "same" (mirror front, reversible).`},
+			"full_guides":        map[string]interface{}{"type": "boolean", "description": "Full box per tag instead of corner-cut marks."},
+			"icon_width_in":      map[string]interface{}{"type": "number", "description": "Icon/image width in inches."},
+			"out_path":           map[string]interface{}{"type": "string", "description": "Absolute destination path for the .mtags document."},
+			"title":              map[string]interface{}{"type": "string", "description": "Document title."},
+			"sheet_ref":          map[string]interface{}{"type": "string", "description": "Optional reference to the source spreadsheet (editor name or path)."},
+			"preview_first_only": map[string]interface{}{"type": "boolean", "description": "Render the preview for only the FIRST tag (single-draft review); the .mtags still stores all rows."},
+		},
+	}
+}
+
 var toolList = []map[string]interface{}{
 	{
 		"name":        "nametag_generate",
@@ -299,6 +336,11 @@ var toolList = []map[string]interface{}{
 		"name":        "nametag_save",
 		"description": "Like nametag_generate, but writes the PDF to disk on the backend (bytes never cross the 64 KiB webview channel). Pass `path` to write directly with no dialog; omit it for a save picker. Returns {saved, path, bytes_written, page_count}, or {saved:false, cancelled:true} on picker cancel.",
 		"inputSchema": saveInputSchema(),
+	},
+	{
+		"name":        "nametag_build_from_sheet",
+		"description": "Build a .mtags nametag document from spreadsheet rows. The caller reads the sheet (minerva_get_spreadsheet_data) and passes rows_json + a column mapping; this deterministically maps columns → tag rows, renders a preview PDF (the first tag only when preview_first_only — the single-draft review), writes the preview + the .mtags to disk, and returns the .mtags path to open. The standard columns are just a suggestion — the mapping makes it work for any sheet.",
+		"inputSchema": buildFromSheetInputSchema(),
 	},
 }
 
@@ -318,6 +360,8 @@ func dispatchTool(client *hostClient, msg *rpcRequest) {
 		respondTool(client.enc, msg.ID, toolNametagGenerate(client, p.Arguments))
 	case "nametag_save":
 		respondTool(client.enc, msg.ID, toolNametagSave(client, p.Arguments))
+	case "nametag_build_from_sheet":
+		respondTool(client.enc, msg.ID, toolNametagBuildFromSheet(client, p.Arguments))
 	case "nametag.render":
 		respondTool(client.enc, msg.ID, toolNametagRender(client, p.Arguments))
 	default:
