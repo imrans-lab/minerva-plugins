@@ -1,0 +1,27 @@
+{
+  "id": "nametag-maker",
+  "name": "Name Tags",
+  "version": "0.0.1",
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "linux-arm64", "macos-universal", "windows-x86_64"],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./nametag-maker-plugin",
+    "args": []
+  },
+  "tools": [],
+  "permissions": {
+    "host_capabilities": ["host.pdf.generate"],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "capabilities": [],
+  "data_directory": "",
+  "autostart": false,
+  "auto_reload": true
+}

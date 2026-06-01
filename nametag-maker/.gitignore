@@ -1,0 +1,9 @@
+# Built Go binary — build from source per FCIB policy; never commit it.
+nametag-maker-plugin
+nametag-maker-plugin.exe
+# Bare `go build .` names the binary after the dir; ignore that too.
+/nametag-maker
+/nametag-maker.exe
+build/
+*.testbin
+*.testbin.exe
