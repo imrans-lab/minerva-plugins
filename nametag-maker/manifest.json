@@ -10,14 +10,30 @@
     "args": []
   },
   "tools": [],
+  "ui": {
+    "ipc_messages": [],
+    "panels": [
+      {
+        "name": "nametag_panel",
+        "kind": "html",
+        "entry": "ui/nametag_panel.html",
+        "ipc_channels": []
+      }
+    ]
+  },
   "permissions": {
-    "host_capabilities": ["host.pdf.generate"],
+    "host_capabilities": [
+      "host.pdf.generate",
+      "host.dialogs.file_picker",
+      "host.files.write",
+      "host.permissions.grant_scope"
+    ],
     "network": {
       "mode": "none"
     },
     "filesystem": {
-      "mode": "none",
-      "paths": []
+      "mode": "scoped_paths",
+      "paths": ["user://"]
     }
   },
   "capabilities": [],

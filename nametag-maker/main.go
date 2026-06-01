@@ -216,6 +216,45 @@ var toolList = []map[string]interface{}{
 			"required": []string{"icon_png_base64"},
 		},
 	},
+	{
+		"name":        "nametag_save",
+		"description": "Generate the name-tag PDF (same inputs as nametag_generate) and save it to a user-chosen location. Pops a save dialog, requests write permission for the picked path, and writes the PDF — all on the backend, so the PDF bytes never cross the webview IPC channel (which caps payloads at 64 KiB). Returns {saved:true, path, bytes_written, page_count}, or {saved:false, cancelled:true} if the user cancels, or {saved:false, error_code, error_message} on error.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"rows": map[string]interface{}{
+					"type":        "array",
+					"description": "Tag rows. Each: {name, class, group, room}. Empty fields are omitted from the tag.",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"name":  map[string]interface{}{"type": "string"},
+							"class": map[string]interface{}{"type": "string"},
+							"group": map[string]interface{}{"type": "string"},
+							"room":  map[string]interface{}{"type": "string"},
+						},
+					},
+				},
+				"csv": map[string]interface{}{
+					"type":        "string",
+					"description": "Alternative to rows: CSV text with headers Name, Class, Group #, Room Assignment.",
+				},
+				"icon_png_base64": map[string]interface{}{
+					"type":        "string",
+					"description": "Bare base64 PNG used as the per-tag icon (embedded once, referenced by every tag).",
+				},
+				"back_mode": map[string]interface{}{
+					"type":        "string",
+					"description": `"same" (default — mirror front onto back, column-reversed) or "blank" (front pages only).`,
+				},
+				"back_offset_x": map[string]interface{}{"type": "number", "description": "Registration nudge (points) applied to every back-page tag, X axis."},
+				"back_offset_y": map[string]interface{}{"type": "number", "description": "Registration nudge (points) applied to every back-page tag, Y axis."},
+				"full_guides":   map[string]interface{}{"type": "boolean", "description": "Draw a full bounding rectangle per tag instead of 4 corner marks."},
+				"icon_width_in": map[string]interface{}{"type": "number", "description": "Icon width in inches. Default 0.40."},
+			},
+			"required": []string{"icon_png_base64"},
+		},
+	},
 }
 
 // dispatchTool routes a tools/call by tool name.
@@ -232,6 +271,8 @@ func dispatchTool(client *hostClient, msg *rpcRequest) {
 	switch p.Name {
 	case "nametag_generate":
 		respondTool(client.enc, msg.ID, toolNametagGenerate(client, p.Arguments))
+	case "nametag_save":
+		respondTool(client.enc, msg.ID, toolNametagSave(client, p.Arguments))
 	default:
 		send(client.enc, errResponse(msg.ID, -32601, "tools/call: unknown tool: "+p.Name))
 	}
