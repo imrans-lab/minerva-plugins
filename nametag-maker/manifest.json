@@ -14,7 +14,23 @@
     "entrypoint": "./nametag-maker-plugin",
     "args": []
   },
-  "tools": [],
+  "tools": [
+    {
+      "name": "minerva_nametag_maker_nametag_generate",
+      "description": "Generate a name-tag PDF and return the bytes. (Install-time metadata; the backend supplies the authoritative schema at runtime.)",
+      "inputSchema": { "type": "object" }
+    },
+    {
+      "name": "minerva_nametag_maker_nametag_save",
+      "description": "Generate a name-tag PDF and write it to disk. (Install-time metadata; backend supplies the runtime schema.)",
+      "inputSchema": { "type": "object" }
+    },
+    {
+      "name": "minerva_nametag_maker_nametag_build_from_sheet",
+      "description": "Build a .mtags document from spreadsheet rows + a column mapping. (Install-time metadata; backend supplies the runtime schema.)",
+      "inputSchema": { "type": "object" }
+    }
+  ],
   "skills": [
     {
       "id": "minerva_nametag_maker_make_tags",
