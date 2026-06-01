@@ -11,7 +11,7 @@
   },
   "tools": [],
   "ui": {
-    "ipc_messages": [],
+    "ipc_messages": ["nametag.render"],
     "panels": [
       {
         "name": "nametag_panel",
@@ -25,7 +25,7 @@
         "entry_scene": "ui/NametagEditorPanel.tscn",
         "scripts": ["ui/nametag_editor_panel.gd", "ui/nametag_model.gd"],
         "file_extensions": [".mtags"],
-        "ipc_channels": [],
+        "ipc_channels": ["nametag.render"],
         "save_mode": "host_owned"
       }
     ]

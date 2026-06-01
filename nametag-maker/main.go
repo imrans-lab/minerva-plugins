@@ -318,6 +318,8 @@ func dispatchTool(client *hostClient, msg *rpcRequest) {
 		respondTool(client.enc, msg.ID, toolNametagGenerate(client, p.Arguments))
 	case "nametag_save":
 		respondTool(client.enc, msg.ID, toolNametagSave(client, p.Arguments))
+	case "nametag.render":
+		respondTool(client.enc, msg.ID, toolNametagRender(client, p.Arguments))
 	default:
 		send(client.enc, errResponse(msg.ID, -32601, "tools/call: unknown tool: "+p.Name))
 	}

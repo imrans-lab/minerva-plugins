@@ -404,6 +404,104 @@ func generatePDF(client capabilityCaller, rawArgs json.RawMessage) (*pdfGenerate
 	return resp.Result, nil
 }
 
+// readTextFile reads a UTF-8 text file on the backend via host.files.read.
+func readTextFile(client capabilityCaller, path string) (string, *toolFault) {
+	raw, capErr := client.callCapability("host.files.read", map[string]interface{}{
+		"path":     path,
+		"encoding": "text",
+	})
+	if capErr != nil {
+		return "", &toolFault{Code: fmt.Sprintf("rpc_error_%d", capErr.Code), Msg: capErr.Message}
+	}
+	var resp struct {
+		Success      bool   `json:"success"`
+		ErrorCode    string `json:"error_code,omitempty"`
+		ErrorMessage string `json:"error_message,omitempty"`
+		Result       *struct {
+			Content string `json:"content"`
+		} `json:"result,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", &toolFault{Code: "parse_error", Msg: "parse host.files.read response: " + err.Error()}
+	}
+	if !resp.Success {
+		return "", &toolFault{Code: resp.ErrorCode, Msg: resp.ErrorMessage}
+	}
+	if resp.Result == nil {
+		return "", &toolFault{Code: "parse_error", Msg: "host.files.read returned no content for path: " + path}
+	}
+	return resp.Result.Content, nil
+}
+
+// toolNametagRender is the panel IPC handler ("nametag.render"): render the
+// editor's current document to a PDF on disk and return its path, for the in-app
+// preview (the panel then rasterizes that PDF with pdftoppm). Path-driven BOTH
+// ways — generate args are read from args_path, the PDF is written to out_path —
+// so nothing large ever crosses the 64 KiB panel IPC channel. The args file is
+// the SAME shape as nametag_generate's arguments (rows + options + images).
+func toolNametagRender(client capabilityCaller, rawArgs json.RawMessage) map[string]interface{} {
+	var a struct {
+		ArgsPath string `json:"args_path"`
+		OutPath  string `json:"out_path"`
+	}
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &a); err != nil {
+			return failResult(&toolFault{Code: "schema_validation_failed", Msg: "parse args: " + err.Error()})
+		}
+	}
+	if strings.TrimSpace(a.ArgsPath) == "" {
+		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "args_path is required"})
+	}
+	if strings.TrimSpace(a.OutPath) == "" {
+		return failResult(&toolFault{Code: "schema_validation_failed", Msg: "out_path is required"})
+	}
+
+	genArgs, fault := readTextFile(client, a.ArgsPath)
+	if fault != nil {
+		return failResult(fault)
+	}
+
+	pdf, fault := generatePDF(client, json.RawMessage(genArgs))
+	if fault != nil {
+		return failResult(fault)
+	}
+
+	writeRaw, capErr := client.callCapability("host.files.write", map[string]interface{}{
+		"path":           a.OutPath,
+		"content":        pdf.BytesB64,
+		"encoding":       "base64",
+		"create_parents": true,
+	})
+	if capErr != nil {
+		return failResult(&toolFault{Code: fmt.Sprintf("rpc_error_%d", capErr.Code), Msg: capErr.Message})
+	}
+	var write struct {
+		Success      bool   `json:"success"`
+		ErrorCode    string `json:"error_code,omitempty"`
+		ErrorMessage string `json:"error_message,omitempty"`
+		Result       *struct {
+			Path string `json:"path"`
+		} `json:"result,omitempty"`
+	}
+	if err := json.Unmarshal(writeRaw, &write); err != nil {
+		return failResult(&toolFault{Code: "parse_error", Msg: "parse files.write response: " + err.Error()})
+	}
+	if !write.Success {
+		return failResult(&toolFault{Code: write.ErrorCode, Msg: write.ErrorMessage})
+	}
+	outPath := a.OutPath
+	if write.Result != nil && write.Result.Path != "" {
+		outPath = write.Result.Path
+	}
+	return map[string]interface{}{
+		"success": true,
+		"result": map[string]interface{}{
+			"path":       outPath,
+			"page_count": pdf.PageCount,
+		},
+	}
+}
+
 // toolNametagGenerate is the handler for the nametag_generate tool. The full
 // argument surface is described authoritatively by the input schema in main.go
 // (generateInputSchema/sharedProps) — in brief: rows (classic {name,class,

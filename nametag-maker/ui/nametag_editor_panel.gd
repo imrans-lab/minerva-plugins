@@ -338,6 +338,7 @@ func _request_render() -> void:
 		_set_status("No temp dir for render args.")
 		return
 	var args_path := dir.path_join("render_args.json")
+	var out_path := dir.path_join("preview_render.pdf")
 	var f := FileAccess.open(args_path, FileAccess.WRITE)
 	if f == null:
 		_set_status("Could not write render args.")
@@ -347,7 +348,7 @@ func _request_render() -> void:
 
 	_reply_counter += 1
 	var reply_id := "nametag_render_%d" % _reply_counter
-	request.emit("nametag.render", {"args_path": args_path}, reply_id)
+	request.emit("nametag.render", {"args_path": args_path, "out_path": out_path}, reply_id)
 	var result: Dictionary = await $_MinervaIPC.await_reply(reply_id)
 	if not (result is Dictionary) or not bool(result.get("success", false)):
 		_set_status("Render unavailable (backend handler lands in N3).")
