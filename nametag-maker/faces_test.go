@@ -144,3 +144,54 @@ func TestBuildDocFullImageFace(t *testing.T) {
 		t.Fatalf("full-image back: want 1 draw_image, got %d", imgOps)
 	}
 }
+
+// A face with a free-placed image emits a draw_image at the right absolute
+// coordinates (content-box origin + inches→pt), width, and rotation angle —
+// drawn AFTER the structured content (foreground).
+func TestBuildDocPlacedImage(t *testing.T) {
+	imgs := []Image{
+		{ID: imageID, Format: "png", BytesB64: "Zm9v"},
+		{ID: "logo", Format: "png", BytesB64: "YmFy"},
+	}
+	rows := []TagRow{{Front: &Face{
+		Title:  "Hi",
+		Placed: []PlacedImage{{ImageID: "logo", XIn: 0.5, YIn: 0.25, WidthIn: 0.75, RotationDeg: 30}},
+	}}}
+	doc := buildDoc(rows, imgs, Options{Layout: "detailed"})
+
+	layout := cardstock4x2()
+	pos := layout.cellPositions()
+	b := tagBox{x: pos[0][0], y: pos[0][1], w: layout.tagW, h: layout.tagH}
+	wantX, wantY, wantW := b.contentX()+inToPt(0.5), b.contentY()+inToPt(0.25), inToPt(0.75)
+
+	var found *Op
+	titleIdx, logoIdx := -1, -1
+	for i := range doc.Pages[0].Ops {
+		o := doc.Pages[0].Ops[i]
+		if o.Kind == "draw_text" && o.Text == "Hi" {
+			titleIdx = i
+		}
+		if o.Kind == "draw_image" && o.ImageID == "logo" {
+			found = &doc.Pages[0].Ops[i]
+			logoIdx = i
+		}
+	}
+	if found == nil {
+		t.Fatal("placed logo draw_image missing from front page")
+	}
+	if found.X == nil || !approx(*found.X, wantX) {
+		t.Fatalf("placed X: got %v want %v", found.X, wantX)
+	}
+	if found.Y == nil || !approx(*found.Y, wantY) {
+		t.Fatalf("placed Y: got %v want %v", found.Y, wantY)
+	}
+	if found.W == nil || !approx(*found.W, wantW) {
+		t.Fatalf("placed W: got %v want %v", found.W, wantW)
+	}
+	if found.Angle == nil || !approx(*found.Angle, 30) {
+		t.Fatalf("placed Angle: got %v want 30", found.Angle)
+	}
+	if !(logoIdx > titleIdx) {
+		t.Fatalf("placed image should draw AFTER the title (foreground): title@%d logo@%d", titleIdx, logoIdx)
+	}
+}

@@ -62,6 +62,9 @@ type Op struct {
 
 	// draw_image
 	ImageID string `json:"image_id,omitempty"`
+	// Angle rotates a draw_image about its center, degrees clockwise-positive
+	// (host.pdf contract §draw_image). Omit / 0 = no rotation.
+	Angle *float64 `json:"angle,omitempty"`
 
 	// draw_line
 	X1 *float64 `json:"x1,omitempty"`

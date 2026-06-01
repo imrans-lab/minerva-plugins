@@ -219,6 +219,28 @@ func faceSchema(role string) map[string]interface{} {
 				},
 			},
 			"full_image_id": map[string]interface{}{"type": "string", "description": "If set, fill the tag with this image id (overrides the structured fields)."},
+			"images":        placedImagesSchema(),
+		},
+	}
+}
+
+// placedImagesSchema describes free-placed images on a face (a logo/stamp):
+// size, tag-local position (inches from the content box), and rotation. Each
+// references a registered image id (the shared "icon" or an images[] entry).
+func placedImagesSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "array",
+		"description": "Free-placed images on this face (drawn on top). Each: an image id + position/size/rotation.",
+		"items": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"image_id":     map[string]interface{}{"type": "string", "description": `Registered image id ("icon" or an images[] id).`},
+				"x_in":         map[string]interface{}{"type": "number", "description": "Left position, inches from the content-box origin."},
+				"y_in":         map[string]interface{}{"type": "number", "description": "Top position, inches from the content-box origin."},
+				"width_in":     map[string]interface{}{"type": "number", "description": "Image width in inches."},
+				"height_in":    map[string]interface{}{"type": "number", "description": "Image height in inches (0/omit → preserve aspect)."},
+				"rotation_deg": map[string]interface{}{"type": "number", "description": "Rotation about the image center, degrees clockwise."},
+			},
 		},
 	}
 }
@@ -321,7 +343,11 @@ func buildFromSheetInputSchema() map[string]interface{} {
 			"rows_json":          map[string]interface{}{"type": "string", "description": "JSON array of sheet row objects ({column: value}) — e.g. from minerva_get_spreadsheet_data. Passed as a STRING (columns are arbitrary per use case)."},
 			"mapping":            mappingSchema("Which spreadsheet columns map onto each tag's FRONT face."),
 			"back_mapping":       mappingSchema("Optional: columns → a DISTINCT per-row BACK face (same shape as mapping). Each tag's back is built from its own row."),
-			"shared_back":        faceSchema("Optional: one CONSTANT back face drawn behind EVERY tag (e.g. a schedule — use columns with per-day headings), aligned for duplex. A per-row back_mapping overrides it. Text-only for now (images via nametag_generate)"),
+			"shared_back":        faceSchema("Optional: one CONSTANT back face drawn behind EVERY tag (e.g. a schedule — use columns with per-day headings), aligned for duplex. A per-row back_mapping overrides it. May carry placed images[] (referencing icon/images ids)"),
+			"icon_png_base64":    map[string]interface{}{"type": "string", "description": `Bare base64 PNG registered as image id "icon" (shown as a side icon on the front, or referenced by placements).`},
+			"icon_path":          map[string]interface{}{"type": "string", "description": `Absolute path to a PNG registered as image id "icon", read on the backend (prefer over icon_png_base64 for large images).`},
+			"images":             imagesSchema(),
+			"front_images":       placedImagesSchema(),
 			"layout":             map[string]interface{}{"type": "string", "description": "classic or detailed (default detailed)."},
 			"image_side":         map[string]interface{}{"type": "string", "description": "left (default) or right."},
 			"back_mode":          map[string]interface{}{"type": "string", "description": `"blank" (default) or "same" (mirror front, reversible). Ignored when a back_mapping / shared_back face is supplied (an explicit back always draws).`},

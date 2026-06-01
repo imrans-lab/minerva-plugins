@@ -239,3 +239,86 @@ func TestBuildFromSheetPerRowBack(t *testing.T) {
 		t.Fatalf("rendered doc should carry per-row back 'Archery': %s", genJSON)
 	}
 }
+
+// build_from_sheet exposes images: an icon (registered) + front_images places it
+// freely on every tag's front. The flat front becomes an explicit face carrying
+// the placement; the icon is read on the backend and the rendered doc draws it
+// at the requested spot with rotation.
+func TestBuildFromSheetFrontImages(t *testing.T) {
+	host := &seqHost{replies: []json.RawMessage{
+		// host.files.read (icon_path → base64)
+		json.RawMessage(`{"success":true,"result":{"content":"Zm9v"}}`),
+		// host.pdf.generate
+		json.RawMessage(`{"success":true,"result":{"bytes_b64":"JVBERg==","byte_size":5,"page_count":1,"content_type":"application/pdf"}}`),
+		// host.files.write (preview)
+		json.RawMessage(`{"success":true,"result":{"path":"/tmp/i.mtags.preview.pdf","bytes_written":5}}`),
+		// host.files.write (.mtags)
+		json.RawMessage(`{"success":true,"result":{"path":"/tmp/i.mtags","bytes_written":100}}`),
+	}}
+	rows := `[{"Name":"Ada Lovelace"}]`
+	args := mustArgs(t, map[string]interface{}{
+		"rows_json": rows,
+		"mapping":   map[string]interface{}{"title": "Name"},
+		"icon_path": "/tmp/logo.png",
+		"front_images": []map[string]interface{}{
+			{"image_id": "icon", "x_in": 1.5, "y_in": 0.1, "width_in": 0.6, "rotation_deg": 15},
+		},
+		"out_path": "/tmp/i.mtags",
+	})
+
+	res := toolNametagBuildFromSheet(host, args)
+	if res["success"] != true {
+		t.Fatalf("expected success, got %+v", res)
+	}
+
+	// The icon was read first, then host.pdf.generate.
+	if host.calls[0].capability != "host.files.read" || host.calls[0].args["path"] != "/tmp/logo.png" {
+		t.Fatalf("expected icon read first, got %+v", host.calls[0])
+	}
+	if host.calls[1].capability != "host.pdf.generate" {
+		t.Fatalf("expected host.pdf.generate second, got %q", host.calls[1].capability)
+	}
+
+	// The rendered doc draws the placed icon, rotated.
+	genJSON, _ := json.Marshal(host.calls[1].args)
+	var doc struct {
+		Pages []struct {
+			Ops []map[string]interface{} `json:"ops"`
+		} `json:"pages"`
+	}
+	if err := json.Unmarshal(genJSON, &doc); err != nil {
+		t.Fatalf("doc not valid JSON: %v", err)
+	}
+	foundRotatedImg := false
+	for _, p := range doc.Pages {
+		for _, op := range p.Ops {
+			if op["kind"] == "draw_image" && op["image_id"] == "icon" {
+				if ang, ok := op["angle"].(float64); ok && ang == 15 {
+					foundRotatedImg = true
+				}
+			}
+		}
+	}
+	if !foundRotatedImg {
+		t.Fatalf("rendered doc missing the placed+rotated icon: %s", genJSON)
+	}
+
+	// The stored .mtags row carries an explicit front face with images.
+	mtagsB64, _ := host.calls[3].args["content"].(string)
+	docBytes, _ := base64.StdEncoding.DecodeString(mtagsB64)
+	var stored struct {
+		Generate struct {
+			Rows []struct {
+				Front *struct {
+					Images []map[string]interface{} `json:"images"`
+				} `json:"front"`
+			} `json:"rows"`
+		} `json:"generate"`
+	}
+	if err := json.Unmarshal(docBytes, &stored); err != nil {
+		t.Fatalf(".mtags not valid JSON: %v", err)
+	}
+	if len(stored.Generate.Rows) != 1 || stored.Generate.Rows[0].Front == nil || len(stored.Generate.Rows[0].Front.Images) != 1 {
+		t.Fatalf("stored .mtags row0 should have an explicit front face with 1 placed image: %s", docBytes)
+	}
+}

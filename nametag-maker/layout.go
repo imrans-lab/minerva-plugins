@@ -120,6 +120,49 @@ type Face struct {
 	Subtitle    string
 	Columns     []Column
 	FullImageID string // if set, fill the tag with this image (overrides structured)
+	// Placed are free-positioned images (a logo, a stamp) drawn ON TOP of the
+	// face content. Coordinates are tag-LOCAL inches relative to the content box.
+	Placed []PlacedImage
+}
+
+// PlacedImage positions one image freely on a face: top-left (XIn, YIn) inches
+// from the content-box origin, WidthIn wide (HeightIn 0 → preserve aspect),
+// rotated RotationDeg clockwise about its center. The image id must be a
+// registered doc image (the shared "icon" or an images[] entry).
+type PlacedImage struct {
+	ImageID     string
+	XIn         float64
+	YIn         float64
+	WidthIn     float64
+	HeightIn    float64
+	RotationDeg float64
+}
+
+// placedImageOps emits the draw_image ops for a face's free-placed images.
+// Tag-local content-box coordinates → absolute points; rotation passes through
+// to the host.pdf `angle`. Skips entries with no image id or non-positive width.
+func placedImageOps(b tagBox, placed []PlacedImage) []Op {
+	var ops []Op
+	for _, p := range placed {
+		if p.ImageID == "" || p.WidthIn <= 0 {
+			continue
+		}
+		op := Op{
+			Kind:    "draw_image",
+			ImageID: p.ImageID,
+			X:       f(b.contentX() + inToPt(p.XIn)),
+			Y:       f(b.contentY() + inToPt(p.YIn)),
+			W:       f(inToPt(p.WidthIn)),
+		}
+		if p.HeightIn > 0 {
+			op.H = f(inToPt(p.HeightIn))
+		}
+		if p.RotationDeg != 0 {
+			op.Angle = f(p.RotationDeg)
+		}
+		ops = append(ops, op)
+	}
+	return ops
 }
 
 // TagRow is one physical tag. The classic layout uses Name/Class/Group/Room.
@@ -349,9 +392,11 @@ func lineText(dl DetailLine) string {
 // auto-shrinks to its column width — the sidecar measures+shrinks with the same
 // font it draws with, so the plugin never reimplements font metrics (DRY).
 func renderFaceOps(b tagBox, fc Face, imgWidthPt float64) []Op {
-	// Full-image face: fill the content box (renderer scales height by aspect).
+	// Full-image face: fill the content box (renderer scales height by aspect),
+	// then any free-placed images on top (e.g. a logo over a background).
 	if fc.FullImageID != "" {
-		return []Op{{Kind: "draw_image", ImageID: fc.FullImageID, X: f(b.contentX()), Y: f(b.contentY()), W: f(b.contentW())}}
+		ops := []Op{{Kind: "draw_image", ImageID: fc.FullImageID, X: f(b.contentX()), Y: f(b.contentY()), W: f(b.contentW())}}
+		return append(ops, placedImageOps(b, fc.Placed)...)
 	}
 
 	var ops []Op
@@ -464,6 +509,10 @@ func renderFaceOps(b tagBox, fc Face, imgWidthPt float64) []Op {
 			}
 		}
 	}
+
+	// Free-placed images last, so a logo/stamp sits on top of the structured
+	// content rather than behind it.
+	ops = append(ops, placedImageOps(b, fc.Placed)...)
 	return ops
 }
 

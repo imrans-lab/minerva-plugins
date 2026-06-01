@@ -32,8 +32,18 @@ type buildFromSheetArgs struct {
 	// SharedBack (optional) is one CONSTANT back face drawn behind EVERY tag —
 	// the common case being a schedule (columns of lines, optionally per-day
 	// headings). A per-row BackMapping back overrides it for that row.
-	SharedBack       *faceArgs `json:"shared_back"`
-	Layout           string    `json:"layout"`
+	SharedBack *faceArgs `json:"shared_back"`
+	// Image registry pass-through: the shared "icon" (icon_png_base64 | icon_path)
+	// plus any extra named Images that faces/placements reference by id. Resolved
+	// at render time by resolveImages, so they must reach the stored generate dict.
+	IconPNGB64 string          `json:"icon_png_base64"`
+	IconPath   string          `json:"icon_path"`
+	Images     json.RawMessage `json:"images"`
+	// FrontImages (optional) are free-placed images applied to EVERY tag's front
+	// (e.g. a logo): position/size/rotation. Supplying them converts the flat
+	// front into an explicit face carrying the placements.
+	FrontImages      json.RawMessage `json:"front_images"`
+	Layout           string          `json:"layout"`
 	ImageSide        string    `json:"image_side"`
 	BackMode         string    `json:"back_mode"`
 	FullGuides       bool      `json:"full_guides"`
@@ -81,6 +91,12 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// hasJSON reports whether a raw JSON value is present and non-null (e.g. an
+// optional declared-shape arg the host passed through).
+func hasJSON(r json.RawMessage) bool {
+	return len(r) > 0 && string(r) != "null"
 }
 
 // sheetCell coerces a spreadsheet cell to a trimmed string. Numbers come back as
@@ -158,6 +174,19 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 		if len(lines) > 0 {
 			row["lines"] = lines
 		}
+		// Free-placed images on every front (e.g. a logo) turn the flat front into
+		// an explicit face carrying the placements; the flat fields move into it.
+		if hasJSON(a.FrontImages) {
+			front := mapRowToFace(r, a.Mapping)
+			if front == nil {
+				front = map[string]interface{}{}
+			}
+			front["images"] = a.FrontImages
+			row["front"] = front
+			delete(row, "title")
+			delete(row, "subtitle")
+			delete(row, "lines")
+		}
 		// A distinct per-row back face (e.g. parent electives) from back_mapping.
 		if a.BackMapping != nil {
 			if back := mapRowToFace(r, *a.BackMapping); back != nil {
@@ -181,6 +210,17 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 	// face (set above) overrides it for that row.
 	if a.SharedBack != nil {
 		gen["back"] = a.SharedBack
+	}
+	// Image registry pass-through so resolveImages can register them at render
+	// time (preview AND later re-renders from the stored .mtags generate dict).
+	if strings.TrimSpace(a.IconPNGB64) != "" {
+		gen["icon_png_base64"] = a.IconPNGB64
+	}
+	if strings.TrimSpace(a.IconPath) != "" {
+		gen["icon_path"] = a.IconPath
+	}
+	if hasJSON(a.Images) {
+		gen["images"] = a.Images
 	}
 
 	// Preview: first tag only when requested (single-draft review). The stored

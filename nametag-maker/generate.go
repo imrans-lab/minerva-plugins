@@ -40,6 +40,17 @@ type faceArgs struct {
 		} `json:"lines"`
 	} `json:"columns"`
 	FullImageID string `json:"full_image_id"`
+	// Images are free-placed images on this face (a logo/stamp): size, position
+	// (tag-local inches from the content box), and rotation. Each references a
+	// registered image id (the shared "icon" or an images[] entry).
+	Images []struct {
+		ImageID     string  `json:"image_id"`
+		XIn         float64 `json:"x_in"`
+		YIn         float64 `json:"y_in"`
+		WidthIn     float64 `json:"width_in"`
+		HeightIn    float64 `json:"height_in"`
+		RotationDeg float64 `json:"rotation_deg"`
+	} `json:"images"`
 }
 
 // toFace converts the JSON face args into a layout.Face (nil-safe).
@@ -55,10 +66,17 @@ func (fa *faceArgs) toFace() *Face {
 		}
 		cols = append(cols, Column{Heading: c.Heading, Lines: lines})
 	}
+	var placed []PlacedImage
+	for _, im := range fa.Images {
+		placed = append(placed, PlacedImage{
+			ImageID: im.ImageID, XIn: im.XIn, YIn: im.YIn,
+			WidthIn: im.WidthIn, HeightIn: im.HeightIn, RotationDeg: im.RotationDeg,
+		})
+	}
 	return &Face{
 		ImageID: fa.ImageID, ImageSide: fa.ImageSide,
 		Title: fa.Title, Subtitle: fa.Subtitle,
-		Columns: cols, FullImageID: fa.FullImageID,
+		Columns: cols, FullImageID: fa.FullImageID, Placed: placed,
 	}
 }
 
@@ -187,7 +205,11 @@ func buildDocFromArgs(rawArgs json.RawMessage, images []Image) (Doc, *toolFault)
 		if fc == nil {
 			return nil
 		}
-		for _, id := range []string{fc.ImageID, fc.FullImageID} {
+		ids := []string{fc.ImageID, fc.FullImageID}
+		for _, p := range fc.Placed {
+			ids = append(ids, p.ImageID)
+		}
+		for _, id := range ids {
 			if id != "" && !known[id] {
 				return &toolFault{Code: "schema_validation_failed", Msg: fmt.Sprintf("face references unknown image id %q (add it via images[] or icon_png_base64/icon_path)", id)}
 			}
