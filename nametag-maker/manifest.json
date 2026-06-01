@@ -34,7 +34,7 @@
   "skills": [
     {
       "id": "minerva_nametag_maker_make_tags",
-      "title": "Make name tags from data",
+      "title": "Nametag Maker",
       "target": "all",
       "summary": "Use when the user wants name tags / badges / lanyards from a roster — a list, a file/xlsx/csv, or info typed in chat. Drives the nametag-maker: data → Minerva spreadsheet → preview ONE draft → iterate via annotations → full batch. The LLM does the data entry; the panel is preview+annotate only.",
       "preconditions": "The nametag_maker plugin is installed and RUNNING (minerva_plugin_list; start with minerva_plugin_start if not). Data may come from a file, a doc, or chat — there need NOT be an input file.",
