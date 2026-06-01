@@ -26,14 +26,14 @@
       "host.pdf.generate",
       "host.dialogs.file_picker",
       "host.files.write",
-      "host.permissions.grant_scope"
+      "host.files.read"
     ],
     "network": {
       "mode": "none"
     },
     "filesystem": {
-      "mode": "scoped_paths",
-      "paths": ["user://"]
+      "mode": "unrestricted",
+      "paths": []
     }
   },
   "capabilities": [],

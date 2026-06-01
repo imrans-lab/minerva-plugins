@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// testImg is the shared icon image table buildDoc expects in these tests.
+var testImg = []Image{{ID: imageID, Format: "png", BytesB64: "Zm9v"}}
+
 // eightRows includes two deliberately long names that must trigger the name
 // auto-shrink (effective drawn size < 20 via the `fit` block).
 var eightRows = []TagRow{
@@ -41,21 +44,21 @@ func textOps(ops []Op) []Op {
 }
 
 func TestBuildDocBackModeSamePageCount(t *testing.T) {
-	doc := buildDoc(eightRows, "Zm9v", Options{BackMode: "same"})
+	doc := buildDoc(eightRows, testImg, Options{BackMode: "same"})
 	if len(doc.Pages) != 2 {
 		t.Fatalf("back_mode same with 8 rows: want 2 pages, got %d", len(doc.Pages))
 	}
 }
 
 func TestBuildDocBackModeBlankPageCount(t *testing.T) {
-	doc := buildDoc(eightRows, "Zm9v", Options{BackMode: "blank"})
+	doc := buildDoc(eightRows, testImg, Options{BackMode: "blank"})
 	if len(doc.Pages) != 1 {
 		t.Fatalf("back_mode blank with 8 rows: want 1 page, got %d", len(doc.Pages))
 	}
 }
 
 func TestBuildDocIconEmbeddedOnceAndReferenced(t *testing.T) {
-	doc := buildDoc(eightRows, "Zm9v", Options{BackMode: "same"})
+	doc := buildDoc(eightRows, testImg, Options{BackMode: "same"})
 	if len(doc.Images) != 1 {
 		t.Fatalf("want exactly 1 embedded image, got %d", len(doc.Images))
 	}
@@ -90,7 +93,7 @@ func TestBuildDocBackPageColumnReversed(t *testing.T) {
 		t.Fatalf("front and back cell-0 share an X (%v) — reversal is a no-op", frontIconX)
 	}
 
-	doc := buildDoc(eightRows, "Zm9v", Options{BackMode: "same"})
+	doc := buildDoc(eightRows, testImg, Options{BackMode: "same"})
 	front, back := doc.Pages[0], doc.Pages[1]
 
 	// First draw_image on each page is tag 0 (draw order = guides..., icon, ...).
@@ -112,7 +115,7 @@ func TestBuildDocBackPageColumnReversed(t *testing.T) {
 }
 
 func TestBuildDocLongNamesShrink(t *testing.T) {
-	doc := buildDoc(eightRows, "Zm9v", Options{BackMode: "blank"})
+	doc := buildDoc(eightRows, testImg, Options{BackMode: "blank"})
 	front := doc.Pages[0]
 
 	// Find the name draw_text for the long name "Maximilian Hohenzollern-Sigmaringen".
@@ -148,7 +151,7 @@ func TestBuildDocEachPopulatedFieldEmitsText(t *testing.T) {
 	// Tag 0 (Ada) has all four fields populated → 4 draw_text ops (name, class,
 	// room, group). Use back_mode blank so we look at one page only.
 	single := []TagRow{{Name: "Ada", Class: "Math 1", Group: "1", Room: "A101"}}
-	doc := buildDoc(single, "Zm9v", Options{BackMode: "blank"})
+	doc := buildDoc(single, testImg, Options{BackMode: "blank"})
 	got := len(textOps(doc.Pages[0].Ops))
 	if got != 4 {
 		t.Fatalf("fully-populated tag: want 4 draw_text ops, got %d", got)
@@ -156,7 +159,7 @@ func TestBuildDocEachPopulatedFieldEmitsText(t *testing.T) {
 
 	// A tag with only a name emits exactly one draw_text.
 	nameOnly := []TagRow{{Name: "Solo"}}
-	doc2 := buildDoc(nameOnly, "Zm9v", Options{BackMode: "blank"})
+	doc2 := buildDoc(nameOnly, testImg, Options{BackMode: "blank"})
 	if got := len(textOps(doc2.Pages[0].Ops)); got != 1 {
 		t.Fatalf("name-only tag: want 1 draw_text op, got %d", got)
 	}
@@ -166,7 +169,7 @@ func TestBuildDocCornerMarksVsFullGuides(t *testing.T) {
 	single := []TagRow{{Name: "Ada", Class: "Math 1", Group: "1", Room: "A101"}}
 
 	// Default: 8 corner-mark draw_line ops per tag, no draw_rect.
-	doc := buildDoc(single, "Zm9v", Options{BackMode: "blank"})
+	doc := buildDoc(single, testImg, Options{BackMode: "blank"})
 	if got := countKind(doc.Pages[0].Ops, "draw_line"); got != 8 {
 		t.Fatalf("corner marks: want 8 draw_line ops, got %d", got)
 	}
@@ -175,7 +178,7 @@ func TestBuildDocCornerMarksVsFullGuides(t *testing.T) {
 	}
 
 	// full_guides: a single draw_rect per tag, no corner-mark lines.
-	docG := buildDoc(single, "Zm9v", Options{BackMode: "blank", FullGuides: true})
+	docG := buildDoc(single, testImg, Options{BackMode: "blank", FullGuides: true})
 	if got := countKind(docG.Pages[0].Ops, "draw_rect"); got != 1 {
 		t.Fatalf("full_guides: want 1 draw_rect op, got %d", got)
 	}
@@ -187,7 +190,7 @@ func TestBuildDocCornerMarksVsFullGuides(t *testing.T) {
 func TestBuildDocIconGeometryOracle(t *testing.T) {
 	// Exact-coordinate oracle from the harness geometry: front tag 0's icon
 	// sits at (marginLeft+padding, marginTop+padding) with width = 0.40in.
-	doc := buildDoc([]TagRow{{Name: "Ada"}}, "Zm9v", Options{BackMode: "blank"})
+	doc := buildDoc([]TagRow{{Name: "Ada"}}, testImg, Options{BackMode: "blank"})
 	var icon *Op
 	for i := range doc.Pages[0].Ops {
 		if doc.Pages[0].Ops[i].Kind == "draw_image" {
@@ -208,7 +211,7 @@ func TestBuildDocIconGeometryOracle(t *testing.T) {
 }
 
 func TestBuildDocBackOffsetApplied(t *testing.T) {
-	doc := buildDoc([]TagRow{{Name: "Ada"}}, "Zm9v", Options{
+	doc := buildDoc([]TagRow{{Name: "Ada"}}, testImg, Options{
 		BackMode: "same", BackOffsetX: 5, BackOffsetY: 7,
 	})
 	layout := cardstock4x2()
@@ -238,7 +241,7 @@ var nineRows = append(append([]TagRow{}, eightRows...),
 
 func TestBuildDocMultiSheetSpillSame(t *testing.T) {
 	// 9 rows, back_mode "same": sheet1 front+back + sheet2 front+back = 4 pages.
-	doc := buildDoc(nineRows, "Zm9v", Options{BackMode: "same"})
+	doc := buildDoc(nineRows, testImg, Options{BackMode: "same"})
 	if len(doc.Pages) != 4 {
 		t.Fatalf("9 rows back_mode same: want 4 pages, got %d", len(doc.Pages))
 	}
@@ -254,7 +257,7 @@ func TestBuildDocMultiSheetSpillSame(t *testing.T) {
 
 func TestBuildDocMultiSheetSpillBlank(t *testing.T) {
 	// 9 rows, back_mode "blank": 2 front pages only.
-	doc := buildDoc(nineRows, "Zm9v", Options{BackMode: "blank"})
+	doc := buildDoc(nineRows, testImg, Options{BackMode: "blank"})
 	if len(doc.Pages) != 2 {
 		t.Fatalf("9 rows back_mode blank: want 2 pages, got %d", len(doc.Pages))
 	}

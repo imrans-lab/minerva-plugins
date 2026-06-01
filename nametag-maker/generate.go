@@ -24,30 +24,92 @@ type pdfGenerateResult struct {
 	ContentType string `json:"content_type"`
 }
 
+// faceArgs is the JSON shape of one tag face (front or back). Either structured
+// (image_id + title + subtitle + columns of lines) or a full-tag image
+// (full_image_id). Maps to layout.Face.
+type faceArgs struct {
+	ImageID   string `json:"image_id"`
+	ImageSide string `json:"image_side"`
+	Title     string `json:"title"`
+	Subtitle  string `json:"subtitle"`
+	Columns   []struct {
+		Heading string `json:"heading"`
+		Lines   []struct {
+			Label string `json:"label"`
+			Value string `json:"value"`
+		} `json:"lines"`
+	} `json:"columns"`
+	FullImageID string `json:"full_image_id"`
+}
+
+// toFace converts the JSON face args into a layout.Face (nil-safe).
+func (fa *faceArgs) toFace() *Face {
+	if fa == nil {
+		return nil
+	}
+	var cols []Column
+	for _, c := range fa.Columns {
+		var lines []DetailLine
+		for _, l := range c.Lines {
+			lines = append(lines, DetailLine{Label: l.Label, Value: l.Value})
+		}
+		cols = append(cols, Column{Heading: c.Heading, Lines: lines})
+	}
+	return &Face{
+		ImageID: fa.ImageID, ImageSide: fa.ImageSide,
+		Title: fa.Title, Subtitle: fa.Subtitle,
+		Columns: cols, FullImageID: fa.FullImageID,
+	}
+}
+
 // nametagArgs is the shared input shape for nametag_generate and nametag_save.
 // Both tools build the SAME Doc from these inputs; nametag_save additionally
 // picks a path, grants scope, and writes the bytes — all server-side, so the
 // PDF never traverses the webview IPC channel (which caps payloads at 64 KiB).
 type nametagArgs struct {
 	Rows []struct {
+		// classic layout
 		Name  string `json:"name"`
 		Class string `json:"class"`
 		Group string `json:"group"`
 		Room  string `json:"room"`
+		// flat detailed convenience (→ a 1-column front face)
+		Title    string `json:"title"`
+		Subtitle string `json:"subtitle"`
+		Lines    []struct {
+			Label string `json:"label"`
+			Value string `json:"value"`
+		} `json:"lines"`
+		// generic faces
+		Front *faceArgs `json:"front"`
+		Back  *faceArgs `json:"back"`
 	} `json:"rows"`
-	CSV         string  `json:"csv"`
-	IconPNGB64  string  `json:"icon_png_base64"`
-	BackMode    string  `json:"back_mode"`
-	BackOffsetX float64 `json:"back_offset_x"`
-	BackOffsetY float64 `json:"back_offset_y"`
-	FullGuides  bool    `json:"full_guides"`
-	IconWidthIn float64 `json:"icon_width_in"`
+	CSV        string `json:"csv"`
+	RowsPath   string `json:"rows_path"`
+	IconPNGB64 string `json:"icon_png_base64"`
+	IconPath   string `json:"icon_path"`
+	// Images registers extra named images (beyond the shared "icon") that faces
+	// reference by id — for full-image faces or per-tag images. Each entry
+	// supplies png_base64 OR path (read on the backend via host.files.read).
+	Images []struct {
+		ID     string `json:"id"`
+		PNGB64 string `json:"png_base64"`
+		Path   string `json:"path"`
+	} `json:"images"`
+	BackMode    string    `json:"back_mode"`
+	BackOffsetX float64   `json:"back_offset_x"`
+	BackOffsetY float64   `json:"back_offset_y"`
+	FullGuides  bool      `json:"full_guides"`
+	IconWidthIn float64   `json:"icon_width_in"`
+	Layout      string    `json:"layout"`
+	ImageSide   string    `json:"image_side"`
+	Back        *faceArgs `json:"back"` // shared back face for every tag
 }
 
 // buildDocFromArgs parses+validates the shared nametag args and builds the Doc.
 // It returns the Doc on success or a *toolFault describing the validation error.
 // Shared by nametag_generate and nametag_save so neither duplicates doc-building.
-func buildDocFromArgs(rawArgs json.RawMessage) (Doc, *toolFault) {
+func buildDocFromArgs(rawArgs json.RawMessage, images []Image) (Doc, *toolFault) {
 	var a nametagArgs
 	if len(rawArgs) > 0 && string(rawArgs) != "null" {
 		if err := json.Unmarshal(rawArgs, &a); err != nil {
@@ -55,16 +117,20 @@ func buildDocFromArgs(rawArgs json.RawMessage) (Doc, *toolFault) {
 		}
 	}
 
-	if a.IconPNGB64 == "" {
-		return Doc{}, &toolFault{Code: "schema_validation_failed", Msg: "icon_png_base64 is required"}
-	}
-
 	// Resolve rows from either the structured array or the CSV string.
 	var rows []TagRow
 	switch {
 	case len(a.Rows) > 0:
 		for _, r := range a.Rows {
-			rows = append(rows, TagRow{Name: r.Name, Class: r.Class, Group: r.Group, Room: r.Room})
+			var lines []DetailLine
+			for _, l := range r.Lines {
+				lines = append(lines, DetailLine{Label: l.Label, Value: l.Value})
+			}
+			rows = append(rows, TagRow{
+				Name: r.Name, Class: r.Class, Group: r.Group, Room: r.Room,
+				Title: r.Title, Subtitle: r.Subtitle, Lines: lines,
+				Front: r.Front.toFace(), Back: r.Back.toFace(),
+			})
 		}
 	case a.CSV != "":
 		parsed, fault := parseCSVRows(a.CSV)
@@ -79,20 +145,214 @@ func buildDocFromArgs(rawArgs json.RawMessage) (Doc, *toolFault) {
 		return Doc{}, &toolFault{Code: "schema_validation_failed", Msg: "no tag rows to render"}
 	}
 
-	if a.BackMode == "" {
-		a.BackMode = "same"
+	if a.Layout != "" && a.Layout != "classic" && a.Layout != "detailed" {
+		return Doc{}, &toolFault{Code: "schema_validation_failed", Msg: `layout must be "classic" or "detailed"`}
 	}
-	if a.BackMode != "same" && a.BackMode != "blank" {
+	if a.ImageSide != "" && a.ImageSide != "left" && a.ImageSide != "right" {
+		return Doc{}, &toolFault{Code: "schema_validation_failed", Msg: `image_side must be "left" or "right"`}
+	}
+
+	if a.BackMode != "" && a.BackMode != "same" && a.BackMode != "blank" {
 		return Doc{}, &toolFault{Code: "schema_validation_failed", Msg: `back_mode must be "same" or "blank"`}
 	}
 
-	return buildDoc(rows, a.IconPNGB64, Options{
-		BackMode:    a.BackMode,
+	sharedBack := a.Back.toFace()
+	opts := Options{
+		BackMode:    a.BackMode, // "" → buildDoc applies the faces-aware default
 		BackOffsetX: a.BackOffsetX,
 		BackOffsetY: a.BackOffsetY,
 		FullGuides:  a.FullGuides,
 		IconWidthIn: a.IconWidthIn,
-	}), nil
+		Layout:      a.Layout,
+		ImageSide:   a.ImageSide,
+		Back:        sharedBack,
+	}
+
+	// The classic icon/name layout requires the shared "icon" image; faces only
+	// need the specific images they reference. Use the shared facesMode predicate
+	// so this validation can't disagree with buildDoc's render-time decision.
+	known := map[string]bool{}
+	for _, im := range images {
+		known[im.ID] = true
+	}
+	if !facesMode(rows, opts) {
+		if !known[imageID] {
+			return Doc{}, &toolFault{Code: "schema_validation_failed", Msg: "provide an icon via icon_png_base64 or icon_path"}
+		}
+	}
+
+	// Every image a face references (image_id / full_image_id) must resolve to a
+	// supplied image — fail clearly here rather than as an opaque host.pdf error.
+	checkFace := func(fc *Face) *toolFault {
+		if fc == nil {
+			return nil
+		}
+		for _, id := range []string{fc.ImageID, fc.FullImageID} {
+			if id != "" && !known[id] {
+				return &toolFault{Code: "schema_validation_failed", Msg: fmt.Sprintf("face references unknown image id %q (add it via images[] or icon_png_base64/icon_path)", id)}
+			}
+		}
+		return nil
+	}
+	for _, r := range rows {
+		if fault := checkFace(r.Front); fault != nil {
+			return Doc{}, fault
+		}
+		if fault := checkFace(r.Back); fault != nil {
+			return Doc{}, fault
+		}
+	}
+	if fault := checkFace(sharedBack); fault != nil {
+		return Doc{}, fault
+	}
+
+	return buildDoc(rows, images, opts), nil
+}
+
+// resolveRowsPath supports the path-driven route for tag data: when `rows_path`
+// is set, the file (a JSON array of row objects, same shape as inline `rows`)
+// is read on the backend via host.files.read and spliced in as `rows`, so large
+// rosters never have to be inlined into the tool call. Mutually exclusive with
+// inline `rows`. Returns the (possibly rewritten) args. A no-op without rows_path.
+func resolveRowsPath(client capabilityCaller, rawArgs json.RawMessage) (json.RawMessage, *toolFault) {
+	var probe struct {
+		RowsPath string          `json:"rows_path"`
+		Rows     json.RawMessage `json:"rows"`
+	}
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &probe); err != nil {
+			return rawArgs, &toolFault{Code: "schema_validation_failed", Msg: "arguments not a JSON object: " + err.Error()}
+		}
+	}
+	if strings.TrimSpace(probe.RowsPath) == "" {
+		return rawArgs, nil
+	}
+	if len(probe.Rows) > 0 && string(probe.Rows) != "null" {
+		return rawArgs, &toolFault{Code: "schema_validation_failed", Msg: "provide rows OR rows_path, not both"}
+	}
+
+	raw, capErr := client.callCapability("host.files.read", map[string]interface{}{
+		"path":     probe.RowsPath,
+		"encoding": "text",
+	})
+	if capErr != nil {
+		return rawArgs, &toolFault{Code: fmt.Sprintf("rpc_error_%d", capErr.Code), Msg: capErr.Message}
+	}
+	var resp struct {
+		Success      bool   `json:"success"`
+		ErrorCode    string `json:"error_code,omitempty"`
+		ErrorMessage string `json:"error_message,omitempty"`
+		Result       *struct {
+			Content string `json:"content"`
+		} `json:"result,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return rawArgs, &toolFault{Code: "parse_error", Msg: "parse host.files.read response: " + err.Error()}
+	}
+	if !resp.Success {
+		return rawArgs, &toolFault{Code: resp.ErrorCode, Msg: resp.ErrorMessage}
+	}
+	if resp.Result == nil {
+		return rawArgs, &toolFault{Code: "parse_error", Msg: "host.files.read returned no content for rows_path"}
+	}
+	// The file must be a JSON array of row objects.
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(resp.Result.Content), &arr); err != nil {
+		return rawArgs, &toolFault{Code: "schema_validation_failed", Msg: "rows_path file is not a JSON array of rows: " + err.Error()}
+	}
+
+	// Splice the file's array in as `rows` (drop rows_path) and re-marshal.
+	var m map[string]json.RawMessage
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &m); err != nil {
+			return rawArgs, &toolFault{Code: "schema_validation_failed", Msg: "arguments not a JSON object: " + err.Error()}
+		}
+	}
+	if m == nil {
+		m = map[string]json.RawMessage{}
+	}
+	m["rows"] = json.RawMessage(resp.Result.Content)
+	delete(m, "rows_path")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return rawArgs, &toolFault{Code: "internal_error", Msg: "re-marshal args: " + err.Error()}
+	}
+	return out, nil
+}
+
+// readImageB64 returns a PNG as bare base64. An inline b64 wins; otherwise the
+// path is read on the backend via host.files.read (encoding base64) — the
+// path-driven route, so large real images never have to be inlined into the
+// tool call. Returns "" (no fault) when neither is supplied.
+func readImageB64(client capabilityCaller, b64, path string) (string, *toolFault) {
+	if strings.TrimSpace(b64) != "" {
+		return b64, nil
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", nil
+	}
+	raw, capErr := client.callCapability("host.files.read", map[string]interface{}{
+		"path":     path,
+		"encoding": "base64",
+	})
+	if capErr != nil {
+		return "", &toolFault{Code: fmt.Sprintf("rpc_error_%d", capErr.Code), Msg: capErr.Message}
+	}
+	var resp struct {
+		Success      bool   `json:"success"`
+		ErrorCode    string `json:"error_code,omitempty"`
+		ErrorMessage string `json:"error_message,omitempty"`
+		Result       *struct {
+			Content string `json:"content"`
+		} `json:"result,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", &toolFault{Code: "parse_error", Msg: "parse host.files.read response: " + err.Error()}
+	}
+	if !resp.Success {
+		return "", &toolFault{Code: resp.ErrorCode, Msg: resp.ErrorMessage}
+	}
+	if resp.Result == nil || resp.Result.Content == "" {
+		return "", &toolFault{Code: "parse_error", Msg: "host.files.read returned no content for path: " + path}
+	}
+	return resp.Result.Content, nil
+}
+
+// resolveImages builds the Doc image table from the args: the shared "icon"
+// (icon_png_base64 | icon_path) plus any named entries in `images`. Faces
+// reference these by id. Returns an empty list when no images are supplied
+// (text-only faces are valid).
+func resolveImages(client capabilityCaller, rawArgs json.RawMessage) ([]Image, *toolFault) {
+	var a nametagArgs
+	if len(rawArgs) > 0 && string(rawArgs) != "null" {
+		if err := json.Unmarshal(rawArgs, &a); err != nil {
+			return nil, &toolFault{Code: "schema_validation_failed", Msg: "arguments not a JSON object: " + err.Error()}
+		}
+	}
+	var images []Image
+
+	icon, fault := readImageB64(client, a.IconPNGB64, a.IconPath)
+	if fault != nil {
+		return nil, fault
+	}
+	if icon != "" {
+		images = append(images, Image{ID: imageID, Format: "png", BytesB64: icon})
+	}
+
+	for i, im := range a.Images {
+		if strings.TrimSpace(im.ID) == "" {
+			return nil, &toolFault{Code: "schema_validation_failed", Msg: fmt.Sprintf("images[%d] requires an id", i)}
+		}
+		b64, fault := readImageB64(client, im.PNGB64, im.Path)
+		if fault != nil {
+			return nil, fault
+		}
+		if b64 == "" {
+			return nil, &toolFault{Code: "schema_validation_failed", Msg: fmt.Sprintf("images[%d] (%q) needs png_base64 or path", i, im.ID)}
+		}
+		images = append(images, Image{ID: im.ID, Format: "png", BytesB64: b64})
+	}
+	return images, nil
 }
 
 // generatePDF builds the Doc, calls host.pdf.generate, and returns the parsed
@@ -100,7 +360,15 @@ func buildDocFromArgs(rawArgs json.RawMessage) (Doc, *toolFault) {
 // preview) and nametag_save (which forwards the bytes to host.files.write).
 // On a validation/capability/parse error it returns a *toolFault.
 func generatePDF(client capabilityCaller, rawArgs json.RawMessage) (*pdfGenerateResult, *toolFault) {
-	doc, fault := buildDocFromArgs(rawArgs)
+	rawArgs, fault := resolveRowsPath(client, rawArgs)
+	if fault != nil {
+		return nil, fault
+	}
+	images, fault := resolveImages(client, rawArgs)
+	if fault != nil {
+		return nil, fault
+	}
+	doc, fault := buildDocFromArgs(rawArgs, images)
 	if fault != nil {
 		return nil, fault
 	}
@@ -136,16 +404,14 @@ func generatePDF(client capabilityCaller, rawArgs json.RawMessage) (*pdfGenerate
 	return resp.Result, nil
 }
 
-// toolNametagGenerate is the handler for the nametag_generate tool.
-//
-// Args (one of rows|csv required):
-//   - rows: [{name, class, group, room}]   OR
-//   - csv:  a CSV string with headers Name / Class / Group # / Room Assignment
-//   - icon_png_base64 (required): bare base64 PNG for the per-tag icon
-//   - back_mode    (opt, default "same"): "same" | "blank"
-//   - back_offset_x / back_offset_y (opt, points): duplex registration nudge
-//   - full_guides  (opt bool): full bounding rect per tag instead of corner marks
-//   - icon_width_in (opt, default 0.40): icon width in inches
+// toolNametagGenerate is the handler for the nametag_generate tool. The full
+// argument surface is described authoritatively by the input schema in main.go
+// (generateInputSchema/sharedProps) — in brief: rows (classic {name,class,
+// group,room} | flat-detailed {title,subtitle,lines} | generic {front,back}
+// faces) OR csv; a shared/per-row back face; images (icon_png_base64/icon_path
+// + named images[]); layout/back_mode/offsets/full_guides/icon_width_in. An
+// icon is required only for the classic layout; faces need only the images they
+// reference.
 //
 // On success returns {success, bytes_b64, byte_size, page_count, content_type}.
 // On a host.pdf.generate failure, surfaces {success:false, error_code,
@@ -190,77 +456,28 @@ func toolNametagSave(client capabilityCaller, rawArgs json.RawMessage) map[strin
 		return out
 	}
 
-	// 2. Pick a save location. filters is an Array of String in Godot FileDialog
-	// format ("*.pdf ; PDF Files") — see CapabilityBroker._handle_host_dialogs_file_picker.
-	pickRaw, capErr := client.callCapability("host.dialogs.file_picker", map[string]interface{}{
-		"mode":    "save",
-		"title":   "Save name tags",
-		"filters": []string{"*.pdf ; PDF Files"},
-	})
-	if capErr != nil {
-		return saveErr(fmt.Sprintf("rpc_error_%d", capErr.Code), capErr.Message)
+	// 2. Resolve the destination. An explicit `path` arg (agent-driven) is
+	// written directly with no dialog — parity with Minerva's core MCP file
+	// tools, which write wherever the agent says. When `path` is omitted we
+	// fall back to a save picker for the human panel flow.
+	var pathArg struct {
+		Path string `json:"path"`
 	}
-	var pick struct {
-		Success      bool   `json:"success"`
-		ErrorCode    string `json:"error_code,omitempty"`
-		ErrorMessage string `json:"error_message,omitempty"`
-		Result       *struct {
-			Cancelled bool   `json:"cancelled"`
-			Path      string `json:"path"`
-		} `json:"result,omitempty"`
-	}
-	if err := json.Unmarshal(pickRaw, &pick); err != nil {
-		return saveErr("parse_error", "parse file_picker response: "+err.Error())
-	}
-	if !pick.Success {
-		return saveErr(pick.ErrorCode, pick.ErrorMessage)
-	}
-	if pick.Result == nil {
-		return saveErr("parse_error", "file_picker returned success but no result")
-	}
-	if pick.Result.Cancelled {
-		return map[string]interface{}{"success": true, "saved": false, "cancelled": true}
-	}
-	path := pick.Result.Path
+	// Best-effort: rawArgs was already structurally validated by generatePDF.
+	_ = json.Unmarshal(rawArgs, &pathArg)
+	path := strings.TrimSpace(pathArg.Path)
+
 	if path == "" {
-		return saveErr("parse_error", "file_picker returned an empty path")
+		picked, early := pickSavePath(client)
+		if early != nil {
+			return early
+		}
+		path = picked
 	}
 
-	// 3. Grant filesystem scope for the picked path so the write passes scope.
-	grantRaw, capErr := client.callCapability("host.permissions.grant_scope", map[string]interface{}{
-		"path":   path,
-		"reason": "Save generated name tags",
-	})
-	if capErr != nil {
-		return saveErr(fmt.Sprintf("rpc_error_%d", capErr.Code), capErr.Message)
-	}
-	var grant struct {
-		Success      bool   `json:"success"`
-		ErrorCode    string `json:"error_code,omitempty"`
-		ErrorMessage string `json:"error_message,omitempty"`
-		Result       *struct {
-			Granted        bool `json:"granted"`
-			AlreadyGranted bool `json:"already_granted"`
-			Cancelled      bool `json:"cancelled"`
-		} `json:"result,omitempty"`
-	}
-	if err := json.Unmarshal(grantRaw, &grant); err != nil {
-		return saveErr("parse_error", "parse grant_scope response: "+err.Error())
-	}
-	if !grant.Success {
-		return saveErr(grant.ErrorCode, grant.ErrorMessage)
-	}
-	if grant.Result == nil {
-		return saveErr("parse_error", "grant_scope returned success but no result")
-	}
-	if grant.Result.Cancelled {
-		return saveErr("permission_denied", "permission to write to that location was declined")
-	}
-	if !grant.Result.Granted && !grant.Result.AlreadyGranted {
-		return saveErr("permission_denied", "could not get permission to write to: "+path)
-	}
-
-	// 4. Write the base64 PDF bytes to the picked path.
+	// 3. Write the base64 PDF bytes. Under filesystem_mode "unrestricted" the
+	// host authorizes the write from the granted host.files.write capability
+	// alone — no grant_scope handshake and no second confirmation dialog.
 	writeRaw, capErr := client.callCapability("host.files.write", map[string]interface{}{
 		"path":           path,
 		"content":        pdf.BytesB64,
@@ -300,6 +517,46 @@ func toolNametagSave(client capabilityCaller, rawArgs json.RawMessage) map[strin
 		"bytes_written": write.Result.BytesWritten,
 		"page_count":    pdf.PageCount,
 	}
+}
+
+// pickSavePath pops a host save dialog and returns the chosen path. The second
+// return is non-nil when the caller should return it directly: either a
+// {saved:false, cancelled:true} map (user cancelled the picker) or a saveErr map.
+// Used only as the human-panel fallback when nametag_save gets no explicit path.
+func pickSavePath(client capabilityCaller) (string, map[string]interface{}) {
+	pickRaw, capErr := client.callCapability("host.dialogs.file_picker", map[string]interface{}{
+		"mode":    "save",
+		"title":   "Save name tags",
+		"filters": []string{"*.pdf ; PDF Files"},
+	})
+	if capErr != nil {
+		return "", saveErr(fmt.Sprintf("rpc_error_%d", capErr.Code), capErr.Message)
+	}
+	var pick struct {
+		Success      bool   `json:"success"`
+		ErrorCode    string `json:"error_code,omitempty"`
+		ErrorMessage string `json:"error_message,omitempty"`
+		Result       *struct {
+			Cancelled bool   `json:"cancelled"`
+			Path      string `json:"path"`
+		} `json:"result,omitempty"`
+	}
+	if err := json.Unmarshal(pickRaw, &pick); err != nil {
+		return "", saveErr("parse_error", "parse file_picker response: "+err.Error())
+	}
+	if !pick.Success {
+		return "", saveErr(pick.ErrorCode, pick.ErrorMessage)
+	}
+	if pick.Result == nil {
+		return "", saveErr("parse_error", "file_picker returned success but no result")
+	}
+	if pick.Result.Cancelled {
+		return "", map[string]interface{}{"success": true, "saved": false, "cancelled": true}
+	}
+	if pick.Result.Path == "" {
+		return "", saveErr("parse_error", "file_picker returned an empty path")
+	}
+	return pick.Result.Path, nil
 }
 
 // saveErr builds a nametag_save failure map. Unlike toolErr it also carries

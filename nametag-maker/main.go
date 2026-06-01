@@ -176,84 +176,129 @@ func toolErr(code, msg string) map[string]interface{} {
 // start with "minerva_<plugin_id>_" — but plugin ids with hyphens are
 // normalized; the registered name here matches the task's nametag_generate
 // and the host applies its own prefix.
+// ---------------------------------------------------------------------------
+// Tool input-schema builders (shared between nametag_generate and nametag_save).
+// The host passes nested args through as objects ONLY if the schema declares
+// their shape, so faces/columns/images must be described here.
+// ---------------------------------------------------------------------------
+
+func linesSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "array",
+		"description": `Stacked lines. {label,value} renders "Label: Value"; value-only renders the value alone (e.g. "9:30 Snack").`,
+		"items": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"label": map[string]interface{}{"type": "string"},
+				"value": map[string]interface{}{"type": "string"},
+			},
+		},
+	}
+}
+
+// faceSchema describes one tag face (front or back): structured content
+// (image_id + title + subtitle + columns of lines) OR a full-tag image.
+func faceSchema(role string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "object",
+		"description": role + ": structured (image_id + title + subtitle + columns) OR a full-tag image (full_image_id).",
+		"properties": map[string]interface{}{
+			"image_id":   map[string]interface{}{"type": "string", "description": `Image id to show on a side ("icon" = the shared icon; or any id from images[]).`},
+			"image_side": map[string]interface{}{"type": "string", "description": "left (default) or right."},
+			"title":      map[string]interface{}{"type": "string", "description": "Big bold line (e.g. first name)."},
+			"subtitle":   map[string]interface{}{"type": "string", "description": "Bold line under the title (e.g. last name)."},
+			"columns": map[string]interface{}{
+				"type":        "array",
+				"description": "One or more columns of lines rendered side-by-side (e.g. a two-day schedule).",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"heading": map[string]interface{}{"type": "string", "description": "Optional bold column heading."},
+						"lines":   linesSchema(),
+					},
+				},
+			},
+			"full_image_id": map[string]interface{}{"type": "string", "description": "If set, fill the tag with this image id (overrides the structured fields)."},
+		},
+	}
+}
+
+func rowsSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "array",
+		"description": "Tag rows. Classic: {name,class,group,room}. Detailed: {title,subtitle,lines}. Generic: {front,back} faces.",
+		"items": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name":     map[string]interface{}{"type": "string"},
+				"class":    map[string]interface{}{"type": "string"},
+				"group":    map[string]interface{}{"type": "string"},
+				"room":     map[string]interface{}{"type": "string"},
+				"title":    map[string]interface{}{"type": "string", "description": "Detailed: big bold line (e.g. first name)."},
+				"subtitle": map[string]interface{}{"type": "string", "description": "Detailed: bold line under the title (e.g. last name)."},
+				"lines":    linesSchema(),
+				"front":    faceSchema("Front face for this tag (overrides the flat title/subtitle/lines)"),
+				"back":     faceSchema("Back face for this tag (overrides the shared back)"),
+			},
+		},
+	}
+}
+
+func imagesSchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "array",
+		"description": "Extra named images (beyond the shared icon) that faces reference by id. Each: {id, png_base64 | path}.",
+		"items": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id":         map[string]interface{}{"type": "string"},
+				"png_base64": map[string]interface{}{"type": "string"},
+				"path":       map[string]interface{}{"type": "string", "description": "Absolute path, read on the backend via host.files.read."},
+			},
+		},
+	}
+}
+
+// sharedProps are the input-schema properties common to both tools.
+func sharedProps() map[string]interface{} {
+	return map[string]interface{}{
+		"rows":            rowsSchema(),
+		"csv":             map[string]interface{}{"type": "string", "description": "Alternative to rows: CSV with headers Name, Class, Group #, Room Assignment."},
+		"rows_path":       map[string]interface{}{"type": "string", "description": "Absolute path to a JSON file holding the rows array (same shape as rows), read on the backend — use instead of inline rows for large rosters."},
+		"icon_png_base64": map[string]interface{}{"type": "string", "description": `Bare base64 PNG for the shared icon (image id "icon").`},
+		"icon_path":       map[string]interface{}{"type": "string", "description": "Absolute path to a PNG icon, read on the backend (use instead of icon_png_base64 for large images)."},
+		"images":          imagesSchema(),
+		"back":            faceSchema("Shared back face drawn behind EVERY tag (e.g. a common schedule), aligned for duplex; a per-row back overrides it"),
+		"back_mode":       map[string]interface{}{"type": "string", "description": `"same" (mirror front, reversible) or "blank" (front only). Default: same for classic, blank for detailed/faces.`},
+		"back_offset_x":   map[string]interface{}{"type": "number", "description": "Duplex registration nudge (points), X axis."},
+		"back_offset_y":   map[string]interface{}{"type": "number", "description": "Duplex registration nudge (points), Y axis."},
+		"full_guides":     map[string]interface{}{"type": "boolean", "description": "Full bounding rectangle per tag instead of 4 corner-cut marks."},
+		"icon_width_in":   map[string]interface{}{"type": "number", "description": "Icon/image width in inches. Default 0.40 (classic) / 1.0 (detailed)."},
+		"layout":          map[string]interface{}{"type": "string", "description": "classic or detailed. Per-row front/back faces or a shared back also switch to the generic renderer."},
+		"image_side":      map[string]interface{}{"type": "string", "description": "Flat-detailed front image side: left (default) or right."},
+	}
+}
+
+func generateInputSchema() map[string]interface{} {
+	return map[string]interface{}{"type": "object", "properties": sharedProps()}
+}
+
+func saveInputSchema() map[string]interface{} {
+	props := sharedProps()
+	props["path"] = map[string]interface{}{"type": "string", "description": "Absolute destination path. Provided → write directly (no dialog); omitted → save picker."}
+	return map[string]interface{}{"type": "object", "properties": props}
+}
+
 var toolList = []map[string]interface{}{
 	{
 		"name":        "nametag_generate",
-		"description": "Generate a duplex-printable name-tag PDF (cardstock 4×2, Letter) via host.pdf.generate. Provide tag data as `rows` ([{name,class,group,room}]) OR a `csv` string with headers Name/Class/Group #/Room Assignment, plus `icon_png_base64` (bare base64 PNG). Back side mirrors the front column-reversed for duplex registration. Returns {bytes_b64, byte_size, page_count, content_type}.",
-		"inputSchema": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"rows": map[string]interface{}{
-					"type":        "array",
-					"description": "Tag rows. Each: {name, class, group, room}. Empty fields are omitted from the tag.",
-					"items": map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"name":  map[string]interface{}{"type": "string"},
-							"class": map[string]interface{}{"type": "string"},
-							"group": map[string]interface{}{"type": "string"},
-							"room":  map[string]interface{}{"type": "string"},
-						},
-					},
-				},
-				"csv": map[string]interface{}{
-					"type":        "string",
-					"description": "Alternative to rows: CSV text with headers Name, Class, Group #, Room Assignment.",
-				},
-				"icon_png_base64": map[string]interface{}{
-					"type":        "string",
-					"description": "Bare base64 PNG used as the per-tag icon (embedded once, referenced by every tag).",
-				},
-				"back_mode": map[string]interface{}{
-					"type":        "string",
-					"description": `"same" (default — mirror front onto back, column-reversed) or "blank" (front pages only).`,
-				},
-				"back_offset_x": map[string]interface{}{"type": "number", "description": "Registration nudge (points) applied to every back-page tag, X axis."},
-				"back_offset_y": map[string]interface{}{"type": "number", "description": "Registration nudge (points) applied to every back-page tag, Y axis."},
-				"full_guides":   map[string]interface{}{"type": "boolean", "description": "Draw a full bounding rectangle per tag instead of 4 corner marks."},
-				"icon_width_in": map[string]interface{}{"type": "number", "description": "Icon width in inches. Default 0.40."},
-			},
-			"required": []string{"icon_png_base64"},
-		},
+		"description": "Generate a name-tag PDF via host.pdf.generate and return the bytes. Tags are 3-3/8 x 2-1/3 in (Avery 5395), 8 per Letter sheet, corner-cut marks. Layouts: classic (icon + name/class/room/group), detailed (image + big name + detail lines), or fully generic front/back faces. A shared `back` (or per-row back) draws a second side aligned for duplex (e.g. a schedule). Returns {bytes_b64, byte_size, page_count, content_type}.",
+		"inputSchema": generateInputSchema(),
 	},
 	{
 		"name":        "nametag_save",
-		"description": "Generate the name-tag PDF (same inputs as nametag_generate) and save it to a user-chosen location. Pops a save dialog, requests write permission for the picked path, and writes the PDF — all on the backend, so the PDF bytes never cross the webview IPC channel (which caps payloads at 64 KiB). Returns {saved:true, path, bytes_written, page_count}, or {saved:false, cancelled:true} if the user cancels, or {saved:false, error_code, error_message} on error.",
-		"inputSchema": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"rows": map[string]interface{}{
-					"type":        "array",
-					"description": "Tag rows. Each: {name, class, group, room}. Empty fields are omitted from the tag.",
-					"items": map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"name":  map[string]interface{}{"type": "string"},
-							"class": map[string]interface{}{"type": "string"},
-							"group": map[string]interface{}{"type": "string"},
-							"room":  map[string]interface{}{"type": "string"},
-						},
-					},
-				},
-				"csv": map[string]interface{}{
-					"type":        "string",
-					"description": "Alternative to rows: CSV text with headers Name, Class, Group #, Room Assignment.",
-				},
-				"icon_png_base64": map[string]interface{}{
-					"type":        "string",
-					"description": "Bare base64 PNG used as the per-tag icon (embedded once, referenced by every tag).",
-				},
-				"back_mode": map[string]interface{}{
-					"type":        "string",
-					"description": `"same" (default — mirror front onto back, column-reversed) or "blank" (front pages only).`,
-				},
-				"back_offset_x": map[string]interface{}{"type": "number", "description": "Registration nudge (points) applied to every back-page tag, X axis."},
-				"back_offset_y": map[string]interface{}{"type": "number", "description": "Registration nudge (points) applied to every back-page tag, Y axis."},
-				"full_guides":   map[string]interface{}{"type": "boolean", "description": "Draw a full bounding rectangle per tag instead of 4 corner marks."},
-				"icon_width_in": map[string]interface{}{"type": "number", "description": "Icon width in inches. Default 0.40."},
-			},
-			"required": []string{"icon_png_base64"},
-		},
+		"description": "Like nametag_generate, but writes the PDF to disk on the backend (bytes never cross the 64 KiB webview channel). Pass `path` to write directly with no dialog; omit it for a save picker. Returns {saved, path, bytes_written, page_count}, or {saved:false, cancelled:true} on picker cancel.",
+		"inputSchema": saveInputSchema(),
 	},
 }
 
