@@ -18,9 +18,26 @@
         "kind": "html",
         "entry": "ui/nametag_panel.html",
         "ipc_channels": []
+      },
+      {
+        "name": "nametag_editor",
+        "kind": "godot_scene",
+        "entry_scene": "ui/NametagEditorPanel.tscn",
+        "scripts": ["ui/nametag_editor_panel.gd", "ui/nametag_model.gd"],
+        "file_extensions": [".mtags"],
+        "ipc_channels": [],
+        "save_mode": "host_owned"
       }
     ]
   },
+  "editor_items": [
+    {
+      "id": "new_mtags",
+      "name": "New Nametag",
+      "panel": "nametag_editor",
+      "default_filename": "untitled.mtags"
+    }
+  ],
   "permissions": {
     "host_capabilities": [
       "host.pdf.generate",
@@ -36,7 +53,7 @@
       "paths": []
     }
   },
-  "capabilities": [],
+  "capabilities": ["host_owned_save"],
   "data_directory": "",
   "autostart": false,
   "auto_reload": true
