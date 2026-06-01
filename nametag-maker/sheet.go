@@ -23,17 +23,57 @@ type sheetMapping struct {
 // minerva_get_spreadsheet_data and passes the array verbatim. A string is immune
 // to the host's nested-arg coercion, and the columns are arbitrary per use case.
 type buildFromSheetArgs struct {
-	RowsJSON         string       `json:"rows_json"`
-	Mapping          sheetMapping `json:"mapping"`
-	Layout           string       `json:"layout"`
-	ImageSide        string       `json:"image_side"`
-	BackMode         string       `json:"back_mode"`
-	FullGuides       bool         `json:"full_guides"`
-	IconWidthIn      float64      `json:"icon_width_in"`
-	OutPath          string       `json:"out_path"`
-	Title            string       `json:"title"`
-	SheetRef         string       `json:"sheet_ref"`
-	PreviewFirstOnly bool         `json:"preview_first_only"`
+	RowsJSON  string       `json:"rows_json"`
+	Mapping   sheetMapping `json:"mapping"`
+	// BackMapping (optional) builds a DISTINCT per-row back face from columns —
+	// same shape as Mapping. Each tag's back is derived from its own row (e.g.
+	// the parent electives on the back of a student tag).
+	BackMapping *sheetMapping `json:"back_mapping"`
+	// SharedBack (optional) is one CONSTANT back face drawn behind EVERY tag —
+	// the common case being a schedule (columns of lines, optionally per-day
+	// headings). A per-row BackMapping back overrides it for that row.
+	SharedBack       *faceArgs `json:"shared_back"`
+	Layout           string    `json:"layout"`
+	ImageSide        string    `json:"image_side"`
+	BackMode         string    `json:"back_mode"`
+	FullGuides       bool      `json:"full_guides"`
+	IconWidthIn      float64   `json:"icon_width_in"`
+	OutPath          string    `json:"out_path"`
+	Title            string    `json:"title"`
+	SheetRef         string    `json:"sheet_ref"`
+	PreviewFirstOnly bool      `json:"preview_first_only"`
+}
+
+// mapRowToFace builds a structured face (title/subtitle + a single column of
+// lines) for one sheet row from a column mapping. Empty values are omitted;
+// returns nil when the row yields no back content at all (so a row missing all
+// back data simply has no back face rather than a blank one). The returned map
+// is faceArgs-shaped so buildDocFromArgs parses it as a layout.Face.
+func mapRowToFace(r map[string]interface{}, m sheetMapping) map[string]interface{} {
+	title := sheetCell(r, m.Title)
+	subtitle := sheetCell(r, m.Subtitle)
+	var lines []map[string]interface{}
+	for _, ml := range m.Lines {
+		val := sheetCell(r, ml.Column)
+		if val == "" {
+			continue
+		}
+		lines = append(lines, map[string]interface{}{"label": ml.Label, "value": val})
+	}
+	if title == "" && subtitle == "" && len(lines) == 0 {
+		return nil
+	}
+	face := map[string]interface{}{}
+	if title != "" {
+		face["title"] = title
+	}
+	if subtitle != "" {
+		face["subtitle"] = subtitle
+	}
+	if len(lines) > 0 {
+		face["columns"] = []map[string]interface{}{{"lines": lines}}
+	}
+	return face
 }
 
 func orDefault(s, def string) string {
@@ -118,6 +158,12 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 		if len(lines) > 0 {
 			row["lines"] = lines
 		}
+		// A distinct per-row back face (e.g. parent electives) from back_mapping.
+		if a.BackMapping != nil {
+			if back := mapRowToFace(r, *a.BackMapping); back != nil {
+				row["back"] = back
+			}
+		}
 		tagRows = append(tagRows, row)
 	}
 
@@ -129,6 +175,12 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 		"full_guides":   a.FullGuides,
 		"icon_width_in": a.IconWidthIn,
 		"rows":          tagRows,
+	}
+	// A shared constant back face (e.g. the schedule) drawn behind every tag.
+	// buildDocFromArgs reads top-level `back` as Options.Back; a per-row back
+	// face (set above) overrides it for that row.
+	if a.SharedBack != nil {
+		gen["back"] = a.SharedBack
 	}
 
 	// Preview: first tag only when requested (single-draft review). The stored

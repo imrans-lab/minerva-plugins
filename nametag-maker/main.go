@@ -289,33 +289,42 @@ func saveInputSchema() map[string]interface{} {
 	return map[string]interface{}{"type": "object", "properties": props}
 }
 
+// mappingSchema describes a spreadsheet→face column mapping (title/subtitle +
+// labelled detail lines). Shared by build_from_sheet's front `mapping` and the
+// per-row `back_mapping`.
+func mappingSchema(desc string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "object",
+		"description": desc,
+		"properties": map[string]interface{}{
+			"title":    map[string]interface{}{"type": "string", "description": "Column for the face's big bold name."},
+			"subtitle": map[string]interface{}{"type": "string", "description": "Column for the subtitle line."},
+			"lines": map[string]interface{}{
+				"type":        "array",
+				"description": "Detail lines: each is a fixed label + the column holding the value (empty values are omitted).",
+				"items": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"label":  map[string]interface{}{"type": "string"},
+						"column": map[string]interface{}{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+}
+
 func buildFromSheetInputSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"rows_json": map[string]interface{}{"type": "string", "description": "JSON array of sheet row objects ({column: value}) — e.g. from minerva_get_spreadsheet_data. Passed as a STRING (columns are arbitrary per use case)."},
-			"mapping": map[string]interface{}{
-				"type":        "object",
-				"description": "Which spreadsheet columns map onto each tag field.",
-				"properties": map[string]interface{}{
-					"title":    map[string]interface{}{"type": "string", "description": "Column for the tag's big bold name."},
-					"subtitle": map[string]interface{}{"type": "string", "description": "Column for the subtitle line."},
-					"lines": map[string]interface{}{
-						"type":        "array",
-						"description": "Detail lines: each is a fixed label + the column holding the value (empty values are omitted).",
-						"items": map[string]interface{}{
-							"type": "object",
-							"properties": map[string]interface{}{
-								"label":  map[string]interface{}{"type": "string"},
-								"column": map[string]interface{}{"type": "string"},
-							},
-						},
-					},
-				},
-			},
+			"rows_json":          map[string]interface{}{"type": "string", "description": "JSON array of sheet row objects ({column: value}) — e.g. from minerva_get_spreadsheet_data. Passed as a STRING (columns are arbitrary per use case)."},
+			"mapping":            mappingSchema("Which spreadsheet columns map onto each tag's FRONT face."),
+			"back_mapping":       mappingSchema("Optional: columns → a DISTINCT per-row BACK face (same shape as mapping). Each tag's back is built from its own row."),
+			"shared_back":        faceSchema("Optional: one CONSTANT back face drawn behind EVERY tag (e.g. a schedule — use columns with per-day headings), aligned for duplex. A per-row back_mapping overrides it. Text-only for now (images via nametag_generate)"),
 			"layout":             map[string]interface{}{"type": "string", "description": "classic or detailed (default detailed)."},
 			"image_side":         map[string]interface{}{"type": "string", "description": "left (default) or right."},
-			"back_mode":          map[string]interface{}{"type": "string", "description": `"blank" (default) or "same" (mirror front, reversible).`},
+			"back_mode":          map[string]interface{}{"type": "string", "description": `"blank" (default) or "same" (mirror front, reversible). Ignored when a back_mapping / shared_back face is supplied (an explicit back always draws).`},
 			"full_guides":        map[string]interface{}{"type": "boolean", "description": "Full box per tag instead of corner-cut marks."},
 			"icon_width_in":      map[string]interface{}{"type": "number", "description": "Icon/image width in inches."},
 			"out_path":           map[string]interface{}{"type": "string", "description": "Absolute destination path for the .mtags document."},
@@ -339,7 +348,7 @@ var toolList = []map[string]interface{}{
 	},
 	{
 		"name":        "nametag_build_from_sheet",
-		"description": "Build a .mtags nametag document from spreadsheet rows. The caller reads the sheet (minerva_get_spreadsheet_data) and passes rows_json + a column mapping; this deterministically maps columns → tag rows, renders a preview PDF (the first tag only when preview_first_only — the single-draft review), writes the preview + the .mtags to disk, and returns the .mtags path to open. The standard columns are just a suggestion — the mapping makes it work for any sheet.",
+		"description": "Build a .mtags nametag document from spreadsheet rows. The caller reads the sheet (minerva_get_spreadsheet_data) and passes rows_json + a column mapping; this deterministically maps columns → tag rows, renders a preview PDF (the first tag only when preview_first_only — the single-draft review), writes the preview + the .mtags to disk, and returns the .mtags path to open. For a two-sided tag, add a `shared_back` face (one constant back behind every tag, e.g. a schedule) and/or a `back_mapping` (a distinct per-row back built from columns). The standard columns are just a suggestion — the mapping makes it work for any sheet.",
 		"inputSchema": buildFromSheetInputSchema(),
 	},
 }

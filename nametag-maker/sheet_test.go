@@ -126,3 +126,116 @@ func TestBuildFromSheetPreviewFirstOnly(t *testing.T) {
 		t.Fatalf("preview_first_only must exclude later tags B/C: %s", s)
 	}
 }
+
+// shared_back draws one CONSTANT back face behind every tag (e.g. a schedule):
+// the rendered Doc gains a second (back) page carrying the schedule text, and
+// the stored .mtags carries the shared `back` under generate.
+func TestBuildFromSheetSharedBack(t *testing.T) {
+	host := &seqHost{replies: []json.RawMessage{
+		json.RawMessage(`{"success":true,"result":{"bytes_b64":"JVBERg==","byte_size":5,"page_count":2,"content_type":"application/pdf"}}`),
+		json.RawMessage(`{"success":true,"result":{"path":"/tmp/s.mtags.preview.pdf","bytes_written":5}}`),
+		json.RawMessage(`{"success":true,"result":{"path":"/tmp/s.mtags","bytes_written":100}}`),
+	}}
+	rows := `[{"Name":"Ada Lovelace"}]`
+	args := mustArgs(t, map[string]interface{}{
+		"rows_json": rows,
+		"mapping":   map[string]interface{}{"title": "Name"},
+		"shared_back": map[string]interface{}{
+			"title": "Schedule",
+			"columns": []map[string]interface{}{
+				{"heading": "Thursday", "lines": []map[string]interface{}{
+					{"value": "9:30 Snack"}, {"value": "10:00 Swim"},
+				}},
+			},
+		},
+		"out_path": "/tmp/s.mtags",
+	})
+
+	res := toolNametagBuildFromSheet(host, args)
+	if res["success"] != true {
+		t.Fatalf("expected success, got %+v", res)
+	}
+
+	// The rendered doc (host.pdf.generate, call 0) gains a back page with the schedule.
+	genJSON, _ := json.Marshal(host.calls[0].args)
+	s := string(genJSON)
+	if !strings.Contains(s, "9:30 Snack") || !strings.Contains(s, "Thursday") {
+		t.Fatalf("rendered doc should carry the shared-back schedule: %s", s)
+	}
+	var doc struct {
+		Pages []struct {
+			Ops []map[string]interface{} `json:"ops"`
+		} `json:"pages"`
+	}
+	if err := json.Unmarshal(genJSON, &doc); err != nil {
+		t.Fatalf("doc not valid JSON: %v", err)
+	}
+	if len(doc.Pages) != 2 {
+		t.Fatalf("shared back → front + back page; want 2 pages, got %d", len(doc.Pages))
+	}
+
+	// The stored .mtags carries the shared back under generate.back.
+	mtagsB64, _ := host.calls[2].args["content"].(string)
+	docBytes, _ := base64.StdEncoding.DecodeString(mtagsB64)
+	var stored struct {
+		Generate struct {
+			Back *struct {
+				Title string `json:"title"`
+			} `json:"back"`
+		} `json:"generate"`
+	}
+	if err := json.Unmarshal(docBytes, &stored); err != nil {
+		t.Fatalf(".mtags not valid JSON: %v", err)
+	}
+	if stored.Generate.Back == nil || stored.Generate.Back.Title != "Schedule" {
+		t.Fatalf("stored .mtags should carry generate.back.title=Schedule: %s", docBytes)
+	}
+}
+
+// back_mapping builds a DISTINCT per-row back face from columns; each row in the
+// stored .mtags carries its own `back`, and a row with no back data has none.
+func TestBuildFromSheetPerRowBack(t *testing.T) {
+	host := &seqHost{replies: []json.RawMessage{
+		json.RawMessage(`{"success":true,"result":{"bytes_b64":"JVBERg==","byte_size":5,"page_count":2,"content_type":"application/pdf"}}`),
+		json.RawMessage(`{"success":true,"result":{"path":"/tmp/b.mtags.preview.pdf","bytes_written":5}}`),
+		json.RawMessage(`{"success":true,"result":{"path":"/tmp/b.mtags","bytes_written":100}}`),
+	}}
+	// Ada has an elective; Bo has none → Bo gets no back face.
+	rows := `[{"Name":"Ada","Elective":"Archery"},{"Name":"Bo","Elective":""}]`
+	args := mustArgs(t, map[string]interface{}{
+		"rows_json":    rows,
+		"mapping":      map[string]interface{}{"title": "Name"},
+		"back_mapping": map[string]interface{}{"lines": []map[string]interface{}{{"label": "Elective", "column": "Elective"}}},
+		"out_path":     "/tmp/b.mtags",
+	})
+
+	res := toolNametagBuildFromSheet(host, args)
+	if res["success"] != true {
+		t.Fatalf("expected success, got %+v", res)
+	}
+
+	mtagsB64, _ := host.calls[2].args["content"].(string)
+	docBytes, _ := base64.StdEncoding.DecodeString(mtagsB64)
+	var stored struct {
+		Generate struct {
+			Rows []map[string]json.RawMessage `json:"rows"`
+		} `json:"generate"`
+	}
+	if err := json.Unmarshal(docBytes, &stored); err != nil {
+		t.Fatalf(".mtags not valid JSON: %v", err)
+	}
+	if len(stored.Generate.Rows) != 2 {
+		t.Fatalf("want 2 rows, got %d", len(stored.Generate.Rows))
+	}
+	if _, ok := stored.Generate.Rows[0]["back"]; !ok {
+		t.Fatalf("row0 (Ada) should have a back face: %s", docBytes)
+	}
+	if _, ok := stored.Generate.Rows[1]["back"]; ok {
+		t.Fatalf("row1 (Bo, no elective) should have NO back face: %s", docBytes)
+	}
+	// The rendered doc carries Ada's elective on a back page.
+	genJSON, _ := json.Marshal(host.calls[0].args)
+	if !strings.Contains(string(genJSON), "Archery") {
+		t.Fatalf("rendered doc should carry per-row back 'Archery': %s", genJSON)
+	}
+}
