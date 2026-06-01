@@ -373,6 +373,7 @@ is available-but-unused.
 | `host.dialogs.file_picker` | all opt: `title`, `initial_path`, `filters[]`, `mode` (`open`/`save`) | `{cancelled, path?}` | `host.dialogs.file_picker` | — |
 | `host.dialogs.directory_picker` | opt: `title`, `initial_path` | `{cancelled, path?}` | `host.dialogs.directory_picker` | — |
 | `host.permissions.grant_scope` | `path` (req, absolute, no `..`/null), `reason` | `{granted, already_granted, cancelled, path}` | `host.permissions.grant_scope` — **NEVER auto-granted** (privilege escalation) | — |
+| `host.pdf.generate` | declarative doc: `defaults{format,orientation,unit}`, `metadata`, `images[{id,format,bytes_b64}]`, `pages[{ops:[…]}]`; ops = `draw_text`(+`fit`)/`draw_image`/`draw_line`/`draw_rect` | `{bytes_b64, byte_size, page_count, content_type:"application/pdf"}` | `host.pdf.generate` | — |
 | `network.none` | — | always `permission_denied` | n/a — deny marker; granting it is a config error | — |
 
 **Filesystem path rules** (`host.files.*`): path must be absolute or `user://`,
@@ -385,6 +386,19 @@ scope as a partial mitigation). Writes are **not** atomic.
 `{service_client_id, action_name}`, `dynamic` `{model_id >= 10000}`, `builtin`
 `{model_id}`. Forward `model_spec` only when it is a non-empty object (the broker
 rejects empty `{}`). Per-message image cap ≈ 10 MiB.
+
+**`host.pdf.generate` notes:** the host owns the one PDF generator (a bundled
+`go-pdf/fpdf` sidecar) — plugins describe the document and never embed their own PDF
+lib. **Units are points** (1in=72pt), origin **top-left**, colors `[r,g,b]` 0–255;
+auto-page-break is always off (you position everything). Embed each image **once** in
+`images[]` and reference it by `id` from `draw_image`. Fonts are referenced inline by
+`{family, style, size}` with **no handle**; v1 bundles only **DejaVuSans** regular
+(`""`) and bold (`"B"`) — any other `(family,style)` → `font_not_available`.
+`draw_text.fit {max_width, min_size, step}` shrinks the size sidecar-side to fit.
+8 MiB request cap (`payload_too_large`). Errors: `schema_validation_failed`,
+`font_not_available`, `unknown_image_id`, `image_decode_failed`,
+`pdf_generation_failed`. Page/layout math (grids, crop marks, duplex) lives in the
+plugin — the host only draws. Full contract: Minerva `Docs/design/host_pdf_contract.md`.
 
 ---
 

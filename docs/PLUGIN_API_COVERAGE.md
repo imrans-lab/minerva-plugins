@@ -45,6 +45,7 @@ Column meaning:
 | host.dialogs.file_picker | host_api | yes | yes | — | CapabilityBroker.gd:2787 |
 | host.dialogs.directory_picker | host_api | yes | yes | — | CapabilityBroker.gd:2888 |
 | host.permissions.grant_scope | permission | yes | yes | — | CapabilityBroker.gd:2976; PluginManager.gd:734 |
+| host.pdf.generate | host_api | yes | yes | — | CapabilityBroker.gd:3330; src/sidecars/host_pdf/ |
 | host.notify (capability form) | host_api | yes | yes | — | CapabilityBroker.gd:3263 |
 | host.notify (JSON-RPC notification) | ipc | yes | no | cad, hello_scene | PluginNotifyRouter.gd:16; MCPServerConnection.gd:925-930; cad/main.go:126-148 |
 | network.none (deny marker) | host_api | yes | no | — | CapabilityBroker.gd:256 |
