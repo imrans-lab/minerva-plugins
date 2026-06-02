@@ -64,7 +64,8 @@
         "minerva_close_editor",
         "minerva_annotations_list",
         "minerva_disk_exists"
-      ]
+      ],
+      "optimization": { "max_tool_call_rounds": 40 }
     }
   ],
   "ui": {
