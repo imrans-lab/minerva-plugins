@@ -93,10 +93,34 @@ func orDefault(s, def string) string {
 	return s
 }
 
-// hasJSON reports whether a raw JSON value is present and non-null (e.g. an
-// optional declared-shape arg the host passed through).
-func hasJSON(r json.RawMessage) bool {
-	return len(r) > 0 && string(r) != "null"
+// hasNonEmptyJSON reports whether a raw JSON value is present AND carries
+// content — i.e. not absent, not null, and not an empty container/string.
+// Crucially an empty array `[]` or object `{}` counts as ABSENT: the host
+// stringifies undeclared optional args, and models routinely emit `[]` as the
+// "unused" default for an array param, so treating `[]` as "present" silently
+// flips behavior (e.g. forcing the explicit-face path and dropping the shared
+// icon — the root cause fixed here). Whitespace variants like `[ ]` are handled
+// by unmarshalling rather than a string compare.
+func hasNonEmptyJSON(r json.RawMessage) bool {
+	if len(r) == 0 {
+		return false
+	}
+	var v interface{}
+	if err := json.Unmarshal(r, &v); err != nil {
+		return false
+	}
+	switch t := v.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(t) != ""
+	case []interface{}:
+		return len(t) > 0
+	case map[string]interface{}:
+		return len(t) > 0
+	default:
+		return true
+	}
 }
 
 // sheetCell coerces a spreadsheet cell to a trimmed string. Numbers come back as
@@ -176,7 +200,7 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 		}
 		// Free-placed images on every front (e.g. a logo) turn the flat front into
 		// an explicit face carrying the placements; the flat fields move into it.
-		if hasJSON(a.FrontImages) {
+		if hasNonEmptyJSON(a.FrontImages) {
 			front := mapRowToFace(r, a.Mapping)
 			if front == nil {
 				front = map[string]interface{}{}
@@ -219,7 +243,7 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 	if strings.TrimSpace(a.IconPath) != "" {
 		gen["icon_path"] = a.IconPath
 	}
-	if hasJSON(a.Images) {
+	if hasNonEmptyJSON(a.Images) {
 		gen["images"] = a.Images
 	}
 
@@ -267,13 +291,17 @@ func toolNametagBuildFromSheet(client capabilityCaller, rawArgs json.RawMessage)
 		return failResult(fault)
 	}
 
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"success":          true,
 		"path":             a.OutPath,
 		"row_count":        len(tagRows),
 		"page_count":       pdf.PageCount,
 		"preview_pdf_path": previewPath,
 	}
+	if len(pdf.Warnings) > 0 {
+		out["warnings"] = pdf.Warnings
+	}
+	return out
 }
 
 // writeFileB64 writes base64 content to a path via host.files.write (the host

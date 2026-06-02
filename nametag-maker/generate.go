@@ -22,6 +22,10 @@ type pdfGenerateResult struct {
 	ByteSize    int    `json:"byte_size"`
 	PageCount   int    `json:"page_count"`
 	ContentType string `json:"content_type"`
+	// Warnings are non-fatal advisories populated locally after a successful
+	// render (the host does not send them) — e.g. a registered-but-undrawn
+	// icon. Surfaced on the tool result so the agent reads them directly.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // faceArgs is the JSON shape of one tag face (front or back). Either structured
@@ -423,6 +427,15 @@ func generatePDF(client capabilityCaller, rawArgs json.RawMessage) (*pdfGenerate
 	if resp.Result == nil {
 		return nil, &toolFault{Code: "parse_error", Msg: "host.pdf.generate returned success but no result"}
 	}
+
+	// Defense-in-depth: a shared icon was registered but no face draws it — a
+	// logo that silently vanishes. Warn rather than pass quietly. (After W2 an
+	// icon-less face auto-adopts the icon, so this fires only when every face
+	// already carries its own image.)
+	if hasImageID(images, imageID) && !docDrawsImage(doc, imageID) {
+		resp.Result.Warnings = append(resp.Result.Warnings,
+			`icon registered (icon_path/icon_png_base64) but no tag face draws it — set image_side, leave a front face without its own image_id, or remove the icon`)
+	}
 	return resp.Result, nil
 }
 
@@ -541,13 +554,17 @@ func toolNametagGenerate(client capabilityCaller, rawArgs json.RawMessage) map[s
 	if fault != nil {
 		return failResult(fault)
 	}
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"success":      true,
 		"bytes_b64":    res.BytesB64,
 		"byte_size":    res.ByteSize,
 		"page_count":   res.PageCount,
 		"content_type": res.ContentType,
 	}
+	if len(res.Warnings) > 0 {
+		out["warnings"] = res.Warnings
+	}
+	return out
 }
 
 // toolNametagSave is the handler for the nametag_save tool. It regenerates the
@@ -630,13 +647,17 @@ func toolNametagSave(client capabilityCaller, rawArgs json.RawMessage) map[strin
 	if savedPath == "" {
 		savedPath = path
 	}
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"success":       true,
 		"saved":         true,
 		"path":          savedPath,
 		"bytes_written": write.Result.BytesWritten,
 		"page_count":    pdf.PageCount,
 	}
+	if len(pdf.Warnings) > 0 {
+		out["warnings"] = pdf.Warnings
+	}
+	return out
 }
 
 // pickSavePath pops a host save dialog and returns the chosen path. The second

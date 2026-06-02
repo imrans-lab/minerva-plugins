@@ -533,6 +533,31 @@ func facesMode(rows []TagRow, opts Options) bool {
 	return false
 }
 
+// hasImageID reports whether the image registry contains an image with this id
+// (e.g. the shared "icon"). Single source of truth for the icon-presence test.
+func hasImageID(images []Image, id string) bool {
+	for _, im := range images {
+		if im.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// docDrawsImage reports whether any page actually draws this image id. Used to
+// flag a registered-but-orphaned icon (a logo supplied yet referenced by no
+// face) — a silent no-op that should surface as a warning, not pass quietly.
+func docDrawsImage(doc Doc, id string) bool {
+	for _, p := range doc.Pages {
+		for _, op := range p.Ops {
+			if op.Kind == "draw_image" && op.ImageID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // buildDoc ports harness.buildDoc: given tag rows + the icon PNG (base64) +
 // options, produce the full host.pdf Doc.
 //
@@ -577,19 +602,26 @@ func buildDoc(rows []TagRow, images []Image, opts Options) Doc {
 	}
 	iconWidthPt := inToPt(iconWidthIn)
 
-	hasIcon := false
-	for _, im := range images {
-		if im.ID == imageID {
-			hasIcon = true
-			break
-		}
-	}
+	hasIcon := hasImageID(images, imageID)
 
 	// frontFace resolves a row's front face; flat Title/Subtitle/Lines map to a
 	// single-column face using the shared "icon" image (when one was supplied).
 	frontFace := func(t TagRow) Face {
 		if t.Front != nil {
-			return *t.Front
+			fc := *t.Front
+			// An explicit face that carries no image of its own still gets the
+			// shared "icon" as a side column — consistent with the flat path
+			// below — so a logo set via icon_path/icon_png_base64 renders even
+			// when the face was built for its placed overlays (e.g.
+			// build_from_sheet with front_images). Faces that set their own
+			// image_id/full_image_id keep it untouched.
+			if hasIcon && fc.ImageID == "" && fc.FullImageID == "" {
+				fc.ImageID = imageID
+				if fc.ImageSide == "" {
+					fc.ImageSide = imageSide
+				}
+			}
+			return fc
 		}
 		fc := Face{Title: t.Title, Subtitle: t.Subtitle, ImageSide: imageSide}
 		if hasIcon {
