@@ -204,7 +204,7 @@ func faceSchema(role string) map[string]interface{} {
 		"description": role + ": structured (image_id + title + subtitle + columns) OR a full-tag image (full_image_id).",
 		"properties": map[string]interface{}{
 			"image_id":   map[string]interface{}{"type": "string", "description": `Image id to show on a side ("icon" = the shared icon; or any id from images[]).`},
-			"image_side": map[string]interface{}{"type": "string", "description": "left (default) or right."},
+			"image_side": map[string]interface{}{"type": "string", "description": "Side for image_id's column logo: left (default) or right (text fills the other column)."},
 			"title":      map[string]interface{}{"type": "string", "description": "Big bold line (e.g. first name)."},
 			"subtitle":   map[string]interface{}{"type": "string", "description": "Bold line under the title (e.g. last name)."},
 			"columns": map[string]interface{}{
@@ -230,7 +230,7 @@ func faceSchema(role string) map[string]interface{} {
 func placedImagesSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type":        "array",
-		"description": "Free-placed images on this face (drawn on top). Each: an image id + position/size/rotation.",
+		"description": "Image OVERLAYS drawn ON TOP of the text (stamps/badges/watermarks) — NOT the way to add a layout logo (that would cover the text). For a logo BESIDE the text, use icon_path/icon_png_base64 + image_side instead. Each: an image id + tag-local position/size/rotation.",
 		"items": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -288,7 +288,7 @@ func sharedProps() map[string]interface{} {
 		"csv":             map[string]interface{}{"type": "string", "description": "Alternative to rows: CSV with headers Name, Class, Group #, Room Assignment."},
 		"rows_path":       map[string]interface{}{"type": "string", "description": "Absolute path to a JSON file holding the rows array (same shape as rows), read on the backend — use instead of inline rows for large rosters."},
 		"icon_png_base64": map[string]interface{}{"type": "string", "description": `Bare base64 PNG for the shared icon (image id "icon").`},
-		"icon_path":       map[string]interface{}{"type": "string", "description": "Absolute path to a PNG icon, read on the backend (use instead of icon_png_base64 for large images)."},
+		"icon_path":       map[string]interface{}{"type": "string", "description": "Absolute path to a PNG icon (use instead of icon_png_base64 for large images). The shared icon renders as a side COLUMN logo (side = image_side) beside the data — the standard way to add a logo. For overlays/stamps on top of the text, use a face's images[] instead."},
 		"images":          imagesSchema(),
 		"back":            faceSchema("Shared back face drawn behind EVERY tag (e.g. a common schedule), aligned for duplex; a per-row back overrides it"),
 		"back_mode":       map[string]interface{}{"type": "string", "description": `"same" (mirror front, reversible) or "blank" (front only). Default: same for classic, blank for detailed/faces.`},
@@ -297,7 +297,7 @@ func sharedProps() map[string]interface{} {
 		"full_guides":     map[string]interface{}{"type": "boolean", "description": "Full bounding rectangle per tag instead of 4 corner-cut marks."},
 		"icon_width_in":   map[string]interface{}{"type": "number", "description": "Icon/image width in inches. Default 0.40 (classic) / 1.0 (detailed)."},
 		"layout":          map[string]interface{}{"type": "string", "description": "classic or detailed. Per-row front/back faces or a shared back also switch to the generic renderer."},
-		"image_side":      map[string]interface{}{"type": "string", "description": "Flat-detailed front image side: left (default) or right."},
+		"image_side":      map[string]interface{}{"type": "string", "description": "Which side the flat-detailed front icon/logo COLUMN sits on: left (default) or right; the data fills the other column."},
 	}
 }
 
@@ -345,11 +345,11 @@ func buildFromSheetInputSchema() map[string]interface{} {
 			"back_mapping":       mappingSchema("Optional: columns → a DISTINCT per-row BACK face (same shape as mapping). Each tag's back is built from its own row."),
 			"shared_back":        faceSchema("Optional: one CONSTANT back face drawn behind EVERY tag (e.g. a schedule — use columns with per-day headings), aligned for duplex. A per-row back_mapping overrides it. May carry placed images[] (referencing icon/images ids)"),
 			"icon_png_base64":    map[string]interface{}{"type": "string", "description": `Bare base64 PNG registered as image id "icon" (shown as a side icon on the front, or referenced by placements).`},
-			"icon_path":          map[string]interface{}{"type": "string", "description": `Absolute path to a PNG registered as image id "icon", read on the backend (prefer over icon_png_base64 for large images).`},
+			"icon_path":          map[string]interface{}{"type": "string", "description": `Absolute path to a PNG registered as image id "icon" (prefer over icon_png_base64 for large images). THIS is how you put a LOGO on a tag: it renders as a side COLUMN (which side = image_side, width = icon_width_in) with the data in the other column — the standard 2-column tag. Do NOT use front_images for a layout logo (those draw on top of the text). Example: icon_path + image_side:"left" + mapping:{title,subtitle,lines} → logo on the left, data on the right.`},
 			"images":             imagesSchema(),
 			"front_images":       placedImagesSchema(),
 			"layout":             map[string]interface{}{"type": "string", "description": "classic or detailed (default detailed)."},
-			"image_side":         map[string]interface{}{"type": "string", "description": "left (default) or right."},
+			"image_side":         map[string]interface{}{"type": "string", "description": "Which side the icon/logo COLUMN sits on: left (default) or right; the data fills the other column."},
 			"back_mode":          map[string]interface{}{"type": "string", "description": `"blank" (default) or "same" (mirror front, reversible). Ignored when a back_mapping / shared_back face is supplied (an explicit back always draws).`},
 			"full_guides":        map[string]interface{}{"type": "boolean", "description": "Full box per tag instead of corner-cut marks."},
 			"icon_width_in":      map[string]interface{}{"type": "number", "description": "Icon/image width in inches."},
