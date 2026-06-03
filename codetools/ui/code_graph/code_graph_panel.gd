@@ -23,21 +23,21 @@ var _status_label: Label = null
 
 
 func _ready() -> void:
-	# Add a status label at the top so the panel can show load / error state.
+	# Wrap the view in a vbox with a status label on top (load / error state).
 	var vbox := VBoxContainer.new()
 	vbox.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	# Reparent the existing view into the vbox.
+	# Status label first → it lands at index 0 (above the view).
+	_status_label = Label.new()
+	_status_label.text = ""
+	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(_status_label)
+	# Reparent the existing view into the vbox, below the label.
 	if _view != null and is_instance_valid(_view):
 		remove_child(_view)
 		vbox.add_child(_view)
 		_view.size_flags_horizontal = SIZE_EXPAND_FILL
 		_view.size_flags_vertical = SIZE_EXPAND_FILL
 	add_child(vbox)
-	_status_label = Label.new()
-	_status_label.text = ""
-	_status_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	# Insert the status label before the view.
-	vbox.move_child(_status_label, 0)
 
 
 # ── Plugin lifecycle ──────────────────────────────────────────────────────────

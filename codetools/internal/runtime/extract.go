@@ -75,8 +75,11 @@ func EnsureRuntime(req EnsureRuntimeRequest) (string, error) {
 
 	target := filepath.Join(req.DataDir, "runtime", req.PluginVersion)
 
-	// Tier 1: cache hit?
-	if ok, _ := manifestValid(target); ok {
+	// Tier 1: cache hit? Require BOTH a self-consistent manifest AND that the
+	// extraction came from the CURRENT embedded bundle. The version-keyed path
+	// alone is not enough: a rebuilt same-version bundle (e.g. a worker .py
+	// change with no version bump) must invalidate a stale extraction.
+	if ok, _ := manifestValid(target); ok && sourceBundleMatches(target, req.EmbeddedSHA256) {
 		return target, nil
 	}
 
@@ -122,6 +125,15 @@ func EnsureRuntime(req EnsureRuntimeRequest) (string, error) {
 		return "", fmt.Errorf("EnsureRuntime: manifest.sha256 missing or empty post-extract")
 	}
 
+	// Stamp the source bundle sha so a later EnsureRuntime can tell a
+	// same-version-but-rebuilt bundle apart from this extraction and re-extract.
+	if req.EmbeddedSHA256 != "" {
+		stamp := filepath.Join(tmp, sourceBundleStampName)
+		if err := os.WriteFile(stamp, []byte(strings.TrimSpace(req.EmbeddedSHA256)+"\n"), 0o644); err != nil {
+			return "", fmt.Errorf("EnsureRuntime: write source-bundle stamp: %w", err)
+		}
+	}
+
 	// If target already exists (stale partial or race winner), clear it so
 	// the rename succeeds. Design §6 mentions keeping prior version for
 	// rollback — out of scope for v1 (cache hit at top of function covers
@@ -137,6 +149,25 @@ func EnsureRuntime(req EnsureRuntimeRequest) (string, error) {
 	}
 	cleanup = false
 	return target, nil
+}
+
+// sourceBundleStampName records, inside an extracted runtime, the sha256 of the
+// bundle it came from. EnsureRuntime Tier-1 reads it to detect a stale cache.
+const sourceBundleStampName = "source-bundle.sha256"
+
+// sourceBundleMatches reports whether the runtime at dir was extracted from a
+// bundle whose sha matches want. An empty want (integrity check disabled) keeps
+// the legacy version-only behavior; a missing stamp (extracted by an older
+// build) is a miss so we re-extract rather than serve a stale same-version cache.
+func sourceBundleMatches(dir, want string) bool {
+	if want == "" {
+		return true
+	}
+	b, err := os.ReadFile(filepath.Join(dir, sourceBundleStampName))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(string(b)), strings.TrimSpace(want))
 }
 
 // extractTarZst decompresses zstd-encoded tarball bytes and extracts every
