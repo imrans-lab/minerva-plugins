@@ -290,6 +290,115 @@ for pkg in $WORKER_PACKAGES; do
 done
 
 # --------------------------------------------------------------------------
+# rg (ripgrep) injection — P2.1 file-primitive tools.
+#
+# The worker locates rg via rg_finder.py: it looks for <bundle>/bin/rg
+# (alongside the bundled python3 interpreter), then falls back to PATH.
+#
+# Source: pinned prebuilt GitHub release from BurntSushi/ripgrep.
+# Version pinned here; update in lockstep with any worker rg_finder.py change.
+# We use the musl variant for linux to maximise glibc-version portability.
+# The macos universal binary covers both arm64 and amd64.
+# Windows uses the MSVC zip.
+#
+# For cross-target builds (TRIPLE != HOST_TRIPLE) the binary must be fetched
+# from the release page for that target. Each triple is handled below.
+# If a fetch fails for a non-must-have triple, a warning is emitted and the
+# bundle is produced without rg (the worker falls back to Python grep).
+# --------------------------------------------------------------------------
+
+RG_VERSION="15.1.0"
+RG_CACHE_DIR="$BUILD_DIR/cache/rg"
+mkdir -p "$RG_CACHE_DIR"
+
+case "$TRIPLE" in
+  linux-x86_64)
+    RG_ASSET="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+    RG_BIN_IN_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg"
+    RG_MUST_HAVE=true
+    ;;
+  linux-arm64)
+    RG_ASSET="ripgrep-${RG_VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+    RG_BIN_IN_ARCHIVE="ripgrep-${RG_VERSION}-aarch64-unknown-linux-gnu/rg"
+    RG_MUST_HAVE=false
+    ;;
+  macos-arm64|macos-amd64)
+    # macOS universal binary covers both architectures.
+    RG_ASSET="ripgrep-${RG_VERSION}-aarch64-apple-darwin.tar.gz"
+    RG_BIN_IN_ARCHIVE="ripgrep-${RG_VERSION}-aarch64-apple-darwin/rg"
+    # TODO: use the x86_64 variant for macos-amd64 once we have a CI runner to test.
+    RG_MUST_HAVE=false
+    ;;
+  windows-x86_64)
+    RG_ASSET="ripgrep-${RG_VERSION}-x86_64-pc-windows-msvc.zip"
+    RG_BIN_IN_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-pc-windows-msvc/rg.exe"
+    RG_MUST_HAVE=false
+    ;;
+  *)
+    echo "[$TRIPLE] WARNING: no rg asset mapping for triple $TRIPLE — rg not bundled" >&2
+    RG_ASSET=""
+    RG_MUST_HAVE=false
+    ;;
+esac
+
+if [ -n "${RG_ASSET:-}" ]; then
+  RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ASSET}"
+  RG_CACHED="$RG_CACHE_DIR/$RG_ASSET"
+  RG_BIN_NAME="rg"
+  [ "$TRIPLE" = "windows-x86_64" ] && RG_BIN_NAME="rg.exe"
+
+  if [ ! -f "$RG_CACHED" ]; then
+    echo "[$TRIPLE] downloading rg ${RG_VERSION}: $RG_URL"
+    if ! curl -fL --retry 3 -o "$RG_CACHED.tmp" "$RG_URL"; then
+      echo "[$TRIPLE] WARNING: failed to download rg from $RG_URL" >&2
+      rm -f "$RG_CACHED.tmp"
+      RG_CACHED=""
+    else
+      mv "$RG_CACHED.tmp" "$RG_CACHED"
+    fi
+  else
+    echo "[$TRIPLE] rg cached: $RG_CACHED"
+  fi
+
+  if [ -n "$RG_CACHED" ] && [ -f "$RG_CACHED" ]; then
+    # Extract just the rg binary into a temp dir, then place it in bundle bin/.
+    RG_EXTRACT_DIR="$BUILD_DIR/rg-extract-$TRIPLE"
+    rm -rf "$RG_EXTRACT_DIR"
+    mkdir -p "$RG_EXTRACT_DIR"
+    case "$RG_ASSET" in
+      *.tar.gz)
+        tar -xzf "$RG_CACHED" -C "$RG_EXTRACT_DIR" --strip-components=1 \
+          "$(basename "$RG_BIN_IN_ARCHIVE")" 2>/dev/null || \
+          tar -xzf "$RG_CACHED" -C "$RG_EXTRACT_DIR"
+        ;;
+      *.zip)
+        unzip -q "$RG_CACHED" -d "$RG_EXTRACT_DIR" "$(basename "$RG_BIN_IN_ARCHIVE")" 2>/dev/null || \
+          unzip -q "$RG_CACHED" -d "$RG_EXTRACT_DIR"
+        ;;
+    esac
+    # Find the rg binary anywhere in the extract dir.
+    RG_EXTRACTED="$(find "$RG_EXTRACT_DIR" -name "$RG_BIN_NAME" -type f | head -1)"
+    if [ -n "$RG_EXTRACTED" ] && [ -f "$RG_EXTRACTED" ]; then
+      chmod +x "$RG_EXTRACTED"
+      cp "$RG_EXTRACTED" "$STAGE_DIR/bin/$RG_BIN_NAME"
+      echo "[$TRIPLE] rg ${RG_VERSION} injected into bundle: bin/$RG_BIN_NAME"
+    else
+      echo "[$TRIPLE] WARNING: rg binary not found in extracted archive $RG_ASSET" >&2
+      if [ "$RG_MUST_HAVE" = "true" ]; then
+        echo "[$TRIPLE] ERROR: rg is required for linux-x86_64 (must-have triple)" >&2
+        exit 72
+      fi
+    fi
+  else
+    if [ "$RG_MUST_HAVE" = "true" ]; then
+      echo "[$TRIPLE] ERROR: rg download failed and it is required for linux-x86_64" >&2
+      exit 72
+    fi
+    echo "[$TRIPLE] WARNING: rg not bundled — grep will use Python fallback at runtime" >&2
+  fi
+fi
+
+# --------------------------------------------------------------------------
 # strip __pycache__ (regenerates on first import; saves space + cleans paths)
 # --------------------------------------------------------------------------
 
