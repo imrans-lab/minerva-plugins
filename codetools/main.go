@@ -161,6 +161,12 @@ func initRegistry() {
 
 	// P1.4 — full code graph with precomputed layout positions.
 	registry.Register(tools.GetGraph, tools.HandleGetGraph)
+
+	// P2.1 — file-primitive tools (glob, grep, bash, cwd).
+	registry.Register(tools.Glob, tools.HandleGlob)
+	registry.Register(tools.Grep, tools.HandleGrep)
+	registry.Register(tools.Bash, tools.HandleBash)
+	registry.Register(tools.Cwd, tools.HandleCwd)
 }
 
 // initWorker resolves the Python interpreter and constructs the Worker. Called
