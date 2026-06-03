@@ -33,8 +33,8 @@ func TestHandleInitialize(t *testing.T) {
 
 // TestHandleToolsListExposesRegisteredTools checks tools/list returns every
 // registered tool: the substrate ping plus the 9 code-visualizer tools added
-// in P1.3. Asserting names (not just count) catches an accidental rename or
-// missing Register call.
+// in P1.3, and the get_graph tool added in P1.4. Asserting names (not just
+// count) catches an accidental rename or missing Register call.
 func TestHandleToolsListExposesRegisteredTools(t *testing.T) {
 	initRegistry()
 	resp := handleToolsList(json.RawMessage(`2`))
@@ -62,6 +62,8 @@ func TestHandleToolsListExposesRegisteredTools(t *testing.T) {
 		"minerva_codetools_describe_symbol",
 		"minerva_codetools_set_tags",
 		"minerva_codetools_undescribed",
+		// P1.4 — full code graph with precomputed layout
+		"minerva_codetools_get_graph",
 	}
 	if len(got.Tools) != len(want) {
 		t.Fatalf("want %d tools, got %d: %+v", len(want), len(got.Tools), got.Tools)

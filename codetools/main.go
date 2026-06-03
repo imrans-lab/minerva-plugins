@@ -158,6 +158,9 @@ func initRegistry() {
 	registry.Register(tools.DescribeSymbol, tools.HandleDescribeSymbol)
 	registry.Register(tools.SetTags, tools.HandleSetTags)
 	registry.Register(tools.Undescribed, tools.HandleUndescribed)
+
+	// P1.4 — full code graph with precomputed layout positions.
+	registry.Register(tools.GetGraph, tools.HandleGetGraph)
 }
 
 // initWorker resolves the Python interpreter and constructs the Worker. Called

@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 
 from . import envelope
+from ._layout import compute_layout
 from .errors import ToolError
 
 # Vendored analyzer modules (snapshot @9cc9403 — do not edit upstream).
@@ -570,4 +571,115 @@ def undescribed(params):
         "%d undescribed %s(s) (limit=%d)" % (len(rows), entity_type, limit),
         artifacts=[{"type": "undescribed_items", "entity_type": entity_type,
                     "count": len(rows), "items": rows}],
+    )
+
+
+# ---------------------------------------------------------------------------
+# 10. get_graph — full code graph with precomputed layout positions (P1.4)
+# ---------------------------------------------------------------------------
+
+def get_graph(params):
+    """Build the full code graph and run force-directed layout.
+
+    CONTRACT (GDScript consumer depends on these exact field names):
+      nodes  — list of {id, file, kind, fan_in, signature_hash, x, y, ...}
+      edges  — list of {source, target, type, confidence}
+      files  — list of {path, description}
+      analysis — {dead_code_ids: [...], dry_signature_groups: {...}}
+      stats  — store.stats() dict
+
+    Layout adds `x` / `y` to every node (float, rounded to 1 dp).
+    """
+    store = _open_store(params)
+
+    nodes = []
+    edges = []
+    files = {}
+
+    # ── Symbols → nodes ─────────────────────────────────────────────────────
+    all_symbols = store.conn.execute(
+        """SELECT s.*, f.relative_path, f.description as file_description
+           FROM symbols s JOIN files f ON s.file_id = f.id
+           ORDER BY f.relative_path, s.line_start"""
+    ).fetchall()
+
+    for sym in all_symbols:
+        sym = dict(sym)
+        fan_in_count = store.fan_in(sym["id"])
+        fan_out_count = store.fan_out(sym["id"])
+
+        nodes.append({
+            # Required contract fields
+            "id":             sym["id"],
+            "file":           sym["relative_path"],
+            "kind":           sym["kind"],
+            "fan_in":         fan_in_count,
+            "signature_hash": sym["signature_hash"],
+            # x / y will be filled by compute_layout below
+            # Additional fields useful for the panel
+            "name":           sym["name"],
+            "signature":      sym["signature"],
+            "description":    sym["description"] or sym["file_description"] or "",
+            "line_start":     sym["line_start"],
+            "line_end":       sym["line_end"],
+            "is_entry_point": bool(sym["is_entry_point"]),
+            "fan_out":        fan_out_count,
+            "parent_symbol_id": sym["parent_symbol_id"],
+        })
+
+        if sym["relative_path"] not in files:
+            files[sym["relative_path"]] = {
+                "path":        sym["relative_path"],
+                "description": sym["file_description"] or "",
+            }
+
+    # ── Edges ────────────────────────────────────────────────────────────────
+    all_edges = store.conn.execute(
+        """SELECT e.source_symbol_id, e.target_symbol_id,
+                  e.edge_type, e.confidence
+           FROM edges e"""
+    ).fetchall()
+
+    for edge in all_edges:
+        edge = dict(edge)
+        edges.append({
+            "source":     edge["source_symbol_id"],
+            "target":     edge["target_symbol_id"],
+            "type":       edge["edge_type"],
+            "confidence": edge["confidence"],
+        })
+
+    # ── Analysis ─────────────────────────────────────────────────────────────
+    dead_code_ids = [d["id"] for d in store.dead_code_candidates()]
+
+    dry_groups_raw = store.dry_candidates()
+    # Build signature_hash → group_index map (top-20 groups, matching export_graph).
+    sig_hash_groups: dict[str, int] = {}
+    for i, group in enumerate(dry_groups_raw[:20]):
+        sig_hash_groups[group["signature_hash"]] = i
+
+    # ── Stats ────────────────────────────────────────────────────────────────
+    stats = store.stats()
+
+    # ── Layout ───────────────────────────────────────────────────────────────
+    # Build a minimal graph dict for compute_layout (needs nodes + edges lists).
+    # Nodes already have "id"; edges have "source" / "target" which is what
+    # compute_layout expects.  The function mutates nodes in-place to add x/y.
+    graph_for_layout = {"nodes": nodes, "edges": edges}
+    compute_layout(graph_for_layout)
+
+    return envelope.ok(
+        "code graph: %d node(s), %d edge(s), %d file(s)" % (
+            len(nodes), len(edges), len(files)),
+        artifacts=[{
+            "type":     "code_graph",
+            "nodes":    nodes,
+            "edges":    edges,
+            "files":    list(files.values()),
+            "analysis": {
+                "dead_code_ids":       dead_code_ids,
+                "dry_signature_groups": sig_hash_groups,
+            },
+            "stats":    stats,
+        }],
     )

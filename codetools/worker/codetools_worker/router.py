@@ -33,6 +33,8 @@ ROUTES = {
     "describe_symbol": code_visualizer.describe_symbol,
     "set_tags": code_visualizer.set_tags,
     "undescribed": code_visualizer.undescribed,
+    # P1.4 — full code graph with precomputed layout positions.
+    "get_graph": code_visualizer.get_graph,
 }
 
 

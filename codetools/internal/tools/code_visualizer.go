@@ -222,3 +222,24 @@ var Undescribed = ToolSpec{
 func HandleUndescribed(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "undescribed", params)
 }
+
+// ---------------------------------------------------------------------------
+// 10. get_graph — full code graph with precomputed force-directed layout (P1.4)
+// ---------------------------------------------------------------------------
+
+var GetGraph = ToolSpec{
+	Name:        "minerva_codetools_get_graph",
+	Description: "Return the full code graph (nodes, edges, files, analysis, stats) with precomputed force-directed x/y positions on every node. Intended for the Godot visualizer panel.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"db_path": {"type": "string", "description": "Path to the code-visualizer SQLite store. Required — or set CODETOOLS_DB env var."}
+		},
+		"required": ["db_path"],
+		"additionalProperties": false
+	}`),
+}
+
+func HandleGetGraph(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "get_graph", params)
+}
