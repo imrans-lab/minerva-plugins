@@ -11,7 +11,6 @@ Returns an envelope with a single "glob_result" artifact.
 
 from __future__ import annotations
 
-import fnmatch
 import os
 import re
 from pathlib import Path
@@ -78,16 +77,12 @@ def handle_glob(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _matches_glob(pattern: str, rel_path: str) -> bool:
-    """Return True if `rel_path` matches `pattern` (** / * / ? semantics).
+    """Return True if `rel_path` matches `pattern`.
 
-    Uses Python's fnmatch for simple patterns and a compiled regex for patterns
-    containing ** (cross-directory matching).
+    Semantics match GlobTool.gd: `*` and `?` stay within a path segment
+    (`[^/]`), while `**` crosses directory separators. So `*.gd` matches only
+    top-level files and `**/*.gd` matches at any depth.
     """
-    if "**" not in pattern:
-        # fnmatch doesn't traverse slashes, but for a bare *.ext pattern we
-        # want to match at any depth, so use our regex approach consistently.
-        pass
-
     rx = _glob_to_regex(pattern)
     return bool(rx.search(rel_path))
 
