@@ -11,6 +11,7 @@ the adapter is what bridges shapes.
 | Subtree | Upstream | Pinned SHA | Filed under | Snapshot date |
 |---|---|---|---|---|
 | `code_visualizer/` | `~/gitlab/ccsandbox/experiments/code-magic` (private repo) | `9cc9403aade51d15837225ee913554bc5a5d110e` | DCR `019e7b6609` / P1.3 `019e7b870f` | 2026-05-31 |
+| `sightline/` | `~/gitlab/minervaservices/experiments/sightline` (private repo) | `8b2baa7` | DCR `019e7b6609` / P3.1 `019e8faa199f` | 2026-06-03 |
 
 ## `code_visualizer/`
 
@@ -37,3 +38,39 @@ cp -a $SRC/analyzer $SRC/server $SRC/vendor $DST/
 ```
 
 Then update the pinned-SHA row in this file with the new upstream HEAD.
+
+## `sightline/`
+
+code-probe — runtime-inspection / evidence-capture tool (P3). Python lib +
+GDScript editor probe. **stdlib-only** (no pip deps); rg-backed search reuses the
+`rg` already bundled by P2.1. Two sub-trees:
+
+- `sightline/` — the Python package (`cli.py` argparse surface, plus
+  `explore.py` / `inspect.py` / `validate.py` / `search.py` / `files.py` /
+  `plugin_system.py` / `session_store.py` / `models.py`). The P3.2 adapter
+  re-implements the explore/inspect/validate surface against the unified envelope
+  and imports the library functions; it does NOT shell out to `cli.py`.
+  `search.py` + `files.py` are rg-backed and DUPLICATE `worker/.../files/` — P3.5
+  collapses them onto the shared module (do the bridging in the adapter, never
+  edit vendored).
+- `godot/` — the Godot integration: `plugin.py` (dispatcher; the X11 window
+  capture via `xdotool`/`xwininfo`/`xwd`/ImageMagick is Linux-only and is
+  feature-gated in P3.3) and `probe/addons/sightline_probe/` (the `@tool`
+  EditorPlugin that emits `res://.sightline/godot_probe/debugger_state.json`).
+
+**Probe schema is `sightline.godot.editor_probe_state.v3`** at this SHA (the DCR
+text mentions v4 aspirationally — the snapshot pins v3). The P3.6 schema-version
+guard asserts replay fixtures match the vendored probe's declared schema.
+
+### Snapshot command (for refresh)
+
+```
+SRC=~/gitlab/minervaservices/experiments/sightline
+DST=~/github/minerva-plugins/codetools/worker/vendored/sightline
+rm -rf $DST/sightline $DST/godot $DST/sightline_main.py
+rsync -a --exclude='.sightline' --exclude='__pycache__' --exclude='*.pyc' $SRC/src/sightline/ $DST/sightline/
+cp -a $SRC/src/sightline_main.py $DST/sightline_main.py
+rsync -a --exclude='.sightline' --exclude='__pycache__' --exclude='*.pyc' $SRC/plugins/godot/ $DST/godot/
+```
+
+Then update the pinned-SHA row + the schema version above with the new upstream HEAD.

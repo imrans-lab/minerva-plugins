@@ -1,0 +1,110 @@
+[plugin]
+id = "godot"
+name = "Godot Local Surface"
+version = "0.1.0"
+description = "Discover local Godot editor/runtime surfaces and capture evidence."
+entrypoint = "plugin.py:run_command"
+platforms = ["linux", "macos", "windows"]
+capabilities = ["inspect", "act"]
+requirements = ["godot", "xdotool", "xwininfo", "xprop", "xwd", "ffmpeg"]
+instructions = "For normal LLM use, prefer top-level CLI commands: godot-debugger-issues <project_path> for Debugger warnings/errors and godot-output-console <project_path> for Output panel text. They prepare the probe, tell you when to restart/launch the editor, and capture semantic editor evidence once probe-status.loaded=true. Use discover-surfaces for window/process context. Low-level prepare-editor-session and launch-editor-session remain available for advanced workflows; running editors do not reliably hot-load the probe."
+
+[[commands]]
+name = "discover-windows"
+description = "List visible Godot editor and debug windows."
+input_schema = {}
+
+[[commands]]
+name = "discover-surfaces"
+description = "List normalized Godot editor/runtime surfaces and provider capability diagnostics."
+input_schema = {}
+
+[[commands]]
+name = "ensure-editor-probe"
+description = "Explicitly install and enable the managed Sightline editor probe in a Godot project."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer" }
+
+[[commands]]
+name = "probe-status"
+description = "Report whether the managed Sightline editor probe is installed, enabled, and producing output."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer" }
+
+[[commands]]
+name = "remove-editor-probe"
+description = "Disable and remove the managed Sightline editor probe from a Godot project."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer" }
+
+[[commands]]
+name = "prepare-editor-session"
+description = "Install and enable the managed editor probe, clear stale probe output, and prepare a project for a probe-backed editor launch."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer" }
+
+[[commands]]
+name = "launch-editor-session"
+description = "Launch the Godot editor with the managed probe already installed and wait for probe output."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer", godot_bin = "string", timeout_seconds = "number", ensure_probe = "boolean" }
+
+[[commands]]
+name = "cleanup-editor-session"
+description = "Remove the managed editor probe and stale probe output after a probe-backed editor session."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer" }
+
+[[commands]]
+name = "capture-window"
+description = "Capture a raw XWD snapshot for a given window_id."
+input_schema = { window_id = "integer" }
+
+[[commands]]
+name = "capture-window-png"
+description = "Capture a PNG snapshot for a given window_id."
+input_schema = { window_id = "integer" }
+
+[[commands]]
+name = "capture-region-png"
+description = "Capture a cropped PNG snapshot for a given window_id using window-relative coordinates."
+input_schema = { window_id = "integer", x = "integer", y = "integer", width = "integer", height = "integer" }
+
+[[commands]]
+name = "capture-debugger-panel-png"
+description = "Capture a cropped PNG snapshot of a visible debugger/output panel using window-relative coordinates."
+input_schema = { window_id = "integer", x = "integer", y = "integer", width = "integer", height = "integer" }
+
+[[commands]]
+name = "focus-window"
+description = "Focus and raise a given window_id."
+input_schema = { window_id = "integer" }
+
+[[commands]]
+name = "send-key"
+description = "Send a key or key chord to a window."
+input_schema = { window_id = "integer", key = "string" }
+
+[[commands]]
+name = "click"
+description = "Click at window-relative coordinates."
+input_schema = { window_id = "integer", x = "integer", y = "integer", button = "integer" }
+
+[[commands]]
+name = "discover-project-logs"
+description = "List recent Godot app_userdata log files, optionally filtered by project."
+input_schema = { project = "string" }
+
+[[commands]]
+name = "tail-runtime-issues"
+description = "Return recent warning/error lines from the latest Godot runtime log for a project or discovered surface."
+input_schema = { project = "string", surface_id = "string", pid = "integer", limit = "integer" }
+
+[[commands]]
+name = "report-runtime-issues"
+description = "Generate a compact bug-report style summary from the latest Godot runtime issues for a project or discovered surface."
+input_schema = { project = "string", surface_id = "string", pid = "integer", limit = "integer" }
+
+[[commands]]
+name = "report-editor-debugger-warnings"
+description = "Read managed probe JSON and report semantic Godot editor debugger warnings."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer", install_if_missing = "boolean", allow_stale = "boolean" }
+
+[[commands]]
+name = "report-editor-output-console"
+description = "Read managed probe JSON and report semantic Godot editor Output console text."
+input_schema = { project_path = "string", surface_id = "string", pid = "integer", install_if_missing = "boolean", allow_stale = "boolean" }
