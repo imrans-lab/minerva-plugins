@@ -18,6 +18,10 @@ from __future__ import annotations
 
 from . import code_visualizer, envelope, methods
 from .errors import MethodError, ToolError
+from .files.glob_handler import handle_glob
+from .files.grep_handler import handle_grep
+from .files.bash_handler import handle_bash
+from .files.cwd_handler import handle_cwd
 
 # method name -> handler(params: dict) -> envelope dict
 ROUTES = {
@@ -35,6 +39,11 @@ ROUTES = {
     "undescribed": code_visualizer.undescribed,
     # P1.4 — full code graph with precomputed layout positions.
     "get_graph": code_visualizer.get_graph,
+    # P2.1 — file-primitive tools (glob, grep, bash, cwd).
+    "glob": handle_glob,
+    "grep": handle_grep,
+    "bash": handle_bash,
+    "cwd": handle_cwd,
 }
 
 
