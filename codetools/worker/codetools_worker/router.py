@@ -16,7 +16,7 @@ single dispatch + result contract the whole plugin shares.
 
 from __future__ import annotations
 
-from . import code_visualizer, envelope, methods
+from . import code_visualizer, envelope, methods, sightline_probe
 from .errors import MethodError, ToolError
 from .files.glob_handler import handle_glob
 from .files.grep_handler import handle_grep
@@ -44,6 +44,10 @@ ROUTES = {
     "grep": handle_grep,
     "bash": handle_bash,
     "cwd": handle_cwd,
+    # P3.2 — sightline (code-probe) tools: explore, inspect, validate.
+    "explore": sightline_probe.explore,
+    "inspect": sightline_probe.inspect,
+    "validate": sightline_probe.validate,
 }
 
 
