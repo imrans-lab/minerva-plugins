@@ -660,6 +660,11 @@ def get_graph(params):
 
     # ── Stats ────────────────────────────────────────────────────────────────
     stats = store.stats()
+    # store.stats() carries only counts; surface the project name so the panel
+    # titles the Level-0 splash with the real project instead of "Project".
+    projects = store.list_projects()
+    if projects:
+        stats = {**stats, "project_name": projects[0]["name"]}
 
     # ── Layout ───────────────────────────────────────────────────────────────
     # Build a minimal graph dict for compute_layout (needs nodes + edges lists).

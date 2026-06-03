@@ -209,6 +209,11 @@ class _GetGraphContractMixin:
         self.assertIsInstance(art["stats"], dict)
         self.assertIn("symbols", art["stats"])
         self.assertIn("edges", art["stats"])
+        # project_name is surfaced so the panel titles the Level-0 splash with
+        # the real project rather than the literal "Project" fallback.
+        self.assertIn("project_name", art["stats"])
+        self.assertIsInstance(art["stats"]["project_name"], str)
+        self.assertNotEqual(art["stats"]["project_name"], "")
 
     # ── db_path missing → error envelope (not a crash) ───────────────────────
 
