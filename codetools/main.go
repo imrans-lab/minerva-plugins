@@ -167,6 +167,11 @@ func initRegistry() {
 	registry.Register(tools.Grep, tools.HandleGrep)
 	registry.Register(tools.Bash, tools.HandleBash)
 	registry.Register(tools.Cwd, tools.HandleCwd)
+
+	// P3.2 — sightline (code-probe) tools: explore, inspect, validate.
+	registry.Register(tools.Explore, tools.HandleExplore)
+	registry.Register(tools.Inspect, tools.HandleInspect)
+	registry.Register(tools.Validate, tools.HandleValidate)
 }
 
 // initWorker resolves the Python interpreter and constructs the Worker. Called
