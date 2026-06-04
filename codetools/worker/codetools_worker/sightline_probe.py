@@ -243,13 +243,26 @@ def explore(params: dict) -> dict:
 # 2. inspect — artifact capture / list / status
 # ---------------------------------------------------------------------------
 
-_INSPECT_OPS = frozenset(["attach", "list", "status"])
+_INSPECT_OPS = frozenset(["attach", "list", "status", "prepare", "remove-probe"])
 
-# Live-capture ops are gated to P3.3.
-_LIVE_OPS = frozenset([
-    "godot-debugger-issues", "godot-output-console",
-    "launch-editor", "ensure-editor-probe",
-])
+# X11/visual capture ops — feature-gated to Linux + a live DISPLAY (P3.3). The
+# cross-platform debugger/output JSON capture (the GDScript probe) is NOT gated.
+_VISUAL_OPS = frozenset(["capture-visual"])
+
+# Live editor-launch ops spawn a Godot editor and poll for probe output — this
+# is the Option C human-in-the-loop workflow (P3.6), intentionally not wired
+# through MCP (the human opens their own editor; the probe writes the JSON).
+_LIVE_OPS = frozenset(["godot-debugger-issues", "godot-output-console", "launch-editor"])
+
+
+def _visual_capture_available() -> tuple[bool, str]:
+    """X11 window/visual capture requires Linux with a live DISPLAY."""
+    import platform as _pf
+    if _pf.system().lower() != "linux":
+        return False, "X11 visual capture requires Linux (host is %s)" % _pf.system()
+    if not os.environ.get("DISPLAY"):
+        return False, "X11 visual capture requires a DISPLAY (none set — headless)"
+    return True, ""
 
 
 def inspect(params: dict) -> dict:
@@ -265,12 +278,23 @@ def inspect(params: dict) -> dict:
     op = params.get("op")
     if op in _LIVE_OPS:
         return envelope.error(
-            "live Godot capture is gated to P3.3",
+            "live Godot editor capture is the Option C human-in-the-loop workflow "
+            "(P3.6) — open the editor with the probe installed (op=prepare) and the "
+            "probe writes debugger_state.json; it is not driven through MCP",
+            kind="not_implemented",
+        )
+    if op in _VISUAL_OPS:
+        available, reason = _visual_capture_available()
+        if not available:
+            return envelope.error(reason, kind="capability_unavailable")
+        return envelope.error(
+            "X11 visual-capture target selection is not yet wired; the supported "
+            "path is the cross-platform debugger/output JSON capture",
             kind="not_implemented",
         )
     if not op or op not in _INSPECT_OPS:
         raise ToolError(
-            "op must be one of: %s (live-capture ops are P3.3)" % ", ".join(sorted(_INSPECT_OPS)),
+            "op must be one of: %s" % ", ".join(sorted(_INSPECT_OPS)),
             kind="invalid_args",
         )
 
@@ -352,8 +376,40 @@ def inspect(params: dict) -> dict:
             artifacts=[{"type": "probe_status", **status_dict}],
         )
 
+    # ---- prepare (install the editor probe into a Godot project; cross-platform) ----
+    if op == "prepare":
+        project_path = _resolve_project_path_param(params)
+        try:
+            result = _godot_plugin._ensure_editor_probe(
+                {"project_path": str(project_path)},
+                {"plugin_dir": str(_VENDORED_GODOT), "root": str(project_path)},
+            )
+        except ValueError as exc:
+            return envelope.error(str(exc), kind="invalid_args")
+        return envelope.ok(
+            "prepare probe: %s (project.godot changed=%s)" % (
+                result.get("project_path"), result.get("project_godot_changed")),
+            artifacts=[{"type": "probe_prepare", **result}],
+        )
+
+    # ---- remove-probe (uninstall the editor probe; cross-platform, reversible) ----
+    if op == "remove-probe":
+        project_path = _resolve_project_path_param(params)
+        result = _godot_plugin._remove_editor_probe({"project_path": str(project_path)})
+        return envelope.ok(
+            "remove probe: %s (removed=%s)" % (
+                result.get("project_path"), result.get("removed")),
+            artifacts=[{"type": "probe_remove", **result}],
+        )
+
     # Unreachable.
     raise ToolError("unhandled op: %r" % op, kind="invalid_args")
+
+
+def _resolve_project_path_param(params: dict) -> Path:
+    """Resolve a Godot project path from params (project_path|root|path|cwd)."""
+    raw = params.get("project_path") or params.get("root") or params.get("path") or ""
+    return expand_and_resolve(raw) if raw else Path.cwd()
 
 
 # ---------------------------------------------------------------------------
