@@ -303,6 +303,17 @@ class TestInspect(unittest.TestCase):
         self.assertFalse(art["enabled"])
         self.assertFalse(art["loaded"])
 
+    def test_status_uninstalled_suggests_prepare(self):
+        # P4.3: when the probe isn't installed, status emits a follow_up
+        # pointing the agent at inspect op=prepare.
+        env = inspect({"op": "status", "project_path": self.tmpdir})
+        self._valid_envelope(env)
+        self.assertEqual(len(env["follow_ups"]), 1)
+        fu = env["follow_ups"][0]
+        self.assertEqual(fu["tool"], "minerva_codetools_inspect")
+        self.assertEqual(fu["params"]["op"], "prepare")
+        self.assertIn("not installed", fu["reason"])
+
     def test_attach_dict_artifact_format(self):
         # Accept {kind, path} dict format as well as [kind, path] list.
         env = inspect({

@@ -367,6 +367,19 @@ def inspect(params: dict) -> dict:
         else:
             project_path = Path.cwd()
         status_dict = _godot_plugin._probe_status(project_path)
+        # Dependency-staleness signal (P4.3): if the editor probe isn't installed,
+        # nothing downstream (capture-visual / live ops / replay) can work — point
+        # the agent straight at the install op rather than letting it discover the
+        # gap by a later failure.
+        follow_ups = []
+        if not status_dict.get("installed"):
+            follow_ups.append(envelope.follow_up(
+                "minerva_codetools_inspect",
+                "the GDScript editor probe is not installed in this project, so "
+                "runtime inspection is unavailable. Run inspect op=prepare to "
+                "install it (cross-platform, reversible).",
+                params={"op": "prepare", "project_path": str(project_path)},
+            ))
         return envelope.ok(
             "probe status: installed=%s enabled=%s loaded=%s" % (
                 status_dict.get("installed"),
@@ -374,6 +387,7 @@ def inspect(params: dict) -> dict:
                 status_dict.get("loaded"),
             ),
             artifacts=[{"type": "probe_status", **status_dict}],
+            follow_ups=follow_ups,
         )
 
     # ---- prepare (install the editor probe into a Godot project; cross-platform) ----
