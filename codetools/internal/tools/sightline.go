@@ -76,14 +76,14 @@ func HandleExplore(ctx context.Context, w *bridge.Worker, params json.RawMessage
 // Inspect is the MCP spec for minerva_codetools_inspect.
 var Inspect = ToolSpec{
 	Name:        "minerva_codetools_inspect",
-	Description: "Evidence artifact capture, listing, and probe status for the sightline inspect subsystem. Dispatches by op: 'attach' (create an attachment session with artifact paths), 'list' (list sessions or artifacts for a session), 'status' (read Godot probe status, read-only — no Godot launch). Live Godot capture (godot-debugger-issues, godot-output-console, launch-editor) is gated to P3.3.",
+	Description: "Evidence artifact capture, probe management, and probe status for the sightline inspect subsystem. Dispatches by op: 'attach' (create an attachment session with artifact paths), 'list' (list sessions, or artifacts for a session), 'status' (read Godot probe status, read-only), 'prepare' (install the GDScript editor probe into a Godot project — cross-platform, reversible), 'remove-probe' (uninstall the probe). 'capture-visual' is feature-gated to Linux + DISPLAY (returns capability_unavailable otherwise). Live editor-launch (godot-debugger-issues, godot-output-console, launch-editor) is the human Option C workflow (see codetools/docs/probe_capture_runbook.md), not driven through MCP.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
 			"op": {
 				"type": "string",
-				"enum": ["attach", "list", "status"],
-				"description": "Operation to perform."
+				"enum": ["attach", "list", "status", "prepare", "remove-probe", "capture-visual"],
+				"description": "Operation. attach/list manage evidence artifacts; status reads probe state; prepare/remove-probe install/uninstall the editor probe (cross-platform); capture-visual is Linux+DISPLAY-only."
 			},
 			"root": {
 				"type": "string",
@@ -116,7 +116,7 @@ var Inspect = ToolSpec{
 			},
 			"project_path": {
 				"type": "string",
-				"description": "status: path to the Godot project to check probe status for."
+				"description": "status/prepare/remove-probe: path to the Godot project (defaults to root/cwd)."
 			}
 		},
 		"required": ["op"],
