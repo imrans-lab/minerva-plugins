@@ -1,7 +1,7 @@
 {
   "id": "codetools",
   "name": "Code Tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "host_api_version": "1",
   "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
   "backend": {

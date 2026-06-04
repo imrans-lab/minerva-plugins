@@ -7,4 +7,4 @@ code-probe subsystems against the same dispatcher + result envelope.
 
 # Single source of truth for the worker version (reported in worker.ready and
 # in the ping artifact). Bump in lockstep with manifest.json / serverVersion.
-WORKER_VERSION = "0.1.0"
+WORKER_VERSION = "0.2.0"

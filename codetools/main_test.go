@@ -64,6 +64,15 @@ func TestHandleToolsListExposesRegisteredTools(t *testing.T) {
 		"minerva_codetools_undescribed",
 		// P1.4 — full code graph with precomputed layout
 		"minerva_codetools_get_graph",
+		// P2.1 — file primitives
+		"minerva_codetools_glob",
+		"minerva_codetools_grep",
+		"minerva_codetools_bash",
+		"minerva_codetools_cwd",
+		// P3.2 — code-probe (vendored sightline)
+		"minerva_codetools_explore",
+		"minerva_codetools_inspect",
+		"minerva_codetools_validate",
 	}
 	if len(got.Tools) != len(want) {
 		t.Fatalf("want %d tools, got %d: %+v", len(want), len(got.Tools), got.Tools)

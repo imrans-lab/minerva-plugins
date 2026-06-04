@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 
-PLUGIN_DIRS = ["cad", "presentation", "scansort"]  # sorted
+PLUGIN_DIRS = ["cad", "codetools", "presentation", "scansort"]  # sorted
 
 REGISTRY_VERSION = 2
 
