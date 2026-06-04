@@ -104,12 +104,17 @@ def _glob_to_regex(pattern: str) -> re.Pattern:
         ch = pattern[i]
         if ch == "*":
             if i + 1 < n and pattern[i + 1] == "*":
-                result.append(".*")
                 i += 2
-                # Consume optional trailing slash after **
+                # `**` matches any number of path segments. When followed by a
+                # slash, `**/` matches ZERO or more leading directories — so
+                # `**/x.gd` also matches a top-level `x.gd` (no slash). The old
+                # `.*(/|$)` form failed that case (it required a slash or EOL
+                # right after the dirs). `(?:.*/)?` = an optional dir prefix.
                 if i < n and pattern[i] == "/":
-                    result.append("(/|$)")
+                    result.append("(?:.*/)?")
                     i += 1
+                else:
+                    result.append(".*")
             else:
                 result.append("[^/]*")
                 i += 1
