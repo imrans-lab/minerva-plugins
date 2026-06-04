@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import envelope
@@ -53,6 +54,124 @@ def _open_store(params):
     # or the schema can't be initialised; let it propagate to the dispatcher as
     # an internal error rather than swallowing.
     return CodeMagicStore(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Dependency-staleness signal (P4.3) — cheap, best-effort follow_ups.
+#
+# Read handlers answer from the SQLite index, which can drift from the live
+# source tree. After a read we cheaply check whether the indexed file set still
+# matches disk and, if not, attach ONE follow_up per stale project pointing the
+# agent at stale_check (the precise, git-hash-based check) or analyze (reindex).
+#
+# Cost model: pure os.stat over the *indexed* file list, early-exiting on the
+# first deleted/newer file (the full per-file list is stale_check's job, not
+# ours — we only answer "is it stale?"). No git subprocess. Never raises: a
+# probe failure must never break the primary handler. Opt out with
+# `staleness: false` in params.
+# ---------------------------------------------------------------------------
+
+_STALENESS_FOLLOWUP_CAP = 3
+
+
+def _parse_iso(ts):
+    """Parse an ISO-8601 timestamp (as written by the indexer) to an aware UTC
+    datetime, or None if absent/unparseable."""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _staleness_follow_ups(store, params):
+    """Return a (possibly empty) list of staleness follow_up entries.
+
+    For each indexed project (optionally filtered by the call's `project`
+    param), compare the live mtime of each indexed file against the project's
+    last_indexed_at. The first file that is missing or newer marks the project
+    stale; we stop scanning it and emit a single follow_up. Capped and
+    exception-safe — this is a best-effort hint, not a guarantee.
+    """
+    project_filter = params.get("project", "")
+    db_path = params.get("db_path") or os.environ.get(DB_ENV_VAR)
+    follow_ups = []
+    try:
+        projects = store.list_projects()
+    except Exception:
+        return follow_ups
+    for proj in projects:
+        if len(follow_ups) >= _STALENESS_FOLLOWUP_CAP:
+            break
+        if project_filter and proj.get("name") != project_filter:
+            continue
+        proot = proj.get("path") or ""
+        if not proot:
+            continue
+        indexed_at = _parse_iso(proj.get("last_indexed_at"))
+        try:
+            files = store.list_files(proj["id"])
+        except Exception:
+            continue
+        stale_example = stale_reason = None
+        for f in files:
+            rel = f.get("relative_path", "")
+            try:
+                st = (Path(proot) / rel).stat()
+            except FileNotFoundError:
+                stale_example, stale_reason = rel, "deleted"
+                break
+            except OSError:
+                continue
+            if indexed_at is None:
+                stale_example, stale_reason = rel, "index time unknown"
+                break
+            if datetime.fromtimestamp(st.st_mtime, tz=timezone.utc) > indexed_at:
+                stale_example, stale_reason = rel, "modified since index"
+                break
+        if stale_example is None:
+            continue
+        fp_params = {"project": proj.get("name", "")}
+        if db_path:
+            fp_params["db_path"] = db_path
+        follow_ups.append(envelope.follow_up(
+            "minerva_codetools_stale_check",
+            "code graph may be stale: %s (%s; last indexed %s). Run stale_check "
+            "for the precise list, or analyze to reindex." % (
+                rel, stale_reason, proj.get("last_indexed_at") or "never"),
+            params=fp_params,
+        ))
+    return follow_ups
+
+
+def _staleness_aware(fn):
+    """Decorator: augment a read handler's ok-envelope with staleness follow_ups.
+
+    Best-effort and fully isolated — any failure (or `staleness: false`) leaves
+    the wrapped handler's result untouched. Re-opens the store cheaply for the
+    probe so handlers need no edits to their (often multiple) return sites.
+    """
+    def wrapper(params):
+        env = fn(params)
+        if not isinstance(params, dict) or not params.get("staleness", True):
+            return env
+        if not isinstance(env, dict) or env.get("status") != envelope.STATUS_OK:
+            return env
+        try:
+            store = _open_store(params)
+            extra = _staleness_follow_ups(store, params)
+            if extra:
+                env["follow_ups"] = list(env.get("follow_ups", [])) + extra
+        except Exception:
+            pass
+        return env
+    wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
 
 
 def _format_context(ctx):
@@ -90,6 +209,7 @@ def _format_context(ctx):
 # 1. query — full-text + name search
 # ---------------------------------------------------------------------------
 
+@_staleness_aware
 def query(params):
     q = params.get("query")
     if not q or not isinstance(q, str):
@@ -162,6 +282,7 @@ def query(params):
 # 2. get_context — full context for a symbol or file
 # ---------------------------------------------------------------------------
 
+@_staleness_aware
 def get_context(params):
     identifier = params.get("identifier")
     if not identifier or not isinstance(identifier, str):
@@ -578,6 +699,7 @@ def undescribed(params):
 # 10. get_graph — full code graph with precomputed layout positions (P1.4)
 # ---------------------------------------------------------------------------
 
+@_staleness_aware
 def get_graph(params):
     """Build the full code graph and run force-directed layout.
 
