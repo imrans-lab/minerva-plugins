@@ -380,6 +380,11 @@ if [ -n "${RG_ASSET:-}" ]; then
     RG_EXTRACTED="$(find "$RG_EXTRACT_DIR" -name "$RG_BIN_NAME" -type f | head -1)"
     if [ -n "$RG_EXTRACTED" ] && [ -f "$RG_EXTRACTED" ]; then
       chmod +x "$RG_EXTRACTED"
+      # PBS's Windows install_only layout puts python.exe at the bundle ROOT
+      # (no bin/ dir), unlike linux/macos where python lives in bin/. Ensure the
+      # rg destination dir exists or this cp fails with "No such file or
+      # directory" on Windows. No-op where bin/ already exists.
+      mkdir -p "$STAGE_DIR/bin"
       cp "$RG_EXTRACTED" "$STAGE_DIR/bin/$RG_BIN_NAME"
       echo "[$TRIPLE] rg ${RG_VERSION} injected into bundle: bin/$RG_BIN_NAME"
     else
