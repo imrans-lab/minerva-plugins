@@ -1,7 +1,7 @@
 @tool
 extends EditorPlugin
 
-const OUTPUT_PATH := "res://.sightline/godot_probe/debugger_state.json"
+const OUTPUT_PATH := "res://.codetools/godot_probe/debugger_state.json"
 const CAPTURE_INTERVAL_SECONDS := 0.5
 const MAX_TEXT_LENGTH := 1200
 const MAX_OUTPUT_TEXT_LENGTH := 20000
@@ -42,7 +42,7 @@ func _capture_debugger_state() -> void:
 		"output_console": output_console_state,
 		"provenance": {
 			"adapter": "godot_editor_plugin",
-			"plugin_id": "sightline_probe",
+			"plugin_id": "codetools_probe",
 			"output_path": ProjectSettings.globalize_path(OUTPUT_PATH)
 		}
 	}

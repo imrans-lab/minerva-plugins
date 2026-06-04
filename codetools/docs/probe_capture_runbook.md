@@ -4,7 +4,7 @@ This runbook describes how to refresh the committed probe-state fixture with
 real data captured from a live Godot editor. Run this whenever:
 
 - The schema-version guard test (`test_sightline_probe_schema_guard.py`) fails
-  because `sightline_probe.gd` was updated and bumped its schema version.
+  because `codetools_probe.gd` was updated and bumped its schema version.
 - You want to update the fixture with richer representative data.
 
 > **Option A** (headless Godot in CI) is deferred. **Option B** (replay from
@@ -44,7 +44,7 @@ Or open it from the Godot project manager GUI.
 
 ### 3. Wait for the probe to write its JSON (~0.5 s cadence)
 
-The probe writes `res://.sightline/godot_probe/debugger_state.json` every
+The probe writes `res://.codetools/godot_probe/debugger_state.json` every
 0.5 seconds from `_process()`. After the editor finishes loading (a few
 seconds), the file will exist.
 
@@ -58,7 +58,7 @@ minerva_codetools_inspect {"op": "status", "project_path": "<absolute-path-to-pr
 The file lives at:
 
 ```
-<project-path>/.sightline/godot_probe/debugger_state.json
+<project-path>/.codetools/godot_probe/debugger_state.json
 ```
 
 ### 4. Copy and normalize the captured JSON
@@ -68,7 +68,7 @@ paths with the placeholder `/project`:
 
 ```bash
 # From the repo root:
-cp "<project-path>/.sightline/godot_probe/debugger_state.json" \
+cp "<project-path>/.codetools/godot_probe/debugger_state.json" \
    codetools/worker/tests/fixtures/probe/debugger_state.v3.json
 
 # Normalize absolute project paths (sed or your editor):
@@ -116,7 +116,7 @@ minerva_codetools_inspect {"op": "status", "project_path": "<absolute-path-to-pr
 
 ## Schema version drift
 
-If `sightline_probe.gd` bumps the top-level schema (e.g.,
+If `codetools_probe.gd` bumps the top-level schema (e.g.,
 `editor_probe_state.v3` → `editor_probe_state.v4`):
 
 1. The guard test `test_schema_versions_match` will fail immediately.
@@ -136,4 +136,4 @@ If `sightline_probe.gd` bumps the top-level schema (e.g.,
   load-bearing for the replay tests.
 - The fixture `project_path` field should be `/project` (the normalized
   placeholder). The `provenance.output_path` should match:
-  `/project/.sightline/godot_probe/debugger_state.json`.
+  `/project/.codetools/godot_probe/debugger_state.json`.

@@ -36,7 +36,7 @@ class ProbeReplayTest(unittest.TestCase):
     """Option B replay: fixture → attach → validate — no live Godot needed."""
 
     def setUp(self):
-        # Fresh temp dir acts as the sightline root (stores .sightline/inspect/).
+        # Fresh temp dir acts as the sightline root (stores .codetools/inspect/).
         self.tmpdir = tempfile.mkdtemp(prefix="ct_p36_replay_")
         # Copy the fixture into the temp dir so artifact paths are local.
         self.fixture_copy = Path(self.tmpdir) / "debugger_state.v3.json"

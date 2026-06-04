@@ -18,6 +18,14 @@ WINDOW_RE = re.compile(
     r'(?P<width>\d+)x(?P<height>\d+)\+(?P<x>-?\d+)\+(?P<y>-?\d+)'
 )
 ISSUE_RE = re.compile(r"^\s*(SCRIPT ERROR|ERROR|WARNING|DEBUGGER)\s*:", re.IGNORECASE)
+
+# User-visible names written into the user's own Godot project (bug 019e93c4c4).
+# Only what the user SEES is renamed off "sightline": the .codetools/ data
+# umbrella (probe output + inspect store) and the codetools_probe editor addon.
+# The internal sightline.godot.* schema strings and the vendored package name
+# deliberately stay (opaque version contracts; no user benefit to churning them).
+PROBE_DATA_DIR = ".codetools"
+PROBE_ADDON = "codetools_probe"
 PROJECT_NAME_RE = re.compile(r'^\s*config/name\s*=\s*"(?P<name>[^"]+)"\s*$', re.MULTILINE)
 PROBE_FRESH_SECONDS = 3.0
 
@@ -49,21 +57,21 @@ def _command_available(command: str) -> bool:
 
 def _artifact_dir(context: dict[str, Any]) -> Path:
     root = Path(context["root"])
-    path = root / ".sightline" / "plugin_artifacts" / "godot"
+    path = root / PROBE_DATA_DIR / "plugin_artifacts" / "godot"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _probe_source_dir(context: dict[str, Any]) -> Path:
-    return Path(context["plugin_dir"]) / "probe" / "addons" / "sightline_probe"
+    return Path(context["plugin_dir"]) / "probe" / "addons" / PROBE_ADDON
 
 
 def _probe_target_dir(project_path: Path) -> Path:
-    return project_path / "addons" / "sightline_probe"
+    return project_path / "addons" / PROBE_ADDON
 
 
 def _probe_output_path(project_path: Path) -> Path:
-    return project_path / ".sightline" / "godot_probe" / "debugger_state.json"
+    return project_path / PROBE_DATA_DIR / "godot_probe" / "debugger_state.json"
 
 
 def _probe_plugin_cfg(project_path: Path) -> Path:
@@ -71,7 +79,7 @@ def _probe_plugin_cfg(project_path: Path) -> Path:
 
 
 def _managed_probe_manifest(project_path: Path) -> Path:
-    return _probe_target_dir(project_path) / ".sightline-managed.json"
+    return _probe_target_dir(project_path) / (PROBE_DATA_DIR + "-managed.json")
 
 
 def _resolve_project_path(
@@ -114,7 +122,7 @@ def _is_probe_enabled(project_path: Path) -> bool:
     project_file = _project_godot_path(project_path)
     if not project_file.exists():
         return False
-    return "res://addons/sightline_probe/plugin.cfg" in _enabled_plugins(
+    return f"res://addons/{PROBE_ADDON}/plugin.cfg" in _enabled_plugins(
         project_file.read_text(encoding="utf-8", errors="replace")
     )
 
@@ -124,7 +132,7 @@ def _set_probe_enabled(project_path: Path, enabled: bool) -> bool:
     if not project_file.exists():
         raise ValueError(f"missing Godot project file: {project_file}")
     text = project_file.read_text(encoding="utf-8", errors="replace")
-    probe_path = "res://addons/sightline_probe/plugin.cfg"
+    probe_path = f"res://addons/{PROBE_ADDON}/plugin.cfg"
     plugins = _enabled_plugins(text)
     changed = False
     if enabled and probe_path not in plugins:
@@ -192,7 +200,7 @@ def _probe_status(project_path: Path) -> dict[str, Any]:
 
 
 def _clear_probe_output(project_path: Path) -> bool:
-    output_dir = project_path / ".sightline" / "godot_probe"
+    output_dir = project_path / PROBE_DATA_DIR / "godot_probe"
     if not output_dir.exists():
         return False
     shutil.rmtree(output_dir)
@@ -1570,7 +1578,7 @@ def _report_editor_debugger_warnings(args: dict[str, Any], context: dict[str, An
         "provenance": {
             "adapter": "plugin",
             "plugin_id": "godot",
-            "probe_id": "sightline_probe",
+            "probe_id": "codetools_probe",
         },
     }
 
@@ -1668,7 +1676,7 @@ def _report_editor_output_console(args: dict[str, Any], context: dict[str, Any])
         "provenance": {
             "adapter": "plugin",
             "plugin_id": "godot",
-            "probe_id": "sightline_probe",
+            "probe_id": "codetools_probe",
         },
     }
 

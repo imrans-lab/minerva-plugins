@@ -27,7 +27,7 @@ def _builtin_plugins_dir() -> Path:
 
 
 def _installed_plugins_dir(root: Path) -> Path:
-    path = root / ".sightline" / "plugins"
+    path = root / ".codetools" / "plugins"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

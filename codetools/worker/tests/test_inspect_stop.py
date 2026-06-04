@@ -152,7 +152,7 @@ class EditorAwareRemoveTest(unittest.TestCase):
         shutil.rmtree(self.proj, ignore_errors=True)
 
     def _addon_exists(self):
-        return Path(self.proj, "addons", "sightline_probe").exists()
+        return Path(self.proj, "addons", "codetools_probe").exists()
 
     def test_editor_running_no_stop_refuses(self):
         with mock.patch.object(plugin, "running_godot_for_project",

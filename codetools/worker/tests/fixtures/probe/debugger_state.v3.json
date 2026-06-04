@@ -89,7 +89,7 @@
 	},
 	"provenance": {
 		"adapter": "godot_editor_plugin",
-		"plugin_id": "sightline_probe",
-		"output_path": "/project/.sightline/godot_probe/debugger_state.json"
+		"plugin_id": "codetools_probe",
+		"output_path": "/project/.codetools/godot_probe/debugger_state.json"
 	}
 }

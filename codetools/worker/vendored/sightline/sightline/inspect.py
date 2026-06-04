@@ -36,7 +36,7 @@ def _path_metadata(root: Path, artifact_path: str) -> dict[str, Any]:
 class InspectStore:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.data_dir = root / ".sightline"
+        self.data_dir = root / ".codetools"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.inspect_dir = self.data_dir / "inspect"
         self.inspect_dir.mkdir(parents=True, exist_ok=True)

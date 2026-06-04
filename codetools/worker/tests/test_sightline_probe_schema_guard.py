@@ -1,6 +1,6 @@
 """P3.6 — schema-version guard: probe GDScript schema vs fixture schema.
 
-If the vendored sightline_probe.gd bumps its top-level schema string (e.g.,
+If the vendored codetools_probe.gd bumps its top-level schema string (e.g.,
 v3 → v4) without a matching fixture refresh this test will FAIL, causing the
 build to stop until a human updates the fixture via the Option C runbook at
 codetools/docs/probe_capture_runbook.md.
@@ -25,8 +25,8 @@ _PROBE_GD = (
     / "godot"
     / "probe"
     / "addons"
-    / "sightline_probe"
-    / "sightline_probe.gd"
+    / "codetools_probe"
+    / "codetools_probe.gd"
 )
 
 _FIXTURE = (
@@ -40,7 +40,7 @@ _RUNBOOK = "codetools/docs/probe_capture_runbook.md"
 
 
 def _probe_schema_from_gd(path: Path) -> str:
-    """Extract the first top-level schema string from sightline_probe.gd.
+    """Extract the first top-level schema string from codetools_probe.gd.
 
     Searches for the pattern:
         "schema": "sightline.godot.editor_probe_state.vN"
@@ -64,7 +64,7 @@ class ProbeSchemaGuardTest(unittest.TestCase):
     """Fail-fast guard: fixture schema must match the probe's declared schema.
 
     This test will FAIL when:
-      - The vendored sightline_probe.gd bumps its top-level schema version
+      - The vendored codetools_probe.gd bumps its top-level schema version
         (e.g., editor_probe_state.v3 → v4), AND
       - The fixture at tests/fixtures/probe/debugger_state.v3.json has NOT
         been refreshed to match.
@@ -90,7 +90,7 @@ class ProbeSchemaGuardTest(unittest.TestCase):
         )
 
     def test_schema_versions_match(self):
-        """Top-level schema in sightline_probe.gd must match the fixture's schema field.
+        """Top-level schema in codetools_probe.gd must match the fixture's schema field.
 
         If this test fails after a probe update, refresh the fixture by following
         the Option C runbook at: %(runbook)s
@@ -106,7 +106,7 @@ class ProbeSchemaGuardTest(unittest.TestCase):
                 "\n\nPROBE SCHEMA DRIFT DETECTED\n"
                 "  probe declares: %r\n"
                 "  fixture has:    %r\n\n"
-                "The vendored sightline_probe.gd has a different schema version than\n"
+                "The vendored codetools_probe.gd has a different schema version than\n"
                 "the replay fixture. Refresh the fixture by following the Option C\n"
                 "runbook at: %s\n"
                 "\n"

@@ -9,7 +9,7 @@ from .models import ResultHandle
 class SessionStore:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.data_dir = root / ".sightline"
+        self.data_dir = root / ".codetools"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.handles_path = self.data_dir / "handles.json"
 

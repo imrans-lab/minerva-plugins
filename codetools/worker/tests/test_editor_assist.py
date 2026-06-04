@@ -68,7 +68,7 @@ class AdapterEditorAssistTest(unittest.TestCase):
             'config_version=5\n\n[application]\n\nconfig/name="x"\n', encoding="utf-8"
         )
         # Plant a probe output the (mocked) launch will "produce".
-        out = Path(self.proj, ".sightline", "godot_probe")
+        out = Path(self.proj, ".codetools", "godot_probe")
         out.mkdir(parents=True, exist_ok=True)
         self.state_path = out / "debugger_state.json"
         shutil.copyfile(FIXTURE, self.state_path)

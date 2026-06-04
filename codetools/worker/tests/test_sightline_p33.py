@@ -40,7 +40,7 @@ class PrepareRemoveTest(unittest.TestCase):
         art = self._art(env)
         self.assertEqual(art["type"], "probe_prepare")
         # Probe addon copied into the project.
-        self.assertTrue(Path(self.proj, "addons", "sightline_probe", "plugin.cfg").is_file())
+        self.assertTrue(Path(self.proj, "addons", "codetools_probe", "plugin.cfg").is_file())
         self.assertTrue(art["installed_files"])
 
     def test_prepare_then_remove(self):
@@ -49,7 +49,7 @@ class PrepareRemoveTest(unittest.TestCase):
         art = self._art(env)
         self.assertEqual(art["type"], "probe_remove")
         self.assertTrue(art["removed"])
-        self.assertFalse(Path(self.proj, "addons", "sightline_probe").exists())
+        self.assertFalse(Path(self.proj, "addons", "codetools_probe").exists())
 
     def test_prepare_on_non_godot_dir_errors_cleanly(self):
         d = tempfile.mkdtemp(prefix="ct_p33_notgodot_")

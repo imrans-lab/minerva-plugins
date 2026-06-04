@@ -74,8 +74,8 @@ GDScript editor probe. **stdlib-only** (no pip deps); rg-backed search reuses th
   edit vendored).
 - `godot/` — the Godot integration: `plugin.py` (dispatcher; the X11 window
   capture via `xdotool`/`xwininfo`/`xwd`/ImageMagick is Linux-only and is
-  feature-gated in P3.3) and `probe/addons/sightline_probe/` (the `@tool`
-  EditorPlugin that emits `res://.sightline/godot_probe/debugger_state.json`).
+  feature-gated in P3.3) and `probe/addons/codetools_probe/` (the `@tool`
+  EditorPlugin that emits `res://.codetools/godot_probe/debugger_state.json`).
 
 **Probe schema is `sightline.godot.editor_probe_state.v3`** at this SHA (the DCR
 text mentions v4 aspirationally — the snapshot pins v3). The P3.6 schema-version
