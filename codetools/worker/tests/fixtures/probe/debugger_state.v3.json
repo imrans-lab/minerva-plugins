@@ -1,0 +1,95 @@
+{
+	"schema": "sightline.godot.editor_probe_state.v3",
+	"project": "fixture_project",
+	"project_path": "/project",
+	"captured_at_unix": 1748908800.0,
+	"source": "godot_editor_probe",
+	"debugger": {
+		"schema": "sightline.godot.debugger_rows.v2",
+		"extraction_status": "scoped_debugger_region",
+		"tab_text": "Debugger (2)",
+		"warning_count": 1,
+		"error_count": 1,
+		"rows": [
+			{
+				"source": "control",
+				"text": "SCRIPT ERROR: probe_fixture_marker",
+				"severity": "script_error",
+				"node_path": "/root/EditorNode/EditorBottomPanel/Debugger/DebuggerEditorPlugin/tabs/ScriptEditorDebugger",
+				"class": "Label",
+				"name": "ErrorLabel",
+				"rect": { "x": 10.0, "y": 600.0, "width": 800.0, "height": 20.0 }
+			},
+			{
+				"source": "control",
+				"text": "Warning: variable 'foo' is shadowing another variable",
+				"severity": "warning",
+				"node_path": "/root/EditorNode/EditorBottomPanel/Debugger/DebuggerEditorPlugin/tabs/ScriptEditorDebugger",
+				"class": "Label",
+				"name": "WarnLabel",
+				"rect": { "x": 10.0, "y": 620.0, "width": 800.0, "height": 20.0 }
+			}
+		],
+		"diagnostics": {
+			"debugger_tabs": [
+				{
+					"node_path": "/root/EditorNode/EditorBottomPanel/TabBar",
+					"class": "TabBar",
+					"name": "TabBar",
+					"text": "Debugger (2)",
+					"rect": { "x": 200.0, "y": 750.0, "width": 120.0, "height": 24.0 },
+					"tab_index": 1,
+					"selected": true
+				}
+			],
+			"regions": [
+				{
+					"x": 0.0,
+					"y": 230.0,
+					"width": 1920.0,
+					"height": 520.0,
+					"tab": {
+						"node_path": "/root/EditorNode/EditorBottomPanel/TabBar",
+						"class": "TabBar",
+						"name": "TabBar",
+						"text": "Debugger (2)",
+						"rect": { "x": 200.0, "y": 750.0, "width": 120.0, "height": 24.0 },
+						"tab_index": 1,
+						"selected": true
+					}
+				}
+			],
+			"tab_bar_candidates": [],
+			"text_candidate_count": 12,
+			"tree_candidate_count": 1,
+			"text_candidate_samples": [],
+			"tree_candidate_samples": [],
+			"bottom_panel_controls": [],
+			"debugger_subtree_rows": [],
+			"row_count": 2,
+			"row_samples": []
+		}
+	},
+	"output_console": {
+		"schema": "sightline.godot.output_console.v1",
+		"extraction_status": "output_text_found",
+		"text": "Godot Engine v4.6.stable - https://godotengine.org\nOpenGL API 3.3.0 NVIDIA 535.183 - Compatibility - Using Device: NVIDIA GeForce RTX 3060\nSCRIPT ERROR: probe_fixture_marker\n   at: _ready (res://main.gd:10)",
+		"line_count": 4,
+		"lines": [
+			"Godot Engine v4.6.stable - https://godotengine.org",
+			"OpenGL API 3.3.0 NVIDIA 535.183 - Compatibility - Using Device: NVIDIA GeForce RTX 3060",
+			"SCRIPT ERROR: probe_fixture_marker",
+			"   at: _ready (res://main.gd:10)"
+		],
+		"counters": [],
+		"diagnostics": {
+			"output_controls": [],
+			"text_part_count": 1
+		}
+	},
+	"provenance": {
+		"adapter": "godot_editor_plugin",
+		"plugin_id": "sightline_probe",
+		"output_path": "/project/.sightline/godot_probe/debugger_state.json"
+	}
+}
