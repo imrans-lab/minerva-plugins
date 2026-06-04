@@ -8,10 +8,25 @@ The codetools adapter handlers live in `worker/codetools_worker/` and import
 *into* `vendored/...`; vendored modules are never edited to fit our envelope —
 the adapter is what bridges shapes.
 
+## EXCEPTION — `sightline/` is de-vendored (first-party, editable) as of 2026-06-04
+
+`sightline/` is **no longer hermetic**. We own it — it began as the
+`minervaservices/experiments/sightline` experiment (now frozen), and the
+codetools plugin is its living home. The "do not edit" rule above **does NOT
+apply to `sightline/`**: fix it in place at its real site; there is no upstream
+re-snapshot to protect. (Filed under bug `019e93d8f1`: the snapshot discipline
+was forcing band-aid *adapter* fixes for bugs whose real site is the sightline
+code itself — a DRY violation the rule itself created.) The subtree still
+physically lives under `vendored/` for now; **relocating it out of `vendored/`
+is a separate follow-up** (touches every `from vendored.sightline …` import +
+the runtime-bundle `WORKER_PACKAGES`). `code_visualizer/` remains genuinely
+vendored + hermetic (the same first-party-origin question is open for it but
+not yet decided).
+
 | Subtree | Upstream | Pinned SHA | Filed under | Snapshot date |
 |---|---|---|---|---|
 | `code_visualizer/` | `~/gitlab/ccsandbox/experiments/code-magic` (private repo) | `9cc9403aade51d15837225ee913554bc5a5d110e` | DCR `019e7b6609` / P1.3 `019e7b870f` | 2026-05-31 |
-| `sightline/` | `~/gitlab/minervaservices/experiments/sightline` (private repo) | `8b2baa7` | DCR `019e7b6609` / P3.1 `019e8faa199f` | 2026-06-03 |
+| `sightline/` | `~/gitlab/minervaservices/experiments/sightline` (private repo, **frozen**) | `8b2baa7` (origin only) | DCR `019e7b6609` / P3.1 `019e8faa199f` | 2026-06-03 — **DE-VENDORED 2026-06-04, now first-party/editable (bug `019e93d8f1`); SHA is origin-of-record, not a re-snapshot pin** |
 
 ## `code_visualizer/`
 
@@ -40,6 +55,10 @@ cp -a $SRC/analyzer $SRC/server $SRC/vendor $DST/
 Then update the pinned-SHA row in this file with the new upstream HEAD.
 
 ## `sightline/`
+
+> **DE-VENDORED 2026-06-04 (bug `019e93d8f1`).** Edit in place — first-party. The
+> snapshot command below is **historical** (origin reference only); we no longer
+> re-snapshot from the frozen experiment, so do not run it to "refresh."
 
 code-probe — runtime-inspection / evidence-capture tool (P3). Python lib +
 GDScript editor probe. **stdlib-only** (no pip deps); rg-backed search reuses the

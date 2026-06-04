@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 WINDOW_RE = re.compile(
@@ -597,6 +597,130 @@ def _surface_kind(title: str | None, process: dict[str, Any] | None) -> str:
     if process and _is_godot_process(process):
         return "runtime"
     return "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Running-process detection + termination for a specific project (bug 019e93d8f1).
+# Detection is cross-platform and DISPLAY-independent — it reuses the same
+# _processes_for_platform scan as surface discovery, NOT the X11 path. Used by
+# inspect op=stop and by remove-probe's editor-clobber guard. All side-effecting
+# collaborators are injectable so the escalation logic is unit-testable.
+# ---------------------------------------------------------------------------
+
+
+def running_godot_for_project(
+    project_path: Any,
+    *,
+    editor_only: bool = False,
+    processes: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Return running Godot processes whose --path resolves to project_path.
+
+    `processes` is injectable for tests; it defaults to a live cross-platform
+    scan. `editor_only` restricts to editor instances (cmdline carries --editor).
+    """
+    try:
+        target = Path(str(project_path)).expanduser().resolve()
+    except OSError:
+        return []
+    rows = processes if processes is not None else _processes_for_platform(_host_platform())
+    matches: list[dict[str, Any]] = []
+    for proc in rows:
+        if not _is_godot_process(proc):
+            continue
+        proc_project = proc.get("project_path")
+        if not proc_project:
+            continue
+        try:
+            if Path(str(proc_project)).expanduser().resolve() != target:
+                continue
+        except OSError:
+            continue
+        kind = _surface_kind(None, proc)
+        is_editor = kind == "editor"
+        if editor_only and not is_editor:
+            continue
+        matches.append({
+            "pid": proc.get("pid"),
+            "is_editor": is_editor,
+            "kind": kind,
+            "project_path": str(proc_project),
+        })
+    return matches
+
+
+def _pid_alive(pid: int) -> bool:
+    """POSIX liveness probe (signal 0). PermissionError ⇒ exists but not ours."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def stop_godot_for_project(
+    project_path: Any,
+    *,
+    editor_only: bool = False,
+    processes: list[dict[str, Any]] | None = None,
+    killer: Callable[[int, int], None] | None = None,
+    is_alive: Callable[[int], bool] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    grace_seconds: float = 5.0,
+    poll_interval: float = 0.25,
+) -> dict[str, Any]:
+    """SIGTERM (then SIGKILL after a grace period) every Godot for project_path.
+
+    killer/is_alive/sleep are injectable so the SIGTERM→poll→SIGKILL escalation
+    is testable without real processes. On Windows os.kill maps SIGTERM/SIGKILL
+    to TerminateProcess (a hard stop) — acceptable for an explicit user action.
+    """
+    import signal
+
+    do_kill = killer or os.kill
+    alive = is_alive or _pid_alive
+    nap = sleep or time.sleep
+    procs = running_godot_for_project(
+        project_path, editor_only=editor_only, processes=processes
+    )
+    stopped: list[int] = []
+    sigkilled: list[int] = []
+    failed: list[dict[str, Any]] = []
+    for entry in procs:
+        pid = entry.get("pid")
+        if pid is None:
+            continue
+        try:
+            do_kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            stopped.append(pid)  # already gone
+            continue
+        except OSError as exc:
+            failed.append({"pid": pid, "error": str(exc)})
+            continue
+        waited = 0.0
+        while waited < grace_seconds and alive(pid):
+            nap(poll_interval)
+            waited += poll_interval
+        if alive(pid):
+            try:
+                do_kill(pid, signal.SIGKILL)
+                sigkilled.append(pid)
+                stopped.append(pid)
+            except OSError as exc:
+                failed.append({"pid": pid, "error": str(exc)})
+        else:
+            stopped.append(pid)
+    return {
+        "stopped": stopped,
+        "sigkilled": sigkilled,
+        "failed": failed,
+        "matched": [e.get("pid") for e in procs],
+    }
 
 
 def _process_surface(process: dict[str, Any], platform_name: str, diagnostics: list[str] | None = None) -> dict[str, Any]:

@@ -21,6 +21,7 @@ already exists inside sightline.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -84,6 +85,7 @@ def _ensure_sightline_imports():
 # ---------------------------------------------------------------------------
 
 from . import envelope
+from . import godot_diagnostics
 from .errors import ToolError
 from .files.paths import expand_and_resolve, validate_dir
 from .files.rg_finder import find_rg
@@ -243,7 +245,7 @@ def explore(params: dict) -> dict:
 # 2. inspect — artifact capture / list / status
 # ---------------------------------------------------------------------------
 
-_INSPECT_OPS = frozenset(["attach", "list", "status", "prepare", "remove-probe"])
+_INSPECT_OPS = frozenset(["attach", "list", "status", "prepare", "remove-probe", "run", "stop"])
 
 # X11/visual capture ops — feature-gated to Linux + a live DISPLAY (P3.3). The
 # cross-platform debugger/output JSON capture (the GDScript probe) is NOT gated.
@@ -406,15 +408,28 @@ def inspect(params: dict) -> dict:
             artifacts=[{"type": "probe_prepare", **result}],
         )
 
-    # ---- remove-probe (uninstall the editor probe; cross-platform, reversible) ----
+    # ---- remove-probe (editor-aware teardown; bug 019e93d8f1) ----
     if op == "remove-probe":
+        return _inspect_remove_probe(params)
+
+    # ---- stop (terminate running Godot for a project) ----
+    if op == "stop":
         project_path = _resolve_project_path_param(params)
-        result = _godot_plugin._remove_editor_probe({"project_path": str(project_path)})
-        return envelope.ok(
-            "remove probe: %s (removed=%s)" % (
-                result.get("project_path"), result.get("removed")),
-            artifacts=[{"type": "probe_remove", **result}],
+        result = _godot_plugin.stop_godot_for_project(str(project_path))
+        summary = "stop godot (%s): %d stopped, %d failed%s" % (
+            project_path,
+            len(result["stopped"]),
+            len(result["failed"]),
+            (" [%d SIGKILLed]" % len(result["sigkilled"])) if result["sigkilled"] else "",
         )
+        return envelope.ok(
+            summary,
+            artifacts=[{"type": "godot_stop", "project_path": str(project_path), **result}],
+        )
+
+    # ---- run (drive Godot + capture diagnostics; dual-mode) ----
+    if op == "run":
+        return _inspect_run(params)
 
     # Unreachable.
     raise ToolError("unhandled op: %r" % op, kind="invalid_args")
@@ -424,6 +439,179 @@ def _resolve_project_path_param(params: dict) -> Path:
     """Resolve a Godot project path from params (project_path|root|path|cwd)."""
     raw = params.get("project_path") or params.get("root") or params.get("path") or ""
     return expand_and_resolve(raw) if raw else Path.cwd()
+
+
+def _as_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _run_envelope(record: dict) -> dict:
+    """Wrap a normalized godot_diagnostics record in an ok envelope."""
+    counts = record["counts"]
+    fixable = sum(1 for d in record["diagnostics"] if d.get("user_fixable"))
+    summary = (
+        "godot run (%s): %d warning(s), %d error(s), %d script-error(s); "
+        "%d user-fixable; exit=%s%s"
+        % (
+            record["source"],
+            counts.get("warning", 0),
+            counts.get("error", 0),
+            counts.get("script_error", 0),
+            fixable,
+            record["exit_code"],
+            " (timed out)" if record["timed_out"] else "",
+        )
+    )
+    return envelope.ok(summary, artifacts=[record])
+
+
+def _inspect_run(params: dict) -> dict:
+    """op=run — drive a Godot project and capture normalized diagnostics.
+
+    mode=headless (default): autonomous, no probe, no display, no human.
+    mode=editor-assist: human-driven editor + probe sink (wired in task #6).
+    """
+    mode = params.get("mode") or "headless"
+    project_path = _resolve_project_path_param(params)
+    if not (project_path / "project.godot").exists():
+        return envelope.error(
+            "not a Godot project path: %s" % project_path, kind="invalid_args"
+        )
+    if mode == "headless":
+        record = godot_diagnostics.run_headless(
+            project_path,
+            scene=params.get("scene") or None,
+            quit_after=_as_int(params.get("quit_after"), 200),
+            verbose=bool(params.get("verbose", False)),
+            timeout_seconds=_as_float(params.get("timeout_seconds"), 60.0),
+            godot_bin=params.get("godot_bin") or "godot",
+        )
+        return _run_envelope(record)
+    if mode == "editor-assist":
+        return _run_editor_assist(params, project_path)
+    return envelope.error(
+        "mode must be 'headless' or 'editor-assist'", kind="invalid_args"
+    )
+
+
+def _run_editor_assist(params: dict, project_path: Path) -> dict:
+    """Human-driven sink: launch the editor with the probe, read its scrape.
+
+    Launches a Godot editor (auto-installing the probe), the human runs the
+    scene, the probe writes debugger_state.json, and we normalize it to the
+    SAME godot_diagnostics shape as headless (source="editor-probe").
+    """
+    try:
+        launch = _godot_plugin._launch_editor_session(
+            {
+                "project_path": str(project_path),
+                "godot_bin": params.get("godot_bin", "godot"),
+                "timeout_seconds": _as_float(params.get("timeout_seconds"), 30.0),
+            },
+            {"plugin_dir": str(_VENDORED_GODOT), "root": str(project_path)},
+        )
+    except (RuntimeError, ValueError) as exc:
+        return envelope.error(str(exc), kind="invalid_args")
+    output_path = _godot_plugin._probe_output_path(project_path)
+    state = None
+    if output_path.exists():
+        try:
+            state = json.loads(output_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            state = None
+    record = godot_diagnostics.diagnostics_record_from_probe(
+        state, log_path=launch.get("log_path")
+    )
+    record["editor_pid"] = launch.get("pid")
+    record["probe_loaded"] = launch.get("probe_loaded")
+    counts = record["counts"]
+    fixable = sum(1 for d in record["diagnostics"] if d.get("user_fixable"))
+    summary = (
+        "godot run (editor-probe): %d warning(s), %d error(s), %d script-error(s); "
+        "%d user-fixable; probe_loaded=%s"
+        % (
+            counts.get("warning", 0),
+            counts.get("error", 0),
+            counts.get("script_error", 0),
+            fixable,
+            launch.get("probe_loaded"),
+        )
+    )
+    follow_ups = []
+    if not launch.get("probe_loaded"):
+        follow_ups.append(envelope.follow_up(
+            "minerva_codetools_inspect",
+            "the probe did not report yet; run the scene in the open editor, then re-read",
+            {"op": "run", "mode": "editor-assist", "project_path": str(project_path)},
+        ))
+    return envelope.ok(summary, artifacts=[record], follow_ups=follow_ups)
+
+
+def _inspect_remove_probe(params: dict) -> dict:
+    """remove-probe with an editor-clobber guard (bug 019e93d8f1).
+
+    A running Godot editor holds project.godot in memory and rewrites it on
+    quit/focus, restoring the probe entry — so a plain removal silently reverts.
+      - editor running + stop_editor unset → refuse the destructive edit, warn,
+        follow_up to re-run with stop_editor=true (rubric: refuse-and-signal
+        beats a removed:true the editor undoes).
+      - editor running + stop_editor=true → stop it, then remove.
+      - no editor → remove as before, with a teardown-hazard next_step.
+    Consent is the caller's: autonomous agents pass stop_editor=true; interactive
+    agents confirm with their user first.
+    """
+    project_path = _resolve_project_path_param(params)
+    stop_editor = bool(params.get("stop_editor", False))
+    running = _godot_plugin.running_godot_for_project(
+        str(project_path), editor_only=True
+    )
+    if running and not stop_editor:
+        pids = [p.get("pid") for p in running]
+        return envelope.ok(
+            "remove-probe deferred: a Godot editor (pid %s) is running for this "
+            "project; it will rewrite project.godot and restore the probe. Close "
+            "the editor, or re-run with stop_editor=true to stop it first."
+            % ", ".join(str(p) for p in pids),
+            artifacts=[{
+                "type": "probe_remove",
+                "removed": False,
+                "reason": "editor_running",
+                "editor_pids": pids,
+                "project_path": str(project_path),
+            }],
+            follow_ups=[envelope.follow_up(
+                "minerva_codetools_inspect",
+                "stop the running Godot editor, then remove the probe",
+                {"op": "remove-probe", "project_path": str(project_path), "stop_editor": True},
+            )],
+        )
+    stopped = None
+    if running and stop_editor:
+        stopped = _godot_plugin.stop_godot_for_project(
+            str(project_path), editor_only=True
+        )
+    result = _godot_plugin._remove_editor_probe({"project_path": str(project_path)})
+    if stopped is not None:
+        result["stopped_editor"] = stopped
+    result["next_step"] = (
+        "If a Godot editor is reopened for this project it can rewrite "
+        "project.godot; remove the probe with the editor closed."
+    )
+    return envelope.ok(
+        "remove probe: %s (removed=%s)"
+        % (result.get("project_path"), result.get("removed")),
+        artifacts=[{"type": "probe_remove", **result}],
+    )
 
 
 # ---------------------------------------------------------------------------
