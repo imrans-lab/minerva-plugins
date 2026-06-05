@@ -453,15 +453,54 @@ func _collect_rows_in_region(text_controls: Array, tree_controls: Array, region:
 			continue
 		var node := get_node_or_null(NodePath(str(tree_record.get("node_path", ""))))
 		if node is Tree:
-			_collect_tree_rows(node as Tree, rows)
+			_collect_tree_rows(node as Tree, rows, true)
 
 
-func _collect_tree_rows(tree: Tree, rows: Array) -> void:
+func _collect_tree_rows(tree: Tree, rows: Array, error_tree := false) -> void:
 	var root := tree.get_root()
 	if root == null:
 		return
+	if error_tree:
+		# Debugger "Errors" tree: every direct child of root is a warning/error.
+		# Capture each, regardless of message-pattern (the autocoder push_warning
+		# rows don't start with "warning:"), and attach its detail children — the
+		# <GDScript Source>/<Stack Trace> rows that carry file.gd:line.
+		var item := root.get_first_child()
+		var index := 0
+		while item != null:
+			var text := _join_columns(item, tree.columns)
+			if not text.is_empty():
+				var details: Array = []
+				_collect_item_details(item, tree.columns, details)
+				var row := _row_record("tree", text, _control_record(tree, ""))
+				row["tree_row_index"] = index
+				if not details.is_empty():
+					row["details"] = details
+				rows.append(row)
+				index += 1
+			item = item.get_next()
+		return
 	var counter := [0]
 	_collect_tree_item_rows(root, tree.columns, rows, _control_record(tree, ""), counter)
+
+
+func _join_columns(item: TreeItem, columns: int) -> String:
+	var parts: Array[String] = []
+	for column in range(columns):
+		var text := item.get_text(column).strip_edges()
+		if not text.is_empty():
+			parts.append(text)
+	return _trim_text(" ".join(parts))
+
+
+func _collect_item_details(item: TreeItem, columns: int, details: Array) -> void:
+	var child := item.get_first_child()
+	while child != null:
+		var text := _join_columns(child, columns)
+		if not text.is_empty() and details.size() < 12:
+			details.append(text)
+		_collect_item_details(child, columns, details)
+		child = child.get_next()
 
 
 func _collect_tree_item_rows(item: TreeItem, columns: int, rows: Array, tree_record: Dictionary, counter: Array) -> void:
@@ -511,7 +550,7 @@ func _collect_bottom_panel_diagnostics_inner(
 			bottom_panel_controls.append(record)
 		if next_in_debugger_subtree:
 			if control is Tree:
-				_collect_tree_rows(control as Tree, debugger_rows)
+				_collect_tree_rows(control as Tree, debugger_rows, true)
 			var text := str(record.get("text", "")).strip_edges()
 			if _looks_like_debugger_message(text):
 				debugger_rows.append(_row_record("debugger_subtree_control", text, record))

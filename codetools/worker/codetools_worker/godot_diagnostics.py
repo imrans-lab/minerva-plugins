@@ -172,32 +172,64 @@ def diagnostics_record(
     return _record(source, parse_godot_output(output), exit_code, timed_out, log_path)
 
 
+# A bare GDScript file:line as the debugger error tree's detail rows render it,
+# e.g. "<GDScript Source>MCPEditorTools.gd:344" or a stack frame "Core.gd:645".
+_GD_FILE_LINE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*\.gd):(\d+)")
+
+
+def _looks_like_warning(blob: str) -> bool:
+    """True for debugger error-tree rows that are real warnings/errors (vs profiler
+    or other tree noise that the error-tree scrape may also pick up)."""
+    low = blob.lower()
+    return (
+        "gdscript::reload" in low
+        or low.startswith("warning")
+        or low.startswith("error")
+        or "script error" in low
+        or _GD_FILE_LINE_RE.search(blob) is not None
+        or _LOC_RE.search(blob) is not None
+    )
+
+
 def _debugger_rows_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Debugger-panel rows → diagnostics. These carry a pre-classified severity +
-    raw text but usually NO res:// file:line (reload warnings name only the C++
-    GDScript::reload source); best-effort parse a res://…:NN out of the text."""
+    """Debugger error-tree rows → diagnostics. Each row may carry `details` (its
+    child rows: <GDScript Source>file.gd:line, stack frames). Pull the location
+    from the row text OR its details — res://…:NN if present, else a bare X.gd:NN
+    (resolved to res:// later by resolve_file_locations)."""
     diagnostics: list[dict[str, Any]] = []
     debugger = (state or {}).get("debugger") or {}
     for row in debugger.get("rows") or []:
+        text = str(row.get("text") or "").strip()
+        details = row.get("details") or []
+        blob = text + " " + " ".join(str(d) for d in details)
+        if not _looks_like_warning(blob):
+            continue  # skip non-warning tree noise
         severity = row.get("severity")
         if severity not in ("warning", "error", "script_error"):
             severity = "warning"
-        text = str(row.get("text") or "").strip()
         message = _PREFIX_RE.sub("", text).strip() or text
         file_: str | None = None
         line_: int | None = None
-        loc = _LOC_RE.search(text)
+        loc = _LOC_RE.search(blob)  # prefer a full res://…:NN
         if loc:
             file_ = loc.group(1)
             line_ = int(loc.group(2))
-        diagnostics.append({
+        else:
+            bare = _GD_FILE_LINE_RE.search(blob)  # else the first bare X.gd:NN
+            if bare:
+                file_ = bare.group(1)
+                line_ = int(bare.group(2))
+        diag: dict[str, Any] = {
             "severity": severity,
             "message": message,
             "file": file_,
             "line": line_,
             "function": None,
-            "user_fixable": bool(file_ and file_.startswith("res://")),
-        })
+            "user_fixable": bool(file_ and str(file_).startswith("res://")),
+        }
+        if details:
+            diag["details"] = [str(d) for d in details]
+        diagnostics.append(diag)
     return diagnostics
 
 
@@ -343,6 +375,43 @@ def resolve_symbol_locations(diagnostics, root, *, finder=None):
     return diagnostics
 
 
+def _build_file_index(root: str, filenames: set[str]) -> dict[str, str]:
+    """{bare filename: res://path} for each filename with EXACTLY ONE match under
+    root (ambiguous → omitted, never guessed)."""
+    if not filenames:
+        return {}
+    found: dict[str, list[str]] = {}
+    root_path = Path(root)
+    for gd in root_path.rglob("*.gd"):
+        if gd.name in filenames:
+            found.setdefault(gd.name, []).append(
+                "res://" + gd.relative_to(root_path).as_posix())
+    return {name: paths[0] for name, paths in found.items() if len(paths) == 1}
+
+
+def resolve_file_locations(diagnostics, root, *, finder=None):
+    """Turn a bare ``X.gd`` file (from a debugger detail row) into its res:// path
+    under root. Mutates + returns diagnostics."""
+    bare: dict[str, list] = {}
+    for diag in diagnostics:
+        file_ = diag.get("file")
+        if isinstance(file_, str) and file_.endswith(".gd") and not file_.startswith("res://"):
+            bare.setdefault(file_, []).append(diag)
+    if not bare:
+        return diagnostics
+    finder = finder or _build_file_index
+    locations = finder(root, set(bare))
+    for filename, diags in bare.items():
+        res = locations.get(filename)
+        if not res:
+            continue
+        for diag in diags:
+            diag["file"] = res
+            diag["user_fixable"] = True
+            diag.setdefault("resolved_via", "file-grep")
+    return diagnostics
+
+
 def diagnostics_record_from_probe(
     state: dict[str, Any] | None,
     *,
@@ -354,10 +423,12 @@ def diagnostics_record_from_probe(
 ) -> dict[str, Any]:
     """Normalized record from a probe debugger_state.json (editor-assist sink).
 
-    If ``root`` is given, location-less diagnostics are resolved to a file:line by
-    grepping the named function under the project (fix 1)."""
+    If ``root`` is given, diagnostics are located: bare ``X.gd`` files from the
+    debugger detail rows → res:// paths (resolve_file_locations), and any still
+    location-less warning that names a function → its def via symbol-grep (fix 1)."""
     diagnostics = probe_state_to_diagnostics(state)
     if root:
+        resolve_file_locations(diagnostics, root)
         resolve_symbol_locations(diagnostics, root, finder=finder)
     return _record("editor-probe", diagnostics, exit_code, timed_out, log_path)
 

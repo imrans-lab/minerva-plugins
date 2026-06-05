@@ -139,6 +139,57 @@ class UnprefixedParseTest(unittest.TestCase):
         self.assertEqual(rec["counts"]["warning"], 2)
 
 
+class DebuggerDetailTest(unittest.TestCase):
+    """Debugger error-tree rows + detail children → located diagnostics, using the
+    EXACT shape from the live Minerva HITL (await + autocoder warnings)."""
+
+    def _state(self):
+        return {"debugger": {"rows": [
+            {  # GDScript::reload warning — location only in the <GDScript Source> child
+                "text": '0:00:02:941 GDScript::reload: "await" keyword is unnecessary because the expression isn\'t a coroutine nor a signal.',
+                "details": [
+                    "<GDScript Error>REDUNDANT_AWAIT",
+                    "<GDScript Source>MCPEditorTools.gd:344 @ GDScript::reload()",
+                ],
+            },
+            {  # push_warning — location is in the top text + the stack trace
+                "text": "0:00:06:940 AutocoderAdapter.gd:422 @ list_generation_models(): List generation models returned empty array",
+                "details": [
+                    "<C++ Source> core/variant/variant_utility.cpp:1034 @ push_warning()",
+                    "<Stack Trace> AutocoderAdapter.gd:422 @ list_generation_models()",
+                    "Core.gd:645 @ receive()",
+                ],
+            },
+        ]}}
+
+    def test_extracts_bare_file_line_from_text_and_details(self):
+        diags = gd.probe_state_to_diagnostics(self._state())
+        self.assertEqual(len(diags), 2)
+        self.assertEqual(diags[0]["file"], "MCPEditorTools.gd")  # from the detail row
+        self.assertEqual(diags[0]["line"], 344)
+        self.assertEqual(diags[1]["file"], "AutocoderAdapter.gd")  # from the top text
+        self.assertEqual(diags[1]["line"], 422)
+
+    def test_resolves_bare_filenames_to_res_paths(self):
+        d = tempfile.mkdtemp(prefix="ct_dbgdetail_")
+        try:
+            Path(d, "Scripts").mkdir()
+            Path(d, "Scripts", "MCPEditorTools.gd").write_text("extends Node\n")
+            Path(d, "AutocoderAdapter.gd").write_text("extends Node\n")
+            rec = gd.diagnostics_record_from_probe(self._state(), root=d)
+            by_msg = {d2["file"]: d2 for d2 in rec["diagnostics"]}
+            self.assertEqual(by_msg["res://Scripts/MCPEditorTools.gd"]["line"], 344)
+            self.assertTrue(by_msg["res://Scripts/MCPEditorTools.gd"]["user_fixable"])
+            self.assertEqual(by_msg["res://AutocoderAdapter.gd"]["line"], 422)
+            self.assertTrue(by_msg["res://AutocoderAdapter.gd"]["user_fixable"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_non_warning_tree_noise_skipped(self):
+        state = {"debugger": {"rows": [{"text": "Monitors", "details": ["FPS 60", "Memory 1.2 GB"]}]}}
+        self.assertEqual(gd.probe_state_to_diagnostics(state), [])
+
+
 class SymbolResolutionTest(unittest.TestCase):
     """Fix 1: resolve a file:line for location-less editor-probe warnings (019e988adc59)."""
 
@@ -231,7 +282,7 @@ class SymbolResolutionTest(unittest.TestCase):
 
     def test_debugger_only_state_unchanged(self):
         # Backward compat: no script_editor section → debugger rows as before.
-        state = {"debugger": {"rows": [{"severity": "warning", "text": "plain warning"}]}}
+        state = {"debugger": {"rows": [{"severity": "warning", "text": "GDScript::reload: plain warning"}]}}
         diags = gd.probe_state_to_diagnostics(state)
         self.assertEqual(len(diags), 1)
         self.assertIsNone(diags[0]["file"])
@@ -268,7 +319,8 @@ class SymbolResolutionTest(unittest.TestCase):
         d = tempfile.mkdtemp(prefix="ct_probe_resolve_")
         try:
             Path(d, "Canvas.gd").write_text("extends Node2D\n\nfunc _draw_line_marker(a, b):\n\tpass\n")
-            state = {"debugger": {"rows": [{"severity": "warning", "text": self.CE_SIZE}]}}
+            state = {"debugger": {"rows": [{"severity": "warning",
+                "text": "0:00:09:547 GDScript::reload: " + self.CE_SIZE}]}}
             rec = gd.diagnostics_record_from_probe(state, root=d)
             diag = rec["diagnostics"][0]
             self.assertEqual(diag["file"], "res://Canvas.gd")
