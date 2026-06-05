@@ -87,6 +87,56 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(diags[0]["message"], "x")
 
 
+class UnprefixedParseTest(unittest.TestCase):
+    """Curated unprefixed Godot diagnostics (019e988adc59) — the Unicode NUL line."""
+
+    def test_unicode_parse_error_captured_as_warning(self):
+        text = "Unicode parsing error, some characters were replaced (U+FFFD): Unexpected NUL character\n"
+        diags = gd.parse_godot_output(text)
+        self.assertEqual(len(diags), 1)
+        self.assertEqual(diags[0]["severity"], "warning")
+        self.assertIn("Unicode parsing error", diags[0]["message"])
+        self.assertIsNone(diags[0]["file"])
+        self.assertFalse(diags[0]["user_fixable"])
+
+    def test_benign_lines_are_not_overmatched(self):
+        # Normal engine chatter must NOT become diagnostics.
+        text = (
+            "Loading resource: res://assets/icons/spinner_progress.png\n"
+            "[SingletonObject] Docket initialized (1 projects)\n"
+            "Selected provider: gpt-5.5\n"
+        )
+        self.assertEqual(gd.parse_godot_output(text), [])
+
+    def test_mixed_prefixed_and_unprefixed_real_sample(self):
+        # Representative of the Minerva headless init/exit output.
+        text = (
+            "Loading resource: res://assets/icons/spinner_progress.png\n"
+            "Unicode parsing error, some characters were replaced (U+FFFD): Unexpected NUL character\n"
+            "ERROR: 29 RID allocations of type 'DummyTexture' were leaked at exit.\n"
+            "WARNING: ObjectDB instances leaked at exit (run with --verbose for details).\n"
+            "     at: cleanup (core/object/object.cpp:2641)\n"
+        )
+        diags = gd.parse_godot_output(text)
+        # unicode(warning) + RID(error) + ObjectDB(warning w/ at:) = 3; "Loading" dropped.
+        self.assertEqual(len(diags), 3)
+        sevs = [d["severity"] for d in diags]
+        self.assertEqual(sevs, ["warning", "error", "warning"])
+        # The unprefixed one carries no location; the ObjectDB one does.
+        self.assertIsNone(diags[0]["file"])
+        self.assertEqual(diags[2]["file"], "core/object/object.cpp")
+        self.assertEqual(diags[2]["line"], 2641)
+
+    def test_record_counts_include_unprefixed(self):
+        text = (
+            "Unicode parsing error: Unexpected NUL character\n"
+            "Unicode parsing error: Unexpected NUL character\n"
+        )
+        rec = gd.diagnostics_record(
+            source="headless-stderr", output=text, exit_code=0, timed_out=False)
+        self.assertEqual(rec["counts"]["warning"], 2)
+
+
 class RecordTest(unittest.TestCase):
     def test_counts_and_shape(self):
         text = (

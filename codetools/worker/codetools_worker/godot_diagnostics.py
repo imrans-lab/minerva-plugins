@@ -48,6 +48,18 @@ _SEVERITY = {
     "SCRIPT ERROR": "script_error",
 }
 
+# Curated Godot diagnostics that print WITHOUT a SEVERITY: prefix and so are
+# missed by _HEADER_RE (019e988adc59). Each entry is (regex, severity). These
+# have no `at:` location, so file/line stay None and user_fixable is False
+# (they're engine-level, not attributable to a res:// script). Keep this list
+# tight + observed — speculative patterns risk false positives. Extend as new
+# unprefixed lines are seen in the wild.
+_UNPREFIXED_PATTERNS = [
+    # Resource loader hits embedded NUL bytes while parsing text (seen 4x in the
+    # Minerva headless probe 2026-06-05).
+    (re.compile(r"^Unicode parsing error\b"), "warning"),
+]
+
 
 class RunResult(NamedTuple):
     """What a runner returns: combined output + how the process ended."""
@@ -74,6 +86,18 @@ def parse_godot_output(text: str) -> list[dict[str, Any]]:
     while i < len(lines):
         header = _HEADER_RE.match(lines[i])
         if not header:
+            # Not a SEVERITY:-prefixed line — check the curated unprefixed set.
+            for pattern, severity in _UNPREFIXED_PATTERNS:
+                if pattern.search(lines[i]):
+                    diagnostics.append({
+                        "severity": severity,
+                        "message": lines[i].strip(),
+                        "file": None,
+                        "line": None,
+                        "function": None,
+                        "user_fixable": False,
+                    })
+                    break
             i += 1
             continue
         sev_raw = header.group("sev")
