@@ -236,6 +236,34 @@ class SymbolResolutionTest(unittest.TestCase):
         self.assertEqual(len(diags), 1)
         self.assertIsNone(diags[0]["file"])
 
+    def test_sweep_yields_per_script_warnings(self):
+        # The automatic open-scripts sweep: warnings for MANY scripts, each located.
+        state = {"script_editor": {"current_script": "res://A.gd", "warnings": [], "sweep": {
+            "nonce": "scan-1",
+            "scripts": [
+                {"script": "res://Autoload.gd", "warnings": [
+                    {"line": 478, "code": "REDUNDANT_AWAIT", "message": '"await" keyword is unnecessary.'}]},
+                {"script": "res://B.gd", "warnings": [
+                    {"line": 12, "code": "UNUSED_SIGNAL", "message": 'The signal "x" is never used.'}]},
+            ]}}}
+        diags = gd.probe_state_to_diagnostics(state)
+        self.assertEqual(len(diags), 2)
+        by_file = {d["file"]: d for d in diags}
+        self.assertEqual(by_file["res://Autoload.gd"]["line"], 478)
+        self.assertTrue(by_file["res://Autoload.gd"]["user_fixable"])
+        self.assertEqual(by_file["res://B.gd"]["line"], 12)
+
+    def test_sweep_and_current_dedup(self):
+        # Same script appears as current AND in the sweep — collapse to one.
+        state = {"script_editor": {
+            "current_script": "res://A.gd",
+            "warnings": [{"line": 10, "message": "dup warning here"}],
+            "sweep": {"nonce": "n", "scripts": [
+                {"script": "res://A.gd", "warnings": [{"line": 10, "message": "dup warning here"}]}]}}}
+        diags = gd.probe_state_to_diagnostics(state)
+        self.assertEqual(len(diags), 1)
+        self.assertEqual(diags[0]["line"], 10)
+
     def test_record_from_probe_resolves_with_root(self):
         d = tempfile.mkdtemp(prefix="ct_probe_resolve_")
         try:

@@ -2,13 +2,30 @@
 extends EditorPlugin
 
 const OUTPUT_PATH := "res://.codetools/godot_probe/debugger_state.json"
+const SCAN_REQUEST_PATH := "res://.codetools/godot_probe/scan_request.json"
 const CAPTURE_INTERVAL_SECONDS := 0.5
+const SWEEP_SETTLE_FRAMES := 3
 const MAX_TEXT_LENGTH := 1200
 const MAX_OUTPUT_TEXT_LENGTH := 20000
 const MAX_DIAGNOSTIC_ROWS := 40
 const DEBUGGER_REGION_HEIGHT := 520.0
 
 var _elapsed := 0.0
+
+# Automatic open-scripts sweep (fix 2 follow-up, 019e988adc59): on a worker
+# request (scan_request.json), cycle every open script through the active editor
+# — letting each one's warnings panel populate — scrape it, then RESTORE the
+# user's original script. A frame-based state machine so warnings have time to
+# settle after each switch; runs ONLY on request (never on the passive cadence)
+# so it doesn't hijack focus.
+var _sweep_active := false
+var _sweep_scripts: Array = []
+var _sweep_index := 0
+var _sweep_results: Array = []
+var _sweep_saved: Script = null
+var _sweep_settle := 0
+var _sweep_nonce := ""
+var _last_sweep: Dictionary = {}
 
 
 func _enter_tree() -> void:
@@ -21,11 +38,82 @@ func _exit_tree() -> void:
 
 
 func _process(delta: float) -> void:
+	if _sweep_active:
+		_sweep_step()  # run at frame rate while sweeping (not gated by the 0.5s cadence)
+		return
 	_elapsed += delta
 	if _elapsed < CAPTURE_INTERVAL_SECONDS:
 		return
 	_elapsed = 0.0
+	_check_scan_request()
 	_capture_debugger_state()
+
+
+func _check_scan_request() -> void:
+	if not FileAccess.file_exists(SCAN_REQUEST_PATH):
+		return
+	var f := FileAccess.open(SCAN_REQUEST_PATH, FileAccess.READ)
+	if f == null:
+		return
+	var txt := f.get_as_text()
+	f.close()
+	var data: Variant = JSON.parse_string(txt)
+	if not data is Dictionary:
+		return
+	var nonce := str((data as Dictionary).get("nonce", ""))
+	if nonce == "" or nonce == _sweep_nonce:
+		return  # already handled this request
+	_begin_sweep(nonce)
+
+
+func _begin_sweep(nonce: String) -> void:
+	var ei := get_editor_interface()
+	var se := ei.get_script_editor() if ei else null
+	if se == null:
+		return
+	_sweep_nonce = nonce
+	_sweep_saved = se.get_current_script()
+	_sweep_scripts = se.get_open_scripts()
+	_sweep_index = 0
+	_sweep_results = []
+	_sweep_active = true
+	_sweep_goto_current()
+
+
+func _sweep_goto_current() -> void:
+	if _sweep_index >= _sweep_scripts.size():
+		return
+	var scr: Script = _sweep_scripts[_sweep_index]
+	if scr != null:
+		get_editor_interface().edit_script(scr)
+	_sweep_settle = SWEEP_SETTLE_FRAMES
+
+
+func _sweep_step() -> void:
+	if _sweep_index >= _sweep_scripts.size():
+		_finish_sweep()
+		return
+	if _sweep_settle > 0:
+		_sweep_settle -= 1
+		return
+	var scr: Script = _sweep_scripts[_sweep_index]
+	var path := scr.resource_path if scr else ""
+	_sweep_results.append({"script": path, "warnings": _scrape_current_warnings()})
+	_sweep_index += 1
+	if _sweep_index < _sweep_scripts.size():
+		_sweep_goto_current()
+	else:
+		_finish_sweep()
+
+
+func _finish_sweep() -> void:
+	if _sweep_saved != null:
+		get_editor_interface().edit_script(_sweep_saved)  # restore the user's script
+	_last_sweep = {"nonce": _sweep_nonce, "scripts": _sweep_results}
+	_sweep_active = false
+	if FileAccess.file_exists(SCAN_REQUEST_PATH):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(SCAN_REQUEST_PATH))
+	_capture_debugger_state()  # publish the sweep result immediately
 
 
 func _capture_debugger_state() -> void:
@@ -61,17 +149,24 @@ func _read_script_editor_warnings() -> Dictionary:
 	var result := {
 		"schema": "codetools.godot.script_editor_warnings.v1",
 		"current_script": "",
-		"warnings": [],
+		"warnings": _scrape_current_warnings(),
+		"sweep": _last_sweep,
 	}
 	var ei := get_editor_interface()
-	if ei == null:
-		return result
-	var se := ei.get_script_editor()
+	var se := ei.get_script_editor() if ei else null
+	if se != null:
+		var cur: Script = se.get_current_script()
+		if cur != null:
+			result["current_script"] = cur.resource_path
+	return result
+
+
+func _scrape_current_warnings() -> Array:
+	var warnings: Array = []
+	var ei := get_editor_interface()
+	var se := ei.get_script_editor() if ei else null
 	if se == null:
-		return result
-	var cur: Script = se.get_current_script()
-	if cur != null:
-		result["current_script"] = cur.resource_path
+		return warnings
 	var panels: Array = []
 	_collect_warning_panels(se, panels)
 	var seen := {}
@@ -85,8 +180,8 @@ func _read_script_editor_warnings() -> Dictionary:
 			if seen.has(key):
 				continue
 			seen[key] = true
-			result["warnings"].append(parsed)
-	return result
+			warnings.append(parsed)
+	return warnings
 
 
 func _collect_warning_panels(node: Node, out: Array) -> void:

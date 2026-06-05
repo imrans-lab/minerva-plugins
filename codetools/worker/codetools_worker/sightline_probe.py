@@ -527,6 +527,41 @@ def _read_probe_state(project_path: Path):
         return None
 
 
+def _trigger_open_scripts_sweep(project_path: Path, timeout_seconds: float = 30.0):
+    """Ask the live probe to sweep every open script (worker→probe request channel,
+    bug 019e988adc59). Write a nonced scan_request.json next to debugger_state.json;
+    the probe sees it on its next tick, cycles the open scripts (restoring focus),
+    and publishes script_editor.sweep with the matching nonce. Poll until it lands.
+    Returns the swept state, or None on timeout."""
+    import time
+
+    out_dir = _godot_plugin._probe_output_path(project_path).parent
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    req_path = out_dir / "scan_request.json"
+    nonce = "scan-%.6f" % time.time()
+    try:
+        req_path.write_text(json.dumps({"nonce": nonce}), encoding="utf-8")
+    except OSError:
+        return None
+    deadline = time.time() + max(5.0, timeout_seconds)
+    while time.time() < deadline:
+        time.sleep(0.5)
+        state = _read_probe_state(project_path)
+        sweep = ((state or {}).get("script_editor") or {}).get("sweep") or {}
+        if str(sweep.get("nonce")) == nonce:
+            return state
+    # Timed out — clear the stale request so it doesn't fire later.
+    try:
+        if req_path.exists():
+            req_path.unlink()
+    except OSError:
+        pass
+    return None
+
+
 def _read_log_tail(log_path, n: int = 12) -> str:
     if not log_path:
         return "(no log)"
@@ -567,8 +602,15 @@ def _run_editor_assist(params: dict, project_path: Path) -> dict:
     # 1. Probe already reporting (e.g. a human opened the editor) → capture, no launch.
     status = _godot_plugin._probe_status(project_path)
     if status.get("loaded") or (status.get("output_exists") and status.get("output_fresh")):
-        return _editor_probe_envelope(
-            project_path, _read_probe_state(project_path), probe_loaded=True)
+        state = _read_probe_state(project_path)
+        # Automatic sweep: ask the probe to cycle every open script so we get
+        # ALL open scripts' warnings (with exact lines), not just the focused one.
+        if bool(params.get("scan_open_scripts", False)):
+            swept = _trigger_open_scripts_sweep(
+                project_path, _as_float(params.get("timeout_seconds"), 30.0))
+            if swept is not None:
+                state = swept
+        return _editor_probe_envelope(project_path, state, probe_loaded=True)
 
     # 2. A launch is needed — but a GUI editor needs a display. Don't launch blind.
     display_ok, why = _editor_display_available()

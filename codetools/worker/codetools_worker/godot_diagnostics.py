@@ -201,27 +201,43 @@ def _debugger_rows_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str
     return diagnostics
 
 
+def _warning_entry_to_diag(warning: dict, script) -> dict[str, Any] | None:
+    """One script-editor warnings-panel entry ({line, code, message}) → diagnostic
+    with the exact res:// file:line (file = the script it belongs to)."""
+    message = str(warning.get("message") or "").strip()
+    if not message:
+        return None
+    raw_line = warning.get("line")
+    line_ = int(raw_line) if isinstance(raw_line, (int, float)) else None
+    return {
+        "severity": "warning",
+        "message": message,
+        "file": script,
+        "line": line_,
+        "function": None,
+        "user_fixable": bool(script and str(script).startswith("res://")),
+        "source_panel": "script_editor",
+    }
+
+
 def _script_editor_diagnostics(state: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Script-editor Warnings-panel entries (fix 2) → diagnostics WITH the exact
-    res:// file:line (file = the open script the probe captured)."""
+    """Script-editor warnings (fix 2) → diagnostics WITH exact res:// file:line.
+    Covers the current active script AND the automatic open-scripts sweep (each
+    {script, warnings:[…]}). Dedup in probe_state_to_diagnostics collapses overlap."""
     se = (state or {}).get("script_editor") or {}
-    script = se.get("current_script") or None
     diagnostics: list[dict[str, Any]] = []
+    current = se.get("current_script") or None
     for warning in se.get("warnings") or []:
-        message = str(warning.get("message") or "").strip()
-        if not message:
-            continue
-        raw_line = warning.get("line")
-        line_ = int(raw_line) if isinstance(raw_line, (int, float)) else None
-        diagnostics.append({
-            "severity": "warning",
-            "message": message,
-            "file": script,
-            "line": line_,
-            "function": None,
-            "user_fixable": bool(script and str(script).startswith("res://")),
-            "source_panel": "script_editor",
-        })
+        diag = _warning_entry_to_diag(warning, current)
+        if diag:
+            diagnostics.append(diag)
+    sweep = se.get("sweep") or {}
+    for entry in sweep.get("scripts") or []:
+        path = entry.get("script") or None
+        for warning in entry.get("warnings") or []:
+            diag = _warning_entry_to_diag(warning, path)
+            if diag:
+                diagnostics.append(diag)
     return diagnostics
 
 

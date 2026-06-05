@@ -108,6 +108,10 @@ var Inspect = ToolSpec{
 				"type": "boolean",
 				"description": "run headless: pass --verbose (e.g. to detail ObjectDB-leak instances). Default false."
 			},
+			"scan_open_scripts": {
+				"type": "boolean",
+				"description": "run mode=editor-assist: automatically sweep EVERY open script (the probe briefly cycles each through the editor, restoring focus) so you get all open scripts' GDScript warnings with exact file:line — not just the focused script. Default false."
+			},
 			"godot_bin": {
 				"type": "string",
 				"description": "run: Godot binary to invoke (default 'godot' on PATH)."
