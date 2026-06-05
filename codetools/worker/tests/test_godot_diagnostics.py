@@ -6,6 +6,8 @@ classification. The headless driver is exercised with an injected runner so no
 real Godot is spawned.
 """
 
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -135,6 +137,117 @@ class UnprefixedParseTest(unittest.TestCase):
         rec = gd.diagnostics_record(
             source="headless-stderr", output=text, exit_code=0, timed_out=False)
         self.assertEqual(rec["counts"]["warning"], 2)
+
+
+class SymbolResolutionTest(unittest.TestCase):
+    """Fix 1: resolve a file:line for location-less editor-probe warnings (019e988adc59)."""
+
+    CE_SIZE = ('The parameter "ce_size" is never used in the function '
+               '"_draw_line_marker()". If this is intended, prefix it with "_ce_size".')
+
+    def test_function_names_extracted(self):
+        self.assertEqual(gd._function_names_in_message(self.CE_SIZE), ["_draw_line_marker"])
+        self.assertEqual(gd._function_names_in_message('"await" keyword is unnecessary'), [])
+
+    def test_resolution_fills_location(self):
+        diags = [{"severity": "warning", "message": self.CE_SIZE, "file": None,
+                  "line": None, "function": None, "user_fixable": False}]
+        finder = lambda root, names: {"_draw_line_marker": ("res://x/Foo.gd", 168)}
+        gd.resolve_symbol_locations(diags, "/proj", finder=finder)
+        self.assertEqual(diags[0]["file"], "res://x/Foo.gd")
+        self.assertEqual(diags[0]["line"], 168)
+        self.assertTrue(diags[0]["user_fixable"])
+        self.assertEqual(diags[0]["resolved_via"], "symbol-grep")
+
+    def test_ambiguous_or_missing_stays_unresolved(self):
+        diags = [{"severity": "warning", "message": self.CE_SIZE, "file": None,
+                  "line": None, "function": None, "user_fixable": False}]
+        gd.resolve_symbol_locations(diags, "/proj", finder=lambda r, n: {})  # no match
+        self.assertIsNone(diags[0]["file"])
+        self.assertFalse(diags[0]["user_fixable"])
+
+    def test_already_located_is_not_touched(self):
+        diags = [{"severity": "warning", "message": self.CE_SIZE,
+                  "file": "res://already.gd", "line": 5, "function": None, "user_fixable": True}]
+        called = {"n": 0}
+        def finder(r, n):
+            called["n"] += 1
+            return {"_draw_line_marker": ("res://x.gd", 1)}
+        gd.resolve_symbol_locations(diags, "/proj", finder=finder)
+        self.assertEqual(diags[0]["file"], "res://already.gd")  # unchanged
+        self.assertEqual(called["n"], 0)  # no work when nothing is unresolved
+
+    def test_build_func_index_unique_match(self):
+        d = tempfile.mkdtemp(prefix="ct_funcidx_")
+        try:
+            Path(d, "a.gd").write_text("extends Node\n\nfunc _draw_line_marker(x):\n\tpass\n")
+            Path(d, "b.gd").write_text("func other():\n\tpass\n")
+            idx = gd._build_func_index(d, {"_draw_line_marker", "other", "missing"})
+            self.assertEqual(idx["_draw_line_marker"], ("res://a.gd", 3))
+            self.assertEqual(idx["other"], ("res://b.gd", 1))
+            self.assertNotIn("missing", idx)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_build_func_index_ambiguous_omitted(self):
+        d = tempfile.mkdtemp(prefix="ct_funcidx2_")
+        try:
+            Path(d, "a.gd").write_text("func dup():\n\tpass\n")
+            Path(d, "b.gd").write_text("func dup():\n\tpass\n")
+            idx = gd._build_func_index(d, {"dup"})
+            self.assertNotIn("dup", idx)  # ambiguous → not guessed
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_script_editor_warnings_have_exact_line(self):
+        state = {"script_editor": {
+            "current_script": "res://Scripts/Foo.gd",
+            "warnings": [
+                {"line": 172, "code": "UNUSED_PARAMETER", "message": 'The parameter "ce_size" is never used.'},
+                {"line": 88, "code": "UNNECESSARY_AWAIT", "message": '"await" keyword is unnecessary.'},
+            ],
+        }}
+        diags = gd._script_editor_diagnostics(state)
+        self.assertEqual(len(diags), 2)
+        self.assertEqual(diags[0]["file"], "res://Scripts/Foo.gd")
+        self.assertEqual(diags[0]["line"], 172)
+        self.assertTrue(diags[0]["user_fixable"])
+        self.assertEqual(diags[0]["source_panel"], "script_editor")
+        # The un-named await warning now HAS a line (the fix-1 grep couldn't get it).
+        self.assertEqual(diags[1]["line"], 88)
+
+    def test_dedup_prefers_script_editor_line_over_debugger(self):
+        # SAME warning in both panels — debugger (no line) + script-editor (line 172).
+        state = {
+            "debugger": {"rows": [{"severity": "warning",
+                "text": '0:00:09:547 GDScript::reload: The parameter "ce_size" is never used in "_draw_line_marker()".'}]},
+            "script_editor": {"current_script": "res://Foo.gd", "warnings": [
+                {"line": 172, "message": 'The parameter "ce_size" is never used in "_draw_line_marker()".'}]},
+        }
+        diags = gd.probe_state_to_diagnostics(state)
+        self.assertEqual(len(diags), 1)  # collapsed
+        self.assertEqual(diags[0]["line"], 172)
+        self.assertEqual(diags[0]["file"], "res://Foo.gd")
+
+    def test_debugger_only_state_unchanged(self):
+        # Backward compat: no script_editor section → debugger rows as before.
+        state = {"debugger": {"rows": [{"severity": "warning", "text": "plain warning"}]}}
+        diags = gd.probe_state_to_diagnostics(state)
+        self.assertEqual(len(diags), 1)
+        self.assertIsNone(diags[0]["file"])
+
+    def test_record_from_probe_resolves_with_root(self):
+        d = tempfile.mkdtemp(prefix="ct_probe_resolve_")
+        try:
+            Path(d, "Canvas.gd").write_text("extends Node2D\n\nfunc _draw_line_marker(a, b):\n\tpass\n")
+            state = {"debugger": {"rows": [{"severity": "warning", "text": self.CE_SIZE}]}}
+            rec = gd.diagnostics_record_from_probe(state, root=d)
+            diag = rec["diagnostics"][0]
+            self.assertEqual(diag["file"], "res://Canvas.gd")
+            self.assertEqual(diag["line"], 3)
+            self.assertTrue(diag["user_fixable"])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class RecordTest(unittest.TestCase):

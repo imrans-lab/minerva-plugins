@@ -40,6 +40,7 @@ func _capture_debugger_state() -> void:
 		"source": "godot_editor_probe",
 		"debugger": debugger_state,
 		"output_console": output_console_state,
+		"script_editor": _read_script_editor_warnings(),
 		"provenance": {
 			"adapter": "godot_editor_plugin",
 			"plugin_id": "codetools_probe",
@@ -47,6 +48,75 @@ func _capture_debugger_state() -> void:
 		}
 	}
 	_write_json(state)
+
+
+# Script-editor Warnings panel scrape (fix 2, bug 019e988adc59). The reload
+# warnings in the Debugger/Output have no res:// line; the script editor's
+# warnings panel shows "Line N (CODE): message" for the CURRENT open script with
+# the real line. file = the current script's path (read via EditorInterface).
+var _warning_re: RegEx = null
+
+
+func _read_script_editor_warnings() -> Dictionary:
+	var result := {
+		"schema": "codetools.godot.script_editor_warnings.v1",
+		"current_script": "",
+		"warnings": [],
+	}
+	var ei := get_editor_interface()
+	if ei == null:
+		return result
+	var se := ei.get_script_editor()
+	if se == null:
+		return result
+	var cur: Script = se.get_current_script()
+	if cur != null:
+		result["current_script"] = cur.resource_path
+	var panels: Array = []
+	_collect_warning_panels(se, panels)
+	var seen := {}
+	for rtl in panels:
+		var txt: String = rtl.get_parsed_text() if rtl.has_method("get_parsed_text") else str(rtl.text)
+		for raw_line in txt.split("\n"):
+			var parsed := _parse_warning_line(raw_line)
+			if parsed.is_empty():
+				continue
+			var key := str(parsed.get("line")) + "|" + str(parsed.get("message"))
+			if seen.has(key):
+				continue
+			seen[key] = true
+			result["warnings"].append(parsed)
+	return result
+
+
+func _collect_warning_panels(node: Node, out: Array) -> void:
+	if node == null:
+		return
+	if node is RichTextLabel:
+		var rtl := node as RichTextLabel
+		var t: String = rtl.get_parsed_text() if rtl.has_method("get_parsed_text") else str(rtl.text)
+		# The warnings panel lists "Line N (CODE): message" entries.
+		if t.find("Line ") != -1 and t.find("):") != -1:
+			out.append(rtl)
+	for child in node.get_children():
+		_collect_warning_panels(child, out)
+
+
+func _parse_warning_line(line: String) -> Dictionary:
+	var t := line.strip_edges()
+	if not t.begins_with("Line "):
+		return {}
+	if _warning_re == null:
+		_warning_re = RegEx.new()
+		_warning_re.compile("^Line\\s+(\\d+)\\s*\\(([^)]*)\\):\\s*(.*)$")
+	var m := _warning_re.search(t)
+	if m == null:
+		return {}
+	return {
+		"line": int(m.get_string(1)),
+		"code": m.get_string(2),
+		"message": m.get_string(3),
+	}
 
 
 func _read_debugger_state(root: Control) -> Dictionary:

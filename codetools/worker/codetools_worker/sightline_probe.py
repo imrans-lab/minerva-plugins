@@ -540,7 +540,8 @@ def _read_log_tail(log_path, n: int = 12) -> str:
 def _editor_probe_envelope(project_path, state, *, probe_loaded, editor_pid=None,
                            log_path=None, follow_ups=None) -> dict:
     """Normalize a probe debugger_state.json into the godot_diagnostics envelope."""
-    record = godot_diagnostics.diagnostics_record_from_probe(state, log_path=log_path)
+    record = godot_diagnostics.diagnostics_record_from_probe(
+        state, log_path=log_path, root=str(project_path))
     record["editor_pid"] = editor_pid
     record["probe_loaded"] = probe_loaded
     counts = record["counts"]

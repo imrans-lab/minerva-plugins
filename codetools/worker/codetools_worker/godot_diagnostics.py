@@ -172,14 +172,10 @@ def diagnostics_record(
     return _record(source, parse_godot_output(output), exit_code, timed_out, log_path)
 
 
-def probe_state_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Map a sightline editor-probe debugger_state.json into diagnostics.
-
-    The probe scrapes the editor's Debugger panel labels, which carry a
-    pre-classified ``severity`` + raw ``text``. There is usually no structured
-    file:line (it's UI text), so location is best-effort (parse a ``res://…:NN``
-    out of the text when present).
-    """
+def _debugger_rows_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Debugger-panel rows → diagnostics. These carry a pre-classified severity +
+    raw text but usually NO res:// file:line (reload warnings name only the C++
+    GDScript::reload source); best-effort parse a res://…:NN out of the text."""
     diagnostics: list[dict[str, Any]] = []
     debugger = (state or {}).get("debugger") or {}
     for row in debugger.get("rows") or []:
@@ -205,17 +201,149 @@ def probe_state_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str, A
     return diagnostics
 
 
+def _script_editor_diagnostics(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Script-editor Warnings-panel entries (fix 2) → diagnostics WITH the exact
+    res:// file:line (file = the open script the probe captured)."""
+    se = (state or {}).get("script_editor") or {}
+    script = se.get("current_script") or None
+    diagnostics: list[dict[str, Any]] = []
+    for warning in se.get("warnings") or []:
+        message = str(warning.get("message") or "").strip()
+        if not message:
+            continue
+        raw_line = warning.get("line")
+        line_ = int(raw_line) if isinstance(raw_line, (int, float)) else None
+        diagnostics.append({
+            "severity": "warning",
+            "message": message,
+            "file": script,
+            "line": line_,
+            "function": None,
+            "user_fixable": bool(script and str(script).startswith("res://")),
+            "source_panel": "script_editor",
+        })
+    return diagnostics
+
+
+def _dedup_key(message: str) -> str:
+    """Normalize a warning message so the same warning from the Debugger panel and
+    the Script-editor panel collapses to one key (strip timestamp/reload prefix)."""
+    s = message.lower()
+    s = re.sub(r"\d+:\d+:\d+:\d+", "", s)
+    s = re.sub(r"gdscript::reload:\s*", "", s)
+    s = re.sub(r"[^a-z0-9]+", " ", s).strip()
+    return s[:80]
+
+
+def probe_state_to_diagnostics(state: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Map a probe debugger_state.json into diagnostics, merging the Script-editor
+    Warnings panel (exact file:line — fix 2) with the Debugger rows, deduped so the
+    same warning collapses to its best-located copy (script-editor > resolved > none)."""
+    # Script-editor diags first so they WIN ties (they carry the exact line).
+    merged = _script_editor_diagnostics(state) + _debugger_rows_to_diagnostics(state)
+    by_key: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for diag in merged:
+        key = _dedup_key(diag["message"])
+        if key not in by_key:
+            by_key[key] = diag
+            order.append(key)
+        elif by_key[key].get("line") is None and diag.get("line") is not None:
+            by_key[key] = diag  # upgrade to the located copy
+    return [by_key[key] for key in order]
+
+
+# ── Symbol-resolution (fix 1) ──────────────────────────────────────────────
+# Editor-reload GDScript warnings reach the probe with NO res:// file:line (Godot
+# emits them with only the C++ `GDScript::reload` source). But the message usually
+# NAMES a function ("…in the function \"_draw_line_marker()\""), so we resolve the
+# location by grepping `func <name>(` under the project root. Only unique matches
+# are accepted — ambiguous names are left unresolved rather than guessed.
+_FUNC_IN_MSG_RE = re.compile(r'(?:function|method)\s+"(\w+)\(?\)?"')
+_BARE_FUNC_RE = re.compile(r'"(\w+)\(\)"')
+
+
+def _function_names_in_message(message: str) -> list[str]:
+    names: list[str] = []
+    for match in _FUNC_IN_MSG_RE.finditer(message):
+        if match.group(1) not in names:
+            names.append(match.group(1))
+    for match in _BARE_FUNC_RE.finditer(message):
+        if match.group(1) not in names:
+            names.append(match.group(1))
+    return names
+
+
+def _build_func_index(root: str, names: set[str]) -> dict[str, tuple[str, int]]:
+    """Single walk of *.gd under root → {name: (res://path, line)} for each name
+    with EXACTLY ONE `func <name>(` definition (ambiguous → omitted, never guessed)."""
+    if not names:
+        return {}
+    patterns = {
+        name: re.compile(r"^\s*(?:static\s+)?func\s+" + re.escape(name) + r"\s*\(")
+        for name in names
+    }
+    found: dict[str, list[tuple[str, int]]] = {name: [] for name in names}
+    root_path = Path(root)
+    for gd in root_path.rglob("*.gd"):
+        try:
+            text = gd.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rel = "res://" + gd.relative_to(root_path).as_posix()
+        for lineno, line in enumerate(text.splitlines(), 1):
+            for name, pattern in patterns.items():
+                if pattern.match(line):
+                    found[name].append((rel, lineno))
+    return {name: locs[0] for name, locs in found.items() if len(locs) == 1}
+
+
+def resolve_symbol_locations(diagnostics, root, *, finder=None):
+    """Fill file/line for location-less diagnostics by resolving a named function
+    to its `func <name>(` definition under root. finder(root, names) ->
+    {name: (res_path, line)}, injectable for tests. Mutates + returns diagnostics."""
+    unresolved = [d for d in diagnostics if not d.get("file")]
+    if not unresolved:
+        return diagnostics
+    name_to_diags: dict[str, list] = {}
+    for diag in unresolved:
+        for name in _function_names_in_message(str(diag.get("message", ""))):
+            name_to_diags.setdefault(name, []).append(diag)
+    if not name_to_diags:
+        return diagnostics
+    finder = finder or _build_func_index
+    locations = finder(root, set(name_to_diags))
+    for name, diags in name_to_diags.items():
+        loc = locations.get(name)
+        if not loc:
+            continue
+        for diag in diags:
+            if diag.get("file"):
+                continue
+            diag["file"], diag["line"] = loc[0], loc[1]
+            diag["function"] = name
+            diag["user_fixable"] = str(loc[0]).startswith("res://")
+            diag["resolved_via"] = "symbol-grep"
+    return diagnostics
+
+
 def diagnostics_record_from_probe(
     state: dict[str, Any] | None,
     *,
     exit_code: int | None = None,
     timed_out: bool = False,
     log_path: str | None = None,
+    root: str | None = None,
+    finder=None,
 ) -> dict[str, Any]:
-    """Normalized record from a probe debugger_state.json (editor-assist sink)."""
-    return _record(
-        "editor-probe", probe_state_to_diagnostics(state), exit_code, timed_out, log_path
-    )
+    """Normalized record from a probe debugger_state.json (editor-assist sink).
+
+    If ``root`` is given, location-less diagnostics are resolved to a file:line by
+    grepping the named function under the project (fix 1)."""
+    diagnostics = probe_state_to_diagnostics(state)
+    if root:
+        resolve_symbol_locations(diagnostics, root, finder=finder)
+    return _record("editor-probe", diagnostics, exit_code, timed_out, log_path)
 
 
 def _default_runner(command: list[str], timeout_seconds: float) -> RunResult:
