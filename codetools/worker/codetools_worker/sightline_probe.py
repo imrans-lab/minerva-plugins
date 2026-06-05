@@ -504,13 +504,91 @@ def _inspect_run(params: dict) -> dict:
     )
 
 
-def _run_editor_assist(params: dict, project_path: Path) -> dict:
-    """Human-driven sink: launch the editor with the probe, read its scrape.
+def _editor_display_available() -> tuple[bool, str]:
+    """A GUI editor launch needs a display. Linux requires DISPLAY/WAYLAND_DISPLAY
+    (the Minerva plugin worker env has neither — bug 019e987e1d); macOS/Windows
+    always have one."""
+    import platform as _pf
+    if _pf.system().lower() != "linux":
+        return True, ""
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return True, ""
+    return False, "no DISPLAY/WAYLAND_DISPLAY in the plugin environment"
 
-    Launches a Godot editor (auto-installing the probe), the human runs the
-    scene, the probe writes debugger_state.json, and we normalize it to the
-    SAME godot_diagnostics shape as headless (source="editor-probe").
+
+def _read_probe_state(project_path: Path):
+    """Read + parse the probe's debugger_state.json, or None if absent/bad."""
+    output_path = _godot_plugin._probe_output_path(project_path)
+    if not output_path.exists():
+        return None
+    try:
+        return json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _read_log_tail(log_path, n: int = 12) -> str:
+    if not log_path:
+        return "(no log)"
+    try:
+        lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-n:]) or "(empty log)"
+    except OSError:
+        return "(log unavailable)"
+
+
+def _editor_probe_envelope(project_path, state, *, probe_loaded, editor_pid=None,
+                           log_path=None, follow_ups=None) -> dict:
+    """Normalize a probe debugger_state.json into the godot_diagnostics envelope."""
+    record = godot_diagnostics.diagnostics_record_from_probe(state, log_path=log_path)
+    record["editor_pid"] = editor_pid
+    record["probe_loaded"] = probe_loaded
+    counts = record["counts"]
+    fixable = sum(1 for d in record["diagnostics"] if d.get("user_fixable"))
+    summary = (
+        "godot run (editor-probe): %d warning(s), %d error(s), %d script-error(s); "
+        "%d user-fixable; probe_loaded=%s"
+        % (counts.get("warning", 0), counts.get("error", 0),
+           counts.get("script_error", 0), fixable, probe_loaded)
+    )
+    return envelope.ok(summary, artifacts=[record], follow_ups=follow_ups or [])
+
+
+def _run_editor_assist(params: dict, project_path: Path) -> dict:
+    """Capture the editor probe's diagnostics (bug 019e987e1d).
+
+    Auto-launches a GUI editor ONLY if one is needed AND a display is available;
+    otherwise guides a human launch (the Minerva plugin worker has no DISPLAY, so
+    a blind `godot --editor` would die — and used to be masked as "probe did not
+    report"). The human-launch flow works through the same op: open the editor,
+    re-run, and we capture the now-fresh probe output.
     """
+    # 1. Probe already reporting (e.g. a human opened the editor) → capture, no launch.
+    status = _godot_plugin._probe_status(project_path)
+    if status.get("loaded") or (status.get("output_exists") and status.get("output_fresh")):
+        return _editor_probe_envelope(
+            project_path, _read_probe_state(project_path), probe_loaded=True)
+
+    # 2. A launch is needed — but a GUI editor needs a display. Don't launch blind.
+    display_ok, why = _editor_display_available()
+    if not display_ok:
+        record = godot_diagnostics.diagnostics_record_from_probe(None)
+        record["editor_pid"] = None
+        record["probe_loaded"] = False
+        record["needs_human_launch"] = True
+        return envelope.ok(
+            "editor-assist: cannot auto-launch a Godot editor (%s). Open it yourself: "
+            "godot --editor --path %s — then re-run (mode=editor-assist) and I'll capture "
+            "the probe output." % (why, project_path),
+            artifacts=[record],
+            follow_ups=[envelope.follow_up(
+                "minerva_codetools_inspect",
+                "open the editor yourself (no display to auto-launch), then re-run to capture",
+                {"op": "run", "mode": "editor-assist", "project_path": str(project_path)},
+            )],
+        )
+
+    # 3. Display available → launch.
     try:
         launch = _godot_plugin._launch_editor_session(
             {
@@ -522,39 +600,30 @@ def _run_editor_assist(params: dict, project_path: Path) -> dict:
         )
     except (RuntimeError, ValueError) as exc:
         return envelope.error(str(exc), kind="invalid_args")
-    output_path = _godot_plugin._probe_output_path(project_path)
-    state = None
-    if output_path.exists():
-        try:
-            state = json.loads(output_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            state = None
-    record = godot_diagnostics.diagnostics_record_from_probe(
-        state, log_path=launch.get("log_path")
-    )
-    record["editor_pid"] = launch.get("pid")
-    record["probe_loaded"] = launch.get("probe_loaded")
-    counts = record["counts"]
-    fixable = sum(1 for d in record["diagnostics"] if d.get("user_fixable"))
-    summary = (
-        "godot run (editor-probe): %d warning(s), %d error(s), %d script-error(s); "
-        "%d user-fixable; probe_loaded=%s"
-        % (
-            counts.get("warning", 0),
-            counts.get("error", 0),
-            counts.get("script_error", 0),
-            fixable,
-            launch.get("probe_loaded"),
+
+    state = _read_probe_state(project_path)
+    if launch.get("probe_loaded"):
+        return _editor_probe_envelope(
+            project_path, state, probe_loaded=True,
+            editor_pid=launch.get("pid"), log_path=launch.get("log_path"))
+
+    # 4. Probe didn't report — distinguish a DEAD editor from one still loading.
+    pid = launch.get("pid")
+    if pid is not None and not _godot_plugin._pid_alive(pid):
+        return envelope.error(
+            "editor-assist: the launched Godot editor (pid %s) exited without reporting "
+            "— it likely failed to start. Last log lines:\n%s"
+            % (pid, _read_log_tail(launch.get("log_path"))),
+            kind="launch_failed",
         )
-    )
-    follow_ups = []
-    if not launch.get("probe_loaded"):
-        follow_ups.append(envelope.follow_up(
+    return _editor_probe_envelope(
+        project_path, state, probe_loaded=False,
+        editor_pid=pid, log_path=launch.get("log_path"),
+        follow_ups=[envelope.follow_up(
             "minerva_codetools_inspect",
-            "the probe did not report yet; run the scene in the open editor, then re-read",
+            "the probe did not report yet; let the editor finish loading or run the scene, then re-run",
             {"op": "run", "mode": "editor-assist", "project_path": str(project_path)},
-        ))
-    return envelope.ok(summary, artifacts=[record], follow_ups=follow_ups)
+        )])
 
 
 def _inspect_remove_probe(params: dict) -> dict:
