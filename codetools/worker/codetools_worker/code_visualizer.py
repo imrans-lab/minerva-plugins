@@ -509,6 +509,10 @@ def get_diff(params):
     return envelope.ok(
         "%d file(s) changed between %s and %s" % (len(files), base, head_label),
         artifacts=[{"type": "diff", "base": base, "head": head_label,
+                    # repo_path lets a UI build absolute paths from the
+                    # project-relative file paths (e.g. to attach annotations
+                    # to the real source files via document_path).
+                    "repo_path": repo_path,
                     "files": files}],
     )
 

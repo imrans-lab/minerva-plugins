@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>codetools — Code Graph</title>
+<!-- @@D3@@ -->
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body { font-family: 'Menlo', 'Consolas', monospace; background: #1a1a2e; color: #e0e0e0; overflow: hidden; font-size: 12px; }
+button { font-family: inherit; }
+
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* Top bar */
+#topbar { display: flex; align-items: center; gap: 8px; padding: 5px 8px; background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; min-height: 32px; }
+#hamburger { display: none; width: 26px; height: 24px; border: 1px solid #0f3460; background: #1a1a2e; color: #cdd5e6; border-radius: 4px; cursor: pointer; font-size: 13px; flex-shrink: 0; }
+#center-toggle { display: flex; flex-shrink: 0; }
+#center-toggle button { padding: 3px 11px; font-size: 10px; border: 1px solid #0f3460; background: #16213e; color: #8a9ac0; cursor: pointer; }
+#center-toggle button:first-child { border-radius: 4px 0 0 4px; border-right: none; }
+#center-toggle button:last-child { border-radius: 0 4px 4px 0; }
+#center-toggle button.active { background: #0f3460; color: #fff; }
+#center-toggle button:disabled { opacity: 0.4; cursor: default; }
+#topbar .status { color: #fcc419; font-size: 10px; margin-left: auto; flex-shrink: 0; }
+#topbar .status.err { color: #ff6b6b; }
+
+/* Breadcrumb */
+#breadcrumb { display: flex; align-items: center; gap: 4px; padding: 4px 10px; background: #141d33; border-bottom: 1px solid #0f3460; font-size: 11px; flex-shrink: 0; overflow: hidden; white-space: nowrap; }
+#breadcrumb .crumb { color: #7ec8e3; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+#breadcrumb .crumb.static { color: #8a9ac0; cursor: default; }
+#breadcrumb .crumb.cur { color: #e0e0e0; cursor: default; }
+#breadcrumb .sep { color: #3a4a6a; }
+
+#body { flex: 1; display: flex; min-height: 0; position: relative; }
+.panel { display: flex; flex-direction: column; min-height: 0; background: #16213e; }
+.panel-head { padding: 7px 10px; font-size: 11px; border-bottom: 1px solid #0f3460; color: #e94560; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.panel-head .close { margin-left: auto; cursor: pointer; color: #8a9ac0; border: 1px solid #0f3460; background: #1a1a2e; border-radius: 3px; padding: 1px 7px; display: none; }
+#outline-panel { width: 240px; border-right: 1px solid #0f3460; flex-shrink: 0; }
+#center { flex: 1; position: relative; background: #1a1a2e; min-width: 0; }
+#detail-panel { width: 300px; border-left: 1px solid #0f3460; flex-shrink: 0; }
+
+/* Outline */
+#outline-search { width: calc(100% - 16px); margin: 6px 8px 4px; padding: 4px 7px; background: #1a1a2e; border: 1px solid #0f3460; color: #e0e0e0; border-radius: 3px; font-size: 11px; }
+#changed-toggle { margin: 0 8px 6px; padding: 3px 7px; font-size: 10px; border: 1px solid #6a5a10; background: #16213e; color: #fcc419; border-radius: 3px; cursor: pointer; display: none; }
+#changed-toggle.active { background: #3a3410; }
+#outline-tree { flex: 1; overflow-y: auto; padding: 2px 0; user-select: none; }
+.tree-node { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 3px 4px; }
+.tree-node:hover { background: #1a1a3e; }
+.tree-node .toggle { display: inline-block; width: 12px; text-align: center; color: #606080; font-size: 9px; }
+.tree-node.file { color: #8eaacc; } .tree-node.file.changed { color: #fcc419; }
+.tree-node.symbol { color: #b0b0b0; } .tree-node.symbol:hover { color: #fff; }
+.tree-node .kind-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin: 0 5px 0 2px; vertical-align: middle; }
+.tree-node .chg { color: #fcc419; margin-right: 3px; }
+.tree-node.highlighted { background: #0f3460; color: #fff; }
+.tree-children { display: none; } .tree-children.expanded { display: block; }
+
+/* Graph */
+#graph-wrap { position: absolute; inset: 0; }
+#graph-wrap svg { width: 100%; height: 100%; display: block; }
+.node circle { cursor: pointer; stroke-width: 1.5px; }
+.node.selected circle { stroke: #e94560 !important; stroke-width: 3px; }
+.node.highlighted circle { filter: brightness(1.3); } .node.dimmed circle { opacity: 0.1; }
+.node.dead-code circle { stroke: #ff4444; stroke-width: 2px; stroke-dasharray: 3,3; }
+.node.changed circle { stroke: #fcc419 !important; stroke-width: 2.5px; }
+.node text { font-size: 9px; fill: #cdd5e6; pointer-events: none; paint-order: stroke; stroke: #1a1a2e; stroke-width: 2.5px; }
+.edge line { stroke-opacity: 0.18; } .edge.highlighted line { stroke-opacity: 0.75; stroke-width: 2px; } .edge.dimmed line { stroke-opacity: 0.04; }
+#controls-bar { position: absolute; top: 8px; left: 8px; display: flex; gap: 3px; z-index: 30; flex-wrap: wrap; max-width: calc(100% - 16px); }
+#controls-bar button { padding: 3px 8px; font-size: 10px; border: 1px solid #0f3460; background: #16213ecc; color: #a0a0a0; border-radius: 3px; cursor: pointer; }
+#controls-bar button.active { background: #0f3460; color: #e0e0e0; }
+#controls-bar button.mode { border-color: #533483; } #controls-bar button.mode.active { background: #533483; color: #fff; }
+#empty-graph { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: #4a5a7a; text-align: center; padding: 20px; }
+
+/* Changeset overview */
+#changeset-wrap { position: absolute; inset: 0; display: none; flex-direction: column; overflow: auto; }
+#cs-head { padding: 10px 12px; border-bottom: 1px solid #0f3460; }
+#cs-head .total { color: #e0e0e0; font-size: 13px; }
+#cs-head .total .add { color: #51cf66; } #cs-head .total .del { color: #ff6b6b; }
+.cs-file { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid #11192e; cursor: pointer; }
+.cs-file:hover { background: #1a1a3e; }
+.cs-file .st { width: 14px; text-align: center; flex-shrink: 0; font-weight: bold; }
+.cs-file .st.modified { color: #fcc419; } .cs-file .st.added { color: #51cf66; } .cs-file .st.deleted { color: #ff6b6b; } .cs-file .st.renamed { color: #74c0fc; }
+.cs-file .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd5e6; }
+.cs-file .path .dir { color: #5a6a8a; }
+.cs-file .churn { font-size: 10px; flex-shrink: 0; } .cs-file .churn .add { color: #51cf66; } .cs-file .churn .del { color: #ff6b6b; }
+.cs-file .bar { width: 70px; height: 7px; flex-shrink: 0; display: flex; border-radius: 2px; overflow: hidden; background: #11192e; }
+.cs-file .bar .b-add { background: #51cf66; } .cs-file .bar .b-del { background: #ff6b6b; }
+
+/* File diff */
+#diff-wrap { position: absolute; inset: 0; display: none; flex-direction: column; background: #16213e; }
+#diff-toolbar { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+#diff-toolbar .fname { color: #fcc419; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+#diff-toolbar button { padding: 2px 8px; font-size: 10px; border: 1px solid #0f3460; background: #16213e; color: #a0a0a0; border-radius: 3px; cursor: pointer; }
+#diff-toolbar .hunk-n { font-size: 10px; color: #5a6a8a; flex-shrink: 0; }
+#diff-rows { flex: 1; overflow: auto; }
+.diff-row { display: flex; white-space: pre; }
+.diff-row .ln { width: 42px; text-align: right; padding-right: 6px; color: #3a3a55; flex-shrink: 0; user-select: none; }
+.diff-row .mark { width: 14px; text-align: center; flex-shrink: 0; }
+.diff-row .code { flex: 1; padding-left: 6px; color: #9aa0b5; }
+.diff-row.add { background: rgba(81,207,102,0.10); } .diff-row.add .code { color: #b6e6b6; } .diff-row.add .mark { color: #51cf66; }
+.diff-row.del { background: rgba(255,107,107,0.10); } .diff-row.del .code { color: #e6b6b6; } .diff-row.del .mark { color: #ff6b6b; }
+.diff-row.gap { color: #4a5a7a; background: #141d33; font-style: italic; justify-content: center; padding: 2px 0; }
+
+/* Inspector */
+#detail { flex: 1; overflow-y: auto; padding: 10px 12px; line-height: 1.6; }
+#detail .label { color: #e94560; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 10px; }
+#detail .value { color: #e0e0e0; margin-bottom: 2px; word-break: break-word; }
+#detail .sig { color: #7ec8e3; font-size: 10px; } #detail .desc { color: #c0c0c0; font-style: italic; }
+#detail .edge-list { list-style: none; padding: 0; } #detail .edge-list li { padding: 2px 0; color: #b0b0b0; cursor: pointer; font-size: 10px; } #detail .edge-list li:hover { color: #e94560; }
+#detail .muted { color: #606080; }
+
+#scrim { position: absolute; inset: 0; background: rgba(0,0,0,0.5); z-index: 40; display: none; }
+
+/* Comments (annotations) */
+.cmt-badge { display: inline-block; font-size: 9px; color: #fcc419; border: 1px solid #6a5a10; background: #3a3410; border-radius: 3px; padding: 0 4px; margin-left: 6px; cursor: pointer; }
+.cmt-btn { font-size: 10px; border: 1px solid #6a5a10; background: #16213e; color: #fcc419; border-radius: 3px; padding: 2px 8px; cursor: pointer; }
+.diff-row .add-cmt { width: 16px; text-align: center; flex-shrink: 0; color: #3a4a6a; cursor: pointer; visibility: hidden; }
+.diff-row:hover .add-cmt { visibility: visible; } .diff-row .add-cmt:hover { color: #fcc419; }
+.diff-row .cmt-here { color: #fcc419; }
+#cs-comments { border-bottom: 1px solid #0f3460; }
+#cs-comments .hdr { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
+.cmt-item { padding: 6px 12px; border-bottom: 1px solid #11192e; cursor: pointer; }
+.cmt-item:hover { background: #1a1a3e; }
+.cmt-item .ref { color: #fcc419; font-weight: bold; margin-right: 6px; }
+.cmt-item .anchor { color: #5a6a8a; font-size: 10px; }
+.cmt-item .body { color: #cdd5e6; margin-top: 2px; }
+#composer { position: absolute; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,0.55); }
+#composer .box { width: 86%; max-width: 460px; background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 12px; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
+#composer .box h3 { font-size: 12px; color: #fcc419; margin-bottom: 4px; }
+#composer .box .ctx { font-size: 10px; color: #5a6a8a; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#composer textarea { width: 100%; height: 80px; background: #1a1a2e; border: 1px solid #0f3460; color: #e0e0e0; border-radius: 4px; padding: 6px; font-family: inherit; font-size: 12px; resize: vertical; }
+#composer .actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 8px; }
+#composer .actions button { padding: 4px 12px; font-size: 11px; border: 1px solid #0f3460; background: #1a1a2e; color: #cdd5e6; border-radius: 4px; cursor: pointer; }
+#composer .actions .save { background: #3a3410; border-color: #6a5a10; color: #fcc419; }
+
+/* Narrow-first = vertical phone: outline & inspector are slide-over drawers */
+#app.narrow #hamburger { display: block; }
+#app.narrow #outline-panel, #app.narrow #detail-panel { position: absolute; top: 0; bottom: 0; z-index: 50; width: 84%; max-width: 320px; transition: transform 0.18s ease; box-shadow: 0 0 24px rgba(0,0,0,0.6); }
+#app.narrow #outline-panel { left: 0; transform: translateX(-102%); } #app.narrow #outline-panel.open { transform: none; }
+#app.narrow #detail-panel { right: 0; transform: translateX(102%); } #app.narrow #detail-panel.open { transform: none; }
+#app.narrow .panel-head .close { display: block; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <button id="hamburger" title="Outline">&#9776;</button>
+    <span id="center-toggle">
+      <button data-c="graph" class="active">Graph</button>
+      <button data-c="changeset" id="changes-btn" disabled>Changes</button>
+    </span>
+    <span class="status" id="status"></span>
+  </div>
+  <div id="breadcrumb"></div>
+  <div id="body">
+    <div id="scrim"></div>
+    <div class="panel" id="outline-panel">
+      <div class="panel-head">Outline <button class="close" data-close="outline">&#10005;</button></div>
+      <input type="text" id="outline-search" placeholder="Filter…">
+      <button id="changed-toggle">● Changed only</button>
+      <div id="outline-tree"></div>
+    </div>
+    <div id="center">
+      <div id="graph-wrap"><svg></svg><div id="controls-bar"></div><div id="empty-graph"></div></div>
+      <div id="changeset-wrap"><div id="cs-head"></div><div id="cs-comments"></div><div id="cs-list"></div></div>
+      <div id="diff-wrap">
+        <div id="diff-toolbar">
+          <span class="fname" id="diff-fname"></span>
+          <span class="hunk-n" id="hunk-n"></span>
+          <button onclick="gotoHunk(-1)" title="Prev change">▲</button>
+          <button onclick="gotoHunk(1)" title="Next change">▼</button>
+        </div>
+        <div id="diff-rows"></div>
+      </div>
+    </div>
+    <div class="panel" id="detail-panel">
+      <div class="panel-head">Inspector <button class="close" data-close="inspector">&#10005;</button></div>
+      <div id="detail"><p class="muted">Select a symbol to inspect.</p></div>
+    </div>
+    <div id="composer"><div class="box">
+      <h3 id="composer-title">Add comment</h3>
+      <div class="ctx" id="composer-ctx"></div>
+      <textarea id="composer-text" placeholder="Comment… (referenced as C# in chat)"></textarea>
+      <div class="actions"><button onclick="closeComposer()">Cancel</button><button class="save" onclick="saveComposer()">Save comment</button></div>
+    </div></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const KIND_COLORS = { 'function':'#4dabf7','class':'#51cf66','signal':'#fcc419','constant':'#adb5bd','enum':'#cc5de8','variable':'#868e96' };
+const EDGE_COLORS = { 'calls':'#4dabf7','connects':'#51cf66','inherits':'#ff6b6b','preloads':'#ff922b','imports':'#868e96','contains':'#555577','instances':'#e599f7','emits':'#ffa94d' };
+const DASHED = new Set(['instances','emits']);
+const DRY_COLORS = ['#ff6b6b','#4dabf7','#51cf66','#fcc419','#cc5de8','#ff922b','#20c997','#f06595','#74c0fc','#a9e34b','#3bc9db','#ffa94d'];
+const DIFF_CONTEXT = 3, LABEL_MAX = 30;   // show node labels when ≤ this many nodes
+
+const PANEL = window.__MINERVA_PANEL || {};
+let graphData = null, simulation = null, currentMode = 'normal';
+let activeKinds = new Set(['function','class','signal']);
+let activeEdgeTypes = new Set(Object.keys(EDGE_COLORS));
+let selectedNode = null, nodeElements, edgeElements, visibleNodes, visibleEdges;
+let diffByPath = {}, changedFiles = [], showChangedOnly = false;
+let changeStats = {};   // path -> {adds, dels, status}
+let totalAdds = 0, totalDels = 0;
+let centerView = 'graph';   // graph | changeset | filediff
+let currentDiffPath = null, hunkAnchors = [], curHunk = -1;
+let narrow = false;
+let projectName = 'project';
+let repoPath = '', comments = [], refToComment = {}, composerTarget = null;
+
+function eid(x){ return typeof x==='object'?x.id:x; }
+function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function setStatus(m, err){ const el=document.getElementById('status'); el.textContent=m||''; el.classList.toggle('err',!!err); }
+
+// ── Bridge ──
+function dbPath(){ const f=(PANEL.file_path||'').trim(); if(f&&f.endsWith('.db'))return f; const d=(PANEL.data_directory||'').replace(/\/+$/,''); return d?d+'/code_visualizer.db':''; }
+function unwrapEnvelope(d){ let c=d,g=0; while(c&&typeof c==='object'&&g++<8){ if(Array.isArray(c.artifacts)||c.status)return c; if('result' in c){c=c.result;continue;} break;} return c; }
+async function callTool(name,args){ const env=unwrapEnvelope(await window.minerva.call(name,args||{})); if(env&&env.status&&env.status!=='ok')throw new Error((env.error&&env.error.message)||env.summary||('status='+env.status)); return (env&&env.artifacts&&env.artifacts[0])||env; }
+
+// ── Boot ──
+async function boot() {
+  setStatus('Loading…'); initLayout();
+  if (!window.minerva || !window.minerva.call) { setStatus('Bridge unavailable', true); return; }
+  const db = dbPath();
+  if (!db) { setStatus('No db_path (panel context missing)', true); return; }
+  try { const a = await callTool('minerva_codetools_get_graph', { db_path: db });
+    graphData = { nodes:a.nodes||[], edges:a.edges||[], files:a.files||[], analysis:a.analysis||{dead_code_ids:[],dry_signature_groups:{}}, stats:a.stats||{} };
+    projectName = graphData.stats.project_name || 'project';
+  } catch (e) { setStatus('Graph failed: '+e.message, true); return; }
+  buildOutline(); buildControls(); renderGraph(); setStatus('');
+  setCenter('graph');
+  try {
+    const d = await callTool('minerva_codetools_get_diff', { db_path: db });
+    const files = (d && d.files) || [];
+    repoPath = (d && d.repo_path) || '';
+    if (files.length) {
+      diffByPath={}; changedFiles=[]; changeStats={}; totalAdds=0; totalDels=0;
+      files.forEach(f => { diffByPath[f.path]=f; changedFiles.push(f.path);
+        const st = churn(f); changeStats[f.path]=st; totalAdds+=st.adds; totalDels+=st.dels; });
+      changedFiles.sort((a,b)=>(changeStats[b].adds+changeStats[b].dels)-(changeStats[a].adds+changeStats[a].dels));
+      onDiffLoaded();
+    }
+  } catch (e) { /* diff optional */ }
+}
+
+// ── Layout (narrow-first / vertical-phone) ──
+function initLayout() {
+  const app=document.getElementById('app');
+  new ResizeObserver(()=>{ const n=app.clientWidth<720; if(n!==narrow){narrow=n; applyLayout();} }).observe(app);
+  document.getElementById('hamburger').onclick=()=>toggleDrawer('outline');
+  document.getElementById('scrim').onclick=closeDrawers;
+  document.querySelectorAll('.panel-head .close').forEach(b=>b.onclick=closeDrawers);
+  document.querySelectorAll('#center-toggle button').forEach(b=>b.onclick=()=>setCenter(b.dataset.c));
+  document.getElementById('outline-search').oninput=e=>filterOutline(e.target.value.toLowerCase());
+  document.getElementById('changed-toggle').onclick=e=>{ showChangedOnly=!showChangedOnly; e.target.classList.toggle('active',showChangedOnly); buildOutline(); };
+  applyLayout();
+}
+function applyLayout(){ document.getElementById('app').classList.toggle('narrow',narrow); if(!narrow)closeDrawers(); if(simulation&&centerView==='graph')simulation.alpha(0.05).restart(); }
+function toggleDrawer(which){ const op=document.getElementById('outline-panel'),ip=document.getElementById('detail-panel'),sc=document.getElementById('scrim'); const t=which==='outline'?op:ip; const open=!t.classList.contains('open'); op.classList.remove('open'); ip.classList.remove('open'); if(open)t.classList.add('open'); sc.style.display=open?'block':'none'; }
+function openDrawer(which){ if(!narrow)return; toggleDrawerForce(which,true); }
+function toggleDrawerForce(which,open){ const op=document.getElementById('outline-panel'),ip=document.getElementById('detail-panel'); op.classList.remove('open'); ip.classList.remove('open'); if(open)(which==='outline'?op:ip).classList.add('open'); document.getElementById('scrim').style.display=open?'block':'none'; }
+function closeDrawers(){ document.getElementById('outline-panel').classList.remove('open'); document.getElementById('detail-panel').classList.remove('open'); document.getElementById('scrim').style.display='none'; }
+
+function setCenter(v) {
+  if ((v==='changeset'||v==='filediff') && !changedFiles.length) return;
+  centerView = v;
+  document.getElementById('graph-wrap').style.display = v==='graph' ? 'block' : 'none';
+  document.getElementById('changeset-wrap').style.display = v==='changeset' ? 'flex' : 'none';
+  document.getElementById('diff-wrap').style.display = v==='filediff' ? 'flex' : 'none';
+  // Toggle: Graph vs Changes (changeset+filediff both = "Changes")
+  document.querySelectorAll('#center-toggle button').forEach(b=>b.classList.toggle('active', (b.dataset.c==='graph')===(v==='graph')));
+  if (v==='graph' && simulation) simulation.alpha(0.08).restart();
+  renderBreadcrumb();
+}
+
+// ── Breadcrumb ──
+function renderBreadcrumb() {
+  const bc=document.getElementById('breadcrumb'); const parts=[];
+  parts.push(`<span class="crumb" onclick="setCenter('graph')">${esc(projectName)}</span>`);
+  if (centerView==='graph') parts.push(`<span class="sep">›</span><span class="crumb cur">Graph</span>`);
+  else if (centerView==='changeset') parts.push(`<span class="sep">›</span><span class="crumb cur">Changes (${changedFiles.length})</span>`);
+  else if (centerView==='filediff') { parts.push(`<span class="sep">›</span><span class="crumb" onclick="setCenter('changeset')">Changes</span>`); parts.push(`<span class="sep">›</span><span class="crumb cur">${esc((currentDiffPath||'').split('/').pop())}</span>`); }
+  bc.innerHTML = parts.join('');
+}
+
+// ── Outline ──
+function buildOutline() {
+  const tree=document.getElementById('outline-tree'); tree.innerHTML='';
+  const byFile={}; graphData.nodes.forEach(n=>(byFile[n.file]=byFile[n.file]||[]).push(n));
+  let paths=Object.keys(byFile).sort(); if(showChangedOnly)paths=paths.filter(p=>diffByPath[p]);
+  paths.forEach(fp=>{
+    const ch=!!diffByPath[fp];
+    const fd=document.createElement('div'); fd.className='tree-node file'+(ch?' changed':'');
+    fd.innerHTML=`<span class="toggle">▶</span>${ch?'<span class="chg">●</span>':''}${esc(fp.split('/').pop())}`;
+    const kids=document.createElement('div'); kids.className='tree-children';
+    byFile[fp].sort((a,b)=>a.line_start-b.line_start).forEach(sym=>{
+      const s=document.createElement('div'); s.className='tree-node symbol'; s.style.paddingLeft='22px'; s.dataset.id=sym.id;
+      s.innerHTML=`<span class="kind-dot" style="background:${KIND_COLORS[sym.kind]||'#888'}"></span>${esc(sym.name)}`;
+      s.onmouseenter=()=>highlightNode(sym.id); s.onmouseleave=()=>clearHighlight();
+      s.onclick=e=>{ e.stopPropagation(); const n=graphData.nodes.find(v=>v.id===sym.id); if(n)selectNode(n); };
+      kids.appendChild(s);
+    });
+    fd.onclick=()=>{ const ex=kids.classList.toggle('expanded'); fd.querySelector('.toggle').textContent=ex?'▼':'▶'; };
+    if(ch){ kids.classList.add('expanded'); fd.querySelector('.toggle').textContent='▼'; }
+    tree.appendChild(fd); tree.appendChild(kids);
+  });
+}
+function filterOutline(q){ document.querySelectorAll('#outline-tree .tree-node.file').forEach(fd=>{ const kids=fd.nextElementSibling; let any=false; kids.querySelectorAll('.tree-node.symbol').forEach(s=>{ const m=!q||s.textContent.toLowerCase().includes(q); s.style.display=m?'':'none'; if(m)any=true; }); const fm=!q||fd.textContent.toLowerCase().includes(q); fd.style.display=(fm||any)?'':'none'; kids.style.display=(fm||any)?'':'none'; if(q&&any){kids.classList.add('expanded'); fd.querySelector('.toggle').textContent='▼';} }); }
+
+// ── Controls ──
+function buildControls(){ const bar=document.getElementById('controls-bar'); bar.innerHTML='';
+  Object.keys(KIND_COLORS).forEach(k=>{ const b=document.createElement('button'); b.textContent=k; b.className=activeKinds.has(k)?'active':''; b.style.borderColor=KIND_COLORS[k]; b.onclick=()=>{ activeKinds.has(k)?activeKinds.delete(k):activeKinds.add(k); b.classList.toggle('active'); rebuildGraph(); }; bar.appendChild(b); });
+  ['normal','dead_code','dry','coupling'].forEach(m=>{ const b=document.createElement('button'); b.textContent=m.replace('_',' '); b.className='mode'+(currentMode===m?' active':''); b.onclick=()=>{ bar.querySelectorAll('.mode').forEach(x=>x.classList.remove('active')); b.classList.add('active'); currentMode=m; updateMode(); }; bar.appendChild(b); }); }
+
+// ── Graph ──
+function rebuildGraph(){ d3.select('#graph-wrap svg').selectAll('*').remove(); if(simulation)simulation.stop(); selectedNode=null; renderGraph(); if(currentMode!=='normal')updateMode(); }
+function nodeR(d){ return Math.max(3, Math.min(14, 2.5+(d.fan_in||0)*1.2)); }
+function renderGraph() {
+  const wrap=document.getElementById('graph-wrap'); const width=wrap.clientWidth||600,height=wrap.clientHeight||400;
+  const svg=d3.select('#graph-wrap svg').attr('viewBox',[0,0,width,height]); svg.selectAll('*').remove();
+  visibleNodes=graphData.nodes.filter(n=>activeKinds.has(n.kind));
+  const ids=new Set(visibleNodes.map(n=>n.id));
+  visibleEdges=graphData.edges.filter(e=>{const s=eid(e.source),t=eid(e.target);return ids.has(s)&&ids.has(t)&&activeEdgeTypes.has(e.type);}).map(e=>({source:eid(e.source),target:eid(e.target),type:e.type}));
+  const empty=document.getElementById('empty-graph');
+  if(!visibleNodes.length){ empty.style.display='flex'; empty.textContent='No symbols match the current filters.'; return;} else empty.style.display='none';
+  const g=svg.append('g'); const defs=svg.append('defs');
+  Object.entries(EDGE_COLORS).forEach(([t,c])=>defs.append('marker').attr('id',`arrow-${t}`).attr('viewBox','0 -3 6 6').attr('refX',6).attr('refY',0).attr('markerWidth',5).attr('markerHeight',5).attr('orient','auto').append('path').attr('d','M0,-3L6,0L0,3').attr('fill',c));
+  svg.call(d3.zoom().scaleExtent([0.05,12]).on('zoom',ev=>g.attr('transform',ev.transform)));
+  edgeElements=g.append('g').selectAll('.edge').data(visibleEdges).join('g').attr('class','edge');
+  edgeElements.append('line').attr('stroke',d=>EDGE_COLORS[d.type]||'#555').attr('stroke-width',1).attr('stroke-dasharray',d=>DASHED.has(d.type)?'4,3':null).attr('marker-end',d=>`url(#arrow-${d.type})`);
+  nodeElements=g.append('g').selectAll('.node').data(visibleNodes).join('g').attr('class','node')
+    .call(d3.drag().on('start',(e,d)=>{if(!e.active)simulation.alphaTarget(0.2).restart();d.fx=d.x;d.fy=d.y;}).on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y;}).on('end',(e,d)=>{if(!e.active)simulation.alphaTarget(0);d.fx=null;d.fy=null;}));
+  nodeElements.append('circle').attr('r',d=>nodeR(d)).attr('fill',d=>KIND_COLORS[d.kind]||'#888').attr('stroke',d=>d.is_entry_point?'#fff':d3.color(KIND_COLORS[d.kind]||'#888').darker(0.5))
+    .on('click',(ev,d)=>{ev.stopPropagation();selectNode(d);}).on('mouseover',(ev,d)=>{if(!selectedNode)highlightNode(d.id);}).on('mouseout',()=>{if(!selectedNode)clearHighlight();});
+  // Labels: always when few nodes; otherwise on high-degree nodes (the rest show on hover/selection via highlight).
+  const showAll = visibleNodes.length <= LABEL_MAX;
+  nodeElements.append('text').attr('x',d=>nodeR(d)+3).attr('y',3).text(d=>d.name)
+    .style('display',d=> (showAll || (d.fan_in||0)+(d.fan_out||0) >= 6) ? null : 'none');
+  svg.on('click',()=>{ selectedNode=null; clearHighlight(); nodeElements.classed('selected',false); });
+  simulation=d3.forceSimulation(visibleNodes)
+    .force('link',d3.forceLink(visibleEdges).id(d=>d.id).distance(d=>d.type==='contains'?30:d.type==='instances'?60:50).strength(d=>d.type==='contains'?0.5:d.type==='instances'?0.4:0.3))
+    .force('charge',d3.forceManyBody().strength(-90).distanceMax(320))
+    .force('center',d3.forceCenter(width/2,height/2))
+    .force('collision',d3.forceCollide().radius(d=>nodeR(d)+ (showAll?28:6)))   // extra room for labels when shown
+    .force('x',d3.forceX(width/2).strength(0.03)).force('y',d3.forceY(height/2).strength(0.03))
+    .alpha(0.6).alphaDecay(0.06).on('tick',ticked);
+  applyChangedRings();
+  function ticked(){ edgeElements.select('line').each(function(d){ const dx=d.target.x-d.source.x,dy=d.target.y-d.source.y,dist=Math.sqrt(dx*dx+dy*dy)||1,r=nodeR(d.target)+4,ra=(dist-r)/dist; d3.select(this).attr('x1',d.source.x).attr('y1',d.source.y).attr('x2',d.source.x+dx*ra).attr('y2',d.source.y+dy*ra); }); nodeElements.attr('transform',d=>`translate(${d.x},${d.y})`); }
+}
+function highlightNode(id){ if(!nodeElements)return; const conn=new Set([id]); graphData.edges.forEach(e=>{const s=eid(e.source),t=eid(e.target); if(s===id)conn.add(t); if(t===id)conn.add(s);}); nodeElements.classed('highlighted',n=>conn.has(n.id)).classed('dimmed',n=>!conn.has(n.id)); nodeElements.select('text').style('display',n=>conn.has(n.id)?null:(visibleNodes.length<=LABEL_MAX||(n.fan_in||0)+(n.fan_out||0)>=6?null:'none')); edgeElements.classed('highlighted',e=>eid(e.source)===id||eid(e.target)===id).classed('dimmed',e=>eid(e.source)!==id&&eid(e.target)!==id); document.querySelectorAll('.tree-node.symbol').forEach(s=>s.classList.toggle('highlighted',s.dataset.id===id)); }
+function clearHighlight(){ if(selectedNode){highlightNode(selectedNode.id);return;} if(nodeElements){nodeElements.classed('highlighted',false).classed('dimmed',false);} if(edgeElements){edgeElements.classed('highlighted',false).classed('dimmed',false);} document.querySelectorAll('.tree-node.highlighted').forEach(s=>s.classList.remove('highlighted')); }
+function selectNode(d){ selectedNode=d; nodeElements&&nodeElements.classed('selected',n=>n.id===d.id); highlightNode(d.id); updateDetail(d); if(narrow)openDrawer('inspector'); }
+function updateDetail(d){
+  const inc=graphData.edges.filter(e=>eid(e.target)===d.id),out=graphData.edges.filter(e=>eid(e.source)===d.id);
+  const isDead=(graphData.analysis.dead_code_ids||[]).includes(d.id),dry=(graphData.analysis.dry_signature_groups||{})[d.signature_hash];
+  let h=`<div class="label">File</div><div class="value">${esc(d.file)}:${d.line_start}-${d.line_end}${diffByPath[d.file]?' <span class="chg">● changed</span>':''}</div>`;
+  if(diffByPath[d.file]) h+=`<div style="margin:4px 0;"><button onclick="openFileDiff('${esc(d.file)}')" style="font-size:10px;padding:2px 8px;background:#3a3410;border:1px solid #6a5a10;color:#fcc419;border-radius:3px;cursor:pointer;">view diff →</button></div>`;
+  h+=`<div class="label">Symbol</div><div class="value"><strong>${esc(d.name)}</strong> <span style="color:${KIND_COLORS[d.kind]}">(${esc(d.kind)})</span></div>`;
+  if(d.signature) h+=`<div class="label">Signature</div><div class="value sig">${esc(d.signature)}</div>`;
+  h+=`<div class="label">Fan-in / Fan-out</div><div class="value">${d.fan_in||0} in / ${d.fan_out||0} out</div>`;
+  if(d.description) h+=`<div class="label">Description</div><div class="value desc">${esc(d.description)}</div>`;
+  if(d.is_entry_point) h+=`<div class="value" style="color:#51cf66;margin-top:6px;">✓ Entry point</div>`;
+  if(isDead) h+=`<div class="value" style="color:#ff4444;">⚠ Dead-code candidate</div>`;
+  if(dry!==undefined) h+=`<div class="value" style="color:#fcc419;">♲ DRY candidate (group ${dry})</div>`;
+  if(inc.length){ h+=`<div class="label">Called by (${inc.length})</div><ul class="edge-list">`; inc.slice(0,25).forEach(e=>h+=`<li onclick="selectById('${eid(e.source)}')">← ${nameOf(eid(e.source))} <span style="color:${EDGE_COLORS[e.type]}">[${e.type}]</span></li>`); if(inc.length>25)h+=`<li class="muted">… +${inc.length-25}</li>`; h+='</ul>'; }
+  if(out.length){ h+=`<div class="label">Calls (${out.length})</div><ul class="edge-list">`; out.slice(0,25).forEach(e=>h+=`<li onclick="selectById('${eid(e.target)}')">→ ${nameOf(eid(e.target))} <span style="color:${EDGE_COLORS[e.type]}">[${e.type}]</span></li>`); if(out.length>25)h+=`<li class="muted">… +${out.length-25}</li>`; h+='</ul>'; }
+  document.getElementById('detail').innerHTML=h;
+}
+function nameOf(id){ const n=graphData.nodes.find(v=>v.id===id); return n?esc(n.name):'?'; }
+function selectById(id){ const n=graphData.nodes.find(v=>v.id===id); if(n)selectNode(n); }
+function updateMode(){ if(!nodeElements)return; nodeElements.classed('dead-code',false); nodeElements.select('circle').attr('fill',d=>KIND_COLORS[d.kind]||'#888');
+  if(currentMode==='dead_code'){ const dead=new Set(graphData.analysis.dead_code_ids||[]); nodeElements.classed('dead-code',d=>dead.has(d.id)); }
+  else if(currentMode==='dry'){ const gr=graphData.analysis.dry_signature_groups||{}; nodeElements.select('circle').attr('fill',d=>{const g=gr[d.signature_hash];return g!==undefined?DRY_COLORS[g%DRY_COLORS.length]:(KIND_COLORS[d.kind]||'#888');}); }
+  else if(currentMode==='coupling'){ const mx=d3.max(visibleNodes,d=>d.fan_out)||1,cs=d3.scaleSequential(d3.interpolateYlOrRd).domain([0,mx]); nodeElements.select('circle').attr('fill',d=>d.fan_out>0?cs(d.fan_out):(KIND_COLORS[d.kind]||'#888')); }
+  applyChangedRings(); }
+function applyChangedRings(){ if(nodeElements)nodeElements.classed('changed',d=>!!diffByPath[d.file]); }
+
+// ── Diff: churn + changeset overview + file diff + hunk nav ──
+function churn(f){ const a=(f.before_content||'').split('\n'), b=(f.after_content||'').split('\n'); let adds=0,dels=0; lcsDiff(a,b).forEach(o=>{ if(o.status==='added')adds++; else if(o.status==='removed')dels++; }); return {adds,dels,status:f.status}; }
+function onDiffLoaded(){
+  document.getElementById('changed-toggle').style.display='block';
+  document.getElementById('changes-btn').disabled=false;
+  applyChangedRings(); showChangedOnly=true; document.getElementById('changed-toggle').classList.add('active'); buildOutline();
+  buildChangeset();
+  setStatus(`${changedFiles.length} files · +${totalAdds}/−${totalDels}`);
+  setCenter('changeset');   // diff-focus = land on the OVERVIEW (AI-era), not a single file
+  loadComments();           // async; re-renders the comments list + diff badges when ready
+}
+function buildChangeset(){
+  document.getElementById('cs-head').innerHTML = `<div class="total"><b>${changedFiles.length}</b> file(s) changed · <span class="add">+${totalAdds}</span> / <span class="del">−${totalDels}</span></div>`;
+  const maxCh = Math.max(1, ...changedFiles.map(p=>changeStats[p].adds+changeStats[p].dels));
+  const list=document.getElementById('cs-list'); list.innerHTML='';
+  changedFiles.forEach(p=>{
+    const st=changeStats[p]; const dir=p.includes('/')?esc(p.slice(0,p.lastIndexOf('/')+1)):''; const base=esc(p.split('/').pop());
+    const stMark={added:'A',modified:'M',deleted:'D',renamed:'R'}[st.status]||'M';
+    const aw=Math.round(70*st.adds/maxCh), dw=Math.round(70*st.dels/maxCh);
+    const row=document.createElement('div'); row.className='cs-file';
+    row.innerHTML=`<span class="st ${st.status}">${stMark}</span><span class="path"><span class="dir">${dir}</span>${base}</span>`
+      +`<span class="churn"><span class="add">+${st.adds}</span> <span class="del">−${st.dels}</span></span>`
+      +`<span class="bar"><span class="b-add" style="width:${aw}px"></span><span class="b-del" style="width:${dw}px"></span></span>`;
+    row.onclick=()=>openFileDiff(p);
+    list.appendChild(row);
+  });
+}
+function openFileDiff(path){
+  if(!diffByPath[path])return; currentDiffPath=path;
+  const info=diffByPath[path];
+  const rows=collapseDiff(lcsDiff((info.before_content||'').split('\n'),(info.after_content||'').split('\n')));
+  document.getElementById('diff-fname').textContent=path;
+  const rowsEl=document.getElementById('diff-rows'); let h=''; hunkAnchors=[]; let inHunk=false, hunkIdx=0;
+  rows.forEach(p=>{
+    if(p.gap){ h+=`<div class="diff-row gap">⋯ ${p.gap} unchanged ⋯</div>`; inHunk=false; return; }
+    const changed=p.status==='added'||p.status==='removed';
+    let anchorAttr='';
+    if(changed && !inHunk){ anchorAttr=` data-hunk="${hunkIdx}" id="hunk-${hunkIdx}"`; hunkIdx++; inHunk=true; }
+    else if(!changed){ inHunk=false; }
+    const cls=p.status==='added'?'add':p.status==='removed'?'del':''; const mk=p.status==='added'?'+':p.status==='removed'?'-':' '; const ln=p.status==='added'?p.after_num:p.before_num;
+    const aline=p.after_num||0;
+    const addBtn=aline?`<span class="add-cmt" onclick="event.stopPropagation();openComposer('line','${esc(currentDiffPath)}',${aline})" title="Comment on line ${aline}">&#128172;</span>`:`<span class="add-cmt"></span>`;
+    const badges=aline?commentsFor(currentDiffPath,aline).map(c=>`<span class="cmt-badge" title="${esc(c.text)}">&#128172;${c.ref}</span>`).join(''):'';
+    h+=`<div class="diff-row ${cls}"${anchorAttr}><span class="ln">${ln||''}</span>${addBtn}<span class="mark">${mk}</span><span class="code">${esc(p.text)||' '}</span>${badges}</div>`;
+  });
+  rowsEl.innerHTML=h; rowsEl.scrollTop=0;
+  hunkAnchors=Array.from(rowsEl.querySelectorAll('[data-hunk]')); curHunk=hunkAnchors.length?0:-1;
+  updateHunkLabel();
+  setCenter('filediff'); closeDrawers();
+}
+function updateHunkLabel(){ document.getElementById('hunk-n').textContent = hunkAnchors.length ? `change ${curHunk+1}/${hunkAnchors.length}` : 'no changes'; }
+function gotoHunk(dir){ if(!hunkAnchors.length)return; curHunk=(curHunk+dir+hunkAnchors.length)%hunkAnchors.length; hunkAnchors[curHunk].scrollIntoView({block:'center'}); updateHunkLabel(); }
+function lcsDiff(a,b){ const m=a.length,n=b.length,dp=Array.from({length:m+1},()=>new Int32Array(n+1)); for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=a[i-1]===b[j-1]?dp[i-1][j-1]+1:Math.max(dp[i-1][j],dp[i][j-1]); const ops=[];let i=m,j=n; while(i>0||j>0){ if(i>0&&j>0&&a[i-1]===b[j-1]){ops.push({status:'same',before_num:i,after_num:j,text:a[i-1]});i--;j--;} else if(j>0&&(i===0||dp[i][j-1]>=dp[i-1][j])){ops.push({status:'added',after_num:j,text:b[j-1]});j--;} else {ops.push({status:'removed',before_num:i,text:a[i-1]});i--;} } return ops.reverse(); }
+function collapseDiff(ops){ const keep=new Array(ops.length).fill(false); ops.forEach((o,i)=>{ if(o.status!=='same'){ for(let k=Math.max(0,i-DIFF_CONTEXT);k<=Math.min(ops.length-1,i+DIFF_CONTEXT);k++)keep[k]=true; } }); const out=[];let gap=0; ops.forEach((o,i)=>{ if(keep[i]){ if(gap){out.push({gap});gap=0;} out.push(o); } else gap++; }); if(gap)out.push({gap}); return out; }
+
+// ── Comments (text_comment annotations on source files + a synthetic changeset doc) ──
+function changesetDoc(){ const d=(PANEL.data_directory||'').replace(/\/+$/,''); return d? d+'/.codetools/'+(projectName||'project')+'.changeset' : ''; }
+function absForRel(rel){ return repoPath ? repoPath.replace(/\/+$/,'')+'/'+rel : ''; }
+function commentsFor(rel,line){ return comments.filter(c=>c.rel===rel && c.line===line); }
+
+async function loadComments(){
+  comments=[]; refToComment={};
+  const docs=[];
+  if (changesetDoc()) docs.push({doc:changesetDoc(), rel:null});
+  changedFiles.forEach(rel=>{ const a=absForRel(rel); if(a) docs.push({doc:a, rel}); });
+  for (const {doc,rel} of docs){
+    try{
+      const r = await window.minerva.call('minerva_annotations_list', {document_path: doc});
+      const arr = (r && r.annotations) ? r.annotations : (Array.isArray(r)?r:[]);
+      arr.forEach(a=>{
+        const payload=a.kind_payload||a.payload||{};
+        const anchor=a.anchor||{}; let line=null;
+        if(anchor.snapshot && Array.isArray(anchor.snapshot.position)) line=Math.round(anchor.snapshot.position[0])+1;
+        comments.push({id:a.id, doc, rel, line, text: payload.text||a.summary||'', author: (a.author&&a.author.kind)||'ai'});
+      });
+    }catch(e){ /* no sidecar yet for this doc */ }
+  }
+  comments.sort((x,y)=>{ if((x.rel===null)!==(y.rel===null)) return x.rel===null?-1:1; if((x.rel||'')!==(y.rel||'')) return (x.rel||'').localeCompare(y.rel||''); return (x.line||0)-(y.line||0); });
+  comments.forEach((c,i)=>{ c.ref='C'+(i+1); refToComment[c.ref]=c; });
+  renderChangesetComments();
+  if (centerView==='filediff' && currentDiffPath) openFileDiff(currentDiffPath);  // refresh badges
+}
+function renderChangesetComments(){
+  const el=document.getElementById('cs-comments'); if(!el)return;
+  let h=`<div class="hdr"><button class="cmt-btn" onclick="openComposer('changeset',null,null)">&#128172; Comment on changeset</button><span style="color:#5a6a8a;font-size:10px;">${comments.length} comment(s)</span></div>`;
+  comments.forEach(c=>{ const anc=c.rel===null?'changeset':(c.rel.split('/').pop()+(c.line?(':'+c.line):'')); h+=`<div class="cmt-item" onclick="jumpToComment('${c.ref}')"><span class="ref">${c.ref}</span><span class="anchor">${esc(anc)}</span><div class="body">${esc(c.text)}</div></div>`; });
+  el.innerHTML=h;
+}
+function jumpToComment(ref){ const c=refToComment[ref]; if(c&&c.rel) openFileDiff(c.rel); }
+
+function openComposer(scope, rel, line){
+  composerTarget={scope, rel, line};
+  document.getElementById('composer-title').textContent = scope==='changeset' ? 'Comment on changeset' : ('Comment on '+(rel?rel.split('/').pop():'')+(line?(':'+line):''));
+  document.getElementById('composer-ctx').textContent = scope==='changeset' ? (projectName+' · whole changeset') : (rel+(line?(':'+line):''));
+  document.getElementById('composer-text').value='';
+  document.getElementById('composer').style.display='flex';
+  setTimeout(()=>{ try{document.getElementById('composer-text').focus();}catch(e){} }, 50);
+}
+function closeComposer(){ document.getElementById('composer').style.display='none'; composerTarget=null; }
+async function saveComposer(){
+  const t=composerTarget; if(!t){ closeComposer(); return; }
+  const text=document.getElementById('composer-text').value.trim(); if(!text){ closeComposer(); return; }
+  let doc, charStart=0, posLine=0;
+  if(t.scope==='changeset'){ doc=changesetDoc(); }
+  else {
+    doc=absForRel(t.rel);
+    const info=diffByPath[t.rel]; const lines=(info&&(info.after_content||'').split('\n'))||[];
+    posLine=Math.max(0,(t.line||1)-1);
+    for(let i=0;i<posLine && i<lines.length;i++) charStart+=lines[i].length+1;
+  }
+  if(!doc){ setStatus('comment failed: no document path', true); closeComposer(); return; }
+  // created_at/updated_at omitted → the MCP server stamps RFC3339; author is
+  // forced to 'ai' by the server regardless of what we send.
+  const env={ kind:'text_comment', schema_version:2,
+    anchor:{ plugin:'core', type:'text.range', id:{start:charStart,end:charStart},
+      snapshot:{ position:[posLine,0], text:'', document_revision:0, target_scope:'line' } },
+    kind_payload:{ text:text, target_scope:'line' }, lifecycle:'open', author:{kind:'human'},
+    view_context:'text', visible_in_views:['all'], summary:text };
+  try{ const r=await window.minerva.call('minerva_annotations_add', {document_path:doc, annotation:env});
+    if(r && r.ok===false){ setStatus('comment rejected: '+JSON.stringify(r.errors||r), true); }
+  }catch(e){ setStatus('comment failed: '+e.message, true); }
+  closeComposer(); await loadComments();
+}
+
+boot();
+</script>
+</body>
+</html>

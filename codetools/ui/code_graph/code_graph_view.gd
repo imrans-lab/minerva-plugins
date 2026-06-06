@@ -35,6 +35,7 @@ var _filter_bar: HBoxContainer
 var _outline_panel: VBoxContainer
 var _outline_tree: Tree
 var _outline_search: LineEdit
+var _changed_toggle: Button
 var _center_panel: Control       # holds all level views stacked
 var _inspector_panel: ScrollContainer
 var _inspector_content: VBoxContainer
@@ -87,6 +88,7 @@ func _ready() -> void:
 	_outline_panel.add_child(_outline_search)
 
 	var changed_toggle := Button.new()
+	_changed_toggle = changed_toggle
 	changed_toggle.text = "Changed only"
 	changed_toggle.toggle_mode = true
 	changed_toggle.add_theme_font_size_override("font_size", 11)
@@ -787,6 +789,32 @@ func _on_diff_data_loaded(diff_files: Array) -> void:
 
 func has_diff_for_file(file_path: String) -> bool:
 	return _diff_data.has(file_path)
+
+
+func focus_first_diff() -> void:
+	## Diff-focus entry: skip the splash + boundary graph and land directly in the
+	## first changed file's side-by-side diff, with the outline filtered to changed
+	## files. The user can hit "< Back" for the graph or untoggle "Changed only".
+	if _diff_file_list.is_empty() or _graph_data == null:
+		return
+	_show_changed_only = true
+	if _changed_toggle != null and is_instance_valid(_changed_toggle):
+		_changed_toggle.button_pressed = true
+	var first_file: String = _diff_file_list[0]
+	var symbols: Array = _graph_data.get_nodes_in_file(first_file)
+	if symbols.size() > 0:
+		symbols.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return int(a.line_start) < int(b.line_start))
+		_on_symbol_clicked(symbols[0])
+	else:
+		# No indexed symbols in the changed file — load the raw file diff directly.
+		var diff_info: Dictionary = _diff_data[first_file]
+		var full_path: String = _source_base_path.path_join(first_file) if _source_base_path != "" else first_file
+		_level3.load_symbol(_graph_data, "", full_path, 1, 50)
+		_level3.before_lines = str(diff_info.before_content).split("\n")
+		_level3.after_lines = str(diff_info.after_content).split("\n")
+		_level3._set_mode(Level3Script.Mode.DIFF)
+		_show_level(3)
 
 
 func _navigate_diff(direction: int) -> void:

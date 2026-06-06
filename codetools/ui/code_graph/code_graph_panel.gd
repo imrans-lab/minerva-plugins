@@ -52,43 +52,88 @@ func _on_panel_loaded(ctx: Dictionary) -> void:
 	var reply_id := "codetools_get_graph_%d" % _reply_counter
 	request.emit("minerva_codetools_get_graph", {"db_path": db_path}, reply_id)
 	var raw: Dictionary = await $_MinervaIPC.await_reply(reply_id)
-	_handle_reply(raw)
+	if _handle_reply(raw):
+		# Graph is in — best-effort overlay the working-tree diff so changed
+		# files get ● markers + the "Changed only" filter, and symbols in
+		# changed files open in side-by-side DIFF mode. A diff failure must
+		# NOT disturb the graph that already loaded.
+		_load_diff(db_path)
 
 
 # ── Reply handling ────────────────────────────────────────────────────────────
 
-func _handle_reply(raw: Dictionary) -> void:
+## Returns true when the graph artifact was successfully handed to the view.
+func _handle_reply(raw: Dictionary) -> bool:
 	# Unwrap broker layer: {success: true, result: <worker-reply>}
 	# A broker failure reply carries error_message/error_code (see MinervaIPC).
 	if not bool(raw.get("success", false)):
 		var err_msg: String = str(raw.get("error_message",
 			raw.get("error_code", raw.get("result", "unknown error"))))
 		_set_status("Graph request failed: %s" % err_msg)
-		return
+		return false
 	var worker_reply: Variant = raw.get("result", {})
 	# Unwrap worker layer: {ok: true, result: <envelope>}
 	var envelope: Dictionary = _unwrap_envelope(worker_reply if worker_reply is Dictionary else {})
 	if envelope.is_empty():
 		_set_status("Graph response missing envelope.")
-		return
+		return false
 	var status_val: String = str(envelope.get("status", ""))
 	if status_val != "ok":
 		var detail: String = str(envelope.get("error", envelope.get("summary", "status=%s" % status_val)))
 		_set_status("Graph unavailable: %s" % detail)
-		return
+		return false
 	var artifacts_raw: Variant = envelope.get("artifacts", [])
 	if not (artifacts_raw is Array) or (artifacts_raw as Array).is_empty():
 		_set_status("No graph artifacts in response.")
-		return
+		return false
 	var artifact: Variant = (artifacts_raw as Array)[0]
 	if not (artifact is Dictionary):
 		_set_status("Artifact is not a dictionary.")
-		return
+		return false
 	if _view == null or not is_instance_valid(_view):
 		_set_status("Graph view node unavailable.")
-		return
+		return false
 	_set_status("")
 	_view.load_from_dict(artifact as Dictionary)
+	return true
+
+
+## Best-effort: fetch the working-tree diff (HEAD vs working tree) and overlay it
+## onto the already-loaded graph. The worker's get_diff is project-scoped and
+## emits project-relative paths (matching the graph nodes' `file`), so changed
+## files line up with indexed files. Any failure is swallowed — the graph stays.
+func _load_diff(db_path: String) -> void:
+	if _view == null or not is_instance_valid(_view):
+		return
+	if not has_node("_MinervaIPC"):
+		return
+	_reply_counter += 1
+	var reply_id := "codetools_get_diff_%d" % _reply_counter
+	request.emit("minerva_codetools_get_diff", {"db_path": db_path}, reply_id)
+	var raw: Dictionary = await $_MinervaIPC.await_reply(reply_id)
+	if not bool(raw.get("success", false)):
+		return
+	var worker_reply: Variant = raw.get("result", {})
+	var envelope: Dictionary = _unwrap_envelope(worker_reply if worker_reply is Dictionary else {})
+	if envelope.is_empty() or str(envelope.get("status", "")) != "ok":
+		return
+	var artifacts_raw: Variant = envelope.get("artifacts", [])
+	if not (artifacts_raw is Array) or (artifacts_raw as Array).is_empty():
+		return
+	var artifact: Variant = (artifacts_raw as Array)[0]
+	if not (artifact is Dictionary):
+		return
+	var files_raw: Variant = (artifact as Dictionary).get("files", [])
+	if not (files_raw is Array) or (files_raw as Array).is_empty():
+		return
+	if not _view.has_method("_on_diff_data_loaded"):
+		return
+	_view._on_diff_data_loaded(files_raw as Array)
+	# Diff-focus: land directly in the changed file's side-by-side diff rather than
+	# leaving the user on the splash/graph to hunt for it.
+	if _view.has_method("focus_first_diff"):
+		_view.focus_first_diff()
+	_set_status("%d changed file(s) — “< Back” for graph · untoggle “Changed only” for all files." % (files_raw as Array).size())
 
 
 ## Recursively unwrap the result layers to find the envelope dict that carries

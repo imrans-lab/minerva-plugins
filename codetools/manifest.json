@@ -73,25 +73,15 @@
   ],
   "ui": {
     "ipc_messages": [
-      "minerva_codetools_get_graph"
+      "minerva_codetools_get_graph",
+      "minerva_codetools_get_diff"
     ],
     "panels": [
       {
         "name": "code_graph",
-        "kind": "godot_scene",
-        "entry_scene": "ui/code_graph/CodeGraphPanel.tscn",
-        "scripts": [
-          "ui/code_graph/code_graph_panel.gd",
-          "ui/code_graph/code_graph_view.gd",
-          "ui/code_graph/graph_data.gd",
-          "ui/code_graph/annotation_data.gd",
-          "ui/code_graph/level1_boundary_view.gd",
-          "ui/code_graph/level2_component_view.gd",
-          "ui/code_graph/level3_symbol_view.gd"
-        ],
-        "ipc_channels": [
-          "minerva_codetools_get_graph"
-        ],
+        "kind": "html",
+        "entry": "ui/code_graph.html",
+        "ipc_channels": [],
         "save_mode": "none"
       }
     ]
