@@ -377,8 +377,12 @@ def stale_check(params):
                               "project": proj["name"]})
                 continue
             try:
+                # Content hash of the working-tree bytes (git blob SHA), matching
+                # index-time get_git_hash. Detects UNCOMMITTED edits, not just new
+                # commits. (`git log -1` only sees committed state — see bug
+                # 019e9aa093: stale_check blind to working-tree edits.)
                 result = subprocess.run(
-                    ["git", "log", "-1", "--format=%H", "--", str(full)],
+                    ["git", "hash-object", str(full)],
                     capture_output=True, text=True, cwd=proj["path"], timeout=5)
                 current_hash = result.stdout.strip()
                 if current_hash != f["last_analyzed_git_hash"]:
@@ -431,15 +435,31 @@ def get_diff(params):
             return None, result.stderr.strip()
         return result.stdout, None
 
+    # Scope the diff to the project subtree and emit PROJECT-relative paths.
+    # When repo_path is a SUBDIRECTORY of a larger git repo, a bare `git diff`
+    # reports the WHOLE repo with repo-root-relative paths that don't match the
+    # store's project-relative file paths. `--relative` (run from repo_path)
+    # both limits the diff to this subtree AND relativizes paths to it.
+    # --show-prefix gives the path from the git root to repo_path ("" at root),
+    # which we re-prepend only for `git show <rev>:<root-path>` content lookups.
+    prefix_out, _ = run_git("rev-parse", "--show-prefix", allow_fail=True)
+    prefix = (prefix_out or "").strip()  # e.g. "experiments/foo/" or ""
+
+    scope = ["--relative"]
+    if file:
+        scope += ["--", file.lstrip("/")]
+
+    def to_root(rel_path):
+        # `git show <rev>:<path>` needs a root-relative path.
+        return prefix + rel_path
+
     status_map = {"M": "modified", "A": "added", "D": "deleted",
                   "R": "renamed", "C": "copied"}
-    changed = {}
+    changed = {}  # keyed by PROJECT-relative path (matches files.relative_path)
 
     if head == "":
         for extra in ([], ["--cached"]):
-            cmd = ["diff", "--name-status"] + extra + [base]
-            if file:
-                cmd += ["--", file]
+            cmd = ["diff", "--name-status"] + extra + [base] + scope
             out, err = run_git(*cmd)
             if err is not None:
                 raise ToolError("git diff failed: %s" % err, kind="git_error")
@@ -451,9 +471,7 @@ def get_diff(params):
                 if len(parts) == 2:
                     changed[parts[1]] = status_map.get(parts[0][0], "modified")
     else:
-        cmd = ["diff", "--name-status", "%s..%s" % (base, head)]
-        if file:
-            cmd += ["--", file]
+        cmd = ["diff", "--name-status", "%s..%s" % (base, head)] + scope
         out, err = run_git(*cmd)
         if err is not None:
             raise ToolError("git diff failed: %s" % err, kind="git_error")
@@ -466,24 +484,25 @@ def get_diff(params):
                 changed[parts[1]] = status_map.get(parts[0][0], "modified")
 
     files = []
-    for path, status in changed.items():
+    for rel_path, status in changed.items():
+        root_path = to_root(rel_path)
         if status == "added":
             before = ""
         else:
-            b_out, _ = run_git("show", "%s:%s" % (base, path), allow_fail=True)
+            b_out, _ = run_git("show", "%s:%s" % (base, root_path), allow_fail=True)
             before = b_out if b_out is not None else ""
         if status == "deleted":
             after = ""
         elif head == "":
-            full = Path(repo_path) / path
+            full = Path(repo_path) / rel_path
             try:
                 after = full.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 after = ""
         else:
-            a_out, _ = run_git("show", "%s:%s" % (head, path), allow_fail=True)
+            a_out, _ = run_git("show", "%s:%s" % (head, root_path), allow_fail=True)
             after = a_out if a_out is not None else ""
-        files.append({"path": path, "status": status,
+        files.append({"path": rel_path, "status": status,
                       "before_content": before, "after_content": after})
 
     head_label = head if head else "working tree"

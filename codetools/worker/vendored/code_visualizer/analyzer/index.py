@@ -17,10 +17,16 @@ from .edges import detect_edges
 
 
 def get_git_hash(file_path: Path) -> str:
-    """Get the git hash for a file (empty string if not in git)."""
+    """Content hash of the file's CURRENT bytes (git blob SHA).
+
+    Uses `git hash-object` (NOT `git log -1`) so the stored hash reflects the
+    working-tree content. This lets stale_check detect uncommitted edits — not
+    just new commits. `git hash-object` works on tracked or untracked content
+    and even outside a repo. Empty string if git is unavailable.
+    """
     try:
         result = subprocess.run(
-            ["git", "log", "-1", "--format=%H", "--", str(file_path)],
+            ["git", "hash-object", str(file_path)],
             capture_output=True, text=True, cwd=file_path.parent,
             timeout=5)
         return result.stdout.strip()
