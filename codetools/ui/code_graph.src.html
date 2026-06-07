@@ -353,7 +353,7 @@ function updateDetail(d){
   const inc=graphData.edges.filter(e=>eid(e.target)===d.id),out=graphData.edges.filter(e=>eid(e.source)===d.id);
   const isDead=(graphData.analysis.dead_code_ids||[]).includes(d.id),dry=(graphData.analysis.dry_signature_groups||{})[d.signature_hash];
   let h=`<div class="label">File</div><div class="value">${esc(d.file)}:${d.line_start}-${d.line_end}${diffByPath[d.file]?' <span class="chg">● changed</span>':''}</div>`;
-  if(diffByPath[d.file]) h+=`<div style="margin:4px 0;"><button onclick="openFileDiff('${esc(d.file)}')" style="font-size:10px;padding:2px 8px;background:#3a3410;border:1px solid #6a5a10;color:#fcc419;border-radius:3px;cursor:pointer;">view diff →</button></div>`;
+  if(diffByPath[d.file]) h+=`<div style="margin:4px 0;"><button onclick="openNativeReview('${esc(d.file)}')" style="font-size:10px;padding:2px 8px;background:#3a3410;border:1px solid #6a5a10;color:#fcc419;border-radius:3px;cursor:pointer;">view diff →</button></div>`;
   h+=`<div class="label">Symbol</div><div class="value"><strong>${esc(d.name)}</strong> <span style="color:${KIND_COLORS[d.kind]}">(${esc(d.kind)})</span></div>`;
   if(d.signature) h+=`<div class="label">Signature</div><div class="value sig">${esc(d.signature)}</div>`;
   h+=`<div class="label">Fan-in / Fan-out</div><div class="value">${d.fan_in||0} in / ${d.fan_out||0} out</div>`;
@@ -397,9 +397,20 @@ function buildChangeset(){
     row.innerHTML=`<span class="st ${st.status}">${stMark}</span><span class="path"><span class="dir">${dir}</span>${base}</span>`
       +`<span class="churn"><span class="add">+${st.adds}</span> <span class="del">−${st.dels}</span></span>`
       +`<span class="bar"><span class="b-add" style="width:${aw}px"></span><span class="b-del" style="width:${dw}px"></span></span>`;
-    row.onclick=()=>openFileDiff(p);
+    row.onclick=()=>openNativeReview(p);
     list.appendChild(row);
   });
+}
+// Hand a changeset file off to Minerva's NATIVE side-by-side diff (work item
+// 019ea06a1413): the panel is the launcher; the diff/edit/annotate happens in the
+// native editor. Feeds the file's get_diff before/after content.
+async function openNativeReview(path){
+  const info=diffByPath[path]; if(!info)return;
+  const abs=absForRel(path)||path;
+  try{
+    await window.minerva.call('minerva_editor_review_content',{path:abs,before:info.before_content||'',after:info.after_content||''});
+    setStatus('Opened native diff: '+path);
+  }catch(e){ setStatus('Open native diff failed: '+((e&&e.message)||e), true); }
 }
 function openFileDiff(path){
   if(!diffByPath[path])return; currentDiffPath=path;
