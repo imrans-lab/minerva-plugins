@@ -38,13 +38,13 @@ var FileRead = ToolSpec{
 var FileWrite = ToolSpec{
 	Name:        "minerva_codetools_file_write",
 	Description: "Write a file's full content through Minerva's buffered document store and flush to disk. Buffered => journaled (reviewable) + coherent with the live editor/annotations, unlike a raw bash write. Delegates to core minerva_doc_write (save). Creates parent dirs.",
-	InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path."},"content":{"type":"string","description":"Full file content."}},"required":["path","content"]}`),
+	InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path."},"content":{"type":"string","description":"Full file content."},"if_match_version":{"type":"integer","description":"Optimistic concurrency: only write if the file buffer's version equals this (from minerva_codetools_file_read). On mismatch the write is rejected (version_mismatch with want/got) so you can re-read and retry. Omit for last-write-wins."}},"required":["path","content"]}`),
 }
 
 var FileEdit = ToolSpec{
 	Name:        "minerva_codetools_file_edit",
 	Description: "Replace old_string with new_string in a file through Minerva's buffered document store and flush to disk (journaled + editor-coherent). Without replace_all, old_string must be unique. Delegates to core minerva_doc_edit (save).",
-	InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path."},"old_string":{"type":"string","description":"Text to find (unique unless replace_all)."},"new_string":{"type":"string","description":"Replacement text."},"replace_all":{"type":"boolean","description":"Replace every occurrence (default false)."}},"required":["path","old_string","new_string"]}`),
+	InputSchema: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Absolute file path."},"old_string":{"type":"string","description":"Text to find (unique unless replace_all)."},"new_string":{"type":"string","description":"Replacement text."},"replace_all":{"type":"boolean","description":"Replace every occurrence (default false)."},"if_match_version":{"type":"integer","description":"Optimistic concurrency: only edit if the file buffer's version equals this (from minerva_codetools_file_read). On mismatch the edit is rejected (version_mismatch with want/got) so you can re-read and retry. Omit for last-write-wins."}},"required":["path","old_string","new_string"]}`),
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
@@ -63,36 +63,46 @@ func HandleFileRead(_ context.Context, _ *bridge.Worker, params json.RawMessage)
 
 func HandleFileWrite(_ context.Context, _ *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	var in struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path           string `json:"path"`
+		Content        string `json:"content"`
+		IfMatchVersion *int64 `json:"if_match_version"`
 	}
 	_ = json.Unmarshal(params, &in)
 	if in.Path == "" {
 		return errEnvelope("path is required"), nil
 	}
 	// minerva_doc_write uses "text"; persist to disk with save:true.
-	docArgs, _ := json.Marshal(map[string]any{"path": in.Path, "text": in.Content, "save": true})
+	m := map[string]any{"path": in.Path, "text": in.Content, "save": true}
+	if in.IfMatchVersion != nil {
+		m["if_match_version"] = *in.IfMatchVersion // optimistic concurrency (DCR 019ea404ffcd P3)
+	}
+	docArgs, _ := json.Marshal(m)
 	return proxyDoc("minerva_doc_write", "wrote "+in.Path, docArgs), nil
 }
 
 func HandleFileEdit(_ context.Context, _ *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	var in struct {
-		Path       string `json:"path"`
-		OldString  string `json:"old_string"`
-		NewString  string `json:"new_string"`
-		ReplaceAll bool   `json:"replace_all"`
+		Path           string `json:"path"`
+		OldString      string `json:"old_string"`
+		NewString      string `json:"new_string"`
+		ReplaceAll     bool   `json:"replace_all"`
+		IfMatchVersion *int64 `json:"if_match_version"`
 	}
 	_ = json.Unmarshal(params, &in)
 	if in.Path == "" {
 		return errEnvelope("path is required"), nil
 	}
-	docArgs, _ := json.Marshal(map[string]any{
+	m := map[string]any{
 		"path":        in.Path,
 		"old_string":  in.OldString,
 		"new_string":  in.NewString,
 		"replace_all": in.ReplaceAll,
 		"save":        true,
-	})
+	}
+	if in.IfMatchVersion != nil {
+		m["if_match_version"] = *in.IfMatchVersion // optimistic concurrency (DCR 019ea404ffcd P3)
+	}
+	docArgs, _ := json.Marshal(m)
 	return proxyDoc("minerva_doc_edit", "edited "+in.Path, docArgs), nil
 }
 
