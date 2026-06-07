@@ -95,7 +95,11 @@
     }
   ],
   "permissions": {
-    "host_capabilities": [],
+    "host_capabilities": [
+      "mcp.proxy:minerva_doc_read",
+      "mcp.proxy:minerva_doc_write",
+      "mcp.proxy:minerva_doc_edit"
+    ],
     "network": {
       "mode": "none"
     },

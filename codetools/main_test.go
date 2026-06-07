@@ -73,6 +73,10 @@ func TestHandleToolsListExposesRegisteredTools(t *testing.T) {
 		"minerva_codetools_explore",
 		"minerva_codetools_inspect",
 		"minerva_codetools_validate",
+		// 019e8f811497 — buffered file tools (delegate to core minerva_doc_*)
+		"minerva_codetools_file_read",
+		"minerva_codetools_file_write",
+		"minerva_codetools_file_edit",
 	}
 	if len(got.Tools) != len(want) {
 		t.Fatalf("want %d tools, got %d: %+v", len(want), len(got.Tools), got.Tools)

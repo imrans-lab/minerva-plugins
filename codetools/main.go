@@ -133,6 +133,68 @@ func emitHostNotify(level, message string, details interface{}) {
 }
 
 // ---------------------------------------------------------------------------
+// host capability client — bidirectional request/response (019e8f811497)
+// ---------------------------------------------------------------------------
+
+// hostClient implements tools.HostCaller: it emits a minerva/capability request
+// to stdout and reads the correlated response from the SAME stdin scanner the
+// main loop uses. Safe because tool handlers run synchronously in the main
+// goroutine — while a handler (and thus Call) runs, the main loop is blocked and
+// not reading stdin, and Minerva won't dispatch a new request until it has our
+// tool result, so the next inbound line is our capability response.
+type hostClient struct {
+	enc     *json.Encoder
+	scanner *bufio.Scanner
+	nextID  int
+}
+
+func (h *hostClient) Call(capability string, args json.RawMessage) (json.RawMessage, error) {
+	h.nextID++
+	id := h.nextID
+	req := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  "minerva/capability",
+		"params":  map[string]interface{}{"capability": capability, "args": json.RawMessage(args)},
+	}
+	send(h.enc, req)
+
+	for h.scanner.Scan() {
+		line := h.scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var resp struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Result json.RawMessage `json:"result"`
+			Error  *rpcError       `json:"error"`
+		}
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return nil, fmt.Errorf("capability %s: parse response: %w", capability, err)
+		}
+		// A new request from Minerva mid-handler is unexpected — it awaits our
+		// tool result before sending more (re-entrancy guard).
+		if resp.Method != "" {
+			return nil, fmt.Errorf("capability %s: unexpected inbound method %q", capability, resp.Method)
+		}
+		var gotID int
+		_ = json.Unmarshal(resp.ID, &gotID)
+		if gotID != id {
+			return nil, fmt.Errorf("capability %s: response id mismatch (want %d, got %s)", capability, id, string(resp.ID))
+		}
+		if resp.Error != nil {
+			return nil, fmt.Errorf("capability %s: %s (code %d)", capability, resp.Error.Message, resp.Error.Code)
+		}
+		return resp.Result, nil
+	}
+	if err := h.scanner.Err(); err != nil {
+		return nil, fmt.Errorf("capability %s: read response: %w", capability, err)
+	}
+	return nil, fmt.Errorf("capability %s: stdin closed awaiting response", capability)
+}
+
+// ---------------------------------------------------------------------------
 // Global worker + tool registry
 // ---------------------------------------------------------------------------
 
@@ -172,6 +234,12 @@ func initRegistry() {
 	registry.Register(tools.Explore, tools.HandleExplore)
 	registry.Register(tools.Inspect, tools.HandleInspect)
 	registry.Register(tools.Validate, tools.HandleValidate)
+
+	// Buffered file tools — delegate to core minerva_doc_* via the host bridge
+	// so edits are journaled + editor/annotation-coherent (019e8f811497).
+	registry.Register(tools.FileRead, tools.HandleFileRead)
+	registry.Register(tools.FileWrite, tools.HandleFileWrite)
+	registry.Register(tools.FileEdit, tools.HandleFileEdit)
 }
 
 // initWorker resolves the Python interpreter and constructs the Worker. Called
@@ -374,6 +442,10 @@ func main() {
 	enc := json.NewEncoder(os.Stdout)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
+
+	// Wire the host-capability bridge so file_* tools can delegate to core
+	// minerva_doc_* mid-handler (019e8f811497). Shares the loop's scanner.
+	tools.Host = &hostClient{enc: enc, scanner: scanner}
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
