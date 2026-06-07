@@ -129,6 +129,12 @@ class GitScopeTest(unittest.TestCase):
         self.assertIn("func bar", f["before_content"])
         self.assertNotIn("func baz", f["before_content"])
         self.assertIn("func baz", f["after_content"])
+        # P5a single-diff-source: unified_diff + adds/dels accompany the content
+        # (panel reads these instead of computing diffs client-side).
+        self.assertIn("@@", f["unified_diff"])
+        self.assertIn("+func baz", f["unified_diff"])
+        self.assertGreaterEqual(f["adds"], 2)
+        self.assertEqual(f["dels"], 0)
 
     def test_get_diff_file_filter_is_project_relative(self):
         self.main_gd.write_text(_MAIN_GD + "\n# touched\n", encoding="utf-8")

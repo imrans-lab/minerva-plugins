@@ -17,6 +17,7 @@ Why an adapter file instead of editing vendored source: pickup.md + DCR comment
 
 from __future__ import annotations
 
+import difflib
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -408,6 +409,26 @@ def stale_check(params):
 # 4. get_diff — git diff between refs as structured data
 # ---------------------------------------------------------------------------
 
+def _unified_diff(rel_path, before, after, status):
+    """Unified-diff text + (adds, dels) line counts for one file.
+
+    Single diff source (DCR 019e9f602391 P5a): the codetools panel no longer
+    computes diffs client-side (lcsDiff) — it reads adds/dels for the churn list
+    and hands `unified_diff` to the native review editor.
+    """
+    before_lines = before.splitlines(keepends=True)
+    after_lines = after.splitlines(keepends=True)
+    a_label = "/dev/null" if status == "added" else "a/%s" % rel_path
+    b_label = "/dev/null" if status == "deleted" else "b/%s" % rel_path
+    diff_lines = list(difflib.unified_diff(
+        before_lines, after_lines, fromfile=a_label, tofile=b_label))
+    adds = sum(1 for ln in diff_lines
+               if ln.startswith("+") and not ln.startswith("+++"))
+    dels = sum(1 for ln in diff_lines
+               if ln.startswith("-") and not ln.startswith("---"))
+    return "".join(diff_lines), adds, dels
+
+
 def get_diff(params):
     base = params.get("base", "HEAD")
     head = params.get("head", "")
@@ -502,8 +523,13 @@ def get_diff(params):
         else:
             a_out, _ = run_git("show", "%s:%s" % (head, root_path), allow_fail=True)
             after = a_out if a_out is not None else ""
+        unified, adds, dels = _unified_diff(rel_path, before, after, status)
         files.append({"path": rel_path, "status": status,
-                      "before_content": before, "after_content": after})
+                      "before_content": before, "after_content": after,
+                      # Single diff source (DCR 019e9f602391 P5a): the panel's
+                      # churn list reads adds/dels; the native review-diff is fed
+                      # `unified_diff` — so the panel no longer computes diffs.
+                      "unified_diff": unified, "adds": adds, "dels": dels})
 
     head_label = head if head else "working tree"
     return envelope.ok(
