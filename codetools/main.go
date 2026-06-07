@@ -178,9 +178,12 @@ func (h *hostClient) Call(capability string, args json.RawMessage) (json.RawMess
 		if resp.Method != "" {
 			return nil, fmt.Errorf("capability %s: unexpected inbound method %q", capability, resp.Method)
 		}
-		var gotID int
+		// Godot's JSON serializes every number as a float, so the echoed id comes
+		// back as e.g. 1.0 — parse as float and compare numerically (NOT as int,
+		// which fails to unmarshal "1.0"). Caught in live HITL 2026-06-07.
+		var gotID float64
 		_ = json.Unmarshal(resp.ID, &gotID)
-		if gotID != id {
+		if int(gotID) != id {
 			return nil, fmt.Errorf("capability %s: response id mismatch (want %d, got %s)", capability, id, string(resp.ID))
 		}
 		if resp.Error != nil {

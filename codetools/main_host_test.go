@@ -17,7 +17,9 @@ func newHostClient(respLines string) (*hostClient, *bytes.Buffer) {
 }
 
 func TestHostClientCallRoundTrip(t *testing.T) {
-	hc, out := newHostClient(`{"jsonrpc":"2.0","id":1,"result":{"success":true,"result":{"ok":1}}}` + "\n")
+	// Godot serializes the echoed id as a FLOAT (1.0), not an int — match that
+	// here so the int-parse regression (live HITL 2026-06-07) can't return.
+	hc, out := newHostClient(`{"jsonrpc":"2.0","id":1.0,"result":{"success":true,"result":{"ok":1}}}` + "\n")
 	res, err := hc.Call("mcp.proxy:minerva_doc_read", json.RawMessage(`{"path":"/x"}`))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
