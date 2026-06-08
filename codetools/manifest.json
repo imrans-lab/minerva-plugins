@@ -13,7 +13,694 @@
     "entrypoint": "./codetools-plugin",
     "args": []
   },
-  "tools": [],
+  "tools": [
+    {
+      "name": "minerva_codetools_ping",
+      "description": "Health check: round-trips through the Code Tools Python worker and returns worker/runtime info. Optional 'echo' string is returned verbatim.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "echo": {
+            "type": "string",
+            "description": "Optional value echoed back by the worker."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_query",
+      "description": "Search the code-visualizer store by name + full-text. Returns matching symbols or files with id, kind, file, lines, and description.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search text (name or description token)."
+          },
+          "project": {
+            "type": "string",
+            "description": "Optional project name to scope the search."
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "symbols",
+              "files"
+            ],
+            "description": "What to search across. Default: symbols."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_get_context",
+      "description": "Get full context for a symbol or file: description, incoming/outgoing edges, tags, file location. Identifier may be a symbol ID, symbol name, or file relative path.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "identifier": {
+            "type": "string",
+            "description": "Symbol ID, symbol name, or file relative path."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "identifier"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_stale_check",
+      "description": "List indexed files whose current git hash differs from the indexed one (or that no longer exist on disk).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "Optional project name to scope the check."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_get_diff",
+      "description": "Get a structured git diff between two refs (default HEAD vs working tree). Returns changed files with before/after content for side-by-side display.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "base": {
+            "type": "string",
+            "description": "Base git ref. Default: HEAD."
+          },
+          "head": {
+            "type": "string",
+            "description": "Head git ref. Empty = working tree (unstaged + staged)."
+          },
+          "file": {
+            "type": "string",
+            "description": "Optional path filter."
+          },
+          "repo_path": {
+            "type": "string",
+            "description": "Repo working tree. If empty, inferred from the first project in the store."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_analyze",
+      "description": "Run a higher-level analysis over the store. analysis ∈ {dead_code, dry_candidates, coupling_hotspots, stats}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "analysis": {
+            "type": "string",
+            "enum": [
+              "dead_code",
+              "dry_candidates",
+              "coupling_hotspots",
+              "stats"
+            ]
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "analysis"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_set_description",
+      "description": "Set the human-readable description for a symbol or file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "symbol",
+              "file"
+            ],
+            "description": "Default: symbol."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "id",
+          "description"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_describe_symbol",
+      "description": "Set description AND semantic tags for a symbol in one call. tags is a comma-separated list.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "string",
+            "description": "Comma-separated semantic tags (e.g. 'mutates_state,does_io')."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "id",
+          "description"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_set_tags",
+      "description": "Set semantic tags on a symbol or file. tags is a comma-separated list.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "string",
+            "description": "Comma-separated tags."
+          },
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "symbol",
+              "file"
+            ],
+            "description": "Default: symbol."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "id",
+          "tags"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_undescribed",
+      "description": "List symbols or files that still lack a description.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "enum": [
+              "symbol",
+              "file"
+            ],
+            "description": "Default: symbol."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Max items. Default: 20."
+          },
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Optional — falls back to the CODETOOLS_DB env var."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_get_graph",
+      "description": "Return the full code graph (nodes, edges, files, analysis, stats) with precomputed force-directed x/y positions on every node. Intended for the Godot visualizer panel.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "db_path": {
+            "type": "string",
+            "description": "Path to the code-visualizer SQLite store. Required — or set CODETOOLS_DB env var."
+          }
+        },
+        "required": [
+          "db_path"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_glob",
+      "description": "Find files matching a glob pattern (*, **, ?) under a base directory. Excludes .git, node_modules, __pycache__ etc. Results are sorted; a configurable limit prevents runaway output.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Glob pattern, e.g. '**/*.py', 'src/*.go', 'tests/test_?.py'."
+          },
+          "path": {
+            "type": "string",
+            "description": "Base directory to search. Defaults to the worker's current working directory."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Maximum number of results to return. 0 = unlimited. Default: 500."
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_grep",
+      "description": "Regex search over file contents using bundled ripgrep (rg). Falls back to Python on dev boxes without a built bundle. Supports context lines, type filters, and file-glob filters. Binary files are auto-skipped.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "description": "Regex pattern to search for."
+          },
+          "path": {
+            "type": "string",
+            "description": "File or directory to search. Defaults to the worker's current working directory."
+          },
+          "type": {
+            "type": "string",
+            "description": "Language type filter, e.g. 'py', 'go', 'ts', 'gd'. Restricts search to files of that type."
+          },
+          "file_glob": {
+            "type": "string",
+            "description": "Glob filter on filenames, e.g. '*.test.ts'. Applied in addition to the type filter."
+          },
+          "ignore_case": {
+            "type": "boolean",
+            "description": "Case-insensitive search. Default: false."
+          },
+          "context_before": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lines of context before each match. Default: 0."
+          },
+          "context_after": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Lines of context after each match. Default: 0."
+          },
+          "context_lines": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Shorthand for equal context_before and context_after. Default: 0."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Maximum number of matches to return. Default: 200."
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_bash",
+      "description": "Execute a shell command (headless subprocess, not a PTY). Policy is loaded from the plugin data directory; denied commands return an error envelope without execution. Output cap ~30 KB; timeout default 120 s (max 600 s).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to execute."
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Working directory for the command. Defaults to the worker's current working directory."
+          },
+          "timeout": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600,
+            "description": "Timeout in seconds. Default: 120. Hard cap: 600."
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_cwd",
+      "description": "Get or set the worker's current working directory. When 'path' is omitted, returns the current directory. When 'path' is given, validates it exists and performs os.chdir() in the worker process so subsequent tool calls inherit the new directory.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Directory to change to. Supports ~ expansion and relative paths. Omit to just get the current directory."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_explore",
+      "description": "Code search and navigation using the vendored sightline library. Dispatches by op: 'search' (literal/regex search), 'where-defined' (find definitions), 'where-tested' (find test files), 'locate-edit' (find best edit targets), 'trace-topic' (trace a topic through the codebase), 'files' (list repo files). All ops return structured artifacts for agent consumption.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "search",
+              "where-defined",
+              "where-tested",
+              "locate-edit",
+              "trace-topic",
+              "files"
+            ],
+            "description": "Operation to perform."
+          },
+          "query": {
+            "type": "string",
+            "description": "Search query or symbol name. Required for all ops except 'files'."
+          },
+          "root": {
+            "type": "string",
+            "description": "Root directory of the repo to search. Defaults to the worker's current working directory."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Max results to return. Defaults: search=20, where-* / locate-edit=5, trace-topic=6."
+          },
+          "regex": {
+            "type": "boolean",
+            "description": "Use regex mode for 'search'. Default: false (literal)."
+          },
+          "intent": {
+            "type": "string",
+            "description": "Search intent hint for 'search': definition, config, tests, edit, flow, example."
+          },
+          "path_contains": {
+            "type": "string",
+            "description": "Filter results to paths containing this substring."
+          },
+          "extension": {
+            "type": "string",
+            "description": "Filter results to files with this extension (e.g. '.py', '.go')."
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_inspect",
+      "description": "Evidence artifact capture, probe management, and Godot run/diagnostics for the sightline inspect subsystem. Dispatches by op: 'run' (drive a Godot project and capture normalized runtime diagnostics — mode=headless is autonomous, mode=editor-assist is human-driven), 'stop' (terminate a running Godot editor/game for a project), 'attach' (create an attachment session with artifact paths), 'list' (list sessions, or artifacts for a session), 'status' (read Godot probe status, read-only), 'prepare' (install the GDScript editor probe into a Godot project — cross-platform, reversible), 'remove-probe' (uninstall the probe; editor-aware — pass stop_editor=true to stop a live editor first). 'capture-visual' is feature-gated to Linux + DISPLAY (returns capability_unavailable otherwise).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "type": "string",
+            "enum": [
+              "run",
+              "stop",
+              "attach",
+              "list",
+              "status",
+              "prepare",
+              "remove-probe",
+              "capture-visual"
+            ],
+            "description": "Operation. run drives Godot + captures diagnostics; stop terminates a running Godot for the project; attach/list manage evidence artifacts; status reads probe state; prepare/remove-probe install/uninstall the editor probe (cross-platform); capture-visual is Linux+DISPLAY-only."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "headless",
+              "editor-assist"
+            ],
+            "description": "run: driver+sink mode. headless (default) = autonomous (godot --headless, parse stderr; no probe/display/human). editor-assist = human-driven (launch editor + probe scrape)."
+          },
+          "scene": {
+            "type": "string",
+            "description": "run: optional scene/path to run (e.g. res://main.tscn). Omit to run the project's main scene."
+          },
+          "quit_after": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "run headless: quit after N frames (godot --quit-after). Default 200."
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "run: wall-clock timeout for the Godot process. Default 60 (headless) / 30 (editor-assist)."
+          },
+          "verbose": {
+            "type": "boolean",
+            "description": "run headless: pass --verbose (e.g. to detail ObjectDB-leak instances). Default false."
+          },
+          "scan_open_scripts": {
+            "type": "boolean",
+            "description": "run mode=editor-assist: automatically sweep EVERY open script (the probe briefly cycles each through the editor, restoring focus) so you get all open scripts' GDScript warnings with exact file:line — not just the focused script. Default false."
+          },
+          "godot_bin": {
+            "type": "string",
+            "description": "run: Godot binary to invoke (default 'godot' on PATH)."
+          },
+          "stop_editor": {
+            "type": "boolean",
+            "description": "remove-probe: if a Godot editor is running for this project (it would rewrite project.godot and restore the probe), stop it first, then remove. Default false = refuse + warn + follow_up. Autonomous agents may set true; interactive agents should confirm with their user first."
+          },
+          "root": {
+            "type": "string",
+            "description": "Root directory for the inspection store (.sightline/). Defaults to the worker's current working directory."
+          },
+          "surface_kind": {
+            "type": "string",
+            "description": "attach: surface kind for the SurfaceTarget (default: 'path')."
+          },
+          "surface_path": {
+            "type": "string",
+            "description": "attach: path component of the SurfaceTarget."
+          },
+          "route": {
+            "type": "string",
+            "description": "attach: route component of the SurfaceTarget."
+          },
+          "component_hint": {
+            "type": "string",
+            "description": "attach: component hint for the SurfaceTarget."
+          },
+          "artifacts": {
+            "type": "array",
+            "description": "attach: list of [kind, path] pairs or {kind, path} objects to register.",
+            "items": {}
+          },
+          "session_id": {
+            "type": "string",
+            "description": "list: if given, list artifacts for this session instead of listing all sessions."
+          },
+          "project_path": {
+            "type": "string",
+            "description": "status/prepare/remove-probe: path to the Godot project (defaults to root/cwd)."
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_validate",
+      "description": "Validate code evidence and inspect artifacts against a stated goal. Runs a suite of checks (code region touched, artifact files present, artifact text matching, runtime issue thresholds) and returns a ValidationResultRecord with status, confidence, per-check results, and a recommended next step.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "description": "Human-readable goal to validate (e.g. 'the export button is visible and labelled Export')."
+          },
+          "root": {
+            "type": "string",
+            "description": "Root directory for the sightline stores. Defaults to the worker's current working directory."
+          },
+          "code_result_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Result handle IDs from prior explore/search calls to use as code evidence."
+          },
+          "artifact_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Artifact IDs from prior inspect/attach calls to use as inspect evidence."
+          },
+          "artifact_only": {
+            "type": "boolean",
+            "description": "Skip the code-evidence requirement; pass when only artifact evidence is available. Default: false."
+          },
+          "expected_artifact_text": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Strings that must appear in at least one artifact's text content or metadata."
+          },
+          "require_no_runtime_issues": {
+            "type": "boolean",
+            "description": "Fail validation if any runtime_issue_report artifact contains issues. Default: false."
+          },
+          "max_runtime_warnings": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Fail if the total warning count across runtime_issue_report artifacts exceeds this threshold."
+          },
+          "expected_runtime_warnings": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Fail if the total warning count does not equal exactly this value."
+          }
+        },
+        "required": [
+          "goal"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "minerva_codetools_file_read",
+      "description": "Read a file's current text via Minerva's buffered document store (sees unsaved editor edits). Delegates to core minerva_doc_read. Prefer this over bash `cat` for code you may edit.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file path."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      }
+    },
+    {
+      "name": "minerva_codetools_file_write",
+      "description": "Write a file's full content through Minerva's buffered document store and flush to disk. Buffered => journaled (reviewable) + coherent with the live editor/annotations, unlike a raw bash write. Delegates to core minerva_doc_write (save). Creates parent dirs.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file path."
+          },
+          "content": {
+            "type": "string",
+            "description": "Full file content."
+          },
+          "if_match_version": {
+            "type": "integer",
+            "description": "Optimistic concurrency: only write if the file buffer's version equals this (from minerva_codetools_file_read). On mismatch the write is rejected (version_mismatch with want/got) so you can re-read and retry. Omit for last-write-wins."
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    },
+    {
+      "name": "minerva_codetools_file_edit",
+      "description": "Replace old_string with new_string in a file through Minerva's buffered document store and flush to disk (journaled + editor-coherent). Without replace_all, old_string must be unique. Delegates to core minerva_doc_edit (save).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file path."
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Text to find (unique unless replace_all)."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Replacement text."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Replace every occurrence (default false)."
+          },
+          "if_match_version": {
+            "type": "integer",
+            "description": "Optimistic concurrency: only edit if the file buffer's version equals this (from minerva_codetools_file_read). On mismatch the edit is rejected (version_mismatch with want/got) so you can re-read and retry. Omit for last-write-wins."
+          }
+        },
+        "required": [
+          "path",
+          "old_string",
+          "new_string"
+        ]
+      }
+    }
+  ],
   "skills": [
     {
       "id": "minerva_codetools_basic_coding",
