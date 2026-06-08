@@ -39,3 +39,8 @@ env/
 
 # Godot import cache (not authoritative; regenerated on open)
 .godot/
+
+# Docket SQLite working layer (regenerated from the committed .dct; never commit)
+*.dct.cache
+*.dct.cache-shm
+*.dct.cache-wal
