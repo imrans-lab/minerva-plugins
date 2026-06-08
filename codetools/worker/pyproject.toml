@@ -4,7 +4,7 @@
 # must ship are pinned in scripts/runtime-bundle.lock (PIP_PKGS), not here.
 [project]
 name = "codetools-plugin-worker"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python worker for the Minerva Code Tools plugin"
 requires-python = ">=3.12,<3.13"
 dependencies = []
