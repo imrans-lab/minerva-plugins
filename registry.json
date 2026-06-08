@@ -17,14 +17,14 @@
     {
       "id": "codetools",
       "name": "Code Tools",
-      "version": "0.2.0",
-      "manifest_version": "0.2.0",
-      "release_tag": "codetools-v0.2.0",
+      "version": "0.3.0",
+      "manifest_version": "0.3.0",
+      "release_tag": "codetools-v0.3.0",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/codetools/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.2.0/codetools-0.2.0-linux-x86_64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.2.0/codetools-0.2.0-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.2.0/codetools-0.2.0-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.0/codetools-0.3.0-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.0/codetools-0.3.0-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/codetools-v0.3.0/codetools-0.3.0-windows-x86_64.tar.gz"
       }
     },
     {
