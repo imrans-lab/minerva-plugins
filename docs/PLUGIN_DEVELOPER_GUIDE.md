@@ -373,8 +373,15 @@ is available-but-unused.
 | `host.dialogs.file_picker` | all opt: `title`, `initial_path`, `filters[]`, `mode` (`open`/`save`) | `{cancelled, path?}` | `host.dialogs.file_picker` | — |
 | `host.dialogs.directory_picker` | opt: `title`, `initial_path` | `{cancelled, path?}` | `host.dialogs.directory_picker` | — |
 | `host.permissions.grant_scope` | `path` (req, absolute, no `..`/null), `reason` | `{granted, already_granted, cancelled, path}` | `host.permissions.grant_scope` — **NEVER auto-granted** (privilege escalation) | — |
+| `host.terminal.exec` | `command*` (string), `args?` (string[]), `timeout?` (ms, default/max 120000/600000), `terminal_id?` | `{exit_code, stdout, stderr, routed_through:"terminal"\|"headless", exit_code_known}` — routes to a visible UI terminal when present (exit_code best-effort), falls back to OS.execute (real exit code) | `host.terminal.exec` | — |
+| `host.terminal.list` | none | `{terminals:[{id,name,visible,cols,rows}], count}` | `host.terminal.list` | agent-relay |
+| `host.terminal.read` | `terminal_id?`, `start_row?` (int), `end_row?` (int) | viewport: `{content,rows,cols,total_scrollback_rows,viewport_rows}` — row range: same + `start_row,end_row` | `host.terminal.read` | agent-relay |
+| `host.terminal.write` | `terminal_id?`, `text*`, `raw?` (bool, **default `true`** for this capability — see note) | `{bytes_sent}` | `host.terminal.write` | agent-relay |
+| `host.terminal.wait` | `terminal_id?`, `timeout_ms?` (default 30000), `settle_ms?` (default 500) | `{content,rows,cols,…,timed_out,waited_ms,bell_rung}` + `shell_exited,shell_exit_code` when shell exits | `host.terminal.wait` | agent-relay |
 | `host.pdf.generate` | declarative doc: `defaults{format,orientation,unit}`, `metadata`, `images[{id,format,bytes_b64}]`, `pages[{ops:[…]}]`; ops = `draw_text`(+`fit`)/`draw_image`/`draw_line`/`draw_rect` | `{bytes_b64, byte_size, page_count, content_type:"application/pdf"}` | `host.pdf.generate` | — |
 | `network.none` | — | always `permission_denied` | n/a — deny marker; granting it is a config error | — |
+
+**`host.terminal.*` notes:** the four interactive capabilities (`list`/`read`/`write`/`wait`) observe and converse with open terminal tabs; they do not own terminal lifecycle (no create/close in v1). `host.terminal.write` defaults `raw=true` for this capability path because plugin SDKs send real control characters in JSON strings (e.g. a literal `\r` byte), and the MCP-side `c_unescape` step — which converts LLM-typed escape strings like `\\r` into real bytes — would corrupt them. Pass `raw=false` only if your plugin explicitly builds `\\r`-style escape sequences as strings. `host.terminal.wait` returns `bell_rung: true` when a standalone BEL arrived during the wait — useful as a fast-path turn signal for bell-capable CLI agents. **`bell_rung` is always `false` on Windows** (the ghostty-vt shim that provides the BEL counter is Unix/macOS-only). `shell_exited` and `shell_exit_code` appear in the result only when the shell exits during the wait. Error code: `terminal_tool_error` (inner tool failure), `schema_validation_failed` (unknown arg key). `host.terminal.exec` is a pre-existing separate capability for one-shot command execution with merged stdout+stderr output; it is unrelated to these four.
 
 **Filesystem path rules** (`host.files.*`): path must be absolute or `user://`,
 contain no `..` segments and no null bytes, and prefix-match (with trailing slash) one
@@ -569,6 +576,62 @@ only** — it is not enforced against `set_state`/`patch_state` payloads. Many p
 omit it (only `obs_controller` declares one). **`events[]` shape is unvalidated** —
 `{name, payload_schema}` and `{name, description}` both parse; there is no canonical
 event-declaration schema.
+
+### 8.1 PLUGIN_EVENT trigger — waking a Minerva agent chat from a plugin event
+
+A `PLUGIN_EVENT` trigger (trigger_type=4) lets a plugin wake a Minerva agent chat
+whenever it emits a declared event. This is the mechanism the `agent-relay` plugin
+uses to relay terminal turns into a chat conversation, but it is generic — any plugin
+can use it (scansort processing-done, CAD render-done, etc.).
+
+**Setup (via `minerva_create_trigger`):**
+
+```json
+{
+  "name": "relay turn → agent chat",
+  "agent_id": "<agent-definition-id>",
+  "trigger_type": 4,
+  "action_type": 1,
+  "plugin_id": "my_plugin",
+  "plugin_event_name": "my_plugin.thing_done",
+  "consecutive_fire_limit": 5,
+  "initial_message": "A new turn arrived. terminal_id={terminal_id}",
+  "enabled": true
+}
+```
+
+- `trigger_type=4` — `PLUGIN_EVENT`
+- `action_type=1` — `MESSAGE_EXISTING` (send into an existing agent chat; the only
+  useful action type for a conversation loop)
+- `plugin_id` — empty string means any plugin; non-empty matches exactly
+- `plugin_event_name` — empty means any event name
+- `consecutive_fire_limit` — default 5; 0 = unlimited. After N consecutive fires
+  without a human message in between, the trigger pauses. **Reset caveat:** the
+  counter resets only when a human message lands in an **agent chat** (a chat driven
+  by an agent definition); a paused trigger targeting a plain chat re-arms only via
+  `minerva_update_trigger` (toggle `enabled`).
+- Event payload keys are merged into the trigger context: `{terminal_id}` in
+  `initial_message` expands from the emitted payload.
+
+**Declaring the event in the manifest:**
+
+```json
+"events": [
+  {
+    "name": "my_plugin.thing_done",
+    "description": "Emitted when processing completes.",
+    "payload_schema": {
+      "type": "object",
+      "properties": {
+        "terminal_id": {"type": "string"},
+        "status": {"type": "string"}
+      }
+    }
+  }
+]
+```
+
+Undeclared event names log a warning but are still delivered.
 
 ---
 
@@ -847,6 +910,20 @@ GitHub redirects) → `tar -xzf` → verify `SHA256SUMS` → read the **tarball-
     over-declares 14 (uses 2); `cad` under-declares (emits `host.notify` with an empty
     list — it works only because the notify *notification* path is ungated). Auditors
     will flag both.
+16. **`host.terminal.write` defaults `raw=true` for the capability path** — unlike the
+    MCP tool (`minerva_terminal_write`) which defaults `raw=false`. Reason: plugin SDKs
+    send real control bytes in JSON; the `c_unescape` step that converts LLM-typed `\\r`
+    strings into real bytes would corrupt them. If your plugin builds escape sequences as
+    backslash strings rather than real bytes, pass `raw=false` explicitly.
+17. **`host.terminal.wait` bell_rung is always `false` on Windows** — the ghostty-vt
+    shim that exposes the BEL counter is only compiled for Unix/macOS. Design your
+    turn-detection logic to work without `bell_rung` on Windows (fall back to
+    settle-heuristics only).
+18. **PLUGIN_EVENT consecutive_fire_limit resets only for agent-chat targets** — the
+    reset fires from `agent_chat_finished` which only emits for `IsAgentChat` histories.
+    A paused trigger pointing at a plain chat re-arms only via `minerva_update_trigger`
+    (toggle `enabled`). This is acceptable for the primary use-case (MESSAGE_EXISTING
+    into an agent chat).
 
 ---
 

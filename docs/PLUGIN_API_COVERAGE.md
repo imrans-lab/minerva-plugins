@@ -45,6 +45,11 @@ Column meaning:
 | host.dialogs.file_picker | host_api | yes | yes | — | CapabilityBroker.gd:2787 |
 | host.dialogs.directory_picker | host_api | yes | yes | — | CapabilityBroker.gd:2888 |
 | host.permissions.grant_scope | permission | yes | yes | — | CapabilityBroker.gd:2976; PluginManager.gd:734 |
+| host.terminal.exec | host_api | yes | yes | — | CapabilityBroker.gd:358-359 |
+| host.terminal.list | host_api | yes | yes | agent-relay | CapabilityBroker.gd:360-361; PluginDefinition.gd:192 |
+| host.terminal.read | host_api | yes | yes | agent-relay | CapabilityBroker.gd:360-361; PluginDefinition.gd:193 |
+| host.terminal.write | host_api | yes | yes | agent-relay | CapabilityBroker.gd:360-361; PluginDefinition.gd:194 |
+| host.terminal.wait | host_api | yes | yes | agent-relay | CapabilityBroker.gd:360-361; PluginDefinition.gd:195 |
 | host.pdf.generate | host_api | yes | yes | — | CapabilityBroker.gd:3330; src/sidecars/host_pdf/ |
 | host.notify (capability form) | host_api | yes | yes | — | CapabilityBroker.gd:3263 |
 | host.notify (JSON-RPC notification) | ipc | yes | no | cad, hello_scene | PluginNotifyRouter.gd:16; MCPServerConnection.gd:925-930; cad/main.go:126-148 |
@@ -57,8 +62,9 @@ Column meaning:
 | host.fs.changed (outbound) | event | yes | no | — | PluginScenePanelBroker.gd:1192 |
 | host_owned_save.get/set/response | ipc | yes | no | presentation | PluginScenePanelBroker.gd:126-132,937-1069 |
 | attach_buffer / text_changed / detach_buffer | ipc | yes | no | cad, test_paired_dsl | PluginScenePanelBroker.gd:75-81,859,873 |
-| minerva/plugin_event (wire) | event | yes | no | obs_controller, scansort | MCPServerConnection.gd:921,961-976; obs_controller/events.go:11-21 |
+| minerva/plugin_event (wire) | event | yes | no | obs_controller, scansort, agent-relay | MCPServerConnection.gd:921,961-976; obs_controller/events.go:11-21 |
 | minerva/plugin_state (wire) | state | yes | no | obs_controller | MCPServerConnection.gd:923,994-1007; obs_controller/events.go:24-34 |
+| PLUGIN_EVENT trigger type (trigger_type=4) | trigger | yes | yes | agent-relay | TriggerDefinition.gd:5; TriggerManager.gd:566-674; MCPAgentTools.gd:439,558-569 |
 | id | manifest_field | yes | yes | all 8 | PluginDefinition.gd:486,365-368,1223 |
 | name | manifest_field | yes | yes | all 8 | PluginDefinition.gd:487,372-373 |
 | version | manifest_field | yes | yes | all 8 | PluginDefinition.gd:488,374-375; cad/main.go:38-39 |
@@ -330,6 +336,17 @@ Column meaning:
     matrix** — cad dropped `linux-arm64` (no aarch64 wheels for cadquery-ocp) yet regen
     would emit a `linux-arm64` URL → 404 on install (download_bad_status).
     (regen_registry.py:38,110-113; cad.yml:35-41.)
+20. **PLUGIN_EVENT consecutive_fire_limit reset fires only for agent chats** —
+    `TriggerManager._reset_plugin_event_consecutive_if_human` is invoked from
+    `agent_chat_finished` which only emits for `IsAgentChat` histories
+    (ChatPane.gd:1707). A paused PLUGIN_EVENT trigger whose target is a plain (non-agent)
+    chat does NOT re-arm on human message; re-arm by toggling `enabled` via
+    `minerva_update_trigger`. The primary use-case (MESSAGE_EXISTING into an agent
+    chat) is unaffected. (TriggerManager.gd:643-674; resolution of docket 019eafc1d9b3.)
+21. **host.terminal.wait bell_rung is always false on Windows** — the ghostty-vt shim
+    that exposes the BEL counter is only compiled for Unix/macOS. On Windows the
+    terminal glue has no shim; `bell_serial` is never incremented.
+    (MCPTerminalTools.gd:290; scripts/build-extensions.sh.)
 
 ---
 
