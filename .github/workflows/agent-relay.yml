@@ -7,7 +7,7 @@ on:
       - "agent-relay/**"
       - ".github/workflows/agent-relay.yml"
       - "scripts/smoke/**"
-    tags: ["agent-relay-v*"]
+    tags: ["agent_relay-v*"]
   pull_request:
     paths:
       - "agent-relay/**"
@@ -93,7 +93,7 @@ jobs:
           PLATFORM="${{ matrix.target }}"
           VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
           mkdir -p dist
-          PACKDIR="dist/agent-relay-${VERSION}-${PLATFORM}"
+          PACKDIR="dist/agent_relay-${VERSION}-${PLATFORM}"
           mkdir -p "$PACKDIR"
           cp target/release/agent-relay-plugin${{ matrix.ext }} "$PACKDIR/"
           cp manifest.json "$PACKDIR/"
@@ -106,16 +106,16 @@ jobs:
             (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
               | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
           fi
-          tar -czf "dist/agent-relay-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          tar -czf "dist/agent_relay-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
           echo "Packed contents:"
-          tar -tzf "dist/agent-relay-${VERSION}-${PLATFORM}.tar.gz"
-          ls -la "dist/agent-relay-${VERSION}-${PLATFORM}.tar.gz"
+          tar -tzf "dist/agent_relay-${VERSION}-${PLATFORM}.tar.gz"
+          ls -la "dist/agent_relay-${VERSION}-${PLATFORM}.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: agent-relay-${{ matrix.target }}
-          path: agent-relay/dist/agent-relay-*-${{ matrix.target }}.tar.gz
+          name: agent_relay-${{ matrix.target }}
+          path: agent-relay/dist/agent_relay-*-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           retention-days: 14
 
@@ -134,7 +134,7 @@ jobs:
       - name: Download all matrix tarballs
         uses: actions/download-artifact@v4
         with:
-          pattern: agent-relay-*
+          pattern: agent_relay-*
           path: artifacts/
           merge-multiple: true
 
@@ -152,13 +152,13 @@ jobs:
             PRE="false"
           elif [ "$GITHUB_REF_NAME" = "main" ]; then
             # Clean version tag on main pushes.
-            TAG="agent-relay-v${VERSION}"
+            TAG="agent_relay-v${VERSION}"
             PRE="false"
           else
             # Auto-tag from any other branch with `-branch-<sanitized>`
             # sentinel so the marketplace registry filter skips test builds.
             SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
-            TAG="agent-relay-v${VERSION}-branch-${SAFE_BRANCH}"
+            TAG="agent_relay-v${VERSION}-branch-${SAFE_BRANCH}"
             PRE="true"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -172,6 +172,6 @@ jobs:
           name: ${{ steps.tag.outputs.tag }}
           prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
           target_commitish: ${{ github.sha }}
-          files: artifacts/agent-relay-*.tar.gz
+          files: artifacts/agent_relay-*.tar.gz
           generate_release_notes: true
           fail_on_unmatched_files: true
