@@ -52,3 +52,4 @@ env/
 *.dct.cache
 *.dct.cache-shm
 *.dct.cache-wal
+agent-relay/agent_relay_state.json
