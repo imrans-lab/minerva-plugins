@@ -14,6 +14,11 @@ presentation/presentation
 # Scansort plugin's Rust binary.
 scansort/scansort-plugin
 scansort/scansort-plugin.exe
+# Agent-relay plugin's Rust binary.
+agent-relay/agent-relay-plugin
+agent-relay/agent-relay-plugin.exe
+# Rust build artifacts (target/ dirs).
+agent-relay/target/
 # Generic catch for plugin binaries built at the plugin root.
 # Add new patterns here as additional plugins land.
 
