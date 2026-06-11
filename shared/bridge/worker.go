@@ -1,4 +1,8 @@
-// Package bridge — Worker manages the long-lived Python CAD worker subprocess.
+// Package bridge — Worker manages a long-lived Python worker subprocess.
+//
+// Plugin-agnostic: the worker entrypoint module (passed to `python -m <module>`)
+// is a parameter of New, so different plugins (cad, pcb, …) can drive their own
+// Python workers over the same framing + correlation machinery.
 //
 // Design references: Go-python-bridge-design.md §2 (process model),
 // §4 (request/response), §5 (worker lifecycle), §7 (error surfaces).
@@ -19,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	cadruntime "github.com/ipeerbhai/plugins/cad/internal/runtime"
+	sharedruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
 )
 
 // readyTimeout returns readyTimeoutDefault, optionally overridden by the
@@ -81,8 +85,9 @@ type Worker struct {
 	mu sync.Mutex
 
 	// Configuration (immutable after New).
-	pythonPath string
-	workerDir  string
+	pythonPath   string
+	workerDir    string
+	workerModule string // python -m <workerModule>
 
 	// StderrCallback, if non-nil, is called for each line emitted by the worker
 	// on stderr (after the line has already been forwarded to Go's stderr via
@@ -109,13 +114,15 @@ type Worker struct {
 	doneC chan struct{}
 }
 
-// New creates a Worker that will use the given Python interpreter and worker
-// directory. It does NOT spawn the subprocess — spawning is lazy (§2).
-func New(pythonPath, workerDir string) *Worker {
+// New creates a Worker that will spawn `python -m <workerModule>` using the
+// given Python interpreter and worker directory. It does NOT spawn the
+// subprocess — spawning is lazy (§2).
+func New(pythonPath, workerDir, workerModule string) *Worker {
 	return &Worker{
-		pythonPath: pythonPath,
-		workerDir:  workerDir,
-		inflight:   make(map[string]*inflightEntry),
+		pythonPath:   pythonPath,
+		workerDir:    workerDir,
+		workerModule: workerModule,
+		inflight:     make(map[string]*inflightEntry),
 	}
 }
 
@@ -179,7 +186,7 @@ func (w *Worker) startLocked(ctx context.Context) error {
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, w.pythonPath, "-m", "mcad_worker") //nolint:gosec
+	cmd := exec.CommandContext(ctx, w.pythonPath, "-m", w.workerModule) //nolint:gosec
 	cmd.Dir = workerCwd(w.pythonPath, w.workerDir)
 	cmd.Env = buildEnv(w.pythonPath)
 	setProcessGroup(cmd)
@@ -546,7 +553,7 @@ func buildEnv(pythonPath string) []string {
 		"PYTHONDONTWRITEBYTECODE=1",
 	}
 
-	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+	runtimeRoot := sharedruntime.RuntimeRoot(pythonPath)
 
 	if runtimeRoot != "" {
 		// Extracted-runtime (production marketplace install) path.
@@ -642,7 +649,7 @@ func bundleSitePackages(runtimeRoot string) string {
 //   - Dev mode: workerDir (matches pre-W1c behavior — the worker source
 //     is at <plugin>/worker/ and used as cwd for relative imports).
 func workerCwd(pythonPath, devWorkerDir string) string {
-	runtimeRoot := cadruntime.RuntimeRoot(pythonPath)
+	runtimeRoot := sharedruntime.RuntimeRoot(pythonPath)
 	if runtimeRoot == "" {
 		return devWorkerDir
 	}

@@ -1,6 +1,6 @@
 //go:build darwin && amd64
 
-package runtime
+package cadruntime
 
 import _ "embed"
 

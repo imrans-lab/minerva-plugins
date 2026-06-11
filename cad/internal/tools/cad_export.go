@@ -12,7 +12,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // Export is the MCP tool spec for cad.export.

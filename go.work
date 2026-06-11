@@ -1,0 +1,9 @@
+go 1.22
+
+use (
+	./cad
+	./codetools
+	./nametag-maker
+	./presentation
+	./shared
+)

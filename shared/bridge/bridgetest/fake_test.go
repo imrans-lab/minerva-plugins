@@ -1,4 +1,4 @@
-package workerfake_test
+package bridgetest_test
 
 import (
 	"bufio"
@@ -7,8 +7,8 @@ import (
 	"io"
 	"testing"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
-	"github.com/ipeerbhai/plugins/cad/internal/workerfake"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge/bridgetest"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ func TestFramerRoundTrip(t *testing.T) {
 func TestFakeEmitsWorkerReadyFirst(t *testing.T) {
 	t.Parallel()
 
-	f := workerfake.New()
+	f := bridgetest.New()
 	// Register a canned response for the "init" method (wildcard params).
 	f.Register("init", "", bridge.Response{
 		OK:     true,
@@ -123,7 +123,7 @@ func TestFakeEmitsWorkerReadyFirst(t *testing.T) {
 func TestFakeInitResponseShape(t *testing.T) {
 	t.Parallel()
 
-	f := workerfake.New()
+	f := bridgetest.New()
 	f.Register("init", "", bridge.Response{
 		OK:     true,
 		Result: json.RawMessage(`{"worker_version":"fake-1.0.0","occt_version":"fake"}`),

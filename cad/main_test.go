@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // captureNotify redirects notifyOut to a fresh buffer and resets notifyEnc so

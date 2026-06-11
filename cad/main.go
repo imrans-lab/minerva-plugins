@@ -28,15 +28,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
-	"github.com/ipeerbhai/plugins/cad/internal/runtime"
+	"github.com/ipeerbhai/plugins/cad/internal/cadruntime"
 	"github.com/ipeerbhai/plugins/cad/internal/tools"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
+	sharedruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
 )
 
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "cad"
 	serverVersion   = "0.1.1"
+
+	// workerModule is the python module the worker is launched as
+	// (`python -m <workerModule>`). Passed to bridge.New.
+	workerModule = "mcad_worker"
 
 	// workerShutdownTimeout is how long we give the worker on plugin shutdown
 	// before SIGTERM kicks in (§5).
@@ -167,9 +172,15 @@ func initWorker() {
 		log.Printf("cad-plugin: WARNING: cannot determine plugin root: %v", err)
 		pluginRoot = "."
 	}
-	workerDir := runtime.WorkerScriptDir(pluginRoot)
+	workerDir := sharedruntime.WorkerScriptDir(pluginRoot)
 
-	pythonPath, err := runtime.PythonPath(workerDir, serverName, serverVersion)
+	pythonPath, err := sharedruntime.PythonPath(sharedruntime.PythonPathRequest{
+		EmbeddedBundle: cadruntime.EmbeddedBundle,
+		EmbeddedSHA256: cadruntime.EmbeddedSHA256,
+		WorkerDir:      workerDir,
+		PluginID:       serverName,
+		PluginVersion:  serverVersion,
+	})
 	if err != nil {
 		log.Printf("cad-plugin: WARNING: %v — mcad_validate will fail until python3 is on PATH or .venv exists", err)
 		emitHostNotify("error",
@@ -180,7 +191,7 @@ func initWorker() {
 	}
 	log.Printf("cad-plugin: worker dir=%s, python=%s", workerDir, pythonPath)
 
-	w := bridge.New(pythonPath, workerDir)
+	w := bridge.New(pythonPath, workerDir, workerModule)
 	// Attach the stderr callback so critical worker stderr lines surface as toasts.
 	w.StderrCallback = func(line string) {
 		if isCriticalStderrLine(line) {

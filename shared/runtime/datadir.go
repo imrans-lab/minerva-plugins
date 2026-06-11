@@ -1,9 +1,7 @@
 // Package runtime — datadir.go: resolves the plugin's data directory.
 //
 // Plugin-agnostic by design. Takes pluginID as a parameter; never hardcodes
-// "cad" or any other plugin identifier. When this package is extracted to
-// pkg/pyembed/ later (per DCR 019e6a4bcb0c scope amendment), this function's
-// signature stays stable.
+// "cad" or any other plugin identifier.
 package runtime
 
 import (

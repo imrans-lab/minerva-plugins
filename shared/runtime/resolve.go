@@ -1,19 +1,19 @@
-// Package runtime resolves the path of the Python interpreter and worker
-// entrypoint for the CAD worker subprocess.
+// Package runtime — resolve.go: resolves the path of the Python interpreter and
+// worker entrypoint for a plugin's worker subprocess.
 //
 // Priority order (production → dev fallback):
 //
 //  1. Extracted embedded PBS runtime under <data_dir>/runtime/<plugin_version>/
-//     (the path resolved by EnsureRuntime / EmbeddedBundle). This is the path
-//     marketplace-installed plugins use.
+//     (the path resolved by EnsureRuntime / the caller-supplied EmbeddedBundle).
+//     This is the path marketplace-installed plugins use.
 //
 //  2. <workerDir>/.venv/bin/python (POSIX) or <workerDir>\.venv\Scripts\python.exe
-//     (Windows). Convenience for developers who keep a venv in the cad/worker/
-//     dir for `python -m mcad_worker` iteration.
+//     (Windows). Convenience for developers who keep a venv in the plugin's
+//     worker/ dir for iteration.
 //
 //  3. `python3` on $PATH. Last-resort dev fallback.
 //
-// See Docs/design/Go-python-bridge-design.md §6 for the design contract.
+// See the Go-python-bridge design (§6) for the design contract.
 package runtime
 
 import (
@@ -22,40 +22,49 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
-	"strings"
 )
 
-// EmbeddedSHA256 is the trimmed hex sha256 of EmbeddedBundle. Computed once
-// at package init from the platform-specific embed_<triple>.go's raw string
-// (which carries a trailing newline from shasum / sha256sum output).
-var EmbeddedSHA256 = strings.TrimSpace(embeddedBundleSHA256Raw)
+// PythonPathRequest carries everything PythonPath needs. All fields are
+// required except WorkerDir (used only for the dev-mode venv fallback).
+type PythonPathRequest struct {
+	// EmbeddedBundle is the plugin's go:embed'd tar.zst bytes (from the
+	// plugin's embed_<triple>.go). The plugin keeps that embed glue in its own
+	// tree and passes the bytes in here.
+	EmbeddedBundle []byte
+	// EmbeddedSHA256 is the hex-encoded sha256 of EmbeddedBundle.
+	EmbeddedSHA256 string
+	// WorkerDir is the plugin's worker source tree, used for the dev-mode venv
+	// fallback. May be empty to skip that tier.
+	WorkerDir string
+	// PluginID + PluginVersion locate the per-plugin extracted runtime under
+	// the data directory (e.g. <data>/plugins/<PluginID>/runtime/<PluginVersion>/).
+	PluginID      string
+	PluginVersion string
+}
 
 // PythonPath returns the absolute path to the python interpreter to use for
 // spawning the worker subprocess. See package comment for priority order.
-//
-// pluginID + pluginVersion locate the per-plugin extracted runtime under the
-// data directory (e.g. <data>/plugins/<pluginID>/runtime/<pluginVersion>/).
-// workerDir is the cad/worker source tree used for the dev-mode venv fallback.
 //
 // The first successful tier wins. Returns a wrapped error only if all three
 // tiers fail. ErrPlatformNotBundled from the embedded-tier is suppressed in
 // favor of trying the venv / PATH fallbacks — callers in production binaries
 // should never reach those fallbacks (a real bundle is always embedded), but
 // developers running un-bundled builds rely on them.
-func PythonPath(workerDir, pluginID, pluginVersion string) (string, error) {
+func PythonPath(req PythonPathRequest) (string, error) {
+	workerDir := req.WorkerDir
 	// Tier 1: extracted embedded runtime.
-	req := EnsureRuntimeRequest{
-		EmbeddedBundle: EmbeddedBundle,
-		EmbeddedSHA256: EmbeddedSHA256,
-		PluginID:       pluginID,
-		PluginVersion:  pluginVersion,
-		DataDir:        DataDir(pluginID),
+	ensureReq := EnsureRuntimeRequest{
+		EmbeddedBundle: req.EmbeddedBundle,
+		EmbeddedSHA256: req.EmbeddedSHA256,
+		PluginID:       req.PluginID,
+		PluginVersion:  req.PluginVersion,
+		DataDir:        DataDir(req.PluginID),
 	}
-	if root, err := EnsureRuntime(req); err == nil {
+	if root, err := EnsureRuntime(ensureReq); err == nil {
 		return RuntimePython(root), nil
 	}
 	// (Embedded tier failure intentionally falls through to dev fallbacks.
-	// main.go's host.notify path surfaces a toast on the failure path.)
+	// The caller's host.notify path surfaces a toast on the failure path.)
 
 	// Tier 2: dev venv next to the worker source.
 	if workerDir != "" {
@@ -69,7 +78,7 @@ func PythonPath(workerDir, pluginID, pluginVersion string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf(
 			"no embedded runtime extracted, no .venv at %s, and python3 not on PATH: %w "+
-				"(production builds embed PBS — see Docs/design/Go-python-bridge-design.md §6)",
+				"(production builds embed PBS — see the Go-python-bridge design §6)",
 			workerDir, err)
 	}
 	return p, nil
@@ -101,10 +110,10 @@ func venvPython(workerDir string) string {
 }
 
 // WorkerScriptDir returns the directory containing the python worker
-// entrypoint module for dev-mode (the venv path expects mcad_worker to be
+// entrypoint module for dev-mode (the venv path expects the worker module to be
 // discoverable here). In production (extracted-runtime path), the worker
 // source lives inside the bundle's site-packages and is found via PYTHONHOME
-// — bridge.Worker.Start adjusts cmd.Dir accordingly in that case (see W1c).
+// — bridge.Worker.Start adjusts cmd.Dir accordingly in that case.
 func WorkerScriptDir(pluginRoot string) string {
 	return filepath.Join(pluginRoot, "worker")
 }

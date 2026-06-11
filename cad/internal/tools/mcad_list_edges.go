@@ -11,7 +11,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // ListEdges is the MCP tool spec for mcad_list_edges.

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // skipIfNoPython calls t.Skip if python3 is not on PATH.
@@ -72,23 +72,21 @@ while True:
     write_frame(stdout, {"id": req['id'], "ok": True, "result": req.get('params', {})})
 `
 
-// writeTempEchoWorker writes the echo worker script to a temp dir and returns
-// a (dir, scriptName) pair suitable for use as workerDir with "-m echo_worker".
-func writeTempEchoWorker(t *testing.T) (dir string) {
+// writeTempWorker writes the given worker script as the __main__.py of a python
+// package named module under a fresh temp dir, and returns the dir. The dir is
+// suitable as the workerDir for bridge.New(python, dir, module).
+func writeTempWorker(t *testing.T, module, script string) (dir string) {
 	t.Helper()
 	dir = t.TempDir()
 
-	// Create a package directory called echo_worker.
-	pkgDir := filepath.Join(dir, "echo_worker")
+	pkgDir := filepath.Join(dir, module)
 	if err := os.Mkdir(pkgDir, 0755); err != nil {
-		t.Fatalf("mkdir echo_worker: %v", err)
+		t.Fatalf("mkdir %s: %v", module, err)
 	}
-	// __init__.py
 	if err := os.WriteFile(filepath.Join(pkgDir, "__init__.py"), nil, 0644); err != nil {
 		t.Fatalf("write __init__.py: %v", err)
 	}
-	// __main__.py — the actual worker logic.
-	if err := os.WriteFile(filepath.Join(pkgDir, "__main__.py"), []byte(echoWorkerScript), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(pkgDir, "__main__.py"), []byte(script), 0644); err != nil {
 		t.Fatalf("write __main__.py: %v", err)
 	}
 	return dir
@@ -100,19 +98,9 @@ func writeTempEchoWorker(t *testing.T) (dir string) {
 
 func TestWorkerHappyPath(t *testing.T) {
 	pythonPath := skipIfNoPython(t)
-	dir := writeTempEchoWorker(t)
+	dir := writeTempWorker(t, "echo_worker", echoWorkerScript)
 
-	// Build a Worker pointing at the echo_worker package.
-	// We override the module name via pythonPath+args by writing a custom worker.
-	// Since bridge.New takes workerDir and spawns "python -m mcad_worker", we
-	// create the echo_worker package named "mcad_worker" in the temp dir.
-	pkgDir := filepath.Join(dir, "echo_worker")
-	mcadDir := filepath.Join(dir, "mcad_worker")
-	if err := os.Rename(pkgDir, mcadDir); err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-
-	w := bridge.New(pythonPath, dir)
+	w := bridge.New(pythonPath, dir, "echo_worker")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -149,7 +137,7 @@ func TestWorkerHappyPath(t *testing.T) {
 
 func TestWorkerNotAliveBeforeStart(t *testing.T) {
 	t.Parallel()
-	w := bridge.New("/nonexistent/python3", "/tmp")
+	w := bridge.New("/nonexistent/python3", "/tmp", "any_worker")
 	if w.IsAlive() {
 		t.Error("expected IsAlive=false before Start")
 	}
@@ -161,16 +149,9 @@ func TestWorkerNotAliveBeforeStart(t *testing.T) {
 
 func TestWorkerLazySpawn(t *testing.T) {
 	pythonPath := skipIfNoPython(t)
-	dir := writeTempEchoWorker(t)
+	dir := writeTempWorker(t, "echo_worker", echoWorkerScript)
 
-	// Rename to mcad_worker (same rename as TestWorkerHappyPath).
-	pkgDir := filepath.Join(dir, "echo_worker")
-	mcadDir := filepath.Join(dir, "mcad_worker")
-	if err := os.Rename(pkgDir, mcadDir); err != nil {
-		t.Fatalf("rename: %v", err)
-	}
-
-	w := bridge.New(pythonPath, dir)
+	w := bridge.New(pythonPath, dir, "echo_worker")
 	// Do NOT call Start — Call should trigger lazy spawn.
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -202,7 +183,7 @@ func TestWorkerContextCancel(t *testing.T) {
 	// real subprocess by using an already-cancelled context.
 	skipIfNoPython(t)
 
-	w := bridge.New("/nonexistent/python3", "/tmp")
+	w := bridge.New("/nonexistent/python3", "/tmp", "any_worker")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
 
@@ -218,23 +199,11 @@ func TestWorkerContextCancel(t *testing.T) {
 
 func TestCircuitBreakerOpenAfterCrashes(t *testing.T) {
 	pythonPath := skipIfNoPython(t)
-	dir := t.TempDir()
-
-	// Create a worker that exits immediately (simulates crash).
-	crashPkg := filepath.Join(dir, "mcad_worker")
-	if err := os.Mkdir(crashPkg, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(crashPkg, "__init__.py"), nil, 0644); err != nil {
-		t.Fatalf("write __init__.py: %v", err)
-	}
 	// Worker that exits 0 immediately without emitting worker.ready.
 	crashScript := `import sys; sys.exit(0)` + "\n"
-	if err := os.WriteFile(filepath.Join(crashPkg, "__main__.py"), []byte(crashScript), 0644); err != nil {
-		t.Fatalf("write __main__.py: %v", err)
-	}
+	dir := writeTempWorker(t, "crash_worker", crashScript)
 
-	w := bridge.New(pythonPath, dir)
+	w := bridge.New(pythonPath, dir, "crash_worker")
 
 	// Each Start should fail with timeout/crashed and record a crash.
 	// We need 3 crashes to trip the breaker.
@@ -287,7 +256,7 @@ func TestWorkerErrorString(t *testing.T) {
 
 func TestShutdownNoOp(t *testing.T) {
 	t.Parallel()
-	w := bridge.New("/nonexistent/python3", "/tmp")
+	w := bridge.New("/nonexistent/python3", "/tmp", "any_worker")
 	// Must not panic.
 	w.Shutdown(1 * time.Second)
 }

@@ -1,19 +1,20 @@
-// Package workerfake provides a pure-Go test double for the Python CAD worker.
+// Package bridgetest provides a pure-Go test double for a Python bridge worker.
 //
 // It implements the same length-prefixed framing (bridge §3) and request/
-// response protocol (bridge §4) as the real worker, keyed by canned responses
-// registered at construction time.  The fake is used exclusively in tests;
-// no production code imports it (design §11).
+// response protocol (bridge §4) as a real worker, keyed by canned responses
+// registered at construction time. The fake is used exclusively in tests; no
+// production code imports it (design §11). It is plugin-agnostic — any plugin
+// driving a bridge.Worker can use it.
 //
 // Usage:
 //
-//	f := workerfake.New()
+//	f := bridgetest.New()
 //	f.Register("init", "", bridge.Response{OK: true, Result: json.RawMessage(`{"worker_version":"fake"}`)})
 //	clientR, workerW := io.Pipe()
 //	workerR, clientW := io.Pipe()
 //	go f.Run(workerR, workerW)
 //	// clientR / clientW are the test's I/O pair
-package workerfake
+package bridgetest
 
 import (
 	"bufio"
@@ -25,7 +26,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/ipeerbhai/plugins/cad/internal/bridge"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // key uniquely identifies a canned response entry.
@@ -77,7 +78,7 @@ func (f *Fake) CallCount(method string) int {
 func HashParams(v interface{}) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return "", fmt.Errorf("workerfake.HashParams: %w", err)
+		return "", fmt.Errorf("bridgetest.HashParams: %w", err)
 	}
 	sum := md5.Sum(b) //nolint:gosec
 	return hex.EncodeToString(sum[:]), nil
@@ -99,11 +100,11 @@ func (f *Fake) Run(in io.Reader, out io.Writer) {
 	}
 	notifBytes, err := bridge.MarshalNotification(notif)
 	if err != nil {
-		log.Printf("workerfake: marshal worker.ready: %v", err)
+		log.Printf("bridgetest: marshal worker.ready: %v", err)
 		return
 	}
 	if err := bridge.WriteFrame(out, notifBytes); err != nil {
-		log.Printf("workerfake: write worker.ready: %v", err)
+		log.Printf("bridgetest: write worker.ready: %v", err)
 		return
 	}
 
@@ -118,7 +119,7 @@ func (f *Fake) Run(in io.Reader, out io.Writer) {
 
 		var req bridge.Request
 		if err := json.Unmarshal(body, &req); err != nil {
-			log.Printf("workerfake: unmarshal request: %v", err)
+			log.Printf("bridgetest: unmarshal request: %v", err)
 			continue
 		}
 
@@ -131,11 +132,11 @@ func (f *Fake) Run(in io.Reader, out io.Writer) {
 
 		respBytes, err := bridge.MarshalResponse(&resp)
 		if err != nil {
-			log.Printf("workerfake: marshal response: %v", err)
+			log.Printf("bridgetest: marshal response: %v", err)
 			continue
 		}
 		if err := bridge.WriteFrame(out, respBytes); err != nil {
-			log.Printf("workerfake: write response: %v", err)
+			log.Printf("bridgetest: write response: %v", err)
 			return
 		}
 	}
@@ -167,7 +168,7 @@ func (f *Fake) dispatch(req *bridge.Request) bridge.Response {
 	// No canned response found.
 	errJSON, _ := json.Marshal(&bridge.WorkerError{
 		Kind:    "internal",
-		Message: fmt.Sprintf("workerfake: no canned response for method %q", req.Method),
+		Message: fmt.Sprintf("bridgetest: no canned response for method %q", req.Method),
 	})
 	return bridge.Response{
 		OK:    false,

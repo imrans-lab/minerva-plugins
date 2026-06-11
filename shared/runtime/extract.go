@@ -1,11 +1,10 @@
 // Package runtime — extract.go: 3-tier embedded runtime lookup + atomic extract.
 //
-// Plugin-agnostic by design. When a second python-embedded plugin needs the
-// same scaffolding, mechanical-move this file to pkg/pyembed/ and update
-// import paths in cad/. Do not add plugin-specific behavior here; parameterize
-// via EnsureRuntimeRequest instead.
+// Plugin-agnostic by design. The embedded python bundle bytes are supplied by
+// the caller via EnsureRuntimeRequest; this package never embeds plugin-specific
+// data. Each consuming plugin keeps its own go:embed glue and passes the bytes in.
 //
-// See Docs/design/Go-python-bridge-design.md §6 for the design contract.
+// See the Go-python-bridge design (§6) for the design contract.
 package runtime
 
 import (
@@ -25,16 +24,16 @@ import (
 
 // ErrPlatformNotBundled is returned by EnsureRuntime when EmbeddedBundle is
 // empty (e.g., running on a platform whose go:embed target was missing).
-// Defensive: with the matrix-build scope (post-amendment 2026-05-27) this
-// should never fire in production builds — all 5 supported targets ship a
-// real bundle. Returned in dev/test contexts where the bundle file isn't
-// staged.
+// Defensive: with the matrix-build scope this should never fire in production
+// builds — all supported targets ship a real bundle. Returned in dev/test
+// contexts where the bundle file isn't staged.
 var ErrPlatformNotBundled = errors.New("embedded python runtime not bundled for this platform")
 
 // EnsureRuntimeRequest carries everything EnsureRuntime needs. All fields
 // are required.
 type EnsureRuntimeRequest struct {
-	// EmbeddedBundle is the go:embed'd tar.zst bytes (from embed_<triple>.go).
+	// EmbeddedBundle is the go:embed'd tar.zst bytes (from the plugin's
+	// embed_<triple>.go).
 	EmbeddedBundle []byte
 	// EmbeddedSHA256 is the hex-encoded sha256 of EmbeddedBundle, used for
 	// post-extract tamper detection. Compared against sha256(EmbeddedBundle).

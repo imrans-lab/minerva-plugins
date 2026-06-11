@@ -1,5 +1,5 @@
 // Package bridge implements the length-prefixed JSON framing protocol used
-// between the Go MCP server and the Python CAD worker subprocess.
+// between the Go MCP server and a Python worker subprocess.
 //
 // Frame format (design §3):
 //
