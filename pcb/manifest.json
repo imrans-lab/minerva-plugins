@@ -1,0 +1,90 @@
+{
+  "id": "pcb",
+  "name": "PCB Editor",
+  "version": "0.1.0",
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./pcb-plugin",
+    "args": []
+  },
+  "tools": [],
+  "skills": [
+    {
+      "id": "minerva_pcb_design",
+      "title": "PCB design (plugin scaffold — under construction)",
+      "target": "all",
+      "summary": "Author and edit .minpcb printed-circuit-board documents. This plugin is an early scaffold: the editor canvas, the Python worker, and the full tool surface land in later rounds. Today only a liveness handshake (minerva_pcb_ping) is wired.",
+      "preconditions": "A .minpcb document is open OR the user has asked for PCB work (an anonymous editor can be spawned via minerva_create_plugin_editor with editor_item_id \"new_pcb\").",
+      "outcome": "The plugin responds to the liveness handshake. No real PCB geometry is produced yet — tell the user the PCB plugin is under construction and only the ping tool is available this round.",
+      "steps": "1. Call minerva_pcb_ping to confirm the backend is alive and report its version.\n2. Tell the user the PCB editor is a scaffold: the canvas and design tools arrive in later rounds.",
+      "system_prompt": "The PCB plugin is under construction. Only minerva_pcb_ping is available — it returns {ok, plugin, version, echo} to confirm the backend is alive. There is NO PCB geometry engine, no worker, and no canvas wired yet. Do not attempt to author board layouts; if the user asks for real PCB work, explain that the plugin is an early scaffold and only the liveness handshake is implemented this round.",
+      "tool_deps": [
+        "minerva_pcb_ping"
+      ]
+    }
+  ],
+  "ui": {
+    "panels": [
+      {
+        "name": "pcb_panel",
+        "kind": "godot_scene",
+        "entry_scene": "ui/PCBPanel.tscn",
+        "scripts": [
+          "ui/PCBPanel.gd"
+        ],
+        "file_extensions": [
+          ".minpcb"
+        ],
+        "ipc_channels": [
+          "pcb.serialize",
+          "pcb.deserialize",
+          "pcb.collect_export",
+          "pcb.apply_export"
+        ],
+        "save_mode": "host_owned"
+      }
+    ],
+    "ipc_messages": [
+      "pcb.serialize",
+      "pcb.deserialize",
+      "pcb.collect_export",
+      "pcb.apply_export"
+    ]
+  },
+  "editor_items": [
+    {
+      "id": "new_pcb",
+      "name": "New PCB",
+      "panel": "pcb_panel",
+      "default_filename": "untitled.minpcb"
+    }
+  ],
+  "capabilities": [
+    "project_state",
+    "host_owned_save",
+    "project_export"
+  ],
+  "project_file": {
+    "serialize_channel": "pcb.serialize",
+    "deserialize_channel": "pcb.deserialize"
+  },
+  "project_export": {
+    "collect_channel": "pcb.collect_export",
+    "apply_channel": "pcb.apply_export"
+  },
+  "permissions": {
+    "host_capabilities": [],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "data_directory": "",
+  "autostart": false,
+  "auto_reload": true
+}

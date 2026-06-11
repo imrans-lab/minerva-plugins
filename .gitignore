@@ -6,6 +6,9 @@
 */presentation-plugin
 */presentation-plugin.exe
 */presentation-plugin-*
+*/pcb-plugin
+*/pcb-plugin.exe
+*/pcb-plugin-*
 # Presentation plugin's Go binary is named just "presentation" inside its own dir.
 presentation/presentation
 # Scansort plugin's Rust binary.

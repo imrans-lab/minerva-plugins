@@ -4,6 +4,7 @@ use (
 	./cad
 	./codetools
 	./nametag-maker
+	./pcb
 	./presentation
 	./shared
 )
