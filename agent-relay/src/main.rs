@@ -27,6 +27,7 @@
 
 mod chrome_filter;
 mod detector;
+mod dialog;
 mod filter_rules;
 mod profiles;
 mod router;
@@ -63,7 +64,7 @@ fn with_filter_rules<R>(f: impl FnOnce(&mut FilterRuleSet) -> R) -> R {
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "agent_relay";
-const SERVER_VERSION: &str = "0.1.0";
+const SERVER_VERSION: &str = "0.2.0";
 
 // ---------------------------------------------------------------------------
 // JSON-RPC envelope types (used for final response serialisation)
@@ -206,28 +207,55 @@ fn handle_send(params: &Value, id: Value, router: &Arc<Router>) -> RpcResponse {
     }
 }
 
-/// The send pipeline shared by handle_send and handle_relay_ask:
-/// normalise → pre-write snapshot → two-write submit → auto-start watch → arm.
+/// How send_core delivers text to the PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendMode {
+    /// Message submit: normalise the body, then the two-write pattern
+    /// (body, pause, "\r") — a single fast chunk reads as a paste to TUI
+    /// agents and never submits.
+    Submit,
+    /// Single raw keystroke (dialog answers): write the text EXACTLY as given
+    /// in ONE write, no normalisation, no trailing Enter — dialog pickers act
+    /// on the keypress, and bare control bytes ("\r", ESC) must survive.
+    RawKeystroke,
+}
+
+/// The send pipeline shared by handle_send and relay_ask_core:
+/// normalise → pre-write snapshot → mode-specific write(s) → auto-start watch
+/// → arm.
 fn send_core(
     terminal_id: &str,
     text: &str,
     do_arm: bool,
     router: &Arc<Router>,
 ) -> Result<Value, String> {
-    // Normalise the message body: drop trailing real CR/LF and any trailing
-    // LITERAL "\r"/"\n" escape text (clients sometimes deliver the two-char
-    // sequence instead of the control char). Enter is sent separately below.
+    send_core_with_mode(terminal_id, text, do_arm, SendMode::Submit, router)
+}
+
+fn send_core_with_mode(
+    terminal_id: &str,
+    text: &str,
+    do_arm: bool,
+    mode: SendMode,
+    router: &Arc<Router>,
+) -> Result<Value, String> {
+    // Normalise the message body (Submit only): drop trailing real CR/LF and
+    // any trailing LITERAL "\r"/"\n" escape text (clients sometimes deliver
+    // the two-char sequence instead of the control char). Enter is sent
+    // separately below. RawKeystroke text passes through byte-true.
     let mut body: &str = text;
-    loop {
-        let trimmed = body.trim_end_matches(['\r', '\n']);
-        let trimmed = trimmed
-            .strip_suffix("\\r")
-            .or_else(|| trimmed.strip_suffix("\\n"))
-            .unwrap_or(trimmed);
-        if trimmed.len() == body.len() {
-            break;
+    if mode == SendMode::Submit {
+        loop {
+            let trimmed = body.trim_end_matches(['\r', '\n']);
+            let trimmed = trimmed
+                .strip_suffix("\\r")
+                .or_else(|| trimmed.strip_suffix("\\n"))
+                .unwrap_or(trimmed);
+            if trimmed.len() == body.len() {
+                break;
+            }
+            body = trimmed;
         }
-        body = trimmed;
     }
 
     // Snapshot the screen BEFORE writing: the pre-write screen is stable and
@@ -251,16 +279,20 @@ fn send_core(
         None
     };
 
-    // Write the text and the Enter as TWO writes with a pause between them.
-    // TUI agents (Claude Code et al.) treat a single fast chunk as a paste:
-    // an embedded CR becomes a newline in the input box and never submits.
+    // Submit: write the text and the Enter as TWO writes with a pause between
+    // them. TUI agents (Claude Code et al.) treat a single fast chunk as a
+    // paste: an embedded CR becomes a newline in the input box and never
+    // submits. RawKeystroke: ONE write, no Enter.
     let write_result = router
         .call_capability("host.terminal.write", json!({
             "terminal_id": terminal_id,
             "text": body,
             "raw": true,
         }))
-        .and_then(|_| {
+        .and_then(|first| {
+            if mode != SendMode::Submit {
+                return Ok(first);
+            }
             std::thread::sleep(std::time::Duration::from_millis(200));
             router.call_capability("host.terminal.write", json!({
                 "terminal_id": terminal_id,
@@ -415,7 +447,7 @@ fn handle_read_turn(params: &Value, id: Value, router: &Arc<Router>) -> RpcRespo
     let model = args.get("model").and_then(|v| v.as_str());
     let deliver = args.get("deliver");
 
-    let mut result = match read_turn_core(terminal_id, do_distill, do_redact, model, router) {
+    let mut result = match read_turn_core(terminal_id, do_distill, do_redact, model, None, router) {
         Err(e) => return ok_response(id, tool_err(&e)),
         Ok(r) => r,
     };
@@ -488,6 +520,72 @@ fn handle_read_turn(params: &Value, id: Value, router: &Arc<Router>) -> RpcRespo
     ok_response(id, tool_ok(result))
 }
 
+/// Rows to look back past the arm anchor when echo-anchoring a turn read.
+const ECHO_SEARCH_ROWS: u64 = 120;
+
+/// Re-anchor a wide turn read on the prompt-glyph echo of the text we just
+/// sent. Returns Some(slice) starting just AFTER the echo, leading blanks
+/// dropped — the chat already shows the user's message, so the echo is
+/// redundant in the answer. The echoed message can WRAP over multiple rows
+/// (glyph row + indented continuation rows — W8 HITL: the wrapped tail of the
+/// user's message headed the bot answer), so rows past the glyph row are also
+/// consumed while the accumulated echo text is still a prefix of `sent`.
+/// Returns None when the echo isn't in `wide` (the caller falls back to the
+/// exact old-anchor window).
+fn slice_from_echo(wide: &str, sent: &str) -> Option<String> {
+    let marker: String = sent.lines().next().unwrap_or("").chars().take(40).collect();
+    if marker.trim().is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = wide.lines().collect();
+    // Whitespace-collapsed comparison throughout: the TUI re-wraps the
+    // message at its own column width, so only the word stream is comparable.
+    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let target = collapse(sent);
+    // Echo lines start with the CLI's prompt glyph (❯ claude, › codex).
+    // Take the LAST glyph-prefixed match (a resend echoes again); answer
+    // lines QUOTING the text don't start with the glyph, so they never
+    // steal the anchor. Match either the 40-char marker (echo row carries
+    // extra text) or a row whose body is a PREFIX of the sent text (the row
+    // wrapped before the marker length — narrow terminals).
+    let echo_idx = lines.iter().rposition(|l| {
+        let t = l.trim_start();
+        if !(t.starts_with('❯') || t.starts_with('›')) {
+            return false;
+        }
+        if l.contains(marker.as_str()) {
+            return true;
+        }
+        let body = collapse(t.trim_start_matches(['❯', '›']));
+        !body.is_empty() && target.starts_with(body.as_str())
+    })?;
+
+    // Consume the echo's wrapped continuation rows. A row that stops
+    // extending the prefix is the first NON-echo row (the answer can never
+    // extend it — answers don't start with the unfinished tail of the
+    // user's message).
+    let mut acc = collapse(
+        lines[echo_idx].trim_start().trim_start_matches(['❯', '›']),
+    );
+    let mut from = (echo_idx + 1).min(lines.len());
+    while from < lines.len()
+        && !acc.is_empty()
+        && acc.len() < target.len()
+        && target.starts_with(acc.as_str())
+    {
+        let next_acc = collapse(&format!("{} {}", acc, lines[from]));
+        if !target.starts_with(next_acc.as_str()) {
+            break;
+        }
+        acc = next_acc;
+        from += 1;
+    }
+    while from < lines.len() && lines[from].trim().is_empty() {
+        from += 1;
+    }
+    Some(lines[from..].join("\n"))
+}
+
 /// Steps 1–4 + turn metadata of read_turn, shared with relay_ask:
 /// row window → host.terminal.read → clean → optional distill → result JSON
 /// {ok, content, distilled, truncated, omitted_chars, turn}.
@@ -496,6 +594,7 @@ fn read_turn_core(
     do_distill: bool,
     do_redact: bool,
     model: Option<&str>,
+    echo_hint: Option<&str>,
     router: &Arc<Router>,
 ) -> Result<Value, String> {
     // ── Step 1: determine row range from watcher's turn-boundary tracking ──
@@ -505,8 +604,26 @@ fn read_turn_core(
     // Build host.terminal.read args. If we have row tracking, use it.
     // If turn_start_row is None (send was never called or watcher just started),
     // fall back to reading the full viewport.
+    //
+    // ECHO ANCHORING: the arm-time start_row anchor can land BELOW the turn
+    // content — a TUI's boot/redraw churn appends transient frames to
+    // scrollback, inflating the pre-write row count (W8 HITL: claude's first
+    // turn after boot returned only "✻ Cogitated for 7s"; the answer sat
+    // above the anchor). When the caller tells us what it just sent
+    // (echo_hint), the prompt-glyph echo line of that text is the TRUE turn
+    // start: read a wider window and re-anchor on it. The echo line itself is
+    // stripped from the result (the chat already shows the user's message).
     let mut read_args = json!({ "terminal_id": terminal_id });
-    if let Some(sr) = start_row {
+    let wide_start: Option<u64> = match (echo_hint, end_row) {
+        (Some(_), Some(er)) => {
+            let ws = start_row.unwrap_or(er).min(er.saturating_sub(ECHO_SEARCH_ROWS));
+            Some(ws)
+        }
+        _ => None,
+    };
+    if let Some(ws) = wide_start {
+        read_args["start_row"] = json!(ws);
+    } else if let Some(sr) = start_row {
         read_args["start_row"] = json!(sr);
     }
     if let Some(er) = end_row {
@@ -521,6 +638,33 @@ fn read_turn_core(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+    };
+
+    // Re-anchor on the echo line when we have a hint and a wide read. If the
+    // echo is NOT in the wide window, re-read the exact old window instead of
+    // doing offset arithmetic — range reads may trim blank rows, so line
+    // offsets into the wide content are not trustworthy.
+    let raw = match (echo_hint, wide_start) {
+        (Some(sent), Some(_)) => match slice_from_echo(&raw, sent) {
+            Some(sliced) => sliced,
+            None => {
+                let mut old_args = json!({ "terminal_id": terminal_id });
+                if let Some(sr) = start_row {
+                    old_args["start_row"] = json!(sr);
+                }
+                if let Some(er) = end_row {
+                    old_args["end_row"] = json!(er);
+                }
+                match router.call_capability("host.terminal.read", old_args) {
+                    Err(e) => return Err(format!("terminal read failed: {e}")),
+                    Ok(result) => result.get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                }
+            }
+        },
+        _ => raw,
     };
 
     // ── Step 3: B2 cleaning pipeline ───────────────────────────────────────
@@ -666,7 +810,6 @@ fn handle_wait_turn(params: &Value, id: Value) -> RpcResponse {
 
 /// relay-ux-suite 019eb3616292: relay_ask — the whole index loop as ONE
 /// blocking call: send + arm → wait for the armed turn end → read_turn.
-/// Composes send_core + watcher::wait_for_turn + read_turn_core.
 fn handle_relay_ask(params: &Value, id: Value, router: &Arc<Router>) -> RpcResponse {
     let args = params.get("arguments").unwrap_or(params);
     let terminal_id = args.get("terminal_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -685,10 +828,37 @@ fn handle_relay_ask(params: &Value, id: Value, router: &Arc<Router>) -> RpcRespo
     let do_redact = args.get("redact").and_then(|v| v.as_bool()).unwrap_or(true);
     let model = args.get("model").and_then(|v| v.as_str());
 
-    // Send + arm (auto-starts the watch when none exists).
-    if let Err(e) = send_core(terminal_id, text, true, router) {
-        return ok_response(id, tool_err(&e));
+    match relay_ask_core(
+        terminal_id, text, SendMode::Submit, timeout_ms,
+        do_distill, do_redact, model, router,
+    ) {
+        Err(e) => ok_response(id, tool_err(&e)),
+        Ok(result) => ok_response(id, tool_ok(result)),
     }
+}
+
+/// The relay_ask composite shared by handle_relay_ask and the chat-passthrough
+/// generate hook (B7 — a parallel send/wait/read pipeline is forbidden):
+/// send (mode-aware) + arm → block until the armed turn ends → read the turn.
+/// Composes send_core_with_mode + watcher::wait_for_turn + read_turn_core.
+///
+/// Returns the relay_ask result payload:
+///   {ok, terminal_id, timed_out, answer, cause, detection_method, distilled,
+///    truncated} — on timeout, answer/cause are null and a hint explains that
+///   the arm REMAINS set (the one-shot event still fires on a late turn end).
+#[allow(clippy::too_many_arguments)]
+fn relay_ask_core(
+    terminal_id: &str,
+    text: &str,
+    mode: SendMode,
+    timeout_ms: u64,
+    do_distill: bool,
+    do_redact: bool,
+    model: Option<&str>,
+    router: &Arc<Router>,
+) -> Result<Value, String> {
+    // Send + arm (auto-starts the watch when none exists).
+    send_core_with_mode(terminal_id, text, true, mode, router)?;
 
     // Block until the armed turn ends (busy-gate guarantees the next counted
     // detection is OUR turn, not the pre-existing idle screen).
@@ -697,14 +867,14 @@ fn handle_relay_ask(params: &Value, id: Value, router: &Arc<Router>) -> RpcRespo
     if timed_out {
         // The arm stays set: if the turn finishes later, the one-shot event
         // still wakes any Minerva-side trigger. We just stop blocking.
-        return ok_response(id, tool_ok(json!({
+        return Ok(json!({
             "ok": true,
             "terminal_id": terminal_id,
             "timed_out": true,
             "answer": Value::Null,
             "cause": Value::Null,
             "hint": "turn did not complete within timeout_ms; the arm remains set — poll watch_status or call read_turn later",
-        })));
+        }));
     }
 
     let cause = payload.as_ref()
@@ -716,11 +886,10 @@ fn handle_relay_ask(params: &Value, id: Value, router: &Arc<Router>) -> RpcRespo
         .cloned()
         .unwrap_or(Value::Null);
 
-    match read_turn_core(terminal_id, do_distill, do_redact, model, router) {
-        Err(e) => ok_response(id, tool_err(&format!(
-            "turn completed (cause={cause}) but read failed: {e}"
-        ))),
-        Ok(read) => ok_response(id, tool_ok(json!({
+    let echo_hint = (mode == SendMode::Submit).then_some(text);
+    match read_turn_core(terminal_id, do_distill, do_redact, model, echo_hint, router) {
+        Err(e) => Err(format!("turn completed (cause={cause}) but read failed: {e}")),
+        Ok(read) => Ok(json!({
             "ok": true,
             "terminal_id": terminal_id,
             "timed_out": false,
@@ -729,8 +898,242 @@ fn handle_relay_ask(params: &Value, id: Value, router: &Arc<Router>) -> RpcRespo
             "detection_method": detection_method,
             "distilled": read.get("distilled").cloned().unwrap_or(json!(false)),
             "truncated": read.get("truncated").cloned().unwrap_or(json!(false)),
-        }))),
+        })),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Chat-passthrough generate hook (B7, DCR 019eb7f329 #483)
+// ---------------------------------------------------------------------------
+
+/// Plugin-side wait budget for a passthrough turn: 10s under the registered
+/// timeout_sec=600 so the host receives a structured {kind:"error"} instead
+/// of a bare call_tool transport timeout.
+const PASSTHROUGH_TIMEOUT_MS: u64 = 590_000;
+
+/// Per-chat passthrough state. SEAM GAP (filed): the host's PluginProvider
+/// sends only {chat_id, text} to the generate tool — no entry/terminal
+/// identity — so the plugin must resolve the terminal itself:
+///   1. explicit terminal_id arg (tests / future host versions),
+///   2. the remembered chat_id → terminal binding,
+///   3. the single active watch session (unambiguous),
+///   else a kind:"error" asking for terminal_id.
+/// `pending_question` tracks terminals whose last passthrough turn ended in a
+/// question — the next single-character text is a dialog keystroke, not a
+/// message.
+#[derive(Default)]
+struct PassthroughState {
+    bindings: std::collections::HashMap<String, String>, // chat_id → terminal_id
+    pending_question: std::collections::HashSet<String>, // terminal_ids
+}
+
+static PASSTHROUGH: Mutex<Option<PassthroughState>> = Mutex::new(None);
+
+fn with_passthrough<R>(f: impl FnOnce(&mut PassthroughState) -> R) -> R {
+    let mut guard = PASSTHROUGH.lock().unwrap();
+    f(guard.get_or_insert_with(PassthroughState::default))
+}
+
+/// Resolve which terminal a passthrough chat turn targets. See
+/// PassthroughState for the resolution ladder and the seam-gap rationale.
+fn resolve_passthrough_terminal(
+    chat_id: &str,
+    explicit: Option<&str>,
+) -> Result<String, String> {
+    if let Some(tid) = explicit {
+        if !chat_id.is_empty() {
+            with_passthrough(|s| {
+                s.bindings.insert(chat_id.to_string(), tid.to_string())
+            });
+        }
+        return Ok(tid.to_string());
+    }
+
+    if !chat_id.is_empty() {
+        if let Some(tid) = with_passthrough(|s| s.bindings.get(chat_id).cloned()) {
+            return Ok(tid);
+        }
+    }
+
+    let sessions = watcher::session_specs();
+    match sessions.len() {
+        1 => {
+            let tid = sessions[0].0.clone();
+            if !chat_id.is_empty() {
+                with_passthrough(|s| {
+                    s.bindings.insert(chat_id.to_string(), tid.clone())
+                });
+            }
+            Ok(tid)
+        }
+        0 => Err(
+            "no watch session is active; call minerva_agent_relay_watch_start \
+             on the terminal first (the chat-provider entry follows the watch \
+             lifecycle)".to_string(),
+        ),
+        n => Err(format!(
+            "{n} terminals are watched and the host did not identify the \
+             provider entry for this chat; pass terminal_id explicitly"
+        )),
+    }
+}
+
+/// If `text` is a single keystroke for a pending dialog, return the byte(s)
+/// to write raw. "\n" normalises to "\r" (the PTY Enter key); any other
+/// single character (letter/number hints, "\r", ESC) passes through as-is.
+fn normalize_keystroke(text: &str) -> Option<String> {
+    match text {
+        "\r" | "\n" => Some("\r".to_string()),
+        _ if text.chars().count() == 1 => Some(text.to_string()),
+        _ => None,
+    }
+}
+
+/// B7: passthrough_generate — services ONE chat turn for a terminal-backed
+/// chat-provider entry. The relay_ask core does the work (send + arm → block
+/// until turn end → read); this handler only resolves the terminal, picks the
+/// write mode (message submit vs raw dialog keystroke), and maps the outcome
+/// to the seam result shape:
+///   {kind:"answer", text} | {kind:"question", text, options} | {kind:"error", text}.
+/// Errors are IN-BAND (kind:"error", normal tool content) so the host's
+/// PluginProvider can render them uniformly. distill is OFF: passthrough is
+/// verbatim (no LLM in the transport path — DCR #479 constraint).
+fn handle_passthrough_generate(params: &Value, id: Value, router: &Arc<Router>) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+    let chat_id = args.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
+    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    // The host's PluginProvider sends entry_id ("terminal-<tid>") with every
+    // generate — the authoritative answer to WHICH watched terminal this chat
+    // targets. An explicit terminal_id arg still wins (direct/test use).
+    let entry_tid = args.get("entry_id")
+        .and_then(|v| v.as_str())
+        .and_then(|e| e.strip_prefix("terminal-"))
+        .filter(|s| !s.is_empty());
+    let explicit_tid = args.get("terminal_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or(entry_tid);
+
+    if text.is_empty() {
+        return ok_response(id, tool_ok(json!({
+            "kind": "error",
+            "text": "text is required",
+        })));
+    }
+
+    let terminal_id = match resolve_passthrough_terminal(chat_id, explicit_tid) {
+        Ok(t) => t,
+        Err(e) => return ok_response(id, tool_ok(json!({"kind": "error", "text": e}))),
+    };
+
+    // The provider entry lives and dies with the watch session — a generate
+    // call for an unwatched terminal means the entry is stale.
+    if watcher::watch_status(&terminal_id).is_none() {
+        return ok_response(id, tool_ok(json!({
+            "kind": "error",
+            "text": format!(
+                "no watch session for terminal {terminal_id}; call \
+                 minerva_agent_relay_watch_start to revive this provider entry"
+            ),
+        })));
+    }
+
+    // Dialog answer? After a "question" result, a single-keystroke text is
+    // written raw with NO Enter — dialog pickers act on the keypress (codex
+    // calibration is ambiguous on enter-confirm, so letter/number hints go
+    // alone; the Confirm option carries "\r" itself).
+    let pending_question =
+        with_passthrough(|s| s.pending_question.contains(&terminal_id));
+    let keystroke = if pending_question { normalize_keystroke(text) } else { None };
+    let (send_text, mode) = match &keystroke {
+        Some(k) => (k.as_str(), SendMode::RawKeystroke),
+        None => (text, SendMode::Submit),
+    };
+
+    let outcome = relay_ask_core(
+        &terminal_id, send_text, mode, PASSTHROUGH_TIMEOUT_MS,
+        false, // distill OFF — passthrough is verbatim
+        true,  // redact stays on: secrets never enter chat history
+        None, router,
+    );
+
+    let result = match outcome {
+        Err(e) => json!({"kind": "error", "text": e}),
+        Ok(v) => {
+            let cause = v.get("cause").and_then(|c| c.as_str()).unwrap_or("");
+            if v.get("timed_out").and_then(|t| t.as_bool()).unwrap_or(false) {
+                json!({
+                    "kind": "error",
+                    "text": format!(
+                        "terminal {terminal_id} did not finish its turn within \
+                         {}s; the arm remains set — collect the late reply via \
+                         minerva_agent_relay_read_turn",
+                        PASSTHROUGH_TIMEOUT_MS / 1000
+                    ),
+                })
+            } else if cause == "input_requested" {
+                build_question_result(&terminal_id, router)
+            } else if cause == "turn_completed" {
+                json!({
+                    "kind": "answer",
+                    "text": v.get("answer").and_then(|a| a.as_str()).unwrap_or(""),
+                })
+            } else {
+                json!({
+                    "kind": "error",
+                    "text": format!(
+                        "terminal {terminal_id} turn ended abnormally \
+                         (cause={cause}); the terminal session may be gone"
+                    ),
+                })
+            }
+        }
+    };
+
+    with_passthrough(|s| {
+        if result.get("kind").and_then(|k| k.as_str()) == Some("question") {
+            s.pending_question.insert(terminal_id.clone());
+        } else {
+            s.pending_question.remove(&terminal_id);
+        }
+    });
+
+    ok_response(id, tool_ok(result))
+}
+
+/// Build the {kind:"question"} result for an input_requested turn: read the
+/// RAW viewport (the cleaned turn window is for prose answers — the chrome /
+/// redaction pipeline must not touch the dialog's option lines before
+/// parsing), extract the dialog region with the profile's permission regex,
+/// and parse the {label, keystroke} options.
+fn build_question_result(terminal_id: &str, router: &Arc<Router>) -> Value {
+    let screen = match router.call_capability("host.terminal.read", json!({
+        "terminal_id": terminal_id,
+    })) {
+        Ok(r) => r.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        Err(e) => {
+            return json!({
+                "kind": "error",
+                "text": format!("input requested but screen read failed: {e}"),
+            });
+        }
+    };
+
+    let profile_id = watcher::watch_status(terminal_id)
+        .and_then(|s| s.get("profile_id").and_then(|v| v.as_str()).map(String::from))
+        .unwrap_or_else(|| "claude".to_string());
+    let dialog_re = profiles::profile_get(&profile_id)
+        .and_then(|p| p.detection.permission_dialog_regex)
+        .and_then(|pat| regex::Regex::new(&pat).ok());
+
+    // Same 20-line window the detector scans for dialogs.
+    let region = dialog::extract_dialog_region(&screen, dialog_re.as_ref(), 20);
+    let options: Vec<Value> = dialog::parse_options(&profile_id, &region)
+        .iter()
+        .map(|o| o.to_json())
+        .collect();
+
+    json!({"kind": "question", "text": region, "options": options})
 }
 
 /// B2 IMPLEMENTED: filter_set — installs or replaces a named filter rule.
@@ -985,6 +1388,20 @@ fn tools_list_schema() -> Value {
                 }
             },
             {
+                "name": "minerva_agent_relay_passthrough_generate",
+                "description": "Chat-provider generate hook (chat-passthrough): service ONE chat turn against the watched terminal bound to this provider entry. Reuses the relay_ask core (send + arm, BLOCK until the turn ends, read the turn) with distill OFF — passthrough is verbatim. Returns JSON {kind:'answer', text} | {kind:'question', text, options:[{label, keystroke}]} when the turn ends in a permission dialog | {kind:'error', text}. After a 'question' result, a single-keystroke text (e.g. 'y', '1', '\\r', ESC) is written raw to the PTY with no Enter.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "chat_id": {"type": "string", "description": "Host chat/history id for this turn (binds the chat to a terminal)."},
+                        "text": {"type": "string", "description": "Newest user message, or a single dialog-answer keystroke after a 'question' result."},
+                        "entry_id": {"type": "string", "description": "Provider entry id ('terminal-<tid>') — sent by the host with every generate; identifies the watched terminal."},
+                        "terminal_id": {"type": "string", "description": "Optional explicit terminal override; normally resolved from entry_id, the chat binding, or the single active watch session."}
+                    },
+                    "required": ["chat_id", "text"]
+                }
+            },
+            {
                 "name": "minerva_agent_relay_read_clean",
                 "description": "Read terminal output (live or raw_text) and apply the chrome filter pipeline.",
                 "inputSchema": {
@@ -1158,6 +1575,8 @@ fn main() {
                         handle_wait_turn(&req.params, req.id),
                     "minerva_agent_relay_relay_ask" =>
                         handle_relay_ask(&req.params, req.id, &router),
+                    "minerva_agent_relay_passthrough_generate" =>
+                        handle_passthrough_generate(&req.params, req.id, &router),
                     "minerva_agent_relay_read_clean" =>
                         handle_read_clean(&req.params, req.id, &router),
                     "minerva_agent_relay_read_turn" =>
@@ -1339,5 +1758,86 @@ mod tests {
             DISTILL_SYSTEM_PROMPT.contains("ONLY") || DISTILL_SYSTEM_PROMPT.contains("only"),
             "prompt instructs returning only the conversational reply"
         );
+    }
+
+    // ── slice_from_echo (W8 HITL fix: boot-churn mis-anchor) ──────────────
+
+    const WIDE: &str = "boot-frame-garbage\nmore boot frames\n❯ hi\n\n● Hi! line one\n  line two\n\n✻ Cogitated for 7s";
+
+    #[test]
+    fn test_slice_from_echo_recovers_answer_above_bad_anchor() {
+        // The old arm anchor pointed at the Cogitated line — the W8 failure.
+        let out = slice_from_echo(WIDE, "hi").expect("echo found");
+        assert!(out.contains("Hi! line one"), "answer recovered: {out:?}");
+        assert!(out.contains("Cogitated"), "turn summary kept: {out:?}");
+        assert!(!out.contains("❯ hi"), "echo stripped: {out:?}");
+        assert!(!out.contains("boot-frame"), "garbage above echo excluded: {out:?}");
+    }
+
+    #[test]
+    fn test_slice_from_echo_none_when_no_echo() {
+        let out = slice_from_echo(WIDE, "completely different text");
+        assert!(out.is_none(), "no echo → None (caller re-reads old window): {out:?}");
+    }
+
+    #[test]
+    fn test_slice_from_echo_quote_does_not_steal_anchor() {
+        let wide = "❯ say MARKER\n\n● you said: say MARKER\n● done";
+        let out = slice_from_echo(wide, "say MARKER").expect("echo found");
+        assert!(out.starts_with("● you said"), "anchored at glyph echo, not the quote: {out:?}");
+    }
+
+    #[test]
+    fn test_slice_from_echo_codex_glyph() {
+        let wide = "noise\n› compute 2+2\n\n2+2 equals 4.";
+        let out = slice_from_echo(wide, "compute 2+2").expect("echo found");
+        assert_eq!(out, "2+2 equals 4.");
+    }
+
+    #[test]
+    fn test_slice_from_echo_empty_marker_is_none() {
+        assert!(slice_from_echo(WIDE, "").is_none(), "empty marker → None");
+    }
+
+    #[test]
+    fn test_slice_from_echo_multiline_send_uses_first_line() {
+        let wide = "junk\n❯ first line of message\n\nanswer body";
+        let out = slice_from_echo(wide, "first line of message\nsecond line").expect("echo found");
+        assert_eq!(out, "answer body");
+    }
+
+    #[test]
+    fn test_slice_from_echo_wrapped_echo_fully_consumed() {
+        // The live W8 round-4 failure screen: the user's message wraps to a
+        // second indented row in claude's transcript; that tail must NOT head
+        // the answer.
+        let wide = "❯ Can you make a tab called pets, then 2 notes: 1 about cats, 1 about dogs?\n\
+                    \u{20}\u{20}Just 1-2 selected fun facts.\n\
+                    \n\
+                    \u{20}\u{20}Called minerva 3 times (ctrl+o to expand)\n\
+                    \n\
+                    ● Done — created a pets tab with two notes:";
+        let sent = "Can you make a tab called pets, then 2 notes: 1 about cats, 1 about dogs? Just 1-2 selected fun facts.";
+        let out = slice_from_echo(wide, sent).expect("echo found");
+        assert!(!out.contains("Just 1-2 selected fun facts"),
+            "wrapped echo tail stripped: {out:?}");
+        assert!(out.starts_with("  Called minerva"), "answer intact: {out:?}");
+        assert!(out.contains("● Done"), "answer body kept: {out:?}");
+    }
+
+    #[test]
+    fn test_slice_from_echo_wrapped_echo_three_rows() {
+        let wide = "❯ alpha beta\n  gamma delta\n  epsilon\n\nthe answer";
+        let out = slice_from_echo(wide, "alpha beta gamma delta epsilon").expect("echo found");
+        assert_eq!(out, "the answer");
+    }
+
+    #[test]
+    fn test_slice_from_echo_answer_repeating_message_not_consumed() {
+        // An answer row that REPEATS the full message verbatim must survive —
+        // consumption stops once the echo is fully accounted for.
+        let wide = "❯ ping\n\nping\npong";
+        let out = slice_from_echo(wide, "ping").expect("echo found");
+        assert_eq!(out, "ping\npong", "answer kept even when it repeats the message");
     }
 }

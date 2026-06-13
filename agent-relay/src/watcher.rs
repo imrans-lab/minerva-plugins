@@ -115,6 +115,16 @@ struct WatchSession {
     /// first wait sample after watch_start, or at the last counted turn.
     gate_ref_rows: Option<u64>,
 
+    /// Content reference for the gate's ARMED change check (W8 HITL stall):
+    /// a TUI that redraws in place inside a not-yet-filled grid grows no rows,
+    /// and a busy phase shorter than settle_ms never appears in a settled
+    /// host.terminal.wait sample — so short turns stayed gated forever. After
+    /// a send (armed), ANY screen change since the arm snapshot is evidence
+    /// the agent acted, so it also opens the gate. Unarmed sessions keep the
+    /// strict busy/growth rule (idle screens with cosmetic changes must not
+    /// fire phantom all_turns events).
+    gate_ref_hash: Option<u64>,
+
     /// Last-activity anchor for the idle reap: refreshed by arm() and by any
     /// counted detection. The watch_timeout_ms reap applies only to UNARMED
     /// sessions idle past this anchor — an armed session never self-reaps
@@ -138,6 +148,7 @@ impl WatchSession {
             last_event_payload: None,
             gate_open: false,
             gate_ref_rows: None,
+            gate_ref_hash: None,
             reap_anchor: Instant::now(),
         }
     }
@@ -362,9 +373,11 @@ pub fn arm(terminal_id: &str, snapshot: Option<(&str, u64)>) -> bool {
             // never gets reaped out from under its one-shot wake.
             s.reap_anchor = Instant::now();
             // Close the busy-gate: this arm's turn_completed requires a fresh
-            // busy screen or row growth past the arm snapshot first.
+            // busy screen, row growth past the arm snapshot, or (armed) any
+            // screen change since the pre-write snapshot.
             s.gate_open = false;
             s.gate_ref_rows = raw_rows;
+            s.gate_ref_hash = snapshot.map(|(content, _)| content_hash(content));
             let anchored = snapshot.map(|(content, rows)| {
                 anchored_rows(&s.profile_id, content, rows)
             });
@@ -387,6 +400,15 @@ pub fn arm(terminal_id: &str, snapshot: Option<(&str, u64)>) -> bool {
         );
     }
     found
+}
+
+/// Hash of a screen dump, for the gate's armed change check. Identity only —
+/// two samples compare equal iff the rendered text is identical.
+fn content_hash(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Compute the content-anchored row count: `total_rows` minus the trailing
@@ -463,6 +485,54 @@ pub fn watch_status(terminal_id: &str) -> Option<serde_json::Value> {
 }
 
 // ---------------------------------------------------------------------------
+// Chat-provider registration (chat-passthrough B7, DCR 019eb7f329 #483)
+//
+// Every watch session advertises its terminal as a Minerva chat provider:
+// register on watch-loop start (all notify modes — resumed sessions included),
+// unregister when the loop cleans up (watch_stop, terminal_closed, agent_exited,
+// idle reap — every session-death path funnels through the loop's cleanup).
+// One capability string gates both ops. Registration runs on the WATCH thread,
+// never the main dispatch thread: a blocking capability round-trip inside
+// handle_watch_start would stall tool dispatch until the host replies.
+//
+// Failures are logged and tolerated: the provider entry is an enhancement on
+// top of the watch session, never a dependency (older Minervas without the
+// capability keep full watch functionality).
+// ---------------------------------------------------------------------------
+
+/// The provider-entry id for a terminal (host namespaces it per-plugin).
+fn chat_provider_entry_id(terminal_id: &str) -> String {
+    format!("terminal-{terminal_id}")
+}
+
+fn register_chat_provider(terminal_id: &str, profile_id: &str, router: &Arc<Router>) {
+    let args = json!({
+        "entry_id": chat_provider_entry_id(terminal_id),
+        "display_name": format!("terminal {terminal_id} ({profile_id})"),
+        "generate_tool": "minerva_agent_relay_passthrough_generate",
+        "history_mode": "newest_only",
+        "timeout_sec": 600,
+    });
+    match router.call_capability("host.chat_providers.register", args) {
+        Ok(_) => log::info!(
+            "chat provider registered for terminal {terminal_id} (profile {profile_id})"
+        ),
+        Err(e) => log::warn!(
+            "chat provider registration failed for {terminal_id}: {e} — \
+             watch continues without a provider entry"
+        ),
+    }
+}
+
+fn unregister_chat_provider(terminal_id: &str, router: &Arc<Router>) {
+    let args = json!({ "entry_id": chat_provider_entry_id(terminal_id) });
+    match router.call_capability("host.chat_providers.unregister", args) {
+        Ok(_) => log::info!("chat provider unregistered for terminal {terminal_id}"),
+        Err(e) => log::warn!("chat provider unregister failed for {terminal_id}: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Watch loop (runs in background thread)
 // ---------------------------------------------------------------------------
 
@@ -485,6 +555,11 @@ fn watch_loop(
     };
 
     let watch_timeout = std::time::Duration::from_millis(cd.watch_timeout_ms);
+
+    // Advertise this terminal as a chat provider. Re-issuing watch_start
+    // (e.g. with a new profile) re-registers under the same entry_id —
+    // an idempotent update on the host side.
+    register_chat_provider(&terminal_id, &profile.id, &router);
 
     loop {
         // Check stop flag and the idle reap. The reap applies only to UNARMED
@@ -581,16 +656,27 @@ fn watch_loop(
                 // Busy-gate bookkeeping: a busy screen or row growth past the
                 // reference opens the gate. First sample after watch_start
                 // seeds the reference (gate stays closed on that sample).
+                // ARMED sessions additionally open on any content change since
+                // the arm snapshot (W8 HITL stall): short in-place turns grow
+                // no rows, and a busy phase shorter than settle_ms is never
+                // present in a settled wait sample — without this, a passthrough
+                // turn whose whole answer fits one settle window gated forever.
                 let gate_open = {
                     let mut s = session.lock().unwrap();
                     if s.gate_ref_rows.is_none() {
                         s.gate_ref_rows = current_rows;
                     }
+                    let hash = content_hash(content);
+                    if s.gate_ref_hash.is_none() {
+                        s.gate_ref_hash = Some(hash);
+                    }
                     let grew = match (current_rows, s.gate_ref_rows) {
                         (Some(now), Some(reference)) => now > reference,
                         _ => false,
                     };
-                    if grew || detector::is_busy(content, &cd) {
+                    let changed_while_armed =
+                        s.armed && s.gate_ref_hash != Some(hash);
+                    if grew || changed_while_armed || detector::is_busy(content, &cd) {
                         s.gate_open = true;
                     }
                     s.gate_open
@@ -640,6 +726,7 @@ fn watch_loop(
                         let mut s = session.lock().unwrap();
                         s.gate_open = false;
                         s.gate_ref_rows = current_rows;
+                        s.gate_ref_hash = Some(content_hash(content));
                     }
 
                     // terminal_closed and agent_exited (child_exit) are terminal — stop watching.
@@ -658,14 +745,28 @@ fn watch_loop(
         }
     }
 
-    // Clean up: remove session from registry.
-    {
+    // Clean up: remove session from registry — but only if the registry still
+    // points at THIS session. A re-issued watch_start replaces the map entry
+    // (and re-registers the provider entry under the same id) while this
+    // superseded loop is still draining; removing/unregistering here would
+    // tear down the NEW session's state (supersede race).
+    let owns_cleanup = {
         let sessions = get_sessions();
         let mut map = sessions.lock().unwrap();
-        map.remove(&terminal_id);
-    }
+        match map.get(&terminal_id) {
+            Some(current) if Arc::ptr_eq(current, &session) => {
+                map.remove(&terminal_id);
+                true
+            }
+            Some(_) => false, // superseded — the newer session owns the entry
+            None => true,     // already removed — still tidy the provider entry
+        }
+    };
     crate::state::save();
-    log::info!("watch_loop: cleaned up {terminal_id}");
+    if owns_cleanup {
+        unregister_chat_provider(&terminal_id, &router);
+    }
+    log::info!("watch_loop: cleaned up {terminal_id} (owned={owns_cleanup})");
 }
 
 /// Conditionally emit a turn_completed event based on notify_mode and arm state.
