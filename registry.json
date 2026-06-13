@@ -4,15 +4,15 @@
     {
       "id": "agent_relay",
       "name": "Agent Relay",
-      "version": "0.1.0",
-      "manifest_version": "0.1.0",
-      "release_tag": "agent_relay-v0.1.0",
+      "version": "0.2.0",
+      "manifest_version": "0.2.0",
+      "release_tag": "agent_relay-v0.2.0",
       "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/agent-relay/manifest.json",
       "downloads": {
-        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.1.0/agent_relay-0.1.0-linux-x86_64.tar.gz",
-        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.1.0/agent_relay-0.1.0-linux-arm64.tar.gz",
-        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.1.0/agent_relay-0.1.0-macos-universal.tar.gz",
-        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.1.0/agent_relay-0.1.0-windows-x86_64.tar.gz"
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.2.0/agent_relay-0.2.0-linux-x86_64.tar.gz",
+        "linux-arm64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.2.0/agent_relay-0.2.0-linux-arm64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.2.0/agent_relay-0.2.0-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/agent_relay-v0.2.0/agent_relay-0.2.0-windows-x86_64.tar.gz"
       }
     },
     {
