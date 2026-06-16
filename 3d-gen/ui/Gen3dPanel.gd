@@ -285,8 +285,9 @@ func _build_viewport_column() -> void:
 	dir_light.rotation_degrees = Vector3(-45, 45, 0)
 	_world_root.add_child(dir_light)
 
-	# OrbitCamera — instantiated from the preloaded script, typed Camera3D.
-	var cam_scene := _OrbitCameraScript.new()  # Script extends Camera3D
+	# OrbitCamera — instantiated from the preloaded script. Untyped: Script.new()
+	# returns Object, so `:=` cannot infer a type (off-tree class_name is stripped).
+	var cam_scene: Camera3D = _OrbitCameraScript.new()  # script extends Camera3D
 	cam_scene.name = "OrbitCamera"
 	_world_root.add_child(cam_scene)
 	_camera = cam_scene as Camera3D
