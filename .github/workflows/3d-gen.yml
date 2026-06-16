@@ -1,0 +1,175 @@
+name: 3d-gen
+
+# Plugin dir is `3d-gen`; plugin id (manifest) is `gen3d`, so the binary is
+# `gen3d-plugin`, release tarballs are `gen3d-<version>-<target>.tar.gz`, and the
+# release tag is `gen3d-v<version>` (regen_registry.py keys off the manifest id).
+on:
+  push:
+    branches: [main, "dcr/**"]
+    paths:
+      - "3d-gen/**"
+      - ".github/workflows/3d-gen.yml"
+      - "shared/rust/**"
+      - "scripts/smoke/**"
+    tags: ["gen3d-v*"]
+  pull_request:
+    paths:
+      - "3d-gen/**"
+      - ".github/workflows/3d-gen.yml"
+      - "shared/rust/**"
+      - "scripts/smoke/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: gen3d (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runs-on: ubuntu-22.04
+            rust-targets: ""
+            ext: ""
+          - target: macos-universal
+            runs-on: macos-14
+            rust-targets: "x86_64-apple-darwin,aarch64-apple-darwin"
+            ext: ""
+          - target: windows-x86_64
+            runs-on: windows-2022
+            rust-targets: ""
+            ext: ".exe"
+    runs-on: ${{ matrix.runs-on }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: 3d-gen
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 3d-gen -> target
+          key: ${{ matrix.target }}
+
+      - name: Build (native)
+        if: matrix.target != 'macos-universal'
+        run: cargo build --release --locked
+
+      - name: Build (macOS universal — lipo x86_64 + arm64)
+        if: matrix.target == 'macos-universal'
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/gen3d-plugin \
+            target/aarch64-apple-darwin/release/gen3d-plugin \
+            -output target/release/gen3d-plugin
+          lipo -info target/release/gen3d-plugin
+
+      - name: Cargo test (linux-x86_64 only — Linux is the source of truth)
+        if: matrix.target == 'linux-x86_64'
+        run: cargo test --release --locked
+
+      - name: Smoke
+        run: python3 ../scripts/smoke/mcp_smoke.py target/release/gen3d-plugin${{ matrix.ext }}
+
+      - name: Pack release tarball
+        run: |
+          PLATFORM="${{ matrix.target }}"
+          VERSION=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')
+          mkdir -p dist
+          PACKDIR="dist/gen3d-${VERSION}-${PLATFORM}"
+          mkdir -p "$PACKDIR"
+          cp target/release/gen3d-plugin${{ matrix.ext }} "$PACKDIR/"
+          cp manifest.json "$PACKDIR/"
+          # Ship the ui/ tree — the manifest declares a godot_scene panel
+          # (ui/Gen3dPanel.tscn + ui/*.gd) which Minerva loads at panel-open
+          # time from the install dir. Without it the backend starts but the
+          # panel fails to open ("Whitelisted script not found").
+          cp -r ui "$PACKDIR/"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 sha256sum | sed 's| \./| |' > SHA256SUMS)
+          else
+            (cd "$PACKDIR" && find . -type f ! -name SHA256SUMS -print0 \
+              | xargs -0 shasum -a 256 | sed 's| \./| |' > SHA256SUMS)
+          fi
+          tar -czf "dist/gen3d-${VERSION}-${PLATFORM}.tar.gz" -C "$PACKDIR" .
+          echo "Packed contents:"
+          tar -tzf "dist/gen3d-${VERSION}-${PLATFORM}.tar.gz" | head -30
+          ls -la "dist/gen3d-${VERSION}-${PLATFORM}.tar.gz"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gen3d-${{ matrix.target }}
+          path: 3d-gen/dist/gen3d-*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all matrix tarballs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gen3d-*
+          path: artifacts/
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: ls -la artifacts/
+
+      - name: Compute tag + prerelease flag
+        id: tag
+        shell: bash
+        run: |
+          VERSION=$(python3 -c 'import json; print(json.load(open("3d-gen/manifest.json"))["version"])')
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            PRE="false"
+          elif [ "$GITHUB_REF_NAME" = "main" ]; then
+            TAG="gen3d-v${VERSION}"
+            PRE="false"
+          else
+            SAFE_BRANCH=$(echo "$GITHUB_REF_NAME" | sed 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g')
+            TAG="gen3d-v${VERSION}-branch-${SAFE_BRANCH}"
+            PRE="true"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRE" >> "$GITHUB_OUTPUT"
+          echo "Computed: tag=$TAG prerelease=$PRE"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ steps.tag.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          files: artifacts/gen3d-*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true
