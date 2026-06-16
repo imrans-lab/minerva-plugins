@@ -31,7 +31,7 @@ impl Default for MediaGenConfig {
         Self {
             login_url: "https://www.turnrock.ai:4040/v1/login".into(),
             ws_url: "wss://www.turnrock.ai:27500/connect".into(),
-            request_timeout: Duration::from_secs(600),
+            request_timeout: Duration::from_secs(1800), // heavy video (720p/81f dual-expert) can run ~20+ min
             recv_timeout: Duration::from_secs(120),
         }
     }

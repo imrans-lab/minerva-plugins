@@ -260,15 +260,15 @@ func _build_controls_column() -> void:
 
 	# ── Shared parameters ──────────────────────────────────────────────────
 	_controls_vbox.add_child(_make_label("Width"))
-	_width_spin = _make_spinbox("WidthSpin", 256, 1280, 1280, 1)
+	_width_spin = _make_spinbox("WidthSpin", 256, 1280, 832, 1)  # light interactive default; raise to 1280 for final
 	_controls_vbox.add_child(_width_spin)
 
 	_controls_vbox.add_child(_make_label("Height"))
-	_height_spin = _make_spinbox("HeightSpin", 256, 720, 720, 1)
+	_height_spin = _make_spinbox("HeightSpin", 256, 720, 480, 1)
 	_controls_vbox.add_child(_height_spin)
 
 	_controls_vbox.add_child(_make_label("Length (frames)"))
-	_length_spin = _make_spinbox("LengthSpin", 17, 121, 81, 1)
+	_length_spin = _make_spinbox("LengthSpin", 17, 121, 33, 1)
 	_controls_vbox.add_child(_length_spin)
 
 	_controls_vbox.add_child(_make_label("FPS"))
@@ -276,11 +276,11 @@ func _build_controls_column() -> void:
 	_controls_vbox.add_child(_fps_spin)
 
 	_controls_vbox.add_child(_make_label("Steps"))
-	_steps_spin = _make_spinbox("StepsSpin", 4, 40, 20, 1)
+	_steps_spin = _make_spinbox("StepsSpin", 4, 40, 16, 1)
 	_controls_vbox.add_child(_steps_spin)
 
 	_controls_vbox.add_child(_make_label("Switch Step"))
-	_switch_step_spin = _make_spinbox("SwitchStepSpin", 1, 39, 10, 1)
+	_switch_step_spin = _make_spinbox("SwitchStepSpin", 1, 39, 8, 1)
 	_controls_vbox.add_child(_switch_step_spin)
 
 	_controls_vbox.add_child(_make_label("CFG Scale"))
@@ -516,7 +516,7 @@ func _run_generate(mode: int, args: Dictionary) -> void:
 	var reply_id: String = "movgen:%d" % Time.get_ticks_usec()
 	request.emit(channel, args, reply_id)
 
-	var reply: Dictionary = await ipc.await_reply(reply_id, 600000)
+	var reply: Dictionary = await ipc.await_reply(reply_id, 1800000)  # up to 30 min for heavy video
 	_set_in_flight(false)
 
 	if not bool(reply.get("success", false)):
