@@ -178,7 +178,7 @@
   "events": [{"name": "movie_gen.progress"}],
   "permissions": {
     "host_capabilities": [
-      "host.media.credentials",
+      "host.core.session",
       "host.notify",
       "host.dialogs.file_picker"
     ],

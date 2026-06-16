@@ -96,7 +96,7 @@
   "events": [{"name": "gen3d.progress"}],
   "permissions": {
     "host_capabilities": [
-      "host.media.credentials",
+      "host.core.session",
       "host.notify",
       "host.dialogs.file_picker"
     ],

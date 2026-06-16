@@ -157,16 +157,16 @@ fn request_capability(
 // Credential fetch
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Fetch media-gen credentials via host.media.credentials capability.
+/// Fetch media-gen credentials via host.core.session capability.
 /// Returns Credentials on success or a tool_err Value on failure.
 fn fetch_credentials(
     out: &mut impl Write,
     lines: &mut impl Iterator<Item = Result<String, io::Error>>,
     next_id: &mut u64,
 ) -> Result<Credentials, Value> {
-    let response = request_capability(out, lines, next_id, "host.media.credentials", json!({}))
+    let response = request_capability(out, lines, next_id, "host.core.session", json!({}))
         .map_err(|e| {
-            log::error!("host.media.credentials failed: {e}");
+            log::error!("host.core.session failed: {e}");
             tool_err(&format!("credentials unavailable: {e}"))
         })?;
 

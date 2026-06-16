@@ -90,26 +90,37 @@ impl MediaGenClient {
 `generate()` correlates strictly on `request_id`; frames/text for other request_ids
 are skipped. On a Core `error` text msg for our request_id → `MediaError::Remote`.
 
-## 2. Minerva host capability — `host.media.credentials`
+## 2. Minerva host capability — `host.core.session`
 
-New capability in `CapabilityBroker.gd` (Opus, direct, Minerva `development`).
-Read-only; returns the live Core session creds so the plugin reuses the host's
-already-authenticated session (no plugin-side login).
+Generic capability in `CapabilityBroker.gd` (Opus, direct, Minerva `development`).
+**Mints a NEW, distinct Core session** via an independent re-login (stored HCP creds)
+and returns its credentials, so the plugin can open its OWN Core connection.
+
+> Why mint instead of reuse: reusing Minerva's live token gives the plugin the SAME
+> `session_id`, and Core rejects the second connection with "Session ID collision"
+> (`core/src/websocket.rs:1234`). Core mints a fresh `session_id` per login
+> (`profile/handlers/login.rs:189`) and allows up to 10 sessions/user, so a re-login
+> yields a clean, distinct session. Named generically (`host.core.session`, not
+> `host.media.*`) so ANY plugin reaching ANY Core service reuses it; Minerva stays
+> out of the data path.
 
 ```
-capability: "host.media.credentials"
+capability: "host.core.session"
 args: {}            // none
 // Broker envelope (platform convention, PluginErrors.success):
 success: { "success": true, "result": { "ws_url": <string>, "token": <string>, "client_id": <string> } }
 // → the backend reads creds under response.result.* (NOT the top level).
 ```
 
-Source: `Core.gd` `_jwt_token` (:38) + `_client_id` (:40); ws_url from core_client.
-Gated by the manifest grant `host.media.credentials` + policy; **never auto-granted**
-if it turns out to expose a broadly-scoped token (revisit scoping in A1a). Error
-`media_credentials_unavailable` when not logged in.
+Source: `Core.gd::mint_plugin_session()` — independent HTTP login (never touches
+Minerva's own `_jwt_token`/socket); login response shape `json.data.token` +
+`json.data.user.id`. Gated by the manifest grant `host.core.session` + policy.
+`backend_error` when Core is absent or the mint (login) fails. The minted session is
+**service-scoped** via the user's `svc_allow` claim, NOT topic-scoped — per-topic
+scoping (a `scope` param on `/v1/login` + Core routing enforcement) is a future
+minerva-services change, tracked separately.
 
-Backend usage: tool handler calls `request_capability(.., "host.media.credentials", {})`
+Backend usage: tool handler calls `request_capability(.., "host.core.session", {})`
 → builds `Credentials` → `MediaGenClient::connect` → `generate`.
 
 ## 3. Test requirements (gate A1b commit)
