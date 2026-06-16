@@ -99,7 +99,9 @@ already-authenticated session (no plugin-side login).
 ```
 capability: "host.media.credentials"
 args: {}            // none
-success result: { "ws_url": <string>, "token": <string>, "client_id": <string> }
+// Broker envelope (platform convention, PluginErrors.success):
+success: { "success": true, "result": { "ws_url": <string>, "token": <string>, "client_id": <string> } }
+// → the backend reads creds under response.result.* (NOT the top level).
 ```
 
 Source: `Core.gd` `_jwt_token` (:38) + `_client_id` (:40); ws_url from core_client.
