@@ -82,12 +82,23 @@
     }
   ],
   "ui": {
-    "panels": []
+    "panels": [{
+      "name": "gen3d_panel",
+      "kind": "godot_scene",
+      "entry_scene": "ui/Gen3dPanel.tscn",
+      "scripts": ["ui/Gen3dPanel.gd", "ui/scripts/orbit_camera.gd"],
+      "ipc_channels": ["minerva_gen3d_text_to_3d", "minerva_gen3d_image_to_3d", "capability:host.dialogs.file_picker"],
+      "file_extensions": [".m3d"],
+      "save_mode": "host_owned"
+    }],
+    "ipc_messages": ["minerva_gen3d_text_to_3d", "minerva_gen3d_image_to_3d", "capability:host.dialogs.file_picker"]
   },
+  "events": [{"name": "gen3d.progress"}],
   "permissions": {
     "host_capabilities": [
       "host.media.credentials",
-      "host.notify"
+      "host.notify",
+      "host.dialogs.file_picker"
     ],
     "network": {
       "mode": "none"
