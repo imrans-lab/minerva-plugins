@@ -164,12 +164,23 @@
     }
   ],
   "ui": {
-    "panels": []
+    "panels": [{
+      "name": "movie_gen_panel",
+      "kind": "godot_scene",
+      "entry_scene": "ui/MovieGenPanel.tscn",
+      "scripts": ["ui/MovieGenPanel.gd"],
+      "ipc_channels": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker"],
+      "file_extensions": [".mmovie"],
+      "save_mode": "host_owned"
+    }],
+    "ipc_messages": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker"]
   },
+  "events": [{"name": "movie_gen.progress"}],
   "permissions": {
     "host_capabilities": [
       "host.media.credentials",
-      "host.notify"
+      "host.notify",
+      "host.dialogs.file_picker"
     ],
     "network": {
       "mode": "none"
