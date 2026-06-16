@@ -1,0 +1,102 @@
+{
+  "id": "gen3d",
+  "name": "3D Generator",
+  "version": "0.0.1",
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./gen3d-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_gen3d_text_to_3d",
+      "description": "Generate a 3D model (GLB) from a text prompt via the Minerva media-gen service. Returns the path to the saved GLB file.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "positive_prompt": {
+            "type": "string",
+            "description": "Text description of the 3D object to generate."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Text description of things to avoid in the generation."
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed. -1 means random. Default: -1.",
+            "default": -1
+          },
+          "steps": {
+            "type": "integer",
+            "description": "Number of diffusion steps (1–50). Default: 25.",
+            "default": 25,
+            "minimum": 1,
+            "maximum": 50
+          },
+          "guidance": {
+            "type": "number",
+            "description": "Guidance scale (1–15). Default: 5.5.",
+            "default": 5.5,
+            "minimum": 1,
+            "maximum": 15
+          }
+        },
+        "required": ["positive_prompt"]
+      }
+    },
+    {
+      "name": "minerva_gen3d_image_to_3d",
+      "description": "Generate a 3D model (GLB) from a reference image via the Minerva media-gen service. Returns the path to the saved GLB file.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "image_path": {
+            "type": "string",
+            "description": "Absolute path to a PNG or JPG image on disk to use as the reference."
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed. -1 means random. Default: -1.",
+            "default": -1
+          },
+          "steps": {
+            "type": "integer",
+            "description": "Number of diffusion steps (10–100). Default: 30.",
+            "default": 30,
+            "minimum": 10,
+            "maximum": 100
+          },
+          "guidance": {
+            "type": "number",
+            "description": "Guidance scale (1–15). Default: 5.5.",
+            "default": 5.5,
+            "minimum": 1,
+            "maximum": 15
+          }
+        },
+        "required": ["image_path"]
+      }
+    }
+  ],
+  "ui": {
+    "panels": []
+  },
+  "permissions": {
+    "host_capabilities": [
+      "host.media.credentials",
+      "host.notify"
+    ],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "autostart": false,
+  "auto_reload": false
+}

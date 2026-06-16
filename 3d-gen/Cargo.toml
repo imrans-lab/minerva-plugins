@@ -1,0 +1,16 @@
+[package]
+name = "gen3d-plugin"
+version = "0.0.1"
+edition = "2021"
+
+[[bin]]
+name = "gen3d-plugin"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+log = "0.4"
+env_logger = "0.11"
+minerva-media-client = { path = "../shared/rust/minerva-media-client" }
