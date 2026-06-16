@@ -1,0 +1,184 @@
+{
+  "id": "movie_gen",
+  "name": "Movie Generator",
+  "version": "0.0.1",
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./movie_gen-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_movie_gen_text_to_video",
+      "description": "Generate a video (MP4) from a text prompt via the Minerva media-gen service. Returns the path to the saved MP4 file.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "positive_prompt": {
+            "type": "string",
+            "description": "Text description of the video to generate."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Text description of things to avoid in the generation. Default: 'blurry, low quality, static, distorted, watermark'."
+          },
+          "width": {
+            "type": "integer",
+            "description": "Output video width in pixels (256–1280). Default: 1280.",
+            "default": 1280,
+            "minimum": 256,
+            "maximum": 1280
+          },
+          "height": {
+            "type": "integer",
+            "description": "Output video height in pixels (256–720). Default: 720.",
+            "default": 720,
+            "minimum": 256,
+            "maximum": 720
+          },
+          "length": {
+            "type": "integer",
+            "description": "Number of frames to generate (17–121). Default: 81.",
+            "default": 81,
+            "minimum": 17,
+            "maximum": 121
+          },
+          "fps": {
+            "type": "integer",
+            "description": "Frames per second for the output video (8–30). Default: 16.",
+            "default": 16,
+            "minimum": 8,
+            "maximum": 30
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed. -1 means random. Default: -1.",
+            "default": -1
+          },
+          "steps": {
+            "type": "integer",
+            "description": "Number of diffusion steps (4–40). Default: 20.",
+            "default": 20,
+            "minimum": 4,
+            "maximum": 40
+          },
+          "switch_step": {
+            "type": "integer",
+            "description": "Step at which the sampler switches (1–39). Default: 10.",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 39
+          },
+          "cfg": {
+            "type": "number",
+            "description": "Classifier-free guidance scale (1–12). Default: 5.0.",
+            "default": 5.0,
+            "minimum": 1,
+            "maximum": 12
+          }
+        },
+        "required": ["positive_prompt"]
+      }
+    },
+    {
+      "name": "minerva_movie_gen_flf2v",
+      "description": "Generate a video (MP4) by interpolating between a first and last keyframe image via the Minerva media-gen service. Returns the path to the saved MP4 file.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "first_frame_path": {
+            "type": "string",
+            "description": "Absolute path to the start keyframe image on disk."
+          },
+          "last_frame_path": {
+            "type": "string",
+            "description": "Absolute path to the end keyframe image on disk."
+          },
+          "positive_prompt": {
+            "type": "string",
+            "description": "Text description of the motion or transition to generate."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Text description of things to avoid in the generation. Default: 'blurry, low quality, static, distorted, watermark'."
+          },
+          "width": {
+            "type": "integer",
+            "description": "Output video width in pixels (256–1280). Default: 1280.",
+            "default": 1280,
+            "minimum": 256,
+            "maximum": 1280
+          },
+          "height": {
+            "type": "integer",
+            "description": "Output video height in pixels (256–720). Default: 720.",
+            "default": 720,
+            "minimum": 256,
+            "maximum": 720
+          },
+          "length": {
+            "type": "integer",
+            "description": "Number of frames to generate (17–121). Default: 81.",
+            "default": 81,
+            "minimum": 17,
+            "maximum": 121
+          },
+          "fps": {
+            "type": "integer",
+            "description": "Frames per second for the output video (8–30). Default: 16.",
+            "default": 16,
+            "minimum": 8,
+            "maximum": 30
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed. -1 means random. Default: -1.",
+            "default": -1
+          },
+          "steps": {
+            "type": "integer",
+            "description": "Number of diffusion steps (4–40). Default: 20.",
+            "default": 20,
+            "minimum": 4,
+            "maximum": 40
+          },
+          "switch_step": {
+            "type": "integer",
+            "description": "Step at which the sampler switches (1–39). Default: 10.",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 39
+          },
+          "cfg": {
+            "type": "number",
+            "description": "Classifier-free guidance scale (1–12). Default: 5.0.",
+            "default": 5.0,
+            "minimum": 1,
+            "maximum": 12
+          }
+        },
+        "required": ["first_frame_path", "last_frame_path", "positive_prompt"]
+      }
+    }
+  ],
+  "ui": {
+    "panels": []
+  },
+  "permissions": {
+    "host_capabilities": [
+      "host.media.credentials",
+      "host.notify"
+    ],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "autostart": false,
+  "auto_reload": false
+}
