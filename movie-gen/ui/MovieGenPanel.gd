@@ -648,8 +648,10 @@ func _on_save_pressed() -> void:
 func receive(channel: String, payload: Dictionary) -> void:
 	match channel:
 		"movie_gen.progress":
-			var msg: String = str(payload.get("message", ""))
-			_set_status(msg)
+			_last_progress_msg = str(payload.get("message", ""))
+			# While in-flight the ticker folds this into the live status line.
+			if not _in_flight:
+				_set_status(_last_progress_msg)
 
 
 # ── Plugin platform lifecycle hooks ──────────────────────────────────────────
@@ -776,12 +778,42 @@ func _make_spinbox(node_name: String, min_v: float, max_v: float, default_v: flo
 	return sb
 
 
+var _gen_start_ms: int = 0
+var _gen_timer: Timer = null
+var _last_progress_msg: String = ""
+
+
 func _set_in_flight(in_flight: bool) -> void:
 	_in_flight = in_flight
 	if _generate_btn != null:
 		_generate_btn.disabled = in_flight
 	if _regenerate_btn != null and not _last_args.is_empty():
 		_regenerate_btn.disabled = in_flight
+	# Drive a live "⏳ Generating… (m:ss)" ticker so the run is visibly alive even
+	# when the backend sends no intermediate progress (video can run minutes).
+	if in_flight:
+		_last_progress_msg = ""
+		_gen_start_ms = Time.get_ticks_msec()
+		_ensure_gen_timer()
+		_gen_timer.start()
+		_on_gen_tick()
+	elif _gen_timer != null:
+		_gen_timer.stop()
+
+
+func _ensure_gen_timer() -> void:
+	if _gen_timer == null:
+		_gen_timer = Timer.new()
+		_gen_timer.wait_time = 1.0
+		_gen_timer.one_shot = false
+		_gen_timer.timeout.connect(_on_gen_tick)
+		add_child(_gen_timer)
+
+
+func _on_gen_tick() -> void:
+	var secs := int((Time.get_ticks_msec() - _gen_start_ms) / 1000.0)
+	var extra := "" if _last_progress_msg.is_empty() else " — " + _last_progress_msg
+	_set_status("⏳ Generating… (%d:%02d)%s" % [secs / 60, secs % 60, extra])
 
 
 func _set_status(msg: String) -> void:

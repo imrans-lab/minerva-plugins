@@ -463,9 +463,38 @@ func _load_glb(path: String) -> bool:
 	_world_root.add_child(scene)
 	_current_mesh_node = scene as Node3D
 
+	# Shape-only meshes (text_to_3d) ship no material and render flat white —
+	# clay-coat them so the form reads under the lighting.
+	_apply_clay_material(scene)
+
 	# Frame the camera on the loaded mesh AABB.
 	_frame_camera_on_mesh(scene)
 	return true
+
+
+## Give untextured meshes a matte clay material so geometry is legible. Meshes
+## that already carry a real material (a future textured GLB) are left untouched.
+func _apply_clay_material(root: Node) -> void:
+	var clay := StandardMaterial3D.new()
+	clay.albedo_color = Color(0.74, 0.74, 0.78)
+	clay.roughness = 0.85
+	clay.metallic = 0.0
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		if n is MeshInstance3D:
+			var mi := n as MeshInstance3D
+			var has_mat := mi.material_override != null
+			if not has_mat and mi.mesh != null:
+				for s in mi.mesh.get_surface_count():
+					if mi.mesh.surface_get_material(s) != null \
+							or mi.get_surface_override_material(s) != null:
+						has_mat = true
+						break
+			if not has_mat:
+				mi.material_override = clay
+		for i in n.get_child_count():
+			stack.push_back(n.get_child(i))
 
 
 func _frame_camera_on_mesh(mesh_node: Node) -> void:
@@ -494,7 +523,7 @@ func _frame_camera_on_mesh(mesh_node: Node) -> void:
 
 	var center: Vector3 = aabb.get_center()
 	var size: float = aabb.get_longest_axis_size()
-	var dist: float = max(size * 1.8, 5.0)
+	var dist: float = max(size * 2.2, 0.4)
 
 	# Duck-type the OrbitCamera's set_target / set_distance (typed Camera3D at
 	# the field level, but actual runtime type is OrbitCamera which has these).
@@ -548,8 +577,10 @@ func _on_save_pressed() -> void:
 func receive(channel: String, payload: Dictionary) -> void:
 	match channel:
 		"gen3d.progress":
-			var msg: String = str(payload.get("message", ""))
-			_set_status(msg)
+			_last_progress_msg = str(payload.get("message", ""))
+			# While in-flight the ticker folds this into the live status line.
+			if not _in_flight:
+				_set_status(_last_progress_msg)
 
 
 # ── Plugin platform lifecycle hooks ──────────────────────────────────────────
@@ -614,12 +645,42 @@ func _on_panel_load_request(document: Dictionary) -> void:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+var _gen_start_ms: int = 0
+var _gen_timer: Timer = null
+var _last_progress_msg: String = ""
+
+
 func _set_in_flight(in_flight: bool) -> void:
 	_in_flight = in_flight
 	if _generate_btn != null:
 		_generate_btn.disabled = in_flight
 	if _regenerate_btn != null and not _last_args.is_empty():
 		_regenerate_btn.disabled = in_flight
+	# Drive a live "⏳ Generating… (m:ss)" ticker so the run is visibly alive even
+	# when the backend sends no intermediate progress (3d/movie can run minutes).
+	if in_flight:
+		_last_progress_msg = ""
+		_gen_start_ms = Time.get_ticks_msec()
+		_ensure_gen_timer()
+		_gen_timer.start()
+		_on_gen_tick()
+	elif _gen_timer != null:
+		_gen_timer.stop()
+
+
+func _ensure_gen_timer() -> void:
+	if _gen_timer == null:
+		_gen_timer = Timer.new()
+		_gen_timer.wait_time = 1.0
+		_gen_timer.one_shot = false
+		_gen_timer.timeout.connect(_on_gen_tick)
+		add_child(_gen_timer)
+
+
+func _on_gen_tick() -> void:
+	var secs := int((Time.get_ticks_msec() - _gen_start_ms) / 1000.0)
+	var extra := "" if _last_progress_msg.is_empty() else " — " + _last_progress_msg
+	_set_status("⏳ Generating… (%d:%02d)%s" % [secs / 60, secs % 60, extra])
 
 
 func _set_status(msg: String) -> void:

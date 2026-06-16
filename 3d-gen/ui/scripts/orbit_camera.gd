@@ -18,7 +18,7 @@ const DEFAULT_YAW         := -45.0   # degrees, horizontal angle
 const DEFAULT_PITCH       := 30.0    # degrees above horizon
 const DEFAULT_TARGET      := Vector3.ZERO
 
-const MIN_DISTANCE        := 5.0
+const MIN_DISTANCE        := 0.05
 const MAX_DISTANCE        := 2000.0
 const ORBIT_SENSITIVITY   := 0.4     # degrees per pixel
 const PAN_SENSITIVITY     := 0.5     # world units per pixel
@@ -34,7 +34,7 @@ var _yaw       : float   = DEFAULT_YAW    # degrees
 var _pitch     : float   = DEFAULT_PITCH  # degrees
 var _view_preset: String = "Perspective"
 var _interactive: bool = true
-var _show_helpers: bool = true
+var _show_helpers: bool = false  # off for model preview — CAD grid/gizmo are wrong scale for a ~unit-sized mesh
 
 var _dragging_orbit : bool = false
 var _dragging_pan   : bool = false
@@ -64,14 +64,14 @@ func handle_pointer_input(event: InputEvent) -> bool:
 
 	var handled := false
 
-	# Middle mouse button: start/stop drag
+	# LEFT mouse = orbit (model-viewer convention); shift+LEFT or MIDDLE = pan.
 	if event is InputEventMouseButton:
 		var mbe := event as InputEventMouseButton
-		if mbe.button_index == MOUSE_BUTTON_MIDDLE:
+		if mbe.button_index == MOUSE_BUTTON_LEFT:
 			handled = true
 			if mbe.pressed:
 				_last_mouse_pos = mbe.position
-				if _view_preset != "Perspective" or mbe.shift_pressed:
+				if mbe.shift_pressed:
 					_dragging_pan = true
 					_dragging_orbit = false
 				else:
@@ -79,6 +79,14 @@ func handle_pointer_input(event: InputEvent) -> bool:
 					_dragging_pan = false
 			else:
 				_dragging_orbit = false
+				_dragging_pan = false
+		elif mbe.button_index == MOUSE_BUTTON_MIDDLE:
+			handled = true
+			if mbe.pressed:
+				_last_mouse_pos = mbe.position
+				_dragging_pan = true
+				_dragging_orbit = false
+			else:
 				_dragging_pan = false
 
 		# Scroll wheel zoom
@@ -94,13 +102,14 @@ func handle_pointer_input(event: InputEvent) -> bool:
 	# Mouse motion: orbit or pan
 	if event is InputEventMouseMotion:
 		var mme := event as InputEventMouseMotion
-		# Self-heal a lost middle-button release: if a drag latch is set but the
-		# live button_mask shows the middle button is not held, the release was
-		# never delivered (e.g. it happened outside the SubViewport). Clear it.
-		if (_dragging_orbit or _dragging_pan) and (mme.button_mask & MOUSE_BUTTON_MASK_MIDDLE) == 0:
+		# Self-heal a lost button release: if a drag latch is set but neither the
+		# left nor middle button is live in the mask, the release was never
+		# delivered (e.g. it happened outside the SubViewport). Clear it.
+		var any_held := (mme.button_mask & (MOUSE_BUTTON_MASK_LEFT | MOUSE_BUTTON_MASK_MIDDLE)) != 0
+		if (_dragging_orbit or _dragging_pan) and not any_held:
 			_dragging_orbit = false
 			_dragging_pan = false
-		if _dragging_orbit and _view_preset == "Perspective":
+		if _dragging_orbit:
 			handled = true
 			_yaw   -= mme.relative.x * ORBIT_SENSITIVITY
 			_pitch += mme.relative.y * ORBIT_SENSITIVITY
@@ -108,11 +117,12 @@ func handle_pointer_input(event: InputEvent) -> bool:
 			_apply_transform()
 		elif _dragging_pan:
 			handled = true
-			# Pan in the camera's local right/up plane
+			# Pan in the camera's local right/up plane, scaled by distance so it
+			# feels consistent at any zoom (works for ~unit-sized meshes).
 			var right := transform.basis.x
 			var up    := transform.basis.y
-			_target -= right * mme.relative.x * PAN_SENSITIVITY * (_distance / DEFAULT_DISTANCE)
-			_target += up   * mme.relative.y * PAN_SENSITIVITY * (_distance / DEFAULT_DISTANCE)
+			_target -= right * mme.relative.x * PAN_SENSITIVITY * _distance * 0.0035
+			_target += up   * mme.relative.y * PAN_SENSITIVITY * _distance * 0.0035
 			_apply_transform()
 
 	return handled
@@ -139,17 +149,18 @@ func _apply_transform() -> void:
 	var yaw_rad   := deg_to_rad(_yaw)
 	var pitch_rad := deg_to_rad(_pitch)
 
-	# Spherical → Cartesian, Z-up. pitch=0 → camera lies in the XY plane;
-	# pitch=+90 → directly above (+Z); pitch=-90 → directly below (-Z).
-	# yaw rotates around Z. yaw=0 puts the camera along +X.
+	# Spherical → Cartesian, Y-up (glTF convention — generated meshes are Y-up).
+	# yaw rotates around Y; pitch is elevation above the XZ plane. yaw=0,pitch=0
+	# puts the camera on +Z looking at the target (a front view); pitch=+90 is
+	# directly above (+Y).
 	var offset := Vector3(
-		_distance * cos(pitch_rad) * cos(yaw_rad),
 		_distance * cos(pitch_rad) * sin(yaw_rad),
-		_distance * sin(pitch_rad)
+		_distance * sin(pitch_rad),
+		_distance * cos(pitch_rad) * cos(yaw_rad)
 	)
 
 	position = _target + offset
-	look_at(_target, _Z_UP)
+	look_at(_target, Vector3.UP)
 
 
 func _apply_orthographic_transform() -> void:
@@ -319,6 +330,8 @@ func _build_axis_gizmo() -> MeshInstance3D:
 
 
 func _ensure_helpers() -> void:
+	if not _show_helpers:
+		return
 	var parent := get_parent()
 	if parent == null:
 		return
