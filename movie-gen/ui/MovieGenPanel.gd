@@ -365,7 +365,12 @@ func _build_main_column() -> void:
 	_mode_toggle.item_selected.connect(_on_mode_selected)
 	mode_row.add_child(_mode_toggle)
 
-	# ── Prompt area (text mode) ────────────────────────────────────────────
+	# ── Keyframe selection (FLF2V) — primary input, lives in the main column ──
+	_build_flf_keyframes()
+	_main_vbox.add_child(_flf_keyframes_section)
+
+	# ── Prompt area — placed at the bottom, just above the action row, so the
+	# inputs (mode, keyframes) read top-down into the prompt then the Send row. ─
 	var prompt_label := Label.new()
 	prompt_label.name = "TextPromptLabel"
 	prompt_label.text = "Prompt"
@@ -379,12 +384,10 @@ func _build_main_column() -> void:
 	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_main_vbox.add_child(_prompt_edit)
 
-	# ── FLF2V prompt area ──────────────────────────────────────────────────
-	# _flf_section was already created in _build_settings_popup; the FLF prompt
-	# is in the main column here (separate TextEdit, hidden by mode logic).
+	# FLF2V prompt (separate TextEdit; mode logic shows exactly one prompt).
 	var flf_prompt_label := Label.new()
 	flf_prompt_label.name = "FLFPromptLabel"
-	flf_prompt_label.text = "Prompt"
+	flf_prompt_label.text = "Prompt (optional)"
 	flf_prompt_label.visible = false
 	_main_vbox.add_child(flf_prompt_label)
 
@@ -392,17 +395,10 @@ func _build_main_column() -> void:
 	_flf_prompt_edit.name = "FLFPromptEdit"
 	_flf_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_flf_prompt_edit.custom_minimum_size = Vector2(0, 80)
-	_flf_prompt_edit.placeholder_text = "Describe the motion or transition…"
+	_flf_prompt_edit.placeholder_text = "Describe the motion or transition (optional)…"
 	_flf_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_flf_prompt_edit.visible = false
 	_main_vbox.add_child(_flf_prompt_edit)
-
-	# ── Keyframe selection (FLF2V) — primary input, lives in the main column ──
-	_build_flf_keyframes()
-	_main_vbox.add_child(_flf_keyframes_section)
-
-	# Store the FLF prompt label so _apply_mode can show/hide it.
-	# We reference it by name from the parent later.
 
 	# ── Button row: a compact, right-aligned flat icon toolbar ─────────────
 	# Order left→right: Settings · Download · Send (send is the rightmost action).
