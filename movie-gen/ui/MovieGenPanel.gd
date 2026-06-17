@@ -1041,7 +1041,7 @@ func _on_save_pressed() -> void:
 # ── IPC progress push ────────────────────────────────────────────────────────
 
 ## Called by the platform broker for push events from the backend.
-## Handles movie_gen.progress event messages.
+## Handles movie_gen.progress + movie_gen.result event messages.
 func receive(channel: String, payload: Dictionary) -> void:
 	match channel:
 		"movie_gen.progress":
@@ -1049,6 +1049,24 @@ func receive(channel: String, payload: Dictionary) -> void:
 			# While in-flight the ticker folds this into the live status line.
 			if not _in_flight:
 				_set_status(_last_progress_msg)
+		"movie_gen.result":
+			# An agent-driven (visible) gen finished — load it into our own player
+			# rather than the OS viewer. The panel's own gens don't emit this
+			# (they pass background=true and preview inline), so no double-load.
+			_on_external_result(str(payload.get("path", "")))
+
+
+## Load a video produced outside the panel (agent-driven gen) into the viewer.
+func _on_external_result(path: String) -> void:
+	if path.is_empty() or not FileAccess.file_exists(path):
+		return
+	_last_artifact_path = path
+	_set_status("Loaded generated video: %s" % path.get_file())
+	if _load_video(path):
+		if _save_btn != null:
+			_save_btn.disabled = false
+		if _regenerate_btn != null and not _last_args.is_empty():
+			_regenerate_btn.disabled = false
 
 
 # ── Plugin platform lifecycle hooks ──────────────────────────────────────────

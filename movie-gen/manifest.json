@@ -287,7 +287,7 @@
     }],
     "ipc_messages": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "minerva_movie_gen_i2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"]
   },
-  "events": [{"name": "movie_gen.progress"}],
+  "events": [{"name": "movie_gen.progress"}, {"name": "movie_gen.result"}],
   "permissions": {
     "host_capabilities": [
       "host.core.session",
@@ -295,7 +295,8 @@
       "host.dialogs.file_picker",
       "mcp.proxy:minerva_list_notes",
       "mcp.proxy:minerva_get_note",
-      "mcp.proxy:minerva_os_open"
+      "mcp.proxy:minerva_os_open",
+      "mcp.proxy:minerva_plugin_open_panel"
     ],
     "network": {
       "mode": "none"

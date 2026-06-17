@@ -153,10 +153,13 @@ fn request_capability(
     Err("stdin closed waiting for capability response".into())
 }
 
-/// Best-effort: surface a produced artifact in the host UI by opening it in the
-/// OS default media viewer (via mcp.proxy:minerva_os_open). Surfacing is a
-/// convenience — the path is already returned to the caller — so any failure is
-/// logged and swallowed, never failing the generation. Skipped in background mode.
+/// Best-effort: surface a produced artifact in the host UI. PANEL-FIRST — the
+/// plugin has its own VideoStreamPlayer, so open the movie-gen panel (idempotent)
+/// and emit a `movie_gen.result` event it loads into that player. Only if the
+/// panel can't be opened do we fall back to the OS media viewer (os_open).
+/// Surfacing is a convenience — the path is already returned to the caller — so
+/// any failure is logged and swallowed, never failing the gen. Skipped in
+/// background mode.
 fn surface_artifact(
     out: &mut impl Write,
     lines: &mut impl Iterator<Item = Result<String, io::Error>>,
@@ -167,12 +170,41 @@ fn surface_artifact(
         out,
         lines,
         next_id,
-        "mcp.proxy:minerva_os_open",
-        json!({"path": path}),
+        "mcp.proxy:minerva_plugin_open_panel",
+        json!({"plugin_id": "movie_gen", "panel_name": "movie_gen_panel"}),
     ) {
-        Ok(_) => log::info!("surfaced artifact via os_open: {path}"),
-        Err(e) => log::warn!("could not surface artifact {path}: {e}"),
+        Ok(_) => {
+            emit_result(out, path);
+            log::info!("surfaced artifact in panel: {path}");
+        }
+        Err(e) => {
+            log::warn!("panel surface failed ({e}); falling back to os_open");
+            match request_capability(
+                out,
+                lines,
+                next_id,
+                "mcp.proxy:minerva_os_open",
+                json!({"path": path}),
+            ) {
+                Ok(_) => log::info!("surfaced artifact via os_open fallback: {path}"),
+                Err(e2) => log::warn!("could not surface artifact {path}: {e2}"),
+            }
+        }
     }
+}
+
+/// One-way event telling an open movie-gen panel to load a freshly produced
+/// video into its player (mirrors emit_progress).
+fn emit_result(out: &mut (impl Write + ?Sized), path: &str) {
+    let notif = json!({
+        "jsonrpc": "2.0",
+        "method": "minerva/plugin_event",
+        "params": {
+            "event": "movie_gen.result",
+            "payload": { "path": path },
+        },
+    });
+    write_line(out, &notif);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
