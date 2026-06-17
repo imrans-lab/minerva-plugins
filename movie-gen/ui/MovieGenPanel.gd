@@ -545,6 +545,7 @@ func _on_browse_first_frame_pressed() -> void:
 	if path != "" and _first_frame_path_edit != null:
 		_first_frame_path_edit.text = path
 		_load_frame_preview(_first_frame_preview, path)
+		_sync_output_dims_from_keyframes()
 
 
 func _on_browse_last_frame_pressed() -> void:
@@ -552,6 +553,7 @@ func _on_browse_last_frame_pressed() -> void:
 	if path != "" and _last_frame_path_edit != null:
 		_last_frame_path_edit.text = path
 		_load_frame_preview(_last_frame_preview, path)
+		_sync_output_dims_from_keyframes()
 
 
 func _pick_image_file(title: String) -> String:
@@ -577,10 +579,14 @@ func _pick_image_file(title: String) -> String:
 
 func _on_first_frame_path_changed(text: String) -> void:
 	_load_frame_preview(_first_frame_preview, text)
+	if FileAccess.file_exists(text):
+		_sync_output_dims_from_keyframes()
 
 
 func _on_last_frame_path_changed(text: String) -> void:
 	_load_frame_preview(_last_frame_preview, text)
+	if FileAccess.file_exists(text):
+		_sync_output_dims_from_keyframes()
 
 
 func _load_frame_preview(preview: TextureRect, path: String) -> void:
@@ -595,6 +601,55 @@ func _load_frame_preview(preview: TextureRect, path: String) -> void:
 		preview.texture = null
 		return
 	preview.texture = ImageTexture.create_from_image(img)
+
+
+## Match the output Width/Height to the chosen keyframe's aspect ratio. Without
+## this the generator keeps its landscape default (832×480) and a portrait/square
+## keyframe comes back squished or cropped. Uses the first frame when set, else
+## the last; snaps to the model's valid ranges and a multiple of 16.
+func _sync_output_dims_from_keyframes() -> void:
+	if _width_spin == null or _height_spin == null:
+		return
+	var path := ""
+	if _first_frame_path_edit != null and FileAccess.file_exists(_first_frame_path_edit.text):
+		path = _first_frame_path_edit.text
+	elif _last_frame_path_edit != null and FileAccess.file_exists(_last_frame_path_edit.text):
+		path = _last_frame_path_edit.text
+	if path.is_empty():
+		return
+	var img := Image.new()
+	if img.load(path) != OK or img.is_empty():
+		return
+	var dims := _fit_output_dims(img.get_width(), img.get_height())
+	_width_spin.value = dims.x
+	_height_spin.value = dims.y
+	_set_status("Output set to %d×%d to match the keyframe." % [dims.x, dims.y])
+
+
+## Fit a source WxH into the model's valid ranges (width 256–1280, height 256–720)
+## preserving aspect, snapped to a multiple of 16. Extreme aspect ratios clamp to
+## the range bounds (minor distortion) rather than failing.
+func _fit_output_dims(src_w: int, src_h: int) -> Vector2i:
+	const MIN_SIDE := 256.0
+	const MAX_W := 1280.0
+	const MAX_H := 720.0
+	const STEP := 16.0
+	if src_w <= 0 or src_h <= 0:
+		return Vector2i(int(_width_spin.value), int(_height_spin.value))
+	var w := float(src_w)
+	var h := float(src_h)
+	# Scale down to fit the max box (never upscale past native).
+	var down := minf(minf(MAX_W / w, MAX_H / h), 1.0)
+	w *= down
+	h *= down
+	# Scale up if we fell below the minimum on either side.
+	var up := maxf(maxf(MIN_SIDE / w, MIN_SIDE / h), 1.0)
+	w *= up
+	h *= up
+	# Snap to STEP and clamp to the valid ranges.
+	var fw := clampf(roundf(w / STEP) * STEP, MIN_SIDE, MAX_W)
+	var fh := clampf(roundf(h / STEP) * STEP, MIN_SIDE, MAX_H)
+	return Vector2i(int(fw), int(fh))
 
 
 # ── Image-note pickers ────────────────────────────────────────────────────────
@@ -687,6 +742,7 @@ func _apply_note_pick(picker: OptionButton, index: int, is_first: bool) -> void:
 		if _last_frame_path_edit != null:
 			_last_frame_path_edit.text = path
 		_load_frame_preview(_last_frame_preview, path)
+	_sync_output_dims_from_keyframes()
 
 
 ## Ask the host to export the note's image to a PNG on disk and return its path.
