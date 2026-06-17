@@ -37,9 +37,16 @@ var _text_section: VBoxContainer = null
 var _prompt_edit: TextEdit = null
 var _neg_prompt_edit: TextEdit = null
 
-## Image-mode controls.
-var _image_section: VBoxContainer = null
+## Image-mode controls. The reference image lives in the MAIN column (primary
+## input for Image→3D), sourced from an open IMAGE note or a raw path — mirrors
+## the movie-gen keyframe picker.
+var _image_source_section: VBoxContainer = null
+var _image_note_picker: OptionButton = null
+var _image_preview: TextureRect = null
 var _image_path_edit: LineEdit = null
+## Cached [{note_id, title}] of IMAGE-kind notes, indexed by OptionButton item id.
+var _image_notes: Array = []
+var _image_note_id: String = ""
 
 ## Shared controls (both modes).
 var _steps_spin: SpinBox = null
@@ -117,21 +124,7 @@ func _build_settings_popup() -> void:
 	_settings_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(_settings_vbox)
 
-	# ── Mode toggle ────────────────────────────────────────────────────────
-	var mode_label := Label.new()
-	mode_label.text = "Mode"
-	_settings_vbox.add_child(mode_label)
-
-	_mode_toggle = OptionButton.new()
-	_mode_toggle.name = "ModeToggle"
-	_mode_toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_mode_toggle.add_item("Text → 3D", MODE_TEXT)
-	_mode_toggle.add_item("Image → 3D", MODE_IMAGE)
-	_mode_toggle.select(MODE_TEXT)
-	_mode_toggle.item_selected.connect(_on_mode_selected)
-	_settings_vbox.add_child(_mode_toggle)
-
-	_settings_vbox.add_child(HSeparator.new())
+	# (Mode chooser + image source live in the MAIN column — see _build_main_column.)
 
 	# ── Text-mode negative prompt ──────────────────────────────────────────
 	_text_section = VBoxContainer.new()
@@ -149,33 +142,6 @@ func _build_settings_popup() -> void:
 	_neg_prompt_edit.placeholder_text = "Things to avoid…"
 	_neg_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_text_section.add_child(_neg_prompt_edit)
-
-	# ── Image-mode section ─────────────────────────────────────────────────
-	_image_section = VBoxContainer.new()
-	_image_section.name = "ImageSection"
-	_image_section.visible = false
-	_settings_vbox.add_child(_image_section)
-
-	var img_label := Label.new()
-	img_label.text = "Image Path"
-	_image_section.add_child(img_label)
-
-	var img_row := HBoxContainer.new()
-	img_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_image_section.add_child(img_row)
-
-	_image_path_edit = LineEdit.new()
-	_image_path_edit.name = "ImagePathEdit"
-	_image_path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_image_path_edit.placeholder_text = "/path/to/image.png"
-	img_row.add_child(_image_path_edit)
-
-	var browse_btn := Button.new()
-	browse_btn.text = "Browse…"
-	browse_btn.pressed.connect(_on_browse_pressed)
-	img_row.add_child(browse_btn)
-
-	_settings_vbox.add_child(HSeparator.new())
 
 	# ── Shared parameters ──────────────────────────────────────────────────
 	var steps_label := Label.new()
@@ -234,6 +200,24 @@ func _build_main_column() -> void:
 	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(_main_vbox)
 
+	# ── Mode chooser (primary control — top of the main column) ─────────────
+	var mode_row := HBoxContainer.new()
+	mode_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.add_child(mode_row)
+
+	var mode_label := Label.new()
+	mode_label.text = "Mode"
+	mode_row.add_child(mode_label)
+
+	_mode_toggle = OptionButton.new()
+	_mode_toggle.name = "ModeToggle"
+	_mode_toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mode_toggle.add_item("Text → 3D", MODE_TEXT)
+	_mode_toggle.add_item("Image → 3D", MODE_IMAGE)
+	_mode_toggle.select(MODE_TEXT)
+	_mode_toggle.item_selected.connect(_on_mode_selected)
+	mode_row.add_child(_mode_toggle)
+
 	# ── Prompt area (text mode) ────────────────────────────────────────────
 	var prompt_label := Label.new()
 	prompt_label.name = "PromptLabel"
@@ -248,13 +232,9 @@ func _build_main_column() -> void:
 	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_main_vbox.add_child(_prompt_edit)
 
-	# Image-mode has no main-column prompt; the image path lives in settings.
-	# We show a brief label so the user knows to open settings.
-	var img_hint_label := Label.new()
-	img_hint_label.name = "ImageHintLabel"
-	img_hint_label.text = "Reference image path set in ⚙ Settings."
-	img_hint_label.visible = false
-	_main_vbox.add_child(img_hint_label)
+	# ── Image-mode source (reference image from a note or a path) ──────────
+	_build_image_source()
+	_main_vbox.add_child(_image_source_section)
 
 	# ── Button row: a compact, right-aligned flat icon toolbar ─────────────
 	# Order left→right: Settings · Download · Send (send is the rightmost action).
@@ -345,6 +325,177 @@ func _build_viewport_column() -> void:
 	_camera = cam_scene as Camera3D
 
 
+# ── Image source (Image→3D primary input) ─────────────────────────────────────
+
+## Build the reference-image source: an image-note dropdown (primary) over a
+## compact path + Browse fallback, with a preview. Mirrors one movie-gen keyframe
+## column. Hidden unless the mode is Image→3D.
+func _build_image_source() -> void:
+	_image_source_section = VBoxContainer.new()
+	_image_source_section.name = "ImageSourceSection"
+	_image_source_section.visible = false
+	_image_source_section.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var header_row := HBoxContainer.new()
+	header_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_image_source_section.add_child(header_row)
+
+	var lbl := Label.new()
+	lbl.text = "Reference Image (from image note)"
+	lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header_row.add_child(lbl)
+
+	var refresh_btn := Button.new()
+	refresh_btn.text = "↻"
+	refresh_btn.tooltip_text = "Re-scan open notes for images"
+	refresh_btn.pressed.connect(_on_refresh_notes_pressed)
+	header_row.add_child(refresh_btn)
+
+	# Two-column row: left = dropdown + path/Browse fallback, right = preview.
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_theme_constant_override("separation", 8)
+	_image_source_section.add_child(row)
+
+	var left := VBoxContainer.new()
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(left)
+
+	_image_note_picker = OptionButton.new()
+	_image_note_picker.name = "ImageNotePicker"
+	_image_note_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_image_note_picker.clip_text = true
+	_image_note_picker.item_selected.connect(_on_image_note_picked)
+	left.add_child(_image_note_picker)
+
+	var path_row := HBoxContainer.new()
+	path_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.add_child(path_row)
+
+	_image_path_edit = LineEdit.new()
+	_image_path_edit.name = "ImagePathEdit"
+	_image_path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_image_path_edit.placeholder_text = "…or a file path"
+	_image_path_edit.text_changed.connect(_on_image_path_changed)
+	path_row.add_child(_image_path_edit)
+
+	var browse_btn := Button.new()
+	browse_btn.text = "📂"
+	browse_btn.tooltip_text = "Browse for an image file"
+	browse_btn.pressed.connect(_on_browse_pressed)
+	path_row.add_child(browse_btn)
+
+	_image_preview = TextureRect.new()
+	_image_preview.name = "ImagePreview"
+	_image_preview.custom_minimum_size = Vector2(96, 96)
+	_image_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	_image_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	_image_preview.clip_contents = true
+	_image_preview.size_flags_horizontal = Control.SIZE_SHRINK_END
+	_image_preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(_image_preview)
+
+
+func _on_refresh_notes_pressed() -> void:
+	await _refresh_image_notes()
+
+
+## Pull open notes from the host, keep IMAGE-kind ones, rebuild the dropdown.
+## Reached via the mcp.proxy:minerva_list_notes capability.
+func _refresh_image_notes() -> void:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return
+	var reply_id: String = "gen:listnotes:%d" % Time.get_ticks_usec()
+	request.emit("capability:mcp.proxy:minerva_list_notes", {}, reply_id)
+	var reply: Dictionary = await ipc.await_reply(reply_id, 15000)
+	if not bool(reply.get("success", false)):
+		return
+	var tool_res: Dictionary = reply.get("result", {}) as Dictionary
+	var notes: Array = tool_res.get("notes", []) as Array
+	_image_notes.clear()
+	for n in notes:
+		if str((n as Dictionary).get("type", "")).to_upper() == "IMAGE":
+			_image_notes.append({
+				"note_id": str((n as Dictionary).get("note_id", "")),
+				"title": str((n as Dictionary).get("title", "")),
+			})
+	_populate_note_picker()
+
+
+func _populate_note_picker() -> void:
+	if _image_note_picker == null:
+		return
+	_image_note_picker.clear()
+	if _image_notes.is_empty():
+		_image_note_picker.add_item("(no image notes open)", -1)
+		_image_note_picker.set_item_disabled(0, true)
+		return
+	_image_note_picker.add_item("— Select image note —", -1)
+	var select_idx: int = 0
+	for i in _image_notes.size():
+		var entry: Dictionary = _image_notes[i]
+		var title: String = entry.get("title", "")
+		_image_note_picker.add_item(title if not title.is_empty() else "(untitled)", i)
+		if entry.get("note_id", "") == _image_note_id and not _image_note_id.is_empty():
+			select_idx = _image_note_picker.item_count - 1
+	_image_note_picker.select(select_idx)
+
+
+func _on_image_note_picked(index: int) -> void:
+	if _image_note_picker == null:
+		return
+	var item_id: int = _image_note_picker.get_item_id(index)
+	if item_id < 0 or item_id >= _image_notes.size():
+		return  # placeholder row
+	var entry: Dictionary = _image_notes[item_id]
+	var note_id: String = entry.get("note_id", "")
+	var title: String = entry.get("title", "")
+	if note_id.is_empty():
+		return
+	var path: String = await _resolve_note_image(note_id)
+	if path.is_empty():
+		_set_status("Could not load image from note '%s'." % title)
+		return
+	_image_note_id = note_id
+	if _image_path_edit != null:
+		_image_path_edit.text = path
+	_load_image_preview(path)
+
+
+## Ask the host to export the note's image to a PNG and return its path
+## (mcp.proxy:minerva_get_note — substrate exports IMAGE notes to disk).
+func _resolve_note_image(note_id: String) -> String:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return ""
+	var reply_id: String = "gen:getnote:%d" % Time.get_ticks_usec()
+	request.emit("capability:mcp.proxy:minerva_get_note", {"note_id": note_id}, reply_id)
+	var reply: Dictionary = await ipc.await_reply(reply_id, 15000)
+	if not bool(reply.get("success", false)):
+		return ""
+	var tool_res: Dictionary = reply.get("result", {}) as Dictionary
+	return str(tool_res.get("image_path", ""))
+
+
+func _on_image_path_changed(text: String) -> void:
+	_load_image_preview(text)
+
+
+func _load_image_preview(path: String) -> void:
+	if _image_preview == null:
+		return
+	if path == "" or not FileAccess.file_exists(path):
+		_image_preview.texture = null
+		return
+	var img := Image.new()
+	if img.load(path) != OK:
+		_image_preview.texture = null
+		return
+	_image_preview.texture = ImageTexture.create_from_image(img)
+
+
 # ── Settings popup open/close ────────────────────────────────────────────────
 
 func _on_settings_pressed() -> void:
@@ -365,21 +516,18 @@ func _on_mode_selected(index: int) -> void:
 
 
 func _apply_mode(mode: int) -> void:
-	# Main column: show the right prompt widget.
+	# Main column: prompt (text) vs reference-image source (image).
 	if _prompt_edit != null:
 		_prompt_edit.visible = (mode == MODE_TEXT)
 	if _main_vbox != null:
 		var pl := _main_vbox.get_node_or_null("PromptLabel")
 		if pl != null:
 			pl.visible = (mode == MODE_TEXT)
-		var hint := _main_vbox.get_node_or_null("ImageHintLabel")
-		if hint != null:
-			hint.visible = (mode == MODE_IMAGE)
-	# Settings popup sections.
+	if _image_source_section != null:
+		_image_source_section.visible = (mode == MODE_IMAGE)
+	# Settings popup: text-mode negative prompt only.
 	if _text_section != null:
 		_text_section.visible = (mode == MODE_TEXT)
-	if _image_section != null:
-		_image_section.visible = (mode == MODE_IMAGE)
 	# Adjust steps range by mode.
 	if _steps_spin != null:
 		if mode == MODE_TEXT:
@@ -392,6 +540,11 @@ func _apply_mode(mode: int) -> void:
 			_steps_spin.max_value = 100
 			if _steps_spin.value < 10:
 				_steps_spin.value = 30
+
+	# Entering image mode: refresh the image-note dropdown (no-op if IPC isn't
+	# attached yet, e.g. during load).
+	if mode == MODE_IMAGE:
+		_refresh_image_notes()
 
 
 # ── Browse (file picker) ─────────────────────────────────────────────────────
@@ -417,6 +570,7 @@ func _on_browse_pressed() -> void:
 	var path: String = str(result.get("path", ""))
 	if path != "" and _image_path_edit != null:
 		_image_path_edit.text = path
+		_load_image_preview(path)
 
 
 # ── Generate / Regenerate ────────────────────────────────────────────────────
