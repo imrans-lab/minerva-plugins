@@ -405,10 +405,13 @@ fn handle_flf2v(
         _ => return ok_response(id, tool_err("last_frame_path is required")),
     };
 
-    let positive_prompt = match args.get("positive_prompt").and_then(|v| v.as_str()) {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => return ok_response(id, tool_err("positive_prompt is required")),
-    };
+    // Prompt is OPTIONAL for first-last-frame interpolation — the two keyframes
+    // are the primary signal. Default to empty when absent/blank.
+    let positive_prompt = args
+        .get("positive_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     let negative_prompt = args
         .get("negative_prompt")
@@ -715,7 +718,7 @@ fn tools_list_result() -> Value {
                             "maximum": 12
                         }
                     },
-                    "required": ["first_frame_path", "last_frame_path", "positive_prompt"]
+                    "required": ["first_frame_path", "last_frame_path"]
                 }
             }
         ]

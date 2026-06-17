@@ -133,21 +133,7 @@ func _build_settings_popup() -> void:
 	_settings_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(_settings_vbox)
 
-	# ── Mode toggle ────────────────────────────────────────────────────────
-	var mode_label := Label.new()
-	mode_label.text = "Mode"
-	_settings_vbox.add_child(mode_label)
-
-	_mode_toggle = OptionButton.new()
-	_mode_toggle.name = "ModeToggle"
-	_mode_toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_mode_toggle.add_item("Text → Video", MODE_TEXT)
-	_mode_toggle.add_item("First-Last Frame → Video", MODE_FLF2V)
-	_mode_toggle.select(MODE_TEXT)
-	_mode_toggle.item_selected.connect(_on_mode_selected)
-	_settings_vbox.add_child(_mode_toggle)
-
-	_settings_vbox.add_child(HSeparator.new())
+	# (The mode chooser lives in the main column — see _build_main_column.)
 
 	# ── FLF2V-mode settings (negative prompt; keyframes are in the main column) ──
 	_flf_section = VBoxContainer.new()
@@ -270,73 +256,72 @@ func _build_flf_keyframes() -> void:
 	refresh_notes_btn.pressed.connect(_on_refresh_notes_pressed)
 	notes_header_row.add_child(refresh_notes_btn)
 
-	# First frame.
-	var first_frame_label := Label.new()
-	first_frame_label.text = "First Frame"
-	_flf_keyframes_section.add_child(first_frame_label)
-
-	_first_frame_note_picker = OptionButton.new()
-	_first_frame_note_picker.name = "FirstFrameNotePicker"
-	_first_frame_note_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# First frame: left col (dropdown + path/browse), right col (preview).
+	var first := _build_keyframe_block("First Frame")
+	_first_frame_note_picker = first[0]
+	_first_frame_preview = first[1]
+	_first_frame_path_edit = first[2]
 	_first_frame_note_picker.item_selected.connect(_on_first_note_picked)
-	_flf_keyframes_section.add_child(_first_frame_note_picker)
-
-	_first_frame_preview = TextureRect.new()
-	_first_frame_preview.name = "FirstFramePreview"
-	_first_frame_preview.custom_minimum_size = Vector2(0, 60)
-	_first_frame_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	_first_frame_preview.expand_mode = TextureRect.EXPAND_FIT_WIDTH
-	_flf_keyframes_section.add_child(_first_frame_preview)
-
-	var first_row := HBoxContainer.new()
-	first_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_flf_keyframes_section.add_child(first_row)
-
-	_first_frame_path_edit = LineEdit.new()
-	_first_frame_path_edit.name = "FirstFramePathEdit"
-	_first_frame_path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_first_frame_path_edit.placeholder_text = "…or a /path/to/first.png"
 	_first_frame_path_edit.text_changed.connect(_on_first_frame_path_changed)
-	first_row.add_child(_first_frame_path_edit)
-
-	var first_browse_btn := Button.new()
-	first_browse_btn.text = "Browse…"
-	first_browse_btn.pressed.connect(_on_browse_first_frame_pressed)
-	first_row.add_child(first_browse_btn)
+	(first[3] as Button).pressed.connect(_on_browse_first_frame_pressed)
 
 	# Last frame.
-	var last_frame_label := Label.new()
-	last_frame_label.text = "Last Frame"
-	_flf_keyframes_section.add_child(last_frame_label)
-
-	_last_frame_note_picker = OptionButton.new()
-	_last_frame_note_picker.name = "LastFrameNotePicker"
-	_last_frame_note_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var last := _build_keyframe_block("Last Frame")
+	_last_frame_note_picker = last[0]
+	_last_frame_preview = last[1]
+	_last_frame_path_edit = last[2]
 	_last_frame_note_picker.item_selected.connect(_on_last_note_picked)
-	_flf_keyframes_section.add_child(_last_frame_note_picker)
-
-	_last_frame_preview = TextureRect.new()
-	_last_frame_preview.name = "LastFramePreview"
-	_last_frame_preview.custom_minimum_size = Vector2(0, 60)
-	_last_frame_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-	_last_frame_preview.expand_mode = TextureRect.EXPAND_FIT_WIDTH
-	_flf_keyframes_section.add_child(_last_frame_preview)
-
-	var last_row := HBoxContainer.new()
-	last_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_flf_keyframes_section.add_child(last_row)
-
-	_last_frame_path_edit = LineEdit.new()
-	_last_frame_path_edit.name = "LastFramePathEdit"
-	_last_frame_path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_last_frame_path_edit.placeholder_text = "…or a /path/to/last.png"
 	_last_frame_path_edit.text_changed.connect(_on_last_frame_path_changed)
-	last_row.add_child(_last_frame_path_edit)
+	(last[3] as Button).pressed.connect(_on_browse_last_frame_pressed)
 
-	var last_browse_btn := Button.new()
-	last_browse_btn.text = "Browse…"
-	last_browse_btn.pressed.connect(_on_browse_last_frame_pressed)
-	last_row.add_child(last_browse_btn)
+
+## Build one keyframe block: a labelled two-column row — left column holds the
+## image-note dropdown over a path+Browse fallback, right column the preview.
+## Returns [picker, preview, path_edit, browse_btn] for the caller to wire.
+func _build_keyframe_block(label_text: String) -> Array:
+	var block := VBoxContainer.new()
+	block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_flf_keyframes_section.add_child(block)
+
+	var lbl := Label.new()
+	lbl.text = label_text
+	block.add_child(lbl)
+
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	block.add_child(row)
+
+	# Left column: dropdown + (path + browse).
+	var left := VBoxContainer.new()
+	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(left)
+
+	var picker := OptionButton.new()
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.add_child(picker)
+
+	var path_row := HBoxContainer.new()
+	path_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left.add_child(path_row)
+
+	var path_edit := LineEdit.new()
+	path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	path_edit.placeholder_text = "…or a file path"
+	path_row.add_child(path_edit)
+
+	var browse_btn := Button.new()
+	browse_btn.text = "Browse…"
+	path_row.add_child(browse_btn)
+
+	# Right column: compact preview.
+	var preview := TextureRect.new()
+	preview.custom_minimum_size = Vector2(96, 96)
+	preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(preview)
+
+	return [picker, preview, path_edit, browse_btn]
 
 
 # ── Main portrait column ──────────────────────────────────────────────────────
@@ -348,6 +333,24 @@ func _build_main_column() -> void:
 	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(_main_vbox)
+
+	# ── Mode chooser (primary control — top of the main column) ─────────────
+	var mode_row := HBoxContainer.new()
+	mode_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.add_child(mode_row)
+
+	var mode_label := Label.new()
+	mode_label.text = "Mode"
+	mode_row.add_child(mode_label)
+
+	_mode_toggle = OptionButton.new()
+	_mode_toggle.name = "ModeToggle"
+	_mode_toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_mode_toggle.add_item("Text → Video", MODE_TEXT)
+	_mode_toggle.add_item("First-Last Frame → Video", MODE_FLF2V)
+	_mode_toggle.select(MODE_TEXT)
+	_mode_toggle.item_selected.connect(_on_mode_selected)
+	mode_row.add_child(_mode_toggle)
 
 	# ── Prompt area (text mode) ────────────────────────────────────────────
 	var prompt_label := Label.new()
@@ -735,12 +738,12 @@ func _build_args(mode: int) -> Dictionary:
 		if last_path.is_empty():
 			_set_status("Please select a last keyframe image.")
 			return {}
-		if prompt.is_empty():
-			_set_status("Please enter a prompt.")
-			return {}
+		# Prompt is OPTIONAL for image→image — the two keyframes drive it. Only
+		# send positive_prompt when the user actually typed one.
 		shared["first_frame_path"] = first_path
 		shared["last_frame_path"] = last_path
-		shared["positive_prompt"] = prompt
+		if not prompt.is_empty():
+			shared["positive_prompt"] = prompt
 		var neg: String = _flf_neg_prompt_edit.text.strip_edges()
 		if not neg.is_empty():
 			shared["negative_prompt"] = neg

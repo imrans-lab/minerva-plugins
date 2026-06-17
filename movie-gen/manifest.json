@@ -159,7 +159,7 @@
             "maximum": 12
           }
         },
-        "required": ["first_frame_path", "last_frame_path", "positive_prompt"]
+        "required": ["first_frame_path", "last_frame_path"]
       }
     }
   ],
