@@ -816,6 +816,9 @@ func _build_args(mode: int) -> Dictionary:
 		"switch_step": int(_switch_step_spin.value),
 		"cfg": _cfg_spin.value,
 		"crf": int(_crf_spin.value),
+		# Panel previews the result inline, so opt out of the host OS-viewer
+		# surfacing (that default is for agent-driven MCP calls).
+		"background": true,
 	}
 
 	if mode == MODE_TEXT:

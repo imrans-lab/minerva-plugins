@@ -153,6 +153,28 @@ fn request_capability(
     Err("stdin closed waiting for capability response".into())
 }
 
+/// Best-effort: surface a produced artifact in the host UI by opening it in the
+/// OS default media viewer (via mcp.proxy:minerva_os_open). Surfacing is a
+/// convenience — the path is already returned to the caller — so any failure is
+/// logged and swallowed, never failing the generation. Skipped in background mode.
+fn surface_artifact(
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+    path: &str,
+) {
+    match request_capability(
+        out,
+        lines,
+        next_id,
+        "mcp.proxy:minerva_os_open",
+        json!({"path": path}),
+    ) {
+        Ok(_) => log::info!("surfaced artifact via os_open: {path}"),
+        Err(e) => log::warn!("could not surface artifact {path}: {e}"),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Credential fetch
 // ─────────────────────────────────────────────────────────────────────────────
@@ -243,7 +265,10 @@ fn emit_progress(out: &mut (impl Write + ?Sized), message: &str) {
 fn run_generate(
     creds: Credentials,
     req: GenerateRequest,
+    background: bool,
     out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
 ) -> Value {
     // Connect
     let mut client = match MediaGenClient::connect(MediaGenConfig::default(), creds) {
@@ -275,11 +300,17 @@ fn run_generate(
             let artifact = &artifacts[0];
             match save_artifact(&artifact.filename, &artifact.bytes) {
                 Err(e) => tool_err(&format!("failed to save artifact: {e}")),
-                Ok(path) => tool_ok(json!({
-                    "path": path,
-                    "filename": artifact.filename,
-                    "bytes": artifact.bytes.len(),
-                })),
+                Ok(path) => {
+                    // Default = surface in the UI; background mode just returns the path.
+                    if !background {
+                        surface_artifact(out, lines, next_id, &path);
+                    }
+                    tool_ok(json!({
+                        "path": path,
+                        "filename": artifact.filename,
+                        "bytes": artifact.bytes.len(),
+                    }))
+                }
             }
         }
     }
@@ -362,6 +393,13 @@ fn handle_text_to_video(
         .unwrap_or(18)
         .clamp(0, 28);
 
+    // background=true → generate silently, just return the path (for programmatic
+    // chaining). Default false → surface the result in the OS media viewer.
+    let background = args
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Fetch credentials
     let creds = match fetch_credentials(out, lines, next_id) {
         Ok(c) => c,
@@ -389,7 +427,7 @@ fn handle_text_to_video(
         files: vec![],
     };
 
-    let result = run_generate(creds, req, out);
+    let result = run_generate(creds, req, background, out, lines, next_id);
     ok_response(id, result)
 }
 
@@ -479,6 +517,13 @@ fn handle_flf2v(
         .unwrap_or(18)
         .clamp(0, 28);
 
+    // background=true → generate silently, just return the path (for programmatic
+    // chaining). Default false → surface the result in the OS media viewer.
+    let background = args
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Read both image files from disk BEFORE fetching credentials,
     // so we return a structured tool error early if either is missing.
     let first_bytes = match std::fs::read(&first_frame_path) {
@@ -553,7 +598,7 @@ fn handle_flf2v(
         ],
     };
 
-    let result = run_generate(creds, req, out);
+    let result = run_generate(creds, req, background, out, lines, next_id);
     ok_response(id, result)
 }
 
@@ -638,6 +683,13 @@ fn handle_i2v(
         .unwrap_or(18)
         .clamp(0, 28);
 
+    // background=true → generate silently, just return the path (for programmatic
+    // chaining). Default false → surface the result in the OS media viewer.
+    let background = args
+        .get("background")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Read the start image BEFORE fetching credentials so a missing file
     // returns a structured tool error early.
     let start_bytes = match std::fs::read(&start_frame_path) {
@@ -688,7 +740,7 @@ fn handle_i2v(
         }],
     };
 
-    let result = run_generate(creds, req, out);
+    let result = run_generate(creds, req, background, out, lines, next_id);
     ok_response(id, result)
 }
 
@@ -792,6 +844,11 @@ fn tools_list_result() -> Value {
                             "default": 18,
                             "minimum": 0,
                             "maximum": 28
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "If true, generate silently and just return the file path — no UI surfacing — for programmatic chaining (e.g. save then upload). If false (default), the result opens in the OS media viewer so the user sees it.",
+                            "default": false
                         }
                     },
                     "required": ["positive_prompt"]
@@ -879,6 +936,11 @@ fn tools_list_result() -> Value {
                             "default": 18,
                             "minimum": 0,
                             "maximum": 28
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "If true, generate silently and just return the file path — no UI surfacing — for programmatic chaining (e.g. save then upload). If false (default), the result opens in the OS media viewer so the user sees it.",
+                            "default": false
                         }
                     },
                     "required": ["first_frame_path", "last_frame_path"]
@@ -962,6 +1024,11 @@ fn tools_list_result() -> Value {
                             "default": 18,
                             "minimum": 0,
                             "maximum": 28
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "If true, generate silently and just return the file path — no UI surfacing — for programmatic chaining (e.g. save then upload). If false (default), the result opens in the OS media viewer so the user sees it.",
+                            "default": false
                         }
                     },
                     "required": ["start_frame_path"]

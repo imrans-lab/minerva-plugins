@@ -84,6 +84,11 @@
             "default": 18,
             "minimum": 0,
             "maximum": 28
+          },
+          "background": {
+            "type": "boolean",
+            "description": "If true, generate silently and just return the file path — no UI surfacing — for programmatic chaining (e.g. save then upload). If false (default), the result opens in the OS media viewer so the user sees it.",
+            "default": false
           }
         },
         "required": ["positive_prompt"]
@@ -171,6 +176,11 @@
             "default": 18,
             "minimum": 0,
             "maximum": 28
+          },
+          "background": {
+            "type": "boolean",
+            "description": "If true, generate silently and just return the file path — no UI surfacing — for programmatic chaining (e.g. save then upload). If false (default), the result opens in the OS media viewer so the user sees it.",
+            "default": false
           }
         },
         "required": ["first_frame_path", "last_frame_path"]
@@ -254,6 +264,11 @@
             "default": 18,
             "minimum": 0,
             "maximum": 28
+          },
+          "background": {
+            "type": "boolean",
+            "description": "If true, generate silently and just return the file path — no UI surfacing — for programmatic chaining (e.g. save then upload). If false (default), the result opens in the OS media viewer so the user sees it.",
+            "default": false
           }
         },
         "required": ["start_frame_path"]
@@ -279,7 +294,8 @@
       "host.notify",
       "host.dialogs.file_picker",
       "mcp.proxy:minerva_list_notes",
-      "mcp.proxy:minerva_get_note"
+      "mcp.proxy:minerva_get_note",
+      "mcp.proxy:minerva_os_open"
     ],
     "network": {
       "mode": "none"
