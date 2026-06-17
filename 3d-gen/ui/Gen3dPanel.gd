@@ -21,11 +21,8 @@ const MODE_IMAGE: int = 1
 
 # ── UI node references (set in _ready) ───────────────────────────────────────
 
-## Top-level HSplitContainer: controls column on left, viewport on right.
-var _split: HSplitContainer = null
-
-## Left-side controls VBoxContainer.
-var _controls_vbox: VBoxContainer = null
+## Main portrait VBox — single column, fills panel.
+var _main_vbox: VBoxContainer = null
 
 ## Mode toggle (Text→3D = 0, Image→3D = 1).
 var _mode_toggle: OptionButton = null
@@ -42,6 +39,9 @@ var _image_path_edit: LineEdit = null
 ## Shared controls (both modes).
 var _steps_spin: SpinBox = null
 var _guidance_spin: SpinBox = null
+
+## Seed spinbox.
+var _seed_spin: SpinBox = null
 
 ## Action buttons.
 var _generate_btn: Button = null
@@ -61,6 +61,10 @@ var _camera: Camera3D = null
 ## Currently loaded mesh node (GLB scene root added under _world_root).
 var _current_mesh_node: Node3D = null
 
+## Settings popup + its scroll/vbox.
+var _settings_popup: PopupPanel = null
+var _settings_vbox: VBoxContainer = null
+
 # ── State ────────────────────────────────────────────────────────────────────
 
 var _ctx: Dictionary = {}
@@ -78,43 +82,40 @@ func _ready() -> void:
 	# Build all UI in code (mirrors PCBEditor pattern — .tscn is a thin wrapper).
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 
-	_split = HSplitContainer.new()
-	_split.name = "HSplit"
-	_split.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	add_child(_split)
+	_build_settings_popup()
+	_build_main_column()
 
-	_build_controls_column()
-	_build_viewport_column()
-
-	# Connect resize so the split ratio stays sane.
+	# Connect resize (no split offset logic needed for portrait layout).
 	resized.connect(_on_panel_resized)
-	# Apply initial split position once the layout is live.
-	await get_tree().process_frame
-	_on_panel_resized()
 
 
 func _on_panel_resized() -> void:
-	# Controls column: fixed 280 px; viewport gets the rest.
-	if _split != null:
-		_split.split_offset = 280
+	# Portrait VBox fills the panel automatically; nothing to adjust.
+	pass
 
 
-# ── Controls column ──────────────────────────────────────────────────────────
+# ── Settings popup ────────────────────────────────────────────────────────────
 
-func _build_controls_column() -> void:
-	_controls_vbox = VBoxContainer.new()
-	_controls_vbox.name = "ControlsColumn"
-	_controls_vbox.custom_minimum_size = Vector2(240, 0)
-	_controls_vbox.size_flags_horizontal = Control.SIZE_FILL
-	_controls_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_split.add_child(_controls_vbox)
+func _build_settings_popup() -> void:
+	_settings_popup = PopupPanel.new()
+	_settings_popup.name = "SettingsPopup"
+	add_child(_settings_popup)
+
+	var scroll := ScrollContainer.new()
+	scroll.name = "SettingsScroll"
+	scroll.custom_minimum_size = Vector2(400, 480)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_settings_popup.add_child(scroll)
+
+	_settings_vbox = VBoxContainer.new()
+	_settings_vbox.name = "SettingsVBox"
+	_settings_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_settings_vbox)
 
 	# ── Mode toggle ────────────────────────────────────────────────────────
 	var mode_label := Label.new()
 	mode_label.text = "Mode"
-	_controls_vbox.add_child(mode_label)
+	_settings_vbox.add_child(mode_label)
 
 	_mode_toggle = OptionButton.new()
 	_mode_toggle.name = "ModeToggle"
@@ -123,26 +124,14 @@ func _build_controls_column() -> void:
 	_mode_toggle.add_item("Image → 3D", MODE_IMAGE)
 	_mode_toggle.select(MODE_TEXT)
 	_mode_toggle.item_selected.connect(_on_mode_selected)
-	_controls_vbox.add_child(_mode_toggle)
+	_settings_vbox.add_child(_mode_toggle)
 
-	_controls_vbox.add_child(HSeparator.new())
+	_settings_vbox.add_child(HSeparator.new())
 
-	# ── Text-mode section ──────────────────────────────────────────────────
+	# ── Text-mode negative prompt ──────────────────────────────────────────
 	_text_section = VBoxContainer.new()
 	_text_section.name = "TextSection"
-	_controls_vbox.add_child(_text_section)
-
-	var prompt_label := Label.new()
-	prompt_label.text = "Prompt"
-	_text_section.add_child(prompt_label)
-
-	_prompt_edit = TextEdit.new()
-	_prompt_edit.name = "PromptEdit"
-	_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_prompt_edit.custom_minimum_size = Vector2(0, 80)
-	_prompt_edit.placeholder_text = "Describe the 3D object…"
-	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
-	_text_section.add_child(_prompt_edit)
+	_settings_vbox.add_child(_text_section)
 
 	var neg_label := Label.new()
 	neg_label.text = "Negative Prompt (optional)"
@@ -160,7 +149,7 @@ func _build_controls_column() -> void:
 	_image_section = VBoxContainer.new()
 	_image_section.name = "ImageSection"
 	_image_section.visible = false
-	_controls_vbox.add_child(_image_section)
+	_settings_vbox.add_child(_image_section)
 
 	var img_label := Label.new()
 	img_label.text = "Image Path"
@@ -181,13 +170,13 @@ func _build_controls_column() -> void:
 	browse_btn.pressed.connect(_on_browse_pressed)
 	img_row.add_child(browse_btn)
 
-	_controls_vbox.add_child(HSeparator.new())
+	_settings_vbox.add_child(HSeparator.new())
 
 	# ── Shared parameters ──────────────────────────────────────────────────
 	var steps_label := Label.new()
 	steps_label.name = "StepsLabel"
 	steps_label.text = "Steps"
-	_controls_vbox.add_child(steps_label)
+	_settings_vbox.add_child(steps_label)
 
 	_steps_spin = SpinBox.new()
 	_steps_spin.name = "StepsSpin"
@@ -196,11 +185,11 @@ func _build_controls_column() -> void:
 	_steps_spin.value = 25
 	_steps_spin.step = 1
 	_steps_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_controls_vbox.add_child(_steps_spin)
+	_settings_vbox.add_child(_steps_spin)
 
 	var guidance_label := Label.new()
 	guidance_label.text = "Guidance"
-	_controls_vbox.add_child(guidance_label)
+	_settings_vbox.add_child(guidance_label)
 
 	_guidance_spin = SpinBox.new()
 	_guidance_spin.name = "GuidanceSpin"
@@ -209,33 +198,84 @@ func _build_controls_column() -> void:
 	_guidance_spin.value = 5.5
 	_guidance_spin.step = 0.5
 	_guidance_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_controls_vbox.add_child(_guidance_spin)
+	_settings_vbox.add_child(_guidance_spin)
 
-	_controls_vbox.add_child(HSeparator.new())
+	_settings_vbox.add_child(HSeparator.new())
 
-	# ── Action buttons ─────────────────────────────────────────────────────
-	_generate_btn = Button.new()
-	_generate_btn.name = "GenerateBtn"
-	_generate_btn.text = "Generate"
-	_generate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_generate_btn.pressed.connect(_on_generate_pressed)
-	_controls_vbox.add_child(_generate_btn)
-
+	# ── Regenerate (settings popup) ────────────────────────────────────────
 	_regenerate_btn = Button.new()
 	_regenerate_btn.name = "RegenerateBtn"
 	_regenerate_btn.text = "Regenerate"
 	_regenerate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_regenerate_btn.disabled = true
 	_regenerate_btn.pressed.connect(_on_regenerate_pressed)
-	_controls_vbox.add_child(_regenerate_btn)
+	_settings_vbox.add_child(_regenerate_btn)
+
+	# ── Close button ───────────────────────────────────────────────────────
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	close_btn.pressed.connect(_on_settings_close_pressed)
+	_settings_vbox.add_child(close_btn)
+
+
+# ── Main portrait column ──────────────────────────────────────────────────────
+
+func _build_main_column() -> void:
+	_main_vbox = VBoxContainer.new()
+	_main_vbox.name = "MainVBox"
+	_main_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(_main_vbox)
+
+	# ── Prompt area (text mode) ────────────────────────────────────────────
+	var prompt_label := Label.new()
+	prompt_label.name = "PromptLabel"
+	prompt_label.text = "Prompt"
+	_main_vbox.add_child(prompt_label)
+
+	_prompt_edit = TextEdit.new()
+	_prompt_edit.name = "PromptEdit"
+	_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_prompt_edit.custom_minimum_size = Vector2(0, 80)
+	_prompt_edit.placeholder_text = "Describe the 3D object…"
+	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_main_vbox.add_child(_prompt_edit)
+
+	# Image-mode has no main-column prompt; the image path lives in settings.
+	# We show a brief label so the user knows to open settings.
+	var img_hint_label := Label.new()
+	img_hint_label.name = "ImageHintLabel"
+	img_hint_label.text = "Reference image path set in ⚙ Settings."
+	img_hint_label.visible = false
+	_main_vbox.add_child(img_hint_label)
+
+	# ── Button row: Generate | Save | ⚙ Settings ──────────────────────────
+	var btn_row := HBoxContainer.new()
+	btn_row.name = "ButtonRow"
+	btn_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.add_child(btn_row)
+
+	_generate_btn = Button.new()
+	_generate_btn.name = "GenerateBtn"
+	_generate_btn.text = "Generate"
+	_generate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_generate_btn.pressed.connect(_on_generate_pressed)
+	btn_row.add_child(_generate_btn)
 
 	_save_btn = Button.new()
 	_save_btn.name = "SaveBtn"
 	_save_btn.text = "Save…"
-	_save_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_save_btn.disabled = true
 	_save_btn.pressed.connect(_on_save_pressed)
-	_controls_vbox.add_child(_save_btn)
+	btn_row.add_child(_save_btn)
+
+	var settings_btn := Button.new()
+	settings_btn.name = "SettingsBtn"
+	settings_btn.text = "⚙ Settings"
+	settings_btn.pressed.connect(_on_settings_pressed)
+	btn_row.add_child(settings_btn)
 
 	# ── Status label ───────────────────────────────────────────────────────
 	_status_label = Label.new()
@@ -243,10 +283,13 @@ func _build_controls_column() -> void:
 	_status_label.text = "Ready."
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_controls_vbox.add_child(_status_label)
+	_main_vbox.add_child(_status_label)
+
+	# ── 3D viewport viewer ─────────────────────────────────────────────────
+	_build_viewport_column()
 
 
-# ── Viewport column ──────────────────────────────────────────────────────────
+# ── Viewport (called from _build_main_column) ─────────────────────────────────
 
 func _build_viewport_column() -> void:
 	_viewport_container = SubViewportContainer.new()
@@ -254,7 +297,7 @@ func _build_viewport_column() -> void:
 	_viewport_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_viewport_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_viewport_container.stretch = true
-	_split.add_child(_viewport_container)
+	_main_vbox.add_child(_viewport_container)
 
 	_sub_viewport = SubViewport.new()
 	_sub_viewport.name = "SubViewport"
@@ -293,6 +336,18 @@ func _build_viewport_column() -> void:
 	_camera = cam_scene as Camera3D
 
 
+# ── Settings popup open/close ────────────────────────────────────────────────
+
+func _on_settings_pressed() -> void:
+	if _settings_popup != null:
+		_settings_popup.popup_centered(Vector2i(420, 520))
+
+
+func _on_settings_close_pressed() -> void:
+	if _settings_popup != null:
+		_settings_popup.hide()
+
+
 # ── Mode handling ────────────────────────────────────────────────────────────
 
 func _on_mode_selected(index: int) -> void:
@@ -301,6 +356,17 @@ func _on_mode_selected(index: int) -> void:
 
 
 func _apply_mode(mode: int) -> void:
+	# Main column: show the right prompt widget.
+	if _prompt_edit != null:
+		_prompt_edit.visible = (mode == MODE_TEXT)
+	if _main_vbox != null:
+		var pl := _main_vbox.get_node_or_null("PromptLabel")
+		if pl != null:
+			pl.visible = (mode == MODE_TEXT)
+		var hint := _main_vbox.get_node_or_null("ImageHintLabel")
+		if hint != null:
+			hint.visible = (mode == MODE_IMAGE)
+	# Settings popup sections.
 	if _text_section != null:
 		_text_section.visible = (mode == MODE_TEXT)
 	if _image_section != null:

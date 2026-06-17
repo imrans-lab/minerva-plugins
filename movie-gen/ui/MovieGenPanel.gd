@@ -13,12 +13,8 @@ const MODE_FLF2V: int = 1
 
 # ── UI node references (set in _ready) ───────────────────────────────────────
 
-## Top-level HSplitContainer: controls column on left, video column on right.
-var _split: HSplitContainer = null
-
-## Left-side controls VBoxContainer (inside a ScrollContainer).
-var _scroll: ScrollContainer = null
-var _controls_vbox: VBoxContainer = null
+## Main portrait VBox — single column, fills panel.
+var _main_vbox: VBoxContainer = null
 
 ## Mode toggle (Text→Video = 0, First-Last-Frame = 1).
 var _mode_toggle: OptionButton = null
@@ -55,8 +51,8 @@ var _save_btn: Button = null
 ## Status label.
 var _status_label: Label = null
 
-## Right-side video column.
-var _video_column: VBoxContainer = null
+## AspectRatioContainer wrapping the video player so it letterboxes correctly.
+var _aspect_container: AspectRatioContainer = null
 
 ## VideoStreamPlayer for previewing generated MP4.
 var _video_player: VideoStreamPlayer = null
@@ -66,6 +62,10 @@ var _loop_video: bool = true
 ## Play/Pause and Restart buttons for the video.
 var _play_pause_btn: Button = null
 var _restart_btn: Button = null
+
+## Settings popup + its scroll/vbox.
+var _settings_popup: PopupPanel = null
+var _settings_vbox: VBoxContainer = null
 
 # ── State ────────────────────────────────────────────────────────────────────
 
@@ -84,51 +84,40 @@ func _ready() -> void:
 	# Build all UI in code (mirrors PCBEditor pattern — .tscn is a thin wrapper).
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 
-	_split = HSplitContainer.new()
-	_split.name = "HSplit"
-	_split.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_split.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_split.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	add_child(_split)
+	_build_settings_popup()
+	_build_main_column()
 
-	_build_controls_column()
-	_build_video_column()
-
-	# Connect resize so the split ratio stays sane.
+	# Connect resize (no split offset logic needed for portrait layout).
 	resized.connect(_on_panel_resized)
-	# Apply initial split position once the layout is live.
-	await get_tree().process_frame
-	_on_panel_resized()
 
 
 func _on_panel_resized() -> void:
-	# Controls column: fixed 300 px; video column gets the rest.
-	if _split != null:
-		_split.split_offset = 300
+	# Portrait VBox fills the panel automatically; nothing to adjust.
+	pass
 
 
-# ── Controls column ──────────────────────────────────────────────────────────
+# ── Settings popup ────────────────────────────────────────────────────────────
 
-func _build_controls_column() -> void:
-	# Wrap controls in a ScrollContainer so they remain accessible on small panels.
-	_scroll = ScrollContainer.new()
-	_scroll.name = "ControlsScroll"
-	_scroll.size_flags_horizontal = Control.SIZE_FILL
-	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_split.add_child(_scroll)
+func _build_settings_popup() -> void:
+	_settings_popup = PopupPanel.new()
+	_settings_popup.name = "SettingsPopup"
+	add_child(_settings_popup)
 
-	_controls_vbox = VBoxContainer.new()
-	_controls_vbox.name = "ControlsColumn"
-	_controls_vbox.custom_minimum_size = Vector2(260, 0)
-	_controls_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_controls_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_scroll.add_child(_controls_vbox)
+	var scroll := ScrollContainer.new()
+	scroll.name = "SettingsScroll"
+	scroll.custom_minimum_size = Vector2(400, 480)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_settings_popup.add_child(scroll)
+
+	_settings_vbox = VBoxContainer.new()
+	_settings_vbox.name = "SettingsVBox"
+	_settings_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_settings_vbox)
 
 	# ── Mode toggle ────────────────────────────────────────────────────────
 	var mode_label := Label.new()
 	mode_label.text = "Mode"
-	_controls_vbox.add_child(mode_label)
+	_settings_vbox.add_child(mode_label)
 
 	_mode_toggle = OptionButton.new()
 	_mode_toggle.name = "ModeToggle"
@@ -137,56 +126,15 @@ func _build_controls_column() -> void:
 	_mode_toggle.add_item("First-Last Frame → Video", MODE_FLF2V)
 	_mode_toggle.select(MODE_TEXT)
 	_mode_toggle.item_selected.connect(_on_mode_selected)
-	_controls_vbox.add_child(_mode_toggle)
+	_settings_vbox.add_child(_mode_toggle)
 
-	_controls_vbox.add_child(HSeparator.new())
+	_settings_vbox.add_child(HSeparator.new())
 
-	# ── Text-mode section ──────────────────────────────────────────────────
-	_text_section = VBoxContainer.new()
-	_text_section.name = "TextSection"
-	_controls_vbox.add_child(_text_section)
-
-	var prompt_label := Label.new()
-	prompt_label.text = "Prompt"
-	_text_section.add_child(prompt_label)
-
-	_prompt_edit = TextEdit.new()
-	_prompt_edit.name = "PromptEdit"
-	_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_prompt_edit.custom_minimum_size = Vector2(0, 80)
-	_prompt_edit.placeholder_text = "Describe the video to generate…"
-	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
-	_text_section.add_child(_prompt_edit)
-
-	var neg_label := Label.new()
-	neg_label.text = "Negative Prompt (optional)"
-	_text_section.add_child(neg_label)
-
-	_neg_prompt_edit = TextEdit.new()
-	_neg_prompt_edit.name = "NegPromptEdit"
-	_neg_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_neg_prompt_edit.custom_minimum_size = Vector2(0, 50)
-	_neg_prompt_edit.placeholder_text = "Things to avoid…"
-	_neg_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
-	_text_section.add_child(_neg_prompt_edit)
-
-	# ── FLF2V-mode section ─────────────────────────────────────────────────
+	# ── FLF2V-mode section (negative prompt + keyframe pickers) ───────────
 	_flf_section = VBoxContainer.new()
 	_flf_section.name = "FLFSection"
 	_flf_section.visible = false
-	_controls_vbox.add_child(_flf_section)
-
-	var flf_prompt_label := Label.new()
-	flf_prompt_label.text = "Prompt"
-	_flf_section.add_child(flf_prompt_label)
-
-	_flf_prompt_edit = TextEdit.new()
-	_flf_prompt_edit.name = "FLFPromptEdit"
-	_flf_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_flf_prompt_edit.custom_minimum_size = Vector2(0, 80)
-	_flf_prompt_edit.placeholder_text = "Describe the motion or transition…"
-	_flf_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
-	_flf_section.add_child(_flf_prompt_edit)
+	_settings_vbox.add_child(_flf_section)
 
 	var flf_neg_label := Label.new()
 	flf_neg_label.text = "Negative Prompt (optional)"
@@ -258,66 +206,148 @@ func _build_controls_column() -> void:
 	last_browse_btn.pressed.connect(_on_browse_last_frame_pressed)
 	last_row.add_child(last_browse_btn)
 
-	_controls_vbox.add_child(HSeparator.new())
+	_flf_section.add_child(HSeparator.new())
+
+	# ── Text-mode negative prompt ──────────────────────────────────────────
+	_text_section = VBoxContainer.new()
+	_text_section.name = "TextSection"
+	_settings_vbox.add_child(_text_section)
+
+	var neg_label := Label.new()
+	neg_label.text = "Negative Prompt (optional)"
+	_text_section.add_child(neg_label)
+
+	_neg_prompt_edit = TextEdit.new()
+	_neg_prompt_edit.name = "NegPromptEdit"
+	_neg_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_neg_prompt_edit.custom_minimum_size = Vector2(0, 50)
+	_neg_prompt_edit.placeholder_text = "Things to avoid…"
+	_neg_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_text_section.add_child(_neg_prompt_edit)
+
+	_settings_vbox.add_child(HSeparator.new())
 
 	# ── Shared parameters ──────────────────────────────────────────────────
-	_controls_vbox.add_child(_make_label("Width"))
-	_width_spin = _make_spinbox("WidthSpin", 256, 1280, 832, 1)  # light interactive default; raise to 1280 for final
-	_controls_vbox.add_child(_width_spin)
+	_settings_vbox.add_child(_make_label("Width"))
+	_width_spin = _make_spinbox("WidthSpin", 256, 1280, 832, 1)
+	_settings_vbox.add_child(_width_spin)
 
-	_controls_vbox.add_child(_make_label("Height"))
+	_settings_vbox.add_child(_make_label("Height"))
 	_height_spin = _make_spinbox("HeightSpin", 256, 720, 480, 1)
-	_controls_vbox.add_child(_height_spin)
+	_settings_vbox.add_child(_height_spin)
 
-	_controls_vbox.add_child(_make_label("Length (frames)"))
+	_settings_vbox.add_child(_make_label("Length (frames)"))
 	_length_spin = _make_spinbox("LengthSpin", 17, 121, 33, 1)
-	_controls_vbox.add_child(_length_spin)
+	_settings_vbox.add_child(_length_spin)
 
-	_controls_vbox.add_child(_make_label("FPS"))
+	_settings_vbox.add_child(_make_label("FPS"))
 	_fps_spin = _make_spinbox("FPSSpin", 8, 30, 16, 1)
-	_controls_vbox.add_child(_fps_spin)
+	_settings_vbox.add_child(_fps_spin)
 
-	_controls_vbox.add_child(_make_label("Steps"))
+	_settings_vbox.add_child(_make_label("Steps"))
 	_steps_spin = _make_spinbox("StepsSpin", 4, 40, 16, 1)
-	_controls_vbox.add_child(_steps_spin)
+	_settings_vbox.add_child(_steps_spin)
 
-	_controls_vbox.add_child(_make_label("Switch Step"))
+	_settings_vbox.add_child(_make_label("Switch Step"))
 	_switch_step_spin = _make_spinbox("SwitchStepSpin", 1, 39, 8, 1)
-	_controls_vbox.add_child(_switch_step_spin)
+	_settings_vbox.add_child(_switch_step_spin)
 
-	_controls_vbox.add_child(_make_label("CFG Scale"))
+	_settings_vbox.add_child(_make_label("CFG Scale"))
 	_cfg_spin = _make_spinbox("CFGSpin", 1.0, 12.0, 5.0, 0.5)
-	_controls_vbox.add_child(_cfg_spin)
+	_settings_vbox.add_child(_cfg_spin)
 
-	_controls_vbox.add_child(_make_label("Seed (-1 = random)"))
+	_settings_vbox.add_child(_make_label("Seed (-1 = random)"))
 	_seed_spin = _make_spinbox("SeedSpin", -1, 2147483647, -1, 1)
-	_controls_vbox.add_child(_seed_spin)
+	_settings_vbox.add_child(_seed_spin)
 
-	_controls_vbox.add_child(HSeparator.new())
+	_settings_vbox.add_child(HSeparator.new())
 
-	# ── Action buttons ─────────────────────────────────────────────────────
-	_generate_btn = Button.new()
-	_generate_btn.name = "GenerateBtn"
-	_generate_btn.text = "Generate"
-	_generate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_generate_btn.pressed.connect(_on_generate_pressed)
-	_controls_vbox.add_child(_generate_btn)
-
+	# ── Regenerate (settings popup) ────────────────────────────────────────
 	_regenerate_btn = Button.new()
 	_regenerate_btn.name = "RegenerateBtn"
 	_regenerate_btn.text = "Regenerate"
 	_regenerate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_regenerate_btn.disabled = true
 	_regenerate_btn.pressed.connect(_on_regenerate_pressed)
-	_controls_vbox.add_child(_regenerate_btn)
+	_settings_vbox.add_child(_regenerate_btn)
+
+	# ── Close button ───────────────────────────────────────────────────────
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	close_btn.pressed.connect(_on_settings_close_pressed)
+	_settings_vbox.add_child(close_btn)
+
+
+# ── Main portrait column ──────────────────────────────────────────────────────
+
+func _build_main_column() -> void:
+	_main_vbox = VBoxContainer.new()
+	_main_vbox.name = "MainVBox"
+	_main_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(_main_vbox)
+
+	# ── Prompt area (text mode) ────────────────────────────────────────────
+	var prompt_label := Label.new()
+	prompt_label.text = "Prompt"
+	_main_vbox.add_child(prompt_label)
+
+	_prompt_edit = TextEdit.new()
+	_prompt_edit.name = "PromptEdit"
+	_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_prompt_edit.custom_minimum_size = Vector2(0, 80)
+	_prompt_edit.placeholder_text = "Describe the video to generate…"
+	_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_main_vbox.add_child(_prompt_edit)
+
+	# ── FLF2V prompt area ──────────────────────────────────────────────────
+	# _flf_section was already created in _build_settings_popup; the FLF prompt
+	# is in the main column here (separate TextEdit, hidden by mode logic).
+	var flf_prompt_label := Label.new()
+	flf_prompt_label.name = "FLFPromptLabel"
+	flf_prompt_label.text = "Prompt"
+	flf_prompt_label.visible = false
+	_main_vbox.add_child(flf_prompt_label)
+
+	_flf_prompt_edit = TextEdit.new()
+	_flf_prompt_edit.name = "FLFPromptEdit"
+	_flf_prompt_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_flf_prompt_edit.custom_minimum_size = Vector2(0, 80)
+	_flf_prompt_edit.placeholder_text = "Describe the motion or transition…"
+	_flf_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_flf_prompt_edit.visible = false
+	_main_vbox.add_child(_flf_prompt_edit)
+
+	# Store the FLF prompt label so _apply_mode can show/hide it.
+	# We reference it by name from the parent later.
+
+	# ── Button row: Generate | Save | ⚙ Settings ──────────────────────────
+	var btn_row := HBoxContainer.new()
+	btn_row.name = "ButtonRow"
+	btn_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.add_child(btn_row)
+
+	_generate_btn = Button.new()
+	_generate_btn.name = "GenerateBtn"
+	_generate_btn.text = "Generate"
+	_generate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_generate_btn.pressed.connect(_on_generate_pressed)
+	btn_row.add_child(_generate_btn)
 
 	_save_btn = Button.new()
 	_save_btn.name = "SaveBtn"
 	_save_btn.text = "Save…"
-	_save_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_save_btn.disabled = true
 	_save_btn.pressed.connect(_on_save_pressed)
-	_controls_vbox.add_child(_save_btn)
+	btn_row.add_child(_save_btn)
+
+	var settings_btn := Button.new()
+	settings_btn.name = "SettingsBtn"
+	settings_btn.text = "⚙ Settings"
+	settings_btn.pressed.connect(_on_settings_pressed)
+	btn_row.add_child(settings_btn)
 
 	# ── Status label ───────────────────────────────────────────────────────
 	_status_label = Label.new()
@@ -325,34 +355,31 @@ func _build_controls_column() -> void:
 	_status_label.text = "Ready."
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_controls_vbox.add_child(_status_label)
+	_main_vbox.add_child(_status_label)
 
+	# ── Video viewer (AspectRatioContainer → VideoStreamPlayer) ───────────
+	_aspect_container = AspectRatioContainer.new()
+	_aspect_container.name = "AspectContainer"
+	_aspect_container.ratio = 16.0 / 9.0
+	_aspect_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_aspect_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_main_vbox.add_child(_aspect_container)
 
-# ── Video column ─────────────────────────────────────────────────────────────
-
-func _build_video_column() -> void:
-	_video_column = VBoxContainer.new()
-	_video_column.name = "VideoColumn"
-	_video_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_video_column.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_split.add_child(_video_column)
-
-	# VideoStreamPlayer fills the column.
 	_video_player = VideoStreamPlayer.new()
 	_video_player.name = "VideoPlayer"
 	_video_player.expand = true  # scale the decoded frame into the control rect
 	_video_player.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_video_player.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_video_column.add_child(_video_player)
+	_aspect_container.add_child(_video_player)
 	# Short previews (~2 s) would otherwise play once and freeze on the last frame —
 	# loop so the motion stays continuously visible.
 	_video_player.finished.connect(_on_video_finished)
 
-	# Video transport controls row.
+	# ── Transport row (below viewer) ───────────────────────────────────────
 	var transport_row := HBoxContainer.new()
 	transport_row.name = "TransportRow"
 	transport_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_video_column.add_child(transport_row)
+	_main_vbox.add_child(transport_row)
 
 	_play_pause_btn = Button.new()
 	_play_pause_btn.name = "PlayPauseBtn"
@@ -371,6 +398,18 @@ func _build_video_column() -> void:
 	transport_row.add_child(_restart_btn)
 
 
+# ── Settings popup open/close ────────────────────────────────────────────────
+
+func _on_settings_pressed() -> void:
+	if _settings_popup != null:
+		_settings_popup.popup_centered(Vector2i(420, 520))
+
+
+func _on_settings_close_pressed() -> void:
+	if _settings_popup != null:
+		_settings_popup.hide()
+
+
 # ── Mode handling ────────────────────────────────────────────────────────────
 
 func _on_mode_selected(index: int) -> void:
@@ -379,6 +418,17 @@ func _on_mode_selected(index: int) -> void:
 
 
 func _apply_mode(mode: int) -> void:
+	# Main column: show the right prompt TextEdit.
+	if _prompt_edit != null:
+		_prompt_edit.visible = (mode == MODE_TEXT)
+	if _flf_prompt_edit != null:
+		_flf_prompt_edit.visible = (mode == MODE_FLF2V)
+	# Also show/hide the FLF prompt label (sibling named "FLFPromptLabel").
+	if _main_vbox != null:
+		var lbl := _main_vbox.get_node_or_null("FLFPromptLabel")
+		if lbl != null:
+			lbl.visible = (mode == MODE_FLF2V)
+	# Settings popup: show the right section.
 	if _text_section != null:
 		_text_section.visible = (mode == MODE_TEXT)
 	if _flf_section != null:
@@ -582,6 +632,15 @@ func _load_video(path: String) -> bool:
 		_play_pause_btn.disabled = false
 	if _restart_btn != null:
 		_restart_btn.disabled = false
+
+	# Update AspectRatioContainer ratio from the chosen Width/Height spinboxes.
+	if _aspect_container != null and _width_spin != null and _height_spin != null:
+		var w: float = _width_spin.value
+		var h: float = _height_spin.value
+		if h > 0.0:
+			_aspect_container.ratio = w / h
+		else:
+			_aspect_container.ratio = 16.0 / 9.0
 
 	return true
 
