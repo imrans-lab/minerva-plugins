@@ -60,6 +60,8 @@ var _video_column: VBoxContainer = null
 
 ## VideoStreamPlayer for previewing generated MP4.
 var _video_player: VideoStreamPlayer = null
+## Loop the preview (generated clips are short) so motion stays visible.
+var _loop_video: bool = true
 
 ## Play/Pause and Restart buttons for the video.
 var _play_pause_btn: Button = null
@@ -338,9 +340,13 @@ func _build_video_column() -> void:
 	# VideoStreamPlayer fills the column.
 	_video_player = VideoStreamPlayer.new()
 	_video_player.name = "VideoPlayer"
+	_video_player.expand = true  # scale the decoded frame into the control rect
 	_video_player.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_video_player.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_video_column.add_child(_video_player)
+	# Short previews (~2 s) would otherwise play once and freeze on the last frame —
+	# loop so the motion stays continuously visible.
+	_video_player.finished.connect(_on_video_finished)
 
 	# Video transport controls row.
 	var transport_row := HBoxContainer.new()
@@ -602,6 +608,13 @@ func _on_restart_pressed() -> void:
 	_video_player.play()
 	if _play_pause_btn != null:
 		_play_pause_btn.text = "Pause"
+
+
+## Loop the short preview clip rather than freezing on the final frame.
+func _on_video_finished() -> void:
+	if _loop_video and _video_player != null and _video_player.stream != null:
+		_video_player.stream_position = 0.0
+		_video_player.play()
 
 
 # ── Save (file picker for output path) ───────────────────────────────────────
