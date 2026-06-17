@@ -945,16 +945,32 @@ func _load_video(path: String) -> bool:
 	if _restart_btn != null:
 		_restart_btn.disabled = false
 
-	# Update AspectRatioContainer ratio from the chosen Width/Height spinboxes.
+	# Provisional aspect from the spinboxes, then corrected to the ACTUAL decoded
+	# video below. The spinboxes only match panel-driven gens — an agent-driven
+	# result (movie_gen.result) can be any size, so the real frame is the source
+	# of truth (otherwise a square clip gets forced into the landscape default box).
 	if _aspect_container != null and _width_spin != null and _height_spin != null:
-		var w: float = _width_spin.value
 		var h: float = _height_spin.value
-		if h > 0.0:
-			_aspect_container.ratio = w / h
-		else:
-			_aspect_container.ratio = 16.0 / 9.0
+		_aspect_container.ratio = (_width_spin.value / h) if h > 0.0 else (16.0 / 9.0)
+	_sync_aspect_to_video()
 
 	return true
+
+
+## Correct the viewer aspect ratio to the actual decoded video dimensions, which
+## the spinboxes don't reflect for agent-driven results. Polls a few frames for
+## the video texture to appear (FFmpeg needs a frame or two to decode).
+func _sync_aspect_to_video() -> void:
+	if _aspect_container == null or _video_player == null:
+		return
+	for _i in range(30):
+		await get_tree().process_frame
+		var tex: Texture2D = _video_player.get_video_texture()
+		if tex != null:
+			var sz: Vector2 = tex.get_size()
+			if sz.x > 0.0 and sz.y > 0.0:
+				_aspect_container.ratio = sz.x / sz.y
+				return
 
 
 # ── Video transport ───────────────────────────────────────────────────────────
