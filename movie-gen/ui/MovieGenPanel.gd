@@ -314,10 +314,16 @@ func _build_keyframe_block(label_text: String) -> Array:
 	browse_btn.text = "Browse…"
 	path_row.add_child(browse_btn)
 
-	# Right column: compact preview.
+	# Right column: a FIXED preview box. EXPAND_IGNORE_SIZE stops the texture's
+	# native resolution from dictating the control's minimum size (which made big
+	# images overflow right + down and shove the controls off-screen); the image
+	# is scaled to fit the box preserving aspect, and contents are clipped.
 	var preview := TextureRect.new()
-	preview.custom_minimum_size = Vector2(96, 96)
+	preview.custom_minimum_size = Vector2(128, 128)
+	preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	preview.clip_contents = true
+	preview.size_flags_horizontal = Control.SIZE_SHRINK_END
 	preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	row.add_child(preview)
 
@@ -327,12 +333,20 @@ func _build_keyframe_block(label_text: String) -> Array:
 # ── Main portrait column ──────────────────────────────────────────────────────
 
 func _build_main_column() -> void:
+	# Wrap the whole column in a vertical ScrollContainer so the controls stay
+	# reachable even if content exceeds the (variable) pane height — nothing can
+	# be pushed into an unreachable area.
+	var scroll := ScrollContainer.new()
+	scroll.name = "MainScroll"
+	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	add_child(scroll)
+
 	_main_vbox = VBoxContainer.new()
 	_main_vbox.name = "MainVBox"
-	_main_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	add_child(_main_vbox)
+	scroll.add_child(_main_vbox)
 
 	# ── Mode chooser (primary control — top of the main column) ─────────────
 	var mode_row := HBoxContainer.new()
@@ -435,6 +449,9 @@ func _build_main_column() -> void:
 	_aspect_container.ratio = 16.0 / 9.0
 	_aspect_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_aspect_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# Guarantee a visible viewer height — inside the ScrollContainer the vertical
+	# EXPAND_FILL won't stretch it past its minimum, so set a sensible floor.
+	_aspect_container.custom_minimum_size = Vector2(0, 240)
 	_main_vbox.add_child(_aspect_container)
 
 	_video_player = VideoStreamPlayer.new()
