@@ -256,78 +256,77 @@ func _build_flf_keyframes() -> void:
 	refresh_notes_btn.pressed.connect(_on_refresh_notes_pressed)
 	notes_header_row.add_child(refresh_notes_btn)
 
-	# First frame: left col (dropdown + path/browse), right col (preview).
-	var first := _build_keyframe_block("First Frame")
-	_first_frame_note_picker = first[0]
-	_first_frame_preview = first[1]
-	_first_frame_path_edit = first[2]
+	# Both keyframes side-by-side: First on the left half, Last on the right half.
+	var frames_row := HBoxContainer.new()
+	frames_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	frames_row.add_theme_constant_override("separation", 8)
+	_flf_keyframes_section.add_child(frames_row)
+
+	var first := _build_keyframe_column("First Frame")
+	frames_row.add_child(first[0])
+	_first_frame_note_picker = first[1]
+	_first_frame_preview = first[2]
+	_first_frame_path_edit = first[3]
 	_first_frame_note_picker.item_selected.connect(_on_first_note_picked)
 	_first_frame_path_edit.text_changed.connect(_on_first_frame_path_changed)
-	(first[3] as Button).pressed.connect(_on_browse_first_frame_pressed)
+	(first[4] as Button).pressed.connect(_on_browse_first_frame_pressed)
 
-	# Last frame.
-	var last := _build_keyframe_block("Last Frame")
-	_last_frame_note_picker = last[0]
-	_last_frame_preview = last[1]
-	_last_frame_path_edit = last[2]
+	var last := _build_keyframe_column("Last Frame")
+	frames_row.add_child(last[0])
+	_last_frame_note_picker = last[1]
+	_last_frame_preview = last[2]
+	_last_frame_path_edit = last[3]
 	_last_frame_note_picker.item_selected.connect(_on_last_note_picked)
 	_last_frame_path_edit.text_changed.connect(_on_last_frame_path_changed)
-	(last[3] as Button).pressed.connect(_on_browse_last_frame_pressed)
+	(last[4] as Button).pressed.connect(_on_browse_last_frame_pressed)
 
 
-## Build one keyframe block: a labelled two-column row — left column holds the
-## image-note dropdown over a path+Browse fallback, right column the preview.
-## Returns [picker, preview, path_edit, browse_btn] for the caller to wire.
-func _build_keyframe_block(label_text: String) -> Array:
-	var block := VBoxContainer.new()
-	block.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_flf_keyframes_section.add_child(block)
+## Build one compact keyframe column (one of the two side-by-side halves):
+## a title, a preview on top, then the image-note dropdown over a compact
+## path + Browse fallback. Returns [column, picker, preview, path_edit, browse_btn].
+func _build_keyframe_column(label_text: String) -> Array:
+	var col := VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL  # the two columns split 50/50
+	col.add_theme_constant_override("separation", 2)
 
 	var lbl := Label.new()
 	lbl.text = label_text
-	block.add_child(lbl)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	col.add_child(lbl)
 
-	var row := HBoxContainer.new()
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	block.add_child(row)
-
-	# Left column: dropdown + (path + browse).
-	var left := VBoxContainer.new()
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(left)
-
-	var picker := OptionButton.new()
-	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.add_child(picker)
-
-	var path_row := HBoxContainer.new()
-	path_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.add_child(path_row)
-
-	var path_edit := LineEdit.new()
-	path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	path_edit.placeholder_text = "…or a file path"
-	path_row.add_child(path_edit)
-
-	var browse_btn := Button.new()
-	browse_btn.text = "Browse…"
-	path_row.add_child(browse_btn)
-
-	# Right column: a FIXED preview box. EXPAND_IGNORE_SIZE stops the texture's
-	# native resolution from dictating the control's minimum size (which made big
-	# images overflow right + down and shove the controls off-screen); the image
-	# is scaled to fit the box preserving aspect, and contents are clipped.
+	# Preview on top — fills the column width, fixed height, scaled to fit.
+	# EXPAND_IGNORE_SIZE stops the texture's native resolution from dictating the
+	# control's minimum size (which used to overflow and shove controls off-screen).
 	var preview := TextureRect.new()
-	preview.custom_minimum_size = Vector2(128, 128)
+	preview.custom_minimum_size = Vector2(0, 110)
 	preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	preview.clip_contents = true
-	preview.size_flags_horizontal = Control.SIZE_SHRINK_END
-	preview.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(preview)
+	preview.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(preview)
 
-	return [picker, preview, path_edit, browse_btn]
+	# Note-image dropdown (primary way to choose).
+	var picker := OptionButton.new()
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	picker.clip_text = true
+	col.add_child(picker)
+
+	# Compact path + Browse fallback.
+	var path_row := HBoxContainer.new()
+	path_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(path_row)
+
+	var path_edit := LineEdit.new()
+	path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	path_edit.placeholder_text = "…or a path"
+	path_row.add_child(path_edit)
+
+	var browse_btn := Button.new()
+	browse_btn.text = "📂"
+	browse_btn.tooltip_text = "Browse for an image file"
+	path_row.add_child(browse_btn)
+
+	return [col, picker, preview, path_edit, browse_btn]
 
 
 # ── Main portrait column ──────────────────────────────────────────────────────
@@ -448,10 +447,11 @@ func _build_main_column() -> void:
 	_aspect_container.name = "AspectContainer"
 	_aspect_container.ratio = 16.0 / 9.0
 	_aspect_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_aspect_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	# Guarantee a visible viewer height — inside the ScrollContainer the vertical
-	# EXPAND_FILL won't stretch it past its minimum, so set a sensible floor.
-	_aspect_container.custom_minimum_size = Vector2(0, 240)
+	# Deterministic fixed height (NOT vertical-expand): inside the ScrollContainer
+	# an expanding child gets ambiguous sizing and the frame clipped at the bottom.
+	# A fixed height keeps the whole viewer + the transport row below it on-screen.
+	_aspect_container.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_aspect_container.custom_minimum_size = Vector2(0, 260)
 	_main_vbox.add_child(_aspect_container)
 
 	_video_player = VideoStreamPlayer.new()
