@@ -344,7 +344,11 @@ func _build_main_column() -> void:
 	_main_vbox = VBoxContainer.new()
 	_main_vbox.name = "MainVBox"
 	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# NOT vertical-expand: inside a ScrollContainer an expanding child is stretched
+	# to the viewport and its overflow is CLIPPED (no scrollbar engages), which cut
+	# off the video + transport row at the bottom. Sizing to content lets the
+	# ScrollContainer scroll instead.
+	_main_vbox.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	scroll.add_child(_main_vbox)
 
 	# ── Mode chooser (primary control — top of the main column) ─────────────
