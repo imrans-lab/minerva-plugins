@@ -77,6 +77,13 @@
             "default": 5.0,
             "minimum": 1,
             "maximum": 12
+          },
+          "crf": {
+            "type": "integer",
+            "description": "H.264 quality (constant rate factor). Lower = higher quality, larger file. 18 ≈ visually lossless. Range 0–28. Default: 18.",
+            "default": 18,
+            "minimum": 0,
+            "maximum": 28
           }
         },
         "required": ["positive_prompt"]
@@ -157,9 +164,99 @@
             "default": 5.0,
             "minimum": 1,
             "maximum": 12
+          },
+          "crf": {
+            "type": "integer",
+            "description": "H.264 quality (constant rate factor). Lower = higher quality, larger file. 18 ≈ visually lossless. Range 0–28. Default: 18.",
+            "default": 18,
+            "minimum": 0,
+            "maximum": 28
           }
         },
         "required": ["first_frame_path", "last_frame_path"]
+      }
+    },
+    {
+      "name": "minerva_movie_gen_i2v",
+      "description": "Generate a video (MP4) by animating a single start keyframe image forward via the Minerva media-gen service. The prompt is optional (the keyframe drives the result). Returns the path to the saved MP4 file.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_frame_path": {
+            "type": "string",
+            "description": "Absolute path to the start keyframe image on disk."
+          },
+          "positive_prompt": {
+            "type": "string",
+            "description": "Optional text describing the motion to animate from the start frame."
+          },
+          "negative_prompt": {
+            "type": "string",
+            "description": "Text description of things to avoid in the generation. Default: 'blurry, low quality, static, distorted, watermark'."
+          },
+          "width": {
+            "type": "integer",
+            "description": "Output video width in pixels (256–1280). Default: 1280.",
+            "default": 1280,
+            "minimum": 256,
+            "maximum": 1280
+          },
+          "height": {
+            "type": "integer",
+            "description": "Output video height in pixels (256–720). Default: 720.",
+            "default": 720,
+            "minimum": 256,
+            "maximum": 720
+          },
+          "length": {
+            "type": "integer",
+            "description": "Number of frames to generate (17–121). Default: 81.",
+            "default": 81,
+            "minimum": 17,
+            "maximum": 121
+          },
+          "fps": {
+            "type": "integer",
+            "description": "Frames per second for the output video (8–30). Default: 16.",
+            "default": 16,
+            "minimum": 8,
+            "maximum": 30
+          },
+          "seed": {
+            "type": "integer",
+            "description": "Random seed. -1 means random. Default: -1.",
+            "default": -1
+          },
+          "steps": {
+            "type": "integer",
+            "description": "Number of diffusion steps (4–40). Default: 20.",
+            "default": 20,
+            "minimum": 4,
+            "maximum": 40
+          },
+          "switch_step": {
+            "type": "integer",
+            "description": "Step at which the sampler switches (1–39). Default: 10.",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 39
+          },
+          "cfg": {
+            "type": "number",
+            "description": "Classifier-free guidance scale (1–12). Default: 5.0.",
+            "default": 5.0,
+            "minimum": 1,
+            "maximum": 12
+          },
+          "crf": {
+            "type": "integer",
+            "description": "H.264 quality (constant rate factor). Lower = higher quality, larger file. 18 ≈ visually lossless. Range 0–28. Default: 18.",
+            "default": 18,
+            "minimum": 0,
+            "maximum": 28
+          }
+        },
+        "required": ["start_frame_path"]
       }
     }
   ],
@@ -169,11 +266,11 @@
       "kind": "godot_scene",
       "entry_scene": "ui/MovieGenPanel.tscn",
       "scripts": ["ui/MovieGenPanel.gd"],
-      "ipc_channels": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"],
+      "ipc_channels": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "minerva_movie_gen_i2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"],
       "file_extensions": [".mmovie"],
       "save_mode": "host_owned"
     }],
-    "ipc_messages": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"]
+    "ipc_messages": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "minerva_movie_gen_i2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"]
   },
   "events": [{"name": "movie_gen.progress"}],
   "permissions": {

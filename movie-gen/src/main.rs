@@ -356,6 +356,12 @@ fn handle_text_to_video(
         .unwrap_or(5.0)
         .clamp(1.0, 12.0);
 
+    let crf = args
+        .get("crf")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(18)
+        .clamp(0, 28);
+
     // Fetch credentials
     let creds = match fetch_credentials(out, lines, next_id) {
         Ok(c) => c,
@@ -373,6 +379,7 @@ fn handle_text_to_video(
         "steps": steps,
         "switch_step": switch_step,
         "cfg": cfg,
+        "crf": crf,
     });
 
     let req = GenerateRequest {
@@ -466,6 +473,12 @@ fn handle_flf2v(
         .unwrap_or(5.0)
         .clamp(1.0, 12.0);
 
+    let crf = args
+        .get("crf")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(18)
+        .clamp(0, 28);
+
     // Read both image files from disk BEFORE fetching credentials,
     // so we return a structured tool error early if either is missing.
     let first_bytes = match std::fs::read(&first_frame_path) {
@@ -517,6 +530,7 @@ fn handle_flf2v(
         "steps": steps,
         "switch_step": switch_step,
         "cfg": cfg,
+        "crf": crf,
     });
 
     let req = GenerateRequest {
@@ -537,6 +551,141 @@ fn handle_flf2v(
                 content_type: "image/png".into(),
             },
         ],
+    };
+
+    let result = run_generate(creds, req, out);
+    ok_response(id, result)
+}
+
+fn handle_i2v(
+    params: &Value,
+    id: Value,
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let args = params.get("arguments").unwrap_or(params);
+
+    let start_frame_path = match args.get("start_frame_path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => return ok_response(id, tool_err("start_frame_path is required")),
+    };
+
+    // Prompt is OPTIONAL for image-to-video — the start keyframe is the primary
+    // signal. Default to empty when absent/blank.
+    let positive_prompt = args
+        .get("positive_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let negative_prompt = args
+        .get("negative_prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("blurry, low quality, static, distorted, watermark")
+        .to_string();
+
+    let width = args
+        .get("width")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(1280)
+        .clamp(256, 1280);
+
+    let height = args
+        .get("height")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(720)
+        .clamp(256, 720);
+
+    let length = args
+        .get("length")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(81)
+        .clamp(17, 121);
+
+    let fps = args
+        .get("fps")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(16)
+        .clamp(8, 30);
+
+    let seed = args
+        .get("seed")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(-1);
+
+    let steps = args
+        .get("steps")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(20)
+        .clamp(4, 40);
+
+    let switch_step = args
+        .get("switch_step")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(10)
+        .clamp(1, 39);
+
+    let cfg = args
+        .get("cfg")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(5.0)
+        .clamp(1.0, 12.0);
+
+    let crf = args
+        .get("crf")
+        .and_then(|v| lax_i64(Some(v)))
+        .unwrap_or(18)
+        .clamp(0, 28);
+
+    // Read the start image BEFORE fetching credentials so a missing file
+    // returns a structured tool error early.
+    let start_bytes = match std::fs::read(&start_frame_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return ok_response(
+                id,
+                tool_err(&format!("could not read start_frame_path {start_frame_path}: {e}")),
+            )
+        }
+    };
+
+    let start_basename = Path::new(&start_frame_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("start_frame.png")
+        .to_string();
+
+    // Fetch credentials
+    let creds = match fetch_credentials(out, lines, next_id) {
+        Ok(c) => c,
+        Err(e) => return ok_response(id, e),
+    };
+
+    let gen_params = json!({
+        "positive_prompt": positive_prompt,
+        "negative_prompt": negative_prompt,
+        "width": width,
+        "height": height,
+        "length": length,
+        "fps": fps,
+        "seed": seed,
+        "steps": steps,
+        "switch_step": switch_step,
+        "cfg": cfg,
+        "crf": crf,
+    });
+
+    let req = GenerateRequest {
+        topic: "media_gen/i2v".into(),
+        workflow: "i2v".into(),
+        params: gen_params,
+        files: vec![InputFile {
+            filename: start_basename,
+            role: "start_frame".into(),
+            bytes: start_bytes,
+            content_type: "image/png".into(),
+        }],
     };
 
     let result = run_generate(creds, req, out);
@@ -636,6 +785,13 @@ fn tools_list_result() -> Value {
                             "default": 5.0,
                             "minimum": 1,
                             "maximum": 12
+                        },
+                        "crf": {
+                            "type": "integer",
+                            "description": "H.264 quality (constant rate factor). Lower = higher quality, larger file. 18 ≈ visually lossless. Range 0–28. Default: 18.",
+                            "default": 18,
+                            "minimum": 0,
+                            "maximum": 28
                         }
                     },
                     "required": ["positive_prompt"]
@@ -716,9 +872,99 @@ fn tools_list_result() -> Value {
                             "default": 5.0,
                             "minimum": 1,
                             "maximum": 12
+                        },
+                        "crf": {
+                            "type": "integer",
+                            "description": "H.264 quality (constant rate factor). Lower = higher quality, larger file. 18 ≈ visually lossless. Range 0–28. Default: 18.",
+                            "default": 18,
+                            "minimum": 0,
+                            "maximum": 28
                         }
                     },
                     "required": ["first_frame_path", "last_frame_path"]
+                }
+            },
+            {
+                "name": "minerva_movie_gen_i2v",
+                "description": "Generate a video (MP4) by animating a single start keyframe image forward via the Minerva media-gen service. The prompt is optional (the keyframe drives the result). Returns the path to the saved MP4 file.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "start_frame_path": {
+                            "type": "string",
+                            "description": "Absolute path to the start keyframe image on disk."
+                        },
+                        "positive_prompt": {
+                            "type": "string",
+                            "description": "Optional text describing the motion to animate from the start frame."
+                        },
+                        "negative_prompt": {
+                            "type": "string",
+                            "description": "Text description of things to avoid in the generation. Default: 'blurry, low quality, static, distorted, watermark'."
+                        },
+                        "width": {
+                            "type": "integer",
+                            "description": "Output video width in pixels (256–1280). Default: 1280.",
+                            "default": 1280,
+                            "minimum": 256,
+                            "maximum": 1280
+                        },
+                        "height": {
+                            "type": "integer",
+                            "description": "Output video height in pixels (256–720). Default: 720.",
+                            "default": 720,
+                            "minimum": 256,
+                            "maximum": 720
+                        },
+                        "length": {
+                            "type": "integer",
+                            "description": "Number of frames to generate (17–121). Default: 81.",
+                            "default": 81,
+                            "minimum": 17,
+                            "maximum": 121
+                        },
+                        "fps": {
+                            "type": "integer",
+                            "description": "Frames per second for the output video (8–30). Default: 16.",
+                            "default": 16,
+                            "minimum": 8,
+                            "maximum": 30
+                        },
+                        "seed": {
+                            "type": "integer",
+                            "description": "Random seed. -1 means random. Default: -1.",
+                            "default": -1
+                        },
+                        "steps": {
+                            "type": "integer",
+                            "description": "Number of diffusion steps (4–40). Default: 20.",
+                            "default": 20,
+                            "minimum": 4,
+                            "maximum": 40
+                        },
+                        "switch_step": {
+                            "type": "integer",
+                            "description": "Step at which the sampler switches (1–39). Default: 10.",
+                            "default": 10,
+                            "minimum": 1,
+                            "maximum": 39
+                        },
+                        "cfg": {
+                            "type": "number",
+                            "description": "Classifier-free guidance scale (1–12). Default: 5.0.",
+                            "default": 5.0,
+                            "minimum": 1,
+                            "maximum": 12
+                        },
+                        "crf": {
+                            "type": "integer",
+                            "description": "H.264 quality (constant rate factor). Lower = higher quality, larger file. 18 ≈ visually lossless. Range 0–28. Default: 18.",
+                            "default": 18,
+                            "minimum": 0,
+                            "maximum": 28
+                        }
+                    },
+                    "required": ["start_frame_path"]
                 }
             }
         ]
@@ -792,6 +1038,9 @@ fn main() {
                     }
                     "minerva_movie_gen_flf2v" => {
                         handle_flf2v(&req.params, req.id, &mut out, &mut lines, &mut next_id)
+                    }
+                    "minerva_movie_gen_i2v" => {
+                        handle_i2v(&req.params, req.id, &mut out, &mut lines, &mut next_id)
                     }
                     other => err_response(
                         req.id,

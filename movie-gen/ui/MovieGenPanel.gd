@@ -10,6 +10,7 @@ extends MinervaPluginPanel
 # ── Mode constants ───────────────────────────────────────────────────────────
 const MODE_TEXT: int = 0
 const MODE_FLF2V: int = 1
+const MODE_I2V: int = 2
 
 # ── Host icons (chat's icons — panels run in-process so res:// = Minerva) ──────
 const ICON_SEND := "res://assets/icons/send_icons/send_icon_24_no_bg.png"
@@ -52,6 +53,12 @@ var _image_notes: Array = []
 var _first_frame_note_id: String = ""
 var _last_frame_note_id: String = ""
 
+## Column container nodes (so i2v mode can hide the Last-frame column) + the
+## First-frame title label (retitled "Start Frame" in i2v mode).
+var _first_frame_column: VBoxContainer = null
+var _last_frame_column: VBoxContainer = null
+var _first_frame_label: Label = null
+
 ## Shared parameters.
 var _width_spin: SpinBox = null
 var _height_spin: SpinBox = null
@@ -61,6 +68,7 @@ var _steps_spin: SpinBox = null
 var _switch_step_spin: SpinBox = null
 var _cfg_spin: SpinBox = null
 var _seed_spin: SpinBox = null
+var _crf_spin: SpinBox = null
 
 ## Action buttons.
 var _generate_btn: Button = null
@@ -208,6 +216,10 @@ func _build_settings_popup() -> void:
 	_seed_spin = _make_spinbox("SeedSpin", -1, 2147483647, -1, 1)
 	_settings_vbox.add_child(_seed_spin)
 
+	_settings_vbox.add_child(_make_label("Video Quality (CRF: lower = better, 18 ≈ lossless)"))
+	_crf_spin = _make_spinbox("CRFSpin", 0, 28, 18, 1)
+	_settings_vbox.add_child(_crf_spin)
+
 	_settings_vbox.add_child(HSeparator.new())
 
 	# ── Regenerate (settings popup) ────────────────────────────────────────
@@ -263,7 +275,9 @@ func _build_flf_keyframes() -> void:
 	_flf_keyframes_section.add_child(frames_row)
 
 	var first := _build_keyframe_column("First Frame")
-	frames_row.add_child(first[0])
+	_first_frame_column = first[0]
+	_first_frame_label = _first_frame_column.get_child(0) as Label  # the title label
+	frames_row.add_child(_first_frame_column)
 	_first_frame_note_picker = first[1]
 	_first_frame_preview = first[2]
 	_first_frame_path_edit = first[3]
@@ -272,7 +286,8 @@ func _build_flf_keyframes() -> void:
 	(first[4] as Button).pressed.connect(_on_browse_first_frame_pressed)
 
 	var last := _build_keyframe_column("Last Frame")
-	frames_row.add_child(last[0])
+	_last_frame_column = last[0]
+	frames_row.add_child(_last_frame_column)
 	_last_frame_note_picker = last[1]
 	_last_frame_preview = last[2]
 	_last_frame_path_edit = last[3]
@@ -364,6 +379,7 @@ func _build_main_column() -> void:
 	_mode_toggle.name = "ModeToggle"
 	_mode_toggle.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_mode_toggle.add_item("Text → Video", MODE_TEXT)
+	_mode_toggle.add_item("Image → Video", MODE_I2V)
 	_mode_toggle.add_item("First-Last Frame → Video", MODE_FLF2V)
 	_mode_toggle.select(MODE_TEXT)
 	_mode_toggle.item_selected.connect(_on_mode_selected)
@@ -510,31 +526,41 @@ func _on_mode_selected(index: int) -> void:
 
 
 func _apply_mode(mode: int) -> void:
+	# FLF2V and I2V are both keyframe-driven video modes: they share the keyframe
+	# section + the (optional) motion prompt. I2V differs only in using a single
+	# Start frame (the Last-frame column is hidden).
+	var is_kf := (mode == MODE_FLF2V or mode == MODE_I2V)
+
 	# Main column: show the right prompt TextEdit + its label.
 	if _prompt_edit != null:
 		_prompt_edit.visible = (mode == MODE_TEXT)
 	if _flf_prompt_edit != null:
-		_flf_prompt_edit.visible = (mode == MODE_FLF2V)
-	# Show exactly one "Prompt" label (text-mode and FLF-mode have their own).
+		_flf_prompt_edit.visible = is_kf
+	# Show exactly one "Prompt" label (text mode vs the keyframe modes).
 	if _main_vbox != null:
 		var text_lbl := _main_vbox.get_node_or_null("TextPromptLabel")
 		if text_lbl != null:
 			text_lbl.visible = (mode == MODE_TEXT)
 		var flf_lbl := _main_vbox.get_node_or_null("FLFPromptLabel")
 		if flf_lbl != null:
-			flf_lbl.visible = (mode == MODE_FLF2V)
-	# Keyframe selection (main column) — only for FLF2V.
+			flf_lbl.visible = is_kf
+	# Keyframe selection (main column) — for both video keyframe modes.
 	if _flf_keyframes_section != null:
-		_flf_keyframes_section.visible = (mode == MODE_FLF2V)
+		_flf_keyframes_section.visible = is_kf
+	# I2V uses only the Start frame: hide the Last-frame column and retitle.
+	if _last_frame_column != null:
+		_last_frame_column.visible = (mode == MODE_FLF2V)
+	if _first_frame_label != null:
+		_first_frame_label.text = "Start Frame" if mode == MODE_I2V else "First Frame"
 	# Settings popup: show the right section.
 	if _text_section != null:
 		_text_section.visible = (mode == MODE_TEXT)
 	if _flf_section != null:
-		_flf_section.visible = (mode == MODE_FLF2V)
+		_flf_section.visible = is_kf
 
-	# Entering keyframe mode: refresh the image-note dropdowns (fire-and-forget;
+	# Entering a keyframe mode: refresh the image-note dropdowns (fire-and-forget;
 	# no-op if IPC isn't attached yet, e.g. during load).
-	if mode == MODE_FLF2V:
+	if is_kf:
 		_refresh_image_notes()
 
 
@@ -789,6 +815,7 @@ func _build_args(mode: int) -> Dictionary:
 		"steps": int(_steps_spin.value),
 		"switch_step": int(_switch_step_spin.value),
 		"cfg": _cfg_spin.value,
+		"crf": int(_crf_spin.value),
 	}
 
 	if mode == MODE_TEXT:
@@ -800,6 +827,20 @@ func _build_args(mode: int) -> Dictionary:
 		var neg: String = _neg_prompt_edit.text.strip_edges()
 		if not neg.is_empty():
 			shared["negative_prompt"] = neg
+		return shared
+	elif mode == MODE_I2V:
+		# Single start keyframe; prompt OPTIONAL (the keyframe drives it).
+		var start_path: String = _first_frame_path_edit.text.strip_edges()
+		if start_path.is_empty():
+			_set_status("Please select a start keyframe image.")
+			return {}
+		shared["start_frame_path"] = start_path
+		var i2v_prompt: String = _flf_prompt_edit.text.strip_edges()
+		if not i2v_prompt.is_empty():
+			shared["positive_prompt"] = i2v_prompt
+		var i2v_neg: String = _flf_neg_prompt_edit.text.strip_edges()
+		if not i2v_neg.is_empty():
+			shared["negative_prompt"] = i2v_neg
 		return shared
 	else:  # MODE_FLF2V
 		var first_path: String = _first_frame_path_edit.text.strip_edges()
@@ -832,10 +873,11 @@ func _run_generate(mode: int, args: Dictionary) -> void:
 	_set_in_flight(true)
 	_set_status("Generating…")
 
-	var channel: String = (
-		"minerva_movie_gen_text_to_video" if mode == MODE_TEXT
-		else "minerva_movie_gen_flf2v"
-	)
+	var channel: String = "minerva_movie_gen_flf2v"
+	if mode == MODE_TEXT:
+		channel = "minerva_movie_gen_text_to_video"
+	elif mode == MODE_I2V:
+		channel = "minerva_movie_gen_i2v"
 	var reply_id: String = "movgen:%d" % Time.get_ticks_usec()
 	request.emit(channel, args, reply_id)
 
@@ -1045,6 +1087,7 @@ func _on_panel_save_request() -> Dictionary:
 		"steps": int(_steps_spin.value) if _steps_spin != null else 20,
 		"switch_step": int(_switch_step_spin.value) if _switch_step_spin != null else 10,
 		"cfg": _cfg_spin.value if _cfg_spin != null else 5.0,
+		"crf": int(_crf_spin.value) if _crf_spin != null else 18,
 		"last_artifact_path": _last_artifact_path,
 	}
 
@@ -1095,6 +1138,8 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		_switch_step_spin.value = float(document.get("switch_step", _switch_step_spin.value))
 	if _cfg_spin != null:
 		_cfg_spin.value = float(document.get("cfg", _cfg_spin.value))
+	if _crf_spin != null:
+		_crf_spin.value = float(document.get("crf", _crf_spin.value))
 
 	# Reload last artifact if it still exists on disk.
 	var artifact_path: String = str(document.get("last_artifact_path", ""))
