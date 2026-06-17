@@ -113,7 +113,9 @@ func handle_pointer_input(event: InputEvent) -> bool:
 			handled = true
 			_yaw   -= mme.relative.x * ORBIT_SENSITIVITY
 			_pitch += mme.relative.y * ORBIT_SENSITIVITY
-			_pitch = clamp(_pitch, -89.0, 89.0)
+			# Clamp to ±85° (not ±89°) to stay clear of the look_at singularity
+			# where the view direction goes (near-)parallel to the up vector.
+			_pitch = clamp(_pitch, -85.0, 85.0)
 			_apply_transform()
 		elif _dragging_pan:
 			handled = true
@@ -160,7 +162,12 @@ func _apply_transform() -> void:
 	)
 
 	position = _target + offset
-	look_at(_target, Vector3.UP)
+	# Defensive: never feed a degenerate/NaN basis to the renderer. Skip the
+	# look_at if the offset is ~zero or ~parallel to up (pitch is already clamped
+	# to ±85°, so this should not trigger — belt-and-suspenders).
+	if offset.is_finite() and offset.length() > 0.0001 \
+			and absf(offset.normalized().dot(Vector3.UP)) < 0.999:
+		look_at(_target, Vector3.UP)
 
 
 func _apply_orthographic_transform() -> void:
@@ -219,7 +226,7 @@ func set_distance(d: float) -> void:
 
 func set_orbit(yaw_deg: float, pitch_deg: float) -> void:
 	_yaw   = yaw_deg
-	_pitch = clamp(pitch_deg, -89.0, 89.0)
+	_pitch = clamp(pitch_deg, -85.0, 85.0)
 	_apply_transform()
 
 
