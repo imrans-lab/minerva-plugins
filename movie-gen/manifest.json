@@ -169,18 +169,20 @@
       "kind": "godot_scene",
       "entry_scene": "ui/MovieGenPanel.tscn",
       "scripts": ["ui/MovieGenPanel.gd"],
-      "ipc_channels": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker"],
+      "ipc_channels": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"],
       "file_extensions": [".mmovie"],
       "save_mode": "host_owned"
     }],
-    "ipc_messages": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker"]
+    "ipc_messages": ["minerva_movie_gen_text_to_video", "minerva_movie_gen_flf2v", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_list_notes", "capability:mcp.proxy:minerva_get_note"]
   },
   "events": [{"name": "movie_gen.progress"}],
   "permissions": {
     "host_capabilities": [
       "host.core.session",
       "host.notify",
-      "host.dialogs.file_picker"
+      "host.dialogs.file_picker",
+      "mcp.proxy:minerva_list_notes",
+      "mcp.proxy:minerva_get_note"
     ],
     "network": {
       "mode": "none"

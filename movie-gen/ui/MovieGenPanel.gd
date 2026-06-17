@@ -38,6 +38,17 @@ var _last_frame_path_edit: LineEdit = null
 var _first_frame_preview: TextureRect = null
 var _last_frame_preview: TextureRect = null
 
+## Image-note pickers — source the two keyframes from open IMAGE notes instead
+## of raw paths. Each resolves the chosen note to an on-disk PNG (via the host
+## minerva_get_note proxy) and funnels it through the path LineEdit below, so the
+## file-path + Browse fallback still works unchanged.
+var _first_frame_note_picker: OptionButton = null
+var _last_frame_note_picker: OptionButton = null
+## Cached [{note_id, title}] of IMAGE-kind notes, indexed by OptionButton item id.
+var _image_notes: Array = []
+var _first_frame_note_id: String = ""
+var _last_frame_note_id: String = ""
+
 ## Shared parameters.
 var _width_spin: SpinBox = null
 var _height_spin: SpinBox = null
@@ -155,10 +166,36 @@ func _build_settings_popup() -> void:
 
 	_flf_section.add_child(HSeparator.new())
 
+	# ── Keyframes from image notes ─────────────────────────────────────────
+	# Source the two keyframes from open IMAGE notes (simpler dropdown picker).
+	# Selecting a note resolves its image to disk and fills the path field below;
+	# the raw path + Browse remain as a fallback.
+	var notes_header_row := HBoxContainer.new()
+	notes_header_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_flf_section.add_child(notes_header_row)
+
+	var notes_header := Label.new()
+	notes_header.text = "Keyframes from image notes"
+	notes_header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	notes_header_row.add_child(notes_header)
+
+	var refresh_notes_btn := Button.new()
+	refresh_notes_btn.name = "RefreshNotesBtn"
+	refresh_notes_btn.text = "↻ Refresh"
+	refresh_notes_btn.tooltip_text = "Re-scan open notes for images"
+	refresh_notes_btn.pressed.connect(_on_refresh_notes_pressed)
+	notes_header_row.add_child(refresh_notes_btn)
+
 	# First frame picker.
 	var first_frame_label := Label.new()
 	first_frame_label.text = "First Frame"
 	_flf_section.add_child(first_frame_label)
+
+	_first_frame_note_picker = OptionButton.new()
+	_first_frame_note_picker.name = "FirstFrameNotePicker"
+	_first_frame_note_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_first_frame_note_picker.item_selected.connect(_on_first_note_picked)
+	_flf_section.add_child(_first_frame_note_picker)
 
 	_first_frame_preview = TextureRect.new()
 	_first_frame_preview.name = "FirstFramePreview"
@@ -187,6 +224,12 @@ func _build_settings_popup() -> void:
 	var last_frame_label := Label.new()
 	last_frame_label.text = "Last Frame"
 	_flf_section.add_child(last_frame_label)
+
+	_last_frame_note_picker = OptionButton.new()
+	_last_frame_note_picker.name = "LastFrameNotePicker"
+	_last_frame_note_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_last_frame_note_picker.item_selected.connect(_on_last_note_picked)
+	_flf_section.add_child(_last_frame_note_picker)
 
 	_last_frame_preview = TextureRect.new()
 	_last_frame_preview.name = "LastFramePreview"
@@ -412,6 +455,9 @@ func _build_main_column() -> void:
 func _on_settings_pressed() -> void:
 	if _settings_popup != null:
 		_settings_popup.popup_centered(Vector2i(420, 520))
+	# Keep the keyframe pickers current whenever the user opens Settings in FLF mode.
+	if _mode_toggle != null and _mode_toggle.get_item_id(_mode_toggle.selected) == MODE_FLF2V:
+		_refresh_image_notes()
 
 
 func _on_settings_close_pressed() -> void:
@@ -442,6 +488,11 @@ func _apply_mode(mode: int) -> void:
 		_text_section.visible = (mode == MODE_TEXT)
 	if _flf_section != null:
 		_flf_section.visible = (mode == MODE_FLF2V)
+
+	# Entering keyframe mode: refresh the image-note dropdowns (fire-and-forget;
+	# no-op if IPC isn't attached yet, e.g. during load).
+	if mode == MODE_FLF2V:
+		_refresh_image_notes()
 
 
 # ── Browse helpers ───────────────────────────────────────────────────────────
@@ -501,6 +552,114 @@ func _load_frame_preview(preview: TextureRect, path: String) -> void:
 		preview.texture = null
 		return
 	preview.texture = ImageTexture.create_from_image(img)
+
+
+# ── Image-note pickers ────────────────────────────────────────────────────────
+
+func _on_refresh_notes_pressed() -> void:
+	await _refresh_image_notes()
+
+
+## Pull the open notes from the host, keep only IMAGE-kind ones, and rebuild both
+## keyframe dropdowns. Reached via the mcp.proxy:minerva_list_notes capability.
+func _refresh_image_notes() -> void:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return
+	var reply_id: String = "movgen:listnotes:%d" % Time.get_ticks_usec()
+	request.emit("capability:mcp.proxy:minerva_list_notes", {}, reply_id)
+	var reply: Dictionary = await ipc.await_reply(reply_id, 15000)
+	if not bool(reply.get("success", false)):
+		return
+	var tool_res: Dictionary = reply.get("result", {}) as Dictionary
+	var notes: Array = tool_res.get("notes", []) as Array
+	_image_notes.clear()
+	for n in notes:
+		if str((n as Dictionary).get("type", "")).to_upper() == "IMAGE":
+			_image_notes.append({
+				"note_id": str((n as Dictionary).get("note_id", "")),
+				"title": str((n as Dictionary).get("title", "")),
+			})
+	_rebuild_note_pickers()
+
+
+## Repopulate a single picker, preserving the current selection by note_id when
+## that note is still present after the refresh.
+func _populate_note_picker(picker: OptionButton, selected_note_id: String) -> void:
+	if picker == null:
+		return
+	picker.clear()
+	if _image_notes.is_empty():
+		picker.add_item("(no image notes open)", -1)
+		picker.set_item_disabled(0, true)
+		return
+	picker.add_item("— Select image note —", -1)
+	var select_idx: int = 0
+	for i in _image_notes.size():
+		var entry: Dictionary = _image_notes[i]
+		var title: String = entry.get("title", "")
+		picker.add_item(title if not title.is_empty() else "(untitled)", i)
+		if entry.get("note_id", "") == selected_note_id and not selected_note_id.is_empty():
+			select_idx = picker.item_count - 1
+	picker.select(select_idx)
+
+
+func _rebuild_note_pickers() -> void:
+	_populate_note_picker(_first_frame_note_picker, _first_frame_note_id)
+	_populate_note_picker(_last_frame_note_picker, _last_frame_note_id)
+
+
+func _on_first_note_picked(index: int) -> void:
+	await _apply_note_pick(_first_frame_note_picker, index, true)
+
+
+func _on_last_note_picked(index: int) -> void:
+	await _apply_note_pick(_last_frame_note_picker, index, false)
+
+
+## Resolve the chosen note's image to disk and feed it into the keyframe's path
+## field + preview. `is_first` selects which slot to fill.
+func _apply_note_pick(picker: OptionButton, index: int, is_first: bool) -> void:
+	if picker == null:
+		return
+	var item_id: int = picker.get_item_id(index)
+	if item_id < 0 or item_id >= _image_notes.size():
+		return  # placeholder / sentinel row
+	var entry: Dictionary = _image_notes[item_id]
+	var note_id: String = entry.get("note_id", "")
+	var title: String = entry.get("title", "")
+	if note_id.is_empty():
+		return
+	var path: String = await _resolve_note_image(note_id)
+	if path.is_empty():
+		_set_status("Could not load image from note '%s'." % title)
+		return
+	if is_first:
+		_first_frame_note_id = note_id
+		if _first_frame_path_edit != null:
+			_first_frame_path_edit.text = path
+		_load_frame_preview(_first_frame_preview, path)
+	else:
+		_last_frame_note_id = note_id
+		if _last_frame_path_edit != null:
+			_last_frame_path_edit.text = path
+		_load_frame_preview(_last_frame_preview, path)
+
+
+## Ask the host to export the note's image to a PNG on disk and return its path.
+## Reached via the mcp.proxy:minerva_get_note capability (substrate exports IMAGE
+## notes to user://plugin_note_images/<uuid>.png and reports image_path).
+func _resolve_note_image(note_id: String) -> String:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return ""
+	var reply_id: String = "movgen:getnote:%d" % Time.get_ticks_usec()
+	request.emit("capability:mcp.proxy:minerva_get_note", {"note_id": note_id}, reply_id)
+	var reply: Dictionary = await ipc.await_reply(reply_id, 15000)
+	if not bool(reply.get("success", false)):
+		return ""
+	var tool_res: Dictionary = reply.get("result", {}) as Dictionary
+	return str(tool_res.get("image_path", ""))
 
 
 # ── Generate / Regenerate ────────────────────────────────────────────────────
