@@ -328,31 +328,35 @@ func _build_main_column() -> void:
 	# Store the FLF prompt label so _apply_mode can show/hide it.
 	# We reference it by name from the parent later.
 
-	# ── Button row: Generate | Save | ⚙ Settings ──────────────────────────
+	# ── Button row: a compact, right-aligned flat icon toolbar ─────────────
+	# Order left→right: Settings · Download · Send (send is the rightmost action).
 	var btn_row := HBoxContainer.new()
 	btn_row.name = "ButtonRow"
 	btn_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_row.alignment = BoxContainer.ALIGNMENT_END
 	_main_vbox.add_child(btn_row)
 
-	_generate_btn = Button.new()
-	_generate_btn.name = "GenerateBtn"
-	_set_icon_button(_generate_btn, ICON_SEND, "Generate", "Generate")
-	_generate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_generate_btn.pressed.connect(_on_generate_pressed)
-	btn_row.add_child(_generate_btn)
+	var settings_btn := Button.new()
+	settings_btn.name = "SettingsBtn"
+	settings_btn.flat = true
+	_set_icon_button(settings_btn, ICON_GEAR, "⚙ Settings", "Settings")
+	settings_btn.pressed.connect(_on_settings_pressed)
+	btn_row.add_child(settings_btn)
 
 	_save_btn = Button.new()
 	_save_btn.name = "SaveBtn"
+	_save_btn.flat = true
 	_set_icon_button(_save_btn, ICON_DOWNLOAD, "Save…", "Download / export the video")
 	_save_btn.disabled = true
 	_save_btn.pressed.connect(_on_save_pressed)
 	btn_row.add_child(_save_btn)
 
-	var settings_btn := Button.new()
-	settings_btn.name = "SettingsBtn"
-	_set_icon_button(settings_btn, ICON_GEAR, "⚙ Settings", "Settings")
-	settings_btn.pressed.connect(_on_settings_pressed)
-	btn_row.add_child(settings_btn)
+	_generate_btn = Button.new()
+	_generate_btn.name = "GenerateBtn"
+	_generate_btn.flat = true
+	_set_icon_button(_generate_btn, ICON_SEND, "Generate", "Generate")
+	_generate_btn.pressed.connect(_on_generate_pressed)
+	btn_row.add_child(_generate_btn)
 
 	# ── Status label ───────────────────────────────────────────────────────
 	_status_label = Label.new()
