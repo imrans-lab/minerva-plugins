@@ -575,6 +575,7 @@ func _load_video(path: String) -> bool:
 
 	_video_player.stream = video_resource
 	_video_player.play()
+	_keep_rendering(true)
 
 	if _play_pause_btn != null:
 		_play_pause_btn.text = "Pause"
@@ -593,10 +594,12 @@ func _on_play_pause_pressed() -> void:
 	if not _video_player.is_playing():
 		_video_player.stream_position = 0
 		_video_player.play()
+		_keep_rendering(true)
 		if _play_pause_btn != null:
 			_play_pause_btn.text = "Pause"
 	else:
 		_video_player.paused = not _video_player.paused
+		_keep_rendering(not _video_player.paused)
 		if _play_pause_btn != null:
 			_play_pause_btn.text = "Play" if _video_player.paused else "Pause"
 
@@ -606,6 +609,7 @@ func _on_restart_pressed() -> void:
 		return
 	_video_player.stop()
 	_video_player.play()
+	_keep_rendering(true)
 	if _play_pause_btn != null:
 		_play_pause_btn.text = "Pause"
 
@@ -615,6 +619,15 @@ func _on_video_finished() -> void:
 	if _loop_video and _video_player != null and _video_player.stream != null:
 		_video_player.stream_position = 0.0
 		_video_player.play()
+		_keep_rendering(true)
+
+
+## Minerva runs with low_processor_mode=true (project.godot) — it only refreshes the
+## screen on input/changes, which makes continuous video stutter (frames advance only
+## when the mouse moves). Disable low-processor mode while a clip plays; restore it
+## when stopped/paused/unloaded so the idle app stays light.
+func _keep_rendering(on: bool) -> void:
+	OS.low_processor_usage_mode = not on
 
 
 # ── Save (file picker for output path) ───────────────────────────────────────
@@ -677,6 +690,7 @@ func _on_panel_unload() -> void:
 	# Stop video playback on unload.
 	if _video_player != null and _video_player.is_playing():
 		_video_player.stop()
+	_keep_rendering(false)  # restore low-processor mode
 
 
 func _on_panel_save_request() -> Dictionary:
