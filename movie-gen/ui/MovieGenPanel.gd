@@ -11,6 +11,11 @@ extends MinervaPluginPanel
 const MODE_TEXT: int = 0
 const MODE_FLF2V: int = 1
 
+# ── Host icons (chat's icons — panels run in-process so res:// = Minerva) ──────
+const ICON_SEND := "res://assets/icons/send_icons/send_icon_24_no_bg.png"
+const ICON_DOWNLOAD := "res://assets/icons/download_icons/download_white.png"
+const ICON_GEAR := "res://assets/icons/gear_icons/gears_icon_24_no_bg.png"
+
 # ── UI node references (set in _ready) ───────────────────────────────────────
 
 ## Main portrait VBox — single column, fills panel.
@@ -331,21 +336,21 @@ func _build_main_column() -> void:
 
 	_generate_btn = Button.new()
 	_generate_btn.name = "GenerateBtn"
-	_generate_btn.text = "Generate"
+	_set_icon_button(_generate_btn, ICON_SEND, "Generate", "Generate")
 	_generate_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_generate_btn.pressed.connect(_on_generate_pressed)
 	btn_row.add_child(_generate_btn)
 
 	_save_btn = Button.new()
 	_save_btn.name = "SaveBtn"
-	_save_btn.text = "Save…"
+	_set_icon_button(_save_btn, ICON_DOWNLOAD, "Save…", "Download / export the video")
 	_save_btn.disabled = true
 	_save_btn.pressed.connect(_on_save_pressed)
 	btn_row.add_child(_save_btn)
 
 	var settings_btn := Button.new()
 	settings_btn.name = "SettingsBtn"
-	settings_btn.text = "⚙ Settings"
+	_set_icon_button(settings_btn, ICON_GEAR, "⚙ Settings", "Settings")
 	settings_btn.pressed.connect(_on_settings_pressed)
 	btn_row.add_child(settings_btn)
 
@@ -905,3 +910,15 @@ func _on_gen_tick() -> void:
 func _set_status(msg: String) -> void:
 	if _status_label != null:
 		_status_label.text = msg
+
+
+## Use a host icon (chat's send/download/gear) on a button; fall back to text if the
+## asset isn't present in this Minerva build.
+func _set_icon_button(btn: Button, icon_path: String, fallback_text: String, tip: String) -> void:
+	var tex: Texture2D = load(icon_path)
+	if tex != null:
+		btn.icon = tex
+		btn.text = ""
+	else:
+		btn.text = fallback_text
+	btn.tooltip_text = tip
