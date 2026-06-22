@@ -282,6 +282,8 @@ pub struct ProjectStatus {
 /// Read-only status view used by the list tool. `local_hashes` maps each tracked
 /// local path to its current content hash (a path absent from the map means the
 /// file is gone and is treated as unchanged — status never implies a deletion).
+/// Source `local_hashes` from the same scan that feeds `sync`'s tracked paths so
+/// the displayed status and the next sync pass agree on what is tracked.
 pub fn compute_status(
     listed: Vec<CloudArtifact>,
     state: &SyncState,

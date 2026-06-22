@@ -47,13 +47,7 @@
   },
   "permissions": {
     "host_capabilities": [
-      "host.core.session",
-      "host.notify",
-      "host.dialogs.file_picker",
-      "mcp.proxy:minerva_list_notes",
-      "mcp.proxy:minerva_get_note",
-      "mcp.proxy:minerva_os_open",
-      "mcp.proxy:minerva_plugin_open_panel"
+      "host.core.session"
     ],
     "network": {
       "mode": "none"

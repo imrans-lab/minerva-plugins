@@ -50,7 +50,7 @@ The plugin exposes three MCP tools (also reachable from the panel):
   any errors.
 
 The panel shows device/connection status, a per-project table, and a Sync Now
-button, and refreshes when the backend reports a change.
+button, and refreshes after each sync.
 
 ## Building
 

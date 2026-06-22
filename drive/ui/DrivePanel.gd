@@ -240,12 +240,7 @@ func _on_sync_pressed() -> void:
 
 # ── Plugin event hook ─────────────────────────────────────────────────────────
 
-## The backend emits drive.changed when remote state changes; refresh the
-## display so the project list stays current without a manual Sync.
 func receive(channel: String, payload: Dictionary) -> void:
-	if channel == "drive.changed":
-		call_deferred("_refresh")
-		return
 	super(channel, payload)
 
 
