@@ -15,6 +15,7 @@ env_logger = "0.11"
 tungstenite = { version = "0.24", features = ["native-tls"] }
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 ureq = { version = "2", features = ["json"] }
