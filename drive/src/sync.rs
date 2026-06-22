@@ -679,6 +679,79 @@ mod tests {
         assert_eq!(remote.cloud_version, 5);
     }
 
+    // Live end-to-end check of the real cloud adapter against the artifact
+    // service. Opt-in via DRIVE_LIVE_TEST=1 so the default suite stays offline.
+    // Proves the manifest round-trips through the artifact description and that
+    // the drive tag scopes list-mine; cleans up the artifact it creates.
+    #[test]
+    fn live_cloud_store_round_trip() {
+        if std::env::var("DRIVE_LIVE_TEST").is_err() {
+            return;
+        }
+        use crate::artifact_client::{ArtifactClient, Credentials};
+        use std::time::Duration;
+
+        let login_url = env_or("DRIVE_LOGIN_URL", "https://www.turnrock.ai:4040/v1/login");
+        let ws_url = env_or("DRIVE_WS_URL", "wss://www.turnrock.ai:27500/connect");
+        let user = env_or("DRIVE_USER", "test");
+        let pass = env_or("DRIVE_PASS", "test");
+
+        let body = serde_json::json!({ "username": user, "password": pass }).to_string();
+        let resp = ureq::post(&login_url)
+            .set("Content-Type", "application/json")
+            .send_string(&body)
+            .expect("login request");
+        let login: serde_json::Value = resp.into_json().expect("login json");
+        let token = login["data"]["token"].as_str().expect("token").to_owned();
+        let client_id = jwt_sub(&token);
+
+        let creds = Credentials { ws_url, token, client_id };
+        let mut client =
+            ArtifactClient::connect(creds, Duration::from_secs(30), Duration::from_secs(10)).expect("connect");
+
+        let proj = new_uuid();
+        let name = format!("drive-e2e-{proj}.txt");
+        let bytes = format!("e2e {proj}").into_bytes();
+        let m = ArtifactManifest {
+            proj_uuid: proj.clone(),
+            name: name.clone(),
+            version: 1,
+            parent_version: 0,
+            content_hash: content_hash(&bytes),
+            device: "e2e".to_owned(),
+            mtime: "0".to_owned(),
+        };
+
+        // Drive the engine's cloud interface, then drop the borrow before cleanup.
+        let uri = {
+            let mut store = ArtifactCloudStore { client: &mut client };
+            let uri = store.upload(&name, &bytes, &m).expect("upload");
+            let listed = store.list_drive().expect("list_drive");
+            let found = listed.iter().find(|a| a.uri == uri).expect("uploaded artifact in list_drive");
+            assert_eq!(found.manifest.proj_uuid, proj);
+            assert_eq!(found.manifest.content_hash, content_hash(&bytes));
+            let got = store.download(&uri).expect("download");
+            assert_eq!(got, bytes, "downloaded bytes must match uploaded");
+            uri
+        };
+
+        client.delete(&uri).expect("delete");
+        println!("live_cloud_store_round_trip OK — uri={uri}");
+    }
+
+    fn env_or(key: &str, default: &str) -> String {
+        std::env::var(key).unwrap_or_else(|_| default.to_owned())
+    }
+
+    fn jwt_sub(token: &str) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let payload = token.split('.').nth(1).expect("jwt payload segment");
+        let bytes = URL_SAFE_NO_PAD.decode(payload).expect("jwt base64");
+        let claims: serde_json::Value = serde_json::from_slice(&bytes).expect("jwt claims");
+        claims["sub"].as_str().expect("sub claim").to_owned()
+    }
+
     #[test]
     fn highest_version_wins_as_current() {
         let mut cloud = FakeCloud::default();
