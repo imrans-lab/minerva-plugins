@@ -128,17 +128,7 @@ pub fn sync(
             return report;
         }
     };
-    let mut current: HashMap<String, CloudArtifact> = HashMap::new();
-    for art in listed {
-        current
-            .entry(art.manifest.proj_uuid.clone())
-            .and_modify(|cur| {
-                if art.manifest.version > cur.manifest.version {
-                    *cur = art.clone();
-                }
-            })
-            .or_insert(art);
-    }
+    let current = current_by_uuid(listed);
 
     let mut handled: HashSet<String> = HashSet::new();
 
@@ -277,6 +267,97 @@ pub fn sync(
     }
 
     report
+}
+
+/// A project's sync state for display, without mutating anything.
+#[derive(Serialize, Debug, PartialEq, Clone)]
+pub struct ProjectStatus {
+    pub name: String,
+    pub proj_uuid: String,
+    pub status: String,
+    pub local_version: u64,
+    pub cloud_version: u64,
+}
+
+/// Read-only status view used by the list tool. `local_hashes` maps each tracked
+/// local path to its current content hash (a path absent from the map means the
+/// file is gone and is treated as unchanged — status never implies a deletion).
+pub fn compute_status(
+    listed: Vec<CloudArtifact>,
+    state: &SyncState,
+    local_hashes: &HashMap<String, String>,
+) -> Vec<ProjectStatus> {
+    let current = current_by_uuid(listed);
+    let mut rows: Vec<ProjectStatus> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for (path, entry) in &state.entries {
+        seen.insert(entry.proj_uuid.clone());
+        let cloud_cur = current.get(&entry.proj_uuid);
+        let cloud_version = cloud_cur.map(|c| c.manifest.version).unwrap_or(0);
+        let cloud_changed = cloud_cur
+            .map(|c| c.manifest.version > entry.base_version || c.manifest.content_hash != entry.base_hash)
+            .unwrap_or(false);
+        let local_changed = local_hashes.get(path).map(|h| h != &entry.base_hash).unwrap_or(false);
+        let status = match (local_changed, cloud_changed) {
+            (true, true) => "conflict",
+            (true, false) => "local_ahead",
+            (false, true) => "cloud_ahead",
+            (false, false) => "synced",
+        };
+        rows.push(ProjectStatus {
+            name: entry.name.clone(),
+            proj_uuid: entry.proj_uuid.clone(),
+            status: status.to_owned(),
+            local_version: entry.base_version,
+            cloud_version,
+        });
+    }
+
+    for path in local_hashes.keys() {
+        if state.entries.contains_key(path) {
+            continue;
+        }
+        rows.push(ProjectStatus {
+            name: file_name_of(path),
+            proj_uuid: String::new(),
+            status: "local_only".to_owned(),
+            local_version: 0,
+            cloud_version: 0,
+        });
+    }
+
+    for (uuid, art) in &current {
+        if seen.contains(uuid) {
+            continue;
+        }
+        rows.push(ProjectStatus {
+            name: art.manifest.name.clone(),
+            proj_uuid: uuid.clone(),
+            status: "cloud_only".to_owned(),
+            local_version: 0,
+            cloud_version: art.manifest.version,
+        });
+    }
+
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
+
+/// Reduce a flat artifact list to the current (highest-version) one per project.
+fn current_by_uuid(listed: Vec<CloudArtifact>) -> HashMap<String, CloudArtifact> {
+    let mut current: HashMap<String, CloudArtifact> = HashMap::new();
+    for art in listed {
+        current
+            .entry(art.manifest.proj_uuid.clone())
+            .and_modify(|cur| {
+                if art.manifest.version > cur.manifest.version {
+                    *cur = art.clone();
+                }
+            })
+            .or_insert(art);
+    }
+    current
 }
 
 fn set_base(state: &mut SyncState, path: &str, version: u64, hash: &str) {
@@ -563,6 +644,39 @@ mod tests {
         let entry = state.entries.get("/drive/b.txt").unwrap();
         assert_eq!(entry.proj_uuid, "u9");
         assert_eq!(entry.base_version, 3);
+    }
+
+    #[test]
+    fn compute_status_classifies_each_case() {
+        // Cloud has u1 (current v2) and a cloud-only u9.
+        let listed = vec![
+            CloudArtifact { uri: "a".into(), manifest: manifest("u1", "a.txt", 2, b"cloudv2") },
+            CloudArtifact { uri: "b".into(), manifest: manifest("u9", "remote.txt", 5, b"remote") },
+        ];
+        let mut state = SyncState { device_id: "dev1".into(), ..Default::default() };
+        // a.txt: base v1/hash(base) — local edited and cloud advanced -> conflict.
+        state.entries.insert(
+            "/p/a.txt".into(),
+            TrackedEntry { proj_uuid: "u1".into(), name: "a.txt".into(), base_version: 1, base_hash: content_hash(b"base") },
+        );
+
+        let mut local_hashes = HashMap::new();
+        local_hashes.insert("/p/a.txt".to_owned(), content_hash(b"localedit")); // != base -> local changed
+        local_hashes.insert("/p/new.txt".to_owned(), content_hash(b"fresh")); // untracked -> local_only
+
+        let rows = compute_status(listed, &state, &local_hashes);
+        let by_name = |n: &str| rows.iter().find(|r| r.name == n).cloned();
+
+        let a = by_name("a.txt").expect("a.txt row");
+        assert_eq!(a.status, "conflict");
+        assert_eq!(a.local_version, 1);
+        assert_eq!(a.cloud_version, 2);
+
+        assert_eq!(by_name("new.txt").unwrap().status, "local_only");
+
+        let remote = by_name("remote.txt").expect("cloud-only row");
+        assert_eq!(remote.status, "cloud_only");
+        assert_eq!(remote.cloud_version, 5);
     }
 
     #[test]
