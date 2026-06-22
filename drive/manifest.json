@@ -12,7 +12,23 @@
   "tools": [
     {
       "name": "minerva_drive_status",
-      "description": "Return the current status of the Drive plugin backend. Used to verify the plugin is running and responsive.",
+      "description": "Return the current connection and readiness status of the Drive plugin. Never fails — returns {ready, connected, device, project_count}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "minerva_drive_list",
+      "description": "List all Drive projects and their sync status (synced / local_ahead / cloud_ahead / conflict / local_only / cloud_only).",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "minerva_drive_sync",
+      "description": "Run a sync pass: push local changes, pull cloud changes, and record conflicts. Returns pushed/pulled/conflict counts and any errors.",
       "input_schema": {
         "type": "object",
         "properties": {}
@@ -25,9 +41,9 @@
       "kind": "godot_scene",
       "entry_scene": "ui/DrivePanel.tscn",
       "scripts": ["ui/DrivePanel.gd"],
-      "ipc_channels": ["minerva_drive_status"]
+      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync"]
     }],
-    "ipc_messages": ["minerva_drive_status"]
+    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync"]
   },
   "permissions": {
     "host_capabilities": [

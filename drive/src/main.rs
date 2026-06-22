@@ -11,10 +11,15 @@
 //   (b) stdin EOF.
 // The synchronous read pattern below is safe under that guarantee.
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use artifact_client::{ArtifactClient, Credentials};
+use sync::{ArtifactCloudStore, CloudStore, DiskLocalStore, SyncState};
 
 mod artifact_client;
 mod sync;
@@ -96,16 +101,302 @@ fn tool_err(message: &str) -> Value {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Capability request/response
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Send a minerva/capability request to the host and read the matching
+/// response. Safe only within a tools/call handler (re-entrancy contract above).
+fn request_capability(
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+    capability: &str,
+    args: Value,
+) -> Result<Value, String> {
+    *next_id += 1;
+    let id = format!("cap-{}", next_id);
+
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "minerva/capability",
+        "params": {
+            "capability": capability,
+            "args": args,
+        }
+    });
+    write_line(out, &req);
+    log::debug!("sent capability request id={id} capability={capability}");
+
+    // Per re-entrancy contract, the next message on stdin is our response.
+    // Defensively skip non-JSON and unexpected ids rather than deadlocking.
+    for line_result in lines.by_ref() {
+        let line = line_result.map_err(|e| format!("stdin read error: {e}"))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let msg: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("non-JSON line while waiting for capability response: {e}");
+                continue;
+            }
+        };
+        let msg_id = msg.get("id").cloned().unwrap_or(Value::Null);
+        if msg_id.as_str() != Some(&id) {
+            log::warn!("unexpected message id {:?} while waiting for {} (skipped)", msg_id, id);
+            continue;
+        }
+        if let Some(err) = msg.get("error") {
+            return Err(format!("capability error: {err}"));
+        }
+        return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+    }
+    Err("stdin closed waiting for capability response".into())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drive folder + state helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The local Drive folder. Uses DRIVE_FOLDER env var if set, otherwise
+/// ~/MinervaDrive, falling back to the current directory.
+fn drive_folder() -> String {
+    if let Ok(v) = std::env::var("DRIVE_FOLDER") {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    if !home.is_empty() {
+        return format!("{home}/MinervaDrive");
+    }
+    ".".to_owned()
+}
+
+/// Path to the persisted state file inside the drive folder.
+fn state_file_path(folder: &str) -> String {
+    format!("{folder}/.drive-state.json")
+}
+
+/// Load state from disk. Generates and persists a device_id on first run.
+fn load_state(folder: &str) -> SyncState {
+    let path = state_file_path(folder);
+    let mut state = match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str::<SyncState>(&s).unwrap_or_default(),
+        Err(_) => SyncState::default(),
+    };
+    if state.device_id.is_empty() {
+        state.device_id = uuid::Uuid::new_v4().to_string();
+        save_state(folder, &state);
+    }
+    state
+}
+
+/// Serialize state to the state file (pretty JSON).
+fn save_state(folder: &str, state: &SyncState) {
+    let path = state_file_path(folder);
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        if let Err(e) = std::fs::write(&path, json) {
+            log::warn!("save_state write {path}: {e}");
+        }
+    }
+}
+
+/// List regular files in the drive folder, excluding hidden files and conflict
+/// copies. Returns their full path strings.
+fn scan_tracked(folder: &str) -> Vec<String> {
+    let dir = match std::fs::read_dir(folder) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("scan_tracked read_dir {folder}: {e}");
+            return Vec::new();
+        }
+    };
+    let mut paths = Vec::new();
+    for entry in dir.flatten() {
+        let ft = match entry.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if !ft.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str.contains(".conflict-") {
+            continue;
+        }
+        paths.push(entry.path().to_string_lossy().into_owned());
+    }
+    paths
+}
+
+/// Read each tracked file and return a map of path -> content hash.
+fn local_hashes(tracked: &[String]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for path in tracked {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                map.insert(path.clone(), sync::content_hash(&bytes));
+            }
+            Err(e) => log::warn!("local_hashes read {path}: {e}"),
+        }
+    }
+    map
+}
+
+/// Seconds since UNIX epoch as an ISO-like string.
+fn now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    secs.to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Client connection helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch host.core.session credentials and connect an ArtifactClient.
+fn connect_client(
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> Result<ArtifactClient, String> {
+    let result = request_capability(out, lines, next_id, "host.core.session", json!({}))?;
+    let creds = Credentials::from_session(&result)
+        .ok_or_else(|| "host.core.session response missing required fields (ws_url/token/client_id)".to_owned())?;
+    ArtifactClient::connect(creds, Duration::from_secs(60), Duration::from_secs(15))
+        .map_err(|e| e.to_string())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tool handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Report the current readiness of the Drive plugin backend.
-/// Returns a stub payload during the scaffold phase; sync capabilities
-/// are added in subsequent tasks once the client module exists.
-fn handle_status(_params: &Value, id: Value) -> RpcResponse {
+fn handle_status(
+    _params: &Value,
+    id: Value,
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let folder = drive_folder();
+    if let Err(e) = std::fs::create_dir_all(&folder) {
+        log::warn!("create drive folder {folder}: {e}");
+    }
+    let state = load_state(&folder);
+    let device = state.device_id.clone();
+
+    match connect_client(out, lines, next_id) {
+        Err(e) => {
+            log::info!("status: not connected: {e}");
+            ok_response(id, tool_ok(json!({
+                "ready": false,
+                "connected": false,
+                "device": device,
+                "project_count": 0
+            })))
+        }
+        Ok(mut client) => {
+            let tracked = scan_tracked(&folder);
+            let hashes = local_hashes(&tracked);
+            let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
+                Ok(l) => l,
+                Err(e) => {
+                    log::warn!("status list_drive: {e}");
+                    vec![]
+                }
+            };
+            let rows = sync::compute_status(listed, &state, &hashes);
+            ok_response(id, tool_ok(json!({
+                "ready": true,
+                "connected": true,
+                "device": device,
+                "project_count": rows.len()
+            })))
+        }
+    }
+}
+
+/// List all known projects and their sync status.
+fn handle_list(
+    _params: &Value,
+    id: Value,
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let folder = drive_folder();
+    if let Err(e) = std::fs::create_dir_all(&folder) {
+        log::warn!("create drive folder {folder}: {e}");
+    }
+
+    let mut client = match connect_client(out, lines, next_id) {
+        Ok(c) => c,
+        Err(e) => return ok_response(id, tool_err(&e)),
+    };
+
+    let state = load_state(&folder);
+    let tracked = scan_tracked(&folder);
+    let hashes = local_hashes(&tracked);
+    let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
+        Ok(l) => l,
+        Err(e) => return ok_response(id, tool_err(&format!("list_drive: {e}"))),
+    };
+    let rows = sync::compute_status(listed, &state, &hashes);
+    let projects = serde_json::to_value(&rows).unwrap_or(Value::Array(vec![]));
+    ok_response(id, tool_ok(json!({ "projects": projects })))
+}
+
+/// Run a sync pass against the artifact service.
+fn handle_sync(
+    _params: &Value,
+    id: Value,
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let folder = drive_folder();
+    if let Err(e) = std::fs::create_dir_all(&folder) {
+        log::warn!("create drive folder {folder}: {e}");
+    }
+
+    let mut client = match connect_client(out, lines, next_id) {
+        Ok(c) => c,
+        Err(e) => return ok_response(id, tool_err(&e)),
+    };
+
+    let mut state = load_state(&folder);
+    let tracked = scan_tracked(&folder);
+    let now = now_iso();
+    // Clone device_id before mutably borrowing state for sync.
+    let device_id = state.device_id.clone();
+
+    let mut cloud = ArtifactCloudStore { client: &mut client };
+    let local = DiskLocalStore;
+    let report = sync::sync(&mut cloud, &local, &mut state, &tracked, &folder, &device_id, &now);
+
+    save_state(&folder, &state);
+
+    let ok = report.errors.is_empty();
+    let pushed = report.pushed.len();
+    let pulled = report.pulled.len();
+    let conflicts = report.conflicts.len();
+    let errors = serde_json::to_value(&report.errors).unwrap_or(Value::Array(vec![]));
+
     ok_response(id, tool_ok(json!({
-        "status": "scaffold",
-        "ready": false
+        "ok": ok,
+        "pushed": pushed,
+        "pulled": pulled,
+        "conflicts": conflicts,
+        "errors": errors
     })))
 }
 
@@ -118,7 +409,23 @@ fn tools_list_result() -> Value {
         "tools": [
             {
                 "name": "minerva_drive_status",
-                "description": "Return the current status of the Drive plugin backend. Used to verify the plugin is running and responsive.",
+                "description": "Return the current connection and readiness status of the Drive plugin. Never fails — returns {ready, connected, device, project_count}.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "minerva_drive_list",
+                "description": "List all Drive projects and their sync status (synced / local_ahead / cloud_ahead / conflict / local_only / cloud_only).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "minerva_drive_sync",
+                "description": "Run a sync pass: push local changes, pull cloud changes, and record conflicts. Returns pushed/pulled/conflict counts and any errors.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -144,6 +451,7 @@ fn main() {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
     let mut lines = stdin.lock().lines();
+    let mut next_id: u64 = 0;
 
     while let Some(line_result) = lines.next() {
         let line = match line_result {
@@ -189,7 +497,15 @@ fn main() {
                     .unwrap_or("");
 
                 match tool_name {
-                    "minerva_drive_status" => handle_status(&req.params, req.id),
+                    "minerva_drive_status" => {
+                        handle_status(&req.params, req.id, &mut out, &mut lines, &mut next_id)
+                    }
+                    "minerva_drive_list" => {
+                        handle_list(&req.params, req.id, &mut out, &mut lines, &mut next_id)
+                    }
+                    "minerva_drive_sync" => {
+                        handle_sync(&req.params, req.id, &mut out, &mut lines, &mut next_id)
+                    }
                     other => err_response(
                         req.id,
                         -32601,
