@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 
-PLUGIN_DIRS = ["3d-gen", "agent-relay", "cad", "codetools", "movie-gen", "presentation", "scansort"]  # sorted
+PLUGIN_DIRS = ["3d-gen", "agent-relay", "cad", "codetools", "drive", "movie-gen", "presentation", "scansort"]  # sorted
 
 REGISTRY_VERSION = 2
 

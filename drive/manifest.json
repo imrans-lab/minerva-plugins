@@ -1,0 +1,52 @@
+{
+  "id": "drive",
+  "name": "Drive",
+  "version": "0.0.1",
+  "host_api_version": "1",
+  "release_targets": ["linux-x86_64", "macos-universal", "windows-x86_64"],
+  "backend": {
+    "transport": "stdio",
+    "entrypoint": "./drive-plugin",
+    "args": []
+  },
+  "tools": [
+    {
+      "name": "minerva_drive_status",
+      "description": "Return the current status of the Drive plugin backend. Used to verify the plugin is running and responsive.",
+      "input_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ],
+  "ui": {
+    "panels": [{
+      "name": "drive_panel",
+      "kind": "godot_scene",
+      "entry_scene": "ui/DrivePanel.tscn",
+      "scripts": ["ui/DrivePanel.gd"],
+      "ipc_channels": ["minerva_drive_status"]
+    }],
+    "ipc_messages": ["minerva_drive_status"]
+  },
+  "permissions": {
+    "host_capabilities": [
+      "host.core.session",
+      "host.notify",
+      "host.dialogs.file_picker",
+      "mcp.proxy:minerva_list_notes",
+      "mcp.proxy:minerva_get_note",
+      "mcp.proxy:minerva_os_open",
+      "mcp.proxy:minerva_plugin_open_panel"
+    ],
+    "network": {
+      "mode": "none"
+    },
+    "filesystem": {
+      "mode": "none",
+      "paths": []
+    }
+  },
+  "autostart": false,
+  "auto_reload": false
+}
