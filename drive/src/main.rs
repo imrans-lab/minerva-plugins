@@ -486,6 +486,17 @@ fn handle_remove(params: &Value, id: Value) -> RpcResponse {
 /// destination for future cloud-only pulls changes.
 fn handle_set_folder(params: &Value, id: Value) -> RpcResponse {
     let raw = tool_arg_str(params, "path"); // already trimmed by tool_arg_str
+    // A non-empty override must be an absolute, usable directory; an empty value
+    // clears the override. Reject bad input now rather than letting it surface
+    // later as silently failed pulls.
+    if !raw.is_empty() {
+        if !std::path::Path::new(&raw).is_absolute() {
+            return ok_response(id, tool_err("drive folder must be an absolute path"));
+        }
+        if let Err(e) = std::fs::create_dir_all(&raw) {
+            return ok_response(id, tool_err(&format!("cannot use folder '{raw}': {e}")));
+        }
+    }
     let base = base_drive_folder();
     let _ = std::fs::create_dir_all(&base);
     let mut state = load_state(&base);
@@ -507,6 +518,7 @@ fn handle_open(
     lines: &mut impl Iterator<Item = Result<String, io::Error>>,
     next_id: &mut u64,
 ) -> RpcResponse {
+    // Step 1: Validate the request.
     let proj_uuid = tool_arg_str(params, "proj_uuid");
     if proj_uuid.is_empty() {
         return ok_response(id, tool_err("open requires a non-empty 'proj_uuid'"));
