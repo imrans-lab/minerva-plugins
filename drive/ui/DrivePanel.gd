@@ -9,14 +9,11 @@ extends MinervaPluginPanel
 
 # ── UI node references (set in _build_ui) ────────────────────────────────────
 
-## Outer scroll so the panel remains usable at any pane height.
-var _scroll: ScrollContainer = null
-
-## Single-column root layout.
+## Single-column root layout that fills the pane.
 var _main_vbox: VBoxContainer = null
 
 ## Header row: device/connection label + action buttons.
-var _header_row: HBoxContainer = null
+var _header_row: HFlowContainer = null
 var _device_label: Label = null
 var _sync_btn: Button = null
 var _add_btn: Button = null
@@ -54,32 +51,29 @@ func _ready() -> void:
 # ── UI construction ───────────────────────────────────────────────────────────
 
 func _build_ui() -> void:
-	_scroll = ScrollContainer.new()
-	_scroll.name = "MainScroll"
-	_scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	add_child(_scroll)
-
+	# A single column that fills the pane: the toolbar wraps its buttons and the
+	# tree takes the remaining height, so the panel stays usable at any width.
 	_main_vbox = VBoxContainer.new()
 	_main_vbox.name = "MainVBox"
+	_main_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	# SIZE_SHRINK_BEGIN inside a ScrollContainer: content drives height so the
-	# scrollbar engages rather than clipping when the list overflows.
-	_main_vbox.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
-	_scroll.add_child(_main_vbox)
+	_main_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(_main_vbox)
 
-	# ── Header row ────────────────────────────────────────────────────────────
-	_header_row = HBoxContainer.new()
-	_header_row.name = "HeaderRow"
-	_header_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_main_vbox.add_child(_header_row)
-
+	# Device / connection status on its own full-width line.
 	_device_label = Label.new()
 	_device_label.name = "DeviceLabel"
 	_device_label.text = "Drive: checking…"
 	_device_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_device_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_header_row.add_child(_device_label)
+	_main_vbox.add_child(_device_label)
+
+	# Toolbar that WRAPS its buttons to new lines when the pane is narrow, so the
+	# actions never overflow horizontally.
+	_header_row = HFlowContainer.new()
+	_header_row.name = "Toolbar"
+	_header_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_main_vbox.add_child(_header_row)
 
 	_add_btn = Button.new()
 	_add_btn.name = "AddBtn"
@@ -174,9 +168,9 @@ func _build_ui() -> void:
 	_project_tree.set_column_custom_minimum_width(2, 60)
 	_project_tree.set_column_custom_minimum_width(3, 60)
 	_project_tree.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	# Fixed height keeps the tree visible without pushing everything off-screen
-	# in narrow pane heights; the outer ScrollContainer handles overflow.
-	_project_tree.custom_minimum_size = Vector2(0, 300)
+	# Fill the remaining height; the tree scrolls its own rows internally.
+	_project_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_project_tree.custom_minimum_size = Vector2(0, 120)
 	_project_tree.item_selected.connect(_on_row_selected)
 	_project_tree.item_activated.connect(_on_row_activated)
 	_main_vbox.add_child(_project_tree)
