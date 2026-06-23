@@ -24,6 +24,13 @@ var _remove_btn: Button = null
 var _reveal_btn: Button = null
 var _open_ext_btn: Button = null
 var _download_btn: Button = null
+var _folder_btn: Button = null
+
+# ── Extra state ───────────────────────────────────────────────────────────────
+
+## Cached effective folder path returned by the last minerva_drive_status call.
+## Shown in the device label and used for display purposes only.
+var _current_folder: String = ""
 
 ## Status line: shows sync result, errors, or connectivity problems.
 var _status_label: Label = null
@@ -112,6 +119,13 @@ func _build_ui() -> void:
 	_download_btn.pressed.connect(_on_download_pressed)
 	_header_row.add_child(_download_btn)
 
+	_folder_btn = Button.new()
+	_folder_btn.name = "FolderBtn"
+	_folder_btn.text = "Drive folder…"
+	_folder_btn.tooltip_text = "Choose the local folder where Drive stores and pulls files"
+	_folder_btn.pressed.connect(_on_folder_pressed)
+	_header_row.add_child(_folder_btn)
+
 	_sync_btn = Button.new()
 	_sync_btn.name = "SyncBtn"
 	_sync_btn.text = "Sync Now"
@@ -181,16 +195,34 @@ func _fetch_status() -> void:
 	var connected: bool = bool(result.get("connected", false))
 	var device: String = str(result.get("device", ""))
 	var count: int = int(result.get("project_count", 0))
+	# Cache folder for display; falls back gracefully if the backend is older
+	# and doesn't include the field yet.
+	_current_folder = str(result.get("folder", ""))
+	var folder_short: String = _current_folder.get_file() if not _current_folder.is_empty() else ""
 	if not connected:
-		_set_device_label("Offline  ·  %d file(s)" % count)
+		if folder_short.is_empty():
+			_set_device_label("Offline  ·  %d file(s)" % count)
+		else:
+			_set_device_label("Offline  ·  %d file(s)  ·  %s" % [count, folder_short])
 	elif device.is_empty():
-		_set_device_label("Drive: connected  ·  %d project(s)" % count)
+		if folder_short.is_empty():
+			_set_device_label("Drive: connected  ·  %d project(s)" % count)
+		else:
+			_set_device_label("Drive: connected  ·  %d project(s)  ·  %s" % [count, folder_short])
 	else:
-		_set_device_label("%s  ·  %s  ·  %d project(s)" % [
-			device,
-			"connected" if connected else "offline",
-			count,
-		])
+		if folder_short.is_empty():
+			_set_device_label("%s  ·  %s  ·  %d project(s)" % [
+				device,
+				"connected" if connected else "offline",
+				count,
+			])
+		else:
+			_set_device_label("%s  ·  %s  ·  %d project(s)  ·  %s" % [
+				device,
+				"connected" if connected else "offline",
+				count,
+				folder_short,
+			])
 
 
 func _fetch_list() -> void:
@@ -348,6 +380,55 @@ func _on_remove_pressed() -> void:
 		_show_status("Remove failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 		return
 	_show_status("Stopped syncing: %s" % path)
+	await _refresh()
+
+
+## Let the user choose a new Drive folder via the host file-picker in dir mode.
+## Falls back gracefully if the host picker doesn't support "dir" mode —
+## in that case we show an informational message rather than crashing.
+## Choosing a folder does NOT move any existing tracked or materialised files.
+func _on_folder_pressed() -> void:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot change folder.")
+		return
+	# Ask the host for a directory picker.
+	var pick_id: String = "drive:folder_pick:%d" % Time.get_ticks_usec()
+	request.emit("capability:host.dialogs.file_picker", {
+		"title": "Choose Drive folder",
+		"mode": "dir",
+	}, pick_id)
+	var pick: Dictionary = await ipc.await_reply(pick_id, 120000)
+	if not bool(pick.get("success", false)):
+		# The host may not support "dir" mode — surface a clear message rather
+		# than silently doing nothing.
+		var err: String = str(pick.get("error_message", str(pick.get("error_code", "unknown"))))
+		_show_status(
+			"Folder picker unavailable (%s). " % err
+			+ "Use the minerva_drive_set_folder MCP tool to set the path directly."
+		)
+		return
+	var presult: Dictionary = pick.get("result", {}) as Dictionary
+	if bool(presult.get("cancelled", false)):
+		return
+	var chosen: String = str(presult.get("path", ""))
+	if chosen.is_empty():
+		return
+	# Apply the new folder.
+	var set_id: String = "drive:set_folder:%d" % Time.get_ticks_usec()
+	request.emit("minerva_drive_set_folder", {"path": chosen}, set_id)
+	var reply: Dictionary = await ipc.await_reply(set_id, 15000)
+	if not bool(reply.get("success", false)):
+		_show_status("Set folder failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+		return
+	var result: Dictionary = reply.get("result", {}) as Dictionary
+	if not bool(result.get("ok", false)):
+		_show_status("Set folder error: %s" % str(result.get("error", "unknown")))
+		return
+	var new_folder: String = str(result.get("folder", chosen))
+	_show_status(
+		"Drive folder set to: %s  (existing tracked files are NOT moved)" % new_folder
+	)
 	await _refresh()
 
 

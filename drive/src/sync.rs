@@ -67,6 +67,17 @@ pub struct SyncState {
     /// written before this field existed still load.
     #[serde(default)]
     pub tracked: Vec<String>,
+    /// Optional user override for the Drive folder. When non-empty, this takes
+    /// precedence over the DRIVE_FOLDER env var and the ~/MinervaDrive default.
+    /// Serde-default (empty string) ensures back-compat with state files written
+    /// before this field existed.
+    ///
+    /// NOTE: changing this field does NOT move existing tracked files — it only
+    /// changes where cloud-only files are materialized and where the state file
+    /// is re-read from on the next tool call. The caller is responsible for
+    /// copying any previously-materialised files if relocation is desired.
+    #[serde(default)]
+    pub drive_folder_override: String,
 }
 
 /// A divergence resolved by keeping the cloud version and saving the local edit.
@@ -734,6 +745,27 @@ mod tests {
         let state: SyncState = serde_json::from_str(legacy).expect("legacy state parses");
         assert_eq!(state.device_id, "dev1");
         assert!(state.tracked.is_empty());
+    }
+
+    #[test]
+    fn state_loads_without_drive_folder_override_field() {
+        // A state file written before `drive_folder_override` existed must still
+        // deserialize — the field defaults to an empty string (back-compat).
+        let legacy = r#"{"device_id":"dev2","entries":{},"tracked":[]}"#;
+        let state: SyncState = serde_json::from_str(legacy).expect("legacy state parses");
+        assert_eq!(state.device_id, "dev2");
+        assert!(state.drive_folder_override.is_empty(),
+            "drive_folder_override should default to empty on legacy state");
+    }
+
+    #[test]
+    fn drive_folder_override_round_trips() {
+        // The override field serializes and deserializes correctly.
+        let mut state = SyncState { device_id: "dev3".into(), ..Default::default() };
+        state.drive_folder_override = "/custom/drive".to_owned();
+        let json = serde_json::to_string(&state).expect("serialize");
+        let loaded: SyncState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(loaded.drive_folder_override, "/custom/drive");
     }
 
     // Live end-to-end check of the real cloud adapter against the artifact

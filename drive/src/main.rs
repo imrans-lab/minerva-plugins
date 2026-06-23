@@ -160,9 +160,12 @@ fn request_capability(
 // Drive folder + state helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The local Drive folder. Uses DRIVE_FOLDER env var if set, otherwise
-/// ~/MinervaDrive, falling back to the current directory.
-fn drive_folder() -> String {
+/// The baseline Drive folder: DRIVE_FOLDER env → ~/MinervaDrive → ".".
+///
+/// This is used ONLY to locate the state file on startup — before we know
+/// whether the state contains a `drive_folder_override`. Every other piece of
+/// code that needs the folder calls `effective_folder(state)` instead.
+fn base_drive_folder() -> String {
     if let Ok(v) = std::env::var("DRIVE_FOLDER") {
         if !v.is_empty() {
             return v;
@@ -177,12 +180,35 @@ fn drive_folder() -> String {
     ".".to_owned()
 }
 
+/// Resolve the effective Drive folder for a loaded state.
+///
+/// Precedence (highest first):
+///   1. `state.drive_folder_override` — set by the user via the panel or the
+///      `minerva_drive_set_folder` tool.
+///   2. `DRIVE_FOLDER` environment variable.
+///   3. `~/MinervaDrive` (the install default).
+///
+/// Changing the override does NOT move existing tracked or materialized files;
+/// only the destination for future cloud-only pulls changes.
+fn effective_folder(state: &sync::SyncState) -> String {
+    if !state.drive_folder_override.is_empty() {
+        return state.drive_folder_override.clone();
+    }
+    base_drive_folder()
+}
+
 /// Path to the persisted state file inside the drive folder.
 fn state_file_path(folder: &str) -> String {
     format!("{folder}/.drive-state.json")
 }
 
-/// Load state from disk. Generates and persists a device_id on first run.
+/// Load state from disk using `base` as the directory to find the state file.
+/// Generates and persists a device_id on first run.
+///
+/// Always pass `base_drive_folder()` here — the state file location is fixed
+/// at the base folder so the plugin can always find it. The effective working
+/// folder (which may be overridden inside the state) is determined by calling
+/// `effective_folder(state)` after loading.
 fn load_state(folder: &str) -> SyncState {
     let path = state_file_path(folder);
     let mut state = match std::fs::read_to_string(&path) {
@@ -264,6 +290,7 @@ fn connect_client(
 
 /// Report the readiness of the Drive plugin. The project count is local-first
 /// (the registered files), so it is meaningful even when the cloud is offline.
+/// Returns `folder` so the panel can display the effective Drive folder path.
 fn handle_status(
     _params: &Value,
     id: Value,
@@ -271,11 +298,17 @@ fn handle_status(
     lines: &mut impl Iterator<Item = Result<String, io::Error>>,
     next_id: &mut u64,
 ) -> RpcResponse {
-    let folder = drive_folder();
-    if let Err(e) = std::fs::create_dir_all(&folder) {
-        log::warn!("create drive folder {folder}: {e}");
+    let base = base_drive_folder();
+    if let Err(e) = std::fs::create_dir_all(&base) {
+        log::warn!("create drive base folder {base}: {e}");
     }
-    let state = load_state(&folder);
+    let state = load_state(&base);
+    let folder = effective_folder(&state);
+    if folder != base {
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            log::warn!("create effective drive folder {folder}: {e}");
+        }
+    }
     let device = state.device_id.clone();
     let tracked = tracked_files(&state);
     let hashes = local_hashes(&tracked);
@@ -286,7 +319,8 @@ fn handle_status(
         "ready": true,
         "connected": connected,
         "device": device,
-        "project_count": rows.len()
+        "project_count": rows.len(),
+        "folder": folder,
     })))
 }
 
@@ -301,11 +335,17 @@ fn handle_list(
     lines: &mut impl Iterator<Item = Result<String, io::Error>>,
     next_id: &mut u64,
 ) -> RpcResponse {
-    let folder = drive_folder();
-    if let Err(e) = std::fs::create_dir_all(&folder) {
-        log::warn!("create drive folder {folder}: {e}");
+    let base = base_drive_folder();
+    if let Err(e) = std::fs::create_dir_all(&base) {
+        log::warn!("create drive base folder {base}: {e}");
     }
-    let state = load_state(&folder);
+    let state = load_state(&base);
+    let folder = effective_folder(&state);
+    if folder != base {
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            log::warn!("create effective drive folder {folder}: {e}");
+        }
+    }
     let tracked = tracked_files(&state);
     let hashes = local_hashes(&tracked);
 
@@ -347,9 +387,9 @@ fn handle_sync(
     lines: &mut impl Iterator<Item = Result<String, io::Error>>,
     next_id: &mut u64,
 ) -> RpcResponse {
-    let folder = drive_folder();
-    if let Err(e) = std::fs::create_dir_all(&folder) {
-        log::warn!("create drive folder {folder}: {e}");
+    let base = base_drive_folder();
+    if let Err(e) = std::fs::create_dir_all(&base) {
+        log::warn!("create drive base folder {base}: {e}");
     }
 
     let mut client = match connect_client(out, lines, next_id) {
@@ -357,7 +397,14 @@ fn handle_sync(
         Err(e) => return ok_response(id, tool_err(&e)),
     };
 
-    let mut state = load_state(&folder);
+    let mut state = load_state(&base);
+    // Use the effective folder for cloud-only file materialization.
+    let folder = effective_folder(&state);
+    if folder != base {
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            log::warn!("create effective drive folder {folder}: {e}");
+        }
+    }
     let tracked = tracked_files(&state);
     let now = now_iso();
     // Clone device_id before mutably borrowing state for sync.
@@ -375,7 +422,7 @@ fn handle_sync(
             state.tracked.push(p);
         }
     }
-    save_state(&folder, &state);
+    save_state(&base, &state);
 
     ok_response(id, tool_ok(sync_payload(&report)))
 }
@@ -386,13 +433,13 @@ fn handle_add(params: &Value, id: Value) -> RpcResponse {
     if path.is_empty() {
         return ok_response(id, tool_err("add requires a non-empty 'path'"));
     }
-    let folder = drive_folder();
-    let _ = std::fs::create_dir_all(&folder);
-    let mut state = load_state(&folder);
+    let base = base_drive_folder();
+    let _ = std::fs::create_dir_all(&base);
+    let mut state = load_state(&base);
     let already = state.tracked.iter().any(|p| p == &path);
     if !already {
         state.tracked.push(path.clone());
-        save_state(&folder, &state);
+        save_state(&base, &state);
     }
     ok_response(id, tool_ok(json!({
         "ok": true,
@@ -408,12 +455,12 @@ fn handle_remove(params: &Value, id: Value) -> RpcResponse {
     if path.is_empty() {
         return ok_response(id, tool_err("remove requires a non-empty 'path'"));
     }
-    let folder = drive_folder();
-    let mut state = load_state(&folder);
+    let base = base_drive_folder();
+    let mut state = load_state(&base);
     let before = state.tracked.len();
     state.tracked.retain(|p| p != &path);
     state.entries.remove(&path);
-    save_state(&folder, &state);
+    save_state(&base, &state);
     ok_response(id, tool_ok(json!({
         "ok": true,
         "path": path,
@@ -422,8 +469,28 @@ fn handle_remove(params: &Value, id: Value) -> RpcResponse {
     })))
 }
 
+/// Set (or clear) the Drive folder override. Local-only; no files are moved.
+///
+/// The override is persisted in the state file at the base folder. An empty
+/// path clears the override, restoring the DRIVE_FOLDER env / ~/MinervaDrive
+/// default. Existing tracked and materialised files are NOT moved — only the
+/// destination for future cloud-only pulls changes.
+fn handle_set_folder(params: &Value, id: Value) -> RpcResponse {
+    let raw = tool_arg_str(params, "path"); // already trimmed by tool_arg_str
+    let base = base_drive_folder();
+    let _ = std::fs::create_dir_all(&base);
+    let mut state = load_state(&base);
+    state.drive_folder_override = raw.clone();
+    save_state(&base, &state);
+    let folder = effective_folder(&state);
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "folder": folder,
+    })))
+}
+
 /// Download the current cloud version of a project and write it to a local path
-/// chosen by the caller. Works for Cloud-only projects that have no local copy.
+/// chosen by the caller. Works for cloud-only projects that have no local copy.
 fn handle_export(
     params: &Value,
     id: Value,
@@ -564,6 +631,17 @@ fn tools_list_result() -> Value {
                     },
                     "required": ["proj_uuid", "dest_path"]
                 }
+            },
+            {
+                "name": "minerva_drive_set_folder",
+                "description": "Set (or clear) the Drive folder — the directory where cloud-only files are pulled and where .drive-state.json lives. An empty path clears the override and restores the DRIVE_FOLDER env / ~/MinervaDrive default. Existing tracked files are NOT moved.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path to use as the Drive folder, or empty string to clear the override."}
+                    },
+                    "required": ["path"]
+                }
             }
         ]
     })
@@ -645,6 +723,7 @@ fn main() {
                     "minerva_drive_export" => {
                         handle_export(&req.params, req.id, &mut out, &mut lines, &mut next_id)
                     }
+                    "minerva_drive_set_folder" => handle_set_folder(&req.params, req.id),
                     other => err_response(
                         req.id,
                         -32601,
@@ -672,6 +751,39 @@ fn main() {
 mod tests {
     use super::*;
 
+    // ── effective_folder precedence ───────────────────────────────────────────
+
+    #[test]
+    fn effective_folder_uses_override_when_set() {
+        let mut state = sync::SyncState::default();
+        state.drive_folder_override = "/my/override".to_owned();
+        // The override must win regardless of what DRIVE_FOLDER env holds.
+        assert_eq!(effective_folder(&state), "/my/override");
+    }
+
+    #[test]
+    fn effective_folder_falls_back_to_base_when_override_empty() {
+        let state = sync::SyncState::default(); // drive_folder_override is ""
+        let result = effective_folder(&state);
+        let base = base_drive_folder();
+        assert_eq!(result, base,
+            "empty override must fall back to base_drive_folder()");
+    }
+
+    #[test]
+    fn effective_folder_clears_override_on_empty_string() {
+        // Setting override to "" and then calling effective_folder must return
+        // the base folder (i.e. clearing the override works).
+        let mut state = sync::SyncState::default();
+        state.drive_folder_override = "/was/set".to_owned();
+        state.drive_folder_override = String::new(); // cleared
+        let result = effective_folder(&state);
+        let base = base_drive_folder();
+        assert_eq!(result, base);
+    }
+
+    // ── tool payload shapes ───────────────────────────────────────────────────
+
     // Guards the export tool_ok payload shape: the panel reads ok/dest_path/
     // bytes_written; name is informational. Verify the keys are all present.
     #[test]
@@ -688,6 +800,19 @@ mod tests {
         assert_eq!(v["dest_path"], json!("/tmp/test.minproj"));
         assert_eq!(v["name"], json!("test.minproj"));
         assert_eq!(v["bytes_written"], json!(1234_u64));
+    }
+
+    #[test]
+    fn set_folder_payload_shape() {
+        // tool_ok({ok, folder}) must carry both keys the panel reads.
+        let payload = tool_ok(json!({
+            "ok": true,
+            "folder": "/some/path",
+        }));
+        let text = payload["content"][0]["text"].as_str().expect("text content");
+        let v: Value = serde_json::from_str(text).expect("valid json");
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["folder"], json!("/some/path"));
     }
 
     // Guards the sync tool's result shape against the panel's contract: the

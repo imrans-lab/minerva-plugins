@@ -63,6 +63,17 @@
         },
         "required": ["proj_uuid", "dest_path"]
       }
+    },
+    {
+      "name": "minerva_drive_set_folder",
+      "description": "Set (or clear) the Drive folder — the directory where cloud-only files are pulled and where .drive-state.json lives. An empty path clears the override and restores the DRIVE_FOLDER env / ~/MinervaDrive default. Existing tracked files are NOT moved.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Absolute path to use as the Drive folder, or empty string to clear the override."}
+        },
+        "required": ["path"]
+      }
     }
   ],
   "ui": {
@@ -71,9 +82,9 @@
       "kind": "godot_scene",
       "entry_scene": "ui/DrivePanel.tscn",
       "scripts": ["ui/DrivePanel.gd"],
-      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
+      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "minerva_drive_set_folder", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
     }],
-    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
+    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "minerva_drive_set_folder", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
   },
   "permissions": {
     "host_capabilities": [
