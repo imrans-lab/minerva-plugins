@@ -385,19 +385,17 @@ fn handle_sync(
 
     save_state(&folder, &state);
 
-    let ok = report.errors.is_empty();
-    let pushed = report.pushed.len();
-    let pulled = report.pulled.len();
-    let conflicts = report.conflicts.len();
-    let errors = serde_json::to_value(&report.errors).unwrap_or(Value::Array(vec![]));
+    ok_response(id, tool_ok(sync_payload(&report)))
+}
 
-    ok_response(id, tool_ok(json!({
-        "ok": ok,
-        "pushed": pushed,
-        "pulled": pulled,
-        "conflicts": conflicts,
-        "errors": errors
-    })))
+/// Shape the sync result for the panel: the pushed/pulled name lists, the
+/// conflict objects, and the error list are all arrays, plus an `ok` flag.
+fn sync_payload(report: &sync::SyncReport) -> Value {
+    let mut payload = serde_json::to_value(report).unwrap_or_else(|_| json!({}));
+    if let Value::Object(ref mut map) = payload {
+        map.insert("ok".to_owned(), Value::Bool(report.errors.is_empty()));
+    }
+    payload
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -527,4 +525,34 @@ fn main() {
     }
 
     log::info!("{SERVER_NAME} exiting");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guards the sync tool's result shape against the panel's contract: the
+    // panel reads pushed/pulled/conflicts/errors as arrays (and conflict items
+    // as {name, conflict_copy}). Returning scalar counts here would crash it.
+    #[test]
+    fn sync_payload_returns_arrays() {
+        let report = sync::SyncReport {
+            pushed: vec!["a.txt".to_owned()],
+            pulled: vec![],
+            conflicts: vec![sync::Conflict {
+                name: "b.txt".to_owned(),
+                conflict_copy: "/p/b.txt.conflict-dev-0".to_owned(),
+            }],
+            errors: vec![],
+        };
+        let v = sync_payload(&report);
+        assert!(v.get("pushed").map(Value::is_array).unwrap_or(false), "pushed must be an array");
+        assert!(v.get("pulled").map(Value::is_array).unwrap_or(false), "pulled must be an array");
+        assert!(v.get("conflicts").map(Value::is_array).unwrap_or(false), "conflicts must be an array");
+        assert!(v.get("errors").map(Value::is_array).unwrap_or(false), "errors must be an array");
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["pushed"][0], json!("a.txt"));
+        assert_eq!(v["conflicts"][0]["name"], json!("b.txt"));
+        assert_eq!(v["conflicts"][0]["conflict_copy"], json!("/p/b.txt.conflict-dev-0"));
+    }
 }
