@@ -55,6 +55,32 @@
       }
     },
     {
+      "id": "gen3d",
+      "name": "3D Generator",
+      "version": "0.0.1",
+      "manifest_version": "0.0.1",
+      "release_tag": "gen3d-v0.0.1",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/3d-gen/manifest.json",
+      "downloads": {
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/gen3d-v0.0.1/gen3d-0.0.1-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/gen3d-v0.0.1/gen3d-0.0.1-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/gen3d-v0.0.1/gen3d-0.0.1-windows-x86_64.tar.gz"
+      }
+    },
+    {
+      "id": "movie_gen",
+      "name": "Movie Generator",
+      "version": "0.0.1",
+      "manifest_version": "0.0.1",
+      "release_tag": "movie_gen-v0.0.1",
+      "manifest_url": "https://raw.githubusercontent.com/imrans-lab/minerva-plugins/main/movie-gen/manifest.json",
+      "downloads": {
+        "linux-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/movie_gen-v0.0.1/movie_gen-0.0.1-linux-x86_64.tar.gz",
+        "macos-universal": "https://github.com/imrans-lab/minerva-plugins/releases/download/movie_gen-v0.0.1/movie_gen-0.0.1-macos-universal.tar.gz",
+        "windows-x86_64": "https://github.com/imrans-lab/minerva-plugins/releases/download/movie_gen-v0.0.1/movie_gen-0.0.1-windows-x86_64.tar.gz"
+      }
+    },
+    {
       "id": "presentation",
       "name": "Presentation",
       "version": "0.0.3",
