@@ -38,9 +38,6 @@ var _in_flight: bool = false
 func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	_build_ui()
-	# Populate on open — fire-and-forget coroutines; IPC may not be ready yet
-	# so each helper checks the node itself.
-	call_deferred("_refresh")
 
 
 # ── UI construction ───────────────────────────────────────────────────────────
@@ -334,8 +331,11 @@ func receive(channel: String, payload: Dictionary) -> void:
 
 # ── Plugin platform lifecycle hooks ──────────────────────────────────────────
 
+## The host attaches the IPC helper and fires this once the panel is fully
+## registered, so the first data load belongs here — not _ready, where
+## $_MinervaIPC is not attached yet.
 func _on_panel_loaded(_ctx: Dictionary) -> void:
-	pass
+	_refresh()
 
 
 func _on_panel_unload() -> void:
