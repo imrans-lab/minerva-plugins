@@ -59,14 +59,15 @@
       "kind": "godot_scene",
       "entry_scene": "ui/DrivePanel.tscn",
       "scripts": ["ui/DrivePanel.gd"],
-      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "capability:host.dialogs.file_picker"]
+      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
     }],
-    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "capability:host.dialogs.file_picker"]
+    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
   },
   "permissions": {
     "host_capabilities": [
       "host.core.session",
-      "host.dialogs.file_picker"
+      "host.dialogs.file_picker",
+      "mcp.proxy:minerva_os_open"
     ],
     "network": {
       "mode": "none"

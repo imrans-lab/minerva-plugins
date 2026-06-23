@@ -21,6 +21,8 @@ var _device_label: Label = null
 var _sync_btn: Button = null
 var _add_btn: Button = null
 var _remove_btn: Button = null
+var _reveal_btn: Button = null
+var _open_ext_btn: Button = null
 
 ## Status line: shows sync result, errors, or connectivity problems.
 var _status_label: Label = null
@@ -84,6 +86,22 @@ func _build_ui() -> void:
 	_remove_btn.disabled = true
 	_remove_btn.pressed.connect(_on_remove_pressed)
 	_header_row.add_child(_remove_btn)
+
+	_reveal_btn = Button.new()
+	_reveal_btn.name = "RevealBtn"
+	_reveal_btn.text = "Reveal"
+	_reveal_btn.tooltip_text = "Show the selected file in the system file manager"
+	_reveal_btn.disabled = true
+	_reveal_btn.pressed.connect(_on_reveal_pressed)
+	_header_row.add_child(_reveal_btn)
+
+	_open_ext_btn = Button.new()
+	_open_ext_btn.name = "OpenExtBtn"
+	_open_ext_btn.text = "Open externally"
+	_open_ext_btn.tooltip_text = "Open the selected file in its OS default application"
+	_open_ext_btn.disabled = true
+	_open_ext_btn.pressed.connect(_on_open_ext_pressed)
+	_header_row.add_child(_open_ext_btn)
 
 	_sync_btn = Button.new()
 	_sync_btn.name = "SyncBtn"
@@ -188,6 +206,10 @@ func _populate_tree(projects: Array) -> void:
 	_project_tree.clear()
 	if _remove_btn != null:
 		_remove_btn.disabled = true
+	if _reveal_btn != null:
+		_reveal_btn.disabled = true
+	if _open_ext_btn != null:
+		_open_ext_btn.disabled = true
 	var root: TreeItem = _project_tree.create_item()
 	if projects.is_empty():
 		var empty_item: TreeItem = _project_tree.create_item(root)
@@ -317,13 +339,65 @@ func _on_remove_pressed() -> void:
 	await _refresh()
 
 
-## Enable Remove only when the selected row maps to a local path (cloud-only
+## Open the containing folder of the selected row's path in the OS file manager.
+func _on_reveal_pressed() -> void:
+	if _project_tree == null:
+		return
+	var item: TreeItem = _project_tree.get_selected()
+	if item == null:
+		return
+	var path: String = str(item.get_metadata(0))
+	if path.is_empty():
+		return
+	var folder: String = path.get_base_dir()
+	if folder.is_empty():
+		_show_status("Cannot determine containing folder for: %s" % path)
+		return
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot reveal.")
+		return
+	var rid: String = "drive:reveal:%d" % Time.get_ticks_usec()
+	request.emit("capability:mcp.proxy:minerva_os_open", {"path": folder}, rid)
+	var reply: Dictionary = await ipc.await_reply(rid, 15000)
+	if not bool(reply.get("success", false)):
+		_show_status("Reveal failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+
+
+## Open the selected row's file in its OS default application.
+func _on_open_ext_pressed() -> void:
+	if _project_tree == null:
+		return
+	var item: TreeItem = _project_tree.get_selected()
+	if item == null:
+		return
+	var path: String = str(item.get_metadata(0))
+	if path.is_empty():
+		return
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot open externally.")
+		return
+	var rid: String = "drive:open_ext:%d" % Time.get_ticks_usec()
+	request.emit("capability:mcp.proxy:minerva_os_open", {"path": path}, rid)
+	var reply: Dictionary = await ipc.await_reply(rid, 15000)
+	if not bool(reply.get("success", false)):
+		_show_status("Open externally failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+
+
+## Enable row actions only when the selected row maps to a local path (cloud-only
 ## rows have none).
 func _on_row_selected() -> void:
-	if _remove_btn == null or _project_tree == null:
+	if _project_tree == null:
 		return
 	var item := _project_tree.get_selected()
-	_remove_btn.disabled = item == null or str(item.get_metadata(0)) == ""
+	var has_path: bool = item != null and str(item.get_metadata(0)) != ""
+	if _remove_btn != null:
+		_remove_btn.disabled = not has_path
+	if _reveal_btn != null:
+		_reveal_btn.disabled = not has_path
+	if _open_ext_btn != null:
+		_open_ext_btn.disabled = not has_path
 
 
 # ── Plugin event hook ─────────────────────────────────────────────────────────
