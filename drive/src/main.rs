@@ -262,7 +262,8 @@ fn connect_client(
 // Tool handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Report the current readiness of the Drive plugin backend.
+/// Report the readiness of the Drive plugin. The project count is local-first
+/// (the registered files), so it is meaningful even when the cloud is offline.
 fn handle_status(
     _params: &Value,
     id: Value,
@@ -276,39 +277,23 @@ fn handle_status(
     }
     let state = load_state(&folder);
     let device = state.device_id.clone();
+    let tracked = tracked_files(&state);
+    let hashes = local_hashes(&tracked);
 
-    match connect_client(out, lines, next_id) {
-        Err(e) => {
-            log::info!("status: not connected: {e}");
-            ok_response(id, tool_ok(json!({
-                "ready": false,
-                "connected": false,
-                "device": device,
-                "project_count": 0
-            })))
-        }
-        Ok(mut client) => {
-            let tracked = tracked_files(&state);
-            let hashes = local_hashes(&tracked);
-            let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
-                Ok(l) => l,
-                Err(e) => {
-                    log::warn!("status list_drive: {e}");
-                    vec![]
-                }
-            };
-            let rows = sync::compute_status(listed, &state, &hashes);
-            ok_response(id, tool_ok(json!({
-                "ready": true,
-                "connected": true,
-                "device": device,
-                "project_count": rows.len()
-            })))
-        }
-    }
+    let (listed, connected) = cloud_list_or_local(out, lines, next_id);
+    let rows = sync::compute_status(listed, &state, &hashes);
+    ok_response(id, tool_ok(json!({
+        "ready": true,
+        "connected": connected,
+        "device": device,
+        "project_count": rows.len()
+    })))
 }
 
-/// List all known projects and their sync status.
+/// List the registered projects and their sync status. Local-first: registered
+/// files always appear (the instant they are added), and the list still renders
+/// with `connected: false` when the cloud is unreachable — the cloud is used
+/// only to enrich each row's status.
 fn handle_list(
     _params: &Value,
     id: Value,
@@ -320,22 +305,38 @@ fn handle_list(
     if let Err(e) = std::fs::create_dir_all(&folder) {
         log::warn!("create drive folder {folder}: {e}");
     }
-
-    let mut client = match connect_client(out, lines, next_id) {
-        Ok(c) => c,
-        Err(e) => return ok_response(id, tool_err(&e)),
-    };
-
     let state = load_state(&folder);
     let tracked = tracked_files(&state);
     let hashes = local_hashes(&tracked);
-    let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
-        Ok(l) => l,
-        Err(e) => return ok_response(id, tool_err(&format!("list_drive: {e}"))),
-    };
+
+    let (listed, connected) = cloud_list_or_local(out, lines, next_id);
     let rows = sync::compute_status(listed, &state, &hashes);
     let projects = serde_json::to_value(&rows).unwrap_or(Value::Array(vec![]));
-    ok_response(id, tool_ok(json!({ "projects": projects })))
+    ok_response(id, tool_ok(json!({ "projects": projects, "connected": connected })))
+}
+
+/// Best-effort fetch of the cloud artifact list. Returns the drive artifacts and
+/// `true` when connected; on any connect or list failure returns an empty list
+/// and `false`, so read-only views degrade to a local-only picture instead of
+/// failing — the file list must never depend on the network.
+fn cloud_list_or_local(
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> (Vec<sync::CloudArtifact>, bool) {
+    match connect_client(out, lines, next_id) {
+        Ok(mut client) => match (ArtifactCloudStore { client: &mut client }).list_drive() {
+            Ok(l) => (l, true),
+            Err(e) => {
+                log::warn!("list_drive failed, showing local view: {e}");
+                (Vec::new(), false)
+            }
+        },
+        Err(e) => {
+            log::info!("offline, showing local view: {e}");
+            (Vec::new(), false)
+        }
+    }
 }
 
 /// Run a sync pass against the artifact service.

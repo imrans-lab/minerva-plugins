@@ -154,7 +154,7 @@ func _fetch_status() -> void:
 	var device: String = str(result.get("device", ""))
 	var count: int = int(result.get("project_count", 0))
 	if not connected:
-		_set_device_label("Drive: not connected.")
+		_set_device_label("Offline  ·  %d file(s)" % count)
 	elif device.is_empty():
 		_set_device_label("Drive: connected  ·  %d project(s)" % count)
 	else:

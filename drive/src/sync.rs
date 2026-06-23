@@ -695,6 +695,27 @@ mod tests {
     }
 
     #[test]
+    fn compute_status_offline_shows_local_state() {
+        // With no cloud artifacts (offline / cloud unreachable), a previously
+        // synced entry shows its last-known "synced" state and an unsynced
+        // registered file shows "local_only" — the list never goes blank.
+        let mut state = SyncState { device_id: "dev1".into(), ..Default::default() };
+        state.entries.insert(
+            "/p/synced.txt".into(),
+            TrackedEntry { proj_uuid: "u1".into(), name: "synced.txt".into(), base_version: 1, base_hash: content_hash(b"v1") },
+        );
+        let mut local = HashMap::new();
+        local.insert("/p/synced.txt".to_owned(), content_hash(b"v1")); // unchanged since base
+        local.insert("/p/fresh.txt".to_owned(), content_hash(b"new")); // registered, never synced
+
+        let rows = compute_status(Vec::new(), &state, &local);
+        let by = |n: &str| rows.iter().find(|r| r.name == n).cloned();
+        assert_eq!(by("synced.txt").unwrap().status, "synced");
+        assert_eq!(by("synced.txt").unwrap().path, "/p/synced.txt");
+        assert_eq!(by("fresh.txt").unwrap().status, "local_only");
+    }
+
+    #[test]
     fn state_loads_without_tracked_field() {
         // A state file written before `tracked` existed must still deserialize.
         let legacy = r#"{"device_id":"dev1","entries":{}}"#;
