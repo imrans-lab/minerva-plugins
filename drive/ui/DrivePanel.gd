@@ -108,6 +108,10 @@ func _build_ui() -> void:
 	_project_tree.name = "ProjectTree"
 	_project_tree.columns = 4
 	_project_tree.column_titles_visible = true
+	# Hide the synthetic root so the project rows are the top-level items. Use
+	# the Tree property — making the root TreeItem invisible would also hide all
+	# of its children (every row).
+	_project_tree.hide_root = true
 	_project_tree.set_column_title(0, "Project")
 	_project_tree.set_column_title(1, "Status")
 	_project_tree.set_column_title(2, "Local")
@@ -185,7 +189,6 @@ func _populate_tree(projects: Array) -> void:
 	if _remove_btn != null:
 		_remove_btn.disabled = true
 	var root: TreeItem = _project_tree.create_item()
-	root.visible = false  # hidden root — the tree shows only the project rows
 	if projects.is_empty():
 		var empty_item: TreeItem = _project_tree.create_item(root)
 		empty_item.set_text(0, "(no projects)")
