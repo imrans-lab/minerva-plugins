@@ -355,6 +355,18 @@ pub fn compute_status(
     rows
 }
 
+/// Return the highest-version artifact for `proj_uuid` from a flat list.
+///
+/// This is the public building block for any code that needs to resolve "the
+/// current cloud version" of one specific project by id — for example, the
+/// export tool.  `current_by_uuid` uses it to build the full map.
+pub fn current_artifact_for<'a>(listed: &'a [CloudArtifact], proj_uuid: &str) -> Option<&'a CloudArtifact> {
+    listed
+        .iter()
+        .filter(|a| a.manifest.proj_uuid == proj_uuid)
+        .max_by_key(|a| a.manifest.version)
+}
+
 /// Reduce a flat artifact list to the current (highest-version) one per project.
 fn current_by_uuid(listed: Vec<CloudArtifact>) -> HashMap<String, CloudArtifact> {
     let mut current: HashMap<String, CloudArtifact> = HashMap::new();
@@ -795,6 +807,20 @@ mod tests {
         let bytes = URL_SAFE_NO_PAD.decode(payload).expect("jwt base64");
         let claims: serde_json::Value = serde_json::from_slice(&bytes).expect("jwt claims");
         claims["sub"].as_str().expect("sub claim").to_owned()
+    }
+
+    #[test]
+    fn current_artifact_for_picks_highest_version() {
+        let arts = vec![
+            CloudArtifact { uri: "artifact://v1/p.txt".into(), manifest: manifest("uuid-A", "p.txt", 1, b"v1") },
+            CloudArtifact { uri: "artifact://v3/p.txt".into(), manifest: manifest("uuid-A", "p.txt", 3, b"v3") },
+            CloudArtifact { uri: "artifact://v2/p.txt".into(), manifest: manifest("uuid-A", "p.txt", 2, b"v2") },
+            CloudArtifact { uri: "artifact://other/q.txt".into(), manifest: manifest("uuid-B", "q.txt", 5, b"q") },
+        ];
+        let found = current_artifact_for(&arts, "uuid-A").expect("uuid-A must be found");
+        assert_eq!(found.manifest.version, 3, "highest version wins");
+        assert_eq!(found.uri, "artifact://v3/p.txt");
+        assert!(current_artifact_for(&arts, "uuid-Z").is_none(), "absent uuid returns None");
     }
 
     #[test]

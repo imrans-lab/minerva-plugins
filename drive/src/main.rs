@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use artifact_client::{ArtifactClient, Credentials};
-use sync::{ArtifactCloudStore, CloudStore, DiskLocalStore, SyncState};
+use sync::{ArtifactCloudStore, CloudStore, DiskLocalStore, SyncState, current_artifact_for};
 
 mod artifact_client;
 mod sync;
@@ -422,6 +422,67 @@ fn handle_remove(params: &Value, id: Value) -> RpcResponse {
     })))
 }
 
+/// Download the current cloud version of a project and write it to a local path
+/// chosen by the caller. Works for Cloud-only projects that have no local copy.
+fn handle_export(
+    params: &Value,
+    id: Value,
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let proj_uuid = tool_arg_str(params, "proj_uuid");
+    let dest_path = tool_arg_str(params, "dest_path");
+    if proj_uuid.is_empty() {
+        return ok_response(id, tool_err("export requires a non-empty 'proj_uuid'"));
+    }
+    if dest_path.is_empty() {
+        return ok_response(id, tool_err("export requires a non-empty 'dest_path'"));
+    }
+
+    let mut client = match connect_client(out, lines, next_id) {
+        Ok(c) => c,
+        Err(e) => return ok_response(id, tool_err(&format!("connect failed: {e}"))),
+    };
+
+    let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
+        Ok(l) => l,
+        Err(e) => return ok_response(id, tool_err(&format!("list cloud failed: {e}"))),
+    };
+
+    let art = match current_artifact_for(&listed, &proj_uuid) {
+        Some(a) => a,
+        None => return ok_response(id, tool_err(&format!("project '{proj_uuid}' not found in cloud"))),
+    };
+
+    let name = art.manifest.name.clone();
+    let uri = art.uri.clone();
+
+    let bytes = match (ArtifactCloudStore { client: &mut client }).download(&uri) {
+        Ok(b) => b,
+        Err(e) => return ok_response(id, tool_err(&format!("download failed: {e}"))),
+    };
+
+    if let Some(parent) = std::path::Path::new(&dest_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return ok_response(id, tool_err(&format!("create dirs failed: {e}")));
+            }
+        }
+    }
+    let bytes_written = bytes.len();
+    if let Err(e) = std::fs::write(&dest_path, &bytes) {
+        return ok_response(id, tool_err(&format!("write failed: {e}")));
+    }
+
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "dest_path": dest_path,
+        "name": name,
+        "bytes_written": bytes_written,
+    })))
+}
+
 /// Read a string argument from a tools/call `arguments` object, trimmed.
 fn tool_arg_str(params: &Value, key: &str) -> String {
     params
@@ -490,6 +551,18 @@ fn tools_list_result() -> Value {
                     "type": "object",
                     "properties": {"path": {"type": "string", "description": "Local file path to stop syncing."}},
                     "required": ["path"]
+                }
+            },
+            {
+                "name": "minerva_drive_export",
+                "description": "Download the current cloud version of a project to a local path chosen by the caller. Works for Cloud-only projects that have no local copy.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "proj_uuid": {"type": "string", "description": "The project UUID to download."},
+                        "dest_path": {"type": "string", "description": "Absolute local path to write the downloaded file to."}
+                    },
+                    "required": ["proj_uuid", "dest_path"]
                 }
             }
         ]
@@ -569,6 +642,9 @@ fn main() {
                     }
                     "minerva_drive_add" => handle_add(&req.params, req.id),
                     "minerva_drive_remove" => handle_remove(&req.params, req.id),
+                    "minerva_drive_export" => {
+                        handle_export(&req.params, req.id, &mut out, &mut lines, &mut next_id)
+                    }
                     other => err_response(
                         req.id,
                         -32601,
@@ -595,6 +671,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Guards the export tool_ok payload shape: the panel reads ok/dest_path/
+    // bytes_written; name is informational. Verify the keys are all present.
+    #[test]
+    fn export_payload_shape() {
+        let payload = tool_ok(json!({
+            "ok": true,
+            "dest_path": "/tmp/test.minproj",
+            "name": "test.minproj",
+            "bytes_written": 1234_u64,
+        }));
+        let text = payload["content"][0]["text"].as_str().expect("text content");
+        let v: Value = serde_json::from_str(text).expect("valid json");
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["dest_path"], json!("/tmp/test.minproj"));
+        assert_eq!(v["name"], json!("test.minproj"));
+        assert_eq!(v["bytes_written"], json!(1234_u64));
+    }
 
     // Guards the sync tool's result shape against the panel's contract: the
     // panel reads pushed/pulled/conflicts/errors as arrays (and conflict items

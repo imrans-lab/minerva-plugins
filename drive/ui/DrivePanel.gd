@@ -23,6 +23,7 @@ var _add_btn: Button = null
 var _remove_btn: Button = null
 var _reveal_btn: Button = null
 var _open_ext_btn: Button = null
+var _download_btn: Button = null
 
 ## Status line: shows sync result, errors, or connectivity problems.
 var _status_label: Label = null
@@ -102,6 +103,14 @@ func _build_ui() -> void:
 	_open_ext_btn.disabled = true
 	_open_ext_btn.pressed.connect(_on_open_ext_pressed)
 	_header_row.add_child(_open_ext_btn)
+
+	_download_btn = Button.new()
+	_download_btn.name = "DownloadBtn"
+	_download_btn.text = "Download…"
+	_download_btn.tooltip_text = "Save the current cloud version of the selected project to a file"
+	_download_btn.disabled = true
+	_download_btn.pressed.connect(_on_download_pressed)
+	_header_row.add_child(_download_btn)
 
 	_sync_btn = Button.new()
 	_sync_btn.name = "SyncBtn"
@@ -210,6 +219,8 @@ func _populate_tree(projects: Array) -> void:
 		_reveal_btn.disabled = true
 	if _open_ext_btn != null:
 		_open_ext_btn.disabled = true
+	if _download_btn != null:
+		_download_btn.disabled = true
 	var root: TreeItem = _project_tree.create_item()
 	if projects.is_empty():
 		var empty_item: TreeItem = _project_tree.create_item(root)
@@ -220,6 +231,7 @@ func _populate_tree(projects: Array) -> void:
 		var proj: Dictionary = entry as Dictionary
 		var item: TreeItem = _project_tree.create_item(root)
 		item.set_metadata(0, str(proj.get("path", "")))
+		item.set_metadata(1, str(proj.get("proj_uuid", "")))
 		item.set_text(0, str(proj.get("name", "(unnamed)")))
 		var status: String = str(proj.get("status", "unknown"))
 		item.set_text(1, _format_status(status))
@@ -385,19 +397,72 @@ func _on_open_ext_pressed() -> void:
 		_show_status("Open externally failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
 
 
-## Enable row actions only when the selected row maps to a local path (cloud-only
-## rows have none).
+## Enable row actions based on what the selected row provides.
+## Reveal/Open/Remove require a local path; Download only requires a proj_uuid
+## so it works for Cloud-only rows that have no local file yet.
 func _on_row_selected() -> void:
 	if _project_tree == null:
 		return
 	var item := _project_tree.get_selected()
 	var has_path: bool = item != null and str(item.get_metadata(0)) != ""
+	var has_uuid: bool = item != null and str(item.get_metadata(1)) != ""
 	if _remove_btn != null:
 		_remove_btn.disabled = not has_path
 	if _reveal_btn != null:
 		_reveal_btn.disabled = not has_path
 	if _open_ext_btn != null:
 		_open_ext_btn.disabled = not has_path
+	if _download_btn != null:
+		_download_btn.disabled = not has_uuid
+
+
+## Save the current cloud version of the selected project to a user-chosen path.
+func _on_download_pressed() -> void:
+	if _project_tree == null:
+		return
+	var item: TreeItem = _project_tree.get_selected()
+	if item == null:
+		return
+	var proj_uuid: String = str(item.get_metadata(1))
+	if proj_uuid.is_empty():
+		return
+	var proj_name: String = item.get_text(0)
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot download.")
+		return
+	# Ask the user where to save the file.
+	var pick_id: String = "drive:download_pick:%d" % Time.get_ticks_usec()
+	request.emit("capability:host.dialogs.file_picker", {
+		"title": "Download a copy as…",
+		"mode": "save",
+		"filters": ["*"],
+		"filename": proj_name,
+	}, pick_id)
+	var pick: Dictionary = await ipc.await_reply(pick_id, 120000)
+	if not bool(pick.get("success", false)):
+		_show_status("File picker failed: %s" % str(pick.get("error_message", "unknown")))
+		return
+	var presult: Dictionary = pick.get("result", {}) as Dictionary
+	if bool(presult.get("cancelled", false)):
+		return
+	var dest: String = str(presult.get("path", ""))
+	if dest.is_empty():
+		return
+	# Download and write.
+	_show_status("Downloading…")
+	var exp_id: String = "drive:export:%d" % Time.get_ticks_usec()
+	request.emit("minerva_drive_export", {"proj_uuid": proj_uuid, "dest_path": dest}, exp_id)
+	var reply: Dictionary = await ipc.await_reply(exp_id, 120000)
+	if not bool(reply.get("success", false)):
+		_show_status("Download failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+		return
+	var result: Dictionary = reply.get("result", {}) as Dictionary
+	if not bool(result.get("ok", false)):
+		_show_status("Download error: %s" % str(result.get("error", "unknown")))
+		return
+	var written: int = int(result.get("bytes_written", 0))
+	_show_status("Downloaded %s (%d bytes) to: %s" % [str(result.get("name", proj_name)), written, dest])
 
 
 # ── Plugin event hook ─────────────────────────────────────────────────────────
