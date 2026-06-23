@@ -410,9 +410,18 @@ fn handle_sync(
     // Clone device_id before mutably borrowing state for sync.
     let device_id = state.device_id.clone();
 
+    // Fetch the currently-open project path so sync can defer it rather than
+    // changing a file out from under the live session. Degrade gracefully to ""
+    // on any error — the sync must still proceed; only the active-project guard
+    // is bypassed.
+    let active_project_path = request_capability(out, lines, next_id, "host.project.current", json!({}))
+        .ok()
+        .and_then(|r| r.get("path").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default();
+
     let mut cloud = ArtifactCloudStore { client: &mut client };
     let local = DiskLocalStore;
-    let report = sync::sync(&mut cloud, &local, &mut state, &tracked, &folder, &device_id, &now);
+    let report = sync::sync(&mut cloud, &local, &mut state, &tracked, &folder, &device_id, &now, &active_project_path);
 
     // Register any files the sync created locally (cloud-only pulls) so their
     // future edits sync back without the user adding them by hand.
@@ -1072,15 +1081,18 @@ mod tests {
                 conflict_copy: "/p/b.txt.conflict-dev-0".to_owned(),
             }],
             errors: vec![],
+            deferred: vec!["open.minproj".to_owned()],
         };
         let v = sync_payload(&report);
         assert!(v.get("pushed").map(Value::is_array).unwrap_or(false), "pushed must be an array");
         assert!(v.get("pulled").map(Value::is_array).unwrap_or(false), "pulled must be an array");
         assert!(v.get("conflicts").map(Value::is_array).unwrap_or(false), "conflicts must be an array");
         assert!(v.get("errors").map(Value::is_array).unwrap_or(false), "errors must be an array");
+        assert!(v.get("deferred").map(Value::is_array).unwrap_or(false), "deferred must be an array");
         assert_eq!(v["ok"], json!(true));
         assert_eq!(v["pushed"][0], json!("a.txt"));
         assert_eq!(v["conflicts"][0]["name"], json!("b.txt"));
         assert_eq!(v["conflicts"][0]["conflict_copy"], json!("/p/b.txt.conflict-dev-0"));
+        assert_eq!(v["deferred"][0], json!("open.minproj"));
     }
 }

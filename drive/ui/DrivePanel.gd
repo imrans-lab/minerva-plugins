@@ -312,6 +312,7 @@ func _on_sync_pressed() -> void:
 	var pulled: Array = result.get("pulled", []) as Array
 	var conflicts: Array = result.get("conflicts", []) as Array
 	var errors: Array = result.get("errors", []) as Array
+	var deferred: Array = result.get("deferred", []) as Array
 
 	var msg_parts: Array = []
 	if ok:
@@ -330,6 +331,10 @@ func _on_sync_pressed() -> void:
 		msg_parts.append("%d conflict copy(s) created: %s" % [conflicts.size(), ", ".join(names)])
 	if errors.size() > 0:
 		msg_parts.append("Errors: %s" % "  |  ".join(errors))
+	if deferred.size() > 0:
+		msg_parts.append("%d open project(s) not synced — close to reconcile: %s" % [
+			deferred.size(), ", ".join(deferred)
+		])
 	_show_status("  ·  ".join(msg_parts))
 
 	# Refresh display after sync.

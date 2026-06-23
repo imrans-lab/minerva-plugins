@@ -94,6 +94,9 @@ pub struct SyncReport {
     pub pulled: Vec<String>,
     pub conflicts: Vec<Conflict>,
     pub errors: Vec<String>,
+    /// Tracked entries skipped because their local path is the currently-open
+    /// project in Minerva. Callers should inform the user to close and re-sync.
+    pub deferred: Vec<String>,
 }
 
 /// Cloud side of sync, abstracted so the engine is testable without a network.
@@ -123,7 +126,10 @@ pub fn content_hash(bytes: &[u8]) -> String {
 /// Run one sync pass. `tracked_paths` are the local files drive manages this
 /// run; `drive_dir` is where cloud-only projects are materialized. `device_id`
 /// and `now_iso` are supplied by the caller (kept out of the engine so it stays
-/// deterministic and unit-testable).
+/// deterministic and unit-testable). `active_project_path` is the local path of
+/// the project currently open in Minerva; when non-empty, any tracked entry whose
+/// path matches is skipped (neither pushed, pulled, nor conflict-copied) and its
+/// name is recorded in `SyncReport::deferred`. Pass `""` when no project is open.
 pub fn sync(
     cloud: &mut dyn CloudStore,
     local: &dyn LocalStore,
@@ -132,6 +138,7 @@ pub fn sync(
     drive_dir: &str,
     device_id: &str,
     now_iso: &str,
+    active_project_path: &str,
 ) -> SyncReport {
     let mut report = SyncReport::default();
 
@@ -191,6 +198,17 @@ pub fn sync(
                     Some(c) => c.manifest.version > entry.base_version || c.manifest.content_hash != entry.base_hash,
                     None => false,
                 };
+
+                // Never touch the file that is currently open in Minerva — a
+                // push/pull/conflict-copy would change a file out from under the
+                // live session. Record it as deferred and let the caller notify
+                // the user to close and re-sync.
+                if !active_project_path.is_empty() && path == active_project_path
+                    && (local_changed || cloud_changed)
+                {
+                    report.deferred.push(name);
+                    continue;
+                }
 
                 match (local_changed, cloud_changed) {
                     (false, false) => {} // synced
@@ -567,7 +585,7 @@ mod tests {
         local.set("/p/a.txt", b"hello");
         let mut state = SyncState { device_id: "dev1".into(), ..Default::default() };
 
-        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00", "");
 
         assert_eq!(r.pushed, vec!["a.txt"]);
         assert!(r.conflicts.is_empty() && r.errors.is_empty());
@@ -589,7 +607,7 @@ mod tests {
             TrackedEntry { proj_uuid: "u1".into(), name: "a.txt".into(), base_version: 1, base_hash: content_hash(b"hello") },
         );
 
-        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00", "");
 
         assert!(r.pushed.is_empty() && r.pulled.is_empty() && r.conflicts.is_empty() && r.errors.is_empty());
         assert_eq!(cloud.uploads, 0);
@@ -607,7 +625,7 @@ mod tests {
             TrackedEntry { proj_uuid: "u1".into(), name: "a.txt".into(), base_version: 1, base_hash: content_hash(b"hello") },
         );
 
-        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00", "");
 
         assert_eq!(r.pushed, vec!["a.txt"]);
         assert_eq!(cloud.uploads, 1);
@@ -629,7 +647,7 @@ mod tests {
             TrackedEntry { proj_uuid: "u1".into(), name: "a.txt".into(), base_version: 1, base_hash: content_hash(b"hello") },
         );
 
-        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00", "");
 
         assert_eq!(r.pulled, vec!["a.txt"]);
         assert_eq!(local.get("/p/a.txt").unwrap(), b"newer");
@@ -650,7 +668,7 @@ mod tests {
             TrackedEntry { proj_uuid: "u1".into(), name: "a.txt".into(), base_version: 1, base_hash: content_hash(b"base") },
         );
 
-        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00", "");
 
         assert_eq!(r.conflicts.len(), 1);
         assert!(r.pushed.is_empty());
@@ -671,7 +689,7 @@ mod tests {
         cloud.preload("artifact://z/b.txt", b"remote", manifest("u9", "b.txt", 3, b"remote"));
         let mut state = SyncState { device_id: "dev1".into(), ..Default::default() };
 
-        let r = sync(&mut cloud, &local, &mut state, &[], "/drive", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &[], "/drive", "dev1", "2026-06-22T00:00:00", "");
 
         assert_eq!(r.pulled, vec!["b.txt"]);
         assert_eq!(local.get("/drive/b.txt").unwrap(), b"remote");
@@ -869,9 +887,62 @@ mod tests {
             TrackedEntry { proj_uuid: "u1".into(), name: "a.txt".into(), base_version: 1, base_hash: content_hash(b"hello") },
         );
 
-        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00");
+        let r = sync(&mut cloud, &local, &mut state, &["/p/a.txt".into()], "/p", "dev1", "2026-06-22T00:00:00", "");
 
         assert_eq!(r.pulled, vec!["a.txt"]);
         assert_eq!(local.get("/p/a.txt").unwrap(), b"v2");
+    }
+
+    #[test]
+    fn active_project_is_deferred_not_touched() {
+        // When active_project_path matches a tracked entry that has a cloud-newer
+        // version, the local file must not be modified, no conflict copy created,
+        // and the name must appear in report.deferred.
+        let mut cloud = FakeCloud::default();
+        let local = FakeLocal::default();
+        local.set("/p/open.minproj", b"local-content");
+        // Cloud has a newer version.
+        cloud.preload(
+            "artifact://x2/open.minproj",
+            b"cloud-content",
+            manifest("u2", "open.minproj", 2, b"cloud-content"),
+        );
+        let mut state = SyncState { device_id: "dev1".into(), ..Default::default() };
+        state.entries.insert(
+            "/p/open.minproj".into(),
+            TrackedEntry {
+                proj_uuid: "u2".into(),
+                name: "open.minproj".into(),
+                base_version: 1,
+                base_hash: content_hash(b"base"),
+            },
+        );
+
+        let r = sync(
+            &mut cloud,
+            &local,
+            &mut state,
+            &["/p/open.minproj".into()],
+            "/p",
+            "dev1",
+            "2026-06-22T00:00:00",
+            "/p/open.minproj",
+        );
+
+        // Must appear in deferred, never in pushed/pulled/conflicts.
+        assert_eq!(r.deferred, vec!["open.minproj"]);
+        assert!(r.pushed.is_empty(), "active project must not be pushed");
+        assert!(r.pulled.is_empty(), "active project must not be pulled");
+        assert!(r.conflicts.is_empty(), "active project must not produce a conflict copy");
+        assert!(r.errors.is_empty());
+        // The local file must be unchanged.
+        assert_eq!(local.get("/p/open.minproj").unwrap(), b"local-content",
+            "local file must not be modified while the project is open");
+        // No conflict copy written anywhere.
+        let files = local.files.borrow();
+        let conflict_copies: Vec<&String> = files.keys()
+            .filter(|k| k.contains(".conflict-"))
+            .collect();
+        assert!(conflict_copies.is_empty(), "no conflict copies must be created: {:?}", conflict_copies);
     }
 }
