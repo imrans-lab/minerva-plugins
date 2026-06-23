@@ -74,6 +74,17 @@
         },
         "required": ["path"]
       }
+    },
+    {
+      "name": "minerva_drive_open",
+      "description": "Pull the latest cloud version of a project and open it in Minerva. Returns {ok:false, needs_save:true} when the current project has unsaved changes — never discards unsaved work. Returns {ok:true, opened, name} on success.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "proj_uuid": {"type": "string", "description": "The project UUID to open."}
+        },
+        "required": ["proj_uuid"]
+      }
     }
   ],
   "ui": {
@@ -82,15 +93,17 @@
       "kind": "godot_scene",
       "entry_scene": "ui/DrivePanel.tscn",
       "scripts": ["ui/DrivePanel.gd"],
-      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "minerva_drive_set_folder", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
+      "ipc_channels": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "minerva_drive_set_folder", "minerva_drive_open", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open", "capability:host.project.current", "capability:host.project.open"]
     }],
-    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "minerva_drive_set_folder", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open"]
+    "ipc_messages": ["minerva_drive_status", "minerva_drive_list", "minerva_drive_sync", "minerva_drive_add", "minerva_drive_remove", "minerva_drive_export", "minerva_drive_set_folder", "minerva_drive_open", "capability:host.dialogs.file_picker", "capability:mcp.proxy:minerva_os_open", "capability:host.project.current", "capability:host.project.open"]
   },
   "permissions": {
     "host_capabilities": [
       "host.core.session",
       "host.dialogs.file_picker",
-      "mcp.proxy:minerva_os_open"
+      "mcp.proxy:minerva_os_open",
+      "host.project.current",
+      "host.project.open"
     ],
     "network": {
       "mode": "none"

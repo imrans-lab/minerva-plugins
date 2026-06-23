@@ -489,6 +489,139 @@ fn handle_set_folder(params: &Value, id: Value) -> RpcResponse {
     })))
 }
 
+/// Open a synced project in Minerva — pulling the latest cloud version first,
+/// then calling host.project.open. Refuses when the current project is dirty.
+fn handle_open(
+    params: &Value,
+    id: Value,
+    out: &mut impl Write,
+    lines: &mut impl Iterator<Item = Result<String, io::Error>>,
+    next_id: &mut u64,
+) -> RpcResponse {
+    let proj_uuid = tool_arg_str(params, "proj_uuid");
+    if proj_uuid.is_empty() {
+        return ok_response(id, tool_err("open requires a non-empty 'proj_uuid'"));
+    }
+
+    // Step 2: Check whether the current project has unsaved changes.
+    let current_result = match request_capability(out, lines, next_id, "host.project.current", json!({})) {
+        Ok(r) => r,
+        Err(e) => return ok_response(id, tool_err(&format!("host.project.current failed: {e}"))),
+    };
+    let dirty = current_result.get("dirty").and_then(Value::as_bool).unwrap_or(false);
+
+    // Step 3: Guard — never open while there are unsaved changes.
+    if dirty {
+        return ok_response(id, tool_ok(json!({
+            "ok": false,
+            "needs_save": true,
+            "message": "Save your current project first, then open.",
+        })));
+    }
+
+    // Step 4: Connect and fetch the cloud artifact list.
+    let mut client = match connect_client(out, lines, next_id) {
+        Ok(c) => c,
+        Err(e) => return ok_response(id, tool_err(&format!("connect failed: {e}"))),
+    };
+    let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
+        Ok(l) => l,
+        Err(e) => return ok_response(id, tool_err(&format!("list cloud failed: {e}"))),
+    };
+    let current = match current_artifact_for(&listed, &proj_uuid) {
+        Some(a) => a.clone(),
+        None => return ok_response(id, tool_err(&format!("project '{proj_uuid}' not found in cloud"))),
+    };
+
+    // Step 5: Resolve the local path.
+    let base = base_drive_folder();
+    let _ = std::fs::create_dir_all(&base);
+    let mut state = load_state(&base);
+    let folder = effective_folder(&state);
+    let local_path = state
+        .entries
+        .iter()
+        .find(|(_, e)| e.proj_uuid == proj_uuid)
+        .map(|(path, _)| path.clone())
+        .unwrap_or_else(|| {
+            let path = if folder.ends_with('/') || folder.ends_with('\\') {
+                format!("{}{}", folder, current.manifest.name)
+            } else {
+                format!("{}/{}", folder, current.manifest.name)
+            };
+            // Register a new entry so future syncs pick it up.
+            state.entries.insert(
+                path.clone(),
+                sync::TrackedEntry {
+                    proj_uuid: proj_uuid.clone(),
+                    name: current.manifest.name.clone(),
+                    base_version: 0,
+                    base_hash: String::new(),
+                },
+            );
+            if !state.tracked.iter().any(|t| t == &path) {
+                state.tracked.push(path.clone());
+            }
+            path
+        });
+
+    // Step 6: Pull latest if the local file is missing or stale.
+    let needs_pull = match std::fs::read(&local_path) {
+        Ok(bytes) => sync::content_hash(&bytes) != current.manifest.content_hash,
+        Err(_) => true,
+    };
+    if needs_pull {
+        let bytes = match (ArtifactCloudStore { client: &mut client }).download(&current.uri) {
+            Ok(b) => b,
+            Err(e) => return ok_response(id, tool_err(&format!("download failed: {e}"))),
+        };
+        if let Some(parent) = std::path::Path::new(&local_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return ok_response(id, tool_err(&format!("create dirs failed: {e}")));
+                }
+            }
+        }
+        if let Err(e) = std::fs::write(&local_path, &bytes) {
+            return ok_response(id, tool_err(&format!("write file failed: {e}")));
+        }
+        // Update tracked entry to the pulled version.
+        if let Some(entry) = state.entries.get_mut(&local_path) {
+            entry.base_version = current.manifest.version;
+            entry.base_hash = current.manifest.content_hash.clone();
+        }
+        save_state(&base, &state);
+    }
+
+    // Step 7: Ask Minerva to open the project.
+    let open_result = match request_capability(
+        out,
+        lines,
+        next_id,
+        "host.project.open",
+        json!({ "path": local_path }),
+    ) {
+        Ok(r) => r,
+        Err(e) => return ok_response(id, tool_err(&format!("host.project.open failed: {e}"))),
+    };
+
+    // Surface needs_save from the host (should not happen since we checked dirty
+    // above, but handle it defensively).
+    if open_result.get("needs_save").and_then(Value::as_bool).unwrap_or(false) {
+        return ok_response(id, tool_ok(json!({
+            "ok": false,
+            "needs_save": true,
+            "message": "Save your current project first, then open.",
+        })));
+    }
+
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "opened": local_path,
+        "name": current.manifest.name,
+    })))
+}
+
 /// Download the current cloud version of a project and write it to a local path
 /// chosen by the caller. Works for cloud-only projects that have no local copy.
 fn handle_export(
@@ -642,6 +775,17 @@ fn tools_list_result() -> Value {
                     },
                     "required": ["path"]
                 }
+            },
+            {
+                "name": "minerva_drive_open",
+                "description": "Pull the latest cloud version of a project and open it in Minerva. Returns {ok:false, needs_save:true} when the current project has unsaved changes — never discards unsaved work. Returns {ok:true, opened, name} on success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "proj_uuid": {"type": "string", "description": "The project UUID to open."}
+                    },
+                    "required": ["proj_uuid"]
+                }
             }
         ]
     })
@@ -724,6 +868,9 @@ fn main() {
                         handle_export(&req.params, req.id, &mut out, &mut lines, &mut next_id)
                     }
                     "minerva_drive_set_folder" => handle_set_folder(&req.params, req.id),
+                    "minerva_drive_open" => {
+                        handle_open(&req.params, req.id, &mut out, &mut lines, &mut next_id)
+                    }
                     other => err_response(
                         req.id,
                         -32601,
@@ -786,6 +933,103 @@ mod tests {
 
     // Guards the export tool_ok payload shape: the panel reads ok/dest_path/
     // bytes_written; name is informational. Verify the keys are all present.
+    // ── open payload shapes ───────────────────────────────────────────────────
+
+    #[test]
+    fn open_payload_ok_shape() {
+        // Guards the shape the panel reads on success: ok/opened/name.
+        let payload = tool_ok(json!({
+            "ok": true,
+            "opened": "/tmp/my.minproj",
+            "name": "my.minproj",
+        }));
+        let text = payload["content"][0]["text"].as_str().expect("text content");
+        let v: Value = serde_json::from_str(text).expect("valid json");
+        assert_eq!(v["ok"], json!(true));
+        assert_eq!(v["opened"], json!("/tmp/my.minproj"));
+        assert_eq!(v["name"], json!("my.minproj"));
+    }
+
+    #[test]
+    fn open_payload_needs_save_shape() {
+        // Guards the shape the panel reads when unsaved changes block the open.
+        let payload = tool_ok(json!({
+            "ok": false,
+            "needs_save": true,
+            "message": "Save your current project first, then open.",
+        }));
+        let text = payload["content"][0]["text"].as_str().expect("text content");
+        let v: Value = serde_json::from_str(text).expect("valid json");
+        assert_eq!(v["ok"], json!(false));
+        assert_eq!(v["needs_save"], json!(true));
+        assert!(!v["message"].as_str().unwrap_or("").is_empty());
+    }
+
+    #[test]
+    fn open_local_path_resolution_from_state() {
+        // When entries already has the proj_uuid, local_path must come from the
+        // state key — not a freshly constructed effective_folder+name path.
+        let mut state = sync::SyncState::default();
+        state.entries.insert(
+            "/existing/path/project.minproj".to_owned(),
+            sync::TrackedEntry {
+                proj_uuid: "uuid-A".to_owned(),
+                name: "project.minproj".to_owned(),
+                base_version: 3,
+                base_hash: "abc".to_owned(),
+            },
+        );
+        // Simulate what handle_open does for path resolution.
+        let proj_uuid = "uuid-A";
+        let folder = "/drive".to_owned();
+        let art_name = "project.minproj";
+        let local_path = state
+            .entries
+            .iter()
+            .find(|(_, e)| e.proj_uuid == proj_uuid)
+            .map(|(path, _)| path.clone())
+            .unwrap_or_else(|| format!("{folder}/{art_name}"));
+        assert_eq!(local_path, "/existing/path/project.minproj",
+            "path must be resolved from state, not constructed from folder");
+    }
+
+    #[test]
+    fn open_local_path_resolution_cloud_only() {
+        // When the proj_uuid is not in state, path is constructed from effective
+        // folder + artifact name. A new entry must be registered.
+        let mut state = sync::SyncState::default();
+        let proj_uuid = "uuid-B";
+        let folder = "/drive".to_owned();
+        let art_name = "new.minproj";
+        let found_path = state
+            .entries
+            .iter()
+            .find(|(_, e)| e.proj_uuid == proj_uuid)
+            .map(|(path, _)| path.clone());
+        assert!(found_path.is_none(), "should be absent from state");
+        let local_path = found_path.unwrap_or_else(|| {
+            let path = format!("{folder}/{art_name}");
+            state.entries.insert(
+                path.clone(),
+                sync::TrackedEntry {
+                    proj_uuid: proj_uuid.to_owned(),
+                    name: art_name.to_owned(),
+                    base_version: 0,
+                    base_hash: String::new(),
+                },
+            );
+            if !state.tracked.iter().any(|t| t == &path) {
+                state.tracked.push(path.clone());
+            }
+            path
+        });
+        assert_eq!(local_path, "/drive/new.minproj");
+        assert!(state.entries.contains_key("/drive/new.minproj"),
+            "new entry must be registered in state");
+        assert!(state.tracked.contains(&"/drive/new.minproj".to_owned()),
+            "new path must be added to tracked");
+    }
+
     #[test]
     fn export_payload_shape() {
         let payload = tool_ok(json!({

@@ -24,6 +24,7 @@ var _remove_btn: Button = null
 var _reveal_btn: Button = null
 var _open_ext_btn: Button = null
 var _download_btn: Button = null
+var _open_btn: Button = null
 var _folder_btn: Button = null
 
 # ── Extra state ───────────────────────────────────────────────────────────────
@@ -119,6 +120,14 @@ func _build_ui() -> void:
 	_download_btn.pressed.connect(_on_download_pressed)
 	_header_row.add_child(_download_btn)
 
+	_open_btn = Button.new()
+	_open_btn.name = "OpenBtn"
+	_open_btn.text = "Open"
+	_open_btn.tooltip_text = "Pull the latest version and open the selected project in Minerva"
+	_open_btn.disabled = true
+	_open_btn.pressed.connect(_on_open_pressed)
+	_header_row.add_child(_open_btn)
+
 	_folder_btn = Button.new()
 	_folder_btn.name = "FolderBtn"
 	_folder_btn.text = "Drive folder…"
@@ -169,6 +178,7 @@ func _build_ui() -> void:
 	# in narrow pane heights; the outer ScrollContainer handles overflow.
 	_project_tree.custom_minimum_size = Vector2(0, 300)
 	_project_tree.item_selected.connect(_on_row_selected)
+	_project_tree.item_activated.connect(_on_row_activated)
 	_main_vbox.add_child(_project_tree)
 
 
@@ -253,6 +263,8 @@ func _populate_tree(projects: Array) -> void:
 		_open_ext_btn.disabled = true
 	if _download_btn != null:
 		_download_btn.disabled = true
+	if _open_btn != null:
+		_open_btn.disabled = true
 	var root: TreeItem = _project_tree.create_item()
 	if projects.is_empty():
 		var empty_item: TreeItem = _project_tree.create_item(root)
@@ -495,6 +507,8 @@ func _on_row_selected() -> void:
 		_open_ext_btn.disabled = not has_path
 	if _download_btn != null:
 		_download_btn.disabled = not has_uuid
+	if _open_btn != null:
+		_open_btn.disabled = not has_uuid
 
 
 ## Save the current cloud version of the selected project to a user-chosen path.
@@ -544,6 +558,55 @@ func _on_download_pressed() -> void:
 		return
 	var written: int = int(result.get("bytes_written", 0))
 	_show_status("Downloaded %s (%d bytes) to: %s" % [str(result.get("name", proj_name)), written, dest])
+
+
+## Open button pressed — delegates to the shared helper.
+func _on_open_pressed() -> void:
+	if _project_tree == null:
+		return
+	var item: TreeItem = _project_tree.get_selected()
+	if item == null:
+		return
+	var proj_uuid: String = str(item.get_metadata(1))
+	await _open_project(proj_uuid)
+
+
+## Double-click or Enter on a tree row — open that project.
+func _on_row_activated() -> void:
+	if _project_tree == null:
+		return
+	var item: TreeItem = _project_tree.get_selected()
+	if item == null:
+		return
+	var proj_uuid: String = str(item.get_metadata(1))
+	await _open_project(proj_uuid)
+
+
+## Pull the latest cloud version and open it in Minerva. Refuses when the
+## current project has unsaved changes (backend enforces the same guard).
+func _open_project(proj_uuid: String) -> void:
+	if proj_uuid.is_empty():
+		return
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot open project.")
+		return
+	_show_status("Opening…")
+	var rid: String = "drive:open:%d" % Time.get_ticks_usec()
+	request.emit("minerva_drive_open", {"proj_uuid": proj_uuid}, rid)
+	var reply: Dictionary = await ipc.await_reply(rid, 120000)
+	if not bool(reply.get("success", false)):
+		_show_status("Open failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+		return
+	var result: Dictionary = reply.get("result", {}) as Dictionary
+	if not bool(result.get("ok", false)):
+		if bool(result.get("needs_save", false)):
+			_show_status(str(result.get("message", "Save your current project first, then open.")))
+		else:
+			_show_status("Open error: %s" % str(result.get("error", "unknown")))
+		return
+	_show_status("Opened %s" % str(result.get("name", proj_uuid)))
+	await _refresh()
 
 
 # ── Plugin event hook ─────────────────────────────────────────────────────────
