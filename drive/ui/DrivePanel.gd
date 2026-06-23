@@ -15,10 +15,12 @@ var _scroll: ScrollContainer = null
 ## Single-column root layout.
 var _main_vbox: VBoxContainer = null
 
-## Header row: device/connection label + Sync Now button.
+## Header row: device/connection label + action buttons.
 var _header_row: HBoxContainer = null
 var _device_label: Label = null
 var _sync_btn: Button = null
+var _add_btn: Button = null
+var _remove_btn: Button = null
 
 ## Status line: shows sync result, errors, or connectivity problems.
 var _status_label: Label = null
@@ -71,6 +73,21 @@ func _build_ui() -> void:
 	_device_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_header_row.add_child(_device_label)
 
+	_add_btn = Button.new()
+	_add_btn.name = "AddBtn"
+	_add_btn.text = "+ Add"
+	_add_btn.tooltip_text = "Choose a file to sync"
+	_add_btn.pressed.connect(_on_add_pressed)
+	_header_row.add_child(_add_btn)
+
+	_remove_btn = Button.new()
+	_remove_btn.name = "RemoveBtn"
+	_remove_btn.text = "Remove"
+	_remove_btn.tooltip_text = "Stop syncing the selected file"
+	_remove_btn.disabled = true
+	_remove_btn.pressed.connect(_on_remove_pressed)
+	_header_row.add_child(_remove_btn)
+
 	_sync_btn = Button.new()
 	_sync_btn.name = "SyncBtn"
 	_sync_btn.text = "Sync Now"
@@ -109,6 +126,7 @@ func _build_ui() -> void:
 	# Fixed height keeps the tree visible without pushing everything off-screen
 	# in narrow pane heights; the outer ScrollContainer handles overflow.
 	_project_tree.custom_minimum_size = Vector2(0, 300)
+	_project_tree.item_selected.connect(_on_row_selected)
 	_main_vbox.add_child(_project_tree)
 
 
@@ -167,6 +185,8 @@ func _populate_tree(projects: Array) -> void:
 	if _project_tree == null:
 		return
 	_project_tree.clear()
+	if _remove_btn != null:
+		_remove_btn.disabled = true
 	var root: TreeItem = _project_tree.create_item()
 	root.visible = false  # hidden root — the tree shows only the project rows
 	if projects.is_empty():
@@ -177,6 +197,7 @@ func _populate_tree(projects: Array) -> void:
 	for entry in projects:
 		var proj: Dictionary = entry as Dictionary
 		var item: TreeItem = _project_tree.create_item(root)
+		item.set_metadata(0, str(proj.get("path", "")))
 		item.set_text(0, str(proj.get("name", "(unnamed)")))
 		var status: String = str(proj.get("status", "unknown"))
 		item.set_text(1, _format_status(status))
@@ -236,6 +257,73 @@ func _on_sync_pressed() -> void:
 	# Refresh display after sync.
 	await _fetch_status()
 	await _fetch_list()
+
+
+# ── Add / remove tracked files ────────────────────────────────────────────────
+
+func _on_add_pressed() -> void:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot add.")
+		return
+	# Pick a file to sync.
+	var pick_id: String = "drive:pick:%d" % Time.get_ticks_usec()
+	request.emit("capability:host.dialogs.file_picker", {
+		"title": "Choose a file to sync",
+		"mode": "open",
+		"filters": ["*"],
+	}, pick_id)
+	var pick: Dictionary = await ipc.await_reply(pick_id, 120000)
+	if not bool(pick.get("success", false)):
+		_show_status("File picker failed: %s" % str(pick.get("error_message", "unknown")))
+		return
+	var presult: Dictionary = pick.get("result", {}) as Dictionary
+	if bool(presult.get("cancelled", false)):
+		return
+	var path: String = str(presult.get("path", ""))
+	if path.is_empty():
+		return
+	# Register it.
+	var add_id: String = "drive:add:%d" % Time.get_ticks_usec()
+	request.emit("minerva_drive_add", {"path": path}, add_id)
+	var reply: Dictionary = await ipc.await_reply(add_id, 15000)
+	if not bool(reply.get("success", false)):
+		_show_status("Add failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+		return
+	_show_status("Added to sync: %s" % path)
+	await _refresh()
+
+
+func _on_remove_pressed() -> void:
+	if _project_tree == null:
+		return
+	var item: TreeItem = _project_tree.get_selected()
+	if item == null:
+		return
+	var path: String = str(item.get_metadata(0))
+	if path.is_empty():
+		return
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		_show_status("IPC unavailable — cannot remove.")
+		return
+	var rid: String = "drive:remove:%d" % Time.get_ticks_usec()
+	request.emit("minerva_drive_remove", {"path": path}, rid)
+	var reply: Dictionary = await ipc.await_reply(rid, 15000)
+	if not bool(reply.get("success", false)):
+		_show_status("Remove failed: %s" % str(reply.get("error_message", str(reply.get("error_code", "unknown")))))
+		return
+	_show_status("Stopped syncing: %s" % path)
+	await _refresh()
+
+
+## Enable Remove only when the selected row maps to a local path (cloud-only
+## rows have none).
+func _on_row_selected() -> void:
+	if _remove_btn == null or _project_tree == null:
+		return
+	var item := _project_tree.get_selected()
+	_remove_btn.disabled = item == null or str(item.get_metadata(0)) == ""
 
 
 # ── Plugin event hook ─────────────────────────────────────────────────────────

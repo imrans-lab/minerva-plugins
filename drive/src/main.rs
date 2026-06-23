@@ -206,33 +206,16 @@ fn save_state(folder: &str, state: &SyncState) {
     }
 }
 
-/// List regular files in the drive folder, excluding hidden files and conflict
-/// copies. Returns their full path strings.
-fn scan_tracked(folder: &str) -> Vec<String> {
-    let dir = match std::fs::read_dir(folder) {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("scan_tracked read_dir {folder}: {e}");
-            return Vec::new();
-        }
-    };
-    let mut paths = Vec::new();
-    for entry in dir.flatten() {
-        let ft = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if !ft.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with('.') || name_str.contains(".conflict-") {
-            continue;
-        }
-        paths.push(entry.path().to_string_lossy().into_owned());
-    }
-    paths
+/// The registered local paths that currently exist as regular files. Registered
+/// paths that are missing (e.g. a project not yet pulled on this device) are
+/// skipped so sync never tries to read a nonexistent file.
+fn tracked_files(state: &SyncState) -> Vec<String> {
+    state
+        .tracked
+        .iter()
+        .filter(|p| std::path::Path::new(p).is_file())
+        .cloned()
+        .collect()
 }
 
 /// Read each tracked file and return a map of path -> content hash.
@@ -305,7 +288,7 @@ fn handle_status(
             })))
         }
         Ok(mut client) => {
-            let tracked = scan_tracked(&folder);
+            let tracked = tracked_files(&state);
             let hashes = local_hashes(&tracked);
             let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
                 Ok(l) => l,
@@ -344,7 +327,7 @@ fn handle_list(
     };
 
     let state = load_state(&folder);
-    let tracked = scan_tracked(&folder);
+    let tracked = tracked_files(&state);
     let hashes = local_hashes(&tracked);
     let listed = match (ArtifactCloudStore { client: &mut client }).list_drive() {
         Ok(l) => l,
@@ -374,7 +357,7 @@ fn handle_sync(
     };
 
     let mut state = load_state(&folder);
-    let tracked = scan_tracked(&folder);
+    let tracked = tracked_files(&state);
     let now = now_iso();
     // Clone device_id before mutably borrowing state for sync.
     let device_id = state.device_id.clone();
@@ -383,9 +366,70 @@ fn handle_sync(
     let local = DiskLocalStore;
     let report = sync::sync(&mut cloud, &local, &mut state, &tracked, &folder, &device_id, &now);
 
+    // Register any files the sync created locally (cloud-only pulls) so their
+    // future edits sync back without the user adding them by hand.
+    let known_paths: Vec<String> = state.entries.keys().cloned().collect();
+    for p in known_paths {
+        if !state.tracked.iter().any(|t| t == &p) {
+            state.tracked.push(p);
+        }
+    }
     save_state(&folder, &state);
 
     ok_response(id, tool_ok(sync_payload(&report)))
+}
+
+/// Register a local file path for sync. Local-only; takes effect on next sync.
+fn handle_add(params: &Value, id: Value) -> RpcResponse {
+    let path = tool_arg_str(params, "path");
+    if path.is_empty() {
+        return ok_response(id, tool_err("add requires a non-empty 'path'"));
+    }
+    let folder = drive_folder();
+    let _ = std::fs::create_dir_all(&folder);
+    let mut state = load_state(&folder);
+    let already = state.tracked.iter().any(|p| p == &path);
+    if !already {
+        state.tracked.push(path.clone());
+        save_state(&folder, &state);
+    }
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "path": path,
+        "added": !already,
+        "tracked": state.tracked.len(),
+    })))
+}
+
+/// Stop syncing a local path. Drops local tracking only; cloud copies remain.
+fn handle_remove(params: &Value, id: Value) -> RpcResponse {
+    let path = tool_arg_str(params, "path");
+    if path.is_empty() {
+        return ok_response(id, tool_err("remove requires a non-empty 'path'"));
+    }
+    let folder = drive_folder();
+    let mut state = load_state(&folder);
+    let before = state.tracked.len();
+    state.tracked.retain(|p| p != &path);
+    state.entries.remove(&path);
+    save_state(&folder, &state);
+    ok_response(id, tool_ok(json!({
+        "ok": true,
+        "path": path,
+        "removed": state.tracked.len() < before,
+        "tracked": state.tracked.len(),
+    })))
+}
+
+/// Read a string argument from a tools/call `arguments` object, trimmed.
+fn tool_arg_str(params: &Value, key: &str) -> String {
+    params
+        .get("arguments")
+        .and_then(|a| a.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned()
 }
 
 /// Shape the sync result for the panel: the pushed/pulled name lists, the
@@ -423,10 +467,28 @@ fn tools_list_result() -> Value {
             },
             {
                 "name": "minerva_drive_sync",
-                "description": "Run a sync pass: push local changes, pull cloud changes, and record conflicts. Returns pushed/pulled/conflict counts and any errors.",
+                "description": "Run a sync pass: push local changes, pull cloud changes, and record conflicts. Returns the pushed and pulled name lists, conflicts, and any errors.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
+                }
+            },
+            {
+                "name": "minerva_drive_add",
+                "description": "Register a local file path to be synced.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "description": "Absolute local file path to sync."}},
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "minerva_drive_remove",
+                "description": "Stop syncing a local file path (cloud copies are kept).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string", "description": "Local file path to stop syncing."}},
+                    "required": ["path"]
                 }
             }
         ]
@@ -504,6 +566,8 @@ fn main() {
                     "minerva_drive_sync" => {
                         handle_sync(&req.params, req.id, &mut out, &mut lines, &mut next_id)
                     }
+                    "minerva_drive_add" => handle_add(&req.params, req.id),
+                    "minerva_drive_remove" => handle_remove(&req.params, req.id),
                     other => err_response(
                         req.id,
                         -32601,

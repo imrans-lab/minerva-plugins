@@ -63,6 +63,10 @@ pub struct SyncState {
     pub device_id: String,
     /// Keyed by local file path.
     pub entries: HashMap<String, TrackedEntry>,
+    /// Local paths the user registered for sync. Serde-default so state files
+    /// written before this field existed still load.
+    #[serde(default)]
+    pub tracked: Vec<String>,
 }
 
 /// A divergence resolved by keeping the cloud version and saving the local edit.
@@ -277,6 +281,8 @@ pub struct ProjectStatus {
     pub status: String,
     pub local_version: u64,
     pub cloud_version: u64,
+    /// Local path, when this project is tracked locally; empty for cloud-only.
+    pub path: String,
 }
 
 /// Read-only status view used by the list tool. `local_hashes` maps each tracked
@@ -313,6 +319,7 @@ pub fn compute_status(
             status: status.to_owned(),
             local_version: entry.base_version,
             cloud_version,
+            path: path.clone(),
         });
     }
 
@@ -326,6 +333,7 @@ pub fn compute_status(
             status: "local_only".to_owned(),
             local_version: 0,
             cloud_version: 0,
+            path: path.clone(),
         });
     }
 
@@ -339,6 +347,7 @@ pub fn compute_status(
             status: "cloud_only".to_owned(),
             local_version: 0,
             cloud_version: art.manifest.version,
+            path: String::new(),
         });
     }
 
@@ -673,12 +682,25 @@ mod tests {
         assert_eq!(a.status, "conflict");
         assert_eq!(a.local_version, 1);
         assert_eq!(a.cloud_version, 2);
+        assert_eq!(a.path, "/p/a.txt", "tracked row carries its local path");
 
-        assert_eq!(by_name("new.txt").unwrap().status, "local_only");
+        let new = by_name("new.txt").unwrap();
+        assert_eq!(new.status, "local_only");
+        assert_eq!(new.path, "/p/new.txt", "local-only row carries its local path");
 
         let remote = by_name("remote.txt").expect("cloud-only row");
         assert_eq!(remote.status, "cloud_only");
         assert_eq!(remote.cloud_version, 5);
+        assert_eq!(remote.path, "", "cloud-only row has no local path");
+    }
+
+    #[test]
+    fn state_loads_without_tracked_field() {
+        // A state file written before `tracked` existed must still deserialize.
+        let legacy = r#"{"device_id":"dev1","entries":{}}"#;
+        let state: SyncState = serde_json::from_str(legacy).expect("legacy state parses");
+        assert_eq!(state.device_id, "dev1");
+        assert!(state.tracked.is_empty());
     }
 
     // Live end-to-end check of the real cloud adapter against the artifact
