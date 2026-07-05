@@ -2,6 +2,8 @@ class_name Cad_AnnotationHost
 extends AnnotationHost
 
 const _CadAnchorTypesScript = preload("scripts/CadAnchorTypes.gd")
+const _SchemaScript = preload("res://Scripts/Services/Annotations/AnnotationV2Schema.gd")
+const _CadEdgeNumberKindScript = preload("kinds/cad_edge_number_kind.gd")
 ## AnnotationHost for the CAD plugin panel (Round 1 scaffold).
 ##
 ## Follows the canonical pattern established by Helloscene_AnnotationHost
@@ -107,13 +109,22 @@ func get_capabilities() -> Dictionary:
 	}
 
 
-## Add an annotation. Assigns an id if missing, stamps anchor, emits signal.
+## Add an annotation. Normalizes to the conformant v2 shape, assigns an id if
+## missing, VALIDATES via validate_with_registry (conformance gate — mirrors
+## TextEditorAnnotationHost / PcbAnnotationHost), stamps anchor, emits signal.
+## Returns "" (nothing stored) when the envelope fails validation.
 func add_annotation(annotation: Dictionary) -> String:
-	var id: String = str(annotation.get("id", ""))
+	var stored: Dictionary = _normalize_envelope(annotation)
+	var id: String = str(stored.get("id", ""))
 	if id.is_empty():
 		id = "ann_%x" % randi()
-	var stored: Dictionary = annotation.duplicate(true)
-	stored["id"] = id
+		stored["id"] = id
+	if _registry != null:
+		var schema = _SchemaScript.new()
+		var result = schema.validate_with_registry(stored, _registry)
+		if result.has_errors():
+			push_warning("[Cad_AnnotationHost] add_annotation: validation errors: %s" % str(result.to_error_dicts()))
+			return ""
 	AnnotationHost._stamp_anchor(stored, self)
 	_annotations.append(stored)
 	annotations_changed.emit()
@@ -141,7 +152,10 @@ func update_annotation(annotation_id: String, new_annotation: Dictionary) -> boo
 	for i in range(_annotations.size()):
 		var entry: Dictionary = _annotations[i] as Dictionary
 		if str(entry.get("id", "")) == annotation_id:
-			var stored: Dictionary = new_annotation.duplicate(true)
+			# Normalize on write so updates (lifecycle patches, body-view edits)
+			# keep the stored envelope conformant. No hard reject here — lifecycle
+			# flows must not silently fail — but the shape stays v2-valid.
+			var stored: Dictionary = _normalize_envelope(new_annotation)
 			stored["id"] = annotation_id
 			AnnotationHost._stamp_anchor(stored, self)
 			_annotations[i] = stored
@@ -182,13 +196,113 @@ func get_annotations() -> Array:
 
 
 ## Replace the annotation list wholesale (used by panel save/load).
+##
+## Accept-old-on-read: legacy CAD sidecars/persisted annotations store the kind
+## data under `payload` and omit lifecycle/visible_in_views/summary. Each entry
+## is normalized to the conformant v2 shape on load; write-new-always keeps them
+## conformant on the next save.
 func set_annotations(list: Array) -> void:
 	_annotations = []
 	for ann in list:
 		if ann is Dictionary:
-			_annotations.append((ann as Dictionary).duplicate(true))
+			_annotations.append(_normalize_envelope(ann as Dictionary))
 	AnnotationHost.refresh_all_anchors(_annotations, self)
 	annotations_changed.emit()
+
+
+# ── Envelope conformance (accept-old-on-read, write-new-always) ───────────────
+#
+# DCR 019dc0543da5 / item 019f335754e0. The shipped validator AnnotationV2Schema
+# requires: kind_payload, anchor.snapshot.position, lifecycle (closed enum),
+# author-dict {kind}, view_context, visible_in_views (Array), summary,
+# schema_version == 2. Legacy CAD envelopes used `payload` and set none of the
+# rest. _normalize_envelope upgrades any envelope to the conformant shape and is
+# idempotent, so re-normalizing an already-conformant envelope is a no-op.
+
+## Upgrade an annotation envelope to the conformant v2 shape. Idempotent.
+func _normalize_envelope(envelope: Dictionary) -> Dictionary:
+	var out: Dictionary = envelope.duplicate(true)
+
+	# payload → kind_payload (drop the legacy slot; the kind reads either shape).
+	if not (out.get("kind_payload", null) is Dictionary):
+		var legacy: Variant = out.get("payload", null)
+		out["kind_payload"] = (legacy as Dictionary).duplicate(true) if legacy is Dictionary else {}
+	out.erase("payload")
+
+	# schema_version must be exactly 2.
+	if int(out.get("schema_version", 0)) != 2:
+		out["schema_version"] = 2
+
+	# lifecycle: closed enum, default "open".
+	if str(out.get("lifecycle", "")) not in ["open", "applied", "resolved", "stale"]:
+		out["lifecycle"] = "open"
+
+	# author: Dictionary {kind}, upgrading a bare "human"/"ai" string.
+	out["author"] = _normalize_author(out.get("author", null))
+
+	# view_context: non-empty; default to the host's current context.
+	if str(out.get("view_context", "")).is_empty():
+		out["view_context"] = get_view_context()
+
+	# visible_in_views: non-empty Array; default ["all"].
+	var viv: Variant = out.get("visible_in_views", null)
+	if not (viv is Array) or (viv as Array).is_empty():
+		out["visible_in_views"] = ["all"]
+
+	# anchor.snapshot.position must exist.
+	out["anchor"] = _normalize_anchor(out.get("anchor", {}))
+
+	# summary: non-empty human/LLM-readable string.
+	if str(out.get("summary", "")).is_empty():
+		out["summary"] = _synthesize_summary(out)
+
+	return out
+
+
+func _normalize_author(raw: Variant) -> Dictionary:
+	if raw is Dictionary:
+		var d: Dictionary = (raw as Dictionary).duplicate(true)
+		if str(d.get("kind", "")) not in ["human", "ai"]:
+			d["kind"] = "human"
+		return d
+	return {"kind": "ai" if str(raw) == "ai" else "human"}
+
+
+func _normalize_anchor(raw: Variant) -> Dictionary:
+	var anchor: Dictionary = (raw as Dictionary).duplicate(true) if raw is Dictionary else {}
+	var snap: Variant = anchor.get("snapshot", null)
+	if not (snap is Dictionary) or not (snap as Dictionary).has("position"):
+		var snap_d: Dictionary = (snap as Dictionary).duplicate(true) if snap is Dictionary else {}
+		snap_d["position"] = _snapshot_position_for_anchor(anchor)
+		anchor["snapshot"] = snap_d
+	return anchor
+
+
+## Best-effort 2D snapshot position for an anchor. For a cad/edge anchor we
+## resolve the live edge midpoint (flattened to 2D); when the edge registry is
+## empty (headless / pre-evaluate) this returns [0, 0], which still satisfies the
+## schema's "position present" requirement.
+func _snapshot_position_for_anchor(anchor: Dictionary) -> Array:
+	if str(anchor.get("plugin", "")) == "cad" and str(anchor.get("type", "")) == "edge" and anchor.has("id"):
+		var resolved: Variant = _resolve_edge_anchor(anchor)
+		if resolved is Dictionary:
+			var p: Variant = (resolved as Dictionary).get("position", null)
+			if p is Vector3:
+				return [(p as Vector3).x, (p as Vector3).y]
+	return [0.0, 0.0]
+
+
+## One-line summary for a normalized envelope that lacks one. Uses the
+## kind_payload text when present, else names the anchored edge.
+func _synthesize_summary(envelope: Dictionary) -> String:
+	var kp: Variant = envelope.get("kind_payload", {})
+	var text := str((kp as Dictionary).get("text", "")) if kp is Dictionary else ""
+	if not text.is_empty():
+		return text
+	var anchor: Variant = envelope.get("anchor", {})
+	if anchor is Dictionary and str((anchor as Dictionary).get("type", "")) == "edge":
+		return "Edge %s annotation" % str((anchor as Dictionary).get("id", "?"))
+	return "CAD annotation"
 
 
 ## Semantic hit-testing — Round 1 stub returning "".
@@ -521,6 +635,14 @@ func _init() -> void:
 		_CadAnchorTypesScript.EDGE_ANCHOR_KEY,
 		_resolve_edge_anchor
 	)
+	# Build a self-sufficient kind registry (built-in kinds + cad_edge_number) so
+	# add_annotation validates envelopes via validate_with_registry even when no
+	# CADPanel has injected one (headless tests, off-tree loads). CADPanel still
+	# overwrites _registry with its own equivalent instance in _ready(); both
+	# register the same kinds, so the overwrite is a no-op in practice.
+	_registry = AnnotationRegistry.new()
+	BuiltinKinds.register_all(_registry)
+	_registry.register_annotation_kind(_CadEdgeNumberKindScript.new())
 
 
 ## Phase B2: domain picker — surfaces the currently-selected edge as a

@@ -93,6 +93,42 @@ func _init() -> void:
 		toolbar_icon = ImageTexture.create_from_image(icon_img)
 
 
+# ── Payload compatibility (accept-old-on-read) ────────────────────────────────
+#
+# Conformant v2 envelopes store the kind's data under `kind_payload` (the shape
+# AnnotationV2Schema requires). Legacy CAD envelopes authored before conformance
+# (DCR 019dc0543da5) used `payload`. Cad_AnnotationHost normalizes payload→
+# kind_payload on write and on load, but this kind renders BOTH shapes during the
+# transition via the tolerant getter below so in-flight / un-normalized dicts
+# (e.g. an envelope handed straight to render() by a test or an older sidecar
+# read through a non-normalizing path) still draw.
+
+## Read the kind's data slot tolerantly: prefer conformant `kind_payload`, fall
+## back to the legacy `payload`. Returns {} when neither is a Dictionary.
+static func _payload_of(annotation: Dictionary) -> Dictionary:
+	var kp: Variant = annotation.get("kind_payload", null)
+	if kp is Dictionary:
+		return kp as Dictionary
+	var p: Variant = annotation.get("payload", null)
+	return (p as Dictionary) if p is Dictionary else {}
+
+
+## Which slot to WRITE back to so an in-place edit does not desync the two
+## shapes: `kind_payload` when the envelope already has it, else legacy `payload`.
+static func _payload_key(annotation: Dictionary) -> String:
+	return "kind_payload" if annotation.has("kind_payload") else "payload"
+
+
+# ── Anchor compatibility ──────────────────────────────────────────────────────
+
+## Anchor types this kind accepts. AnnotationV2Schema.validate_with_registry
+## reads this so a cad/edge-anchored envelope passes the kind/anchor compat check
+## (without it the schema falls back to _GENERIC_KIND_ANCHORS, which has no CAD
+## entry, and rejects every cad_edge_number envelope as "accepts no anchors").
+func accepted_anchor_types() -> Array:
+	return ["cad/edge"]
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 func validate(annotation: Dictionary) -> Array:
@@ -114,7 +150,7 @@ func validate(annotation: Dictionary) -> Array:
 		if not (id_val is int or id_val is float):
 			errors.append({"field": "anchor.id", "message": "anchor.id must be an integer"})
 
-	var payload: Dictionary = annotation.get("payload", {})
+	var payload: Dictionary = _payload_of(annotation)
 	# payload.text is optional (defaults to ""); validate type when present.
 	if payload.has("text") and not (payload["text"] is String):
 		errors.append({"field": "payload.text", "message": "payload.text must be a string"})
@@ -159,7 +195,7 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	var edge_id: int = int(resolved_d.get("edge_id", (anchor as Dictionary).get("id", -1)))
 	var is_stale: bool = bool(resolved_d.get("stale", false))
 
-	var payload: Dictionary = annotation.get("payload", {})
+	var payload: Dictionary = _payload_of(annotation)
 	var text: String = str(payload.get("text", payload.get("label", "")))
 	var box_offset := _vec3_from_payload(payload.get("box_offset", [0.0, 0.0, 0.0]))
 	var leader_end_world: Vector3 = leader_start_world + box_offset
@@ -216,12 +252,12 @@ static func _anchor_for_annotation(annotation: Dictionary) -> Variant:
 	var anchor: Variant = annotation.get("anchor", null)
 	if anchor is Dictionary:
 		return anchor
-	var payload_v: Variant = annotation.get("payload", {})
-	if payload_v is Dictionary and (payload_v as Dictionary).has("edge_id"):
+	var payload: Dictionary = _payload_of(annotation)
+	if payload.has("edge_id"):
 		return {
 			"plugin": "cad",
 			"type": "edge",
-			"id": int((payload_v as Dictionary).get("edge_id", -1)),
+			"id": int(payload.get("edge_id", -1)),
 		}
 	return null
 
@@ -288,11 +324,10 @@ func transform_annotation(
 	var new_box_offset := _back_project_to_world_offset(camera, rect, anchor_world, new_box_screen)
 
 	var out := annotation.duplicate(true)
-	var payload_v: Variant = out.get("payload", {})
-	var payload: Dictionary = payload_v.duplicate(true) if payload_v is Dictionary else {}
+	var payload: Dictionary = _payload_of(out).duplicate(true)
 	payload["box_offset"] = [new_box_offset.x, new_box_offset.y, new_box_offset.z]
 	payload["user_placed"] = true
-	out["payload"] = payload
+	out[_payload_key(out)] = payload
 	return out
 
 
@@ -360,7 +395,7 @@ func _resolve_perspective_ctx_for_annotation(annotation: Dictionary) -> Dictiona
 		# state + camera so subsequent transform_annotation calls within a
 		# drag see the same start_box_screen (see _drag_start_box_screen_cache
 		# header for the substrate contract that makes this necessary).
-		var payload: Dictionary = annotation.get("payload", {}) as Dictionary
+		var payload: Dictionary = _payload_of(annotation)
 		var user_placed: bool = bool(payload.get("user_placed", false))
 		var box_screen: Vector2
 		if user_placed:
