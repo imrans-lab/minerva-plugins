@@ -22,7 +22,7 @@ import os
 import traceback
 from pathlib import Path
 
-from . import board_model, kicad
+from . import board_model, kicad, libcheck
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -103,24 +103,10 @@ def _generate(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
-def _resolve_footprint(lib_dir: str, footprint: str) -> bool:
-    """True iff a .kicad_mod for *footprint* exists under *lib_dir*.
-
-    Accepts both "Lib:Name" (KiCad fp-lib-table form → <lib_dir>/Lib.pretty/
-    Name.kicad_mod) and a bare "Name" (searched across any *.pretty dir).
-    """
-    if ":" in footprint:
-        lib, _, name = footprint.partition(":")
-        return (Path(lib_dir) / f"{lib}.pretty" / f"{name}.kicad_mod").is_file()
-    # Bare name — scan every *.pretty directory.
-    try:
-        for entry in os.scandir(lib_dir):
-            if entry.is_dir() and entry.name.endswith(".pretty"):
-                if (Path(entry.path) / f"{footprint}.kicad_mod").is_file():
-                    return True
-    except OSError:
-        return False
-    return False
+_NO_LIBRARY_DATA_HINT = (
+    "No KiCAD library data found under lib_dir. Run pcb_fetch_libraries first, "
+    "then retry (see pcb_library_status to check what's already fetched)."
+)
 
 
 def _check_libraries(params: dict) -> dict:
@@ -130,33 +116,52 @@ def _check_libraries(params: dict) -> dict:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
     lib_dir = params.get("lib_dir")
-    # The library DATA ships with the NEXT child. With no lib_dir (or one that
-    # doesn't exist) this is an explicit "no data" answer — never a crash.
+    # lib_dir data is fetched by the Go-side pcb_fetch_libraries tool (see
+    # pcb/internal/libraries/ + docs/libraries.md) into a directory this
+    # method never writes to — it only reads whatever is already there. With
+    # no lib_dir (or one that doesn't exist / isn't a directory yet) this is
+    # an explicit "no data" answer — never a crash.
     if not isinstance(lib_dir, str) or lib_dir.strip() == "" or not os.path.isdir(lib_dir):
         return {"ok": True, "result": {
             "ok": True,
             "checked": 0,
             "missing": [],
             "missing_data": True,
+            "hint": _NO_LIBRARY_DATA_HINT,
         }}
 
     checked = 0
     missing: list[dict] = []
+    missing_symbols: list[dict] = []
     for i, comp in enumerate(board.get("components") or []):
         if not isinstance(comp, dict):
             continue
         fp = comp.get("footprint")
-        if not isinstance(fp, str) or fp == "":
-            continue
-        checked += 1
-        if not _resolve_footprint(lib_dir, fp):
-            missing.append({"path": f"components[{i}].footprint",
-                            "ref": comp.get("ref"), "footprint": fp})
+        if isinstance(fp, str) and fp != "":
+            # Footprint match is REQUIRED per board-yaml's footprint field —
+            # boards always reference a footprint, so this gates `ok`.
+            checked += 1
+            if not libcheck.resolve_footprint(lib_dir, fp):
+                missing.append({"path": f"components[{i}].footprint",
+                                "ref": comp.get("ref"), "footprint": fp,
+                                "suggestions": libcheck.suggest_footprints(lib_dir, fp)})
+
+        # Symbol match is OPTIONAL and informational only: the canonical
+        # board-yaml schema has no first-class "symbol" field (components
+        # reference footprints, not symbols — see docs/board-yaml.md), but a
+        # component may carry one via the schema's Extra passthrough. When
+        # present, report a resolve miss as a soft "missing_symbols" entry —
+        # it never affects `ok` or `checked`.
+        sym = comp.get("symbol")
+        if isinstance(sym, str) and sym != "" and not libcheck.resolve_symbol(lib_dir, sym):
+            missing_symbols.append({"path": f"components[{i}].symbol",
+                                    "ref": comp.get("ref"), "symbol": sym})
 
     return {"ok": True, "result": {
         "ok": len(missing) == 0,
         "checked": checked,
         "missing": missing,
+        "missing_symbols": missing_symbols,
         "missing_data": False,
         "lib_dir": lib_dir,
     }}
@@ -172,12 +177,20 @@ def _check_bom(params: dict) -> dict:
     lib_present = isinstance(lib_dir, str) and lib_dir.strip() != "" and os.path.isdir(lib_dir)
     result = board_model.extract_bom(board, lib_present=lib_present)
 
-    # Footprint suggestions only when library data is present (per contract).
+    # Footprint presence + nearest-name suggestions only when library data is
+    # present (per contract) — mirrors check_libraries's missing_data shape so
+    # callers can treat the two tools uniformly.
     if lib_present:
         for it in result["items"]:
             fp = it.get("footprint") or ""
-            it["footprint_found"] = bool(fp) and _resolve_footprint(lib_dir, fp)
+            found = bool(fp) and libcheck.resolve_footprint(lib_dir, fp)
+            it["footprint_found"] = found
+            if fp and not found:
+                it["suggestions"] = libcheck.suggest_footprints(lib_dir, fp)
     result["lib_present"] = lib_present
+    result["missing_data"] = not lib_present
+    if not lib_present:
+        result["hint"] = _NO_LIBRARY_DATA_HINT
     return {"ok": True, "result": result}
 
 

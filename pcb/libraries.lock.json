@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "tag": "9.0.9.1",
+  "generated_at": "2026-07-05T22:00:10Z",
+  "source": {
+    "symbols_repo": "https://gitlab.com/kicad/libraries/kicad-symbols",
+    "footprints_repo": "https://gitlab.com/kicad/libraries/kicad-footprints"
+  },
+  "entries": [
+    {
+      "name": "Device.kicad_sym",
+      "kind": "symbol_lib",
+      "dest": "Device.kicad_sym",
+      "url": "https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/9.0.9.1/Device.kicad_sym",
+      "sha256": "bf466eecad72ed640dd9a279bce4741c1fcf3d0eecfb07e933c945f7a64744ae",
+      "size_bytes": 2218424
+    },
+    {
+      "name": "Connector.kicad_sym",
+      "kind": "symbol_lib",
+      "dest": "Connector.kicad_sym",
+      "url": "https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/9.0.9.1/Connector.kicad_sym",
+      "sha256": "5c46ee679a6d5ef5d67115ce3f3217636385de49f316db649f44376861de31c9",
+      "size_bytes": 4915441
+    },
+    {
+      "name": "Connector_Generic.kicad_sym",
+      "kind": "symbol_lib",
+      "dest": "Connector_Generic.kicad_sym",
+      "url": "https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/9.0.9.1/Connector_Generic.kicad_sym",
+      "sha256": "c44a0a561694b37a58027539b4e215067f64b5789cd7855bc001890dc484d51b",
+      "size_bytes": 6694163
+    },
+    {
+      "name": "power.kicad_sym",
+      "kind": "symbol_lib",
+      "dest": "power.kicad_sym",
+      "url": "https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/9.0.9.1/power.kicad_sym",
+      "sha256": "541c49bdad55134b5f6379e80c6d18f165c1d9e98ca7df36ad6ec2a316a6d11b",
+      "size_bytes": 165243
+    },
+    {
+      "name": "MCU_Module.kicad_sym",
+      "kind": "symbol_lib",
+      "dest": "MCU_Module.kicad_sym",
+      "url": "https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/9.0.9.1/MCU_Module.kicad_sym",
+      "sha256": "4032f6cd7e5e303cb792324c965ba4d0f8fc8a8f71cbac7fc0f200cb0287dc44",
+      "size_bytes": 888906
+    },
+    {
+      "name": "Regulator_Linear.kicad_sym",
+      "kind": "symbol_lib",
+      "dest": "Regulator_Linear.kicad_sym",
+      "url": "https://gitlab.com/kicad/libraries/kicad-symbols/-/raw/9.0.9.1/Regulator_Linear.kicad_sym",
+      "sha256": "0668d6043b5213767a7f45ff376b06c1cb1edec1309cc6ce51e7a0e0cbecf3fc",
+      "size_bytes": 2358538
+    },
+    {
+      "name": "Resistor_SMD.pretty/R_0402_1005Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "Resistor_SMD.pretty/R_0402_1005Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Resistor_SMD.pretty/R_0402_1005Metric.kicad_mod",
+      "sha256": "3d0936db48c6ab489699460947c0404419ffeb7b715a627460c54e101212ce02",
+      "size_bytes": 1767
+    },
+    {
+      "name": "Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Resistor_SMD.pretty/R_0603_1608Metric.kicad_mod",
+      "sha256": "32e6f926b4be772aeabae6060210133fbf78854a3fe12ca7011b4916ed49f134",
+      "size_bytes": 1773
+    },
+    {
+      "name": "Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
+      "sha256": "704d1094b0451245bffd3829cb0570418ca82d48bda9912ed1808ac90ff79667",
+      "size_bytes": 1775
+    },
+    {
+      "name": "Capacitor_SMD.pretty/C_0402_1005Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "Capacitor_SMD.pretty/C_0402_1005Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Capacitor_SMD.pretty/C_0402_1005Metric.kicad_mod",
+      "sha256": "88232454c8ab84afbcda21beeeccc8a2b0b745b15c0515a83e3d56ff9be2d412",
+      "size_bytes": 1766
+    },
+    {
+      "name": "Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Capacitor_SMD.pretty/C_0603_1608Metric.kicad_mod",
+      "sha256": "86a101f1dbc512aa9a73532f4b837db141edd5bded65094b0d13dca3fc3f6c68",
+      "size_bytes": 1758
+    },
+    {
+      "name": "Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
+      "sha256": "1e9871a31457c9d9932d22edb68ed91c275a6270066239b08d192eead990c301",
+      "size_bytes": 1860
+    },
+    {
+      "name": "LED_SMD.pretty/LED_0603_1608Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "LED_SMD.pretty/LED_0603_1608Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/LED_SMD.pretty/LED_0603_1608Metric.kicad_mod",
+      "sha256": "813026fb584d47b87fb701e748b473ab50c923fd4d6e92a286e39362887a37c8",
+      "size_bytes": 2267
+    },
+    {
+      "name": "LED_SMD.pretty/LED_0805_2012Metric.kicad_mod",
+      "kind": "footprint",
+      "dest": "LED_SMD.pretty/LED_0805_2012Metric.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/LED_SMD.pretty/LED_0805_2012Metric.kicad_mod",
+      "sha256": "49307a68d4aac7b96937e9398c3f8fb560839424eea11fc3c31a5af95a3a079a",
+      "size_bytes": 2273
+    },
+    {
+      "name": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+      "kind": "footprint",
+      "dest": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+      "sha256": "5a656ff149fccf131618c4f56ab3c7f72c2a14c2d763fbfaacd61a8581e3b4c5",
+      "size_bytes": 2595
+    },
+    {
+      "name": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x04_P2.54mm_Vertical.kicad_mod",
+      "kind": "footprint",
+      "dest": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x04_P2.54mm_Vertical.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Connector_PinHeader_2.54mm.pretty/PinHeader_1x04_P2.54mm_Vertical.kicad_mod",
+      "sha256": "62f240288a76b5d38f3310d004da9db832149af3c29d9890ee4f96764fc9c444",
+      "size_bytes": 2837
+    },
+    {
+      "name": "Connector_PinHeader_2.54mm.pretty/PinHeader_2x05_P2.54mm_Vertical.kicad_mod",
+      "kind": "footprint",
+      "dest": "Connector_PinHeader_2.54mm.pretty/PinHeader_2x05_P2.54mm_Vertical.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Connector_PinHeader_2.54mm.pretty/PinHeader_2x05_P2.54mm_Vertical.kicad_mod",
+      "sha256": "b0aa7bcb7649100b5619d9f9ea4daeb4a4f72affb326439a6c337bde1d53ffed",
+      "size_bytes": 3872
+    },
+    {
+      "name": "Package_SO.pretty/SOIC-8_3.9x4.9mm_P1.27mm.kicad_mod",
+      "kind": "footprint",
+      "dest": "Package_SO.pretty/SOIC-8_3.9x4.9mm_P1.27mm.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Package_SO.pretty/SOIC-8_3.9x4.9mm_P1.27mm.kicad_mod",
+      "sha256": "623e154d907cd3e49387a81775898feee35c4ed5fd3317865ad11c322f72adfb",
+      "size_bytes": 4447
+    },
+    {
+      "name": "Package_SO.pretty/SOIC-16_3.9x9.9mm_P1.27mm.kicad_mod",
+      "kind": "footprint",
+      "dest": "Package_SO.pretty/SOIC-16_3.9x9.9mm_P1.27mm.kicad_mod",
+      "url": "https://gitlab.com/kicad/libraries/kicad-footprints/-/raw/9.0.9.1/Package_SO.pretty/SOIC-16_3.9x9.9mm_P1.27mm.kicad_mod",
+      "sha256": "a75e250f33e9565e835b6f4d15adbdd8b1ee5edafd2f43396d6429e4060a7f58",
+      "size_bytes": 5589
+    }
+  ]
+}

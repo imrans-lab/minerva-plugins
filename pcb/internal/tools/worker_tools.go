@@ -18,7 +18,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
+	"github.com/imrans-lab/minerva-plugins/pcb/internal/libraries"
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
@@ -96,7 +98,7 @@ var CheckLibraries = ToolSpec{
 }
 
 func HandleCheckLibraries(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "check_libraries", params)
+	return w.Call(ctx, "check_libraries", withDefaultLibDir(params))
 }
 
 // ---- pcb_check_bom ---------------------------------------------------------
@@ -118,5 +120,43 @@ var CheckBOM = ToolSpec{
 }
 
 func HandleCheckBOM(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "check_bom", params)
+	return w.Call(ctx, "check_bom", withDefaultLibDir(params))
+}
+
+// withDefaultLibDir fills in lib_dir with the fetched-library data directory
+// (libraries.DefaultDir — pcb_fetch_libraries's destination) whenever the
+// caller omits it or supplies an empty/whitespace-only value, so an LLM
+// caller doesn't need to know the path to get real footprint/symbol checks
+// once pcb_fetch_libraries has run. An explicit caller-supplied lib_dir is
+// never overridden. The worker's own os.path.isdir(lib_dir) guard handles the
+// not-yet-fetched case gracefully (missing_data:true + hint) — this helper
+// never needs to check presence itself.
+//
+// Malformed params (not a JSON object) are passed through unchanged; the
+// worker's own parse-error handling reports that uniformly.
+func withDefaultLibDir(params json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if len(params) == 0 {
+		m = map[string]interface{}{}
+	} else if err := json.Unmarshal(params, &m); err != nil {
+		return params
+	}
+
+	if ld, ok := m["lib_dir"]; !ok || isBlankString(ld) {
+		m["lib_dir"] = libraries.DefaultDir()
+	}
+
+	out, err := json.Marshal(m)
+	if err != nil {
+		return params
+	}
+	return out
+}
+
+func isBlankString(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	s, ok := v.(string)
+	return ok && strings.TrimSpace(s) == ""
 }

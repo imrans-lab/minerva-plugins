@@ -33,6 +33,8 @@ components:
     y_mm: 12
     rotation_deg: 90
     layer: top
+    symbol: Device:NE555P      # OPTIONAL, unmodeled — carried in Extra (see below);
+                                # checked informally by pcb_check_libraries when present
     pins:
       - {number: "1", name: VCC, x_mm: 0, y_mm: 0}   # component-relative offsets
 nets:

@@ -141,16 +141,16 @@ var (
 	registry *tools.Registry
 )
 
+// pluginRoot is resolved once in main() and reused by initWorker (Python
+// interpreter / worker dir resolution) and initRegistry (libraries.lock.json
+// location for the pcb_fetch_libraries / pcb_library_status tools).
+var pluginRoot string
+
 // initWorker resolves the Python interpreter and constructs the Worker. The
 // worker is NOT spawned here — spawning is lazy (first pcb_* tool call). This
 // plugin has no embedded PBS bundle yet, so PythonPath falls through to the dev
 // tiers: <worker>/.venv, then python3 on PATH.
 func initWorker() {
-	pluginRoot, err := pluginRootDir()
-	if err != nil {
-		log.Printf("pcb-plugin: WARNING: cannot determine plugin root: %v", err)
-		pluginRoot = "."
-	}
 	workerDir := sharedruntime.WorkerScriptDir(pluginRoot)
 
 	pythonPath, err := sharedruntime.PythonPath(sharedruntime.PythonPathRequest{
@@ -191,6 +191,8 @@ func pluginRootDir() (string, error) {
 // initRegistry registers all MCP tools. Called once at startup.
 func initRegistry() {
 	tools.SetVersion(serverVersion)
+	tools.SetPluginRoot(pluginRoot)
+	tools.SetNotifier(emitHostNotify)
 	registry = tools.NewRegistry()
 
 	// In-process tools (no worker) — adapted to the worker-threaded signature.
@@ -202,6 +204,10 @@ func initRegistry() {
 	registry.Register(tools.Deserialize, tools.WrapInProcess(tools.HandleDeserialize))
 	registry.Register(tools.CollectExport, tools.WrapInProcess(tools.HandleCollectExport))
 	registry.Register(tools.ApplyExport, tools.WrapInProcess(tools.HandleApplyExport))
+	// Library-data fetch/status — in-process (no Python worker involved), the
+	// Go-side network fetcher (pcb/internal/libraries/). See docs/libraries.md.
+	registry.Register(tools.FetchLibraries, tools.WrapInProcess(tools.HandleFetchLibraries))
+	registry.Register(tools.LibraryStatus, tools.WrapInProcess(tools.HandleLibraryStatus))
 
 	// Worker-backed tools — lazily spawn python -m pcb_worker via the bridge.
 	registry.Register(tools.Validate, tools.HandleValidate)
@@ -407,6 +413,13 @@ func main() {
 	log.SetOutput(os.Stderr)
 
 	log.Printf("starting (pid=%d)", os.Getpid())
+
+	root, err := pluginRootDir()
+	if err != nil {
+		log.Printf("pcb-plugin: WARNING: cannot determine plugin root: %v", err)
+		root = "."
+	}
+	pluginRoot = root
 
 	initRegistry()
 	initWorker()

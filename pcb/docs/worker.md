@@ -28,13 +28,18 @@ core Minerva's `minerva_pcb_*` tools.
 |---|---|---|
 | `pcb_validate` | `validate` | structural validation → `{ok, errors[], warnings[]}` |
 | `pcb_generate` | `generate` | canonical YAML → KiCad file text |
-| `pcb_check_libraries` | `check_libraries` | footprint existence vs a `lib_dir` |
+| `pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` (real data this round — see `docs/libraries.md`) |
 | `pcb_check_bom` | `check_bom` | BOM extraction + validation |
 | — (health) | `init`, `ping` | version/liveness handshake |
 
 Every method returns the bridge envelope `{"ok": bool, "result"|"error": …}`
 (the Go router re-wraps success as `{ok:true, result}` and worker errors as
 `{ok:false, error}` for the MCP `content[0].text` payload).
+
+**Not worker methods** — `pcb_fetch_libraries` and `pcb_library_status` are
+in-process Go tools (no Python round-trip; the fetch is plain `net/http`) that
+provide the `lib_dir` data `check_libraries`/`check_bom` read. See
+`docs/libraries.md` for the full fetch/verify/data-dir contract.
 
 ### `validate` — `{yaml}` or `{board}` → `{ok, errors[], warnings[]}`
 
@@ -72,24 +77,45 @@ nodes, the outline as four `Edge.Cuts` `gr_line`s, and vias. Nets are declared
 and pads/segments reference them. The `.kicad_sch`/`.kicad_pro` are **minimal
 netlist-carrying skeletons** (see divergence below).
 
-### `check_libraries` — `{yaml|board, lib_dir?}` → `{ok, checked, missing[], missing_data}`
+### `check_libraries` — `{yaml|board, lib_dir?}` → `{ok, checked, missing[], missing_symbols[], missing_data}`
 
-The library **data** ships with a later child. The `lib_dir` arg is the data
-contract: a directory of KiCAD `*.pretty` footprint libraries. A footprint
-resolves if a `.kicad_mod` exists — `"Lib:Name"` → `<lib_dir>/Lib.pretty/
-Name.kicad_mod`; a bare `"Name"` is searched across every `*.pretty` dir.
+The library **data** ships via `pcb_fetch_libraries` + `pcb/libraries.lock.json`
+(see `docs/libraries.md` for the fetch/verify/data-dir contract). The `lib_dir`
+arg is the data contract: a directory of KiCAD `*.kicad_sym` symbol libraries
+and `*.pretty` footprint libraries (`pcb_worker/libcheck.py` reads both). The
+Go router (`internal/tools/worker_tools.go`'s `withDefaultLibDir`) fills in
+the fetched-data directory automatically whenever a caller omits `lib_dir`, so
+in practice most callers never pass it explicitly.
+
+A footprint resolves if a `.kicad_mod` exists — `"Lib:Name"` →
+`<lib_dir>/Lib.pretty/Name.kicad_mod`; a bare `"Name"` is searched across every
+`*.pretty` dir. **Footprint match is required** per board-yaml's footprint
+field — every component that declares one gates `ok`, and a miss carries
+nearest-name `suggestions[]` (via `difflib`).
+
+A component may optionally carry a `symbol` field via the schema's `Extra`
+passthrough (board-yaml has no first-class symbol field — components
+reference footprints, not symbols). When present, it's checked against the
+`.kicad_sym` files' top-level symbol names (see `docs/libraries.md`'s "Worker-
+side reading" for the paren-depth scan). **Symbol match is optional/informal**
+— a miss lands in `missing_symbols[]` and never affects `ok`.
 
 **No-data contract (never crashes):** with no `lib_dir`, an empty/whitespace
-`lib_dir`, or one that doesn't exist, the reply is exactly
-`{ok:true, checked:0, missing:[], missing_data:true}`. With data present:
-`{ok, checked, missing:[{ref, footprint, path}], missing_data:false}`.
+`lib_dir`, or one that doesn't exist, the reply is
+`{ok:true, checked:0, missing:[], missing_data:true, hint:"..."}` — `hint`
+points the caller at `pcb_fetch_libraries`. With data present:
+`{ok, checked, missing:[{ref, footprint, path, suggestions}], missing_symbols:[{ref, symbol, path}], missing_data:false, lib_dir}`.
 
-### `check_bom` — `{yaml|board, lib_dir?}` → `{ok, items[], line_count, part_count, errors, warnings}`
+### `check_bom` — `{yaml|board, lib_dir?}` → `{ok, items[], line_count, part_count, errors, warnings, lib_present, missing_data, hint?}`
 
 Groups components by `(footprint, value)` → `items:[{refs[], footprint, value,
 qty}]`. Warns on components missing a `value` or `footprint` (a DNP position is
 legitimate, so these are warnings, not errors). Footprint-presence flags
-(`footprint_found`) are added to each item only when `lib_dir` data is present.
+(`footprint_found`) and nearest-name `suggestions[]` (for items that don't
+resolve) are added to each item only when `lib_dir` data is present.
+`missing_data` mirrors `check_libraries`'s no-data contract (`!lib_present`),
+with the same `hint` field when data is absent — the two tools are safe to
+treat uniformly.
 
 ### `init` / `ping` — health
 

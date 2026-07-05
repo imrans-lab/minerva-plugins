@@ -30,7 +30,9 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 	want := []string{
 		// in-process (unchanged from the scaffold)
 		"ping", "pcb.serialize", "pcb.deserialize", "pcb.collect_export", "pcb.apply_export",
-		// worker-backed (this round)
+		// in-process — library-data fetch/status (this round)
+		"pcb_fetch_libraries", "pcb_library_status",
+		// worker-backed (prior round)
 		"pcb_validate", "pcb_generate", "pcb_check_libraries", "pcb_check_bom",
 	}
 	for _, name := range want {

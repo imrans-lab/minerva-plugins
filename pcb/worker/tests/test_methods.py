@@ -14,6 +14,7 @@ import pytest
 from pcb_worker.methods import handle_request
 
 SPIKE_BOARD = Path(__file__).resolve().parents[2] / "spikes" / "gerber" / "board.yaml"
+FIXTURE_LIB = str(Path(__file__).resolve().parent / "testdata" / "fixture_lib")
 
 
 @pytest.fixture()
@@ -198,12 +199,18 @@ def test_check_libraries_no_lib_dir(board_yaml):
     resp = _call("check_libraries", {"yaml": board_yaml})
     assert resp["ok"] is True
     r = resp["result"]
-    assert r == {"ok": True, "checked": 0, "missing": [], "missing_data": True}
+    assert r["ok"] is True
+    assert r["checked"] == 0
+    assert r["missing"] == []
+    assert r["missing_data"] is True
+    assert "pcb_fetch_libraries" in r["hint"]
 
 
 def test_check_libraries_empty_lib_dir(board_yaml):
     resp = _call("check_libraries", {"yaml": board_yaml, "lib_dir": "   "})
-    assert resp["result"]["missing_data"] is True
+    r = resp["result"]
+    assert r["missing_data"] is True
+    assert "pcb_fetch_libraries" in r["hint"]
 
 
 def test_check_libraries_with_data(board_yaml, tmp_path):
@@ -218,6 +225,49 @@ def test_check_libraries_with_data(board_yaml, tmp_path):
     # R_0805 resolves (bare-name scan finds it); C_0805 / TH_TestPoint miss.
     missing_fps = {m["footprint"] for m in r["missing"]}
     assert "C_0805" in missing_fps
+    # missing_symbols is always present (symbol match is optional/informal —
+    # board-yaml components have no first-class symbol field this round).
+    assert r["missing_symbols"] == []
+
+
+def test_check_libraries_against_real_fixture_lib(board_yaml):
+    # Real curated fixture (the same shape libraries.lock.json fetches into):
+    # R_0805/C_0805 (spike board's bare footprint names) do NOT match the
+    # fixture's actual KiCad-conventioned names (R_0603_1608Metric etc) —
+    # this documents that the spike board uses placeholder names, not real
+    # KiCad footprint IDs, so a "required, real" check correctly flags them.
+    resp = _call("check_libraries", {"yaml": board_yaml, "lib_dir": FIXTURE_LIB})
+    r = resp["result"]
+    assert r["missing_data"] is False
+    assert r["checked"] == 3  # R1, C1, U1 all declare a footprint
+    missing_fps = {m["footprint"] for m in r["missing"]}
+    assert missing_fps == {"R_0805", "C_0805", "TH_TestPoint"}
+    # Nearest-name suggestions surface for the resistor (close to a real name).
+    r1_entry = next(m for m in r["missing"] if m["footprint"] == "R_0805")
+    assert isinstance(r1_entry["suggestions"], list)
+
+
+def test_check_libraries_symbol_is_optional_soft_signal():
+    # A component carrying an (unmodeled) "symbol" field via Extra passthrough
+    # (no "footprint" field at all here, isolating the symbol-only path) — a
+    # symbol miss lands in missing_symbols, never in "missing" (footprints),
+    # and never flips `ok`.
+    yaml_src = (
+        "version: 1\nname: T\nwidth_mm: 10\nheight_mm: 10\n"
+        "components:\n"
+        "  - {ref: X1, symbol: NoSuchSymbol, x_mm: 1, y_mm: 1, rotation_deg: 0}\n"
+        "nets: []\n"
+    )
+    resp = _call("check_libraries", {"yaml": yaml_src, "lib_dir": FIXTURE_LIB})
+    r = resp["result"]
+    assert r["ok"] is True  # no footprint declared -> nothing gates ok here
+    assert r["missing"] == []
+    assert any(m["symbol"] == "NoSuchSymbol" and m["ref"] == "X1" for m in r["missing_symbols"])
+
+    # And the mirror-image: a resolvable symbol produces no miss entry.
+    yaml_ok = yaml_src.replace("NoSuchSymbol", "Device:R")
+    resp2 = _call("check_libraries", {"yaml": yaml_ok, "lib_dir": FIXTURE_LIB})
+    assert resp2["result"]["missing_symbols"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +282,10 @@ def test_check_bom_extracts_items(board_yaml):
     assert r["part_count"] == 3  # R1, C1, U1
     refs = {ref for it in r["items"] for ref in it["refs"]}
     assert refs == {"R1", "C1", "U1"}
+    # No lib_dir supplied -> the check_libraries-mirroring no-data contract.
+    assert r["lib_present"] is False
+    assert r["missing_data"] is True
+    assert "pcb_fetch_libraries" in r["hint"]
 
 
 def test_check_bom_warns_missing_value():
@@ -240,3 +294,17 @@ def test_check_bom_warns_missing_value():
     resp = _call("check_bom", {"yaml": _BASE})
     r = resp["result"]
     assert any("no value" in w["message"] for w in r["warnings"])
+
+
+def test_check_bom_footprint_found_and_suggestions_with_lib_dir(board_yaml):
+    resp = _call("check_bom", {"yaml": board_yaml, "lib_dir": FIXTURE_LIB})
+    r = resp["result"]
+    assert r["lib_present"] is True
+    assert r["missing_data"] is False
+    assert "hint" not in r
+    items_by_fp = {it["footprint"]: it for it in r["items"]}
+    # R_0805 (spike board's placeholder name) doesn't match the real fixture
+    # lib's R_0805_2012Metric — flagged not-found, with a nearest-name
+    # suggestion offered from the present library.
+    assert items_by_fp["R_0805"]["footprint_found"] is False
+    assert "R_0805_2012Metric" in items_by_fp["R_0805"]["suggestions"]

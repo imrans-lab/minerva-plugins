@@ -15,17 +15,19 @@
       "id": "minerva_pcb_design",
       "title": "PCB design (migration build — worker compute online)",
       "target": "all",
-      "summary": "PCB editor under migration from Minerva core. Opens .pcbskel board documents (JSON), renders a crude component view, supports platform pcb_route_hint annotations with sidecar persistence, and has a Python compute worker: minerva_pcb_validate (board YAML structural + design-rule checks), minerva_pcb_generate (YAML -> .kicad_pcb/.kicad_sch/.kicad_pro text, no KiCad install), minerva_pcb_check_libraries / minerva_pcb_check_bom (return missing_data:true until KiCAD library data ships). pcb.serialize/pcb.deserialize are the canonical-YAML board codec (see docs/board-yaml.md). The real editor canvas, trace routing (agent-router), and gerber export land in later rounds; .minpcb stays with the in-tree editor until cutover.",
+      "summary": "PCB editor under migration from Minerva core. Opens .pcbskel board documents (JSON), renders a crude component view, supports platform pcb_route_hint annotations with sidecar persistence, and has a Python compute worker: minerva_pcb_validate (board YAML structural + design-rule checks), minerva_pcb_generate (YAML -> .kicad_pcb/.kicad_sch/.kicad_pro text, no KiCad install), minerva_pcb_check_libraries / minerva_pcb_check_bom (real footprint/symbol checks + BOM suggestions against a fetched KiCAD library-data subset; minerva_pcb_fetch_libraries fetches+verifies it, minerva_pcb_library_status reports what's present). pcb.serialize/pcb.deserialize are the canonical-YAML board codec (see docs/board-yaml.md). The real editor canvas, trace routing (agent-router), and gerber export land in later rounds; .minpcb stays with the in-tree editor until cutover.",
       "preconditions": "A .pcbskel document is open OR the user has asked for PCB work (an anonymous editor can be spawned via minerva_create_plugin_editor with editor_item_id \"new_pcb\").",
-      "outcome": "A .pcbskel board renders in the panel; pcb_route_hint annotations author via the dock and persist to the <file>.annotations.json sidecar; boards validate and generate KiCad files via the worker tools.",
-      "steps": "1. Call minerva_pcb_ping to confirm the backend is alive.\n2. Open a .pcbskel file (or create one via editor_item new_pcb).\n3. Validate a board with minerva_pcb_validate (canonical YAML per docs/board-yaml.md); generate KiCad files with minerva_pcb_generate.\n4. Use the core minerva_annotations_* tools against the panel's editor tab for route-hint work.\n5. For anything beyond this (real canvas editing, routing, gerbers), explain it lands in later rounds — the in-tree PCB editor still owns .minpcb.",
-      "system_prompt": "The PCB plugin is mid-migration from Minerva core. It opens .pcbskel JSON boards, draws components crudely, and supports pcb_route_hint annotations through the platform annotation substrate (dock authoring, sidecar persistence, minerva_annotations_query/render_overlay). Backend: minerva_pcb_ping; canonical-YAML board codec on pcb.serialize/pcb.deserialize; Python worker tools minerva_pcb_validate (structural + design-rule validation), minerva_pcb_generate (KiCad file text generation, pure Python), minerva_pcb_check_libraries and minerva_pcb_check_bom (missing_data:true until library data ships). NO trace routing or gerber export yet; .minpcb documents still open in the in-tree PCB editor, not this plugin.",
+      "outcome": "A .pcbskel board renders in the panel; pcb_route_hint annotations author via the dock and persist to the <file>.annotations.json sidecar; boards validate and generate KiCad files via the worker tools; footprint/symbol/BOM checks run against real KiCAD library data once fetched.",
+      "steps": "1. Call minerva_pcb_ping to confirm the backend is alive.\n2. Open a .pcbskel file (or create one via editor_item new_pcb).\n3. Validate a board with minerva_pcb_validate (canonical YAML per docs/board-yaml.md); generate KiCad files with minerva_pcb_generate.\n4. Run minerva_pcb_fetch_libraries once (or check minerva_pcb_library_status) so minerva_pcb_check_libraries/minerva_pcb_check_bom can resolve real footprints instead of returning missing_data.\n5. Use the core minerva_annotations_* tools against the panel's editor tab for route-hint work.\n6. For anything beyond this (real canvas editing, routing, gerbers), explain it lands in later rounds — the in-tree PCB editor still owns .minpcb.",
+      "system_prompt": "The PCB plugin is mid-migration from Minerva core. It opens .pcbskel JSON boards, draws components crudely, and supports pcb_route_hint annotations through the platform annotation substrate (dock authoring, sidecar persistence, minerva_annotations_query/render_overlay). Backend: minerva_pcb_ping; canonical-YAML board codec on pcb.serialize/pcb.deserialize; Python worker tools minerva_pcb_validate (structural + design-rule validation), minerva_pcb_generate (KiCad file text generation, pure Python), minerva_pcb_check_libraries and minerva_pcb_check_bom (real footprint/symbol checks + nearest-name BOM suggestions once library data is fetched; missing_data:true with a hint field before that). minerva_pcb_fetch_libraries downloads+sha256-verifies a curated KiCAD library subset (docs/libraries.md); minerva_pcb_library_status reports fetch state without fetching. NO trace routing or gerber export yet; .minpcb documents still open in the in-tree PCB editor, not this plugin.",
       "tool_deps": [
         "minerva_pcb_ping",
         "minerva_pcb_validate",
         "minerva_pcb_generate",
         "minerva_pcb_check_libraries",
-        "minerva_pcb_check_bom"
+        "minerva_pcb_check_bom",
+        "minerva_pcb_fetch_libraries",
+        "minerva_pcb_library_status"
       ]
     }
   ],
@@ -83,7 +85,7 @@
   "permissions": {
     "host_capabilities": [],
     "network": {
-      "mode": "none"
+      "mode": "unrestricted"
     },
     "filesystem": {
       "mode": "none",
