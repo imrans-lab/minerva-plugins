@@ -125,15 +125,20 @@ func _on_panel_save_request() -> Dictionary:
 
 ## Restore board state previously returned by _on_panel_save_request.
 ##
-## Load shapes (Editor.gd:1108 JSON-parses host_owned files):
-##   1. JSON doc merged as a dict → {version, kind, board, components}. Happy path.
-##   2. Non-JSON → {file_path, raw_text}. We treat that as "open by path" and read
-##      the file ourselves (defensive; the skeleton board file is always JSON).
+## Load shapes (Editor.gd:1108 JSON-parses host_owned files). The host ALWAYS
+## includes `file_path` (Editor.gd:1117) — in BOTH shapes:
+##   1. JSON doc merged as a dict → {file_path, version, kind, board, components}.
+##   2. Non-JSON → {file_path, raw_text}. We parse the body ourselves
+##      (defensive; the skeleton board file is always JSON).
 func _on_panel_load_request(document: Dictionary) -> void:
 	var doc := document
-	# Raw-text shape: re-read + parse the file ourselves.
-	if document.has("file_path") and document.has("raw_text") and not document.has("board"):
-		_file_path = str(document.get("file_path", ""))
+	# Capture file_path regardless of shape — the JSON branch previously
+	# dropped it, so live saves never knew where to write the sidecar (W-15).
+	var doc_path := str(document.get("file_path", ""))
+	if not doc_path.is_empty():
+		_file_path = doc_path
+	# Raw-text shape: parse the body ourselves.
+	if document.has("raw_text") and not document.has("board"):
 		var parsed: Variant = JSON.parse_string(str(document.get("raw_text", "")))
 		if parsed is Dictionary:
 			doc = parsed as Dictionary
