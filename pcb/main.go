@@ -2,22 +2,18 @@
 //
 // Protocol: JSON-RPC 2.0 over stdin/stdout, one message per line — the same
 // transport Minerva uses for every stdio MCP plugin (see cad/main.go for the
-// worker-backed sibling).
+// worker-backed sibling). The inner protocol (Go ↔ Python worker) uses
+// length-prefixed framing via the shared bridge and is separate.
 //
-// Round 1 (this scaffold) implements:
+// This build implements:
 //   - initialize handshake
-//   - tools/list → [ping]
-//   - tools/call ping → answered directly in-process (no worker)
+//   - tools/list → [ping, pcb.*, pcb_validate, pcb_generate,
+//     pcb_check_libraries, pcb_check_bom]
+//   - tools/call → in-process tools answered directly; pcb_* tools lazily spawn
+//     the Python worker (python -m pcb_worker) via the shared bridge (circuit
+//     breaker + graceful shutdown come free).
 //   - notifications/initialized + any other notification → ignored gracefully
-//   - shutdown → exit 0
-//
-// There is deliberately NO Python worker and NO shared/bridge import this round
-// — the worker round adds bridge.New, a worker dir, and worker-backed tools. The
-// internal/tools registry mirrors cad/internal/tools so that addition is a slot-
-// in, not a reshape. See FINDING in the round report: the dispatch loop below is
-// intentionally byte-similar to cad/main.go; extracting a shared/ MCP-router is a
-// future call, deferred so the second consumer (this file) can first prove the
-// pattern is stable.
+//   - shutdown → graceful worker shutdown, then exit 0
 //
 // All logging goes to stderr; stdout carries only JSON-RPC responses.
 package main
@@ -27,16 +23,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/imrans-lab/minerva-plugins/pcb/internal/tools"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
+	sharedruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
 )
 
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "pcb"
-	serverVersion   = "0.1.0"
+	serverVersion   = "0.2.0"
+
+	// workerModule is the python module the worker runs as (python -m <module>).
+	workerModule = "pcb_worker"
+
+	// workerShutdownTimeout is the graceful window on plugin shutdown before
+	// SIGTERM (mirrors CAD).
+	workerShutdownTimeout = 2 * time.Second
 )
 
 // ---------------------------------------------------------------------------
@@ -51,10 +61,10 @@ type rpcRequest struct {
 }
 
 type rpcResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
+	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *rpcError   `json:"error,omitempty"`
+	Result  interface{}     `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
 }
 
 type rpcError struct {
@@ -70,31 +80,134 @@ func errResponse(id json.RawMessage, code int, msg string) rpcResponse {
 	return rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}}
 }
 
+// stdoutMu serialises every write to stdout (the JSON-RPC response path and the
+// host.notify path both target os.Stdout).
+var stdoutMu sync.Mutex
+
 func send(enc *json.Encoder, v interface{}) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
 	if err := enc.Encode(v); err != nil {
 		log.Printf("pcb-plugin: write response: %v", err)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Tool registry
+// host.notify — Minerva toast pipe (mirrors CAD)
 // ---------------------------------------------------------------------------
 
-var registry *tools.Registry
+type notifyParams struct {
+	Level   string      `json:"level"`
+	Message string      `json:"message"`
+	Details interface{} `json:"details,omitempty"`
+}
+
+type hostNotify struct {
+	JSONRPC string       `json:"jsonrpc"`
+	Method  string       `json:"method"`
+	Params  notifyParams `json:"params"`
+}
+
+var (
+	notifyOut = io.Writer(os.Stdout)
+	notifyEnc *json.Encoder
+)
+
+func emitHostNotify(level, message string, details interface{}) {
+	if message == "" {
+		return
+	}
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	if notifyEnc == nil {
+		notifyEnc = json.NewEncoder(notifyOut)
+	}
+	n := hostNotify{
+		JSONRPC: "2.0",
+		Method:  "host.notify",
+		Params:  notifyParams{Level: level, Message: message, Details: details},
+	}
+	if err := notifyEnc.Encode(n); err != nil {
+		log.Printf("pcb-plugin: emitHostNotify: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Worker + tool registry
+// ---------------------------------------------------------------------------
+
+var (
+	worker   *bridge.Worker
+	registry *tools.Registry
+)
+
+// initWorker resolves the Python interpreter and constructs the Worker. The
+// worker is NOT spawned here — spawning is lazy (first pcb_* tool call). This
+// plugin has no embedded PBS bundle yet, so PythonPath falls through to the dev
+// tiers: <worker>/.venv, then python3 on PATH.
+func initWorker() {
+	pluginRoot, err := pluginRootDir()
+	if err != nil {
+		log.Printf("pcb-plugin: WARNING: cannot determine plugin root: %v", err)
+		pluginRoot = "."
+	}
+	workerDir := sharedruntime.WorkerScriptDir(pluginRoot)
+
+	pythonPath, err := sharedruntime.PythonPath(sharedruntime.PythonPathRequest{
+		EmbeddedBundle: nil, // no embedded runtime this round — dev fallbacks only
+		EmbeddedSHA256: "",
+		WorkerDir:      workerDir,
+		PluginID:       serverName,
+		PluginVersion:  serverVersion,
+	})
+	if err != nil {
+		log.Printf("pcb-plugin: WARNING: %v — pcb_* worker tools will fail until a .venv exists or python3 is on PATH", err)
+		emitHostNotify("error",
+			"PCB plugin: Python interpreter not found — pcb_validate/generate/check_* will fail",
+			map[string]string{"detail": err.Error(), "fix": "Create a .venv in the plugin worker/ dir (pip install -e .) or put python3 on PATH"})
+		pythonPath = ""
+	}
+	log.Printf("pcb-plugin: worker dir=%s, python=%s", workerDir, pythonPath)
+
+	w := bridge.New(pythonPath, workerDir, workerModule)
+	w.StderrCallback = func(line string) {
+		if isCriticalStderrLine(line) {
+			emitHostNotify("error", "PCB worker: "+line, nil)
+		}
+	}
+	worker = w
+}
+
+// pluginRootDir returns the directory of the running executable (the plugin
+// root — contains manifest.json and worker/).
+func pluginRootDir() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("os.Executable: %w", err)
+	}
+	return filepath.Dir(filepath.Clean(exe)), nil
+}
 
 // initRegistry registers all MCP tools. Called once at startup.
 func initRegistry() {
 	tools.SetVersion(serverVersion)
 	registry = tools.NewRegistry()
-	registry.Register(tools.Ping, tools.HandlePing)
+
+	// In-process tools (no worker) — adapted to the worker-threaded signature.
+	registry.Register(tools.Ping, tools.WrapInProcess(tools.HandlePing))
 	// Project channels declared in manifest ui.ipc_channels/ipc_messages. Every
 	// declared channel MUST have a same-named backend tool or the broker returns
-	// permission_denied at runtime (gap register A-7). These are echo stubs for
-	// the walking skeleton — board truth round-trips panel-side, not here.
-	registry.Register(tools.Serialize, tools.HandleSerialize)
-	registry.Register(tools.Deserialize, tools.HandleDeserialize)
-	registry.Register(tools.CollectExport, tools.HandleCollectExport)
-	registry.Register(tools.ApplyExport, tools.HandleApplyExport)
+	// permission_denied (gap register A-7).
+	registry.Register(tools.Serialize, tools.WrapInProcess(tools.HandleSerialize))
+	registry.Register(tools.Deserialize, tools.WrapInProcess(tools.HandleDeserialize))
+	registry.Register(tools.CollectExport, tools.WrapInProcess(tools.HandleCollectExport))
+	registry.Register(tools.ApplyExport, tools.WrapInProcess(tools.HandleApplyExport))
+
+	// Worker-backed tools — lazily spawn python -m pcb_worker via the bridge.
+	registry.Register(tools.Validate, tools.HandleValidate)
+	registry.Register(tools.Generate, tools.HandleGenerate)
+	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
+	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +241,15 @@ func handleToolsList(id json.RawMessage) rpcResponse {
 	return okResponse(id, map[string]interface{}{"tools": mcpTools})
 }
 
+// workerBackedTools is the set of tool names that dispatch to the Python worker
+// and therefore return the worker's {ok, result|error} envelope shape.
+var workerBackedTools = map[string]bool{
+	"pcb_validate":        true,
+	"pcb_generate":        true,
+	"pcb_check_libraries": true,
+	"pcb_check_bom":       true,
+}
+
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 	var p struct {
 		Name      string          `json:"name"`
@@ -139,16 +261,41 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 
 	log.Printf("pcb-plugin: tools/call: %s", p.Name)
 
-	result, err, found := registry.Dispatch(context.Background(), p.Name, p.Arguments)
+	// Use context.Background() (not a per-call timeout ctx): the bridge threads
+	// the call ctx into exec.CommandContext when it lazily spawns the worker, so
+	// a per-call cancel/timeout would KILL the long-lived shared worker and force
+	// a cold respawn on the next call. The worker.ready spawn deadline
+	// (bridge.readyTimeout, 60s) still bounds startup; the worker methods are
+	// fast pure functions over YAML. This mirrors CAD's default tool path.
+	ctx := context.Background()
+
+	result, err, found := registry.Dispatch(ctx, worker, p.Name, p.Arguments)
 	if !found {
 		return errResponse(id, -32601, fmt.Sprintf("method not found: %s", p.Name))
 	}
+
 	if err != nil {
+		// Worker errors are surfaced as MCP tool result content (isError) so the
+		// LLM can inspect them, preserving the {ok:false, error} envelope shape;
+		// only non-worker (protocol) errors become JSON-RPC errors.
+		var we *bridge.WorkerError
+		if asWorkerErr(err, &we) {
+			level, msg := workerErrorToast(p.Name, we)
+			emitHostNotify(level, msg, we)
+			errEnvelope := map[string]interface{}{"ok": false, "error": we}
+			errJSON, _ := json.Marshal(errEnvelope)
+			return okResponse(id, map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": string(errJSON)},
+				},
+				"isError": true,
+			})
+		}
 		return errResponse(id, -32603, fmt.Sprintf("tool error: %v", err))
 	}
 
-	// Wrap the raw result in {ok: true, result: <result>} so the panel-side
-	// decoder is symmetric with the eventual error path. Mirrors cad/main.go.
+	// Wrap the raw result in {ok:true, result:<result>} so the panel-side decoder
+	// is symmetric with the error path. Mirrors cad/main.go.
 	successEnvelope := map[string]interface{}{"ok": true, "result": json.RawMessage(result)}
 	envelopeJSON, _ := json.Marshal(successEnvelope)
 	return okResponse(id, map[string]interface{}{
@@ -158,13 +305,56 @@ func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
 	})
 }
 
+// asWorkerErr checks whether err is a *bridge.WorkerError and, if so, sets target.
+func asWorkerErr(err error, target **bridge.WorkerError) bool {
+	if we, ok := err.(*bridge.WorkerError); ok {
+		*target = we
+		return true
+	}
+	return false
+}
+
+// workerErrorToast maps a WorkerError to a (level, message) toast pair.
+func workerErrorToast(toolName string, we *bridge.WorkerError) (level, message string) {
+	switch we.Kind {
+	case "crashed", "python", "internal":
+		return "error", fmt.Sprintf("PCB plugin [%s]: worker error (%s) — %s", toolName, we.Kind, we.Message)
+	case "parse", "io":
+		return "warning", fmt.Sprintf("PCB plugin [%s]: %s — %s", toolName, we.Kind, we.Message)
+	case "timeout":
+		return "warning", fmt.Sprintf("PCB plugin [%s]: request timed out — %s", toolName, we.Message)
+	case "cancelled":
+		return "info", ""
+	default:
+		return "error", fmt.Sprintf("PCB plugin [%s]: worker error (%s) — %s", toolName, we.Kind, we.Message)
+	}
+}
+
+// criticalStderrPrefixes flag critical Python-worker stderr lines to toast.
+var criticalStderrPrefixes = []string{
+	"FATAL:",
+	"ERROR:",
+	"ModuleNotFoundError:",
+	"ImportError:",
+	"RuntimeError:",
+	"Traceback (most recent call last):",
+}
+
+func isCriticalStderrLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	for _, prefix := range criticalStderrPrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
 func dispatch(enc *json.Encoder, msg *rpcRequest) {
-	// Notifications have a null or absent id. Per JSON-RPC 2.0, no response is
-	// sent for notifications.
 	isNotification := len(msg.ID) == 0 || string(msg.ID) == "null"
 
 	switch msg.Method {
@@ -190,7 +380,11 @@ func dispatch(enc *json.Encoder, msg *rpcRequest) {
 		send(enc, handleToolsCall(msg.ID, msg.Params))
 
 	case "shutdown":
-		log.Printf("pcb-plugin: shutdown requested — exiting")
+		log.Printf("pcb-plugin: shutdown requested — shutting down worker")
+		if worker != nil {
+			worker.Shutdown(workerShutdownTimeout)
+		}
+		log.Printf("pcb-plugin: exiting")
 		os.Exit(0)
 
 	default:
@@ -215,6 +409,7 @@ func main() {
 	log.Printf("starting (pid=%d)", os.Getpid())
 
 	initRegistry()
+	initWorker()
 
 	enc := json.NewEncoder(os.Stdout)
 	scanner := bufio.NewScanner(os.Stdin)
@@ -236,7 +431,13 @@ func main() {
 
 	if err := scanner.Err(); err != nil {
 		log.Printf("stdin read error: %v", err)
+		if worker != nil {
+			worker.Shutdown(workerShutdownTimeout)
+		}
 		os.Exit(1)
 	}
 	log.Printf("stdin closed — exiting")
+	if worker != nil {
+		worker.Shutdown(workerShutdownTimeout)
+	}
 }

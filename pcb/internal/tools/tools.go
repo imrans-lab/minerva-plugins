@@ -4,16 +4,19 @@
 // import time. Each tool's handler is a ToolHandlerFunc that receives raw JSON
 // params and returns raw JSON result or an error.
 //
-// Round 1 (this scaffold) has NO Python worker — every tool is served directly
-// in-process. The handler signature therefore takes only (ctx, params) and does
-// NOT thread a *bridge.Worker the way the CAD plugin does. When the worker round
-// lands, add a worker field to the entry/Dispatch path (mirroring cad's
-// internal/tools) so worker-backed tools slot in without reshaping the router.
+// The worker round threads a *bridge.Worker through Dispatch, mirroring cad's
+// internal/tools so worker-backed tools (pcb_validate/generate/check_*) slot in
+// alongside the in-process tools (ping, the pcb.* project channels) without
+// reshaping the router. In-process handlers keep their original (ctx, params)
+// signature and are adapted via WrapInProcess, so their handlers and tests are
+// untouched.
 package tools
 
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // ToolSpec describes an MCP tool for the tools/list response.
@@ -23,10 +26,24 @@ type ToolSpec struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-// ToolHandlerFunc is the signature for an MCP tool handler.
-// params is the raw JSON params from the tools/call "arguments" field.
-// Returns a JSON result payload or an error.
-type ToolHandlerFunc func(ctx context.Context, params json.RawMessage) (json.RawMessage, error)
+// ToolHandlerFunc is the signature for an MCP tool handler. It threads the
+// worker so worker-backed tools can Call the Python subprocess; in-process
+// tools ignore it (see WrapInProcess). params is the raw JSON from the
+// tools/call "arguments" field.
+type ToolHandlerFunc func(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error)
+
+// InProcessHandlerFunc is the signature for a tool served entirely in-process
+// (no worker) — ping and the pcb.* project channels. WrapInProcess adapts one
+// to a ToolHandlerFunc so both kinds live in one Registry.
+type InProcessHandlerFunc func(ctx context.Context, params json.RawMessage) (json.RawMessage, error)
+
+// WrapInProcess adapts an in-process handler to the worker-threaded
+// ToolHandlerFunc signature, discarding the (unused) worker.
+func WrapInProcess(h InProcessHandlerFunc) ToolHandlerFunc {
+	return func(ctx context.Context, _ *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+		return h(ctx, params)
+	}
+}
 
 type entry struct {
 	spec    ToolSpec
@@ -58,13 +75,14 @@ func (r *Registry) Specs() []ToolSpec {
 	return specs
 }
 
-// Dispatch looks up and calls the handler for the named tool.
-// The bool return is false if the name is not found (caller should return
-// method-not-found).
-func (r *Registry) Dispatch(ctx context.Context, name string, params json.RawMessage) (json.RawMessage, error, bool) {
+// Dispatch looks up and calls the handler for the named tool, threading the
+// worker to worker-backed handlers. The bool return is false if the name is
+// not found (caller should return method-not-found). w may be nil for a
+// registry containing only in-process tools.
+func (r *Registry) Dispatch(ctx context.Context, w *bridge.Worker, name string, params json.RawMessage) (json.RawMessage, error, bool) {
 	for _, e := range r.entries {
 		if e.spec.Name == name {
-			result, err := e.handler(ctx, params)
+			result, err := e.handler(ctx, w, params)
 			return result, err, true
 		}
 	}
