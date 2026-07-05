@@ -1,0 +1,15 @@
+# Pinned versions used to produce pcb/spikes/gerber/golden/*.
+# Install: python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
+#
+# gerber-writer: the writer under test (no Excellon support -- drill files in
+#                golden/ are hand-written by generate.py, not library output).
+# pygerber:      independent, actively-maintained X3-aware reader used by
+#                validate.py for round-trip parsing + aperture-aware bbox.
+# pcb-tools:     independent but unmaintained (2019) reader; validate.py uses
+#                it as a best-effort second opinion. Needs an in-process
+#                workaround for Python 3.12 (see validate.py:run_pcbtools_check)
+#                because its `open(file, "rU")` calls raise ValueError on 3.11+.
+
+gerber-writer==0.4.3.3
+pygerber==2.4.3
+pcb-tools==0.1.6

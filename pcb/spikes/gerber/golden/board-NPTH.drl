@@ -1,0 +1,13 @@
+M48
+;NON-PLATED HOLES
+;CREATED_BY=gerber-writer-spike/generate.py 2026-07-05
+;FORMAT={3:3/ absolute / metric / decimal}
+FMAT,2
+METRIC
+T1C3.200
+%
+G90
+G05
+T1
+X5.000Y5.000
+M30
