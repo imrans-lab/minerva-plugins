@@ -47,6 +47,43 @@ func accepted_anchor_types() -> Array:
 	return [_ANCHOR_TYPE]
 
 
+# ── Authoring ─────────────────────────────────────────────────────────────────
+
+## Fresh instance per activation (AnnotationText pattern) so the toolbar can
+## deactivate-then-reactivate without state leak. Without this override the
+## toolbar shows no button for the kind (AnnotationToolbar only creates buttons
+## for kinds whose author_ui() is non-null) — walking-skeleton finding W-13.
+func author_ui() -> Object:
+	return RouteHintAuthorTool.new()
+
+
+## Click-to-author: one left click places a route hint at the clicked
+## document-space point (board mm through the host transform — identity in the
+## skeleton). Envelope construction is delegated to the host's
+## build_route_hint_envelope so the toolbar path and the MCP/test path share
+## one builder. Emits annotation_ready; the toolbar calls host.add_annotation.
+class RouteHintAuthorTool:
+	extends AnnotationAuthorTool
+
+	var _host: AnnotationHost = null
+
+	func on_activate(host: AnnotationHost) -> void:
+		_host = host
+
+	func on_deactivate() -> void:
+		_host = null
+
+	func on_pointer_down(pos: Vector2, button: int, _mods: int) -> bool:
+		if button != MOUSE_BUTTON_LEFT:
+			return false
+		if _host == null or not _host.has_method("build_route_hint_envelope"):
+			push_warning("[pcb_route_hint] author tool active without a pcb host; ignoring click")
+			return false
+		var envelope: Dictionary = _host.call("build_route_hint_envelope", pos.x, pos.y)
+		annotation_ready.emit(envelope)
+		return true
+
+
 # ── Validation (beyond the envelope schema) ──────────────────────────────────
 
 func validate(annotation: Dictionary) -> Array:

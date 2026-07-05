@@ -119,23 +119,24 @@ func add_annotation(annotation: Dictionary) -> String:
 	return add_annotation_v2(annotation)
 
 
-## Build + store a conformant pcb_route_hint envelope at a board point.
-## x_mm/y_mm are board millimetres. Returns the assigned id, or "" on failure.
-func add_route_hint_at(
+## Build a conformant pcb_route_hint envelope (no id — add_annotation_v2 assigns
+## one). x_mm/y_mm are board millimetres. Shared by add_route_hint_at (MCP/test
+## path) and the kind's RouteHintAuthorTool (toolbar click-to-author path).
+func build_route_hint_envelope(
 		x_mm: float,
 		y_mm: float,
 		text: String = "",
 		layer: String = "F.Cu",
 		hint_type: String = "waypoint",
 		waypoints: Array = [],
-		author_kind: String = "human") -> String:
+		author_kind: String = "human") -> Dictionary:
 	if author_kind != "ai":
 		author_kind = "human"
 	var now := int(Time.get_unix_time_from_system())
 	var summary_text := "Route hint (%s, %s)" % [hint_type, layer]
 	if not text.is_empty():
 		summary_text = "%s: %s" % [summary_text, text]
-	var envelope := {
+	return {
 		"id": "",
 		"kind": "pcb_route_hint",
 		"schema_version": 2,
@@ -161,7 +162,20 @@ func add_route_hint_at(
 		"created_at": now,
 		"updated_at": now,
 	}
-	return add_annotation_v2(envelope)
+
+
+## Build + store a conformant pcb_route_hint envelope at a board point.
+## x_mm/y_mm are board millimetres. Returns the assigned id, or "" on failure.
+func add_route_hint_at(
+		x_mm: float,
+		y_mm: float,
+		text: String = "",
+		layer: String = "F.Cu",
+		hint_type: String = "waypoint",
+		waypoints: Array = [],
+		author_kind: String = "human") -> String:
+	return add_annotation_v2(build_route_hint_envelope(
+			x_mm, y_mm, text, layer, hint_type, waypoints, author_kind))
 
 
 # ── Store adapters (used by MCPAnnotationTools) ───────────────────────────────
