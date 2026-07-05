@@ -87,6 +87,14 @@ func initRegistry() {
 	tools.SetVersion(serverVersion)
 	registry = tools.NewRegistry()
 	registry.Register(tools.Ping, tools.HandlePing)
+	// Project channels declared in manifest ui.ipc_channels/ipc_messages. Every
+	// declared channel MUST have a same-named backend tool or the broker returns
+	// permission_denied at runtime (gap register A-7). These are echo stubs for
+	// the walking skeleton — board truth round-trips panel-side, not here.
+	registry.Register(tools.Serialize, tools.HandleSerialize)
+	registry.Register(tools.Deserialize, tools.HandleDeserialize)
+	registry.Register(tools.CollectExport, tools.HandleCollectExport)
+	registry.Register(tools.ApplyExport, tools.HandleApplyExport)
 }
 
 // ---------------------------------------------------------------------------
