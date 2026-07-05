@@ -39,8 +39,14 @@
         "entry_scene": "ui/PCBPanel.tscn",
         "scripts": [
           "ui/PCBPanel.gd",
+          "ui/pcb_canvas.gd",
           "ui/PcbAnnotationHost.gd",
-          "ui/kinds/pcb_route_hint_kind.gd"
+          "ui/kinds/pcb_route_hint_kind.gd",
+          "ui/model/pcb_data.gd",
+          "ui/model/pcb_component.gd",
+          "ui/model/pcb_net.gd",
+          "ui/model/pcb_trace.gd",
+          "ui/model/pcb_spatial_index.gd"
         ],
         "file_extensions": [
           ".pcbskel"
