@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "board_name": "HasUnknowns",
+  "board_width": 20.0,
+  "board_height": 20.0,
+  "grid_size": 2.54,
+  "layers": ["top", "bottom"],
+  "future_feature_flags": {"thermal_relief": true},
+  "components": {
+    "C1": {
+      "id": "C1",
+      "footprint": "CAPACITOR",
+      "position": {"x": 4.0, "y": 4.0},
+      "rotation": 0.0,
+      "layer": "top",
+      "pins": {"1": {"x": 0.0, "y": 0.0}, "2": {"x": 2.54, "y": 0.0}},
+      "properties": {"value": "100nF"},
+      "solder_paste_ratio": 0.9
+    }
+  },
+  "nets": {
+    "VCC": {
+      "name": "VCC",
+      "pins": [{"component_id": "C1", "pin_name": "1"}],
+      "is_power_net": true,
+      "impedance_target_ohm": 50
+    }
+  },
+  "traces": {
+    "trace_1": {
+      "id": "trace_1",
+      "net_name": "VCC",
+      "waypoints": [{"x": 4.0, "y": 4.0}, {"x": 8.0, "y": 4.0}],
+      "width": 0.25,
+      "layer": "top",
+      "locked": false,
+      "teardrop_style": "curved"
+    }
+  },
+  "annotations": {},
+  "route_hints": {}
+}

@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "board_name": "Blinky",
+  "board_width": 40.0,
+  "board_height": 30.0,
+  "grid_size": 2.54,
+  "layers": ["top", "bottom"],
+  "components": {
+    "R1": {
+      "id": "R1",
+      "footprint": "RESISTOR",
+      "footprint_id": "Resistor_SMD:R_0805_2012Metric",
+      "position": {"x": 10.0, "y": 5.0},
+      "rotation": 0.0,
+      "width": 3.0,
+      "height": 1.5,
+      "local_bounds": {"x": -0.5, "y": -0.75, "w": 3.0, "h": 1.5},
+      "pins": {
+        "1": {"x": 0.0, "y": 0.0},
+        "2": {"x": 2.54, "y": 0.0}
+      },
+      "pads": [
+        {"number": "1", "type": "smd", "shape": "rect", "position": {"x": 0.0, "y": 0.0}, "size": {"width": 1.0, "height": 1.2}, "drill": {"x": 0.0, "y": 0.0}, "layers": ["F.Cu"]}
+      ],
+      "has_pad_geometry": true,
+      "bbox_center_offset": {"x": 1.27, "y": 0.0},
+      "properties": {"value": "330"},
+      "layer": "top",
+      "color": {"r": 0.2, "g": 0.6, "b": 0.3, "a": 1.0},
+      "label_visible": true,
+      "locked": false
+    },
+    "U1": {
+      "id": "U1",
+      "footprint": "IC_DIP",
+      "position": {"x": 20.0, "y": 12.0},
+      "rotation": 90.0,
+      "pins": {
+        "1": {"x": 0.0, "y": 0.0},
+        "8": {"x": 7.62, "y": 0.0}
+      },
+      "properties": {"value": "NE555"},
+      "layer": "top",
+      "locked": false
+    }
+  },
+  "nets": {
+    "VCC": {
+      "name": "VCC",
+      "pins": [
+        {"component_id": "U1", "pin_name": "8"},
+        {"component_id": "R1", "pin_name": "1"}
+      ],
+      "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+      "properties": {},
+      "is_power_net": true
+    },
+    "GND": {
+      "name": "GND",
+      "pins": [
+        {"component_id": "U1", "pin_name": "1"}
+      ],
+      "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0},
+      "properties": {},
+      "is_power_net": true
+    }
+  },
+  "traces": {
+    "trace_1": {
+      "id": "trace_1",
+      "net_name": "VCC",
+      "waypoints": [
+        {"x": 10.0, "y": 5.0},
+        {"x": 15.0, "y": 5.0},
+        {"x": 20.0, "y": 12.0}
+      ],
+      "width": 0.25,
+      "layer": "top",
+      "locked": false
+    }
+  },
+  "vias": [
+    {
+      "position": {"x": 15.0, "y": 8.0},
+      "size": 0.8,
+      "drill": 0.4,
+      "net_name": "VCC",
+      "layers": ["top", "bottom"]
+    }
+  ],
+  "annotations": {
+    "ann_000042": {
+      "id": "ann_000042",
+      "type": "ARROW",
+      "positions": [{"x": 5.0, "y": 5.0}, {"x": 10.0, "y": 5.0}],
+      "text": "route this first",
+      "color": "f280e6ff",
+      "author": "human",
+      "created_at": 1720000000.5,
+      "associated_component": "R1",
+      "associated_net": "VCC"
+    }
+  },
+  "route_hints": {
+    "rhint_000007": {
+      "id": "rhint_000007",
+      "hint_type": "SINGLE_TRACE",
+      "detail_level": "GUIDED",
+      "layer": "top",
+      "width": 0.25,
+      "bus_spacing": 0.0,
+      "source_pins": ["R1.1"],
+      "dest_pins": ["U1.8"],
+      "net_names": ["VCC"],
+      "waypoints": [{"x": 10.0, "y": 5.0}, {"x": 20.0, "y": 12.0}],
+      "author": "ai",
+      "text": "keep clear of the crystal",
+      "color": "9966e6cc",
+      "created_at": 1720000100.0,
+      "client_id": ""
+    }
+  }
+}
