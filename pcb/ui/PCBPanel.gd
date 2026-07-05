@@ -50,11 +50,23 @@ var _components: Array = []
 ## The crude board renderer (custom-drawn Control child).
 var _board_canvas: Control = null
 
+## True while restoring persisted state (load_sidecar re-emits
+## annotations_changed); suppresses the content_changed dirty relay.
+var _restoring := false
+
 
 func _init() -> void:
 	# Build the host eagerly so get_annotation_host() is valid the instant the
 	# platform queries it during mount (before _on_panel_loaded fires).
 	_annotation_host = _PcbAnnotationHostScript.new()
+	# Annotations are unsaved panel state until the sidecar is written on save
+	# request, so mutations must flip the tab's unsaved glyph via the
+	# MinervaPluginPanel.content_changed contract (gap register W-14).
+	# Gated by _restoring: load_sidecar emits the same signal (the dock/overlay
+	# refresh off it), and restoring saved state must not mark the tab dirty.
+	_annotation_host.annotations_changed.connect(func() -> void:
+		if not _restoring:
+			content_changed.emit())
 	_board = _DEFAULT_BOARD.duplicate(true)
 	_components = _DEFAULT_COMPONENTS.duplicate(true)
 
@@ -133,10 +145,13 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	if doc.has("components") and doc["components"] is Array:
 		_components = (doc["components"] as Array).duplicate(true)
 
-	# Load the annotation sidecar for this board file.
+	# Load the annotation sidecar for this board file. Restored annotations are
+	# saved state, not edits — suppress the dirty relay while loading.
 	if _annotation_host != null and not _file_path.is_empty():
 		_annotation_host.set_document_path(_file_path)
+		_restoring = true
 		_annotation_host.load_sidecar(_file_path)
+		_restoring = false
 
 	if _board_canvas != null:
 		_board_canvas.queue_redraw()
