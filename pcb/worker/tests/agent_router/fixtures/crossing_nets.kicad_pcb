@@ -1,0 +1,52 @@
+(kicad_pcb (version 20221018) (generator pcbnew)
+
+  (general
+    (thickness 1.6)
+  )
+
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+
+  (net 0 "")
+  (net 1 "NET_HORIZONTAL")
+  (net 2 "NET_VERTICAL")
+
+  (gr_rect (start 0 0) (end 60 60) (layer "Edge.Cuts") (width 0.1))
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 10 30)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET_HORIZONTAL"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET_HORIZONTAL"))
+  )
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 50 30)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET_HORIZONTAL"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET_HORIZONTAL"))
+  )
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 30 10 90)
+    (property "Reference" "R3")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "NET_VERTICAL"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "NET_VERTICAL"))
+  )
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 30 50 90)
+    (property "Reference" "R4")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "NET_VERTICAL"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "NET_VERTICAL"))
+  )
+
+)

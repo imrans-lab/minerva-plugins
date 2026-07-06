@@ -12,6 +12,12 @@ requires-python = ">=3.12,<3.13"
 # so pin, don't float. It has no Excellon support; drill files are emitted by
 # pcb_worker.gerber directly. Imported lazily (only when `gerbers` is called), so
 # a missing install never affects validate/generate/check_*.
+#
+# agent_router (first-party, vendored under agent_router/) is the standalone PCB
+# routing engine behind the `route` method. It is pure-Python and its ONLY
+# external dependency is pyyaml (already listed above) — no numpy / no heavy
+# native deps — so it adds ~0 to cold start (the worker never imports it eagerly;
+# methods.route imports it lazily on first call).
 dependencies = [
     "pyyaml>=6.0,<7",
     "gerber-writer==0.4.3.3",
@@ -49,4 +55,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["pcb_worker"]
+packages = ["pcb_worker", "agent_router"]

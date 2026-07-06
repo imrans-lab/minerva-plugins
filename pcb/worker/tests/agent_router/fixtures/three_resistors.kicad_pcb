@@ -1,0 +1,62 @@
+(kicad_pcb (version 20221018) (generator pcbnew)
+
+  (general
+    (thickness 1.6)
+  )
+
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "MID1")
+  (net 4 "MID2")
+
+  (gr_rect (start 0 0) (end 80 40) (layer "Edge.Cuts") (width 0.1))
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 20 20)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "MID1"))
+  )
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 40 20)
+    (property "Reference" "R2")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 3 "MID1"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 4 "MID2"))
+  )
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 60 20)
+    (property "Reference" "R3")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 4 "MID2"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+
+  (footprint "Capacitor_SMD:C_0603_1608Metric" (layer "F.Cu")
+    (at 40 30)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+
+  (footprint "Capacitor_SMD:C_0603_1608Metric" (layer "F.Cu")
+    (at 60 30)
+    (property "Reference" "C2")
+    (property "Value" "100nF")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "VCC"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 2 "GND"))
+  )
+
+)

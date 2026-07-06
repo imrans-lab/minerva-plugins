@@ -233,6 +233,164 @@ def _check_bom(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
+# ---------------------------------------------------------------------------
+# route — autoroute a board with the vendored agent_router engine.
+#
+# INPUT (this round): agent_router's OWN native shapes, NOT the canonical board
+# YAML. The canonical board-yaml (components + pin-refs, geometry resolved from
+# footprint libraries) has no absolute pad positions, whereas agent_router.Board
+# is a flat list of positioned Pads. Translating canonical-YAML → agent_router
+# Board is the NEXT grandchild (annotation→hint + geometry bridge, 019eb481ae28
+# / 019eb481cddd); until then this method accepts the engine's native pad list
+# directly so it is fully testable now.
+#
+#   params.board = {"pads": [{component, pad|number, net, x, y, size:[w,h],
+#                             shape?, type?|pad_type?, drill?, layer?, rotation?}],
+#                   "width"?, "height"?, "obstacles"?: [{type, x, y, radius?}]}
+#   params.hints = agent_router native routing_hints dict (see hints.parse_hints)
+#   params.options = {single_layer?, allow_vias?, trace_width?, clearance?,
+#                     order?, grid_resolution?}
+#
+# OUTPUT: the engine's RoutingResult, serialised to plain JSON
+#   {success, via_count, routes:[{net, segments:[{start,end,layer}], vias:[[x,y]]}],
+#    unrouted:[{net, from, to}]}
+# ---------------------------------------------------------------------------
+
+
+def _board_from_native(spec: dict):
+    """Rebuild an agent_router.Board from its native pad-list dict.
+
+    This lives in the worker (not in agent_router) so the engine stays a clean
+    standalone package with no worker/plugin coupling. The shape mirrors the
+    engine's own `dump-pads` JSON, i.e. the inverse of that serialisation.
+    """
+    from agent_router.board import Board, Pad, Net, Obstacle
+
+    if not isinstance(spec, dict):
+        raise ValueError("board must be a mapping")
+    pad_specs = spec.get("pads")
+    if not isinstance(pad_specs, list) or not pad_specs:
+        raise ValueError("board.pads must be a non-empty list")
+
+    pads: list = []
+    for i, p in enumerate(pad_specs):
+        if not isinstance(p, dict):
+            raise ValueError(f"pads[{i}] must be a mapping")
+        try:
+            x = float(p["x"]); y = float(p["y"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"pads[{i}] needs numeric x and y")
+        size = p.get("size") or [0.0, 0.0]
+        if not isinstance(size, (list, tuple)) or len(size) < 2:
+            raise ValueError(f"pads[{i}].size must be [w, h]")
+        number = p.get("number", p.get("pad"))
+        pad_type = p.get("pad_type", p.get("type", "smd"))
+        pads.append(Pad(
+            component=str(p.get("component", "")),
+            number=str(number) if number is not None else "",
+            net=(str(p["net"]) if p.get("net") not in (None, "") else None),
+            position=(x, y),
+            size=(float(size[0]), float(size[1])),
+            shape=str(p.get("shape", "rect")),
+            pad_type=str(pad_type),
+            drill=(float(p["drill"]) if p.get("drill") not in (None, "") else None),
+            layer=str(p.get("layer", "F.Cu")),
+            rotation=float(p.get("rotation", 0.0)),
+        ))
+
+    # Group pads into nets (net.number assigned in first-seen order).
+    nets: dict = {}
+    for pad in pads:
+        if not pad.net:
+            continue
+        net = nets.get(pad.net)
+        if net is None:
+            net = Net(name=pad.net, number=len(nets) + 1, pads=[])
+            nets[pad.net] = net
+        net.pads.append(pad)
+
+    obstacles: list = []
+    for o in spec.get("obstacles") or []:
+        if not isinstance(o, dict):
+            continue
+        obstacles.append(Obstacle(
+            position=(float(o.get("x", 0.0)), float(o.get("y", 0.0))),
+            type=str(o.get("type", "keepout")),
+            radius=(float(o["radius"]) if o.get("radius") not in (None, "") else None),
+        ))
+
+    return Board(
+        pads=pads,
+        nets=nets,
+        obstacles=obstacles,
+        width=float(spec.get("width", 0.0) or 0.0),
+        height=float(spec.get("height", 0.0) or 0.0),
+    )
+
+
+def _serialize_routing_result(result) -> dict:
+    """Serialise an agent_router.RoutingResult to plain JSON-safe dict."""
+    return {
+        "success": bool(result.success),
+        "via_count": int(result.via_count),
+        "routes": [
+            {
+                "net": r.net,
+                "segments": [
+                    {"start": [s.start[0], s.start[1]],
+                     "end": [s.end[0], s.end[1]],
+                     "layer": s.layer}
+                    for s in r.segments
+                ],
+                "vias": [[v[0], v[1]] for v in r.vias],
+            }
+            for r in result.routes
+        ],
+        "unrouted": [
+            {"net": net, "from": f"{p1.component}.{p1.number}",
+             "to": f"{p2.component}.{p2.number}"}
+            for net, p1, p2 in result.unrouted
+        ],
+    }
+
+
+def _route(params: dict) -> dict:
+    """Autoroute a board with the vendored agent_router engine.
+
+    See the module-level note above for the input/output contract. Engine
+    faults are returned as structured errors (never crash the loop).
+    """
+    try:
+        board = _board_from_native(params.get("board"))
+    except Exception as exc:
+        return {"ok": False, "error": {"kind": "parse",
+                "message": f"invalid board: {exc}"}}
+
+    # Only pass through options the engine actually accepts.
+    opts = params.get("options") or {}
+    kw: dict = {}
+    for key in ("allow_vias", "single_layer", "order",
+                "trace_width", "clearance", "grid_resolution"):
+        if key in opts and opts[key] is not None:
+            kw[key] = opts[key]
+
+    from agent_router.router import route_board, route_board_with_hints
+
+    hints_data = params.get("hints")
+    try:
+        if hints_data:
+            from agent_router.hints import parse_hints
+            hints = parse_hints(hints_data)
+            result = route_board_with_hints(board, hints, **kw)
+        else:
+            result = route_board(board, **kw)
+    except Exception as exc:
+        return {"ok": False, "error": {"kind": "route",
+                "message": str(exc), "traceback": traceback.format_exc()}}
+
+    return {"ok": True, "result": _serialize_routing_result(result)}
+
+
 def _init() -> dict:
     return {"ok": True, "result": {
         "worker_version": WORKER_VERSION,
@@ -262,6 +420,7 @@ _HANDLERS = {
     "gerbers": lambda req: _gerbers(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
+    "route": lambda req: _route(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),
 }
 

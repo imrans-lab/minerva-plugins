@@ -1,0 +1,55 @@
+(kicad_pcb (version 20221018) (generator pcbnew)
+
+  (general
+    (thickness 1.6)
+  )
+
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+
+  (net 0 "")
+  (net 1 "NET1")
+
+  (gr_rect (start 0 0) (end 80 80) (layer "Edge.Cuts") (width 0.1))
+
+  (footprint "MountingHole:MountingHole_3.2mm_M3" (layer "F.Cu")
+    (at 5 5)
+    (property "Reference" "H1")
+    (property "Value" "MountingHole_3.2mm_M3")
+    (pad "1" thru_hole circle (at 0 0) (size 6.4 6.4) (drill 3.2) (layers "*.Cu" "*.Mask"))
+  )
+
+  (footprint "MountingHole:MountingHole_3.2mm_M3" (layer "F.Cu")
+    (at 75 5)
+    (property "Reference" "H2")
+    (property "Value" "MountingHole_3.2mm_M3")
+    (pad "1" thru_hole circle (at 0 0) (size 6.4 6.4) (drill 3.2) (layers "*.Cu" "*.Mask"))
+  )
+
+  (footprint "MountingHole:MountingHole_3.2mm_M3" (layer "F.Cu")
+    (at 5 75)
+    (property "Reference" "H3")
+    (property "Value" "MountingHole_3.2mm_M3")
+    (pad "1" thru_hole circle (at 0 0) (size 6.4 6.4) (drill 3.2) (layers "*.Cu" "*.Mask"))
+  )
+
+  (footprint "MountingHole:MountingHole_3.2mm_M3" (layer "F.Cu")
+    (at 75 75)
+    (property "Reference" "H4")
+    (property "Value" "MountingHole_3.2mm_M3")
+    (pad "1" thru_hole circle (at 0 0) (size 6.4 6.4) (drill 3.2) (layers "*.Cu" "*.Mask"))
+  )
+
+  (footprint "Resistor_SMD:R_0603_1608Metric" (layer "F.Cu")
+    (at 40 40)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd roundrect (at -0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
+    (pad "2" smd roundrect (at 0.825 0) (size 0.8 0.95) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net 1 "NET1"))
+  )
+
+)
