@@ -22,6 +22,11 @@ signal annotations_changed()
 
 const _ANN_ID_PREFIX := "ann_"
 const _ANCHOR_TYPE := "pcb/board.point"
+## Semantic anchor types resolved live against the board model (this round).
+const _ANCHOR_TYPE_PAD := "pcb/pad"
+const _ANCHOR_TYPE_COMPONENT := "pcb/component"
+const _ANCHOR_TYPE_NET := "pcb/net"
+const _ANCHOR_TYPE_TRACE := "pcb/trace"
 const _SCHEMA := preload("res://Scripts/Services/Annotations/AnnotationV2Schema.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 
@@ -33,6 +38,11 @@ var _id_counter: int = 0
 
 ## Per-host kind registry (built-in kinds + pcb_route_hint).
 var _registry: AnnotationRegistry = null
+
+## Per-host v2 anchor registry (validate/summary/repair for the pcb/* anchors).
+## This is the DOCUMENTED repair path: MCPAnnotationTools.repair_anchor and the
+## sidebar model reach it via host.get_anchor_registry().repair(anchor, host).
+var _anchor_registry: AnnotationAnchorRegistry = null
 
 ## Board document path (for sidecar resolution). Empty for anonymous editors.
 var _document_path: String = ""
@@ -58,10 +68,27 @@ const _TRACE_HIT_THRESHOLD_MM := 0.3
 
 func _init() -> void:
 	super._init()
+	# Position resolvers (base resolve_anchor dispatches by "plugin/type" key). Each
+	# returns {position, bounds, stale, view_metadata}; stale=true + snapshot
+	# fallback when the target element no longer exists on the board.
 	register_anchor_resolver(_ANCHOR_TYPE, Callable(self, "_resolve_board_point"))
+	register_anchor_resolver(_ANCHOR_TYPE_PAD, Callable(self, "_resolve_pad"))
+	register_anchor_resolver(_ANCHOR_TYPE_COMPONENT, Callable(self, "_resolve_component"))
+	register_anchor_resolver(_ANCHOR_TYPE_NET, Callable(self, "_resolve_net"))
+	register_anchor_resolver(_ANCHOR_TYPE_TRACE, Callable(self, "_resolve_trace"))
+
 	_registry = AnnotationRegistry.new()
 	BuiltinKinds.register_all(_registry)
 	_registry.register_annotation_kind(_PcbRouteHintKindScript.new())
+
+	# Anchor registry: validate/summary/repair adapters for the pcb/* anchors. One
+	# adapter delegates back to the host's semantic dispatch (single code path); it
+	# is registered under every pcb anchor type so the platform repair surface can
+	# reach it by (plugin, type).
+	_anchor_registry = AnnotationAnchorRegistry.new()
+	var adapter := _PcbAnchorResolver.new(self)
+	for atype in ["board.point", "pad", "component", "net", "trace"]:
+		_anchor_registry.register("pcb", atype, adapter)
 
 
 # ── AnnotationHost overrides ──────────────────────────────────────────────────
@@ -70,16 +97,29 @@ func get_registry() -> AnnotationRegistry:
 	return _registry
 
 
+## The v2 anchor registry (validate/summary/repair for pcb/* anchors). Non-null
+## so the platform repair surface (MCPAnnotationTools.repair_anchor, the sidebar
+## model) can retarget a stale pcb anchor via the documented path.
+func get_anchor_registry() -> Object:
+	return _anchor_registry
+
+
 func get_capabilities() -> Dictionary:
 	return {
-		"kinds": ["pcb_route_hint"],
+		# Reflects reality: the per-host registry carries the core generic 2d_*
+		# kinds (BuiltinKinds.register_all) PLUS the one pcb domain kind. Generic
+		# annotations author through the core kinds — no pcb-namespaced duplicates.
+		"kinds": ["pcb_route_hint", "2d_arrow", "2d_text", "2d_region", "2d_polyline"],
 		"tools": ["select"],
-		"anchor_types": [_ANCHOR_TYPE],
+		"anchor_types": [
+			_ANCHOR_TYPE, _ANCHOR_TYPE_PAD, _ANCHOR_TYPE_COMPONENT,
+			_ANCHOR_TYPE_NET, _ANCHOR_TYPE_TRACE, "core/canvas.point",
+		],
 		"lifecycle": {
 			"resolve": true,
 			"reopen": true,
 			"delete": true,
-			"repair": false,
+			"repair": true,
 			"apply": false,
 		},
 		"authoring": {
@@ -334,9 +374,15 @@ func build_route_hint_envelope(
 		layer: String = "F.Cu",
 		hint_type: String = "waypoint",
 		waypoints: Array = [],
-		author_kind: String = "human") -> Dictionary:
+		author_kind: String = "human",
+		detail_level: String = "",
+		width_mm: float = 0.25,
+		source_pins: Array = [],
+		dest_pins: Array = []) -> Dictionary:
 	if author_kind != "ai":
 		author_kind = "human"
+	if detail_level.is_empty():
+		detail_level = _derive_detail_level(waypoints.size())
 	var now := int(Time.get_unix_time_from_system())
 	var summary_text := "Route hint (%s, %s)" % [hint_type, layer]
 	if not text.is_empty():
@@ -355,7 +401,11 @@ func build_route_hint_envelope(
 		},
 		"kind_payload": {
 			"hint_type": hint_type,
+			"detail_level": detail_level,
 			"layer": layer,
+			"width_mm": width_mm,
+			"source_pins": source_pins.duplicate(),
+			"dest_pins": dest_pins.duplicate(),
 			"text": text,
 			"waypoints": waypoints,
 		},
@@ -367,6 +417,16 @@ func build_route_hint_envelope(
 		"created_at": now,
 		"updated_at": now,
 	}
+
+
+## Route-hint detail level, auto-derived from waypoint count (sparse ≤1, guided
+## 2–3, detailed ≥4). Matches the legacy PCBRouteHint auto-derivation.
+static func _derive_detail_level(waypoint_count: int) -> String:
+	if waypoint_count <= 1:
+		return "sparse"
+	if waypoint_count <= 3:
+		return "guided"
+	return "detailed"
 
 
 ## Build + store a conformant pcb_route_hint envelope at a board point.
@@ -444,21 +504,298 @@ func set_annotations(list: Array) -> void:
 	annotations_changed.emit()
 
 
-# ── Anchor resolver ───────────────────────────────────────────────────────────
+# ── Anchor position resolvers (base resolve_anchor dispatches here) ───────────
+#
+# Contract: each returns {position: Vector2, bounds: Rect2, stale: bool,
+# view_metadata: Dict}. `stale: true` is the platform's staleness flag — the
+# base AnnotationHost.resolve_anchor / AnnotationResolveCache pass it to
+# AnnotationOverlay, which sets ctx.is_stale and calls kind.render_broken (badge
+# at the snapshot position). There is NO automatic lifecycle mutation from a
+# stale resolve — moving an annotation to lifecycle "stale"/"broken" is an
+# explicit act (update_annotation_lifecycle, or the repair surface via
+# get_anchor_registry().repair). When the target element is gone we fall back to
+# anchor.snapshot.position and flag stale so the marker renders in place.
 
-## Board points are static in the skeleton, so a route hint is never stale.
+## Board points are static — a board.point anchor is never stale.
 func _resolve_board_point(anchor: Dictionary) -> Dictionary:
-	var pos := Vector2.ZERO
 	var id: Variant = anchor.get("id", null)
 	if id is Dictionary and (id as Dictionary).has("x") and (id as Dictionary).has("y"):
-		pos = Vector2(float((id as Dictionary)["x"]), float((id as Dictionary)["y"]))
-	else:
-		var snap: Variant = anchor.get("snapshot", {})
-		if snap is Dictionary:
-			var p: Variant = (snap as Dictionary).get("position", [0, 0])
-			if p is Array and (p as Array).size() >= 2:
-				pos = Vector2(float((p as Array)[0]), float((p as Array)[1]))
-	return {"position": pos, "bounds": Rect2(pos, Vector2.ZERO), "stale": false, "view_metadata": {}}
+		return _resolve_result(Vector2(float((id as Dictionary)["x"]), float((id as Dictionary)["y"])), false)
+	return _resolve_result(_snapshot_pos(anchor), false)
+
+
+## pcb/pad — id {component, pin} → live pin world position (rotation-correct via
+## component.get_pin_world_position). Stale when component or pin is gone.
+func _resolve_pad(anchor: Dictionary) -> Dictionary:
+	var comp = _pad_component(anchor)
+	if comp != null:
+		var pin := str((anchor.get("id", {}) as Dictionary).get("pin", ""))
+		return _resolve_result(comp.get_pin_world_position(pin), false)
+	return _resolve_result(_snapshot_pos(anchor), true)
+
+
+## pcb/component — id "U3" → component origin position. Stale when gone.
+func _resolve_component(anchor: Dictionary) -> Dictionary:
+	var data = _board_data()
+	if data != null:
+		var comp = data.get_component(str(anchor.get("id", "")))
+		if comp != null:
+			return _resolve_result(comp.position, false)
+	return _resolve_result(_snapshot_pos(anchor), true)
+
+
+## pcb/net — id "GND" → nearest point across the net's trace geometry to the
+## snapshot position (multi-geometry). Stale when the net has no live geometry.
+func _resolve_net(anchor: Dictionary) -> Dictionary:
+	var data = _board_data()
+	var snap := _snapshot_pos(anchor)
+	# A net's live geometry is its traces (net objects are implicit — a trace can
+	# reference a net_name without a matching net entry). Stale when no trace
+	# geometry exists to point at.
+	if data != null:
+		var traces: Array = data.get_traces_for_net(str(anchor.get("id", "")))
+		if not traces.is_empty():
+			return _resolve_result(_nearest_point_on_traces(traces, snap), false)
+	return _resolve_result(snap, true)
+
+
+## pcb/trace — id trace-id String OR {net, segment} → a representative point on
+## the trace (segment midpoint when a segment index is given, else its start).
+func _resolve_trace(anchor: Dictionary) -> Dictionary:
+	var trace = _find_trace(anchor.get("id", null))
+	if trace != null:
+		return _resolve_result(_trace_point(trace, anchor.get("id", null)), false)
+	return _resolve_result(_snapshot_pos(anchor), true)
+
+
+func _resolve_result(pos: Vector2, stale: bool) -> Dictionary:
+	return {"position": pos, "bounds": Rect2(pos, Vector2.ZERO), "stale": stale, "view_metadata": {}}
+
+
+func _snapshot_pos(anchor: Dictionary) -> Vector2:
+	var snap: Variant = anchor.get("snapshot", {})
+	if snap is Dictionary:
+		var p: Variant = (snap as Dictionary).get("position", null)
+		if p is Array and (p as Array).size() >= 2:
+			return Vector2(float((p as Array)[0]), float((p as Array)[1]))
+	return Vector2.ZERO
+
+
+## Live component for a pcb/pad anchor, or null when the component/pin is gone.
+func _pad_component(anchor: Dictionary):
+	var data = _board_data()
+	var id: Variant = anchor.get("id", null)
+	if data == null or not (id is Dictionary):
+		return null
+	var comp = data.get_component(str((id as Dictionary).get("component", "")))
+	if comp == null:
+		return null
+	if not comp.pins.has(str((id as Dictionary).get("pin", ""))):
+		return null
+	return comp
+
+
+## Nearest point to `target` across a set of trace objects (their closest-point
+## helper handles each polyline). Returns `target` unchanged for empty input.
+func _nearest_point_on_traces(traces: Array, target: Vector2) -> Vector2:
+	var best := target
+	var best_dist := INF
+	for trace in traces:
+		if trace == null:
+			continue
+		var cp: Vector2 = trace.get_closest_point(target)
+		var d := cp.distance_to(target)
+		if d < best_dist:
+			best_dist = d
+			best = cp
+	return best
+
+
+## Resolve a pcb/trace anchor id to a live trace object, or null.
+## id forms: "trace_3" (String) | {trace_id: "trace_3"} | {net: "GND", segment?}.
+func _find_trace(id: Variant):
+	var data = _board_data()
+	if data == null:
+		return null
+	if id is String:
+		return data.get_trace(id as String)
+	if id is Dictionary:
+		var d: Dictionary = id
+		if d.has("trace_id"):
+			return data.get_trace(str(d["trace_id"]))
+		if d.has("net"):
+			var traces: Array = data.get_traces_for_net(str(d["net"]))
+			if not traces.is_empty():
+				return traces[0]
+	return null
+
+
+## A representative point on a trace: the midpoint of segment `id.segment` when a
+## segment index is supplied and valid, else the trace's start waypoint.
+func _trace_point(trace, id: Variant) -> Vector2:
+	var wps: Array = trace.waypoints
+	if id is Dictionary and (id as Dictionary).has("segment"):
+		var idx := int((id as Dictionary)["segment"])
+		if idx >= 0 and idx + 1 < wps.size():
+			return (wps[idx] + wps[idx + 1]) * 0.5
+	if not wps.is_empty():
+		return wps[0]
+	return Vector2.ZERO
+
+
+# ── Semantic anchor summary / validate / repair (documented repair path) ──────
+#
+# These back the AnnotationAnchorRegistry adapter (_PcbAnchorResolver). One dispatch
+# per concern keeps a single source of truth; the adapter and any direct caller
+# share it. Existence checks are gated on a live board model so headless callers
+# (no canvas) validate SHAPE only and never false-negative.
+
+## Anchor-level summary, e.g. "pad U1.3" / "component U3" / "net GND" / "trace GND".
+func anchor_summary(anchor: Dictionary) -> String:
+	var id: Variant = anchor.get("id", null)
+	match str(anchor.get("type", "")):
+		"pad":
+			if id is Dictionary:
+				return "pad %s.%s" % [str((id as Dictionary).get("component", "?")), str((id as Dictionary).get("pin", "?"))]
+			return "pad %s" % str(id)
+		"component":
+			return "component %s" % str(id)
+		"net":
+			return "net %s" % str(id)
+		"trace":
+			return "trace %s" % _trace_net_label(anchor)
+		"board.point":
+			var p := _snapshot_pos(anchor)
+			if id is Dictionary and (id as Dictionary).has("x"):
+				p = Vector2(float((id as Dictionary)["x"]), float((id as Dictionary)["y"]))
+			return "board point (%.1f, %.1f) mm" % [p.x, p.y]
+	return "%s %s" % [str(anchor.get("type", "?")), str(id)]
+
+
+## A trace anchor's net label (net name via the live trace, falling back to the
+## anchor id's net, then the raw id).
+func _trace_net_label(anchor: Dictionary) -> String:
+	var trace = _find_trace(anchor.get("id", null))
+	if trace != null and not str(trace.net_name).is_empty():
+		return str(trace.net_name)
+	var id: Variant = anchor.get("id", null)
+	if id is Dictionary and (id as Dictionary).has("net"):
+		return str((id as Dictionary)["net"])
+	return str(id)
+
+
+## Semantic validation beyond the common shape: the referenced element exists.
+## Returns an Array of error strings (empty = valid). Existence is only asserted
+## when a live board model is present.
+func anchor_validate(anchor: Dictionary) -> Array:
+	var errors: Array = []
+	var data = _board_data()
+	var id: Variant = anchor.get("id", null)
+	match str(anchor.get("type", "")):
+		"pad":
+			if not (id is Dictionary) or not (id as Dictionary).has("component") or not (id as Dictionary).has("pin"):
+				errors.append("pad id must be {component, pin}")
+			elif data != null:
+				var comp = data.get_component(str((id as Dictionary)["component"]))
+				if comp == null:
+					errors.append("pad component '%s' not found" % str((id as Dictionary)["component"]))
+				elif not comp.pins.has(str((id as Dictionary)["pin"])):
+					errors.append("pad pin '%s' not found on '%s'" % [str((id as Dictionary)["pin"]), str((id as Dictionary)["component"])])
+		"component":
+			if str(id).is_empty():
+				errors.append("component id must be a non-empty string")
+			elif data != null and data.get_component(str(id)) == null:
+				errors.append("component '%s' not found" % str(id))
+		"net":
+			if str(id).is_empty():
+				errors.append("net id must be a non-empty string")
+			elif data != null and not data.has_net(str(id)) and (data.get_traces_for_net(str(id)) as Array).is_empty():
+				errors.append("net '%s' not found (no net entry and no trace geometry)" % str(id))
+		"trace":
+			if data != null and _find_trace(id) == null:
+				errors.append("trace '%s' not found" % str(id))
+		"board.point":
+			if not (id is Dictionary) or not (id as Dictionary).has("x") or not (id as Dictionary).has("y"):
+				errors.append("board.point id must be {x, y}")
+	return errors
+
+
+## Repair an anchor by re-locating its target. Returns a refreshed anchor Dict
+## (snapshot.position updated to the live position) when the target still exists,
+## or null when it is gone — the caller (repair surface) treats null as broken.
+func anchor_repair(anchor: Dictionary) -> Variant:
+	var resolved := resolve_anchor(anchor)
+	if bool(resolved.get("stale", false)):
+		return null
+	var pos: Vector2 = resolved.get("position", Vector2.ZERO)
+	var out := anchor.duplicate(true)
+	var snap: Dictionary = (out.get("snapshot", {}) as Dictionary).duplicate(true) if out.get("snapshot", null) is Dictionary else {}
+	snap["position"] = [pos.x, pos.y]
+	out["snapshot"] = snap
+	return out
+
+
+## Repair a WHOLE route-hint annotation. For a hint with source_pins/dest_pins,
+## EVERY endpoint pad must still exist — a missing endpoint marks the annotation
+## broken rather than silently re-anchoring. On success re-locates the anchor.
+##
+## Returns {ok, broken, reason?, missing?, anchor?}.
+func repair_route_hint(annotation: Dictionary) -> Dictionary:
+	var payload: Dictionary = annotation.get("kind_payload", {})
+	var missing: Array = []
+	for key in ["source_pins", "dest_pins"]:
+		var refs: Variant = payload.get(key, [])
+		if refs is Array:
+			for ref in (refs as Array):
+				if not _pin_ref_exists(str(ref)):
+					missing.append(str(ref))
+	if not missing.is_empty():
+		return {
+			"ok": false,
+			"broken": true,
+			"missing": missing,
+			"reason": "missing endpoint(s): %s" % ", ".join(missing),
+		}
+	var repaired: Variant = anchor_repair(annotation.get("anchor", {}))
+	if repaired == null:
+		return {"ok": false, "broken": true, "reason": "anchor target no longer exists"}
+	return {"ok": true, "broken": false, "anchor": repaired}
+
+
+## True when "U1.15"-form pad reference resolves to a live component+pin. When no
+## board model is bound, treats the reference as present (cannot disprove it).
+func _pin_ref_exists(ref: String) -> bool:
+	var data = _board_data()
+	if data == null:
+		return true
+	var idx := ref.rfind(".")
+	if idx < 0:
+		return data.get_component(ref) != null
+	var comp = data.get_component(ref.left(idx))
+	if comp == null:
+		return false
+	return comp.pins.has(ref.substr(idx + 1))
+
+
+## Thin AnnotationAnchorRegistry adapter — delegates validate/summary/repair to the
+## host's semantic dispatch so there is one source of truth. Registered under every
+## pcb anchor type. Duck-typed methods (the registry checks has_method).
+class _PcbAnchorResolver:
+	extends RefCounted
+
+	var _host = null
+
+	func _init(host) -> void:
+		_host = host
+
+	func validate(anchor: Dictionary) -> Array:
+		return _host.anchor_validate(anchor)
+
+	func summary(anchor: Dictionary, _host_arg: Object) -> String:
+		return _host.anchor_summary(anchor)
+
+	func repair(anchor: Dictionary, _host_arg: Object) -> Variant:
+		return _host.anchor_repair(anchor)
 
 
 # ── Sidecar persistence (core AnnotationSidecar) ──────────────────────────────
