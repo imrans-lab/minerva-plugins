@@ -389,6 +389,48 @@ func _on_export_yaml_pressed() -> void:
 		_set_status("YAML export complete.")
 
 
+## Router bridge (route-correction loop, agent-router child 019eb47eb567). Builds
+## the worker `route` request from the LIVE board + the host's route-hint
+## annotations and drives it over the plugin IPC channel the same way YAML export
+## drives pcb.serialize. Returns the worker's {ok, result:{success, routes,
+## unrouted, via_count, …}} envelope verbatim, or a structured worker_unavailable
+## when the IPC channel is not ready / times out — the caller
+## (host.run_router → MCPPcbPanelTools.minerva_pcb_apply_route_hints) turns that
+## into failure-as-feedback rather than crashing.
+##
+## FINDING (DCR 019dc140): "pcb.route" is NOT yet a declared broker channel
+## (manifest.json ipc_channels lists only serialize/deserialize/export) and is
+## out of this round's fence, so in production this currently returns
+## worker_unavailable; the emit is wired and goes live the moment the channel is
+## declared + forwarded to the worker `route` handler.
+func route_board(selection: Dictionary) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null or _data == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var envelopes: Array = []
+	if _annotation_host != null and _annotation_host.has_method("get_all_annotations"):
+		for ann in _annotation_host.get_all_annotations():
+			if ann is Dictionary and str((ann as Dictionary).get("kind", "")) == "pcb_route_hint":
+				envelopes.append(ann)
+	var params := {
+		"board": _data.to_board_dict(),
+		"route_hints": envelopes,
+		"selection": selection,
+	}
+	var reply_id := "pcb.route:%d" % Time.get_ticks_usec()
+	request.emit("pcb.route", params, reply_id)
+	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	# The worker returns {ok, result}; the host IPC wrapper may nest it under
+	# "result"/"success" — normalise to the worker envelope the apply tool wants.
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		return {"ok": true, "result": result.get("result")}
+	return {"ok": false, "error": {"kind": "worker_error",
+		"message": str(result.get("error_message", result.get("error", "route failed")))}}
+
+
 # ── Status / board-size UI ────────────────────────────────────────────────────
 
 func _update_board_size_label() -> void:

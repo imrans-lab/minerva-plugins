@@ -221,6 +221,29 @@ func get_spatial_index():
 	return _spatial_index
 
 
+## Router bridge (route-correction loop, agent-router child 019eb47eb567). The
+## core apply tool (MCPPcbPanelTools.minerva_pcb_apply_route_hints) reaches the
+## worker `route` method through HERE — the host is what AnnotationHostRegistry
+## vends, so the async worker hop resolves off the same host the tool already
+## holds. We forward to the panel, which owns the broker `request` signal + the
+## _MinervaIPC reply channel (the same path _on_export_yaml_pressed uses for
+## pcb.serialize). No panel bound (headless / before mount) → a structured
+## worker_unavailable so the caller degrades to failure-as-feedback instead of
+## crashing. Async: awaits the panel's broker round-trip.
+##
+## FINDING (DCR 019dc140): making this live end-to-end needs one out-of-fence
+## step — the "pcb.route" broker channel is not declared in manifest.json
+## ipc_channels (only pcb.serialize/deserialize/collect_export/apply_export are),
+## and the worker `route` method is otherwise reachable only via a Go MCP tool
+## (internal/tools/worker_tools.go), neither of which is in this round's fence.
+## The in-fence half (host→panel→broker request) is wired and ready.
+func run_router(selection: Dictionary) -> Dictionary:
+	if _panel != null and is_instance_valid(_panel) and _panel.has_method("route_board"):
+		return await _panel.route_board(selection)
+	return {"ok": false, "error": {"kind": "worker_unavailable",
+		"message": "no panel bound — router broker unreachable (headless / before mount)"}}
+
+
 func _connect_canvas() -> void:
 	if _canvas == null or not is_instance_valid(_canvas):
 		return

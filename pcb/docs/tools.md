@@ -44,9 +44,75 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_import_trace_geometry` | segment→polyline merge; `data.new_trace()` factory |
 | `minerva_pcb_export_trace_geometry` | round-trips with the import shape |
 | `minerva_pcb_get_image` | snapshot-style via `host.render_content_to_image`; null-safe headless |
+| `minerva_pcb_apply_route_hints` | route the open route hints → cyan proposals (default) or committed traces (`commit=true`); see the route-correction loop below |
 
 Mutations go through the model API, so the change journal, undo history and the
 `data_changed` dirty relay come for free.
+
+## Route-correction collaboration loop (`minerva_pcb_apply_route_hints`)
+
+Closes the route-correction loop (agent-router child `019eb47eb567`, DCR
+`019dc140`). Signature: `{editor_name, hint_ids?, commit?}`.
+
+**propose → inspect → apply → iterate**
+
+1. **PROPOSE** (`commit` absent/false) — gather the board's OPEN `pcb_route_hint`
+   annotations (or the given `hint_ids`), route them through the worker, and write
+   each routed polyline back as an **AI-authored proposal annotation**. Proposals
+   do NOT mutate the board — the user inspects them in the dock/canvas first.
+   Returns `{proposed, proposals:[…], unrouted:[…], stuck:[…]}`.
+2. **APPLY** (`commit=true`) — re-route the selected open hints and MATERIALIZE the
+   results as real traces in the model (journalled via `save_to_history`), then
+   transition the source hints `open → applied`. Returns
+   `{applied, applied_hint_ids, traces_added, failed:[…], unrouted, stuck}`.
+3. **ITERATE** — applied hints drop out of the default (open) gather, and AI
+   proposals are never re-routed (they carry `kind_payload.proposal_for`), so
+   re-running after the user edits/adds hints picks up only the fresh open hints.
+
+**Proposal representation (decision).** A proposal is an AI-authored
+`pcb_route_hint` envelope — the simplest conformant carrier, no new kind:
+
+- `author.kind = "ai"` → renders in the substrate **author cyan** (the kind's
+  `render()` swaps its layer tint for cyan when the author is AI), visually
+  distinct from a human, layer-tinted hint.
+- `kind_payload.hint_type = "single_trace"`, `waypoints` = the routed polyline,
+  `net_names = [net]`, and `proposal_for = [source hint id(s)]` linking the
+  proposal to the hint it answers. `lifecycle = "open"`.
+- Built through the existing `host.build_route_hint_envelope(…, author_kind="ai")`
+  + `add_annotation_v2` — no bespoke authoring path.
+
+**Failure as feedback.** Partial/failed routing returns WHERE it got stuck rather
+than a bare "failed": `stuck` carries each unrouted net with its blocked pad pair
+(`{net, from, to, reason}`) plus any bridge warnings — structured data the agent
+can reason about (add a waypoint hint, move a part, free a corridor) and re-run.
+
+**Worker invocation — FINDING (in-fence half only; DCR `019dc140`).** The worker
+`route` method (`pcb_worker/methods.py`, dispatcher-registered; consumes a
+canonical board + `pcb_route_hint` envelopes + a selection and returns
+`{success, routes[{net, segments, vias}], unrouted, via_count}`) is **complete and
+unchanged**. There is **no in-fence path** for the core apply tool to reach it:
+
+- Worker compute is exposed to core only as **Go MCP tools**
+  (`internal/tools/worker_tools.go`), and `route` is not among them — adding
+  `minerva_pcb_route` there is out of this round's fence.
+- The panel `request` broker reaches **Go channel handlers**
+  (`pcb.serialize`/`deserialize`/`collect_export`/`apply_export`, declared in
+  `manifest.json` `ipc_channels`), NOT the Python worker's compute methods — and
+  `manifest.json` is out of fence too.
+
+So the **in-fence half is wired end-to-end**: `MCPPcbPanelTools._apply_route_hints`
+→ `PcbAnnotationHost.run_router(selection)` (async) → `PCBPanel.route_board()`,
+which builds `{board: to_board_dict(), route_hints, selection}` and emits a
+`pcb.route` broker `request`, awaiting the reply (mirrors the `pcb.serialize`
+export path). Until the out-of-fence step lands, `route_board` finds no
+`pcb.route` channel / `_MinervaIPC` reply and returns a structured
+`worker_unavailable`, which the tool surfaces as `route_worker_unavailable`
+failure-feedback. **To go live (out of fence):** declare `pcb.route` in
+`manifest.json` `ipc_channels` and forward it to the worker `route` handler, **or**
+register `minerva_pcb_route` in `internal/tools/worker_tools.go`. The
+write-back / materialize / lifecycle logic is validated headless against a canned
+`RoutingResult` in `src/test/test_pcb_apply_route_hints.gd` (the worker call is the
+only stubbed seam).
 
 ### Host bridge (added to `pcb/ui/PcbAnnotationHost.gd`)
 

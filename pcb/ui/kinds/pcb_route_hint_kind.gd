@@ -46,9 +46,11 @@ const _HIT_THRESHOLD_MM: float = 0.6
 const _VALID_HINT_TYPES := ["waypoint", "single_trace", "bus"]
 const _VALID_DETAIL_LEVELS := ["sparse", "guided", "detailed"]
 
-## Follow-up pointer: the "apply" action is a no-op stub; the agent-router child
-## (docket 019eb47eb567) wires it to real trace synthesis.
-const _APPLY_TODO := "apply routing not wired yet (agent-router child 019eb47eb567)"
+## The per-row "apply" action is a synchronous no-op pointer: real routing is an
+## async worker round-trip that a sync run_action cannot await, so trace synthesis
+## lives in the MCP tool minerva_pcb_apply_route_hints (agent-router child
+## 019eb47eb567), which routes open hints → cyan proposals → committed traces.
+const _APPLY_TODO := "use minerva_pcb_apply_route_hints to route + apply (async worker path)"
 
 
 func _init() -> void:
@@ -248,7 +250,14 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	var pos := _anchor_position(annotation)
 	var payload: Dictionary = annotation.get("kind_payload", {})
 	var layer := str(payload.get("layer", "F.Cu"))
+	# AI-authored proposals (route-correction loop, 019eb47eb567) render in the
+	# substrate's author cyan so a proposed route reads as distinct from a
+	# human-authored (layer-tinted) hint at a glance. Human hints keep the
+	# layer-tinted stroke.
 	var stroke_color := _layer_color(layer)
+	var author: Variant = annotation.get("author", null)
+	if author is Dictionary and str((author as Dictionary).get("kind", "human")) == "ai":
+		stroke_color = AnnotationRenderContext.author_color("ai")
 
 	# Stroke width: width_mm scaled by zoom (pixels-per-mm), floored to 1px so a
 	# hair-thin hint stays visible when zoomed out.
