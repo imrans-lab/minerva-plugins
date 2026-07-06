@@ -236,24 +236,36 @@ def _check_bom(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 # route — autoroute a board with the vendored agent_router engine.
 #
-# INPUT (this round): agent_router's OWN native shapes, NOT the canonical board
-# YAML. The canonical board-yaml (components + pin-refs, geometry resolved from
-# footprint libraries) has no absolute pad positions, whereas agent_router.Board
-# is a flat list of positioned Pads. Translating canonical-YAML → agent_router
-# Board is the NEXT grandchild (annotation→hint + geometry bridge, 019eb481ae28
-# / 019eb481cddd); until then this method accepts the engine's native pad list
-# directly so it is fully testable now.
+# TWO input shapes are accepted (auto-discriminated):
 #
-#   params.board = {"pads": [{component, pad|number, net, x, y, size:[w,h],
-#                             shape?, type?|pad_type?, drill?, layer?, rotation?}],
-#                   "width"?, "height"?, "obstacles"?: [{type, x, y, radius?}]}
-#   params.hints = agent_router native routing_hints dict (see hints.parse_hints)
+# 1. CANONICAL (this round's bridge, 019eb481ae28): the canonical board dict +
+#    pcb_route_hint annotation envelopes, translated to the engine's native
+#    Board + RoutingHints by pcb_worker.route_bridge. Absolute pad positions are
+#    composed from component placement + rotated pin offsets using the SAME
+#    convention the panel model uses (get_pin_world_position), so panel and
+#    router agree.
+#
+#      params.yaml  = canonical board YAML source        (or)
+#      params.board = canonical board dict (has "components")
+#      params.route_hints = [pcb_route_hint envelope, …]  (optional)
+#      params.selection   = which hints feed the run:
+#                           {"mode":"open"|"all"|"ids"|"net", …} (default open)
+#
+# 2. NATIVE (grandchild-1, kept for back-compat): agent_router's own flat pad
+#    list, fed straight through _board_from_native.
+#
+#      params.board = {"pads": [{component, pad|number, net, x, y, size:[w,h],
+#                                shape?, type?|pad_type?, drill?, layer?, rotation?}],
+#                      "width"?, "height"?, "obstacles"?: [{type,x,y,radius?}]}
+#      params.hints = agent_router native routing_hints dict (see parse_hints)
+#
+# COMMON:
 #   params.options = {single_layer?, allow_vias?, trace_width?, clearance?,
 #                     order?, grid_resolution?}
 #
 # OUTPUT: the engine's RoutingResult, serialised to plain JSON
 #   {success, via_count, routes:[{net, segments:[{start,end,layer}], vias:[[x,y]]}],
-#    unrouted:[{net, from, to}]}
+#    unrouted:[{net, from, to}], warnings?:[{id, message}], selected_hint_ids?:[…]}
 # ---------------------------------------------------------------------------
 
 
@@ -354,17 +366,23 @@ def _serialize_routing_result(result) -> dict:
     }
 
 
+def _is_canonical_route_input(params: dict) -> bool:
+    """True if params carry a CANONICAL board (YAML source, or a board dict with
+    a "components" list) rather than agent_router's native flat "pads" list."""
+    if isinstance(params.get("yaml"), str):
+        return True
+    b = params.get("board")
+    return isinstance(b, dict) and "components" in b and "pads" not in b
+
+
 def _route(params: dict) -> dict:
     """Autoroute a board with the vendored agent_router engine.
 
     See the module-level note above for the input/output contract. Engine
     faults are returned as structured errors (never crash the loop).
     """
-    try:
-        board = _board_from_native(params.get("board"))
-    except Exception as exc:
-        return {"ok": False, "error": {"kind": "parse",
-                "message": f"invalid board: {exc}"}}
+    bridge_warnings: list = []
+    selected_hint_ids: list = []
 
     # Only pass through options the engine actually accepts.
     opts = params.get("options") or {}
@@ -376,19 +394,67 @@ def _route(params: dict) -> dict:
 
     from agent_router.router import route_board, route_board_with_hints
 
-    hints_data = params.get("hints")
-    try:
-        if hints_data:
-            from agent_router.hints import parse_hints
-            hints = parse_hints(hints_data)
-            result = route_board_with_hints(board, hints, **kw)
-        else:
-            result = route_board(board, **kw)
-    except Exception as exc:
-        return {"ok": False, "error": {"kind": "route",
-                "message": str(exc), "traceback": traceback.format_exc()}}
+    if _is_canonical_route_input(params):
+        # --- Canonical board + pcb_route_hint envelopes -> engine (bridge) ---
+        from . import route_bridge
+        try:
+            board_dict = board_model.load_board(params)
+        except board_model.BoardParseError as exc:
+            return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+        try:
+            board = route_bridge.board_to_router(board_dict)
+        except Exception as exc:
+            return {"ok": False, "error": {"kind": "parse",
+                    "message": f"invalid board: {exc}"}}
 
-    return {"ok": True, "result": _serialize_routing_result(result)}
+        envelopes = params.get("route_hints") or []
+        if not isinstance(envelopes, list):
+            return {"ok": False, "error": {"kind": "parse",
+                    "message": "route_hints must be a list of envelopes"}}
+        translation = route_bridge.hints_to_router(
+            envelopes, board, params.get("selection"))
+        bridge_warnings = translation.warnings
+        selected_hint_ids = translation.selected_ids
+        # A hint-authored width becomes the run's trace_width unless the caller
+        # set one explicitly (per-hint width has no RoutingHints slot).
+        if translation.trace_width_mm and "trace_width" not in kw:
+            kw["trace_width"] = translation.trace_width_mm
+
+        try:
+            if translation.hints.net_hints or translation.hints.buses \
+                    or translation.hints.chains or translation.hints.internal_bridges:
+                result = route_board_with_hints(board, translation.hints, **kw)
+            else:
+                result = route_board(board, **kw)
+        except Exception as exc:
+            return {"ok": False, "error": {"kind": "route",
+                    "message": str(exc), "traceback": traceback.format_exc()}}
+    else:
+        # --- Native agent_router pad-list path (grandchild-1 back-compat) ---
+        try:
+            board = _board_from_native(params.get("board"))
+        except Exception as exc:
+            return {"ok": False, "error": {"kind": "parse",
+                    "message": f"invalid board: {exc}"}}
+
+        hints_data = params.get("hints")
+        try:
+            if hints_data:
+                from agent_router.hints import parse_hints
+                hints = parse_hints(hints_data)
+                result = route_board_with_hints(board, hints, **kw)
+            else:
+                result = route_board(board, **kw)
+        except Exception as exc:
+            return {"ok": False, "error": {"kind": "route",
+                    "message": str(exc), "traceback": traceback.format_exc()}}
+
+    payload = _serialize_routing_result(result)
+    if bridge_warnings:
+        payload["warnings"] = bridge_warnings
+    if selected_hint_ids:
+        payload["selected_hint_ids"] = selected_hint_ids
+    return {"ok": True, "result": payload}
 
 
 def _init() -> dict:
