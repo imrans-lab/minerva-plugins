@@ -101,6 +101,20 @@ func _init(width: float = 100.0, height: float = 100.0) -> void:
 
 #region Component Management
 
+## Factory: a blank component instance. Off-tree bridge helper — the Minerva-core
+## panel-local MCP tools (MCPPcbPanelTools) cannot preload the plugin component
+## script, so they mint one here and configure it via duck-typed calls before
+## add_component(). Keeps construction on the plugin side, orchestration in core.
+func new_component():
+	return PCBComponentScript.new()
+
+
+## Factory: a blank trace instance. Same off-tree rationale as new_component —
+## used by the import_trace_geometry bridge tool.
+func new_trace():
+	return PCBTraceScript.new()
+
+
 ## Add a component to the board
 func add_component(component) -> void:
 	if component.id.is_empty():

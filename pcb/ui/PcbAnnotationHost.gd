@@ -29,6 +29,10 @@ const _ANCHOR_TYPE_NET := "pcb/net"
 const _ANCHOR_TYPE_TRACE := "pcb/trace"
 const _SCHEMA := preload("res://Scripts/Services/Annotations/AnnotationV2Schema.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
+## Spatial reasoning (nearest/relative/NL-move) for the panel-local MCP tools.
+## Bridge-only: MCPPcbPanelTools (Minerva core, off-tree) reaches it via
+## get_spatial_index() duck-typed, never by class.
+const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 
 ## Storage: Array of v2 envelope Dictionaries.
 var _annotations: Array = []
@@ -57,6 +61,10 @@ var _canvas = null
 ## the canvas carries pan/zoom AND the data model — but kept as a fallback data
 ## source for describe_point and for future panel-level state needs.
 var _panel = null
+
+## Lazily-built spatial index (pcb_spatial_index.gd) for the panel-local MCP
+## bridge (see get_spatial_index). Rebuilt when the bound board model changes.
+var _spatial_index = null
 
 ## Board-mm proximity for a pad/pin hit in describe_point (precedence tier 1).
 const _PAD_HIT_RADIUS_MM := 1.0
@@ -180,6 +188,37 @@ func set_canvas(canvas) -> void:
 ## Optional panel back-reference used as a fallback data source (duck-typed).
 func set_panel(panel) -> void:
 	_panel = panel
+
+
+# ── Panel-local MCP bridge (MCPPcbPanelTools, Minerva core) ───────────────────
+#
+# The single duck-typed gateway the off-tree core module reaches through. The
+# host is what AnnotationHostRegistry vends by editor tab title, so the panel
+# structural tools (add/move/rotate/delete component, connect net, board resize,
+# CSV/geometry round-trip, queries) resolve the board model + spatial index HERE
+# rather than reaching the panel by class. Mutations run against the returned
+# model API so journal + undo + the data_changed dirty relay come for free. The
+# core module NEVER references pcb_data/pcb_component/pcb_spatial_index by
+# class — it only calls the objects these accessors return.
+
+## The live board model (pcb_data.gd), or null when nothing is wired (headless
+## before mount). Core add/query tools reach the model exclusively through this.
+func get_board_data():
+	return _board_data()
+
+
+## Lazily-built spatial index (pcb_spatial_index.gd) bound to the live board
+## model, or null when no model is available. Rebuilt if the underlying model
+## instance changes. Backs the describe_component / spatial_query / move_relative
+## panel-local tools (the plugin owns the NL/relative reasoning; core orchestrates
+## the mutation through get_board_data()).
+func get_spatial_index():
+	var data = _board_data()
+	if data == null:
+		return null
+	if _spatial_index == null or _spatial_index.data != data:
+		_spatial_index = _PcbSpatialIndexScript.new(data)
+	return _spatial_index
 
 
 func _connect_canvas() -> void:
