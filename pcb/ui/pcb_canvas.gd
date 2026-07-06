@@ -132,11 +132,21 @@ var right_click_start_pos: Vector2 = Vector2.ZERO
 const RIGHT_CLICK_THRESHOLD := 5.0  # Pixels — below this a right-click is a tap → context menu
 
 
-func _ready() -> void:
+func _enter_tree() -> void:
+	# Input config MUST be re-applied on every tree entry, not just once in
+	# _ready. The editor reparents this panel into the annotation content row
+	# AFTER mount (Editor._ensure_annotation_content_row); a reparent fires
+	# _exit_tree then _enter_tree but NOT _ready. If mouse_filter is only set in
+	# _ready it is left on IGNORE after the reparent and the canvas silently
+	# swallows every mouse+keyboard event (draws fine, but zoom/pan/select all
+	# dead — bug 019f39164c2e; the toolbar survives because Buttons don't
+	# self-clear their filter on exit). Setting it here makes it reparent-safe.
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	focus_mode = Control.FOCUS_ALL
 	clip_contents = true
 
+
+func _ready() -> void:
 	font = ThemeDB.fallback_font
 	font_size = ThemeDB.fallback_font_size
 
@@ -146,7 +156,9 @@ func _ready() -> void:
 func _exit_tree() -> void:
 	if has_focus():
 		release_focus()
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# NOTE: do NOT set mouse_filter = IGNORE here. This node is reparented (not
+	# just freed) when the annotation dock mounts; leaving it IGNORE would make
+	# the re-added canvas ignore all input. _enter_tree restores STOP on re-add.
 	is_panning = false
 	is_dragging_component = false
 	is_box_selecting = false
