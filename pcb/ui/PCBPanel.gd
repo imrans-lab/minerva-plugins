@@ -27,20 +27,16 @@ const _PcbComponentScript: Script = preload("model/pcb_component.gd")
 const _PcbCanvasScript: Script = preload("pcb_canvas.gd")
 const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.gd")
 
-## Default skeleton board handed to a fresh (anonymous) editor — a couple of
-## crude parts so the canvas isn't blank before a document loads.
+## Default board handed to a fresh (anonymous) editor. A brand-new board is
+## EMPTY (finding 4): no phantom parts the user never placed. Board name / size /
+## grid are kept so the canvas has a valid frame to draw and snap against.
 const _DEFAULT_BOARD := {
 	"version": 1,
 	"name": "Untitled",
 	"width_mm": 60.0,
 	"height_mm": 40.0,
 	"grid_mm": 2.54,
-	"components": [
-		{"ref": "U1", "footprint": "IC_DIP", "x_mm": 8.0, "y_mm": 8.0, "rotation_deg": 0.0,
-			"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]},
-		{"ref": "R1", "footprint": "RESISTOR", "x_mm": 34.0, "y_mm": 6.0, "rotation_deg": 0.0,
-			"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}, {"number": "2", "x_mm": 2.54, "y_mm": 0.0}]},
-	],
+	"components": [],
 }
 
 var _annotation_host: AnnotationHost = null
@@ -206,6 +202,10 @@ func _build_ui() -> void:
 	_status_label.custom_minimum_size.y = 22
 	main_vbox.add_child(_status_label)
 
+	# Smart Select is the resting tool (finding 5) — engaged by default so the
+	# canvas is immediately click-to-select/drag-to-move without a mode hunt.
+	_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.SELECT)
+
 	_update_board_size_label()
 	_update_status()
 
@@ -215,10 +215,14 @@ func _build_toolbar() -> HBoxContainer:
 	tb.name = "Toolbar"
 	tb.custom_minimum_size.y = 34
 
-	# Tool-mode buttons (Select / Move / Rotate) — text labels (off-tree: no uid icons).
-	_add_tool_button(tb, _PcbCanvasScript.ToolMode.SELECT, "Select", "Select components / traces (S)")
-	_add_tool_button(tb, _PcbCanvasScript.ToolMode.TRANSLATE, "Move", "Move selected components")
-	_add_tool_button(tb, _PcbCanvasScript.ToolMode.ROTATE, "Rotate", "Rotate selected components (R)")
+	# ONE smart Select tool + a Pan tool (Photoshop / GraphicsEditor style,
+	# finding 5). Select does select + move + box-select + rotate; Pan drags the
+	# whole view. The old separate Move/Rotate buttons are gone — the smart tool
+	# subsumes them (drag a part to move it, press R to rotate the selection).
+	_add_tool_button(tb, _PcbCanvasScript.ToolMode.SELECT, "Select",
+		"Select & move (S) — click selects; drag a part to move (snaps); drag empty to box-select; R rotates selection")
+	_add_tool_button(tb, _PcbCanvasScript.ToolMode.PAN, "Pan",
+		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.")
 
 	tb.add_child(VSeparator.new())
 
@@ -324,15 +328,21 @@ func _rebuild_layer_option() -> void:
 func _toggle_tool_mode(mode: int) -> void:
 	if _canvas == null:
 		return
-	if _canvas.tool_mode == mode:
-		_canvas.clear_tool_mode()
-	else:
-		_canvas.set_tool_mode(mode)
+	# Radio behaviour: Select and Pan are the two persistent tools. Clicking a
+	# tool activates it; Select is the resting tool, so we never drop to a
+	# modeless state. Re-assert button pressed-states even when the mode is
+	# unchanged (clicking the already-active toggle button flipped it visually).
+	_canvas.set_tool_mode(mode)
+	_sync_tool_buttons(_canvas.tool_mode)
+
+
+func _sync_tool_buttons(mode: int) -> void:
+	for m in _tool_buttons:
+		(_tool_buttons[m] as Button).button_pressed = (m == mode)
 
 
 func _on_tool_mode_changed(mode: int) -> void:
-	for m in _tool_buttons:
-		(_tool_buttons[m] as Button).button_pressed = (m == mode)
+	_sync_tool_buttons(mode)
 	_update_status()
 
 
@@ -447,14 +457,16 @@ func _update_status() -> void:
 	if _status_label == null or _canvas == null or _data == null:
 		return
 	var sel: Array = _canvas.get_selected_components()
-	var mode_names := ["", "Select", "Move", "Rotate"]
+	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN.
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan"]
 	var mode_txt := ""
 	var tm: int = _canvas.tool_mode
 	if tm > 0 and tm < mode_names.size():
 		mode_txt = "  [%s]" % mode_names[tm]
-	_status_label.text = "%d parts, %d nets, %d traces  •  %d selected%s" % [
+	var hint := "  •  wheel/pinch zoom · Pan tool or Space/right/middle-drag to pan"
+	_status_label.text = "%d parts, %d nets, %d traces  •  %d selected%s%s" % [
 		_data.get_component_count(), _data.get_net_count(), _data.get_trace_count(),
-		sel.size(), mode_txt]
+		sel.size(), mode_txt, hint]
 
 
 ## Reflect the current model into the toolbar + canvas (after a load).

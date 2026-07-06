@@ -83,8 +83,16 @@ var is_box_selecting: bool = false
 var box_select_start: Vector2 = Vector2.ZERO
 var box_select_end: Vector2 = Vector2.ZERO
 
-## General tool mode (Select / Translate / Rotate).
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE }
+## Space-drag pan (Photoshop / GraphicsEditor style): while Space is held, a
+## left-drag pans the whole view instead of selecting.
+var _space_pan_armed: bool = false
+
+## General tool mode. SELECT is the single smart tool (click selects, drag a
+## part moves it snap-aware, drag empty space box-selects, R rotates the
+## selection); PAN drags the whole view. TRANSLATE/ROTATE are kept for
+## back-compat with the tool_mode_changed contract but are no longer distinct
+## toolbar tools — the smart SELECT tool subsumes both (finding 5).
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
 
@@ -711,6 +719,10 @@ func _gui_input(event: InputEvent) -> void:
 		_handle_mouse_motion(event)
 	elif event is InputEventKey:
 		_handle_key_input(event)
+	elif event is InputEventPanGesture:
+		_handle_pan_gesture(event)
+	elif event is InputEventMagnifyGesture:
+		_handle_magnify_gesture(event)
 
 
 func _handle_mouse_button(event: InputEventMouseButton) -> void:
@@ -720,11 +732,18 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 		if event.pressed:
 			grab_focus()
 
-			# Tool mode first (Select, Translate, Rotate).
-			if tool_mode != ToolMode.NONE:
-				if _handle_tool_click(world_pos, event):
-					return
+			# Pan tool OR Space-drag: a left-drag pans the whole board view.
+			# (Discoverability for finding 2 — a visible Pan tool + the familiar
+			# Space+drag, alongside the existing right/middle-drag pan.)
+			if tool_mode == ToolMode.PAN or _space_pan_armed:
+				is_panning = true
+				pan_start_mouse = event.position
+				pan_start_offset = pan_offset
+				return
 
+			# Smart SELECT tool (the resting tool): click selects; click-drag on
+			# a component moves it (snap-aware); click-drag on empty space
+			# box-selects. One tool does select + move + box-select; R rotates.
 			var hit_component: String = data.get_component_at(world_pos)
 
 			if event.double_click and not hit_component.is_empty():
@@ -746,15 +765,27 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				if comp:
 					drag_start_component_pos = comp.position
 			else:
-				if not event.shift_pressed:
-					_clear_selection()
-				is_box_selecting = true
-				box_select_start = event.position
-				box_select_end = event.position
+				# No component under cursor. Try a trace hit (so traces stay
+				# selectable/deletable); otherwise begin a box-select.
+				var hit_trace_id: String = data.get_trace_at(world_pos, 3.0 / zoom)
+				if not hit_trace_id.is_empty():
+					if not event.shift_pressed:
+						_clear_selection()
+					selected_trace_id = hit_trace_id
+				else:
+					if not event.shift_pressed:
+						_clear_selection()
+					selected_trace_id = ""
+					is_box_selecting = true
+					box_select_start = event.position
+					box_select_end = event.position
 
 			selection_changed.emit()
 			queue_redraw()
 		else:
+			# Release a left-drag pan (Pan tool / Space-drag).
+			if is_panning:
+				is_panning = false
 			if is_dragging_component:
 				is_dragging_component = false
 				if drag_component_id:
@@ -830,6 +861,11 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 
 
 func _handle_key_input(event: InputEventKey) -> void:
+	# Space arms/disarms drag-pan on both key edges (before the pressed-only gate).
+	if event.keycode == KEY_SPACE:
+		_space_pan_armed = event.pressed
+		return
+
 	if not event.pressed:
 		return
 
@@ -867,10 +903,21 @@ func _handle_key_input(event: InputEventKey) -> void:
 		KEY_MINUS, KEY_KP_SUBTRACT:
 			_zoom_at(size / 2, 0.8)
 		KEY_S:
-			if tool_mode == ToolMode.SELECT:
-				clear_tool_mode()
-			else:
-				set_tool_mode(ToolMode.SELECT)
+			set_tool_mode(ToolMode.SELECT)
+
+
+## Trackpad two-finger scroll → pan the view (finding 1: "trackpad zoom does
+## nothing" — many trackpads emit pan gestures, not wheel-button events).
+func _handle_pan_gesture(event: InputEventPanGesture) -> void:
+	pan_offset -= event.delta * 12.0
+	view_changed.emit()
+	queue_redraw()
+
+
+## Trackpad pinch → zoom about the gesture point (finding 1).
+func _handle_magnify_gesture(event: InputEventMagnifyGesture) -> void:
+	if event.factor > 0.0:
+		_zoom_at(event.position, event.factor)
 
 
 func _zoom_at(screen_pos: Vector2, factor: float) -> void:
@@ -1015,68 +1062,12 @@ func _has_any_locked_components() -> bool:
 	return false
 
 
-## Handle tool mode click — select/translate/rotate components + trace selection.
-func _handle_tool_click(world_pos: Vector2, event: InputEventMouseButton) -> bool:
-	if tool_mode == ToolMode.NONE:
-		return false
-
-	var threshold := 3.0 / zoom
-
-	match tool_mode:
-		ToolMode.SELECT, ToolMode.TRANSLATE:
-			var hit_component: String = data.get_component_at(world_pos)
-			if not hit_component.is_empty():
-				if not event.shift_pressed:
-					_clear_selection()
-					selected_trace_id = ""
-				if hit_component not in selected_components:
-					selected_components.append(hit_component)
-					component_selected.emit(hit_component)
-				selection_changed.emit()
-
-				if tool_mode == ToolMode.TRANSLATE:
-					is_dragging_component = true
-					drag_component_id = hit_component
-					drag_start_mouse = event.position
-					var comp = data.get_component(hit_component)
-					if comp:
-						drag_start_component_pos = comp.position
-				queue_redraw()
-				return true
-
-			var hit_trace_id: String = data.get_trace_at(world_pos, threshold)
-			if not hit_trace_id.is_empty():
-				selected_trace_id = hit_trace_id
-				_clear_selection()
-				queue_redraw()
-				return true
-
-			# Clicked empty space — deselect all.
-			_clear_selection()
-			selected_trace_id = ""
-			selection_changed.emit()
-			queue_redraw()
-			return true
-
-		ToolMode.ROTATE:
-			if not selected_components.is_empty():
-				_rotate_selected()
-				return true
-
-	return false
-
-
-## Set tool mode (Select, Translate, Rotate).
+## Set the active tool mode. Emits tool_mode_changed on a real change.
 func set_tool_mode(mode: ToolMode) -> void:
 	if tool_mode != mode:
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		queue_redraw()
-
-
-## Clear tool mode (return to normal).
-func clear_tool_mode() -> void:
-	set_tool_mode(ToolMode.NONE)
 
 #endregion
 
