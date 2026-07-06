@@ -41,6 +41,7 @@
           "ui/PCBPanel.gd",
           "ui/pcb_canvas.gd",
           "ui/PcbAnnotationHost.gd",
+          "ui/legacy_annotation_migration.gd",
           "ui/kinds/pcb_route_hint_kind.gd",
           "ui/model/pcb_data.gd",
           "ui/model/pcb_component.gd",

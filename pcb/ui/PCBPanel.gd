@@ -25,6 +25,7 @@ const _PcbAnnotationHostScript: Script = preload("PcbAnnotationHost.gd")
 const _PcbDataScript: Script = preload("model/pcb_data.gd")
 const _PcbComponentScript: Script = preload("model/pcb_component.gd")
 const _PcbCanvasScript: Script = preload("pcb_canvas.gd")
+const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.gd")
 
 ## Default skeleton board handed to a fresh (anonymous) editor — a couple of
 ## crude parts so the canvas isn't blank before a document loads.
@@ -66,6 +67,11 @@ var _status_label: Label = null
 ## Suppresses the content_changed dirty relay so restoring never marks the tab
 ## dirty (W-14; carry-in 3b extends the gate to cover board load).
 var _restoring := false
+
+## Summary of the last one-shot legacy annotation migration ({migrated, warnings}).
+## Populated by _run_legacy_migration; surfaced on the status bar and exposed for
+## tests/telemetry via get_last_migration_summary().
+var _last_migration: Dictionary = {"migrated": 0, "warnings": []}
 
 
 func _init() -> void:
@@ -479,14 +485,70 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		_data.from_board_dict(doc)
 	# else: unknown/empty body — keep whatever board is already loaded.
 
-	# Load the annotation sidecar for this board file (restored, not edited).
+	# Annotation persistence for this board file (restored, not edited).
+	# Idempotency marker = sidecar presence (docket annotation child 019eb47e4e7e):
+	#   * sidecar exists           → load it (already migrated, or authored fresh);
+	#                                 NEVER re-migrate — the inline blobs, if the
+	#                                 board still carries them, are stale duplicates.
+	#   * no sidecar + legacy blobs → ONE-SHOT migrate the inline annotations /
+	#                                 route_hints into v2 envelopes, then save the
+	#                                 sidecar immediately so the data is durable.
+	#   * no sidecar + no legacy    → nothing to load.
+	#
+	# Dirty-state decision (documented): migration runs INSIDE the _restoring gate,
+	# so the migrated envelopes' annotations_changed signals do NOT dirty the tab —
+	# migration is a restore-class operation, not a user edit. The board file itself
+	# rewrites clean on the next save (to_board_dict() never emits annotations /
+	# route_hints), so the inline blobs disappear naturally; the sidecar is the
+	# source of truth from here on.
 	if _annotation_host != null and not _file_path.is_empty():
 		_annotation_host.set_document_path(_file_path)
-		_annotation_host.load_sidecar(_file_path)
+		if AnnotationSidecar.has_sidecar(_file_path):
+			_annotation_host.load_sidecar(_file_path)
+		elif _has_legacy_annotation_blobs(doc):
+			_run_legacy_migration(doc)
+		# else: no sidecar, no legacy blobs — leave the host's list empty.
 	_restoring = false
 
 	_refresh_board_ui()
 	_zoom_to_fit_deferred()
+
+
+## Run the one-shot legacy → sidecar migration through the annotation host, persist
+## the result, and surface the count/warnings on the status bar. Caller guarantees
+## _annotation_host + _file_path are set and no sidecar exists yet. Runs while
+## _restoring is true so migrated envelopes never dirty the tab.
+func _run_legacy_migration(doc: Dictionary) -> void:
+	_last_migration = _LegacyAnnotationMigration.migrate(
+		doc.get("annotations", {}), doc.get("route_hints", {}), _annotation_host)
+	_annotation_host.save_sidecar(_file_path)
+	var n := int(_last_migration.get("migrated", 0))
+	var warns: Array = _last_migration.get("warnings", [])
+	if warns.is_empty():
+		_set_status("Migrated %d legacy annotation%s to sidecar." % [n, "" if n == 1 else "s"])
+	else:
+		_set_status("Migrated %d legacy annotation%s (%d warning%s)." % [
+			n, "" if n == 1 else "s", warns.size(), "" if warns.size() == 1 else "s"])
+
+
+## Summary of the most recent legacy migration ({migrated, warnings}). {0, []}
+## when no migrating load has run. Exposed for tests / telemetry.
+func get_last_migration_summary() -> Dictionary:
+	return _last_migration
+
+
+## True when the loaded document still carries a NON-EMPTY inline annotations or
+## route_hints blob (the one-shot migration trigger).
+static func _has_legacy_annotation_blobs(doc: Dictionary) -> bool:
+	return not _blob_empty(doc.get("annotations", null)) or not _blob_empty(doc.get("route_hints", null))
+
+
+static func _blob_empty(v: Variant) -> bool:
+	if v is Array:
+		return (v as Array).is_empty()
+	if v is Dictionary:
+		return (v as Dictionary).is_empty()
+	return true
 
 
 ## Migrate the legacy skeleton document {board:{width_mm,height_mm},
