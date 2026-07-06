@@ -12,6 +12,7 @@ contract (pcb/internal/board/board.go, pcb/docs/board-yaml.md):
   ping            — cheap liveness probe; reports cold-start ms.
   validate        — structural validation → {ok, errors[], warnings[]}.
   generate        — YAML → KiCad file text (.kicad_pcb/.kicad_sch/.kicad_pro).
+  gerbers         — YAML → Gerber (RS-274X/X2) layers + Excellon drill files.
   check_libraries — footprint existence check against a lib_dir data contract.
   check_bom       — BOM extraction + validation.
 """
@@ -22,7 +23,7 @@ import os
 import traceback
 from pathlib import Path
 
-from . import board_model, kicad, libcheck
+from . import board_model, gerber, kicad, libcheck
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -88,6 +89,44 @@ def _generate(params: dict) -> dict:
         # Optional: also write to disk and report paths + byte counts (mirrors
         # CAD's export, which returns {path, bytes_written}). Contents still
         # travel inline — worker↔Go is stdio, not the 64KiB panel IPC broker.
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+            written = []
+            for fname, text in files.items():
+                p = Path(out_dir) / fname
+                data = text.encode("utf-8")
+                p.write_bytes(data)
+                written.append({"path": str(p), "bytes_written": len(data)})
+            result["written"] = written
+        except OSError as exc:
+            return {"ok": False, "error": {
+                "kind": "io", "message": f"failed to write to out_dir: {exc}"}}
+    return {"ok": True, "result": result}
+
+
+def _gerbers(params: dict) -> dict:
+    """Generate Gerber (RS-274X/X2) + Excellon fabrication files from a board.
+
+    Return convention mirrors `generate` exactly: {files:{name:content},
+    written:[{path,bytes_written}]}, with the files also written to disk when
+    out_dir is supplied. Six Gerber layers (F_Cu/B_Cu/F_Mask/B_Mask/F_SilkS/
+    Edge_Cuts) plus PTH.drl/NPTH.drl (each drill file only when the board has
+    holes of that class).
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    base_name = params.get("name") if isinstance(params.get("name"), str) else None
+    try:
+        files = gerber.build_gerbers(board, name=base_name)
+    except Exception as exc:  # geometry/library faults reported as data, not crash
+        return {"ok": False, "error": {"kind": "gerber", "message": str(exc)}}
+
+    out_dir = params.get("out_dir")
+    result: dict = {"files": files, "written": []}
+    if isinstance(out_dir, str) and out_dir.strip():
         try:
             os.makedirs(out_dir, exist_ok=True)
             written = []
@@ -220,6 +259,7 @@ def _ping(params: dict) -> dict:
 _HANDLERS = {
     "validate": lambda req: _validate(req.get("params") or {}),
     "generate": lambda req: _generate(req.get("params") or {}),
+    "gerbers": lambda req: _gerbers(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),

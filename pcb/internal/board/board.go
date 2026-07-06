@@ -60,6 +60,14 @@ type Board struct {
 	Traces      []Trace     `json:"traces,omitempty" yaml:"traces,omitempty"`
 	Vias        []Via       `json:"vias,omitempty" yaml:"vias,omitempty"`
 
+	// MountingHoles are board-level drilled holes not attached to a pad — the
+	// mechanical mounting / non-plated holes the gerber exporter routes into
+	// PTH.drl or NPTH.drl by their Plated flag. Formalises the field the gerber
+	// spike carried through Extra (docket 019eb47ddebc, comment 508). The worker
+	// additionally accepts `npth_holes` / `pth_holes` aliases via Extra
+	// passthrough for producers that split the two lists (see docs/gerbers.md).
+	MountingHoles []Hole `json:"mounting_holes,omitempty" yaml:"mounting_holes,omitempty"`
+
 	// Annotations and RouteHints are opaque passthrough — carried losslessly,
 	// never interpreted here.
 	Annotations []Blob `json:"annotations,omitempty" yaml:"annotations,omitempty"`
@@ -111,11 +119,38 @@ type Component struct {
 // Pin is a component-relative pad location. Number is the pad identifier
 // ("1", "A3"); Name is the optional symbolic name ("VCC", "GPIO8"). X/Y are
 // offsets from the component origin.
+//
+// DrillMM / AnnulusDiameterMM / Plated formalise through-hole pad geometry the
+// gerber spike carried through Extra (docket 019eb47ddebc, comment 508). A pin
+// with DrillMM > 0 is a through-hole pad: it gets a copper annulus on every
+// copper layer, a mask opening, and a drilled hole (plated unless Plated is
+// explicitly false — Plated is a pointer so "unspecified" means plated). SMD
+// pads leave all three zero/nil.
 type Pin struct {
-	Number string  `json:"number" yaml:"number"`
-	Name   string  `json:"name,omitempty" yaml:"name,omitempty"`
-	XMM    float64 `json:"x_mm" yaml:"x_mm"`
-	YMM    float64 `json:"y_mm" yaml:"y_mm"`
+	Number            string  `json:"number" yaml:"number"`
+	Name              string  `json:"name,omitempty" yaml:"name,omitempty"`
+	XMM               float64 `json:"x_mm" yaml:"x_mm"`
+	YMM               float64 `json:"y_mm" yaml:"y_mm"`
+	DrillMM           float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
+	AnnulusDiameterMM float64 `json:"annulus_diameter_mm,omitempty" yaml:"annulus_diameter_mm,omitempty"`
+	Plated            *bool   `json:"plated,omitempty" yaml:"plated,omitempty"`
+
+	Extra map[string]interface{} `json:"-" yaml:",inline"`
+}
+
+// Hole is a board-level drilled hole not attached to a component pad (mounting
+// / mechanical holes). DiameterMM is the finished drill size; Plated selects
+// PTH vs NPTH output (default non-plated — mounting holes are typically NPTH).
+//
+// Plated is a plain bool (unlike Pin.Plated's tri-state pointer) because the
+// default here IS false, so omitempty dropping a false on marshal is lossless.
+// Deliberate asymmetry — do not "fix" one to match the other.
+type Hole struct {
+	XMM        float64 `json:"x_mm" yaml:"x_mm"`
+	YMM        float64 `json:"y_mm" yaml:"y_mm"`
+	DiameterMM float64 `json:"diameter_mm,omitempty" yaml:"diameter_mm,omitempty"`
+	DrillMM    float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
+	Plated     bool    `json:"plated,omitempty" yaml:"plated,omitempty"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }

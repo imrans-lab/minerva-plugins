@@ -67,11 +67,14 @@ it mints objects here and configures them via duck-typed calls.
 |---|---|---|
 | `pcb_validate` | `validate` | structural validation |
 | `pcb_generate` | `generate` | canonical YAML → KiCad text |
+| `pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills |
 | `pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` |
 | `pcb_check_bom` | `check_bom` | BOM extraction + validation |
 | `pcb_fetch_libraries` / `pcb_library_status` | (in-process Go) | library data dir |
 
-Gerber/fab export lands with a later worker child. See `docs/worker.md`.
+Gerber/fab export shipped via `pcb_gerbers` (docket `019eb47ddebc`). See
+`docs/gerbers.md` for the layer set, coordinate-format decision, and the
+fab-correctness HITL gate; `docs/worker.md` for the worker method.
 
 ## Retired (superseded — NOT reimplemented)
 

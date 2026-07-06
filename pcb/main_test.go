@@ -34,6 +34,8 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		"pcb_fetch_libraries", "pcb_library_status",
 		// worker-backed (prior round)
 		"pcb_validate", "pcb_generate", "pcb_check_libraries", "pcb_check_bom",
+		// worker-backed — fabrication output (this round)
+		"pcb_gerbers",
 	}
 	for _, name := range want {
 		if !got[name] {
@@ -193,8 +195,53 @@ func TestPCBWorkerStdioSmoke(t *testing.T) {
 	}
 	t.Logf("STDIO SMOKE PASS: pcb_validate result = %v", inner)
 
-	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "shutdown"})
+	// tools/call pcb_gerbers on the same spike board → expect fabrication files.
+	_ = enc.Encode(map[string]any{
+		"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+		"params": map[string]any{"name": "pcb_gerbers", "arguments": map[string]any{
+			"yaml": string(board), "name": "board"}},
+	})
+	var gresp map[string]any
+	for {
+		resp, err := readResp()
+		if err != nil {
+			t.Fatalf("pcb_gerbers read: %v", err)
+		}
+		if f, ok := resp["id"].(float64); ok && f == 3 {
+			gresp = resp
+			break
+		}
+		t.Logf("ignored intermediate: %v", resp)
+	}
+	if gresp["error"] != nil {
+		t.Fatalf("pcb_gerbers JSON-RPC error: %v", gresp["error"])
+	}
+	genv := unwrapMCP(t, gresp)
+	if genv["ok"] != true {
+		t.Fatalf("pcb_gerbers outer ok != true: %v", genv)
+	}
+	gres, _ := genv["result"].(map[string]any)
+	gfiles, _ := gres["files"].(map[string]any)
+	// Six Gerber layers + PTH + NPTH for the spike board (has one NPTH hole).
+	for _, want := range []string{"board-F_Cu.gbr", "board-B_Cu.gbr", "board-F_Mask.gbr",
+		"board-B_Mask.gbr", "board-F_SilkS.gbr", "board-Edge_Cuts.gbr",
+		"board-PTH.drl", "board-NPTH.drl"} {
+		if _, ok := gfiles[want]; !ok {
+			t.Fatalf("pcb_gerbers missing %q; got keys %v", want, keysOf(gfiles))
+		}
+	}
+	t.Logf("STDIO SMOKE PASS: pcb_gerbers returned %d files", len(gfiles))
+
+	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 4, "method": "shutdown"})
 	_, _ = io.Copy(io.Discard, br)
+}
+
+func keysOf(m map[string]any) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
 }
 
 // python3Available reports whether a `python3` on the given PATH can import

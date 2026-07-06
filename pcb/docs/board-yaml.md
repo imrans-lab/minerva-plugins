@@ -37,6 +37,10 @@ components:
                                 # checked informally by pcb_check_libraries when present
     pins:
       - {number: "1", name: VCC, x_mm: 0, y_mm: 0}   # component-relative offsets
+      # Through-hole pad: drill_mm > 0 makes it a TH pad (copper annulus on every
+      # copper layer + a drilled hole in the Excellon output). plated defaults to
+      # true; set plated: false for a non-plated mechanical pad (routes to NPTH).
+      - {number: "2", name: GND, x_mm: 2.54, y_mm: 0, drill_mm: 0.8, annulus_diameter_mm: 1.6}
 nets:
   - name: VCC
     pins: [U1.8, R1.1]         # "Ref.PadNumber" strings
@@ -50,9 +54,22 @@ traces:
 vias:
   - {x_mm: 15, y_mm: 8, drill_mm: 0.4, diameter_mm: 0.8, net: VCC,
      from_layer: top, to_layer: bottom}
+mounting_holes:                # optional board-level drilled holes (not on a pad)
+  - {x_mm: 5, y_mm: 5, diameter_mm: 3.2, plated: false}   # plated defaults to false (NPTH)
 annotations: [...]             # OPAQUE passthrough (see below)
 route_hints: [...]             # OPAQUE passthrough (see below)
 ```
+
+### Through-hole & mounting-hole fields (fabrication)
+
+`Pin.drill_mm` / `Pin.annulus_diameter_mm` / `Pin.plated` and the board-level
+`mounting_holes` list (`[]Hole`: `x_mm`, `y_mm`, `diameter_mm`, `drill_mm`,
+`plated`) are first-class as of docket `019eb47ddebc` — they formalize the
+through-hole pad geometry and non-plated mounting holes the gerber spike carried
+through `Extra`. The `pcb_gerbers` exporter uses them to build copper annuli,
+mask openings, and the PTH/NPTH Excellon split. See `docs/gerbers.md`. The worker
+also tolerantly accepts `npth_holes` / `pth_holes` aliases via `Extra` for
+producers that pre-split the two lists.
 
 ## `.minpcb` (legacy JSON) → canonical mapping
 

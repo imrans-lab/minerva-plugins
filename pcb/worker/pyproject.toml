@@ -2,10 +2,19 @@
 name = "pcb-plugin-worker"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-# pyyaml is the ONE hard runtime dependency — the worker parses/loads the
-# canonical board YAML with it, and cold start imports it eagerly.
+# pyyaml is a hard runtime dependency — the worker parses/loads the canonical
+# board YAML with it, and cold start imports it eagerly.
+#
+# gerber-writer (Karel Tavernier / Ucamco, the RS-274X/X2 spec's own author) is
+# the fabrication-output writer for the `gerbers` method. PINNED to 0.4.3.3, the
+# version the validation spike (pcb/spikes/gerber/REPORT.md) validated + goldened
+# against — its coordinate-format self-selection makes goldens version-sensitive,
+# so pin, don't float. It has no Excellon support; drill files are emitted by
+# pcb_worker.gerber directly. Imported lazily (only when `gerbers` is called), so
+# a missing install never affects validate/generate/check_*.
 dependencies = [
     "pyyaml>=6.0,<7",
+    "gerber-writer==0.4.3.3",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +35,10 @@ circuit_synth = [
 ]
 dev = [
     "pytest>=7.0",
+    # pygerber: independent, actively-maintained X3-aware reader used ONLY by the
+    # gerber test suite for round-trip parsing of every emitted layer (not a
+    # runtime dependency). Pinned to the spike's validated version.
+    "pygerber==2.4.3",
 ]
 
 [tool.pytest.ini_options]

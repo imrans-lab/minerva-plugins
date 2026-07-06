@@ -78,6 +78,34 @@ func HandleGenerate(ctx context.Context, w *bridge.Worker, params json.RawMessag
 	return w.Call(ctx, "generate", params)
 }
 
+// ---- pcb_gerbers -----------------------------------------------------------
+
+var Gerbers = ToolSpec{
+	Name: "pcb_gerbers",
+	Description: "Generate fabrication files (Gerber RS-274X/X2 + Excellon drills) from a " +
+		"canonical PCB board — pure Python, no KiCad binary. Args {yaml|board, name?:<basename>, " +
+		"out_dir?:<dir>}. Returns {files:{'<name>-F_Cu.gbr':text, ...'-B_Cu/-F_Mask/-B_Mask/" +
+		"-F_SilkS/-Edge_Cuts.gbr', '<name>-PTH.drl':text, '<name>-NPTH.drl':text}, " +
+		"written:[{path,bytes_written}]}. Six Gerber layers plus separate plated (PTH) and " +
+		"non-plated (NPTH) Excellon drill files (each drill file only when the board has holes " +
+		"of that class). Coordinate format is self-declared per layer (read the %FS line, not " +
+		"assume 4.6). Silk currently renders a courtyard-box placeholder per top component " +
+		"(no glyph text yet). Fab-correctness still needs a human viewer check — see docs/gerbers.md.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+			"name": {"type": "string", "description": "Optional output file basename (defaults to board name)."},
+			"out_dir": {"type": "string", "description": "Optional directory to also write the files to."}
+		}
+	}`),
+}
+
+func HandleGerbers(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "gerbers", params)
+}
+
 // ---- pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

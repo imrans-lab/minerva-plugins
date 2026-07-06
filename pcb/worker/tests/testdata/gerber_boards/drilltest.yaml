@@ -1,0 +1,65 @@
+# Hand-authored second fixture for the gerber worker's drill-split coverage.
+# NOT fetched or derived from KiCad data — authored to exercise every path the
+# spike board (pcb/spikes/gerber/board.yaml) does not:
+#   * multiple plated through-hole pads (J1.1 / J1.2, drill_mm on a Pin)
+#   * a NON-plated through-hole pad (TP1.1, pad-level `plated: false`)
+#   * board-level non-plated mounting holes (Extra `mounting_holes`)
+#   * a plated via
+# so PTH.drl gets {J1.1, J1.2, via} and NPTH.drl gets {TP1.1, 2 mounting holes}.
+version: 1
+name: DrillTest
+width_mm: 20
+height_mm: 15
+layers: [top, bottom]
+origin: {x_mm: 0, y_mm: 0}
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.3
+  via_diameter_mm: 0.9
+  via_drill_mm: 0.45
+
+components:
+  - ref: J1
+    footprint: Conn_02x01
+    value: HDR2
+    x_mm: 5
+    y_mm: 5
+    rotation_deg: 0
+    layer: top
+    pins:
+      # Two plated through-hole pads -> PTH.drl.
+      - {number: "1", name: A, x_mm: -1.27, y_mm: 0, drill_mm: 1.0, annulus_diameter_mm: 1.8}
+      - {number: "2", name: B, x_mm: 1.27, y_mm: 0, drill_mm: 1.0, annulus_diameter_mm: 1.8}
+  - ref: TP1
+    footprint: MountPad_M2
+    value: MECH
+    x_mm: 15
+    y_mm: 5
+    rotation_deg: 0
+    layer: top
+    pins:
+      # A non-plated mechanical pad: pad-level plated:false routes it to NPTH.drl
+      # even though it carries a copper annulus (tolerant Pin.Extra fields).
+      - {number: "1", name: MP, x_mm: 0, y_mm: 0, drill_mm: 2.0, annulus_diameter_mm: 3.0, plated: false}
+
+nets:
+  - name: GND
+    pins: ["J1.1", "J1.2"]
+
+traces:
+  - net: GND
+    layer: top
+    width_mm: 0.3
+    points:
+      - {x_mm: 3.73, y_mm: 5}
+      - {x_mm: 6.27, y_mm: 5}
+
+vias:
+  - {x_mm: 10, y_mm: 10, drill_mm: 0.45, diameter_mm: 0.9, net: GND,
+     from_layer: top, to_layer: bottom}
+
+# Board-level non-plated mounting holes (schema Extra passthrough — no
+# first-class mounting-hole entity in the canonical model yet).
+mounting_holes:
+  - {x_mm: 2, y_mm: 13, diameter_mm: 3.2, plated: false}
+  - {x_mm: 18, y_mm: 13, diameter_mm: 3.2, plated: false}

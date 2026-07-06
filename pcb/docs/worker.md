@@ -28,6 +28,7 @@ core Minerva's `minerva_pcb_*` tools.
 |---|---|---|
 | `pcb_validate` | `validate` | structural validation → `{ok, errors[], warnings[]}` |
 | `pcb_generate` | `generate` | canonical YAML → KiCad file text |
+| `pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills — see `docs/gerbers.md` |
 | `pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` (real data this round — see `docs/libraries.md`) |
 | `pcb_check_bom` | `check_bom` | BOM extraction + validation |
 | — (health) | `init`, `ping` | version/liveness handshake |
@@ -69,6 +70,17 @@ is stdio (no 64 KiB cap; that cap is only the panel↔plugin IPC broker,
 board-yaml.md §"64 KiB IPC payload caveat"). When `out_dir` is supplied the
 files are **also** written to disk and `written` = `[{path, bytes_written}]`
 (mirrors CAD's `export`, which returns `{path, bytes_written}`).
+
+### `gerbers` — `{yaml|board, name?, out_dir?}` → `{files, written}`
+
+Same envelope as `generate`. `files` = six Gerber layers (`<name>-F_Cu.gbr`,
+`-B_Cu`, `-F_Mask`, `-B_Mask`, `-F_SilkS`, `-Edge_Cuts`) plus `-PTH.drl` /
+`-NPTH.drl` Excellon drill files (each emitted only when the board has holes of
+that class). Gerber layers come from the pinned `gerber-writer` (a runtime
+dependency now); the Excellon files are emitted by `pcb_worker.gerber` directly.
+Coordinate format is self-declared per layer (read the `%FS` line). See
+`docs/gerbers.md` for the coordinate-format decision, the X2 comment-form interop
+note, the PTH/NPTH split, silk limitations, and the fab-correctness HITL gate.
 
 `name` defaults to the board `name`. The `.kicad_pcb` faithfully carries every
 component as a `footprint` (pads at authored offsets; through-hole pads when a
@@ -175,12 +187,14 @@ Resolution order (`shared/runtime/resolve.go`): embedded PBS runtime (none yet
 for PCB) → `<plugin>/worker/.venv` → `python3` on PATH.
 
 ```bash
-# Create a venv OUTSIDE the repo, install the worker (pyyaml) + pytest:
+# Create a venv OUTSIDE the repo, install the worker (pyyaml + gerber-writer)
+# and the dev extra (pytest + pygerber, the gerber round-trip test dependency):
 python -m venv /path/to/pcbworker-venv
-/path/to/pcbworker-venv/Scripts/pip install -e pcb/worker pytest   # + optional: '.[circuit_synth]'
+/path/to/pcbworker-venv/Scripts/pip install -e 'pcb/worker[dev]'   # + optional: '.[circuit_synth]'
 
-# Python tests (21 tests: methods happy paths, malformed YAML, seeded
-# structural errors, check_libraries no-data, stdio smoke):
+# Python tests (50 tests: methods happy paths, malformed YAML, seeded
+# structural errors, check_libraries no-data, gerber structural + pygerber
+# round-trip + drill split + goldens, stdio smoke):
 cd pcb/worker && /path/to/pcbworker-venv/Scripts/python -m pytest tests/ -q
 
 # Go tests, incl. the end-to-end stdio smoke that spawns the real worker.

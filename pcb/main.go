@@ -212,6 +212,7 @@ func initRegistry() {
 	// Worker-backed tools — lazily spawn python -m pcb_worker via the bridge.
 	registry.Register(tools.Validate, tools.HandleValidate)
 	registry.Register(tools.Generate, tools.HandleGenerate)
+	registry.Register(tools.Gerbers, tools.HandleGerbers)
 	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
 	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
 }
@@ -252,6 +253,7 @@ func handleToolsList(id json.RawMessage) rpcResponse {
 var workerBackedTools = map[string]bool{
 	"pcb_validate":        true,
 	"pcb_generate":        true,
+	"pcb_gerbers":         true,
 	"pcb_check_libraries": true,
 	"pcb_check_bom":       true,
 }
