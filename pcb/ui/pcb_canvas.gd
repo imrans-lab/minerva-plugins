@@ -38,6 +38,10 @@ signal canvas_clicked(world_position: Vector2)
 signal zoom_changed(new_zoom: float)
 signal selection_changed()
 signal component_lock_changed(message: String)
+## Emitted whenever the board-mm↔screen mapping moves (pan, zoom, fit, center).
+## PcbAnnotationHost relays this to its base view_changed so the annotation
+## overlay re-renders route-hint markers at the new screen positions (gap W-9).
+signal view_changed()
 
 ## Data reference (pcb_data.gd instance — duck-typed).
 var data = null
@@ -808,6 +812,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 
 	if is_panning:
 		pan_offset = pan_start_offset + (event.position - pan_start_mouse)
+		view_changed.emit()
 		queue_redraw()
 
 	if is_dragging_component and drag_component_id:
@@ -874,6 +879,7 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	var world_after := screen_to_world(screen_pos)
 	pan_offset += (world_after - world_before) * zoom
 	zoom_changed.emit(zoom)
+	view_changed.emit()
 	queue_redraw()
 
 
@@ -881,6 +887,7 @@ func _center_view() -> void:
 	if not data:
 		return
 	pan_offset = Vector2.ZERO
+	view_changed.emit()
 	queue_redraw()
 
 
@@ -1147,6 +1154,7 @@ func zoom_to_fit() -> void:
 	pan_offset = -content_center * zoom
 
 	zoom_changed.emit(zoom)
+	view_changed.emit()
 	queue_redraw()
 
 

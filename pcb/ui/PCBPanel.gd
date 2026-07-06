@@ -126,6 +126,10 @@ func _on_panel_loaded(ctx: Dictionary) -> void:
 
 
 func _on_panel_unload() -> void:
+	# Unbind the canvas so the host drops its signal connections before the
+	# canvas is freed (symmetric with set_canvas in _build_ui).
+	if _annotation_host != null and _annotation_host.has_method("set_canvas"):
+		_annotation_host.set_canvas(null)
 	if _registered_editor_name != "":
 		AnnotationHostRegistry.deregister(_registered_editor_name)
 		_registered_editor_name = ""
@@ -164,8 +168,21 @@ func _build_ui() -> void:
 	_canvas.name = "PCBCanvas"
 	_canvas.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# If an on-screen AnnotationOverlay is ever mounted here, it MUST be a child
+	# of _canvas (same origin) — NOT canvas_container: the host's view transform
+	# maps board-mm to canvas-LOCAL pixels, and the PanelContainer stylebox inset
+	# would offset every marker otherwise.
 	canvas_container.add_child(_canvas)
 	_canvas.set_data(_data)
+
+	# Bind the annotation host to the live canvas so route-hint markers track
+	# board coordinates through zoom/pan and describe_point can read the board
+	# model (gap register W-9). Duck-typed: a host without set_canvas simply
+	# stays on identity transforms.
+	if _annotation_host != null and _annotation_host.has_method("set_canvas"):
+		_annotation_host.set_canvas(_canvas)
+	if _annotation_host != null and _annotation_host.has_method("set_panel"):
+		_annotation_host.set_panel(self)
 
 	# Canvas → panel signal wiring.
 	_canvas.tool_mode_changed.connect(_on_tool_mode_changed)
