@@ -216,6 +216,11 @@ func initRegistry() {
 	registry.Register(tools.DRC, tools.HandleDRC)
 	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
 	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
+	// pcb.route is a dotted panel-IPC channel (like pcb.serialize/...), not an
+	// LLM-facing pcb_* tool name — but unlike the in-process project channels,
+	// it forwards to the Python worker's "route" method (see worker_tools.go),
+	// so it registers here in the worker-backed section, not WrapInProcess'd.
+	registry.Register(tools.RouteChannel, tools.HandleRouteChannel)
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +256,16 @@ func handleToolsList(id json.RawMessage) rpcResponse {
 
 // workerBackedTools is the set of tool names that dispatch to the Python worker
 // and therefore return the worker's {ok, result|error} envelope shape.
+//
+// pcb.route is included here even though it's a dotted panel-IPC channel name
+// (like pcb.serialize/deserialize/collect_export/apply_export), not an
+// LLM-facing pcb_* tool name: those other dotted channels stay OUT of this map
+// because they're genuinely in-process (Go-native board codec / echo
+// passthroughs, never touch the worker), so they fail the map's literal
+// invariant ("dispatch to the Python worker"). pcb.route does dispatch to the
+// worker (HandleRouteChannel calls w.Call(ctx, "route", params)), so it
+// satisfies that invariant regardless of its dotted name — membership here
+// tracks worker-dispatch, not naming convention.
 var workerBackedTools = map[string]bool{
 	"pcb_validate":        true,
 	"pcb_generate":        true,
@@ -258,6 +273,7 @@ var workerBackedTools = map[string]bool{
 	"pcb_drc":             true,
 	"pcb_check_libraries": true,
 	"pcb_check_bom":       true,
+	"pcb.route":           true,
 }
 
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {

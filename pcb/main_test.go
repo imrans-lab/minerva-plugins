@@ -34,8 +34,14 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		"pcb_fetch_libraries", "pcb_library_status",
 		// worker-backed (prior round)
 		"pcb_validate", "pcb_generate", "pcb_check_libraries", "pcb_check_bom",
-		// worker-backed — fabrication output (this round)
+		// worker-backed — fabrication output (prior round)
 		"pcb_gerbers",
+		// worker-backed — geometric DRC (prior round; was missing from this
+		// assertion pre-existing this change, caught while adding pcb.route)
+		"pcb_drc",
+		// worker-backed — dotted panel-IPC channel forwarding to the worker's
+		// "route" method (this round; docket 019f3815e9f9)
+		"pcb.route",
 	}
 	for _, name := range want {
 		if !got[name] {

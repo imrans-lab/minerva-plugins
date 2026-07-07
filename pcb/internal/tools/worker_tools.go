@@ -135,6 +135,40 @@ func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (j
 	return w.Call(ctx, "drc", params)
 }
 
+// ---- pcb.route (worker-backed broker CHANNEL, not an LLM tool name) --------
+//
+// Unlike pcb_validate/pcb_generate/... (LLM-facing tool names under the pcb_
+// prefix), pcb.route is a dotted panel-IPC channel: ui/PCBPanel.gd's
+// route_board() emits a "pcb.route" broker request (request.emit("pcb.route",
+// params, reply_id)) driving the route-correction loop behind
+// minerva_pcb_apply_route_hints. The broker requires every declared
+// ipc_channels entry to have a same-named backend tool (main.go's registry
+// gotcha, gap register A-7) — but the actual routing computation is a Python
+// worker method (pcb_worker/methods.py's "route", vendoring agent_router), so
+// this channel forwards verbatim to the worker rather than computing in Go.
+
+var RouteChannel = ToolSpec{
+	Name: "pcb.route",
+	Description: "Panel IPC channel backing ui/PCBPanel.gd's route-correction loop " +
+		"(minerva_pcb_apply_route_hints). Forwards verbatim to the Python worker's " +
+		"'route' method, which autoroutes a canonical board with the vendored " +
+		"agent_router engine. Args: {board:<canonical Board dict with a "+
+		"'components' list — see docs/board-yaml.md>, route_hints:[<pcb_route_hint " +
+		"annotation envelope>,...], selection:<optional dict scoping which hints/" +
+		"nets to route — propose vs commit is expressed via the hint/selection " +
+		"contents, not a separate flag>, options?:{allow_vias, single_layer, order, " +
+		"trace_width, clearance, grid_resolution}}. Returns {ok, result:{success, " +
+		"via_count, routes:[{net,segments:[{start,end,layer}],vias}], unrouted:" +
+		"[{net,from,to}], warnings?, selected_hint_ids?}} on success, or " +
+		"{ok:false, error:{kind,message}} on a structured routing/parse fault — " +
+		"engine faults never crash the worker loop.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleRouteChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "route", params)
+}
+
 // ---- pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

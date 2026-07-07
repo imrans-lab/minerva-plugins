@@ -56,7 +56,8 @@
           "pcb.serialize",
           "pcb.deserialize",
           "pcb.collect_export",
-          "pcb.apply_export"
+          "pcb.apply_export",
+          "pcb.route"
         ],
         "save_mode": "host_owned"
       }
@@ -65,7 +66,8 @@
       "pcb.serialize",
       "pcb.deserialize",
       "pcb.collect_export",
-      "pcb.apply_export"
+      "pcb.apply_export",
+      "pcb.route"
     ]
   },
   "editor_items": [
