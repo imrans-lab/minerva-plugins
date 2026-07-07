@@ -87,6 +87,17 @@ var pads: Array = []
 ## Whether pad geometry has been loaded from footprint library
 var has_pad_geometry: bool = false
 
+## Silk/courtyard graphics attached by the worker's footprint-RESOLVE step
+## (pcb/worker/pcb_worker/resolve.py), in component-LOCAL mm coords (same
+## frame as `pads[].position`). Each entry is a Dictionary:
+##   layer: String  - "F.SilkS" or "F.CrtYd"
+##   kind: String    - "line", "circle", "arc", or "poly"
+##   width: float    - stroke width in mm
+##   start/end: Vector2   (kind == "line")
+##   center: Vector2, radius: float   (kind == "circle")
+##   points: Array[Vector2], angle: float (optional)  (kind == "arc" or "poly")
+var graphics: Array = []
+
 ## Bounding box center offset from footprint origin (for origin-based positioning)
 ## When has_pad_geometry is true, position = origin, visual center = position + bbox_center_offset
 var bbox_center_offset: Vector2 = Vector2.ZERO
@@ -206,6 +217,82 @@ func load_pad_geometry(geometry: Dictionary) -> void:
 		if ptype == "np_thru_hole":
 			continue  # Mechanical hole: not an electrical pin
 		pins[num] = pad.get("position", Vector2.ZERO)
+
+
+## Parse a point from either the worker's native `[x, y]` array shape or the
+## Godot round-trip `{x:, y:}` dict shape (defensive — `graphics` may arrive
+## via either channel; see `_graphics_from_list`).
+static func _point_from_any(v) -> Vector2:
+	if v is Vector2:
+		return v
+	if v is Array and v.size() >= 2:
+		return Vector2(float(v[0]), float(v[1]))
+	if v is Dictionary:
+		return Vector2(float(v.get("x", 0.0)), float(v.get("y", 0.0)))
+	return Vector2.ZERO
+
+
+## Serialize the graphics array to a JSON-safe list (shared by to_dict/to_board_dict).
+func _graphics_to_list() -> Array:
+	var list := []
+	for g in graphics:
+		var kind: String = g.get("kind", "")
+		var entry := {
+			"layer": g.get("layer", ""),
+			"kind": kind,
+			"width": g.get("width", 0.0),
+		}
+		match kind:
+			"line":
+				var start: Vector2 = g.get("start", Vector2.ZERO)
+				var end: Vector2 = g.get("end", Vector2.ZERO)
+				entry["start"] = {"x": start.x, "y": start.y}
+				entry["end"] = {"x": end.x, "y": end.y}
+			"circle":
+				var center: Vector2 = g.get("center", Vector2.ZERO)
+				entry["center"] = {"x": center.x, "y": center.y}
+				entry["radius"] = g.get("radius", 0.0)
+			"arc", "poly":
+				var pts_list := []
+				for pt in g.get("points", []):
+					var p: Vector2 = pt
+					pts_list.append({"x": p.x, "y": p.y})
+				entry["points"] = pts_list
+				if g.has("angle"):
+					entry["angle"] = g["angle"]
+		list.append(entry)
+	return list
+
+
+## Deserialize a graphics list (shared by from_dict/from_board_dict) into
+## `graphics`, normalizing points to Vector2 regardless of source shape
+## (worker `[x,y]` arrays vs. round-tripped `{x:,y:}` dicts).
+func _graphics_from_list(graphics_data: Array) -> void:
+	graphics.clear()
+	for g_data in graphics_data:
+		if not (g_data is Dictionary):
+			continue
+		var kind: String = str(g_data.get("kind", ""))
+		var entry := {
+			"layer": str(g_data.get("layer", "")),
+			"kind": kind,
+			"width": float(g_data.get("width", 0.0)) if g_data.get("width") != null else 0.0,
+		}
+		match kind:
+			"line":
+				entry["start"] = _point_from_any(g_data.get("start", Vector2.ZERO))
+				entry["end"] = _point_from_any(g_data.get("end", Vector2.ZERO))
+			"circle":
+				entry["center"] = _point_from_any(g_data.get("center", Vector2.ZERO))
+				entry["radius"] = float(g_data.get("radius", 0.0))
+			"arc", "poly":
+				var pts: Array = []
+				for pt_data in g_data.get("points", []):
+					pts.append(_point_from_any(pt_data))
+				entry["points"] = pts
+				if g_data.has("angle") and g_data["angle"] != null:
+					entry["angle"] = float(g_data["angle"])
+		graphics.append(entry)
 
 
 ## Get a pad's world-space position and size, accounting for component rotation
@@ -548,6 +635,7 @@ func duplicate_component():
 	copy.footprint_id = footprint_id
 	copy.pads = pads.duplicate(true)
 	copy.has_pad_geometry = has_pad_geometry
+	copy.graphics = graphics.duplicate(true)
 	copy.bbox_center_offset = bbox_center_offset
 	copy.local_bounds = local_bounds
 	copy.locked = locked
@@ -624,6 +712,7 @@ func to_dict() -> Dictionary:
 		"pins": pins_dict,
 		"pads": _pads_to_list(),
 		"has_pad_geometry": has_pad_geometry,
+		"graphics": _graphics_to_list(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
 		"properties": properties.duplicate(),
 		"layer": layer,
@@ -670,6 +759,7 @@ func load_from_dict(data: Dictionary) -> void:
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
 	_pads_from_list(data.get("pads", []))
+	_graphics_from_list(data.get("graphics", []))
 
 	properties = data.get("properties", {}).duplicate()
 	layer = data.get("layer", "top")
@@ -734,6 +824,7 @@ func to_board_dict() -> Dictionary:
 		"w": local_bounds.size.x, "h": local_bounds.size.y}
 	d["pads"] = _pads_to_list()
 	d["has_pad_geometry"] = has_pad_geometry
+	d["graphics"] = _graphics_to_list()
 	d["bbox_center_offset"] = {"x": bbox_center_offset.x, "y": bbox_center_offset.y}
 	d["properties"] = properties.duplicate()
 	d["color"] = {"r": color.r, "g": color.g, "b": color.b, "a": color.a}
@@ -775,6 +866,7 @@ func load_from_board_dict(data: Dictionary) -> void:
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
 	_pads_from_list(data.get("pads", []))
+	_graphics_from_list(data.get("graphics", []))
 
 	properties = (data.get("properties", {}) as Dictionary).duplicate()
 	# `value` is derivative of properties.value (minpcb dual-write). Only adopt the

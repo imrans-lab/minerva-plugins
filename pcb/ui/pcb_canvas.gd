@@ -60,6 +60,9 @@ var show_labels: bool = true
 var show_pins: bool = true
 var snap_to_grid: bool = true
 var show_pads: bool = true
+## Draws F.SilkS graphics resolved by the worker's footprint-RESOLVE step
+## (component.graphics — see pcb_component.gd). Courtyard (F.CrtYd) stays off.
+var show_silk: bool = true
 
 ## Copper-layer trace filter driven by the toolbar layer selector.
 ## "all" → both layers; "top" → non-bottom traces; "bottom" → bottom traces.
@@ -120,6 +123,10 @@ var pad_copper_color: Color = Color(0.85, 0.65, 0.3, 1.0)  # Copper/gold for THT
 var pad_smd_color: Color = Color(0.75, 0.55, 0.25, 1.0)    # SMD pads
 var drill_hole_color: Color = Color(0.08, 0.08, 0.08, 1.0) # Drill holes (match background)
 var mounting_hole_color: Color = Color(0.2, 0.2, 0.2, 1.0) # Non-plated holes
+
+## Silkscreen (F.SilkS) stroke color — light/white, matching real silk ink.
+var silk_color: Color = Color(0.9, 0.9, 0.9, 1.0)
+var silk_min_width_px: float = 1.0
 
 ## Font
 var font: Font
@@ -448,6 +455,9 @@ func _draw_component(comp) -> void:
 	if comp.locked:
 		_draw_locked_hatch(screen_poly)
 
+	if show_silk and comp.graphics.size() > 0:
+		_draw_component_silk(comp, xform)
+
 	if show_pads and comp.has_pad_geometry and comp.pads.size() > 0:
 		_draw_component_pads(comp, xform)
 	elif show_pins:
@@ -547,6 +557,61 @@ func _draw_component_pads(comp, xform: Transform2D) -> void:
 				var drill_radius := (drill_diameter * zoom) / 2.0
 				draw_circle(screen_pos, maxf(drill_radius, 1.0), drill_hole_color)
 				draw_arc(screen_pos, maxf(drill_radius, 1.0), 0, TAU, 16, Color(0.4, 0.4, 0.4, 0.6), 1.0)
+
+
+## Draw F.SilkS graphics (component body outline, markings, etc.) attached by
+## the worker's footprint-RESOLVE step (component.graphics, LOCAL mm coords).
+## Transform convention MUST match _draw_component_pads EXACTLY — same `xform`
+## (comp.get_transform(), KiCAD CW rotation) and the same
+## `comp.position + (xform * local_point)` composition — so silk aligns with
+## the copper it was resolved against. F.CrtYd (courtyard) is intentionally
+## skipped; silk is the goal for this round.
+func _draw_component_silk(comp, xform: Transform2D) -> void:
+	for g in comp.graphics:
+		if g.get("layer", "") != "F.SilkS":
+			continue
+
+		var kind: String = g.get("kind", "")
+		var w: float = maxf(float(g.get("width", 0.15)) * zoom, silk_min_width_px)
+
+		match kind:
+			"line":
+				var start: Vector2 = g.get("start", Vector2.ZERO)
+				var end: Vector2 = g.get("end", Vector2.ZERO)
+				var p0 := world_to_screen(comp.position + (xform * start))
+				var p1 := world_to_screen(comp.position + (xform * end))
+				draw_line(p0, p1, silk_color, w)
+
+			"circle":
+				var center: Vector2 = g.get("center", Vector2.ZERO)
+				var radius: float = float(g.get("radius", 0.0))
+				var center_screen := world_to_screen(comp.position + (xform * center))
+				var radius_screen := radius * zoom
+				if radius_screen > 0.0:
+					draw_arc(center_screen, radius_screen, 0, TAU, 32, silk_color, w)
+
+			"poly":
+				var poly_points: PackedVector2Array = []
+				for pt in g.get("points", []):
+					var local_pt: Vector2 = pt
+					poly_points.append(world_to_screen(comp.position + (xform * local_pt)))
+				if poly_points.size() >= 2:
+					draw_polyline(poly_points, silk_color, w)
+
+			"arc":
+				# The graphic carries 2-3 LOCAL points (start[,mid],end). A true
+				# arc reconstruction from those is awkward in screen space (the
+				# rotation/rounding makes center+angle derivation fiddly); a
+				# polyline through the transformed points is an acceptable
+				# stand-in per the round's brief — visually indistinguishable
+				# for the small radii silk arcs typically use (pin-1 dots,
+				# rounded corners).
+				var arc_points: PackedVector2Array = []
+				for pt in g.get("points", []):
+					var local_pt: Vector2 = pt
+					arc_points.append(world_to_screen(comp.position + (xform * local_pt)))
+				if arc_points.size() >= 2:
+					draw_polyline(arc_points, silk_color, w)
 
 
 ## Fallback pin rendering when pad geometry not available.

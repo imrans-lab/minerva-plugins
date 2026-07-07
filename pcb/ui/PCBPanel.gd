@@ -256,6 +256,8 @@ func _build_toolbar() -> HBoxContainer:
 		_canvas.show_labels = p; _canvas.queue_redraw()))
 	tb.add_child(_make_toggle("Traces", true, func(p: bool) -> void:
 		_canvas.show_traces = p; _canvas.queue_redraw()))
+	tb.add_child(_make_toggle("Silk", true, func(p: bool) -> void:
+		_canvas.show_silk = p; _canvas.queue_redraw()))
 
 	tb.add_child(VSeparator.new())
 
