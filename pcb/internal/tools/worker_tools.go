@@ -106,6 +106,35 @@ func HandleGerbers(ctx context.Context, w *bridge.Worker, params json.RawMessage
 	return w.Call(ctx, "gerbers", params)
 }
 
+// ---- pcb_drc ---------------------------------------------------------------
+
+var DRC = ToolSpec{
+	Name: "pcb_drc",
+	Description: "Run a geometric design-rule check over a canonical PCB board — pure " +
+		"Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. " +
+		"Returns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured " +
+		"and located: 'wrong_net_pad' (a trace endpoint on a different-net pad -> short) " +
+		"{net, at:[x,y], pad:{ref,pin,net}}; 'crossing' (two same-layer different-net traces " +
+		"that intersect, deduped per net-pair-per-layer) {nets:[a,b], layer, at}; " +
+		"'dangling_endpoint' (a leaf trace endpoint reaching no pad/via/same-net copper -> " +
+		"open) {net, at}; 'layer_change_no_via' (a net's top and bottom copper meet with no " +
+		"via or through-hole pad -> missing via) {net, at}. T-junction taps and same-" +
+		"component internal-net pads are credited so they don't read as false opens. " +
+		"Scope: checks key off trace endpoints/segments — this is NOT a full ratsnest/" +
+		"connectivity check; a pad with no trace routed near it is not flagged as unrouted.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+		}
+	}`),
+}
+
+func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "drc", params)
+}
+
 // ---- pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

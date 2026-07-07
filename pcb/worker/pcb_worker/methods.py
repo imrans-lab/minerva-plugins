@@ -23,7 +23,7 @@ import os
 import traceback
 from pathlib import Path
 
-from . import board_model, gerber, kicad, libcheck
+from . import board_model, drc, gerber, kicad, libcheck
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -139,6 +139,23 @@ def _gerbers(params: dict) -> dict:
         except OSError as exc:
             return {"ok": False, "error": {
                 "kind": "io", "message": f"failed to write to out_dir: {exc}"}}
+    return {"ok": True, "result": result}
+
+
+def _drc(params: dict) -> dict:
+    """Geometric design-rule check over a canonical board.
+
+    Returns {ok, findings:[{type,...}], counts:{type:n}}. A parse failure is a
+    structured error (never a crash), mirroring `generate`/`gerbers`.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    try:
+        result = drc.run_drc(board)
+    except Exception as exc:  # geometry faults reported as data, not a crash
+        return {"ok": False, "error": {"kind": "drc", "message": str(exc)}}
     return {"ok": True, "result": result}
 
 
@@ -484,6 +501,7 @@ _HANDLERS = {
     "validate": lambda req: _validate(req.get("params") or {}),
     "generate": lambda req: _generate(req.get("params") or {}),
     "gerbers": lambda req: _gerbers(req.get("params") or {}),
+    "drc": lambda req: _drc(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),

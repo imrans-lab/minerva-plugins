@@ -213,6 +213,7 @@ func initRegistry() {
 	registry.Register(tools.Validate, tools.HandleValidate)
 	registry.Register(tools.Generate, tools.HandleGenerate)
 	registry.Register(tools.Gerbers, tools.HandleGerbers)
+	registry.Register(tools.DRC, tools.HandleDRC)
 	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
 	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
 }
@@ -254,6 +255,7 @@ var workerBackedTools = map[string]bool{
 	"pcb_validate":        true,
 	"pcb_generate":        true,
 	"pcb_gerbers":         true,
+	"pcb_drc":             true,
 	"pcb_check_libraries": true,
 	"pcb_check_bom":       true,
 }
