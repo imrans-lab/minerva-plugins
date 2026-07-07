@@ -273,3 +273,136 @@ def test_gerbers_method_malformed_yaml_errors():
     resp = _call("gerbers", {"yaml": "]["})
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "parse"
+
+
+# ---------------------------------------------------------------------------
+# F.SilkS real footprint graphics (resolve_board's component["graphics"]).
+#
+# Components WITHOUT 'graphics' must be untouched (covered above by
+# test_matches_goldens — the spike/drilltest boards carry no 'graphics' field
+# and their goldens are unchanged byte-for-byte). These tests cover the NEW
+# behaviour: components WITH 'graphics' emit real silk instead of a box.
+# ---------------------------------------------------------------------------
+
+FOOTPRINTS_DIR = HERE / "testdata" / "footprints"
+SMART_REMOTE_BOARD = FOOTPRINTS_DIR / "smart-remote-orig.yaml"
+
+
+def _fs_scale(gbr_text: str) -> tuple[int, int]:
+    fs = re.search(r"%FSLAX(\d)(\d)Y(\d)(\d)\*%", gbr_text)
+    assert fs, "no %FSLAX..Y..*% format spec in gerber"
+    return int(fs.group(2)), int(fs.group(4))
+
+
+def _gerber_move_points(gbr_text: str) -> list[tuple[float, float]]:
+    """Every D02 (move, i.e. path start) coordinate, honouring the self-declared
+    coordinate format (mirrors test_rotation.py's _gerber_flash_centres)."""
+    xd, yd = _fs_scale(gbr_text)
+    return [(int(xs) / 10 ** xd, int(ys) / 10 ** yd)
+            for xs, ys in re.findall(r"X(-?\d+)Y(-?\d+)D02\*", gbr_text)]
+
+
+def _gerber_flash_points(gbr_text: str) -> list[tuple[float, float]]:
+    xd, yd = _fs_scale(gbr_text)
+    return [(int(xs) / 10 ** xd, int(ys) / 10 ** yd)
+            for xs, ys in re.findall(r"X(-?\d+)Y(-?\d+)D03\*", gbr_text)]
+
+
+def test_silk_real_graphics_replaces_placeholder_box():
+    """A resolved board's F.SilkS carries real footprint outlines (many more
+    draws than the old one-box-per-component placeholder), including a true
+    ARC (MIC1's DIP-socket notch), and still round-trips through pygerber."""
+    pytest.importorskip("pygerber")
+    from pygerber.gerberx3.api.v2 import (
+        FileTypeEnum,
+        GerberFile,
+        OnParserErrorEnum,
+    )
+    from pcb_worker.resolve import resolve_board
+
+    board = _load(SMART_REMOTE_BOARD)
+    resolved = resolve_board(board)
+    n_components = len(resolved["components"])
+    assert n_components > 0
+    assert all(c.get("graphics") for c in resolved["components"]), \
+        "fixture expected to fully resolve graphics for this assertion"
+
+    files = gerber.build_gerbers(resolved, name="smartremote")
+    silk = files["smartremote-F_SilkS.gbr"]
+
+    # The old placeholder drew exactly 4 line segments (a box) per component;
+    # real silk (line/circle/poly/arc across ~10 components) draws far more.
+    draw_ops = len(re.findall(r"D0[123]\*", silk))
+    assert draw_ops > 4 * n_components, \
+        f"F.SilkS looks like it's still boxes ({draw_ops} draws for {n_components} components)"
+
+    # ESP32/U1's body outline in particular (its footprint has 7 F.SilkS lines).
+    assert draw_ops > 50
+
+    # A real arc (G02/G03) is present — MIC1's DIP-6 socket notch — not just
+    # straight-line polyline approximations.
+    assert "G02*" in silk or "G03*" in silk, "expected a true arc (G02/G03) in F.SilkS"
+
+    gf = GerberFile.from_str(silk, file_type=FileTypeEnum.INFER_FROM_ATTRIBUTES)
+    parsed = gf.parse(on_parser_error=OnParserErrorEnum.Raise)
+    assert parsed.get_file_type() is not None
+
+
+def test_silk_omitted_when_component_has_no_graphics():
+    """A component with no 'graphics' key still gets the courtyard-box
+    placeholder (unchanged behaviour) even on a board where OTHER components
+    do have resolved graphics."""
+    board = {
+        "version": 1, "name": "mixed", "width_mm": 40, "height_mm": 40,
+        "components": [
+            {"ref": "U1", "footprint": "TESTFP", "x_mm": 10.0, "y_mm": 10.0,
+             "rotation_deg": 0.0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": -1.0, "y_mm": 0.0},
+                      {"number": "2", "x_mm": 1.0, "y_mm": 0.0}],
+             "graphics": [{"layer": "F.SilkS", "kind": "line",
+                          "start": [-2.0, -1.0], "end": [2.0, -1.0], "width": 0.15}]},
+            {"ref": "R1", "footprint": "R_0402", "x_mm": 25.0, "y_mm": 25.0,
+             "rotation_deg": 0.0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": -0.5, "y_mm": 0.0},
+                      {"number": "2", "x_mm": 0.5, "y_mm": 0.0}]},
+        ],
+        "nets": [],
+    }
+    files = gerber.build_gerbers(board, name="mixed")
+    silk = files["mixed-F_SilkS.gbr"]
+    moves = _gerber_move_points(silk)
+    # R1's box (4 segments -> 1 D02 move) + U1's real silk line (1 D02 move).
+    assert len(moves) == 2, f"expected one box move + one silk-line move, got {moves}"
+
+
+def test_silk_transform_matches_pad_transform():
+    """A component's silk graphics must land at the SAME board-absolute point
+    as a pad declared at the identical LOCAL coordinate — i.e. silk uses the
+    exact same (_rotate + translate) convention as pads (docs: gerber.py's
+    _rotate KiCad-clockwise convention, pinned by test_rotation.py)."""
+    board = {
+        "version": 1, "name": "silktest", "width_mm": 40, "height_mm": 40,
+        "components": [
+            {"ref": "U1", "footprint": "TESTFP", "x_mm": 15.0, "y_mm": 8.0,
+             "rotation_deg": 37.0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": 2.0, "y_mm": 3.0, "drill_mm": 0.5}],
+             "graphics": [{"layer": "F.SilkS", "kind": "line",
+                          "start": [2.0, 3.0], "end": [6.0, 3.0], "width": 0.15}]},
+        ],
+        "nets": [],
+    }
+    files = gerber.build_gerbers(board, name="silktest")
+
+    # Pin 1's TH annulus flash in F_Cu (absolute board coords).
+    pad_xy = _gerber_flash_points(files["silktest-F_Cu.gbr"])
+    assert len(pad_xy) == 1, pad_xy
+
+    # The silk line's start point (local [2.0, 3.0] — identical to the pin)
+    # should land on the exact same absolute point.
+    silk_xy = _gerber_move_points(files["silktest-F_SilkS.gbr"])
+    assert len(silk_xy) == 1, silk_xy
+
+    dx = abs(pad_xy[0][0] - silk_xy[0][0])
+    dy = abs(pad_xy[0][1] - silk_xy[0][1])
+    assert dx < 1e-3 and dy < 1e-3, \
+        f"silk transform {silk_xy[0]} != pad transform {pad_xy[0]}"

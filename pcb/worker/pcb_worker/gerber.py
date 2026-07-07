@@ -126,6 +126,87 @@ def _rotate(px: float, py: float, deg: float) -> tuple[float, float]:
     return px * c - py * s, px * s + py * c
 
 
+def _transform_point(cx: float, cy: float, rot: float,
+                     lx: float, ly: float) -> tuple[float, float]:
+    """Rotate a component-LOCAL point by *rot* (via ``_rotate``) and translate
+    by the component's board placement (cx, cy) — the exact pad convention."""
+    ox, oy = _rotate(lx, ly, rot)
+    return cx + ox, cy + oy
+
+
+def _graphic_width(graphic: dict) -> float:
+    w = _opt_num(graphic.get("width"))
+    return w if (w is not None and w > 0) else SILK_LINE_WIDTH_MM
+
+
+def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
+                          graphic: dict) -> None:
+    """Transform one footprint F.SilkS graphic (component-LOCAL coords) into
+    board-absolute geometry, appended to the matching ``g.silk_*`` bucket.
+
+    Supported kinds (see footprints.py's ``_parse_graphics``): line, circle,
+    poly, arc. Arc has two source forms: legacy KiCad ``(center, start, angle)``
+    (``points`` has 2 entries + an ``angle`` field) drawn as a TRUE arc via
+    gerber-writer's ``add_trace_arc``; and the 3-point ``(start, mid, end)``
+    form, drawn as a polyline through those points (acceptable approximation
+    per the round brief — no test fixture currently exercises this form).
+    """
+    kind = graphic.get("kind")
+    width = _graphic_width(graphic)
+
+    if kind == "line":
+        st, en = graphic.get("start"), graphic.get("end")
+        if not (isinstance(st, list) and isinstance(en, list)
+                and len(st) >= 2 and len(en) >= 2):
+            return
+        p1 = _transform_point(cx, cy, rot, _num(st[0]), _num(st[1]))
+        p2 = _transform_point(cx, cy, rot, _num(en[0]), _num(en[1]))
+        g.silk_lines.append((p1[0], p1[1], p2[0], p2[1], width))
+
+    elif kind == "circle":
+        ct = graphic.get("center")
+        radius = _opt_num(graphic.get("radius"))
+        if not (isinstance(ct, list) and len(ct) >= 2 and radius and radius > 0):
+            return
+        pc = _transform_point(cx, cy, rot, _num(ct[0]), _num(ct[1]))
+        g.silk_circles.append((pc[0], pc[1], radius, width))
+
+    elif kind == "poly":
+        pts = [p for p in _list(graphic.get("points")) if isinstance(p, list) and len(p) >= 2]
+        if len(pts) < 2:
+            return
+        abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
+        g.silk_polys.append((abs_pts, width, True))
+
+    elif kind == "arc":
+        pts = [p for p in _list(graphic.get("points")) if isinstance(p, list) and len(p) >= 2]
+        angle = _opt_num(graphic.get("angle"))
+        if angle is not None and angle != 0.0 and len(pts) >= 2:
+            # Legacy KiCad form: pts[0] is the arc CENTER, pts[1] is the arc
+            # START point, and 'angle' is the sweep (same file-coordinate
+            # convention as footprint (at x y rot) — reuse _rotate() as-is).
+            ccx, ccy = _num(pts[0][0]), _num(pts[0][1])
+            sx, sy = _num(pts[1][0]), _num(pts[1][1])
+            vx, vy = sx - ccx, sy - ccy
+            if vx == 0.0 and vy == 0.0:
+                return
+            evx, evy = _rotate(vx, vy, angle)
+            ex, ey = ccx + evx, ccy + evy
+            start_abs = _transform_point(cx, cy, rot, sx, sy)
+            end_abs = _transform_point(cx, cy, rot, ex, ey)
+            center_abs = _transform_point(cx, cy, rot, ccx, ccy)
+            # _rotate(v, angle) rotates v CCW (math convention) by -angle, so
+            # a negative 'angle' sweeps CCW ('+' in gerber-writer's arcto);
+            # a positive 'angle' sweeps CW ('-'). Verified against gerber_writer
+            # writer.Path.arcto's own docstring example (spike-level check).
+            orientation = "+" if angle < 0 else "-"
+            g.silk_arcs.append((start_abs, end_abs, center_abs, orientation, width))
+        elif len(pts) >= 2:
+            # 3-point (start[, mid], end) form: polyline approximation.
+            abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
+            g.silk_polys.append((abs_pts, width, False))
+
+
 # ---------------------------------------------------------------------------
 # Board -> intermediate geometry (side-tagged so we can build both copper /
 # both mask layers in one pass).
@@ -149,8 +230,19 @@ class _Geometry:
         self.traces_bot: list[tuple[float, float, float, float, float]] = []
         # Drill hits: (x, y, diameter, plated?)
         self.holes: list[tuple[float, float, float, bool]] = []
-        # Silk courtyard boxes (top side): (cx, cy, half_w, half_h)
+        # Silk courtyard boxes (top side, components WITHOUT graphics only):
+        # (cx, cy, half_w, half_h)
         self.silk_boxes: list[tuple[float, float, float, float]] = []
+        # Real footprint silk (top side, components WITH graphics), harvested
+        # from component["graphics"] (resolve_board) and transformed to board
+        # coords with the same _rotate() convention as pads.
+        self.silk_lines: list[tuple[float, float, float, float, float]] = []  # x1,y1,x2,y2,w
+        self.silk_circles: list[tuple[float, float, float, float]] = []       # cx,cy,r,w
+        # points, width, closed (fp_poly / mid-less arc fallback is open)
+        self.silk_polys: list[tuple[list[tuple[float, float]], float, bool]] = []
+        # start, end, center, orientation('+'/'-'), width
+        self.silk_arcs: list[tuple[tuple[float, float], tuple[float, float],
+                                   tuple[float, float], str, float]] = []
 
 
 def _harvest(board: dict, mask_clearance: float) -> _Geometry:
@@ -199,8 +291,20 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                         h + 2 * mask_clearance, rot)
                 (g.mask_top if top else g.mask_bot).append(mask)
 
-        # Silk courtyard box (top-side components only) around the pad extent.
-        if top and pin_extents:
+        # Silk: components with resolved footprint graphics (resolve_board's
+        # component["graphics"]) get their REAL F.SilkS outline; components
+        # without it keep the courtyard-box placeholder (non-breaking — the
+        # byte-golden boards carry no 'graphics' field, so they take this
+        # unchanged 'else' path). Bottom-side (B.SilkS) is out of scope here,
+        # same as the pre-existing box code (which was already top-only).
+        graphics = comp.get("graphics")
+        has_graphics = isinstance(graphics, list) and len(graphics) > 0
+        if has_graphics:
+            if top:
+                for graphic in graphics:
+                    if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
+                        _harvest_silk_graphic(g, cx, cy, rot, graphic)
+        elif top and pin_extents:
             xs = [p[0] for p in pin_extents]
             ys = [p[1] for p in pin_extents]
             half_w = (max(xs) - min(xs)) / 2 + SILK_COURTYARD_MARGIN_MM
@@ -296,6 +400,37 @@ def _add_mask(layer: DataLayer, openings) -> None:
             layer.add_pad(Circle(op[3], ""), (px, py))
 
 
+def _add_silk_lines(layer: DataLayer, lines) -> None:
+    for (x1, y1, x2, y2, w) in lines:
+        layer.add_trace_line((x1, y1), (x2, y2), w, "")
+
+
+def _add_silk_circles(layer: DataLayer, circles) -> None:
+    for (cx, cy, r, w) in circles:
+        # start == end with a given center is gerber-writer's documented full
+        # (360 deg) arc form (Path.arcto / _ArcTo docstring) — a TRUE circle,
+        # not a sampled polyline.
+        layer.add_trace_arc((cx + r, cy), (cx + r, cy), (cx, cy), "+", w, "")
+
+
+def _add_silk_polys(layer: DataLayer, polys) -> None:
+    for (pts, w, closed) in polys:
+        if len(pts) < 2:
+            continue
+        p = GPath()
+        p.moveto(pts[0])
+        for pt in pts[1:]:
+            p.lineto(pt)
+        if closed and pts[0] != pts[-1]:
+            p.lineto(pts[0])
+        layer.add_traces_path(p, w, "")
+
+
+def _add_silk_arcs(layer: DataLayer, arcs) -> None:
+    for (start, end, center, orientation, w) in arcs:
+        layer.add_trace_arc(start, end, center, orientation, w, "")
+
+
 def _rect_path(cx: float, cy: float, half_w: float, half_h: float) -> GPath:
     p = GPath()
     p.moveto((cx - half_w, cy - half_h))
@@ -335,11 +470,17 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_mask(b_mask, g.mask_bot)
     out["B_Mask"] = _dump(b_mask, creation_date)
 
-    # F.SilkS — courtyard box placeholder per top component (gerber-writer has
-    # no glyph/text primitive; real reference-designator text is future scope).
+    # F.SilkS — real footprint silk (line/circle/poly/arc) for components with
+    # resolved graphics; courtyard box placeholder for the rest (gerber-writer
+    # has no glyph/text primitive; real reference-designator text is future
+    # scope, unrelated to this round).
     f_silks = DataLayer("Legend,Top", negative=False)
     for (cx, cy, hw, hh) in g.silk_boxes:
         f_silks.add_traces_path(_rect_path(cx, cy, hw, hh), SILK_LINE_WIDTH_MM, "")
+    _add_silk_lines(f_silks, g.silk_lines)
+    _add_silk_circles(f_silks, g.silk_circles)
+    _add_silk_polys(f_silks, g.silk_polys)
+    _add_silk_arcs(f_silks, g.silk_arcs)
     out["F_SilkS"] = _dump(f_silks, creation_date)
 
     # Edge.Cuts — closed board-outline rectangle from origin + width/height.
