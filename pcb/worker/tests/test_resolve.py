@@ -74,6 +74,82 @@ def test_resolve_coincidence_passes_for_smart_remote():
 
 
 # ---------------------------------------------------------------------------
+# (a2) Pad geometry: resolve also attaches real per-component pads.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_attaches_pads_to_every_component():
+    resolved = resolve_board(_load_board())
+    for comp in resolved["components"]:
+        assert comp.get("has_pad_geometry") is True, \
+            f"{comp.get('ref')}: has_pad_geometry not set"
+        pads = comp.get("pads")
+        assert isinstance(pads, list) and len(pads) > 0, \
+            f"{comp.get('ref')}: no pads attached"
+        # Contract shape consumed by pcb_component.gd::_pads_from_list.
+        for pad in pads:
+            assert set(pad) >= {
+                "number", "type", "shape", "position", "size", "drill", "layers"}
+            assert {"x", "y"} <= set(pad["position"])
+            assert {"width", "height"} <= set(pad["size"])
+            assert {"x", "y"} <= set(pad["drill"])
+            assert pad["type"] in {"smd", "thru_hole", "np_thru_hole"}
+
+
+def test_resolve_pad_counts_match_footprints():
+    resolved = resolve_board(_load_board())
+    by_ref = {c["ref"]: c for c in resolved["components"]}
+    # ESP32-S3-DevKitC-1 (U1) is a 44-pin module; MIC1 is a 6-pin DIP.
+    assert len(by_ref["U1"]["pads"]) == 44
+    assert len(by_ref["MIC1"]["pads"]) == 6
+
+
+def test_resolve_pad_shape_and_size_fidelity():
+    resolved = resolve_board(_load_board())
+    u1 = next(c for c in resolved["components"] if c["ref"] == "U1")
+    # Real geometry, not a uniform circle stand-in: some pad is non-rect OR
+    # has an asymmetric footprint, and every size is positive.
+    real = any(
+        pad["shape"] != "rect"
+        or pad["size"]["width"] != pad["size"]["height"]
+        for pad in u1["pads"])
+    assert real, "U1 pads look like uniform stand-ins, not real geometry"
+    for pad in u1["pads"]:
+        assert pad["size"]["width"] > 0 and pad["size"]["height"] > 0
+
+
+def test_resolve_tht_vs_smd_drill():
+    resolved = resolve_board(_load_board())
+    by_ref = {c["ref"]: c for c in resolved["components"]}
+    # U1 is thru-hole → drilled copper.
+    assert any(pad["drill"]["x"] > 0 for pad in by_ref["U1"]["pads"]), \
+        "expected at least one drilled (thru-hole) pad on U1"
+    assert all(pad["type"] == "thru_hole" for pad in by_ref["U1"]["pads"])
+    # SW1 (EVP-ASAC1A tactile switch) is SMD → EVERY pad drill-less.
+    sw1 = by_ref["SW1"]
+    assert all(pad["drill"]["x"] == 0 and pad["drill"]["y"] == 0 for pad in sw1["pads"]), \
+        "expected all SMD pads on SW1 to be drill-less"
+    assert all(pad["type"] == "smd" for pad in sw1["pads"])
+
+
+def test_resolve_pads_coregister_with_declared_pins():
+    board = _load_board()
+    resolved = resolve_board(board)
+    u1_in = next(c for c in board["components"] if c["ref"] == "U1")
+    u1_out = next(c for c in resolved["components"] if c["ref"] == "U1")
+    declared = {str(p["number"]): (p["x_mm"], p["y_mm"]) for p in u1_in["pins"]}
+    checked = 0
+    for pad in u1_out["pads"]:
+        pin = declared.get(pad["number"])
+        if pin is None:
+            continue
+        assert abs(pad["position"]["x"] - pin[0]) <= 0.01
+        assert abs(pad["position"]["y"] - pin[1]) <= 0.01
+        checked += 1
+    assert checked > 0, "no U1 pads matched a declared pin number"
+
+
+# ---------------------------------------------------------------------------
 # (b) NEGATIVE: a pin moved off its pad trips the fail-closed guard.
 # ---------------------------------------------------------------------------
 

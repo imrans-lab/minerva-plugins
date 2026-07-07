@@ -38,6 +38,22 @@ from .footprints import GRAPHIC_LAYERS, resolve_footprint
 # Coincidence tolerance in mm — same golden threshold Round 1 validated.
 COINCIDENCE_TOL_MM = 0.01
 
+# KiCad pad-type tokens → the exactly-three tokens the Godot panel renders
+# (smd = surface pad, thru_hole = drilled copper, np_thru_hole = mounting hole).
+# `connect` (edge-connector finger) is copper-only like an SMD pad; anything
+# unknown/None fails safe to `smd` so the panel never chokes on a stray token.
+_PAD_TYPE_MAP = {
+    "smd": "smd",
+    "thru_hole": "thru_hole",
+    "np_thru_hole": "np_thru_hole",
+    "connect": "smd",
+}
+
+
+def _normalize_pad_type(raw) -> str:
+    """Map a raw KiCad pad-type token to the panel's smd/thru_hole/np_thru_hole."""
+    return _PAD_TYPE_MAP.get(raw, "smd")
+
 
 class ResolveError(Exception):
     """Base for resolve-step faults."""
@@ -104,9 +120,10 @@ def resolve_board(
     For each component: resolve the footprint ref, PROVE its pads coincide with
     the component's declared pins (fail-closed — see ResolveCoincidenceError),
     then set ``component["graphics"]`` to the footprint's ``F.SilkS`` + ``F.CrtYd``
-    graphics in component-LOCAL coordinates. The existing inline pads are left
-    untouched (this round attaches silk; it does not re-source pads). The input
-    is not mutated — a deep copy is returned.
+    graphics AND ``component["pads"]`` to the footprint's real pad geometry
+    (shape/size/drill/type), both in component-LOCAL coordinates, and flag
+    ``component["has_pad_geometry"] = True`` so the panel's accurate pad renderer
+    takes over. The input is not mutated — a deep copy is returned.
     """
     resolved = copy.deepcopy(board)
     components = resolved.get("components")
@@ -132,7 +149,55 @@ def resolve_board(
         graphics = [g for g in parsed["graphics"] if g.get("layer") in GRAPHIC_LAYERS]
         comp["graphics"] = graphics
 
+        # Attach real pad geometry (footprint-LOCAL coords — the SAME frame the
+        # graphics above are in, so silk and copper co-register). Built from the
+        # SAME parsed footprint used for the coincidence check; no re-parse. The
+        # coincidence guard has already run (and would have raised) before we get
+        # here, so pads are only attached to a proven-coincident component.
+        pads = _pads_from_parsed(parsed["pads"])
+        comp["pads"] = pads
+        # Only claim geometry when pads actually resolved — otherwise the panel
+        # would suppress its fallback pin renderer and draw nothing at all.
+        comp["has_pad_geometry"] = bool(pads)
+
     return resolved
+
+
+def _pads_from_parsed(fp_pads: list) -> list:
+    """Map ``footprints._parse_pad`` output → the panel's board-dict pad shape.
+
+    Emits ``{number, type, shape, position{x,y}, size{width,height},
+    drill{x,y}, layers}`` (see ``pcb_component.gd::_pads_from_list``). Pads with
+    no local position are skipped — mirrors the coincidence path's null skip so
+    we never emit a positionless pad.
+    """
+    out: list = []
+    for p in fp_pads:
+        x, y = p.get("x_mm"), p.get("y_mm")
+        if x is None or y is None:
+            continue
+
+        size = p.get("size")
+        if size and size[0] is not None and size[1] is not None:
+            size_dict = {"width": size[0], "height": size[1]}
+        else:
+            size_dict = {"width": 1.0, "height": 1.0}
+
+        # KiCad drill is a single float (or absent) → symmetric {x,y}; 0 == no hole.
+        drill = p.get("drill")
+        drill_dict = ({"x": drill, "y": drill} if drill is not None
+                      else {"x": 0.0, "y": 0.0})
+
+        out.append({
+            "number": str(p.get("number", "")),
+            "type": _normalize_pad_type(p.get("type")),
+            "shape": p.get("shape") or "rect",
+            "position": {"x": x, "y": y},
+            "size": size_dict,
+            "drill": drill_dict,
+            "layers": p.get("layers") or [],
+        })
+    return out
 
 
 def board_graphic_stats(board: dict) -> dict:
