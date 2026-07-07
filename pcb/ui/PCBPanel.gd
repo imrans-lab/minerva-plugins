@@ -408,11 +408,10 @@ func _on_export_yaml_pressed() -> void:
 ## (host.run_router → MCPPcbPanelTools.minerva_pcb_apply_route_hints) turns that
 ## into failure-as-feedback rather than crashing.
 ##
-## FINDING (DCR 019dc140): "pcb.route" is NOT yet a declared broker channel
-## (manifest.json ipc_channels lists only serialize/deserialize/export) and is
-## out of this round's fence, so in production this currently returns
-## worker_unavailable; the emit is wired and goes live the moment the channel is
-## declared + forwarded to the worker `route` handler.
+## "pcb.route" is a declared broker channel (manifest.json ipc_channels) forwarded
+## to the worker `route` method (internal/tools RouteChannel/HandleRouteChannel,
+## bug 019f3815e9f9). The route-correction loop is LIVE; worker_unavailable is
+## returned only when the IPC channel is genuinely not ready (panel not mounted).
 func route_board(selection: Dictionary) -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null or _data == null:

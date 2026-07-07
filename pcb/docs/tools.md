@@ -104,12 +104,11 @@ So the **in-fence half is wired end-to-end**: `MCPPcbPanelTools._apply_route_hin
 → `PcbAnnotationHost.run_router(selection)` (async) → `PCBPanel.route_board()`,
 which builds `{board: to_board_dict(), route_hints, selection}` and emits a
 `pcb.route` broker `request`, awaiting the reply (mirrors the `pcb.serialize`
-export path). Until the out-of-fence step lands, `route_board` finds no
-`pcb.route` channel / `_MinervaIPC` reply and returns a structured
-`worker_unavailable`, which the tool surfaces as `route_worker_unavailable`
-failure-feedback. **To go live (out of fence):** declare `pcb.route` in
-`manifest.json` `ipc_channels` and forward it to the worker `route` handler, **or**
-register `minerva_pcb_route` in `internal/tools/worker_tools.go`. The
+export path). `pcb.route` is now a declared `ipc_channels` entry forwarded to the
+worker `route` method (`internal/tools` `RouteChannel`/`HandleRouteChannel`, bug
+019f3815e9f9), so the route-correction loop is LIVE; `route_board` returns a
+structured `worker_unavailable` (surfaced by the tool as `route_worker_unavailable`
+failure-feedback) only when the IPC channel is genuinely not ready. The
 write-back / materialize / lifecycle logic is validated headless against a canned
 `RoutingResult` in `src/test/test_pcb_apply_route_hints.gd` (the worker call is the
 only stubbed seam).
