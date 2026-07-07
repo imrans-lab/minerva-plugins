@@ -534,7 +534,8 @@ func _draw_locked_hatch(screen_poly: PackedVector2Array) -> void:
 
 ## Draw pads with accurate geometry from KiCAD footprint
 func _draw_component_pads(comp, xform: Transform2D) -> void:
-	var pad_rot: float = -comp.rotation
+	# +rotation to match get_transform() (pad position) and the authored traces.
+	var pad_rot: float = comp.rotation
 
 	for pad in comp.pads:
 		var pad_type: String = pad.get("type", "smd")
@@ -684,7 +685,7 @@ func _draw_fallback_pins(comp, xform: Transform2D) -> void:
 
 			if pin_name == "1":
 				var pad_size := Vector2(pad_diameter, pad_diameter) * zoom
-				_draw_rect_pad(pin_screen, pad_size, -comp.rotation, pad_copper_color)
+				_draw_rect_pad(pin_screen, pad_size, comp.rotation, pad_copper_color)
 			else:
 				draw_circle(pin_screen, maxf(pad_radius, 2.0), pad_copper_color)
 

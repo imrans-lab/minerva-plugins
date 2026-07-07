@@ -136,9 +136,14 @@ func get_pin_name(pin_number: String) -> String:
 
 ## Get the Transform2D for this component (rotation around anchor/origin)
 func get_transform() -> Transform2D:
-	# KiCAD uses CCW positive, Godot uses CW positive
-	# Negate rotation for correct visual alignment
-	return Transform2D(deg_to_rad(-rotation), Vector2.ZERO)
+	# Board rotation is applied in the panel's Y-down screen space, which matches
+	# the authored trace/pin coordinates directly (no Y-flip in world_to_screen).
+	# So pads/silk/pins must rotate by +rotation to land on their traces. The
+	# earlier -rotation "visual alignment" was wrong for 90/270 parts (0/180 are
+	# symmetric so it went unnoticed): it put e.g. MIC1 (270) off the board and
+	# off its traces. Verified sub-mm against the routed board; the worker gerber
+	# is unaffected (it plots Y-up, so its -deg already equals +deg here).
+	return Transform2D(deg_to_rad(rotation), Vector2.ZERO)
 
 
 ## Get local body polygon for drawing (4 corners relative to anchor)
