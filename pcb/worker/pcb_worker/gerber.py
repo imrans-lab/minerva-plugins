@@ -195,11 +195,15 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
             start_abs = _transform_point(cx, cy, rot, sx, sy)
             end_abs = _transform_point(cx, cy, rot, ex, ey)
             center_abs = _transform_point(cx, cy, rot, ccx, ccy)
-            # _rotate(v, angle) rotates v CCW (math convention) by -angle, so
-            # a negative 'angle' sweeps CCW ('+' in gerber-writer's arcto);
-            # a positive 'angle' sweeps CW ('-'). Verified against gerber_writer
-            # writer.Path.arcto's own docstring example (spike-level check).
-            orientation = "+" if angle < 0 else "-"
+            # KiCad legacy arc 'angle' is measured in KiCad's Y-DOWN frame; the
+            # gerber is plotted in board coords with no Y-flip, so the sweep
+            # chirality INVERTS relative to gerber's Y-up CCW convention. A KiCad
+            # negative 'angle' must therefore emit as a CW ('-') gerber arc and a
+            # positive one as CCW ('+'). Empirically verified: the DIP-6 pin-1
+            # notch (center,start,angle=-180) must bulge INTO the body (+y here),
+            # which is CW/'-'; the opposite ('+') mirrors it outside the body.
+            # Pinned by test_legacy_arc_bulges_into_body.
+            orientation = "-" if angle < 0 else "+"
             g.silk_arcs.append((start_abs, end_abs, center_abs, orientation, width))
         elif len(pts) >= 2:
             # 3-point (start[, mid], end) form: polyline approximation.

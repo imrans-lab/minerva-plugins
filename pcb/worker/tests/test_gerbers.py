@@ -406,3 +406,70 @@ def test_silk_transform_matches_pad_transform():
     dy = abs(pad_xy[0][1] - silk_xy[0][1])
     assert dx < 1e-3 and dy < 1e-3, \
         f"silk transform {silk_xy[0]} != pad transform {pad_xy[0]}"
+
+
+def _first_arc(gbr: str):
+    """Parse the first modal G02/G03 arc: return (start, end, center, mode)
+    in mm, mode 2=CW / 3=CCW. center = start + (I, J)."""
+    xd, yd = _fs_scale(gbr)
+    mode, sx, sy = 1, None, None
+    for line in gbr.splitlines():
+        s = line.strip()
+        if s == "G02*": mode = 2; continue
+        if s == "G03*": mode = 3; continue
+        if s == "G01*": mode = 1; continue
+        m = re.match(r"X(-?\d+)Y(-?\d+)D02\*", s)
+        if m:
+            sx, sy = int(m.group(1)) / 10 ** xd, int(m.group(2)) / 10 ** yd
+            continue
+        m = re.match(r"X(-?\d+)Y(-?\d+)I(-?\d+)J(-?\d+)D01\*", s)
+        if m and mode in (2, 3) and sx is not None:
+            ex, ey = int(m.group(1)) / 10 ** xd, int(m.group(2)) / 10 ** yd
+            ii, jj = int(m.group(3)) / 10 ** xd, int(m.group(4)) / 10 ** yd
+            return (sx, sy), (ex, ey), (sx + ii, sy + jj), mode
+        m = re.match(r"X(-?\d+)Y(-?\d+)D01\*", s)
+        if m:
+            sx, sy = int(m.group(1)) / 10 ** xd, int(m.group(2)) / 10 ** yd
+    return None
+
+
+def _arc_midpoint(start, end, center, mode) -> tuple[float, float]:
+    import math
+    a0 = math.atan2(start[1] - center[1], start[0] - center[0])
+    a1 = math.atan2(end[1] - center[1], end[0] - center[0])
+    r = math.hypot(start[0] - center[0], start[1] - center[1])
+    if mode == 3:  # CCW: sweep angle increasing
+        while a1 <= a0: a1 += 2 * math.pi
+    else:          # CW: sweep angle decreasing
+        while a1 >= a0: a1 -= 2 * math.pi
+    am = (a0 + a1) / 2.0
+    return (center[0] + r * math.cos(am), center[1] + r * math.sin(am))
+
+
+def test_legacy_arc_bulges_into_body():
+    """Regression: KiCad legacy (center,start,angle) arcs must emit with the
+    correct gerber chirality. The DIP-6 pin-1 notch (angle=-180) must bulge
+    INTO the body, not mirror outside it. With the DIP-6 placed at rot 0 and
+    +y toward the body, the emitted arc's midpoint must sit on the +y side of
+    its centre. (The pre-fix code emitted G03, mirroring the notch outward.)"""
+    from pcb_worker.footprints import resolve_footprint
+    from pcb_worker.resolve import resolve_board
+
+    fp = resolve_footprint("Package_DIP:DIP-6_W7.62mm_Socket")
+    pins = [{"number": p["number"], "x_mm": p["x_mm"], "y_mm": p["y_mm"],
+             "drill_mm": p.get("drill") or 0.8, "annulus_diameter_mm": 1.6}
+            for p in fp["pads"]]
+    board = {
+        "version": 1, "name": "dip6", "width_mm": 20, "height_mm": 20,
+        "components": [{"ref": "U1", "footprint": "Package_DIP:DIP-6_W7.62mm_Socket",
+                        "x_mm": 10.0, "y_mm": 10.0, "rotation_deg": 0.0,
+                        "layer": "top", "pins": pins}],
+        "nets": [],
+    }
+    silk = gerber.build_gerbers(resolve_board(board), name="dip6")["dip6-F_SilkS.gbr"]
+    arc = _first_arc(silk)
+    assert arc is not None, "expected the DIP-6 pin-1 notch arc in F.SilkS"
+    start, end, center, mode = arc
+    mid = _arc_midpoint(start, end, center, mode)
+    assert mid[1] > center[1] + 0.5, \
+        f"notch bulges the WRONG way: midpoint {mid} vs centre {center} (mode {mode})"
