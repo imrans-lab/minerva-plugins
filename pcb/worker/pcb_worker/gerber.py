@@ -99,10 +99,29 @@ def _is_top(layer: Any) -> bool:
 
 
 def _rotate(px: float, py: float, deg: float) -> tuple[float, float]:
-    """Rotate a component-relative offset CCW by *deg* degrees."""
+    """Rotate a component-LOCAL pad offset by *deg* using KiCad's footprint-angle
+    convention, so the resulting flash lands on KiCad's own absolute pad position.
+
+    KiCad applies a footprint ``(at x y rot)`` angle CLOCKWISE in the file's
+    coordinate frame (Y grows downward) — i.e. negate the angle before applying
+    the standard CCW rotation matrix. This is the exact convention the
+    agent_router KiCad reader encodes (``kicad_io._transform_position`` uses
+    ``radians(-rotation)``), which is the ground truth pinned by
+    tests/test_rotation.py against a real KiCad-authored fixture. The previous
+    ``+deg`` (CCW) form flashed pads MIRRORED about the component centre versus
+    KiCad, so a connector authored at rotation 90 landed off its routed trace
+    endpoints (docket 019f3ba0f455).
+
+    NOTE: 0 deg is rotation-invariant and short-circuits, so the rotation_deg=0
+    gerber goldens are unaffected by the sign fix.
+
+    (Boards authored in the pcb-architect dialect use the OPPOSITE sign for their
+    ``rotation`` field; reconciling that is an IMPORT-layer concern — negate at
+    import — not this worker's, whose rotation_deg is defined as KiCad-equivalent.)
+    """
     if deg == 0.0:
         return px, py
-    r = math.radians(deg)
+    r = math.radians(-deg)
     c, s = math.cos(r), math.sin(r)
     return px * c - py * s, px * s + py * c
 

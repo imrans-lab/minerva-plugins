@@ -33,6 +33,10 @@ def _num(v: Any, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
 
 
+def _opt_num(v: Any) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def _copper_layer(name: Any) -> str:
     if isinstance(name, str) and name in _LAYER_MAP:
         return _LAYER_MAP[name]
@@ -182,10 +186,17 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
                 f'(layers "*.Cu"){net_expr})'
             )
         else:
-            # SMD rect pad (nominal 1x0.6mm — exact pad geometry is next-child scope).
+            # SMD rect pad. Honour the pin's declared pad geometry when present
+            # (pad_width_mm / pad_height_mm — the SAME keys gerber.py reads in
+            # _harvest, so kicad + gerber stay consistent); fall back to the
+            # 1x0.6mm nominal only when the pin omits them.
+            pw = _opt_num(pin.get("pad_width_mm"))
+            ph = _opt_num(pin.get("pad_height_mm"))
+            w = pw if pw is not None else 1
+            h = ph if ph is not None else 0.6
             lines.append(
                 f'    (pad "{_esc(num_s)}" smd rect (at {px} {py}) '
-                f'(size 1 0.6) (layers "{layer}" "F.Paste" "F.Mask"){net_expr})'
+                f'(size {w} {h}) (layers "{layer}" "F.Paste" "F.Mask"){net_expr})'
             )
     lines.append("  )")
     return "\n".join(lines)
