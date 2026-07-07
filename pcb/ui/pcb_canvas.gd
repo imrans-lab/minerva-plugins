@@ -255,6 +255,8 @@ func _draw() -> void:
 
 	_draw_components()
 
+	_draw_mounting_holes()
+
 	if show_traces:
 		_draw_traces()
 
@@ -425,6 +427,28 @@ func _draw_components() -> void:
 	for comp_id in data.components:
 		var comp = data.components[comp_id]
 		_draw_component(comp)
+
+
+## Draw board-level mounting holes (structural — not components, not vias).
+## Mirrors the via draw loop in _draw_traces(): resolves position (Vector2 or
+## {x,y} dict), draws an outer rim in mounting_hole_color and an inner drill
+## circle so it reads as a hole.
+func _draw_mounting_holes() -> void:
+	for hole in data.mounting_holes:
+		var pos_data = hole.get("position", Vector2.ZERO)
+		var pos: Vector2
+		if pos_data is Vector2:
+			pos = world_to_screen(pos_data)
+		elif pos_data is Dictionary:
+			pos = world_to_screen(Vector2(pos_data.get("x", 0), pos_data.get("y", 0)))
+		else:
+			continue
+
+		var outer_radius: float = (hole.get("diameter", 3.2) / 2.0) * zoom
+		var inner_radius: float = outer_radius * 0.8
+
+		draw_circle(pos, maxf(outer_radius, 2.0), mounting_hole_color)
+		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
 ## Draw a single component using rigid body transform

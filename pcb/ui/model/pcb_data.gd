@@ -79,6 +79,7 @@ var components: Dictionary = {}   # component_id -> pcb_component.gd
 var nets: Dictionary = {}         # net_name -> pcb_net.gd
 var traces: Dictionary = {}       # trace_id -> pcb_trace.gd
 var vias: Array[Dictionary] = []  # [{position, size, drill, net_name, layers}]
+var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 
 ## Undo/redo history
 var history: Array[Dictionary] = []
@@ -604,6 +605,15 @@ func to_dict() -> Dictionary:
 			via_copy["position"] = {"x": p.x, "y": p.y}
 		vias_arr.append(via_copy)
 
+	# Serialize mounting holes (mirror vias — Vector2 → Dictionary for JSON safety)
+	var holes_arr: Array = []
+	for hole in mounting_holes:
+		var hole_copy = hole.duplicate()
+		if hole_copy.has("position") and hole_copy["position"] is Vector2:
+			var hp: Vector2 = hole_copy["position"]
+			hole_copy["position"] = {"x": hp.x, "y": hp.y}
+		holes_arr.append(hole_copy)
+
 	return {
 		"version": 1,
 		"board_name": board_name,
@@ -614,7 +624,8 @@ func to_dict() -> Dictionary:
 		"components": comp_dict,
 		"nets": net_dict,
 		"traces": trace_dict,
-		"vias": vias_arr
+		"vias": vias_arr,
+		"mounting_holes": holes_arr
 	}
 
 
@@ -655,6 +666,9 @@ func load_from_dict(data: Dictionary) -> void:
 	# Load vias
 	_load_vias(data.get("vias", []))
 
+	# Load mounting holes (mirror vias so undo snapshots don't drop them)
+	_load_mounting_holes(data.get("mounting_holes", []))
+
 	# Save baseline snapshot so the first action can be undone
 	history.clear()
 	history_index = -1
@@ -689,6 +703,33 @@ func _load_vias(vias_data: Array) -> void:
 					else:
 						via_entry["position"] = Vector2.ZERO
 			vias.append(via_entry)
+
+
+## Shared mounting-hole loader (legacy + canonical shapes both store mounting
+## holes with Vector2 positions internally). Mirrors _load_vias.
+func _load_mounting_holes(holes_data: Array) -> void:
+	mounting_holes.clear()
+	for hole_data in holes_data:
+		if hole_data is Dictionary:
+			var hole_entry: Dictionary = hole_data.duplicate()
+			if hole_data.has("position"):
+				var pos = hole_data["position"]
+				if pos is Vector2:
+					hole_entry["position"] = pos
+				elif pos is Dictionary:
+					hole_entry["position"] = Vector2(
+						pos.get("x", 0), pos.get("y", 0))
+				elif pos is String:
+					# Handle "(x, y)" from JSON round-trip of Vector2
+					var s: String = str(pos).replace("(", "").replace(")", "").strip_edges()
+					var parts: PackedStringArray = s.split(",")
+					if parts.size() >= 2:
+						hole_entry["position"] = Vector2(
+							float(parts[0].strip_edges()),
+							float(parts[1].strip_edges()))
+					else:
+						hole_entry["position"] = Vector2.ZERO
+			mounting_holes.append(hole_entry)
 
 
 ## Export to CSV format (component placement list)
@@ -796,6 +837,10 @@ func to_board_dict() -> Dictionary:
 	for via in vias:
 		via_list.append(_via_to_board_dict(via))
 
+	var hole_list: Array = []
+	for hole in mounting_holes:
+		hole_list.append(_mounting_hole_to_board_dict(hole))
+
 	return {
 		"version": 1,
 		"name": board_name,
@@ -807,7 +852,8 @@ func to_board_dict() -> Dictionary:
 		"components": comp_list,
 		"nets": net_list,
 		"traces": trace_list,
-		"vias": via_list
+		"vias": via_list,
+		"mounting_holes": hole_list
 	}
 
 
@@ -858,6 +904,9 @@ func from_board_dict(data: Dictionary) -> void:
 
 	# Vias (canonical list → internal via dicts)
 	_load_vias(_vias_from_board_list(data.get("vias", [])))
+
+	# Mounting holes (canonical list → internal mounting-hole dicts)
+	_load_mounting_holes(_mounting_holes_from_board_list(data.get("mounting_holes", [])))
 
 	# annotations / route_hints: intentionally ignored — see method doc.
 
@@ -911,6 +960,48 @@ func _vias_from_board_list(via_list: Array) -> Array:
 		result.append(entry)
 	return result
 
+
+## Map one internal mounting-hole dict → canonical mounting-hole dict. Any keys
+## beyond the mapped set ride as canonical Extra siblings. Mirrors
+## _via_to_board_dict.
+func _mounting_hole_to_board_dict(hole: Dictionary) -> Dictionary:
+	var d := {}
+	var pos = hole.get("position", Vector2.ZERO)
+	if pos is Vector2:
+		d["x_mm"] = pos.x
+		d["y_mm"] = pos.y
+	elif pos is Dictionary:
+		d["x_mm"] = float(pos.get("x", 0.0))
+		d["y_mm"] = float(pos.get("y", 0.0))
+	d["diameter_mm"] = float(hole.get("diameter", 0.0))
+	d["plated"] = bool(hole.get("plated", false))
+	for k in hole:
+		if k in ["position", "diameter", "plated"]:
+			continue
+		d[k] = hole[k]
+	return d
+
+
+## Map a canonical mounting-hole list back to internal mounting-hole dicts
+## ({position,diameter,plated,+extra}). Fed to _load_mounting_holes which
+## normalises the position to Vector2. Mirrors _vias_from_board_list.
+func _mounting_holes_from_board_list(hole_list: Array) -> Array:
+	var result: Array = []
+	for hd in hole_list:
+		if not hd is Dictionary:
+			continue
+		var entry := {
+			"position": {"x": float(hd.get("x_mm", 0.0)), "y": float(hd.get("y_mm", 0.0))},
+			"diameter": float(hd.get("diameter_mm", 0.0)),
+			"plated": bool(hd.get("plated", false))
+		}
+		for k in hd:
+			if k in ["x_mm", "y_mm", "diameter_mm", "plated"]:
+				continue
+			entry[k] = hd[k]
+		result.append(entry)
+	return result
+
 #endregion
 
 
@@ -922,6 +1013,7 @@ func clear() -> void:
 	nets.clear()
 	traces.clear()
 	vias.clear()
+	mounting_holes.clear()
 	history.clear()
 	history_index = -1
 	_next_trace_id = 1
