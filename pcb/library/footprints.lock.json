@@ -1,0 +1,42 @@
+{
+  "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal": {
+    "path": "Connector_JST.pretty/JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal.kicad_mod",
+    "sha256": "b508c63f2a4edff7774276952a7588b628e2ab066c7b241f996ceca84abae8ec",
+    "size_bytes": 3929
+  },
+  "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical": {
+    "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x04_P2.54mm_Vertical.kicad_mod",
+    "sha256": "710e50e4fbfafd5089be6b139ec22364a7086e4af5eebb790affcdf7e711265d",
+    "size_bytes": 2209
+  },
+  "Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical": {
+    "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x05_P2.54mm_Vertical.kicad_mod",
+    "sha256": "da74f0a4995fec4e9c6d68f2e45bc7d60bd484ea59705580d0eea8bc13c2c3b9",
+    "size_bytes": 2305
+  },
+  "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical": {
+    "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x07_P2.54mm_Vertical.kicad_mod",
+    "sha256": "daa80f4afdb4d94abaf11e36a9056242730bf75320857144d7e704ade5390f27",
+    "size_bytes": 2464
+  },
+  "EVP-ASAC1A:SW_EVP-ASAC1A": {
+    "path": "EVP-ASAC1A.pretty/SW_EVP-ASAC1A.kicad_mod",
+    "sha256": "d03af0c4bb8f399f3b271e79a116823a3206c9be6104bb231173686c9191ee62",
+    "size_bytes": 2226
+  },
+  "Espressif:ESP32-S3-DevKitC": {
+    "path": "Espressif.pretty/ESP32-S3-DevKitC.kicad_mod",
+    "sha256": "1e033c202e4ae743955d325da9e8e392c9600b51bf67caec56fb7f7eca723c0a",
+    "size_bytes": 16642
+  },
+  "MountingHole:MountingHole_3.2mm_M3": {
+    "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",
+    "sha256": "7875432d1eb0639bfb14f939e2a7894e9c986ed58924b9d00c8a95e50b79fb77",
+    "size_bytes": 720
+  },
+  "Package_DIP:DIP-6_W7.62mm_Socket": {
+    "path": "Package_DIP.pretty/DIP-6_W7.62mm_Socket.kicad_mod",
+    "sha256": "fbb6c473684a825b968346cea08134dad688da20fcb0b9c83d0c7bab1ef22b1a",
+    "size_bytes": 2953
+  }
+}

@@ -1,0 +1,4 @@
+# Seed footprint library: .kicad_mod bytes are sha256-pinned in
+# footprints.lock.json — EOL conversion would break the hash on checkout.
+*.kicad_mod -text
+footprints.lock.json -text
