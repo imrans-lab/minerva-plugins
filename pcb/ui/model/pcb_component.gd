@@ -136,8 +136,14 @@ func get_pin_name(pin_number: String) -> String:
 
 ## Get the Transform2D for this component (rotation around anchor/origin)
 func get_transform() -> Transform2D:
-	# KiCAD uses CCW positive, Godot uses CW positive
-	# Negate rotation for correct visual alignment
+	# rotation is the canonical rotation_deg, which is defined KiCad-equivalent:
+	# KiCad applies a footprint angle as R(radians(-angle)) in board space (its
+	# angle is CW in the Y-down file frame). The worker matches this exactly
+	# (gerber._rotate / route_bridge / kicad_io all use radians(-rotation_deg)),
+	# so the panel MUST too — hence deg_to_rad(-rotation) — or pads/silk/pins
+	# desync from the fab for 90/270 parts. Do NOT "fix" this to +rotation: if a
+	# board's 90/270 parts land off their traces, the DATA has the wrong-sign
+	# rotation (e.g. a stale pre-KiCad-convention negation at import), not this.
 	return Transform2D(deg_to_rad(-rotation), Vector2.ZERO)
 
 
