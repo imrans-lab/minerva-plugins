@@ -39,6 +39,8 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// worker-backed — geometric DRC (prior round; was missing from this
 		// assertion pre-existing this change, caught while adding pcb.route)
 		"pcb_drc",
+		// worker-backed — footprint resolve: attach silk/courtyard graphics
+		"pcb_resolve",
 		// worker-backed — dotted panel-IPC channel forwarding to the worker's
 		// "route" method (this round; docket 019f3815e9f9)
 		"pcb.route",

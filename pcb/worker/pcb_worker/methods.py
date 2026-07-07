@@ -23,7 +23,7 @@ import os
 import traceback
 from pathlib import Path
 
-from . import board_model, drc, gerber, kicad, libcheck
+from . import board_model, drc, footprints, gerber, kicad, libcheck, resolve
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -157,6 +157,35 @@ def _drc(params: dict) -> dict:
     except Exception as exc:  # geometry faults reported as data, not a crash
         return {"ok": False, "error": {"kind": "drc", "message": str(exc)}}
     return {"ok": True, "result": result}
+
+
+def _resolve(params: dict) -> dict:
+    """Enrich a canonical board with footprint silk/courtyard graphics.
+
+    For each component, resolve its footprint from the sha-verified seed library
+    and attach its F.SilkS + F.CrtYd graphics (component-LOCAL coords), after a
+    fail-closed coincidence guard that proves the footprint's pads match the
+    declared pins. Returns {ok, board:<resolved>, stats:{components,
+    silk_graphics, courtyard_graphics}}. A parse failure, an unresolvable
+    footprint, or a coincidence mismatch is reported as a structured error
+    (never a crash), mirroring generate/gerbers/drc.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    try:
+        resolved = resolve.resolve_board(board)
+    except resolve.ResolveCoincidenceError as exc:
+        return {"ok": False, "error": {
+            "kind": "coincidence", "message": str(exc),
+            "ref": exc.ref, "pin": exc.pin, "delta_mm": exc.delta_mm}}
+    except (resolve.ResolveError, footprints.FootprintLookupError) as exc:
+        return {"ok": False, "error": {"kind": "resolve", "message": str(exc)}}
+
+    stats = resolve.board_graphic_stats(resolved)
+    return {"ok": True, "result": {"ok": True, "board": resolved, "stats": stats}}
 
 
 _NO_LIBRARY_DATA_HINT = (
@@ -502,6 +531,7 @@ _HANDLERS = {
     "generate": lambda req: _generate(req.get("params") or {}),
     "gerbers": lambda req: _gerbers(req.get("params") or {}),
     "drc": lambda req: _drc(req.get("params") or {}),
+    "resolve": lambda req: _resolve(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),

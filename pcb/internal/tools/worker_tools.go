@@ -135,6 +135,34 @@ func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (j
 	return w.Call(ctx, "drc", params)
 }
 
+// ---- pcb_resolve -----------------------------------------------------------
+
+var Resolve = ToolSpec{
+	Name: "pcb_resolve",
+	Description: "Enrich a canonical PCB board with footprint silkscreen + courtyard " +
+		"graphics — pure Python, no KiCad binary. Args {yaml:<board source>} or " +
+		"{board:<board object>}. For each component the footprint ref is resolved from " +
+		"the sha-verified seed library and its F.SilkS body outline + F.CrtYd keep-out " +
+		"graphics are attached as component['graphics'] (component-LOCAL coords; the " +
+		"placement/rotation transform stays the renderer's job, like pins). The existing " +
+		"inline pads are left untouched. FAIL-CLOSED coincidence guard: every declared " +
+		"pin's local position must equal the footprint pad's local position (matched by " +
+		"number) within 0.01mm, else {ok:false, error:{kind:'coincidence', ref, pin, " +
+		"delta_mm}} — never attach silk that would desync from the routed copper. Returns " +
+		"{ok, board:<resolved board>, stats:{components, silk_graphics, courtyard_graphics}}.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+		}
+	}`),
+}
+
+func HandleResolve(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "resolve", params)
+}
+
 // ---- pcb.route (worker-backed broker CHANNEL, not an LLM tool name) --------
 //
 // Unlike pcb_validate/pcb_generate/... (LLM-facing tool names under the pcb_
