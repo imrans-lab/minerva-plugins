@@ -98,6 +98,18 @@ func get_annotation_host() -> RefCounted:
 	return _annotation_host
 
 
+## Where the platform annotation overlay must mount (Editor.gd duck-types this).
+## The host's view transform maps board-mm to CANVAS-local pixels, so the
+## overlay has to share the canvas origin — parenting it to the whole panel
+## would offset every pointer hit and rendered annotation by the toolbar row
+## (see the warning at the canvas mount in _build_ui). Falls back to the panel
+## when the canvas isn't built yet.
+func get_annotation_overlay_parent() -> Control:
+	if _canvas != null and is_instance_valid(_canvas):
+		return _canvas
+	return self
+
+
 ## The board model (pcb_data.gd) this panel edits. Exposed for MCP/tests.
 func get_data():
 	return _data
