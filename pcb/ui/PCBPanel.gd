@@ -26,6 +26,7 @@ const _PcbDataScript: Script = preload("model/pcb_data.gd")
 const _PcbComponentScript: Script = preload("model/pcb_component.gd")
 const _PcbCanvasScript: Script = preload("pcb_canvas.gd")
 const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.gd")
+const _PanelLayoutScript: Script = preload("panel_layout.gd")
 
 ## Default board handed to a fresh (anonymous) editor. A brand-new board is
 ## EMPTY (finding 4): no phantom parts the user never placed. Board name / size /
@@ -58,6 +59,28 @@ var _tool_buttons: Dictionary = {}   # ToolMode int -> Button
 var _layer_option: OptionButton = null
 var _board_size_label: Label = null
 var _status_label: Label = null
+
+## Responsive layout state (UI redesign round B). Modes resolve from the
+## panel's OWN width via panel_layout.gd — wide/medium/narrow with hysteresis.
+var _layout_mode: String = ""
+var _drawer_open := false
+var _sidebar: VBoxContainer = null
+var _dock_parent: VBoxContainer = null
+var _view_toggles_box: HBoxContainer = null
+var _view_menu_button: MenuButton = null
+var _drawer_button: Button = null
+var _export_button: Button = null
+
+## View-flag table shared by the wide-mode CheckButtons and the medium/narrow
+## View menu (single source of truth: the canvas flags themselves).
+const _VIEW_FLAGS := [
+	["Grid", "show_grid"],
+	["Ratsnest", "show_ratsnest"],
+	["Labels", "show_labels"],
+	["Traces", "show_traces"],
+	["Silk", "show_silk"],
+]
+const _VIEW_MENU_EXPORT_ID := 100
 
 ## True while restoring persisted state (board load OR annotation sidecar load).
 ## Suppresses the content_changed dirty relay so restoring never marks the tab
@@ -170,13 +193,21 @@ func _build_ui() -> void:
 	main_vbox.add_child(toolbar_scroll)
 	toolbar_scroll.add_child(_build_toolbar())
 
+	# Content row: canvas (majority share) + right sidebar (legacy layout clone).
+	var content_hbox := HBoxContainer.new()
+	content_hbox.name = "ContentHBox"
+	content_hbox.clip_contents = true
+	content_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main_vbox.add_child(content_hbox)
+
 	# Canvas fills the middle.
 	var canvas_container := PanelContainer.new()
 	canvas_container.name = "CanvasContainer"
 	canvas_container.clip_contents = true
 	canvas_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	canvas_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	main_vbox.add_child(canvas_container)
+	content_hbox.add_child(canvas_container)
 
 	_canvas = _PcbCanvasScript.new()
 	_canvas.name = "PCBCanvas"
@@ -205,6 +236,10 @@ func _build_ui() -> void:
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 
+	# Right sidebar (legacy layout clone): tool buttons + the platform
+	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
+	content_hbox.add_child(_build_sidebar())
+
 	# Model → toolbar (board size label) refresh.
 	_data.structure_changed.connect(_update_board_size_label)
 
@@ -221,22 +256,28 @@ func _build_ui() -> void:
 	_update_board_size_label()
 	_update_status()
 
+	# Responsive layout: modes resolve from the panel's OWN width (Minerva's
+	# 1/2/3-column layouts are all just widths from in here).
+	if not resized.is_connected(_on_panel_resized):
+		resized.connect(_on_panel_resized)
+	_apply_layout_mode(_PanelLayoutScript.mode_for_width(size.x), true)
+
 
 func _build_toolbar() -> HBoxContainer:
 	var tb := HBoxContainer.new()
 	tb.name = "Toolbar"
 	tb.custom_minimum_size.y = 34
 
-	# ONE smart Select tool + a Pan tool (Photoshop / GraphicsEditor style,
-	# finding 5). Select does select + move + box-select + rotate; Pan drags the
-	# whole view. The old separate Move/Rotate buttons are gone — the smart tool
-	# subsumes them (drag a part to move it, press R to rotate the selection).
-	_add_tool_button(tb, _PcbCanvasScript.ToolMode.SELECT, "Select",
-		"Select & move (S) — click selects; drag a part to move (snaps); drag empty to box-select; R rotates selection")
-	_add_tool_button(tb, _PcbCanvasScript.ToolMode.PAN, "Pan",
-		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.")
-
-	tb.add_child(VSeparator.new())
+	# Narrow-mode drawer toggle (hidden outside narrow): slides the sidebar in
+	# over a squeezed 3-col panel where it can't be permanently visible.
+	_drawer_button = Button.new()
+	_drawer_button.name = "SidebarDrawerButton"
+	_drawer_button.text = "☰"
+	_drawer_button.tooltip_text = "Show/hide the tools sidebar"
+	_drawer_button.toggle_mode = true
+	_drawer_button.visible = false
+	_drawer_button.pressed.connect(_on_drawer_toggled)
+	tb.add_child(_drawer_button)
 
 	# Zoom controls.
 	var zoom_out := Button.new()
@@ -259,17 +300,31 @@ func _build_toolbar() -> HBoxContainer:
 
 	tb.add_child(VSeparator.new())
 
-	# View toggles.
-	tb.add_child(_make_toggle("Grid", true, func(p: bool) -> void:
-		_canvas.show_grid = p; _canvas.queue_redraw()))
-	tb.add_child(_make_toggle("Ratsnest", true, func(p: bool) -> void:
-		_canvas.show_ratsnest = p; _canvas.queue_redraw()))
-	tb.add_child(_make_toggle("Labels", true, func(p: bool) -> void:
-		_canvas.show_labels = p; _canvas.queue_redraw()))
-	tb.add_child(_make_toggle("Traces", true, func(p: bool) -> void:
-		_canvas.show_traces = p; _canvas.queue_redraw()))
-	tb.add_child(_make_toggle("Silk", true, func(p: bool) -> void:
-		_canvas.show_silk = p; _canvas.queue_redraw()))
+	# View toggles — a named box so responsive modes can show/hide it whole.
+	# Wide mode shows the inline CheckButtons; medium/narrow use the View menu
+	# below (both drive the same canvas flags, so they can't drift apart).
+	_view_toggles_box = HBoxContainer.new()
+	_view_toggles_box.name = "ViewTogglesBox"
+	for entry in _VIEW_FLAGS:
+		var flag: String = entry[1]
+		_view_toggles_box.add_child(_make_toggle(entry[0], true, func(p: bool) -> void:
+			_canvas.set(flag, p); _canvas.queue_redraw()))
+	tb.add_child(_view_toggles_box)
+
+	# Compact View menu (medium/narrow): the same flags as checkable items,
+	# synced from the canvas each time it opens. Narrow also gets Export here.
+	_view_menu_button = MenuButton.new()
+	_view_menu_button.name = "ViewMenuButton"
+	_view_menu_button.text = "View"
+	_view_menu_button.visible = false
+	var popup := _view_menu_button.get_popup()
+	for i in _VIEW_FLAGS.size():
+		popup.add_check_item(_VIEW_FLAGS[i][0], i)
+	popup.add_separator()
+	popup.add_item("Export YAML…", _VIEW_MENU_EXPORT_ID)
+	popup.about_to_popup.connect(_sync_view_menu_checks)
+	popup.id_pressed.connect(_on_view_menu_id_pressed)
+	tb.add_child(_view_menu_button)
 
 	tb.add_child(VSeparator.new())
 
@@ -287,11 +342,12 @@ func _build_toolbar() -> HBoxContainer:
 	tb.add_child(VSeparator.new())
 
 	# YAML export (routes through the Go pcb.serialize channel).
-	var export_btn := Button.new()
-	export_btn.text = "Export YAML"
-	export_btn.tooltip_text = "Serialize the board to canonical YAML via the plugin backend"
-	export_btn.pressed.connect(_on_export_yaml_pressed)
-	tb.add_child(export_btn)
+	_export_button = Button.new()
+	_export_button.name = "ExportButton"
+	_export_button.text = "Export YAML"
+	_export_button.tooltip_text = "Serialize the board to canonical YAML via the plugin backend"
+	_export_button.pressed.connect(_on_export_yaml_pressed)
+	tb.add_child(_export_button)
 
 	# Spacer + board size label.
 	var spacer := Control.new()
@@ -305,7 +361,7 @@ func _build_toolbar() -> HBoxContainer:
 	return tb
 
 
-func _add_tool_button(tb: HBoxContainer, mode: int, text: String, tip: String) -> void:
+func _add_tool_button(tb: Container, mode: int, text: String, tip: String) -> void:
 	var btn := Button.new()
 	btn.text = text
 	btn.tooltip_text = tip
@@ -321,6 +377,141 @@ func _make_toggle(text: String, on: bool, cb: Callable) -> CheckButton:
 	c.button_pressed = on
 	c.toggled.connect(cb)
 	return c
+
+
+# ── Right sidebar (legacy layout clone) ────────────────────────────────────────
+
+## Tools live in a wrap-capable flow (legacy FlowContainer pattern: buttons wrap
+## to more rows as the column narrows instead of overflowing), followed by the
+## mount point for the platform annotation dock (Tools/Annotate/list — round A
+## hook), which fills the remaining height.
+func _build_sidebar() -> VBoxContainer:
+	_sidebar = VBoxContainer.new()
+	_sidebar.name = "RightSidebar"
+	_sidebar.custom_minimum_size.x = 120
+	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+	var tools_flow := FlowContainer.new()
+	tools_flow.name = "ToolsFlow"
+	_sidebar.add_child(tools_flow)
+
+	# ONE smart Select tool + a Pan tool (Photoshop / GraphicsEditor style,
+	# finding 5). Select does select + move + box-select + rotate; Pan drags
+	# the whole view.
+	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.SELECT, "Select",
+		"Select & move (S) — click selects; drag a part to move (snaps); drag empty to box-select; R rotates selection")
+	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.PAN, "Pan",
+		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.")
+
+	_sidebar.add_child(HSeparator.new())
+
+	# Platform annotation dock mounts here (Editor duck-types
+	# get_annotation_dock_parent — round A). Fills the remaining column.
+	_dock_parent = VBoxContainer.new()
+	_dock_parent.name = "AnnotationDockParent"
+	_dock_parent.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_sidebar.add_child(_dock_parent)
+
+	return _sidebar
+
+
+## Where the platform annotation dock must mount (Editor.gd duck-types this —
+## round A hook). Opting in makes this panel own the dock's responsive
+## placement; the platform's editor-width RIGHT/BOTTOM logic is bypassed.
+func get_annotation_dock_parent() -> Control:
+	if _dock_parent != null and is_instance_valid(_dock_parent):
+		return _dock_parent
+	return null
+
+
+# ── Responsive layout (round B) ────────────────────────────────────────────────
+
+func _on_panel_resized() -> void:
+	if _sidebar == null:
+		return
+	var mode: String = _PanelLayoutScript.mode_for_width(size.x, _layout_mode)
+	if mode != _layout_mode:
+		_apply_layout_mode(mode)
+
+
+## Applies a layout mode. Visibility matrix:
+##   wide:   sidebar shown; inline view toggles; Export + board label inline.
+##   medium: sidebar shown; toggles fold into the View menu (3-col width is
+##           too tight for five labeled CheckButtons); board label → status.
+##   narrow: sidebar behind the drawer toggle; View menu carries Export too.
+func _apply_layout_mode(mode: String, force := false) -> void:
+	if mode == _layout_mode and not force:
+		return
+	var entering_narrow := mode == _PanelLayoutScript.MODE_NARROW \
+		and _layout_mode != _PanelLayoutScript.MODE_NARROW
+	_layout_mode = mode
+
+	var narrow := mode == _PanelLayoutScript.MODE_NARROW
+	var wide := mode == _PanelLayoutScript.MODE_WIDE
+
+	if entering_narrow:
+		_drawer_open = false  # drawer starts closed; canvas gets the width
+
+	if _sidebar != null:
+		_sidebar.visible = (not narrow) or _drawer_open
+	if _drawer_button != null:
+		_drawer_button.visible = narrow
+		_drawer_button.button_pressed = _drawer_open
+	if _view_toggles_box != null:
+		_view_toggles_box.visible = wide
+		if wide and _canvas != null:
+			# Re-sync the inline CheckButtons from the canvas flags — the View
+			# menu can change flags while the toggles are hidden (medium/narrow).
+			for i in mini(_VIEW_FLAGS.size(), _view_toggles_box.get_child_count()):
+				var c := _view_toggles_box.get_child(i) as CheckButton
+				if c != null:
+					c.set_pressed_no_signal(bool(_canvas.get(_VIEW_FLAGS[i][1])))
+	if _view_menu_button != null:
+		_view_menu_button.visible = not wide
+	if _export_button != null:
+		_export_button.visible = not narrow
+	if _board_size_label != null:
+		_board_size_label.visible = wide
+	_update_status()
+
+
+func _on_drawer_toggled() -> void:
+	_drawer_open = not _drawer_open
+	_apply_layout_mode(_layout_mode, true)
+
+
+func _sync_view_menu_checks() -> void:
+	if _view_menu_button == null or _canvas == null:
+		return
+	var popup := _view_menu_button.get_popup()
+	for i in _VIEW_FLAGS.size():
+		var idx := popup.get_item_index(i)
+		if idx >= 0:
+			popup.set_item_checked(idx, bool(_canvas.get(_VIEW_FLAGS[i][1])))
+
+
+func _on_view_menu_id_pressed(id: int) -> void:
+	if id == _VIEW_MENU_EXPORT_ID:
+		_on_export_yaml_pressed()
+		return
+	if _canvas == null or id < 0 or id >= _VIEW_FLAGS.size():
+		return
+	var flag: String = _VIEW_FLAGS[id][1]
+	_canvas.set(flag, not bool(_canvas.get(flag)))
+	_canvas.queue_redraw()
+
+
+## Structured layout state for MCP/tests — lets an agent verify responsive
+## behavior as data instead of screenshots (LLM-ergonomics requirement).
+func get_layout_state() -> Dictionary:
+	return {
+		"mode": _layout_mode,
+		"width": size.x,
+		"sidebar_visible": _sidebar != null and _sidebar.visible,
+		"drawer_open": _drawer_open,
+		"view_toggles_inline": _view_toggles_box != null and _view_toggles_box.visible,
+		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
+	}
 
 
 func _rebuild_layer_option() -> void:
@@ -477,9 +668,14 @@ func _update_status() -> void:
 	if tm > 0 and tm < mode_names.size():
 		mode_txt = "  [%s]" % mode_names[tm]
 	var hint := "  •  wheel/pinch zoom · Pan tool or Space/right/middle-drag to pan"
-	_status_label.text = "%d parts, %d nets, %d traces  •  %d selected%s%s" % [
+	# Below wide mode the toolbar's board-size label is hidden — carry it here.
+	var board_txt := ""
+	if _layout_mode != _PanelLayoutScript.MODE_WIDE:
+		board_txt = "  •  %s×%smm" % [_data.board_width, _data.board_height]
+		hint = ""
+	_status_label.text = "%d parts, %d nets, %d traces  •  %d selected%s%s%s" % [
 		_data.get_component_count(), _data.get_net_count(), _data.get_trace_count(),
-		sel.size(), mode_txt, hint]
+		sel.size(), mode_txt, board_txt, hint]
 
 
 ## Reflect the current model into the toolbar + canvas (after a load).
