@@ -255,7 +255,7 @@ func _build_annotation(edge_id: int, box_offset: Vector3) -> Dictionary:
 	return {
 		"kind":           "cad_edge_number",
 		"schema_version": _schema_version,
-		"author":         "human",
+		"author":         {"kind": "human"},
 		"view_context":   view_ctx,
 		"anchor": {
 			"plugin": "cad",
