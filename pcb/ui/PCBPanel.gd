@@ -66,6 +66,9 @@ var _layout_mode: String = ""
 var _drawer_open := false
 var _sidebar: VBoxContainer = null
 var _dock_parent: VBoxContainer = null
+## Bottom strip slot for the annotation dock (medium/narrow — HITL note:
+## 3-col wants the dock along the bottom; only wide keeps it in the sidebar).
+var _bottom_dock_slot: VBoxContainer = null
 var _view_toggles_box: HBoxContainer = null
 var _view_menu_button: MenuButton = null
 var _drawer_button: Button = null
@@ -247,6 +250,22 @@ func _build_ui() -> void:
 	# Right sidebar (legacy layout clone): tool buttons + the platform
 	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
 	content_hbox.add_child(_build_sidebar())
+
+	# Bottom dock strip: the annotation dock lives HERE in medium/narrow
+	# (full panel width under the canvas — HITL note 2026-07-13) and moves
+	# into the sidebar slot only in wide mode. Whichever slot the dock pane
+	# lands in, _sync_dock_pane_mode re-asserts the pane's internal
+	# RIGHT/BOTTOM arrangement (deferred: the platform mount sets RIGHT after
+	# parenting, so a same-frame correction would be overwritten).
+	_bottom_dock_slot = VBoxContainer.new()
+	_bottom_dock_slot.name = "BottomDockSlot"
+	_bottom_dock_slot.size_flags_vertical = Control.SIZE_SHRINK_END
+	main_vbox.add_child(_bottom_dock_slot)
+	_bottom_dock_slot.child_entered_tree.connect(func(_n: Node) -> void:
+		call_deferred("_sync_dock_pane_mode"))
+	if _dock_parent != null:
+		_dock_parent.child_entered_tree.connect(func(_n: Node) -> void:
+			call_deferred("_sync_dock_pane_mode"))
 
 	# Model → toolbar (board size label) refresh.
 	_data.structure_changed.connect(_update_board_size_label)
@@ -525,10 +544,50 @@ func _update_properties() -> void:
 ## Where the platform annotation dock must mount (Editor.gd duck-types this —
 ## round A hook). Opting in makes this panel own the dock's responsive
 ## placement; the platform's editor-width RIGHT/BOTTOM logic is bypassed.
+## Slot depends on the current mode: bottom strip in medium/narrow (HITL:
+## 3-col wants the dock along the bottom), sidebar in wide.
 func get_annotation_dock_parent() -> Control:
-	if _dock_parent != null and is_instance_valid(_dock_parent):
-		return _dock_parent
+	var slot := _current_dock_slot()
+	if slot != null and is_instance_valid(slot):
+		return slot
 	return null
+
+
+func _current_dock_slot() -> Control:
+	if _layout_mode == _PanelLayoutScript.MODE_WIDE:
+		return _dock_parent
+	return _bottom_dock_slot if _bottom_dock_slot != null else _dock_parent
+
+
+## The mounted AnnotationDockPane, wherever it currently sits (duck-typed:
+## the platform names it; we just look for its API in either slot).
+func _find_dock_pane() -> Node:
+	for slot in [_dock_parent, _bottom_dock_slot]:
+		if slot == null or not is_instance_valid(slot):
+			continue
+		for child in slot.get_children():
+			if child.has_method("set_dock_mode"):
+				return child
+	return null
+
+
+## Moves the mounted dock pane into the current mode's slot and re-asserts its
+## internal arrangement (RIGHT = column for the sidebar, BOTTOM = strip).
+func _sync_dock_pane_mode() -> void:
+	var pane := _find_dock_pane()
+	if pane == null or not is_instance_valid(pane):
+		return
+	var slot := _current_dock_slot()
+	if slot != null and pane.get_parent() != slot:
+		pane.get_parent().remove_child(pane)
+		slot.add_child(pane)
+	var wide := _layout_mode == _PanelLayoutScript.MODE_WIDE
+	if pane is Control:
+		(pane as Control).size_flags_vertical = \
+			Control.SIZE_EXPAND_FILL if wide else Control.SIZE_SHRINK_END
+	# DockMode enum: RIGHT = 0, BOTTOM = 1 (AnnotationDockPane.gd) — read via
+	# get() so a pane without the enum still duck-types safely.
+	pane.set_dock_mode(0 if wide else 1)
 
 
 # ── Responsive layout (round B) ────────────────────────────────────────────────
@@ -562,12 +621,18 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 
 	if _sidebar != null:
 		var show_sidebar := (not narrow) or _drawer_open
-		if _sidebar.visible and not show_sidebar:
+		if _sidebar.visible and not show_sidebar and _dock_pane_in_sidebar():
 			# Never hide the annotation toolbar with a live author tool — the
 			# overlay would keep eating canvas clicks with no visible way out
 			# (the dock pane enforces this for its own collapse; mirror it).
+			# Only relevant when the dock actually sits in the sidebar — in
+			# medium/narrow it lives in the always-visible bottom strip.
 			_clear_dock_active_tool()
 		_sidebar.visible = show_sidebar
+
+	# Dock placement follows the mode (bottom in medium/narrow, sidebar in
+	# wide) — move a mounted pane between slots.
+	_sync_dock_pane_mode()
 	if _drawer_button != null:
 		_drawer_button.visible = narrow
 		_drawer_button.button_pressed = _drawer_open
@@ -595,14 +660,16 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 	_update_status()
 
 
-## Duck-typed: clears the active author tool on whatever dock pane the
-## platform mounted into our sidebar (if any).
+## Duck-typed: clears the active author tool on the mounted dock pane.
 func _clear_dock_active_tool() -> void:
-	if _dock_parent == null or not is_instance_valid(_dock_parent):
-		return
-	for child in _dock_parent.get_children():
-		if child.has_method("clear_active_tool"):
-			child.clear_active_tool()
+	var pane := _find_dock_pane()
+	if pane != null and pane.has_method("clear_active_tool"):
+		pane.clear_active_tool()
+
+
+func _dock_pane_in_sidebar() -> bool:
+	var pane := _find_dock_pane()
+	return pane != null and pane.get_parent() == _dock_parent
 
 
 func _on_drawer_toggled() -> void:
@@ -642,6 +709,7 @@ func get_layout_state() -> Dictionary:
 		"view_toggles_inline": _view_toggles_box != null and _view_toggles_box.visible,
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
 		"properties_expanded": _properties_expanded,
+		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
 	}
 
 
