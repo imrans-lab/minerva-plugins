@@ -71,6 +71,12 @@ var _view_menu_button: MenuButton = null
 var _drawer_button: Button = null
 var _export_button: Button = null
 
+## Properties section (round C): field name -> value Label.
+var _prop_labels: Dictionary = {}
+var _properties_body: VBoxContainer = null
+var _properties_collapse_btn: Button = null
+var _properties_expanded := true
+
 ## View-flag table shared by the wide-mode CheckButtons and the medium/narrow
 ## View menu (single source of truth: the canvas flags themselves).
 const _VIEW_FLAGS := [
@@ -231,8 +237,10 @@ func _build_ui() -> void:
 
 	# Canvas → panel signal wiring.
 	_canvas.tool_mode_changed.connect(_on_tool_mode_changed)
-	_canvas.component_selected.connect(func(_id: String) -> void: _update_status())
-	_canvas.selection_changed.connect(_update_status)
+	_canvas.component_selected.connect(func(_id: String) -> void:
+		_update_status(); _update_properties())
+	_canvas.selection_changed.connect(func() -> void:
+		_update_status(); _update_properties())
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 
@@ -287,7 +295,11 @@ func _build_toolbar() -> HBoxContainer:
 	tb.add_child(zoom_out)
 
 	var zoom_fit := Button.new()
-	zoom_fit.text = "Fit"
+	var fit_icon := _load_icon("zoom_fit_24.png")
+	if fit_icon != null:
+		zoom_fit.icon = fit_icon
+	else:
+		zoom_fit.text = "Fit"
 	zoom_fit.tooltip_text = "Zoom to fit"
 	zoom_fit.pressed.connect(func() -> void: _canvas.zoom_to_fit())
 	tb.add_child(zoom_fit)
@@ -361,14 +373,38 @@ func _build_toolbar() -> HBoxContainer:
 	return tb
 
 
-func _add_tool_button(tb: Container, mode: int, text: String, tip: String) -> void:
+func _add_tool_button(tb: Container, mode: int, text: String, tip: String, icon_file := "") -> void:
 	var btn := Button.new()
-	btn.text = text
+	var icon := _load_icon(icon_file) if not icon_file.is_empty() else null
+	if icon != null:
+		# Icon-only (legacy look, and the narrow-column width saver); the
+		# name stays discoverable via the tooltip.
+		btn.icon = icon
+	else:
+		btn.text = text
 	btn.tooltip_text = tip
 	btn.toggle_mode = true
 	btn.pressed.connect(func() -> void: _toggle_tool_mode(mode))
 	tb.add_child(btn)
 	_tool_buttons[mode] = btn
+
+
+## Loads an icon from the plugin's own assets dir (next to this script).
+## Plugins live OUTSIDE res://, so preload() can't reach the PNGs — resolve the
+## script's directory and load from the filesystem. Fail-safe: any miss returns
+## null and callers fall back to a text button (never a blank one).
+func _load_icon(fname: String) -> Texture2D:
+	var script_ref: Script = get_script() as Script
+	if script_ref == null or script_ref.resource_path.is_empty():
+		return null
+	var dir := script_ref.resource_path.get_base_dir()
+	var path := ProjectSettings.globalize_path(dir.path_join("assets/icons").path_join(fname))
+	if not FileAccess.file_exists(path):
+		return null
+	var img := Image.load_from_file(path)
+	if img == null:
+		return null
+	return ImageTexture.create_from_image(img)
 
 
 func _make_toggle(text: String, on: bool, cb: Callable) -> CheckButton:
@@ -399,9 +435,11 @@ func _build_sidebar() -> VBoxContainer:
 	# finding 5). Select does select + move + box-select + rotate; Pan drags
 	# the whole view.
 	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.SELECT, "Select",
-		"Select & move (S) — click selects; drag a part to move (snaps); drag empty to box-select; R rotates selection")
+		"Select & move (S) — click selects; drag a part to move (snaps); drag empty to box-select; R rotates selection",
+		"select_24.png")
 	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.PAN, "Pan",
-		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.")
+		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.",
+		"pan_24.png")
 
 	_sidebar.add_child(HSeparator.new())
 
@@ -412,7 +450,76 @@ func _build_sidebar() -> VBoxContainer:
 	_dock_parent.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_sidebar.add_child(_dock_parent)
 
+	_sidebar.add_child(HSeparator.new())
+	_sidebar.add_child(_build_properties_section())
+
 	return _sidebar
+
+
+## Properties section (legacy clone): ID / Position / Rotation / Layer /
+## Footprint of the single-selected component. Collapsible — wide mode expands
+## it by default, medium collapses it (3-col width is precious); the selection
+## summary also mirrors into the status bar either way.
+func _build_properties_section() -> VBoxContainer:
+	var section := VBoxContainer.new()
+	section.name = "PropertiesSection"
+
+	_properties_collapse_btn = Button.new()
+	_properties_collapse_btn.name = "PropertiesHeader"
+	_properties_collapse_btn.text = "Properties"
+	_properties_collapse_btn.flat = true
+	_properties_collapse_btn.toggle_mode = true
+	_properties_collapse_btn.pressed.connect(func() -> void:
+		_set_properties_expanded(not _properties_expanded))
+	section.add_child(_properties_collapse_btn)
+
+	_properties_body = VBoxContainer.new()
+	_properties_body.name = "PropertiesBody"
+	section.add_child(_properties_body)
+
+	for field in ["ID", "Position", "Rotation", "Layer", "Footprint"]:
+		var row := HBoxContainer.new()
+		var key_label := Label.new()
+		key_label.text = "%s:" % field
+		key_label.custom_minimum_size.x = 60
+		row.add_child(key_label)
+		var value_label := Label.new()
+		value_label.text = "-"
+		value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		value_label.clip_text = true
+		row.add_child(value_label)
+		_prop_labels[field] = value_label
+		_properties_body.add_child(row)
+
+	return section
+
+
+func _set_properties_expanded(expanded: bool) -> void:
+	_properties_expanded = expanded
+	if _properties_body != null:
+		_properties_body.visible = expanded
+	if _properties_collapse_btn != null:
+		_properties_collapse_btn.button_pressed = expanded
+		_properties_collapse_btn.text = "Properties" if expanded else "Properties…"
+
+
+func _update_properties() -> void:
+	if _prop_labels.is_empty() or _canvas == null or _data == null:
+		return
+	var sel: Array = _canvas.get_selected_components()
+	var comp = _data.get_component(sel[0]) if sel.size() == 1 else null
+	if comp == null:
+		for key in _prop_labels:
+			(_prop_labels[key] as Label).text = "-"
+		return
+	(_prop_labels["ID"] as Label).text = str(comp.id)
+	(_prop_labels["Position"] as Label).text = "(%.1f, %.1f)" % [comp.position.x, comp.position.y]
+	(_prop_labels["Rotation"] as Label).text = "%.0f°" % float(comp.rotation)
+	(_prop_labels["Layer"] as Label).text = str(comp.layer)
+	var fp := str(comp.footprint_id)
+	if fp.is_empty() and "FootprintType" in _PcbComponentScript:
+		fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
+	(_prop_labels["Footprint"] as Label).text = fp
 
 
 ## Where the platform annotation dock must mount (Editor.gd duck-types this —
@@ -472,6 +579,9 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_export_button.visible = not narrow
 	if _board_size_label != null:
 		_board_size_label.visible = wide
+	# Properties default: expanded where width is generous, collapsed in the
+	# 3-col medium tier (the status bar mirrors the selection either way).
+	_set_properties_expanded(wide)
 	_update_status()
 
 
@@ -511,6 +621,7 @@ func get_layout_state() -> Dictionary:
 		"drawer_open": _drawer_open,
 		"view_toggles_inline": _view_toggles_box != null and _view_toggles_box.visible,
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
+		"properties_expanded": _properties_expanded,
 	}
 
 
