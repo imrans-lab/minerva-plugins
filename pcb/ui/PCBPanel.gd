@@ -549,6 +549,7 @@ func _on_panel_resized() -> void:
 func _apply_layout_mode(mode: String, force := false) -> void:
 	if mode == _layout_mode and not force:
 		return
+	var mode_changed := mode != _layout_mode
 	var entering_narrow := mode == _PanelLayoutScript.MODE_NARROW \
 		and _layout_mode != _PanelLayoutScript.MODE_NARROW
 	_layout_mode = mode
@@ -560,7 +561,13 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_drawer_open = false  # drawer starts closed; canvas gets the width
 
 	if _sidebar != null:
-		_sidebar.visible = (not narrow) or _drawer_open
+		var show_sidebar := (not narrow) or _drawer_open
+		if _sidebar.visible and not show_sidebar:
+			# Never hide the annotation toolbar with a live author tool — the
+			# overlay would keep eating canvas clicks with no visible way out
+			# (the dock pane enforces this for its own collapse; mirror it).
+			_clear_dock_active_tool()
+		_sidebar.visible = show_sidebar
 	if _drawer_button != null:
 		_drawer_button.visible = narrow
 		_drawer_button.button_pressed = _drawer_open
@@ -581,8 +588,21 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 		_board_size_label.visible = wide
 	# Properties default: expanded where width is generous, collapsed in the
 	# 3-col medium tier (the status bar mirrors the selection either way).
-	_set_properties_expanded(wide)
+	# Only on a REAL mode change — a force re-apply (drawer toggle) must not
+	# clobber the user's manual expand/collapse choice.
+	if mode_changed:
+		_set_properties_expanded(wide)
 	_update_status()
+
+
+## Duck-typed: clears the active author tool on whatever dock pane the
+## platform mounted into our sidebar (if any).
+func _clear_dock_active_tool() -> void:
+	if _dock_parent == null or not is_instance_valid(_dock_parent):
+		return
+	for child in _dock_parent.get_children():
+		if child.has_method("clear_active_tool"):
+			child.clear_active_tool()
 
 
 func _on_drawer_toggled() -> void:
