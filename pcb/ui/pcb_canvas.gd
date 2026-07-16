@@ -70,7 +70,16 @@ var show_silk: bool = true
 
 ## Copper-layer trace filter driven by the toolbar layer selector.
 ## "all" → both layers; "top" → non-bottom traces; "bottom" → bottom traces.
-var trace_layer_filter: String = "all"
+## Setter emits view_changed so the annotation overlay re-renders — layer-keyed
+## workflow annotations (route hints, WC-2 C3 fix 019f33d2c9bf) must appear /
+## disappear with the same filter change that shows/hides the traces.
+var trace_layer_filter: String = "all":
+	set(value):
+		if trace_layer_filter == value:
+			return
+		trace_layer_filter = value
+		view_changed.emit()
+		queue_redraw()
 
 ## Selection state
 var selected_components: Array[String] = []
@@ -339,6 +348,44 @@ func _layer_visible(layer: String) -> bool:
 			return layer == "bottom"
 		_:
 			return true
+
+
+## PUBLIC layer-visibility probe for the annotation substrate (WC-2 C3 fix
+## 019f33d2c9bf). PcbAnnotationHost.is_annotation_visible consults this so
+## layer-keyed route hints follow the same filter as the traces. Accepts both
+## the canvas's internal layer names ("top"/"bottom") and the KiCAD copper
+## names route-hint payloads carry ("F.Cu"/"B.Cu").
+func is_layer_visible(layer: String) -> bool:
+	return _layer_visible(_canonical_layer(layer))
+
+
+static func _canonical_layer(layer: String) -> String:
+	match layer:
+		"F.Cu":
+			return "top"
+		"B.Cu":
+			return "bottom"
+		_:
+			return layer
+
+
+## Navigation events relayed from the platform AnnotationOverlay while an
+## annotation tool is active (WC-2 §1a — the overlay claims only LEFT/RIGHT
+## for tools and forwards middle-button / wheel / pan-gesture / middle-drag
+## motion here via PcbAnnotationHost.forward_navigation_input). The overlay
+## shares the canvas origin, so event positions are already canvas-local;
+## routing through the normal handlers gives identical pan/zoom behavior.
+func handle_navigation_input(event: InputEvent) -> void:
+	if not is_inside_tree() or not data:
+		return
+	if event is InputEventMouseButton:
+		_handle_mouse_button(event)
+	elif event is InputEventMouseMotion:
+		_handle_mouse_motion(event)
+	elif event is InputEventPanGesture:
+		_handle_pan_gesture(event)
+	elif event is InputEventMagnifyGesture:
+		_handle_magnify_gesture(event)
 
 
 ## Draw all traces (bottom layer first, then top, then vias), honoring the filter.

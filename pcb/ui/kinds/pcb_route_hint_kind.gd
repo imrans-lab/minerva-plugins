@@ -59,6 +59,10 @@ func _init() -> void:
 	schema_version = 1
 	owning_plugin = &"pcb"
 	primitives_optional = true
+	# Workflow-class (pcb-ui-native-cluster §4, WC-2): route hints are working
+	# data for the routing loop, not review commentary. The review workbench
+	# excludes them; WorkflowAnnotationList shows them; MCP reads are unchanged.
+	workflow_class = true
 	default_payload = {
 		"hint_type": "waypoint",
 		"detail_level": "guided",

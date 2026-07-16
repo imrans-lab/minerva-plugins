@@ -302,6 +302,42 @@ func get_annotation_zoom() -> float:
 	return float(_canvas.zoom)
 
 
+## Layer-keyed visibility (WC-2 C3 fix, bug 019f33d2c9bf): a WORKFLOW-class
+## annotation carrying kind_payload.layer follows the canvas's live layer
+## filter — hiding B.Cu hides bottom-layer route hints from rendering AND
+## hit-testing (the substrate consults this in AnnotationOverlay._draw and in
+## every manipulation-tool hit loop). Review annotations, hints without a
+## layer, and headless hosts (no canvas) are always visible. UI-only: MCP
+## reads and the stored list are unaffected.
+func is_annotation_visible(annotation: Dictionary) -> bool:
+	if _registry == null:
+		return true
+	var kind: AnnotationKind = _registry.get_annotation_kind(StringName(str(annotation.get("kind", ""))))
+	if kind == null or not kind.workflow_class:
+		return true
+	var payload: Variant = annotation.get("kind_payload", {})
+	if not payload is Dictionary:
+		return true
+	var layer := str((payload as Dictionary).get("layer", ""))
+	if layer.is_empty():
+		return true
+	if _canvas == null or not is_instance_valid(_canvas) or not _canvas.has_method("is_layer_visible"):
+		return true
+	return bool(_canvas.is_layer_visible(layer))
+
+
+## Navigation pass-through target (WC-2 §1a): the platform AnnotationOverlay
+## forwards middle-button / wheel / pan-gesture / middle-drag-motion events
+## here while an annotation tool is active; we relay to the canvas's existing
+## pan/zoom handling. Overlay and canvas share an origin, so positions are
+## already canvas-local. No canvas bound (headless) → no-op.
+func forward_navigation_input(event: InputEvent) -> void:
+	if _canvas == null or not is_instance_valid(_canvas):
+		return
+	if _canvas.has_method("handle_navigation_input"):
+		_canvas.handle_navigation_input(event)
+
+
 ## Resolve the live board data model (pcb_data.gd), preferring the canvas's model
 ## and falling back to the panel's. Null when neither is wired (headless).
 func _board_data():
