@@ -27,6 +27,13 @@ const _PcbComponentScript: Script = preload("model/pcb_component.gd")
 const _PcbCanvasScript: Script = preload("pcb_canvas.gd")
 const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.gd")
 const _PanelLayoutScript: Script = preload("panel_layout.gd")
+const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
+
+## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
+## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
+## the canvas (get_annotation_overlay_parent's own target), the same lookup
+## Editor.gd performs — see _find_annotation_overlay.
+const _OVERLAY_NODE_NAME := "PlatformAnnotationOverlay"
 
 ## Default board handed to a fresh (anonymous) editor. A brand-new board is
 ## EMPTY (finding 4): no phantom parts the user never placed. Board name / size /
@@ -87,6 +94,25 @@ var _pin_info_section: VBoxContainer = null
 var _pin_info_ref_label: Label = null
 var _pin_info_value_label: Label = null
 var _pin_info_members_label: Label = null
+
+## In-panel route-flow toolbar cluster (WC-3, contract §5 — a conscious
+## partial reversal of Round-B "no authoring in panel"). Buttons activate
+## substrate AnnotationAuthorTools directly on the shared platform overlay;
+## implementations remain ordinary AnnotationAuthorTools (see
+## kinds/pcb_route_hint_kind.gd SingleTraceAuthorTool). kind_key -> Button.
+var _route_flow_buttons: Dictionary = {}
+var _route_flow_mode_label: Label = null
+## kind_key of the cluster's own currently-active tool, or "" when none.
+var _active_route_flow_kind: String = ""
+## The tool instance the cluster itself activated (used to tell apart "the
+## overlay's active tool changed because another surface — e.g. the dock's
+## own AnnotationToolbar — took over" from "we changed it ourselves").
+var _active_route_flow_tool: AnnotationAuthorTool = null
+## The mounted platform AnnotationOverlay's active_tool_changed connection
+## (so mutual exclusion also covers OTHER surfaces driving the same overlay,
+## e.g. the annotation dock's per-kind buttons — contract: "activation is
+## mutually exclusive").
+var _overlay_tool_signal_bound: Control = null
 
 ## View-flag table shared by the wide-mode CheckButtons and the medium/narrow
 ## View menu (single source of truth: the canvas flags themselves).
@@ -489,6 +515,30 @@ func _build_sidebar() -> VBoxContainer:
 	tools_flow.add_child(_inspect_pin_button)
 	_tool_buttons[_PcbCanvasScript.ToolMode.INSPECT_PIN] = _inspect_pin_button
 
+	# Route-flow toolbar cluster (WC-3, contract §5): a TRUE toggle per route
+	# author tool, same idiom as the pin inspector button above. Only
+	# single-trace this round; WC-4 adds a "Bus" button beside it into the
+	# same _route_flow_buttons table (mutual exclusion is already generic).
+	var trace_btn := Button.new()
+	trace_btn.name = "SingleTraceButton"
+	var trace_icon := _load_icon("trace_24.png")
+	if trace_icon != null:
+		trace_btn.icon = trace_icon
+	else:
+		trace_btn.text = "Trace"
+	trace_btn.tooltip_text = "Draw a single-trace route hint: click a pad or point, click waypoints, " \
+		+ "click a pad/double-click empty space to finish (Esc/right-click cancels)"
+	trace_btn.toggle_mode = true
+	trace_btn.pressed.connect(_on_single_trace_button_pressed)
+	tools_flow.add_child(trace_btn)
+	_route_flow_buttons["single_trace"] = trace_btn
+
+	_route_flow_mode_label = Label.new()
+	_route_flow_mode_label.name = "RouteFlowModeLabel"
+	_route_flow_mode_label.text = "Select"
+	_route_flow_mode_label.add_theme_font_size_override("font_size", 11)
+	_sidebar.add_child(_route_flow_mode_label)
+
 	_sidebar.add_child(HSeparator.new())
 
 	# Platform annotation dock mounts here (Editor duck-types
@@ -632,6 +682,159 @@ func _on_inspect_pin_button_pressed() -> void:
 	_sync_tool_buttons(_canvas.tool_mode)
 
 
+# ── Route-flow toolbar cluster (WC-3, contract §5) ────────────────────────────
+
+## Locate the platform AnnotationOverlay mounted by Editor.gd — a duck-typed,
+## by-name lookup under the canvas (get_annotation_overlay_parent's own
+## target), mirroring Editor.gd's own `surface.find_child("PlatformAnnotation
+## Overlay", true, false)` (Editor.gd:852). Returns null when the overlay
+## hasn't been mounted yet (panel not hosted by the platform — e.g. some
+## headless test fixtures that never build one).
+func _find_annotation_overlay() -> Control:
+	if _canvas == null or not is_instance_valid(_canvas):
+		return null
+	var found := _canvas.find_child(_OVERLAY_NODE_NAME, true, false)
+	if found is Control:
+		# Bind ONCE per overlay instance so mutual exclusion also covers other
+		# surfaces (e.g. the dock's own AnnotationToolbar) driving the same
+		# overlay — contract: "Tool activation is mutually exclusive."
+		if _overlay_tool_signal_bound != found:
+			var cb := Callable(self, "_on_overlay_active_tool_changed")
+			if found.has_signal("active_tool_changed") and not found.active_tool_changed.is_connected(cb):
+				found.active_tool_changed.connect(cb)
+			_overlay_tool_signal_bound = found
+		return found
+	return null
+
+
+func _on_single_trace_button_pressed() -> void:
+	var btn: Button = _route_flow_buttons.get("single_trace", null)
+	if btn == null:
+		return
+	if btn.button_pressed:
+		_activate_route_flow_tool("single_trace")
+	else:
+		_deactivate_route_flow_tool()
+
+
+## New AnnotationAuthorTool instance for a route-flow cluster key. Deliberately
+## bypasses kind.author_ui() (see SingleTraceAuthorTool's class doc) — the
+## kind's author_ui() stays wired to the generic waypoint tool for the dock's
+## own per-kind button.
+func _new_route_flow_tool(kind_key: String) -> AnnotationAuthorTool:
+	match kind_key:
+		"single_trace":
+			return _PcbRouteHintKindScript.SingleTraceAuthorTool.new()
+	return null
+
+
+func _activate_route_flow_tool(kind_key: String) -> void:
+	var overlay := _find_annotation_overlay()
+	if overlay == null or _annotation_host == null:
+		_set_status("Route tool unavailable — annotation overlay not mounted.")
+		_untoggle_route_flow_buttons()
+		return
+
+	var tool := _new_route_flow_tool(kind_key)
+	if tool == null:
+		_untoggle_route_flow_buttons()
+		return
+
+	# Deactivate any route-flow tool WE previously activated (mutual exclusion
+	# within the cluster; future WC-4 bus button shares this path).
+	_teardown_active_route_flow_tool()
+
+	tool.on_activate(_annotation_host)
+	if not tool.annotation_ready.is_connected(_on_route_flow_annotation_ready):
+		tool.annotation_ready.connect(_on_route_flow_annotation_ready)
+	if not tool.cancelled.is_connected(_on_route_flow_cancelled):
+		tool.cancelled.connect(_on_route_flow_cancelled)
+
+	# Set tracking BEFORE handing to the overlay: set_active_tool below fires
+	# active_tool_changed synchronously, and _on_overlay_active_tool_changed
+	# must see a match (no self-reset).
+	_active_route_flow_kind = kind_key
+	_active_route_flow_tool = tool
+	overlay.set_active_tool(tool)
+
+	for k in _route_flow_buttons.keys():
+		var b: Button = _route_flow_buttons[k]
+		if is_instance_valid(b):
+			b.set_pressed_no_signal(k == kind_key)
+	_update_route_flow_mode_label(kind_key)
+
+
+## Deactivates the cluster's own active tool (if any) and restores Select —
+## contract §5: "deactivation restores Select." Does not touch the overlay's
+## assignment when some OTHER surface is now driving it (cross-surface case;
+## _on_overlay_active_tool_changed already reset our buttons for that).
+func _deactivate_route_flow_tool() -> void:
+	var overlay := _find_annotation_overlay()
+	_teardown_active_route_flow_tool()
+	if overlay != null:
+		overlay.clear_active_tool()
+	_untoggle_route_flow_buttons()
+	_update_route_flow_mode_label("")
+
+
+func _teardown_active_route_flow_tool() -> void:
+	if _active_route_flow_tool == null:
+		return
+	if _active_route_flow_tool.annotation_ready.is_connected(_on_route_flow_annotation_ready):
+		_active_route_flow_tool.annotation_ready.disconnect(_on_route_flow_annotation_ready)
+	if _active_route_flow_tool.cancelled.is_connected(_on_route_flow_cancelled):
+		_active_route_flow_tool.cancelled.disconnect(_on_route_flow_cancelled)
+	_active_route_flow_tool.on_deactivate()
+	_active_route_flow_tool = null
+	_active_route_flow_kind = ""
+
+
+func _untoggle_route_flow_buttons() -> void:
+	for k in _route_flow_buttons.keys():
+		var b: Button = _route_flow_buttons[k]
+		if is_instance_valid(b) and b.button_pressed:
+			b.set_pressed_no_signal(false)
+
+
+func _update_route_flow_mode_label(kind_key: String) -> void:
+	if _route_flow_mode_label == null:
+		return
+	match kind_key:
+		"single_trace":
+			_route_flow_mode_label.text = "Single Trace"
+		_:
+			_route_flow_mode_label.text = "Select"
+
+
+## Forwards a committed envelope to the host (same single call-site convention
+## as AnnotationToolbar._on_annotation_ready) — the tool instance stays active
+## for continuous tracing (no auto-deactivate on commit).
+func _on_route_flow_annotation_ready(annotation: Dictionary) -> void:
+	if _annotation_host != null:
+		_annotation_host.add_annotation(annotation)
+
+
+## A cancelled in-progress trace fully deactivates the cluster's tool
+## (mirrors AnnotationToolbar._on_tool_cancelled's convention) — re-press the
+## button to start drawing again.
+func _on_route_flow_cancelled() -> void:
+	_deactivate_route_flow_tool()
+
+
+## Cross-surface mutual exclusion: when the shared overlay's active tool
+## changes to something OTHER than what we last handed it (another surface,
+## e.g. the dock's AnnotationToolbar, took over — or it was cleared from
+## outside), drop our own button/label state without touching the overlay
+## again (avoids a feedback loop).
+func _on_overlay_active_tool_changed(tool: Object) -> void:
+	if tool == _active_route_flow_tool:
+		return
+	_active_route_flow_tool = null
+	_active_route_flow_kind = ""
+	_untoggle_route_flow_buttons()
+	_update_route_flow_mode_label("")
+
+
 ## Where the platform annotation dock must mount (Editor.gd duck-types this —
 ## round A hook). Opting in makes this panel own the dock's responsive
 ## placement; the platform's editor-width RIGHT/BOTTOM logic is bypassed.
@@ -751,11 +954,15 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 	_update_status()
 
 
-## Duck-typed: clears the active author tool on the mounted dock pane.
+## Duck-typed: clears the active author tool on the mounted dock pane, AND
+## the route-flow cluster's own tool (same hidden-sidebar-eats-clicks hazard
+## the dock pane already guards against — see the call site in
+## _apply_layout_mode).
 func _clear_dock_active_tool() -> void:
 	var pane := _find_dock_pane()
 	if pane != null and pane.has_method("clear_active_tool"):
 		pane.clear_active_tool()
+	_deactivate_route_flow_tool()
 
 
 func _dock_pane_in_sidebar() -> bool:

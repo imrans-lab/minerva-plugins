@@ -196,6 +196,263 @@ class WaypointRouteHintAuthorTool:
 		return _waypoints.size()
 
 
+## Single-trace authoring: full click-flow state machine (pcb-ui-native-cluster
+## §5, WC-3 round; native parity PCBCanvas.gd@pre-cutover-2026-07-07 ~L2406
+## click flow / ~L1378 live preview — re-implemented, not copied). Distinct
+## from WaypointRouteHintAuthorTool above: that tool stays wired to
+## kind.author_ui() (the dock's generic per-kind "Route Hint" button keeps
+## waypoint-only authoring). This tool is instantiated directly by PCBPanel's
+## dedicated route-flow toolbar cluster (see PCBPanel.gd
+## _build_route_flow_cluster / _new_route_tool) and pushed onto the shared
+## platform AnnotationOverlay — kind.author_ui() is intentionally NOT extended
+## to return this tool, since a kind's author_ui() contract is one-tool-per-kind
+## and the generic dock button must keep its existing (pre-WC-3) behavior.
+##
+## State machine (verbatim, contract §5):
+##   IDLE --click pad--> DRAWING(source=pad)     # pad_at snap, radius 5mm
+##   IDLE --click empty--> DRAWING(source=point)
+##   DRAWING --click empty--> append waypoint
+##   DRAWING --click pad--> commit(dest=pad)     # pad == source → CANCEL (self-ref)
+##   DRAWING --double-click empty--> commit(dest=point)
+##   DRAWING --right-click / Escape--> cancel
+##
+## Double-click gotcha (verified, contract §"known gotchas"): AnnotationOverlay
+## ._gui_input does NOT forward InputEventMouseButton.double_click to tools —
+## it decomposes every press into on_pointer_down(pos, button_index, mods),
+## dropping the flag entirely (AnnotationOverlay.gd:187-201). A REAL physical
+## double-click still works here because its two press events land at
+## (near-)identical screen pixels: the first press's on_pointer_down "click
+## empty" branch appends a waypoint at that doc-space point; the second
+## press's on_pointer_down finds that new point within _COMMIT_EPSILON of
+## itself and commits — the exact "click lands on the last placed point"
+## technique WaypointRouteHintAuthorTool already uses above. A programmatic
+## fallback (KEY_ENTER, forwarded via the same pseudo-pointer convention as
+## Escape/Delete) is ALSO wired for callers that can't reproduce same-pixel
+## double-click timing (tests, agents): commits dest=point at the last
+## waypoint, or at the live preview position if no waypoint has been placed
+## yet.
+class SingleTraceAuthorTool:
+	extends AnnotationAuthorTool
+
+	## Same-position epsilon (board mm) for double-click / Enter commit
+	## detection — matches WaypointRouteHintAuthorTool's constant exactly.
+	const _COMMIT_EPSILON := 0.001
+	const _PAD_RADIUS_MM := 5.0
+	const _DASH_LEN_MM := 2.0
+	const _GAP_LEN_MM := 1.5
+	const _DEFAULT_WIDTH_MM := 0.25
+
+	var _host: AnnotationHost = null
+	var _state: String = "idle"    # "idle" | "drawing"
+	var _source: Dictionary = {}   # {type:"pad", component, pin, pos} | {type:"point", pos}
+	var _waypoints: Array = []     # Array[Vector2] — interior waypoints placed so far
+	var _preview: Vector2 = Vector2.ZERO
+	var _has_preview: bool = false
+
+	func on_activate(host: AnnotationHost) -> void:
+		_host = host
+		_reset()
+
+	func on_deactivate() -> void:
+		_reset()
+		_host = null
+
+	func on_pointer_down(pos: Vector2, button: int, mods: int) -> bool:
+		if mods == KEY_ESCAPE:
+			return _cancel_if_drawing()
+		if mods == KEY_ENTER:
+			return _commit_via_enter()
+		if button == MOUSE_BUTTON_RIGHT:
+			return _cancel_if_drawing()
+		if button != MOUSE_BUTTON_LEFT:
+			return false
+		if _host == null:
+			return false
+
+		var doc_pos: Vector2 = _host.transform_screen_to_doc(pos)
+		var pad := _pad_at(doc_pos)
+
+		if _state == "idle":
+			if not pad.is_empty():
+				_source = {"type": "pad", "component": str(pad.get("component", "")),
+					"pin": str(pad.get("pin", "")), "pos": pad.get("position", doc_pos)}
+			else:
+				_source = {"type": "point", "pos": doc_pos}
+			_state = "drawing"
+			_waypoints = []
+			_has_preview = false
+			return true
+
+		# DRAWING.
+		if not pad.is_empty():
+			if str(_source.get("type", "")) == "pad" \
+					and str(_source.get("component", "")) == str(pad.get("component", "")) \
+					and str(_source.get("pin", "")) == str(pad.get("pin", "")):
+				# Self-reference: the same pad as the source → CANCEL (contract §5).
+				_reset()
+				cancelled.emit()
+				return true
+			return _commit(pad, Vector2.ZERO, false)   # commit(dest=pad)
+
+		# Empty click — double-click-by-position detection (see class doc).
+		var last: Vector2 = _waypoints[_waypoints.size() - 1] if not _waypoints.is_empty() \
+			else (_source.get("pos", Vector2.ZERO) as Vector2)
+		if last.distance_to(doc_pos) <= _COMMIT_EPSILON:
+			return _commit({}, doc_pos, true)   # commit(dest=point)
+
+		_waypoints.append(doc_pos)
+		_preview = doc_pos
+		_has_preview = true
+		return true
+
+	func on_pointer_move(pos: Vector2) -> void:
+		if _host == null or _state != "drawing":
+			return
+		_preview = _host.transform_screen_to_doc(pos)
+		_has_preview = true
+
+	func draw_preview(ctx: AnnotationRenderContext) -> void:
+		if ctx == null or _state != "drawing":
+			return
+		var pts: Array = [_source.get("pos", Vector2.ZERO)]
+		for wp in _waypoints:
+			pts.append(wp)
+		if _has_preview:
+			pts.append(_preview)
+		if pts.size() < 2:
+			return
+		var color := AnnotationRenderContext.author_color("human")
+		for i in range(1, pts.size()):
+			_draw_dashed_segment(ctx, pts[i - 1], pts[i], color)
+
+		var font: Font = ThemeDB.fallback_font
+		if font != null:
+			var label := "Single Trace"
+			if str(_source.get("type", "")) == "pad":
+				label = "Single Trace  from %s.%s" % [str(_source.get("component", "")), str(_source.get("pin", ""))]
+			ctx.draw_string(font, (pts[0] as Vector2) + Vector2(6.0, -6.0), label, color, 12)
+
+	# ── internal ──────────────────────────────────────────────────────────────
+
+	func _cancel_if_drawing() -> bool:
+		if _state == "drawing":
+			_reset()
+			cancelled.emit()
+			return true
+		return false
+
+	## Enter fallback commit (see class doc: the double_click flag gotcha).
+	func _commit_via_enter() -> bool:
+		if _state != "drawing":
+			return false
+		if not _waypoints.is_empty():
+			return _commit({}, _waypoints[_waypoints.size() - 1], true)
+		if _has_preview:
+			return _commit({}, _preview, true)
+		return false
+
+	## dest_pad: {} unless committing to a pad. dest_point/as_point: the
+	## doc-space commit point when committing to a bare point.
+	func _commit(dest_pad: Dictionary, dest_point: Vector2, as_point: bool) -> bool:
+		if _host == null or not _host.has_method("build_route_hint_envelope"):
+			push_warning("[pcb_route_hint] single-trace tool active without a pcb host; ignoring commit")
+			_reset()
+			return false
+
+		# Interior waypoints only (contract §5) — when the commit point equals
+		# the last appended waypoint (the double-click / Enter path both land
+		# here), that entry IS the destination, not an interior point.
+		var interior: Array = _waypoints.duplicate()
+		if as_point and not interior.is_empty() \
+				and (interior[interior.size() - 1] as Vector2).distance_to(dest_point) <= _COMMIT_EPSILON:
+			interior.remove_at(interior.size() - 1)
+
+		var source_pins: Array = []
+		var dest_pins: Array = []
+		var anchor_pos: Vector2 = _source.get("pos", Vector2.ZERO)
+		var anchor_is_pad := str(_source.get("type", "")) == "pad"
+		if anchor_is_pad:
+			source_pins.append("%s.%s" % [str(_source.get("component", "")), str(_source.get("pin", ""))])
+		if not as_point and not dest_pad.is_empty():
+			dest_pins.append("%s.%s" % [str(dest_pad.get("component", "")), str(dest_pad.get("pin", ""))])
+
+		var wp_arrays: Array = []
+		for wp in interior:
+			wp_arrays.append([(wp as Vector2).x, (wp as Vector2).y])
+
+		var layer := "F.Cu"
+		if _host.has_method("get_current_layer"):
+			layer = str(_host.call("get_current_layer"))
+
+		var envelope: Dictionary = _host.call(
+			"build_route_hint_envelope", anchor_pos.x, anchor_pos.y, "", layer, "single_trace",
+			wp_arrays, "human", "", _DEFAULT_WIDTH_MM, source_pins, dest_pins)
+
+		# dest_point: a commit-time-resolved rendering/hit-test cache (NOT a
+		# semantic waypoint — kind_payload.waypoints stays interior-only per
+		# contract §5). Needed because AnnotationKind.hit_test()/bounds() have
+		# no host parameter to resolve a dest_pins pad reference live — see
+		# pcb_route_hint_kind.gd _waypoint_points()'s class doc for the full
+		# rationale and the accepted staleness tradeoff.
+		var dest_pos: Vector2 = dest_point
+		if not as_point and not dest_pad.is_empty():
+			dest_pos = dest_pad.get("position", dest_point)
+		var kp: Dictionary = envelope.get("kind_payload", {})
+		kp["dest_point"] = [dest_pos.x, dest_pos.y]
+		envelope["kind_payload"] = kp
+
+		# Semantic pad anchor when the SOURCE is a pad (contract §5): re-anchor
+		# at the pad (same shape PcbAnnotationHost._resolve_pad expects) so the
+		# marker tracks the live component through moves, instead of the bare
+		# board.point default build_route_hint_envelope always produces.
+		if anchor_is_pad:
+			envelope["anchor"] = {
+				"plugin": "pcb", "type": "pad",
+				"id": {"component": str(_source.get("component", "")), "pin": str(_source.get("pin", ""))},
+				"snapshot": {"position": [anchor_pos.x, anchor_pos.y]},
+			}
+
+		_reset()
+		annotation_ready.emit(envelope)
+		return true
+
+	func _pad_at(doc_pos: Vector2) -> Dictionary:
+		if _host == null or not _host.has_method("pad_at"):
+			return {}
+		return _host.pad_at(doc_pos, _PAD_RADIUS_MM)
+
+	func _draw_dashed_segment(ctx: AnnotationRenderContext, a: Vector2, b: Vector2, color: Color) -> void:
+		var seg := b - a
+		var seg_len := seg.length()
+		if seg_len < 0.0001:
+			return
+		var dir := seg / seg_len
+		var step := _DASH_LEN_MM + _GAP_LEN_MM
+		var dist := 0.0
+		while dist < seg_len:
+			var dash_end := minf(dist + _DASH_LEN_MM, seg_len)
+			ctx.draw_line(a + dir * dist, a + dir * dash_end, color, 1.5)
+			dist += step
+
+	func _reset() -> void:
+		_state = "idle"
+		_source = {}
+		_waypoints = []
+		_preview = Vector2.ZERO
+		_has_preview = false
+
+	# ── Test/introspection accessors (state assertions, contract E2E-3/4) ──────
+
+	func current_state() -> String:
+		return _state
+
+	func source_info() -> Dictionary:
+		return _source.duplicate()
+
+	func waypoint_count() -> int:
+		return _waypoints.size()
+
+
 # ── Validation (beyond the envelope schema) ──────────────────────────────────
 
 func validate(annotation: Dictionary) -> Array:
@@ -404,15 +661,39 @@ static func _anchor_position(annotation: Dictionary) -> Vector2:
 	return Vector2.ZERO
 
 
-## The polyline points for render/hit-test/bounds: the explicit waypoints when
-## present, else the single anchor point.
+## The polyline points for render/hit-test/bounds. Two storage conventions
+## coexist (discriminated by presence of kind_payload.dest_point, WC-3):
+##
+##   * Legacy full-path (hint_type "waypoint" AND AI-authored "single_trace"
+##     proposals from MCPPcbPanelTools._write_back_proposals): `waypoints`
+##     already carries EVERY point including source and dest
+##     (WaypointRouteHintAuthorTool / the router's routed polyline both build
+##     it that way) — used as-is.
+##   * Interior-only (human-authored "single_trace" hints, contract §5 —
+##     kind_payload.waypoints holds INTERIOR points only): reconstructed here
+##     as anchor → interior waypoints → dest_point. dest_point is a
+##     commit-time-resolved cache (not a semantic ref) purely for rendering/
+##     hit-testing — AnnotationKind.hit_test()/bounds() have no host
+##     parameter to re-resolve a dest_pins pad reference live, unlike the
+##     anchor (which the base resolve_anchor path DOES track live). Accepted
+##     limitation: if the dest pad moves after authoring, the drawn line stays
+##     at its commit-time position until the hint is repaired/re-authored —
+##     same staleness class as any other snapshot fallback in this file.
 func _waypoint_points(annotation: Dictionary) -> PackedVector2Array:
 	var payload: Dictionary = annotation.get("kind_payload", {})
 	var raw: Variant = payload.get("waypoints", [])
+	var interior: Array = (raw as Array) if raw is Array else []
 	var out := PackedVector2Array()
-	if raw is Array:
-		for wp in (raw as Array):
+
+	if payload.has("dest_point"):
+		out.append(_anchor_position(annotation))
+		for wp in interior:
 			out.append(_to_vec2(wp))
+		out.append(_to_vec2(payload["dest_point"]))
+		return out
+
+	for wp in interior:
+		out.append(_to_vec2(wp))
 	if out.is_empty():
 		out.append(_anchor_position(annotation))
 	return out

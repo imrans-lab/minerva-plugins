@@ -326,6 +326,61 @@ func is_annotation_visible(annotation: Dictionary) -> bool:
 	return bool(_canvas.is_layer_visible(layer))
 
 
+## The board-layer a freshly-authored route hint should carry (WC-3 contract
+## §5, "current layer"). Derived from the canvas's live trace_layer_filter (the
+## same OptionButton the human drives, PCBPanel.gd _on_layer_selected) so a
+## human authoring while the view is scoped to one layer gets a hint on THAT
+## layer, not a stale default. "all" (both layers shown) and no canvas bound
+## (headless) fall back to "F.Cu" (the pcb_route_hint kind's own default).
+## Layer-name mapping mirrors MCPPcbPanelTools' materialize step (top→F.Cu,
+## bottom→B.Cu) — one source of truth for board-layer ↔ KiCad-layer naming
+## would be a future cleanup; duplicated here deliberately small.
+func get_current_layer() -> String:
+	if _canvas == null or not is_instance_valid(_canvas) or not ("trace_layer_filter" in _canvas):
+		return "F.Cu"
+	match str(_canvas.trace_layer_filter):
+		"top":
+			return "F.Cu"
+		"bottom":
+			return "B.Cu"
+		_:
+			return "F.Cu"
+
+
+## Clear-by-author (pcb-ui-native-cluster §5 / WC-3 deliverable 3): removes
+## every WORKFLOW-class annotation (route hints) whose author.kind matches
+## author_kind — "human", "ai", or "all" (both). Review-class annotations
+## (arrows/text/etc.) are never touched; this is the host-side filter behind
+## the workflow listing's clear-by-author context menu. Returns the number of
+## annotations removed. A no-op removal (0) does not emit annotations_changed
+## (mirrors remove_annotation's single-signal-per-real-change discipline).
+func clear_annotations_by_author(author_kind: String) -> int:
+	if author_kind not in ["human", "ai", "all"]:
+		return 0
+	var kept: Array = []
+	var removed := 0
+	for ann in _annotations:
+		if not (ann is Dictionary):
+			kept.append(ann)
+			continue
+		var a: Dictionary = ann
+		var kind: AnnotationKind = _registry.get_annotation_kind(StringName(str(a.get("kind", "")))) if _registry != null else null
+		var is_workflow := kind != null and kind.workflow_class
+		var author: Variant = a.get("author", null)
+		var a_kind := str((author as Dictionary).get("kind", "human")) if author is Dictionary else "human"
+		var matches := author_kind == "all" or a_kind == author_kind
+		if is_workflow and matches:
+			removed += 1
+			if get_selected_annotation_id() == str(a.get("id", "")):
+				set_selected_annotation_id("")
+			continue
+		kept.append(a)
+	if removed > 0:
+		_annotations = kept
+		annotations_changed.emit()
+	return removed
+
+
 ## Navigation pass-through target (WC-2 §1a): the platform AnnotationOverlay
 ## forwards middle-button / wheel / pan-gesture / middle-drag-motion events
 ## here while an annotation tool is active; we relay to the canvas's existing
