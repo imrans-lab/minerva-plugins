@@ -28,6 +28,7 @@ const _PcbCanvasScript: Script = preload("pcb_canvas.gd")
 const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.gd")
 const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
+const _PanelToolsScript: Script = preload("panel_tools.gd")
 
 ## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
 ## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
@@ -179,6 +180,17 @@ func get_annotation_overlay_parent() -> Control:
 ## The board model (pcb_data.gd) this panel edits. Exposed for MCP/tests.
 func get_data():
 	return _data
+
+
+## Panel-executed MCP tool entry point (DCR 019f6c3d0e3d contract §2
+## plugin-side convention, C2 round docket 019f6c45f09e). PluginToolRegistry
+## has already resolved args.editor_name -> this panel and verified
+## ownership before calling here; panel_tools.gd owns the wave-1 tool bodies
+## themselves (moved verbatim from Minerva core's MCPPcbPanelTools.gd). An
+## unrecognised tool_name returns {} so the dispatcher maps it to the
+## structured tool_unhandled error.
+func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
+	return _PanelToolsScript.handle(_annotation_host, tool_name, args)
 
 
 # ── Mount / unmount ───────────────────────────────────────────────────────────
