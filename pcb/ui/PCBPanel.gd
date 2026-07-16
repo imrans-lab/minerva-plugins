@@ -1150,7 +1150,16 @@ func route_board(selection: Dictionary) -> Dictionary:
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		return {"ok": true, "result": result.get("result")}
+		var inner: Dictionary = result.get("result")
+		# Live broker shape: MinervaIPC wraps the backend reply in
+		# {success, result} while the Go side forwards the worker's own
+		# {ok, result} envelope verbatim (HandleRouteChannel) — so the
+		# worker envelope arrives one level deeper than the direct-stdio
+		# path. Unwrap it rather than re-wrapping (HITL-2 live bug: the
+		# apply tool read routes one level too high and proposed nothing).
+		if inner.has("ok"):
+			return inner
+		return {"ok": true, "result": inner}
 	return {"ok": false, "error": {"kind": "worker_error",
 		"message": str(result.get("error_message", result.get("error", "route failed")))}}
 
