@@ -31,7 +31,12 @@ extends AnnotationKind
 const _ANCHOR_TYPE_BOARD_POINT := "pcb/board.point"
 const _ANCHOR_TYPE_PAD := "pcb/pad"
 
-const _MARKER_RADIUS: float = 5.0
+## Anchor-marker size: document-space (board mm), so it scales with board
+## features instead of swallowing small parts (HITL-2 feedback: 5mm diamonds
+## completely covered a 2.54mm-pitch header). Render keeps a small pixel
+## floor so hints stay visible when zoomed far out.
+const _MARKER_RADIUS: float = 1.25
+const _MARKER_MIN_PX: float = 6.0
 const _LABEL_COLOR := Color(0.92, 0.96, 0.98, 1.0)
 const _LABEL_FONT_SIZE: int = 12
 
@@ -237,7 +242,10 @@ class SingleTraceAuthorTool:
 	## Same-position epsilon (board mm) for double-click / Enter commit
 	## detection — matches WaypointRouteHintAuthorTool's constant exactly.
 	const _COMMIT_EPSILON := 0.001
-	const _PAD_RADIUS_MM := 5.0
+	# 2mm, not the native 5mm: on fine-pitch boards a 5mm commit radius
+	# grabbed the destination pad while the user was still placing bends
+	# nearby (HITL-2 feedback). 2mm ~= pad + comfortable margin.
+	const _PAD_RADIUS_MM := 2.0
 	const _DASH_LEN_MM := 2.0
 	const _GAP_LEN_MM := 1.5
 	const _DEFAULT_WIDTH_MM := 0.25
@@ -533,7 +541,7 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 		ctx.draw_polyline(pts, stroke_color, stroke_px)
 
 	# Diamond marker at the anchor.
-	var d := _MARKER_RADIUS
+	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(ctx.zoom, 0.001))
 	var diamond := PackedVector2Array([
 		pos + Vector2(0, -d), pos + Vector2(d, 0),
 		pos + Vector2(0, d), pos + Vector2(-d, 0),
