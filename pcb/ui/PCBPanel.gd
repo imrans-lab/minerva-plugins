@@ -676,6 +676,8 @@ func _on_inspect_pin_button_pressed() -> void:
 	if _canvas == null or _inspect_pin_button == null:
 		return
 	if _inspect_pin_button.button_pressed:
+		if _active_route_flow_tool != null:
+			_deactivate_route_flow_tool()
 		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.INSPECT_PIN)
 	else:
 		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.SELECT)
@@ -743,6 +745,13 @@ func _activate_route_flow_tool(kind_key: String) -> void:
 	# Deactivate any route-flow tool WE previously activated (mutual exclusion
 	# within the cluster; future WC-4 bus button shares this path).
 	_teardown_active_route_flow_tool()
+
+	# Cross-surface mutual exclusion (contract §5 / review must_fix): arming a
+	# route-flow tool releases the canvas tool surface — Pan/Pin-Inspect drop
+	# back to Select and their buttons un-press.
+	if _canvas != null and _canvas.tool_mode != _PcbCanvasScript.ToolMode.SELECT:
+		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.SELECT)
+		_sync_tool_buttons(_canvas.tool_mode)
 
 	tool.on_activate(_annotation_host)
 	if not tool.annotation_ready.is_connected(_on_route_flow_annotation_ready):
@@ -1030,6 +1039,10 @@ func _rebuild_layer_option() -> void:
 func _toggle_tool_mode(mode: int) -> void:
 	if _canvas == null:
 		return
+	# Cross-surface mutual exclusion: a canvas tool press releases the
+	# route-flow cluster (guarded — never clears another surface's tool).
+	if _active_route_flow_tool != null:
+		_deactivate_route_flow_tool()
 	# Radio behaviour: Select and Pan are the two persistent tools. Clicking a
 	# tool activates it; Select is the resting tool, so we never drop to a
 	# modeless state. Re-assert button pressed-states even when the mode is
