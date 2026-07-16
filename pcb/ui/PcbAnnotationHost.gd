@@ -325,7 +325,7 @@ func describe_point(doc_pos: Vector2) -> String:
 		return _canvas_point_label(doc_pos)
 
 	# 1. pad — a specific pin/pad of a component.
-	var pad_ref := _pad_at(data, doc_pos)
+	var pad_ref := _pad_at(doc_pos)
 	if not pad_ref.is_empty():
 		return "pad:" + pad_ref
 
@@ -351,18 +351,113 @@ func _canvas_point_label(doc_pos: Vector2) -> String:
 
 ## Nearest pin/pad of any component within _PAD_HIT_RADIUS_MM of doc_pos.
 ## Returns "<component_id>.<pin_name>" or "" when nothing is close enough.
-func _pad_at(data, doc_pos: Vector2) -> String:
-	var best_ref := ""
-	var best_dist := _PAD_HIT_RADIUS_MM
+## Thin wrapper over the public pad_at() lookup (WC-1 pin inspector round) — the
+## precedence-tier-1 hit test used to be duplicated inline here; now there is one
+## hit-test implementation, reused by describe_point, the canvas inspector, and
+## the MCP parity tool.
+func _pad_at(doc_pos: Vector2) -> String:
+	var hit := pad_at(doc_pos, _PAD_HIT_RADIUS_MM)
+	if hit.is_empty():
+		return ""
+	return "%s.%s" % [str(hit.get("component", "")), str(hit.get("pin", ""))]
+
+
+## PUBLIC, side-effect-free pad lookup (WC-1 pin inspector, contract §2). Nearest
+## pad within radius_mm of doc_pos wins; ties break deterministically by
+## (component, pin) lexicographic order (never insertion-order-dependent).
+## Returns {} on miss, else {component: String, pin: String, position: Vector2
+## (board mm, the live pin world position)}.
+func pad_at(doc_pos: Vector2, radius_mm: float = 5.0) -> Dictionary:
+	var data = _board_data()
+	if data == null:
+		return {}
+	var candidates: Array = []
 	for comp_id in data.components:
 		var comp = data.components[comp_id]
 		for pin_name in comp.pins:
 			var world_pin: Vector2 = comp.get_pin_world_position(pin_name)
 			var d := world_pin.distance_to(doc_pos)
-			if d <= best_dist:
-				best_dist = d
-				best_ref = "%s.%s" % [comp_id, pin_name]
-	return best_ref
+			if d <= radius_mm:
+				candidates.append({
+					"component": str(comp_id), "pin": str(pin_name),
+					"position": world_pin, "dist": d,
+				})
+	if candidates.is_empty():
+		return {}
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if not is_equal_approx(a["dist"], b["dist"]):
+			return a["dist"] < b["dist"]
+		if a["component"] != b["component"]:
+			return a["component"] < b["component"]
+		return a["pin"] < b["pin"])
+	var best: Dictionary = candidates[0]
+	return {"component": best["component"], "pin": best["pin"], "position": best["position"]}
+
+
+## PUBLIC, side-effect-free pin-detail lookup (WC-1 pin inspector, contract §2).
+## {} on an unknown component/pin, else {ref: "Component.Pin", pin_name: String
+## (footprint geometry name via pcb_component.get_pin_name, "" if none),
+## net: String ("" if unconnected), net_members: [other "Component.Pin" refs on
+## the same net], trace_ids: [String], trace_count: int}.
+##
+## trace_ids: traces on the pin's net whose start or end waypoint lands on the
+## pad (within _PAD_HIT_RADIUS_MM — traces are drawn pad-snapped, so this is a
+## tolerance, not a second hit-test system).
+func pin_info(component: String, pin: String) -> Dictionary:
+	var data = _board_data()
+	if data == null:
+		return {}
+	var comp = data.get_component(component)
+	if comp == null or not comp.pins.has(pin):
+		return {}
+
+	var pin_name: String = comp.get_pin_name(pin)
+	var net: String = data.find_net_for_pin(component, pin)
+
+	var net_members: Array = []
+	if not net.is_empty():
+		var net_obj = data.get_net(net)
+		if net_obj != null:
+			for member in net_obj.pins:
+				var m_comp := str((member as Dictionary).get("component_id", ""))
+				var m_pin := str((member as Dictionary).get("pin_name", ""))
+				if m_comp == component and m_pin == pin:
+					continue
+				net_members.append("%s.%s" % [m_comp, m_pin])
+
+	var trace_ids: Array = []
+	if not net.is_empty():
+		var pad_pos: Vector2 = comp.get_pin_world_position(pin)
+		for trace in data.get_traces_for_net(net):
+			if trace == null:
+				continue
+			var start: Vector2 = trace.get_start()
+			var end: Vector2 = trace.get_end()
+			if start.distance_to(pad_pos) <= _PAD_HIT_RADIUS_MM or end.distance_to(pad_pos) <= _PAD_HIT_RADIUS_MM:
+				trace_ids.append(str(trace.id))
+
+	return {
+		"ref": "%s.%s" % [component, pin],
+		"pin_name": pin_name,
+		"net": net,
+		"net_members": net_members,
+		"trace_ids": trace_ids,
+		"trace_count": trace_ids.size(),
+	}
+
+
+## Native-parity display rule (contract §2): footprint geometry pin_name wins
+## over net; an unconnected pin reads "(unconnected)". Shared by the panel's Pin
+## Info section AND minerva_pcb_pin_info (MCP) so READ ≡ what the UI shows —
+## one rule, not two copies that can drift.
+func pin_display_name(info: Dictionary) -> String:
+	var pin_name := str(info.get("pin_name", ""))
+	if not pin_name.is_empty():
+		return pin_name
+	var net := str(info.get("net", ""))
+	if not net.is_empty():
+		return net
+	return "(unconnected)"
 
 
 # ── Compositing (LLM vision) ──────────────────────────────────────────────────

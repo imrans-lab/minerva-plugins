@@ -80,6 +80,14 @@ var _properties_body: VBoxContainer = null
 var _properties_collapse_btn: Button = null
 var _properties_expanded := true
 
+## Pin Info section (WC-1 pin inspector). Hidden until a pin is selected;
+## hides again on clear (canvas pin_selected({})).
+var _inspect_pin_button: Button = null
+var _pin_info_section: VBoxContainer = null
+var _pin_info_ref_label: Label = null
+var _pin_info_value_label: Label = null
+var _pin_info_members_label: Label = null
+
 ## View-flag table shared by the wide-mode CheckButtons and the medium/narrow
 ## View menu (single source of truth: the canvas flags themselves).
 const _VIEW_FLAGS := [
@@ -237,6 +245,11 @@ func _build_ui() -> void:
 		_annotation_host.set_canvas(_canvas)
 	if _annotation_host != null and _annotation_host.has_method("set_panel"):
 		_annotation_host.set_panel(self)
+	# WC-1 pin inspector: the canvas hit-tests through the host's pad_at/pin_info
+	# (single source of truth — see PcbAnnotationHost.gd), never duplicating the
+	# lookup locally.
+	if _annotation_host != null and _canvas.has_method("set_pin_inspector_host"):
+		_canvas.set_pin_inspector_host(_annotation_host)
 
 	# Canvas → panel signal wiring.
 	_canvas.tool_mode_changed.connect(_on_tool_mode_changed)
@@ -246,6 +259,7 @@ func _build_ui() -> void:
 		_update_status(); _update_properties())
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
+	_canvas.pin_selected.connect(_on_pin_selected)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
 	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
@@ -460,6 +474,21 @@ func _build_sidebar() -> VBoxContainer:
 		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.",
 		"pan_24.png")
 
+	# Pin inspector (WC-1) — a TRUE toggle (unlike the Select/Pan radio tools):
+	# pressed arms INSPECT_PIN, pressed-again exits back to Select.
+	_inspect_pin_button = Button.new()
+	_inspect_pin_button.name = "InspectPinButton"
+	var inspect_icon := _load_icon("inspect_pin_24.png")
+	if inspect_icon != null:
+		_inspect_pin_button.icon = inspect_icon
+	else:
+		_inspect_pin_button.text = "Pin"
+	_inspect_pin_button.tooltip_text = "Click on a pin to see its info (Shift+P)"
+	_inspect_pin_button.toggle_mode = true
+	_inspect_pin_button.pressed.connect(_on_inspect_pin_button_pressed)
+	tools_flow.add_child(_inspect_pin_button)
+	_tool_buttons[_PcbCanvasScript.ToolMode.INSPECT_PIN] = _inspect_pin_button
+
 	_sidebar.add_child(HSeparator.new())
 
 	# Platform annotation dock mounts here (Editor duck-types
@@ -471,6 +500,9 @@ func _build_sidebar() -> VBoxContainer:
 
 	_sidebar.add_child(HSeparator.new())
 	_sidebar.add_child(_build_properties_section())
+
+	_sidebar.add_child(HSeparator.new())
+	_sidebar.add_child(_build_pin_info_section())
 
 	return _sidebar
 
@@ -539,6 +571,65 @@ func _update_properties() -> void:
 	if fp.is_empty() and "FootprintType" in _PcbComponentScript:
 		fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
 	(_prop_labels["Footprint"] as Label).text = fp
+
+
+## Pin Info section (WC-1, contract §3): Component.Pin + the display rule
+## (geometry pin_name > net > "(unconnected)", via host.pin_display_name so the
+## UI and MCP parity tool compute the SAME string) + net_members. Starts hidden.
+func _build_pin_info_section() -> VBoxContainer:
+	_pin_info_section = VBoxContainer.new()
+	_pin_info_section.name = "PinInfoSection"
+	_pin_info_section.visible = false
+
+	var header := Label.new()
+	header.name = "PinInfoHeader"
+	header.text = "Pin Info"
+	_pin_info_section.add_child(header)
+
+	_pin_info_ref_label = Label.new()
+	_pin_info_ref_label.name = "PinInfoRef"
+	_pin_info_section.add_child(_pin_info_ref_label)
+
+	_pin_info_value_label = Label.new()
+	_pin_info_value_label.name = "PinInfoValue"
+	_pin_info_section.add_child(_pin_info_value_label)
+
+	_pin_info_members_label = Label.new()
+	_pin_info_members_label.name = "PinInfoMembers"
+	_pin_info_members_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_pin_info_section.add_child(_pin_info_members_label)
+
+	return _pin_info_section
+
+
+## Canvas pin_selected relay: {} clears + hides; a populated pin_info Dictionary
+## shows "Component.Pin" + the display rule + net members.
+func _on_pin_selected(info: Dictionary) -> void:
+	if _pin_info_section == null:
+		return
+	if info.is_empty():
+		_pin_info_section.visible = false
+		return
+	_pin_info_section.visible = true
+	_pin_info_ref_label.text = str(info.get("ref", ""))
+	var display := ""
+	if _annotation_host != null and _annotation_host.has_method("pin_display_name"):
+		display = _annotation_host.pin_display_name(info)
+	_pin_info_value_label.text = display
+	var members: Array = info.get("net_members", [])
+	_pin_info_members_label.text = "Net members: %s" % (", ".join(members) if not members.is_empty() else "(none)")
+
+
+## Toolbar toggle handler — a TRUE toggle, mirroring the canvas's Shift+P
+## behaviour (contract §3): pressed arms INSPECT_PIN, un-pressed exits to Select.
+func _on_inspect_pin_button_pressed() -> void:
+	if _canvas == null or _inspect_pin_button == null:
+		return
+	if _inspect_pin_button.button_pressed:
+		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.INSPECT_PIN)
+	else:
+		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.SELECT)
+	_sync_tool_buttons(_canvas.tool_mode)
 
 
 ## Where the platform annotation dock must mount (Editor.gd duck-types this —
@@ -860,8 +951,8 @@ func _update_status() -> void:
 	if _status_label == null or _canvas == null or _data == null:
 		return
 	var sel: Array = _canvas.get_selected_components()
-	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN.
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan"]
+	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN.
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin"]
 	var mode_txt := ""
 	var tm: int = _canvas.tool_mode
 	if tm > 0 and tm < mode_names.size():

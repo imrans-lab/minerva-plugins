@@ -42,6 +42,10 @@ signal component_lock_changed(message: String)
 ## PcbAnnotationHost relays this to its base view_changed so the annotation
 ## overlay re-renders route-hint markers at the new screen positions (gap W-9).
 signal view_changed()
+## WC-1 pin inspector (INSPECT_PIN mode). Emitted on a pin click with the host's
+## pin_info() Dictionary, or {} to clear (click on empty space / mode switch /
+## Escape). PCBPanel listens and drives the Pin Info section.
+signal pin_selected(info: Dictionary)
 
 ## Data reference (pcb_data.gd instance — duck-typed).
 var data = null
@@ -94,10 +98,23 @@ var _space_pan_armed: bool = false
 ## part moves it snap-aware, drag empty space box-selects, R rotates the
 ## selection); PAN drags the whole view. TRANSLATE/ROTATE are kept for
 ## back-compat with the tool_mode_changed contract but are no longer distinct
-## toolbar tools — the smart SELECT tool subsumes both (finding 5).
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN }
+## toolbar tools — the smart SELECT tool subsumes both (finding 5). INSPECT_PIN
+## (WC-1) is the pin inspector: hover labels the nearest pad, click selects it
+## (pin_selected), click empty clears, Escape/mode-switch clears + exits.
+## Appended at the END so existing ToolMode-by-int callers (status bar mode
+## names) never renumber.
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
+
+## Duck-typed back-reference to the PcbAnnotationHost (set by PCBPanel), the
+## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
+## canvas does no hit-testing of its own, only rendering + input plumbing.
+var _pin_inspector_host = null
+
+## Hover state for the INSPECT_PIN nearest-pad label (native L1444 parity).
+var _inspect_hover_label: String = ""
+var _inspect_hover_screen_pos: Vector2 = Vector2.ZERO
 
 ## Trace selection state
 var selected_trace_id: String = ""
@@ -265,6 +282,9 @@ func _draw() -> void:
 
 	if is_box_selecting:
 		_draw_selection_box()
+
+	if tool_mode == ToolMode.INSPECT_PIN and not _inspect_hover_label.is_empty():
+		_draw_inspect_hover_label()
 
 
 ## Draw the PCB board outline
@@ -775,6 +795,15 @@ func _draw_selection_box() -> void:
 	draw_rect(rect, selection_border_color, false, 1.0)
 
 
+## INSPECT_PIN nearest-pad hover label at the cursor (native L1444 parity).
+func _draw_inspect_hover_label() -> void:
+	var pos := _inspect_hover_screen_pos + Vector2(14, -14)
+	var text_size := font.get_string_size(_inspect_hover_label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size)
+	var bg_rect := Rect2(pos + Vector2(-3, -text_size.y), text_size + Vector2(6, 4))
+	draw_rect(bg_rect, Color(0.05, 0.05, 0.05, 0.85))
+	draw_string(font, pos, _inspect_hover_label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color.WHITE)
+
+
 ## Draw a dashed line
 func _draw_dashed_line(from: Vector2, to: Vector2, color: Color, width: float, dash_length: float) -> void:
 	var direction := (to - from).normalized()
@@ -832,6 +861,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 	if event.button_index == MOUSE_BUTTON_LEFT:
 		if event.pressed:
 			grab_focus()
+
+			# Pin inspector (WC-1): click selects the nearest pad within radius,
+			# or clears when empty space is clicked. Owns the click outright —
+			# no select/drag/box-select fallthrough while the mode is active.
+			if tool_mode == ToolMode.INSPECT_PIN:
+				_handle_inspect_pin_click(world_pos)
+				return
 
 			# Pan tool OR Space-drag: a left-drag pans the whole board view.
 			# (Discoverability for finding 2 — a visible Pan tool + the familiar
@@ -937,10 +973,16 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	var world_pos := screen_to_world(event.position)
 
-	var new_hover: String = data.get_component_at(world_pos)
-	if new_hover != hovered_component:
-		hovered_component = new_hover
-		queue_redraw()
+	# Pin inspector (WC-1) owns hover feedback instead of component hover; a
+	# middle/right-drag pan still updates below via is_panning, unaffected by
+	# this branch.
+	if tool_mode == ToolMode.INSPECT_PIN:
+		_update_inspect_hover(world_pos, event.position)
+	else:
+		var new_hover: String = data.get_component_at(world_pos)
+		if new_hover != hovered_component:
+			hovered_component = new_hover
+			queue_redraw()
 
 	if is_panning:
 		pan_offset = pan_start_offset + (event.position - pan_start_mouse)
@@ -978,9 +1020,14 @@ func _handle_key_input(event: InputEventKey) -> void:
 			else:
 				_delete_selected()
 		KEY_ESCAPE:
+			if tool_mode == ToolMode.INSPECT_PIN:
+				_exit_inspect_pin_mode()
 			_clear_selection()
 			selected_trace_id = ""
 			queue_redraw()
+		KEY_P:
+			if event.shift_pressed:
+				_toggle_inspect_pin_mode()
 		KEY_R:
 			_rotate_selected()
 		KEY_G:
@@ -1164,11 +1211,80 @@ func _has_any_locked_components() -> bool:
 
 
 ## Set the active tool mode. Emits tool_mode_changed on a real change.
+## Entering OR leaving INSPECT_PIN clears any pin selection (contract §3:
+## "switching modes clears selection") — one gate covers both directions.
 func set_tool_mode(mode: ToolMode) -> void:
 	if tool_mode != mode:
+		if tool_mode == ToolMode.INSPECT_PIN or mode == ToolMode.INSPECT_PIN:
+			_clear_inspect_pin_selection()
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		queue_redraw()
+
+#endregion
+
+
+#region Pin Inspector (WC-1)
+
+## Bind the PcbAnnotationHost (duck-typed) that owns pad_at()/pin_info() — the
+## canvas never hit-tests pads itself, it only drives the host through it.
+func set_pin_inspector_host(host) -> void:
+	_pin_inspector_host = host
+
+
+## Toolbar toggle / Shift+P: arm INSPECT_PIN, or exit back to Select if already
+## active (a true toggle, unlike the Select/Pan radio tools).
+func _toggle_inspect_pin_mode() -> void:
+	if tool_mode == ToolMode.INSPECT_PIN:
+		_exit_inspect_pin_mode()
+	else:
+		set_tool_mode(ToolMode.INSPECT_PIN)
+
+
+func _exit_inspect_pin_mode() -> void:
+	set_tool_mode(ToolMode.SELECT)
+
+
+## Click handling for INSPECT_PIN: nearest pad (host.pad_at, default 5mm radius
+## per contract §2) → host.pin_info → pin_selected; a miss clears (empty dict).
+func _handle_inspect_pin_click(world_pos: Vector2) -> void:
+	var info := _lookup_pin_info(world_pos)
+	pin_selected.emit(info)
+	queue_redraw()
+
+
+## Hover feedback: nearest-pad label at the cursor (native L1444 parity).
+## Redraws only on an actual label change, not every motion event.
+func _update_inspect_hover(world_pos: Vector2, screen_pos: Vector2) -> void:
+	_inspect_hover_screen_pos = screen_pos
+	var label := ""
+	if _pin_inspector_host != null and _pin_inspector_host.has_method("pad_at"):
+		var hit: Dictionary = _pin_inspector_host.pad_at(world_pos)
+		if not hit.is_empty():
+			label = "%s.%s" % [str(hit.get("component", "")), str(hit.get("pin", ""))]
+	if label != _inspect_hover_label:
+		_inspect_hover_label = label
+		queue_redraw()
+
+
+## host.pad_at → host.pin_info in one step; {} when the host is unbound, no pad
+## is within radius, or pin_info can't resolve the hit (defensive — pad_at and
+## pin_info are backed by the same live board model so this should not diverge).
+func _lookup_pin_info(world_pos: Vector2) -> Dictionary:
+	if _pin_inspector_host == null or not _pin_inspector_host.has_method("pad_at"):
+		return {}
+	var hit: Dictionary = _pin_inspector_host.pad_at(world_pos)
+	if hit.is_empty():
+		return {}
+	if not _pin_inspector_host.has_method("pin_info"):
+		return {}
+	return _pin_inspector_host.pin_info(str(hit.get("component", "")), str(hit.get("pin", "")))
+
+
+## Clears any live pin selection/hover (mode exit, mode switch, empty click).
+func _clear_inspect_pin_selection() -> void:
+	_inspect_hover_label = ""
+	pin_selected.emit({})
 
 #endregion
 
