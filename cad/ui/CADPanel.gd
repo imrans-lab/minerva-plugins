@@ -26,6 +26,10 @@ const _ResponsiveContainerScript: Script = preload("res://Scripts/UI/Controls/re
 const _BuiltinKindsScript: Script = preload("res://Scripts/Services/Annotations/BuiltinKinds.gd")
 const _CadEdgeNumberKindScript: Script = preload("kinds/cad_edge_number_kind.gd")
 
+## Panel-executed MCP tool surface (executor: "panel", DCR 019f6c3d0e3d C6 —
+## see handle_tool() below and panel_tools.gd's doc comment for the contract).
+const _PanelToolsScript: Script = preload("panel_tools.gd")
+
 # ── Node references (set in _ready) ────────────────────────────────────────
 
 ## ResponsiveContainer wrapping both layouts. Typed Container (base class) so
@@ -289,6 +293,67 @@ func _ready() -> void:
 
 func get_annotation_host() -> RefCounted:
 	return _annotation_host
+
+
+## Panel-executed MCP tool entry point (executor: "panel",
+## Docs/design/panel-executed-tools.md §2 "Plugin-side convention"). The
+## PluginToolRegistry dispatcher resolves args.editor_name to this live
+## panel and calls this method directly — no subprocess involved. All tool
+## bodies live in panel_tools.gd (mirrors pcb/ui/PCBPanel.gd's forward).
+func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
+	return _PanelToolsScript.handle(self, tool_name, args)
+
+
+## Public introspection surface backing minerva_cad_view_state (panel_tools.gd).
+## Surfaces layout/camera state the panel already tracks — width_class (which
+## ResponsiveContainer breakpoint is active), active_viewport_id (which pane
+## an agent's minerva_cad_snapshot view="active" would capture), the
+## narrow-mode projection dropdown selection, and the active pane's camera
+## orientation/zoom (OrbitCamera's own get_target/get_distance/get_yaw/
+## get_pitch/get_debug_state — no new camera state was added for this tool).
+func get_view_state() -> Dictionary:
+	var cam: Camera3D = _camera_for_active_viewport()
+	var camera_state: Variant = null
+	if cam != null:
+		camera_state = {
+			"view_preset": String(cam.get_debug_state().get("view_preset", "")) if cam.has_method("get_debug_state") else "",
+			"target": _vec3_to_array(cam.get_target()) if cam.has_method("get_target") else null,
+			"distance": cam.get_distance() if cam.has_method("get_distance") else null,
+			"yaw": cam.get_yaw() if cam.has_method("get_yaw") else null,
+			"pitch": cam.get_pitch() if cam.has_method("get_pitch") else null,
+		}
+	return {
+		"width_class": String(_responsive.width_class) if _responsive != null else "",
+		"is_narrow_layout": _narrow_layout.visible if _narrow_layout != null else false,
+		"active_viewport_id": _active_viewport_id,
+		"projection_preset": _current_projection_preset(),
+		"camera": camera_state,
+	}
+
+
+## Resolve the Camera3D backing the currently-active pane: the single
+## narrow-mode camera when narrow layout is visible, otherwise the wide-mode
+## camera matching _active_viewport_id (falls back to the iso camera for any
+## id that isn't top/front/right — mirrors _projection_preset_to_viewport_id's
+## lower-cased ids and _register_host_viewports' wide-mode camera map).
+func _camera_for_active_viewport() -> Camera3D:
+	if _narrow_layout != null and _narrow_layout.visible:
+		return _single_view_camera
+	var grid := "ResponsiveContainer/WideLayout/VBoxContainer/GridContainer"
+	match _active_viewport_id:
+		"top":
+			return get_node_or_null(grid + "/TopView/SubViewport/OrbitCamera") as Camera3D
+		"front":
+			return get_node_or_null(grid + "/FrontView/SubViewport/OrbitCamera") as Camera3D
+		"right":
+			return get_node_or_null(grid + "/RightView/SubViewport/OrbitCamera") as Camera3D
+		_:
+			return get_node_or_null(grid + "/IsoView/SubViewport/OrbitCamera") as Camera3D
+
+
+## Vector3 -> [x, y, z] (JSON-safe; MCP results are JSON-encoded downstream).
+func _vec3_to_array(v: Vector3) -> Array:
+	return [v.x, v.y, v.z]
 
 
 # ── Plugin platform lifecycle hooks (override MinervaPluginPanel virtuals) ──

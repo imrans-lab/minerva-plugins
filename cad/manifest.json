@@ -9,7 +9,20 @@
     "entrypoint": "./cad-plugin",
     "args": []
   },
-  "tools": [],
+  "tools": [
+    {
+      "name": "minerva_cad_view_state",
+      "description": "Read-only snapshot of what the user is currently looking at in a live CAD editor: the responsive layout class (xs/sm/md/lg/xl), the active viewport pane id (top/front/right/iso in wide layout, or the narrow-layout single pane), the narrow-layout projection dropdown selection, and the active pane camera's orientation/zoom (view_preset, target [x,y,z] in mm, distance, yaw, pitch). Use this for SEE-context before deciding whether a minerva_cad_snapshot is worth taking, or to confirm which pane a snapshot view=\"active\" call would capture.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the CAD editor tab (as returned by minerva_list_editors)."}
+        },
+        "required": ["editor_name"]
+      }
+    }
+  ],
   "skills": [
     {
       "id": "minerva_cad_modeling",

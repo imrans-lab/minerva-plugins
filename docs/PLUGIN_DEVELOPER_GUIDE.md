@@ -543,6 +543,127 @@ Ctrl+S the host only logs a warning ("plugin_owned mode not yet implemented … 
 NOT written by Minerva") and writes nothing. **Do not use `plugin_owned`** — your
 document will silently never save.
 
+### Panel-executed MCP tools (executor: `"panel"`)
+
+A native scene panel can serve MCP tools **directly from its own in-process
+scene state**, with no backend round-trip at all. This is a second dispatch
+path alongside the normal backend tools described in §5 — pick whichever fits
+each tool:
+
+| | Backend tool (`executor` absent / `"backend"`) | Panel tool (`executor: "panel"`) |
+|---|---|---|
+| Runs where | Your subprocess, over MCP `tools/call` | In-process, inside the live scene panel |
+| Needs the plugin running? | Yes — fails `plugin_not_running` if stopped | **No** — the subprocess-running check is skipped entirely |
+| Good for | Compute (geometry kernels, parsers, anything CPU-bound or stateful outside the scene tree) | **Reading or mutating scene-local state** the panel already holds — selection, camera/view state, in-memory model objects, annotation hosts |
+| Needs `editor_name`? | Optional, tool-specific | **Required** — v1 panel tools always resolve against one live editor tab |
+
+If your tool only needs to look at (or poke) something the panel's Godot
+nodes/scripts already know — a camera transform, a selection, an in-memory
+document model — make it a panel tool. If it needs real compute or state that
+outlives the scene panel, keep it a backend tool.
+
+**The manifest field.** Add `"executor": "panel"` to the tool's `tools[]`
+entry (default when absent is `"backend"`, so every tool you already ship is
+unaffected). The `input_schema` **must** declare `editor_name` as a required
+string property — panel tools have no other way to know which live tab to
+target:
+
+```json
+{
+  "name": "minerva_cad_view_state",
+  "description": "…",
+  "executor": "panel",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "editor_name": {"type": "string", "description": "Name of the CAD editor tab"}
+    },
+    "required": ["editor_name"]
+  }
+}
+```
+
+**The `handle_tool` contract.** Your panel's script root implements one entry
+point:
+
+```gdscript
+func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
+    ...
+```
+
+- Signature is `Dictionary in, Dictionary out`. It **may be `async`** (use
+  `await` inside it) — the host always awaits the call, so a synchronous
+  `return {...}` and an `await`-ing coroutine both work.
+- Return `{}` (or anything that isn't a non-empty Dictionary) for a
+  `tool_name` you don't recognize — the host turns that into a structured
+  `tool_unhandled` error for the caller. Never crash on an unknown name.
+- The Dictionary you return is passed back **verbatim** as the tool result —
+  panel tools own their own success/error envelope shape, same as backend
+  tools do.
+
+**Dispatch guarantees (host-side, you get these for free):**
+- No subprocess required — panel tools work even while your plugin's backend
+  is stopped.
+- `editor_name` is validated before your code ever runs: missing →
+  `editor_name_required`; not a currently-open editor of yours → resolves via
+  the live scene-panel registry, and a miss returns `editor_not_found` with
+  the list of known editor names (so an agent can self-correct).
+- **Ownership is enforced**: the resolved panel must belong to the plugin
+  that declared the tool. A tool from plugin A can never execute against
+  plugin B's panel — this is checked before `handle_tool` is called, not
+  something your code needs to defend against.
+- If your panel doesn't implement `handle_tool` at all, callers get a
+  structured `panel_no_handler` error instead of a crash.
+
+**Worked example (from this plugin — the CAD `minerva_cad_view_state` tool,
+DCR 019f6c3d0e3d round C6).** `cad/ui/CADPanel.gd` forwards to a small
+dispatch file, `cad/ui/panel_tools.gd`, which just calls back into a plain
+public method the panel already needed for other reasons:
+
+```gdscript
+# CADPanel.gd
+const _PanelToolsScript: Script = preload("panel_tools.gd")
+
+func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
+    return _PanelToolsScript.handle(self, tool_name, args)
+
+func get_view_state() -> Dictionary:
+    # ... reads _responsive.width_class, _active_viewport_id, the active
+    # pane's OrbitCamera — all state the panel already tracked.
+    return {"width_class": ..., "active_viewport_id": ..., "camera": ...}
+```
+
+```gdscript
+# panel_tools.gd — no class_name (off-tree rule, see §15)
+static func handle(panel, tool_name: String, args: Dictionary) -> Dictionary:
+    match tool_name:
+        "minerva_cad_view_state":
+            return _ok(panel.get_view_state())
+    return {}
+
+static func _ok(data: Dictionary = {}) -> Dictionary:
+    var result := {"success": true}
+    result.merge(data)
+    return result
+```
+
+Note what's absent: no `editor_name` handling, no host/registry lookup, no
+subprocess call. The dispatcher already resolved `editor_name` to this exact
+live panel instance before calling `handle_tool` — by the time your code
+runs, `panel` (here, `self`) just *is* the right one.
+
+For a full-scale example with 20+ panel tools, model mutations, async
+route-worker calls, and structured per-tool error messages, read
+[`pcb/ui/panel_tools.gd`](../pcb/ui/panel_tools.gd) end to end — it's the
+production reference this pattern was extracted from.
+
+> **Reinstall gotcha:** manifest edits (including adding/changing
+> `executor`) are **not** picked up by `.gd`/`.tscn` hot reload. If you're
+> iterating on an already-installed plugin, reinstall (or restart) it after
+> editing `manifest.json`, and reconnect any MCP client (`/mcp` in Claude
+> Code) so it re-fetches `tools/list` — otherwise it keeps calling the old
+> tool shape.
+
 ---
 
 ## 8. Events & state
