@@ -37,6 +37,27 @@ const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 ## Storage: Array of v2 envelope Dictionaries.
 var _annotations: Array = []
 
+## Per-hint revision history (C4 deliverable 1, docket 019f6c464ff0): the
+## tracked kind_payload fields for a pcb_route_hint (waypoints/layer/
+## width_mm/detail_level). Bounded stacks carried as TOP-LEVEL envelope
+## fields (siblings of kind_payload, not nested inside it) — deliberate:
+## kind_payload is "the kind's own domain data" (sent verbatim to the router
+## worker, read verbatim by summary()), so keeping history OUT of it means
+## summary() (which only reads named kind_payload keys) never has to
+## special-case it, and PCBPanel.route_board()/panel_tools.gd's route-
+## request builders only need one strip step (strip_hint_history below)
+## instead of scrubbing inside a nested dict everywhere kind_payload is read.
+const _HINT_HISTORY_FIELDS := ["waypoints", "layer", "width_mm", "detail_level"]
+const HINT_HISTORY_CAP := 25
+const _REVISION_KEY := "revision_stack"
+const _REDO_KEY := "redo_stack"
+
+## Set true only while undo_hint_revision()/redo_hint_revision() are applying
+## a restored snapshot through update_annotation() — suppresses the auto-push
+## in _apply_hint_history so a restore is never itself recorded as a new edit
+## (that would make undo un-undo-able).
+var _suppress_hint_history := false
+
 ## Monotonic id counter for generated envelope ids.
 var _id_counter: int = 0
 
@@ -724,16 +745,156 @@ func get_by_id(annotation_id: String) -> Dictionary:
 	return {}
 
 
+## THE mutate-with-history seam (C4 deliverable 1): both the canvas
+## manipulation-tool path (AnnotationOverlay._on_tool_annotation_modified,
+## which every AnnotationAuthorTool subclass — the bend-handle edit tool
+## included — routes through when it emits annotation_modified) and the MCP
+## update path (MCPAnnotationTools._annotations_update calls
+## host.update_annotation(target_id, existing) directly) already funnel
+## through this ONE method. Hooking history here — rather than adding a
+## separate "mutate_with_history" entry point — means neither caller has to
+## opt in, so an agent's minerva_annotations_update edit and a human's
+## bend-drag are captured identically (reliability: no seam an editor can
+## bypass; see _apply_hint_history below).
 func update_annotation(annotation_id: String, new_annotation: Dictionary) -> bool:
 	for i in range(_annotations.size()):
 		if _annotations[i] is Dictionary and str(_annotations[i].get("id", "")) == annotation_id:
+			var old: Dictionary = _annotations[i]
 			var updated := new_annotation.duplicate(true)
 			updated["id"] = annotation_id
+			_apply_hint_history(old, updated)
 			# Re-stamp anchored_to so it reflects the current board (a component
 			# may have moved under the marker since it was authored).
 			AnnotationHost._stamp_anchor(updated, self)
 			_annotations[i] = updated
 			annotations_changed.emit()
+			return true
+	return false
+
+
+# ── Per-hint revision history (C4 deliverable 1) ──────────────────────────────
+
+## Carries/updates the pcb_route_hint revision+redo stacks across an
+## update_annotation() call. No-op for every other kind. When one of the
+## tracked fields actually changed, pushes `old`'s PRIOR payload onto the
+## bounded revision stack (cap HINT_HISTORY_CAP, oldest dropped) and clears
+## the redo stack (a fresh edit invalidates whatever was undone past this
+## point — standard undo/redo semantics). When nothing tracked changed (e.g.
+## a lifecycle-only MCP patch), the existing stacks are carried forward
+## unchanged so they are never silently dropped. While
+## _suppress_hint_history is set (undo_hint_revision/redo_hint_revision
+## restoring a snapshot), this is a deliberate no-op — the caller has already
+## computed and stamped the correct stacks onto `updated` itself.
+func _apply_hint_history(old: Dictionary, updated: Dictionary) -> void:
+	if str(old.get("kind", "")) != "pcb_route_hint":
+		return
+	if _suppress_hint_history:
+		return
+	var old_payload := _hint_payload_of(old)
+	var new_payload := _hint_payload_of(updated)
+	if _hint_payload_changed(old_payload, new_payload):
+		var revisions := _hint_stack_of(old, _REVISION_KEY)
+		revisions.append(old_payload.duplicate(true))
+		if revisions.size() > HINT_HISTORY_CAP:
+			revisions.pop_front()
+		updated[_REVISION_KEY] = revisions
+		updated[_REDO_KEY] = []
+	else:
+		updated[_REVISION_KEY] = _hint_stack_of(old, _REVISION_KEY)
+		updated[_REDO_KEY] = _hint_stack_of(old, _REDO_KEY)
+
+
+## Restore the previous kind_payload for a pcb_route_hint (undo), pushing the
+## CURRENT payload onto the redo stack. Returns {ok:true, kind_payload:
+## <restored>} on success, or {ok:false, error:"not_found"|"not_a_route_hint"
+## |"no_prior_revision"} — never crashes. Shared by the panel's Ctrl+Z-while-
+## selected UI seam (PCBPanel._unhandled_key_input) and the panel-executed
+## MCP tool minerva_pcb_hint_undo (C4 deliverable 2).
+func undo_hint_revision(id: String) -> Dictionary:
+	return _shift_hint_revision(id, _REVISION_KEY, _REDO_KEY)
+
+
+## Redo counterpart of undo_hint_revision — restores the most recently undone
+## payload, pushing the current payload back onto the revision (undo) stack.
+func redo_hint_revision(id: String) -> Dictionary:
+	return _shift_hint_revision(id, _REDO_KEY, _REVISION_KEY)
+
+
+## Shared undo/redo engine: pop the last snapshot off `from_key`'s stack,
+## apply it as the hint's new kind_payload, and push the payload it replaced
+## onto `to_key`'s stack (bounded, oldest dropped). Goes through
+## update_annotation() (with _suppress_hint_history set) so every other
+## side effect of a normal update — anchor re-stamp, annotations_changed,
+## sidecar-dirty relay — stays IDENTICAL between a human edit, an agent edit,
+## and an undo/redo of either.
+func _shift_hint_revision(id: String, from_key: String, to_key: String) -> Dictionary:
+	var idx := _find_annotation_index(id)
+	if idx < 0:
+		return {"ok": false, "error": "not_found"}
+	var ann: Dictionary = _annotations[idx]
+	if str(ann.get("kind", "")) != "pcb_route_hint":
+		return {"ok": false, "error": "not_a_route_hint"}
+
+	var from_stack := _hint_stack_of(ann, from_key)
+	if from_stack.is_empty():
+		return {"ok": false, "error": "no_prior_revision" if from_key == _REVISION_KEY else "no_redo_available"}
+	var restored_payload: Dictionary = (from_stack.pop_back() as Dictionary).duplicate(true)
+
+	var to_stack := _hint_stack_of(ann, to_key)
+	to_stack.append(_hint_payload_of(ann).duplicate(true))
+	if to_stack.size() > HINT_HISTORY_CAP:
+		to_stack.pop_front()
+
+	var updated := ann.duplicate(true)
+	updated["kind_payload"] = restored_payload
+	updated["updated_at"] = int(Time.get_unix_time_from_system())
+	updated[from_key] = from_stack
+	updated[to_key] = to_stack
+
+	_suppress_hint_history = true
+	var ok := update_annotation(id, updated)
+	_suppress_hint_history = false
+	if not ok:
+		return {"ok": false, "error": "update_failed"}
+	return {"ok": true, "kind_payload": restored_payload}
+
+
+## Route-request envelopes never carry per-hint edit-history bookkeeping (C4
+## deliverable 1 contract: "excluded from route-request building") — it's
+## editing-session state, not routing input, and would bloat/risk the 64KiB
+## IPC payload cap after a long editing session. PCBPanel.route_board() calls
+## this for every pcb_route_hint envelope it hands to the router worker.
+## Single source of truth for the two history keys' names (kept here, not
+## duplicated in the panel).
+func strip_hint_history(ann: Dictionary) -> Dictionary:
+	var out := ann.duplicate(true)
+	out.erase(_REVISION_KEY)
+	out.erase(_REDO_KEY)
+	return out
+
+
+func _find_annotation_index(id: String) -> int:
+	for i in range(_annotations.size()):
+		if _annotations[i] is Dictionary and str((_annotations[i] as Dictionary).get("id", "")) == id:
+			return i
+	return -1
+
+
+func _hint_payload_of(ann: Dictionary) -> Dictionary:
+	var p: Variant = ann.get("kind_payload", {})
+	return p if p is Dictionary else {}
+
+
+func _hint_stack_of(ann: Dictionary, key: String) -> Array:
+	var s: Variant = ann.get(key, null)
+	if s is Array:
+		return (s as Array).duplicate(true)
+	return []
+
+
+static func _hint_payload_changed(a: Dictionary, b: Dictionary) -> bool:
+	for f in _HINT_HISTORY_FIELDS:
+		if JSON.stringify(a.get(f, null)) != JSON.stringify(b.get(f, null)):
 			return true
 	return false
 

@@ -467,6 +467,331 @@ class SingleTraceAuthorTool:
 		return _waypoints.size()
 
 
+## Bend-handle editing tool (C4 deliverable 3, docket 019f6c464ff0):
+## instantiated directly by PCBPanel's route-flow toolbar cluster (see
+## PCBPanel.gd's "Edit hint" button / _new_route_flow_tool), same idiom as
+## SingleTraceAuthorTool above — NOT wired to kind.author_ui() (this is a
+## MANIPULATION tool over an EXISTING hint, not an authoring tool).
+##
+## Selecting a pcb_route_hint (click on its rendered polyline/marker) shows
+## drag handles on its interior bend points (bend_points(), outer class,
+## below):
+##   - DRAG a handle        → moves that bend. Live position is PREVIEW ONLY
+##                             (draw_preview) during the drag — commits ONE
+##                             annotation_modified on release. Deliberately
+##                             NOT AnnotationTransformTool's per-pointer-move
+##                             emission convention: that tool has no history
+##                             to worry about, but here a per-frame commit
+##                             would push a revision every mouse-move frame
+##                             and blow the bounded stack for nothing.
+##   - RIGHT-CLICK a handle → deletes that bend. ONE revision.
+##   - CLICK a segment      → inserts a bend at the clicked point (snapped
+##                             onto the segment). ONE revision.
+##   - Escape                → cancels a drag in progress (nothing was
+##                             committed mid-drag, so this is a silent
+##                             reset, not a revert-emit) or clears selection
+##                             when idle.
+##   - Tool-switch (on_deactivate) → same silent reset; no partial commits
+##                             ever reach the host.
+##
+## SCOPE: bend-level only. The anchor (source pad/point) and the destination
+## are never touched by this tool.
+##
+## Selection is HOST state (mirrors AnnotationSelectTool) so it persists
+## across a tool-switch away and back. Only pcb_route_hint annotations are
+## selectable while this tool is active — a deliberate narrowing (this tool
+## exists to edit hints, not as a general-purpose selector); clicking a
+## non-hint annotation or empty space just clears the host selection.
+class BendHandleEditTool:
+	extends AnnotationAuthorTool
+
+	const _HANDLE_HIT_PX := 10.0
+	const _SEGMENT_HIT_PX := 8.0
+	const _SELECT_HIT_PX := 8.0
+	const _HANDLE_SIZE_PX := 7.0
+	const _HANDLE_COLOR := Color(0.2, 0.9, 1.0, 0.95)
+	const _DRAG_PREVIEW_COLOR := Color(1.0, 0.85, 0.2, 0.95)
+
+	var _host: AnnotationHost = null
+	var _dragging := false
+	var _drag_hint_id: String = ""
+	var _drag_bend_index := -1
+	var _drag_start_bends: Array = []   # Array[Vector2] snapshot at drag start
+	var _drag_live_point: Vector2 = Vector2.ZERO
+
+	func on_activate(host: AnnotationHost) -> void:
+		_host = host
+		_reset_drag()
+
+	func on_deactivate() -> void:
+		# Silent reset — a drag in progress was never committed, so there is
+		# nothing to revert on the host. Selection persists by design.
+		_reset_drag()
+		_host = null
+
+	func _reset_drag() -> void:
+		_dragging = false
+		_drag_hint_id = ""
+		_drag_bend_index = -1
+		_drag_start_bends = []
+		_drag_live_point = Vector2.ZERO
+
+	func on_pointer_down(pos: Vector2, button: int, mods: int) -> bool:
+		if _host == null:
+			return false
+
+		if mods == KEY_ESCAPE:
+			if _dragging:
+				_reset_drag()
+				return true
+			_host.set_selected_annotation_id("")
+			return true
+
+		var doc_pos := _host.transform_screen_to_doc(pos)
+		var zoom := _zoom()
+		var handle_r := _HANDLE_HIT_PX / zoom
+		var seg_r := _SEGMENT_HIT_PX / zoom
+
+		if button == MOUSE_BUTTON_RIGHT:
+			# Right-click a handle of the CURRENTLY SELECTED hint deletes that
+			# bend. No selection / not a route hint / no handle hit → no-op
+			# (let the host's own right-click handling, if any, proceed).
+			var sel := _host.get_selected_annotation_id()
+			if sel.is_empty():
+				return false
+			var ann := _find(sel)
+			var kind := _kind()
+			if ann.is_empty() or kind == null or str(ann.get("kind", "")) != "pcb_route_hint":
+				return false
+			var bends: Array = kind.bend_points(ann)
+			var idx := _hit_bend(bends, doc_pos, handle_r)
+			if idx < 0:
+				return false
+			bends.remove_at(idx)
+			annotation_modified.emit(sel, kind.with_bend_points(ann, bends))
+			return true
+
+		if button != MOUSE_BUTTON_LEFT:
+			return false
+
+		var sel := _host.get_selected_annotation_id()
+		if not sel.is_empty():
+			var ann := _find(sel)
+			var kind := _kind()
+			if not ann.is_empty() and kind != null and str(ann.get("kind", "")) == "pcb_route_hint":
+				var bends: Array = kind.bend_points(ann)
+				var idx := _hit_bend(bends, doc_pos, handle_r)
+				if idx >= 0:
+					# Begin a drag — commits on release (on_pointer_up), never here.
+					_dragging = true
+					_drag_hint_id = sel
+					_drag_bend_index = idx
+					_drag_start_bends = bends.duplicate()
+					_drag_live_point = bends[idx]
+					return true
+				var insertion: Dictionary = kind.nearest_bend_insertion(ann, doc_pos, seg_r)
+				if not insertion.is_empty():
+					var new_bends: Array = bends.duplicate()
+					new_bends.insert(int(insertion.get("insert_at", 0)), insertion.get("point", doc_pos))
+					annotation_modified.emit(sel, kind.with_bend_points(ann, new_bends))
+					return true
+
+		# No handle/segment hit on the current selection — fall back to
+		# route-hint-only selection (see class doc).
+		return _select_route_hint_at(doc_pos)
+
+	func on_pointer_move(pos: Vector2) -> void:
+		if not _dragging or _host == null:
+			return
+		_drag_live_point = _host.transform_screen_to_doc(pos)
+
+	func on_pointer_up(_pos: Vector2, button: int, _mods: int) -> bool:
+		if not _dragging:
+			return false
+		if button == MOUSE_BUTTON_LEFT:
+			var kind := _kind()
+			var ann := _find(_drag_hint_id)
+			if kind != null and not ann.is_empty() \
+					and _drag_bend_index >= 0 and _drag_bend_index < _drag_start_bends.size():
+				var new_bends: Array = _drag_start_bends.duplicate()
+				new_bends[_drag_bend_index] = _drag_live_point
+				annotation_modified.emit(_drag_hint_id, kind.with_bend_points(ann, new_bends))
+			_reset_drag()
+			return true
+		return false
+
+	func draw_preview(ctx: AnnotationRenderContext) -> void:
+		if _host == null:
+			return
+		var sel := _host.get_selected_annotation_id()
+		if sel.is_empty():
+			return
+		var ann := _find(sel)
+		var kind := _kind()
+		if ann.is_empty() or kind == null or str(ann.get("kind", "")) != "pcb_route_hint":
+			return
+		var bends: Array = kind.bend_points(ann)
+		var half := (_HANDLE_SIZE_PX / _zoom()) * 0.5
+		for i in range(bends.size()):
+			var p: Vector2 = bends[i]
+			var color := _HANDLE_COLOR
+			if _dragging and i == _drag_bend_index:
+				p = _drag_live_point
+				color = _DRAG_PREVIEW_COLOR
+			ctx.draw_rect(Rect2(p - Vector2(half, half), Vector2(half * 2.0, half * 2.0)), color, true, 1.0)
+
+	# ── internal ──────────────────────────────────────────────────────────────
+
+	func _zoom() -> float:
+		if _host != null and _host.has_method("get_annotation_zoom"):
+			return maxf(float(_host.get_annotation_zoom()), 0.01)
+		return 1.0
+
+	func _select_route_hint_at(doc_pos: Vector2) -> bool:
+		var registry := _host.get_registry()
+		var annotations: Array = _host.get_annotations()
+		var hit_threshold := _SELECT_HIT_PX / _zoom()
+		for i in range(annotations.size() - 1, -1, -1):
+			var ann: Dictionary = annotations[i]
+			if str(ann.get("kind", "")) != "pcb_route_hint":
+				continue
+			if not _host.is_annotation_visible(ann):
+				continue
+			var kind: AnnotationKind = registry.get_annotation_kind(StringName("pcb_route_hint")) if registry != null else null
+			if kind == null:
+				continue
+			if kind.hit_test(ann, doc_pos, hit_threshold):
+				_host.set_selected_annotation_id(str(ann.get("id", "")))
+				return true
+		_host.set_selected_annotation_id("")
+		return true
+
+	func _hit_bend(bends: Array, doc_pos: Vector2, radius: float) -> int:
+		for i in range(bends.size()):
+			if (bends[i] as Vector2).distance_to(doc_pos) <= radius:
+				return i
+		return -1
+
+	func _find(id: String) -> Dictionary:
+		if _host == null:
+			return {}
+		for ann in _host.get_annotations():
+			if ann is Dictionary and str((ann as Dictionary).get("id", "")) == id:
+				return ann as Dictionary
+		return {}
+
+	func _kind() -> AnnotationKind:
+		if _host == null:
+			return null
+		var registry := _host.get_registry()
+		if registry == null:
+			return null
+		return registry.get_annotation_kind(StringName("pcb_route_hint"))
+
+
+# ── Bend-handle geometry (C4 deliverable 3, docket 019f6c464ff0) ──────────────
+#
+# "Bend points" are the INTERIOR waypoints only — never the anchor/source and
+# never the destination (SCOPE: bend-level editing; endpoint re-tie to a
+# different pad is explicitly OUT of this round, follow-up filed). These
+# normalize over the two coexisting kind_payload.waypoints storage
+# conventions documented on _waypoint_points()'s class doc above (legacy
+# full-path vs interior-only + dest_point), so BendHandleEditTool never has
+# to know which convention a given hint uses.
+#
+# Called externally via the registry (kind.bend_points(ann), same pattern as
+# kind.hit_test/kind.bounds) — not static, so BendHandleEditTool (a nested
+# class with no implicit access to this outer script's members) reaches them
+# through _host.get_registry().get_annotation_kind(&"pcb_route_hint").
+
+## Interior bend points, in document (board-mm) space.
+func bend_points(annotation: Dictionary) -> Array:
+	var payload: Dictionary = annotation.get("kind_payload", {})
+	var raw: Variant = payload.get("waypoints", [])
+	var wp: Array = (raw as Array) if raw is Array else []
+	if payload.has("dest_point"):
+		# Interior-only convention — every stored waypoint IS a bend.
+		var out: Array = []
+		for w in wp:
+			out.append(_to_vec2(w))
+		return out
+	# Legacy full-path convention — first/last are anchor/destination.
+	if wp.size() < 3:
+		return []
+	var out2: Array = []
+	for i in range(1, wp.size() - 1):
+		out2.append(_to_vec2(wp[i]))
+	return out2
+
+
+## Replace the interior bend points, preserving whichever storage convention
+## `annotation` already uses. Returns a NEW, fully-duplicated annotation
+## Dictionary (never mutates the input) with kind_payload.waypoints rebuilt —
+## the anchor/destination the original waypoints array carried (legacy
+## convention) are preserved verbatim.
+func with_bend_points(annotation: Dictionary, new_bends: Array) -> Dictionary:
+	var new_ann := annotation.duplicate(true)
+	var payload: Dictionary = (new_ann.get("kind_payload", {}) as Dictionary).duplicate(true)
+	var bend_arrays: Array = []
+	for b in new_bends:
+		bend_arrays.append([(b as Vector2).x, (b as Vector2).y])
+	if payload.has("dest_point"):
+		payload["waypoints"] = bend_arrays
+	else:
+		var raw: Variant = payload.get("waypoints", [])
+		var wp: Array = (raw as Array) if raw is Array else []
+		if wp.size() < 2:
+			# No recorded anchor/dest to preserve (degenerate/empty hint).
+			payload["waypoints"] = bend_arrays
+		else:
+			var out: Array = [wp[0]]
+			out.append_array(bend_arrays)
+			out.append(wp[wp.size() - 1])
+			payload["waypoints"] = out
+	new_ann["kind_payload"] = payload
+	return new_ann
+
+
+## Nearest point ON the full rendered polyline (anchor→bends→dest) to
+## doc_pos, plus which bend_points()-array insertion index a new bend there
+## would occupy (0 = before the first existing bend; bend_points().size() =
+## append after the last). Returns {} when doc_pos is farther than
+## `threshold` from every segment, or when the hint has fewer than 2
+## rendered points (nothing to insert into).
+func nearest_bend_insertion(annotation: Dictionary, doc_pos: Vector2, threshold: float) -> Dictionary:
+	var full := _waypoint_points(annotation)
+	if full.size() < 2:
+		return {}
+	var best_dist := INF
+	var best_point := Vector2.ZERO
+	var best_seg := -1
+	for i in range(full.size() - 1):
+		var a: Vector2 = full[i]
+		var b: Vector2 = full[i + 1]
+		var proj := _project_on_segment(a, b, doc_pos)
+		var d := proj.distance_to(doc_pos)
+		if d < best_dist:
+			best_dist = d
+			best_point = proj
+			best_seg = i
+	if best_seg < 0 or best_dist > threshold:
+		return {}
+	# full[0] is the anchor (not a bend); full[k] for k in 1..size-2 are
+	# bends (== bend_points()[k-1]); full[-1] is the destination. Segment i
+	# spans full[i]..full[i+1], so inserting there means "insert_at = i" in
+	# bend_points()'s array (0-based, since bend_points()[0] == full[1]).
+	return {"point": best_point, "insert_at": best_seg}
+
+
+static func _project_on_segment(a: Vector2, b: Vector2, p: Vector2) -> Vector2:
+	var ab := b - a
+	var len_sq := ab.length_squared()
+	if len_sq < 0.0001:
+		return a
+	var t := clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
+	return a + ab * t
+
+
 # ── Validation (beyond the envelope schema) ──────────────────────────────────
 
 func validate(annotation: Dictionary) -> Array:

@@ -554,6 +554,26 @@ func _build_sidebar() -> VBoxContainer:
 	tools_flow.add_child(trace_btn)
 	_route_flow_buttons["single_trace"] = trace_btn
 
+	# Bend-handle editing tool (C4, docket 019f6c464ff0): select a committed
+	# route hint, then drag/right-click/click its bend points to edit them.
+	# Same TRUE-toggle idiom as the Trace button; shares mutual exclusion
+	# with the rest of the cluster (and the canvas tool surface) for free —
+	# see _activate_route_flow_tool.
+	var edit_hint_btn := Button.new()
+	edit_hint_btn.name = "EditHintButton"
+	var edit_hint_icon := _load_icon("waypoint_24.png")
+	if edit_hint_icon != null:
+		edit_hint_btn.icon = edit_hint_icon
+	else:
+		edit_hint_btn.text = "Edit Hint"
+	edit_hint_btn.tooltip_text = "Edit a route hint's bend points: click the hint to select it, " \
+		+ "drag a handle to move a bend, right-click a handle to delete it, " \
+		+ "click a segment to insert a new bend (Esc/tool-switch exits)"
+	edit_hint_btn.toggle_mode = true
+	edit_hint_btn.pressed.connect(_on_edit_hint_button_pressed)
+	tools_flow.add_child(edit_hint_btn)
+	_route_flow_buttons["edit_hint"] = edit_hint_btn
+
 	_route_flow_mode_label = Label.new()
 	_route_flow_mode_label.name = "RouteFlowModeLabel"
 	_route_flow_mode_label.text = "Select"
@@ -740,6 +760,17 @@ func _on_single_trace_button_pressed() -> void:
 		_deactivate_route_flow_tool()
 
 
+## Edit-hint toggle handler (C4) — same pattern as _on_single_trace_button_pressed.
+func _on_edit_hint_button_pressed() -> void:
+	var btn: Button = _route_flow_buttons.get("edit_hint", null)
+	if btn == null:
+		return
+	if btn.button_pressed:
+		_activate_route_flow_tool("edit_hint")
+	else:
+		_deactivate_route_flow_tool()
+
+
 ## New AnnotationAuthorTool instance for a route-flow cluster key. Deliberately
 ## bypasses kind.author_ui() (see SingleTraceAuthorTool's class doc) — the
 ## kind's author_ui() stays wired to the generic waypoint tool for the dock's
@@ -748,6 +779,8 @@ func _new_route_flow_tool(kind_key: String) -> AnnotationAuthorTool:
 	match kind_key:
 		"single_trace":
 			return _PcbRouteHintKindScript.SingleTraceAuthorTool.new()
+		"edit_hint":
+			return _PcbRouteHintKindScript.BendHandleEditTool.new()
 	return null
 
 
@@ -832,6 +865,8 @@ func _update_route_flow_mode_label(kind_key: String) -> void:
 	match kind_key:
 		"single_trace":
 			_route_flow_mode_label.text = "Single Trace"
+		"edit_hint":
+			_route_flow_mode_label.text = "Edit Hint"
 		_:
 			_route_flow_mode_label.text = "Select"
 
@@ -912,6 +947,57 @@ func _sync_dock_pane_mode() -> void:
 	# DockMode enum: RIGHT = 0, BOTTOM = 1 (AnnotationDockPane.gd) — read via
 	# get() so a pane without the enum still duck-types safely.
 	pane.set_dock_mode(0 if wide else 1)
+
+
+# ── Per-hint revision undo/redo keyboard seam (C4 deliverable 2c) ─────────────
+
+## Ctrl+Z / Ctrl+Shift+Z routes to per-hint revision undo/redo ONLY when a
+## pcb_route_hint annotation is currently selected — otherwise the event is
+## left unconsumed so it never collides with a future board-level undo
+## binding (see below).
+##
+## Seam choice (reuse-scan finding): AnnotationOverlay._gui_input only
+## special-cases Escape/Delete/Backspace/Enter via its pseudo-pointer
+## convention (mods=KEY_ESCAPE/KEY_DELETE/KEY_ENTER through
+## on_pointer_down(Vector2.ZERO, MOUSE_BUTTON_LEFT, mods)) — it does NOT
+## forward Ctrl+Z at all, so no AnnotationAuthorTool ever sees it. Nor does
+## pcb_canvas.gd's own _handle_key_input (it binds Delete/Escape/R/G/N/L/
+## Home/+/-/S but no Ctrl+Z). PCBPanel currently wires NO board-level undo
+## either (no Undo button, no Ctrl+Z handler anywhere in this plugin) — the
+## legacy in-core Editor.gd:undo_action() match on Type.PCB is dead code for
+## this off-tree plugin (its panel type is Type.PLUGIN_SCENE, which
+## undo_action() does not match at all). So _unhandled_key_input on the
+## panel Control is the first seam nothing else claims: it fires only when
+## neither the overlay's nor the canvas's _gui_input consumed the key.
+## Gating strictly on "a route hint is selected" keeps this mutually
+## exclusive by construction with any future board-level Ctrl+Z binding —
+## an edit with no hint selected simply falls through unconsumed.
+func _unhandled_key_input(event: InputEvent) -> void:
+	if not (event is InputEventKey):
+		return
+	var ek: InputEventKey = event
+	if not ek.pressed or ek.is_echo():
+		return
+	if ek.keycode != KEY_Z or not ek.ctrl_pressed:
+		return
+	if _annotation_host == null:
+		return
+	var sel_id: String = _annotation_host.get_selected_annotation_id()
+	if sel_id.is_empty():
+		return
+	var ann: Dictionary = _annotation_host.get_by_id(sel_id)
+	if str(ann.get("kind", "")) != "pcb_route_hint":
+		return
+
+	var result: Dictionary
+	if ek.shift_pressed:
+		result = _annotation_host.redo_hint_revision(sel_id)
+	else:
+		result = _annotation_host.undo_hint_revision(sel_id)
+	if bool(result.get("ok", false)):
+		get_viewport().set_input_as_handled()
+		if _canvas != null:
+			_canvas.queue_redraw()
 
 
 # ── Responsive layout (round B) ────────────────────────────────────────────────
@@ -1157,7 +1243,14 @@ func route_board(selection: Dictionary) -> Dictionary:
 	if _annotation_host != null and _annotation_host.has_method("get_all_annotations"):
 		for ann in _annotation_host.get_all_annotations():
 			if ann is Dictionary and str((ann as Dictionary).get("kind", "")) == "pcb_route_hint":
-				envelopes.append(ann)
+				# Per-hint revision/redo history never leaves the editing
+				# session (C4 deliverable 1 contract: "excluded from
+				# route-request building") — strip before it reaches the
+				# router worker over IPC.
+				if _annotation_host.has_method("strip_hint_history"):
+					envelopes.append(_annotation_host.strip_hint_history(ann as Dictionary))
+				else:
+					envelopes.append(ann)
 	var params := {
 		"board": _data.to_board_dict(),
 		"route_hints": envelopes,

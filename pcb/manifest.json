@@ -354,6 +354,32 @@
         },
         "required": ["editor_name"]
       }
+    },
+    {
+      "name": "minerva_pcb_hint_undo",
+      "description": "Undo the most recent tracked edit (waypoints/layer/width_mm/detail_level) to a route hint's per-hint revision stack, restoring its prior kind_payload. Works over BOTH human canvas edits (the Edit-hint bend-drag tool) and prior agent edits (minerva_annotations_update) — every edit path shares one bounded revision stack per hint (cap 25), so this undoes whichever edit landed last regardless of who made it.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "id": {"type": "string", "description": "The pcb_route_hint annotation id to undo"}
+        },
+        "required": ["editor_name", "id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_hint_redo",
+      "description": "Redo a previously undone edit to a route hint's per-hint revision stack, restoring the kind_payload that undo just reverted. Cleared by any fresh edit made after the undo (standard undo/redo semantics — you cannot redo past a new edit).",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "id": {"type": "string", "description": "The pcb_route_hint annotation id to redo"}
+        },
+        "required": ["editor_name", "id"]
+      }
     }
   ],
   "skills": [

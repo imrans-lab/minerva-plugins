@@ -100,6 +100,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _get_image(host, args)
 		"minerva_pcb_apply_route_hints":
 			return await _apply_route_hints(host, args)
+		"minerva_pcb_hint_undo":
+			return _hint_undo(host, args)
+		"minerva_pcb_hint_redo":
+			return _hint_redo(host, args)
 	return {}
 
 
@@ -711,6 +715,39 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 		"height": img.get_height(),
 		"metadata": metadata,
 	})
+
+
+# ── Per-hint revision undo/redo (C4 deliverable 2, docket 019f6c464ff0) ───────
+#
+# Panel-executed MCP counterparts to PcbAnnotationHost.undo_hint_revision /
+# redo_hint_revision — the SAME engine the Ctrl+Z-while-selected UI seam
+# (PCBPanel._unhandled_key_input) drives, so an agent and a human undo the
+# identical revision stack (a human's canvas bend-drag and an agent's
+# minerva_annotations_update edit are indistinguishable once they land on the
+# host — see PcbAnnotationHost.gd's "Per-hint revision history" class doc).
+
+static func _hint_undo(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("undo_hint_revision"):
+		return _err("PCB annotation host not available")
+	var id: String = str(args.get("id", ""))
+	if id.is_empty():
+		return _err("id is required")
+	var result: Dictionary = host.undo_hint_revision(id)
+	if not bool(result.get("ok", false)):
+		return _err(str(result.get("error", "undo failed")))
+	return _ok({"id": id, "kind_payload": result.get("kind_payload", {})})
+
+
+static func _hint_redo(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("redo_hint_revision"):
+		return _err("PCB annotation host not available")
+	var id: String = str(args.get("id", ""))
+	if id.is_empty():
+		return _err("id is required")
+	var result: Dictionary = host.redo_hint_revision(id)
+	if not bool(result.get("ok", false)):
+		return _err(str(result.get("error", "redo failed")))
+	return _ok({"id": id, "kind_payload": result.get("kind_payload", {})})
 
 
 # ── Route-correction collaboration loop (moved verbatim from
