@@ -103,6 +103,9 @@ var _pin_info_members_label: Label = null
 ## kinds/pcb_route_hint_kind.gd SingleTraceAuthorTool). kind_key -> Button.
 var _route_flow_buttons: Dictionary = {}
 var _route_flow_mode_label: Label = null
+## Propose action button (C5) — a non-toggle act, NOT part of
+## _route_flow_buttons' mutual-exclusion radio set.
+var _propose_button: Button = null
 ## kind_key of the cluster's own currently-active tool, or "" when none.
 var _active_route_flow_kind: String = ""
 ## The tool instance the cluster itself activated (used to tell apart "the
@@ -574,6 +577,24 @@ func _build_sidebar() -> VBoxContainer:
 	tools_flow.add_child(edit_hint_btn)
 	_route_flow_buttons["edit_hint"] = edit_hint_btn
 
+	# Propose button (C5, docket 019f6c465fd8, deliverable 1): explicit-propose
+	# UX — the router NEVER runs implicitly (product contract v2). This is a
+	# non-toggle ACT button (not part of _route_flow_buttons' mutual-exclusion
+	# radio set — it fires once and returns, it doesn't arm a drawing tool),
+	# sitting beside the toggle tools for discoverability. Runs the SAME code
+	# path as the panel tool minerva_pcb_apply_route_hints with commit=false —
+	# see _on_propose_button_pressed.
+	_propose_button = Button.new()
+	_propose_button.name = "ProposeButton"
+	var propose_icon := _load_icon("trace_icon_1_24.png")
+	if propose_icon != null:
+		_propose_button.icon = propose_icon
+	else:
+		_propose_button.text = "Propose"
+	_propose_button.tooltip_text = "Run the router over open route hints and write back inspectable cyan proposals (the board is not changed)"
+	_propose_button.pressed.connect(_on_propose_button_pressed)
+	tools_flow.add_child(_propose_button)
+
 	_route_flow_mode_label = Label.new()
 	_route_flow_mode_label.name = "RouteFlowModeLabel"
 	_route_flow_mode_label.text = "Select"
@@ -769,6 +790,42 @@ func _on_edit_hint_button_pressed() -> void:
 		_activate_route_flow_tool("edit_hint")
 	else:
 		_deactivate_route_flow_tool()
+
+
+## Propose button handler (C5, docket 019f6c465fd8, deliverable 1): an
+## explicit human ACT — this is the ONLY thing in this plugin that invokes the
+## router besides the equivalent MCP tool call (deliverable 4: nothing else —
+## not panel mount, not tool activation, not an annotation-change handler —
+## ever reaches _apply_route_hints/route_board; see
+## test_pcb_explicit_propose.gd scenario A). Calls through handle_tool(),
+## PCBPanel's own plugin-side MCP entry point, with commit=false: the EXACT
+## same code path minerva_pcb_apply_route_hints (commit absent/false) takes —
+## one implementation, two entry points. Async (awaits the router bridge, same
+## as _on_export_yaml_pressed's await ipc.await_reply pattern) so the UI thread
+## is never blocked; the button stays interactive (no manual disable — a
+## second click before the first resolves just re-runs propose, which is
+## idempotent by construction: it only ever reads open hints and writes fresh
+## proposal annotations).
+func _on_propose_button_pressed() -> void:
+	_set_status("Proposing routes…")
+	var result: Dictionary = await handle_tool("minerva_pcb_apply_route_hints", {"commit": false})
+
+	if not bool(result.get("success", false)):
+		if str(result.get("error", "")) == "pcb_backend_stopped":
+			# Backend-stopped affordance (bug 019f6c1e0399): names the cause
+			# AND the recovery action, exact wording is this round's call —
+			# the structured machine shape (error/detail/recovery_hint) is
+			# what panel_tools.gd's _router_unavailable already returns.
+			_set_status("Routing needs the pcb backend — it's stopped. Start it from the Plugin Manager, then retry.")
+		else:
+			_set_status("Propose failed: %s" % str(result.get("note", result.get("error", "unknown error"))))
+		return
+
+	var n := int(result.get("proposed", 0))
+	if n == 0:
+		_set_status("Nothing to route — no open route hints.")
+	else:
+		_set_status("%d proposal%s" % [n, "" if n == 1 else "s"])
 
 
 ## New AnnotationAuthorTool instance for a route-flow cluster key. Deliberately
@@ -1274,6 +1331,24 @@ func route_board(selection: Dictionary) -> Dictionary:
 		if inner.has("ok"):
 			return inner
 		return {"ok": true, "result": inner}
+	# Backend-stopped detection (C5, docket 019f6c465fd8, bug 019f6c1e0399):
+	# when the pcb backend subprocess is not RUNNING,
+	# PluginScenePanelBroker._dispatch_to_plugin_backend replies with
+	# PluginErrors.plugin_not_running(plugin_id) — {success:false,
+	# error_code:"plugin_not_running", error_message:"Plugin is not running"} —
+	# verbatim (no "ok" key, so it falls through the two checks above). Tag it
+	# distinctly from the generic worker_error fallback so panel_tools.gd's
+	# _router_unavailable (and the Propose button) can surface a
+	# human-actionable "start it" message instead of an opaque routing
+	# failure. error_message is ALSO matched by substring (not just the code)
+	# so a differently-worded future PluginErrors message still degrades
+	# correctly.
+	var code := str(result.get("error_code", ""))
+	var msg := str(result.get("error_message", ""))
+	if code == "plugin_not_running" or msg.findn("not running") != -1:
+		return {"ok": false, "error": {"kind": "plugin_not_running",
+			"message": msg if not msg.is_empty() else "Plugin is not running",
+			"hint": "start via minerva_plugin_start"}}
 	return {"ok": false, "error": {"kind": "worker_error",
 		"message": str(result.get("error_message", result.get("error", "route failed")))}}
 

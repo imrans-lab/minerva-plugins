@@ -100,6 +100,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _get_image(host, args)
 		"minerva_pcb_apply_route_hints":
 			return await _apply_route_hints(host, args)
+		"minerva_pcb_proposal_accept":
+			return _proposal_accept(host, args)
+		"minerva_pcb_proposal_reject":
+			return _proposal_reject(host, args)
 		"minerva_pcb_hint_undo":
 			return _hint_undo(host, args)
 		"minerva_pcb_hint_redo":
@@ -824,11 +828,32 @@ static func _run_router(host, selection: Dictionary) -> Dictionary:
 
 
 ## Structured failure-as-feedback when the worker did not answer.
+##
+## Backend-stopped affordance (C5, docket 019f6c465fd8, bug 019f6c1e0399):
+## PCBPanel.route_board() tags a reply whose error_code was "plugin_not_running"
+## (the pcb backend subprocess is not RUNNING — PluginScenePanelBroker.
+## _dispatch_to_plugin_backend's own check) with error.kind ==
+## "plugin_not_running" specifically, distinct from the generic
+## "worker_unavailable" (no IPC bridge reachable at all — e.g. headless
+## tests with no broker mounted) / "worker_error" (some OTHER routing
+## failure) kinds. Callers that need a human-actionable message (the Propose
+## button) key off error=="pcb_backend_stopped"; agents get the same signal
+## plus recovery_hint="start via minerva_plugin_start" in the machine shape.
 static func _router_unavailable(reply: Dictionary, source_hints: Array) -> Dictionary:
+	var err: Dictionary = reply.get("error", {})
+	if str(err.get("kind", "")) == "plugin_not_running":
+		return {
+			"success": false,
+			"error": "pcb_backend_stopped",
+			"detail": err,
+			"hint_ids": _hint_id_list(source_hints),
+			"recovery_hint": "start via minerva_plugin_start",
+			"note": "Routing needs the pcb backend, and it is not running. Start it (minerva_plugin_start, plugin_id \"pcb\"), then retry.",
+		}
 	return {
 		"success": false,
 		"error": "route_worker_unavailable",
-		"detail": reply.get("error", {}),
+		"detail": err,
 		"hint_ids": _hint_id_list(source_hints),
 		"note": "Router worker did not answer. In-fence wiring reaches it via host.run_router → panel 'pcb.route' broker request; declaring the 'pcb.route' channel (or exposing minerva_pcb_route in the worker MCP tools) is the out-of-fence follow-up — see pcb/docs/tools.md.",
 	}
@@ -1015,6 +1040,118 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
 	}
+
+
+## PER-PROPOSAL accept (C5, docket 019f6c465fd8, deliverable 2). Materializes
+## ONE proposal's own stored polyline as a real trace, sharing _materialize_routes
+## verbatim rather than re-implementing trace synthesis: the proposal's
+## kind_payload.waypoints (the FULL polyline — _write_back_proposals always
+## stores anchor..dest, never the interior-only convention) is chopped into a
+## synthetic single-route "result" shaped exactly like a router reply
+## ({routes:[{net, segments, vias:[]}]}), then handed to _materialize_routes
+## together with the REAL source-hint dicts kind_payload.proposal_for points at
+## (so width/consumed-id resolution — and the removed_proposal_ids cleanup pass
+## that finds and deletes proposals linking to a consumed hint — are the exact
+## same code the bulk commit=true path runs). Owner-ratified contract (HITL-2):
+## an accepted proposal AND its source hint(s) are both deleted; regular (non-
+## proposal) hints are untouched.
+static func _proposal_accept(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("get_by_id"):
+		return _err("PCB annotation host not available")
+	var data = _get_data(host)
+	if data == null:
+		return _err("PCB data not available")
+
+	var id: String = str(args.get("id", ""))
+	if id.is_empty():
+		return _err("id is required")
+	var proposal: Dictionary = host.get_by_id(id)
+	if proposal.is_empty():
+		return _err("proposal not found: %s" % id)
+	if str(proposal.get("kind", "")) != "pcb_route_hint":
+		return _err("annotation '%s' is not a route-hint proposal" % id)
+
+	var kp: Dictionary = proposal.get("kind_payload", {})
+	var linked: Array = _string_list(kp.get("proposal_for", []))
+	if linked.is_empty():
+		return _err("annotation '%s' is not a proposal (no kind_payload.proposal_for)" % id)
+
+	var pts: Array = []
+	for wp in kp.get("waypoints", []):
+		pts.append(_arr_to_vec2(wp))
+	if pts.size() < 2:
+		return _err("proposal '%s' has no routable polyline" % id)
+
+	var net_names := _string_list(kp.get("net_names", []))
+	var net: String = net_names[0] if not net_names.is_empty() else ""
+	var kicad_layer := str(kp.get("layer", "F.Cu"))
+	var segments: Array = []
+	for i in range(pts.size() - 1):
+		segments.append({"start": pts[i], "end": pts[i + 1], "layer": kicad_layer})
+
+	# The REAL source-hint dicts (for width fallback + so _materialize_routes'
+	# own consumed-id / removed-proposal cleanup runs against the true hints,
+	# not a synthetic stand-in). A hint may already be gone (a prior accept/
+	# reject raced it) — fabricate a minimal stand-in carrying the proposal's
+	# own net/width so materialization can still size the trace; there is then
+	# nothing further to delete for that (already-gone) hint.
+	var source_hints: Array = []
+	for hid in linked:
+		var h: Dictionary = host.get_by_id(hid)
+		if not h.is_empty():
+			source_hints.append(h)
+	if source_hints.is_empty():
+		source_hints = [{"id": "", "kind_payload": {"net_names": [net], "width_mm": kp.get("width_mm", 0.0)}}]
+
+	var synth_result := {"routes": [{"net": net, "segments": segments, "vias": []}]}
+	var mat: Dictionary = _materialize_routes(host, data, synth_result, source_hints)
+	if not bool(mat.get("success", false)) or int(mat.get("traces_added", 0)) <= 0:
+		return _err("failed to materialize proposal '%s'" % id)
+
+	# _materialize_routes already removes any proposal whose proposal_for links
+	# a just-consumed hint — that generically catches THIS proposal since
+	# consumed_hint_ids == linked. Fall back to a direct delete only for the
+	# edge case above (source hints already gone, so nothing was "consumed" to
+	# trigger that cleanup pass) — acceptance must never leave the proposal
+	# behind.
+	var removed_proposals: Array = mat.get("removed_proposal_ids", [])
+	var removed_id := id if (id in removed_proposals) else ""
+	if removed_id.is_empty() and host.has_method("remove_annotation"):
+		if host.remove_annotation(id):
+			removed_id = id
+
+	return _ok({
+		"trace_added": true,
+		"consumed_hint_ids": mat.get("consumed_hint_ids", []),
+		"removed_proposal_id": removed_id,
+	})
+
+
+## PER-PROPOSAL reject (C5 deliverable 2): deletes the proposal only. Source
+## hints stay open — owner contract: "REJECT deletes the proposal; source hints
+## stay open for iteration."
+static func _proposal_reject(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("get_by_id"):
+		return _err("PCB annotation host not available")
+	var id: String = str(args.get("id", ""))
+	if id.is_empty():
+		return _err("id is required")
+	var proposal: Dictionary = host.get_by_id(id)
+	if proposal.is_empty():
+		return _err("proposal not found: %s" % id)
+
+	var kp: Dictionary = proposal.get("kind_payload", {})
+	var linked: Array = _string_list(kp.get("proposal_for", []))
+	if linked.is_empty():
+		return _err("annotation '%s' is not a proposal (no kind_payload.proposal_for)" % id)
+
+	if not host.has_method("remove_annotation") or not host.remove_annotation(id):
+		return _err("failed to remove proposal '%s'" % id)
+
+	return _ok({
+		"removed_proposal_id": id,
+		"source_hints_still_open": linked,
+	})
 
 
 ## unrouted nets (+ bridge warnings) → structured "stuck" feedback the agent can

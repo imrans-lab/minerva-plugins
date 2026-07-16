@@ -33,6 +33,12 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 ## Bridge-only: MCPPcbPanelTools (Minerva core, off-tree) reaches it via
 ## get_spatial_index() duck-typed, never by class.
 const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
+## Panel-executed MCP tool surface (C5, docket 019f6c465fd8): the generic
+## accept_annotation_proposal/reject_annotation_proposal wrappers below forward
+## to the SAME minerva_pcb_proposal_accept/_reject tool bodies the MCP dispatch
+## path calls (one implementation, two entry points — mirrors run_router/
+## route_board's host→panel forwarding convention above).
+const _PanelToolsScript: Script = preload("panel_tools.gd")
 
 ## Storage: Array of v2 envelope Dictionaries.
 var _annotations: Array = []
@@ -412,6 +418,25 @@ func clear_annotations_by_author(author_kind: String) -> int:
 		_annotations = kept
 		annotations_changed.emit()
 	return removed
+
+
+## GENERIC per-proposal accept/reject (C5, docket 019f6c465fd8, deliverable 2).
+## Named without any "route_hint"/"pcb" vocabulary on purpose: this is the
+## duck-typed verb pair core's WorkflowAnnotationList checks for (mirroring
+## clear_annotations_by_author's opt-in above) to offer per-row Accept/Reject
+## on any AI-authored (author.kind=="ai") workflow annotation — the substrate's
+## own generic "this is a machine PROPOSAL" signal (AnnotationRenderContext.
+## author_color("ai") cyan), not a pcb-specific concept. pcb is simply the
+## first plugin to implement the two verbs. Both awaited: panel_tools.gd's
+## handle() is a coroutine as a whole once ANY branch in it awaits (the
+## apply_route_hints branch does) — awaiting an already-resolved branch here
+## is a documented no-op wait (see panel_tools.gd's class doc).
+func accept_annotation_proposal(id: String) -> Dictionary:
+	return await _PanelToolsScript.handle(self, "minerva_pcb_proposal_accept", {"id": id})
+
+
+func reject_annotation_proposal(id: String) -> Dictionary:
+	return await _PanelToolsScript.handle(self, "minerva_pcb_proposal_reject", {"id": id})
 
 
 ## Navigation pass-through target (WC-2 §1a): the platform AnnotationOverlay

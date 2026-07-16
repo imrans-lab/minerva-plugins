@@ -356,6 +356,32 @@
       }
     },
     {
+      "name": "minerva_pcb_proposal_accept",
+      "description": "Accept ONE AI-authored route proposal (a cyan pcb_route_hint annotation carrying kind_payload.proposal_for, written back by minerva_pcb_apply_route_hints with commit=false or the panel's Propose button). Materializes ONLY that proposal's polyline as a real trace in the board model (journaled), then deletes the consumed source hint(s) (kind_payload.proposal_for) AND the proposal itself — accepted scaffolding disappears. Shares its materialization logic with the bulk apply (commit=true) path, so the resulting trace geometry is identical either way.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "id": {"type": "string", "description": "The proposal annotation id to accept (must carry kind_payload.proposal_for)"}
+        },
+        "required": ["editor_name", "id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_proposal_reject",
+      "description": "Reject ONE AI-authored route proposal: deletes the proposal annotation only. The source hint(s) it answered (kind_payload.proposal_for) are left open for further iteration (re-propose, edit, or a different route).",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "id": {"type": "string", "description": "The proposal annotation id to reject (must carry kind_payload.proposal_for)"}
+        },
+        "required": ["editor_name", "id"]
+      }
+    },
+    {
       "name": "minerva_pcb_hint_undo",
       "description": "Undo the most recent tracked edit (waypoints/layer/width_mm/detail_level) to a route hint's per-hint revision stack, restoring its prior kind_payload. Works over BOTH human canvas edits (the Edit-hint bend-drag tool) and prior agent edits (minerva_annotations_update) — every edit path shares one bounded revision stack per hint (cap 25), so this undoes whichever edit landed last regardless of who made it.",
       "executor": "panel",
