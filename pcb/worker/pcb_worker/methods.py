@@ -428,6 +428,7 @@ def _route(params: dict) -> dict:
     faults are returned as structured errors (never crash the loop).
     """
     bridge_warnings: list = []
+    drawn_routes: list = []
     selected_hint_ids: list = []
 
     # Only pass through options the engine actually accepts.
@@ -457,10 +458,23 @@ def _route(params: dict) -> dict:
         if not isinstance(envelopes, list):
             return {"ok": False, "error": {"kind": "parse",
                     "message": "route_hints must be a list of envelopes"}}
+        # Route-as-drawn (HITL-2): 'detailed' single-trace hints ARE the route.
+        # Materialize them directly, consume their nets so the engine neither
+        # re-routes nor duplicates them, and keep everything else on the
+        # engine-guided path.
+        drawn_routes, consumed_nets, drawn_warnings, consumed_ids = \
+            route_bridge.materialize_detailed_hints(
+                envelopes, board, params.get("selection"))
+        for net_name in consumed_nets:
+            board.nets.pop(net_name, None)
+        remaining = [e for e in envelopes
+                     if str((e or {}).get("id", "")) not in consumed_ids] \
+            if consumed_ids else envelopes
         translation = route_bridge.hints_to_router(
-            envelopes, board, params.get("selection"))
-        bridge_warnings = translation.warnings
-        selected_hint_ids = translation.selected_ids
+            remaining, board, params.get("selection"))
+        bridge_warnings = drawn_warnings + translation.warnings
+        selected_hint_ids = consumed_ids + [
+            i for i in translation.selected_ids if i not in consumed_ids]
         # A hint-authored width becomes the run's trace_width unless the caller
         # set one explicitly (per-hint width has no RoutingHints slot).
         if translation.trace_width_mm and "trace_width" not in kw:
@@ -496,6 +510,9 @@ def _route(params: dict) -> dict:
                     "message": str(exc), "traceback": traceback.format_exc()}}
 
     payload = _serialize_routing_result(result)
+    if drawn_routes:
+        payload["routes"] = drawn_routes + payload["routes"]
+        payload["success"] = bool(payload.get("success", False)) or not payload.get("unrouted")
     if bridge_warnings:
         payload["warnings"] = bridge_warnings
     if selected_hint_ids:

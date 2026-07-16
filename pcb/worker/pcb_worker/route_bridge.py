@@ -390,6 +390,95 @@ def _waypoints_of(envelope: dict) -> list[list[float]]:
     return out
 
 
+def materialize_detailed_hints(
+    hint_envelopes: list[dict],
+    board: Board,
+    selection: Any = None,
+) -> tuple[list[dict], set, list[dict], list[str]]:
+    """Materialize 'detailed' single-trace hints as routes-as-drawn.
+
+    Native DetailLevel semantics (HITL-2 owner feedback): a hint dense enough
+    to be inferred 'detailed' means "follow my line" — the human is routing
+    around obstacles the engine can't see, so its waypoints are the route,
+    not a soft attraction field. For each SELECTED envelope with
+    hint_type=single_trace, detail_level=detailed, and BOTH endpoints
+    resolvable to pads on one net, emit a serialized route dict
+    (pad -> waypoints -> pad, single layer) and consume the hint + its net so
+    the A* engine neither re-routes nor duplicates it. Anything that doesn't
+    fully resolve is left for the engine path with a warning.
+
+    Returns (routes, consumed_net_names, warnings, consumed_hint_ids); route
+    dicts carry "as_drawn": True so callers/tests can tell the paths apart.
+    """
+    warnings: list[dict] = []
+    routes: list[dict] = []
+    consumed_nets: set = set()
+    consumed_ids: list[str] = []
+
+    for env in select_hints(hint_envelopes, selection):
+        if not isinstance(env, dict) or str(env.get("kind", "")) != "pcb_route_hint":
+            continue
+        kp = env.get("kind_payload") or {}
+        if not isinstance(kp, dict):
+            continue
+        if str(kp.get("hint_type", "")) != "single_trace":
+            continue
+        if str(kp.get("detail_level", "")) != "detailed":
+            continue
+        ann_id = str(env.get("id", ""))
+
+        def _endpoint(key: str):
+            for ref in kp.get(key) or []:
+                comp, pad = _split_pin_ref(ref)
+                if comp is None:
+                    continue
+                hit = board.get_pad(comp, pad)
+                if hit is not None:
+                    return hit
+            return None
+
+        src = _endpoint("source_pins")
+        dst = _endpoint("dest_pins")
+        if src is None or dst is None:
+            warnings.append({"id": ann_id, "message":
+                "detailed hint endpoints don't both resolve to pads — "
+                "falling back to engine-guided routing"})
+            continue
+        net = src.net or dst.net
+        if not net or (src.net and dst.net and src.net != dst.net):
+            warnings.append({"id": ann_id, "message":
+                "detailed hint endpoints are not on one shared net — "
+                "falling back to engine-guided routing"})
+            continue
+        if net in consumed_nets:
+            warnings.append({"id": ann_id, "message":
+                f"net {net!r} already materialized by an earlier detailed hint — skipped"})
+            consumed_ids.append(ann_id)
+            continue
+
+        layer = _canon_layer(kp.get("layer", "F.Cu"))
+        pts = [[src.position[0], src.position[1]]]
+        pts += _waypoints_of(env)
+        pts.append([dst.position[0], dst.position[1]])
+        segments = [
+            {"start": [pts[i][0], pts[i][1]],
+             "end": [pts[i + 1][0], pts[i + 1][1]],
+             "layer": layer}
+            for i in range(len(pts) - 1)
+            if pts[i] != pts[i + 1]
+        ]
+        if not segments:
+            warnings.append({"id": ann_id, "message":
+                "detailed hint has no usable geometry — skipped"})
+            continue
+        routes.append({"net": net, "segments": segments, "vias": [],
+                       "as_drawn": True, "hint_id": ann_id})
+        consumed_nets.add(net)
+        consumed_ids.append(ann_id)
+
+    return routes, consumed_nets, warnings, consumed_ids
+
+
 def hints_to_router(
     hint_envelopes: list[dict],
     board: Board,

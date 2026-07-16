@@ -41,9 +41,15 @@ const _LABEL_COLOR := Color(0.92, 0.96, 0.98, 1.0)
 const _LABEL_FONT_SIZE: int = 12
 
 ## Layer-tinted stroke hues (F.Cu vs B.Cu hue shift). Unknown layers → neutral.
-const _COLOR_F_CU := Color(0.25, 0.85, 0.80, 0.95)   # teal   — top copper
-const _COLOR_B_CU := Color(0.95, 0.55, 0.25, 0.95)   # amber  — bottom copper (hue-shifted)
-const _COLOR_OTHER := Color(0.70, 0.55, 0.90, 0.95)  # violet — other/unspecified layer
+## Human-hint palette (HITL-2 feedback): stays in the magenta/violet family so
+## a committed hint NEVER reads as AI output — substrate cyan is reserved for
+## AI authorship, and the old teal top-copper tint was indistinguishable from
+## it on canvas. F.Cu matches the human preview color exactly (no color jump
+## when a drawn hint commits). Distinct from real traces (red/blue), pads
+## (copper/gold), and selection (yellow).
+const _COLOR_F_CU := Color(1.0, 0.5, 1.0, 0.95)      # magenta — top copper
+const _COLOR_B_CU := Color(0.65, 0.40, 0.95, 0.95)   # violet  — bottom copper
+const _COLOR_OTHER := Color(0.60, 0.75, 0.40, 0.95)  # olive   — other/unspecified layer
 
 ## Path hit-test tolerance in document (board-mm) units, on top of stroke half-width.
 const _HIT_THRESHOLD_MM: float = 0.6
