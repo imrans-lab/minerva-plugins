@@ -183,14 +183,23 @@ func get_data():
 
 
 ## Panel-executed MCP tool entry point (DCR 019f6c3d0e3d contract §2
-## plugin-side convention, C2 round docket 019f6c45f09e). PluginToolRegistry
-## has already resolved args.editor_name -> this panel and verified
-## ownership before calling here; panel_tools.gd owns the wave-1 tool bodies
-## themselves (moved verbatim from Minerva core's MCPPcbPanelTools.gd). An
+## plugin-side convention; wave 1 C2 round docket 019f6c45f09e, wave 2 + core
+## deletion C3 round docket 019f6c4604ba). PluginToolRegistry has already
+## resolved args.editor_name -> this panel and verified ownership before
+## calling here; panel_tools.gd owns EVERY tool body (moved verbatim from
+## Minerva core's now-deleted MCPPcbPanelTools.gd — waves 1 and 2). An
 ## unrecognised tool_name returns {} so the dispatcher maps it to the
 ## structured tool_unhandled error.
+##
+## Always awaited: minerva_pcb_apply_route_hints awaits the router worker
+## bridge, which makes panel_tools.gd's handle() a coroutine as a whole
+## (Godot 4.6 landmine — once any branch awaits, the whole function is a
+## coroutine). Awaiting unconditionally here is correct for every tool, sync
+## or async: awaiting an already-resolved coroutine call is a no-op wait. The
+## PluginToolRegistry dispatcher already awaits THIS call end-to-end (C1
+## scenario E proved it).
 func handle_tool(tool_name: String, args: Dictionary) -> Dictionary:
-	return _PanelToolsScript.handle(_annotation_host, tool_name, args)
+	return await _PanelToolsScript.handle(_annotation_host, tool_name, args)
 
 
 # ── Mount / unmount ───────────────────────────────────────────────────────────

@@ -1,15 +1,21 @@
 extends RefCounted
-## PCB panel-executed MCP tool surface — wave 1 (DCR 019f6c3d0e3d, C2 round,
-## docket 019f6c45f09e).
+## PCB panel-executed MCP tool surface — waves 1 + 2 (DCR 019f6c3d0e3d; wave 1
+## C2 round docket 019f6c45f09e; wave 2 C3 round docket 019f6c4604ba).
 ##
-## The 16 wave-1 tool bodies MOVED VERBATIM from Minerva core's
-## MCPPcbPanelTools.gd (see Docs/design/panel-executed-tools.md §3 migration
-## table): set_board_size, get_components, get_nets, get_pin_position,
-## pin_info, add_component, move_component, move_relative, rotate_component,
-## delete_component, connect_net, spatial_query, describe_component,
-## import_csv, export_csv, import_footprint_geometry. Tool names, arg
-## validation, result shapes, and error messages are preserved EXACTLY —
-## existing test suites assert against them unmodified.
+## All 21 tool bodies MOVED VERBATIM from Minerva core's MCPPcbPanelTools.gd
+## (see Docs/design/panel-executed-tools.md §3 migration table), which is now
+## DELETED — this file is the SOLE remaining implementation.
+##   Wave 1: set_board_size, get_components, get_nets, get_pin_position,
+##   pin_info, add_component, move_component, move_relative, rotate_component,
+##   delete_component, connect_net, spatial_query, describe_component,
+##   import_csv, export_csv, import_footprint_geometry.
+##   Wave 2: get_change_journal, import_trace_geometry, export_trace_geometry,
+##   get_image, apply_route_hints (ASYNC — awaits the router worker bridge)
+##   plus its whole route-correction collaboration-loop helper cluster
+##   (_run_router … _build_polylines_from_segments).
+## Tool names, arg validation, result shapes, and error messages are preserved
+## EXACTLY — existing test suites assert against them (mechanically rerouted
+## to call through this surface instead of the deleted core module).
 ##
 ## Host resolution is NO LONGER this surface's job (contract §2.2/§2.3): the
 ## PluginToolRegistry dispatcher resolves args.editor_name -> the live
@@ -19,6 +25,14 @@ extends RefCounted
 ## `host` as a parameter instead of resolving it from args via
 ## AnnotationHostRegistry (the old core module's _resolve_host/_no_host_error
 ## dance is gone — panel_tools.gd never sees an unknown/missing editor_name).
+##
+## Coroutine note (Godot 4.6 static-typing landmine): apply_route_hints awaits
+## the router bridge, so `handle()` as a whole is a coroutine once that branch
+## exists in its body. PCBPanel.handle_tool awaits this call unconditionally
+## (`return await _PanelToolsScript.handle(...)`) — correct for every tool,
+## sync or async, since awaiting an already-resolved coroutine call is a no-op
+## wait. Any other call site reaching `handle()` (tests included) must await
+## too.
 ##
 ## Off-tree note: this file lives OUTSIDE Minerva's res:// tree, so it MUST
 ## NOT declare a class_name — preloaded by relative path from PCBPanel.gd
@@ -39,6 +53,9 @@ const _VALID_FOOTPRINTS: Array[String] = [
 ## panel builds it eagerly in _init()); tests may still pass a fresh host
 ## directly. An unrecognised tool_name returns {} so the PluginToolRegistry
 ## dispatcher maps it to the structured tool_unhandled error (contract §2.4).
+## Coroutine: the apply_route_hints branch awaits the router bridge, which
+## makes this whole function a coroutine — every caller must await it (see
+## the class doc note above).
 static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 	match tool_name:
 		"minerva_pcb_set_board_size":
@@ -73,6 +90,16 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _export_csv(host, args)
 		"minerva_pcb_import_footprint_geometry":
 			return _import_footprint_geometry(host, args)
+		"minerva_pcb_get_change_journal":
+			return _get_change_journal(host, args)
+		"minerva_pcb_import_trace_geometry":
+			return _import_trace_geometry(host, args)
+		"minerva_pcb_export_trace_geometry":
+			return _export_trace_geometry(host, args)
+		"minerva_pcb_get_image":
+			return _get_image(host, args)
+		"minerva_pcb_apply_route_hints":
+			return await _apply_route_hints(host, args)
 	return {}
 
 
@@ -517,9 +544,584 @@ static func _import_footprint_geometry(host, args: Dictionary) -> Dictionary:
 	return result
 
 
-# ── Host-access helpers (copied from MCPPcbPanelTools.gd — wave-2 keeps its
-#    own copy in core since get_change_journal/import_export_trace_geometry/
-#    get_image still need them there) ──────────────────────────────────────
+# ── Wave-2 tool implementations (moved verbatim from MCPPcbPanelTools.gd,
+#    C3 round, docket 019f6c4604ba) ───────────────────────────────────────────
+
+static func _get_change_journal(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var since_timestamp: float = float(args.get("since_timestamp", 0.0))
+	var limit: int = int(args.get("limit", 50))
+
+	var entries: Array = data.get_change_journal(since_timestamp)
+	if limit > 0 and entries.size() > limit:
+		entries = entries.slice(entries.size() - limit)
+
+	return _ok({
+		"total_entries": data.change_journal.size(),
+		"returned_entries": entries.size(),
+		"entries": entries,
+	})
+
+
+static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
+	if host == null:
+		return _err("PCB data not available")
+	var data = _get_data(host)
+	if data == null:
+		return _err("PCB data not available")
+	var trace_data: Dictionary = args.get("trace_data", {})
+	if trace_data.is_empty():
+		return _err("trace_data is required")
+
+	data.clear_traces()
+
+	var traces_input: Array = trace_data.get("traces", [])
+	var trace_groups: Dictionary = {}
+	for seg in traces_input:
+		var net_name: String = seg.get("net_name", "")
+		var layer: String = seg.get("layer", "F.Cu")
+		var key := "%s_%s" % [net_name, layer]
+		if not trace_groups.has(key):
+			trace_groups[key] = {
+				"net_name": net_name,
+				"layer": "top" if layer == "F.Cu" else "bottom",
+				"width": seg.get("width", 0.3),
+				"segments": [],
+			}
+		var start = seg.get("start", {})
+		var end_pt = seg.get("end", {})
+		trace_groups[key].segments.append({
+			"start": Vector2(start.get("x", 0), start.get("y", 0)),
+			"end": Vector2(end_pt.get("x", 0), end_pt.get("y", 0)),
+		})
+
+	var trace_count := 0
+	for key in trace_groups:
+		var group = trace_groups[key]
+		var polylines := _build_polylines_from_segments(group.segments)
+		for polyline in polylines:
+			if polyline.size() < 2:
+				continue
+			var trace = data.new_trace()
+			trace.id = "trace_%d" % trace_count
+			trace.net_name = group.net_name
+			trace.layer = group.layer
+			trace.width = group.width
+			for point in polyline:
+				trace.waypoints.append(point)
+			data.add_trace(trace)
+			trace_count += 1
+
+	var vias_input: Array = trace_data.get("vias", [])
+	for via_data in vias_input:
+		var pos = via_data.get("position", {})
+		data.add_via({
+			"position": Vector2(pos.get("x", 0), pos.get("y", 0)),
+			"size": via_data.get("size", 0.8),
+			"drill": via_data.get("drill", 0.4),
+			"net_name": via_data.get("net_name", ""),
+			"layers": via_data.get("layers", ["F.Cu", "B.Cu"]),
+		})
+
+	data.save_to_history("Import traces")
+	return _ok({"trace_count": trace_count, "via_count": vias_input.size()})
+
+
+static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+
+	var traces_output: Array = []
+	for trace_id in data.get_trace_ids():
+		var trace = data.get_trace(trace_id)
+		if not trace:
+			continue
+		var layer_name: String = "F.Cu" if trace.layer == "top" else "B.Cu"
+		for i in range(trace.waypoints.size() - 1):
+			var start_pt: Vector2 = trace.waypoints[i]
+			var end_pt: Vector2 = trace.waypoints[i + 1]
+			traces_output.append({
+				"start": {"x": snapped(start_pt.x, 0.0001), "y": snapped(start_pt.y, 0.0001)},
+				"end": {"x": snapped(end_pt.x, 0.0001), "y": snapped(end_pt.y, 0.0001)},
+				"width": trace.width,
+				"layer": layer_name,
+				"net_name": trace.net_name,
+			})
+
+	var vias_output: Array = []
+	for via in data.vias:
+		var pos: Vector2 = via.get("position", Vector2.ZERO)
+		vias_output.append({
+			"position": {"x": snapped(pos.x, 0.0001), "y": snapped(pos.y, 0.0001)},
+			"size": via.get("size", 0.8),
+			"drill": via.get("drill", 0.4),
+			"net_name": via.get("net_name", ""),
+			"layers": via.get("layers", ["F.Cu", "B.Cu"]),
+		})
+
+	return _ok({
+		"trace_count": traces_output.size(),
+		"via_count": vias_output.size(),
+		"trace_data": {"traces": traces_output, "vias": vias_output},
+	})
+
+
+## Snapshot-style image capture (mirrors minerva_cad_snapshot in spirit). Renders
+## the live board canvas via the host's render_content_to_image; headless /
+## unmounted → image_data null (never crashes). Metadata is always populated from
+## the model. Synchronous: this host's render_content_to_image returns the current
+## frame directly (no deferred capture to await), so there is nothing to wait on.
+static func _get_image(host, args: Dictionary) -> Dictionary:
+	if host == null:
+		return _err("PCB data not available")
+	var data = _get_data(host)
+
+	var metadata := {}
+	if data != null:
+		metadata["board_width_mm"] = data.board_width
+		metadata["board_height_mm"] = data.board_height
+		metadata["component_count"] = data.components.size()
+		metadata["net_count"] = data.nets.size()
+	if host.has_method("get_all_annotations"):
+		metadata["annotation_count"] = (host.call("get_all_annotations") as Array).size()
+
+	var img: Image = null
+	if host.has_method("render_content_to_image"):
+		img = host.call("render_content_to_image", Rect2()) as Image
+
+	if img == null:
+		return _ok({
+			"image_data": null,
+			"format": "png",
+			"metadata": metadata,
+			"note": "No rendered image available (panel not mounted / headless).",
+		})
+
+	var png_buf: PackedByteArray = img.save_png_to_buffer()
+	if png_buf.is_empty():
+		return _err("Failed to encode PCB image")
+	return _ok({
+		"image_data": Marshalls.raw_to_base64(png_buf),
+		"format": "png",
+		"encoding": "base64",
+		"width": img.get_width(),
+		"height": img.get_height(),
+		"metadata": metadata,
+	})
+
+
+# ── Route-correction collaboration loop (moved verbatim from
+#    MCPPcbPanelTools.gd, C3 round) ───────────────────────────────────────────
+#
+# minerva_pcb_apply_route_hints closes the route-correction loop (agent-router
+# child 019eb47eb567). The propose→inspect→apply→iterate flow:
+#
+#   1. PROPOSE (commit absent/false): gather the board's OPEN pcb_route_hint
+#      annotations (or the given hint_ids), route them through the worker, and
+#      write the routed polylines back as AI-authored (author.kind="ai" → cyan)
+#      pcb_route_hint PROPOSAL annotations. A proposal carries the routed
+#      waypoints + kind_payload.net_names=[net] + kind_payload.proposal_for=
+#      [source hint ids]. Proposals do NOT mutate the board — the user inspects
+#      them in the dock/canvas first.
+#   2. APPLY (commit=true): re-route the selected open hints and MATERIALIZE the
+#      results as real traces in the model (journaled via save_to_history), then
+#      transition the source hints open→applied. Returns applied/traces_added.
+#   3. ITERATE: applied hints are excluded from the default (open) gather and AI
+#      proposals are never re-routed (they carry proposal_for), so re-running
+#      after the user edits/adds hints picks up only the fresh open hints.
+#
+# FAILURE AS FEEDBACK: partial/failed routing returns WHERE it got stuck —
+# result.unrouted (net + blocked pad pair) surfaced as `stuck`, plus bridge
+# warnings — structured data the agent can reason about, not a bare "failed".
+
+static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
+	if host == null:
+		return _err("PCB data not available")
+	var data = _get_data(host)
+	if data == null:
+		return _err("PCB data not available")
+
+	var hint_ids: Array = args.get("hint_ids", [])
+	var commit: bool = bool(args.get("commit", false))
+
+	var source_hints: Array = _gather_route_hints(host, hint_ids)
+	if source_hints.is_empty():
+		return _ok({
+			"proposed": 0,
+			"proposals": [],
+			"unrouted": [],
+			"stuck": [],
+			"committed": commit,
+			"note": "no open route hints to route (add hints or pass hint_ids)",
+		})
+
+	var selection: Dictionary
+	if hint_ids.is_empty():
+		selection = {"mode": "open"}
+	else:
+		selection = {"mode": "ids", "ids": _hint_id_list(source_hints)}
+
+	var reply: Dictionary = await _run_router(host, selection)
+	if not bool(reply.get("ok", false)):
+		return _router_unavailable(reply, source_hints)
+
+	var result: Dictionary = reply.get("result", {})
+	if commit:
+		return _materialize_routes(host, data, result, source_hints)
+	return _write_back_proposals(host, result, source_hints)
+
+
+## Reach the router worker through the in-fence host bridge (async). The host
+## forwards to the panel's broker request path. Returns the worker's {ok, result}
+## envelope, or a structured worker_unavailable when no bridge is reachable
+## (headless / channel not registered — see the WORKER-INVOCATION note in the
+## contract doc).
+static func _run_router(host, selection: Dictionary) -> Dictionary:
+	if host != null and host.has_method("run_router"):
+		return await host.run_router(selection)
+	return {"ok": false, "error": {"kind": "worker_unavailable",
+		"message": "host has no run_router bridge to the router worker"}}
+
+
+## Structured failure-as-feedback when the worker did not answer.
+static func _router_unavailable(reply: Dictionary, source_hints: Array) -> Dictionary:
+	return {
+		"success": false,
+		"error": "route_worker_unavailable",
+		"detail": reply.get("error", {}),
+		"hint_ids": _hint_id_list(source_hints),
+		"note": "Router worker did not answer. In-fence wiring reaches it via host.run_router → panel 'pcb.route' broker request; declaring the 'pcb.route' channel (or exposing minerva_pcb_route in the worker MCP tools) is the out-of-fence follow-up — see pcb/docs/tools.md.",
+	}
+
+
+## Gather the source route hints to route. With explicit hint_ids: exactly those
+## (any lifecycle). Without: every OPEN human/source hint. AI proposals (carrying
+## kind_payload.proposal_for) are NEVER treated as source hints — that keeps the
+## iterate loop from re-routing its own proposals, and applied hints drop out of
+## the default open gather.
+static func _gather_route_hints(host, hint_ids: Array) -> Array:
+	var anns: Array = []
+	if host != null and host.has_method("get_all_annotations"):
+		anns = host.call("get_all_annotations")
+	var wanted := {}
+	for i in hint_ids:
+		wanted[str(i)] = true
+	var out: Array = []
+	for ann in anns:
+		if not (ann is Dictionary):
+			continue
+		if str(ann.get("kind", "")) != "pcb_route_hint":
+			continue
+		var payload: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+		if payload.has("proposal_for"):
+			continue  # an AI proposal — not a source hint
+		if not wanted.is_empty():
+			if wanted.has(str(ann.get("id", ""))):
+				out.append(ann)
+		elif str(ann.get("lifecycle", "open")) == "open":
+			out.append(ann)
+	return out
+
+
+## PROPOSE: routed polylines → AI-authored cyan proposal annotations. The board
+## is NOT mutated — only annotations are added. Each proposal links to the source
+## hint id(s) answering the same net.
+static func _write_back_proposals(host, result: Dictionary, source_hints: Array) -> Dictionary:
+	var proposals: Array = []
+	for route in result.get("routes", []):
+		if not (route is Dictionary):
+			continue
+		var net: String = str(route.get("net", ""))
+		var pts: Array = _route_polyline(route)
+		if pts.size() < 2:
+			continue
+		var layer: String = _route_layer(route)
+		var width: float = _width_for_net(source_hints, net)
+		var linked: Array = _source_hint_ids_for_net(source_hints, net)
+		var first: Array = pts[0]
+		var envelope: Dictionary = host.call("build_route_hint_envelope",
+			float(first[0]), float(first[1]), "", layer, "single_trace", pts, "ai")
+		var kp: Dictionary = envelope.get("kind_payload", {})
+		kp["net_names"] = [net]
+		kp["proposal_for"] = linked
+		if width > 0.0:
+			kp["width_mm"] = width
+		envelope["kind_payload"] = kp
+		envelope["summary"] = "Proposed route %s (%d waypoints, %s)" % [net, pts.size(), layer]
+		var new_id: String = str(host.call("add_annotation_v2", envelope))
+		if new_id.is_empty():
+			continue
+		proposals.append({
+			"id": new_id,
+			"net": net,
+			"layer": layer,
+			"waypoint_count": pts.size(),
+			"proposal_for": linked,
+			"width_mm": width,
+		})
+	return {
+		"success": true,
+		"committed": false,
+		"proposed": proposals.size(),
+		"proposals": proposals,
+		"unrouted": result.get("unrouted", []),
+		"stuck": _stuck_from_result(result),
+		"via_count": int(result.get("via_count", 0)),
+	}
+
+
+## APPLY: materialize routed polylines as real traces (journaled) + transition
+## source hints open→applied. Per-layer segment grouping mirrors
+## import_trace_geometry so multi-layer routes become correct single-layer traces.
+static func _materialize_routes(host, data, result: Dictionary, source_hints: Array) -> Dictionary:
+	var traces_added := 0
+	var failed: Array = []
+	for route in result.get("routes", []):
+		if not (route is Dictionary):
+			continue
+		var net: String = str(route.get("net", ""))
+		var width: float = _width_for_net(source_hints, net)
+		if width <= 0.0:
+			width = 0.25
+		var by_layer := {}
+		for seg in route.get("segments", []):
+			if not (seg is Dictionary):
+				continue
+			var lyr: String = str(seg.get("layer", "F.Cu"))
+			if not by_layer.has(lyr):
+				by_layer[lyr] = []
+			by_layer[lyr].append({
+				"start": _arr_to_vec2(seg.get("start", [0, 0])),
+				"end": _arr_to_vec2(seg.get("end", [0, 0])),
+			})
+		var made_any := false
+		for lyr in by_layer:
+			for polyline in _build_polylines_from_segments(by_layer[lyr]):
+				if polyline.size() < 2:
+					continue
+				var trace = data.new_trace()
+				trace.net_name = net
+				trace.layer = "top" if lyr == "F.Cu" else "bottom"
+				trace.width = width
+				for point in polyline:
+					trace.waypoints.append(point)
+				data.add_trace(trace)
+				traces_added += 1
+				made_any = true
+		if not made_any:
+			failed.append({"net": net, "reason": "no usable segments in routed result"})
+		for via in route.get("vias", []):
+			data.add_via({
+				"position": _arr_to_vec2(via),
+				"size": 0.8,
+				"drill": 0.4,
+				"net_name": net,
+				"layers": ["F.Cu", "B.Cu"],
+			})
+
+	# Snapshot AFTER mutation so the undo/redo checkpoint captures the applied
+	# traces (undo() restores the PREVIOUS entry — matches _import_trace_geometry;
+	# snapshotting before would leave the applied state unrecoverable on redo).
+	if traces_added > 0:
+		data.save_to_history("Apply route hints")
+
+	# Owner-ratified contract (HITL-2, 2026-07-16): an accepted hint is DELETED
+	# once its real trace exists — it was scaffolding, and leaving it (or its
+	# proposals) behind clutters the board. Hints whose nets failed to
+	# materialize stay open for iteration. Proposals answering a consumed hint
+	# (kind_payload.proposal_for) are removed with it.
+	var consumed_ids: Array = []
+	if traces_added > 0 and host.has_method("remove_annotation"):
+		var to_delete: Array = []
+		if failed.is_empty():
+			to_delete = _hint_id_list(source_hints)
+		else:
+			var ok_nets: Array = []
+			for route in result.get("routes", []):
+				if route is Dictionary:
+					ok_nets.append(str(route.get("net", "")))
+			for net in ok_nets:
+				for hid in _source_hint_ids_for_net(source_hints, str(net)):
+					if not (hid in to_delete):
+						to_delete.append(hid)
+		for hid in to_delete:
+			if str(hid).is_empty():
+				continue
+			if host.remove_annotation(str(hid)):
+				consumed_ids.append(str(hid))
+	var removed_proposals: Array = []
+	if not consumed_ids.is_empty() and host.has_method("get_annotations"):
+		for ann in host.get_annotations():
+			if not (ann is Dictionary):
+				continue
+			var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+			var links: Array = kp.get("proposal_for", []) if kp.get("proposal_for", []) is Array else []
+			for linked in links:
+				if str(linked) in consumed_ids:
+					var pid := str(ann.get("id", ""))
+					if not pid.is_empty() and host.remove_annotation(pid):
+						removed_proposals.append(pid)
+					break
+	return {
+		"success": true,
+		"committed": true,
+		"applied": consumed_ids.size(),
+		"applied_hint_ids": consumed_ids,  # deprecated alias of consumed_hint_ids
+		"consumed_hint_ids": consumed_ids,
+		"removed_proposal_ids": removed_proposals,
+		"traces_added": traces_added,
+		"failed": failed,
+		"unrouted": result.get("unrouted", []),
+		"stuck": _stuck_from_result(result),
+		"via_count": int(result.get("via_count", 0)),
+	}
+
+
+## unrouted nets (+ bridge warnings) → structured "stuck" feedback the agent can
+## reason about: which net, which pad pair is blocked.
+static func _stuck_from_result(result: Dictionary) -> Array:
+	var stuck: Array = []
+	for u in result.get("unrouted", []):
+		if u is Dictionary:
+			stuck.append({
+				"net": u.get("net", ""),
+				"from": u.get("from", ""),
+				"to": u.get("to", ""),
+				"reason": "unrouted — blocked pad pair (congestion or no legal path)",
+			})
+	for w in result.get("warnings", []):
+		stuck.append({"warning": w})
+	return stuck
+
+
+## Ordered polyline (Array of [x, y]) chaining a route's segment endpoints. Layer
+## changes/vias appear as continuous joints — adequate for a visual proposal.
+static func _route_polyline(route: Dictionary) -> Array:
+	var pts: Array = []
+	for seg in route.get("segments", []):
+		if not (seg is Dictionary):
+			continue
+		var st: Array = _arr_pair(seg.get("start", [0, 0]))
+		var en: Array = _arr_pair(seg.get("end", [0, 0]))
+		if pts.is_empty():
+			pts.append(st)
+		pts.append(en)
+	return pts
+
+
+## KiCad copper layer of a route (its first segment's layer), defaulting F.Cu.
+static func _route_layer(route: Dictionary) -> String:
+	for seg in route.get("segments", []):
+		if seg is Dictionary and (seg as Dictionary).has("layer"):
+			return str((seg as Dictionary).get("layer", "F.Cu"))
+	return "F.Cu"
+
+
+## Widest authored trace width among the source hints that target `net`
+## (kind_payload.net_names). 0.0 when none specify a width.
+static func _width_for_net(source_hints: Array, net: String) -> float:
+	var w := 0.0
+	for hint in source_hints:
+		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		if net in _string_list(kp.get("net_names", [])):
+			var hw := float(kp.get("width_mm", 0.0))
+			if hw > w:
+				w = hw
+	return w
+
+
+## Source hint ids that answer `net` (by net_names). Falls back to ALL source
+## hint ids when none match by net — the whole selection collectively asked to
+## route, so the proposal is still traceable to its origin.
+static func _source_hint_ids_for_net(source_hints: Array, net: String) -> Array:
+	var ids: Array = []
+	for hint in source_hints:
+		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		if net in _string_list(kp.get("net_names", [])):
+			ids.append(str(hint.get("id", "")))
+	if ids.is_empty():
+		return _hint_id_list(source_hints)
+	return ids
+
+
+static func _hint_id_list(source_hints: Array) -> Array:
+	var ids: Array = []
+	for hint in source_hints:
+		ids.append(str(hint.get("id", "")))
+	return ids
+
+
+static func _string_list(raw) -> Array:
+	var out: Array = []
+	if raw is Array:
+		for v in (raw as Array):
+			out.append(str(v))
+	return out
+
+
+## Coerce a [x, y] pair (Array or Vector2) to a fresh [float, float] Array.
+static func _arr_pair(raw) -> Array:
+	if raw is Vector2:
+		return [float((raw as Vector2).x), float((raw as Vector2).y)]
+	if raw is Array and (raw as Array).size() >= 2:
+		return [float((raw as Array)[0]), float((raw as Array)[1])]
+	return [0.0, 0.0]
+
+
+static func _arr_to_vec2(raw) -> Vector2:
+	if raw is Vector2:
+		return raw
+	if raw is Array and (raw as Array).size() >= 2:
+		return Vector2(float((raw as Array)[0]), float((raw as Array)[1]))
+	return Vector2.ZERO
+
+
+## Connect trace segments into polylines (pure geometry; ported verbatim from the
+## legacy MCPPCBTools helper so import_trace_geometry stays call-compatible).
+static func _build_polylines_from_segments(segments: Array) -> Array:
+	if segments.is_empty():
+		return []
+	var result: Array = []
+	var used: Array = []
+	used.resize(segments.size())
+	used.fill(false)
+	for i in range(segments.size()):
+		if used[i]:
+			continue
+		var polyline: Array[Vector2] = [segments[i].start, segments[i].end]
+		used[i] = true
+		var changed := true
+		while changed:
+			changed = false
+			for j in range(segments.size()):
+				if used[j]:
+					continue
+				var seg = segments[j]
+				if seg.start.distance_to(polyline[polyline.size() - 1]) < 0.01:
+					polyline.append(seg.end)
+					used[j] = true
+					changed = true
+				elif seg.end.distance_to(polyline[polyline.size() - 1]) < 0.01:
+					polyline.append(seg.start)
+					used[j] = true
+					changed = true
+				elif seg.end.distance_to(polyline[0]) < 0.01:
+					polyline.insert(0, seg.start)
+					used[j] = true
+					changed = true
+				elif seg.start.distance_to(polyline[0]) < 0.01:
+					polyline.insert(0, seg.end)
+					used[j] = true
+					changed = true
+		result.append(polyline)
+	return result
+
+
+# ── Host-access helpers (moved verbatim from MCPPcbPanelTools.gd; now the
+#    SOLE copy — the core module that used to keep its own is deleted) ──────
 
 ## The live board model off a host, or null (duck-typed — host may lack the getter).
 static func _get_data(host):

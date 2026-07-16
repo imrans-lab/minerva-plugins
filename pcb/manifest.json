@@ -284,6 +284,76 @@
         },
         "required": ["editor_name", "geometry"]
       }
+    },
+    {
+      "name": "minerva_pcb_get_change_journal",
+      "description": "Get the change journal for a PCB editor. Returns an append-only log of forward actions (moves, rotations, deletions, etc.) with timestamps.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "since_timestamp": {"type": "number", "description": "Optional Unix timestamp to filter entries from. Only entries at or after this time are returned."},
+          "limit": {"type": "integer", "description": "Maximum number of entries to return (most recent). Default: 50"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_import_trace_geometry",
+      "description": "Import routed traces and vias from pcb-architect's trace-geometry command output. Clears existing traces and imports new ones. Trace segments are automatically connected into polylines.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "trace_data": {
+            "type": "object",
+            "description": "Trace geometry JSON from pcb-architect trace-geometry command"
+          }
+        },
+        "required": ["editor_name", "trace_data"]
+      }
+    },
+    {
+      "name": "minerva_pcb_export_trace_geometry",
+      "description": "Export routed traces and vias from a PCB editor. Returns trace data in the same format accepted by import_trace_geometry, enabling round-trip workflows.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_get_image",
+      "description": "Export a PCB view as a base64-encoded PNG image for LLM viewing.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "width": {"type": "integer", "description": "Requested image width in pixels (advisory). Default: 800"},
+          "height": {"type": "integer", "description": "Requested image height in pixels (advisory). Default: 600"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_apply_route_hints",
+      "description": "Route the board's open route hints and either PROPOSE routes (default) or COMMIT them as real traces. Default (commit absent/false): runs the router over the selected open route hints and writes the results back as AI-authored (cyan) proposal annotations — inspectable polylines that do NOT mutate the board; each proposal links to the source hint(s) it answers (kind_payload.proposal_for). Set commit=true to materialize the routed polylines as real traces in the board model (journaled) and transition the source hints open→applied. Partial/failed routing returns WHERE it got stuck (unrouted nets with their blocked pad pairs) as structured feedback. Iterate: edit/add hints and re-run; applied hints are excluded by default so only fresh open hints re-route.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "hint_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit route-hint annotation ids to route. Omit to route all OPEN route hints (applied/resolved hints are excluded)."},
+          "commit": {"type": "boolean", "description": "false/absent (default): write back cyan proposal annotations only, board unchanged. true: materialize routed traces + mark source hints applied."}
+        },
+        "required": ["editor_name"]
+      }
     }
   ],
   "skills": [

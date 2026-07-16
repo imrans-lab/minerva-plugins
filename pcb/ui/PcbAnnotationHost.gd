@@ -190,6 +190,18 @@ func set_panel(panel) -> void:
 	_panel = panel
 
 
+## The bound panel, or null (duck-typed getter, C3 round docket 019f6c4604ba —
+## defense-in-depth). PluginToolRegistry._handle_panel_tool_call's fallback
+## panel-resolution path (contract §2.2 step 2, when the scene-panel broker
+## doesn't know an editor_name) calls AnnotationHostRegistry.get_host(name)
+## then duck-types host.get_panel() to reach the live PCBPanel. Without this
+## getter that fallback silently misses for pcb even though the primary
+## broker path already resolves it in production — this closes the gap so
+## the fallback is live too, not just the happy path.
+func get_panel():
+	return _panel
+
+
 # ── Panel-local MCP bridge (MCPPcbPanelTools, Minerva core) ───────────────────
 #
 # The single duck-typed gateway the off-tree core module reaches through. The
