@@ -446,7 +446,15 @@ func save_to_history(action_name: String = "Change") -> void:
 		"action": action_name,
 		"components": _serialize_components(),
 		"nets": _serialize_nets(),
-		"traces": _serialize_traces()
+		"traces": _serialize_traces(),
+		# F1 (Codex 019f70ec149b): the undo codec previously omitted vias +
+		# mounting_holes (only the full-board serialize carried them), so
+		# undoing an accepted via route removed its traces but ORPHANED its
+		# vias. Deep-duplicate both into the snapshot so _restore_state can
+		# rebuild them faithfully. Interim fix; the DCR (T1) unifies undo onto
+		# one complete board codec.
+		"vias": vias.duplicate(true),
+		"mounting_holes": mounting_holes.duplicate(true)
 	}
 
 	history.append(state)
@@ -538,6 +546,11 @@ func _restore_state(state: Dictionary) -> void:
 	for id in trace_data:
 		var trace = PCBTraceScript.from_dict(trace_data[id])
 		traces[id] = trace
+
+	# Restore vias + mounting holes (F1 — see save_to_history). Reuse the shared
+	# loaders so Vector2/dict positions normalize the same way as file load.
+	_load_vias(state.get("vias", []))
+	_load_mounting_holes(state.get("mounting_holes", []))
 
 #endregion
 
