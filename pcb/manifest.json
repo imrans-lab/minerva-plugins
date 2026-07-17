@@ -407,6 +407,21 @@
         },
         "required": ["editor_name", "id"]
       }
+    },
+    {
+      "name": "minerva_pcb_add_via",
+      "description": "Manually insert a via on a pcb_route_hint proposal (a route carrying kind_payload.segments): splits the segment nearest board point (x, y) into two at the projected point, appends a via there, and recomputes every segment's copper layer via the layer-run toggle (F.Cu<->B.Cu at each via position, in path order) — the same split+via+layer-run geometry the canvas Add-Via tool uses, so an agent's call and a human's click produce identical results. Use this to resolve a routing collision by hand when the autorouter's own vias-avoidance left a proposal single-layer through an obstacle: one via jumps the trace to the opposite layer past that point, a second via jumps it back. No-op (error) if (x, y) is not near any segment. Persists through the host's revision-history seam, so minerva_pcb_hint_undo/minerva_pcb_hint_redo cover it.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "id": {"type": "string", "description": "The pcb_route_hint proposal annotation id to add a via to"},
+          "x": {"type": "number", "description": "Board-space X (mm) of the point to split/via"},
+          "y": {"type": "number", "description": "Board-space Y (mm) of the point to split/via"}
+        },
+        "required": ["editor_name", "id", "x", "y"]
+      }
     }
   ],
   "skills": [

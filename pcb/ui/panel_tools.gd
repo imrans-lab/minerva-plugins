@@ -38,6 +38,13 @@ extends RefCounted
 ## NOT declare a class_name — preloaded by relative path from PCBPanel.gd
 ## (matches the convention every other pcb/ui/*.gd file already follows).
 
+## Shared split+via+layer-run-toggle geometry (U4) lives on pcb_route_hint_kind.gd
+## as a static func (apply_via_at_point) so ViaInsertTool (the canvas gesture)
+## and _add_via below (the MCP parity tool) share ONE implementation. Off-tree,
+## no class_name — reached by preload(), same convention every other
+## cross-file pcb/ui/*.gd reference in this plugin already uses.
+const _PcbRouteHintKindScript := preload("kinds/pcb_route_hint_kind.gd")
+
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
 ## the plugin component enum carries extra values but is set by NAME,
 ## off-tree safe). Moved from MCPPcbPanelTools._VALID_FOOTPRINTS verbatim —
@@ -108,6 +115,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_undo(host, args)
 		"minerva_pcb_hint_redo":
 			return _hint_redo(host, args)
+		"minerva_pcb_add_via":
+			return _add_via(host, args)
 	return {}
 
 
@@ -796,6 +805,47 @@ static func _hint_redo(host, args: Dictionary) -> Dictionary:
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "redo failed")))
 	return _ok({"id": id, "kind_payload": result.get("kind_payload", {})})
+
+
+# ── Manual via insertion (U4, DCR 019f7095c395 Stage-2) ───────────────────────
+
+## MCP parity for ViaInsertTool (pcb_route_hint_kind.gd's canvas gesture):
+## split the proposal's nearest kind_payload.segments entry at (x, y), insert
+## a via there, and recompute the layer-run toggle for every segment. Calls
+## the SAME static helper (apply_via_at_point) the canvas tool calls, then
+## persists through host.update_annotation — the identical mutate-with-history
+## seam BendHandleEditTool/the canvas ViaInsertTool use (undo/redo + revision
+## history already wired there; north-star: an agent's tool call and a
+## human's click are indistinguishable once they land on the host).
+static func _add_via(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("get_by_id") or not host.has_method("update_annotation"):
+		return _err("PCB annotation host not available")
+	var id: String = str(args.get("id", ""))
+	if id.is_empty():
+		return _err("id is required")
+	if not args.has("x") or not args.has("y"):
+		return _err("x and y are required")
+
+	var ann: Dictionary = host.get_by_id(id)
+	if ann.is_empty():
+		return _err("annotation not found: %s" % id)
+	if str(ann.get("kind", "")) != "pcb_route_hint":
+		return _err("annotation '%s' is not a pcb_route_hint" % id)
+
+	var kp: Dictionary = ann.get("kind_payload", {})
+	var result: Dictionary = _PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y", 0.0)))
+	if not bool(result.get("ok", false)):
+		return _err(str(result.get("error", "could not insert via")))
+
+	var new_ann: Dictionary = ann.duplicate(true)
+	new_ann["kind_payload"] = result.get("kind_payload", kp)
+	if not host.update_annotation(id, new_ann):
+		return _err("failed to persist via insertion for '%s'" % id)
+
+	return _ok({
+		"via_count": result.get("via_count", 0),
+		"segments": result.get("segments", []),
+	})
 
 
 # ── Route-correction collaboration loop (moved verbatim from

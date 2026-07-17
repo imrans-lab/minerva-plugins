@@ -31,6 +31,16 @@ extends AnnotationKind
 const _ANCHOR_TYPE_BOARD_POINT := "pcb/board.point"
 const _ANCHOR_TYPE_PAD := "pcb/pad"
 
+## Self-reference so NESTED classes below (ViaInsertTool, BendHandleEditTool,
+## …) can reach this outer class's STATIC funcs. Off-tree rule forbids
+## class_name here, and GDScript nested classes do NOT get implicit unqualified
+## access to their outer class's members (verified empirically — an unqualified
+## call from inside a nested class fails to parse with "Function not found in
+## base self") — a self-preload constant is the standing workaround, same
+## family of trick as every sibling file's PCBPanel.gd-style cross-file
+## preload() consts.
+const _Self := preload("pcb_route_hint_kind.gd")
+
 ## Anchor-marker size: document-space (board mm), so it scales with board
 ## features instead of swallowing small parts (HITL-2 feedback: 5mm diamonds
 ## completely covered a 2.54mm-pitch header). Render keeps a small pixel
@@ -703,6 +713,224 @@ class BendHandleEditTool:
 		if registry == null:
 			return null
 		return registry.get_annotation_kind(StringName("pcb_route_hint"))
+
+
+## Manual via-insertion tool (U4, DCR 019f7095c395 Stage-2): the autorouter
+## avoids vias by preferring single-layer detours, so a human resolves a
+## collision by hand — click a point on a SELECTED proposal's route to split
+## the segment there, insert a via, and flip the following run of segments to
+## the opposite copper layer (a second via jumps back). Instantiated directly
+## by PCBPanel's route-flow toolbar cluster ("Add Via" button /
+## _new_route_flow_tool), same idiom as BendHandleEditTool right above — NOT
+## wired to kind.author_ui() (this is a MANIPULATION tool over an EXISTING
+## hint/proposal, not an authoring tool).
+##
+## Selection-first idiom, mirrors BendHandleEditTool exactly: only
+## pcb_route_hint annotations are selectable while this tool is active. A
+## left-click near a segment of the CURRENTLY SELECTED hint inserts a via
+## there (ONE annotation_modified, so undo/redo + revision history — the
+## same host.update_annotation() seam BendHandleEditTool uses — already work
+## for free); a click that misses every segment of the selection instead
+## re-targets selection (select a different hint, or clear it) — never both
+## effects from one click. Escape clears the selection.
+##
+## The split+via+layer-run-toggle geometry itself is NOT reimplemented here —
+## it lives once, as the outer class's static apply_via_at_point() (below,
+## in the "Manual via insertion" section), shared verbatim with the MCP
+## parity tool minerva_pcb_add_via (panel_tools.gd._add_via) so the canvas
+## gesture and an agent's tool call produce byte-identical results.
+class ViaInsertTool:
+	extends AnnotationAuthorTool
+
+	# Matches BendHandleEditTool's segment/select hit-test tolerances exactly
+	# (screen px, converted to doc-space via zoom at hit-test time).
+	const _SEGMENT_HIT_PX := 8.0
+	const _SELECT_HIT_PX := 8.0
+
+	var _host: AnnotationHost = null
+
+	func on_activate(host: AnnotationHost) -> void:
+		_host = host
+
+	func on_deactivate() -> void:
+		_host = null
+
+	func on_pointer_down(pos: Vector2, button: int, mods: int) -> bool:
+		if _host == null:
+			return false
+
+		if mods == KEY_ESCAPE:
+			_host.set_selected_annotation_id("")
+			return true
+
+		if button != MOUSE_BUTTON_LEFT:
+			return false
+
+		var doc_pos := _host.transform_screen_to_doc(pos)
+		var seg_r := _SEGMENT_HIT_PX / _zoom()
+
+		var sel := _host.get_selected_annotation_id()
+		if not sel.is_empty():
+			var ann := _find(sel)
+			if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint":
+				var kp: Dictionary = ann.get("kind_payload", {})
+				var result: Dictionary = _Self.apply_via_at_point(kp, doc_pos.x, doc_pos.y, seg_r)
+				if bool(result.get("ok", false)):
+					var new_ann := ann.duplicate(true)
+					new_ann["kind_payload"] = result.get("kind_payload", kp)
+					annotation_modified.emit(sel, new_ann)
+					return true
+
+		# No via inserted (nothing selected, selection isn't a route hint, or the
+		# click missed every segment of the selection's route) — fall back to
+		# route-hint-only selection, same idiom as BendHandleEditTool.
+		return _select_route_hint_at(doc_pos)
+
+	# ── internal ──────────────────────────────────────────────────────────────
+
+	func _zoom() -> float:
+		if _host != null and _host.has_method("get_annotation_zoom"):
+			return maxf(float(_host.get_annotation_zoom()), 0.01)
+		return 1.0
+
+	func _select_route_hint_at(doc_pos: Vector2) -> bool:
+		var registry := _host.get_registry()
+		var annotations: Array = _host.get_annotations()
+		var hit_threshold := _SELECT_HIT_PX / _zoom()
+		for i in range(annotations.size() - 1, -1, -1):
+			var ann: Dictionary = annotations[i]
+			if str(ann.get("kind", "")) != "pcb_route_hint":
+				continue
+			if not _host.is_annotation_visible(ann):
+				continue
+			var kind: AnnotationKind = registry.get_annotation_kind(StringName("pcb_route_hint")) if registry != null else null
+			if kind == null:
+				continue
+			if kind.hit_test(ann, doc_pos, hit_threshold):
+				_host.set_selected_annotation_id(str(ann.get("id", "")))
+				return true
+		_host.set_selected_annotation_id("")
+		return true
+
+	func _find(id: String) -> Dictionary:
+		if _host == null:
+			return {}
+		for ann in _host.get_annotations():
+			if ann is Dictionary and str((ann as Dictionary).get("id", "")) == id:
+				return ann as Dictionary
+		return {}
+
+
+# ── Manual via insertion (U4, DCR 019f7095c395 Stage-2) ───────────────────────
+#
+# Shared by ViaInsertTool (canvas gesture, above) and the MCP parity tool
+# minerva_pcb_add_via (panel_tools.gd._add_via) — ONE implementation, so a
+# human's click and an agent's tool call always produce the same geometry.
+# Reached from panel_tools.gd via a preload() of this script (off-tree,
+# no class_name — same convention PCBPanel.gd's _PcbRouteHintKindScript uses).
+
+## Split the kind_payload.segments entry nearest (x, y) into two at its
+## projected point, append that point to kind_payload.vias, and recompute
+## every segment's layer via the layer-run toggle (see
+## _recompute_layer_runs below). Returns {ok:false, error} when no segment
+## lies within threshold_mm of (x, y) (a no-op — the caller must not persist
+## anything); otherwise {ok:true, kind_payload: Dictionary (fresh — segments
+## + vias updated, every other key preserved verbatim), via_count: int,
+## segments: Array}.
+static func apply_via_at_point(kind_payload: Dictionary, x: float, y: float, threshold_mm: float = _HIT_THRESHOLD_MM) -> Dictionary:
+	var segments_raw: Variant = kind_payload.get("segments", [])
+	var segments: Array = (segments_raw as Array).duplicate(true) if segments_raw is Array else []
+	if segments.is_empty():
+		return {"ok": false, "error": "proposal has no segments to split"}
+
+	var click := Vector2(x, y)
+	var best_idx := -1
+	var best_dist := INF
+	var best_point := Vector2.ZERO
+	for i in range(segments.size()):
+		var seg: Variant = segments[i]
+		if not (seg is Dictionary):
+			continue
+		var a := _to_vec2((seg as Dictionary).get("start", [0, 0]))
+		var b := _to_vec2((seg as Dictionary).get("end", [0, 0]))
+		var proj := _project_on_segment(a, b, click)
+		var d := proj.distance_to(click)
+		if d < best_dist:
+			best_dist = d
+			best_idx = i
+			best_point = proj
+
+	if best_idx < 0 or best_dist > threshold_mm:
+		return {"ok": false, "error": "no route segment within %.2fmm of (%.3f, %.3f)" % [threshold_mm, x, y]}
+
+	# The layer-run toggle always starts from the ORIGINAL first segment's
+	# layer — captured before the split below, so it stays stable across
+	# repeated via insertions (adding via #2 never changes where run #1 starts).
+	var start_layer := "F.Cu"
+	if segments[0] is Dictionary:
+		start_layer = str((segments[0] as Dictionary).get("layer", "F.Cu"))
+
+	var target: Dictionary = segments[best_idx]
+	var a := _to_vec2(target.get("start", [0, 0]))
+	var b := _to_vec2(target.get("end", [0, 0]))
+	var target_layer := str(target.get("layer", start_layer))
+	var seg1 := {"start": [a.x, a.y], "end": [best_point.x, best_point.y], "layer": target_layer}
+	var seg2 := {"start": [best_point.x, best_point.y], "end": [b.x, b.y], "layer": target_layer}
+	segments[best_idx] = seg1
+	segments.insert(best_idx + 1, seg2)
+
+	var vias_raw: Variant = kind_payload.get("vias", [])
+	var vias: Array = (vias_raw as Array).duplicate(true) if vias_raw is Array else []
+	vias.append([best_point.x, best_point.y])
+
+	var recomputed := _recompute_layer_runs(segments, vias, start_layer)
+	var new_payload := kind_payload.duplicate(true)
+	new_payload["segments"] = recomputed
+	new_payload["vias"] = vias
+
+	return {"ok": true, "kind_payload": new_payload, "via_count": vias.size(), "segments": recomputed}
+
+
+## Position-match tolerance (board mm) used to decide whether a segment
+## boundary sits AT a via — deliberately tight (split points are computed in
+## the same call that appends the via, so they match exactly bar float noise;
+## this is not a UI hit-test threshold).
+const _VIA_EPS_MM: float = 0.01
+
+## Pure recompute of every segment's layer from `vias` + `start_layer` — walks
+## `segments` IN ORDER (they form a connected start→end chain), maintaining a
+## "current layer" that begins at start_layer and TOGGLES each time a
+## segment's start point lands on a via position. Order-independent in
+## `vias` (membership is tested by proximity against every via, not by
+## index) and idempotent (a pure function of its three inputs — calling it
+## again with the same segments/vias/start_layer reproduces the same output).
+## N vias on the path therefore produce N layer alternations: one via flips
+## the tail to the opposite layer, a second flips it back, etc.
+static func _recompute_layer_runs(segments: Array, vias: Array, start_layer: String) -> Array:
+	var via_points: Array = []
+	for v in vias:
+		via_points.append(_to_vec2(v))
+
+	var current := start_layer
+	var out: Array = []
+	for i in range(segments.size()):
+		if not (segments[i] is Dictionary):
+			continue
+		var seg: Dictionary = (segments[i] as Dictionary).duplicate(true)
+		if i > 0:
+			var seg_start := _to_vec2(seg.get("start", [0, 0]))
+			for vp in via_points:
+				if (vp as Vector2).distance_to(seg_start) <= _VIA_EPS_MM:
+					current = _toggle_layer(current)
+					break
+		seg["layer"] = current
+		out.append(seg)
+	return out
+
+
+## F.Cu <-> B.Cu only (the KiCad copper-layer vocabulary segments carry).
+static func _toggle_layer(layer: String) -> String:
+	return "B.Cu" if layer == "F.Cu" else "F.Cu"
 
 
 # ── Bend-handle geometry (C4 deliverable 3, docket 019f6c464ff0) ──────────────

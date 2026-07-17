@@ -584,6 +584,26 @@ func _build_sidebar() -> VBoxContainer:
 	tools_flow.add_child(edit_hint_btn)
 	_route_flow_buttons["edit_hint"] = edit_hint_btn
 
+	# Manual via-insertion tool (U4, DCR 019f7095c395 Stage-2): select a
+	# proposal, then click a point on its route to split the segment, add a
+	# via, and flip the following run to the opposite copper layer. Same
+	# TRUE-toggle idiom as Trace/Edit Hint above; shares mutual exclusion with
+	# the rest of the cluster via _route_flow_buttons for free.
+	var add_via_btn := Button.new()
+	add_via_btn.name = "AddViaButton"
+	var add_via_icon := _load_icon("via_24.png")
+	if add_via_icon != null:
+		add_via_btn.icon = add_via_icon
+	else:
+		add_via_btn.text = "Add Via"
+	add_via_btn.tooltip_text = "Insert a via on a selected proposal: click the proposal to select it, " \
+		+ "then click a point on its route to split it, add a via, and flip the trace past that point " \
+		+ "to the opposite copper layer (Esc/tool-switch exits)"
+	add_via_btn.toggle_mode = true
+	add_via_btn.pressed.connect(_on_add_via_button_pressed)
+	tools_flow.add_child(add_via_btn)
+	_route_flow_buttons["add_via"] = add_via_btn
+
 	# Propose button (C5, docket 019f6c465fd8, deliverable 1): explicit-propose
 	# UX — the router NEVER runs implicitly (product contract v2). This is a
 	# non-toggle ACT button (not part of _route_flow_buttons' mutual-exclusion
@@ -799,6 +819,17 @@ func _on_edit_hint_button_pressed() -> void:
 		_deactivate_route_flow_tool()
 
 
+## Add-via toggle handler (U4) — same pattern as _on_edit_hint_button_pressed.
+func _on_add_via_button_pressed() -> void:
+	var btn: Button = _route_flow_buttons.get("add_via", null)
+	if btn == null:
+		return
+	if btn.button_pressed:
+		_activate_route_flow_tool("add_via")
+	else:
+		_deactivate_route_flow_tool()
+
+
 ## Propose button handler (C5, docket 019f6c465fd8, deliverable 1): an
 ## explicit human ACT — this is the ONLY thing in this plugin that invokes the
 ## router besides the equivalent MCP tool call (deliverable 4: nothing else —
@@ -864,6 +895,8 @@ func _new_route_flow_tool(kind_key: String) -> AnnotationAuthorTool:
 			return _PcbRouteHintKindScript.SingleTraceAuthorTool.new()
 		"edit_hint":
 			return _PcbRouteHintKindScript.BendHandleEditTool.new()
+		"add_via":
+			return _PcbRouteHintKindScript.ViaInsertTool.new()
 	return null
 
 
@@ -950,6 +983,8 @@ func _update_route_flow_mode_label(kind_key: String) -> void:
 			_route_flow_mode_label.text = "Single Trace"
 		"edit_hint":
 			_route_flow_mode_label.text = "Edit Hint"
+		"add_via":
+			_route_flow_mode_label.text = "Add Via"
 		_:
 			_route_flow_mode_label.text = "Select"
 
