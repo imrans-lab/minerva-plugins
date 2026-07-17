@@ -955,6 +955,16 @@ static func _write_back_proposals(host, result: Dictionary, source_hints: Array)
 		kp["proposal_for"] = linked
 		if width > 0.0:
 			kp["width_mm"] = width
+		# DRC-at-propose (docket 019f6f1492e0): the worker's route() attaches a
+		# per-route "drc" verdict (see pcb_worker.methods._attach_route_drc) —
+		# copy it onto the proposal's kind_payload so the dock badge (generic
+		# WorkflowAnnotationList) and MCP reads (annotations_list passes
+		# kind_payload through unmodified) both see it. Absent when the
+		# worker didn't run DRC (e.g. native-path routing, not reachable from
+		# this canonical-only propose flow) — no key added, matching the
+		# "absent drc key -> no badge" contract.
+		if route.has("drc"):
+			kp["drc"] = route.get("drc")
 		envelope["kind_payload"] = kp
 		envelope["summary"] = "Proposed route %s (%d waypoints, %s)" % [net, pts.size(), layer]
 		var new_id: String = str(host.call("add_annotation_v2", envelope))
@@ -976,6 +986,7 @@ static func _write_back_proposals(host, result: Dictionary, source_hints: Array)
 		"unrouted": result.get("unrouted", []),
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
+		"drc_summary": result.get("drc_summary", {}),
 	}
 
 

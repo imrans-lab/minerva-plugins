@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import traceback
 from pathlib import Path
+from typing import Any
 
 from . import board_model, drc, footprints, gerber, kicad, libcheck, resolve
 
@@ -421,6 +422,146 @@ def _is_canonical_route_input(params: dict) -> bool:
     return isinstance(b, dict) and "components" in b and "pads" not in b
 
 
+# ---------------------------------------------------------------------------
+# DRC-at-propose (docket 019f6f1492e0): after a successful CANONICAL route,
+# build the post-route board (existing traces + every returned route
+# materialized as traces) and run the EXISTING drc.run_drc engine over it —
+# this reuses drc.py's four checks verbatim, it does not reimplement any rule.
+# Native-pad-list routing has no canonical "components"/"nets"/"traces" board
+# to check against, so DRC is skipped there (no drc/drc_summary keys added;
+# _route only calls this helper on the canonical branch, see below).
+# ---------------------------------------------------------------------------
+
+# agent_router segment layers are always "F.Cu"/"B.Cu" (route_bridge._LAYER_MAP,
+# agent_router/router.py literals). The canonical board's OWN traces use
+# "top"/"bottom" (pcb/docs/board-yaml.md). drc.py's crossing/layer-change checks
+# compare `seg.layer` by raw string equality, so a route segment must be
+# normalized to the canonical spelling before merge — otherwise a same-layer
+# collision between a new route and an existing "top" trace would be missed
+# because "F.Cu" != "top" as strings, even though both mean the top layer.
+
+
+def _canonical_drc_layer(layer: Any) -> str:
+    from . import route_bridge
+    reverse = {v: k for k, v in route_bridge._LAYER_MAP.items()}
+    s = str(layer or "")
+    return reverse.get(s, s.lower() if s else "top")
+
+
+def _routes_to_traces(routes: list) -> list:
+    """One 2-point trace per route segment. drc._harvest_segments already
+    breaks any traces[].points polyline into consecutive (a, b) pairs, so a
+    2-point trace per segment is geometrically identical to a merged
+    per-layer polyline — simpler and avoids re-deriving chain adjacency."""
+    traces: list = []
+    for r in routes:
+        if not isinstance(r, dict):
+            continue
+        net = r.get("net")
+        for seg in r.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            start = seg.get("start")
+            end = seg.get("end")
+            if not (isinstance(start, (list, tuple)) and len(start) >= 2
+                    and isinstance(end, (list, tuple)) and len(end) >= 2):
+                continue
+            traces.append({
+                "net": net,
+                "layer": _canonical_drc_layer(seg.get("layer")),
+                "points": [
+                    {"x_mm": float(start[0]), "y_mm": float(start[1])},
+                    {"x_mm": float(end[0]), "y_mm": float(end[1])},
+                ],
+            })
+    return traces
+
+
+def _routes_to_vias(routes: list) -> list:
+    vias: list = []
+    for r in routes:
+        if not isinstance(r, dict):
+            continue
+        for v in r.get("vias") or []:
+            if isinstance(v, (list, tuple)) and len(v) >= 2:
+                vias.append({"x_mm": float(v[0]), "y_mm": float(v[1])})
+    return vias
+
+
+def _finding_involves_net(finding: dict, net: Any) -> bool:
+    """True if a drc.py finding dict 'involves' the given net name — either
+    as the offending trace's own net, one of a crossing's two nets, or the
+    net of a pad a trace wrongly landed on (a wrong_net_pad finding involves
+    BOTH the trespassing net and the victim pad's net)."""
+    if not isinstance(finding, dict) or net is None:
+        return False
+    if finding.get("net") == net:
+        return True
+    nets = finding.get("nets")
+    if isinstance(nets, list) and net in nets:
+        return True
+    pad = finding.get("pad")
+    if isinstance(pad, dict) and pad.get("net") == net:
+        return True
+    return False
+
+
+def _drc_for_routes(board_dict: dict, routes: list) -> dict:
+    """Run drc.run_drc over (board_dict's existing traces/vias + every
+    proposed route materialized as traces/vias). Shallow-copies board_dict
+    and replaces only "traces"/"vias" with new lists — the input's own lists
+    are never mutated, and no other board field (components/nets/design_rules/
+    revision bookkeeping — board_dict is the canonical board, which never
+    carries per-hint revision_stack in the first place; that's stripped from
+    the route_hints ANNOTATION envelopes upstream by PcbAnnotationHost.
+    strip_hint_history, not from this board) is touched."""
+    post_board = dict(board_dict)
+    existing_traces = post_board.get("traces")
+    post_board["traces"] = (list(existing_traces) if isinstance(existing_traces, list) else []) \
+        + _routes_to_traces(routes)
+    existing_vias = post_board.get("vias")
+    post_board["vias"] = (list(existing_vias) if isinstance(existing_vias, list) else []) \
+        + _routes_to_vias(routes)
+    return drc.run_drc(post_board)
+
+
+def _attach_route_drc(payload: dict, board_dict: dict) -> None:
+    """Mutate payload in place: each route dict gains
+    "drc": {"clean": bool, "violations": [...]} (filtered to findings
+    involving that route's net) on success, or
+    "drc": {"clean": None, "error": "<msg>"} if the DRC engine itself faults.
+    payload also gains a top-level "drc_summary": {"clean", "violation_count"}
+    (violation_count counts EVERY finding, including ones not attributable to
+    any single proposed route — e.g. a crossing between two pre-existing
+    traces). A DRC-engine fault never fails the route call — routes still
+    return, just without a clean determination."""
+    routes = payload.get("routes")
+    if not isinstance(routes, list):
+        return
+    try:
+        result = _drc_for_routes(board_dict, routes)
+        error: str | None = None
+    except Exception as exc:  # geometry faults reported as data, mirrors _drc()
+        result = None
+        error = str(exc)
+
+    if error is not None:
+        for r in routes:
+            if isinstance(r, dict):
+                r["drc"] = {"clean": None, "error": error}
+        payload["drc_summary"] = {"clean": None, "violation_count": 0, "error": error}
+        return
+
+    findings = (result or {}).get("findings", [])
+    for r in routes:
+        if not isinstance(r, dict):
+            continue
+        net = r.get("net")
+        violations = [f for f in findings if _finding_involves_net(f, net)]
+        r["drc"] = {"clean": len(violations) == 0, "violations": violations}
+    payload["drc_summary"] = {"clean": len(findings) == 0, "violation_count": len(findings)}
+
+
 def _route(params: dict) -> dict:
     """Autoroute a board with the vendored agent_router engine.
 
@@ -430,6 +571,7 @@ def _route(params: dict) -> dict:
     bridge_warnings: list = []
     drawn_routes: list = []
     selected_hint_ids: list = []
+    drc_board: dict | None = None  # set only on the CANONICAL path (see below)
 
     # Only pass through options the engine actually accepts.
     opts = params.get("options") or {}
@@ -448,6 +590,7 @@ def _route(params: dict) -> dict:
             board_dict = board_model.load_board(params)
         except board_model.BoardParseError as exc:
             return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+        drc_board = board_dict  # DRC-at-propose runs against this canonical board
         try:
             board = route_bridge.board_to_router(board_dict)
         except Exception as exc:
@@ -517,6 +660,14 @@ def _route(params: dict) -> dict:
         payload["warnings"] = bridge_warnings
     if selected_hint_ids:
         payload["selected_hint_ids"] = selected_hint_ids
+
+    # DRC-at-propose (docket 019f6f1492e0): only meaningful on the canonical
+    # path — the native pad-list path has no "components"/"nets"/"traces"
+    # board to check proposed routes against, so it is left untouched (no
+    # drc/drc_summary keys added, matching its pre-existing output exactly).
+    if drc_board is not None:
+        _attach_route_drc(payload, drc_board)
+
     return {"ok": True, "result": payload}
 
 

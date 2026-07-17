@@ -832,7 +832,26 @@ func _on_propose_button_pressed() -> void:
 	if n == 0:
 		_set_status("Nothing to route — no open route hints.")
 	else:
-		_set_status("%d proposal%s" % [n, "" if n == 1 else "s"])
+		_set_status("%d proposal%s%s" % [n, "" if n == 1 else "s", _drc_status_suffix(result)])
+
+
+## DRC-at-propose (docket 019f6f1492e0) status-label suffix. drc_summary is
+## {"clean": bool|null, "violation_count": int, "error"?: String} — see
+## pcb_worker.methods._attach_route_drc. null means the DRC engine itself
+## faulted (never blocks propose — informs, never blocks); an absent/empty
+## dict means the worker didn't run DRC at all (e.g. an older worker), in
+## which case the status label stays exactly as it was before this round.
+func _drc_status_suffix(result: Dictionary) -> String:
+	var summary: Dictionary = result.get("drc_summary", {})
+	if summary.is_empty():
+		return ""
+	var clean: Variant = summary.get("clean", null)
+	if clean == null:
+		return " — DRC: unavailable"
+	if bool(clean):
+		return " — DRC clean"
+	var count := int(summary.get("violation_count", 0))
+	return " — DRC: %d violation%s" % [count, "" if count == 1 else "s"]
 
 
 ## New AnnotationAuthorTool instance for a route-flow cluster key. Deliberately
