@@ -15,6 +15,7 @@ extends RefCounted
 
 const _Self := preload("pcb_routing_workspace.gd")
 const PcbRouteCandidate := preload("pcb_route_candidate.gd")
+const PcbLayerStack := preload("pcb_layer_stack.gd")
 
 ## Emitted when a candidate is inserted.
 signal candidate_added(id: String)
@@ -44,6 +45,12 @@ var _findings: Dictionary = {}
 var _cand_counter: int = 0
 var _seg_counter: int = 0
 var _via_counter: int = 0
+
+## T2 (S2.2) idempotent-replace bookkeeping: task_key -> the CURRENT (non-
+## superseded) candidate_id answering that task. In-memory only — NOT part of
+## to_dict/load_from_dict (persistence is T2a; the shadow workspace lives in
+## memory this round, so this index does not need to survive a save/load yet).
+var _task_candidate: Dictionary = {}
 
 
 # ── id minting ────────────────────────────────────────────────────────────────
@@ -92,6 +99,19 @@ func get_candidate(id: String):
 ## All candidates (insertion order of the backing dict).
 func list_candidates() -> Array:
 	return candidates.values()
+
+
+## Non-superseded candidates for a task_id — the task's CURRENT-generation
+## set. A re-ingest for the same task (see ingest_routing_result's
+## idempotent-replace) supersedes the prior candidate rather than removing
+## it, so `candidates` can hold >1 entry per task; this is "how many are
+## LIVE for this task" without callers re-deriving the disposition filter.
+func candidates_for_task(task_id: String) -> Array:
+	var out: Array = []
+	for c in candidates.values():
+		if str(c.task_id) == task_id and c.disposition != "superseded":
+			out.append(c)
+	return out
 
 
 func remove_candidate(id: String) -> void:
@@ -164,11 +184,199 @@ func findings_for_candidate(id: String) -> Array:
 # Each is a real no-op placeholder that push_warnings — NOT a fake success — so a
 # premature caller is visibly unimplemented rather than silently wrong.
 
-## T2: translate a worker routing result into candidates (mint ids, set
-## base_board_revision, add via add_candidate). STUB.
-func ingest_routing_result(_result: Dictionary) -> Array:
-	push_warning("[RoutingWorkspace] ingest_routing_result is a stub (T2)")
-	return []
+## T2 (S2.2) — SHADOW-phase ingest. Translates a router reply into
+## RouteCandidates and adds them via add_candidate (mints cand_/seg_/via_ ids).
+## This is dual-write ALONGSIDE panel_tools.gd's _write_back_proposals — the
+## annotation proposals it writes remain the UI's source of truth; this
+## workspace is populated in parallel and drives nothing visible yet.
+##
+## router_reply: {"routes":[{"net":String, "segments":[{"start":[x,y]|Vector2,
+##   "end":[x,y]|Vector2, "layer":"F.Cu"/"B.Cu"}], "vias":[[x,y], ...]}], ...} —
+##   EXACTLY the shape panel_tools.gd's _write_back_proposals/_materialize_routes
+##   read (see panel_tools.gd ~990/~1058). A via entry is POSITIONAL [x,y] (the
+##   worker's public route() reply carries no from/to — a through-via always
+##   spans PcbLayerStack.default_through_via_span(), same assumption
+##   _materialize_routes makes); a {x_mm,y_mm}/{x,y}/{"position":...} dict is
+##   also accepted defensively, mirroring panel_tools._via_position.
+##
+## source_hints: the Array of source route-hint annotation dicts the propose
+##   call gathered (kind_payload.net_names/source_pins/dest_pins/width_mm).
+##   Their ids become source_hint_ids (provenance); net_names/width_mm size
+##   each candidate's segment width (falls back to 0.25mm, matching
+##   _materialize_routes' own fallback); source_pins/dest_pins seed `endpoints`.
+##
+## board_revision: PCBData.board_revision AT INGEST TIME, passed as a plain int
+##   (not the PCBData object) so this pure-model file stays decoupled from
+##   pcb_data.gd — the caller (panel_tools.gd, which already resolves the board
+##   via _get_data(host)) reads data.board_revision and hands the int in.
+##
+## ── IDEMPOTENT REPLACE (discussion gap d) ──────────────────────────────────
+## Task-identity key: `net + "|" + sorted(source_hint_ids).join(",")`. Two
+## ingests sharing the same net AND the same set of source-hint ids are the
+## SAME task (a re-propose of the same corridor); a different net or a
+## different hint set is a DIFFERENT task. source_hint_ids are chosen over an
+## endpoint-derived key because they are already stable/deterministic
+## (annotation ids) and available on every ingest call with no extra parsing.
+##
+## Re-ingesting the SAME task NEVER appends a duplicate: the prior CURRENT
+## candidate for that task_key is flipped to disposition="superseded"
+## (candidate_changed emitted) and a NEW candidate is added at
+## generation = prior.generation + 1 (candidate_added emitted). The superseded
+## candidate is kept (not removed) as an audit trail; candidates_for_task()
+## (non-superseded) is what stays size-1 across re-proposes for that task — a
+## DIFFERENT task adds a genuinely new, independent candidate.
+func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], board_revision: int = 0) -> Array:
+	var new_ids: Array = []
+	var hint_ids := _hint_ids(source_hints)
+	var via_span: Array = PcbLayerStack.default_through_via_span()
+
+	for route in router_reply.get("routes", []):
+		if not (route is Dictionary):
+			continue
+		var route_dict: Dictionary = route
+		var segs: Array = route_dict.get("segments", [])
+		var vias: Array = route_dict.get("vias", [])
+		if segs.is_empty() and vias.is_empty():
+			continue
+		var net: String = str(route_dict.get("net", ""))
+
+		var task_key := _task_key(net, hint_ids)
+		var generation := 1
+		var prior_id: String = str(_task_candidate.get(task_key, ""))
+		if not prior_id.is_empty() and candidates.has(prior_id):
+			var prior = candidates[prior_id]
+			generation = int(prior.generation) + 1
+			prior.disposition = "superseded"
+			candidate_changed.emit(prior_id)
+
+		var cand = PcbRouteCandidate.new()
+		cand.task_id = task_key
+		cand.net = net
+		cand.generation = generation
+		cand.base_board_revision = board_revision
+		cand.source_hint_ids = _to_string_typed_array(hint_ids)
+		cand.endpoints = _endpoints_for_net(source_hints, net)
+
+		var width := _width_for_net(source_hints, net)
+		for seg in segs:
+			if not (seg is Dictionary):
+				continue
+			var seg_dict: Dictionary = seg
+			var layer := PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "F.Cu"))
+			var pts: Array = [_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))]
+			cand.add_segment(PcbRouteCandidate.make_segment("", layer, width, pts))
+
+		for via in vias:
+			var pos := _via_pt(via)
+			cand.add_via(PcbRouteCandidate.make_via("", pos, via_span[0], via_span[1]))
+
+		var new_id: String = add_candidate(cand)
+		_task_candidate[task_key] = new_id
+		new_ids.append(new_id)
+
+	return new_ids
+
+
+# ── ingest helpers (private) ────────────────────────────────────────────────
+
+static func _hint_ids(source_hints: Array) -> Array:
+	var out: Array = []
+	for hint in source_hints:
+		if hint is Dictionary:
+			out.append(str((hint as Dictionary).get("id", "")))
+	return out
+
+
+static func _to_string_typed_array(ids: Array) -> Array[String]:
+	var out: Array[String] = []
+	for id in ids:
+		out.append(str(id))
+	return out
+
+
+## Deterministic task-identity key — see the ingest_routing_result contract doc.
+static func _task_key(net: String, hint_ids: Array) -> String:
+	var sorted_ids: Array = hint_ids.duplicate()
+	sorted_ids.sort()
+	var joined := ",".join(sorted_ids)
+	return "%s|%s" % [net, joined]
+
+
+## Endpoints seeded from the matching source hints' pin references
+## (kind_payload.source_pins/dest_pins, each "Component.Pin"). Positions are
+## not resolved here (no board/pad lookup in this pure model) — component/pin
+## identity is enough for provenance; a later task can enrich with position.
+static func _endpoints_for_net(source_hints: Array, net: String) -> Array:
+	var out: Array = []
+	for hint in source_hints:
+		if not (hint is Dictionary):
+			continue
+		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
+		var nets: Array = kp.get("net_names", []) if kp.get("net_names", []) is Array else []
+		if not (net in nets):
+			continue
+		for pin_ref in kp.get("source_pins", []):
+			out.append(_pin_ref_to_endpoint(pin_ref))
+		for pin_ref in kp.get("dest_pins", []):
+			out.append(_pin_ref_to_endpoint(pin_ref))
+	return out
+
+
+static func _pin_ref_to_endpoint(pin_ref) -> Dictionary:
+	var s := str(pin_ref)
+	var idx := s.rfind(".")
+	if idx < 0:
+		return {"component": s, "pin": ""}
+	return {"component": s.substr(0, idx), "pin": s.substr(idx + 1)}
+
+
+## Widest authored trace width among the source hints that target `net`
+## (mirrors panel_tools._width_for_net); falls back to 0.25mm — the same
+## default _materialize_routes applies when no hint specifies a width — so a
+## shadow candidate's width matches what would actually be committed.
+static func _width_for_net(source_hints: Array, net: String) -> float:
+	var w := 0.0
+	for hint in source_hints:
+		if not (hint is Dictionary):
+			continue
+		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
+		var nets: Array = kp.get("net_names", []) if kp.get("net_names", []) is Array else []
+		if net in nets:
+			var hw := float(kp.get("width_mm", 0.0))
+			if hw > w:
+				w = hw
+	if w <= 0.0:
+		w = 0.25
+	return w
+
+
+## Coerce a [x, y] pair (Array/Vector2/{"x","y"} dict) to Vector2.
+static func _pt(raw) -> Vector2:
+	if raw is Vector2:
+		return raw
+	if raw is Array and (raw as Array).size() >= 2:
+		return Vector2(float((raw as Array)[0]), float((raw as Array)[1]))
+	if raw is Dictionary:
+		var d: Dictionary = raw
+		return Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
+	return Vector2.ZERO
+
+
+## A route's via entries are POSITIONAL [x,y] (mirrors panel_tools._via_position
+## — SAME reply shape, independently read here since this pure model has no
+## dependency on panel_tools.gd). Defensively also accepts {x_mm,y_mm}/{x,y}/
+## {"position":...} dict shapes.
+static func _via_pt(raw) -> Vector2:
+	if raw is Dictionary:
+		var d: Dictionary = raw
+		if d.has("x_mm") and d.has("y_mm"):
+			return Vector2(float(d.get("x_mm", 0.0)), float(d.get("y_mm", 0.0)))
+		if d.has("x") and d.has("y"):
+			return Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
+		if d.has("position"):
+			return _pt(d.get("position", [0, 0]))
+		return Vector2.ZERO
+	return _pt(raw)
 
 
 ## T5: apply a candidate's geometry to the board as ONE batched transaction and

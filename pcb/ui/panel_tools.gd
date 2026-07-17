@@ -908,7 +908,7 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	var result: Dictionary = reply.get("result", {})
 	if commit:
 		return _materialize_routes(host, data, result, source_hints)
-	return _write_back_proposals(host, result, source_hints)
+	return _dual_write_propose(host, result, source_hints)
 
 
 ## Reach the router worker through the in-fence host bridge (async). The host
@@ -1050,6 +1050,30 @@ static func _write_back_proposals(host, result: Dictionary, source_hints: Array)
 		"via_count": int(result.get("via_count", 0)),
 		"drc_summary": result.get("drc_summary", {}),
 	}
+
+
+## T2 (S2.2) strangler-fig SHADOW-phase seam: PROPOSE dual-write. Runs the
+## EXISTING _write_back_proposals verbatim (annotation proposals stay the
+## UI's source of truth — unchanged behavior, unchanged return shape) and
+## THEN, ALONGSIDE it, ingests the SAME raw router `result` into the panel's
+## RoutingWorkspace (in-memory shadow model; persistence is T2a). Both writes
+## fire off the same reply so the shadow model sees exactly the geometry the
+## annotation path saw. Reached via host.get_panel() (the same duck-typed
+## host->panel back-reference run_router/route_board already use above) so a
+## host with no bound panel (headless / before mount) simply skips the shadow
+## write — the annotation proposals still return normally either way; a
+## missing/stub workspace on the panel is likewise a silent no-op (defensive,
+## never hit against a mounted PCBPanel post-T2).
+static func _dual_write_propose(host, result: Dictionary, source_hints: Array) -> Dictionary:
+	var out: Dictionary = _write_back_proposals(host, result, source_hints)
+	var panel = host.get_panel() if host != null and host.has_method("get_panel") else null
+	if panel != null and is_instance_valid(panel) and panel.has_method("get_routing_workspace"):
+		var workspace = panel.get_routing_workspace()
+		if workspace != null and workspace.has_method("ingest_routing_result"):
+			var data = _get_data(host)
+			var revision: int = int(data.board_revision) if data != null else 0
+			workspace.ingest_routing_result(result, source_hints, revision)
+	return out
 
 
 ## APPLY: materialize routed polylines as real traces (journaled) + transition

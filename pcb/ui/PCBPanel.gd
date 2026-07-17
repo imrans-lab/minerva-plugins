@@ -35,6 +35,11 @@ const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.
 const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
+## T2 (S2.2) strangler-fig SHADOW phase: the routing workspace is populated
+## ALONGSIDE the existing annotation proposals on every propose (dual-write,
+## see panel_tools.gd _dual_write_propose). It drives nothing visible yet —
+## annotation proposals remain the UI's source of truth.
+const _PcbRoutingWorkspaceScript: Script = preload("model/pcb_routing_workspace.gd")
 
 ## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
 ## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
@@ -64,6 +69,12 @@ var _file_path: String = ""
 
 ## Board model (pcb_data.gd) — round-tripped by save/load, edited by the canvas.
 var _data = null
+
+## T2 (S2.2) shadow routing workspace (pcb_routing_workspace.gd). In-memory
+## only this round (persistence is T2a) — built eagerly beside _data/
+## _annotation_host so get_routing_workspace() is valid from construction,
+## matching the _annotation_host eager-build convention below.
+var _routing_workspace = null
 
 ## The ported board canvas (custom-drawn Control child), built on mount.
 var _canvas: Control = null
@@ -158,6 +169,10 @@ func _init() -> void:
 		if not _restoring:
 			content_changed.emit())
 
+	# T2 (S2.2): the shadow routing workspace, built eagerly alongside the
+	# annotation host so get_routing_workspace() is valid immediately.
+	_routing_workspace = _PcbRoutingWorkspaceScript.new()
+
 	# Build the board model and seed the default board WITHOUT dirtying the tab
 	# (from_board_dict emits data_changed; gate it).
 	_data = _PcbDataScript.new()
@@ -190,6 +205,14 @@ func get_annotation_overlay_parent() -> Control:
 ## The board model (pcb_data.gd) this panel edits. Exposed for MCP/tests.
 func get_data():
 	return _data
+
+
+## T2 (S2.2): the shadow routing workspace (pcb_routing_workspace.gd), dual-
+## written on every propose alongside the annotation proposals. Exposed for
+## MCP/tests; not yet the UI's source of truth for anything (that lands in
+## later tasks — see the file-level docstring).
+func get_routing_workspace():
+	return _routing_workspace
 
 
 ## Panel-executed MCP tool entry point (DCR 019f6c3d0e3d contract §2
