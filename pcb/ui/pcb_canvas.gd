@@ -27,6 +27,9 @@ extends Control
 ## filter (the toolbar's layer selector drives trace_layer_filter).
 
 const PCBComponentScript := preload("model/pcb_component.gd")
+## T1.5: canonical layer contract (only _canonical_layer migrated here; layer
+## filter/color/rendering internals are T3's territory and untouched).
+const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 
 ## Signals
 signal component_selected(component_id: String)
@@ -370,13 +373,15 @@ func is_layer_visible(layer: String) -> bool:
 
 
 static func _canonical_layer(layer: String) -> String:
-	match layer:
-		"F.Cu":
-			return "top"
-		"B.Cu":
-			return "bottom"
-		_:
-			return layer
+	# T1.5: delegates to the ONE canonical GD contract. This UNIFIES the
+	# semantics onto the contract (kicad_to_canon case-folds and maps empty ->
+	# "top"), which DIFFERS from the old inline match's raw, case-sensitive
+	# passthrough. Safe because the sole caller (is_layer_visible) feeds
+	# canonical inputs into a bottom/not-bottom test, where "" and "top" behave
+	# identically — so the divergence is unreachable. Only THIS mapping fn is
+	# migrated; _layer_visible and rendering internals are untouched (T3 owns
+	# those, and rewrites this file).
+	return PcbLayerStack.kicad_to_canon(layer)
 
 
 ## Navigation events relayed from the platform AnnotationOverlay while an

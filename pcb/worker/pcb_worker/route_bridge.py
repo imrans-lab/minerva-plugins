@@ -42,13 +42,18 @@ from typing import Any, Optional
 
 from agent_router.board import Board, Pad, Net, Obstacle
 from agent_router.hints import RoutingHints, parse_hints
+from agent_router import layers as _layers
 
 
 # ---------------------------------------------------------------------------
 # Layer mapping (canonical "top"/"bottom" <-> KiCad "F.Cu"/"B.Cu")
 # ---------------------------------------------------------------------------
-
-_LAYER_MAP = {"top": "F.Cu", "bottom": "B.Cu"}
+# T1.5: the map now lives in the LOWER package agent_router.layers so it can be
+# shared with kicad_io without inverting the dependency direction. Re-exported
+# here (the SAME dict object, not a copy) so pcb_worker.methods._canonical_drc_layer
+# and any other reader of route_bridge._LAYER_MAP keep working and can never
+# drift from the canonical map.
+_LAYER_MAP = _layers.CANON_TO_KICAD
 # Nominal SMD pad extent (mm) used only when a component carries no per-pad
 # geometry (canonical Pin has no size field) and the pad is not through-hole.
 _DEFAULT_PAD_SIZE = (1.0, 1.0)
@@ -65,11 +70,12 @@ def _num(v: Any, default: float = 0.0) -> float:
 
 
 def _canon_layer(layer: Any) -> str:
-    """Map a canonical component/hint layer to a KiCad copper layer name."""
-    s = str(layer or "").strip()
-    if not s:
-        return "F.Cu"
-    return _LAYER_MAP.get(s.lower(), s)
+    """Map a canonical component/hint layer to a KiCad copper layer name.
+
+    Thin re-export of agent_router.layers.canon_to_kicad (T1.5); kept as a
+    module-level name for existing call sites.
+    """
+    return _layers.canon_to_kicad(layer)
 
 
 def _rotate_offset(px: float, py: float, rotation_deg: float) -> tuple[float, float]:

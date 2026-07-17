@@ -25,8 +25,20 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# KiCad canonical copper layer names for our abstract "top"/"bottom".
-_LAYER_MAP = {"top": "F.Cu", "bottom": "B.Cu", "": "F.Cu"}
+from agent_router import layers as _layers
+
+# Canonical "top"/"bottom" -> KiCad copper name. T1.5: the SAME dict object as
+# route_bridge._LAYER_MAP and kicad_io._CANON_TO_KICAD_LAYER (all three alias
+# agent_router.layers.CANON_TO_KICAD) so the worker's copper-layer emitters can
+# never drift again. kicad.py lives in pcb_worker, so importing the lower
+# agent_router base package is the allowed (upward) direction.
+#
+# _copper_layer's body below is UNCHANGED and its behaviour is byte-identical:
+# the shared map has no "" key, but _copper_layer's final `return "F.Cu"`
+# already maps an empty string (and any non-string / falsy input) to "F.Cu",
+# and a non-empty unknown/already-KiCad name still passes through unchanged and
+# un-case-folded ("F.Cu"->"F.Cu", "Edge.Cuts"->"Edge.Cuts").
+_LAYER_MAP = _layers.CANON_TO_KICAD
 
 
 def _num(v: Any, default: float = 0.0) -> float:

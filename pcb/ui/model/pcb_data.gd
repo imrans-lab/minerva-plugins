@@ -50,6 +50,7 @@ extends RefCounted
 const PCBComponentScript := preload("pcb_component.gd")
 const PCBNetScript := preload("pcb_net.gd")
 const PCBTraceScript := preload("pcb_trace.gd")
+const PcbLayerStack := preload("pcb_layer_stack.gd")
 
 ## Signals for reactive UI updates (panel relays these to drive dirty state).
 signal data_changed()
@@ -940,14 +941,11 @@ func from_board_dict(data: Dictionary) -> void:
 ## "bottom":"B.Cu"}, _canon_layer) — mirrored here (not imported: this is
 ## GDScript, that is Python) rather than re-invented.
 func _canon_layer_name(v) -> String:
-	var s := str(v).strip_edges()
-	if s.to_lower() == "f.cu":
-		return "top"
-	if s.to_lower() == "b.cu":
-		return "bottom"
-	if s.is_empty():
-		return "top"
-	return s.to_lower()
+	# T1.5: delegates to the ONE canonical GD contract; edge-case behaviour
+	# (empty -> "top", F.Cu/B.Cu -> top/bottom, else lower-cased passthrough)
+	# is preserved there. _via_to_board_dict's legacy "layers" consumption is
+	# unchanged and still routes through here.
+	return PcbLayerStack.kicad_to_canon(v)
 
 
 ## Map one internal via dict → canonical via dict. from_layer/to_layer are

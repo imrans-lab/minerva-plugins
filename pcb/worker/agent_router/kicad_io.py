@@ -11,6 +11,8 @@ from pathlib import Path as FilePath
 import re
 import math
 
+from agent_router import layers as _layers
+
 
 @dataclass
 class TraceSegment:
@@ -55,12 +57,11 @@ class Via:
         KiCad F.Cu/B.Cu at THIS boundary (the KiCad/engine side of the
         convention).
 
-        ``_CANON_TO_KICAD_LAYER`` intentionally mirrors
-        pcb_worker/route_bridge.py's ``_LAYER_MAP`` value-for-value rather
-        than importing it: agent_router is a standalone package pcb_worker
-        depends ON (never the reverse — see route_bridge.py's module
-        docstring), so this 2-entry map can't cross that boundary without
-        inverting it. When the source via has no from_layer/to_layer (legacy
+        ``_CANON_TO_KICAD_LAYER`` is the SAME object as
+        pcb_worker/route_bridge.py's ``_LAYER_MAP`` (both alias
+        agent_router.layers.CANON_TO_KICAD, T1.5) — agent_router is the lower
+        base package, so it can host the one shared map without inverting the
+        dependency direction. When the source via has no from_layer/to_layer (legacy
         vias), the dataclass default (F.Cu/B.Cu) is kept.
         """
         x = float(via.get("x_mm", 0.0) or 0.0)
@@ -79,9 +80,11 @@ class Via:
 
 
 # Canonical top/bottom -> KiCad copper layer name, at the KiCad-export
-# boundary. See Via.from_canonical for why this duplicates (rather than
-# imports) pcb_worker/route_bridge.py's _LAYER_MAP.
-_CANON_TO_KICAD_LAYER = {"top": "F.Cu", "bottom": "B.Cu"}
+# boundary. T1.5: this is now the SAME dict object as
+# pcb_worker/route_bridge.py's _LAYER_MAP -- both alias
+# agent_router.layers.CANON_TO_KICAD (the shared, lower-package contract) so
+# the two emitters can never drift again.
+_CANON_TO_KICAD_LAYER = _layers.CANON_TO_KICAD
 
 
 @dataclass

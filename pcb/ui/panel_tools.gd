@@ -44,6 +44,8 @@ extends RefCounted
 ## no class_name — reached by preload(), same convention every other
 ## cross-file pcb/ui/*.gd reference in this plugin already uses.
 const _PcbRouteHintKindScript := preload("kinds/pcb_route_hint_kind.gd")
+## T1.5: the ONE canonical layer/via-span contract (top/bottom <-> F.Cu/B.Cu).
+const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
 ## the plugin component enum carries extra values but is set by NAME,
@@ -603,7 +605,7 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 		if not trace_groups.has(key):
 			trace_groups[key] = {
 				"net_name": net_name,
-				"layer": "top" if layer == "F.Cu" else "bottom",
+				"layer": PcbLayerStack.kicad_to_canon(layer),
 				"width": seg.get("width", 0.3),
 				"segments": [],
 			}
@@ -639,7 +641,7 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 			"size": via_data.get("size", 0.8),
 			"drill": via_data.get("drill", 0.4),
 			"net_name": via_data.get("net_name", ""),
-			"layers": via_data.get("layers", ["F.Cu", "B.Cu"]),
+			"layers": via_data.get("layers", PcbLayerStack.default_via_kicad_layers()),
 		})
 
 	data.save_to_history("Import traces")
@@ -656,7 +658,7 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 		var trace = data.get_trace(trace_id)
 		if not trace:
 			continue
-		var layer_name: String = "F.Cu" if trace.layer == "top" else "B.Cu"
+		var layer_name: String = PcbLayerStack.canon_to_kicad(trace.layer)
 		for i in range(trace.waypoints.size() - 1):
 			var start_pt: Vector2 = trace.waypoints[i]
 			var end_pt: Vector2 = trace.waypoints[i + 1]
@@ -676,7 +678,7 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 			"size": via.get("size", 0.8),
 			"drill": via.get("drill", 0.4),
 			"net_name": via.get("net_name", ""),
-			"layers": via.get("layers", ["F.Cu", "B.Cu"]),
+			"layers": via.get("layers", PcbLayerStack.default_via_kicad_layers()),
 		})
 
 	return _ok({
@@ -1081,7 +1083,7 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 					continue
 				var trace = data.new_trace()
 				trace.net_name = net
-				trace.layer = "top" if lyr == "F.Cu" else "bottom"
+				trace.layer = PcbLayerStack.kicad_to_canon(lyr)
 				trace.width = width
 				for point in polyline:
 					trace.waypoints.append(point)
@@ -1102,14 +1104,15 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		var via_drill: float = float(dr.get("via_drill_mm", 0.0))
 		if via_drill <= 0.0:
 			via_drill = 0.4
+		var _via_span: Array = PcbLayerStack.default_through_via_span()
 		for via in route.get("vias", []):
 			data.add_via({
 				"position": _via_position(via),
 				"size": via_size,
 				"drill": via_drill,
 				"net_name": net,
-				"from_layer": "top",
-				"to_layer": "bottom",
+				"from_layer": _via_span[0],
+				"to_layer": _via_span[1],
 			})
 
 	# Snapshot AFTER mutation so the undo/redo checkpoint captures the applied

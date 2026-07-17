@@ -33,6 +33,8 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 ## Bridge-only: MCPPcbPanelTools (Minerva core, off-tree) reaches it via
 ## get_spatial_index() duck-typed, never by class.
 const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
+## T1.5: the ONE canonical layer contract (top/bottom <-> F.Cu/B.Cu).
+const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## Panel-executed MCP tool surface (C5, docket 019f6c465fd8): the generic
 ## accept_annotation_proposal/reject_annotation_proposal wrappers below forward
 ## to the SAME minerva_pcb_proposal_accept/_reject tool bodies the MCP dispatch
@@ -381,13 +383,15 @@ func is_annotation_visible(annotation: Dictionary) -> bool:
 func get_current_layer() -> String:
 	if _canvas == null or not is_instance_valid(_canvas) or not ("trace_layer_filter" in _canvas):
 		return "F.Cu"
-	match str(_canvas.trace_layer_filter):
-		"top":
-			return "F.Cu"
-		"bottom":
-			return "B.Cu"
-		_:
-			return "F.Cu"
+	# T1.5: only a "top"/"bottom" filter designates a single active copper layer;
+	# its KiCad name comes from the ONE contract. Any other filter value
+	# ("all"/""/unknown) means "no single active layer" and keeps the prior
+	# F.Cu default — so we guard the two copper ids explicitly rather than pass
+	# an arbitrary filter through canon_to_kicad (which would echo it unchanged).
+	var filter := str(_canvas.trace_layer_filter)
+	if filter == "top" or filter == "bottom":
+		return PcbLayerStack.canon_to_kicad(filter)
+	return "F.Cu"
 
 
 ## Clear-by-author (pcb-ui-native-cluster §5 / WC-3 deliverable 3): removes
