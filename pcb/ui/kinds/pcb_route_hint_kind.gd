@@ -59,6 +59,14 @@ const _COLOR_F_CU := Color(1.0, 0.5, 1.0, 0.95)      # magenta — top copper
 const _COLOR_B_CU := Color(0.30, 1.0, 0.40, 0.95)    # green   — bottom copper (complement)
 const _COLOR_OTHER := Color(0.85, 0.85, 0.85, 0.95)  # gray    — other/unspecified layer
 
+## Via marker (U2, DCR 019f7095c395 Stage-1): amber ring, distinct from both
+## layer colors and the AI cyan/human diamond anchor markers, so a
+## layer-transition point on a proposal reads as an explicit via, not a
+## silently-flattened joint.
+const _COLOR_VIA := Color(1.0, 0.85, 0.2, 0.95)
+const _VIA_MARKER_RADIUS_MM: float = 0.5
+const _VIA_MARKER_MIN_PX: float = 4.0
+
 ## Path hit-test tolerance in document (board-mm) units, on top of stroke half-width.
 const _HIT_THRESHOLD_MM: float = 0.6
 
@@ -878,13 +886,32 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	if width_mm > 0.0:
 		stroke_px = maxf(1.0, width_mm * ctx.zoom)
 
-	# Waypoint polyline (layer-tinted) if present; AI strokes are dashed.
-	var pts := _waypoint_points(annotation)
-	if pts.size() >= 2:
-		if is_ai:
-			_draw_dashed_polyline(ctx, pts, stroke_color, stroke_px)
-		else:
-			ctx.draw_polyline(pts, stroke_color, stroke_px)
+	# Waypoint polyline. Lossless proposals (U2, DCR 019f7095c395 Stage-1) carry
+	# kind_payload.segments — the route's EXACT per-segment geometry, each with
+	# its own real layer — so a reviewer SEES a layer change before accepting
+	# instead of the flattened `waypoints` polyline hiding it as one continuous
+	# joint. Draw those per-segment (each in ITS layer's color) when present;
+	# fall back to the single-color flattened polyline for hints/legacy
+	# proposals that only carry `waypoints`. AI strokes stay dashed either way.
+	var segments_raw: Variant = payload.get("segments", [])
+	var per_segment: Array = (segments_raw as Array) if segments_raw is Array else []
+	if not per_segment.is_empty():
+		_draw_per_segment_polyline(ctx, per_segment, stroke_px, is_ai)
+	else:
+		var pts := _waypoint_points(annotation)
+		if pts.size() >= 2:
+			if is_ai:
+				_draw_dashed_polyline(ctx, pts, stroke_color, stroke_px)
+			else:
+				ctx.draw_polyline(pts, stroke_color, stroke_px)
+
+	# Via markers (U2): a small amber ring at each via position so a layer
+	# change reads as an explicit, deliberate via — not a silent joint —
+	# before the human accepts the proposal.
+	var vias_raw: Variant = payload.get("vias", [])
+	var via_list: Array = (vias_raw as Array) if vias_raw is Array else []
+	for v in via_list:
+		_draw_via_marker(ctx, _to_vec2(v))
 
 	# Diamond marker at the anchor (AI keeps the substrate cyan so authorship
 	# stays one-glance even though strokes are now layer-tinted).
@@ -1081,6 +1108,40 @@ func _draw_dashed_polyline(ctx: AnnotationRenderContext, pts: PackedVector2Array
 			dist = dash_end + 1.5
 
 
+## Draw a route's EXACT per-segment geometry (U2): each segment in ITS OWN
+## layer's color (F.Cu magenta / B.Cu green, via _layer_color), so a layer
+## change is visible as a color change along the stroke rather than a hidden
+## joint in a single flattened-color polyline. AI strokes stay dashed
+## (reuses _draw_dashed_polyline per-segment); human strokes solid.
+func _draw_per_segment_polyline(ctx: AnnotationRenderContext, segments: Array, width_px: float, is_ai: bool) -> void:
+	for seg in segments:
+		if not (seg is Dictionary):
+			continue
+		var s: Dictionary = seg as Dictionary
+		var a := _to_vec2(s.get("start", [0, 0]))
+		var b := _to_vec2(s.get("end", [0, 0]))
+		var color := _layer_color(str(s.get("layer", "F.Cu")))
+		if is_ai:
+			_draw_dashed_polyline(ctx, PackedVector2Array([a, b]), color, width_px)
+		else:
+			ctx.draw_line(a, b, color, width_px)
+
+
+## Amber ring at a via position (document space), zoom-floored like the
+## anchor diamond so it stays visible zoomed far out.
+func _draw_via_marker(ctx: AnnotationRenderContext, pos: Vector2) -> void:
+	var r := maxf(_VIA_MARKER_RADIUS_MM, _VIA_MARKER_MIN_PX / maxf(ctx.zoom, 0.001))
+	var segs := 12
+	var pts := PackedVector2Array()
+	for i in range(segs):
+		var ang := TAU * float(i) / float(segs)
+		pts.append(pos + Vector2(cos(ang), sin(ang)) * r)
+	var cols := PackedColorArray()
+	cols.resize(segs)
+	cols.fill(_COLOR_VIA)
+	ctx.draw_polygon(pts, cols)
+
+
 ## Focus points for the overlay's selection markers (duck-typed hook): DRC
 ## violation sites carried on a flagged proposal, so selecting a "⚠ N" row
 ## rings each collision on the canvas (owner HITL 2026-07-17: "I can't tell
@@ -1135,6 +1196,18 @@ static func _to_vec2(raw: Variant) -> Vector2:
 		return raw
 	if raw is Array and (raw as Array).size() >= 2:
 		return Vector2(float((raw as Array)[0]), float((raw as Array)[1]))
+	# Dict-shaped points (e.g. a via emitted as {x_mm,y_mm}) — parity with
+	# panel_tools._via_position so a dict via renders at its real position, not
+	# the origin. The worker emits [x,y] today; this keeps the marker correct
+	# if a dict shape ever reaches the renderer.
+	if raw is Dictionary:
+		var d: Dictionary = raw as Dictionary
+		if d.has("x_mm") and d.has("y_mm"):
+			return Vector2(float(d["x_mm"]), float(d["y_mm"]))
+		if d.has("x") and d.has("y"):
+			return Vector2(float(d["x"]), float(d["y"]))
+		if d.has("position"):
+			return _to_vec2(d.get("position", []))
 	return Vector2.ZERO
 
 

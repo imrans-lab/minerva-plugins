@@ -955,6 +955,16 @@ static func _write_back_proposals(host, result: Dictionary, source_hints: Array)
 		kp["proposal_for"] = linked
 		if width > 0.0:
 			kp["width_mm"] = width
+		# Lossless carry (U2, DCR 019f7095c395 Stage-1): the route's EXACT
+		# per-segment geometry (real per-segment layer, not the flattened
+		# summary above) and its vias, stored verbatim so _proposal_accept can
+		# commit precisely what was proposed instead of reconstructing a
+		# single-layer, no-via approximation from `waypoints`/`layer`.
+		# `waypoints` + `layer` are KEPT unchanged (backward-compat: the
+		# renderer and legacy proposals still read them; `layer` stays the
+		# first-segment summary for the badge).
+		kp["segments"] = (route.get("segments", []) as Array).duplicate(true)
+		kp["vias"] = (route.get("vias", []) as Array).duplicate(true)
 		# DRC-at-propose (docket 019f6f1492e0): the worker's route() attaches a
 		# per-route "drc" verdict (see pcb_worker.methods._attach_route_drc) —
 		# copy it onto the proposal's kind_payload so the dock badge (generic
@@ -1030,13 +1040,26 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 				made_any = true
 		if not made_any:
 			failed.append({"net": net, "reason": "no usable segments in routed result"})
+		# Via size/drill (U2, DCR 019f7095c395 Stage-1): the board's own
+		# design_rules when set (via_diameter_mm/via_drill_mm), else the prior
+		# 0.8/0.4 defaults — never hardcoded over an authored board's rules.
+		# from_layer/to_layer are the canonical (top/bottom) span fields U1
+		# added; a 2-layer board's via always spans top<->bottom.
+		var dr: Dictionary = data.design_rules if data.design_rules is Dictionary else {}
+		var via_size: float = float(dr.get("via_diameter_mm", 0.0))
+		if via_size <= 0.0:
+			via_size = 0.8
+		var via_drill: float = float(dr.get("via_drill_mm", 0.0))
+		if via_drill <= 0.0:
+			via_drill = 0.4
 		for via in route.get("vias", []):
 			data.add_via({
-				"position": _arr_to_vec2(via),
-				"size": 0.8,
-				"drill": 0.4,
+				"position": _via_position(via),
+				"size": via_size,
+				"drill": via_drill,
 				"net_name": net,
-				"layers": ["F.Cu", "B.Cu"],
+				"from_layer": "top",
+				"to_layer": "bottom",
 			})
 
 	# Snapshot AFTER mutation so the undo/redo checkpoint captures the applied
@@ -1097,18 +1120,24 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 	}
 
 
-## PER-PROPOSAL accept (C5, docket 019f6c465fd8, deliverable 2). Materializes
-## ONE proposal's own stored polyline as a real trace, sharing _materialize_routes
-## verbatim rather than re-implementing trace synthesis: the proposal's
-## kind_payload.waypoints (the FULL polyline — _write_back_proposals always
-## stores anchor..dest, never the interior-only convention) is chopped into a
-## synthetic single-route "result" shaped exactly like a router reply
-## ({routes:[{net, segments, vias:[]}]}), then handed to _materialize_routes
-## together with the REAL source-hint dicts kind_payload.proposal_for points at
-## (so width/consumed-id resolution — and the removed_proposal_ids cleanup pass
-## that finds and deletes proposals linking to a consumed hint — are the exact
-## same code the bulk commit=true path runs). Owner-ratified contract (HITL-2):
-## an accepted proposal AND its source hint(s) are both deleted; regular (non-
+## PER-PROPOSAL accept (C5, docket 019f6c465fd8, deliverable 2; lossless carry
+## U2, DCR 019f7095c395 Stage-1). Materializes ONE proposal's own stored route
+## as real trace(s)/via(s), sharing _materialize_routes verbatim rather than
+## re-implementing trace synthesis: the proposal's kind_payload.segments +
+## kind_payload.vias (the EXACT per-segment-layer geometry and vias
+## _write_back_proposals stores verbatim from the router's route) are handed
+## through unchanged in a synthetic single-route "result" shaped exactly like
+## a router reply ({routes:[{net, segments, vias}]}). LEGACY proposals written
+## before U2 (no kind_payload.segments) fall back to chopping
+## kind_payload.waypoints (the FULL polyline — always anchor..dest, never
+## interior-only) into single-layer segments on kind_payload.layer, with no
+## vias — the pre-U2 lossy behavior, kept only for old proposals still on a
+## board. Either way the result is handed to _materialize_routes together with
+## the REAL source-hint dicts kind_payload.proposal_for points at (so width/
+## consumed-id resolution — and the removed_proposal_ids cleanup pass that
+## finds and deletes proposals linking to a consumed hint — are the exact same
+## code the bulk commit=true path runs). Owner-ratified contract (HITL-2): an
+## accepted proposal AND its source hint(s) are both deleted; regular (non-
 ## proposal) hints are untouched.
 static func _proposal_accept(host, args: Dictionary) -> Dictionary:
 	if host == null or not host.has_method("get_by_id"):
@@ -1131,18 +1160,36 @@ static func _proposal_accept(host, args: Dictionary) -> Dictionary:
 	if linked.is_empty():
 		return _err("annotation '%s' is not a proposal (no kind_payload.proposal_for)" % id)
 
-	var pts: Array = []
-	for wp in kp.get("waypoints", []):
-		pts.append(_arr_to_vec2(wp))
-	if pts.size() < 2:
-		return _err("proposal '%s' has no routable polyline" % id)
-
 	var net_names := _string_list(kp.get("net_names", []))
 	var net: String = net_names[0] if not net_names.is_empty() else ""
-	var kicad_layer := str(kp.get("layer", "F.Cu"))
+
+	# Lossless path (U2): when the proposal carries its EXACT per-segment
+	# geometry (written by _write_back_proposals above), commit that verbatim
+	# — real per-segment layers + real vias — instead of reconstructing a
+	# single-layer, no-via approximation from the flattened `waypoints`
+	# polyline (that would silently re-introduce the collision the via
+	# resolved). Fall back to waypoint reconstruction only for LEGACY
+	# proposals written before U2 (no `segments` key).
 	var segments: Array = []
-	for i in range(pts.size() - 1):
-		segments.append({"start": pts[i], "end": pts[i + 1], "layer": kicad_layer})
+	var vias: Array = []
+	var raw_segments: Variant = kp.get("segments", [])
+	if raw_segments is Array and not (raw_segments as Array).is_empty():
+		segments = (raw_segments as Array).duplicate(true)
+		var raw_vias: Variant = kp.get("vias", [])
+		if raw_vias is Array:
+			vias = (raw_vias as Array).duplicate(true)
+	else:
+		var pts: Array = []
+		for wp in kp.get("waypoints", []):
+			pts.append(_arr_to_vec2(wp))
+		if pts.size() < 2:
+			return _err("proposal '%s' has no routable polyline" % id)
+		var kicad_layer := str(kp.get("layer", "F.Cu"))
+		for i in range(pts.size() - 1):
+			segments.append({"start": pts[i], "end": pts[i + 1], "layer": kicad_layer})
+
+	if segments.is_empty():
+		return _err("proposal '%s' has no routable polyline" % id)
 
 	# The REAL source-hint dicts (for width fallback + so _materialize_routes'
 	# own consumed-id / removed-proposal cleanup runs against the true hints,
@@ -1158,7 +1205,7 @@ static func _proposal_accept(host, args: Dictionary) -> Dictionary:
 	if source_hints.is_empty():
 		source_hints = [{"id": "", "kind_payload": {"net_names": [net], "width_mm": kp.get("width_mm", 0.0)}}]
 
-	var synth_result := {"routes": [{"net": net, "segments": segments, "vias": []}]}
+	var synth_result := {"routes": [{"net": net, "segments": segments, "vias": vias}]}
 	var mat: Dictionary = _materialize_routes(host, data, synth_result, source_hints)
 	if not bool(mat.get("success", false)) or int(mat.get("traces_added", 0)) <= 0:
 		return _err("failed to materialize proposal '%s'" % id)
@@ -1306,6 +1353,23 @@ static func _arr_to_vec2(raw) -> Vector2:
 	if raw is Array and (raw as Array).size() >= 2:
 		return Vector2(float((raw as Array)[0]), float((raw as Array)[1]))
 	return Vector2.ZERO
+
+
+## A route's via entries are POSITIONAL [x, y] (the worker's public route()
+## reply — see pcb_worker.methods ~394-406: vias:[[x,y],...], no from/to).
+## Defensively also accept a {x_mm,y_mm} or {x,y} dict shape (a via re-fed
+## from a canonical board dict, e.g. a hand-edited/legacy proposal).
+static func _via_position(raw) -> Vector2:
+	if raw is Dictionary:
+		var d: Dictionary = raw as Dictionary
+		if d.has("x_mm") and d.has("y_mm"):
+			return Vector2(float(d.get("x_mm", 0.0)), float(d.get("y_mm", 0.0)))
+		if d.has("x") and d.has("y"):
+			return Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
+		if d.has("position"):
+			return _arr_to_vec2(d.get("position", [0, 0]))
+		return Vector2.ZERO
+	return _arr_to_vec2(raw)
 
 
 ## Connect trace segments into polylines (pure geometry; ported verbatim from the
