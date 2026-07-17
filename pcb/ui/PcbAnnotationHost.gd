@@ -349,6 +349,10 @@ func get_annotation_zoom() -> float:
 ## layer, and headless hosts (no canvas) are always visible. UI-only: MCP
 ## reads and the stored list are unaffected.
 func is_annotation_visible(annotation: Dictionary) -> bool:
+	# A superseded hint is drawn by its proposal (same geometry + verdict) —
+	# drawing both stacks near-identical polylines on the canvas.
+	if is_annotation_superseded(annotation):
+		return false
 	if _registry == null:
 		return true
 	var kind: AnnotationKind = _registry.get_annotation_kind(StringName(str(annotation.get("kind", ""))))
@@ -669,6 +673,35 @@ func add_annotation_v2(envelope: Dictionary) -> String:
 ## Base-API alias so callers using AnnotationHost.add_annotation() work.
 func add_annotation(annotation: Dictionary) -> String:
 	return add_annotation_v2(annotation)
+
+
+## Supersession (owner HITL 2026-07-17): a route hint answered by a live
+## proposal is REPRESENTED by that proposal — the proposal carries the same
+## routed geometry plus its DRC verdict, so showing the hint too means the
+## reviewer sees each route twice and learns its verdict only from the far
+## copy. Superseded hints are hidden from the workflow list (core consults
+## this duck-typed hook) and from the canvas (is_annotation_visible above).
+## UI-only and reversible: rejecting the proposal un-supersedes the hint,
+## which returns to the list/canvas ready for iteration; accepting deletes
+## both. MCP reads always see everything.
+func is_annotation_superseded(annotation: Dictionary) -> bool:
+	var ann_id := str(annotation.get("id", ""))
+	if ann_id.is_empty():
+		return false
+	var kp: Variant = annotation.get("kind_payload", {})
+	# A proposal is never itself superseded (it IS the successor).
+	if kp is Dictionary and (kp as Dictionary).has("proposal_for"):
+		return false
+	for other in _annotations:
+		if not (other is Dictionary):
+			continue
+		var okp: Variant = (other as Dictionary).get("kind_payload", {})
+		if not (okp is Dictionary):
+			continue
+		var links: Variant = (okp as Dictionary).get("proposal_for", null)
+		if links is Array and ann_id in (links as Array):
+			return true
+	return false
 
 
 ## View-flag relay (canvas show_hint_labels → kind label gate). The kind's
