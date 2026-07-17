@@ -682,9 +682,32 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 ## unmounted → image_data null (never crashes). Metadata is always populated from
 ## the model. Synchronous: this host's render_content_to_image returns the current
 ## frame directly (no deferred capture to await), so there is nothing to wait on.
+##
+## save_to_path (optional, bug 019f6ea4e52a): write the PNG to a caller-supplied
+## absolute filesystem path instead of returning it inline as base64. Mirrors the
+## fix already applied to minerva_annotations_render_overlay (Minerva commit
+## 4b74971c "render_overlay writes PNG to caller-supplied path") — inline base64
+## PNGs survive in the LLM conversation transcript and get re-tokenized every
+## turn, which stalled a routing agent for 6+ minutes on a single ~150KB inline
+## image. Validated up front (absolute path, parent dir exists) before any
+## capture work, same as the annotation-tools precedent. Default behavior with
+## no save_to_path is byte-for-byte unchanged for existing callers.
 static func _get_image(host, args: Dictionary) -> Dictionary:
 	if host == null:
 		return _err("PCB data not available")
+
+	var save_to_path: String = str(args.get("save_to_path", ""))
+	var using_save_path: bool = not save_to_path.is_empty()
+
+	# Validate save_to_path before doing any capture work — fail fast with a
+	# structured error, never crash.
+	if using_save_path:
+		if not save_to_path.is_absolute_path():
+			return _err("save_to_path must be an absolute path (got: %s)" % save_to_path)
+		var parent_dir: String = save_to_path.get_base_dir()
+		if not DirAccess.dir_exists_absolute(parent_dir):
+			return _err("save_to_path parent directory does not exist: %s" % parent_dir)
+
 	var data = _get_data(host)
 
 	var metadata := {}
@@ -701,6 +724,13 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 		img = host.call("render_content_to_image", Rect2()) as Image
 
 	if img == null:
+		if using_save_path:
+			return _ok({
+				"saved_to": null,
+				"format": "png",
+				"metadata": metadata,
+				"note": "No rendered image available (panel not mounted / headless).",
+			})
 		return _ok({
 			"image_data": null,
 			"format": "png",
@@ -711,6 +741,20 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 	var png_buf: PackedByteArray = img.save_png_to_buffer()
 	if png_buf.is_empty():
 		return _err("Failed to encode PCB image")
+
+	if using_save_path:
+		var save_err: Error = img.save_png(save_to_path)
+		if save_err != OK:
+			return _err("Failed to write PNG to %s (error %d)" % [save_to_path, save_err])
+		return _ok({
+			"saved_to": save_to_path,
+			"format": "png",
+			"width": img.get_width(),
+			"height": img.get_height(),
+			"byte_size": png_buf.size(),
+			"metadata": metadata,
+		})
+
 	return _ok({
 		"image_data": Marshalls.raw_to_base64(png_buf),
 		"format": "png",

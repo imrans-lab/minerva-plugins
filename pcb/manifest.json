@@ -329,14 +329,15 @@
     },
     {
       "name": "minerva_pcb_get_image",
-      "description": "Export a PCB view as a base64-encoded PNG image for LLM viewing.",
+      "description": "Export a PCB view as a PNG image. Prefer save_to_path — inline base64 is large and will bloat your context. Without save_to_path, the PNG is returned inline as base64 (image_data), which is expensive and should only be used when the caller specifically needs the bytes in the response.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "width": {"type": "integer", "description": "Requested image width in pixels (advisory). Default: 800"},
-          "height": {"type": "integer", "description": "Requested image height in pixels (advisory). Default: 600"}
+          "height": {"type": "integer", "description": "Requested image height in pixels (advisory). Default: 600"},
+          "save_to_path": {"type": "string", "description": "Optional absolute filesystem path to write the PNG to instead of returning it inline as base64. Parent directory must already exist. When set, the response omits image_data and instead returns {saved_to, width, height, byte_size} — read the file back with your file-read tool if you need to view it."}
         },
         "required": ["editor_name"]
       }
