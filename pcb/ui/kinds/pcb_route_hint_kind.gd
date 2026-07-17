@@ -854,10 +854,14 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	# substrate's author cyan so a proposed route reads as distinct from a
 	# human-authored (layer-tinted) hint at a glance. Human hints keep the
 	# layer-tinted stroke.
+	# Layer carries COLOR for every author (owner req 2026-07-17: with all AI
+	# output cyan you cannot tell F.Cu from B.Cu on a 16-proposal review, and
+	# zero-via boards LOOK like collisions). Authorship carries LINE STYLE
+	# instead: AI = dashed stroke + substrate-cyan anchor marker, human =
+	# solid stroke + layer-tinted marker.
 	var stroke_color := _layer_color(layer)
 	var author: Variant = annotation.get("author", null)
-	if author is Dictionary and str((author as Dictionary).get("kind", "human")) == "ai":
-		stroke_color = AnnotationRenderContext.author_color("ai")
+	var is_ai: bool = author is Dictionary and str((author as Dictionary).get("kind", "human")) == "ai"
 
 	# Stroke width: width_mm scaled by zoom (pixels-per-mm), floored to 1px so a
 	# hair-thin hint stays visible when zoomed out.
@@ -866,18 +870,25 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	if width_mm > 0.0:
 		stroke_px = maxf(1.0, width_mm * ctx.zoom)
 
-	# Waypoint polyline (layer-tinted) if present.
+	# Waypoint polyline (layer-tinted) if present; AI strokes are dashed.
 	var pts := _waypoint_points(annotation)
 	if pts.size() >= 2:
-		ctx.draw_polyline(pts, stroke_color, stroke_px)
+		if is_ai:
+			_draw_dashed_polyline(ctx, pts, stroke_color, stroke_px)
+		else:
+			ctx.draw_polyline(pts, stroke_color, stroke_px)
 
-	# Diamond marker at the anchor.
+	# Diamond marker at the anchor (AI keeps the substrate cyan so authorship
+	# stays one-glance even though strokes are now layer-tinted).
+	if is_ai:
+		pass  # marker color set below
+	var marker_color := AnnotationRenderContext.author_color("ai") if is_ai else stroke_color
 	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(ctx.zoom, 0.001))
 	var diamond := PackedVector2Array([
 		pos + Vector2(0, -d), pos + Vector2(d, 0),
 		pos + Vector2(0, d), pos + Vector2(-d, 0),
 	])
-	var cols := PackedColorArray([stroke_color, stroke_color, stroke_color, stroke_color])
+	var cols := PackedColorArray([marker_color, marker_color, marker_color, marker_color])
 	ctx.draw_polygon(diamond, cols)
 
 	# Label: the enriched summary (endpoints, layer, width, waypoint count).
@@ -1039,6 +1050,24 @@ func _waypoint_points(annotation: Dictionary) -> PackedVector2Array:
 	for wp in interior:
 		out.append(_to_vec2(wp))
 	return out
+
+
+## Dashed polyline in document space (AI-authored strokes). Dash geometry in
+## board mm so it scales with zoom like the preview (2.0/1.5 per the author
+## tools' _DASH_LEN_MM/_GAP_LEN_MM convention).
+func _draw_dashed_polyline(ctx: AnnotationRenderContext, pts: PackedVector2Array, color: Color, width_px: float) -> void:
+	for i in range(pts.size() - 1):
+		var a: Vector2 = pts[i]
+		var b: Vector2 = pts[i + 1]
+		var seg_len := a.distance_to(b)
+		if seg_len <= 0.0001:
+			continue
+		var dir := (b - a) / seg_len
+		var dist := 0.0
+		while dist < seg_len:
+			var dash_end := minf(dist + 2.0, seg_len)
+			ctx.draw_line(a + dir * dist, a + dir * dash_end, color, width_px)
+			dist = dash_end + 1.5
 
 
 static func _layer_color(layer: String) -> Color:
