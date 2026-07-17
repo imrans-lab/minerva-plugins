@@ -1,5 +1,11 @@
 class_name Cad_CADPanel
 extends MinervaPluginPanel
+
+## Ownership marker for the panel-executed tool dispatcher: fallback-resolved
+## panels (AnnotationHostRegistry path) aren't broker-keyed by editor name, so
+## the dispatcher reads this duck-typed property to verify the calling tool's
+## plugin owns this panel (fail-safe deny otherwise). HITL-caught 2026-07-16.
+var plugin_id: String = "cad"
 ## CAD editor panel — Round 2 layout integration.
 ##
 ## Cycle 2 R2 adopts platform widgets:

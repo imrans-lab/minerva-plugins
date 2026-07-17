@@ -1,4 +1,10 @@
 extends MinervaPluginPanel
+
+## Ownership marker for the panel-executed tool dispatcher: fallback-resolved
+## panels (AnnotationHostRegistry path) aren't broker-keyed by editor name, so
+## the dispatcher reads this duck-typed property to verify the calling tool's
+## plugin owns this panel (fail-safe deny otherwise). HITL-caught 2026-07-16.
+var plugin_id: String = "pcb"
 ## PCB editor panel — Round B (full board-editing UI port).
 ##
 ## Replaces the walking-skeleton crude renderer with the real ported canvas
