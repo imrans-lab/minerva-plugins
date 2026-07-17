@@ -87,6 +87,35 @@ var history: Array[Dictionary] = []
 var history_index: int = -1
 const MAX_HISTORY_SIZE := 50
 
+## Monotonic-forward board revision (T1 — PcbRoutingWorkspace foundation).
+## Increments on EVERY state-changing op — every forward mutation (via
+## record_change, the shared mutation hook) AND every undo/redo restore. It is
+## FORWARD-ONLY: undo produces a NEW board state, so it BUMPS the counter forward,
+## it does NOT roll it back. Rationale: a RouteCandidate stores base_board_revision
+## at generation time; a forward-only counter makes "has the board changed AT ALL
+## since I was generated?" an unambiguous `board_revision != base_board_revision`.
+##
+## LOAD-FAMILY EXCLUSIONS (deliberately do NOT bump — they establish a NEW
+## baseline, they are not a delta on the current one): clear_traces() bumps
+## (delta), but the whole-board loaders load_from_dict()/from_board_dict() and
+## clear-and-load paths do NOT — they replace the board wholesale and call
+## save_to_history("Load") only. from_csv() is NOT in this family: it is a
+## forward in-place merge, so it DOES bump (see from_csv). Rationale:
+## base_board_revision answers "did the CURRENT board change since this candidate
+## was generated"; loading a (possibly different) board resets the baseline, so a
+## bump there would be meaningless rather than a real delta.
+var board_revision: int = 0
+
+## Batch-commit state (T5's future composite transaction). NOTE ON WHAT BATCH
+## ACTUALLY DOES: mutators here never snapshot history themselves (the CALLER
+## decides when to save_to_history), so a batch has no per-mutation snapshots to
+## suppress. What it does today is DEFER the per-mutation board_revision bump:
+## while a batch is open every mutation's bump is coalesced, and end_batch()
+## performs exactly ONE save_to_history + ONE board_revision bump for the whole
+## batch — so a single undo reverts the entire batch as one step.
+var _batch_active: bool = false
+var _batch_touched: bool = false
+
 ## Change journal — append-only log of forward actions (not undo/redo)
 var change_journal: Array[Dictionary] = []
 const MAX_JOURNAL_SIZE := 200
@@ -474,6 +503,9 @@ func undo() -> bool:
 
 	history_index -= 1
 	_restore_state(history[history_index])
+	# Undo produces a NEW board state — bump FORWARD (never roll back). See
+	# board_revision doc.
+	_bump_board_revision()
 	data_changed.emit()
 	structure_changed.emit()
 	return true
@@ -486,9 +518,47 @@ func redo() -> bool:
 
 	history_index += 1
 	_restore_state(history[history_index])
+	# Redo is also a fresh state transition — bump forward.
+	_bump_board_revision()
 	data_changed.emit()
 	structure_changed.emit()
 	return true
+
+
+## Single point that advances the monotonic-forward board revision. While a batch
+## is open the bump is deferred (marked _batch_touched); end_batch() applies the
+## one bump for the whole batch.
+func _bump_board_revision() -> void:
+	if _batch_active:
+		_batch_touched = true
+		return
+	board_revision += 1
+
+
+## Open a batch: defer per-mutation board_revision bumps until end_batch()
+## (mutators don't self-snapshot history, so there is nothing else to suppress).
+## Nested begin_batch() is ignored (stays a single batch).
+func begin_batch() -> void:
+	if _batch_active:
+		push_warning("[PCBData] begin_batch called while a batch is already open")
+		return
+	_batch_active = true
+	_batch_touched = false
+
+
+## Close a batch: if any mutation was applied, perform exactly ONE save_to_history
+## and ONE board_revision bump for everything in the batch (a single undo reverts
+## the whole batch). A batch with no mutations is a no-op.
+func end_batch(action_name: String = "Batch") -> void:
+	if not _batch_active:
+		push_warning("[PCBData] end_batch called with no open batch")
+		return
+	_batch_active = false
+	if not _batch_touched:
+		return
+	_batch_touched = false
+	save_to_history(action_name)
+	_bump_board_revision()
 
 
 ## Check if undo is available
@@ -560,6 +630,13 @@ func _restore_state(state: Dictionary) -> void:
 
 ## Record a change to the journal
 func record_change(action: String, details: Dictionary) -> void:
+	# record_change is the ONE hook every forward mutator funnels through
+	# (add/remove/move/rotate component, net connect/disconnect/add/remove, trace
+	# add/remove/clear, via add/remove, resize). Bumping the board revision here
+	# gives every forward state change exactly one bump in a single place. undo/
+	# redo do NOT call record_change, so they bump explicitly (see undo/redo).
+	_bump_board_revision()
+
 	var entry := {
 		"timestamp": Time.get_unix_time_from_system(),
 		"action": action,
@@ -787,6 +864,7 @@ func from_csv(csv_text: String) -> void:
 		return
 
 	# Parse data rows
+	var imported := 0
 	for i in range(1, lines.size()):
 		var line := lines[i].strip_edges()
 		if line.is_empty():
@@ -815,7 +893,15 @@ func from_csv(csv_text: String) -> void:
 
 		component.setup_standard_pins()
 		components[component.id] = component
+		imported += 1
 
+	# from_csv is a forward in-place MERGE (appends/overwrites components on the
+	# CURRENT board — it does NOT clear or reset history), so it is a delta and
+	# MUST advance board_revision. Funnel one summary record through record_change
+	# (bumps once + journals + respects an active batch). A header-only CSV that
+	# imported nothing is a no-op and is left unbumped.
+	if imported > 0:
+		record_change("import_csv", {"count": imported})
 	structure_changed.emit()
 	data_changed.emit()
 
