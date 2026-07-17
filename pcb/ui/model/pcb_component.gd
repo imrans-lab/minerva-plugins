@@ -699,6 +699,74 @@ func _pads_from_list(pads_data: Array) -> void:
 		})
 
 
+## Synthesize render pads from geometry-bearing canonical pins. Worker-authored
+## boards express pad geometry ON the pins (drill_mm/annulus_diameter_mm for
+## through-hole, pad_width_mm/pad_height_mm for SMD) and carry no separate `pads`
+## array, so load_from_board_dict falls back here. Produces the same internal pad
+## shape as _pads_from_list. When fit_body is true (the dict gave no width/height)
+## the body box is fitted to the synthesized pad extents.
+func _pads_from_canonical_pins(pin_list: Array, fit_body: bool) -> void:
+	pads.clear()
+	var copper_layer := "B.Cu" if layer == "bottom" else "F.Cu"
+	var synthesized := false
+	for pd in pin_list:
+		if not (pd is Dictionary):
+			continue
+		var pos := Vector2(float(pd.get("x_mm", 0.0)), float(pd.get("y_mm", 0.0)))
+		var drill := float(pd.get("drill_mm", 0.0))
+		var annulus := float(pd.get("annulus_diameter_mm", 0.0))
+		var pw := float(pd.get("pad_width_mm", 0.0))
+		var ph := float(pd.get("pad_height_mm", 0.0))
+		var pad := {
+			"number": str(pd.get("number", "")),
+			"name": str(pd.get("name", "")),
+			"position": pos,
+		}
+		if drill > 0.0:
+			var d := annulus if annulus > 0.0 else drill * 2.0
+			pad["type"] = "tht"
+			pad["shape"] = "circle"
+			pad["size"] = Vector2(d, d)
+			pad["drill"] = Vector2(drill, drill)
+			pad["layers"] = ["F.Cu", "B.Cu"]
+		elif pw > 0.0 or ph > 0.0:
+			pad["type"] = "smd"
+			pad["shape"] = "rect"
+			pad["size"] = Vector2(pw if pw > 0.0 else 1.0, ph if ph > 0.0 else 1.0)
+			pad["drill"] = Vector2.ZERO
+			pad["layers"] = [copper_layer]
+		else:
+			# Bare positional pin (no pad geometry) — no render pad.
+			continue
+		pads.append(pad)
+		synthesized = true
+	if synthesized:
+		has_pad_geometry = true
+		if fit_body:
+			_fit_body_to_pads()
+
+
+## Fit the body box (width/height/local_bounds/bbox_center_offset) to the current
+## pad extents — used when a canonical board provided pad geometry but no explicit
+## body dimensions (worker-authored boards).
+func _fit_body_to_pads() -> void:
+	if pads.is_empty():
+		return
+	var min_p := Vector2(INF, INF)
+	var max_p := Vector2(-INF, -INF)
+	for pad in pads:
+		var pos: Vector2 = pad.get("position", Vector2.ZERO)
+		var sz: Vector2 = pad.get("size", Vector2.ZERO)
+		min_p.x = minf(min_p.x, pos.x - sz.x / 2.0)
+		min_p.y = minf(min_p.y, pos.y - sz.y / 2.0)
+		max_p.x = maxf(max_p.x, pos.x + sz.x / 2.0)
+		max_p.y = maxf(max_p.y, pos.y + sz.y / 2.0)
+	width = max_p.x - min_p.x
+	height = max_p.y - min_p.y
+	local_bounds = Rect2(min_p.x, min_p.y, width, height)
+	bbox_center_offset = (min_p + max_p) * 0.5
+
+
 ## Serialize to dictionary (legacy .minpcb shape — undo snapshots + Round-B)
 func to_dict() -> Dictionary:
 	var pins_dict := {}
@@ -871,7 +939,17 @@ func load_from_board_dict(data: Dictionary) -> void:
 	has_pad_geometry = data.get("has_pad_geometry", false)
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
-	_pads_from_list(data.get("pads", []))
+	# Render pads: editor-authored boards carry an explicit `pads` array (render
+	# detail parked in canonical Extra). Worker-authored boards (the worker
+	# canonical YAML) instead carry pad geometry ON the pins themselves and have
+	# NO `pads` array — synthesize the render pads from that pin geometry so a
+	# whole-board load (minerva_pcb_load_board) renders real pads, not
+	# placeholders. Fit the body to the pads only when the dict gave no size.
+	var explicit_pads: Array = data.get("pads", [])
+	if not explicit_pads.is_empty():
+		_pads_from_list(explicit_pads)
+	else:
+		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
 	_graphics_from_list(data.get("graphics", []))
 
 	properties = (data.get("properties", {}) as Dictionary).duplicate()

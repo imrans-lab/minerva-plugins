@@ -2,10 +2,38 @@ package board
 
 import (
 	"bytes"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// TestSMDPadDimsSurviveJSONMarshal guards the board-load gap: pad_width_mm /
+// pad_height_mm on an SMD pin must survive a YAML->Board->JSON round-trip. They
+// were previously parked in Pin.Extra (json:"-") and silently dropped on JSON
+// marshal, which lost SMD pad dimensions over the pcb.deserialize IPC reply that
+// minerva_pcb_load_board depends on.
+func TestSMDPadDimsSurviveJSONMarshal(t *testing.T) {
+	yamlSrc := "version: 1\nname: SMD\nwidth_mm: 10\nheight_mm: 10\n" +
+		"components:\n  - ref: SW1\n    footprint: SWITCH\n    x_mm: 5\n    y_mm: 5\n    rotation_deg: 0\n" +
+		"    pins:\n      - {number: A, x_mm: -3, y_mm: 0, pad_width_mm: 2, pad_height_mm: 2}\n" +
+		"nets: []\n"
+	b, err := UnmarshalYAML([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	p := b.Components[0].Pins[0]
+	if p.PadWidthMM != 2 || p.PadHeightMM != 2 {
+		t.Fatalf("YAML did not bind SMD pad dims to first-class fields: %+v", p)
+	}
+	out, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(out, []byte("pad_width_mm")) || !bytes.Contains(out, []byte("pad_height_mm")) {
+		t.Fatalf("SMD pad dims dropped on JSON marshal:\n%s", out)
+	}
+}
 
 // canonicalYAML is a hand-written source in the canonical contract, exercising
 // every top-level section including the opaque annotations / route_hints. It is

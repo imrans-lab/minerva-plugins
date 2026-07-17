@@ -1441,6 +1441,69 @@ func route_board(selection: Dictionary) -> Dictionary:
 		"message": str(result.get("error_message", result.get("error", "route failed")))}}
 
 
+## Whole-board load (minerva_pcb_load_board): parse canonical YAML via the Go
+## backend's pcb.deserialize channel, then rebuild the live board from the
+## returned canonical dict in ONE call — replacing the multi-call add_component /
+## connect_net / import_footprint_geometry / import_trace_geometry sequence.
+## Async, mirroring the pcb.serialize / route_board await pattern. Returns
+## {ok, result:{component_count, net_count, warnings}} or {ok:false, error:{…}}.
+func load_board_from_yaml(yaml_text: String) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null or _data == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var reply_id := "pcb.deserialize:%d" % Time.get_ticks_usec()
+	request.emit("pcb.deserialize", {"yaml": yaml_text}, reply_id)
+	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+
+	# Unwrap the deserialize reply. HandleDeserialize returns {board, warnings};
+	# the broker/worker path nests that under one or more {ok|success, result:{…}}
+	# envelopes (the live shape is {ok, result:{board, warnings}}). Recurse through
+	# `result` wrappers to the dict that directly carries `board`.
+	var payload = _unwrap_to_board(result)
+	if payload == null:
+		var code := str(result.get("error_code", ""))
+		var msg := str(result.get("error_message", result.get("error", "deserialize failed")))
+		if code == "plugin_not_running" or msg.findn("not running") != -1:
+			return {"ok": false, "error": {"kind": "plugin_not_running",
+				"message": msg, "hint": "start via minerva_plugin_start"}}
+		return {"ok": false, "error": {"kind": "worker_error", "message": msg}}
+
+	var board: Dictionary = payload.get("board")
+	var warnings: Array = payload.get("warnings", [])
+
+	# Rebuild the live board (from_board_dict emits data_changed; suppress the
+	# dirty relay for the whole load like the project-file restore path).
+	_restoring = true
+	_data.from_board_dict(board)
+	_restoring = false
+
+	# Reflect the new board in the toolbar/status and frame it in the canvas —
+	# _on_data_changed only queue_redraw()s, it does not refit, so mirror the
+	# file-open path (which does exactly this) or the capture shows the stale view.
+	_refresh_board_ui()
+	_zoom_to_fit_deferred()
+
+	return {"ok": true, "result": {
+		"component_count": _data.get_component_count(),
+		"net_count": _data.nets.size(),
+		"warnings": warnings,
+	}}
+
+
+## Recursively unwrap broker/worker envelopes ({ok|success, result:{…}}) down to
+## the dict that directly carries a `board` key. Returns that dict (board +
+## warnings siblings) or null when no board is present.
+func _unwrap_to_board(v) -> Variant:
+	if not (v is Dictionary):
+		return null
+	if v.get("board", null) is Dictionary:
+		return v
+	if v.get("result", null) is Dictionary:
+		return _unwrap_to_board(v.get("result"))
+	return null
+
+
 ## On-demand routing draft-check (T2.4). Production wiring for the reusable NATIVE
 ## draft-check seam T5 depends on: computes the current board coherence token,
 ## has the routing workspace build the request (flipping the checked candidates

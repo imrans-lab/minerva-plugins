@@ -124,8 +124,15 @@ type Component struct {
 // gerber spike carried through Extra (docket 019eb47ddebc, comment 508). A pin
 // with DrillMM > 0 is a through-hole pad: it gets a copper annulus on every
 // copper layer, a mask opening, and a drilled hole (plated unless Plated is
-// explicitly false — Plated is a pointer so "unspecified" means plated). SMD
-// pads leave all three zero/nil.
+// explicitly false — Plated is a pointer so "unspecified" means plated).
+//
+// PadWidthMM / PadHeightMM formalise SMD pad geometry the same way (docket
+// PLG board-load gap): an SMD pad (DrillMM == 0) carries an explicit rectangular
+// copper size. These were previously parked in Extra (yaml inline) and so
+// survived YAML round-trips but were dropped on JSON marshal (Extra is json:"-"),
+// which silently lost SMD pad dimensions over the pcb.deserialize IPC reply.
+// First-classing them keeps the JSON boundary lossless. A pad with neither drill
+// nor pad_width/height is a bare positional pin.
 type Pin struct {
 	Number            string  `json:"number" yaml:"number"`
 	Name              string  `json:"name,omitempty" yaml:"name,omitempty"`
@@ -133,6 +140,8 @@ type Pin struct {
 	YMM               float64 `json:"y_mm" yaml:"y_mm"`
 	DrillMM           float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
 	AnnulusDiameterMM float64 `json:"annulus_diameter_mm,omitempty" yaml:"annulus_diameter_mm,omitempty"`
+	PadWidthMM        float64 `json:"pad_width_mm,omitempty" yaml:"pad_width_mm,omitempty"`
+	PadHeightMM       float64 `json:"pad_height_mm,omitempty" yaml:"pad_height_mm,omitempty"`
 	Plated            *bool   `json:"plated,omitempty" yaml:"plated,omitempty"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`

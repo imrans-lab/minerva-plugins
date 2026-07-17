@@ -119,6 +119,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_redo(host, args)
 		"minerva_pcb_add_via":
 			return _add_via(host, args)
+		"minerva_pcb_load_board":
+			return await _load_board(host, args)
 	return {}
 
 
@@ -1521,6 +1523,26 @@ static func _resolve_data(host) -> Variant:
 
 
 # ── Envelope builders (self-contained, mirrors MCPCadTools/MCPPcbPanelTools) ──
+
+## Whole-board load (minerva_pcb_load_board) — parse canonical YAML via the Go
+## backend's pcb.deserialize channel and rebuild the live board in one call.
+## ASYNC: awaits the panel broker bridge (host.load_board → panel.load_board_from_yaml),
+## same shape as _apply_route_hints. Failure-as-feedback: a worker/broker failure
+## comes back as an _err, never a crash.
+static func _load_board(host, args: Dictionary) -> Dictionary:
+	if host == null:
+		return _err("PCB data not available")
+	var yaml_text: String = str(args.get("yaml", ""))
+	if yaml_text.is_empty():
+		return _err("yaml is required")
+	if not host.has_method("load_board"):
+		return _err("host has no load_board bridge to the panel")
+	var reply: Dictionary = await host.load_board(yaml_text)
+	if not bool(reply.get("ok", false)):
+		var err_info: Dictionary = reply.get("error", {})
+		return _err(str(err_info.get("message", "load_board failed")))
+	return _ok(reply.get("result", {}))
+
 
 static func _ok(data: Dictionary = {}) -> Dictionary:
 	var result := {"success": true}

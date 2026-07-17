@@ -285,6 +285,16 @@ func run_router(selection: Dictionary) -> Dictionary:
 		"message": "no panel bound — router broker unreachable (headless / before mount)"}}
 
 
+## Whole-board load bridge (minerva_pcb_load_board). Forwards to the panel, which
+## owns the broker `request` signal for pcb.deserialize + from_board_dict — same
+## host→panel duck-typed path as run_router.
+func load_board(yaml_text: String) -> Dictionary:
+	if _panel != null and is_instance_valid(_panel) and _panel.has_method("load_board_from_yaml"):
+		return await _panel.load_board_from_yaml(yaml_text)
+	return {"ok": false, "error": {"kind": "worker_unavailable",
+		"message": "no panel bound — pcb.deserialize broker unreachable (headless / before mount)"}}
+
+
 func _connect_canvas() -> void:
 	if _canvas == null or not is_instance_valid(_canvas):
 		return
