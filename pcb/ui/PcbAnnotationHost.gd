@@ -660,6 +660,7 @@ func add_annotation_v2(envelope: Dictionary) -> String:
 	# never sees the anchored_to key: kind.primary_anchor_point → describe_point →
 	# anchored_to (e.g. "pad:U1.3"). No-op when the registry/kind is missing.
 	AnnotationHost._stamp_anchor(stored, self)
+	_backfill_route_hint_dest_point(stored)
 	_annotations.append(stored)
 	annotations_changed.emit()
 	return ann_id
@@ -668,6 +669,35 @@ func add_annotation_v2(envelope: Dictionary) -> String:
 ## Base-API alias so callers using AnnotationHost.add_annotation() work.
 func add_annotation(annotation: Dictionary) -> String:
 	return add_annotation_v2(annotation)
+
+
+## MCP-authored route hints carry dest_pins but no dest_point (the render/
+## hit-test cache the author tools stamp at commit). Resolve dest_pins[0] to
+## its live pad position at write time so agent-authored hints render their
+## full polyline (HITL-caught: first/last segments missing). Tool-authored
+## envelopes already carry dest_point and are left untouched.
+func _backfill_route_hint_dest_point(stored: Dictionary) -> void:
+	if str(stored.get("kind", "")) != "pcb_route_hint":
+		return
+	var kp: Variant = stored.get("kind_payload", {})
+	if not (kp is Dictionary) or kp.has("dest_point"):
+		return
+	var dests: Variant = kp.get("dest_pins", [])
+	if not (dests is Array) or dests.is_empty():
+		return
+	var ref := str(dests[0])
+	var dot := ref.rfind(".")
+	if dot < 0:
+		return
+	var data = get_board_data()
+	if data == null:
+		return
+	var comp = data.components.get(ref.left(dot), null)
+	if comp == null or not comp.has_method("get_pin_world_position"):
+		return
+	var pos: Vector2 = comp.get_pin_world_position(ref.substr(dot + 1))
+	kp["dest_point"] = [pos.x, pos.y]
+	stored["kind_payload"] = kp
 
 
 ## Build a conformant pcb_route_hint envelope (no id — add_annotation_v2 assigns
@@ -791,6 +821,7 @@ func update_annotation(annotation_id: String, new_annotation: Dictionary) -> boo
 			# Re-stamp anchored_to so it reflects the current board (a component
 			# may have moved under the marker since it was authored).
 			AnnotationHost._stamp_anchor(updated, self)
+			_backfill_route_hint_dest_point(updated)
 			_annotations[i] = updated
 			annotations_changed.emit()
 			return true

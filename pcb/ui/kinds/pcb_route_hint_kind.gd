@@ -1031,10 +1031,13 @@ func _waypoint_points(annotation: Dictionary) -> PackedVector2Array:
 		out.append(_to_vec2(payload["dest_point"]))
 		return out
 
+	# No dest_point cache (e.g. MCP-authored before the host backfill, or a
+	# dest-less waypoint hint): still start the polyline at the anchor so the
+	# source pad connects to the first bend (HITL-caught: the first and last
+	# segments of agent-authored hints never rendered).
+	out.append(_anchor_position(annotation))
 	for wp in interior:
 		out.append(_to_vec2(wp))
-	if out.is_empty():
-		out.append(_anchor_position(annotation))
 	return out
 
 
