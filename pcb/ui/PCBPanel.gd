@@ -1441,6 +1441,70 @@ func route_board(selection: Dictionary) -> Dictionary:
 		"message": str(result.get("error_message", result.get("error", "route failed")))}}
 
 
+## On-demand routing draft-check (T2.4). Production wiring for the reusable NATIVE
+## draft-check seam T5 depends on: computes the current board coherence token,
+## has the routing workspace build the request (flipping the checked candidates
+## to "checking"), forwards it over the DECLARED pcb.draft_check broker channel
+## with the live board attached, awaits the worker reply, and hands it back to
+## workspace.apply_check_result — which GUARDS on the echoed board_token +
+## workspace_generation (+ per-candidate revision) before writing any verdict, so
+## a stale reply can never mark a candidate clean. Async, mirroring the
+## pcb.serialize / route_board await pattern.
+##
+## ON-DEMAND ONLY. Debounce/coalescing/cancellation/auto-recheck are T6.
+##
+## Like route_board's live worker hop, the full broker→worker round-trip does not
+## run under the headless gd scaffold (no _MinervaIPC backend there); the seam is
+## covered by the worker pytest (draft_check) + the gd state-machine test
+## (begin_check/apply_check_result with a fake reply). When the IPC channel is not
+## ready the checked candidates are reverted (apply_check_result discards an empty
+## reply), never left stuck on "checking". Returns the draft_check result dict on
+## success, or {} when the hop could not run.
+func check_draft(candidate_ids: Array = []) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null or _data == null or _routing_workspace == null:
+		if _routing_workspace != null:
+			# Still flip+revert so a caller sees a coherent no-op, not stuck state.
+			_routing_workspace.begin_check(candidate_ids)
+			_routing_workspace.apply_check_result({})
+		return {}
+
+	# Board coherence token = the SAME fingerprint the durable sidecar guards with.
+	var board_dict: Dictionary = _data.to_board_dict()
+	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint(board_dict)
+
+	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
+	payload["board"] = board_dict
+
+	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
+	request.emit("pcb.draft_check", payload, reply_id)
+	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+
+	# Unwrap to the worker's draft_check result dict ({board_token,
+	# workspace_generation, findings, per_candidate}). The broker may nest the
+	# worker {ok, result} envelope one level deeper under {success, result}
+	# (same shape route_board unwraps). apply_check_result guard-discards an
+	# empty/mismatched reply, so a failed unwrap safely reverts the candidates.
+	var inner: Dictionary = _unwrap_draft_check(result)
+	_routing_workspace.apply_check_result(inner)
+	return inner
+
+
+## Dig the draft_check result dict out of whatever envelope the broker returned.
+func _unwrap_draft_check(result: Dictionary) -> Dictionary:
+	var r: Dictionary = result
+	# Broker wrap: {success, result:{ok, result:{…}}} → step into the worker envelope.
+	if r.has("result") and r.get("result") is Dictionary and (r.get("result") as Dictionary).has("ok"):
+		r = r.get("result")
+	# Worker envelope: {ok, result:{…}} → the inner result is what we want.
+	if r.has("ok") and r.get("result") is Dictionary:
+		r = r.get("result")
+	# A well-formed draft_check result carries per_candidate; else treat as no-op.
+	if r.has("per_candidate") or r.has("board_token"):
+		return r
+	return {}
+
+
 # ── Status / board-size UI ────────────────────────────────────────────────────
 
 func _update_board_size_label() -> void:

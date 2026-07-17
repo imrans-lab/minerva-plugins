@@ -197,6 +197,37 @@ func HandleRouteChannel(ctx context.Context, w *bridge.Worker, params json.RawMe
 	return w.Call(ctx, "route", params)
 }
 
+// ---- pcb.draft_check (worker-backed broker CHANNEL, T2.4) ------------------
+//
+// The on-demand honest-DRC-over-the-draft-set seam behind ui/PCBPanel.gd's
+// check_draft(). Like pcb.route it is a dotted panel-IPC channel (NOT an
+// LLM-facing pcb_* tool) that forwards verbatim to the Python worker — here the
+// "draft_check" method, which runs drc.run_drc over the union of committed
+// copper and every candidate's draft geometry (SET-scoped). Every declared
+// ipc_channels entry needs a same-named backend tool (main.go registry, gap
+// A-7), and the computation is Python, so this forwards rather than computing.
+
+var DraftCheckChannel = ToolSpec{
+	Name: "pcb.draft_check",
+	Description: "Panel IPC channel backing ui/PCBPanel.gd's on-demand routing " +
+		"draft-check. Forwards verbatim to the Python worker's 'draft_check' " +
+		"method, which runs the existing DRC checks over the UNION of the board's " +
+		"committed copper and every candidate's draft segments/vias (set-scoped, " +
+		"not per-candidate). Args: {board:<canonical Board dict>, candidates:[{" +
+		"candidate_id, net, revision, segments:[{id,layer,width,points}], vias:[{" +
+		"id,position,from_layer,to_layer}]}], board_token:<str>, " +
+		"workspace_generation:<int>}. Returns {ok, result:{board_token, " +
+		"workspace_generation, findings:[{kind,subjects:[{candidate_id," +
+		"segment_id?/via_id?}],...}], per_candidate:{candidate_id:'clean'/" +
+		"'violating'/'error'}}} — board_token + workspace_generation echoed " +
+		"verbatim so the GD side can discard a stale reply.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleDraftCheckChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "draft_check", params)
+}
+
 // ---- pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

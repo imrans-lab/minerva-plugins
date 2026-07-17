@@ -52,6 +52,40 @@ var _via_counter: int = 0
 ## memory this round, so this index does not need to survive a save/load yet).
 var _task_candidate: Dictionary = {}
 
+## ── T2.4 draft-check coherence state (TRANSIENT — never persisted) ─────────────
+## workspace_generation: a monotonic counter bumped on ANY candidate-set change
+## (add/remove/ingest/supersede + disposition changes that alter the live set).
+## It is the SECOND coherence token draft_check echoes (alongside board_token):
+## if the set drifted between begin_check and apply_check_result, the generation
+## differs and the whole reply is discarded. It is RUNTIME state — it resets to 0
+## on a fresh session/load and is DELIBERATELY absent from to_dict/to_sidecar_dict
+## (the durable sidecar guards coherence with the board fingerprint, not this).
+var _workspace_generation: int = 0
+
+## The current board coherence token (compute_board_fingerprint of the live
+## board). The workspace is a pure model with no PCBData dependency, so the OWNER
+## (PCBPanel) sets this before begin_check and keeps it current; begin_check
+## stamps it into the request and apply_check_result compares the echoed value
+## against it. Transient — never persisted.
+var board_token: String = ""
+
+## In-flight begin_check snapshot: candidate_id -> {"revision": int,
+## "prior": String}. Captured when begin_check flips a candidate to "checking"
+## so apply_check_result can (a) detect a per-candidate revision drift and
+## (b) revert a discarded candidate to exactly the validation it had before.
+var _pending_check: Dictionary = {}
+
+
+## The current workspace generation (read-only accessor for the owner/tests).
+func workspace_generation() -> int:
+	return _workspace_generation
+
+
+## Bump the generation on any candidate-set change. Kept private + called from
+## every set-mutating op so a stale draft-check reply is always caught.
+func _bump_generation() -> void:
+	_workspace_generation += 1
+
 
 # ── id minting ────────────────────────────────────────────────────────────────
 
@@ -88,6 +122,7 @@ func add_candidate(candidate) -> String:
 	candidates[id] = candidate
 	if candidate.disposition == "pinned":
 		pinned[id] = true
+	_bump_generation()  # candidate-set grew → any in-flight draft-check is stale
 	candidate_added.emit(id)
 	return id
 
@@ -120,6 +155,7 @@ func remove_candidate(id: String) -> void:
 	candidates.erase(id)
 	pinned.erase(id)
 	_findings.erase(id)
+	_bump_generation()  # candidate-set shrank → any in-flight draft-check is stale
 	if active_candidate_id == id:
 		active_candidate_id = ""
 		active_candidate_changed.emit("")
@@ -139,6 +175,7 @@ func pin(id: String) -> void:
 		return
 	pinned[id] = true
 	c.disposition = "pinned"
+	_bump_generation()  # disposition change alters the live set → invalidate in-flight check
 	candidate_changed.emit(id)
 
 
@@ -149,6 +186,7 @@ func unpin(id: String) -> void:
 		return
 	pinned.erase(id)
 	c.disposition = "proposed"
+	_bump_generation()
 	candidate_changed.emit(id)
 
 
@@ -162,6 +200,7 @@ func reject(id: String) -> void:
 	if c == null:
 		return
 	c.disposition = "rejected"
+	_bump_generation()  # rejected leaves the live set → invalidate in-flight check
 	candidate_changed.emit(id)
 
 
@@ -178,6 +217,181 @@ func set_validation(id: String, value: String) -> void:
 ## Stored findings for a candidate (empty until a later task populates them).
 func findings_for_candidate(id: String) -> Array:
 	return _findings.get(id, [])
+
+
+# ── T2.4 draft-check state machine (IPC-decoupled) ────────────────────────────
+# The reusable NATIVE draft-check seam T5 depends on. It is split so it can be
+# tested WITHOUT the worker: begin_check() builds a plain request payload and
+# apply_check_result() consumes a plain reply dict. PCBPanel.check_draft() wires
+# the two ends to the pcb.draft_check broker channel; here there is no IPC.
+# ON-DEMAND only — no debounce/coalescing/cancellation/auto-recheck (that is T6).
+
+## Candidate ids whose disposition keeps them in the LIVE routing set (i.e. NOT
+## superseded/rejected/committed) — the default scope of a draft check.
+func live_candidate_ids() -> Array:
+	var out: Array = []
+	for id in candidates:
+		var c = candidates[id]
+		if str(c.disposition) in ["superseded", "rejected", "committed"]:
+			continue
+		out.append(str(id))
+	return out
+
+
+## Begin an ON-DEMAND draft check. Flips the target candidates to
+## validation="checking" (emitting validation_changed), SNAPSHOTS each one's
+## candidate_revision + prior validation (so a mismatched reply can be reverted
+## exactly), and returns the request payload the worker's draft_check consumes:
+##   {board_token, workspace_generation, candidates:[{candidate_id, net,
+##    revision, segments:[{id,layer,width,points:[[x,y],…]}],
+##    vias:[{id,position:[x,y],from_layer,to_layer}]}]}
+## board_token comes from `board_token` (owner-set) and workspace_generation from
+## the current counter — both are stamped so apply_check_result can discard a
+## stale reply. `candidate_ids` empty ⇒ all live candidates.
+func begin_check(candidate_ids: Array = []) -> Dictionary:
+	var ids: Array = candidate_ids if not candidate_ids.is_empty() else live_candidate_ids()
+	_pending_check = {}
+	var out_candidates: Array = []
+	for raw_id in ids:
+		var cid := str(raw_id)
+		var c = get_candidate(cid)
+		if c == null:
+			continue
+		_pending_check[cid] = {"revision": int(c.candidate_revision), "prior": str(c.validation)}
+		set_validation(cid, "checking")  # emits validation_changed
+		out_candidates.append({
+			"candidate_id": cid,
+			"net": str(c.net),
+			"revision": int(c.candidate_revision),
+			"segments": _segments_wire(c),
+			"vias": _vias_wire(c),
+		})
+	return {
+		"board_token": board_token,
+		"workspace_generation": int(_workspace_generation),
+		"candidates": out_candidates,
+	}
+
+
+## Apply a draft_check reply. GUARDS FIRST, then writes — a mismatched reply must
+## NEVER mark a candidate clean:
+##   1+2. WHOLE-REPLY discard if reply.board_token != current board_token OR
+##        reply.workspace_generation != current _workspace_generation. Every
+##        candidate begin_check set to "checking" is reverted to its snapshotted
+##        prior validation; nothing is set clean/violating.
+##   3.   PER-CANDIDATE discard if a candidate's CURRENT candidate_revision !=
+##        the value snapshotted at begin_check (its geometry drifted mid-flight):
+##        that candidate is reverted to its prior validation and skipped.
+## Only on a FULL match is a candidate set clean/violating/error per the reply's
+## per_candidate verdict, its findings stored (attributed by candidate_id), and
+## validation_changed emitted. The workspace is the SOLE authoritative store of
+## validation + findings (no parallel store).
+func apply_check_result(reply: Dictionary) -> void:
+	var reply_token := str(reply.get("board_token", ""))
+	# workspace_generation round-trips through JSON as a float; int() normalises.
+	var reply_gen := int(reply.get("workspace_generation", -1))
+
+	# GUARD 1+2 — whole-reply coherence.
+	if reply_token != board_token or reply_gen != _workspace_generation:
+		_revert_pending()
+		_pending_check = {}
+		return
+
+	var per_candidate: Dictionary = reply.get("per_candidate", {}) if reply.get("per_candidate", {}) is Dictionary else {}
+	var findings: Array = reply.get("findings", []) if reply.get("findings", []) is Array else []
+
+	for raw_cid in per_candidate:
+		var cid := str(raw_cid)
+		var c = get_candidate(cid)
+		if c == null:
+			continue
+		var snap: Dictionary = _pending_check.get(cid, {})
+		# GUARD 3 — a candidate not in this check, or whose revision drifted after
+		# begin_check, is left as it was (revert to prior); never marked clean.
+		if snap.is_empty():
+			continue
+		if int(c.candidate_revision) != int(snap.get("revision", -1)):
+			if str(c.validation) == "checking":
+				set_validation(cid, str(snap.get("prior", "unchecked")))
+			continue
+		var verdict := str(per_candidate[raw_cid])
+		var value := "clean"
+		if verdict == "violating" or verdict == "clean" or verdict == "error":
+			value = verdict
+		else:
+			value = "error"  # an unknown verdict is never trusted as clean
+		set_validation(cid, value)
+		_findings[cid] = _findings_for_subject(findings, cid)
+
+	_pending_check = {}
+
+
+## Revert every still-"checking" pending candidate to its snapshotted prior
+## validation. Used on a whole-reply discard.
+func _revert_pending() -> void:
+	for cid in _pending_check:
+		var c = get_candidate(str(cid))
+		if c == null:
+			continue
+		if str(c.validation) == "checking":
+			set_validation(str(cid), str((_pending_check[cid] as Dictionary).get("prior", "unchecked")))
+
+
+## Findings from a draft_check reply that name `cid` among their subjects.
+static func _findings_for_subject(findings: Array, cid: String) -> Array:
+	var out: Array = []
+	for f in findings:
+		if not (f is Dictionary):
+			continue
+		for s in (f as Dictionary).get("subjects", []):
+			if s is Dictionary and str((s as Dictionary).get("candidate_id", "")) == cid:
+				out.append(f)
+				break
+	return out
+
+
+## Serialise a candidate's segments to the draft_check wire shape: points as
+## [[x,y],…] (JSON-friendly, mirrors route segment coordinates).
+func _segments_wire(c) -> Array:
+	var out: Array = []
+	for seg in c.segments:
+		if not (seg is Dictionary):
+			continue
+		var pts: Array = []
+		for p in (seg as Dictionary).get("points", []):
+			if p is Vector2:
+				pts.append([p.x, p.y])
+			elif p is Dictionary:
+				pts.append([float((p as Dictionary).get("x", 0.0)), float((p as Dictionary).get("y", 0.0))])
+		out.append({
+			"id": str((seg as Dictionary).get("id", "")),
+			"layer": str((seg as Dictionary).get("layer", "top")),
+			"width": float((seg as Dictionary).get("width", 0.25)),
+			"points": pts,
+		})
+	return out
+
+
+## Serialise a candidate's vias to the draft_check wire shape: position as [x,y].
+func _vias_wire(c) -> Array:
+	var out: Array = []
+	for via in c.vias:
+		if not (via is Dictionary):
+			continue
+		var via_dict: Dictionary = via
+		var pos = via_dict.get("position", Vector2.ZERO)
+		var xy: Array = [0.0, 0.0]
+		if pos is Vector2:
+			xy = [pos.x, pos.y]
+		elif pos is Dictionary:
+			xy = [float((pos as Dictionary).get("x", 0.0)), float((pos as Dictionary).get("y", 0.0))]
+		out.append({
+			"id": str(via_dict.get("id", "")),
+			"position": xy,
+			"from_layer": str(via_dict.get("from_layer", "top")),
+			"to_layer": str(via_dict.get("to_layer", "bottom")),
+		})
+	return out
 
 
 # ── stub ops (signatures fixed now; bodies land in T2/T5/T7) ───────────────────
@@ -253,6 +467,7 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 			var prior = candidates[prior_id]
 			generation = int(prior.generation) + 1
 			prior.disposition = "superseded"
+			_bump_generation()  # supersede leaves the live set (add_candidate bumps for the new one)
 			candidate_changed.emit(prior_id)
 
 		var cand = PcbRouteCandidate.new()

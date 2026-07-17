@@ -685,6 +685,274 @@ def _route(params: dict) -> dict:
     return {"ok": True, "result": payload}
 
 
+# ---------------------------------------------------------------------------
+# draft_check (T2.4) — honest DRC over the COMPLETE effective candidate set.
+#
+# The reusable NATIVE draft-check seam T5 (verbs) depends on. Unlike route()'s
+# DRC-at-propose (which checks the ONE route it just computed), draft_check is
+# SET-SCOPED: it runs the EXISTING drc.run_drc primitives (drc.py's four checks,
+# reused verbatim — this reimplements no rule) over the UNION of the board's
+# committed copper AND every candidate's draft segments/vias. A verdict for a
+# candidate therefore depends on the whole effective set — a collision between
+# two candidates, or between a candidate and committed copper, is found.
+#
+# ON-DEMAND ONLY. Debounce/coalescing/cancellation/auto-recheck are T6 and are
+# NOT built here — draft_check is a pure function of its params.
+#
+# params = {
+#   board: <canonical board dict>,
+#   candidates: [{candidate_id, net, revision, segments:[{id,layer,width,points}],
+#                 vias:[{id,position,from_layer,to_layer,...}]}],
+#   board_token: <opaque str — the GD board-coherence fingerprint>,
+#   workspace_generation: <opaque int — the GD workspace generation>,
+# }
+# Segment points and via positions travel as [[x,y], ...] / [x,y] (JSON-friendly,
+# mirroring route()'s segment coordinate style); {x_mm,y_mm}/{x,y} dicts are also
+# accepted defensively. Candidate layers are canonical "top"/"bottom" (same
+# spelling as committed board traces) so drc's raw-string layer equality lines
+# up; F.Cu/B.Cu are normalized defensively.
+#
+# reply = {ok, result: {board_token, workspace_generation, findings:[...],
+#          per_candidate:{candidate_id: "clean"/"violating"/"error"}}}
+# board_token + workspace_generation are ECHOED VERBATIM (never coerced) so the
+# GD side can discard a stale reply. Each finding names SUBJECT IDENTITY —
+# subjects:[{candidate_id, segment_id?/via_id?}] — not net-only; a violation
+# between two candidates names BOTH subjects (candidate-vs-committed names the
+# candidate + a {candidate_id:"board"} subject).
+# ---------------------------------------------------------------------------
+
+
+def _dc_dist(a, b) -> float:
+    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def _dc_points(raw) -> list:
+    """Coerce a segment's points to [(x, y), ...]. Accepts [[x,y],...] pairs and
+    {x_mm,y_mm}/{x,y} dicts."""
+    out: list = []
+    if isinstance(raw, list):
+        for p in raw:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                out.append((float(p[0]), float(p[1])))
+            elif isinstance(p, dict):
+                if "x_mm" in p and "y_mm" in p:
+                    out.append((float(p["x_mm"]), float(p["y_mm"])))
+                elif "x" in p and "y" in p:
+                    out.append((float(p["x"]), float(p["y"])))
+    return out
+
+
+def _dc_via_pos(raw):
+    """Coerce a via position to (x, y) or None. Accepts [x,y], {x_mm,y_mm},
+    {x,y}, and {position:<either>}."""
+    if isinstance(raw, dict):
+        if "x_mm" in raw and "y_mm" in raw:
+            return (float(raw["x_mm"]), float(raw["y_mm"]))
+        if "x" in raw and "y" in raw:
+            return (float(raw["x"]), float(raw["y"]))
+        pos = raw.get("position")
+        if pos is not None:
+            return _dc_via_pos(pos)
+        return None
+    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+        return (float(raw[0]), float(raw[1]))
+    return None
+
+
+def _dc_pt_touches_seg(pt, a, b, eps: float) -> bool:
+    """True if pt lies within eps of segment a-b (endpoints included)."""
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    seg_len2 = dx * dx + dy * dy
+    if seg_len2 <= 1e-18:
+        return _dc_dist(pt, a) <= eps
+    t = ((pt[0] - ax) * dx + (pt[1] - ay) * dy) / seg_len2
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    proj = (ax + t * dx, ay + t * dy)
+    return _dc_dist(pt, proj) <= eps
+
+
+def _dc_clearance(board) -> float:
+    """Same clearance derivation drc.run_drc uses — the attribution tolerance."""
+    clr = drc.DEFAULT_COINCIDENT_MM
+    dr = (board or {}).get("design_rules") if isinstance(board, dict) else None
+    if isinstance(dr, dict):
+        c = dr.get("clearance_mm")
+        if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
+            clr = float(c)
+    return clr
+
+
+def _dc_attribute(finding: dict, seg_subjects: list, via_subjects: list,
+                  eps: float) -> list:
+    """Map a drc.py finding back to the candidate/board subjects it names.
+
+    A finding carries only net(s) + an `at` point (drc is net-scoped); this
+    re-derives WHICH candidate segment/via that point falls on so the seam can
+    surface subject identity. crossing names both crossing nets' segments;
+    the endpoint checks (wrong_net_pad / dangling / layer_change_no_via) name
+    the offending net's segments (and any candidate via coincident with `at`,
+    e.g. the layer-change meeting point)."""
+    at = finding.get("at")
+    if not (isinstance(at, (list, tuple)) and len(at) >= 2):
+        return []
+    pt = (float(at[0]), float(at[1]))
+    kind = finding.get("type")
+    subjects: list = []
+    seen: set = set()
+
+    if kind == "crossing":
+        nets = {str(n) for n in (finding.get("nets") or [])}
+        layer = finding.get("layer")
+        for s in seg_subjects:
+            if s["net"] in nets and s["layer"] == layer \
+                    and _dc_pt_touches_seg(pt, s["a"], s["b"], eps):
+                key = ("seg", s["candidate_id"], s["segment_id"])
+                if key not in seen:
+                    seen.add(key)
+                    subjects.append({"candidate_id": s["candidate_id"],
+                                     "segment_id": s["segment_id"]})
+    else:
+        net = str(finding.get("net"))
+        for s in seg_subjects:
+            if s["net"] == net and _dc_pt_touches_seg(pt, s["a"], s["b"], eps):
+                key = ("seg", s["candidate_id"], s["segment_id"])
+                if key not in seen:
+                    seen.add(key)
+                    subjects.append({"candidate_id": s["candidate_id"],
+                                     "segment_id": s["segment_id"]})
+        for v in via_subjects:
+            if _dc_dist(pt, v["pos"]) <= eps:
+                key = ("via", v["candidate_id"], v["via_id"])
+                if key not in seen:
+                    seen.add(key)
+                    subjects.append({"candidate_id": v["candidate_id"],
+                                     "via_id": v["via_id"]})
+    return subjects
+
+
+def _draft_check(params: dict) -> dict:
+    board = params.get("board")
+    candidates = params.get("candidates") or []
+    # Echoed VERBATIM (no int/str coercion) so the GD guard can compare exactly.
+    board_token = params.get("board_token")
+    workspace_generation = params.get("workspace_generation")
+
+    def _reply(findings, per_candidate, error=None):
+        result = {
+            "board_token": board_token,
+            "workspace_generation": workspace_generation,
+            "findings": findings,
+            "per_candidate": per_candidate,
+        }
+        if error is not None:
+            result["error"] = error
+        return {"ok": True, "result": result}
+
+    per_candidate: dict = {}
+    seg_subjects: list = []  # {candidate_id, segment_id, net, layer, a, b}
+    via_subjects: list = []  # {candidate_id, via_id, pos}
+
+    # Committed board copper as SUBJECTS (candidate_id="board") so a
+    # candidate-vs-committed collision can name the board side too. Traces on
+    # disk are canonical top/bottom {x_mm,y_mm} polylines.
+    base_traces: list = []
+    base_vias: list = []
+    if isinstance(board, dict):
+        base_traces = list(board.get("traces")) if isinstance(board.get("traces"), list) else []
+        base_vias = list(board.get("vias")) if isinstance(board.get("vias"), list) else []
+        for tr in base_traces:
+            if not isinstance(tr, dict):
+                continue
+            net = str(tr.get("net", ""))
+            layer = _canonical_drc_layer(tr.get("layer"))
+            pts = [(float(p.get("x_mm", 0.0)), float(p.get("y_mm", 0.0)))
+                   for p in (tr.get("points") or []) if isinstance(p, dict)]
+            for a, b in zip(pts, pts[1:]):
+                seg_subjects.append({"candidate_id": "board", "segment_id": "",
+                                     "net": net, "layer": layer, "a": a, "b": b})
+
+    new_traces: list = []
+    new_vias: list = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        cid = str(cand.get("candidate_id", ""))
+        net = str(cand.get("net", ""))
+        per_candidate.setdefault(cid, "clean")
+        had_geometry = False
+        for seg in cand.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            pts = _dc_points(seg.get("points"))
+            if len(pts) < 2:
+                continue
+            had_geometry = True
+            sid = str(seg.get("id", ""))
+            layer = _canonical_drc_layer(seg.get("layer"))
+            width = float(seg.get("width", 0.25) or 0.25)
+            new_traces.append({
+                "net": net, "layer": layer, "width_mm": width,
+                "points": [{"x_mm": p[0], "y_mm": p[1]} for p in pts],
+            })
+            for a, b in zip(pts, pts[1:]):
+                seg_subjects.append({"candidate_id": cid, "segment_id": sid,
+                                     "net": net, "layer": layer, "a": a, "b": b})
+        for via in cand.get("vias") or []:
+            if not isinstance(via, dict):
+                continue
+            pos = _dc_via_pos(via)
+            if pos is None:
+                continue
+            had_geometry = True
+            vid = str(via.get("id", ""))
+            new_vias.append({"x_mm": pos[0], "y_mm": pos[1],
+                             "from_layer": _canonical_drc_layer(via.get("from_layer", "top")),
+                             "to_layer": _canonical_drc_layer(via.get("to_layer", "bottom"))})
+            via_subjects.append({"candidate_id": cid, "via_id": vid, "pos": pos})
+        if not had_geometry:
+            # A candidate with no usable geometry can't be checked → error verdict.
+            per_candidate[cid] = "error"
+
+    # Effective board = committed copper ∪ every candidate's draft copper.
+    effective: dict = dict(board) if isinstance(board, dict) else {}
+    effective["traces"] = base_traces + new_traces
+    effective["vias"] = base_vias + new_vias
+
+    try:
+        drc_result = drc.run_drc(effective)
+    except Exception as exc:  # geometry faults reported as data, mirrors _drc()
+        for cid in per_candidate:
+            per_candidate[cid] = "error"
+        return _reply([], per_candidate, error=str(exc))
+
+    eps = _dc_clearance(board)
+    findings_out: list = []
+    for f in drc_result.get("findings", []):
+        if not isinstance(f, dict):
+            continue
+        subjects = _dc_attribute(f, seg_subjects, via_subjects, eps)
+        finding: dict = {"kind": f.get("type"), "subjects": subjects,
+                         "at": f.get("at")}
+        if f.get("type") == "crossing":
+            finding["nets"] = f.get("nets")
+            finding["layer"] = f.get("layer")
+        else:
+            finding["net"] = f.get("net")
+        if f.get("type") == "wrong_net_pad":
+            finding["pad"] = f.get("pad")
+        findings_out.append(finding)
+        for s in subjects:
+            scid = str(s.get("candidate_id", ""))
+            # Only a real candidate flips to violating; "board" and error
+            # candidates are untouched (an error candidate has no subjects).
+            if scid in per_candidate and per_candidate[scid] != "error":
+                per_candidate[scid] = "violating"
+
+    return _reply(findings_out, per_candidate)
+
+
 def _init() -> dict:
     return {"ok": True, "result": {
         "worker_version": WORKER_VERSION,
@@ -717,6 +985,7 @@ _HANDLERS = {
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),
+    "draft_check": lambda req: _draft_check(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),
 }
 

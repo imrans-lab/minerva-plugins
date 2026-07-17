@@ -471,7 +471,8 @@
           "pcb.deserialize",
           "pcb.collect_export",
           "pcb.apply_export",
-          "pcb.route"
+          "pcb.route",
+          "pcb.draft_check"
         ],
         "save_mode": "host_owned"
       }
@@ -481,7 +482,8 @@
       "pcb.deserialize",
       "pcb.collect_export",
       "pcb.apply_export",
-      "pcb.route"
+      "pcb.route",
+      "pcb.draft_check"
     ]
   },
   "editor_items": [

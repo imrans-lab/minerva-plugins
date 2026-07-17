@@ -222,6 +222,9 @@ func initRegistry() {
 	// it forwards to the Python worker's "route" method (see worker_tools.go),
 	// so it registers here in the worker-backed section, not WrapInProcess'd.
 	registry.Register(tools.RouteChannel, tools.HandleRouteChannel)
+	// pcb.draft_check — same dotted panel-IPC channel shape as pcb.route,
+	// forwarding to the worker's "draft_check" method (T2.4). See worker_tools.go.
+	registry.Register(tools.DraftCheckChannel, tools.HandleDraftCheckChannel)
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +279,7 @@ var workerBackedTools = map[string]bool{
 	"pcb_check_libraries": true,
 	"pcb_check_bom":       true,
 	"pcb.route":           true,
+	"pcb.draft_check":     true,
 }
 
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {
