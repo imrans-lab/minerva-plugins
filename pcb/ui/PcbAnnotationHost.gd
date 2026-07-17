@@ -671,6 +671,17 @@ func add_annotation(annotation: Dictionary) -> String:
 	return add_annotation_v2(annotation)
 
 
+## View-flag relay (canvas show_hint_labels → kind label gate). The kind's
+## render() has no host/canvas access, so the flag lives on the kind instance
+## in THIS host's registry.
+func set_hint_labels_visible(visible: bool) -> void:
+	if _registry == null:
+		return
+	var kind = _registry.get_annotation_kind(&"pcb_route_hint")
+	if kind != null and "labels_visible" in kind:
+		kind.labels_visible = visible
+
+
 ## MCP-authored route hints carry dest_pins but no dest_point (the render/
 ## hit-test cache the author tools stamp at commit). Resolve dest_pins[0] to
 ## its live pad position at write time so agent-authored hints render their

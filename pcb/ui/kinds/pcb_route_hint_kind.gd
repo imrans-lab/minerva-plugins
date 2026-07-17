@@ -37,6 +37,10 @@ const _ANCHOR_TYPE_PAD := "pcb/pad"
 ## floor so hints stay visible when zoomed far out.
 const _MARKER_RADIUS: float = 1.25
 const _MARKER_MIN_PX: float = 6.0
+
+## View-flag: draw the per-hint summary label. Set by PcbAnnotationHost when
+## the canvas's show_hint_labels toggle changes (default ON).
+var labels_visible: bool = true
 const _LABEL_COLOR := Color(0.92, 0.96, 0.98, 1.0)
 const _LABEL_FONT_SIZE: int = 12
 
@@ -47,9 +51,13 @@ const _LABEL_FONT_SIZE: int = 12
 ## it on canvas. F.Cu matches the human preview color exactly (no color jump
 ## when a drawn hint commits). Distinct from real traces (red/blue), pads
 ## (copper/gold), and selection (yellow).
+## Complementary layer pair (owner req 2026-07-17: magenta/violet were too
+## close to separate visually). F.Cu keeps magenta (matches the human drawing
+## preview — no color jump on commit); B.Cu takes its color-wheel complement,
+## bright green (thin strokes stay distinct from the darker component fills).
 const _COLOR_F_CU := Color(1.0, 0.5, 1.0, 0.95)      # magenta — top copper
-const _COLOR_B_CU := Color(0.65, 0.40, 0.95, 0.95)   # violet  — bottom copper
-const _COLOR_OTHER := Color(0.60, 0.75, 0.40, 0.95)  # olive   — other/unspecified layer
+const _COLOR_B_CU := Color(0.30, 1.0, 0.40, 0.95)    # green   — bottom copper (complement)
+const _COLOR_OTHER := Color(0.85, 0.85, 0.85, 0.95)  # gray    — other/unspecified layer
 
 ## Path hit-test tolerance in document (board-mm) units, on top of stroke half-width.
 const _HIT_THRESHOLD_MM: float = 0.6
@@ -891,7 +899,10 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	var cols := PackedColorArray([marker_color, marker_color, marker_color, marker_color])
 	ctx.draw_polygon(diamond, cols)
 
-	# Label: the enriched summary (endpoints, layer, width, waypoint count).
+	# Label: the enriched summary — gated by the view flag (canvas
+	# show_hint_labels → host relay → this instance property).
+	if not labels_visible:
+		return
 	var font: Font = ThemeDB.fallback_font
 	if font != null:
 		ctx.draw_string(font, pos + Vector2(d + 3.0, 4.0), summary(annotation), _LABEL_COLOR, _LABEL_FONT_SIZE)

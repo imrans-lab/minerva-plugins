@@ -61,6 +61,16 @@ var show_grid: bool = true
 var show_ratsnest: bool = true
 var show_traces: bool = true
 var show_labels: bool = true
+## Route-hint/proposal summary labels (view flag). Setter relays to the
+## annotation host so the pcb_route_hint kind can gate its label draw, then
+## nudges the overlay via view_changed (owner req 2026-07-17: 16 proposals'
+## labels are unreadable clutter without a toggle).
+var show_hint_labels: bool = true:
+	set(value):
+		show_hint_labels = value
+		if _pin_inspector_host != null and _pin_inspector_host.has_method("set_hint_labels_visible"):
+			_pin_inspector_host.set_hint_labels_visible(value)
+		view_changed.emit()
 var show_pins: bool = true
 var snap_to_grid: bool = true
 var show_pads: bool = true
