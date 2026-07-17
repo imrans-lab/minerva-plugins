@@ -40,6 +40,10 @@ const _PanelToolsScript: Script = preload("panel_tools.gd")
 ## see panel_tools.gd _dual_write_propose). It drives nothing visible yet —
 ## annotation proposals remain the UI's source of truth.
 const _PcbRoutingWorkspaceScript: Script = preload("model/pcb_routing_workspace.gd")
+## T2a: durable, versioned, crash-safe persistence for the routing workspace,
+## with a board-coherence fingerprint. Wired beside the annotation sidecar in
+## _on_panel_save_request / _on_panel_load_request.
+const _PcbRoutingSidecarScript: Script = preload("model/pcb_routing_sidecar.gd")
 
 ## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
 ## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
@@ -1496,9 +1500,23 @@ func _zoom_to_fit_deferred() -> void:
 ## here — the platform does not auto-persist plugin-panel annotation sidecars
 ## (gap register C-15), so the panel owns that write.
 func _on_panel_save_request() -> Dictionary:
+	var board_dict: Dictionary = _data.to_board_dict()
 	if _annotation_host != null and not _file_path.is_empty():
 		_annotation_host.save_sidecar(_file_path)
-	return _data.to_board_dict()
+	# T2a: flush the routing workspace to "<board_path>.routing.json" AFTER the
+	# annotation sidecar. The fingerprint is computed from the CURRENT board_dict
+	# (the exact fabrication doc we return, which carries NO routing state), so a
+	# later load can tell whether this workspace still matches the board.
+	# Save vs Save-As: on Save the sidecar rewrites at the same _file_path with a
+	# matching fingerprint (candidates load clean next open); on Save-As _file_path
+	# has already been updated to the new path by _on_panel_load_request's capture
+	# (the host re-drives load with the new path) — but for a same-content Save-As
+	# the recomputed fingerprint still matches, so candidates stay valid. Zero
+	# candidates ⇒ the sidecar is deleted, never written empty.
+	if _routing_workspace != null and not _file_path.is_empty():
+		_PcbRoutingSidecarScript.save_workspace(
+			_file_path, _routing_workspace, board_dict, int(_data.board_revision))
+	return board_dict
 
 
 ## Restore board state previously returned by _on_panel_save_request.
@@ -1563,6 +1581,16 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		elif _has_legacy_annotation_blobs(doc):
 			_run_legacy_migration(doc)
 		# else: no sidecar, no legacy blobs — leave the host's list empty.
+
+	# T2a: load the routing workspace sidecar, coherence-gated. Runs INSIDE the
+	# _restoring gate (a restore, not a user edit). The fingerprint is recomputed
+	# from the board we JUST loaded into _data; a mismatch (board changed under the
+	# workspace — Save-As/copy/edit/crash-torn/ABA) marks ALL candidates stale
+	# rather than trusting them. Missing sidecar → nothing to load; corrupt/
+	# unknown-schema → quarantine, never a crashed load.
+	if _routing_workspace != null and not _file_path.is_empty():
+		_PcbRoutingSidecarScript.load_into_workspace(
+			_file_path, _routing_workspace, _data.to_board_dict(), int(_data.board_revision))
 	_restoring = false
 
 	_refresh_board_ui()

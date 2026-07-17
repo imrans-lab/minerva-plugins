@@ -227,7 +227,6 @@ func findings_for_candidate(id: String) -> Array:
 ## DIFFERENT task adds a genuinely new, independent candidate.
 func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], board_revision: int = 0) -> Array:
 	var new_ids: Array = []
-	var hint_ids := _hint_ids(source_hints)
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 
 	for route in router_reply.get("routes", []):
@@ -240,6 +239,13 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 			continue
 		var net: String = str(route_dict.get("net", ""))
 
+		# PER-NET attribution (T2a folds in docket #555): the task_key +
+		# source_hint_ids are keyed on the hints that target THIS net, not the
+		# GLOBAL propose hint set. A multi-net propose / a cross-net hint change
+		# no longer shifts an unrelated net's task_key (which would leave a stale
+		# duplicate). Mirrors panel_tools._source_hint_ids_for_net (same per-net
+		# filter + same fallback-to-all when no hint names the net).
+		var hint_ids := _hint_ids_for_net(source_hints, net)
 		var task_key := _task_key(net, hint_ids)
 		var generation := 1
 		var prior_id: String = str(_task_candidate.get(task_key, ""))
@@ -285,6 +291,26 @@ static func _hint_ids(source_hints: Array) -> Array:
 		if hint is Dictionary:
 			out.append(str((hint as Dictionary).get("id", "")))
 	return out
+
+
+## Ids of the source hints whose kind_payload.net_names include `net` — the
+## PER-NET provenance/attribution set. Mirrors panel_tools._source_hint_ids_for_net
+## exactly, INCLUDING its fallback: when NO hint names this net (e.g. a route for
+## a net with no matching hint), fall back to the full hint set so a candidate is
+## never left with empty provenance. Keeping this identical to the propose path
+## means the workspace's task_key matches the proposal-linking the UI already does.
+static func _hint_ids_for_net(source_hints: Array, net: String) -> Array:
+	var ids: Array = []
+	for hint in source_hints:
+		if not (hint is Dictionary):
+			continue
+		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
+		var nets: Array = kp.get("net_names", []) if kp.get("net_names", []) is Array else []
+		if net in nets:
+			ids.append(str((hint as Dictionary).get("id", "")))
+	if ids.is_empty():
+		return _hint_ids(source_hints)
+	return ids
 
 
 static func _to_string_typed_array(ids: Array) -> Array[String]:
@@ -432,6 +458,43 @@ func to_dict() -> Dictionary:
 	}
 
 
+## DURABLE serialisation for the on-disk routing sidecar (T2a). Identical to
+## to_dict() MINUS the transient UI selection (active_candidate_id,
+## selected_finding_id) — those are session state, not design intent, so they
+## are NOT persisted (a fresh load starts with no active/selected). The pinned
+## SET and the id counters ARE persisted: pinning is durable user intent, and
+## the counters keep post-load ids from colliding with loaded ones. Round-trips
+## back through load_from_dict (which defaults active/selected to "" when the
+## keys are absent).
+func to_sidecar_dict() -> Dictionary:
+	var cand_out: Dictionary = {}
+	for id in candidates:
+		cand_out[id] = candidates[id].to_dict()
+	var pinned_out: Array = []
+	for id in pinned:
+		pinned_out.append(id)
+	return {
+		"candidates": cand_out,
+		"pinned": pinned_out,
+		"counters": {
+			"candidate": _cand_counter,
+			"segment": _seg_counter,
+			"via": _via_counter,
+		},
+	}
+
+
+## Force EVERY candidate's validation axis to "stale" (disposition preserved).
+## The coherence-quarantine signal: a loaded workspace whose board changed
+## underneath it (fingerprint mismatch / unknown schema / missing token) is
+## surfaced but never silently trusted — every candidate must be re-validated
+## against the current board before it can be committed.
+func mark_all_stale() -> void:
+	for id in candidates:
+		candidates[id].set_validation("stale")
+		validation_changed.emit(str(id))
+
+
 func load_from_dict(data: Dictionary) -> void:
 	candidates.clear()
 	pinned.clear()
@@ -462,6 +525,28 @@ func load_from_dict(data: Dictionary) -> void:
 		for via in c.vias:
 			if via is Dictionary:
 				_via_counter = maxi(_via_counter, _suffix_num(str(via.get("id", ""))))
+
+	# Rebuild the in-memory idempotent-replace index from the loaded candidates
+	# so a re-propose AFTER a load still supersedes (rather than duplicating) the
+	# prior candidate for a task. _task_candidate is not itself persisted (T2's
+	# contract), but it IS deterministically reconstructable from the loaded set.
+	_rebuild_task_index()
+
+
+## Rebuild _task_candidate: task_key -> the CURRENT (non-superseded, highest-
+## generation) candidate answering it. Deterministic over the loaded candidates.
+func _rebuild_task_index() -> void:
+	_task_candidate.clear()
+	for id in candidates:
+		var c = candidates[id]
+		if c.disposition == "superseded":
+			continue
+		var tk := str(c.task_id)
+		if tk.is_empty():
+			continue
+		var cur := str(_task_candidate.get(tk, ""))
+		if cur.is_empty() or int(c.generation) >= int(candidates[cur].generation):
+			_task_candidate[tk] = str(id)
 
 
 static func from_dict(data: Dictionary):
