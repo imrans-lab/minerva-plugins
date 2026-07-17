@@ -236,6 +236,30 @@ def test_single_layer_change_no_via():
     assert f["at"] == [5.0, 5.0]
 
 
+def test_via_with_layer_span_satisfies_layer_change_check():
+    """A via carrying first-class from_layer/to_layer (docket 019... U1:
+    canonical via schema) still satisfies check D by POSITION — the layer
+    span isn't load-bearing for this check (see drc._harvest_vias docstring),
+    so adding a via at the meeting point silences the finding exactly as a
+    position-only via always has."""
+    board = yaml.safe_load(_MISSING_VIA)
+    board["vias"] = [{"x_mm": 5.0, "y_mm": 5.0, "drill_mm": 0.4,
+                      "diameter_mm": 0.8, "net": "V",
+                      "from_layer": "top", "to_layer": "bottom"}]
+    r = _run(board)
+    assert r["counts"]["layer_change_no_via"] == 0
+
+
+def test_legacy_via_without_layer_span_still_satisfies_check():
+    """A legacy via dict with NO from_layer/to_layer keys (pre-U1 shape) must
+    still work — no crash, same position-based credit."""
+    board = yaml.safe_load(_MISSING_VIA)
+    board["vias"] = [{"x_mm": 5.0, "y_mm": 5.0, "drill_mm": 0.4,
+                      "diameter_mm": 0.8, "net": "V"}]
+    r = _run(board)
+    assert r["counts"]["layer_change_no_via"] == 0
+
+
 def test_single_dangling_endpoint():
     r = _run(yaml.safe_load(_DANGLING))
     assert r["counts"]["dangling_endpoint"] == 1

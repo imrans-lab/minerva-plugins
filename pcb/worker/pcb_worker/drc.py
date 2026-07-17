@@ -224,6 +224,20 @@ def _harvest_segments(board: dict) -> list[_Seg]:
 
 
 def _harvest_vias(board: dict) -> list[tuple[float, float]]:
+    """Harvest via POSITIONS only (deliberate — see below).
+
+    A canonical via may now carry first-class from_layer/to_layer (top/bottom
+    span; see pcb_data.gd / board-yaml.md), but every DRC use of a via
+    (check C's dangling-endpoint credit, check D's layer_change_no_via
+    resolution) only needs to know THAT a via exists at a point, not which
+    two layers it bridges — on a 2-layer board every via already spans the
+    full top<->bottom, which is exactly what both checks assume. This
+    function never mutates board["vias"], so from_layer/to_layer are never
+    dropped from the source data — they simply aren't load-bearing for these
+    two checks today. If a future multi-layer board or partial (blind/buried)
+    via needs a layer-aware credit, extend this to a small (x, y, from, to)
+    tuple/dataclass and thread the span into checks C/D's distance tests.
+    """
     out: list[tuple[float, float]] = []
     for via in _list(board.get("vias")):
         if not isinstance(via, dict):

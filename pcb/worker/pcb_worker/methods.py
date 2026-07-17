@@ -478,13 +478,27 @@ def _routes_to_traces(routes: list) -> list:
 
 
 def _routes_to_vias(routes: list) -> list:
+    """Materialize proposed-route vias for DRC-at-propose (see _drc_for_routes).
+
+    Each via dict carries first-class from_layer/to_layer (canonical
+    top/bottom — see pcb_data.gd / board-yaml.md) so it matches the shape of
+    a canonical board via. agent_router.router.Route.vias is positional
+    ((x, y) only, no layer span — see agent_router/router.py's Route
+    dataclass) and on a 2-layer board a via always bridges the full
+    top<->bottom span, so that is the default here. This does NOT change the
+    public route() JSON contract (routes[].vias stays [[x, y], ...] — see
+    _serialize_routing_result); this dict shape is internal to DRC harvesting
+    only. If the engine ever reports a real per-via layer span, thread it
+    through here instead of the hardcoded default.
+    """
     vias: list = []
     for r in routes:
         if not isinstance(r, dict):
             continue
         for v in r.get("vias") or []:
             if isinstance(v, (list, tuple)) and len(v) >= 2:
-                vias.append({"x_mm": float(v[0]), "y_mm": float(v[1])})
+                vias.append({"x_mm": float(v[0]), "y_mm": float(v[1]),
+                             "from_layer": "top", "to_layer": "bottom"})
     return vias
 
 

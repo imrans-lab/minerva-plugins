@@ -47,6 +47,42 @@ class Via:
             f'(layers "{self.layers[0]}" "{self.layers[1]}") (net {self.net}))'
         )
 
+    @classmethod
+    def from_canonical(cls, via: dict, net_number: int = 0) -> "Via":
+        """Build a Via from a canonical via dict (x_mm/y_mm/diameter_mm/
+        drill_mm/from_layer/to_layer — see pcb/ui/model/pcb_data.gd and
+        pcb/docs/board-yaml.md). Maps the canonical top/bottom layer span to
+        KiCad F.Cu/B.Cu at THIS boundary (the KiCad/engine side of the
+        convention).
+
+        ``_CANON_TO_KICAD_LAYER`` intentionally mirrors
+        pcb_worker/route_bridge.py's ``_LAYER_MAP`` value-for-value rather
+        than importing it: agent_router is a standalone package pcb_worker
+        depends ON (never the reverse — see route_bridge.py's module
+        docstring), so this 2-entry map can't cross that boundary without
+        inverting it. When the source via has no from_layer/to_layer (legacy
+        vias), the dataclass default (F.Cu/B.Cu) is kept.
+        """
+        x = float(via.get("x_mm", 0.0) or 0.0)
+        y = float(via.get("y_mm", 0.0) or 0.0)
+        size = float(via.get("diameter_mm") or 0.8)
+        drill = float(via.get("drill_mm") or 0.4)
+        from_layer = via.get("from_layer")
+        to_layer = via.get("to_layer")
+        if from_layer and to_layer:
+            return cls(
+                position=(x, y), size=size, drill=drill, net=net_number,
+                layers=(_CANON_TO_KICAD_LAYER.get(str(from_layer), "F.Cu"),
+                        _CANON_TO_KICAD_LAYER.get(str(to_layer), "B.Cu")),
+            )
+        return cls(position=(x, y), size=size, drill=drill, net=net_number)
+
+
+# Canonical top/bottom -> KiCad copper layer name, at the KiCad-export
+# boundary. See Via.from_canonical for why this duplicates (rather than
+# imports) pcb_worker/route_bridge.py's _LAYER_MAP.
+_CANON_TO_KICAD_LAYER = {"top": "F.Cu", "bottom": "B.Cu"}
+
 
 @dataclass
 class KiCadPCB:

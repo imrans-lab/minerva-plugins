@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 
 from pcb_worker import drc as drc_module
-from pcb_worker.methods import handle_request
+from pcb_worker.methods import _routes_to_vias, handle_request
 
 
 def _call(method: str, params: dict) -> dict:
@@ -208,6 +208,30 @@ def test_drc_engine_failure_is_reported_not_raised(monkeypatch):
 # ---------------------------------------------------------------------------
 # Native pad-list path: no canonical board, DRC is skipped entirely.
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# _routes_to_vias (docket 019... U1: canonical via schema) — internal-only
+# DRC-harvesting shape, NOT the public route() JSON contract (routes[].vias
+# stays [[x, y], ...] there — see _serialize_routing_result / test above's
+# fixtures, none of which produce vias). agent_router.Route.vias is
+# positional-only, so from_layer/to_layer are always the top<->bottom default
+# here (a 2-layer board via always spans the full board).
+# ---------------------------------------------------------------------------
+
+
+def test_routes_to_vias_attaches_default_layer_span():
+    routes = [{"net": "SIG", "segments": [], "vias": [[12.5, 7.25], (1.0, 2.0)]}]
+    vias = _routes_to_vias(routes)
+    assert vias == [
+        {"x_mm": 12.5, "y_mm": 7.25, "from_layer": "top", "to_layer": "bottom"},
+        {"x_mm": 1.0, "y_mm": 2.0, "from_layer": "top", "to_layer": "bottom"},
+    ]
+
+
+def test_routes_to_vias_ignores_malformed_entries():
+    routes = [{"net": "SIG", "vias": [[1.0], "bad", None]}, "not-a-dict", {}]
+    assert _routes_to_vias(routes) == []
 
 
 def test_native_path_carries_no_drc_keys():

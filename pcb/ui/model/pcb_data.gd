@@ -78,7 +78,7 @@ var design_rules: Dictionary = {}
 var components: Dictionary = {}   # component_id -> pcb_component.gd
 var nets: Dictionary = {}         # net_name -> pcb_net.gd
 var traces: Dictionary = {}       # trace_id -> pcb_trace.gd
-var vias: Array[Dictionary] = []  # [{position, size, drill, net_name, layers}]
+var vias: Array[Dictionary] = []  # [{position, size, drill, net_name, from_layer, to_layer}]
 var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 
 ## Undo/redo history
@@ -919,8 +919,35 @@ func from_board_dict(data: Dictionary) -> void:
 	data_changed.emit()
 
 
-## Map one internal via dict → canonical via dict. Any keys beyond the mapped set
-## (e.g. "layers") ride as canonical Extra siblings (mirrors minpcb.go importVias).
+## Map a KiCad-named copper layer ("F.Cu"/"B.Cu") to the canonical top/bottom
+## span name used by the via from_layer/to_layer fields; already-canonical
+## values (and anything else) pass through lower-cased. This is the GDScript
+## side of the ONE canonical convention documented in
+## pcb/worker/pcb_worker/route_bridge.py (_LAYER_MAP = {"top":"F.Cu",
+## "bottom":"B.Cu"}, _canon_layer) — mirrored here (not imported: this is
+## GDScript, that is Python) rather than re-invented.
+func _canon_layer_name(v) -> String:
+	var s := str(v).strip_edges()
+	if s.to_lower() == "f.cu":
+		return "top"
+	if s.to_lower() == "b.cu":
+		return "bottom"
+	if s.is_empty():
+		return "top"
+	return s.to_lower()
+
+
+## Map one internal via dict → canonical via dict. from_layer/to_layer are
+## first-class canonical (top/bottom) fields on the copper span a via bridges.
+## Preference order: an already-canonical from_layer/to_layer pair on the
+## internal via (round-trip fidelity) > a legacy "layers" Extra passthrough
+## (KiCad-named, e.g. ["F.Cu","B.Cu"] — what panel_tools._materialize_routes /
+## import_trace_geometry currently store) mapped via _canon_layer_name > the
+## only span a 2-layer board has, top<->bottom. The legacy "layers" key is
+## consumed (mapped to from_layer/to_layer), NOT re-emitted, so a via never
+## carries both a "layers" array and first-class from_layer/to_layer at once.
+## Any OTHER extra keys still ride as canonical Extra siblings (mirrors
+## minpcb.go importVias).
 func _via_to_board_dict(via: Dictionary) -> Dictionary:
 	var d := {}
 	var pos = via.get("position", Vector2.ZERO)
@@ -933,15 +960,35 @@ func _via_to_board_dict(via: Dictionary) -> Dictionary:
 	d["drill_mm"] = float(via.get("drill", 0.0))
 	d["diameter_mm"] = float(via.get("size", 0.0))
 	d["net"] = str(via.get("net_name", ""))
+
+	var from_layer: String = str(via.get("from_layer", ""))
+	var to_layer: String = str(via.get("to_layer", ""))
+	if from_layer.is_empty() or to_layer.is_empty():
+		var legacy_layers = via.get("layers")
+		if legacy_layers is Array and legacy_layers.size() >= 2:
+			from_layer = _canon_layer_name(legacy_layers[0])
+			to_layer = _canon_layer_name(legacy_layers[1])
+		else:
+			from_layer = "top"
+			to_layer = "bottom"
+	d["from_layer"] = from_layer
+	d["to_layer"] = to_layer
+
 	for k in via:
-		if k in ["position", "drill", "size", "net_name"]:
+		if k in ["position", "drill", "size", "net_name", "layers", "from_layer", "to_layer"]:
 			continue
 		d[k] = via[k]
 	return d
 
 
 ## Map a canonical via list back to internal via dicts ({position,size,drill,
-## net_name,+extra}). Fed to _load_vias which normalises the position to Vector2.
+## net_name,from_layer,to_layer,+extra}). Fed to _load_vias which normalises
+## the position to Vector2. Tolerates legacy canonical vias with no
+## from_layer/to_layer (defaults to a full top<->bottom span) or with a
+## legacy "layers" KiCad-named array instead (mapped via _canon_layer_name).
+## The legacy "layers" key, if present, is consumed here and not carried into
+## the internal entry — from_layer/to_layer is the one internal representation
+## going forward, so a later _via_to_board_dict call round-trips it exactly.
 func _vias_from_board_list(via_list: Array) -> Array:
 	var result: Array = []
 	for vd in via_list:
@@ -953,8 +1000,21 @@ func _vias_from_board_list(via_list: Array) -> Array:
 			"size": float(vd.get("diameter_mm", 0.0)),
 			"net_name": str(vd.get("net", ""))
 		}
+		var from_layer: String = str(vd.get("from_layer", ""))
+		var to_layer: String = str(vd.get("to_layer", ""))
+		if from_layer.is_empty() or to_layer.is_empty():
+			var legacy_layers = vd.get("layers")
+			if legacy_layers is Array and legacy_layers.size() >= 2:
+				from_layer = _canon_layer_name(legacy_layers[0])
+				to_layer = _canon_layer_name(legacy_layers[1])
+			else:
+				from_layer = "top"
+				to_layer = "bottom"
+		entry["from_layer"] = from_layer
+		entry["to_layer"] = to_layer
+
 		for k in vd:
-			if k in ["x_mm", "y_mm", "drill_mm", "diameter_mm", "net"]:
+			if k in ["x_mm", "y_mm", "drill_mm", "diameter_mm", "net", "from_layer", "to_layer", "layers"]:
 				continue
 			entry[k] = vd[k]
 		result.append(entry)

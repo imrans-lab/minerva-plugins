@@ -113,6 +113,36 @@ class TestVia:
         via = Via(position=(30.0, 25.0), size=0.8, drill=0.4, net=2)
         assert via.layers == ("F.Cu", "B.Cu")
 
+    def test_from_canonical_maps_top_bottom_to_kicad_layers(self):
+        """A canonical via with from_layer/to_layer maps top/bottom -> F.Cu/B.Cu
+        (docket 019... U1: canonical via schema)."""
+        via = Via.from_canonical(
+            {"x_mm": 15.7, "y_mm": 55.88, "drill_mm": 0.4, "diameter_mm": 0.8,
+             "from_layer": "top", "to_layer": "bottom"},
+            net_number=3,
+        )
+        assert via.position == (15.7, 55.88)
+        assert via.size == 0.8
+        assert via.drill == 0.4
+        assert via.net == 3
+        assert via.layers == ("F.Cu", "B.Cu")
+        assert '(layers "F.Cu" "B.Cu")' in via.to_kicad()
+
+    def test_from_canonical_tolerates_legacy_via_without_span(self):
+        """A legacy via with no from_layer/to_layer defaults to F.Cu/B.Cu (no
+        crash) — same default the dataclass itself uses."""
+        via = Via.from_canonical(
+            {"x_mm": 1.0, "y_mm": 2.0, "drill_mm": 0.4, "diameter_mm": 0.8})
+        assert via.layers == ("F.Cu", "B.Cu")
+
+    def test_from_canonical_missing_size_fields_use_defaults(self):
+        """Missing diameter_mm/drill_mm fall back to sane defaults instead of
+        raising, mirroring Via's own dataclass defaults."""
+        via = Via.from_canonical({"x_mm": 1.0, "y_mm": 2.0})
+        assert via.size == 0.8
+        assert via.drill == 0.4
+        assert via.net == 0
+
 
 class TestKiCadWriting:
     """Tests for writing KiCad PCB files."""
