@@ -1081,6 +1081,29 @@ func _draw_dashed_polyline(ctx: AnnotationRenderContext, pts: PackedVector2Array
 			dist = dash_end + 1.5
 
 
+## Focus points for the overlay's selection markers (duck-typed hook): DRC
+## violation sites carried on a flagged proposal, so selecting a "⚠ N" row
+## rings each collision on the canvas (owner HITL 2026-07-17: "I can't tell
+## which item the comment refers to").
+func focus_points(annotation: Dictionary) -> Array:
+	var out: Array = []
+	var kp: Variant = annotation.get("kind_payload", {})
+	if not (kp is Dictionary):
+		return out
+	var drc: Variant = (kp as Dictionary).get("drc", null)
+	if not (drc is Dictionary):
+		return out
+	var violations: Variant = (drc as Dictionary).get("violations", [])
+	if not (violations is Array):
+		return out
+	for v in violations:
+		if v is Dictionary and (v as Dictionary).get("at", null) is Array:
+			var at: Array = (v as Dictionary)["at"]
+			if at.size() >= 2:
+				out.append(Vector2(float(at[0]), float(at[1])))
+	return out
+
+
 static func _layer_color(layer: String) -> Color:
 	match layer:
 		"F.Cu":
