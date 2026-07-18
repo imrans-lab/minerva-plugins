@@ -45,6 +45,13 @@ dev = [
     # gerber test suite for round-trip parsing of every emitted layer (not a
     # runtime dependency). Pinned to the spike's validated version.
     "pygerber==2.4.3",
+    # gerbonara: independent, unified Gerber + Excellon + IPC-356 reader used
+    # ONLY by the fabrication-verification test harness (not a runtime dependency,
+    # no FCIB). Justified as ADDITIVE over pygerber because pygerber parses only
+    # RS-274X Gerber — it does NOT read Excellon drill files or IPC-356, which we
+    # need for drill-to-copper registration checks. Pinned to the version proven
+    # importable + round-tripping the current exporter output on CPython 3.12.
+    "gerbonara==1.6.3",
 ]
 
 [tool.pytest.ini_options]
