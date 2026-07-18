@@ -44,6 +44,11 @@ const _PcbRoutingWorkspaceScript: Script = preload("model/pcb_routing_workspace.
 ## with a board-coherence fingerprint. Wired beside the annotation sidecar in
 ## _on_panel_save_request / _on_panel_load_request.
 const _PcbRoutingSidecarScript: Script = preload("model/pcb_routing_sidecar.gd")
+## T2.3: the strangler-fig cutover coordinator — a per-surface authority latch
+## ({canvas, inspector, verbs, mcp, persistence, drc}). In T2.3 every surface
+## stays annotation-authoritative (mechanism only); T3/T5 flip individual
+## surfaces once their write path is workspace-backed. Built beside the workspace.
+const _PcbRoutingCutoverScript: Script = preload("model/pcb_routing_cutover.gd")
 
 ## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
 ## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
@@ -79,6 +84,11 @@ var _data = null
 ## _annotation_host so get_routing_workspace() is valid from construction,
 ## matching the _annotation_host eager-build convention below.
 var _routing_workspace = null
+
+## T2.3 cutover coordinator (pcb_routing_cutover.gd), built eagerly beside the
+## workspace so get_routing_cutover() is valid from construction. Mechanism only
+## this round — all surfaces annotation-authoritative until T3/T5 flip them.
+var _routing_cutover = null
 
 ## The ported board canvas (custom-drawn Control child), built on mount.
 var _canvas: Control = null
@@ -177,6 +187,10 @@ func _init() -> void:
 	# annotation host so get_routing_workspace() is valid immediately.
 	_routing_workspace = _PcbRoutingWorkspaceScript.new()
 
+	# T2.3: the cutover coordinator, built eagerly beside the workspace. Every
+	# surface defaults annotation-authoritative — nothing is cut over in T2.3.
+	_routing_cutover = _PcbRoutingCutoverScript.new()
+
 	# Build the board model and seed the default board WITHOUT dirtying the tab
 	# (from_board_dict emits data_changed; gate it).
 	_data = _PcbDataScript.new()
@@ -217,6 +231,13 @@ func get_data():
 ## later tasks — see the file-level docstring).
 func get_routing_workspace():
 	return _routing_workspace
+
+
+## T2.3: the cutover coordinator (pcb_routing_cutover.gd). Exposed for MCP/tests
+## and the surfaces that will consult it once cutover begins (T3/T5). In T2.3 it
+## reports every surface annotation-authoritative.
+func get_routing_cutover():
+	return _routing_cutover
 
 
 ## Panel-executed MCP tool entry point (DCR 019f6c3d0e3d contract §2

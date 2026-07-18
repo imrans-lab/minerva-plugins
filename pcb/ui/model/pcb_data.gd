@@ -124,6 +124,15 @@ signal journal_entry_added(entry: Dictionary)
 ## Next trace ID counter
 var _next_trace_id: int = 1
 
+## Next via ID counter (T2.3). Vias are plain dicts (no wrapper class); a via
+## minted here carries a stable "id" ("via_N") so a committed route's copper can
+## be referenced by a durable identity that survives to_board_dict()/reload. The
+## id rides in the via dict's extra-key passthrough (_via_to_board_dict /
+## _vias_from_board_list already copy unknown keys), so no serialisation change
+## is needed. Restored to a HIGH-WATER MARK on load so post-load mints never
+## collide with loaded ids (mirrors RoutingWorkspace's counter policy).
+var _next_via_id: int = 1
+
 
 func _init(width: float = 100.0, height: float = 100.0) -> void:
 	board_width = width
@@ -424,15 +433,35 @@ func clear_traces() -> void:
 	traces.clear()
 	vias.clear()
 	_next_trace_id = 1
+	_next_via_id = 1
 	record_change("clear_traces", {})
 	data_changed.emit()
 
 
-## Add a via
-func add_via(via_data: Dictionary) -> void:
+## Add a via. Mints a stable "id" ("via_N") when the caller did not supply one
+## (T2.3) so committed copper carries a durable identity across serialisation.
+## Returns the via's id.
+func add_via(via_data: Dictionary) -> String:
+	if str(via_data.get("id", "")).is_empty():
+		via_data["id"] = "via_%d" % _next_via_id
+		_next_via_id += 1
+	else:
+		# A caller-supplied id must not let a later auto-mint collide with it.
+		_next_via_id = maxi(_next_via_id, _via_id_suffix(str(via_data["id"])) + 1)
 	vias.append(via_data)
-	record_change("add_via", {"index": vias.size() - 1})
+	record_change("add_via", {"index": vias.size() - 1, "via_id": str(via_data["id"])})
 	data_changed.emit()
+	return str(via_data["id"])
+
+
+## Trailing integer of a via id like "via_12" -> 12; 0 if none. Feeds the
+## high-water restoration so post-load mints never collide with loaded ids.
+static func _via_id_suffix(id: String) -> int:
+	var idx := id.rfind("_")
+	if idx < 0 or idx + 1 >= id.length():
+		return 0
+	var tail := id.substr(idx + 1)
+	return int(tail) if tail.is_valid_int() else 0
 
 
 ## Remove a via by index
@@ -793,6 +822,11 @@ func _load_vias(vias_data: Array) -> void:
 							float(parts[1].strip_edges()))
 					else:
 						via_entry["position"] = Vector2.ZERO
+			# High-water the via id counter so a later add_via() mint can never
+			# collide with a loaded via's id (T2.3 stable-id contract).
+			var vid := str(via_entry.get("id", ""))
+			if not vid.is_empty():
+				_next_via_id = maxi(_next_via_id, _via_id_suffix(vid) + 1)
 			vias.append(via_entry)
 
 

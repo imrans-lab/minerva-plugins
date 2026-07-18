@@ -842,13 +842,30 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 		return _err(str(result.get("error", "could not insert via")))
 
 	var new_ann: Dictionary = ann.duplicate(true)
-	new_ann["kind_payload"] = result.get("kind_payload", kp)
+	var new_kp: Dictionary = result.get("kind_payload", kp)
+	new_ann["kind_payload"] = new_kp
 	if not host.update_annotation(id, new_ann):
 		return _err("failed to persist via insertion for '%s'" % id)
+
+	# T2.3 bridged Add-Via: DESIGN CHOICE = route-through (not disable). Add-Via is
+	# a first-class capability that fires on the SAME propose-originated proposals
+	# that dual-write always bridges, so disabling it would break the common case.
+	# Instead, re-derive the correlated candidate's geometry from the SAME updated
+	# raw route (the recomputed segments + the appended via) so both stores stay
+	# geometrically identical — never one mutated without the other.
+	var bridged_synced := false
+	var workspace = _get_workspace(host)
+	if workspace != null and workspace.has_method("candidate_for_annotation"):
+		var cand_id := str(workspace.candidate_for_annotation(id))
+		if not cand_id.is_empty() and workspace.has_method("sync_candidate_geometry"):
+			var new_segments: Array = result.get("segments", []) if result.get("segments", []) is Array else []
+			var new_vias: Array = new_kp.get("vias", []) if new_kp.get("vias", []) is Array else []
+			bridged_synced = bool(workspace.sync_candidate_geometry(cand_id, new_segments, new_vias))
 
 	return _ok({
 		"via_count": result.get("via_count", 0),
 		"segments": result.get("segments", []),
+		"bridged_candidate_synced": bridged_synced,
 	})
 
 
@@ -986,61 +1003,70 @@ static func _gather_route_hints(host, hint_ids: Array) -> Array:
 	return out
 
 
-## PROPOSE: routed polylines → AI-authored cyan proposal annotations. The board
-## is NOT mutated — only annotations are added. Each proposal links to the source
-## hint id(s) answering the same net.
-static func _write_back_proposals(host, result: Dictionary, source_hints: Array) -> Dictionary:
-	var proposals: Array = []
+## T2.3 normalization seam: derive ONE normalized route record per route, ONCE,
+## from the raw router `result` + the propose call's source hints. BOTH shadow
+## projections — the annotation proposal (_write_records_as_proposals below) and
+## the RouteCandidate (RoutingWorkspace.ingest_record) — are then derived from
+## the SAME record, so they are guaranteed to describe identical geometry rather
+## than being two independent parses of `result` that can silently drift.
+##
+## A record carries the RAW router geometry verbatim (segments in
+## {start,end,layer} shape, vias positional [x,y]) so the annotation stores it
+## losslessly (U2) AND the workspace parses the exact same bytes into its
+## canonical candidate — plus the once-resolved provenance/width and the flattened
+## polyline/layer the annotation badge needs. `source_hints` rides along so the
+## workspace resolves width/hint-ids/endpoints from the identical inputs the
+## annotation side used.
+static func _normalize_route_records(result: Dictionary, source_hints: Array) -> Array:
+	var records: Array = []
 	for route in result.get("routes", []):
 		if not (route is Dictionary):
 			continue
 		var net: String = str(route.get("net", ""))
-		var pts: Array = _route_polyline(route)
-		if pts.size() < 2:
-			continue
-		var layer: String = _route_layer(route)
-		var width: float = _width_for_net(source_hints, net)
-		var linked: Array = _source_hint_ids_for_net(source_hints, net)
-		var first: Array = pts[0]
-		var envelope: Dictionary = host.call("build_route_hint_envelope",
-			float(first[0]), float(first[1]), "", layer, "single_trace", pts, "ai")
-		var kp: Dictionary = envelope.get("kind_payload", {})
-		kp["net_names"] = [net]
-		kp["proposal_for"] = linked
-		if width > 0.0:
-			kp["width_mm"] = width
-		# Lossless carry (U2, DCR 019f7095c395 Stage-1): the route's EXACT
-		# per-segment geometry (real per-segment layer, not the flattened
-		# summary above) and its vias, stored verbatim so _proposal_accept can
-		# commit precisely what was proposed instead of reconstructing a
-		# single-layer, no-via approximation from `waypoints`/`layer`.
-		# `waypoints` + `layer` are KEPT unchanged (backward-compat: the
-		# renderer and legacy proposals still read them; `layer` stays the
-		# first-segment summary for the badge).
-		kp["segments"] = (route.get("segments", []) as Array).duplicate(true)
-		kp["vias"] = (route.get("vias", []) as Array).duplicate(true)
-		# DRC-at-propose (docket 019f6f1492e0): the worker's route() attaches a
-		# per-route "drc" verdict (see pcb_worker.methods._attach_route_drc) —
-		# copy it onto the proposal's kind_payload so the dock badge (generic
-		# WorkflowAnnotationList) and MCP reads (annotations_list passes
-		# kind_payload through unmodified) both see it. Absent when the
-		# worker didn't run DRC (e.g. native-path routing, not reachable from
-		# this canonical-only propose flow) — no key added, matching the
-		# "absent drc key -> no badge" contract.
+		var rec: Dictionary = {
+			"net": net,
+			"segments": (route.get("segments", []) as Array).duplicate(true) if route.get("segments", []) is Array else [],
+			"vias": (route.get("vias", []) as Array).duplicate(true) if route.get("vias", []) is Array else [],
+			"width": _width_for_net(source_hints, net),
+			"source_hint_ids": _source_hint_ids_for_net(source_hints, net),
+			"polyline": _route_polyline(route),
+			"layer": _route_layer(route),
+			"source_hints": source_hints,
+		}
+		# DRC-at-propose (docket 019f6f1492e0): carry the worker's per-route "drc"
+		# verdict ONLY when present (absent-key ⇒ no badge contract preserved).
 		if route.has("drc"):
-			kp["drc"] = route.get("drc")
-		envelope["kind_payload"] = kp
-		envelope["summary"] = "Proposed route %s (%d waypoints, %s)" % [net, pts.size(), layer]
-		var new_id: String = str(host.call("add_annotation_v2", envelope))
+			rec["drc"] = route.get("drc")
+		records.append(rec)
+	return records
+
+
+## PROPOSE: routed polylines → AI-authored cyan proposal annotations. The board
+## is NOT mutated — only annotations are added. Each proposal links to the source
+## hint id(s) answering the same net. Thin wrapper: normalize once, then project.
+static func _write_back_proposals(host, result: Dictionary, source_hints: Array) -> Dictionary:
+	return _write_records_as_proposals(host, _normalize_route_records(result, source_hints), result)
+
+
+## Annotation projection of the normalized records. Writes one AI-authored
+## proposal annotation per record (skipping a record whose polyline is
+## degenerate, exactly as before), STAMPS each record it wrote with its
+## `annotation_id` (so the caller can correlate the candidate to it), and returns
+## the unchanged _dual_write_propose/_write_back_proposals result shape.
+static func _write_records_as_proposals(host, records: Array, result: Dictionary) -> Dictionary:
+	var proposals: Array = []
+	for rec in records:
+		var new_id: String = _write_one_proposal(host, rec)
+		rec["annotation_id"] = new_id
 		if new_id.is_empty():
 			continue
 		proposals.append({
 			"id": new_id,
-			"net": net,
-			"layer": layer,
-			"waypoint_count": pts.size(),
-			"proposal_for": linked,
-			"width_mm": width,
+			"net": str(rec.get("net", "")),
+			"layer": str(rec.get("layer", "F.Cu")),
+			"waypoint_count": (rec.get("polyline", []) as Array).size(),
+			"proposal_for": rec.get("source_hint_ids", []),
+			"width_mm": float(rec.get("width", 0.0)),
 		})
 	return {
 		"success": true,
@@ -1052,6 +1078,36 @@ static func _write_back_proposals(host, result: Dictionary, source_hints: Array)
 		"via_count": int(result.get("via_count", 0)),
 		"drc_summary": result.get("drc_summary", {}),
 	}
+
+
+## Author ONE proposal annotation from a normalized record. Returns the new
+## annotation id, or "" when the record's polyline is degenerate / the host
+## rejected the envelope. Lossless carry (U2): the record's EXACT per-segment
+## geometry + vias are stored verbatim in kind_payload so _proposal_accept can
+## commit precisely what was proposed; `waypoints`/`layer` stay the flattened
+## badge summary (backward-compat).
+static func _write_one_proposal(host, rec: Dictionary) -> String:
+	var pts: Array = rec.get("polyline", [])
+	if pts.size() < 2:
+		return ""
+	var net: String = str(rec.get("net", ""))
+	var layer: String = str(rec.get("layer", "F.Cu"))
+	var width: float = float(rec.get("width", 0.0))
+	var first: Array = pts[0]
+	var envelope: Dictionary = host.call("build_route_hint_envelope",
+		float(first[0]), float(first[1]), "", layer, "single_trace", pts, "ai")
+	var kp: Dictionary = envelope.get("kind_payload", {})
+	kp["net_names"] = [net]
+	kp["proposal_for"] = rec.get("source_hint_ids", [])
+	if width > 0.0:
+		kp["width_mm"] = width
+	kp["segments"] = (rec.get("segments", []) as Array).duplicate(true)
+	kp["vias"] = (rec.get("vias", []) as Array).duplicate(true)
+	if rec.has("drc"):
+		kp["drc"] = rec.get("drc")
+	envelope["kind_payload"] = kp
+	envelope["summary"] = "Proposed route %s (%d waypoints, %s)" % [net, pts.size(), layer]
+	return str(host.call("add_annotation_v2", envelope))
 
 
 ## T2 (S2.2) strangler-fig SHADOW-phase seam: PROPOSE dual-write. Runs the
@@ -1067,15 +1123,41 @@ static func _write_back_proposals(host, result: Dictionary, source_hints: Array)
 ## missing/stub workspace on the panel is likewise a silent no-op (defensive,
 ## never hit against a mounted PCBPanel post-T2).
 static func _dual_write_propose(host, result: Dictionary, source_hints: Array) -> Dictionary:
-	var out: Dictionary = _write_back_proposals(host, result, source_hints)
-	var panel = host.get_panel() if host != null and host.has_method("get_panel") else null
-	if panel != null and is_instance_valid(panel) and panel.has_method("get_routing_workspace"):
-		var workspace = panel.get_routing_workspace()
-		if workspace != null and workspace.has_method("ingest_routing_result"):
-			var data = _get_data(host)
-			var revision: int = int(data.board_revision) if data != null else 0
-			workspace.ingest_routing_result(result, source_hints, revision)
+	# ONE normalization → BOTH projections (T2.3). The annotation projection runs
+	# first and stamps each record with its annotation_id; the workspace then
+	# ingests the SAME records and correlates each candidate to its annotation so
+	# the two shadow stores are bridged, not two independent parses that drift.
+	var records: Array = _normalize_route_records(result, source_hints)
+	var out: Dictionary = _write_records_as_proposals(host, records, result)
+
+	var workspace = _get_workspace(host)
+	if workspace != null and workspace.has_method("ingest_record"):
+		var data = _get_data(host)
+		var revision: int = int(data.board_revision) if data != null else 0
+		for rec in records:
+			var ann_id: String = str(rec.get("annotation_id", ""))
+			if ann_id.is_empty():
+				continue  # annotation projection skipped this record → no candidate to bridge
+			var cand_id: String = str(workspace.ingest_record(rec, revision))
+			if cand_id.is_empty() or not workspace.has_method("correlate"):
+				continue
+			var cand = workspace.get_candidate(cand_id)
+			var task_id: String = str(cand.task_id) if cand != null else ""
+			var generation: int = int(cand.generation) if cand != null else 0
+			workspace.correlate(cand_id, ann_id, task_id, generation)
 	return out
+
+
+## The panel's RoutingWorkspace off a host (duck-typed through the same
+## host→panel back-reference run_router/route_board use), or null when no panel
+## is bound (headless / before mount) or it exposes no workspace.
+static func _get_workspace(host):
+	if host == null or not host.has_method("get_panel"):
+		return null
+	var panel = host.get_panel()
+	if panel == null or not is_instance_valid(panel) or not panel.has_method("get_routing_workspace"):
+		return null
+	return panel.get_routing_workspace()
 
 
 ## APPLY: materialize routed polylines as real traces (journaled) + transition
@@ -1084,6 +1166,11 @@ static func _dual_write_propose(host, result: Dictionary, source_hints: Array) -
 static func _materialize_routes(host, data, result: Dictionary, source_hints: Array) -> Dictionary:
 	var traces_added := 0
 	var failed: Array = []
+	# T2.3: stable ids of the copper this materialization created, so a bridged
+	# accept can record them on its candidate (ResolvedBoard IR references
+	# committed copper by these ids, which survive to_board_dict()/reload).
+	var created_trace_ids: Array = []
+	var created_via_ids: Array = []
 	for route in result.get("routes", []):
 		if not (route is Dictionary):
 			continue
@@ -1114,6 +1201,7 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 				for point in polyline:
 					trace.waypoints.append(point)
 				data.add_trace(trace)
+				created_trace_ids.append(str(trace.id))
 				traces_added += 1
 				made_any = true
 		if not made_any:
@@ -1132,14 +1220,14 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 			via_drill = 0.4
 		var _via_span: Array = PcbLayerStack.default_through_via_span()
 		for via in route.get("vias", []):
-			data.add_via({
+			created_via_ids.append(data.add_via({
 				"position": _via_position(via),
 				"size": via_size,
 				"drill": via_drill,
 				"net_name": net,
 				"from_layer": _via_span[0],
 				"to_layer": _via_span[1],
-			})
+			}))
 
 	# Snapshot AFTER mutation so the undo/redo checkpoint captures the applied
 	# traces (undo() restores the PREVIOUS entry — matches _import_trace_geometry;
@@ -1192,6 +1280,8 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		"consumed_hint_ids": consumed_ids,
 		"removed_proposal_ids": removed_proposals,
 		"traces_added": traces_added,
+		"trace_ids": created_trace_ids,
+		"via_ids": created_via_ids,
 		"failed": failed,
 		"unrouted": result.get("unrouted", []),
 		"stuck": _stuck_from_result(result),
@@ -1284,10 +1374,27 @@ static func _proposal_accept(host, args: Dictionary) -> Dictionary:
 	if source_hints.is_empty():
 		source_hints = [{"id": "", "kind_payload": {"net_names": [net], "width_mm": kp.get("width_mm", 0.0)}}]
 
+	# T2.3 bridged accept: if this proposal is correlated to a shadow candidate,
+	# resolve it BEFORE materialization (materialize deletes the annotation, but
+	# the correlation is keyed by candidate_id so it survives either way).
+	var workspace = _get_workspace(host)
+	var bridged_candidate: String = ""
+	if workspace != null and workspace.has_method("candidate_for_annotation"):
+		bridged_candidate = str(workspace.candidate_for_annotation(id))
+
 	var synth_result := {"routes": [{"net": net, "segments": segments, "vias": vias}]}
 	var mat: Dictionary = _materialize_routes(host, data, synth_result, source_hints)
 	if not bool(mat.get("success", false)) or int(mat.get("traces_added", 0)) <= 0:
 		return _err("failed to materialize proposal '%s'" % id)
+
+	# Route the ACCEPT through the workspace commit of the correlated candidate so
+	# accepting an annotation proposal can never leave its candidate live: flip it
+	# to disposition="committed" and record the stable trace/via ids just
+	# materialized (the ResolvedBoard IR references committed copper by these ids).
+	# Never independently mutates both stores — the candidate is a projection of
+	# the same accept, driven by the correlation.
+	if not bridged_candidate.is_empty() and workspace.has_method("mark_committed"):
+		workspace.mark_committed(bridged_candidate, mat.get("trace_ids", []), mat.get("via_ids", []))
 
 	# _materialize_routes already removes any proposal whose proposal_for links
 	# a just-consumed hint — that generically catches THIS proposal since
@@ -1305,6 +1412,7 @@ static func _proposal_accept(host, args: Dictionary) -> Dictionary:
 		"trace_added": true,
 		"consumed_hint_ids": mat.get("consumed_hint_ids", []),
 		"removed_proposal_id": removed_id,
+		"committed_candidate_id": bridged_candidate,
 	})
 
 
@@ -1326,12 +1434,27 @@ static func _proposal_reject(host, args: Dictionary) -> Dictionary:
 	if linked.is_empty():
 		return _err("annotation '%s' is not a proposal (no kind_payload.proposal_for)" % id)
 
+	# T2.3 bridged reject: resolve the correlated candidate BEFORE removing the
+	# annotation, then route the rejection through the workspace (disposition→
+	# rejected) so the candidate leaves the live set in lockstep with the
+	# annotation removal. Removing the proposal annotation also un-supersedes the
+	# source hint(s) (is_annotation_superseded returns false once no proposal links
+	# them) — both stores coherent, neither independently mutated.
+	var workspace = _get_workspace(host)
+	var bridged_candidate: String = ""
+	if workspace != null and workspace.has_method("candidate_for_annotation"):
+		bridged_candidate = str(workspace.candidate_for_annotation(id))
+
 	if not host.has_method("remove_annotation") or not host.remove_annotation(id):
 		return _err("failed to remove proposal '%s'" % id)
+
+	if not bridged_candidate.is_empty() and workspace.has_method("reject"):
+		workspace.reject(bridged_candidate)
 
 	return _ok({
 		"removed_proposal_id": id,
 		"source_hints_still_open": linked,
+		"rejected_candidate_id": bridged_candidate,
 	})
 
 

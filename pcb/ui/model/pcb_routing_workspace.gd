@@ -52,6 +52,26 @@ var _via_counter: int = 0
 ## memory this round, so this index does not need to survive a save/load yet).
 var _task_candidate: Dictionary = {}
 
+## ── T2.3 shadow-parity CORRELATION (candidate ↔ annotation) ────────────────────
+## The single record that ties a RouteCandidate to the annotation PROPOSAL it was
+## dual-written alongside, so the two shadow stores can never be independently
+## mutated into divergence:
+##   candidate_id -> {
+##     "annotation_id":       String,   # the proposal annotation this mirrors
+##     "task_id":             String,   # candidate.task_id at correlation time
+##     "generation":          int,      # candidate.generation at correlation time
+##     "committed_trace_ids": Array,    # stable PCBData trace ids from commit
+##     "committed_via_ids":   Array,    # stable PCBData via ids from commit
+##     "prior_disposition":   String,   # disposition BEFORE commit (for uncommit)
+##   }
+## The committed_* ids live HERE (not on the candidate) because pcb_route_candidate
+## .gd is out of this task's fence — and it keeps the ResolvedBoard-IR copper
+## references in one durable place the sidecar already persists. Persisted through
+## to_dict/to_sidecar_dict and restored in load_from_dict; _annotation_to_candidate
+## is the derived reverse index (rebuilt on load, never serialised).
+var correlations: Dictionary = {}
+var _annotation_to_candidate: Dictionary = {}
+
 ## ── T2.4 draft-check coherence state (TRANSIENT — never persisted) ─────────────
 ## workspace_generation: a monotonic counter bumped on ANY candidate-set change
 ## (add/remove/ingest/supersede + disposition changes that alter the live set).
@@ -155,6 +175,13 @@ func remove_candidate(id: String) -> void:
 	candidates.erase(id)
 	pinned.erase(id)
 	_findings.erase(id)
+	# Drop the correlation (both directions) so a removed candidate never leaves a
+	# dangling annotation↔candidate link behind.
+	var rec: Dictionary = correlations.get(id, {})
+	var ann := str(rec.get("annotation_id", ""))
+	if not ann.is_empty() and str(_annotation_to_candidate.get(ann, "")) == id:
+		_annotation_to_candidate.erase(ann)
+	correlations.erase(id)
 	_bump_generation()  # candidate-set shrank → any in-flight draft-check is stale
 	if active_candidate_id == id:
 		active_candidate_id = ""
@@ -441,61 +468,240 @@ func _vias_wire(c) -> Array:
 ## DIFFERENT task adds a genuinely new, independent candidate.
 func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], board_revision: int = 0) -> Array:
 	var new_ids: Array = []
-	var via_span: Array = PcbLayerStack.default_through_via_span()
-
 	for route in router_reply.get("routes", []):
 		if not (route is Dictionary):
 			continue
 		var route_dict: Dictionary = route
-		var segs: Array = route_dict.get("segments", [])
-		var vias: Array = route_dict.get("vias", [])
-		if segs.is_empty() and vias.is_empty():
-			continue
-		var net: String = str(route_dict.get("net", ""))
-
-		# PER-NET attribution (T2a folds in docket #555): the task_key +
-		# source_hint_ids are keyed on the hints that target THIS net, not the
-		# GLOBAL propose hint set. A multi-net propose / a cross-net hint change
-		# no longer shifts an unrelated net's task_key (which would leave a stale
-		# duplicate). Mirrors panel_tools._source_hint_ids_for_net (same per-net
-		# filter + same fallback-to-all when no hint names the net).
-		var hint_ids := _hint_ids_for_net(source_hints, net)
-		var task_key := _task_key(net, hint_ids)
-		var generation := 1
-		var prior_id: String = str(_task_candidate.get(task_key, ""))
-		if not prior_id.is_empty() and candidates.has(prior_id):
-			var prior = candidates[prior_id]
-			generation = int(prior.generation) + 1
-			prior.disposition = "superseded"
-			_bump_generation()  # supersede leaves the live set (add_candidate bumps for the new one)
-			candidate_changed.emit(prior_id)
-
-		var cand = PcbRouteCandidate.new()
-		cand.task_id = task_key
-		cand.net = net
-		cand.generation = generation
-		cand.base_board_revision = board_revision
-		cand.source_hint_ids = _to_string_typed_array(hint_ids)
-		cand.endpoints = _endpoints_for_net(source_hints, net)
-
-		var width := _width_for_net(source_hints, net)
-		for seg in segs:
-			if not (seg is Dictionary):
-				continue
-			var seg_dict: Dictionary = seg
-			var layer := PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "F.Cu"))
-			var pts: Array = [_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))]
-			cand.add_segment(PcbRouteCandidate.make_segment("", layer, width, pts))
-
-		for via in vias:
-			var pos := _via_pt(via)
-			cand.add_via(PcbRouteCandidate.make_via("", pos, via_span[0], via_span[1]))
-
-		var new_id: String = add_candidate(cand)
-		_task_candidate[task_key] = new_id
-		new_ids.append(new_id)
-
+		var new_id := _create_candidate_for_route(
+			str(route_dict.get("net", "")),
+			route_dict.get("segments", []),
+			route_dict.get("vias", []),
+			source_hints, board_revision)
+		if not new_id.is_empty():
+			new_ids.append(new_id)
 	return new_ids
+
+
+## T2.3 correlated single-route ingest. Builds EXACTLY the candidate
+## ingest_routing_result would (same _create_candidate_for_route helper) from a
+## NORMALIZED route record produced once by panel_tools._normalize_route_records
+## — so the shadow candidate and the annotation projection derive from the SAME
+## record, never two independent parses that can drift. Returns the candidate_id
+## (empty when the record has no geometry). `record` carries net, segments (raw
+## router shape), vias (raw), and source_hints (for width/hint/endpoint
+## derivation — the identical inputs the annotation side used).
+func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
+	var hints: Array = record.get("source_hints", []) if record.get("source_hints", []) is Array else []
+	return _create_candidate_for_route(
+		str(record.get("net", "")),
+		record.get("segments", []) if record.get("segments", []) is Array else [],
+		record.get("vias", []) if record.get("vias", []) is Array else [],
+		hints, board_revision)
+
+
+## Create + add one RouteCandidate from a raw router route (net + raw segments +
+## raw vias) and the propose call's source hints. The SOLE candidate-construction
+## path — both bulk ingest_routing_result and correlated ingest_record funnel
+## through it so a candidate is built identically no matter the entry point.
+## Handles the idempotent-replace supersession bookkeeping. Returns the new
+## candidate_id, or "" when the route has no geometry.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int) -> String:
+	if segs.is_empty() and vias.is_empty():
+		return ""
+	var via_span: Array = PcbLayerStack.default_through_via_span()
+
+	# PER-NET attribution (T2a folds in docket #555): the task_key +
+	# source_hint_ids are keyed on the hints that target THIS net, not the
+	# GLOBAL propose hint set. A multi-net propose / a cross-net hint change
+	# no longer shifts an unrelated net's task_key (which would leave a stale
+	# duplicate). Mirrors panel_tools._source_hint_ids_for_net (same per-net
+	# filter + same fallback-to-all when no hint names the net).
+	var hint_ids := _hint_ids_for_net(source_hints, net)
+	var task_key := _task_key(net, hint_ids)
+	var generation := 1
+	var prior_id: String = str(_task_candidate.get(task_key, ""))
+	if not prior_id.is_empty() and candidates.has(prior_id):
+		var prior = candidates[prior_id]
+		generation = int(prior.generation) + 1
+		prior.disposition = "superseded"
+		_bump_generation()  # supersede leaves the live set (add_candidate bumps for the new one)
+		candidate_changed.emit(prior_id)
+
+	var cand = PcbRouteCandidate.new()
+	cand.task_id = task_key
+	cand.net = net
+	cand.generation = generation
+	cand.base_board_revision = board_revision
+	cand.source_hint_ids = _to_string_typed_array(hint_ids)
+	cand.endpoints = _endpoints_for_net(source_hints, net)
+
+	var width := _width_for_net(source_hints, net)
+	for seg in segs:
+		if not (seg is Dictionary):
+			continue
+		var seg_dict: Dictionary = seg
+		var layer := PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "F.Cu"))
+		var pts: Array = [_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))]
+		cand.add_segment(PcbRouteCandidate.make_segment("", layer, width, pts))
+
+	for via in vias:
+		var pos := _via_pt(via)
+		cand.add_via(PcbRouteCandidate.make_via("", pos, via_span[0], via_span[1]))
+
+	var new_id: String = add_candidate(cand)
+	_task_candidate[task_key] = new_id
+	return new_id
+
+
+# ── T2.3 correlation (candidate ↔ annotation) + bridged legacy-mutation routing ──
+
+## Record the bidirectional correlation between a candidate and the annotation
+## proposal it was dual-written beside. Overwrites any prior link for either id
+## (a re-propose mints a fresh candidate+annotation pair). Both lookup directions
+## are then valid: candidate_for_annotation / annotation_for_candidate.
+func correlate(candidate_id: String, annotation_id: String, task_id: String = "", generation: int = 0) -> void:
+	if candidate_id.is_empty() or annotation_id.is_empty():
+		return
+	# Drop any stale reverse entry pointing at this candidate from a prior link.
+	var prev: Dictionary = correlations.get(candidate_id, {})
+	var prev_ann := str(prev.get("annotation_id", ""))
+	if not prev_ann.is_empty() and str(_annotation_to_candidate.get(prev_ann, "")) == candidate_id:
+		_annotation_to_candidate.erase(prev_ann)
+	correlations[candidate_id] = {
+		"annotation_id": annotation_id,
+		"task_id": task_id,
+		"generation": generation,
+		"committed_trace_ids": prev.get("committed_trace_ids", []),
+		"committed_via_ids": prev.get("committed_via_ids", []),
+		"prior_disposition": prev.get("prior_disposition", ""),
+	}
+	_annotation_to_candidate[annotation_id] = candidate_id
+
+
+## candidate_id -> the correlated annotation id ("" if not bridged).
+func annotation_for_candidate(candidate_id: String) -> String:
+	return str((correlations.get(candidate_id, {}) as Dictionary).get("annotation_id", ""))
+
+
+## annotation_id -> the correlated candidate id ("" if not bridged).
+func candidate_for_annotation(annotation_id: String) -> String:
+	return str(_annotation_to_candidate.get(annotation_id, ""))
+
+
+## True iff this candidate has a correlated annotation.
+func is_candidate_bridged(candidate_id: String) -> bool:
+	return correlations.has(candidate_id) and not annotation_for_candidate(candidate_id).is_empty()
+
+
+## True iff this annotation has a correlated candidate.
+func is_annotation_bridged(annotation_id: String) -> bool:
+	return not candidate_for_annotation(annotation_id).is_empty()
+
+
+## Bridged ACCEPT (T2.3): the correlated candidate's geometry has just been
+## materialized into PCBData as the given stable trace/via ids — flip the
+## candidate to disposition="committed" so accepting an annotation proposal can
+## NEVER leave its candidate live in the workspace, and RECORD the resulting
+## copper ids (the ResolvedBoard IR references committed copper by these stable
+## ids). Stashes the prior disposition so an undo can restore it (uncommit). The
+## pure model does no board mutation itself — the annotation-authoritative accept
+## path already did that; this only keeps the shadow candidate coherent.
+func mark_committed(candidate_id: String, trace_ids: Array = [], via_ids: Array = []) -> bool:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return false
+	var rec: Dictionary = correlations.get(candidate_id, {})
+	if str(c.disposition) != "committed":
+		rec["prior_disposition"] = str(c.disposition)
+	rec["committed_trace_ids"] = _to_string_array(trace_ids)
+	rec["committed_via_ids"] = _to_string_array(via_ids)
+	correlations[candidate_id] = rec
+	c.disposition = "committed"
+	_bump_generation()  # committed leaves the live set
+	candidate_changed.emit(candidate_id)
+	return true
+
+
+## Stable ids of the copper a committed candidate produced (empty when not
+## committed). {trace_ids, via_ids} — the ResolvedBoard-IR reference set.
+func committed_copper_ids(candidate_id: String) -> Dictionary:
+	var rec: Dictionary = correlations.get(candidate_id, {})
+	return {
+		"trace_ids": (rec.get("committed_trace_ids", []) as Array).duplicate(),
+		"via_ids": (rec.get("committed_via_ids", []) as Array).duplicate(),
+	}
+
+
+## UNDO of a bridged accept (T2.3, GATE INV-1): the board undo has restored the
+## pre-commit state (its traces AND vias — never orphaning vias, F1) — revert the
+## candidate from committed back to its prior disposition and clear the recorded
+## copper ids, so BOTH stores are coherent again (the candidate is live once more,
+## matching a board that no longer holds its trace/vias). Returns true if a
+## committed candidate was reverted.
+func uncommit(candidate_id: String) -> bool:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return false
+	if str(c.disposition) != "committed":
+		return false
+	var rec: Dictionary = correlations.get(candidate_id, {})
+	var prior := str(rec.get("prior_disposition", "proposed"))
+	if prior.is_empty() or prior == "committed":
+		prior = "proposed"
+	rec["committed_trace_ids"] = []
+	rec["committed_via_ids"] = []
+	rec["prior_disposition"] = ""
+	correlations[candidate_id] = rec
+	c.disposition = prior
+	_bump_generation()
+	candidate_changed.emit(candidate_id)
+	return true
+
+
+## Bridged ADD-VIA route-through (T2.3): the correlated annotation's segments/vias
+## have just been edited (a via inserted) — re-derive the candidate's geometry
+## from that SAME updated raw route data so both stores stay identical, and bump
+## candidate_revision (invalidates any in-flight draft check for it). Raw segments
+## are the router `{start,end,layer}` shape; raw vias are positional [x,y] (the
+## exact shapes _create_candidate_for_route already parses). Widths are preserved
+## from the candidate's existing first segment. Returns true on success.
+func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Array) -> bool:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return false
+	var via_span: Array = PcbLayerStack.default_through_via_span()
+	var width := 0.25
+	if not c.segments.is_empty() and c.segments[0] is Dictionary:
+		width = float((c.segments[0] as Dictionary).get("width", 0.25))
+
+	var new_segments: Array = []
+	for seg in segs_raw:
+		if not (seg is Dictionary):
+			continue
+		var seg_dict: Dictionary = seg
+		var layer := PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "F.Cu"))
+		var pts: Array = [_pt(seg_dict.get("start", [0, 0])), _pt(seg_dict.get("end", [0, 0]))]
+		var s := PcbRouteCandidate.make_segment(next_segment_id(), layer, width, pts)
+		new_segments.append(s)
+
+	var new_vias: Array = []
+	for via in vias_raw:
+		var pos := _via_pt(via)
+		new_vias.append(PcbRouteCandidate.make_via(next_via_id(), pos, via_span[0], via_span[1]))
+
+	c.segments = new_segments
+	c.vias = new_vias
+	c.candidate_revision = int(c.candidate_revision) + 1
+	_bump_generation()
+	candidate_changed.emit(candidate_id)
+	return true
+
+
+static func _to_string_array(arr: Array) -> Array:
+	var out: Array = []
+	for v in arr:
+		out.append(str(v))
+	return out
 
 
 # ── ingest helpers (private) ────────────────────────────────────────────────
@@ -665,6 +871,7 @@ func to_dict() -> Dictionary:
 		"active_candidate_id": active_candidate_id,
 		"pinned": pinned_out,
 		"selected_finding_id": selected_finding_id,
+		"correlations": _correlations_out(),
 		"counters": {
 			"candidate": _cand_counter,
 			"segment": _seg_counter,
@@ -691,12 +898,22 @@ func to_sidecar_dict() -> Dictionary:
 	return {
 		"candidates": cand_out,
 		"pinned": pinned_out,
+		"correlations": _correlations_out(),
 		"counters": {
 			"candidate": _cand_counter,
 			"segment": _seg_counter,
 			"via": _via_counter,
 		},
 	}
+
+
+## Deep-copy the correlation map for serialisation (JSON-safe: all values are
+## String/int/Array-of-String already).
+func _correlations_out() -> Dictionary:
+	var out: Dictionary = {}
+	for cid in correlations:
+		out[cid] = (correlations[cid] as Dictionary).duplicate(true)
+	return out
 
 
 ## Force EVERY candidate's validation axis to "stale" (disposition preserved).
@@ -714,10 +931,29 @@ func load_from_dict(data: Dictionary) -> void:
 	candidates.clear()
 	pinned.clear()
 	_findings.clear()
+	correlations.clear()
+	_annotation_to_candidate.clear()
 
 	var cand_data: Dictionary = data.get("candidates", {})
 	for id in cand_data:
 		candidates[id] = PcbRouteCandidate.from_dict(cand_data[id])
+
+	# Restore correlations + rebuild the derived reverse (annotation→candidate)
+	# index. int()/str() normalise JSON round-trip types (generation is a float).
+	var corr_data: Dictionary = data.get("correlations", {}) if data.get("correlations", {}) is Dictionary else {}
+	for cid in corr_data:
+		var rec: Dictionary = corr_data[cid] if corr_data[cid] is Dictionary else {}
+		var ann := str(rec.get("annotation_id", ""))
+		correlations[str(cid)] = {
+			"annotation_id": ann,
+			"task_id": str(rec.get("task_id", "")),
+			"generation": int(rec.get("generation", 0)),
+			"committed_trace_ids": _to_string_array(rec.get("committed_trace_ids", []) if rec.get("committed_trace_ids", []) is Array else []),
+			"committed_via_ids": _to_string_array(rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []),
+			"prior_disposition": str(rec.get("prior_disposition", "")),
+		}
+		if not ann.is_empty():
+			_annotation_to_candidate[ann] = str(cid)
 
 	active_candidate_id = str(data.get("active_candidate_id", ""))
 	selected_finding_id = str(data.get("selected_finding_id", ""))
