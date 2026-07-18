@@ -21,6 +21,16 @@
       "date": null,
       "by": null,
       "notes": "DRIFT-PIN ONLY — captured from the emitter under test (pcb_worker.gerber.build_gerbers via scripts/capture_emitter_golden.py). Inherently circular: it can detect FUTURE drift in the emitter but can NEVER attest correctness. blessed stays false PERMANENTLY by design; do NOT bless this entry. The correctness reference is spike-gerber-v1."
+    },
+    "cam-excellon-ipc356-v1": {
+      "golden_id": "cam-excellon-ipc356-v1",
+      "path": "pcb/spikes/cam/golden",
+      "role": "correctness-reference-candidate",
+      "blessed": false,
+      "method": null,
+      "date": null,
+      "by": null,
+      "notes": "AWAITING OWNER BLESS (candidate, docket 019f777e9206) — the Excellon drills (PTH/NPTH), the routed SLOT, and the IPC-356 netlist, emitted by the RATIFIED gerbonara coupon (spikes/cam/emit_golden.py -> gerbonara_coupon.build()). Satisfies CAM ratification condition 1 once blessed. Contents: PTH = Ø0.8mm plated @ (30.0,15.0) [U1 TH] + Ø0.4mm plated @ (20.0,10.0) [via] + a Ø1.0mm plated routed SLOT (34.0,5.0)->(38.0,5.0); NPTH = Ø3.2mm bare @ (5.0,5.0) [mount]; IPC-356 = 4 records: U1.1 VCC through-hole Ø0.8 plated @ (30.0,15.0) access-both, R1.2 VCC SMD @ (10.95,10.0) top, R1.1 GND SMD @ (9.05,10.0) top, C1.1 GND SMD @ (9.05,20.0) top. ANTI-CIRCULARITY CAVEAT: emitted by gerbonara and the Stage-5 PRODUCTION emitter will ALSO be gerbonara-based (different code path — pcb_worker over the ResolvedBoard IR), so this golden catches INTEGRATION / driving divergence (wrong params/geometry from the IR) but NOT gerbonara LIBRARY bugs (those are tracked in 019f7773257 and caught by the owner's INDEPENDENT gerbv bless of drills+slot + IPC-356 record review). CORRECTNESS CONSUMER: the Stage-5 production Excellon/slots/IPC-356 emitter (019f761fefae) — which does NOT exist yet, so no correctness comparison is possible today. Until BOTH the owner blesses (blessed=true) AND that consumer exists, the correctness-oracle test skips-with-reason; a coupon-vs-its-own-output check is a drift/reproducibility pin ONLY, never a correctness claim. Do NOT self-bless — see golden/HOW_TO_BLESS_EXCELLON.md; flag open Excellon-header bug 019f7720928d during the drill check."
     }
   }
 }
