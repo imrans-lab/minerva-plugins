@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from gerbonara import ExcellonFile, GerberFile
+from gerbonara.ipc356 import Netlist
 
 # Coordinate/dimension rounding for canonical keys. 4 decimals of a millimetre
 # is 0.1 micron — far finer than any fab tolerance, coarse enough that emitter
@@ -147,13 +148,40 @@ def parse_gerber_layer(text: str, filename: str = "layer.gbr") -> LayerGeometry:
     return lg
 
 
+def _drill_key(o) -> tuple:
+    """Canonical, stable key for one parsed Excellon object.
+
+    A point drill is a ``Flash`` -> ``(x, y, diameter)`` (unchanged legacy
+    3-float form). A ROUTED SLOT parses as a ``Line`` (start/end + a routing
+    tool) -> ``("slot", (p_lo, p_hi), width)`` where the endpoints are sorted so
+    a reversed slot is not a spurious change and ``width`` is the tool diameter.
+    The literal-string first element distinguishes slots from point drills for
+    every downstream consumer.
+    """
+    t = type(o).__name__
+    if t == "Line":
+        a, b = (_r(o.x1), _r(o.y1)), (_r(o.x2), _r(o.y2))
+        return ("slot", tuple(sorted((a, b))), round(float(o.tool.diameter), _ROUND))
+    # Flash (point drill) — legacy behaviour.
+    return (_r(o.x), _r(o.y), round(float(o.tool.diameter), _ROUND))
+
+
+def _is_slot_key(key: tuple) -> bool:
+    return bool(key) and key[0] == "slot"
+
+
 def parse_drill_file(text: str, filename: str = "drill.drl") -> Counter:
+    """Parse an Excellon drill file into a multiset of canonical drill keys.
+
+    Handles point drills (``Flash``) AND routed slots (``Line``) — a slot no
+    longer crashes the harness (docket 019f7772eca0). See ``_drill_key``.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ef = ExcellonFile.from_string(text, filename=filename)
     hits: Counter = Counter()
     for o in ef.objects:
-        hits[(_r(o.x), _r(o.y), round(float(o.tool.diameter), _ROUND))] += 1
+        hits[_drill_key(o)] += 1
     return hits
 
 
@@ -208,7 +236,10 @@ def registration_violations(output: OutputGeometry) -> list[tuple]:
     for cls, hits in output.drills.items():
         if cls.upper() != "PTH":  # only plated holes require copper
             continue
-        for (x, y, dia) in hits:
+        for key in hits:
+            if _is_slot_key(key):
+                continue  # routed slots are cutouts, not annulus-backed holes
+            (x, y, dia) = key
             if (x, y) not in copper:
                 bad.append((cls, x, y, dia))
     return sorted(bad)
@@ -228,7 +259,7 @@ class Delta:
             'registration' -> a plated drill lacking copper (in one set only)
     """
 
-    category: str   # flash | segment | arc | region | aperture | drill | registration
+    category: str   # flash | segment | arc | region | aperture | drill | slot | netlist | registration
     layer: str      # layer suffix, drill class, or '*'
     change: str
     detail: str
@@ -271,6 +302,14 @@ def _describe_key(key: tuple) -> str:
     return f"{cat} {key[1:]}"
 
 
+def _describe_drill_key(key: tuple) -> str:
+    """Human-readable label for a point-drill OR routed-slot drill key."""
+    if _is_slot_key(key):
+        (p_lo, p_hi), width = key[1], key[2]
+        return f"routed slot Ø{width}mm {p_lo}->{p_hi}"
+    return f"drill Ø{key[2]}mm at ({key[0]}, {key[1]})"
+
+
 def _diff_counter(deltas: list[Delta], layer: str, current: Counter,
                   golden: Counter, describe, category_of) -> None:
     """Multiset symmetric difference -> added/removed deltas."""
@@ -300,14 +339,14 @@ def diff_geometry(current: OutputGeometry, golden: OutputGeometry) -> GeometryDi
         _diff_counter(deltas, suffix, c.apertures, g.apertures,
                       lambda k: f"aperture {k}", lambda k: "aperture")
 
-    # --- Drills (per class). ---
+    # --- Drills (per class) — point drills AND routed slots. ---
     for cls in sorted(set(current.drills) | set(golden.drills)):
         c = current.drills.get(cls, Counter())
         g = golden.drills.get(cls, Counter())
         _diff_counter(
             deltas, cls, c, g,
-            lambda k: f"drill Ø{k[2]}mm at ({k[0]}, {k[1]})",
-            lambda k: "drill",
+            _describe_drill_key,
+            lambda k: "slot" if _is_slot_key(k) else "drill",
         )
 
     # --- Registration (only differences between the two sets). ---
@@ -328,3 +367,75 @@ def diff_output_sets(current_files: dict[str, str],
     """Convenience: parse both {filename: text} sets and diff their geometry."""
     return diff_geometry(parse_output_set(current_files),
                          parse_output_set(golden_files))
+
+
+# ---------------------------------------------------------------------------
+# IPC-356 (IPC-D-356A) netlist diff — the electrical companion to the geometry
+# diff. Each test record collapses to a canonical, category-tagged key so the
+# same Counter symmetric-difference yields added/removed Deltas; a CHANGED
+# record surfaces as a removed(old)+added(new) pair, exactly as a moved pad does
+# in the geometry diff.
+# ---------------------------------------------------------------------------
+
+
+def _netlist_record_key(rec) -> tuple:
+    """Canonical key for one IPC-356 TestRecord: net + pad/location + plating.
+
+    Includes ref-des and pad-type for identity; ``pin_num`` is deliberately
+    excluded — gerbonara 1.6.3 does not round-trip it (reads back as None).
+    """
+    net = getattr(rec, "net_name", None)
+    ref = getattr(rec, "ref_des", None)
+    x, y = getattr(rec, "x", None), getattr(rec, "y", None)
+    loc = (_r(x) if x is not None else None, _r(y) if y is not None else None)
+    pt = getattr(rec, "pad_type", None)
+    pad_type = getattr(pt, "name", None) or (repr(pt) if pt is not None else None)
+    plated = getattr(rec, "is_plated", None)
+    hole = getattr(rec, "hole_dia", None)
+    hole = _r(hole) if isinstance(hole, (int, float)) and not isinstance(hole, bool) else None
+    return ("netlist", net, ref, loc, pad_type, plated, hole)
+
+
+def parse_ipc356_file(text: str, filename: str = "board.ipc356") -> Counter:
+    """Parse an IPC-356 netlist into a multiset of canonical record keys.
+
+    Thin gerbonara 1.6.3 read-bug workaround: ``Netlist.from_string`` calls
+    ``Path(filename)`` unconditionally, so ``filename=None`` raises TypeError —
+    we always pass an explicit filename. The ``lefover``/``leftover`` typo and
+    the ``None.copy()`` crash are WRITE-path bugs and do not bite reading.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        nl = Netlist.from_string(text, filename=filename)
+    hits: Counter = Counter()
+    for rec in nl.objects:
+        hits[_netlist_record_key(rec)] += 1
+    return hits
+
+
+def _describe_netlist_key(key: tuple) -> str:
+    _, net, ref, loc, pad_type, plated, hole = key
+    plate = "plated" if plated else ("nonplated" if plated is not None else "?plating")
+    hole_s = f" Ø{hole}mm" if hole is not None else ""
+    return f"net {net!r} {ref} {pad_type} at {loc} [{plate}]{hole_s}"
+
+
+def diff_netlists(current: Counter, golden: Counter) -> GeometryDiff:
+    """Structured diff of two parsed IPC-356 record multisets (current vs golden).
+
+    Returns a ``GeometryDiff`` of ``category='netlist'`` Deltas — 'added' present
+    only in current, 'removed' present only in golden. A changed record is a
+    removed+added pair (same idiom as a moved pad in the geometry diff).
+    """
+    deltas: list[Delta] = []
+    _diff_counter(deltas, "ipc356", current, golden,
+                  _describe_netlist_key, lambda k: "netlist")
+    return GeometryDiff(deltas)
+
+
+def diff_ipc356_files(current_text: str, golden_text: str,
+                      current_name: str = "board.ipc356",
+                      golden_name: str = "board.ipc356") -> GeometryDiff:
+    """Convenience: parse two IPC-356 texts and diff their netlist records."""
+    return diff_netlists(parse_ipc356_file(current_text, current_name),
+                         parse_ipc356_file(golden_text, golden_name))
