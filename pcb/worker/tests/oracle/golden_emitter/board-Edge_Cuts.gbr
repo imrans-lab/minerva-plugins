@@ -1,0 +1,21 @@
+G04 Created with the python gerber_writer 0.4.3.3*
+G04 #@! TF.CreationDate,1970-01-01T00:00:00*
+G04 #@! TF.FileFunction,Profile,NP*
+G04 #@! TF.FilePolarity,Positive*
+G04 #@! TF.GenerationSoftware,Minerva,pcb_worker/gerber.py,0.2.0*
+%MOMM*%
+%FSLAX36Y36*%
+G75*
+G04 #@! TA.AperFunction,Profile*
+G04 #@! TAShape,Circle,0.1*
+%ADD10C,0.1*%
+G04 #@! TD*
+%LPD*%
+D10*
+X0Y0D02*
+G01*
+X40000000Y0D01*
+X40000000Y30000000D01*
+X0Y30000000D01*
+X0Y0D01*
+M02*

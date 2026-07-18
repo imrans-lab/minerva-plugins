@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "GOLDEN PROVENANCE registry (docket SB.2, 019f77117376). Records whether each golden was blessed ONCE by an INDEPENDENT authority (an independent Gerber viewer and/or kicad-cli DRC on the round-tripped board). A golden with blessed=false, or with no entry here, is UNTRUSTED: usable by the geometry-diff harness as a DRIFT PIN, but NEVER as a correctness oracle. See tests/oracle/provenance.py and golden/HOW_TO_BLESS.md.",
+  "goldens": {
+    "spike-gerber-v1": {
+      "golden_id": "spike-gerber-v1",
+      "path": "pcb/spikes/gerber/golden",
+      "role": "correctness-reference-candidate",
+      "blessed": false,
+      "method": null,
+      "date": null,
+      "by": null,
+      "notes": "CANDIDATE — AWAITING OWNER EXTERNAL BLESS. This hand-built golden passed structural validation (spikes/gerber/validate.py) plus pygerber/pcb-tools round-trips, but has NOT been independently confirmed in a real Gerber viewer or via kicad-cli DRC, so it is NOT yet a trusted correctness oracle. To bless: follow golden/HOW_TO_BLESS.md, then set blessed=true and fill method/date/by. KNOWN before bless: (1) the current pcb_worker.gerber emitter DIVERGES from this golden — SMD copper pads are 1.0x0.6mm placeholder defaults vs this golden's real 1.2x1.3mm 0805 pads, with matching F_Mask and F_SilkS differences, because board.yaml pins carry no pad geometry; reconcile which is correct during bless. (2) Open Excellon-header bug 019f7720928d: G90/G05 appear AFTER the M48 '%' header-end — check the drill files still load cleanly in the external viewer during bless."
+    },
+    "emitter-snapshot-v1": {
+      "golden_id": "emitter-snapshot-v1",
+      "path": "pcb/worker/tests/oracle/golden_emitter",
+      "role": "drift-pin-only",
+      "blessed": false,
+      "method": null,
+      "date": null,
+      "by": null,
+      "notes": "DRIFT-PIN ONLY — captured from the emitter under test (pcb_worker.gerber.build_gerbers via scripts/capture_emitter_golden.py). Inherently circular: it can detect FUTURE drift in the emitter but can NEVER attest correctness. blessed stays false PERMANENTLY by design; do NOT bless this entry. The correctness reference is spike-gerber-v1."
+    }
+  }
+}
