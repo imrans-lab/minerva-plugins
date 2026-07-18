@@ -724,7 +724,14 @@ func _pads_from_canonical_pins(pin_list: Array, fit_body: bool) -> void:
 		}
 		if drill > 0.0:
 			var d := annulus if annulus > 0.0 else drill * 2.0
-			pad["type"] = "tht"
+			# "thru_hole" (NOT "tht") — this is the pad's stored type field, whose
+			# vocabulary is smd/thru_hole/np_thru_hole (see the pad-shape docstring
+			# above). The canvas gates the drill-hole render on
+			# pad_type in ["thru_hole","np_thru_hole"] (pcb_canvas _draw_component_pads);
+			# emitting "tht" here left load_board THT pads rendering as solid discs
+			# with no hole. "tht" is only the setup_generic_pins SIZING argument, not
+			# a stored type. (Bug 019f75c24bd2.)
+			pad["type"] = "thru_hole"
 			pad["shape"] = "circle"
 			pad["size"] = Vector2(d, d)
 			pad["drill"] = Vector2(drill, drill)
