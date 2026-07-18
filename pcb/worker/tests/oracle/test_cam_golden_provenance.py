@@ -72,26 +72,37 @@ def _load_coupon():
 # ---------------------------------------------------------------------------
 
 
-def test_cam_golden_registered_as_unblessed_candidate():
+def test_cam_golden_blessed_with_recorded_caveat():
+    # Blessed by the OWNER 2026-07-18 via independent gerbv confirmation of the
+    # drills+slot, and a symbolic net-membership review of the IPC-356 — NOT
+    # self-blessed. The IPC-356 verification CAVEAT (checked as net-membership vs
+    # board.yaml, not as scalable geometry — no viewer tool exists yet) must be
+    # recorded honestly, naming the missing-tool follow-up.
     prov = _prov()
     assert CAM_ID in prov, "cam golden must have a provenance entry"
     entry = prov[CAM_ID]
-    assert entry.blessed is False, "cam golden is a CANDIDATE — must NOT be self-blessed"
-    assert entry.role == "correctness-reference-candidate"
-    assert entry.method is None and entry.date is None and entry.by is None, (
-        "an unblessed candidate must not carry a HOW/WHEN/WHO bless record"
+    assert entry.blessed is True, "cam golden was blessed by the owner"
+    assert entry.role == "correctness-reference"
+    assert entry.method and entry.date and entry.by, (
+        "a blessed golden must record HOW/WHEN/WHO blessed it"
     )
     assert entry.path == "pcb/spikes/cam/golden"
-    # The honesty caveats must be spelled out in the notes.
     notes = entry.notes.upper()
-    assert "AWAITING OWNER BLESS" in notes
-    assert "019F761FEFAE" in notes, "notes must name the Stage-5 correctness consumer"
+    assert "CAVEAT" in notes, "the IPC-356 verification caveat must be recorded"
+    assert "019F77AA012E" in notes, (
+        "notes must name the IPC-356 visual-verification-tool follow-up that would "
+        "close the caveat"
+    )
 
 
-def test_cam_golden_is_not_a_correctness_oracle_while_unblessed():
+def test_cam_golden_is_a_correctness_oracle_once_blessed():
+    # Post-bless, gate (a) opens: the golden IS usable as a correctness oracle.
+    # (Gate (b), the Stage-5 consumer, still defers the actual comparison — see the
+    # gated test below.) The "unblessed -> not an oracle" invariant keeps live
+    # coverage via the permanently-unblessed emitter snapshot in test_provenance.py.
     usable, reason = correctness_oracle_status(_prov(), CAM_ID)
-    assert usable is False
-    assert reason and "blessed" in reason.lower()
+    assert usable is True
+    assert reason == ""
 
 
 # ---------------------------------------------------------------------------
