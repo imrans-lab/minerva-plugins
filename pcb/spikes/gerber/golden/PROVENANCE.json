@@ -5,12 +5,12 @@
     "spike-gerber-v1": {
       "golden_id": "spike-gerber-v1",
       "path": "pcb/spikes/gerber/golden",
-      "role": "correctness-reference-candidate",
-      "blessed": false,
-      "method": null,
-      "date": null,
-      "by": null,
-      "notes": "CANDIDATE — AWAITING OWNER EXTERNAL BLESS. This hand-built golden passed structural validation (spikes/gerber/validate.py) plus pygerber/pcb-tools round-trips, but has NOT been independently confirmed in a real Gerber viewer or via kicad-cli DRC, so it is NOT yet a trusted correctness oracle. To bless: follow golden/HOW_TO_BLESS.md, then set blessed=true and fill method/date/by. KNOWN before bless: (1) the current pcb_worker.gerber emitter DIVERGES from this golden — SMD copper pads are 1.0x0.6mm placeholder defaults vs this golden's real 1.2x1.3mm 0805 pads, with matching F_Mask and F_SilkS differences, because board.yaml pins carry no pad geometry; reconcile which is correct during bless. (2) Open Excellon-header bug 019f7720928d: G90/G05 appear AFTER the M48 '%' header-end — check the drill files still load cleanly in the external viewer during bless."
+      "role": "correctness-reference",
+      "blessed": true,
+      "method": "gerbv (homebrew /opt/homebrew/bin/gerbv) visual layer-by-layer overlay of all 8 files vs stated intent — Edge_Cuts, F_Cu, B_Cu, F_Mask, B_Mask, F_SilkS, PTH.drl, NPTH.drl each independently confirmed against the documented geometry (board.yaml + generate.py)",
+      "date": "2026-07-18",
+      "by": "Imran Peerbhai",
+      "notes": "BLESSED by owner 2026-07-18 via independent gerbv walkthrough (see golden/HOW_TO_BLESS.md). All 8 layers matched intent: 40x30 outline; 4x real 1.2x1.3mm 0805 SMD lands + U1 O1.6 TH pad + O0.8 via + VCC/GND traces on F_Cu; sparse B_Cu; 5 F_Mask openings with via correctly TENTED; single B_Mask opening; 2 courtyards + pin-1 tick on F_SilkS; PTH holes (O0.8 U1, O0.4 via) concentric in their pads; single O3.2 bare NPTH mounting hole. Drill files loaded cleanly in gerbv despite open bug 019f7720928d (G90/G05-after-header) — cosmetic to gerbv, still tracked. This golden is the TRUSTED correctness oracle. KNOWN: the current pcb_worker.gerber emitter DIVERGES from it — placeholder 1.0x0.6mm SMD pads vs these real 1.2x1.3mm 0805 lands (emitter bug 019f7736b236, fixed by FootprintDefinition/IR Stage 2). The correctness-oracle test is xfail(strict) against that bug until Stage 2 lands, at which point it flips to a live passing assertion."
     },
     "emitter-snapshot-v1": {
       "golden_id": "emitter-snapshot-v1",

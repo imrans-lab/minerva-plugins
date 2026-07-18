@@ -36,20 +36,25 @@ def _prov() -> dict[str, ProvenanceEntry]:
 
 
 # ---------------------------------------------------------------------------
-# Registry loads; the spike golden is a CANDIDATE (blessed=false), not self-blessed.
+# Registry loads; the spike golden was BLESSED by the owner (2026-07-18) via an
+# independent gerbv layer-by-layer walkthrough — NOT self-blessed by the
+# implementer. The bless must be well-formed: blessed=true with method/date/by
+# all filled in by a human. (The anti-self-bless regression is preserved by the
+# permanently-unblessed emitter-snapshot entry, exercised below.)
 # ---------------------------------------------------------------------------
 
 
-def test_provenance_loads_and_spike_is_unblessed_candidate():
+def test_provenance_loads_and_spike_is_blessed():
     prov = _prov()
     assert SPIKE_ID in prov, "spike golden must have a provenance entry"
     entry = prov[SPIKE_ID]
-    assert entry.blessed is False, (
-        "the spike golden MUST NOT be self-blessed by the implementer — it is a "
-        "candidate awaiting an external human bless"
+    assert entry.blessed is True, (
+        "spike golden was blessed by the owner via independent gerbv walkthrough"
     )
-    assert "AWAITING" in entry.notes.upper()
-    assert entry.method is None and entry.by is None
+    # A valid human bless fills provenance — never blessed=true with empty fields.
+    assert entry.method and entry.date and entry.by, (
+        "a blessed golden must record HOW/WHEN/WHO blessed it (method/date/by)"
+    )
 
 
 def test_snapshot_golden_is_permanent_drift_pin():
@@ -66,10 +71,20 @@ def test_snapshot_golden_is_permanent_drift_pin():
 # ---------------------------------------------------------------------------
 
 
-def test_unblessed_spike_golden_is_not_a_correctness_oracle():
-    usable, reason = correctness_oracle_status(_prov(), SPIKE_ID)
+def test_unblessed_golden_is_not_a_correctness_oracle():
+    # Anchored on the emitter snapshot, which is blessed=false PERMANENTLY by
+    # design (circular drift-pin) — so this "unblessed -> not an oracle" guard
+    # keeps live coverage even though the spike golden is now blessed.
+    usable, reason = correctness_oracle_status(_prov(), SNAPSHOT_ID)
     assert usable is False
     assert reason and "blessed" in reason.lower()
+
+
+def test_blessed_spike_golden_is_now_a_correctness_oracle():
+    # Post-bless: the spike golden IS usable as a correctness oracle.
+    usable, reason = correctness_oracle_status(_prov(), SPIKE_ID)
+    assert usable is True
+    assert reason == ""
 
 
 def test_missing_golden_is_untrusted():
@@ -99,18 +114,30 @@ def test_blessed_entry_would_be_a_correctness_oracle():
 # ---------------------------------------------------------------------------
 
 
-def test_spike_golden_correctness_oracle_is_gated():
-    """Treat the spike golden as a CORRECTNESS oracle (assert the live emitter
-    matches known-good geometry) ONLY if provenance blesses it. Unblessed ->
-    skip-with-reason. This is the load-bearing anti-circularity assertion: the
-    correctness claim is never made against an untrusted golden.
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "emitter pad-geometry bug 019f7736b236: pcb_worker.gerber emits placeholder "
+        "1.0x0.6mm SMD pads instead of the blessed golden's real 1.2x1.3mm 0805 lands "
+        "(board.yaml pins carry no pad geometry). Fixed by FootprintDefinition/IR "
+        "Stage 2 (019f761fe518). strict=True => when the emitter is fixed this test "
+        "XPASSes and FAILS, forcing removal of this xfail and promotion to a live "
+        "correctness assertion."
+    ),
+)
+def test_spike_golden_correctness_oracle_matches_emitter():
+    """Now that the spike golden is BLESSED, use it as a real CORRECTNESS oracle:
+    assert the live emitter's geometry matches the trusted known-good golden.
+
+    This is the payoff of the anti-circularity control — a byte-determinism gate
+    could never make this claim. It currently XFAILs against the known emitter pad
+    bug (see marker); it becomes a live green assertion once Stage 2 lands.
     """
     prov = _prov()
     usable, reason = correctness_oracle_status(prov, SPIKE_ID)
-    if not usable:
+    if not usable:  # defensive: only if someone un-blesses the golden
         pytest.skip(f"spike golden not usable as correctness oracle: {reason}")
 
-    # Only reached once a human blesses spike-gerber-v1 (blessed=true).
     board = yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8"))
     current = parse_output_set(gerber.build_gerbers(board, name="board"))
     golden = parse_output_set(load_output_dir(SPIKE_GOLDEN_DIR))
