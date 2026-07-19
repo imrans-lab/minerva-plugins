@@ -34,10 +34,16 @@ import math
 from pathlib import Path
 from typing import Any, Union
 
-# Graphics layers we extract. Silkscreen is the visible body outline / pin-1
-# markers; courtyard is the keep-out boundary. Everything else (F.Fab,
-# Cmts.User, F.Mask, ...) is intentionally dropped.
+# Graphics layers we CAPTURE as real geometry. Silkscreen is the visible body
+# outline / pin-1 markers; courtyard is the keep-out boundary. Fab-affecting
+# primitives on OTHER layers (F.Fab, F.Mask, B.SilkS, ...) are NOT modeled --
+# but they are no longer silently dropped: ``_uncaptured_graphics`` surfaces an
+# attributed marker for each so a downstream compiler can fail closed on data
+# the parser could not represent (K1: lossless-or-flagging).
 GRAPHIC_LAYERS = frozenset({"F.SilkS", "F.CrtYd"})
+
+# fp_* geometry tags scanned when surfacing uncaptured fab graphics.
+_FAB_GRAPHIC_TAGS = ("fp_line", "fp_circle", "fp_arc", "fp_poly")
 
 # Repo layout: this file is pcb/worker/pcb_worker/footprints.py, so the seed
 # library lives two levels up (pcb/library/...).
@@ -142,8 +148,22 @@ def _kv(node: Any, tag: str) -> Union[list, None]:
 def _parse_pad(p: list) -> dict:
     """Parse a ``(pad NUMBER TYPE SHAPE ...)`` node into a dict.
 
-    Position/size/drill/layers come from nested lists; a pad's own ``at``
-    rotation (3rd value) is ignored -- it does not move the pad centre.
+    The EIGHT original keys (number, type, shape, x_mm, y_mm, size, drill,
+    layers) keep their exact historical values/shape so existing consumers
+    (``resolve._pads_from_parsed``, ``footprint_def.from_kicad_parsed``, the
+    coincidence golden) are byte-identical.
+
+    K1 (lossless-or-flagging) ADDITIVELY surfaces fab-affecting fields that were
+    previously dropped -- each is added under a NEW key and ONLY when the source
+    carries it, so a pad with none of them is byte-identical to before:
+
+    * ``rotation``            -- the pad's own ``(at x y ROT)`` 3rd value.
+    * ``roundrect_rratio``    -- ``(roundrect_rratio N)`` corner ratio.
+    * ``drill_shape``/``drill_size`` -- an oval/slot ``(drill oval X Y)`` hole's
+      shape token + BOTH dimensions (the legacy ``drill`` keeps the 1st numeric).
+    * ``solder_mask_margin`` / ``solder_paste_margin`` -- per-pad overrides.
+    * ``unsupported``         -- attributed markers for pad geometry we do NOT
+      model (e.g. a custom pad's ``(primitives ...)``): flagged, never dropped.
     """
     number = _atom(p[1]) if len(p) > 1 else ""
     pad_type = _atom(p[2]) if len(p) > 2 else None
@@ -171,7 +191,7 @@ def _parse_pad(p: list) -> dict:
     layers_node = _kv(p, "layers")
     layers = [_atom(t) for t in layers_node[1:]] if layers_node else []
 
-    return {
+    pad = {
         "number": number,
         "type": pad_type,
         "shape": shape,
@@ -181,6 +201,85 @@ def _parse_pad(p: list) -> dict:
         "drill": drill,
         "layers": layers,
     }
+
+    # --- K1 ADDITIVE: surface previously-dropped fab-affecting fields ---------
+    # All reuse the SAME _kv/_atom/_num helpers as the extraction above.
+
+    # Local pad rotation: the 3rd value of the pad's own (at x y ROT).
+    if at is not None and len(at) > 3:
+        rot = _num(at[3])
+        if rot is not None:
+            pad["rotation"] = rot
+
+    # Roundrect corner ratio.
+    rr = _kv(p, "roundrect_rratio")
+    if rr is not None and len(rr) > 1:
+        v = _num(rr[1])
+        if v is not None:
+            pad["roundrect_rratio"] = v
+
+    # Oval/slot drill: a shape token (e.g. "oval") and/or a 2nd dimension. The
+    # legacy ``drill`` above already holds the 1st numeric; only surface the
+    # extra (shape + full size) when this is NOT a plain round hole.
+    if drill_node is not None:
+        drill_shape = None
+        drill_dims: list = []
+        for tok in drill_node[1:]:
+            v = _num(tok)
+            if v is not None:
+                drill_dims.append(v)
+            elif drill_shape is None:
+                a = _atom(tok)
+                if isinstance(a, str):
+                    drill_shape = a
+        if drill_shape is not None or len(drill_dims) > 1:
+            pad["drill_shape"] = drill_shape or "oval"
+            pad["drill_size"] = drill_dims
+
+    # Solder mask / paste margin overrides.
+    for _margin in ("solder_mask_margin", "solder_paste_margin"):
+        node = _kv(p, _margin)
+        if node is not None and len(node) > 1:
+            v = _num(node[1])
+            if v is not None:
+                pad[_margin] = v
+
+    # Pad geometry we do NOT model (custom pad primitives): flag, never drop.
+    prim = _kv(p, "primitives")
+    if prim is not None:
+        pad.setdefault("unsupported", []).append({
+            "feature": "custom_primitives",
+            "detail": (
+                f"pad {_atom(number)!r} carries (primitives ...) custom "
+                f"geometry not modeled by the parser"
+            ),
+        })
+
+    # Other fab-affecting pad tokens we do not yet model: flag (never silently
+    # drop) so a downstream compiler can fail closed instead of the geometry
+    # vanishing. `offset` (nested in the drill node) shifts copper relative to
+    # the hole; chamfer/clearance/zone_connect alter copper/mask.
+    if drill_node is not None and _kv(drill_node, "offset") is not None:
+        pad.setdefault("unsupported", []).append({
+            "feature": "pad_drill_offset",
+            "detail": f"pad {_atom(number)!r} drill carries (offset ...) not modeled by the parser",
+        })
+    for _feat, _toks in (
+        ("chamfer", ("chamfer", "chamfer_ratio")),
+        ("local_clearance", ("clearance",)),
+        ("zone_connect", ("zone_connect",)),
+    ):
+        _present = [t for t in _toks if _kv(p, t) is not None]
+        if _present:
+            pad.setdefault("unsupported", []).append({
+                "feature": _feat,
+                "detail": (
+                    f"pad {_atom(number)!r} carries ({'/'.join(_present)} ...) "
+                    f"not modeled by the parser"
+                ),
+            })
+
+    return pad
 
 
 def _stroke_width(g: list) -> Union[float, None]:
@@ -278,6 +377,47 @@ def _parse_graphics(root: Any) -> list[dict]:
     return graphics
 
 
+def _uncaptured_graphics(root: Any) -> list[dict]:
+    """Surface (never silently filter) fab-affecting graphic primitives that
+    fall OUTSIDE the captured ``GRAPHIC_LAYERS``.
+
+    ``_parse_graphics`` keeps F.SilkS/F.CrtYd exactly as before; this reuses the
+    SAME ``_find_all`` + ``_graphic_layer`` helpers to enumerate fp_line/circle/
+    arc/poly on every OTHER layer (F.Fab, F.Mask, B.SilkS, ...) and returns one
+    attributed marker per (layer, kind), so a downstream compiler sees the
+    data-loss instead of it being dropped. No coordinates are captured -- these
+    layers are not modeled -- only that geometry EXISTS there is reported.
+    """
+    counts: dict = {}
+    order: list = []
+    for tag in _FAB_GRAPHIC_TAGS:
+        kind = tag[len("fp_"):]  # line / circle / arc / poly
+        for g in _find_all(root, tag):
+            layer = _graphic_layer(g)
+            if layer in GRAPHIC_LAYERS:
+                continue  # captured verbatim by _parse_graphics
+            key = (layer, kind)
+            if key not in counts:
+                counts[key] = 0
+                order.append(key)
+            counts[key] += 1
+
+    markers: list[dict] = []
+    for (layer, kind) in order:
+        n = counts[(layer, kind)]
+        markers.append({
+            "feature": "uncaptured_graphic",
+            "layer": layer,
+            "kind": kind,
+            "count": n,
+            "detail": (
+                f"{n} fp_{kind} on layer {layer!r} not captured "
+                f"(outside {sorted(GRAPHIC_LAYERS)})"
+            ),
+        })
+    return markers
+
+
 def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     """Parse a ``.kicad_mod`` footprint.
 
@@ -289,6 +429,13 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
           "pads": [{number, type, shape, x_mm, y_mm, size:[w,h], drill, layers}],
           "graphics": [{layer, kind, ...coords, width}],  # F.SilkS + F.CrtYd
         }
+
+    The eight pad keys above and the ``graphics`` list are byte-identical to
+    prior behavior. K1 (lossless-or-flagging) ADDS, only when the source carries
+    them: per-pad ``rotation`` / ``roundrect_rratio`` / ``drill_shape`` +
+    ``drill_size`` / ``solder_mask_margin`` / ``solder_paste_margin`` and a pad
+    ``unsupported`` list (custom primitives); plus a top-level ``unsupported``
+    list of attributed markers for fab graphics on layers we do not capture.
 
     All coordinates are footprint-LOCAL (no board transform applied).
     """
@@ -306,7 +453,14 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     name = _atom(root[1]) if len(root) > 1 else ""
     pads = [_parse_pad(p) for p in _find_all(root, "pad")]
     graphics = _parse_graphics(root)
-    return {"name": name, "pads": pads, "graphics": graphics}
+    result = {"name": name, "pads": pads, "graphics": graphics}
+    # K1 ADDITIVE: surface fab geometry on layers we do not capture as an
+    # attributed marker list (NEW top-level key, added only when non-empty so
+    # footprints with only silk/courtyard graphics stay byte-identical).
+    uncaptured = _uncaptured_graphics(root)
+    if uncaptured:
+        result["unsupported"] = uncaptured
+    return result
 
 
 # ---------------------------------------------------------------------------

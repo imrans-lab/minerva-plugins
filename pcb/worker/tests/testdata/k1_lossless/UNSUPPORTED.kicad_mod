@@ -1,0 +1,12 @@
+(footprint "UNSUPPORTED" (layer "F.Cu")
+  (pad "1" smd custom (at 0 0) (size 1 1) (layers "F.Cu")
+    (primitives
+      (gr_poly (pts (xy -0.5 -0.5) (xy 0.5 -0.5) (xy 0 0.5)) (width 0))
+    ))
+  (pad "2" thru_hole roundrect (at 2 0) (size 1.6 1.6) (drill 0.8 (offset 0.1 0)) (layers "*.Cu")
+    (roundrect_rratio 0.25) (chamfer_ratio 0.2) (chamfer top_left) (clearance 0.15) (zone_connect 2))
+  (fp_line (start -1 -1) (end 1 -1) (width 0.1) (layer "F.Fab"))
+  (fp_line (start 1 -1) (end 1 1) (width 0.1) (layer "F.Fab"))
+  (fp_circle (center 0 0) (end 0.3 0) (width 0.1) (layer "B.SilkS"))
+  (fp_line (start -1 -1) (end 1 -1) (width 0.12) (layer "F.SilkS"))
+)

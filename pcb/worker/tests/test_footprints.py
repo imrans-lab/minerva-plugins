@@ -218,6 +218,109 @@ def test_kicad7_stroke_and_arc_mid(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# (e) K1 lossless-or-flagging: previously-dropped fab-affecting fields are now
+#     CAPTURED (pad rotation, roundrect_rratio, oval/slot drill, mask/paste
+#     margin) or FLAGGED with an attributed marker (custom pad primitives, fab
+#     graphics on uncaptured layers) — never silently dropped. All ADDITIVE:
+#     the eight original pad keys keep their exact historical value/shape.
+# ---------------------------------------------------------------------------
+
+K1DIR = HERE / "testdata" / "k1_lossless"
+_ORIGINAL_PAD_KEYS = {
+    "number", "type", "shape", "x_mm", "y_mm", "size", "drill", "layers",
+}
+
+
+def test_k1_pad_lossless_fields_captured():
+    parsed = parse_kicad_mod(K1DIR / "PAD_FIELDS.kicad_mod")
+    pads = {p["number"]: p for p in parsed["pads"]}
+
+    # Every pad still carries the eight original keys unchanged in shape.
+    for p in parsed["pads"]:
+        assert _ORIGINAL_PAD_KEYS <= set(p.keys()), p
+
+    p1 = pads["1"]
+    # Existing keys byte-identical to legacy extraction.
+    assert p1["type"] == "smd" and p1["shape"] == "roundrect"
+    assert p1["x_mm"] == -1.0 and p1["y_mm"] == 0.0
+    assert p1["size"] == [1.2, 1.0]
+    assert p1["drill"] is None
+    assert p1["layers"] == ["F.Cu", "F.Paste", "F.Mask"]
+    # NEW captured fields.
+    assert p1["rotation"] == pytest.approx(90.0)          # (at -1 0 90)
+    assert p1["roundrect_rratio"] == pytest.approx(0.25)
+    assert p1["solder_mask_margin"] == pytest.approx(0.05)
+    assert p1["solder_paste_margin"] == pytest.approx(-0.02)
+
+    p2 = pads["2"]
+    # Legacy drill keeps the 1st numeric; the oval 2nd dim + shape are additive.
+    assert p2["drill"] == pytest.approx(0.9)
+    assert p2["drill_shape"] == "oval"
+    assert p2["drill_size"] == [pytest.approx(0.9), pytest.approx(1.4)]
+
+    p3 = pads["3"]
+    # A plain SMD pad with no extra fields is byte-identical to before: exactly
+    # the eight original keys, no additive noise.
+    assert set(p3.keys()) == _ORIGINAL_PAD_KEYS
+
+    # The F.SilkS line is still captured exactly as today.
+    silk = _silk_graphics(parsed)
+    assert len(silk) == 1 and silk[0]["kind"] == "line"
+
+
+def test_k1_unsupported_pad_and_graphic_are_flagged_not_dropped():
+    parsed = parse_kicad_mod(K1DIR / "UNSUPPORTED.kicad_mod")
+
+    # (1) Custom pad primitives -> attributed per-pad unsupported marker.
+    p1 = {p["number"]: p for p in parsed["pads"]}["1"]
+    assert "unsupported" in p1, "custom (primitives ...) pad silently dropped"
+    feats = {u["feature"] for u in p1["unsupported"]}
+    assert "custom_primitives" in feats
+    marker = next(u for u in p1["unsupported"] if u["feature"] == "custom_primitives")
+    assert "'1'" in marker["detail"]  # attributed to the pad number
+
+    # (2) Fab graphics on uncaptured layers -> top-level attributed markers.
+    assert "unsupported" in parsed, "uncaptured fab graphics silently dropped"
+    by_layer_kind = {(u["layer"], u["kind"]): u for u in parsed["unsupported"]}
+    assert by_layer_kind[("F.Fab", "line")]["count"] == 2
+    assert by_layer_kind[("B.SilkS", "circle")]["count"] == 1
+    for u in parsed["unsupported"]:
+        assert u["feature"] == "uncaptured_graphic"
+        assert u["layer"] and u["kind"] and u["detail"]
+
+    # (3) The captured F.SilkS graphic is STILL captured; nothing outside
+    #     GRAPHIC_LAYERS leaked into the captured `graphics` list.
+    assert all(g["layer"] in {"F.SilkS", "F.CrtYd"} for g in parsed["graphics"])
+    assert _silk_graphics(parsed), "real F.SilkS graphic was dropped"
+
+    # (4) Other fab-affecting pad tokens (drill offset, chamfer, local
+    #     clearance, zone_connect) are flagged, never silently dropped; a
+    #     captured field on the SAME pad (roundrect_rratio) still captures.
+    p2 = {p["number"]: p for p in parsed["pads"]}["2"]
+    assert p2.get("roundrect_rratio") == 0.25  # captured, not flagged
+    assert "unsupported" in p2, "fab-affecting pad tokens silently dropped"
+    p2_feats = {u["feature"] for u in p2["unsupported"]}
+    assert {"pad_drill_offset", "chamfer", "local_clearance", "zone_connect"} <= p2_feats
+    assert all("'2'" in u["detail"] for u in p2["unsupported"])  # attributed to pad
+
+
+def test_k1_additive_on_real_seed_footprint_byte_identical_keys():
+    """On a REAL seed footprint the eight original pad keys are unchanged and
+    new keys are strictly additional — the JST pad 1 carries a real
+    roundrect_rratio that is now surfaced (was previously dropped)."""
+    parsed = resolve_footprint(
+        "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal"
+    )
+    for p in parsed["pads"]:
+        assert _ORIGINAL_PAD_KEYS <= set(p.keys())
+        # existing values intact.
+        assert isinstance(p["layers"], list)
+    p1 = {p["number"]: p for p in parsed["pads"]}["1"]
+    # Real (roundrect_rratio 0.208333) now captured instead of dropped.
+    assert p1["roundrect_rratio"] == pytest.approx(0.208333)
+
+
+# ---------------------------------------------------------------------------
 # (c) Lockfile sha256 integrity.
 # ---------------------------------------------------------------------------
 
