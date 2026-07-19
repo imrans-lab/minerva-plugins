@@ -36,7 +36,7 @@ U1 = (30.0, 15.0)   # single TH pad
 VIA = (20.0, 10.0)
 MOUNTING_HOLE = (5.0, 5.0)
 
-SMD_PAD_X, SMD_PAD_Y = 1.2, 1.3   # 0805-ish rectangular SMD pad
+SMD_PAD_X, SMD_PAD_Y = 1.0, 1.45   # real 0805 land (KiCad R/C_0805_2012Metric)
 TRACE_W = 0.25
 TH_DRILL = 0.8
 TH_ANNULUS = 1.6

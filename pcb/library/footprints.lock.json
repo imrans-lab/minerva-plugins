@@ -38,5 +38,20 @@
     "path": "Package_DIP.pretty/DIP-6_W7.62mm_Socket.kicad_mod",
     "sha256": "fbb6c473684a825b968346cea08134dad688da20fcb0b9c83d0c7bab1ef22b1a",
     "size_bytes": 2953
+  },
+  "R_0805": {
+    "path": "Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
+    "sha256": "aaa6a6a177248b71877a6ca5e3bbda99c930b84ef7c5b5c08c9861832e7638f7",
+    "size_bytes": 744
+  },
+  "C_0805": {
+    "path": "Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
+    "sha256": "92f34e5af64d6085e84185973c9fe5886e2968f0bef175fe36ff68f8ea2a5441",
+    "size_bytes": 736
+  },
+  "TH_TestPoint": {
+    "path": "TestPoint.pretty/TH_TestPoint.kicad_mod",
+    "sha256": "3df5c5d5f6a094511227fbaaa6985dfa2ce867c22e03ade755c0d94a88112cf4",
+    "size_bytes": 552
   }
 }

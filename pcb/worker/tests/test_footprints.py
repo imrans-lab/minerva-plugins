@@ -42,6 +42,9 @@ EXPECTED_PAD_COUNTS = {
     "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal": 2,
     "MountingHole:MountingHole_3.2mm_M3": 1,
     "EVP-ASAC1A:SW_EVP-ASAC1A": 2,
+    "R_0805": 2,
+    "C_0805": 2,
+    "TH_TestPoint": 1,
 }
 
 # MountingHole is a purely-mechanical footprint: it carries NO F.SilkS graphics

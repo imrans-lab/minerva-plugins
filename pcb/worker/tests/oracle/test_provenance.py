@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import gerber
+from pcb_worker import gerber, resolve
 from tests.oracle.geometry_diff import diff_geometry, load_output_dir, parse_output_set
 from tests.oracle.provenance import (
     ProvenanceEntry,
@@ -44,16 +44,21 @@ def _prov() -> dict[str, ProvenanceEntry]:
 # ---------------------------------------------------------------------------
 
 
-def test_provenance_loads_and_spike_is_blessed():
+def test_spike_golden_regenerated_pending_rebless():
+    # The spike golden was REGENERATED 2026-07-19 to the real 0805 land
+    # (1.0x1.45, sourced by resolving vendored footprints) as part of Stage 2
+    # pad-bug closure. A changed golden is UNBLESSED until the owner independently
+    # re-confirms it in gerbv — blessed=false is the honest interim state, and it
+    # must record that it awaits re-bless (and why).
     prov = _prov()
     assert SPIKE_ID in prov, "spike golden must have a provenance entry"
     entry = prov[SPIKE_ID]
-    assert entry.blessed is True, (
-        "spike golden was blessed by the owner via independent gerbv walkthrough"
+    assert entry.blessed is False, (
+        "a regenerated golden must be UNBLESSED until the owner re-blesses it"
     )
-    # A valid human bless fills provenance — never blessed=true with empty fields.
-    assert entry.method and entry.date and entry.by, (
-        "a blessed golden must record HOW/WHEN/WHO blessed it (method/date/by)"
+    notes = entry.notes.upper()
+    assert "PENDING" in notes and "RE-BLESS" in notes, (
+        "an unblessed-pending golden must record that it awaits re-bless + why"
     )
 
 
@@ -80,11 +85,14 @@ def test_unblessed_golden_is_not_a_correctness_oracle():
     assert reason and "blessed" in reason.lower()
 
 
-def test_blessed_spike_golden_is_now_a_correctness_oracle():
-    # Post-bless: the spike golden IS usable as a correctness oracle.
+def test_regenerated_spike_golden_is_not_yet_a_correctness_oracle():
+    # While blessed=false (regenerated, pending re-bless), the spike golden is
+    # NOT usable as a correctness oracle — the correctness test skips-with-reason
+    # until the owner re-blesses. The gate's TRUE branch stays covered by
+    # test_blessed_entry_would_be_a_correctness_oracle below.
     usable, reason = correctness_oracle_status(_prov(), SPIKE_ID)
-    assert usable is True
-    assert reason == ""
+    assert usable is False
+    assert reason and "blessed" in reason.lower()
 
 
 def test_missing_golden_is_untrusted():
@@ -114,35 +122,35 @@ def test_blessed_entry_would_be_a_correctness_oracle():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "emitter pad-geometry bug 019f7736b236: pcb_worker.gerber emits placeholder "
-        "1.0x0.6mm SMD pads instead of the blessed golden's real 1.2x1.3mm 0805 lands "
-        "(board.yaml pins carry no pad geometry). Fixed by FootprintDefinition/IR "
-        "Stage 2 (019f761fe518). strict=True => when the emitter is fixed this test "
-        "XPASSes and FAILS, forcing removal of this xfail and promotion to a live "
-        "correctness assertion."
-    ),
-)
 def test_spike_golden_correctness_oracle_matches_emitter():
-    """Now that the spike golden is BLESSED, use it as a real CORRECTNESS oracle:
-    assert the live emitter's geometry matches the trusted known-good golden.
+    """Use the blessed spike golden as a real CORRECTNESS oracle: assert the live
+    emitter's FABRICATION-CRITICAL geometry (copper/mask/drill/edge) matches the
+    trusted known-good golden — over the RESOLVED board, because Stage 2's whole
+    point is that pad geometry comes from RESOLVING the footprint, not a
+    placeholder (pad bug 019f7736b236).
 
     This is the payoff of the anti-circularity control — a byte-determinism gate
-    could never make this claim. It currently XFAILs against the known emitter pad
-    bug (see marker); it becomes a live green assertion once Stage 2 lands.
+    could never make this claim. While the golden is UNBLESSED (regenerated to
+    the real 0805 land, pending owner gerbv re-bless) this SKIPS-WITH-REASON,
+    never a silent pass; once the owner sets blessed=true it is a live assertion
+    and pad bug 019f7736b236 is CLOSED.
+
+    ORACLE SCOPE (Option A): silk is EXCLUDED — the emitter draws courtyards
+    procedurally, legitimately differently from this synthetic golden's
+    hand-drawn ones. Silk correctness is earned separately against real
+    footprints that carry real silk graphics (silk-text 019f77fd6d69; coverage
+    audit 019f77fd9c6c), not by pinning to a synthetic golden's courtyard boxes.
     """
     prov = _prov()
     usable, reason = correctness_oracle_status(prov, SPIKE_ID)
-    if not usable:  # defensive: only if someone un-blesses the golden
+    if not usable:  # skips while regenerated-but-unblessed; live once re-blessed
         pytest.skip(f"spike golden not usable as correctness oracle: {reason}")
 
-    board = yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8"))
+    board = resolve.resolve_board(yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8")))
     current = parse_output_set(gerber.build_gerbers(board, name="board"))
     golden = parse_output_set(load_output_dir(SPIKE_GOLDEN_DIR))
-    diff = diff_geometry(current, golden)
+    diff = diff_geometry(current, golden).excluding_layers("F_SilkS")
     assert diff.is_empty, (
-        "emitter output does not match the BLESSED correctness golden:\n"
-        + diff.describe()
+        "emitter output does not match the BLESSED correctness golden on the "
+        "fabrication-critical layers (copper/mask/drill/edge):\n" + diff.describe()
     )
