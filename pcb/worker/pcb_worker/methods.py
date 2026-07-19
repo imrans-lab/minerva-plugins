@@ -60,6 +60,46 @@ def _load(params: dict) -> dict:
     return board_model.load_board(params or {})
 
 
+# --- Resolve-into-fab gate (bug 019f7736b236) -----------------------------
+# The fab compilers (gerber/kicad/drc via pad_source) prefer real footprint pad
+# geometry attached by resolve.resolve_board to comp["pads"]. Running resolve on
+# the fab path is GATED so DEFAULT output stays byte-identical: a LATER step
+# flips this constant to True and regenerates goldens. Grep this name to find the
+# switch. Per-call override: params["resolve_geometry"] (truthy/falsey).
+RESOLVE_FAB_GEOMETRY_DEFAULT = False
+
+
+def _is_error_reply(x: Any) -> bool:
+    """True for a structured error reply {ok: False, error: {...}} (a real board
+    dict never carries an "ok" key, so this cleanly discriminates the two)."""
+    return isinstance(x, dict) and x.get("ok") is False and "error" in x
+
+
+def _maybe_resolve(board: dict, params: dict) -> dict:
+    """Return the board to compile: unchanged when the resolve-fab gate is OFF
+    (no resolve call → default fab output byte-identical), or resolve_board(board)
+    when ON (attaching comp["pads"] real geometry that pad_source then prefers).
+
+    Gate = RESOLVE_FAB_GEOMETRY_DEFAULT, overridable per-call via
+    params["resolve_geometry"]. On a coincidence / lookup failure returns a
+    structured error reply (SAME error kinds as _resolve) instead of raising, so
+    callers pass it straight through — detect it with _is_error_reply().
+    """
+    want = params.get("resolve_geometry")
+    if want is None:
+        want = RESOLVE_FAB_GEOMETRY_DEFAULT
+    if not want:
+        return board
+    try:
+        return resolve.resolve_board(board)
+    except resolve.ResolveCoincidenceError as exc:
+        return {"ok": False, "error": {
+            "kind": "coincidence", "message": str(exc),
+            "ref": exc.ref, "pin": exc.pin, "delta_mm": exc.delta_mm}}
+    except (resolve.ResolveError, footprints.FootprintLookupError) as exc:
+        return {"ok": False, "error": {"kind": "resolve", "message": str(exc)}}
+
+
 def _validate(params: dict) -> dict:
     try:
         board = _load(params)
@@ -80,6 +120,10 @@ def _generate(params: dict) -> dict:
         board = _load(params)
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    board = _maybe_resolve(board, params)
+    if _is_error_reply(board):
+        return board
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     files = kicad.generate(board, base_name=base_name)
@@ -119,6 +163,10 @@ def _gerbers(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
+    board = _maybe_resolve(board, params)
+    if _is_error_reply(board):
+        return board
+
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
         files = gerber.build_gerbers(board, name=base_name)
@@ -153,6 +201,10 @@ def _drc(params: dict) -> dict:
         board = _load(params)
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    board = _maybe_resolve(board, params)
+    if _is_error_reply(board):
+        return board
     try:
         result = drc.run_drc(board)
     except Exception as exc:  # geometry faults reported as data, not a crash
@@ -176,14 +228,11 @@ def _resolve(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
-    try:
-        resolved = resolve.resolve_board(board)
-    except resolve.ResolveCoincidenceError as exc:
-        return {"ok": False, "error": {
-            "kind": "coincidence", "message": str(exc),
-            "ref": exc.ref, "pin": exc.pin, "delta_mm": exc.delta_mm}}
-    except (resolve.ResolveError, footprints.FootprintLookupError) as exc:
-        return {"ok": False, "error": {"kind": "resolve", "message": str(exc)}}
+    # Force the resolve (this method IS resolve) and reuse _maybe_resolve's shared
+    # coincidence/lookup error handling — one place owns the structured errors.
+    resolved = _maybe_resolve(board, {"resolve_geometry": True})
+    if _is_error_reply(resolved):
+        return resolved
 
     stats = resolve.board_graphic_stats(resolved)
     return {"ok": True, "result": {"ok": True, "board": resolved, "stats": stats}}

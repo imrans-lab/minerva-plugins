@@ -27,6 +27,8 @@ from typing import Any
 
 from agent_router import layers as _layers
 
+from .pad_source import iter_pads
+
 # Canonical "top"/"bottom" -> KiCad copper name. T1.5: the SAME dict object as
 # route_bridge._LAYER_MAP and kicad_io._CANON_TO_KICAD_LAYER (all three alias
 # agent_router.layers.CANON_TO_KICAD) so the worker's copper-layer emitters can
@@ -176,36 +178,35 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
     lines.append(f'    (fp_text reference "{_esc(ref)}" (at 0 -1.5) (layer "F.SilkS"))')
     lines.append(f'    (fp_text value "{_esc(str(value))}" (at 0 1.5) (layer "F.Fab"))')
 
-    for pin in _list(comp.get("pins")):
-        if not isinstance(pin, dict):
+    # iter_pads PREFERS resolved comp["pads"] (real footprint geometry — the SAME
+    # source gerber._harvest now reads, so kicad + gerber agree) and otherwise
+    # reconstructs the exact per-pin fallback this loop used to read inline, so
+    # gate-OFF (no comp["pads"]) is byte-identical (see pad_source).
+    for pad in iter_pads(comp):
+        if pad.number is None:
             continue
-        num = pin.get("number")
-        if num is None:
-            continue
-        num_s = str(num)
-        px, py = _num(pin.get("x_mm")), _num(pin.get("y_mm"))
-        drill = pin.get("drill_mm")
+        num_s = str(pad.number)
+        px, py = pad.x, pad.y
+        drill = pad.drill
         net_no = pads_nets.get(num_s)
         net_expr = ""
         if net_no:
             net_expr = f' (net {net_no} "{_esc(net_name_of.get(net_no, ""))}")'
-        if isinstance(drill, (int, float)) and not isinstance(drill, bool):
-            # Through-hole pad. annulus geometry is carried in Extra when present.
-            annulus = pin.get("annulus_diameter_mm", drill * 2)
+        if drill is not None:
+            # Through-hole pad. annulus geometry is the real copper dim when
+            # resolved, else the pin's Extra annulus, else the 2x-drill nominal.
+            annulus = pad.annulus if pad.annulus is not None else drill * 2
             lines.append(
                 f'    (pad "{_esc(num_s)}" thru_hole circle (at {px} {py}) '
                 f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
                 f'(layers "*.Cu"){net_expr})'
             )
         else:
-            # SMD rect pad. Honour the pin's declared pad geometry when present
-            # (pad_width_mm / pad_height_mm — the SAME keys gerber.py reads in
-            # _harvest, so kicad + gerber stay consistent); fall back to the
-            # 1x0.6mm nominal only when the pin omits them.
-            pw = _opt_num(pin.get("pad_width_mm"))
-            ph = _opt_num(pin.get("pad_height_mm"))
-            w = pw if pw is not None else 1
-            h = ph if ph is not None else 0.6
+            # SMD rect pad. Honour the resolved/declared pad geometry when present
+            # (the SAME size gerber.py reads in _harvest, so kicad + gerber stay
+            # consistent); fall back to the 1x0.6mm nominal only when absent.
+            w = pad.width if pad.width is not None else 1
+            h = pad.height if pad.height is not None else 0.6
             lines.append(
                 f'    (pad "{_esc(num_s)}" smd rect (at {px} {py}) '
                 f'(size {w} {h}) (layers "{layer}" "F.Paste" "F.Mask"){net_expr})'

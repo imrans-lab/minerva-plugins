@@ -53,6 +53,7 @@ from .geometry import (
     place_point as _transform_point,
     rotate_local_offset as _rotate,
 )
+from .pad_source import iter_pads
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest / methods.WORKER_VERSION
 
@@ -234,28 +235,28 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         top = _is_top(comp.get("layer"))
 
         pin_extents: list[tuple[float, float]] = []
-        for pin in _list(comp.get("pins")):
-            if not isinstance(pin, dict):
-                continue
-            ox, oy = _rotate(_num(pin.get("x_mm")), _num(pin.get("y_mm")), rot)
+        # iter_pads PREFERS resolved comp["pads"] (real footprint geometry) and
+        # otherwise reconstructs the exact per-pin fallback this loop used to read
+        # inline — so gate-OFF (no comp["pads"]) is byte-identical (see pad_source).
+        for pad in iter_pads(comp):
+            ox, oy = _rotate(pad.x, pad.y, rot)
             px, py = cx + ox, cy + oy
             pin_extents.append((px, py))
 
-            drill = _opt_num(pin.get("drill_mm"))
+            drill = pad.drill
             if drill is not None and drill > 0:
                 # Through-hole pad: copper annulus on BOTH copper layers, mask
                 # opening on both sides, drilled hole (plated unless flagged).
-                annulus = _opt_num(pin.get("annulus_diameter_mm")) or (drill * 2.0)
+                annulus = pad.annulus or (drill * 2.0)
                 g.th_annuli.append((px, py, annulus, "ComponentPad"))
                 mask_d = annulus + 2 * mask_clearance
                 g.mask_top.append((px, py, "circle", mask_d))
                 g.mask_bot.append((px, py, "circle", mask_d))
-                plated = pin.get("plated", True) is not False
-                g.holes.append((px, py, drill, plated))
+                g.holes.append((px, py, drill, pad.plated))
             else:
                 # SMD pad on the component's own side.
-                w = _opt_num(pin.get("pad_width_mm")) or DEFAULT_SMD_PAD_W_MM
-                h = _opt_num(pin.get("pad_height_mm")) or DEFAULT_SMD_PAD_H_MM
+                w = pad.width or DEFAULT_SMD_PAD_W_MM
+                h = pad.height or DEFAULT_SMD_PAD_H_MM
                 g.smd_pads.append((px, py, w, h, rot, top))
                 mask = (px, py, "rect", w + 2 * mask_clearance,
                         h + 2 * mask_clearance, rot)

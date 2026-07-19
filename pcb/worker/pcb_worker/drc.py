@@ -35,6 +35,7 @@ from collections import defaultdict
 from typing import Any
 
 from .geometry import is_top as _is_top, rotate_local_offset as _rotate
+from .pad_source import iter_pads
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
 # layer"; it defaults to the board's clearance rule (same value the wrong-net
@@ -196,12 +197,14 @@ def _harvest_pads(board: dict) -> list[_Pad]:
         ref = comp.get("ref")
         cx, cy = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
         rot = _num(comp.get("rotation_deg"))
-        for pin in _list(comp.get("pins")):
-            if not isinstance(pin, dict):
-                continue
-            num = str(pin.get("number"))
-            ox, oy = _rotate(_num(pin.get("x_mm")), _num(pin.get("y_mm")), rot)
-            drill = _opt_num(pin.get("drill_mm"))
+        # iter_pads PREFERS resolved comp["pads"] (real footprint pad CENTERS) and
+        # otherwise reconstructs the exact per-pin fallback used inline before —
+        # DRC uses only the pad center + through-hole flag (no pad SIZE), so
+        # gate-OFF is a pure no-op (see pad_source).
+        for pad in iter_pads(comp):
+            num = str(pad.number)
+            ox, oy = _rotate(pad.x, pad.y, rot)
+            drill = pad.drill
             through_hole = drill is not None and drill > 0
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
                              cx + ox, cy + oy, through_hole))
