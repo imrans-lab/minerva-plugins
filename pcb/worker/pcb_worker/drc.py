@@ -1,7 +1,14 @@
-"""Geometric design-rule check (DRC) over a canonical board model.
+"""Connectivity/topology check over a canonical board model.
+
+NOT a geometric copper DRC. Every check below reads pad CENTERS and trace
+CENTERLINES only — never copper extents, pad shapes, trace widths, or mask
+geometry — so it CANNOT verify clearances. A zero-finding result means "no
+connectivity/topology fault found", NOT "geometrically or fab clean". Real
+geometric-copper DRC + manufacturer DFM need resolved pad/trace geometry (the
+ResolvedBoard IR, docket 019f7abf55c2) and are reported separately (019f7abf7e7b).
 
 Pure Python, no KiCad binary — operates on the same canonical board dict
-(``board_model.load_board``) that gerber.py / kicad.py consume. Four checks:
+(``board_model.load_board``) that gerber.py / kicad.py consume. Four connectivity checks:
 
   A. wrong_net_pad     — a trace endpoint coincident (<= clearance) with a pad of
                          a DIFFERENT net  -> short / mis-route.
@@ -389,11 +396,15 @@ def _check_layer_change(segs, pads, vias, clr) -> list[dict]:
 
 
 def run_drc(board: dict) -> dict:
-    """Run all geometric checks over a canonical board dict.
+    """Run all connectivity/topology checks over a canonical board dict.
 
-    Returns {ok: True, findings: [...], counts: {type: n}}. `ok` reports that the
-    check RAN (structured findings are data, not an error); callers inspect
-    counts / findings to decide pass/fail.
+    Returns {ok, scope, verifies_geometry, findings, counts}. `ok` reports that
+    the check RAN (structured findings are data, not an error); callers inspect
+    counts / findings to decide pass/fail. `scope` is "connectivity" and
+    `verifies_geometry` is False: these checks read pad centers + trace
+    centerlines only, so a zero-finding result is NOT a geometric/fab-clean
+    verdict. Geometric-copper DRC + DFM are reported separately once resolved
+    geometry exists (ResolvedBoard IR).
     """
     dr = board.get("design_rules") or {}
     clr = DEFAULT_COINCIDENT_MM
@@ -421,4 +432,13 @@ def run_drc(board: dict) -> dict:
     for f in findings:
         counts[f["type"]] = counts.get(f["type"], 0) + 1
 
-    return {"ok": True, "findings": findings, "counts": counts}
+    return {
+        "ok": True,
+        # HONEST SCOPE (docket 019f7abf7e7b): connectivity/topology over pad
+        # centers + trace centerlines — NOT geometric copper DRC. A zero-finding
+        # result does NOT mean geometrically or fab clean.
+        "scope": "connectivity",
+        "verifies_geometry": False,
+        "findings": findings,
+        "counts": counts,
+    }

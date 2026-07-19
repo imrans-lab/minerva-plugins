@@ -1,4 +1,4 @@
-"""Tests for the geometric DRC (pcb_worker.drc + the `drc` worker method).
+"""Tests for the connectivity/topology DRC (pcb_worker.drc + the `drc` worker method).
 
 Two layers of coverage:
 
@@ -32,6 +32,18 @@ def _run(board: dict) -> dict:
 
 def _of_type(result: dict, t: str) -> list[dict]:
     return [f for f in result["findings"] if f["type"] == t]
+
+
+def test_drc_result_declares_connectivity_scope_not_geometric():
+    """Honesty contract (docket 019f7abf7e7b): run_drc is connectivity/topology
+    only — pad centers + trace centerlines, no copper extents — so it must
+    self-describe as such. A zero-finding result must never be read as a
+    geometric/fab-clean verdict; these fields make that explicit."""
+    board = yaml.safe_load(SMART_REMOTE.read_text(encoding="utf-8"))
+    r = _run(board)
+    assert r["ok"] is True
+    assert r["scope"] == "connectivity"
+    assert r["verifies_geometry"] is False
 
 
 # ---------------------------------------------------------------------------
