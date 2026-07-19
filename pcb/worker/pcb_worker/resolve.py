@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Union
 
 from .footprints import GRAPHIC_LAYERS, FootprintLookupError, resolve_footprint
+from .pad_source import has_resolved_pads
 
 # Coincidence tolerance in mm — same golden threshold Round 1 validated.
 COINCIDENCE_TOL_MM = 0.01
@@ -212,11 +213,13 @@ def _resolve_component(
     # SAME parsed footprint used for the coincidence check; no re-parse. The
     # coincidence guard has already run (and would have raised) before we get
     # here, so pads are only attached to a proven-coincident component.
-    pads = _pads_from_parsed(parsed["pads"])
-    comp["pads"] = pads
-    # Only claim geometry when pads actually resolved — otherwise the panel
-    # would suppress its fallback pin renderer and draw nothing at all.
-    comp["has_pad_geometry"] = bool(pads)
+    comp["pads"] = _pads_from_parsed(parsed["pads"])
+    # ``has_pad_geometry`` is the board-dict VIEW of the one resolved-vs-fallback
+    # predicate (pad_source.has_resolved_pads) — NOT an independent computation,
+    # so it can never drift from what iter_pads/the emitters see. Only claims
+    # geometry when pads actually resolved, else the panel would suppress its
+    # fallback pin renderer and draw nothing at all (Stage 2 step 7 collapse).
+    comp["has_pad_geometry"] = has_resolved_pads(comp)
 
 
 def _pads_from_parsed(fp_pads: list) -> list:

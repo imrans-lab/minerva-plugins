@@ -98,7 +98,25 @@ class PadGeom:
     shape: str
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
-    from_resolve: bool      # provenance: real footprint geometry vs pin fallback
+    from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
+
+
+def has_resolved_pads(comp: Any) -> bool:
+    """The ONE definition of "this component's pad geometry came from a resolved
+    footprint" (vs the inline-pin fallback).
+
+    ``resolve._resolve_component`` attaches the real footprint pad list to
+    ``comp["pads"]``; a non-empty list there is the SINGLE ground truth for the
+    resolved-vs-fallback fact. The board-dict view ``comp["has_pad_geometry"]``
+    (resolve.py), the per-pad ``PadGeom.from_resolve`` marker, and the branch in
+    ``iter_pads`` below all derive from THIS predicate — so the fact has one
+    definition rather than several independently-computed copies (Stage 2 step 7
+    provenance-collapse, docket 019f761fe518 / 019f791cdf26). GDScript mirrors it
+    across the worker↔panel boundary under the same key ``has_pad_geometry``
+    (pcb_component.gd), with the legacy ``footprint_found`` key still accepted.
+    """
+    resolved = comp.get("pads") if isinstance(comp, dict) else None
+    return isinstance(resolved, list) and bool(resolved)
 
 
 def iter_pads(comp: dict, *, require_smd_size: bool = False) -> list[PadGeom]:
@@ -115,9 +133,8 @@ def iter_pads(comp: dict, *, require_smd_size: bool = False) -> list[PadGeom]:
     """
     if not isinstance(comp, dict):
         return []
-    resolved = comp.get("pads")
-    if isinstance(resolved, list) and resolved:
-        pads = [_from_resolved(p) for p in resolved if isinstance(p, dict)]
+    if has_resolved_pads(comp):
+        pads = [_from_resolved(p) for p in comp["pads"] if isinstance(p, dict)]
     else:
         pins = comp.get("pins")
         pins = pins if isinstance(pins, list) else []

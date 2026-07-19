@@ -533,7 +533,9 @@ static func _import_footprint_geometry(host, args: Dictionary) -> Dictionary:
 			missing.append(comp_id)
 			continue
 		var comp_geometry: Dictionary = components_data[comp_id]
-		if comp_geometry.get("footprint_found", false):
+		# Canonical resolved-vs-fallback marker is has_pad_geometry (Stage 2
+		# step 7); legacy footprint_found still accepted for older output.
+		if comp_geometry.get("has_pad_geometry", comp_geometry.get("footprint_found", false)):
 			comp.load_pad_geometry(comp_geometry)
 			updated_count += 1
 			if position_is_center or invert_y:

@@ -158,10 +158,13 @@ func get_local_body_polygon() -> PackedVector2Array:
 
 
 ## Load pad geometry from pcb-architect footprint-geometry output
-## geometry: Dictionary with keys: pads, bounding_box, footprint_id, footprint_found
+## geometry: Dictionary with keys: pads, bounding_box, footprint_id,
+##   has_pad_geometry (canonical resolved-vs-fallback marker; Stage 2 step 7).
+##   The legacy key ``footprint_found`` is still accepted for older
+##   pcb-architect output that predates the rename.
 func load_pad_geometry(geometry: Dictionary) -> void:
 	footprint_id = geometry.get("footprint_id", "")
-	has_pad_geometry = geometry.get("footprint_found", false)
+	has_pad_geometry = geometry.get("has_pad_geometry", geometry.get("footprint_found", false))
 
 	# Update bounding box from footprint data
 	var bbox: Dictionary = geometry.get("bounding_box", {})

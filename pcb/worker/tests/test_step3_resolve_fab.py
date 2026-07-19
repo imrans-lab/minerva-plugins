@@ -276,3 +276,29 @@ def test_pad_source_prefers_resolved_over_pins():
     assert all(p.width is None and p.height is None for p in raw_pads)
     with pytest.raises(pad_source.PadGeometryError):
         pad_source.iter_pads(sw_raw, require_smd_size=True)
+
+
+def test_has_resolved_pads_is_the_single_marker():
+    """Stage 2 step 7 (provenance-collapse): pad_source.has_resolved_pads is the
+    ONE definition of "resolved-real-footprint vs inline/fallback". The board-dict
+    view comp["has_pad_geometry"] and the per-pad PadGeom.from_resolve marker are
+    derived VIEWS that must ALWAYS agree with it — this pins that they cannot
+    drift (the whole point of collapsing the 4 formats to 1)."""
+    board = _board_no_smd_geometry()
+
+    # Pre-resolve: no comp["pads"] => fallback everywhere, all three views False.
+    for comp in board["components"]:
+        assert pad_source.has_resolved_pads(comp) is False
+        assert bool(comp.get("has_pad_geometry")) is False
+        assert not any(p.from_resolve for p in pad_source.iter_pads(comp))
+
+    # Post-resolve (strict resolve_board): the board-dict view and per-pad view
+    # each equal the one predicate, component by component.
+    resolved = resolve.resolve_board(board)
+    for comp in resolved["components"]:
+        marker = pad_source.has_resolved_pads(comp)
+        assert bool(comp.get("has_pad_geometry")) is marker
+        pads = pad_source.iter_pads(comp)
+        assert pads and all(p.from_resolve is marker for p in pads)
+    # This board fully resolves, so the marker is True everywhere.
+    assert all(pad_source.has_resolved_pads(c) for c in resolved["components"])
