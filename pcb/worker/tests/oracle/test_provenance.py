@@ -44,21 +44,18 @@ def _prov() -> dict[str, ProvenanceEntry]:
 # ---------------------------------------------------------------------------
 
 
-def test_spike_golden_regenerated_pending_rebless():
-    # The spike golden was REGENERATED 2026-07-19 to the real 0805 land
-    # (1.0x1.45, sourced by resolving vendored footprints) as part of Stage 2
-    # pad-bug closure. A changed golden is UNBLESSED until the owner independently
-    # re-confirms it in gerbv — blessed=false is the honest interim state, and it
-    # must record that it awaits re-bless (and why).
+def test_spike_golden_blessed():
+    # RE-BLESSED by the owner 2026-07-19 via an independent gerbv walkthrough
+    # after regeneration to the real 0805 land — NOT self-blessed. A valid human
+    # bless fills provenance: blessed=true with method/date/by all recorded.
     prov = _prov()
     assert SPIKE_ID in prov, "spike golden must have a provenance entry"
     entry = prov[SPIKE_ID]
-    assert entry.blessed is False, (
-        "a regenerated golden must be UNBLESSED until the owner re-blesses it"
+    assert entry.blessed is True, (
+        "spike golden was re-blessed by the owner via independent gerbv walkthrough"
     )
-    notes = entry.notes.upper()
-    assert "PENDING" in notes and "RE-BLESS" in notes, (
-        "an unblessed-pending golden must record that it awaits re-bless + why"
+    assert entry.method and entry.date and entry.by, (
+        "a blessed golden must record HOW/WHEN/WHO blessed it (method/date/by)"
     )
 
 
@@ -85,14 +82,13 @@ def test_unblessed_golden_is_not_a_correctness_oracle():
     assert reason and "blessed" in reason.lower()
 
 
-def test_regenerated_spike_golden_is_not_yet_a_correctness_oracle():
-    # While blessed=false (regenerated, pending re-bless), the spike golden is
-    # NOT usable as a correctness oracle — the correctness test skips-with-reason
-    # until the owner re-blesses. The gate's TRUE branch stays covered by
-    # test_blessed_entry_would_be_a_correctness_oracle below.
+def test_blessed_spike_golden_is_a_correctness_oracle():
+    # Post-re-bless: the spike golden IS usable as a correctness oracle. The
+    # "unblessed -> not an oracle" invariant stays covered by the permanently-
+    # unblessed emitter snapshot (test_unblessed_golden_is_not_a_correctness_oracle).
     usable, reason = correctness_oracle_status(_prov(), SPIKE_ID)
-    assert usable is False
-    assert reason and "blessed" in reason.lower()
+    assert usable is True
+    assert reason == ""
 
 
 def test_missing_golden_is_untrusted():
