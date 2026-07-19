@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 WORKER = HERE.parents[2]  # pcb/worker
 sys.path.insert(0, str(WORKER))
 
-from pcb_worker import gerber  # noqa: E402
+from pcb_worker import gerber, resolve  # noqa: E402
 
 SPIKE_BOARD = WORKER.parent / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE.parent / "gerber_boards" / "drilltest.yaml"
@@ -33,8 +33,13 @@ CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
 
 
 def main() -> int:
+    # Build THROUGH THE PRODUCTION PATH: best-effort resolve (as methods._gerbers
+    # now does by default, Stage 2 step 4a-ii) then emit. The spike's footprints
+    # (R_0805/C_0805/TH_TestPoint) resolve to their real lands; drilltest's
+    # footprints are not in the seed lib so it is left inline (all-TH, unchanged).
     for board_path, base in CASES:
-        board = yaml.safe_load(board_path.read_text(encoding="utf-8"))
+        board = resolve.resolve_board_best_effort(
+            yaml.safe_load(board_path.read_text(encoding="utf-8")))
         files = gerber.build_gerbers(board, name=base)
         for fname, content in files.items():
             (HERE / fname).write_text(content, encoding="utf-8", newline="\n")

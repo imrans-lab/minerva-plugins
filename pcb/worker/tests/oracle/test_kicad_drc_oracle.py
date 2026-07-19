@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from pcb_worker import resolve
 from tests.oracle.kicad_drc import (
     DrcResult,
     kicad_cli_available,
@@ -33,8 +34,12 @@ def _load(path: Path) -> dict:
 
 
 def test_spike_board_drc_clean():
-    """The spike fixture, rendered by pcb_worker.kicad, passes kicad-cli DRC."""
-    result = run_drc_on_board(_load(SPIKE_BOARD), name="board")
+    """The spike fixture, rendered by pcb_worker.kicad, passes kicad-cli DRC.
+
+    Best-effort resolved first, as the production fab path does (step 4a-ii): the
+    raw spike fails closed (its SMD pins carry no inline geometry)."""
+    result = run_drc_on_board(resolve.resolve_board_best_effort(_load(SPIKE_BOARD)),
+                              name="board")
     assert isinstance(result, DrcResult)
     assert result.clean, (
         f"expected a clean DRC on the known-good spike board, got "
@@ -53,8 +58,10 @@ def test_drc_returns_structured_findings_on_bad_board():
         "components": [
             {"ref": "U1", "footprint": "FP", "x_mm": 5.0, "y_mm": 5.0,
              "rotation_deg": 0.0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0},
-                      {"number": "2", "x_mm": 0.0, "y_mm": 0.0}]},
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5},
+                      {"number": "2", "x_mm": 0.0, "y_mm": 0.0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5}]},
         ],
         "nets": [
             {"name": "A", "pins": ["U1.1"]},

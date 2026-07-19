@@ -179,10 +179,11 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
     lines.append(f'    (fp_text value "{_esc(str(value))}" (at 0 1.5) (layer "F.Fab"))')
 
     # iter_pads PREFERS resolved comp["pads"] (real footprint geometry — the SAME
-    # source gerber._harvest now reads, so kicad + gerber agree) and otherwise
-    # reconstructs the exact per-pin fallback this loop used to read inline, so
-    # gate-OFF (no comp["pads"]) is byte-identical (see pad_source).
-    for pad in iter_pads(comp):
+    # source gerber._harvest reads, so kicad + gerber agree) and otherwise
+    # reconstructs the per-pin fallback. require_smd_size=True fail-closes on a
+    # sizeless SMD pad (no placeholder land — bug 019f7736b236); real runs resolve
+    # the board first (methods gate).
+    for pad in iter_pads(comp, require_smd_size=True):
         if pad.number is None:
             continue
         num_s = str(pad.number)
@@ -202,11 +203,12 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
                 f'(layers "*.Cu"){net_expr})'
             )
         else:
-            # SMD rect pad. Honour the resolved/declared pad geometry when present
-            # (the SAME size gerber.py reads in _harvest, so kicad + gerber stay
-            # consistent); fall back to the 1x0.6mm nominal only when absent.
-            w = pad.width if pad.width is not None else 1
-            h = pad.height if pad.height is not None else 0.6
+            # SMD rect pad. width/height are guaranteed positive by
+            # iter_pads(require_smd_size=True) above (a sizeless SMD pad has
+            # already raised PadGeometryError) — the SAME real size gerber.py
+            # reads in _harvest, so kicad + gerber stay consistent.
+            w = pad.width
+            h = pad.height
             lines.append(
                 f'    (pad "{_esc(num_s)}" smd rect (at {px} {py}) '
                 f'(size {w} {h}) (layers "{layer}" "F.Paste" "F.Mask"){net_expr})'

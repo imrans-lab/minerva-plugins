@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import gerber
+from pcb_worker import gerber, resolve
 
 gerbonara = pytest.importorskip("gerbonara")
 from gerbonara import ExcellonFile, GerberFile  # noqa: E402
@@ -32,9 +32,15 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _prep(path: Path) -> dict:
+    """Best-effort resolve, as the production fab path does (step 4a-ii): the raw
+    spike fails closed (SMD pins carry no inline geometry); drilltest stays inline."""
+    return resolve.resolve_board_best_effort(_load(path))
+
+
 @pytest.mark.parametrize("board_path,base,expected_drills", CASES)
 def test_gerbonara_reads_current_exporter_output(board_path, base, expected_drills):
-    files = gerber.build_gerbers(_load(board_path), name=base)
+    files = gerber.build_gerbers(_prep(board_path), name=base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     drls = {n: t for n, t in files.items() if n.endswith(".drl")}
@@ -73,7 +79,7 @@ def test_gerbonara_excellon_reads_plated_and_nonplated_split():
     """The exporter's PTH/NPTH split both round-trip through gerbonara's Excellon
     parser with the expected per-file hole counts (spike board: 2 plated, 1 non-
     plated)."""
-    files = gerber.build_gerbers(_load(SPIKE_BOARD), name="board")
+    files = gerber.build_gerbers(_prep(SPIKE_BOARD), name="board")
 
     pth = ExcellonFile.from_string(files["board-PTH.drl"], filename="board-PTH.drl")
     npth = ExcellonFile.from_string(files["board-NPTH.drl"], filename="board-NPTH.drl")

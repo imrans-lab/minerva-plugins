@@ -1,23 +1,22 @@
-"""Stage-2 step 3: resolve wired into the fab path (gated) + the single
-resolve-aware pad_source accessor.
+"""Stage-2 step 4a-ii: fab path resolves BY DEFAULT (best-effort) + the emitter
+FAILS CLOSED on a sizeless SMD pad. Closes bug 019f7736b236 (placeholder pads).
 
-TEETH proving the wiring is LIVE and CORRECT while DEFAULT output is unchanged:
+This file was written at step 3 (gate default OFF, placeholder still emitted).
+Step 4a-ii flips the gate ON and REMOVES the placeholder, so the step-3 premise
+is inverted — these tests now pin the NEW contract:
 
-  (a) GEOMETRY-DIFF old-vs-new — the crux. A real board whose SMD pins carry NO
-      pad geometry compiles to the 1.0x0.6 PLACEHOLDER on the raw path; the SAME
-      board resolve_board()-ed compiles to the REAL 2.0x2.0 footprint lands. The
-      existing oracle geometry_diff (REUSED, not edited) shows a non-empty diff,
-      and the specific SMD apertures flip placeholder -> real.
-  (b) GATE DEFAULT-OFF no-op — methods._gerbers/_generate/_drc with no
-      resolve_geometry param are byte-identical to a raw compile.
-  (c) GATE ERROR PASSTHROUGH — a coincidence failure with the gate ON returns a
-      STRUCTURED error (kind coincidence), not a crash.
-  (d) FUNCTIONAL FLOOR (non-mocked) — the real methods dispatch over a real
-      resolvable board with resolve_geometry=True returns fab files carrying real
-      (non-placeholder) pad geometry. Real board -> real resolve -> real gerber.
-
-Bug: 019f7736b236 (placeholder SMD pads). The DEFAULT gate stays OFF this step —
-goldens and the pad-bug xfail are untouched; a later step flips the gate.
+  (a) FAIL-CLOSED — a board whose SMD pins carry NO geometry no longer compiles
+      to a placeholder land: the RAW emitter RAISES PadGeometryError, and the
+      SAME board resolve_board()-ed compiles to the REAL footprint lands.
+  (b) GATE DEFAULT-ON — methods._gerbers/_generate resolve by DEFAULT (no
+      resolve_geometry param) and carry real geometry; with the gate explicitly
+      OFF the fab methods FAIL CLOSED (structured error, not a placeholder).
+  (c) BEST-EFFORT vs STRICT — the fab path TOLERATES an unresolvable footprint
+      (falls back to inline pins), and fails closed only if inline geometry is
+      also missing; the standalone `resolve` action stays STRICT (unresolvable
+      footprint IS an error). A coincidence mismatch is fatal on BOTH paths.
+  (d) FUNCTIONAL FLOOR (non-mocked) — real dispatch, real resolve, real gerber
+      carrying real (non-placeholder) pad geometry.
 """
 
 from __future__ import annotations
@@ -34,16 +33,18 @@ from pcb_worker.methods import (
     _drc,
     _generate,
     _gerbers,
+    _resolve,
     handle_request,
 )
-from tests.oracle.geometry_diff import diff_geometry, parse_output_set
+from tests.oracle.geometry_diff import parse_output_set
 
 HERE = Path(__file__).resolve().parent
 # The one board whose footprints all resolve cleanly (coincidence passes).
 BOARD_YAML = HERE / "testdata" / "footprints" / "smart-remote-orig.yaml"
 
 # Placeholder vs real, per bug 019f7736b236: the EVP-ASAC1A tactile switch
-# footprint's real SMD lands are 2.0x2.0mm; the raw fab placeholder is 1.0x0.6.
+# footprint's real SMD lands are 2.0x2.0mm; the OLD raw fab placeholder was
+# 1.0x0.6 (now GONE — a sizeless SMD pad fails closed instead of placeholdering).
 PLACEHOLDER_WH = (1.0, 0.6)
 REAL_SW_WH = (2.0, 2.0)
 
@@ -54,8 +55,8 @@ def _load_board() -> dict:
 
 def _board_no_smd_geometry() -> dict:
     """The resolvable board with the SW components' inline pad geometry stripped,
-    so the RAW fab path is forced onto the placeholder (the bug), while resolve
-    still supplies the real 2.0x2.0 lands."""
+    so the RAW fab path has no SMD size (the bug's trigger) while resolve still
+    supplies the real 2.0x2.0 lands."""
     board = _load_board()
     for comp in board["components"]:
         if str(comp.get("ref", "")).startswith("SW"):
@@ -63,6 +64,25 @@ def _board_no_smd_geometry() -> dict:
                 pin.pop("pad_width_mm", None)
                 pin.pop("pad_height_mm", None)
     return board
+
+
+def _unresolvable_smd_board(*, inline_geom: bool) -> dict:
+    """A one-SMD-component board whose footprint is NOT in the seed library.
+
+    With inline_geom the SMD pins carry pad_width_mm/pad_height_mm (so the fab
+    path can fall back to them); without, they carry only positions (so the fab
+    path has nothing to fall back to → fails closed)."""
+    pin_geom = {"pad_width_mm": 0.6, "pad_height_mm": 0.5} if inline_geom else {}
+    return {
+        "version": 1, "name": "unres", "width_mm": 10, "height_mm": 10,
+        "components": [
+            {"ref": "R9", "footprint": "NoSuch:Nope", "x_mm": 5, "y_mm": 5,
+             "rotation_deg": 0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": -0.5, "y_mm": 0, **pin_geom},
+                      {"number": "2", "x_mm": 0.5, "y_mm": 0, **pin_geom}]},
+        ],
+        "nets": [],
+    }
 
 
 def _copper_rect_apertures(files: dict[str, str]) -> set[tuple[float, float]]:
@@ -81,33 +101,30 @@ def _copper_rect_apertures(files: dict[str, str]) -> set[tuple[float, float]]:
 
 
 # ---------------------------------------------------------------------------
-# (a) GEOMETRY-DIFF: placeholder (raw) -> real (resolved).
+# (a) FAIL-CLOSED: raw sizeless SMD raises; resolved -> real lands.
 # ---------------------------------------------------------------------------
 
 
-def test_geometry_diff_placeholder_to_real_smd_pads():
+def test_raw_sizeless_smd_fails_closed_resolved_is_real():
     board = _board_no_smd_geometry()
-    raw_files = gerber.build_gerbers(copy.deepcopy(board), name="board")
-    resolved_files = gerber.build_gerbers(resolve.resolve_board(board), name="board")
 
-    diff = diff_geometry(parse_output_set(resolved_files), parse_output_set(raw_files))
-    assert not diff.is_empty, "resolve made no geometry difference — wiring is dead"
+    # RAW emit: the SW SMD pins have no size -> fail closed (no placeholder).
+    with pytest.raises(pad_source.PadGeometryError):
+        gerber.build_gerbers(copy.deepcopy(board), name="board")
 
-    raw_rects = _copper_rect_apertures(raw_files)
-    resolved_rects = _copper_rect_apertures(resolved_files)
-
-    # RAW compiles the SW lands to the 1.0x0.6 placeholder (the bug); resolved
-    # replaces them with the real 2.0x2.0 footprint lands.
-    assert PLACEHOLDER_WH in raw_rects, f"raw did not use the placeholder: {raw_rects}"
-    assert PLACEHOLDER_WH not in resolved_rects, \
-        f"resolved still emits the 1.0x0.6 placeholder: {resolved_rects}"
+    # Resolved emit: the real 2.0x2.0 SW lands, and the old 1.0x0.6 placeholder
+    # is nowhere in the output.
+    resolved_rects = _copper_rect_apertures(
+        gerber.build_gerbers(resolve.resolve_board(board), name="board"))
     assert REAL_SW_WH in resolved_rects, \
         f"resolved missing the real 2.0x2.0 SW lands: {resolved_rects}"
+    assert PLACEHOLDER_WH not in resolved_rects, \
+        f"resolved still emits the 1.0x0.6 placeholder: {resolved_rects}"
 
 
 def test_gerber_and_kicad_read_the_same_resolved_geometry():
-    """Criterion 6: gerber and kicad both consume pad_source, so the two emitters
-    agree on the real resolved SMD size (2.0x2.0), not just gerber."""
+    """gerber and kicad both consume pad_source, so the two emitters agree on the
+    real resolved SMD size (2.0x2.0), not just gerber."""
     board = _board_no_smd_geometry()
     resolved = resolve.resolve_board(board)
     resolved_rects = _copper_rect_apertures(gerber.build_gerbers(resolved, name="board"))
@@ -116,46 +133,56 @@ def test_gerber_and_kicad_read_the_same_resolved_geometry():
     pcb = kicad.generate_kicad_pcb(resolved)
     # The same real land size lands in the kicad_pcb SMD pads.
     assert "(size 2.0 2.0)" in pcb, "kicad did not emit the real 2.0x2.0 SW land"
-    # And the placeholder is gone from the SW pads (kicad's nominal is 1 0.6).
+    # And the old 1x0.6 placeholder is gone from the SW pads.
     assert "(size 1 0.6)" not in pcb
 
 
 # ---------------------------------------------------------------------------
-# (b) GATE DEFAULT-OFF: pure no-op vs a raw compile.
+# (b) GATE DEFAULT-ON: resolves by default; explicit OFF fails closed.
 # ---------------------------------------------------------------------------
 
 
-def test_gate_default_is_off():
-    assert RESOLVE_FAB_GEOMETRY_DEFAULT is False
+def test_gate_default_is_on():
+    assert RESOLVE_FAB_GEOMETRY_DEFAULT is True
 
 
-def test_gerbers_gate_off_matches_raw_compile():
-    board = _board_no_smd_geometry()
-    raw_files = gerber.build_gerbers(copy.deepcopy(board), name="board")
-    resp = _gerbers({"board": copy.deepcopy(board), "name": "board"})
-    assert resp["ok"] is True
-    assert resp["result"]["files"] == raw_files
+def test_gerbers_default_gate_resolves_real_geometry():
+    # No resolve_geometry param -> the DEFAULT (ON) resolves and carries real lands.
+    resp = _gerbers({"board": _board_no_smd_geometry(), "name": "board"})
+    assert resp["ok"] is True, resp
+    rects = _copper_rect_apertures(resp["result"]["files"])
+    assert REAL_SW_WH in rects, f"default gate did not resolve real geometry: {rects}"
+    assert PLACEHOLDER_WH not in rects
 
 
-def test_generate_gate_off_matches_raw_compile():
-    board = _board_no_smd_geometry()
-    raw_files = kicad.generate(copy.deepcopy(board))
-    resp = _generate({"board": copy.deepcopy(board)})
-    assert resp["ok"] is True
-    assert resp["result"]["files"] == raw_files
+def test_gerbers_gate_off_fails_closed():
+    # Gate explicitly OFF on a sizeless-SMD board -> fail closed, structured error
+    # (NOT a silent placeholder).
+    resp = _gerbers({"board": _board_no_smd_geometry(), "name": "board",
+                     "resolve_geometry": False})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "gerber"
+
+
+def test_generate_gate_off_fails_closed():
+    resp = _generate({"board": _board_no_smd_geometry(), "resolve_geometry": False})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "generate"
 
 
 def test_drc_gate_off_matches_raw_run():
+    # DRC reads only pad CENTERS (never size), so it never fails closed and the
+    # gate is a pure no-op for it: explicitly OFF == a raw run.
     from pcb_worker import drc as drc_mod
     board = _board_no_smd_geometry()
     raw = drc_mod.run_drc(copy.deepcopy(board))
-    resp = _drc({"board": copy.deepcopy(board)})
+    resp = _drc({"board": copy.deepcopy(board), "resolve_geometry": False})
     assert resp["ok"] is True
     assert resp["result"] == raw
 
 
 # ---------------------------------------------------------------------------
-# (c) GATE ERROR PASSTHROUGH: coincidence failure, gate ON -> structured error.
+# (c) BEST-EFFORT (fab) vs STRICT (resolve action); coincidence fatal on both.
 # ---------------------------------------------------------------------------
 
 
@@ -166,25 +193,47 @@ def _coincidence_board() -> dict:
     return board
 
 
+def test_fab_path_tolerates_unresolvable_footprint_via_inline():
+    # Best-effort: an unresolvable footprint is NOT an error on the fab path —
+    # the component falls back to its inline pin geometry.
+    resp = _gerbers({"board": _unresolvable_smd_board(inline_geom=True),
+                     "name": "unres"})
+    assert resp["ok"] is True, resp
+    rects = _copper_rect_apertures(resp["result"]["files"])
+    assert (0.6, 0.5) in rects, f"fab path did not use the inline SMD geometry: {rects}"
+
+
+def test_fab_path_fails_closed_when_unresolvable_and_no_inline_geom():
+    # The two controls compose: best-effort resolve leaves the unresolvable
+    # component inline, and with no inline geometry either the emitter fails
+    # closed rather than fabricating a placeholder.
+    resp = _gerbers({"board": _unresolvable_smd_board(inline_geom=False),
+                     "name": "unres"})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "gerber"
+
+
+def test_resolve_action_is_strict_on_unresolvable_footprint():
+    # The standalone `resolve` action does NOT tolerate an unresolvable footprint
+    # (unlike the fab path) — it surfaces a structured resolve error.
+    resp = _resolve({"board": _unresolvable_smd_board(inline_geom=True)})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "resolve"
+
+
 def test_gerbers_gate_on_coincidence_returns_structured_error():
-    resp = _gerbers({"board": _coincidence_board(), "resolve_geometry": True})
+    # A coincidence mismatch is fatal even on the tolerant fab path (integrity
+    # fault — footprint pads disagree with routed pins).
+    resp = _gerbers({"board": _coincidence_board()})
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "coincidence"
     assert resp["error"]["ref"] == "U1"
 
 
 def test_drc_gate_on_coincidence_returns_structured_error():
-    resp = _drc({"board": _coincidence_board(), "resolve_geometry": True})
+    resp = _drc({"board": _coincidence_board()})
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "coincidence"
-
-
-def test_generate_gate_on_lookup_error_returns_structured_error():
-    board = _load_board()
-    board["components"][0]["footprint"] = "NoSuch:Footprint_Missing"
-    resp = _generate({"board": board, "resolve_geometry": True})
-    assert resp["ok"] is False
-    assert resp["error"]["kind"] == "resolve"
 
 
 # ---------------------------------------------------------------------------
@@ -195,12 +244,12 @@ def test_generate_gate_on_lookup_error_returns_structured_error():
 def test_functional_floor_gerbers_dispatch_carries_real_geometry():
     board = _board_no_smd_geometry()
     req = {"id": 1, "method": "gerbers",
-           "params": {"board": board, "name": "board", "resolve_geometry": True}}
+           "params": {"board": board, "name": "board"}}
     resp = handle_request(req)
     assert resp["ok"] is True, resp
     files = resp["result"]["files"]
     rects = _copper_rect_apertures(files)
-    # Real board -> real resolve -> real gerber, end to end, no mocks.
+    # Real board -> real (default) resolve -> real gerber, end to end, no mocks.
     assert REAL_SW_WH in rects, f"dispatch did not carry real geometry: {rects}"
     assert PLACEHOLDER_WH not in rects, \
         f"dispatch still emitted the placeholder: {rects}"
@@ -208,7 +257,8 @@ def test_functional_floor_gerbers_dispatch_carries_real_geometry():
 
 def test_pad_source_prefers_resolved_over_pins():
     """Direct accessor contract: comp["pads"] wins when present; pins are the
-    fallback when it is absent."""
+    fallback when it is absent (width/height None until the size-consuming
+    emitter demands them via require_smd_size)."""
     board = _board_no_smd_geometry()
     resolved = resolve.resolve_board(board)
     sw = next(c for c in resolved["components"] if c["ref"].startswith("SW"))
@@ -218,8 +268,11 @@ def test_pad_source_prefers_resolved_over_pins():
     assert smd and all((p.width, p.height) == REAL_SW_WH for p in smd)
 
     # Same component pre-resolve (pins only, geometry stripped) -> fallback path,
-    # width/height None so each emitter applies its own placeholder.
+    # width/height None. iter_pads without require_smd_size does NOT fail closed;
+    # the emitters that DO pass require_smd_size are what refuse a sizeless SMD.
     sw_raw = next(c for c in board["components"] if c["ref"].startswith("SW"))
     raw_pads = pad_source.iter_pads(sw_raw)
     assert raw_pads and not any(p.from_resolve for p in raw_pads)
     assert all(p.width is None and p.height is None for p in raw_pads)
+    with pytest.raises(pad_source.PadGeometryError):
+        pad_source.iter_pads(sw_raw, require_smd_size=True)

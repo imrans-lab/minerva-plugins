@@ -26,14 +26,19 @@ import yaml
 PCB = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PCB / "worker"))
 
-from pcb_worker import gerber  # noqa: E402
+from pcb_worker import gerber, resolve  # noqa: E402
 
 SPIKE_BOARD = PCB / "spikes" / "gerber" / "board.yaml"
 OUT_DIR = PCB / "worker" / "tests" / "oracle" / "golden_emitter"
 
 
 def main() -> int:
-    board = yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8"))
+    # Capture THROUGH THE PRODUCTION PATH: best-effort resolve then emit, exactly
+    # as methods._gerbers now does by default (Stage 2 step 4a-ii). The raw spike
+    # would fail closed (its SMD pins carry no inline geometry), so the drift pin
+    # tracks the resolved emitter output — the real production input.
+    board = resolve.resolve_board_best_effort(
+        yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8")))
     files = gerber.build_gerbers(board, name="board")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():

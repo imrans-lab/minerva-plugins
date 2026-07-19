@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import board_model, gerber
+from pcb_worker import board_model, gerber, resolve
 from pcb_worker.methods import handle_request
 
 HERE = Path(__file__).resolve().parent
@@ -42,8 +42,18 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _prep(path: Path) -> dict:
+    """Load + best-effort resolve, exactly as methods._gerbers now does by
+    default (Stage 2 step 4a-ii). The spike resolves to its real lands; the
+    drill fixture's footprints are not in the seed lib so it stays inline
+    (all-TH, no SMD → unaffected). Emitting the RAW spike would fail closed
+    (its SMD pins carry no inline geometry — that IS the fix), so tests that
+    exercise the spike compile the resolved board, like production."""
+    return resolve.resolve_board_best_effort(_load(path))
+
+
 def _build(path: Path, base: str) -> dict[str, str]:
-    return gerber.build_gerbers(_load(path), name=base)
+    return gerber.build_gerbers(_prep(path), name=base)
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +107,7 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
 
 @pytest.mark.parametrize("board_path,base", CASES)
 def test_gerber_layers_structural(board_path, base):
-    board = _load(board_path)
+    board = _prep(board_path)
     bounds = board_model.board_bounds(board)
     files = gerber.build_gerbers(board, name=base)
 
@@ -118,7 +128,7 @@ def test_gerber_pygerber_round_trip(board_path, base):
         OnParserErrorEnum,
     )
 
-    files = gerber.build_gerbers(_load(board_path), name=base)
+    files = gerber.build_gerbers(_prep(board_path), name=base)
     for name, text in files.items():
         if not name.endswith(".gbr"):
             continue
@@ -189,14 +199,18 @@ def test_excellon_split_drilltest():
 
 
 def test_drill_files_omitted_when_no_holes():
-    # A board with only SMD pads and no drills emits neither drill file.
+    # A board with only SMD pads and no drills emits neither drill file. The SMD
+    # pins carry inline pad geometry (pad_width_mm/pad_height_mm) so the emitter
+    # has a real land to flash — a sizeless SMD pad now fails closed (step 4a-ii).
     board = {
         "version": 1, "name": "smdonly", "width_mm": 10, "height_mm": 10,
         "components": [
             {"ref": "R1", "footprint": "R_0402", "x_mm": 5, "y_mm": 5,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": -0.5, "y_mm": 0},
-                      {"number": "2", "x_mm": 0.5, "y_mm": 0}]},
+             "pins": [{"number": "1", "x_mm": -0.5, "y_mm": 0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5},
+                      {"number": "2", "x_mm": 0.5, "y_mm": 0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5}]},
         ],
         "nets": [],
     }
@@ -216,7 +230,7 @@ def _golden_names() -> list[str]:
 
 @pytest.mark.parametrize("board_path,base", CASES)
 def test_matches_goldens(board_path, base):
-    files = gerber.build_gerbers(_load(board_path), name=base)
+    files = gerber.build_gerbers(_prep(board_path), name=base)
     for fname, content in files.items():
         golden = GOLDEN_DIR / fname
         assert golden.exists(), f"missing golden {fname} (run regenerate.py)"
@@ -357,14 +371,18 @@ def test_silk_omitted_when_component_has_no_graphics():
         "components": [
             {"ref": "U1", "footprint": "TESTFP", "x_mm": 10.0, "y_mm": 10.0,
              "rotation_deg": 0.0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": -1.0, "y_mm": 0.0},
-                      {"number": "2", "x_mm": 1.0, "y_mm": 0.0}],
+             "pins": [{"number": "1", "x_mm": -1.0, "y_mm": 0.0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5},
+                      {"number": "2", "x_mm": 1.0, "y_mm": 0.0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5}],
              "graphics": [{"layer": "F.SilkS", "kind": "line",
                           "start": [-2.0, -1.0], "end": [2.0, -1.0], "width": 0.15}]},
             {"ref": "R1", "footprint": "R_0402", "x_mm": 25.0, "y_mm": 25.0,
              "rotation_deg": 0.0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": -0.5, "y_mm": 0.0},
-                      {"number": "2", "x_mm": 0.5, "y_mm": 0.0}]},
+             "pins": [{"number": "1", "x_mm": -0.5, "y_mm": 0.0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5},
+                      {"number": "2", "x_mm": 0.5, "y_mm": 0.0,
+                       "pad_width_mm": 0.6, "pad_height_mm": 0.5}]},
         ],
         "nets": [],
     }

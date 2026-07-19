@@ -22,14 +22,18 @@ structurally-validated golden at `pcb/spikes/gerber/golden/`
 (`spike-gerber-v1`), whose external bless is deferred to a human — see
 `../../../../spikes/gerber/golden/HOW_TO_BLESS.md`.
 
-## Known divergence from the correctness reference
+## Captured through the production (resolved) path
 
-The current emitter output captured here **differs** from `spike-gerber-v1`:
-SMD copper pads are the placeholder `1.0 x 0.6 mm` default (the spike golden
-uses real `1.2 x 1.3 mm` 0805 pads), with the matching mask and F.SilkS
-differences. That is a genuine finding — `board.yaml` pins carry no pad
-geometry, so `build_gerbers` falls back to `DEFAULT_SMD_PAD_*`. See the SB.2
-report.
+Since Stage 2 step 4a-ii (bug 019f7736b236) this snapshot is captured through the
+production fab path: `resolve.resolve_board_best_effort(board.yaml)` then
+`build_gerbers` — the same best-effort resolve `methods._gerbers` now runs by
+default. The raw board can no longer be captured directly: its SMD pins carry no
+inline geometry, so the emitter fails closed rather than writing a placeholder
+land. The SMD copper pads here are therefore the REAL `1.0 x 1.45 mm` 0805 lands
+resolved from the seed library, matching the (re-blessed) correctness reference
+`spike-gerber-v1` on the fabrication-critical layers (F.SilkS still differs — the
+emitter draws courtyards procedurally; silk is excluded from the correctness
+oracle, Option A).
 
 ## Regenerating (intentional emitter changes only)
 

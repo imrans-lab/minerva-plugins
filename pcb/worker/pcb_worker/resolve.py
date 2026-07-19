@@ -33,7 +33,7 @@ import math
 from pathlib import Path
 from typing import Union
 
-from .footprints import GRAPHIC_LAYERS, resolve_footprint
+from .footprints import GRAPHIC_LAYERS, FootprintLookupError, resolve_footprint
 
 # Coincidence tolerance in mm — same golden threshold Round 1 validated.
 COINCIDENCE_TOL_MM = 0.01
@@ -133,34 +133,90 @@ def resolve_board(
     for comp in components:
         if not isinstance(comp, dict):
             continue
-        ref = str(comp.get("ref", ""))
-        fp_ref = comp.get("footprint")
-        if not isinstance(fp_ref, str) or fp_ref == "":
-            raise ResolveError(
-                f"component {ref!r} has no footprint ref to resolve")
-
-        parsed = resolve_footprint(fp_ref, library_root=library_root, lockfile=lockfile)
-
-        fp_pads = {str(p["number"]): (p["x_mm"], p["y_mm"]) for p in parsed["pads"]}
-        _check_coincidence(ref, comp.get("pins") or [], fp_pads)
-
-        # Attach only the wanted layers (parse already filters to GRAPHIC_LAYERS,
-        # but assert the invariant so drift is caught here rather than in a render).
-        graphics = [g for g in parsed["graphics"] if g.get("layer") in GRAPHIC_LAYERS]
-        comp["graphics"] = graphics
-
-        # Attach real pad geometry (footprint-LOCAL coords — the SAME frame the
-        # graphics above are in, so silk and copper co-register). Built from the
-        # SAME parsed footprint used for the coincidence check; no re-parse. The
-        # coincidence guard has already run (and would have raised) before we get
-        # here, so pads are only attached to a proven-coincident component.
-        pads = _pads_from_parsed(parsed["pads"])
-        comp["pads"] = pads
-        # Only claim geometry when pads actually resolved — otherwise the panel
-        # would suppress its fallback pin renderer and draw nothing at all.
-        comp["has_pad_geometry"] = bool(pads)
+        _resolve_component(comp, library_root, lockfile)
 
     return resolved
+
+
+def resolve_board_best_effort(
+    board: dict,
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+) -> dict:
+    """TOLERANT resolve for the fabrication path (Stage 2 step 4a-ii, design 2).
+
+    Same as ``resolve_board`` but a component whose footprint is UNRESOLVABLE
+    (not in the library) or that declares no footprint ref is LEFT INLINE — its
+    ``pins`` remain the source of truth — instead of failing the whole board. The
+    downstream emitter then fail-closes only if such a component's SMD pad has no
+    inline geometry either (pad_source.iter_pads(require_smd_size=True)). So the
+    two controls compose: resolve what you can, and refuse to fabricate a pad you
+    still have no geometry for.
+
+    A ResolveCoincidenceError is NOT tolerated — a footprint that resolves but
+    whose pads DISAGREE with the routed pins is an integrity fault (silk/copper
+    would desync), so it still propagates and fails the board. The input is not
+    mutated — a deep copy is returned. The standalone ``resolve`` worker action
+    keeps using the STRICT ``resolve_board`` (an unresolvable footprint there IS
+    an error the caller asked to surface).
+    """
+    resolved = copy.deepcopy(board)
+    components = resolved.get("components")
+    if not isinstance(components, list):
+        return resolved
+
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        try:
+            _resolve_component(comp, library_root, lockfile)
+        except ResolveCoincidenceError:
+            raise  # integrity fault: footprint pads disagree with routed pins
+        except (ResolveError, FootprintLookupError):
+            continue  # unresolvable / no-ref footprint — leave inline (pins win)
+
+    return resolved
+
+
+def _resolve_component(
+    comp: dict,
+    library_root: Union[str, Path, None],
+    lockfile: Union[str, Path, None],
+) -> None:
+    """Resolve ONE component's footprint and attach its graphics + pad geometry.
+
+    Mutates ``comp`` in place (sets ``graphics``/``pads``/``has_pad_geometry``).
+    Raises ResolveError (no footprint ref), FootprintLookupError (not in library),
+    or ResolveCoincidenceError (pads disagree with pins) — the caller decides
+    whether to propagate (strict) or leave the component inline (best-effort).
+    Nothing is mutated until AFTER the coincidence check passes, so a raising
+    component is left pristine (inline).
+    """
+    ref = str(comp.get("ref", ""))
+    fp_ref = comp.get("footprint")
+    if not isinstance(fp_ref, str) or fp_ref == "":
+        raise ResolveError(f"component {ref!r} has no footprint ref to resolve")
+
+    parsed = resolve_footprint(fp_ref, library_root=library_root, lockfile=lockfile)
+
+    fp_pads = {str(p["number"]): (p["x_mm"], p["y_mm"]) for p in parsed["pads"]}
+    _check_coincidence(ref, comp.get("pins") or [], fp_pads)
+
+    # Attach only the wanted layers (parse already filters to GRAPHIC_LAYERS,
+    # but assert the invariant so drift is caught here rather than in a render).
+    graphics = [g for g in parsed["graphics"] if g.get("layer") in GRAPHIC_LAYERS]
+    comp["graphics"] = graphics
+
+    # Attach real pad geometry (footprint-LOCAL coords — the SAME frame the
+    # graphics above are in, so silk and copper co-register). Built from the
+    # SAME parsed footprint used for the coincidence check; no re-parse. The
+    # coincidence guard has already run (and would have raised) before we get
+    # here, so pads are only attached to a proven-coincident component.
+    pads = _pads_from_parsed(parsed["pads"])
+    comp["pads"] = pads
+    # Only claim geometry when pads actually resolved — otherwise the panel
+    # would suppress its fallback pin renderer and draw nothing at all.
+    comp["has_pad_geometry"] = bool(pads)
 
 
 def _pads_from_parsed(fp_pads: list) -> list:

@@ -7,8 +7,8 @@ G04 #@! TF.GenerationSoftware,Minerva,pcb_worker/gerber.py,0.2.0*
 %FSLAX36Y36*%
 G75*
 G04 #@! TA.AperFunction,SMDPad,CuDef*
-G04 #@! TAShape,Rectangle,1.0,0.6,0.0*
-%ADD10R,1.0X0.6*%
+G04 #@! TAShape,Rectangle,1.0,1.45,0.0*
+%ADD10R,1.0X1.45*%
 G04 #@! TD*
 G04 #@! TA.AperFunction,ComponentPad*
 G04 #@! TAShape,Circle,1.6*

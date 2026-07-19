@@ -25,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-from pcb_worker import gerber
+from pcb_worker import gerber, resolve
 from tests.oracle.geometry_diff import (
     diff_geometry,
     load_output_dir,
@@ -44,8 +44,12 @@ def _load(path: Path) -> dict:
 
 
 def _emit() -> dict[str, str]:
-    """Real emitter output for the spike board (name='board' to match goldens)."""
-    return gerber.build_gerbers(_load(SPIKE_BOARD), name="board")
+    """Real emitter output for the spike board (name='board' to match goldens).
+
+    Best-effort resolved first, as the production fab path does (step 4a-ii) —
+    the raw spike fails closed (SMD pins carry no inline geometry)."""
+    return gerber.build_gerbers(resolve.resolve_board_best_effort(_load(SPIKE_BOARD)),
+                                name="board")
 
 
 # ---------------------------------------------------------------------------

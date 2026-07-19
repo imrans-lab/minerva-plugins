@@ -62,11 +62,11 @@ WORKER_VERSION = "0.2.0"  # tracks plugin manifest / methods.WORKER_VERSION
 # the creation_date argument (pass a real ISO timestamp for a dated artifact).
 PINNED_CREATION_DATE = "1970-01-01T00:00:00"
 
-# --- Documented geometry defaults (no pad geometry exists in the canonical
-# board schema yet — these are placeholders, overridable per-pin via the
-# schema's Extra passthrough; see docs/gerbers.md + board-yaml.md). ---
-DEFAULT_SMD_PAD_W_MM = 1.0     # SMD pad width  (pin.Extra pad_width_mm overrides)
-DEFAULT_SMD_PAD_H_MM = 0.6     # SMD pad height (pin.Extra pad_height_mm overrides)
+# --- Geometry defaults. The SMD pad-size PLACEHOLDER is GONE (Stage 2 step
+# 4a-ii, bug 019f7736b236): a sizeless SMD pad now fails closed in pad_source
+# (iter_pads(require_smd_size=True) below) instead of flashing a nominal
+# rectangle. The via/trace/mask/silk/edge nominals below are genuine board-level
+# defaults (overridable via design_rules), not per-pad placeholders. ---
 DEFAULT_VIA_DIAMETER_MM = 0.8
 DEFAULT_VIA_DRILL_MM = 0.4
 DEFAULT_TRACE_WIDTH_MM = 0.25
@@ -236,9 +236,11 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
 
         pin_extents: list[tuple[float, float]] = []
         # iter_pads PREFERS resolved comp["pads"] (real footprint geometry) and
-        # otherwise reconstructs the exact per-pin fallback this loop used to read
-        # inline — so gate-OFF (no comp["pads"]) is byte-identical (see pad_source).
-        for pad in iter_pads(comp):
+        # otherwise reconstructs the per-pin fallback. require_smd_size=True is the
+        # fail-closed contract: an SMD pad with no resolved/inline copper size
+        # raises PadGeometryError here rather than flashing a placeholder land
+        # (bug 019f7736b236) — real runs resolve the board first (methods gate).
+        for pad in iter_pads(comp, require_smd_size=True):
             ox, oy = _rotate(pad.x, pad.y, rot)
             px, py = cx + ox, cy + oy
             pin_extents.append((px, py))
@@ -254,9 +256,11 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 g.mask_bot.append((px, py, "circle", mask_d))
                 g.holes.append((px, py, drill, pad.plated))
             else:
-                # SMD pad on the component's own side.
-                w = pad.width or DEFAULT_SMD_PAD_W_MM
-                h = pad.height or DEFAULT_SMD_PAD_H_MM
+                # SMD pad on the component's own side. width/height are
+                # guaranteed positive by iter_pads(require_smd_size=True) above
+                # (a sizeless SMD pad has already raised PadGeometryError).
+                w = pad.width
+                h = pad.height
                 g.smd_pads.append((px, py, w, h, rot, top))
                 mask = (px, py, "rect", w + 2 * mask_clearance,
                         h + 2 * mask_clearance, rot)

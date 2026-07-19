@@ -57,7 +57,10 @@ def _canonical_from_fixture() -> tuple[dict, dict[str, tuple[float, float]]]:
     pins = []
     for pad in fp["pads"]:
         lx, ly = pad["position"]
-        pins.append({"number": pad["number"], "x_mm": lx, "y_mm": ly})
+        # Nominal inline pad size so the SMD lands flash — this test asserts pad
+        # CENTRES only, and a sizeless SMD pad now fails closed (step 4a-ii).
+        pins.append({"number": pad["number"], "x_mm": lx, "y_mm": ly,
+                     "pad_width_mm": 1.0, "pad_height_mm": 1.0})
 
     comp = {
         "ref": fp.get("reference", "U1"),
@@ -173,7 +176,11 @@ def test_kicad_smd_pad_honours_declared_size():
     assert "(size 2.0 2.0)" in pcb, pcb
 
 
-def test_kicad_smd_pad_falls_back_to_nominal():
+def test_kicad_smd_pad_without_size_fails_closed():
+    """Step 4a-ii: the kicad emitter NO LONGER falls back to a 1x0.6 nominal for a
+    sizeless SMD pad — it fails closed (PadGeometryError), same as gerber, rather
+    than writing a placeholder land (bug 019f7736b236)."""
+    from pcb_worker.pad_source import PadGeometryError
     board = {
         "version": 1, "name": "smd", "width_mm": 10, "height_mm": 10,
         "components": [
@@ -183,5 +190,5 @@ def test_kicad_smd_pad_falls_back_to_nominal():
         ],
         "nets": [],
     }
-    pcb = kicad.generate_kicad_pcb(board)
-    assert "(size 1 0.6)" in pcb, "nominal fallback changed"
+    with pytest.raises(PadGeometryError):
+        kicad.generate_kicad_pcb(board)

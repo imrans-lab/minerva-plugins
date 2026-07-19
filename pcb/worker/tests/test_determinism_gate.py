@@ -32,7 +32,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import gerber
+from pcb_worker import gerber, resolve
 
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
@@ -42,7 +42,12 @@ CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
 
 
 def _load(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    # Best-effort resolve, as the production fab path does (step 4a-ii): the raw
+    # spike would fail closed (SMD pins carry no inline geometry), so the
+    # determinism gate exercises the ACTUAL production input — the resolved
+    # board. drilltest's footprints aren't in the seed lib → left inline.
+    return resolve.resolve_board_best_effort(
+        yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
 @pytest.mark.parametrize("board_path,base", CASES)

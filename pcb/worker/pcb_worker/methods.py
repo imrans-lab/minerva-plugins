@@ -62,11 +62,13 @@ def _load(params: dict) -> dict:
 
 # --- Resolve-into-fab gate (bug 019f7736b236) -----------------------------
 # The fab compilers (gerber/kicad/drc via pad_source) prefer real footprint pad
-# geometry attached by resolve.resolve_board to comp["pads"]. Running resolve on
-# the fab path is GATED so DEFAULT output stays byte-identical: a LATER step
-# flips this constant to True and regenerates goldens. Grep this name to find the
-# switch. Per-call override: params["resolve_geometry"] (truthy/falsey).
-RESOLVE_FAB_GEOMETRY_DEFAULT = False
+# geometry attached by resolve to comp["pads"]. Stage 2 step 4a-ii FLIPPED this
+# ON (design 2): the fab path resolves by default so pads come from the library,
+# not a placeholder. The resolve is BEST-EFFORT (see _maybe_resolve) — a
+# component with an unresolvable footprint is left inline rather than failing the
+# board; the emitter then fail-closes only on a genuinely sizeless SMD pad.
+# Grep this name to find the switch. Per-call override: params["resolve_geometry"].
+RESOLVE_FAB_GEOMETRY_DEFAULT = True
 
 
 def _is_error_reply(x: Any) -> bool:
@@ -76,21 +78,33 @@ def _is_error_reply(x: Any) -> bool:
 
 
 def _maybe_resolve(board: dict, params: dict) -> dict:
-    """Return the board to compile: unchanged when the resolve-fab gate is OFF
-    (no resolve call → default fab output byte-identical), or resolve_board(board)
-    when ON (attaching comp["pads"] real geometry that pad_source then prefers).
+    """Return the board to compile for the FAB path: unchanged when the resolve
+    gate is OFF, or a BEST-EFFORT resolve when ON — attaching comp["pads"] real
+    geometry that pad_source prefers, while leaving any component with an
+    unresolvable footprint inline (its pins win) rather than failing the board.
 
-    Gate = RESOLVE_FAB_GEOMETRY_DEFAULT, overridable per-call via
-    params["resolve_geometry"]. On a coincidence / lookup failure returns a
-    structured error reply (SAME error kinds as _resolve) instead of raising, so
-    callers pass it straight through — detect it with _is_error_reply().
+    Gate = RESOLVE_FAB_GEOMETRY_DEFAULT (default ON since step 4a-ii), overridable
+    per-call via params["resolve_geometry"]. A coincidence failure (footprint
+    resolves but disagrees with the routed pins) is NOT tolerated — it returns a
+    structured error reply so callers pass it through (detect with
+    _is_error_reply()). The standalone `resolve` action uses the STRICT variant
+    below instead (an unresolvable footprint there IS an error to surface).
     """
     want = params.get("resolve_geometry")
     if want is None:
         want = RESOLVE_FAB_GEOMETRY_DEFAULT
     if not want:
         return board
+    return _resolve_mapped(board, tolerant=True)
+
+
+def _resolve_mapped(board: dict, *, tolerant: bool) -> dict:
+    """Run resolve (tolerant=best-effort for fab, strict for the resolve action)
+    and map its faults to structured error replies (never raise). Single owner of
+    the coincidence/resolve error shape shared by _maybe_resolve and _resolve."""
     try:
+        if tolerant:
+            return resolve.resolve_board_best_effort(board)
         return resolve.resolve_board(board)
     except resolve.ResolveCoincidenceError as exc:
         return {"ok": False, "error": {
@@ -126,7 +140,10 @@ def _generate(params: dict) -> dict:
         return board
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
-    files = kicad.generate(board, base_name=base_name)
+    try:
+        files = kicad.generate(board, base_name=base_name)
+    except Exception as exc:  # geometry/library faults (incl. fail-closed) as data
+        return {"ok": False, "error": {"kind": "generate", "message": str(exc)}}
 
     out_dir = params.get("out_dir")
     result: dict = {"files": files, "written": []}
@@ -228,9 +245,11 @@ def _resolve(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
-    # Force the resolve (this method IS resolve) and reuse _maybe_resolve's shared
-    # coincidence/lookup error handling — one place owns the structured errors.
-    resolved = _maybe_resolve(board, {"resolve_geometry": True})
+    # This method IS resolve, and it is STRICT: an unresolvable footprint is an
+    # error the caller asked to surface (unlike the fab path, which tolerates it
+    # and falls back to inline pins). Reuse _resolve_mapped's shared structured
+    # error handling — one place owns the coincidence/lookup error shape.
+    resolved = _resolve_mapped(board, tolerant=False)
     if _is_error_reply(resolved):
         return resolved
 
