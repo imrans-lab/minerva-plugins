@@ -36,13 +36,14 @@ Design constraints (docket 019eb481ae28 / 019eb47eb567, DCR 019dc140):
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from agent_router.board import Board, Pad, Net, Obstacle
 from agent_router.hints import RoutingHints, parse_hints
 from agent_router import layers as _layers
+
+from .geometry import rotate_local_offset
 
 
 # ---------------------------------------------------------------------------
@@ -81,16 +82,15 @@ def _canon_layer(layer: Any) -> str:
 def _rotate_offset(px: float, py: float, rotation_deg: float) -> tuple[float, float]:
     """Rotate a component-relative pin offset into board space.
 
-    Mirrors pcb/ui/model/pcb_component.gd::get_pin_world_position exactly:
-    a Godot Transform2D(deg_to_rad(-rotation)) applied to the offset. For a
-    right-handed screen frame that is a clockwise rotation by ``rotation_deg``.
+    Single source of the transform is pcb_worker.geometry.rotate_local_offset;
+    this thin wrapper keeps the call sites here unchanged. The geometry form
+    (``radians(-deg)``) is algebraically identical to this module's former
+    hand-written ``radians(+deg)`` matrix, and both mirror
+    pcb/ui/model/pcb_component.gd::get_pin_world_position exactly: a Godot
+    Transform2D(deg_to_rad(-rotation)) applied to the offset (a clockwise
+    rotation by ``rotation_deg`` in a right-handed screen frame).
     """
-    if not rotation_deg:
-        return (px, py)
-    r = math.radians(rotation_deg)
-    c = math.cos(r)
-    s = math.sin(r)
-    return (px * c + py * s, -px * s + py * c)
+    return rotate_local_offset(px, py, rotation_deg)
 
 
 # ---------------------------------------------------------------------------

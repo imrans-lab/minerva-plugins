@@ -23,10 +23,10 @@ FALSE-POSITIVE GUARDS (mandatory — a DRC that cries wolf is useless):
     open — same-component same-net pads (module internal nets, e.g. an ESP32's
     several GND pins) are internally connected and stay quiet.
 
-DRY: pad absolute positions reuse gerber._rotate (KiCad CW convention,
-math.radians(-deg)) so DRC and the fabrication compiler agree byte-for-byte on
-where a rotated pad lands. This module owns only the net<->pad wiring and the
-segment geometry that gerber has no need for.
+DRY: pad absolute positions reuse geometry.rotate_local_offset (KiCad CW
+convention, math.radians(-deg)) so DRC and the fabrication compiler agree
+byte-for-byte on where a rotated pad lands. This module owns only the net<->pad
+wiring and the segment geometry that gerber has no need for.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from .gerber import _is_top, _rotate
+from .geometry import is_top as _is_top, rotate_local_offset as _rotate
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
 # layer"; it defaults to the board's clearance rule (same value the wrong-net
