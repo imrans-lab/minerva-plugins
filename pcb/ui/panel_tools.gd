@@ -775,14 +775,16 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 		if not DirAccess.dir_exists_absolute(parent_dir):
 			return _err("save_to_path parent directory does not exist: %s" % parent_dir)
 
-	# Frame the board and let it render BEFORE capturing, so a programmatically-
-	# loaded board isn't grabbed at a stale/unframed camera (bug 019f7876e3d4).
-	# fit defaults TRUE (whole board); pass fit=false to capture the current
-	# minerva_pcb_set_view camera (a zoomed-in detail). Best-effort + safe
-	# headless; this whole call is already awaited by handle().
+	# Render the board OFF-SCREEN at the requested size (bug 019f7876e3d4): the
+	# old "screenshot the window viewport + crop" path returned only the editor
+	# background for a plugin-hosted / non-foreground panel and ignored width/
+	# height. capture_to_image builds its own SubViewport so the capture is
+	# independent of tab focus and honors the size. fit defaults TRUE (whole
+	# board); fit=false reproduces the current minerva_pcb_set_view camera (a
+	# zoomed-in detail). This whole call is already awaited by handle().
 	var want_fit: bool = bool(args.get("fit", true))
-	if host.has_method("prepare_capture"):
-		await host.prepare_capture(want_fit)
+	var width: int = int(args.get("width", 800))
+	var height: int = int(args.get("height", 600))
 
 	var data = _get_data(host)
 
@@ -796,7 +798,11 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 		metadata["annotation_count"] = (host.call("get_all_annotations") as Array).size()
 
 	var img: Image = null
-	if host.has_method("render_content_to_image"):
+	var canvas = host.get_canvas() if host.has_method("get_canvas") else null
+	if canvas != null and is_instance_valid(canvas) and canvas.has_method("capture_to_image"):
+		img = await canvas.capture_to_image(width, height, want_fit)
+	elif host.has_method("render_content_to_image"):
+		# Legacy fallback (headless / a host without a canvas).
 		img = host.call("render_content_to_image", Rect2()) as Image
 
 	if img == null:

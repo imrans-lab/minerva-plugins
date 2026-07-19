@@ -1533,6 +1533,99 @@ func get_view() -> Dictionary:
 	}
 
 
+## Render the board to an Image OFF-SCREEN — independent of which editor tab is
+## focused or how the plugin panel is hosted. This is the get_image MCP capture
+## path (bug 019f7876e3d4): it RESTORES the capture_to_image the native->plugin
+## port wrongly stripped (see the "STRIPPED vs legacy" note at the top of this
+## file — "MCP export lives in the worker" was incorrect). The prior replacement
+## screenshotted the live window viewport and cropped, which returned only the
+## editor background for a plugin-hosted / non-foreground panel.
+##
+## Builds a private SubViewport, renders a FRESH copy of this canvas over the SAME
+## board data at the requested size, waits for the render to actually land
+## (RenderingServer.frame_post_draw), then reads the texture. Honors width/height.
+## fit=true frames the whole board; fit=false reproduces THIS canvas's current
+## camera (the minerva_pcb_set_view detail) — the world point at the screen centre
+## is -pan_offset/zoom regardless of viewport size, so copying zoom+pan_offset
+## preserves centre+scale across the differing size. Returns null in a bare
+## --headless run (no render target) or when detached, so the caller emits its
+## graceful null envelope (test contract §1c).
+func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
+	if DisplayServer.get_name() == "headless":
+		return null
+	if data == null or not is_inside_tree():
+		return null
+	var tree := get_tree()
+	if tree == null:
+		return null
+
+	var viewport := SubViewport.new()
+	viewport.size = Vector2i(maxi(width, 1), maxi(height, 1))
+	viewport.transparent_bg = false
+	viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+	var copy = get_script().new()
+	copy.size = Vector2(viewport.size)
+	copy.data = data
+	# Mirror the visible view options so the capture matches what the user sees.
+	copy.show_grid = show_grid
+	copy.show_ratsnest = show_ratsnest
+	copy.show_traces = show_traces
+	copy.show_labels = show_labels
+	copy.show_pins = show_pins
+	copy.show_pads = show_pads
+	copy.show_silk = show_silk
+	copy.show_unresolved_badges = show_unresolved_badges
+	copy.snap_to_grid = snap_to_grid
+	copy.trace_layer_filter = trace_layer_filter
+
+	viewport.add_child(copy)
+	add_child(viewport)
+
+	if fit:
+		_frame_board_for_capture(copy)
+	else:
+		copy.zoom = zoom
+		copy.pan_offset = pan_offset
+
+	copy.queue_redraw()
+	await tree.process_frame
+	await tree.process_frame
+	await RenderingServer.frame_post_draw
+
+	var img: Image = viewport.get_texture().get_image()
+
+	viewport.remove_child(copy)
+	copy.queue_free()
+	remove_child(viewport)
+	viewport.queue_free()
+	return img
+
+
+## Fit the whole board (+5% margin) into a capture copy sized to the offscreen
+## viewport. Same math as zoom_to_fit, but against the COPY's size (the requested
+## capture dims), not the on-screen canvas size.
+func _frame_board_for_capture(copy) -> void:
+	var min_pos := Vector2.ZERO
+	var max_pos := Vector2(data.board_width, data.board_height)
+	for comp_id in data.components:
+		var b: Rect2 = data.components[comp_id].get_bounding_rect()
+		min_pos.x = minf(min_pos.x, b.position.x)
+		min_pos.y = minf(min_pos.y, b.position.y)
+		max_pos.x = maxf(max_pos.x, b.end.x)
+		max_pos.y = maxf(max_pos.y, b.end.y)
+	var content := max_pos - min_pos
+	var margin := content * 0.05
+	min_pos -= margin
+	max_pos += margin
+	content = max_pos - min_pos
+	if content.x <= 0.0 or content.y <= 0.0:
+		return
+	copy.zoom = clampf(minf(copy.size.x / content.x, copy.size.y / content.y),
+		copy.min_zoom, copy.max_zoom)
+	copy.pan_offset = -((min_pos + max_pos) / 2.0) * copy.zoom
+
+
 func _on_data_changed() -> void:
 	queue_redraw()
 

@@ -335,8 +335,8 @@
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "width": {"type": "integer", "description": "Requested image width in pixels (advisory). Default: 800"},
-          "height": {"type": "integer", "description": "Requested image height in pixels (advisory). Default: 600"},
+          "width": {"type": "integer", "description": "Capture width in pixels (honored — the board is rendered off-screen at this size). Default: 800"},
+          "height": {"type": "integer", "description": "Capture height in pixels (honored — the board is rendered off-screen at this size). Default: 600"},
           "save_to_path": {"type": "string", "description": "Optional absolute filesystem path to write the PNG to instead of returning it inline as base64. Parent directory must already exist. When set, the response omits image_data and instead returns {saved_to, width, height, byte_size} — read the file back with your file-read tool if you need to view it."},
           "fit": {"type": "boolean", "description": "Default true: frame the whole board (fit-to-content) before capturing, so a freshly-loaded board is never off-frame. Pass false to capture the CURRENT camera set by minerva_pcb_set_view (a zoomed-in detail)."}
         },
