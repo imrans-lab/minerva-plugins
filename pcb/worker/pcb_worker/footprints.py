@@ -1,8 +1,8 @@
 """KiCad footprint (`.kicad_mod`) parser + seed-library lookup.
 
 This module turns a real KiCad footprint into the geometry Minerva needs to
-render a component as more than a bare pad-cluster: its PADS *and* its
-silkscreen (``F.SilkS``) + courtyard (``F.CrtYd``) graphics. Coordinates are
+render or fabricate a component: its pads and modeled front/back technical
+graphics. Coordinates are
 returned in footprint-LOCAL space -- the board-placement transform (component
 position + KiCad clockwise rotation) happens elsewhere, in the resolve round,
 exactly as ``agent_router.kicad_io._transform_position`` already does for pads.
@@ -34,16 +34,29 @@ import math
 from pathlib import Path
 from typing import Any, Union
 
-# Graphics layers we CAPTURE as real geometry. Silkscreen is the visible body
-# outline / pin-1 markers; courtyard is the keep-out boundary. Fab-affecting
-# primitives on OTHER layers (F.Fab, F.Mask, B.SilkS, ...) are NOT modeled --
-# but they are no longer silently dropped: ``_uncaptured_graphics`` surfaces an
-# attributed marker for each so a downstream compiler can fail closed on data
-# the parser could not represent (K1: lossless-or-flagging).
-GRAPHIC_LAYERS = frozenset({"F.SilkS", "F.CrtYd"})
+# Primitive geometry is layer-agnostic: once line/circle/arc/poly/rect is
+# understood, dropping it merely because it is on the back, fab, courtyard, or
+# paste side makes strict compilation reject ordinary library parts.  Capture
+# the modeled technical-layer set; consumers still explicitly choose which
+# layers they render/emit, so this is additive to the current live path.
+GRAPHIC_LAYERS = frozenset({
+    "F.SilkS", "B.SilkS", "F.Fab", "B.Fab", "F.CrtYd", "B.CrtYd",
+    "F.Paste", "B.Paste",
+})
 
-# fp_* geometry tags scanned when surfacing uncaptured fab graphics.
-_FAB_GRAPHIC_TAGS = ("fp_line", "fp_circle", "fp_arc", "fp_poly")
+_CAPTURED_GRAPHIC_TAGS = frozenset(
+    {"fp_line", "fp_circle", "fp_arc", "fp_poly", "fp_rect"}
+)
+_CAPTURED_GRAPHIC_KINDS = frozenset(
+    tag[len("fp_"):] for tag in _CAPTURED_GRAPHIC_TAGS
+)
+# Kinds scanned for capture-or-diagnostic coverage. Text/curve forms are not
+# silently dropped; the FootprintDefinition adapter classifies their layer and
+# whether omitting them blocks a requested output.
+_FAB_GRAPHIC_TAGS = (
+    "fp_line", "fp_circle", "fp_arc", "fp_poly", "fp_rect",
+    "fp_text", "fp_text_box", "fp_curve",
+)
 
 # Repo layout: this file is pcb/worker/pcb_worker/footprints.py, so the seed
 # library lives two levels up (pcb/library/...).
@@ -333,7 +346,10 @@ def _parse_graphics(root: Any) -> list[dict]:
         if not (ct and en):
             continue
         cx, cy = _num(ct[1]), _num(ct[2])
-        radius = math.hypot(_num(en[1]) - cx, _num(en[2]) - cy)
+        ex, ey = _num(en[1]), _num(en[2])
+        if None in (cx, cy, ex, ey):
+            continue
+        radius = math.hypot(ex - cx, ey - cy)
         graphics.append({
             "layer": layer, "kind": "circle",
             "center": [cx, cy], "radius": radius,
@@ -374,29 +390,54 @@ def _parse_graphics(root: Any) -> list[dict]:
             "points": pts, "width": _stroke_width(g),
         })
 
+    # Rectangles normalize to the one downstream polygon form. KiCad stores
+    # opposing corners; preserve a deterministic clockwise local-point order.
+    for g in _find_all(root, "fp_rect"):
+        layer = _graphic_layer(g)
+        if layer not in GRAPHIC_LAYERS:
+            continue
+        st, en = _kv(g, "start"), _kv(g, "end")
+        if not (st and en):
+            continue
+        x1, y1 = _num(st[1]), _num(st[2])
+        x2, y2 = _num(en[1]), _num(en[2])
+        graphics.append({
+            "layer": layer,
+            "kind": "poly",
+            "source_kind": "rect",
+            "points": [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+            "width": _stroke_width(g),
+        })
+
     return graphics
 
 
-def _uncaptured_graphics(root: Any) -> list[dict]:
-    """Surface (never silently filter) fab-affecting graphic primitives that
-    fall OUTSIDE the captured ``GRAPHIC_LAYERS``.
+def _uncaptured_graphics(root: Any, captured: list[dict]) -> list[dict]:
+    """Surface every graphic that the modeled kind/layer matrix cannot hold.
 
-    ``_parse_graphics`` keeps F.SilkS/F.CrtYd exactly as before; this reuses the
-    SAME ``_find_all`` + ``_graphic_layer`` helpers to enumerate fp_line/circle/
-    arc/poly on every OTHER layer (F.Fab, F.Mask, B.SilkS, ...) and returns one
-    attributed marker per (layer, kind), so a downstream compiler sees the
-    data-loss instead of it being dropped. No coordinates are captured -- these
-    layers are not modeled -- only that geometry EXISTS there is reported.
+    This includes supported primitives on unmodeled layers and unmodeled kinds
+    (such as text) on otherwise modeled layers. One attributed marker per
+    ``(layer, kind)`` makes the omission visible to capability policy.
     """
+    # Count successful capture by SOURCE kind (rect normalizes to poly). This
+    # makes a malformed known primitive visible too: if parsing could not emit
+    # it, its source count remains after subtraction and becomes a marker.
+    captured_counts: dict = {}
+    for graphic in captured:
+        key = (graphic.get("layer"), graphic.get("source_kind") or graphic.get("kind"))
+        captured_counts[key] = captured_counts.get(key, 0) + 1
+
     counts: dict = {}
     order: list = []
     for tag in _FAB_GRAPHIC_TAGS:
         kind = tag[len("fp_"):]  # line / circle / arc / poly
         for g in _find_all(root, tag):
             layer = _graphic_layer(g)
-            if layer in GRAPHIC_LAYERS:
-                continue  # captured verbatim by _parse_graphics
             key = (layer, kind)
+            if (tag in _CAPTURED_GRAPHIC_TAGS and layer in GRAPHIC_LAYERS
+                    and captured_counts.get(key, 0) > 0):
+                captured_counts[key] -= 1
+                continue
             if key not in counts:
                 counts[key] = 0
                 order.append(key)
@@ -405,14 +446,19 @@ def _uncaptured_graphics(root: Any) -> list[dict]:
     markers: list[dict] = []
     for (layer, kind) in order:
         n = counts[(layer, kind)]
+        if layer not in GRAPHIC_LAYERS:
+            reason = "outside the modeled layer set"
+        elif kind in _CAPTURED_GRAPHIC_KINDS:
+            reason = "malformed or unsupported source form"
+        else:
+            reason = "unsupported graphic kind"
         markers.append({
             "feature": "uncaptured_graphic",
             "layer": layer,
             "kind": kind,
             "count": n,
             "detail": (
-                f"{n} fp_{kind} on layer {layer!r} not captured "
-                f"(outside {sorted(GRAPHIC_LAYERS)})"
+                f"{n} fp_{kind} on layer {layer!r} not captured: {reason}"
             ),
         })
     return markers
@@ -427,15 +473,16 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
         {
           "name": str,
           "pads": [{number, type, shape, x_mm, y_mm, size:[w,h], drill, layers}],
-          "graphics": [{layer, kind, ...coords, width}],  # F.SilkS + F.CrtYd
+          "graphics": [{layer, kind, ...coords, width}],
         }
 
-    The eight pad keys above and the ``graphics`` list are byte-identical to
-    prior behavior. K1 (lossless-or-flagging) ADDS, only when the source carries
-    them: per-pad ``rotation`` / ``roundrect_rratio`` / ``drill_shape`` +
+    The eight original pad keys above stay byte-identical. K1
+    (lossless-or-flagging) adds, only when the source carries them: per-pad
+    ``rotation`` / ``roundrect_rratio`` / ``drill_shape`` +
     ``drill_size`` / ``solder_mask_margin`` / ``solder_paste_margin`` and a pad
     ``unsupported`` list (custom primitives); plus a top-level ``unsupported``
-    list of attributed markers for fab graphics on layers we do not capture.
+    list of attributed markers for graphics outside the modeled kind/layer
+    matrix.
 
     All coordinates are footprint-LOCAL (no board transform applied).
     """
@@ -457,7 +504,7 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     # K1 ADDITIVE: surface fab geometry on layers we do not capture as an
     # attributed marker list (NEW top-level key, added only when non-empty so
     # footprints with only silk/courtyard graphics stay byte-identical).
-    uncaptured = _uncaptured_graphics(root)
+    uncaptured = _uncaptured_graphics(root, graphics)
     if uncaptured:
         result["unsupported"] = uncaptured
     return result

@@ -23,6 +23,7 @@ from pcb_worker import footprints
 from pcb_worker.footprints import (
     DEFAULT_LIBRARY_ROOT,
     DEFAULT_LOCKFILE,
+    GRAPHIC_LAYERS,
     load_lockfile,
     parse_kicad_mod,
     resolve_footprint,
@@ -84,8 +85,7 @@ def test_seed_footprint_has_graphics(ref):
     parsed = resolve_footprint(ref)
     silk = _silk_graphics(parsed)
     crtyd = _courtyard_graphics(parsed)
-    # Only F.SilkS / F.CrtYd graphics are extracted.
-    assert all(g["layer"] in {"F.SilkS", "F.CrtYd"} for g in parsed["graphics"])
+    assert all(g["layer"] in GRAPHIC_LAYERS for g in parsed["graphics"])
     if ref in NO_SILK_REFS:
         # Mechanical footprint: no silkscreen, but it must have a courtyard.
         assert silk == [], f"{ref}: unexpectedly has silk graphics"
@@ -279,18 +279,21 @@ def test_k1_unsupported_pad_and_graphic_are_flagged_not_dropped():
     marker = next(u for u in p1["unsupported"] if u["feature"] == "custom_primitives")
     assert "'1'" in marker["detail"]  # attributed to the pad number
 
-    # (2) Fab graphics on uncaptured layers -> top-level attributed markers.
+    # (2) Modeled primitives on Fab/back layers are now captured losslessly;
+    # unsupported kinds on those layers remain attributed markers.
+    captured = {(g["layer"], g["kind"]) for g in parsed["graphics"]}
+    assert ("F.Fab", "line") in captured
+    assert ("B.SilkS", "circle") in captured
     assert "unsupported" in parsed, "uncaptured fab graphics silently dropped"
     by_layer_kind = {(u["layer"], u["kind"]): u for u in parsed["unsupported"]}
-    assert by_layer_kind[("F.Fab", "line")]["count"] == 2
-    assert by_layer_kind[("B.SilkS", "circle")]["count"] == 1
+    assert by_layer_kind[("F.Fab", "text")]["count"] == 1
     for u in parsed["unsupported"]:
         assert u["feature"] == "uncaptured_graphic"
         assert u["layer"] and u["kind"] and u["detail"]
 
-    # (3) The captured F.SilkS graphic is STILL captured; nothing outside
-    #     GRAPHIC_LAYERS leaked into the captured `graphics` list.
-    assert all(g["layer"] in {"F.SilkS", "F.CrtYd"} for g in parsed["graphics"])
+    # (3) The captured F.SilkS graphic is STILL captured; nothing outside the
+    #     modeled layer set leaked into `graphics`.
+    assert all(g["layer"] in GRAPHIC_LAYERS for g in parsed["graphics"])
     assert _silk_graphics(parsed), "real F.SilkS graphic was dropped"
 
     # (4) Other fab-affecting pad tokens (drill offset, chamfer, local
@@ -302,6 +305,21 @@ def test_k1_unsupported_pad_and_graphic_are_flagged_not_dropped():
     p2_feats = {u["feature"] for u in p2["unsupported"]}
     assert {"pad_drill_offset", "chamfer", "local_clearance", "zone_connect"} <= p2_feats
     assert all("'2'" in u["detail"] for u in p2["unsupported"])  # attributed to pad
+
+
+def test_malformed_modeled_graphic_is_diagnosed_instead_of_silently_filtered():
+    parsed = parse_kicad_mod("""
+        (footprint "Malformed" (layer "F.Cu")
+          (fp_circle (center bad 0) (end 1 0) (width 0.1) (layer "F.SilkS")))
+    """)
+    assert parsed["graphics"] == []
+    assert parsed["unsupported"] == [{
+        "feature": "uncaptured_graphic",
+        "layer": "F.SilkS",
+        "kind": "circle",
+        "count": 1,
+        "detail": "1 fp_circle on layer 'F.SilkS' not captured: malformed or unsupported source form",
+    }]
 
 
 def test_k1_additive_on_real_seed_footprint_byte_identical_keys():

@@ -1,0 +1,57 @@
+{
+  "generated_by": "pcbnew 9.0.9",
+  "fixture": "k1_bottom_oracle.kicad_pcb",
+  "source": {
+    "position": [50.0, 40.0],
+    "rotation_deg": 37.0,
+    "side": "bottom",
+    "pads": [
+      {
+        "local_position": [3.0, 1.0],
+        "local_rotation_deg": 23.0,
+        "layers": ["F.Cu", "F.Paste", "F.Mask"]
+      },
+      {
+        "local_position": [-2.0, -1.0],
+        "local_rotation_deg": 0.0,
+        "layers": ["F.Cu", "F.Paste", "F.Mask"]
+      }
+    ],
+    "line": {
+      "a": [-4.0, -2.0],
+      "b": [2.0, -1.0],
+      "layer": "F.SilkS"
+    },
+    "arc": {
+      "start": [-3.0, 1.0],
+      "mid": [0.0, 4.0],
+      "end": [3.0, 1.0],
+      "layer": "F.SilkS"
+    }
+  },
+  "expected": {
+    "pads": [
+      {
+        "position": [51.794092, 37.395919],
+        "rotation_deg": 14.0,
+        "layers": ["B.Cu", "B.Paste", "B.Mask"]
+      },
+      {
+        "position": [49.004544, 42.002266],
+        "rotation_deg": 37.0,
+        "layers": ["B.Cu", "B.Paste", "B.Mask"]
+      }
+    ],
+    "line": {
+      "a": [48.009088, 44.004531],
+      "b": [52.199086, 39.595005],
+      "layer": "B.SilkS"
+    },
+    "arc": {
+      "start": [47.002278, 41.006810],
+      "mid": [47.592739, 36.805457],
+      "end": [51.794092, 37.395919],
+      "layer": "B.SilkS"
+    }
+  }
+}

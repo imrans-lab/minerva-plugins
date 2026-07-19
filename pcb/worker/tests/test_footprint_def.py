@@ -11,16 +11,22 @@ DTO, so a later rewire is a no-op for existing parts. This runs the REAL parser
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import replace
 
 import pytest
 
 from pcb_worker import resolve
-from pcb_worker.footprints import parse_kicad_mod
+from pcb_worker.footprints import load_lockfile, parse_kicad_mod
 from pcb_worker.footprint_def import (
+    ArcGraphic,
+    CircleGraphic,
     DrillDefinition,
     FootprintDefinition,
+    LineGraphic,
     PadDefinition,
     PadShape,
+    PolyGraphic,
+    Provenance,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -162,3 +168,152 @@ def test_np_thru_hole_drill_is_unplated():
     assert np_pads, "expected a non-plated thru-hole pad"
     for p in np_pads:
         assert p.drill is not None and p.drill.plated is False
+
+
+def test_content_identity_excludes_provenance_but_tracks_geometry():
+    parsed = parse_kicad_mod(_LOCAL_FIXTURES[0])
+    first = FootprintDefinition.from_kicad_parsed(
+        parsed, Provenance("one", "aaa", "MIT", "2026-07-19"),
+    )
+    second = FootprintDefinition.from_kicad_parsed(
+        parsed, Provenance("two", "bbb", "Apache-2.0", "2027-01-01"),
+    )
+    assert first.content_id == second.content_id
+    assert len(first.content_id) == 64
+
+    changed_pad = replace(first.pads[0], position=(9.0, 9.0))
+    changed = replace(first, pads=(changed_pad, *first.pads[1:]))
+    assert changed.content_id != first.content_id
+
+
+def test_definition_local_ids_disambiguate_duplicate_pad_numbers():
+    parsed = {
+        "name": "Duplicated",
+        "pads": [
+            {"number": "1", "type": "smd", "shape": "rect", "x_mm": 0.0,
+             "y_mm": 0.0, "size": [1.0, 1.0], "drill": None, "layers": ["F.Cu"]},
+            {"number": "1", "type": "smd", "shape": "rect", "x_mm": 2.0,
+             "y_mm": 0.0, "size": [1.0, 1.0], "drill": None, "layers": ["F.Cu"]},
+        ],
+        "graphics": [],
+    }
+    fp = FootprintDefinition.from_kicad_parsed(parsed)
+    assert [pad.source_id for pad in fp.pads] == ["pad:1:0", "pad:1:1"]
+
+
+def test_sizeless_pad_stays_none_instead_of_inventing_geometry():
+    parsed = {
+        "name": "Sizeless",
+        "pads": [{
+            "number": "1", "type": "smd", "shape": "rect",
+            "x_mm": 0.0, "y_mm": 0.0, "size": None,
+            "drill": None, "layers": ["F.Cu"],
+        }],
+        "graphics": [],
+    }
+    fp = FootprintDefinition.from_kicad_parsed(parsed)
+    assert fp.pads[0].size is None
+    assert fp.to_board_pad_dicts()[0]["size"] == {"width": None, "height": None}
+
+
+def test_unknown_pad_type_is_preserved_and_blocks_only_strict_new_path():
+    parsed = {
+        "name": "UnknownPad",
+        "pads": [{
+            "number": "1", "type": "future_pad", "shape": "rect",
+            "x_mm": 0.0, "y_mm": 0.0, "size": [1.0, 1.0],
+            "drill": None, "layers": ["F.Cu"],
+        }],
+        "graphics": [],
+    }
+    pad = FootprintDefinition.from_kicad_parsed(parsed).pads[0]
+    assert pad.raw_pad_type == "future_pad"
+    assert pad.pad_type == "smd"  # compatibility projection only
+    marker = next(item for item in pad.unsupported if item.feature == "unknown_pad_type")
+    assert marker.default_blocking is True
+    assert marker.source_ref.entity_id == "pad:1:0"
+
+
+def test_graphic_adapter_has_one_typed_variant_per_modeled_primitive():
+    parsed = {
+        "name": "Graphics",
+        "pads": [],
+        "graphics": [
+            {"kind": "line", "layer": "B.Fab", "width": 0.1,
+             "start": [0.0, 0.0], "end": [1.0, 0.0]},
+            {"kind": "circle", "layer": "F.Paste", "width": 0.0,
+             "center": [0.0, 0.0], "radius": 1.0},
+            {"kind": "arc", "layer": "B.SilkS", "width": 0.1,
+             "points": [[-1.0, 0.0], [0.0, -1.0], [1.0, 0.0]]},
+            {"kind": "poly", "layer": "F.CrtYd", "width": 0.05,
+             "points": [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]},
+        ],
+    }
+    fp = FootprintDefinition.from_kicad_parsed(parsed)
+    assert [type(item) for item in fp.graphics] == [
+        LineGraphic, CircleGraphic, ArcGraphic, PolyGraphic,
+    ]
+    assert [item.source_id for item in fp.graphics] == [
+        "graphic:0", "graphic:1", "graphic:2", "graphic:3",
+    ]
+    assert [item.layer.id for item in fp.graphics] == [
+        "B.Fab", "F.Paste", "B.SilkS", "F.CrtYd",
+    ]
+
+
+def test_real_dip6_legacy_arc_normalizes_center_start_sweep():
+    fp = FootprintDefinition.from_kicad_parsed(
+        resolve.resolve_footprint("Package_DIP:DIP-6_W7.62mm_Socket")
+    )
+    arc = next(item for item in fp.graphics if isinstance(item, ArcGraphic))
+    assert arc.source_id == "graphic:22"
+    assert arc.start == pytest.approx((2.81, -1.33))
+    assert arc.mid == pytest.approx((3.81, -2.33))
+    assert arc.end == pytest.approx((4.81, -1.33))
+
+
+_EXPECTED_SEED_MARKERS = {
+    "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+    "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+    "Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+    "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+    "EVP-ASAC1A:SW_EVP-ASAC1A":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+    "Espressif:ESP32-S3-DevKitC":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+    "MountingHole:MountingHole_3.2mm_M3": (
+        ("uncaptured_graphic", "Cmts.User", "documentation"),
+        ("uncaptured_graphic", "F.SilkS", "silk"),
+        ("uncaptured_graphic", "F.Fab", "fab"),
+    ),
+    "Package_DIP:DIP-6_W7.62mm_Socket":
+        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+}
+
+
+def test_lockfile_wide_adapter_census_is_explicit_and_nonblocking():
+    lock = load_lockfile()
+    observed = {}
+    for ref in sorted(lock):
+        parsed = resolve.resolve_footprint(ref)
+        first = FootprintDefinition.from_kicad_parsed(parsed)
+        second = FootprintDefinition.from_kicad_parsed(parsed)
+        assert first.content_id == second.content_id
+        assert len({item.source_id for item in (*first.pads, *first.graphics)}) == (
+            len(first.pads) + len(first.graphics)
+        )
+        markers = [*first.unsupported]
+        for pad in first.pads:
+            markers.extend(pad.unsupported)
+        assert not any(marker.default_blocking for marker in markers), ref
+        if markers:
+            observed[ref] = tuple(
+                (item.feature, item.affected_layer.id if item.affected_layer else None,
+                 item.domain.value)
+                for item in markers
+            )
+    assert observed == _EXPECTED_SEED_MARKERS

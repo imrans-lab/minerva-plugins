@@ -33,28 +33,19 @@ import math
 from pathlib import Path
 from typing import Union
 
-from .footprints import GRAPHIC_LAYERS, FootprintLookupError, resolve_footprint
+from .footprints import FootprintLookupError, resolve_footprint
 from .pad_source import has_resolved_pads
+from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
+from .pad_types import normalize_pad_type as _normalize_pad_type
 
 # Coincidence tolerance in mm — same golden threshold Round 1 validated.
 COINCIDENCE_TOL_MM = 0.01
 
-# KiCad pad-type tokens → the exactly-three tokens the Godot panel renders
-# (smd = surface pad, thru_hole = drilled copper, np_thru_hole = mounting hole).
-# `connect` (edge-connector finger) is copper-only like an SMD pad; anything
-# unknown/None fails safe to `smd` so the panel never chokes on a stray token.
-_PAD_TYPE_MAP = {
-    "smd": "smd",
-    "thru_hole": "thru_hole",
-    "np_thru_hole": "np_thru_hole",
-    "connect": "smd",
-}
-
-
-def _normalize_pad_type(raw) -> str:
-    """Map a raw KiCad pad-type token to the panel's smd/thru_hole/np_thru_hole."""
-    return _PAD_TYPE_MAP.get(raw, "smd")
-
+# The parser now captures a broader fabrication definition, but this legacy
+# preview DTO retains its established F.SilkS/F.CrtYd payload until K3 moves
+# consumers to ResolvedBoard.  Keeping this filter local prevents a parser
+# capability expansion from silently changing the live panel contract.
+_LEGACY_GRAPHIC_LAYERS = frozenset({"F.SilkS", "F.CrtYd"})
 
 class ResolveError(Exception):
     """Base for resolve-step faults."""
@@ -205,7 +196,10 @@ def _resolve_component(
 
     # Attach only the wanted layers (parse already filters to GRAPHIC_LAYERS,
     # but assert the invariant so drift is caught here rather than in a render).
-    graphics = [g for g in parsed["graphics"] if g.get("layer") in GRAPHIC_LAYERS]
+    graphics = [
+        g for g in parsed["graphics"]
+        if g.get("layer") in _LEGACY_GRAPHIC_LAYERS
+    ]
     comp["graphics"] = graphics
 
     # Attach real pad geometry (footprint-LOCAL coords — the SAME frame the
