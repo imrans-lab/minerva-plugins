@@ -77,6 +77,12 @@ var show_hint_labels: bool = true:
 var show_pins: bool = true
 var snap_to_grid: bool = true
 var show_pads: bool = true
+## Draws a warning badge on components rendered from FALLBACK pins rather than
+## resolved footprint geometry (has_pad_geometry == false) — the visual mirror of
+## the fab emitter failing closed on those same components (bug 019f7736b236 /
+## hermetic-CAM Stage 2 step 4b). A badged component would NOT fabricate as-is.
+## Mounting holes are exempt (they legitimately carry no pad geometry).
+var show_unresolved_badges: bool = true
 ## Draws F.SilkS graphics resolved by the worker's footprint-RESOLVE step
 ## (component.graphics — see pcb_component.gd). Courtyard (F.CrtYd) stays off.
 var show_silk: bool = true
@@ -162,6 +168,8 @@ var pad_copper_color: Color = Color(0.85, 0.65, 0.3, 1.0)  # Copper/gold for THT
 var pad_smd_color: Color = Color(0.75, 0.55, 0.25, 1.0)    # SMD pads
 var drill_hole_color: Color = Color(0.08, 0.08, 0.08, 1.0) # Drill holes (match background)
 var mounting_hole_color: Color = Color(0.2, 0.2, 0.2, 1.0) # Non-plated holes
+## Amber warning badge for unresolved-footprint components (see show_unresolved_badges)
+var unresolved_badge_color: Color = Color(0.95, 0.65, 0.1, 1.0)
 
 ## Silkscreen (F.SilkS) stroke color — light/white, matching real silk ink.
 var silk_color: Color = Color(0.9, 0.9, 0.9, 1.0)
@@ -564,10 +572,19 @@ func _draw_component(comp) -> void:
 	if show_silk and comp.graphics.size() > 0:
 		_draw_component_silk(comp, xform)
 
-	if show_pads and comp.has_pad_geometry and comp.pads.size() > 0:
+	# Resolved footprint geometry vs the fallback pin renderer. The same
+	# condition the fab emitter uses to fail closed (bug 019f7736b236): a
+	# component WITHOUT real pad geometry is drawn from nominal fallback pins and
+	# would not fabricate as-is — so it is badged (step 4b, canvas degrades).
+	var has_real_pads: bool = comp.has_pad_geometry and comp.pads.size() > 0
+	if show_pads and has_real_pads:
 		_draw_component_pads(comp, xform)
 	elif show_pins:
 		_draw_fallback_pins(comp, xform)
+
+	if show_unresolved_badges and not has_real_pads \
+			and comp.footprint != PCBComponentScript.FootprintType.MOUNTING_HOLE:
+		_draw_unresolved_badge(screen_poly)
 
 	if show_labels and comp.label_visible:
 		var local_center: Vector2 = comp.local_bounds.get_center()
@@ -575,6 +592,44 @@ func _draw_component(comp) -> void:
 		var screen_center := world_to_screen(world_center)
 		var label_pos := screen_center - Vector2(0, comp.height * zoom / 2 + 10)
 		draw_string(font, label_pos, comp.id, HORIZONTAL_ALIGNMENT_CENTER, -1, font_size, label_color)
+
+
+## Draw an amber warning triangle (with a "!") at the top-right of a component
+## whose footprint did NOT resolve to real pad geometry — the visual counterpart
+## of the fab emitter failing closed on that component (step 4b). Drawn as a
+## triangle + strokes (no font dependency) so the "warning" reads unambiguously
+## against a board of round pads/vias. Screen-space, so it stays a constant size
+## regardless of zoom.
+func _draw_unresolved_badge(screen_poly: PackedVector2Array) -> void:
+	if screen_poly.size() < 3:
+		return
+
+	var min_pt := screen_poly[0]
+	var max_pt := screen_poly[0]
+	for pt in screen_poly:
+		min_pt.x = minf(min_pt.x, pt.x)
+		min_pt.y = minf(min_pt.y, pt.y)
+		max_pt.x = maxf(max_pt.x, pt.x)
+		max_pt.y = maxf(max_pt.y, pt.y)
+
+	# Sit just outside the top-right corner of the component's screen bbox.
+	var center := Vector2(max_pt.x + 3.0, min_pt.y - 3.0)
+	var s := 7.0
+	var tri := PackedVector2Array([
+		center + Vector2(0.0, -s),          # top vertex
+		center + Vector2(-s * 0.9, s * 0.6),  # bottom-left
+		center + Vector2(s * 0.9, s * 0.6),   # bottom-right
+	])
+	draw_colored_polygon(tri, unresolved_badge_color)
+
+	var dark := Color(0.15, 0.1, 0.0, 1.0)
+	var outline := tri.duplicate()
+	outline.append(tri[0])
+	draw_polyline(outline, dark, 1.5)
+
+	# Exclamation mark: a short stem + a dot, both dark, centred in the triangle.
+	draw_line(center + Vector2(0.0, -s * 0.35), center + Vector2(0.0, s * 0.1), dark, 1.5)
+	draw_circle(center + Vector2(0.0, s * 0.35), 1.0, dark)
 
 
 ## Draw diagonal hatch lines over a locked component's screen polygon
