@@ -170,6 +170,11 @@ var drill_hole_color: Color = Color(0.08, 0.08, 0.08, 1.0) # Drill holes (match 
 var mounting_hole_color: Color = Color(0.2, 0.2, 0.2, 1.0) # Non-plated holes
 ## Amber warning badge for unresolved-footprint components (see show_unresolved_badges)
 var unresolved_badge_color: Color = Color(0.95, 0.65, 0.1, 1.0)
+## Warning-triangle half-height in screen px (constant across zoom) + its offset
+## outside the component's top-right bbox corner. Bumped from 7 so the badge reads
+## clearly (owner HITL 2026-07-19).
+const UNRESOLVED_BADGE_SIZE := 11.0
+const UNRESOLVED_BADGE_MARGIN := 3.0
 
 ## Silkscreen (F.SilkS) stroke color — light/white, matching real silk ink.
 var silk_color: Color = Color(0.9, 0.9, 0.9, 1.0)
@@ -603,20 +608,10 @@ func _draw_component(comp) -> void:
 func _draw_unresolved_badge(screen_poly: PackedVector2Array) -> void:
 	if screen_poly.size() < 3:
 		return
-
-	var min_pt := screen_poly[0]
-	var max_pt := screen_poly[0]
-	for pt in screen_poly:
-		min_pt.x = minf(min_pt.x, pt.x)
-		min_pt.y = minf(min_pt.y, pt.y)
-		max_pt.x = maxf(max_pt.x, pt.x)
-		max_pt.y = maxf(max_pt.y, pt.y)
-
-	# Sit just outside the top-right corner of the component's screen bbox.
-	var center := Vector2(max_pt.x + 3.0, min_pt.y - 3.0)
-	var s := 7.0
+	var center := _badge_center(screen_poly)
+	var s := UNRESOLVED_BADGE_SIZE
 	var tri := PackedVector2Array([
-		center + Vector2(0.0, -s),          # top vertex
+		center + Vector2(0.0, -s),            # top vertex
 		center + Vector2(-s * 0.9, s * 0.6),  # bottom-left
 		center + Vector2(s * 0.9, s * 0.6),   # bottom-right
 	])
@@ -625,11 +620,55 @@ func _draw_unresolved_badge(screen_poly: PackedVector2Array) -> void:
 	var dark := Color(0.15, 0.1, 0.0, 1.0)
 	var outline := tri.duplicate()
 	outline.append(tri[0])
-	draw_polyline(outline, dark, 1.5)
+	draw_polyline(outline, dark, 2.0)
 
 	# Exclamation mark: a short stem + a dot, both dark, centred in the triangle.
-	draw_line(center + Vector2(0.0, -s * 0.35), center + Vector2(0.0, s * 0.1), dark, 1.5)
-	draw_circle(center + Vector2(0.0, s * 0.35), 1.0, dark)
+	draw_line(center + Vector2(0.0, -s * 0.35), center + Vector2(0.0, s * 0.12), dark, 2.0)
+	draw_circle(center + Vector2(0.0, s * 0.42), maxf(s * 0.11, 1.2), dark)
+
+
+## Screen-space centre of a component's unresolved badge (just outside the
+## top-right corner of its body bbox). Shared by the draw path AND the hover
+## tooltip (_get_tooltip) so both agree on where the badge is.
+func _badge_center(screen_poly: PackedVector2Array) -> Vector2:
+	var min_pt := screen_poly[0]
+	var max_pt := screen_poly[0]
+	for pt in screen_poly:
+		min_pt.x = minf(min_pt.x, pt.x)
+		min_pt.y = minf(min_pt.y, pt.y)
+		max_pt.x = maxf(max_pt.x, pt.x)
+		max_pt.y = maxf(max_pt.y, pt.y)
+	return Vector2(max_pt.x + UNRESOLVED_BADGE_MARGIN, min_pt.y - UNRESOLVED_BADGE_MARGIN)
+
+
+## A component's body polygon in screen space (same transform _draw_component
+## uses), for hover hit-testing without caching per-frame draw state.
+func _component_screen_poly(comp) -> PackedVector2Array:
+	var xform: Transform2D = comp.get_transform()
+	var out: PackedVector2Array = []
+	for point in comp.get_local_body_polygon():
+		out.append(world_to_screen(comp.position + (xform * point)))
+	return out
+
+
+## Native hover tooltip explaining the amber unresolved-footprint badge. Returns
+## "" everywhere except over a badge, so no tooltip shows elsewhere. Godot calls
+## this on mouse-hover (mouse_filter is STOP); at_position is canvas-local px,
+## the same space world_to_screen produces.
+func _get_tooltip(at_position: Vector2) -> String:
+	if not show_unresolved_badges or data == null:
+		return ""
+	var reach := UNRESOLVED_BADGE_SIZE + 3.0
+	for comp_id in data.components:
+		var comp = data.components[comp_id]
+		if comp.has_pad_geometry and comp.pads.size() > 0:
+			continue
+		if comp.footprint == PCBComponentScript.FootprintType.MOUNTING_HOLE:
+			continue
+		var center := _badge_center(_component_screen_poly(comp))
+		if absf(at_position.x - center.x) <= reach and absf(at_position.y - center.y) <= reach:
+			return "%s — unresolved footprint\nPads are approximate (fallback pins); resolve the footprint before fabrication." % str(comp_id)
+	return ""
 
 
 ## Draw diagonal hatch lines over a locked component's screen polygon
@@ -1589,9 +1628,14 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 		copy.pan_offset = pan_offset
 
 	copy.queue_redraw()
+	# Yield ONE idle frame (process_frame fires even when the app is otherwise
+	# idle) to reach a clean main-thread point, then FORCE a synchronous draw so
+	# the offscreen viewport renders NOW. The previous code awaited
+	# RenderingServer.frame_post_draw, which does NOT fire while the app is
+	# idle/unfocused — so a 2nd/3rd capture stalled past the MCP timeout. force_draw
+	# renders deterministically without depending on the throttled main loop.
 	await tree.process_frame
-	await tree.process_frame
-	await RenderingServer.frame_post_draw
+	RenderingServer.force_draw(false)
 
 	var img: Image = viewport.get_texture().get_image()
 
