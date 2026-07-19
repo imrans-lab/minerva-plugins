@@ -1483,6 +1483,56 @@ func zoom_to_fit() -> void:
 	queue_redraw()
 
 
+## Center the view on a world-mm point at an explicit zoom (px/mm), clamped to
+## [min_zoom, max_zoom]. Camera convention: world_to_screen = world*zoom +
+## pan_offset + size/2, so the world point at the screen centre is
+## -pan_offset/zoom; centring on `center_mm` therefore means
+## pan_offset = -center_mm*zoom (identical to zoom_to_fit). Drives the MCP
+## set_view tool so an agent — and the human watching — can pan/zoom the board.
+func set_view_center_zoom(center_mm: Vector2, new_zoom: float) -> void:
+	zoom = clampf(new_zoom, min_zoom, max_zoom)
+	pan_offset = -center_mm * zoom
+	zoom_changed.emit(zoom)
+	view_changed.emit()
+	queue_redraw()
+
+
+## Multiply the current zoom by `factor` (clamped), keeping the world point at the
+## screen centre fixed. factor > 1 zooms IN, < 1 zooms OUT.
+func zoom_by(factor: float) -> void:
+	if factor <= 0.0 or zoom == 0.0:
+		return
+	set_view_center_zoom(-pan_offset / zoom, zoom * factor)
+
+
+## Frame an arbitrary world-mm rect to fill the viewport (with a small mm margin)
+## — e.g. to inspect one component. Same fit math as zoom_to_fit, for a sub-region.
+func frame_rect(bounds: Rect2, margin_mm: float = 2.0) -> void:
+	var content := bounds.grow(margin_mm)
+	if content.size.x <= 0.0 or content.size.y <= 0.0 or size.x <= 0.0 or size.y <= 0.0:
+		return
+	set_view_center_zoom(content.get_center(),
+		minf(size.x / content.size.x, size.y / content.size.y))
+
+
+## Current camera as plain data (for the set_view tool to report back): zoom
+## (px/mm), the world-mm point at the screen centre, and the visible world-mm rect.
+func get_view() -> Dictionary:
+	var center_mm: Vector2 = (-pan_offset / zoom) if zoom != 0.0 else Vector2.ZERO
+	var vis: Vector2 = (size / zoom) if zoom != 0.0 else Vector2.ZERO
+	return {
+		"zoom": zoom,
+		"center_x_mm": center_mm.x,
+		"center_y_mm": center_mm.y,
+		"visible": {
+			"x_mm": center_mm.x - vis.x / 2.0,
+			"y_mm": center_mm.y - vis.y / 2.0,
+			"width_mm": vis.x,
+			"height_mm": vis.y,
+		},
+	}
+
+
 func _on_data_changed() -> void:
 	queue_redraw()
 

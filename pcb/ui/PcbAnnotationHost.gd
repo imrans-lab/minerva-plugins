@@ -658,6 +658,43 @@ func render_content_to_image(_viewport_rect: Rect2) -> Image:
 	return img.get_region(crop)
 
 
+## Frame the WHOLE board and let it render, so a following render_content_to_image
+## captures the full fit board instead of a stale/unframed camera. The get_image
+## MCP tool needs this: an agent loads a board programmatically (minerva_pcb_load_board)
+## then expects to SEE all of it, but the canvas's live camera is whatever was last
+## set — for a freshly-loaded board in a not-yet-fit tab that is the default (empty)
+## framing, so the capture came back off-frame. Fits the board, then awaits TWO
+## frames so the parent-viewport texture reflects the fit + redraw (the capture is
+## otherwise "one render behind"). Best-effort and safe when detached/headless
+## (bails without awaiting → get_image still returns its graceful null envelope).
+## NOTE: this leaves the on-screen view fit-to-board (a capture doubles as "show me
+## the whole board"); it is not restored to the user's prior zoom/pan.
+func prepare_capture(fit: bool = true) -> void:
+	if _canvas == null or not is_instance_valid(_canvas):
+		return
+	if not _canvas.is_inside_tree():
+		return
+	var tree: SceneTree = _canvas.get_tree()
+	if tree == null:
+		return
+	# fit=true frames the whole board (default — "show me everything"); fit=false
+	# captures the CURRENT camera (whatever minerva_pcb_set_view last set), so an
+	# agent can grab a zoomed-in detail. Either way, await two frames so the
+	# parent-viewport texture reflects the redraw (capture is "one render behind").
+	if fit and _canvas.has_method("zoom_to_fit"):
+		_canvas.zoom_to_fit()
+	_canvas.queue_redraw()
+	await tree.process_frame
+	await tree.process_frame
+
+
+## Accessor for the bound canvas (the PCB view Control) so the panel-tool surface
+## can drive the camera (minerva_pcb_set_view) without reaching into a private
+## field. Null when the panel is detached/headless.
+func get_canvas():
+	return _canvas
+
+
 # ── Envelope authoring (conformant v2, TextEditorAnnotationHost pattern) ──────
 
 ## Add a v2 envelope. Assigns an id if missing, validates against the registry,

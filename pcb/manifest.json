@@ -337,7 +337,28 @@
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "width": {"type": "integer", "description": "Requested image width in pixels (advisory). Default: 800"},
           "height": {"type": "integer", "description": "Requested image height in pixels (advisory). Default: 600"},
-          "save_to_path": {"type": "string", "description": "Optional absolute filesystem path to write the PNG to instead of returning it inline as base64. Parent directory must already exist. When set, the response omits image_data and instead returns {saved_to, width, height, byte_size} — read the file back with your file-read tool if you need to view it."}
+          "save_to_path": {"type": "string", "description": "Optional absolute filesystem path to write the PNG to instead of returning it inline as base64. Parent directory must already exist. When set, the response omits image_data and instead returns {saved_to, width, height, byte_size} — read the file back with your file-read tool if you need to view it."},
+          "fit": {"type": "boolean", "description": "Default true: frame the whole board (fit-to-content) before capturing, so a freshly-loaded board is never off-frame. Pass false to capture the CURRENT camera set by minerva_pcb_set_view (a zoomed-in detail)."}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_set_view",
+      "description": "Pan/zoom the PCB board camera so you (and the human watching the panel) can view items at different scales. Drives the live canvas view; then capture it with minerva_pcb_get_image {fit:false}. Provide exactly one framing (first present wins): component_id (frame one part), region (frame a world-mm rect), center_x_mm/center_y_mm/zoom (set centre in mm + zoom in px/mm; omitted axis/zoom keeps current), zoom_factor (multiply current zoom — >1 in, <1 out), or fit:true (whole board). Returns {view:{zoom, center_x_mm, center_y_mm, visible:{x_mm,y_mm,width_mm,height_mm}}}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "component_id": {"type": "string", "description": "Frame (center + zoom onto) this component's bounds."},
+          "margin_mm": {"type": "number", "description": "Padding in mm around a component_id/region frame (default 2 for component_id, 0 for region)."},
+          "region": {"type": "object", "description": "Frame a world-mm rectangle {x_mm, y_mm, width_mm, height_mm}."},
+          "center_x_mm": {"type": "number", "description": "View centre X in board mm."},
+          "center_y_mm": {"type": "number", "description": "View centre Y in board mm."},
+          "zoom": {"type": "number", "description": "Zoom in pixels-per-mm (clamped to the canvas min/max)."},
+          "zoom_factor": {"type": "number", "description": "Multiply the current zoom, keeping the view centre fixed (>1 zooms in, <1 out)."},
+          "fit": {"type": "boolean", "description": "Frame the whole board."}
         },
         "required": ["editor_name"]
       }

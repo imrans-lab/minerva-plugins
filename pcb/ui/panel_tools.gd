@@ -106,7 +106,9 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		"minerva_pcb_export_trace_geometry":
 			return _export_trace_geometry(host, args)
 		"minerva_pcb_get_image":
-			return _get_image(host, args)
+			return await _get_image(host, args)
+		"minerva_pcb_set_view":
+			return _set_view(host, args)
 		"minerva_pcb_apply_route_hints":
 			return await _apply_route_hints(host, args)
 		"minerva_pcb_proposal_accept":
@@ -705,6 +707,58 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 ## image. Validated up front (absolute path, parent dir exists) before any
 ## capture work, same as the annotation-tools precedent. Default behavior with
 ## no save_to_path is byte-for-byte unchanged for existing callers.
+## Pan/zoom the board camera so an agent (and the human watching the panel) can
+## view items at different scales. Drives the LIVE canvas view; capture it with
+## minerva_pcb_get_image {fit:false}. Precedence (first present wins):
+##   component_id  — frame one component (optional margin_mm)
+##   region        — frame a world-mm rect {x_mm,y_mm,width_mm,height_mm}
+##   center_x_mm/center_y_mm/zoom — set centre (mm) + zoom (px/mm); any omitted
+##                   axis/zoom keeps its current value
+##   zoom_factor   — multiply current zoom (>1 in, <1 out), centre fixed
+##   fit:true      — frame the whole board
+## Returns {view:{zoom, center_x_mm, center_y_mm, visible:{...}}}.
+static func _set_view(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("get_canvas"):
+		return _err("PCB view control not available")
+	var canvas = host.get_canvas()
+	if canvas == null or not is_instance_valid(canvas):
+		return _err("PCB canvas not available (panel detached/headless)")
+
+	if args.has("component_id"):
+		var data = _get_data(host)
+		var cid: String = str(args["component_id"])
+		if not (data is Object) or not (cid in data.components):
+			return _err("component not found: %s" % cid)
+		var comp = data.components[cid]
+		if not comp.has_method("get_bounding_rect"):
+			return _err("component has no bounds: %s" % cid)
+		canvas.frame_rect(comp.get_bounding_rect(), float(args.get("margin_mm", 2.0)))
+	elif args.has("region"):
+		var r = args["region"]
+		if not (r is Dictionary):
+			return _err("region must be an object {x_mm,y_mm,width_mm,height_mm}")
+		var rect := Rect2(float(r.get("x_mm", 0.0)), float(r.get("y_mm", 0.0)),
+			float(r.get("width_mm", 0.0)), float(r.get("height_mm", 0.0)))
+		canvas.frame_rect(rect, float(args.get("margin_mm", 0.0)))
+	elif args.has("center_x_mm") or args.has("center_y_mm") or args.has("zoom"):
+		var cur: Dictionary = canvas.get_view() if canvas.has_method("get_view") else {}
+		canvas.set_view_center_zoom(
+			Vector2(float(args.get("center_x_mm", cur.get("center_x_mm", 0.0))),
+				float(args.get("center_y_mm", cur.get("center_y_mm", 0.0)))),
+			float(args.get("zoom", cur.get("zoom", 4.0))))
+	elif args.has("zoom_factor"):
+		canvas.zoom_by(float(args["zoom_factor"]))
+	elif bool(args.get("fit", false)):
+		if canvas.has_method("zoom_to_fit"):
+			canvas.zoom_to_fit()
+	else:
+		return _err("set_view needs one of: component_id, region, "
+			+ "center_x_mm/center_y_mm/zoom, zoom_factor, or fit:true")
+
+	var view: Dictionary = canvas.get_view() if canvas.has_method("get_view") else {}
+	return _ok({"view": view})
+
+
 static func _get_image(host, args: Dictionary) -> Dictionary:
 	if host == null:
 		return _err("PCB data not available")
@@ -720,6 +774,15 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 		var parent_dir: String = save_to_path.get_base_dir()
 		if not DirAccess.dir_exists_absolute(parent_dir):
 			return _err("save_to_path parent directory does not exist: %s" % parent_dir)
+
+	# Frame the board and let it render BEFORE capturing, so a programmatically-
+	# loaded board isn't grabbed at a stale/unframed camera (bug 019f7876e3d4).
+	# fit defaults TRUE (whole board); pass fit=false to capture the current
+	# minerva_pcb_set_view camera (a zoomed-in detail). Best-effort + safe
+	# headless; this whole call is already awaited by handle().
+	var want_fit: bool = bool(args.get("fit", true))
+	if host.has_method("prepare_capture"):
+		await host.prepare_capture(want_fit)
 
 	var data = _get_data(host)
 
