@@ -44,6 +44,10 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// worker-backed — dotted panel-IPC channel forwarding to the worker's
 		// "route" method (this round; docket 019f3815e9f9)
 		"pcb.route",
+		// worker-backed — native draft-check seam (T2.4, commit 7f5060b;
+		// routing DCR 019f7095c395). Was missing from this assertion, leaving
+		// the suite red; restored here (docket 019f7abf9c8e).
+		"pcb.draft_check",
 	}
 	for _, name := range want {
 		if !got[name] {
