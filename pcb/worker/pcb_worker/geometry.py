@@ -39,6 +39,12 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+# The single authority for the placement-convention version.  Any change to the
+# rotation sign or bottom-side mirror below MUST bump this so a downstream
+# consumer (e.g. the K2 compiler's board provenance) records a detectable
+# identity change rather than silently re-placing geometry under the old label.
+TRANSFORM_VERSION = "kicad-flip-v1"
+
 from .resolved_board import (
     ArcGeometry,
     CircleGeometry,

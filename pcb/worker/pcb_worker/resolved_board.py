@@ -637,10 +637,13 @@ class ResolvedComponent:
     placed_pads: tuple[PlacedPad, ...]
     placed_graphics: tuple[PlacedGraphic, ...]
     provenance: "Provenance"
+    value: str = ""
 
     def __post_init__(self) -> None:
         for field in ("id", "ref", "footprint_id"):
             _nonempty(getattr(self, field), f"ResolvedComponent.{field}")
+        if not isinstance(self.value, str):
+            raise TypeError("ResolvedComponent.value must be a string")
         _tuple(self.placed_pads, "ResolvedComponent.placed_pads")
         _tuple(self.placed_graphics, "ResolvedComponent.placed_graphics")
         _unique_ids(self.placed_pads, "ResolvedComponent.placed_pads")

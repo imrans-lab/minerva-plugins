@@ -258,3 +258,15 @@ def test_preview_board_is_separate_and_may_be_partial():
 def test_geometry_rejects_nonfinite_values(bad):
     with pytest.raises(ValueError, match="finite"):
         RectOutline((bad, 0.0), 1.0, 1.0)
+
+
+def test_component_value_defaults_empty_and_accepts_string():
+    # value is additive (K2 review 621 MF7); the KiCad exporter consumes it.
+    assert _board().components[0].value == ""
+    component = replace(_board().components[0], value="NE555")
+    assert component.value == "NE555"
+
+
+def test_component_value_must_be_string():
+    with pytest.raises(TypeError, match="value"):
+        replace(_board().components[0], value=555)
