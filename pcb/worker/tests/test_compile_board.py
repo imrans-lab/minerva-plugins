@@ -183,7 +183,7 @@ def test_smart_remote_emits_omission_and_capability_warnings(smart_remote_result
     codes = {d.code for d in smart_remote_result.diagnostics
              if d.severity is DiagnosticSeverity.WARNING}
     assert "feature_omitted" in codes
-    assert "captured_graphic_not_emitted" in codes  # F.Fab/F.CrtYd are doc-only
+    assert "captured_geometry_not_emitted" in codes  # F.Fab/F.CrtYd/paste are doc-only
 
 
 def test_smart_remote_holes_are_npth(smart_remote_result):
@@ -216,63 +216,98 @@ def test_components_carry_value(smart_remote_result):
 
 
 def test_complete_pad_projection_parity(smart_remote, smart_remote_result):
-    """Every placed pad, keyed by (ref, source_id), matches the current
-    resolve+place_point projection on the fields BOTH represent: absolute
-    position, size, shape, rotation, and the full drill (shape/x/y/plating).
-    Layer expansion is asserted separately (K2 enriches wildcards)."""
+    """EVERY placed pad, matched by (ref, source_id), equals an INDEPENDENT
+    projection of a freshly-parsed footprint through the placement transform —
+    on the COMPLETE field set: position, rotation, size, shape, full drill
+    (shape/x/y/plating), corner ratio, both margins, side, and expanded layers
+    (review 623 R6).  Exact equality, no rounding."""
+    from pcb_worker.compile_board import _resolved_pad_layers
+    from pcb_worker.footprint_def import FootprintDefinition
+    from pcb_worker.footprints import resolve_footprint
+    from pcb_worker.geometry import PlacementTransform
+
+    src_by_ref = {c["ref"]: c for c in smart_remote["components"]}
+    diags = _Diagnostics()
+    checked = 0
+    for comp in smart_remote_result.board.components:
+        src = src_by_ref[comp.ref]
+        fresh = FootprintDefinition.from_kicad_parsed(resolve_footprint(src["footprint"]))
+        local_by_source = {p.source_id: p for p in fresh.pads}
+        transform = PlacementTransform(position=comp.placement.position,
+                                       rotation_deg=comp.placement.rotation_deg,
+                                       side=comp.placement.side)
+        for placed in comp.placed_pads:
+            local = local_by_source[placed.source_id]
+            assert placed.position == transform.point(local.position)
+            assert placed.rotation_deg == transform.angle(local.rotation_deg)
+            expected_size = (None if local.size is None
+                             else (float(local.size[0]), float(local.size[1])))
+            assert placed.size == expected_size
+            assert placed.shape == local.shape
+            assert placed.drill == local.drill            # shape + (x, y) + plating
+            assert placed.corner_rratio == local.corner_rratio
+            assert placed.solder_mask_margin == local.solder_mask_margin
+            assert placed.solder_paste_margin == local.solder_paste_margin
+            assert placed.side is comp.placement.side
+            assert placed.layers == _resolved_pad_layers(local, transform, comp.ref, diags)
+            checked += 1
+    assert checked == 76
+    assert not diags.has_error
+
+
+def test_pad_position_cross_checks_the_live_path(smart_remote, smart_remote_result):
+    """Independent cross-check: absolute pad centres also match the current
+    resolve+place_point projection (a second algorithm)."""
     resolved = resolve_board(smart_remote)
-    # Reference keyed by (ref, pad-number) — resolve keeps the footprint order.
-    ref_pads: dict[tuple[str, str], dict] = {}
+    ref = {}
     for comp in resolved["components"]:
         cx, cy, rot = comp["x_mm"], comp["y_mm"], comp.get("rotation_deg", 0.0)
         for pad in comp.get("pads", []):
             ax, ay = place_point(cx, cy, rot, pad["position"]["x"], pad["position"]["y"])
-            ref_pads[(comp["ref"], str(pad["number"]))] = {
-                "pos": (round(ax, 5), round(ay, 5)),
-                "size": (round(pad["size"]["width"], 5), round(pad["size"]["height"], 5)),
-                "shape": pad["shape"],
-                "drill_x": round(pad["drill"]["x"], 5),
-            }
-
-    definitions = smart_remote_result.board.footprint_index
-    checked = 0
+            ref[(comp["ref"], str(pad["number"]))] = (round(ax, 6), round(ay, 6))
+    index = smart_remote_result.board.footprint_index
     for comp in smart_remote_result.board.components:
-        by_source = {p.source_id: p for p in definitions[comp.footprint_id].pads}
+        by_source = {p.source_id: p for p in index[comp.footprint_id].pads}
         for placed in comp.placed_pads:
             number = by_source[placed.source_id].number
-            ref = ref_pads[(comp.ref, number)]
-            assert (round(placed.position[0], 5), round(placed.position[1], 5)) == ref["pos"]
-            assert placed.size is not None
-            assert (round(placed.size[0], 5), round(placed.size[1], 5)) == ref["size"]
-            assert placed.shape.value == ref["shape"]
-            drill_x = placed.drill.size[0] if placed.drill else 0.0
-            assert round(drill_x, 5) == ref["drill_x"]
-            checked += 1
-    assert checked == 76
+            assert (round(placed.position[0], 6), round(placed.position[1], 6)) == ref[(comp.ref, number)]
 
 
 def test_board_geometry_is_carried_faithfully(smart_remote, smart_remote_result):
-    """Outline, traces, vias and holes are the authored geometry — not dropped,
-    not resampled."""
+    """Outline, traces, vias and holes are the authored geometry with COMPLETE
+    properties — not dropped, not resampled, not partially compared."""
     board = smart_remote_result.board
     assert board.outline.width_mm == smart_remote["width_mm"]
     assert board.outline.height_mm == smart_remote["height_mm"]
 
-    # Each authored trace's polyline survives as ordered segment endpoints.
+    # Traces: full ordered polyline + width + layer for EVERY trace.
     assert len(board.traces) == len(smart_remote["traces"])
-    src = smart_remote["traces"][0]
-    got = board.traces[0]
-    pts = [(p["x_mm"], p["y_mm"]) for p in src["points"]]
-    seg_points = [got.segments[0].a] + [s.b for s in got.segments]
-    assert seg_points == pts
-    assert all(s.width_mm == src["width_mm"] for s in got.segments)
+    for src, got in zip(smart_remote["traces"], board.traces):
+        pts = [(float(p["x_mm"]), float(p["y_mm"])) for p in src["points"]]
+        seg_points = [got.segments[0].a] + [s.b for s in got.segments]
+        assert seg_points == pts
+        assert all(s.width_mm == src["width_mm"] for s in got.segments)
+        assert all(s.layer.id == src["layer"] for s in got.segments)
 
-    via_positions = {(round(v.position[0], 5), round(v.position[1], 5)) for v in board.vias}
-    assert via_positions == {(v["x_mm"], v["y_mm"]) for v in smart_remote["vias"]}
+    # Vias: position, diameter, drill, span, and net membership.
+    net_name = {n.id: n.name for n in board.nets}
+    src_vias = {(float(v["x_mm"]), float(v["y_mm"])): v for v in smart_remote["vias"]}
+    assert len(board.vias) == len(src_vias)
+    for via in board.vias:
+        s = src_vias[(round(via.position[0], 6), round(via.position[1], 6))]
+        assert via.diameter_mm == s["diameter_mm"]
+        assert via.drill_mm == s["drill_mm"]
+        assert {via.from_layer, via.to_layer} == {s["from_layer"], s["to_layer"]}
+        assert net_name[via.net_id] == s["net"]
 
-    hole_positions = {(round(h.feature.position[0], 5), round(h.feature.position[1], 5))
-                      for h in board.holes}
-    assert hole_positions == {(h["x_mm"], h["y_mm"]) for h in smart_remote["mounting_holes"]}
+    # Holes: diameter, plating, and derived kind.
+    src_holes = {(float(h["x_mm"]), float(h["y_mm"])): h for h in smart_remote["mounting_holes"]}
+    assert len(board.holes) == len(src_holes)
+    for hole in board.holes:
+        s = src_holes[(round(hole.feature.position[0], 6), round(hole.feature.position[1], 6))]
+        assert hole.feature.diameter_mm == s["diameter_mm"]
+        assert hole.plated == s["plated"]
+        assert hole.kind is (HoleKind.PTH if s["plated"] else HoleKind.NPTH)
 
 
 def test_origin_is_preserved(smart_remote):
@@ -343,11 +378,25 @@ def test_smd_bottom_pad_mirrors_to_back():
         assert pad.side is Side.BOTTOM
 
 
-def test_npth_pad_has_no_copper_participation():
+def test_npth_pad_expands_declared_layers_without_synthesis():
+    # The MountingHole footprint declares [*.Cu, *.Mask]; expansion must preserve
+    # exactly that authored participation (review 623 R1), not drop it to ().
     result = compile_board(_one_component_board("MountingHole:MountingHole_3.2mm_M3"))
     pad = result.board.components[0].placed_pads[0]
     assert pad.pad_type == "np_thru_hole"
-    assert pad.layers == ()
+    assert {l.id for l in pad.layers} == {"F.Cu", "B.Cu", "F.Mask", "B.Mask"}
+
+
+def test_pad_layer_expansion_never_synthesizes_absent_participation():
+    # A pad authored on F.Cu only must resolve to F.Cu only — no invented mask/paste.
+    from pcb_worker.compile_board import _resolved_pad_layers
+    from pcb_worker.geometry import PlacementTransform
+    diags = _Diagnostics()
+    transform = PlacementTransform(position=(0.0, 0.0), rotation_deg=0.0, side=Side.TOP)
+    pad = _synthetic_pad(layers=(Layer.from_id("F.Cu"),))
+    layers = _resolved_pad_layers(pad, transform, "X1", diags)
+    assert [l.id for l in layers] == ["F.Cu"]
+    assert not diags.has_error
 
 
 # ---------------------------------------------------------------------------
@@ -381,10 +430,38 @@ def test_policy_zone_connect_is_context_sensitive():
 
 
 def test_v1_requested_outputs_do_not_claim_paste_or_fab():
-    """Requested profile must match what K3 emits (review 621 MF3)."""
-    assert "paste" not in V1_FAB_OUTPUTS
-    assert "fab" not in V1_FAB_OUTPUTS
+    """Fatal-output profile + emitter layers come from the shared authority and
+    exclude unemitted paste/fab (review 623 R3/R5)."""
+    from pcb_worker import fab_capability
+    assert V1_FAB_OUTPUTS == fab_capability.FABRICATION_CRITICAL_OUTPUTS
+    assert K3_EMITTED_LAYERS is fab_capability.EMITTED_LAYERS
+    assert "paste" not in V1_FAB_OUTPUTS and "fab" not in V1_FAB_OUTPUTS
     assert "F.Paste" not in K3_EMITTED_LAYERS and "F.Fab" not in K3_EMITTED_LAYERS
+
+
+def test_policy_blocks_rules_marker_when_rules_requested():
+    """A dropped design-rule marker is fatal when 'rules' is requested — the IR
+    feeds DRC/routing (review 623 R5)."""
+    policy = DefaultCapabilityPolicy()
+    marker = UnsupportedFeature(
+        feature="local_clearance", domain=FeatureDomain.RULES, affected_layer=None,
+        affected_outputs=("rules",), default_blocking=True, detail="local clearance",
+        source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
+    assert policy.is_blocking(marker, {}, ("rules",)) is True
+    assert policy.is_blocking(marker, {}, V1_FAB_OUTPUTS) is True   # rules ∈ profile
+    assert policy.is_blocking(marker, {}, ("copper",)) is False     # rules not requested
+
+
+def test_policy_honors_affected_outputs():
+    """Fatality considers the marker's explicit affected_outputs, not only its
+    domain value (review 623 R5)."""
+    policy = DefaultCapabilityPolicy()
+    marker = UnsupportedFeature(
+        feature="x", domain=FeatureDomain.DRILL, affected_layer=None,
+        affected_outputs=("mask",), default_blocking=True, detail="d",
+        source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
+    assert policy.is_blocking(marker, {}, ("mask",)) is True     # via affected_outputs
+    assert policy.is_blocking(marker, {}, ("silk",)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -546,6 +623,85 @@ def test_non_list_traces_fails_closed():
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
     assert "invalid_trace" in _errors(result)
+
+
+def test_invalid_rotation_fails_closed():
+    result = compile_board(_one_component_board("R_0805", rotation_deg="bad"))
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_component" in _errors(result)
+
+
+def test_empty_zones_mapping_fails_closed():
+    board = _one_component_board("R_0805")
+    board["zones"] = {}  # malformed empty mapping — a declaration, not absence
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unsupported_board_feature" in _errors(result)
+
+
+def test_empty_zones_list_is_allowed():
+    board = _one_component_board("R_0805")
+    board["zones"] = []  # explicitly nothing declared
+    assert isinstance(compile_board(board), ResolutionSuccess)
+
+
+def test_string_plated_fails_closed():
+    board = _minimal_board(mounting_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2,
+                                            "plated": "false"}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "hole_bad_plating" in _errors(result)
+
+
+def test_malformed_lock_entry_fails_closed(tmp_path):
+    import json
+    lock = tmp_path / "bad.lock.json"
+    lock.write_text(json.dumps({"R_0805": "not-a-mapping"}))
+    result = compile_board(_one_component_board("R_0805"), lockfile=lock)
+    assert isinstance(result, ResolutionFailure)
+    assert "lock_entry_malformed" in _errors(result)
+
+
+def test_net_pin_to_nonexistent_pad_fails_closed():
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1", "NOPE.99"]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "net_pin_unresolved" in _errors(result)
+
+
+def test_duplicate_pin_ownership_fails_closed():
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]},
+                     {"name": "N2", "pins": ["X1.1"]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "duplicate_pin_ownership" in _errors(result)
+
+
+def test_entity_ids_are_board_namespaced():
+    """The same ref/net in two different boards yields distinct ids (review 623 R4)."""
+    def one(name):
+        b = _one_component_board("R_0805")
+        b["name"] = name
+        b["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+        return compile_board(b)
+
+    a, c = one("board-A"), one("board-B")
+    assert isinstance(a, ResolutionSuccess) and isinstance(c, ResolutionSuccess)
+    assert a.board.id != c.board.id
+    assert a.board.components[0].id != c.board.components[0].id
+    assert a.board.components[0].placed_pads[0].id != c.board.components[0].placed_pads[0].id
+    assert a.board.nets[0].id != c.board.nets[0].id
+
+
+def test_diff_pair_rules_are_warned_not_silently_dropped():
+    board = _one_component_board("R_0805")
+    board["design_rules"]["diff_pair_gap_mm"] = 0.15
+    board["design_rules"]["diff_pair_width_mm"] = 0.2
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    assert any(d.code == "unsupported_design_rule" for d in result.diagnostics)
 
 
 # ---------------------------------------------------------------------------

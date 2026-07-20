@@ -43,6 +43,7 @@ from typing import Union
 from agent_router.layers import CANON_TO_KICAD, STACK_INDEX
 
 from .canonical_id import content_id, derive_id
+from .fab_capability import EMITTED_LAYERS, FABRICATION_CRITICAL_OUTPUTS
 from .footprint_def import (
     ArcGraphic,
     CircleGraphic,
@@ -114,22 +115,22 @@ COINCIDENCE_TOL_MM = 0.01
 # authority — so this module cannot drift from the router/emitter mapping.
 _TOP_ID, _BOTTOM_ID = "top", "bottom"
 
-# The layers today's K3 emitter (gerber.py `_GERBER_SUFFIXES` + the PTH/NPTH
-# Excellon split) actually produces.  Captured footprint geometry outside this
-# set is DOCUMENTATION-ONLY and is warned, never silently promised as emittable.
-K3_EMITTED_LAYERS = frozenset({
-    "F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.SilkS", "Edge.Cuts",
-})
+# Emitter capability + the fatal-output profile come from the ONE neutral
+# authority (fab_capability), imported by K2 AND every emitter, so they cannot
+# drift independently (K2 review 623, decision a).  Captured footprint geometry
+# on a layer outside EMITTED_LAYERS is DOCUMENTATION-ONLY and warned.
+K3_EMITTED_LAYERS = EMITTED_LAYERS
 
-# The fabrication outputs v1 requests — exactly what K3 emits.  Deliberately
-# excludes paste and fab: K3 produces neither, so their loss cannot corrupt a
-# produced output (it is warned as captured-but-unemitted instead of failing).
-V1_FAB_OUTPUTS: tuple[str, ...] = ("copper", "drill", "mask", "silk", "edge")
+# Fabrication-critical outputs a captured-feature loss may corrupt.  Cosmetic
+# (silk/fab) and unemitted (paste) losses are warned, never fatal.
+V1_FAB_OUTPUTS: tuple[str, ...] = FABRICATION_CRITICAL_OUTPUTS
 
-# Domains whose loss corrupts real copper/hole fabrication when requested.
-_FAB_DOMAINS = frozenset({
-    FeatureDomain.COPPER, FeatureDomain.DRILL,
-    FeatureDomain.MASK, FeatureDomain.PASTE,
+# Domains eligible to be FATAL when their output is requested (review 623 R5:
+# RULES included so a dropped design-rule marker can block, since the IR feeds
+# DRC/routing).  A marker outside these domains is always non-fatal (warned).
+_FATAL_DOMAINS = frozenset({
+    FeatureDomain.COPPER, FeatureDomain.DRILL, FeatureDomain.MASK,
+    FeatureDomain.PASTE, FeatureDomain.RULES,
 })
 
 # Technical (non-copper) layers the IR advertises for v1 boards.
@@ -182,10 +183,15 @@ class DefaultCapabilityPolicy:
         requested_outputs: tuple[str, ...],
     ) -> bool:
         if marker.feature == "zone_connect":
+            # Inert unless the board actually declares zones for it to affect.
             return bool(isinstance(board_context, dict) and board_context.get("zones"))
-        if marker.domain in _FAB_DOMAINS:
-            return marker.domain.value in requested_outputs
-        return False
+        if marker.domain not in _FATAL_DOMAINS:
+            return False
+        # Fatal when the marker's own domain OR any of its explicitly-attributed
+        # affected outputs is one the caller requested (review 623 R5).
+        if marker.domain.value in requested_outputs:
+            return True
+        return any(output in requested_outputs for output in marker.affected_outputs)
 
 
 class _Diagnostics:
@@ -341,6 +347,12 @@ def _build_design_rules(board: dict, diags: _Diagnostics) -> Union[ResolvedDesig
                     f"via_drill_mm ({via_drill}) must be smaller than via_diameter_mm ({via_diameter})",
                     _board_ref())
         return None
+    # The canonical schema declares diff-pair rules the v1 IR does not yet model;
+    # surface the omission instead of silently discarding them (review 623).
+    if any(rules.get(k) is not None for k in ("diff_pair_gap_mm", "diff_pair_width_mm")):
+        diags.warning("unsupported_design_rule",
+                      "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the "
+                      "v1 IR; they are carried by neither DRC nor routing yet", _board_ref())
     return ResolvedDesignRules(
         defaults=RoutingDefaults(
             trace_width_mm=float(trace_width),
@@ -430,27 +442,43 @@ def _check_pad_capabilities(pad: PadDefinition, ref: str, diags: _Diagnostics) -
     return ok
 
 
-def _resolved_pad_layers(pad: PadDefinition, side: Side, ref: str,
+_WILDCARD_EXPANSION = {
+    "*.Cu": ("F.Cu", "B.Cu"),
+    "*.Mask": ("F.Mask", "B.Mask"),
+    "*.Paste": ("F.Paste", "B.Paste"),
+}
+
+
+def _resolved_pad_layers(pad: PadDefinition, transform: PlacementTransform, ref: str,
                          diags: _Diagnostics) -> Union[tuple[Layer, ...], None]:
-    """Expand a footprint pad's copper/mask/paste participation to EXPLICIT
-    resolved layers by pad type + side (K2 review 621 MF2), matching what K3
-    emits.  No ``*.Cu``/``*.Mask`` wildcard may survive into a PlacedPad."""
-    top = side is Side.TOP
-    if pad.pad_type == "thru_hole":
-        # Plated TH: copper annulus + mask opening on BOTH sides.
-        return (Layer.from_id("F.Cu"), Layer.from_id("B.Cu"),
-                Layer.from_id("F.Mask"), Layer.from_id("B.Mask"))
-    if pad.pad_type == "np_thru_hole":
-        return ()  # non-plated mechanical hole — no copper/mask participation
-    if pad.pad_type == "smd":
-        if top:
-            return (Layer.from_id("F.Cu"), Layer.from_id("F.Mask"), Layer.from_id("F.Paste"))
-        return (Layer.from_id("B.Cu"), Layer.from_id("B.Mask"), Layer.from_id("B.Paste"))
-    diags.error("unresolved_pad_layers",
-                f"component {ref!r} pad {pad.number!r}: pad type {pad.pad_type!r} has no "
-                f"resolved layer participation in v1",
-                SourceRef(EntityKind.PAD, pad.source_id, f"component {ref}"))
-    return None
+    """Expand the footprint pad's DECLARED layer selectors to explicit resolved
+    layers — wildcards to both sides, explicit F.*/B.* mirrored by placement
+    side — carrying exactly the participation the library declared (K2 review
+    623 R1).  Nothing is synthesized: a pad that declares no layers resolves to
+    none, and an unexpandable selector is a fail-closed error.  No ``*.Cu`` /
+    ``*.Mask`` wildcard survives into a PlacedPad."""
+    resolved: list[Layer] = []
+    seen: set[str] = set()
+
+    def add(layer: Layer) -> None:
+        if layer.id not in seen:
+            seen.add(layer.id)
+            resolved.append(layer)
+
+    for layer in pad.layers:
+        if layer.is_wildcard:
+            expansion = _WILDCARD_EXPANSION.get(layer.id)
+            if expansion is None:
+                diags.error("unresolved_pad_layers",
+                            f"component {ref!r} pad {pad.number!r}: cannot expand layer "
+                            f"selector {layer.id!r}",
+                            SourceRef(EntityKind.PAD, pad.source_id, f"component {ref}"))
+                return None
+            for layer_id in expansion:
+                add(Layer.from_id(layer_id))
+        else:
+            add(transform.layer(layer))  # mirror an explicit F/B layer by side
+    return tuple(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -485,11 +513,13 @@ def _place_component(
         rotation_deg=float(comp.get("rotation_deg") or 0.0),
         side=side,
     )
+    unemitted: set[str] = set()
     placed_pads: list[PlacedPad] = []
     for pad in definition.pads:
-        layers = _resolved_pad_layers(pad, side, ref, diags)
+        layers = _resolved_pad_layers(pad, transform, ref, diags)
         if layers is None:
             return None
+        unemitted.update(layer.id for layer in layers if layer.id not in K3_EMITTED_LAYERS)
         net_id = pin_net.get((ref, pad.number))
         size = (float(pad.size[0]), float(pad.size[1])) if pad.size is not None else None
         placed_pads.append(PlacedPad(
@@ -511,7 +541,6 @@ def _place_component(
             side=side,
         ))
     placed_graphics: list[PlacedGraphic] = []
-    unemitted: set[str] = set()
     for graphic in definition.graphics:
         placed_layer = transform.layer(graphic.layer)
         if placed_layer.id not in K3_EMITTED_LAYERS:
@@ -525,9 +554,10 @@ def _place_component(
             width_mm=graphic.width_mm,
         ))
     if unemitted:
-        diags.warning("captured_graphic_not_emitted",
-                      f"component {ref!r}: captured graphics on {sorted(unemitted)} are "
-                      f"documentation-only — outside the K3 emitter capability",
+        diags.warning("captured_geometry_not_emitted",
+                      f"component {ref!r}: captured pad/graphic participation on "
+                      f"{sorted(unemitted)} is documentation-only — outside the emitter "
+                      f"capability profile",
                       SourceRef(EntityKind.COMPONENT, ref))
     return tuple(placed_pads), tuple(placed_graphics)
 
@@ -583,17 +613,21 @@ def _split_pin_ref(token) -> Union[tuple[str, str], None]:
     return ref, number
 
 
-def _build_nets_index(board: dict, diags: _Diagnostics):
+def _build_nets_index(board: dict, board_id: str, diags: _Diagnostics):
     """Return (name→net_id, name→index, (ref,num)→net_id, ordered descriptors).
 
-    Net ids are NAME-derived and the index is assigned in NAME-sorted order
-    (KiCad reserves 0), so a semantically-harmless reorder of the board's net
-    list does not renumber the board (keystone comment 608, Q3)."""
+    Net ids are board-namespaced + NAME-derived; the index is assigned in
+    NAME-sorted order (KiCad reserves 0), so a semantically-harmless reorder of
+    the board's net list does not renumber the board (keystone comment 608, Q3).
+    A pin owned by two nets is a fail-closed error, never last-write-wins (K2
+    review 623 R3).  Each descriptor carries its declared pins so a pin that
+    never resolves to a placed pad can be diagnosed, not silently dropped."""
     raw_nets = _dict_items(board, "nets", "net", diags)
     name_to_id: dict[str, str] = {}
     name_to_index: dict[str, int] = {}
     pin_net: dict[tuple[str, str], str] = {}
-    descriptors: list[tuple[str, str, int]] = []
+    pin_owner: dict[tuple[str, str], str] = {}
+    descriptors: list[tuple[str, str, int, list[tuple[str, str]]]] = []
     names: list[str] = []
     for net in raw_nets:
         name = net.get("name")
@@ -604,7 +638,7 @@ def _build_nets_index(board: dict, diags: _Diagnostics):
             diags.error("duplicate_net", f"net {name!r} declared more than once", _board_ref())
             continue
         names.append(name)
-        name_to_id[name] = derive_id("net", name)
+        name_to_id[name] = derive_id("net", board_id, name)
     for index, name in enumerate(sorted(names), start=1):
         name_to_index[name] = index
     for net in raw_nets:
@@ -615,14 +649,23 @@ def _build_nets_index(board: dict, diags: _Diagnostics):
         if pins is not None and not isinstance(pins, list):
             diags.error("invalid_net", f"net {name!r}: pins must be a list", _board_ref())
             continue
+        declared: list[tuple[str, str]] = []
         for token in pins or []:
             parsed = _split_pin_ref(token)
             if parsed is None:
                 diags.error("invalid_pin_ref",
                             f"net {name!r}: pin ref {token!r} is not 'REF.NUMBER'", _board_ref())
                 continue
+            prior = pin_owner.get(parsed)
+            if prior is not None and prior != name:
+                diags.error("duplicate_pin_ownership",
+                            f"pin {parsed[0]}.{parsed[1]} is claimed by both {prior!r} and {name!r}",
+                            _board_ref())
+                continue
+            pin_owner[parsed] = name
             pin_net[parsed] = name_to_id[name]
-        descriptors.append((name_to_id[name], name, name_to_index[name]))
+            declared.append(parsed)
+        descriptors.append((name_to_id[name], name, name_to_index[name], declared))
     return name_to_id, name_to_index, pin_net, descriptors
 
 
@@ -650,7 +693,7 @@ def _extract_points(raw_points, ordinal: int, ref: SourceRef,
     return points
 
 
-def _build_traces(board: dict, net_id_by_name: dict[str, str],
+def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
                   diags: _Diagnostics) -> tuple[ResolvedTrace, ...]:
     traces: list[ResolvedTrace] = []
     for ordinal, raw in enumerate(_dict_items(board, "traces", "trace", diags)):
@@ -675,7 +718,7 @@ def _build_traces(board: dict, net_id_by_name: dict[str, str],
         if len(points) < 2:
             diags.error("trace_degenerate", f"trace {ordinal}: needs at least two points, got {len(points)}", trace_ref)
             continue
-        trace_id = _authored_or_ordinal_id("trace", raw, net_id, ordinal)
+        trace_id = _authored_or_ordinal_id("trace", board_id, raw, net_id, ordinal)
         segments: list[ResolvedTraceSegment] = []
         degenerate = False
         for seg_ordinal, (a, b) in enumerate(zip(points, points[1:])):
@@ -693,7 +736,7 @@ def _build_traces(board: dict, net_id_by_name: dict[str, str],
     return tuple(traces)
 
 
-def _build_vias(board: dict, net_id_by_name: dict[str, str],
+def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
                 diags: _Diagnostics) -> tuple[ResolvedVia, ...]:
     vias: list[ResolvedVia] = []
     for ordinal, raw in enumerate(_dict_items(board, "vias", "via", diags)):
@@ -722,7 +765,7 @@ def _build_vias(board: dict, net_id_by_name: dict[str, str],
                         f"through-via across [top, bottom]", via_ref)
             continue
         vias.append(ResolvedVia(
-            id=_authored_or_ordinal_id("via", raw, net_id, ordinal),
+            id=_authored_or_ordinal_id("via", board_id, raw, net_id, ordinal),
             position=(float(x), float(y)),
             diameter_mm=float(diameter),
             drill_mm=float(drill),
@@ -736,7 +779,7 @@ def _build_vias(board: dict, net_id_by_name: dict[str, str],
     return tuple(vias)
 
 
-def _build_holes(board: dict, diags: _Diagnostics) -> tuple[ResolvedHole, ...]:
+def _build_holes(board: dict, board_id: str, diags: _Diagnostics) -> tuple[ResolvedHole, ...]:
     holes: list[ResolvedHole] = []
     # The canonical worker accepts mounting_holes plus the npth_holes/pth_holes
     # aliases producers use when they pre-split plating (board-yaml.md).
@@ -751,25 +794,32 @@ def _build_holes(board: dict, diags: _Diagnostics) -> tuple[ResolvedHole, ...]:
                 diags.error("hole_bad_geometry",
                             f"{key}[{ordinal}]: needs finite x/y and a positive diameter", hole_ref)
                 continue
-            plated = bool(raw.get("plated", default_plated))
+            raw_plated = raw.get("plated", default_plated)
+            if not isinstance(raw_plated, bool):
+                # A string "false" must NOT coerce to a plated hole (review 623 R2).
+                diags.error("hole_bad_plating",
+                            f"{key}[{ordinal}]: plated must be a boolean, got {raw_plated!r}", hole_ref)
+                continue
             holes.append(ResolvedHole(
-                id=_authored_or_ordinal_id("hole", raw, key, ordinal),
+                id=_authored_or_ordinal_id("hole", board_id, raw, key, ordinal),
                 feature=RoundHole(position=(float(x), float(y)), diameter_mm=float(diameter)),
-                plated=plated,
-                kind=HoleKind.PTH if plated else HoleKind.NPTH,
+                plated=raw_plated,
+                kind=HoleKind.PTH if raw_plated else HoleKind.NPTH,
             ))
     return tuple(holes)
 
 
-def _authored_or_ordinal_id(entity: str, raw: dict, *ordinal_parts) -> str:
+def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_parts) -> str:
     """Honor an authored ``id`` when present; otherwise mint a deterministic
-    ORDINAL-derived id.  Ordinal ids are stable for a compile-from-scratch but
-    NOT under reorder/insert — the compile emits an INFO diagnostic recording
-    this so the mint-and-persist handoff (YAML v2) is visible (review 621 MF4)."""
+    ORDINAL-derived id.  Both forms are BOARD-NAMESPACED (review 623 R4) so the
+    same authored/ordinal id in two boards yields distinct ids.  Ordinal ids are
+    stable for a compile-from-scratch but NOT under reorder/insert — the compile
+    emits an INFO diagnostic recording this so the mint-and-persist handoff
+    (YAML v2) is visible (review 621 MF4)."""
     authored = raw.get("id")
     if isinstance(authored, str) and authored:
-        return derive_id(entity, "authored", authored)
-    return derive_id(entity, *(str(part) for part in ordinal_parts))
+        return derive_id(entity, board_id, "authored", authored)
+    return derive_id(entity, board_id, *(str(part) for part in ordinal_parts))
 
 
 # ---------------------------------------------------------------------------
@@ -811,25 +861,33 @@ def compile_board(
     name = board.get("name")
     if not isinstance(name, str) or not name:
         diags.error("invalid_board", "board has no name", _board_ref())
+    # Board-namespace every derived child id so the same ref/net/trace in two
+    # different boards yields distinct ids (K2 review 623 R4).
+    board_id = derive_id("board", str(name or "<unnamed>"), str(board.get("version") or 1))
 
-    # Reject recognized-but-unsupported board geometry rather than silently
-    # dropping it (review 621 MF1).
+    # Reject recognized-but-unsupported board features by PRESENCE, not
+    # truthiness — an empty-mapping ``zones: {}`` is still a declaration we must
+    # refuse rather than treat as absent (review 623 R2).  An explicitly empty
+    # list declares nothing and is allowed.
     for unsupported_key in ("zones", "board_graphics", "keepouts"):
-        if board.get(unsupported_key):
-            diags.error("unsupported_board_feature",
-                        f"board declares {unsupported_key!r}, which v1 cannot fabricate",
-                        _board_ref())
+        value = board.get(unsupported_key)
+        if value is None or (isinstance(value, list) and not value):
+            continue
+        diags.error("unsupported_board_feature",
+                    f"board declares {unsupported_key!r} ({value!r}), which v1 cannot fabricate",
+                    _board_ref())
 
     two_layer = _require_two_layer(board, diags)
     outline = _build_outline(board, diags)
     layer_stack = _build_layer_stack() if two_layer else None
     design_rules = _build_design_rules(board, diags)
 
-    net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, diags)
+    net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
 
     interned: dict[str, FootprintDefinition] = {}
     components: list[ResolvedComponent] = []
     pad_ids_by_net: dict[str, list[str]] = {}
+    resolved_pins: set[tuple[str, str]] = set()
 
     for position, comp in enumerate(_dict_items(board, "components", "component", diags)):
         ref = str(comp.get("ref") or "")
@@ -844,17 +902,29 @@ def compile_board(
         if not (_is_number(comp.get("x_mm")) and _is_number(comp.get("y_mm"))):
             diags.error("invalid_component", f"component {ref!r} has no finite x_mm/y_mm placement", comp_ref)
             continue
+        rotation = comp.get("rotation_deg")
+        if rotation is not None and not _is_number(rotation):
+            diags.error("invalid_component",
+                        f"component {ref!r} has non-finite rotation_deg {rotation!r}", comp_ref)
+            continue
         side = _resolve_side(comp.get("layer"), ref, comp_ref, diags)
         if side is None:
             continue
 
+        entry = lock.get(fp_ref)
+        if entry is not None and (not isinstance(entry, dict)
+                                  or not isinstance(entry.get("path"), str)
+                                  or not isinstance(entry.get("sha256"), str)):
+            diags.error("lock_entry_malformed",
+                        f"component {ref!r}: lock entry for {fp_ref!r} is malformed", comp_ref)
+            continue
         try:
-            parsed = resolve_footprint(fp_ref, library_root=library_root, lockfile=lockfile)
+            parsed = resolve_footprint(fp_ref, library_root=library_root, lock=lock)
         except FootprintLookupError as exc:
             diags.error("footprint_unresolved", f"component {ref!r}: {exc}", comp_ref)
             continue
 
-        entry = lock.get(fp_ref) or {}
+        entry = entry or {}
         provenance = Provenance(
             source_id=fp_ref,
             sha256=entry.get("sha256"),
@@ -868,7 +938,7 @@ def compile_board(
             continue
         _check_coincidence(comp, clean, ref, diags)
 
-        component_id = derive_id("component", ref)
+        component_id = derive_id("component", board_id, ref)
         placed = _place_component(comp, component_id, clean, side, pin_net, ref, diags)
         if placed is None:
             continue
@@ -881,7 +951,7 @@ def compile_board(
             footprint_id=clean.content_id,
             placement=Placement(
                 position=(float(comp["x_mm"]), float(comp["y_mm"])),
-                rotation_deg=float(comp.get("rotation_deg") or 0.0),
+                rotation_deg=float(rotation or 0.0),
                 side=side,
             ),
             placed_pads=placed_pads,
@@ -889,19 +959,22 @@ def compile_board(
             provenance=provenance,
             value=str(comp.get("value") or ""),
         ))
+        for pad in clean.pads:
+            resolved_pins.add((ref, pad.number))
         for pad in placed_pads:
             if pad.net_id is not None:
                 pad_ids_by_net.setdefault(pad.net_id, []).append(pad.id)
 
-    nets = _finalize_nets(net_descriptors, pad_ids_by_net, components, diags)
-    traces = _build_traces(board, net_id_by_name, diags)
-    vias = _build_vias(board, net_id_by_name, diags)
-    holes = _build_holes(board, diags)
+    nets = _finalize_nets(net_descriptors, pad_ids_by_net, resolved_pins, components, diags)
+    traces = _build_traces(board, board_id, net_id_by_name, diags)
+    vias = _build_vias(board, board_id, net_id_by_name, diags)
+    holes = _build_holes(board, board_id, diags)
 
     if traces or vias or holes:
         diags.info("ordinal_ids",
-                   "trace/via/hole ids are ordinal-derived and NOT stable under reorder/insert; "
-                   "persisted authored identity is a YAML-v2 handoff",
+                   "trace/via/hole ids are ordinal-derived and board-namespaced but NOT stable "
+                   "under reorder/insert; persisted authored identity is a YAML-v2 handoff that "
+                   "must land before any DRC/routing consumer switches onto the IR",
                    _board_ref())
 
     if diags.has_error or outline is None or layer_stack is None or design_rules is None:
@@ -916,7 +989,7 @@ def compile_board(
 
     try:
         resolved = ResolvedBoard(
-            id=derive_id("board", name, str(board.get("version") or 1)),
+            id=board_id,
             name=name,
             outline=outline,
             layer_stack=layer_stack,
@@ -954,13 +1027,20 @@ def _resolve_side(raw_layer, ref: str, comp_ref: SourceRef,
     return None
 
 
-def _finalize_nets(descriptors, pad_ids_by_net, components, diags: _Diagnostics) -> tuple[ResolvedNet, ...]:
-    """Assemble ResolvedNets from placed-pad membership.  A net whose declared
-    pins never resolved to a placed pad is an ERROR — fail-closed, no silent
-    empty net."""
+def _finalize_nets(descriptors, pad_ids_by_net, resolved_pins, components,
+                   diags: _Diagnostics) -> tuple[ResolvedNet, ...]:
+    """Assemble ResolvedNets from placed-pad membership.  EVERY declared pin must
+    resolve to a placed pad — a well-formed reference to a nonexistent pad is an
+    ERROR, never silently dropped (K2 review 623 R3).  A net with no resolved
+    pads is likewise an error."""
     placed_pad_ids = {pad.id for comp in components for pad in comp.placed_pads}
     nets: list[ResolvedNet] = []
-    for net_id, name, index in descriptors:
+    for net_id, name, index, declared in descriptors:
+        net_ref = SourceRef(EntityKind.NET, net_id, f"net {name}")
+        for pin in declared:
+            if pin not in resolved_pins:
+                diags.error("net_pin_unresolved",
+                            f"net {name!r}: pin {pin[0]}.{pin[1]} has no resolved placed pad", net_ref)
         seen: set[str] = set()
         ordered: list[str] = []
         for pad_id in pad_ids_by_net.get(net_id, []):
@@ -968,8 +1048,7 @@ def _finalize_nets(descriptors, pad_ids_by_net, components, diags: _Diagnostics)
                 seen.add(pad_id)
                 ordered.append(pad_id)
         if not ordered:
-            diags.error("empty_net", f"net {name!r} has no resolved placed pads",
-                        SourceRef(EntityKind.NET, net_id, f"net {name}"))
+            diags.error("empty_net", f"net {name!r} has no resolved placed pads", net_ref)
             continue
         nets.append(ResolvedNet(id=net_id, name=name, index=index, pad_refs=tuple(ordered)))
     return tuple(nets)

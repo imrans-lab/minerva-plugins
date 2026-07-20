@@ -534,15 +534,21 @@ def resolve_footprint(
     ref: str,
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
+    lock: Union[dict, None] = None,
 ) -> dict:
     """Resolve a footprint ``ref`` (``"LibNick:Name"``) to a parsed footprint.
 
     Looks the ref up in the seed-library lockfile, verifies the on-disk file's
     sha256 against the pin, then parses it. No network access -- on-demand
     fetch of un-vendored footprints is a deferred item.
+
+    A caller that already holds a validated lock snapshot (e.g. the K2 compiler,
+    which loads it once) may pass it as ``lock`` to avoid a per-call reload and
+    the two-authority/TOCTOU risk that creates (K2 review 623 R7).
     """
     root = Path(library_root) if library_root else DEFAULT_LIBRARY_ROOT
-    lock = load_lockfile(lockfile)
+    if lock is None:
+        lock = load_lockfile(lockfile)
 
     entry = lock.get(ref)
     if entry is None:
