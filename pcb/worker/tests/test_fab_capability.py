@@ -25,3 +25,11 @@ def test_fabrication_critical_outputs_exclude_unemitted_domains():
     # Paste/fab/silk are never fabrication-critical (unemitted or cosmetic).
     for domain in ("paste", "fab", "silk"):
         assert domain not in fab_capability.FABRICATION_CRITICAL_OUTPUTS
+
+
+def test_profile_declares_geometry_capability_dimensions():
+    # The profile is not just filenames/layers: it also bounds pad shapes,
+    # graphic primitives, and hole shapes the IR subset may contain (review 625.2).
+    assert fab_capability.SUPPORTED_PAD_SHAPES >= {"rect", "roundrect", "circle", "oval"}
+    assert fab_capability.SUPPORTED_GRAPHIC_PRIMITIVES == {"line", "circle", "arc", "poly"}
+    assert fab_capability.SUPPORTED_HOLE_SHAPES == {"round", "circle"}

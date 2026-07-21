@@ -255,6 +255,34 @@ def test_complete_pad_projection_parity(smart_remote, smart_remote_result):
     assert not diags.has_error
 
 
+def test_complete_graphic_projection_parity(smart_remote, smart_remote_result):
+    """Every placed GRAPHIC, matched by (ref, source_id), equals an independent
+    projection of a freshly-parsed footprint graphic through the placement
+    transform — layer, primitive geometry, and width (review 625.5)."""
+    from pcb_worker.compile_board import _to_geometry
+    from pcb_worker.footprint_def import FootprintDefinition
+    from pcb_worker.footprints import resolve_footprint
+    from pcb_worker.geometry import PlacementTransform
+
+    src_by_ref = {c["ref"]: c for c in smart_remote["components"]}
+    checked = 0
+    for comp in smart_remote_result.board.components:
+        fresh = FootprintDefinition.from_kicad_parsed(
+            resolve_footprint(src_by_ref[comp.ref]["footprint"]))
+        local_by_source = {g.source_id: g for g in fresh.graphics}
+        transform = PlacementTransform(position=comp.placement.position,
+                                       rotation_deg=comp.placement.rotation_deg,
+                                       side=comp.placement.side)
+        for placed in comp.placed_graphics:
+            local = local_by_source[placed.source_id]
+            assert placed.layer == transform.layer(local.layer)
+            assert placed.geometry == transform.graphic(_to_geometry(local))
+            assert placed.width_mm == local.width_mm
+            checked += 1
+    assert checked == sum(len(c.placed_graphics) for c in smart_remote_result.board.components)
+    assert checked == 207
+
+
 def test_pad_position_cross_checks_the_live_path(smart_remote, smart_remote_result):
     """Independent cross-check: absolute pad centres also match the current
     resolve+place_point projection (a second algorithm)."""
@@ -280,7 +308,9 @@ def test_board_geometry_is_carried_faithfully(smart_remote, smart_remote_result)
     assert board.outline.width_mm == smart_remote["width_mm"]
     assert board.outline.height_mm == smart_remote["height_mm"]
 
-    # Traces: full ordered polyline + width + layer for EVERY trace.
+    net_name = {n.id: n.name for n in board.nets}
+
+    # Traces: full ordered polyline + width + layer + NET membership for EVERY trace.
     assert len(board.traces) == len(smart_remote["traces"])
     for src, got in zip(smart_remote["traces"], board.traces):
         pts = [(float(p["x_mm"]), float(p["y_mm"])) for p in src["points"]]
@@ -288,9 +318,9 @@ def test_board_geometry_is_carried_faithfully(smart_remote, smart_remote_result)
         assert seg_points == pts
         assert all(s.width_mm == src["width_mm"] for s in got.segments)
         assert all(s.layer.id == src["layer"] for s in got.segments)
+        assert net_name[got.net_id] == src["net"]
 
     # Vias: position, diameter, drill, span, and net membership.
-    net_name = {n.id: n.name for n in board.nets}
     src_vias = {(float(v["x_mm"]), float(v["y_mm"])): v for v in smart_remote["vias"]}
     assert len(board.vias) == len(src_vias)
     for via in board.vias:
@@ -515,8 +545,9 @@ def test_pad_guard_rejects_non_round_drill():
 
 
 def test_pad_guard_allows_sizeless_non_copper_hole():
+    # An NPTH mechanical pad legitimately has a drill, no copper, and no size.
     diags = _Diagnostics()
-    pad = _synthetic_pad(size=None, layers=(),
+    pad = _synthetic_pad(pad_type="np_thru_hole", size=None, layers=(),
                          drill=DrillDefinition(shape="round", size=(3.2, 3.2)))
     assert _check_pad_capabilities(pad, "X1", diags)
 
@@ -695,13 +726,107 @@ def test_entity_ids_are_board_namespaced():
     assert a.board.nets[0].id != c.board.nets[0].id
 
 
-def test_diff_pair_rules_are_warned_not_silently_dropped():
+def test_diff_pair_rule_loss_is_fatal_when_rules_requested():
+    # Default profile requests 'rules'; dropping a known rule must fail (review 625.4).
     board = _one_component_board("R_0805")
     board["design_rules"]["diff_pair_gap_mm"] = 0.15
     board["design_rules"]["diff_pair_width_mm"] = 0.2
     result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unsupported_design_rule" in _errors(result)
+
+
+def test_diff_pair_rule_loss_is_warned_when_cam_only():
+    board = _one_component_board("R_0805")
+    board["design_rules"]["diff_pair_gap_mm"] = 0.15
+    result = compile_board(board, requested_outputs=("copper", "drill", "mask"))
     assert isinstance(result, ResolutionSuccess)
-    assert any(d.code == "unsupported_design_rule" for d in result.diagnostics)
+    assert any(d.code == "unsupported_design_rule" and d.severity is DiagnosticSeverity.WARNING
+               for d in result.diagnostics)
+
+
+# --- Round-4 regressions (review 625) -------------------------------------
+
+
+@pytest.mark.parametrize("version", [0, 2, 3, "1"])
+def test_non_v1_schema_version_fails_closed(version):
+    board = _one_component_board("R_0805")
+    board["version"] = version
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unsupported_schema_version" in _errors(result)
+
+
+def test_numeric_component_ref_fails_closed():
+    board = _one_component_board("R_0805")
+    board["components"][0]["ref"] = 123
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_component" in _errors(result)
+
+
+def test_non_string_trace_id_fails_closed():
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["traces"] = [{"id": 123, "net": "N1", "layer": "top", "width_mm": 0.3,
+                        "points": [{"x_mm": 1, "y_mm": 1}, {"x_mm": 2, "y_mm": 2}]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_authored_id" in _errors(result)
+
+
+def test_trace_point_with_three_coords_fails_closed():
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["traces"] = [{"net": "N1", "layer": "top", "width_mm": 0.3,
+                        "points": [[1, 1, 999], [2, 2]]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "trace_bad_points" in _errors(result)
+
+
+def test_uncanonicalizable_annotation_fails_closed():
+    board = _one_component_board("R_0805")
+    board["annotations"] = [{"id": "a", "big": 2 ** 60}]  # outside exactly-safe I-JSON
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "uncanonicalizable_board" in _errors(result)
+
+
+def test_inline_pin_geometry_is_diagnosed(smart_remote_result):
+    # smart_remote carries legacy inline drill/annulus on every pin.
+    assert any(d.code == "inline_pin_geometry_ignored"
+               and d.severity is DiagnosticSeverity.WARNING
+               for d in smart_remote_result.diagnostics)
+
+
+def test_pad_guard_rejects_smd_without_copper():
+    diags = _Diagnostics()
+    assert not _check_pad_capabilities(_synthetic_pad(pad_type="smd", layers=()), "X1", diags)
+    assert "illegal_pad_definition" in [d.code for d in diags.tuple()]
+
+
+def test_pad_guard_rejects_smd_with_drill():
+    diags = _Diagnostics()
+    pad = _synthetic_pad(pad_type="smd", drill=DrillDefinition(shape="round", size=(0.8, 0.8)))
+    assert not _check_pad_capabilities(pad, "X1", diags)
+    assert "illegal_pad_definition" in [d.code for d in diags.tuple()]
+
+
+def test_pad_guard_rejects_through_hole_without_drill():
+    diags = _Diagnostics()
+    pad = _synthetic_pad(pad_type="thru_hole", drill=None,
+                         layers=(Layer.from_id("F.Cu"), Layer.from_id("B.Cu")))
+    assert not _check_pad_capabilities(pad, "X1", diags)
+    assert "illegal_pad_definition" in [d.code for d in diags.tuple()]
+
+
+def test_pin_partial_position_fails_closed():
+    board = _one_component_board("R_0805")
+    board["components"][0]["pins"] = [{"number": "1", "x_mm": 0.0}]  # y_mm missing
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "pin_partial_position" in _errors(result)
 
 
 # ---------------------------------------------------------------------------

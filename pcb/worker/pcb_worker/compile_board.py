@@ -42,8 +42,13 @@ from typing import Union
 
 from agent_router.layers import CANON_TO_KICAD, STACK_INDEX
 
-from .canonical_id import content_id, derive_id
-from .fab_capability import EMITTED_LAYERS, FABRICATION_CRITICAL_OUTPUTS
+from .canonical_id import CanonicalizationError, content_id, derive_id
+from .fab_capability import (
+    EMITTED_LAYERS,
+    FABRICATION_CRITICAL_OUTPUTS,
+    SUPPORTED_HOLE_SHAPES,
+    SUPPORTED_PAD_SHAPES,
+)
 from .footprint_def import (
     ArcGraphic,
     CircleGraphic,
@@ -322,7 +327,8 @@ def _build_layer_stack() -> LayerStack:
                       technical=technical)
 
 
-def _build_design_rules(board: dict, diags: _Diagnostics) -> Union[ResolvedDesignRules, None]:
+def _build_design_rules(board: dict, requested_outputs: tuple[str, ...],
+                        diags: _Diagnostics) -> Union[ResolvedDesignRules, None]:
     rules = board.get("design_rules")
     if not isinstance(rules, dict):
         diags.error("missing_design_rules",
@@ -347,12 +353,20 @@ def _build_design_rules(board: dict, diags: _Diagnostics) -> Union[ResolvedDesig
                     f"via_drill_mm ({via_drill}) must be smaller than via_diameter_mm ({via_diameter})",
                     _board_ref())
         return None
-    # The canonical schema declares diff-pair rules the v1 IR does not yet model;
-    # surface the omission instead of silently discarding them (review 623).
+    # The canonical schema declares diff-pair rules the v1 IR does not model.
+    # Route the loss through the SAME output policy as any other rule loss
+    # (review 625.4): fatal when 'rules' is a requested output (the IR feeds
+    # DRC/routing), a warning when compiling CAM-only without rules.
     if any(rules.get(k) is not None for k in ("diff_pair_gap_mm", "diff_pair_width_mm")):
+        if "rules" in requested_outputs:
+            diags.error("unsupported_design_rule",
+                        "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the "
+                        "v1 IR; dropping them is fatal because 'rules' was requested (DRC/routing)",
+                        _board_ref())
+            return None
         diags.warning("unsupported_design_rule",
                       "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the "
-                      "v1 IR; they are carried by neither DRC nor routing yet", _board_ref())
+                      "v1 IR; ignored for this CAM-only ('rules' not requested) compile", _board_ref())
     return ResolvedDesignRules(
         defaults=RoutingDefaults(
             trace_width_mm=float(trace_width),
@@ -420,25 +434,38 @@ def _adjudicate_footprint(
 
 def _check_pad_capabilities(pad: PadDefinition, ref: str, diags: _Diagnostics) -> bool:
     """Fail-closed guards for the bounded v1 pad subset. True == acceptable.
-    Records ALL failing conditions (does not short-circuit) for debuggability."""
+    Records ALL failing conditions (does not short-circuit) for debuggability.
+    Enforces pad-type/layer/drill LEGALITY so a contradictory definition (an SMD
+    pad with no copper, a through-hole pad with no drill, an SMD pad carrying a
+    drill) never compiles into an internally inconsistent PlacedPad (review 625.2)."""
     ok = True
     pad_ref = SourceRef(EntityKind.PAD, pad.source_id, f"component {ref}")
-    if not pad.shape.is_supported:
-        diags.error("unsupported_pad_shape",
-                    f"component {ref!r} pad {pad.number!r}: shape {pad.shape.value} "
-                    f"is outside the v1 rect/roundrect/circle/oval subset", pad_ref)
+
+    def fail(code: str, detail: str) -> None:
+        nonlocal ok
+        diags.error(code, f"component {ref!r} pad {pad.number!r}: {detail}", pad_ref)
         ok = False
+
+    if pad.shape.value not in SUPPORTED_PAD_SHAPES:
+        fail("unsupported_pad_shape",
+             f"shape {pad.shape.value} is outside the supported {sorted(SUPPORTED_PAD_SHAPES)} subset")
+    if pad.drill is not None and pad.drill.shape not in SUPPORTED_HOLE_SHAPES:
+        fail("unsupported_hole", f"{pad.drill.shape} drill is outside the v1 round-hole subset")
+
     has_copper = any(layer.role is LayerRole.COPPER for layer in pad.layers)
     if has_copper and pad.size is None:
-        diags.error("missing_pad_size",
-                    f"component {ref!r} pad {pad.number!r}: copper pad has no declared size; "
-                    f"v1 refuses to invent one", pad_ref)
-        ok = False
-    if pad.drill is not None and pad.drill.shape not in ("round", "circle"):
-        diags.error("unsupported_hole",
-                    f"component {ref!r} pad {pad.number!r}: {pad.drill.shape} drill is outside "
-                    f"the v1 round-hole subset", pad_ref)
-        ok = False
+        fail("missing_pad_size", "copper pad has no declared size; v1 refuses to invent one")
+
+    # Pad-type legality: the three seed pad types have distinct, non-overlapping
+    # geometry contracts.  A definition that violates its own type is malformed.
+    if pad.pad_type == "smd":
+        if not has_copper:
+            fail("illegal_pad_definition", "SMD pad declares no copper layer")
+        if pad.drill is not None:
+            fail("illegal_pad_definition", "SMD pad must not carry a drill")
+    elif pad.pad_type in ("thru_hole", "np_thru_hole"):
+        if pad.drill is None:
+            fail("illegal_pad_definition", f"{pad.pad_type} pad has no drill")
     return ok
 
 
@@ -562,10 +589,23 @@ def _place_component(
     return tuple(placed_pads), tuple(placed_graphics)
 
 
+# Inline per-pin FABRICATION geometry the canonical YAML still carries but that
+# the hermetic library footprint is authoritative over (K2 review 625.1).
+_INLINE_FAB_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm", "plated")
+
+
 def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
                        diags: _Diagnostics) -> None:
-    """If the board declares per-pin local positions, prove they match the
-    footprint pads of the same number (fail-closed — silk/copper desync)."""
+    """Prove each declared pin's LOCAL position matches the footprint pad of the
+    same number (fail-closed — silk/copper desync), and surface any inline
+    fabrication geometry the board also carries.
+
+    Authority (per the hermetic-CAM keystone) is the LOCKED footprint; the
+    legacy inline drill/annulus/size/plating fields are NOT silently discarded —
+    a per-component deprecation WARNING records that they are ignored in favour
+    of the library, and any divergence beyond tolerance is flagged as a conflict.
+    The library-vs-override authority is formally migrated in YAML v2
+    (019f802ca3af)."""
     pins = comp.get("pins")
     if pins is None:
         return
@@ -576,6 +616,8 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
     pad_by_number: dict[str, PadDefinition] = {}
     for pad in definition.pads:
         pad_by_number.setdefault(pad.number, pad)
+    inline_present = False
+    conflicts: list[str] = []
     for index, pin in enumerate(pins):
         if not isinstance(pin, dict):
             diags.error("invalid_component",
@@ -583,11 +625,20 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
                         SourceRef(EntityKind.COMPONENT, ref))
             continue
         number = str(pin.get("number"))
-        px, py = pin.get("x_mm"), pin.get("y_mm")
-        if not _is_number(px) or not _is_number(py):
-            continue  # a pin with no local position cannot be coincidence-checked
         pad = pad_by_number.get(number)
         pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
+        if any(pin.get(k) is not None for k in _INLINE_FAB_KEYS):
+            inline_present = True
+            if pad is not None:
+                conflicts.extend(_inline_geometry_conflicts(pin, pad, number))
+        px, py = pin.get("x_mm"), pin.get("y_mm")
+        has_x, has_y = _is_number(px), _is_number(py)
+        if not has_x and not has_y:
+            continue  # no declared local position — nothing to coincidence-check
+        if has_x != has_y:
+            diags.error("pin_partial_position",
+                        f"component {ref!r} pin {number!r} declares only one of x_mm/y_mm", pad_ref)
+            continue
         if pad is None:
             diags.error("pin_without_pad",
                         f"component {ref!r} pin {number!r} has no matching footprint pad", pad_ref)
@@ -597,6 +648,28 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
             diags.error("pin_pad_desync",
                         f"component {ref!r} pin {number!r}: declared local ({px}, {py}) vs "
                         f"footprint pad {pad.position} exceeds {COINCIDENCE_TOL_MM}mm", pad_ref)
+    if inline_present:
+        detail = ("; conflicts vs library: " + "; ".join(conflicts)) if conflicts else ""
+        diags.warning("inline_pin_geometry_ignored",
+                      f"component {ref!r}: legacy inline pin fabrication geometry "
+                      f"(drill/annulus/size/plating) is IGNORED — the locked footprint is "
+                      f"authoritative in v1; migrate to typed overrides in YAML v2{detail}",
+                      SourceRef(EntityKind.COMPONENT, ref))
+
+
+def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> list[str]:
+    """Divergences between a pin's inline geometry and its resolved footprint pad."""
+    out: list[str] = []
+    drill = pin.get("drill_mm")
+    if _is_number(drill) and pad.drill is not None and abs(float(drill) - pad.drill.size[0]) > COINCIDENCE_TOL_MM:
+        out.append(f"pin {number} drill {drill} vs footprint {pad.drill.size[0]}")
+    if _is_number(drill) and pad.drill is None:
+        out.append(f"pin {number} declares a drill but the footprint pad has none")
+    for axis, key in ((0, "pad_width_mm"), (1, "pad_height_mm")):
+        val = pin.get(key)
+        if _is_number(val) and pad.size is not None and abs(float(val) - pad.size[axis]) > COINCIDENCE_TOL_MM:
+            out.append(f"pin {number} {key} {val} vs footprint {pad.size[axis]}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -680,9 +753,10 @@ def _extract_points(raw_points, ordinal: int, ref: SourceRef,
     for index, item in enumerate(raw_points):
         if isinstance(item, dict):
             x, y = item.get("x_mm"), item.get("y_mm")
-        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
             x, y = item[0], item[1]
         else:
+            # A 3-tuple point etc. is malformed — do not silently drop the extra.
             diags.error("trace_bad_points", f"trace {ordinal}: point[{index}] is malformed ({item!r})", ref)
             return None
         if not (_is_number(x) and _is_number(y)):
@@ -700,6 +774,8 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
         net_name = raw.get("net")
         net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
         trace_ref = SourceRef(EntityKind.TRACE, f"trace:{ordinal}", f"net {net_name}")
+        if not _authored_id_ok(raw, trace_ref, diags):
+            continue
         if net_id is None:
             diags.error("trace_unknown_net", f"trace {ordinal}: references unknown net {net_name!r}", trace_ref)
             continue
@@ -743,6 +819,8 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
         net_name = raw.get("net")
         net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
         via_ref = SourceRef(EntityKind.VIA, f"via:{ordinal}", f"net {net_name}")
+        if not _authored_id_ok(raw, via_ref, diags):
+            continue
         if net_id is None:
             diags.error("via_unknown_net", f"via {ordinal}: references unknown net {net_name!r}", via_ref)
             continue
@@ -790,6 +868,8 @@ def _build_holes(board: dict, board_id: str, diags: _Diagnostics) -> tuple[Resol
             if diameter is None:
                 diameter = raw.get("drill_mm")
             hole_ref = SourceRef(EntityKind.HOLE, f"{key}:{ordinal}")
+            if not _authored_id_ok(raw, hole_ref, diags):
+                continue
             if not (_is_number(x) and _is_number(y) and _is_positive_number(diameter)):
                 diags.error("hole_bad_geometry",
                             f"{key}[{ordinal}]: needs finite x/y and a positive diameter", hole_ref)
@@ -807,6 +887,17 @@ def _build_holes(board: dict, board_id: str, diags: _Diagnostics) -> tuple[Resol
                 kind=HoleKind.PTH if raw_plated else HoleKind.NPTH,
             ))
     return tuple(holes)
+
+
+def _authored_id_ok(raw: dict, ref: SourceRef, diags: _Diagnostics) -> bool:
+    """A present-but-non-string authored ``id`` is an error, not silently
+    replaced by an ordinal (K2 review 625.3)."""
+    authored = raw.get("id")
+    if authored is not None and not (isinstance(authored, str) and authored):
+        diags.error("invalid_authored_id",
+                    f"authored id {authored!r} must be a non-empty string", ref)
+        return False
+    return True
 
 
 def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_parts) -> str:
@@ -848,6 +939,15 @@ def compile_board(
         diags.error("invalid_board", "board must be a mapping", _board_ref())
         return ResolutionFailure(diagnostics=diags.tuple())
 
+    # Dispatch on the schema version FIRST: a v0/v2 (or any non-v1) board must
+    # never be silently interpreted with v1 semantics (K2 review 625.3).
+    version = board.get("version", 1)
+    if isinstance(version, bool) or version != 1:
+        diags.error("unsupported_schema_version",
+                    f"canonical board schema version {version!r} is not v1; refusing to compile "
+                    f"a non-v1 board with v1 semantics", _board_ref())
+        return ResolutionFailure(diagnostics=diags.tuple())
+
     # Load the sha-verified lock ONCE; an unreadable/malformed lock is fatal —
     # provenance and footprint resolution both depend on it (review 621 MF4).
     try:
@@ -880,7 +980,7 @@ def compile_board(
     two_layer = _require_two_layer(board, diags)
     outline = _build_outline(board, diags)
     layer_stack = _build_layer_stack() if two_layer else None
-    design_rules = _build_design_rules(board, diags)
+    design_rules = _build_design_rules(board, requested_outputs, diags)
 
     net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
 
@@ -890,11 +990,14 @@ def compile_board(
     resolved_pins: set[tuple[str, str]] = set()
 
     for position, comp in enumerate(_dict_items(board, "components", "component", diags)):
-        ref = str(comp.get("ref") or "")
+        raw_ref = comp.get("ref")
+        ref = raw_ref if isinstance(raw_ref, str) else ""
         comp_ref = SourceRef(EntityKind.COMPONENT, ref or f"<component:{position}>")
         fp_ref = comp.get("footprint")
-        if not ref:
-            diags.error("invalid_component", f"component {position} has no ref", comp_ref)
+        if not isinstance(raw_ref, str) or not raw_ref:
+            # A non-string ref (int 123, a mapping) must fail, not be stringified.
+            diags.error("invalid_component",
+                        f"component {position} has a non-string/empty ref {raw_ref!r}", comp_ref)
             continue
         if not isinstance(fp_ref, str) or not fp_ref:
             diags.error("invalid_component", f"component {ref!r} has no footprint ref", comp_ref)
@@ -980,10 +1083,19 @@ def compile_board(
     if diags.has_error or outline is None or layer_stack is None or design_rules is None:
         return ResolutionFailure(diagnostics=_ensure_error(diags))
 
+    try:
+        source_digest = content_id(board)
+        library_lock_ref = content_id(lock)
+    except CanonicalizationError as exc:
+        # e.g. an out-of-I-JSON-range integer inside an opaque annotation blob:
+        # a digest is a hard requirement, so fail closed rather than raise.
+        diags.error("uncanonicalizable_board",
+                    f"board cannot be canonicalized for a provenance digest: {exc}", _board_ref())
+        return ResolutionFailure(diagnostics=_ensure_error(diags))
     provenance = BoardProvenance(
         compiler_version=f"{COMPILER_VERSION}+transform/{TRANSFORM_VERSION}",
-        source_digest=content_id(board),
-        library_lock_ref=content_id(lock),
+        source_digest=source_digest,
+        library_lock_ref=library_lock_ref,
         rule_profile_ref=V1_RULE_PROFILE,
     )
 

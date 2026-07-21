@@ -32,3 +32,21 @@ EMITTED_GERBER_SUFFIXES: frozenset[str] = frozenset({
 # because the IR also feeds DRC/routing, where a dropped rule is a correctness
 # hazard, not a cosmetic one.
 FABRICATION_CRITICAL_OUTPUTS: tuple[str, ...] = ("copper", "drill", "mask", "rules")
+
+# ---------------------------------------------------------------------------
+# Geometry capability dimensions (K2 review 625.2).  The profile is not just
+# filenames/layers: it also declares the pad shapes, graphic primitives, and
+# hole kinds the IR subset may contain.  The COMPILER consumes these as its
+# accept-set; a matching "the emitter can actually render every supported
+# primitive faithfully" test is a K3 gate (the current gerber.py flattens every
+# SMD to a rectangle, so that gate is not yet green — see K3 019f7aed6d9e).
+# ---------------------------------------------------------------------------
+
+# Pad copper shapes the v1 IR subset admits (KiCad pad-shape tokens).
+SUPPORTED_PAD_SHAPES: frozenset[str] = frozenset({"rect", "roundrect", "circle", "oval"})
+
+# Footprint/board graphic primitives the v1 IR subset admits.
+SUPPORTED_GRAPHIC_PRIMITIVES: frozenset[str] = frozenset({"line", "circle", "arc", "poly"})
+
+# Hole geometries the v1 IR subset admits (round only for v1).
+SUPPORTED_HOLE_SHAPES: frozenset[str] = frozenset({"round", "circle"})
