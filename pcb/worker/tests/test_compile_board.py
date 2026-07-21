@@ -748,13 +748,29 @@ def test_diff_pair_rule_loss_is_warned_when_cam_only():
 # --- Round-4 regressions (review 625) -------------------------------------
 
 
-@pytest.mark.parametrize("version", [0, 2, 3, "1"])
+@pytest.mark.parametrize("version", [0, 2, 3, "1", 1.0, True])
 def test_non_v1_schema_version_fails_closed(version):
     board = _one_component_board("R_0805")
-    board["version"] = version
+    board["version"] = version   # non-int, or int != 1, or float 1.0 — all rejected
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
     assert "unsupported_schema_version" in _errors(result)
+
+
+def test_missing_version_fails_closed():
+    board = _one_component_board("R_0805")
+    del board["version"]         # the integer version field is required
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unsupported_schema_version" in _errors(result)
+
+
+def test_non_string_component_value_fails_closed():
+    board = _one_component_board("R_0805")
+    board["components"][0]["value"] = {"bad": 1}   # must not stringify into the IR
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_component" in _errors(result)
 
 
 def test_numeric_component_ref_fails_closed():

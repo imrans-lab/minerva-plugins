@@ -669,6 +669,12 @@ def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> li
         val = pin.get(key)
         if _is_number(val) and pad.size is not None and abs(float(val) - pad.size[axis]) > COINCIDENCE_TOL_MM:
             out.append(f"pin {number} {key} {val} vs footprint {pad.size[axis]}")
+    annulus = pin.get("annulus_diameter_mm")
+    if _is_number(annulus) and pad.size is not None and abs(float(annulus) - pad.size[0]) > COINCIDENCE_TOL_MM:
+        out.append(f"pin {number} annulus {annulus} vs footprint pad diameter {pad.size[0]}")
+    plated = pin.get("plated")
+    if isinstance(plated, bool) and pad.drill is not None and plated != pad.drill.plated:
+        out.append(f"pin {number} plated {plated} vs footprint {pad.drill.plated}")
     return out
 
 
@@ -939,13 +945,14 @@ def compile_board(
         diags.error("invalid_board", "board must be a mapping", _board_ref())
         return ResolutionFailure(diagnostics=diags.tuple())
 
-    # Dispatch on the schema version FIRST: a v0/v2 (or any non-v1) board must
-    # never be silently interpreted with v1 semantics (K2 review 625.3).
-    version = board.get("version", 1)
-    if isinstance(version, bool) or version != 1:
+    # Dispatch on the schema version FIRST: the canonical contract types version
+    # as an integer, so it must be PRESENT and exactly int 1 — a missing field,
+    # a float 1.0, or any non-1 value must never be interpreted as v1 (review 630).
+    version = board.get("version")
+    if type(version) is not int or version != 1:
         diags.error("unsupported_schema_version",
-                    f"canonical board schema version {version!r} is not v1; refusing to compile "
-                    f"a non-v1 board with v1 semantics", _board_ref())
+                    f"canonical board schema requires an integer version 1 (present); got "
+                    f"{version!r} of type {type(version).__name__}", _board_ref())
         return ResolutionFailure(diagnostics=diags.tuple())
 
     # Load the sha-verified lock ONCE; an unreadable/malformed lock is fatal —
@@ -1010,6 +1017,14 @@ def compile_board(
             diags.error("invalid_component",
                         f"component {ref!r} has non-finite rotation_deg {rotation!r}", comp_ref)
             continue
+        raw_value = comp.get("value")
+        if raw_value is not None and not isinstance(raw_value, str):
+            # The canonical contract types Component.Value as a string; a present
+            # non-string value must not be stringified into the identity-bearing
+            # IR (would corrupt KiCad/BOM output — review 630).
+            diags.error("invalid_component",
+                        f"component {ref!r} value must be a string, got {raw_value!r}", comp_ref)
+            continue
         side = _resolve_side(comp.get("layer"), ref, comp_ref, diags)
         if side is None:
             continue
@@ -1060,7 +1075,7 @@ def compile_board(
             placed_pads=placed_pads,
             placed_graphics=placed_graphics,
             provenance=provenance,
-            value=str(comp.get("value") or ""),
+            value=raw_value or "",
         ))
         for pad in clean.pads:
             resolved_pins.add((ref, pad.number))
