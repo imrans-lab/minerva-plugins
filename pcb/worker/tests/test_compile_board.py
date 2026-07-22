@@ -803,6 +803,20 @@ def test_v2_board_with_minted_ids_compiles_and_reads_persisted_identity():
     assert result.board.holes[0].id == _mid("hole", 1)
 
 
+def test_v2_board_with_only_board_id_compiles():
+    # A childless v2 board needs just the persisted board id — no trace/via/hole
+    # id requirement to trip, and no ordinal bridge.
+    board = _one_component_board("R_0805")
+    board["version"] = 2
+    board["id"] = _mid("board", 1)
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    codes = [d.code for d in result.diagnostics]
+    assert "unminted_persistent_id" not in codes
+    assert "ordinal_ids" not in codes
+    assert result.board.id == _mid("board", 1)
+
+
 def test_v2_board_missing_board_id_fails_closed():
     board = _v2_full_board()
     del board["id"]
@@ -812,7 +826,7 @@ def test_v2_board_missing_board_id_fails_closed():
 
 
 @pytest.mark.parametrize("bad_id", [None, "", "trace_1", "trace:XYZ", "TRACE:" + "0" * 32,
-                                    "trace:" + "0" * 31, "via:" + "0" * 32])
+                                    "trace:" + "0" * 31, "trace:" + "0" * 33, "via:" + "0" * 32])
 def test_v2_board_unminted_trace_id_fails_closed(bad_id):
     board = _v2_full_board()
     if bad_id is None:
