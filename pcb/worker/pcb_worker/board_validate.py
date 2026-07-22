@@ -26,8 +26,8 @@ _V2_ENTITIES = (("trace", "traces"), ("via", "vias"), ("hole", "mounting_holes")
 def validate_board_v2(board: dict) -> list[str]:
     """Return a list of shared-boundary error codes; an empty list means the board
     is valid at this boundary. Codes are identical to ``internal/board.Validate``:
-    ``unsupported_schema_version``, ``unminted_persistent_id``, ``invalid_pin_override``,
-    ``invalid_board_structure``.
+    ``unsupported_schema_version``, ``unminted_persistent_id``,
+    ``duplicate_persistent_id``, ``invalid_pin_override``, ``invalid_board_structure``.
     """
     if not isinstance(board, dict):
         return ["invalid_board_structure"]
@@ -42,7 +42,11 @@ def validate_board_v2(board: dict) -> list[str]:
     # is invalid_board_structure on both sides — the Go codec rejects a mapping or
     # scalar where it expects a slice — even for a collection this validator does
     # not otherwise inspect (nets carry no persistent id, but `nets: {}` must still
-    # fail closed on both sides). Nested / auxiliary containers (points, layers,
+    # fail closed on both sides). A NULL item inside any of the five collections is
+    # ALSO invalid_board_structure: yaml.v3 silently drops a null list item, so a
+    # canonical source entity would vanish to make the two parsers agree — rejected
+    # on both sides instead (finding 019f8b7fb07e, part 3; the Go codec probes the
+    # raw node tree for the same). Nested / auxiliary containers (points, layers,
     # annotations, route_hints, design_rules) are the documented Go-codec superset,
     # enforced by the codec and the full compiler, not re-checked here.
     lists: dict[str, list] = {}
@@ -51,18 +55,31 @@ def validate_board_v2(board: dict) -> list[str]:
         lists[key] = items
         if not ok:
             codes.append("invalid_board_structure")
+        elif any(item is None for item in items):
+            codes.append("invalid_board_structure")
 
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
             codes.append("unminted_persistent_id")
         for entity, key in _V2_ENTITIES:
+            seen: set[str] = set()
             for item in lists[key]:
                 if item is None:
-                    continue  # yaml.v3 drops a null list item before Go sees it;
-                    # skip here too so the two codecs agree (Fable Round D, D2)
+                    # A null item is already flagged invalid_board_structure above;
+                    # skip the id/uniqueness check so it is not double-coded.
+                    continue
                 if not isinstance(item, dict) or not _is_minted_id(entity, item.get("id")):
                     codes.append("unminted_persistent_id")
                     break
+                item_id = item.get("id")
+                if item_id in seen:
+                    # Minted ids must be unique WITHIN their entity domain (the
+                    # board id is global). Per-domain, so trace:<hex> and via:<hex>
+                    # sharing a hex tail stay distinct. Shared code with Go's
+                    # board.Validate (finding 019f8b7fb07e, part 2).
+                    codes.append("duplicate_persistent_id")
+                    break
+                seen.add(item_id)
 
     for comp in lists["components"]:
         if not isinstance(comp, dict):

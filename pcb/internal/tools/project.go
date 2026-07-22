@@ -105,6 +105,14 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 	if err := json.Unmarshal(a.Board, &b); err != nil {
 		return nil, fmt.Errorf("pcb.serialize: parse board: %w", err)
 	}
+	// Serialize is a fail-closed WRITE gate: refuse to emit canonical-looking
+	// source for a board that would not survive the shared validation boundary
+	// (bad/missing version, unminted or duplicate persistent id). Mirrors how
+	// HandleDeserialize reports a validation error — a code-bearing wrapped
+	// board.Validate error (finding 019f8b7fb07e, part 1).
+	if err := board.Validate(&b); err != nil {
+		return nil, fmt.Errorf("pcb.serialize: invalid board: %w", err)
+	}
 	yml, err := board.MarshalYAML(&b)
 	if err != nil {
 		return nil, fmt.Errorf("pcb.serialize: %w", err)

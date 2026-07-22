@@ -23,9 +23,9 @@ import "fmt"
 //     the board and on every trace/via/hole. v1 has NO id requirement — it is the
 //     ordinal-bridge era, before identity was minted.
 //
-// The error codes (unsupported_schema_version, unminted_persistent_id) are the
-// SAME strings the Python compiler and validator emit, so a vector's expected
-// code matches verbatim on both sides.
+// The error codes (unsupported_schema_version, unminted_persistent_id,
+// duplicate_persistent_id) are the SAME strings the Python compiler and
+// validator emit, so a vector's expected code matches verbatim on both sides.
 func Validate(b *Board) error {
 	if b.Version != 1 && b.Version != 2 {
 		return fmt.Errorf("unsupported_schema_version: version %d (want 1 or 2)", b.Version)
@@ -36,20 +36,44 @@ func Validate(b *Board) error {
 	if !isMintedID("board", b.ID) {
 		return fmt.Errorf("unminted_persistent_id: board id %q is not a minted \"board:<32hex>\" id", b.ID)
 	}
+	// Persistent ids must be minted AND unique WITHIN each entity domain. The
+	// board id is global (a single value); trace/via/hole ids are unique among
+	// their own kind. Uniqueness is per-domain, so trace:<hex> and via:<hex>
+	// sharing a hex tail are DISTINCT ids (different prefixes) and both valid.
+	// duplicate_persistent_id is the shared code the Python validator emits too
+	// (finding 019f8b7fb07e, part 2).
+	seenTrace := make(map[string]int, len(b.Traces))
 	for i := range b.Traces {
-		if !isMintedID("trace", b.Traces[i].ID) {
-			return fmt.Errorf("unminted_persistent_id: trace[%d] id %q is not minted", i, b.Traces[i].ID)
+		id := b.Traces[i].ID
+		if !isMintedID("trace", id) {
+			return fmt.Errorf("unminted_persistent_id: trace[%d] id %q is not minted", i, id)
 		}
+		if j, ok := seenTrace[id]; ok {
+			return fmt.Errorf("duplicate_persistent_id: trace[%d] id %q duplicates trace[%d]", i, id, j)
+		}
+		seenTrace[id] = i
 	}
+	seenVia := make(map[string]int, len(b.Vias))
 	for i := range b.Vias {
-		if !isMintedID("via", b.Vias[i].ID) {
-			return fmt.Errorf("unminted_persistent_id: via[%d] id %q is not minted", i, b.Vias[i].ID)
+		id := b.Vias[i].ID
+		if !isMintedID("via", id) {
+			return fmt.Errorf("unminted_persistent_id: via[%d] id %q is not minted", i, id)
 		}
+		if j, ok := seenVia[id]; ok {
+			return fmt.Errorf("duplicate_persistent_id: via[%d] id %q duplicates via[%d]", i, id, j)
+		}
+		seenVia[id] = i
 	}
+	seenHole := make(map[string]int, len(b.MountingHoles))
 	for i := range b.MountingHoles {
-		if !isMintedID("hole", b.MountingHoles[i].ID) {
-			return fmt.Errorf("unminted_persistent_id: hole[%d] id %q is not minted", i, b.MountingHoles[i].ID)
+		id := b.MountingHoles[i].ID
+		if !isMintedID("hole", id) {
+			return fmt.Errorf("unminted_persistent_id: hole[%d] id %q is not minted", i, id)
 		}
+		if j, ok := seenHole[id]; ok {
+			return fmt.Errorf("duplicate_persistent_id: hole[%d] id %q duplicates hole[%d]", i, id, j)
+		}
+		seenHole[id] = i
 	}
 	return nil
 }

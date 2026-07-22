@@ -18,7 +18,7 @@ const vectorsDir = "../../spec/vectors"
 
 // minVectors is the committed floor — a drift/loss guard so a deleted or
 // mis-globbed vector fails the suite instead of silently reducing coverage.
-const minVectors = 20
+const minVectors = 24
 
 // TestSharedValidationVectors runs every committed cross-language vector through
 // the Go schema boundary (UnmarshalYAML + Validate) and asserts the outcome the
@@ -62,7 +62,14 @@ func TestSharedValidationVectors(t *testing.T) {
 				if want.Valid {
 					t.Fatalf("expected valid, but codec rejected at unmarshal: %v", uErr)
 				}
-				return // codec fail-closed is a legitimate rejection
+				// Codec fail-closed is a legitimate rejection — but if the vector
+				// declares a shared code, the unmarshal error MUST carry it, same
+				// as the post-Validate branch. yaml.v3's native errors do not, so
+				// UnmarshalYAML wraps structural/override rejections with the code.
+				if want.Code != "" && !strings.Contains(uErr.Error(), want.Code) {
+					t.Fatalf("unmarshal error %q does not carry the shared code %q", uErr.Error(), want.Code)
+				}
+				return
 			}
 			vErr := Validate(b)
 			if gotValid := vErr == nil; gotValid != want.Valid {

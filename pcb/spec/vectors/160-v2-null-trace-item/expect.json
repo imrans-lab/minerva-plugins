@@ -1,3 +1,4 @@
 {
-  "valid": true
+  "valid": false,
+  "code": "invalid_board_structure"
 }

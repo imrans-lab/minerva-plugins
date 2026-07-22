@@ -37,6 +37,13 @@ ordinal shape like `trace_1` carried in from a `.minpcb` import, uppercase hex,
 or a foreign shape — is `unminted_persistent_id` and fails closed. v1 boards have
 no id requirement.
 
+Minted ids must also be **unique within their entity domain**: the board id is a
+single global value; trace ids are unique among traces, via ids among vias, hole
+ids among mounting holes. Two entities of the same kind carrying the same token
+is `duplicate_persistent_id`. Uniqueness is **per-domain**, so a `trace:<hex>` and
+a `via:<hex>` that happen to share the same hex tail are DISTINCT ids (the kind
+prefix differs) and both valid.
+
 The one-time v1→v2 mint-and-write migration (`board.MigrateV1toV2`, run at
 `pcb.deserialize`) assigns these ids and bumps the version; it is idempotent and
 re-mints any non-minted id. See `internal/board/migrate.go`.
@@ -62,7 +69,8 @@ emission.
 ## Boundary scope (what the vectors can and cannot pin)
 
 The shared boundary is the INTERSECTION of rules both sides enforce:
-schema-version dispatch, persistent-id validity, and pin-override field types.
+schema-version dispatch, persistent-id validity AND per-domain uniqueness,
+entity-collection shape (list, no null item), and pin-override field types.
 Vectors live in that intersection.
 
 Outside it, the two implementations legitimately differ and no vector may
@@ -72,21 +80,26 @@ straddle the difference:
   field TYPES don't decode (`width_mm: twenty`, `x_mm: 'one'`) — the Python
   schema validator doesn't inspect those fields, so it would call them valid. A
   malformed field type is a Go error and simply is not expressed as a vector.
-- **Parser-level differences are documented, not vectored.** A whole-float
-  version (`2.0`) coerces to int in yaml.v3, so the Go codec rejects it
-  explicitly (see above) to match Python. A duplicate mapping key errors in
-  yaml.v3 but is last-wins in PyYAML; a `null` list item is dropped by yaml.v3
-  and is skipped by the Python validator to match. These are properties of the
-  parsers, kept aligned in code, not asserted as vectors.
+- **Parser-level differences are documented, not vectored.** A quoted or typed
+  version (`'2'`) and a whole-float version (`2.0`) do not decode as an integer,
+  so the Go codec rejects them explicitly (see above) to match Python. A
+  duplicate mapping key errors in yaml.v3 but is last-wins in PyYAML — that one
+  is a parser property kept aligned in code, not asserted as a vector.
 - **Top-level entity-collection shape IS a shared rule.** Each of the five
   top-level entity collections — `components`, `nets`, `traces`, `vias`,
   `mounting_holes` — that is present but not a list (`traces: {}`, `nets: 5`)
   cannot decode into a Go slice (the codec rejects) and must not silently pass —
   or crash — the Python validator; it is `invalid_board_structure` on both sides
   (vectors 180/190/200). This holds even for `nets`, which carries no persistent
-  id. Nested / auxiliary containers (`points`, `layers`, `annotations`,
-  `route_hints`, `design_rules`) are NOT in this rule — their shape is enforced
-  by the Go codec (a superset) and the full compiler, not by this validator.
+  id. A **null item** inside any of the five collections is also
+  `invalid_board_structure` (vector 160): yaml.v3 silently DROPS a null list item
+  during slice decode, so a canonical source entity would vanish to make the two
+  parsers agree — rejected on both sides instead. The Go codec probes the raw
+  `yaml.Node` tree for both cases so the rejection carries the shared code at
+  unmarshal time. Nested / auxiliary containers (`points`, `layers`,
+  `annotations`, `route_hints`, `design_rules`) are NOT in this rule — their
+  shape is enforced by the Go codec (a superset) and the full compiler, not by
+  this validator.
 
 ## Adding a vector
 
