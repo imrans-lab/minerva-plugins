@@ -18,6 +18,7 @@ belongs to K3 (review 621, trap 1).
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -30,7 +31,9 @@ from pcb_worker.compile_board import (
     DefaultCapabilityPolicy,
     _Diagnostics,
     _adjudicate_footprint,
+    _check_coincidence,
     _check_pad_capabilities,
+    _validate_pin_override,
     compile_board,
 )
 from pcb_worker.footprint_def import (
@@ -906,10 +909,129 @@ def test_uncanonicalizable_annotation_fails_closed():
 
 
 def test_inline_pin_geometry_is_diagnosed(smart_remote_result):
-    # smart_remote carries legacy inline drill/annulus on every pin.
+    # smart_remote carries legacy inline drill/annulus on every pin, and its
+    # annulus DIFFERS from the footprint (2.0 vs 1.2) → the fold warns.
     assert any(d.code == "inline_pin_geometry_ignored"
                and d.severity is DiagnosticSeverity.WARNING
                for d in smart_remote_result.diagnostics)
+
+
+# ---------------------------------------------------------------------------
+# Pin-geometry authority fold (migration 019f802ca3af — Round C2). Footprint
+# authoritative; typed `override` is the sanctioned v2 deviation channel; legacy
+# inline geometry is folded per-compile (match → dropped, diverge → warn).
+# ---------------------------------------------------------------------------
+
+
+def _thru_pad(*, drill_mm=0.8, diameter_mm=1.2):
+    return _synthetic_pad(
+        pad_type="thru_hole", size=(diameter_mm, diameter_mm),
+        drill=DrillDefinition(shape="round", size=(drill_mm, drill_mm)),
+        layers=(Layer.from_id("F.Cu"), Layer.from_id("B.Cu")),
+    )
+
+
+def _fp(*pads):
+    """A minimal footprint stand-in — _check_coincidence reads only `.pads`."""
+    return SimpleNamespace(pads=pads)
+
+
+def _codes(diags):
+    return [d.code for d in diags.tuple()]
+
+
+def test_inline_geometry_matching_footprint_is_dropped_silently():
+    # Inline drill+annulus equal to the footprint pad → redundant, folded away
+    # with NO deprecation warning (and no error).
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 1.2}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
+    assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags.tuple())
+
+
+def test_inline_geometry_diverging_footprint_warns_to_migrate():
+    # Annulus differs from the footprint → deprecation warning naming the override
+    # migration path, with the specific conflict detail.
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 2.0}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    warns = [d for d in diags.tuple() if d.code == "inline_pin_geometry_ignored"]
+    assert len(warns) == 1 and warns[0].severity is DiagnosticSeverity.WARNING
+    assert "override" in warns[0].message and "annulus 2.0" in warns[0].message
+
+
+def test_inline_geometry_without_matching_pad_warns():
+    # Inline geometry present but no footprint pad to verify against → cannot prove
+    # redundancy, so it is surfaced (not silently dropped).
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "9", "drill_mm": 0.8}]}  # footprint only has pad "1"
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "inline_pin_geometry_ignored" in _codes(diags)
+
+
+def test_typed_override_is_honored_not_deprecated():
+    # A typed override is the sanctioned deviation channel: no deprecation warning,
+    # no error.
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "override": {"annulus_diameter_mm": 2.0}}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert _codes(diags) == []
+
+
+def test_typed_override_supersedes_inline_geometry():
+    # Override present alongside legacy inline that diverges from the footprint →
+    # inline is folded away silently (the override is the intended value).
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 2.0,
+                      "override": {"annulus_diameter_mm": 2.0}}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
+    assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags.tuple())
+
+
+@pytest.mark.parametrize("override", [
+    5,                                              # not a mapping
+    "drill",                                        # not a mapping
+    {"drill_mm": "big"},                            # numeric key, wrong type
+    {"annulus_diameter_mm": True},                  # bool is not a number
+    {"pad_width_mm": None, "pad_height_mm": "x"},   # one bad numeric key
+    {"plated": "yes"},                              # plated must be a boolean
+])
+def test_malformed_override_fails_closed(override):
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "override": override}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "invalid_pin_override" in [d.code for d in diags.tuple()
+                                      if d.severity is DiagnosticSeverity.ERROR]
+
+
+def test_valid_override_types_pass_validation():
+    diags = _Diagnostics()
+    _validate_pin_override(
+        {"drill_mm": 0.9, "annulus_diameter_mm": 1.5, "pad_width_mm": 1.0,
+         "pad_height_mm": 1.0, "plated": True}, "X1", "1", diags)
+    assert _codes(diags) == []
+
+
+def test_override_compiles_on_real_board():
+    # Functional floor: a typed override on a real resolvable component compiles
+    # (footprint stays authoritative for emission) with no override/inline diags.
+    board = _one_component_board("R_0805")
+    board["components"][0]["pins"] = [{"number": "1", "override": {"pad_width_mm": 1.4}}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    assert "invalid_pin_override" not in _errors(result)
+    assert "inline_pin_geometry_ignored" not in [d.code for d in result.diagnostics]
+
+
+def test_malformed_override_fails_closed_on_real_board():
+    # Functional floor: a malformed override hard-fails the real compile.
+    board = _one_component_board("R_0805")
+    board["components"][0]["pins"] = [{"number": "1", "override": {"drill_mm": "wide"}}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_pin_override" in _errors(result)
 
 
 def test_pad_guard_rejects_smd_without_copper():

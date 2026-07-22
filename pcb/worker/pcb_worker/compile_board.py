@@ -590,22 +590,38 @@ def _place_component(
 
 
 # Inline per-pin FABRICATION geometry the canonical YAML still carries but that
-# the hermetic library footprint is authoritative over (K2 review 625.1).
+# the hermetic library footprint is authoritative over (K2 review 625.1).  The
+# migration authority fold (019f802ca3af): the LOCKED footprint is authoritative
+# for emitted geometry and a typed pin `override` is the ONLY sanctioned deviation
+# channel.  This inline geometry is legacy/deprecated and folded per-compile —
+# values that MATCH the footprint are dropped silently, values that DIFFER are
+# surfaced with a deprecation warning to migrate them to a typed override.
 _INLINE_FAB_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm", "plated")
+
+# Numeric keys of a typed pin `override` (schema-v2 sanctioned deviation); `plated`
+# is a separate boolean.  Type-checked ONLY here — matching the Go PinOverride
+# codec, which rejects wrong types at unmarshal.  Value-range semantics belong to
+# the shared board-v2 spec (Round D), enforced identically on both sides to avoid
+# validator drift (comment 629).
+_OVERRIDE_NUM_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm")
 
 
 def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
                        diags: _Diagnostics) -> None:
     """Prove each declared pin's LOCAL position matches the footprint pad of the
-    same number (fail-closed — silk/copper desync), and surface any inline
-    fabrication geometry the board also carries.
+    same number (fail-closed — silk/copper desync), and run the pin-geometry
+    authority fold (019f802ca3af).
 
-    Authority (per the hermetic-CAM keystone) is the LOCKED footprint; the
-    legacy inline drill/annulus/size/plating fields are NOT silently discarded —
-    a per-component deprecation WARNING records that they are ignored in favour
-    of the library, and any divergence beyond tolerance is flagged as a conflict.
-    The library-vs-override authority is formally migrated in YAML v2
-    (019f802ca3af)."""
+    Authority (per the hermetic-CAM keystone) is the LOCKED footprint; it stays
+    authoritative for emitted pad geometry (see _place_component).  The fold runs
+    per-compile, version-independent — a board freshly migrated to v2 still carries
+    inline geometry the Go migration did not strip, so every compile must normalize
+    it:
+      * a typed pin `override` is the sanctioned v2 deviation channel — validated
+        here (fail-closed on malformed types) and NOT deprecated;
+      * legacy inline drill/annulus/size/plating that MATCHES the footprint is
+        dropped silently; that DIFFERS (or cannot be verified) raises a per-
+        component deprecation WARNING to migrate the deviation into an override."""
     pins = comp.get("pins")
     if pins is None:
         return
@@ -616,7 +632,7 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
     pad_by_number: dict[str, PadDefinition] = {}
     for pad in definition.pads:
         pad_by_number.setdefault(pad.number, pad)
-    inline_present = False
+    deprecated_inline = False  # legacy inline geometry diverging from the footprint
     conflicts: list[str] = []
     for index, pin in enumerate(pins):
         if not isinstance(pin, dict):
@@ -627,10 +643,21 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
         number = str(pin.get("number"))
         pad = pad_by_number.get(number)
         pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
+
+        # Pin-geometry authority fold. A typed `override` is the sanctioned v2
+        # deviation channel: validate it, and let it supersede any legacy inline
+        # geometry on the same pin (folded away silently). Otherwise the inline
+        # geometry is deprecated — dropped when it matches the footprint, warned
+        # when it diverges (or when there is no pad to verify it against).
+        override = pin.get("override")
+        if override is not None:
+            _validate_pin_override(override, ref, number, diags)
         if any(pin.get(k) is not None for k in _INLINE_FAB_KEYS):
-            inline_present = True
-            if pad is not None:
-                conflicts.extend(_inline_geometry_conflicts(pin, pad, number))
+            if override is None:
+                pin_conflicts = _inline_geometry_conflicts(pin, pad, number) if pad is not None else []
+                if pad is None or pin_conflicts:
+                    deprecated_inline = True
+                    conflicts.extend(pin_conflicts)
         px, py = pin.get("x_mm"), pin.get("y_mm")
         has_x, has_y = _is_number(px), _is_number(py)
         if not has_x and not has_y:
@@ -648,12 +675,13 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
             diags.error("pin_pad_desync",
                         f"component {ref!r} pin {number!r}: declared local ({px}, {py}) vs "
                         f"footprint pad {pad.position} exceeds {COINCIDENCE_TOL_MM}mm", pad_ref)
-    if inline_present:
+    if deprecated_inline:
         detail = ("; conflicts vs library: " + "; ".join(conflicts)) if conflicts else ""
         diags.warning("inline_pin_geometry_ignored",
                       f"component {ref!r}: legacy inline pin fabrication geometry "
-                      f"(drill/annulus/size/plating) is IGNORED — the locked footprint is "
-                      f"authoritative in v1; migrate to typed overrides in YAML v2{detail}",
+                      f"(drill/annulus/size/plating) diverges from the authoritative locked "
+                      f"footprint and is IGNORED — migrate the deviation to a typed pin "
+                      f"`override`{detail}",
                       SourceRef(EntityKind.COMPONENT, ref))
 
 
@@ -676,6 +704,32 @@ def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> li
     if isinstance(plated, bool) and pad.drill is not None and plated != pad.drill.plated:
         out.append(f"pin {number} plated {plated} vs footprint {pad.drill.plated}")
     return out
+
+
+def _validate_pin_override(override, ref: str, number: str, diags: _Diagnostics) -> None:
+    """Fail-closed type check of a typed pin `override` — the schema-v2 sanctioned
+    channel for an intentional deviation from the locked footprint. The footprint
+    stays authoritative for EMITTED pad geometry; the override is validated (and
+    recorded in the source) here. Applying a validated override to fabricated pad
+    geometry is a downstream emitter concern (filed separately), not this identity
+    gate. Type-checked only, to stay in parity with the Go PinOverride codec."""
+    pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
+    if not isinstance(override, dict):
+        diags.error("invalid_pin_override",
+                    f"component {ref!r} pin {number!r}: override must be a mapping, "
+                    f"got {type(override).__name__}", pad_ref)
+        return
+    for key in _OVERRIDE_NUM_KEYS:
+        val = override.get(key)
+        if val is not None and not _is_number(val):
+            diags.error("invalid_pin_override",
+                        f"component {ref!r} pin {number!r}: override.{key} must be a number, "
+                        f"got {val!r}", pad_ref)
+    plated = override.get("plated")
+    if plated is not None and not isinstance(plated, bool):
+        diags.error("invalid_pin_override",
+                    f"component {ref!r} pin {number!r}: override.plated must be a boolean, "
+                    f"got {plated!r}", pad_ref)
 
 
 # ---------------------------------------------------------------------------
