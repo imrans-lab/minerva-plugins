@@ -158,6 +158,22 @@ func TestDeserializeMinpcbMintsIdsAndClampsVersion(t *testing.T) {
 	}
 }
 
+// An unsupported schema version must fail closed at deserialize rather than be
+// silently migrated (version 0/missing) or accepted (version 3). Migration is
+// gated on version==1; everything else goes through Validate (Fable Round D, D3).
+func TestDeserializeUnsupportedVersionFailsClosed(t *testing.T) {
+	for _, yaml := range []string{
+		"version: 0\nname: Z\nwidth_mm: 10\nheight_mm: 10\ncomponents: []\nnets: []\n",
+		"version: 3\nid: board:0123456789abcdef0123456789abcdef\nname: T\nwidth_mm: 10\nheight_mm: 10\ncomponents: []\nnets: []\n",
+		"name: NoVer\nwidth_mm: 10\nheight_mm: 10\ncomponents: []\nnets: []\n",
+	} {
+		args, _ := json.Marshal(map[string]string{"yaml": yaml})
+		if _, err := HandleDeserialize(context.Background(), args); err == nil {
+			t.Errorf("expected deserialize error for unsupported version, got nil\nyaml: %s", yaml)
+		}
+	}
+}
+
 func TestDeserializeMinpcbJSON(t *testing.T) {
 	minpcb := `{"version":1,"board_name":"Leg","board_width":10,"board_height":10,"components":{"R1":{"id":"R1","footprint":"RESISTOR","position":{"x":1,"y":1},"rotation":0}},"nets":{},"annotations":{"a1":{"id":"a1","type":"TEXT","text":"hi"}}}`
 	args, _ := json.Marshal(map[string]json.RawMessage{"minpcb_json": json.RawMessage(minpcb)})

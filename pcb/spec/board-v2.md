@@ -59,6 +59,26 @@ geometry is deferred emitter work (`019f88a0c84f`) — at this boundary the
 override is validated and recorded, and the footprint stays authoritative for
 emission.
 
+## Boundary scope (what the vectors can and cannot pin)
+
+The shared boundary is the INTERSECTION of rules both sides enforce:
+schema-version dispatch, persistent-id validity, and pin-override field types.
+Vectors live in that intersection.
+
+Outside it, the two implementations legitimately differ and no vector may
+straddle the difference:
+
+- **Go's codec is a strict superset.** `UnmarshalYAML` rejects a source whose
+  field TYPES don't decode (`width_mm: twenty`, `x_mm: 'one'`) — the Python
+  schema validator doesn't inspect those fields, so it would call them valid. A
+  malformed field type is a Go error and simply is not expressed as a vector.
+- **Parser-level differences are documented, not vectored.** A whole-float
+  version (`2.0`) coerces to int in yaml.v3, so the Go codec rejects it
+  explicitly (see above) to match Python. A duplicate mapping key errors in
+  yaml.v3 but is last-wins in PyYAML; a `null` list item is dropped by yaml.v3
+  and is skipped by the Python validator to match. These are properties of the
+  parsers, kept aligned in code, not asserted as vectors.
+
 ## Adding a vector
 
 Create `vectors/<NNN-name>/` with `input.yaml` (a board source) and `expect.json`

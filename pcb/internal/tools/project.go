@@ -154,7 +154,7 @@ func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMes
 	// persistent ids minted here, at the deserialize boundary, and is persisted
 	// on the host's next pcb.serialize. Idempotent — a v2 board is untouched.
 	// Serialize never mints; it writes what it is given.
-	if b.Version < 2 {
+	if b.Version == 1 {
 		n, mErr := board.MigrateV1toV2(b, board.DefaultIDSource())
 		if mErr != nil {
 			return nil, fmt.Errorf("pcb.deserialize: migrate v1→v2: %w", mErr)
@@ -164,10 +164,12 @@ func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMes
 				fmt.Sprintf("migrated board source v1→v2: minted %d persistent entity id(s)", n))
 		}
 	} else if vErr := board.Validate(b); vErr != nil {
-		// An inbound board that already claims v2 must satisfy the shared
-		// validation boundary (comment 629) — fail closed rather than pass an
-		// unminted/ordinal id downstream where K3 would key identity off it.
-		return nil, fmt.Errorf("pcb.deserialize: invalid v2 board: %w", vErr)
+		// Only a true v1 board migrates. Anything else — an inbound v2 board, or an
+		// unsupported version (0/missing/3) — must satisfy the shared validation
+		// boundary (comment 629). Gating on ==1 (not <2) stops a version-0/missing
+		// board from being silently "fixed" by migration, matching the Python
+		// validator which calls it unsupported_schema_version. Fail closed.
+		return nil, fmt.Errorf("pcb.deserialize: invalid board: %w", vErr)
 	}
 	if warnings == nil {
 		warnings = []string{}

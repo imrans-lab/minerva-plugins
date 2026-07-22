@@ -15,11 +15,10 @@ shared with the compiler (``_is_minted_id``) so the two Python paths cannot drif
 """
 from __future__ import annotations
 
-from .compile_board import _is_minted_id, _is_number
-
-# Numeric keys of a typed pin override; ``plated`` is a separate boolean. Mirrors
-# compile_board._OVERRIDE_NUM_KEYS and the Go PinOverride *float64 fields.
-_OVERRIDE_NUM_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm")
+# Reuse the compiler's shared predicates AND the override-key list so the two
+# Python paths cannot drift (the minted-id definition and the override field set
+# have exactly one source of truth).
+from .compile_board import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
 
 _V2_ENTITIES = (("trace", "traces"), ("via", "vias"), ("hole", "mounting_holes"))
 
@@ -40,6 +39,9 @@ def validate_board_v2(board: dict) -> list[str]:
             codes.append("unminted_persistent_id")
         for entity, key in _V2_ENTITIES:
             for item in board.get(key) or []:
+                if item is None:
+                    continue  # yaml.v3 drops a null list item before Go sees it;
+                    # skip here too so the two codecs agree (Fable Round D, D2)
                 if not isinstance(item, dict) or not _is_minted_id(entity, item.get("id")):
                     codes.append("unminted_persistent_id")
                     break

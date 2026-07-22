@@ -35,5 +35,18 @@ func UnmarshalYAML(data []byte) (*Board, error) {
 	if err := yaml.Unmarshal(data, &b); err != nil {
 		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
+	// yaml.v3 silently coerces a whole-valued float ("2.0") into the int Version
+	// field, so the codec alone would accept a version the Python validator (which
+	// sees the float and rejects it) calls unsupported. Probe the raw version
+	// scalar's tag and reject a non-integer, keeping the shared version-dispatch
+	// boundary identical on both sides (item 019f802ca3af, comment 629).
+	var probe struct {
+		Version yaml.Node `yaml:"version"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err == nil &&
+		probe.Version.Kind == yaml.ScalarNode && probe.Version.Tag == "!!float" {
+		return nil, fmt.Errorf("board: unmarshal yaml: unsupported_schema_version: "+
+			"version scalar %q is not an integer", probe.Version.Value)
+	}
 	return &b, nil
 }
