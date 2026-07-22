@@ -107,17 +107,57 @@ def _graphic_width(graphic: dict) -> float:
     return w if (w is not None and w > 0) else SILK_LINE_WIDTH_MM
 
 
+# Collinearity epsilon for the 3-point-arc circumcentre. Points are board mm; a
+# genuine silk arc has a triangle signed-area (|d|) many orders above this, while
+# collinear/coincident points drive it to ~0 (infinite-radius circle => a line).
+_ARC_COLLINEAR_EPS = 1e-9
+# The signed-area epsilon is absolute, so a NEAR-collinear triple can still solve
+# to a huge-but-finite radius whose centre falls outside the plottable board range
+# and would overflow the gerber 4.6 coordinate format. Any arc past this radius is
+# physically a straight silk stroke — fall back to a polyline (cosmetic fail-safe).
+_ARC_MAX_RADIUS_MM = 1.0e4
+
+
+def _circumcenter(a: tuple[float, float], b: tuple[float, float],
+                  c: tuple[float, float]) -> tuple[tuple[float, float], float] | None:
+    """Circumcentre of the triangle (a, b, c) and its orientation denominator.
+
+    Returns ``(center, d)`` where ``d`` is twice the signed area of a->b->c
+    (``d == 2 * cross``): ``d > 0`` means the a->b->c turn is COUNTER-clockwise
+    (gerber '+'/CCW), ``d < 0`` clockwise (gerber '-'). Returns ``None`` when the
+    three points are collinear or coincident (infinite radius — caller falls back
+    to a polyline, since an arc through collinear points IS a line).
+    """
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < _ARC_COLLINEAR_EPS:
+        return None
+    a2 = ax * ax + ay * ay
+    b2 = bx * bx + by * by
+    c2 = cx * cx + cy * cy
+    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
+    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
+    return (ux, uy), d
+
+
 def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
                           graphic: dict) -> None:
     """Transform one footprint F.SilkS graphic (component-LOCAL coords) into
     board-absolute geometry, appended to the matching ``g.silk_*`` bucket.
 
     Supported kinds (see footprints.py's ``_parse_graphics``): line, circle,
-    poly, arc. Arc has two source forms: legacy KiCad ``(center, start, angle)``
-    (``points`` has 2 entries + an ``angle`` field) drawn as a TRUE arc via
-    gerber-writer's ``add_trace_arc``; and the 3-point ``(start, mid, end)``
-    form, drawn as a polyline through those points (acceptable approximation
-    per the round brief — no test fixture currently exercises this form).
+    poly, arc. Arc has two source forms, BOTH drawn as a TRUE gerber arc via
+    gerber-writer's ``add_trace_arc``: legacy KiCad ``(center, start, angle)``
+    (``points`` has 2 entries + an ``angle`` field); and the modern KiCad 7/8
+    3-point ``(start, mid, end)`` form (``points`` has 3 entries, no ``angle``) —
+    emitted as an arc whose centre is the circumcircle of the three transformed
+    points, with chirality taken from the a->b->c turn in the gerber Y-up frame
+    (consistent with the legacy convention). Only when the three points are
+    collinear/coincident (infinite radius) does it fall back to a polyline — an
+    arc through collinear points IS a line. Silk is cosmetic, so degenerate
+    forms never raise (contrast R1/R2 copper/mask, which fail closed).
     """
     kind = graphic.get("kind")
     width = _graphic_width(graphic)
@@ -173,8 +213,34 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
             # Pinned by test_legacy_arc_bulges_into_body.
             orientation = "-" if angle < 0 else "+"
             g.silk_arcs.append((start_abs, end_abs, center_abs, orientation, width))
+        elif len(pts) >= 3:
+            # Modern KiCad 7/8 three-point (start, mid, end) form: emit a TRUE
+            # gerber arc through the circumcircle of the transformed points.
+            a = _transform_point(cx, cy, rot, _num(pts[0][0]), _num(pts[0][1]))
+            b = _transform_point(cx, cy, rot, _num(pts[1][0]), _num(pts[1][1]))
+            c = _transform_point(cx, cy, rot, _num(pts[2][0]), _num(pts[2][1]))
+            solved = _circumcenter(a, b, c)
+            if solved is not None:
+                center, _d = solved
+                r2 = (a[0] - center[0]) ** 2 + (a[1] - center[1]) ** 2
+                if r2 > _ARC_MAX_RADIUS_MM * _ARC_MAX_RADIUS_MM:
+                    # Near-collinear: finite but off-board centre — treat as a line.
+                    solved = None
+            if solved is None:
+                # Collinear / coincident / near-degenerate (infinite or off-board
+                # radius). Fail-SAFE (cosmetic, not fail-closed) — fall back to the
+                # polyline through the points; never risk a coordinate overflow.
+                g.silk_polys.append(([a, b, c], width, False))
+            else:
+                center, d = solved
+                # d == 2*cross of a->b->c: positive => CCW turn => gerber '+';
+                # negative => CW => '-'. Same Y-up chirality rule the legacy
+                # (center,start,angle) branch above encodes.
+                orientation = "+" if d > 0 else "-"
+                g.silk_arcs.append((a, c, center, orientation, width))
         elif len(pts) >= 2:
-            # 3-point (start[, mid], end) form: polyline approximation.
+            # 2-point arc with no mid and no angle: underspecified — draw the
+            # chord as a polyline (unchanged fallback).
             abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
             g.silk_polys.append((abs_pts, width, False))
 

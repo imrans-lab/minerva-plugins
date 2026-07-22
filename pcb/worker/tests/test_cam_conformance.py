@@ -16,6 +16,7 @@ now produce its own faithful gerber aperture:
 """
 from __future__ import annotations
 
+import math
 import re
 
 import pytest
@@ -329,3 +330,251 @@ def test_th_mask_honors_per_pad_margin_and_stays_circular():
     text = _fmask(_th_pad_board(w=w, solder_mask_margin=margin))
     # resolved TH copper width doubles as the annulus diameter (pad_source contract).
     assert f"%ADD10C,{w + 2 * margin}*%" in text
+
+
+# ===========================================================================
+# ROUND 3 — GRAPHIC-PRIMITIVE (F.SilkS) conformance.
+#
+# The R3 regression: gerber._harvest_silk_graphic FLATTENED the modern KiCad 7/8
+# three-point (start, mid, end) arc into a straight-segment polyline — a declared
+# `arc` primitive emitted as lines, the exact flattening class this gate kills.
+# The other primitives (line/circle/poly + the legacy center/start/angle arc) were
+# already faithful; R3 locks them and fixes the three-point arc to a TRUE gerber
+# arc via the SAME g.silk_arcs -> _add_silk_arcs emit path (no new emitter).
+#
+# Silk is COSMETIC (fab_capability: "Silk/fab/paste losses are warned, never
+# fatal") so — unlike R1 copper / R2 mask — degenerate silk here is fail-SAFE
+# (falls back to a polyline), NOT fail-closed. It must NEVER raise.
+# ===========================================================================
+
+from pcb_worker.fab_capability import SUPPORTED_GRAPHIC_PRIMITIVES
+
+
+def _fsilk(board: dict) -> str:
+    return gerber.build_gerbers(board, name="conf")["conf-F_SilkS.gbr"]
+
+
+def _silk_board(graphics: list[dict], *, rot: float = 0.0) -> dict:
+    """A minimal single-component board carrying F.SilkS `graphics` (the shape
+    resolve_board emits), placed at (5, 5). One throwaway pad keeps the component
+    well-formed; the silk path in _harvest reads only `graphics`."""
+    return {
+        "version": 2, "name": "conf", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2},
+        "components": [{"ref": "P1", "footprint": "F", "x_mm": 5, "y_mm": 5,
+                        "rotation_deg": rot, "layer": "top",
+                        "pads": [{"number": "1", "type": "smd", "shape": "rect",
+                                  "position": {"x": 0, "y": 0},
+                                  "size": {"width": 1, "height": 1},
+                                  "layers": ["F.Cu"]}],
+                        "graphics": graphics}],
+    }
+
+
+def _silk_fs_scale(text: str) -> tuple[int, int]:
+    m = re.search(r"%FSLAX(\d)(\d)Y(\d)(\d)\*%", text)
+    assert m, "no coordinate-format spec in silk gerber"
+    return int(m.group(2)), int(m.group(4))
+
+
+def _silk_draws(text: str) -> tuple[list, int]:
+    """Parse the silk layer into (arcs, n_straight):
+
+    arcs   -> list of (start, end, center, mode) for every G02/G03 D01 (mode
+              2=CW / 3=CCW; center = start + (I, J)); a FULL circle has start==end.
+    n_straight -> count of plain G01 straight-line interpolations (D01 without I/J).
+    """
+    xd, yd = _silk_fs_scale(text)
+    mode, sx, sy = 1, None, None
+    arcs: list = []
+    n_straight = 0
+    for raw in text.splitlines():
+        s = raw.strip()
+        if s == "G02*":
+            mode = 2; continue
+        if s == "G03*":
+            mode = 3; continue
+        if s == "G01*":
+            mode = 1; continue
+        m = re.match(r"X(-?\d+)Y(-?\d+)D02\*$", s)
+        if m:
+            sx, sy = int(m.group(1)) / 10 ** xd, int(m.group(2)) / 10 ** yd
+            continue
+        m = re.match(r"X(-?\d+)Y(-?\d+)I(-?\d+)J(-?\d+)D01\*$", s)
+        if m and mode in (2, 3) and sx is not None:
+            ex, ey = int(m.group(1)) / 10 ** xd, int(m.group(2)) / 10 ** yd
+            ii, jj = int(m.group(3)) / 10 ** xd, int(m.group(4)) / 10 ** yd
+            arcs.append(((sx, sy), (ex, ey), (sx + ii, sy + jj), mode))
+            sx, sy = ex, ey
+            continue
+        m = re.match(r"X(-?\d+)Y(-?\d+)D01\*$", s)
+        if m:
+            if mode == 1:
+                n_straight += 1
+            sx, sy = int(m.group(1)) / 10 ** xd, int(m.group(2)) / 10 ** yd
+    return arcs, n_straight
+
+
+def _arc_midpoint(start, end, center, mode) -> tuple[float, float]:
+    a0 = math.atan2(start[1] - center[1], start[0] - center[0])
+    a1 = math.atan2(end[1] - center[1], end[0] - center[0])
+    r = math.hypot(start[0] - center[0], start[1] - center[1])
+    if mode == 3:  # CCW: sweep angle increasing
+        while a1 <= a0:
+            a1 += 2 * math.pi
+    else:          # CW: sweep angle decreasing
+        while a1 >= a0:
+            a1 -= 2 * math.pi
+    am = (a0 + a1) / 2.0
+    return (center[0] + r * math.cos(am), center[1] + r * math.sin(am))
+
+
+def _silk_signature(text: str) -> tuple[int, int, int]:
+    """(full_circle_arcs, partial_arcs, straight_draws) — the primitive-shape
+    fingerprint. It stays DISTINCT across line/circle/poly/arc iff none is
+    flattened into another (e.g. an arc collapsing into straight segments)."""
+    arcs, n_straight = _silk_draws(text)
+    full = sum(1 for (s, e, _c, _m) in arcs
+               if abs(s[0] - e[0]) < 1e-9 and abs(s[1] - e[1]) < 1e-9)
+    return full, len(arcs) - full, n_straight
+
+
+# --- Per-primitive faithful emission ---------------------------------------
+
+
+def test_silk_line_emits_straight_draw():
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "line",
+                                "start": [-1, -1], "end": [1, 1], "width": 0.15}]))
+    arcs, n_straight = _silk_draws(text)
+    assert arcs == [], "a line must not emit an arc"
+    assert n_straight == 1, f"line should be one straight draw, got {n_straight}"
+
+
+def test_silk_circle_emits_true_full_circle_arc():
+    # A circle is a SINGLE true-circle arc (start==end full-circle form), never a
+    # sampled polygon.
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "circle",
+                                "center": [0, 0], "radius": 1.5, "width": 0.15}]))
+    arcs, n_straight = _silk_draws(text)
+    assert len(arcs) == 1, f"circle must be exactly one arc, got {len(arcs)}"
+    start, end, center, _mode = arcs[0]
+    assert start == end, "a full circle is emitted as a start==end 360-deg arc"
+    # radius ~1.5 about the placed centre (5, 5).
+    assert abs(math.hypot(start[0] - center[0], start[1] - center[1]) - 1.5) < 1e-3
+    assert abs(center[0] - 5.0) < 1e-3 and abs(center[1] - 5.0) < 1e-3
+
+
+def test_silk_circle_not_decomposed_into_segments():
+    # Regression guard: the true circle must NOT decompose into many short straight
+    # segments (the polygon-flatten failure this gate exists to prevent).
+    _full, _partial, n_straight = _silk_signature(
+        _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "circle",
+                             "center": [0, 0], "radius": 1.5, "width": 0.15}])))
+    assert n_straight == 0, "circle was flattened into straight segments"
+
+
+def test_silk_poly_emits_closed_path():
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "poly",
+                                "points": [[-1, -1], [1, -1], [1, 1], [-1, 1]],
+                                "width": 0.15}]))
+    arcs, n_straight = _silk_draws(text)
+    assert arcs == [], "a poly must not emit an arc"
+    # 4 corners closed back to the first -> 4 straight interpolations.
+    assert n_straight == 4, f"expected a closed 4-segment path, got {n_straight}"
+
+
+def test_silk_three_point_arc_emits_true_arc():
+    # Modern KiCad 7/8 (start, mid, end) form. start(-1,0) mid(0,1) end(1,0):
+    # circumcentre (0,0) -> placed (5,5), radius 1; midpoint bulges to +y.
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+                                "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}]))
+    arcs, _n_straight = _silk_draws(text)
+    assert len(arcs) == 1, f"a three-point arc must emit one true arc, got {len(arcs)}"
+    start, end, center, mode = arcs[0]
+    # Centre == circumcircle centre (placed local (0,0)).
+    assert abs(center[0] - 5.0) < 1e-3 and abs(center[1] - 5.0) < 1e-3, \
+        f"arc centre {center} != circumcentre (5,5)"
+    # The arc passes THROUGH the mid point (placed local (0,1) -> (5,6)).
+    mx, my = _arc_midpoint(start, end, center, mode)
+    assert abs(mx - 5.0) < 1e-2 and abs(my - 6.0) < 1e-2, \
+        f"arc geometric midpoint {(mx, my)} does not pass through mid (5,6)"
+
+
+def test_silk_three_point_arc_not_flattened():
+    # The R3 not-flattened guard: the three-point arc is a genuine arc, NOT a
+    # polyline of straight segments.
+    full, partial, n_straight = _silk_signature(
+        _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+                             "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}])))
+    assert (full, partial) == (0, 1), "three-point arc must be one partial arc"
+    assert n_straight == 0, "three-point arc was flattened into straight segments"
+
+
+def test_silk_three_point_arc_chirality_mirrors():
+    # Mid on +y vs the mirrored mid on -y (same start/end) yield OPPOSITE gerber
+    # orientations — chirality derives from the point order, consistent with the
+    # legacy-arc convention pinned by test_legacy_arc_bulges_into_body.
+    up = _silk_draws(_fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+        "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}])))[0]
+    down = _silk_draws(_fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+        "points": [[-1, 0], [0, -1], [1, 0]], "width": 0.15}])))[0]
+    assert len(up) == 1 and len(down) == 1
+    assert up[0][3] != down[0][3], \
+        f"mirrored mid must flip chirality, got modes {up[0][3]} and {down[0][3]}"
+
+
+def test_silk_collinear_three_point_arc_falls_back_without_raising():
+    # Fail-SAFE (cosmetic, NOT fail-closed): three collinear points have an
+    # undefined circumcentre (infinite radius) — an arc through them IS a line, so
+    # it degrades to a polyline WITHOUT raising, and still emits something.
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+                                "points": [[-1, 0], [0, 0], [1, 0]], "width": 0.15}]))
+    arcs, n_straight = _silk_draws(text)
+    assert arcs == [], "collinear points must not fabricate a spurious arc"
+    assert n_straight >= 1, "collinear arc must still emit its chord as a polyline"
+
+
+def test_silk_coincident_three_point_arc_does_not_raise():
+    # Degenerate coincident points are also fail-SAFE — they must never raise.
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+                                "points": [[0, 0], [0, 0], [0, 0]], "width": 0.15}]))
+    arcs, _n = _silk_draws(text)
+    assert arcs == [], "coincident points must not fabricate an arc"
+
+
+def test_silk_near_collinear_three_point_arc_falls_back_no_overflow():
+    # The collinear epsilon is absolute, so a NEAR-collinear triple can still solve
+    # to a huge-but-finite radius whose centre lands off-board and would overflow
+    # the gerber 4.6 coordinate format. Any arc past _ARC_MAX_RADIUS_MM is a straight
+    # silk stroke — it must degrade to a polyline, not emit an off-board arc centre.
+    # Mid point sagitta is ~5e-7 mm over a 4 mm chord -> radius ~4e6 mm >> the cap.
+    text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
+                                "points": [[-2.0, 0.0], [0.0, 5.0e-7], [2.0, 0.0]],
+                                "width": 0.15}]))
+    arcs, n_straight = _silk_draws(text)
+    assert arcs == [], "off-board huge-radius arc must fall back to a polyline"
+    assert n_straight >= 1, "near-collinear arc must still emit its chord"
+    # No emitted coordinate may exceed the plottable board range (overflow guard).
+    for coord in re.findall(r"[XY](-?\d+)\*?", text):
+        assert abs(int(coord)) < 10_000 * 10 ** 6, "coordinate overflowed 4.6 range"
+
+
+def test_supported_graphic_primitives_are_not_flattened():
+    # comment 628 analog for graphics: the declared primitives must each emit a
+    # DISTINCT gerber shape — none silently collapsing into another's form.
+    prims = {
+        "line": [{"layer": "F.SilkS", "kind": "line",
+                  "start": [-1, -1], "end": [1, 1], "width": 0.15}],
+        "circle": [{"layer": "F.SilkS", "kind": "circle",
+                    "center": [0, 0], "radius": 1.5, "width": 0.15}],
+        "poly": [{"layer": "F.SilkS", "kind": "poly",
+                  "points": [[-1, -1], [1, -1], [1, 1], [-1, 1]], "width": 0.15}],
+        "arc": [{"layer": "F.SilkS", "kind": "arc",
+                 "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}],
+    }
+    # Every declared primitive is exercised (guards against silent scope drift).
+    assert set(prims) == set(SUPPORTED_GRAPHIC_PRIMITIVES), \
+        f"test set {set(prims)} != declared {set(SUPPORTED_GRAPHIC_PRIMITIVES)}"
+    sigs = {k: _silk_signature(_fsilk(_silk_board(v))) for k, v in prims.items()}
+    assert len(set(sigs.values())) == len(prims), f"graphic primitives collapsed: {sigs}"
