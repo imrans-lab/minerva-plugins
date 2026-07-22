@@ -78,10 +78,15 @@ straddle the difference:
   yaml.v3 but is last-wins in PyYAML; a `null` list item is dropped by yaml.v3
   and is skipped by the Python validator to match. These are properties of the
   parsers, kept aligned in code, not asserted as vectors.
-- **Container shape IS a shared rule.** An entity container that is present but
-  not a list (`traces: {}`, `traces: 5`) cannot decode into a Go slice (codec
-  rejects) and must not silently pass — or crash — the Python validator; it is
-  `invalid_board_structure` on both sides (vectors 180/190).
+- **Top-level entity-collection shape IS a shared rule.** Each of the five
+  top-level entity collections — `components`, `nets`, `traces`, `vias`,
+  `mounting_holes` — that is present but not a list (`traces: {}`, `nets: 5`)
+  cannot decode into a Go slice (the codec rejects) and must not silently pass —
+  or crash — the Python validator; it is `invalid_board_structure` on both sides
+  (vectors 180/190/200). This holds even for `nets`, which carries no persistent
+  id. Nested / auxiliary containers (`points`, `layers`, `annotations`,
+  `route_hints`, `design_rules`) are NOT in this rule — their shape is enforced
+  by the Go codec (a superset) and the full compiler, not by this validator.
 
 ## Adding a vector
 

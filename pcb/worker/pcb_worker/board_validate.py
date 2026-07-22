@@ -37,15 +37,26 @@ def validate_board_v2(board: dict) -> list[str]:
         return ["unsupported_schema_version"]
 
     codes: list[str] = []
+
+    # Top-level entity collections are shared-shape containers: a present non-list
+    # is invalid_board_structure on both sides — the Go codec rejects a mapping or
+    # scalar where it expects a slice — even for a collection this validator does
+    # not otherwise inspect (nets carry no persistent id, but `nets: {}` must still
+    # fail closed on both sides). Nested / auxiliary containers (points, layers,
+    # annotations, route_hints, design_rules) are the documented Go-codec superset,
+    # enforced by the codec and the full compiler, not re-checked here.
+    lists: dict[str, list] = {}
+    for key in ("components", "nets", "traces", "vias", "mounting_holes"):
+        items, ok = _as_list(board.get(key))
+        lists[key] = items
+        if not ok:
+            codes.append("invalid_board_structure")
+
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
             codes.append("unminted_persistent_id")
         for entity, key in _V2_ENTITIES:
-            items, ok = _as_list(board.get(key))
-            if not ok:
-                codes.append("invalid_board_structure")
-                continue
-            for item in items:
+            for item in lists[key]:
                 if item is None:
                     continue  # yaml.v3 drops a null list item before Go sees it;
                     # skip here too so the two codecs agree (Fable Round D, D2)
@@ -53,11 +64,7 @@ def validate_board_v2(board: dict) -> list[str]:
                     codes.append("unminted_persistent_id")
                     break
 
-    comps, ok = _as_list(board.get("components"))
-    if not ok:
-        codes.append("invalid_board_structure")
-        comps = []
-    for comp in comps:
+    for comp in lists["components"]:
         if not isinstance(comp, dict):
             continue
         pins, ok = _as_list(comp.get("pins"))
