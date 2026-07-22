@@ -306,18 +306,23 @@ func importTraces(raw json.RawMessage) ([]Trace, []string, error) {
 			}
 		}
 
-		// legacy trace id has no canonical slot: preserve the map key, letting
-		// an explicit "id" field below override it.
-		ensureExtra(&t.Extra)["id"] = id
+		// Legacy trace id maps to the canonical ID field. Before schema v2 the
+		// Trace struct had no id slot, so the importer parked the map key in
+		// Extra["id"]; v2 models `id`, and a modeled field whose yaml name also
+		// appears in an inline Extra map makes yaml.v3 panic on marshal
+		// (item 019f802ca3af). The map key is the default; an explicit inner
+		// "id" field overrides it.
+		t.ID = id
+		getString(obj, "id", &t.ID)
 
 		// preserve every other trace field in Extra; warn on the unknown.
 		for k, v := range obj {
-			if k == "net_name" || k == "layer" || k == "width" || k == "waypoints" {
+			if k == "net_name" || k == "layer" || k == "width" || k == "waypoints" || k == "id" {
 				continue // already mapped
 			}
 			var val interface{}
 			_ = json.Unmarshal(v, &val)
-			t.Extra[k] = val
+			ensureExtra(&t.Extra)[k] = val
 			if !knownTraceFields[k] {
 				warnings = append(warnings, fmt.Sprintf("trace %q: non-canonical field %q preserved as passthrough", id, k))
 			}
@@ -344,9 +349,15 @@ func importVias(raw json.RawMessage) ([]Via, error) {
 		if s, ok := obj["net_name"].(string); ok {
 			v.Net = s
 		}
+		// Legacy via id maps to the canonical ID field, not Extra — a modeled
+		// field whose yaml name also sits in an inline Extra map panics yaml.v3
+		// on marshal (item 019f802ca3af).
+		if s, ok := obj["id"].(string); ok {
+			v.ID = s
+		}
 		// preserve anything else (layers, etc.) in Extra
 		for k, val := range obj {
-			if k == "position" || k == "drill" || k == "size" || k == "net_name" {
+			if k == "position" || k == "drill" || k == "size" || k == "net_name" || k == "id" {
 				continue
 			}
 			ensureExtra(&v.Extra)[k] = val

@@ -71,6 +71,77 @@ mask openings, and the PTH/NPTH Excellon split. See `docs/gerbers.md`. The worke
 also tolerantly accepts `npth_holes` / `pth_holes` aliases via `Extra` for
 producers that pre-split the two lists.
 
+## Persistent identity (schema v2)
+
+Schema v2 introduces **persistent, mint-once entity identity**. This is the
+contract half of migration `019f802ca3af` — the gate before any identity-dependent
+consumer (DRC, routing) may key off a compiled board. It exists because the
+pre-v2 compiler derived trace/via/hole ids from their **ordinal** position, so
+inserting or reordering a child silently changed every later child's id and broke
+any reference to it (Sol K2 review).
+
+### The `id` field
+
+`Board`, `Trace`, `Via`, and `Hole` carry an opaque string `id`
+(`"board:<hex>"`, `"trace:<hex>"`, …):
+
+- **Mint-once, never recomputed.** The id is assigned exactly once — by the
+  v1→v2 migration for existing boards, or at creation for new ones — and is *not*
+  a content hash. A content hash would move when a trace's waypoints or the
+  board's name change; identity must survive those edits, which is the whole
+  point. Consumers key off `id`, not off position or content.
+- **Globally unique by construction**, so it subsumes the earlier
+  "board-namespace every child id" rule — two boards cannot collide because each
+  mint is independent.
+- **`omitempty`.** A v1 board has no ids; the field is absent, so a pre-migration
+  board round-trips byte-identically. This makes v2 an *additive* contract change.
+
+Entities that already have a stable identity keep it and gain **no** opaque id:
+`Component` → `ref`, `Net` → `name`, `Pin` → (`ref`, `number`). Segments are
+derived children of a trace (N points → N-1 segments) and are identified by the
+persisted trace id + ordinal — inserting a waypoint renumbers that one trace's
+segments, which is inherent and acceptable since segments are never referenced
+independently. `zone` ids are reserved for when zones are modeled (v1/v2 cannot
+fabricate zones at all, so no `Zone` struct exists yet).
+
+### Pin-geometry authority: the `override` sub-struct
+
+The **locked footprint is authoritative** for pad geometry. The inline pin
+fields `drill_mm` / `annulus_diameter_mm` / `pad_width_mm` / `pad_height_mm` /
+`plated` are **deprecated in v2**: they duplicate what the footprint defines, and
+a board carrying both forces consumers to guess which wins.
+
+A v2 board expresses an *intentional* deviation only through the explicit typed
+`override` sub-struct on a pin:
+
+```yaml
+pins:
+  - number: "2"
+    x_mm: 2.54
+    y_mm: 0
+    override:                 # present ONLY when deviating from the footprint
+      drill_mm: 0.9           # every field optional; unset = use the footprint's value
+```
+
+The deprecated inline fields remain modeled so v1 boards round-trip losslessly;
+the v1→v2 migration folds inline geometry that *differs* from the footprint into
+`override` and drops what *matches*. A v2 producer must not emit the inline fields.
+
+### Shared validation boundary (Go ↔ Python)
+
+`version` dispatch, required/type-checked fields, id validity, `override`
+semantics, and canonical-number constraints are a **single spec both the Go codec
+and the Python compiler enforce**, so the two cannot drift. The spec is backed by
+committed cross-language vectors under `pcb/spec/vectors/` — each case
+(`{input.yaml, expect: valid|error, code}`) is loaded and asserted identically by
+both `internal/board` (Go) and the worker's `test_board_v2_vectors.py` (Python).
+This is the cross-language analogue of the worker's `fab_capability` drift test.
+
+> **Round status (019f802ca3af):** Round A lands the contract *shape* above — the
+> `id`/`override` fields and this spec. The v1→v2 mint-and-write migration
+> (Go), the Python v2 compiler path that *requires* persisted ids (fail-closed),
+> and the committed cross-language vectors are later serialized rounds.
+
 ## `.minpcb` (legacy JSON) → canonical mapping
 
 The in-tree Godot editor's `PCBData.to_dict()` shape maps as follows. The
@@ -94,7 +165,8 @@ importer (`board.ImportMinpcb`) applies this and returns a warnings list.
 | net `color` / `properties` / `is_power_net` | net `Extra` (inline)            | carried losslessly |
 | `traces` (`id`→object map)                  | `traces` (list, sorted by id)   | |
 | trace `net_name` / `waypoints` / `width`    | `net` / `points` / `width_mm`   | |
-| trace `id` / `locked`                       | trace `Extra`                   | carried losslessly |
+| trace `id`                                  | trace `id` (modeled, v2)        | maps to the persistent `id` field, not `Extra` — see "Persistent identity" |
+| trace `locked`                              | trace `Extra`                   | carried losslessly |
 | `vias` (array; `position`, `size`, `drill`, `net_name`) | `vias` (`x_mm`,`y_mm`,`diameter_mm`,`drill_mm`,`net`) | rest → `Extra` |
 | `annotations` (`id`→object map)             | `annotations` (list of opaque blobs) | **not interpreted** |
 | `route_hints` (`id`→object map)             | `route_hints` (list of opaque blobs) | **not interpreted** |

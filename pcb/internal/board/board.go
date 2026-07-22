@@ -47,7 +47,16 @@ type Blob = map[string]interface{}
 // yaml.v3 sorts inline/map keys, so a given Board always produces byte-identical
 // YAML. That determinism is why this is the pcb.serialize payload format.
 type Board struct {
-	Version     int         `json:"version" yaml:"version"`
+	Version int `json:"version" yaml:"version"`
+	// ID is the persistent, mint-once board identity (schema v2+). It is an
+	// opaque token ("board:<hex>") assigned exactly once by the v1→v2 migration
+	// and never recomputed — unlike a content hash it survives edits to the
+	// board's name or geometry, which is the whole point: identity-dependent
+	// consumers (DRC, routing) key off it and must not have the key move when a
+	// user renames the board or reorders its children. Empty on a v1 board;
+	// omitempty so a pre-migration board still round-trips byte-identically.
+	// See docs/board-yaml.md "Persistent identity (v2)".
+	ID          string      `json:"id,omitempty" yaml:"id,omitempty"`
 	Name        string      `json:"name" yaml:"name"`
 	WidthMM     float64     `json:"width_mm" yaml:"width_mm"`
 	HeightMM    float64     `json:"height_mm" yaml:"height_mm"`
@@ -133,16 +142,56 @@ type Component struct {
 // which silently lost SMD pad dimensions over the pcb.deserialize IPC reply.
 // First-classing them keeps the JSON boundary lossless. A pad with neither drill
 // nor pad_width/height is a bare positional pin.
+//
+// # Pin-geometry authority (schema v2, item 019f802ca3af / K2 review 627.1)
+//
+// The inline geometry fields (DrillMM, AnnulusDiameterMM, PadWidthMM,
+// PadHeightMM, Plated) DUPLICATE what the locked footprint already defines, and
+// a board that carries both (smart_remote does) forces every consumer to guess
+// which wins. The v2 authority rule: the LOCKED FOOTPRINT is authoritative;
+// these inline fields are DEPRECATED. A v2 board expresses an intentional
+// deviation only through the explicit typed Override sub-struct below. The
+// inline fields remain modeled (not deleted) so pre-migration v1 boards still
+// round-trip losslessly; the v1→v2 migration (Round B) folds inline geometry
+// that DIFFERS from the footprint into Override and drops what MATCHES.
 type Pin struct {
-	Number            string  `json:"number" yaml:"number"`
-	Name              string  `json:"name,omitempty" yaml:"name,omitempty"`
-	XMM               float64 `json:"x_mm" yaml:"x_mm"`
-	YMM               float64 `json:"y_mm" yaml:"y_mm"`
+	Number string  `json:"number" yaml:"number"`
+	Name   string  `json:"name,omitempty" yaml:"name,omitempty"`
+	XMM    float64 `json:"x_mm" yaml:"x_mm"`
+	YMM    float64 `json:"y_mm" yaml:"y_mm"`
+
+	// Override is the ONLY v2-sanctioned way to deviate from the footprint's pad
+	// geometry — an explicit, typed, intentional deviation. Nil (the common case)
+	// means "use the footprint verbatim". omitempty keeps footprint-faithful pins
+	// clean in YAML.
+	Override *PinOverride `json:"override,omitempty" yaml:"override,omitempty"`
+
+	// Deprecated inline geometry (schema v1). Authoritative source is the locked
+	// footprint; use Override for intentional deviations. Retained only for
+	// lossless v1 round-trip and as the migration's input — a v2 producer MUST
+	// NOT emit these. See the type doc for the authority rule.
 	DrillMM           float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
 	AnnulusDiameterMM float64 `json:"annulus_diameter_mm,omitempty" yaml:"annulus_diameter_mm,omitempty"`
 	PadWidthMM        float64 `json:"pad_width_mm,omitempty" yaml:"pad_width_mm,omitempty"`
 	PadHeightMM       float64 `json:"pad_height_mm,omitempty" yaml:"pad_height_mm,omitempty"`
 	Plated            *bool   `json:"plated,omitempty" yaml:"plated,omitempty"`
+
+	Extra map[string]interface{} `json:"-" yaml:",inline"`
+}
+
+// PinOverride is an intentional, typed per-pad deviation from the locked
+// footprint's pad geometry (schema v2, item 019f802ca3af). It carries the same
+// fabrication dimensions as the deprecated inline Pin fields, but its PRESENCE
+// is the signal that the deviation is deliberate rather than a stale duplicate
+// of the footprint. Every field is a pointer so "unset" (use the footprint's
+// value for this dimension) is distinguishable from "explicitly zero"; omitempty
+// keeps an override that touches one dimension from serializing the rest.
+type PinOverride struct {
+	DrillMM           *float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
+	AnnulusDiameterMM *float64 `json:"annulus_diameter_mm,omitempty" yaml:"annulus_diameter_mm,omitempty"`
+	PadWidthMM        *float64 `json:"pad_width_mm,omitempty" yaml:"pad_width_mm,omitempty"`
+	PadHeightMM       *float64 `json:"pad_height_mm,omitempty" yaml:"pad_height_mm,omitempty"`
+	Plated            *bool    `json:"plated,omitempty" yaml:"plated,omitempty"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
@@ -155,6 +204,9 @@ type Pin struct {
 // default here IS false, so omitempty dropping a false on marshal is lossless.
 // Deliberate asymmetry — do not "fix" one to match the other.
 type Hole struct {
+	// ID is the persistent, mint-once mounting-hole identity (schema v2+) — same
+	// rationale as Trace.ID. Opaque token ("hole:<hex>"); empty on v1; omitempty.
+	ID         string  `json:"id,omitempty" yaml:"id,omitempty"`
 	XMM        float64 `json:"x_mm" yaml:"x_mm"`
 	YMM        float64 `json:"y_mm" yaml:"y_mm"`
 	DiameterMM float64 `json:"diameter_mm,omitempty" yaml:"diameter_mm,omitempty"`
@@ -177,6 +229,13 @@ type Net struct {
 // with N points has N-1 segments. (The legacy model's `waypoints` map 1:1 onto
 // Points.)
 type Trace struct {
+	// ID is the persistent, mint-once trace identity (schema v2+). Traces are
+	// reorderable and insertable, so the pre-migration ordinal-derived id was
+	// unstable (Sol K2 review, item 019f802ca3af): inserting a trace shifted
+	// every later trace's ordinal and thus its id. A minted opaque token
+	// ("trace:<hex>") is stable under reorder/insert AND under editing this
+	// trace's own Points. Empty on a v1 board; omitempty for lossless round-trip.
+	ID      string  `json:"id,omitempty" yaml:"id,omitempty"`
 	Net     string  `json:"net" yaml:"net"`
 	Layer   string  `json:"layer,omitempty" yaml:"layer,omitempty"`
 	WidthMM float64 `json:"width_mm,omitempty" yaml:"width_mm,omitempty"`
@@ -187,6 +246,10 @@ type Trace struct {
 
 // Via is a layer-transition plated hole.
 type Via struct {
+	// ID is the persistent, mint-once via identity (schema v2+) — same rationale
+	// as Trace.ID: vias are reorderable, so the ordinal-derived id was unstable.
+	// Opaque token ("via:<hex>"); empty on v1; omitempty for lossless round-trip.
+	ID         string  `json:"id,omitempty" yaml:"id,omitempty"`
 	XMM        float64 `json:"x_mm" yaml:"x_mm"`
 	YMM        float64 `json:"y_mm" yaml:"y_mm"`
 	DrillMM    float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
