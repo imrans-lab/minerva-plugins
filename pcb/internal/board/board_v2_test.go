@@ -1,6 +1,7 @@
 package board
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -125,5 +126,44 @@ func TestLegacyTraceIdMapsToModeledField(t *testing.T) {
 	// The imported board must now marshal without the id/Extra collision panic.
 	if _, err := MarshalYAML(b); err != nil {
 		t.Fatalf("imported board failed to marshal: %v", err)
+	}
+}
+
+// The via importer must route a legacy via `id` into the modeled ID field
+// (the .minpcb fixture has no via id, so this drives importVias directly), and
+// a NON-string legacy id must be preserved (stringified), never silently
+// dropped — it cannot fall through to Extra without re-creating the yaml.v3
+// inline-map collision. Non-id passthrough (e.g. `layers`) still lands in Extra.
+func TestLegacyViaIdMapsToModeledFieldNotDropped(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"position":{"x":1,"y":2},"size":0.8,"drill":0.4,"net_name":"VCC","id":"via_7","layers":["top","bottom"]},
+		{"position":{"x":3,"y":4},"size":0.8,"drill":0.4,"id":5}
+	]`)
+	vias, err := importVias(raw)
+	if err != nil {
+		t.Fatalf("importVias: %v", err)
+	}
+	if len(vias) != 2 {
+		t.Fatalf("vias: want 2, got %d", len(vias))
+	}
+	if vias[0].ID != "via_7" {
+		t.Errorf("string via id not mapped to ID field: %q", vias[0].ID)
+	}
+	if _, ok := vias[0].Extra["id"]; ok {
+		t.Errorf("via id must not remain in Extra (yaml.v3 collision): %#v", vias[0].Extra)
+	}
+	if vias[0].Extra["layers"] == nil {
+		t.Errorf("non-id via passthrough (layers) lost from Extra: %#v", vias[0].Extra)
+	}
+	if vias[1].ID != "5" {
+		t.Errorf("non-string via id dropped or not stringified: %q", vias[1].ID)
+	}
+	if _, ok := vias[1].Extra["id"]; ok {
+		t.Errorf("stringified via id must not also sit in Extra: %#v", vias[1].Extra)
+	}
+	// A board carrying both must marshal without the collision panic.
+	b := &Board{Version: 2, Name: "x", Components: []Component{}, Nets: []Net{}, Vias: vias}
+	if _, err := MarshalYAML(b); err != nil {
+		t.Fatalf("marshal board with imported vias: %v", err)
 	}
 }

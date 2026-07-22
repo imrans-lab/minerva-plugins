@@ -310,8 +310,10 @@ func importTraces(raw json.RawMessage) ([]Trace, []string, error) {
 		// Trace struct had no id slot, so the importer parked the map key in
 		// Extra["id"]; v2 models `id`, and a modeled field whose yaml name also
 		// appears in an inline Extra map makes yaml.v3 panic on marshal
-		// (item 019f802ca3af). The map key is the default; an explicit inner
-		// "id" field overrides it.
+		// (item 019f802ca3af). The map key (always a non-empty string, from
+		// sortedKeys) is the authoritative default; a string inner "id" field
+		// overrides it. A non-string inner "id" is redundant with the map key
+		// and is dropped — identity is never lost because the map key holds it.
 		t.ID = id
 		getString(obj, "id", &t.ID)
 
@@ -351,9 +353,15 @@ func importVias(raw json.RawMessage) ([]Via, error) {
 		}
 		// Legacy via id maps to the canonical ID field, not Extra — a modeled
 		// field whose yaml name also sits in an inline Extra map panics yaml.v3
-		// on marshal (item 019f802ca3af).
-		if s, ok := obj["id"].(string); ok {
-			v.ID = s
+		// on marshal (item 019f802ca3af). A non-string legacy id is STRINGIFIED
+		// rather than dropped: it cannot fall through to Extra (that re-creates
+		// the collision), so preserving it here keeps the import lossless.
+		if raw, ok := obj["id"]; ok {
+			if s, ok := raw.(string); ok {
+				v.ID = s
+			} else {
+				v.ID = fmt.Sprint(raw)
+			}
 		}
 		// preserve anything else (layers, etc.) in Extra
 		for k, val := range obj {

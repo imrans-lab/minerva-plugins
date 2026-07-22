@@ -131,11 +131,12 @@ the v1→v2 migration folds inline geometry that *differs* from the footprint in
 
 `version` dispatch, required/type-checked fields, id validity, `override`
 semantics, and canonical-number constraints are a **single spec both the Go codec
-and the Python compiler enforce**, so the two cannot drift. The spec is backed by
-committed cross-language vectors under `pcb/spec/vectors/` — each case
-(`{input.yaml, expect: valid|error, code}`) is loaded and asserted identically by
-both `internal/board` (Go) and the worker's `test_board_v2_vectors.py` (Python).
-This is the cross-language analogue of the worker's `fab_capability` drift test.
+and the Python compiler enforce**, so the two cannot drift. The spec *will be*
+backed by committed cross-language vectors under `pcb/spec/vectors/` (Round D,
+below) — each case (`{input.yaml, expect: valid|error, code}`) loaded and asserted
+identically by both `internal/board` (Go) and the worker's `test_board_v2_vectors.py`
+(Python). This is the cross-language analogue of the worker's `fab_capability`
+drift test.
 
 > **Round status (019f802ca3af):** Round A lands the contract *shape* above — the
 > `id`/`override` fields and this spec. The v1→v2 mint-and-write migration
