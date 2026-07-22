@@ -44,6 +44,7 @@ from gerber_writer import (
     DataLayer,
     Path as GPath,
     Rectangle,
+    RoundedRectangle,
     set_generation_software,
 )
 
@@ -188,8 +189,8 @@ class _Geometry:
     """Flattened, absolute-coordinate geometry harvested from a board dict."""
 
     def __init__(self) -> None:
-        # SMD pads: (x, y, w, h, angle, top?)
-        self.smd_pads: list[tuple[float, float, float, float, float, bool]] = []
+        # SMD pads: (x, y, w, h, angle, top?, shape, corner_rratio)
+        self.smd_pads: list[tuple[float, float, float, float, float, bool, str, float | None]] = []
         # Through-hole pads / vias copper annuli: (x, y, diameter, function)
         self.th_annuli: list[tuple[float, float, float, str]] = []
         # Mask openings on each side: (x, y, kind, dims...) where kind is
@@ -261,7 +262,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 # (a sizeless SMD pad has already raised PadGeometryError).
                 w = pad.width
                 h = pad.height
-                g.smd_pads.append((px, py, w, h, rot, top))
+                g.smd_pads.append((px, py, w, h, rot, top, pad.shape, pad.corner_rratio))
                 mask = (px, py, "rect", w + 2 * mask_clearance,
                         h + 2 * mask_clearance, rot)
                 (g.mask_top if top else g.mask_bot).append(mask)
@@ -348,11 +349,36 @@ def _dump(layer: DataLayer, creation_date: str) -> str:
 
 def _add_smd(layer: DataLayer, pads, top_wanted: bool) -> None:
     # gerber-writer reuses one aperture per (shape, function); adding many pads
-    # of the same size collapses to a single %ADD..% (verified in the spike).
-    for (px, py, w, h, angle, top) in pads:
+    # of the same size+shape collapses to a single %ADD..% (verified in the spike).
+    for (px, py, w, h, angle, top, shape, rratio) in pads:
         if top != top_wanted:
             continue
-        layer.add_pad(Rectangle(w, h, "SMDPad,CuDef"), (px, py), angle)
+        layer.add_pad(_smd_aperture(shape, w, h, rratio), (px, py), angle)
+
+
+def _smd_aperture(shape: str, w: float, h: float, rratio: float | None):
+    """Map a declared SUPPORTED_PAD_SHAPE to its faithful gerber aperture — the
+    K3 capability-conformance requirement (019f7aed6d9e comment 628). Before this
+    every SMD pad flashed a Rectangle, silently flattening circle/oval/roundrect.
+
+      * circle    -> Circle (width is the diameter).
+      * oval      -> RoundedRectangle fully rounded on the short axis (an obround).
+      * roundrect -> RoundedRectangle with radius = corner_rratio * min(w, h)
+                     (KiCad's rratio convention; default 0.25 when unspecified).
+                     A zero/absent radius degenerates to a plain Rectangle.
+      * rect (and any unknown shape) -> Rectangle.
+    """
+    func = "SMDPad,CuDef"
+    if shape == "circle":
+        return Circle(w, func)
+    if shape == "oval":
+        return RoundedRectangle(w, h, min(w, h) / 2.0, func)
+    if shape == "roundrect":
+        ratio = rratio if rratio is not None else 0.25
+        radius = ratio * min(w, h)
+        if radius > 0:
+            return RoundedRectangle(w, h, radius, func)
+    return Rectangle(w, h, func)
 
 
 def _add_annuli(layer: DataLayer, annuli) -> None:

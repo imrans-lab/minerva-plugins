@@ -96,6 +96,7 @@ class PadGeom:
     annulus: float | None  # TH copper annulus diameter; None => emitter default
     plated: bool
     shape: str
+    corner_rratio: float | None  # roundrect corner radius / min(w,h), in [0,0.5]; None => none/default
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
     from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
@@ -181,6 +182,7 @@ def _from_pin(pin: dict) -> PadGeom:
         annulus=_opt_num(pin.get("annulus_diameter_mm")),
         plated=(pin.get("plated", True) is not False),
         shape="rect",
+        corner_rratio=None,  # inline-pin fallback carries no footprint corner datum
         pad_type=("thru_hole" if (drill is not None and drill > 0) else "smd"),
         layers=[],
         from_resolve=False,
@@ -212,6 +214,7 @@ def _from_resolved(pad: dict) -> PadGeom:
         annulus=(width if drill is not None else None),
         plated=(pad_type != "np_thru_hole"),
         shape=pad.get("shape") or "rect",
+        corner_rratio=_opt_num(pad.get("corner_rratio")),
         pad_type=pad_type,
         layers=pad.get("layers") or [],
         from_resolve=True,
