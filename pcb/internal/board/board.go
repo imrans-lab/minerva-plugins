@@ -152,8 +152,16 @@ type Component struct {
 // these inline fields are DEPRECATED. A v2 board expresses an intentional
 // deviation only through the explicit typed Override sub-struct below. The
 // inline fields remain modeled (not deleted) so pre-migration v1 boards still
-// round-trip losslessly; the v1→v2 migration (Round B) folds inline geometry
-// that DIFFERS from the footprint into Override and drops what MATCHES.
+// round-trip losslessly.
+//
+// Authority is enforced by the Python v2 COMPILER (Round C), not by the Go
+// identity migration: the fold — inline geometry that DIFFERS from the footprint
+// becomes an Override, geometry that MATCHES is dropped — needs the resolved
+// footprint, which lives in the worker. So the Go v1→v2 migration (Round B)
+// bumps a board to v2 and mints ids but LEAVES inline geometry in place; a board
+// can therefore be v2 and still carry inline fields until the compiler
+// normalizes it. Round C's fold must run per-compile (not gated on the version)
+// for exactly this reason.
 type Pin struct {
 	Number string  `json:"number" yaml:"number"`
 	Name   string  `json:"name,omitempty" yaml:"name,omitempty"`
@@ -167,9 +175,11 @@ type Pin struct {
 	Override *PinOverride `json:"override,omitempty" yaml:"override,omitempty"`
 
 	// Deprecated inline geometry (schema v1). Authoritative source is the locked
-	// footprint; use Override for intentional deviations. Retained only for
-	// lossless v1 round-trip and as the migration's input — a v2 producer MUST
-	// NOT emit these. See the type doc for the authority rule.
+	// footprint; use Override for intentional deviations. Retained for lossless
+	// v1 round-trip and as the Round C compiler's fold input. Target end-state:
+	// a fully-normalized v2 board carries none of these (only Override) — but the
+	// Go identity migration does not strip them, so a freshly-migrated v2 board
+	// may still have them until the compiler folds. See the type doc.
 	DrillMM           float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
 	AnnulusDiameterMM float64 `json:"annulus_diameter_mm,omitempty" yaml:"annulus_diameter_mm,omitempty"`
 	PadWidthMM        float64 `json:"pad_width_mm,omitempty" yaml:"pad_width_mm,omitempty"`

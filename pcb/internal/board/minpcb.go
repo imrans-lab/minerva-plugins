@@ -72,9 +72,13 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 	getFloat(root, "board_height", &b.HeightMM)
 	getFloat(root, "grid_size", &b.GridMM)
 	getString(root, "board_name", &b.Name)
-	if v, ok := root["version"]; ok {
-		_ = json.Unmarshal(v, &b.Version)
-	}
+	// A .minpcb's `version` is the legacy Godot editor's schema version, NOT the
+	// canonical board-contract version — a different namespace. Any .minpcb is by
+	// definition a pre-v2 source, so the canonical Version stays 1 here and the
+	// v1→v2 identity migration mints its persistent ids at pcb.deserialize. (Were
+	// we to trust a legacy file claiming `version: 2`, its ordinal-shaped ids
+	// like "trace_1" would skip the mint and persist forever — item 019f802ca3af,
+	// Fable Round B note.) The legacy value is consumed, not carried across.
 	if v, ok := root["layers"]; ok {
 		_ = json.Unmarshal(v, &b.Layers)
 	}

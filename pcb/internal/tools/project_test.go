@@ -121,6 +121,43 @@ func TestDeserializeDoesNotReMigrateV2(t *testing.T) {
 	}
 }
 
+// End-to-end: importing a legacy .minpcb through pcb.deserialize must MINT
+// persistent ids — even for a legacy trace whose ordinal-shaped id ("trace_1")
+// the importer carried into the ID field, and even if the file lies about its
+// version. Proves the composed importer→migration path, not just the units.
+func TestDeserializeMinpcbMintsIdsAndClampsVersion(t *testing.T) {
+	// version:2 is a lie — a .minpcb is a pre-v2 legacy source; the importer must
+	// clamp to v1 so the mint still fires over its ordinal ids.
+	minpcb := `{"version":2,"board_name":"Leg","board_width":10,"board_height":10,` +
+		`"components":{"R1":{"id":"R1","footprint":"RESISTOR","position":{"x":1,"y":1},"rotation":0}},` +
+		`"nets":{"N":{"pins":[]}},` +
+		`"traces":{"trace_1":{"id":"trace_1","net_name":"N","waypoints":[{"x":1,"y":1},{"x":2,"y":2}],"width":0.25}}}`
+	args, _ := json.Marshal(map[string]json.RawMessage{"minpcb_json": json.RawMessage(minpcb)})
+	out, err := HandleDeserialize(context.Background(), args)
+	if err != nil {
+		t.Fatalf("deserialize minpcb: %v", err)
+	}
+	var r struct {
+		Board    map[string]interface{} `json:"board"`
+		Warnings []string               `json:"warnings"`
+	}
+	if err := json.Unmarshal(out, &r); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := r.Board["version"].(float64); v != 2 {
+		t.Fatalf("version: want 2 (migrated), got %v", r.Board["version"])
+	}
+	traces, _ := r.Board["traces"].([]interface{})
+	if len(traces) != 1 {
+		t.Fatalf("traces: want 1, got %#v", r.Board["traces"])
+	}
+	tr, _ := traces[0].(map[string]interface{})
+	id, _ := tr["id"].(string)
+	if id == "trace_1" || !strings.HasPrefix(id, "trace:") || len(id) != len("trace:")+32 {
+		t.Fatalf("legacy ordinal trace id not re-minted: %q", id)
+	}
+}
+
 func TestDeserializeMinpcbJSON(t *testing.T) {
 	minpcb := `{"version":1,"board_name":"Leg","board_width":10,"board_height":10,"components":{"R1":{"id":"R1","footprint":"RESISTOR","position":{"x":1,"y":1},"rotation":0}},"nets":{},"annotations":{"a1":{"id":"a1","type":"TEXT","text":"hi"}}}`
 	args, _ := json.Marshal(map[string]json.RawMessage{"minpcb_json": json.RawMessage(minpcb)})
