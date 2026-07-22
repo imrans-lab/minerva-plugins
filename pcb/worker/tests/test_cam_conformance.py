@@ -245,12 +245,14 @@ def _valid_mask_pad_board(shape: str, *, solder_mask_margin: float | None = None
     return _mask_pad_board(shape, solder_mask_margin=solder_mask_margin)
 
 
-def _th_pad_board(*, w: float = 2.0, drill: float = 1.0,
+def _th_pad_board(*, w: float = 2.0, h: float | None = None, drill: float = 1.0,
                   solder_mask_margin: float | None = None) -> dict:
     """A minimal board with one resolved THROUGH-HOLE pad (round annulus). Its
-    resolved copper width doubles as the annulus diameter (pad_source contract)."""
+    resolved copper width doubles as the annulus diameter (pad_source contract).
+    `h` defaults to `w` (a square/round land); pass h != w for an OBLONG land."""
+    height = h if h is not None else w
     pad = {"number": "1", "type": "thru_hole", "shape": "circle",
-           "position": {"x": 0, "y": 0}, "size": {"width": w, "height": w},
+           "position": {"x": 0, "y": 0}, "size": {"width": w, "height": height},
            "drill": {"x": drill, "y": drill}, "layers": ["F.Cu", "B.Cu"]}
     if solder_mask_margin is not None:
         pad["solder_mask_margin"] = solder_mask_margin
@@ -971,3 +973,69 @@ def test_kicad_method_clean_board_forwards_empty_warnings():
                                       "name": "conf", "resolve_geometry": False}})
     assert resp["ok"] is True
     assert resp["result"]["warnings"] == []
+
+
+# ===========================================================================
+# W1 (Codex MUST_FIX A1+A2). A1: an SMD shape outside SUPPORTED_PAD_SHAPES was
+# silently flattened to a rectangle by BOTH emitters with no diagnostic — the
+# exact silent-flatten this gate kills, on fabrication-critical copper — so it
+# must now fail CLOSED. A2: a genuinely OBLONG through-hole land (w != h) is
+# circularized to a round annulus (out of the round-only TH capability); that is
+# a real copper-extent loss, so it must WARN with pad context but never raise
+# (failing closed would reject every oval-pad connector). The signal is
+# dimensional (w != h), NOT the shape token — a fallback TH pad defaults to
+# shape "rect" while being a perfectly round land, so a token test would flood.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("shape", ["trapezoid", "chamfered", "roundmutant", "octagon"])
+def test_unknown_smd_shape_fails_closed_both_emitters(shape):
+    board = _pad_board(shape)
+    with pytest.raises(ValueError, match="not a supported pad shape"):
+        gerber.build_gerbers(board, name="conf")
+    with pytest.raises(ValueError, match="not a supported pad shape"):
+        kicad.generate(board, base_name="conf")
+
+
+def test_every_supported_smd_shape_still_passes_the_guard():
+    # The fail-closed guard must not reject any DECLARED shape on either emitter.
+    for shape in SUPPORTED_PAD_SHAPES:
+        gerber.build_gerbers(_valid_pad_board(shape), name="conf")
+        kicad.generate(_valid_pad_board(shape), base_name="conf")
+
+
+def test_oblong_th_pad_warns_not_raises_gerber():
+    result = gerber.build_gerbers(_th_pad_board(w=2.0, h=1.0), name="conf")
+    warns = [d for d in result.diagnostics if d.code == "th_pad_shape_circularized"]
+    assert warns, "an oblong TH land must warn (the round annulus drops an extent)"
+    assert warns[0].severity is DiagnosticSeverity.WARNING
+    assert warns[0].source_ref.entity_kind == "pad"
+    assert "conf-F_Cu.gbr" in result  # still emits the annulus (never fatal)
+
+
+def test_oblong_th_pad_warns_not_raises_kicad():
+    result = kicad.generate(_th_pad_board(w=2.0, h=1.0), base_name="conf")
+    warns = [d for d in result.diagnostics if d.code == "th_pad_shape_circularized"]
+    assert warns and warns[0].severity is DiagnosticSeverity.WARNING
+    assert warns[0].source_ref.entity_kind == "pad"
+    assert "conf.kicad_pcb" in result
+
+
+def test_square_th_pad_does_not_warn_either_emitter():
+    # A round/square TH land is faithfully a circular annulus — no warning noise.
+    g = gerber.build_gerbers(_th_pad_board(w=1.5, h=1.5), name="conf")
+    k = kicad.generate(_th_pad_board(w=1.5, h=1.5), base_name="conf")
+    assert "th_pad_shape_circularized" not in [d.code for d in g.diagnostics]
+    assert "th_pad_shape_circularized" not in [d.code for d in k.diagnostics]
+
+
+def test_empty_or_missing_smd_shape_defaults_to_rect_no_raise():
+    # An SMD pad with shape "" or no shape key legitimately defaults to "rect" (a
+    # supported shape) in _from_resolved BEFORE the guard runs — it must NOT trip
+    # the A1 unknown-shape fail-closed. Locks the no-false-reject boundary.
+    empty = _pad_board("")
+    missing = _pad_board("rect")
+    missing["components"][0]["pads"][0].pop("shape")
+    for board in (empty, missing):
+        gerber.build_gerbers(board, name="conf")     # must not raise
+        kicad.generate(board, base_name="conf")       # must not raise

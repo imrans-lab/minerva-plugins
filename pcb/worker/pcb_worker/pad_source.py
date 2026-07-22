@@ -42,6 +42,8 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from .fab_capability import SUPPORTED_PAD_SHAPES
+
 
 class PadGeometryError(ValueError):
     """An SMD pad reached a size-consuming emitter with no copper geometry.
@@ -191,6 +193,16 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
     ``corner_rratio`` is coerced to None before it reaches PadGeom."""
     if pad.drill is not None:
         return
+    if pad.shape not in SUPPORTED_PAD_SHAPES:
+        # An unknown SMD shape would sail through to the emitter's aperture/token
+        # mapping and silently FLATTEN to a rectangle (gerber _shape_aperture /
+        # kicad _smd_shape_tokens both fall through to rect) with no diagnostic —
+        # the exact silent-flatten this gate exists to kill, on fabrication-
+        # critical copper. Fail CLOSED with context instead.
+        raise ValueError(
+            f"component {ref!r} pad {pad.number!r}: SMD pad shape {pad.shape!r} is "
+            f"not a supported pad shape {sorted(SUPPORTED_PAD_SHAPES)} — refusing to "
+            f"silently flatten it to a rectangle")
     if (pad.shape == "circle" and pad.width is not None and pad.height is not None
             and abs(pad.width - pad.height) > _SHAPE_TOL_MM):
         raise ValueError(

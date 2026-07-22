@@ -117,6 +117,20 @@ def _graphic_ref(ref: Any, layer: Any) -> SourceRef:
     return SourceRef(EntityKind.GRAPHIC, rid, detail)
 
 
+# A TH land wider than tall (or vice-versa) beyond this is genuinely oblong — the
+# round annulus drops the extra extent. Below it the land is square and the
+# circular annulus is faithful (no warning noise on round/default TH pads).
+_TH_OBLONG_TOL_MM = 1e-6
+
+
+def _pad_ref(ref: Any, number: Any) -> SourceRef:
+    """A PAD SourceRef tagged with the owning component ref (non-empty sentinel
+    when absent — same load-bearing fallback as _graphic_ref) + the pad number."""
+    rid = ref if isinstance(ref, str) and ref else "<unknown>"
+    num = str(number) if number is not None and str(number) else "?"
+    return SourceRef(EntityKind.PAD, rid, num)
+
+
 def _smd_shape_tokens(pad) -> tuple[str, float, float, str]:
     """Map a declared SUPPORTED_PAD_SHAPE to its faithful KiCad pad shape token +
     size + optional roundrect_rratio suffix — the K3 conformance analog of gerber's
@@ -393,6 +407,18 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
                 f'(layers "*.Cu"){net_expr})'
             )
+            if (diagnostics is not None and pad.width is not None
+                    and pad.height is not None
+                    and abs(pad.width - pad.height) > _TH_OBLONG_TOL_MM):
+                # Oblong TH land circularized: out of declared capability
+                # (SUPPORTED_HOLE_SHAPES=round) → WARN (never fatal — would reject
+                # every oval-pad connector), never silent. Matches gerber._harvest.
+                diagnostics.append(Diagnostic(
+                    DiagnosticSeverity.WARNING, "th_pad_shape_circularized",
+                    f"through-hole pad {num_s!r} land {pad.width}x{pad.height} "
+                    f"emitted as a round annulus (dia {_num(annulus)}) — TH copper "
+                    f"is round-only; oblong extent dropped",
+                    _pad_ref(comp.get("ref"), num_s)))
         else:
             # SMD pad. width/height are guaranteed positive by
             # iter_pads(require_smd_size=True) above (a sizeless SMD pad has

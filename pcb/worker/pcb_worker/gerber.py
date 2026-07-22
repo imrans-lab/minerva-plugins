@@ -177,6 +177,20 @@ def _silk_ref(ref: Any) -> SourceRef:
     return SourceRef(EntityKind.GRAPHIC, rid, "F.SilkS")
 
 
+# A through-hole land wider than tall (or vice-versa) beyond this is genuinely
+# oblong — the round annulus drops the extra extent. Below it, the land is square
+# and the circular annulus is faithful (so no warning noise on round/default pads).
+_TH_OBLONG_TOL_MM = 1e-6
+
+
+def _pad_ref(ref: Any, number: Any) -> SourceRef:
+    """A PAD SourceRef tagged with the owning component ref (non-empty sentinel
+    when absent — the same load-bearing fallback as _silk_ref) + the pad number."""
+    rid = ref if isinstance(ref, str) and ref else "<unknown>"
+    num = str(number) if number is not None and str(number) else "?"
+    return SourceRef(EntityKind.PAD, rid, num)
+
+
 def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
                           graphic: dict, ref: Any = None) -> None:
     """Transform one footprint F.SilkS graphic (component-LOCAL coords) into
@@ -409,6 +423,17 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 # opening on both sides, drilled hole (plated unless flagged).
                 annulus = pad.annulus or (drill * 2.0)
                 g.th_annuli.append((px, py, annulus, "ComponentPad"))
+                if (pad.width is not None and pad.height is not None
+                        and abs(pad.width - pad.height) > _TH_OBLONG_TOL_MM):
+                    # Genuinely oblong TH land circularized to a round annulus:
+                    # copper extent is dropped. Out of declared capability
+                    # (SUPPORTED_HOLE_SHAPES=round) so WARN (never fatal — failing
+                    # closed would reject every oval-pad connector), never silent.
+                    g.warn("th_pad_shape_circularized",
+                           f"through-hole pad {pad.number!r} land "
+                           f"{pad.width}x{pad.height} emitted as a round annulus "
+                           f"(dia {annulus}) — TH copper is round-only; oblong "
+                           f"extent dropped", _pad_ref(ref, pad.number))
                 margin = _pad_mask_margin(pad, mask_clearance)
                 mask_d = _mask_dim(annulus, margin, ref, pad.number)
                 # TH copper is a round annulus (SUPPORTED_HOLE_SHAPES = round);
