@@ -704,11 +704,17 @@ def _apply_pin_override(
 
 # Inline per-pin FABRICATION geometry the canonical YAML still carries but that
 # the hermetic library footprint is authoritative over (K2 review 625.1).  The
-# migration authority fold (019f802ca3af): the LOCKED footprint is authoritative
-# for emitted geometry and a typed pin `override` is the ONLY sanctioned deviation
-# channel.  This inline geometry is legacy/deprecated and folded per-compile —
-# values that MATCH the footprint are dropped silently, values that DIFFER are
-# surfaced with a deprecation warning to migrate them to a typed override.
+# migration authority fold (019f802ca3af; SB3 super-review 019f8b7fc709): a typed
+# pin `override` is the sanctioned deviation channel, and these inline fab keys
+# ARE the override keys (same names), so an override synthesized from inline
+# geometry is ``{k: pin[k] for k in inline_keys}``.  This legacy inline geometry
+# is folded per-compile with fail-closed classification:
+#   * MATCHES the footprint (redundant) → dropped silently;
+#   * DIVERGES but is VERIFIABLE → auto-MIGRATED to a synthesized typed override
+#     and APPLIED (the authored v1 fab deviation is PRESERVED, never ignored);
+#   * AMBIGUOUS (no matching pad, or an unverifiable/wrong-type value) → a
+#     fail-closed ERROR, because a v1→v2 migration must not mint a v2 board whose
+#     fabrication meaning silently changed.
 _INLINE_FAB_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm", "plated")
 
 # Numeric keys of a typed pin `override` (schema-v2 sanctioned deviation); `plated`
@@ -731,17 +737,23 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
     v2 deviation channel and now supersedes the footprint per-field in the IR
     (019f88a0c84f — applied in _place_component).  The fold runs per-compile,
     version-independent — a board freshly migrated to v2 still carries inline
-    geometry the Go migration did not strip, so every compile must normalize it:
+    geometry the Go migration did not strip, so every compile must normalize it
+    (SB3, super-review 019f8b7fc709):
       * a typed pin `override` is validated here (fail-closed on malformed types);
         the well-formed ones are returned for the IR to apply and are NOT
         deprecated;
-      * legacy inline drill/annulus/size/plating that MATCHES the footprint is
-        dropped silently; that DIFFERS (or cannot be verified) raises a per-
-        component deprecation WARNING to migrate the deviation into an override.
+      * legacy inline drill/annulus/size/plating is classified per pin:
+        redundant (MATCHES the footprint) → dropped silently; divergent-but-
+        VERIFIABLE → auto-migrated into a synthesized typed override that is
+        returned so the IR APPLIES the authored deviation (INFO
+        ``inline_pin_geometry_migrated``); ambiguous (no matching pad, or an
+        unverifiable value) → a fail-closed ERROR
+        (``inline_geometry_without_pad`` / ``inline_geometry_unverifiable``),
+        never a silent fab-semantics change.
 
-    Returns ``{pin_number: override_dict}`` for every override that passed
-    validation (a malformed override emits ``invalid_pin_override`` here and is
-    NOT returned — so it is never applied)."""
+    Returns ``{pin_number: override_dict}`` for every override — typed or migrated
+    from inline — that passed validation (a malformed one emits
+    ``invalid_pin_override`` here and is NOT returned, so it is never applied)."""
     validated_overrides: dict[str, dict] = {}
     pins = comp.get("pins")
     if pins is None:
@@ -753,8 +765,6 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
     pad_by_number: dict[str, PadDefinition] = {}
     for pad in definition.pads:
         pad_by_number.setdefault(pad.number, pad)
-    deprecated_inline = False  # legacy inline geometry diverging from the footprint
-    conflicts: list[str] = []
     for index, pin in enumerate(pins):
         if not isinstance(pin, dict):
             diags.error("invalid_component",
@@ -768,8 +778,8 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
         # Pin-geometry authority fold. A typed `override` is the sanctioned v2
         # deviation channel: validate it, and let it supersede any legacy inline
         # geometry on the same pin (folded away silently). Otherwise the inline
-        # geometry is deprecated — dropped when it matches the footprint, warned
-        # when it diverges (or when there is no pad to verify it against).
+        # geometry is folded per-compile — redundant → dropped, divergent-but-
+        # verifiable → migrated to a synthesized override, ambiguous → fail-closed.
         override = pin.get("override")
         if override is not None and _validate_pin_override(override, ref, number, diags):
             # Well-formed: hand it to the IR builder, which applies it per-field
@@ -778,14 +788,8 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
             validated_overrides[number] = override
         inline_keys = [k for k in _INLINE_FAB_KEYS if pin.get(k) is not None]
         if inline_keys and override is None:
-            pin_conflicts = _inline_geometry_conflicts(pin, pad, number) if pad is not None else []
-            redundant = (pad is not None and not pin_conflicts
-                         and _inline_geometry_verifiable(pin, inline_keys))
-            if not redundant:
-                # Diverges from, or cannot be verified against, the authoritative
-                # footprint → surface for migration rather than drop it silently.
-                deprecated_inline = True
-                conflicts.extend(pin_conflicts)
+            _fold_inline_geometry(pin, pad, number, inline_keys, ref,
+                                  validated_overrides, diags)
         px, py = pin.get("x_mm"), pin.get("y_mm")
         has_x, has_y = _is_number(px), _is_number(py)
         if not has_x and not has_y:
@@ -803,15 +807,55 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
             diags.error("pin_pad_desync",
                         f"component {ref!r} pin {number!r}: declared local ({px}, {py}) vs "
                         f"footprint pad {pad.position} exceeds {COINCIDENCE_TOL_MM}mm", pad_ref)
-    if deprecated_inline:
-        detail = ("; conflicts vs library: " + "; ".join(conflicts)) if conflicts else ""
-        diags.warning("inline_pin_geometry_ignored",
-                      f"component {ref!r}: legacy inline pin fabrication geometry "
-                      f"(drill/annulus/size/plating) diverges from the authoritative locked "
-                      f"footprint and is IGNORED — migrate the deviation to a typed pin "
-                      f"`override`{detail}",
-                      SourceRef(EntityKind.COMPONENT, ref))
     return validated_overrides
+
+
+def _fold_inline_geometry(pin: dict, pad: Union[PadDefinition, None], number: str,
+                          inline_keys: list[str], ref: str,
+                          validated_overrides: dict[str, dict], diags: _Diagnostics) -> None:
+    """Classify a pin's legacy inline fabrication geometry and act on it
+    (SB3/SB5, super-review 019f8b7fc709).  Called only when the pin carries inline
+    fab keys and NO explicit typed `override`.  Three outcomes:
+
+      * redundant (a matching pad, verifiable, and no divergence) → dropped
+        silently — the inline merely restates the footprint;
+      * divergent but VERIFIABLE → synthesize the typed override ``{k: pin[k]}``
+        (the authored v1 fab intent), validate it, add it to *validated_overrides*
+        so the IR APPLIES the deviation, and emit INFO
+        ``inline_pin_geometry_migrated``.  A synthesized override that would form
+        an illegal PlacedPad still fail-closes downstream in ``_apply_pin_override``
+        — not double-handled here;
+      * ambiguous → fail-closed ERROR: no matching footprint pad
+        (``inline_geometry_without_pad``) or an unverifiable/wrong-type value
+        (``inline_geometry_unverifiable``).  A v1→v2 migration must never mint a
+        v2 board whose fabrication meaning silently changed."""
+    fields = ", ".join(inline_keys)
+    pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
+    if pad is None:
+        diags.error("inline_geometry_without_pad",
+                    f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+                    f"({fields}) has no matching footprint pad to correlate the deviation "
+                    f"against — ambiguous, cannot migrate to a typed pin `override`", pad_ref)
+        return
+    if not _inline_geometry_verifiable(pin, inline_keys):
+        diags.error("inline_geometry_unverifiable",
+                    f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+                    f"({fields}) is not verifiable (wrong value type) — cannot form a "
+                    f"trustworthy typed pin `override`", pad_ref)
+        return
+    conflicts = _inline_geometry_conflicts(pin, pad, number)
+    if not conflicts:
+        return  # redundant — restates the footprint; drop silently
+    # Divergent but valid → migrate the authored deviation into a typed override
+    # and APPLY it (preserved as intentional fabrication design, not ignored).
+    synthesized = {k: pin[k] for k in inline_keys}
+    if _validate_pin_override(synthesized, ref, number, diags):
+        validated_overrides[number] = synthesized
+        diags.info("inline_pin_geometry_migrated",
+                   f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+                   f"({fields}) diverges from the locked footprint and was auto-migrated to "
+                   f"a typed pin `override` so the authored deviation is PRESERVED and applied "
+                   f"({'; '.join(conflicts)}); migrate the source to a typed override", pad_ref)
 
 
 def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> list[str]:
@@ -824,11 +868,22 @@ def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> li
         out.append(f"pin {number} declares a drill but the footprint pad has none")
     for axis, key in ((0, "pad_width_mm"), (1, "pad_height_mm")):
         val = pin.get(key)
-        if _is_number(val) and pad.size is not None and abs(float(val) - pad.size[axis]) > COINCIDENCE_TOL_MM:
+        if not _is_number(val):
+            continue
+        if pad.size is None:
+            # Inline sizes a pad the footprint gives no size (a size-less
+            # np_thru_hole) — a divergence the fold must NOT treat as redundant
+            # and silently drop (Fable SB3 note 1); mirrors the drill-vs-no-drill
+            # case above.
+            out.append(f"pin {number} declares {key} but the footprint pad has no size")
+        elif abs(float(val) - pad.size[axis]) > COINCIDENCE_TOL_MM:
             out.append(f"pin {number} {key} {val} vs footprint {pad.size[axis]}")
     annulus = pin.get("annulus_diameter_mm")
-    if _is_number(annulus) and pad.size is not None and abs(float(annulus) - pad.size[0]) > COINCIDENCE_TOL_MM:
-        out.append(f"pin {number} annulus {annulus} vs footprint pad diameter {pad.size[0]}")
+    if _is_number(annulus):
+        if pad.size is None:
+            out.append(f"pin {number} declares an annulus but the footprint pad has no size")
+        elif abs(float(annulus) - pad.size[0]) > COINCIDENCE_TOL_MM:
+            out.append(f"pin {number} annulus {annulus} vs footprint pad diameter {pad.size[0]}")
     plated = pin.get("plated")
     if isinstance(plated, bool) and pad.drill is not None and plated != pad.drill.plated:
         out.append(f"pin {number} plated {plated} vs footprint {pad.drill.plated}")

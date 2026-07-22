@@ -910,10 +910,13 @@ def test_uncanonicalizable_annotation_fails_closed():
 
 def test_inline_pin_geometry_is_diagnosed(smart_remote_result):
     # smart_remote carries legacy inline drill/annulus on every pin, and its
-    # annulus DIFFERS from the footprint (2.0 vs 1.2) → the fold warns.
-    assert any(d.code == "inline_pin_geometry_ignored"
-               and d.severity is DiagnosticSeverity.WARNING
+    # annulus DIVERGES from the footprint (2.0 vs 1.2) but is verifiable → the fold
+    # auto-migrates it to a typed override (INFO), never the retired ignore-warning.
+    codes = [d.code for d in smart_remote_result.diagnostics]
+    assert any(d.code == "inline_pin_geometry_migrated"
+               and d.severity is DiagnosticSeverity.INFO
                for d in smart_remote_result.diagnostics)
+    assert "inline_pin_geometry_ignored" not in codes
 
 
 # ---------------------------------------------------------------------------
@@ -942,32 +945,41 @@ def _codes(diags):
 
 def test_inline_geometry_matching_footprint_is_dropped_silently():
     # Inline drill+annulus equal to the footprint pad → redundant, folded away
-    # with NO deprecation warning (and no error).
+    # silently: no migrate INFO, no error, and no synthesized override returned.
     diags = _Diagnostics()
     comp = {"pins": [{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 1.2}]}
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
+    assert "inline_pin_geometry_migrated" not in _codes(diags)
+    assert validated == {}
+    assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags.tuple())
+
+
+def test_inline_geometry_diverging_footprint_is_migrated_to_override():
+    # Annulus diverges from the footprint but is verifiable → the fold synthesizes
+    # a typed override capturing the authored inline geometry, returns it for the
+    # IR to APPLY, and records an INFO (never the retired ignore-warning).
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 2.0}]}
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert validated == {"1": {"drill_mm": 0.8, "annulus_diameter_mm": 2.0}}
+    infos = [d for d in diags.tuple() if d.code == "inline_pin_geometry_migrated"]
+    assert len(infos) == 1 and infos[0].severity is DiagnosticSeverity.INFO
+    assert "override" in infos[0].message and "annulus 2.0" in infos[0].message
     assert "inline_pin_geometry_ignored" not in _codes(diags)
     assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags.tuple())
 
 
-def test_inline_geometry_diverging_footprint_warns_to_migrate():
-    # Annulus differs from the footprint → deprecation warning naming the override
-    # migration path, with the specific conflict detail.
-    diags = _Diagnostics()
-    comp = {"pins": [{"number": "1", "drill_mm": 0.8, "annulus_diameter_mm": 2.0}]}
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
-    warns = [d for d in diags.tuple() if d.code == "inline_pin_geometry_ignored"]
-    assert len(warns) == 1 and warns[0].severity is DiagnosticSeverity.WARNING
-    assert "override" in warns[0].message and "annulus 2.0" in warns[0].message
-
-
-def test_inline_geometry_without_matching_pad_warns():
-    # Inline geometry present but no footprint pad to verify against → cannot prove
-    # redundancy, so it is surfaced (not silently dropped).
+def test_inline_geometry_without_matching_pad_fails_closed():
+    # Inline geometry present but no footprint pad to correlate it against →
+    # ambiguous, cannot migrate → fail-closed ERROR (no silent drop, no warning).
     diags = _Diagnostics()
     comp = {"pins": [{"number": "9", "drill_mm": 0.8}]}  # footprint only has pad "1"
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
-    assert "inline_pin_geometry_ignored" in _codes(diags)
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert validated == {}
+    errors = [d for d in diags.tuple() if d.severity is DiagnosticSeverity.ERROR]
+    assert "inline_geometry_without_pad" in [d.code for d in errors]
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
 
 
 def test_typed_override_is_honored_not_deprecated():
@@ -993,22 +1005,43 @@ def test_override_extra_keys_are_tolerated():
     assert validated == {"1": {"drill_mm": 0.9, "foo": 123}}
 
 
-def test_non_numeric_inline_geometry_is_not_dropped_silently():
-    # A garbage inline value is present but un-comparable — it must be surfaced,
-    # not silently swallowed by the fold (_inline_geometry_conflicts skips it).
+def test_unverifiable_inline_geometry_fails_closed():
+    # A garbage inline value (wrong type) with a matching pad is present but
+    # un-comparable — the fold cannot form a trustworthy override, so it fail-closes
+    # with an ERROR rather than migrate or silently drop it.
     diags = _Diagnostics()
-    comp = {"pins": [{"number": "1", "drill_mm": "abc"}]}
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
-    assert "inline_pin_geometry_ignored" in _codes(diags)
+    comp = {"pins": [{"number": "1", "drill_mm": "big"}]}
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert validated == {}
+    errors = [d for d in diags.tuple() if d.severity is DiagnosticSeverity.ERROR]
+    assert "inline_geometry_unverifiable" in [d.code for d in errors]
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
 
 
-def test_inline_plated_divergence_warns():
-    # plated diverges from the footprint drill (pad drill is plated) → warn.
+def test_inline_size_on_sizeless_pad_is_flagged_not_silently_redundant():
+    # Fable SB3 note 1: inline size/annulus on a footprint pad with NO size must
+    # register as a divergence (so the fold migrates or fail-closes it) rather than
+    # classify as redundant and silently drop the authored geometry — mirroring the
+    # drill-vs-no-drill case.
+    from pcb_worker.compile_board import _inline_geometry_conflicts
+    sizeless = _synthetic_pad(pad_type="np_thru_hole", size=None,
+                              drill=DrillDefinition(shape="round", size=(0.8, 0.8)))
+    assert _inline_geometry_conflicts({"pad_width_mm": 1.5}, sizeless, "1")
+    assert _inline_geometry_conflicts({"annulus_diameter_mm": 2.0}, sizeless, "1")
+    # A pin whose only inline value matches the footprint drill stays conflict-free.
+    assert not _inline_geometry_conflicts({"drill_mm": 0.8}, sizeless, "1")
+
+
+def test_inline_plated_divergence_is_migrated():
+    # plated diverges from the footprint drill (pad drill is plated) → migrated to a
+    # synthesized override that carries the authored plating flag.
     diags = _Diagnostics()
     comp = {"pins": [{"number": "1", "plated": False}]}
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
-    warns = [d for d in diags.tuple() if d.code == "inline_pin_geometry_ignored"]
-    assert len(warns) == 1 and "plated" in warns[0].message
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert validated == {"1": {"plated": False}}
+    infos = [d for d in diags.tuple() if d.code == "inline_pin_geometry_migrated"]
+    assert len(infos) == 1 and "plated" in infos[0].message
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
 
 
 def test_typed_override_supersedes_inline_geometry():
@@ -1194,6 +1227,36 @@ def test_override_drill_mm_on_slot_drill_warns_and_squares():
         _thru_pad(), {"drill_mm": 1.5}, (1.2, 1.2), slot, None, "thru_hole", "X1", diags)
     assert "override_drill_squared_slot" in _codes(diags)
     assert drill.size == (1.5, 1.5)
+
+
+def test_divergent_inline_geometry_migrated_and_applied_on_real_board():
+    # Real-compile emission parity: a component pin whose inline annulus DIVERGES
+    # from the footprint compiles to success, the PlacedPad reflects the AUTHORED
+    # inline value (proving synthesize→apply preserves the deviation through the
+    # IR), and the compile records the migrate INFO — never the retired warning.
+    board = _one_component_board(_TH_FP)
+    board["components"][0]["pins"] = [{"number": "1", "annulus_diameter_mm": 2.5}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    placed = _placed_by_number(result)
+    base = _placed_by_number(compile_board(_th_board()))
+    assert base["1"].annulus is None          # footprint declares no annulus
+    assert placed["1"].annulus == 2.5         # authored inline value applied
+    assert placed["2"] == base["2"]           # untouched sibling byte-identical
+    codes = [d.code for d in result.diagnostics]
+    assert "inline_pin_geometry_migrated" in codes
+    assert "inline_pin_geometry_ignored" not in codes
+
+
+def test_divergent_inline_forming_invalid_override_fails_closed():
+    # A divergent inline value that would synthesize an ILLEGAL override still
+    # fail-closes through the SB1 apply guards (drill_mm on a drill-less SMD pad) —
+    # no silent apply, no ResolutionSuccess.
+    board = _one_component_board("R_0805")  # SMD, drill-less pads
+    board["components"][0]["pins"] = [{"number": "1", "drill_mm": 0.9}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "override_drill_on_drilless_pad" in _errors(result)
 
 
 def test_pad_guard_rejects_smd_without_copper():
