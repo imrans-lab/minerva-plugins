@@ -50,6 +50,77 @@ func TestDeserializeYAMLToBoard(t *testing.T) {
 	}
 }
 
+// Deserializing a sub-v2 board migrates it: the returned board is v2, every
+// trace/via/hole plus the board itself carries a minted "type:<32 hex>" id, and
+// a migration warning is surfaced (design decision D3 — mint at deserialize).
+func TestDeserializeMigratesV1BoardToV2(t *testing.T) {
+	yaml := "version: 1\nname: Mig\nwidth_mm: 40\nheight_mm: 30\n" +
+		"components:\n  - ref: U1\n    footprint: IC_DIP\n    x_mm: 1\n    y_mm: 2\n    rotation_deg: 0\n" +
+		"nets: []\n" +
+		"traces:\n  - net: N\n    points:\n      - {x_mm: 1, y_mm: 1}\n      - {x_mm: 2, y_mm: 2}\n" +
+		"vias:\n  - {x_mm: 5, y_mm: 5, drill_mm: 0.4, diameter_mm: 0.8}\n"
+	args, _ := json.Marshal(map[string]string{"yaml": yaml})
+	out, err := HandleDeserialize(context.Background(), args)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	var r struct {
+		Board    map[string]interface{} `json:"board"`
+		Warnings []string               `json:"warnings"`
+	}
+	if err := json.Unmarshal(out, &r); err != nil {
+		t.Fatal(err)
+	}
+	// version bumped to 2 (JSON numbers decode as float64).
+	if v, _ := r.Board["version"].(float64); v != 2 {
+		t.Fatalf("version: want 2, got %v", r.Board["version"])
+	}
+	if id, _ := r.Board["id"].(string); !strings.HasPrefix(id, "board:") || len(id) != len("board:")+32 {
+		t.Fatalf("board id not minted: %q", r.Board["id"])
+	}
+	traces, _ := r.Board["traces"].([]interface{})
+	if len(traces) != 1 {
+		t.Fatalf("traces: want 1, got %#v", r.Board["traces"])
+	}
+	tr, _ := traces[0].(map[string]interface{})
+	if id, _ := tr["id"].(string); !strings.HasPrefix(id, "trace:") || len(id) != len("trace:")+32 {
+		t.Fatalf("trace id not minted: %q", tr["id"])
+	}
+	foundWarn := false
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "v1→v2") {
+			foundWarn = true
+		}
+	}
+	if !foundWarn {
+		t.Fatalf("migration warning not surfaced: %#v", r.Warnings)
+	}
+}
+
+// A board that is already v2 is not re-migrated: no id churn, no warning.
+func TestDeserializeDoesNotReMigrateV2(t *testing.T) {
+	id := "board:" + strings.Repeat("a", 32)
+	yaml := "version: 2\nid: " + id + "\nname: V2\nwidth_mm: 10\nheight_mm: 10\ncomponents: []\nnets: []\n"
+	args, _ := json.Marshal(map[string]string{"yaml": yaml})
+	out, err := HandleDeserialize(context.Background(), args)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	var r struct {
+		Board    map[string]interface{} `json:"board"`
+		Warnings []string               `json:"warnings"`
+	}
+	_ = json.Unmarshal(out, &r)
+	if got, _ := r.Board["id"].(string); got != id {
+		t.Fatalf("v2 board id churned: got %q, want %q", got, id)
+	}
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "v1→v2") {
+			t.Fatalf("v2 board should not emit a migration warning: %#v", r.Warnings)
+		}
+	}
+}
+
 func TestDeserializeMinpcbJSON(t *testing.T) {
 	minpcb := `{"version":1,"board_name":"Leg","board_width":10,"board_height":10,"components":{"R1":{"id":"R1","footprint":"RESISTOR","position":{"x":1,"y":1},"rotation":0}},"nets":{},"annotations":{"a1":{"id":"a1","type":"TEXT","text":"hi"}}}`
 	args, _ := json.Marshal(map[string]json.RawMessage{"minpcb_json": json.RawMessage(minpcb)})

@@ -10,7 +10,7 @@
 // pcb.serialize / pcb.deserialize are the REAL board-source codec (this round):
 //   - pcb.serialize   args {board:<canonical Board JSON>} → {yaml:"<source>"}
 //   - pcb.deserialize args {yaml:"..."} OR {minpcb_json:<legacy JSON>}
-//                     → {board:<canonical Board JSON dict>, warnings:[...]}
+//     → {board:<canonical Board JSON dict>, warnings:[...]}
 //
 // pcb.collect_export / pcb.apply_export remain thin echo passthroughs for the
 // project_export capability (untouched this round).
@@ -149,6 +149,20 @@ func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMes
 	}
 	if err != nil {
 		return nil, fmt.Errorf("pcb.deserialize: %w", err)
+	}
+	// v1→v2 identity migration (design decision D3): a sub-v2 board gets its
+	// persistent ids minted here, at the deserialize boundary, and is persisted
+	// on the host's next pcb.serialize. Idempotent — a v2 board is untouched.
+	// Serialize never mints; it writes what it is given.
+	if b.Version < 2 {
+		n, mErr := board.MigrateV1toV2(b, board.DefaultIDSource())
+		if mErr != nil {
+			return nil, fmt.Errorf("pcb.deserialize: migrate v1→v2: %w", mErr)
+		}
+		if n > 0 {
+			warnings = append(warnings,
+				fmt.Sprintf("migrated board source v1→v2: minted %d persistent entity id(s)", n))
+		}
 	}
 	if warnings == nil {
 		warnings = []string{}
