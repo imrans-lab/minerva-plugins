@@ -19,7 +19,7 @@ from pcb_worker.board_validate import validate_board_v2
 
 # pcb/worker/tests/ -> parents[2] == pcb/, so pcb/spec/vectors.
 VECTORS = Path(__file__).resolve().parents[2] / "spec" / "vectors"
-_MIN_VECTORS = 17  # committed floor — keep in lockstep with vectors_test.go minVectors
+_MIN_VECTORS = 19  # committed floor — keep in lockstep with vectors_test.go minVectors
 
 
 def _vector_names() -> list[str]:

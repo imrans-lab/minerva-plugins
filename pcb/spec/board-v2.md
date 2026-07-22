@@ -78,6 +78,10 @@ straddle the difference:
   yaml.v3 but is last-wins in PyYAML; a `null` list item is dropped by yaml.v3
   and is skipped by the Python validator to match. These are properties of the
   parsers, kept aligned in code, not asserted as vectors.
+- **Container shape IS a shared rule.** An entity container that is present but
+  not a list (`traces: {}`, `traces: 5`) cannot decode into a Go slice (codec
+  rejects) and must not silently pass — or crash — the Python validator; it is
+  `invalid_board_structure` on both sides (vectors 180/190).
 
 ## Adding a vector
 

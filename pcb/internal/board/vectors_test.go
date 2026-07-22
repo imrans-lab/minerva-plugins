@@ -18,7 +18,7 @@ const vectorsDir = "../../spec/vectors"
 
 // minVectors is the committed floor — a drift/loss guard so a deleted or
 // mis-globbed vector fails the suite instead of silently reducing coverage.
-const minVectors = 17
+const minVectors = 19
 
 // TestSharedValidationVectors runs every committed cross-language vector through
 // the Go schema boundary (UnmarshalYAML + Validate) and asserts the outcome the

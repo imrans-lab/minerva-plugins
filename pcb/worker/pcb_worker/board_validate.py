@@ -26,8 +26,11 @@ _V2_ENTITIES = (("trace", "traces"), ("via", "vias"), ("hole", "mounting_holes")
 def validate_board_v2(board: dict) -> list[str]:
     """Return a list of shared-boundary error codes; an empty list means the board
     is valid at this boundary. Codes are identical to ``internal/board.Validate``:
-    ``unsupported_schema_version``, ``unminted_persistent_id``, ``invalid_pin_override``.
+    ``unsupported_schema_version``, ``unminted_persistent_id``, ``invalid_pin_override``,
+    ``invalid_board_structure``.
     """
+    if not isinstance(board, dict):
+        return ["invalid_board_structure"]
     version = board.get("version")
     # bool is a subclass of int — exclude it explicitly (as _is_number does).
     if type(version) is not int or version not in (1, 2):
@@ -38,7 +41,11 @@ def validate_board_v2(board: dict) -> list[str]:
         if not _is_minted_id("board", board.get("id")):
             codes.append("unminted_persistent_id")
         for entity, key in _V2_ENTITIES:
-            for item in board.get(key) or []:
+            items, ok = _as_list(board.get(key))
+            if not ok:
+                codes.append("invalid_board_structure")
+                continue
+            for item in items:
                 if item is None:
                     continue  # yaml.v3 drops a null list item before Go sees it;
                     # skip here too so the two codecs agree (Fable Round D, D2)
@@ -46,13 +53,35 @@ def validate_board_v2(board: dict) -> list[str]:
                     codes.append("unminted_persistent_id")
                     break
 
-    for comp in board.get("components") or []:
+    comps, ok = _as_list(board.get("components"))
+    if not ok:
+        codes.append("invalid_board_structure")
+        comps = []
+    for comp in comps:
         if not isinstance(comp, dict):
             continue
-        for pin in comp.get("pins") or []:
+        pins, ok = _as_list(comp.get("pins"))
+        if not ok:
+            codes.append("invalid_board_structure")
+            continue
+        for pin in pins:
             if isinstance(pin, dict):
                 codes.extend(_override_problems(pin.get("override")))
     return codes
+
+
+def _as_list(value):
+    """Return (items, ok). An absent/null container is an empty list (ok). A present
+    NON-list container — a mapping (``traces: {}``) or scalar (``traces: 5``) — is a
+    structural violation the Go codec rejects at unmarshal (a mapping/scalar cannot
+    decode into a slice), and iterating it would crash this validator; return
+    ([], False) so the caller records it. Keeps the two codecs aligned on container
+    shape (Fable Round D confirmation)."""
+    if value is None:
+        return [], True
+    if isinstance(value, list):
+        return value, True
+    return [], False
 
 
 def _override_problems(override) -> list[str]:
