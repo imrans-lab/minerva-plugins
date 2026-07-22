@@ -193,8 +193,10 @@ class _Geometry:
         self.smd_pads: list[tuple[float, float, float, float, float, bool, str, float | None]] = []
         # Through-hole pads / vias copper annuli: (x, y, diameter, function)
         self.th_annuli: list[tuple[float, float, float, str]] = []
-        # Mask openings on each side: (x, y, kind, dims...) where kind is
-        # 'rect' -> (w, h, angle) or 'circle' -> (d,)
+        # Mask openings on each side, ONE uniform tuple built through
+        # _shape_aperture (R2): (x, y, shape, w, h, corner_rratio, angle). SMD
+        # openings carry the pad's own shape + enlarged dims; a TH annulus arrives
+        # as shape "circle" with w==h==annulus+2*margin, rratio None, angle 0.
         self.mask_top: list[tuple] = []
         self.mask_bot: list[tuple] = []
         # Traces per side: (x1, y1, x2, y2, width)
@@ -217,6 +219,27 @@ class _Geometry:
                                    tuple[float, float], str, float]] = []
 
 
+def _pad_mask_margin(pad, mask_clearance: float) -> float:
+    """The effective per-side solder-mask margin for one pad: the pad's own
+    ``solder_mask_margin`` when present, else the board's global clearance. The
+    RAW type/finiteness of a per-pad margin is already vetted fail-closed in
+    pad_source (_require_valid_solder_mask_margin), so here it is a float|None."""
+    return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
+
+
+def _mask_dim(base: float, margin: float, ref: Any, number: Any) -> float:
+    """Enlarge a copper dimension by the mask margin (per side), failing CLOSED if
+    the opening collapses to <= 0 (e.g. a large-negative margin) — that is not a
+    manufacturable mask window. A merely-negative margin whose opening stays > 0
+    is a legitimate KiCad mask-sliver feature and IS accepted."""
+    dim = base + 2 * margin
+    if dim <= 0:
+        raise ValueError(
+            f"component {ref!r} pad {number!r}: solder-mask opening dimension "
+            f"{dim} <= 0 (margin {margin}) — fail-closed")
+    return dim
+
+
 def _harvest(board: dict, mask_clearance: float) -> _Geometry:
     g = _Geometry()
 
@@ -234,6 +257,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         cx, cy = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
         rot = _num(comp.get("rotation_deg"))
         top = _is_top(comp.get("layer"))
+        ref = comp.get("ref")
 
         pin_extents: list[tuple[float, float]] = []
         # iter_pads PREFERS resolved comp["pads"] (real footprint geometry) and
@@ -252,9 +276,12 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 # opening on both sides, drilled hole (plated unless flagged).
                 annulus = pad.annulus or (drill * 2.0)
                 g.th_annuli.append((px, py, annulus, "ComponentPad"))
-                mask_d = annulus + 2 * mask_clearance
-                g.mask_top.append((px, py, "circle", mask_d))
-                g.mask_bot.append((px, py, "circle", mask_d))
+                margin = _pad_mask_margin(pad, mask_clearance)
+                mask_d = _mask_dim(annulus, margin, ref, pad.number)
+                # TH copper is a round annulus (SUPPORTED_HOLE_SHAPES = round);
+                # the mask opening stays circular, enlarged by the per-pad margin.
+                g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+                g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
                 g.holes.append((px, py, drill, pad.plated))
             else:
                 # SMD pad on the component's own side. width/height are
@@ -263,8 +290,14 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 w = pad.width
                 h = pad.height
                 g.smd_pads.append((px, py, w, h, rot, top, pad.shape, pad.corner_rratio))
-                mask = (px, py, "rect", w + 2 * mask_clearance,
-                        h + 2 * mask_clearance, rot)
+                # Mask opening follows the pad SHAPE (R2), enlarged per side by the
+                # effective margin (per-pad solder_mask_margin, else the global
+                # clearance); a large-negative margin that collapses the opening
+                # fails closed in _mask_dim.
+                margin = _pad_mask_margin(pad, mask_clearance)
+                mw = _mask_dim(w, margin, ref, pad.number)
+                mh = _mask_dim(h, margin, ref, pad.number)
+                mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, rot)
                 (g.mask_top if top else g.mask_bot).append(mask)
 
         # Silk: components with resolved footprint graphics (resolve_board's
@@ -356,10 +389,16 @@ def _add_smd(layer: DataLayer, pads, top_wanted: bool) -> None:
         layer.add_pad(_smd_aperture(shape, w, h, rratio), (px, py), angle)
 
 
-def _smd_aperture(shape: str, w: float, h: float, rratio: float | None):
+def _shape_aperture(shape: str, w: float, h: float, rratio: float | None, func: str):
     """Map a declared SUPPORTED_PAD_SHAPE to its faithful gerber aperture — the
     K3 capability-conformance requirement (019f7aed6d9e comment 628). Before this
     every SMD pad flashed a Rectangle, silently flattening circle/oval/roundrect.
+
+    The SINGLE shape->aperture branch, shared by COPPER (func="SMDPad,CuDef") and
+    SOLDER-MASK (func="", enlarged dims). Keeping one branch is the DRY gate — the
+    mask opening MUST use the same aperture family as the copper it covers (R2:
+    otherwise a circle/oval/roundrect land got a rectangular mask window, the same
+    flattening class R1 killed for copper).
 
       * circle    -> Circle (width is the diameter).
       * oval      -> RoundedRectangle fully rounded on the short axis (an obround).
@@ -368,7 +407,6 @@ def _smd_aperture(shape: str, w: float, h: float, rratio: float | None):
                      A zero/absent radius degenerates to a plain Rectangle.
       * rect (and any unknown shape) -> Rectangle.
     """
-    func = "SMDPad,CuDef"
     if shape == "circle":
         return Circle(w, func)
     if shape == "oval":
@@ -379,6 +417,12 @@ def _smd_aperture(shape: str, w: float, h: float, rratio: float | None):
         if radius > 0:
             return RoundedRectangle(w, h, radius, func)
     return Rectangle(w, h, func)
+
+
+def _smd_aperture(shape: str, w: float, h: float, rratio: float | None):
+    """Copper-layer wrapper over _shape_aperture (func="SMDPad,CuDef"). Kept as a
+    named entry for the copper path + the conformance unit test."""
+    return _shape_aperture(shape, w, h, rratio, "SMDPad,CuDef")
 
 
 def _add_annuli(layer: DataLayer, annuli) -> None:
@@ -392,13 +436,11 @@ def _add_traces(layer: DataLayer, traces) -> None:
 
 
 def _add_mask(layer: DataLayer, openings) -> None:
-    for op in openings:
-        px, py, kind = op[0], op[1], op[2]
-        if kind == "rect":
-            _, _, _, w, h, angle = op
-            layer.add_pad(Rectangle(w, h, ""), (px, py), angle)
-        else:  # circle
-            layer.add_pad(Circle(op[3], ""), (px, py))
+    # ONE code path for SMD + TH mask openings: the opening uses the SAME aperture
+    # family as its copper (via _shape_aperture, func=""), enlarged by the mask
+    # margin. TH annuli arrive as shape "circle" (w==h==annulus+2*margin).
+    for (px, py, shape, w, h, rratio, angle) in openings:
+        layer.add_pad(_shape_aperture(shape, w, h, rratio, ""), (px, py), angle)
 
 
 def _add_silk_lines(layer: DataLayer, lines) -> None:

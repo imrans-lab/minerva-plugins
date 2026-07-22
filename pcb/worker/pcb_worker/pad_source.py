@@ -98,6 +98,7 @@ class PadGeom:
     plated: bool
     shape: str
     corner_rratio: float | None  # roundrect corner radius / min(w,h), in [0,0.5]; None => none/default
+    solder_mask_margin: float | None  # per-side mask growth over copper; None => board global clearance
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
     from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
@@ -149,6 +150,7 @@ def iter_pads(comp: dict, *, require_smd_size: bool = False) -> list[PadGeom]:
         for rawpad, pad in zip(raw, pads):
             _require_smd_size(ref, pad)
             _require_faithful_shape(ref, rawpad, pad)
+            _require_valid_solder_mask_margin(ref, rawpad, pad)
     return pads
 
 
@@ -205,6 +207,28 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
                 f"{rr!r} must be a finite number in [0, 0.5]")
 
 
+def _require_valid_solder_mask_margin(ref: Any, rawpad: dict, pad: PadGeom) -> None:
+    """Fail-closed: a per-pad ``solder_mask_margin`` that is PRESENT must be a
+    finite number (R2 mask-conformance, symmetric to _require_faithful_shape).
+
+    The RAW value is read here — a non-numeric like the string ``"0.4"`` is coerced
+    to None by ``_opt_num`` before it reaches PadGeom, which would silently fall
+    back to the global clearance (a wrong-but-quiet mask window). Reading the raw
+    dict catches the string / bool / NaN / ±inf and errors WITH pad context. Both
+    SMD and TH pads carry a mask, so this is NOT gated on shape/drill (unlike
+    _require_faithful_shape). A merely-negative but finite margin is a legitimate
+    KiCad mask-sliver value and is accepted; whether it collapses the opening to
+    <= 0 is a geometric check owned by gerber._mask_dim (margin + clearance in hand)."""
+    smm = rawpad.get("solder_mask_margin")
+    if smm is None:
+        return
+    if (isinstance(smm, bool) or not isinstance(smm, (int, float))
+            or not math.isfinite(smm)):
+        raise ValueError(
+            f"component {ref!r} pad {pad.number!r}: solder_mask_margin "
+            f"{smm!r} must be a finite number")
+
+
 def _from_pin(pin: dict) -> PadGeom:
     """Fallback: reconstruct a pad from a canonical pin. Matches what
     gerber/kicad/drc read directly, and normalises a 0/negative drill to None
@@ -225,6 +249,7 @@ def _from_pin(pin: dict) -> PadGeom:
         plated=(pin.get("plated", True) is not False),
         shape="rect",
         corner_rratio=None,  # inline-pin fallback carries no footprint corner datum
+        solder_mask_margin=_opt_num(pin.get("solder_mask_margin")),
         pad_type=("thru_hole" if (drill is not None and drill > 0) else "smd"),
         layers=[],
         from_resolve=False,
@@ -257,6 +282,7 @@ def _from_resolved(pad: dict) -> PadGeom:
         plated=(pad_type != "np_thru_hole"),
         shape=pad.get("shape") or "rect",
         corner_rratio=_opt_num(pad.get("corner_rratio")),
+        solder_mask_margin=_opt_num(pad.get("solder_mask_margin")),
         pad_type=pad_type,
         layers=pad.get("layers") or [],
         from_resolve=True,
