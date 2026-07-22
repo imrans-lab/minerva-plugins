@@ -145,8 +145,15 @@ def _generate(params: dict) -> dict:
     except Exception as exc:  # geometry/library faults (incl. fail-closed) as data
         return {"ok": False, "error": {"kind": "generate", "message": str(exc)}}
 
+    # K3 gate (R5): surface the KiCad emitter's WARNING-channel diagnostics (a
+    # captured footprint graphic that was dropped/unsupported must never vanish
+    # silently). files is a KicadResult carrying .diagnostics; serialized with the
+    # SAME _diagnostic_to_payload shape the gerbers handler uses. Non-breaking:
+    # only ADDS a "warnings" key — the files/written contract is unchanged.
     out_dir = params.get("out_dir")
-    result: dict = {"files": files, "written": []}
+    result: dict = {"files": files, "written": [],
+                    "warnings": [_diagnostic_to_payload(d)
+                                 for d in getattr(files, "diagnostics", [])]}
     if isinstance(out_dir, str) and out_dir.strip():
         # Optional: also write to disk and report paths + byte counts (mirrors
         # CAD's export, which returns {path, bytes_written}). Contents still

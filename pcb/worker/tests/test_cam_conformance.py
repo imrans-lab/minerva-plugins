@@ -756,3 +756,218 @@ def test_refless_component_degenerate_silk_warns_with_sentinel_not_raises():
     warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
     assert warns, "refless component's dropped silk must still warn"
     assert warns[0].source_ref.entity_id  # non-empty (sentinel), Diagnostic-valid
+
+
+# ===========================================================================
+# Round 5: the KiCad emitter (kicad.py) under the SAME K3 bar as gerber.
+# Declared capabilities must be emitted FAITHFULLY into the .kicad_pcb by the
+# KiCad emitter too — the hard-coded `smd rect` (flattening circle/oval/roundrect)
+# and the wholesale DROP of footprint silk graphics were the two infidelities.
+# ===========================================================================
+
+from pcb_worker import kicad
+
+
+def _kpcb(board: dict, name: str = "conf") -> str:
+    """The emitted .kicad_pcb text for a board."""
+    return kicad.generate(board, base_name=name)[f"{name}.kicad_pcb"]
+
+
+def _kicad_pad_shape_tokens(text: str) -> list[str]:
+    """The shape token of every `(pad "N" smd <shape> ...)` in a .kicad_pcb."""
+    return re.findall(r'\(pad "[^"]*" smd (\w+)', text)
+
+
+# --- SMD pad SHAPE faithfulness (the R1 analog) -----------------------------
+
+def test_kicad_rect_pad_emits_rect():
+    assert "smd rect" in _kpcb(_valid_pad_board("rect"))
+
+
+def test_kicad_circle_pad_emits_circle():
+    # A circle pad emits `smd circle (size d d)`, not a flattened rect.
+    text = _kpcb(_valid_pad_board("circle"))
+    assert "smd circle" in text
+    assert re.search(r"smd circle \(at [^)]*\) \(size 2\.0 2\.0\)", text)
+
+
+def test_kicad_oval_pad_emits_oval():
+    assert "smd oval" in _kpcb(_valid_pad_board("oval"))
+
+
+def test_kicad_roundrect_pad_emits_roundrect_with_rratio():
+    text = _kpcb(_valid_pad_board("roundrect"))  # rratio 0.25
+    assert "smd roundrect" in text
+    m = re.search(r"\(roundrect_rratio ([\d.]+)\)", text)
+    assert m and float(m.group(1)) == 0.25
+
+
+def test_kicad_supported_pad_shapes_are_not_flattened():
+    # The four declared shapes produce four DISTINCT tokens (none collapse to rect).
+    tokens = {
+        _kicad_pad_shape_tokens(_kpcb(_valid_pad_board(s)))[0]
+        for s in ("rect", "circle", "oval", "roundrect")
+    }
+    assert tokens == {"rect", "circle", "oval", "roundrect"}
+
+
+def test_kicad_roundrect_rratio_tracks_corner_rratio():
+    # Two different corner ratios -> two different emitted roundrect_rratio values.
+    r1 = re.search(r"\(roundrect_rratio ([\d.]+)\)",
+                   _kpcb(_pad_board("roundrect", rratio=0.1)))
+    r2 = re.search(r"\(roundrect_rratio ([\d.]+)\)",
+                   _kpcb(_pad_board("roundrect", rratio=0.4)))
+    assert r1 and float(r1.group(1)) == 0.1
+    assert r2 and float(r2.group(1)) == 0.4
+
+
+# --- TH pad stays a faithful round annulus (R5 #5: intentional, not a flatten) --
+
+def test_kicad_th_pad_stays_round_annulus():
+    board = _drill_board()  # J1 has a TH pin
+    assert "thru_hole circle" in _kpcb(board, name="drill")
+
+
+# --- Footprint SILK GRAPHICS emission (was DROPPED before R5) ----------------
+
+def test_kicad_silk_line_emitted():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "line",
+                          "start": [-1, -1], "end": [1, 1], "width": 0.15}])
+    text = _kpcb(board)
+    assert "(fp_line" in text
+    assert '(layer "F.SilkS")' in text
+
+
+def test_kicad_silk_circle_emitted():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
+                          "center": [0, 0], "radius": 1.0, "width": 0.15}])
+    text = _kpcb(board)
+    assert "(fp_circle" in text
+    # center + end at center+radius (local coords, no transform).
+    assert re.search(r"\(fp_circle \(center 0\.?0? 0\.?0?\) \(end 1\.0 0\.?0?\)", text)
+
+
+def test_kicad_silk_three_point_arc_emitted():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "arc",
+                          "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}])
+    text = _kpcb(board)
+    assert "(fp_arc" in text
+    # The mid point of the 3-point form is emitted (not dropped/approximated).
+    assert re.search(r"\(fp_arc \(start [^)]*\) \(mid 0\.0 1\.0\) \(end", text)
+
+
+def test_kicad_silk_poly_emitted():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "poly",
+                          "points": [[0, 0], [1, 0], [1, 1]], "width": 0.15}])
+    text = _kpcb(board)
+    assert "(fp_poly" in text
+    assert "(xy 0.0 0.0)" in text and "(xy 1.0 1.0)" in text
+
+
+def test_kicad_supported_graphic_primitives_are_not_dropped():
+    # All four declared graphic primitives emit their matching fp_* node.
+    text = _kpcb(_silk_board([
+        {"layer": "F.SilkS", "kind": "line", "start": [-1, -1], "end": [1, 1],
+         "width": 0.15},
+        {"layer": "F.SilkS", "kind": "circle", "center": [0, 0], "radius": 1.0,
+         "width": 0.15},
+        {"layer": "F.SilkS", "kind": "arc", "points": [[-1, 0], [0, 1], [1, 0]],
+         "width": 0.15},
+        {"layer": "F.SilkS", "kind": "poly", "points": [[0, 0], [1, 0], [1, 1]],
+         "width": 0.15},
+    ]))
+    for node in ("(fp_line", "(fp_circle", "(fp_arc", "(fp_poly"):
+        assert node in text, f"{node} was dropped"
+
+
+# --- KicadResult: a files dict that ALSO carries diagnostics ----------------
+
+def test_kicad_generate_returns_kicad_result_files_dict():
+    result = kicad.generate(_valid_pad_board("rect"), base_name="conf")
+    assert isinstance(result, kicad.KicadResult)
+    assert isinstance(result, dict)
+    assert "conf.kicad_pcb" in result
+    assert isinstance(result["conf.kicad_pcb"], str) and result["conf.kicad_pcb"]
+    assert result == dict(result)
+    # Clean board -> empty diagnostics side channel.
+    assert result.diagnostics == []
+
+
+# --- Degenerate / unsupported silk -> WARNING, never a raise, not emitted ----
+
+def test_kicad_zero_radius_silk_circle_warns_and_is_not_emitted():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
+                          "center": [0, 0], "radius": 0, "width": 0.15}])
+    result = kicad.generate(board, base_name="conf")  # must not raise
+    assert "(fp_circle" not in result["conf.kicad_pcb"]
+    warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
+    assert warns and warns[0].severity is DiagnosticSeverity.WARNING
+    assert warns[0].source_ref.entity_id == "P1"
+
+
+def test_kicad_non_silk_graphic_layer_warns_and_is_not_emitted():
+    board = _silk_board([{"layer": "F.Fab", "kind": "line",
+                          "start": [-1, -1], "end": [1, 1], "width": 0.15}])
+    result = kicad.generate(board, base_name="conf")
+    codes = [d.code for d in result.diagnostics]
+    assert "unsupported_graphic_layer" in codes
+    d = next(x for x in result.diagnostics
+             if x.code == "unsupported_graphic_layer")
+    assert d.severity is DiagnosticSeverity.WARNING
+    assert d.source_ref.entity_id == "P1"
+    # The F.Fab graphic is NOT emitted as an fp_line.
+    assert "(fp_line" not in result["conf.kicad_pcb"]
+
+
+def test_kicad_degenerate_silk_does_not_raise():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "poly",
+                          "points": [[0, 0]], "width": 0.15}])  # single-point poly
+    result = kicad.generate(board, base_name="conf")  # must not raise
+    assert "(fp_poly" not in result["conf.kicad_pcb"]
+    assert "silk_primitive_unemitted" in [d.code for d in result.diagnostics]
+
+
+def test_kicad_legacy_angle_arc_warns_not_emitted_wrong():
+    # Legacy KiCad-6 (start,end,angle) form: emitter must NOT emit a wrong arc — it
+    # warns instead (never a silent drop, never a wrong fp_arc).
+    board = _silk_board([{"layer": "F.SilkS", "kind": "arc",
+                          "points": [[-1, 0], [1, 0]], "angle": 90.0,
+                          "width": 0.15}])
+    result = kicad.generate(board, base_name="conf")
+    assert "(fp_arc" not in result["conf.kicad_pcb"]
+    assert "silk_primitive_unemitted" in [d.code for d in result.diagnostics]
+
+
+def test_kicad_refless_component_degenerate_silk_warns_with_sentinel():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
+                          "center": [0, 0], "radius": 0, "width": 0.15}])
+    board["components"][0].pop("ref")  # refless but well-formed
+    result = kicad.generate(board, base_name="conf")  # must not raise
+    warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
+    assert warns and warns[0].source_ref.entity_id  # non-empty sentinel
+
+
+# --- methods `generate` (the "kicad" handler) forwards the warnings ----------
+
+def test_kicad_method_forwards_warnings():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
+                          "center": [0, 0], "radius": 0, "width": 0.15}])
+    resp = handle_request({"id": "k1", "method": "generate",
+                           "params": {"board": board, "name": "conf",
+                                      "resolve_geometry": False}})
+    assert resp["ok"] is True
+    warnings = resp["result"]["warnings"]
+    codes = [w["code"] for w in warnings]
+    assert "silk_primitive_unemitted" in codes
+    w = next(x for x in warnings if x["code"] == "silk_primitive_unemitted")
+    assert w["severity"] == "warning"
+    assert w["source_ref"]["entity_kind"] == "graphic"
+    assert w["source_ref"]["entity_id"] == "P1"
+
+
+def test_kicad_method_clean_board_forwards_empty_warnings():
+    resp = handle_request({"id": "k0", "method": "generate",
+                           "params": {"board": _valid_pad_board("rect"),
+                                      "name": "conf", "resolve_geometry": False}})
+    assert resp["ok"] is True
+    assert resp["result"]["warnings"] == []

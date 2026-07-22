@@ -28,6 +28,36 @@ from typing import Any
 from agent_router import layers as _layers
 
 from .pad_source import iter_pads
+from .resolved_board import (
+    Diagnostic,
+    DiagnosticSeverity,
+    EntityKind,
+    SourceRef,
+)
+
+
+class KicadResult(dict):
+    """The ``{filename: content}`` KiCad files mapping (UNCHANGED semantics — it IS
+    the files dict the ~2 callers already index / iterate) that ALSO carries the
+    emitter's capability-conformance diagnostics as a side channel.
+
+    R5 K3 gate (019f8a44484f comment 628): a captured fab feature the KiCad emitter
+    cannot emit faithfully (a degenerate footprint silk primitive, a graphic on a
+    non-emitted layer) must never vanish SILENTLY. generate() returns this so
+    methods.py can forward WARNING diagnostics without any change to the file bytes
+    or to callers that treat the return as a plain ``dict[str, str]``. A DIRECT COPY
+    of gerber.GerberResult's pattern (one shared side-channel contract, not a
+    divergent reimplementation).
+
+    CAVEAT (same as GerberResult): ``.copy()`` returns a PLAIN ``dict`` — the
+    ``diagnostics`` side channel is dropped. Read ``.diagnostics`` off the value
+    generate() returned, not off a copy of it.
+    """
+
+    def __init__(self, *args: Any, diagnostics: list[Diagnostic] | None = None,
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.diagnostics: list[Diagnostic] = list(diagnostics or [])
 
 # Canonical "top"/"bottom" -> KiCad copper name. T1.5: the SAME dict object as
 # route_bridge._LAYER_MAP and kicad_io._CANON_TO_KICAD_LAYER (all three alias
@@ -67,6 +97,149 @@ def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# Silk stroke width fallback — mirrors gerber._graphic_width / SILK_LINE_WIDTH_MM
+# so kicad and gerber default a widthless footprint graphic to the SAME stroke.
+_SILK_LINE_WIDTH_MM = 0.15
+
+
+def _graphic_width(graphic: dict) -> float:
+    w = _opt_num(graphic.get("width"))
+    return w if (w is not None and w > 0) else _SILK_LINE_WIDTH_MM
+
+
+def _graphic_ref(ref: Any, layer: Any) -> SourceRef:
+    """A GRAPHIC SourceRef tagged with the owning component ref (or a sentinel
+    when the board component carries none). entity_id must be non-empty — the same
+    load-bearing fallback gerber._silk_ref uses so a refless component's dropped
+    graphic still yields a valid Diagnostic instead of raising."""
+    rid = ref if isinstance(ref, str) and ref else "<unknown>"
+    detail = layer if isinstance(layer, str) and layer else "F.SilkS"
+    return SourceRef(EntityKind.GRAPHIC, rid, detail)
+
+
+def _smd_shape_tokens(pad) -> tuple[str, float, float, str]:
+    """Map a declared SUPPORTED_PAD_SHAPE to its faithful KiCad pad shape token +
+    size + optional roundrect_rratio suffix — the K3 conformance analog of gerber's
+    _shape_aperture (019f7aed6d9e comment 628). Before this, kicad hard-coded
+    ``smd rect``, silently flattening circle/oval/roundrect.
+
+      * rect      -> ``rect`` (size w h).
+      * circle    -> ``circle`` (size d d) with d = width (pad_source guarantees
+                     w==h for a circle upstream, so width IS the diameter).
+      * oval      -> ``oval`` (size w h).
+      * roundrect -> ``roundrect`` (size w h) + ``(roundrect_rratio R)`` so the
+                     corner radius is FAITHFUL (R from corner_rratio, default 0.25
+                     when None — matching gerber's _shape_aperture default), not a
+                     constant.
+
+    SMD geometry is already fail-closed upstream (iter_pads(require_smd_size=True):
+    circle w!=h, bad roundrect rratio), so this just emits the faithful token — it
+    does NOT re-validate.
+    """
+    shape = pad.shape
+    w, h = pad.width, pad.height
+    if shape == "circle":
+        return "circle", w, w, ""
+    if shape == "oval":
+        return "oval", w, h, ""
+    if shape == "roundrect":
+        ratio = pad.corner_rratio if pad.corner_rratio is not None else 0.25
+        return "roundrect", w, h, f" (roundrect_rratio {ratio})"
+    return "rect", w, h, ""
+
+
+def _footprint_graphics(comp: dict, ref: Any,
+                        diagnostics: list[Diagnostic]) -> list[str]:
+    """Emit ``comp["graphics"]`` F.SilkS entries as native KiCad footprint
+    graphics in component-LOCAL coords (no transform — KiCad draws these under the
+    footprint's own ``(at x y rot)``, unlike gerber which pre-transforms to board
+    absolute). The stroke uses the file's inline ``(width W)`` convention (the same
+    gr_line/edges use above), not a ``(stroke ...)`` block.
+
+    K3: a captured graphic that cannot be emitted faithfully WARNS (cosmetic —
+    never fatal, never raises): a non-F.SilkS layer -> ``unsupported_graphic_layer``;
+    a degenerate primitive (missing endpoints, radius<=0, <2 poly pts, an
+    unsupported/underspecified arc form) -> ``silk_primitive_unemitted``. The legacy
+    KiCad-6 (start,end,angle) arc form is NOT emitted (its center/start/sweep
+    interpretation is ambiguous here) — warned, never emitted WRONG.
+    """
+    lines: list[str] = []
+    for g in _list(comp.get("graphics")):
+        if not isinstance(g, dict):
+            continue
+        layer = g.get("layer")
+        if layer != "F.SilkS":
+            diagnostics.append(Diagnostic(
+                DiagnosticSeverity.WARNING, "unsupported_graphic_layer",
+                f"footprint graphic on layer {layer!r} not emitted "
+                "(only F.SilkS is emitted)", _graphic_ref(ref, layer)))
+            continue
+        kind = g.get("kind")
+        w = _graphic_width(g)
+        if kind == "line":
+            st, en = g.get("start"), g.get("end")
+            if not (isinstance(st, list) and isinstance(en, list)
+                    and len(st) >= 2 and len(en) >= 2):
+                diagnostics.append(Diagnostic(
+                    DiagnosticSeverity.WARNING, "silk_primitive_unemitted",
+                    "silk line dropped: malformed start/end", _graphic_ref(ref, layer)))
+                continue
+            lines.append(
+                f'    (fp_line (start {_num(st[0])} {_num(st[1])}) '
+                f'(end {_num(en[0])} {_num(en[1])}) (width {w}) (layer "F.SilkS"))')
+        elif kind == "circle":
+            ct = g.get("center")
+            radius = _opt_num(g.get("radius"))
+            if not (isinstance(ct, list) and len(ct) >= 2 and radius and radius > 0):
+                diagnostics.append(Diagnostic(
+                    DiagnosticSeverity.WARNING, "silk_primitive_unemitted",
+                    "silk circle dropped: non-positive radius or malformed center",
+                    _graphic_ref(ref, layer)))
+                continue
+            cx0, cy0 = _num(ct[0]), _num(ct[1])
+            lines.append(
+                f'    (fp_circle (center {cx0} {cy0}) (end {cx0 + radius} {cy0}) '
+                f'(width {w}) (layer "F.SilkS"))')
+        elif kind == "poly":
+            pts = [p for p in _list(g.get("points"))
+                   if isinstance(p, list) and len(p) >= 2]
+            if len(pts) < 2:
+                diagnostics.append(Diagnostic(
+                    DiagnosticSeverity.WARNING, "silk_primitive_unemitted",
+                    "silk poly dropped: fewer than 2 valid points",
+                    _graphic_ref(ref, layer)))
+                continue
+            pts_expr = " ".join(f'(xy {_num(p[0])} {_num(p[1])})' for p in pts)
+            lines.append(
+                f'    (fp_poly (pts {pts_expr}) (width {w}) (layer "F.SilkS"))')
+        elif kind == "arc":
+            pts = [p for p in _list(g.get("points"))
+                   if isinstance(p, list) and len(p) >= 2]
+            angle = _opt_num(g.get("angle"))
+            if len(pts) >= 3:
+                # Modern KiCad 7/8 three-point (start, mid, end) form — emit directly.
+                s, m, e = pts[0], pts[1], pts[2]
+                lines.append(
+                    f'    (fp_arc (start {_num(s[0])} {_num(s[1])}) '
+                    f'(mid {_num(m[0])} {_num(m[1])}) '
+                    f'(end {_num(e[0])} {_num(e[1])}) '
+                    f'(width {w}) (layer "F.SilkS"))')
+            elif angle is not None and angle != 0.0 and len(pts) >= 2:
+                # Legacy KiCad-6 (start,end,angle) form: emitting an fp_arc needs a
+                # mid point, and the center/start/sweep interpretation is ambiguous
+                # against this emitter's data — WARN rather than emit a WRONG arc.
+                diagnostics.append(Diagnostic(
+                    DiagnosticSeverity.WARNING, "silk_primitive_unemitted",
+                    "silk arc dropped: legacy angle form unsupported by kicad emitter",
+                    _graphic_ref(ref, layer)))
+            else:
+                diagnostics.append(Diagnostic(
+                    DiagnosticSeverity.WARNING, "silk_primitive_unemitted",
+                    "silk arc dropped: underspecified (need 3 points or an angle form)",
+                    _graphic_ref(ref, layer)))
+    return lines
+
+
 def _bounds(board: dict) -> tuple[float, float, float, float]:
     origin = board.get("origin") or {}
     ox = _num(origin.get("x_mm")) if isinstance(origin, dict) else 0.0
@@ -94,13 +267,18 @@ def _net_table(board: dict) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
     return net_index, pad_net
 
 
-def generate_kicad_pcb(board: dict) -> str:
+def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None) -> str:
     """Emit a minimal .kicad_pcb (s-expression) for the canonical board.
 
     Renders: board outline on Edge.Cuts, each component as a `footprint` node
-    with its pads, each trace as `segment` nodes, each via as a `via` node.
-    Coordinates pass through 1:1 (KiCad's .kicad_pcb unit is mm).
+    with its pads + F.SilkS graphics, each trace as `segment` nodes, each via as a
+    `via` node. Coordinates pass through 1:1 (KiCad's .kicad_pcb unit is mm).
+
+    ``diagnostics`` (when supplied) collects the emitter's K3 WARNING channel
+    (captured-but-unemitted footprint graphics) in board/component order.
     """
+    if diagnostics is None:
+        diagnostics = []
     min_x, min_y, max_x, max_y = _bounds(board)
     net_index, pad_net = _net_table(board)
     net_name_of = {i: n for n, i in net_index.items()}
@@ -132,7 +310,7 @@ def generate_kicad_pcb(board: dict) -> str:
     # Components → footprints.
     for comp in _list(board.get("components")):
         if isinstance(comp, dict):
-            out.append(_footprint(comp, pad_net, net_name_of))
+            out.append(_footprint(comp, pad_net, net_name_of, diagnostics))
 
     # Traces → segments (one per consecutive point pair).
     for tr in _list(board.get("traces")):
@@ -165,7 +343,9 @@ def generate_kicad_pcb(board: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict[int, str]) -> str:
+def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
+               net_name_of: dict[int, str],
+               diagnostics: list[Diagnostic] | None = None) -> str:
     ref = str(comp.get("ref") or "?")
     fp = comp.get("footprint") or "unknown"
     x, y = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
@@ -175,7 +355,14 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
     pads_nets = pad_net.get(ref, {})
 
     lines = [f'  (footprint "{_esc(str(fp))}" (layer "{layer}") (at {x} {y} {rot})']
-    lines.append(f'    (fp_text reference "{_esc(ref)}" (at 0 -1.5) (layer "F.SilkS"))')
+    # Reference + value designator text both go on F.Fab (documentation), NOT
+    # F.SilkS. R5 now emits the footprint's REAL F.SilkS graphics; a placeholder
+    # reference glyph hard-pinned at local (0, -1.5) — with no footprint-aware
+    # placement datum — would land ON that real silk and trip KiCad's
+    # silkscreen-overlap DRC (verified on the spike board's origin-centred silk
+    # circle). Designators on F.Fab is standard KiCad assembly practice and keeps
+    # the silk layer to the footprint's own faithful outline.
+    lines.append(f'    (fp_text reference "{_esc(ref)}" (at 0 -1.5) (layer "F.Fab"))')
     lines.append(f'    (fp_text value "{_esc(str(value))}" (at 0 1.5) (layer "F.Fab"))')
 
     # iter_pads PREFERS resolved comp["pads"] (real footprint geometry — the SAME
@@ -196,6 +383,10 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
         if drill is not None:
             # Through-hole pad. annulus geometry is the real copper dim when
             # resolved, else the pin's Extra annulus, else the 2x-drill nominal.
+            # SHAPE INTENTIONALLY ``circle``, NOT an oversight: TH copper is a round
+            # annulus (SUPPORTED_HOLE_SHAPES = {round}); the model carries a single
+            # annulus diameter, not a shaped land, so `thru_hole circle (size a a)`
+            # IS faithful — consistent with the gerber emitter's round-only TH.
             annulus = pad.annulus if pad.annulus is not None else drill * 2
             lines.append(
                 f'    (pad "{_esc(num_s)}" thru_hole circle (at {px} {py}) '
@@ -203,16 +394,26 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]], net_name_of: dict
                 f'(layers "*.Cu"){net_expr})'
             )
         else:
-            # SMD rect pad. width/height are guaranteed positive by
+            # SMD pad. width/height are guaranteed positive by
             # iter_pads(require_smd_size=True) above (a sizeless SMD pad has
             # already raised PadGeometryError) — the SAME real size gerber.py
-            # reads in _harvest, so kicad + gerber stay consistent.
-            w = pad.width
-            h = pad.height
+            # reads in _harvest, so kicad + gerber stay consistent. The shape token
+            # is now FAITHFUL (rect/circle/oval/roundrect) via _smd_shape_tokens —
+            # no more hard-coded `rect` flattening (R5 K3 conformance).
+            shape_tok, sw, sh, rratio_suffix = _smd_shape_tokens(pad)
             lines.append(
-                f'    (pad "{_esc(num_s)}" smd rect (at {px} {py}) '
-                f'(size {w} {h}) (layers "{layer}" "F.Paste" "F.Mask"){net_expr})'
+                f'    (pad "{_esc(num_s)}" smd {shape_tok} (at {px} {py}) '
+                f'(size {sw} {sh}){rratio_suffix} '
+                f'(layers "{layer}" "F.Paste" "F.Mask"){net_expr})'
             )
+
+    # Footprint F.SilkS graphics (line/circle/arc/poly) — DROPPED before R5; now
+    # emitted in LOCAL coords under this footprint's own (at). Degenerate /
+    # unsupported entries warn into `diagnostics` (never raise).
+    if diagnostics is not None:
+        # Pass the RAW ref (may be None) so _graphic_ref's non-empty sentinel is a
+        # real path — mirrors gerber._harvest passing comp.get("ref") to _silk_ref.
+        lines.extend(_footprint_graphics(comp, comp.get("ref"), diagnostics))
     lines.append("  )")
     return "\n".join(lines)
 
@@ -270,15 +471,21 @@ def generate_kicad_sch(board: dict) -> str:
     return "\n".join(out) + "\n"
 
 
-def generate(board: dict, base_name: str | None = None) -> dict[str, str]:
+def generate(board: dict, base_name: str | None = None) -> KicadResult:
     """Generate the three KiCad files for a canonical board.
 
-    Returns {"<name>.kicad_pcb": text, "<name>.kicad_sch": text,
-             "<name>.kicad_pro": text}.
+    Returns a KicadResult (a ``dict[str, str]`` subclass — a drop-in for the plain
+    files dict every caller indexes / iterates) mapping
+    {"<name>.kicad_pcb": text, "<name>.kicad_sch": text, "<name>.kicad_pro": text}.
+    ``.diagnostics`` carries the emitter's K3 WARNING channel (captured-but-
+    unemitted footprint graphics); empty on a clean board, a side channel that
+    changes no file bytes.
     """
     name = base_name or (board.get("name") if isinstance(board.get("name"), str) else None) or "board"
-    return {
-        f"{name}.kicad_pcb": generate_kicad_pcb(board),
+    diagnostics: list[Diagnostic] = []
+    files = {
+        f"{name}.kicad_pcb": generate_kicad_pcb(board, diagnostics),
         f"{name}.kicad_sch": generate_kicad_sch(board),
         f"{name}.kicad_pro": generate_kicad_pro(board),
     }
+    return KicadResult(files, diagnostics=diagnostics)
