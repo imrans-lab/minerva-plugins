@@ -972,23 +972,25 @@ def test_inline_geometry_without_matching_pad_warns():
 
 def test_typed_override_is_honored_not_deprecated():
     # A typed override is the sanctioned deviation channel: no deprecation warning,
-    # no error — but an INFO records it is validated-yet-not-applied to emission.
+    # no error, and it is returned for the IR builder to apply (no stale
+    # override_not_yet_applied INFO — the override IS applied now, 019f88a0c84f).
     diags = _Diagnostics()
     comp = {"pins": [{"number": "1", "override": {"annulus_diameter_mm": 2.0}}]}
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
     assert "inline_pin_geometry_ignored" not in _codes(diags)
     assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags.tuple())
-    assert "override_not_yet_applied" in _codes(diags)
+    assert "override_not_yet_applied" not in _codes(diags)
+    assert validated == {"1": {"annulus_diameter_mm": 2.0}}
 
 
 def test_override_extra_keys_are_tolerated():
     # Unknown override keys round-trip via Go's inline Extra; the Python validator
-    # must not reject them (parity), and the override is still honored.
+    # must not reject them (parity), and the override is still returned/honored.
     diags = _Diagnostics()
     comp = {"pins": [{"number": "1", "override": {"drill_mm": 0.9, "foo": 123}}]}
-    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    validated = _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
     assert "invalid_pin_override" not in _codes(diags)
-    assert "override_not_yet_applied" in _codes(diags)
+    assert validated == {"1": {"drill_mm": 0.9, "foo": 123}}
 
 
 def test_non_numeric_inline_geometry_is_not_dropped_silently():
@@ -1062,6 +1064,136 @@ def test_malformed_override_fails_closed_on_real_board():
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
     assert "invalid_pin_override" in _errors(result)
+
+
+# ---------------------------------------------------------------------------
+# Typed override APPLIED in the ResolvedBoard IR (019f88a0c84f). Emission-parity:
+# an override changes EXACTLY the intended PlacedPad field(s), nothing else; a
+# sibling pad with no override is byte-identical to the un-overridden compile.
+# ---------------------------------------------------------------------------
+
+_TH_FP = "Package_DIP:DIP-6_W7.62mm_Socket"  # a through-hole (drilled) seed
+
+
+def _placed_by_number(result) -> dict:
+    """Map pin number → PlacedPad for the single component, via the footprint
+    definition's source_id↔number correlation (PlacedPad carries source_id)."""
+    comp = result.board.components[0]
+    fp = result.board.footprint_definitions[0]
+    num_by_source = {p.source_id: p.number for p in fp.pads}
+    return {num_by_source[p.source_id]: p for p in comp.placed_pads}
+
+
+def _th_board(override=None) -> dict:
+    board = _one_component_board(_TH_FP)
+    if override is not None:
+        board["components"][0]["pins"] = [{"number": "1", "override": override}]
+    return board
+
+
+def test_override_drill_mm_changes_only_drill():
+    base = _placed_by_number(compile_board(_th_board()))
+    over = _placed_by_number(compile_board(_th_board({"drill_mm": 1.5})))
+    assert over["1"].drill.size == (1.5, 1.5)
+    assert over["1"].size == base["1"].size          # size untouched
+    assert over["1"].annulus == base["1"].annulus    # annulus untouched
+    assert over["1"].pad_type == base["1"].pad_type  # pad_type untouched
+    assert over["2"] == base["2"]                     # sibling byte-identical
+
+
+def test_override_pad_width_only_keeps_footprint_height():
+    base = _placed_by_number(compile_board(_th_board()))
+    over = _placed_by_number(compile_board(_th_board({"pad_width_mm": 3.3})))
+    assert over["1"].size[0] == 3.3
+    assert over["1"].size[1] == base["1"].size[1]     # height kept from footprint
+    assert over["1"].drill == base["1"].drill
+    assert over["2"] == base["2"]
+
+
+def test_override_annulus_sets_annulus_only():
+    base = _placed_by_number(compile_board(_th_board()))
+    over = _placed_by_number(compile_board(_th_board({"annulus_diameter_mm": 2.5})))
+    assert base["1"].annulus is None
+    assert over["1"].annulus == 2.5
+    assert over["1"].size == base["1"].size
+    assert over["1"].drill == base["1"].drill
+    assert over["2"] == base["2"]
+
+
+def test_override_plated_false_makes_np_thru_hole_true_keeps_thru_hole():
+    base = _placed_by_number(compile_board(_th_board()))
+    assert base["1"].pad_type == "thru_hole" and base["1"].drill.plated is True
+    npth = _placed_by_number(compile_board(_th_board({"plated": False})))
+    assert npth["1"].pad_type == "np_thru_hole" and npth["1"].drill.plated is False
+    assert npth["1"].size == base["1"].size and npth["1"].drill.size == base["1"].drill.size
+    plated = _placed_by_number(compile_board(_th_board({"plated": True})))
+    assert plated["1"].pad_type == "thru_hole" and plated["1"].drill.plated is True
+
+
+def test_full_override_sets_all_fields():
+    over = _placed_by_number(compile_board(_th_board(
+        {"drill_mm": 1.1, "pad_width_mm": 3.0, "pad_height_mm": 3.2,
+         "annulus_diameter_mm": 2.0, "plated": False})))
+    p = over["1"]
+    assert p.drill.size == (1.1, 1.1)
+    assert p.size == (3.0, 3.2)
+    assert p.annulus == 2.0
+    assert p.pad_type == "np_thru_hole" and p.drill.plated is False
+
+
+def test_override_nonpositive_numeric_fails_closed_not_applied():
+    result = compile_board(_th_board({"drill_mm": -1}))
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_pin_override" in _errors(result)
+
+
+def test_override_drill_on_smd_pad_rejected():
+    # drill_mm on a drill-less SMD pad is a fail-closed rejection, not a silent
+    # SMD→through-hole conversion.
+    board = _one_component_board("R_0805")
+    board["components"][0]["pins"] = [{"number": "1", "override": {"drill_mm": 0.9}}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "override_drill_on_drilless_pad" in _errors(result)
+
+
+def test_override_plated_on_smd_pad_is_noop():
+    base = _placed_by_number(compile_board(_one_component_board("R_0805")))
+    board = _one_component_board("R_0805")
+    board["components"][0]["pins"] = [{"number": "1", "override": {"plated": True}}]
+    over = _placed_by_number(compile_board(board))
+    assert over["1"].pad_type == base["1"].pad_type == "smd"
+    assert over["1"].drill == base["1"].drill  # still None
+
+
+def test_override_not_yet_applied_diagnostic_is_retired():
+    result = compile_board(_th_board({"annulus_diameter_mm": 2.0}))
+    assert isinstance(result, ResolutionSuccess)
+    assert "override_not_yet_applied" not in [d.code for d in result.diagnostics]
+
+
+def test_override_on_nonexistent_pin_number_fails_closed():
+    # A validated override whose pin number matches NO footprint pad would apply
+    # to nothing — it must not vanish silently (Fable SB1 note 1): fail closed
+    # with override_without_pad rather than lose a sanctioned fab deviation.
+    board = _th_board()
+    board["components"][0]["pins"] = [
+        {"number": "99", "override": {"annulus_diameter_mm": 2.0}}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "override_without_pad" in _errors(result)
+
+
+def test_override_drill_mm_on_slot_drill_warns_and_squares():
+    # A scalar drill_mm override collapsing a non-round (slot) footprint drill to a
+    # round hole is a fab change — warned, never silent (Fable SB1 note 2).
+    from pcb_worker.compile_board import _apply_pin_override
+    diags = _Diagnostics()
+    slot = DrillDefinition(shape="oval", size=(1.0, 2.0))
+    _size, drill, _ann, _pt = _apply_pin_override(
+        _thru_pad(), {"drill_mm": 1.5}, (1.2, 1.2), slot, None, "thru_hole", "X1", diags)
+    assert "override_drill_squared_slot" in _codes(diags)
+    assert drill.size == (1.5, 1.5)
 
 
 def test_pad_guard_rejects_smd_without_copper():

@@ -532,6 +532,7 @@ def _place_component(
     definition: FootprintDefinition,
     side: Side,
     pin_net: dict[tuple[str, str], str],
+    overrides: dict[str, dict],
     ref: str,
     diags: _Diagnostics,
 ) -> Union[tuple[tuple[PlacedPad, ...], tuple[PlacedGraphic, ...]], None]:
@@ -548,25 +549,48 @@ def _place_component(
             return None
         unemitted.update(layer.id for layer in layers if layer.id not in K3_EMITTED_LAYERS)
         net_id = pin_net.get((ref, pad.number))
+        # Footprint values are the default; a validated per-pin `override`
+        # (correlated by pad/pin number) wins ONLY on the fields it carries. A
+        # footprint carrying duplicate pad numbers applies the same override to
+        # each (validation correlated only the first) — acceptable: same pad
+        # number == same electrical pad (Fable SB1 note 3).
         size = (float(pad.size[0]), float(pad.size[1])) if pad.size is not None else None
+        drill = pad.drill
+        annulus = None
+        pad_type = pad.pad_type
+        override = overrides.get(pad.number)
+        if override:
+            size, drill, annulus, pad_type = _apply_pin_override(
+                pad, override, size, drill, annulus, pad_type, ref, diags)
         placed_pads.append(PlacedPad(
             id=derive_id("placed-pad", component_id, pad.source_id),
             component_id=component_id,
             source_id=pad.source_id,
             net_id=net_id,
-            pad_type=pad.pad_type,
+            pad_type=pad_type,
             shape=pad.shape,
             position=transform.point(pad.position),
             size=size,
             rotation_deg=transform.angle(pad.rotation_deg),
             corner_rratio=pad.corner_rratio,
-            drill=pad.drill,
-            annulus=None,
+            drill=drill,
+            annulus=annulus,
             solder_mask_margin=pad.solder_mask_margin,
             solder_paste_margin=pad.solder_paste_margin,
             layers=layers,
             side=side,
         ))
+    # A validated override that correlates to NO footprint pad would apply to
+    # nothing and vanish silently — a fail-closed violation (a sanctioned
+    # fabrication deviation lost without a trace). Surface it (Fable SB1 note 1).
+    placed_numbers = {pad.number for pad in definition.pads}
+    for number in overrides:
+        if number not in placed_numbers:
+            diags.error("override_without_pad",
+                        f"component {ref!r} pin {number!r}: a validated pin `override` "
+                        f"correlates to no footprint pad — the deviation would apply to "
+                        f"nothing",
+                        SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}"))
     placed_graphics: list[PlacedGraphic] = []
     for graphic in definition.graphics:
         placed_layer = transform.layer(graphic.layer)
@@ -589,6 +613,95 @@ def _place_component(
     return tuple(placed_pads), tuple(placed_graphics)
 
 
+def _apply_pin_override(
+    pad: PadDefinition,
+    override: dict,
+    size: Union[tuple[float, float], None],
+    drill,
+    annulus: Union[float, None],
+    pad_type: str,
+    ref: str,
+    diags: _Diagnostics,
+) -> tuple[Union[tuple[float, float], None], object, Union[float, None], str]:
+    """Fold a VALIDATED (type-checked) pin `override` onto the footprint-derived
+    pad fields, returning ``(size, drill, annulus, pad_type)``.  The footprint is
+    the default; the override wins ONLY where a key is present.  Positive/range
+    checks live here (not in the type-only validator, for Go-codec parity): a
+    non-positive numeric override is a fail-closed ``invalid_pin_override`` ERROR
+    and that field is left at the footprint default (so PlacedPad can never be
+    constructed with an illegal value and crash the compile).
+
+    Field semantics:
+      * ``pad_width_mm`` / ``pad_height_mm`` override one or both size axes; a
+        partial override keeps the footprint's other axis.
+      * ``annulus_diameter_mm`` sets PlacedPad.annulus.
+      * ``drill_mm`` resizes the pad's round drill.  On a drill-less (SMD) pad it
+        is REJECTED (``override_drill_on_drilless_pad``) — an SMD→through-hole
+        conversion needs copper/mask reconciliation out of scope for the IR
+        override channel, and applying it would build an inconsistent PlacedPad.
+      * ``plated`` (bool) flips a THROUGH-HOLE pad between plated (``thru_hole``)
+        and non-plated (``np_thru_hole``), updating both pad_type and the drill's
+        plating flag.  On a drill-less (SMD) pad plating is meaningless — a
+        documented no-op (no field change, no diagnostic)."""
+    pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{pad.number}", f"component {ref}")
+
+    def positive(key, value) -> bool:
+        if _is_positive_number(value):
+            return True
+        diags.error("invalid_pin_override",
+                    f"component {ref!r} pin {pad.number!r}: override.{key} must be a "
+                    f"positive number, got {value!r}", pad_ref)
+        return False
+
+    # Size axes (partial override keeps the footprint's untouched axis).
+    width, height = override.get("pad_width_mm"), override.get("pad_height_mm")
+    if width is not None or height is not None:
+        new_w = size[0] if size is not None else None
+        new_h = size[1] if size is not None else None
+        if width is not None and positive("pad_width_mm", width):
+            new_w = float(width)
+        if height is not None and positive("pad_height_mm", height):
+            new_h = float(height)
+        if (new_w is None) != (new_h is None):
+            diags.error("invalid_pin_override",
+                        f"component {ref!r} pin {pad.number!r}: override sizes one axis but the "
+                        f"footprint pad has no size on the other — cannot form a pad size", pad_ref)
+        elif new_w is not None:
+            size = (new_w, new_h)
+
+    # Annulus.
+    ann = override.get("annulus_diameter_mm")
+    if ann is not None and positive("annulus_diameter_mm", ann):
+        annulus = float(ann)
+
+    # Drill size (round).  Rejected on a drill-less pad.
+    drill_mm = override.get("drill_mm")
+    if drill_mm is not None and positive("drill_mm", drill_mm):
+        if drill is None:
+            diags.error("override_drill_on_drilless_pad",
+                        f"component {ref!r} pin {pad.number!r}: override.drill_mm on a pad with no "
+                        f"footprint drill (pad_type {pad.pad_type!r}); a through-hole conversion is "
+                        f"out of scope for the IR override channel", pad_ref)
+        else:
+            if drill.size[0] != drill.size[1]:
+                # A scalar drill_mm override collapses a non-round (slot/oval)
+                # footprint drill to a round hole — a fab change; never silent
+                # (Fable SB1 note 2).
+                diags.warning("override_drill_squared_slot",
+                              f"component {ref!r} pin {pad.number!r}: override.drill_mm replaces a "
+                              f"non-round footprint drill {drill.size} with a round {float(drill_mm)}mm "
+                              f"hole", pad_ref)
+            drill = replace(drill, size=(float(drill_mm), float(drill_mm)))
+
+    # Plating — through-hole only; a no-op on an SMD (drill-less) pad.
+    plated = override.get("plated")
+    if isinstance(plated, bool) and drill is not None:
+        drill = replace(drill, plated=plated)
+        pad_type = "thru_hole" if plated else "np_thru_hole"
+
+    return size, drill, annulus, pad_type
+
+
 # Inline per-pin FABRICATION geometry the canonical YAML still carries but that
 # the hermetic library footprint is authoritative over (K2 review 625.1).  The
 # migration authority fold (019f802ca3af): the LOCKED footprint is authoritative
@@ -607,28 +720,36 @@ _OVERRIDE_NUM_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_he
 
 
 def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
-                       diags: _Diagnostics) -> None:
+                       diags: _Diagnostics) -> dict[str, dict]:
     """Prove each declared pin's LOCAL position matches the footprint pad of the
-    same number (fail-closed — silk/copper desync), and run the pin-geometry
-    authority fold (019f802ca3af).
+    same number (fail-closed — silk/copper desync), run the pin-geometry authority
+    fold (019f802ca3af), and RETURN the well-formed typed overrides keyed by pin
+    number so :func:`_place_component` can apply them to the resolved IR.
 
-    Authority (per the hermetic-CAM keystone) is the LOCKED footprint; it stays
-    authoritative for emitted pad geometry (see _place_component).  The fold runs
-    per-compile, version-independent — a board freshly migrated to v2 still carries
-    inline geometry the Go migration did not strip, so every compile must normalize
-    it:
-      * a typed pin `override` is the sanctioned v2 deviation channel — validated
-        here (fail-closed on malformed types) and NOT deprecated;
+    Authority (per the hermetic-CAM keystone) is the LOCKED footprint for any pad
+    field a pin does NOT override; a validated typed `override` is the sanctioned
+    v2 deviation channel and now supersedes the footprint per-field in the IR
+    (019f88a0c84f — applied in _place_component).  The fold runs per-compile,
+    version-independent — a board freshly migrated to v2 still carries inline
+    geometry the Go migration did not strip, so every compile must normalize it:
+      * a typed pin `override` is validated here (fail-closed on malformed types);
+        the well-formed ones are returned for the IR to apply and are NOT
+        deprecated;
       * legacy inline drill/annulus/size/plating that MATCHES the footprint is
         dropped silently; that DIFFERS (or cannot be verified) raises a per-
-        component deprecation WARNING to migrate the deviation into an override."""
+        component deprecation WARNING to migrate the deviation into an override.
+
+    Returns ``{pin_number: override_dict}`` for every override that passed
+    validation (a malformed override emits ``invalid_pin_override`` here and is
+    NOT returned — so it is never applied)."""
+    validated_overrides: dict[str, dict] = {}
     pins = comp.get("pins")
     if pins is None:
-        return
+        return validated_overrides
     if not isinstance(pins, list):
         diags.error("invalid_component",
                     f"component {ref!r}: pins must be a list", SourceRef(EntityKind.COMPONENT, ref))
-        return
+        return validated_overrides
     pad_by_number: dict[str, PadDefinition] = {}
     for pad in definition.pads:
         pad_by_number.setdefault(pad.number, pad)
@@ -651,11 +772,10 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
         # when it diverges (or when there is no pad to verify it against).
         override = pin.get("override")
         if override is not None and _validate_pin_override(override, ref, number, diags):
-            diags.info("override_not_yet_applied",
-                       f"component {ref!r} pin {number!r}: typed pin `override` is validated "
-                       f"and recorded but is NOT YET applied to emitted pad geometry — the "
-                       f"locked footprint stays authoritative until 019f88a0c84f lands",
-                       pad_ref)
+            # Well-formed: hand it to the IR builder, which applies it per-field
+            # over the footprint default (019f88a0c84f).  Correlated by pin number
+            # to the like-numbered footprint pad in _place_component.
+            validated_overrides[number] = override
         inline_keys = [k for k in _INLINE_FAB_KEYS if pin.get(k) is not None]
         if inline_keys and override is None:
             pin_conflicts = _inline_geometry_conflicts(pin, pad, number) if pad is not None else []
@@ -691,6 +811,7 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
                       f"footprint and is IGNORED — migrate the deviation to a typed pin "
                       f"`override`{detail}",
                       SourceRef(EntityKind.COMPONENT, ref))
+    return validated_overrides
 
 
 def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> list[str]:
@@ -733,10 +854,11 @@ def _inline_geometry_verifiable(pin: dict, inline_keys) -> bool:
 def _validate_pin_override(override, ref: str, number: str, diags: _Diagnostics) -> bool:
     """Fail-closed type check of a typed pin `override` — the schema-v2 sanctioned
     channel for an intentional deviation from the locked footprint. The footprint
-    stays authoritative for EMITTED pad geometry; the override is validated (and
-    recorded in the source) here. Applying a validated override to fabricated pad
-    geometry is a downstream emitter concern (filed 019f88a0c84f), not this identity
-    gate. Type-checked only, to stay in parity with the Go PinOverride codec.
+    stays authoritative for every pad field a pin does NOT override; a validated
+    override is applied per-field to the resolved IR by :func:`_place_component`
+    (019f88a0c84f).  This gate is type-checking ONLY (positive/value-range checks
+    happen at apply time), to stay in parity with the Go PinOverride codec, which
+    likewise rejects only wrong types at unmarshal.
 
     Returns True when the override is well-formed (no diagnostic emitted)."""
     pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
@@ -1202,10 +1324,10 @@ def compile_board(
             continue
         if not all([_check_pad_capabilities(pad, ref, diags) for pad in clean.pads]):
             continue
-        _check_coincidence(comp, clean, ref, diags)
+        pin_overrides = _check_coincidence(comp, clean, ref, diags)
 
         component_id = derive_id("component", board_id, ref)
-        placed = _place_component(comp, component_id, clean, side, pin_net, ref, diags)
+        placed = _place_component(comp, component_id, clean, side, pin_net, pin_overrides, ref, diags)
         if placed is None:
             continue
         placed_pads, placed_graphics = placed
