@@ -578,3 +578,181 @@ def test_supported_graphic_primitives_are_not_flattened():
         f"test set {set(prims)} != declared {set(SUPPORTED_GRAPHIC_PRIMITIVES)}"
     sigs = {k: _silk_signature(_fsilk(_silk_board(v))) for k, v in prims.items()}
     assert len(set(sigs.values())) == len(prims), f"graphic primitives collapsed: {sigs}"
+
+
+# ===========================================================================
+# Round 4: the WARNING side channel (GerberResult.diagnostics) + drill
+# conformance. K3 doctrine (019f8a44484f comment 628): a captured fab feature
+# that is dropped or approximated must never vanish SILENTLY. Silk/drill losses
+# here are "warned, never fatal" — none of these paths may raise or fail-closed.
+# ===========================================================================
+
+from pcb_worker.methods import handle_request
+from pcb_worker.resolved_board import DiagnosticSeverity
+
+
+def _codes(result) -> list[str]:
+    return [d.code for d in result.diagnostics]
+
+
+def _drill_board(**extra) -> dict:
+    """A board exercising every drill class: a plated TH pin (PTH), a via (PTH),
+    a board-level plated pth_holes entry (PTH), and a non-plated mounting hole
+    (NPTH). Distinct coordinates so each hole is identifiable in the .drl body."""
+    board = {
+        "version": 2, "name": "drill", "width_mm": 30, "height_mm": 30,
+        "layers": ["top", "bottom"],
+        "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "J1", "footprint": "F", "x_mm": 5, "y_mm": 5,
+                        "rotation_deg": 0, "layer": "top",
+                        "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                                  "drill_mm": 1.0, "annulus_diameter_mm": 1.8}]}],
+        "vias": [{"x_mm": 10, "y_mm": 10, "drill_mm": 0.45, "diameter_mm": 0.9}],
+        "pth_holes": [{"x_mm": 8, "y_mm": 8, "diameter_mm": 0.6}],
+        "mounting_holes": [{"x_mm": 2, "y_mm": 20, "diameter_mm": 3.2,
+                            "plated": False}],
+    }
+    board.update(extra)
+    return board
+
+
+# --- GerberResult: a files dict that ALSO carries diagnostics ---------------
+
+def test_build_gerbers_returns_gerber_result_that_is_a_files_dict():
+    result = gerber.build_gerbers(_valid_pad_board("rect"), name="conf")
+    # It IS the files dict (indexing / iteration / equality unchanged).
+    assert isinstance(result, gerber.GerberResult)
+    assert isinstance(result, dict)
+    assert "conf-F_Cu.gbr" in result
+    assert isinstance(result["conf-F_Cu.gbr"], str) and result["conf-F_Cu.gbr"]
+    assert set(result.items()) == set(dict(result).items())
+    assert result == dict(result)
+    # And it exposes the diagnostics side channel — empty on a clean board.
+    assert result.diagnostics == []
+
+
+# --- Silk degenerate drops -> WARNING, never a raise -----------------------
+
+@pytest.mark.parametrize("graphic, reason", [
+    ({"layer": "F.SilkS", "kind": "circle", "center": [0, 0], "radius": 0,
+      "width": 0.15}, "zero-radius circle"),
+    ({"layer": "F.SilkS", "kind": "line", "start": [0], "end": [1, 1],
+      "width": 0.15}, "one-element line start"),
+    ({"layer": "F.SilkS", "kind": "poly", "points": [[0, 0]], "width": 0.15},
+     "single-point poly"),
+])
+def test_degenerate_silk_primitive_warns_and_still_emits(graphic, reason):
+    board = _silk_board([graphic])
+    # Must NOT raise (silk is cosmetic — warn, never fail-closed).
+    result = gerber.build_gerbers(board, name="conf")
+    # Files still emit (the degenerate primitive is simply absent from silk).
+    assert "conf-F_SilkS.gbr" in result
+    # The drop is surfaced as a WARNING carrying the owning component ref.
+    warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
+    assert warns, f"{reason}: expected a silk_primitive_unemitted warning"
+    d = warns[0]
+    assert d.severity is DiagnosticSeverity.WARNING
+    assert d.source_ref.entity_id == "P1", f"{reason}: missing component context"
+
+
+def test_collinear_three_point_arc_emits_arc_approximated_warning():
+    # Reuse the R3 collinear fixture: three colinear points -> polyline fallback,
+    # now ALSO flagged as an approximation (the curvature was lost, not silent).
+    board = _silk_board([{"layer": "F.SilkS", "kind": "arc",
+                          "points": [[-1, 0], [0, 0], [1, 0]], "width": 0.15}])
+    result = gerber.build_gerbers(board, name="conf")
+    # R3 behaviour intact: the polyline fallback still emits, no arc.
+    arcs, n_straight = _silk_draws(result["conf-F_SilkS.gbr"])
+    assert arcs == [] and n_straight >= 1
+    # R4 addition: the approximation is announced.
+    assert "silk_arc_approximated" in _codes(result)
+    approx = [d for d in result.diagnostics if d.code == "silk_arc_approximated"][0]
+    assert approx.severity is DiagnosticSeverity.WARNING
+    assert approx.source_ref.entity_id == "P1"
+
+
+def test_clean_silk_board_has_no_diagnostics():
+    board = _silk_board([{"layer": "F.SilkS", "kind": "line",
+                          "start": [-1, -1], "end": [1, 1], "width": 0.15}])
+    assert gerber.build_gerbers(board, name="conf").diagnostics == []
+
+
+# --- Drill PTH/NPTH split conformance (LOCK the working behaviour) ----------
+
+def _drill_hits(text: str) -> list[tuple[float, float]]:
+    """Every (x, y) drill hit in an Excellon body (X<..>Y<..>, 3-decimal mm)."""
+    return [(float(x), float(y))
+            for x, y in re.findall(r"^X(-?\d+\.\d+)Y(-?\d+\.\d+)$",
+                                   text, re.MULTILINE)]
+
+
+def test_drill_pth_npth_split_is_faithful():
+    result = gerber.build_gerbers(_drill_board(), name="drill")
+    assert "drill-PTH.drl" in result and "drill-NPTH.drl" in result
+    pth = _drill_hits(result["drill-PTH.drl"])
+    npth = _drill_hits(result["drill-NPTH.drl"])
+    # Plated features (TH pin @5,5 ; via @10,10 ; pth_holes @8,8) land in PTH ONLY.
+    assert (5.0, 5.0) in pth and (5.0, 5.0) not in npth      # TH pin
+    assert (10.0, 10.0) in pth and (10.0, 10.0) not in npth  # via
+    assert (8.0, 8.0) in pth and (8.0, 8.0) not in npth      # pth_holes entry
+    # The non-plated mounting hole (@2,20) lands in NPTH ONLY.
+    assert (2.0, 20.0) in npth and (2.0, 20.0) not in pth
+
+
+def test_drill_degenerate_hole_warns_and_is_not_drilled():
+    # A zero-diameter board hole is a captured-but-unemittable drill feature: it
+    # must WARN (drill is fabrication-critical — silence is unacceptable) but must
+    # NOT be drilled and must NOT raise (Extra passthrough of malformed input).
+    board = _drill_board(mounting_holes=[{"x_mm": 2, "y_mm": 20,
+                                          "diameter_mm": 0, "plated": False}])
+    result = gerber.build_gerbers(board, name="drill")
+    assert "drill_feature_unemitted" in _codes(result)
+    d = [x for x in result.diagnostics if x.code == "drill_feature_unemitted"][0]
+    assert d.severity is DiagnosticSeverity.WARNING
+    assert "mounting_holes[0]" in d.source_ref.entity_id
+    # The zero hole was NOT emitted; with no other NPTH candidate, NPTH is absent.
+    assert "drill-NPTH.drl" not in result
+    assert (2.0, 20.0) not in _drill_hits(result.get("drill-PTH.drl", ""))
+
+
+# --- methods.py forwards the diagnostics as a reply "warnings" key ----------
+
+def test_gerbers_method_forwards_warnings():
+    board = _drill_board(mounting_holes=[{"x_mm": 2, "y_mm": 20,
+                                          "diameter_mm": -1, "plated": False}])
+    resp = handle_request({"id": "w1", "method": "gerbers",
+                           "params": {"board": board, "name": "drill",
+                                      "resolve_geometry": False}})
+    assert resp["ok"] is True
+    warnings = resp["result"]["warnings"]
+    codes = [w["code"] for w in warnings]
+    assert "drill_feature_unemitted" in codes
+    w = next(x for x in warnings if x["code"] == "drill_feature_unemitted")
+    assert w["severity"] == "warning"
+    assert w["source_ref"]["entity_kind"] == "hole"
+    assert "mounting_holes[0]" in w["source_ref"]["entity_id"]
+
+
+def test_gerbers_method_clean_board_forwards_empty_warnings():
+    # The forward is additive AND present-but-empty on a clean board (no key drift
+    # for consumers): a board with no captured-but-unemitted feature yields [].
+    resp = handle_request({"id": "w0", "method": "gerbers",
+                           "params": {"board": _valid_pad_board("rect"),
+                                      "name": "conf", "resolve_geometry": False}})
+    assert resp["ok"] is True
+    assert resp["result"]["warnings"] == []
+
+
+def test_refless_component_degenerate_silk_warns_with_sentinel_not_raises():
+    # A component carrying no `ref` is valid input. Its degenerate silk must still
+    # WARN (never silently vanish) and must NOT raise — Diagnostic requires a
+    # non-empty entity_id, so _silk_ref falls back to a sentinel rather than
+    # constructing an invalid Diagnostic. Pins that load-bearing fallback path.
+    board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
+                          "center": [0, 0], "radius": 0, "width": 0.15}])
+    board["components"][0].pop("ref")  # refless but otherwise well-formed
+    result = gerber.build_gerbers(board, name="conf")  # must not raise
+    warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
+    assert warns, "refless component's dropped silk must still warn"
+    assert warns[0].source_ref.entity_id  # non-empty (sentinel), Diagnostic-valid

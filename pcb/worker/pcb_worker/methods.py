@@ -166,6 +166,22 @@ def _generate(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
+def _diagnostic_to_payload(d) -> dict:
+    """Serialise a resolved_board.Diagnostic to a reply dict. The source_ref shape
+    mirrors footprint_def._unsupported_to_payload (the one place that already turns
+    a SourceRef into JSON) so callers see one uniform diagnostic shape."""
+    return {
+        "severity": d.severity.value,
+        "code": d.code,
+        "message": d.message,
+        "source_ref": {
+            "entity_kind": d.source_ref.entity_kind.value,
+            "entity_id": d.source_ref.entity_id,
+            "detail": d.source_ref.detail,
+        },
+    }
+
+
 def _gerbers(params: dict) -> dict:
     """Generate Gerber (RS-274X/X2) + Excellon fabrication files from a board.
 
@@ -190,8 +206,15 @@ def _gerbers(params: dict) -> dict:
     except Exception as exc:  # geometry/library faults reported as data, not crash
         return {"ok": False, "error": {"kind": "gerber", "message": str(exc)}}
 
+    # K3 gate: surface the emitter's WARNING-channel diagnostics (a captured fab
+    # feature that was dropped/approximated must never vanish silently). files is a
+    # GerberResult (dict subclass) carrying .diagnostics; serialized with the same
+    # source_ref shape footprint_def._unsupported_to_payload uses. Non-breaking:
+    # only ADDS a "warnings" key — the files/written contract is unchanged.
     out_dir = params.get("out_dir")
-    result: dict = {"files": files, "written": []}
+    result: dict = {"files": files, "written": [],
+                    "warnings": [_diagnostic_to_payload(d)
+                                 for d in getattr(files, "diagnostics", [])]}
     if isinstance(out_dir, str) and out_dir.strip():
         try:
             os.makedirs(out_dir, exist_ok=True)

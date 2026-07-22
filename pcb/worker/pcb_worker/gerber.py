@@ -55,6 +55,12 @@ from .geometry import (
     rotate_local_offset as _rotate,
 )
 from .pad_source import iter_pads
+from .resolved_board import (
+    Diagnostic,
+    DiagnosticSeverity,
+    EntityKind,
+    SourceRef,
+)
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest / methods.WORKER_VERSION
 
@@ -78,6 +84,28 @@ EDGE_CUTS_WIDTH_MM = 0.1
 
 # Gerber output layer filenames (suffixes appended to the board base name).
 _GERBER_SUFFIXES = ("F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "Edge_Cuts")
+
+
+class GerberResult(dict):
+    """The ``{filename: content}`` files mapping (UNCHANGED semantics — it IS the
+    files dict every caller already indexes / iterates) that ALSO carries the
+    emitter's capability-conformance diagnostics as a side channel.
+
+    K3 gate (019f8a44484f comment 628): a fab feature that was captured but not
+    emitted must never vanish SILENTLY. build_gerbers returns this so callers can
+    surface WARNING diagnostics (dropped silk primitives, arc approximations,
+    malformed drill features) without any change to the file bytes or to the ~20
+    callers that treat the return as a plain ``dict[str, str]``.
+
+    CAVEAT (matters for the R5 KiCad emitter that copies this pattern): ``.copy()``
+    returns a PLAIN ``dict`` — the ``diagnostics`` side channel is dropped. Read
+    ``.diagnostics`` off the value build_gerbers returned, not off a copy of it.
+    """
+
+    def __init__(self, *args: Any, diagnostics: list[Diagnostic] | None = None,
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.diagnostics: list[Diagnostic] = list(diagnostics or [])
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +170,15 @@ def _circumcenter(a: tuple[float, float], b: tuple[float, float],
     return (ux, uy), d
 
 
+def _silk_ref(ref: Any) -> SourceRef:
+    """A GRAPHIC SourceRef tagged with the owning component ref (or a sentinel
+    when the board component carries none). entity_id must be non-empty."""
+    rid = ref if isinstance(ref, str) and ref else "<unknown>"
+    return SourceRef(EntityKind.GRAPHIC, rid, "F.SilkS")
+
+
 def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
-                          graphic: dict) -> None:
+                          graphic: dict, ref: Any = None) -> None:
     """Transform one footprint F.SilkS graphic (component-LOCAL coords) into
     board-absolute geometry, appended to the matching ``g.silk_*`` bucket.
 
@@ -166,6 +201,11 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
         st, en = graphic.get("start"), graphic.get("end")
         if not (isinstance(st, list) and isinstance(en, list)
                 and len(st) >= 2 and len(en) >= 2):
+            # Malformed endpoints — a captured silk line that cannot be emitted.
+            # Cosmetic, so WARN (never fail-closed) so the drop is not silent.
+            g.warn("silk_primitive_unemitted",
+                   "silk line dropped: malformed start/end (need two >=2-length "
+                   "points)", _silk_ref(ref))
             return
         p1 = _transform_point(cx, cy, rot, _num(st[0]), _num(st[1]))
         p2 = _transform_point(cx, cy, rot, _num(en[0]), _num(en[1]))
@@ -175,6 +215,9 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
         ct = graphic.get("center")
         radius = _opt_num(graphic.get("radius"))
         if not (isinstance(ct, list) and len(ct) >= 2 and radius and radius > 0):
+            g.warn("silk_primitive_unemitted",
+                   "silk circle dropped: non-positive radius or malformed center",
+                   _silk_ref(ref))
             return
         pc = _transform_point(cx, cy, rot, _num(ct[0]), _num(ct[1]))
         g.silk_circles.append((pc[0], pc[1], radius, width))
@@ -182,6 +225,8 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
     elif kind == "poly":
         pts = [p for p in _list(graphic.get("points")) if isinstance(p, list) and len(p) >= 2]
         if len(pts) < 2:
+            g.warn("silk_primitive_unemitted",
+                   "silk poly dropped: fewer than 2 valid points", _silk_ref(ref))
             return
         abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
         g.silk_polys.append((abs_pts, width, True))
@@ -197,6 +242,9 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
             sx, sy = _num(pts[1][0]), _num(pts[1][1])
             vx, vy = sx - ccx, sy - ccy
             if vx == 0.0 and vy == 0.0:
+                g.warn("silk_primitive_unemitted",
+                       "silk arc dropped: zero-length radius vector "
+                       "(center coincides with start)", _silk_ref(ref))
                 return
             evx, evy = _rotate(vx, vy, angle)
             ex, ey = ccx + evx, ccy + evy
@@ -230,6 +278,11 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
                 # Collinear / coincident / near-degenerate (infinite or off-board
                 # radius). Fail-SAFE (cosmetic, not fail-closed) — fall back to the
                 # polyline through the points; never risk a coordinate overflow.
+                # The arc IS emitted (as its chord), but its curvature is lost, so
+                # WARN that the shape was approximated (not a silent degrade).
+                g.warn("silk_arc_approximated",
+                       "silk 3-point arc approximated as a polyline: collinear or "
+                       "off-board (infinite/huge) circumradius", _silk_ref(ref))
                 g.silk_polys.append(([a, b, c], width, False))
             else:
                 center, d = solved
@@ -240,7 +293,11 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
                 g.silk_arcs.append((a, c, center, orientation, width))
         elif len(pts) >= 2:
             # 2-point arc with no mid and no angle: underspecified — draw the
-            # chord as a polyline (unchanged fallback).
+            # chord as a polyline (unchanged fallback). Its curvature is
+            # unknowable, so WARN that the arc was approximated (not silent).
+            g.warn("silk_arc_approximated",
+                   "silk 2-point arc approximated as a polyline: underspecified "
+                   "(no mid point and no sweep angle)", _silk_ref(ref))
             abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
             g.silk_polys.append((abs_pts, width, False))
 
@@ -283,6 +340,16 @@ class _Geometry:
         # start, end, center, orientation('+'/'-'), width
         self.silk_arcs: list[tuple[tuple[float, float], tuple[float, float],
                                    tuple[float, float], str, float]] = []
+        # Capability-conformance diagnostics (K3 WARNING channel). Built in board
+        # order by _harvest, so the list is deterministic. NEVER fatal here — silk
+        # is cosmetic and board-level drill is an Extra passthrough; both are
+        # "warned, never fatal" (contrast fabrication-critical copper/mask, which
+        # fail closed upstream). A side channel only: it changes no emitted bytes.
+        self.diagnostics: list[Diagnostic] = []
+
+    def warn(self, code: str, message: str, ref: SourceRef) -> None:
+        self.diagnostics.append(
+            Diagnostic(DiagnosticSeverity.WARNING, code, message, ref))
 
 
 def _pad_mask_margin(pad, mask_clearance: float) -> float:
@@ -378,7 +445,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
             if top:
                 for graphic in graphics:
                     if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
-                        _harvest_silk_graphic(g, cx, cy, rot, graphic)
+                        _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
         elif top and pin_extents:
             xs = [p[0] for p in pin_extents]
             ys = [p[1] for p in pin_extents]
@@ -416,12 +483,21 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
     # spike routed these through Extra keys 'mounting_holes' / 'npth_holes'.
     for key, default_plated in (("mounting_holes", False), ("npth_holes", False),
                                 ("pth_holes", True)):
-        for hole in _list(board.get(key)):
+        for idx, hole in enumerate(_list(board.get(key))):
             if not isinstance(hole, dict):
                 continue
             hx, hy = _num(hole.get("x_mm")), _num(hole.get("y_mm"))
             dia = _opt_num(hole.get("diameter_mm")) or _opt_num(hole.get("drill_mm"))
             if dia is None or dia <= 0:
+                # Drill is fabrication-critical, but a board-level hole is an Extra
+                # passthrough of malformed-OPTIONAL input — do NOT hard-fail. Still
+                # emit no zero hole (keep the skip), but WARN so a captured-but-
+                # unemitted drill feature is never silent (K3 gate).
+                g.warn("drill_feature_unemitted",
+                       f"drill feature dropped: {key}[{idx}] has non-positive "
+                       f"diameter ({dia}) at ({hx}, {hy})",
+                       SourceRef(EntityKind.HOLE, f"{key}[{idx}]",
+                                 f"({hx}, {hy})"))
                 continue
             plated = bool(hole.get("plated", default_plated))
             g.holes.append((hx, hy, dia, plated))
@@ -664,12 +740,16 @@ def _build_drill_files(g: _Geometry, creation_date: str) -> dict[str, str]:
 
 def build_gerbers(board_dict: dict, out_dir: str | None = None,
                   name: str | None = None,
-                  creation_date: str | None = None) -> dict[str, str]:
+                  creation_date: str | None = None) -> GerberResult:
     """Compile a canonical board into fabrication files.
 
-    Returns {filename: content} for six Gerber layers (F_Cu, B_Cu, F_Mask,
-    B_Mask, F_SilkS, Edge_Cuts) plus PTH.drl / NPTH.drl (each drill file emitted
-    only when the board actually has holes of that class).
+    Returns a GerberResult (a ``dict[str, str]`` subclass — a drop-in for the
+    plain files dict every caller indexes / iterates) mapping {filename: content}
+    for six Gerber layers (F_Cu, B_Cu, F_Mask, B_Mask, F_SilkS, Edge_Cuts) plus
+    PTH.drl / NPTH.drl (each drill file emitted only when the board actually has
+    holes of that class). ``.diagnostics`` carries the emitter's WARNING-channel
+    capability-conformance diagnostics (empty on a clean board); it is a side
+    channel and changes no file bytes.
 
     Filenames are ``{base}-{suffix}.gbr`` / ``{base}-PTH.drl`` where base is
     *name* (default the board's ``name`` field, else "board").
@@ -706,4 +786,4 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
             with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as fh:
                 fh.write(text)
 
-    return files
+    return GerberResult(files, diagnostics=g.diagnostics)
