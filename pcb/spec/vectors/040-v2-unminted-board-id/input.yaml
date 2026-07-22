@@ -1,0 +1,5 @@
+version: 2
+id: board_1
+name: Bad
+width_mm: 20
+height_mm: 20

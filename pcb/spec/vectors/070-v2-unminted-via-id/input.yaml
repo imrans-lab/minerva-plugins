@@ -1,0 +1,9 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: BadVia
+width_mm: 20
+height_mm: 20
+vias:
+  - id: ""
+    x_mm: 5
+    y_mm: 5

@@ -1,0 +1,11 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: OrdTrace
+width_mm: 20
+height_mm: 20
+traces:
+  - id: trace_1
+    net: N
+    points:
+      - {x_mm: 1, y_mm: 1}
+      - {x_mm: 2, y_mm: 2}

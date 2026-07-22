@@ -1,0 +1,5 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: V2
+width_mm: 20
+height_mm: 20

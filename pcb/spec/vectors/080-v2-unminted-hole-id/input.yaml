@@ -1,0 +1,10 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: BadHole
+width_mm: 20
+height_mm: 20
+mounting_holes:
+  - id: h1
+    x_mm: 3
+    y_mm: 3
+    diameter_mm: 3

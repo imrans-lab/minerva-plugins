@@ -1,0 +1,10 @@
+version: 1
+name: LegacyV1
+width_mm: 20
+height_mm: 20
+traces:
+  - id: trace_1
+    net: N
+    points:
+      - {x_mm: 1, y_mm: 1}
+      - {x_mm: 2, y_mm: 2}

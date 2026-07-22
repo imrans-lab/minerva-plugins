@@ -163,6 +163,11 @@ func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMes
 			warnings = append(warnings,
 				fmt.Sprintf("migrated board source v1→v2: minted %d persistent entity id(s)", n))
 		}
+	} else if vErr := board.Validate(b); vErr != nil {
+		// An inbound board that already claims v2 must satisfy the shared
+		// validation boundary (comment 629) — fail closed rather than pass an
+		// unminted/ordinal id downstream where K3 would key identity off it.
+		return nil, fmt.Errorf("pcb.deserialize: invalid v2 board: %w", vErr)
 	}
 	if warnings == nil {
 		warnings = []string{}

@@ -1,0 +1,14 @@
+version: 2
+id: board:0123456789abcdef0123456789abcdef
+name: OvBad
+width_mm: 20
+height_mm: 20
+components:
+  - ref: U1
+    footprint: F
+    x_mm: 1
+    y_mm: 1
+    rotation_deg: 0
+    pins:
+      - number: '1'
+        override: {drill_mm: wide}

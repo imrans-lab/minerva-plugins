@@ -1,0 +1,5 @@
+version: 2
+id: board:0123456789ABCDEF0123456789ABCDEF
+name: Upper
+width_mm: 20
+height_mm: 20
