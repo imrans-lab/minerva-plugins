@@ -53,6 +53,16 @@ def _pad_board(shape: str, *, w: float = 2.0, h: float = 1.0,
     }
 
 
+def _valid_pad_board(shape: str, *, angle: float = 0.0) -> dict:
+    """A board carrying one pad of `shape` with VALID geometry for that shape (a
+    circle is square; a roundrect gets a mid-range corner ratio)."""
+    if shape == "circle":
+        return _pad_board("circle", w=2.0, h=2.0, angle=angle)
+    if shape == "roundrect":
+        return _pad_board("roundrect", rratio=0.25, angle=angle)
+    return _pad_board(shape, angle=angle)
+
+
 def _fcu(board: dict) -> str:
     files = gerber.build_gerbers(board, name="conf")
     return files["conf-F_Cu.gbr"]
@@ -86,7 +96,7 @@ def test_rect_pad_emits_rectangle_aperture():
 
 def test_circle_pad_emits_circle_aperture():
     # A circle flashes a true C aperture with the diameter, not a square land.
-    assert "%ADD10C,2.0*%" in _fcu(_pad_board("circle"))
+    assert "%ADD10C,2.0*%" in _fcu(_pad_board("circle", w=2.0, h=2.0))
 
 
 def test_oval_pad_emits_obround_aperture():
@@ -103,17 +113,13 @@ def test_roundrect_pad_emits_rounded_macro():
 @pytest.mark.parametrize("shape", sorted(SUPPORTED_PAD_SHAPES))
 def test_every_supported_pad_shape_emits_its_faithful_aperture(shape):
     # comment 628: EVERY declared SUPPORTED_PAD_SHAPE must be emitted faithfully.
-    rratio = 0.25 if shape == "roundrect" else None
-    assert _aperture_signature(_fcu(_pad_board(shape, rratio=rratio))) == _EXPECTED_APERTURE[shape]
+    assert _aperture_signature(_fcu(_valid_pad_board(shape))) == _EXPECTED_APERTURE[shape]
 
 
 def test_supported_pad_shapes_are_not_flattened():
     # The core regression guard: the four declared shapes must produce four
     # DISTINCT apertures. If any pair collapses, the emitter is flattening again.
-    sigs = {
-        s: _aperture_signature(_fcu(_pad_board(s, rratio=0.25 if s == "roundrect" else None)))
-        for s in SUPPORTED_PAD_SHAPES
-    }
+    sigs = {s: _aperture_signature(_fcu(_valid_pad_board(s))) for s in SUPPORTED_PAD_SHAPES}
     assert len(set(sigs.values())) == len(SUPPORTED_PAD_SHAPES), f"shapes collapsed: {sigs}"
 
 
@@ -147,6 +153,41 @@ def test_roundrect_zero_rratio_degenerates_to_rectangle():
 # ---------------------------------------------------------------------------
 # Aperture-mapping unit (fast, type-level).
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed on degenerate geometry (fail-closed-fab doctrine): an emitter must
+# never silently corrupt or flatten copper — it must error with pad context.
+# ---------------------------------------------------------------------------
+
+
+def test_circle_pad_with_unequal_sides_fails_closed():
+    # A circle with width != height has no faithful circular aperture; emitting
+    # C,width would silently drop the height axis.
+    with pytest.raises(ValueError, match="circle"):
+        gerber.build_gerbers(_pad_board("circle", w=2.0, h=1.0), name="conf")
+
+
+@pytest.mark.parametrize("rratio", [-0.2, 0.9, "0.4", True, float("nan")])
+def test_roundrect_bad_corner_rratio_fails_closed(rratio):
+    # A negative ratio would silently flatten to a rectangle (the exact defect
+    # this gate kills); >0.5 / non-numeric / NaN must also error with context,
+    # not crash the aperture writer or silently default.
+    with pytest.raises(ValueError):
+        gerber.build_gerbers(_pad_board("roundrect", rratio=rratio), name="conf")
+
+
+def test_roundrect_valid_rratio_boundary_is_accepted():
+    # The [0, 0.5] boundary is valid: 0 -> rectangle, 0.5 -> fully rounded.
+    assert _aperture_signature(_fcu(_pad_board("roundrect", rratio=0.0))) == "R"
+    assert _fcu(_pad_board("roundrect", rratio=0.5))  # emits without error
+
+
+def test_rotated_non_rect_shape_is_faithful():
+    # A rotated oval must still be an obround carrying the rotation (Fable R1 note:
+    # rotation coverage beyond the rectangle).
+    text = _fcu(_pad_board("oval", angle=90.0))
+    assert "%AMObround*" in text or re.search(r"%ADD\d+O", text)
 
 
 def test_smd_aperture_maps_each_shape_to_its_primitive():

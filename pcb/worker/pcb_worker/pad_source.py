@@ -38,6 +38,7 @@ footprint's own ``(at x y rot)``).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -135,16 +136,19 @@ def iter_pads(comp: dict, *, require_smd_size: bool = False) -> list[PadGeom]:
     if not isinstance(comp, dict):
         return []
     if has_resolved_pads(comp):
-        pads = [_from_resolved(p) for p in comp["pads"] if isinstance(p, dict)]
+        raw = [p for p in comp["pads"] if isinstance(p, dict)]
+        pads = [_from_resolved(p) for p in raw]
     else:
         pins = comp.get("pins")
         pins = pins if isinstance(pins, list) else []
-        pads = [_from_pin(p) for p in pins if isinstance(p, dict)]
+        raw = [p for p in pins if isinstance(p, dict)]
+        pads = [_from_pin(p) for p in raw]
 
     if require_smd_size:
         ref = comp.get("ref")
-        for pad in pads:
+        for rawpad, pad in zip(raw, pads):
             _require_smd_size(ref, pad)
+            _require_faithful_shape(ref, rawpad, pad)
     return pads
 
 
@@ -161,6 +165,44 @@ def _require_smd_size(ref: Any, pad: PadGeom) -> None:
     if pad.drill is None and not (pad.width and pad.width > 0
                                   and pad.height and pad.height > 0):
         raise PadGeometryError(ref, pad.number, pad.width, pad.height)
+
+
+# Circle width/height must agree to within this to be a faithful circle.
+_SHAPE_TOL_MM = 1e-6
+
+
+def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
+    """Fail-closed: SMD pad geometry an emitter cannot render faithfully must
+    error WITH CONTEXT rather than silently corrupt or flatten copper (the K3
+    capability-conformance doctrine, 019f8a44484f / 019f7aed6d9e comment 628).
+
+      * a ``circle`` whose width != height has no faithful single circular
+        aperture — emitting one silently drops an axis (copper corruption);
+      * a ``roundrect`` corner ratio must be a finite number in [0, 0.5]. A
+        negative or non-numeric ratio would otherwise silently flatten to a plain
+        rectangle (the exact defect class this gate exists to kill) or crash the
+        aperture writer with no pad context.
+
+    Only shaped SMD lands are checked — a through-hole pad's copper is a
+    drill-derived annulus, not a shaped land, so it is exempt (mirrors
+    ``_require_smd_size``). The raw pad dict is needed because a non-numeric
+    ``corner_rratio`` is coerced to None before it reaches PadGeom."""
+    if pad.drill is not None:
+        return
+    if (pad.shape == "circle" and pad.width is not None and pad.height is not None
+            and abs(pad.width - pad.height) > _SHAPE_TOL_MM):
+        raise ValueError(
+            f"component {ref!r} pad {pad.number!r}: circle pad width {pad.width} "
+            f"!= height {pad.height} — no faithful circular aperture")
+    if pad.shape == "roundrect":
+        rr = rawpad.get("corner_rratio")
+        if rr is not None and (isinstance(rr, bool)
+                               or not isinstance(rr, (int, float))
+                               or not math.isfinite(rr)
+                               or not 0.0 <= rr <= 0.5):
+            raise ValueError(
+                f"component {ref!r} pad {pad.number!r}: roundrect corner_rratio "
+                f"{rr!r} must be a finite number in [0, 0.5]")
 
 
 def _from_pin(pin: dict) -> PadGeom:
