@@ -247,6 +247,74 @@ func TestMalformedParamsReturnError(t *testing.T) {
 	}
 }
 
+// End-to-end IPC proof for finding 019f8b7fbbd7: unknown YAML fields at the root
+// AND nested inside a component must SURVIVE the real pcb.deserialize →
+// pcb.serialize round trip. The direct Go YAML→Board→YAML path already preserved
+// them via yaml:",inline"; the IPC path was broken because pcb.deserialize returns
+// {"board": b} via encoding/json, which stripped every Extra (json:"-") before the
+// host saw the board — so a later pcb.serialize could not restore them. The custom
+// JSON marshalers inline Extra, closing that gap. This test drives the ACTUAL
+// handlers, mirroring the wire shape: deserialize emits {board,...}; serialize
+// consumes {board:<that JSON>}.
+func TestIPCRoundTripPreservesUnknownYAMLFields(t *testing.T) {
+	// version 1 so it migrates to v2 (mints ids) and passes Validate on serialize.
+	// forward_compat_root (root) and forward_compat_pin (nested in a pin) are
+	// unmodeled — they exist only via Extra inline.
+	yaml := "version: 1\n" +
+		"name: FC\nwidth_mm: 40\nheight_mm: 30\n" +
+		"forward_compat_root: {source: architect, rev: 9}\n" +
+		"components:\n" +
+		"  - ref: U1\n    footprint: IC_DIP\n    x_mm: 1\n    y_mm: 2\n    rotation_deg: 0\n" +
+		"    mpn: ATMEGA328P\n" +
+		"    pins:\n      - number: '1'\n        x_mm: 0\n        y_mm: 0\n        signal_class: analog\n" +
+		"nets: []\n"
+
+	// Step 1: pcb.deserialize (YAML in → {board, warnings}).
+	desArgs, _ := json.Marshal(map[string]string{"yaml": yaml})
+	desOut, err := HandleDeserialize(context.Background(), desArgs)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	var des struct {
+		Board json.RawMessage `json:"board"`
+	}
+	if err := json.Unmarshal(desOut, &des); err != nil {
+		t.Fatal(err)
+	}
+	// The unknown keys must be present in the JSON the host receives (the
+	// previously-broken boundary): they were stripped before this fix.
+	boardJSON := string(des.Board)
+	if !strings.Contains(boardJSON, "forward_compat_root") {
+		t.Fatalf("root unknown field stripped from deserialize JSON:\n%s", boardJSON)
+	}
+	if !strings.Contains(boardJSON, "mpn") || !strings.Contains(boardJSON, "signal_class") {
+		t.Fatalf("nested unknown field stripped from deserialize JSON:\n%s", boardJSON)
+	}
+
+	// Step 2: pcb.serialize (the deserialized board back out → YAML).
+	serArgs, _ := json.Marshal(map[string]json.RawMessage{"board": des.Board})
+	serOut, err := HandleSerialize(context.Background(), serArgs)
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	var ser struct {
+		YAML  string `json:"yaml"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(serOut, &ser); err != nil {
+		t.Fatal(err)
+	}
+	if ser.Error != "" {
+		t.Fatalf("serialize error: %s", ser.Error)
+	}
+	// The unknown fields survived the full IPC round trip into the re-emitted YAML.
+	for _, want := range []string{"forward_compat_root", "source: architect", "mpn: ATMEGA328P", "signal_class: analog"} {
+		if !strings.Contains(ser.YAML, want) {
+			t.Fatalf("unknown field %q lost across IPC round trip:\n%s", want, ser.YAML)
+		}
+	}
+}
+
 func TestSerializePayloadTooLarge(t *testing.T) {
 	// Build a board whose YAML exceeds the cap via many nets.
 	var sb strings.Builder
