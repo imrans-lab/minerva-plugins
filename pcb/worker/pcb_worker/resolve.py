@@ -220,9 +220,20 @@ def _pads_from_parsed(fp_pads: list) -> list:
     """Map ``footprints._parse_pad`` output → the panel's board-dict pad shape.
 
     Emits ``{number, type, shape, position{x,y}, size{width,height},
-    drill{x,y}, layers}`` (see ``pcb_component.gd::_pads_from_list``). Pads with
-    no local position are skipped — mirrors the coincidence path's null skip so
-    we never emit a positionless pad.
+    drill{x,y}, layers}`` plus the fab-affecting optionals the parser surfaces
+    (see ``pcb_component.gd::_pads_from_list``). Pads with no local position are
+    skipped — mirrors the coincidence path's null skip so we never emit a
+    positionless pad.
+
+    SB2 (019f8acfd651): the parser (``footprints._parse_pad``) already extracts
+    ``roundrect_rratio`` / ``solder_mask_margin`` / ``solder_paste_margin`` /
+    ``rotation``, but this projection used to DROP them, so every resolved
+    roundrect fell back to the emitter's default corner ratio and every pad to
+    the board-global mask clearance. Thread them through here (name-mapping
+    ``roundrect_rratio`` → ``corner_rratio``, the key the gerber/kicad emitters
+    read) so the LIVE emitters see the real per-pad geometry. ``rotation`` and
+    ``solder_paste_margin`` are carried for losslessness; their APPLICATION
+    (pad-local rotation into the placement transform; a paste layer) lands in W8.
     """
     out: list = []
     for p in fp_pads:
@@ -241,7 +252,7 @@ def _pads_from_parsed(fp_pads: list) -> list:
         drill_dict = ({"x": drill, "y": drill} if drill is not None
                       else {"x": 0.0, "y": 0.0})
 
-        out.append({
+        pad_out = {
             "number": str(p.get("number", "")),
             "type": _normalize_pad_type(p.get("type")),
             "shape": p.get("shape") or "rect",
@@ -249,7 +260,25 @@ def _pads_from_parsed(fp_pads: list) -> list:
             "size": size_dict,
             "drill": drill_dict,
             "layers": p.get("layers") or [],
-        })
+        }
+        # Fab-affecting optionals — only present when the footprint carries them,
+        # so a plain rect pad stays clean. corner_rratio + solder_mask_margin are
+        # consumed by the emitters NOW; rotation + solder_paste_margin are carried
+        # for W8.
+        rratio = p.get("roundrect_rratio")
+        if rratio is not None:
+            pad_out["corner_rratio"] = rratio
+        for key in ("solder_mask_margin", "solder_paste_margin"):
+            val = p.get(key)
+            if val is not None:
+                pad_out[key] = val
+        # A 0/absent local rotation is a no-op; omit it so this projection stays
+        # byte-identical to footprint_def.to_board_pad_dicts (whose PadDefinition
+        # .rotation_deg defaults to 0.0 and can't distinguish absent from zero).
+        rot = p.get("rotation")
+        if rot:
+            pad_out["rotation"] = rot
+        out.append(pad_out)
     return out
 
 

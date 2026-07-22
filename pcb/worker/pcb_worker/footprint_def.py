@@ -609,7 +609,7 @@ class FootprintDefinition:
                           if pad.drill else {"x": 0.0, "y": 0.0})
             size_dict = ({"width": pad.size[0], "height": pad.size[1]}
                          if pad.size is not None else {"width": None, "height": None})
-            out.append({
+            pad_dict = {
                 "number": pad.number,
                 "type": normalize_pad_type(pad.pad_type),
                 "shape": pad.shape.value,
@@ -617,5 +617,18 @@ class FootprintDefinition:
                 "size": size_dict,
                 "drill": drill_dict,
                 "layers": [layer.id for layer in pad.layers],
-            })
+            }
+            # SB2 (019f8acfd651): thread the fab-affecting optionals in exact
+            # parity with resolve._pads_from_parsed (the round-trip invariant).
+            # corner_rratio + margins only when present; a 0/absent rotation is
+            # omitted (rotation_deg defaults to 0.0 and can't encode "absent").
+            if pad.corner_rratio is not None:
+                pad_dict["corner_rratio"] = pad.corner_rratio
+            for key, val in (("solder_mask_margin", pad.solder_mask_margin),
+                             ("solder_paste_margin", pad.solder_paste_margin)):
+                if val is not None:
+                    pad_dict[key] = val
+            if pad.rotation_deg:
+                pad_dict["rotation"] = pad.rotation_deg
+            out.append(pad_dict)
         return out

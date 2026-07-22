@@ -238,3 +238,71 @@ def test_board_graphic_stats_matches_manual_count():
     manual_crtyd = sum(len(_crtyd(c)) for c in resolved["components"])
     assert stats["silk_graphics"] == manual_silk
     assert stats["courtyard_graphics"] == manual_crtyd
+
+
+# ---------------------------------------------------------------------------
+# SB2 (019f8acfd651): the pad projection must THREAD the fab-affecting fields the
+# footprint parser extracts (corner_rratio / solder_mask_margin / rotation) —
+# previously dropped, so every resolved roundrect fell back to the emitter's
+# default corner ratio and every pad to the global mask clearance. The live
+# emitters read `corner_rratio` + `solder_mask_margin` off comp["pads"].
+# ---------------------------------------------------------------------------
+
+from pcb_worker.footprints import parse_kicad_mod
+from pcb_worker.resolve import _pads_from_parsed
+
+_PAD_FIELDS = HERE / "testdata" / "k1_lossless" / "PAD_FIELDS.kicad_mod"
+
+
+def test_pads_from_parsed_threads_fab_optionals_from_real_footprint():
+    # PAD_FIELDS pad "1": smd roundrect (at -1 0 90), roundrect_rratio 0.25,
+    # solder_mask_margin 0.05, solder_paste_margin -0.02. The projection must
+    # carry all four (roundrect_rratio NAME-MAPPED to corner_rratio, the key the
+    # emitters read); the plain rect pad "3" must carry none of them.
+    pads = _pads_from_parsed(parse_kicad_mod(_PAD_FIELDS)["pads"])
+    by_num = {p["number"]: p for p in pads}
+    p1 = by_num["1"]
+    assert p1["corner_rratio"] == pytest.approx(0.25)   # name-mapped from roundrect_rratio
+    assert p1["solder_mask_margin"] == pytest.approx(0.05)
+    assert p1["solder_paste_margin"] == pytest.approx(-0.02)
+    assert p1["rotation"] == pytest.approx(90)
+    p3 = by_num["3"]
+    for k in ("corner_rratio", "solder_mask_margin", "solder_paste_margin", "rotation"):
+        assert k not in p3, f"plain rect pad should not carry {k}"
+
+
+def test_pads_from_parsed_name_maps_roundrect_rratio_not_hardcoded():
+    # A non-default ratio proves the value is threaded, not defaulted to 0.25.
+    parsed = [{"number": "9", "type": "smd", "shape": "roundrect",
+               "x_mm": 0.0, "y_mm": 0.0, "size": (2.0, 1.0), "layers": ["F.Cu"],
+               "roundrect_rratio": 0.4, "solder_mask_margin": 0.12}]
+    out = _pads_from_parsed(parsed)[0]
+    assert out["corner_rratio"] == 0.4
+    assert out["solder_mask_margin"] == 0.12
+    # A pad with no optionals stays clean (no None-valued keys injected).
+    plain = _pads_from_parsed([{"number": "1", "type": "smd", "shape": "rect",
+                                "x_mm": 0.0, "y_mm": 0.0, "size": (1.0, 1.0),
+                                "layers": ["F.Cu"]}])[0]
+    assert "corner_rratio" not in plain and "solder_mask_margin" not in plain
+
+
+def test_pads_from_parsed_and_footprint_def_agree_on_fab_optionals():
+    # The TWO board-dict projections — resolve._pads_from_parsed and
+    # FootprintDefinition.to_board_pad_dicts — must stay byte-identical on the
+    # SB2-threaded fields (corner_rratio/margins/rotation), not just the base keys,
+    # else the lockstep drifts silently (Fable SB2 note 1: no parity fixture
+    # otherwise exercises these). PAD_FIELDS pads "1" (roundrect + margins +
+    # rotation) and "3" (plain rect) exercise them. Pad "2" is SKIPPED: its oval
+    # drill carries a PRE-EXISTING resolve-vs-footprint_def divergence filed
+    # separately (out of SB2 scope).
+    from pcb_worker.footprint_def import FootprintDefinition
+    parsed = parse_kicad_mod(_PAD_FIELDS)
+    from_resolve = {p["number"]: p for p in _pads_from_parsed(parsed["pads"])}
+    from_fpdef = {p["number"]: p
+                  for p in FootprintDefinition.from_kicad_parsed(parsed).to_board_pad_dicts()}
+    for num in ("1", "3"):
+        assert from_resolve[num] == from_fpdef[num], f"projection drift on pad {num}"
+    # Guard against both projections agreeing by both DROPPING the optionals.
+    assert from_resolve["1"]["corner_rratio"] == pytest.approx(0.25)
+    assert from_resolve["1"]["solder_mask_margin"] == pytest.approx(0.05)
+    assert from_resolve["1"]["rotation"] == pytest.approx(90)
