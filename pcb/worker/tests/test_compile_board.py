@@ -972,11 +972,41 @@ def test_inline_geometry_without_matching_pad_warns():
 
 def test_typed_override_is_honored_not_deprecated():
     # A typed override is the sanctioned deviation channel: no deprecation warning,
-    # no error.
+    # no error — but an INFO records it is validated-yet-not-applied to emission.
     diags = _Diagnostics()
     comp = {"pins": [{"number": "1", "override": {"annulus_diameter_mm": 2.0}}]}
     _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
-    assert _codes(diags) == []
+    assert "inline_pin_geometry_ignored" not in _codes(diags)
+    assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags.tuple())
+    assert "override_not_yet_applied" in _codes(diags)
+
+
+def test_override_extra_keys_are_tolerated():
+    # Unknown override keys round-trip via Go's inline Extra; the Python validator
+    # must not reject them (parity), and the override is still honored.
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "override": {"drill_mm": 0.9, "foo": 123}}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "invalid_pin_override" not in _codes(diags)
+    assert "override_not_yet_applied" in _codes(diags)
+
+
+def test_non_numeric_inline_geometry_is_not_dropped_silently():
+    # A garbage inline value is present but un-comparable — it must be surfaced,
+    # not silently swallowed by the fold (_inline_geometry_conflicts skips it).
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "drill_mm": "abc"}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    assert "inline_pin_geometry_ignored" in _codes(diags)
+
+
+def test_inline_plated_divergence_warns():
+    # plated diverges from the footprint drill (pad drill is plated) → warn.
+    diags = _Diagnostics()
+    comp = {"pins": [{"number": "1", "plated": False}]}
+    _check_coincidence(comp, _fp(_thru_pad()), "X1", diags)
+    warns = [d for d in diags.tuple() if d.code == "inline_pin_geometry_ignored"]
+    assert len(warns) == 1 and "plated" in warns[0].message
 
 
 def test_typed_override_supersedes_inline_geometry():

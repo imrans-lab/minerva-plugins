@@ -650,14 +650,22 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
         # geometry is deprecated — dropped when it matches the footprint, warned
         # when it diverges (or when there is no pad to verify it against).
         override = pin.get("override")
-        if override is not None:
-            _validate_pin_override(override, ref, number, diags)
-        if any(pin.get(k) is not None for k in _INLINE_FAB_KEYS):
-            if override is None:
-                pin_conflicts = _inline_geometry_conflicts(pin, pad, number) if pad is not None else []
-                if pad is None or pin_conflicts:
-                    deprecated_inline = True
-                    conflicts.extend(pin_conflicts)
+        if override is not None and _validate_pin_override(override, ref, number, diags):
+            diags.info("override_not_yet_applied",
+                       f"component {ref!r} pin {number!r}: typed pin `override` is validated "
+                       f"and recorded but is NOT YET applied to emitted pad geometry — the "
+                       f"locked footprint stays authoritative until 019f88a0c84f lands",
+                       pad_ref)
+        inline_keys = [k for k in _INLINE_FAB_KEYS if pin.get(k) is not None]
+        if inline_keys and override is None:
+            pin_conflicts = _inline_geometry_conflicts(pin, pad, number) if pad is not None else []
+            redundant = (pad is not None and not pin_conflicts
+                         and _inline_geometry_verifiable(pin, inline_keys))
+            if not redundant:
+                # Diverges from, or cannot be verified against, the authoritative
+                # footprint → surface for migration rather than drop it silently.
+                deprecated_inline = True
+                conflicts.extend(pin_conflicts)
         px, py = pin.get("x_mm"), pin.get("y_mm")
         has_x, has_y = _is_number(px), _is_number(py)
         if not has_x and not has_y:
@@ -706,30 +714,52 @@ def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> li
     return out
 
 
-def _validate_pin_override(override, ref: str, number: str, diags: _Diagnostics) -> None:
+def _inline_geometry_verifiable(pin: dict, inline_keys) -> bool:
+    """True only if every present inline fabrication value is the right TYPE to
+    compare against a footprint pad (numbers for the mm keys, bool for `plated`).
+    A garbage value (e.g. drill_mm: "big") is present but un-comparable — the fold
+    cannot prove it redundant, so it must surface it rather than drop it silently
+    (_inline_geometry_conflicts skips non-numbers, which would otherwise hide it)."""
+    for key in inline_keys:
+        val = pin.get(key)
+        if key == "plated":
+            if not isinstance(val, bool):
+                return False
+        elif not _is_number(val):
+            return False
+    return True
+
+
+def _validate_pin_override(override, ref: str, number: str, diags: _Diagnostics) -> bool:
     """Fail-closed type check of a typed pin `override` — the schema-v2 sanctioned
     channel for an intentional deviation from the locked footprint. The footprint
     stays authoritative for EMITTED pad geometry; the override is validated (and
     recorded in the source) here. Applying a validated override to fabricated pad
-    geometry is a downstream emitter concern (filed separately), not this identity
-    gate. Type-checked only, to stay in parity with the Go PinOverride codec."""
+    geometry is a downstream emitter concern (filed 019f88a0c84f), not this identity
+    gate. Type-checked only, to stay in parity with the Go PinOverride codec.
+
+    Returns True when the override is well-formed (no diagnostic emitted)."""
     pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
     if not isinstance(override, dict):
         diags.error("invalid_pin_override",
                     f"component {ref!r} pin {number!r}: override must be a mapping, "
                     f"got {type(override).__name__}", pad_ref)
-        return
+        return False
+    ok = True
     for key in _OVERRIDE_NUM_KEYS:
         val = override.get(key)
         if val is not None and not _is_number(val):
+            ok = False
             diags.error("invalid_pin_override",
                         f"component {ref!r} pin {number!r}: override.{key} must be a number, "
                         f"got {val!r}", pad_ref)
     plated = override.get("plated")
     if plated is not None and not isinstance(plated, bool):
+        ok = False
         diags.error("invalid_pin_override",
                     f"component {ref!r} pin {number!r}: override.plated must be a boolean, "
                     f"got {plated!r}", pad_ref)
+    return ok
 
 
 # ---------------------------------------------------------------------------
