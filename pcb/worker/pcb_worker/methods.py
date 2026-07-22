@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import board_model, drc, footprints, gerber, kicad, libcheck, resolve
+from . import board_model, compile_board, drc, footprints, gerber, kicad, libcheck, resolve
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -285,6 +285,36 @@ def _resolve(params: dict) -> dict:
 
     stats = resolve.board_graphic_stats(resolved)
     return {"ok": True, "result": {"ok": True, "board": resolved, "stats": stats}}
+
+
+def _normalize(params: dict) -> dict:
+    """Rewrite a canonical SOURCE board to its normalized v2 shape (the sync-back
+    the compile fold never persists): legacy inline per-pin fabrication geometry is
+    dropped when redundant, migrated to a typed `override` when it diverges, and
+    fail-closes the WHOLE normalize when ambiguous.
+
+    PURE — returns the normalized board for the host to persist; NEVER writes to
+    disk. Mirrors _resolve/_gerbers: a parse failure or a fail-closed (ambiguous)
+    normalize is a structured {ok:False, error} reply, never a crash. On success the
+    reply carries the normalized board plus the diagnostics as `warnings` (same
+    _diagnostic_to_payload shape the gerbers/kicad handlers use)."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    normalized, diagnostics = compile_board.normalize_board(board)
+    payloads = [_diagnostic_to_payload(d) for d in diagnostics]
+    if normalized is None:
+        # Fail-closed: an ambiguous pin makes the WHOLE normalize a failure. Surface
+        # it with the same {ok:False, error} shape _resolve uses, carrying the
+        # serialized fail-closed diagnostics so the caller sees exactly what blocked.
+        errors = [p for p in payloads if p.get("severity") == "error"]
+        message = "; ".join(p["message"] for p in errors) or "board could not be normalized"
+        return {"ok": False, "error": {
+            "kind": "normalize", "message": message, "diagnostics": errors or payloads}}
+    return {"ok": True, "result": {
+        "ok": True, "board": normalized, "warnings": payloads}}
 
 
 _NO_LIBRARY_DATA_HINT = (
@@ -1080,6 +1110,7 @@ _HANDLERS = {
     "gerbers": lambda req: _gerbers(req.get("params") or {}),
     "drc": lambda req: _drc(req.get("params") or {}),
     "resolve": lambda req: _resolve(req.get("params") or {}),
+    "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),

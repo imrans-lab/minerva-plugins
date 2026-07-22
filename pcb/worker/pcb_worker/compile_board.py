@@ -36,7 +36,8 @@ authority is imported from ``geometry`` and recorded on board provenance.
 
 from __future__ import annotations
 
-from dataclasses import replace
+import copy
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Union
 
@@ -810,52 +811,129 @@ def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
     return validated_overrides
 
 
+# Outcome tags for the ONE shared per-pin inline-geometry classification.
+_INLINE_REDUNDANT = "redundant"
+_INLINE_MIGRATE = "migrate"
+_INLINE_AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class _InlineClassification:
+    """Single-source verdict for a pin's legacy inline fabrication geometry.
+
+    Exactly ONE outcome:
+      * REDUNDANT → the inline merely restates the footprint; drop it;
+      * MIGRATE   → divergent-but-verifiable; ``override`` is the synthesized typed
+        override ``{k: pin[k] for k in inline_keys}`` to apply/persist, and
+        ``conflicts`` describes the divergence (for the INFO message);
+      * AMBIGUOUS → ``error_code``/``error_message`` carry the fail-closed diagnostic.
+
+    Both the compile fold (:func:`_fold_inline_geometry`) and the source rewrite
+    (:func:`normalize_board`) consume THIS one verdict, so an override the compiler
+    APPLIES and an override normalize PERSISTS can never disagree (SB4 anti-drift)."""
+    outcome: str
+    override: Union[dict, None] = None
+    conflicts: tuple = ()
+    error_code: Union[str, None] = None
+    error_message: Union[str, None] = None
+
+
+def _classify_inline_geometry(pin: dict, pad: Union[PadDefinition, None], number: str,
+                              inline_keys: list[str], ref: str) -> _InlineClassification:
+    """Classify a pin's legacy inline fabrication geometry into exactly one of
+    REDUNDANT / MIGRATE / AMBIGUOUS (SB3/SB5, super-review 019f8b7fc709; SB4).
+
+    PURE: records no diagnostics and mutates nothing — the caller acts on the
+    verdict.  This is the SOLE inline-geometry decision; the compile fold and
+    normalize both call it, so their outcomes cannot drift.  A MIGRATE override
+    that would form an illegal PlacedPad still fail-closes downstream in
+    ``_apply_pin_override`` (compile) — not double-handled here."""
+    fields = ", ".join(inline_keys)
+    if pad is None:
+        return _InlineClassification(
+            _INLINE_AMBIGUOUS,
+            error_code="inline_geometry_without_pad",
+            error_message=(
+                f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+                f"({fields}) has no matching footprint pad to correlate the deviation "
+                f"against — ambiguous, cannot migrate to a typed pin `override`"))
+    if not _inline_geometry_verifiable(pin, inline_keys):
+        return _InlineClassification(
+            _INLINE_AMBIGUOUS,
+            error_code="inline_geometry_unverifiable",
+            error_message=(
+                f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+                f"({fields}) is not verifiable (wrong value type) — cannot form a "
+                f"trustworthy typed pin `override`"))
+    conflicts = _inline_geometry_conflicts(pin, pad, number)
+    if not conflicts:
+        return _InlineClassification(_INLINE_REDUNDANT)  # restates the footprint
+    # Divergent but valid → migrate the authored deviation into a typed override.
+    synthesized = {k: pin[k] for k in inline_keys}
+    return _InlineClassification(_INLINE_MIGRATE, override=synthesized,
+                                 conflicts=tuple(conflicts))
+
+
+def _migrated_info_message(ref: str, number: str, inline_keys: list[str],
+                           conflicts) -> str:
+    """The ONE ``inline_pin_geometry_migrated`` INFO text, shared by the compile
+    fold and normalize so both report an auto-migration identically (naming the
+    fields + the divergences)."""
+    fields = ", ".join(inline_keys)
+    return (f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+            f"({fields}) diverges from the locked footprint and was auto-migrated to "
+            f"a typed pin `override` so the authored deviation is PRESERVED and applied "
+            f"({'; '.join(conflicts)}); migrate the source to a typed override")
+
+
+def _override_apply_rejection(pad: PadDefinition, override: dict,
+                              ref: str) -> Union[Diagnostic, None]:
+    """Dry-run a synthesized MIGRATE override through the SAME apply-time guards
+    :func:`_apply_pin_override` enforces during placement (positive/range checks,
+    drill-on-drill-less-pad, one-axis-size), against the resolved *pad*.  Returns
+    the first ERROR diagnostic the apply would raise, else ``None``.
+
+    normalize uses this so it NEVER persists an override the compiler would reject
+    at apply time (which would mint a source every future compile fail-closes on).
+    Reuses ``_apply_pin_override`` verbatim — no forked validity logic."""
+    probe = _Diagnostics()
+    size = (float(pad.size[0]), float(pad.size[1])) if pad.size is not None else None
+    _apply_pin_override(pad, override, size, pad.drill, None, pad.pad_type, ref, probe)
+    for d in probe.tuple():
+        if d.severity is DiagnosticSeverity.ERROR:
+            return d
+    return None
+
+
 def _fold_inline_geometry(pin: dict, pad: Union[PadDefinition, None], number: str,
                           inline_keys: list[str], ref: str,
                           validated_overrides: dict[str, dict], diags: _Diagnostics) -> None:
-    """Classify a pin's legacy inline fabrication geometry and act on it
-    (SB3/SB5, super-review 019f8b7fc709).  Called only when the pin carries inline
-    fab keys and NO explicit typed `override`.  Three outcomes:
+    """Compile-path adapter over the shared :func:`_classify_inline_geometry`
+    verdict.  Called only when the pin carries inline fab keys and NO explicit
+    typed `override`.  Three outcomes:
 
-      * redundant (a matching pad, verifiable, and no divergence) → dropped
-        silently — the inline merely restates the footprint;
-      * divergent but VERIFIABLE → synthesize the typed override ``{k: pin[k]}``
-        (the authored v1 fab intent), validate it, add it to *validated_overrides*
-        so the IR APPLIES the deviation, and emit INFO
-        ``inline_pin_geometry_migrated``.  A synthesized override that would form
-        an illegal PlacedPad still fail-closes downstream in ``_apply_pin_override``
-        — not double-handled here;
-      * ambiguous → fail-closed ERROR: no matching footprint pad
-        (``inline_geometry_without_pad``) or an unverifiable/wrong-type value
-        (``inline_geometry_unverifiable``).  A v1→v2 migration must never mint a
-        v2 board whose fabrication meaning silently changed."""
-    fields = ", ".join(inline_keys)
+      * redundant → dropped silently — the inline merely restates the footprint;
+      * divergent but VERIFIABLE → the synthesized typed override is validated and
+        added to *validated_overrides* so the IR APPLIES the deviation, with an
+        INFO ``inline_pin_geometry_migrated`` (the authored v1 fab intent is
+        PRESERVED, never ignored);
+      * ambiguous → fail-closed ERROR (``inline_geometry_without_pad`` /
+        ``inline_geometry_unverifiable``); a v1→v2 migration must never mint a v2
+        board whose fabrication meaning silently changed."""
     pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
-    if pad is None:
-        diags.error("inline_geometry_without_pad",
-                    f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
-                    f"({fields}) has no matching footprint pad to correlate the deviation "
-                    f"against — ambiguous, cannot migrate to a typed pin `override`", pad_ref)
-        return
-    if not _inline_geometry_verifiable(pin, inline_keys):
-        diags.error("inline_geometry_unverifiable",
-                    f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
-                    f"({fields}) is not verifiable (wrong value type) — cannot form a "
-                    f"trustworthy typed pin `override`", pad_ref)
-        return
-    conflicts = _inline_geometry_conflicts(pin, pad, number)
-    if not conflicts:
+    verdict = _classify_inline_geometry(pin, pad, number, inline_keys, ref)
+    if verdict.outcome == _INLINE_REDUNDANT:
         return  # redundant — restates the footprint; drop silently
-    # Divergent but valid → migrate the authored deviation into a typed override
-    # and APPLY it (preserved as intentional fabrication design, not ignored).
-    synthesized = {k: pin[k] for k in inline_keys}
+    if verdict.outcome == _INLINE_AMBIGUOUS:
+        diags.error(verdict.error_code, verdict.error_message, pad_ref)
+        return
+    # MIGRATE — synthesize+apply the authored deviation as a typed override.
+    synthesized = verdict.override
     if _validate_pin_override(synthesized, ref, number, diags):
         validated_overrides[number] = synthesized
         diags.info("inline_pin_geometry_migrated",
-                   f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
-                   f"({fields}) diverges from the locked footprint and was auto-migrated to "
-                   f"a typed pin `override` so the authored deviation is PRESERVED and applied "
-                   f"({'; '.join(conflicts)}); migrate the source to a typed override", pad_ref)
+                   _migrated_info_message(ref, number, inline_keys, verdict.conflicts),
+                   pad_ref)
 
 
 def _inline_geometry_conflicts(pin: dict, pad: PadDefinition, number: str) -> list[str]:
@@ -1464,6 +1542,155 @@ def compile_board(
         return ResolutionFailure(diagnostics=_ensure_error(diags))
 
     return ResolutionSuccess(board=resolved, diagnostics=diags.tuple())
+
+
+def _footprint_pad_map(fp_ref, *, library_root, lock) -> dict[str, PadDefinition]:
+    """Resolve a component's footprint to a ``{pad_number: PadDefinition}`` map via
+    the SAME footprint-resolution path the compile fold classifies against
+    (``resolve_footprint`` → :class:`FootprintDefinition`), so normalize correlates
+    each pin to exactly the pad the compiler would.  Best-effort: a missing/invalid
+    ref or an unresolvable footprint yields an empty map, which makes any inline pin
+    on that component AMBIGUOUS (fail-closed), never silently migrated.  Marker
+    adjudication is intentionally skipped — it only strips feature markers and never
+    alters pad drill/size geometry, which is all the classification reads."""
+    if not isinstance(fp_ref, str) or not fp_ref:
+        return {}
+    try:
+        parsed = resolve_footprint(fp_ref, library_root=library_root, lock=lock)
+    except (FootprintLookupError, KeyError, TypeError, ValueError, OSError):
+        # Unresolvable OR a malformed lock entry (missing path/sha, wrong type) →
+        # no pads. Any inline pin then classifies AMBIGUOUS (fail-closed), never
+        # silently migrated. A broken lock must not crash normalize.
+        return {}
+    definition = FootprintDefinition.from_kicad_parsed(parsed)
+    pad_by_number: dict[str, PadDefinition] = {}
+    for pad in definition.pads:
+        pad_by_number.setdefault(pad.number, pad)
+    return pad_by_number
+
+
+def normalize_board(
+    source_board: dict,
+    *,
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+) -> tuple[Union[dict, None], tuple[Diagnostic, ...]]:
+    """Rewrite a canonical SOURCE board to its normalized v2 shape — the "sync-back"
+    the compile fold never performs (SB4).  PURE: returns ``(normalized_board,
+    diagnostics)`` and NEVER writes to disk; the host owns persistence.
+
+    For each component pin that carries legacy inline fabrication geometry
+    (``_INLINE_FAB_KEYS``) and NO explicit typed ``override``, the SAME
+    :func:`_classify_inline_geometry` verdict the compiler applies decides:
+
+      * REDUNDANT → delete the inline fab keys (it merely restated the footprint);
+        records an INFO ``inline_pin_geometry_dropped``;
+      * MIGRATE   → set ``pin["override"]`` to the synthesized typed override and
+        delete the inline fab keys (the authored deviation is PRESERVED as the
+        sanctioned v2 channel); records an INFO ``inline_pin_geometry_migrated``
+        (same code/shape the compile fold emits).  The synthesized override is
+        FIRST dry-run through the compiler's apply-time guards
+        (:func:`_override_apply_rejection`): if the compiler would reject it at
+        apply (non-positive value, drill on a drill-less pad, …), the pin is
+        fail-closed instead — normalize must never persist a source every future
+        compile rejects;
+      * AMBIGUOUS → a fail-closed ERROR diagnostic; the WHOLE normalize fails (no
+        board returned) — a half-normalized source is worse than none.
+
+    A pin that already has an explicit ``override`` keeps it, but any legacy inline
+    fab keys it ALSO carries are SUPERSEDED by the override (fold doctrine) and are
+    dropped (INFO ``inline_pin_geometry_dropped``).  A pin with no inline geometry
+    is left UNCHANGED.  The returned board is a CLEAN canonical source (SAME shape
+    as the input): footprints are resolved for CLASSIFICATION only and their pads
+    are never leaked into the output (no ``comp["pads"]``/``graphics``).  IDEMPOTENT
+    — a second pass is a no-op (rewritten pins now carry ``override`` and/or no
+    inline).
+
+    INVARIANT: a board normalize SUCCEEDS on must compile; a board compile rejects,
+    normalize also rejects."""
+    diags = _Diagnostics()
+    if not isinstance(source_board, dict):
+        diags.error("invalid_board", "board must be a mapping", _board_ref())
+        return None, diags.tuple()
+
+    try:
+        lock = load_lockfile(lockfile)
+        if not isinstance(lock, dict):
+            raise ValueError("lockfile is not a mapping")
+    except Exception as exc:  # noqa: BLE001 — structured error, not a crash
+        diags.error("lock_unreadable", f"footprint lock could not be loaded: {exc}", _board_ref())
+        return None, diags.tuple()
+
+    # Never mutate the caller's input; footprint resolution reads a fresh copy so
+    # no resolve artifact can leak into the returned board.
+    board = copy.deepcopy(source_board)
+    components = board.get("components")
+    if not isinstance(components, list):
+        return board, diags.tuple()  # nothing to normalize
+
+    # Collect mutations first and apply them ONLY if no pin was ambiguous, so an
+    # ambiguous board is returned un-normalized (fail-closed, all-or-nothing).
+    pending: list[tuple[dict, list[str], Union[dict, None]]] = []
+    for comp in components:
+        if not isinstance(comp, dict):
+            continue
+        pins = comp.get("pins")
+        if not isinstance(pins, list):
+            continue
+        ref = comp.get("ref") if isinstance(comp.get("ref"), str) else ""
+        pad_by_number = _footprint_pad_map(comp.get("footprint"),
+                                           library_root=library_root, lock=lock)
+        for pin in pins:
+            if not isinstance(pin, dict):
+                continue
+            number = str(pin.get("number"))
+            pad_ref = SourceRef(EntityKind.PAD, f"{ref}.{number}", f"component {ref}")
+            inline_keys = [k for k in _INLINE_FAB_KEYS if pin.get(k) is not None]
+
+            # An explicit override supersedes any legacy inline (fold doctrine):
+            # keep the override, drop the superseded inline keys.
+            if pin.get("override") is not None:
+                if inline_keys:
+                    diags.info("inline_pin_geometry_dropped",
+                               f"component {ref!r} pin {number!r}: legacy inline fabrication "
+                               f"geometry ({', '.join(inline_keys)}) is superseded by the pin's "
+                               f"explicit typed `override` and was dropped from the source", pad_ref)
+                    pending.append((pin, inline_keys, None))
+                continue
+
+            if not inline_keys:
+                continue  # no inline geometry — leave as-is
+
+            pad = pad_by_number.get(number)
+            verdict = _classify_inline_geometry(pin, pad, number, inline_keys, ref)
+            if verdict.outcome == _INLINE_AMBIGUOUS:
+                diags.error(verdict.error_code, verdict.error_message, pad_ref)
+                continue
+            if verdict.outcome == _INLINE_REDUNDANT:
+                diags.info("inline_pin_geometry_dropped",
+                           f"component {ref!r} pin {number!r}: legacy inline fabrication geometry "
+                           f"({', '.join(inline_keys)}) is redundant (restates the locked "
+                           f"footprint) and was dropped from the source", pad_ref)
+                pending.append((pin, inline_keys, None))
+            else:  # MIGRATE — but never persist an override the compiler would reject.
+                rejection = _override_apply_rejection(pad, verdict.override, ref)
+                if rejection is not None:
+                    diags.error(rejection.code, rejection.message, rejection.source_ref)
+                    continue
+                diags.info("inline_pin_geometry_migrated",
+                           _migrated_info_message(ref, number, inline_keys, verdict.conflicts),
+                           pad_ref)
+                pending.append((pin, inline_keys, verdict.override))
+
+    if diags.has_error:
+        return None, diags.tuple()  # ambiguous → whole normalize fails, no board
+
+    for pin, inline_keys, override in pending:
+        for key in inline_keys:
+            del pin[key]
+        if override is not None:
+            pin["override"] = override
+    return board, diags.tuple()
 
 
 def _resolve_side(raw_layer, ref: str, comp_ref: SourceRef,
