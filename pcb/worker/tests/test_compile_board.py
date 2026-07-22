@@ -748,10 +748,10 @@ def test_diff_pair_rule_loss_is_warned_when_cam_only():
 # --- Round-4 regressions (review 625) -------------------------------------
 
 
-@pytest.mark.parametrize("version", [0, 2, 3, "1", 1.0, True])
-def test_non_v1_schema_version_fails_closed(version):
+@pytest.mark.parametrize("version", [0, 3, "1", 1.0, True])
+def test_unsupported_schema_version_fails_closed(version):
     board = _one_component_board("R_0805")
-    board["version"] = version   # non-int, or int != 1, or float 1.0 — all rejected
+    board["version"] = version   # non-int, int not in {1,2}, or float 1.0 — all rejected
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
     assert "unsupported_schema_version" in _errors(result)
@@ -763,6 +763,88 @@ def test_missing_version_fails_closed():
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
     assert "unsupported_schema_version" in _errors(result)
+
+
+# --- Round C1: schema-v2 fail-closed persistent identity (019f802ca3af) -------
+
+
+def _mid(entity: str, n: int = 0) -> str:
+    """A deterministic minted-shape id ('<entity>:<32 hex>') for tests — the
+    shape the Go migration writes (migrate.go) and the v2 compiler requires."""
+    return f"{entity}:{n:032x}"
+
+
+def _v2_full_board() -> dict:
+    """A properly-migrated v2 board: persisted minted ids on the board and every
+    trace/via/hole."""
+    board = _one_component_board("R_0805")
+    board["version"] = 2
+    board["id"] = _mid("board", 1)
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["traces"] = [{"id": _mid("trace", 1), "net": "N1", "layer": "top", "width_mm": 0.3,
+                        "points": [{"x_mm": 1, "y_mm": 1}, {"x_mm": 3, "y_mm": 3}]}]
+    board["vias"] = [{"id": _mid("via", 1), "net": "N1", "x_mm": 5, "y_mm": 5,
+                      "diameter_mm": 0.8, "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}]
+    board["mounting_holes"] = [{"id": _mid("hole", 1), "x_mm": 2, "y_mm": 2, "diameter_mm": 3.0}]
+    return board
+
+
+def test_v2_board_with_minted_ids_compiles_and_reads_persisted_identity():
+    result = compile_board(_v2_full_board())
+    assert isinstance(result, ResolutionSuccess)
+    codes = [d.code for d in result.diagnostics]
+    assert "unminted_persistent_id" not in codes
+    # v2 ids are persisted identity, so the ordinal-bridge INFO must NOT fire.
+    assert "ordinal_ids" not in codes
+    # The resolved IR carries the PERSISTED ids verbatim (not re-derived).
+    assert result.board.id == _mid("board", 1)
+    assert result.board.traces[0].id == _mid("trace", 1)
+    assert result.board.vias[0].id == _mid("via", 1)
+    assert result.board.holes[0].id == _mid("hole", 1)
+
+
+def test_v2_board_missing_board_id_fails_closed():
+    board = _v2_full_board()
+    del board["id"]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unminted_persistent_id" in _errors(result)
+
+
+@pytest.mark.parametrize("bad_id", [None, "", "trace_1", "trace:XYZ", "TRACE:" + "0" * 32,
+                                    "trace:" + "0" * 31, "via:" + "0" * 32])
+def test_v2_board_unminted_trace_id_fails_closed(bad_id):
+    board = _v2_full_board()
+    if bad_id is None:
+        del board["traces"][0]["id"]
+    else:
+        board["traces"][0]["id"] = bad_id
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unminted_persistent_id" in _errors(result)
+
+
+def test_v2_board_unminted_via_and_hole_ids_fail_closed():
+    board = _v2_full_board()
+    board["vias"][0]["id"] = "via_legacy"
+    board["mounting_holes"][0]["id"] = "hole:not-hex-at-all-nope-nope-nope!!"
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unminted_persistent_id" in _errors(result)
+
+
+def test_v1_board_still_emits_ordinal_bridge_not_id_requirement():
+    # A v1 board with a trace keeps the permissive bridge: it does NOT require a
+    # minted id and DOES emit the ordinal_ids INFO handoff diagnostic.
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["traces"] = [{"net": "N1", "layer": "top", "width_mm": 0.3,
+                        "points": [{"x_mm": 1, "y_mm": 1}, {"x_mm": 3, "y_mm": 3}]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    codes = [d.code for d in result.diagnostics]
+    assert "ordinal_ids" in codes
+    assert "unminted_persistent_id" not in codes
 
 
 def test_non_string_component_value_fails_closed():

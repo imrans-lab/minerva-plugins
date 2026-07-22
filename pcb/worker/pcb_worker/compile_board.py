@@ -774,13 +774,13 @@ def _extract_points(raw_points, ordinal: int, ref: SourceRef,
 
 
 def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
-                  diags: _Diagnostics) -> tuple[ResolvedTrace, ...]:
+                  schema_version: int, diags: _Diagnostics) -> tuple[ResolvedTrace, ...]:
     traces: list[ResolvedTrace] = []
     for ordinal, raw in enumerate(_dict_items(board, "traces", "trace", diags)):
         net_name = raw.get("net")
         net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
         trace_ref = SourceRef(EntityKind.TRACE, f"trace:{ordinal}", f"net {net_name}")
-        if not _authored_id_ok(raw, trace_ref, diags):
+        if not _validate_child_id("trace", raw, trace_ref, schema_version, diags):
             continue
         if net_id is None:
             diags.error("trace_unknown_net", f"trace {ordinal}: references unknown net {net_name!r}", trace_ref)
@@ -800,7 +800,7 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
         if len(points) < 2:
             diags.error("trace_degenerate", f"trace {ordinal}: needs at least two points, got {len(points)}", trace_ref)
             continue
-        trace_id = _authored_or_ordinal_id("trace", board_id, raw, net_id, ordinal)
+        trace_id = _resolve_child_id("trace", board_id, raw, (net_id, ordinal), schema_version)
         segments: list[ResolvedTraceSegment] = []
         degenerate = False
         for seg_ordinal, (a, b) in enumerate(zip(points, points[1:])):
@@ -819,13 +819,13 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
 
 
 def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
-                diags: _Diagnostics) -> tuple[ResolvedVia, ...]:
+                schema_version: int, diags: _Diagnostics) -> tuple[ResolvedVia, ...]:
     vias: list[ResolvedVia] = []
     for ordinal, raw in enumerate(_dict_items(board, "vias", "via", diags)):
         net_name = raw.get("net")
         net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
         via_ref = SourceRef(EntityKind.VIA, f"via:{ordinal}", f"net {net_name}")
-        if not _authored_id_ok(raw, via_ref, diags):
+        if not _validate_child_id("via", raw, via_ref, schema_version, diags):
             continue
         if net_id is None:
             diags.error("via_unknown_net", f"via {ordinal}: references unknown net {net_name!r}", via_ref)
@@ -849,7 +849,7 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
                         f"through-via across [top, bottom]", via_ref)
             continue
         vias.append(ResolvedVia(
-            id=_authored_or_ordinal_id("via", board_id, raw, net_id, ordinal),
+            id=_resolve_child_id("via", board_id, raw, (net_id, ordinal), schema_version),
             position=(float(x), float(y)),
             diameter_mm=float(diameter),
             drill_mm=float(drill),
@@ -863,7 +863,8 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
     return tuple(vias)
 
 
-def _build_holes(board: dict, board_id: str, diags: _Diagnostics) -> tuple[ResolvedHole, ...]:
+def _build_holes(board: dict, board_id: str, schema_version: int,
+                 diags: _Diagnostics) -> tuple[ResolvedHole, ...]:
     holes: list[ResolvedHole] = []
     # The canonical worker accepts mounting_holes plus the npth_holes/pth_holes
     # aliases producers use when they pre-split plating (board-yaml.md).
@@ -874,7 +875,7 @@ def _build_holes(board: dict, board_id: str, diags: _Diagnostics) -> tuple[Resol
             if diameter is None:
                 diameter = raw.get("drill_mm")
             hole_ref = SourceRef(EntityKind.HOLE, f"{key}:{ordinal}")
-            if not _authored_id_ok(raw, hole_ref, diags):
+            if not _validate_child_id("hole", raw, hole_ref, schema_version, diags):
                 continue
             if not (_is_number(x) and _is_number(y) and _is_positive_number(diameter)):
                 diags.error("hole_bad_geometry",
@@ -887,12 +888,30 @@ def _build_holes(board: dict, board_id: str, diags: _Diagnostics) -> tuple[Resol
                             f"{key}[{ordinal}]: plated must be a boolean, got {raw_plated!r}", hole_ref)
                 continue
             holes.append(ResolvedHole(
-                id=_authored_or_ordinal_id("hole", board_id, raw, key, ordinal),
+                id=_resolve_child_id("hole", board_id, raw, (key, ordinal), schema_version),
                 feature=RoundHole(position=(float(x), float(y)), diameter_mm=float(diameter)),
                 plated=raw_plated,
                 kind=HoleKind.PTH if raw_plated else HoleKind.NPTH,
             ))
     return tuple(holes)
+
+
+_MINTED_HEX_LEN = 32  # 128-bit mint → 32 lowercase hex chars
+
+
+def _is_minted_id(entity: str, value) -> bool:
+    """True iff ``value`` is a well-formed minted id ``"<entity>:<32 lc hex>"`` —
+    byte-for-byte the shape the Go v1→v2 migration writes (migrate.go
+    ``isMintedID``).  Anything else (absent, a legacy ordinal-shaped ``trace_1``,
+    a foreign shape) is UNMINTED, which for a v2 board is fatal."""
+    if not isinstance(value, str):
+        return False
+    prefix = entity + ":"
+    if len(value) != len(prefix) + _MINTED_HEX_LEN:
+        return False
+    if not value.startswith(prefix):
+        return False
+    return all(c in "0123456789abcdef" for c in value[len(prefix):])
 
 
 def _authored_id_ok(raw: dict, ref: SourceRef, diags: _Diagnostics) -> bool:
@@ -904,6 +923,35 @@ def _authored_id_ok(raw: dict, ref: SourceRef, diags: _Diagnostics) -> bool:
                     f"authored id {authored!r} must be a non-empty string", ref)
         return False
     return True
+
+
+def _validate_child_id(entity: str, raw: dict, ref: SourceRef,
+                       schema_version: int, diags: _Diagnostics) -> bool:
+    """Version-dispatched id precondition for a trace/via/hole.
+
+    v2 REQUIRES a persisted minted id and fails closed without one — a v2 board
+    that reaches an identity-dependent compile without minted ids has skipped the
+    migration, and routing/DRC against unstable identity is the exact hazard this
+    gate exists to prevent.  v1 keeps the permissive authored-or-ordinal bridge."""
+    if schema_version >= 2:
+        pid = raw.get("id")
+        if not _is_minted_id(entity, pid):
+            diags.error("unminted_persistent_id",
+                        f"{entity} lacks a persisted minted id (got {pid!r}); a v2 board must be "
+                        f"migrated (ids minted at pcb.deserialize) before an identity-dependent "
+                        f"compile", ref)
+            return False
+        return True
+    return _authored_id_ok(raw, ref, diags)
+
+
+def _resolve_child_id(entity: str, board_id: str, raw: dict,
+                      ordinal_parts: tuple, schema_version: int) -> str:
+    """The final child id: the persisted minted id in v2 (already validated by
+    :func:`_validate_child_id`), or the v1 authored/ordinal-derived id."""
+    if schema_version >= 2:
+        return raw["id"]
+    return _authored_or_ordinal_id(entity, board_id, raw, *ordinal_parts)
 
 
 def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_parts) -> str:
@@ -946,12 +994,14 @@ def compile_board(
         return ResolutionFailure(diagnostics=diags.tuple())
 
     # Dispatch on the schema version FIRST: the canonical contract types version
-    # as an integer, so it must be PRESENT and exactly int 1 — a missing field,
-    # a float 1.0, or any non-1 value must never be interpreted as v1 (review 630).
+    # as an integer, so it must be PRESENT and exactly int 1 or int 2 — a missing
+    # field, a float 1.0, or any other value must never be interpreted (review
+    # 630).  v1 keeps the ordinal-id bridge; v2 REQUIRES persisted minted ids
+    # (fail-closed, item 019f802ca3af Round C).
     version = board.get("version")
-    if type(version) is not int or version != 1:
+    if type(version) is not int or version not in (1, 2):
         diags.error("unsupported_schema_version",
-                    f"canonical board schema requires an integer version 1 (present); got "
+                    f"canonical board schema requires an integer version 1 or 2 (present); got "
                     f"{version!r} of type {type(version).__name__}", _board_ref())
         return ResolutionFailure(diagnostics=diags.tuple())
 
@@ -968,9 +1018,23 @@ def compile_board(
     name = board.get("name")
     if not isinstance(name, str) or not name:
         diags.error("invalid_board", "board has no name", _board_ref())
-    # Board-namespace every derived child id so the same ref/net/trace in two
-    # different boards yields distinct ids (K2 review 623 R4).
-    board_id = derive_id("board", str(name or "<unnamed>"), str(board.get("version") or 1))
+    # The board id namespaces every derived child id (net/component/segment) so
+    # the same ref/net in two boards yields distinct ids (K2 review 623 R4).
+    #   v2: it MUST be the persisted, minted board id (fail-closed) — the whole
+    #       point of the migration is that identity is stable, not re-derived.
+    #   v1: it stays content-derived (the pre-migration bridge).
+    if version >= 2:
+        persisted_board_id = board.get("id")
+        if _is_minted_id("board", persisted_board_id):
+            board_id = persisted_board_id
+        else:
+            diags.error("unminted_persistent_id",
+                        f"v2 board lacks a persisted minted id (got {persisted_board_id!r}); it must "
+                        f"be migrated (ids minted at pcb.deserialize) before an identity-dependent "
+                        f"compile", _board_ref())
+            board_id = derive_id("board", str(name or "<unnamed>"), "unminted-v2")
+    else:
+        board_id = derive_id("board", str(name or "<unnamed>"), str(version))
 
     # Reject recognized-but-unsupported board features by PRESENCE, not
     # truthiness — an empty-mapping ``zones: {}`` is still a declaration we must
@@ -1084,11 +1148,14 @@ def compile_board(
                 pad_ids_by_net.setdefault(pad.net_id, []).append(pad.id)
 
     nets = _finalize_nets(net_descriptors, pad_ids_by_net, resolved_pins, components, diags)
-    traces = _build_traces(board, board_id, net_id_by_name, diags)
-    vias = _build_vias(board, board_id, net_id_by_name, diags)
-    holes = _build_holes(board, board_id, diags)
+    traces = _build_traces(board, board_id, net_id_by_name, version, diags)
+    vias = _build_vias(board, board_id, net_id_by_name, version, diags)
+    holes = _build_holes(board, board_id, version, diags)
 
-    if traces or vias or holes:
+    # The ordinal-id bridge diagnostic is a v1-only artifact: v2 ids are the
+    # persisted minted identity (validated above), not ordinal-derived, so there
+    # is nothing to warn about.
+    if version == 1 and (traces or vias or holes):
         diags.info("ordinal_ids",
                    "trace/via/hole ids are ordinal-derived and board-namespaced but NOT stable "
                    "under reorder/insert; persisted authored identity is a YAML-v2 handoff that "
