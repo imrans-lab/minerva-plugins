@@ -295,3 +295,37 @@ func TestViaTentedRoundTrips(t *testing.T) {
 		t.Fatalf("explicit tented:false not serialized:\n%s", out)
 	}
 }
+
+// E1 (finding 019f8b7fb07e): a .minpcb import must map board holes into the TYPED
+// collections (folded to mounting_holes), not park them in Extra — since the hole
+// keys are now modeled, mergeExtra would drop the Extra copy and the holes would
+// vanish on the next JSON marshal.
+func TestImportMinpcbHolesSurviveJSONMarshal(t *testing.T) {
+	src := `{"board_name":"H","board_width":20,"board_height":20,
+	  "mounting_holes":[{"x_mm":1,"y_mm":1,"diameter_mm":3.2}],
+	  "pth_holes":[{"x_mm":2,"y_mm":2,"diameter_mm":2.0}],
+	  "npth_holes":[{"x_mm":3,"y_mm":3,"diameter_mm":3.0}]}`
+	b, _, err := ImportMinpcb([]byte(src))
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(b.MountingHoles) != 3 {
+		t.Fatalf("want 3 folded holes, got %d (extra=%v)", len(b.MountingHoles), b.Extra)
+	}
+	if b.Extra["mounting_holes"] != nil || b.Extra["pth_holes"] != nil || b.Extra["npth_holes"] != nil {
+		t.Fatalf("holes leaked into Extra: %v", b.Extra)
+	}
+	// The load-bearing assertion: the holes SURVIVE a JSON round-trip (mergeExtra no
+	// longer drops them, because they are in the modeled field, not Extra).
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Board
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(back.MountingHoles) != 3 {
+		t.Fatalf("holes lost through JSON marshal: got %d", len(back.MountingHoles))
+	}
+}

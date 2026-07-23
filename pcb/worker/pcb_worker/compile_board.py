@@ -701,6 +701,17 @@ def _apply_pin_override(
         drill = replace(drill, plated=plated)
         pad_type = "thru_hole" if plated else "np_thru_hole"
 
+    # Validate the FOLDED override state, not just each field in isolation: an
+    # override that AUTHORS a copper annulus while also making the pad UNPLATED
+    # (np_thru_hole) is contradictory — an unplated hole carries no copper ring, so
+    # the annulus would be silently discarded at emission (finding 019f8fe77068).
+    # Fail CLOSED rather than drop the authored value.
+    if pad_type == "np_thru_hole" and override.get("annulus_diameter_mm") is not None:
+        diags.error("override_annulus_on_unplated_pad",
+                    f"component {ref!r} pin {pad.number!r}: override authors "
+                    f"annulus_diameter_mm but the pad is unplated (np_thru_hole) — an "
+                    f"unplated hole carries no copper ring; drop one or the other", pad_ref)
+
     return size, drill, annulus, pad_type
 
 

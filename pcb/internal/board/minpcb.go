@@ -25,6 +25,7 @@ var knownRootFields = map[string]bool{
 	"version": true, "board_name": true, "board_width": true,
 	"board_height": true, "grid_size": true, "layers": true,
 	"components": true, "nets": true, "traces": true, "vias": true,
+	"mounting_holes": true, "pth_holes": true, "npth_holes": true,
 	"annotations": true, "route_hints": true,
 }
 
@@ -122,6 +123,22 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 		b.Vias = vias
 	}
 
+	// --- board-level holes: map into the TYPED collections, not Extra. A .minpcb's
+	// holes were parked in Extra under mounting_holes/pth_holes/npth_holes, but those
+	// are now modeled keys, so mergeExtra drops the Extra copy (modeled field wins) —
+	// the holes vanished on the next JSON marshal (finding 019f8b7fb07e). NormalizeHoles
+	// (below) then folds the aliases into the canonical MountingHoles.
+	for _, hk := range []struct {
+		key string
+		dst *[]Hole
+	}{{"mounting_holes", &b.MountingHoles}, {"pth_holes", &b.PTHHoles}, {"npth_holes", &b.NPTHHoles}} {
+		if raw, ok := root[hk.key]; ok {
+			if err := json.Unmarshal(raw, hk.dst); err != nil {
+				return nil, nil, fmt.Errorf("board: parse minpcb %s: %w", hk.key, err)
+			}
+		}
+	}
+
 	// --- annotations / route_hints: opaque passthrough (id→object → []Blob) ---
 	if raw, ok := root["annotations"]; ok {
 		blobs, err := importBlobMap(raw)
@@ -152,9 +169,9 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 		warnings = append(warnings, fmt.Sprintf("non-canonical top-level field %q preserved as passthrough", k))
 	}
 
-	// (No hole fold here: ImportMinpcb maps only its known scalar/component/net/
-	// trace/via fields; a .minpcb's board-level holes ride through Extra as a v1
-	// board and are folded+minted on the next canonical YAML re-ingest.)
+	// Fold the pth_holes / npth_holes aliases into canonical mounting_holes so an
+	// imported board carries ONE validated hole collection (finding 019f8b7fb07e).
+	NormalizeHoles(b)
 	return b, warnings, nil
 }
 

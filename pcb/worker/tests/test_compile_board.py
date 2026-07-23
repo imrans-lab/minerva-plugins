@@ -728,6 +728,30 @@ def test_plated_hole_with_annulus_compiles_and_carries_it():
     assert hole.plated and hole.annulus_mm == 3.5
 
 
+def test_override_annulus_on_unplated_pad_fails_closed():
+    # E2 (finding 019f8fe77068): an override that AUTHORS an annulus AND plates the
+    # pad OFF is contradictory — an unplated hole carries no copper ring, so the
+    # annulus would be silently discarded. Validate the FOLDED state, fail closed.
+    board = _one_component_board(
+        "Package_DIP:DIP-6_W7.62mm_Socket",
+        pins=[{"number": "1", "override": {"annulus_diameter_mm": 3.0, "plated": False}}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "override_annulus_on_unplated_pad" in _errors(result)
+
+
+def test_override_plated_off_without_annulus_is_ok():
+    # The complement: overriding ONLY plated:false (no authored annulus) is a
+    # legitimate "make this a mechanical hole" — the footprint annulus drops naturally,
+    # no contradiction.
+    board = _one_component_board(
+        "Package_DIP:DIP-6_W7.62mm_Socket",
+        pins=[{"number": "1", "override": {"plated": False}}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    assert "override_annulus_on_unplated_pad" not in _errors(result)
+
+
 def test_via_bad_tented_fails_closed():
     # D4 (finding 019f8fe7cbaf): a non-bool `tented` on a via fails closed (mirrors
     # hole_bad_plating). A string "false" must NOT coerce.
@@ -1271,14 +1295,17 @@ def test_override_plated_false_makes_np_thru_hole_true_keeps_thru_hole():
 
 
 def test_full_override_sets_all_fields():
+    # An annulus is copper, so it may only co-exist with a PLATED pad (E2 rejects
+    # annulus + plated:false as contradictory); this exercises all override fields on
+    # a valid plated pad. (plated:false without an annulus is covered separately.)
     over = _placed_by_number(compile_board(_th_board(
         {"drill_mm": 1.1, "pad_width_mm": 3.0, "pad_height_mm": 3.2,
-         "annulus_diameter_mm": 2.0, "plated": False})))
+         "annulus_diameter_mm": 2.0, "plated": True})))
     p = over["1"]
     assert p.drill.size == (1.1, 1.1)
     assert p.size == (3.0, 3.2)
     assert p.annulus == 2.0
-    assert p.pad_type == "np_thru_hole" and p.drill.plated is False
+    assert p.pad_type == "thru_hole" and p.drill.plated is True
 
 
 def test_override_nonpositive_numeric_fails_closed_not_applied():
