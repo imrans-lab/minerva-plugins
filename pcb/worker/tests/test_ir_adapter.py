@@ -599,11 +599,11 @@ def test_kicad_adapter_emits_mounting_hole_component():
 
 
 def test_kicad_adapter_plated_mounting_hole_is_thru_hole():
-    """A PLATED (PTH) board hole projects to a thru_hole pad (copper annulus) — the
-    emitter supplies its 2x-drill nominal annulus since a RoundHole carries only its
-    drill diameter, and the footprint sits at the hole's real position."""
+    """A PLATED (PTH) board hole projects to a thru_hole pad whose copper size is the
+    hole's AUTHORED annulus (finding 019f8dbb7104) — NOT an invented 2x-drill nominal
+    — and the footprint sits at the hole's real position."""
     board = _board("R_0805")
-    board["pth_holes"] = [{"x_mm": 3.0, "y_mm": 4.0, "diameter_mm": 2.0}]
+    board["pth_holes"] = [{"x_mm": 3.0, "y_mm": 4.0, "diameter_mm": 2.0, "annulus_mm": 3.0}]
     resolved = _resolve(board)
     d = ir_to_kicad_board_dict(resolved)
     (mh,) = [c for c in d["components"] if c["footprint"] == "MountingHole"]
@@ -612,7 +612,7 @@ def test_kicad_adapter_plated_mounting_hole_is_thru_hole():
     assert pad["position"] == {"x": 0.0, "y": 0.0}          # footprint-LOCAL origin
     assert (mh["x_mm"], mh["y_mm"]) == (3.0, 4.0)           # footprint at the hole
     assert pad["drill"] == {"x": 2.0, "y": 2.0}
-    assert "size" not in pad  # omitted -> emitter's 2x-drill nominal annulus
+    assert pad["size"] == {"width": 3.0, "height": 3.0}     # the AUTHORED annulus
 
 
 def test_kicad_adapter_mounting_holes_are_ordered_and_multiple():
@@ -693,12 +693,31 @@ def test_kicad_pth_mounting_hole_roundtrips_through_drill_export(tmp_path):
     """ORACLE: a PLATED board hole lands in the PLATED drill file (thru_hole),
     correct diameter + absolute position, DRC-clean."""
     board = _board("R_0805")
-    board["pth_holes"] = [{"x_mm": 12.0, "y_mm": 20.0, "diameter_mm": 2.5}]
+    board["pth_holes"] = [{"x_mm": 12.0, "y_mm": 20.0, "diameter_mm": 2.5,
+                           "annulus_mm": 3.5}]
     pcb = _emit_kicad(board)
     npth, pth = _export_drills(pcb, tmp_path)
     assert _drill_hits(pth) == [("2.500", 12.0, -20.0)]
     assert _drill_hits(npth) == []
     assert run_drc_on_pcb_text(pcb, name="brd").clean
+
+
+def test_plated_board_hole_annulus_agrees_across_emitters():
+    """finding 019f8dbb7104: a plated board hole's AUTHORED annulus reaches BOTH
+    emitters as the SAME copper — gerber flashes a copper annulus of that diameter on
+    F.Cu AND B.Cu, kicad emits a thru_hole of the same size. No emitter invents (the
+    old divergence: kicad 2x-drill copper vs gerber drill-only)."""
+    board = _board("R_0805")
+    board["pth_holes"] = [{"x_mm": 10.0, "y_mm": 10.0, "diameter_mm": 2.0,
+                           "annulus_mm": 3.4}]
+    resolved = _resolve(board)
+    kd = ir_to_kicad_board_dict(resolved)
+    (mh,) = [c for c in kd["components"] if c["footprint"] == "MountingHole"]
+    assert mh["pads"][0]["size"] == {"width": 3.4, "height": 3.4}   # kicad annulus
+    g = gerber.build_gerbers(ir_to_board_dict(resolved), name="brd")
+    for layer in ("brd-F_Cu.gbr", "brd-B_Cu.gbr"):
+        assert re.search(r"%ADD\d+C,3\.4\b", g[layer]), (
+            f"{layer} missing the authored 3.4 copper annulus on the plated hole")
 
 
 def test_kicad_adapter_does_not_mutate_the_resolved_board():

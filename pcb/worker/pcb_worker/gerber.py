@@ -530,6 +530,25 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 continue
             plated = bool(hole.get("plated", default_plated))
             g.holes.append((hx, hy, dia, plated))
+            annulus = _opt_num(hole.get("annulus_mm"))
+            if plated and annulus is not None and annulus > 0:
+                # AUTHORED copper ring on BOTH copper layers + a matching mask
+                # opening (finding 019f8dbb7104) — the SAME annulus the kicad
+                # thru_hole emits, so the two emitters agree; no invented copper.
+                g.th_annuli.append((hx, hy, annulus, "ComponentPad"))
+                mask_d = _mask_dim(annulus, mask_clearance, f"{key}[{idx}]", "")
+                g.mask_top.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
+                g.mask_bot.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
+            elif plated:
+                # A plated hole with no authored annulus reaches here only via a
+                # direct build_gerbers(raw dict) caller — the live path COMPILES
+                # first and fail-closes (plated_hole_needs_annulus). Emit drill-only
+                # but WARN, never silently (matches this loop's drill_feature_unemitted
+                # convention): copper is fabrication-critical.
+                g.warn("plated_hole_no_annulus_copper",
+                       f"plated hole {key}[{idx}] at ({hx}, {hy}) has no annulus_mm — "
+                       f"drilled but NO copper ring emitted (author annulus_mm)",
+                       SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
 
     return g
 

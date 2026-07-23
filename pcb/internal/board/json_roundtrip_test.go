@@ -64,6 +64,7 @@ func TestJSONRoundTripPreservesExtraNested(t *testing.T) {
 		}},
 		MountingHoles: []Hole{{
 			ID: "hole:" + repeat32, XMM: 9, YMM: 9, DiameterMM: 3.2,
+			Plated: true, AnnulusMM: 3.6,
 			Extra: map[string]interface{}{"standoff": "M3"},
 		}},
 		Extra: map[string]interface{}{"source_tool": "pcb-architect", "revision": 7.0},
@@ -101,6 +102,14 @@ func TestJSONRoundTripPreservesExtraNested(t *testing.T) {
 	}
 	if back.MountingHoles[0].Extra["standoff"] != "M3" {
 		t.Fatalf("Hole Extra lost: %#v", back.MountingHoles[0].Extra)
+	}
+	// The first-class authored annulus (finding 019f8dbb7104) round-trips as a
+	// MODELED key, not via Extra (it must not leak into Extra on the way back).
+	if back.MountingHoles[0].AnnulusMM != 3.6 {
+		t.Fatalf("Hole AnnulusMM lost: %v", back.MountingHoles[0].AnnulusMM)
+	}
+	if _, leaked := back.MountingHoles[0].Extra["annulus_mm"]; leaked {
+		t.Fatalf("annulus_mm leaked into Extra (should be a modeled key)")
 	}
 
 	// Full semantic round-trip (all modeled fields + extras) is identical.

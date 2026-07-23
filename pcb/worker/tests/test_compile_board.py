@@ -691,6 +691,43 @@ def test_string_plated_fails_closed():
     assert "hole_bad_plating" in _errors(result)
 
 
+# --- C4 (finding 019f8dbb7104): a plated board hole's copper annulus is AUTHORED,
+# never invented, so both emitters emit the SAME copper. ---
+
+
+def test_plated_hole_without_annulus_fails_closed():
+    # No invented copper on a fabrication-critical plated hole.
+    board = _minimal_board(pth_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "plated_hole_needs_annulus" in _errors(result)
+
+
+def test_plated_hole_annulus_must_exceed_drill():
+    board = _minimal_board(pth_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0,
+                                       "annulus_mm": 2.0}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "hole_annulus_not_bigger_than_drill" in _errors(result)
+
+
+def test_unplated_hole_with_annulus_fails_closed():
+    board = _minimal_board(mounting_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2,
+                                            "annulus_mm": 4.0}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unplated_hole_has_annulus" in _errors(result)
+
+
+def test_plated_hole_with_annulus_compiles_and_carries_it():
+    board = _minimal_board(pth_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0,
+                                       "annulus_mm": 3.5}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    (hole,) = result.board.holes
+    assert hole.plated and hole.annulus_mm == 3.5
+
+
 def test_malformed_lock_entry_fails_closed(tmp_path):
     import json
     lock = tmp_path / "bad.lock.json"

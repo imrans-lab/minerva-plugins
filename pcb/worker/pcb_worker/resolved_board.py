@@ -814,6 +814,12 @@ class ResolvedHole:
     feature: HoleFeature
     plated: bool
     kind: HoleKind
+    # AUTHORED copper annulus diameter for a plated board-level hole (finding
+    # 019f8dbb7104): both emitters emit exactly this — no emitter invents a 2x-drill
+    # nominal (kicad) while the other emits drill-only (gerber). None on an unplated
+    # hole (no copper); the compiler fail-closes a plated hole that authors none, so
+    # a plated hole reaching fabrication always carries an authored annulus.
+    annulus_mm: float | None = None
 
     def __post_init__(self) -> None:
         _nonempty(self.id, "ResolvedHole.id")
@@ -822,6 +828,16 @@ class ResolvedHole:
             raise ValueError("NPTH holes cannot be plated")
         if self.kind is HoleKind.PTH and not self.plated:
             raise ValueError("PTH holes must be plated")
+        if self.annulus_mm is not None:
+            _positive(self.annulus_mm, "ResolvedHole.annulus_mm")
+            if not self.plated:
+                raise ValueError("an unplated hole cannot carry a copper annulus")
+        elif self.plated:
+            # The IR itself enforces the "author, not invent" invariant (finding
+            # 019f8dbb7104): a plated hole MUST carry an authored annulus, so an
+            # emitter can never reach a plated hole without one (no bare -O-strippable
+            # assert downstream, no silently-copperless plated hole).
+            raise ValueError("a plated hole must carry an authored copper annulus")
 
 
 class ZoneKind(str, Enum):

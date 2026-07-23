@@ -222,6 +222,12 @@ type Hole struct {
 	DiameterMM float64 `json:"diameter_mm,omitempty" yaml:"diameter_mm,omitempty"`
 	DrillMM    float64 `json:"drill_mm,omitempty" yaml:"drill_mm,omitempty"`
 	Plated     bool    `json:"plated,omitempty" yaml:"plated,omitempty"`
+	// AnnulusMM is the AUTHORED copper-ring diameter for a PLATED board hole
+	// (finding 019f8dbb7104). The Python compiler fail-closes a plated hole without
+	// it and both fab emitters emit exactly this ring — no invented copper. Absent
+	// on an unplated hole. Modeled first-class (not Extra) so it is a documented,
+	// known source key on both sides of the codec.
+	AnnulusMM float64 `json:"annulus_mm,omitempty" yaml:"annulus_mm,omitempty"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }

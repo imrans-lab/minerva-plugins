@@ -56,6 +56,7 @@ vias:
      from_layer: top, to_layer: bottom}
 mounting_holes:                # optional board-level drilled holes (not on a pad)
   - {x_mm: 5, y_mm: 5, diameter_mm: 3.2, plated: false}   # plated defaults to false (NPTH)
+  - {x_mm: 8, y_mm: 5, diameter_mm: 2.0, plated: true, annulus_mm: 3.0}  # PTH: annulus_mm REQUIRED
 annotations: [...]             # OPAQUE passthrough (see below)
 route_hints: [...]             # OPAQUE passthrough (see below)
 ```
@@ -64,9 +65,14 @@ route_hints: [...]             # OPAQUE passthrough (see below)
 
 `Pin.drill_mm` / `Pin.annulus_diameter_mm` / `Pin.plated` and the board-level
 `mounting_holes` list (`[]Hole`: `x_mm`, `y_mm`, `diameter_mm`, `drill_mm`,
-`plated`) are first-class as of docket `019eb47ddebc` — they formalize the
-through-hole pad geometry and non-plated mounting holes the gerber spike carried
-through `Extra`. The `pcb_gerbers` exporter uses them to build copper annuli,
+`plated`, `annulus_mm`) are first-class as of docket `019eb47ddebc` — they
+formalize the through-hole pad geometry and non-plated mounting holes the gerber
+spike carried through `Extra`. A **plated** board hole MUST author `annulus_mm`
+(its copper-ring diameter, `> diameter_mm`): the copper ring is never invented, so
+both the gerber and KiCad exporters emit exactly the authored ring and cannot
+diverge (finding `019f8dbb7104`); the compiler fail-closes a plated hole without
+one, and rejects `annulus_mm` on an unplated hole. The `pcb_gerbers` exporter uses
+them to build copper annuli,
 mask openings, and the PTH/NPTH Excellon split. See `docs/gerbers.md`. The worker
 also tolerantly accepts `npth_holes` / `pth_holes` aliases via `Extra` for
 producers that pre-split the two lists.

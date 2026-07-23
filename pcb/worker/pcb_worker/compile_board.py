@@ -1226,11 +1226,39 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
                 diags.error("hole_bad_plating",
                             f"{key}[{ordinal}]: plated must be a boolean, got {raw_plated!r}", hole_ref)
                 continue
+            # AUTHORED annulus (finding 019f8dbb7104): a PLATED board hole's copper
+            # ring must be AUTHORED, not invented — so both emitters emit the SAME
+            # copper (no kicad-2x-drill vs gerber-drill-only divergence).
+            raw_annulus = raw.get("annulus_mm")
+            annulus: Union[float, None] = None
+            if raw_plated:
+                if not _is_positive_number(raw_annulus):
+                    # Fail CLOSED: no invented copper on a fabrication-critical plated
+                    # hole. The source must author annulus_mm (> the drill diameter).
+                    diags.error("plated_hole_needs_annulus",
+                                f"{key}[{ordinal}]: a plated hole must author a positive "
+                                f"'annulus_mm' (its copper ring diameter); got {raw_annulus!r}",
+                                hole_ref)
+                    continue
+                if float(raw_annulus) <= float(diameter):
+                    diags.error("hole_annulus_not_bigger_than_drill",
+                                f"{key}[{ordinal}]: annulus_mm {raw_annulus} must exceed the "
+                                f"drill diameter {diameter} to leave a copper ring", hole_ref)
+                    continue
+                annulus = float(raw_annulus)
+            elif raw_annulus is not None:
+                # An unplated hole carries no copper — an authored annulus is a
+                # contradiction, not silently dropped.
+                diags.error("unplated_hole_has_annulus",
+                            f"{key}[{ordinal}]: an unplated hole cannot carry an "
+                            f"'annulus_mm' (no copper); got {raw_annulus!r}", hole_ref)
+                continue
             holes.append(ResolvedHole(
                 id=_resolve_child_id("hole", board_id, raw, (key, ordinal), schema_version),
                 feature=RoundHole(position=(float(x), float(y)), diameter_mm=float(diameter)),
                 plated=raw_plated,
                 kind=HoleKind.PTH if raw_plated else HoleKind.NPTH,
+                annulus_mm=annulus,
             ))
     return tuple(holes)
 

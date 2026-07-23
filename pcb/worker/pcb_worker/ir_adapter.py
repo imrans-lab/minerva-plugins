@@ -237,12 +237,17 @@ def _hole_dict(hole: ResolvedHole) -> dict:
         raise ValueError(
             f"hole {hole.id!r} has a non-round feature {type(feature).__name__} the "
             f"round-only fabrication path cannot drill — refusing to drop it silently")
-    return {
+    out = {
         "x_mm": feature.position[0],
         "y_mm": feature.position[1],
         "diameter_mm": feature.diameter_mm,
         "plated": hole.plated,
     }
+    # AUTHORED copper annulus for a plated board hole (finding 019f8dbb7104): the
+    # gerber bridge emits this exact ring on both copper layers — no invented 2x-drill.
+    if hole.annulus_mm is not None:
+        out["annulus_mm"] = hole.annulus_mm
+    return out
 
 
 # ResolvedHole kind -> the board-dict key gerber._harvest reads.
@@ -443,10 +448,12 @@ def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
     Plating drives the padstack via ``pad_source._from_resolved`` +
     ``kicad._footprint``: a NON-plated hole (NPTH / an unplated MOUNTING hole) is a
     bare ``np_thru_hole`` with size == drill (no copper, no net); a PLATED hole
-    (PTH) is a ``thru_hole`` with a copper annulus (the emitter's 2x-drill nominal,
-    since a RoundHole carries only its drill diameter, no separate annulus datum).
-    The empty pad NUMBER matches KiCad's real mounting-hole footprints. FAIL-CLOSED
-    on a non-round feature stays intact (the round-only drill seal)."""
+    (PTH) is a ``thru_hole`` whose copper size is the hole's AUTHORED
+    ``annulus_mm`` (finding 019f8dbb7104) — NOT an invented 2x-drill nominal, so the
+    kicad annulus matches the gerber annulus exactly. The empty pad NUMBER matches
+    KiCad's real mounting-hole footprints. FAIL-CLOSED on a non-round feature stays
+    intact (the round-only drill seal); a plated hole always carries an authored
+    annulus by the time it reaches here (the compiler fail-closes otherwise)."""
     feature = hole.feature
     if not isinstance(feature, RoundHole):
         raise ValueError(
@@ -461,9 +468,14 @@ def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
         "drill": {"x": diameter, "y": diameter},
         "layers": ["*.Cu", "*.Mask"],
     }
-    # NPTH/unplated: size == drill (no copper ring). PLATED: omit size so the
-    # emitter supplies its 2x-drill nominal annulus (no annulus datum in the IR).
-    if not hole.plated:
+    # NPTH/unplated: size == drill (no copper ring). PLATED: size == the AUTHORED
+    # annulus (its copper ring diameter), which pad_source._from_resolved reads as
+    # the thru_hole annulus — the same value the gerber bridge emits. A plated
+    # ResolvedHole is GUARANTEED to carry an annulus (ResolvedHole.__post_init__
+    # enforces it), so this is total, not a strippable assert.
+    if hole.plated:
+        pad["size"] = {"width": hole.annulus_mm, "height": hole.annulus_mm}
+    else:
         pad["size"] = {"width": diameter, "height": diameter}
     return {
         "ref": ref,
