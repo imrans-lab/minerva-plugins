@@ -176,6 +176,48 @@ def _require_smd_size(ref: Any, pad: PadGeom) -> None:
 _SHAPE_TOL_MM = 1e-6
 
 
+# Two through-hole land dims within this tolerance are treated as equal (a round
+# annulus); beyond it the land is genuinely oblong. Shared by BOTH emitters via
+# th_land so gerber and kicad cannot drift on the decision.
+_TH_OBLONG_TOL_MM = 1e-6
+
+# The pad-shape families for which a genuinely OBLONG through-hole land has a
+# faithful non-round copper aperture in both emitters. A KiCad ``circle`` cannot be
+# oblong; ``custom`` / ``trapezoid`` / any unknown token has no faithful oblong
+# aperture — an oblong land carrying one is fail-closed by _require_faithful_shape
+# (never silently coerced, never silently circularized).
+_TH_SHAPEABLE = ("oval", "roundrect", "rect")
+
+
+def th_land(pad: "PadGeom") -> tuple[bool, str, float, float, "float | None"]:
+    """Decide a through-hole pad's COPPER-LAND geometry — the SINGLE source of
+    truth both fab emitters consume, so gerber and kicad can never disagree on
+    when/how a TH land is shaped (the anti-drift point of finding 019f8b7fd295).
+
+    Returns ``(shaped, shape, width, height, corner_rratio)``.
+
+    A TH land is SHAPED — faithful oblong copper honoring width AND height — when it
+    declares both dims, they DIFFER (``abs(w-h) > tol``), AND the declared shape is a
+    shapeable family (``_TH_SHAPEABLE``). Oblongness is the reliable size signal:
+    ``resolve`` defaults an unshaped pad's ``shape`` to ``rect``
+    (pad_source._from_resolved) and sets its round-annulus diameter to the pad
+    WIDTH, so a 1.2x2.0 land silently collapsed to a round dia-1.2 annulus, dropping
+    the height (the finding). An equal-axis land stays the historical round annulus
+    (``shaped=False``, byte-identical goldens). The round DRILL is unchanged in both
+    cases (SUPPORTED_HOLE_SHAPES) — only the LAND takes a shape.
+
+    This function NEVER coerces an unrecognized shape: an oblong land whose shape is
+    not shapeable (circle / custom / unknown) has no faithful oblong aperture and is
+    fail-closed UPSTREAM by ``_require_faithful_shape`` before emission, so the
+    ``shaped=False`` return for such a land is unreachable on the gated emit path
+    (returning round there would circularize — the exact defect this fixes)."""
+    w, h = pad.width, pad.height
+    if (w is not None and h is not None and abs(w - h) > _TH_OBLONG_TOL_MM
+            and pad.shape in _TH_SHAPEABLE):
+        return (True, pad.shape, w, h, pad.corner_rratio)
+    return (False, "circle", 0.0, 0.0, None)
+
+
 def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
     """Fail-closed: SMD pad geometry an emitter cannot render faithfully must
     error WITH CONTEXT rather than silently corrupt or flatten copper (the K3
@@ -188,11 +230,24 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
         rectangle (the exact defect class this gate exists to kill) or crash the
         aperture writer with no pad context.
 
-    Only shaped SMD lands are checked — a through-hole pad's copper is a
-    drill-derived annulus, not a shaped land, so it is exempt (mirrors
-    ``_require_smd_size``). The raw pad dict is needed because a non-numeric
-    ``corner_rratio`` is coerced to None before it reaches PadGeom."""
+    A THROUGH-HOLE pad's copper is a round annulus UNLESS its land is oblong
+    (th_land). An equal-axis TH land is a round annulus regardless of shape token,
+    so it is exempt. An OBLONG TH land, however, must have a shapeable family
+    (``_TH_SHAPEABLE``) to be emitted faithfully — a ``circle`` cannot be oblong and
+    a ``custom``/unknown token has no faithful oblong copper aperture, so such a land
+    fails CLOSED here rather than being silently circularized (dropping copper
+    extent) or coerced to an obround (misrepresenting a custom outline) — finding
+    019f8b7fd295, "faithfully OR fail closed". The raw pad dict is needed because a
+    non-numeric ``corner_rratio`` is coerced to None before it reaches PadGeom."""
     if pad.drill is not None:
+        if (pad.width is not None and pad.height is not None
+                and abs(pad.width - pad.height) > _TH_OBLONG_TOL_MM
+                and pad.shape not in _TH_SHAPEABLE):
+            raise ValueError(
+                f"component {ref!r} pad {pad.number!r}: oblong through-hole land "
+                f"{pad.width}x{pad.height} has shape {pad.shape!r}, which has no "
+                f"faithful oblong copper aperture (shapeable: {sorted(_TH_SHAPEABLE)}) "
+                f"— refusing to circularize (drop copper extent) or coerce it")
         return
     if pad.shape not in SUPPORTED_PAD_SHAPES:
         # An unknown SMD shape would sail through to the emitter's aperture/token

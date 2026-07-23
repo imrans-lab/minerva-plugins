@@ -255,12 +255,14 @@ def _valid_mask_pad_board(shape: str, *, solder_mask_margin: float | None = None
 
 
 def _th_pad_board(*, w: float = 2.0, h: float | None = None, drill: float = 1.0,
-                  solder_mask_margin: float | None = None) -> dict:
-    """A minimal board with one resolved THROUGH-HOLE pad (round annulus). Its
-    resolved copper width doubles as the annulus diameter (pad_source contract).
-    `h` defaults to `w` (a square/round land); pass h != w for an OBLONG land."""
+                  shape: str = "circle", solder_mask_margin: float | None = None) -> dict:
+    """A minimal board with one resolved THROUGH-HOLE pad. Its resolved copper width
+    doubles as the round-annulus diameter (pad_source contract). `h` defaults to `w`
+    (a square/round land); pass h != w for an OBLONG land. An oblong land needs a
+    SHAPEABLE `shape` (oval/roundrect/rect) to emit faithfully; the default `circle`
+    is round-only (an oblong circle fails closed — that is the point)."""
     height = h if h is not None else w
-    pad = {"number": "1", "type": "thru_hole", "shape": "circle",
+    pad = {"number": "1", "type": "thru_hole", "shape": shape,
            "position": {"x": 0, "y": 0}, "size": {"width": w, "height": height},
            "drill": {"x": drill, "y": drill}, "layers": ["F.Cu", "B.Cu"]}
     if solder_mask_margin is not None:
@@ -947,15 +949,18 @@ def test_kicad_refless_component_degenerate_silk_warns_with_sentinel():
 
 
 # ===========================================================================
-# W1 (Codex MUST_FIX A1+A2). A1: an SMD shape outside SUPPORTED_PAD_SHAPES was
-# silently flattened to a rectangle by BOTH emitters with no diagnostic — the
-# exact silent-flatten this gate kills, on fabrication-critical copper — so it
-# must now fail CLOSED. A2: a genuinely OBLONG through-hole land (w != h) is
-# circularized to a round annulus (out of the round-only TH capability); that is
-# a real copper-extent loss, so it must WARN with pad context but never raise
-# (failing closed would reject every oval-pad connector). The signal is
-# dimensional (w != h), NOT the shape token — a fallback TH pad defaults to
-# shape "rect" while being a perfectly round land, so a token test would flood.
+# W1 A1: an SMD shape outside SUPPORTED_PAD_SHAPES was silently flattened to a
+# rectangle by BOTH emitters with no diagnostic — the exact silent-flatten this
+# gate kills, on fabrication-critical copper — so it must fail CLOSED.
+#
+# C2 (Codex finding 019f8b7fd295, supersedes the old A2 WARN): a genuinely OBLONG
+# through-hole land (w != h) was circularized to a round annulus, DROPPING copper
+# extent, with only a warning. Copper is FABRICATION_CRITICAL, so the doctrine is
+# emit FAITHFULLY or fail closed — a warn is neither. Both emitters now emit the
+# oblong land faithfully (obround / roundrect / rect copper on both layers via the
+# shared pad_source.th_land; the drill stays round), so there is nothing to warn
+# about. The signal is dimensional (w != h), NOT the shape token — a fallback TH
+# pad defaults to shape "rect" while being a perfectly round land.
 # ===========================================================================
 
 
@@ -975,21 +980,58 @@ def test_every_supported_smd_shape_still_passes_the_guard():
         kicad.generate(_valid_pad_board(shape), base_name="conf")
 
 
-def test_oblong_th_pad_warns_not_raises_gerber():
-    result = gerber.build_gerbers(_th_pad_board(w=2.0, h=1.0), name="conf")
-    warns = [d for d in result.diagnostics if d.code == "th_pad_shape_circularized"]
-    assert warns, "an oblong TH land must warn (the round annulus drops an extent)"
-    assert warns[0].severity is DiagnosticSeverity.WARNING
-    assert warns[0].source_ref.entity_kind == "pad"
-    assert "conf-F_Cu.gbr" in result  # still emits the annulus (never fatal)
+def test_oblong_th_pad_emits_faithful_land_gerber():
+    # An oblong TH land keeps BOTH extents as an obround on F.Cu AND B.Cu — never a
+    # collapsed round annulus — with NO circularization warning (finding 019f8b7fd295).
+    result = gerber.build_gerbers(_th_pad_board(w=2.0, h=1.0, shape="oval"), name="conf")
+    assert "th_pad_shape_circularized" not in [d.code for d in result.diagnostics]
+    for layer in ("conf-F_Cu.gbr", "conf-B_Cu.gbr"):
+        assert re.search(r"%ADD\d+O,2\.0X1\.0\*%", result[layer]), (
+            f"{layer} must carry the faithful obround TH land, not a round annulus")
 
 
-def test_oblong_th_pad_warns_not_raises_kicad():
-    result = kicad.generate(_th_pad_board(w=2.0, h=1.0), base_name="conf")
-    warns = [d for d in result.diagnostics if d.code == "th_pad_shape_circularized"]
-    assert warns and warns[0].severity is DiagnosticSeverity.WARNING
-    assert warns[0].source_ref.entity_kind == "pad"
-    assert "conf.kicad_pcb" in result
+def test_oblong_th_pad_emits_faithful_land_kicad():
+    result = kicad.generate(_th_pad_board(w=2.0, h=1.0, shape="oval"), base_name="conf")
+    assert "th_pad_shape_circularized" not in [d.code for d in result.diagnostics]
+    pcb = result["conf.kicad_pcb"]
+    assert "thru_hole oval" in pcb        # faithful shaped TH copper, not circle
+    assert "(size 2.0 1.0)" in pcb        # both extents preserved
+    assert "(drill 1.0)" in pcb           # the drill stays round
+
+
+@pytest.mark.parametrize("bad_shape", ["circle", "custom", "trapezoid"])
+def test_oblong_th_pad_unshapeable_fails_closed_both_emitters(bad_shape):
+    # "faithfully OR fail closed": an OBLONG land whose shape has no faithful oblong
+    # aperture (a circle cannot be oblong; custom/unknown has no aperture) must fail
+    # CLOSED, never silently circularize (drop copper) or coerce to an obround.
+    board = _th_pad_board(w=2.0, h=1.0, shape=bad_shape)
+    with pytest.raises(ValueError, match="no.*faithful oblong copper aperture"):
+        gerber.build_gerbers(board, name="conf")
+    with pytest.raises(ValueError, match="no.*faithful oblong copper aperture"):
+        kicad.generate(board, base_name="conf")
+
+
+def test_th_land_decision_truth_table():
+    # The SINGLE shared th_land decision BOTH emitters consume (anti-drift). Shaped
+    # iff OBLONG (w != h) AND a shapeable family (oval/roundrect/rect) — NO coercion:
+    # an oblong circle/custom land is NOT shaped here (it is fail-closed upstream by
+    # _require_faithful_shape). Equal-axis or missing-dim lands are round annuli.
+    from types import SimpleNamespace
+
+    from pcb_worker.pad_source import th_land
+
+    def pad(w, h, shape="rect", rr=None):
+        return SimpleNamespace(width=w, height=h, shape=shape, corner_rratio=rr)
+
+    assert th_land(pad(2.0, 1.0, "oval")) == (True, "oval", 2.0, 1.0, None)
+    assert th_land(pad(2.0, 1.0, "rect")) == (True, "rect", 2.0, 1.0, None)
+    assert th_land(pad(2.0, 1.0, "roundrect", 0.25)) == (True, "roundrect", 2.0, 1.0, 0.25)
+    assert th_land(pad(2.0, 1.0, "circle"))[0] is False   # oblong circle: gate's job
+    assert th_land(pad(2.0, 1.0, "custom"))[0] is False    # unknown: gate's job
+    assert th_land(pad(1.5, 1.5, "rect"))[0] is False      # equal-axis
+    assert th_land(pad(1.5, 1.5, "oval"))[0] is False
+    assert th_land(pad(None, 1.0, "oval"))[0] is False     # missing dim
+    assert th_land(pad(2.0, None, "oval"))[0] is False
 
 
 def test_square_th_pad_does_not_warn_either_emitter():

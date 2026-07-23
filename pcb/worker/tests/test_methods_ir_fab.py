@@ -270,28 +270,58 @@ def test_clean_compiled_board_forwards_empty_warnings_generate():
     assert resp["result"]["warnings"] == []
 
 
-# The reply's `warnings` merges BOTH channels: the compile diagnostics (above) AND
-# the EMITTER's own diagnostics. `th_pad_shape_circularized` is raised by the
-# gerber/kicad emitters (NOT by compile) when an oblong TH land is circularized to
-# a round annulus, so these prove the emitter warning channel still reaches the
-# methods reply post-cutover — the capability the removed test_cam_conformance
-# methods-forwarding tests covered, now on the real IR path.
+# C2 (finding 019f8b7fd295): the real JST connector's OBLONG through-hole lands are
+# now emitted FAITHFULLY end-to-end through methods — the obround/roundrect copper
+# reaches the reply's gerber + .kicad_pcb bytes instead of collapsing to a round
+# Ø-width annulus, and there is no th_pad_shape_circularized warning. These prove
+# the finding on Codex's exact footprint. (Post-cutover NO seed footprint triggers
+# an emitter-channel warning through the strict IR path — the removed
+# th_pad_shape_circularized was the only one — so the emitter-FORWARDING line is
+# covered by the seam test below.)
+
+_JST = "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal"
 
 
-def test_emitter_channel_warning_forwarded_gerbers():
-    resp = _call("gerbers", {"board": _board(
-        "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal"), "name": "brd"})
+def test_real_jst_oblong_th_emitted_faithfully_gerbers():
+    resp = _call("gerbers", {"board": _board(_JST), "name": "brd"})
     assert resp["ok"] is True, resp
-    codes = {w["code"] for w in resp["result"]["warnings"]}
-    assert "th_pad_shape_circularized" in codes, codes
+    assert "th_pad_shape_circularized" not in {w["code"] for w in resp["result"]["warnings"]}
+    fcu = next(v for k, v in resp["result"]["files"].items() if "F_Cu" in k)
+    assert re.search(r"%ADD\d+O,1\.2X", fcu), (
+        "JST oblong TH land must reach F.Cu as an obround (both extents), not Ø1.2")
 
 
-def test_emitter_channel_warning_forwarded_generate():
-    resp = _call("generate", {"board": _board(
-        "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal")})
+def test_real_jst_oblong_th_emitted_faithfully_generate():
+    resp = _call("generate", {"board": _board(_JST)})
     assert resp["ok"] is True, resp
-    codes = {w["code"] for w in resp["result"]["warnings"]}
-    assert "th_pad_shape_circularized" in codes, codes
+    assert "th_pad_shape_circularized" not in {w["code"] for w in resp["result"]["warnings"]}
+    pcb = next(v for k, v in resp["result"]["files"].items() if k.endswith(".kicad_pcb"))
+    assert "thru_hole oval" in pcb  # faithful shaped TH copper, not a round annulus
+
+
+def test_emitter_diagnostics_forwarded_through_methods(monkeypatch):
+    # The reply merges the EMITTER's own `.diagnostics` (methods._gerbers:
+    # getattr(files, "diagnostics", [])) — a channel distinct from the compile
+    # diagnostics tested above. Post-cutover no seed footprint triggers an emitter
+    # warning through the strict IR path, so this fakes the emitter COLLABORATOR to
+    # carry a synthetic emitter diagnostic and asserts the forwarding line delivers
+    # it to the reply. (The emitters' own warning production is covered directly in
+    # test_cam_conformance; this isolates the methods-level forwarding contract.)
+    from pcb_worker import gerber as gerber_mod
+    from pcb_worker.resolved_board import Diagnostic, DiagnosticSeverity, EntityKind, SourceRef
+    real = gerber_mod.build_gerbers
+
+    def fake(board_dict, *a, **k):
+        res = real(board_dict, *a, **k)
+        res.diagnostics.append(Diagnostic(
+            DiagnosticSeverity.WARNING, "synthetic_emitter_warning", "seam probe",
+            SourceRef(EntityKind.PAD, "X1.1", "1")))
+        return res
+
+    monkeypatch.setattr(gerber_mod, "build_gerbers", fake)
+    resp = _call("gerbers", {"board": _board("R_0805"), "name": "brd"})
+    assert resp["ok"] is True, resp
+    assert "synthetic_emitter_warning" in {w["code"] for w in resp["result"]["warnings"]}
 
 
 # ---------------------------------------------------------------------------

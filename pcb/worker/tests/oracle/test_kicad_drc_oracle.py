@@ -73,3 +73,26 @@ def test_drc_returns_structured_findings_on_bad_board():
     assert findings, "expected kicad-cli DRC to flag the coincident different-net pads"
     # Each finding is a structured dict (has a type/description), not opaque text.
     assert all(isinstance(f, dict) for f in findings)
+
+
+def test_oblong_th_pad_round_trips_through_real_pcbnew():
+    """C2 (finding 019f8b7fd295): a FAITHFUL oblong through-hole land parses in the
+    REAL pcbnew parser and passes kicad-cli DRC — the process lesson requires KiCad
+    emission be validated against the real parser, not text assertions. A 2.0x1.5
+    oval PTH land with a round 0.8 drill (annulus 0.35 on the narrow axis, above the
+    0.1 minimum) must round-trip cleanly; before C2 this collapsed to a round Ø2.0
+    annulus, silently dropping the 1.5 extent."""
+    pad = {"number": "1", "type": "thru_hole", "shape": "oval",
+           "position": {"x": 0, "y": 0}, "size": {"width": 2.0, "height": 1.5},
+           "drill": {"x": 0.8, "y": 0.8}, "layers": ["F.Cu", "B.Cu"]}
+    board = {
+        "version": 2, "name": "oblong_th", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2},
+        "components": [{"ref": "P1", "footprint": "F", "x_mm": 10, "y_mm": 10,
+                        "rotation_deg": 0, "layer": "top", "pads": [pad]}],
+    }
+    result = run_drc_on_board(board, name="oblong_th")
+    assert result.clean, (
+        f"a faithful oblong-TH board must pass real-pcbnew DRC, got "
+        f"{result.violations or result.unconnected_items}")

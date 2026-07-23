@@ -54,7 +54,7 @@ from .geometry import (
     place_point as _transform_point,
     rotate_local_offset as _rotate,
 )
-from .pad_source import iter_pads
+from .pad_source import iter_pads, th_land
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -175,20 +175,6 @@ def _silk_ref(ref: Any) -> SourceRef:
     when the board component carries none). entity_id must be non-empty."""
     rid = ref if isinstance(ref, str) and ref else "<unknown>"
     return SourceRef(EntityKind.GRAPHIC, rid, "F.SilkS")
-
-
-# A through-hole land wider than tall (or vice-versa) beyond this is genuinely
-# oblong — the round annulus drops the extra extent. Below it, the land is square
-# and the circular annulus is faithful (so no warning noise on round/default pads).
-_TH_OBLONG_TOL_MM = 1e-6
-
-
-def _pad_ref(ref: Any, number: Any) -> SourceRef:
-    """A PAD SourceRef tagged with the owning component ref (non-empty sentinel
-    when absent — the same load-bearing fallback as _silk_ref) + the pad number."""
-    rid = ref if isinstance(ref, str) and ref else "<unknown>"
-    num = str(number) if number is not None and str(number) else "?"
-    return SourceRef(EntityKind.PAD, rid, num)
 
 
 def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
@@ -328,8 +314,14 @@ class _Geometry:
     def __init__(self) -> None:
         # SMD pads: (x, y, w, h, angle, top?, shape, corner_rratio)
         self.smd_pads: list[tuple[float, float, float, float, float, bool, str, float | None]] = []
-        # Through-hole pads / vias copper annuli: (x, y, diameter, function)
+        # Through-hole pads / vias copper annuli (ROUND land): (x, y, diameter, function)
         self.th_annuli: list[tuple[float, float, float, str]] = []
+        # Through-hole pads with a genuinely OBLONG copper land (th_land shaped):
+        # (x, y, shape, w, h, corner_rratio, angle). Flashed as a SHAPED land on BOTH
+        # copper layers (a TH pad's copper is present on F.Cu and B.Cu), reusing the
+        # SMD _shape_aperture family so a 1.2x2.0 land keeps both extents instead of
+        # collapsing to a round annulus (finding 019f8b7fd295). Round drill unchanged.
+        self.th_shaped: list[tuple[float, float, str, float, float, float | None, float]] = []
         # Mask openings on each side, ONE uniform tuple built through
         # _shape_aperture (R2): (x, y, shape, w, h, corner_rratio, angle). SMD
         # openings carry the pad's own shape + enlarged dims; a TH annulus arrives
@@ -430,27 +422,28 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
 
             drill = pad.drill
             if drill is not None and drill > 0:
-                # Through-hole pad: copper annulus on BOTH copper layers, mask
-                # opening on both sides, drilled hole (plated unless flagged).
-                annulus = pad.annulus or (drill * 2.0)
-                g.th_annuli.append((px, py, annulus, "ComponentPad"))
-                if (pad.width is not None and pad.height is not None
-                        and abs(pad.width - pad.height) > _TH_OBLONG_TOL_MM):
-                    # Genuinely oblong TH land circularized to a round annulus:
-                    # copper extent is dropped. Out of declared capability
-                    # (SUPPORTED_HOLE_SHAPES=round) so WARN (never fatal — failing
-                    # closed would reject every oval-pad connector), never silent.
-                    g.warn("th_pad_shape_circularized",
-                           f"through-hole pad {pad.number!r} land "
-                           f"{pad.width}x{pad.height} emitted as a round annulus "
-                           f"(dia {annulus}) — TH copper is round-only; oblong "
-                           f"extent dropped", _pad_ref(ref, pad.number))
+                # Through-hole pad: copper land on BOTH copper layers, mask opening
+                # on both sides, drilled hole (plated unless flagged). th_land is the
+                # SHARED decision (also used by kicad): a genuinely OBLONG land keeps
+                # its width x height faithfully; an equal-axis land is the historical
+                # round annulus (finding 019f8b7fd295). The DRILL stays round either way.
+                shaped, land_shape, lw, lh, lrratio = th_land(pad)
                 margin = _pad_mask_margin(pad, mask_clearance)
-                mask_d = _mask_dim(annulus, margin, ref, pad.number)
-                # TH copper is a round annulus (SUPPORTED_HOLE_SHAPES = round);
-                # the mask opening stays circular, enlarged by the per-pad margin.
-                g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
-                g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+                if shaped:
+                    # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
+                    # aperture family enlarged per axis (no more circularizing).
+                    g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
+                    mw = _mask_dim(lw, margin, ref, pad.number)
+                    mh = _mask_dim(lh, margin, ref, pad.number)
+                    g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+                    g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+                else:
+                    annulus = pad.annulus or (drill * 2.0)
+                    g.th_annuli.append((px, py, annulus, "ComponentPad"))
+                    mask_d = _mask_dim(annulus, margin, ref, pad.number)
+                    # Round land: circular mask opening, enlarged by the per-pad margin.
+                    g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+                    g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
                 g.holes.append((px, py, drill, pad.plated))
             else:
                 # SMD pad on the component's own side. width/height are
@@ -608,6 +601,16 @@ def _add_annuli(layer: DataLayer, annuli) -> None:
         layer.add_pad(Circle(dia, func), (px, py))
 
 
+def _add_shaped_th(layer: DataLayer, pads) -> None:
+    # Oblong through-hole copper LANDS, flashed on BOTH copper layers (a TH pad's
+    # copper is present on F.Cu and B.Cu). Reuses the SMD copper aperture family
+    # (func="ComponentPad,CuDef" — the TH copper function) so a shaped land keeps
+    # both extents faithfully instead of collapsing to a round annulus.
+    for (px, py, shape, w, h, rratio, angle) in pads:
+        layer.add_pad(_shape_aperture(shape, w, h, rratio, "ComponentPad,CuDef"),
+                      (px, py), angle)
+
+
 def _add_traces(layer: DataLayer, traces) -> None:
     for (x1, y1, x2, y2, w) in traces:
         layer.add_trace_line((x1, y1), (x2, y2), w, "Conductor")
@@ -671,6 +674,7 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     f_cu = DataLayer("Copper,L1,Top,Signal", negative=False)
     _add_smd(f_cu, g.smd_pads, top_wanted=True)
     _add_annuli(f_cu, g.th_annuli)
+    _add_shaped_th(f_cu, g.th_shaped)
     _add_traces(f_cu, g.traces_top)
     out["F_Cu"] = _dump(f_cu, creation_date)
 
@@ -678,6 +682,7 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     b_cu = DataLayer("Copper,L2,Bot,Signal", negative=False)
     _add_smd(b_cu, g.smd_pads, top_wanted=False)
     _add_annuli(b_cu, g.th_annuli)
+    _add_shaped_th(b_cu, g.th_shaped)
     _add_traces(b_cu, g.traces_bot)
     out["B_Cu"] = _dump(b_cu, creation_date)
 

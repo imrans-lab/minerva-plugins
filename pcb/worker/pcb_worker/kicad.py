@@ -27,7 +27,7 @@ from typing import Any
 
 from agent_router import layers as _layers
 
-from .pad_source import iter_pads
+from .pad_source import iter_pads, th_land
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -117,18 +117,6 @@ def _graphic_ref(ref: Any, layer: Any) -> SourceRef:
     return SourceRef(EntityKind.GRAPHIC, rid, detail)
 
 
-# A TH land wider than tall (or vice-versa) beyond this is genuinely oblong — the
-# round annulus drops the extra extent. Below it the land is square and the
-# circular annulus is faithful (no warning noise on round/default TH pads).
-_TH_OBLONG_TOL_MM = 1e-6
-
-
-def _pad_ref(ref: Any, number: Any) -> SourceRef:
-    """A PAD SourceRef tagged with the owning component ref (non-empty sentinel
-    when absent — same load-bearing fallback as _graphic_ref) + the pad number."""
-    rid = ref if isinstance(ref, str) and ref else "<unknown>"
-    num = str(number) if number is not None and str(number) else "?"
-    return SourceRef(EntityKind.PAD, rid, num)
 
 
 def _pad_at(px: float, py: float, rotation: float | None) -> str:
@@ -457,24 +445,32 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                     f'(layers "*.Cu" "*.Mask"))'
                 )
                 continue
-            annulus = pad.annulus if pad.annulus is not None else drill * 2
-            lines.append(
-                f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
-                f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
-                f'(layers "*.Cu"){net_expr})'
-            )
-            if (diagnostics is not None and pad.width is not None
-                    and pad.height is not None
-                    and abs(pad.width - pad.height) > _TH_OBLONG_TOL_MM):
-                # Oblong TH land circularized: out of declared capability
-                # (SUPPORTED_HOLE_SHAPES=round) → WARN (never fatal — would reject
-                # every oval-pad connector), never silent. Matches gerber._harvest.
-                diagnostics.append(Diagnostic(
-                    DiagnosticSeverity.WARNING, "th_pad_shape_circularized",
-                    f"through-hole pad {num_s!r} land {pad.width}x{pad.height} "
-                    f"emitted as a round annulus (dia {_num(annulus)}) — TH copper "
-                    f"is round-only; oblong extent dropped",
-                    _pad_ref(comp.get("ref"), num_s)))
+            # th_land is the SHARED decision (also gerber._harvest): a genuinely
+            # OBLONG land emits a faithful shaped thru_hole (KiCad renders oval/
+            # roundrect/rect TH copper natively), keeping width x height instead of
+            # collapsing to a round annulus (finding 019f8b7fd295). An equal-axis
+            # land stays the historical round `thru_hole circle`. Drill stays round.
+            shaped, land_shape, lw, lh, lrratio = th_land(pad)
+            if shaped:
+                if land_shape == "roundrect":
+                    ratio = lrratio if lrratio is not None else 0.25
+                    tok, suffix = "roundrect", f" (roundrect_rratio {ratio})"
+                elif land_shape == "oval":
+                    tok, suffix = "oval", ""
+                else:
+                    tok, suffix = "rect", ""
+                lines.append(
+                    f'    (pad "{_esc(num_s)}" thru_hole {tok} {_pad_at(px, py, pad.rotation)} '
+                    f'(size {_num(lw)} {_num(lh)}){suffix} (drill {_num(drill)}) '
+                    f'(layers "*.Cu"){net_expr})'
+                )
+            else:
+                annulus = pad.annulus if pad.annulus is not None else drill * 2
+                lines.append(
+                    f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
+                    f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
+                    f'(layers "*.Cu"){net_expr})'
+                )
         else:
             # SMD pad. width/height are guaranteed positive by
             # iter_pads(require_smd_size=True) above (a sizeless SMD pad has
