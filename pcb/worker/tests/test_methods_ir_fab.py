@@ -311,16 +311,16 @@ def test_emitter_diagnostics_forwarded_through_methods(monkeypatch):
     # test_cam_conformance; this isolates the methods-level forwarding contract.)
     from pcb_worker import gerber as gerber_mod
     from pcb_worker.resolved_board import Diagnostic, DiagnosticSeverity, EntityKind, SourceRef
-    real = gerber_mod.build_gerbers
+    real = gerber_mod.build_gerbers_ir  # C5: the live fab path is IR-native
 
-    def fake(board_dict, *a, **k):
-        res = real(board_dict, *a, **k)
+    def fake(board, *a, **k):
+        res = real(board, *a, **k)
         res.diagnostics.append(Diagnostic(
             DiagnosticSeverity.WARNING, "synthetic_emitter_warning", "seam probe",
             SourceRef(EntityKind.PAD, "X1.1", "1")))
         return res
 
-    monkeypatch.setattr(gerber_mod, "build_gerbers", fake)
+    monkeypatch.setattr(gerber_mod, "build_gerbers_ir", fake)
     resp = _call("gerbers", {"board": _board("R_0805"), "name": "brd"})
     assert resp["ok"] is True, resp
     assert "synthetic_emitter_warning" in {w["code"] for w in resp["result"]["warnings"]}

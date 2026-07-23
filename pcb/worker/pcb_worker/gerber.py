@@ -54,11 +54,22 @@ from .geometry import (
     place_point as _transform_point,
     rotate_local_offset as _rotate,
 )
-from .pad_source import iter_pads, th_land
+from .pad_source import iter_pads, placed_pad_to_geom, th_land
 from .resolved_board import (
+    ArcGeometry,
+    CircleGeometry,
     Diagnostic,
     DiagnosticSeverity,
     EntityKind,
+    HoleKind,
+    LineGeometry,
+    PlacedGraphic,
+    PolygonGeometry,
+    ProfileOutline,
+    RectOutline,
+    ResolvedBoard,
+    RoundHole,
+    Side,
     SourceRef,
 )
 
@@ -379,6 +390,115 @@ def _mask_dim(base: float, margin: float, ref: Any, number: Any) -> float:
     return dim
 
 
+def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
+               top: bool, ref, mask_clearance: float) -> list[tuple[float, float]]:
+    """Emit one component's pads into ``g`` — the SHARED, byte-sensitive pad path
+    both the loose-dict harvest (``iter_pads(comp)``) and the IR-native harvest
+    (``placed_pad_to_geom(placed)``) drive, so the two cannot diverge. ``pads`` is an
+    iterable of :class:`PadGeom`; returns the pin extents for silk courtyard sizing."""
+    pin_extents: list[tuple[float, float]] = []
+    for pad in pads:
+        ox, oy = _rotate(pad.x, pad.y, rot)
+        px, py = cx + ox, cy + oy
+        pin_extents.append((px, py))
+
+        # Aperture rotation SOURCE: each pad's own ABSOLUTE rotation
+        # (PlacedPad.rotation_deg — placement rot + footprint-local pad rot, baked by
+        # the compiler) drives its aperture so per-pad rotation reaches fab. A pad
+        # carrying no rotation falls back to the component rot (=0 under the IR's
+        # identity placement) — a no-op there.
+        pad_angle = pad.rotation if pad.rotation is not None else rot
+
+        drill = pad.drill
+        if drill is not None and drill > 0:
+            # Through-hole pad: copper land on BOTH copper layers, mask opening on
+            # both sides, drilled hole (plated unless flagged). th_land is the SHARED
+            # decision (also used by kicad): a genuinely OBLONG land keeps its
+            # width x height faithfully; an equal-axis land is the historical round
+            # annulus (finding 019f8b7fd295). The DRILL stays round either way.
+            shaped, land_shape, lw, lh, lrratio = th_land(pad)
+            margin = _pad_mask_margin(pad, mask_clearance)
+            if shaped:
+                # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
+                # aperture family enlarged per axis (no more circularizing).
+                g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
+                mw = _mask_dim(lw, margin, ref, pad.number)
+                mh = _mask_dim(lh, margin, ref, pad.number)
+                g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+                g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+            else:
+                annulus = pad.annulus or (drill * 2.0)
+                g.th_annuli.append((px, py, annulus, "ComponentPad"))
+                mask_d = _mask_dim(annulus, margin, ref, pad.number)
+                # Round land: circular mask opening, enlarged by the per-pad margin.
+                g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+                g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+            g.holes.append((px, py, drill, pad.plated))
+        else:
+            # SMD pad on the component's own side. width/height are guaranteed
+            # positive by the caller (require_smd_size — a sizeless SMD pad has
+            # already raised PadGeometryError).
+            w = pad.width
+            h = pad.height
+            g.smd_pads.append((px, py, w, h, pad_angle, top, pad.shape, pad.corner_rratio))
+            # Mask opening follows the pad SHAPE (R2), enlarged per side by the
+            # effective margin (per-pad solder_mask_margin, else the global
+            # clearance); a large-negative margin that collapses the opening fails
+            # closed in _mask_dim.
+            margin = _pad_mask_margin(pad, mask_clearance)
+            mw = _mask_dim(w, margin, ref, pad.number)
+            mh = _mask_dim(h, margin, ref, pad.number)
+            mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
+            (g.mask_top if top else g.mask_bot).append(mask)
+    return pin_extents
+
+
+def _emit_silk(g: _Geometry, graphics, pin_extents: list[tuple[float, float]],
+               cx: float, cy: float, rot: float, top: bool, ref) -> None:
+    """Emit one component's F.SilkS — the SHARED silk path. A component with resolved
+    footprint graphics gets its REAL F.SilkS outline; one without keeps the
+    courtyard-box placeholder (byte-golden boards carry no graphics, so they take the
+    box path unchanged). ``graphics`` is a list of graphic dicts or None. Bottom-side
+    (B.SilkS) is out of scope, as in the original box code."""
+    has_graphics = isinstance(graphics, list) and len(graphics) > 0
+    if has_graphics:
+        if top:
+            for graphic in graphics:
+                if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
+                    _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
+    elif top and pin_extents:
+        xs = [p[0] for p in pin_extents]
+        ys = [p[1] for p in pin_extents]
+        half_w = (max(xs) - min(xs)) / 2 + SILK_COURTYARD_MARGIN_MM
+        half_h = (max(ys) - min(ys)) / 2 + SILK_COURTYARD_MARGIN_MM
+        g.silk_boxes.append(((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2,
+                             max(half_w, SILK_COURTYARD_MARGIN_MM),
+                             max(half_h, SILK_COURTYARD_MARGIN_MM)))
+
+
+def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
+                     dia: float, plated: bool, annulus: float | None,
+                     mask_clearance: float) -> None:
+    """Emit one board-level hole into ``g`` — the SHARED path for the loose-dict and
+    IR-native harvests. Always drills; a PLATED hole with an AUTHORED annulus flashes
+    the copper ring on BOTH copper layers + a matching mask opening (finding
+    019f8dbb7104) — the SAME annulus the kicad thru_hole emits, no invented copper. A
+    plated hole with no annulus (only reachable via a direct build_gerbers(raw dict)
+    caller; the live path COMPILES first and fail-closes) drills but WARNs, never
+    silent (copper is fabrication-critical)."""
+    g.holes.append((hx, hy, dia, plated))
+    if plated and annulus is not None and annulus > 0:
+        g.th_annuli.append((hx, hy, annulus, "ComponentPad"))
+        mask_d = _mask_dim(annulus, mask_clearance, f"{key}[{idx}]", "")
+        g.mask_top.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
+        g.mask_bot.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
+    elif plated:
+        g.warn("plated_hole_no_annulus_copper",
+               f"plated hole {key}[{idx}] at ({hx}, {hy}) has no annulus_mm — "
+               f"drilled but NO copper ring emitted (author annulus_mm)",
+               SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
+
+
 def _harvest(board: dict, mask_clearance: float) -> _Geometry:
     g = _Geometry()
 
@@ -398,91 +518,14 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         top = _is_top(comp.get("layer"))
         ref = comp.get("ref")
 
-        pin_extents: list[tuple[float, float]] = []
         # iter_pads PREFERS resolved comp["pads"] (real footprint geometry) and
         # otherwise reconstructs the per-pin fallback. require_smd_size=True is the
         # fail-closed contract: an SMD pad with no resolved/inline copper size
-        # raises PadGeometryError here rather than flashing a placeholder land
+        # raises PadGeometryError rather than flashing a placeholder land
         # (bug 019f7736b236) — real runs resolve the board first (methods gate).
-        for pad in iter_pads(comp, require_smd_size=True):
-            ox, oy = _rotate(pad.x, pad.y, rot)
-            px, py = cx + ox, cy + oy
-            pin_extents.append((px, py))
-
-            # Aperture rotation SOURCE (W8.1, hazard #2). The board dict fed here is
-            # always the IR/placed dict: component placement is IDENTITY (x=y=rot=0)
-            # so POSITION is already board-absolute above, and each pad's own
-            # ABSOLUTE rotation (PlacedPad.rotation_deg — placement rot + footprint-
-            # local pad rot, baked by the compiler) drives its aperture so per-pad
-            # rotation reaches fab. A pad carrying no rotation (an identity-placed
-            # all-TH fixture) falls back to the component rot (=0 under identity
-            # placement) — a no-op there. (K4 phase 2 removed the legacy branch that
-            # sourced the aperture angle from the component rotation_deg.)
-            pad_angle = pad.rotation if pad.rotation is not None else rot
-
-            drill = pad.drill
-            if drill is not None and drill > 0:
-                # Through-hole pad: copper land on BOTH copper layers, mask opening
-                # on both sides, drilled hole (plated unless flagged). th_land is the
-                # SHARED decision (also used by kicad): a genuinely OBLONG land keeps
-                # its width x height faithfully; an equal-axis land is the historical
-                # round annulus (finding 019f8b7fd295). The DRILL stays round either way.
-                shaped, land_shape, lw, lh, lrratio = th_land(pad)
-                margin = _pad_mask_margin(pad, mask_clearance)
-                if shaped:
-                    # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
-                    # aperture family enlarged per axis (no more circularizing).
-                    g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
-                    mw = _mask_dim(lw, margin, ref, pad.number)
-                    mh = _mask_dim(lh, margin, ref, pad.number)
-                    g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
-                    g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
-                else:
-                    annulus = pad.annulus or (drill * 2.0)
-                    g.th_annuli.append((px, py, annulus, "ComponentPad"))
-                    mask_d = _mask_dim(annulus, margin, ref, pad.number)
-                    # Round land: circular mask opening, enlarged by the per-pad margin.
-                    g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
-                    g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
-                g.holes.append((px, py, drill, pad.plated))
-            else:
-                # SMD pad on the component's own side. width/height are
-                # guaranteed positive by iter_pads(require_smd_size=True) above
-                # (a sizeless SMD pad has already raised PadGeometryError).
-                w = pad.width
-                h = pad.height
-                g.smd_pads.append((px, py, w, h, pad_angle, top, pad.shape, pad.corner_rratio))
-                # Mask opening follows the pad SHAPE (R2), enlarged per side by the
-                # effective margin (per-pad solder_mask_margin, else the global
-                # clearance); a large-negative margin that collapses the opening
-                # fails closed in _mask_dim.
-                margin = _pad_mask_margin(pad, mask_clearance)
-                mw = _mask_dim(w, margin, ref, pad.number)
-                mh = _mask_dim(h, margin, ref, pad.number)
-                mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
-                (g.mask_top if top else g.mask_bot).append(mask)
-
-        # Silk: components with resolved footprint graphics (resolve_board's
-        # component["graphics"]) get their REAL F.SilkS outline; components
-        # without it keep the courtyard-box placeholder (non-breaking — the
-        # byte-golden boards carry no 'graphics' field, so they take this
-        # unchanged 'else' path). Bottom-side (B.SilkS) is out of scope here,
-        # same as the pre-existing box code (which was already top-only).
-        graphics = comp.get("graphics")
-        has_graphics = isinstance(graphics, list) and len(graphics) > 0
-        if has_graphics:
-            if top:
-                for graphic in graphics:
-                    if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
-                        _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
-        elif top and pin_extents:
-            xs = [p[0] for p in pin_extents]
-            ys = [p[1] for p in pin_extents]
-            half_w = (max(xs) - min(xs)) / 2 + SILK_COURTYARD_MARGIN_MM
-            half_h = (max(ys) - min(ys)) / 2 + SILK_COURTYARD_MARGIN_MM
-            g.silk_boxes.append(((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2,
-                                 max(half_w, SILK_COURTYARD_MARGIN_MM),
-                                 max(half_h, SILK_COURTYARD_MARGIN_MM)))
+        pin_extents = _emit_pads(g, iter_pads(comp, require_smd_size=True),
+                                 cx, cy, rot, top, ref, mask_clearance)
+        _emit_silk(g, comp.get("graphics"), pin_extents, cx, cy, rot, top, ref)
 
     # --- Vias: copper annulus on both layers + plated drill. ---
     for via in _list(board.get("vias")):
@@ -529,26 +572,8 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                                  f"({hx}, {hy})"))
                 continue
             plated = bool(hole.get("plated", default_plated))
-            g.holes.append((hx, hy, dia, plated))
             annulus = _opt_num(hole.get("annulus_mm"))
-            if plated and annulus is not None and annulus > 0:
-                # AUTHORED copper ring on BOTH copper layers + a matching mask
-                # opening (finding 019f8dbb7104) — the SAME annulus the kicad
-                # thru_hole emits, so the two emitters agree; no invented copper.
-                g.th_annuli.append((hx, hy, annulus, "ComponentPad"))
-                mask_d = _mask_dim(annulus, mask_clearance, f"{key}[{idx}]", "")
-                g.mask_top.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
-                g.mask_bot.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
-            elif plated:
-                # A plated hole with no authored annulus reaches here only via a
-                # direct build_gerbers(raw dict) caller — the live path COMPILES
-                # first and fail-closes (plated_hole_needs_annulus). Emit drill-only
-                # but WARN, never silently (matches this loop's drill_feature_unemitted
-                # convention): copper is fabrication-critical.
-                g.warn("plated_hole_no_annulus_copper",
-                       f"plated hole {key}[{idx}] at ({hx}, {hy}) has no annulus_mm — "
-                       f"drilled but NO copper ring emitted (author annulus_mm)",
-                       SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
+            _emit_board_hole(g, key, idx, hx, hy, dia, plated, annulus, mask_clearance)
 
     return g
 
@@ -796,6 +821,166 @@ def _build_drill_files(g: _Geometry, creation_date: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------
+
+
+def _placed_graphic_to_dict(graphic: PlacedGraphic) -> dict:
+    """A board-ABSOLUTE :class:`PlacedGraphic` -> the silk-graphic dict
+    ``_harvest_silk_graphic`` reads. Byte-identical to the retiring adapter's
+    projection; under the IR's identity component placement the silk transform is a
+    no-op so the absolute coords pass through. Coordinates are LISTS."""
+    geom = graphic.geometry
+    out: dict = {"layer": graphic.layer.id}
+    if isinstance(geom, LineGeometry):
+        out["kind"] = "line"
+        out["start"] = [geom.a[0], geom.a[1]]
+        out["end"] = [geom.b[0], geom.b[1]]
+    elif isinstance(geom, CircleGeometry):
+        out["kind"] = "circle"
+        out["center"] = [geom.center[0], geom.center[1]]
+        out["radius"] = geom.radius_mm
+    elif isinstance(geom, ArcGeometry):
+        out["kind"] = "arc"
+        out["points"] = [[geom.start[0], geom.start[1]], [geom.mid[0], geom.mid[1]],
+                         [geom.end[0], geom.end[1]]]
+    elif isinstance(geom, PolygonGeometry):
+        out["kind"] = "poly"
+        out["points"] = [[p[0], p[1]] for p in geom.points]
+    else:  # pragma: no cover - GraphicGeometry is a closed union
+        raise TypeError(f"unsupported graphic geometry {type(geom)!r}")
+    if graphic.width_mm is not None:
+        out["width"] = graphic.width_mm
+    return out
+
+
+def _ir_outline_frame(outline) -> tuple[float, float, float, float]:
+    """(origin_x, origin_y, width_mm, height_mm) of a ResolvedBoard outline — the IR
+    board frame for Edge.Cuts + bounds. A ProfileOutline degrades to its outer
+    contour's axis-aligned bounding box (as the retiring adapter did)."""
+    if isinstance(outline, RectOutline):
+        return outline.origin[0], outline.origin[1], outline.width_mm, outline.height_mm
+    if isinstance(outline, ProfileOutline):
+        pts: list[tuple[float, float]] = []
+        for seg in outline.outer.segments:
+            if isinstance(seg, LineGeometry):
+                pts.extend((seg.a, seg.b))
+            elif isinstance(seg, ArcGeometry):
+                pts.extend((seg.start, seg.mid, seg.end))
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+    raise TypeError(f"unsupported board outline {type(outline)!r}")
+
+
+# Board-hole class -> the (key, default_plated) the shared hole path uses, in the
+# SAME order the loose-dict harvest iterates (mounting, then npth, then pth).
+_IR_HOLE_ORDER = (
+    (HoleKind.MOUNTING, "mounting_holes"),
+    (HoleKind.NPTH, "npth_holes"),
+    (HoleKind.PTH, "pth_holes"),
+)
+
+
+def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
+    """IR-NATIVE geometry harvest: read a :class:`ResolvedBoard` DIRECTLY into the
+    flattened :class:`_Geometry`, with NO IR->loose-dict adapter (C5). Byte-identical
+    to ``_harvest(ir_to_board_dict(board))`` — it drives the SAME shared emission
+    (:func:`_emit_pads` / :func:`_emit_silk` / :func:`_emit_board_hole`) with the
+    component at IDENTITY placement (position is already board-absolute in the IR
+    PlacedPad), pinned by the emitter byte-equivalence test."""
+    g = _Geometry()
+
+    for comp in board.components:
+        top = comp.placement.side is Side.TOP
+        ref = comp.ref
+        number_of = {p.source_id: p.number for p in board.footprint_for(comp).pads}
+        pads = [placed_pad_to_geom(p, number_of.get(p.source_id, ""))
+                for p in comp.placed_pads]
+        pin_extents = _emit_pads(g, pads, 0.0, 0.0, 0.0, top, ref, mask_clearance)
+        # Pass ALL placed graphics (NOT pre-filtered to F.SilkS): _emit_silk's
+        # has-graphics check is layer-agnostic and its internal F.SilkS filter does
+        # the selecting — exactly as the loose-dict path does. Pre-filtering here
+        # would make a component with non-F.SilkS graphics (e.g. F.Fab/F.CrtYd only)
+        # fall to the courtyard-box branch instead of emitting no silk (Fable C5a).
+        graphics = [_placed_graphic_to_dict(gr) for gr in comp.placed_graphics]
+        _emit_silk(g, graphics, pin_extents, 0.0, 0.0, 0.0, top, ref)
+
+    for via in board.vias:
+        g.th_annuli.append((via.position[0], via.position[1], via.diameter_mm, "ViaPad"))
+        g.holes.append((via.position[0], via.position[1], via.drill_mm, True))
+
+    for trace in board.traces:
+        for seg in trace.segments:
+            bucket = g.traces_top if _is_top(seg.layer.id) else g.traces_bot
+            bucket.append((seg.a[0], seg.a[1], seg.b[0], seg.b[1], seg.width_mm))
+
+    # Board holes: bucket by kind and iterate in the loose-dict harvest's order so a
+    # multi-hole board's flash/drill stream is byte-identical.
+    by_kind: dict[HoleKind, list] = {k: [] for k, _ in _IR_HOLE_ORDER}
+    for hole in board.holes:
+        by_kind[hole.kind].append(hole)
+    for kind, key in _IR_HOLE_ORDER:
+        for idx, hole in enumerate(by_kind[kind]):
+            feature = hole.feature
+            if not isinstance(feature, RoundHole):
+                raise ValueError(
+                    f"hole {hole.id!r} has a non-round feature {type(feature).__name__} "
+                    f"the round-only fabrication path cannot drill")
+            _emit_board_hole(g, key, idx, feature.position[0], feature.position[1],
+                             feature.diameter_mm, hole.plated, hole.annulus_mm,
+                             mask_clearance)
+    return g
+
+
+def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
+                     name: str | None = None,
+                     creation_date: str | None = None) -> GerberResult:
+    """Compile a :class:`ResolvedBoard` (K2 IR) into fabrication files DIRECTLY — the
+    IR-native fab entry the live path uses, with no IR->loose-dict adapter (C5).
+    Byte-identical to ``build_gerbers(ir_to_board_dict(board))`` (emitter
+    byte-equivalence test)."""
+    # FAIL-CLOSED seal (carried from the retiring ir_to_board_dict): a captured
+    # feature the gerber bridge does not map — a copper zone or a board-level graphic
+    # — must RAISE, never vanish silently from a fabrication-bound file. compile_board
+    # fail-closes zone/board-graphic DECLARATIONS today, so these are always empty;
+    # the seal guards against a future IR silently dropping copper at fabrication.
+    if board.zones:
+        raise ValueError(
+            f"build_gerbers_ir: board has {len(board.zones)} zone(s) the gerber bridge "
+            f"does not map yet — refusing to emit fabrication that silently drops copper")
+    if board.board_graphics:
+        raise ValueError(
+            f"build_gerbers_ir: board has {len(board.board_graphics)} board-level "
+            f"graphic(s) the gerber bridge does not map yet — refusing to drop them silently")
+
+    base = name or (board.name if isinstance(board.name, str) and board.name else None) or "board"
+    date = creation_date or PINNED_CREATION_DATE
+    set_generation_software("Minerva", "pcb_worker/gerber.py", WORKER_VERSION)
+
+    mask_clearance = DEFAULT_MASK_CLEARANCE_MM
+    mc = board.design_rules.minimums.solder_mask_clearance_mm
+    if mc is not None and mc >= 0:
+        mask_clearance = mc
+
+    g = _harvest_ir(board, mask_clearance)
+
+    ox, oy, width_mm, height_mm = _ir_outline_frame(board.outline)
+    outline_dict = {"width_mm": width_mm, "height_mm": height_mm,
+                    "origin": {"x_mm": ox, "y_mm": oy}}
+
+    files: dict[str, str] = {}
+    for suffix, text in _build_gerber_layers(outline_dict, g, date).items():
+        files[f"{base}-{suffix}.gbr"] = text
+    for suffix, text in _build_drill_files(g, date).items():
+        files[f"{base}-{suffix}.drl"] = text
+
+    if isinstance(out_dir, str) and out_dir.strip():
+        import os
+        os.makedirs(out_dir, exist_ok=True)
+        for fname, text in files.items():
+            with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    return GerberResult(files, diagnostics=g.diagnostics)
 
 
 def build_gerbers(board_dict: dict, out_dir: str | None = None,

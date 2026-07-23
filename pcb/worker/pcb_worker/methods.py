@@ -247,8 +247,8 @@ def _gerbers(params: dict) -> dict:
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
-        board_dict = ir_adapter.ir_to_board_dict(compiled.board)
-        files = gerber.build_gerbers(board_dict, name=base_name)
+        # C5: emit straight from the ResolvedBoard IR — no IR->loose-dict adapter.
+        files = gerber.build_gerbers_ir(compiled.board, name=base_name)
     except Exception as exc:  # geometry/library faults reported as data, not crash
         return {"ok": False, "error": {"kind": "gerber", "message": str(exc)}}
 

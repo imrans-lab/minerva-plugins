@@ -702,6 +702,48 @@ def test_kicad_pth_mounting_hole_roundtrips_through_drill_export(tmp_path):
     assert run_drc_on_pcb_text(pcb, name="brd").clean
 
 
+@pytest.mark.parametrize("make", [
+    lambda: _board("R_0805"),
+    lambda: _board("R_0805", x=30.0, y=30.0, rotation_deg=90.0),
+    lambda: _board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom", x=40.0, y=40.0),
+    lambda: _board("Espressif:ESP32-S3-DevKitC"),
+    lambda: _board("Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal"),
+    lambda: {**_board("R_0805"),
+             "pth_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0, "annulus_mm": 3.2}],
+             "mounting_holes": [{"x_mm": 30, "y_mm": 30, "diameter_mm": 3.2, "plated": False}]},
+    # multi-component + routed: two components, a net, a trace, and a via — exercises
+    # _harvest_ir's via + trace loops and >1 component (Fable C5a matrix gap).
+    lambda: {"version": 1, "name": "brd", "width_mm": 40, "height_mm": 40,
+             "layers": ["top", "bottom"],
+             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+             "components": [
+                 {"ref": "R1", "footprint": "R_0805", "x_mm": 10, "y_mm": 10,
+                  "rotation_deg": 0, "layer": "top"},
+                 {"ref": "R2", "footprint": "R_0805", "x_mm": 25, "y_mm": 15,
+                  "rotation_deg": 90, "layer": "bottom"},
+             ],
+             "nets": [{"name": "N1", "pins": ["R1.1", "R2.2"]}],
+             "traces": [{"net": "N1", "layer": "top", "width_mm": 0.3,
+                         "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 18, "y_mm": 12}]},
+                        {"net": "N1", "layer": "bottom", "width_mm": 0.3,
+                         "points": [{"x_mm": 18, "y_mm": 12}, {"x_mm": 25, "y_mm": 15}]}],
+             "vias": [{"net": "N1", "x_mm": 18, "y_mm": 12, "diameter_mm": 0.8,
+                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}]},
+])
+def test_build_gerbers_ir_is_byte_identical_to_adapter_path(make):
+    """C5: the IR-NATIVE gerber path (build_gerbers_ir, no loose-dict adapter) is
+    byte-for-byte identical to build_gerbers(ir_to_board_dict(resolved)) — files AND
+    diagnostics — across rotated / bottom / oblong-TH / plated-hole / NPTH boards.
+    This is the correctness net for retiring the adapter: zero golden movement."""
+    resolved = _resolve(make())
+    via_adapter = gerber.build_gerbers(ir_to_board_dict(resolved), name="brd")
+    native = gerber.build_gerbers_ir(resolved, name="brd")
+    assert dict(native) == dict(via_adapter)   # every file, byte-identical
+    assert [(d.code, d.severity) for d in native.diagnostics] == \
+           [(d.code, d.severity) for d in via_adapter.diagnostics]
+
+
 def test_plated_board_hole_annulus_agrees_across_emitters():
     """finding 019f8dbb7104: a plated board hole's AUTHORED annulus reaches BOTH
     emitters as the SAME copper — gerber flashes a copper annulus of that diameter on

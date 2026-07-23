@@ -40,9 +40,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .fab_capability import SUPPORTED_PAD_SHAPES
+
+if TYPE_CHECKING:
+    from .resolved_board import PlacedPad
 
 
 class PadGeometryError(ValueError):
@@ -364,3 +367,43 @@ def _from_resolved(pad: dict) -> PadGeom:
         # honours it (previously dropped — Codex 2b).
         rotation=_opt_num(pad.get("rotation")),
     )
+
+
+def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
+    """A board-absolute :class:`PlacedPad` (K2 IR) -> the same :class:`PadGeom` the
+    loose-dict path yields — the IR-NATIVE pad accessor the fab emitters use so they
+    consume the ResolvedBoard directly, with no IR->loose-dict adapter (C5).
+
+    It builds the exact resolved-pad dict the adapter's ``_pad_to_dict`` projected and
+    reuses :func:`_from_resolved`, so it is BYTE-IDENTICAL to the loose-dict path (the
+    TH annulus/drill contract, the size/None handling, everything) — pinned by the
+    emitter byte-equivalence test. A drilled pad's copper width doubles as the
+    annulus: the override-set :attr:`PlacedPad.annulus` when present (round), else the
+    footprint copper :attr:`PlacedPad.size`."""
+    is_drilled = pad.drill is not None
+    if is_drilled:
+        if pad.annulus is not None:
+            width = height = pad.annulus
+        elif pad.size is not None:
+            width, height = pad.size
+        else:
+            width = height = None
+    else:
+        width, height = pad.size if pad.size is not None else (None, None)
+    d: dict = {
+        "number": number,
+        "type": pad.pad_type,
+        "shape": pad.shape.value,
+        "position": {"x": pad.position[0], "y": pad.position[1]},
+        "layers": [layer.id for layer in pad.layers],
+        "rotation": pad.rotation_deg,
+        "drill": ({"x": pad.drill.size[0], "y": pad.drill.size[1]}
+                  if is_drilled else {"x": 0.0, "y": 0.0}),
+    }
+    if width is not None and height is not None:
+        d["size"] = {"width": width, "height": height}
+    if pad.corner_rratio is not None:
+        d["corner_rratio"] = pad.corner_rratio
+    if pad.solder_mask_margin is not None:
+        d["solder_mask_margin"] = pad.solder_mask_margin
+    return _from_resolved(d)
