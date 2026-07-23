@@ -440,6 +440,23 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             # annulus (SUPPORTED_HOLE_SHAPES = {round}); the model carries a single
             # annulus diameter, not a shaped land, so `thru_hole circle (size a a)`
             # IS faithful — consistent with the gerber emitter's round-only TH.
+            #
+            # A NON-PLATED through-hole (a mounting hole / NPTH pad: pad_type
+            # ``np_thru_hole`` or plated is False) is a BARE drilled hole with NO
+            # copper annulus and NO net — the standard KiCad ``MountingHole``
+            # padstack: ``np_thru_hole circle (size drill drill) (drill drill)
+            # (layers "*.Cu" "*.Mask")``. It emits size == drill (no copper ring),
+            # adds the "*.Mask" layer so the mask opens over the hole, and carries
+            # no ``(net ...)``. A plated ``thru_hole`` stays byte-identical to today.
+            plated = pad.plated and pad.pad_type != "np_thru_hole"
+            if not plated:
+                lines.append(
+                    f'    (pad "{_esc(num_s)}" np_thru_hole circle '
+                    f'{_pad_at(px, py, pad.rotation)} '
+                    f'(size {_num(drill)} {_num(drill)}) (drill {_num(drill)}) '
+                    f'(layers "*.Cu" "*.Mask"))'
+                )
+                continue
             annulus = pad.annulus if pad.annulus is not None else drill * 2
             lines.append(
                 f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '

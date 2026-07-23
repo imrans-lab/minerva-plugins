@@ -27,8 +27,18 @@ import pytest
 from agent_router.kicad_io import read_kicad_pcb
 from pcb_worker import gerber, kicad
 from pcb_worker.compile_board import compile_board
-from pcb_worker.ir_adapter import ir_to_board_dict, ir_to_kicad_board_dict
-from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
+from pcb_worker.ir_adapter import (
+    _kicad_mounting_hole_component,
+    ir_to_board_dict,
+    ir_to_kicad_board_dict,
+)
+from pcb_worker.resolved_board import (
+    DiagnosticSeverity,
+    HoleKind,
+    OvalHole,
+    ResolutionSuccess,
+    ResolvedHole,
+)
 
 try:  # dev/CI-only kicad-cli DRC oracle (skips cleanly when absent).
     from tests.oracle.kicad_drc import kicad_cli_available, run_drc_on_pcb_text
@@ -296,6 +306,46 @@ def _emit_kicad(board: dict, name: str = "brd") -> str:
         f"{name}.kicad_pcb"]
 
 
+def _export_drills(pcb_text: str, tmp_path, name: str = "brd") -> tuple[str, str]:
+    """Round-trip the emitted board through KiCad's OWN drill exporter (the
+    independent oracle) and return the (NPTH.drl, PTH.drl) Excellon text — the
+    plating-split KiCad itself computes. read_kicad_pcb drops empty-number mounting
+    pads, so the drill export is the parse-back that actually sees them."""
+    import subprocess
+
+    src = tmp_path / f"{name}.kicad_pcb"
+    src.write_text(pcb_text, encoding="utf-8")
+    outd = tmp_path / "drl"
+    outd.mkdir(exist_ok=True)
+    proc = subprocess.run(
+        ["kicad-cli", "pcb", "export", "drill", "--format", "excellon",
+         "--excellon-separate-th", "-o", f"{outd}/", str(src)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    npth = (outd / f"{name}-NPTH.drl")
+    pth = (outd / f"{name}-PTH.drl")
+    return (npth.read_text() if npth.exists() else "",
+            pth.read_text() if pth.exists() else "")
+
+
+def _drill_hits(excellon: str) -> list[tuple[str, float, float]]:
+    """[(tool_diameter, x, y), ...] for every drilled coordinate in an Excellon
+    file — the tool the coordinate is under (KiCad emits X/Y in mm)."""
+    tool_dia: dict[str, str] = dict(re.findall(r"(T\d+)C([\d.]+)", excellon))
+    hits: list[tuple[str, float, float]] = []
+    current = None
+    for line in excellon.splitlines():
+        tm = re.fullmatch(r"(T\d+)", line.strip())
+        if tm:
+            current = tm.group(1)
+            continue
+        cm = re.match(r"X(-?[\d.]+)Y(-?[\d.]+)", line.strip())
+        if cm and current in tool_dia:
+            hits.append((tool_dia[current], float(cm.group(1)), float(cm.group(2))))
+    return hits
+
+
 def _ir_pad_truth(resolved) -> dict:
     """``{ 'REF.NUMBER': (abs_position, abs_rotation_deg, Side) }`` — the IR's
     board-absolute ground truth for every placed pad, joined to its footprint pad
@@ -512,16 +562,138 @@ def test_kicad_smd_tech_layers_follow_copper_side():
 # ---------------------------------------------------------------------------
 
 
-def test_kicad_adapter_fails_closed_on_board_holes():
-    """The kicad emitter drills no standalone holes, so a board-level hole the
-    adapter cannot map must RAISE (never silently drop a fab feature) — the K3
-    fail-closed doctrine, mirroring the gerber bridge's zone/board-graphic seals."""
+# ---------------------------------------------------------------------------
+# W8.2b — the kicad bridge now EMITS board-level mounting holes faithfully
+# (owner decision): each round ResolvedHole becomes a synthetic MountingHole
+# footprint with one bare drilled pad at its ABSOLUTE position — np_thru_hole
+# (no copper) when unplated, thru_hole (copper annulus) when plated. Proven by
+# the kicad-cli drill-export oracle (position + drill diameter + NPTH/PTH plating
+# split) and a DRC-clean check; a non-round hole still RAISES (round-only seal).
+# ---------------------------------------------------------------------------
+
+
+def test_kicad_adapter_emits_mounting_hole_component():
+    """A board-level (NPTH) mounting hole projects to a synthetic MountingHole
+    component carrying ONE np_thru_hole pad at the hole's ABSOLUTE position —
+    empty pad number, size == drill (no copper), *.Cu/*.Mask, no net."""
     board = _board("R_0805")
-    board["mounting_holes"] = [{"x_mm": 2.0, "y_mm": 2.0, "diameter_mm": 3.2}]
+    board["mounting_holes"] = [{"x_mm": 2.0, "y_mm": 7.0, "diameter_mm": 3.2}]
     resolved = _resolve(board)
     assert resolved.holes  # the compiler captured the hole
-    with pytest.raises(ValueError, match="hole"):
-        ir_to_kicad_board_dict(resolved)
+    d = ir_to_kicad_board_dict(resolved)
+    mh = [c for c in d["components"] if c["footprint"] == "MountingHole"]
+    assert len(mh) == 1
+    (pad,) = mh[0]["pads"]
+    assert pad["number"] == ""
+    assert pad["type"] == "np_thru_hole"
+    assert pad["shape"] == "circle"
+    assert pad["position"] == {"x": 2.0, "y": 7.0}     # ABSOLUTE
+    assert pad["drill"] == {"x": 3.2, "y": 3.2}
+    assert pad["size"] == {"width": 3.2, "height": 3.2}  # size == drill (no copper)
+    assert pad["layers"] == ["*.Cu", "*.Mask"]
+    # Identity footprint (absolute-under-identity like the rest of the bridge).
+    assert (mh[0]["x_mm"], mh[0]["y_mm"], mh[0]["rotation_deg"]) == (0.0, 0.0, 0.0)
+
+
+def test_kicad_adapter_plated_mounting_hole_is_thru_hole():
+    """A PLATED (PTH) board hole projects to a thru_hole pad (copper annulus) — the
+    emitter supplies its 2x-drill nominal annulus since a RoundHole carries only its
+    drill diameter, and the drill lands at the hole's absolute position."""
+    board = _board("R_0805")
+    board["pth_holes"] = [{"x_mm": 3.0, "y_mm": 4.0, "diameter_mm": 2.0}]
+    resolved = _resolve(board)
+    d = ir_to_kicad_board_dict(resolved)
+    (mh,) = [c for c in d["components"] if c["footprint"] == "MountingHole"]
+    (pad,) = mh["pads"]
+    assert pad["type"] == "thru_hole"
+    assert pad["position"] == {"x": 3.0, "y": 4.0}
+    assert pad["drill"] == {"x": 2.0, "y": 2.0}
+    assert "size" not in pad  # omitted -> emitter's 2x-drill nominal annulus
+
+
+def test_kicad_adapter_mounting_holes_are_ordered_and_multiple():
+    """Every board hole is emitted, in board.holes order (deterministic), with
+    non-colliding H-refs."""
+    board = _board("R_0805")
+    board["mounting_holes"] = [
+        {"x_mm": 2.0, "y_mm": 2.0, "diameter_mm": 3.2},
+        {"x_mm": 8.0, "y_mm": 8.0, "diameter_mm": 3.2},
+    ]
+    d = ir_to_kicad_board_dict(_resolve(board))
+    mh = [c for c in d["components"] if c["footprint"] == "MountingHole"]
+    assert [c["ref"] for c in mh] == ["H1", "H2"]
+    assert [c["pads"][0]["position"] for c in mh] == [
+        {"x": 2.0, "y": 2.0}, {"x": 8.0, "y": 8.0}]
+
+
+def _th_comp(pad: dict) -> dict:
+    """A minimal single-pad component for driving kicad._footprint directly."""
+    return {"ref": "H1", "value": "", "footprint": "MountingHole",
+            "x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0, "layer": "top",
+            "pads": [pad], "graphics": []}
+
+
+def test_kicad_footprint_non_plated_th_emits_np_thru_hole():
+    """UNIT: a non-plated through-hole pad emits `np_thru_hole` with size == drill
+    (no copper annulus) on *.Cu/*.Mask and NO net."""
+    pad = {"number": "", "type": "np_thru_hole", "shape": "circle",
+           "position": {"x": 5.0, "y": 6.0}, "size": {"width": 3.2, "height": 3.2},
+           "drill": {"x": 3.2, "y": 3.2}, "layers": ["*.Cu", "*.Mask"]}
+    fp = kicad._footprint(_th_comp(pad), {}, {})
+    assert ('(pad "" np_thru_hole circle (at 5.0 6.0) (size 3.2 3.2) '
+            '(drill 3.2) (layers "*.Cu" "*.Mask"))') in fp
+    assert "thru_hole circle" not in fp.replace("np_thru_hole circle", "")
+
+
+def test_kicad_footprint_plated_th_stays_thru_hole_byte_identical():
+    """UNIT: a plated through-hole pad still emits the EXACT legacy `thru_hole`
+    line (no np_thru_hole, no *.Mask) — byte-stable, so no existing golden moves."""
+    pad = {"number": "1", "type": "thru_hole", "shape": "circle",
+           "position": {"x": 5.0, "y": 5.0}, "size": {"width": 1.6, "height": 1.6},
+           "drill": {"x": 0.8, "y": 0.8}, "layers": ["*.Cu"]}
+    fp = kicad._footprint(_th_comp(pad), {}, {})
+    assert ('(pad "1" thru_hole circle (at 5.0 5.0) (size 1.6 1.6) '
+            '(drill 0.8) (layers "*.Cu"))') in fp
+    assert "np_thru_hole" not in fp
+
+
+def test_kicad_adapter_fails_closed_on_non_round_hole():
+    """The round-only drill seal stays intact: a non-round hole feature (a future
+    oval/slot IR) RAISES rather than silently dropping a fab-critical drill."""
+    hole = ResolvedHole(
+        id="hole:oval:0",
+        feature=OvalHole(position=(1.0, 1.0), width_mm=2.0, height_mm=3.0,
+                         rotation_deg=0.0),
+        plated=False, kind=HoleKind.NPTH)
+    with pytest.raises(ValueError, match="non-round"):
+        _kicad_mounting_hole_component(hole, 0)
+
+
+@pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not on PATH")
+def test_kicad_npth_mounting_hole_roundtrips_through_drill_export(tmp_path):
+    """ORACLE: an NPTH mounting hole emits a valid, DRC-clean .kicad_pcb whose
+    kicad-cli drill export places the drill in the NON-plated file at the hole's
+    ABSOLUTE position with the correct diameter (KiCad flips Y: y_mm -> -y_mm)."""
+    board = _board("R_0805")
+    board["mounting_holes"] = [{"x_mm": 25.0, "y_mm": 30.0, "diameter_mm": 3.2}]
+    pcb = _emit_kicad(board)
+    npth, pth = _export_drills(pcb, tmp_path)
+    assert _drill_hits(npth) == [("3.200", 25.0, -30.0)]
+    assert _drill_hits(pth) == []
+    assert run_drc_on_pcb_text(pcb, name="brd").clean
+
+
+@pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not on PATH")
+def test_kicad_pth_mounting_hole_roundtrips_through_drill_export(tmp_path):
+    """ORACLE: a PLATED board hole lands in the PLATED drill file (thru_hole),
+    correct diameter + absolute position, DRC-clean."""
+    board = _board("R_0805")
+    board["pth_holes"] = [{"x_mm": 12.0, "y_mm": 20.0, "diameter_mm": 2.5}]
+    pcb = _emit_kicad(board)
+    npth, pth = _export_drills(pcb, tmp_path)
+    assert _drill_hits(pth) == [("2.500", 12.0, -20.0)]
+    assert _drill_hits(npth) == []
+    assert run_drc_on_pcb_text(pcb, name="brd").clean
 
 
 def test_kicad_adapter_does_not_mutate_the_resolved_board():
@@ -547,3 +719,14 @@ def test_kicad_and_gerber_bridges_agree_on_absolute_pad_position():
     gpos = sorted((p["position"]["x"], p["position"]["y"]) for p in gerb)
     kpos = sorted((p["position"]["x"], p["position"]["y"]) for p in kic)
     assert gpos == kpos
+
+
+def test_mounting_hole_refs_skip_existing_component_refs():
+    # Fable W8.2b: a synthetic MountingHole ref must not duplicate a real
+    # component ref (a user component named "H1" would otherwise collide in the
+    # .kicad_pcb — a duplicate reference KiCad flags).
+    from pcb_worker.ir_adapter import _mounting_hole_refs
+    assert _mounting_hole_refs(set(), 3) == ["H1", "H2", "H3"]
+    refs = _mounting_hole_refs({"R1", "H1", "H3"}, 3)
+    assert refs == ["H2", "H4", "H5"]
+    assert not set(refs) & {"R1", "H1", "H3"}

@@ -130,6 +130,24 @@ def _validate(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
+def _compile_or_fail(board: dict):
+    """The SHARED fab prologue for ``_gerbers`` + ``_generate``: COMPILE (strict) →
+    ResolvedBoard IR, or a structured fail-closed error reply.
+
+    Returns the ``ResolutionSuccess`` (carrying ``.board`` + ``.diagnostics`` the
+    caller forwards as warnings) on success, or a ``{kind:"compile"}`` error reply
+    (detect with :func:`_is_error_reply`) on failure — NO fallback to the legacy
+    best-effort emitter (W9 deletes the dead best-effort fab path). Uses the SAME
+    seed library the legacy resolve used (library_root=lockfile=None, i.e.
+    footprints.DEFAULT_LIBRARY_ROOT/LOCKFILE). ``params["resolve_geometry"]`` is
+    moot on the fab path now (compile ALWAYS resolves): accepted-and-ignored by the
+    callers, not consulted here."""
+    compiled = compile_board.compile_board(board)
+    if isinstance(compiled, compile_board.ResolutionFailure):
+        return _compile_failure_reply(compiled)
+    return compiled
+
+
 def _generate(params: dict) -> dict:
     try:
         board = _load(params)
@@ -137,14 +155,11 @@ def _generate(params: dict) -> dict:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
     # W8.2 CUTOVER: same shape as _gerbers — COMPILE (strict) → ResolvedBoard IR →
-    # kicad.generate, replacing the legacy best-effort _maybe_resolve. Fail-closed:
-    # an uncompilable board returns a structured {kind:"compile"} error, NO
-    # fallback. Same seed library the legacy resolve used (library_root=lockfile=
-    # None). params["resolve_geometry"] is moot for fab (compile always resolves):
-    # accepted-and-ignored.
-    compiled = compile_board.compile_board(board)
-    if isinstance(compiled, compile_board.ResolutionFailure):
-        return _compile_failure_reply(compiled)
+    # kicad.generate, replacing the legacy best-effort _maybe_resolve (shared
+    # prologue in _compile_or_fail).
+    compiled = _compile_or_fail(board)
+    if _is_error_reply(compiled):
+        return compiled
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
@@ -224,16 +239,11 @@ def _gerbers(params: dict) -> dict:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
     # W8.2 CUTOVER: the LIVE fab path now COMPILES (strict) → ResolvedBoard IR →
-    # emit, replacing the legacy best-effort _maybe_resolve. compile_board is
-    # fail-closed: an uncompilable board returns a structured {kind:"compile"}
-    # error with NO fallback to the legacy emitter (W9 deletes the dead best-effort
-    # fab path). It uses the SAME seed library the legacy resolve used — both pass
-    # library_root=lockfile=None, i.e. footprints.DEFAULT_LIBRARY_ROOT/LOCKFILE.
-    # params["resolve_geometry"] is moot on the fab path now (compile ALWAYS
-    # resolves): it is accepted-and-ignored here, not best-effort-consulted.
-    compiled = compile_board.compile_board(board)
-    if isinstance(compiled, compile_board.ResolutionFailure):
-        return _compile_failure_reply(compiled)
+    # emit, replacing the legacy best-effort _maybe_resolve (shared prologue in
+    # _compile_or_fail — fail-closed, NO fallback to the legacy emitter).
+    compiled = _compile_or_fail(board)
+    if _is_error_reply(compiled):
+        return compiled
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:

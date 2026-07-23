@@ -372,6 +372,71 @@ def _kicad_component_to_dict(board: ResolvedBoard,
     }
 
 
+def _mounting_hole_refs(existing_refs: set[str], count: int) -> list[str]:
+    """``count`` collision-free ``MountingHole`` refs (H1, H2, ...) that SKIP any
+    ref a real component already uses. Without this a user component named ``H1``
+    would duplicate a synthetic mounting-hole ref in the .kicad_pcb — a duplicate
+    reference KiCad flags (Fable W8.2b note)."""
+    used = set(existing_refs)
+    out: list[str] = []
+    n = 0
+    while len(out) < count:
+        n += 1
+        ref = f"H{n}"
+        if ref not in used:
+            used.add(ref)
+            out.append(ref)
+    return out
+
+
+def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
+    """A board-level :class:`ResolvedHole` -> a synthetic ``MountingHole`` component
+    the kicad emitter renders as one bare through-hole pad.
+
+    KiCad represents a standalone drill as a footprint carrying a single drilled
+    pad. We emit one ``MountingHole`` footprint at the IDENTITY placement (the same
+    absolute-under-identity convention the rest of the kicad bridge uses) with the
+    pad at the hole's ABSOLUTE position, so ``kicad._footprint`` (identity
+    translate+rotate no-op) drills it exactly where the IR says.
+
+    Plating drives the padstack via ``pad_source._from_resolved`` +
+    ``kicad._footprint``: a NON-plated hole (NPTH / an unplated MOUNTING hole) is a
+    bare ``np_thru_hole`` with size == drill (no copper, no net); a PLATED hole
+    (PTH) is a ``thru_hole`` with a copper annulus (the emitter's 2x-drill nominal,
+    since a RoundHole carries only its drill diameter, no separate annulus datum).
+    The empty pad NUMBER matches KiCad's real mounting-hole footprints. FAIL-CLOSED
+    on a non-round feature stays intact (the round-only drill seal)."""
+    feature = hole.feature
+    if not isinstance(feature, RoundHole):
+        raise ValueError(
+            f"hole {hole.id!r} has a non-round feature {type(feature).__name__} the "
+            f"round-only fabrication path cannot drill — refusing to drop it silently")
+    diameter = feature.diameter_mm
+    pad: dict = {
+        "number": "",
+        "type": "thru_hole" if hole.plated else "np_thru_hole",
+        "shape": "circle",
+        "position": {"x": feature.position[0], "y": feature.position[1]},
+        "drill": {"x": diameter, "y": diameter},
+        "layers": ["*.Cu", "*.Mask"],
+    }
+    # NPTH/unplated: size == drill (no copper ring). PLATED: omit size so the
+    # emitter supplies its 2x-drill nominal annulus (no annulus datum in the IR).
+    if not hole.plated:
+        pad["size"] = {"width": diameter, "height": diameter}
+    return {
+        "ref": ref,
+        "value": "",
+        "footprint": "MountingHole",
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "rotation_deg": 0.0,
+        "layer": "top",
+        "pads": [pad],
+        "graphics": [],
+    }
+
+
 def _kicad_net_dicts(board: ResolvedBoard) -> list[dict]:
     """Each :class:`ResolvedNet` -> the ``{name, pins:["REF.PADNUM", ...]}`` dict
     kicad._net_table reads. A net's ``pad_refs`` are PlacedPad ids; kicad wants
@@ -438,17 +503,18 @@ def ir_to_kicad_board_dict(board: ResolvedBoard) -> dict:
     nets from them) and net-tagged traces/vias, which the gerber bridge omits.
     PURE + deterministic — the ResolvedBoard is only read.
 
+    Board-level HOLES (mounting holes) are EMITTED faithfully: each round
+    :class:`ResolvedHole` becomes a synthetic ``MountingHole`` footprint carrying a
+    single bare through-hole pad at the hole's absolute position — an unplated hole
+    as ``np_thru_hole`` (no copper), a plated one as ``thru_hole`` with a copper
+    annulus (see :func:`_kicad_mounting_hole_component`). A non-round hole feature
+    still RAISES (the round-only drill seal).
+
     FAIL-CLOSED seals (mirroring the gerber bridge): a captured feature the kicad
-    emitter cannot render — a board-level HOLE (``generate_kicad_pcb`` emits no
-    standalone drills), a zone, or a board-level graphic — must RAISE, never vanish
-    silently from a fabrication-bound file. compile_board fail-closes zones/board-
-    graphics upstream (always empty today), so these seal the adapter against a
-    future IR silently dropping copper/drill at the cutover."""
-    if board.holes:
-        raise ValueError(
-            f"ir_to_kicad_board_dict: board has {len(board.holes)} board-level hole(s) "
-            f"the kicad emitter does not drill (generate_kicad_pcb emits no standalone "
-            f"holes) — refusing to emit a fabrication file that silently drops them")
+    emitter cannot render — a zone or a board-level graphic — must RAISE, never
+    vanish silently from a fabrication-bound file. compile_board fail-closes
+    zones/board-graphics upstream (always empty today), so these seal the adapter
+    against a future IR silently dropping copper at the cutover."""
     if board.zones:
         raise ValueError(
             f"ir_to_kicad_board_dict: board has {len(board.zones)} zone(s) the kicad "
@@ -462,6 +528,15 @@ def ir_to_kicad_board_dict(board: ResolvedBoard) -> dict:
     rules = board.design_rules
     net_name_of = {net.id: net.name for net in board.nets}
 
+    # Real components first, then the synthetic mounting-hole footprints (in
+    # board.holes order — deterministic). Their refs (H1, H2, ...) SKIP any real
+    # component ref so the .kicad_pcb never carries a duplicate reference; they
+    # carry no net, so nets/traces/vias are unaffected.
+    components = [_kicad_component_to_dict(board, comp) for comp in board.components]
+    hole_refs = _mounting_hole_refs({comp.ref for comp in board.components}, len(board.holes))
+    components += [_kicad_mounting_hole_component(hole, ref)
+                   for hole, ref in zip(board.holes, hole_refs)]
+
     return {
         "name": board.name,
         "width_mm": width_mm,
@@ -474,7 +549,7 @@ def ir_to_kicad_board_dict(board: ResolvedBoard) -> dict:
             "solder_mask_clearance_mm": rules.minimums.solder_mask_clearance_mm,
         },
         "nets": _kicad_net_dicts(board),
-        "components": [_kicad_component_to_dict(board, comp) for comp in board.components],
+        "components": components,
         "traces": _kicad_trace_dicts(board, net_name_of),
         "vias": _kicad_via_dicts(board, net_name_of),
     }

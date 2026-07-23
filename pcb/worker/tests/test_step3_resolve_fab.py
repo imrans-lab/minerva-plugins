@@ -171,10 +171,21 @@ def test_gerbers_resolve_geometry_off_is_ignored_still_compiles():
     assert PLACEHOLDER_WH not in rects
 
 
-def test_generate_gate_off_fails_closed():
+def test_generate_emits_mounting_holes_and_ignores_gate():
+    # W8.2b: the spike board carries NPTH mounting_holes. This test USED to assert
+    # `generate` fail-closed with kind:"generate" — but that failure came from the
+    # OLD kicad-bridge RAISE on board.holes, NOT from the resolve gate (which W8.2
+    # already made moot). Now the kicad bridge EMITS mounting holes faithfully, so
+    # the honest contract is: `generate` SUCCEEDS (resolve_geometry:False is
+    # accepted-and-ignored, the board compiles) AND its NPTH mounting holes reach
+    # the .kicad_pcb as np_thru_hole pads.
     resp = _generate({"board": _board_no_smd_geometry(), "resolve_geometry": False})
-    assert resp["ok"] is False
-    assert resp["error"]["kind"] == "generate"
+    assert resp["ok"] is True, resp
+    pcb = next(v for k, v in resp["result"]["files"].items()
+               if k.endswith(".kicad_pcb"))
+    # The spike board declares four NPTH mounting holes (diameter 3.2).
+    assert pcb.count("np_thru_hole") == 4, pcb.count("np_thru_hole")
+    assert '(drill 3.2) (layers "*.Cu" "*.Mask")' in pcb
 
 
 def test_drc_gate_off_matches_raw_run():
