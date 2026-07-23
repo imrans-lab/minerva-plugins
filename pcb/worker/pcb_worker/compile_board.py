@@ -1207,9 +1207,15 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
         # Via mask TENTING is AUTHORED by the source and DEFAULTS TENTED (the
         # historical CAM behavior): a tented via has no mask opening; an untented via
         # exposes its annulus (finding 019f8fe7cbaf). A single `tented` bool sets both
-        # sides (the v1 symmetric case); a non-bool fails closed.
-        raw_tented = raw.get("tented", True)
-        if not isinstance(raw_tented, bool):
+        # sides (the v1 symmetric case). An ABSENT or explicit-NULL `tented` is the
+        # DEFAULT (tented) — matching Go, whose Via.Tented is a *bool that decodes
+        # null to nil=unset and whose YAML probe explicitly allows `!!null` (finding
+        # 019f9123abef: the two languages must not disagree on null). Only a non-null
+        # non-bool (a string/number) fails closed.
+        raw_tented = raw.get("tented")
+        if raw_tented is None:
+            raw_tented = True
+        elif not isinstance(raw_tented, bool):
             diags.error("via_bad_tented",
                         f"via {ordinal}: tented must be a boolean, got {raw_tented!r}", via_ref)
             continue
@@ -1248,6 +1254,12 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
                 continue
             if key == "mounting_holes":
                 raw_plated = raw.get("plated", default_plated)
+                if raw_plated is None:
+                    # An explicit `plated: null` is the DEFAULT (unplated), matching Go
+                    # (Hole.Plated is a plain bool that decodes null to its false
+                    # zero-value) + the pth/npth alias branch + the YAML `!!null`
+                    # allowance (finding 019f9123abef). Only a non-null non-bool errors.
+                    raw_plated = default_plated
                 if not isinstance(raw_plated, bool):
                     # A string "false" must NOT coerce to a plated hole (review 623 R2).
                     diags.error("hole_bad_plating",

@@ -1,0 +1,4 @@
+{
+  "valid": true,
+  "note": "finding 019f9123abef: `plated: null` is unset -> DEFAULT, not a structural error. Go (Hole.Plated bool decodes null to false) and Python must AGREE the board is valid."
+}

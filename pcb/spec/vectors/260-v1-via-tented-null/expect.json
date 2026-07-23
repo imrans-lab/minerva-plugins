@@ -1,0 +1,4 @@
+{
+  "valid": true,
+  "note": "finding 019f9123abef: `tented: null` is unset -> DEFAULT (tented), not a structural error. Go (Via.Tented *bool decodes null to nil=unset) and Python must AGREE the board is valid."
+}

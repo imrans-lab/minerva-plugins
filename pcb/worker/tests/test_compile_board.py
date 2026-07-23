@@ -813,6 +813,38 @@ def test_via_tenting_defaults_tented_and_authors_untented():
     assert not untented.tented_front and not untented.tented_back      # authored untented
 
 
+def test_null_tented_and_plated_are_unset_default_matching_go():
+    # G1 (finding 019f9123abef): an explicit `tented: null` / `plated: null` is UNSET
+    # -> the DEFAULT, NOT a fail-closed error. This matches Go (Via.Tented *bool
+    # decodes null to nil=unset; Hole.Plated bool decodes null to false) and the
+    # shared validator (validate_board_v2 accepts both — vectors 250/260/270), so the
+    # Go codec and the Python CAM compiler no longer disagree on null. A non-null
+    # non-bool still fails closed (test_via_bad_tented / test_string_plated).
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N", "pins": ["X1.1"]}]
+    board["vias"] = [{"x_mm": 5, "y_mm": 5, "diameter_mm": 0.8, "drill_mm": 0.4,
+                      "net": "N", "from_layer": "top", "to_layer": "bottom",
+                      "tented": None}]
+    board["mounting_holes"] = [{"x_mm": 2, "y_mm": 2, "diameter_mm": 3.2, "plated": None}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    (via,) = result.board.vias
+    assert via.tented_front and via.tented_back        # null -> default TENTED
+    (hole,) = result.board.holes
+    assert hole.plated is False                        # null -> default UNPLATED
+
+
+def test_null_override_plated_is_unset_not_rejected():
+    # G1 complement (vector 270): an override `plated: null` is UNSET (keep the
+    # footprint's plating), matching Go's probeOverride `!!null` allowance — not the
+    # invalid_pin_override a non-bool like "maybe" earns (vector 230).
+    board = _one_component_board(
+        "Package_DIP:DIP-6_W7.62mm_Socket",
+        pins=[{"number": "1", "override": {"plated": None}}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+
+
 def test_pth_alias_key_overrides_explicit_plated_false():
     # D2 (Fable): the pth_holes alias KEY is authoritative for plating — a
     # contradictory explicit plated:false is overridden (folded PLATED, matching Go's

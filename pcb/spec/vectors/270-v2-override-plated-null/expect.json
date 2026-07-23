@@ -1,0 +1,4 @@
+{
+  "valid": true,
+  "note": "finding 019f9123abef: an override `plated: null` is unset (use the footprint's plating), the complement of 230-v2-override-plated-nonbool. Go's probeOverride explicitly allows `!!null`; Python must AGREE (valid)."
+}

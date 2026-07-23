@@ -1,0 +1,6 @@
+version: 1
+name: HolePlatedNull
+width_mm: 20
+height_mm: 20
+mounting_holes:
+  - {x_mm: 2, y_mm: 2, diameter_mm: 3.2, plated: null}

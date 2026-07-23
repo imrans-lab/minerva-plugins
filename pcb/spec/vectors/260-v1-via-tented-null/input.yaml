@@ -1,0 +1,8 @@
+version: 1
+name: ViaTentedNull
+width_mm: 20
+height_mm: 20
+nets:
+  - {name: N, pins: []}
+vias:
+  - {net: N, x_mm: 5, y_mm: 5, diameter_mm: 0.8, drill_mm: 0.4, from_layer: top, to_layer: bottom, tented: null}
