@@ -458,11 +458,13 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             net_expr = f' (net {net_no} "{_esc(net_name_of.get(net_no, ""))}")'
         if drill is not None:
             # Through-hole pad. annulus geometry is the real copper dim when
-            # resolved, else the pin's Extra annulus, else the 2x-drill nominal.
-            # SHAPE INTENTIONALLY ``circle``, NOT an oversight: TH copper is a round
-            # annulus (SUPPORTED_HOLE_SHAPES = {round}); the model carries a single
-            # annulus diameter, not a shaped land, so `thru_hole circle (size a a)`
-            # IS faithful — consistent with the gerber emitter's round-only TH.
+            # resolved, else the pin's Extra annulus, else the 2x-drill nominal. The
+            # land SHAPE is decided by the shared ``th_land`` (also gerber._harvest),
+            # emitted below: an equal-axis DEFAULTED land is a round ``circle``
+            # annulus, while an OBLONG or authored-cornered (rect/roundrect) land is a
+            # faithful shaped land (finding 019f8b7fd295, D1) — the two fab emitters
+            # AGREE (not round-only). The DRILL is always round
+            # (SUPPORTED_HOLE_SHAPES = {round}).
             #
             # A NON-PLATED through-hole (a mounting hole / NPTH pad: pad_type
             # ``np_thru_hole`` or plated is False) is a BARE drilled hole with NO

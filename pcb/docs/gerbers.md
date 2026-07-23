@@ -23,7 +23,7 @@ convention as `pcb_generate`. `out_dir` optionally also writes to disk.
 | `<base>-B_Cu.gbr` | Bottom copper: TH/via annuli, bottom traces |
 | `<base>-F_Mask.gbr` | Top solder-mask openings (pad + clearance) |
 | `<base>-B_Mask.gbr` | Bottom solder-mask openings |
-| `<base>-F_SilkS.gbr` | Top silkscreen (courtyard-box placeholder per component) |
+| `<base>-F_SilkS.gbr` | Top silkscreen (resolved footprint silk graphics; courtyard-box fallback when none) |
 | `<base>-Edge_Cuts.gbr` | Board outline rectangle from origin + width/height |
 | `<base>-PTH.drl` | Plated through-holes (Excellon) — only if the board has any |
 | `<base>-NPTH.drl` | Non-plated holes (Excellon) — only if the board has any |
@@ -71,10 +71,13 @@ per tool, `M30`. Metric, absolute, 3.3 decimal coordinates.
 
 ### Silk limitations
 
-`gerber-writer` has no glyph/text primitive, so `F_SilkS` currently renders a
-**courtyard-box outline placeholder** around each top-side component's pad
-extent — NOT the reference-designator text. Real silkscreen text (vectorised
-glyphs for refdes/value/pin-1 markers) is deferred to a later child.
+`F_SilkS` emits the component's **real resolved silkscreen primitives** (lines,
+arcs, polygons from the resolved footprint's `F.SilkS` graphics) when the footprint
+carries them; a component **without** resolved silk graphics falls back to a
+**courtyard-box outline** around its pad extent. Silkscreen **text** (vectorised
+refdes/value glyphs) is still not rendered — `gerber-writer` has no glyph
+primitive — so real silk-text correctness is tracked separately (silk-text
+`019f77fd6d69`; coverage audit `019f77fd9c6c`).
 
 ### Bottom-side components
 

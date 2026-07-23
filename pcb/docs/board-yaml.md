@@ -150,10 +150,11 @@ both `internal/board/vectors_test.go` (Go) and the worker's
 (`minVectors` / `_MIN_VECTORS`) guarding against silent loss. This is the cross-language analogue of the worker's `fab_capability`
 drift test.
 
-> **Round status (019f802ca3af):** Round A lands the contract *shape* above — the
-> `id`/`override` fields and this spec. The v1→v2 mint-and-write migration
-> (Go), the Python v2 compiler path that *requires* persisted ids (fail-closed),
-> and the committed cross-language vectors are later serialized rounds.
+> **Round status (019f802ca3af):** SHIPPED. Round A landed the contract *shape* —
+> the `id`/`override` fields and this spec — and the v1→v2 mint-and-write migration
+> (Go), the Python v2 compiler path that *requires* persisted ids (fail-closed), and
+> the committed cross-language vectors (`pcb/spec/vectors/`, run by both languages)
+> are all now in place.
 
 ## `.minpcb` (legacy JSON) → canonical mapping
 
@@ -214,11 +215,12 @@ it round-trips into the emitted YAML, or (c) reported in the returned
 are parked in `Extra` quietly; genuinely unrecognized fields are parked in
 `Extra` **and** flagged in `warnings` so the surprise is visible.
 
-Note: `Extra` is `yaml:",inline"` but `json:"-"`. Unknown keys therefore survive
-YAML↔YAML round-trips, but are **not** reflected into the JSON board dict
-returned by `pcb.deserialize` (Go's `encoding/json` has no inline support). The
-canonical fields are the contract; `Extra` is a YAML-side forward-compat
-affordance.
+Note: `Extra` is `yaml:",inline"` and tagged `json:"-"`, but the nine Extra-bearing
+structs carry **custom `MarshalJSON`/`UnmarshalJSON`** (`internal/board/json.go`)
+that inline the unknown keys into the JSON object too — so `Extra` survives both
+YAML↔YAML **and** the `pcb.deserialize` JSON boundary losslessly (modeled fields
+always win a key collision). The canonical fields are the contract; `Extra` is the
+forward-compat affordance, preserved on both wire formats.
 
 ## Channels (`pcb.serialize` / `pcb.deserialize`)
 
