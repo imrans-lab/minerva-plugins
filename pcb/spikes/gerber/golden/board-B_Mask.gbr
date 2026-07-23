@@ -1,5 +1,5 @@
 G04 Created with the python gerber_writer 0.4.3.3*
-G04 #@! TF.CreationDate,2026-07-18T18:33:03.181427*
+G04 #@! TF.CreationDate,2026-07-23T13:09:24.015637*
 G04 #@! TF.FileFunction,Soldermask,Bot*
 G04 #@! TF.FilePolarity,Positive*
 G04 #@! TF.GenerationSoftware,Minerva,gerber-writer-spike/generate.py,1.0*
@@ -8,7 +8,11 @@ G04 #@! TF.GenerationSoftware,Minerva,gerber-writer-spike/generate.py,1.0*
 G75*
 G04 #@! TAShape,Circle,1.8*
 %ADD10C,1.8*%
+G04 #@! TAShape,Circle,3.2*
+%ADD11C,3.2*%
 %LPD*%
 D10*
 X30000000Y15000000D03*
+D11*
+X5000000Y5000000D03*
 M02*

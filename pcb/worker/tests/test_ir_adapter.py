@@ -650,15 +650,17 @@ def test_kicad_footprint_non_plated_th_emits_np_thru_hole():
     assert "thru_hole circle" not in fp.replace("np_thru_hole circle", "")
 
 
-def test_kicad_footprint_plated_th_stays_thru_hole_byte_identical():
-    """UNIT: a plated through-hole pad still emits the EXACT legacy `thru_hole`
-    line (no np_thru_hole, no *.Mask) — byte-stable, so no existing golden moves."""
+def test_kicad_footprint_plated_th_is_masked_thru_hole():
+    """UNIT: a plated through-hole pad emits a `thru_hole`
+    line — a plated thru_hole (never np_thru_hole). It now carries "*.Mask" so its
+    annulus is exposed, matching the gerber emitter + kicad-standard (verified vs
+    pcbnew: a plated thru_hole pad IS on F.Mask) — E3 finding 019f901a9966."""
     pad = {"number": "1", "type": "thru_hole", "shape": "circle",
            "position": {"x": 5.0, "y": 5.0}, "size": {"width": 1.6, "height": 1.6},
            "drill": {"x": 0.8, "y": 0.8}, "layers": ["*.Cu"]}
     fp = kicad._footprint(_th_comp(pad), {}, {})
     assert ('(pad "1" thru_hole circle (at 5.0 5.0) (size 1.6 1.6) '
-            '(drill 0.8) (layers "*.Cu"))') in fp
+            '(drill 0.8) (layers "*.Cu" "*.Mask"))') in fp
     assert "np_thru_hole" not in fp
 
 
@@ -745,6 +747,27 @@ def test_build_gerbers_ir_is_byte_identical_to_adapter_path(make):
     assert dict(native) == dict(via_adapter)   # every file, byte-identical
     assert [(d.code, d.severity) for d in native.diagnostics] == \
            [(d.code, d.severity) for d in via_adapter.diagnostics]
+
+
+def test_unplated_board_hole_gets_drill_size_mask_both_emitters():
+    # E3 (finding 019f901a9966): the ratified NPTH mask rule — an unplated board-level
+    # hole gets a DRILL-size mask opening on both sides in gerber, UNIFORM with a
+    # footprint np_thru_hole pad and kicad's np_thru_hole (which declares *.Mask).
+    board = {"version": 1, "name": "h", "width_mm": 20, "height_mm": 20,
+             "layers": ["top", "bottom"],
+             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+             "components": [{"ref": "X1", "footprint": "R_0805", "x_mm": 5, "y_mm": 5,
+                             "rotation_deg": 0, "layer": "top"}],
+             "mounting_holes": [{"x_mm": 12, "y_mm": 12, "diameter_mm": 3.2, "plated": False}]}
+    resolved = _resolve(board)
+    g = gerber.build_gerbers_ir(resolved, name="h")
+    for layer in ("h-F_Mask.gbr", "h-B_Mask.gbr"):
+        assert re.search(r"%ADD\d+C,3\.2\*%", g[layer]), f"{layer} missing the NPTH drill mask"
+        assert re.search(r"X12000000Y12000000D03", g[layer]), f"{layer} missing the mask flash"
+    # kicad emits the bare np_thru_hole (which carries *.Mask) for the board hole.
+    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="h")["h.kicad_pcb"]
+    assert '(pad "" np_thru_hole circle' in pcb and '"*.Cu" "*.Mask"' in pcb
 
 
 def test_via_tenting_gerber_mask():

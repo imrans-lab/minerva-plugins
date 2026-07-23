@@ -57,6 +57,11 @@ smd_mask_pad = Rectangle(SMD_PAD_X + 2 * MASK_CLEARANCE, SMD_PAD_Y + 2 * MASK_CL
 th_pad_cu = Circle(TH_ANNULUS, "ComponentPad")
 th_mask_pad = Circle(TH_ANNULUS + 2 * MASK_CLEARANCE, "")
 via_pad_cu = Circle(VIA_DIAMETER, "ViaPad")
+# NPTH mounting-hole mask: a DRILL-SIZE opening (no clearance growth) on BOTH
+# sides. Ground truth is pcbnew 9.0.9 — a KiCad np_thru_hole pad IS on F.Mask/
+# B.Mask with a size==drill opening; the emitter matches (E3, docket
+# 019f901a9966). Kept independent of the emitter: this is gerber_writer.
+mount_mask_pad = Circle(MOUNT_HOLE_DIA, "")
 
 # =============================================================================
 # F.Cu
@@ -97,15 +102,17 @@ f_mask.add_pad(smd_mask_pad, r1_pin2)
 f_mask.add_pad(smd_mask_pad, c1_pin1)
 f_mask.add_pad(smd_mask_pad, c1_pin2)
 f_mask.add_pad(th_mask_pad, U1)
+f_mask.add_pad(mount_mask_pad, MOUNTING_HOLE)   # NPTH: drill-size opening
 
 with open(OUT / "board-F_Mask.gbr", "w") as fh:
     f_mask.dump_gerber(fh)
 
 # =============================================================================
-# B.Mask (only U1's TH pad has copper on the bottom side)
+# B.Mask (U1's TH pad copper + the NPTH mounting-hole drill-size opening)
 # =============================================================================
 b_mask = DataLayer("Soldermask,Bot", negative=False)
 b_mask.add_pad(th_mask_pad, U1)
+b_mask.add_pad(mount_mask_pad, MOUNTING_HOLE)   # NPTH: drill-size opening
 
 with open(OUT / "board-B_Mask.gbr", "w") as fh:
     b_mask.dump_gerber(fh)

@@ -390,6 +390,14 @@ def _mask_dim(base: float, margin: float, ref: Any, number: Any) -> float:
     return dim
 
 
+def _circle_mask(x: float, y: float, d: float) -> tuple:
+    """A round, unrotated solder-mask opening of diameter ``d`` at ``(x, y)`` —
+    the aperture tuple every circular mask flash shares (round TH land, NPTH
+    drill-size opening, untented via). One place owns the (shape, w==h, no
+    corner-ratio, 0° angle) convention so the mask emitters cannot drift."""
+    return (x, y, "circle", d, d, None, 0.0)
+
+
 def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                top: bool, ref, mask_clearance: float) -> list[tuple[float, float]]:
     """Emit one component's pads into ``g`` — the SHARED, byte-sensitive pad path
@@ -438,8 +446,8 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                     g.th_annuli.append((px, py, annulus, "ComponentPad"))
                     mask_d = _mask_dim(annulus, margin, ref, pad.number)
                     # Round land: circular mask opening, enlarged by the per-pad margin.
-                    g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
-                    g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+                    g.mask_top.append(_circle_mask(px, py, mask_d))
+                    g.mask_bot.append(_circle_mask(px, py, mask_d))
             else:
                 # UNPLATED (np_thru_hole): NO copper land — just a DRILL-size mask
                 # opening on both sides, matching kicad's np_thru_hole `(size drill
@@ -448,8 +456,8 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                 # margin); a nonzero board mask clearance is not added here (a mask
                 # ring on a mechanical hole is cosmetic), so the two emitters can
                 # differ by that clearance only — filed as a follow-up.
-                g.mask_top.append((px, py, "circle", drill, drill, None, 0.0))
-                g.mask_bot.append((px, py, "circle", drill, drill, None, 0.0))
+                g.mask_top.append(_circle_mask(px, py, drill))
+                g.mask_bot.append(_circle_mask(px, py, drill))
             g.holes.append((px, py, drill, is_plated))
         else:
             # SMD pad on the component's own side. width/height are guaranteed
@@ -507,13 +515,20 @@ def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
     if plated and annulus is not None and annulus > 0:
         g.th_annuli.append((hx, hy, annulus, "ComponentPad"))
         mask_d = _mask_dim(annulus, mask_clearance, f"{key}[{idx}]", "")
-        g.mask_top.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
-        g.mask_bot.append((hx, hy, "circle", mask_d, mask_d, None, 0.0))
+        g.mask_top.append(_circle_mask(hx, hy, mask_d))
+        g.mask_bot.append(_circle_mask(hx, hy, mask_d))
     elif plated:
         g.warn("plated_hole_no_annulus_copper",
                f"plated hole {key}[{idx}] at ({hx}, {hy}) has no annulus_mm — "
                f"drilled but NO copper ring emitted (author annulus_mm)",
                SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
+    else:
+        # Unplated: no copper, but a DRILL-size mask opening on both sides — UNIFORM
+        # with a footprint np_thru_hole pad and kicad's np_thru_hole (verified vs
+        # pcbnew 9.0.9: an np pad IS on *.Mask and renders a size==drill opening). The
+        # ratified NPTH mask rule (finding 019f901a9966).
+        g.mask_top.append(_circle_mask(hx, hy, dia))
+        g.mask_bot.append(_circle_mask(hx, hy, dia))
 
 
 def _emit_via(g: _Geometry, vx: float, vy: float, dia: float, drill: float,
@@ -528,9 +543,9 @@ def _emit_via(g: _Geometry, vx: float, vy: float, dia: float, drill: float,
     if not (tented_front and tented_back):
         md = _mask_dim(dia, mask_clearance, "via", f"({vx}, {vy})")
         if not tented_front:
-            g.mask_top.append((vx, vy, "circle", md, md, None, 0.0))
+            g.mask_top.append(_circle_mask(vx, vy, md))
         if not tented_back:
-            g.mask_bot.append((vx, vy, "circle", md, md, None, 0.0))
+            g.mask_bot.append(_circle_mask(vx, vy, md))
 
 
 def _harvest(board: dict, mask_clearance: float) -> _Geometry:

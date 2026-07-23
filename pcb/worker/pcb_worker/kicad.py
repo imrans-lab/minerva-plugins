@@ -462,14 +462,14 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 lines.append(
                     f'    (pad "{_esc(num_s)}" thru_hole {tok} {_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(lw)} {_num(lh)}){suffix} (drill {_num(drill)}) '
-                    f'(layers "*.Cu"){net_expr})'
+                    f'(layers "*.Cu" "*.Mask"){net_expr})'
                 )
             else:
                 annulus = pad.annulus if pad.annulus is not None else drill * 2
                 lines.append(
                     f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
-                    f'(layers "*.Cu"){net_expr})'
+                    f'(layers "*.Cu" "*.Mask"){net_expr})'
                 )
         else:
             # SMD pad. width/height are guaranteed positive by
