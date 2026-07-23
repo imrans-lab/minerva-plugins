@@ -865,6 +865,68 @@ def test_kicad_via_tenting_defaults_tented_and_agrees_with_gerber():
     assert re.search(via_flash, g["v-F_Mask.gbr"]) and re.search(via_flash, g["v-B_Mask.gbr"])
 
 
+def _declared_kicad_layers(pcb: str) -> set[str]:
+    """Canonical layer names declared in the board's top `(layers ...)` table."""
+    m = re.search(r"  \(layers\n(.*?)\n  \)", pcb, re.S)
+    assert m, "no (layers ...) table found in the emitted board"
+    return set(re.findall(r'\(\d+ "([^"]+)"', m.group(1)))
+
+
+def _referenced_kicad_layers(pcb: str) -> set[str]:
+    """Every layer the emitter WRITES outside the table: pad `(layers "A" "B")`
+    lists and node `(layer "X")` refs, with `*.Cu`/`*.Mask` wildcards expanded to
+    their front+back members."""
+    tbl = re.search(r"  \(layers\n.*?\n  \)", pcb, re.S)
+    body = (pcb[:tbl.start()] + pcb[tbl.end():]) if tbl else pcb
+    refs: set[str] = set()
+    for grp in re.findall(r'\(layers ((?:"[^"]+"\s*)+)\)', body):
+        refs.update(re.findall(r'"([^"]+)"', grp))
+    refs.update(re.findall(r'\(layer "([^"]+)"\)', body))
+    out: set[str] = set()
+    for r in refs:
+        # `*.Cu`/`*.Mask` expand to FRONT+BACK only — correct for the bounded 2-layer
+        # v1 contract; revisit if inner copper layers ever ship.
+        out.update({"F." + r[2:], "B." + r[2:]} if r.startswith("*.") else {r})
+    return out
+
+
+def test_every_referenced_kicad_layer_is_declared():
+    # G2 (finding 019f90c5c962): EXHAUSTIVE declared-vs-referenced gate, not just
+    # F.Mask. Every layer the emitter writes — pad `(layers ...)`, footprint/text/
+    # graphic `(layer ...)`, wildcards expanded — MUST be declared in the top
+    # `(layers ...)` table, or KiCad silently drops that layer's export. Exercises a
+    # TOP and a BOTTOM footprint (so F/B paste+mask+fab all appear) plus a TH pad,
+    # via, NPTH mount, and traces.
+    board = {"version": 1, "name": "b", "width_mm": 40, "height_mm": 30,
+             "layers": ["top", "bottom"],
+             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+             "components": [
+                 {"ref": "R1", "footprint": "R_0805", "x_mm": 10, "y_mm": 10,
+                  "rotation_deg": 0, "layer": "top"},
+                 {"ref": "R2", "footprint": "R_0805", "x_mm": 25, "y_mm": 15,
+                  "rotation_deg": 0, "layer": "bottom"},
+                 {"ref": "U1", "footprint": "TH_TestPoint", "x_mm": 30, "y_mm": 20,
+                  "rotation_deg": 0, "layer": "top",
+                  "pins": [{"number": "1", "x_mm": 0, "y_mm": 0, "drill_mm": 0.8,
+                            "annulus_diameter_mm": 1.6}]}],
+             "nets": [{"name": "N", "pins": ["R1.1", "U1.1"]}],
+             "vias": [{"net": "N", "x_mm": 18, "y_mm": 12, "diameter_mm": 0.8,
+                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}],
+             "mounting_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2, "plated": False}]}
+    pcb = _emit_kicad(board, name="b")
+    declared = _declared_kicad_layers(pcb)
+    referenced = _referenced_kicad_layers(pcb)
+    missing = referenced - declared
+    assert not missing, (
+        f"emitter references undeclared KiCad layers {sorted(missing)} "
+        f"(KiCad would silently drop their export); declared={sorted(declared)}")
+    # Teeth: the scan actually SAW the technical layers on both sides — otherwise a
+    # trivially-empty reference set would pass vacuously.
+    assert {"F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.Paste", "B.Paste", "F.Fab",
+            "F.SilkS", "Edge.Cuts"} <= referenced, sorted(referenced)
+
+
 def test_plated_board_hole_annulus_agrees_across_emitters():
     """finding 019f8dbb7104: a plated board hole's AUTHORED annulus reaches BOTH
     emitters as the SAME copper — gerber flashes a copper annulus of that diameter on

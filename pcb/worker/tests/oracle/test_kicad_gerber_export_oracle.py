@@ -84,3 +84,53 @@ def test_tented_via_has_no_mask_opening_through_kicad_cli():
     # No Ø0.8 aperture (the tented via) — the via at (20,10) has no opening.
     assert not re.search(r"%ADD\d+C,0\.8\d*\*%", fmask), "tented via leaked a mask opening (E4)"
     assert re.search(r"%ADD\d+C,3\.2\d*\*%", fmask), "NPTH mask still expected (E3)"
+
+
+ALL_TECH_LAYERS = ["F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.Paste", "B.Paste",
+                   "F.Fab", "B.Fab", "Edge.Cuts"]
+
+
+def test_kicad_cli_exports_all_referenced_technical_layers_both_sides():
+    # G2 (finding 019f90c5c962): the export gate must be EXHAUSTIVE — every declared
+    # technical layer on BOTH sides actually plots, not just F.Mask. A board with a
+    # TOP and a BOTTOM SMD land (for F/B.Paste + F/B.Mask) plus a TH pad exports
+    # cleanly and every requested layer yields a file; the mask + paste layers carry
+    # real flashes (not just an empty header).
+    board = {
+        "version": 1, "name": "brd", "width_mm": 40, "height_mm": 30,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "R1", "footprint": "R_0805", "x_mm": 10, "y_mm": 10,
+             "rotation_deg": 0, "layer": "top"},
+            {"ref": "R2", "footprint": "R_0805", "x_mm": 25, "y_mm": 15,
+             "rotation_deg": 0, "layer": "bottom"},
+            {"ref": "U1", "footprint": "TH_TestPoint", "x_mm": 30, "y_mm": 20,
+             "rotation_deg": 0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0, "drill_mm": 0.8,
+                       "annulus_diameter_mm": 1.6}]}],
+        "nets": [{"name": "N", "pins": ["R1.1", "U1.1"]}],
+        "vias": [],
+        "mounting_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2, "plated": False}],
+    }
+    resolved = compile_board(board).board
+    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="brd")["brd.kicad_pcb"]
+    files = export_gerbers_on_pcb_text(pcb, ALL_TECH_LAYERS, name="brd")
+
+    def _layer(tok: str) -> str:
+        matches = [v for k, v in files.items() if tok in k]
+        assert matches, f"no exported gerber file for layer token {tok!r} (files={list(files)})"
+        return matches[0]
+
+    # Every requested technical layer produced a file (declared -> plotted).
+    for tok in ("F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_Paste", "B_Paste",
+                "F_Fab", "B_Fab", "Edge_Cuts"):
+        _layer(tok)
+    # Mask + paste carry real geometry on BOTH sides (the F3 failure was silent
+    # empties). Top has R1's land + U1's TH; bottom has R2's land.
+    for tok in ("F_Mask", "B_Mask", "F_Paste", "B_Paste"):
+        assert _layer(tok).count("D03*") >= 1, f"{tok} exported with no flashes (silent-empty regression)"
+    # NPTH Ø3.2 mask opening present (E3) on both mask sides.
+    assert re.search(r"%ADD\d+C,3\.2\d*\*%", _layer("F_Mask"))
+    assert re.search(r"%ADD\d+C,3\.2\d*\*%", _layer("B_Mask"))
