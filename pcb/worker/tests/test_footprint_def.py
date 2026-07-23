@@ -94,8 +94,11 @@ def test_to_board_pad_dicts_exact_keys():
     dicts = FootprintDefinition.from_kicad_parsed(parsed).to_board_pad_dicts()
     assert dicts, "fixture produced no pads"
     for d in dicts:
+        # raw_shape (D1 provenance) is present because real footprint pads all
+        # AUTHOR a shape token — the signal th_land uses to shape an equal-axis land.
         assert set(d.keys()) == {
             "number", "type", "shape", "position", "size", "drill", "layers",
+            "raw_shape",
         }
         assert set(d["position"].keys()) == {"x", "y"}
         assert set(d["size"].keys()) == {"width", "height"}

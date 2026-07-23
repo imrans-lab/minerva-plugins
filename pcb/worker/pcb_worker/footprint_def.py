@@ -630,5 +630,7 @@ class FootprintDefinition:
                     pad_dict[key] = val
             if pad.rotation_deg:
                 pad_dict["rotation"] = pad.rotation_deg
+            if pad.raw_shape is not None:
+                pad_dict["raw_shape"] = pad.raw_shape   # D1 provenance parity
             out.append(pad_dict)
         return out

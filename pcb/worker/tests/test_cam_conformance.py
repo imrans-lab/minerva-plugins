@@ -255,16 +255,23 @@ def _valid_mask_pad_board(shape: str, *, solder_mask_margin: float | None = None
 
 
 def _th_pad_board(*, w: float = 2.0, h: float | None = None, drill: float = 1.0,
-                  shape: str = "circle", solder_mask_margin: float | None = None) -> dict:
+                  shape: str = "circle", raw_shape: str | None = None,
+                  corner_rratio: float | None = None,
+                  solder_mask_margin: float | None = None) -> dict:
     """A minimal board with one resolved THROUGH-HOLE pad. Its resolved copper width
     doubles as the round-annulus diameter (pad_source contract). `h` defaults to `w`
     (a square/round land); pass h != w for an OBLONG land. An oblong land needs a
     SHAPEABLE `shape` (oval/roundrect/rect) to emit faithfully; the default `circle`
-    is round-only (an oblong circle fails closed — that is the point)."""
+    is round-only (an oblong circle fails closed — that is the point). `raw_shape`
+    sets the AUTHORED-shape provenance (D1) that lets an EQUAL-AXIS land shape."""
     height = h if h is not None else w
     pad = {"number": "1", "type": "thru_hole", "shape": shape,
            "position": {"x": 0, "y": 0}, "size": {"width": w, "height": height},
            "drill": {"x": drill, "y": drill}, "layers": ["F.Cu", "B.Cu"]}
+    if raw_shape is not None:
+        pad["raw_shape"] = raw_shape
+    if corner_rratio is not None:
+        pad["corner_rratio"] = corner_rratio
     if solder_mask_margin is not None:
         pad["solder_mask_margin"] = solder_mask_margin
     return {
@@ -1013,24 +1020,31 @@ def test_oblong_th_pad_unshapeable_fails_closed_both_emitters(bad_shape):
 
 def test_th_land_decision_truth_table():
     # The SINGLE shared th_land decision BOTH emitters consume (anti-drift). Shaped
-    # iff OBLONG (w != h) AND a shapeable family (oval/roundrect/rect) — NO coercion:
-    # an oblong circle/custom land is NOT shaped here (it is fail-closed upstream by
-    # _require_faithful_shape). Equal-axis or missing-dim lands are round annuli.
+    # iff shapeable family (oval/roundrect/rect) AND (OBLONG w!=h OR an authored
+    # CORNERED shape rect/roundrect). No coercion: an oblong circle/custom land is
+    # fail-closed upstream by _require_faithful_shape. A DEFAULTED-rect equal-axis
+    # land (raw_shape None) and an equal-axis oval stay round annuli (D1).
     from types import SimpleNamespace
 
     from pcb_worker.pad_source import th_land
 
-    def pad(w, h, shape="rect", rr=None):
-        return SimpleNamespace(width=w, height=h, shape=shape, corner_rratio=rr)
+    def pad(w, h, shape="rect", rr=None, raw_shape=None):
+        return SimpleNamespace(width=w, height=h, shape=shape, corner_rratio=rr,
+                               raw_shape=raw_shape)
 
+    # OBLONG lands: shaped regardless of provenance.
     assert th_land(pad(2.0, 1.0, "oval")) == (True, "oval", 2.0, 1.0, None)
     assert th_land(pad(2.0, 1.0, "rect")) == (True, "rect", 2.0, 1.0, None)
     assert th_land(pad(2.0, 1.0, "roundrect", 0.25)) == (True, "roundrect", 2.0, 1.0, 0.25)
-    assert th_land(pad(2.0, 1.0, "circle"))[0] is False   # oblong circle: gate's job
-    assert th_land(pad(2.0, 1.0, "custom"))[0] is False    # unknown: gate's job
-    assert th_land(pad(1.5, 1.5, "rect"))[0] is False      # equal-axis
-    assert th_land(pad(1.5, 1.5, "oval"))[0] is False
-    assert th_land(pad(None, 1.0, "oval"))[0] is False     # missing dim
+    assert th_land(pad(2.0, 1.0, "circle"))[0] is False    # oblong circle: gate's job
+    assert th_land(pad(2.0, 1.0, "custom"))[0] is False     # unknown: gate's job
+    # EQUAL-AXIS lands: shaped ONLY for an authored CORNERED shape (D1 c688).
+    assert th_land(pad(1.5, 1.5, "rect", raw_shape="rect")) == (True, "rect", 1.5, 1.5, None)
+    assert th_land(pad(1.5, 1.5, "roundrect", 0.2, raw_shape="roundrect")) == \
+        (True, "roundrect", 1.5, 1.5, 0.2)
+    assert th_land(pad(1.5, 1.5, "rect", raw_shape=None))[0] is False    # defaulted rect
+    assert th_land(pad(1.5, 1.5, "oval", raw_shape="oval"))[0] is False  # authored oval = round
+    assert th_land(pad(None, 1.0, "oval"))[0] is False      # missing dim
     assert th_land(pad(2.0, None, "oval"))[0] is False
 
 
@@ -1040,6 +1054,40 @@ def test_square_th_pad_does_not_warn_either_emitter():
     k = kicad.generate(_th_pad_board(w=1.5, h=1.5), base_name="conf")
     assert "th_pad_shape_circularized" not in [d.code for d in g.diagnostics]
     assert "th_pad_shape_circularized" not in [d.code for d in k.diagnostics]
+
+
+def test_authored_square_rect_th_pad_is_shaped_both_emitters():
+    # D1 (finding 019f8b7fd295 c688): an EQUAL-AXIS land whose shape is genuinely
+    # AUTHORED as rect (a real square pin-1 marker) keeps its corners in BOTH
+    # emitters — no round-annulus flattening. gerber: a rect aperture; kicad: a
+    # thru_hole rect.
+    board = _th_pad_board(w=1.6, h=1.6, shape="rect", raw_shape="rect")
+    g = gerber.build_gerbers(board, name="conf")
+    assert re.search(r"%ADD\d+R,1\.6X1\.6\*%", g["conf-F_Cu.gbr"])
+    assert re.search(r"%ADD\d+R,1\.6X1\.6\*%", g["conf-B_Cu.gbr"])
+    assert "thru_hole rect" in kicad.generate(board, base_name="conf")["conf.kicad_pcb"]
+
+
+def test_defaulted_rect_equal_axis_th_pad_stays_round():
+    # The other half of D1: an equal-axis land whose rect shape was DEFAULTED (no
+    # authored provenance) stays a round annulus — a plain round TH pad is untouched.
+    board = _th_pad_board(w=1.6, h=1.6, shape="rect", raw_shape=None)
+    g = gerber.build_gerbers(board, name="conf")
+    assert re.search(r"%ADD\d+C,1\.6\*%", g["conf-F_Cu.gbr"])
+    assert not re.search(r"%ADD\d+R,1\.6X1\.6\*%", g["conf-F_Cu.gbr"])
+
+
+@pytest.mark.parametrize("bad_rratio", [-0.1, 0.6, float("inf")])
+def test_th_roundrect_bad_corner_rratio_fails_closed(bad_rratio):
+    # D1 hoisted the roundrect corner_rratio validation above the drill branch, so a
+    # TH roundrect land (now shapeable) no longer skips it: a ratio outside [0, 0.5]
+    # fails CLOSED in both emitters rather than flattening / crashing the aperture
+    # writer on fabrication-critical copper.
+    board = _th_pad_board(w=2.0, h=1.0, shape="roundrect", corner_rratio=bad_rratio)
+    with pytest.raises(ValueError, match="corner_rratio"):
+        gerber.build_gerbers(board, name="conf")
+    with pytest.raises(ValueError, match="corner_rratio"):
+        kicad.generate(board, base_name="conf")
 
 
 def test_empty_or_missing_smd_shape_defaults_to_rect_no_raise():

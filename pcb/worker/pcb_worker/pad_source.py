@@ -108,6 +108,7 @@ class PadGeom:
     layers: list
     from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
     rotation: float | None = None  # ABSOLUTE combined pad angle (IR placed mode); None => use the component angle (legacy). Read by the IR fab bridges: gerber placed path (W8.1) AND kicad absolute-under-identity (W8.1b, emitted as the pad (at) third value).
+    raw_shape: str | None = None  # the FOOTPRINT-AUTHORED shape token, None when the footprint pad declared none (resolve defaulted `shape` to "rect"). th_land shapes an EQUAL-AXIS TH land only when the shape was genuinely authored (D1, finding 019f8b7fd295) — a defaulted-rect square stays a round annulus.
 
 
 def has_resolved_pads(comp: Any) -> bool:
@@ -209,14 +210,29 @@ def th_land(pad: "PadGeom") -> tuple[bool, str, float, float, "float | None"]:
     (``shaped=False``, byte-identical goldens). The round DRILL is unchanged in both
     cases (SUPPORTED_HOLE_SHAPES) — only the LAND takes a shape.
 
+    An EQUAL-AXIS land is shaped too when its shape was genuinely AUTHORED by the
+    footprint (``pad.raw_shape`` in a shapeable family) — a real square ``rect``
+    pin-1 marker or a rounded-rect land keeps its corners instead of collapsing to a
+    round annulus (D1, finding 019f8b7fd295 comment 688). A DEFAULTED ``rect``
+    (``raw_shape is None``, resolve's fallback for an unshaped pad) stays a round
+    annulus, so a plain round TH pad is unaffected — oblongness OR authored-shape,
+    not the effective token, is the signal.
+
     This function NEVER coerces an unrecognized shape: an oblong land whose shape is
     not shapeable (circle / custom / unknown) has no faithful oblong aperture and is
     fail-closed UPSTREAM by ``_require_faithful_shape`` before emission, so the
     ``shaped=False`` return for such a land is unreachable on the gated emit path
     (returning round there would circularize — the exact defect this fixes)."""
     w, h = pad.width, pad.height
-    if (w is not None and h is not None and abs(w - h) > _TH_OBLONG_TOL_MM
-            and pad.shape in _TH_SHAPEABLE):
+    if w is None or h is None or pad.shape not in _TH_SHAPEABLE:
+        return (False, "circle", 0.0, 0.0, None)
+    oblong = abs(w - h) > _TH_OBLONG_TOL_MM
+    # An EQUAL-AXIS land is shaped only for an authored CORNERED shape (rect /
+    # roundrect) — a genuine square / rounded-square land keeps its corners. An
+    # equal-axis authored OVAL is geometrically a circle, so it stays a round
+    # annulus (no spurious obround); a defaulted rect (raw_shape None) stays round.
+    authored_cornered = pad.raw_shape in ("rect", "roundrect")
+    if oblong or authored_cornered:
         return (True, pad.shape, w, h, pad.corner_rratio)
     return (False, "circle", 0.0, 0.0, None)
 
@@ -242,6 +258,20 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
     extent) or coerced to an obround (misrepresenting a custom outline) — finding
     019f8b7fd295, "faithfully OR fail closed". The raw pad dict is needed because a
     non-numeric ``corner_rratio`` is coerced to None before it reaches PadGeom."""
+    # A roundrect corner ratio must be finite in [0, 0.5] for ANY roundrect land —
+    # SMD or a (now shapeable) TH land (D1). Checked BEFORE the drill branch so a
+    # through-hole roundrect no longer skips it (an unvalidated ratio would flatten
+    # to a plain rectangle or crash the aperture writer on fabrication-critical
+    # copper). Runs on the raw value: a non-numeric is coerced to None before PadGeom.
+    if pad.shape == "roundrect":
+        rr = rawpad.get("corner_rratio")
+        if rr is not None and (isinstance(rr, bool)
+                               or not isinstance(rr, (int, float))
+                               or not math.isfinite(rr)
+                               or not 0.0 <= rr <= 0.5):
+            raise ValueError(
+                f"component {ref!r} pad {pad.number!r}: roundrect corner_rratio "
+                f"{rr!r} must be a finite number in [0, 0.5]")
     if pad.drill is not None:
         if (pad.width is not None and pad.height is not None
                 and abs(pad.width - pad.height) > _TH_OBLONG_TOL_MM
@@ -267,15 +297,6 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
         raise ValueError(
             f"component {ref!r} pad {pad.number!r}: circle pad width {pad.width} "
             f"!= height {pad.height} — no faithful circular aperture")
-    if pad.shape == "roundrect":
-        rr = rawpad.get("corner_rratio")
-        if rr is not None and (isinstance(rr, bool)
-                               or not isinstance(rr, (int, float))
-                               or not math.isfinite(rr)
-                               or not 0.0 <= rr <= 0.5):
-            raise ValueError(
-                f"component {ref!r} pad {pad.number!r}: roundrect corner_rratio "
-                f"{rr!r} must be a finite number in [0, 0.5]")
 
 
 def _require_valid_solder_mask_margin(ref: Any, rawpad: dict, pad: PadGeom) -> None:
@@ -366,6 +387,9 @@ def _from_resolved(pad: dict) -> PadGeom:
         # unchanged; a rotated-footprint resolve dict does carry it, and kicad now
         # honours it (previously dropped — Codex 2b).
         rotation=_opt_num(pad.get("rotation")),
+        # FOOTPRINT-authored shape token (None => defaulted), the D1 provenance
+        # signal th_land uses to shape an equal-axis authored land.
+        raw_shape=pad.get("raw_shape"),
     )
 
 
@@ -406,4 +430,9 @@ def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
         d["corner_rratio"] = pad.corner_rratio
     if pad.solder_mask_margin is not None:
         d["solder_mask_margin"] = pad.solder_mask_margin
+    # D1 provenance — but an OVERRIDE annulus (pad.annulus set) is an explicitly
+    # ROUND copper ring that supersedes the footprint's authored shape, so it is not
+    # carried: an override-annulus pad stays a round annulus regardless of raw_shape.
+    if pad.raw_shape is not None and pad.annulus is None:
+        d["raw_shape"] = pad.raw_shape
     return _from_resolved(d)

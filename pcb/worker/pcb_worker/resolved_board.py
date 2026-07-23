@@ -591,6 +591,11 @@ class PlacedPad:
     solder_paste_margin: float | None
     layers: tuple[Layer, ...]
     side: Side
+    # The FOOTPRINT-AUTHORED shape token (None when the footprint pad declared none),
+    # carried so the fab emitters can shape an EQUAL-AXIS through-hole land only when
+    # its shape was genuinely authored — a defaulted-rect square stays a round
+    # annulus (D1, finding 019f8b7fd295). Defaults None for non-footprint pads.
+    raw_shape: str | None = None
 
     def __post_init__(self) -> None:
         for field in ("id", "component_id", "source_id", "pad_type"):

@@ -580,6 +580,7 @@ def _place_component(
             solder_paste_margin=pad.solder_paste_margin,
             layers=layers,
             side=side,
+            raw_shape=pad.raw_shape,   # D1 provenance (authored footprint shape)
         ))
     # A validated override that correlates to NO footprint pad would apply to
     # nothing and vanish silently — a fail-closed violation (a sanctioned

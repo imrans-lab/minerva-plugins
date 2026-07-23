@@ -261,6 +261,14 @@ def _pads_from_parsed(fp_pads: list) -> list:
             "drill": drill_dict,
             "layers": p.get("layers") or [],
         }
+        # D1 provenance: carry the FOOTPRINT-AUTHORED shape (None when the pad
+        # declared none) so th_land can shape an equal-axis authored land (finding
+        # 019f8b7fd295). Derived from the raw ``shape`` token exactly as
+        # PadDefinition.raw_shape is (a string only), keeping the two producers in
+        # parity; only present when authored, so a defaulted pad stays clean.
+        raw_shape = p.get("shape") if isinstance(p.get("shape"), str) else None
+        if raw_shape is not None:
+            pad_out["raw_shape"] = raw_shape
         # Fab-affecting optionals — only present when the footprint carries them,
         # so a plain rect pad stays clean. corner_rratio + solder_mask_margin are
         # consumed by the emitters NOW; rotation + solder_paste_margin are carried

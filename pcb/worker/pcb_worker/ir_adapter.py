@@ -136,6 +136,10 @@ def _pad_to_dict(pad: PlacedPad, number: str) -> dict:
         out["corner_rratio"] = pad.corner_rratio
     if pad.solder_mask_margin is not None:
         out["solder_mask_margin"] = pad.solder_mask_margin
+    # D1 provenance — omitted when an OVERRIDE annulus (round) supersedes the
+    # footprint shape, so an override-annulus pad stays a round annulus.
+    if pad.raw_shape is not None and pad.annulus is None:
+        out["raw_shape"] = pad.raw_shape
     return out
 
 
