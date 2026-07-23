@@ -8,12 +8,9 @@ G04 #@! TF.GenerationSoftware,Minerva,pcb_worker/gerber.py,0.2.0*
 G75*
 G04 #@! TAShape,Circle,2.0*
 %ADD10C,2.0*%
-G04 #@! TAShape,Circle,3.2*
-%ADD11C,3.2*%
 %LPD*%
 D10*
 X3730000Y5000000D03*
 X6270000Y5000000D03*
-D11*
 X15000000Y5000000D03*
 M02*

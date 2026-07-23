@@ -411,29 +411,46 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
 
         drill = pad.drill
         if drill is not None and drill > 0:
-            # Through-hole pad: copper land on BOTH copper layers, mask opening on
-            # both sides, drilled hole (plated unless flagged). th_land is the SHARED
-            # decision (also used by kicad): a genuinely OBLONG land keeps its
-            # width x height faithfully; an equal-axis land is the historical round
-            # annulus (finding 019f8b7fd295). The DRILL stays round either way.
-            shaped, land_shape, lw, lh, lrratio = th_land(pad)
-            margin = _pad_mask_margin(pad, mask_clearance)
-            if shaped:
-                # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
-                # aperture family enlarged per axis (no more circularizing).
-                g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
-                mw = _mask_dim(lw, margin, ref, pad.number)
-                mh = _mask_dim(lh, margin, ref, pad.number)
-                g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
-                g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+            # An UNPLATED through-hole pad (np_thru_hole, or a pad flagged not plated)
+            # is a BARE drilled hole — NO copper land (just a drill-size mask opening,
+            # below), exactly as kicad emits np_thru_hole. Only a PLATED TH pad gets
+            # the copper annulus / land (finding 019f8fe77068 — gerber must not invent
+            # copper the kicad emitter leaves bare). The DRILL is emitted either way
+            # (routed to PTH / NPTH by the plating flag). Same predicate
+            # kicad._footprint uses.
+            is_plated = pad.plated and pad.pad_type != "np_thru_hole"
+            if is_plated:
+                # th_land is the SHARED decision: a genuinely OBLONG land keeps its
+                # width x height faithfully; an equal-axis land is the historical
+                # round annulus (finding 019f8b7fd295). The drill stays round.
+                shaped, land_shape, lw, lh, lrratio = th_land(pad)
+                margin = _pad_mask_margin(pad, mask_clearance)
+                if shaped:
+                    # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
+                    # aperture family enlarged per axis (no more circularizing).
+                    g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
+                    mw = _mask_dim(lw, margin, ref, pad.number)
+                    mh = _mask_dim(lh, margin, ref, pad.number)
+                    g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+                    g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+                else:
+                    annulus = pad.annulus or (drill * 2.0)
+                    g.th_annuli.append((px, py, annulus, "ComponentPad"))
+                    mask_d = _mask_dim(annulus, margin, ref, pad.number)
+                    # Round land: circular mask opening, enlarged by the per-pad margin.
+                    g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
+                    g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
             else:
-                annulus = pad.annulus or (drill * 2.0)
-                g.th_annuli.append((px, py, annulus, "ComponentPad"))
-                mask_d = _mask_dim(annulus, margin, ref, pad.number)
-                # Round land: circular mask opening, enlarged by the per-pad margin.
-                g.mask_top.append((px, py, "circle", mask_d, mask_d, None, 0.0))
-                g.mask_bot.append((px, py, "circle", mask_d, mask_d, None, 0.0))
-            g.holes.append((px, py, drill, pad.plated))
+                # UNPLATED (np_thru_hole): NO copper land — just a DRILL-size mask
+                # opening on both sides, matching kicad's np_thru_hole `(size drill
+                # drill)` on "*.Mask": a bare hole, mask open to the drill, no copper
+                # ring (finding 019f8fe77068). Uses the literal drill (no per-pad mask
+                # margin); a nonzero board mask clearance is not added here (a mask
+                # ring on a mechanical hole is cosmetic), so the two emitters can
+                # differ by that clearance only — filed as a follow-up.
+                g.mask_top.append((px, py, "circle", drill, drill, None, 0.0))
+                g.mask_bot.append((px, py, "circle", drill, drill, None, 0.0))
+            g.holes.append((px, py, drill, is_plated))
         else:
             # SMD pad on the component's own side. width/height are guaranteed
             # positive by the caller (require_smd_size — a sizeless SMD pad has

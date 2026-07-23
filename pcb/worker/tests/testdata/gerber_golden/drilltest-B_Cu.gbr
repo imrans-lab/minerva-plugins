@@ -10,20 +10,14 @@ G04 #@! TA.AperFunction,ComponentPad*
 G04 #@! TAShape,Circle,1.8*
 %ADD10C,1.8*%
 G04 #@! TD*
-G04 #@! TA.AperFunction,ComponentPad*
-G04 #@! TAShape,Circle,3.0*
-%ADD11C,3.0*%
-G04 #@! TD*
 G04 #@! TA.AperFunction,ViaPad*
 G04 #@! TAShape,Circle,0.9*
-%ADD12C,0.9*%
+%ADD11C,0.9*%
 G04 #@! TD*
 %LPD*%
 D10*
 X3730000Y5000000D03*
 X6270000Y5000000D03*
 D11*
-X15000000Y5000000D03*
-D12*
 X10000000Y10000000D03*
 M02*

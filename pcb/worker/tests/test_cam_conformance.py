@@ -256,7 +256,7 @@ def _valid_mask_pad_board(shape: str, *, solder_mask_margin: float | None = None
 
 def _th_pad_board(*, w: float = 2.0, h: float | None = None, drill: float = 1.0,
                   shape: str = "circle", raw_shape: str | None = None,
-                  corner_rratio: float | None = None,
+                  corner_rratio: float | None = None, pad_type: str = "thru_hole",
                   solder_mask_margin: float | None = None) -> dict:
     """A minimal board with one resolved THROUGH-HOLE pad. Its resolved copper width
     doubles as the round-annulus diameter (pad_source contract). `h` defaults to `w`
@@ -265,7 +265,7 @@ def _th_pad_board(*, w: float = 2.0, h: float | None = None, drill: float = 1.0,
     is round-only (an oblong circle fails closed — that is the point). `raw_shape`
     sets the AUTHORED-shape provenance (D1) that lets an EQUAL-AXIS land shape."""
     height = h if h is not None else w
-    pad = {"number": "1", "type": "thru_hole", "shape": shape,
+    pad = {"number": "1", "type": pad_type, "shape": shape,
            "position": {"x": 0, "y": 0}, "size": {"width": w, "height": height},
            "drill": {"x": drill, "y": drill}, "layers": ["F.Cu", "B.Cu"]}
     if raw_shape is not None:
@@ -1054,6 +1054,25 @@ def test_square_th_pad_does_not_warn_either_emitter():
     k = kicad.generate(_th_pad_board(w=1.5, h=1.5), base_name="conf")
     assert "th_pad_shape_circularized" not in [d.code for d in g.diagnostics]
     assert "th_pad_shape_circularized" not in [d.code for d in k.diagnostics]
+
+
+def test_unplated_np_thru_hole_pad_emits_no_copper_both_emitters():
+    # D3 (finding 019f8fe77068): an UNPLATED (np_thru_hole) footprint pad is a BARE
+    # hole — gerber emits NO copper land (it used to invent a 2x-drill annulus), just
+    # a drill-size mask opening, matching kicad's np_thru_hole (no copper ring). The
+    # drill routes to NPTH on both.
+    board = _th_pad_board(w=2.0, h=2.0, drill=2.0, pad_type="np_thru_hole")
+    g = gerber.build_gerbers(board, name="conf")
+    # No copper flash on either copper layer (no ComponentPad annulus for the pad).
+    assert "ComponentPad" not in g["conf-F_Cu.gbr"]
+    assert "ComponentPad" not in g["conf-B_Cu.gbr"]
+    assert "conf-NPTH.drl" in g and "conf-PTH.drl" not in g   # bare hole -> NPTH only
+    # A drill-size (2.0) mask opening is present (matches kicad np_thru_hole size==drill).
+    assert re.search(r"%ADD\d+C,2\.0\*%", g["conf-F_Mask.gbr"])
+    # kicad emits the bare np_thru_hole (no copper), never a thru_hole for it.
+    pcb = kicad.generate(board, base_name="conf")["conf.kicad_pcb"]
+    assert "np_thru_hole" in pcb
+    assert "thru_hole circle" not in pcb.replace("np_thru_hole circle", "")
 
 
 def test_authored_square_rect_th_pad_is_shaped_both_emitters():
