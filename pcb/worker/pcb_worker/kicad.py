@@ -325,7 +325,12 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     net_name_of = {i: n for n, i in net_index.items()}
 
     out: list[str] = []
-    out.append("(kicad_pcb (version 20221018) (generator pcb_worker)")
+    # KiCad-9 board file version. Bumped from the KiCad-7 stamp (20221018) when the
+    # via emitter began writing the KiCad-9 `(tenting ...)` grammar (finding
+    # 019f9022facc): a board carrying v9 tokens must declare v9 so a v7/v8 tool
+    # fails loudly on version rather than silently mis-parsing. 20241229 is the exact
+    # version pcbnew 9.0.9 writes (verified via SaveBoard).
+    out.append("(kicad_pcb (version 20241229) (generator pcb_worker)")
     out.append("  (general (thickness 1.6))")
     out.append('  (paper "A4")')
     out.append("  (layers")
@@ -375,9 +380,22 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
         size = _num(via.get("diameter_mm"), 0.8)
         drill = _num(via.get("drill_mm"), 0.4)
         net_no = net_index.get(via.get("net"), 0)
+        # Per-side mask tenting (finding 019f9022facc): honor the canonical
+        # tented_front/back so KiCad agrees with the Gerber emitter instead of
+        # deferring to the board's design-rule default. The `(tenting ...)` token
+        # names the sides that ARE tented (mask covers the via); an UNTENTED side
+        # is exposed. Verified vs pcbnew 9.0.9 SetFront/BackTentingMode round-trip:
+        # both tented -> "front back", front-only -> "front", back-only -> "back",
+        # neither -> "none". Emitted EXPLICITLY in every case (never FROM_RULES) so
+        # the two emitters cannot silently diverge. Default (key absent) is tented,
+        # matching gerber._emit_via's via.get("tented_front", True).
+        tented = [s for s, t in (("front", via.get("tented_front", True)),
+                                 ("back", via.get("tented_back", True))) if t]
+        tenting = f'(tenting {" ".join(tented)})' if tented else "(tenting none)"
         out.append(
             f'  (via (at {_num(via.get("x_mm"))} {_num(via.get("y_mm"))}) '
-            f'(size {size}) (drill {drill}) (layers "F.Cu" "B.Cu") (net {net_no}))'
+            f'(size {size}) (drill {drill}) (layers "F.Cu" "B.Cu") '
+            f'{tenting} (net {net_no}))'
         )
 
     out.append(")")

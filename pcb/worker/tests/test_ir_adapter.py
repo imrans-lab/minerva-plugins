@@ -795,6 +795,76 @@ def test_via_tenting_gerber_mask():
     assert re.search(via_flash, g["v-F_Mask.gbr"]) and re.search(via_flash, g["v-B_Mask.gbr"])
 
 
+def _one_via_kicad_board():
+    """A minimal resolvable board carrying exactly one via, projected into the
+    kicad emitter board_dict. Callers set d['vias'][0]['tented_front'/'back']."""
+    board = {"version": 1, "name": "v", "width_mm": 40, "height_mm": 40,
+             "layers": ["top", "bottom"],
+             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+             "components": [{"ref": "X1", "footprint": "R_0805", "x_mm": 10,
+                             "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
+             "nets": [{"name": "N", "pins": ["X1.1"]}],
+             "vias": [{"net": "N", "x_mm": 20, "y_mm": 20, "diameter_mm": 0.8,
+                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}]}
+    return ir_to_kicad_board_dict(_resolve(board))
+
+
+def test_kicad_via_tenting_token_matches_pcbnew():
+    # E4 (finding 019f9022facc): KiCad export must HONOR the canonical per-side via
+    # tenting instead of deferring to the board's design-rule default. The
+    # `(tenting ...)` token names the sides that ARE tented (mask covers the via);
+    # an untented side is exposed. The exact token vocabulary is verified against
+    # pcbnew 9.0.9 SetFront/BackTentingMode -> SaveBoard round-trip: both tented ->
+    # "front back", front-only -> "front", back-only -> "back", neither -> "none".
+    # It is emitted EXPLICITLY in every case (never omitted/FROM_RULES) so the kicad
+    # and gerber emitters cannot silently diverge on which vias are exposed.
+    def _kpcb(tf, tb):
+        d = _one_via_kicad_board()
+        d["vias"][0]["tented_front"] = tf
+        d["vias"][0]["tented_back"] = tb
+        return kicad.generate(d, base_name="v")["v.kicad_pcb"]
+
+    assert "(tenting front back)" in _kpcb(True, True)
+    assert "(tenting none)" in _kpcb(False, False)
+    assert "(tenting front)" in _kpcb(True, False)
+    assert "(tenting back)" in _kpcb(False, True)
+
+
+def test_kicad_via_tenting_defaults_tented_and_agrees_with_gerber():
+    # The IR default is TENTED (both sides), matching gerber._emit_via's
+    # via.get("tented_front", True). A DEFAULT via: kicad tents both sides AND gerber
+    # emits NO mask opening. An UNTENTED via: kicad exposes both sides AND gerber
+    # flashes a mask opening on both — the two emitters agree on exposure (the whole
+    # point of finding 019f9022facc). Uses the source-level `tented` bool (symmetric).
+    def _board(tented):
+        v = {"net": "N", "x_mm": 20, "y_mm": 20, "diameter_mm": 0.8, "drill_mm": 0.4,
+             "from_layer": "top", "to_layer": "bottom"}
+        if tented is not None:
+            v["tented"] = tented
+        return {"version": 1, "name": "v", "width_mm": 40, "height_mm": 40,
+                "layers": ["top", "bottom"],
+                "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                                 "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+                "components": [{"ref": "X1", "footprint": "R_0805", "x_mm": 10,
+                                "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
+                "nets": [{"name": "N", "pins": ["X1.1"]}], "vias": [v]}
+
+    via_flash = r"X20000000Y20000000D03"
+    for tented in (None, True):        # default + explicit tented: kicad tents, gerber bare
+        resolved = _resolve(_board(tented))
+        pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="v")["v.kicad_pcb"]
+        g = gerber.build_gerbers_ir(resolved, name="v")
+        assert "(tenting front back)" in pcb, f"tented={tented}: kicad did not tent"
+        assert not re.search(via_flash, g["v-F_Mask.gbr"]), f"tented={tented}: gerber leaked a via mask"
+
+    resolved = _resolve(_board(False))  # untented: kicad exposes, gerber opens mask
+    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="v")["v.kicad_pcb"]
+    g = gerber.build_gerbers_ir(resolved, name="v")
+    assert "(tenting none)" in pcb
+    assert re.search(via_flash, g["v-F_Mask.gbr"]) and re.search(via_flash, g["v-B_Mask.gbr"])
+
+
 def test_plated_board_hole_annulus_agrees_across_emitters():
     """finding 019f8dbb7104: a plated board hole's AUTHORED annulus reaches BOTH
     emitters as the SAME copper — gerber flashes a copper annulus of that diameter on
