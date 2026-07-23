@@ -701,16 +701,21 @@ def _apply_pin_override(
         drill = replace(drill, plated=plated)
         pad_type = "thru_hole" if plated else "np_thru_hole"
 
-    # Validate the FOLDED override state, not just each field in isolation: an
-    # override that AUTHORS a copper annulus while also making the pad UNPLATED
-    # (np_thru_hole) is contradictory — an unplated hole carries no copper ring, so
-    # the annulus would be silently discarded at emission (finding 019f8fe77068).
-    # Fail CLOSED rather than drop the authored value.
-    if pad_type == "np_thru_hole" and override.get("annulus_diameter_mm") is not None:
-        diags.error("override_annulus_on_unplated_pad",
-                    f"component {ref!r} pin {pad.number!r}: override authors "
-                    f"annulus_diameter_mm but the pad is unplated (np_thru_hole) — an "
-                    f"unplated hole carries no copper ring; drop one or the other", pad_ref)
+    # Validate the FOLDED FINAL state, not each field in isolation: an UNPLATED
+    # (np_thru_hole) pad carries NO copper — so ANY copper-bearing dimension the
+    # override AUTHORS (the annulus ring OR the pad land width/height) would be
+    # silently discarded at emission. Fail CLOSED on the COMPLETE set, not just
+    # annulus (finding 019f8fe77068: a final-state invariant, not a per-field check
+    # — {pad_width_mm, pad_height_mm, plated:false} was slipping through).
+    if pad_type == "np_thru_hole":
+        discarded = [k for k in ("annulus_diameter_mm", "pad_width_mm", "pad_height_mm")
+                     if override.get(k) is not None]
+        if discarded:
+            diags.error("override_copper_dims_on_unplated_pad",
+                        f"component {ref!r} pin {pad.number!r}: override authors "
+                        f"{', '.join(discarded)} but the pad is unplated (np_thru_hole) — "
+                        f"an unplated hole carries no copper land/ring; drop the copper "
+                        f"dimension(s) or the unplating", pad_ref)
 
     return size, drill, annulus, pad_type
 
@@ -1256,6 +1261,16 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
                 # (never silent) but the key wins.
                 raw_plated = default_plated
                 explicit = raw.get("plated")
+                if explicit is not None and not isinstance(explicit, bool):
+                    # A MALFORMED (non-bool) plated fails closed here too — Go's typed
+                    # `bool` rejects it and mounting_holes above rejects it, so silently
+                    # ignoring it on the pth/npth aliases was a Go/Python codec
+                    # divergence (finding 019f8b7fb07e). The alias KEY still wins on the
+                    # VALUE (below); only a wrong TYPE is the error.
+                    diags.error("hole_bad_plating",
+                                f"{key}[{ordinal}]: plated must be a boolean, got {explicit!r}",
+                                hole_ref)
+                    continue
                 if isinstance(explicit, bool) and explicit != default_plated:
                     diags.warning("alias_plating_overridden",
                                   f"{key}[{ordinal}]: explicit plated={explicit} overridden by "

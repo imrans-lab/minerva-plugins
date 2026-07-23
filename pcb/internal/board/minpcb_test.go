@@ -213,3 +213,16 @@ func TestImportMalformedJSONReturnsError(t *testing.T) {
 		t.Error("expected error for malformed json, got nil")
 	}
 }
+
+func TestImportMinpcbRejectsNullHole(t *testing.T) {
+	// finding 019f8b7fb07e: a JSON `null` hole array item must be REJECTED, not
+	// decoded into a zero-valued phantom hole (which NormalizeHoles would fold and
+	// v1->v2 id-minting would mint). The YAML null-item probe does not run on this
+	// JSON import, so ImportMinpcb must carry the fail-closed rule itself.
+	for _, key := range []string{"mounting_holes", "pth_holes", "npth_holes"} {
+		src := []byte(`{"version":1,"name":"b","` + key + `":[null]}`)
+		if _, _, err := ImportMinpcb(src); err == nil {
+			t.Errorf("%s:[null] must be rejected, got nil error", key)
+		}
+	}
+}

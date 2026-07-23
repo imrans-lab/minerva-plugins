@@ -691,6 +691,20 @@ def test_string_plated_fails_closed():
     assert "hole_bad_plating" in _errors(result)
 
 
+def test_string_plated_on_alias_hole_fails_closed():
+    # F1 (finding 019f8b7fb07e): a malformed (non-bool) plated on a pth_holes /
+    # npth_holes ALIAS must fail closed too. Go's typed bool rejects it and the
+    # mounting_holes branch rejects it, so silently ignoring it on the aliases was a
+    # Go/Python codec divergence. The alias KEY still wins on the VALUE; only a wrong
+    # TYPE is the error.
+    for key in ("pth_holes", "npth_holes"):
+        board = _minimal_board(**{key: [{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2,
+                                         "plated": "false"}]})
+        result = compile_board(board)
+        assert isinstance(result, ResolutionFailure), key
+        assert "hole_bad_plating" in _errors(result), key
+
+
 # --- C4 (finding 019f8dbb7104): a plated board hole's copper annulus is AUTHORED,
 # never invented, so both emitters emit the SAME copper. ---
 
@@ -737,19 +751,38 @@ def test_override_annulus_on_unplated_pad_fails_closed():
         pins=[{"number": "1", "override": {"annulus_diameter_mm": 3.0, "plated": False}}])
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
-    assert "override_annulus_on_unplated_pad" in _errors(result)
+    assert "override_copper_dims_on_unplated_pad" in _errors(result)
 
 
-def test_override_plated_off_without_annulus_is_ok():
-    # The complement: overriding ONLY plated:false (no authored annulus) is a
-    # legitimate "make this a mechanical hole" — the footprint annulus drops naturally,
+def test_override_pad_land_dims_on_unplated_pad_fails_closed():
+    # F2 (finding 019f8fe77068 reopened): the invariant is FINAL-STATE, not
+    # annulus-specific. Authoring a pad LAND size (pad_width_mm / pad_height_mm) while
+    # plating the pad OFF is the same contradiction — an np_thru_hole carries no
+    # copper land, so both emitters would silently discard the authored dimensions.
+    board = _one_component_board(
+        "Package_DIP:DIP-6_W7.62mm_Socket",
+        pins=[{"number": "1", "override": {"pad_width_mm": 2.0, "pad_height_mm": 1.5,
+                                           "plated": False}}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    errs = _errors(result)
+    assert "override_copper_dims_on_unplated_pad" in errs
+    # the message names ALL discarded copper dims, not just one
+    msg = next(d.message for d in result.diagnostics
+               if d.code == "override_copper_dims_on_unplated_pad")
+    assert "pad_width_mm" in msg and "pad_height_mm" in msg
+
+
+def test_override_plated_off_without_copper_dims_is_ok():
+    # The complement: overriding ONLY plated:false (no authored annulus/land) is a
+    # legitimate "make this a mechanical hole" — the footprint copper drops naturally,
     # no contradiction.
     board = _one_component_board(
         "Package_DIP:DIP-6_W7.62mm_Socket",
         pins=[{"number": "1", "override": {"plated": False}}])
     result = compile_board(board)
     assert isinstance(result, ResolutionSuccess)
-    assert "override_annulus_on_unplated_pad" not in _errors(result)
+    assert "override_copper_dims_on_unplated_pad" not in _errors(result)
 
 
 def test_via_bad_tented_fails_closed():

@@ -133,9 +133,25 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 		dst *[]Hole
 	}{{"mounting_holes", &b.MountingHoles}, {"pth_holes", &b.PTHHoles}, {"npth_holes", &b.NPTHHoles}} {
 		if raw, ok := root[hk.key]; ok {
-			if err := json.Unmarshal(raw, hk.dst); err != nil {
+			// Decode via POINTERS so a JSON `null` array item is a nil element we
+			// REJECT — not a zero-valued phantom hole (which NormalizeHoles would
+			// fold and v1->v2 id-minting would mint, finding 019f8b7fb07e). This
+			// JSON import bypasses UnmarshalYAML's null-item probe, so it must carry
+			// the same fail-closed rule itself.
+			var ptrs []*Hole
+			if err := json.Unmarshal(raw, &ptrs); err != nil {
 				return nil, nil, fmt.Errorf("board: parse minpcb %s: %w", hk.key, err)
 			}
+			holes := make([]Hole, 0, len(ptrs))
+			for i, p := range ptrs {
+				if p == nil {
+					return nil, nil, fmt.Errorf(
+						"board: import minpcb: invalid_board_structure: %s[%d] is a null item",
+						hk.key, i)
+				}
+				holes = append(holes, *p)
+			}
+			*hk.dst = holes
 		}
 	}
 
