@@ -29,10 +29,10 @@ from pcb_worker import gerber, kicad
 from pcb_worker.compile_board import compile_board
 from pcb_worker.geometry import place_point
 from pcb_worker.ir_adapter import (
-    _kicad_mounting_hole_component,
     ir_to_board_dict,
     ir_to_kicad_board_dict,
 )
+from pcb_worker.kicad import _kicad_mounting_hole_component
 from pcb_worker.resolved_board import (
     DiagnosticSeverity,
     HoleKind,
@@ -749,6 +749,49 @@ def test_build_gerbers_ir_is_byte_identical_to_adapter_path(make):
            [(d.code, d.severity) for d in via_adapter.diagnostics]
 
 
+@pytest.mark.parametrize("make", [
+    lambda: _board("R_0805"),                                             # top SMD
+    lambda: _board("R_0805", layer="bottom", x=25.0, y=15.0),            # bottom SMD (mirror)
+    lambda: _board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom",   # bottom TH footprint
+                   x=30.0, y=30.0),
+    lambda: {**_board("R_0805"),                                          # PTH + NPTH mounting holes
+             "pth_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0, "annulus_mm": 3.2}],
+             "mounting_holes": [{"x_mm": 30, "y_mm": 30, "diameter_mm": 3.2, "plated": False}]},
+    # multi-component + routed: two components, a net, two trace segments, and a via —
+    # exercises _kicad_net_dicts / _kicad_trace_dicts / _kicad_via_dicts + >1 component.
+    lambda: {"version": 1, "name": "brd", "width_mm": 40, "height_mm": 40,
+             "layers": ["top", "bottom"],
+             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+             "components": [
+                 {"ref": "R1", "footprint": "R_0805", "x_mm": 10, "y_mm": 10,
+                  "rotation_deg": 0, "layer": "top"},
+                 {"ref": "R2", "footprint": "R_0805", "x_mm": 25, "y_mm": 15,
+                  "rotation_deg": 90, "layer": "bottom"},
+             ],
+             "nets": [{"name": "N1", "pins": ["R1.1", "R2.2"]}],
+             "traces": [{"net": "N1", "layer": "top", "width_mm": 0.3,
+                         "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 18, "y_mm": 12}]},
+                        {"net": "N1", "layer": "bottom", "width_mm": 0.3,
+                         "points": [{"x_mm": 18, "y_mm": 12}, {"x_mm": 25, "y_mm": 15}]}],
+             "vias": [{"net": "N1", "x_mm": 18, "y_mm": 12, "diameter_mm": 0.8,
+                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom",
+                       "tented": False}]},
+])
+def test_generate_ir_is_byte_identical_to_adapter_path(make):
+    """C5b: the IR-NATIVE kicad path (kicad.generate_ir, no loose-dict adapter) is
+    byte-for-byte identical to kicad.generate(ir_to_kicad_board_dict(resolved)) —
+    files AND diagnostics — across top/bottom SMD, a bottom TH footprint, pth+npth
+    mounting holes, and a multi-component routed board with a via. The correctness
+    net for retiring the adapter: zero golden movement."""
+    resolved = _resolve(make())
+    via_adapter = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="b")
+    native = kicad.generate_ir(resolved, base_name="b")
+    assert dict(native) == dict(via_adapter)   # every file, byte-identical
+    assert [(d.code, d.severity) for d in native.diagnostics] == \
+           [(d.code, d.severity) for d in via_adapter.diagnostics]
+
+
 def test_unplated_board_hole_gets_drill_size_mask_both_emitters():
     # E3 (finding 019f901a9966): the ratified NPTH mask rule — an unplated board-level
     # hole gets a DRILL-size mask opening on both sides in gerber, UNIFORM with a
@@ -927,6 +970,22 @@ def test_every_referenced_kicad_layer_is_declared():
             "F.SilkS", "Edge.Cuts"} <= referenced, sorted(referenced)
 
 
+def test_footprint_fab_text_is_own_side_and_back_is_mirrored():
+    # C5b fold-in (finding 019f8b715ca6): reference/value fp_text goes on the
+    # component's OWN-SIDE Fab layer — F.Fab for a top footprint, B.Fab for a bottom
+    # one (was hardcoded F.Fab, leaving B.Fab empty). Back-layer text must be
+    # MIRRORED or KiCad DRC raises nonmirrored_text_on_back_layer.
+    top = _emit_kicad(_board("R_0805", layer="top"), name="t")
+    bot = _emit_kicad(_board("R_0805", layer="bottom"), name="b")
+    # Top: on F.Fab, NO mirror effects.
+    assert '(fp_text reference "X1" (at 0 -1.5) (layer "F.Fab"))' in top
+    assert '(fp_text value "" (at 0 1.5) (layer "F.Fab"))' in top
+    # Bottom: on B.Fab WITH (effects (justify mirror)); NO fp_text left on F.Fab.
+    assert '(fp_text reference "X1" (at 0 -1.5) (layer "B.Fab") (effects (justify mirror)))' in bot
+    assert '(fp_text value "" (at 0 1.5) (layer "B.Fab") (effects (justify mirror)))' in bot
+    assert '(layer "F.Fab")' not in bot   # the layer TABLE uses (35 "F.Fab" user), not (layer ...)
+
+
 def test_plated_board_hole_annulus_agrees_across_emitters():
     """finding 019f8dbb7104: a plated board hole's AUTHORED annulus reaches BOTH
     emitters as the SAME copper — gerber flashes a copper annulus of that diameter on
@@ -979,7 +1038,7 @@ def test_mounting_hole_refs_skip_existing_component_refs():
     # Fable W8.2b: a synthetic MountingHole ref must not duplicate a real
     # component ref (a user component named "H1" would otherwise collide in the
     # .kicad_pcb — a duplicate reference KiCad flags).
-    from pcb_worker.ir_adapter import _mounting_hole_refs
+    from pcb_worker.kicad import _mounting_hole_refs
     assert _mounting_hole_refs(set(), 3) == ["H1", "H2", "H3"]
     refs = _mounting_hole_refs({"R1", "H1", "H3"}, 3)
     assert refs == ["H2", "H4", "H5"]

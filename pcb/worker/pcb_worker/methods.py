@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import (board_model, compile_board, drc, footprints, gerber, ir_adapter,
+from . import (board_model, compile_board, drc, footprints, gerber,
                kicad, libcheck, resolve)
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -163,8 +163,9 @@ def _generate(params: dict) -> dict:
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
-        board_dict = ir_adapter.ir_to_kicad_board_dict(compiled.board)
-        files = kicad.generate(board_dict, base_name=base_name)
+        # C5b: emit straight from the ResolvedBoard IR — no IR->loose-dict adapter
+        # (mirrors _gerbers' build_gerbers_ir at the gerber cutover).
+        files = kicad.generate_ir(compiled.board, base_name=base_name)
     except Exception as exc:  # geometry/library faults (incl. fail-closed) as data
         return {"ok": False, "error": {"kind": "generate", "message": str(exc)}}
 
