@@ -73,9 +73,13 @@ both the gerber and KiCad exporters emit exactly the authored ring and cannot
 diverge (finding `019f8dbb7104`); the compiler fail-closes a plated hole without
 one, and rejects `annulus_mm` on an unplated hole. The `pcb_gerbers` exporter uses
 them to build copper annuli,
-mask openings, and the PTH/NPTH Excellon split. See `docs/gerbers.md`. The worker
-also tolerantly accepts `npth_holes` / `pth_holes` aliases via `Extra` for
-producers that pre-split the two lists.
+mask openings, and the PTH/NPTH Excellon split. See `docs/gerbers.md`. Producers
+may pre-split plating with the `pth_holes` / `npth_holes` INPUT aliases; the codec
+NORMALIZES them into the single canonical `mounting_holes` collection (with
+`plated` set from the alias key) at every parse boundary, so a board always
+round-trips as `mounting_holes` and its holes get uniform id-minting + structural
+validation — the aliases no longer bypass the v2 identity/validation gate (finding
+`019f8b7fb07e` comment 689).
 
 ## Persistent identity (schema v2)
 

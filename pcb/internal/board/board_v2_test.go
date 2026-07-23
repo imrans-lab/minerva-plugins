@@ -167,3 +167,108 @@ func TestLegacyViaIdMapsToModeledFieldNotDropped(t *testing.T) {
 		t.Fatalf("marshal board with imported vias: %v", err)
 	}
 }
+
+// D2 (finding 019f8b7fb07e comment 689): the pth_holes / npth_holes producer
+// aliases are FOLDED into canonical mounting_holes at parse (NormalizeHoles) with
+// the plating set from the alias key, so they can no longer bypass id-minting or
+// the structural gate. After the fold the alias fields are empty (canonical
+// round-trip) and every hole is validated / migrated uniformly.
+func TestNormalizeHolesFoldsAliasesIntoMountingHoles(t *testing.T) {
+	src := "version: 1\nname: A\nwidth_mm: 20\nheight_mm: 20\n" +
+		"components: []\nnets: []\n" +
+		"mounting_holes:\n  - {x_mm: 1, y_mm: 1, diameter_mm: 3.2}\n" +
+		"pth_holes:\n  - {x_mm: 2, y_mm: 2, diameter_mm: 2.0}\n" +
+		"npth_holes:\n  - {x_mm: 3, y_mm: 3, diameter_mm: 3.0}\n"
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(b.PTHHoles) != 0 || len(b.NPTHHoles) != 0 {
+		t.Fatalf("aliases not cleared after fold: pth=%d npth=%d", len(b.PTHHoles), len(b.NPTHHoles))
+	}
+	if len(b.MountingHoles) != 3 {
+		t.Fatalf("want 3 folded holes, got %d", len(b.MountingHoles))
+	}
+	// The pth hole is plated, the npth hole is not.
+	var pth, npth *Hole
+	for i := range b.MountingHoles {
+		switch b.MountingHoles[i].XMM {
+		case 2:
+			pth = &b.MountingHoles[i]
+		case 3:
+			npth = &b.MountingHoles[i]
+		}
+	}
+	if pth == nil || !pth.Plated {
+		t.Fatalf("pth_holes hole must fold plated=true: %+v", pth)
+	}
+	if npth == nil || npth.Plated {
+		t.Fatalf("npth_holes hole must fold plated=false: %+v", npth)
+	}
+	// Canonical round-trip: serialized YAML has mounting_holes only, no aliases.
+	out, _ := MarshalYAML(b)
+	if strings.Contains(string(out), "pth_holes") {
+		t.Fatalf("aliases leaked into serialized output:\n%s", out)
+	}
+}
+
+// A v1 board authored with pth_holes gets its folded holes MINTED by the migration
+// (previously they rode through Extra id-less).
+func TestV1AliasHolesGetMintedIds(t *testing.T) {
+	src := "version: 1\nname: A\nwidth_mm: 20\nheight_mm: 20\n" +
+		"components: []\nnets: []\n" +
+		"pth_holes:\n  - {x_mm: 2, y_mm: 2, diameter_mm: 2.0}\n"
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, err := MigrateV1toV2(b, DefaultIDSource()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if len(b.MountingHoles) != 1 || !isMintedID("hole", b.MountingHoles[0].ID) {
+		t.Fatalf("folded pth hole not minted: %+v", b.MountingHoles)
+	}
+}
+
+// A v2 board with an id-LESS pth_hole no longer bypasses validation: after the fold
+// it is a mounting hole without a minted id, which board.Validate rejects.
+func TestV2AliasHoleWithoutIdFailsValidation(t *testing.T) {
+	src := "version: 2\nname: A\nid: board:" + strings.Repeat("a", 32) + "\n" +
+		"width_mm: 20\nheight_mm: 20\ncomponents: []\nnets: []\n" +
+		"pth_holes:\n  - {x_mm: 2, y_mm: 2, diameter_mm: 2.0}\n"
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := Validate(b); err == nil || !strings.Contains(err.Error(), "unminted_persistent_id") {
+		t.Fatalf("want unminted_persistent_id for id-less pth_hole, got: %v", err)
+	}
+}
+
+// A NULL item inside a pth_holes / npth_holes alias is rejected by the raw
+// null-probe (entityListKeys now includes the aliases).
+func TestNullAliasHoleItemFailsClosed(t *testing.T) {
+	for _, key := range []string{"pth_holes", "npth_holes"} {
+		src := "version: 1\nname: A\nwidth_mm: 20\nheight_mm: 20\n" +
+			"components: []\nnets: []\n" + key + ":\n  - null\n"
+		if _, err := UnmarshalYAML([]byte(src)); err == nil ||
+			!strings.Contains(err.Error(), "invalid_board_structure") {
+			t.Fatalf("%s null item: want invalid_board_structure, got: %v", key, err)
+		}
+	}
+}
+
+// The alias KEY is authoritative for plating: a pth_holes hole with an explicit
+// contradictory plated:false is folded as PLATED (matching the worker), so no path
+// diverges on the fab-critical flag (Fable D2).
+func TestAliasKeyOverridesExplicitPlated(t *testing.T) {
+	src := "version: 1\nname: A\nwidth_mm: 20\nheight_mm: 20\ncomponents: []\nnets: []\n" +
+		"pth_holes:\n  - {x_mm: 2, y_mm: 2, diameter_mm: 2.0, plated: false}\n"
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(b.MountingHoles) != 1 || !b.MountingHoles[0].Plated {
+		t.Fatalf("pth_holes hole must fold plated=true despite explicit plated:false: %+v", b.MountingHoles)
+	}
+}

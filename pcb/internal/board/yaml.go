@@ -33,7 +33,8 @@ func MarshalYAML(b *Board) ([]byte, error) {
 // a non-sequence with a native error that does NOT carry our shared code, or
 // silently DROP a null list item before Validate ever sees it — both must fail
 // closed with a code the cross-language vector runner can assert.
-var entityListKeys = []string{"components", "nets", "traces", "vias", "mounting_holes"}
+var entityListKeys = []string{"components", "nets", "traces", "vias",
+	"mounting_holes", "pth_holes", "npth_holes"}
 
 // overrideNumKeys mirrors _OVERRIDE_NUM_KEYS in board_validate.py — the typed
 // pin-override fields that must decode as numbers.
@@ -63,6 +64,10 @@ func UnmarshalYAML(data []byte) (*Board, error) {
 	if err := yaml.Unmarshal(data, &b); err != nil {
 		return nil, fmt.Errorf("board: unmarshal yaml: %w", err)
 	}
+	// Fold the pth_holes / npth_holes aliases into canonical mounting_holes BEFORE
+	// any downstream migration / validation, so they cannot bypass id-minting or the
+	// structural gate (finding 019f8b7fb07e comment 689).
+	NormalizeHoles(&b)
 	return &b, nil
 }
 

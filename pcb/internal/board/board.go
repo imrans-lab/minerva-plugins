@@ -72,10 +72,17 @@ type Board struct {
 	// MountingHoles are board-level drilled holes not attached to a pad — the
 	// mechanical mounting / non-plated holes the gerber exporter routes into
 	// PTH.drl or NPTH.drl by their Plated flag. Formalises the field the gerber
-	// spike carried through Extra (docket 019eb47ddebc, comment 508). The worker
-	// additionally accepts `npth_holes` / `pth_holes` aliases via Extra
-	// passthrough for producers that split the two lists (see docs/gerbers.md).
+	// spike carried through Extra (docket 019eb47ddebc, comment 508).
 	MountingHoles []Hole `json:"mounting_holes,omitempty" yaml:"mounting_holes,omitempty"`
+
+	// PTHHoles / NPTHHoles are producer INPUT aliases that pre-split plating. They
+	// are NORMALIZED into MountingHoles (Plated true / false) at every parse
+	// boundary (NormalizeHoles) — modeled first-class ONLY so a v2 source can't ship
+	// id-less / null holes through Extra that bypass id-minting + structural
+	// validation (finding 019f8b7fb07e comment 689). After normalization they are
+	// empty, so a board always round-trips as canonical `mounting_holes`.
+	PTHHoles  []Hole `json:"pth_holes,omitempty" yaml:"pth_holes,omitempty"`
+	NPTHHoles []Hole `json:"npth_holes,omitempty" yaml:"npth_holes,omitempty"`
 
 	// Annotations and RouteHints are opaque passthrough — carried losslessly,
 	// never interpreted here.
@@ -213,6 +220,37 @@ type PinOverride struct {
 // Plated is a plain bool (unlike Pin.Plated's tri-state pointer) because the
 // default here IS false, so omitempty dropping a false on marshal is lossless.
 // Deliberate asymmetry — do not "fix" one to match the other.
+// NormalizeHoles folds the pth_holes / npth_holes producer INPUT aliases into the
+// single canonical MountingHoles collection (Plated set from the alias key), then
+// clears them — so a board carries exactly ONE hole collection that id-minting,
+// Validate, and the raw null-probe already cover uniformly, and a v2 source can no
+// longer smuggle id-less / null holes through the aliases (finding 019f8b7fb07e
+// comment 689). Idempotent: a board with no aliases is unchanged. Order preserves
+// the historical mounting → npth → pth fabrication sequence. Called at the canonical
+// ingest boundaries (UnmarshalYAML, the serialize board decode) so a board is
+// canonical before migration / validation. (ImportMinpcb maps only its known
+// fields; a legacy .minpcb's holes ride through Extra as v1 and fold on the next
+// canonical re-ingest.) The alias key is AUTHORITATIVE for plating — an explicit
+// `plated` on an alias hole is overridden by the key (Fable D2), matching the
+// worker's compile_board / gerber so the two paths cannot diverge on the flag.
+func NormalizeHoles(b *Board) {
+	if len(b.NPTHHoles) == 0 && len(b.PTHHoles) == 0 {
+		return
+	}
+	for i := range b.NPTHHoles {
+		h := b.NPTHHoles[i]
+		h.Plated = false // the npth alias key IS the (non-)plating declaration
+		b.MountingHoles = append(b.MountingHoles, h)
+	}
+	for i := range b.PTHHoles {
+		h := b.PTHHoles[i]
+		h.Plated = true // the pth alias key IS the plating declaration
+		b.MountingHoles = append(b.MountingHoles, h)
+	}
+	b.PTHHoles = nil
+	b.NPTHHoles = nil
+}
+
 type Hole struct {
 	// ID is the persistent, mint-once mounting-hole identity (schema v2+) — same
 	// rationale as Trace.ID. Opaque token ("hole:<hex>"); empty on v1; omitempty.

@@ -1221,12 +1221,26 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
                 diags.error("hole_bad_geometry",
                             f"{key}[{ordinal}]: needs finite x/y and a positive diameter", hole_ref)
                 continue
-            raw_plated = raw.get("plated", default_plated)
-            if not isinstance(raw_plated, bool):
-                # A string "false" must NOT coerce to a plated hole (review 623 R2).
-                diags.error("hole_bad_plating",
-                            f"{key}[{ordinal}]: plated must be a boolean, got {raw_plated!r}", hole_ref)
-                continue
+            if key == "mounting_holes":
+                raw_plated = raw.get("plated", default_plated)
+                if not isinstance(raw_plated, bool):
+                    # A string "false" must NOT coerce to a plated hole (review 623 R2).
+                    diags.error("hole_bad_plating",
+                                f"{key}[{ordinal}]: plated must be a boolean, got {raw_plated!r}", hole_ref)
+                    continue
+            else:
+                # pth_holes / npth_holes: the alias KEY is the plating declaration and
+                # is AUTHORITATIVE — an explicit `plated` is overridden by the key,
+                # matching Go's NormalizeHoles so the two paths cannot diverge on a
+                # fab-critical flag (Fable D2). A contradicting explicit value WARNs
+                # (never silent) but the key wins.
+                raw_plated = default_plated
+                explicit = raw.get("plated")
+                if isinstance(explicit, bool) and explicit != default_plated:
+                    diags.warning("alias_plating_overridden",
+                                  f"{key}[{ordinal}]: explicit plated={explicit} overridden by "
+                                  f"the {key!r} alias (the key declares plating); folded as "
+                                  f"plated={default_plated}", hole_ref)
             # AUTHORED annulus (finding 019f8dbb7104): a PLATED board hole's copper
             # ring must be AUTHORED, not invented — so both emitters emit the SAME
             # copper (no kicad-2x-drill vs gerber-drill-only divergence).

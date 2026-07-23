@@ -114,8 +114,10 @@ first-class in the Go contract (`pcb/internal/board/board.go`) and documented in
 - `Board.mounting_holes` (`[]Hole`) — board-level mechanical holes with
   `x_mm` / `y_mm` / `diameter_mm` / `plated` (default non-plated).
 
-The worker reads these tolerantly and additionally accepts `npth_holes` /
-`pth_holes` aliases via Extra for producers that pre-split the two lists.
+Producers may pre-split plating with the `npth_holes` / `pth_holes` INPUT aliases;
+the codec normalizes them into the canonical `mounting_holes` collection (`plated`
+set from the alias key) at parse, so they round-trip as `mounting_holes` and get
+the same v2 id-minting + structural validation (finding `019f8b7fb07e` c689).
 
 ## Fab-correctness HITL gate (debt #5 — extended to production output)
 

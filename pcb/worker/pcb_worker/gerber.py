@@ -571,7 +571,12 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                        SourceRef(EntityKind.HOLE, f"{key}[{idx}]",
                                  f"({hx}, {hy})"))
                 continue
-            plated = bool(hole.get("plated", default_plated))
+            # The pth_holes / npth_holes alias KEY is authoritative for plating (an
+            # explicit `plated` is overridden by the key), matching Go's
+            # NormalizeHoles + compile_board so no path diverges on the flag (Fable
+            # D2). mounting_holes keeps its explicit plated.
+            plated = (bool(hole.get("plated", default_plated))
+                      if key == "mounting_holes" else default_plated)
             annulus = _opt_num(hole.get("annulus_mm"))
             _emit_board_hole(g, key, idx, hx, hy, dia, plated, annulus, mask_clearance)
 

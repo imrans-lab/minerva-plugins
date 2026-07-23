@@ -42,3 +42,41 @@ def test_shared_validation_vector(name):
 def test_committed_vector_floor():
     # Drift/loss guard — the committed vector set must not silently shrink.
     assert len(_vector_names()) >= _MIN_VECTORS
+
+
+# D2 (finding 019f8b7fb07e comment 689): the pth_holes / npth_holes aliases share
+# the "hole" persistent-id domain with mounting_holes. validate_board_v2 covers all
+# three uniformly for a raw board that reaches the Python compiler without the Go
+# fold — an id-less alias hole, a duplicate across the alias keys, and a null alias
+# item all fail closed.
+def _v2_hole_board(**collections) -> dict:
+    board = {"version": 2, "id": "board:" + "a" * 32, "name": "H",
+             "width_mm": 20, "height_mm": 20, "components": [], "nets": []}
+    board.update(collections)
+    return board
+
+
+def test_v2_pth_hole_without_id_fails_validation():
+    board = _v2_hole_board(pth_holes=[{"x_mm": 2, "y_mm": 2, "diameter_mm": 2.0}])
+    assert "unminted_persistent_id" in validate_board_v2(board)
+
+
+def test_v2_duplicate_hole_id_across_alias_keys_fails():
+    dup = "hole:" + "b" * 32
+    board = _v2_hole_board(
+        mounting_holes=[{"id": dup, "x_mm": 1, "y_mm": 1, "diameter_mm": 3.0}],
+        pth_holes=[{"id": dup, "x_mm": 2, "y_mm": 2, "diameter_mm": 2.0}])
+    assert "duplicate_persistent_id" in validate_board_v2(board)
+
+
+def test_v2_null_alias_hole_item_fails_structure():
+    board = _v2_hole_board(npth_holes=[None])
+    assert "invalid_board_structure" in validate_board_v2(board)
+
+
+def test_v2_minted_alias_holes_across_keys_pass():
+    board = _v2_hole_board(
+        mounting_holes=[{"id": "hole:" + "1" * 32, "x_mm": 1, "y_mm": 1, "diameter_mm": 3.0}],
+        pth_holes=[{"id": "hole:" + "2" * 32, "x_mm": 2, "y_mm": 2, "diameter_mm": 2.0}],
+        npth_holes=[{"id": "hole:" + "3" * 32, "x_mm": 3, "y_mm": 3, "diameter_mm": 3.0}])
+    assert validate_board_v2(board) == []

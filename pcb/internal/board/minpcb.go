@@ -152,6 +152,9 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 		warnings = append(warnings, fmt.Sprintf("non-canonical top-level field %q preserved as passthrough", k))
 	}
 
+	// (No hole fold here: ImportMinpcb maps only its known scalar/component/net/
+	// trace/via fields; a .minpcb's board-level holes ride through Extra as a v1
+	// board and are folded+minted on the next canonical YAML re-ingest.)
 	return b, warnings, nil
 }
 

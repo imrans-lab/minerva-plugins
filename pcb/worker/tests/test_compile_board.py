@@ -728,6 +728,19 @@ def test_plated_hole_with_annulus_compiles_and_carries_it():
     assert hole.plated and hole.annulus_mm == 3.5
 
 
+def test_pth_alias_key_overrides_explicit_plated_false():
+    # D2 (Fable): the pth_holes alias KEY is authoritative for plating — a
+    # contradictory explicit plated:false is overridden (folded PLATED, matching Go's
+    # NormalizeHoles) and WARNED (never silent), so no path diverges on the flag.
+    board = _minimal_board(pth_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0,
+                                       "annulus_mm": 3.5, "plated": False}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    (hole,) = result.board.holes
+    assert hole.plated is True
+    assert "alias_plating_overridden" in [d.code for d in result.diagnostics]
+
+
 def test_malformed_lock_entry_fails_closed(tmp_path):
     import json
     lock = tmp_path / "bad.lock.json"

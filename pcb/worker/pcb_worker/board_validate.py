@@ -20,7 +20,26 @@ from __future__ import annotations
 # have exactly one source of truth).
 from .compile_board import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
 
-_V2_ENTITIES = (("trace", "traces"), ("via", "vias"), ("hole", "mounting_holes"))
+def _check_entity_ids(entity: str, item_lists: "list[list]", codes: list) -> None:
+    """Append the first persistent-id violation across one entity DOMAIN (one or more
+    collections that share an id namespace, e.g. the three hole alias keys). Every
+    item must be a dict carrying a minted ``<entity>:<32hex>`` id, unique across the
+    combined domain. Shared codes with Go's board.Validate."""
+    seen: set = set()
+    for items in item_lists:
+        for item in items:
+            if item is None:
+                # A null item is already flagged invalid_board_structure upstream;
+                # skip it here so it is not double-coded.
+                continue
+            if not isinstance(item, dict) or not _is_minted_id(entity, item.get("id")):
+                codes.append("unminted_persistent_id")
+                return
+            item_id = item.get("id")
+            if item_id in seen:
+                codes.append("duplicate_persistent_id")
+                return
+            seen.add(item_id)
 
 
 def validate_board_v2(board: dict) -> list[str]:
@@ -50,7 +69,8 @@ def validate_board_v2(board: dict) -> list[str]:
     # annotations, route_hints, design_rules) are the documented Go-codec superset,
     # enforced by the codec and the full compiler, not re-checked here.
     lists: dict[str, list] = {}
-    for key in ("components", "nets", "traces", "vias", "mounting_holes"):
+    for key in ("components", "nets", "traces", "vias",
+                "mounting_holes", "pth_holes", "npth_holes"):
         items, ok = _as_list(board.get(key))
         lists[key] = items
         if not ok:
@@ -61,25 +81,20 @@ def validate_board_v2(board: dict) -> list[str]:
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
             codes.append("unminted_persistent_id")
-        for entity, key in _V2_ENTITIES:
-            seen: set[str] = set()
-            for item in lists[key]:
-                if item is None:
-                    # A null item is already flagged invalid_board_structure above;
-                    # skip the id/uniqueness check so it is not double-coded.
-                    continue
-                if not isinstance(item, dict) or not _is_minted_id(entity, item.get("id")):
-                    codes.append("unminted_persistent_id")
-                    break
-                item_id = item.get("id")
-                if item_id in seen:
-                    # Minted ids must be unique WITHIN their entity domain (the
-                    # board id is global). Per-domain, so trace:<hex> and via:<hex>
-                    # sharing a hex tail stay distinct. Shared code with Go's
-                    # board.Validate (finding 019f8b7fb07e, part 2).
-                    codes.append("duplicate_persistent_id")
-                    break
-                seen.add(item_id)
+        # trace / via each own one collection. HOLES span three: the Go codec folds
+        # pth_holes / npth_holes into mounting_holes (NormalizeHoles), so every hole
+        # id must be minted AND unique across ALL THREE alias keys — the SAME "hole"
+        # domain (finding 019f8b7fb07e comment 689). A raw board that reaches this
+        # validator without the Go fold is checked identically here.
+        _check_entity_ids("trace", [lists["traces"]], codes)
+        _check_entity_ids("via", [lists["vias"]], codes)
+        _check_entity_ids(
+            "hole",
+            # mounting → npth → pth: the SAME order Go's NormalizeHoles folds into
+            # MountingHoles, so a multi-violation board emits the identical first code
+            # on both sides (Fable D2 parity note).
+            [lists["mounting_holes"], lists["npth_holes"], lists["pth_holes"]],
+            codes)
 
     for comp in lists["components"]:
         if not isinstance(comp, dict):

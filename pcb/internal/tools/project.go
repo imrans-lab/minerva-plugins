@@ -116,6 +116,10 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 	if err := json.Unmarshal(a.Board, &b); err != nil {
 		return nil, fmt.Errorf("pcb.serialize: parse board: %w", err)
 	}
+	// Canonicalize the pth_holes / npth_holes aliases into mounting_holes before the
+	// write gate, so serialize emits ONE hole collection and validates it (finding
+	// 019f8b7fb07e comment 689).
+	board.NormalizeHoles(&b)
 	// Serialize is a fail-closed WRITE gate: refuse to emit canonical-looking
 	// source for a board that would not survive the shared validation boundary
 	// (bad/missing version, unminted or duplicate persistent id). Mirrors how
