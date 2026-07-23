@@ -143,7 +143,14 @@ def test_spike_golden_correctness_oracle_matches_emitter():
         pytest.skip(f"spike golden not usable as correctness oracle: {reason}")
 
     board = resolve.resolve_board(yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8")))
-    current = parse_output_set(gerber.build_gerbers(board, name="board"))
+    # placed=True is a no-op here (resolve_board pads carry no per-pad `rotation`),
+    # so this stays byte-matched to the owner-blessed spike golden while satisfying
+    # the K4 "every build_gerbers call passes placed=True" rule. NOTE: this uses the
+    # STRICT resolve_board (not the IR path) DELIBERATELY — the blessed golden was
+    # cut at the 0.1mm default mask clearance, whereas the compile->IR path carries
+    # the compiler's resolved 0.05mm clearance; routing this oracle through the IR
+    # would (correctly) diverge on the mask layer and break the bless comparison.
+    current = parse_output_set(gerber.build_gerbers(board, name="board", placed=True))
     golden = parse_output_set(load_output_dir(SPIKE_GOLDEN_DIR))
     diff = diff_geometry(current, golden).excluding_layers("F_SilkS")
     assert diff.is_empty, (

@@ -38,19 +38,28 @@ _EXPECTED_APERTURE = {
 
 def _pad_board(shape: str, *, w: float = 2.0, h: float = 1.0,
                rratio: float | None = None, angle: float = 0.0) -> dict:
-    """A minimal board carrying one resolved SMD pad of the given shape."""
+    """A minimal board carrying one resolved SMD pad of the given shape.
+
+    K4 phase 1: the board is emitted under ``placed=True`` (the IR fab path), where
+    the component placement is IDENTITY and any pad rotation comes from the pad's
+    own ABSOLUTE ``rotation`` key — NOT the component ``rotation_deg`` (which the
+    placed path only reads as a fallback). So a requested ``angle`` is baked onto
+    the pad, exactly as ``ir_to_board_dict`` bakes a placed pad's combined angle,
+    keeping the component at rotation 0."""
     pad = {"number": "1", "type": "smd", "shape": shape,
            "position": {"x": 0, "y": 0}, "size": {"width": w, "height": h},
            "layers": ["F.Cu"]}
     if rratio is not None:
         pad["corner_rratio"] = rratio
+    if angle:
+        pad["rotation"] = angle
     return {
         "version": 2, "name": "conf", "width_mm": 20, "height_mm": 20,
         "layers": ["top", "bottom"],
         "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
                          "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
         "components": [{"ref": "P1", "footprint": "F", "x_mm": 5, "y_mm": 5,
-                        "rotation_deg": angle, "layer": "top", "pads": [pad]}],
+                        "rotation_deg": 0.0, "layer": "top", "pads": [pad]}],
     }
 
 
@@ -65,7 +74,7 @@ def _valid_pad_board(shape: str, *, angle: float = 0.0) -> dict:
 
 
 def _fcu(board: dict) -> str:
-    files = gerber.build_gerbers(board, name="conf")
+    files = gerber.build_gerbers(board, name="conf", placed=True)
     return files["conf-F_Cu.gbr"]
 
 
@@ -166,7 +175,7 @@ def test_circle_pad_with_unequal_sides_fails_closed():
     # A circle with width != height has no faithful circular aperture; emitting
     # C,width would silently drop the height axis.
     with pytest.raises(ValueError, match="circle"):
-        gerber.build_gerbers(_pad_board("circle", w=2.0, h=1.0), name="conf")
+        gerber.build_gerbers(_pad_board("circle", w=2.0, h=1.0), name="conf", placed=True)
 
 
 @pytest.mark.parametrize("rratio", [-0.2, 0.9, "0.4", True, float("nan")])
@@ -175,7 +184,7 @@ def test_roundrect_bad_corner_rratio_fails_closed(rratio):
     # this gate kills); >0.5 / non-numeric / NaN must also error with context,
     # not crash the aperture writer or silently default.
     with pytest.raises(ValueError):
-        gerber.build_gerbers(_pad_board("roundrect", rratio=rratio), name="conf")
+        gerber.build_gerbers(_pad_board("roundrect", rratio=rratio), name="conf", placed=True)
 
 
 def test_roundrect_valid_rratio_boundary_is_accepted():
@@ -218,7 +227,7 @@ _DEFAULT_MARGIN = gerber.DEFAULT_MASK_CLEARANCE_MM
 
 
 def _fmask(board: dict) -> str:
-    files = gerber.build_gerbers(board, name="conf")
+    files = gerber.build_gerbers(board, name="conf", placed=True)
     return files["conf-F_Mask.gbr"]
 
 
@@ -322,7 +331,7 @@ def test_degenerate_solder_mask_margin_fails_closed(margin):
     # pad context. -0.5 pins the `<= 0` boundary (dim 0.0 fails, not just dim < 0).
     with pytest.raises(ValueError, match="P1"):
         gerber.build_gerbers(_mask_pad_board("rect", w=2.0, h=1.0, solder_mask_margin=margin),
-                             name="conf")
+                             name="conf", placed=True)
 
 
 def test_th_mask_honors_per_pad_margin_and_stays_circular():
@@ -353,7 +362,7 @@ from pcb_worker.fab_capability import SUPPORTED_GRAPHIC_PRIMITIVES
 
 
 def _fsilk(board: dict) -> str:
-    return gerber.build_gerbers(board, name="conf")["conf-F_SilkS.gbr"]
+    return gerber.build_gerbers(board, name="conf", placed=True)["conf-F_SilkS.gbr"]
 
 
 def _silk_board(graphics: list[dict], *, rot: float = 0.0) -> dict:
@@ -621,7 +630,7 @@ def _drill_board(**extra) -> dict:
 # --- GerberResult: a files dict that ALSO carries diagnostics ---------------
 
 def test_build_gerbers_returns_gerber_result_that_is_a_files_dict():
-    result = gerber.build_gerbers(_valid_pad_board("rect"), name="conf")
+    result = gerber.build_gerbers(_valid_pad_board("rect"), name="conf", placed=True)
     # It IS the files dict (indexing / iteration / equality unchanged).
     assert isinstance(result, gerber.GerberResult)
     assert isinstance(result, dict)
@@ -646,7 +655,7 @@ def test_build_gerbers_returns_gerber_result_that_is_a_files_dict():
 def test_degenerate_silk_primitive_warns_and_still_emits(graphic, reason):
     board = _silk_board([graphic])
     # Must NOT raise (silk is cosmetic — warn, never fail-closed).
-    result = gerber.build_gerbers(board, name="conf")
+    result = gerber.build_gerbers(board, name="conf", placed=True)
     # Files still emit (the degenerate primitive is simply absent from silk).
     assert "conf-F_SilkS.gbr" in result
     # The drop is surfaced as a WARNING carrying the owning component ref.
@@ -662,7 +671,7 @@ def test_collinear_three_point_arc_emits_arc_approximated_warning():
     # now ALSO flagged as an approximation (the curvature was lost, not silent).
     board = _silk_board([{"layer": "F.SilkS", "kind": "arc",
                           "points": [[-1, 0], [0, 0], [1, 0]], "width": 0.15}])
-    result = gerber.build_gerbers(board, name="conf")
+    result = gerber.build_gerbers(board, name="conf", placed=True)
     # R3 behaviour intact: the polyline fallback still emits, no arc.
     arcs, n_straight = _silk_draws(result["conf-F_SilkS.gbr"])
     assert arcs == [] and n_straight >= 1
@@ -676,7 +685,7 @@ def test_collinear_three_point_arc_emits_arc_approximated_warning():
 def test_clean_silk_board_has_no_diagnostics():
     board = _silk_board([{"layer": "F.SilkS", "kind": "line",
                           "start": [-1, -1], "end": [1, 1], "width": 0.15}])
-    assert gerber.build_gerbers(board, name="conf").diagnostics == []
+    assert gerber.build_gerbers(board, name="conf", placed=True).diagnostics == []
 
 
 # --- Drill PTH/NPTH split conformance (LOCK the working behaviour) ----------
@@ -689,7 +698,7 @@ def _drill_hits(text: str) -> list[tuple[float, float]]:
 
 
 def test_drill_pth_npth_split_is_faithful():
-    result = gerber.build_gerbers(_drill_board(), name="drill")
+    result = gerber.build_gerbers(_drill_board(), name="drill", placed=True)
     assert "drill-PTH.drl" in result and "drill-NPTH.drl" in result
     pth = _drill_hits(result["drill-PTH.drl"])
     npth = _drill_hits(result["drill-NPTH.drl"])
@@ -707,7 +716,7 @@ def test_drill_degenerate_hole_warns_and_is_not_drilled():
     # NOT be drilled and must NOT raise (Extra passthrough of malformed input).
     board = _drill_board(mounting_holes=[{"x_mm": 2, "y_mm": 20,
                                           "diameter_mm": 0, "plated": False}])
-    result = gerber.build_gerbers(board, name="drill")
+    result = gerber.build_gerbers(board, name="drill", placed=True)
     assert "drill_feature_unemitted" in _codes(result)
     d = [x for x in result.diagnostics if x.code == "drill_feature_unemitted"][0]
     assert d.severity is DiagnosticSeverity.WARNING
@@ -735,7 +744,7 @@ def test_refless_component_degenerate_silk_warns_with_sentinel_not_raises():
     board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
                           "center": [0, 0], "radius": 0, "width": 0.15}])
     board["components"][0].pop("ref")  # refless but otherwise well-formed
-    result = gerber.build_gerbers(board, name="conf")  # must not raise
+    result = gerber.build_gerbers(board, name="conf", placed=True)  # must not raise
     warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
     assert warns, "refless component's dropped silk must still warn"
     assert warns[0].source_ref.entity_id  # non-empty (sentinel), Diagnostic-valid
@@ -954,7 +963,7 @@ def test_kicad_refless_component_degenerate_silk_warns_with_sentinel():
 def test_unknown_smd_shape_fails_closed_both_emitters(shape):
     board = _pad_board(shape)
     with pytest.raises(ValueError, match="not a supported pad shape"):
-        gerber.build_gerbers(board, name="conf")
+        gerber.build_gerbers(board, name="conf", placed=True)
     with pytest.raises(ValueError, match="not a supported pad shape"):
         kicad.generate(board, base_name="conf")
 
@@ -962,12 +971,12 @@ def test_unknown_smd_shape_fails_closed_both_emitters(shape):
 def test_every_supported_smd_shape_still_passes_the_guard():
     # The fail-closed guard must not reject any DECLARED shape on either emitter.
     for shape in SUPPORTED_PAD_SHAPES:
-        gerber.build_gerbers(_valid_pad_board(shape), name="conf")
+        gerber.build_gerbers(_valid_pad_board(shape), name="conf", placed=True)
         kicad.generate(_valid_pad_board(shape), base_name="conf")
 
 
 def test_oblong_th_pad_warns_not_raises_gerber():
-    result = gerber.build_gerbers(_th_pad_board(w=2.0, h=1.0), name="conf")
+    result = gerber.build_gerbers(_th_pad_board(w=2.0, h=1.0), name="conf", placed=True)
     warns = [d for d in result.diagnostics if d.code == "th_pad_shape_circularized"]
     assert warns, "an oblong TH land must warn (the round annulus drops an extent)"
     assert warns[0].severity is DiagnosticSeverity.WARNING
@@ -985,7 +994,7 @@ def test_oblong_th_pad_warns_not_raises_kicad():
 
 def test_square_th_pad_does_not_warn_either_emitter():
     # A round/square TH land is faithfully a circular annulus — no warning noise.
-    g = gerber.build_gerbers(_th_pad_board(w=1.5, h=1.5), name="conf")
+    g = gerber.build_gerbers(_th_pad_board(w=1.5, h=1.5), name="conf", placed=True)
     k = kicad.generate(_th_pad_board(w=1.5, h=1.5), base_name="conf")
     assert "th_pad_shape_circularized" not in [d.code for d in g.diagnostics]
     assert "th_pad_shape_circularized" not in [d.code for d in k.diagnostics]
@@ -999,5 +1008,5 @@ def test_empty_or_missing_smd_shape_defaults_to_rect_no_raise():
     missing = _pad_board("rect")
     missing["components"][0]["pads"][0].pop("shape")
     for board in (empty, missing):
-        gerber.build_gerbers(board, name="conf")     # must not raise
+        gerber.build_gerbers(board, name="conf", placed=True)     # must not raise
         kicad.generate(board, base_name="conf")       # must not raise

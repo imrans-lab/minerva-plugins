@@ -30,9 +30,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
-from pcb_worker import gerber, resolve
+from pcb_worker import gerber
+from tests.gerber_fab import placed_board_dict
 
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
@@ -42,12 +42,13 @@ CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
 
 
 def _load(path: Path) -> dict:
-    # Best-effort resolve, as the production fab path does (step 4a-ii): the raw
-    # spike would fail closed (SMD pins carry no inline geometry), so the
-    # determinism gate exercises the ACTUAL production input — the resolved
-    # board. drilltest's footprints aren't in the seed lib → left inline.
-    return resolve.resolve_board_best_effort(
-        yaml.safe_load(path.read_text(encoding="utf-8")))
+    # The board dict fed to the placed emitter, exactly as production
+    # (methods._gerbers) now does (K4 phase 1): COMPILE (strict) -> ir_to_board_dict
+    # for the spike; drilltest's hand-authored footprints aren't in the seed lib so
+    # the strict compile fail-closes it and it is emitted from its raw dict directly
+    # (all-TH at rotation 0). The determinism gate exercises the ACTUAL production
+    # input, off the legacy resolve_board_best_effort path.
+    return placed_board_dict(path)
 
 
 @pytest.mark.parametrize("board_path,base", CASES)
@@ -62,8 +63,8 @@ def test_emit_is_byte_identical_across_runs(board_path, base):
     """
     board = _load(board_path)
 
-    first = gerber.build_gerbers(board, name=base)
-    second = gerber.build_gerbers(board, name=base)
+    first = gerber.build_gerbers(board, name=base, placed=True)
+    second = gerber.build_gerbers(board, name=base, placed=True)
 
     # File SET (names + order) is identical.
     assert list(first.keys()) == list(second.keys()), (
@@ -93,8 +94,10 @@ def test_creation_date_is_the_only_volatile_field(board_path, base):
     """
     board = _load(board_path)
 
-    a = gerber.build_gerbers(board, name=base, creation_date="2001-01-01T00:00:00")
-    b = gerber.build_gerbers(board, name=base, creation_date="2099-12-31T23:59:59")
+    a = gerber.build_gerbers(board, name=base, creation_date="2001-01-01T00:00:00",
+                             placed=True)
+    b = gerber.build_gerbers(board, name=base, creation_date="2099-12-31T23:59:59",
+                             placed=True)
 
     assert list(a.keys()) == list(b.keys())
 

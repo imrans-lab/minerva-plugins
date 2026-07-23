@@ -23,9 +23,8 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-import yaml
-
-from pcb_worker import gerber, resolve
+from pcb_worker import gerber
+from tests.gerber_fab import placed_board_dict
 from tests.oracle.geometry_diff import (
     diff_geometry,
     load_output_dir,
@@ -39,17 +38,14 @@ SPIKE_GOLDEN_DIR = HERE.parents[2] / "spikes" / "gerber" / "golden"
 SNAPSHOT_DIR = HERE / "golden_emitter"                 # emitter drift-pin snapshot
 
 
-def _load(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
 def _emit() -> dict[str, str]:
     """Real emitter output for the spike board (name='board' to match goldens).
 
-    Best-effort resolved first, as the production fab path does (step 4a-ii) —
-    the raw spike fails closed (SMD pins carry no inline geometry)."""
-    return gerber.build_gerbers(resolve.resolve_board_best_effort(_load(SPIKE_BOARD)),
-                                name="board")
+    Routed through the production placed path (K4 phase 1): COMPILE (strict) ->
+    ir_to_board_dict -> build_gerbers(placed=True), exactly as methods._gerbers
+    does — off the legacy resolve_board_best_effort path."""
+    return gerber.build_gerbers(placed_board_dict(SPIKE_BOARD), name="board",
+                                placed=True)
 
 
 # ---------------------------------------------------------------------------

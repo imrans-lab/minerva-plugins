@@ -18,13 +18,11 @@ self-selection is board-extent-dependent — see ../../../docs/gerbers.md).
 import sys
 from pathlib import Path
 
-import yaml
-
 HERE = Path(__file__).resolve().parent
 WORKER = HERE.parents[2]  # pcb/worker
 sys.path.insert(0, str(WORKER))
 
-from pcb_worker import gerber, resolve  # noqa: E402
+from tests.gerber_fab import build_fab  # noqa: E402
 
 SPIKE_BOARD = WORKER.parent / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE.parent / "gerber_boards" / "drilltest.yaml"
@@ -33,14 +31,16 @@ CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
 
 
 def main() -> int:
-    # Build THROUGH THE PRODUCTION PATH: best-effort resolve (as methods._gerbers
-    # now does by default, Stage 2 step 4a-ii) then emit. The spike's footprints
-    # (R_0805/C_0805/TH_TestPoint) resolve to their real lands; drilltest's
-    # footprints are not in the seed lib so it is left inline (all-TH, unchanged).
+    # Build THROUGH THE PRODUCTION PATH, exactly as methods._gerbers now does
+    # (K4 phase 1): COMPILE (strict) -> ir_to_board_dict -> build_gerbers(placed=True).
+    # The spike's footprints (R_0805/C_0805/TH_TestPoint) compile to their real
+    # lands (absolute placement, resolved mask clearance); drilltest's hand-authored
+    # footprints are not in the seed lib so the strict compile fail-closes it and it
+    # is emitted from its raw dict directly (all-TH at rotation 0 -> placed==unplaced,
+    # geometry unchanged). NO caller remains on the legacy resolve_board_best_effort
+    # path (build_fab centralizes this — the SAME helper the emitter tests use).
     for board_path, base in CASES:
-        board = resolve.resolve_board_best_effort(
-            yaml.safe_load(board_path.read_text(encoding="utf-8")))
-        files = gerber.build_gerbers(board, name=base)
+        files = build_fab(board_path, base)
         for fname, content in files.items():
             (HERE / fname).write_text(content, encoding="utf-8", newline="\n")
             print(f"wrote {fname} ({len(content)} bytes)")

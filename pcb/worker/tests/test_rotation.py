@@ -128,7 +128,11 @@ def test_fixture_is_rotated_ground_truth():
 
 def test_gerber_pad_centres_match_kicad_ground_truth():
     board, ground_truth = _canonical_from_fixture()
-    files = gerber.build_gerbers(board, name="rot")
+    # placed=True: the fixture pins carry no per-pad `rotation`, so the aperture
+    # angle still comes from the component rotation_deg (the placed path only
+    # overrides it when a pad carries its own absolute rotation) — this stays a
+    # faithful check of gerber._rotate's sign against the KiCad ground truth.
+    files = gerber.build_gerbers(board, name="rot", placed=True)
 
     # SMD component on top -> flashes land on F_Cu.
     f_cu = files["rot-F_Cu.gbr"]

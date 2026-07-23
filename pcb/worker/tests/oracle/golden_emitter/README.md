@@ -22,18 +22,25 @@ structurally-validated golden at `pcb/spikes/gerber/golden/`
 (`spike-gerber-v1`), whose external bless is deferred to a human — see
 `../../../../spikes/gerber/golden/HOW_TO_BLESS.md`.
 
-## Captured through the production (resolved) path
+## Captured through the production (IR) path
 
-Since Stage 2 step 4a-ii (bug 019f7736b236) this snapshot is captured through the
-production fab path: `resolve.resolve_board_best_effort(board.yaml)` then
-`build_gerbers` — the same best-effort resolve `methods._gerbers` now runs by
-default. The raw board can no longer be captured directly: its SMD pins carry no
-inline geometry, so the emitter fails closed rather than writing a placeholder
-land. The SMD copper pads here are therefore the REAL `1.0 x 1.45 mm` 0805 lands
-resolved from the seed library, matching the (re-blessed) correctness reference
-`spike-gerber-v1` on the fabrication-critical layers (F.SilkS still differs — the
-emitter draws courtyards procedurally; silk is excluded from the correctness
-oracle, Option A).
+Since K4 phase 1 this snapshot is captured through the production fab path,
+exactly as `methods._gerbers` runs it: COMPILE (strict) → `ir_to_board_dict` →
+`build_gerbers(placed=True)` (via `tests/gerber_fab.build_fab`). The raw board
+cannot be captured directly: its SMD pins carry no inline geometry, so the
+emitter fails closed rather than writing a placeholder land. The SMD copper pads
+here are the REAL `1.0 x 1.45 mm` 0805 lands resolved from the seed library. NB
+the solder-mask openings now carry the compiler's resolved `0.05 mm` per-side
+clearance (`R,1.1X1.55` / `C,1.7`) rather than the `0.1 mm` default the legacy
+`resolve_board_best_effort` path used — the corrected bytes this drift pin now
+tracks. F.SilkS still differs from the correctness reference (`spike-gerber-v1`):
+the emitter draws courtyards procedurally; silk is excluded from the correctness
+oracle (Option A).
+
+Note: `pcb/scripts/capture_emitter_golden.py` (out of the K4 phase-1 fence) still
+captures via the legacy `resolve_board_best_effort` path; this snapshot was
+regenerated to the IR path by hand. That script must be migrated to `build_fab`
+in the phase that deletes `build_gerbers(placed=False)`.
 
 ## Regenerating (intentional emitter changes only)
 
