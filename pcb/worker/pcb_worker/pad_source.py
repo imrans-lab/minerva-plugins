@@ -104,7 +104,7 @@ class PadGeom:
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
     from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
-    rotation: float | None = None  # ABSOLUTE combined pad angle (IR placed mode); None => use the component angle (legacy). Only read on the gerber placed path (W8.1).
+    rotation: float | None = None  # ABSOLUTE combined pad angle (IR placed mode); None => use the component angle (legacy). Read by the IR fab bridges: gerber placed path (W8.1) AND kicad absolute-under-identity (W8.1b, emitted as the pad (at) third value).
 
 
 def has_resolved_pads(comp: Any) -> bool:
@@ -300,8 +300,12 @@ def _from_resolved(pad: dict) -> PadGeom:
         layers=pad.get("layers") or [],
         from_resolve=True,
         # ABSOLUTE combined pad angle from the IR (compile_board bakes the
-        # placement rotation + footprint-local pad rotation into one value). Only
-        # the gerber placed path reads it; legacy resolve dicts carry no rotation
-        # key so this stays None and the legacy component-angle path is unchanged.
+        # placement rotation + footprint-local pad rotation into one value). Read by
+        # the IR fab bridges — the gerber placed path AND kicad's absolute-under-
+        # identity emit (kicad writes it as the pad (at) third value, which KiCad
+        # reads as the absolute angle). Legacy resolve dicts carry no rotation key
+        # for a zero-rotation pad so this stays None and the legacy path is
+        # unchanged; a rotated-footprint resolve dict does carry it, and kicad now
+        # honours it (previously dropped — Codex 2b).
         rotation=_opt_num(pad.get("rotation")),
     )

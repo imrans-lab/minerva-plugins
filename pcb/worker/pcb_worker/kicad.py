@@ -131,6 +131,45 @@ def _pad_ref(ref: Any, number: Any) -> SourceRef:
     return SourceRef(EntityKind.PAD, rid, num)
 
 
+def _pad_at(px: float, py: float, rotation: float | None) -> str:
+    """The pad ``(at ...)`` s-expression. KiCad's pad ``(at)`` third value is the
+    ABSOLUTE pad angle (footprint rotation + the pad's own local rotation), NOT a
+    footprint-relative one — pcbnew stores it absolute and re-derives the relative
+    part on load. The caller MUST therefore pass an ABSOLUTE angle. The IR fab
+    bridge (ir_to_kicad_board_dict) satisfies this: it emits every footprint at
+    identity ``(at 0 0 0)`` and passes ``PlacedPad.rotation_deg`` (already the
+    absolute combined angle), so the emitted value is correct.
+
+    Emitted ONLY when a non-zero angle is present, so a pad with no rotation
+    (``None``) or zero emits ``(at px py)`` — byte-identical to the pre-W8 emission
+    (the legacy-resolve goldens carry no rotated pads).
+
+    CAVEAT (legacy path, retiring at the W8.2 cutover — filed follow-up): the
+    legacy ``resolve`` dict path feeds ``PadGeom.rotation`` a footprint-LOCAL angle
+    (SB2), which is wrong-as-absolute for a component placed at a non-zero
+    rotation. Not fixed here (that path is being replaced by this IR bridge, and a
+    fix would churn goldens that encode the pre-existing value); the IR path — the
+    one W8.2 wires into fab — is correct."""
+    if rotation is not None and rotation != 0.0:
+        return f"(at {px} {py} {_num(rotation)})"
+    return f"(at {px} {py})"
+
+
+def _smd_tech_layers(copper_layer: str) -> tuple[str, str]:
+    """(paste, mask) technical layers on the SAME side as an SMD pad's copper.
+
+    Before W8.1b kicad hardcoded ``F.Paste``/``F.Mask``, so a B.Cu (bottom) SMD pad
+    emitted its paste + mask on the FRONT — an inconsistent padstack KiCad DRC
+    flags ("copper and mask layers on different sides of the board"). Deriving the
+    side from the copper layer keeps them consistent. GOLDEN-NEUTRAL: a front
+    (``F.Cu``, or any non-``B.Cu``) pad still yields ``F.Paste``/``F.Mask``
+    unchanged; only a bottom pad — previously wrong and untested by any kicad
+    golden — changes (the IR already tags such pads ``B.Mask``/``B.Paste``)."""
+    if copper_layer == "B.Cu":
+        return "B.Paste", "B.Mask"
+    return "F.Paste", "F.Mask"
+
+
 def _smd_shape_tokens(pad) -> tuple[str, float, float, str]:
     """Map a declared SUPPORTED_PAD_SHAPE to its faithful KiCad pad shape token +
     size + optional roundrect_rratio suffix — the K3 conformance analog of gerber's
@@ -403,7 +442,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             # IS faithful — consistent with the gerber emitter's round-only TH.
             annulus = pad.annulus if pad.annulus is not None else drill * 2
             lines.append(
-                f'    (pad "{_esc(num_s)}" thru_hole circle (at {px} {py}) '
+                f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
                 f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
                 f'(layers "*.Cu"){net_expr})'
             )
@@ -427,10 +466,11 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             # is now FAITHFUL (rect/circle/oval/roundrect) via _smd_shape_tokens —
             # no more hard-coded `rect` flattening (R5 K3 conformance).
             shape_tok, sw, sh, rratio_suffix = _smd_shape_tokens(pad)
+            paste, mask = _smd_tech_layers(layer)
             lines.append(
-                f'    (pad "{_esc(num_s)}" smd {shape_tok} (at {px} {py}) '
+                f'    (pad "{_esc(num_s)}" smd {shape_tok} {_pad_at(px, py, pad.rotation)} '
                 f'(size {sw} {sh}){rratio_suffix} '
-                f'(layers "{layer}" "F.Paste" "F.Mask"){net_expr})'
+                f'(layers "{layer}" "{paste}" "{mask}"){net_expr})'
             )
 
     # Footprint F.SilkS graphics (line/circle/arc/poly) — DROPPED before R5; now

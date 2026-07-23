@@ -46,7 +46,7 @@ from .resolved_board import (
     Side,
 )
 
-__all__ = ["ir_to_board_dict"]
+__all__ = ["ir_to_board_dict", "ir_to_kicad_board_dict"]
 
 
 def _outline_frame(outline: BoardOutline) -> tuple[float, float, float, float]:
@@ -303,3 +303,178 @@ def ir_to_board_dict(board: ResolvedBoard) -> dict:
         if entries:
             out[key] = entries
     return out
+
+
+# ===========================================================================
+# KiCad IR->dict bridge (W8.1b of the PCB K3 cutover).
+#
+# GROUND TRUTH (verified against pcbnew 9.0.9's parser; see docket cold-review):
+# when KiCad LOADS a footprint it applies TRANSLATE + ROTATE ONLY — it does NOT
+# natively flip a ``(footprint (layer "B.Cu") ...)`` on load. And the pad ``(at px
+# py ANGLE)`` third value is the ABSOLUTE angle (footprint rotation + pad-local
+# rotation), NOT a footprint-relative one. So the two intuitions the first cut
+# encoded were BOTH wrong:
+#   * feeding LOCAL pad rotation parses as fp-relative (a local 270 under a
+#     comp at 90 reads as 180) — WRONG;
+#   * a ``(layer "B.Cu")`` footprint with local un-mirrored pads is NOT flipped on
+#     load, so bottom pads land mirror-SWAPPED onto the wrong nets — WRONG.
+#
+# CORRECT PROJECTION — ABSOLUTE geometry under an IDENTITY footprint, exactly like
+# the gerber bridge. The IR ``PlacedPad`` is ALREADY board-absolute, override-
+# baked, bottom-mirrored, and carries the COMBINED absolute ``rotation_deg`` and
+# its correctly-sided ``layers``. So we reuse the SAME :func:`_pad_to_dict` /
+# :func:`_graphic_to_dict` the gerber bridge uses and emit each footprint at
+# ``(at 0 0 0)``: KiCad's translate+rotate is then a NO-OP, no flip is needed, and
+# every pad's absolute position + absolute angle + side pass straight through.
+# Overrides and pad rotation reach the .kicad_pcb because they are baked into the
+# PlacedPad; the bottom side is right because the pad coordinate is pre-mirrored
+# and the copper layer is tagged from ``PlacedPad.side`` — no double-mirror, no
+# fp-relative-angle bug. kicad and gerber now share ONE absolute projection.
+# ===========================================================================
+
+
+def _kicad_component_to_dict(board: ResolvedBoard,
+                             component: ResolvedComponent) -> dict:
+    """One :class:`ResolvedComponent` -> an emitter component dict with an IDENTITY
+    footprint placement (``x=y=rotation=0``) and ABSOLUTE pad/graphic geometry —
+    the SAME absolute projection the gerber bridge uses, reused verbatim via
+    :func:`_pad_to_dict` / :func:`_graphic_to_dict`.
+
+    KiCad applies only translate+rotate on load, so an identity footprint leaves
+    the pre-placed, pre-mirrored PlacedPad geometry untouched: absolute position,
+    absolute combined ``rotation_deg``, and the pad's own correctly-sided copper
+    layer all round-trip. ``layer`` tags the component side so a bottom SMD land is
+    emitted on B.Cu (its copper is already at the mirror-folded coordinate — the
+    coordinate does the mirror, NOT a footprint flip)."""
+    number_of = _pad_number_map(board, component)
+    definition = board.footprint_for(component)
+    return {
+        "ref": component.ref,
+        "value": component.value,
+        "footprint": definition.name,
+        "x_mm": 0.0,
+        "y_mm": 0.0,
+        "rotation_deg": 0.0,
+        "layer": "top" if component.placement.side is Side.TOP else "bottom",
+        # ABSOLUTE, override-baked, side-mirrored — identity footprint no-ops the
+        # emitter transform, so _pad_to_dict's absolute position + combined angle
+        # pass through (the exact geometry the gerber bridge emits).
+        "pads": [
+            _pad_to_dict(pad, number_of.get(pad.source_id, ""))
+            for pad in component.placed_pads
+        ],
+        # Only F.SilkS is rendered by the kicad emitter; the placed graphics are
+        # board-ABSOLUTE and land correctly under the identity footprint (at 0 0 0).
+        "graphics": [
+            _graphic_to_dict(g) for g in component.placed_graphics
+            if g.layer.id == "F.SilkS"
+        ],
+    }
+
+
+def _kicad_net_dicts(board: ResolvedBoard) -> list[dict]:
+    """Each :class:`ResolvedNet` -> the ``{name, pins:["REF.PADNUM", ...]}`` dict
+    kicad._net_table reads. A net's ``pad_refs`` are PlacedPad ids; kicad wants
+    ``REF.PADNUM``, so each placed-pad id is resolved to its component ref + the
+    footprint pad NUMBER (via source_id) — the same join kicad's pad_net expects."""
+    pin_of: dict[str, str] = {}
+    for component in board.components:
+        number_of = {pad.source_id: pad.number
+                     for pad in board.footprint_for(component).pads}
+        for placed in component.placed_pads:
+            pin_of[placed.id] = f"{component.ref}.{number_of.get(placed.source_id, '')}"
+    return [
+        {"name": net.name, "pins": [pin_of[ref] for ref in net.pad_refs]}
+        for net in board.nets
+    ]
+
+
+def _kicad_trace_dicts(board: ResolvedBoard, net_name_of: dict[str, str]) -> list[dict]:
+    """Like :func:`_trace_dicts` but tagged with the trace's NET NAME — kicad
+    assigns each ``segment`` a net index from ``board["nets"]``, so a routed board
+    keeps its copper on-net (gerber ignores nets, hence the divergent projection)."""
+    out: list[dict] = []
+    for trace in board.traces:
+        name = net_name_of.get(trace.net_id, "")
+        for seg in trace.segments:
+            out.append({
+                "layer": seg.layer.id,
+                "width_mm": seg.width_mm,
+                "net": name,
+                "points": [
+                    {"x_mm": seg.a[0], "y_mm": seg.a[1]},
+                    {"x_mm": seg.b[0], "y_mm": seg.b[1]},
+                ],
+            })
+    return out
+
+
+def _kicad_via_dicts(board: ResolvedBoard, net_name_of: dict[str, str]) -> list[dict]:
+    return [
+        {
+            "x_mm": via.position[0],
+            "y_mm": via.position[1],
+            "diameter_mm": via.diameter_mm,
+            "drill_mm": via.drill_mm,
+            "net": net_name_of.get(via.net_id, ""),
+        }
+        for via in board.vias
+    ]
+
+
+def ir_to_kicad_board_dict(board: ResolvedBoard) -> dict:
+    """Project a :class:`ResolvedBoard` (K2 IR) into the loosely-typed emitter
+    board_dict that ``kicad.generate`` consumes, in BOARD-ABSOLUTE geometry with
+    IDENTITY footprint placement — the SAME projection the gerber bridge uses.
+
+    KiCad applies only translate+rotate on load (no native flip) and reads the pad
+    ``(at)`` third value as the ABSOLUTE angle, so absolute-under-identity is the
+    faithful encoding: each footprint at ``(at 0 0 0)`` with pads at their
+    board-absolute position + combined rotation + correctly-sided copper layer.
+    OVERRIDES, per-pad rotation, and the bottom-side MIRROR all reach the
+    .kicad_pcb because they are baked into every :class:`PlacedPad`; the identity
+    footprint no-ops KiCad's transform so nothing is double-applied or
+    double-mirrored. Additionally emits ``nets`` (kicad assigns pad/segment/via
+    nets from them) and net-tagged traces/vias, which the gerber bridge omits.
+    PURE + deterministic — the ResolvedBoard is only read.
+
+    FAIL-CLOSED seals (mirroring the gerber bridge): a captured feature the kicad
+    emitter cannot render — a board-level HOLE (``generate_kicad_pcb`` emits no
+    standalone drills), a zone, or a board-level graphic — must RAISE, never vanish
+    silently from a fabrication-bound file. compile_board fail-closes zones/board-
+    graphics upstream (always empty today), so these seal the adapter against a
+    future IR silently dropping copper/drill at the cutover."""
+    if board.holes:
+        raise ValueError(
+            f"ir_to_kicad_board_dict: board has {len(board.holes)} board-level hole(s) "
+            f"the kicad emitter does not drill (generate_kicad_pcb emits no standalone "
+            f"holes) — refusing to emit a fabrication file that silently drops them")
+    if board.zones:
+        raise ValueError(
+            f"ir_to_kicad_board_dict: board has {len(board.zones)} zone(s) the kicad "
+            f"bridge does not map yet — refusing to silently drop copper")
+    if board.board_graphics:
+        raise ValueError(
+            f"ir_to_kicad_board_dict: board has {len(board.board_graphics)} board-level "
+            f"graphic(s) the kicad bridge does not map yet — refusing to drop them silently")
+
+    ox, oy, width_mm, height_mm = _outline_frame(board.outline)
+    rules = board.design_rules
+    net_name_of = {net.id: net.name for net in board.nets}
+
+    return {
+        "name": board.name,
+        "width_mm": width_mm,
+        "height_mm": height_mm,
+        "origin": {"x_mm": ox, "y_mm": oy},
+        "design_rules": {
+            "trace_width_mm": rules.defaults.trace_width_mm,
+            "via_diameter_mm": rules.defaults.via_diameter_mm,
+            "via_drill_mm": rules.defaults.via_drill_mm,
+            "solder_mask_clearance_mm": rules.minimums.solder_mask_clearance_mm,
+        },
+        "nets": _kicad_net_dicts(board),
+        "components": [_kicad_component_to_dict(board, comp) for comp in board.components],
+        "traces": _kicad_trace_dicts(board, net_name_of),
+        "vias": _kicad_via_dicts(board, net_name_of),
+    }

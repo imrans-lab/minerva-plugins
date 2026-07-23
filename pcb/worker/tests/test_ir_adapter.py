@@ -24,10 +24,17 @@ import re
 
 import pytest
 
-from pcb_worker import gerber
+from agent_router.kicad_io import read_kicad_pcb
+from pcb_worker import gerber, kicad
 from pcb_worker.compile_board import compile_board
-from pcb_worker.ir_adapter import ir_to_board_dict
+from pcb_worker.ir_adapter import ir_to_board_dict, ir_to_kicad_board_dict
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
+
+try:  # dev/CI-only kicad-cli DRC oracle (skips cleanly when absent).
+    from tests.oracle.kicad_drc import kicad_cli_available, run_drc_on_pcb_text
+except Exception:  # pragma: no cover - oracle package optional
+    kicad_cli_available = lambda: False  # noqa: E731
+    run_drc_on_pcb_text = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,3 +266,284 @@ def test_legacy_placed_false_is_byte_stable_across_the_new_param():
     default = gerber.build_gerbers(copy.deepcopy(legacy_board), name="leg")
     explicit = gerber.build_gerbers(copy.deepcopy(legacy_board), name="leg", placed=False)
     assert dict(default) == dict(explicit)
+
+
+# ===========================================================================
+# W8.1b — the KICAD IR->dict bridge (``ir_adapter.ir_to_kicad_board_dict``).
+#
+# GROUND TRUTH (pcbnew 9.0.9): KiCad applies TRANSLATE + ROTATE ONLY on load (no
+# native footprint flip), and the pad ``(at px py ANGLE)`` third value is the
+# ABSOLUTE angle. So the bridge emits ABSOLUTE geometry under an IDENTITY footprint
+# (reusing the gerber projection): overrides, per-pad rotation, and the bottom
+# mirror are all baked into each PlacedPad and pass through KiCad's no-op transform.
+#
+# These wins are proven by a REAL ROUND-TRIP ORACLE — the emitted .kicad_pcb is
+# parsed back through KiCad's load transform (agent_router.kicad_io.read_kicad_pcb,
+# translate+rotate, the SAME reader test_rotation.py trusts as ground truth) and
+# every pad's PARSED absolute position, absolute angle, and copper layer is checked
+# against the IR truth (PlacedPad.position / rotation_deg / side). Plain-text
+# assertions MISSED the mirror + fp-relative-angle bugs; the parse-back catches
+# them because a mis-mirrored/local-rotated pad lands at the WRONG absolute spot.
+# The external kicad-cli DRC is the independent second oracle.
+#
+#   compile_board(src).board -> ir_to_kicad_board_dict -> kicad.generate -> parse
+# ===========================================================================
+
+
+def _emit_kicad(board: dict, name: str = "brd") -> str:
+    """Compile + project + emit the .kicad_pcb text for a raw board dict."""
+    return kicad.generate(ir_to_kicad_board_dict(_resolve(board)), base_name=name)[
+        f"{name}.kicad_pcb"]
+
+
+def _ir_pad_truth(resolved) -> dict:
+    """``{ 'REF.NUMBER': (abs_position, abs_rotation_deg, Side) }`` — the IR's
+    board-absolute ground truth for every placed pad, joined to its footprint pad
+    NUMBER by source_id (the same join the emitted ``REF.NUMBER`` uses)."""
+    truth: dict = {}
+    for comp in resolved.components:
+        number_of = {p.source_id: p.number for p in resolved.footprint_for(comp).pads}
+        for pad in comp.placed_pads:
+            truth[f"{comp.ref}.{number_of[pad.source_id]}"] = (
+                pad.position, pad.rotation_deg, pad.side)
+    return truth
+
+
+def _roundtrip_pads(pcb_text: str, tmp_path) -> dict:
+    """Parse the emitted board back through KiCad's load transform (translate +
+    rotate, NO flip — real KiCad behavior) and return ``{'REF.NUMBER': Pad}``."""
+    path = tmp_path / "rt.kicad_pcb"
+    path.write_text(pcb_text, encoding="utf-8")
+    board = read_kicad_pcb(str(path))
+    return {f"{p.component}.{p.number}": p for p in board.pads}
+
+
+def _assert_pads_roundtrip(board: dict, tmp_path, *, name: str = "brd") -> None:
+    """The core oracle: EVERY pad's parsed absolute position + absolute angle +
+    copper layer matches the IR truth. A through-hole pad is on ``*.Cu`` (all
+    copper); an SMD pad is on its side's copper (F.Cu / B.Cu). Catches the mirror
+    bug (wrong position) AND the fp-relative-rotation bug (wrong angle)."""
+    resolved = _resolve(board)
+    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name=name)[
+        f"{name}.kicad_pcb"]
+    parsed = _roundtrip_pads(pcb, tmp_path)
+    truth = _ir_pad_truth(resolved)
+    assert set(parsed) == set(truth), (set(truth) - set(parsed), set(parsed) - set(truth))
+    for key, (pos, rot, side) in truth.items():
+        p = parsed[key]
+        assert abs(p.position[0] - pos[0]) < 1e-3 and abs(p.position[1] - pos[1]) < 1e-3, (
+            f"{key}: parsed pos {p.position} != IR {pos}")
+        assert abs(((p.rotation - rot + 180) % 360) - 180) < 1e-3, (
+            f"{key}: parsed angle {p.rotation} != IR {rot}")
+        if p.pad_type == "smd":
+            want = "B.Cu" if side.value == "bottom" else "F.Cu"
+            assert p.layer == want, f"{key}: parsed layer {p.layer} != {want} (side {side.value})"
+        else:
+            assert p.layer == "*.Cu", f"{key}: TH pad layer {p.layer} != *.Cu"
+
+
+# ---------------------------------------------------------------------------
+# WIN 1 — a component at non-zero rotation with a rotated pad: ABSOLUTE angle.
+# ---------------------------------------------------------------------------
+
+
+def test_kicad_component_rotation_roundtrips_absolute(tmp_path):
+    """An R_0805 at component rotation 90: each pad round-trips to its IR-absolute
+    position AND absolute angle. The bug this kills: feeding a footprint-relative
+    angle would parse WRONG (KiCad reads the pad `(at)` third value as absolute)."""
+    _assert_pads_roundtrip(_board("R_0805", x=30.0, y=30.0, rotation_deg=90.0), tmp_path)
+
+
+def test_kicad_pad_local_rotation_roundtrips_absolute(tmp_path):
+    """ESP32-S3-DevKitC has pads at LOCAL rotation 270; at component rotation 0 the
+    IR combined angle is 270. The emitted pad `(at)` carries 270 and round-trips to
+    270 — proving per-pad rotation reaches the .kicad_pcb (Codex 2b) as the ABSOLUTE
+    angle, not a dropped or fp-relative value."""
+    _assert_pads_roundtrip(
+        _board("Espressif:ESP32-S3-DevKitC", x=40.0, y=50.0), tmp_path)
+    # And the emitted angle is literally the IR combined angle on the pad (at).
+    resolved = _resolve(_board("Espressif:ESP32-S3-DevKitC", x=40.0, y=50.0))
+    d = ir_to_kicad_board_dict(resolved)
+    assert d["components"][0]["rotation_deg"] == 0.0  # IDENTITY footprint
+    assert all(p.get("rotation") == 270.0 for p in d["components"][0]["pads"])
+
+
+# ---------------------------------------------------------------------------
+# WIN 2 — a BOTTOM asymmetric component: the mirror is in the COORDINATE, and
+# there is NO double-mirror (the earlier y=0 test could not see a swap).
+# ---------------------------------------------------------------------------
+
+
+def test_kicad_bottom_asymmetric_component_roundtrips_mirrored(tmp_path):
+    """A BOTTOM DIP-6 (pads NOT at y=0, so a mirror error is detectable): every pin
+    round-trips to the IR's mirror-folded absolute position. The bug this kills:
+    emitting a `(layer B.Cu)` footprint with LOCAL un-mirrored pads is NOT flipped
+    on load, so pins 2/3 would swap onto the wrong nets. Here the coordinate is
+    pre-mirrored under an identity footprint, so it lands right — no double-mirror."""
+    _assert_pads_roundtrip(
+        _board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom", x=40.0, y=40.0),
+        tmp_path)
+
+
+def test_kicad_bottom_placement_is_pre_mirrored_not_local(tmp_path):
+    """Directly: a BOTTOM DIP-6's emitted pad coordinates are the IR's absolute
+    MIRRORED positions (identity footprint), NOT the footprint-local (0,0)/(7.62,*)
+    coords that the broken component-relative encoding produced."""
+    resolved = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom",
+                               x=40.0, y=40.0))
+    d = ir_to_kicad_board_dict(resolved)
+    comp = d["components"][0]
+    assert comp["x_mm"] == 0.0 and comp["y_mm"] == 0.0 and comp["rotation_deg"] == 0.0
+    assert comp["layer"] == "bottom"
+    truth = {(round(p.position[0], 3), round(p.position[1], 3)) for p in resolved.components[0].placed_pads}
+    emitted = {(round(p["position"]["x"], 3), round(p["position"]["y"], 3)) for p in comp["pads"]}
+    assert emitted == truth, (emitted, truth)
+    # A local (un-mirrored) origin pad at (0,0) would appear if the bug were back.
+    assert (0.0, 0.0) not in emitted
+
+
+def test_kicad_bottom_smd_pad_is_layer_consistent(tmp_path):
+    """A BOTTOM SMD component: copper AND paste/mask land on the SAME (back) side.
+    Round-trip confirms B.Cu copper; the DRC oracle (below) confirms the padstack
+    is no longer 'copper and mask on different sides' (the pre-existing bug the
+    absolute-identity + side-derived tech layers fix)."""
+    _assert_pads_roundtrip(
+        _board("EVP-ASAC1A:SW_EVP-ASAC1A", layer="bottom", x=50.0, y=50.0,
+               ), tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# WIN 3 — a pin `override` reaches the emitted pad geometry.
+# ---------------------------------------------------------------------------
+
+
+def test_kicad_override_reaches_pad_geometry(tmp_path):
+    """A pin `override` (drill + annulus) reaches the emitted through-hole pad while
+    the other pins keep the footprint geometry — the legacy kicad path drops
+    overrides. Asserted on the emitted pad dict AND round-tripped for position."""
+    board = _board("Package_DIP:DIP-6_W7.62mm_Socket",
+                   pins=[{"number": "1", "override": {"drill_mm": 1.3,
+                                                      "annulus_diameter_mm": 3.0}}])
+    pcb = _emit_kicad(board)
+    fp = pcb[pcb.index('(footprint "DIP-6'):]
+    fp = fp[:fp.index("\n  )")]
+
+    def pad_line(num):
+        return next(l for l in fp.splitlines() if l.lstrip().startswith(f'(pad "{num}"'))
+
+    assert "(drill 1.3)" in pad_line("1") and "(size 3.0 3.0)" in pad_line("1")
+    assert "(drill 0.8)" in pad_line("2") and "(size 1.6 1.6)" in pad_line("2")
+    _assert_pads_roundtrip(board, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# WIN 4 — the emitted board parses + DRCs clean (independent KiCad-engine oracle).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not kicad_cli_available(),
+                    reason="kicad-cli not on PATH (dev/CI-only oracle)")
+@pytest.mark.parametrize("board", [
+    {"footprint": "R_0805", "layer": "top", "rotation_deg": 90.0},        # rotation
+    {"footprint": "Package_DIP:DIP-6_W7.62mm_Socket", "layer": "bottom"},  # bottom TH mirror
+    {"footprint": "EVP-ASAC1A:SW_EVP-ASAC1A", "layer": "bottom"},          # bottom SMD layers
+])
+def test_kicad_emitted_board_is_drc_clean(board):
+    """Each geometry class (rotation / bottom mirror / bottom SMD) DRCs clean under
+    the external kicad-cli — the independent second oracle that the emission is
+    valid KiCad, on a board large enough that edge clearance is not at issue."""
+    raw = {"version": 1, "name": "brd", "width_mm": 100, "height_mm": 100,
+           "layers": ["top", "bottom"],
+           "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                            "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+           "components": [{"ref": "X1", "footprint": board["footprint"],
+                           "x_mm": 50.0, "y_mm": 50.0,
+                           "rotation_deg": board.get("rotation_deg", 0.0),
+                           "layer": board["layer"]}]}
+    pcb = kicad.generate(ir_to_kicad_board_dict(_resolve(raw)), base_name="brd")[
+        "brd.kicad_pcb"]
+    result = run_drc_on_pcb_text(pcb, name="brd")
+    assert result.clean, (result.violations, result.unconnected_items)
+
+
+# ---------------------------------------------------------------------------
+# Direct kicad.py emission unit-checks (targeted, no IR).
+# ---------------------------------------------------------------------------
+
+
+def test_kicad_footprint_emits_absolute_rotation_only_when_present():
+    """kicad._footprint's pad `(at)` gains a third value ONLY for a pad carrying a
+    non-zero `rotation`; a pad with no/zero rotation stays `(at px py)` — the
+    backward-compat seal that keeps the legacy resolve goldens byte-identical."""
+    def comp(rot):
+        pad = {"number": "1", "type": "smd", "shape": "rect",
+               "position": {"x": 0.5, "y": -0.5}, "size": {"width": 1.0, "height": 0.6},
+               "drill": {"x": 0.0, "y": 0.0}, "layers": ["F.Cu"]}
+        if rot is not None:
+            pad["rotation"] = rot
+        return {"version": 1, "name": "b", "width_mm": 10, "height_mm": 10,
+                "components": [{"ref": "U1", "footprint": "FP", "x_mm": 5, "y_mm": 5,
+                                "rotation_deg": 0, "layer": "top", "pads": [pad]}]}
+
+    assert re.search(r'\(pad "1" smd rect \(at 0.5 -0.5 45(\.0)?\)',
+                     kicad.generate_kicad_pcb(comp(45))), "rotated pad missing angle"
+    assert '(pad "1" smd rect (at 0.5 -0.5)' in kicad.generate_kicad_pcb(comp(None))
+    assert '(pad "1" smd rect (at 0.5 -0.5)' in kicad.generate_kicad_pcb(comp(0.0))
+
+
+def test_kicad_smd_tech_layers_follow_copper_side():
+    """A BOTTOM SMD pad emits paste/mask on the BACK (B.Paste/B.Mask), a FRONT pad
+    on F.* — the side-consistency fix. A front pad is byte-identical to before."""
+    def one(layer):
+        pad = {"number": "1", "type": "smd", "shape": "rect",
+               "position": {"x": 0.0, "y": 0.0}, "size": {"width": 1.0, "height": 0.6},
+               "drill": {"x": 0.0, "y": 0.0}, "layers": ["F.Cu"]}
+        return kicad.generate_kicad_pcb({
+            "version": 1, "name": "b", "width_mm": 10, "height_mm": 10,
+            "components": [{"ref": "U1", "footprint": "FP", "x_mm": 5, "y_mm": 5,
+                            "rotation_deg": 0, "layer": layer, "pads": [pad]}]})
+
+    assert '(layers "F.Cu" "F.Paste" "F.Mask")' in one("top")
+    assert '(layers "B.Cu" "B.Paste" "B.Mask")' in one("bottom")
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed seals + adapter purity/determinism.
+# ---------------------------------------------------------------------------
+
+
+def test_kicad_adapter_fails_closed_on_board_holes():
+    """The kicad emitter drills no standalone holes, so a board-level hole the
+    adapter cannot map must RAISE (never silently drop a fab feature) — the K3
+    fail-closed doctrine, mirroring the gerber bridge's zone/board-graphic seals."""
+    board = _board("R_0805")
+    board["mounting_holes"] = [{"x_mm": 2.0, "y_mm": 2.0, "diameter_mm": 3.2}]
+    resolved = _resolve(board)
+    assert resolved.holes  # the compiler captured the hole
+    with pytest.raises(ValueError, match="hole"):
+        ir_to_kicad_board_dict(resolved)
+
+
+def test_kicad_adapter_does_not_mutate_the_resolved_board():
+    board = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket",
+                            pins=[{"number": "1", "override": {"drill_mm": 1.3}}]))
+    before = copy.deepcopy(board)
+    ir_to_kicad_board_dict(board)
+    assert board == before
+
+
+def test_kicad_adapter_is_deterministic():
+    board = _resolve(_board("Espressif:ESP32-S3-DevKitC"))
+    assert ir_to_kicad_board_dict(board) == ir_to_kicad_board_dict(board)
+
+
+def test_kicad_and_gerber_bridges_agree_on_absolute_pad_position():
+    """kicad and gerber now share ONE absolute projection: a pad's absolute
+    position is identical whether taken from the gerber bridge or the kicad
+    bridge (both reuse _pad_to_dict under identity placement)."""
+    resolved = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom"))
+    gerb = ir_to_board_dict(resolved)["components"][0]["pads"]
+    kic = ir_to_kicad_board_dict(resolved)["components"][0]["pads"]
+    gpos = sorted((p["position"]["x"], p["position"]["y"]) for p in gerb)
+    kpos = sorted((p["position"]["x"], p["position"]["y"]) for p in kic)
+    assert gpos == kpos
