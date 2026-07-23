@@ -333,11 +333,28 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     out.append("(kicad_pcb (version 20241229) (generator pcb_worker)")
     out.append("  (general (thickness 1.6))")
     out.append('  (paper "A4")')
+    # FULL canonical KiCad-9 layer table (finding 019f90c5c962). The emitter
+    # references F/B.Mask, F/B.Paste, F.Fab, etc. in pad/footprint layer lists; a
+    # layer NOT declared here is silently NOT PLOTTED by KiCad's Gerber exporter
+    # (it exits 0 but emits no mask files), so the E3 NPTH mask + E4 via tenting
+    # never reach fab. These ids/types are the EXACT stack pcbnew 9.0.9 writes for a
+    # 2-layer board (verified via CreateEmptyBoard -> SaveBoard) — KiCad-9 renumbered
+    # the stack (B.Cu=2 not 31, F.Mask=1, Edge.Cuts=25, F.SilkS=5 not 35), so the old
+    # KiCad-7 numbers under the 20241229 (v9) stamp were internally inconsistent.
     out.append("  (layers")
-    out.append('    (0 "F.Cu" signal)')
-    out.append('    (31 "B.Cu" signal)')
-    out.append('    (44 "Edge.Cuts" user)')
-    out.append('    (35 "F.SilkS" user)')
+    for decl in (
+        '(0 "F.Cu" signal)', '(2 "B.Cu" signal)',
+        '(9 "F.Adhes" user "F.Adhesive")', '(11 "B.Adhes" user "B.Adhesive")',
+        '(13 "F.Paste" user)', '(15 "B.Paste" user)',
+        '(5 "F.SilkS" user "F.Silkscreen")', '(7 "B.SilkS" user "B.Silkscreen")',
+        '(1 "F.Mask" user)', '(3 "B.Mask" user)',
+        '(17 "Dwgs.User" user "User.Drawings")', '(19 "Cmts.User" user "User.Comments")',
+        '(21 "Eco1.User" user "User.Eco1")', '(23 "Eco2.User" user "User.Eco2")',
+        '(25 "Edge.Cuts" user)', '(27 "Margin" user)',
+        '(31 "F.CrtYd" user "F.Courtyard")', '(29 "B.CrtYd" user "B.Courtyard")',
+        '(35 "F.Fab" user)', '(33 "B.Fab" user)',
+    ):
+        out.append("    " + decl)
     out.append("  )")
     out.append("  (setup)")
 

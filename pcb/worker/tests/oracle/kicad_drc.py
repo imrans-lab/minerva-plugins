@@ -86,3 +86,37 @@ def run_drc_on_pcb_text(pcb_text: str, name: str = "board",
 def run_drc_on_board(board: dict, name: str = "board") -> DrcResult:
     """Render a canonical board to KiCad and run the DRC oracle over it."""
     return run_drc_on_pcb_text(kicad.generate_kicad_pcb(board), name=name)
+
+
+def export_gerbers_on_pcb_text(pcb_text: str, layers: list[str], name: str = "board",
+                               timeout: float = 120.0) -> dict[str, str]:
+    """Run ``kicad-cli pcb export gerbers`` over a .kicad_pcb string; return
+    ``{output_filename: file_text}`` for the plotted layers.
+
+    This is the CAM oracle that a pcbnew ``LoadBoard`` cannot stand in for: KiCad's
+    Gerber exporter silently plots NOTHING for a layer the board's ``(layers ...)``
+    table does not declare (exits 0, emits an empty/absent file), so a mask/tenting
+    change can pass a parse-back round-trip yet produce zero fab geometry (finding
+    019f90c5c962). Asserting on the exported bytes is the real proof.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        pcb = Path(td) / f"{name}.kicad_pcb"
+        pcb.write_text(pcb_text, encoding="utf-8")
+        outdir = Path(td) / "gbr"
+        outdir.mkdir()
+        proc = subprocess.run(
+            [KICAD_CLI, "pcb", "export", "gerbers", "--output", str(outdir),
+             "--layers", ",".join(layers), str(pcb)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        files = {p.name: p.read_text(encoding="utf-8", errors="replace")
+                 for p in sorted(outdir.glob("*")) if p.is_file() and p.suffix != ".gbrjob"}
+        # A clean export is rc==0 with files; honor BOTH so a partial/failed export
+        # (some files present but a nonzero rc) fails loudly rather than returning a
+        # silently-incomplete layer set to the oracle.
+        if proc.returncode != 0 or not files:
+            raise RuntimeError(
+                f"kicad-cli pcb export gerbers failed (rc={proc.returncode}, "
+                f"{len(files)} files): {proc.stderr.strip() or proc.stdout.strip()}"
+            )
+        return files
