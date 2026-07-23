@@ -215,6 +215,7 @@ func initRegistry() {
 	registry.Register(tools.Gerbers, tools.HandleGerbers)
 	registry.Register(tools.DRC, tools.HandleDRC)
 	registry.Register(tools.Resolve, tools.HandleResolve)
+	registry.Register(tools.Normalize, tools.HandleNormalize)
 	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
 	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
 	// pcb.route is a dotted panel-IPC channel (like pcb.serialize/...), not an
@@ -276,6 +277,7 @@ var workerBackedTools = map[string]bool{
 	"pcb_gerbers":         true,
 	"pcb_drc":             true,
 	"pcb_resolve":         true,
+	"pcb_normalize":       true,
 	"pcb_check_libraries": true,
 	"pcb_check_bom":       true,
 	"pcb.route":           true,

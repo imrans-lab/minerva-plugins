@@ -163,6 +163,35 @@ func HandleResolve(ctx context.Context, w *bridge.Worker, params json.RawMessage
 	return w.Call(ctx, "resolve", params)
 }
 
+// ---- pcb_normalize ---------------------------------------------------------
+
+var Normalize = ToolSpec{
+	Name: "pcb_normalize",
+	Description: "Rewrite a canonical PCB board to its normalized v2 shape — the sync-back " +
+		"the compile fold never persists on its own. Args {yaml:<board source>} or " +
+		"{board:<board object>}. For every pin carrying deprecated inline fabrication " +
+		"geometry (drill_mm/annulus_diameter_mm/pad_width_mm/pad_height_mm/plated): geometry " +
+		"REDUNDANT with the locked footprint pad is dropped, geometry that DIVERGES is " +
+		"migrated to a typed `override`, and an AMBIGUOUS pin (no matching footprint pad, or " +
+		"unverifiable) fail-closes the WHOLE normalize (better none than a half-normalized " +
+		"source). PURE — returns the normalized board for the host to persist; never writes " +
+		"to disk. Returns {ok:true, board:<normalized>, warnings:[{severity,code,message,...}]} " +
+		"on success (the warnings carry per-pin migrate/drop INFO diagnostics), or " +
+		"{ok:false, error:{kind:'normalize'|'parse', message, diagnostics}} on a fail-closed " +
+		"or parse fault. Idempotent: normalizing an already-normalized board is a no-op.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+		}
+	}`),
+}
+
+func HandleNormalize(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "normalize", params)
+}
+
 // ---- pcb.route (worker-backed broker CHANNEL, not an LLM tool name) --------
 //
 // Unlike pcb_validate/pcb_generate/... (LLM-facing tool names under the pcb_
