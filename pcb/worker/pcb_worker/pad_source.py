@@ -104,6 +104,7 @@ class PadGeom:
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
     from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
+    rotation: float | None = None  # ABSOLUTE combined pad angle (IR placed mode); None => use the component angle (legacy). Only read on the gerber placed path (W8.1).
 
 
 def has_resolved_pads(comp: Any) -> bool:
@@ -298,4 +299,9 @@ def _from_resolved(pad: dict) -> PadGeom:
         pad_type=pad_type,
         layers=pad.get("layers") or [],
         from_resolve=True,
+        # ABSOLUTE combined pad angle from the IR (compile_board bakes the
+        # placement rotation + footprint-local pad rotation into one value). Only
+        # the gerber placed path reads it; legacy resolve dicts carry no rotation
+        # key so this stays None and the legacy component-angle path is unchanged.
+        rotation=_opt_num(pad.get("rotation")),
     )

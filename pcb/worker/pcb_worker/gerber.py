@@ -387,7 +387,7 @@ def _mask_dim(base: float, margin: float, ref: Any, number: Any) -> float:
     return dim
 
 
-def _harvest(board: dict, mask_clearance: float) -> _Geometry:
+def _harvest(board: dict, mask_clearance: float, placed: bool = False) -> _Geometry:
     g = _Geometry()
 
     dr = board.get("design_rules") or {}
@@ -416,6 +416,16 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
             ox, oy = _rotate(pad.x, pad.y, rot)
             px, py = cx + ox, cy + oy
             pin_extents.append((px, py))
+
+            # Aperture rotation SOURCE (W8.1, hazard #2). In the IR placed path the
+            # component placement is IDENTITY (x=y=rot=0) so POSITION is already
+            # board-absolute above; but the copper/mask aperture angle would then be
+            # the component rot (=0), LOSING the per-pad rotation the IR baked in
+            # (PlacedPad.rotation_deg — placement rot + footprint-local pad rot). So
+            # placed mode takes the per-pad absolute angle. legacy mode (placed=False)
+            # keeps using the component rot verbatim and never reads pad.rotation, so
+            # test_gerbers goldens stay byte-identical.
+            pad_angle = pad.rotation if (placed and pad.rotation is not None) else rot
 
             drill = pad.drill
             if drill is not None and drill > 0:
@@ -447,7 +457,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 # (a sizeless SMD pad has already raised PadGeometryError).
                 w = pad.width
                 h = pad.height
-                g.smd_pads.append((px, py, w, h, rot, top, pad.shape, pad.corner_rratio))
+                g.smd_pads.append((px, py, w, h, pad_angle, top, pad.shape, pad.corner_rratio))
                 # Mask opening follows the pad SHAPE (R2), enlarged per side by the
                 # effective margin (per-pad solder_mask_margin, else the global
                 # clearance); a large-negative margin that collapses the opening
@@ -455,7 +465,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
                 margin = _pad_mask_margin(pad, mask_clearance)
                 mw = _mask_dim(w, margin, ref, pad.number)
                 mh = _mask_dim(h, margin, ref, pad.number)
-                mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, rot)
+                mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
                 (g.mask_top if top else g.mask_bot).append(mask)
 
         # Silk: components with resolved footprint graphics (resolve_board's
@@ -765,7 +775,8 @@ def _build_drill_files(g: _Geometry, creation_date: str) -> dict[str, str]:
 
 def build_gerbers(board_dict: dict, out_dir: str | None = None,
                   name: str | None = None,
-                  creation_date: str | None = None) -> GerberResult:
+                  creation_date: str | None = None,
+                  placed: bool = False) -> GerberResult:
     """Compile a canonical board into fabrication files.
 
     Returns a GerberResult (a ``dict[str, str]`` subclass — a drop-in for the
@@ -783,6 +794,16 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
     format is self-declared by gerber-writer per layer extent (not pinned 4.6);
     the CreationDate stamp is pinned for byte-reproducibility unless
     *creation_date* is supplied.
+
+    ``placed`` (W8.1) selects the aperture-rotation SOURCE. Default False is the
+    legacy path: the copper/mask aperture angle comes from the component
+    ``rotation_deg`` (goldens depend on this — byte-identical). True is the IR
+    path (``ir_adapter.ir_to_board_dict``): the component placement is identity so
+    positions are already board-absolute, and each pad's own ``rotation`` (the
+    ABSOLUTE combined angle the compiler baked into ``PlacedPad.rotation_deg``)
+    drives its aperture — so per-pad rotation reaches fab. Positions, shapes,
+    mask-follows-shape and every R1–R5 conformance check are identical in both
+    modes; only the angle source differs.
     """
     base = name or (board_dict.get("name") if isinstance(board_dict.get("name"), str) else None) or "board"
     date = creation_date or PINNED_CREATION_DATE
@@ -796,7 +817,7 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
         if mc is not None and mc >= 0:
             mask_clearance = mc
 
-    g = _harvest(board_dict, mask_clearance)
+    g = _harvest(board_dict, mask_clearance, placed=placed)
 
     files: dict[str, str] = {}
     for suffix, text in _build_gerber_layers(board_dict, g, date).items():
