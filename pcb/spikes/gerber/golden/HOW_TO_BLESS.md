@@ -48,14 +48,19 @@ Overlay all layers and visually confirm, per the spike REPORT.md HITL checklist:
    components.
 3. **Pad / drill alignment**: both PTH holes (U1 test point Ø0.8, via Ø0.4)
    land inside their copper annuli on F.Cu/B.Cu with no annular-ring
-   violation; the NPTH Ø3.2 mounting hole appears ONLY in the drill layer with
-   no copper/mask ring.
+   violation; the NPTH Ø3.2 mounting hole has **NO copper ring** but DOES get a
+   **drill-size (Ø3.2) solder-mask opening on BOTH F.Mask and B.Mask** —
+   ratified E3 (docket 019f901a9966): every through-hole entity is masked,
+   uniform with kicad's np_thru_hole (verified vs pcbnew 9.0.9 that an
+   np_thru_hole pad IS on *.Mask with a size==drill opening). The via at
+   (20,10) is TENTED — it must have NO mask opening.
 4. **Board outline**: a clean, closed 40 mm x 30 mm rectangle, no gaps.
-5. **Pad geometry sanity**: the SMD pads are the intended size for R_0805 /
-   C_0805 (this golden uses 1.2 x 1.3 mm). Note that the current
-   `pcb_worker.gerber` emitter produces 1.0 x 0.6 mm placeholder pads instead —
-   decide which is correct and reconcile (`board.yaml` pad geometry vs emitter
-   defaults) as part of blessing.
+5. **Pad geometry sanity**: the four SMD pads are the REAL 0805 land
+   (1.0 x 1.45 mm copper, 1.2 x 1.65 mm mask) SOURCED by resolving the vendored
+   seed-lib footprints — NOT a placeholder. (This was reconciled at the
+   2026-07-19 bless: the golden and the `pcb_worker.gerber` emitter both now
+   carry the resolved 0805 land; the emitter's old 1.0 x 0.6 mm placeholder is
+   gone.)
 
 ## Option B — kicad-cli DRC on the round-tripped board (recommended in addition)
 
