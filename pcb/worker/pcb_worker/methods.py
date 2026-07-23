@@ -24,7 +24,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import board_model, compile_board, drc, footprints, gerber, kicad, libcheck, resolve
+from . import (board_model, compile_board, drc, footprints, gerber, ir_adapter,
+               kicad, libcheck, resolve)
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -135,25 +136,31 @@ def _generate(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
-    board = _maybe_resolve(board, params)
-    if _is_error_reply(board):
-        return board
+    # W8.2 CUTOVER: same shape as _gerbers — COMPILE (strict) → ResolvedBoard IR →
+    # kicad.generate, replacing the legacy best-effort _maybe_resolve. Fail-closed:
+    # an uncompilable board returns a structured {kind:"compile"} error, NO
+    # fallback. Same seed library the legacy resolve used (library_root=lockfile=
+    # None). params["resolve_geometry"] is moot for fab (compile always resolves):
+    # accepted-and-ignored.
+    compiled = compile_board.compile_board(board)
+    if isinstance(compiled, compile_board.ResolutionFailure):
+        return _compile_failure_reply(compiled)
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
-        files = kicad.generate(board, base_name=base_name)
+        board_dict = ir_adapter.ir_to_kicad_board_dict(compiled.board)
+        files = kicad.generate(board_dict, base_name=base_name)
     except Exception as exc:  # geometry/library faults (incl. fail-closed) as data
         return {"ok": False, "error": {"kind": "generate", "message": str(exc)}}
 
-    # K3 gate (R5): surface the KiCad emitter's WARNING-channel diagnostics (a
-    # captured footprint graphic that was dropped/unsupported must never vanish
-    # silently). files is a KicadResult carrying .diagnostics; serialized with the
-    # SAME _diagnostic_to_payload shape the gerbers handler uses. Non-breaking:
-    # only ADDS a "warnings" key — the files/written contract is unchanged.
+    # Surface WARNING-channel diagnostics so nothing vanishes silently: the KiCad
+    # emitter's own (a captured footprint graphic dropped/unsupported) PLUS the
+    # compile diagnostics (INFO/WARNING). Both via the SAME _diagnostic_to_payload
+    # shape the gerbers handler uses. Non-breaking: only the "warnings" key changes.
     out_dir = params.get("out_dir")
-    result: dict = {"files": files, "written": [],
-                    "warnings": [_diagnostic_to_payload(d)
-                                 for d in getattr(files, "diagnostics", [])]}
+    warnings = [_diagnostic_to_payload(d) for d in getattr(files, "diagnostics", [])]
+    warnings += [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+    result: dict = {"files": files, "written": [], "warnings": warnings}
     if isinstance(out_dir, str) and out_dir.strip():
         # Optional: also write to disk and report paths + byte counts (mirrors
         # CAD's export, which returns {path, bytes_written}). Contents still
@@ -189,6 +196,19 @@ def _diagnostic_to_payload(d) -> dict:
     }
 
 
+def _compile_failure_reply(failure) -> dict:
+    """Map a compile_board.ResolutionFailure to the STRICT fail-closed fab reply
+    (W8.2). No fallback to the legacy best-effort emitter — an uncompilable board
+    never yields fabrication. `message` summarises the FIRST ERROR diagnostic;
+    every diagnostic is serialized (same _diagnostic_to_payload shape as warnings)
+    so the caller sees exactly what blocked the compile."""
+    payloads = [_diagnostic_to_payload(d) for d in failure.diagnostics]
+    first_error = next((p for p in payloads if p.get("severity") == "error"), None)
+    message = first_error["message"] if first_error else "board could not be compiled"
+    return {"ok": False, "error": {
+        "kind": "compile", "message": message, "diagnostics": payloads}}
+
+
 def _gerbers(params: dict) -> dict:
     """Generate Gerber (RS-274X/X2) + Excellon fabrication files from a board.
 
@@ -203,25 +223,34 @@ def _gerbers(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
-    board = _maybe_resolve(board, params)
-    if _is_error_reply(board):
-        return board
+    # W8.2 CUTOVER: the LIVE fab path now COMPILES (strict) → ResolvedBoard IR →
+    # emit, replacing the legacy best-effort _maybe_resolve. compile_board is
+    # fail-closed: an uncompilable board returns a structured {kind:"compile"}
+    # error with NO fallback to the legacy emitter (W9 deletes the dead best-effort
+    # fab path). It uses the SAME seed library the legacy resolve used — both pass
+    # library_root=lockfile=None, i.e. footprints.DEFAULT_LIBRARY_ROOT/LOCKFILE.
+    # params["resolve_geometry"] is moot on the fab path now (compile ALWAYS
+    # resolves): it is accepted-and-ignored here, not best-effort-consulted.
+    compiled = compile_board.compile_board(board)
+    if isinstance(compiled, compile_board.ResolutionFailure):
+        return _compile_failure_reply(compiled)
 
     base_name = params.get("name") if isinstance(params.get("name"), str) else None
     try:
-        files = gerber.build_gerbers(board, name=base_name)
+        board_dict = ir_adapter.ir_to_board_dict(compiled.board)
+        files = gerber.build_gerbers(board_dict, name=base_name, placed=True)
     except Exception as exc:  # geometry/library faults reported as data, not crash
         return {"ok": False, "error": {"kind": "gerber", "message": str(exc)}}
 
-    # K3 gate: surface the emitter's WARNING-channel diagnostics (a captured fab
-    # feature that was dropped/approximated must never vanish silently). files is a
-    # GerberResult (dict subclass) carrying .diagnostics; serialized with the same
-    # source_ref shape footprint_def._unsupported_to_payload uses. Non-breaking:
-    # only ADDS a "warnings" key — the files/written contract is unchanged.
+    # Surface WARNING-channel diagnostics so nothing vanishes silently: the
+    # emitter's own (a captured fab feature dropped/approximated) PLUS the compile
+    # diagnostics (INFO/WARNING — inline_pin_geometry_migrated,
+    # captured_geometry_not_emitted, ordinal_ids). Both via the same
+    # _diagnostic_to_payload shape. Non-breaking: only the "warnings" key changes.
     out_dir = params.get("out_dir")
-    result: dict = {"files": files, "written": [],
-                    "warnings": [_diagnostic_to_payload(d)
-                                 for d in getattr(files, "diagnostics", [])]}
+    warnings = [_diagnostic_to_payload(d) for d in getattr(files, "diagnostics", [])]
+    warnings += [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+    result: dict = {"files": files, "written": [], "warnings": warnings}
     if isinstance(out_dir, str) and out_dir.strip():
         try:
             os.makedirs(out_dir, exist_ok=True)

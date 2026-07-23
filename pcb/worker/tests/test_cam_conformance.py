@@ -589,7 +589,6 @@ def test_supported_graphic_primitives_are_not_flattened():
 # here are "warned, never fatal" — none of these paths may raise or fail-closed.
 # ===========================================================================
 
-from pcb_worker.methods import handle_request
 from pcb_worker.resolved_board import DiagnosticSeverity
 
 
@@ -718,32 +717,14 @@ def test_drill_degenerate_hole_warns_and_is_not_drilled():
     assert (2.0, 20.0) not in _drill_hits(result.get("drill-PTH.drl", ""))
 
 
-# --- methods.py forwards the diagnostics as a reply "warnings" key ----------
-
-def test_gerbers_method_forwards_warnings():
-    board = _drill_board(mounting_holes=[{"x_mm": 2, "y_mm": 20,
-                                          "diameter_mm": -1, "plated": False}])
-    resp = handle_request({"id": "w1", "method": "gerbers",
-                           "params": {"board": board, "name": "drill",
-                                      "resolve_geometry": False}})
-    assert resp["ok"] is True
-    warnings = resp["result"]["warnings"]
-    codes = [w["code"] for w in warnings]
-    assert "drill_feature_unemitted" in codes
-    w = next(x for x in warnings if x["code"] == "drill_feature_unemitted")
-    assert w["severity"] == "warning"
-    assert w["source_ref"]["entity_kind"] == "hole"
-    assert "mounting_holes[0]" in w["source_ref"]["entity_id"]
-
-
-def test_gerbers_method_clean_board_forwards_empty_warnings():
-    # The forward is additive AND present-but-empty on a clean board (no key drift
-    # for consumers): a board with no captured-but-unemitted feature yields [].
-    resp = handle_request({"id": "w0", "method": "gerbers",
-                           "params": {"board": _valid_pad_board("rect"),
-                                      "name": "conf", "resolve_geometry": False}})
-    assert resp["ok"] is True
-    assert resp["result"]["warnings"] == []
+# NOTE (W8.2 cutover): the two methods-level "gerbers forwards warnings" tests
+# that lived here used a placeholder footprint ("F") + injected comp["pads"] +
+# resolve_geometry:False to reach the emitter warning channel through the OLD
+# best-effort fab path. Post-cutover the methods COMPILE first, so "F" fail-closes
+# and that construction no longer reaches the emitter. The methods-forwarding
+# capability (both the compile AND emitter warning channels, and the empty-warnings
+# clean case) is now covered on the real IR path in tests/test_methods_ir_fab.py.
+# The R1-R5 build_gerbers-direct conformance tests below are unaffected.
 
 
 def test_refless_component_degenerate_silk_warns_with_sentinel_not_raises():
@@ -949,30 +930,11 @@ def test_kicad_refless_component_degenerate_silk_warns_with_sentinel():
     assert warns and warns[0].source_ref.entity_id  # non-empty sentinel
 
 
-# --- methods `generate` (the "kicad" handler) forwards the warnings ----------
-
-def test_kicad_method_forwards_warnings():
-    board = _silk_board([{"layer": "F.SilkS", "kind": "circle",
-                          "center": [0, 0], "radius": 0, "width": 0.15}])
-    resp = handle_request({"id": "k1", "method": "generate",
-                           "params": {"board": board, "name": "conf",
-                                      "resolve_geometry": False}})
-    assert resp["ok"] is True
-    warnings = resp["result"]["warnings"]
-    codes = [w["code"] for w in warnings]
-    assert "silk_primitive_unemitted" in codes
-    w = next(x for x in warnings if x["code"] == "silk_primitive_unemitted")
-    assert w["severity"] == "warning"
-    assert w["source_ref"]["entity_kind"] == "graphic"
-    assert w["source_ref"]["entity_id"] == "P1"
-
-
-def test_kicad_method_clean_board_forwards_empty_warnings():
-    resp = handle_request({"id": "k0", "method": "generate",
-                           "params": {"board": _valid_pad_board("rect"),
-                                      "name": "conf", "resolve_geometry": False}})
-    assert resp["ok"] is True
-    assert resp["result"]["warnings"] == []
+# NOTE (W8.2 cutover): the two methods-level "generate/kicad forwards warnings"
+# tests here (placeholder "F" footprint + resolve_geometry:False) are superseded
+# for the same reason as the gerbers pair above — see that note. The kicad
+# methods-forwarding + clean-empty-warnings coverage now lives on the real IR path
+# in tests/test_methods_ir_fab.py.
 
 
 # ===========================================================================

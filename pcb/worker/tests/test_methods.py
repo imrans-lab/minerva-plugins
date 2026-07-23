@@ -161,7 +161,16 @@ def test_validate_out_of_bounds_trace_is_warning():
 
 
 def test_generate_produces_kicad_pcb(board_yaml):
-    resp = _call("generate", {"yaml": board_yaml})
+    # W8.2 cutover: generate now COMPILES → IR → kicad.generate. The spike board's
+    # Extra `mounting_holes` are board-level NON-plated holes the KiCad emitter
+    # cannot drill (generate_kicad_pcb emits no standalone holes), so the IR adapter
+    # fail-closes on them — the strict, no-silent-drop contract. Drop them here so
+    # this happy-path fixture stays KiCad-emittable while still exercising
+    # footprints/segments/vias/edge-cuts (holes are covered by the gerbers path).
+    import yaml
+    board = yaml.safe_load(board_yaml)
+    board.pop("mounting_holes", None)
+    resp = _call("generate", {"board": board})
     assert resp["ok"] is True
     files = resp["result"]["files"]
     assert any(k.endswith(".kicad_pcb") for k in files)
@@ -176,7 +185,12 @@ def test_generate_produces_kicad_pcb(board_yaml):
 
 
 def test_generate_writes_out_dir(board_yaml, tmp_path):
-    resp = _call("generate", {"yaml": board_yaml, "out_dir": str(tmp_path)})
+    # See test_generate_produces_kicad_pcb: strip the board-level mounting_holes the
+    # KiCad IR path fail-closes on so this write-path fixture stays emittable.
+    import yaml
+    board = yaml.safe_load(board_yaml)
+    board.pop("mounting_holes", None)
+    resp = _call("generate", {"board": board, "out_dir": str(tmp_path)})
     written = resp["result"]["written"]
     assert len(written) == 3
     for w in written:

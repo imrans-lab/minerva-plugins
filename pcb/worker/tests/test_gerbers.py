@@ -267,7 +267,14 @@ def test_gerbers_method_returns_files():
 
 
 def test_gerbers_method_accepts_board_dict_and_name():
-    resp = _call("gerbers", {"board": _load(DRILL_BOARD), "name": "myboard"})
+    # W8.2 cutover: the gerbers method now COMPILES (strict) → IR → emit, so the
+    # board must fully resolve. DRILL_BOARD is authored with non-library footprint
+    # refs (Conn_02x01, MountPad_M2) that only worked under the removed best-effort
+    # inline-pin path — it no longer compiles. The spike board resolves and carries
+    # both a plated TH pad (PTH.drl) and a non-plated mounting hole (NPTH.drl), so
+    # it exercises the same {board dict + name} envelope this test asserts.
+    # (DRILL_BOARD keeps its direct-emitter golden coverage via test_matches_goldens.)
+    resp = _call("gerbers", {"board": _load(SPIKE_BOARD), "name": "myboard"})
     files = resp["result"]["files"]
     assert "myboard-F_Cu.gbr" in files
     assert "myboard-PTH.drl" in files and "myboard-NPTH.drl" in files

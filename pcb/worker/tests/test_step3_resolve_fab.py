@@ -11,10 +11,13 @@ is inverted — these tests now pin the NEW contract:
   (b) GATE DEFAULT-ON — methods._gerbers/_generate resolve by DEFAULT (no
       resolve_geometry param) and carry real geometry; with the gate explicitly
       OFF the fab methods FAIL CLOSED (structured error, not a placeholder).
-  (c) BEST-EFFORT vs STRICT — the fab path TOLERATES an unresolvable footprint
-      (falls back to inline pins), and fails closed only if inline geometry is
-      also missing; the standalone `resolve` action stays STRICT (unresolvable
-      footprint IS an error). A coincidence mismatch is fatal on BOTH paths.
+  (c) STRICT FAB (W8.2 cutover) — the fab methods now COMPILE (strict): an
+      unresolvable footprint fails closed as a kind:"compile" error EVEN with
+      inline pin geometry (the old best-effort tolerance is GONE), and a
+      coincidence mismatch surfaces as a compile pin_pad_desync. The standalone
+      `resolve` action stays STRICT too. The _drc path still uses the tolerant
+      best-effort _maybe_resolve (a coincidence mismatch there is still fatal, as
+      kind:"coincidence").
   (d) FUNCTIONAL FLOOR (non-mocked) — real dispatch, real resolve, real gerber
       carrying real (non-placeholder) pad geometry.
 """
@@ -155,13 +158,17 @@ def test_gerbers_default_gate_resolves_real_geometry():
     assert PLACEHOLDER_WH not in rects
 
 
-def test_gerbers_gate_off_fails_closed():
-    # Gate explicitly OFF on a sizeless-SMD board -> fail closed, structured error
-    # (NOT a silent placeholder).
+def test_gerbers_resolve_geometry_off_is_ignored_still_compiles():
+    # W8.2 cutover: the resolve_geometry gate NO LONGER governs the fab path — it
+    # always COMPILES (strict) -> IR -> emit. resolve_geometry:False is now
+    # accepted-and-ignored, so the same resolvable board still compiles and carries
+    # its REAL resolved lands (NOT a fail-closed, NOT the removed placeholder).
     resp = _gerbers({"board": _board_no_smd_geometry(), "name": "board",
                      "resolve_geometry": False})
-    assert resp["ok"] is False
-    assert resp["error"]["kind"] == "gerber"
+    assert resp["ok"] is True, resp
+    rects = _copper_rect_apertures(resp["result"]["files"])
+    assert REAL_SW_WH in rects, f"gate-off did not resolve real geometry: {rects}"
+    assert PLACEHOLDER_WH not in rects
 
 
 def test_generate_gate_off_fails_closed():
@@ -193,24 +200,30 @@ def _coincidence_board() -> dict:
     return board
 
 
-def test_fab_path_tolerates_unresolvable_footprint_via_inline():
-    # Best-effort: an unresolvable footprint is NOT an error on the fab path —
-    # the component falls back to its inline pin geometry.
+def test_fab_path_unresolvable_footprint_fails_closed_even_with_inline_geom():
+    # W8.2 cutover INVERTS the old best-effort tolerance: the fab path COMPILES
+    # (strict), so an unresolvable footprint fails closed EVEN when the pins carry
+    # inline pad geometry. The removed best-effort path used to fall back to that
+    # inline geometry; the strict compile now rejects the footprint outright.
     resp = _gerbers({"board": _unresolvable_smd_board(inline_geom=True),
                      "name": "unres"})
-    assert resp["ok"] is True, resp
-    rects = _copper_rect_apertures(resp["result"]["files"])
-    assert (0.6, 0.5) in rects, f"fab path did not use the inline SMD geometry: {rects}"
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "compile"
+    assert any(d["code"] == "footprint_unresolved"
+               for d in resp["error"]["diagnostics"])
 
 
 def test_fab_path_fails_closed_when_unresolvable_and_no_inline_geom():
-    # The two controls compose: best-effort resolve leaves the unresolvable
-    # component inline, and with no inline geometry either the emitter fails
-    # closed rather than fabricating a placeholder.
+    # Composes with the inline-present case above: with NO inline geometry either,
+    # the strict compile still fail-closes on the unresolvable footprint (it rejects
+    # the ref BEFORE geometry matters) — proving inline geometry is no longer a
+    # fallback in EITHER direction. Error is the compile shape, not kind:"gerber".
     resp = _gerbers({"board": _unresolvable_smd_board(inline_geom=False),
                      "name": "unres"})
     assert resp["ok"] is False
-    assert resp["error"]["kind"] == "gerber"
+    assert resp["error"]["kind"] == "compile"
+    assert any(d["code"] == "footprint_unresolved"
+               for d in resp["error"]["diagnostics"])
 
 
 def test_resolve_action_is_strict_on_unresolvable_footprint():
@@ -221,13 +234,17 @@ def test_resolve_action_is_strict_on_unresolvable_footprint():
     assert resp["error"]["kind"] == "resolve"
 
 
-def test_gerbers_gate_on_coincidence_returns_structured_error():
-    # A coincidence mismatch is fatal even on the tolerant fab path (integrity
-    # fault — footprint pads disagree with routed pins).
+def test_gerbers_coincidence_returns_structured_compile_error():
+    # A footprint that RESOLVES but whose pads disagree with the declared pins is
+    # still fatal (integrity fault). W8.2 cutover: it now surfaces as a COMPILE
+    # failure (pin_pad_desync on the offending pin) rather than the old
+    # kind:"coincidence" the best-effort resolve path returned.
     resp = _gerbers({"board": _coincidence_board()})
     assert resp["ok"] is False
-    assert resp["error"]["kind"] == "coincidence"
-    assert resp["error"]["ref"] == "U1"
+    assert resp["error"]["kind"] == "compile"
+    assert any(d["code"] == "pin_pad_desync"
+               and d["source_ref"]["entity_id"] == "U1.1"
+               for d in resp["error"]["diagnostics"])
 
 
 def test_drc_gate_on_coincidence_returns_structured_error():
