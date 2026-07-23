@@ -656,7 +656,11 @@ def test_non_list_traces_fails_closed():
     board["traces"] = {"net": "N1"}
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
-    assert "invalid_trace" in _errors(result)
+    # A present non-list collection is a shared-boundary violation the compiler now
+    # rejects up front via validate_board_v2 (findings 019f88bac172 / 019f8b7fb07e)
+    # with the SAME code the Go codec + vectors use, instead of the compiler-local
+    # invalid_trace it emitted after reaching its own trace parser.
+    assert "invalid_board_structure" in _errors(result)
 
 
 def test_invalid_rotation_fails_closed():
@@ -826,6 +830,31 @@ def test_v2_board_missing_board_id_fails_closed():
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
     assert "unminted_persistent_id" in _errors(result)
+
+
+def test_duplicate_trace_id_fails_closed_with_explicit_code():
+    # Finding 019f88bac172: a duplicate persistent id must fail closed with the
+    # EXPLICIT shared-boundary code the Go codec + vectors use, up front — NOT via
+    # the late generic board_invariant ResolvedBoard construction used to raise.
+    board = _v2_full_board()
+    board["traces"] = board["traces"] + [
+        {"id": _mid("trace", 1), "net": "N1", "layer": "top", "width_mm": 0.3,
+         "points": [{"x_mm": 4, "y_mm": 4}, {"x_mm": 6, "y_mm": 6}]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    errs = _errors(result)
+    assert "duplicate_persistent_id" in errs
+    assert "board_invariant" not in errs  # caught early, not by the late invariant
+
+
+def test_null_component_fails_closed():
+    # Finding 019f8b7fb07e: a null / identity-less component is a structural
+    # violation the production compiler now rejects via the shared validator.
+    board = _one_component_board("R_0805")
+    board["components"] = [None]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_board_structure" in _errors(result)
 
 
 @pytest.mark.parametrize("bad_id", [None, "", "trace_1", "trace:XYZ", "TRACE:" + "0" * 32,

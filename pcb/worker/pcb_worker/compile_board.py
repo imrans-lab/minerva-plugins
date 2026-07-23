@@ -1311,6 +1311,18 @@ def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_part
 # ---------------------------------------------------------------------------
 
 
+# Human messages for the shared-boundary codes validate_board_v2 returns as bare
+# strings; the CODE is the contract (matched by vectors + Go), the message is
+# operator context. Kept beside compile_board's early gate that emits them.
+_BOUNDARY_MESSAGES = {
+    "unsupported_schema_version": "canonical board schema requires an integer version 1 or 2 (present)",
+    "unminted_persistent_id": "a v2 board and every trace/via/hole require a minted \"<kind>:<32hex>\" id",
+    "duplicate_persistent_id": "a persistent id is duplicated within its entity domain",
+    "invalid_board_structure": "a top-level entity collection is malformed or carries a null item",
+    "invalid_pin_override": "a pin override field has the wrong type",
+}
+
+
 def compile_board(
     board: dict,
     *,
@@ -1330,6 +1342,23 @@ def compile_board(
 
     if not isinstance(board, dict):
         diags.error("invalid_board", "board must be a mapping", _board_ref())
+        return ResolutionFailure(diagnostics=diags.tuple())
+
+    # Shared-boundary gate FIRST (findings 019f88bac172 / 019f8b7fb07e): the
+    # production compiler must run the SAME structural + persistent-id validator
+    # the Go codec and the committed vectors use, so a duplicate persistent id or a
+    # null / identity-less list item fails CLOSED here with its EXPLICIT shared code
+    # — not later as a generic ``board_invariant`` raised by ResolvedBoard
+    # construction (previously the only thing that caught duplicate ids). Imported
+    # lazily because board_validate imports predicates FROM this module (cycle).
+    from .board_validate import validate_board_v2
+    seen_codes: set[str] = set()
+    for code in validate_board_v2(board):
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        diags.error(code, _BOUNDARY_MESSAGES.get(code, code), _board_ref())
+    if seen_codes:
         return ResolutionFailure(diagnostics=diags.tuple())
 
     # Dispatch on the schema version FIRST: the canonical contract types version

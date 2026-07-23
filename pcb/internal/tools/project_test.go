@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,45 @@ func TestSerializeBoardToYAML(t *testing.T) {
 	}
 	if !strings.Contains(r.YAML, "name: T") || !strings.Contains(r.YAML, "ref: U1") {
 		t.Fatalf("yaml missing expected content:\n%s", r.YAML)
+	}
+}
+
+// pcb.serialize must fail closed on a null element in ANY of the five entity
+// collections. JSON decodes a null into a ZERO-VALUED struct (a phantom entity),
+// so the raw-JSON probe rejects it with invalid_board_structure rather than
+// emitting it into canonical source (finding 019f8b7fb07e).
+func TestSerializeRejectsNullEntity(t *testing.T) {
+	const tmpl = `{"board":{"version":1,"name":"T","width_mm":40,"height_mm":30,` +
+		`"components":%s,"nets":%s,"traces":%s,"vias":%s,"mounting_holes":%s}}`
+	empty := "[]"
+	null := "[null]"
+	for _, tc := range []struct{ name, comps, nets, traces, vias, holes string }{
+		{"component", null, empty, empty, empty, empty},
+		{"net", empty, null, empty, empty, empty},
+		{"trace", empty, empty, null, empty, empty},
+		{"via", empty, empty, empty, null, empty},
+		{"mounting_hole", empty, empty, empty, empty, null},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := json.RawMessage(fmt.Sprintf(tmpl, tc.comps, tc.nets, tc.traces, tc.vias, tc.holes))
+			_, err := HandleSerialize(context.Background(), args)
+			if err == nil {
+				t.Fatalf("serialize accepted a null %s; want a fail-closed error", tc.name)
+			}
+			if !strings.Contains(err.Error(), "invalid_board_structure") {
+				t.Fatalf("want invalid_board_structure, got: %v", err)
+			}
+		})
+	}
+}
+
+// A present non-list entity collection is also invalid_board_structure (the probe
+// mirrors the YAML path: a mapping/scalar where a sequence is required).
+func TestSerializeRejectsNonListCollection(t *testing.T) {
+	args := json.RawMessage(`{"board":{"version":1,"name":"T","width_mm":40,"height_mm":30,"components":[],"nets":[],"traces":{"net":"N1"}}}`)
+	_, err := HandleSerialize(context.Background(), args)
+	if err == nil || !strings.Contains(err.Error(), "invalid_board_structure") {
+		t.Fatalf("want invalid_board_structure for non-list traces, got: %v", err)
 	}
 }
 

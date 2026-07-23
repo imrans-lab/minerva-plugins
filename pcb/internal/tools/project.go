@@ -101,6 +101,17 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 		return echoState(ctx, params)
 	}
 
+	// Raw-JSON structural probe BEFORE the typed decode (mirrors the YAML path's
+	// probeNodeTree): a typed json.Unmarshal either collapses `components:[null]`
+	// (or a null in any of the five entity collections) into a phantom zero-valued
+	// struct Validate cannot distinguish from a minimal one, or rejects a non-list
+	// collection with a native, code-less error. Probe the raw board across all
+	// five collections first so both fail closed with the shared
+	// invalid_board_structure code instead of leaking / surfacing an opaque parse
+	// error (finding 019f8b7fb07e).
+	if err := board.ProbeJSONBoard(a.Board); err != nil {
+		return nil, fmt.Errorf("pcb.serialize: %w", err)
+	}
 	var b board.Board
 	if err := json.Unmarshal(a.Board, &b); err != nil {
 		return nil, fmt.Errorf("pcb.serialize: parse board: %w", err)
