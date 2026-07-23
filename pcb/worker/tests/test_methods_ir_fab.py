@@ -129,15 +129,17 @@ def test_generate_method_happy_path_emits_kicad_triplet():
 def test_generate_method_emits_mounting_holes_no_longer_fail_closed():
     # W8.2b: a board with a mounting hole used to fail-close (kind:"generate") on
     # the kicad-bridge board.holes RAISE. It now SUCCEEDS and drills the hole as an
-    # np_thru_hole MountingHole footprint at its absolute position (5,5), diameter
-    # 3.2 — the LIVE reply the Go bridge returns.
+    # np_thru_hole MountingHole footprint. Under real placement (C3) the footprint
+    # sits at the hole (5,5) and the pad is at footprint-local origin, diameter 3.2 —
+    # the LIVE reply the Go bridge returns.
     board = _board("R_0805")
     board["mounting_holes"] = [{"x_mm": 5.0, "y_mm": 5.0, "diameter_mm": 3.2}]
     resp = _call("generate", {"board": board})
     assert resp["ok"] is True, resp
     pcb = next(v for k, v in resp["result"]["files"].items()
                if k.endswith(".kicad_pcb"))
-    assert ('(pad "" np_thru_hole circle (at 5.0 5.0) (size 3.2 3.2) '
+    assert '(footprint "MountingHole" (layer "F.Cu") (at 5.0 5.0 0.0)' in pcb
+    assert ('(pad "" np_thru_hole circle (at 0.0 0.0) (size 3.2 3.2) '
             '(drill 3.2) (layers "*.Cu" "*.Mask"))') in pcb
 
 

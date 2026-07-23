@@ -27,6 +27,7 @@ import pytest
 from agent_router.kicad_io import read_kicad_pcb
 from pcb_worker import gerber, kicad
 from pcb_worker.compile_board import compile_board
+from pcb_worker.geometry import place_point
 from pcb_worker.ir_adapter import (
     _kicad_mounting_hole_component,
     ir_to_board_dict,
@@ -342,27 +343,49 @@ def _roundtrip_pads(pcb_text: str, tmp_path) -> dict:
 
 
 def _assert_pads_roundtrip(board: dict, tmp_path, *, name: str = "brd") -> None:
-    """The core oracle: EVERY pad's parsed absolute position + absolute angle +
-    copper layer matches the IR truth. A through-hole pad is on ``*.Cu`` (all
-    copper); an SMD pad is on its side's copper (F.Cu / B.Cu). Catches the mirror
-    bug (wrong position) AND the fp-relative-rotation bug (wrong angle)."""
+    """The core oracle: under the REAL-placement encoding, every pad's reconstructed
+    absolute POSITION + copper LAYER matches the IR truth, and the emitted pad
+    ``(at)`` ANGLE is the IR's absolute angle. Catches the mirror bug (wrong
+    position / wrong side) AND a dropped/mangled pad angle.
+
+    POSITION + LAYER come from ``read_kicad_pcb`` applying KiCad's real translate +
+    rotate (verified vs the pcbnew k1_bottom oracle). The ANGLE is asserted on the
+    emitted ``(at)`` value: KiCad reads a placed pad's ``(at)`` third value as the
+    ABSOLUTE board angle (pinned by the k1_bottom oracle), so the emitted absolute
+    angle is the faithful check. (read_kicad_pcb DOUBLES it — adds the footprint
+    rotation to the already-absolute stored angle; agent_router bug, filed — so its
+    ``.rotation`` is not used here. End-to-end angle correctness is covered by the
+    kicad-cli DRC oracle in tests/oracle.)"""
     resolved = _resolve(board)
-    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name=name)[
-        f"{name}.kicad_pcb"]
+    d = ir_to_kicad_board_dict(resolved)
+    pcb = kicad.generate(d, base_name=name)[f"{name}.kicad_pcb"]
     parsed = _roundtrip_pads(pcb, tmp_path)
     truth = _ir_pad_truth(resolved)
+    emitted_angle = {f"{c['ref']}.{p['number']}": p.get("rotation", 0.0)
+                     for c in d["components"] for p in c["pads"]}
     assert set(parsed) == set(truth), (set(truth) - set(parsed), set(parsed) - set(truth))
     for key, (pos, rot, side) in truth.items():
         p = parsed[key]
         assert abs(p.position[0] - pos[0]) < 1e-3 and abs(p.position[1] - pos[1]) < 1e-3, (
             f"{key}: parsed pos {p.position} != IR {pos}")
-        assert abs(((p.rotation - rot + 180) % 360) - 180) < 1e-3, (
-            f"{key}: parsed angle {p.rotation} != IR {rot}")
+        assert abs(((emitted_angle[key] - rot + 180) % 360) - 180) < 1e-3, (
+            f"{key}: emitted pad (at) angle {emitted_angle[key]} != IR absolute {rot}")
         if p.pad_type == "smd":
             want = "B.Cu" if side.value == "bottom" else "F.Cu"
             assert p.layer == want, f"{key}: parsed layer {p.layer} != {want} (side {side.value})"
         else:
             assert p.layer == "*.Cu", f"{key}: TH pad layer {p.layer} != *.Cu"
+    # And the pad angles must reach the emitted .kicad_pcb BYTES as the IR absolute
+    # angle (KiCad reads the pad (at) third value as absolute; _pad_at omits it when
+    # 0). Multiset over the text so an emitter drop/mangle is caught, not just the
+    # adapter dict (these boards carry no mounting holes, so every pad is a component
+    # pad in `truth`).
+    text_angles = sorted(
+        round(float(m.group(1)) if m.group(1) else 0.0, 3) % 360
+        for m in re.finditer(
+            r'\(pad "[^"]*"[^(]*\(at [-\d.eE]+ [-\d.eE]+(?: ([-\d.eE]+))?\)', pcb))
+    truth_angles = sorted(round(rot, 3) % 360 for (_, rot, _) in truth.values())
+    assert text_angles == truth_angles, (text_angles, truth_angles)
 
 
 # ---------------------------------------------------------------------------
@@ -408,21 +431,27 @@ def test_kicad_bottom_asymmetric_component_roundtrips_mirrored(tmp_path):
         tmp_path)
 
 
-def test_kicad_bottom_placement_is_pre_mirrored_not_local(tmp_path):
-    """Directly: a BOTTOM DIP-6's emitted pad coordinates are the IR's absolute
-    MIRRORED positions (identity footprint), NOT the footprint-local (0,0)/(7.62,*)
-    coords that the broken component-relative encoding produced."""
+def test_kicad_bottom_placement_is_real_with_local_pads(tmp_path):
+    """A BOTTOM DIP-6 is emitted at its REAL placement (40, 40, 0 / bottom) with
+    footprint-LOCAL pad coords, and reconstructing each local pad through the
+    placement transform recovers the IR's absolute mirror-folded truth. Kills two
+    bugs at once: the identity encoding that put every footprint at 0,0,0 and lost
+    component placement / CPL (finding 019f8dbb6593), and the earlier
+    component-relative encoding whose un-mirrored pads landed on the wrong nets."""
     resolved = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom",
                                x=40.0, y=40.0))
     d = ir_to_kicad_board_dict(resolved)
     comp = d["components"][0]
-    assert comp["x_mm"] == 0.0 and comp["y_mm"] == 0.0 and comp["rotation_deg"] == 0.0
+    assert (comp["x_mm"], comp["y_mm"], comp["rotation_deg"]) == (40.0, 40.0, 0.0)
     assert comp["layer"] == "bottom"
-    truth = {(round(p.position[0], 3), round(p.position[1], 3)) for p in resolved.components[0].placed_pads}
-    emitted = {(round(p["position"]["x"], 3), round(p["position"]["y"], 3)) for p in comp["pads"]}
-    assert emitted == truth, (emitted, truth)
-    # A local (un-mirrored) origin pad at (0,0) would appear if the bug were back.
-    assert (0.0, 0.0) not in emitted
+    truth = {(round(p.position[0], 3), round(p.position[1], 3))
+             for p in resolved.components[0].placed_pads}
+    recon = {
+        tuple(round(v, 3) for v in place_point(40.0, 40.0, 0.0,
+                                               p["position"]["x"], p["position"]["y"]))
+        for p in comp["pads"]
+    }
+    assert recon == truth, (recon, truth)
 
 
 def test_kicad_bottom_smd_pad_is_layer_consistent(tmp_path):
@@ -547,8 +576,9 @@ def test_kicad_smd_tech_layers_follow_copper_side():
 
 def test_kicad_adapter_emits_mounting_hole_component():
     """A board-level (NPTH) mounting hole projects to a synthetic MountingHole
-    component carrying ONE np_thru_hole pad at the hole's ABSOLUTE position —
-    empty pad number, size == drill (no copper), *.Cu/*.Mask, no net."""
+    component at the hole's REAL position carrying ONE np_thru_hole pad at
+    footprint-LOCAL origin — empty pad number, size == drill (no copper),
+    *.Cu/*.Mask, no net."""
     board = _board("R_0805")
     board["mounting_holes"] = [{"x_mm": 2.0, "y_mm": 7.0, "diameter_mm": 3.2}]
     resolved = _resolve(board)
@@ -560,18 +590,18 @@ def test_kicad_adapter_emits_mounting_hole_component():
     assert pad["number"] == ""
     assert pad["type"] == "np_thru_hole"
     assert pad["shape"] == "circle"
-    assert pad["position"] == {"x": 2.0, "y": 7.0}     # ABSOLUTE
+    assert pad["position"] == {"x": 0.0, "y": 0.0}     # footprint-LOCAL origin
     assert pad["drill"] == {"x": 3.2, "y": 3.2}
     assert pad["size"] == {"width": 3.2, "height": 3.2}  # size == drill (no copper)
     assert pad["layers"] == ["*.Cu", "*.Mask"]
-    # Identity footprint (absolute-under-identity like the rest of the bridge).
-    assert (mh[0]["x_mm"], mh[0]["y_mm"], mh[0]["rotation_deg"]) == (0.0, 0.0, 0.0)
+    # Real placement: the footprint sits on the drill (finding 019f8dbb6593).
+    assert (mh[0]["x_mm"], mh[0]["y_mm"], mh[0]["rotation_deg"]) == (2.0, 7.0, 0.0)
 
 
 def test_kicad_adapter_plated_mounting_hole_is_thru_hole():
     """A PLATED (PTH) board hole projects to a thru_hole pad (copper annulus) — the
     emitter supplies its 2x-drill nominal annulus since a RoundHole carries only its
-    drill diameter, and the drill lands at the hole's absolute position."""
+    drill diameter, and the footprint sits at the hole's real position."""
     board = _board("R_0805")
     board["pth_holes"] = [{"x_mm": 3.0, "y_mm": 4.0, "diameter_mm": 2.0}]
     resolved = _resolve(board)
@@ -579,7 +609,8 @@ def test_kicad_adapter_plated_mounting_hole_is_thru_hole():
     (mh,) = [c for c in d["components"] if c["footprint"] == "MountingHole"]
     (pad,) = mh["pads"]
     assert pad["type"] == "thru_hole"
-    assert pad["position"] == {"x": 3.0, "y": 4.0}
+    assert pad["position"] == {"x": 0.0, "y": 0.0}          # footprint-LOCAL origin
+    assert (mh["x_mm"], mh["y_mm"]) == (3.0, 4.0)           # footprint at the hole
     assert pad["drill"] == {"x": 2.0, "y": 2.0}
     assert "size" not in pad  # omitted -> emitter's 2x-drill nominal annulus
 
@@ -595,8 +626,9 @@ def test_kicad_adapter_mounting_holes_are_ordered_and_multiple():
     d = ir_to_kicad_board_dict(_resolve(board))
     mh = [c for c in d["components"] if c["footprint"] == "MountingHole"]
     assert [c["ref"] for c in mh] == ["H1", "H2"]
-    assert [c["pads"][0]["position"] for c in mh] == [
-        {"x": 2.0, "y": 2.0}, {"x": 8.0, "y": 8.0}]
+    # Each MountingHole footprint sits at its hole; the pad is at local origin.
+    assert [(c["x_mm"], c["y_mm"]) for c in mh] == [(2.0, 2.0), (8.0, 8.0)]
+    assert all(c["pads"][0]["position"] == {"x": 0.0, "y": 0.0} for c in mh)
 
 
 def _th_comp(pad: dict) -> dict:
@@ -683,15 +715,20 @@ def test_kicad_adapter_is_deterministic():
 
 
 def test_kicad_and_gerber_bridges_agree_on_absolute_pad_position():
-    """kicad and gerber now share ONE absolute projection: a pad's absolute
-    position is identical whether taken from the gerber bridge or the kicad
-    bridge (both reuse _pad_to_dict under identity placement)."""
+    """The kicad REAL-placement encoding and the gerber ABSOLUTE encoding describe
+    the SAME absolute copper: reconstructing each kicad footprint-LOCAL pad through
+    its component placement recovers the gerber bridge's board-absolute position.
+    The geometric-equivalence guard for the real-placement cutover — fabrication is
+    unchanged; only the kicad footprint origin moved (finding 019f8dbb6593)."""
     resolved = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom"))
     gerb = ir_to_board_dict(resolved)["components"][0]["pads"]
-    kic = ir_to_kicad_board_dict(resolved)["components"][0]["pads"]
-    gpos = sorted((p["position"]["x"], p["position"]["y"]) for p in gerb)
-    kpos = sorted((p["position"]["x"], p["position"]["y"]) for p in kic)
-    assert gpos == kpos
+    kcomp = ir_to_kicad_board_dict(resolved)["components"][0]
+    px, py, rot = kcomp["x_mm"], kcomp["y_mm"], kcomp["rotation_deg"]
+    gpos = sorted((round(p["position"]["x"], 6), round(p["position"]["y"], 6)) for p in gerb)
+    kpos = sorted(
+        tuple(round(v, 6) for v in place_point(px, py, rot, p["position"]["x"], p["position"]["y"]))
+        for p in kcomp["pads"])
+    assert kpos == gpos, (kpos, gpos)
 
 
 def test_mounting_hole_refs_skip_existing_component_refs():

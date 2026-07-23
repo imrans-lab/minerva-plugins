@@ -8,6 +8,7 @@ kicad-cli is not installed.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -95,4 +96,47 @@ def test_oblong_th_pad_round_trips_through_real_pcbnew():
     result = run_drc_on_board(board, name="oblong_th")
     assert result.clean, (
         f"a faithful oblong-TH board must pass real-pcbnew DRC, got "
+        f"{result.violations or result.unconnected_items}")
+
+
+def test_real_placement_footprints_round_trip_through_real_pcbnew():
+    """C3 (finding 019f8dbb6593): the REAL-placement kicad encoding — footprints at
+    ``(at px py rot)`` with footprint-local pads (was every footprint at 0,0,0 with
+    board-absolute pads) — round-trips through the real pcbnew parser DRC-CLEAN, for
+    ROTATED top, ROTATED bottom, and a mounting-hole footprint. This validates the
+    inverse-transform math against the real parser (the banked lesson), and asserts
+    the footprints now sit at their real placements (CPL / editability restored),
+    not stacked at the origin. Routed through the PRODUCTION methods path
+    (compile -> ir_to_kicad_board_dict -> kicad.generate)."""
+    from pcb_worker.methods import handle_request
+    board = {
+        "version": 1, "name": "rp", "width_mm": 60, "height_mm": 60,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "R1", "footprint": "R_0805", "x_mm": 15, "y_mm": 20,
+             "rotation_deg": 90, "layer": "top"},
+            {"ref": "R2", "footprint": "R_0805", "x_mm": 30, "y_mm": 35,
+             "rotation_deg": 45, "layer": "bottom"},
+            {"ref": "J1",
+             "footprint": "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal",
+             "x_mm": 40, "y_mm": 15, "rotation_deg": 180, "layer": "top"},
+        ],
+        "mounting_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2, "plated": False}],
+    }
+    resp = handle_request({"id": "r", "method": "generate", "params": {"board": board}})
+    assert resp["ok"] is True, resp
+    pcb = next(v for k, v in resp["result"]["files"].items()
+               if k.endswith(".kicad_pcb"))
+    # CPL fix: every footprint at its real placement + side, none stacked at 0,0,0.
+    placements = re.findall(
+        r'\(footprint "[^"]+" \(layer "([^"]+)"\) \(at ([^)]+)\)', pcb)
+    assert len(placements) == 4                            # all 4 footprints matched
+    sides = {layer for layer, _ in placements}
+    assert sides == {"F.Cu", "B.Cu"}                      # both sides present
+    assert all(at.strip() != "0.0 0.0 0.0" for _, at in placements)  # none at the origin
+    result = run_drc_on_pcb_text(pcb, name="rp")
+    assert result.clean, (
+        f"real-placement board must pass real-pcbnew DRC, got "
         f"{result.violations or result.unconnected_items}")

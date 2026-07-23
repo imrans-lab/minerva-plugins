@@ -28,6 +28,7 @@ module only builds the bridge and is exercised by tests.
 
 from __future__ import annotations
 
+from .geometry import place_point
 from .resolved_board import (
     ArcGeometry,
     BoardOutline,
@@ -306,70 +307,109 @@ def ir_to_board_dict(board: ResolvedBoard) -> dict:
 
 
 # ===========================================================================
-# KiCad IR->dict bridge (W8.1b of the PCB K3 cutover).
+# KiCad IR->dict bridge — REAL-PLACEMENT footprints (C3, finding 019f8dbb6593).
 #
-# GROUND TRUTH (verified against pcbnew 9.0.9's parser; see docket cold-review):
-# when KiCad LOADS a footprint it applies TRANSLATE + ROTATE ONLY — it does NOT
-# natively flip a ``(footprint (layer "B.Cu") ...)`` on load. And the pad ``(at px
-# py ANGLE)`` third value is the ABSOLUTE angle (footprint rotation + pad-local
-# rotation), NOT a footprint-relative one. So the two intuitions the first cut
-# encoded were BOTH wrong:
-#   * feeding LOCAL pad rotation parses as fp-relative (a local 270 under a
-#     comp at 90 reads as 180) — WRONG;
-#   * a ``(layer "B.Cu")`` footprint with local un-mirrored pads is NOT flipped on
-#     load, so bottom pads land mirror-SWAPPED onto the wrong nets — WRONG.
+# GROUND TRUTH (verified numerically vs pcbnew 9.0.9 oracle k1_bottom_oracle):
+# a KiCad footprint is ``(footprint (layer F.Cu|B.Cu) (at px py rot))`` with pads/
+# graphics in footprint-LOCAL coords; on LOAD KiCad applies TRANSLATE + ROTATE
+# ONLY (no re-flip). A BOTTOM footprint stores its local coords already Y-mirrored,
+# and each pad ``(at ... ANGLE)`` third value is the ABSOLUTE board-frame angle.
 #
-# CORRECT PROJECTION — ABSOLUTE geometry under an IDENTITY footprint, exactly like
-# the gerber bridge. The IR ``PlacedPad`` is ALREADY board-absolute, override-
-# baked, bottom-mirrored, and carries the COMBINED absolute ``rotation_deg`` and
-# its correctly-sided ``layers``. So we reuse the SAME :func:`_pad_to_dict` /
-# :func:`_graphic_to_dict` the gerber bridge uses and emit each footprint at
-# ``(at 0 0 0)``: KiCad's translate+rotate is then a NO-OP, no flip is needed, and
-# every pad's absolute position + absolute angle + side pass straight through.
-# Overrides and pad rotation reach the .kicad_pcb because they are baked into the
-# PlacedPad; the bottom side is right because the pad coordinate is pre-mirrored
-# and the copper layer is tagged from ``PlacedPad.side`` — no double-mirror, no
-# fp-relative-angle bug. kicad and gerber now share ONE absolute projection.
+# The FIRST cutover emitted every footprint at ``(at 0 0 0)`` with board-ABSOLUTE
+# pads. Geometrically correct, but SEMANTICALLY broken: every component's origin
+# sat at 0,0, so the .kicad_pcb lost component placement, editability, and
+# assembly/CPL (pick-and-place) — a CPL export reported every part at 0,0,0.
+#
+# REAL PLACEMENT restores it. The IR ``PlacedPad`` is already board-absolute,
+# override-baked, bottom-mirrored, and carries the COMBINED absolute
+# ``rotation_deg`` + correctly-sided ``layers`` — so the STORED footprint-local
+# coordinate is recovered by inverting ONLY the placement translate+rotate
+# (``_to_footprint_local``); the mirror and absolute angle are already baked, and
+# are emitted AS-IS. KiCad re-applies (at px py rot) on load to reproduce the exact
+# same absolute geometry the identity encoding produced — so copper/registration is
+# byte-for-byte equivalent — while the footprint now sits at its real placement.
+# gerber stays absolute-under-identity (layer-based, no footprint concept).
 # ===========================================================================
+
+
+def _to_footprint_local(px: float, py: float, rot: float,
+                        x: float, y: float) -> tuple[float, float]:
+    """Recover the KiCad footprint-LOCAL coordinate a board-ABSOLUTE point must be
+    STORED as, by inverting a component placement's translate + rotate. KiCad
+    reproduces the absolute on load by re-applying the footprint ``(at px py rot)``;
+    the bottom-side MIRROR and the ABSOLUTE pad angle are already baked into the
+    PlacedPad, so ONLY translate+rotate is inverted here. Verified vs the pcbnew
+    9.0.9 oracle: ``place_point(0,0,-37, 51.794092-50, 37.395919-40) == (3.0,-1.0)``
+    and the forward ``place_point(50,40,37, 3,-1)`` returns the absolute.
+
+    Rounded to 6 decimals (KiCad's 1 nm native resolution) so the inverse rotation's
+    float noise (a ``5.8e-17`` that should be ``0``) does not leak into the emitted
+    ``(at)`` — clean, exactly-reproducible bytes, well within fab tolerance."""
+    lx, ly = place_point(0.0, 0.0, -rot, x - px, y - py)
+    return (round(lx, 6), round(ly, 6))
 
 
 def _kicad_component_to_dict(board: ResolvedBoard,
                              component: ResolvedComponent) -> dict:
-    """One :class:`ResolvedComponent` -> an emitter component dict with an IDENTITY
-    footprint placement (``x=y=rotation=0``) and ABSOLUTE pad/graphic geometry —
-    the SAME absolute projection the gerber bridge uses, reused verbatim via
-    :func:`_pad_to_dict` / :func:`_graphic_to_dict`.
+    """One :class:`ResolvedComponent` -> an emitter component dict at its REAL
+    footprint placement (``x/y/rotation`` from :attr:`Placement`) with pad/graphic
+    geometry in footprint-LOCAL coords.
 
-    KiCad applies only translate+rotate on load, so an identity footprint leaves
-    the pre-placed, pre-mirrored PlacedPad geometry untouched: absolute position,
-    absolute combined ``rotation_deg``, and the pad's own correctly-sided copper
-    layer all round-trip. ``layer`` tags the component side so a bottom SMD land is
-    emitted on B.Cu (its copper is already at the mirror-folded coordinate — the
-    coordinate does the mirror, NOT a footprint flip)."""
+    The PlacedPad is board-absolute (override-baked, bottom-mirrored, absolute
+    combined angle, correctly-sided layers); :func:`_to_footprint_local` inverts the
+    placement translate+rotate to recover the stored local POSITION, while the pad
+    ANGLE (absolute) and LAYERS (sided) pass through unchanged — KiCad reads the pad
+    ``(at)`` angle as absolute and does not re-flip a B.Cu footprint. KiCad's
+    on-load translate+rotate reproduces the identical absolute geometry, so
+    fabrication is unchanged while the footprint sits at its real placement (CPL /
+    editability restored)."""
     number_of = _pad_number_map(board, component)
     definition = board.footprint_for(component)
+    px, py = component.placement.position
+    rot = component.placement.rotation_deg
+
+    def _local_pad(pad: PlacedPad) -> dict:
+        out = _pad_to_dict(pad, number_of.get(pad.source_id, ""))
+        lx, ly = _to_footprint_local(px, py, rot, pad.position[0], pad.position[1])
+        out["position"] = {"x": lx, "y": ly}   # local; angle + layers stay absolute/sided
+        return out
+
+    def _local_graphic(graphic: PlacedGraphic) -> dict:
+        out = _graphic_to_dict(graphic)
+        _localize_graphic_points(out, px, py, rot)
+        return out
+
     return {
         "ref": component.ref,
         "value": component.value,
         "footprint": definition.name,
-        "x_mm": 0.0,
-        "y_mm": 0.0,
-        "rotation_deg": 0.0,
+        "x_mm": px,
+        "y_mm": py,
+        "rotation_deg": rot,
         "layer": "top" if component.placement.side is Side.TOP else "bottom",
-        # ABSOLUTE, override-baked, side-mirrored — identity footprint no-ops the
-        # emitter transform, so _pad_to_dict's absolute position + combined angle
-        # pass through (the exact geometry the gerber bridge emits).
-        "pads": [
-            _pad_to_dict(pad, number_of.get(pad.source_id, ""))
-            for pad in component.placed_pads
-        ],
-        # Only F.SilkS is rendered by the kicad emitter; the placed graphics are
-        # board-ABSOLUTE and land correctly under the identity footprint (at 0 0 0).
+        "pads": [_local_pad(pad) for pad in component.placed_pads],
+        # Only F.SilkS is rendered by the kicad emitter (bottom-side B.SilkS silk is
+        # dropped as before — cosmetic, non-fabrication-critical). Localized so the
+        # silk lands correctly under the real footprint (at), not double-transformed.
         "graphics": [
-            _graphic_to_dict(g) for g in component.placed_graphics
+            _local_graphic(g) for g in component.placed_graphics
             if g.layer.id == "F.SilkS"
         ],
     }
+
+
+def _localize_graphic_points(graphic_dict: dict, px: float, py: float,
+                             rot: float) -> None:
+    """In-place: rewrite a graphic dict's ABSOLUTE coordinate fields to footprint-
+    LOCAL (``_to_footprint_local``). ``radius`` is rotation/translation-invariant, so
+    only the point fields (start/end/center + the arc/poly points list) move."""
+    def loc(pt: list) -> list:
+        return list(_to_footprint_local(px, py, rot, pt[0], pt[1]))
+    for key in ("start", "end", "center"):
+        if key in graphic_dict:
+            graphic_dict[key] = loc(graphic_dict[key])
+    if "points" in graphic_dict:
+        graphic_dict["points"] = [loc(p) for p in graphic_dict["points"]]
 
 
 def _mounting_hole_refs(existing_refs: set[str], count: int) -> list[str]:
@@ -394,10 +434,11 @@ def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
     the kicad emitter renders as one bare through-hole pad.
 
     KiCad represents a standalone drill as a footprint carrying a single drilled
-    pad. We emit one ``MountingHole`` footprint at the IDENTITY placement (the same
-    absolute-under-identity convention the rest of the kicad bridge uses) with the
-    pad at the hole's ABSOLUTE position, so ``kicad._footprint`` (identity
-    translate+rotate no-op) drills it exactly where the IR says.
+    pad. We emit one ``MountingHole`` footprint at the hole's REAL position with the
+    pad at footprint-LOCAL origin (0, 0), consistent with the real-placement
+    component footprints — ``kicad._footprint`` translates the origin-local pad by
+    the footprint ``(at)`` and drills it exactly where the IR says, and the hole
+    footprint reads correctly in KiCad (its origin is on the drill).
 
     Plating drives the padstack via ``pad_source._from_resolved`` +
     ``kicad._footprint``: a NON-plated hole (NPTH / an unplated MOUNTING hole) is a
@@ -416,7 +457,7 @@ def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
         "number": "",
         "type": "thru_hole" if hole.plated else "np_thru_hole",
         "shape": "circle",
-        "position": {"x": feature.position[0], "y": feature.position[1]},
+        "position": {"x": 0.0, "y": 0.0},   # footprint-local; footprint (at) is the hole
         "drill": {"x": diameter, "y": diameter},
         "layers": ["*.Cu", "*.Mask"],
     }
@@ -428,8 +469,8 @@ def _kicad_mounting_hole_component(hole: ResolvedHole, ref: str) -> dict:
         "ref": ref,
         "value": "",
         "footprint": "MountingHole",
-        "x_mm": 0.0,
-        "y_mm": 0.0,
+        "x_mm": feature.position[0],
+        "y_mm": feature.position[1],
         "rotation_deg": 0.0,
         "layer": "top",
         "pads": [pad],
@@ -489,26 +530,27 @@ def _kicad_via_dicts(board: ResolvedBoard, net_name_of: dict[str, str]) -> list[
 
 def ir_to_kicad_board_dict(board: ResolvedBoard) -> dict:
     """Project a :class:`ResolvedBoard` (K2 IR) into the loosely-typed emitter
-    board_dict that ``kicad.generate`` consumes, in BOARD-ABSOLUTE geometry with
-    IDENTITY footprint placement — the SAME projection the gerber bridge uses.
+    board_dict that ``kicad.generate`` consumes, with each footprint at its REAL
+    placement ``(at px py rot)`` and pad/graphic geometry in footprint-LOCAL coords.
 
     KiCad applies only translate+rotate on load (no native flip) and reads the pad
-    ``(at)`` third value as the ABSOLUTE angle, so absolute-under-identity is the
-    faithful encoding: each footprint at ``(at 0 0 0)`` with pads at their
-    board-absolute position + combined rotation + correctly-sided copper layer.
-    OVERRIDES, per-pad rotation, and the bottom-side MIRROR all reach the
-    .kicad_pcb because they are baked into every :class:`PlacedPad`; the identity
-    footprint no-ops KiCad's transform so nothing is double-applied or
-    double-mirrored. Additionally emits ``nets`` (kicad assigns pad/segment/via
-    nets from them) and net-tagged traces/vias, which the gerber bridge omits.
-    PURE + deterministic — the ResolvedBoard is only read.
+    ``(at)`` third value as the ABSOLUTE angle. The IR's board-absolute PlacedPad is
+    projected back to the stored footprint-local POSITION by inverting the placement
+    translate+rotate (:func:`_to_footprint_local`), while the absolute angle, sided
+    layers, and baked-in overrides + bottom mirror pass through unchanged — KiCad's
+    on-load transform reproduces the identical absolute geometry (fabrication /
+    registration unchanged) while the footprint sits at its real placement, so the
+    .kicad_pcb keeps component placement, editability, and assembly/CPL semantics
+    (finding 019f8dbb6593). Additionally emits ``nets`` (kicad assigns
+    pad/segment/via nets from them) and net-tagged traces/vias, which the gerber
+    bridge omits. PURE + deterministic — the ResolvedBoard is only read.
 
     Board-level HOLES (mounting holes) are EMITTED faithfully: each round
-    :class:`ResolvedHole` becomes a synthetic ``MountingHole`` footprint carrying a
-    single bare through-hole pad at the hole's absolute position — an unplated hole
-    as ``np_thru_hole`` (no copper), a plated one as ``thru_hole`` with a copper
-    annulus (see :func:`_kicad_mounting_hole_component`). A non-round hole feature
-    still RAISES (the round-only drill seal).
+    :class:`ResolvedHole` becomes a synthetic ``MountingHole`` footprint at the
+    hole's real position carrying a single bare through-hole pad at footprint-local
+    origin — an unplated hole as ``np_thru_hole`` (no copper), a plated one as
+    ``thru_hole`` with a copper annulus (see :func:`_kicad_mounting_hole_component`).
+    A non-round hole feature still RAISES (the round-only drill seal).
 
     FAIL-CLOSED seals (mirroring the gerber bridge): a captured feature the kicad
     emitter cannot render — a zone or a board-level graphic — must RAISE, never
