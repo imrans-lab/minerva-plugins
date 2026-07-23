@@ -32,11 +32,11 @@ CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
 
 def main() -> int:
     # Build THROUGH THE PRODUCTION PATH, exactly as methods._gerbers now does
-    # (K4 phase 1): COMPILE (strict) -> ir_to_board_dict -> build_gerbers(placed=True).
+    # COMPILE (strict) -> ir_to_board_dict -> build_gerbers.
     # The spike's footprints (R_0805/C_0805/TH_TestPoint) compile to their real
     # lands (absolute placement, resolved mask clearance); drilltest's hand-authored
     # footprints are not in the seed lib so the strict compile fail-closes it and it
-    # is emitted from its raw dict directly (all-TH at rotation 0 -> placed==unplaced,
+    # is emitted from its raw dict directly (all-TH at rotation 0 -> placed geometry == unplaced,
     # geometry unchanged). NO caller remains on the legacy resolve_board_best_effort
     # path (build_fab centralizes this — the SAME helper the emitter tests use).
     for board_path, base in CASES:

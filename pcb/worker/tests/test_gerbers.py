@@ -54,7 +54,7 @@ def _prep(path: Path) -> dict:
 
 
 def _build(path: Path, base: str) -> dict[str, str]:
-    return gerber.build_gerbers(_prep(path), name=base, placed=True)
+    return gerber.build_gerbers(_prep(path), name=base)
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
 def test_gerber_layers_structural(board_path, base):
     board = _prep(board_path)
     bounds = board_model.board_bounds(board)
-    files = gerber.build_gerbers(board, name=base, placed=True)
+    files = gerber.build_gerbers(board, name=base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     # Exactly the six expected layers.
@@ -129,7 +129,7 @@ def test_gerber_pygerber_round_trip(board_path, base):
         OnParserErrorEnum,
     )
 
-    files = gerber.build_gerbers(_prep(board_path), name=base, placed=True)
+    files = gerber.build_gerbers(_prep(board_path), name=base)
     for name, text in files.items():
         if not name.endswith(".gbr"):
             continue
@@ -215,7 +215,7 @@ def test_drill_files_omitted_when_no_holes():
         ],
         "nets": [],
     }
-    files = gerber.build_gerbers(board, name="smdonly", placed=True)
+    files = gerber.build_gerbers(board, name="smdonly")
     assert not any(n.endswith(".drl") for n in files), "unexpected drill file"
 
 
@@ -231,7 +231,7 @@ def _golden_names() -> list[str]:
 
 @pytest.mark.parametrize("board_path,base", CASES)
 def test_matches_goldens(board_path, base):
-    files = gerber.build_gerbers(_prep(board_path), name=base, placed=True)
+    files = gerber.build_gerbers(_prep(board_path), name=base)
     for fname, content in files.items():
         golden = GOLDEN_DIR / fname
         assert golden.exists(), f"missing golden {fname} (run regenerate.py)"
@@ -349,7 +349,7 @@ def test_silk_real_graphics_replaces_placeholder_box():
     assert all(c.get("graphics") for c in resolved["components"]), \
         "fixture expected to fully resolve graphics for this assertion"
 
-    files = gerber.build_gerbers(resolved, name="smartremote", placed=True)
+    files = gerber.build_gerbers(resolved, name="smartremote")
     silk = files["smartremote-F_SilkS.gbr"]
 
     # The old placeholder drew exactly 4 line segments (a box) per component;
@@ -394,7 +394,7 @@ def test_silk_omitted_when_component_has_no_graphics():
         ],
         "nets": [],
     }
-    files = gerber.build_gerbers(board, name="mixed", placed=True)
+    files = gerber.build_gerbers(board, name="mixed")
     silk = files["mixed-F_SilkS.gbr"]
     moves = _gerber_move_points(silk)
     # R1's box (4 segments -> 1 D02 move) + U1's real silk line (1 D02 move).
@@ -417,7 +417,7 @@ def test_silk_transform_matches_pad_transform():
         ],
         "nets": [],
     }
-    files = gerber.build_gerbers(board, name="silktest", placed=True)
+    files = gerber.build_gerbers(board, name="silktest")
 
     # Pin 1's TH annulus flash in F_Cu (absolute board coords).
     pad_xy = _gerber_flash_points(files["silktest-F_Cu.gbr"])
@@ -492,7 +492,7 @@ def test_legacy_arc_bulges_into_body():
                         "layer": "top", "pins": pins}],
         "nets": [],
     }
-    silk = gerber.build_gerbers(resolve_board(board), name="dip6", placed=True)["dip6-F_SilkS.gbr"]
+    silk = gerber.build_gerbers(resolve_board(board), name="dip6")["dip6-F_SilkS.gbr"]
     arc = _first_arc(silk)
     assert arc is not None, "expected the DIP-6 pin-1 notch arc in F.SilkS"
     start, end, center, mode = arc

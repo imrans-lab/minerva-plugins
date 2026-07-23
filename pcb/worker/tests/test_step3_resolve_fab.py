@@ -112,15 +112,15 @@ def test_raw_sizeless_smd_fails_closed_resolved_is_real():
     board = _board_no_smd_geometry()
 
     # RAW emit: the SW SMD pins have no size -> fail closed (no placeholder).
-    # (placed=True is irrelevant here — iter_pads(require_smd_size=True) raises
+    # (the aperture-rotation source is irrelevant here — iter_pads(require_smd_size=True) raises
     # before any placement/rotation logic runs.)
     with pytest.raises(pad_source.PadGeometryError):
-        gerber.build_gerbers(copy.deepcopy(board), name="board", placed=True)
+        gerber.build_gerbers(copy.deepcopy(board), name="board")
 
     # Resolved emit: the real 2.0x2.0 SW lands, and the old 1.0x0.6 placeholder
     # is nowhere in the output.
     resolved_rects = _copper_rect_apertures(
-        gerber.build_gerbers(resolve.resolve_board(board), name="board", placed=True))
+        gerber.build_gerbers(resolve.resolve_board(board), name="board"))
     assert REAL_SW_WH in resolved_rects, \
         f"resolved missing the real 2.0x2.0 SW lands: {resolved_rects}"
     assert PLACEHOLDER_WH not in resolved_rects, \
@@ -133,7 +133,7 @@ def test_gerber_and_kicad_read_the_same_resolved_geometry():
     board = _board_no_smd_geometry()
     resolved = resolve.resolve_board(board)
     resolved_rects = _copper_rect_apertures(
-        gerber.build_gerbers(resolved, name="board", placed=True))
+        gerber.build_gerbers(resolved, name="board"))
     assert REAL_SW_WH in resolved_rects
 
     pcb = kicad.generate_kicad_pcb(resolved)

@@ -63,8 +63,8 @@ def test_emit_is_byte_identical_across_runs(board_path, base):
     """
     board = _load(board_path)
 
-    first = gerber.build_gerbers(board, name=base, placed=True)
-    second = gerber.build_gerbers(board, name=base, placed=True)
+    first = gerber.build_gerbers(board, name=base)
+    second = gerber.build_gerbers(board, name=base)
 
     # File SET (names + order) is identical.
     assert list(first.keys()) == list(second.keys()), (
@@ -94,10 +94,8 @@ def test_creation_date_is_the_only_volatile_field(board_path, base):
     """
     board = _load(board_path)
 
-    a = gerber.build_gerbers(board, name=base, creation_date="2001-01-01T00:00:00",
-                             placed=True)
-    b = gerber.build_gerbers(board, name=base, creation_date="2099-12-31T23:59:59",
-                             placed=True)
+    a = gerber.build_gerbers(board, name=base, creation_date="2001-01-01T00:00:00")
+    b = gerber.build_gerbers(board, name=base, creation_date="2099-12-31T23:59:59")
 
     assert list(a.keys()) == list(b.keys())
 

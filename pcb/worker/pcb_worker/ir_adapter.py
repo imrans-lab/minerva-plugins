@@ -12,11 +12,11 @@ IR (``compile_board(source).board``): every :class:`PlacedPad` is BOARD-ABSOLUTE
 per-pad ``rotation_deg`` combined). :func:`ir_to_board_dict` projects that IR back
 into the emitter's board_dict shape with IDENTITY component placement, so the
 emitter's ``_rotate`` + ``cx/cy`` become a no-op and the absolute geometry passes
-through unchanged. Feed the result to ``gerber.build_gerbers(dict, placed=True)``
-(``placed=True`` makes the aperture rotation come from each pad's ``rotation``
-rather than the — now zero — component angle; see gerber.py hazard #2).
+through unchanged. Feed the result to ``gerber.build_gerbers(dict)``: the emitter
+sources the aperture rotation from each pad's ``rotation`` rather than the — now
+zero — component angle (see gerber.py hazard #2).
 
-    compile_board(source).board  ->  ir_to_board_dict(rb)  ->  build_gerbers(dict, placed=True)
+    compile_board(source).board  ->  ir_to_board_dict(rb)  ->  build_gerbers(dict)
 
 This is the phase that makes overrides + bottom-side mirror + pad-rotation reach
 the gerber/Excellon fab bytes. PURE + deterministic: the ResolvedBoard is only
@@ -91,7 +91,7 @@ def _pad_to_dict(pad: PlacedPad, number: str) -> dict:
     annulus: the override-set :attr:`PlacedPad.annulus` when present (round), else
     the footprint copper land :attr:`PlacedPad.size`. ``drill.x`` carries the
     (possibly overridden) round drill; ``rotation`` is the absolute combined pad
-    angle the ``placed=True`` gerber path applies to the aperture."""
+    angle the gerber emitter applies to the aperture."""
     is_drilled = pad.drill is not None
 
     out: dict = {
@@ -256,11 +256,11 @@ def ir_to_board_dict(board: ResolvedBoard) -> dict:
     """Project a :class:`ResolvedBoard` (K2 IR) into the loosely-typed emitter
     board_dict, in BOARD-ABSOLUTE geometry with IDENTITY component placement.
 
-    Feed the result to ``gerber.build_gerbers(dict, placed=True)``: positions are
-    already absolute (identity placement no-ops the emitter transform), overrides
-    and the bottom-side mirror are baked into every :class:`PlacedPad`, and
-    ``placed=True`` sources each aperture's rotation from the pad's own absolute
-    angle. PURE + deterministic — the ResolvedBoard is only read.
+    Feed the result to ``gerber.build_gerbers(dict)``: positions are already
+    absolute (identity placement no-ops the emitter transform), overrides and the
+    bottom-side mirror are baked into every :class:`PlacedPad`, and the emitter
+    sources each aperture's rotation from the pad's own absolute angle. PURE +
+    deterministic — the ResolvedBoard is only read.
     """
     # Copper the adapter does not yet map must NOT vanish at the cutover.
     # compile_board fail-closes zone/board-graphic DECLARATIONS today, so these are

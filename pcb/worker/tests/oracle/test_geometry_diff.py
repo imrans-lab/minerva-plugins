@@ -41,11 +41,10 @@ SNAPSHOT_DIR = HERE / "golden_emitter"                 # emitter drift-pin snaps
 def _emit() -> dict[str, str]:
     """Real emitter output for the spike board (name='board' to match goldens).
 
-    Routed through the production placed path (K4 phase 1): COMPILE (strict) ->
-    ir_to_board_dict -> build_gerbers(placed=True), exactly as methods._gerbers
-    does — off the legacy resolve_board_best_effort path."""
-    return gerber.build_gerbers(placed_board_dict(SPIKE_BOARD), name="board",
-                                placed=True)
+    Routed through the production fab path: COMPILE (strict) -> ir_to_board_dict
+    -> build_gerbers, exactly as methods._gerbers does — off the legacy
+    resolve_board_best_effort path."""
+    return gerber.build_gerbers(placed_board_dict(SPIKE_BOARD), name="board")
 
 
 # ---------------------------------------------------------------------------

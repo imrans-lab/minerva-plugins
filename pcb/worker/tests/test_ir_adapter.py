@@ -1,6 +1,6 @@
 """W8.1 — the GERBER IR→dict bridge (``ir_adapter.ir_to_board_dict``).
 
-These are the W8.1 wins: the adapter + gerber ``placed=True`` mode make the three
+These are the W8.1 wins: the adapter + the gerber IR fab path make the three
 things the LEGACY (resolve_board_best_effort) fab path drops reach the gerber/
 Excellon fabrication BYTES —
 
@@ -14,7 +14,7 @@ determinism and a legacy-path-unchanged guard.
 
 The pipeline under test:
 
-    compile_board(source).board  ->  ir_to_board_dict(rb)  ->  build_gerbers(dict, placed=True)
+    compile_board(source).board  ->  ir_to_board_dict(rb)  ->  build_gerbers(dict)
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def _resolve(board: dict):
 
 
 def _placed_gerbers(board: dict, name: str = "brd"):
-    return gerber.build_gerbers(ir_to_board_dict(_resolve(board)), name=name, placed=True)
+    return gerber.build_gerbers(ir_to_board_dict(_resolve(board)), name=name)
 
 
 # ---------------------------------------------------------------------------
@@ -205,21 +205,17 @@ def test_bottom_side_mirror_folds_the_coordinate():
 def test_per_pad_rotation_reaches_the_aperture():
     """An R_0805 placed at rotation 90 bakes a per-pad absolute rotation into the
     IR; under the adapter's IDENTITY component placement the ONLY rotation source
-    left is the pad's own angle. ``placed=True`` applies it (a rotation-carrying
-    aperture macro); ``placed=False`` on the SAME dict drops it (a plain rect) —
-    which is exactly the legacy bug this phase fixes."""
+    left is the pad's own angle, and the emitter applies it — a rotation-carrying
+    aperture macro reaches fab (the legacy bug this phase closed dropped it)."""
     board_dict = ir_to_board_dict(_resolve(_board("R_0805", rotation_deg=90)))
     # The bridge zeroed the component placement and baked the angle per-pad.
     comp = board_dict["components"][0]
     assert comp["x_mm"] == 0.0 and comp["y_mm"] == 0.0 and comp["rotation_deg"] == 0.0
     assert all(p["rotation"] == 90.0 for p in comp["pads"])
 
-    placed = gerber.build_gerbers(board_dict, name="brd", placed=True)["brd-F_Cu.gbr"]
-    legacy = gerber.build_gerbers(board_dict, name="brd", placed=False)["brd-F_Cu.gbr"]
+    placed = gerber.build_gerbers(board_dict, name="brd")["brd-F_Cu.gbr"]
     assert "%AMRectangle*" in placed                        # a rotation-carrying macro
     assert re.search(r"Rectangle,[\d.X]+X90", placed), _apertures(placed)
-    assert "%AMRectangle*" not in legacy                    # rotation dropped without placed mode
-    assert any(a.startswith("R,") for a in _apertures(legacy))
 
 
 # ---------------------------------------------------------------------------
@@ -253,29 +249,6 @@ def test_adapter_carries_absolute_geometry_and_frame():
     assert comp["pads"][0]["position"] == {"x": 9.05, "y": 10.0}  # ABSOLUTE
     # R_0805 carries F.SilkS graphics — attached as absolute list-coord dicts.
     assert comp["graphics"] and all(isinstance(g.get("layer"), str) for g in comp["graphics"])
-
-
-# ---------------------------------------------------------------------------
-# Legacy path unchanged (placed=False is the goldens' path).
-# ---------------------------------------------------------------------------
-
-
-def test_legacy_placed_false_is_byte_stable_across_the_new_param():
-    """Adding the ``placed`` parameter must not perturb the default path: a legacy
-    (local-geometry) board built with ``placed=False`` — the goldens' path —
-    equals one built with the parameter omitted entirely, byte for byte. (The
-    full golden set is guarded by test_gerbers.py / test_determinism_gate.py.)"""
-    legacy_board = {
-        "version": 1, "name": "leg", "width_mm": 20, "height_mm": 20,
-        "components": [{
-            "ref": "U1", "x_mm": 10, "y_mm": 10, "rotation_deg": 30, "layer": "top",
-            "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
-                      "pad_width_mm": 1.2, "pad_height_mm": 0.8}],
-        }],
-    }
-    default = gerber.build_gerbers(copy.deepcopy(legacy_board), name="leg")
-    explicit = gerber.build_gerbers(copy.deepcopy(legacy_board), name="leg", placed=False)
-    assert dict(default) == dict(explicit)
 
 
 # ===========================================================================

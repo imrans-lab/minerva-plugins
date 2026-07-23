@@ -26,7 +26,7 @@ structurally-validated golden at `pcb/spikes/gerber/golden/`
 
 Since K4 phase 1 this snapshot is captured through the production fab path,
 exactly as `methods._gerbers` runs it: COMPILE (strict) → `ir_to_board_dict` →
-`build_gerbers(placed=True)` (via `tests/gerber_fab.build_fab`). The raw board
+`build_gerbers` (via `tests/gerber_fab.build_fab`). The raw board
 cannot be captured directly: its SMD pins carry no inline geometry, so the
 emitter fails closed rather than writing a placeholder land. The SMD copper pads
 here are the REAL `1.0 x 1.45 mm` 0805 lands resolved from the seed library. NB
@@ -37,10 +37,9 @@ tracks. F.SilkS still differs from the correctness reference (`spike-gerber-v1`)
 the emitter draws courtyards procedurally; silk is excluded from the correctness
 oracle (Option A).
 
-Note: `pcb/scripts/capture_emitter_golden.py` (out of the K4 phase-1 fence) still
-captures via the legacy `resolve_board_best_effort` path; this snapshot was
-regenerated to the IR path by hand. That script must be migrated to `build_fab`
-in the phase that deletes `build_gerbers(placed=False)`.
+Note: `pcb/scripts/capture_emitter_golden.py` regenerates this snapshot through
+the same `build_fab` (compile → IR → `build_gerbers`) path, so running it
+reproduces these files byte-for-byte.
 
 ## Regenerating (intentional emitter changes only)
 

@@ -10,7 +10,7 @@ three reach the emitted bytes IN THE REPLY. The pipeline under test:
     handle_request(gerbers/generate)
         -> compile_board(board)              (STRICT; fail-closed)
         -> ir_to_board_dict / ir_to_kicad_board_dict
-        -> gerber.build_gerbers(placed=True) / kicad.generate
+        -> gerber.build_gerbers / kicad.generate
 
 The emitter-level proofs live in test_ir_adapter.py; these are the METHODS-LEVEL
 proofs — the same wins surfacing through the real request handler — plus the

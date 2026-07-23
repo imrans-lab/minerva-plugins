@@ -38,7 +38,7 @@ def _prep(path: Path) -> dict:
 
 @pytest.mark.parametrize("board_path,base,expected_drills", CASES)
 def test_gerbonara_reads_current_exporter_output(board_path, base, expected_drills):
-    files = gerber.build_gerbers(_prep(board_path), name=base, placed=True)
+    files = gerber.build_gerbers(_prep(board_path), name=base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     drls = {n: t for n, t in files.items() if n.endswith(".drl")}
@@ -77,7 +77,7 @@ def test_gerbonara_excellon_reads_plated_and_nonplated_split():
     """The exporter's PTH/NPTH split both round-trip through gerbonara's Excellon
     parser with the expected per-file hole counts (spike board: 2 plated, 1 non-
     plated)."""
-    files = gerber.build_gerbers(_prep(SPIKE_BOARD), name="board", placed=True)
+    files = gerber.build_gerbers(_prep(SPIKE_BOARD), name="board")
 
     pth = ExcellonFile.from_string(files["board-PTH.drl"], filename="board-PTH.drl")
     npth = ExcellonFile.from_string(files["board-NPTH.drl"], filename="board-NPTH.drl")
