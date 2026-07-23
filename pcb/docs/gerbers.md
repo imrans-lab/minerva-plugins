@@ -76,15 +76,14 @@ per tool, `M30`. Metric, absolute, 3.3 decimal coordinates.
 extent — NOT the reference-designator text. Real silkscreen text (vectorised
 glyphs for refdes/value/pin-1 markers) is deferred to a later child.
 
-### Bottom-side component limitation
+### Bottom-side components
 
-Pad harvesting rotates footprints but does **not mirror** them for bottom-side
-(`layer: "B.Cu"`) components — an asymmetric bottom-side footprint would emit
-its pads unmirrored on B_Cu/B_Mask. Pad and mask stay self-consistent and
-drill positions are unaffected, so boards with only symmetric bottom parts
-(or none) are correct. Mirroring lands with the real footprint-geometry work;
-until then treat asymmetric bottom-side parts as unsupported (review note,
-gerber round).
+Bottom-side (`layer: "B.Cu"`) footprints ARE mirrored: the ResolvedBoard IR bakes
+the bottom-side mirror into each board-absolute `PlacedPad`, so an asymmetric
+bottom-side footprint emits correctly on B_Cu / B_Mask / B_Paste. (The original
+loose-dict gerber spike did **not** mirror — that limitation was superseded by the
+fabrication-complete footprint resolution; this note is retained only to mark the
+change.)
 
 ### Determinism
 
@@ -94,13 +93,16 @@ fixed sentinel (`1970-01-01T00:00:00`, SOURCE_DATE_EPOCH-style) so output is
 byte-reproducible for golden comparison. Pass `creation_date=...` for a real
 dated artifact.
 
-### Pad/mask geometry defaults
+### Pad/mask geometry
 
-The canonical schema carries no per-pad copper geometry yet, so SMD pad size
-(1.0 × 0.6 mm), TH annulus (`drill × 2` when unspecified) and solder-mask
-clearance (0.1 mm/side) are **documented placeholders**, each overridable via the
-schema's Extra passthrough (`pad_width_mm` / `pad_height_mm` /
-`annulus_diameter_mm` on a pin; `solder_mask_clearance_mm` in `design_rules`).
+Pad copper geometry is **resolved from the locked library footprint** (the
+fabrication-complete `FootprintDefinition` → `ResolvedBoard` IR); the emitter
+consumes that geometry and FAILS CLOSED on a sizeless SMD pad rather than
+inventing a placeholder land (pad bug 019f7736b236). The original spike's
+documented placeholders (1.0 × 0.6 mm SMD, `drill × 2` TH annulus) have been
+removed. Solder-mask clearance defaults to 0.1 mm/side, overridable via
+`solder_mask_clearance_mm` in `design_rules` or a per-pad `solder_mask_margin`;
+a pin may still override `pad_width_mm` / `pad_height_mm` / `annulus_diameter_mm`.
 
 ## Contract fields formalized this round
 
@@ -129,10 +131,11 @@ checklist to the production `pcb_gerbers` output):
 
 1. **Zero parser warnings** in the viewer for every layer.
 2. **Visual match to intent:** SMD pads under their silk courtyards; TH pads show
-   a round copper pad with a drilled hole on both copper layers; traces land
-   exactly on pads/vias; the outline is a clean closed rectangle; mask openings
-   are centered on their pads with visible clearance; NPTH holes appear only in
-   the drill layer (no copper/mask ring).
+   their resolved copper land (a round annulus, or an authored square / roundrect
+   land — D1) with a drilled hole on both copper layers; traces land exactly on
+   pads/vias; the outline is a clean closed rectangle; mask openings are centered
+   on their pads with visible clearance; NPTH holes get a **drill-size mask
+   opening** (no copper ring) on both sides, matching KiCad's `np_thru_hole` (E3).
 3. **Drill-to-copper alignment:** every PTH hole lands inside its copper annulus
    with no annular-ring violations.
 

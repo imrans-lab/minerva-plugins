@@ -249,12 +249,14 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
         rectangle (the exact defect class this gate exists to kill) or crash the
         aperture writer with no pad context.
 
-    A THROUGH-HOLE pad's copper is a round annulus UNLESS its land is oblong
-    (th_land). An equal-axis TH land is a round annulus regardless of shape token,
-    so it is exempt. An OBLONG TH land, however, must have a shapeable family
-    (``_TH_SHAPEABLE``) to be emitted faithfully — a ``circle`` cannot be oblong and
-    a ``custom``/unknown token has no faithful oblong copper aperture, so such a land
-    fails CLOSED here rather than being silently circularized (dropping copper
+    A THROUGH-HOLE pad's copper is a round annulus UNLESS ``th_land`` shapes it —
+    either an OBLONG land, OR an equal-axis land whose shape was genuinely AUTHORED
+    as a cornered ``rect``/``roundrect`` (D1, finding 019f8b7fd295: a square /
+    rounded-square land keeps its corners). Only a DEFAULTED-``rect`` or an
+    (equal-axis) ``oval`` land stays a round annulus. A shaped TH land must have a
+    shapeable family (``_TH_SHAPEABLE``) to be emitted faithfully — a ``circle``
+    cannot be oblong and a ``custom``/unknown token has no faithful copper aperture,
+    so such a land fails CLOSED here rather than being silently circularized (dropping copper
     extent) or coerced to an obround (misrepresenting a custom outline) — finding
     019f8b7fd295, "faithfully OR fail closed". The raw pad dict is needed because a
     non-numeric ``corner_rratio`` is coerced to None before it reaches PadGeom."""
