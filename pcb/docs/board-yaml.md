@@ -53,7 +53,8 @@ traces:
       - {x_mm: 20, y_mm: 12}
 vias:
   - {x_mm: 15, y_mm: 8, drill_mm: 0.4, diameter_mm: 0.8, net: VCC,
-     from_layer: top, to_layer: bottom}
+     from_layer: top, to_layer: bottom}   # `tented` defaults true (no mask opening);
+                                           # set `tented: false` to expose the annulus
 mounting_holes:                # optional board-level drilled holes (not on a pad)
   - {x_mm: 5, y_mm: 5, diameter_mm: 3.2, plated: false}   # plated defaults to false (NPTH)
   - {x_mm: 8, y_mm: 5, diameter_mm: 2.0, plated: true, annulus_mm: 3.0}  # PTH: annulus_mm REQUIRED

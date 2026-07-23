@@ -728,6 +728,34 @@ def test_plated_hole_with_annulus_compiles_and_carries_it():
     assert hole.plated and hole.annulus_mm == 3.5
 
 
+def test_via_bad_tented_fails_closed():
+    # D4 (finding 019f8fe7cbaf): a non-bool `tented` on a via fails closed (mirrors
+    # hole_bad_plating). A string "false" must NOT coerce.
+    board = _minimal_board(
+        nets=[{"name": "N", "pins": []}],
+        vias=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 0.8, "drill_mm": 0.4,
+               "net": "N", "from_layer": "top", "to_layer": "bottom",
+               "tented": "false"}])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "via_bad_tented" in _errors(result)
+
+
+def test_via_tenting_defaults_tented_and_authors_untented():
+    def _one_via(**extra):
+        v = {"x_mm": 5, "y_mm": 5, "diameter_mm": 0.8, "drill_mm": 0.4,
+             "net": "N", "from_layer": "top", "to_layer": "bottom", **extra}
+        board = _one_component_board("R_0805")
+        board["nets"] = [{"name": "N", "pins": ["X1.1"]}]
+        board["vias"] = [v]
+        return board
+
+    (default_via,) = compile_board(_one_via()).board.vias
+    assert default_via.tented_front and default_via.tented_back        # default TENTED
+    (untented,) = compile_board(_one_via(tented=False)).board.vias
+    assert not untented.tented_front and not untented.tented_back      # authored untented
+
+
 def test_pth_alias_key_overrides_explicit_plated_false():
     # D2 (Fable): the pth_holes alias KEY is authoritative for plating — a
     # contradictory explicit plated:false is overridden (folded PLATED, matching Go's

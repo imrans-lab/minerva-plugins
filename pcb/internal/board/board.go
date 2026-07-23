@@ -311,6 +311,11 @@ type Via struct {
 	Net        string  `json:"net,omitempty" yaml:"net,omitempty"`
 	FromLayer  string  `json:"from_layer,omitempty" yaml:"from_layer,omitempty"`
 	ToLayer    string  `json:"to_layer,omitempty" yaml:"to_layer,omitempty"`
+	// Tented authors the via's solder-mask tenting (finding 019f8fe7cbaf). A pointer
+	// so "unset" (nil → DEFAULT TENTED, the historical CAM behavior) is distinct from
+	// an explicit `tented: false` (untented — the via annulus is exposed). The Python
+	// compiler reads it (default true) into ResolvedVia.tented_front/back.
+	Tented *bool `json:"tented,omitempty" yaml:"tented,omitempty"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }

@@ -728,8 +728,11 @@ def test_kicad_pth_mounting_hole_roundtrips_through_drill_export(tmp_path):
                          "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 18, "y_mm": 12}]},
                         {"net": "N1", "layer": "bottom", "width_mm": 0.3,
                          "points": [{"x_mm": 18, "y_mm": 12}, {"x_mm": 25, "y_mm": 15}]}],
+             # An UNTENTED via (tented:false) exercises the via mask-opening path in
+             # both harvests under the byte-equivalence net (D4).
              "vias": [{"net": "N1", "x_mm": 18, "y_mm": 12, "diameter_mm": 0.8,
-                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}]},
+                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom",
+                       "tented": False}]},
 ])
 def test_build_gerbers_ir_is_byte_identical_to_adapter_path(make):
     """C5: the IR-NATIVE gerber path (build_gerbers_ir, no loose-dict adapter) is
@@ -742,6 +745,31 @@ def test_build_gerbers_ir_is_byte_identical_to_adapter_path(make):
     assert dict(native) == dict(via_adapter)   # every file, byte-identical
     assert [(d.code, d.severity) for d in native.diagnostics] == \
            [(d.code, d.severity) for d in via_adapter.diagnostics]
+
+
+def test_via_tenting_gerber_mask():
+    # D4 (finding 019f8fe7cbaf): via mask tenting is authored + DEFAULTS TENTED. A
+    # tented via (default or explicit) has NO mask opening; an untented via exposes
+    # its annulus with a mask opening on BOTH sides. Only the `tented` flag differs.
+    def _via_board(tented):
+        v = {"x_mm": 20, "y_mm": 20, "diameter_mm": 0.8, "drill_mm": 0.4,
+             "net": "N", "from_layer": "top", "to_layer": "bottom"}
+        if tented is not None:
+            v["tented"] = tented
+        return {"version": 1, "name": "v", "width_mm": 40, "height_mm": 40,
+                "layers": ["top", "bottom"],
+                "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                                 "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+                "components": [{"ref": "X1", "footprint": "R_0805", "x_mm": 10,
+                                "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
+                "nets": [{"name": "N", "pins": ["X1.1"]}], "vias": [v]}
+
+    via_flash = r"X20000000Y20000000D03"
+    for tented in (None, True):   # default + explicit tented -> no via mask
+        g = gerber.build_gerbers_ir(_resolve(_via_board(tented)), name="v")
+        assert not re.search(via_flash, g["v-F_Mask.gbr"]), f"tented={tented} leaked a via mask"
+    g = gerber.build_gerbers_ir(_resolve(_via_board(False)), name="v")   # untented -> mask
+    assert re.search(via_flash, g["v-F_Mask.gbr"]) and re.search(via_flash, g["v-B_Mask.gbr"])
 
 
 def test_plated_board_hole_annulus_agrees_across_emitters():

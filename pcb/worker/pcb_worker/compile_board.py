@@ -1188,6 +1188,15 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
                         f"via {ordinal}: span {from_layer!r}->{to_layer!r} is not a legal v1 "
                         f"through-via across [top, bottom]", via_ref)
             continue
+        # Via mask TENTING is AUTHORED by the source and DEFAULTS TENTED (the
+        # historical CAM behavior): a tented via has no mask opening; an untented via
+        # exposes its annulus (finding 019f8fe7cbaf). A single `tented` bool sets both
+        # sides (the v1 symmetric case); a non-bool fails closed.
+        raw_tented = raw.get("tented", True)
+        if not isinstance(raw_tented, bool):
+            diags.error("via_bad_tented",
+                        f"via {ordinal}: tented must be a boolean, got {raw_tented!r}", via_ref)
+            continue
         vias.append(ResolvedVia(
             id=_resolve_child_id("via", board_id, raw, (net_id, ordinal), schema_version),
             position=(float(x), float(y)),
@@ -1197,8 +1206,8 @@ def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
             kind=ViaKind.THROUGH,
             from_layer=from_layer,
             to_layer=to_layer,
-            tented_front=False,
-            tented_back=False,
+            tented_front=raw_tented,
+            tented_back=raw_tented,
         ))
     return tuple(vias)
 

@@ -272,3 +272,26 @@ func TestAliasKeyOverridesExplicitPlated(t *testing.T) {
 		t.Fatalf("pth_holes hole must fold plated=true despite explicit plated:false: %+v", b.MountingHoles)
 	}
 }
+
+// D4 (finding 019f8fe7cbaf): via mask tenting is authored via `tented` and defaults
+// TENTED (nil). An explicit `tented: false` round-trips as a modeled field.
+func TestViaTentedRoundTrips(t *testing.T) {
+	src := "version: 1\nname: A\nwidth_mm: 20\nheight_mm: 20\ncomponents: []\nnets: []\n" +
+		"vias:\n  - {x_mm: 5, y_mm: 5, diameter_mm: 0.8, drill_mm: 0.4, tented: false}\n" +
+		"  - {x_mm: 8, y_mm: 8, diameter_mm: 0.8, drill_mm: 0.4}\n"
+	b, err := UnmarshalYAML([]byte(src))
+	if err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if b.Vias[0].Tented == nil || *b.Vias[0].Tented != false {
+		t.Fatalf("explicit tented:false must round-trip: %v", b.Vias[0].Tented)
+	}
+	if b.Vias[1].Tented != nil {
+		t.Fatalf("absent tented must stay nil (default tented): %v", b.Vias[1].Tented)
+	}
+	// Serialized YAML carries the explicit false, omits the nil (default) via.
+	out, _ := MarshalYAML(b)
+	if !strings.Contains(string(out), "tented: false") {
+		t.Fatalf("explicit tented:false not serialized:\n%s", out)
+	}
+}

@@ -516,6 +516,23 @@ def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
                SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
 
 
+def _emit_via(g: _Geometry, vx: float, vy: float, dia: float, drill: float,
+              tented_front: bool, tented_back: bool, mask_clearance: float) -> None:
+    """Emit one via into ``g`` — the SHARED via path for the loose-dict and IR-native
+    harvests. A via is a copper annulus (ViaPad) on both copper layers + a plated
+    drill. Mask TENTING is per-side (finding 019f8fe7cbaf): a TENTED side (the
+    default) has NO mask opening; an UNTENTED side exposes the annulus with a
+    mask opening (dia enlarged by the board mask clearance, like a plated pad)."""
+    g.th_annuli.append((vx, vy, dia, "ViaPad"))
+    g.holes.append((vx, vy, drill, True))
+    if not (tented_front and tented_back):
+        md = _mask_dim(dia, mask_clearance, "via", f"({vx}, {vy})")
+        if not tented_front:
+            g.mask_top.append((vx, vy, "circle", md, md, None, 0.0))
+        if not tented_back:
+            g.mask_bot.append((vx, vy, "circle", md, md, None, 0.0))
+
+
 def _harvest(board: dict, mask_clearance: float) -> _Geometry:
     g = _Geometry()
 
@@ -551,9 +568,12 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         vx, vy = _num(via.get("x_mm")), _num(via.get("y_mm"))
         dia = _opt_num(via.get("diameter_mm")) or dr_via_dia
         drill = _opt_num(via.get("drill_mm")) or dr_via_drill
-        g.th_annuli.append((vx, vy, dia, "ViaPad"))
-        # Vias are tented by default -> no mask opening (matches the spike).
-        g.holes.append((vx, vy, drill, True))
+        # Per-side tenting; DEFAULTS TENTED (no mask) when absent. The IR bridge
+        # (_via_dicts) supplies tented_front/back; a legacy direct-dict caller that
+        # authored the source-level `tented` key does NOT reach here (this loose path
+        # reads only the per-side keys) — the live path compiles first.
+        _emit_via(g, vx, vy, dia, drill, via.get("tented_front", True),
+                  via.get("tented_back", True), mask_clearance)
 
     # --- Traces. ---
     for tr in _list(board.get("traces")):
@@ -927,8 +947,8 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         _emit_silk(g, graphics, pin_extents, 0.0, 0.0, 0.0, top, ref)
 
     for via in board.vias:
-        g.th_annuli.append((via.position[0], via.position[1], via.diameter_mm, "ViaPad"))
-        g.holes.append((via.position[0], via.position[1], via.drill_mm, True))
+        _emit_via(g, via.position[0], via.position[1], via.diameter_mm, via.drill_mm,
+                  via.tented_front, via.tented_back, mask_clearance)
 
     for trace in board.traces:
         for seg in trace.segments:

@@ -224,6 +224,10 @@ def _via_dicts(board: ResolvedBoard) -> list[dict]:
             "y_mm": via.position[1],
             "diameter_mm": via.diameter_mm,
             "drill_mm": via.drill_mm,
+            # Per-side mask tenting (finding 019f8fe7cbaf): an untented side gets a
+            # mask opening over the via annulus; a tented side (default) does not.
+            "tented_front": via.tented_front,
+            "tented_back": via.tented_back,
         }
         for via in board.vias
     ]
@@ -539,6 +543,8 @@ def _kicad_via_dicts(board: ResolvedBoard, net_name_of: dict[str, str]) -> list[
             "diameter_mm": via.diameter_mm,
             "drill_mm": via.drill_mm,
             "net": net_name_of.get(via.net_id, ""),
+            "tented_front": via.tented_front,
+            "tented_back": via.tented_back,
         }
         for via in board.vias
     ]

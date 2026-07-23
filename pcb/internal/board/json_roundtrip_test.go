@@ -60,7 +60,7 @@ func TestJSONRoundTripPreservesExtraNested(t *testing.T) {
 		}},
 		Vias: []Via{{
 			ID: "via:" + repeat32, XMM: 5, YMM: 5,
-			Extra: map[string]interface{}{"tented": true},
+			Extra: map[string]interface{}{"microvia": true},
 		}},
 		MountingHoles: []Hole{{
 			ID: "hole:" + repeat32, XMM: 9, YMM: 9, DiameterMM: 3.2,
@@ -97,7 +97,7 @@ func TestJSONRoundTripPreservesExtraNested(t *testing.T) {
 	if back.Traces[0].Extra["impedance_ohm"] != 50.0 {
 		t.Fatalf("Trace Extra lost: %#v", back.Traces[0].Extra)
 	}
-	if back.Vias[0].Extra["tented"] != true {
+	if back.Vias[0].Extra["microvia"] != true {
 		t.Fatalf("Via Extra lost: %#v", back.Vias[0].Extra)
 	}
 	if back.MountingHoles[0].Extra["standoff"] != "M3" {
