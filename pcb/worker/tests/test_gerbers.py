@@ -428,7 +428,8 @@ def test_silk_transform_matches_pad_transform():
         "components": [
             {"ref": "U1", "footprint": "TESTFP", "x_mm": 15.0, "y_mm": 8.0,
              "rotation_deg": 37.0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": 2.0, "y_mm": 3.0, "drill_mm": 0.5}],
+             "pins": [{"number": "1", "x_mm": 2.0, "y_mm": 3.0, "drill_mm": 0.5,
+                       "annulus_diameter_mm": 1.0}],
              "graphics": [{"layer": "F.SilkS", "kind": "line",
                           "start": [2.0, 3.0], "end": [6.0, 3.0], "width": 0.15}]},
         ],

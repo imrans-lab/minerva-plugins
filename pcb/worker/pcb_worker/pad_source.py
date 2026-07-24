@@ -49,21 +49,37 @@ if TYPE_CHECKING:
 
 
 class PadGeometryError(ValueError):
-    """An SMD pad reached a size-consuming emitter with no copper geometry.
+    """A pad reached a size-consuming emitter with no faithful copper geometry.
 
-    Fail-closed signal for bug 019f7736b236: rather than flashing a placeholder
-    rectangle, the emitter refuses. Carries the component ref + pad number so the
-    caller (methods._gerbers/_generate) can surface it as a structured fab error.
+    Fail-closed signal: rather than flashing a placeholder rectangle (SMD, bug
+    019f7736b236) or INVENTING a copper ring (plated through-hole, K4 —
+    fabrication-critical copper is never invented, mirroring the board-hole
+    contract finding 019f8dbb7104), the emitter refuses. Carries the component
+    ref + pad number so the caller (methods._gerbers/_generate) can surface it as
+    a structured fab error.
     """
 
-    def __init__(self, ref: Any, number: Any, width: Any, height: Any):
+    def __init__(self, ref: Any, number: Any, message: str):
         self.ref = ref
         self.number = number
-        super().__init__(
+        super().__init__(message)
+
+    @classmethod
+    def smd_no_size(cls, ref: Any, number: Any, width: Any, height: Any) -> "PadGeometryError":
+        return cls(
+            ref, number,
             f"component {ref!r} pad {number!r} is SMD but has no copper geometry "
             f"(width={width}, height={height}); resolve its footprint or declare "
-            f"inline pad_width_mm/pad_height_mm — fail-closed, bug 019f7736b236"
-        )
+            f"inline pad_width_mm/pad_height_mm — fail-closed, bug 019f7736b236")
+
+    @classmethod
+    def th_no_annulus(cls, ref: Any, number: Any, drill: Any) -> "PadGeometryError":
+        return cls(
+            ref, number,
+            f"component {ref!r} pad {number!r} is a PLATED through-hole pad with no "
+            f"copper annulus (drill={drill}); author an 'annulus_diameter_mm' or a "
+            f"pad size — fail-closed, never invented (K4, mirrors the plated-board-"
+            f"hole contract finding 019f8dbb7104)")
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -173,7 +189,33 @@ def _require_smd_size(ref: Any, pad: PadGeom) -> None:
     """
     if pad.drill is None and not (pad.width and pad.width > 0
                                   and pad.height and pad.height > 0):
-        raise PadGeometryError(ref, pad.number, pad.width, pad.height)
+        raise PadGeometryError.smd_no_size(ref, pad.number, pad.width, pad.height)
+
+
+def require_th_annulus(pad: PadGeom, ref: Any) -> float:
+    """The round-annulus copper diameter for a PLATED through-hole pad — the SINGLE
+    accessor both fab emitters consume, so gerber and kicad can never diverge on the
+    "faithful-or-fail-closed" contract (K4).
+
+    Returns ``pad.annulus`` when present. A plated TH pad that reaches here with NO
+    resolved annulus fails CLOSED (``PadGeometryError``) — the emitter never invents
+    a ring (the retired ``pad.annulus or drill*2`` fallback), exactly as a plated
+    board hole must author its ``annulus_mm`` (finding 019f8dbb7104). On the
+    production path this can't fire — a footprint TH pad's copper size doubles as the
+    annulus (placed_pad_to_geom / _from_resolved) and a plated copper pad with no
+    size is already rejected at compile by ``_check_pad_capabilities``
+    (``missing_pad_size``). This is the defense-in-depth for the raw loose-dict path:
+    a plated TH pin authoring NEITHER an ``annulus_diameter_mm`` NOR a pad size (both
+    factories now derive the annulus from an authored size — see ``_from_pin`` /
+    ``_from_resolved``).
+
+    Callers gate this on the SAME predicate the emitters use for the round-annulus
+    branch (plated, drilled, equal-axis land), so an unplated ``np_thru_hole`` (bare
+    mechanical hole, no copper ring) never reaches it.
+    """
+    if pad.annulus is None:
+        raise PadGeometryError.th_no_annulus(ref, pad.number, pad.drill)
+    return pad.annulus
 
 
 # Circle width/height must agree to within this to be a faithful circle.
@@ -332,14 +374,22 @@ def _from_pin(pin: dict) -> PadGeom:
     drill = _opt_num(pin.get("drill_mm"))
     if drill is not None and drill <= 0:
         drill = None
+    width = _opt_num(pin.get("pad_width_mm"))
+    # A drilled pad's round-annulus copper: the pin's authored annulus_diameter_mm
+    # when present, else its authored pad width doubles as the annulus — the SAME
+    # "copper size IS the annulus" rule _from_resolved applies, so the raw and
+    # resolved factories agree. Only a plated TH pin authoring NEITHER an annulus
+    # nor a size resolves annulus=None and fails closed downstream (require_th_annulus).
+    explicit_annulus = _opt_num(pin.get("annulus_diameter_mm"))
     return PadGeom(
         number=pin.get("number"),
         x=_num(pin.get("x_mm")),
         y=_num(pin.get("y_mm")),
-        width=_opt_num(pin.get("pad_width_mm")),
+        width=width,
         height=_opt_num(pin.get("pad_height_mm")),
         drill=drill,
-        annulus=_opt_num(pin.get("annulus_diameter_mm")),
+        annulus=(explicit_annulus if explicit_annulus is not None
+                 else (width if drill is not None else None)),
         plated=(pin.get("plated", True) is not False),
         shape="rect",
         corner_rratio=None,  # inline-pin fallback carries no footprint corner datum

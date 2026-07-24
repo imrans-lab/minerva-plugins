@@ -32,7 +32,7 @@ from agent_router import layers as _layers
 
 from .geometry import place_point
 from .ir_projection import graphic_to_dict, outline_frame
-from .pad_source import iter_pads, th_land
+from .pad_source import iter_pads, require_th_annulus, th_land
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -478,9 +478,11 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         if net_no:
             net_expr = f' (net {net_no} "{_esc(net_name_of.get(net_no, ""))}")'
         if drill is not None:
-            # Through-hole pad. annulus geometry is the real copper dim when
-            # resolved, else the pin's Extra annulus, else the 2x-drill nominal. The
-            # land SHAPE is decided by the shared ``th_land`` (also gerber._harvest),
+            # Through-hole pad. The round-annulus copper dim is the real resolved
+            # copper (or the pin's authored annulus/size); a plated TH pad that
+            # resolved no copper at all fails CLOSED via require_th_annulus — never
+            # an invented 2x-drill ring (K4). The land SHAPE is decided by the shared
+            # ``th_land`` (also gerber._harvest),
             # emitted below: an equal-axis DEFAULTED land is a round ``circle``
             # annulus, while an OBLONG or authored-cornered (rect/roundrect) land is a
             # faithful shaped land (finding 019f8b7fd295, D1) — the two fab emitters
@@ -523,7 +525,10 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                     f'(layers "*.Cu" "*.Mask"){net_expr})'
                 )
             else:
-                annulus = pad.annulus if pad.annulus is not None else drill * 2
+                # Round thru_hole land: the plated TH copper ring. FAIL-CLOSED if the
+                # pad resolved no annulus — never the retired `else drill*2` invention
+                # (K4). The SHARED accessor keeps kicad + gerber identical here.
+                annulus = require_th_annulus(pad, ref)
                 lines.append(
                     f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '

@@ -333,3 +333,75 @@ def test_has_resolved_pads_is_the_single_marker():
         assert pads and all(p.from_resolve is marker for p in pads)
     # This board fully resolves, so the marker is True everywhere.
     assert all(pad_source.has_resolved_pads(c) for c in resolved["components"])
+
+
+# ---------------------------------------------------------------------------
+# (e) FAIL-CLOSED: plated TH pad with NO resolved annulus (K4 — retired the
+#     invented `pad.annulus or drill*2` fallback). A plated through-hole pad that
+#     authors neither an annulus nor a pad size no longer flashes a 2x-drill ring:
+#     BOTH raw emitters RAISE PadGeometryError. Authoring the annulus emits it
+#     faithfully — the SAME diameter in gerber (copper aperture) and kicad
+#     (thru_hole size), never invented.
+# ---------------------------------------------------------------------------
+
+
+def _raw_board_plated_th(annulus=None, pad_size=None):
+    pin = {"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 1.0}
+    if annulus is not None:
+        pin["annulus_diameter_mm"] = annulus
+    if pad_size is not None:
+        pin["pad_width_mm"] = pad_size
+        pin["pad_height_mm"] = pad_size
+    return {
+        "version": 1, "name": "thtest", "width_mm": 20, "height_mm": 20,
+        "components": [
+            {"ref": "J1", "footprint": "HDR", "x_mm": 10.0, "y_mm": 10.0,
+             "rotation_deg": 0, "layer": "top", "pins": [pin]},
+        ],
+        "nets": [],
+    }
+
+
+def test_raw_plated_th_no_annulus_fails_closed_gerber():
+    # No annulus, no pad size on a plated TH pin -> gerber refuses (never invents
+    # drill*2). This is the raw loose-dict path compile_board never sees.
+    with pytest.raises(pad_source.PadGeometryError):
+        gerber.build_gerbers(_raw_board_plated_th(), name="thtest")
+
+
+def test_raw_plated_th_no_annulus_fails_closed_kicad():
+    # kicad reads the SAME shared pad_source contract, so it fails closed identically.
+    with pytest.raises(pad_source.PadGeometryError):
+        kicad.generate_kicad_pcb(_raw_board_plated_th())
+
+
+def test_raw_plated_th_authored_annulus_emits_faithfully_both_emitters():
+    # Authoring the annulus (1.8) emits it faithfully and IDENTICALLY in both
+    # emitters — the diameter is honoured, never a 2x-drill (=2.0) invention.
+    board = _raw_board_plated_th(annulus=1.8)
+    fcu = next(v for k, v in gerber.build_gerbers(board, name="thtest").items()
+               if "F_Cu" in k)
+    import re
+    assert re.search(r"%ADD\d+C,1\.8\d*\*%", fcu), \
+        f"gerber F_Cu missing the authored 1.8 annulus aperture:\n{fcu}"
+    assert not re.search(r"%ADD\d+C,2(\.0+)?\*%", fcu), \
+        "gerber F_Cu leaked a 2x-drill (2.0) invented annulus"
+    pcb = kicad.generate_kicad_pcb(board)
+    assert "thru_hole" in pcb and "(size 1.8 1.8)" in pcb, \
+        f"kicad missing the authored 1.8 thru_hole land:\n{pcb}"
+
+
+def test_raw_plated_th_equal_axis_pad_size_becomes_the_annulus():
+    # A plated TH pin that authored a SIZE (equal-axis 1.8) but no annulus is NOT
+    # fail-closed — its authored copper size doubles as the round annulus, exactly
+    # as the resolved path does (_from_pin mirrors _from_resolved). Only a pin that
+    # authored NEITHER annulus nor size fails closed.
+    board = _raw_board_plated_th(pad_size=1.8)
+    fcu = next(v for k, v in gerber.build_gerbers(board, name="thtest").items()
+               if "F_Cu" in k)
+    import re
+    assert re.search(r"%ADD\d+C,1\.8\d*\*%", fcu), \
+        f"gerber F_Cu missing the size-derived 1.8 annulus aperture:\n{fcu}"
+    assert not re.search(r"%ADD\d+C,2(\.0+)?\*%", fcu), \
+        "gerber F_Cu leaked a 2x-drill (2.0) invented annulus"
+    assert "(size 1.8 1.8)" in kicad.generate_kicad_pcb(board)

@@ -55,7 +55,7 @@ from .geometry import (
     rotate_local_offset as _rotate,
 )
 from .ir_projection import graphic_to_dict, outline_frame
-from .pad_source import iter_pads, placed_pad_to_geom, th_land
+from .pad_source import iter_pads, placed_pad_to_geom, require_th_annulus, th_land
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -436,7 +436,11 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                     g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
                     g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
                 else:
-                    annulus = pad.annulus or (drill * 2.0)
+                    # Round land: the plated TH copper ring. FAIL-CLOSED if the pad
+                    # resolved no annulus — never the retired `pad.annulus or drill*2`
+                    # invention (K4). The SHARED accessor keeps gerber + kicad
+                    # identical on this contract.
+                    annulus = require_th_annulus(pad, ref)
                     g.th_annuli.append((px, py, annulus, "ComponentPad"))
                     mask_d = _mask_dim(annulus, margin, ref, pad.number)
                     # Round land: circular mask opening, enlarged by the per-pad margin.
