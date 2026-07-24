@@ -34,8 +34,10 @@ the solder-mask openings now carry the compiler's resolved `0.05 mm` per-side
 clearance (`R,1.1X1.55` / `C,1.7`) rather than the `0.1 mm` default the legacy
 `resolve_board_best_effort` path used — the corrected bytes this drift pin now
 tracks. F.SilkS still differs from the correctness reference (`spike-gerber-v1`):
-the emitter draws courtyards procedurally; silk is excluded from the correctness
-oracle (Option A).
+the spike reference draws courtyard outlines procedurally, while the production
+emitter emits only real resolved footprint silk (none for these simple 0805 / TH
+footprints — K4 retired the courtyard-box placeholder). Silk is excluded from the
+correctness oracle (Option A).
 
 Note: `pcb/scripts/capture_emitter_golden.py` regenerates this snapshot through
 the same `build_fab` (compile → `build_gerbers_ir`) path, so running it

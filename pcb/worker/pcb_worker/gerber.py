@@ -445,10 +445,10 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                 # UNPLATED (np_thru_hole): NO copper land — just a DRILL-size mask
                 # opening on both sides, matching kicad's np_thru_hole `(size drill
                 # drill)` on "*.Mask": a bare hole, mask open to the drill, no copper
-                # ring (finding 019f8fe77068). Uses the literal drill (no per-pad mask
-                # margin); a nonzero board mask clearance is not added here (a mask
-                # ring on a mechanical hole is cosmetic), so the two emitters can
-                # differ by that clearance only — filed as a follow-up.
+                # ring (finding 019f8fe77068). Uses the literal drill (no mask margin);
+                # kicad emits the SAME drill-size opening — its np_thru_hole carries an
+                # explicit `(solder_mask_margin 0.0)` — so the two emitters AGREE on the
+                # NPTH mask (R4d closed the earlier board-clearance divergence).
                 g.mask_top.append(_circle_mask(px, py, drill))
                 g.mask_bot.append(_circle_mask(px, py, drill))
             g.holes.append((px, py, drill, is_plated))

@@ -23,7 +23,7 @@ convention as `pcb_generate`. `out_dir` optionally also writes to disk.
 | `<base>-B_Cu.gbr` | Bottom copper: TH/via annuli, bottom traces |
 | `<base>-F_Mask.gbr` | Top solder-mask openings (pad + clearance) |
 | `<base>-B_Mask.gbr` | Bottom solder-mask openings |
-| `<base>-F_SilkS.gbr` | Top silkscreen (resolved footprint silk graphics; courtyard-box fallback when none) |
+| `<base>-F_SilkS.gbr` | Top silkscreen (resolved footprint silk graphics only; no output when the footprint carries none — K4) |
 | `<base>-Edge_Cuts.gbr` | Board outline rectangle from origin + width/height |
 | `<base>-PTH.drl` | Plated through-holes (Excellon) — only if the board has any |
 | `<base>-NPTH.drl` | Non-plated holes (Excellon) — only if the board has any |
@@ -73,8 +73,9 @@ per tool, `M30`. Metric, absolute, 3.3 decimal coordinates.
 
 `F_SilkS` emits the component's **real resolved silkscreen primitives** (lines,
 arcs, polygons from the resolved footprint's `F.SilkS` graphics) when the footprint
-carries them; a component **without** resolved silk graphics falls back to a
-**courtyard-box outline** around its pad extent. Silkscreen **text** (vectorised
+carries them; a component **without** resolved silk graphics contributes **no silk
+output** — K4 retired the procedural courtyard-box placeholder, matching the KiCad
+emitter, which never drew one (faithful-or-nothing). Silkscreen **text** (vectorised
 refdes/value glyphs) is still not rendered — `gerber-writer` has no glyph
 primitive — so real silk-text correctness is tracked separately (silk-text
 `019f77fd6d69`; coverage audit `019f77fd9c6c`).
@@ -133,8 +134,9 @@ both drill files in `gerbv` or KiCad GerbView and confirm (extends the spike's
 checklist to the production `pcb_gerbers` output):
 
 1. **Zero parser warnings** in the viewer for every layer.
-2. **Visual match to intent:** SMD pads under their silk courtyards; TH pads show
-   their resolved copper land (a round annulus, or an authored square / roundrect
+2. **Visual match to intent:** SMD pads show their resolved copper land, with silk
+   only where the footprint carries real graphics (no courtyard boxes — K4); TH pads
+   show their resolved copper land (a round annulus, or an authored square / roundrect
    land — D1) with a drilled hole on both copper layers; traces land exactly on
    pads/vias; the outline is a clean closed rectangle; mask openings are centered
    on their pads with visible clearance; NPTH holes get a **drill-size mask
