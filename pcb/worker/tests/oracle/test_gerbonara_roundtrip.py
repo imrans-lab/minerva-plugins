@@ -43,6 +43,12 @@ def test_gerbonara_reads_current_exporter_output(board_path, base, expected_dril
     total_apertures = 0
     for name, text in gbrs.items():
         gf = GerberFile.from_string(text, filename=name)
+        # A legend/silk layer is legitimately EMPTY when no component authored F.SilkS
+        # graphics (K4: the procedural courtyard box is retired). It must still PARSE
+        # cleanly; it just carries no apertures. Every fabrication-bearing layer
+        # (copper/mask/edge) is still required non-empty.
+        if name.endswith("F_SilkS.gbr") and gf.is_empty:
+            continue
         assert not gf.is_empty, f"{name}: gerbonara read an empty layer"
         apertures = list(gf.apertures())
         assert apertures, f"{name}: no apertures/pads parsed"

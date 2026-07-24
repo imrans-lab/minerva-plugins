@@ -33,7 +33,7 @@ SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
 GOLDEN_DIR = HERE / "testdata" / "gerber_golden"
 
-BOUNDS_TOL_MM = 2.0  # slack for pad half-extents / silk courtyard margins
+BOUNDS_TOL_MM = 2.0  # slack for pad half-extents / real silk graphics past nominal extent
 
 # (board path, golden base name)
 CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
@@ -85,8 +85,12 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
             assert dcode in define_pos, f"{name}: aperture D{dcode} used but never defined"
             assert define_pos[dcode] <= i, f"{name}: D{dcode} selected before its %ADD"
 
-    # At least one plot command.
-    assert re.search(r"D0[123]\*", text), f"{name}: no D01/D02/D03 plot commands"
+    # At least one plot command — EXCEPT a legend/silk layer, which is legitimately
+    # EMPTY when no component authored F.SilkS graphics (K4: the procedural courtyard
+    # box is retired; no resolved silk means an empty legend layer, still a valid
+    # gerber with header/footer).
+    if not name.endswith("F_SilkS.gbr"):
+        assert re.search(r"D0[123]\*", text), f"{name}: no D01/D02/D03 plot commands"
 
     # X2 attributes — accept both the %TF..*% and the G04 #@! comment form.
     assert re.search(r"TF\.FileFunction,([^*]+)\*", text), f"{name}: no .FileFunction"
@@ -388,9 +392,11 @@ def test_silk_real_graphics_replaces_placeholder_box():
 
 
 def test_silk_omitted_when_component_has_no_graphics():
-    """A component with no 'graphics' key still gets the courtyard-box
-    placeholder (unchanged behaviour) even on a board where OTHER components
-    do have resolved graphics."""
+    """A component with no 'graphics' contributes NO F.SilkS (K4: the procedural
+    courtyard-box placeholder is retired — no resolved silk means no silk). On a
+    mixed board only the component that authored real silk graphics appears; the
+    graphics-less one adds nothing (matching the kicad emitter, which never drew a
+    box)."""
     board = {
         "version": 1, "name": "mixed", "width_mm": 40, "height_mm": 40,
         "components": [
@@ -414,8 +420,8 @@ def test_silk_omitted_when_component_has_no_graphics():
     files = gerber.build_gerbers(board, name="mixed")
     silk = files["mixed-F_SilkS.gbr"]
     moves = _gerber_move_points(silk)
-    # R1's box (4 segments -> 1 D02 move) + U1's real silk line (1 D02 move).
-    assert len(moves) == 2, f"expected one box move + one silk-line move, got {moves}"
+    # Only U1's real silk line (1 D02 move). R1 has no graphics -> no box, no silk.
+    assert len(moves) == 1, f"expected only U1's real silk-line move, got {moves}"
 
 
 def test_silk_transform_matches_pad_transform():

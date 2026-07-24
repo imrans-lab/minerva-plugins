@@ -84,7 +84,6 @@ DEFAULT_VIA_DRILL_MM = 0.4
 DEFAULT_TRACE_WIDTH_MM = 0.25
 DEFAULT_MASK_CLEARANCE_MM = 0.1   # per-side growth of a mask opening over its pad
 SILK_LINE_WIDTH_MM = 0.15
-SILK_COURTYARD_MARGIN_MM = 0.5    # box drawn around a component's pad extent
 EDGE_CUTS_WIDTH_MM = 0.1
 
 # Gerber output layer filenames (suffixes appended to the board base name).
@@ -338,9 +337,6 @@ class _Geometry:
         self.traces_bot: list[tuple[float, float, float, float, float]] = []
         # Drill hits: (x, y, diameter, plated?)
         self.holes: list[tuple[float, float, float, bool]] = []
-        # Silk courtyard boxes (top side, components WITHOUT graphics only):
-        # (cx, cy, half_w, half_h)
-        self.silk_boxes: list[tuple[float, float, float, float]] = []
         # Real footprint silk (top side, components WITH graphics), harvested
         # from component["graphics"] (resolve_board) and transformed to board
         # coords with the same _rotate() convention as pads.
@@ -393,16 +389,14 @@ def _circle_mask(x: float, y: float, d: float) -> tuple:
 
 
 def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
-               top: bool, ref, mask_clearance: float) -> list[tuple[float, float]]:
+               top: bool, ref, mask_clearance: float) -> None:
     """Emit one component's pads into ``g`` — the SHARED, byte-sensitive pad path
     both the loose-dict harvest (``iter_pads(comp)``) and the IR-native harvest
     (``placed_pad_to_geom(placed)``) drive, so the two cannot diverge. ``pads`` is an
-    iterable of :class:`PadGeom`; returns the pin extents for silk courtyard sizing."""
-    pin_extents: list[tuple[float, float]] = []
+    iterable of :class:`PadGeom`."""
     for pad in pads:
         ox, oy = _rotate(pad.x, pad.y, rot)
         px, py = cx + ox, cy + oy
-        pin_extents.append((px, py))
 
         # Aperture rotation SOURCE: each pad's own ABSOLUTE rotation
         # (PlacedPad.rotation_deg — placement rot + footprint-local pad rot, baked by
@@ -473,30 +467,22 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
             mh = _mask_dim(h, margin, ref, pad.number)
             mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
             (g.mask_top if top else g.mask_bot).append(mask)
-    return pin_extents
 
 
-def _emit_silk(g: _Geometry, graphics, pin_extents: list[tuple[float, float]],
-               cx: float, cy: float, rot: float, top: bool, ref) -> None:
+def _emit_silk(g: _Geometry, graphics, cx: float, cy: float, rot: float,
+               top: bool, ref) -> None:
     """Emit one component's F.SilkS — the SHARED silk path. A component with resolved
-    footprint graphics gets its REAL F.SilkS outline; one without keeps the
-    courtyard-box placeholder (byte-golden boards carry no graphics, so they take the
-    box path unchanged). ``graphics`` is a list of graphic dicts or None. Bottom-side
-    (B.SilkS) is out of scope, as in the original box code."""
-    has_graphics = isinstance(graphics, list) and len(graphics) > 0
-    if has_graphics:
-        if top:
-            for graphic in graphics:
-                if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
-                    _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
-    elif top and pin_extents:
-        xs = [p[0] for p in pin_extents]
-        ys = [p[1] for p in pin_extents]
-        half_w = (max(xs) - min(xs)) / 2 + SILK_COURTYARD_MARGIN_MM
-        half_h = (max(ys) - min(ys)) / 2 + SILK_COURTYARD_MARGIN_MM
-        g.silk_boxes.append(((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2,
-                             max(half_w, SILK_COURTYARD_MARGIN_MM),
-                             max(half_h, SILK_COURTYARD_MARGIN_MM)))
+    footprint graphics gets its REAL F.SilkS outline; one WITHOUT graphics gets NO
+    silk (K4: the procedural courtyard-box placeholder is retired — no resolved silk
+    means no silk output, matching the kicad emitter, which never drew a box). A
+    source that CLAIMED silk it could not emit still WARNs via _harvest_silk_graphic;
+    silk-less-by-design is silent. ``graphics`` is a list of graphic dicts or None.
+    Bottom-side (B.SilkS) is out of scope."""
+    if not (isinstance(graphics, list) and graphics and top):
+        return
+    for graphic in graphics:
+        if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
+            _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
 
 
 def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
@@ -556,7 +542,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
     dr_via_dia = _num(dr.get("via_diameter_mm"), DEFAULT_VIA_DIAMETER_MM)
     dr_via_drill = _num(dr.get("via_drill_mm"), DEFAULT_VIA_DRILL_MM)
 
-    # --- Components: pads (SMD + TH), silk courtyards. ---
+    # --- Components: pads (SMD + TH), real footprint silk. ---
     for comp in _list(board.get("components")):
         if not isinstance(comp, dict):
             continue
@@ -570,9 +556,9 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         # fail-closed contract: an SMD pad with no resolved/inline copper size
         # raises PadGeometryError rather than flashing a placeholder land
         # (bug 019f7736b236) — real runs resolve the board first (methods gate).
-        pin_extents = _emit_pads(g, iter_pads(comp, require_smd_size=True),
-                                 cx, cy, rot, top, ref, mask_clearance)
-        _emit_silk(g, comp.get("graphics"), pin_extents, cx, cy, rot, top, ref)
+        _emit_pads(g, iter_pads(comp, require_smd_size=True),
+                   cx, cy, rot, top, ref, mask_clearance)
+        _emit_silk(g, comp.get("graphics"), cx, cy, rot, top, ref)
 
     # --- Vias: copper annulus on both layers + plated drill. ---
     for via in _list(board.get("vias")):
@@ -754,16 +740,6 @@ def _add_silk_arcs(layer: DataLayer, arcs) -> None:
         layer.add_trace_arc(start, end, center, orientation, w, "")
 
 
-def _rect_path(cx: float, cy: float, half_w: float, half_h: float) -> GPath:
-    p = GPath()
-    p.moveto((cx - half_w, cy - half_h))
-    p.lineto((cx + half_w, cy - half_h))
-    p.lineto((cx + half_w, cy + half_h))
-    p.lineto((cx - half_w, cy + half_h))
-    p.lineto((cx - half_w, cy - half_h))
-    return p
-
-
 def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[str, str]:
     min_x, min_y, max_x, max_y = board_model.board_bounds(board)
 
@@ -796,12 +772,10 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     out["B_Mask"] = _dump(b_mask, creation_date)
 
     # F.SilkS — real footprint silk (line/circle/poly/arc) for components with
-    # resolved graphics; courtyard box placeholder for the rest (gerber-writer
-    # has no glyph/text primitive; real reference-designator text is future
-    # scope, unrelated to this round).
+    # resolved graphics ONLY; a component without graphics contributes NO silk (K4:
+    # the procedural courtyard-box placeholder is retired). Real reference-designator
+    # text is future scope (gerber-writer has no glyph/text primitive).
     f_silks = DataLayer("Legend,Top", negative=False)
-    for (cx, cy, hw, hh) in g.silk_boxes:
-        f_silks.add_traces_path(_rect_path(cx, cy, hw, hh), SILK_LINE_WIDTH_MM, "")
     _add_silk_lines(f_silks, g.silk_lines)
     _add_silk_circles(f_silks, g.silk_circles)
     _add_silk_polys(f_silks, g.silk_polys)
@@ -902,14 +876,13 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         number_of = {p.source_id: p.number for p in board.footprint_for(comp).pads}
         pads = [placed_pad_to_geom(p, number_of.get(p.source_id, ""))
                 for p in comp.placed_pads]
-        pin_extents = _emit_pads(g, pads, 0.0, 0.0, 0.0, top, ref, mask_clearance)
+        _emit_pads(g, pads, 0.0, 0.0, 0.0, top, ref, mask_clearance)
         # Pass ALL placed graphics (NOT pre-filtered to F.SilkS): _emit_silk's
-        # has-graphics check is layer-agnostic and its internal F.SilkS filter does
-        # the selecting — exactly as the loose-dict path does. Pre-filtering here
-        # would make a component with non-F.SilkS graphics (e.g. F.Fab/F.CrtYd only)
-        # fall to the courtyard-box branch instead of emitting no silk (Fable C5a).
+        # internal F.SilkS filter does the selecting — exactly as the loose-dict path
+        # does. A component whose graphics are all non-F.SilkS (e.g. F.Fab/F.CrtYd)
+        # simply emits no silk (no procedural box remains to fall back to).
         graphics = [graphic_to_dict(gr) for gr in comp.placed_graphics]
-        _emit_silk(g, graphics, pin_extents, 0.0, 0.0, 0.0, top, ref)
+        _emit_silk(g, graphics, 0.0, 0.0, 0.0, top, ref)
 
     for via in board.vias:
         _emit_via(g, via.position[0], via.position[1], via.diameter_mm, via.drill_mm,

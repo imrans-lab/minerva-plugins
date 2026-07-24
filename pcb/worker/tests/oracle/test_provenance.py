@@ -143,11 +143,13 @@ def test_spike_golden_correctness_oracle_matches_emitter():
     never a silent pass; once the owner sets blessed=true it is a live assertion
     and pad bug 019f7736b236 is CLOSED.
 
-    ORACLE SCOPE (Option A): silk is EXCLUDED — the emitter draws courtyards
-    procedurally, legitimately differently from this synthetic golden's
-    hand-drawn ones. Silk correctness is earned separately against real
-    footprints that carry real silk graphics (silk-text 019f77fd6d69; coverage
-    audit 019f77fd9c6c), not by pinning to a synthetic golden's courtyard boxes.
+    ORACLE SCOPE (Option A): silk is EXCLUDED — F.SilkS is a cosmetic legend
+    layer, not fabrication-critical geometry. The emitter emits only REAL
+    footprint silk graphics (K4: the procedural courtyard-box placeholder is
+    retired; no resolved silk means no silk). Silk correctness is earned
+    separately against real footprints that carry real silk graphics (silk-text
+    019f77fd6d69; coverage audit 019f77fd9c6c), not by pinning to this synthetic
+    golden.
     """
     prov = _prov()
     usable, reason = correctness_oracle_status(prov, SPIKE_ID)

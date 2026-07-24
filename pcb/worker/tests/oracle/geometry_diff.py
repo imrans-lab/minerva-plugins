@@ -288,12 +288,12 @@ class GeometryDiff:
         Used to scope a correctness assertion to the layers a golden genuinely
         pins. A synthetic golden can be a trusted oracle for the fabrication-
         critical geometry it was blessed against (copper/mask/drill/edge) while
-        NOT being a meaningful oracle for a layer the emitter generates
-        procedurally in a legitimately different way (e.g. F.SilkS courtyards).
-        Excluding such a layer is NOT hiding a defect: silk correctness is
-        earned separately, against real footprints that carry real silk graphics
-        (see the silk-text/coverage-audit follow-ups), not by asserting the
-        emitter reproduces a synthetic golden's hand-drawn courtyard boxes.
+        NOT being a meaningful oracle for a cosmetic legend layer (F.SilkS),
+        which carries only real footprint silk graphics (K4: the procedural
+        courtyard-box placeholder is retired). Excluding such a layer is NOT
+        hiding a defect: silk correctness is earned separately, against real
+        footprints that carry real silk graphics (see the silk-text/coverage-
+        audit follow-ups), not by pinning to a synthetic golden.
         """
         drop = set(names)
         return GeometryDiff([d for d in self.deltas if d.layer not in drop])
