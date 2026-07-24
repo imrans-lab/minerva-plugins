@@ -32,7 +32,7 @@ OUT_DIR = PCB / "worker" / "tests" / "oracle" / "golden_emitter"
 
 def main() -> int:
     # Capture THROUGH THE PRODUCTION (IR) PATH, exactly as methods._gerbers runs
-    # it (K4 phase 2): COMPILE (strict) -> ir_to_board_dict -> build_gerbers. The
+    # it: COMPILE (strict) -> build_gerbers_ir (the IR-native gerber path). The
     # raw spike would fail closed (its SMD pins carry no inline geometry), so the
     # drift pin tracks the compiled/resolved emitter output — the real production
     # input. build_fab centralizes this path (the SAME helper the emitter tests +

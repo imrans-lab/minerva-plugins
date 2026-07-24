@@ -107,7 +107,7 @@ def test_real_placement_footprints_round_trip_through_real_pcbnew():
     inverse-transform math against the real parser (the banked lesson), and asserts
     the footprints now sit at their real placements (CPL / editability restored),
     not stacked at the origin. Routed through the PRODUCTION methods path
-    (compile -> ir_to_kicad_board_dict -> kicad.generate)."""
+    (compile -> kicad.generate_ir)."""
     from pcb_worker.methods import handle_request
     board = {
         "version": 1, "name": "rp", "width_mm": 60, "height_mm": 60,

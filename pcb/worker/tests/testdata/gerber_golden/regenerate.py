@@ -32,7 +32,7 @@ CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
 
 def main() -> int:
     # Build THROUGH THE PRODUCTION PATH, exactly as methods._gerbers now does
-    # COMPILE (strict) -> ir_to_board_dict -> build_gerbers.
+    # COMPILE (strict) -> build_gerbers_ir.
     # The spike's footprints (R_0805/C_0805/TH_TestPoint) compile to their real
     # lands (absolute placement, resolved mask clearance); drilltest's hand-authored
     # footprints are not in the seed lib so the strict compile fail-closes it and it

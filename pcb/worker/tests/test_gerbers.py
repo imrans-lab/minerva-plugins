@@ -24,9 +24,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import board_model, gerber, resolve
+from pcb_worker import board_model, gerber
 from pcb_worker.methods import handle_request
-from tests.gerber_fab import placed_board_dict
+from tests.gerber_fab import build_fab
 
 HERE = Path(__file__).resolve().parent
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
@@ -43,18 +43,14 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def _prep(path: Path) -> dict:
-    """The board dict fed to the PLACED emitter, exactly as methods._gerbers now
-    does (K4 phase 1): COMPILE (strict) -> ir_to_board_dict for the spike (real
-    lands, absolute placement); the drill fixture's hand-authored footprints are
-    not in the seed lib so the strict compile fail-closes it and it is emitted
-    from its raw dict directly (all-TH at rotation 0 -> placed == unplaced). No
-    caller remains on the legacy resolve_board_best_effort path."""
-    return placed_board_dict(path)
-
-
 def _build(path: Path, base: str) -> dict[str, str]:
-    return gerber.build_gerbers(_prep(path), name=base)
+    """Emit a fixture exactly as methods._gerbers now does (K4 phase 1): COMPILE
+    (strict) -> build_gerbers_ir for the spike (real lands, absolute placement);
+    the drill fixture's hand-authored footprints are not in the seed lib so the
+    strict compile fail-closes it and it is emitted from its raw dict directly
+    (all-TH at rotation 0 -> placed == unplaced). No caller remains on the legacy
+    resolve_board_best_effort path."""
+    return build_fab(path, base)
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +104,8 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
 
 @pytest.mark.parametrize("board_path,base", CASES)
 def test_gerber_layers_structural(board_path, base):
-    board = _prep(board_path)
-    bounds = board_model.board_bounds(board)
-    files = gerber.build_gerbers(board, name=base)
+    bounds = board_model.board_bounds(_load(board_path))
+    files = build_fab(board_path, base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     # Exactly the six expected layers.
@@ -129,7 +124,7 @@ def test_gerber_pygerber_round_trip(board_path, base):
         OnParserErrorEnum,
     )
 
-    files = gerber.build_gerbers(_prep(board_path), name=base)
+    files = build_fab(board_path, base)
     for name, text in files.items():
         if not name.endswith(".gbr"):
             continue
@@ -231,7 +226,7 @@ def _golden_names() -> list[str]:
 
 @pytest.mark.parametrize("board_path,base", CASES)
 def test_matches_goldens(board_path, base):
-    files = gerber.build_gerbers(_prep(board_path), name=base)
+    files = build_fab(board_path, base)
     for fname, content in files.items():
         golden = GOLDEN_DIR / fname
         assert golden.exists(), f"missing golden {fname} (run regenerate.py)"

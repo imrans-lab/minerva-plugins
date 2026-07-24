@@ -4,15 +4,14 @@ These drive ``methods.handle_request({"method": "gerbers"/"generate", ...})`` �
 PRODUCTION worker entry point — to prove the cutover reaches the reply the Go
 bridge actually returns. Before W8.2 the fab methods ran a best-effort resolve and
 IGNORED pin overrides, per-pad rotation and the bottom-side mirror; now they
-COMPILE (strict) → ``ir_to_board_dict``/``ir_to_kicad_board_dict`` → emit, so all
+COMPILE (strict) → ``build_gerbers_ir``/``generate_ir`` → emit, so all
 three reach the emitted bytes IN THE REPLY. The pipeline under test:
 
     handle_request(gerbers/generate)
         -> compile_board(board)              (STRICT; fail-closed)
-        -> ir_to_board_dict / ir_to_kicad_board_dict
-        -> gerber.build_gerbers / kicad.generate
+        -> gerber.build_gerbers_ir / kicad.generate_ir
 
-The emitter-level proofs live in test_ir_adapter.py; these are the METHODS-LEVEL
+The emitter-level proofs live in test_ir_fab.py; these are the METHODS-LEVEL
 proofs — the same wins surfacing through the real request handler — plus the
 strict fail-closed cutover behavior and diagnostic forwarding.
 """
@@ -25,7 +24,7 @@ from pcb_worker.methods import handle_request
 
 
 # ---------------------------------------------------------------------------
-# Helpers (mirror the board builder + gerber/Excellon parsers in test_ir_adapter).
+# Helpers (mirror the board builder + gerber/Excellon parsers in test_ir_fab).
 # ---------------------------------------------------------------------------
 
 

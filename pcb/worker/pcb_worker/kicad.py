@@ -17,7 +17,10 @@ Edge.Cuts, vias). The .kicad_sch/.kicad_pro are minimal netlist-carrying
 skeletons (a fully symbol-placed schematic needs symbol-library data — next
 child scope).
 
-All functions are pure: board dict → text.
+Emission is pure + deterministic. There are two entry shapes: the legacy
+``generate(board_dict)`` (loose-dict → text) and the IR-native
+``generate_ir(ResolvedBoard)`` (compiled IR → text, via the ``_ir_board_dict``
+projection); both write the same s-expression bytes from authored geometry.
 """
 
 from __future__ import annotations
@@ -28,20 +31,14 @@ from typing import Any
 from agent_router import layers as _layers
 
 from .geometry import place_point
+from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import iter_pads, th_land
 from .resolved_board import (
-    ArcGeometry,
-    BoardOutline,
-    CircleGeometry,
     Diagnostic,
     DiagnosticSeverity,
     EntityKind,
-    LineGeometry,
     PlacedGraphic,
     PlacedPad,
-    PolygonGeometry,
-    ProfileOutline,
-    RectOutline,
     ResolvedBoard,
     ResolvedComponent,
     ResolvedHole,
@@ -138,10 +135,12 @@ def _pad_at(px: float, py: float, rotation: float | None) -> str:
     """The pad ``(at ...)`` s-expression. KiCad's pad ``(at)`` third value is the
     ABSOLUTE pad angle (footprint rotation + the pad's own local rotation), NOT a
     footprint-relative one — pcbnew stores it absolute and re-derives the relative
-    part on load. The caller MUST therefore pass an ABSOLUTE angle. The IR fab
-    bridge (ir_to_kicad_board_dict) satisfies this: it emits every footprint at
-    identity ``(at 0 0 0)`` and passes ``PlacedPad.rotation_deg`` (already the
-    absolute combined angle), so the emitted value is correct.
+    part on load. The caller MUST therefore pass an ABSOLUTE angle. The IR-native
+    path (``generate_ir`` → ``_ir_board_dict``) satisfies this: each footprint sits
+    at its REAL placement with pad POSITIONS localized (see
+    ``_kicad_component_to_dict``/``_to_footprint_local``), but the pad ANGLE passed
+    here is ``PlacedPad.rotation_deg`` — already the absolute combined angle —
+    unchanged, so the emitted value is correct.
 
     Emitted ONLY when a non-zero angle is present, so a pad with no rotation
     (``None``) or zero emits ``(at px py)`` — byte-identical to the pre-W8 emission
@@ -630,34 +629,12 @@ def generate(board: dict, base_name: str | None = None) -> KicadResult:
 
 
 # ===========================================================================
-# IR->dict projection (C5b). Moved here from ir_adapter.py so the LIVE KiCad path
-# (methods.generate_ir) no longer transits ir_adapter, mirroring the gerber
-# precedent (gerber.build_gerbers_ir). The SHARED helpers (_outline_frame,
-# _pad_number_map, _pad_to_dict, _graphic_to_dict) live here and are imported BACK
-# by ir_adapter.ir_to_board_dict (the gerber test-only path); direction is
-# ir_adapter -> kicad only (kicad must NOT import ir_adapter, which would cycle).
-# PURE move — no emission-logic change; the projected dict is byte-identical to
-# what ir_adapter produced before.
+# IR->dict projection for the LIVE KiCad path (generate_ir). The emitter-neutral
+# geometric projections (outline frame, placed graphic) live in ir_projection and
+# are imported ABOVE — shared verbatim with the gerber emitter (C5c). The KiCad-
+# SPECIFIC projection (pad/component/net → s-expression dict) stays here.
+# PURE — no emission-logic change; every projected value is byte-identical.
 # ===========================================================================
-
-
-def _outline_frame(outline: BoardOutline) -> tuple[float, float, float, float]:
-    """(origin_x, origin_y, width_mm, height_mm) for the board frame. v1 compiles
-    a :class:`RectOutline`; a :class:`ProfileOutline` (future) degrades to its
-    outer-contour axis-aligned bounding box so Edge.Cuts still frames the board."""
-    if isinstance(outline, RectOutline):
-        return outline.origin[0], outline.origin[1], outline.width_mm, outline.height_mm
-    if isinstance(outline, ProfileOutline):
-        pts: list[tuple[float, float]] = []
-        for seg in outline.outer.segments:
-            if isinstance(seg, LineGeometry):
-                pts.extend((seg.a, seg.b))
-            elif isinstance(seg, ArcGeometry):
-                pts.extend((seg.start, seg.mid, seg.end))
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
-    raise TypeError(f"unsupported board outline {type(outline)!r}")
 
 
 def _pad_number_map(board: ResolvedBoard, component: ResolvedComponent) -> dict[str, str]:
@@ -734,40 +711,6 @@ def _pad_to_dict(pad: PlacedPad, number: str) -> dict:
     return out
 
 
-def _graphic_to_dict(graphic: PlacedGraphic) -> dict:
-    """One :class:`PlacedGraphic` (BOARD-ABSOLUTE) → the silk-graphic dict shape
-    ``gerber._harvest_silk_graphic`` reads. With the component placed at identity
-    the harvest silk transform is a no-op, so the absolute coords pass through.
-    Coordinates are emitted as LISTS (the harvest ``isinstance(..., list)`` guards
-    reject tuples). Arcs use the modern 3-point ``(start, mid, end)`` form, which
-    is exactly what :class:`ArcGeometry` carries."""
-    geom = graphic.geometry
-    out: dict = {"layer": graphic.layer.id}
-    if isinstance(geom, LineGeometry):
-        out["kind"] = "line"
-        out["start"] = [geom.a[0], geom.a[1]]
-        out["end"] = [geom.b[0], geom.b[1]]
-    elif isinstance(geom, CircleGeometry):
-        out["kind"] = "circle"
-        out["center"] = [geom.center[0], geom.center[1]]
-        out["radius"] = geom.radius_mm
-    elif isinstance(geom, ArcGeometry):
-        out["kind"] = "arc"
-        out["points"] = [
-            [geom.start[0], geom.start[1]],
-            [geom.mid[0], geom.mid[1]],
-            [geom.end[0], geom.end[1]],
-        ]
-    elif isinstance(geom, PolygonGeometry):
-        out["kind"] = "poly"
-        out["points"] = [[p[0], p[1]] for p in geom.points]
-    else:  # pragma: no cover - GraphicGeometry is a closed union
-        raise TypeError(f"unsupported graphic geometry {type(geom)!r}")
-    if graphic.width_mm is not None:
-        out["width"] = graphic.width_mm
-    return out
-
-
 def _to_footprint_local(px: float, py: float, rot: float,
                         x: float, y: float) -> tuple[float, float]:
     """Recover the KiCad footprint-LOCAL coordinate a board-ABSOLUTE point must be
@@ -811,7 +754,7 @@ def _kicad_component_to_dict(board: ResolvedBoard,
         return out
 
     def _local_graphic(graphic: PlacedGraphic) -> dict:
-        out = _graphic_to_dict(graphic)
+        out = graphic_to_dict(graphic)
         _localize_graphic_points(out, px, py, rot)
         return out
 
@@ -1011,7 +954,7 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
             f"kicad._ir_board_dict: board has {len(board.board_graphics)} board-level "
             f"graphic(s) the kicad bridge does not map yet — refusing to drop them silently")
 
-    ox, oy, width_mm, height_mm = _outline_frame(board.outline)
+    ox, oy, width_mm, height_mm = outline_frame(board.outline)
     rules = board.design_rules
     net_name_of = {net.id: net.name for net in board.nets}
 
@@ -1044,9 +987,9 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
 
 def generate_ir(board: ResolvedBoard, base_name: str | None = None) -> KicadResult:
     """Generate the three KiCad files DIRECTLY from a :class:`ResolvedBoard` (K2 IR)
-    — the IR-native entry the live path uses, with no IR->loose-dict transit through
-    ir_adapter (C5b, mirroring gerber.build_gerbers_ir). Projects the IR into the
-    emitter board_dict via :func:`_ir_board_dict` then emits exactly as
-    :func:`generate` does, so the returned KicadResult (files AND ``.diagnostics``)
-    is byte-identical to ``generate(_ir_board_dict(board), base_name)``."""
+    — the IR-native entry the live path uses, with no IR->loose-dict adapter transit
+    (mirroring gerber.build_gerbers_ir). Projects the IR into the emitter board_dict
+    via :func:`_ir_board_dict` then emits exactly as :func:`generate` does, so the
+    returned KicadResult (files AND ``.diagnostics``) is byte-identical to
+    ``generate(_ir_board_dict(board), base_name)``."""
     return generate(_ir_board_dict(board), base_name=base_name)

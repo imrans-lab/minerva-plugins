@@ -1,20 +1,20 @@
-"""W8.1 — the GERBER IR→dict bridge (``ir_adapter.ir_to_board_dict``).
+"""W8.1 — the IR-native GERBER fab path (``gerber.build_gerbers_ir``).
 
-These are the W8.1 wins: the adapter + the gerber IR fab path make the three
-things the LEGACY (resolve_board_best_effort) fab path drops reach the gerber/
-Excellon fabrication BYTES —
+These are the W8.1 wins: emitting straight from the ResolvedBoard IR makes the
+three things the LEGACY (resolve_board_best_effort) fab path drops reach the
+gerber/Excellon fabrication BYTES —
 
   1. board-ABSOLUTE pad placement (not the emitter re-applying local geometry);
   2. a pin ``override`` (drill / annulus) — ignored by the legacy path;
   3. the bottom-side MIRROR (side + Y-fold) — the legacy path never mirrors;
   4. per-pad ROTATION — dropped by the legacy path.
 
-Each is proven by parsing the emitted gerber/Excellon, plus adapter purity /
+Each is proven by parsing the emitted gerber/Excellon, plus emission purity /
 determinism and a legacy-path-unchanged guard.
 
 The pipeline under test:
 
-    compile_board(source).board  ->  ir_to_board_dict(rb)  ->  build_gerbers(dict)
+    compile_board(source).board  ->  gerber.build_gerbers_ir(rb)
 """
 
 from __future__ import annotations
@@ -28,10 +28,6 @@ from agent_router.kicad_io import read_kicad_pcb
 from pcb_worker import gerber, kicad
 from pcb_worker.compile_board import compile_board
 from pcb_worker.geometry import place_point
-from pcb_worker.ir_adapter import (
-    ir_to_board_dict,
-    ir_to_kicad_board_dict,
-)
 from pcb_worker.kicad import _kicad_mounting_hole_component
 from pcb_worker.resolved_board import (
     DiagnosticSeverity,
@@ -76,7 +72,7 @@ def _resolve(board: dict):
 
 
 def _placed_gerbers(board: dict, name: str = "brd"):
-    return gerber.build_gerbers(ir_to_board_dict(_resolve(board)), name=name)
+    return gerber.build_gerbers_ir(_resolve(board), name=name)
 
 
 # ---------------------------------------------------------------------------
@@ -205,61 +201,64 @@ def test_bottom_side_mirror_folds_the_coordinate():
 
 def test_per_pad_rotation_reaches_the_aperture():
     """An R_0805 placed at rotation 90 bakes a per-pad absolute rotation into the
-    IR; under the adapter's IDENTITY component placement the ONLY rotation source
-    left is the pad's own angle, and the emitter applies it — a rotation-carrying
-    aperture macro reaches fab (the legacy bug this phase closed dropped it)."""
-    board_dict = ir_to_board_dict(_resolve(_board("R_0805", rotation_deg=90)))
-    # The bridge zeroed the component placement and baked the angle per-pad.
-    comp = board_dict["components"][0]
-    assert comp["x_mm"] == 0.0 and comp["y_mm"] == 0.0 and comp["rotation_deg"] == 0.0
-    assert all(p["rotation"] == 90.0 for p in comp["pads"])
-
-    placed = gerber.build_gerbers(board_dict, name="brd")["brd-F_Cu.gbr"]
+    IR; the IR-native gerber emitter sources the aperture rotation from the pad's
+    own absolute angle, so a rotation-carrying aperture macro reaches fab (the
+    legacy bug this phase closed dropped it)."""
+    placed = gerber.build_gerbers_ir(
+        _resolve(_board("R_0805", rotation_deg=90)), name="brd")["brd-F_Cu.gbr"]
     assert "%AMRectangle*" in placed                        # a rotation-carrying macro
     assert re.search(r"Rectangle,[\d.X]+X90", placed), _apertures(placed)
 
 
 # ---------------------------------------------------------------------------
-# Adapter purity + determinism.
+# Gerber emission purity + determinism.
 # ---------------------------------------------------------------------------
 
 
-def test_adapter_does_not_mutate_the_resolved_board():
+def test_gerber_ir_emit_does_not_mutate_the_resolved_board():
     board = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket",
                             pins=[{"number": "1", "override": {"drill_mm": 1.3}}]))
     before = copy.deepcopy(board)
-    ir_to_board_dict(board)
-    assert board == before  # frozen dataclasses; the adapter only reads
+    gerber.build_gerbers_ir(board, name="brd")
+    assert board == before  # frozen dataclasses; the emitter only reads
 
 
-def test_adapter_is_deterministic():
+def test_gerber_ir_emit_is_deterministic():
     board = _resolve(_board("EVP-ASAC1A:SW_EVP-ASAC1A"))
-    assert ir_to_board_dict(board) == ir_to_board_dict(board)
+    assert dict(gerber.build_gerbers_ir(board, name="brd")) == \
+        dict(gerber.build_gerbers_ir(board, name="brd"))
 
 
-def test_adapter_carries_absolute_geometry_and_frame():
-    """Shape smoke: identity placement, absolute pad positions, board frame,
-    design rules, and silk graphics all carried in the emitter's expected keys."""
-    board_dict = ir_to_board_dict(_resolve(_board("R_0805")))
-    assert board_dict["width_mm"] == 40 and board_dict["height_mm"] == 40
-    assert board_dict["origin"] == {"x_mm": 0.0, "y_mm": 0.0}
-    assert set(board_dict["design_rules"]) >= {
-        "trace_width_mm", "via_diameter_mm", "via_drill_mm", "solder_mask_clearance_mm"}
-    comp = board_dict["components"][0]
-    assert comp["layer"] == "top"
-    assert comp["pads"][0]["position"] == {"x": 9.05, "y": 10.0}  # ABSOLUTE
-    # R_0805 carries F.SilkS graphics — attached as absolute list-coord dicts.
-    assert comp["graphics"] and all(isinstance(g.get("layer"), str) for g in comp["graphics"])
+def test_gerber_ir_carries_absolute_geometry_and_frame():
+    """Shape smoke on the EMITTED gerber: the board frame lands on Edge.Cuts, the
+    ABSOLUTE pad copper flashes (not the footprint-local coord), and R_0805's
+    F.SilkS graphics reach the silk layer."""
+    files = gerber.build_gerbers_ir(_resolve(_board("R_0805")), name="brd")
+    # Board frame (40x40 at origin 0,0) drawn on Edge.Cuts.
+    edge = files["brd-Edge_Cuts.gbr"]
+    assert "%MOMM*%" in edge
+    corners = set(re.findall(r"X(-?\d+)Y(-?\d+)D0[12]\*", edge))
+    d = _decimals(edge)
+    got = {(int(x) / 10 ** d, int(y) / 10 ** d) for x, y in corners}
+    assert {(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)} <= got, got
+    # ABSOLUTE pad copper (9.05,10.0), never the footprint-local coord.
+    flashes = _flashes(files["brd-F_Cu.gbr"])
+    assert _near(flashes, (9.05, 10.0)), flashes
+    assert not _near(flashes, (-0.95, 0.0))
+    # R_0805 carries F.SilkS graphics — they reach the silk layer.
+    assert files["brd-F_SilkS.gbr"].count("D01*") > 0
 
 
 # ===========================================================================
-# W8.1b — the KICAD IR->dict bridge (``ir_adapter.ir_to_kicad_board_dict``).
+# W8.1b — the IR-native KICAD fab path (``kicad.generate_ir``).
 #
 # GROUND TRUTH (pcbnew 9.0.9): KiCad applies TRANSLATE + ROTATE ONLY on load (no
 # native footprint flip), and the pad ``(at px py ANGLE)`` third value is the
-# ABSOLUTE angle. So the bridge emits ABSOLUTE geometry under an IDENTITY footprint
-# (reusing the gerber projection): overrides, per-pad rotation, and the bottom
-# mirror are all baked into each PlacedPad and pass through KiCad's no-op transform.
+# ABSOLUTE angle. So the bridge emits each footprint at its REAL placement
+# ``(at px py rot)`` with pad POSITIONS in footprint-LOCAL coords but the pad ANGLE
+# absolute (finding 019f8dbb6593): overrides, per-pad rotation, and the bottom
+# mirror are baked into each PlacedPad, and KiCad's load translate+rotate
+# reconstructs the identical absolute geometry (placement/editability preserved).
 #
 # These wins are proven by a REAL ROUND-TRIP ORACLE — the emitted .kicad_pcb is
 # parsed back through KiCad's load transform (agent_router.kicad_io.read_kicad_pcb,
@@ -270,13 +269,13 @@ def test_adapter_carries_absolute_geometry_and_frame():
 # them because a mis-mirrored/local-rotated pad lands at the WRONG absolute spot.
 # The external kicad-cli DRC is the independent second oracle.
 #
-#   compile_board(src).board -> ir_to_kicad_board_dict -> kicad.generate -> parse
+#   compile_board(src).board -> kicad.generate_ir -> parse
 # ===========================================================================
 
 
 def _emit_kicad(board: dict, name: str = "brd") -> str:
-    """Compile + project + emit the .kicad_pcb text for a raw board dict."""
-    return kicad.generate(ir_to_kicad_board_dict(_resolve(board)), base_name=name)[
+    """Compile + emit the .kicad_pcb text for a raw board dict."""
+    return kicad.generate_ir(_resolve(board), base_name=name)[
         f"{name}.kicad_pcb"]
 
 
@@ -357,7 +356,7 @@ def _assert_pads_roundtrip(board: dict, tmp_path, *, name: str = "brd") -> None:
     ``.rotation`` is not used here. End-to-end angle correctness is covered by the
     kicad-cli DRC oracle in tests/oracle.)"""
     resolved = _resolve(board)
-    d = ir_to_kicad_board_dict(resolved)
+    d = kicad._ir_board_dict(resolved)
     pcb = kicad.generate(d, base_name=name)[f"{name}.kicad_pcb"]
     parsed = _roundtrip_pads(pcb, tmp_path)
     truth = _ir_pad_truth(resolved)
@@ -409,8 +408,8 @@ def test_kicad_pad_local_rotation_roundtrips_absolute(tmp_path):
         _board("Espressif:ESP32-S3-DevKitC", x=40.0, y=50.0), tmp_path)
     # And the emitted angle is literally the IR combined angle on the pad (at).
     resolved = _resolve(_board("Espressif:ESP32-S3-DevKitC", x=40.0, y=50.0))
-    d = ir_to_kicad_board_dict(resolved)
-    assert d["components"][0]["rotation_deg"] == 0.0  # IDENTITY footprint
+    d = kicad._ir_board_dict(resolved)
+    assert d["components"][0]["rotation_deg"] == 0.0  # real placement, authored comp rot 0
     assert all(p.get("rotation") == 270.0 for p in d["components"][0]["pads"])
 
 
@@ -440,7 +439,7 @@ def test_kicad_bottom_placement_is_real_with_local_pads(tmp_path):
     component-relative encoding whose un-mirrored pads landed on the wrong nets."""
     resolved = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom",
                                x=40.0, y=40.0))
-    d = ir_to_kicad_board_dict(resolved)
+    d = kicad._ir_board_dict(resolved)
     comp = d["components"][0]
     assert (comp["x_mm"], comp["y_mm"], comp["rotation_deg"]) == (40.0, 40.0, 0.0)
     assert comp["layer"] == "bottom"
@@ -512,7 +511,7 @@ def test_kicad_emitted_board_is_drc_clean(board):
                            "x_mm": 50.0, "y_mm": 50.0,
                            "rotation_deg": board.get("rotation_deg", 0.0),
                            "layer": board["layer"]}]}
-    pcb = kicad.generate(ir_to_kicad_board_dict(_resolve(raw)), base_name="brd")[
+    pcb = kicad.generate_ir(_resolve(raw), base_name="brd")[
         "brd.kicad_pcb"]
     result = run_drc_on_pcb_text(pcb, name="brd")
     assert result.clean, (result.violations, result.unconnected_items)
@@ -583,7 +582,7 @@ def test_kicad_adapter_emits_mounting_hole_component():
     board["mounting_holes"] = [{"x_mm": 2.0, "y_mm": 7.0, "diameter_mm": 3.2}]
     resolved = _resolve(board)
     assert resolved.holes  # the compiler captured the hole
-    d = ir_to_kicad_board_dict(resolved)
+    d = kicad._ir_board_dict(resolved)
     mh = [c for c in d["components"] if c["footprint"] == "MountingHole"]
     assert len(mh) == 1
     (pad,) = mh[0]["pads"]
@@ -605,7 +604,7 @@ def test_kicad_adapter_plated_mounting_hole_is_thru_hole():
     board = _board("R_0805")
     board["pth_holes"] = [{"x_mm": 3.0, "y_mm": 4.0, "diameter_mm": 2.0, "annulus_mm": 3.0}]
     resolved = _resolve(board)
-    d = ir_to_kicad_board_dict(resolved)
+    d = kicad._ir_board_dict(resolved)
     (mh,) = [c for c in d["components"] if c["footprint"] == "MountingHole"]
     (pad,) = mh["pads"]
     assert pad["type"] == "thru_hole"
@@ -623,7 +622,7 @@ def test_kicad_adapter_mounting_holes_are_ordered_and_multiple():
         {"x_mm": 2.0, "y_mm": 2.0, "diameter_mm": 3.2},
         {"x_mm": 8.0, "y_mm": 8.0, "diameter_mm": 3.2},
     ]
-    d = ir_to_kicad_board_dict(_resolve(board))
+    d = kicad._ir_board_dict(_resolve(board))
     mh = [c for c in d["components"] if c["footprint"] == "MountingHole"]
     assert [c["ref"] for c in mh] == ["H1", "H2"]
     # Each MountingHole footprint sits at its hole; the pad is at local origin.
@@ -704,94 +703,6 @@ def test_kicad_pth_mounting_hole_roundtrips_through_drill_export(tmp_path):
     assert run_drc_on_pcb_text(pcb, name="brd").clean
 
 
-@pytest.mark.parametrize("make", [
-    lambda: _board("R_0805"),
-    lambda: _board("R_0805", x=30.0, y=30.0, rotation_deg=90.0),
-    lambda: _board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom", x=40.0, y=40.0),
-    lambda: _board("Espressif:ESP32-S3-DevKitC"),
-    lambda: _board("Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal"),
-    lambda: {**_board("R_0805"),
-             "pth_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0, "annulus_mm": 3.2}],
-             "mounting_holes": [{"x_mm": 30, "y_mm": 30, "diameter_mm": 3.2, "plated": False}]},
-    # multi-component + routed: two components, a net, a trace, and a via — exercises
-    # _harvest_ir's via + trace loops and >1 component (Fable C5a matrix gap).
-    lambda: {"version": 1, "name": "brd", "width_mm": 40, "height_mm": 40,
-             "layers": ["top", "bottom"],
-             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
-                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
-             "components": [
-                 {"ref": "R1", "footprint": "R_0805", "x_mm": 10, "y_mm": 10,
-                  "rotation_deg": 0, "layer": "top"},
-                 {"ref": "R2", "footprint": "R_0805", "x_mm": 25, "y_mm": 15,
-                  "rotation_deg": 90, "layer": "bottom"},
-             ],
-             "nets": [{"name": "N1", "pins": ["R1.1", "R2.2"]}],
-             "traces": [{"net": "N1", "layer": "top", "width_mm": 0.3,
-                         "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 18, "y_mm": 12}]},
-                        {"net": "N1", "layer": "bottom", "width_mm": 0.3,
-                         "points": [{"x_mm": 18, "y_mm": 12}, {"x_mm": 25, "y_mm": 15}]}],
-             # An UNTENTED via (tented:false) exercises the via mask-opening path in
-             # both harvests under the byte-equivalence net (D4).
-             "vias": [{"net": "N1", "x_mm": 18, "y_mm": 12, "diameter_mm": 0.8,
-                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom",
-                       "tented": False}]},
-])
-def test_build_gerbers_ir_is_byte_identical_to_adapter_path(make):
-    """C5: the IR-NATIVE gerber path (build_gerbers_ir, no loose-dict adapter) is
-    byte-for-byte identical to build_gerbers(ir_to_board_dict(resolved)) — files AND
-    diagnostics — across rotated / bottom / oblong-TH / plated-hole / NPTH boards.
-    This is the correctness net for retiring the adapter: zero golden movement."""
-    resolved = _resolve(make())
-    via_adapter = gerber.build_gerbers(ir_to_board_dict(resolved), name="brd")
-    native = gerber.build_gerbers_ir(resolved, name="brd")
-    assert dict(native) == dict(via_adapter)   # every file, byte-identical
-    assert [(d.code, d.severity) for d in native.diagnostics] == \
-           [(d.code, d.severity) for d in via_adapter.diagnostics]
-
-
-@pytest.mark.parametrize("make", [
-    lambda: _board("R_0805"),                                             # top SMD
-    lambda: _board("R_0805", layer="bottom", x=25.0, y=15.0),            # bottom SMD (mirror)
-    lambda: _board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom",   # bottom TH footprint
-                   x=30.0, y=30.0),
-    lambda: {**_board("R_0805"),                                          # PTH + NPTH mounting holes
-             "pth_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 2.0, "annulus_mm": 3.2}],
-             "mounting_holes": [{"x_mm": 30, "y_mm": 30, "diameter_mm": 3.2, "plated": False}]},
-    # multi-component + routed: two components, a net, two trace segments, and a via —
-    # exercises _kicad_net_dicts / _kicad_trace_dicts / _kicad_via_dicts + >1 component.
-    lambda: {"version": 1, "name": "brd", "width_mm": 40, "height_mm": 40,
-             "layers": ["top", "bottom"],
-             "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
-                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
-             "components": [
-                 {"ref": "R1", "footprint": "R_0805", "x_mm": 10, "y_mm": 10,
-                  "rotation_deg": 0, "layer": "top"},
-                 {"ref": "R2", "footprint": "R_0805", "x_mm": 25, "y_mm": 15,
-                  "rotation_deg": 90, "layer": "bottom"},
-             ],
-             "nets": [{"name": "N1", "pins": ["R1.1", "R2.2"]}],
-             "traces": [{"net": "N1", "layer": "top", "width_mm": 0.3,
-                         "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 18, "y_mm": 12}]},
-                        {"net": "N1", "layer": "bottom", "width_mm": 0.3,
-                         "points": [{"x_mm": 18, "y_mm": 12}, {"x_mm": 25, "y_mm": 15}]}],
-             "vias": [{"net": "N1", "x_mm": 18, "y_mm": 12, "diameter_mm": 0.8,
-                       "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom",
-                       "tented": False}]},
-])
-def test_generate_ir_is_byte_identical_to_adapter_path(make):
-    """C5b: the IR-NATIVE kicad path (kicad.generate_ir, no loose-dict adapter) is
-    byte-for-byte identical to kicad.generate(ir_to_kicad_board_dict(resolved)) —
-    files AND diagnostics — across top/bottom SMD, a bottom TH footprint, pth+npth
-    mounting holes, and a multi-component routed board with a via. The correctness
-    net for retiring the adapter: zero golden movement."""
-    resolved = _resolve(make())
-    via_adapter = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="b")
-    native = kicad.generate_ir(resolved, base_name="b")
-    assert dict(native) == dict(via_adapter)   # every file, byte-identical
-    assert [(d.code, d.severity) for d in native.diagnostics] == \
-           [(d.code, d.severity) for d in via_adapter.diagnostics]
-
-
 def test_unplated_board_hole_gets_drill_size_mask_both_emitters():
     # E3 (finding 019f901a9966): the ratified NPTH mask rule — an unplated board-level
     # hole gets a DRILL-size mask opening on both sides in gerber, UNIFORM with a
@@ -809,7 +720,7 @@ def test_unplated_board_hole_gets_drill_size_mask_both_emitters():
         assert re.search(r"%ADD\d+C,3\.2\*%", g[layer]), f"{layer} missing the NPTH drill mask"
         assert re.search(r"X12000000Y12000000D03", g[layer]), f"{layer} missing the mask flash"
     # kicad emits the bare np_thru_hole (which carries *.Mask) for the board hole.
-    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="h")["h.kicad_pcb"]
+    pcb = kicad.generate_ir(resolved, base_name="h")["h.kicad_pcb"]
     assert '(pad "" np_thru_hole circle' in pcb and '"*.Cu" "*.Mask"' in pcb
 
 
@@ -850,7 +761,7 @@ def _one_via_kicad_board():
              "nets": [{"name": "N", "pins": ["X1.1"]}],
              "vias": [{"net": "N", "x_mm": 20, "y_mm": 20, "diameter_mm": 0.8,
                        "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}]}
-    return ir_to_kicad_board_dict(_resolve(board))
+    return kicad._ir_board_dict(_resolve(board))
 
 
 def test_kicad_via_tenting_token_matches_pcbnew():
@@ -896,13 +807,13 @@ def test_kicad_via_tenting_defaults_tented_and_agrees_with_gerber():
     via_flash = r"X20000000Y20000000D03"
     for tented in (None, True):        # default + explicit tented: kicad tents, gerber bare
         resolved = _resolve(_board(tented))
-        pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="v")["v.kicad_pcb"]
+        pcb = kicad.generate_ir(resolved, base_name="v")["v.kicad_pcb"]
         g = gerber.build_gerbers_ir(resolved, name="v")
         assert "(tenting front back)" in pcb, f"tented={tented}: kicad did not tent"
         assert not re.search(via_flash, g["v-F_Mask.gbr"]), f"tented={tented}: gerber leaked a via mask"
 
     resolved = _resolve(_board(False))  # untented: kicad exposes, gerber opens mask
-    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="v")["v.kicad_pcb"]
+    pcb = kicad.generate_ir(resolved, base_name="v")["v.kicad_pcb"]
     g = gerber.build_gerbers_ir(resolved, name="v")
     assert "(tenting none)" in pcb
     assert re.search(via_flash, g["v-F_Mask.gbr"]) and re.search(via_flash, g["v-B_Mask.gbr"])
@@ -995,10 +906,10 @@ def test_plated_board_hole_annulus_agrees_across_emitters():
     board["pth_holes"] = [{"x_mm": 10.0, "y_mm": 10.0, "diameter_mm": 2.0,
                            "annulus_mm": 3.4}]
     resolved = _resolve(board)
-    kd = ir_to_kicad_board_dict(resolved)
+    kd = kicad._ir_board_dict(resolved)
     (mh,) = [c for c in kd["components"] if c["footprint"] == "MountingHole"]
     assert mh["pads"][0]["size"] == {"width": 3.4, "height": 3.4}   # kicad annulus
-    g = gerber.build_gerbers(ir_to_board_dict(resolved), name="brd")
+    g = gerber.build_gerbers_ir(resolved, name="brd")
     for layer in ("brd-F_Cu.gbr", "brd-B_Cu.gbr"):
         assert re.search(r"%ADD\d+C,3\.4\b", g[layer]), (
             f"{layer} missing the authored 3.4 copper annulus on the plated hole")
@@ -1008,26 +919,29 @@ def test_kicad_adapter_does_not_mutate_the_resolved_board():
     board = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket",
                             pins=[{"number": "1", "override": {"drill_mm": 1.3}}]))
     before = copy.deepcopy(board)
-    ir_to_kicad_board_dict(board)
+    kicad._ir_board_dict(board)
     assert board == before
 
 
 def test_kicad_adapter_is_deterministic():
     board = _resolve(_board("Espressif:ESP32-S3-DevKitC"))
-    assert ir_to_kicad_board_dict(board) == ir_to_kicad_board_dict(board)
+    assert kicad._ir_board_dict(board) == kicad._ir_board_dict(board)
 
 
 def test_kicad_and_gerber_bridges_agree_on_absolute_pad_position():
     """The kicad REAL-placement encoding and the gerber ABSOLUTE encoding describe
     the SAME absolute copper: reconstructing each kicad footprint-LOCAL pad through
-    its component placement recovers the gerber bridge's board-absolute position.
-    The geometric-equivalence guard for the real-placement cutover — fabrication is
-    unchanged; only the kicad footprint origin moved (finding 019f8dbb6593)."""
+    its component placement recovers the IR's board-absolute pad position (the same
+    board-absolute geometry the gerber emitter consumes). The geometric-equivalence
+    guard for the real-placement cutover — fabrication is unchanged; only the kicad
+    footprint origin moved (finding 019f8dbb6593)."""
     resolved = _resolve(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom"))
-    gerb = ir_to_board_dict(resolved)["components"][0]["pads"]
-    kcomp = ir_to_kicad_board_dict(resolved)["components"][0]
+    # Gerber-side truth: PlacedPad.position IS board-absolute — exactly what the
+    # IR-native gerber emitter flashes.
+    kcomp = kicad._ir_board_dict(resolved)["components"][0]
     px, py, rot = kcomp["x_mm"], kcomp["y_mm"], kcomp["rotation_deg"]
-    gpos = sorted((round(p["position"]["x"], 6), round(p["position"]["y"], 6)) for p in gerb)
+    gpos = sorted((round(p.position[0], 6), round(p.position[1], 6))
+                  for p in resolved.components[0].placed_pads)
     kpos = sorted(
         tuple(round(v, 6) for v in place_point(px, py, rot, p["position"]["x"], p["position"]["y"]))
         for p in kcomp["pads"])

@@ -18,7 +18,6 @@ import pytest
 
 from pcb_worker import kicad
 from pcb_worker.compile_board import compile_board
-from pcb_worker.ir_adapter import ir_to_kicad_board_dict
 from tests.oracle.kicad_drc import export_gerbers_on_pcb_text, kicad_cli_available
 
 pytestmark = pytest.mark.skipif(
@@ -29,7 +28,7 @@ MASK_LAYERS = ["F.Cu", "B.Cu", "F.Mask", "B.Mask", "Edge.Cuts"]
 
 def _export(board: dict) -> dict[str, str]:
     resolved = compile_board(board).board
-    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="brd")["brd.kicad_pcb"]
+    pcb = kicad.generate_ir(resolved, base_name="brd")["brd.kicad_pcb"]
     return export_gerbers_on_pcb_text(pcb, MASK_LAYERS, name="brd")
 
 
@@ -115,7 +114,7 @@ def test_kicad_cli_exports_all_referenced_technical_layers_both_sides():
         "mounting_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2, "plated": False}],
     }
     resolved = compile_board(board).board
-    pcb = kicad.generate(ir_to_kicad_board_dict(resolved), base_name="brd")["brd.kicad_pcb"]
+    pcb = kicad.generate_ir(resolved, base_name="brd")["brd.kicad_pcb"]
     files = export_gerbers_on_pcb_text(pcb, ALL_TECH_LAYERS, name="brd")
 
     def _layer(tok: str) -> str:

@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pcb_worker import gerber
-from tests.gerber_fab import placed_board_dict
+from tests.gerber_fab import build_fab
 
 gerbonara = pytest.importorskip("gerbonara")
 from gerbonara import ExcellonFile, GerberFile  # noqa: E402
@@ -28,17 +27,13 @@ DRILL_BOARD = HERE.parent / "testdata" / "gerber_boards" / "drilltest.yaml"
 CASES = [(SPIKE_BOARD, "board", 3), (DRILL_BOARD, "drilltest", 6)]
 
 
-def _prep(path: Path) -> dict:
-    """The board dict fed to the placed emitter, as the production fab path does
-    (K4 phase 1): COMPILE (strict) -> ir_to_board_dict for the spike; drilltest's
-    hand-authored footprints aren't in the seed lib so it is emitted from its raw
-    dict directly (off the legacy resolve_board_best_effort path)."""
-    return placed_board_dict(path)
-
-
 @pytest.mark.parametrize("board_path,base,expected_drills", CASES)
 def test_gerbonara_reads_current_exporter_output(board_path, base, expected_drills):
-    files = gerber.build_gerbers(_prep(board_path), name=base)
+    # Production fab path (K4 phase 1): COMPILE (strict) -> build_gerbers_ir for the
+    # spike; drilltest's hand-authored footprints aren't in the seed lib so it is
+    # emitted from its raw dict directly (off the legacy resolve_board_best_effort
+    # path).
+    files = build_fab(board_path, base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     drls = {n: t for n, t in files.items() if n.endswith(".drl")}
@@ -77,7 +72,7 @@ def test_gerbonara_excellon_reads_plated_and_nonplated_split():
     """The exporter's PTH/NPTH split both round-trip through gerbonara's Excellon
     parser with the expected per-file hole counts (spike board: 2 plated, 1 non-
     plated)."""
-    files = gerber.build_gerbers(_prep(SPIKE_BOARD), name="board")
+    files = build_fab(SPIKE_BOARD, "board")
 
     pth = ExcellonFile.from_string(files["board-PTH.drl"], filename="board-PTH.drl")
     npth = ExcellonFile.from_string(files["board-NPTH.drl"], filename="board-NPTH.drl")

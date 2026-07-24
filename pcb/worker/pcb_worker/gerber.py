@@ -54,19 +54,13 @@ from .geometry import (
     place_point as _transform_point,
     rotate_local_offset as _rotate,
 )
+from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import iter_pads, placed_pad_to_geom, th_land
 from .resolved_board import (
-    ArcGeometry,
-    CircleGeometry,
     Diagnostic,
     DiagnosticSeverity,
     EntityKind,
     HoleKind,
-    LineGeometry,
-    PlacedGraphic,
-    PolygonGeometry,
-    ProfileOutline,
-    RectOutline,
     ResolvedBoard,
     RoundHole,
     Side,
@@ -880,54 +874,6 @@ def _build_drill_files(g: _Geometry, creation_date: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _placed_graphic_to_dict(graphic: PlacedGraphic) -> dict:
-    """A board-ABSOLUTE :class:`PlacedGraphic` -> the silk-graphic dict
-    ``_harvest_silk_graphic`` reads. Byte-identical to the retiring adapter's
-    projection; under the IR's identity component placement the silk transform is a
-    no-op so the absolute coords pass through. Coordinates are LISTS."""
-    geom = graphic.geometry
-    out: dict = {"layer": graphic.layer.id}
-    if isinstance(geom, LineGeometry):
-        out["kind"] = "line"
-        out["start"] = [geom.a[0], geom.a[1]]
-        out["end"] = [geom.b[0], geom.b[1]]
-    elif isinstance(geom, CircleGeometry):
-        out["kind"] = "circle"
-        out["center"] = [geom.center[0], geom.center[1]]
-        out["radius"] = geom.radius_mm
-    elif isinstance(geom, ArcGeometry):
-        out["kind"] = "arc"
-        out["points"] = [[geom.start[0], geom.start[1]], [geom.mid[0], geom.mid[1]],
-                         [geom.end[0], geom.end[1]]]
-    elif isinstance(geom, PolygonGeometry):
-        out["kind"] = "poly"
-        out["points"] = [[p[0], p[1]] for p in geom.points]
-    else:  # pragma: no cover - GraphicGeometry is a closed union
-        raise TypeError(f"unsupported graphic geometry {type(geom)!r}")
-    if graphic.width_mm is not None:
-        out["width"] = graphic.width_mm
-    return out
-
-
-def _ir_outline_frame(outline) -> tuple[float, float, float, float]:
-    """(origin_x, origin_y, width_mm, height_mm) of a ResolvedBoard outline — the IR
-    board frame for Edge.Cuts + bounds. A ProfileOutline degrades to its outer
-    contour's axis-aligned bounding box (as the retiring adapter did)."""
-    if isinstance(outline, RectOutline):
-        return outline.origin[0], outline.origin[1], outline.width_mm, outline.height_mm
-    if isinstance(outline, ProfileOutline):
-        pts: list[tuple[float, float]] = []
-        for seg in outline.outer.segments:
-            if isinstance(seg, LineGeometry):
-                pts.extend((seg.a, seg.b))
-            elif isinstance(seg, ArcGeometry):
-                pts.extend((seg.start, seg.mid, seg.end))
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
-    raise TypeError(f"unsupported board outline {type(outline)!r}")
-
-
 # Board-hole class -> the (key, default_plated) the shared hole path uses, in the
 # SAME order the loose-dict harvest iterates (mounting, then npth, then pth).
 _IR_HOLE_ORDER = (
@@ -939,11 +885,11 @@ _IR_HOLE_ORDER = (
 
 def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
     """IR-NATIVE geometry harvest: read a :class:`ResolvedBoard` DIRECTLY into the
-    flattened :class:`_Geometry`, with NO IR->loose-dict adapter (C5). Byte-identical
-    to ``_harvest(ir_to_board_dict(board))`` — it drives the SAME shared emission
-    (:func:`_emit_pads` / :func:`_emit_silk` / :func:`_emit_board_hole`) with the
-    component at IDENTITY placement (position is already board-absolute in the IR
-    PlacedPad), pinned by the emitter byte-equivalence test."""
+    flattened :class:`_Geometry`, with NO IR->loose-dict adapter (C5). It drives the
+    SAME shared emission (:func:`_emit_pads` / :func:`_emit_silk` /
+    :func:`_emit_board_hole`) as the loose-dict harvest, with the component at
+    IDENTITY placement (position is already board-absolute in the IR PlacedPad),
+    pinned by the gerber golden + oracle tests."""
     g = _Geometry()
 
     for comp in board.components:
@@ -958,7 +904,7 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         # the selecting — exactly as the loose-dict path does. Pre-filtering here
         # would make a component with non-F.SilkS graphics (e.g. F.Fab/F.CrtYd only)
         # fall to the courtyard-box branch instead of emitting no silk (Fable C5a).
-        graphics = [_placed_graphic_to_dict(gr) for gr in comp.placed_graphics]
+        graphics = [graphic_to_dict(gr) for gr in comp.placed_graphics]
         _emit_silk(g, graphics, pin_extents, 0.0, 0.0, 0.0, top, ref)
 
     for via in board.vias:
@@ -993,11 +939,10 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
                      creation_date: str | None = None) -> GerberResult:
     """Compile a :class:`ResolvedBoard` (K2 IR) into fabrication files DIRECTLY — the
     IR-native fab entry the live path uses, with no IR->loose-dict adapter (C5).
-    Byte-identical to ``build_gerbers(ir_to_board_dict(board))`` (emitter
-    byte-equivalence test)."""
-    # FAIL-CLOSED seal (carried from the retiring ir_to_board_dict): a captured
-    # feature the gerber bridge does not map — a copper zone or a board-level graphic
-    # — must RAISE, never vanish silently from a fabrication-bound file. compile_board
+    Pinned by the gerber golden + oracle (gerbonara / KiCad export) tests."""
+    # FAIL-CLOSED seal (a captured feature the gerber bridge does not map — a copper
+    # zone or a board-level graphic — must RAISE, never vanish silently from a
+    # fabrication-bound file). compile_board
     # fail-closes zone/board-graphic DECLARATIONS today, so these are always empty;
     # the seal guards against a future IR silently dropping copper at fabrication.
     if board.zones:
@@ -1020,7 +965,7 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
 
     g = _harvest_ir(board, mask_clearance)
 
-    ox, oy, width_mm, height_mm = _ir_outline_frame(board.outline)
+    ox, oy, width_mm, height_mm = outline_frame(board.outline)
     outline_dict = {"width_mm": width_mm, "height_mm": height_mm,
                     "origin": {"x_mm": ox, "y_mm": oy}}
 
@@ -1061,11 +1006,11 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
     the CreationDate stamp is pinned for byte-reproducibility unless
     *creation_date* is supplied.
 
-    The board dict is always the IR/placed dict produced by
-    ``ir_adapter.ir_to_board_dict`` (identity component placement, board-absolute
-    pad positions): each pad's own ``rotation`` — the ABSOLUTE combined angle the
-    compiler baked into ``PlacedPad.rotation_deg`` — drives its copper/mask
-    aperture, so per-pad rotation reaches fab.
+    This is the loose-dict entry (hand-built / legacy dicts, e.g. tests); the live
+    path emits straight from the IR via :func:`build_gerbers_ir`. A placed dict
+    carries board-absolute pad positions and each pad's own ``rotation`` (the
+    ABSOLUTE combined angle) drives its copper/mask aperture, so per-pad rotation
+    reaches fab.
     """
     base = name or (board_dict.get("name") if isinstance(board_dict.get("name"), str) else None) or "board"
     date = creation_date or PINNED_CREATION_DATE

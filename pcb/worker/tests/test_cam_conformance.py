@@ -44,7 +44,7 @@ def _pad_board(shape: str, *, w: float = 2.0, h: float = 1.0,
     IDENTITY and any pad rotation comes from the pad's own ABSOLUTE ``rotation``
     key — NOT the component ``rotation_deg`` (which the emitter reads only as a
     fallback). So a requested ``angle`` is baked onto
-    the pad, exactly as ``ir_to_board_dict`` bakes a placed pad's combined angle,
+    the pad, exactly as the IR-native emitter bakes a placed pad's combined angle,
     keeping the component at rotation 0."""
     pad = {"number": "1", "type": "smd", "shape": shape,
            "position": {"x": 0, "y": 0}, "size": {"width": w, "height": h},
