@@ -194,6 +194,28 @@ def test_excellon_split_drilltest():
                    for x, y, _ in pth["hits"]), "plated:false pad leaked into PTH"
 
 
+def test_build_fab_fails_closed_on_uncompilable_non_allowlisted_board():
+    # bug 019f917bbe18: build_fab must FAIL CLOSED (raise) when a board that is NOT
+    # an explicitly-named raw-dict fixture fails to compile — never silently fall
+    # back to the tolerant loose-dict emitter (which would let a compiler/library/
+    # contract regression slip past goldens/determinism/geometry-diff/gerbonara).
+    # Reuse the same non-library DRILL_BOARD, but a base name NOT in
+    # _RAW_DICT_FIXTURES, so the deliberate drilltest allowlist does not apply.
+    # This ALSO guards that drilltest itself stays NON-compilable: if its
+    # footprints ever entered the seed library, this compile would SUCCEED and the
+    # `raises` would fail — a prompt to drop drilltest from the allowlist and
+    # migrate it onto the IR path rather than silently keeping it on raw-dict.
+    with pytest.raises(RuntimeError, match="no raw-dict fallback"):
+        build_fab(DRILL_BOARD, "not-an-allowlisted-fixture")
+    # Production methods._gerbers fails closed on the exact same board — the helper
+    # and production now AGREE (the split Codex reproduced is gone for any board not
+    # explicitly named as a raw fixture).
+    resp = handle_request({"id": "r1", "method": "gerbers",
+                           "params": {"board": yaml.safe_load(
+                               DRILL_BOARD.read_text(encoding="utf-8")), "name": "d"}})
+    assert resp["ok"] is False and resp["error"]["kind"] == "compile"
+
+
 def test_drill_files_omitted_when_no_holes():
     # A board with only SMD pads and no drills emits neither drill file. The SMD
     # pins carry inline pad geometry (pad_width_mm/pad_height_mm) so the emitter
