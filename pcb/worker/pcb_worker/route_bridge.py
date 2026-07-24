@@ -44,6 +44,7 @@ from agent_router.hints import RoutingHints, parse_hints
 from agent_router import layers as _layers
 
 from .geometry import rotate_local_offset
+from .pad_source import is_th_drill
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +174,11 @@ def board_to_router(canonical_board: dict) -> Board:
             py = _num(pin.get("y_mm"))
             wx, wy = _rotate_offset(px, py, rot)
             drill = _num(pin.get("drill_mm"))
+            # Through-hole iff the drill is a FINITE positive diameter — the SAME
+            # shared predicate the fab emitters + DRC use (bug 019f920d433f), so the
+            # router can never drift from them and a NaN/Inf drill is never modeled as
+            # a through-hole (the bare `drill > 0` literal classified +Inf as TH).
+            is_th = is_th_drill(drill)
             pad = Pad(
                 component=ref,
                 number=num,
@@ -180,8 +186,8 @@ def board_to_router(canonical_board: dict) -> Board:
                 position=(cx + wx, cy + wy),
                 size=_pad_size_for(pin, extra_pads_by_num),
                 shape=str(pin.get("shape", "rect")),
-                pad_type=("thru_hole" if drill > 0 else "smd"),
-                drill=(drill if drill > 0 else None),
+                pad_type=("thru_hole" if is_th else "smd"),
+                drill=(drill if is_th else None),
                 layer=layer,
                 rotation=rot,
             )

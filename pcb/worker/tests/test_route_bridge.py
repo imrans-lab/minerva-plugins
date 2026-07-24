@@ -138,6 +138,26 @@ def test_board_to_router_through_hole_and_layer():
     assert pad.layer == "B.Cu"                      # "bottom" -> B.Cu
 
 
+@pytest.mark.parametrize("bad_drill", [float("nan"), float("inf"), float("-inf"), -1.0, 0.0])
+def test_board_to_router_non_positive_or_nonfinite_drill_is_smd(bad_drill):
+    # bug 019f920d433f: the router classifies through-hole via the SAME shared
+    # finite-positive predicate the fab emitters use (pad_source.is_th_drill), so it
+    # can never drift. A non-finite (NaN/Inf) or non-positive drill is modeled as SMD,
+    # NOT a through-hole — the old bare `drill > 0` literal classified +Inf as a
+    # through-hole (with an infinite drill).
+    board = route_bridge.board_to_router({
+        "components": [{
+            "ref": "J1", "x_mm": 0, "y_mm": 0, "rotation_deg": 0, "layer": "top",
+            "pins": [{"number": "1", "x_mm": 0, "y_mm": 0, "drill_mm": bad_drill,
+                      "pad_width_mm": 1.0, "pad_height_mm": 1.0}],
+        }],
+        "nets": [],
+    })
+    pad = board.get_pad("J1", "1")
+    assert pad.pad_type == "smd"
+    assert pad.drill is None
+
+
 def test_board_to_router_mounting_hole_obstacle():
     board = route_bridge.board_to_router({
         "components": [{"ref": "R1", "x_mm": 1, "y_mm": 1, "rotation_deg": 0,

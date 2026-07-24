@@ -316,11 +316,13 @@ def require_th_annulus(pad: PadGeom, ref: Any) -> float:
     return ann
 
 
-def _is_th_drill(drill: "float | None") -> bool:
-    """Scalar core of the through-hole test: a drill denotes a hole iff it is a
-    FINITE POSITIVE diameter. The ONE definition — ``is_through_hole`` (PadGeom) and
-    the ``_from_pin`` pad_type both derive from it, so not even the factory can grow
-    a divergent literal (bug 019f91c1420c)."""
+def is_th_drill(drill: "float | None") -> bool:
+    """Scalar through-hole test: a drill denotes a hole iff it is a FINITE POSITIVE
+    diameter. The ONE definition every consumer derives from — ``is_through_hole``
+    (PadGeom), the ``_from_pin`` pad_type, and the router bridge's raw-pin
+    classification (route_bridge, bug 019f920d433f) — so not even a sibling module or
+    the factory can grow a divergent literal (bug 019f91c1420c). Public because it is
+    shared across modules that hold a bare scalar drill rather than a PadGeom."""
     return drill is not None and math.isfinite(drill) and drill > 0
 
 
@@ -338,7 +340,7 @@ def is_through_hole(pad: "PadGeom") -> bool:
     this states the contract ONCE, positively, and is robust by construction
     (``isfinite`` means a stray NaN can never be classified through-hole here, so
     even off the validated path the sites cannot disagree)."""
-    return _is_th_drill(pad.drill)
+    return is_th_drill(pad.drill)
 
 
 # Circle width/height must agree to within this to be a faithful circle.
@@ -520,7 +522,7 @@ def _from_pin(pin: dict) -> PadGeom:
         shape="rect",
         corner_rratio=None,  # inline-pin fallback carries no footprint corner datum
         solder_mask_margin=_opt_num(pin.get("solder_mask_margin")),
-        pad_type=("thru_hole" if _is_th_drill(drill) else "smd"),
+        pad_type=("thru_hole" if is_th_drill(drill) else "smd"),
         layers=[],
         from_resolve=False,
     )
