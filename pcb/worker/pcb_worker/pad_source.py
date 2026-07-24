@@ -135,14 +135,15 @@ def _opt_num(v: Any) -> float | None:
 class PadGeom:
     """Normalised, consumer-ready geometry for one pad.
 
-    Deliberately RAW-preserving where the three fab sites diverge, so each keeps
+    Deliberately RAW-preserving where the three pad-geometry consumers diverge (the
+    two fabrication emitters gerber/kicad + the tolerant DRC reader), so each keeps
     its exact historical tail on the shared data:
       * ``number`` is the raw pin number (``str | None | ...``): kicad SKIPS a
         ``None`` number, drc ``str()``-es it (``None`` -> ``"None"``), gerber
         ignores it.
       * ``drill`` is the drill diameter mm, or ``None`` for no hole. The factories
         normalize a FINITE <= 0 drill to None; a PRESENT non-finite drill is
-        preserved and fail-closed by ``_require_finite_drill``. All three fab sites
+        preserved and fail-closed by ``_require_finite_drill``. All three consumers
         (gerber, kicad, drc) classify through-hole via the ONE shared
         ``is_through_hole`` predicate (finite positive), so they cannot diverge on
         this field (bug 019f91c1420c retired the per-emitter literals).
@@ -338,7 +339,7 @@ def is_th_drill(drill: "float | None") -> bool:
 
 
 def is_through_hole(pad: "PadGeom") -> bool:
-    """The SINGLE through-hole predicate all three fab sites consume (gerber, kicad,
+    """The SINGLE through-hole predicate all three consumers use (gerber, kicad,
     drc), so they can never diverge on the TH-vs-SMD classification (bug
     019f91c1420c).
 

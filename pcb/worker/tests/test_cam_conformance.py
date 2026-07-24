@@ -364,9 +364,14 @@ def _global_clearance_board(clearance) -> dict:
                                   "size": {"width": 2.0, "height": 1.0},
                                   "layers": ["F.Cu"]}]}],
         "nets": [{"name": "N", "pins": ["R1.1"]}],
+        # UNTENTED via: the canonical per-side keys the raw emitters actually read
+        # are tented_front / tented_back (each DEFAULTS True/tented when absent) — a
+        # source-level `tented` key never reaches the loose-dict path. Both False =>
+        # the via mask opens (gerber flashes it, kicad emits `(tenting none)`), so the
+        # via mask-aperture path is genuinely exercised by the global clearance.
         "vias": [{"net": "N", "x_mm": 10, "y_mm": 10, "diameter_mm": 0.8,
                   "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom",
-                  "tented": False}],
+                  "tented_front": False, "tented_back": False}],
     }
     if clearance is not None:
         board["design_rules"]["solder_mask_clearance_mm"] = clearance
@@ -402,28 +407,44 @@ def test_raw_global_mask_clearance_valid_emits(emit, good):
 
 def test_raw_global_mask_clearance_absent_uses_default():
     # No authored global clearance -> the documented raw default (0.1mm/side): the
-    # 2x1 SMD land -> F.Mask opening 2.2x1.2.
+    # 2x1 SMD land -> F.Mask opening 2.2x1.2, the Ø0.8 untented via -> 1.0.
     fmask = gerber.build_gerbers(_global_clearance_board(None), name="conf")["conf-F_Mask.gbr"]
     assert "R,2.2X1.2" in fmask
+    assert "C,1.0" in fmask  # via Ø0.8 + 2*0.1
+
+
+def test_raw_global_mask_clearance_explicit_null_uses_default():
+    # An EXPLICITLY null clearance (field PRESENT, value null/None) is treated as
+    # absent -> the raw default (0.1), not fail-closed. Distinct from omitting the
+    # field: this pins that `solder_mask_clearance_mm: null` is honored as "unset".
+    board = _global_clearance_board(None)
+    board["design_rules"]["solder_mask_clearance_mm"] = None  # explicit JSON null
+    fmask = gerber.build_gerbers(board, name="conf")["conf-F_Mask.gbr"]
+    assert "R,2.2X1.2" in fmask
+    assert kicad.generate_kicad_pcb(board)  # kicad likewise emits, no fail-closed
 
 
 @pytest.mark.parametrize("good", [0.0, 0.3])
 def test_raw_global_mask_clearance_feeds_gerber_opening(good):
-    # The authored global clearance actually drives the gerber SMD mask opening
-    # (2x1 copper + 2*clearance per side) — proving it is used, not ignored.
-    w, h = 2.0, 1.0
+    # The authored global clearance actually drives BOTH gerber mask openings it
+    # feeds — the 2x1 SMD land (copper + 2*clearance/side) AND the Ø0.8 untented via
+    # (dia + 2*clearance) — proving it is used, not ignored, on both aperture paths.
+    w, h, via_dia = 2.0, 1.0, 0.8
     fmask = gerber.build_gerbers(_global_clearance_board(good), name="conf")["conf-F_Mask.gbr"]
-    assert f"R,{w + 2 * good}X{h + 2 * good}" in fmask
+    assert f"R,{w + 2 * good}X{h + 2 * good}" in fmask   # SMD pad mask
+    assert f"C,{via_dia + 2 * good}" in fmask            # untented via mask
 
 
 @pytest.mark.parametrize("good", [0.0, 0.3])
 def test_raw_global_mask_clearance_feeds_kicad_setup_and_pad(good):
     # Symmetric to the gerber-opening test: the authored global clearance reaches
     # BOTH the KiCad board `(setup (pad_to_mask_clearance ...))` and the per-pad
-    # `(solder_mask_margin ...)` — proving it FLOWS THROUGH, not merely "emits".
+    # `(solder_mask_margin ...)` — proving it FLOWS THROUGH, not merely "emits". The
+    # untented via carries `(tenting none)` so its mask opens (matching gerber's flash).
     pcb = kicad.generate_kicad_pcb(_global_clearance_board(good))
     assert f"(pad_to_mask_clearance {good})" in pcb
     assert f"(solder_mask_margin {good})" in pcb
+    assert "(tenting none)" in pcb
 
 
 @pytest.mark.parametrize("authored", [0.9, 0.0])
