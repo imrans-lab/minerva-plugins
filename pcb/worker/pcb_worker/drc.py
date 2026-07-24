@@ -42,7 +42,7 @@ from collections import defaultdict
 from typing import Any
 
 from .geometry import is_top as _is_top, rotate_local_offset as _rotate
-from .pad_source import iter_pads
+from .pad_source import is_through_hole, iter_pads
 
 # Tolerances (mm). COINCIDENT gates "touches a pad/via" and "meets the other
 # layer"; it defaults to the board's clearance rule (same value the wrong-net
@@ -211,8 +211,13 @@ def _harvest_pads(board: dict) -> list[_Pad]:
         for pad in iter_pads(comp):
             num = str(pad.number)
             ox, oy = _rotate(pad.x, pad.y, rot)
-            drill = pad.drill
-            through_hole = drill is not None and drill > 0
+            # is_through_hole is the SHARED predicate the two emitters also use, so
+            # DRC classifies TH-vs-SMD identically (no third hand-written literal to
+            # drift — bug 019f91c1420c). DRC runs iter_pads WITHOUT require_smd_size,
+            # so a non-finite drill is not fail-closed here; is_through_hole's
+            # isfinite guard means it is simply not counted as a through-hole (never
+            # NaN-classified), matching the emitters' post-validation behaviour.
+            through_hole = is_through_hole(pad)
             pads.append(_Pad(ref, num, pin_net.get((str(ref), num)),
                              cx + ox, cy + oy, through_hole))
     return pads

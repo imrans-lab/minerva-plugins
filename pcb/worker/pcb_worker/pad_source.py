@@ -92,6 +92,16 @@ class PadGeometryError(ValueError):
             f"fail-closed (physical invariant, distinct from a board-house min "
             f"annular-ring policy; mirrors the board-hole check finding 019f8dbb7104)")
 
+    @classmethod
+    def drill_not_finite(cls, ref: Any, number: Any, drill: Any) -> "PadGeometryError":
+        return cls(
+            ref, number,
+            f"component {ref!r} pad {number!r}: through-hole drill diameter {drill!r} "
+            f"is not finite — a drilled hole must be a FINITE positive diameter; "
+            f"fail-closed (bug 019f91c1420c: a 0/negative drill is normalized to no "
+            f"hole, but a NaN/Inf drill is a corrupt TH intent the two emitters would "
+            f"otherwise treat divergently — Gerber crashes, KiCad emits `(drill nan)`)")
+
 
 def _num(v: Any, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
@@ -110,10 +120,12 @@ class PadGeom:
       * ``number`` is the raw pin number (``str | None | ...``): kicad SKIPS a
         ``None`` number, drc ``str()``-es it (``None`` -> ``"None"``), gerber
         ignores it.
-      * ``drill`` is ``_opt_num(drill_mm)`` (``0.0`` preserved, ``None`` if
-        absent/non-numeric): gerber treats a through-hole as ``drill > 0``,
-        kicad as ``drill is not None`` (so a ``0`` drill is TH to kicad, SMD to
-        gerber) — each applies its own predicate to this one field.
+      * ``drill`` is the drill diameter mm, or ``None`` for no hole. The factories
+        normalize a FINITE <= 0 drill to None; a PRESENT non-finite drill is
+        preserved and fail-closed by ``_require_finite_drill``. All three fab sites
+        (gerber, kicad, drc) classify through-hole via the ONE shared
+        ``is_through_hole`` predicate (finite positive), so they cannot diverge on
+        this field (bug 019f91c1420c retired the per-emitter literals).
       * ``width``/``height`` are ``None`` when the source declares no size. The
         size-consuming emitters (gerber/kicad) demand a real size via
         ``iter_pads(require_smd_size=True)``, which fail-closes on a sizeless
@@ -125,7 +137,7 @@ class PadGeom:
     y: float
     width: float | None    # SMD copper width; None => no declared/resolved size
     height: float | None
-    drill: float | None    # drill diameter mm (0.0 preserved); None => no datum
+    drill: float | None    # drill diameter mm (finite positive => hole); None => no hole
     annulus: float | None  # round TH copper annulus diameter; None on a plated TH pad fails closed at emit (require_th_annulus) — never an emitter-invented default
     plated: bool
     shape: str
@@ -182,24 +194,46 @@ def iter_pads(comp: dict, *, require_smd_size: bool = False) -> list[PadGeom]:
     if require_smd_size:
         ref = comp.get("ref")
         for rawpad, pad in zip(raw, pads):
+            # FIRST: a present-but-non-finite drill fails closed before any TH-vs-SMD
+            # predicate (or the SMD-size check) reads it — else a NaN drill slips past
+            # both (nan is not None, nan > 0 is False) and diverges at emit.
+            _require_finite_drill(ref, pad)
             _require_smd_size(ref, pad)
             _require_faithful_shape(ref, rawpad, pad)
             _require_valid_solder_mask_margin(ref, rawpad, pad)
     return pads
 
 
+def _require_finite_drill(ref: Any, pad: PadGeom) -> None:
+    """Fail-closed: a PRESENT drill datum must be a FINITE positive diameter.
+
+    The pad factories normalize a finite 0/negative drill to None (no hole -> SMD,
+    the accepted degenerate handling — Codex d00427f). A PRESENT but NON-FINITE
+    drill (NaN / +-Inf) is a corrupt through-hole intent that the two emitters would
+    otherwise treat DIVERGENTLY and INVALIDLY: gerber's ``drill > 0`` is False for
+    NaN so it mis-routes to the SMD branch and crashes on ``None + mask_margin``
+    (unstructured TypeError); kicad's ``drill is not None`` is True so it emits a
+    malformed ``thru_hole ... (drill nan)``. This is the SINGLE drill boundary both
+    emitters share (bug 019f91c1420c) — a non-finite drill fails closed here, WITH
+    pad context, before either predicate runs, for plated AND unplated holes."""
+    d = pad.drill
+    if d is not None and not math.isfinite(d):
+        raise PadGeometryError.drill_not_finite(ref, pad.number, d)
+
+
 def _require_smd_size(ref: Any, pad: PadGeom) -> None:
     """Fail-closed: an SMD pad (no drill) must carry a positive width AND height.
 
     A through-hole / mounting pad is exempt — its copper is a drill-derived
-    annulus, not an SMD land. ``drill is None`` is the SMD test (both _from_pin
-    and _from_resolved normalise a 0/negative drill to None), the SAME boundary
-    kicad._footprint uses (``drill is not None`` => TH), so the fail-closed check
-    and the emitters never disagree. A zero-size SMD pad — a latent form of the
-    same placeholder bug — also fails closed now.
+    annulus, not an SMD land. ``not is_through_hole(pad)`` is the SMD test — the
+    SAME shared predicate both emitters use (bug 019f91c1420c), so the fail-closed
+    check and the emitters can never disagree on what counts as SMD. (A present
+    non-finite drill has already fail-closed in ``_require_finite_drill``, which
+    runs first, so here a pad is SMD iff it has no finite-positive drill.) A
+    zero-size SMD pad — a latent form of the placeholder bug — also fails closed.
     """
-    if pad.drill is None and not (pad.width and pad.width > 0
-                                  and pad.height and pad.height > 0):
+    if not is_through_hole(pad) and not (pad.width and pad.width > 0
+                                         and pad.height and pad.height > 0):
         raise PadGeometryError.smd_no_size(ref, pad.number, pad.width, pad.height)
 
 
@@ -239,6 +273,31 @@ def require_th_annulus(pad: PadGeom, ref: Any) -> float:
         raise PadGeometryError.th_annulus_not_bigger_than_drill(
             ref, pad.number, ann, pad.drill)
     return ann
+
+
+def _is_th_drill(drill: "float | None") -> bool:
+    """Scalar core of the through-hole test: a drill denotes a hole iff it is a
+    FINITE POSITIVE diameter. The ONE definition — ``is_through_hole`` (PadGeom) and
+    the ``_from_pin`` pad_type both derive from it, so not even the factory can grow
+    a divergent literal (bug 019f91c1420c)."""
+    return drill is not None and math.isfinite(drill) and drill > 0
+
+
+def is_through_hole(pad: "PadGeom") -> bool:
+    """The SINGLE through-hole predicate all three fab sites consume (gerber, kicad,
+    drc), so they can never diverge on the TH-vs-SMD classification (bug
+    019f91c1420c).
+
+    A pad is through-hole iff it carries a FINITE POSITIVE drill diameter. Before
+    this predicate each site hand-wrote its own literal that only HAPPENED to agree:
+    gerber/drc ``drill is not None and drill > 0``, kicad ``drill is not None``.
+    They were equivalent only because the pad factories normalize a finite <= 0
+    drill to None (no hole); a PRESENT non-finite drill (NaN/Inf) is fail-closed
+    upstream by ``_require_finite_drill``. Literals kept in lockstep BY HAND drift —
+    this states the contract ONCE, positively, and is robust by construction
+    (``isfinite`` means a stray NaN can never be classified through-hole here, so
+    even off the validated path the sites cannot disagree)."""
+    return _is_th_drill(pad.drill)
 
 
 # Circle width/height must agree to within this to be a faithful circle.
@@ -390,12 +449,15 @@ def _require_valid_solder_mask_margin(ref: Any, rawpad: dict, pad: PadGeom) -> N
 
 def _from_pin(pin: dict) -> PadGeom:
     """Fallback: reconstruct a pad from a canonical pin. Matches what
-    gerber/kicad/drc read directly, and normalises a 0/negative drill to None
-    (no hole) exactly as ``_from_resolved`` does — so both paths agree that a
-    sizeless drill-less pad is an SMD land, and the fail-closed check + kicad's
-    ``drill is not None`` TH test never disagree at the degenerate drill==0."""
+    gerber/kicad/drc read directly, and normalises a FINITE 0/negative drill to
+    None (no hole) exactly as ``_from_resolved`` does — so both paths agree that a
+    sizeless drill-less pad is an SMD land, and every consumer's TH test agrees at
+    the degenerate drill==0. A PRESENT non-finite drill (NaN/+-Inf) is deliberately
+    PRESERVED here so the shared ``_require_finite_drill`` boundary fails it closed
+    with pad context (bug 019f91c1420c) rather than it silently becoming a no-hole
+    SMD via ``-inf <= 0``."""
     drill = _opt_num(pin.get("drill_mm"))
-    if drill is not None and drill <= 0:
+    if drill is not None and math.isfinite(drill) and drill <= 0:
         drill = None
     width = _opt_num(pin.get("pad_width_mm"))
     # A drilled pad's round-annulus copper: the pin's authored annulus_diameter_mm
@@ -417,7 +479,7 @@ def _from_pin(pin: dict) -> PadGeom:
         shape="rect",
         corner_rratio=None,  # inline-pin fallback carries no footprint corner datum
         solder_mask_margin=_opt_num(pin.get("solder_mask_margin")),
-        pad_type=("thru_hole" if (drill is not None and drill > 0) else "smd"),
+        pad_type=("thru_hole" if _is_th_drill(drill) else "smd"),
         layers=[],
         from_resolve=False,
     )
@@ -433,7 +495,10 @@ def _from_resolved(pad: dict) -> PadGeom:
     size = pad.get("size") or {}
     dr = pad.get("drill") or {}
     drill = _opt_num(dr.get("x"))
-    if drill is not None and drill <= 0:
+    # FINITE 0/negative -> no hole (SMD); a non-finite drill is preserved for
+    # _require_finite_drill to fail closed (bug 019f91c1420c). On the IR path the
+    # compiler already guarantees a finite drill, so this guard is a no-op there.
+    if drill is not None and math.isfinite(drill) and drill <= 0:
         drill = None
     width = _opt_num(size.get("width"))
     height = _opt_num(size.get("height"))

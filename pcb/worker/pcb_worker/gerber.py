@@ -55,7 +55,13 @@ from .geometry import (
     rotate_local_offset as _rotate,
 )
 from .ir_projection import graphic_to_dict, outline_frame
-from .pad_source import iter_pads, placed_pad_to_geom, require_th_annulus, th_land
+from .pad_source import (
+    is_through_hole,
+    iter_pads,
+    placed_pad_to_geom,
+    require_th_annulus,
+    th_land,
+)
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -406,7 +412,7 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
         pad_angle = pad.rotation if pad.rotation is not None else rot
 
         drill = pad.drill
-        if drill is not None and drill > 0:
+        if is_through_hole(pad):
             # An UNPLATED through-hole pad (np_thru_hole, or a pad flagged not plated)
             # is a BARE drilled hole — NO copper land (just a drill-size mask opening,
             # below), exactly as kicad emits np_thru_hole. Only a PLATED TH pad gets

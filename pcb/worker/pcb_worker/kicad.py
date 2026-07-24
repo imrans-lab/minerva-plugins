@@ -32,7 +32,7 @@ from agent_router import layers as _layers
 
 from .geometry import place_point
 from .ir_projection import graphic_to_dict, outline_frame
-from .pad_source import iter_pads, require_th_annulus, th_land
+from .pad_source import is_through_hole, iter_pads, require_th_annulus, th_land
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -477,7 +477,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         net_expr = ""
         if net_no:
             net_expr = f' (net {net_no} "{_esc(net_name_of.get(net_no, ""))}")'
-        if drill is not None:
+        if is_through_hole(pad):
             # Through-hole pad. The round-annulus copper dim is the real resolved
             # copper (or the pin's authored annulus/size); a plated TH pad that
             # resolved no copper at all fails CLOSED via require_th_annulus — never

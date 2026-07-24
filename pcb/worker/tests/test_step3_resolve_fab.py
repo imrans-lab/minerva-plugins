@@ -345,8 +345,8 @@ def test_has_resolved_pads_is_the_single_marker():
 # ---------------------------------------------------------------------------
 
 
-def _raw_board_plated_th(annulus=None, pad_size=None):
-    pin = {"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 1.0}
+def _raw_board_plated_th(annulus=None, pad_size=None, drill=1.0):
+    pin = {"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": drill}
     if annulus is not None:
         pin["annulus_diameter_mm"] = annulus
     if pad_size is not None:
@@ -427,4 +427,79 @@ def test_raw_plated_th_annulus_not_bigger_than_drill_fails_closed_both_emitters(
     with pytest.raises(pad_source.PadGeometryError):
         gerber.build_gerbers(board, name="thtest")
     with pytest.raises(pad_source.PadGeometryError):
+        kicad.generate_kicad_pcb(board)
+
+
+# ---------------------------------------------------------------------------
+# (f) FAIL-CLOSED: a PRESENT but NON-FINITE drill (bug 019f91c1420c). Before the
+#     shared _require_finite_drill boundary the two emitters DIVERGED on a NaN drill
+#     — gerber's `drill > 0` was False so it mis-routed to the SMD branch and crashed
+#     with an unstructured TypeError, while kicad's `drill is not None` was True so it
+#     emitted a MALFORMED `thru_hole ... (drill nan)`. Now both share one predicate
+#     (is_through_hole) and one boundary, so both fail closed identically with a
+#     structured PadGeometryError; a finite 0/negative drill stays the ACCEPTED
+#     "no hole -> SMD" degenerate (no predicate drift).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_drill", [float("nan"), float("inf"), float("-inf")])
+def test_raw_th_non_finite_drill_fails_closed_both_emitters(bad_drill):
+    # Authored a VALID annulus (1.8) so the ONLY defect is the drill — this pins the
+    # non-finite drill itself (not the annulus / SMD-size) as the fail-closed cause.
+    board = _raw_board_plated_th(annulus=1.8, drill=bad_drill)
+    with pytest.raises(pad_source.PadGeometryError, match="not finite"):
+        gerber.build_gerbers(board, name="thtest")
+    with pytest.raises(pad_source.PadGeometryError, match="not finite"):
+        kicad.generate_kicad_pcb(board)
+
+
+@pytest.mark.parametrize("degenerate_drill", [0.0, -1.0])
+def test_raw_th_zero_or_negative_drill_is_smd_not_a_drill_error(degenerate_drill):
+    # BOUNDARY GUARD (no predicate drift): a finite 0/negative drill is normalized to
+    # "no hole" (SMD) — NOT the non-finite drill error. With no SMD size it fails
+    # closed as a SIZELESS SMD (smd_no_size), identically in both emitters. Pins the
+    # accepted degenerate so a future change can't reclassify 0/neg as drill_not_finite.
+    board = _raw_board_plated_th(drill=degenerate_drill)  # no annulus, no size
+    for emit in (lambda b: gerber.build_gerbers(b, name="thtest"),
+                 lambda b: kicad.generate_kicad_pcb(b)):
+        with pytest.raises(pad_source.PadGeometryError, match="no copper geometry"):
+            emit(board)
+
+
+@pytest.mark.parametrize("nonnumeric_drill", [True, "1.0"])
+def test_raw_th_nonnumeric_drill_is_treated_as_no_hole(nonnumeric_drill):
+    # A bool / string drill is non-numeric -> _opt_num coerces it to None (no hole),
+    # so the pad is SMD and fails closed on its missing size — never reaches the
+    # emitters as a through-hole. (Documents the _opt_num boundary the repro asked to
+    # cover; a bool is deliberately NOT treated as its int value.)
+    board = _raw_board_plated_th(drill=nonnumeric_drill)  # no annulus, no size
+    with pytest.raises(pad_source.PadGeometryError, match="no copper geometry"):
+        gerber.build_gerbers(board, name="thtest")
+    with pytest.raises(pad_source.PadGeometryError, match="no copper geometry"):
+        kicad.generate_kicad_pcb(board)
+
+
+def test_resolved_path_non_finite_drill_fails_closed_both_emitters():
+    # Defense-in-depth: the non-finite drill boundary also guards the RESOLVED pad
+    # path (_from_resolved via comp["pads"]), not just inline pins. Production can't
+    # author this (the compiler guarantees finite drills), but the shared validator
+    # holds on either factory branch.
+    board = {
+        "version": 1, "name": "thtest", "width_mm": 20, "height_mm": 20,
+        "components": [{
+            "ref": "J1", "footprint": "HDR", "x_mm": 10.0, "y_mm": 10.0,
+            "rotation_deg": 0, "layer": "top",
+            "pads": [{
+                "number": "1", "type": "thru_hole", "shape": "circle",
+                "position": {"x": 0.0, "y": 0.0},
+                "size": {"width": 1.8, "height": 1.8},
+                "drill": {"x": float("nan"), "y": float("nan")},
+                "layers": ["F.Cu", "B.Cu"],
+            }],
+        }],
+        "nets": [],
+    }
+    with pytest.raises(pad_source.PadGeometryError, match="not finite"):
+        gerber.build_gerbers(board, name="thtest")
+    with pytest.raises(pad_source.PadGeometryError, match="not finite"):
         kicad.generate_kicad_pcb(board)
