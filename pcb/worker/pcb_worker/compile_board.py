@@ -43,6 +43,13 @@ from typing import Union
 
 from agent_router.layers import CANON_TO_KICAD, STACK_INDEX
 
+from .board_schema import (
+    _BOUNDARY_MESSAGES,
+    _OVERRIDE_NUM_KEYS,
+    _is_minted_id,
+    _is_number,
+)
+from .board_validate import validate_board_v2
 from .canonical_id import CanonicalizationError, content_id, derive_id
 from .fab_capability import (
     EMITTED_LAYERS,
@@ -233,12 +240,6 @@ def _board_ref(entity_id: str = "<board>", detail: Union[str, None] = None) -> S
 # ---------------------------------------------------------------------------
 # Small numeric helpers.
 # ---------------------------------------------------------------------------
-
-
-def _is_number(value) -> bool:
-    import math
-    return (not isinstance(value, bool) and isinstance(value, (int, float))
-            and math.isfinite(value))
 
 
 def _is_positive_number(value) -> bool:
@@ -734,13 +735,6 @@ def _apply_pin_override(
 #     fail-closed ERROR, because a v1→v2 migration must not mint a v2 board whose
 #     fabrication meaning silently changed.
 _INLINE_FAB_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm", "plated")
-
-# Numeric keys of a typed pin `override` (schema-v2 sanctioned deviation); `plated`
-# is a separate boolean.  Type-checked ONLY here — matching the Go PinOverride
-# codec, which rejects wrong types at unmarshal.  Value-range semantics belong to
-# the shared board-v2 spec (Round D), enforced identically on both sides to avoid
-# validator drift (comment 629).
-_OVERRIDE_NUM_KEYS = ("drill_mm", "annulus_diameter_mm", "pad_width_mm", "pad_height_mm")
 
 
 def _check_coincidence(comp: dict, definition: FootprintDefinition, ref: str,
@@ -1325,24 +1319,6 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
     return tuple(holes)
 
 
-_MINTED_HEX_LEN = 32  # 128-bit mint → 32 lowercase hex chars
-
-
-def _is_minted_id(entity: str, value) -> bool:
-    """True iff ``value`` is a well-formed minted id ``"<entity>:<32 lc hex>"`` —
-    byte-for-byte the shape the Go v1→v2 migration writes (migrate.go
-    ``isMintedID``).  Anything else (absent, a legacy ordinal-shaped ``trace_1``,
-    a foreign shape) is UNMINTED, which for a v2 board is fatal."""
-    if not isinstance(value, str):
-        return False
-    prefix = entity + ":"
-    if len(value) != len(prefix) + _MINTED_HEX_LEN:
-        return False
-    if not value.startswith(prefix):
-        return False
-    return all(c in "0123456789abcdef" for c in value[len(prefix):])
-
-
 def _authored_id_ok(raw: dict, ref: SourceRef, diags: _Diagnostics) -> bool:
     """A present-but-non-string authored ``id`` is an error, not silently
     replaced by an ordinal (K2 review 625.3)."""
@@ -1361,7 +1337,13 @@ def _validate_child_id(entity: str, raw: dict, ref: SourceRef,
     v2 REQUIRES a persisted minted id and fails closed without one — a v2 board
     that reaches an identity-dependent compile without minted ids has skipped the
     migration, and routing/DRC against unstable identity is the exact hazard this
-    gate exists to prevent.  v1 keeps the permissive authored-or-ordinal bridge."""
+    gate exists to prevent.  v1 keeps the permissive authored-or-ordinal bridge.
+
+    NOTE: for v2 this mintedness check is REDUNDANT behind the shared gate
+    (validate_board_v2, run first in compile_board — it already fails closed on
+    unminted/duplicate trace/via/hole ids across all three domains).  It is kept as
+    cheap per-entity defense-in-depth; the v1 branch (_authored_id_ok) is the part
+    that is actually load-bearing here."""
     if schema_version >= 2:
         pid = raw.get("id")
         if not _is_minted_id(entity, pid):
@@ -1401,18 +1383,6 @@ def _authored_or_ordinal_id(entity: str, board_id: str, raw: dict, *ordinal_part
 # ---------------------------------------------------------------------------
 
 
-# Human messages for the shared-boundary codes validate_board_v2 returns as bare
-# strings; the CODE is the contract (matched by vectors + Go), the message is
-# operator context. Kept beside compile_board's early gate that emits them.
-_BOUNDARY_MESSAGES = {
-    "unsupported_schema_version": "canonical board schema requires an integer version 1 or 2 (present)",
-    "unminted_persistent_id": "a v2 board and every trace/via/hole require a minted \"<kind>:<32hex>\" id",
-    "duplicate_persistent_id": "a persistent id is duplicated within its entity domain",
-    "invalid_board_structure": "a top-level entity collection is malformed or carries a null item",
-    "invalid_pin_override": "a pin override field has the wrong type",
-}
-
-
 def compile_board(
     board: dict,
     *,
@@ -1435,13 +1405,15 @@ def compile_board(
         return ResolutionFailure(diagnostics=diags.tuple())
 
     # Shared-boundary gate FIRST (findings 019f88bac172 / 019f8b7fb07e): the
-    # production compiler must run the SAME structural + persistent-id validator
-    # the Go codec and the committed vectors use, so a duplicate persistent id or a
-    # null / identity-less list item fails CLOSED here with its EXPLICIT shared code
-    # — not later as a generic ``board_invariant`` raised by ResolvedBoard
-    # construction (previously the only thing that caught duplicate ids). Imported
-    # lazily because board_validate imports predicates FROM this module (cycle).
-    from .board_validate import validate_board_v2
+    # production compiler runs the SAME structural + persistent-id validator the Go
+    # codec and the committed vectors use (validate_board_v2), so a duplicate
+    # persistent id or a null / identity-less list item fails CLOSED here with its
+    # EXPLICIT shared code — not later as a generic ``board_invariant`` raised by
+    # ResolvedBoard construction (previously the only thing that caught duplicate
+    # ids). This is the ONE schema-validation authority: it checks schema-version
+    # validity, the v2 minted board id, and top-level container shape + pin-override
+    # field types — so the compiler does NOT re-check those below (finding
+    # 019f88bac172, Codex @ aa2ef0f: one authority, no lazy circular import).
     seen_codes: set[str] = set()
     for code in validate_board_v2(board):
         if code in seen_codes:
@@ -1451,17 +1423,10 @@ def compile_board(
     if seen_codes:
         return ResolutionFailure(diagnostics=diags.tuple())
 
-    # Dispatch on the schema version FIRST: the canonical contract types version
-    # as an integer, so it must be PRESENT and exactly int 1 or int 2 — a missing
-    # field, a float 1.0, or any other value must never be interpreted (review
-    # 630).  v1 keeps the ordinal-id bridge; v2 REQUIRES persisted minted ids
-    # (fail-closed, item 019f802ca3af Round C).
+    # The gate guaranteed version is int 1 or 2 (unsupported_schema_version fails
+    # closed there, review 630), so read it without re-validating: v1 keeps the
+    # ordinal-id bridge, v2 requires persisted minted ids (item 019f802ca3af Round C).
     version = board.get("version")
-    if type(version) is not int or version not in (1, 2):
-        diags.error("unsupported_schema_version",
-                    f"canonical board schema requires an integer version 1 or 2 (present); got "
-                    f"{version!r} of type {type(version).__name__}", _board_ref())
-        return ResolutionFailure(diagnostics=diags.tuple())
 
     # Load the sha-verified lock ONCE; an unreadable/malformed lock is fatal —
     # provenance and footprint resolution both depend on it (review 621 MF4).
@@ -1482,15 +1447,9 @@ def compile_board(
     #       point of the migration is that identity is stable, not re-derived.
     #   v1: it stays content-derived (the pre-migration bridge).
     if version >= 2:
-        persisted_board_id = board.get("id")
-        if _is_minted_id("board", persisted_board_id):
-            board_id = persisted_board_id
-        else:
-            diags.error("unminted_persistent_id",
-                        f"v2 board lacks a persisted minted id (got {persisted_board_id!r}); it must "
-                        f"be migrated (ids minted at pcb.deserialize) before an identity-dependent "
-                        f"compile", _board_ref())
-            board_id = derive_id("board", str(name or "<unnamed>"), "unminted-v2")
+        # The gate guaranteed a minted v2 board id (unminted_persistent_id fails
+        # closed there), so trust it — one authority, no re-check.
+        board_id = board.get("id")
     else:
         board_id = derive_id("board", str(name or "<unnamed>"), str(version))
 

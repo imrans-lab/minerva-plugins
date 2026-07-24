@@ -10,15 +10,17 @@ untyped dict — re-checks explicitly).
 It operates on a PARSED board dict and does NOT resolve footprints or geometry —
 that is the full compiler (compile_board.py). The committed vectors in
 ``pcb/spec/vectors/`` are loaded and asserted identically on both sides; the error
-codes here match ``internal/board.Validate`` verbatim. The minted-id predicate is
-shared with the compiler (``_is_minted_id``) so the two Python paths cannot drift.
+codes here match ``internal/board.Validate`` verbatim. The minted-id predicate and
+override-key set live in the neutral :mod:`board_schema` module (imported by both
+this validator and the compiler) so the two Python paths cannot drift.
 """
 from __future__ import annotations
 
-# Reuse the compiler's shared predicates AND the override-key list so the two
-# Python paths cannot drift (the minted-id definition and the override field set
-# have exactly one source of truth).
-from .compile_board import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
+# The shared predicates AND the override-key list live in the neutral
+# board_schema module so the two Python paths cannot drift (the minted-id
+# definition and the override field set have exactly one source of truth) — and
+# so this validator no longer depends on the compiler (finding 019f88bac172).
+from .board_schema import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
 
 def _check_entity_ids(entity: str, item_lists: "list[list]", codes: list) -> None:
     """Append the first persistent-id violation across one entity DOMAIN (one or more
