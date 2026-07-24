@@ -12,9 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
-from pcb_worker import gerber, resolve
+from tests.gerber_fab import build_fab
 from tests.oracle.geometry_diff import diff_geometry, load_output_dir, parse_output_set
 from tests.oracle.provenance import (
     ProvenanceEntry,
@@ -131,43 +130,44 @@ def test_blessed_entry_would_be_a_correctness_oracle():
 
 
 def test_spike_golden_correctness_oracle_matches_emitter():
-    """Use the blessed spike golden as a real CORRECTNESS oracle: assert the live
-    emitter's FABRICATION-CRITICAL geometry (copper/mask/drill/edge) matches the
-    trusted known-good golden — over the RESOLVED board, because Stage 2's whole
-    point is that pad geometry comes from RESOLVING the footprint, not a
-    placeholder (pad bug 019f7736b236).
+    """Use the blessed spike golden as a real CORRECTNESS oracle: assert the
+    PRODUCTION emitter's FABRICATION-CRITICAL geometry (copper/mask/drill/edge)
+    matches the trusted known-good golden.
+
+    Routed through the PRODUCTION fab path — ``build_fab`` = COMPILE (strict) ->
+    ``build_gerbers_ir``, EXACTLY as ``methods._gerbers`` does — so the oracle
+    certifies USER-FACING CAM, not a legacy path (K4 correctness-oracle fix, bug
+    019f91f9e89c). Previously this ran the legacy ``build_gerbers(resolve_board(...))``
+    path, whose default 0.1mm mask clearance matched the old golden while production
+    (compile->IR) resolves the compiler's 0.05mm clearance — so a green oracle
+    certified the RETIRED path, not what the user ships (24 F.Mask/B.Mask deltas).
+    The independent golden is now cut at the ratified 0.05mm (owner decision;
+    generate.py MASK_CLEARANCE, still gerber_writer — NOT the emitter under test, so
+    anti-circularity holds), and this asserts production == golden on the fab layers.
 
     This is the payoff of the anti-circularity control — a byte-determinism gate
-    could never make this claim. While the golden is UNBLESSED (regenerated to
-    the real 0805 land, pending owner gerbv re-bless) this SKIPS-WITH-REASON,
-    never a silent pass; once the owner sets blessed=true it is a live assertion
-    and pad bug 019f7736b236 is CLOSED.
+    could never make this claim. While the golden is UNBLESSED (re-cut to 0.05mm,
+    pending owner gerbv/kicad-cli re-bless) this SKIPS-WITH-REASON, never a silent
+    pass; once the owner sets blessed=true it is a live assertion.
 
     ORACLE SCOPE (Option A): silk is EXCLUDED — F.SilkS is a cosmetic legend
-    layer, not fabrication-critical geometry. The emitter emits only REAL
-    footprint silk graphics (K4: the procedural courtyard-box placeholder is
-    retired; no resolved silk means no silk). Silk correctness is earned
-    separately against real footprints that carry real silk graphics (silk-text
-    019f77fd6d69; coverage audit 019f77fd9c6c), not by pinning to this synthetic
-    golden.
+    layer, not fabrication-critical geometry. Production emits only REAL footprint
+    silk graphics (K4: the procedural courtyard-box placeholder is retired; the
+    spike board authors no silk, so production emits an EMPTY legend layer while the
+    independent golden still draws courtyards — a deliberate, documented cosmetic
+    divergence, see test_geometry_diff). Silk correctness is earned separately
+    against real footprints that carry real silk graphics (silk-text 019f77fd6d69;
+    coverage audit 019f77fd9c6c), not by pinning to this synthetic golden.
     """
     prov = _prov()
     usable, reason = correctness_oracle_status(prov, SPIKE_ID)
-    if not usable:  # skips while regenerated-but-unblessed; live once re-blessed
+    if not usable:  # skips while re-cut-but-unblessed; live once re-blessed
         pytest.skip(f"spike golden not usable as correctness oracle: {reason}")
 
-    board = resolve.resolve_board(yaml.safe_load(SPIKE_BOARD.read_text(encoding="utf-8")))
-    # The aperture rotation is a no-op here (resolve_board pads carry no per-pad
-    # `rotation`), so this stays byte-matched to the owner-blessed spike golden.
-    # NOTE: this uses the
-    # STRICT resolve_board (not the IR path) DELIBERATELY — the blessed golden was
-    # cut at the 0.1mm default mask clearance, whereas the compile->IR path carries
-    # the compiler's resolved 0.05mm clearance; routing this oracle through the IR
-    # would (correctly) diverge on the mask layer and break the bless comparison.
-    current = parse_output_set(gerber.build_gerbers(board, name="board"))
+    current = parse_output_set(build_fab(SPIKE_BOARD, "board"))
     golden = parse_output_set(load_output_dir(SPIKE_GOLDEN_DIR))
     diff = diff_geometry(current, golden).excluding_layers("F_SilkS")
     assert diff.is_empty, (
-        "emitter output does not match the BLESSED correctness golden on the "
-        "fabrication-critical layers (copper/mask/drill/edge):\n" + diff.describe()
+        "PRODUCTION emitter output does not match the BLESSED correctness golden on "
+        "the fabrication-critical layers (copper/mask/drill/edge):\n" + diff.describe()
     )

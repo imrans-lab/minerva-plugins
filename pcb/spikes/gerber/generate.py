@@ -42,7 +42,13 @@ TH_DRILL = 0.8
 TH_ANNULUS = 1.6
 VIA_DRILL = 0.4
 VIA_DIAMETER = 0.8
-MASK_CLEARANCE = 0.1   # per-side growth for solder mask openings
+MASK_CLEARANCE = 0.05  # per-side growth for solder mask openings. RATIFIED to
+# match PRODUCTION (owner decision, K4 correctness-oracle bug 019f91f9e89c): the
+# compile->IR fab path resolves the board's solder_mask_clearance_mm from
+# compile_board._DEFAULTS (0.05mm), so this INDEPENDENT golden must be cut at the
+# same clearance for the correctness oracle to certify user-facing CAM. Was 0.1mm
+# (legacy DEFAULT_MASK_CLEARANCE_MM in gerber.py, which now only applies to the raw
+# test path). The NPTH mount mask below is a drill-size opening and is unaffected.
 MOUNT_HOLE_DIA = 3.2
 
 r1_pin1 = (R1[0] - 0.95, R1[1])
@@ -52,10 +58,15 @@ c1_pin2 = (C1[0] + 0.95, C1[1])
 
 # --- Pad masters -------------------------------------------------------------
 
+# Mask openings grow the copper land by MASK_CLEARANCE per side. round() keeps the
+# emitted diameter clean (e.g. 1.6 + 2*0.05 = 1.7, not 1.7000000000000002 from
+# binary float) — the correctness oracle is geometry-tolerant, but a clean golden
+# is easier to bless and diff.
 smd_pad = Rectangle(SMD_PAD_X, SMD_PAD_Y, "SMDPad,CuDef")
-smd_mask_pad = Rectangle(SMD_PAD_X + 2 * MASK_CLEARANCE, SMD_PAD_Y + 2 * MASK_CLEARANCE, "")
+smd_mask_pad = Rectangle(round(SMD_PAD_X + 2 * MASK_CLEARANCE, 4),
+                         round(SMD_PAD_Y + 2 * MASK_CLEARANCE, 4), "")
 th_pad_cu = Circle(TH_ANNULUS, "ComponentPad")
-th_mask_pad = Circle(TH_ANNULUS + 2 * MASK_CLEARANCE, "")
+th_mask_pad = Circle(round(TH_ANNULUS + 2 * MASK_CLEARANCE, 4), "")
 via_pad_cu = Circle(VIA_DIAMETER, "ViaPad")
 # NPTH mounting-hole mask: a DRILL-SIZE opening (no clearance growth) on BOTH
 # sides. Ground truth is pcbnew 9.0.9 — a KiCad np_thru_hole pad IS on F.Mask/

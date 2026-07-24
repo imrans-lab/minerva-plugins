@@ -1,8 +1,9 @@
 """GOLDEN GEOMETRY-DIFF harness (docket SB.2) — regression + teeth + registration.
 
-This is a REAL functional test (no mocking): it runs the production emitter
-``pcb_worker.gerber.build_gerbers`` to produce real bytes, parses them with real
-gerbonara, and diffs at the GEOMETRY level (NOT bytes — SB.3 owns bytes).
+This is a REAL functional test (no mocking): it runs the PRODUCTION fab path
+``build_fab`` (compile_board -> ``build_gerbers_ir``, exactly as methods._gerbers)
+to produce real bytes, parses them with real gerbonara, and diffs at the GEOMETRY
+level (NOT bytes — SB.3 owns bytes).
 
   * ``test_regression_drift_pin`` pins the emitter output against the captured
     drift-pin snapshot (empty delta). This detects DRIFT, it does NOT assert
@@ -11,11 +12,12 @@ gerbonara, and diffs at the GEOMETRY level (NOT bytes — SB.3 owns bytes).
   * ``test_teeth_*`` prove the diff DETECTS a real perturbation of a parsed
     golden (a moved pad / a removed drill) — proof the empty delta above is
     meaningful, not a diff that can't see anything.
-  * ``test_current_diverges_from_spike_golden`` documents the anti-circularity
-    finding: the emitter's geometry currently DIFFERS from the independent,
-    structurally-validated spike golden (placeholder SMD pad geometry). The
-    correctness verdict on that golden is gated by provenance (see
-    test_provenance.py), not asserted here.
+  * ``test_production_matches_spike_golden_except_cosmetic_silk`` asserts the
+    anti-circularity PAYOFF: production now AGREES with the independent,
+    structurally-validated spike golden on every fabrication-critical layer
+    (copper/mask/drill/edge) — after the golden was re-cut to the ratified 0.05mm
+    mask clearance (K4, bug 019f91f9e89c) — leaving only cosmetic F.SilkS. The
+    correctness verdict on that golden is gated by provenance (test_provenance.py).
 """
 
 from __future__ import annotations
@@ -153,31 +155,37 @@ def test_teeth_changed_pad_size_is_detected():
 
 
 # ---------------------------------------------------------------------------
-# Anti-circularity finding: the live emitter DIVERGES from the independent
-# structurally-validated spike golden. Documented, not silently accepted. The
-# correctness verdict is gated on provenance (see test_provenance.py).
+# Anti-circularity payoff: the PRODUCTION emitter now AGREES with the independent
+# structurally-validated spike golden on every FABRICATION-CRITICAL layer
+# (copper/mask/drill/edge). The only remaining divergence is COSMETIC F.SilkS.
+# The correctness verdict is gated on provenance (see test_provenance.py).
 # ---------------------------------------------------------------------------
 
 
-def test_current_diverges_from_spike_golden():
-    """The emitter's copper/mask/silk geometry differs from the independent
-    spike golden (placeholder SMD pad defaults), but DRILLS + REGISTRATION agree.
+def test_production_matches_spike_golden_except_cosmetic_silk():
+    """PRODUCTION (build_fab = compile -> IR) matches the independent spike golden
+    on ALL fabrication-critical layers; the ONLY divergence is cosmetic F.SilkS.
 
-    This is the anti-circularity signal working: an unblessed golden reveals real
-    correctness drift. Kept as an assertion (not a skip) because it documents a
-    KNOWN finding; if the emitter is later fixed to match, update this test.
-    """
+    This test previously documented a KNOWN copper/mask divergence (the emitter's
+    placeholder SMD pad defaults, and later the 0.1-vs-0.05mm mask-clearance gap).
+    Both are now resolved: pad geometry comes from the resolved footprint, and the
+    independent golden is cut at the ratified 0.05mm clearance (K4 correctness-
+    oracle fix, bug 019f91f9e89c). So copper/mask/drill/edge/registration all
+    AGREE. F.SilkS still differs — and by design: production retired the procedural
+    courtyard box and the spike board authors no silk graphics, so production emits
+    an EMPTY legend layer while the independent gerber_writer golden still draws
+    courtyards. That cosmetic difference is EXCLUDED from the correctness oracle
+    (test_provenance, Option A)."""
     current = parse_output_set(_emit())
     golden = parse_output_set(load_output_dir(SPIKE_GOLDEN_DIR))
     diff = diff_geometry(current, golden)
 
-    assert not diff.is_empty, "expected the known emitter/spike-golden divergence"
-    # The parts that ARE correct must match: drills and drill-to-copper reg.
+    # Fabrication-critical layers agree; only cosmetic silk differs.
+    assert not diff.is_empty, "expected the cosmetic F.SilkS divergence to remain"
     assert not any(d.category in ("drill", "registration") for d in diff.deltas), (
-        "drills/registration should already agree with the spike golden:\n"
-        + diff.describe()
+        "drills/registration must agree with the spike golden:\n" + diff.describe()
     )
-    # The divergence is confined to copper/mask/silk (pad geometry), no outline.
-    assert diff.layers_changed() <= {"F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS"}, (
-        "divergence spread beyond copper/mask/silk:\n" + diff.describe()
+    assert diff.layers_changed() == {"F_SilkS"}, (
+        "production must match the golden on ALL fab-critical layers; only cosmetic "
+        "F.SilkS may differ (courtyards vs empty legend):\n" + diff.describe()
     )
