@@ -405,3 +405,26 @@ def test_raw_plated_th_equal_axis_pad_size_becomes_the_annulus():
     assert not re.search(r"%ADD\d+C,2(\.0+)?\*%", fcu), \
         "gerber F_Cu leaked a 2x-drill (2.0) invented annulus"
     assert "(size 1.8 1.8)" in kicad.generate_kicad_pcb(board)
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_raw_plated_th_invalid_annulus_fails_closed_both_emitters(bad):
+    # bug 019f91b61337: the shared accessor must reject a non-finite / non-positive
+    # annulus, not just None — else 0.0 flashes a zero aperture, NaN/Inf reach the
+    # fabrication bytes literally, and a negative diverges between the two emitters.
+    board = _raw_board_plated_th(annulus=bad)
+    with pytest.raises(pad_source.PadGeometryError):
+        gerber.build_gerbers(board, name="thtest")
+    with pytest.raises(pad_source.PadGeometryError):
+        kicad.generate_kicad_pcb(board)
+
+
+@pytest.mark.parametrize("ann", [1.0, 0.8])  # drill is 1.0: equal == zero ring; less == nonsense
+def test_raw_plated_th_annulus_not_bigger_than_drill_fails_closed_both_emitters(ann):
+    # Physical invariant (distinct from a board-house min-annular-ring policy): the
+    # round copper annulus must EXCEED the drill or there is no copper ring.
+    board = _raw_board_plated_th(annulus=ann)
+    with pytest.raises(pad_source.PadGeometryError):
+        gerber.build_gerbers(board, name="thtest")
+    with pytest.raises(pad_source.PadGeometryError):
+        kicad.generate_kicad_pcb(board)

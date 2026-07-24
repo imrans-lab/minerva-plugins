@@ -73,13 +73,24 @@ class PadGeometryError(ValueError):
             f"inline pad_width_mm/pad_height_mm — fail-closed, bug 019f7736b236")
 
     @classmethod
-    def th_no_annulus(cls, ref: Any, number: Any, drill: Any) -> "PadGeometryError":
+    def th_no_annulus(cls, ref: Any, number: Any, annulus: Any, drill: Any) -> "PadGeometryError":
         return cls(
             ref, number,
             f"component {ref!r} pad {number!r} is a PLATED through-hole pad with no "
-            f"copper annulus (drill={drill}); author an 'annulus_diameter_mm' or a "
-            f"pad size — fail-closed, never invented (K4, mirrors the plated-board-"
-            f"hole contract finding 019f8dbb7104)")
+            f"VALID copper annulus (annulus={annulus!r}, drill={drill!r}); the round "
+            f"copper ring must be a finite POSITIVE diameter — author an "
+            f"'annulus_diameter_mm' or a pad size — fail-closed, never invented (K4, "
+            f"mirrors the plated-board-hole contract finding 019f8dbb7104)")
+
+    @classmethod
+    def th_annulus_not_bigger_than_drill(
+            cls, ref: Any, number: Any, annulus: Any, drill: Any) -> "PadGeometryError":
+        return cls(
+            ref, number,
+            f"component {ref!r} pad {number!r}: plated through-hole copper annulus "
+            f"{annulus} must EXCEED the drill {drill} to leave a copper ring — "
+            f"fail-closed (physical invariant, distinct from a board-house min "
+            f"annular-ring policy; mirrors the board-hole check finding 019f8dbb7104)")
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -115,7 +126,7 @@ class PadGeom:
     width: float | None    # SMD copper width; None => no declared/resolved size
     height: float | None
     drill: float | None    # drill diameter mm (0.0 preserved); None => no datum
-    annulus: float | None  # TH copper annulus diameter; None => emitter default
+    annulus: float | None  # round TH copper annulus diameter; None on a plated TH pad fails closed at emit (require_th_annulus) — never an emitter-invented default
     plated: bool
     shape: str
     corner_rratio: float | None  # roundrect corner radius / min(w,h), in [0,0.5]; None => none/default
@@ -212,10 +223,22 @@ def require_th_annulus(pad: PadGeom, ref: Any) -> float:
     Callers gate this on the SAME predicate the emitters use for the round-annulus
     branch (plated, drilled, equal-axis land), so an unplated ``np_thru_hole`` (bare
     mechanical hole, no copper ring) never reaches it.
+
+    The returned value is VALIDATED, never merely non-None (bug 019f91b61337): a
+    zero / negative / NaN / infinite diameter would otherwise flash a malformed
+    aperture (Gerber) or a degenerate/negative pad (KiCad) and let the two emitters
+    diverge. It must be a finite positive diameter that EXCEEDS the drill (else there
+    is no copper ring — the physical invariant, mirroring the board-hole check; this
+    is NOT a board-house minimum-annular-ring policy, which stays a fab-house
+    concern).
     """
-    if pad.annulus is None:
-        raise PadGeometryError.th_no_annulus(ref, pad.number, pad.drill)
-    return pad.annulus
+    ann = pad.annulus
+    if ann is None or not math.isfinite(ann) or ann <= 0:
+        raise PadGeometryError.th_no_annulus(ref, pad.number, ann, pad.drill)
+    if pad.drill is not None and ann <= pad.drill:
+        raise PadGeometryError.th_annulus_not_bigger_than_drill(
+            ref, pad.number, ann, pad.drill)
+    return ann
 
 
 # Circle width/height must agree to within this to be a faithful circle.
@@ -446,16 +469,15 @@ def _from_resolved(pad: dict) -> PadGeom:
 
 
 def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
-    """A board-absolute :class:`PlacedPad` (K2 IR) -> the same :class:`PadGeom` the
-    loose-dict path yields — the IR-NATIVE pad accessor the fab emitters use so they
-    consume the ResolvedBoard directly, with no IR->loose-dict adapter (C5).
+    """A board-absolute :class:`PlacedPad` (K2 IR) -> a :class:`PadGeom` — the
+    IR-NATIVE pad accessor the fab emitters use so they consume the ResolvedBoard
+    directly (C5: the IR->loose-dict adapter is gone).
 
-    It builds the exact resolved-pad dict the adapter's ``_pad_to_dict`` projected and
-    reuses :func:`_from_resolved`, so it is BYTE-IDENTICAL to the loose-dict path (the
-    TH annulus/drill contract, the size/None handling, everything) — pinned by the
-    emitter byte-equivalence test. A drilled pad's copper width doubles as the
-    annulus: the override-set :attr:`PlacedPad.annulus` when present (round), else the
-    footprint copper :attr:`PlacedPad.size`."""
+    It projects the PlacedPad into the resolved-pad dict shape and reuses
+    :func:`_from_resolved`, so the IR path and the raw loose-dict path apply the SAME
+    TH annulus/drill contract and size/None handling. A drilled pad's copper width
+    doubles as the annulus: the override-set :attr:`PlacedPad.annulus` when present
+    (round), else the footprint copper :attr:`PlacedPad.size`."""
     is_drilled = pad.drill is not None
     if is_drilled:
         if pad.annulus is not None:
