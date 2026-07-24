@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.gerber_fab import build_fab
+from tests.gerber_fab import build_fab, build_raw_emitter
 
 gerbonara = pytest.importorskip("gerbonara")
 from gerbonara import ExcellonFile, GerberFile  # noqa: E402
@@ -23,17 +23,18 @@ HERE = Path(__file__).resolve().parent  # pcb/worker/tests/oracle
 SPIKE_BOARD = HERE.parents[2] / "spikes" / "gerber" / "board.yaml"  # pcb/spikes/...
 DRILL_BOARD = HERE.parent / "testdata" / "gerber_boards" / "drilltest.yaml"
 
-# (board path, base name, expected total drill-hit count across PTH+NPTH)
-CASES = [(SPIKE_BOARD, "board", 3), (DRILL_BOARD, "drilltest", 6)]
+# (board path, base name, expected total drill-hit count across PTH+NPTH, builder).
+# Spike -> PRODUCTION fab path (compile -> IR); drilltest -> raw loose-dict emitter
+# (explicit drift fixture, non-library footprints), NOT a production oracle.
+CASES = [
+    pytest.param(SPIKE_BOARD, "board", 3, build_fab, id="board-production"),
+    pytest.param(DRILL_BOARD, "drilltest", 6, build_raw_emitter, id="drilltest-raw"),
+]
 
 
-@pytest.mark.parametrize("board_path,base,expected_drills", CASES)
-def test_gerbonara_reads_current_exporter_output(board_path, base, expected_drills):
-    # Production fab path (K4 phase 1): COMPILE (strict) -> build_gerbers_ir for the
-    # spike; drilltest's hand-authored footprints aren't in the seed lib so it is
-    # emitted from its raw dict directly (off the legacy resolve_board_best_effort
-    # path).
-    files = build_fab(board_path, base)
+@pytest.mark.parametrize("board_path,base,expected_drills,builder", CASES)
+def test_gerbonara_reads_current_exporter_output(board_path, base, expected_drills, builder):
+    files = builder(board_path, base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     drls = {n: t for n, t in files.items() if n.endswith(".drl")}

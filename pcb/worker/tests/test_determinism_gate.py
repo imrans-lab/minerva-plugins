@@ -31,17 +31,22 @@ from pathlib import Path
 
 import pytest
 
-from tests.gerber_fab import build_fab
+from tests.gerber_fab import build_fab, build_raw_emitter
 
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
 
-CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
+# (board path, base name, builder). Spike -> PRODUCTION fab path (compile -> IR);
+# drilltest -> raw loose-dict emitter (explicit drift fixture, not production).
+CASES = [
+    pytest.param(SPIKE_BOARD, "board", build_fab, id="board-production"),
+    pytest.param(DRILL_BOARD, "drilltest", build_raw_emitter, id="drilltest-raw"),
+]
 
 
-@pytest.mark.parametrize("board_path,base", CASES)
-def test_emit_is_byte_identical_across_runs(board_path, base):
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_emit_is_byte_identical_across_runs(board_path, base, builder):
     """Same board, two live emissions -> byte-identical file set.
 
     RAW comparison, DELIBERATELY un-normalized: no timestamp scrubbing, no
@@ -50,14 +55,14 @@ def test_emit_is_byte_identical_across_runs(board_path, base):
     layer/aperture/drill ordering, dict-iteration nondeterminism). That is
     exactly what this guard exists to catch.
 
-    Emission goes through the ACTUAL production fab path, exactly as
-    methods._gerbers does (K4 phase 1): COMPILE (strict) -> build_gerbers_ir for
-    the spike; drilltest's hand-authored footprints aren't in the seed lib so the
-    strict compile fail-closes it and it is emitted from its raw dict directly
-    (all-TH at rotation 0) — off the legacy resolve_board_best_effort path.
+    The spike goes through the ACTUAL production fab path, exactly as
+    methods._gerbers does (K4 phase 1): COMPILE (strict) -> build_gerbers_ir.
+    drilltest's hand-authored footprints aren't in the seed lib, so it is the
+    explicit raw loose-dict drift fixture (build_raw_emitter, all-TH at rotation
+    0) — determinism must hold on both the production and the raw emit path.
     """
-    first = build_fab(board_path, base)
-    second = build_fab(board_path, base)
+    first = builder(board_path, base)
+    second = builder(board_path, base)
 
     # File SET (names + order) is identical.
     assert list(first.keys()) == list(second.keys()), (
@@ -73,8 +78,8 @@ def test_emit_is_byte_identical_across_runs(board_path, base):
     )
 
 
-@pytest.mark.parametrize("board_path,base", CASES)
-def test_creation_date_is_the_only_volatile_field(board_path, base):
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_creation_date_is_the_only_volatile_field(board_path, base, builder):
     """Proof/justification that ONE field (the creation timestamp) is the sole
     wall-clock-volatile byte, and that it is fully controlled by the injection
     point (so pinning it is sufficient for reproducibility).
@@ -85,8 +90,8 @@ def test_creation_date_is_the_only_volatile_field(board_path, base):
     Excellon). This documents WHY the default pin makes the gate above truly
     green: there is nothing else to normalize.
     """
-    a = build_fab(board_path, base, creation_date="2001-01-01T00:00:00")
-    b = build_fab(board_path, base, creation_date="2099-12-31T23:59:59")
+    a = builder(board_path, base, creation_date="2001-01-01T00:00:00")
+    b = builder(board_path, base, creation_date="2099-12-31T23:59:59")
 
     assert list(a.keys()) == list(b.keys())
 

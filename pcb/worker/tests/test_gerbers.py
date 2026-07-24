@@ -26,7 +26,7 @@ import yaml
 
 from pcb_worker import board_model, gerber
 from pcb_worker.methods import handle_request
-from tests.gerber_fab import build_fab
+from tests.gerber_fab import build_fab, build_raw_emitter
 
 HERE = Path(__file__).resolve().parent
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
@@ -35,22 +35,19 @@ GOLDEN_DIR = HERE / "testdata" / "gerber_golden"
 
 BOUNDS_TOL_MM = 2.0  # slack for pad half-extents / real silk graphics past nominal extent
 
-# (board path, golden base name)
-CASES = [(SPIKE_BOARD, "board"), (DRILL_BOARD, "drilltest")]
+# (board path, golden base name, builder). The spike goes through the PRODUCTION
+# fab path (compile -> IR); drilltest is the raw loose-dict drift fixture and is
+# emitted DIRECTLY through the raw emitter (its non-library footprints do not
+# compile) — the routing is explicit per case, not a hidden allowlist (K4
+# keystone item 1). See tests/gerber_fab.py.
+CASES = [
+    pytest.param(SPIKE_BOARD, "board", build_fab, id="board-production"),
+    pytest.param(DRILL_BOARD, "drilltest", build_raw_emitter, id="drilltest-raw"),
+]
 
 
 def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _build(path: Path, base: str) -> dict[str, str]:
-    """Emit a fixture exactly as methods._gerbers now does (K4 phase 1): COMPILE
-    (strict) -> build_gerbers_ir for the spike (real lands, absolute placement);
-    the drill fixture's hand-authored footprints are not in the seed lib so the
-    strict compile fail-closes it and it is emitted from its raw dict directly
-    (all-TH at rotation 0 -> placed == unplaced). No caller remains on the legacy
-    resolve_board_best_effort path."""
-    return build_fab(path, base)
 
 
 # ---------------------------------------------------------------------------
@@ -106,10 +103,10 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
                 f"{name}: Y {y_mm} out of bounds"
 
 
-@pytest.mark.parametrize("board_path,base", CASES)
-def test_gerber_layers_structural(board_path, base):
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_gerber_layers_structural(board_path, base, builder):
     bounds = board_model.board_bounds(_load(board_path))
-    files = build_fab(board_path, base)
+    files = builder(board_path, base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     # Exactly the six expected layers.
@@ -119,8 +116,8 @@ def test_gerber_layers_structural(board_path, base):
         _assert_gerber_structural(name, text, bounds)
 
 
-@pytest.mark.parametrize("board_path,base", CASES)
-def test_gerber_pygerber_round_trip(board_path, base):
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_gerber_pygerber_round_trip(board_path, base, builder):
     pytest.importorskip("pygerber")
     from pygerber.gerberx3.api.v2 import (
         FileTypeEnum,
@@ -128,7 +125,7 @@ def test_gerber_pygerber_round_trip(board_path, base):
         OnParserErrorEnum,
     )
 
-    files = build_fab(board_path, base)
+    files = builder(board_path, base)
     for name, text in files.items():
         if not name.endswith(".gbr"):
             continue
@@ -171,7 +168,7 @@ def _parse_excellon(text: str) -> dict:
 
 
 def test_excellon_structural_spike():
-    files = _build(SPIKE_BOARD, "board")
+    files = build_fab(SPIKE_BOARD, "board")
     pth = _parse_excellon(files["board-PTH.drl"])
     npth = _parse_excellon(files["board-NPTH.drl"])
     # Spike PTH: U1 TH pad (0.8) + via (0.4). NPTH: 1 mounting hole (3.2).
@@ -180,7 +177,9 @@ def test_excellon_structural_spike():
 
 
 def test_excellon_split_drilltest():
-    files = _build(DRILL_BOARD, "drilltest")
+    # drilltest is the RAW loose-dict drift fixture (non-library footprints) —
+    # emitted directly through the raw emitter, NOT the production fab path.
+    files = build_raw_emitter(DRILL_BOARD, "drilltest")
     pth = _parse_excellon(files["drilltest-PTH.drl"])
     npth = _parse_excellon(files["drilltest-NPTH.drl"])
 
@@ -198,22 +197,19 @@ def test_excellon_split_drilltest():
                    for x, y, _ in pth["hits"]), "plated:false pad leaked into PTH"
 
 
-def test_build_fab_fails_closed_on_uncompilable_non_allowlisted_board():
-    # bug 019f917bbe18: build_fab must FAIL CLOSED (raise) when a board that is NOT
-    # an explicitly-named raw-dict fixture fails to compile — never silently fall
-    # back to the tolerant loose-dict emitter (which would let a compiler/library/
-    # contract regression slip past goldens/determinism/geometry-diff/gerbonara).
-    # Reuse the same non-library DRILL_BOARD, but a base name NOT in
-    # _RAW_DICT_FIXTURES, so the deliberate drilltest allowlist does not apply.
-    # This ALSO guards that drilltest itself stays NON-compilable: if its
-    # footprints ever entered the seed library, this compile would SUCCEED and the
-    # `raises` would fail — a prompt to drop drilltest from the allowlist and
-    # migrate it onto the IR path rather than silently keeping it on raw-dict.
+def test_build_fab_fails_closed_on_uncompilable_board():
+    # bug 019f917bbe18: build_fab must FAIL CLOSED (raise) for ANY board that does
+    # not compile — never silently fall back to the tolerant loose-dict emitter
+    # (which would let a compiler/library/contract regression slip past goldens/
+    # determinism/geometry-diff/gerbonara). K4 keystone item 1 retired the
+    # _RAW_DICT_FIXTURES allowlist, so there is NO per-fixture exemption: the
+    # non-library DRILL_BOARD fails closed through build_fab under its OWN name.
+    # (Its raw-emitter coverage lives explicitly on build_raw_emitter instead.)
     with pytest.raises(RuntimeError, match="no raw-dict fallback"):
-        build_fab(DRILL_BOARD, "not-an-allowlisted-fixture")
+        build_fab(DRILL_BOARD, "drilltest")
     # Production methods._gerbers fails closed on the exact same board — the helper
-    # and production now AGREE (the split Codex reproduced is gone for any board not
-    # explicitly named as a raw fixture).
+    # and production AGREE (the split Codex reproduced is gone: no board reaches the
+    # raw path by failing to compile).
     resp = handle_request({"id": "r1", "method": "gerbers",
                            "params": {"board": yaml.safe_load(
                                DRILL_BOARD.read_text(encoding="utf-8")), "name": "d"}})
@@ -250,9 +246,9 @@ def _golden_names() -> list[str]:
                   if p.suffix in (".gbr", ".drl"))
 
 
-@pytest.mark.parametrize("board_path,base", CASES)
-def test_matches_goldens(board_path, base):
-    files = build_fab(board_path, base)
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_matches_goldens(board_path, base, builder):
+    files = builder(board_path, base)
     for fname, content in files.items():
         golden = GOLDEN_DIR / fname
         assert golden.exists(), f"missing golden {fname} (run regenerate.py)"
