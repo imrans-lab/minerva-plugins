@@ -1,11 +1,14 @@
 """Single resolve-aware pad-geometry accessor for the fabrication compilers.
 
-Before this module, three fab sites (gerber._harvest, kicad._footprint,
-drc._harvest_pads) each hand-read ``comp["pins"]`` and, for an SMD pad with no
-declared geometry, fell back to a hard-coded PLACEHOLDER size (gerber 1.0x0.6,
-kicad 1/0.6). That placeholder is the emitter pad-geometry bug (docket
-019f7736b236): the RAW board's pins carry no footprint pad geometry, so a fab
-run flashed nominal rectangles instead of the real lands.
+Before this module, three pad-geometry readers hand-read ``comp["pins"]`` — the
+two SIZE-consuming fabrication emitters (gerber._harvest, kicad._footprint) plus
+the TOLERANT DRC reader (drc._harvest_pads, which reads pad CENTERS only, never
+size). The two emitters, for an SMD pad with no declared geometry, fell back to a
+hard-coded PLACEHOLDER size (gerber 1.0x0.6, kicad 1/0.6). That placeholder is the
+emitter pad-geometry bug (docket 019f7736b236): the RAW board's pins carry no
+footprint pad geometry, so a fab run flashed nominal rectangles instead of the real
+lands. DRC never hit the placeholder (it ignores size) and stays tolerant — the
+fail-closed geometry checks below bind only the two fabrication emitters.
 
 ``resolve.resolve_board`` attaches the real per-component footprint pad geometry
 to ``comp["pads"]`` (fail-closed coincidence guard). This accessor is the ONE

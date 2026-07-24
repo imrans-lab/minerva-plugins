@@ -44,9 +44,10 @@ VIA_DRILL = 0.4
 VIA_DIAMETER = 0.8
 MASK_CLEARANCE = 0.05  # per-side growth for solder mask openings. RATIFIED to
 # match PRODUCTION (owner decision, K4 correctness-oracle bug 019f91f9e89c): the
-# compile->IR fab path resolves the board's solder_mask_clearance_mm from
-# compile_board._DEFAULTS (0.05mm), so this INDEPENDENT golden must be cut at the
-# same clearance for the correctness oracle to certify user-facing CAM. Was 0.1mm
+# compile->IR fab path pins solder_mask_clearance_mm to 0.05mm from compile_board's
+# v1 manufacturing floor (compile_board._V1_MANUFACTURING_FLOOR) and ignores any
+# authored value, so this INDEPENDENT golden must be cut at the same clearance for
+# the correctness oracle to certify user-facing CAM. Was 0.1mm
 # (legacy DEFAULT_MASK_CLEARANCE_MM in gerber.py, which now only applies to the raw
 # test path). The NPTH mount mask below is a drill-size opening and is unaffected.
 MOUNT_HOLE_DIA = 3.2

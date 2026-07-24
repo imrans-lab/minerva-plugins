@@ -104,9 +104,14 @@ fabrication-complete `FootprintDefinition` → `ResolvedBoard` IR); the emitter
 consumes that geometry and FAILS CLOSED on a sizeless SMD pad rather than
 inventing a placeholder land (pad bug 019f7736b236). The original spike's
 documented placeholders (1.0 × 0.6 mm SMD, `drill × 2` TH annulus) have been
-removed. Solder-mask clearance defaults to 0.1 mm/side, overridable via
-`solder_mask_clearance_mm` in `design_rules` or a per-pad `solder_mask_margin`;
-a pin may still override `pad_width_mm` / `pad_height_mm` / `annulus_diameter_mm`.
+removed. Solder-mask clearance differs by path: the **canonical production path**
+(compile → ResolvedBoard IR) fixes it at the **v1 manufacturing floor, 0.05 mm/side**,
+and does not model an authored `design_rules.solder_mask_clearance_mm` (that source
+field is ignored by `compile_board`). The **raw loose-dict emitter path** defaults to
+**0.1 mm/side**, honouring an authored finite, non-negative `solder_mask_clearance_mm`
+— an invalid (negative / NaN / ±Inf) value fails closed rather than being silently
+defaulted (bug `019f94b686b4`). A per-pad `solder_mask_margin` overrides either; a pin
+may still override `pad_width_mm` / `pad_height_mm` / `annulus_diameter_mm`.
 
 ## Contract fields formalized this round
 
@@ -150,9 +155,12 @@ debt (#5) and must be closed per-board by a human before fabrication.
 ## Testing
 
 `pcb/worker/tests/test_gerbers.py` lifts the spike's `validate.py` structural
-checks into pytest assertions and runs them over the PRODUCTION compiler for two
-boards (the spike board + a hand-authored drill-split fixture,
-`tests/testdata/gerber_boards/drilltest.yaml`): every Gerber layer passes the
+checks into pytest assertions and runs them for two boards through their respective
+emitter paths: the spike board through the PRODUCTION compiler (compile →
+`build_gerbers_ir`), and a hand-authored drill-split fixture
+(`tests/testdata/gerber_boards/drilltest.yaml`) through the RAW loose-dict emitter
+(`build_gerbers`) — a placed dict the production compiler does not model. Every
+Gerber layer passes the
 RS-274X/X2 structural checks + a `pygerber` round-trip parse; every Excellon file
 passes header/tool-table/split checks; and all outputs byte-match the goldens in
 `tests/testdata/gerber_golden/` (regenerate via that dir's `regenerate.py`).
