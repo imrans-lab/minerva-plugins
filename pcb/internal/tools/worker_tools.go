@@ -110,7 +110,9 @@ func HandleGerbers(ctx context.Context, w *bridge.Worker, params json.RawMessage
 
 var DRC = ToolSpec{
 	Name: "pcb_drc",
-	Description: "Run a geometric design-rule check over a canonical PCB board — pure " +
+	Description: "Run a CONNECTIVITY/topology check over a canonical PCB board (pad centers " +
+		"+ trace centerlines; NOT a geometric copper DRC — use pcb_drc_geometric for copper " +
+		"clearance/width/annular). Pure " +
 		"Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. " +
 		"Returns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured " +
 		"and located: 'wrong_net_pad' (a trace endpoint on a different-net pad -> short) " +
@@ -133,6 +135,35 @@ var DRC = ToolSpec{
 
 func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "drc", params)
+}
+
+// ---- pcb_drc_geometric -----------------------------------------------------
+
+var DRCGeometric = ToolSpec{
+	Name: "pcb_drc_geometric",
+	Description: "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR — real " +
+		"pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args " +
+		"{yaml:<board source>} or {board:<board object>}. Compiles the board to the " +
+		"ResolvedBoard IR, then checks GC1 min trace width, GC2 copper-copper clearance, " +
+		"GC3 drill/finished-hole, GC4 annular ring, GC5 copper-to-edge, GC6 hole-to-hole. " +
+		"NEVER a false clean: modeled copper is exact or a superset (fail-safe), and " +
+		"unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a " +
+		"discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, " +
+		"verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, " +
+		"entity_id, net_id, layer, measured_mm, required_mm, witness}], counts, warnings} or " +
+		"indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. " +
+		"Distinct from pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+		}
+	}`),
+}
+
+func HandleDRCGeometric(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "drc_geometric", params)
 }
 
 // ---- pcb_resolve -----------------------------------------------------------

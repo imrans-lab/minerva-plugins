@@ -832,8 +832,12 @@ def geometric_drc_from_resolution(result: ResolutionResult) -> dict:
     ``ResolutionSuccess`` and surface its compile warnings on the determinate
     result. The kernel itself never calls the compiler."""
     if isinstance(result, ResolutionFailure):
+        # A compile/resolution failure (unknown footprint, sizeless pad, …) is
+        # "unresolved_geometry", NOT "parse": the board parsed fine, it could not be
+        # resolved to fabricable geometry. "parse" is reserved for a source that will
+        # not parse at all (surfaced by the method layer before compile).
         return _indeterminate(
-            "parse",
+            "unresolved_geometry",
             "board failed to compile to a ResolvedBoard",
             diagnostics=[_diag_dict(d) for d in result.diagnostics])
     if isinstance(result, ResolutionSuccess):

@@ -38,9 +38,11 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		"pcb_validate", "pcb_generate", "pcb_check_libraries", "pcb_check_bom",
 		// worker-backed — fabrication output (prior round)
 		"pcb_gerbers",
-		// worker-backed — geometric DRC (prior round; was missing from this
-		// assertion pre-existing this change, caught while adding pcb.route)
+		// worker-backed — connectivity/topology check (pad centers + trace
+		// centerlines; NOT geometric — that is pcb_drc_geometric)
 		"pcb_drc",
+		// worker-backed — geometric copper DRC over the ResolvedBoard IR
+		"pcb_drc_geometric",
 		// worker-backed — footprint resolve: attach silk/courtyard graphics
 		"pcb_resolve",
 		// worker-backed — source normalize: fold inline geometry to typed

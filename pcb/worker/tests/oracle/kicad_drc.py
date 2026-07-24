@@ -35,6 +35,17 @@ def kicad_cli_available() -> bool:
     return shutil.which(KICAD_CLI) is not None
 
 
+def kicad_cli_version() -> str:
+    """The ``kicad-cli version`` string (e.g. ``"9.0.9"``), read DYNAMICALLY.
+
+    Oracles assert against this rather than a hardcoded literal so a KiCad upgrade
+    on the dev/CI box never silently invalidates the corroboration.
+    """
+    proc = subprocess.run([KICAD_CLI, "version"],
+                          capture_output=True, text=True, timeout=30.0)
+    return proc.stdout.strip() or proc.stderr.strip()
+
+
 @dataclass
 class DrcResult:
     """Parsed ``kicad-cli pcb drc`` JSON report."""

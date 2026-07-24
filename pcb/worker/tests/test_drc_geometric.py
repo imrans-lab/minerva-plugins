@@ -370,7 +370,9 @@ def test_failed_compile_maps_to_indeterminate_no_clean():
     assert res["ok"] is False
     assert res["verifies_geometry"] is False
     assert res["verdict"] == "indeterminate"
-    assert res["error"]["kind"] == "parse"
+    # A compile/resolution failure is "unresolved_geometry", not "parse" (the board
+    # parsed; it could not resolve to fabricable geometry).
+    assert res["error"]["kind"] == "unresolved_geometry"
     # NO clean/findings/zero-counts a caller could mistake for a pass.
     assert "findings" not in res
     assert "counts" not in res

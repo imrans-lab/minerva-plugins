@@ -26,6 +26,7 @@ from typing import Any
 
 from . import (board_model, compile_board, drc, footprints, gerber,
                kicad, libcheck, resolve)
+from .drc_geometric import geometric_drc_from_resolution
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -279,7 +280,15 @@ def _gerbers(params: dict) -> dict:
 
 
 def _drc(params: dict) -> dict:
-    """Geometric design-rule check over a canonical board.
+    """CONNECTIVITY / topology design-rule check over a canonical board.
+
+    Runs the legacy CENTERLINE checker (`drc.run_drc`, via `_maybe_resolve`): it
+    reasons about pad CENTERS and trace CENTERLINES only. It is NOT geometric and
+    canNOT verify a clearance, trace width, or annular ring — a zero-finding result
+    here is a connectivity/topology pass, NOT a proof that the copper is
+    geometrically clean. For real geometric copper DRC (GC1-GC6 over the
+    ResolvedBoard IR, fail-closed, never a false clean) use the `drc_geometric`
+    method (`_drc_geometric`).
 
     Returns {ok, findings:[{type,...}], counts:{type:n}}. A parse failure is a
     structured error (never a crash), mirroring `generate`/`gerbers`.
@@ -297,6 +306,38 @@ def _drc(params: dict) -> dict:
     except Exception as exc:  # geometry faults reported as data, not a crash
         return {"ok": False, "error": {"kind": "drc", "message": str(exc)}}
     return {"ok": True, "result": result}
+
+
+def _drc_geometric(params: dict) -> dict:
+    """Geometric copper DRC over the ResolvedBoard IR (GC1-GC6): reads REAL copper
+    and hole geometry, fail-closed, and NEVER emits a false ``clean``. This is the
+    geometric counterpart to :func:`_drc` (the connectivity/centerline checker,
+    which cannot verify a clearance).
+
+    Parse (via ``_load``) → compile (``compile_board.compile_board``) → hand the
+    ``ResolutionResult`` straight to
+    :func:`drc_geometric.geometric_drc_from_resolution`, whose dict is returned
+    VERBATIM. That dict IS this method's contract — the geometric result union:
+
+      * DETERMINATE (compile succeeded): ``{ok:True, scope:"geometric",
+        verifies_geometry:True, verdict:"clean"|"violations", findings, counts,
+        warnings, ...}``.
+      * INDETERMINATE (compile failed, or the kernel met un-modelable geometry):
+        ``{ok:False, scope:"geometric", verifies_geometry:False,
+        verdict:"indeterminate", error:{...}}`` — deliberately carries NO
+        ``clean``/``findings`` a caller could read as a pass.
+
+    It is NOT re-wrapped into the legacy ``{ok, result}`` shape. A parse failure is
+    the one exception: a structured ``{ok:False, error:{kind:"parse"}}`` reply,
+    mirroring generate/gerbers/drc.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    result = compile_board.compile_board(board)
+    return geometric_drc_from_resolution(result)
 
 
 def _resolve(params: dict) -> dict:
@@ -1149,6 +1190,7 @@ _HANDLERS = {
     "generate": lambda req: _generate(req.get("params") or {}),
     "gerbers": lambda req: _gerbers(req.get("params") or {}),
     "drc": lambda req: _drc(req.get("params") or {}),
+    "drc_geometric": lambda req: _drc_geometric(req.get("params") or {}),
     "resolve": lambda req: _resolve(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
