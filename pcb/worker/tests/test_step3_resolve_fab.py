@@ -453,30 +453,41 @@ def test_raw_th_non_finite_drill_fails_closed_both_emitters(bad_drill):
         kicad.generate_kicad_pcb(board)
 
 
-@pytest.mark.parametrize("degenerate_drill", [0.0, -1.0])
-def test_raw_th_zero_or_negative_drill_is_smd_not_a_drill_error(degenerate_drill):
-    # BOUNDARY GUARD (no predicate drift): a finite 0/negative drill is normalized to
-    # "no hole" (SMD) — NOT the non-finite drill error. With no SMD size it fails
-    # closed as a SIZELESS SMD (smd_no_size), identically in both emitters. Pins the
-    # accepted degenerate so a future change can't reclassify 0/neg as drill_not_finite.
-    board = _raw_board_plated_th(drill=degenerate_drill)  # no annulus, no size
-    for emit in (lambda b: gerber.build_gerbers(b, name="thtest"),
-                 lambda b: kicad.generate_kicad_pcb(b)):
-        with pytest.raises(pad_source.PadGeometryError, match="no copper geometry"):
-            emit(board)
-
-
-@pytest.mark.parametrize("nonnumeric_drill", [True, "1.0"])
-def test_raw_th_nonnumeric_drill_is_treated_as_no_hole(nonnumeric_drill):
-    # A bool / string drill is non-numeric -> _opt_num coerces it to None (no hole),
-    # so the pad is SMD and fails closed on its missing size — never reaches the
-    # emitters as a through-hole. (Documents the _opt_num boundary the repro asked to
-    # cover; a bool is deliberately NOT treated as its int value.)
-    board = _raw_board_plated_th(drill=nonnumeric_drill)  # no annulus, no size
-    with pytest.raises(pad_source.PadGeometryError, match="no copper geometry"):
+@pytest.mark.parametrize("bad", [0.0, -1.0, True, "1.0"])
+def test_raw_th_present_malformed_drill_fails_closed_no_size(bad):
+    # bug 019f924ce991: a PRESENT authored drill_mm that cannot form a hole (finite
+    # <=0, bool, or string) fails closed as authored_drill_invalid — the author WROTE
+    # a drill, so it is a MALFORMED hole, not a silent "no-hole SMD". (A NON-finite
+    # drill reports as drill_not_finite instead — see the parametrized test above.)
+    board = _raw_board_plated_th(drill=bad)  # no annulus, no size
+    with pytest.raises(pad_source.PadGeometryError, match="authored drill_mm"):
         gerber.build_gerbers(board, name="thtest")
-    with pytest.raises(pad_source.PadGeometryError, match="no copper geometry"):
+    with pytest.raises(pad_source.PadGeometryError, match="authored drill_mm"):
         kicad.generate_kicad_pcb(board)
+
+
+@pytest.mark.parametrize("bad", [-1.0, 0.0, True, "1.0"])
+def test_raw_th_malformed_authored_drill_fails_closed_even_with_size(bad):
+    # THE bug (019f924ce991): with a valid pad SIZE present, a malformed authored
+    # drill_mm previously slipped through — both raw emitters silently DROPPED the
+    # hole and fabricated an ordinary SMD pad (gerber: no .drl; kicad: (pad ... smd)).
+    # It must fail closed: an authored drill intent is never silently discarded, size
+    # or no size.
+    board = _raw_board_plated_th(drill=bad, pad_size=1.8)
+    with pytest.raises(pad_source.PadGeometryError, match="authored drill_mm"):
+        gerber.build_gerbers(board, name="thtest")
+    with pytest.raises(pad_source.PadGeometryError, match="authored drill_mm"):
+        kicad.generate_kicad_pcb(board)
+
+
+def test_raw_absent_drill_with_size_is_a_valid_smd_pad():
+    # BOUNDARY: an ABSENT drill_mm (omitted / null) + a valid pad size is a normal SMD
+    # pad, NOT a fail-close — this is what distinguishes "no hole intended" (omit the
+    # key) from "malformed hole authored" (present-but-invalid). Both emitters succeed.
+    board = _raw_board_plated_th(pad_size=1.8, drill=None)  # drill_mm null == omitted
+    files = gerber.build_gerbers(board, name="thtest")
+    assert not any(n.endswith(".drl") for n in files), "SMD pad must emit no drill file"
+    assert "smd" in kicad.generate_kicad_pcb(board)
 
 
 def test_resolved_path_non_finite_drill_fails_closed_both_emitters():

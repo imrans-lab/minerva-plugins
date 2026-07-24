@@ -102,6 +102,15 @@ class PadGeometryError(ValueError):
             f"hole, but a NaN/Inf drill is a corrupt TH intent the two emitters would "
             f"otherwise treat divergently — Gerber crashes, KiCad emits `(drill nan)`)")
 
+    @classmethod
+    def authored_drill_invalid(cls, ref: Any, number: Any, drill: Any) -> "PadGeometryError":
+        return cls(
+            ref, number,
+            f"component {ref!r} pad {number!r}: authored drill_mm {drill!r} is not a "
+            f"finite positive diameter — a raw pin that AUTHORS a drill_mm must author "
+            f"a valid hole; OMIT drill_mm (or set it null) for an SMD pad. Fail-closed, "
+            f"never silently dropped to an SMD pad (bug 019f924ce991).")
+
 
 def _num(v: Any, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
@@ -198,6 +207,10 @@ def iter_pads(comp: dict, *, require_smd_size: bool = False) -> list[PadGeom]:
             # predicate (or the SMD-size check) reads it — else a NaN drill slips past
             # both (nan is not None, nan > 0 is False) and diverges at emit.
             _require_finite_drill(ref, pad)
+            # THEN: a raw pin that AUTHORED a malformed drill_mm (finite <=0, bool,
+            # string) fails closed even if it also carries a pad size — else the hole
+            # is silently dropped and it fabricates as an SMD pad (bug 019f924ce991).
+            _require_valid_authored_drill(ref, rawpad, pad)
             _require_smd_size(ref, pad)
             _require_faithful_shape(ref, rawpad, pad)
             _require_valid_solder_mask_margin(ref, rawpad, pad)
@@ -219,6 +232,34 @@ def _require_finite_drill(ref: Any, pad: PadGeom) -> None:
     d = pad.drill
     if d is not None and not math.isfinite(d):
         raise PadGeometryError.drill_not_finite(ref, pad.number, d)
+
+
+def _require_valid_authored_drill(ref: Any, rawpad: dict, pad: PadGeom) -> None:
+    """Fail-closed: a RAW pin that AUTHORS a ``drill_mm`` must author a VALID one.
+
+    Distinguishes an ABSENT drill (a legitimate SMD pad) from a PRESENT-but-malformed
+    one. The pad factories normalize a finite <=0 / nonnumeric / bool ``drill_mm`` to
+    None (no hole); combined with an authored pad size BOTH raw emitters would then
+    silently fabricate an ordinary SMD pad, DISCARDING the authored drill intent (bug
+    019f924ce991: agreement is not correctness). The raw emitter's contract is
+    fail-closed: a pin that WROTE a ``drill_mm`` but wrote a value that cannot form a
+    hole (bool, string, non-finite, or <= 0) fails closed WITH context rather than
+    shipping copper the author did not intend. To author an SMD pad, OMIT ``drill_mm``
+    (or set it null).
+
+    Resolved pads are EXEMPT: they carry no ``drill_mm`` (their hole is ``drill:{x,y}``
+    with {0,0} the no-hole SENTINEL, not an authored value), and the IR guarantees a
+    finite positive drill otherwise. A non-finite drill on either path is already
+    fail-closed by ``_require_finite_drill`` (which runs first, so NaN/Inf reports as
+    drill_not_finite)."""
+    if pad.from_resolve or "drill_mm" not in rawpad:
+        return
+    raw = rawpad["drill_mm"]
+    if raw is None:
+        return  # explicit null == absent == SMD intent
+    if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+            or not math.isfinite(raw) or raw <= 0):
+        raise PadGeometryError.authored_drill_invalid(ref, pad.number, raw)
 
 
 def _require_smd_size(ref: Any, pad: PadGeom) -> None:
