@@ -343,6 +343,105 @@ def test_degenerate_solder_mask_margin_fails_closed(margin):
                              name="conf")
 
 
+# --- Global (board-level) solder-mask clearance: shared raw resolver (019f94b686b4) ---
+from pcb_worker import kicad  # noqa: E402
+from pcb_worker.compile_board import compile_board  # noqa: E402
+
+
+def _global_clearance_board(clearance) -> dict:
+    """A RAW board with one resolved 2.0x1.0 SMD pad AND one untented via, optionally
+    carrying an authored ``design_rules.solder_mask_clearance_mm``. Exercises both
+    mask-aperture paths (pad + via) that a global clearance feeds."""
+    board = {
+        "version": 2, "name": "conf", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "R1", "footprint": "F", "x_mm": 5, "y_mm": 5,
+                        "rotation_deg": 0, "layer": "top",
+                        "pads": [{"number": "1", "type": "smd", "shape": "rect",
+                                  "position": {"x": 0, "y": 0},
+                                  "size": {"width": 2.0, "height": 1.0},
+                                  "layers": ["F.Cu"]}]}],
+        "nets": [{"name": "N", "pins": ["R1.1"]}],
+        "vias": [{"net": "N", "x_mm": 10, "y_mm": 10, "diameter_mm": 0.8,
+                  "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom",
+                  "tented": False}],
+    }
+    if clearance is not None:
+        board["design_rules"]["solder_mask_clearance_mm"] = clearance
+    return board
+
+
+_RAW_EMITTERS = [
+    pytest.param(lambda b: gerber.build_gerbers(b, name="conf"), id="gerber"),
+    pytest.param(lambda b: kicad.generate_kicad_pcb(b), id="kicad"),
+]
+
+
+@pytest.mark.parametrize("emit", _RAW_EMITTERS)
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("-inf"), float("inf")],
+                         ids=["neg", "nan", "neg-inf", "pos-inf"])
+def test_raw_global_mask_clearance_invalid_fails_closed(emit, bad):
+    # bug 019f94b686b4: an authored global solder_mask_clearance_mm that is negative,
+    # NaN, or +-Inf must FAIL CLOSED in BOTH raw emitters — never silently rewritten
+    # to the 0.1 default (-1/NaN/-Inf) nor leaked as malformed +Inf aperture geometry
+    # (KiCad `(pad_to_mask_clearance inf)` / Gerber `%ADD...inf...%`). The shared
+    # resolver rejects it before any pad/via opening is computed.
+    with pytest.raises(ValueError, match="solder_mask_clearance_mm"):
+        emit(_global_clearance_board(bad))
+
+
+@pytest.mark.parametrize("emit", _RAW_EMITTERS)
+@pytest.mark.parametrize("good", [0.0, 0.3])
+def test_raw_global_mask_clearance_valid_emits(emit, good):
+    # A finite, non-negative authored global clearance (INCLUDING exactly 0) is
+    # honored by both raw emitters — no fail-closed, real output produced.
+    assert emit(_global_clearance_board(good))
+
+
+def test_raw_global_mask_clearance_absent_uses_default():
+    # No authored global clearance -> the documented raw default (0.1mm/side): the
+    # 2x1 SMD land -> F.Mask opening 2.2x1.2.
+    fmask = gerber.build_gerbers(_global_clearance_board(None), name="conf")["conf-F_Mask.gbr"]
+    assert "R,2.2X1.2" in fmask
+
+
+@pytest.mark.parametrize("good", [0.0, 0.3])
+def test_raw_global_mask_clearance_feeds_gerber_opening(good):
+    # The authored global clearance actually drives the gerber SMD mask opening
+    # (2x1 copper + 2*clearance per side) — proving it is used, not ignored.
+    w, h = 2.0, 1.0
+    fmask = gerber.build_gerbers(_global_clearance_board(good), name="conf")["conf-F_Mask.gbr"]
+    assert f"R,{w + 2 * good}X{h + 2 * good}" in fmask
+
+
+@pytest.mark.parametrize("good", [0.0, 0.3])
+def test_raw_global_mask_clearance_feeds_kicad_setup_and_pad(good):
+    # Symmetric to the gerber-opening test: the authored global clearance reaches
+    # BOTH the KiCad board `(setup (pad_to_mask_clearance ...))` and the per-pad
+    # `(solder_mask_margin ...)` — proving it FLOWS THROUGH, not merely "emits".
+    pcb = kicad.generate_kicad_pcb(_global_clearance_board(good))
+    assert f"(pad_to_mask_clearance {good})" in pcb
+    assert f"(solder_mask_margin {good})" in pcb
+
+
+@pytest.mark.parametrize("authored", [0.9, 0.0])
+def test_production_ir_mask_clearance_pinned_to_v1_floor(authored):
+    # Production compile does NOT model the authored global clearance (Extra
+    # passthrough): the ResolvedBoard IR pins it to the v1 manufacturing floor
+    # (0.05mm), so the +Inf/negative raw-emitter defect is unreachable on the
+    # canonical path regardless of what the source authored.
+    board = {"version": 1, "name": "x", "width_mm": 10, "height_mm": 10,
+             "layers": ["top", "bottom"],
+             "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
+                              "via_diameter_mm": 0.8, "via_drill_mm": 0.4,
+                              "solder_mask_clearance_mm": authored},
+             "components": [], "nets": []}
+    resolved = compile_board(board).board
+    assert resolved.design_rules.minimums.solder_mask_clearance_mm == 0.05
+
+
 def test_th_mask_honors_per_pad_margin_and_stays_circular():
     # A through-hole pad's mask opening tracks annulus + 2*margin and stays a
     # circle (declared TH copper = round annulus; SUPPORTED_HOLE_SHAPES = round).

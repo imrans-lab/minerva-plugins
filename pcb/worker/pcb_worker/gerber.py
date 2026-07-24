@@ -56,11 +56,14 @@ from .geometry import (
 )
 from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import (
+    DEFAULT_MASK_CLEARANCE_MM,
     is_through_hole,
     iter_pads,
     mask_opening_dim,
+    pad_mask_margin,
     placed_pad_to_geom,
     require_th_annulus,
+    resolve_global_mask_clearance,
     th_land,
 )
 from .resolved_board import (
@@ -89,7 +92,8 @@ PINNED_CREATION_DATE = "1970-01-01T00:00:00"
 DEFAULT_VIA_DIAMETER_MM = 0.8
 DEFAULT_VIA_DRILL_MM = 0.4
 DEFAULT_TRACE_WIDTH_MM = 0.25
-DEFAULT_MASK_CLEARANCE_MM = 0.1   # per-side growth of a mask opening over its pad
+# DEFAULT_MASK_CLEARANCE_MM is owned by pad_source (imported above) so both CAM
+# emitters share one raw-board default; re-exported here for back-compat callers.
 SILK_LINE_WIDTH_MM = 0.15
 EDGE_CUTS_WIDTH_MM = 0.1
 
@@ -366,14 +370,6 @@ class _Geometry:
             Diagnostic(DiagnosticSeverity.WARNING, code, message, ref))
 
 
-def _pad_mask_margin(pad, mask_clearance: float) -> float:
-    """The effective per-side solder-mask margin for one pad: the pad's own
-    ``solder_mask_margin`` when present, else the board's global clearance. The
-    RAW type/finiteness of a per-pad margin is already vetted fail-closed in
-    pad_source (_require_valid_solder_mask_margin), so here it is a float|None."""
-    return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
-
-
 # The mask-opening collapse boundary is owned by pad_source.mask_opening_dim so BOTH
 # CAM emitters (this module + kicad) fail closed at the exact same point on a
 # collapsing negative per-pad solder_mask_margin (bug 019f929b1416). Kept under the
@@ -421,7 +417,7 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                 # width x height faithfully; an equal-axis land is the historical
                 # round annulus (finding 019f8b7fd295). The drill stays round.
                 shaped, land_shape, lw, lh, lrratio = th_land(pad)
-                margin = _pad_mask_margin(pad, mask_clearance)
+                margin = pad_mask_margin(pad, mask_clearance)
                 if shaped:
                     # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
                     # aperture family enlarged per axis (no more circularizing).
@@ -463,7 +459,7 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
             # effective margin (per-pad solder_mask_margin, else the global
             # clearance); a large-negative margin that collapses the opening fails
             # closed in _mask_dim.
-            margin = _pad_mask_margin(pad, mask_clearance)
+            margin = pad_mask_margin(pad, mask_clearance)
             mw = _mask_dim(w, margin, ref, pad.number)
             mh = _mask_dim(h, margin, ref, pad.number)
             mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
@@ -995,12 +991,10 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
 
     set_generation_software("Minerva", "pcb_worker/gerber.py", WORKER_VERSION)
 
-    dr = board_dict.get("design_rules") or {}
-    mask_clearance = DEFAULT_MASK_CLEARANCE_MM
-    if isinstance(dr, dict):
-        mc = _opt_num(dr.get("solder_mask_clearance_mm"))
-        if mc is not None and mc >= 0:
-            mask_clearance = mc
+    # Shared raw-board global-clearance resolver: absent -> raw default; an authored
+    # value must be finite and non-negative, else fail CLOSED (bug 019f94b686b4) —
+    # kicad.generate resolves it identically, so the two emitters never diverge.
+    mask_clearance = resolve_global_mask_clearance(board_dict)
 
     g = _harvest(board_dict, mask_clearance)
 

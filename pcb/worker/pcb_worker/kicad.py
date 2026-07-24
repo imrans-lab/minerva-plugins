@@ -33,10 +33,13 @@ from agent_router import layers as _layers
 from .geometry import place_point
 from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import (
+    DEFAULT_MASK_CLEARANCE_MM,
     is_through_hole,
     iter_pads,
     mask_opening_dim,
+    pad_mask_margin,
     require_th_annulus,
+    resolve_global_mask_clearance,
     th_land,
 )
 from .resolved_board import (
@@ -328,35 +331,6 @@ def _net_table(board: dict) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
     return net_index, pad_net
 
 
-# Per-side solder-mask expansion default when the board declares none. MUST match
-# gerber.DEFAULT_MASK_CLEARANCE_MM so the two CAM emitters never diverge on a raw
-# board (production always carries the compiler-resolved value in design_rules).
-DEFAULT_MASK_CLEARANCE_MM = 0.1
-
-
-def _resolve_mask_clearance(board: dict) -> float:
-    """The per-side solder-mask clearance, resolved the SAME way gerber does: the
-    board's ``design_rules.solder_mask_clearance_mm`` (compile_board bakes in the
-    manufacturing default 0.05mm), else :data:`DEFAULT_MASK_CLEARANCE_MM`."""
-    dr = board.get("design_rules")
-    if isinstance(dr, dict):
-        mc = dr.get("solder_mask_clearance_mm")
-        if isinstance(mc, (int, float)) and not isinstance(mc, bool) and mc >= 0:
-            return float(mc)
-    return DEFAULT_MASK_CLEARANCE_MM
-
-
-def _pad_mask_margin(pad, mask_clearance: float) -> float:
-    """Per-side solder-mask expansion for one pad — IDENTICAL to gerber._pad_mask_margin
-    so the two emitters produce the same mask opening (bug 019f9266b9cd). An UNPLATED
-    hole (np_thru_hole / plated False) gets a drill-size opening (margin 0, matching
-    gerber's literal-drill NPTH); every copper pad (SMD or plated TH) gets its per-pad
-    ``solder_mask_margin`` override, else the board clearance."""
-    if is_through_hole(pad) and not (pad.plated and pad.pad_type != "np_thru_hole"):
-        return 0.0
-    return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
-
-
 def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None) -> str:
     """Emit a minimal .kicad_pcb (s-expression) for the canonical board.
 
@@ -372,7 +346,7 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     min_x, min_y, max_x, max_y = _bounds(board)
     net_index, pad_net = _net_table(board)
     net_name_of = {i: n for n, i in net_index.items()}
-    mask_clearance = _resolve_mask_clearance(board)
+    mask_clearance = resolve_global_mask_clearance(board)
 
     out: list[str] = []
     # KiCad-9 board file version. Bumped from the KiCad-7 stamp (20221018) when the
@@ -527,7 +501,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         # copper base gerber validates, so a collapsing large-negative margin fails
         # CLOSED at the identical boundary in both emitters (bug 019f929b1416) — a
         # merely-negative mask-sliver value (opening still > 0) stays accepted.
-        mask_margin = _pad_mask_margin(pad, mask_clearance)
+        mask_margin = pad_mask_margin(pad, mask_clearance)
         mask_expr = f" (solder_mask_margin {_num(mask_margin)})"
         if is_through_hole(pad):
             # Through-hole pad. The round-annulus copper dim is the real resolved

@@ -117,7 +117,7 @@ class PadGeometryError(ValueError):
         return cls(
             ref, number,
             f"component {ref!r} pad {number!r}: solder-mask opening dimension "
-            f"{dim} <= 0 (margin {margin}) — fail-closed")
+            f"{dim} is not a finite positive value (margin {margin}) — fail-closed")
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -500,19 +500,72 @@ def _require_valid_solder_mask_margin(ref: Any, rawpad: dict, pad: PadGeom) -> N
 
 def mask_opening_dim(base: float, margin: float, ref: Any, number: Any) -> float:
     """Enlarge a copper dimension by the per-side solder-mask ``margin``, failing
-    CLOSED if the opening collapses to <= 0 (e.g. a large-negative margin) — that is
-    not a manufacturable mask window. A merely-negative margin whose opening stays
-    > 0 is a legitimate KiCad mask-sliver feature and IS accepted (symmetry with
-    _require_valid_solder_mask_margin, which accepts finite negatives).
+    CLOSED unless the resulting opening is a FINITE POSITIVE dimension. A collapse to
+    <= 0 (e.g. a large-negative margin) is not a manufacturable mask window; a
+    non-finite opening (NaN/±Inf base or margin — e.g. a +Inf global clearance that
+    slipped a resolver, bug 019f94b686b4) is malformed geometry. A merely-negative
+    margin whose opening stays > 0 is a legitimate KiCad mask-sliver feature and IS
+    accepted (symmetry with _require_valid_solder_mask_margin, which accepts finite
+    negatives).
 
-    The SINGLE owner of the mask-opening collapse boundary, SHARED by both CAM
+    The SINGLE owner of the mask-opening geometry boundary, SHARED by both CAM
     emitters (gerber._mask_dim aliases this; kicad gates its per-pad
-    solder_mask_margin through it) so the two never disagree on the fail boundary for
-    a collapsing negative per-pad solder_mask_margin (bug 019f929b1416)."""
+    solder_mask_margin through it) so the two never disagree on the fail boundary
+    (bug 019f929b1416) — and the last-line guard against a non-finite clearance
+    reaching either emitter's aperture text (bug 019f94b686b4)."""
     dim = base + 2 * margin
-    if dim <= 0:
+    if not (math.isfinite(dim) and dim > 0):
         raise PadGeometryError.mask_opening_collapsed(ref, number, dim, margin)
     return dim
+
+
+# Per-side solder-mask expansion default for a RAW (loose-dict) board that authors
+# no global clearance. Production always carries the compiler-resolved value in the
+# ResolvedBoard IR (compile_board's v1 manufacturing floor, 0.05mm).
+DEFAULT_MASK_CLEARANCE_MM = 0.1
+
+
+def resolve_global_mask_clearance(board: dict) -> float:
+    """The per-side solder-mask clearance for a RAW (loose-dict) board, resolved
+    IDENTICALLY for both CAM emitters (gerber.build_gerbers / kicad.generate) so a
+    raw board never diverges between them. A board that authors NO global clearance
+    gets the documented raw default :data:`DEFAULT_MASK_CLEARANCE_MM`. An authored
+    ``design_rules.solder_mask_clearance_mm`` that is PRESENT must be a finite,
+    non-negative number, else fail CLOSED (attributed) — an authored-but-invalid
+    global clearance is corrupt fab intent, NOT a missing value, so it must never be
+    silently rewritten to the default nor leaked as malformed geometry (bug
+    019f94b686b4: -1/NaN/-Inf were silently swapped to 0.1; +Inf reached the emitter
+    aperture text literally). The canonical production path does NOT reach here —
+    compile_board bakes the v1 manufacturing floor (0.05mm) into the ResolvedBoard
+    IR before emission."""
+    dr = board.get("design_rules")
+    if not isinstance(dr, dict):
+        return DEFAULT_MASK_CLEARANCE_MM
+    mc = dr.get("solder_mask_clearance_mm")
+    if mc is None:
+        return DEFAULT_MASK_CLEARANCE_MM
+    if (isinstance(mc, bool) or not isinstance(mc, (int, float))
+            or not math.isfinite(mc) or mc < 0):
+        raise ValueError(
+            f"design_rules.solder_mask_clearance_mm {mc!r} must be a finite, "
+            f"non-negative number (mm) — fail-closed, never silently defaulted to "
+            f"{DEFAULT_MASK_CLEARANCE_MM} nor emitted as malformed geometry "
+            f"(bug 019f94b686b4)")
+    return float(mc)
+
+
+def pad_mask_margin(pad: "PadGeom", mask_clearance: float) -> float:
+    """The effective per-side solder-mask margin for one pad, SHARED by both CAM
+    emitters so they produce the same mask opening (bug 019f9266b9cd). An UNPLATED
+    hole (np_thru_hole / plated False) gets a drill-size opening (margin 0, matching
+    gerber's literal-drill NPTH); every copper pad (SMD or plated TH) gets its own
+    ``solder_mask_margin`` override, else the board clearance. (Gerber never calls
+    this on an NPTH pad — its NPTH branch emits the literal drill — so the margin-0
+    branch is a no-op for gerber's plated-TH/SMD call sites and load-bearing only for
+    kicad, which emits (solder_mask_margin) on the np_thru_hole line too.)"""
+    if is_through_hole(pad) and not (pad.plated and pad.pad_type != "np_thru_hole"):
+        return 0.0
+    return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
 
 
 def _from_pin(pin: dict) -> PadGeom:
