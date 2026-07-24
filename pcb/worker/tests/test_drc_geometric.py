@@ -14,14 +14,25 @@ import math
 
 import pytest
 
+from types import SimpleNamespace
+
 from pcb_worker.compile_board import compile_board
 from pcb_worker.drc_geom_primitives import (
     Capsule,
     OrientedRect,
     capsule_edge_distance,
+    convex_edge_distance,
+    convex_edge_witness,
     segment_segment_distance,
+    segment_segment_witness,
 )
 from pcb_worker.drc_geometric import (
+    CopperPrimitive,
+    Projection,
+    UnsupportedGeometry,
+    _bucket_copper_by_layer,
+    _check_gc2_clearance,
+    _check_gc5_copper_to_edge,
     geometric_drc_from_resolution,
     project_board,
     run_geometric_drc,
@@ -34,6 +45,7 @@ from pcb_worker.resolved_board import (
     LineGeometry,
     OvalHole,
     ProfileOutline,
+    RectOutline,
     ResolutionFailure,
     ResolutionSuccess,
     ResolvedHole,
@@ -400,6 +412,21 @@ def test_zones_present_is_indeterminate_unsupported_geometry():
     assert "findings" not in res and "counts" not in res
 
 
+def test_copper_on_unknown_layer_fails_closed():
+    # Fail-closed guard (Fable C2 note a): a copper primitive whose layer does not
+    # fold to a known board copper layer is UNMODELED — it must raise (the kernel maps
+    # that to indeterminate), never be silently un-paired. Uncompared copper is a
+    # potential missed short = a false clean. Unreachable on today's 2-layer boards;
+    # this guards the N-layer / mixed-namespace future.
+    disc = Capsule.disc(0.0, 0.0, 0.5)
+    prim = CopperPrimitive(
+        entity_id="p1", parent_id=None, kind="smd_pad",
+        layers=("In1.Cu",), net_id=None, shape=disc, aabb=disc.aabb())
+    proj = Projection(copper=(prim,), holes=(), annular=())
+    with pytest.raises(UnsupportedGeometry):
+        _bucket_copper_by_layer(proj, frozenset({"top", "bottom"}))
+
+
 # ---------------------------------------------------------------------------
 # Geometry primitives — fail-safe direction + exactness.
 # ---------------------------------------------------------------------------
@@ -433,3 +460,381 @@ def test_rotated_rect_aabb_is_a_superset_envelope():
     assert box.min_x == pytest.approx(-math.sqrt(2))
     assert box.max_y == pytest.approx(math.sqrt(2))
     assert box.min_y == pytest.approx(-math.sqrt(2))
+
+
+# ===========================================================================
+# C2 — GC2 copper clearance, GC5 copper-to-edge, broad phase, layer/NPTH/witness.
+# Design of record: docket 019f952306f9 §4/§5 + Codex comment 762.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Convex-shape edge distance (drc_geom_primitives) — the GC2 narrow-phase kernel.
+# below / equal / above the fail-safe direction, for every GC2 pairing.
+# ---------------------------------------------------------------------------
+
+
+def test_convex_disc_disc_distance_exact():
+    # disc <-> disc == circle edge distance (fail-safe: exact for round copper).
+    assert convex_edge_distance(
+        Capsule.disc(0.0, 0.0, 1.0), Capsule.disc(3.0, 0.0, 1.0)
+    ) == pytest.approx(1.0)
+
+
+def test_convex_rect_rect_distance_exact():
+    # rect [-1,1] vs rect [2,4] on x -> a 1.0 gap.
+    a = OrientedRect(0.0, 0.0, 1.0, 1.0, 0.0)
+    b = OrientedRect(3.0, 0.0, 1.0, 1.0, 0.0)
+    assert convex_edge_distance(a, b) == pytest.approx(1.0)
+
+
+def test_convex_rect_capsule_distance_exact():
+    # rect right edge at x=1; disc (zero-length capsule) core at x=3, r=0.5.
+    rect = OrientedRect(0.0, 0.0, 1.0, 1.0, 0.0)
+    disc = Capsule.disc(3.0, 0.0, 0.5)
+    assert convex_edge_distance(rect, disc) == pytest.approx(1.5)
+
+
+def test_convex_rect_trace_capsule_distance_exact():
+    # rect top edge at y=1; a horizontal trace capsule at y=3, r=0.25.
+    rect = OrientedRect(0.0, 0.0, 1.0, 1.0, 0.0)
+    trace = Capsule(-5.0, 3.0, 5.0, 3.0, 0.25)
+    assert convex_edge_distance(rect, trace) == pytest.approx(1.75)
+
+
+def test_convex_overlap_is_negative():
+    # A disc whose centre is inside the rect -> overlap -> negative edge distance
+    # (fail-safe: overlapping copper never reads as positive clearance).
+    rect = OrientedRect(0.0, 0.0, 1.0, 1.0, 0.0)
+    disc = Capsule.disc(0.5, 0.0, 0.5)
+    assert convex_edge_distance(rect, disc) < 0
+
+
+def test_convex_witness_on_overlap_is_a_single_shared_point():
+    # WITNESS FIX: overlapping shapes must return a witness ON the overlap, the same
+    # point for both, so a collision highlight sits on the real intersection.
+    rect = OrientedRect(0.0, 0.0, 1.0, 1.0, 0.0)
+    disc = Capsule.disc(0.5, 0.0, 0.5)
+    w1, w2 = convex_edge_witness(rect, disc)
+    assert w1 == w2
+
+
+def test_crossing_segment_witness_is_the_crossing_point():
+    # WITNESS FIX (segment level): two segments that PROPERLY CROSS have distance 0;
+    # the witness must be the crossing point on BOTH, not a stale endpoint pair.
+    w1, w2 = segment_segment_witness((0, 0), (2, 2), (0, 2), (2, 0))
+    assert w1 == pytest.approx((1.0, 1.0))
+    assert w1 == w2
+
+
+# ---------------------------------------------------------------------------
+# GC2 via the real check over a hand-built Projection (precise net/layer/shape
+# control that footprint fixtures cannot give). Reuses the real convex kernel +
+# broad phase; only the copper set is synthesized.
+# ---------------------------------------------------------------------------
+
+
+def _cp(eid, shape, *, net=None, layers=("top",), kind="smd_pad", parent=None,
+        width=None):
+    return CopperPrimitive(entity_id=eid, parent_id=parent, kind=kind, layers=layers,
+                           net_id=net, shape=shape, aabb=shape.aabb(), width_mm=width)
+
+
+def _proj(*copper):
+    return Projection(copper=tuple(copper), holes=(), annular=())
+
+
+def _rb_clearance(clearance=0.2):
+    # A 2-layer stack so GC2's known-copper-layer guard has top/bottom to fold onto;
+    # the synthetic primitives sit on "top"/"bottom" (or F.Cu/B.Cu, which fold there).
+    return SimpleNamespace(
+        design_rules=SimpleNamespace(
+            minimums=SimpleNamespace(min_clearance_mm=clearance)),
+        layer_stack=SimpleNamespace(
+            copper=(SimpleNamespace(id="top"), SimpleNamespace(id="bottom"))))
+
+
+def _gc2(proj, clearance=0.2):
+    return _check_gc2_clearance(proj, _rb_clearance(clearance))
+
+
+# --- pad <-> pad (disc <-> disc), different nets: below / equal / above ------
+
+
+def test_gc2_pad_pad_below_threshold_flags():
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="A"),
+                     _cp("p2", Capsule.disc(1.05, 0.0, 0.5), net="B")))
+    assert len(res) == 1
+    f = res[0]
+    assert f["type"] == "gc2_copper_clearance"
+    assert f["measured_mm"] == pytest.approx(0.05)
+    assert f["required_mm"] == pytest.approx(0.2)
+    assert f["layer"] == "top"
+    assert {p["entity_id"] for p in f["participants"]} == {"p1", "p2"}
+
+
+def test_gc2_pad_pad_at_threshold_passes():
+    # centres 1.2 apart -> edge 0.2 == floor -> exact-at-threshold PASSES (epsilon).
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="A"),
+                     _cp("p2", Capsule.disc(1.2, 0.0, 0.5), net="B")))
+    assert res == []
+
+
+def test_gc2_pad_pad_above_threshold_passes():
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="A"),
+                     _cp("p2", Capsule.disc(2.0, 0.0, 0.5), net="B")))
+    assert res == []
+
+
+# --- trace <-> pad, trace <-> trace, via <-> pad (mixed shapes) -------------
+
+
+def test_gc2_trace_pad_below_threshold_flags():
+    trace = _cp("t1", Capsule(0.0, 0.0, 2.0, 0.0, 0.15), net="A", kind="trace_seg",
+                parent="trace:A", width=0.3)
+    pad = _cp("p1", Capsule.disc(1.0, 0.4, 0.15), net="B")
+    res = _gc2(_proj(trace, pad))
+    assert len(res) == 1                     # gap 0.4 - 0.15 - 0.15 = 0.1 < 0.2
+    assert res[0]["measured_mm"] == pytest.approx(0.1)
+
+
+def test_gc2_trace_trace_below_threshold_flags():
+    a = _cp("t1", Capsule(0.0, 0.0, 2.0, 0.0, 0.15), net="A", kind="trace_seg",
+            parent="trace:A")
+    b = _cp("t2", Capsule(0.0, 0.35, 2.0, 0.35, 0.15), net="B", kind="trace_seg",
+            parent="trace:B")
+    res = _gc2(_proj(a, b))
+    assert len(res) == 1                     # 0.35 - 0.3 = 0.05 < 0.2
+    assert res[0]["measured_mm"] == pytest.approx(0.05)
+
+
+def test_gc2_via_pad_below_threshold_flags():
+    via = _cp("v1", Capsule.disc(0.0, 0.0, 0.4), net="A", kind="via",
+              layers=("top", "bottom"))
+    pad = _cp("p1", Capsule.disc(0.85, 0.0, 0.3), net="B")   # pad on top only
+    res = _gc2(_proj(via, pad))
+    assert len(res) == 1                     # shared layer 'top'; 0.85-0.7 = 0.15
+    assert res[0]["measured_mm"] == pytest.approx(0.15)
+    assert res[0]["layer"] == "top"
+
+
+# --- same-net / None / self / adjacent exemption semantics ------------------
+
+
+def test_gc2_same_non_null_net_is_exempt():
+    # Overlapping copper on the SAME non-null net is a shared electrical node -> exempt.
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="N"),
+                     _cp("p2", Capsule.disc(0.3, 0.0, 0.5), net="N")))
+    assert res == []
+
+
+def test_gc2_none_vs_none_is_checked_and_flagged():
+    # Two UNASSIGNED (None-net) primitives are NOT a shared net -> must be checked.
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net=None),
+                     _cp("p2", Capsule.disc(0.3, 0.0, 0.5), net=None)))
+    assert len(res) == 1
+
+
+def test_gc2_none_vs_net_is_checked_and_flagged():
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net=None),
+                     _cp("p2", Capsule.disc(0.3, 0.0, 0.5), net="A")))
+    assert len(res) == 1
+
+
+def test_gc2_self_pair_is_not_flagged():
+    # Two entries sharing an entity_id (a shape vs itself) are never a violation.
+    shape = Capsule.disc(0.0, 0.0, 0.5)
+    res = _gc2(_proj(_cp("p1", shape, net=None), _cp("p1", shape, net=None)))
+    assert res == []
+
+
+def test_gc2_adjacent_segments_of_one_trace_share_vertex_not_flagged():
+    # Two segments of ONE polyline meet by construction at a shared vertex; that touch
+    # is not a clearance violation (subsumed by the same-non-null-net exemption).
+    a = _cp("t1:0", Capsule(0.0, 0.0, 1.0, 0.0, 0.2), net="N", kind="trace_seg",
+            parent="trace:N")
+    b = _cp("t1:1", Capsule(1.0, 0.0, 2.0, 0.0, 0.2), net="N", kind="trace_seg",
+            parent="trace:N")
+    res = _gc2(_proj(a, b))
+    assert res == []
+
+
+# --- layer normalization: F.Cu vs B.Cu at the same xy must NOT conflict -----
+
+
+def test_gc2_opposite_layer_pair_does_not_conflict():
+    # An F.Cu pad and a B.Cu pad at the SAME xy are on different physical layers.
+    # Layer normalization (kicad_to_canon: F.Cu->top, B.Cu->bottom) puts them in
+    # separate buckets, so they do NOT conflict even though they fully overlap in xy.
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="A", layers=("F.Cu",)),
+                     _cp("p2", Capsule.disc(0.0, 0.0, 0.5), net="B", layers=("B.Cu",))))
+    assert res == []
+
+
+def test_gc2_same_layer_kicad_namespace_pair_conflicts():
+    # Control for the above: the SAME two overlapping pads both on F.Cu DO conflict —
+    # proving it was the layer separation, not some other exemption, that spared them.
+    res = _gc2(_proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="A", layers=("F.Cu",)),
+                     _cp("p2", Capsule.disc(0.0, 0.0, 0.5), net="B", layers=("F.Cu",))))
+    assert len(res) == 1
+    assert res[0]["layer"] == "top"          # reported in the canonical namespace
+
+
+# --- broad phase: correctness-equivalent to all-pairs ------------------------
+
+
+def test_gc2_broad_phase_finds_the_one_violating_pair_among_many():
+    # A grid of well-separated discs (no violations) PLUS one close violating pair.
+    # The broad phase must prune the far pairs yet still surface the close one.
+    copper = []
+    n = 0
+    for gx in range(6):
+        for gy in range(6):
+            copper.append(_cp(f"g{n:02d}", Capsule.disc(gx * 5.0, gy * 5.0, 0.5),
+                              net=f"N{n}"))
+            n += 1
+    # One extra disc 0.05mm (edge) from grid cell g00 at (0,0), different net.
+    copper.append(_cp("hot", Capsule.disc(1.05, 0.0, 0.5), net="HOT"))
+    res = _gc2(_proj(*copper))
+    assert len(res) == 1
+    assert {p["entity_id"] for p in res[0]["participants"]} == {"g00", "hot"}
+
+
+def test_gc2_broad_phase_matches_naive_all_pairs():
+    # Equivalence check: the broad-phase result equals a brute-force all-pairs scan
+    # over the same copper (same violations, no drops, no spurious adds).
+    import itertools
+    copper = [
+        _cp("a", Capsule.disc(0.0, 0.0, 0.5), net="A"),
+        _cp("b", Capsule.disc(1.05, 0.0, 0.5), net="B"),     # a-b violate
+        _cp("c", Capsule.disc(20.0, 20.0, 0.5), net="C"),
+        _cp("d", Capsule.disc(20.6, 20.0, 0.5), net="D"),    # c-d violate
+        _cp("e", Capsule.disc(50.0, 0.0, 0.5), net="E"),     # isolated
+    ]
+    res = _gc2(_proj(*copper))
+    got = {tuple(sorted(p["entity_id"] for p in f["participants"])) for f in res}
+    naive = set()
+    for x, y in itertools.combinations(copper, 2):
+        if x.net_id is not None and x.net_id == y.net_id:
+            continue
+        if convex_edge_distance(x.shape, y.shape) < 0.2 - 1e-9:
+            naive.add(tuple(sorted((x.entity_id, y.entity_id))))
+    assert got == naive
+    assert naive == {("a", "b"), ("c", "d")}
+
+
+# ---------------------------------------------------------------------------
+# GC5 copper-to-edge — hand-built Projection over a real RectOutline.
+# ---------------------------------------------------------------------------
+
+
+def _rb_edge(edge=0.3, origin=(0.0, 0.0), w=40.0, h=40.0):
+    return SimpleNamespace(
+        design_rules=SimpleNamespace(minimums=SimpleNamespace(copper_to_edge_mm=edge)),
+        outline=RectOutline(origin=origin, width_mm=w, height_mm=h))
+
+
+def _gc5(proj, **kw):
+    return _check_gc5_copper_to_edge(proj, _rb_edge(**kw))
+
+
+def test_gc5_interior_copper_above_threshold_passes():
+    res = _gc5(_proj(_cp("p1", Capsule.disc(20.0, 20.0, 0.5))))
+    assert res == []
+
+
+def test_gc5_copper_at_threshold_passes():
+    # left inset exactly 0.3: disc r0.5 centred at x=0.8 -> min_x 0.3 -> inset 0.3.
+    res = _gc5(_proj(_cp("p1", Capsule.disc(0.8, 20.0, 0.5))))
+    assert res == []
+
+
+def test_gc5_copper_below_threshold_flags():
+    # disc r0.5 at x=0.6 -> min_x 0.1 -> left inset 0.1 < 0.3.
+    res = _gc5(_proj(_cp("p1", Capsule.disc(0.6, 20.0, 0.5))))
+    assert len(res) == 1
+    assert res[0]["type"] == "gc5_copper_to_edge"
+    assert res[0]["measured_mm"] == pytest.approx(0.1)
+    assert res[0]["required_mm"] == pytest.approx(0.3)
+
+
+def test_gc5_copper_outside_outline_is_negative_violation():
+    # disc r0.5 at x=0.2 -> min_x -0.3 (copper pokes past the left edge) -> negative.
+    res = _gc5(_proj(_cp("p1", Capsule.disc(0.2, 20.0, 0.5))))
+    assert len(res) == 1
+    assert res[0]["measured_mm"] < 0
+
+
+def test_gc5_honors_outline_origin():
+    # Outline shifted to origin (10,10), 20x20 -> board spans x,y in [10,30]. A disc at
+    # x=10.4 is well inside a (0,0) board but only 0.1mm inside the SHIFTED left edge.
+    inside_origin_00 = _gc5(_proj(_cp("p1", Capsule.disc(10.4, 20.0, 0.5))),
+                            origin=(0.0, 0.0), w=40.0, h=40.0)
+    assert inside_origin_00 == []                     # 9.9mm inset -> clean at (0,0)
+    shifted = _gc5(_proj(_cp("p1", Capsule.disc(10.4, 20.0, 0.5))),
+                   origin=(10.0, 10.0), w=20.0, h=20.0)
+    assert len(shifted) == 1                          # (10.4-0.5) - 10 = -0.1 -> flag
+    assert shifted[0]["measured_mm"] < 0
+
+
+# ---------------------------------------------------------------------------
+# End-to-end over a compiled ResolvedBoard: GC2 None-conflict, same-net
+# exemption, and the NPTH-as-hole prerequisite.
+# ---------------------------------------------------------------------------
+
+
+def _flip_pad_type(rb, comp_ref, new_type):
+    comps = []
+    for comp in rb.components:
+        if comp.ref == comp_ref:
+            pads = tuple(dataclasses.replace(p, pad_type=new_type)
+                         for p in comp.placed_pads)
+            comp = dataclasses.replace(comp, placed_pads=pads)
+        comps.append(comp)
+    return dataclasses.replace(rb, components=tuple(comps))
+
+
+def _two_th_pads(**net):
+    return _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6),
+                    _th_pad_comp(ref="U2", x=10.6, annulus=1.6)],
+        **net)
+
+
+def test_gc2_compiled_none_vs_none_flags_across_both_layers():
+    # Two plated TH pads (no nets -> net None) overlapping in copper. Not same-net
+    # exempt; both span top+bottom, so the conflict is reported on each layer.
+    res = _run(_two_th_pads())
+    assert _counts(res, "gc2_copper_clearance") == 2
+    layers = {f["layer"] for f in _findings(res, "gc2_copper_clearance")}
+    assert layers == {"top", "bottom"}
+
+
+def test_gc2_compiled_same_net_is_exempt():
+    res = _run(_two_th_pads(nets=[{"name": "N", "pins": ["U1.1", "U2.1"]}]))
+    assert _counts(res, "gc2_copper_clearance") == 0
+
+
+def test_npth_pad_projects_hole_not_copper():
+    # PREREQUISITE: an np_thru_hole pad has NO copper land/ring — it is a bare hole.
+    rb = _compile(_base(components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6)]))
+    pad_id = rb.components[0].placed_pads[0].id
+    rb = _flip_pad_type(rb, "U1", "np_thru_hole")
+    proj = project_board(rb)
+    assert pad_id not in {c.entity_id for c in proj.copper}      # NO copper
+    assert pad_id in {h.entity_id for h in proj.holes}           # IS a hole (GC3/GC6)
+    assert pad_id not in {a.entity_id for a in proj.annular}     # NO annular (GC4)
+
+
+def test_npth_pad_suppresses_gc2_but_keeps_gc6():
+    # Baseline: two plated TH pads overlapping -> GC2 fires (copper), GC6 fires (holes).
+    rb = _compile(_two_th_pads())
+    base = run_geometric_drc(rb)
+    assert _counts(base, "gc2_copper_clearance") >= 1
+    assert _counts(base, "gc6_hole_to_hole") == 1
+    # Flip U2 to np_thru_hole: its copper vanishes (no GC2 against U1), but its DRILL
+    # remains, so hole-to-hole (GC6) against U1 still fires — proving it is modeled as
+    # a hole, not copper.
+    res = run_geometric_drc(_flip_pad_type(rb, "U2", "np_thru_hole"))
+    assert _counts(res, "gc2_copper_clearance") == 0
+    assert _counts(res, "gc6_hole_to_hole") == 1
