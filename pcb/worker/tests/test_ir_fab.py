@@ -663,6 +663,57 @@ def test_kicad_footprint_plated_th_is_masked_thru_hole():
     assert "np_thru_hole" not in fp
 
 
+def _smd_mask_pad(margin: float) -> dict:
+    """A 1.0x1.0 SMD pad carrying a per-pad solder_mask_margin (drives the SMD gate)."""
+    return {"number": "1", "type": "smd", "shape": "rect",
+            "position": {"x": 0.0, "y": 0.0}, "size": {"width": 1.0, "height": 1.0},
+            "layers": ["F.Cu"], "solder_mask_margin": margin}
+
+
+def _plated_th_mask_pad(margin: float) -> dict:
+    """A round plated-TH pad (annulus 1.0) carrying a per-pad solder_mask_margin
+    (drives the round-annulus gate)."""
+    return {"number": "1", "type": "thru_hole", "shape": "circle",
+            "position": {"x": 0.0, "y": 0.0}, "size": {"width": 1.0, "height": 1.0},
+            "drill": {"x": 0.8, "y": 0.8}, "layers": ["*.Cu"],
+            "solder_mask_margin": margin}
+
+
+def _oblong_th_mask_pad(margin: float) -> dict:
+    """An OBLONG (2.0x1.0) plated-TH pad with a shapeable `oval` land — drives the
+    shaped-TH gate (lw & lh), where the smaller axis (1.0) collapses first."""
+    return {"number": "1", "type": "thru_hole", "shape": "oval",
+            "position": {"x": 0.0, "y": 0.0}, "size": {"width": 2.0, "height": 1.0},
+            "drill": {"x": 0.8, "y": 0.8}, "layers": ["*.Cu"],
+            "solder_mask_margin": margin}
+
+
+@pytest.mark.parametrize("make_pad", [_smd_mask_pad, _plated_th_mask_pad,
+                                      _oblong_th_mask_pad],
+                         ids=["smd", "round-th", "oblong-th"])
+@pytest.mark.parametrize("margin", [-5.0, -0.5])
+def test_kicad_footprint_collapsing_negative_mask_margin_fails_closed(make_pad, margin):
+    """SYMMETRY with gerber (bug 019f929b1416): a per-pad solder_mask_margin large
+    enough to collapse the mask opening to <= 0 fails CLOSED in the KiCad emitter too,
+    rather than emitting a degenerate `(solder_mask_margin)` on a zero/negative
+    opening. -0.5 on a 1.0 copper dim pins the exact-zero boundary (dim 0.0 fails, not
+    just dim < 0). Both emitters route the per-pad margin through the SHARED
+    pad_source.mask_opening_dim, so they fail at the IDENTICAL boundary."""
+    with pytest.raises(ValueError, match="H1"):
+        kicad._footprint(_th_comp(make_pad(margin)), {}, {})
+
+
+def test_kicad_footprint_negative_mask_margin_that_stays_positive_is_accepted():
+    """COMPLEMENT (symmetric to the gerber test): a merely-negative margin whose
+    opening stays > 0 is a legitimate KiCad mask-sliver feature and emits without
+    error — a 2.0x1.0 land with margin -0.1 keeps openings 1.8x0.8 (both > 0)."""
+    fp = kicad._footprint(_th_comp({
+        "number": "1", "type": "smd", "shape": "rect",
+        "position": {"x": 0.0, "y": 0.0}, "size": {"width": 2.0, "height": 1.0},
+        "layers": ["F.Cu"], "solder_mask_margin": -0.1}), {}, {})
+    assert "(solder_mask_margin -0.1)" in fp
+
+
 def test_kicad_adapter_fails_closed_on_non_round_hole():
     """The round-only drill seal stays intact: a non-round hole feature (a future
     oval/slot IR) RAISES rather than silently dropping a fab-critical drill."""

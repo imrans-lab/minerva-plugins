@@ -111,6 +111,14 @@ class PadGeometryError(ValueError):
             f"a valid hole; OMIT drill_mm (or set it null) for an SMD pad. Fail-closed, "
             f"never silently dropped to an SMD pad (bug 019f924ce991).")
 
+    @classmethod
+    def mask_opening_collapsed(
+            cls, ref: Any, number: Any, dim: Any, margin: Any) -> "PadGeometryError":
+        return cls(
+            ref, number,
+            f"component {ref!r} pad {number!r}: solder-mask opening dimension "
+            f"{dim} <= 0 (margin {margin}) — fail-closed")
+
 
 def _num(v: Any, default: float = 0.0) -> float:
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
@@ -479,7 +487,7 @@ def _require_valid_solder_mask_margin(ref: Any, rawpad: dict, pad: PadGeom) -> N
     SMD and TH pads carry a mask, so this is NOT gated on shape/drill (unlike
     _require_faithful_shape). A merely-negative but finite margin is a legitimate
     KiCad mask-sliver value and is accepted; whether it collapses the opening to
-    <= 0 is a geometric check owned by gerber._mask_dim (margin + clearance in hand)."""
+    <= 0 is a geometric check owned by mask_opening_dim (margin + clearance in hand)."""
     smm = rawpad.get("solder_mask_margin")
     if smm is None:
         return
@@ -488,6 +496,23 @@ def _require_valid_solder_mask_margin(ref: Any, rawpad: dict, pad: PadGeom) -> N
         raise ValueError(
             f"component {ref!r} pad {pad.number!r}: solder_mask_margin "
             f"{smm!r} must be a finite number")
+
+
+def mask_opening_dim(base: float, margin: float, ref: Any, number: Any) -> float:
+    """Enlarge a copper dimension by the per-side solder-mask ``margin``, failing
+    CLOSED if the opening collapses to <= 0 (e.g. a large-negative margin) — that is
+    not a manufacturable mask window. A merely-negative margin whose opening stays
+    > 0 is a legitimate KiCad mask-sliver feature and IS accepted (symmetry with
+    _require_valid_solder_mask_margin, which accepts finite negatives).
+
+    The SINGLE owner of the mask-opening collapse boundary, SHARED by both CAM
+    emitters (gerber._mask_dim aliases this; kicad gates its per-pad
+    solder_mask_margin through it) so the two never disagree on the fail boundary for
+    a collapsing negative per-pad solder_mask_margin (bug 019f929b1416)."""
+    dim = base + 2 * margin
+    if dim <= 0:
+        raise PadGeometryError.mask_opening_collapsed(ref, number, dim, margin)
+    return dim
 
 
 def _from_pin(pin: dict) -> PadGeom:

@@ -58,6 +58,7 @@ from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import (
     is_through_hole,
     iter_pads,
+    mask_opening_dim,
     placed_pad_to_geom,
     require_th_annulus,
     th_land,
@@ -373,17 +374,11 @@ def _pad_mask_margin(pad, mask_clearance: float) -> float:
     return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
 
 
-def _mask_dim(base: float, margin: float, ref: Any, number: Any) -> float:
-    """Enlarge a copper dimension by the mask margin (per side), failing CLOSED if
-    the opening collapses to <= 0 (e.g. a large-negative margin) — that is not a
-    manufacturable mask window. A merely-negative margin whose opening stays > 0
-    is a legitimate KiCad mask-sliver feature and IS accepted."""
-    dim = base + 2 * margin
-    if dim <= 0:
-        raise ValueError(
-            f"component {ref!r} pad {number!r}: solder-mask opening dimension "
-            f"{dim} <= 0 (margin {margin}) — fail-closed")
-    return dim
+# The mask-opening collapse boundary is owned by pad_source.mask_opening_dim so BOTH
+# CAM emitters (this module + kicad) fail closed at the exact same point on a
+# collapsing negative per-pad solder_mask_margin (bug 019f929b1416). Kept under the
+# historical private name so every call site below is byte-unchanged.
+_mask_dim = mask_opening_dim
 
 
 def _circle_mask(x: float, y: float, d: float) -> tuple:

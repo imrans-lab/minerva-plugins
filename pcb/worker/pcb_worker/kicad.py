@@ -32,7 +32,13 @@ from agent_router import layers as _layers
 
 from .geometry import place_point
 from .ir_projection import graphic_to_dict, outline_frame
-from .pad_source import is_through_hole, iter_pads, require_th_annulus, th_land
+from .pad_source import (
+    is_through_hole,
+    iter_pads,
+    mask_opening_dim,
+    require_th_annulus,
+    th_land,
+)
 from .resolved_board import (
     Diagnostic,
     DiagnosticSeverity,
@@ -516,8 +522,13 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         # Explicit per-pad solder-mask expansion, IDENTICAL to gerber's per-pad
         # margin (bug 019f9266b9cd) — authoritative in KiCad, so the CAM output does
         # not depend on the board-setup default. 0 for an unplated hole (drill-size
-        # opening), else the pad override / board clearance.
-        mask_expr = f" (solder_mask_margin {_num(_pad_mask_margin(pad, mask_clearance))})"
+        # opening), else the pad override / board clearance. Each emitting branch
+        # below GATES this margin through the SHARED mask_opening_dim on the SAME
+        # copper base gerber validates, so a collapsing large-negative margin fails
+        # CLOSED at the identical boundary in both emitters (bug 019f929b1416) — a
+        # merely-negative mask-sliver value (opening still > 0) stays accepted.
+        mask_margin = _pad_mask_margin(pad, mask_clearance)
+        mask_expr = f" (solder_mask_margin {_num(mask_margin)})"
         if is_through_hole(pad):
             # Through-hole pad. The round-annulus copper dim is the real resolved
             # copper (or the pin's authored annulus/size); a plated TH pad that
@@ -553,6 +564,10 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             # land stays the historical round `thru_hole circle`. Drill stays round.
             shaped, land_shape, lw, lh, lrratio = th_land(pad)
             if shaped:
+                # Gate the per-pad margin on BOTH oblong axes (gerber gates lw & lh
+                # identically) — a collapsing large-negative margin fails CLOSED here.
+                mask_opening_dim(lw, mask_margin, ref, num_s)
+                mask_opening_dim(lh, mask_margin, ref, num_s)
                 if land_shape == "roundrect":
                     ratio = lrratio if lrratio is not None else 0.25
                     tok, suffix = "roundrect", f" (roundrect_rratio {ratio})"
@@ -570,6 +585,9 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 # pad resolved no annulus — never the retired `else drill*2` invention
                 # (K4). The SHARED accessor keeps kicad + gerber identical here.
                 annulus = require_th_annulus(pad, ref)
+                # Gate the per-pad margin on the round annulus (gerber gates the same
+                # base) — a collapsing large-negative margin fails CLOSED here.
+                mask_opening_dim(annulus, mask_margin, ref, num_s)
                 lines.append(
                     f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
@@ -583,6 +601,11 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             # is now FAITHFUL (rect/circle/oval/roundrect) via _smd_shape_tokens —
             # no more hard-coded `rect` flattening (R5 K3 conformance).
             shape_tok, sw, sh, rratio_suffix = _smd_shape_tokens(pad)
+            # Gate the per-pad margin on the copper width & height (gerber gates
+            # pad.width & pad.height identically) — a collapsing large-negative margin
+            # fails CLOSED here rather than emitting a degenerate mask opening.
+            mask_opening_dim(pad.width, mask_margin, ref, num_s)
+            mask_opening_dim(pad.height, mask_margin, ref, num_s)
             paste, mask = _smd_tech_layers(layer)
             lines.append(
                 f'    (pad "{_esc(num_s)}" smd {shape_tok} {_pad_at(px, py, pad.rotation)} '
