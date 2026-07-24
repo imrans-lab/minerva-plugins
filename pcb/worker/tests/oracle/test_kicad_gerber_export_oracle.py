@@ -56,9 +56,16 @@ def test_kicad_cli_exports_nonempty_mask_with_npth_and_untented_via():
         "mounting_holes": [{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2, "plated": False}],
     }
     fmask = _fmask(_export(board))
+    # Openings carry the compiler-resolved 0.05mm/side solder-mask clearance (bug
+    # 019f9266b9cd: KiCad previously applied 0 for an empty (setup), shipping 0mm
+    # plated-pad openings that DIVERGED from the Gerber emitter's clearance). The
+    # plated TH annulus 1.6 -> 1.7 and the untented via 0.8 -> 0.9 (both +2*0.05);
+    # the NPTH mount stays drill-size 3.2 (margin 0). These are IDENTICAL to the
+    # production Gerber emitter's F.Mask on this board — the two CAM paths now agree.
     assert re.search(r"%ADD\d+C,3\.2\d*\*%", fmask), "NPTH Ø3.2 mask aperture missing (E3/F3)"
-    assert re.search(r"%ADD\d+C,1\.6\d*\*%", fmask), "TH pad Ø1.6 mask aperture missing (F3)"
-    assert re.search(r"%ADD\d+C,0\.8\d*\*%", fmask), "untented via Ø0.8 mask aperture missing (E4/F3)"
+    assert re.search(r"%ADD\d+C,1\.7\d*\*%", fmask), "TH pad Ø1.7 (1.6 + 2*0.05) mask aperture missing"
+    assert re.search(r"%ADD\d+C,0\.9\d*\*%", fmask), "untented via Ø0.9 (0.8 + 2*0.05) mask aperture missing"
+    assert not re.search(r"%ADD\d+C,1\.6\d*\*%", fmask), "TH mask must NOT be at copper size (0 clearance — the bug)"
     assert fmask.count("D03*") >= 3, "F.Mask should flash all three openings"
 
 

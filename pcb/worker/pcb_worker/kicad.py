@@ -322,6 +322,35 @@ def _net_table(board: dict) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
     return net_index, pad_net
 
 
+# Per-side solder-mask expansion default when the board declares none. MUST match
+# gerber.DEFAULT_MASK_CLEARANCE_MM so the two CAM emitters never diverge on a raw
+# board (production always carries the compiler-resolved value in design_rules).
+DEFAULT_MASK_CLEARANCE_MM = 0.1
+
+
+def _resolve_mask_clearance(board: dict) -> float:
+    """The per-side solder-mask clearance, resolved the SAME way gerber does: the
+    board's ``design_rules.solder_mask_clearance_mm`` (compile_board bakes in the
+    manufacturing default 0.05mm), else :data:`DEFAULT_MASK_CLEARANCE_MM`."""
+    dr = board.get("design_rules")
+    if isinstance(dr, dict):
+        mc = dr.get("solder_mask_clearance_mm")
+        if isinstance(mc, (int, float)) and not isinstance(mc, bool) and mc >= 0:
+            return float(mc)
+    return DEFAULT_MASK_CLEARANCE_MM
+
+
+def _pad_mask_margin(pad, mask_clearance: float) -> float:
+    """Per-side solder-mask expansion for one pad — IDENTICAL to gerber._pad_mask_margin
+    so the two emitters produce the same mask opening (bug 019f9266b9cd). An UNPLATED
+    hole (np_thru_hole / plated False) gets a drill-size opening (margin 0, matching
+    gerber's literal-drill NPTH); every copper pad (SMD or plated TH) gets its per-pad
+    ``solder_mask_margin`` override, else the board clearance."""
+    if is_through_hole(pad) and not (pad.plated and pad.pad_type != "np_thru_hole"):
+        return 0.0
+    return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
+
+
 def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None) -> str:
     """Emit a minimal .kicad_pcb (s-expression) for the canonical board.
 
@@ -337,6 +366,7 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     min_x, min_y, max_x, max_y = _bounds(board)
     net_index, pad_net = _net_table(board)
     net_name_of = {i: n for n, i in net_index.items()}
+    mask_clearance = _resolve_mask_clearance(board)
 
     out: list[str] = []
     # KiCad-9 board file version. Bumped from the KiCad-7 stamp (20221018) when the
@@ -370,7 +400,11 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     ):
         out.append("    " + decl)
     out.append("  )")
-    out.append("  (setup)")
+    # Board-default solder-mask expansion (bug 019f9266b9cd): KiCad applies 0 for an
+    # empty (setup), so the KiCad CAM path shipped 0mm plated-pad openings while the
+    # Gerber path shipped the resolved clearance. Emit it as the board default AND
+    # explicitly per pad below (the per-pad value is authoritative in KiCad).
+    out.append(f"  (setup (pad_to_mask_clearance {_num(mask_clearance)}))")
 
     # Net declarations (net 0 is the unconnected net, required by KiCad).
     out.append('  (net 0 "")')
@@ -387,7 +421,8 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     # Components → footprints.
     for comp in _list(board.get("components")):
         if isinstance(comp, dict):
-            out.append(_footprint(comp, pad_net, net_name_of, diagnostics))
+            out.append(_footprint(comp, pad_net, net_name_of, diagnostics,
+                                  mask_clearance=mask_clearance))
 
     # Traces → segments (one per consecutive point pair).
     for tr in _list(board.get("traces")):
@@ -435,7 +470,8 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
 
 def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                net_name_of: dict[int, str],
-               diagnostics: list[Diagnostic] | None = None) -> str:
+               diagnostics: list[Diagnostic] | None = None,
+               mask_clearance: float = DEFAULT_MASK_CLEARANCE_MM) -> str:
     ref = str(comp.get("ref") or "?")
     fp = comp.get("footprint") or "unknown"
     x, y = _num(comp.get("x_mm")), _num(comp.get("y_mm"))
@@ -477,6 +513,11 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
         net_expr = ""
         if net_no:
             net_expr = f' (net {net_no} "{_esc(net_name_of.get(net_no, ""))}")'
+        # Explicit per-pad solder-mask expansion, IDENTICAL to gerber's per-pad
+        # margin (bug 019f9266b9cd) — authoritative in KiCad, so the CAM output does
+        # not depend on the board-setup default. 0 for an unplated hole (drill-size
+        # opening), else the pad override / board clearance.
+        mask_expr = f" (solder_mask_margin {_num(_pad_mask_margin(pad, mask_clearance))})"
         if is_through_hole(pad):
             # Through-hole pad. The round-annulus copper dim is the real resolved
             # copper (or the pin's authored annulus/size); a plated TH pad that
@@ -502,7 +543,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                     f'    (pad "{_esc(num_s)}" np_thru_hole circle '
                     f'{_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(drill)} {_num(drill)}) (drill {_num(drill)}) '
-                    f'(layers "*.Cu" "*.Mask"))'
+                    f'(layers "*.Cu" "*.Mask"){mask_expr})'
                 )
                 continue
             # th_land is the SHARED decision (also gerber._harvest): a genuinely
@@ -522,7 +563,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 lines.append(
                     f'    (pad "{_esc(num_s)}" thru_hole {tok} {_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(lw)} {_num(lh)}){suffix} (drill {_num(drill)}) '
-                    f'(layers "*.Cu" "*.Mask"){net_expr})'
+                    f'(layers "*.Cu" "*.Mask"){mask_expr}{net_expr})'
                 )
             else:
                 # Round thru_hole land: the plated TH copper ring. FAIL-CLOSED if the
@@ -532,7 +573,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 lines.append(
                     f'    (pad "{_esc(num_s)}" thru_hole circle {_pad_at(px, py, pad.rotation)} '
                     f'(size {_num(annulus)} {_num(annulus)}) (drill {_num(drill)}) '
-                    f'(layers "*.Cu" "*.Mask"){net_expr})'
+                    f'(layers "*.Cu" "*.Mask"){mask_expr}{net_expr})'
                 )
         else:
             # SMD pad. width/height are guaranteed positive by
@@ -546,7 +587,7 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
             lines.append(
                 f'    (pad "{_esc(num_s)}" smd {shape_tok} {_pad_at(px, py, pad.rotation)} '
                 f'(size {sw} {sh}){rratio_suffix} '
-                f'(layers "{layer}" "{paste}" "{mask}"){net_expr})'
+                f'(layers "{layer}" "{paste}" "{mask}"){mask_expr}{net_expr})'
             )
 
     # Footprint F.SilkS graphics (line/circle/arc/poly) — DROPPED before R5; now

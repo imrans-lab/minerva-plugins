@@ -139,7 +139,7 @@ def test_generate_method_emits_mounting_holes_no_longer_fail_closed():
                if k.endswith(".kicad_pcb"))
     assert '(footprint "MountingHole" (layer "F.Cu") (at 5.0 5.0 0.0)' in pcb
     assert ('(pad "" np_thru_hole circle (at 0.0 0.0) (size 3.2 3.2) '
-            '(drill 3.2) (layers "*.Cu" "*.Mask"))') in pcb
+            '(drill 3.2) (layers "*.Cu" "*.Mask") (solder_mask_margin 0.0))') in pcb
 
 
 # ---------------------------------------------------------------------------

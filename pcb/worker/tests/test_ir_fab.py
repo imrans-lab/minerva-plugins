@@ -645,7 +645,7 @@ def test_kicad_footprint_non_plated_th_emits_np_thru_hole():
            "drill": {"x": 3.2, "y": 3.2}, "layers": ["*.Cu", "*.Mask"]}
     fp = kicad._footprint(_th_comp(pad), {}, {})
     assert ('(pad "" np_thru_hole circle (at 5.0 6.0) (size 3.2 3.2) '
-            '(drill 3.2) (layers "*.Cu" "*.Mask"))') in fp
+            '(drill 3.2) (layers "*.Cu" "*.Mask") (solder_mask_margin 0.0))') in fp
     assert "thru_hole circle" not in fp.replace("np_thru_hole circle", "")
 
 
@@ -659,7 +659,7 @@ def test_kicad_footprint_plated_th_is_masked_thru_hole():
            "drill": {"x": 0.8, "y": 0.8}, "layers": ["*.Cu"]}
     fp = kicad._footprint(_th_comp(pad), {}, {})
     assert ('(pad "1" thru_hole circle (at 5.0 5.0) (size 1.6 1.6) '
-            '(drill 0.8) (layers "*.Cu" "*.Mask"))') in fp
+            '(drill 0.8) (layers "*.Cu" "*.Mask") (solder_mask_margin 0.1))') in fp
     assert "np_thru_hole" not in fp
 
 
