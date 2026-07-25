@@ -316,8 +316,9 @@ def _drc_geometric(params: dict) -> dict:
 
     Parse (via ``_load``) → compile (``compile_board.compile_board``) → hand the
     ``ResolutionResult`` straight to
-    :func:`drc_geometric.geometric_drc_from_resolution`, whose dict is returned
-    VERBATIM. That dict IS this method's contract — the geometric result union:
+    :func:`drc_geometric.geometric_drc_from_resolution`. That union dict is this
+    method's PAYLOAD — returned as the ``result`` of the standard worker envelope
+    (``{ok:True, result:<union>}``). The geometric result union:
 
       * DETERMINATE (compile succeeded): ``{ok:True, scope:"geometric",
         verifies_geometry:True, verdict:"clean"|"violations", findings, counts,
@@ -327,7 +328,10 @@ def _drc_geometric(params: dict) -> dict:
         verdict:"indeterminate", error:{...}}`` — deliberately carries NO
         ``clean``/``findings`` a caller could read as a pass.
 
-    It is NOT re-wrapped into the legacy ``{ok, result}`` shape. EVERY failure at
+    The union is the ``result`` payload of the standard worker envelope (every
+    worker method returns ``{ok:True, result:<payload>}``; the dispatcher and Go
+    bridge unwrap ``result`` — a bare top-level union surfaces as ``result:null``).
+    EVERY failure at
     this boundary — parse, compile exception, or unmodeled geometry — returns the
     SAME geometric indeterminate union (019f9589b232): a source that will not parse
     is ``kind="parse"``, an unexpected ``compile_board`` exception is
@@ -340,13 +344,23 @@ def _drc_geometric(params: dict) -> dict:
     try:
         board = _load(params)
     except board_model.BoardParseError as exc:
-        return geometric_indeterminate("parse", str(exc))
-
-    try:
-        result = compile_board.compile_board(board)
-    except Exception as exc:  # noqa: BLE001 - fail-closed: a compile crash is NOT a clean.
-        return geometric_indeterminate("internal", f"compile_board raised {exc!r}")
-    return geometric_drc_from_resolution(result)
+        union = geometric_indeterminate("parse", str(exc))
+    else:
+        try:
+            result = compile_board.compile_board(board)
+        except Exception as exc:  # noqa: BLE001 - fail-closed: a compile crash is NOT a clean.
+            union = geometric_indeterminate("internal", f"compile_board raised {exc!r}")
+        else:
+            union = geometric_drc_from_resolution(result)
+    # WORKER ENVELOPE: the geometric UNION is the payload, wrapped under ``result``
+    # exactly like every other worker method — the dispatcher and the Go bridge
+    # unwrap ``result``, so a BARE top-level union (no ``result`` key) surfaces as
+    # ``result: null`` over the bridge (the live regression this fixes). The envelope
+    # ``ok`` is always True: the method RAN and produced a structured discriminated
+    # union; clean / violations / indeterminate are conveyed INSIDE the union
+    # (``result.ok`` / ``result.verdict``), so every failure still returns the SAME
+    # union (019f9589b232) and no consumer needs a bespoke branch.
+    return {"ok": True, "result": union}
 
 
 def _resolve(params: dict) -> dict:

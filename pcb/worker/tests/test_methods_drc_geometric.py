@@ -18,10 +18,16 @@ from pcb_worker.methods import handle_request
 
 
 def _call(params: dict) -> dict:
+    # The worker method wraps the geometric UNION under the standard envelope
+    # {ok:True, result:<union>} — like EVERY worker method. The dispatcher + Go
+    # bridge unwrap "result"; a bare top-level union surfaces as result:null over
+    # the bridge (the live regression). Assert the envelope here, then return the
+    # UNION so the union-level assertions in each test read naturally.
     resp = handle_request({"id": "g1", "method": "drc_geometric", "params": params})
     assert resp is not None
     assert resp["id"] == "g1"
-    return resp
+    assert resp["ok"] is True and "result" in resp, f"worker envelope broken: {resp!r}"
+    return resp["result"]
 
 
 def _th(ref: str, x: float, y: float, drill: float = 0.5, annulus: float = 1.6) -> dict:
@@ -86,6 +92,24 @@ def test_accepts_yaml_source_like_the_other_methods():
     resp = _call({"yaml": yaml.safe_dump(board)})
     assert resp["ok"] is True
     assert resp["verdict"] == "clean"
+
+
+def test_method_wraps_union_under_worker_result_envelope():
+    # REGRESSION (live bridge bug): the method MUST return the standard worker
+    # envelope {ok:True, result:<union>}. The dispatcher + Go bridge unwrap "result";
+    # a BARE top-level union (the old behaviour) surfaces as result:null over the
+    # bridge — invisible to in-process tests that skip the envelope. Assert the raw
+    # (un-unwrapped) envelope here so a regression to a bare union fails loudly.
+    board = _base(components=[_th("U1", 10, 10), _th("U2", 30, 30)],
+                  nets=[{"name": "A", "pins": ["U1.1"]},
+                        {"name": "B", "pins": ["U2.1"]}])
+    resp = handle_request({"id": "e1", "method": "drc_geometric",
+                           "params": {"board": board}})
+    assert resp["ok"] is True                 # envelope: the method ran
+    union = resp["result"]                    # the geometric union is the PAYLOAD
+    assert isinstance(union, dict), f"result must be the union, got {union!r}"
+    assert union["scope"] == "geometric"
+    assert union["verdict"] in ("clean", "violations")
 
 
 # ---------------------------------------------------------------------------

@@ -252,6 +252,44 @@ func TestPCBWorkerStdioSmoke(t *testing.T) {
 	}
 	t.Logf("STDIO SMOKE PASS: pcb_gerbers returned %d files", len(gfiles))
 
+	// tools/call pcb_drc_geometric on the spike board → the geometric UNION must
+	// arrive under result. REGRESSION GUARD: the worker method must wrap the union
+	// as {ok:true, result:<union>}; a bare top-level union surfaces as result:null
+	// over this bridge (in-process worker tests skip the bridge and could not see
+	// it). Assert result is a non-null object carrying the union's scope + verdict.
+	_ = enc.Encode(map[string]any{
+		"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+		"params": map[string]any{"name": "pcb_drc_geometric", "arguments": map[string]any{
+			"yaml": string(board)}},
+	})
+	var dgresp map[string]any
+	for {
+		resp, err := readResp()
+		if err != nil {
+			t.Fatalf("pcb_drc_geometric read: %v", err)
+		}
+		if f, ok := resp["id"].(float64); ok && f == 5 {
+			dgresp = resp
+			break
+		}
+		t.Logf("ignored intermediate: %v", resp)
+	}
+	if dgresp["error"] != nil {
+		t.Fatalf("pcb_drc_geometric JSON-RPC error: %v", dgresp["error"])
+	}
+	dgenv := unwrapMCP(t, dgresp)
+	if dgenv["ok"] != true {
+		t.Fatalf("pcb_drc_geometric outer ok != true: %v", dgenv)
+	}
+	dgres, ok := dgenv["result"].(map[string]any)
+	if !ok || dgres == nil {
+		t.Fatalf("pcb_drc_geometric result must be the geometric union, got null/non-object: %v", dgenv["result"])
+	}
+	if dgres["scope"] != "geometric" || dgres["verdict"] == nil {
+		t.Fatalf("pcb_drc_geometric result missing union fields (scope/verdict): %v", dgres)
+	}
+	t.Logf("STDIO SMOKE PASS: pcb_drc_geometric verdict = %v", dgres["verdict"])
+
 	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 4, "method": "shutdown"})
 	_, _ = io.Copy(io.Discard, br)
 }
