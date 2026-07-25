@@ -33,6 +33,15 @@ EMITTED_GERBER_SUFFIXES: frozenset[str] = frozenset({
 # hazard, not a cosmetic one.
 FABRICATION_CRITICAL_OUTPUTS: tuple[str, ...] = ("copper", "drill", "mask", "rules")
 
+# ROUTING-critical output domains (Round E, docket 019f783860c8). Routing needs
+# the same copper/drill/rules truth fabrication does, but a solder-MASK
+# limitation cannot make a route unsafe — so a mask-only capability loss must not
+# disable routing, while any dropped copper, drill or rule stays fatal. Codex
+# ruling 2: compile against a routing-specific capability set, not the full CAM
+# set. Keep this a SUBSET of FABRICATION_CRITICAL_OUTPUTS: a board that fails to
+# compile for routing must also fail for fabrication, never the reverse.
+ROUTING_CRITICAL_OUTPUTS: tuple[str, ...] = ("copper", "drill", "rules")
+
 # ---------------------------------------------------------------------------
 # Geometry capability dimensions (K2 review 625.2).  The profile is not just
 # filenames/layers: it also declares the pad shapes, graphic primitives, and

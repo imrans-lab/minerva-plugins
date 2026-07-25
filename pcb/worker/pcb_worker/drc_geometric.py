@@ -89,7 +89,14 @@ from .drc_geom_primitives import (
     convex_edge_distance,
     convex_edge_witness,
 )
-from .pad_source import placed_pad_to_geom, th_land
+from .ir_pads import (
+    IRPad,
+    LandDisc,
+    UnsupportedGeometry,
+    iter_ir_pads,
+    pad_land,
+    smd_shape,
+)
 from .resolved_board import (
     Diagnostic,
     LayerRole,
@@ -107,10 +114,14 @@ from .resolved_board import (
 # policy for the whole engine, not a duplicated literal.
 
 
-class UnsupportedGeometry(Exception):
-    """Raised inside the projection when the kernel meets geometry it cannot model
-    faithfully — caught by :func:`run_geometric_drc` and turned into the
-    INDETERMINATE envelope rather than a (potentially false) clean."""
+# UnsupportedGeometry, LandDisc and the pad-land/SMD shape builders moved to the
+# neutral :mod:`ir_pads` owner in Round E (019f783860c8) so canonical ROUTING
+# shapes its keepouts with the identical code — checked, routed and fabricated
+# copper cannot drift. Re-exported here: `drc_geometric.UnsupportedGeometry` and
+# `drc_geometric.LandDisc` remain valid names for existing callers and tests.
+__all__ = ["UnsupportedGeometry", "LandDisc", "run_geometric_drc",
+           "geometric_drc_from_resolution", "geometric_indeterminate",
+           "project_board", "Projection"]
 
 
 # ---------------------------------------------------------------------------
@@ -161,23 +172,6 @@ class HolePrimitive:
     ref: str | None = None         # component ref (pad-origin holes)
     pad_number: str | None = None  # pad number (pad-origin holes)
     net_name: str | None = None    # net name where the hole carries a net
-
-
-@dataclass(frozen=True)
-class LandDisc:
-    kind: str                      # round|rect
-    dia_mm: float | None = None    # round land diameter
-    w_mm: float | None = None      # rect land width
-    h_mm: float | None = None      # rect land height
-
-    def min_reach(self) -> float:
-        """Smallest copper reach from the land centre to its boundary — the nearest
-        edge. For a round land, the radius; for a rectangle, half its MINOR side
-        (a roundrect's mid-edge is unaffected by its corners, so this stays exact
-        for the nearest edge, and conservative elsewhere)."""
-        if self.kind == "round":
-            return (self.dia_mm or 0.0) / 2.0
-        return min(self.w_mm or 0.0, self.h_mm or 0.0) / 2.0
 
 
 @dataclass(frozen=True)
@@ -234,57 +228,6 @@ def _drill_disc_from_size(size: tuple[float, float]) -> DrillDisc:
     return DrillDisc(kind="oblong", major_mm=max(dx, dy), minor_mm=min(dx, dy))
 
 
-def _pad_land(pad, number: str, ref: str) -> tuple[LandDisc, Any]:
-    """The copper LAND of a through-hole pad — resolved through the NEUTRAL OWNER
-    (``placed_pad_to_geom`` + ``th_land``), NOT reinterpreted here. This is the DRY
-    call site mandated by Codex #3: the CAM emitters shape the exact same land, so
-    fabricated and checked copper cannot drift.
-
-    Returns ``(LandDisc, shape)`` where ``shape`` is the exact/superset geometry
-    primitive for the (C2) clearance checks. Raises :class:`UnsupportedGeometry`
-    for a land the owner cannot classify into a modelable family — fail-closed
-    rather than guess."""
-    geom = placed_pad_to_geom(pad, number)
-    shaped, shape_token, w, h, _rr = th_land(geom)
-    angle = math.radians(pad.rotation_deg)
-    if not shaped:
-        # Round annulus: the neutral owner exposes the land DIAMETER as PadGeom.annulus.
-        dia = geom.annulus
-        if dia is None or not math.isfinite(dia) or dia <= 0:
-            raise UnsupportedGeometry(
-                f"pad {ref}.{number}: through-hole land has no usable round-annulus "
-                f"diameter from the neutral owner (annulus={dia!r})")
-        land = LandDisc(kind="round", dia_mm=float(dia))
-        shape = Capsule.disc(pad.position[0], pad.position[1], float(dia) / 2.0)
-        return land, shape
-    # Shaped land (oblong / authored-cornered rect / roundrect). rect + roundrect
-    # are modeled by the bounding oriented rectangle (superset of copper);
-    # anything else the owner would have failed upstream.
-    if shape_token not in ("rect", "roundrect", "oval"):
-        raise UnsupportedGeometry(
-            f"pad {ref}.{number}: through-hole land shape {shape_token!r} has no "
-            f"modelable copper primitive")
-    land = LandDisc(kind="rect", w_mm=float(w), h_mm=float(h))
-    shape = OrientedRect(pad.position[0], pad.position[1],
-                         float(w) / 2.0, float(h) / 2.0, angle)
-    return land, shape
-
-
-def _smd_shape(pad, number: str, ref: str) -> Any:
-    geom = placed_pad_to_geom(pad, number)
-    w, h = geom.width, geom.height
-    if w is None or h is None:
-        # A sizeless SMD pad should never reach the IR (compiler fail-closes), but
-        # be defensive rather than emit copper we cannot model.
-        raise UnsupportedGeometry(
-            f"pad {ref}.{number}: SMD pad has no copper size in the IR")
-    angle = math.radians(pad.rotation_deg)
-    if geom.shape == "circle":
-        return Capsule.disc(pad.position[0], pad.position[1], float(w) / 2.0)
-    return OrientedRect(pad.position[0], pad.position[1],
-                        float(w) / 2.0, float(h) / 2.0, angle)
-
-
 def _via_span_layers(rb: ResolvedBoard, via) -> tuple[str, ...]:
     idx = {layer.id: layer.stack_index for layer in rb.layer_stack.copper}
     lo, hi = idx.get(via.from_layer), idx.get(via.to_layer)
@@ -308,58 +251,53 @@ def project_board(rb: ResolvedBoard) -> Projection:
     # consumer rebuilding this private table.
     net_names = {net.id: net.name for net in rb.nets}
 
-    for comp in rb.components:
-        # Human pad-number correlation (019f9589ebb3): a PlacedPad carries only the
-        # footprint pad source_id ("pad:1:0"); the human-meaningful number ("1")
-        # lives on the footprint pad. Map source_id -> number so a finding can name
-        # "U1.1". Falls back to the source_id if a pad has no correlated number.
-        fp = rb.footprint_for(comp)
-        number_by_source = {fpad.source_id: fpad.number for fpad in fp.pads}
-        for pad in comp.placed_pads:
-            number = pad.source_id
-            human_pad = number_by_source.get(pad.source_id) or number
-            pad_net_name = net_names.get(pad.net_id)
-            is_drilled = pad.drill is not None
-            # A pad participates on the copper layers flagged in pad.layers; a
-            # through-hole pad spans ALL copper layers regardless.
-            pad_copper = tuple(
-                layer.id for layer in pad.layers if layer.role is LayerRole.COPPER)
-            if is_drilled:
-                layers = all_copper
-                # NPTH prerequisite (C2): an np_thru_hole pad has NO copper land/ring
-                # — it is a bare mechanical hole. It contributes a HOLE/drill primitive
-                # (GC3/GC6) but MUST NOT project a copper primitive (which would cause
-                # spurious GC2/GC5 positives) nor an annular entity (GC4). The
-                # classification reuses pad_source's shared pad_type literal, not a new
-                # one (see pad_source.is_through_hole / _from_resolved).
-                is_npth = pad.pad_type == "np_thru_hole"
-                if not is_npth:
-                    land, shape = _pad_land(pad, number, comp.ref)
-                    copper.append(CopperPrimitive(
-                        entity_id=pad.id, parent_id=comp.id, kind="pth_pad",
-                        layers=layers, net_id=pad.net_id, shape=shape,
-                        aabb=_shape_aabb(shape),
-                        ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
-                drill = _drill_disc_from_size(pad.drill.size)
-                holes.append(_hole_from_drill(
-                    pad.id, comp.id, "pad", pad.net_id, pad.drill.plated,
-                    pad.position, drill, pad.rotation_deg,
-                    ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
-                # Annular ring: PLATED through-hole pads only.
-                if not is_npth:
-                    annular.append(AnnularEntity(
-                        entity_id=pad.id, parent_id=comp.id, kind="pth_pad",
-                        net_id=pad.net_id,
-                        per_layer=tuple((lid, land) for lid in layers),
-                        drill=drill, position=pad.position,
-                        ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
-            else:
-                shape = _smd_shape(pad, number, comp.ref)
+    # Pads, their human numbers and net names come from the NEUTRAL owner
+    # (ir_pads.iter_ir_pads) — the same iteration canonical routing walks, so a
+    # pad DRC checks and a pad the router keeps out of are the same pad
+    # (019f9589ebb3 attribution, Round E 019f783860c8 DRY).
+    for ir_pad in iter_ir_pads(rb):
+        pad, comp = ir_pad.pad, ir_pad.component
+        number, human_pad = ir_pad.source_number, ir_pad.number
+        pad_net_name = ir_pad.net_name
+        # A pad participates on the copper layers flagged in pad.layers; a
+        # through-hole pad spans ALL copper layers regardless.
+        pad_copper = tuple(
+            layer.id for layer in pad.layers if layer.role is LayerRole.COPPER)
+        if ir_pad.is_drilled:
+            layers = all_copper
+            # NPTH prerequisite (C2): an np_thru_hole pad has NO copper land/ring
+            # — it is a bare mechanical hole. It contributes a HOLE/drill primitive
+            # (GC3/GC6) but MUST NOT project a copper primitive (which would cause
+            # spurious GC2/GC5 positives) nor an annular entity (GC4). The
+            # classification lives on IRPad.carries_copper, so DRC and routing
+            # agree on what a bare hole is.
+            if ir_pad.carries_copper:
+                land, shape = pad_land(pad, number, comp.ref)
                 copper.append(CopperPrimitive(
-                    entity_id=pad.id, parent_id=comp.id, kind="smd_pad",
-                    layers=pad_copper or all_copper[:1], net_id=pad.net_id,
-                    shape=shape, aabb=_shape_aabb(shape),
+                    entity_id=pad.id, parent_id=comp.id, kind="pth_pad",
+                    layers=layers, net_id=pad.net_id, shape=shape,
+                    aabb=_shape_aabb(shape),
                     ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
+            drill = _drill_disc_from_size(pad.drill.size)
+            holes.append(_hole_from_drill(
+                pad.id, comp.id, "pad", pad.net_id, pad.drill.plated,
+                pad.position, drill, pad.rotation_deg,
+                ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
+            # Annular ring: PLATED through-hole pads only.
+            if ir_pad.carries_copper:
+                annular.append(AnnularEntity(
+                    entity_id=pad.id, parent_id=comp.id, kind="pth_pad",
+                    net_id=pad.net_id,
+                    per_layer=tuple((lid, land) for lid in layers),
+                    drill=drill, position=pad.position,
+                    ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
+        else:
+            shape = smd_shape(pad, number, comp.ref)
+            copper.append(CopperPrimitive(
+                entity_id=pad.id, parent_id=comp.id, kind="smd_pad",
+                layers=pad_copper or all_copper[:1], net_id=pad.net_id,
+                shape=shape, aabb=_shape_aabb(shape),
+                ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
 
     for trace in rb.traces:
         trace_net_name = net_names.get(trace.net_id)

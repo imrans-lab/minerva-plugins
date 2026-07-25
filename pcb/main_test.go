@@ -290,6 +290,55 @@ func TestPCBWorkerStdioSmoke(t *testing.T) {
 	}
 	t.Logf("STDIO SMOKE PASS: pcb_drc_geometric verdict = %v", dgres["verdict"])
 
+	// tools/call pcb_route on the same spike board → ROUND E (019f783860c8).
+	// Canonical routing now compiles the board and routes the ResolvedBoard IR, so
+	// this crosses the bridge that the Round C envelope bug hid in: a route reply
+	// must arrive either as a real proposal under result, or as a structured
+	// fail-closed error — never as ok:true with a null result.
+	_ = enc.Encode(map[string]any{
+		"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+		"params": map[string]any{"name": "pcb.route", "arguments": map[string]any{
+			"yaml": string(board)}},
+	})
+	var rresp map[string]any
+	for {
+		resp, err := readResp()
+		if err != nil {
+			t.Fatalf("pcb_route read: %v", err)
+		}
+		if f, ok := resp["id"].(float64); ok && f == 6 {
+			rresp = resp
+			break
+		}
+		t.Logf("ignored intermediate: %v", resp)
+	}
+	if rresp["error"] != nil {
+		t.Fatalf("pcb_route JSON-RPC error: %v", rresp["error"])
+	}
+	renv := unwrapMCP(t, rresp)
+	if renv["ok"] == true {
+		rres, ok := renv["result"].(map[string]any)
+		if !ok || rres == nil {
+			t.Fatalf("pcb_route ok:true must carry a proposal object, got null/non-object: %v", renv["result"])
+		}
+		if _, ok := rres["routes"]; !ok {
+			t.Fatalf("pcb_route result missing routes: %v", rres)
+		}
+		t.Logf("STDIO SMOKE PASS: pcb_route success = %v", rres["success"])
+	} else {
+		// Fail-closed is a legitimate outcome (the spike board may carry accepted
+		// copper or geometry the grid cannot model) — but it must be ATTRIBUTED and
+		// must propose nothing.
+		rerr, ok := renv["error"].(map[string]any)
+		if !ok || rerr["kind"] == nil || rerr["message"] == nil {
+			t.Fatalf("pcb_route fail-closed reply must carry error.kind + message: %v", renv)
+		}
+		if _, has := renv["result"]; has {
+			t.Fatalf("pcb_route must propose NOTHING when it fails closed: %v", renv)
+		}
+		t.Logf("STDIO SMOKE PASS: pcb_route failed closed, kind = %v", rerr["kind"])
+	}
+
 	_ = enc.Encode(map[string]any{"jsonrpc": "2.0", "id": 4, "method": "shutdown"})
 	_, _ = io.Copy(io.Discard, br)
 }

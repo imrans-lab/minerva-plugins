@@ -35,14 +35,46 @@ def _two_pin_board() -> dict:
         "components": [
             {"ref": "U1", "footprint": "HEADER", "x_mm": 15.24, "y_mm": 20.32,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0},
-                      {"number": "GND", "x_mm": 0.0, "y_mm": 2.54}]},
+             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0,
+                       "pad_width_mm": 1.7, "pad_height_mm": 1.7},
+                      {"number": "GND", "x_mm": 0.0, "y_mm": 2.54,
+                       "pad_width_mm": 1.7, "pad_height_mm": 1.7}]},
             {"ref": "J1", "footprint": "HEADER", "x_mm": 45.72, "y_mm": 20.32,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0},
-                      {"number": "GND", "x_mm": 0.0, "y_mm": 2.54}]},
+             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0,
+                       "pad_width_mm": 1.7, "pad_height_mm": 1.7},
+                      {"number": "GND", "x_mm": 0.0, "y_mm": 2.54,
+                       "pad_width_mm": 1.7, "pad_height_mm": 1.7}]},
         ],
         "nets": [{"name": "SIG", "pins": ["U1.SIG", "J1.SIG"]}],
+    }
+
+
+def _ir_two_pin_board() -> dict:
+    """The same HITL-2 topology as :func:`_two_pin_board`, but COMPILABLE.
+
+    ROUND E (019f783860c8): the route() METHOD now compiles the board and routes
+    the ResolvedBoard IR, so a method-level fixture must name a footprint the seed
+    library resolves and reference the footprint's own pad numbers. Real pads:
+    PinSocket_1x04 puts pad "1" at the component origin, so U1.1 sits at
+    (15.24, 20.32) and J1.1 at (45.72, 20.32) — the exact positions the pure-bridge
+    fixture placed "SIG" at, so the drawn corridor below is unchanged.
+    """
+    return {
+        "version": 1,
+        "name": "hitl2-ir",
+        "width_mm": 60,
+        "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "U1", "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical",
+             "x_mm": 15.24, "y_mm": 20.32, "rotation_deg": 0, "layer": "top"},
+            {"ref": "J1", "footprint": "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical",
+             "x_mm": 45.72, "y_mm": 20.32, "rotation_deg": 0, "layer": "top"},
+        ],
+        "nets": [{"name": "SIG", "pins": ["U1.1", "J1.1"]}],
     }
 
 
@@ -122,8 +154,9 @@ def test_cross_net_endpoints_fall_back_to_engine():
 
 
 def test_route_method_detailed_hint_routes_as_drawn():
-    resp = _call("route", {"board": _two_pin_board(),
-                           "route_hints": [_detailed_hint()],
+    resp = _call("route", {"board": _ir_two_pin_board(),
+                           "route_hints": [_detailed_hint(source_pins=["U1.1"],
+                                                          dest_pins=["J1.1"])],
                            "selection": {"mode": "open"}})
     assert resp["ok"] is True, resp
     r = resp["result"]
@@ -142,8 +175,10 @@ def test_route_method_detailed_hint_routes_as_drawn():
 
 
 def test_route_method_guided_hint_keeps_engine_path():
-    resp = _call("route", {"board": _two_pin_board(),
-                           "route_hints": [_detailed_hint(detail_level="guided", _id="g1")],
+    resp = _call("route", {"board": _ir_two_pin_board(),
+                           "route_hints": [_detailed_hint(detail_level="guided", _id="g1",
+                                                          source_pins=["U1.1"],
+                                                          dest_pins=["J1.1"])],
                            "selection": {"mode": "open"}})
     assert resp["ok"] is True, resp
     r = resp["result"]

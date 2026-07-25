@@ -35,8 +35,10 @@ def _detailed_hint(_id: str = "ann1", **kp_overrides) -> dict:
         "hint_type": "single_trace",
         "detail_level": "detailed",
         "layer": "F.Cu",
-        "source_pins": ["U1.SIG"],
-        "dest_pins": ["J1.SIG"],
+        # ROUND E: pin refs name the FOOTPRINT's pad numbers now that route()
+        # routes the compiled IR — TH_TestPoint's single pad is "1".
+        "source_pins": ["U1.1"],
+        "dest_pins": ["J1.1"],
         "waypoints": [],  # straight pad -> pad segment: fully predictable geometry
         "width_mm": 0.25,
     }
@@ -57,23 +59,30 @@ def _board(existing_traces: list | None = None) -> dict:
         "name": "drc-at-propose",
         "width_mm": 60,
         "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
         "components": [
-            {"ref": "U1", "footprint": "HEADER", "x_mm": 10, "y_mm": 20,
+            {"ref": "U1", "footprint": "TH_TestPoint", "x_mm": 10, "y_mm": 20,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0}]},
-            {"ref": "J1", "footprint": "HEADER", "x_mm": 50, "y_mm": 20,
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
+            {"ref": "J1", "footprint": "TH_TestPoint", "x_mm": 50, "y_mm": 20,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0}]},
-            {"ref": "A1", "footprint": "HEADER", "x_mm": 30, "y_mm": 5,
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
+            {"ref": "A1", "footprint": "TH_TestPoint", "x_mm": 30, "y_mm": 5,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "EXIST", "x_mm": 0.0, "y_mm": 0.0}]},
-            {"ref": "A2", "footprint": "HEADER", "x_mm": 30, "y_mm": 35,
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
+            {"ref": "A2", "footprint": "TH_TestPoint", "x_mm": 30, "y_mm": 35,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "EXIST", "x_mm": 0.0, "y_mm": 0.0}]},
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
         ],
         "nets": [
-            {"name": "SIG", "pins": ["U1.SIG", "J1.SIG"]},
-            {"name": "EXIST", "pins": ["A1.EXIST", "A2.EXIST"]},
+            {"name": "SIG", "pins": ["U1.1", "J1.1"]},
+            {"name": "EXIST", "pins": ["A1.1", "A2.1"]},
         ],
         "traces": existing_traces or [],
     }
@@ -95,15 +104,20 @@ def _clean_board() -> dict:
         "name": "drc-at-propose-clean",
         "width_mm": 60,
         "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
         "components": [
-            {"ref": "U1", "footprint": "HEADER", "x_mm": 10, "y_mm": 20,
+            {"ref": "U1", "footprint": "TH_TestPoint", "x_mm": 10, "y_mm": 20,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0}]},
-            {"ref": "J1", "footprint": "HEADER", "x_mm": 50, "y_mm": 20,
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
+            {"ref": "J1", "footprint": "TH_TestPoint", "x_mm": 50, "y_mm": 20,
              "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "SIG", "x_mm": 0.0, "y_mm": 0.0}]},
+             "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                       "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
         ],
-        "nets": [{"name": "SIG", "pins": ["U1.SIG", "J1.SIG"]}],
+        "nets": [{"name": "SIG", "pins": ["U1.1", "J1.1"]}],
         "traces": [],
     }
 
@@ -113,26 +127,51 @@ def _clean_board() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_route_flags_collision_with_existing_trace():
+def test_route_fails_closed_on_a_board_with_accepted_copper():
+    """ROUND E (019f783860c8, Codex gap E): a board that already carries accepted
+    traces/vias is NOT routable until T7 (019f70ebc9ed) models existing copper.
+
+    The routing grid is given pads and holes only, so accepted copper would be
+    INVISIBLE to it and a new proposal could be routed straight through a trace the
+    user already accepted. Rather than propose over copper it cannot see, route()
+    fails closed and says why. (This is why the crossing-detection coverage below
+    exercises the DRC attach layer directly — the scenario it needs, a board with
+    an existing trace, no longer reaches the router.)"""
     resp = _call("route", {"board": _board(_CROSSING_TRACE),
                            "route_hints": [_detailed_hint()],
                            "selection": {"mode": "open"}})
-    assert resp["ok"] is True, resp
-    r = resp["result"]
+    assert resp["ok"] is False, resp
+    assert resp["error"]["kind"] == "unsupported_geometry"
+    assert "accepted copper" in resp["error"]["message"]
+    assert "019f70ebc9ed" in resp["error"]["message"]   # names its owner
+    assert "result" not in resp                          # and proposes NOTHING
 
-    sig = [rt for rt in r["routes"] if rt["net"] == "SIG"]
-    assert len(sig) == 1
-    route_drc = sig[0]["drc"]
+
+def test_drc_attach_flags_a_proposal_crossing_an_existing_trace():
+    """The crossing check itself, at the layer that still sees existing copper.
+
+    ``_attach_route_drc`` is what route() calls once it has proposals; it is a pure
+    function of (canonical board, routes), so the pre-existing-trace scenario is
+    exercised here verbatim even though route() now refuses such a board."""
+    from pcb_worker.methods import _attach_route_drc
+
+    board = _board(_CROSSING_TRACE)
+    # The proposal route() would have produced: a straight SIG segment at y=20,
+    # crossing the existing EXIST trace at (30, 20) on the same layer.
+    payload = {"routes": [{"net": "SIG", "segments": [
+        {"layer": "top", "width_mm": 0.25, "start": [10, 20], "end": [50, 20]}]}]}
+    _attach_route_drc(payload, board)
+
+    route_drc = payload["routes"][0]["drc"]
     # HONEST LABEL (019f958aa6db): route DRC is CONNECTIVITY-scoped, never geometric.
     assert route_drc["scope"] == "connectivity"
     assert route_drc["clean"] is False
-    assert len(route_drc["violations"]) >= 1
     assert any(v["type"] == "crossing" for v in route_drc["violations"])
     crossing = [v for v in route_drc["violations"] if v["type"] == "crossing"][0]
     assert sorted(crossing["nets"]) == ["EXIST", "SIG"]
     assert crossing["layer"] == "top"
 
-    summary = r["drc_summary"]
+    summary = payload["drc_summary"]
     assert summary["scope"] == "connectivity"
     assert summary["clean"] is False
     assert summary["violation_count"] >= 1

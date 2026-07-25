@@ -251,7 +251,15 @@ var RouteChannel = ToolSpec{
 		"via_count, routes:[{net,segments:[{start,end,layer}],vias}], unrouted:" +
 		"[{net,from,to}], warnings?, selected_hint_ids?}} on success, or " +
 		"{ok:false, error:{kind,message}} on a structured routing/parse fault — " +
-		"engine faults never crash the worker loop.",
+		"engine faults never crash the worker loop. FAILS CLOSED (019f783860c8): " +
+		"canonical routing COMPILES the board and routes real ResolvedBoard copper; " +
+		"it never approximates a pad. A board that will not compile returns " +
+		"kind:\"compile\" with the blocking diagnostics, and one that compiles but " +
+		"carries geometry the routing grid cannot model faithfully — accepted " +
+		"traces/vias (until 019f70ebc9ed), inner copper layers, zones, copper " +
+		"graphics, a non-rectangular outline — returns kind:\"unsupported_geometry\". " +
+		"Either way ZERO routes come back: no proposal is ever computed over " +
+		"guessed copper.",
 	InputSchema: json.RawMessage(`{"type":"object"}`),
 }
 

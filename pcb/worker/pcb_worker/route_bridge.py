@@ -36,6 +36,7 @@ Design constraints (docket 019eb481ae28 / 019eb47eb567, DCR 019dc140):
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -44,7 +45,16 @@ from agent_router.hints import RoutingHints, parse_hints
 from agent_router import layers as _layers
 
 from .geometry import rotate_local_offset
+from .ir_pads import UnsupportedGeometry, iter_ir_pads, pad_copper_shape
 from .pad_source import is_th_drill
+from .resolved_board import (
+    LayerRole,
+    OvalHole,
+    RectOutline,
+    ResolvedBoard,
+    RoundHole,
+    SlotHole,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -56,9 +66,12 @@ from .pad_source import is_th_drill
 # and any other reader of route_bridge._LAYER_MAP keep working and can never
 # drift from the canonical map.
 _LAYER_MAP = _layers.CANON_TO_KICAD
-# Nominal SMD pad extent (mm) used only when a component carries no per-pad
-# geometry (canonical Pin has no size field) and the pad is not through-hole.
-_DEFAULT_PAD_SIZE = (1.0, 1.0)
+
+# The copper layers the vendored engine can route (agent_router.layers is
+# explicitly 2-layer: "NO N-layer support"). A compiled board whose copper stack
+# is anything else fails CLOSED rather than route with inner copper the grid
+# never models.
+_ROUTABLE_KICAD_LAYERS = ("F.Cu", "B.Cu")
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -100,12 +113,21 @@ def _rotate_offset(px: float, py: float, rotation_deg: float) -> tuple[float, fl
 
 
 def _pad_size_for(pin: dict, extra_pads_by_num: dict[str, dict]) -> tuple[float, float]:
-    """Resolve a pad's (w, h) size in mm.
+    """Resolve a pad's (w, h) size in mm from AUTHORED geometry, or fail closed.
 
     Priority: explicit render geometry (component ``pads`` Extra, present when
     the board came from YAML with footprint geometry) -> through-hole annulus
-    diameter -> nominal default. Canonical ``Pin`` has no size field, so this
-    is best-effort keepout sizing, not authored data.
+    diameter -> :class:`UnsupportedGeometry`.
+
+    ROUND E (019f783860c8): the third branch used to return a nominal
+    ``_DEFAULT_PAD_SIZE = (1.0, 1.0)`` — copper the board does not have. The
+    router then computed keepouts around a fictional land and could propose a
+    trace straight through the real package land; accepted, that is approximated
+    copper reaching fabrication, which the owner-ratified Step-4 ruling forbids
+    ("ROUTING/DRC/CAM FAIL CLOSED. No approximated copper."). There is no honest
+    size to invent here, so this path now raises. Production canonical routing
+    does not reach it at all — it goes through
+    :func:`resolved_board_to_router`, where every dimension is IR-authoritative.
     """
     num = str(pin.get("number", ""))
     render = extra_pads_by_num.get(num)
@@ -120,10 +142,21 @@ def _pad_size_for(pin: dict, extra_pads_by_num: dict[str, dict]) -> tuple[float,
             w = _num(size[0]); h = _num(size[1])
             if w > 0 and h > 0:
                 return (w, h)
+    # AUTHORED inline pin size. pad_source._from_pin has always read these keys —
+    # this builder did not, so a pin that authored its own copper size still got
+    # the nominal 1.0x1.0 land. Reading them is not a new inference: it is the
+    # same authored datum the neutral owner already uses.
+    pin_w = _num(pin.get("pad_width_mm"))
+    pin_h = _num(pin.get("pad_height_mm"))
+    if pin_w > 0 and pin_h > 0:
+        return (pin_w, pin_h)
     annulus = _num(pin.get("annulus_diameter_mm"))
     if annulus > 0:
         return (annulus, annulus)
-    return _DEFAULT_PAD_SIZE
+    raise UnsupportedGeometry(
+        f"pad {pin.get('number')!r}: no authored copper geometry (neither a "
+        f"resolved pad size nor a through-hole annulus) — routing fails closed "
+        f"rather than invent a nominal land")
 
 
 def board_to_router(canonical_board: dict) -> Board:
@@ -246,6 +279,218 @@ def _obstacles_from_board(canonical_board: dict) -> list[Obstacle]:
             radius=radius,
         ))
     return obstacles
+
+
+# ---------------------------------------------------------------------------
+# resolved_board_to_router — the IR-authoritative projection (Round E1)
+# ---------------------------------------------------------------------------
+# docket 019f783860c8. Canonical routing consumes REAL compiled copper or it does
+# not route. Every dimension, position, side/mirror, layer participation and net
+# ownership below comes from the ResolvedBoard IR; nothing is inferred from
+# authored pins and nothing is defaulted.
+#
+# FAIL-SAFE DIRECTION (same invariant as geometric DRC, restated for keepouts):
+# the modeled keepout must be a SUPERSET of the fabricated copper. Over-blocking
+# is legal (the router declines a route it could have made); under-blocking is
+# never legal (the router proposes copper that shorts a real land).
+#
+# WHY AXIS-ALIGNED ENVELOPES: agent_router's RoutingGrid.mark_pad marks an
+# unrotated rectangle and DISCARDS the rotation argument it accepts
+# ("Simple rectangular marking (ignoring rotation for now)", grid.py:133). Handing
+# it a truthful w/h for a ROTATED elongated land would therefore under-block along
+# the rotated axes. We hand it the axis-aligned bounding box of the real land
+# instead — a strict superset, computed from the same neutral land owner the CAM
+# emitters fabricate from (ir_pads.pad_copper_shape).
+
+
+def _routing_layer_ids(rb: ResolvedBoard) -> tuple[str, ...]:
+    """The engine-facing copper layer names, or fail closed.
+
+    The vendored engine routes F.Cu/B.Cu only. A board with inner copper would be
+    routed as if those layers did not exist — copper the grid never models — so it
+    fails closed here instead."""
+    aliases = tuple(layer.kicad_alias for layer in rb.layer_stack.copper)
+    if sorted(aliases) != sorted(_ROUTABLE_KICAD_LAYERS):
+        raise UnsupportedGeometry(
+            f"routing engine models a 2-layer F.Cu/B.Cu stack only; board copper "
+            f"stack is {list(aliases)}")
+    return aliases
+
+
+def _reject_unroutable_board(rb: ResolvedBoard) -> None:
+    """Fail closed on compiled features the router cannot honour.
+
+    Each of these would otherwise be SILENTLY ABSENT from the grid, and absent
+    copper is exactly what lets a proposal cross real copper."""
+    if not isinstance(rb.outline, RectOutline):
+        raise UnsupportedGeometry(
+            f"routing v1 models a rectangular (RectOutline) board only; got "
+            f"{type(rb.outline).__name__}")
+    if rb.traces or rb.vias:
+        # EXISTING ACCEPTED COPPER (Codex gap E). The engine is given pads/holes
+        # only, so already-accepted traces and vias would be invisible and a new
+        # proposal could be routed straight through them. Modeling accepted copper
+        # is owned by T7 019f70ebc9ed; until it lands, a board that HAS accepted
+        # copper is not routable rather than routable-and-wrong.
+        raise UnsupportedGeometry(
+            f"board already carries accepted copper ({len(rb.traces)} trace(s), "
+            f"{len(rb.vias)} via(s)) which the routing grid does not model yet "
+            f"(019f70ebc9ed); routing fails closed rather than propose copper "
+            f"that may cross it")
+    if rb.zones:
+        raise UnsupportedGeometry("routing v1 does not model copper zones/pours")
+    if any(g.layer.role is LayerRole.COPPER for g in rb.board_graphics) or any(
+            g.layer.role is LayerRole.COPPER
+            for comp in rb.components for g in comp.placed_graphics):
+        raise UnsupportedGeometry(
+            "copper board/placed graphics are not modeled by the routing grid; "
+            "routing fails closed rather than route through unmodeled copper")
+
+
+def _pad_copper_layer(ir_pad, routable: tuple[str, ...]) -> str:
+    """The engine layer name an SMD pad's copper sits on (IR-authoritative side).
+
+    A pad whose copper is not on a routable layer fails closed: the engine's own
+    fallback for an unrecognised layer is to mark the pad on F.Cu (router.py:393),
+    which would place a bottom-side or inner-layer land on the top layer."""
+    copper = tuple(layer.id for layer in ir_pad.pad.layers
+                   if layer.role is LayerRole.COPPER)
+    if len(copper) != 1:
+        raise UnsupportedGeometry(
+            f"pad {ir_pad.ref}.{ir_pad.number}: surface pad participates on "
+            f"{list(copper)} copper layers; the routing grid models exactly one")
+    if copper[0] not in routable:
+        raise UnsupportedGeometry(
+            f"pad {ir_pad.ref}.{ir_pad.number}: copper layer {copper[0]!r} is not "
+            f"routable ({list(routable)})")
+    return copper[0]
+
+
+def _router_pad(ir_pad, routable: tuple[str, ...]) -> Pad:
+    """One IR pad as an engine Pad whose extent CONTAINS the fabricated land."""
+    box = pad_copper_shape(ir_pad).aabb()
+    position = ((box.min_x + box.max_x) / 2.0, (box.min_y + box.max_y) / 2.0)
+    size = (box.max_x - box.min_x, box.max_y - box.min_y)
+    if ir_pad.is_drilled:
+        # Through-hole copper spans every copper layer; the engine keys that off
+        # pad_type (router.py:390) and marks all routing layers.
+        drill = ir_pad.pad.drill
+        return Pad(
+            component=ir_pad.ref, number=ir_pad.number, net=None,
+            position=position, size=size, shape="rect", pad_type="thru_hole",
+            drill=max(float(drill.size[0]), float(drill.size[1])),
+            layer="*.Cu",
+            # rotation is DELIBERATELY 0.0: `size` is already the axis-aligned
+            # envelope of the rotated land. Passing the true rotation would
+            # double-count the moment the engine starts honouring it.
+            rotation=0.0)
+    return Pad(
+        component=ir_pad.ref, number=ir_pad.number, net=None,
+        position=position, size=size, shape="rect", pad_type="smd",
+        drill=None, layer=_pad_copper_layer(ir_pad, routable), rotation=0.0)
+
+
+def _npth_obstacle(ir_pad) -> Obstacle:
+    """A bare mechanical (NPTH) component hole: an obstacle, never a route target.
+
+    It carries no copper land, so it is not a Pad — a Pad would be both phantom
+    copper and a connectable endpoint the net list never asked for."""
+    drill = ir_pad.pad.drill
+    radius = max(float(drill.size[0]), float(drill.size[1])) / 2.0
+    return Obstacle(position=tuple(ir_pad.pad.position), type="npth_pad",
+                    radius=radius)
+
+
+def _hole_obstacle(hole) -> Obstacle:
+    """A board-level hole as a circumscribing disc obstacle.
+
+    The engine's only obstacle primitive the grid consumes is a disc
+    (``mark_obstacle``; ``Obstacle.polygon`` is declared but read nowhere), so an
+    oval or slot is blocked by the disc that CONTAINS it — over-blocking, which is
+    the safe direction. A PLATED hole blocks its copper ANNULUS, not merely its
+    drill: the copper is what a trace must not cross."""
+    feature = hole.feature
+    if isinstance(feature, RoundHole):
+        centre = feature.position
+        radius = feature.diameter_mm / 2.0
+    elif isinstance(feature, OvalHole):
+        centre = feature.position
+        # Rotation-invariant containment: the disc through the oval's corners.
+        radius = math.hypot(feature.width_mm, feature.height_mm) / 2.0
+    elif isinstance(feature, SlotHole):
+        xs = [p[0] for p in feature.path]
+        ys = [p[1] for p in feature.path]
+        centre = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+        span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+        radius = span / 2.0 + feature.width_mm / 2.0
+    else:
+        raise UnsupportedGeometry(
+            f"board hole {hole.id}: geometry {type(feature).__name__} has no "
+            f"conservative disc the routing grid can consume")
+    if hole.plated and hole.annulus_mm:
+        radius = max(radius, float(hole.annulus_mm) / 2.0)
+    return Obstacle(position=tuple(centre), type="mounting_hole", radius=radius)
+
+
+def resolved_board_to_router(rb: ResolvedBoard) -> Board:
+    """Project a compiled :class:`ResolvedBoard` onto the engine's ``Board``.
+
+    THE fail-closed seam for canonical routing (Round E, docket 019f783860c8):
+    every pad extent, position, side, layer and net here is IR-authoritative, so
+    the copper the router keeps out of is the copper the CAM emitters fabricate
+    and geometric DRC checks — one owner, no drift. Anything the grid cannot
+    faithfully model raises :class:`UnsupportedGeometry`; the caller turns that
+    into zero routes plus diagnostics, never a proposal over guessed copper.
+
+    NOT yet handled here, by design (each has its own owner, none of them silent):
+      * effective width/clearance from ``rb.design_rules`` and keepout inflation
+        by clearance + half the trace width — Round E2. Today the engine still
+        applies its own defaults, exactly as before this change.
+      * grid origin correctness for a non-zero ``RectOutline.origin`` — Round E2.
+      * per-net-class width/clearance minima — Round E2, with the rest of rules.
+      * accepted traces/vias — T7 019f70ebc9ed; fails closed above until then.
+    """
+    _reject_unroutable_board(rb)
+    routable = _routing_layer_ids(rb)
+
+    pads: list[Pad] = []
+    obstacles: list[Obstacle] = []
+    pad_by_id: dict[str, Pad] = {}
+    for ir_pad in iter_ir_pads(rb):
+        if not ir_pad.carries_copper:
+            obstacles.append(_npth_obstacle(ir_pad))
+            continue
+        pad = _router_pad(ir_pad, routable)
+        pads.append(pad)
+        pad_by_id[ir_pad.pad.id] = pad
+
+    nets: dict[str, Net] = {}
+    for resolved_net in rb.nets:
+        net = Net(name=resolved_net.name, number=resolved_net.index, pads=[])
+        for pad_ref in resolved_net.pad_refs:
+            pad = pad_by_id.get(pad_ref)
+            if pad is None:
+                # The IR guarantees pad_refs resolve, so the only way to get here
+                # is a net member that carries no copper (an NPTH pad). Routing to
+                # it is impossible; failing closed beats silently dropping a net
+                # member and reporting the net "routed".
+                raise UnsupportedGeometry(
+                    f"net {resolved_net.name!r} references pad {pad_ref} which "
+                    f"carries no routable copper")
+            pad.net = resolved_net.name
+            net.pads.append(pad)
+        nets[resolved_net.name] = net
+
+    obstacles.extend(_hole_obstacle(hole) for hole in rb.holes)
+
+    return Board(
+        pads=pads,
+        nets=nets,
+        obstacles=obstacles,
+        width=rb.outline.width_mm,
+        height=rb.outline.height_mm,
+        origin=tuple(rb.outline.origin),
+    )
 
 
 def _split_pin_ref(ref: Any) -> tuple[Optional[str], str]:

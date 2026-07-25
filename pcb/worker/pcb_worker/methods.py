@@ -131,9 +131,17 @@ def _validate(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
-def _compile_or_fail(board: dict):
-    """The SHARED fab prologue for ``_gerbers`` + ``_generate``: COMPILE (strict) →
-    ResolvedBoard IR, or a structured fail-closed error reply.
+def _compile_or_fail(board: dict, *,
+                     requested_outputs: tuple[str, ...] = compile_board.V1_FAB_OUTPUTS):
+    """The SHARED strict-compile prologue: COMPILE → ResolvedBoard IR, or a
+    structured fail-closed error reply.
+
+    Used by ``_gerbers`` + ``_generate`` with the FAB capability profile (the
+    default) and by ``_route`` with the narrower ROUTING profile
+    (``V1_ROUTING_OUTPUTS``, Round E 019f783860c8) — so a solder-mask capability
+    loss cannot disable routing while any dropped copper/drill/rule stays fatal
+    everywhere. ``requested_outputs`` is the ONLY thing that varies; the failure
+    reply shape is identical for every caller.
 
     Returns the ``ResolutionSuccess`` (carrying ``.board`` + ``.diagnostics`` the
     caller forwards as warnings) on success, or a ``{kind:"compile"}`` error reply
@@ -143,7 +151,7 @@ def _compile_or_fail(board: dict):
     footprints.DEFAULT_LIBRARY_ROOT/LOCKFILE). ``params["resolve_geometry"]`` is
     moot on the fab path now (compile ALWAYS resolves): accepted-and-ignored by the
     callers, not consulted here."""
-    compiled = compile_board.compile_board(board)
+    compiled = compile_board.compile_board(board, requested_outputs=requested_outputs)
     if isinstance(compiled, compile_board.ResolutionFailure):
         return _compile_failure_reply(compiled)
     return compiled
@@ -824,6 +832,7 @@ def _route(params: dict) -> dict:
     faults are returned as structured errors (never crash the loop).
     """
     bridge_warnings: list = []
+    compile_warnings: list = []  # non-fatal compile diagnostics (canonical path)
     drawn_routes: list = []
     selected_hint_ids: list = []
     drc_board: dict | None = None  # set only on the CANONICAL path (see below)
@@ -846,11 +855,36 @@ def _route(params: dict) -> dict:
         except board_model.BoardParseError as exc:
             return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
         drc_board = board_dict  # DRC-at-propose runs against this canonical board
+        # ROUND E CUTOVER (019f783860c8): canonical routing consumes the compiled
+        # ResolvedBoard IR or it does not route. Before this, the router was handed
+        # the RAW board and invented a nominal 1.0x1.0 land for any pad without
+        # authored geometry — keepouts around fictional copper, so an accepted
+        # proposal could cross the real package land. The owner-ratified Step-4
+        # ruling puts ROUTING in the fail-closed bucket ("No approximated copper"),
+        # so an uncompilable board now returns its compile diagnostics and ZERO
+        # routes. Compiled against the narrower ROUTING capability profile: a
+        # mask-only limitation must not disable routing, but any dropped
+        # copper/drill/rule is still fatal.
+        compiled = _compile_or_fail(
+            board_dict, requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
+        if _is_error_reply(compiled):
+            return compiled
+        compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
         try:
-            board = route_bridge.board_to_router(board_dict)
+            board = route_bridge.resolved_board_to_router(compiled.board)
+        except route_bridge.UnsupportedGeometry as exc:
+            # Compiled fine, but carries geometry the routing grid cannot model
+            # faithfully (inner copper, accepted traces/vias, zones, a copper
+            # graphic, a non-rectangular outline). Fail closed with its own kind so
+            # a consumer can tell "this board will not compile" from "this board
+            # compiles but is not routable yet".
+            return {"ok": False, "error": {
+                "kind": "unsupported_geometry", "message": str(exc),
+                "diagnostics": compile_warnings}}
         except Exception as exc:
-            return {"ok": False, "error": {"kind": "parse",
-                    "message": f"invalid board: {exc}"}}
+            return {"ok": False, "error": {"kind": "route",
+                    "message": f"invalid board: {exc}",
+                    "traceback": traceback.format_exc()}}
 
         envelopes = params.get("route_hints") or []
         if not isinstance(envelopes, list):
@@ -911,8 +945,11 @@ def _route(params: dict) -> dict:
     if drawn_routes:
         payload["routes"] = drawn_routes + payload["routes"]
         payload["success"] = bool(payload.get("success", False)) or not payload.get("unrouted")
-    if bridge_warnings:
-        payload["warnings"] = bridge_warnings
+    # Non-fatal COMPILE diagnostics travel with the proposal too (Codex ruling 2):
+    # a route computed over a board that compiled with warnings must not look
+    # indistinguishable from one that compiled clean.
+    if bridge_warnings or compile_warnings:
+        payload["warnings"] = bridge_warnings + compile_warnings
     if selected_hint_ids:
         payload["selected_hint_ids"] = selected_hint_ids
 

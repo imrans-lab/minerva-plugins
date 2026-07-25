@@ -54,6 +54,7 @@ from .canonical_id import CanonicalizationError, content_id, derive_id
 from .fab_capability import (
     EMITTED_LAYERS,
     FABRICATION_CRITICAL_OUTPUTS,
+    ROUTING_CRITICAL_OUTPUTS,
     SUPPORTED_HOLE_SHAPES,
     SUPPORTED_PAD_SHAPES,
 )
@@ -137,6 +138,8 @@ K3_EMITTED_LAYERS = EMITTED_LAYERS
 # Fabrication-critical outputs a captured-feature loss may corrupt.  Cosmetic
 # (silk/fab) and unemitted (paste) losses are warned, never fatal.
 V1_FAB_OUTPUTS: tuple[str, ...] = FABRICATION_CRITICAL_OUTPUTS
+# The requested-output profile canonical ROUTING compiles against (Round E).
+V1_ROUTING_OUTPUTS: tuple[str, ...] = ROUTING_CRITICAL_OUTPUTS
 
 # Domains eligible to be FATAL when their output is requested (review 623 R5:
 # RULES included so a dropped design-rule marker can block, since the IR feeds

@@ -1,0 +1,336 @@
+"""Round E1 — the STRICT IR router projection (docket 019f783860c8).
+
+Canonical routing consumes real compiled copper or it does not route. These tests
+pin the two halves of that contract:
+
+  1. TRUTH — every pad the engine sees comes from the ResolvedBoard IR: position,
+     side/mirror, layer participation, net ownership, and an extent that CONTAINS
+     the fabricated land. The cross-check against ``drc_geometric.project_board``
+     is the important one: the router's keepout is compared against the copper the
+     geometric DRC checks and the CAM emitters fabricate, so all three can be
+     shown to agree by construction rather than by assertion-matching constants.
+
+  2. FAIL-CLOSED — anything the routing grid cannot model faithfully yields ZERO
+     routes plus a reason, never a proposal over guessed copper. The headline
+     regression is the one that named this round: a pad with no authored geometry
+     used to get a nominal 1.0x1.0 land, so the router computed keepouts around
+     copper the board does not have and could route a trace straight through the
+     real package land.
+
+The safety direction is the same one the geometric DRC kernel documents, restated
+for keepouts: the modeled keepout must be a SUPERSET of the fabricated copper.
+Over-blocking is legal; under-blocking never is.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from pcb_worker import compile_board as cb
+from pcb_worker import drc_geometric, ir_pads, route_bridge
+from pcb_worker.methods import handle_request
+
+
+# ---------------------------------------------------------------------------
+# Fixtures — boards that really compile against the seed library.
+# ---------------------------------------------------------------------------
+
+
+def _board(components: list, **extra) -> dict:
+    board = {
+        "version": 1, "name": "route-ir", "width_mm": 40, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": components,
+    }
+    board.update(extra)
+    return board
+
+
+def _comp(ref: str, fp: str, x: float, y: float, *, rot: float = 0.0,
+          layer: str = "top") -> dict:
+    return {"ref": ref, "footprint": fp, "x_mm": x, "y_mm": y,
+            "rotation_deg": rot, "layer": layer}
+
+
+def _compile(board: dict):
+    """Compile with the ROUTING capability profile, as route() does."""
+    result = cb.compile_board(board, requested_outputs=cb.V1_ROUTING_OUTPUTS)
+    assert isinstance(result, cb.ResolutionSuccess), getattr(result, "diagnostics", None)
+    return result.board
+
+
+def _project(board: dict):
+    return route_bridge.resolved_board_to_router(_compile(board))
+
+
+def _call_route(params: dict) -> dict:
+    resp = handle_request({"id": "e1", "method": "route", "params": params})
+    assert resp is not None and resp["id"] == "e1"
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# 1. TRUTH — the projection matches the IR, pad for pad.
+# ---------------------------------------------------------------------------
+
+
+def test_pad_census_matches_the_ir_exactly():
+    """Every IR pad appears once, with the IR's own identity and net."""
+    board = _board([_comp("R1", "R_0805", 10, 10), _comp("R2", "R_0805", 20, 10)],
+                   nets=[{"name": "N1", "pins": ["R1.2", "R2.1"]}])
+    rb = _compile(board)
+    rendered = route_bridge.resolved_board_to_router(rb)
+
+    ir = {(p.ref, p.number): p for p in ir_pads.iter_ir_pads(rb)}
+    assert len(rendered.pads) == len(ir), "pad count must match the IR census"
+    for pad in rendered.pads:
+        source = ir[(pad.component, pad.number)]
+        # Position is the IR's placed position (top-side: no mirroring involved).
+        assert pad.position == pytest.approx(source.pad.position)
+        # Net ownership comes from the IR net, not from a re-parsed "Ref.Pad".
+        assert pad.net == source.net_name
+    assert rendered.nets["N1"].pads and all(
+        p.net == "N1" for p in rendered.nets["N1"].pads)
+    assert {(p.component, p.number) for p in rendered.nets["N1"].pads} == {
+        ("R1", "2"), ("R2", "1")}
+
+
+def test_pad_extent_contains_the_copper_geometric_drc_checks():
+    """THE safety property, cross-checked against the DRC/CAM copper owner.
+
+    A rotated elongated land is the case that breaks naive sizing: the engine's
+    ``mark_pad`` discards the rotation it is handed (grid.py:133), so handing it
+    the raw 1.0 x 1.45 land of a 45-degree 0805 pad would leave real copper
+    outside the keepout. The projection hands it the land's axis-aligned bounding
+    box instead — proved here to CONTAIN every copper primitive the geometric DRC
+    projects for the same board."""
+    board = _board([_comp("R1", "R_0805", 20, 20, rot=45)])
+    rb = _compile(board)
+    rendered = route_bridge.resolved_board_to_router(rb)
+    copper = {c.entity_id: c for c in drc_geometric.project_board(rb).copper}
+
+    by_number = {(p.component, p.number): p for p in rendered.pads}
+    for ir_pad in ir_pads.iter_ir_pads(rb):
+        pad = by_number[(ir_pad.ref, ir_pad.number)]
+        box = copper[ir_pad.pad.id].aabb          # what DRC/CAM call this copper
+        half_w, half_h = pad.size[0] / 2.0, pad.size[1] / 2.0
+        lo_x, hi_x = pad.position[0] - half_w, pad.position[0] + half_w
+        lo_y, hi_y = pad.position[1] - half_h, pad.position[1] + half_h
+        assert lo_x <= box.min_x + 1e-9 and hi_x >= box.max_x - 1e-9
+        assert lo_y <= box.min_y + 1e-9 and hi_y >= box.max_y - 1e-9
+
+    # And it is a REAL rotation, not a no-op fixture: a 45-degree 1.0 x 1.45 land
+    # has a strictly wider envelope than the unrotated land.
+    pad = by_number[("R1", "1")]
+    assert pad.size[0] > 1.0 and pad.size[1] > 1.0
+    assert pad.rotation == 0.0, "size is the axis-aligned envelope; rotation must not double-count"
+
+
+def test_bottom_side_component_is_mirrored_and_lands_on_b_cu():
+    """IR-authoritative side handling (Codex ruling 1). The raw path never
+    mirrored a bottom-side footprint; the IR does, pinned to pcbnew's own Flip."""
+    # A footprint whose pads are OFF the local X axis — an 0805's two pads both
+    # sit at local y=0, where a Y mirror is invisible.
+    fp = "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical"
+    top = _project(_board([_comp("J1", fp, 10, 10)]))
+    bottom = _project(_board([_comp("J1", fp, 10, 10, layer="bottom")]))
+
+    # A through-hole pad spans both sides, so side shows up in the GEOMETRY here.
+    t2 = next(p for p in top.pads if p.number == "2")
+    b2 = next(p for p in bottom.pads if p.number == "2")
+    assert t2.position == pytest.approx((10.0, 12.54))    # local (0, +2.54)
+    assert b2.position == pytest.approx((10.0, 7.46))     # mirrored to (0, -2.54)
+
+    # And a SURFACE pad follows its side onto B.Cu.
+    smd_top = _project(_board([_comp("R1", "R_0805", 10, 10)]))
+    smd_bottom = _project(_board([_comp("R1", "R_0805", 10, 10, layer="bottom")]))
+    assert {p.layer for p in smd_top.pads} == {"F.Cu"}
+    assert {p.layer for p in smd_bottom.pads} == {"B.Cu"}
+
+
+def test_through_hole_pad_spans_layers_and_carries_its_drill():
+    board = _board([_comp("J1", "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical",
+                          10, 10)])
+    rendered = _project(board)
+    pad = next(p for p in rendered.pads if p.number == "1")
+    assert pad.pad_type == "thru_hole"
+    assert pad.layer == "*.Cu"                     # engine marks every copper layer
+    assert pad.drill == pytest.approx(1.0)
+    # The land (1.7 square) is what keeps other nets out, not the 1.0 drill.
+    assert pad.size == pytest.approx((1.7, 1.7))
+
+
+def test_outline_extent_and_origin_come_from_the_ir():
+    rendered = _project(_board([_comp("R1", "R_0805", 10, 10)]))
+    assert rendered.width == pytest.approx(40.0)
+    assert rendered.height == pytest.approx(40.0)
+    assert rendered.origin == pytest.approx((0.0, 0.0))
+
+
+# ---------------------------------------------------------------------------
+# 2. HOLE SEMANTICS (Codex gap D)
+# ---------------------------------------------------------------------------
+
+
+def test_npth_pad_is_an_obstacle_not_a_routable_pad():
+    """A bare mechanical hole has no land: it must block, and must NOT become a
+    pad the router can terminate a net on."""
+    board = _board([_comp("H1", "MountingHole:MountingHole_3.2mm_M3", 20, 20)])
+    rendered = route_bridge.resolved_board_to_router(_compile(board))
+
+    assert rendered.pads == [], "an NPTH pad is not routable copper"
+    assert len(rendered.obstacles) == 1
+    obs = rendered.obstacles[0]
+    assert obs.type == "npth_pad"
+    assert obs.position == pytest.approx((20.0, 20.0))
+    assert obs.radius == pytest.approx(1.6)        # 3.2mm drill
+
+
+def test_plated_board_hole_blocks_its_copper_annulus_not_just_its_drill():
+    board = _board([_comp("R1", "R_0805", 10, 10)],
+                   pth_holes=[{"x_mm": 30, "y_mm": 30, "drill_mm": 1.0,
+                               "annulus_mm": 2.4}])
+    rendered = route_bridge.resolved_board_to_router(_compile(board))
+    holes = [o for o in rendered.obstacles if o.type == "mounting_hole"]
+    assert len(holes) == 1
+    # 1.2 (annulus radius), NOT 0.5 (drill radius): copper is what a trace must
+    # not cross.
+    assert holes[0].radius == pytest.approx(1.2)
+
+
+def test_unplated_board_hole_blocks_its_drill():
+    board = _board([_comp("R1", "R_0805", 10, 10)],
+                   mounting_holes=[{"x_mm": 30, "y_mm": 30, "diameter_mm": 3.2}])
+    rendered = route_bridge.resolved_board_to_router(_compile(board))
+    holes = [o for o in rendered.obstacles if o.type == "mounting_hole"]
+    assert holes[0].radius == pytest.approx(1.6)
+
+
+# ---------------------------------------------------------------------------
+# 3. FAIL-CLOSED — zero routes, with a reason.
+# ---------------------------------------------------------------------------
+
+
+def test_unresolvable_footprint_returns_diagnostics_and_no_routes():
+    resp = _call_route({"board": _board([_comp("U1", "NOPE_NOT_REAL", 10, 10)])})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "compile"
+    assert resp["error"]["diagnostics"]           # attributed, not a bare message
+    assert "result" not in resp                   # and NOTHING is proposed
+
+
+def test_inner_copper_layers_fail_closed():
+    """The vendored engine is 2-layer. Inner copper it never models must not be
+    silently absent from the grid."""
+    board = _board([_comp("R1", "R_0805", 10, 10)],
+                   layers=["top", "inner1", "inner2", "bottom"])
+    result = cb.compile_board(board, requested_outputs=cb.V1_ROUTING_OUTPUTS)
+    if isinstance(result, cb.ResolutionSuccess):
+        with pytest.raises(ir_pads.UnsupportedGeometry, match="2-layer"):
+            route_bridge.resolved_board_to_router(result.board)
+
+
+def test_sizeless_smd_pad_can_never_be_given_a_nominal_land():
+    """THE round-E regression, at the seam that used to invent copper.
+
+    ``_pad_size_for`` returned (1.0, 1.0) for a pad with no authored geometry.
+    That nominal land is smaller than most real packages, so a router that
+    believed it would happily lay a trace through the actual copper. There is no
+    honest size to invent: the call now fails closed."""
+    with pytest.raises(ir_pads.UnsupportedGeometry, match="fails closed"):
+        route_bridge._pad_size_for({"number": "1"}, {})
+
+    # And the nominal constant is gone entirely — not merely unreferenced.
+    assert not hasattr(route_bridge, "_DEFAULT_PAD_SIZE")
+
+
+def test_authored_pin_size_is_used_rather_than_invented():
+    """The honest half of the same seam: an AUTHORED size is real data and is
+    used. (pad_source._from_pin always read these keys; this builder did not, so
+    a pin that authored its own copper still got the nominal land.)"""
+    assert route_bridge._pad_size_for(
+        {"number": "1", "pad_width_mm": 2.0, "pad_height_mm": 0.6}, {}
+    ) == pytest.approx((2.0, 0.6))
+
+
+def test_routed_keepout_covers_the_real_land_that_a_nominal_land_would_miss():
+    """End-to-end statement of the bug this round closes.
+
+    A DIP-6 land is 1.6mm square. The old nominal land was 1.0mm square, so a
+    keepout built from it left a 0.3mm ring of REAL copper unprotected on every
+    side. The IR projection's extent covers the whole land."""
+    board = _board([_comp("U1", "Package_DIP:DIP-6_W7.62mm_Socket", 15, 15)])
+    rendered = _project(board)
+    pad = next(p for p in rendered.pads if p.number == "1")
+    assert pad.size[0] >= 1.6 - 1e-9 and pad.size[1] >= 1.6 - 1e-9
+    assert pad.size[0] > 1.0 and pad.size[1] > 1.0   # strictly bigger than nominal
+
+
+def test_route_method_routes_a_compiling_board_end_to_end():
+    """The happy path still works through the real method: compile -> IR -> engine."""
+    board = _board([_comp("R1", "R_0805", 10, 20), _comp("R2", "R_0805", 25, 20)],
+                   nets=[{"name": "N1", "pins": ["R1.2", "R2.1"]}])
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+    assert resp["result"]["success"] is True
+    assert any(rt["net"] == "N1" for rt in resp["result"]["routes"])
+
+
+# ---------------------------------------------------------------------------
+# 4. The neutral owner itself (ir_pads) — one correlation, two consumers.
+# ---------------------------------------------------------------------------
+
+
+def test_ir_pads_correlates_human_numbers_and_classifies_npth():
+    board = _board([_comp("R1", "R_0805", 10, 10),
+                    _comp("H1", "MountingHole:MountingHole_3.2mm_M3", 30, 30)])
+    rb = _compile(board)
+    by_ref = {(p.ref, p.number): p for p in ir_pads.iter_ir_pads(rb)}
+
+    # Human numbers, not the "pad:1:0" source ids a PlacedPad carries.
+    assert ("R1", "1") in by_ref and ("R1", "2") in by_ref
+    assert by_ref[("R1", "1")].source_number != "1"
+
+    smd, npth = by_ref[("R1", "1")], by_ref[("H1", "1")]
+    assert smd.carries_copper and not smd.is_drilled
+    assert npth.is_npth and not npth.carries_copper
+    with pytest.raises(ir_pads.UnsupportedGeometry, match="no copper land"):
+        ir_pads.pad_copper_shape(npth)
+
+
+def test_drc_and_routing_shape_the_same_land():
+    """DRY proof: the two consumers do not merely agree numerically — they call
+    the same builder, so a change to one is a change to both."""
+    board = _board([_comp("J1", "Package_DIP:DIP-6_W7.62mm_Socket", 12, 12, rot=17)])
+    rb = _compile(board)
+    drc_copper = {c.entity_id: c.shape for c in drc_geometric.project_board(rb).copper}
+    for ir_pad in ir_pads.iter_ir_pads(rb):
+        assert ir_pads.pad_copper_shape(ir_pad) == drc_copper[ir_pad.pad.id]
+
+
+def test_slot_and_oval_holes_get_a_containing_disc():
+    """The grid consumes discs only (Obstacle.polygon is declared but read
+    nowhere), so a non-round hole is blocked by a disc that CONTAINS it."""
+    from pcb_worker.resolved_board import OvalHole, ResolvedHole, SlotHole
+
+    oval = route_bridge._hole_obstacle(ResolvedHole(
+        id="h1", feature=OvalHole(position=(5.0, 5.0), width_mm=4.0,
+                                  height_mm=2.0, rotation_deg=30.0),
+        plated=False, kind=_hole_kind_npth()))
+    # Half-diagonal contains the oval at ANY rotation.
+    assert oval.radius == pytest.approx(math.hypot(4.0, 2.0) / 2.0)
+
+    slot = route_bridge._hole_obstacle(ResolvedHole(
+        id="h2", feature=SlotHole(path=((0.0, 0.0), (6.0, 0.0)), width_mm=2.0),
+        plated=False, kind=_hole_kind_npth()))
+    assert slot.position == pytest.approx((3.0, 0.0))
+    assert slot.radius == pytest.approx(3.0 + 1.0)
+
+
+def _hole_kind_npth():
+    from pcb_worker.resolved_board import HoleKind
+    return HoleKind.NPTH

@@ -43,16 +43,20 @@ def _rotated_board() -> dict:
                 "ref": "U1", "footprint": "IC", "x_mm": 10, "y_mm": 20,
                 "rotation_deg": 90, "layer": "top",
                 "pins": [
-                    {"number": "1", "x_mm": 0.0, "y_mm": 0.0},
-                    {"number": "2", "x_mm": 2.54, "y_mm": 0.0},
+                    {"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                     "pad_width_mm": 1.0, "pad_height_mm": 1.0},
+                    {"number": "2", "x_mm": 2.54, "y_mm": 0.0,
+                     "pad_width_mm": 1.0, "pad_height_mm": 1.0},
                 ],
             },
             {
                 "ref": "R1", "footprint": "R", "x_mm": 10, "y_mm": 5,
                 "rotation_deg": 0, "layer": "top",
                 "pins": [
-                    {"number": "1", "x_mm": 0.0, "y_mm": 0.0},
-                    {"number": "2", "x_mm": 1.0, "y_mm": 0.0},
+                    {"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                     "pad_width_mm": 1.0, "pad_height_mm": 1.0},
+                    {"number": "2", "x_mm": 1.0, "y_mm": 0.0,
+                     "pad_width_mm": 1.0, "pad_height_mm": 1.0},
                 ],
             },
         ],
@@ -98,7 +102,8 @@ def test_board_to_router_matches_godot_transform_simulation():
         b = route_bridge.board_to_router({
             "components": [{
                 "ref": "X", "x_mm": 3.0, "y_mm": 7.0, "rotation_deg": rot,
-                "pins": [{"number": "p", "x_mm": 1.5, "y_mm": -0.95}],
+                "pins": [{"number": "p", "x_mm": 1.5, "y_mm": -0.95,
+                          "pad_width_mm": 1.0, "pad_height_mm": 1.0}],
             }],
             "nets": [],
         })
@@ -161,7 +166,8 @@ def test_board_to_router_non_positive_or_nonfinite_drill_is_smd(bad_drill):
 def test_board_to_router_mounting_hole_obstacle():
     board = route_bridge.board_to_router({
         "components": [{"ref": "R1", "x_mm": 1, "y_mm": 1, "rotation_deg": 0,
-                        "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]}],
+                        "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                                  "pad_width_mm": 1.0, "pad_height_mm": 1.0}]}],
         "nets": [],
         "mounting_holes": [{"x_mm": 5, "y_mm": 6, "diameter_mm": 3.2}],
     })
@@ -307,18 +313,25 @@ def _call(method: str, params: dict) -> dict:
 
 
 def _routable_board() -> dict:
-    """Two 2-pad parts on net N1, close together — trivially routable."""
+    """Two REAL 0805 resistors on net N1, close together — trivially routable.
+
+    ROUND E (019f783860c8): canonical route() now COMPILES the board and routes
+    the ResolvedBoard IR, so a method-level fixture must name footprints the seed
+    library actually resolves. Pads come from the footprint (R_0805: "1" at
+    -0.95mm, "2" at +0.95mm local), not from invented inline pins — which is the
+    whole point of the round: the router keeps out of real copper or it does not
+    route. R1.2 lands at (5.95, 10), R2.1 at (11.05, 10).
+    """
     return {
         "version": 1, "name": "Mini", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
         "components": [
-            {"ref": "R1", "footprint": "R", "x_mm": 5, "y_mm": 10,
-             "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0},
-                      {"number": "2", "x_mm": 1.0, "y_mm": 0}]},
-            {"ref": "R2", "footprint": "R", "x_mm": 12, "y_mm": 10,
-             "rotation_deg": 0, "layer": "top",
-             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0},
-                      {"number": "2", "x_mm": 1.0, "y_mm": 0}]},
+            {"ref": "R1", "footprint": "R_0805", "x_mm": 5, "y_mm": 10,
+             "rotation_deg": 0, "layer": "top"},
+            {"ref": "R2", "footprint": "R_0805", "x_mm": 12, "y_mm": 10,
+             "rotation_deg": 0, "layer": "top"},
         ],
         "nets": [{"name": "N1", "pins": ["R1.2", "R2.1"]}],
     }
@@ -374,6 +387,12 @@ def test_route_method_native_path_still_works():
 
 
 def test_route_method_bad_canonical_board_structured_error():
+    # ROUND E: a structurally unusable canonical board is rejected by the STRICT
+    # routing compile (kind "compile", carrying the blocking diagnostics) rather
+    # than by the old raw bridge's ValueError. Either way it is data, not a crash
+    # — and no routes come back.
     resp = _call("route", {"board": {"components": []}})
     assert resp["ok"] is False
-    assert resp["error"]["kind"] == "parse"
+    assert resp["error"]["kind"] == "compile"
+    assert resp["error"]["diagnostics"]
+    assert "result" not in resp
