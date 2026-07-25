@@ -35,6 +35,7 @@ behind 2-pin single-path fixtures):
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -45,6 +46,7 @@ from agent_router import router as engine_router
 from pcb_worker import compile_board as cb
 from pcb_worker import drc_geometric, ir_candidates, ir_pads, methods, route_bridge
 from pcb_worker.methods import handle_request
+from pcb_worker.resolved_board import NetClass
 
 
 # ---------------------------------------------------------------------------
@@ -551,7 +553,11 @@ def test_every_keepout_marker_goes_through_the_one_margin(monkeypatch):
     grid.mark_trace(start=(11.0, 5.0), end=(13.0, 5.0), width=0.5, net="A")
     assert len(seen) >= 3, "pad, obstacle and trace must each consult the owner"
 
-    # Every mark_trace call site must hand over the BARE trace width. Parsed, so
+    # Every mark_trace call site must hand over the BARE trace width — either
+    # the run's baseline ("trace_width") or, in the two per-net loops, THIS
+    # net's own class-or-baseline width ("net_width" — the net-class round's
+    # only change to these call sites; the grid still owns ONE, board-wide,
+    # margin — see docs/routing.md, "Per-net-class minima"). Parsed, so
     # `trace_width + 2 * clearance`, `trace_width + 2 * _c` and any other
     # re-inflation are all rejected as the non-Name nodes they are.
     import ast
@@ -564,9 +570,10 @@ def test_every_keepout_marker_goes_through_the_one_margin(monkeypatch):
     assert len(calls) == 3, f"expected 3 mark_trace call sites, found {len(calls)}"
     for call in calls:
         supplied = {k.arg: k.value for k in call.keywords}.get("width")
-        assert isinstance(supplied, ast.Name) and supplied.id == "trace_width", \
-            f"mark_trace width must be the bare trace width, got " \
-            f"{ast.dump(supplied) if supplied else None}"
+        assert isinstance(supplied, ast.Name) and supplied.id in (
+            "trace_width", "net_width"), \
+            f"mark_trace width must be a bare (never re-inflated) width " \
+            f"variable, got {ast.dump(supplied) if supplied else None}"
 
 
 def test_the_engine_hands_the_grid_the_runs_own_width(recorded_grids):
@@ -823,3 +830,592 @@ def test_the_via_the_commit_wrote_comes_from_the_boards_own_routing_defaults():
     assert rb.design_rules.defaults.via_diameter_mm == pytest.approx(0.8)
     assert rb.design_rules.defaults.via_drill_mm == pytest.approx(0.4)
     assert math.isclose(rb.design_rules.defaults.via_drill_mm, 0.4)
+
+
+
+# ---------------------------------------------------------------------------
+# 5. Per-net-class minima — the NEW precedence step this round adds.
+#
+# The v1 compiler emits NO net classes at all (compile_board.py hardcodes
+# `net_classes=()`; verified below) and sets no net's `net_class_id` — so the
+# only way to drive this feature through the REAL `route()` entry point is to
+# monkeypatch the compile step itself, exactly the way the existing
+# drc_geometric fail-closed guard (docket 019f958b45b9) is only reachable via
+# `dataclasses.replace` in a test. `net_classed_compile` below does that for
+# the FULL `_call_route` path rather than for an internal helper, so a
+# reverted call site (not just a reverted resolver function) is what these
+# tests actually exercise.
+#
+# TWO DIFFERENT SHAPES, on purpose (Codex must-fix on this round's first cut):
+#   * COPPER WIDTH is genuinely per-net — `net_widths` in router.py, sourced
+#     from `_net_class_overrides` below. A net's own class draws ITS OWN
+#     copper wider or narrower; nobody else is affected.
+#   * The KEEPOUT MARGIN is NOT per-net — a ring sized to one net's own
+#     requirement cannot also satisfy a STRICTER class net that approaches
+#     that copper later (an under-block; routing.md's superset invariant has
+#     no net-class exception). So the grid's own clearance/trace_width are
+#     the board-wide WORST CASE any present class demands, applied to EVERY
+#     marking uniformly — see `_widen_for_net_classes` in methods.py.
+# ---------------------------------------------------------------------------
+
+CLASS_WIDTH_MM = 0.6       # wider than BOARD_WIDTH_MM (0.35)
+CLASS_CLEARANCE_MM = 0.5   # wider than BOARD_CLEARANCE_MM (0.3)
+
+
+def _apply_net_class_to(rb, net_name: str, nc: NetClass):
+    """Same `dataclasses.replace` shape test_drc_geometric.py's
+    `_apply_net_class` uses, narrowed to ONE net rather than every net on the
+    board — so a fixture with two nets can pin that the class WIDTH affects
+    ONLY the net it is assigned to (even though the keepout margin, being
+    board-wide, ends up affecting both — see below)."""
+    dr = dataclasses.replace(rb.design_rules, net_classes=(nc,))
+    nets = tuple(
+        dataclasses.replace(n, net_class_id=nc.id) if n.name == net_name else n
+        for n in rb.nets)
+    return dataclasses.replace(rb, design_rules=dr, nets=nets)
+
+
+@pytest.fixture
+def net_classed_compile(monkeypatch):
+    """Patch the compiler `_route` actually calls so its ResolvedBoard carries
+    ONE net class, assigned to ONE net — set ``state["nc"]``/``state["net"]``
+    before calling `_call_route`/`handle_request`, and every compile for the
+    rest of the test sees it. Returns the mutable state dict.
+    """
+    real_compile = cb.compile_board
+    state: dict = {"nc": None, "net": None}
+
+    def spy(board, **kw):
+        result = real_compile(board, **kw)
+        if state["nc"] is not None and isinstance(result, cb.ResolutionSuccess):
+            rb2 = _apply_net_class_to(result.board, state["net"], state["nc"])
+            result = dataclasses.replace(result, board=rb2)
+        return result
+
+    monkeypatch.setattr(cb, "compile_board", spy)
+    return state
+
+
+# ---------------------------------------------------------------------------
+# 5a. Provenance source coverage (note from Codex review: `hint` and
+# `engine_default` were the two of the five source labels no test named).
+# ---------------------------------------------------------------------------
+
+
+def test_the_reply_names_a_hint_authored_width_as_its_own_source():
+    """`source: "hint"` is the ONE non-trivial refinement in `_route` (it is
+    the only label `_effective_routing_rules_detailed` cannot itself produce
+    — see its docstring — because by the time it runs, an explicit caller
+    option and a merged hint width are indistinguishable; only `_route`,
+    which still has both pieces of information, can tell them apart). No
+    prior test named it."""
+    board = _three_pin_board()
+    hint = {"id": "h1", "kind": "pcb_route_hint", "lifecycle": "open",
+            "author": {"kind": "human"},
+            "kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+                             "net_names": ["SIG"], "waypoints": [],
+                             "width_mm": 0.5}}
+    resp = _call_route({"board": board, "route_hints": [hint]})
+    assert resp["ok"] is True, resp
+    assert resp["result"]["effective_routing_rules"]["trace_width_mm"] == \
+        {"value": pytest.approx(0.5), "source": "hint"}
+
+
+def test_the_reply_names_the_engines_own_default_as_its_source(monkeypatch):
+    """`source: "engine_default"` — the last-resort step, unreachable on any
+    board this fixture set can author (the board always carries
+    `design_rules.defaults.trace_width_mm`/`minimums.min_clearance_mm`), so
+    pinned the same way `test_a_zero_engine_default_would_still_be_sourced_
+    not_skipped` already forces that step: neutralise the board-rules reader
+    so only the engine's signature default is left."""
+    monkeypatch.setattr(methods, "_ir_rule_mm", lambda *a, **k: None)
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is True, resp
+    rules = resp["result"]["effective_routing_rules"]
+    assert rules["trace_width_mm"]["source"] == "engine_default"
+    assert rules["clearance_mm"]["source"] == "engine_default"
+    assert rules["trace_width_mm"]["value"] == \
+        pytest.approx(methods._engine_default_mm("trace_width"))
+    assert rules["clearance_mm"]["value"] == \
+        pytest.approx(methods._engine_default_mm("clearance"))
+
+
+def test_the_v1_compiler_emits_no_net_classes_and_no_net_class_id():
+    """Verifies the finding this round's report leads with: the IR carries the
+    slot (design_rules.net_classes, ResolvedNet.net_class_id) but nothing in
+    the v1 compiler ever populates either one from board input — a real
+    compile always has an empty tuple and every net's id is None, regardless
+    of what a caller puts in the board dict. Everything below this point is
+    therefore DORMANT on any board the compiler can actually produce today;
+    it is exercised only via `_apply_net_class_to` / `net_classed_compile`.
+    """
+    board = _three_pin_board()
+    board["design_rules"] = dict(
+        board["design_rules"],
+        net_classes=[{"id": "nc:power", "name": "Power", "min_trace_width_mm": 0.6}])
+    for net in board["nets"]:
+        net["net_class"] = "nc:power"  # not a field the compiler reads either
+    rb = _compile(board)
+    assert rb.design_rules.net_classes == ()
+    assert all(net.net_class_id is None for net in rb.nets)
+
+
+def test_net_class_overrides_reads_only_the_min_prefixed_fields():
+    """Routing sources the class's MINIMA (min_trace_width_mm/min_clearance_mm)
+    — the same two fields drc_geometric's existing guard watches — never the
+    plain `trace_width_mm` (that mirrors RoutingDefaults' nominal default, a
+    different concept). A class carrying only the nominal field contributes
+    NOTHING to either dimension."""
+    rb = _compile(_three_pin_board())
+
+    rb_min = _apply_net_class_to(rb, "SIG", NetClass(
+        id="nc:power", name="Power",
+        min_trace_width_mm=CLASS_WIDTH_MM, min_clearance_mm=CLASS_CLEARANCE_MM))
+    overrides = methods._net_class_overrides(rb_min)
+    assert overrides == {"SIG": (pytest.approx(CLASS_WIDTH_MM),
+                                 pytest.approx(CLASS_CLEARANCE_MM))}
+    assert "OTHER" not in overrides   # unassigned net: untouched
+
+    rb_nominal = _apply_net_class_to(rb, "SIG", NetClass(
+        id="nc:nominal", name="Nominal", trace_width_mm=0.9))
+    assert methods._net_class_overrides(rb_nominal) == {}
+
+
+def test_net_class_with_no_relevant_minima_does_not_override():
+    """A class naming only an UNRELATED field (via sizing) must not trip an
+    override for either dimension — mirrors drc_geometric's own
+    `test_net_class_without_relevant_minima_does_not_trip`."""
+    rb = _compile(_three_pin_board())
+    rb2 = _apply_net_class_to(rb, "SIG", NetClass(
+        id="nc:route", name="Route", via_diameter_mm=0.9))
+    assert methods._net_class_overrides(rb2) == {}
+
+
+def test_a_net_classes_inadmissible_minimum_fails_closed_not_reinterpreted():
+    """Same posture as an inadmissible explicit caller option (E1's nominal
+    land, A5's 0x0 pad, this chain's non-positive explicit width): a class
+    that NAMES a rule it cannot source fails the whole run rather than being
+    quietly treated as if the class had said nothing.
+
+    ``NetClass.__post_init__`` (resolved_board.py) already rejects a negative/
+    NaN/inf value for either field at CONSTRUCTION time (``_nonnegative`` /
+    ``_finite``), so ``0`` is the ONLY inadmissible-but-constructible width —
+    zero is a legal ``NetClass.min_trace_width_mm`` (non-negative) but not a
+    legal routing width (zero-width copper is not copper), exactly the gap
+    ``_explicit_mm`` already closes for an explicit caller option. There is no
+    equivalent reachable case for clearance: zero IS a legal clearance both at
+    the IR level and for routing, and anything else is unconstructable — the
+    second assertion below pins that this class of bug (an inadmissible float
+    reaching the resolver at all) is closed one layer up, at the dataclass.
+    """
+    rb = _compile(_three_pin_board())
+    rb2 = _apply_net_class_to(rb, "SIG", NetClass(
+        id="nc:bad", name="Bad", min_trace_width_mm=0))
+    with pytest.raises(route_bridge.UnsupportedGeometry, match="min_trace_width_mm"):
+        methods._net_class_overrides(rb2)
+
+    for bad in (-1.0, float("nan"), float("inf"), True):
+        with pytest.raises(ValueError):
+            NetClass(id="nc:bad", name="Bad", min_clearance_mm=bad)
+        with pytest.raises(ValueError):
+            NetClass(id="nc:bad", name="Bad", min_trace_width_mm=bad)
+
+
+def test_a_net_classes_inadmissible_minimum_fails_the_real_route_call(net_classed_compile):
+    """The SAME rule, reached through the REAL entry point rather than by
+    calling the resolver directly — zero routes, structured error, same
+    vocabulary as every other unsourceable rule in the chain."""
+    net_classed_compile["nc"] = NetClass(id="nc:bad", name="Bad", min_trace_width_mm=0)
+    net_classed_compile["net"] = "SIG"
+
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is False, resp
+    assert resp["error"]["kind"] == "unsupported_geometry"
+    assert "min_trace_width_mm" in resp["error"]["message"]
+    assert "routes" not in resp.get("result", {})
+
+
+def test_net_class_width_widens_only_that_nets_own_copper(recorded_grids):
+    """COPPER WIDTH is per-net: SIG (net-classed) draws at CLASS_WIDTH_MM,
+    OTHER (no class) still draws at the board's own baseline. Driven through
+    `route_board` itself (not `_net_class_overrides`), which is the real call
+    site that decides what width a segment is marked at.
+
+    Probes a band strictly between the baseline's half-width and the class's:
+    a point there is COPPER only if the net's ACTUAL drawn width is the wider
+    class one — reverting `net_widths` back to a no-op would leave that point
+    as a bare clearance ring (or free space) instead.
+    """
+    rb = _compile(_three_pin_board())
+    rb2 = _apply_net_class_to(rb, "SIG", NetClass(
+        id="nc:power", name="Power", min_trace_width_mm=CLASS_WIDTH_MM))
+    board = route_bridge.resolved_board_to_router(rb2)
+    net_widths = {"SIG": CLASS_WIDTH_MM}
+
+    result = engine_router.route_board(
+        board, trace_width=BOARD_WIDTH_MM, clearance=BOARD_CLEARANCE_MM,
+        grid_resolution=0.02, net_widths=net_widths)
+    grid = recorded_grids[0]
+    sig = next(r for r in result.routes if r.net == "SIG")
+
+    probed = 0
+    probe = (BOARD_WIDTH_MM / 2.0 + CLASS_WIDTH_MM / 2.0) / 2.0
+    for s in sig.segments:
+        dx, dy = s.end[0] - s.start[0], s.end[1] - s.start[1]
+        span = math.hypot(dx, dy)
+        if span < 0.3:
+            continue
+        mx, my = (s.start[0] + s.end[0]) / 2.0, (s.start[1] + s.end[1]) / 2.0
+        nx, ny = -dy / span, dx / span
+        for sign in (1.0, -1.0):
+            px, py = mx + sign * nx * probe, my + sign * ny * probe
+            assert grid.get_cell(px, py, layer=s.layer).obstacle_type == "trace", (
+                f"({px:.3f},{py:.3f}) is inside SIG's class-width copper "
+                f"({CLASS_WIDTH_MM}mm) but outside the board baseline "
+                f"({BOARD_WIDTH_MM}mm) — must be copper, not ring/free space")
+            probed += 1
+    assert probed >= 2, "need probe points along a real SIG segment"
+
+
+def test_bus_routing_honours_net_class_width_not_just_the_bus_baseline():
+    """MUST-FIX (Codex review): before this fix, ``route_bus`` never consulted
+    ``net_widths`` at all, so a bus-routed net-classed net's COPPER was always
+    laid at the run's baseline width while the reply's provenance (this
+    round's ``_attach_effective_routing_rules``) still stamped it
+    ``{"source": "net_class", "value": <class width>}`` — a LYING provenance
+    field (worse than none), and a false clean in the candidate overlay
+    (``ir_candidates.build_overlay`` reads a segment's own ``width_mm`` first,
+    so it would have checked the proposal at a width it was never routed at).
+
+    Driven directly through ``route_bus`` — the real call site
+    ``route_board_with_hints`` delegates to for every bus — mirroring
+    ``TestBusRouting.test_route_bus_creates_parallel_traces`` in
+    ``tests/agent_router/test_router.py``. SIG_A carries a class override,
+    SIG_B does not; both are members of the SAME bus.
+
+    The grid is constructed with ``trace_width=CLASS_WIDTH_MM`` (simulating
+    the board-wide worst-case ``keepout_trace_width`` ``methods._route`` would
+    compute, since SIG_A's class is present on this board), so BOTH nets'
+    RINGS reach the class distance — that part is intentional (see
+    docs/routing.md, "Keepout margin"). What must differ is the COPPER core:
+    only SIG_A's actually reaches it.
+    """
+    from agent_router.board import Board as _Board, Pad as _Pad, Net as _Net
+    from agent_router.hints import BusHint, Waypoint
+
+    board = _Board(width=40, height=20)
+    board.pads = [
+        _Pad("U1", "1", "SIG_A", (5, 10), (1, 1)),
+        _Pad("U1", "2", "SIG_B", (5, 12), (1, 1)),
+        _Pad("U2", "1", "SIG_A", (35, 10), (1, 1)),
+        _Pad("U2", "2", "SIG_B", (35, 12), (1, 1)),
+    ]
+    board.nets = {
+        "SIG_A": _Net("SIG_A", 1, [board.pads[0], board.pads[2]]),
+        "SIG_B": _Net("SIG_B", 2, [board.pads[1], board.pads[3]]),
+    }
+
+    grid = RoutingGrid(width=40, height=20, resolution=0.02,
+                       clearance=BOARD_CLEARANCE_MM, trace_width=CLASS_WIDTH_MM)
+    bus_hint = BusHint(name="Bus", nets=["SIG_A", "SIG_B"], spacing=2.0,
+                       waypoints=[Waypoint(10, 11), Waypoint(30, 11)])
+
+    net_widths = {"SIG_A": CLASS_WIDTH_MM}   # SIG_B: no override, stays baseline
+    routes = engine_router.route_bus(
+        grid, board, bus_hint, trace_width=BOARD_WIDTH_MM, net_widths=net_widths)
+    assert {r.net for r in routes} == {"SIG_A", "SIG_B"}
+
+    sig_a = next(r for r in routes if r.net == "SIG_A")
+    sig_b = next(r for r in routes if r.net == "SIG_B")
+
+    # Strictly between the baseline's half-width and the class's.
+    probe = (BOARD_WIDTH_MM / 2.0 + CLASS_WIDTH_MM / 2.0) / 2.0
+    probed_a = 0
+    for s in sig_a.segments:
+        dx, dy = s.end[0] - s.start[0], s.end[1] - s.start[1]
+        span = math.hypot(dx, dy)
+        if span < 3.0:
+            continue
+        mx, my = (s.start[0] + s.end[0]) / 2.0, (s.start[1] + s.end[1]) / 2.0
+        nx, ny = -dy / span, dx / span
+        for sign in (1.0, -1.0):
+            px, py = mx + sign * nx * probe, my + sign * ny * probe
+            assert grid.get_cell(px, py, layer=s.layer).obstacle_type == "trace", (
+                f"SIG_A (net_widths override): ({px:.3f},{py:.3f}) must be "
+                f"its OWN class-width copper")
+            probed_a += 1
+    assert probed_a >= 2
+
+    probed_b = 0
+    for s in sig_b.segments:
+        dx, dy = s.end[0] - s.start[0], s.end[1] - s.start[1]
+        span = math.hypot(dx, dy)
+        if span < 3.0:
+            continue
+        mx, my = (s.start[0] + s.end[0]) / 2.0, (s.start[1] + s.end[1]) / 2.0
+        nx, ny = -dy / span, dx / span
+        px, py = mx + nx * probe, my + ny * probe
+        cell = grid.get_cell(px, py, layer=s.layer)
+        # SIG_B never got a width override — this point is past its OWN
+        # (baseline) copper. It is still inside the board-wide RING (the
+        # must-fix from the earlier round), never bare copper.
+        assert cell.obstacle_type != "trace", (
+            f"SIG_B (no override): ({px:.3f},{py:.3f}) must NOT be copper — "
+            f"the bus must not draw a net wider than its own effective width")
+        probed_b += 1
+    assert probed_b >= 1
+
+
+def test_a_strict_class_elsewhere_widens_the_keepout_around_an_unclassed_nets_own_copper(
+        net_classed_compile, recorded_grids):
+    """MUST-FIX (Codex review of this round's first cut): the pairwise gap. A
+    ring sized to ONE net's own requirement cannot also satisfy a STRICTER
+    class net that approaches the same copper later, so a per-net margin is
+    an under-block. The fix is board-wide worst-case sizing: SIG (net-classed,
+    wider minima) and OTHER (no class, board baseline) sit on the SAME board,
+    and a foreign net must be kept out to SIG's class-driven distance from
+    ANY copper on the board — including OTHER's own, UNCLASSED pads and
+    traces — because the keepout margin is now a board-wide value, not a
+    per-net one (docs/routing.md, "Per-net-class minima" -> "Keepout margin").
+
+    Driven through the REAL entry point (`_call_route`), not through
+    `_widen_for_net_classes` or the margin directly: reverting the fix back to
+    a per-net-only margin (net_widths feeding BOTH copper width and the ring)
+    makes THIS test fail while every per-net-copper-width test above stays
+    green — it targets exactly the direction those cannot see.
+    """
+    net_classed_compile["nc"] = NetClass(
+        id="nc:power", name="Power",
+        min_trace_width_mm=CLASS_WIDTH_MM, min_clearance_mm=CLASS_CLEARANCE_MM)
+    net_classed_compile["net"] = "SIG"
+
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is True, resp
+    grid = recorded_grids[0]
+
+    board = route_bridge.resolved_board_to_router(_compile(_three_pin_board()))
+    x1 = next(p for p in board.pads if p.component == "X1")  # OTHER net, unclassed
+
+    board_reach = BOARD_CLEARANCE_MM + BOARD_WIDTH_MM / 2.0     # the OLD (per-net) reach
+    class_reach = CLASS_CLEARANCE_MM + CLASS_WIDTH_MM / 2.0     # what SIG's class demands
+    assert class_reach > board_reach
+
+    # A point strictly inside the band a per-net-only fix would have left
+    # open (beyond OTHER's own margin, but still inside SIG's class margin).
+    # Probed on the LEFT of X1 (away from X2 at (50, 34), i.e. away from the
+    # direction OTHER's own route actually travels), so the point cannot be
+    # confused with OTHER's own routed copper.
+    probe_x = x1.position[0] - x1.size[0] / 2.0 - (board_reach + class_reach) / 2.0
+    assert grid.can_route_through(probe_x, x1.position[1], net="NO_SUCH_NET") is False, (
+        "OTHER's own (unclassed) pad must still be protected out to the "
+        "board's WORST-CASE class distance, not just its own baseline — "
+        "a per-net-only margin would leave this point routable")
+
+    # Sanity: well outside even the class reach (same side), the board is
+    # free again — this is real free space, not an artifact of the widened
+    # margin swallowing the whole board.
+    far_x = x1.position[0] - x1.size[0] / 2.0 - class_reach - 0.3
+    assert grid.can_route_through(far_x, x1.position[1], net="NO_SUCH_NET") is True
+
+
+def test_an_explicit_run_wide_clearance_is_never_widened_by_a_net_class(
+        net_classed_compile, routed_with):
+    """The OTHER half of "admitted or rejected, never reinterpreted": an
+    explicit caller clearance fixes the WHOLE RUN's value, full stop — even
+    the coordinator-mandated worst-case widening must not touch it, or an
+    explicit `clearance: 0.1` would silently become something else."""
+    net_classed_compile["nc"] = NetClass(
+        id="nc:power", name="Power", min_clearance_mm=CLASS_CLEARANCE_MM)
+    net_classed_compile["net"] = "SIG"
+
+    resp = _call_route({"board": _three_pin_board(),
+                        "options": {"clearance": 0.1}})
+    assert resp["ok"] is True, resp
+    assert routed_with["engine_clearance"] == pytest.approx(0.1)
+    assert resp["result"]["effective_routing_rules"]["clearance_mm"] == \
+        {"value": pytest.approx(0.1), "source": "caller_option"}
+
+
+def test_the_three_pin_fixture_routes_a_net_classed_net_end_to_end(
+        net_classed_compile, routed_with):
+    """The 3-pin fixture, driven through the REAL entry point with a net
+    class on SIG. WHAT THIS COVERS: a genuine multi-segment reply out of the
+    real engine, and that the provenance/stamping mechanism (source labels,
+    per-segment width_mm, the candidate overlay) is correct on it.
+
+    WHAT THIS DOES NOT COVER: gate 019f70f76c2f's two-disconnected-paths +
+    layer-changing-via shape. Verified (both with and without a net class):
+    the real pathfinder on THIS geometry needs no via and produces ONE
+    connected F.Cu polyline of exactly 4 segments, 0 vias — nothing in this
+    fixture forces a layer change, so the engine never chooses one. That
+    shape is a property of the geometry, not of net classing, so a
+    net-class-specific fixture cannot make the real engine produce it either
+    without changing the geometry (out of scope for what this test pins).
+    The mandatory via/disconnected-path shape for THIS round is instead
+    covered on the reused STAGED fixture (`_three_pin_route_reply`, same one
+    the pre-existing `test_a_three_pin_two_path_route_with_a_via_is_
+    projected_at_the_run_width` uses) by
+    `test_the_staged_via_fixture_is_projected_at_a_net_classed_nets_own_width`
+    below — proving the stamping mechanism this round adds is correct on
+    exactly the shape the gate cares about, per "reuse rather than rebuild".
+    """
+    net_classed_compile["nc"] = NetClass(
+        id="nc:power", name="Power",
+        min_trace_width_mm=CLASS_WIDTH_MM, min_clearance_mm=CLASS_CLEARANCE_MM)
+    net_classed_compile["net"] = "SIG"
+
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is True, resp
+    sig = next(r for r in resp["result"]["routes"] if r["net"] == "SIG")
+    other = [r for r in resp["result"]["routes"] if r["net"] == "OTHER"]
+    # The real engine's actual shape for this geometry (pinned so a future
+    # change to the geometry or the engine that DOES start needing a via is
+    # noticed here, rather than this test silently keeping stale numbers).
+    assert len(sig["segments"]) == 4
+    assert sig["vias"] == []
+    assert {s["layer"] for s in sig["segments"]} == {"F.Cu"}
+
+    # The run's WIDTH baseline is still the board's own rule (width is
+    # per-net, so an unrelated class never touches the fallback other nets
+    # use); the run's CLEARANCE is the board-wide worst case, widened by
+    # SIG's class even though SIG is only ONE of the board's nets.
+    assert resp["result"]["effective_routing_rules"] == {
+        "trace_width_mm": {"value": pytest.approx(BOARD_WIDTH_MM), "source": "board_rules"},
+        "clearance_mm": {"value": pytest.approx(CLASS_CLEARANCE_MM), "source": "net_class"},
+    }
+    assert sig["effective_routing_rules"] == {
+        "trace_width_mm": {"value": pytest.approx(CLASS_WIDTH_MM), "source": "net_class"},
+        "clearance_mm": {"value": pytest.approx(CLASS_CLEARANCE_MM), "source": "net_class"},
+    }
+    for seg in sig["segments"]:
+        assert seg["width_mm"] == pytest.approx(CLASS_WIDTH_MM)
+    if other:
+        # OTHER's own copper width is unaffected (still the board's baseline)
+        # but its CLEARANCE reports the same board-wide worst case as SIG's —
+        # that is what the grid actually reserved around OTHER's copper too.
+        assert other[0]["effective_routing_rules"] == {
+            "trace_width_mm": {"value": pytest.approx(BOARD_WIDTH_MM), "source": "board_rules"},
+            "clearance_mm": {"value": pytest.approx(CLASS_CLEARANCE_MM), "source": "net_class"},
+        }
+        for seg in other[0]["segments"]:
+            assert seg["width_mm"] == pytest.approx(BOARD_WIDTH_MM)
+
+    # Task 3: the candidate overlay must check SIG at the width it actually got
+    # (the class width), never the run's baseline — a false clean otherwise.
+    candidates, _empty = methods._routes_to_candidates(resp["result"]["routes"])
+    sig_candidate = next(c for c in candidates if c["net"] == "SIG")
+    assert all(seg["width_mm"] == pytest.approx(CLASS_WIDTH_MM)
+              for seg in sig_candidate["segments"])
+
+    # drc_geometric's OWN pre-existing guard (019f958b45b9) still fires for a
+    # net-classed board — this round does not (and must not) paper over it;
+    # geometric DRC stays honestly indeterminate until IT learns to apply
+    # per-class minima too (docs/routing.md, "Not yet done").
+    assert sig["drc_geometric"]["verdict"] == "indeterminate"
+
+
+def test_the_staged_via_fixture_is_projected_at_a_net_classed_nets_own_width():
+    """MANDATORY FIXTURE (gate 019f70f76c2f), for the net-class path — reusing
+    the SAME staged reply `test_a_three_pin_two_path_route_with_a_via_is_
+    projected_at_the_run_width` uses, per the round's own instruction to reuse
+    rather than rebuild it. The real engine does not need a via for this
+    fixture's geometry (see the test above), so this is the only way to
+    exercise "a net-classed net's disconnected-paths-plus-via reply is stamped
+    and checked at ITS OWN width" at all — the STAGED shape stands in for
+    whatever geometry a real board eventually forces a via on, and pins that
+    this round's stamping mechanism (`_attach_effective_routing_rules`) and
+    the candidate overlay agree on that shape exactly as they do on the
+    simpler one.
+    """
+    rb = _compile(_three_pin_board())
+    rb2 = _apply_net_class_to(rb, "SIG", NetClass(
+        id="nc:power", name="Power", min_trace_width_mm=CLASS_WIDTH_MM))
+
+    payload = {"routes": _three_pin_route_reply()}
+    # The SAME stamping _route calls, standing in for what it would have
+    # computed for this net-classed run (baseline width/board_rules for the
+    # run, SIG's own class width for its one route).
+    methods._attach_effective_routing_rules(
+        payload, baseline_width=BOARD_WIDTH_MM, width_source="board_rules",
+        keepout_clearance=BOARD_CLEARANCE_MM, keepout_clearance_source="board_rules",
+        net_widths={"SIG": CLASS_WIDTH_MM})
+
+    sig = payload["routes"][0]
+    assert sig["effective_routing_rules"]["trace_width_mm"] == \
+        {"value": pytest.approx(CLASS_WIDTH_MM), "source": "net_class"}
+    for seg in sig["segments"]:
+        assert seg["width_mm"] == pytest.approx(CLASS_WIDTH_MM)
+
+    # The geometric candidate overlay: passing BOARD_WIDTH_MM as the fallback
+    # `trace_width_mm` default proves the class width WON on its own — a
+    # segment's own width_mm (just stamped above) outranks the fallback in
+    # ir_candidates.build_overlay, so if the class width did not win here the
+    # overlay would be checking this proposal at a width it was not routed
+    # at (the false clean task 3 exists to prevent).
+    # NOTE: `_attach_route_geometric_drc` runs the FULL geometric kernel
+    # (`run_geometric_drc`), which carries drc_geometric's own pre-existing
+    # net-class guard (019f958b45b9, fires whenever EITHER min_trace_width_mm
+    # OR min_clearance_mm is set) — so THIS verdict is "indeterminate", same
+    # as the end-to-end test above, and for the same reason (this round does
+    # not, and must not, paper over that guard). It says nothing about
+    # whether the width the OVERLAY used was correct — `build_overlay` below
+    # (which `check_candidates`/`run_geometric_drc` call internally, but which
+    # itself does not consult net_classes at all) is what actually proves that.
+    methods._attach_route_geometric_drc(payload, rb2, trace_width_mm=BOARD_WIDTH_MM)
+    verdict = payload["routes"][0]["drc_geometric"]
+    assert verdict["verifies_geometry"] is False
+    assert verdict["verdict"] == "indeterminate"
+
+    candidates, empty = methods._routes_to_candidates(payload["routes"])
+    assert empty == [] and len(candidates) == 1
+    assert len(candidates[0]["segments"]) == 3 and len(candidates[0]["vias"]) == 1
+    overlay = ir_candidates.build_overlay(
+        rb2, candidates, default_width_mm=BOARD_WIDTH_MM,
+        default_via_diameter_mm=rb2.design_rules.defaults.via_diameter_mm,
+        default_via_drill_mm=rb2.design_rules.defaults.via_drill_mm)
+    projected = [t for t in overlay.board.traces if t.id not in
+                 {b.id for b in rb2.traces}]
+    assert projected, "the three-pin proposal must reach the overlay as copper"
+    for trace in projected:
+        for seg in trace.segments:
+            # THE must-fix's proof: CLASS_WIDTH_MM, not BOARD_WIDTH_MM — a
+            # net-classed proposal is checked at what it actually got.
+            assert seg.width_mm == pytest.approx(CLASS_WIDTH_MM)
+    # The mandatory shape itself, preserved through net-class stamping: two
+    # disconnected paths (one per layer) joined by a layer-changing via.
+    layers = {seg.layer.id for t in projected for seg in t.segments}
+    assert layers == {"top", "bottom"}
+    assert len(overlay.board.vias) == len(rb2.vias) + 1
+
+
+def test_undo_after_commit_preserves_the_net_classed_nets_own_width(
+        net_classed_compile, routed_with):
+    """MANDATORY undo-after-commit, with a net class in play: the class
+    assignment (like the board's own rules) is a pure function of the
+    compiled board, so SIG routes at its class width before a commit, is
+    correctly refused once that copper is accepted (T7, unrelated to this
+    round), and routes at the SAME class width — and the SAME board-wide
+    clearance — again once undone."""
+    net_classed_compile["nc"] = NetClass(id="nc:power", name="Power",
+                                        min_trace_width_mm=CLASS_WIDTH_MM,
+                                        min_clearance_mm=CLASS_CLEARANCE_MM)
+    net_classed_compile["net"] = "SIG"
+    board = _three_pin_board()
+
+    before = _call_route({"board": board})
+    assert before["ok"] is True, before
+    sig_before = next(r for r in before["result"]["routes"] if r["net"] == "SIG")
+    assert sig_before["effective_routing_rules"] == {
+        "trace_width_mm": {"value": pytest.approx(CLASS_WIDTH_MM), "source": "net_class"},
+        "clearance_mm": {"value": pytest.approx(CLASS_CLEARANCE_MM), "source": "net_class"},
+    }
+
+    committed = _call_route({"board": _committed(board)})
+    assert committed["ok"] is False, committed   # T7, unrelated to this round
+
+    after = _call_route({"board": _undone(_committed(board))})
+    assert after["ok"] is True, after
+    sig_after = next(r for r in after["result"]["routes"] if r["net"] == "SIG")
+    assert sig_after["effective_routing_rules"] == sig_before["effective_routing_rules"]
+    for seg in sig_after["segments"]:
+        assert seg["width_mm"] == pytest.approx(CLASS_WIDTH_MM)

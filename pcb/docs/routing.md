@@ -97,40 +97,255 @@ per-run engine options, not board geometry — so `pcb_worker.methods.
 _effective_routing_rules` resolves them and passes both to `route_board` /
 `route_board_with_hints` explicitly. Precedence, highest first:
 
-| # | source | trace width | clearance |
-|---|---|---|---|
-| 1 | explicit caller option | `options.trace_width` | `options.clearance` |
-| 2 | hint-authored width | widest `width_mm` among selected hints | — (a route hint has no clearance field) |
-| 3 | **the compiled board's design rules** | `design_rules.defaults.trace_width_mm` | `design_rules.minimums.min_clearance_mm` |
-| 4 | the engine's own signature default | `route_board`'s `trace_width` | `route_board`'s `clearance` |
+| # | source | trace width | clearance | scope |
+|---|---|---|---|---|
+| 1 | explicit caller option | `options.trace_width` | `options.clearance` | whole run |
+| 2 | hint-authored width | widest `width_mm` among selected hints | — (a route hint has no clearance field) | whole run |
+| 3 | **net class minima** (this round) | `net_class.min_trace_width_mm` | `net_class.min_clearance_mm` | width: **that net's own copper only**. clearance: **board-wide** — see "Keepout margin" below, this is not a symmetric pair |
+| 4 | the compiled board's design rules | `design_rules.defaults.trace_width_mm` | `design_rules.minimums.min_clearance_mm` | whole run (fallback) |
+| 5 | the engine's own signature default | `route_board`'s `trace_width` | `route_board`'s `clearance` | whole run (fallback) |
 
-Steps 1 and 2 are unchanged in meaning; E2 inserted step 3 ahead of what used to
-be the sole fallback. Step 4 is still read from `route_board`'s **signature**
+Steps 1 and 2 are unchanged in meaning; E2 inserted (what is now) step 4 ahead
+of what used to be the sole fallback, and this round inserted step 3 ahead of
+*that*. Step 5 is still read from `route_board`'s **signature**
 (`_engine_default_mm`) rather than re-spelled as a literal, for the same reason
 the candidate overlay reads it there: a duplicated default that drifted would
 under- or over-state a keepout as easily as a candidate width.
 
-**An explicit option is admitted or rejected — never reinterpreted.** Absent means
-"the caller said nothing", so the next step applies; *present but inadmissible*
-fails closed naming the value. Quietly substituting the board's rule for what the
-caller asked for is the same dishonesty as quietly routing at the engine's
-default. The two dimensions differ only in their **predicate**: `clearance: 0` is
-admissible (asking for no clearance is a coherent request, and `positive_mm` would
-have silently discarded it), while `trace_width: 0` is not — zero-width copper is
-not copper, and routing at it while the overlay checked at something else is the
-false-clean shape.
+**Why step 3 sits exactly there.** Steps 1 and 2 fix a value for the **whole
+run** — every net routes at it, uniformly, because that is what "the caller
+asked for a 0.6mm run" or "the widest selected hint wants 0.5mm" means. A
+per-net class rule must never be read as overriding that: it is scoped to
+*one net*, so if it outranked steps 1/2 it would silently reinterpret what an
+explicit run-wide request meant for every net that happens to carry a class —
+exactly the reinterpretation the "admitted or rejected, never reinterpreted"
+rule (below) forbids. So `pcb_worker.methods._route` captures, before the hint
+merge, whether the CALLER set `trace_width`/`clearance` explicitly, and again
+whether the hint merge added one; step 3 is applied **per net** only for a
+dimension neither of those already fixed. It still outranks the board's own
+blanket rule (step 4, now the fallback): a class exists precisely to make one
+group of nets (say, power) wider than the board's default, and a board-wide
+number can't do that.
+
+**An explicit option — or an explicit class rule — is admitted or rejected, never
+reinterpreted.** Absent means "the caller/class said nothing", so the next step
+applies; *present but inadmissible* fails closed naming the value. Quietly
+substituting the board's rule for what the caller (or the net's own class) asked
+for is the same dishonesty as quietly routing at the engine's default. The two
+dimensions differ only in their **predicate**: `clearance: 0` is admissible
+(asking for no clearance is a coherent request, and `positive_mm` would have
+silently discarded it), while `trace_width: 0` is not — zero-width copper is not
+copper, and routing at it while the overlay checked at something else is the
+false-clean shape. `NetClass.min_trace_width_mm: 0` is exactly this case: the
+dataclass itself allows `0` (non-negative), but routing refuses it as a width —
+see "Per-net-class minima" below.
 
 The chain is a sequence of explicit `is None` tests, not an `or` chain: `or`
 treats `0.0` as absent, so a step legitimately yielding zero would fall through
 while still passing an `is None` guard — the run and the overlay would then
-disagree about the width. Every step, step 4 included, goes through the same
+disagree about the width. Every step, step 5 included, goes through the same
 admission predicate.
 
 If nothing in the chain yields a usable number the route **fails closed**
-(`unsupported_geometry`, zero routes). There is no invented default; step 3's
+(`unsupported_geometry`, zero routes). There is no invented default; step 4's
 `min_clearance_mm` is the same field `ir_connectivity` publishes and
 `drc_geometric` enforces, so routing cannot reserve less space than DRC will
 demand.
+
+## Per-net-class minima (this round)
+
+**DORMANT on every real board — read this before anything else in this
+section.** `ResolvedDesignRules.net_classes` and `ResolvedNet.net_class_id`
+have existed in the IR since before this round, but the v1 compiler hardcodes
+`net_classes=()` (`compile_board.py`) and never reads a `net_classes` or
+per-net class key from the board dict at all. A REAL compiled board — anything
+`route()` can be handed today — always has an empty tuple and every net's
+`net_class_id` is `None`, so everything below is unreachable until the
+compiler is taught to emit a class. This round is the ROUTING (consumer) half
+only; authoring net classes on a real board is a separate, still-open
+follow-up, filed independently and out of this round's fence. Until it lands,
+the only way to exercise this surface at all is to build a `ResolvedBoard`
+with `dataclasses.replace` directly (exactly how `drc_geometric`'s own
+net-class guard, docket `019f958b45b9`, is tested) or, for an end-to-end test,
+to monkeypatch the compile step — see `tests/test_route_rules.py`'s
+`net_classed_compile` fixture.
+
+That dormancy is also why the board-wide widening below (see "Keepout margin")
+is an acceptable move for THIS round: it cannot change how any real board
+routes today, because no real board can carry a class yet. It is documented as
+the permanent design, not a "for now" stopgap — it is a legitimate,
+conservative answer on its own merits (see below), not merely safe because
+nothing exercises it yet.
+
+**Which fields.** `pcb_worker.methods._net_class_overrides` reads
+`NetClass.min_trace_width_mm` / `.min_clearance_mm` — the SAME two fields
+`drc_geometric`'s pre-existing fail-closed guard already watches
+(`nc.min_trace_width_mm is not None or nc.min_clearance_mm is not None`). It
+deliberately does **not** read the plain `NetClass.trace_width_mm` (a nominal
+default, mirroring `RoutingDefaults.trace_width_mm` — a different concept from
+a *minimum*): the task is "route at the class's minima", and the `min_`-prefixed
+pair is the minima.
+
+**Per-dimension, not per-class.** A class naming nothing for a dimension (that
+field is `None`) contributes nothing for THAT dimension — the net falls through
+to step 4/5 exactly as if it carried no class. A class naming an unrelated field
+only (e.g. `via_diameter_mm`) contributes nothing to either dimension. A class
+that DOES name a dimension is admitted-or-rejected through the same predicates
+as an explicit caller option (`positive_mm` for width, non-negative for
+clearance) — see the box above.
+
+**An explicit caller clearance defeats a class minimum, board-wide, silently
+from the class's point of view.** This is a direct consequence of "steps 1/2
+outrank step 3" (the "Why step 3 sits exactly there" box) applied to a
+dimension whose margin is board-wide: if the caller passes `options.clearance`
+explicitly, `_route` drops the clearance component out of every net's
+`net_overrides` BEFORE `_widen_for_net_classes` ever runs (see
+`methods._route`, the `caller_set_clearance` guard), so the widening step
+never sees the class's `min_clearance_mm` at all — not "widened then
+overridden", genuinely never consulted. A board with a "power" class
+authoring `min_clearance_mm: 0.5` and a caller passing `options.clearance:
+0.1` routes the WHOLE BOARD, including the power net, at 0.1mm — the class's
+own requirement stops applying, board-wide, for as long as that option is set.
+The reply is honest about it (`clearance_mm.source` reports `"caller_option"`,
+never `"net_class"`, on every route — see `test_an_explicit_run_wide_
+clearance_is_never_widened_by_a_net_class`), but a reader who authored a class
+minimum and separately passes a run-wide clearance option needs to know THIS,
+not just that the reply happens to say `caller_option`: it is not a smaller
+number than expected, it is the class minimum not applying at all. This is the
+same "admitted or rejected, never reinterpreted" policy the explicit-option box
+above states for width/clearance individually — restated here because a class
+minimum silently losing to a run-wide option is easy to miss the SCOPE of
+(one net) if a reader has not connected it to the board-wide margin.
+
+**Keepout margin: board-wide worst case, not per-net.** A per-net margin was
+the first cut of this round, and it was wrong: `RoutingGrid.keepout_margin`
+(`clearance + trace_width / 2`) sizes a RING that is a static reservation,
+written once, by whichever net's copper it protects. Sizing that ring to ONLY
+that net's own class cannot also satisfy a STRICTER class net that comes along
+later and approaches the SAME copper — the ring it finds there is smaller than
+its own requirement demands. That is an under-block, and routing.md's
+invariant is unconditional: **the modeled keepout must be a SUPERSET of the
+fabricated copper. Over-blocking is legal; under-blocking never is.** There is
+no net-class carve-out for that sentence.
+
+The exact `max(class_A, class_B)` fix — track which specific rule each ring
+reflects, and compare against the QUERYING net's own rule at
+`can_route_through` time — needs per-cell metadata and a query-time lookup,
+which does not fit this round's shape (the grid's occupancy model is "one
+owner, one static reservation" throughout, not "who is asking"). But the
+invariant does not require the exact fix, only a CONSERVATIVE one: size the
+grid's OWN `clearance`/`trace_width` — which `keepout_margin` reads for
+**every** marking on the board, pad or trace, classed net or not — to the
+**widest** value any class present on the board demands, never narrower than
+the run's own baseline. `pcb_worker.methods._widen_for_net_classes` computes
+it; `agent_router.router.route_board`/`route_board_with_hints` take it as
+`keepout_clearance`/`keepout_trace_width`, separate from the (still genuinely
+per-net) copper width. This is the SAME move this campaign has used at
+every other point it met an under-block it could not model exactly: the
+axis-aligned pad envelope for a rotated land, the containing disc for an oval
+hole, the conservative obstacle for unnumbered copper. All of them trade
+"maybe over-blocks a little" for "never under-blocks", because that is the one
+direction the invariant allows.
+
+One consequence worth being explicit about: because the margin is board-wide,
+**every** net's keepout reflects the strictest class present, even a net that
+carries no class of its own — an unclassed net's own copper is protected (and
+protects others) out to the SAME distance as the strictest classed net on the
+board, not its own narrower baseline. Concretely: on a board with SIG in a
+"power" class (0.6mm width / 0.5mm clearance) and OTHER carrying no class
+(0.35mm / 0.3mm board defaults), a foreign net is kept `0.6/2 + 0.5 = 0.8mm`
+from OTHER's own pads too, not merely `0.35/2 + 0.3 = 0.475mm` — pinned by
+`test_a_strict_class_elsewhere_widens_the_keepout_around_an_unclassed_nets_own_copper`.
+COPPER WIDTH stays exactly per-net regardless (OTHER's own trace is still
+drawn at 0.35mm) — only the shared RESERVATION widens.
+
+**Bus routing now honours net-class width too.** `agent_router.router.
+route_bus` (hint-driven bus/parallel-corridor routing) first cut of this round
+laid every net in a bus at the run's baseline copper width unconditionally,
+ignoring `net_widths` entirely — a real defect (Codex must-fix), not a scoped
+exception: `_attach_effective_routing_rules` stamps a bus-routed net-classed
+net's reply with `{"source": "net_class", "value": <class width>}` regardless
+of what actually got drawn, so the un-threaded case made the reply LIE about
+copper that did not exist at that width — a lying provenance field, worse than
+none, and via `ir_candidates.build_overlay` (which reads a segment's own
+`width_mm` first) a **false clean** in the candidate overlay too: the proposal
+would be checked at the class width while the routed copper was the baseline.
+Fixed by threading `net_widths` into `route_bus`'s own per-net loop exactly
+like the standard loop — each bus net now draws at its own class-or-baseline
+width, the SAME `_net_width` lookup the two other loops use. Only the bus's
+parallel-spacing **offset** (`bus_hint.spacing`) stays shared across the whole
+bus; that is a layout choice, independent of any one net's width. Pinned by
+`test_bus_routing_honours_net_class_width_not_just_the_bus_baseline`, driven
+directly through `route_bus` (mirroring `TestBusRouting.test_route_bus_
+creates_parallel_traces` in `tests/agent_router/test_router.py`), which probes
+that a classed bus net's copper actually reaches its class width while an
+unclassed bus-mate's does not. The board-wide keepout widening (above) always
+applied to bus nets' pads and to every other net's copper regardless of this
+bug — only a bus net's own drawn copper was ever wrong.
+
+**Reply provenance.** Every route now carries `effective_routing_rules`:
+
+```json
+"routes": [{
+  "net": "VCC",
+  "segments": [{"start": [...], "end": [...], "layer": "F.Cu", "width_mm": 0.6}],
+  "effective_routing_rules": {
+    "trace_width_mm": {"value": 0.6, "source": "net_class"},
+    "clearance_mm": {"value": 0.5, "source": "net_class"}
+  }
+}, {
+  "net": "OTHER",
+  "segments": [{"start": [...], "end": [...], "layer": "F.Cu", "width_mm": 0.35}],
+  "effective_routing_rules": {
+    "trace_width_mm": {"value": 0.35, "source": "board_rules"},
+    "clearance_mm": {"value": 0.5, "source": "net_class"}
+  }
+}],
+"effective_routing_rules": {
+  "trace_width_mm": {"value": 0.35, "source": "board_rules"},
+  "clearance_mm": {"value": 0.5, "source": "net_class"}
+}
+```
+
+`source` is one of `caller_option` / `hint` / `net_class` / `board_rules` /
+`engine_default` — never left for a consumer to infer from whether an override
+happens to exist. This is the same honesty `drc_geometric`'s three-way verdict
+enum already enforces (`ok` means "the check ran", never "the board passed";
+here, a concrete `source` is always present, never omitted as "could not
+determine which one"). Note the asymmetry that falls out of the margin being
+board-wide: `OTHER`'s own `trace_width_mm` is unaffected (its copper is still
+drawn at the board's baseline), but its `clearance_mm` reports the SAME
+class-widened value as `VCC`'s — because that is the true, currently-enforced
+margin around OTHER's copper too, not a per-net number a consumer could
+mistake for something narrower. `pcb_worker.methods._attach_effective_
+routing_rules` is the single place that stamps both the top-level baseline and
+every route's own block, from the exact `net_widths` map and `keepout_
+clearance` value also handed to the engine (`kw["net_widths"]`, `kw["keepout_
+clearance"]`) — one value, two consumers (the grid and the reply), so they
+cannot disagree.
+
+**The candidate overlay follows, for width.** The same stamping writes each
+segment's `width_mm`, and `ir_candidates.build_overlay` already reads a
+segment's own `width_mm` **before** any caller-supplied default — that
+precedence pre-dates this round (docket `019f952b99f2`) and needed no code
+change here, only a producer that finally uses it: before this round, no
+segment the worker serialized ever carried its own `width_mm`, so every
+candidate fell through to the run's single `default_width_mm`. A net-classed
+net is therefore now checked at the width it actually got, not the run's
+baseline — the false-clean the whole overlay surface exists to prevent (see
+"Where candidate dimensions come from" below). Clearance has no equivalent
+per-candidate concept in the overlay (geometric DRC's own clearance check
+reads `design_rules.minimums.min_clearance_mm` directly, and is unaffected by
+this round — see the fail-closed guard note below).
+
+**`drc_geometric`'s own guard is untouched, on purpose.** Geometric DRC has its
+own pre-existing fail-closed guard (docket `019f958b45b9`) that returns
+`indeterminate` for ANY net-classed board, because it has not yet been taught
+to apply per-class minima to GC1/GC2. This round does not touch it: a
+net-classed proposal's `drc_geometric.verdict` stays `"indeterminate"`, exactly
+as before — this round teaches ROUTING to honour class minima, not DRC, and
+leaving that guard exactly as it was is what keeps the two surfaces from
+silently disagreeing about whether a net-classed board is safe.
 
 **Endpoint identity vs geometry.** A pad becomes a routable **endpoint** only if it
 carries an authored pad number — nets are spelled `U1.2`, hints reference `U1.2`,
@@ -203,10 +418,17 @@ In every failing case **zero routes** are returned — no partial proposal, no
   `_effective_grid_size`, which grew the grid to cover any pad outside the board
   (+2mm), is gone — a pad outside the outline makes its net **unrouted** instead
   of routable off-board.
-- **Per-net-class width/clearance minima** — still open. The IR carries the slot
-  (`design_rules.net_classes`, with per-class `trace_width_mm` /
-  `min_clearance_mm`) but the v1 compiler emits none, so there is nothing for
-  routing to honour yet: a run is one width and one clearance for every net.
+- ~~Per-net-class width/clearance minima~~ — **done, this round**, for the
+  ROUTING consumer (see "Per-net-class minima" above). The v1 compiler still
+  emits `net_classes=()` for every real board, so this is reachable only via a
+  hand-built/monkeypatched `ResolvedBoard` until compiler support lands —
+  authoring net classes on a real board is a SEPARATE, still-open piece.
+  `drc_geometric`'s own fail-closed guard (`019f958b45b9`) also still fires for
+  any net-classed board: geometric DRC has not yet been taught to apply the
+  per-class minima this round only teaches ROUTING to honour, and this round
+  deliberately leaves that guard as-is rather than paper over it. Bus-hint
+  routing (`route_bus`) now honours net-class width too, fixed within this
+  round — see "Bus routing now honours net-class width too" above.
 - ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
   still accepted a missing size as `0x0`, the same class of fictional copper
   E1 removed from the canonical path — but rather than fix it, the shape
@@ -280,7 +502,11 @@ approximated copper, so both values are sourced explicitly:
   engine (`kw["trace_width"]`, precedence table above), passed on to the overlay:
   one variable, not two derivations that agree by coincidence. A proposal cleared
   at a width it was not routed at is a **false clean**, which is the failure this
-  surface exists to remove.
+  surface exists to remove. Per-net-class minima (this round) extend this rather
+  than compete with it: `_attach_effective_routing_rules` stamps each segment's
+  own `width_mm` with THAT net's actual width (its class override, or the run's
+  baseline), so `build_overlay`'s existing per-segment `width_mm` precedence
+  picks the right one automatically — see "Per-net-class minima" above.
 - **Via diameter / drill** — the board's own authored routing defaults
   (`design_rules.via_diameter_mm` / `via_drill_mm`), which is what acceptance
   writes. The engine's vias are positional only.

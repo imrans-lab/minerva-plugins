@@ -873,6 +873,24 @@ def _first_sourced(*steps) -> float | None:
     return None
 
 
+def _sourced_with_label(*steps: tuple) -> tuple:
+    """Like :func:`_first_sourced`, but each step also names ITSELF, and the
+    winning step's name comes back with its value.
+
+    This is the provenance a route reply now carries (docs/routing.md,
+    "Provenance") — a consumer must be able to tell WHICH source supplied an
+    effective value, never just what the value is. Same ``is None`` semantics
+    as ``_first_sourced`` (a step yielding ``0.0`` is still sourced); this is
+    not a second resolver, just the first one with a name attached to each
+    step so the caller does not have to re-derive which one fired.
+    """
+    for label, step in steps:
+        value = step()
+        if value is not None:
+            return value, label
+    return None, None
+
+
 def _explicit_mm(kw: dict, key: str, predicate, expected: str) -> float | None:
     """An explicitly-supplied option, admitted or REJECTED — never reinterpreted.
 
@@ -899,13 +917,24 @@ def _explicit_mm(kw: dict, key: str, predicate, expected: str) -> float | None:
     return value
 
 
-def _effective_routing_rules(kw: dict, rb) -> tuple[float, float]:
-    """(trace_width_mm, clearance_mm) for this run, or raise UnsupportedGeometry.
+def _effective_routing_rules_detailed(kw: dict, rb) -> tuple[float, str, float, str]:
+    """(trace_width_mm, width_source, clearance_mm, clearance_source), or raise
+    UnsupportedGeometry.
 
     ``kw`` carries steps 1 and 2 already merged by ``_route`` (the caller option
     wins there, exactly as before). This resolves steps 3 and 4 behind them and
     returns the pair the ENGINE, the GRID's keepout inflation and the candidate
     overlay all consume — one value, three consumers, so they cannot disagree.
+
+    The ``*_source`` labels are this round's provenance addition (docs/
+    routing.md, "Provenance"): steps 1 and 2 are already merged into ``kw`` by
+    the time this runs, so from here they are indistinguishable and both report
+    as ``"caller_or_hint"``. Only ``_route`` still knows which of the two
+    actually supplied a merged value (it has the raw caller options and the hint
+    translation separately), so it is what refines that label into
+    ``"caller_option"`` or ``"hint"`` for the reply. A step-3/4 label needs no
+    such refinement — the board's rule and the engine's signature default are
+    each read from exactly one place.
     """
     from .route_bridge import UnsupportedGeometry
 
@@ -916,18 +945,21 @@ def _effective_routing_rules(kw: dict, rb) -> tuple[float, float]:
     # would then have disagreed about the width, which is what this round exists
     # to prevent. Every step below is an explicit `is None` test, and every value
     # (including step 4's) goes through the same admission predicate.
-    width = _first_sourced(
+    width, width_source = _sourced_with_label(
         # 1 + 2. An explicit caller option or a merged hint width. A value that is
         # PRESENT but inadmissible raises rather than falling through — see
         # _explicit_mm. Only the caller can put an inadmissible value here: a hint
         # width reaches kw only via `if translation.trace_width_mm`, already > 0.
-        lambda: _explicit_mm(kw, "trace_width", ir_candidates.positive_mm,
-                             "a positive, finite trace width in mm"),
+        ("caller_or_hint", lambda: _explicit_mm(
+            kw, "trace_width", ir_candidates.positive_mm,
+            "a positive, finite trace width in mm")),
         # 3. The board's own authored routing default.
-        lambda: _ir_rule_mm(rb, "design_rules", "defaults", "trace_width_mm",
-                            predicate=ir_candidates.positive_mm),
+        ("board_rules", lambda: _ir_rule_mm(
+            rb, "design_rules", "defaults", "trace_width_mm",
+            predicate=ir_candidates.positive_mm)),
         # 4. What the engine would have applied, read from its signature.
-        lambda: ir_candidates.positive_mm(_engine_default_trace_width_mm()),
+        ("engine_default", lambda: ir_candidates.positive_mm(
+            _engine_default_trace_width_mm())),
     )
     if width is None:
         raise UnsupportedGeometry(
@@ -936,12 +968,14 @@ def _effective_routing_rules(kw: dict, rb) -> tuple[float, float]:
             "board, and the engine's own default is unreadable) — routing fails "
             "closed rather than route at an invented width")
 
-    clearance = _first_sourced(
-        lambda: _explicit_mm(kw, "clearance", _nonnegative_mm,
-                             "a non-negative, finite clearance in mm"),
-        lambda: _ir_rule_mm(rb, "design_rules", "minimums", "min_clearance_mm",
-                            predicate=_nonnegative_mm),
-        lambda: _nonnegative_mm(_engine_default_mm("clearance")),
+    clearance, clearance_source = _sourced_with_label(
+        ("caller_or_hint", lambda: _explicit_mm(
+            kw, "clearance", _nonnegative_mm,
+            "a non-negative, finite clearance in mm")),
+        ("board_rules", lambda: _ir_rule_mm(
+            rb, "design_rules", "minimums", "min_clearance_mm",
+            predicate=_nonnegative_mm)),
+        ("engine_default", lambda: _nonnegative_mm(_engine_default_mm("clearance"))),
     )
     if clearance is None:
         raise UnsupportedGeometry(
@@ -950,7 +984,96 @@ def _effective_routing_rules(kw: dict, rb) -> tuple[float, float]:
             "the engine's own default is unreadable) — routing fails closed "
             "rather than reserve an invented keepout")
 
+    return (width, width_source, clearance, clearance_source)
+
+
+def _effective_routing_rules(kw: dict, rb) -> tuple[float, float]:
+    """(trace_width_mm, clearance_mm) for this run, or raise UnsupportedGeometry.
+
+    Thin wrapper over :func:`_effective_routing_rules_detailed` that drops the
+    provenance labels — kept because most callers (and every pre-existing test)
+    want only the pair, and re-deriving the same resolution twice is exactly the
+    kind of drift this campaign has been removing.
+    """
+    width, _width_source, clearance, _clearance_source = \
+        _effective_routing_rules_detailed(kw, rb)
     return (width, clearance)
+
+
+def _net_class_overrides(rb) -> dict[str, tuple[float | None, float | None]]:
+    """net name -> (class min_trace_width_mm, class min_clearance_mm), the NEW
+    precedence step this round inserts (docs/routing.md, "Per-net-class
+    minima"): between the hint-authored width (step 2) and the board's blanket
+    design_rules (now step 4).
+
+    Reads ``NetClass.min_trace_width_mm`` / ``.min_clearance_mm`` — the SAME
+    two fields ``drc_geometric``'s existing fail-closed guard already watches
+    (``nc.min_trace_width_mm is not None or nc.min_clearance_mm is not None``,
+    docket 019f958b45b9): that guard exists precisely because a net-classed
+    board's MINIMA are these two fields, and geometric DRC cannot enforce them
+    yet. ``NetClass`` also carries a plain ``trace_width_mm`` (mirroring
+    ``RoutingDefaults.trace_width_mm``, a nominal/default width) — deliberately
+    NOT read here: the task is "routes at that class's width/clearance
+    MINIMA", and the minima are the ``min_``-prefixed pair, not the nominal
+    one.
+
+    A dimension the class says NOTHING about (that field is ``None`` on the
+    ``NetClass``) is not in this dict's pair — the run falls through to the
+    next step for THAT dimension exactly as if the class were absent, and
+    ``_route`` never applies this step at all for a dimension steps 1/2
+    already fixed for the whole run (an explicit caller option or a
+    hint-authored width is never reinterpreted per net).
+
+    ``rb.design_rules.net_classes`` and each net's ``net_class_id`` are BOTH
+    validated at ResolvedBoard construction (resolved_board.py ~1039: "an
+    unknown net class" raises there), so a referenced class always exists on
+    a real compiled board — the ``None`` guard below is defensive, not a path
+    a valid IR can reach.
+
+    A class that DOES carry a value for a dimension is admitted or REJECTED,
+    the same policy _explicit_mm already applies to an explicit caller option:
+    a class authoring ``min_trace_width_mm: 0`` is a rule that cannot be
+    sourced (zero-width copper is not copper), and silently treating it as
+    "the class said nothing" would substitute the board's default for what
+    the class author asked for — the same dishonesty this whole campaign has
+    been removing one round at a time (E1's nominal 1.0x1.0 land, A5's 0x0 pad
+    size, this chain's own non-positive explicit width). Fails closed with
+    UnsupportedGeometry, same vocabulary as every other unsourceable rule.
+    """
+    from .route_bridge import UnsupportedGeometry
+
+    classes = {nc.id: nc for nc in rb.design_rules.net_classes}
+    overrides: dict[str, tuple[float | None, float | None]] = {}
+    for net in rb.nets:
+        if not net.net_class_id:
+            continue
+        nc = classes.get(net.net_class_id)
+        if nc is None:
+            continue  # unreachable on a valid ResolvedBoard; see docstring
+
+        width = None
+        if nc.min_trace_width_mm is not None:
+            width = ir_candidates.positive_mm(nc.min_trace_width_mm)
+            if width is None:
+                raise UnsupportedGeometry(
+                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
+                    f"min_trace_width_mm={nc.min_trace_width_mm!r} is not a "
+                    f"positive, finite width in mm — routing fails closed "
+                    f"rather than reinterpret the class's own rule")
+
+        clearance = None
+        if nc.min_clearance_mm is not None:
+            clearance = _nonnegative_mm(nc.min_clearance_mm)
+            if clearance is None:
+                raise UnsupportedGeometry(
+                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
+                    f"min_clearance_mm={nc.min_clearance_mm!r} is not a "
+                    f"non-negative, finite clearance in mm — routing fails "
+                    f"closed rather than reinterpret the class's own rule")
+
+        if width is not None or clearance is not None:
+            overrides[net.name] = (width, clearance)
+    return overrides
 
 
 def _routes_to_candidates(routes: list) -> tuple[list, list]:
@@ -1071,6 +1194,89 @@ def _attach_route_geometric_drc(payload: dict, rb, *,
             "scope": union["scope"], "verifies_geometry": True,
             "verdict": "violations" if violations else "clean",
             "violations": violations}
+
+
+def _widen_for_net_classes(baseline: float, source: str,
+                          class_values: list) -> tuple[float, str]:
+    """The CONSERVATIVE (never-under-block) value for a dimension the whole
+    board's keepout margin depends on: the baseline, or whichever class value
+    exceeds it. Never narrower than the baseline — a class that asks for LESS
+    than the board's own rule does not get to shrink the reservation everyone
+    else routes against (docs/routing.md, "Per-net-class minima"). Ties (a
+    class exactly matching the baseline) keep the baseline's own source label,
+    since nothing was actually widened."""
+    result, result_source = baseline, source
+    for value in class_values:
+        if value > result:
+            result, result_source = value, "net_class"
+    return result, result_source
+
+
+def _attach_effective_routing_rules(
+    payload: dict, *,
+    baseline_width: float, width_source: str,
+    keepout_clearance: float, keepout_clearance_source: str,
+    net_widths: dict,
+) -> None:
+    """Mutate payload in place with PROVENANCE (docs/routing.md, "Provenance"):
+    which source supplied the width/clearance a route actually got, never left
+    for a consumer to infer from whether a net-class override happens to exist.
+
+    Same honesty principle ``drc_geometric``'s verdict enum already enforces —
+    "could not determine" must never be indistinguishable from "determined" —
+    applied here to sourcing rather than to a verdict: every route reports a
+    concrete ``source``, not just a number, so "the board's own rule" and "an
+    invented default" can never look alike to a caller who only reads the value.
+
+    WIDTH is genuinely per-net (it is what gets FABRICATED for that one net's
+    own copper) — ``net_widths`` (net name -> width_mm) says which nets differ
+    from the baseline, and is the EXACT map handed to ``route_board``/
+    ``route_board_with_hints`` (``kw["net_widths"]``), so the copper drawn and
+    what this reply claims a route got cannot drift apart.
+
+    CLEARANCE is NOT per-net — it is already the board-WIDE, worst-case value
+    (``keepout_clearance``, computed by ``_widen_for_net_classes`` before this
+    is called) that sizes the grid's margin for EVERY marking, so every route
+    reports the SAME clearance: the one actually reserved around it, not a
+    per-net number a consumer might mistake for what was reserved (see
+    docs/routing.md, "Per-net-class minima" -> "Keepout margin").
+
+    Adds:
+      * ``payload["effective_routing_rules"]`` — the run-wide values: width is
+        the FALLBACK baseline (what an unclassed net's own copper gets),
+        clearance is the actually-enforced (possibly class-widened) margin.
+      * ``routes[].effective_routing_rules`` — THIS route's own width (differs
+        from the baseline only if its net carries a class override) and the
+        SAME run-wide clearance every route carries.
+      * ``routes[].segments[].width_mm`` — stamped with the per-net width, so
+        the geometric candidate overlay below (``ir_candidates.build_overlay``,
+        which reads a segment's own ``width_mm`` before any default) checks a
+        net-classed proposal at the width it actually got, not the run's
+        baseline (docs/routing.md, "the overlay must be checked at the width it
+        was routed at" — the false-clean this whole surface exists to prevent).
+    """
+    payload["effective_routing_rules"] = {
+        "trace_width_mm": {"value": baseline_width, "source": width_source},
+        "clearance_mm": {"value": keepout_clearance, "source": keepout_clearance_source},
+    }
+    routes = payload.get("routes")
+    if not isinstance(routes, list):
+        return
+    for r in routes:
+        if not isinstance(r, dict):
+            continue
+        net_name = r.get("net")
+        if net_name in net_widths:
+            width, width_src = net_widths[net_name], "net_class"
+        else:
+            width, width_src = baseline_width, width_source
+        r["effective_routing_rules"] = {
+            "trace_width_mm": {"value": width, "source": width_src},
+            "clearance_mm": {"value": keepout_clearance, "source": keepout_clearance_source},
+        }
+        for seg in r.get("segments") or []:
+            if isinstance(seg, dict):
+                seg["width_mm"] = width
 
 
 def _route(params: dict) -> dict:
@@ -1205,9 +1411,16 @@ def _route(params: dict) -> dict:
     bridge_warnings = drawn_warnings + translation.warnings
     selected_hint_ids = consumed_ids + [
         i for i in translation.selected_ids if i not in consumed_ids]
+    # Captured BEFORE the hint merge below, because afterwards "trace_width" in
+    # kw no longer says WHICH of the two supplied it — that distinction only
+    # exists here, and is what turns _effective_routing_rules_detailed's generic
+    # "caller_or_hint" label into the specific one the reply carries.
+    caller_set_width = "trace_width" in kw
+    caller_set_clearance = "clearance" in kw
     # A hint-authored width becomes the run's trace_width unless the caller
     # set one explicitly (per-hint width has no RoutingHints slot).
-    if translation.trace_width_mm and "trace_width" not in kw:
+    hint_set_width = bool(translation.trace_width_mm and "trace_width" not in kw)
+    if hint_set_width:
         kw["trace_width"] = translation.trace_width_mm
 
     # EFFECTIVE DESIGN RULES (Round E2) — see the precedence note above
@@ -1219,12 +1432,71 @@ def _route(params: dict) -> dict:
     # would path a 0.35mm trace against keepouts reserved for 0.25mm, so the
     # proposed copper would be wider than the space held for it.
     try:
-        kw["trace_width"], kw["clearance"] = _effective_routing_rules(
+        (kw["trace_width"], width_source,
+         kw["clearance"], clearance_source) = _effective_routing_rules_detailed(
             kw, compiled.board)
     except route_bridge.UnsupportedGeometry as exc:
         return {"ok": False, "error": {
             "kind": "unsupported_geometry", "message": str(exc),
             "diagnostics": compile_warnings}}
+    # Refine the generic "caller_or_hint" label into which of the two it was —
+    # only this function still has both pieces of information (see the capture
+    # above). Steps 3/4 need no refinement; each already names one place.
+    if width_source == "caller_or_hint":
+        width_source = "caller_option" if caller_set_width else "hint"
+    if clearance_source == "caller_or_hint":
+        clearance_source = "caller_option"
+
+    # PER-NET-CLASS MINIMA (this round) — the NEW step 3 of the precedence
+    # chain, between the hint-authored width (step 2, folded into kw above) and
+    # the board's blanket design_rules (now step 4, already resolved into
+    # kw["trace_width"]/kw["clearance"]). An explicit caller option or a hint
+    # already fixed the WHOLE RUN's value for a dimension — that decision is a
+    # run-wide one and is never reinterpreted per net, so a class override for
+    # that dimension is dropped rather than silently overriding what the caller
+    # or the hint decided (docs/routing.md, "Per-net-class minima" explains the
+    # placement). A class's own rule is otherwise admitted-or-rejected exactly
+    # like an explicit option — see _net_class_overrides.
+    try:
+        net_overrides = _net_class_overrides(compiled.board)
+    except route_bridge.UnsupportedGeometry as exc:
+        return {"ok": False, "error": {
+            "kind": "unsupported_geometry", "message": str(exc),
+            "diagnostics": compile_warnings}}
+    if caller_set_width or hint_set_width:
+        net_overrides = {n: (None, c) for n, (w, c) in net_overrides.items()}
+    if caller_set_clearance:
+        net_overrides = {n: (w, None) for n, (w, c) in net_overrides.items()}
+    net_overrides = {n: v for n, v in net_overrides.items() if v != (None, None)}
+
+    # COPPER WIDTH is genuinely per-net — THIS net's own trace is drawn at its
+    # class's width, and every other net is unaffected.
+    net_widths = {n: w for n, (w, _c) in net_overrides.items() if w is not None}
+
+    # The KEEPOUT MARGIN is NOT per-net (Codex must-fix on this round): a ring
+    # sized to one net's own requirement cannot ALSO satisfy a STRICTER class
+    # net that approaches that same copper later — the ring is a static
+    # reservation, sized once, by whichever net's copper it protects, and has
+    # no notion of "the net that queries it later has a bigger demand of its
+    # own". That is an UNDER-block, and routing.md's invariant ("the modeled
+    # keepout must be a SUPERSET of the fabricated copper... under-blocking
+    # never is legal") has no net-class exception. The fix is the same
+    # conservative move this campaign uses everywhere it meets an under-block
+    # it cannot model exactly (the pad AABB superset, the oval-hole containing
+    # disc, the conservative NPTH obstacle): the grid's OWN clearance/
+    # trace_width — which size EVERY marking uniformly — become the WIDEST
+    # value any class present on the board demands, never narrower than the
+    # run's own baseline. See docs/routing.md, "Per-net-class minima" ->
+    # "Keepout margin".
+    keepout_clearance, keepout_clearance_source = _widen_for_net_classes(
+        kw["clearance"], clearance_source,
+        [c for _w, c in net_overrides.values() if c is not None])
+    keepout_trace_width = max(
+        [kw["trace_width"]] + [w for w, _c in net_overrides.values() if w is not None])
+
+    kw["net_widths"] = net_widths
+    kw["keepout_clearance"] = keepout_clearance
+    kw["keepout_trace_width"] = keepout_trace_width
 
     try:
         if translation.hints.net_hints or translation.hints.buses \
@@ -1247,6 +1519,17 @@ def _route(params: dict) -> dict:
         payload["warnings"] = bridge_warnings + compile_warnings
     if selected_hint_ids:
         payload["selected_hint_ids"] = selected_hint_ids
+
+    # PROVENANCE (this round; docs/routing.md "Provenance") — attached to every
+    # route, including drawn/as_drawn ones merged in above, BEFORE the DRC
+    # attaches below so the geometric overlay reads the per-net width this just
+    # stamped rather than falling back to the run's baseline for a net-classed
+    # net (see _attach_effective_routing_rules).
+    _attach_effective_routing_rules(
+        payload, baseline_width=kw["trace_width"], width_source=width_source,
+        keepout_clearance=keepout_clearance,
+        keepout_clearance_source=keepout_clearance_source,
+        net_widths=net_widths)
 
     # DRC-at-propose (docket 019f6f1492e0): every call reaching here is on the
     # canonical path (the native pad-list shape is rejected at the top of

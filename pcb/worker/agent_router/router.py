@@ -346,6 +346,46 @@ class RoutingResult:
         return None
 
 
+# Per-net-class minima (docs/routing.md, "Per-net-class minima"). Two
+# SEPARATE concepts, sized differently on purpose:
+#
+#   * COPPER WIDTH is genuinely per-net: `net_widths` (net name -> width_mm,
+#     sourced from that net's own class by `pcb_worker.methods.
+#     _net_class_overrides`) says what width THAT net's own trace is drawn
+#     at. A net absent from the map draws at the run's baseline `trace_width`.
+#
+#   * The KEEPOUT MARGIN is NOT per-net. `keepout_clearance`/`keepout_trace_
+#     width` size the GRID itself (its `clearance`/`trace_width` fields, which
+#     `RoutingGrid.keepout_margin` reads for EVERY marking) and so apply
+#     uniformly to every pad and every trace on the board, net-classed or not.
+#     A per-net margin was tried and rejected (Codex review of this round): a
+#     ring is a static reservation sized once, by whichever net's copper it
+#     protects, at MARK time — it has no way to also satisfy a STRICTER class
+#     net that only comes along later and approaches that same copper. That is
+#     an under-block, and routing.md's invariant ("the modeled keepout must be
+#     a SUPERSET of the fabricated copper... under-blocking never is legal")
+#     applies with no net-class exception. The fix is the same one this
+#     campaign uses everywhere it meets an under-block it cannot model
+#     exactly (the pad AABB superset, the oval-hole containing disc, the
+#     conservative NPTH obstacle): pick the CONSERVATIVE value — here, the
+#     widest clearance/width any class present on the board demands — and
+#     apply it to every marking. `pcb_worker.methods._route` computes that
+#     board-wide worst case and passes it as `keepout_clearance`/
+#     `keepout_trace_width`; None (every pre-net-class caller) means "use the
+#     run's own `clearance`/`trace_width`", i.e. unchanged behaviour.
+NetWidths = dict[str, float]
+
+
+def _net_width(net_widths: Optional[NetWidths], net_name: Optional[str],
+              base_width: float) -> float:
+    """THIS net's own copper width: its class override, or the run's
+    baseline. `net_name=None` (an unconnected pad) and a net absent from the
+    map both fall straight through — there is nothing to look up."""
+    if not net_widths or net_name not in net_widths:
+        return base_width
+    return net_widths[net_name]
+
+
 def route_board(
     board: Board,
     allow_vias: bool = True,
@@ -353,7 +393,10 @@ def route_board(
     order: str = "shortest_first",
     trace_width: float = 0.25,
     clearance: float = 0.2,
-    grid_resolution: float = 0.1
+    grid_resolution: float = 0.1,
+    net_widths: Optional[NetWidths] = None,
+    keepout_clearance: Optional[float] = None,
+    keepout_trace_width: Optional[float] = None,
 ) -> RoutingResult:
     """
     Route all nets on a board.
@@ -363,9 +406,19 @@ def route_board(
         allow_vias: Whether to allow vias for layer changes
         single_layer: If True, only route on F.Cu
         order: Net ordering strategy ("shortest_first", "longest_first")
-        trace_width: Default trace width in mm
-        clearance: Minimum clearance between traces in mm
+        trace_width: Default trace width in mm — the FALLBACK copper width for
+            any net not named in ``net_widths``.
+        clearance: Minimum clearance between traces in mm — the FALLBACK
+            keepout clearance if ``keepout_clearance`` is None.
         grid_resolution: Grid resolution in mm
+        net_widths: per-net class-sourced copper width override (see the
+            module note above). Affects ONLY the copper drawn for that net —
+            never the keepout margin, which is grid-wide (below).
+        keepout_clearance / keepout_trace_width: the grid's OWN clearance/
+            trace_width, if they differ from the run's baseline (net-class
+            minima; see the module note above). None (every pre-net-class
+            caller) means "use clearance/trace_width", i.e. unchanged
+            behaviour — a board with no net classes present sees no change.
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -379,7 +432,7 @@ def route_board(
         width=grid_w,
         height=grid_h,
         resolution=grid_resolution,
-        clearance=clearance,
+        clearance=clearance if keepout_clearance is None else keepout_clearance,
         layers=layers,
         origin=board.origin,
         # Round E2: the grid inflates every keepout by `clearance +
@@ -387,10 +440,15 @@ def route_board(
         # Passing it here (rather than letting RoutingGrid default) is what makes
         # the reserved space and the proposed copper the SAME width — a keepout
         # sized for a narrower trace than the one being laid is an under-block.
-        trace_width=trace_width,
+        # Net-class minima (this round): the grid's OWN trace_width is the
+        # board-wide WORST CASE, not necessarily what any one net actually
+        # draws — see the module note above for why that is deliberate.
+        trace_width=trace_width if keepout_trace_width is None else keepout_trace_width,
     )
 
-    # Mark all pads on the grid
+    # Mark all pads on the grid. The margin every pad's ring reserves is the
+    # GRID's own (worst-case) margin, uniformly — see the module note above;
+    # a per-pad override was rejected as an under-block.
     for pad in board.pads:
         if pad.layer in layers:
             pad_layers = [pad.layer]
@@ -427,6 +485,7 @@ def route_board(
         if len(pads) < 2:
             continue  # Skip nets with less than 2 pads
 
+        net_width = _net_width(net_widths, net_name, trace_width)
         route = Route(net=net_name)
 
         # Build minimum spanning tree for multi-pad nets
@@ -447,16 +506,19 @@ def route_board(
                 route.vias.extend(path.vias)
                 result.via_count += len(path.vias)
 
-                # Mark the path on the grid. The TRUE copper width goes in;
-                # RoutingGrid adds its own keepout_margin (Round E2). This used to
-                # hand-inflate to `trace_width + 2 * clearance`, a half-extent of
-                # `w/2 + clearance` — short by the newcomer's own half-width, so a
-                # later trace could sit half a width inside the clearance gap.
+                # Mark the path on the grid. The TRUE copper width goes in
+                # (THIS net's own, net-class or baseline); RoutingGrid adds
+                # its own keepout_margin (Round E2), sized to the board-wide
+                # worst case, not to this specific net (see the module note
+                # above). This used to hand-inflate to `trace_width + 2 *
+                # clearance`, a half-extent of `w/2 + clearance` — short by
+                # the newcomer's own half-width, so a later trace could sit
+                # half a width inside the clearance gap.
                 for segment in path.segments:
                     grid.mark_trace(
                         start=segment.start,
                         end=segment.end,
-                        width=trace_width,
+                        width=net_width,
                         net=net_name,
                         layer=segment.layer
                     )
@@ -786,6 +848,7 @@ def route_bus(
     trace_width: float = 0.25,
     layer: str = "F.Cu",
     orthogonal: bool = False,
+    net_widths: Optional[NetWidths] = None,
 ) -> list[Route]:
     """
     Route a group of signals as a bus with consistent spacing.
@@ -802,8 +865,17 @@ def route_bus(
         grid: RoutingGrid with collision detection
         board: Board containing the pads
         bus_hint: BusHint with nets, spacing, and waypoints
-        trace_width: Width of each trace
+        trace_width: Width of each trace — the FALLBACK for any net in the bus
+            not named in ``net_widths``.
         layer: Layer to route on
+        net_widths: per-net class-sourced copper width override (see the
+            module note above ``route_board``). Net-class minima round 2: a
+            bus net used to be laid at ``trace_width`` unconditionally, which
+            made the reply's per-route provenance describe copper the bus
+            never actually drew (docs/routing.md, "Bus routing now honours
+            net-class width"). The spacing OFFSET between parallel bus traces
+            is unaffected — that stays ``bus_hint.spacing``, a layout choice
+            independent of any one net's width.
 
     Returns:
         List of Route objects, one per net in the bus
@@ -871,6 +943,12 @@ def route_bus(
     # Route each net
     num_nets = len(net_pads_sorted)
     for i, (net_name, source_pad, dest_pad) in enumerate(net_pads_sorted):
+        # THIS net's own class-or-baseline width (net-class round 2) — the
+        # copper actually drawn below, so the reply's per-route provenance
+        # (pcb_worker.methods._attach_effective_routing_rules) never claims a
+        # class width the bus laid down at the baseline instead.
+        net_width = _net_width(net_widths, net_name, trace_width)
+
         # Calculate offset (centered around waypoint line)
         offset = (i - (num_nets - 1) / 2.0) * spacing
         offset_x = perp_x * offset
@@ -924,12 +1002,13 @@ def route_bus(
             route.paths.append(path)
 
             for segment in path.segments:
-                # True copper width only — the grid owns the keepout margin
-                # (see the note in route_board; Round E2).
+                # True copper width only (THIS net's own) — the grid owns the
+                # keepout margin (see the note in route_board; Round E2 and
+                # the net-class round).
                 grid.mark_trace(
                     start=segment.start,
                     end=segment.end,
-                    width=trace_width,
+                    width=net_width,
                     net=net_name,
                     layer=layer
                 )
@@ -990,7 +1069,10 @@ def route_board_with_hints(
     order: str = "signals_first",
     trace_width: float = 0.25,
     clearance: float = 0.2,
-    grid_resolution: float = 0.1
+    grid_resolution: float = 0.1,
+    net_widths: Optional[NetWidths] = None,
+    keepout_clearance: Optional[float] = None,
+    keepout_trace_width: Optional[float] = None,
 ) -> RoutingResult:
     """
     Route a board using routing hints for guidance.
@@ -1008,6 +1090,17 @@ def route_board_with_hints(
         trace_width: Default trace width in mm
         clearance: Minimum clearance between traces in mm
         grid_resolution: Grid resolution in mm
+        net_widths: per-net class-sourced copper width — see the module note
+            above ``route_board``. Threaded to BOTH the standard per-net loop
+            below AND ``route_bus`` (net-class round 2): each bus net draws at
+            its own width, exactly like a standard net. Only the bus's
+            parallel-spacing OFFSET stays shared across the whole bus — that
+            is a layout choice, not a per-net requirement (docs/routing.md,
+            "Bus routing now honours net-class width").
+        keepout_clearance / keepout_trace_width: the grid's OWN (board-wide
+            worst-case) clearance/trace_width — see the module note above.
+            Grid-wide, not per-net, so it covers every marking regardless of
+            which loop drew it (standard, bus, or pad).
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -1023,7 +1116,7 @@ def route_board_with_hints(
         width=grid_w,
         height=grid_h,
         resolution=grid_resolution,
-        clearance=clearance,
+        clearance=clearance if keepout_clearance is None else keepout_clearance,
         layers=layers,
         origin=board.origin,
         # Round E2: the grid inflates every keepout by `clearance +
@@ -1031,10 +1124,13 @@ def route_board_with_hints(
         # Passing it here (rather than letting RoutingGrid default) is what makes
         # the reserved space and the proposed copper the SAME width — a keepout
         # sized for a narrower trace than the one being laid is an under-block.
-        trace_width=trace_width,
+        # Net-class minima (this round): board-wide WORST CASE — see the
+        # module note above route_board for why this is grid-wide, not per-net.
+        trace_width=trace_width if keepout_trace_width is None else keepout_trace_width,
     )
 
-    # Mark all pads on the grid
+    # Mark all pads on the grid. Margin is the GRID's own (worst-case),
+    # uniformly — see the module note above route_board.
     for pad in board.pads:
         if pad.layer in layers:
             pad_layers = [pad.layer]
@@ -1099,6 +1195,7 @@ def route_board_with_hints(
                 trace_width=trace_width,
                 layer=bus_hint.preferred_layer or "F.Cu",
                 orthogonal=hints.global_hints.prefer_orthogonal,
+                net_widths=net_widths,
             )
             result.routes.extend(bus_routes)
             for route in bus_routes:
@@ -1128,6 +1225,7 @@ def route_board_with_hints(
         if jumper_mode and jumpers_used >= max_jumpers:
             can_via = False
 
+        net_width = _net_width(net_widths, net_name, trace_width)
         route = Route(net=net_name)
 
         # Use bridge-aware routing if bridge assignments exist
@@ -1170,13 +1268,15 @@ def route_board_with_hints(
                 if jumper_mode and jumpers_used >= max_jumpers:
                     can_via = False
 
-                # True copper width only — the grid owns the keepout margin
-                # (see the note in route_board; Round E2).
+                # True copper width only (THIS net's own — net-class or
+                # baseline) — the grid owns the keepout margin, sized to the
+                # board-wide worst case (see the note in route_board; Round E2
+                # and this round).
                 for segment in path.segments:
                     grid.mark_trace(
                         start=segment.start,
                         end=segment.end,
-                        width=trace_width,
+                        width=net_width,
                         net=net_name,
                         layer=segment.layer
                     )
