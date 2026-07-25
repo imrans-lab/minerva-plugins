@@ -294,3 +294,155 @@ def test_native_path_carries_no_drc_keys():
     assert "drc_summary" not in r
     for rt in r["routes"]:
         assert "drc" not in rt
+
+
+# ---------------------------------------------------------------------------
+# GEOMETRIC DRC-at-propose (docket 019f952b99f2, bug 019f80b5124d) — the copper
+# complement attached ALONGSIDE the connectivity result above. The connectivity
+# payloads asserted earlier in this file are unchanged: this surface ADDS
+# `drc_geometric` / `drc_geometric_summary`, it replaces nothing.
+# ---------------------------------------------------------------------------
+
+
+def test_route_attaches_both_scopes_and_they_are_distinguishable():
+    resp = _call("route", {"board": _clean_board(),
+                           "route_hints": [_detailed_hint()],
+                           "selection": {"mode": "open"}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    sig = [rt for rt in r["routes"] if rt["net"] == "SIG"][0]
+
+    # Two answers to two different questions, never one blurred "DRC clean".
+    assert sig["drc"]["scope"] == "connectivity"
+    assert sig["drc_geometric"]["scope"] == "geometric_candidate"
+    assert sig["drc_geometric"]["verifies_geometry"] is True
+    assert sig["drc_geometric"]["verdict"] == "clean"
+    # Deliberately NOT spelled `clean` — a consumer cannot confuse the geometric
+    # verdict with the connectivity boolean, nor read "did not run" as "passed".
+    assert "clean" not in sig["drc_geometric"]
+
+    summary = r["drc_geometric_summary"]
+    assert summary["scope"] == "geometric_candidate"
+    assert summary["verdict"] == "clean"
+    assert summary["per_candidate"]["route[0]"]["verdict"] == "clean"
+    # Staleness detection: the candidate verdict names the source it was computed
+    # against (the finding contract already carries source_digest).
+    assert summary["source_digest"]
+    assert summary["board_id"]
+
+
+def test_geometric_drc_flags_a_proposal_running_over_a_foreign_pad():
+    """The bug class of 019f80b5124d, on route()'s own path: a proposal whose
+    waypoint lands on a different-net pad. Connectivity catches this particular
+    one because the waypoint is a VERTEX; the geometric surface catches it as what
+    it physically is — copper overlapping copper, with a measured margin."""
+    board = _board()
+    board["components"][2]["x_mm"] = 30
+    board["components"][2]["y_mm"] = 20
+
+    resp = _call("route", {"board": board,
+                           "route_hints": [_detailed_hint(waypoints=[[30, 20]])],
+                           "selection": {"mode": "open"}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    sig = [rt for rt in r["routes"] if rt["net"] == "SIG"][0]
+
+    assert sig["drc_geometric"]["verdict"] == "violations"
+    shorts = [v for v in sig["drc_geometric"]["violations"]
+              if any(p.get("ref") == "A1" for p in v.get("participants") or [])]
+    assert shorts, sig["drc_geometric"]["violations"]
+    short = shorts[0]
+    assert short["type"] == "gc2_copper_clearance"
+    assert short["measured_mm"] < short["required_mm"]
+    assert {p.get("net_name") for p in short["participants"]} == {"SIG", "EXIST"}
+    # Attributed to the specific proposal a canvas is drawing.
+    assert any(s["candidate_id"] == "route[0]" for s in short["subjects"])
+
+
+def test_geometric_drc_failure_is_indeterminate_never_clean(monkeypatch):
+    """A geometric fault must not fail the route call, and must not silently
+    become a pass. Case (c) of the honesty contract."""
+    from pcb_worker import ir_candidates
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("synthetic geometric kernel fault")
+
+    monkeypatch.setattr(ir_candidates, "run_geometric_drc", _boom)
+
+    resp = _call("route", {"board": _clean_board(),
+                           "route_hints": [_detailed_hint()],
+                           "selection": {"mode": "open"}})
+    assert resp["ok"] is True, resp          # routes still return
+    r = resp["result"]
+    sig = [rt for rt in r["routes"] if rt["net"] == "SIG"][0]
+
+    assert sig["drc_geometric"]["verdict"] == "indeterminate"
+    assert sig["drc_geometric"]["verifies_geometry"] is False
+    assert "violations" not in sig["drc_geometric"]
+    assert "clean" not in sig["drc_geometric"]
+    assert "synthetic geometric kernel fault" in \
+        sig["drc_geometric"]["error"]["message"]
+
+    summary = r["drc_geometric_summary"]
+    assert summary["ok"] is False
+    assert summary["verdict"] == "indeterminate"
+    for forbidden in ("findings", "counts", "per_candidate", "baseline"):
+        assert forbidden not in summary
+    # The CONNECTIVITY half is unaffected — one surface failing must not take the
+    # other's honest answer down with it.
+    assert sig["drc"]["scope"] == "connectivity"
+    assert sig["drc"]["clean"] is True
+
+
+def test_native_path_carries_no_geometric_drc_keys():
+    """No canonical board => no compile => nothing to overlay. Same rule the
+    connectivity attach already follows."""
+    resp = _call("route", {"board": {
+        "pads": [
+            {"component": "U1", "number": "1", "net": "SIG", "x": 0, "y": 0, "size": [1, 1]},
+            {"component": "U2", "number": "1", "net": "SIG", "x": 10, "y": 0, "size": [1, 1]},
+        ],
+        "width": 20, "height": 20,
+    }})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    assert "drc_geometric_summary" not in r
+    for rt in r["routes"]:
+        assert "drc_geometric" not in rt
+
+
+def test_geometric_candidate_width_is_the_width_the_engine_routed_at():
+    """The overlay models the width the run ACTUALLY used, read from the engine's
+    own signature rather than a duplicated literal — under-stating candidate
+    copper would be a route to a false clean."""
+    from pcb_worker.methods import _engine_default_trace_width_mm
+    from agent_router.router import route_board
+    import inspect
+
+    assert _engine_default_trace_width_mm() == \
+        inspect.signature(route_board).parameters["trace_width"].default
+
+
+def test_an_unchecked_empty_route_is_recorded_in_the_summary_not_silently_clean():
+    """A route with no segments and no vias never reaches the overlay, so
+    `per_candidate` would omit it entirely. The per-route reply already refuses
+    to say "clean" about copper that does not exist; the SUMMARY must not stay
+    silent either, or a caller reading only the summary sees an all-clean
+    verdict with no sign that a route went unchecked. Silence about copper that
+    was not checked is the same dishonesty as a false clean."""
+    from pcb_worker import compile_board
+    from pcb_worker.methods import _attach_route_geometric_drc, _compile_or_fail
+
+    compiled = _compile_or_fail(
+        _clean_board(), requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
+    payload = {"routes": [{"net": "SIG", "segments": [], "vias": []}]}
+    _attach_route_geometric_drc(payload, compiled.board, trace_width_mm=0.25)
+
+    route = payload["routes"][0]
+    assert route["drc_geometric"]["verdict"] == "indeterminate"
+    assert route["drc_geometric"]["verifies_geometry"] is False
+    assert "clean" not in route["drc_geometric"]
+
+    entry = payload["drc_geometric_summary"]["per_candidate"]["route[0]"]
+    assert entry["verdict"] == "indeterminate"
+    assert entry["reason"]

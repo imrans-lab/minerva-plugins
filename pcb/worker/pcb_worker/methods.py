@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (board_model, compile_board, drc, footprints, gerber,
-               ir_connectivity, kicad, libcheck, resolve)
+               ir_candidates, ir_connectivity, kicad, libcheck, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -825,6 +825,159 @@ def _attach_route_drc(payload: dict, board_dict: dict) -> None:
                               "violation_count": len(findings)}
 
 
+# ---------------------------------------------------------------------------
+# GEOMETRIC DRC-at-propose (docket 019f952b99f2) — the COMPLEMENT to the
+# connectivity attach above, not a replacement for it.
+#
+# `_attach_route_drc` answers "is the net topology sane?" over centerlines and
+# pad centers. It cannot represent a trace running through the CENTRE of a
+# different-net pad, which is how bug 019f80b5124d shipped a shorting proposal
+# under a "clean" label. `_attach_route_geometric_drc` answers the copper
+# question, by projecting the proposal onto the compiled ResolvedBoard
+# (`ir_candidates`) and running the UNCHANGED geometric kernel. Both payloads
+# are attached; neither is authoritative for the other's question.
+# ---------------------------------------------------------------------------
+
+
+def _engine_default_trace_width_mm() -> float | None:
+    """The width the ROUTER routes at when the caller sets none.
+
+    Read from ``agent_router.router.route_board``'s own signature rather than
+    re-spelled as a literal here: the overlay must model the width the engine
+    ACTUALLY used, and a duplicated default that drifted would silently under- or
+    over-state candidate copper. Returns None if it cannot be read, which makes
+    the overlay fail closed rather than guess."""
+    import inspect
+    from agent_router.router import route_board
+    try:
+        default = inspect.signature(route_board).parameters["trace_width"].default
+    except (KeyError, TypeError, ValueError):
+        return None
+    if isinstance(default, bool) or not isinstance(default, (int, float)):
+        return None
+    return float(default)
+
+
+def _routes_to_candidates(routes: list) -> tuple[list, list]:
+    """Split proposed routes into checkable CANDIDATES and the ones with no
+    geometry to check. Each route becomes one candidate identified by its index +
+    net, because a route reply carries no id of its own; the index is what a
+    canvas already uses to address a ghost. Returns (candidates, empty_indices)."""
+    candidates: list = []
+    empty: list = []
+    for index, r in enumerate(routes):
+        if not isinstance(r, dict):
+            empty.append(index)
+            continue
+        segments = [s for s in (r.get("segments") or []) if isinstance(s, dict)]
+        vias = [v for v in (r.get("vias") or []) if v is not None]
+        if not segments and not vias:
+            empty.append(index)
+            continue
+        candidates.append({
+            "candidate_id": f"route[{index}]",
+            # A route reply carries no revision; the union's `source_digest`
+            # (the compiled board's) is what makes a stale result detectable here.
+            "revision": None,
+            "net": r.get("net"),
+            "segments": [dict(s, id=str(s.get("id", "") or f"segment:{i}"))
+                         for i, s in enumerate(segments)],
+            # Span is top<->bottom because the vendored engine is 2-layer only
+            # (see _ROUTABLE_KICAD_LAYERS in route_bridge); a route reply carries
+            # no span of its own. IF THIS IS COPIED to a board with inner copper,
+            # this hardcode would silently UNDER-model the span and the overlay
+            # would miss collisions on the layers it skipped. Read the span from
+            # the route when the engine learns to emit one.
+            "vias": [{"id": f"via:{i}", "position": v, "from_layer": "top",
+                      "to_layer": "bottom"} for i, v in enumerate(vias)],
+        })
+    return candidates, empty
+
+
+def _attach_route_geometric_drc(payload: dict, rb, *,
+                                trace_width_mm: float | None = None) -> None:
+    """Mutate payload in place with the GEOMETRIC candidate verdict.
+
+    Each route gains ``"drc_geometric"`` and the payload gains
+    ``"drc_geometric_summary"`` (the full candidate union — findings, per-candidate
+    verdicts, and the board's own pre-existing ``baseline``).
+
+    DELIBERATELY NOT SPELLED ``clean``. The connectivity attach uses
+    ``clean: bool|None``; this one uses ``verdict: "clean"|"violations"|
+    "indeterminate"`` so the two can never be confused by a consumer reading a
+    truthy field, and so "the check could not run" cannot be read as "the check
+    passed". A geometric fault never fails the route call — the proposal still
+    returns, with an honest indeterminate verdict.
+
+    Candidate via geometry comes from the board's OWN authored routing defaults
+    (``design_rules.via_diameter_mm``/``via_drill_mm``), which is what acceptance
+    writes; the trace width is the width the engine routed at. Nothing is
+    invented — a value the overlay cannot source makes it fail closed.
+    """
+    routes = payload.get("routes")
+    if not isinstance(routes, list):
+        return
+
+    candidates, empty = _routes_to_candidates(routes)
+    try:
+        defaults = rb.design_rules.defaults
+        union = ir_candidates.check_candidates(
+            rb, candidates,
+            default_width_mm=trace_width_mm,
+            default_via_diameter_mm=defaults.via_diameter_mm,
+            default_via_drill_mm=defaults.via_drill_mm)
+    except Exception as exc:  # noqa: BLE001 - a fault is NOT a clean.
+        union = ir_candidates.candidate_indeterminate(
+            "internal", f"geometric candidate DRC raised {exc!r}")
+
+    payload["drc_geometric_summary"] = union
+
+    if not union.get("ok"):
+        shared = {"scope": union.get("scope"), "verifies_geometry": False,
+                  "verdict": "indeterminate", "error": union.get("error")}
+        for r in routes:
+            if isinstance(r, dict):
+                r["drc_geometric"] = dict(shared)
+        return
+
+    # An empty route never reaches the overlay (there is no copper to project),
+    # so per_candidate would omit it and a caller reading ONLY the summary would
+    # see an all-clean verdict with no sign that a route went unchecked. Record
+    # them explicitly, for the same reason the per-route branch below refuses to
+    # say "clean": silence about copper that was not checked is the dishonesty
+    # this surface exists to remove.
+    for index in empty:
+        union.setdefault("per_candidate", {})[f"route[{index}]"] = {
+            "revision": None, "verdict": "indeterminate", "finding_count": 0,
+            "reason": "route carries no segments or vias to check"}
+
+    by_candidate: dict = {}
+    for finding in union.get("findings", []):
+        for subject in finding.get("subjects", []):
+            cid = subject.get("candidate_id")
+            if cid and cid != ir_candidates.BOARD_SUBJECT_ID:
+                by_candidate.setdefault(cid, []).append(finding)
+
+    for index, r in enumerate(routes):
+        if not isinstance(r, dict):
+            continue
+        if index in empty:
+            # Nothing to model. Saying "clean" about copper that does not exist
+            # would be the exact dishonesty this surface was built to remove.
+            r["drc_geometric"] = {
+                "scope": union["scope"], "verifies_geometry": False,
+                "verdict": "indeterminate",
+                "error": {"kind": "unsupported_geometry",
+                          "message": "route carries no segments or vias to check",
+                          "diagnostics": []}}
+            continue
+        violations = by_candidate.get(f"route[{index}]", [])
+        r["drc_geometric"] = {
+            "scope": union["scope"], "verifies_geometry": True,
+            "verdict": "violations" if violations else "clean",
+            "violations": violations}
+
+
 def _route(params: dict) -> dict:
     """Autoroute a board with the vendored agent_router engine.
 
@@ -836,6 +989,10 @@ def _route(params: dict) -> dict:
     drawn_routes: list = []
     selected_hint_ids: list = []
     drc_board: dict | None = None  # set only on the CANONICAL path (see below)
+    # The COMPILED board the router consumed — the base the geometric candidate
+    # overlay layers proposals onto (019f952b99f2). Same single compile as the
+    # other two consumers; canonical path only, like drc_board.
+    geometric_board = None
 
     # Only pass through options the engine actually accepts.
     opts = params.get("options") or {}
@@ -883,6 +1040,7 @@ def _route(params: dict) -> dict:
         try:
             board = route_bridge.resolved_board_to_router(compiled.board)
             drc_board = ir_connectivity.connectivity_board(compiled.board)
+            geometric_board = compiled.board
         except route_bridge.UnsupportedGeometry as exc:
             # Compiled fine, but carries geometry the routing grid cannot model
             # faithfully (inner copper, accepted traces/vias, zones, a copper
@@ -970,6 +1128,15 @@ def _route(params: dict) -> dict:
     # drc/drc_summary keys added, matching its pre-existing output exactly).
     if drc_board is not None:
         _attach_route_drc(payload, drc_board)
+    # GEOMETRIC DRC-at-propose (019f952b99f2) — the copper complement, attached
+    # ALONGSIDE the connectivity result above (never instead of it). The effective
+    # trace width is the one the run actually used: an explicit caller/hint width
+    # if any, else the engine's own default.
+    if geometric_board is not None:
+        _attach_route_geometric_drc(
+            payload, geometric_board,
+            trace_width_mm=(ir_candidates.positive_mm(kw.get("trace_width"))
+                            or _engine_default_trace_width_mm()))
 
     return {"ok": True, "result": payload}
 
@@ -1015,37 +1182,13 @@ def _dc_dist(a, b) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
 
-def _dc_points(raw) -> list:
-    """Coerce a segment's points to [(x, y), ...]. Accepts [[x,y],...] pairs and
-    {x_mm,y_mm}/{x,y} dicts."""
-    out: list = []
-    if isinstance(raw, list):
-        for p in raw:
-            if isinstance(p, (list, tuple)) and len(p) >= 2:
-                out.append((float(p[0]), float(p[1])))
-            elif isinstance(p, dict):
-                if "x_mm" in p and "y_mm" in p:
-                    out.append((float(p["x_mm"]), float(p["y_mm"])))
-                elif "x" in p and "y" in p:
-                    out.append((float(p["x"]), float(p["y"])))
-    return out
-
-
-def _dc_via_pos(raw):
-    """Coerce a via position to (x, y) or None. Accepts [x,y], {x_mm,y_mm},
-    {x,y}, and {position:<either>}."""
-    if isinstance(raw, dict):
-        if "x_mm" in raw and "y_mm" in raw:
-            return (float(raw["x_mm"]), float(raw["y_mm"]))
-        if "x" in raw and "y" in raw:
-            return (float(raw["x"]), float(raw["y"]))
-        pos = raw.get("position")
-        if pos is not None:
-            return _dc_via_pos(pos)
-        return None
-    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
-        return (float(raw[0]), float(raw[1]))
-    return None
+# The candidate wire-shape coercion moved to the neutral :mod:`ir_candidates`
+# owner (019f952b99f2) so the CONNECTIVITY candidate surface (draft_check) and the
+# GEOMETRIC one accept exactly the same candidate language. A shape one accepts
+# and the other silently drops would be a correctness trap. Aliased, not
+# re-implemented; the local names are kept for existing callers/tests.
+_dc_points = ir_candidates.candidate_points
+_dc_via_pos = ir_candidates.candidate_via_position
 
 
 def _dc_pt_touches_seg(pt, a, b, eps: float) -> bool:

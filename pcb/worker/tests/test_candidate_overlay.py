@@ -1,0 +1,444 @@
+"""Typed candidate-copper overlay — geometric feedback BEFORE acceptance.
+
+Docket 019f952b99f2, closing bug 019f80b5124d: a routing proposal ran a trace
+straight through the centre of a different-net pad, shorting two nets, and the
+DRC attached to that proposal reported it CLEAN. The connectivity checker cannot
+see that fault (traces are centerlines, pads are points); geometric DRC detects
+it exactly, but only ever ran on ACCEPTED copper.
+
+BASELINE ROBUSTNESS. ``smart_remote.yaml`` already carries 12 geometric
+violations of its own (bug 019f989d3179, tracked separately — the board is NOT
+repaired here). Every assertion below is therefore about the DELTA a candidate
+introduces, or about a specific attributed finding. Nothing asserts "clean" on a
+whole board, and no count is hard-coded against the fixture's own dirt.
+"""
+
+from __future__ import annotations
+
+import yaml
+
+from pcb_worker import board_model, compile_board, ir_candidates
+from pcb_worker.ir_pads import UnsupportedGeometry
+from pcb_worker.methods import handle_request
+
+SMART_REMOTE = "tests/testdata/smart_remote.yaml"
+
+
+def _smart_remote_dict() -> dict:
+    with open(SMART_REMOTE) as fh:
+        return yaml.safe_load(fh)
+
+
+def _compile(board: dict):
+    result = compile_board.compile_board(board)
+    assert isinstance(result, compile_board.ResolutionSuccess), result
+    return result.board
+
+
+def _compiled_smart_remote():
+    return _compile(board_model.load_board({"yaml": yaml.safe_dump(_smart_remote_dict())}))
+
+
+# The exact geometry of bug 019f80b5124d: an I2S_SD trace on the bottom layer
+# running straight down x=45.72 through MIC1 pad 4, which belongs to I2S_WS.
+SHORTING_SEGMENT = {
+    "id": "seg-0", "layer": "bottom", "width_mm": 0.3,
+    "points": [[45.72, 90.0], [45.72, 106.68]],
+}
+
+
+def _shorting_candidate(candidate_id: str = "ghost-1", revision=7) -> dict:
+    return {"candidate_id": candidate_id, "revision": revision, "net": "I2S_SD",
+            "segments": [dict(SHORTING_SEGMENT)]}
+
+
+def _mic1_pad4_findings(findings: list) -> list:
+    """Findings that name MIC1 pad 4 AND the trespassing net — the short itself."""
+    out = []
+    for f in findings:
+        participants = f.get("participants") or []
+        names = {(p.get("ref"), p.get("pad")) for p in participants}
+        nets = {p.get("net_name") for p in participants}
+        if ("MIC1", "4") in names and nets == {"I2S_WS", "I2S_SD"}:
+            out.append(f)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# THE HEADLINE: the shorting proposal is caught BEFORE acceptance.
+# ---------------------------------------------------------------------------
+
+
+def test_shorting_proposal_is_caught_before_acceptance():
+    rb = _compiled_smart_remote()
+    union = ir_candidates.check_candidates(rb, [_shorting_candidate()])
+
+    # Case (b): the check RAN and found violations — unmistakably geometric, and
+    # unmistakably NOT the connectivity scope today's propose DRC carries.
+    assert union["ok"] is True
+    assert union["scope"] == "geometric_candidate"
+    assert union["verifies_geometry"] is True
+    assert union["verdict"] == "violations"
+
+    shorts = _mic1_pad4_findings(union["findings"])
+    assert len(shorts) == 1, union["findings"]
+    short = shorts[0]
+    assert short["type"] == "gc2_copper_clearance"
+    # Measured, attributed, and located — not merely "something is wrong".
+    assert short["measured_mm"] == -0.95
+    assert short["required_mm"] == 0.2
+    assert short["closest"] == [45.72, 99.06]
+    assert short["layer"] == "bottom"
+
+    # Attribution back to the specific ghost route + its revision, so a canvas can
+    # highlight THAT trace and detect a stale result.
+    assert {"candidate_id": "ghost-1", "revision": 7, "segment_id": "seg-0"} \
+        in short["subjects"]
+    assert {"candidate_id": "board"} in short["subjects"]
+
+    per_candidate = union["per_candidate"]["ghost-1"]
+    assert per_candidate["verdict"] == "violations"
+    assert per_candidate["revision"] == 7
+    assert per_candidate["finding_count"] == len(union["findings"])
+
+
+def test_connectivity_drc_still_calls_the_same_geometry_clean():
+    """The bug, restated as a test: the CONNECTIVITY checker reports the shorting
+    proposal clean. It is not wrong — a centerline checker cannot represent this —
+    which is exactly why the geometric complement above had to exist. This test
+    pins the division of labour: if connectivity ever starts reporting it, the two
+    surfaces have blurred and the honest-label contract needs revisiting."""
+    from pcb_worker.methods import _attach_route_drc
+    from pcb_worker import ir_connectivity
+
+    rb = _compiled_smart_remote()
+    payload = {"routes": [{"net": "I2S_SD", "segments": [
+        {"layer": "bottom", "start": [45.72, 90.0], "end": [45.72, 106.68]}]}]}
+    _attach_route_drc(payload, ir_connectivity.connectivity_board(rb))
+    route_drc = payload["routes"][0]["drc"]
+    assert route_drc["scope"] == "connectivity"
+    assert not any(v.get("type") == "wrong_net_pad" for v in route_drc["violations"])
+
+
+# ---------------------------------------------------------------------------
+# PROPOSE-TIME == POST-ACCEPT. The same geometry, checked both ways.
+# ---------------------------------------------------------------------------
+
+
+def _comparable(finding: dict) -> dict:
+    """A finding stripped of IR identity, so a candidate's synthetic entity ids can
+    be compared against the ids the compiler mints for an accepted trace. What
+    remains is everything a human or a canvas actually reads.
+
+    PAIR ORDER IS NORMALIZED, deliberately. GC2/GC6 order the two sides of a pair
+    by opaque entity_id (drc_geometric ``lo, hi``), and a candidate's id is not the
+    id the compiler will mint once it is accepted — so the SAME collision can be
+    reported as (pad, trace) before acceptance and (trace, pad) after, swapping
+    ``closest``/``witness`` with it. That is presentation, not measurement: the
+    pair, the rule, the measured margin and the location are identical. A consumer
+    that draws the pair must not depend on the order either."""
+    keep = {k: v for k, v in finding.items()
+            if k not in ("entity_id", "parent", "participants", "subjects",
+                         "closest", "witness", "entities")}
+    keep["participants"] = sorted(
+        ({pk: pv for pk, pv in p.items()
+          if pk not in ("entity_id", "parent", "net_id")}
+         for p in finding.get("participants") or []),
+        key=repr)
+    keep["endpoints"] = sorted([finding.get("closest"), finding.get("witness")],
+                               key=repr)
+    return keep
+
+
+def test_proposed_and_accepted_geometry_produce_the_identical_finding():
+    """The proposal and the same trace accepted into the board must agree — the
+    whole point of overlaying at the IR level instead of re-deriving primitives."""
+    rb = _compiled_smart_remote()
+    proposed = ir_candidates.check_candidates(rb, [_shorting_candidate()])
+
+    accepted_src = _smart_remote_dict()
+    accepted_src["traces"].append({
+        "net": "I2S_SD", "layer": "bottom", "width_mm": 0.3,
+        "points": [{"x_mm": 45.72, "y_mm": 90.0}, {"x_mm": 45.72, "y_mm": 106.68}]})
+    accepted = handle_request({"id": "a", "method": "drc_geometric",
+                               "params": {"yaml": yaml.safe_dump(accepted_src)}})["result"]
+    assert accepted["ok"] is True and accepted["verdict"] == "violations"
+
+    proposed_short = _comparable(_mic1_pad4_findings(proposed["findings"])[0])
+    accepted_short = _comparable(_mic1_pad4_findings(accepted["findings"])[0])
+    assert proposed_short == accepted_short
+
+    # And the whole delta agrees, not just the headline finding: every violation
+    # the accepted board gained is one the proposal predicted.
+    baseline = {str(_comparable(f)) for f in proposed["baseline"]["findings"]}
+    introduced = sorted(str(_comparable(f)) for f in proposed["findings"])
+    accepted_delta = sorted(str(_comparable(f)) for f in accepted["findings"]
+                            if str(_comparable(f)) not in baseline)
+    assert introduced == accepted_delta
+
+
+def test_baseline_is_reported_separately_and_never_charged_to_a_candidate():
+    """The fixture's 12 pre-existing violations (019f989d3179) belong to the BOARD.
+    They must be visible — hiding them would be dishonest — but never attributed to
+    a proposal, and never allowed to make a clean proposal look dirty."""
+    rb = _compiled_smart_remote()
+    whole_board = handle_request({
+        "id": "b", "method": "drc_geometric",
+        "params": {"yaml": yaml.safe_dump(_smart_remote_dict())}})["result"]
+
+    union = ir_candidates.check_candidates(rb, [_shorting_candidate()])
+    assert len(union["baseline"]["findings"]) == len(whole_board["findings"])
+    assert union["baseline"]["verdict"] == "violations"
+    assert union["baseline"]["counts"] == whole_board["counts"]
+    for finding in union["baseline"]["findings"]:
+        assert "subjects" not in finding
+
+
+def test_a_clean_candidate_on_a_dirty_board_is_reported_clean():
+    """Case (a) over a board that is NOT clean: the candidate verdict is about the
+    candidate. A dirty board must not veto an honest proposal."""
+    rb = _compiled_smart_remote()
+    # Empty top-left corner of the board, well clear of every placed part.
+    union = ir_candidates.check_candidates(rb, [{
+        "candidate_id": "ghost-clean", "revision": 1, "net": "I2S_SD",
+        "segments": [{"id": "s0", "layer": "bottom", "width_mm": 0.3,
+                      "points": [[2.0, 66.0], [2.0, 70.0]]}]}])
+    assert union["ok"] is True
+    assert union["verdict"] == "clean"
+    assert union["findings"] == []
+    assert union["per_candidate"]["ghost-clean"]["verdict"] == "clean"
+    # ... while the board's own dirt is still on the record, right beside it.
+    assert union["baseline"]["verdict"] == "violations"
+
+
+# ---------------------------------------------------------------------------
+# MULTI-PAD NET (3+ pins) — campaign standing rule, gate 019f70f76c2f.
+# Two-pin single-path fixtures previously missed four real bugs.
+# ---------------------------------------------------------------------------
+
+
+def _pad(ref: str, x: float, y: float) -> dict:
+    return {"ref": ref, "footprint": "TH_TestPoint", "x_mm": x, "y_mm": y,
+            "rotation_deg": 0, "layer": "top",
+            "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                      "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]}
+
+
+def _bus_board() -> dict:
+    """A THREE-pin net (BUS: P1/P2/P3) plus a foreign net whose pad X1 sits on the
+    straight P1->P2 run. A 2-pin fixture cannot express this: the fault needs a
+    net whose route legitimately passes OTHER pads, some its own (must stay clean)
+    and one not (must be caught)."""
+    return {
+        "version": 1, "name": "bus-multipad", "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [_pad("P1", 10, 20), _pad("P2", 50, 20), _pad("P3", 30, 35),
+                       _pad("X1", 30, 20), _pad("X2", 50, 35)],
+        "nets": [{"name": "BUS", "pins": ["P1.1", "P2.1", "P3.1"]},
+                 {"name": "OTHER", "pins": ["X1.1", "X2.1"]}],
+        "traces": [],
+    }
+
+
+def _bus_rb():
+    return _compile(board_model.load_board({"board": _bus_board()}))
+
+
+def test_multipad_net_candidate_through_a_foreign_pad_is_caught():
+    rb = _bus_rb()
+    union = ir_candidates.check_candidates(rb, [{
+        "candidate_id": "bus-a", "revision": "r1", "net": "BUS",
+        "segments": [{"id": "run", "layer": "top", "width_mm": 0.3,
+                      "points": [[10, 20], [50, 20]]}]}])
+    assert union["verdict"] == "violations"
+    hits = [f for f in union["findings"]
+            if any(p.get("ref") == "X1" for p in f.get("participants") or [])]
+    assert hits, union["findings"]
+    nets = {p.get("net_name") for p in hits[0]["participants"]}
+    assert nets == {"BUS", "OTHER"}
+    assert {"candidate_id": "bus-a", "revision": "r1", "segment_id": "run"} \
+        in hits[0]["subjects"]
+
+
+def test_multipad_net_candidate_over_its_own_pads_stays_clean():
+    """The same-net exemption across a 3-pin net: a BUS route that runs from P1 to
+    P3 touches its OWN pads, which is a connection, not a short."""
+    rb = _bus_rb()
+    union = ir_candidates.check_candidates(rb, [{
+        "candidate_id": "bus-b", "revision": "r1", "net": "BUS",
+        "segments": [{"id": "leg-a", "layer": "top", "width_mm": 0.3,
+                      "points": [[10, 20], [10, 35], [30, 35]]}]}])
+    assert union["verdict"] == "clean", union["findings"]
+    assert union["per_candidate"]["bus-b"]["verdict"] == "clean"
+
+
+def test_two_candidates_colliding_name_both_ghosts_and_not_the_board():
+    """Candidate-vs-candidate. A canvas must be able to blame both ghosts, and must
+    NOT be told committed copper is involved when it is not."""
+    rb = _bus_rb()
+    union = ir_candidates.check_candidates(rb, [
+        {"candidate_id": "g1", "revision": 1, "net": "BUS",
+         "segments": [{"id": "a", "layer": "top", "width_mm": 0.3,
+                       "points": [[12, 25], [12, 32]]}]},
+        {"candidate_id": "g2", "revision": 1, "net": "OTHER",
+         "segments": [{"id": "b", "layer": "top", "width_mm": 0.3,
+                       "points": [[8, 28], [16, 28]]}]}])
+    assert union["verdict"] == "violations"
+    crossed = [f for f in union["findings"]
+               if {s["candidate_id"] for s in f["subjects"]} == {"g1", "g2"}]
+    assert crossed, union["findings"]
+    assert all(s["candidate_id"] != "board" for s in crossed[0]["subjects"])
+    assert union["per_candidate"]["g1"]["verdict"] == "violations"
+    assert union["per_candidate"]["g2"]["verdict"] == "violations"
+
+
+def test_candidate_via_is_projected_as_real_copper_and_a_real_hole():
+    """A ghost VIA is copper on both layers and a drilled hole, not a marker."""
+    rb = _bus_rb()
+    union = ir_candidates.check_candidates(rb, [{
+        "candidate_id": "g-via", "revision": 1, "net": "BUS",
+        # Dropped right on top of X1's PTH pad (net OTHER) at (30, 20).
+        "vias": [{"id": "v0", "position": [30, 20], "diameter_mm": 0.8,
+                  "drill_mm": 0.4}]}])
+    assert union["verdict"] == "violations"
+    types = {f["type"] for f in union["findings"]}
+    assert "gc2_copper_clearance" in types      # via land vs pad land
+    assert "gc6_hole_to_hole" in types          # via drill vs pad drill
+    for finding in union["findings"]:
+        assert {"candidate_id": "g-via", "revision": 1, "via_id": "v0"} \
+            in finding["subjects"]
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED — case (c) must never read like case (a).
+# ---------------------------------------------------------------------------
+
+
+def _assert_indeterminate(union: dict, kind: str, needle: str) -> None:
+    assert union["ok"] is False
+    assert union["scope"] == "geometric_candidate"
+    assert union["verifies_geometry"] is False
+    assert union["verdict"] == "indeterminate"
+    assert union["error"]["kind"] == kind
+    assert needle in union["error"]["message"]
+    # NOTHING a consumer could read as a pass.
+    for forbidden in ("findings", "counts", "per_candidate", "clean", "baseline"):
+        assert forbidden not in union, forbidden
+
+
+def test_candidate_on_an_unknown_net_fails_closed():
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [{
+            "candidate_id": "g", "net": "NOT_A_NET",
+            "segments": [{"layer": "top", "width_mm": 0.3,
+                          "points": [[10, 20], [20, 20]]}]}]),
+        "unsupported_geometry", "not a net of this board")
+
+
+def test_candidate_without_a_declared_width_fails_closed():
+    """No approximated copper: a width nobody declared is never invented."""
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [{
+            "candidate_id": "g", "net": "BUS",
+            "segments": [{"layer": "top", "points": [[10, 20], [20, 20]]}]}]),
+        "unsupported_geometry", "never modeled at a guessed width")
+
+
+def test_candidate_via_without_a_declared_size_fails_closed():
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [{
+            "candidate_id": "g", "net": "BUS",
+            "vias": [{"position": [20, 20]}]}]),
+        "unsupported_geometry", "never modeled at a guessed")
+
+
+def test_candidate_on_a_foreign_layer_fails_closed():
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [{
+            "candidate_id": "g", "net": "BUS",
+            "segments": [{"layer": "In1.Cu", "width_mm": 0.3,
+                          "points": [[10, 20], [20, 20]]}]}]),
+        "unsupported_geometry", "is not a copper layer of this board")
+
+
+def test_zero_length_candidate_leg_fails_closed():
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [{
+            "candidate_id": "g", "net": "BUS",
+            "segments": [{"layer": "top", "width_mm": 0.3,
+                          "points": [[10, 20], [10, 20]]}]}]),
+        "unsupported_geometry", "zero-length leg")
+
+
+def test_duplicate_candidate_ids_fail_closed():
+    """Two ghosts sharing an id would make attribution ambiguous — a finding could
+    not be pinned to one route. Ambiguous attribution is a wrong answer."""
+    seg = {"layer": "top", "width_mm": 0.3, "points": [[10, 20], [20, 20]]}
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [
+            {"candidate_id": "same", "net": "BUS", "segments": [dict(seg)]},
+            {"candidate_id": "same", "net": "BUS", "segments": [dict(seg)]}]),
+        "unsupported_geometry", "duplicate candidate_id")
+
+
+def test_kernel_indeterminacy_propagates_and_is_not_downgraded(monkeypatch):
+    """When the KERNEL cannot reach a verdict over base+candidates, the candidate
+    reply is indeterminate too — never a clean, never a partial finding list."""
+    from pcb_worker import drc_geometric
+
+    monkeypatch.setattr(
+        ir_candidates, "run_geometric_drc",
+        lambda rb, warnings=(): drc_geometric.geometric_indeterminate(
+            "unsupported_geometry", "synthetic unmodelable geometry"))
+    _assert_indeterminate(
+        ir_candidates.check_candidates(_bus_rb(), [{
+            "candidate_id": "g", "net": "BUS",
+            "segments": [{"layer": "top", "width_mm": 0.3,
+                          "points": [[10, 20], [20, 20]]}]}]),
+        "unsupported_geometry", "synthetic unmodelable geometry")
+
+
+def test_overlay_raises_rather_than_returning_partial_geometry():
+    """The projection itself is all-or-nothing: one unmodelable candidate does not
+    yield a board carrying the others."""
+    rb = _bus_rb()
+    try:
+        ir_candidates.build_overlay(rb, [
+            {"candidate_id": "ok", "net": "BUS",
+             "segments": [{"layer": "top", "width_mm": 0.3,
+                           "points": [[10, 20], [20, 20]]}]},
+            {"candidate_id": "bad", "net": "NOPE", "segments": []}])
+    except UnsupportedGeometry as exc:
+        assert "not a net of this board" in str(exc)
+    else:  # pragma: no cover - the assertion is the point
+        raise AssertionError("expected UnsupportedGeometry")
+
+
+def test_overlay_does_not_mutate_the_base_board():
+    rb = _bus_rb()
+    before = (len(rb.traces), len(rb.vias))
+    overlay = ir_candidates.build_overlay(rb, [{
+        "candidate_id": "g", "net": "BUS",
+        "segments": [{"layer": "top", "width_mm": 0.3,
+                      "points": [[10, 20], [20, 20]]}]}])
+    assert (len(rb.traces), len(rb.vias)) == before
+    assert len(overlay.board.traces) == before[0] + 1
+    # The overlaid board keeps the BASE board's identity + digest, so a consumer
+    # can tell which source a candidate verdict was computed against.
+    assert overlay.board.id == rb.id
+    assert overlay.board.provenance.source_digest == rb.provenance.source_digest
+
+
+def test_route_segment_start_end_shape_is_accepted():
+    """route() serializes segments as {start, end, layer} while ghosts use
+    {points}. Both are the same candidate language here."""
+    rb = _bus_rb()
+    union = ir_candidates.check_candidates(rb, [{
+        "candidate_id": "g", "net": "BUS",
+        "segments": [{"id": "s", "layer": "top", "width_mm": 0.3,
+                      "start": [10, 20], "end": [50, 20]}]}])
+    assert union["verdict"] == "violations"
+    assert any(p.get("ref") == "X1"
+               for f in union["findings"] for p in f.get("participants") or [])

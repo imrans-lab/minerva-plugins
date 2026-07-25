@@ -147,5 +147,47 @@ having a rotation applied twice.
 
 **It is still connectivity-only.** The projection deliberately carries no pad
 extents — sharing a pad *census* is not sharing *geometry*. The attached result
-stays `scope:"connectivity"` (see `docs/drc.md`), it is **not** a geometric gate,
-and geometric candidate feedback remains `019f952b99f2`.
+stays `scope:"connectivity"` (see `docs/drc.md`) and is **not** a geometric gate.
+The geometric gate is the candidate overlay below, attached beside it.
+
+## Geometric DRC-at-propose (the candidate overlay)
+
+Docket `019f952b99f2`, closing bug `019f80b5124d` — a proposal that ran through
+the centre of a different-net pad and was reported **clean**, because the only
+check attached to it was the centerline one.
+
+The **same** compile feeds a third consumer: `ir_candidates.check_candidates`
+layers each proposed route onto `compiled.board` as IR traces/vias and runs the
+unchanged geometric kernel over base + candidates. `route()` therefore returns
+**two** verdicts per proposal, answering two different questions:
+
+| key | scope | shape |
+|---|---|---|
+| `routes[].drc` | `connectivity` | `{clean: bool\|null, violations}` (unchanged) |
+| `routes[].drc_geometric` | `geometric_candidate` | `{verdict: "clean"\|"violations"\|"indeterminate", violations}` |
+| `drc_geometric_summary` | `geometric_candidate` | the full candidate union (`docs/drc.md`) |
+
+The geometric payload deliberately does **not** carry a `clean` field. The
+connectivity one does, and a consumer must never be able to read "the geometric
+check could not run" as "the geometric check passed". A geometric fault never
+fails the route call — the proposal still returns, with an honest
+`verdict:"indeterminate"`. The native pad-list path has no compiled board, so it
+carries neither key (exactly as it carries no `drc`).
+
+### Where candidate dimensions come from — nothing is invented
+
+A route reply carries geometry but not sizes, and the fail-closed ruling forbids
+approximated copper, so both values are sourced explicitly:
+
+- **Trace width** — the width the run *actually routed at*: an explicit caller or
+  hint width if one was set, otherwise the engine's own default read from
+  `agent_router.router.route_board`'s **signature** (`_engine_default_trace_width_mm`).
+  A duplicated literal that drifted from the engine would under- or over-state
+  candidate copper, and under-stating it is a route to a false clean.
+- **Via diameter / drill** — the board's own authored routing defaults
+  (`design_rules.via_diameter_mm` / `via_drill_mm`), which is what acceptance
+  writes. The engine's vias are positional only.
+
+If a value cannot be sourced, the overlay fails closed (`unsupported_geometry`)
+rather than guess one. Same `error.kind` vocabulary as the table above, plus
+`unresolved_geometry` and `internal` from the geometric union.
