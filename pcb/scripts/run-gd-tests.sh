@@ -78,6 +78,22 @@ fi
 overall_rc=0
 declare -a results=()
 
+# Import the host project before running anything. Godot resolves `class_name`
+# globals through .godot/global_script_class_cache.cfg, which is generated on
+# import and is NOT tracked in git. On a FRESH Minerva clone (any CI runner, or
+# a colleague who just cloned) that cache does not exist, so autoloads
+# referencing class_name types fail to parse:
+#
+#   Parse Error: Could not find type "DocumentBuffer" in the current scope.
+#     at: GDScript::reload (res://Scripts/Services/Watcher/WatcherRuntime.gd:71)
+#
+# and the tests that touch those paths fail for a reason that has nothing to do
+# with the code under test. A warm local checkout hides this completely — it
+# cost one red CI run to find. Idempotent and near-free once .godot exists.
+echo "Importing Minerva host project (generates .godot class cache if absent)..."
+godot --headless --path "${MINERVA_DIR}/src" --import >/dev/null 2>&1 || true
+echo
+
 echo "Running ${#tests[@]} pcb GDScript test(s) via Minerva host at ${MINERVA_DIR}"
 echo
 
