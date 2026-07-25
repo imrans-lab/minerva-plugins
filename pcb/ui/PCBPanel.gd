@@ -914,12 +914,23 @@ func _on_propose_button_pressed() -> void:
 		_set_status("%d proposal%s%s" % [n, "" if n == 1 else "s", _drc_status_suffix(result)])
 
 
-## DRC-at-propose (docket 019f6f1492e0) status-label suffix. drc_summary is
-## {"scope": "connectivity", "clean": bool|null, "violation_count": int,
-## "error"?: String} — see pcb_worker.methods._attach_route_drc. null means the
-## DRC engine itself faulted (never blocks propose — informs, never blocks); an
-## absent/empty dict means the worker didn't run DRC at all (e.g. an older
-## worker), in which case the status label stays exactly as it was before.
+## DRC-at-propose (docket 019f6f1492e0) status-label suffix: BOTH scopes,
+## concatenated but never blended (docket 019f98b24284 requirement 1/5) — the
+## connectivity fragment and the geometric fragment are each self-contained
+## (own leading " — ", own label), so a caller can find/assert either
+## substring independently and neither can be read as the other's verdict.
+## Extracted to a static func (no `self` reads) so the gd test suite can drive
+## it with plain result dictionaries — no live PCBPanel/host required.
+static func _drc_status_suffix(result: Dictionary) -> String:
+	return _connectivity_status_suffix(result) + _geometric_status_suffix(result)
+
+
+## Connectivity fragment. drc_summary is {"scope": "connectivity",
+## "clean": bool|null, "violation_count": int, "error"?: String} — see
+## pcb_worker.methods._attach_route_drc. null means the DRC engine itself
+## faulted (never blocks propose — informs, never blocks); an absent/empty
+## dict means the worker didn't run DRC at all (e.g. an older worker), in
+## which case this fragment stays exactly as it was before (empty string).
 ##
 ## HONEST LABEL (019f958aa6db): this is the CONNECTIVITY/topology checker
 ## (drc.run_drc — pad centers + trace centerlines), NOT geometric copper DRC. It
@@ -927,7 +938,7 @@ func _on_propose_button_pressed() -> void:
 ## generic "DRC clean". We read scope (default "connectivity") and title-case it
 ## for the label so a clean connectivity pass reads "Connectivity clean", never
 ## the misleading bare "DRC clean".
-func _drc_status_suffix(result: Dictionary) -> String:
+static func _connectivity_status_suffix(result: Dictionary) -> String:
 	var summary: Dictionary = result.get("drc_summary", {})
 	if summary.is_empty():
 		return ""
@@ -940,6 +951,106 @@ func _drc_status_suffix(result: Dictionary) -> String:
 		return " — %s clean" % label
 	var count := int(summary.get("violation_count", 0))
 	return " — %s: %d violation%s" % [label, count, "" if count == 1 else "s"]
+
+
+## GEOMETRIC copper fragment (docket 019f98b24284) — the complement that closes
+## the gap left by the connectivity fragment above: a proposal routed through
+## the CENTRE of a different-net pad reads "Connectivity clean" (centerlines
+## never crossed) while the copper itself shorts. drc_geometric_summary is the
+## candidate-scoped union from panel_tools._write_records_as_proposals — see
+## pcb_worker methods.py _attach_route_geometric_drc / ir_candidates.py
+## check_candidates module docstring for the three-way contract this reads:
+##
+##   verdict == "clean"       -> ok=True,  candidates introduce no violation
+##   verdict == "violations"  -> ok=True,  candidates introduce >=1 violation
+##   anything else            -> ok=False, the check could not run at all
+##
+## THE INDETERMINATE TRAP (requirement 2): the union deliberately carries NO
+## `clean` key — only a 3-way `verdict` string — because a truthy/absent-key
+## check is exactly how "could not verify" silently reads as "verified clean"
+## in GDScript. Do not "simplify" this to `if summary.get("clean")`; there is
+## no such key, and adding one back reintroduces the bug this surface exists
+## to remove. `match` on the literal string is the fail-closed shape: only the
+## literal "clean" string renders as clean, and both "indeterminate" and any
+## future/unknown verdict fall through to the same "unavailable" branch as a
+## faulted connectivity check — never counted as a violation, never as clean.
+##
+## An absent/empty summary (older worker that never attached
+## drc_geometric_summary, or a route call that took the non-canonical path
+## where the worker skips the attach entirely — methods.py `_route`) is a
+## THIRD state again from "indeterminate": render nothing rather than invent a
+## verdict the worker never computed (requirement 2/4).
+##
+## BASELINE EXCLUSION (requirement 4): the union's "findings"/"verdict" are
+## already candidate-scoped by the worker — pre-existing board violations live
+## under summary["baseline"] and are never read here, so a dirty fixture board
+## (the real fixture carries 12) cannot make a clean proposal look dirty.
+static func _geometric_status_suffix(result: Dictionary) -> String:
+	var summary: Dictionary = result.get("drc_geometric_summary", {})
+	if summary.is_empty():
+		return ""
+	var verdict := str(summary.get("verdict", "indeterminate"))
+	match verdict:
+		"clean":
+			return " — Geometric clean"
+		"violations":
+			var count := (summary.get("findings", []) as Array).size()
+			var who := _offending_nets(result)
+			# Name the offender when we can. A batch line that says only "2
+			# violations" leaves the user who must REJECT one proposal unable to
+			# tell which — and rejecting the right one is the entire decision
+			# this surface exists to inform (019f98b24284 requirement 3).
+			if who != "":
+				return " — Geometric: %d violation%s on %s" % [
+					count, "" if count == 1 else "s", who]
+			return " — Geometric: %d violation%s" % [count, "" if count == 1 else "s"]
+		_:
+			# Covers "indeterminate" AND any unrecognized verdict — fail closed,
+			# never counted as clean, never counted as a violation (requirement 2).
+			#
+			# Carry the REASON. "unavailable" on its own is unactionable: the
+			# error.kind vocabulary is small, stable and shared with the route
+			# reply (parse | compile | unresolved_geometry | unsupported_geometry
+			# | route | internal — see ir_candidates.candidate_indeterminate), and
+			# it is the difference between "this board has geometry we cannot
+			# model yet" and "something faulted". The free-text message is NOT
+			# surfaced here: it can be an exception repr, which does not belong
+			# in a one-line status label.
+			var err: Dictionary = summary.get("error", {})
+			var kind := str(err.get("kind", ""))
+			if kind != "":
+				return " — Geometric: unavailable (%s)" % kind
+			return " — Geometric: unavailable"
+
+
+## Comma-joined net names of the proposals whose OWN geometric verdict is
+## "violations", for the batch status line. Reads `proposals[].drc_geometric`,
+## stamped per proposal by panel_tools._write_records_as_proposals — the union's
+## `per_candidate` is keyed `route[<i>]`, which is a wire-level index a human
+## has no way to map back to anything on screen; the net name is what the canvas
+## and the hint both label.
+##
+## Returns "" when nothing can be attributed (an older worker that stamped no
+## per-proposal verdict, or a union-level indeterminate) so the caller falls back
+## to the bare count rather than printing an empty "on ".
+static func _offending_nets(result: Dictionary) -> String:
+	var nets: Array[String] = []
+	for p in (result.get("proposals", []) as Array):
+		if typeof(p) != TYPE_DICTIONARY:
+			continue
+		var geo: Dictionary = (p as Dictionary).get("drc_geometric", {})
+		if str(geo.get("verdict", "")) != "violations":
+			continue
+		var net := str((p as Dictionary).get("net", ""))
+		if net != "" and not nets.has(net):
+			nets.append(net)
+	if nets.is_empty():
+		return ""
+	# Cap the list: a status label that grows with the batch stops being
+	# readable, and past a few names the user is going to open the list anyway.
+	if nets.size() > 3:
+		return ", ".join(nets.slice(0, 3)) + " +%d more" % (nets.size() - 3)
+	return ", ".join(nets)
 
 
 ## New AnnotationAuthorTool instance for a route-flow cluster key. Deliberately

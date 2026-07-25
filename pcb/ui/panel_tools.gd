@@ -1108,6 +1108,13 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 		# verdict ONLY when present (absent-key ⇒ no badge contract preserved).
 		if route.has("drc"):
 			rec["drc"] = route.get("drc")
+		# GEOMETRIC DRC-at-propose (docket 019f98b24284): same absent-key contract
+		# for the copper verdict — see methods.py _attach_route_geometric_drc.
+		# This is what closes the gap where a proposal shorting a different-net
+		# pad reported "clean" because only the centreline (connectivity) check
+		# above was ever attached to a route.
+		if route.has("drc_geometric"):
+			rec["drc_geometric"] = route.get("drc_geometric")
 		records.append(rec)
 	return records
 
@@ -1131,14 +1138,21 @@ static func _write_records_as_proposals(host, records: Array, result: Dictionary
 		rec["annotation_id"] = new_id
 		if new_id.is_empty():
 			continue
-		proposals.append({
+		var proposal: Dictionary = {
 			"id": new_id,
 			"net": str(rec.get("net", "")),
 			"layer": str(rec.get("layer", "F.Cu")),
 			"waypoint_count": (rec.get("polyline", []) as Array).size(),
 			"proposal_for": rec.get("source_hint_ids", []),
 			"width_mm": float(rec.get("width", 0.0)),
-		})
+		}
+		# GEOMETRIC DRC-at-propose (docket 019f98b24284): stamp THIS proposal's own
+		# candidate verdict (absent-key ⇒ older worker, same contract as "drc"
+		# above) so a caller can name WHICH proposal is geometrically dirty
+		# instead of only knowing the batch contains a violation somewhere.
+		if rec.has("drc_geometric"):
+			proposal["drc_geometric"] = rec.get("drc_geometric")
+		proposals.append(proposal)
 	return {
 		"success": true,
 		"committed": false,
@@ -1148,6 +1162,14 @@ static func _write_records_as_proposals(host, records: Array, result: Dictionary
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
 		"drc_summary": result.get("drc_summary", {}),
+		# GEOMETRIC DRC-at-propose (docket 019f98b24284): the candidate-scoped
+		# union — findings/per_candidate attributed to route[<i>], PLUS the
+		# board's own pre-existing "baseline" violations kept SEPARATE (see
+		# ir_candidates.check_candidates) — alongside drc_summary above. NEVER
+		# merge the two: drc_summary answers connectivity, this answers copper,
+		# and PCBPanel._geometric_status_suffix reads only this key so a dirty
+		# baseline can never mark a clean proposal dirty (or vice versa).
+		"drc_geometric_summary": result.get("drc_geometric_summary", {}),
 	}
 
 
