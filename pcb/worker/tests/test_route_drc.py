@@ -281,7 +281,12 @@ def test_routes_to_vias_ignores_malformed_entries():
     assert _routes_to_vias(routes) == []
 
 
-def test_native_path_carries_no_drc_keys():
+def test_native_pad_list_shape_is_rejected_with_a_structured_parse_error():
+    """The flat "pads" list shape (grandchild-1, _board_from_native) was
+    retired: it had no compile, no IR, and no DRC of any kind. route() must
+    now fail closed with a message that names the canonical replacement,
+    not silently accept the shape (or fall through to the canonical loader
+    and fail with some unrelated, unnamed message)."""
     resp = _call("route", {"board": {
         "pads": [
             {"component": "U1", "number": "1", "net": "SIG", "x": 0, "y": 0, "size": [1, 1]},
@@ -289,11 +294,35 @@ def test_native_path_carries_no_drc_keys():
         ],
         "width": 20, "height": 20,
     }})
-    assert resp["ok"] is True, resp
-    r = resp["result"]
-    assert "drc_summary" not in r
-    for rt in r["routes"]:
-        assert "drc" not in rt
+    assert resp["ok"] is False, resp
+    assert resp["error"]["kind"] == "parse"
+    message = resp["error"]["message"]
+    assert "pads" in message
+    assert "components" in message
+    assert "yaml" in message
+
+
+def test_a_malformed_board_is_not_misdiagnosed_as_the_retired_pads_shape():
+    """The retirement guard must not become a catch-all. An input that never
+    used the pads shape has to keep getting load_board's accurate message —
+    telling someone who sent {} that "the pads shape was retired" sends them
+    looking for a pads key they never wrote.
+
+    This is a real regression that was caught in review: the first cut gated
+    on "is this input not canonical?", which is true of every malformed input,
+    not just the retired one."""
+    # kind varies HONESTLY with how far the input gets: the first three do not
+    # load at all ("parse"), while a board dict with neither key loads and then
+    # fails the schema ("compile", carrying diagnostics). Both are accurate;
+    # what none of them may say is that a pads shape was retired.
+    for bad, kind in (({}, "parse"),
+                      ({"board": "not-a-dict"}, "parse"),
+                      ({"yaml": 123}, "parse"),
+                      ({"board": {"nets": [], "traces": []}}, "compile")):
+        resp = _call("route", bad)
+        assert resp["ok"] is False, (bad, resp)
+        assert resp["error"]["kind"] == kind, (bad, resp)
+        assert "retired" not in resp["error"]["message"], (bad, resp)
 
 
 # ---------------------------------------------------------------------------
@@ -394,9 +423,11 @@ def test_geometric_drc_failure_is_indeterminate_never_clean(monkeypatch):
     assert sig["drc"]["clean"] is True
 
 
-def test_native_path_carries_no_geometric_drc_keys():
-    """No canonical board => no compile => nothing to overlay. Same rule the
-    connectivity attach already follows."""
+def test_native_pad_list_shape_is_rejected_before_any_geometric_overlay():
+    """Same retirement as test_native_pad_list_shape_is_rejected_with_a_structured_parse_error,
+    pinned again here: the flat "pads" list never reaches compile, so there is
+    nothing to overlay geometric DRC onto — route() must reject it outright,
+    not return a routeless-looking success with no drc_geometric keys."""
     resp = _call("route", {"board": {
         "pads": [
             {"component": "U1", "number": "1", "net": "SIG", "x": 0, "y": 0, "size": [1, 1]},
@@ -404,11 +435,30 @@ def test_native_path_carries_no_geometric_drc_keys():
         ],
         "width": 20, "height": 20,
     }})
+    assert resp["ok"] is False, resp
+    assert resp["error"]["kind"] == "parse"
+
+
+def test_board_with_both_components_and_stray_pads_key_routes_as_canonical():
+    """The discriminator footgun: before this round, ANY top-level "pads" key
+    vetoed "components" and silently dropped a structurally-canonical board
+    onto the unsafe native branch. Canonical boards never legitimately carry
+    a top-level "pads" key (canonical pads live under each component's
+    "pins", see docs/board-yaml.md), so the retirement guard fires only when
+    "pads" is present AND "components" is absent — a stray "pads" key is
+    inert. This pins that decision: the board still routes on the CANONICAL
+    path (compiled, DRC-attached), it is not rejected and not mis-routed."""
+    board = _clean_board()
+    board["pads"] = ["leftover-garbage"]
+    resp = _call("route", {"board": board,
+                           "route_hints": [_detailed_hint()],
+                           "selection": {"mode": "open"}})
     assert resp["ok"] is True, resp
     r = resp["result"]
-    assert "drc_geometric_summary" not in r
-    for rt in r["routes"]:
-        assert "drc_geometric" not in rt
+    sig = [rt for rt in r["routes"] if rt["net"] == "SIG"][0]
+    # Canonical-only keys prove the canonical (compiled + DRC) branch ran.
+    assert sig["drc"]["scope"] == "connectivity"
+    assert sig["drc_geometric"]["scope"] == "geometric_candidate"
 
 
 def test_geometric_candidate_width_is_the_width_the_engine_routed_at():

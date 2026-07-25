@@ -116,8 +116,12 @@ In every failing case **zero routes** are returned — no partial proposal, no
   (+2mm), is gone — a pad outside the outline makes its net **unrouted** instead
   of routable off-board.
 - **Per-net-class width/clearance minima** — **Round E2**, with the rest of rules.
-- **Native pad-list path** (`_board_from_native`) — **Round E3**: it still accepts
-  a missing size as `0x0`, which is the same class of fictional copper.
+- ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
+  still accepted a missing size as `0x0`, the same class of fictional copper
+  E1 removed from the canonical path — but rather than fix it, the shape
+  itself is gone: `route()` now accepts exactly one board census (canonical
+  YAML/dict), and the retired shape returns a structured `parse` error naming
+  the replacement. Zero in-repo callers ever constructed a pads list.
 
 ## One compile feeds both halves of the reply
 
@@ -171,8 +175,9 @@ The geometric payload deliberately does **not** carry a `clean` field. The
 connectivity one does, and a consumer must never be able to read "the geometric
 check could not run" as "the geometric check passed". A geometric fault never
 fails the route call — the proposal still returns, with an honest
-`verdict:"indeterminate"`. The native pad-list path has no compiled board, so it
-carries neither key (exactly as it carries no `drc`).
+`verdict:"indeterminate"`. The native pad-list path is retired (see "Not yet
+done" above): `route()` no longer accepts it at all, so there is no longer a
+routed shape that carries neither key.
 
 ### Where candidate dimensions come from — nothing is invented
 

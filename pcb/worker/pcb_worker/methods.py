@@ -523,14 +523,11 @@ def _check_bom(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 # route — autoroute a board with the vendored agent_router engine.
 #
-# TWO input shapes are accepted (auto-discriminated):
-#
-# 1. CANONICAL (this round's bridge, 019eb481ae28): the canonical board dict +
-#    pcb_route_hint annotation envelopes, translated to the engine's native
-#    Board + RoutingHints by pcb_worker.route_bridge. Absolute pad positions are
-#    composed from component placement + rotated pin offsets using the SAME
-#    convention the panel model uses (get_pin_world_position), so panel and
-#    router agree.
+# ONE input shape is accepted: the CANONICAL board (this round's bridge,
+# 019eb481ae28), translated to the engine's native Board + RoutingHints by
+# pcb_worker.route_bridge. Absolute pad positions are composed from component
+# placement + rotated pin offsets using the SAME convention the panel model
+# uses (get_pin_world_position), so panel and router agree.
 #
 #      params.yaml  = canonical board YAML source        (or)
 #      params.board = canonical board dict (has "components")
@@ -538,13 +535,14 @@ def _check_bom(params: dict) -> dict:
 #      params.selection   = which hints feed the run:
 #                           {"mode":"open"|"all"|"ids"|"net", …} (default open)
 #
-# 2. NATIVE (grandchild-1, kept for back-compat): agent_router's own flat pad
-#    list, fed straight through _board_from_native.
-#
-#      params.board = {"pads": [{component, pad|number, net, x, y, size:[w,h],
-#                                shape?, type?|pad_type?, drill?, layer?, rotation?}],
-#                      "width"?, "height"?, "obstacles"?: [{type,x,y,radius?}]}
-#      params.hints = agent_router native routing_hints dict (see parse_hints)
+# The NATIVE shape (grandchild-1's flat pad list, formerly fed through
+# _board_from_native) was RETIRED this round: it had no compile, no IR, no
+# connectivity DRC, no geometric DRC, and accepted a missing pad size as
+# `0x0` — the same class of approximated copper Round E1 removed from the
+# canonical path (see pcb/docs/routing.md, "Not yet done"). Zero in-repo
+# callers construct it; anything still sending it now gets a structured
+# {"kind": "parse"} rejection instead of a silent route over invented
+# geometry (see _route, below).
 #
 # COMMON:
 #   params.options = {single_layer?, allow_vias?, trace_width?, clearance?,
@@ -554,77 +552,6 @@ def _check_bom(params: dict) -> dict:
 #   {success, via_count, routes:[{net, segments:[{start,end,layer}], vias:[[x,y]]}],
 #    unrouted:[{net, from, to}], warnings?:[{id, message}], selected_hint_ids?:[…]}
 # ---------------------------------------------------------------------------
-
-
-def _board_from_native(spec: dict):
-    """Rebuild an agent_router.Board from its native pad-list dict.
-
-    This lives in the worker (not in agent_router) so the engine stays a clean
-    standalone package with no worker/plugin coupling. The shape mirrors the
-    engine's own `dump-pads` JSON, i.e. the inverse of that serialisation.
-    """
-    from agent_router.board import Board, Pad, Net, Obstacle
-
-    if not isinstance(spec, dict):
-        raise ValueError("board must be a mapping")
-    pad_specs = spec.get("pads")
-    if not isinstance(pad_specs, list) or not pad_specs:
-        raise ValueError("board.pads must be a non-empty list")
-
-    pads: list = []
-    for i, p in enumerate(pad_specs):
-        if not isinstance(p, dict):
-            raise ValueError(f"pads[{i}] must be a mapping")
-        try:
-            x = float(p["x"]); y = float(p["y"])
-        except (KeyError, TypeError, ValueError):
-            raise ValueError(f"pads[{i}] needs numeric x and y")
-        size = p.get("size") or [0.0, 0.0]
-        if not isinstance(size, (list, tuple)) or len(size) < 2:
-            raise ValueError(f"pads[{i}].size must be [w, h]")
-        number = p.get("number", p.get("pad"))
-        pad_type = p.get("pad_type", p.get("type", "smd"))
-        pads.append(Pad(
-            component=str(p.get("component", "")),
-            number=str(number) if number is not None else "",
-            net=(str(p["net"]) if p.get("net") not in (None, "") else None),
-            position=(x, y),
-            size=(float(size[0]), float(size[1])),
-            shape=str(p.get("shape", "rect")),
-            pad_type=str(pad_type),
-            drill=(float(p["drill"]) if p.get("drill") not in (None, "") else None),
-            layer=str(p.get("layer", "F.Cu")),
-            rotation=float(p.get("rotation", 0.0)),
-        ))
-
-    # Group pads into nets (net.number assigned in first-seen order).
-    nets: dict = {}
-    for pad in pads:
-        if not pad.net:
-            continue
-        net = nets.get(pad.net)
-        if net is None:
-            net = Net(name=pad.net, number=len(nets) + 1, pads=[])
-            nets[pad.net] = net
-        net.pads.append(pad)
-
-    obstacles: list = []
-    for o in spec.get("obstacles") or []:
-        if not isinstance(o, dict):
-            continue
-        obstacles.append(Obstacle(
-            position=(float(o.get("x", 0.0)), float(o.get("y", 0.0))),
-            type=str(o.get("type", "keepout")),
-            radius=(float(o["radius"]) if o.get("radius") not in (None, "") else None),
-        ))
-
-    return Board(
-        pads=pads,
-        nets=nets,
-        obstacles=obstacles,
-        width=float(spec.get("width", 0.0) or 0.0),
-        height=float(spec.get("height", 0.0) or 0.0),
-    )
 
 
 def _serialize_routing_result(result) -> dict:
@@ -653,13 +580,11 @@ def _serialize_routing_result(result) -> dict:
     }
 
 
-def _is_canonical_route_input(params: dict) -> bool:
-    """True if params carry a CANONICAL board (YAML source, or a board dict with
-    a "components" list) rather than agent_router's native flat "pads" list."""
-    if isinstance(params.get("yaml"), str):
-        return True
-    b = params.get("board")
-    return isinstance(b, dict) and "components" in b and "pads" not in b
+# NOTE: there is deliberately NO `_is_canonical_route_input` discriminator any
+# more. It existed to choose between two input shapes; round A5 retired one of
+# them, so there is nothing left to choose. `route` now has a single shape,
+# board_model.load_board is its only parser, and the retired shape gets a named
+# rejection in _route rather than a branch.
 
 
 # ---------------------------------------------------------------------------
@@ -667,9 +592,9 @@ def _is_canonical_route_input(params: dict) -> bool:
 # build the post-route board (existing traces + every returned route
 # materialized as traces) and run the EXISTING drc.run_drc engine over it —
 # this reuses drc.py's four checks verbatim, it does not reimplement any rule.
-# Native-pad-list routing has no canonical "components"/"nets"/"traces" board
-# to check against, so DRC is skipped there (no drc/drc_summary keys added;
-# _route only calls this helper on the canonical branch, see below).
+# Anything that is not a loadable canonical board is rejected by load_board
+# before reaching this point, so every call that gets here has a canonical
+# "components"/"nets"/"traces" board to check against.
 # ---------------------------------------------------------------------------
 
 # agent_router segment layers are always "F.Cu"/"B.Cu" (route_bridge._LAYER_MAP,
@@ -1004,111 +929,126 @@ def _route(params: dict) -> dict:
 
     from agent_router.router import route_board, route_board_with_hints
 
-    if _is_canonical_route_input(params):
-        # --- Canonical board + pcb_route_hint envelopes -> engine (bridge) ---
-        from . import route_bridge
-        try:
-            board_dict = board_model.load_board(params)
-        except board_model.BoardParseError as exc:
-            return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
-        # DRC-at-propose runs against the projection of the SAME compiled board the
-        # router consumes (set below, once the compile succeeds) — never the raw
-        # dict. See ir_connectivity: one compile feeds both halves of the reply.
-        drc_board = None
-        # ROUND E CUTOVER (019f783860c8): canonical routing consumes the compiled
-        # ResolvedBoard IR or it does not route. Before this, the router was handed
-        # the RAW board and invented a nominal 1.0x1.0 land for any pad without
-        # authored geometry — keepouts around fictional copper, so an accepted
-        # proposal could cross the real package land. The owner-ratified Step-4
-        # ruling puts ROUTING in the fail-closed bucket ("No approximated copper"),
-        # so an uncompilable board now returns its compile diagnostics and ZERO
-        # routes. Compiled against the narrower ROUTING capability profile: a
-        # mask-only limitation must not disable routing, but any dropped
-        # copper/drill/rule is still fatal.
-        compiled = _compile_or_fail(
-            board_dict, requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
-        if _is_error_reply(compiled):
-            return compiled
-        compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
-        # ONE compile, BOTH halves of the reply (019f97d021a8), under ONE error
-        # boundary (019f97eb6adf). Routing consumes the IR; connectivity DRC
-        # consumes the connectivity projection of that same compiled board. Both
-        # projections sit inside this try, so EITHER one meeting geometry it cannot
-        # model faithfully produces the same structured zero-route reply — the
-        # connectivity projection used to run ahead of the guard, where its failure
-        # would have escaped the route error envelope entirely.
-        try:
-            board = route_bridge.resolved_board_to_router(compiled.board)
-            drc_board = ir_connectivity.connectivity_board(compiled.board)
-            geometric_board = compiled.board
-        except route_bridge.UnsupportedGeometry as exc:
-            # Compiled fine, but carries geometry the routing grid cannot model
-            # faithfully (inner copper, accepted traces/vias, zones, a copper
-            # graphic, a non-rectangular outline). Fail closed with its own kind so
-            # a consumer can tell "this board will not compile" from "this board
-            # compiles but is not routable yet".
-            return {"ok": False, "error": {
-                "kind": "unsupported_geometry", "message": str(exc),
-                "diagnostics": compile_warnings}}
-        except Exception as exc:
-            return {"ok": False, "error": {"kind": "route",
-                    "message": f"invalid board: {exc}",
-                    "traceback": traceback.format_exc()}}
+    _board = params.get("board")
+    if isinstance(_board, dict) and "pads" in _board \
+            and "components" not in _board:
+        # Native pad-list shape retired this round (module note above, and
+        # pcb/docs/routing.md "Not yet done"): no compile, no IR, no DRC of
+        # any kind, and a missing pad size silently became `0x0` — the same
+        # class of fictional copper Round E1 removed from the canonical path.
+        # Reject it BY NAME here rather than falling through to
+        # board_model.load_board below, which rejects it too but with a
+        # message that never names what to send instead.
+        #
+        # Deliberately narrow, in two directions.
+        #
+        # It fires ONLY on a board that actually carries "pads". Every other
+        # malformed input — {}, a non-dict board, a bad yaml type, a dict with
+        # neither key — falls through to load_board, whose message accurately
+        # describes what IS wrong with it. Gating on "is this not canonical?"
+        # instead would have been shorter and would have told a caller who
+        # sent {} that the pads shape was retired: a misdiagnosis of an input
+        # that never used that shape.
+        #
+        # And it requires "components" to be ABSENT. A board carrying BOTH
+        # keys is treated as canonical, not as an ambiguous shape needing its
+        # own error. Before this round the opposite held — any "pads" key
+        # vetoed "components" — so a structurally canonical board fell through
+        # to the unsafe uncompiled branch on nothing more than a leftover key.
+        # No legitimate canonical producer emits a top-level "pads" (canonical
+        # pads live under each component's "pins", see docs/board-yaml.md), so
+        # treating it as inert is the same "unknown fields survive" tolerance
+        # the rest of the canonical contract already extends.
+        return {"ok": False, "error": {"kind": "parse", "message": (
+            "the flat \"pads\" list board shape was retired; send a "
+            "canonical board dict with a \"components\" list, or \"yaml\" "
+            "source (see pcb/docs/board-yaml.md).")}}
 
-        envelopes = params.get("route_hints") or []
-        if not isinstance(envelopes, list):
-            return {"ok": False, "error": {"kind": "parse",
-                    "message": "route_hints must be a list of envelopes"}}
-        # Route-as-drawn (HITL-2): 'detailed' single-trace hints ARE the route.
-        # Materialize them directly, consume their nets so the engine neither
-        # re-routes nor duplicates them, and keep everything else on the
-        # engine-guided path.
-        drawn_routes, consumed_nets, drawn_warnings, consumed_ids = \
-            route_bridge.materialize_detailed_hints(
-                envelopes, board, params.get("selection"))
-        for net_name in consumed_nets:
-            board.nets.pop(net_name, None)
-        remaining = [e for e in envelopes
-                     if str((e or {}).get("id", "")) not in consumed_ids] \
-            if consumed_ids else envelopes
-        translation = route_bridge.hints_to_router(
-            remaining, board, params.get("selection"))
-        bridge_warnings = drawn_warnings + translation.warnings
-        selected_hint_ids = consumed_ids + [
-            i for i in translation.selected_ids if i not in consumed_ids]
-        # A hint-authored width becomes the run's trace_width unless the caller
-        # set one explicitly (per-hint width has no RoutingHints slot).
-        if translation.trace_width_mm and "trace_width" not in kw:
-            kw["trace_width"] = translation.trace_width_mm
+    # --- Canonical board + pcb_route_hint envelopes -> engine (bridge) ---
+    from . import route_bridge
+    try:
+        board_dict = board_model.load_board(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    # DRC-at-propose runs against the projection of the SAME compiled board the
+    # router consumes (set below, once the compile succeeds) — never the raw
+    # dict. See ir_connectivity: one compile feeds both halves of the reply.
+    drc_board = None
+    # ROUND E CUTOVER (019f783860c8): canonical routing consumes the compiled
+    # ResolvedBoard IR or it does not route. Before this, the router was handed
+    # the RAW board and invented a nominal 1.0x1.0 land for any pad without
+    # authored geometry — keepouts around fictional copper, so an accepted
+    # proposal could cross the real package land. The owner-ratified Step-4
+    # ruling puts ROUTING in the fail-closed bucket ("No approximated copper"),
+    # so an uncompilable board now returns its compile diagnostics and ZERO
+    # routes. Compiled against the narrower ROUTING capability profile: a
+    # mask-only limitation must not disable routing, but any dropped
+    # copper/drill/rule is still fatal.
+    compiled = _compile_or_fail(
+        board_dict, requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
+    if _is_error_reply(compiled):
+        return compiled
+    compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+    # ONE compile, BOTH halves of the reply (019f97d021a8), under ONE error
+    # boundary (019f97eb6adf). Routing consumes the IR; connectivity DRC
+    # consumes the connectivity projection of that same compiled board. Both
+    # projections sit inside this try, so EITHER one meeting geometry it cannot
+    # model faithfully produces the same structured zero-route reply — the
+    # connectivity projection used to run ahead of the guard, where its failure
+    # would have escaped the route error envelope entirely.
+    try:
+        board = route_bridge.resolved_board_to_router(compiled.board)
+        drc_board = ir_connectivity.connectivity_board(compiled.board)
+        geometric_board = compiled.board
+    except route_bridge.UnsupportedGeometry as exc:
+        # Compiled fine, but carries geometry the routing grid cannot model
+        # faithfully (inner copper, accepted traces/vias, zones, a copper
+        # graphic, a non-rectangular outline). Fail closed with its own kind so
+        # a consumer can tell "this board will not compile" from "this board
+        # compiles but is not routable yet".
+        return {"ok": False, "error": {
+            "kind": "unsupported_geometry", "message": str(exc),
+            "diagnostics": compile_warnings}}
+    except Exception as exc:
+        return {"ok": False, "error": {"kind": "route",
+                "message": f"invalid board: {exc}",
+                "traceback": traceback.format_exc()}}
 
-        try:
-            if translation.hints.net_hints or translation.hints.buses \
-                    or translation.hints.chains or translation.hints.internal_bridges:
-                result = route_board_with_hints(board, translation.hints, **kw)
-            else:
-                result = route_board(board, **kw)
-        except Exception as exc:
-            return {"ok": False, "error": {"kind": "route",
-                    "message": str(exc), "traceback": traceback.format_exc()}}
-    else:
-        # --- Native agent_router pad-list path (grandchild-1 back-compat) ---
-        try:
-            board = _board_from_native(params.get("board"))
-        except Exception as exc:
-            return {"ok": False, "error": {"kind": "parse",
-                    "message": f"invalid board: {exc}"}}
+    envelopes = params.get("route_hints") or []
+    if not isinstance(envelopes, list):
+        return {"ok": False, "error": {"kind": "parse",
+                "message": "route_hints must be a list of envelopes"}}
+    # Route-as-drawn (HITL-2): 'detailed' single-trace hints ARE the route.
+    # Materialize them directly, consume their nets so the engine neither
+    # re-routes nor duplicates them, and keep everything else on the
+    # engine-guided path.
+    drawn_routes, consumed_nets, drawn_warnings, consumed_ids = \
+        route_bridge.materialize_detailed_hints(
+            envelopes, board, params.get("selection"))
+    for net_name in consumed_nets:
+        board.nets.pop(net_name, None)
+    remaining = [e for e in envelopes
+                 if str((e or {}).get("id", "")) not in consumed_ids] \
+        if consumed_ids else envelopes
+    translation = route_bridge.hints_to_router(
+        remaining, board, params.get("selection"))
+    bridge_warnings = drawn_warnings + translation.warnings
+    selected_hint_ids = consumed_ids + [
+        i for i in translation.selected_ids if i not in consumed_ids]
+    # A hint-authored width becomes the run's trace_width unless the caller
+    # set one explicitly (per-hint width has no RoutingHints slot).
+    if translation.trace_width_mm and "trace_width" not in kw:
+        kw["trace_width"] = translation.trace_width_mm
 
-        hints_data = params.get("hints")
-        try:
-            if hints_data:
-                from agent_router.hints import parse_hints
-                hints = parse_hints(hints_data)
-                result = route_board_with_hints(board, hints, **kw)
-            else:
-                result = route_board(board, **kw)
-        except Exception as exc:
-            return {"ok": False, "error": {"kind": "route",
-                    "message": str(exc), "traceback": traceback.format_exc()}}
+    try:
+        if translation.hints.net_hints or translation.hints.buses \
+                or translation.hints.chains or translation.hints.internal_bridges:
+            result = route_board_with_hints(board, translation.hints, **kw)
+        else:
+            result = route_board(board, **kw)
+    except Exception as exc:
+        return {"ok": False, "error": {"kind": "route",
+                "message": str(exc), "traceback": traceback.format_exc()}}
 
     payload = _serialize_routing_result(result)
     if drawn_routes:
@@ -1122,10 +1062,9 @@ def _route(params: dict) -> dict:
     if selected_hint_ids:
         payload["selected_hint_ids"] = selected_hint_ids
 
-    # DRC-at-propose (docket 019f6f1492e0): only meaningful on the canonical
-    # path — the native pad-list path has no "components"/"nets"/"traces"
-    # board to check proposed routes against, so it is left untouched (no
-    # drc/drc_summary keys added, matching its pre-existing output exactly).
+    # DRC-at-propose (docket 019f6f1492e0): every call reaching here is on the
+    # canonical path (the native pad-list shape is rejected at the top of
+    # _route, everything else by load_board), so drc_board is always set below.
     if drc_board is not None:
         _attach_route_drc(payload, drc_board)
     # GEOMETRIC DRC-at-propose (019f952b99f2) — the copper complement, attached

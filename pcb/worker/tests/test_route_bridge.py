@@ -368,8 +368,22 @@ def test_route_method_canonical_via_yaml():
     assert resp["result"]["success"] is True
 
 
-def test_route_method_native_path_still_works():
-    """Grandchild-1 native pad-list shape must keep routing (back-compat)."""
+def test_route_method_native_pad_list_shape_never_reaches_the_bridge():
+    """RETIRED in round A5 (owner ruling 2026-07-25). This test previously
+    asserted the opposite — that the grandchild-1 native pad-list shape "must
+    keep routing (back-compat)" — and it is the reason the retirement is a
+    behaviour change worth a test rather than a silent deletion.
+
+    That shape reached agent_router with no compile, no IR and no DRC of any
+    kind, and accepted a missing pad size as 0x0: approximated copper, which
+    the fail-closed ruling forbids. E1 had already removed the canonical
+    path's equivalent fiction (the nominal 1.0x1.0 land).
+
+    The message contract is pinned in test_route_drc.py
+    (test_native_pad_list_shape_is_rejected_with_a_structured_parse_error);
+    what THIS file cares about is that the shape is rejected BEFORE the bridge
+    runs, so no half-translated board exists anywhere.
+    """
     native = {
         "width": 20, "height": 20,
         "pads": [
@@ -380,10 +394,12 @@ def test_route_method_native_path_still_works():
         ],
     }
     resp = _call("route", {"board": native})
-    assert resp["ok"] is True, resp
-    assert resp["result"]["success"] is True
-    # Native path emits no bridge warnings/selection keys.
-    assert "warnings" not in resp["result"]
+    assert resp["ok"] is False, resp
+    assert resp["error"]["kind"] == "parse"
+    # No partial proposal: rejection means zero routes, not routes alongside a
+    # verdict a consumer could misread (same invariant as the fail-closed
+    # reasons table in pcb/docs/routing.md).
+    assert "result" not in resp
 
 
 def test_route_method_bad_canonical_board_structured_error():
