@@ -3,7 +3,7 @@ name: pcb
 # TEST GATES ONLY (round A0a). No packaging/release/registry/NOTICE/runtime
 # bundle here — that is round A0b, a separate follow-up workflow change.
 #
-# Three jobs:
+# Four jobs:
 #
 #   `test`   — every push (main, dcr/**), every pull_request, and manual
 #              dispatch. Linux only, no kicad-cli installed. This is the fast
@@ -12,6 +12,16 @@ name: pcb
 #              test skips unconditionally, unrelated to kicad-cli).
 #              Expected baseline (measured 2026-07-25 @ 5c81a22): 1018 passed,
 #              16 skipped.
+#
+#   `test-crossplatform`
+#            — round A0c. The SAME gate as `test`, on macos-latest and
+#              windows-latest. push-to-main + manual dispatch only (see the
+#              job's own note for the cost argument). Nothing about the worker
+#              (Python) or the bridge (Go) is Linux-specific by design, but
+#              nothing proved it either, and the owner develops on Linux while
+#              testing opportunistically on Mac and Windows laptops — so a
+#              portability break would otherwise surface on a laptop, days
+#              later, with N rounds of changes to bisect.
 #
 #   `oracle` — push to main and manual dispatch ONLY (never pull_request).
 #              Installs kicad-cli via the KiCad PPA, then runs the full
@@ -26,7 +36,10 @@ name: pcb
 #              pcb/scripts/run-gd-tests.sh for why). Same triggers as `test`
 #              (every push + PR) because the Godot download is cached — see
 #              the cache step below — so there is no cost reason to restrict
-#              coverage to main-only.
+#              coverage to main-only. Linux only: a second Godot download and
+#              a second Minerva checkout per OS is a real cost, and the layer
+#              under test is engine-portable GDScript with no platform seams.
+#              Whether the plugin INSTALLS on Mac/Windows stays a human check.
 #
 # Why `test`/`oracle` are two jobs instead of one: if kicad-cli is never
 # installed, 15 oracle tests skip on every single run and nobody notices when
@@ -35,11 +48,20 @@ name: pcb
 # every push, which in practice makes people route around CI rather than wait
 # for it. Keeping oracle checks on main-only (+ workflow_dispatch for
 # on-demand verification) exercises them regularly without taxing the PR loop.
+# `test-crossplatform` is gated the same way for the same reason, with a
+# steeper multiplier — see its note.
 #
-# pytest's own exit code is the pass/fail gate in `test`/`oracle` — the counts
-# above are baselines to sanity-check against, not counts asserted in this
-# file. `panel` is gated the same way: every pcb/tests/gd/*.gd test is an
-# `extends SceneTree` script whose _init() ends with
+# Shared setup lives in .github/actions/pcb-setup (round A0c). The previous
+# revision of this file duplicated the toolchain steps per job and recorded
+# the threshold for extracting them: "Revisit if a third job appears." One
+# did. Read that action before editing any job below — it owns the ordering
+# invariant (worker installed BEFORE `go test`) and the assertion that the
+# Go<->Python bridge tests will actually run rather than silently skip.
+#
+# pytest's own exit code is the pass/fail gate in `test`/`test-crossplatform`/
+# `oracle` — the counts above are baselines to sanity-check against, not counts
+# asserted in this file. `panel` is gated the same way: every pcb/tests/gd/*.gd
+# test is an `extends SceneTree` script whose _init() ends with
 # `quit(1 if _fail > 0 else 0)`, so the Godot process's own exit code IS the
 # pass/fail signal (confirmed 2026-07-25 by temporarily breaking an assertion
 # in test_pad_synthesis.gd and observing run-gd-tests.sh exit non-zero).
@@ -56,17 +78,23 @@ on:
     # there can break the pcb build without touching pcb/**. Silent
     # non-execution is worse than a red build. Precedent: 3d-gen.yml,
     # movie-gen.yml.
+    #
+    # .github/actions/pcb-setup/** is listed for the same reason: the toolchain
+    # steps moved there in A0c, so a change to that action changes what every
+    # job below actually does.
     paths:
       - "pcb/**"
       - "shared/**"
       - "go.work"
       - ".github/workflows/pcb.yml"
+      - ".github/actions/pcb-setup/**"
   pull_request:
     paths:
       - "pcb/**"
       - "shared/**"
       - "go.work"
       - ".github/workflows/pcb.yml"
+      - ".github/actions/pcb-setup/**"
   workflow_dispatch:
 
 permissions:
@@ -74,7 +102,7 @@ permissions:
 
 jobs:
   test:
-    name: pcb test (no kicad-cli)
+    name: pcb test (linux, no kicad-cli)
     runs-on: ubuntu-22.04
     defaults:
       run:
@@ -83,26 +111,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      # MUST run BEFORE the Go steps. main_test.go's python3Available() (:647)
-      # shells `python3 -c "import pcb_worker, yaml"`, and its callers at :112
-      # and :373 t.Skip() when that fails. On a clean setup-python 3.12 the
-      # worker isn't importable, so both Go<->Python bridge tests would skip
-      # and the job would report green while never exercising the bridge —
-      # exactly the silent-pass failure this workflow exists to prevent.
-      - name: Install worker (dev extras)
-        working-directory: pcb/worker
-        run: pip install -e ".[dev]"
+      - name: Set up Go + Python + worker
+        uses: ./.github/actions/pcb-setup
 
       - name: Go vet
         run: go vet ./...
@@ -125,18 +135,68 @@ jobs:
         working-directory: pcb/worker
         run: python -m pytest tests/ -q
 
+  test-crossplatform:
+    name: pcb test (${{ matrix.os }})
+    # ROUND A0c. Owner-requested 2026-07-25: development happens on a Linux
+    # desktop, acceptance happens opportunistically on Mac and Windows laptops.
+    # Without this job a portability break is found by a human, on a laptop,
+    # after an unknown number of rounds have landed on top of it.
+    #
+    # main + manual dispatch ONLY, matching `oracle`. The cost argument is
+    # steeper here than anywhere else in this file: GitHub bills macOS runners
+    # at a 10x minute multiplier and Windows at 2x. Paying that on every push
+    # to every dcr/** branch buys very little — the failure mode this job
+    # catches (a path separator, a shell assumption, a missing `python3`) is
+    # introduced by code, and every round of this campaign lands on main, so
+    # main-only still gives per-round coverage.
+    #
+    # `if:` cannot reference the matrix (cad.yml carries the same note), but it
+    # does not need to — this condition is matrix-independent.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      # Independent results. A macOS-only break must not hide whether Windows
+      # is also broken — with two platforms, one cancelled run is half the
+      # information the job exists to produce.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # bash on the Windows runner too (Git Bash). Every command below is
+        # POSIX; pinning the shell means the steps are literally identical
+        # across the matrix rather than merely similar.
+        shell: bash
+        working-directory: pcb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go + Python + worker
+        uses: ./.github/actions/pcb-setup
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test -count=1 ./...
+
+      - name: Standing gates (determinism + kicad-cli boundary lint)
+        working-directory: pcb/worker
+        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py -v
+
+      # kicad-cli is absent here, exactly as in `test` — the oracle tests skip.
+      # Installing KiCad on three platforms is a separate and much larger
+      # undertaking; the oracle contract is verified on Linux (`oracle` job),
+      # and what THIS job is asking is "does our own code run off-Linux".
+      - name: Worker test suite (kicad-cli absent — oracle tests skip)
+        working-directory: pcb/worker
+        run: python -m pytest tests/ -q
+
   oracle:
     name: pcb oracle (with kicad-cli)
     # main + manual dispatch ONLY. `event_name != 'pull_request'` would have
     # been wrong in one direction: it also fires on every dcr/** push, which
     # contradicts the main-only intent stated at the top of this file.
-    #
-    # The step list below duplicates the `test` job. That is deliberate: the
-    # obvious de-duplication (a `matrix: kicad: [false, true]`) cannot work,
-    # because matrix context is not valid in a job-level `if:` — cad.yml
-    # carries the same note — so the kicad entry could not be restricted to
-    # main. A composite action would trade ~30 readable lines for indirection
-    # at a size that does not earn it. Revisit if a third job appears.
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     defaults:
@@ -146,17 +206,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
+      # Before the shared setup, so a KiCad-install failure is reported as
+      # itself rather than as a confusing downstream test failure. The setup
+      # action's own ordering invariant (worker before `go test`) is unaffected
+      # — nothing here touches Python or Go.
       - name: Install kicad-cli (KiCad PPA)
         run: |
           sudo add-apt-repository -y ppa:kicad/kicad-9.0-releases
@@ -169,10 +222,8 @@ jobs:
           fi
           kicad-cli --version
 
-      # Before the Go steps — see the equivalent comment in the `test` job.
-      - name: Install worker (dev extras)
-        working-directory: pcb/worker
-        run: pip install -e ".[dev]"
+      - name: Set up Go + Python + worker
+        uses: ./.github/actions/pcb-setup
 
       - name: Go vet
         run: go vet ./...
@@ -200,6 +251,10 @@ jobs:
     # main-only: the Godot download below is cached (design decision #2),
     # so the marginal cost of running on every PR is a cache hit, and there
     # is no reason to weaken coverage of a layer nothing else verifies.
+    #
+    # This job does NOT use .github/actions/pcb-setup: it runs no Go and no
+    # pytest, so it needs neither toolchain. Adding it "for consistency" would
+    # buy a slower job and nothing else.
     runs-on: ubuntu-22.04
     env:
       GODOT_VERSION: "4.6.2"

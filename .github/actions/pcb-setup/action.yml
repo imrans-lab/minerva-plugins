@@ -1,0 +1,93 @@
+name: pcb toolchain setup
+description: >
+  Go + Python toolchain for the pcb plugin, with the worker installed in the
+  ORDER the Go tests require. Used by every job in .github/workflows/pcb.yml.
+
+# WHY THIS EXISTS (and why it did not exist until round A0c)
+#
+# pcb.yml carried two jobs (`test`, `oracle`) with near-identical step lists.
+# Its own comment recorded the threshold for de-duplicating them: "A composite
+# action would trade ~30 readable lines for indirection at a size that does not
+# earn it. Revisit if a third job appears." Round A0c adds `test-crossplatform`
+# (a 2-entry matrix), so the same six steps would have appeared FOUR times.
+# That is past the threshold, so this action now exists.
+#
+# The line count is the smaller half of the argument. The larger half is the
+# ORDERING INVARIANT below, which was previously an English comment repeated in
+# each job and enforced by nothing. Here it is executable and lives once.
+#
+# This is the FIRST composite action in minerva-plugins. Other plugin workflows
+# (cad.yml, scansort.yml, ...) carry the same duplication and may copy this
+# shape — keep it boring and self-explaining.
+
+inputs:
+  go-version:
+    description: Go toolchain version
+    required: false
+    default: "1.22"
+  python-version:
+    description: CPython version
+    required: false
+    default: "3.12"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ inputs.go-version }}
+        # Left off deliberately: the module cache keyed across three OSes buys
+        # little here (the pcb module tree is small) and a stale/partial cache
+        # produces failures that read like real breakage.
+        cache: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # ORDERING INVARIANT — this step MUST precede any `go test` in the calling
+    # job, which is why it lives inside the setup action rather than in each
+    # workflow job where it could drift.
+    #
+    # main_test.go's python3Available() (:647) shells
+    #   python3 -c "import pcb_worker, yaml"
+    # and its callers at :112 and :373 t.Skip() when that fails. On a clean
+    # setup-python the worker is not importable, so BOTH Go<->Python bridge
+    # tests would skip and the job would report green while never exercising
+    # the bridge — the exact silent-pass this workflow exists to prevent.
+    - name: Install worker (dev extras)
+      shell: bash
+      # Composite actions do NOT inherit the calling job's `defaults.run
+      # .working-directory`, so the path is spelled explicitly here. It is
+      # relative to the workspace root (the caller must have checked out the
+      # repo first), and forward slashes work on the Windows runner because
+      # every run step in this action pins `shell: bash`.
+      working-directory: pcb/worker
+      run: pip install -e ".[dev]"
+
+    # The assertion form of the invariant above. Installing the worker is not
+    # the same as the Go tests being ABLE to find it: python3Available() probes
+    # the literal command `python3`, and on the Windows runner `python3` is not
+    # guaranteed to resolve even when `python` does. If it does not, both bridge
+    # tests skip, skips do not fail pytest or `go test`, and the job goes green
+    # having tested nothing across the bridge.
+    #
+    # So probe it here, with the SAME command the Go test uses, and fail the job
+    # loudly if it does not answer. A red build naming this step is diagnosable;
+    # a green build hiding two skipped tests is not.
+    - name: Assert the Go<->Python bridge precondition
+      shell: bash
+      run: |
+        if ! python3 -c "import pcb_worker, yaml" 2>/dev/null; then
+          echo "::error::python3 cannot import pcb_worker/yaml — main_test.go's"
+          echo "::error::python3Available() (:647) would silently t.Skip() the"
+          echo "::error::bridge tests at :112 and :373 and this job would go green."
+          echo "--- diagnosis ---"
+          command -v python3 || echo "no python3 on PATH"
+          command -v python  || echo "no python on PATH"
+          python3 -c "import pcb_worker" || true
+          exit 1
+        fi
+        echo "python3 imports pcb_worker + yaml — bridge tests will RUN, not skip"
