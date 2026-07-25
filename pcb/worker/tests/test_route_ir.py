@@ -30,6 +30,7 @@ import pytest
 
 from pcb_worker import compile_board as cb
 from pcb_worker import drc_geometric, ir_pads, route_bridge
+from pcb_worker.footprints import load_lockfile
 from pcb_worker.methods import handle_request
 
 
@@ -97,6 +98,46 @@ def test_pad_census_matches_the_ir_exactly():
         p.net == "N1" for p in rendered.nets["N1"].pads)
     assert {(p.component, p.number) for p in rendered.nets["N1"].pads} == {
         ("R1", "2"), ("R2", "1")}
+
+
+@pytest.mark.parametrize("ref", sorted(load_lockfile().keys()))
+def test_locked_seed_census_projects_every_pad_faithfully(ref):
+    """THE locked seed census (Codex E1 review): every footprint in the lockfile,
+    not a hand-picked pair.
+
+    For each locked seed, the router projection must agree with the shared IR/DRC
+    projection on WHICH pads exist and WHERE, and each router keepout must CONTAIN
+    the copper the geometric DRC checks. The footprint list comes from the
+    lockfile itself, so a new seed is covered the moment it is locked."""
+    rb = _compile(_board([_comp("X1", ref, 20, 20)]))
+    rendered = route_bridge.resolved_board_to_router(rb)
+
+    census = list(ir_pads.iter_ir_pads(rb))
+    copper = {c.entity_id: c for c in drc_geometric.project_board(rb).copper}
+    copper_bearing = [p for p in census if p.carries_copper]
+
+    # Identity: exactly the copper-bearing pads become router pads; NPTH pads
+    # become obstacles instead (never routable endpoints).
+    assert {(p.component, p.number) for p in rendered.pads} == \
+        {(p.ref, p.number) for p in copper_bearing}
+    assert len(rendered.pads) == len(copper_bearing)
+
+    by_id = {(p.component, p.number): p for p in rendered.pads}
+    for ir_pad in copper_bearing:
+        pad = by_id[(ir_pad.ref, ir_pad.number)]
+        box = copper[ir_pad.pad.id].aabb
+        # Position + layer are the IR's own.
+        assert pad.position == pytest.approx(ir_pad.pad.position, abs=1e-9)
+        if ir_pad.is_drilled:
+            assert pad.layer == "*.Cu" and pad.pad_type == "thru_hole"
+        else:
+            assert pad.layer in ("F.Cu", "B.Cu") and pad.pad_type == "smd"
+        # Containment: the keepout is a SUPERSET of the fabricated copper.
+        half_w, half_h = pad.size[0] / 2.0, pad.size[1] / 2.0
+        assert pad.position[0] - half_w <= box.min_x + 1e-9
+        assert pad.position[0] + half_w >= box.max_x - 1e-9
+        assert pad.position[1] - half_h <= box.min_y + 1e-9
+        assert pad.position[1] + half_h >= box.max_y - 1e-9
 
 
 def test_pad_extent_contains_the_copper_geometric_drc_checks():
@@ -268,6 +309,81 @@ def test_routed_keepout_covers_the_real_land_that_a_nominal_land_would_miss():
     pad = next(p for p in rendered.pads if p.number == "1")
     assert pad.size[0] >= 1.6 - 1e-9 and pad.size[1] >= 1.6 - 1e-9
     assert pad.size[0] > 1.0 and pad.size[1] > 1.0   # strictly bigger than nominal
+
+
+def test_footprint_only_board_routes_AND_reports_connectivity_clean():
+    """REGRESSION 019f97d021a8 — the two halves of one reply must agree.
+
+    E1 moved routing onto the IR but left DRC-at-propose reading the raw dict's
+    inline ``pins``. A footprint-only board (a perfectly valid authoring shape,
+    and what the panel produces) then routed SUCCESSFULLY while every endpoint was
+    reported dangling: same board, same geometry, two pad censuses. One compile now
+    feeds both halves."""
+    board = _board([_comp("U1", "TH_TestPoint", 10, 20),
+                    _comp("J1", "TH_TestPoint", 30, 20)],
+                   nets=[{"name": "SIG", "pins": ["U1.1", "J1.1"]}])
+    # No component carries inline `pins` — pads exist only in the footprint.
+    assert all("pins" not in c for c in board["components"])
+
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+    result = resp["result"]
+    assert result["success"] is True
+    assert result["drc_summary"] == {"scope": "connectivity", "clean": True,
+                                     "violation_count": 0}
+    for route in result["routes"]:
+        assert route["drc"]["clean"] is True, route["drc"]
+
+
+def test_connectivity_projection_comes_from_the_compiled_ir():
+    """The projection carries the IR's own pad census — absolute placement, human
+    pad numbers, net membership — in the connectivity kernel's input language."""
+    from pcb_worker import ir_connectivity
+
+    rb = _compile(_board([_comp("R1", "R_0805", 10, 10, rot=90)],
+                         nets=[{"name": "N1", "pins": ["R1.2"]}]))
+    projected = ir_connectivity.connectivity_board(rb)
+
+    comp = next(c for c in projected["components"] if c["ref"] == "R1")
+    # Components are emitted at the ORIGIN with the placement already applied, so
+    # the kernel's own "component + rotate(offset)" composition is the identity and
+    # cannot re-apply a rotation the IR already applied.
+    assert (comp["x_mm"], comp["y_mm"], comp["rotation_deg"]) == (0.0, 0.0, 0.0)
+    by_number = {p["number"]: p for p in comp["pins"]}
+    assert set(by_number) == {"1", "2"}
+    ir = {p.number: p for p in ir_pads.iter_ir_pads(rb)}
+    for number, pin in by_number.items():
+        assert (pin["x_mm"], pin["y_mm"]) == pytest.approx(ir[number].pad.position)
+    assert {"R1.2"} == set(next(n for n in projected["nets"]
+                                if n["name"] == "N1")["pins"])
+
+
+def test_routing_capability_profile_ignores_mask_but_not_copper():
+    """A mask-only limitation must not disable ROUTING; copper/drill/rules must.
+
+    The routing profile is a strict subset of the fabrication profile, so anything
+    that blocks routing also blocks fabrication — never the reverse."""
+    from pcb_worker.resolved_board import (EntityKind, FeatureDomain, SourceRef,
+                                           UnsupportedFeature)
+
+    def marker(domain: FeatureDomain, output: str) -> UnsupportedFeature:
+        return UnsupportedFeature(
+            feature="synthetic", domain=domain, affected_layer=None,
+            affected_outputs=(output,), default_blocking=False,
+            detail="test marker", source_ref=SourceRef(EntityKind.PAD, "pad:1:0"))
+
+    policy = cb.DefaultCapabilityPolicy()
+    mask = marker(FeatureDomain.MASK, "mask")
+    assert policy.is_blocking(mask, {}, cb.V1_FAB_OUTPUTS) is True
+    assert policy.is_blocking(mask, {}, cb.V1_ROUTING_OUTPUTS) is False
+
+    for domain, output in ((FeatureDomain.COPPER, "copper"),
+                           (FeatureDomain.DRILL, "drill"),
+                           (FeatureDomain.RULES, "rules")):
+        assert policy.is_blocking(marker(domain, output), {},
+                                  cb.V1_ROUTING_OUTPUTS) is True
+
+    assert set(cb.V1_ROUTING_OUTPUTS) < set(cb.V1_FAB_OUTPUTS)
 
 
 def test_route_method_routes_a_compiling_board_end_to_end():

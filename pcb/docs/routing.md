@@ -87,8 +87,28 @@ In every failing case **zero routes** are returned — no partial proposal, no
 - **Native pad-list path** (`_board_from_native`) — **Round E3**: it still accepts
   a missing size as `0x0`, which is the same class of fictional copper.
 
-## DRC-at-propose is unchanged, and still connectivity-only
+## One compile feeds both halves of the reply
 
-`route()` still attaches the centerline `drc.run_drc` result as
-`scope:"connectivity"` (see `docs/drc.md`). It is **not** a geometric gate, and E1
-does not make it one; geometric candidate feedback is `019f952b99f2`.
+`route()` compiles **once**. The router consumes the ResolvedBoard; DRC-at-propose
+consumes `ir_connectivity.connectivity_board(rb)` — a normalized projection of the
+*same* compiled board into the dict language the legacy connectivity kernel
+already speaks (pad centers, net ownership, existing traces/vias). There is **no**
+raw-dict and **no** best-effort-resolve fallback on the canonical path.
+
+This matters because E1's first cut moved only the routing half. Routes came from
+IR pads while the attached DRC still read the raw dict's inline `pins`, so a
+**footprint-only** board — components with a `footprint` and no inline pins, which
+is both valid and what the panel produces — routed successfully *and* reported
+every endpoint `dangling_endpoint`. Same board, same geometry, two pad censuses
+(docket `019f97d021a8`).
+
+The projection emits components at the origin with zero rotation and pins carrying
+**absolute** positions, because the IR has already placed them; the kernel's own
+`component position + rotate(pin offset)` composition is then the identity, so the
+IR's placement (including bottom-side mirroring) reaches it unchanged instead of
+having a rotation applied twice.
+
+**It is still connectivity-only.** The projection deliberately carries no pad
+extents — sharing a pad *census* is not sharing *geometry*. The attached result
+stays `scope:"connectivity"` (see `docs/drc.md`), it is **not** a geometric gate,
+and geometric candidate feedback remains `019f952b99f2`.

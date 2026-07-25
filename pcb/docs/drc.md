@@ -82,6 +82,12 @@ chip (`ui/PCBPanel.gd` `_drc_status_suffix`) reads the scope and renders
 "Connectivity clean" / "Connectivity: N violation(s)". True geometric-at-propose
 (a copper-overlay check) is a separate follow-up; this is the honest-label repair.
 
+Since Round E1 (`019f97d021a8`) its pad census comes from the **compiled IR**, via
+`ir_connectivity.connectivity_board` — the same compile the router consumes, so
+the two halves of one route reply cannot disagree about which pads exist. That is
+a shared *census*, not shared geometry: the projection carries pad centers and net
+ownership only, so this surface remains centerline-scoped exactly as above.
+
 ### Safety invariant — never a false `clean`
 
 The kernel is **fail-safe** (every modeled shape is exact or a superset of the

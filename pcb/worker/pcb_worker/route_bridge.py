@@ -6,13 +6,35 @@ pcb_route_hint_kind.gd + PcbAnnotationHost.build_route_hint_envelope) into the
 agent_router engine's native ``Board`` + ``RoutingHints`` so the ``route``
 method can drive the router from the same board the panel renders.
 
+WHICH BUILDER IS WHICH (Round E, docket 019f783860c8)
+-----------------------------------------------------
+``resolved_board_to_router`` is the PRODUCTION canonical builder: it projects a
+compiled ResolvedBoard, so every dimension, position, side/mirror, layer and net
+is IR-authoritative. ``board_to_router`` below is the LEGACY raw-dict builder,
+kept for the pure-bridge tests and the hint helpers; it no longer invents a
+nominal land (a pad with no authored geometry now raises) and it is slated for
+retirement with the native pad-list path in E3.
+
+The panel-convention notes below therefore describe the LEGACY builder. Canonical
+routing no longer mirrors raw panel-pin placement: it takes placement from the
+IR. For a top-side component the two agree exactly (the IR's
+``PlacementTransform.point`` calls the very same ``rotate_local_offset``), but for
+a BOTTOM-side component they deliberately differ — the IR mirrors local Y as
+pcbnew does (pinned by ``k1_bottom_oracle.kicad_pcb``, KiCad 9.0.9) while the raw
+path never did. That divergence is the raw path being wrong, not a compatibility
+requirement (Codex ruling 1).
+
 Design constraints (docket 019eb481ae28 / 019eb47eb567, DCR 019dc140):
 
-  * This module lives in pcb_worker/ and IMPORTS agent_router types — it never
-    edits agent_router/, keeping the engine a clean standalone package.
-  * Absolute pad positions are composed the SAME way the panel model does it in
-    pcb/ui/model/pcb_component.gd::get_pin_world_position, so panel and router
-    agree on where a rotated component's pad lands. That convention is:
+  * This module lives in pcb_worker/ and IMPORTS agent_router types. Historically
+    it also never EDITED agent_router/. That note describes dependency direction,
+    not a ban on evolving our own first-party engine: Codex's E1 review (comment
+    773) rules that E2 makes ``RoutingGrid`` natively origin-aware rather than
+    duplicating a world<->grid transform here.
+  * Absolute pad positions (LEGACY builder) are composed the SAME way the panel
+    model does it in pcb/ui/model/pcb_component.gd::get_pin_world_position, so
+    panel and router agree on where a rotated component's pad lands. That
+    convention is:
 
         xform  = Transform2D(deg_to_rad(-rotation_deg))   # Godot CW-positive
         world  = component_pos + xform * pin_offset

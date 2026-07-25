@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (board_model, compile_board, drc, footprints, gerber,
-               kicad, libcheck, resolve)
+               ir_connectivity, kicad, libcheck, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -854,7 +854,10 @@ def _route(params: dict) -> dict:
             board_dict = board_model.load_board(params)
         except board_model.BoardParseError as exc:
             return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
-        drc_board = board_dict  # DRC-at-propose runs against this canonical board
+        # DRC-at-propose runs against the projection of the SAME compiled board the
+        # router consumes (set below, once the compile succeeds) — never the raw
+        # dict. See ir_connectivity: one compile feeds both halves of the reply.
+        drc_board = None
         # ROUND E CUTOVER (019f783860c8): canonical routing consumes the compiled
         # ResolvedBoard IR or it does not route. Before this, the router was handed
         # the RAW board and invented a nominal 1.0x1.0 land for any pad without
@@ -870,6 +873,12 @@ def _route(params: dict) -> dict:
         if _is_error_reply(compiled):
             return compiled
         compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+        # ONE compile, BOTH halves of the reply (019f97d021a8). Routing consumes the
+        # IR below; connectivity DRC consumes the connectivity projection of that
+        # same compiled board. Before this, routes came from IR pads while the
+        # attached DRC read the raw dict's inline pins, so a footprint-only board
+        # routed successfully AND reported every endpoint dangling.
+        drc_board = ir_connectivity.connectivity_board(compiled.board)
         try:
             board = route_bridge.resolved_board_to_router(compiled.board)
         except route_bridge.UnsupportedGeometry as exc:

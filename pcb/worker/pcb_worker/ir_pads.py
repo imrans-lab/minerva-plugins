@@ -111,11 +111,25 @@ def iter_ir_pads(rb: ResolvedBoard) -> Iterator[IRPad]:
         numbers = pad_number_map(rb.footprint_for(comp))
         for pad in comp.placed_pads:
             source_number = pad.source_id
+            number = numbers.get(source_number)
+            if not number:
+                # FAIL CLOSED rather than fall back to the source_id (Codex E1
+                # review, comment 773). The human number IS the endpoint identity:
+                # net membership is spelled "U1.2", hints reference "U1.2", and the
+                # panel labels "U1.2". A pad identified as "pad:1:0" would be
+                # unreachable by every one of those, so a proposal naming it would
+                # be unusable rather than merely ugly. ResolvedBoard already
+                # guarantees each PlacedPad correlates to a footprint pad, so this
+                # is reachable only for a footprint pad with no number at all.
+                raise UnsupportedGeometry(
+                    f"component {comp.ref!r}: placed pad {source_number!r} has no "
+                    f"human pad number in its footprint — it has no usable endpoint "
+                    f"identity for nets, hints or the panel")
             yield IRPad(
                 component=comp,
                 pad=pad,
                 source_number=source_number,
-                number=numbers.get(source_number) or source_number,
+                number=number,
                 net_name=net_names.get(pad.net_id),
                 is_drilled=pad.drill is not None,
                 is_npth=pad.pad_type == NPTH_PAD_TYPE,
