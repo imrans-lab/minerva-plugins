@@ -57,13 +57,6 @@ class AABB:
             max(self.max_x, other.max_x), max(self.max_y, other.max_y),
         )
 
-    def expanded(self, margin: float) -> "AABB":
-        return AABB(self.min_x - margin, self.min_y - margin,
-                    self.max_x + margin, self.max_y + margin)
-
-    def as_list(self) -> list[float]:
-        return [self.min_x, self.min_y, self.max_x, self.max_y]
-
 
 def aabb_union(boxes: list[AABB]) -> AABB:
     it = iter(boxes)

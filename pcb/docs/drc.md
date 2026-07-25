@@ -29,7 +29,11 @@ result is a topology pass, not a proof the copper is geometrically clean.**
 
 - **GC1** min trace width
 - **GC2** copper-to-copper clearance (same canonical layer, same-net exempt)
-- **GC3** drill / finished-hole minimums
+- **GC3** drill / finished-hole minimums — the finished-hole check is a
+  *necessary pre-DFM condition only*: the ResolvedBoard IR carries the **drill**
+  diameter, not the plated finished bore, so `drill < min_finished` always fails,
+  but a drill that clears the floor is **not** certified finished-clean (that is
+  DFM's job)
 - **GC4** annular ring
 - **GC5** copper-to-edge inset
 - **GC6** hole-to-hole spacing

@@ -2,7 +2,7 @@
 
 This is the real (non-mocked) functional floor for the DRC oracle: it renders the
 spike board through the worker's own KiCad emitter and runs the external
-``kicad-cli pcb drc`` (KiCad 9.0.7) over the real bytes. Skips cleanly if
+``kicad-cli pcb drc`` (KiCad 9.0.x; 9.0.9 as tested) over the real bytes. Skips cleanly if
 kicad-cli is not installed.
 """
 

@@ -145,7 +145,9 @@ var DRCGeometric = ToolSpec{
 		"pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args " +
 		"{yaml:<board source>} or {board:<board object>}. Compiles the board to the " +
 		"ResolvedBoard IR, then checks GC1 min trace width, GC2 copper-copper clearance, " +
-		"GC3 drill/finished-hole, GC4 annular ring, GC5 copper-to-edge, GC6 hole-to-hole. " +
+		"GC3 drill/finished-hole (finished-hole is a necessary pre-DFM check — the IR " +
+		"carries drill diameter, not the plated finished bore), GC4 annular ring, GC5 " +
+		"copper-to-edge, GC6 hole-to-hole. " +
 		"NEVER a false clean: modeled copper is exact or a superset (fail-safe), and " +
 		"unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a " +
 		"discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, " +

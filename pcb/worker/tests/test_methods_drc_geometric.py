@@ -4,10 +4,12 @@ Drive the REAL ``methods.handle_request({"method":"drc_geometric",...})`` dispat
 (not the kernel directly) so the wiring is proven end to end: the method must
 return the GEOMETRIC RESULT UNION verbatim from
 ``drc_geometric.geometric_drc_from_resolution`` — the determinate envelope on a
-compile success, the indeterminate envelope on a compile failure — and a
-structured ``{ok:False, error:{kind:"parse"}}`` reply on a board that will not
-parse. The kernel's own behaviour is covered by tests/test_drc_geometric.py; this
-file is about the method contract + dispatch.
+compile success, the indeterminate envelope on failure. EVERY boundary failure —
+a board that will not parse (kind ``parse``), a compile ResolutionFailure (kind
+``unresolved_geometry``), or an unexpected compile exception (kind ``internal``) —
+returns the SAME geometric union (scope / verifies_geometry / verdict), never a
+bespoke shape. The kernel's own behaviour is covered by tests/test_drc_geometric.py;
+this file is about the method contract + dispatch.
 """
 
 from __future__ import annotations

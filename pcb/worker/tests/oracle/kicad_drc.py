@@ -3,7 +3,7 @@
 An INDEPENDENT check on the worker's board geometry: it takes a canonical board
 dict, renders it to a ``.kicad_pcb`` with the worker's own emitter
 (``pcb_worker.kicad.generate_kicad_pcb`` — reused, not reimplemented), then runs
-the external ``kicad-cli pcb drc`` (KiCad 9.0.7) over it and parses the structured
+the external ``kicad-cli pcb drc`` (KiCad 9.0.x; 9.0.9 as tested) over it and parses the structured
 JSON report into :class:`DrcResult`.
 
 BOUNDARY (enforced by SB.3 lint): this module lives under ``tests/`` and shells

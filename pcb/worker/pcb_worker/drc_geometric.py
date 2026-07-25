@@ -80,6 +80,7 @@ from agent_router.layers import kicad_to_canon
 
 from .drc_geom_primitives import (
     AABB,
+    EPS,
     Capsule,
     OrientedRect,
     aabb_union,
@@ -102,10 +103,8 @@ from .resolved_board import (
     SlotHole,
 )
 
-# Numerical slack for threshold comparisons (mm). A measurement within EPS of a
-# floor PASSES (exact-at-threshold is compliant) — the geometry is already biased
-# conservative, so this is float-noise slack only. See drc_geom_primitives.EPS.
-EPS = 1e-9
+# EPS (threshold slack) is imported from drc_geom_primitives — ONE shared boundary
+# policy for the whole engine, not a duplicated literal.
 
 
 class UnsupportedGeometry(Exception):
