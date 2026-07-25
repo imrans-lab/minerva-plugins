@@ -10,8 +10,9 @@ name: pcb
 #              PR gate: go vet, go test -count=1, and the worker pytest suite
 #              with the 15 kicad-cli-gated "oracle" tests skipping (a 16th
 #              test skips unconditionally, unrelated to kicad-cli).
-#              Expected baseline (measured 2026-07-25 @ 5c81a22): 1018 passed,
-#              16 skipped.
+#              Expected baseline (re-measured 2026-07-25 after the IR-parity
+#              gate landed): 1076 passed, 16 skipped. Measured by running the
+#              suite with kicad-cli off PATH, which is what this job sees.
 #
 #   `test-crossplatform`
 #            — round A0c. The SAME gate as `test`, on macos-latest and
@@ -26,8 +27,8 @@ name: pcb
 #   `oracle` — push to main and manual dispatch ONLY (never pull_request).
 #              Installs kicad-cli via the KiCad PPA, then runs the full
 #              worker suite so the oracle-gated tests actually execute.
-#              Expected baseline (same commit, with kicad-cli 9.0.9):
-#              1033 passed, 1 skipped.
+#              Expected baseline (same measurement, with kicad-cli 9.0.9):
+#              1091 passed, 1 skipped.
 #
 #   `panel`  — round A1a. Runs pcb/tests/gd/*.gd, the GDScript layer covering
 #              the plugin's panel + UI models. Nothing ran these before this
@@ -122,14 +123,27 @@ jobs:
         # worker-side changes that don't touch Go source.
         run: go test -count=1 ./...
 
-      # Run the two standing campaign gates by name first, so a red run is
+      # Run the standing campaign gates by name first, so a red run is
       # legible at a glance (which gate failed) without digging through the
       # full pytest log below. They are ordinary tests inside tests/, so the
       # full-suite step re-runs them — that's intentional duplication for
       # log legibility, not a coverage gap.
-      - name: Standing gates (determinism + kicad-cli boundary lint)
+      #
+      # test_ir_parity is the third standing gate (cross-surface geometry
+      # parity: the compiled IR vs geometric DRC vs the emitted .kicad_pcb vs
+      # the emitted Gerber/Excellon). It belongs in THIS job, not `oracle`,
+      # because it needs no kicad-cli — it parses our OWN emitted bytes with
+      # gerbonara, which the setup action already installs as a dev extra. A
+      # parity break is caused by a code change, so it has to fail on the PR
+      # that makes it, not days later on a main-only job. Same argument the
+      # other two standing gates are here on.
+      #
+      # It runs in `test-crossplatform` and `oracle` too, for the same reason
+      # those jobs re-run the other two: they are full-suite jobs, and a gate
+      # that is skipped on Windows is a gate that breaks on Windows.
+      - name: Standing gates (determinism + kicad-cli boundary lint + IR parity)
         working-directory: pcb/worker
-        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py -v
+        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py tests/test_ir_parity.py -v
 
       - name: Worker test suite (kicad-cli absent — oracle tests skip)
         working-directory: pcb/worker
@@ -180,9 +194,9 @@ jobs:
       - name: Go test
         run: go test -count=1 ./...
 
-      - name: Standing gates (determinism + kicad-cli boundary lint)
+      - name: Standing gates (determinism + kicad-cli boundary lint + IR parity)
         working-directory: pcb/worker
-        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py -v
+        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py tests/test_ir_parity.py -v
 
       # kicad-cli is absent here, exactly as in `test` — the oracle tests skip.
       # Installing KiCad on three platforms is a separate and much larger
@@ -231,9 +245,9 @@ jobs:
       - name: Go test
         run: go test -count=1 ./...
 
-      - name: Standing gates (determinism + kicad-cli boundary lint)
+      - name: Standing gates (determinism + kicad-cli boundary lint + IR parity)
         working-directory: pcb/worker
-        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py -v
+        run: python -m pytest tests/test_determinism_gate.py tests/test_kicad_cli_boundary.py tests/test_ir_parity.py -v
 
       - name: Worker test suite (kicad-cli present — oracle tests execute)
         working-directory: pcb/worker
