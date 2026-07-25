@@ -32,6 +32,13 @@ class RoutingGrid:
     resolution: float      # Grid resolution in mm (cell size)
     clearance: float = 0.2  # Minimum clearance between different nets in mm
     layers: list[str] = field(default_factory=lambda: ["F.Cu", "B.Cu"])
+    # Board ORIGIN in world mm: the world position of cell (0, 0)'s lower-left
+    # corner. A board outline that does not start at (0, 0) — RectOutline.origin
+    # in the ResolvedBoard IR — used to be ignored here, so world coordinates were
+    # indexed as if the board began at the world origin and every pad landed in
+    # the wrong cell (docket 019f783860c8, gap C). Callers keep speaking WORLD
+    # coordinates at every boundary; the grid subtracts the origin internally.
+    origin: tuple[float, float] = (0.0, 0.0)
 
     def __post_init__(self):
         """Initialize the grid cells."""
@@ -45,11 +52,42 @@ class RoutingGrid:
                 for _ in range(self.rows)
             ]
 
+    # -- world <-> cell -----------------------------------------------------
+    # THE single owner of the transform, in both directions. Every marker, the
+    # bounds test and the pathfinder go through these two methods; nothing
+    # re-derives `x / resolution` on its own, so the origin cannot be honoured in
+    # one place and forgotten in another.
+
     def _pos_to_cell(self, x: float, y: float) -> tuple[int, int]:
-        """Convert position in mm to grid cell indices."""
-        col = int(x / self.resolution)
-        row = int(y / self.resolution)
+        """Convert a WORLD position in mm to grid cell indices.
+
+        Uses floor, not truncation: for a position left of / above the origin,
+        ``int()`` rounds toward zero and would fold two different out-of-bounds
+        positions onto cell -0, which ``_cell_in_bounds`` then reads as index 0 —
+        an out-of-board point testing as an in-board cell.
+        """
+        col = math.floor((x - self.origin[0]) / self.resolution)
+        row = math.floor((y - self.origin[1]) / self.resolution)
         return (col, row)
+
+    def _cell_to_pos(self, col: int, row: int) -> tuple[float, float]:
+        """Convert grid cell indices to the WORLD position of the cell's centre.
+
+        The inverse of :meth:`_pos_to_cell`. Path reconstruction returns world
+        coordinates through here, so a routed proposal lands where the board says
+        rather than offset by the origin.
+        """
+        return (self.origin[0] + (col + 0.5) * self.resolution,
+                self.origin[1] + (row + 0.5) * self.resolution)
+
+    def _cell_range(self, lo: float, hi: float, axis: int) -> range:
+        """Inclusive cell index range covering the world span [lo, hi] on *axis*
+        (0 = x/cols, 1 = y/rows). Shared by every rectangular marker so the
+        origin is applied once."""
+        base = self.origin[axis]
+        first = math.floor((lo - base) / self.resolution)
+        last = math.ceil((hi - base) / self.resolution)
+        return range(first, last + 1)
 
     def _cell_in_bounds(self, col: int, row: int) -> bool:
         """Check if cell indices are within grid bounds."""
@@ -134,20 +172,10 @@ class RoutingGrid:
         half_w = size[0] / 2
         half_h = size[1] / 2
 
-        # Mark cells covered by pad
-        x_min = x - half_w
-        x_max = x + half_w
-        y_min = y - half_h
-        y_max = y + half_h
-
-        # Convert to cell indices
-        col_min = int(x_min / self.resolution)
-        col_max = int(math.ceil(x_max / self.resolution))
-        row_min = int(y_min / self.resolution)
-        row_max = int(math.ceil(y_max / self.resolution))
-
-        for row in range(row_min, row_max + 1):
-            for col in range(col_min, col_max + 1):
+        # Mark cells covered by pad (world span -> cells via the shared owner, so
+        # the board origin is honoured here exactly as in _pos_to_cell).
+        for row in self._cell_range(y - half_h, y + half_h, 1):
+            for col in self._cell_range(x - half_w, x + half_w, 0):
                 if self._cell_in_bounds(col, row):
                     cell = self._grid[layer][row][col]
                     cell.occupied = True
@@ -234,20 +262,8 @@ class RoutingGrid:
         """Mark a single point of a trace with given width."""
         half_w = width / 2
 
-        # Calculate the range of grid cells to mark
-        x_min = x - half_w
-        x_max = x + half_w
-        y_min = y - half_w
-        y_max = y + half_w
-
-        # Convert to cell indices
-        col_min = int(x_min / self.resolution)
-        col_max = int(math.ceil(x_max / self.resolution))
-        row_min = int(y_min / self.resolution)
-        row_max = int(math.ceil(y_max / self.resolution))
-
-        for row in range(row_min, row_max + 1):
-            for col in range(col_min, col_max + 1):
+        for row in self._cell_range(y - half_w, y + half_w, 1):
+            for col in self._cell_range(x - half_w, x + half_w, 0):
                 if self._cell_in_bounds(col, row):
                     cell = self._grid[layer][row][col]
                     cell.occupied = True

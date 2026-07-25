@@ -176,3 +176,71 @@ class TestBoundaryConditions:
 
         cell = grid.get_cell(49.9, 49.9)
         assert cell.occupied == False
+
+
+class TestGridOrigin:
+    """A board whose outline does not start at (0, 0) — docket 019f783860c8 gap C.
+
+    The grid used to index world coordinates as if every board began at the world
+    origin, so on an offset board every pad landed in the wrong cell. The grid now
+    carries the board origin and is the SINGLE owner of the world<->cell transform
+    in both directions; callers keep speaking world coordinates everywhere.
+    """
+
+    def test_origin_defaults_to_zero_and_is_backward_compatible(self):
+        grid = RoutingGrid(width=10, height=10, resolution=1.0)
+        assert grid.origin == (0.0, 0.0)
+        assert grid._pos_to_cell(0.5, 0.5) == (0, 0)
+        assert grid._pos_to_cell(9.5, 9.5) == (9, 9)
+
+    def test_world_to_cell_subtracts_the_origin(self):
+        grid = RoutingGrid(width=40, height=40, resolution=0.1, origin=(100.0, 100.0))
+        assert grid._pos_to_cell(100.0, 100.0) == (0, 0)
+        assert grid._pos_to_cell(120.0, 110.0) == (200, 100)
+        # The far corner is the last cell, not out of bounds.
+        assert grid._cell_in_bounds(*grid._pos_to_cell(139.99, 139.99))
+
+    def test_cell_to_world_is_the_inverse_and_round_trips(self):
+        grid = RoutingGrid(width=40, height=40, resolution=0.5, origin=(100.0, 100.0))
+        for col, row in ((0, 0), (3, 7), (79, 79)):
+            x, y = grid._cell_to_pos(col, row)
+            assert grid._pos_to_cell(x, y) == (col, row)
+        # Centre of cell (0,0) on this grid is half a cell in from the origin.
+        assert grid._cell_to_pos(0, 0) == pytest.approx((100.25, 100.25))
+
+    def test_a_point_before_the_origin_is_out_of_bounds(self):
+        """Floor, not truncation. int() rounds toward zero, so a point just LEFT
+        of the origin would become cell -0 == 0 and test as in-bounds — an
+        off-board position reading as the board's first cell."""
+        grid = RoutingGrid(width=40, height=40, resolution=1.0, origin=(100.0, 100.0))
+        assert grid._pos_to_cell(99.5, 100.5) == (-1, 0)
+        assert not grid._cell_in_bounds(*grid._pos_to_cell(99.5, 100.5))
+        assert not grid._cell_in_bounds(*grid._pos_to_cell(100.5, 99.5))
+        # Out-of-bounds reads are blocked, so nothing routes off-board.
+        assert grid.is_blocked(99.5, 100.5)
+
+    def test_markers_honour_the_origin(self):
+        """Every rectangular marker goes through the same span helper, so a pad
+        marked in world coordinates occupies the cells under it — not cells offset
+        by the origin (which, before, was most of the board away)."""
+        grid = RoutingGrid(width=40, height=40, resolution=0.5, origin=(100.0, 100.0))
+        grid.mark_pad(x=120.0, y=120.0, size=(1.0, 1.0), net="N1", layer="F.Cu")
+
+        assert grid.get_cell(120.0, 120.0, "F.Cu").occupied is True
+        assert grid.get_cell(120.0, 120.0, "F.Cu").net == "N1"
+        # The cell at the same OFFSET from zero (i.e. where the origin-blind grid
+        # would have marked it) is untouched.
+        assert grid.get_cell(100.25, 100.25, "F.Cu").occupied is False
+
+    def test_trace_and_obstacle_markers_honour_the_origin(self):
+        grid = RoutingGrid(width=40, height=40, resolution=0.5, origin=(100.0, 100.0))
+        grid.mark_trace(start=(110.0, 110.0), end=(115.0, 110.0),
+                        width=0.25, net="N2", layer="F.Cu")
+        assert grid.get_cell(112.5, 110.0, "F.Cu").net == "N2"
+        # The same offset from ZERO is off the board entirely: out-of-bounds reads
+        # return the synthetic boundary cell, never the trace we just marked.
+        off_board = grid.get_cell(12.5, 10.0, "F.Cu")
+        assert off_board.obstacle_type == "boundary" and off_board.net is None
+
+        grid.mark_obstacle(x=130.0, y=130.0, radius=1.0)
+        assert grid.get_cell(130.0, 130.0, "F.Cu").obstacle_type == "hole"

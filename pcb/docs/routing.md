@@ -106,9 +106,15 @@ In every failing case **zero routes** are returned — no partial proposal, no
   defaults (`trace_width=0.25`, `clearance=0.2`), which is what it did before E1:
   `agent_router.Board` carries no design rules, so a board authoring a 0.35mm
   floor is currently routed at 0.25 unless the caller passes options.
-- **Grid origin correctness** for a non-zero `RectOutline.origin` — **Round E2**.
-  The `Board.origin` is carried, but `RoutingGrid` indexes from zero and
-  `_effective_grid_size` expands past the outline to cover outlying pads.
+- ~~Grid origin correctness~~ — **done in E2a**. `RoutingGrid` now carries the
+  board `origin` and is the single owner of the world↔cell transform in both
+  directions (`_pos_to_cell` / `_cell_to_pos` / `_cell_range`); callers still
+  speak world coordinates at every boundary. It also floors rather than
+  truncates, so a position just before the origin can no longer fold onto cell
+  `-0` and read as in-bounds. The legal routing area is now the **outline**:
+  `_effective_grid_size`, which grew the grid to cover any pad outside the board
+  (+2mm), is gone — a pad outside the outline makes its net **unrouted** instead
+  of routable off-board.
 - **Per-net-class width/clearance minima** — **Round E2**, with the rest of rules.
 - **Native pad-list path** (`_board_from_native`) — **Round E3**: it still accepts
   a missing size as `0x0`, which is the same class of fictional copper.

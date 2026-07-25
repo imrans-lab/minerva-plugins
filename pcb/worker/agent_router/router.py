@@ -372,15 +372,16 @@ def route_board(
     """
     result = RoutingResult()
 
-    # Create routing grid – expand to cover all pad positions
+    # Create routing grid over the board's OWN extent, anchored at its origin.
     layers = ["F.Cu"] if single_layer else ["F.Cu", "B.Cu"]
-    grid_w, grid_h = _effective_grid_size(board)
+    grid_w, grid_h = _grid_extent(board)
     grid = RoutingGrid(
         width=grid_w,
         height=grid_h,
         resolution=grid_resolution,
         clearance=clearance,
-        layers=layers
+        layers=layers,
+        origin=board.origin,
     )
 
     # Mark all pads on the grid
@@ -471,16 +472,21 @@ def _is_power_net(net_name: str) -> bool:
     return bool(_POWER_NET_PATTERNS.search(net_name))
 
 
-def _effective_grid_size(board: Board) -> tuple[float, float]:
-    """Return grid dimensions that cover the board outline and all pad positions."""
-    w, h = board.width, board.height
-    margin = 2.0  # mm extra beyond outermost pad
-    for pad in board.pads:
-        x, y = pad.position
-        half_w = max(pad.size) / 2 if pad.size else 0
-        w = max(w, x + half_w + margin)
-        h = max(h, y + half_w + margin)
-    return w, h
+def _grid_extent(board: Board) -> tuple[float, float]:
+    """The board's own routable extent — its outline, nothing more.
+
+    This used to be ``_effective_grid_size``, which GREW the grid to cover any pad
+    lying outside the outline (plus a 2mm margin). That silently enlarged the legal
+    routing area: copper outside the board became routable space, and a proposal
+    could be laid down where no board exists. The outline is the legal area
+    (019f783860c8 gap C); a pad outside it is simply out of bounds, so nets that
+    need it come back UNROUTED rather than routed off-board.
+
+    Note this is a pure extent — the grid is anchored at ``board.origin``, so a
+    board spanning x in [10, 50] is 40mm wide and starts at 10, not 50 wide
+    starting at 0.
+    """
+    return board.width, board.height
 
 
 def _order_nets(board: Board, strategy: str) -> list[str]:
@@ -998,15 +1004,16 @@ def route_board_with_hints(
 
     result = RoutingResult()
 
-    # Create routing grid – expand to cover all pad positions
+    # Create routing grid over the board's OWN extent, anchored at its origin.
     layers = ["F.Cu"] if single_layer else ["F.Cu", "B.Cu"]
-    grid_w, grid_h = _effective_grid_size(board)
+    grid_w, grid_h = _grid_extent(board)
     grid = RoutingGrid(
         width=grid_w,
         height=grid_h,
         resolution=grid_resolution,
         clearance=clearance,
-        layers=layers
+        layers=layers,
+        origin=board.origin,
     )
 
     # Mark all pads on the grid

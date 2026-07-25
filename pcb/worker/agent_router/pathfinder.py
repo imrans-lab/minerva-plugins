@@ -287,8 +287,9 @@ def _astar_path(
                 continue
 
             # Convert cell to position for collision check
-            nx = neighbor[0] * grid.resolution + grid.resolution / 2
-            ny = neighbor[1] * grid.resolution + grid.resolution / 2
+            # Cell -> WORLD through the grid's single transform owner, so a
+            # non-zero board origin is honoured here too (019f783860c8 gap C).
+            nx, ny = grid._cell_to_pos(*neighbor)
 
             if not grid.can_route_through(nx, ny, net, layer):
                 continue
@@ -341,9 +342,7 @@ def _reconstruct_path(
     # Convert cells to positions
     points = [start]  # Use exact start
     for cell in cells[1:-1]:  # Skip first and last (use exact positions)
-        x = cell[0] * grid.resolution + grid.resolution / 2
-        y = cell[1] * grid.resolution + grid.resolution / 2
-        points.append((x, y))
+        points.append(grid._cell_to_pos(*cell))
     points.append(end)  # Use exact end
 
     # Simplify: merge collinear points

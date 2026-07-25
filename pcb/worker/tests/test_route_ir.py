@@ -211,6 +211,32 @@ def test_outline_extent_and_origin_come_from_the_ir():
     assert rendered.height == pytest.approx(40.0)
     assert rendered.origin == pytest.approx((0.0, 0.0))
 
+    offset = _project(_board([_comp("R1", "R_0805", 110, 110)],
+                             origin={"x_mm": 100.0, "y_mm": 100.0}))
+    assert offset.origin == pytest.approx((100.0, 100.0))
+
+
+def test_board_with_a_nonzero_origin_routes_inside_its_own_outline():
+    """E2 gap C, end to end. The grid used to index from zero regardless of the
+    board's origin, so every pad on an offset board landed in the wrong cell. The
+    grid is now anchored at the outline's origin and world coordinates are
+    preserved at the boundary — a route on an offset board must come back INSIDE
+    that board, not translated toward (0, 0)."""
+    board = _board([_comp("R1", "R_0805", 110, 120), _comp("R2", "R_0805", 125, 120)],
+                   origin={"x_mm": 100.0, "y_mm": 100.0},
+                   nets=[{"name": "N1", "pins": ["R1.2", "R2.1"]}])
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+    result = resp["result"]
+    assert result["success"] is True, result
+
+    points = [p for route in result["routes"] for seg in route["segments"]
+              for p in (seg["start"], seg["end"])]
+    assert points
+    for x, y in points:
+        assert 100.0 <= x <= 140.0, f"routed off-board in x: {x}"
+        assert 100.0 <= y <= 140.0, f"routed off-board in y: {y}"
+
 
 # ---------------------------------------------------------------------------
 # 2. HOLE SEMANTICS (Codex gap D)
@@ -425,6 +451,22 @@ def test_connectivity_projection_failure_stays_inside_the_route_envelope(monkeyp
     assert resp["error"]["kind"] == "unsupported_geometry"
     assert "synthetic connectivity projection fault" in resp["error"]["message"]
     assert "result" not in resp
+
+
+def test_a_pad_outside_the_outline_is_unrouted_not_routed_off_board():
+    """E2 gap C, the other half. The grid used to GROW to cover any pad outside
+    the outline (+2mm), which quietly made off-board space routable. The outline
+    is the legal area: a net reaching a pad outside it comes back UNROUTED, with
+    no route laid down where no board exists."""
+    board = _board([_comp("R1", "R_0805", 10, 20),
+                    _comp("R2", "R_0805", 60, 20)],      # x=60 on a 40mm board
+                   nets=[{"name": "N1", "pins": ["R1.2", "R2.1"]}])
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+    result = resp["result"]
+    assert result["success"] is False
+    assert result["routes"] == []
+    assert [u["net"] for u in result["unrouted"]] == ["N1"]
 
 
 def test_footprint_only_board_routes_AND_reports_connectivity_clean():
