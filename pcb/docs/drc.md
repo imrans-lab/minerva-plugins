@@ -47,12 +47,36 @@ result is a topology pass, not a proof the copper is geometrically clean.**
   `clean`/`findings`/zero-counts a caller could mistake for a pass. `kind` is
   `unresolved_geometry` when the board parsed but would not compile/resolve
   (unknown footprint, sizeless pad), or `unsupported_geometry` when the kernel
-  met geometry it does not model (non-rectangular outline, copper zone), or
+  met geometry it does not model — a non-rectangular outline, a copper zone/pour,
+  a via **per-layer padstack** (019f95893989), a copper **board/placed graphic**
+  (019f95897086), or a **net-class** width/clearance minimum (019f958b45b9) — or
   `internal` on an unexpected fault.
 
-A board that will not **parse** at all returns the structured `{ok:false,
-error:{kind:"parse"}}` reply instead (no `verdict`), mirroring
-`generate`/`gerbers`.
+Every failure at the method boundary returns the **same** indeterminate union
+(docket 019f9589b232) — there is no bespoke third shape. A board that will not
+**parse** at all is `error.kind:"parse"`, an unexpected `compile_board` exception
+is `error.kind:"internal"`, and both still carry
+`scope:"geometric", verifies_geometry:false, verdict:"indeterminate"` with **no**
+`clean`/`findings`/`counts`. Consumers branch on `verdict`, never on a separate
+parse shape.
+
+## Route DRC-at-propose is CONNECTIVITY-scoped (not geometric)
+
+`route()` (docket 019f6f1492e0) attaches a per-route `drc` and a top-level
+`drc_summary` to its result. **This is the connectivity/centerline checker
+(`drc.run_drc`), not geometric copper DRC** — it cannot verify a clearance, trace
+width, or annular ring. Both payloads therefore carry `scope:"connectivity"`
+(docket 019f958aa6db):
+
+- per route: `drc: {scope:"connectivity", clean:bool|null, violations:[…]}`
+  (`clean:null` + `error` when the DRC engine itself faulted).
+- top level: `drc_summary: {scope:"connectivity", clean:bool|null,
+  violation_count:int, error?}`.
+
+Consumers **must not** render this as a generic/geometric "DRC clean". The UI
+chip (`ui/PCBPanel.gd` `_drc_status_suffix`) reads the scope and renders
+"Connectivity clean" / "Connectivity: N violation(s)". True geometric-at-propose
+(a copper-overlay check) is a separate follow-up; this is the honest-label repair.
 
 ### Safety invariant — never a false `clean`
 

@@ -26,7 +26,7 @@ from typing import Any
 
 from . import (board_model, compile_board, drc, footprints, gerber,
                kicad, libcheck, resolve)
-from .drc_geometric import geometric_drc_from_resolution
+from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
 
@@ -327,16 +327,25 @@ def _drc_geometric(params: dict) -> dict:
         verdict:"indeterminate", error:{...}}`` — deliberately carries NO
         ``clean``/``findings`` a caller could read as a pass.
 
-    It is NOT re-wrapped into the legacy ``{ok, result}`` shape. A parse failure is
-    the one exception: a structured ``{ok:False, error:{kind:"parse"}}`` reply,
-    mirroring generate/gerbers/drc.
+    It is NOT re-wrapped into the legacy ``{ok, result}`` shape. EVERY failure at
+    this boundary — parse, compile exception, or unmodeled geometry — returns the
+    SAME geometric indeterminate union (019f9589b232): a source that will not parse
+    is ``kind="parse"``, an unexpected ``compile_board`` exception is
+    ``kind="internal"``, and a compile ``ResolutionFailure`` /
+    kernel-unmodeled-geometry flows through
+    :func:`drc_geometric.geometric_drc_from_resolution`. No consumer maintains a
+    bespoke branch for parse anymore, and the union never carries a ``clean`` a
+    caller could mistake for a pass.
     """
     try:
         board = _load(params)
     except board_model.BoardParseError as exc:
-        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+        return geometric_indeterminate("parse", str(exc))
 
-    result = compile_board.compile_board(board)
+    try:
+        result = compile_board.compile_board(board)
+    except Exception as exc:  # noqa: BLE001 - fail-closed: a compile crash is NOT a clean.
+        return geometric_indeterminate("internal", f"compile_board raised {exc!r}")
     return geometric_drc_from_resolution(result)
 
 
@@ -750,14 +759,20 @@ def _drc_for_routes(board_dict: dict, routes: list) -> dict:
 
 def _attach_route_drc(payload: dict, board_dict: dict) -> None:
     """Mutate payload in place: each route dict gains
-    "drc": {"clean": bool, "violations": [...]} (filtered to findings
-    involving that route's net) on success, or
-    "drc": {"clean": None, "error": "<msg>"} if the DRC engine itself faults.
-    payload also gains a top-level "drc_summary": {"clean", "violation_count"}
-    (violation_count counts EVERY finding, including ones not attributable to
-    any single proposed route — e.g. a crossing between two pre-existing
-    traces). A DRC-engine fault never fails the route call — routes still
-    return, just without a clean determination."""
+    "drc": {"scope": "connectivity", "clean": bool, "violations": [...]} (filtered
+    to findings involving that route's net) on success, or
+    "drc": {"scope": "connectivity", "clean": None, "error": "<msg>"} if the DRC
+    engine itself faults. payload also gains a top-level "drc_summary":
+    {"scope": "connectivity", "clean", "violation_count"} (violation_count counts
+    EVERY finding, including ones not attributable to any single proposed route —
+    e.g. a crossing between two pre-existing traces). A DRC-engine fault never
+    fails the route call — routes still return, just without a clean determination.
+
+    SCOPE (019f958aa6db): this is CONNECTIVITY/topology only — it runs the legacy
+    centerline `drc.run_drc`, which cannot verify a clearance/width/annular ring.
+    Every payload carries scope:"connectivity" so no consumer (PCBPanel.gd's status
+    chip) can render it as a generic/geometric "DRC clean". It is NOT the
+    fail-closed geometric union (drc_geometric)."""
     routes = payload.get("routes")
     if not isinstance(routes, list):
         return
@@ -771,8 +786,9 @@ def _attach_route_drc(payload: dict, board_dict: dict) -> None:
     if error is not None:
         for r in routes:
             if isinstance(r, dict):
-                r["drc"] = {"clean": None, "error": error}
-        payload["drc_summary"] = {"clean": None, "violation_count": 0, "error": error}
+                r["drc"] = {"scope": "connectivity", "clean": None, "error": error}
+        payload["drc_summary"] = {"scope": "connectivity", "clean": None,
+                                  "violation_count": 0, "error": error}
         return
 
     findings = (result or {}).get("findings", [])
@@ -781,8 +797,10 @@ def _attach_route_drc(payload: dict, board_dict: dict) -> None:
             continue
         net = r.get("net")
         violations = [f for f in findings if _finding_involves_net(f, net)]
-        r["drc"] = {"clean": len(violations) == 0, "violations": violations}
-    payload["drc_summary"] = {"clean": len(findings) == 0, "violation_count": len(findings)}
+        r["drc"] = {"scope": "connectivity", "clean": len(violations) == 0,
+                    "violations": violations}
+    payload["drc_summary"] = {"scope": "connectivity", "clean": len(findings) == 0,
+                              "violation_count": len(findings)}
 
 
 def _route(params: dict) -> dict:

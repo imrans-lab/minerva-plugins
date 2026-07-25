@@ -87,17 +87,43 @@ def test_accepts_yaml_source_like_the_other_methods():
 
 
 # ---------------------------------------------------------------------------
-# Parse failure — structured {ok:False, error:{kind:"parse"}} (never the union).
+# Parse failure — the FULL geometric indeterminate union (019f9589b232). Every
+# failure at the method boundary carries the SAME union; parse no longer escapes
+# to a bespoke {ok:false, error:{kind:"parse"}} shape with no scope/verdict.
 # ---------------------------------------------------------------------------
 
 
-def test_parse_failure_returns_parse_error_reply():
+def test_parse_failure_returns_indeterminate_union_kind_parse():
     resp = _call({"yaml": "]["})
     assert resp["ok"] is False
+    # The SAME union shape as every other geometric failure — not a bespoke reply.
+    assert resp["scope"] == "geometric"
+    assert resp["verifies_geometry"] is False
+    assert resp["verdict"] == "indeterminate"
     assert resp["error"]["kind"] == "parse"
-    # A parse fault is the structured reply, NOT the geometric union.
-    assert "verdict" not in resp
+    # Fail-closed: NO clean/findings/counts a caller could mistake for a pass.
     assert "findings" not in resp
+    assert "counts" not in resp
+    assert "clean" not in resp
+
+
+def test_compile_exception_returns_indeterminate_union_kind_internal(monkeypatch):
+    # An UNEXPECTED compile_board exception must NOT escape the union — it becomes
+    # verdict:"indeterminate", error.kind:"internal", same envelope as parse.
+    from pcb_worker import compile_board as cb
+
+    def _boom(_board):
+        raise RuntimeError("synthetic compile fault")
+
+    monkeypatch.setattr(cb, "compile_board", _boom)
+    resp = _call({"board": _base(components=[_th("U1", 10, 10)])})
+    assert resp["ok"] is False
+    assert resp["scope"] == "geometric"
+    assert resp["verifies_geometry"] is False
+    assert resp["verdict"] == "indeterminate"
+    assert resp["error"]["kind"] == "internal"
+    assert "synthetic compile fault" in resp["error"]["message"]
+    assert "findings" not in resp and "counts" not in resp and "clean" not in resp
 
 
 # ---------------------------------------------------------------------------

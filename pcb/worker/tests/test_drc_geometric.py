@@ -38,11 +38,14 @@ from pcb_worker.drc_geometric import (
     run_geometric_drc,
 )
 from pcb_worker.resolved_board import (
+    BoardGraphic,
     Contour,
     DiagnosticSeverity,
     HoleKind,
     Layer,
+    LayerPad,
     LineGeometry,
+    NetClass,
     OvalHole,
     ProfileOutline,
     RectOutline,
@@ -50,6 +53,7 @@ from pcb_worker.resolved_board import (
     ResolutionSuccess,
     ResolvedHole,
     ResolvedZone,
+    ViaPadstack,
     ZoneKind,
 )
 
@@ -840,3 +844,173 @@ def test_npth_pad_suppresses_gc2_but_keeps_gc6():
     res = run_geometric_drc(_flip_pad_type(rb, "U2", "np_thru_hole"))
     assert _counts(res, "gc2_copper_clearance") == 0
     assert _counts(res, "gc6_hole_to_hole") == 1
+
+
+# ===========================================================================
+# REPAIR ROUND — the six close-out false-clean / contract repros (docket
+# 019f95893989, 019f95897086, 019f958b45b9, 019f9589ebb3). The result-union
+# (019f9589b232) + routing-label (019f958aa6db) repros live in
+# test_methods_drc_geometric.py / test_route_drc.py (they are method-boundary).
+# Each false-clean guard fires BEFORE projection and yields the indeterminate
+# envelope — verdict:"indeterminate", kind:"unsupported_geometry", NO
+# clean/findings/counts.
+# ===========================================================================
+
+
+def _assert_indeterminate_unsupported(res: dict) -> None:
+    assert res["ok"] is False
+    assert res["scope"] == "geometric"
+    assert res["verifies_geometry"] is False
+    assert res["verdict"] == "indeterminate"
+    assert res["error"]["kind"] == "unsupported_geometry"
+    # NO clean/findings/counts a caller could mistake for a pass.
+    assert "findings" not in res
+    assert "counts" not in res
+    assert "clean" not in res
+
+
+# --- 019f95893989: via per-layer padstack copper false-clean ---------------
+
+
+def _via_board():
+    return _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6)],
+        nets=[{"name": "N", "pins": ["U1.1"]}],
+        vias=[{"net": "N", "x_mm": 20, "y_mm": 20, "diameter_mm": 0.8,
+               "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}])
+
+
+def test_via_padstack_fails_closed_indeterminate():
+    # A via whose TOP padstack land (3.0) exceeds its global diameter (0.8) can
+    # collide on top while GC2/GC5 read only the global diameter -> false clean.
+    # With the fail-closed guard, ANY per-layer padstack makes the kernel
+    # indeterminate rather than risk that (Codex option B, minimal v1).
+    rb = _compile(_via_board())
+    padstack = ViaPadstack(per_layer=(LayerPad("top", 3.0, 1.3),
+                                      LayerPad("bottom", 0.8, 0.2)))
+    via2 = dataclasses.replace(rb.vias[0], padstack=padstack)
+    res = run_geometric_drc(dataclasses.replace(rb, vias=(via2,)))
+    _assert_indeterminate_unsupported(res)
+
+
+def test_via_without_padstack_still_runs_to_a_verdict():
+    # Control: the SAME via without a padstack must NOT trip the guard — the
+    # kernel runs to a determinate verdict (a padstack-less via is fully modeled).
+    res = _run(_via_board())
+    assert res["ok"] is True
+    assert res["verdict"] in ("clean", "violations")
+
+
+# --- 019f95897086: copper board/placed graphics false-clean ----------------
+
+
+def test_copper_board_graphic_fails_closed_indeterminate():
+    rb = _compile(_base(components=[_th_pad_comp(annulus=1.6)]))
+    copper_line = BoardGraphic(
+        id="copper-line", layer=Layer.from_id("F.Cu"),
+        geometry=LineGeometry((1.0, 1.0), (39.0, 39.0)), width_mm=1.0)
+    res = run_geometric_drc(dataclasses.replace(rb, board_graphics=(copper_line,)))
+    _assert_indeterminate_unsupported(res)
+
+
+def test_non_copper_board_graphic_still_runs_to_a_verdict():
+    # Control: a SILK board graphic is not copper -> the kernel is unaffected.
+    rb = _compile(_base(components=[_th_pad_comp(annulus=1.6)]))
+    silk_line = BoardGraphic(
+        id="silk-line", layer=Layer.from_id("F.SilkS"),
+        geometry=LineGeometry((1.0, 1.0), (5.0, 5.0)), width_mm=0.2)
+    res = run_geometric_drc(dataclasses.replace(rb, board_graphics=(silk_line,)))
+    assert res["ok"] is True
+    assert res["verdict"] in ("clean", "violations")
+
+
+def test_copper_placed_graphic_fails_closed_indeterminate():
+    # A component PlacedGraphic on a copper layer is the same unmodeled-copper
+    # false clean. Flip an existing (silk) placed graphic onto F.Cu.
+    rb = _compile(_base(components=[
+        {"ref": "R1", "footprint": "R_0805", "x_mm": 20, "y_mm": 20,
+         "rotation_deg": 0, "layer": "top"}]))
+    comp = rb.components[0]
+    assert comp.placed_graphics, "fixture expects footprint silk/courtyard graphics"
+    pg0 = dataclasses.replace(comp.placed_graphics[0], layer=Layer.from_id("F.Cu"))
+    comp2 = dataclasses.replace(
+        comp, placed_graphics=(pg0,) + comp.placed_graphics[1:])
+    res = run_geometric_drc(dataclasses.replace(rb, components=(comp2,)))
+    _assert_indeterminate_unsupported(res)
+
+
+# --- 019f958b45b9: per-net-class width/clearance minima false-clean ---------
+
+
+def _net_board():
+    return _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6)],
+        nets=[{"name": "N", "pins": ["U1.1"]}])
+
+
+def _apply_net_class(rb, nc: NetClass):
+    dr = dataclasses.replace(rb.design_rules, net_classes=(nc,))
+    nets = tuple(dataclasses.replace(n, net_class_id=nc.id) for n in rb.nets)
+    return dataclasses.replace(rb, design_rules=dr, nets=nets)
+
+
+def test_net_class_min_trace_width_fails_closed_indeterminate():
+    rb = _compile(_net_board())
+    rb2 = _apply_net_class(rb, NetClass(id="nc:strict", name="Strict",
+                                        min_trace_width_mm=0.5))
+    _assert_indeterminate_unsupported(run_geometric_drc(rb2))
+
+
+def test_net_class_min_clearance_fails_closed_indeterminate():
+    rb = _compile(_net_board())
+    rb2 = _apply_net_class(rb, NetClass(id="nc:strict", name="Strict",
+                                        min_clearance_mm=0.5))
+    _assert_indeterminate_unsupported(run_geometric_drc(rb2))
+
+
+def test_net_class_without_relevant_minima_does_not_trip():
+    # A net class carrying only OTHER fields (via_diameter_mm) must NOT trip the
+    # guard — the kernel runs to a determinate verdict.
+    rb = _compile(_net_board())
+    rb2 = _apply_net_class(rb, NetClass(id="nc:route", name="Route",
+                                        via_diameter_mm=0.9))
+    res = run_geometric_drc(rb2)
+    assert res["ok"] is True
+    assert res["verdict"] in ("clean", "violations")
+
+
+# --- 019f9589ebb3: human source attribution on findings --------------------
+
+
+def test_gc2_finding_names_both_refs_pins_and_net_names():
+    # Two different-net TH lands (radius 0.8) overlapping in copper -> a GC2
+    # violation whose two participants must NAME U1.1 (net GND) and U2.1 (net VCC)
+    # in human-meaningful form, ALONGSIDE the stable hashed ids.
+    board = _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6),
+                    _th_pad_comp(ref="U2", x=10.6, annulus=1.6)],
+        nets=[{"name": "GND", "pins": ["U1.1"]},
+              {"name": "VCC", "pins": ["U2.1"]}])
+    res = _run(board)
+    f = _findings(res, "gc2_copper_clearance")[0]
+    parts = f["participants"]
+    by_ref = {p["ref"]: p for p in parts}
+    assert set(by_ref) == {"U1", "U2"}
+    assert by_ref["U1"]["pad"] == "1"
+    assert by_ref["U2"]["pad"] == "1"
+    assert by_ref["U1"]["net_name"] == "GND"
+    assert by_ref["U2"]["net_name"] == "VCC"
+    # Stable hashed ids are PRESERVED alongside the human fields.
+    assert all(p["entity_id"] and p["net_id"] for p in parts)
+
+
+def test_single_entity_finding_carries_ref_pad_net_name():
+    # A GC4 annular finding on a TH pad names its ref/pad/net_name too.
+    board = _base(
+        components=[_th_pad_comp(ref="U1", drill=0.5, annulus=0.7)],
+        nets=[{"name": "GND", "pins": ["U1.1"]}])
+    res = _run(board)
+    f = _findings(res, "gc4_annular_ring")[0]
+    assert f["ref"] == "U1"
+    assert f["pad"] == "1"
+    assert f["net_name"] == "GND"

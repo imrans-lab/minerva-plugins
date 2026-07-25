@@ -123,6 +123,8 @@ def test_route_flags_collision_with_existing_trace():
     sig = [rt for rt in r["routes"] if rt["net"] == "SIG"]
     assert len(sig) == 1
     route_drc = sig[0]["drc"]
+    # HONEST LABEL (019f958aa6db): route DRC is CONNECTIVITY-scoped, never geometric.
+    assert route_drc["scope"] == "connectivity"
     assert route_drc["clean"] is False
     assert len(route_drc["violations"]) >= 1
     assert any(v["type"] == "crossing" for v in route_drc["violations"])
@@ -131,6 +133,7 @@ def test_route_flags_collision_with_existing_trace():
     assert crossing["layer"] == "top"
 
     summary = r["drc_summary"]
+    assert summary["scope"] == "connectivity"
     assert summary["clean"] is False
     assert summary["violation_count"] >= 1
 
@@ -175,8 +178,11 @@ def test_route_clean_when_no_collision():
 
     sig = [rt for rt in r["routes"] if rt["net"] == "SIG"]
     assert len(sig) == 1
-    assert sig[0]["drc"] == {"clean": True, "violations": []}
-    assert r["drc_summary"] == {"clean": True, "violation_count": 0}
+    # HONEST LABEL (019f958aa6db): a clean connectivity result is scope-tagged so
+    # the UI renders "Connectivity clean", never a misleading bare "DRC clean".
+    assert sig[0]["drc"] == {"scope": "connectivity", "clean": True, "violations": []}
+    assert r["drc_summary"] == {"scope": "connectivity", "clean": True,
+                                "violation_count": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -198,9 +204,11 @@ def test_drc_engine_failure_is_reported_not_raised(monkeypatch):
 
     sig = [rt for rt in r["routes"] if rt["net"] == "SIG"]
     assert len(sig) == 1
+    assert sig[0]["drc"]["scope"] == "connectivity"
     assert sig[0]["drc"]["clean"] is None
     assert "synthetic DRC engine fault" in sig[0]["drc"]["error"]
 
+    assert r["drc_summary"]["scope"] == "connectivity"
     assert r["drc_summary"]["clean"] is None
     assert "synthetic DRC engine fault" in r["drc_summary"]["error"]
 

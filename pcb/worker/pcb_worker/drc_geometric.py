@@ -133,6 +133,13 @@ class CopperPrimitive:
     shape: Any                     # Capsule | OrientedRect
     aabb: AABB
     width_mm: float | None = None  # trace width (GC1); None for non-trace copper
+    # HUMAN SOURCE ATTRIBUTION (019f9589ebb3) — added ALONGSIDE the stable hashed
+    # ids above so MCP/UI/LLM consumers can name "U1.1" / net "GND" without
+    # rebuilding private IR lookup tables. None where a field does not apply
+    # (a trace/via has no ref/pad; an unassigned-net primitive has no net_name).
+    ref: str | None = None         # component ref (pads) — ResolvedComponent.ref
+    pad_number: str | None = None  # pad number (pads) — footprint source_id
+    net_name: str | None = None    # net name — ResolvedNet.name
 
 
 @dataclass(frozen=True)
@@ -151,6 +158,10 @@ class HolePrimitive:
     minor_mm: float
     position: tuple[float, float]
     aabb: AABB
+    # HUMAN SOURCE ATTRIBUTION (019f9589ebb3) — see CopperPrimitive.
+    ref: str | None = None         # component ref (pad-origin holes)
+    pad_number: str | None = None  # pad number (pad-origin holes)
+    net_name: str | None = None    # net name where the hole carries a net
 
 
 @dataclass(frozen=True)
@@ -200,6 +211,10 @@ class AnnularEntity:
     per_layer: tuple[tuple[str, LandDisc], ...]
     drill: DrillDisc
     position: tuple[float, float]
+    # HUMAN SOURCE ATTRIBUTION (019f9589ebb3) — see CopperPrimitive.
+    ref: str | None = None         # component ref (PTH pads)
+    pad_number: str | None = None  # pad number (PTH pads)
+    net_name: str | None = None    # net name where the entity carries a net
 
 
 @dataclass(frozen=True)
@@ -289,10 +304,22 @@ def project_board(rb: ResolvedBoard) -> Projection:
     holes: list[HolePrimitive] = []
     annular: list[AnnularEntity] = []
     all_copper = _copper_layer_ids(rb)
+    # Human net-name lookup (019f9589ebb3): the stable hashed net_id -> the
+    # authored ResolvedNet.name, so findings can name the net ("GND") without a
+    # consumer rebuilding this private table.
+    net_names = {net.id: net.name for net in rb.nets}
 
     for comp in rb.components:
+        # Human pad-number correlation (019f9589ebb3): a PlacedPad carries only the
+        # footprint pad source_id ("pad:1:0"); the human-meaningful number ("1")
+        # lives on the footprint pad. Map source_id -> number so a finding can name
+        # "U1.1". Falls back to the source_id if a pad has no correlated number.
+        fp = rb.footprint_for(comp)
+        number_by_source = {fpad.source_id: fpad.number for fpad in fp.pads}
         for pad in comp.placed_pads:
             number = pad.source_id
+            human_pad = number_by_source.get(pad.source_id) or number
+            pad_net_name = net_names.get(pad.net_id)
             is_drilled = pad.drill is not None
             # A pad participates on the copper layers flagged in pad.layers; a
             # through-hole pad spans ALL copper layers regardless.
@@ -312,48 +339,56 @@ def project_board(rb: ResolvedBoard) -> Projection:
                     copper.append(CopperPrimitive(
                         entity_id=pad.id, parent_id=comp.id, kind="pth_pad",
                         layers=layers, net_id=pad.net_id, shape=shape,
-                        aabb=_shape_aabb(shape)))
+                        aabb=_shape_aabb(shape),
+                        ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
                 drill = _drill_disc_from_size(pad.drill.size)
                 holes.append(_hole_from_drill(
                     pad.id, comp.id, "pad", pad.net_id, pad.drill.plated,
-                    pad.position, drill, pad.rotation_deg))
+                    pad.position, drill, pad.rotation_deg,
+                    ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
                 # Annular ring: PLATED through-hole pads only.
                 if not is_npth:
                     annular.append(AnnularEntity(
                         entity_id=pad.id, parent_id=comp.id, kind="pth_pad",
                         net_id=pad.net_id,
                         per_layer=tuple((lid, land) for lid in layers),
-                        drill=drill, position=pad.position))
+                        drill=drill, position=pad.position,
+                        ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
             else:
                 shape = _smd_shape(pad, number, comp.ref)
                 copper.append(CopperPrimitive(
                     entity_id=pad.id, parent_id=comp.id, kind="smd_pad",
                     layers=pad_copper or all_copper[:1], net_id=pad.net_id,
-                    shape=shape, aabb=_shape_aabb(shape)))
+                    shape=shape, aabb=_shape_aabb(shape),
+                    ref=comp.ref, pad_number=human_pad, net_name=pad_net_name))
 
     for trace in rb.traces:
+        trace_net_name = net_names.get(trace.net_id)
         for seg in trace.segments:
             cap = Capsule(seg.a[0], seg.a[1], seg.b[0], seg.b[1], seg.width_mm / 2.0)
             copper.append(CopperPrimitive(
                 entity_id=seg.id, parent_id=trace.id, kind="trace_seg",
                 layers=(seg.layer.id,), net_id=trace.net_id, shape=cap,
-                aabb=cap.aabb(), width_mm=seg.width_mm))
+                aabb=cap.aabb(), width_mm=seg.width_mm, net_name=trace_net_name))
 
     for via in rb.vias:
+        via_net_name = net_names.get(via.net_id)
         span = _via_span_layers(rb, via)
         cap = Capsule.disc(via.position[0], via.position[1], via.diameter_mm / 2.0)
         copper.append(CopperPrimitive(
             entity_id=via.id, parent_id=None, kind="via", layers=span,
-            net_id=via.net_id, shape=cap, aabb=cap.aabb()))
+            net_id=via.net_id, shape=cap, aabb=cap.aabb(), net_name=via_net_name))
         drill = DrillDisc(kind="round", dia_mm=via.drill_mm)
         holes.append(_hole_from_drill(
-            via.id, None, "via", via.net_id, True, via.position, drill, 0.0))
+            via.id, None, "via", via.net_id, True, via.position, drill, 0.0,
+            net_name=via_net_name))
         # Per-layer padstack land when present, else the via diameter on each
         # participating copper layer.
         per_layer = _via_per_layer_lands(via, span)
         annular.append(AnnularEntity(
             entity_id=via.id, parent_id=None, kind="via", net_id=via.net_id,
-            per_layer=per_layer, drill=drill, position=via.position))
+            per_layer=per_layer, drill=drill, position=via.position,
+            net_name=via_net_name))
 
     for hole in rb.holes:
         cap_list, minor, pos = _hole_capsules(hole)
@@ -405,7 +440,9 @@ def _via_per_layer_lands(via, span: tuple[str, ...]) -> tuple[tuple[str, LandDis
 def _hole_from_drill(entity_id: str, parent_id: str | None, origin: str,
                      net_id: str | None, plated: bool,
                      position: tuple[float, float], drill: DrillDisc,
-                     rotation_deg: float) -> HolePrimitive:
+                     rotation_deg: float, *,
+                     ref: str | None = None, pad_number: str | None = None,
+                     net_name: str | None = None) -> HolePrimitive:
     if drill.kind == "round":
         r = (drill.dia_mm or 0.0) / 2.0
         cap = Capsule.disc(position[0], position[1], r)
@@ -422,7 +459,7 @@ def _hole_from_drill(entity_id: str, parent_id: str | None, origin: str,
     return HolePrimitive(
         entity_id=entity_id, parent_id=parent_id, origin=origin, net_id=net_id,
         plated=plated, capsules=(cap,), minor_mm=minor, position=position,
-        aabb=cap.aabb())
+        aabb=cap.aabb(), ref=ref, pad_number=pad_number, net_name=net_name)
 
 
 def _hole_capsules(hole) -> tuple[tuple[Capsule, ...], float, tuple[float, float]]:
@@ -479,7 +516,8 @@ def _check_gc1_trace_width(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                 prim.net_id, prim.layers[0] if prim.layers else None,
                 prim.width_mm, required,
                 closest=[shape.ax, shape.ay], witness=[shape.bx, shape.by],
-                midpoint=list(mid)))
+                midpoint=list(mid),
+                ref=prim.ref, pad=prim.pad_number, net_name=prim.net_name))
     return findings
 
 
@@ -492,13 +530,15 @@ def _check_gc3_drill(proj: Projection, rb: ResolvedBoard) -> list[dict]:
             findings.append(_finding(
                 "gc3_drill", hole.entity_id, hole.parent_id, hole.origin,
                 hole.net_id, None, hole.minor_mm, mins.min_drill_mm,
-                closest=list(hole.position), witness=list(hole.position)))
+                closest=list(hole.position), witness=list(hole.position),
+                ref=hole.ref, pad=hole.pad_number, net_name=hole.net_name))
         # min_finished_hole_mm — plated (finished) hole floor — plated only.
         elif hole.plated and _violates(hole.minor_mm, mins.min_finished_hole_mm):
             findings.append(_finding(
                 "gc3_finished_hole", hole.entity_id, hole.parent_id, hole.origin,
                 hole.net_id, None, hole.minor_mm, mins.min_finished_hole_mm,
-                closest=list(hole.position), witness=list(hole.position)))
+                closest=list(hole.position), witness=list(hole.position),
+                ref=hole.ref, pad=hole.pad_number, net_name=hole.net_name))
     return findings
 
 
@@ -513,7 +553,8 @@ def _check_gc4_annular(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                 findings.append(_finding(
                     "gc4_annular_ring", ent.entity_id, ent.parent_id, ent.kind,
                     ent.net_id, layer_id, web, required,
-                    closest=list(ent.position), witness=list(ent.position)))
+                    closest=list(ent.position), witness=list(ent.position),
+                    ref=ent.ref, pad=ent.pad_number, net_name=ent.net_name))
     return findings
 
 
@@ -543,7 +584,14 @@ def _check_gc6_hole_to_hole(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                     "hole_pair", None, None, best, required,
                     closest=list(w1), witness=list(w2), midpoint=list(mid),
                     extra={"entities": [h1.entity_id, h2.entity_id],
-                           "origins": [h1.origin, h2.origin]}))
+                           "origins": [h1.origin, h2.origin],
+                           "participants": [
+                               {"entity_id": h1.entity_id, "origin": h1.origin,
+                                "ref": h1.ref, "pad": h1.pad_number,
+                                "net_name": h1.net_name},
+                               {"entity_id": h2.entity_id, "origin": h2.origin,
+                                "ref": h2.ref, "pad": h2.pad_number,
+                                "net_name": h2.net_name}]}))
     return findings
 
 
@@ -660,9 +708,13 @@ def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                     closest=list(w1), witness=list(w2), midpoint=list(mid),
                     extra={"participants": [
                         {"entity_id": lo.entity_id, "parent": lo.parent_id,
-                         "kind": lo.kind, "net_id": lo.net_id},
+                         "kind": lo.kind, "net_id": lo.net_id,
+                         "ref": lo.ref, "pad": lo.pad_number,
+                         "net_name": lo.net_name},
                         {"entity_id": hi.entity_id, "parent": hi.parent_id,
-                         "kind": hi.kind, "net_id": hi.net_id}]}))
+                         "kind": hi.kind, "net_id": hi.net_id,
+                         "ref": hi.ref, "pad": hi.pad_number,
+                         "net_name": hi.net_name}]}))
     findings.sort(key=lambda f: (f["layer"], f["entity_id"]))
     return findings
 
@@ -699,7 +751,8 @@ def _check_gc5_copper_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]
             findings.append(_finding(
                 "gc5_copper_to_edge", prim.entity_id, prim.parent_id, prim.kind,
                 prim.net_id, layer, measured, required,
-                closest=list(cop_pt), witness=list(edge_pt)))
+                closest=list(cop_pt), witness=list(edge_pt),
+                ref=prim.ref, pad=prim.pad_number, net_name=prim.net_name))
     return findings
 
 
@@ -712,7 +765,9 @@ def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
              net_id: str | None, layer: str | None,
              measured: float, required: float, *,
              closest: list, witness: list,
-             midpoint: list | None = None, extra: dict | None = None) -> dict:
+             midpoint: list | None = None, extra: dict | None = None,
+             ref: str | None = None, pad: str | None = None,
+             net_name: str | None = None) -> dict:
     out = {
         "type": rule,
         "entity_id": entity_id,
@@ -720,6 +775,12 @@ def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
         "kind": kind,
         "net_id": net_id,
         "layer": layer,
+        # HUMAN SOURCE ATTRIBUTION (019f9589ebb3): added ALONGSIDE the hashed ids
+        # above (ref="U1", pad="1", net_name="GND"). None where a field does not
+        # apply (traces/vias have no ref/pad; unassigned copper has no net_name).
+        "ref": ref,
+        "pad": pad,
+        "net_name": net_name,
         "measured_mm": round(measured, 6),
         "required_mm": round(required, 6),
         "closest": [round(closest[0], 6), round(closest[1], 6)],
@@ -756,6 +817,19 @@ def _indeterminate(kind: str, message: str,
     }
 
 
+def geometric_indeterminate(kind: str, message: str,
+                            diagnostics: tuple | list = ()) -> dict:
+    """PUBLIC constructor for the geometric INDETERMINATE union — the single
+    discriminated failure shape at the ``drc_geometric`` method boundary
+    (019f9589b232). The method layer uses this for a source that will not parse
+    (``kind="parse"``) and for an unexpected compile exception (``kind="internal"``)
+    so EVERY failure carries the same envelope (``ok=False``, ``scope="geometric"``,
+    ``verifies_geometry=False``, ``verdict="indeterminate"``, ``error={...}``) — no
+    bespoke third shape a caller must special-case, and never a ``clean``/``findings``
+    a caller could read as a pass. Thin wrapper over :func:`_indeterminate`."""
+    return _indeterminate(kind, message, list(diagnostics))
+
+
 def _diag_dict(diag: Diagnostic) -> dict:
     return {
         "severity": diag.severity.value,
@@ -788,6 +862,52 @@ def run_geometric_drc(rb: ResolvedBoard, *,
             return _indeterminate(
                 "unsupported_geometry",
                 "geometric DRC v1 does not model copper zones/pours")
+
+        # FAIL-CLOSED GUARD (019f95893989): a via carrying a PER-LAYER PADSTACK has
+        # per-layer land diameters the GC2/GC5 copper projection does not model
+        # (project_board uses the single via.diameter_mm for the via CopperPrimitive
+        # on every span layer while honoring the padstack only for GC4). A larger top
+        # padstack land can collide while GC2/GC5 read the smaller global diameter —
+        # a false clean. The compiler authors no padstacks today, so gating here is
+        # the safe minimal v1 repair (Codex option B) until CAM + DRC model padstack
+        # copper consistently.
+        if any(via.padstack is not None for via in rb.vias):
+            return _indeterminate(
+                "unsupported_geometry",
+                "per-layer via padstack copper is not modeled in GC2/GC5 yet; "
+                "geometric DRC is indeterminate rather than risk a false clean")
+
+        # FAIL-CLOSED GUARD (019f95897086): a COPPER board/placed graphic is copper
+        # the kernel never projects (project_board reads pads/traces/vias/holes only).
+        # A copper BoardGraphic or component PlacedGraphic would be silently skipped
+        # and the board certified clean — a false clean over unmodeled copper. Detect
+        # any copper graphic and fail closed to indeterminate.
+        if any(g.layer.role is LayerRole.COPPER for g in rb.board_graphics) or any(
+                g.layer.role is LayerRole.COPPER
+                for comp in rb.components for g in comp.placed_graphics):
+            return _indeterminate(
+                "unsupported_geometry",
+                "copper board/placed graphics are not modeled by geometric DRC; "
+                "geometric DRC is indeterminate rather than skip unmodeled copper")
+
+        # FAIL-CLOSED GUARD (019f958b45b9): the kernel applies only the GLOBAL
+        # ManufacturingConstraints minima; it never reads per-net-class
+        # min_trace_width_mm / min_clearance_mm. A net whose class carries a STRICTER
+        # width/clearance floor would false-clean under the weaker global floor. Gate
+        # whenever any net references a NetClass that carries either minimum (a class
+        # with only other fields does not trip). The compiler emits no such classes
+        # today, so this is the safe minimal v1 repair until the effective per-class
+        # thresholds are applied in GC1/GC2.
+        _net_classes = {nc.id: nc for nc in rb.design_rules.net_classes}
+        for net in rb.nets:
+            nc = _net_classes.get(net.net_class_id) if net.net_class_id else None
+            if nc is not None and (nc.min_trace_width_mm is not None
+                                   or nc.min_clearance_mm is not None):
+                return _indeterminate(
+                    "unsupported_geometry",
+                    "per-net-class width/clearance minima are not applied by "
+                    "geometric DRC yet; geometric DRC is indeterminate rather than "
+                    "risk a false clean under the weaker global floor")
 
         proj = project_board(rb)
 
