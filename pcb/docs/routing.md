@@ -39,14 +39,98 @@ from and geometric DRC checks (`pad_source.placed_pad_to_geom` + `th_land`), so
 routed keepouts, checked copper and fabricated copper cannot drift apart.
 
 **Conservative envelopes.** `agent_router`'s `RoutingGrid.mark_pad` marks an
-unrotated rectangle and **discards** the rotation argument it accepts
-(`grid.py:133`). Handing it a truthful `w/h` for a rotated elongated land would
-therefore under-block along the rotated axes. It is handed the land's
-axis-aligned **bounding box** instead — a strict superset of the real copper.
-Same invariant as the DRC kernel, restated for keepouts:
+unrotated rectangle and **discards** the rotation argument it accepts. Handing it
+a truthful `w/h` for a rotated elongated land would therefore under-block along
+the rotated axes. It is handed the land's axis-aligned **bounding box** instead —
+a strict superset of the real copper. Same invariant as the DRC kernel, restated
+for keepouts:
 
 > the modeled keepout must be a SUPERSET of the fabricated copper. Over-blocking
 > is legal; under-blocking never is.
+
+**Inflation composes with that superset, it does not replace it** (Round E2).
+`RoutingGrid.keepout_margin` = `clearance + trace_width / 2`, and it is the
+single owner of the term — **all three** markers go through it (`mark_pad`,
+`mark_obstacle`, `mark_trace`), for the same reason `_pos_to_cell` is the single
+owner of the world↔cell transform. A margin honoured in one marker and forgotten
+in another is an under-block. Growing a box that already contains the rotated
+copper still contains it, so the two over-blocks stack.
+
+The half-width term is not decoration: the grid marks **centerline**-addressed
+cells (the pathfinder tests one cell per step), so a trace centered exactly
+`clearance` away from a pad still lays half its copper inside the clearance ring.
+The same arithmetic applies to an already-routed trace, which is why `mark_trace`
+now takes the **true copper width** and inflates it here rather than being handed
+a pre-inflated `trace_width + 2 * clearance` by the engine: that literal reserved
+a half-extent of `w/2 + clearance`, short by the newcomer's own `w/2`. The
+correct half-extent — marked copper's half-width, the gap, the newcomer's
+half-width — is exactly `w/2 + keepout_margin`.
+
+Each marker writes two concentric regions: the copper itself
+(`obstacle_type="pad"` / `"trace"`), and the ring around it as that copper's
+reservation (`"pad_clearance"` / `"trace_clearance"`), under three rules that all
+say the same thing:
+
+| the ring meets | what happens | why |
+|---|---|---|
+| free space | claimed for the marker's net | a net owes no clearance to itself, so it may approach its own copper; everyone else is blocked |
+| **copper** (pad or trace) | left alone | pads are marked in board order and traces as each net is routed; overwriting B's land with A's net would let A route straight through real copper |
+| another **ring** of a different net | `net=None` — nobody passes | first-writer-wins would let that one net route within `clearance` of the other owner |
+
+The precedence is **not** symmetric, and the asymmetry is deliberate: a ring never
+overwrites copper, but a **copper** mark does overwrite a contested `net=None`
+ring cell unconditionally. That is a weakening, and it is bounded — it is
+reachable only where that net's own copper physically sits (plus at most the one
+cell `_cell_range` over-claims, whose reasoning is recorded at that method). A
+cell occupied by a net's real land is not a place any router could have kept that
+net out of, so re-typing it as copper describes the board rather than relaxing a
+rule. Under-blocking that mattered would need a ring to lose to something that is
+*not* copper, which cannot happen.
+
+An obstacle (hole) belongs to **no** net and clears any net it lands on:
+`can_route_through` lets a net cross its own cells, so an inherited net would be a
+licence to route through a mounting hole.
+
+**Effective width and clearance (Round E2).** The run routes at the **board's**
+rules, not the engine's. `agent_router.Board` has no slot for either — they are
+per-run engine options, not board geometry — so `pcb_worker.methods.
+_effective_routing_rules` resolves them and passes both to `route_board` /
+`route_board_with_hints` explicitly. Precedence, highest first:
+
+| # | source | trace width | clearance |
+|---|---|---|---|
+| 1 | explicit caller option | `options.trace_width` | `options.clearance` |
+| 2 | hint-authored width | widest `width_mm` among selected hints | — (a route hint has no clearance field) |
+| 3 | **the compiled board's design rules** | `design_rules.defaults.trace_width_mm` | `design_rules.minimums.min_clearance_mm` |
+| 4 | the engine's own signature default | `route_board`'s `trace_width` | `route_board`'s `clearance` |
+
+Steps 1 and 2 are unchanged in meaning; E2 inserted step 3 ahead of what used to
+be the sole fallback. Step 4 is still read from `route_board`'s **signature**
+(`_engine_default_mm`) rather than re-spelled as a literal, for the same reason
+the candidate overlay reads it there: a duplicated default that drifted would
+under- or over-state a keepout as easily as a candidate width.
+
+**An explicit option is admitted or rejected — never reinterpreted.** Absent means
+"the caller said nothing", so the next step applies; *present but inadmissible*
+fails closed naming the value. Quietly substituting the board's rule for what the
+caller asked for is the same dishonesty as quietly routing at the engine's
+default. The two dimensions differ only in their **predicate**: `clearance: 0` is
+admissible (asking for no clearance is a coherent request, and `positive_mm` would
+have silently discarded it), while `trace_width: 0` is not — zero-width copper is
+not copper, and routing at it while the overlay checked at something else is the
+false-clean shape.
+
+The chain is a sequence of explicit `is None` tests, not an `or` chain: `or`
+treats `0.0` as absent, so a step legitimately yielding zero would fall through
+while still passing an `is None` guard — the run and the overlay would then
+disagree about the width. Every step, step 4 included, goes through the same
+admission predicate.
+
+If nothing in the chain yields a usable number the route **fails closed**
+(`unsupported_geometry`, zero routes). There is no invented default; step 3's
+`min_clearance_mm` is the same field `ir_connectivity` publishes and
+`drc_geometric` enforces, so routing cannot reserve less space than DRC will
+demand.
 
 **Endpoint identity vs geometry.** A pad becomes a routable **endpoint** only if it
 carries an authored pad number — nets are spelled `U1.2`, hints reference `U1.2`,
@@ -101,11 +185,15 @@ In every failing case **zero routes** are returned — no partial proposal, no
 
 ## Not yet done (each has an owner; none of it is silent)
 
-- **Effective width/clearance from the IR** and keepout inflation by clearance +
-  half the trace width — **Round E2**. Today the engine still applies its own
-  defaults (`trace_width=0.25`, `clearance=0.2`), which is what it did before E1:
-  `agent_router.Board` carries no design rules, so a board authoring a 0.35mm
-  floor is currently routed at 0.25 unless the caller passes options.
+- ~~Effective width/clearance from the IR, and keepout inflation by clearance +
+  half the trace width~~ — **done in E2**, both together, for **all three**
+  markers (pads, holes, routed traces). They had to ship together: plumbing the
+  real width alone would have the router path a 0.35mm trace against keepouts
+  sized for 0.25mm, so the proposed copper would be wider than the clearance
+  reserved for it — worse than either endpoint. See "Effective width and
+  clearance" and "Inflation composes with that superset" above. The engine's own
+  defaults (`trace_width=0.25`, `clearance=0.2`) are no longer what a board gets
+  routed at.
 - ~~Grid origin correctness~~ — **done in E2a**. `RoutingGrid` now carries the
   board `origin` and is the single owner of the world↔cell transform in both
   directions (`_pos_to_cell` / `_cell_to_pos` / `_cell_range`); callers still
@@ -115,7 +203,10 @@ In every failing case **zero routes** are returned — no partial proposal, no
   `_effective_grid_size`, which grew the grid to cover any pad outside the board
   (+2mm), is gone — a pad outside the outline makes its net **unrouted** instead
   of routable off-board.
-- **Per-net-class width/clearance minima** — **Round E2**, with the rest of rules.
+- **Per-net-class width/clearance minima** — still open. The IR carries the slot
+  (`design_rules.net_classes`, with per-class `trace_width_mm` /
+  `min_clearance_mm`) but the v1 compiler emits none, so there is nothing for
+  routing to honour yet: a run is one width and one clearance for every net.
 - ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
   still accepted a missing size as `0x0`, the same class of fictional copper
   E1 removed from the canonical path — but rather than fix it, the shape
@@ -184,11 +275,12 @@ routed shape that carries neither key.
 A route reply carries geometry but not sizes, and the fail-closed ruling forbids
 approximated copper, so both values are sourced explicitly:
 
-- **Trace width** — the width the run *actually routed at*: an explicit caller or
-  hint width if one was set, otherwise the engine's own default read from
-  `agent_router.router.route_board`'s **signature** (`_engine_default_trace_width_mm`).
-  A duplicated literal that drifted from the engine would under- or over-state
-  candidate copper, and under-stating it is a route to a false clean.
+- **Trace width** — the width the run *actually routed at*. Since E2 that is
+  literally the value `_effective_routing_rules` resolved and handed to the
+  engine (`kw["trace_width"]`, precedence table above), passed on to the overlay:
+  one variable, not two derivations that agree by coincidence. A proposal cleared
+  at a width it was not routed at is a **false clean**, which is the failure this
+  surface exists to remove.
 - **Via diameter / drill** — the board's own authored routing defaults
   (`design_rules.via_diameter_mm` / `via_drill_mm`), which is what acceptance
   writes. The engine's vias are positional only.

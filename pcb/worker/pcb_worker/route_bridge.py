@@ -318,11 +318,20 @@ def _obstacles_from_board(canonical_board: dict) -> list[Obstacle]:
 #
 # WHY AXIS-ALIGNED ENVELOPES: agent_router's RoutingGrid.mark_pad marks an
 # unrotated rectangle and DISCARDS the rotation argument it accepts
-# ("Simple rectangular marking (ignoring rotation for now)", grid.py:133). Handing
-# it a truthful w/h for a ROTATED elongated land would therefore under-block along
-# the rotated axes. We hand it the axis-aligned bounding box of the real land
+# ("Simple rectangular marking (ignoring rotation for now)"). Handing it a
+# truthful w/h for a ROTATED elongated land would therefore under-block along the
+# rotated axes. We hand it the axis-aligned bounding box of the real land
 # instead — a strict superset, computed from the same neutral land owner the CAM
 # emitters fabricate from (ir_pads.pad_copper_shape).
+#
+# ROUND E2 stacks a SECOND over-block on top of that one rather than replacing
+# it: the grid grows every keepout it marks — pad, hole and routed trace alike —
+# by `clearance + trace_width / 2` (RoutingGrid.keepout_margin, the single owner
+# all three markers consult). Growing a box that already contains the rotated
+# copper still contains it, so the rotation superset and the clearance
+# reservation compose. Neither is a substitute for the other — the first is about
+# geometry the grid cannot represent, the second about space the fabricated trace
+# will occupy.
 
 
 def _routing_layer_ids(rb: ResolvedBoard) -> tuple[str, ...]:
@@ -479,12 +488,22 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     faithfully model raises :class:`UnsupportedGeometry`; the caller turns that
     into zero routes plus diagnostics, never a proposal over guessed copper.
 
+    DESIGN RULES DO NOT RIDE THIS PROJECTION (Round E2). ``agent_router.Board``
+    has no slot for a width or a clearance — they are per-RUN engine options, not
+    board geometry — so the effective pair is resolved by the caller
+    (``pcb_worker.methods._effective_routing_rules``, which documents the
+    precedence) and passed to ``route_board``/``route_board_with_hints``. The
+    grid then inflates every keepout it marks — including the ones it lays down
+    for its own routed traces — by ``clearance + trace_width / 2``
+    (agent_router/grid.py::keepout_margin), which COMPOSES with
+    the axis-aligned envelopes here: growing a box that already contains the
+    rotated land still contains it, so the rotation superset and the clearance
+    reservation stack rather than compete.
+
     NOT yet handled here, by design (each has its own owner, none of them silent):
-      * effective width/clearance from ``rb.design_rules`` and keepout inflation
-        by clearance + half the trace width — Round E2. Today the engine still
-        applies its own defaults, exactly as before this change.
-      * grid origin correctness for a non-zero ``RectOutline.origin`` — Round E2.
-      * per-net-class width/clearance minima — Round E2, with the rest of rules.
+      * per-net-class width/clearance minima — the IR carries the slot
+        (``design_rules.net_classes``) but the v1 compiler emits none, so there
+        is nothing to honour yet; the run is one width and one clearance.
       * accepted traces/vias — T7 019f70ebc9ed; fails closed above until then.
     """
     _reject_unroutable_board(rb)

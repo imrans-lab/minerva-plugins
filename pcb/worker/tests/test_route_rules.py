@@ -1,0 +1,825 @@
+"""Round E2 — the run's EFFECTIVE design rules, and the keepouts they size.
+
+Two halves that only make sense together, and are therefore pinned together:
+
+  1. WIDTH/CLEARANCE COME FROM THE BOARD. Before this round the engine applied
+     its own signature defaults (``trace_width=0.25``, ``clearance=0.2``), so a
+     board authoring a 0.35mm floor was routed at 0.25 unless the caller passed
+     options. The compiled IR carries the real numbers
+     (``design_rules.defaults.trace_width_mm`` /
+     ``design_rules.minimums.min_clearance_mm``) and they now win.
+
+  2. KEEPOUTS ARE INFLATED BY ``clearance + trace_width / 2``. Plumbing (1)
+     without (2) would be worse than neither: the router would path a 0.35mm
+     trace against keepouts reserved for 0.25mm, so the proposed copper would be
+     wider than the space held for it. The grid marks CENTERLINE-addressed
+     cells, so the half-width term is what keeps a legal centerline from putting
+     copper inside a clearance ring.
+
+The safety direction is the same one every other surface in this campaign
+documents, restated once more for keepouts:
+
+    the modeled keepout must be a SUPERSET of the fabricated copper.
+    Over-blocking is legal; under-blocking never is.
+
+MANDATORY FIXTURES (standing gate 019f70f76c2f — an entire class of via bugs hid
+behind 2-pin single-path fixtures):
+
+  * a 3-pin net whose route is TWO DISCONNECTED copper paths plus a
+    layer-changing via — ``_three_pin_route_reply`` / ``_three_pin_board``;
+  * an undo-AFTER-commit scenario — ``test_commit_then_undo_...`` below. The
+    worker is stateless, so "undo" is expressed the only honest way it can be
+    here: the SAME board, before a commit, with the commit's copper accepted onto
+    it, and after that copper is taken back off again.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from agent_router.grid import RoutingGrid
+from agent_router import router as engine_router
+
+from pcb_worker import compile_board as cb
+from pcb_worker import drc_geometric, ir_candidates, ir_pads, methods, route_bridge
+from pcb_worker.methods import handle_request
+
+
+# ---------------------------------------------------------------------------
+# Fixtures.
+# ---------------------------------------------------------------------------
+
+# Deliberately NEITHER of the engine's own signature defaults (0.25 / 0.2): a
+# board routed at these numbers can only have got them from its own rules.
+BOARD_WIDTH_MM = 0.35
+BOARD_CLEARANCE_MM = 0.3
+
+
+def _tp(ref: str, x: float, y: float) -> dict:
+    """A through-hole test point: one numbered pad, drilled, on every layer.
+
+    Through-hole keeps the fixture layer-agnostic, so a route that changes layer
+    (the mandatory via case) can land on either side of the board.
+    """
+    return {"ref": ref, "footprint": "TH_TestPoint", "x_mm": x, "y_mm": y,
+            "rotation_deg": 0, "layer": "top",
+            "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                      "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]}
+
+
+def _three_pin_board(**extra) -> dict:
+    """THE mandatory multi-pad fixture: a THREE-pin net (SIG: P1/P2/P3).
+
+    A 3-pin net is what makes the round's two halves observable at all: its MST
+    is two connections, so one route legitimately carries two disconnected copper
+    paths, and a route reply that carries a via has somewhere for the via to sit
+    between them. X1 is a foreign-net pad parked between P1 and P2 so an
+    under-sized keepout has something real to under-block.
+    """
+    board = {
+        "version": 1, "name": "e2-rules", "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": BOARD_CLEARANCE_MM,
+                         "trace_width_mm": BOARD_WIDTH_MM,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [_tp("P1", 10, 20), _tp("P2", 50, 20), _tp("P3", 30, 34),
+                       _tp("X1", 30, 8), _tp("X2", 50, 34)],
+        "nets": [{"name": "SIG", "pins": ["P1.1", "P2.1", "P3.1"]},
+                 {"name": "OTHER", "pins": ["X1.1", "X2.1"]}],
+    }
+    board.update(extra)
+    return board
+
+
+def _three_pin_route_reply() -> list:
+    """The mandatory route SHAPE, as route() serialises it: one 3-pin net whose
+    copper is TWO DISCONNECTED paths — {P1->corner, corner->P3} on top and
+    {P2->via} on bottom — joined by a layer-changing via, with no shared endpoint
+    between the two groups.
+
+    STAGED, not engine-produced, and deliberately so: the point is to pin what the
+    OVERLAY does with that shape, which needs the shape to be exact rather than
+    whatever the router happens to emit today. It is therefore NOT end-to-end
+    engine coverage of via production — ``test_the_three_pin_fixture_routes_end_
+    to_end_at_its_own_rules`` is the run that exercises the real engine, and it
+    asserts only what the engine actually guarantees.
+    """
+    return [{
+        "net": "SIG",
+        "segments": [
+            {"start": [10.0, 20.0], "end": [10.0, 28.0], "layer": "F.Cu"},
+            {"start": [10.0, 28.0], "end": [22.0, 28.0], "layer": "F.Cu"},
+            {"start": [40.0, 20.0], "end": [50.0, 20.0], "layer": "B.Cu"},
+        ],
+        "vias": [[40.0, 20.0]],
+    }]
+
+
+def _compile(board: dict):
+    result = cb.compile_board(board, requested_outputs=cb.V1_ROUTING_OUTPUTS)
+    assert isinstance(result, cb.ResolutionSuccess), getattr(result, "diagnostics", None)
+    return result.board
+
+
+def _call_route(params: dict) -> dict:
+    resp = handle_request({"id": "e2", "method": "route", "params": params})
+    assert resp is not None and resp["id"] == "e2"
+    return resp
+
+
+class _RecordingGrid(RoutingGrid):
+    """A RoutingGrid that remembers how it was constructed. Used to prove the
+    ENGINE hands the run's own width to the grid — the seam where half (1) of
+    this round becomes half (2)."""
+
+    built: list = []
+
+    def __post_init__(self):  # noqa: D105 - see class docstring
+        _RecordingGrid.built.append(self)
+        super().__post_init__()
+
+
+@pytest.fixture
+def recorded_grids(monkeypatch):
+    _RecordingGrid.built = []
+    monkeypatch.setattr(engine_router, "RoutingGrid", _RecordingGrid)
+    return _RecordingGrid.built
+
+
+@pytest.fixture
+def routed_with(monkeypatch):
+    """Record the trace_width the ENGINE was called with and the width the
+    candidate OVERLAY was checked at, on the same run. Returns a dict that gains
+    ``engine`` and ``overlay`` keys once route() has run."""
+    seen: dict = {}
+    real_route_board = engine_router.route_board
+    real_with_hints = engine_router.route_board_with_hints
+    real_check = ir_candidates.check_candidates
+
+    def spy_route_board(board, **kw):
+        seen["engine"] = kw.get("trace_width")
+        seen["engine_clearance"] = kw.get("clearance")
+        return real_route_board(board, **kw)
+
+    def spy_with_hints(board, hints, **kw):
+        seen["engine"] = kw.get("trace_width")
+        seen["engine_clearance"] = kw.get("clearance")
+        return real_with_hints(board, hints, **kw)
+
+    def spy_check(rb, candidates, **kw):
+        seen["overlay"] = kw.get("default_width_mm")
+        return real_check(rb, candidates, **kw)
+
+    # _route imports the entry points from the MODULE at call time
+    # (`from agent_router.router import route_board, ...` inside the function),
+    # so the module attributes are the seam to patch.
+    monkeypatch.setattr(engine_router, "route_board", spy_route_board)
+    monkeypatch.setattr(engine_router, "route_board_with_hints", spy_with_hints)
+    monkeypatch.setattr(ir_candidates, "check_candidates", spy_check)
+    return seen
+
+
+# ---------------------------------------------------------------------------
+# 1. Where the numbers come from — the precedence chain.
+# ---------------------------------------------------------------------------
+
+
+def test_the_ir_carries_the_fields_the_precedence_chain_reads():
+    """Pin the FIELD NAMES, not just the behaviour. These two are what step 3 of
+    the chain reads; a rename that silently dropped routing back to the engine
+    defaults would otherwise only show up as a number nobody asserted on."""
+    rb = _compile(_three_pin_board())
+    assert rb.design_rules.defaults.trace_width_mm == pytest.approx(BOARD_WIDTH_MM)
+    assert rb.design_rules.minimums.min_clearance_mm == pytest.approx(BOARD_CLEARANCE_MM)
+
+
+def test_board_design_rules_beat_the_engine_defaults():
+    """THE regression this round closes: a board authoring 0.35/0.3 is routed at
+    0.35/0.3, not at the engine's own 0.25/0.2."""
+    rb = _compile(_three_pin_board())
+    width, clearance = methods._effective_routing_rules({}, rb)
+    assert width == pytest.approx(BOARD_WIDTH_MM)
+    assert clearance == pytest.approx(BOARD_CLEARANCE_MM)
+    # ... and they really are different from what the engine would have applied.
+    assert width != methods._engine_default_mm("trace_width")
+    assert clearance != methods._engine_default_mm("clearance")
+
+
+def test_an_explicit_caller_option_still_outranks_the_board():
+    """Step 1 of the chain is unchanged in meaning by this round."""
+    rb = _compile(_three_pin_board())
+    assert methods._effective_routing_rules(
+        {"trace_width": 0.6, "clearance": 0.45}, rb) == pytest.approx((0.6, 0.45))
+
+
+def test_an_explicit_zero_clearance_is_honoured_not_promoted():
+    """Clearance differs from a copper dimension: ZERO is a legal request. Had it
+    been admitted through ``positive_mm`` it would have been discarded and the
+    board's rule used instead — silently changing what the option MEANS."""
+    rb = _compile(_three_pin_board())
+    _, clearance = methods._effective_routing_rules({"clearance": 0}, rb)
+    assert clearance == 0.0
+
+
+def test_a_hint_width_outranks_the_board_but_not_the_caller(routed_with):
+    """Step 2 sits between them. `kw` reaching _effective_routing_rules already
+    has the hint merged (that merge is _route's, and it is unchanged), so this
+    exercises the real ordering end to end."""
+    board = _three_pin_board()
+    hint = {"id": "h1", "kind": "pcb_route_hint", "lifecycle": "open",
+            "author": {"kind": "human"},
+            "kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+                             "net_names": ["SIG"], "waypoints": [],
+                             "width_mm": 0.5}}
+    resp = _call_route({"board": board, "route_hints": [hint]})
+    assert resp["ok"] is True, resp
+    assert routed_with["engine"] == pytest.approx(0.5)   # hint beat the board
+    assert routed_with["engine_clearance"] == pytest.approx(BOARD_CLEARANCE_MM)
+
+    resp = _call_route({"board": board, "route_hints": [hint],
+                        "options": {"trace_width": 0.7}})
+    assert resp["ok"] is True, resp
+    assert routed_with["engine"] == pytest.approx(0.7)   # caller beat the hint
+
+
+def test_an_inadmissible_caller_option_fails_closed_rather_than_being_reinterpreted():
+    """0 / NaN / a string is not a trace width, and routing at one would lay
+    zero-width copper while the overlay — which admits dimensions through
+    ``positive_mm`` — checked at something else. But quietly substituting the
+    board's rule is the SAME dishonesty the round removed from the engine
+    default: the caller asked for something specific and got something else with
+    no diagnostic. It is rejected by name instead.
+
+    Same policy for both dimensions; only the PREDICATE differs (see the
+    zero-clearance test above — asking for no clearance is coherent, asking for
+    zero-width copper is not).
+    """
+    rb = _compile(_three_pin_board())
+    for bad in (0, -1.0, float("nan"), float("inf"), "0.3", True, None):
+        with pytest.raises(route_bridge.UnsupportedGeometry, match="trace_width"):
+            methods._effective_routing_rules({"trace_width": bad}, rb)
+    for bad in (-1.0, float("nan"), float("inf"), "0.3", True, None):
+        with pytest.raises(route_bridge.UnsupportedGeometry, match="clearance"):
+            methods._effective_routing_rules({"clearance": bad}, rb)
+
+    # ABSENT is not the same as inadmissible: silence still falls through.
+    assert methods._effective_routing_rules({}, rb) == \
+        pytest.approx((BOARD_WIDTH_MM, BOARD_CLEARANCE_MM))
+
+
+def test_a_zero_engine_default_would_still_be_sourced_not_skipped(monkeypatch):
+    """The latent `or`-chain hole. With an `or` chain a step yielding 0.0 reads as
+    'absent' and falls through — the run would route at one number while the
+    overlay (positive_mm) saw another. Every step is an explicit `is None` test
+    and every value goes through an admission predicate, so a zero engine default
+    is REJECTED as a width (0 is not copper) and HONOURED as a clearance."""
+    monkeypatch.setattr(methods, "_ir_rule_mm", lambda *a, **k: None)
+    monkeypatch.setattr(methods, "_engine_default_mm", lambda _p: 0.0)
+    monkeypatch.setattr(methods, "_engine_default_trace_width_mm", lambda: 0.0)
+
+    rb = _compile(_three_pin_board())
+    with pytest.raises(route_bridge.UnsupportedGeometry, match="trace width"):
+        methods._effective_routing_rules({}, rb)
+    _, clearance = methods._effective_routing_rules({"trace_width": 0.3}, rb)
+    assert clearance == 0.0
+
+
+def test_a_rule_that_cannot_be_sourced_fails_closed(monkeypatch):
+    """No source left => no route. NOT an invented default: inventing geometry is
+    the class of bug this campaign removes (E1 deleted a nominal 1.0x1.0 land,
+    A5 deleted a 0x0 pad size). Only the two SOURCES are neutralised here; the
+    resolver and _route itself run for real."""
+    monkeypatch.setattr(methods, "_ir_rule_mm", lambda *a, **k: None)
+    monkeypatch.setattr(methods, "_engine_default_mm", lambda _p: None)
+    monkeypatch.setattr(methods, "_engine_default_trace_width_mm", lambda: None)
+
+    rb = _compile(_three_pin_board())
+    with pytest.raises(route_bridge.UnsupportedGeometry, match="trace width"):
+        methods._effective_routing_rules({}, rb)
+    with pytest.raises(route_bridge.UnsupportedGeometry, match="clearance"):
+        methods._effective_routing_rules({"trace_width": 0.3}, rb)
+
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "unsupported_geometry"
+    assert "fails closed" in resp["error"]["message"]
+    # Same vocabulary as every other unroutable-geometry reply, and zero routes.
+    assert "routes" not in resp.get("result", {})
+
+
+def test_the_engine_default_is_still_read_from_the_engines_signature():
+    """The no-drifting-literal property, now for BOTH parameters. A duplicated
+    default that drifted would under- or over-state a keepout as easily as a
+    candidate width."""
+    import inspect
+
+    sig = inspect.signature(engine_router.route_board).parameters
+    assert methods._engine_default_mm("trace_width") == sig["trace_width"].default
+    assert methods._engine_default_mm("clearance") == sig["clearance"].default
+    # The named trace-width accessor is a thin alias, not a second copy.
+    assert methods._engine_default_trace_width_mm() == \
+        methods._engine_default_mm("trace_width")
+    assert methods._engine_default_mm("no_such_parameter") is None
+
+
+# ---------------------------------------------------------------------------
+# 2. Keepout inflation — the half that makes half (1) safe.
+# ---------------------------------------------------------------------------
+
+
+def test_keepout_margin_is_clearance_plus_half_the_trace_width():
+    grid = RoutingGrid(width=10, height=10, resolution=0.1,
+                       clearance=0.3, trace_width=0.5)
+    assert grid.keepout_margin == pytest.approx(0.3 + 0.25)
+    # A negative input can never shrink a keepout below the copper itself.
+    assert RoutingGrid(width=10, height=10, resolution=0.1,
+                       clearance=-1.0, trace_width=-1.0).keepout_margin == 0.0
+
+
+def test_a_pad_keepout_is_inflated_for_foreign_nets_and_open_to_its_own():
+    """The ring blocks everyone else out to `clearance + w/2` past the copper,
+    and stops there — over-blocking is legal, but blocking the whole board is
+    not useful. The pad's OWN net may cross it: no clearance is owed to
+    yourself, and a net has to be able to reach its own land."""
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_pad(x=10.0, y=10.0, size=(1.0, 1.0), net="SIG")
+    margin = grid.keepout_margin           # 0.55
+    edge = 0.5                             # half the pad
+
+    inside_ring = 10.0 + edge + margin / 2.0
+    assert grid.can_route_through(inside_ring, 10.0, net="OTHER") is False
+    assert grid.can_route_through(inside_ring, 10.0, net="SIG") is True
+    # Copper itself is still copper, and still the pad's own net.
+    assert grid.get_cell(10.0, 10.0).obstacle_type == "pad"
+    assert grid.get_cell(inside_ring, 10.0).obstacle_type == "pad_clearance"
+    # Beyond copper + margin the board is free again (one cell of grid slack).
+    assert grid.get_cell(10.0 + edge + margin + 0.15, 10.0).occupied is False
+
+
+def test_a_clearance_ring_never_overwrites_a_neighbours_copper():
+    """THE ordering trap the ring introduces. Pads are marked in board order, so
+    pad A's ring reaches cells pad B already claimed as copper. Overwriting them
+    with A's net would let net A route straight through pad B's real land — an
+    under-block, and precisely the failure this round exists to prevent."""
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_pad(x=10.0, y=10.0, size=(1.0, 1.0), net="B")   # marked FIRST
+    grid.mark_pad(x=11.2, y=10.0, size=(1.0, 1.0), net="A")   # its ring reaches B
+
+    cell = grid.get_cell(10.0, 10.0)
+    assert cell.obstacle_type == "pad" and cell.net == "B"
+    assert grid.can_route_through(10.0, 10.0, net="A") is False
+    assert grid.can_route_through(10.0, 10.0, net="B") is True
+
+
+def test_a_cell_two_rings_want_belongs_to_neither_net():
+    """First-writer-wins would let that one net route within `clearance` of the
+    OTHER pad. Nobody gets it."""
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_pad(x=10.0, y=10.0, size=(0.5, 0.5), net="A")
+    grid.mark_pad(x=11.0, y=10.0, size=(0.5, 0.5), net="B")
+
+    cell = grid.get_cell(10.5, 10.0)     # midway: inside both rings, neither pad
+    assert cell.occupied is True and cell.obstacle_type == "pad_clearance"
+    assert cell.net is None
+    assert grid.can_route_through(10.5, 10.0, net="A") is False
+    assert grid.can_route_through(10.5, 10.0, net="B") is False
+
+
+def test_an_obstacle_grows_by_the_same_margin_and_owns_no_net():
+    """One margin, every marker (grid.keepout_margin is its single owner) — and a
+    hole belongs to NO net, so it must not inherit one from a pad ring it lands
+    on. `can_route_through` lets a net cross its own cells, so an inherited net
+    would be a licence to route through a mounting hole."""
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_pad(x=10.0, y=10.0, size=(0.5, 0.5), net="SIG")
+    grid.mark_obstacle(x=10.0, y=10.0, radius=1.0)
+
+    assert grid.get_cell(10.0, 10.0).obstacle_type == "hole"
+    assert grid.get_cell(10.0, 10.0).net is None
+    assert grid.can_route_through(10.0, 10.0, net="SIG") is False
+    # radius + clearance alone (1.3) would have left this cell free.
+    probe = 1.0 + 0.3 + 0.25 / 2.0
+    assert grid.is_blocked(10.0 + probe, 10.0) is True
+    assert grid.is_blocked(10.0 + 1.0 + grid.keepout_margin + 0.15, 10.0) is False
+
+
+def test_a_routed_trace_reserves_its_own_half_width_too():
+    """The keepout a routed trace leaves behind is the third marker, and it was
+    the last one still under-blocking. The engine used to hand ``mark_trace`` a
+    pre-inflated ``trace_width + 2 * clearance`` — half-extent ``w/2 +
+    clearance``, which is short by the NEWCOMER's own half-width. The grid is
+    addressed by centerline, so a foreign trace centred there lays half its copper
+    inside the clearance gap.
+    """
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_trace(start=(5.0, 10.0), end=(15.0, 10.0), width=0.5, net="SIG")
+
+    edge = 0.25                       # the trace's own half-width
+    old_half_extent = edge + 0.3      # what `w + 2c` reserved: 0.55
+    correct = edge + grid.keepout_margin              # 0.25 + 0.55 = 0.80
+
+    # The band the old inflation left open, and which a foreign centerline could
+    # legally occupy, is now blocked.
+    probe = 10.0 + (old_half_extent + correct) / 2.0
+    assert grid.can_route_through(10.0, probe, net="OTHER") is False
+    assert grid.can_route_through(10.0, probe, net="SIG") is True
+    # Copper is still copper, and the reservation still stops somewhere.
+    assert grid.get_cell(10.0, 10.0).obstacle_type == "trace"
+    assert grid.get_cell(10.0, 10.0 + correct - 0.05).obstacle_type == "trace_clearance"
+    assert grid.get_cell(10.0, 10.0 + correct + 0.15).occupied is False
+
+
+def _point_to_segment_mm(px: float, py: float, a, b) -> float:
+    """Distance from a point to a segment's CENTERLINE, in mm."""
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    span = dx * dx + dy * dy
+    t = 0.0 if span == 0.0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / span))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def test_route_board_reserves_the_full_margin_around_the_copper_it_lays(recorded_grids):
+    """THE behavioural guard for this round's headline fix, driven through
+    ``route_board`` itself rather than through ``mark_trace``.
+
+    The band between ``w/2 + clearance`` (what the old hand-inflated
+    ``trace_width + 2 * clearance`` reserved) and ``w/2 + clearance + w/2`` (what
+    a foreign CENTERLINE actually needs) is precisely the region the old code left
+    open. A test that probes that band fails on the old behaviour and passes on
+    the new one no matter how the width term is spelled at the call site — which
+    the source scanner below cannot do, and which the direct-``mark_trace`` test
+    above does not do either, because it never reaches a call site at all.
+
+    Deliberately generous geometry: a 1.2mm trace makes the band 0.6mm wide, and
+    a 0.05mm grid keeps ``_cell_range``'s one-cell over-claim (see its note) an
+    order of magnitude smaller than the effect being measured.
+    """
+    width_mm, clearance_mm, resolution_mm = 1.2, 0.2, 0.05
+    old_reach = width_mm / 2.0 + clearance_mm                    # 0.80
+    new_reach = old_reach + width_mm / 2.0                       # 1.40
+    slop = 3 * resolution_mm                                     # quantisation
+
+    board = route_bridge.resolved_board_to_router(_compile(_three_pin_board()))
+    result = engine_router.route_board(board, trace_width=width_mm,
+                                       clearance=clearance_mm,
+                                       grid_resolution=resolution_mm)
+    assert result.routes, "the fixture must actually route"
+    grid = recorded_grids[0]
+
+    copper = [(s.start, s.end, s.layer)
+              for route in result.routes for s in route.segments]
+    assert copper, "the run must have laid down some copper"
+
+    # Probe points strictly inside the contested band, far enough from every PAD
+    # that a pad's own ring cannot be what blocks them (a pad reserves at most
+    # half its diagonal + the margin).
+    pad_reach = max(math.hypot(*p.size) / 2.0 for p in board.pads) \
+        + clearance_mm + width_mm / 2.0 + slop
+    probes: list = []
+    for a, b, layer in copper:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        span = math.hypot(dx, dy)
+        if span < resolution_mm:
+            continue
+        nx, ny = -dy / span, dx / span              # unit perpendicular
+        mx, my = (a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0
+        for sign in (1.0, -1.0):
+            for reach in (old_reach + slop + 0.05, new_reach - slop - 0.05):
+                px, py = mx + sign * nx * reach, my + sign * ny * reach
+                # The probe must sit in the band relative to ALL routed copper
+                # (a neighbouring segment of the same polyline is closer than the
+                # one it was derived from, and would block it for free).
+                nearest = min(_point_to_segment_mm(px, py, s, e)
+                              for s, e, lyr in copper if lyr == layer)
+                if not (old_reach + slop < nearest < new_reach - slop):
+                    continue
+                if min(math.hypot(px - p.position[0], py - p.position[1])
+                       for p in board.pads) < pad_reach:
+                    continue
+                probes.append((px, py, layer))
+
+    assert len(probes) >= 8, (
+        f"need probe points in the contested band; found {len(probes)}")
+    for px, py, layer in probes:
+        assert grid.can_route_through(px, py, net="NO_SUCH_NET", layer=layer) \
+            is False, f"({px:.3f}, {py:.3f}) on {layer} is inside the band a " \
+                      f"foreign centerline must not enter"
+
+
+def test_a_traces_ring_never_overwrites_a_pads_copper():
+    """The ordering trap again, on the marker that just grew. ``_mark_trace_point``
+    used to write its net over every cell it touched, so a trace passing a foreign
+    pad handed that pad's land to the trace's net."""
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_pad(x=10.0, y=10.0, size=(1.0, 1.0), net="PADNET")
+    grid.mark_trace(start=(5.0, 11.2), end=(15.0, 11.2), width=0.5, net="SIG")
+
+    cell = grid.get_cell(10.0, 10.0)
+    assert cell.obstacle_type == "pad" and cell.net == "PADNET"
+    assert grid.can_route_through(10.0, 10.0, net="SIG") is False
+
+
+def test_every_keepout_marker_goes_through_the_one_margin(monkeypatch):
+    """The single-owner claim routing.md and route_bridge.py both make. If any
+    marker re-derived its own inflation, changing the owner would leave it behind.
+
+    A SUPPLEMENT to the behavioural test above, never the primary guard. What it
+    adds: a call site that re-inflates on top of the grid's margin
+    (``trace_width + 2 * clearance`` while the grid also adds its own) OVER-blocks
+    rather than under-blocks, so no probe can see it — legal by the invariant, but
+    still a duplicated term that would drift. What it cannot do is prove the
+    reserved distance is right; only the probes can. The width argument is
+    compared as an AST node rather than as text, because a substring scan is
+    defeated by aliasing the clearance term (``_c = clearance``).
+    """
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    seen: list = []
+    monkeypatch.setattr(type(grid), "keepout_margin",
+                        property(lambda self: seen.append(1) or 0.55))
+    grid.mark_pad(x=5.0, y=5.0, size=(0.5, 0.5), net="A")
+    grid.mark_obstacle(x=8.0, y=5.0, radius=0.5)
+    grid.mark_trace(start=(11.0, 5.0), end=(13.0, 5.0), width=0.5, net="A")
+    assert len(seen) >= 3, "pad, obstacle and trace must each consult the owner"
+
+    # Every mark_trace call site must hand over the BARE trace width. Parsed, so
+    # `trace_width + 2 * clearance`, `trace_width + 2 * _c` and any other
+    # re-inflation are all rejected as the non-Name nodes they are.
+    import ast
+    import inspect
+
+    calls = [node for node in ast.walk(ast.parse(inspect.getsource(engine_router)))
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "mark_trace"]
+    assert len(calls) == 3, f"expected 3 mark_trace call sites, found {len(calls)}"
+    for call in calls:
+        supplied = {k.arg: k.value for k in call.keywords}.get("width")
+        assert isinstance(supplied, ast.Name) and supplied.id == "trace_width", \
+            f"mark_trace width must be the bare trace width, got " \
+            f"{ast.dump(supplied) if supplied else None}"
+
+
+def test_the_engine_hands_the_grid_the_runs_own_width(recorded_grids):
+    """The seam where half (1) becomes half (2). If the grid were left on its own
+    default the router would path a 0.35mm trace against 0.25mm-sized keepouts —
+    proposed copper wider than the space reserved for it."""
+    board = route_bridge.resolved_board_to_router(_compile(_three_pin_board()))
+    engine_router.route_board(board, trace_width=BOARD_WIDTH_MM,
+                              clearance=BOARD_CLEARANCE_MM)
+    assert recorded_grids, "route_board must build a grid"
+    grid = recorded_grids[0]
+    assert grid.trace_width == pytest.approx(BOARD_WIDTH_MM)
+    assert grid.clearance == pytest.approx(BOARD_CLEARANCE_MM)
+    assert grid.keepout_margin == pytest.approx(
+        BOARD_CLEARANCE_MM + BOARD_WIDTH_MM / 2.0)
+
+
+def test_inflation_composes_with_the_rotation_superset_it_does_not_replace_it():
+    """``mark_pad`` discards rotation, so route_bridge hands it the land's
+    axis-aligned BOUNDING BOX — a superset chosen for rotation. The ring grows
+    that superset; it does not stand in for it. A box that already contains the
+    rotated copper still contains it after growing, so the two over-blocks stack.
+
+    Checked on a rotated DIP land, where a truthful w/h would under-block.
+    """
+    board = {
+        "version": 1, "name": "e2-rot", "width_mm": 40, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": BOARD_CLEARANCE_MM,
+                         "trace_width_mm": BOARD_WIDTH_MM,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "U1", "x_mm": 20, "y_mm": 20, "rotation_deg": 37,
+                        "layer": "top",
+                        "footprint": "Package_DIP:DIP-6_W7.62mm_Socket"}],
+    }
+    rb = _compile(board)
+    rendered = route_bridge.resolved_board_to_router(rb)
+    margin = BOARD_CLEARANCE_MM + BOARD_WIDTH_MM / 2.0
+
+    by_id = {p.ref + "." + p.number: p for p in ir_pads.iter_ir_pads(rb)}
+    for pad in rendered.pads:
+        land = ir_pads.pad_copper_shape(by_id[pad.component + "." + pad.number]).aabb()
+        # (a) the projection's box already CONTAINS the real rotated land ...
+        assert pad.position[0] - pad.size[0] / 2.0 <= land.min_x + 1e-9
+        assert pad.position[0] + pad.size[0] / 2.0 >= land.max_x - 1e-9
+        assert pad.position[1] - pad.size[1] / 2.0 <= land.min_y + 1e-9
+        assert pad.position[1] + pad.size[1] / 2.0 >= land.max_y - 1e-9
+
+        # (b) ... and the marked keepout contains that box grown by the margin,
+        # i.e. real copper + clearance + half a trace, on every side.
+        grid = RoutingGrid(width=40, height=40, resolution=0.05,
+                           clearance=BOARD_CLEARANCE_MM, trace_width=BOARD_WIDTH_MM,
+                           layers=["F.Cu", "B.Cu"])
+        grid.mark_pad(x=pad.position[0], y=pad.position[1], size=pad.size,
+                      net="SIG", layer="F.Cu", rotation=0.0)
+        for px, py in ((land.min_x - margin + 0.05, land.min_y - margin + 0.05),
+                       (land.max_x + margin - 0.05, land.max_y + margin - 0.05),
+                       (land.min_x - margin + 0.05, land.max_y + margin - 0.05),
+                       (land.max_x + margin - 0.05, land.min_y - margin + 0.05)):
+            assert grid.can_route_through(px, py, net="OTHER", layer="F.Cu") is False
+
+
+def test_the_routed_keepout_is_a_superset_of_the_copper_geometric_drc_checks():
+    """The invariant in one line, over the whole mandatory fixture: every piece
+    of copper the geometric DRC will collision-check is inside a cell the router
+    refuses to hand to a foreign net."""
+    rb = _compile(_three_pin_board())
+    rendered = route_bridge.resolved_board_to_router(rb)
+    grid = RoutingGrid(width=60, height=40, resolution=0.1,
+                       clearance=BOARD_CLEARANCE_MM, trace_width=BOARD_WIDTH_MM,
+                       layers=["F.Cu", "B.Cu"])
+    for pad in rendered.pads:
+        for layer in ("F.Cu", "B.Cu"):
+            grid.mark_pad(x=pad.position[0], y=pad.position[1], size=pad.size,
+                          net=pad.net, layer=layer, rotation=0.0)
+
+    for copper in drc_geometric.project_board(rb).copper:
+        box = copper.shape.aabb()
+        for px, py in ((box.min_x, box.min_y), (box.max_x, box.max_y),
+                       ((box.min_x + box.max_x) / 2.0, (box.min_y + box.max_y) / 2.0)):
+            assert grid.can_route_through(px, py, net="NO_SUCH_NET") is False
+
+
+# ---------------------------------------------------------------------------
+# 3. The candidate overlay is still checked at the width the run routed at.
+# ---------------------------------------------------------------------------
+
+
+def test_the_overlay_is_checked_at_the_width_the_engine_routed_at(routed_with):
+    """A proposal checked at a different width than it was routed at is a FALSE
+    CLEAN — the failure this whole campaign exists to remove. Since E2 both come
+    from one resolved value, so this is a shared variable rather than two
+    derivations that happen to agree."""
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is True, resp
+    assert routed_with["engine"] == pytest.approx(BOARD_WIDTH_MM)
+    assert routed_with["overlay"] == pytest.approx(routed_with["engine"])
+
+
+def test_the_overlay_width_follows_an_explicit_caller_option_too(routed_with):
+    """The two must track each other at EVERY step of the precedence chain, not
+    only where the board's rule happens to win."""
+    resp = _call_route({"board": _three_pin_board(),
+                        "options": {"trace_width": 0.55}})
+    assert resp["ok"] is True, resp
+    assert routed_with["engine"] == pytest.approx(0.55)
+    assert routed_with["overlay"] == pytest.approx(0.55)
+
+
+def test_a_three_pin_two_path_route_with_a_via_is_projected_at_the_run_width():
+    """MANDATORY FIXTURE, at the seam that consumes it. The reply carries a 3-pin
+    net whose copper is two disconnected paths plus a layer-changing via; every
+    projected candidate segment must carry the run's width, and the via must
+    become real copper on both layers rather than a marker.
+
+    A 2-pin single-path reply cannot express this: the second path has no shared
+    endpoint with the first, which is exactly the shape the via bugs hid in.
+    """
+    rb = _compile(_three_pin_board())
+    payload = {"routes": _three_pin_route_reply()}
+    methods._attach_route_geometric_drc(payload, rb, trace_width_mm=BOARD_WIDTH_MM)
+
+    verdict = payload["routes"][0]["drc_geometric"]
+    assert verdict["verifies_geometry"] is True
+    assert verdict["verdict"] in ("clean", "violations")   # never indeterminate
+
+    candidates, empty = methods._routes_to_candidates(payload["routes"])
+    assert empty == [] and len(candidates) == 1
+    assert len(candidates[0]["segments"]) == 3 and len(candidates[0]["vias"]) == 1
+    overlay = ir_candidates.build_overlay(
+        rb, candidates, default_width_mm=BOARD_WIDTH_MM,
+        default_via_diameter_mm=rb.design_rules.defaults.via_diameter_mm,
+        default_via_drill_mm=rb.design_rules.defaults.via_drill_mm)
+    projected = [t for t in overlay.board.traces if t.id not in
+                 {b.id for b in rb.traces}]
+    assert projected, "the three-pin proposal must reach the overlay as copper"
+    for trace in projected:
+        for seg in trace.segments:
+            assert seg.width_mm == pytest.approx(BOARD_WIDTH_MM)
+    # The two paths really are disconnected: one group on F.Cu, one on B.Cu.
+    layers = {seg.layer.id for t in projected for seg in t.segments}
+    assert layers == {"top", "bottom"}
+    assert len(overlay.board.vias) == len(rb.vias) + 1
+
+
+def test_the_three_pin_fixture_routes_end_to_end_at_its_own_rules(routed_with):
+    """And the same fixture through the real method, so the mandatory shape is
+    not only checked in isolation."""
+    resp = _call_route({"board": _three_pin_board()})
+    assert resp["ok"] is True, resp
+    sig = [r for r in resp["result"]["routes"] if r["net"] == "SIG"]
+    assert sig, resp["result"]
+    # A 3-pin net's MST is two connections, so its route carries >1 path worth of
+    # segments — the multi-path shape, produced by the engine rather than staged.
+    assert len(sig[0]["segments"]) >= 2
+    assert routed_with["engine"] == pytest.approx(BOARD_WIDTH_MM)
+
+
+# ---------------------------------------------------------------------------
+# 4. MANDATORY: undo AFTER commit.
+# ---------------------------------------------------------------------------
+
+
+def _committed(board: dict) -> dict:
+    """The same board with the proposal ACCEPTED onto it — traces + via written
+    at the board's own authored dimensions, which is what acceptance does."""
+    out = dict(board)
+    out["traces"] = [
+        {"net": "SIG", "layer": "top", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": 10.0, "y_mm": 20.0}, {"x_mm": 10.0, "y_mm": 28.0},
+                    {"x_mm": 22.0, "y_mm": 28.0}]},
+        {"net": "SIG", "layer": "bottom", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": 40.0, "y_mm": 20.0}, {"x_mm": 50.0, "y_mm": 20.0}]},
+    ]
+    out["vias"] = [{"net": "SIG", "x_mm": 40.0, "y_mm": 20.0,
+                    "diameter_mm": 0.8, "drill_mm": 0.4,
+                    "from_layer": "top", "to_layer": "bottom"}]
+    return out
+
+
+def _undone(board: dict) -> dict:
+    """...and the same board after the commit is undone. F1 (019f70f76c2f) is the
+    reason traces and vias come back off TOGETHER: an undo that dropped only the
+    traces would leave an orphaned via behind."""
+    out = dict(board)
+    out.pop("traces", None)
+    out.pop("vias", None)
+    return out
+
+
+def test_commit_then_undo_leaves_the_board_routing_at_its_own_rules(routed_with):
+    """MANDATORY undo-after-commit scenario, in the only honest worker-side form:
+    the worker holds no state, so "undo" is the board itself losing the copper a
+    commit added.
+
+    What must hold across the round trip is that the run's effective rules are a
+    pure function of the board's OWN design rules — a commit and its undo change
+    the copper census, never the width the next run reserves space for. (An
+    implementation that cached the resolved pair, or derived it from what was
+    already routed, would drift here and nowhere else.)
+    """
+    board = _three_pin_board()
+
+    # Pre-commit: routes, at the board's rules.
+    before = _call_route({"board": board})
+    assert before["ok"] is True, before
+    width_before = routed_with["engine"]
+    clearance_before = routed_with["engine_clearance"]
+    assert width_before == pytest.approx(BOARD_WIDTH_MM)
+
+    # Committed: accepted copper is not modelled by the grid yet (T7
+    # 019f70ebc9ed), so the board is NOT routable — and says so, rather than
+    # proposing copper that might cross what was just accepted.
+    committed = _call_route({"board": _committed(board)})
+    assert committed["ok"] is False, committed
+    assert committed["error"]["kind"] == "unsupported_geometry"
+    assert "accepted copper" in committed["error"]["message"]
+
+    # Undone: the copper is gone, and the board routes again at the SAME rules.
+    after = _call_route({"board": _undone(_committed(board))})
+    assert after["ok"] is True, after
+    assert routed_with["engine"] == pytest.approx(width_before)
+    assert routed_with["engine_clearance"] == pytest.approx(clearance_before)
+
+    rb_before = _compile(board)
+    rb_after = _compile(_undone(_committed(board)))
+    assert methods._effective_routing_rules({}, rb_before) == \
+        methods._effective_routing_rules({}, rb_after)
+
+    # The proposal itself is the same one, still checked at the width it was
+    # routed at — an undo must not quietly relax the geometric gate.
+    assert routed_with["overlay"] == pytest.approx(routed_with["engine"])
+    assert [r["net"] for r in after["result"]["routes"]] == \
+        [r["net"] for r in before["result"]["routes"]]
+
+
+def test_undo_after_commit_over_a_board_whose_rules_changed_uses_the_new_rules():
+    """The other half of "pure function of the board": if the undone board's own
+    rules differ, the next run must follow the BOARD, not whatever the previous
+    run used."""
+    board = _undone(_committed(_three_pin_board()))
+    board = dict(board)
+    board["design_rules"] = dict(board["design_rules"], trace_width_mm=0.45,
+                                 clearance_mm=0.4)
+    rb = _compile(board)
+    assert methods._effective_routing_rules({}, rb) == pytest.approx((0.45, 0.4))
+
+
+def test_the_via_the_commit_wrote_comes_from_the_boards_own_routing_defaults():
+    """Vias are the other authored dimension in play (routing.md: via diameter and
+    drill come from ``design_rules``, the engine's vias being positional only), so
+    the mandatory via fixture pins that they survive the compile unchanged."""
+    rb = _compile(_three_pin_board())
+    assert rb.design_rules.defaults.via_diameter_mm == pytest.approx(0.8)
+    assert rb.design_rules.defaults.via_drill_mm == pytest.approx(0.4)
+    assert math.isclose(rb.design_rules.defaults.via_drill_mm, 0.4)

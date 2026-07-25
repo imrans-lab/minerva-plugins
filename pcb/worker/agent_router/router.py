@@ -382,6 +382,12 @@ def route_board(
         clearance=clearance,
         layers=layers,
         origin=board.origin,
+        # Round E2: the grid inflates every keepout by `clearance +
+        # trace_width / 2`, so it needs the width this run actually routes at.
+        # Passing it here (rather than letting RoutingGrid default) is what makes
+        # the reserved space and the proposed copper the SAME width — a keepout
+        # sized for a narrower trace than the one being laid is an under-block.
+        trace_width=trace_width,
     )
 
     # Mark all pads on the grid
@@ -441,12 +447,16 @@ def route_board(
                 route.vias.extend(path.vias)
                 result.via_count += len(path.vias)
 
-                # Mark the path on the grid (include clearance to prevent crossovers)
+                # Mark the path on the grid. The TRUE copper width goes in;
+                # RoutingGrid adds its own keepout_margin (Round E2). This used to
+                # hand-inflate to `trace_width + 2 * clearance`, a half-extent of
+                # `w/2 + clearance` — short by the newcomer's own half-width, so a
+                # later trace could sit half a width inside the clearance gap.
                 for segment in path.segments:
                     grid.mark_trace(
                         start=segment.start,
                         end=segment.end,
-                        width=trace_width + 2 * clearance,
+                        width=trace_width,
                         net=net_name,
                         layer=segment.layer
                     )
@@ -914,10 +924,12 @@ def route_bus(
             route.paths.append(path)
 
             for segment in path.segments:
+                # True copper width only — the grid owns the keepout margin
+                # (see the note in route_board; Round E2).
                 grid.mark_trace(
                     start=segment.start,
                     end=segment.end,
-                    width=trace_width + 2 * grid.clearance,
+                    width=trace_width,
                     net=net_name,
                     layer=layer
                 )
@@ -1014,6 +1026,12 @@ def route_board_with_hints(
         clearance=clearance,
         layers=layers,
         origin=board.origin,
+        # Round E2: the grid inflates every keepout by `clearance +
+        # trace_width / 2`, so it needs the width this run actually routes at.
+        # Passing it here (rather than letting RoutingGrid default) is what makes
+        # the reserved space and the proposed copper the SAME width — a keepout
+        # sized for a narrower trace than the one being laid is an under-block.
+        trace_width=trace_width,
     )
 
     # Mark all pads on the grid
@@ -1152,12 +1170,13 @@ def route_board_with_hints(
                 if jumper_mode and jumpers_used >= max_jumpers:
                     can_via = False
 
-                # Mark with clearance to prevent crossovers
+                # True copper width only — the grid owns the keepout margin
+                # (see the note in route_board; Round E2).
                 for segment in path.segments:
                     grid.mark_trace(
                         start=segment.start,
                         end=segment.end,
-                        width=trace_width + 2 * clearance,
+                        width=trace_width,
                         net=net_name,
                         layer=segment.layer
                     )
