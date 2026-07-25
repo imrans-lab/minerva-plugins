@@ -3,7 +3,7 @@ name: pcb
 # TEST GATES ONLY (round A0a). No packaging/release/registry/NOTICE/runtime
 # bundle here — that is round A0b, a separate follow-up workflow change.
 #
-# Two jobs, split on whether kicad-cli is present:
+# Three jobs:
 #
 #   `test`   — every push (main, dcr/**), every pull_request, and manual
 #              dispatch. Linux only, no kicad-cli installed. This is the fast
@@ -19,16 +19,30 @@ name: pcb
 #              Expected baseline (same commit, with kicad-cli 9.0.9):
 #              1033 passed, 1 skipped.
 #
-# Why two jobs instead of one: if kicad-cli is never installed, 15 oracle
-# tests skip on every single run and nobody notices when they silently start
-# failing (skips don't fail CI). If kicad-cli is installed on every PR, every
-# contributor pays a heavy KiCad-install tax on every push, which in practice
-# makes people route around CI rather than wait for it. Keeping oracle checks
-# on main-only (+ workflow_dispatch for on-demand verification) exercises them
-# regularly without taxing the PR loop.
+#   `panel`  — round A1a. Runs pcb/tests/gd/*.gd, the GDScript layer covering
+#              the plugin's panel + UI models. Nothing ran these before this
+#              job existed: they are `extends SceneTree` scripts that must be
+#              hosted by a Minerva `src/` checkout (see
+#              pcb/scripts/run-gd-tests.sh for why). Same triggers as `test`
+#              (every push + PR) because the Godot download is cached — see
+#              the cache step below — so there is no cost reason to restrict
+#              coverage to main-only.
 #
-# pytest's own exit code is the pass/fail gate in both jobs — the counts above
-# are baselines to sanity-check against, not counts asserted in this file.
+# Why `test`/`oracle` are two jobs instead of one: if kicad-cli is never
+# installed, 15 oracle tests skip on every single run and nobody notices when
+# they silently start failing (skips don't fail CI). If kicad-cli is
+# installed on every PR, every contributor pays a heavy KiCad-install tax on
+# every push, which in practice makes people route around CI rather than wait
+# for it. Keeping oracle checks on main-only (+ workflow_dispatch for
+# on-demand verification) exercises them regularly without taxing the PR loop.
+#
+# pytest's own exit code is the pass/fail gate in `test`/`oracle` — the counts
+# above are baselines to sanity-check against, not counts asserted in this
+# file. `panel` is gated the same way: every pcb/tests/gd/*.gd test is an
+# `extends SceneTree` script whose _init() ends with
+# `quit(1 if _fail > 0 else 0)`, so the Godot process's own exit code IS the
+# pass/fail signal (confirmed 2026-07-25 by temporarily breaking an assertion
+# in test_pad_synthesis.gd and observing run-gd-tests.sh exit non-zero).
 
 on:
   push:
@@ -173,3 +187,90 @@ jobs:
       - name: Worker test suite (kicad-cli present — oracle tests execute)
         working-directory: pcb/worker
         run: python -m pytest tests/ -q
+
+  panel:
+    name: pcb panel (GDScript tests via Minerva host)
+    # Round A1a. pcb/tests/gd/*.gd is `extends SceneTree` GDScript covering
+    # the plugin's panel + UI models; it must run hosted inside a Minerva
+    # `src/` checkout (see pcb/scripts/run-gd-tests.sh header for the full
+    # rationale — the tests' own preloads are res:// paths resolved against
+    # Minerva's res:// root).
+    #
+    # Same triggers as `test` (every push + pull_request) rather than
+    # main-only: the Godot download below is cached (design decision #2),
+    # so the marginal cost of running on every PR is a cache hit, and there
+    # is no reason to weaken coverage of a layer nothing else verifies.
+    runs-on: ubuntu-22.04
+    env:
+      GODOT_VERSION: "4.6.2"
+      # Pinned to a specific commit, not a moving branch: pcb's CI must be
+      # deterministic, and a third-party repo changing underneath us must not
+      # turn pcb red without someone choosing that. Bumping this SHA is a
+      # deliberate act.
+      #
+      # THIS IS `development`, NOT `main`. Minerva's DEFAULT branch is `main`
+      # and it is roughly a year stale — the plugin system does not exist
+      # there. Verified 2026-07-25: `src/test/helpers/plugin_panel_driver.gd`,
+      # which test_workspace_persistence / test_workspace_ingest /
+      # test_parity_bridge all preload, is ABSENT from main's tree and present
+      # on development. Pinning main makes this job fail while looking like a
+      # reasonable choice. If you bump this SHA, take it from
+      # `origin/development` and re-check that helper still exists.
+      #
+      # Head of turnrocklabs/Minerva `development` on 2026-07-25.
+      MINERVA_SHA: "8cc7ace5d916f79ebfe987b22cfd36a69979572d"
+    steps:
+      - name: Checkout minerva-plugins
+        uses: actions/checkout@v4
+
+      # Minerva must end up as a SIBLING of the minerva-plugins checkout,
+      # because every test preloads `res://../../minerva-plugins/pcb/...`
+      # resolved from <minerva>/src — so <minerva>/../minerva-plugins has to
+      # exist. On a runner the workspace is
+      #   /home/runner/work/minerva-plugins/minerva-plugins
+      # so the sibling slot is $GITHUB_WORKSPACE/../Minerva.
+      #
+      # It CANNOT be checked out there directly: actions/checkout rejects any
+      # `path` outside $GITHUB_WORKSPACE ("Repository path '...' is not under
+      # '...'"), which would kill this job at step 2 on every run. So clone
+      # inside the workspace and relocate.
+      #
+      # Minerva is public, so no credentials are needed to fetch it.
+      - name: Checkout Minerva (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: turnrocklabs/Minerva
+          ref: ${{ env.MINERVA_SHA }}
+          path: _minerva_host
+
+      - name: Place Minerva beside minerva-plugins
+        working-directory: ${{ github.workspace }}
+        run: |
+          mv _minerva_host "$GITHUB_WORKSPACE/../Minerva"
+          # Fail loudly here rather than letting Godot report an opaque
+          # "Cannot open file res://..." twenty lines later.
+          test -f "$GITHUB_WORKSPACE/../Minerva/src/project.godot"
+          test -f "$GITHUB_WORKSPACE/../Minerva/src/test/helpers/plugin_panel_driver.gd"
+
+      - name: Cache Godot download
+        id: godot-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/godot-bin
+          key: godot-${{ env.GODOT_VERSION }}-linux-x86_64
+
+      - name: Download Godot ${{ env.GODOT_VERSION }} headless (cache miss only)
+        if: steps.godot-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/godot-bin
+          curl -fL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q /tmp/godot.zip -d /tmp/godot-extract
+          mv "/tmp/godot-extract/Godot_v${GODOT_VERSION}-stable_linux.x86_64" ~/godot-bin/godot
+          chmod +x ~/godot-bin/godot
+
+      - name: Run pcb GDScript test suite
+        run: |
+          export PATH="$HOME/godot-bin:$PATH"
+          godot --version
+          bash pcb/scripts/run-gd-tests.sh ../Minerva
