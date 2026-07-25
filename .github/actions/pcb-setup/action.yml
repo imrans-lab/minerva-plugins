@@ -24,7 +24,32 @@ inputs:
   go-version:
     description: Go toolchain version
     required: false
-    default: "1.22"
+    # NOT "1.22", which is what pcb.yml used before A0c and what cad.yml,
+    # codetools.yml and presentation.yml still use.
+    #
+    # EVIDENCE (run 30170514155, the first cross-platform run): setup-go
+    # resolved "1.22" to go1.22.12 — the newest 1.22 patch, so this is not a
+    # stale-pin problem — and every `go test` binary died on the macOS runner
+    # before running a single test:
+    #
+    #   dyld[2338]: missing LC_UUID load command in .../b001/pcb.test
+    #   signal: abort trap
+    #   FAIL github.com/imrans-lab/minerva-plugins/pcb 0.004s
+    #
+    # The runner image is macos-26-arm64. macOS 26's dyld rejects the binaries
+    # Go 1.22's linker produces. `go vet` passed — compiling is fine, it is
+    # LOADING that fails — so nothing in our source is at fault and no source
+    # change can fix it. Go 1.22 is also past end of support (upstream patches
+    # only the two most recent minors), so there is no 1.22 patch coming.
+    #
+    # pcb/go.mod and go.work still declare `go 1.22`; that is the LANGUAGE
+    # version and is unaffected. Building a `go 1.22` module with a newer
+    # toolchain is explicitly supported and is what this now does.
+    #
+    # Pinned to a specific minor rather than "stable" on purpose: this file's
+    # whole posture (see the MINERVA_SHA note in pcb.yml) is that a third
+    # party must not be able to turn pcb red without someone choosing it.
+    default: "1.26"
   python-version:
     description: CPython version
     required: false
