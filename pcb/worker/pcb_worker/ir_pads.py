@@ -79,7 +79,8 @@ class IRPad:
     component: Any                 # ResolvedComponent
     pad: Any                       # PlacedPad
     source_number: str             # pad.source_id — what PadGeom messages name
-    number: str                    # human pad number ("1"), source_id if absent
+    number: str                    # DISPLAY token: human number, else source_id
+    human_number: str | None       # AUTHORED identity; None when the pad has none
     net_name: str | None
     is_drilled: bool
     is_npth: bool
@@ -92,6 +93,20 @@ class IRPad:
     def carries_copper(self) -> bool:
         """False only for a bare mechanical hole (NPTH) — no land, no ring."""
         return not self.is_npth
+
+    @property
+    def is_addressable(self) -> bool:
+        """True when this pad can be NAMED by a user or a net ref.
+
+        Nets are spelled "U1.2", hints reference "U1.2", the panel labels "U1.2" —
+        all of it keyed on the AUTHORED pad number. A pad without one cannot be a
+        routed endpoint, but it can still be perfectly good copper or a bare
+        mechanical hole (019f97eb6adf): KiCad legitimately leaves NPTH mechanical
+        pads unnumbered, and PadDefinition permits number="". Consumers that need
+        an addressable endpoint check this; consumers that only need GEOMETRY
+        (hole primitives, keepouts, copper checks) must not.
+        """
+        return self.human_number is not None
 
 
 def pad_number_map(definition) -> dict[str, str]:
@@ -111,25 +126,22 @@ def iter_ir_pads(rb: ResolvedBoard) -> Iterator[IRPad]:
         numbers = pad_number_map(rb.footprint_for(comp))
         for pad in comp.placed_pads:
             source_number = pad.source_id
-            number = numbers.get(source_number)
-            if not number:
-                # FAIL CLOSED rather than fall back to the source_id (Codex E1
-                # review, comment 773). The human number IS the endpoint identity:
-                # net membership is spelled "U1.2", hints reference "U1.2", and the
-                # panel labels "U1.2". A pad identified as "pad:1:0" would be
-                # unreachable by every one of those, so a proposal naming it would
-                # be unusable rather than merely ugly. ResolvedBoard already
-                # guarantees each PlacedPad correlates to a footprint pad, so this
-                # is reachable only for a footprint pad with no number at all.
-                raise UnsupportedGeometry(
-                    f"component {comp.ref!r}: placed pad {source_number!r} has no "
-                    f"human pad number in its footprint — it has no usable endpoint "
-                    f"identity for nets, hints or the panel")
+            # NEUTRAL, PERMISSIVE (019f97eb6adf). An empty authored number is
+            # preserved as `human_number=None` rather than rejected here: this
+            # iterator serves geometry consumers too, and an unnumbered NPTH
+            # mechanical pad is fully modelable copper-free geometry. Endpoint
+            # ADDRESSABILITY is a routing concern and is enforced there, on
+            # `is_addressable` — baking "every pad is an endpoint" into the shared
+            # iterator would make geometric DRC indeterminate for a hole it models
+            # exactly. `number` stays a display token so findings can still name
+            # something stable.
+            human_number = numbers.get(source_number) or None
             yield IRPad(
                 component=comp,
                 pad=pad,
                 source_number=source_number,
-                number=number,
+                number=human_number or source_number,
+                human_number=human_number,
                 net_name=net_names.get(pad.net_id),
                 is_drilled=pad.drill is not None,
                 is_npth=pad.pad_type == NPTH_PAD_TYPE,

@@ -311,6 +311,122 @@ def test_routed_keepout_covers_the_real_land_that_a_nominal_land_would_miss():
     assert pad.size[0] > 1.0 and pad.size[1] > 1.0   # strictly bigger than nominal
 
 
+def _unnumber_pads(rb, ref: str):
+    """Rebuild ``rb`` with component ``ref``'s footprint pads carrying number "".
+
+    KiCad legitimately leaves mechanical pads unnumbered and PadDefinition permits
+    number="" — but no LOCKED seed does, so the only way to cover the case is to
+    construct it (Codex's own repro, 019f97eb6adf). The PlacedPad/source_id
+    correlation is left intact, so the result is a fully valid ResolvedBoard."""
+    import dataclasses
+
+    comp = next(c for c in rb.components if c.ref == ref)
+    definitions, rebound = [], {}
+    for definition in rb.footprint_definitions:
+        if definition.content_id == comp.footprint_id:
+            replaced = dataclasses.replace(definition, pads=tuple(
+                dataclasses.replace(p, number="") for p in definition.pads))
+            # content_id is CONTENT-derived, so editing a pad re-mints it; every
+            # component pointing at the old definition has to follow.
+            rebound[definition.content_id] = replaced.content_id
+            definition = replaced
+        definitions.append(definition)
+    components = tuple(
+        dataclasses.replace(c, footprint_id=rebound[c.footprint_id])
+        if c.footprint_id in rebound else c
+        for c in rb.components)
+    return dataclasses.replace(rb, footprint_definitions=tuple(definitions),
+                               components=components)
+
+
+def test_unnumbered_npth_is_modeled_not_rejected():
+    """REGRESSION 019f97eb6adf. An unnumbered NPTH mechanical pad is ordinary,
+    fully-modelable geometry: it must become a routing obstacle and a DRC hole
+    primitive, NOT a fail-closed rejection. Requiring endpoint identity of every
+    pad made both IR projections reject a hole they model exactly."""
+    rb = _unnumber_pads(
+        _compile(_board([_comp("H1", "MountingHole:MountingHole_3.2mm_M3", 20, 20)])),
+        "H1")
+
+    # The neutral iterator stays permissive: the pad is yielded, with its missing
+    # identity reported honestly rather than invented.
+    census = list(ir_pads.iter_ir_pads(rb))
+    assert len(census) == 1
+    assert census[0].human_number is None and census[0].is_addressable is False
+    assert census[0].is_npth is True
+
+    # Routing: an obstacle, and NOT a routable endpoint.
+    rendered = route_bridge.resolved_board_to_router(rb)
+    assert rendered.pads == []
+    assert [o.type for o in rendered.obstacles] == ["npth_pad"]
+
+    # Geometric DRC: models the hole exactly — no indeterminate verdict.
+    verdict = drc_geometric.run_geometric_drc(rb)
+    assert verdict["ok"] is True and verdict["verdict"] in ("clean", "violations")
+
+    # Connectivity: a mechanical hole is not an electrical entity at all.
+    from pcb_worker import ir_connectivity
+    assert ir_connectivity.connectivity_board(rb)["components"] == []
+
+
+def test_unnumbered_unnetted_copper_becomes_an_obstacle_not_an_endpoint():
+    """Real copper that nothing can NAME still has to block. It cannot be a routed
+    endpoint (no net ref, hint or panel label could address it), so it degrades to
+    a conservative keepout rather than failing the whole board."""
+    rb = _unnumber_pads(_compile(_board([_comp("R1", "R_0805", 10, 10)])), "R1")
+    rendered = route_bridge.resolved_board_to_router(rb)
+
+    assert rendered.pads == [], "unaddressable copper must never be an endpoint"
+    obstacles = [o for o in rendered.obstacles if o.type == "unaddressable_pad"]
+    assert len(obstacles) == 2                       # both 0805 lands
+    # The disc CONTAINS the land it stands for (fail-safe direction).
+    copper = {c.entity_id: c for c in drc_geometric.project_board(rb).copper}
+    for ir_pad, obstacle in zip(ir_pads.iter_ir_pads(rb), obstacles):
+        box = copper[ir_pad.pad.id].aabb
+        for corner in ((box.min_x, box.min_y), (box.max_x, box.max_y),
+                       (box.min_x, box.max_y), (box.max_x, box.min_y)):
+            reach = math.hypot(corner[0] - obstacle.position[0],
+                               corner[1] - obstacle.position[1])
+            assert reach <= obstacle.radius + 1e-9
+
+
+def test_netted_but_unnumbered_pad_fails_closed():
+    """A net claiming an endpoint that nothing can address is a contradiction —
+    degrading it to a keepout would silently drop a connection the netlist asked
+    for. Both projections agree, so the reply is the same whichever runs first."""
+    from pcb_worker import ir_connectivity
+
+    rb = _unnumber_pads(
+        _compile(_board([_comp("R1", "R_0805", 10, 10), _comp("R2", "R_0805", 20, 10)],
+                        nets=[{"name": "N1", "pins": ["R1.2", "R2.1"]}])),
+        "R1")
+    for project in (route_bridge.resolved_board_to_router,
+                    ir_connectivity.connectivity_board):
+        with pytest.raises(ir_pads.UnsupportedGeometry, match="nothing can address"):
+            project(rb)
+
+
+def test_connectivity_projection_failure_stays_inside_the_route_envelope(monkeypatch):
+    """REGRESSION 019f97eb6adf (second defect): the connectivity projection ran
+    BEFORE the guard that turns UnsupportedGeometry into the structured
+    zero-route reply, so its failure escaped the route error envelope. Both
+    projections now sit under one boundary."""
+    from pcb_worker import ir_connectivity
+
+    def _boom(_rb):
+        raise ir_pads.UnsupportedGeometry("synthetic connectivity projection fault")
+
+    monkeypatch.setattr(ir_connectivity, "connectivity_board", _boom)
+    resp = _call_route({"board": _board(
+        [_comp("R1", "R_0805", 10, 20), _comp("R2", "R_0805", 25, 20)],
+        nets=[{"name": "N1", "pins": ["R1.2", "R2.1"]}])})
+
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "unsupported_geometry"
+    assert "synthetic connectivity projection fault" in resp["error"]["message"]
+    assert "result" not in resp
+
+
 def test_footprint_only_board_routes_AND_reports_connectivity_clean():
     """REGRESSION 019f97d021a8 — the two halves of one reply must agree.
 

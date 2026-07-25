@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from agent_router.layers import kicad_to_canon
 
-from .ir_pads import iter_ir_pads
+from .ir_pads import UnsupportedGeometry, iter_ir_pads
 from .resolved_board import ResolvedBoard
 
 
@@ -55,12 +55,38 @@ def connectivity_board(rb: ResolvedBoard) -> dict:
 
     for ir_pad in iter_ir_pads(rb):
         pad = ir_pad.pad
+        if not ir_pad.carries_copper:
+            # NPTH is a bare mechanical hole — not an ELECTRICAL entity. Including
+            # it would be actively dishonest: drc._check_dangling credits an
+            # endpoint that lands near ANY pad as "copper-connected", so a route
+            # terminating on a mechanical hole would be reported as connected
+            # (019f97eb6adf). Its geometry is owned by geometric DRC (hole
+            # primitives) and by routing (an obstacle), both of which model it
+            # exactly.
+            continue
+        if not ir_pad.is_addressable:
+            # Copper with no authored pad number. The kernel's entire pad identity
+            # is (ref, number) and every net ref is spelled "U1.2", so it has no
+            # way to REFER to this pad. Carrying it anyway is not neutral: it would
+            # earn the same dangling-endpoint CREDIT above — reporting a route as
+            # connected to copper that belongs to no net. The legacy kernel has no
+            # honest representation for unaddressable copper, so it is left out of
+            # the ELECTRICAL census; the short it could cause is a COPPER question,
+            # which geometric DRC's GC2 models exactly over this same IR. A NETTED
+            # unnumbered pad is a contradiction and fails closed (routing raises on
+            # the same board, so both projections agree).
+            if pad.net_id is not None:
+                raise UnsupportedGeometry(
+                    f"component {ir_pad.ref!r}: pad {ir_pad.source_number!r} is on "
+                    f"net {ir_pad.net_name!r} but has no authored pad number — a "
+                    f"netted endpoint that nothing can address")
+            continue
         comp = components.get(ir_pad.ref)
         if comp is None:
             comp = {"ref": ir_pad.ref, "x_mm": 0.0, "y_mm": 0.0,
                     "rotation_deg": 0.0, "pins": []}
             components[ir_pad.ref] = comp
-        pin: dict = {"number": ir_pad.number,
+        pin: dict = {"number": ir_pad.human_number,
                      "x_mm": float(pad.position[0]),
                      "y_mm": float(pad.position[1])}
         if ir_pad.is_drilled:
@@ -69,7 +95,7 @@ def connectivity_board(rb: ResolvedBoard) -> dict:
             # drill — so it classifies exactly as the emitters do.
             pin["drill_mm"] = max(float(pad.drill.size[0]), float(pad.drill.size[1]))
         comp["pins"].append(pin)
-        pin_ref_by_pad_id[pad.id] = _pin_ref(ir_pad.ref, ir_pad.number)
+        pin_ref_by_pad_id[pad.id] = _pin_ref(ir_pad.ref, ir_pad.human_number)
 
     nets: list[dict] = []
     for net in rb.nets:

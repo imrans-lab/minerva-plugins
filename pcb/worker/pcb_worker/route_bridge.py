@@ -398,7 +398,7 @@ def _router_pad(ir_pad, routable: tuple[str, ...]) -> Pad:
         # pad_type (router.py:390) and marks all routing layers.
         drill = ir_pad.pad.drill
         return Pad(
-            component=ir_pad.ref, number=ir_pad.number, net=None,
+            component=ir_pad.ref, number=ir_pad.human_number, net=None,
             position=position, size=size, shape="rect", pad_type="thru_hole",
             drill=max(float(drill.size[0]), float(drill.size[1])),
             layer="*.Cu",
@@ -407,7 +407,7 @@ def _router_pad(ir_pad, routable: tuple[str, ...]) -> Pad:
             # double-count the moment the engine starts honouring it.
             rotation=0.0)
     return Pad(
-        component=ir_pad.ref, number=ir_pad.number, net=None,
+        component=ir_pad.ref, number=ir_pad.human_number, net=None,
         position=position, size=size, shape="rect", pad_type="smd",
         drill=None, layer=_pad_copper_layer(ir_pad, routable), rotation=0.0)
 
@@ -416,11 +416,26 @@ def _npth_obstacle(ir_pad) -> Obstacle:
     """A bare mechanical (NPTH) component hole: an obstacle, never a route target.
 
     It carries no copper land, so it is not a Pad — a Pad would be both phantom
-    copper and a connectable endpoint the net list never asked for."""
+    copper and a connectable endpoint the net list never asked for. It needs no
+    pad NUMBER either: KiCad routinely leaves these unnumbered (019f97eb6adf) and
+    an obstacle is never addressed by name."""
     drill = ir_pad.pad.drill
     radius = max(float(drill.size[0]), float(drill.size[1])) / 2.0
     return Obstacle(position=tuple(ir_pad.pad.position), type="npth_pad",
                     radius=radius)
+
+
+def _unaddressable_copper_obstacle(ir_pad) -> Obstacle:
+    """Real copper with no authored pad number: a keepout, not an endpoint.
+
+    Such a pad cannot be named by a net ref, a hint or the panel, so it must never
+    become a routable Pad — but it IS copper, so it must still block. Blocked by
+    the disc that CONTAINS its land (same fail-safe direction as every other
+    keepout here: over-block, never under-block)."""
+    box = pad_copper_shape(ir_pad).aabb()
+    centre = ((box.min_x + box.max_x) / 2.0, (box.min_y + box.max_y) / 2.0)
+    radius = math.hypot(box.max_x - box.min_x, box.max_y - box.min_y) / 2.0
+    return Obstacle(position=centre, type="unaddressable_pad", radius=radius)
 
 
 def _hole_obstacle(hole) -> Obstacle:
@@ -481,6 +496,19 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     for ir_pad in iter_ir_pads(rb):
         if not ir_pad.carries_copper:
             obstacles.append(_npth_obstacle(ir_pad))
+            continue
+        if not ir_pad.is_addressable:
+            # Copper with no authored pad number (019f97eb6adf). It cannot be a
+            # routed endpoint — nothing could name it — but it is real copper and
+            # must block. Degrading it to a conservative obstacle keeps the board
+            # routable; a NETTED one cannot degrade, because the net list claims an
+            # endpoint that has no address.
+            if ir_pad.pad.net_id is not None:
+                raise UnsupportedGeometry(
+                    f"component {ir_pad.ref!r}: pad {ir_pad.source_number!r} is on "
+                    f"net {ir_pad.net_name!r} but has no authored pad number — a "
+                    f"netted endpoint that nothing can address")
+            obstacles.append(_unaddressable_copper_obstacle(ir_pad))
             continue
         pad = _router_pad(ir_pad, routable)
         pads.append(pad)

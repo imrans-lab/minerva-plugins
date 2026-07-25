@@ -48,6 +48,32 @@ Same invariant as the DRC kernel, restated for keepouts:
 > the modeled keepout must be a SUPERSET of the fabricated copper. Over-blocking
 > is legal; under-blocking never is.
 
+**Endpoint identity vs geometry.** A pad becomes a routable **endpoint** only if it
+carries an authored pad number — nets are spelled `U1.2`, hints reference `U1.2`,
+the panel labels `U1.2`, so a pad without one cannot be addressed by anything.
+That requirement belongs to routing alone, not to the shared IR iteration: KiCad
+legitimately leaves NPTH mechanical pads unnumbered, and such a pad is ordinary,
+exactly-modelable geometry (docket `019f97eb6adf`). So `ir_pads.iter_ir_pads`
+stays permissive and reports missing identity honestly (`human_number is None`),
+and each consumer decides:
+
+| pad | routing | connectivity | geometric DRC |
+|---|---|---|---|
+| numbered copper | routable endpoint | electrical pad | copper |
+| **unnumbered** copper, no net | conservative **obstacle** | excluded | copper |
+| unnumbered copper **on a net** | **fails closed** | fails closed | copper |
+| NPTH (numbered or not) | obstacle | excluded | hole primitive |
+
+Unnumbered copper degrades to a keepout rather than failing the board: it still
+has to block, but nothing could route *to* it. A **netted** unnumbered pad is a
+contradiction — the netlist claims a connection to something unaddressable — so
+that one fails closed rather than silently dropping the connection. NPTH is
+excluded from the connectivity census deliberately: `drc._check_dangling` credits
+an endpoint near *any* pad as copper-connected, so carrying a mechanical hole
+there would report a route as connected to a drill. The same reasoning excludes
+unaddressable copper; the short *it* could cause is a copper question, which
+geometric DRC's GC2 models exactly over the same IR.
+
 **Hole semantics.** An NPTH pad is an **obstacle, never a routable pad** (no land,
 so it is not a connectable endpoint). A PTH pad keeps out its copper **land**, not
 its drill. A plated board hole blocks its **annulus**; an unplated one its drill.
@@ -94,6 +120,11 @@ consumes `ir_connectivity.connectivity_board(rb)` — a normalized projection of
 *same* compiled board into the dict language the legacy connectivity kernel
 already speaks (pad centers, net ownership, existing traces/vias). There is **no**
 raw-dict and **no** best-effort-resolve fallback on the canonical path.
+
+Both projections sit under **one** `UnsupportedGeometry` boundary, so whichever
+meets geometry it cannot model produces the same structured `unsupported_geometry`
+zero-route reply. (The connectivity projection briefly ran ahead of that guard,
+where its failure would have escaped the route error envelope — `019f97eb6adf`.)
 
 This matters because E1's first cut moved only the routing half. Routes came from
 IR pads while the attached DRC still read the raw dict's inline `pins`, so a

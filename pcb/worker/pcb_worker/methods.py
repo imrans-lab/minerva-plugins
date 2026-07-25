@@ -873,14 +873,16 @@ def _route(params: dict) -> dict:
         if _is_error_reply(compiled):
             return compiled
         compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
-        # ONE compile, BOTH halves of the reply (019f97d021a8). Routing consumes the
-        # IR below; connectivity DRC consumes the connectivity projection of that
-        # same compiled board. Before this, routes came from IR pads while the
-        # attached DRC read the raw dict's inline pins, so a footprint-only board
-        # routed successfully AND reported every endpoint dangling.
-        drc_board = ir_connectivity.connectivity_board(compiled.board)
+        # ONE compile, BOTH halves of the reply (019f97d021a8), under ONE error
+        # boundary (019f97eb6adf). Routing consumes the IR; connectivity DRC
+        # consumes the connectivity projection of that same compiled board. Both
+        # projections sit inside this try, so EITHER one meeting geometry it cannot
+        # model faithfully produces the same structured zero-route reply — the
+        # connectivity projection used to run ahead of the guard, where its failure
+        # would have escaped the route error envelope entirely.
         try:
             board = route_bridge.resolved_board_to_router(compiled.board)
+            drc_board = ir_connectivity.connectivity_board(compiled.board)
         except route_bridge.UnsupportedGeometry as exc:
             # Compiled fine, but carries geometry the routing grid cannot model
             # faithfully (inner copper, accepted traces/vias, zones, a copper
