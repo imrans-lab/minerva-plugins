@@ -498,10 +498,12 @@ MUTANTS: tuple[dict, ...] = (
     {
         # Added in T0 wave 2. Also killed pre-tightening, by the same
         # `test_smart_remote_structure` census (`len(board.vias) == 4`).
-        # Deliberately `full`, not `half`: there is NO one-sided shape available
-        # at this site, because `kind=ViaKind.THROUGH` is hardcoded
-        # unconditionally in the constructor call, so no via attribute
-        # partitions the collection the way `plated` partitions holes.
+        # `full` because this entry drops EVERY via unconditionally. An earlier
+        # draft of this comment justified that by claiming no one-sided shape
+        # exists here — that was FALSE and a cold review measured it so:
+        # `raw_tented` is in scope immediately above and partitions the
+        # collection. The half it exposes is now carried separately as
+        # `compile_untented_vias_silently_dropped` below.
         "id": "compile_vias_constructed_then_discarded",
         "file": COMPILE_BOARD,
         "kind": "full",
@@ -510,6 +512,34 @@ MUTANTS: tuple[dict, ...] = (
         "rationale": "Builds each via — so every per-via validation still runs and still "
                      "reports — then throws it away instead of accumulating it, the "
                      "shape a refactor that loses an accumulator leaves behind.",
+    },
+    {
+        # Added in T0 wave 2, on a cold review's measurement, after the author
+        # wrongly asserted no `half` shape existed at this site. This is the
+        # SHARP one of the three: measured killed by only 4 tests, ALL of them
+        # tenting-specific, and it SURVIVES `test_smart_remote_structure`'s
+        # `len(board.vias) == 4` census AND the vacuity guard in
+        # test_smart_remote_vias_are_through.
+        #
+        # WHY it survives those two, stated correctly because a first draft of
+        # this comment stated it backwards: `if not raw_tented` drops the
+        # UNTENTED vias and keeps the tented ones. Every via on the smart-remote
+        # fixture is tented (measured: tented_front/tented_back True on all 4),
+        # so that board loses nothing and its count-based tests never notice.
+        # The dropped case is only represented on the tenting fixtures.
+        # A four-test margin on a fab-visible property is worth knowing about.
+        "id": "compile_untented_vias_silently_dropped",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": "        vias.append(ResolvedVia(",
+        "replace": L(
+            "        if not raw_tented:",
+            "            continue",
+            "        vias.append(ResolvedVia(",
+        ),
+        "rationale": "Emits tented vias but silently drops untented ones, so a board's "
+                     "mask-opened vias vanish from the IR while tented ones still "
+                     "arrive — the one-sided counterpart to the unconditional drop above.",
     },
 
     # ----------------------------------------------------- resolved_board --
