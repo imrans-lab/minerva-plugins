@@ -380,6 +380,145 @@ Oval and slot holes are blocked by the disc that **contains** them — the grid'
 only obstacle primitive is a disc (`Obstacle.polygon` is declared but read
 nowhere), so a containing disc is the honest conservative representation.
 
+## Existing copper (docket `019f70ebc9ed`)
+
+Until this landed, a board that carried **any** accepted trace or via was not
+routable at all: `route_bridge._reject_unroutable_board` raised on
+`rb.traces or rb.vias`. The reasoning was sound — the grid was handed pads and
+holes only, so accepted copper was invisible and a fresh proposal could be laid
+straight across it, which is approximated copper by another name. The
+CONSEQUENCE was not: accepting one proposal ended the incremental workflow the
+plugin exists to support.
+
+The grid now sees it. `route_bridge.resolved_board_existing_copper` projects
+`rb.traces`/`rb.vias` beside `resolved_board_to_router`, and
+`pcb_worker.methods._route` passes both to `route_board` /
+`route_board_with_hints` as `existing_traces` / `existing_vias`. It rides as a
+run option rather than as a field on `agent_router.Board` for the same reason
+the width/clearance pair does — that class is also what `Board.from_kicad`
+builds. Dimensions are the copper's **own** authored `width_mm` / `diameter_mm`:
+this copper already physically exists, so there is nothing to resolve and
+nothing to invent. Only the keepout **margin** around it belongs to the run.
+
+**Other-net copper is an obstacle; same-net copper is already-connected.** Those
+are two different jobs, and conflating them is the failure this feature is prone
+to in both directions — an obstacle reading would lock a net out of its own
+copper; an ignore-it reading would re-propose a trace the board already carries.
+
+| the copper is | what the grid does | what the router may do |
+|---|---|---|
+| another net's | marked as **that** net's copper + ring | blocked, exactly as by a pad |
+| this net's | marked as **this** net's copper + ring | path **to** it and **along** it (`can_route_through` passes a net through its own cells) |
+| this net's, joining two of its pads | as above, **plus** those pads are merged before the spanning tree | propose only what is still missing |
+
+There is **no second inflation path**. Existing copper goes through
+`RoutingGrid.mark_trace` and the new `mark_via`, which consult the same
+`keepout_margin` every other marker does. An earlier round shipped a
+hand-inflated parallel path and had to undo it: a margin spelled twice is a
+margin that drifts, and the direction it drifts in is not bounded.
+
+**Vias span layers, and that is the whole point of modeling them.**
+`RoutingGrid.mark_via` marks the annulus as the via's net on **every** layer it
+spans, plus the ring. It is deliberately not `mark_obstacle` — the grid's other
+disc marker — because an obstacle belongs to no net and clears any net it lands
+on, so an accepted via modeled that way would keep its own net out of its own
+copper. `"via"` had been reserved in the cell taxonomy since Round E2 for
+exactly this; `"via_clearance"` joins `_CLEARANCE_TYPES` beside it, because a
+ring type missing from that set is one two rival rings can never downgrade to
+`net=None`.
+
+**Marking order is pads -> existing copper -> obstacles.** After pads, because
+accepted copper sits on top of the census. Before obstacles, because losing a few
+cells of accepted copper to a hole only over-blocks.
+
+That ordering is a **preference, not the safety property**. A hole is an absolute
+veto that belongs to no net, and `_mark_copper_cell` refuses to re-net a `"hole"`
+cell outright — whoever asks, in whatever order. Order alone would not do: both
+markers are public, and the engine's own routed traces are marked *after* the
+obstacles, where `_cell_range`'s one-cell over-claim can reach a hole cell no
+route ever entered. Re-netting one would license routing through a mounting hole,
+because `can_route_through` lets a net cross its own cells.
+
+**A copper mark never steals another owner's copper** (`RoutingGrid._mark_copper_cell`,
+the single owner of that rule). Before this item every copper mark came from the
+engine — a pad from the board census, or a trace the pathfinder had just been
+*permitted* to lay — so an unconditional overwrite was unreachable. Importing the
+board's own accepted copper marks geometry the grid never approved: an accepted
+trace overlapping a foreign (or unconnected, `net=None`) pad, i.e. a board that is
+already shorted, would hand that pad's land to the trace's net — and
+`can_route_through` lets a net cross its own cells. Describing the board more
+completely would have *licensed* routing through real copper. Re-marking a net's
+own copper still writes through, as does the bounded copper-over-contested-ring
+weakening recorded at `_cell_range`.
+
+### Already-connected: the error directions are not symmetric
+
+`router._preconnected_groups` decides which of a net's pads accepted copper
+already joins; `_build_spanning_tree` then spans the **groups**, not the pads, so
+a partly-routed net is finished rather than re-routed from scratch. A net whose
+pads are wholly joined yields zero connections and no proposal at all.
+
+Everything about how that is computed follows from one asymmetry:
+
+* **over**-counting (claiming a connection the copper does not make) makes the
+  router skip a connection the net needs, and the reply then reports a net as
+  routed while it is open — a silent false clean, the worst outcome available;
+* **under**-counting makes the router propose a connection that already exists —
+  redundant same-net copper: wasteful, visible in the proposal, electrically
+  harmless.
+
+**The tolerance is capped in millimetres, not in cells.** `grid_resolution` is a
+**caller option** (`methods._route` passes `options.grid_resolution` straight
+through), so a tolerance of "one cell" is a tolerance the caller can inflate. At
+the 0.1mm default the quantisation term is far below any real trace width and can
+only under-count; at 0.5mm, two same-net stubs with a genuine 0.4mm air gap merge
+into one group, the router skips a connection the net needs, and the reply calls
+an **open** net routed. A caller's choice of grid must not be able to reverse the
+safe direction, so `router._coincidence_tolerance` takes the **smaller** of the
+quantisation term and the narrowest copper involved — a segment's half-width, a
+via's radius. Copper of width `w` ending at a point covers a disc of radius `w/2`
+about it, so two pieces that really touch are within `(w1 + w2) / 2`; the single
+narrowest half-extent is strictly tighter than that. Both terms shrink the
+tolerance and neither can grow it.
+
+Subject to that cap, every rule demands **coincidence**, never proximity or
+containment. A segment endpoint lands on a pad only within tolerance of the pad's
+**centre** — not
+"inside the pad's extent", because the extent the engine holds is the
+axis-aligned *superset* of a possibly-rotated land, the right shape for a keepout
+and the wrong one for connectivity. The centre is exact, and it is where copper
+actually terminates: routes are pathfound pad-centre to pad-centre and acceptance
+writes those coordinates back. Two segments join at shared endpoints only — a
+**T-junction is missed on purpose**, because catching it needs a point-on-segment
+tolerance that grows with trace width, and being wrong there over-counts. A via
+joins whatever coincides with it on a layer it spans, which is what makes a
+two-sided net continuous.
+
+The contraction applies to the **automatic** spanning tree only. Bridge
+assignments and chains are pad pairs the **user** authored, and this document's
+standing rule for authored input is "admitted or rejected, never reinterpreted";
+dropping one because the board looks already-connected would silently
+reinterpret an explicit instruction.
+
+### What still fails closed, and why that residue is right
+
+Narrowing a fail-closed reason is correct; deleting it while a sub-case is still
+unmodelable is not. Accepted copper that reaches a layer the 2-layer grid does
+not carry — an inner-layer trace, or a blind/buried **via span** — is refused,
+because half a via's copper modeled and half of it invisible is worse than not
+routing the board. The v1 compiler cannot author either today (`_build_vias`
+validates every span against `[top, bottom]`, and `ResolvedBoard.__post_init__`
+checks `layer_stack.is_legal_via_span` a second time), so these are
+defence-in-depth in the same sense `_pad_copper_layer`'s guard is — kept because
+the failure they guard is *silent invisible copper*, and unreachable-today is not
+the same as unreachable.
+
+One case is skipped rather than refused: a caller passing `single_layer=True`
+over a 2-layer board drops the B.Cu copper. That is safe **there and only
+there** — with no B.Cu in the grid nothing routes on B.Cu, and no via can be
+proposed (`allow_via = allow_vias and not single_layer`), so there is nothing
+that could cross the copper being skipped.
+
 ## Fail-closed reasons
 
 | `error.kind` | Meaning |
@@ -389,11 +528,15 @@ nowhere), so a containing disc is the honest conservative representation.
 | `unsupported_geometry` | it compiles, but the routing grid cannot model it faithfully |
 | `route` | the engine itself faulted |
 
-`unsupported_geometry` covers: **accepted traces/vias** (the grid never sees
-existing copper — owned by T7 `019f70ebc9ed`; until it lands, a board with
-accepted copper is not routable rather than routable-and-wrong), **inner copper
-layers** (the vendored engine is 2-layer F.Cu/B.Cu only), copper **zones**, copper
-**board/placed graphics**, and a non-rectangular **outline**.
+`unsupported_geometry` covers: **inner copper layers** (the vendored engine is
+2-layer F.Cu/B.Cu only), copper **zones**, copper **board/placed graphics**, a
+non-rectangular **outline**, and accepted copper on a layer or **via span** the
+2-layer grid does not carry.
+
+That last one is what is LEFT of the old blanket "accepted traces/vias" entry,
+which used to make a board unroutable the moment it carried any accepted copper
+at all. See "Existing copper" below for what replaced it, and why the residue is
+kept rather than deleted with the rest.
 
 In every failing case **zero routes** are returned — no partial proposal, no
 `routes: []` alongside a verdict a consumer could misread as "nothing needed".
@@ -429,6 +572,13 @@ In every failing case **zero routes** are returned — no partial proposal, no
   deliberately leaves that guard as-is rather than paper over it. Bus-hint
   routing (`route_bus`) now honours net-class width too, fixed within this
   round — see "Bus routing now honours net-class width too" above.
+- ~~Existing accepted traces/vias in the grid~~ — **done, docket `019f70ebc9ed`**
+  (see "Existing copper" above). Other-net copper is an obstacle through the one
+  `keepout_margin`; same-net copper is already-connected, both as space the net
+  may path through and as pads the spanning tree no longer has to join. A via's
+  annulus is marked on every layer it spans. What remains refused is accepted
+  copper on a layer or via span the 2-layer grid does not carry — narrowed, not
+  deleted.
 - ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
   still accepted a missing size as `0x0`, the same class of fictional copper
   E1 removed from the canonical path — but rather than fix it, the shape
@@ -444,10 +594,14 @@ consumes `ir_connectivity.connectivity_board(rb)` — a normalized projection of
 already speaks (pad centers, net ownership, existing traces/vias). There is **no**
 raw-dict and **no** best-effort-resolve fallback on the canonical path.
 
-Both projections sit under **one** `UnsupportedGeometry` boundary, so whichever
-meets geometry it cannot model produces the same structured `unsupported_geometry`
-zero-route reply. (The connectivity projection briefly ran ahead of that guard,
-where its failure would have escaped the route error envelope — `019f97eb6adf`.)
+Since `019f70ebc9ed` the router's half is **two** projections, not one — the
+`Board` (pads, nets, holes, outline) and the board's existing copper beside it —
+because `agent_router.Board` has no slot for accepted copper. Both, plus the
+connectivity projection, sit under **one** `UnsupportedGeometry` boundary, so
+whichever meets geometry it cannot model produces the same structured
+`unsupported_geometry` zero-route reply. (The connectivity projection briefly ran
+ahead of that guard, where its failure would have escaped the route error
+envelope — `019f97eb6adf`.)
 
 This matters because E1's first cut moved only the routing half. Routes came from
 IR pads while the attached DRC still read the raw dict's inline `pins`, so a

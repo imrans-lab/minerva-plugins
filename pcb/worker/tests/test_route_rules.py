@@ -551,29 +551,40 @@ def test_every_keepout_marker_goes_through_the_one_margin(monkeypatch):
     grid.mark_pad(x=5.0, y=5.0, size=(0.5, 0.5), net="A")
     grid.mark_obstacle(x=8.0, y=5.0, radius=0.5)
     grid.mark_trace(start=(11.0, 5.0), end=(13.0, 5.0), width=0.5, net="A")
-    assert len(seen) >= 3, "pad, obstacle and trace must each consult the owner"
+    grid.mark_via(x=16.0, y=5.0, diameter=0.8, net="A")
+    assert len(seen) >= 4, \
+        "pad, obstacle, trace and via must each consult the owner"
 
-    # Every mark_trace call site must hand over the BARE trace width — either
-    # the run's baseline ("trace_width") or, in the two per-net loops, THIS
-    # net's own class-or-baseline width ("net_width" — the net-class round's
-    # only change to these call sites; the grid still owns ONE, board-wide,
-    # margin — see docs/routing.md, "Per-net-class minima"). Parsed, so
-    # `trace_width + 2 * clearance`, `trace_width + 2 * _c` and any other
-    # re-inflation are all rejected as the non-Name nodes they are.
+    # Every mark_trace / mark_via call site must hand over the BARE copper
+    # dimension — the run's baseline ("trace_width"), THIS net's own
+    # class-or-baseline width ("net_width" — the net-class round's only change to
+    # these call sites), or, for copper the board ALREADY carries (T7
+    # 019f70ebc9ed), that copper's own authored dimension ("seg.width" /
+    # "via.diameter"). The grid still owns ONE, board-wide, margin. Parsed, so
+    # `trace_width + 2 * clearance`, `trace_width + 2 * _c`, `via.diameter +
+    # 2 * clearance` and every other re-inflation are rejected as the arithmetic
+    # nodes they are — a hand-inflated second path is exactly the defect an
+    # earlier round shipped and had to undo.
     import ast
     import inspect
 
-    calls = [node for node in ast.walk(ast.parse(inspect.getsource(engine_router)))
-             if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Attribute)
-             and node.func.attr == "mark_trace"]
-    assert len(calls) == 3, f"expected 3 mark_trace call sites, found {len(calls)}"
-    for call in calls:
-        supplied = {k.arg: k.value for k in call.keywords}.get("width")
-        assert isinstance(supplied, ast.Name) and supplied.id in (
-            "trace_width", "net_width"), \
-            f"mark_trace width must be a bare (never re-inflated) width " \
-            f"variable, got {ast.dump(supplied) if supplied else None}"
+    tree = ast.parse(inspect.getsource(engine_router))
+    _ALLOWED = {"width": {"trace_width", "net_width", "seg.width"},
+                "diameter": {"via.diameter"}}
+    for attr, arg_name in (("mark_trace", "width"), ("mark_via", "diameter")):
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == attr]
+        expected = 4 if attr == "mark_trace" else 1
+        assert len(calls) == expected, \
+            f"expected {expected} {attr} call sites, found {len(calls)}"
+        for call in calls:
+            supplied = {k.arg: k.value for k in call.keywords}.get(arg_name)
+            assert supplied is not None and \
+                ast.unparse(supplied) in _ALLOWED[arg_name], \
+                f"{attr} {arg_name} must be a bare (never re-inflated) copper " \
+                f"dimension, got {ast.unparse(supplied) if supplied else None}"
 
 
 def test_the_engine_hands_the_grid_the_runs_own_width(recorded_grids):
@@ -784,13 +795,14 @@ def test_commit_then_undo_leaves_the_board_routing_at_its_own_rules(routed_with)
     clearance_before = routed_with["engine_clearance"]
     assert width_before == pytest.approx(BOARD_WIDTH_MM)
 
-    # Committed: accepted copper is not modelled by the grid yet (T7
-    # 019f70ebc9ed), so the board is NOT routable — and says so, rather than
-    # proposing copper that might cross what was just accepted.
+    # Committed: since T7 (019f70ebc9ed) the grid MODELS accepted copper, so the
+    # board is routable again — this is the whole point of the item, because
+    # before it the first accepted proposal ended the iterative workflow. The
+    # rules it routes at are still the board's own.
     committed = _call_route({"board": _committed(board)})
-    assert committed["ok"] is False, committed
-    assert committed["error"]["kind"] == "unsupported_geometry"
-    assert "accepted copper" in committed["error"]["message"]
+    assert committed["ok"] is True, committed
+    assert routed_with["engine"] == pytest.approx(width_before)
+    assert routed_with["engine_clearance"] == pytest.approx(clearance_before)
 
     # Undone: the copper is gone, and the board routes again at the SAME rules.
     after = _call_route({"board": _undone(_committed(board))})
@@ -831,6 +843,458 @@ def test_the_via_the_commit_wrote_comes_from_the_boards_own_routing_defaults():
     assert rb.design_rules.defaults.via_drill_mm == pytest.approx(0.4)
     assert math.isclose(rb.design_rules.defaults.via_drill_mm, 0.4)
 
+
+# ---------------------------------------------------------------------------
+# 4b. EXISTING (already-accepted) copper in the grid — T7, docket 019f70ebc9ed.
+#
+# Everything below reuses the MANDATORY fixtures above rather than inventing new
+# ones, because the shape the gate demands is exactly the shape this feature
+# needs: a 3-pin net whose copper is two DISCONNECTED paths joined by a
+# layer-changing via is the only shape that can tell "the grid models a via's
+# layer span" apart from "the grid models copper on one layer".
+#
+# `_committed` is the gate's own accepted-copper board and stays exactly as it
+# was; `_committed_joined` below is the SAME copper extended so it actually
+# lands on P1 and P2, which is what makes the already-connected half observable.
+# ---------------------------------------------------------------------------
+
+
+def _committed_joined(board: dict, *, with_via: bool = True) -> dict:
+    """`_committed`'s copper, extended so it genuinely JOINS P1 and P2.
+
+    The gate's own `_committed` copper is a pair of stubs: the top run stops at
+    (22,28), nowhere near a pad, and the bottom run reaches P2 only. That is the
+    right fixture for "does the board still route at its own rules", and the
+    wrong one for "does the router know this net is partly done" — nothing is
+    joined, so there is nothing to notice.
+
+    Here the top run continues to (40,20) and the bottom run leaves from there,
+    so the electrical chain is P1 -> top copper -> VIA -> bottom copper -> P2.
+    Still two disconnected copper paths on two layers plus one layer-changing
+    via, exactly as gate 019f70f76c2f requires — the via is now the only thing
+    holding the two halves together, which is what `with_via=False` takes away.
+    """
+    out = dict(board)
+    out["traces"] = [
+        {"net": "SIG", "layer": "top", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": 10.0, "y_mm": 20.0}, {"x_mm": 10.0, "y_mm": 28.0},
+                    {"x_mm": 40.0, "y_mm": 28.0}, {"x_mm": 40.0, "y_mm": 20.0}]},
+        {"net": "SIG", "layer": "bottom", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": 40.0, "y_mm": 20.0}, {"x_mm": 50.0, "y_mm": 20.0}]},
+    ]
+    if with_via:
+        out["vias"] = [{"net": "SIG", "x_mm": 40.0, "y_mm": 20.0,
+                        "diameter_mm": 0.8, "drill_mm": 0.4,
+                        "from_layer": "top", "to_layer": "bottom"}]
+    return out
+
+
+def _engine_run(board_dict: dict):
+    """Compile a board and route it through the ENGINE entry point, with the
+    accepted copper the bridge projects for it.
+
+    `_call_route` cannot answer the questions below: `_serialize_routing_result`
+    FLATTENS a route's paths into one segment list, so how many CONNECTIONS the
+    router decided it still needed is not recoverable from the reply. `route_board`
+    is a real entry point (it is what `methods._route` calls), and `Route.paths`
+    is one entry per connection — which is the number this feature changes.
+    """
+    rb = _compile(board_dict)
+    engine_board = route_bridge.resolved_board_to_router(rb)
+    existing_traces, existing_vias = \
+        route_bridge.resolved_board_existing_copper(rb)
+    width, clearance = methods._effective_routing_rules({}, rb)
+    return engine_router.route_board(
+        engine_board, trace_width=width, clearance=clearance,
+        existing_traces=existing_traces, existing_vias=existing_vias)
+
+
+def test_a_board_carrying_accepted_copper_is_routable_again():
+    """The headline of T7 (019f70ebc9ed), at the real entry point.
+
+    Before this, `_reject_unroutable_board` raised on `rb.traces or rb.vias`, so
+    accepting ONE proposal made the board permanently unroutable — the exact
+    opposite of the incremental workflow the plugin exists for. The board here is
+    the mandatory gate fixture with its commit applied.
+    """
+    resp = _call_route({"board": _committed(_three_pin_board())})
+    assert resp["ok"] is True, resp
+    assert resp["result"]["routes"], resp["result"]
+
+
+def test_the_via_is_what_joins_the_two_halves_of_an_accepted_net():
+    """MANDATORY FIXTURE SHAPE (gate 019f70f76c2f), used as the discriminator.
+
+    P1 is joined to the accepted TOP copper, P2 to the accepted BOTTOM copper,
+    and NOTHING but the via connects the two. So:
+
+      * with the via, SIG's remaining work is ONE connection (P3 into the joined
+        group);
+      * take the via away and the same copper leaves THREE separate groups
+        {P1..top}, {P2..bottom}, {P3} — TWO connections.
+
+    That difference is only visible if the grid models a via's LAYER SPAN. A via
+    modeled on one layer, or not modeled at all, gives the two-connection answer
+    with the via present, which is what this pins.
+
+    Honest note on engine via PRODUCTION: the run still emits ZERO vias of its own
+    on this fixture (verified — `Route.vias` is empty on both runs). The via here
+    is one the board ALREADY CARRIES, which is what this item is about; the reply
+    shape carrying an engine-produced via remains STAGED, in
+    `_three_pin_route_reply`, and says so.
+    """
+    joined = _engine_run(_committed_joined(_three_pin_board()))
+    split = _engine_run(_committed_joined(_three_pin_board(), with_via=False))
+
+    sig_joined = joined.get_route("SIG")
+    sig_split = split.get_route("SIG")
+    assert sig_joined is not None and sig_split is not None
+    assert len(sig_joined.paths) == 1, \
+        "P1 and P2 are already joined THROUGH the via; only P3 is still loose"
+    assert len(sig_split.paths) == 2, \
+        "without the via the accepted copper leaves three groups, not two"
+    assert not joined.unrouted and not split.unrouted
+
+
+def test_a_net_wholly_joined_by_accepted_copper_gets_no_proposal_at_all():
+    """The degenerate end of the same rule, and the one that would silently
+    duplicate copper if `_build_spanning_tree`'s two-pad short-circuit had been
+    left asking the old question. OTHER (X1/X2) is a 2-pad net, so it never
+    reaches the Prim loop at all — it takes the `len(pads) == 2` branch, which had
+    to learn the same question the loop asks."""
+    board = _committed_joined(_three_pin_board())
+    board["traces"] = list(board["traces"]) + [
+        {"net": "OTHER", "layer": "top", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": 30.0, "y_mm": 8.0}, {"x_mm": 56.0, "y_mm": 8.0},
+                    {"x_mm": 56.0, "y_mm": 34.0}, {"x_mm": 50.0, "y_mm": 34.0}]},
+    ]
+    result = _engine_run(board)
+    assert result.get_route("OTHER") is None, \
+        "OTHER's pads are already joined by accepted copper — nothing to propose"
+    assert not result.unrouted
+    # ...and the net that is NOT finished still gets its proposal.
+    assert result.get_route("SIG") is not None
+
+
+def test_accepted_foreign_copper_reserves_the_same_margin_as_copper_just_routed():
+    """Other-net copper is an OBSTACLE, inflated through the SAME single owner
+    (`RoutingGrid.keepout_margin`) as the copper this run lays — never through a
+    second, hand-inflated path. A previous round shipped exactly that second path
+    and it had to be undone, so this probes the DISTANCE rather than the spelling:
+    the reserved half-extent must be the accepted copper's own half-width plus
+    the margin, which is strictly more than the `w/2 + clearance` a hand-rolled
+    inflation reaches for.
+
+    Driven through `route_board` with real projected copper, so it exercises the
+    call site rather than `mark_trace` in isolation.
+    """
+    width_mm, clearance_mm, resolution_mm = 1.2, 0.2, 0.05
+    rb = _compile(_committed_joined(_three_pin_board()))
+    engine_board = route_bridge.resolved_board_to_router(rb)
+    existing_traces, existing_vias = \
+        route_bridge.resolved_board_existing_copper(rb)
+
+    grid = RoutingGrid(width=engine_board.width, height=engine_board.height,
+                       resolution=resolution_mm, clearance=clearance_mm,
+                       origin=engine_board.origin, trace_width=width_mm)
+    engine_router._mark_existing_copper(
+        grid, existing_traces, existing_vias, grid.layers)
+
+    seg = next(s for s in existing_traces
+               if s.layer == "F.Cu" and s.start[1] == s.end[1] == 28.0)
+    half = seg.width / 2.0
+    old_reach = half + clearance_mm                  # a hand-inflated `w + 2c`
+    new_reach = half + grid.keepout_margin           # what the one owner reserves
+    assert new_reach > old_reach + 3 * resolution_mm, "probe band must be real"
+
+    mid_x = (seg.start[0] + seg.end[0]) / 2.0
+    band = 28.0 + (old_reach + new_reach) / 2.0
+    assert grid.can_route_through(mid_x, band, net="OTHER", layer="F.Cu") is False
+    # ...and its OWN net is not kept out of its own copper.
+    assert grid.can_route_through(mid_x, band, net="SIG", layer="F.Cu") is True
+    assert grid.get_cell(mid_x, 28.0, "F.Cu").obstacle_type == "trace"
+    assert grid.get_cell(mid_x, 28.0, "F.Cu").net == "SIG"
+
+    # The accepted VIA came through the same call, and reserves the same margin
+    # around its annulus — on BOTH layers, which is the half a single-layer
+    # model would leave open.
+    via = existing_vias[0]
+    via_reach = via.diameter / 2.0 + grid.keepout_margin
+    for layer in ("F.Cu", "B.Cu"):
+        assert grid.get_cell(via.position[0], via.position[1],
+                             layer).net == "SIG"
+        assert grid.can_route_through(via.position[0] + via_reach - 0.05,
+                                      via.position[1], net="OTHER",
+                                      layer=layer) is False
+
+
+def test_an_accepted_via_is_its_nets_copper_on_both_layers_not_a_hole():
+    """A via is the one copper primitive that is not confined to a layer, and the
+    grid's other disc marker (`mark_obstacle`) would model it WRONGLY in two ways
+    at once: an obstacle owns no net, so the via's own net would be locked out of
+    its own copper, and it is only ever marked as a keepout, never as something a
+    net may route to."""
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_via(x=10.0, y=10.0, diameter=0.8, net="SIG")
+
+    for layer in ("F.Cu", "B.Cu"):
+        assert grid.get_cell(10.0, 10.0, layer).obstacle_type == "via"
+        assert grid.get_cell(10.0, 10.0, layer).net == "SIG"
+        assert grid.can_route_through(10.0, 10.0, net="SIG", layer=layer) is True
+        assert grid.can_route_through(10.0, 10.0, net="OTHER", layer=layer) is False
+        # The ring is the same single owner's, on both layers.
+        probe = 0.4 + grid.keepout_margin - 0.05
+        assert grid.can_route_through(10.0 + probe, 10.0, net="OTHER",
+                                      layer=layer) is False
+        assert grid.can_route_through(10.0 + 0.4 + grid.keepout_margin + 0.15,
+                                      10.0, net="OTHER", layer=layer) is True
+
+
+def _walled_board(*, with_copper: bool) -> dict:
+    """SIG's two pads with a foreign net's accepted copper SEALING the board
+    between them — a wall at x=30 on BOTH layers, pad to pad, so there is no gap
+    and no via can get under it.
+
+    Built as an explicit before/after pair rather than as one board, because the
+    point is the COUNTERFACTUAL: `with_copper=False` is the same geometry with
+    the wall's copper never accepted, which is also exactly what the board looks
+    like to a router that cannot see accepted copper.
+    """
+    def _tp(ref: str, x: float, y: float) -> dict:
+        return {"ref": ref, "footprint": "TH_TestPoint", "x_mm": x, "y_mm": y,
+                "rotation_deg": 0, "layer": "top",
+                "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                          "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]}
+
+    board = {
+        "version": 1, "name": "sealed-wall", "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": BOARD_CLEARANCE_MM,
+                         "trace_width_mm": BOARD_WIDTH_MM,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [_tp("S1", 10, 20), _tp("S2", 50, 20),
+                       _tp("B1", 30, 1), _tp("B2", 30, 39)],
+        "nets": [{"name": "SIG", "pins": ["S1.1", "S2.1"]},
+                 {"name": "BLK", "pins": ["B1.1", "B2.1"]}],
+    }
+    if with_copper:
+        board["traces"] = [
+            {"net": "BLK", "layer": layer, "width_mm": BOARD_WIDTH_MM,
+             "points": [{"x_mm": 30, "y_mm": 1}, {"x_mm": 30, "y_mm": 39}]}
+            for layer in ("top", "bottom")]
+    return board
+
+
+def test_invisible_foreign_copper_would_short_and_visible_copper_does_not():
+    """END-TO-END SHORT DETECTION through `route()`, with both sides asserted.
+
+    The wall seals the board on both layers, so with the accepted copper VISIBLE
+    the only honest answer is "I cannot route this": SIG comes back UNROUTED with
+    ZERO proposals, and the geometric overlay is clean because nothing was
+    proposed to be unclean about.
+
+    The same board with that copper never accepted — which is precisely what the
+    board looked like to the pre-T7 router — routes SIG straight through where
+    the wall would be, and the GEOMETRIC overlay (the real short detector, not
+    the centerline-only connectivity kernel) reports `violations`. That is the
+    short this item exists to prevent, demonstrated rather than asserted about.
+
+    WHY THIS FIXTURE AND NOT A DETOUR ONE: `agent_router.pathfinder._simplify_path`
+    collapses an A* detour into a chord that can pass through cells the grid
+    correctly blocked (see the finding filed against this round — the grid blocks,
+    the simplifier then cuts the corner). Any fixture whose right answer is a
+    detour therefore reports geometric violations for a reason that has nothing to
+    do with whether the copper was seen. A fully-sealed board has no detour to
+    simplify, so it isolates exactly the behaviour under test.
+    """
+    sealed = _call_route({"board": _walled_board(with_copper=True)})
+    assert sealed["ok"] is True, sealed
+    result = sealed["result"]
+    assert result["routes"] == [], \
+        "with the wall visible there is no honest proposal to make"
+    assert [u["net"] for u in result["unrouted"]] == ["SIG"]
+    assert result["success"] is False
+    assert result["drc_geometric_summary"]["verdict"] == "clean"
+
+    # The counterfactual: the same geometry with that copper unseen.
+    open_board = _call_route({"board": _walled_board(with_copper=False)})
+    assert open_board["ok"] is True, open_board
+    unsealed = open_board["result"]
+    assert sorted(r["net"] for r in unsealed["routes"]) == ["BLK", "SIG"]
+    assert unsealed["success"] is True
+    assert unsealed["drc_geometric_summary"]["verdict"] == "violations", \
+        "routing as if the wall were not there is exactly the short T7 prevents"
+
+
+def _stubbed(board: dict, gap_mm: float) -> dict:
+    """SIG with TWO accepted stubs that do NOT meet: one out of P1, one out of
+    P2, separated by a real air gap of ``gap_mm`` on the same layer.
+
+    The gap is genuine copper-to-copper separation — at BOARD_WIDTH_MM (0.35) the
+    two runs' copper reaches 0.175mm past each endpoint, so anything wider than
+    0.35mm between the endpoints is air. P1 and P2 therefore still need a route.
+    """
+    out = dict(board)
+    meet = 30.0
+    out["traces"] = [
+        {"net": "SIG", "layer": "top", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": 10.0, "y_mm": 20.0},
+                    {"x_mm": meet - gap_mm, "y_mm": 20.0}]},
+        {"net": "SIG", "layer": "top", "width_mm": BOARD_WIDTH_MM,
+         "points": [{"x_mm": meet, "y_mm": 20.0}, {"x_mm": 50.0, "y_mm": 20.0}]},
+    ]
+    out.pop("vias", None)
+    return out
+
+
+@pytest.mark.parametrize("resolution_mm", [0.1, 0.5])
+def test_a_coarse_caller_grid_cannot_merge_two_genuinely_separate_stubs(
+        resolution_mm):
+    """The coincidence tolerance is capped in MILLIMETRES, not in cells.
+
+    ``grid_resolution`` is a CALLER OPTION — ``methods._route`` passes
+    ``options.grid_resolution`` straight through to the engine — so a tolerance
+    of "one cell" is a tolerance the caller can inflate. At 0.5mm a 0.4mm air gap
+    between two same-net stubs is under one cell, and the two stubs would merge
+    into one pre-connected group. The router would then skip the P1<->P2
+    connection and the reply would report SIG as routed while it is OPEN: the
+    over-count `_preconnected_groups` exists to prevent, reached not through bad
+    copper but through a caller's choice of grid.
+
+    The cap is the narrowest copper involved (half of 0.35mm = 0.175mm), which is
+    smaller than the gap at BOTH resolutions — so the answer must not depend on
+    the resolution at all. Driven through ``route_board`` because the count that
+    changes is the number of CONNECTIONS, which the serialized reply flattens
+    away.
+    """
+    gap_mm = 0.4
+    rb = _compile(_stubbed(_three_pin_board(), gap_mm))
+    engine_board = route_bridge.resolved_board_to_router(rb)
+    existing_traces, existing_vias = \
+        route_bridge.resolved_board_existing_copper(rb)
+    width, clearance = methods._effective_routing_rules({}, rb)
+
+    assert gap_mm > width, "the gap must be real air, not touching copper"
+
+    result = engine_router.route_board(
+        engine_board, trace_width=width, clearance=clearance,
+        grid_resolution=resolution_mm,
+        existing_traces=existing_traces, existing_vias=existing_vias)
+
+    sig = result.get_route("SIG")
+    assert sig is not None, "SIG is not finished — it must still be proposed"
+    # Three groups ({P1..stub}, {stub..P2}, {P3}) => two connections. A merged
+    # pair would give one, and would leave the air gap unrouted.
+    assert len(sig.paths) == 2, \
+        f"at {resolution_mm}mm the stubs must stay separate, got " \
+        f"{len(sig.paths)} connection(s)"
+
+
+def test_the_tolerance_cap_is_the_narrowest_copper_not_the_grid():
+    """The cap itself, stated as the arithmetic rather than only its effect: it
+    is the SMALLER of the quantisation term and the narrowest copper's own
+    half-extent, so neither a coarse grid nor a wide trace can grow it."""
+    seg = engine_router.ExistingSegment(net="SIG", start=(0.0, 0.0),
+                                        end=(10.0, 0.0), width=0.35,
+                                        layer="F.Cu")
+    via = engine_router.ExistingVia(net="SIG", position=(10.0, 0.0),
+                                    diameter=0.8, layers=("F.Cu", "B.Cu"))
+    # Coarse grid: copper wins.
+    assert engine_router._coincidence_tolerance(0.5, [seg], [via]) == \
+        pytest.approx(0.175)
+    # Fine grid: quantisation wins, which is the pre-existing behaviour.
+    assert engine_router._coincidence_tolerance(0.1, [seg], [via]) == \
+        pytest.approx(0.1)
+    # The NARROWEST piece sets it, not the average or the widest.
+    wide = dataclasses.replace(seg, width=2.0)
+    assert engine_router._coincidence_tolerance(0.5, [wide], [via]) == \
+        pytest.approx(0.4)
+
+
+def test_a_copper_mark_can_never_re_net_a_hole():
+    """A hole is an ABSOLUTE veto and the guard must be the marker's, not the
+    caller's ordering (cold review note 3). ``mark_trace``/``mark_via`` are
+    public, and the engine's own routed traces are marked AFTER obstacles, where
+    `_cell_range`'s one-cell over-claim can touch a hole cell no route ever
+    entered. If a copper mark could re-net it, `can_route_through` — which lets a
+    net cross its own cells — would hand that net a path through a mounting hole.
+    """
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_obstacle(x=10.0, y=10.0, radius=0.5)
+
+    for mark in (
+        lambda: grid.mark_trace(start=(5.0, 10.0), end=(15.0, 10.0),
+                                width=0.5, net="SIG"),
+        lambda: grid.mark_via(x=10.0, y=10.0, diameter=0.8, net="SIG"),
+    ):
+        mark()
+        cell = grid.get_cell(10.0, 10.0)
+        assert cell.obstacle_type == "hole" and cell.net is None
+        assert grid.can_route_through(10.0, 10.0, net="SIG") is False
+
+
+def test_marked_copper_never_steals_another_owners_copper():
+    """The guard T7 needed in `_mark_copper_cell`.
+
+    Every copper mark used to come from the ENGINE — a pad from the board census,
+    or a trace the pathfinder had just been PERMITTED to lay — so an unconditional
+    overwrite was unreachable. Importing the board's own accepted copper marks
+    geometry the grid never approved: an accepted trace overlapping a foreign (or
+    unconnected) pad, i.e. a board that is ALREADY shorted, would hand that pad's
+    land to the trace's net, and `can_route_through` lets a net cross its own
+    cells. Describing the board more completely would then have LICENSED routing
+    through real copper.
+
+    Probed at the marker, honestly: on a well-formed board the two never overlap,
+    so there is no end-to-end route this changes. Its whole job is to keep an
+    already-broken board from making the router worse.
+    """
+    grid = RoutingGrid(width=20, height=20, resolution=0.05,
+                       clearance=0.3, trace_width=0.5)
+    grid.mark_pad(x=10.0, y=10.0, size=(1.0, 1.0), net="PADNET")
+    grid.mark_pad(x=14.0, y=10.0, size=(1.0, 1.0), net=None)
+    # Accepted copper laid straight over both — the shorted-board case.
+    grid.mark_trace(start=(5.0, 10.0), end=(16.0, 10.0), width=0.5, net="SIG")
+
+    assert grid.get_cell(10.0, 10.0).net == "PADNET"
+    assert grid.can_route_through(10.0, 10.0, net="SIG") is False
+    assert grid.get_cell(14.0, 10.0).net is None
+    assert grid.can_route_through(14.0, 10.0, net="SIG") is False
+    # Copper the mark legitimately owns is still written.
+    assert grid.get_cell(7.0, 10.0).obstacle_type == "trace"
+    assert grid.get_cell(7.0, 10.0).net == "SIG"
+
+
+def test_accepted_copper_on_an_unmodelable_via_span_still_fails_closed():
+    """Narrowing a fail-closed reason is right; deleting it while a sub-case is
+    still unmodelable is not. A via that reaches a layer the 2-layer grid does not
+    carry would be modeled as half copper and half nothing — worse than not
+    routing — so it keeps failing closed with the same `unsupported_geometry`
+    vocabulary.
+
+    UNREACHABLE ON A REAL BOARD TODAY, and the fixture has to say so out loud:
+    `compile_board._build_vias` rejects any span outside [top, bottom], and
+    `ResolvedBoard.__post_init__` rejects it a second time via
+    `layer_stack.is_legal_via_span` — so `dataclasses.replace(rb, vias=...)`
+    cannot even build the board this needs. What is passed in is therefore a
+    stand-in carrying a real `ResolvedVia` (which permits the span; only the
+    BOARD forbids it) on a real layer stack. It exercises the guard, not a
+    scenario the compiler can produce — which is exactly what a defence-in-depth
+    guard is, and pretending otherwise would be the coverage claim this file's
+    header warns against."""
+    rb = _compile(_committed_joined(_three_pin_board()))
+
+    class _BoardWithAnInnerLayerVia:
+        layer_stack = rb.layer_stack
+        nets = rb.nets
+        traces = ()
+        vias = (dataclasses.replace(rb.vias[0], to_layer="In1.Cu"),)
+
+    with pytest.raises(route_bridge.UnsupportedGeometry) as exc:
+        route_bridge.resolved_board_existing_copper(_BoardWithAnInnerLayerVia())
+    assert "In1.Cu" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1392,10 +1856,11 @@ def test_undo_after_commit_preserves_the_net_classed_nets_own_width(
         net_classed_compile, routed_with):
     """MANDATORY undo-after-commit, with a net class in play: the class
     assignment (like the board's own rules) is a pure function of the
-    compiled board, so SIG routes at its class width before a commit, is
-    correctly refused once that copper is accepted (T7, unrelated to this
-    round), and routes at the SAME class width — and the SAME board-wide
-    clearance — again once undone."""
+    compiled board, so SIG routes at its class width before a commit, WITH the
+    commit's copper accepted onto it (routable since T7 019f70ebc9ed), and at
+    the SAME class width — and the SAME board-wide clearance — again once
+    undone. The class minima are read from the board, never from what happens
+    to be routed already."""
     net_classed_compile["nc"] = NetClass(id="nc:power", name="Power",
                                         min_trace_width_mm=CLASS_WIDTH_MM,
                                         min_clearance_mm=CLASS_CLEARANCE_MM)
@@ -1411,7 +1876,11 @@ def test_undo_after_commit_preserves_the_net_classed_nets_own_width(
     }
 
     committed = _call_route({"board": _committed(board)})
-    assert committed["ok"] is False, committed   # T7, unrelated to this round
+    assert committed["ok"] is True, committed
+    sig_committed = next(r for r in committed["result"]["routes"]
+                         if r["net"] == "SIG")
+    assert sig_committed["effective_routing_rules"] == \
+        sig_before["effective_routing_rules"]
 
     after = _call_route({"board": _undone(_committed(board))})
     assert after["ok"] is True, after

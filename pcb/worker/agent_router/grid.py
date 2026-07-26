@@ -21,22 +21,22 @@ class GridCell:
     # outranks a reservation when both want the same cell — a halo must never
     # overwrite a neighbouring pad's copper claim.
     obstacle_type: Optional[str] = None  # "pad", "pad_clearance", "via",
-                                         # "trace", "trace_clearance", "hole",
-                                         # "keepout"
+                                         # "via_clearance", "trace",
+                                         # "trace_clearance", "hole", "keepout"
 
 
 # Real copper, vs the reservation held around it. A ring may never overwrite
 # copper (see RoutingGrid._mark_clearance_cell); rings may downgrade each other.
 #
-# "via" is listed but NOTHING WRITES IT TODAY: the grid has no via marker at all,
-# because the engine's vias are positional only (agent_router.router.Route.vias is
-# a bare (x, y) list; pcb_worker.methods._routes_to_vias is what gives them a
-# layer span, downstream of the grid). It is listed anyway so that the day a via
-# marker lands it is copper BY DEFAULT — the failure mode of omitting it is a
-# ring silently overwriting via copper, which is the under-block this set exists
-# to prevent, and that is a worse default than one unused string.
+# "via" was reserved here BEFORE anything wrote it, so that the day a via marker
+# landed it would be copper by default rather than something a ring could quietly
+# overwrite. That day is T7 (019f70ebc9ed): :meth:`RoutingGrid.mark_via` writes
+# it for an EXISTING accepted via. The engine's OWN vias are still positional
+# only (agent_router.router.Route.vias is a bare (x, y) list; pcb_worker.methods.
+# _routes_to_vias is what gives them a layer span, downstream of the grid), so
+# only accepted copper reaches this type today.
 _COPPER_TYPES = frozenset({"pad", "trace", "via"})
-_CLEARANCE_TYPES = frozenset({"pad_clearance", "trace_clearance"})
+_CLEARANCE_TYPES = frozenset({"pad_clearance", "trace_clearance", "via_clearance"})
 
 
 @dataclass
@@ -137,6 +137,57 @@ class RoutingGrid:
             return
         if cell.obstacle_type in _CLEARANCE_TYPES and cell.net != net:
             cell.net = None
+
+    def _mark_copper_cell(self, cell: GridCell, net: Optional[str], kind: str,
+                          layer: Optional[str] = None) -> None:
+        """Claim one cell as REAL copper owned by ``net``, never stealing another
+        owner's copper.
+
+        THE single owner of the copper-marking rule, for the same reason
+        :meth:`_mark_clearance_cell` owns the ring rule.
+
+        The "never steal" clause is T7 (019f70ebc9ed). Before existing copper was
+        imported, every copper mark came from the ENGINE — a pad the board census
+        placed, or a trace the pathfinder had just been PERMITTED to lay, which by
+        construction never runs through a foreign land. So an unconditional
+        overwrite was unreachable-but-fine. Importing the board's own accepted
+        copper marks geometry the grid never approved: an accepted trace that
+        overlaps a foreign (or unconnected, ``net=None``) pad — a board that is
+        already shorted — would hand that pad's land to the trace's net, and
+        ``can_route_through`` lets a net cross its own cells. The result is a
+        router licensed to route straight through real copper: an under-block
+        introduced by describing the board more completely, which is exactly
+        backwards. A cell already typed copper under a DIFFERENT owner is
+        therefore left as it is.
+
+        A HOLE is refused outright, whoever asks. A hole belongs to no net and
+        clears any net it lands on (see :meth:`mark_obstacle`), so re-netting one
+        of its cells is a licence to route through a mounting hole —
+        ``can_route_through`` lets a net cross its own cells. The canonical order
+        (pads -> existing copper -> obstacles, see
+        ``router._mark_existing_copper``) already keeps accepted copper away from
+        it, but ORDER IS NOT A GUARD: ``mark_trace`` and ``mark_via`` are public
+        and the engine's OWN routed traces are marked AFTER the obstacles, where
+        ``_cell_range``'s one-cell over-claim can reach a hole cell that no route
+        ever passed through. This is checked here rather than trusted to the
+        caller for the same reason the margin is owned here rather than by the
+        call sites (cold review of 019f70ebc9ed, note 3).
+
+        Re-marking a net's OWN copper (``cell.net == net``) still writes through —
+        an accepted trace landing on its own pad, or the engine re-marking its own
+        path, is not a conflict. So is the documented copper-over-contested-ring
+        weakening (a ``net=None`` cell typed ``*_clearance``, not copper): see
+        :meth:`_cell_range`.
+        """
+        if cell.obstacle_type == "hole":
+            return
+        if cell.obstacle_type in _COPPER_TYPES and cell.net != net:
+            return
+        cell.occupied = True
+        cell.net = net
+        cell.obstacle_type = kind
+        if layer is not None:
+            cell.layer = layer
 
     # -- world <-> cell -----------------------------------------------------
     # THE single owner of the transform, in both directions. Every marker, the
@@ -310,9 +361,7 @@ class RoutingGrid:
                     continue
                 cell = self._grid[layer][row][col]
                 if col in core_cols and row in core_rows:
-                    cell.occupied = True
-                    cell.net = net
-                    cell.obstacle_type = "pad"
+                    self._mark_copper_cell(cell, net, "pad")
                 else:
                     self._mark_clearance_cell(cell, net)
 
@@ -370,6 +419,67 @@ class RoutingGrid:
                             # access to copper it must reach.
                             cell.net = None
                             cell.obstacle_type = "hole"
+
+    def mark_via(
+        self,
+        x: float,
+        y: float,
+        diameter: float,
+        net: Optional[str],
+        layers: Optional[list[str]] = None,
+    ) -> None:
+        """Mark an EXISTING via's annulus as that net's copper, on every layer it
+        spans, plus its clearance ring.
+
+        T7 (019f70ebc9ed). A via is the one copper primitive that is NOT confined
+        to one layer, and that span is the whole point of it: a net whose accepted
+        copper crosses sides is only continuous if the grid agrees the via joins
+        the two sides. Marking it on one layer would leave the other side's copper
+        looking like an unconnected stub AND leave a foreign net free to route
+        over real annulus copper.
+
+        Deliberately NOT :meth:`mark_obstacle`, which is the other disc marker on
+        this class: an obstacle belongs to NO net and clears any net it lands on
+        (a mounting hole nobody may cross). A via belongs to a net and its own net
+        must be able to reach it — routing an accepted via as an obstacle would
+        keep its own net out of its own copper.
+
+        ``diameter`` is the via's TRUE annulus diameter; the grid adds
+        :attr:`keepout_margin` itself, exactly as :meth:`mark_trace` does with a
+        width. Callers must NOT hand-inflate — the single-owner rule (see
+        :attr:`keepout_margin`) is what stops one marker reserving less than
+        another.
+
+        Args:
+            x: Via center X position in mm
+            y: Via center Y position in mm
+            diameter: Annulus (copper pad) diameter in mm — copper only
+            net: Net name the via belongs to
+            layers: Layers the via spans; None marks every layer of the grid
+        """
+        radius = max(0.0, diameter) / 2.0
+        block_radius = radius + self.keepout_margin
+        layers_to_mark = [lyr for lyr in (layers or self.layers)
+                          if lyr in self._grid]
+
+        for row in self._cell_range(y - block_radius, y + block_radius, 1):
+            for col in self._cell_range(x - block_radius, x + block_radius, 0):
+                if not self._cell_in_bounds(col, row):
+                    continue
+                # Distance is measured to the CELL CENTRE, the same point
+                # _cell_to_pos hands back to the pathfinder — so "is this cell
+                # inside the annulus" is asked about the position a route would
+                # actually occupy, not about a corner.
+                cx, cy = self._cell_to_pos(col, row)
+                dist = math.hypot(cx - x, cy - y)
+                if dist > block_radius:
+                    continue
+                for lyr in layers_to_mark:
+                    cell = self._grid[lyr][row][col]
+                    if dist <= radius:
+                        self._mark_copper_cell(cell, net, "via", lyr)
+                    else:
+                        self._mark_clearance_cell(cell, net, "via_clearance")
 
     def mark_trace(
         self,
@@ -448,10 +558,7 @@ class RoutingGrid:
                     continue
                 cell = self._grid[layer][row][col]
                 if col in core_cols and row in core_rows:
-                    cell.occupied = True
-                    cell.net = net
-                    cell.obstacle_type = "trace"
-                    cell.layer = layer
+                    self._mark_copper_cell(cell, net, "trace", layer)
                 else:
                     self._mark_clearance_cell(cell, net, "trace_clearance")
 

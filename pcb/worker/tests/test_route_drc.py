@@ -127,24 +127,72 @@ def _clean_board() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_route_fails_closed_on_a_board_with_accepted_copper():
-    """ROUND E (019f783860c8, Codex gap E): a board that already carries accepted
-    traces/vias is NOT routable until T7 (019f70ebc9ed) models existing copper.
+def test_the_router_routes_around_accepted_foreign_copper_instead_of_over_it():
+    """T7, docket 019f70ebc9ed — driven through ``route()``, the real entry point.
 
-    The routing grid is given pads and holes only, so accepted copper would be
-    INVISIBLE to it and a new proposal could be routed straight through a trace the
-    user already accepted. Rather than propose over copper it cannot see, route()
-    fails closed and says why. (This is why the crossing-detection coverage below
-    exercises the DRC attach layer directly — the scenario it needs, a board with
-    an existing trace, no longer reaches the router.)"""
-    resp = _call("route", {"board": _board(_CROSSING_TRACE),
-                           "route_hints": [_detailed_hint()],
-                           "selection": {"mode": "open"}})
-    assert resp["ok"] is False, resp
-    assert resp["error"]["kind"] == "unsupported_geometry"
-    assert "accepted copper" in resp["error"]["message"]
-    assert "019f70ebc9ed" in resp["error"]["message"]   # names its owner
-    assert "result" not in resp                          # and proposes NOTHING
+    ROUND E (019f783860c8, Codex gap E) made this board unroutable ON PURPOSE: the
+    grid was given pads and holes only, so accepted copper was INVISIBLE and a
+    fresh proposal could be laid straight through a trace the user had already
+    accepted. Failing closed was right while the grid could not model it — but it
+    also meant the FIRST accepted proposal ended the incremental workflow.
+
+    The fixture is the one that made the old failure visible: an EXIST trace walled
+    across x=30 from y=5 to y=35, and SIG needing to get from U1(10,20) to
+    J1(50,20) — a straight line right through it. Two things must now hold, and
+    only the SECOND of them is about the wall being seen at all:
+
+      * the board routes (it no longer fails closed), and
+      * NO proposed segment crosses the wall. If existing copper were still
+        invisible the engine would take the straight line, which is both the
+        cheapest path and a short.
+
+    Deliberately NOT driven with the detailed hint the DRC tests use: a detailed
+    hint materializes AS DRAWN, bypassing the grid entirely, so it could not tell
+    a seen wall from an unseen one.
+
+    WHAT THIS DOES **NOT** CLAIM: that the resulting proposal is geometrically
+    clean. It is not — `drc_geometric` reports a `gc2_copper_clearance` violation
+    against A2's land on this fixture, and the cause is NOT the grid.
+    `agent_router.pathfinder._simplify_path` measures each point's deviation
+    against the last KEPT point, so error accumulates along a gentle detour and a
+    curve that hugged an obstacle collapses into a chord straight through it.
+    Verified directly: the grid blocks nine consecutive probe points along the
+    emitted segment, and `find_path` still returns that segment. Pre-existing and
+    OUT OF THIS ROUND'S FENCE (`pathfinder.py`), but only reachable since
+    accepted-copper boards became routable at all — filed as a finding rather
+    than papered over here. Asserting `verdict == "clean"` would be a false claim;
+    the sealed-wall case in test_route_rules.py is the geometric assertion that
+    can be made honestly."""
+    resp = _call("route", {"board": _board(_CROSSING_TRACE)})
+    assert resp["ok"] is True, resp
+
+    sig = [r for r in resp["result"]["routes"] if r["net"] == "SIG"]
+    assert sig, resp["result"]
+    wall_a, wall_b = (30.0, 5.0), (30.0, 35.0)
+    for seg in sig[0]["segments"]:
+        start = (seg["start"][0], seg["start"][1])
+        end = (seg["end"][0], seg["end"][1])
+        assert not drc_module._segments_intersect(start, end, wall_a, wall_b), \
+            f"proposed SIG segment {start}->{end} crosses the accepted EXIST trace"
+    # And the connectivity kernel agrees, over the same board: no crossing found.
+    assert resp["result"]["drc_summary"]["clean"] is True, resp["result"]
+
+
+def test_a_net_the_accepted_copper_already_joins_is_not_proposed_again():
+    """The other half of T7 (019f70ebc9ed), same fixture, same entry point.
+
+    EXIST's two pads (A1, A2) are the endpoints of the accepted trace — that net
+    is DONE. Same-net copper is already-connected, not an obstacle, so the router
+    must propose nothing for it. Treating it as an obstacle would make the net
+    unroutable; ignoring it entirely (the pre-T7 behaviour, had the board reached
+    the router at all) would re-propose a trace the board already carries, laid
+    straight on top of its own copper.
+    """
+    resp = _call("route", {"board": _board(_CROSSING_TRACE)})
+    assert resp["ok"] is True, resp
+    assert [r["net"] for r in resp["result"]["routes"]] == ["SIG"], \
+        "EXIST is already joined by accepted copper and must not be re-routed"
+    assert not resp["result"].get("unrouted"), resp["result"]
 
 
 def test_drc_attach_flags_a_proposal_crossing_an_existing_trace():

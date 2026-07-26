@@ -1374,12 +1374,20 @@ def _route(params: dict) -> dict:
     # would have escaped the route error envelope entirely.
     try:
         board = route_bridge.resolved_board_to_router(compiled.board)
+        # The board's ALREADY-ACCEPTED copper (T7 019f70ebc9ed), projected beside
+        # the Board because agent_router.Board has no slot for it. Inside the SAME
+        # boundary as the other two projections, for the same reason they are:
+        # existing copper the grid cannot model must produce the identical
+        # structured zero-route reply, not escape as an unhandled exception.
+        existing_traces, existing_vias = \
+            route_bridge.resolved_board_existing_copper(compiled.board)
         drc_board = ir_connectivity.connectivity_board(compiled.board)
         geometric_board = compiled.board
     except route_bridge.UnsupportedGeometry as exc:
         # Compiled fine, but carries geometry the routing grid cannot model
-        # faithfully (inner copper, accepted traces/vias, zones, a copper
-        # graphic, a non-rectangular outline). Fail closed with its own kind so
+        # faithfully (inner copper, zones, a copper graphic, a non-rectangular
+        # outline, or accepted copper spanning a layer the grid does not carry).
+        # Fail closed with its own kind so
         # a consumer can tell "this board will not compile" from "this board
         # compiles but is not routable yet".
         return {"ok": False, "error": {
@@ -1497,6 +1505,14 @@ def _route(params: dict) -> dict:
     kw["net_widths"] = net_widths
     kw["keepout_clearance"] = keepout_clearance
     kw["keepout_trace_width"] = keepout_trace_width
+    # ALREADY-ACCEPTED COPPER (T7 019f70ebc9ed). Other-net copper becomes an
+    # obstacle through the same markers — and therefore the same
+    # RoutingGrid.keepout_margin — as the copper this run lays; same-net copper
+    # is already-connected, so the net may path along it and the pads it joins
+    # are not proposed again. Both engine entry points take it, so hinted and
+    # unhinted runs see the identical board.
+    kw["existing_traces"] = existing_traces
+    kw["existing_vias"] = existing_vias
 
     try:
         if translation.hints.net_hints or translation.hints.buses \

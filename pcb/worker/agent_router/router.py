@@ -10,7 +10,7 @@ to identify potential issues and prompt design-level thinking.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence
 from collections import defaultdict
 import math
 import re
@@ -376,6 +376,302 @@ class RoutingResult:
 NetWidths = dict[str, float]
 
 
+# ---------------------------------------------------------------------------
+# EXISTING (already-accepted) copper — T7, docket 019f70ebc9ed
+# ---------------------------------------------------------------------------
+# The board's own accepted traces and vias, in the engine's language. Until T7 a
+# board carrying any of it was not routable at all (route_bridge fails closed),
+# because the grid was given pads and holes only: accepted copper was INVISIBLE
+# and a fresh proposal could be laid straight across it. That was the honest call
+# while the grid could not model it, but it also meant the first accepted proposal
+# ended the iterative workflow this plugin exists for.
+#
+# These ride as ENGINE OPTIONS rather than as fields on ``Board`` for the same
+# reason ``trace_width``/``clearance`` do (see docs/routing.md, "Effective width
+# and clearance"): ``agent_router.Board`` is also the shape ``Board.from_kicad``
+# produces, and this round's fence does not extend to it. The projection that
+# fills them is pcb_worker.route_bridge.resolved_board_existing_copper, beside the
+# one that fills the Board.
+#
+# TWO different jobs, and conflating them is the bug this feature is prone to:
+#
+#   * OTHER-net copper is an OBSTACLE. It goes through the SAME markers as
+#     freshly-routed copper (``RoutingGrid.mark_trace`` / ``mark_via``), so it is
+#     inflated by the SAME single owner, ``RoutingGrid.keepout_margin``. There is
+#     deliberately NO second, hand-inflated path here — one shipped in an earlier
+#     round and had to be undone, because a margin applied in one marker and
+#     forgotten (or spelled differently) in another is exactly the under-block
+#     keepout_margin exists to make impossible.
+#   * SAME-net copper is ALREADY-CONNECTED. It is marked with its own net, so
+#     ``can_route_through`` lets that net path TO it and ALONG it; and the pads it
+#     already joins are pre-merged before the spanning tree is built
+#     (:func:`_preconnected_groups`), so the router adds only the connections the
+#     board still lacks instead of re-routing a net that is partly done.
+
+
+@dataclass(frozen=True)
+class ExistingSegment:
+    """One straight run of accepted copper on one layer.
+
+    Segments, not polylines: the IR's own trace is already a chain of 2-point
+    segments and every consumer (ir_connectivity, the DRC kernel) breaks polylines
+    into consecutive pairs anyway, so one shape reaches all of them.
+    """
+    net: Optional[str]
+    start: tuple[float, float]
+    end: tuple[float, float]
+    width: float
+    layer: str
+
+
+@dataclass(frozen=True)
+class ExistingVia:
+    """An accepted via: an annulus of copper present on EVERY layer it spans."""
+    net: Optional[str]
+    position: tuple[float, float]
+    diameter: float
+    layers: tuple[str, ...]
+
+
+def _mark_existing_copper(
+    grid: RoutingGrid,
+    existing_traces: Sequence[ExistingSegment],
+    existing_vias: Sequence[ExistingVia],
+    layers: Sequence[str],
+) -> None:
+    """Put the board's accepted copper into the grid.
+
+    ORDER MATTERS, and it is: pads -> existing copper -> obstacles.
+
+    * after PADS, because a pad is the board's census of copper and existing
+      copper is laid on top of it; running the other way would let a pad's
+      clearance ring be written where accepted copper already sits.
+    * before OBSTACLES, because an obstacle (a mounting hole) is an ABSOLUTE veto
+      that belongs to no net and clears whatever it lands on (see
+      ``mark_obstacle``). Losing a few cells of accepted copper to a hole is the
+      safe direction: it only over-blocks.
+
+    That second clause is a PREFERENCE, not the safety property. Re-netting a
+    hole cell is refused by ``RoutingGrid._mark_copper_cell`` itself, so getting
+    the order wrong here (or calling the public markers from somewhere else)
+    costs blocking that could have been avoided — never a hole the router is
+    allowed to route through.
+
+    Widths and diameters are the copper's OWN authored dimensions, not the run's:
+    this is copper that already physically exists. Only the keepout MARGIN around
+    it is the run's (grid-wide) one — that is a reservation for the newcomer, not
+    a property of what is already there.
+    """
+    routable = set(layers)
+    for seg in existing_traces:
+        if seg.layer not in routable:
+            # Not reachable from the canonical projection (route_bridge fails
+            # closed on a non-F.Cu/B.Cu stack), but reachable for a caller that
+            # asked for single_layer=True over a 2-layer board. Skipping is safe
+            # THERE and only there: with no B.Cu in the grid, nothing routes on
+            # B.Cu and no via can be proposed (`allow_via = allow_vias and not
+            # single_layer`), so there is nothing that could cross the copper
+            # being skipped.
+            continue
+        grid.mark_trace(start=seg.start, end=seg.end, width=seg.width,
+                        net=seg.net, layer=seg.layer)
+    for via in existing_vias:
+        spans = [lyr for lyr in via.layers if lyr in routable]
+        if not spans:
+            continue
+        grid.mark_via(x=via.position[0], y=via.position[1],
+                      diameter=via.diameter, net=via.net, layers=spans)
+
+
+# How close two pieces of copper must be before this engine calls them the same
+# point, in GRID CELLS. One cell: the router cannot resolve anything finer — a
+# path's own vertices come back from `_cell_to_pos` as cell CENTRES, so copper
+# accepted from a previous run sits up to half a cell diagonal off the pad centre
+# it was routed from. Deliberately not looser: see _preconnected_groups for why
+# the error that matters here is over-counting, not under-counting.
+_COINCIDENT_CELLS = 1.0
+
+
+def _coincidence_tolerance(
+    grid_resolution: float,
+    segments: Sequence[ExistingSegment],
+    vias: Sequence[ExistingVia],
+) -> float:
+    """How far apart two pieces of THIS net's copper may be and still count as
+    joined, in mm — capped by the copper itself, never by the grid alone.
+
+    THE CAP IS THE POINT (cold review of 019f70ebc9ed). A cells-based tolerance
+    scales with ``grid_resolution``, and that is a CALLER OPTION
+    (``pcb_worker.methods._route`` passes it straight through from
+    ``options.grid_resolution``). At the 0.1mm default the quantisation term is
+    far smaller than any real trace width, so it can only under-count. Nothing
+    forbids a caller asking for 0.5mm — and at that resolution two same-net stubs
+    with a GENUINE 0.4mm air gap between them merge into one pre-connected group.
+    The router then skips a connection the net actually needs and the reply
+    reports an OPEN net as routed: precisely the over-count, and precisely the
+    false clean, that :func:`_preconnected_groups` is built to avoid. A caller's
+    choice of grid must not be able to reverse the safe direction.
+
+    So the tolerance is the SMALLER of:
+
+      * the quantisation term (one cell), which is what it exists to absorb, and
+      * the narrowest COPPER involved — a segment's half-width, a via's radius.
+        Copper of width ``w`` ending at a point covers a disc of radius ``w/2``
+        about it, so two pieces whose copper really touches are within
+        ``(w1 + w2) / 2``; taking the narrowest single half-extent is strictly
+        tighter than that, i.e. conservative in the one direction that is safe.
+
+    Both terms shrink the tolerance and neither can grow it, so the result is
+    bounded by physical copper no matter what grid the caller asks for.
+    """
+    reach = min([seg.width / 2.0 for seg in segments]
+                + [via.diameter / 2.0 for via in vias])
+    return min(grid_resolution * _COINCIDENT_CELLS, reach)
+
+
+def _pad_reaches_layer(pad: Pad, layer: str) -> bool:
+    """Whether ``pad``'s copper is present on ``layer``.
+
+    Mirrors the layer choice route_board makes when MARKING the pad, minus its
+    ``else: ["F.Cu"]`` fallback for an unrecognised layer name. That fallback is
+    a conservative guess for a KEEPOUT (block somewhere rather than nowhere);
+    reused for CONNECTIVITY it would be an invented electrical connection, which
+    is the one direction this predicate must never err in.
+    """
+    return (pad.layer == layer or pad.layer == "*.Cu"
+            or pad.pad_type == "thru_hole")
+
+
+def _preconnected_groups(
+    pads: list[Pad],
+    segments: Sequence[ExistingSegment],
+    vias: Sequence[ExistingVia],
+    tolerance: float,
+) -> dict[int, int]:
+    """Which of ``pads`` the board's EXISTING copper already joins.
+
+    Returns ``{pad index -> group id}``; two pads share a group iff accepted
+    copper already connects them. All inputs must already be filtered to ONE net.
+
+    THE ERROR DIRECTIONS ARE NOT SYMMETRIC, and everything below follows from
+    that:
+
+    * OVER-counting (claiming a connection the copper does not make) makes the
+      router skip a connection the net genuinely needs. The reply then reports a
+      net as routed while it is open — a silent false clean, and the worst
+      outcome available here.
+    * UNDER-counting (missing a join the copper does make) makes the router
+      propose a connection that is already there. That is redundant same-net
+      copper: wasteful, visible to the user in the proposal, and electrically
+      harmless.
+
+    So every rule here demands COINCIDENCE, never mere proximity or containment:
+
+    * a segment endpoint counts as landing on a pad only within ``tolerance`` of
+      the pad's CENTRE — not "inside the pad's extent". The extent the engine
+      holds is the axis-aligned SUPERSET of a possibly-rotated land
+      (route_bridge._router_pad), which is the right shape for a keepout and the
+      wrong one for connectivity: it would credit copper that stops in the corner
+      of a bounding box where no real copper exists. The centre is exact, and it
+      is where copper actually terminates — routes are pathfound pad-centre to
+      pad-centre and acceptance writes those coordinates back.
+    * two segments join at shared ENDPOINTS only. A T-junction (one segment
+      ending part-way along another) is real copper contact this misses, on
+      purpose: catching it needs a point-on-segment test whose tolerance would
+      have to grow with trace width, and being wrong there over-counts. The cost
+      of missing it is one redundant proposed trace.
+    * a via joins whatever coincides with it on a layer it SPANS, which is what
+      makes a two-sided net continuous.
+    """
+    if not pads:
+        return {}
+    n_pads = len(pads)
+    parent = list(range(n_pads + len(segments) + len(vias)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def coincident(p: tuple[float, float], q: tuple[float, float]) -> bool:
+        return math.hypot(p[0] - q[0], p[1] - q[1]) <= tolerance
+
+    seg_node = n_pads
+    via_node = n_pads + len(segments)
+
+    for si, seg in enumerate(segments):
+        for pi, pad in enumerate(pads):
+            if not _pad_reaches_layer(pad, seg.layer):
+                continue
+            if coincident(seg.start, pad.position) or coincident(seg.end, pad.position):
+                union(pi, seg_node + si)
+        for sj in range(si + 1, len(segments)):
+            other = segments[sj]
+            if other.layer != seg.layer:
+                continue
+            if any(coincident(a, b) for a in (seg.start, seg.end)
+                   for b in (other.start, other.end)):
+                union(seg_node + si, seg_node + sj)
+
+    for vi, via in enumerate(vias):
+        for pi, pad in enumerate(pads):
+            if any(_pad_reaches_layer(pad, lyr) for lyr in via.layers) and \
+                    coincident(via.position, pad.position):
+                union(pi, via_node + vi)
+        for si, seg in enumerate(segments):
+            if seg.layer not in via.layers:
+                continue
+            if coincident(seg.start, via.position) or coincident(seg.end, via.position):
+                union(via_node + vi, seg_node + si)
+
+    return {pi: find(pi) for pi in range(n_pads)}
+
+
+def _existing_copper_by_net(
+    existing_traces: Sequence[ExistingSegment],
+    existing_vias: Sequence[ExistingVia],
+) -> dict[str, tuple[list[ExistingSegment], list[ExistingVia]]]:
+    """Index accepted copper by net once, so the per-net routing loop does not
+    rescan the whole board's copper for every net it routes."""
+    by_net: dict[str, tuple[list[ExistingSegment], list[ExistingVia]]] = {}
+    for seg in existing_traces:
+        if seg.net:
+            by_net.setdefault(seg.net, ([], []))[0].append(seg)
+    for via in existing_vias:
+        if via.net:
+            by_net.setdefault(via.net, ([], []))[1].append(via)
+    return by_net
+
+
+def _connections_for_net(
+    pads: list[Pad],
+    net_name: str,
+    existing_by_net: dict[str, tuple[list[ExistingSegment], list[ExistingVia]]],
+    grid_resolution: float,
+) -> list[tuple[Pad, Pad]]:
+    """The connections this net still NEEDS: a spanning tree over the groups the
+    board's accepted copper has already merged, not over the bare pads.
+
+    Takes the raw ``grid_resolution`` rather than a pre-computed tolerance so the
+    physical cap in :func:`_coincidence_tolerance` cannot be bypassed by a caller
+    that resolves the tolerance itself — one owner, same reasoning as
+    ``RoutingGrid.keepout_margin``.
+    """
+    segments, vias = existing_by_net.get(net_name, ((), ()))
+    if not segments and not vias:
+        return _build_spanning_tree(pads, None)
+    groups = _preconnected_groups(
+        pads, segments, vias,
+        _coincidence_tolerance(grid_resolution, segments, vias))
+    return _build_spanning_tree(pads, groups)
+
+
 def _net_width(net_widths: Optional[NetWidths], net_name: Optional[str],
               base_width: float) -> float:
     """THIS net's own copper width: its class override, or the run's
@@ -397,6 +693,8 @@ def route_board(
     net_widths: Optional[NetWidths] = None,
     keepout_clearance: Optional[float] = None,
     keepout_trace_width: Optional[float] = None,
+    existing_traces: Sequence[ExistingSegment] = (),
+    existing_vias: Sequence[ExistingVia] = (),
 ) -> RoutingResult:
     """
     Route all nets on a board.
@@ -419,6 +717,13 @@ def route_board(
             minima; see the module note above). None (every pre-net-class
             caller) means "use clearance/trace_width", i.e. unchanged
             behaviour — a board with no net classes present sees no change.
+        existing_traces / existing_vias: the board's ALREADY-ACCEPTED copper
+            (T7, 019f70ebc9ed — see the module note above). Other-net copper
+            becomes an obstacle through the same markers (and therefore the same
+            keepout_margin) as freshly-routed copper; same-net copper is
+            already-connected, so the net may path along it and the pads it
+            joins are not re-routed. Empty (every pre-T7 caller) is the
+            unchanged behaviour.
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -467,6 +772,10 @@ def route_board(
                 rotation=pad.rotation
             )
 
+    # The board's OWN accepted copper, between pads and obstacles — see
+    # _mark_existing_copper for why that position in the order is load-bearing.
+    _mark_existing_copper(grid, existing_traces, existing_vias, layers)
+
     # Mark obstacles
     for obstacle in board.obstacles:
         if obstacle.radius:
@@ -475,6 +784,8 @@ def route_board(
                 y=obstacle.position[1],
                 radius=obstacle.radius
             )
+
+    existing_by_net = _existing_copper_by_net(existing_traces, existing_vias)
 
     # Get ordered list of nets to route
     nets_to_route = _order_nets(board, order)
@@ -488,8 +799,11 @@ def route_board(
         net_width = _net_width(net_widths, net_name, trace_width)
         route = Route(net=net_name)
 
-        # Build minimum spanning tree for multi-pad nets
-        connections = _build_spanning_tree(pads)
+        # Spanning tree over what the board still NEEDS: pads the accepted copper
+        # already joins collapse to one node, so a partly-routed net is finished
+        # rather than routed again from scratch (T7, 019f70ebc9ed).
+        connections = _connections_for_net(
+            pads, net_name, existing_by_net, grid_resolution)
 
         for pad_a, pad_b in connections:
             path = find_path(
@@ -609,7 +923,10 @@ def _order_nets(board: Board, strategy: str) -> list[str]:
     return sorted_nets
 
 
-def _build_spanning_tree(pads: list[Pad]) -> list[tuple[Pad, Pad]]:
+def _build_spanning_tree(
+    pads: list[Pad],
+    groups: Optional[dict[int, int]] = None,
+) -> list[tuple[Pad, Pad]]:
     """
     Build minimum spanning tree for connecting pads.
 
@@ -619,6 +936,14 @@ def _build_spanning_tree(pads: list[Pad]) -> list[tuple[Pad, Pad]]:
 
     Args:
         pads: List of pads to connect
+        groups: optional ``{pad index -> group id}`` saying which pads the board's
+            EXISTING accepted copper already joins (T7, 019f70ebc9ed; built by
+            :func:`_preconnected_groups`). Pads sharing a group are treated as ONE
+            node, so the result is a spanning tree over the GROUPS — the
+            connections the net still lacks — rather than over the bare pads. A
+            net whose pads are entirely joined already yields ZERO connections.
+            None (every caller before T7, and every net with no accepted copper)
+            means one group per pad, i.e. the unchanged full MST.
 
     Returns:
         List of (pad1, pad2) connections forming the MST
@@ -626,7 +951,13 @@ def _build_spanning_tree(pads: list[Pad]) -> list[tuple[Pad, Pad]]:
     if len(pads) < 2:
         return []
 
+    group_of = groups if groups is not None else {i: i for i in range(len(pads))}
+
     if len(pads) == 2:
+        # Same short-circuit as before, but it has to ask the same question the
+        # loop below does: two pads the board already joins need no connection.
+        if group_of.get(0) == group_of.get(1):
+            return []
         return [(pads[0], pads[1])]
 
     # Seed from the most peripheral pad (farthest from centroid)
@@ -636,10 +967,16 @@ def _build_spanning_tree(pads: list[Pad]) -> list[tuple[Pad, Pad]]:
         (pads[i].position[0] - cx) ** 2 + (pads[i].position[1] - cy) ** 2
     ))
 
-    # Prim's algorithm using indices (Pad is not hashable)
+    # Prim's algorithm using indices (Pad is not hashable). The tree starts
+    # holding the seed's WHOLE group, and absorbing any pad absorbs its whole
+    # group — that contraction is the only difference from the plain MST.
+    def _group_members(index: int) -> set[int]:
+        gid = group_of.get(index, index)
+        return {i for i in range(len(pads)) if group_of.get(i, i) == gid}
+
     connections = []
-    in_tree_indices = {seed}
-    not_in_tree_indices = set(range(len(pads))) - {seed}
+    in_tree_indices = _group_members(seed)
+    not_in_tree_indices = set(range(len(pads))) - in_tree_indices
 
     while not_in_tree_indices:
         best_edge = None
@@ -657,10 +994,12 @@ def _build_spanning_tree(pads: list[Pad]) -> list[tuple[Pad, Pad]]:
                     best_dist = dist
                     best_edge = (i, j)
 
-        if best_edge:
-            connections.append((pads[best_edge[0]], pads[best_edge[1]]))
-            in_tree_indices.add(best_edge[1])
-            not_in_tree_indices.remove(best_edge[1])
+        if best_edge is None:
+            break
+        connections.append((pads[best_edge[0]], pads[best_edge[1]]))
+        absorbed = _group_members(best_edge[1])
+        in_tree_indices |= absorbed
+        not_in_tree_indices -= absorbed
 
     return connections
 
@@ -1073,6 +1412,8 @@ def route_board_with_hints(
     net_widths: Optional[NetWidths] = None,
     keepout_clearance: Optional[float] = None,
     keepout_trace_width: Optional[float] = None,
+    existing_traces: Sequence[ExistingSegment] = (),
+    existing_vias: Sequence[ExistingVia] = (),
 ) -> RoutingResult:
     """
     Route a board using routing hints for guidance.
@@ -1101,6 +1442,10 @@ def route_board_with_hints(
             worst-case) clearance/trace_width — see the module note above.
             Grid-wide, not per-net, so it covers every marking regardless of
             which loop drew it (standard, bus, or pad).
+        existing_traces / existing_vias: the board's ALREADY-ACCEPTED copper
+            (T7, 019f70ebc9ed — see the module note above ``route_board``). It is
+            marked on the SAME grid ``route_bus`` and the standard loop both
+            draw on, so bus-routed nets see it too.
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -1149,6 +1494,11 @@ def route_board_with_hints(
                 rotation=pad.rotation
             )
 
+    # The board's OWN accepted copper, between pads and obstacles — see
+    # _mark_existing_copper. Marked BEFORE route_bus runs below, so a bus net
+    # keeps out of accepted copper exactly as the standard loop does.
+    _mark_existing_copper(grid, existing_traces, existing_vias, layers)
+
     # Mark obstacles
     for obstacle in board.obstacles:
         if obstacle.radius:
@@ -1157,6 +1507,8 @@ def route_board_with_hints(
                 y=obstacle.position[1],
                 radius=obstacle.radius
             )
+
+    existing_by_net = _existing_copper_by_net(existing_traces, existing_vias)
 
     # Build bridge lookup: {net_name: InternalBridge}
     bridge_map: dict[str, list] = {}
@@ -1238,7 +1590,16 @@ def route_board_with_hints(
                 internal_nets=internal_nets,
             )
         else:
-            connections = _build_spanning_tree(pads)
+            # Same group contraction as route_board (T7, 019f70ebc9ed).
+            # Deliberately NOT applied to the bridge branch above, nor to the
+            # chains appended below: those are pad pairs the USER authored, and
+            # docs/routing.md's standing rule for authored input is "admitted or
+            # rejected, never reinterpreted" — dropping one because the board
+            # looks already-connected would silently reinterpret an explicit
+            # instruction. Only the AUTOMATIC tree is the router's own choice to
+            # make.
+            connections = _connections_for_net(
+                pads, net_name, existing_by_net, grid_resolution)
 
         # Add chain connections (sequential pad-to-pad)
         net_chains = chain_pad_pairs.get(net_name, [])

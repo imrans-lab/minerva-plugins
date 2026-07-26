@@ -64,6 +64,7 @@ from typing import Any, Optional
 
 from agent_router.board import Board, Pad, Net, Obstacle
 from agent_router.hints import RoutingHints, parse_hints
+from agent_router.router import ExistingSegment, ExistingVia
 from agent_router import layers as _layers
 
 from .geometry import rotate_local_offset
@@ -357,17 +358,6 @@ def _reject_unroutable_board(rb: ResolvedBoard) -> None:
         raise UnsupportedGeometry(
             f"routing v1 models a rectangular (RectOutline) board only; got "
             f"{type(rb.outline).__name__}")
-    if rb.traces or rb.vias:
-        # EXISTING ACCEPTED COPPER (Codex gap E). The engine is given pads/holes
-        # only, so already-accepted traces and vias would be invisible and a new
-        # proposal could be routed straight through them. Modeling accepted copper
-        # is owned by T7 019f70ebc9ed; until it lands, a board that HAS accepted
-        # copper is not routable rather than routable-and-wrong.
-        raise UnsupportedGeometry(
-            f"board already carries accepted copper ({len(rb.traces)} trace(s), "
-            f"{len(rb.vias)} via(s)) which the routing grid does not model yet "
-            f"(019f70ebc9ed); routing fails closed rather than propose copper "
-            f"that may cross it")
     if rb.zones:
         raise UnsupportedGeometry("routing v1 does not model copper zones/pours")
     if any(g.layer.role is LayerRole.COPPER for g in rb.board_graphics) or any(
@@ -500,11 +490,16 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     rotated land still contains it, so the rotation superset and the clearance
     reservation stack rather than compete.
 
+    ACCEPTED COPPER IS NOT PART OF THIS PROJECTION, but it is no longer refused
+    either (T7 019f70ebc9ed): it comes across through
+    :func:`resolved_board_existing_copper`, which the caller invokes beside this
+    one and passes to the engine as run options. See that function for why it
+    cannot ride on the ``Board``.
+
     NOT yet handled here, by design (each has its own owner, none of them silent):
       * per-net-class width/clearance minima — the IR carries the slot
         (``design_rules.net_classes``) but the v1 compiler emits none, so there
         is nothing to honour yet; the run is one width and one clearance.
-      * accepted traces/vias — T7 019f70ebc9ed; fails closed above until then.
     """
     _reject_unroutable_board(rb)
     routable = _routing_layer_ids(rb)
@@ -560,6 +555,102 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
         height=rb.outline.height_mm,
         origin=tuple(rb.outline.origin),
     )
+
+
+def resolved_board_existing_copper(
+    rb: ResolvedBoard,
+) -> tuple[list[ExistingSegment], list[ExistingVia]]:
+    """Project the board's ALREADY-ACCEPTED traces and vias for the routing grid.
+
+    T7, docket 019f70ebc9ed. Until this landed, ANY accepted copper made a board
+    unroutable (``_reject_unroutable_board`` raised on ``rb.traces or rb.vias``):
+    the grid saw pads and holes only, so accepted copper was invisible and a fresh
+    proposal could be laid straight across it. That was the right call while the
+    grid could not model existing copper — but it also meant the FIRST accepted
+    proposal ended the incremental workflow, which is the workflow the plugin
+    exists for.
+
+    It rides BESIDE :func:`resolved_board_to_router` rather than inside its
+    ``Board`` for the same reason the effective width/clearance pair does (see
+    that function's "DESIGN RULES DO NOT RIDE THIS PROJECTION"): ``agent_router.
+    Board`` is also what ``Board.from_kicad`` builds, and this round's fence does
+    not reach it. The caller (``pcb_worker.methods._route``) passes both to
+    ``route_board``/``route_board_with_hints``, inside the SAME
+    ``UnsupportedGeometry`` boundary — so a board that cannot be projected here
+    fails closed identically to one that cannot be projected there.
+
+    Dimensions are the copper's OWN authored ones (``width_mm``,
+    ``diameter_mm``) — this is copper that already physically exists, so there is
+    nothing to resolve and nothing to invent. Only the keepout MARGIN around it
+    belongs to the run, and the grid owns that (``RoutingGrid.keepout_margin``).
+
+    The per-SEGMENT decomposition is deliberately the same one
+    ``ir_connectivity.connectivity_board`` uses for the same IR traces: one
+    2-point piece per ``ResolvedTraceSegment``. Both consumers then reason about
+    the identical pieces of copper, which is the whole point of one compile
+    feeding every half of the reply (019f97d021a8).
+    """
+    routable = _routing_layer_ids(rb)
+    net_name_by_id = {net.id: net.name for net in rb.nets}
+
+    segments: list[ExistingSegment] = []
+    for trace in rb.traces:
+        net_name = net_name_by_id.get(trace.net_id)
+        for seg in trace.segments:
+            # ``ResolvedTraceSegment.layer`` is a plain ``Layer`` whose ``id`` is
+            # the CANONICAL name ("top"/"bottom") — NOT the ``kicad_alias`` the
+            # layer-STACK entries carry. The engine speaks KiCad aliases, so the
+            # hop goes through the one canonical map (agent_router.layers), which
+            # exists precisely because a duplicated copy of it once drifted and
+            # produced the two-emitter via bug.
+            layer = _layers.canon_to_kicad(seg.layer.id)
+            if layer not in routable:
+                # Defence in depth, matching _pad_copper_layer: the IR already
+                # validates every segment onto the compiled copper stack and
+                # _routing_layer_ids already refused any stack that is not
+                # F.Cu/B.Cu, so this is unreachable today. Kept because the
+                # failure it guards is silent invisible copper.
+                raise UnsupportedGeometry(
+                    f"accepted trace {trace.id}: segment on copper layer "
+                    f"{layer!r} is not routable ({list(routable)}); the routing "
+                    f"grid would not see it")
+            segments.append(ExistingSegment(
+                net=net_name,
+                start=(float(seg.a[0]), float(seg.a[1])),
+                end=(float(seg.b[0]), float(seg.b[1])),
+                width=float(seg.width_mm),
+                layer=layer))
+
+    vias: list[ExistingVia] = []
+    for via in rb.vias:
+        span = tuple(dict.fromkeys(
+            _layers.canon_to_kicad(lid) for lid in (via.from_layer, via.to_layer)))
+        unroutable = [lid for lid in span if lid not in routable]
+        if unroutable:
+            # A blind/buried span touching a layer the 2-layer grid does not
+            # carry. The v1 compiler cannot emit one (it validates every span
+            # against [top, bottom]), so this is the same defence-in-depth as
+            # above — but it is the sub-case that MUST keep failing closed if
+            # inner layers ever arrive: half a via's copper modeled and half of
+            # it invisible is worse than not routing the board.
+            raise UnsupportedGeometry(
+                f"accepted via {via.id}: spans {list(unroutable)}, which the "
+                f"routing grid does not model ({list(routable)})")
+        # A via's copper is its ANNULUS, and an authored padstack may make that
+        # annulus wider on some layer than the nominal diameter. Take the widest
+        # — same fail-safe direction as every other keepout in this module: the
+        # modeled copper must be a SUPERSET of the fabricated copper.
+        diameter = float(via.diameter_mm)
+        if via.padstack is not None:
+            diameter = max([diameter] + [float(lp.diameter_mm)
+                                         for lp in via.padstack.per_layer])
+        vias.append(ExistingVia(
+            net=net_name_by_id.get(via.net_id),
+            position=(float(via.position[0]), float(via.position[1])),
+            diameter=diameter,
+            layers=span))
+
+    return segments, vias
 
 
 def _split_pin_ref(ref: Any) -> tuple[Optional[str], str]:
