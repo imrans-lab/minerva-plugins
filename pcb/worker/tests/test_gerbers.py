@@ -519,3 +519,107 @@ def test_legacy_arc_bulges_into_body():
     mid = _arc_midpoint(start, end, center, mode)
     assert mid[1] > center[1] + 0.5, \
         f"notch bulges the WRONG way: midpoint {mid} vs centre {center} (mode {mode})"
+
+
+# ---------------------------------------------------------------------------
+# Rotated fully-rounded aperture: EMITTED BYTES + the upstream canary (019f9af6e899).
+#
+# gerber-writer collapses a fully-rounded RoundedRectangle to the standard obround
+# `O,xXy`, which carries no rotation, and gates that on `angle % 90 == 0` — but an
+# obround is symmetric only under 180. gerber._shape_aperture compensates by
+# swapping the extents for the defect set. These tests pin the exact bytes on BOTH
+# sides of that boundary: swap where upstream drops the angle, and byte-identical
+# passthrough everywhere else (especially the macro branch, which carries its own
+# angle and would be CORRUPTED by a swap).
+# ---------------------------------------------------------------------------
+
+
+def _aperture_body(shape: str, w: float, h: float, rratio, angle: float) -> str:
+    """The single %ADD body a shape+angle flashes, straight out of gerber-writer."""
+    from gerber_writer import DataLayer
+
+    layer = DataLayer("Copper,L1,Top", negative=False)
+    layer.add_pad(gerber._shape_aperture(shape, w, h, rratio, "SMDPad,CuDef", angle),
+                  (10.0, 10.0), angle)
+    bodies = re.findall(r"%ADD\d+([^*]+)\*%", layer.dumps_gerber())
+    assert len(bodies) == 1, bodies
+    return bodies[0]
+
+
+@pytest.mark.parametrize("angle", [90.0, 270.0, -90.0, 450.0, -270.0])
+def test_odd_multiple_of_90_swaps_the_obround_extents(angle):
+    # The DEFECT SET. -90 and -270 pin that Python's `%` normalises negatives the way
+    # the workaround assumes (-90 % 180 == 90), rather than leaving it to be believed;
+    # 450 / -270 pin that it is periodic, not a hardcoded {90, 270}.
+    assert _aperture_body("oval", 1.2, 2.4, None, angle) == "O,2.4X1.2"
+
+
+@pytest.mark.parametrize("angle", [0.0, 180.0, 360.0, -180.0])
+def test_even_multiple_of_90_leaves_the_obround_untouched(angle):
+    # NON-REGRESSION: an obround is symmetric under 180, so these were always right.
+    assert _aperture_body("oval", 1.2, 2.4, None, angle) == "O,1.2X2.4"
+
+
+def test_square_obround_is_untouched_at_90():
+    # NON-REGRESSION: w == h, so the rotation folds away and a swap is a no-op that
+    # must not perturb the bytes.
+    assert _aperture_body("oval", 2.0, 2.0, None, 90.0) == "O,2.0X2.0"
+
+
+def test_non_multiple_of_90_still_takes_the_rotating_macro_branch():
+    # NON-REGRESSION, and the sharpest edge of the fix: at 45 degrees upstream's
+    # `% 90` gate fails, so it emits an aperture MACRO that already carries the
+    # angle. Swapping the extents there would CORRUPT a case that was correct.
+    body = _aperture_body("oval", 1.2, 2.4, None, 45.0)
+    assert body.startswith("RoundedRectangle,0.6X1.2X")
+    assert "X45.0X" in body
+
+
+def test_near_90_angle_is_not_swapped_because_upstream_keeps_the_macro():
+    # The tolerance boundary: 90.0000001 fails upstream's EXACT `angle % 90 == 0`, so
+    # upstream takes the macro branch and carries the angle itself. Our correction is
+    # gated on that same exact test, so it must NOT fire here — a purely tolerance-
+    # based check would swap and break a working case.
+    body = _aperture_body("oval", 1.2, 2.4, None, 90.0000001)
+    assert body.startswith("RoundedRectangle,0.6X1.2X")
+
+
+def test_rect_and_circle_apertures_are_unaffected_by_rotation_handling():
+    # NON-REGRESSION: a rect always emits a macro that carries the angle, and a
+    # circle has no orientation at all. Neither goes near the swap.
+    assert _aperture_body("rect", 1.2, 2.4, None, 90.0) == "Rectangle,0.6X1.2X90.0"
+    assert _aperture_body("circle", 2.0, 2.0, None, 90.0) == "C,2.0"
+
+
+def test_partially_rounded_roundrect_keeps_its_rotating_macro():
+    # NON-REGRESSION: rratio 0.25 is NOT fully rounded, so upstream emits a macro
+    # carrying the angle and no correction is wanted.
+    body = _aperture_body("roundrect", 1.2, 2.4, 0.25, 90.0)
+    assert body.startswith("RoundedRectangle,") and "X90.0X" in body
+
+
+def test_canary_gerber_writer_still_collapses_fully_rounded_to_a_rotationless_obround():
+    """CANARY on the UPSTREAM behaviour gerber._obround_rotation_swap works around.
+
+    Our fix pre-swaps w/h because gerber-writer throws the rotation away. If
+    gerber-writer is ever upgraded and fixes its guard (`angle % 90` -> `angle % 180`,
+    or by emitting a rotated macro / %LR), it will start honouring the angle itself —
+    and OUR swap becomes the bug, double-rotating every oblong land back to wrong.
+    This asserts the raw upstream contract, with no pcb_worker code in the path, so
+    that upgrade fails HERE and loudly instead of silently shipping bad copper.
+    """
+    from gerber_writer import DataLayer, RoundedRectangle
+
+    layer = DataLayer("Copper,L1,Top", negative=False)
+    # Fully rounded (radius == min(w, h)/2) at an exact multiple of 90.
+    layer.add_pad(RoundedRectangle(1.2, 2.4, 0.6, "SMDPad,CuDef"), (10.0, 10.0), 90.0)
+    body = re.findall(r"%ADD\d+([^*]+)\*%", layer.dumps_gerber())[0]
+
+    assert body == "O,1.2X2.4", (
+        "UPSTREAM CHANGED: gerber-writer no longer collapses a fully-rounded "
+        "RoundedRectangle at 90 degrees to the rotationless standard obround "
+        f"'O,1.2X2.4' (got {body!r}). gerber._shape_aperture pre-swaps w/h to "
+        "compensate for that rotation loss (docket 019f9af6e899). If gerber-writer "
+        "now honours the angle itself, THAT SWAP IS NOW A BUG and will double-rotate "
+        "every oblong land — delete _obround_rotation_swap and its call site in "
+        "gerber._shape_aperture, then re-run the rotated-oval conformance tests.")

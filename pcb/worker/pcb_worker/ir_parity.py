@@ -111,6 +111,7 @@ __all__ = [
     "SMART_REMOTE_BASELINE",
     "PARITY_CORNERS_BASELINE",
     "ParitySurfaceUnavailable",
+    "ParityCanonicalizationUnsupported",
 ]
 
 
@@ -430,6 +431,18 @@ def _canonical_rotation(shape: str, w: float, h: float, rot_deg: float) -> float
     return round(folded, 6)
 
 
+# Shapes for which the transposition identity below is VALID. The identity
+# "a land of (w, h) at 90 deg is the same copper as a land of (h, w) at 0 deg"
+# requires the shape to be symmetric about BOTH of its own axes: a 90-degree turn
+# maps the outline onto its transpose only if reflecting across either axis is a
+# no-op. rect, oval and roundrect all are. An asymmetric shape is NOT — rotating a
+# trapezoid or a chamfered pad 90 degrees does NOT give you the transposed
+# trapezoid, it gives you one pointing a different way — so transposing it would
+# manufacture a false agreement between two genuinely different lands. Circle never
+# reaches here (_canonical_rotation returns NA for it: a disc has no orientation).
+_TRANSPOSABLE_SHAPES = frozenset({_SHAPE_RECT, _SHAPE_OVAL, _SHAPE_ROUNDRECT})
+
+
 def _values_agree(name: str, a: Any, b: Any) -> bool:
     """Field comparison. NA on EITHER side is never a disagreement."""
     if a is NA or b is NA:
@@ -539,11 +552,39 @@ def _flash_row(layer_token: str, x: float, y: float, *, shape: str, w: float,
     RAW in ``x_mm``/``y_mm`` (a compared value). Without the raw copy a displaced
     pad inside the same bucket would be invisible, and one outside it would be an
     illegible missing/extra pair — position would never actually be CHECKED."""
+    rot = _canonical_rotation(shape, w, h, rot_deg) if rot_deg is not NA else NA
+
+    # ORIENTATION-CANONICAL extents. Surfaces legitimately carry DIFFERENT but
+    # EQUIVALENT descriptions of one quarter-turned land: the IR keeps the authored
+    # (w, h, rot=90), while gerber folds the turn into the aperture's extents and
+    # emits (h, w, rot=0) — it has no choice, the standard obround aperture `O,xXy`
+    # has no rotation parameter at all (see gerber._obround_rotation_swap). Without
+    # a single canonical form, that pure REPRESENTATION difference reads as three
+    # field defects on a land that is fabricated correctly.
+    #
+    # This folds both to the axis-aligned representative. It is NOT a suppression:
+    # it only ever equates two descriptions of the SAME outline, so a land that is
+    # genuinely the wrong way round still disagrees — it disagrees on w_mm/h_mm
+    # instead of on rot_deg (pinned by
+    # test_canonicalization_does_not_mask_a_genuinely_transposed_land).
+    if rot is not NA and abs(rot - 90.0) <= _ANGLE_TOLERANCE_DEG:
+        if shape not in _TRANSPOSABLE_SHAPES:
+            # Fail LOUDLY rather than transpose an outline the identity does not
+            # hold for. A new asymmetric pad shape must extend the set CONSCIOUSLY.
+            raise ParityCanonicalizationUnsupported(
+                f"ir_parity: shape {shape!r} is at 90 deg but is not in "
+                f"_TRANSPOSABLE_SHAPES, so (w, h, 90) -> (h, w, 0) is not a valid "
+                f"canonicalisation for it — a 90-degree turn maps an outline onto "
+                f"its transpose only when the outline is symmetric about BOTH axes. "
+                f"Add it to _TRANSPOSABLE_SHAPES only after confirming that, or give "
+                f"it its own canonical form; do NOT transpose it by default.")
+        w, h, rot = h, w, 0.0
+
     return ParityRow.make(
         "copper_flash", (layer_token, _q(x), _q(y)),
         x_mm=float(x), y_mm=float(y),
         shape=shape, w_mm=w, h_mm=h,
-        rot_deg=_canonical_rotation(shape, w, h, rot_deg) if rot_deg is not NA else NA,
+        rot_deg=rot,
         entity=entity, ref=ref, pad_number=pad_number, net_name=net_name)
 
 
@@ -939,6 +980,20 @@ class ParitySurfaceUnavailable(RuntimeError):
     """A surface cannot be tabulated on this machine (missing dev-only reader)."""
 
 
+class ParityCanonicalizationUnsupported(RuntimeError):
+    """A row cannot be reduced to a canonical orientation, so it cannot be compared.
+
+    DELIBERATELY NOT a subclass of :class:`ParitySurfaceUnavailable`, and this is
+    load-bearing. That one reports an ENVIRONMENT condition — a reader missing on
+    this machine — which a caller may quite reasonably convert into "skip this
+    surface". This one reports a GAP IN THIS MODULE: a shape whose geometry the
+    canonicaliser does not know how to fold. Folding the two together would let a
+    caller's environment-skip path silently disable the gate for a newly-added
+    asymmetric pad shape, which is exactly the class of silent degradation the
+    fail-closed rule exists to prevent. Fix the canonicaliser; never skip past this.
+    """
+
+
 def _gerbonara_shape(aperture) -> tuple[str, float, float, float]:
     """One parsed gerbonara aperture -> ``(shape, w_mm, h_mm, rot_deg)``.
 
@@ -1291,42 +1346,11 @@ PARITY_CORNERS_BASELINE: tuple[KnownDelta, ...] = (
         docket="019f952306f9"),
 
     # ---------------------------------------------------------------------
-    # DEFECT, NOT A POLICY — found by this harness on its first corner-fixture
-    # run, and left here as a baseline entry ONLY because this round is
-    # report-only. This one SHOULD go to zero, and doing so is a fix in
-    # pcb_worker/gerber.py.
-    #
-    # gerber._shape_aperture (gerber.py:645-672) maps an `oval` land to
-    # gerber-writer's RoundedRectangle(w, h, min(w,h)/2) — fully rounded on the
-    # short axis. gerber-writer optimizes that degenerate case down to the
-    # STANDARD Gerber obround primitive, and a standard aperture has no rotation
-    # parameter. The emitted bytes for J1.2 are:
-    #
-    #     G04 #@! TAShape,RoundedRectangle,1.2,2.4,0.6,90.0*
-    #     %ADD16O,1.2X2.4*%
-    #
-    # The 90 degrees survives only in the X2 ATTRIBUTE COMMENT, which is metadata;
-    # the aperture a CAM tool actually flashes is an axis-aligned 1.2 x 2.4
-    # obround. No %LR rotation command is emitted anywhere in the file (verified).
-    # So the fabricated land is 1.2 wide and 2.4 tall where the IR, the KiCad
-    # export and the DRC all say 2.4 wide and 1.2 tall.
-    #
-    # Contrast the rect family two apertures earlier — `%ADD15Rectangle,0.6X1.2X90.0*%`
-    # — an aperture MACRO, which does carry rotation. The loss is specific to the
-    # fully-rounded (oval/obround) case; roundrect with a smaller radius still
-    # emits a macro and keeps its angle.
-    #
-    # Not fixed in this round (scope fence: no existing worker module modified).
-    KnownDelta(
-        surface="gerber", family="copper_flash", kind="field", field="rot_deg",
-        keys=(("B.Cu", 10.54, 8.0), ("F.Cu", 10.54, 8.0)),
-        reason="DEFECT: an oblong OVAL land loses its rotation in Gerber. "
-               "_shape_aperture maps oval -> fully-rounded RoundedRectangle, which "
-               "gerber-writer collapses to the standard obround aperture "
-               "'%ADD16O,1.2X2.4*%'; standard apertures carry no rotation and no "
-               "%LR is emitted, so J1.2's 90-degree land is fabricated "
-               "axis-aligned. KiCad and DRC both keep the 90. Fix belongs in "
-               "pcb_worker/gerber.py (emit a rotated macro, or an %LR, for a "
-               "rotated oval land).",
-        docket="unattributed"),
+    # REMOVED — the gerber rotated-oval defect (docket 019f9af6e899) that this
+    # harness found on its first corner-fixture run is FIXED, so its baseline entry
+    # is gone rather than relaxed. J1.2's 90-degree oblong OVAL land now flashes
+    # '%ADD..O,2.4X1.2*%' (swapped extents) on both copper layers and on the mask,
+    # agreeing with the IR, KiCad and DRC. See gerber._obround_rotation_swap for the
+    # workaround and the canary test that pins the upstream behaviour it relies on.
+    # The baseline shrinking from 4 entries to 3 IS the proof; do not re-add.
 )

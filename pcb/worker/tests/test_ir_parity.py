@@ -44,6 +44,9 @@ from pcb_worker.ir_parity import (
     Delta,
     KnownDelta,
     ParityRow,
+    ParityCanonicalizationUnsupported,
+    ParitySurfaceUnavailable,
+    SurfaceTable,
     check_parity,
     diff_against_reference,
     format_report,
@@ -336,9 +339,14 @@ def test_a_real_emitter_perturbation_is_caught_end_to_end(monkeypatch):
     from pcb_worker import gerber
 
     original = gerber._shape_aperture
+    # NB the trailing `angle` is forwarded UNCHANGED — only w/h are transposed. The
+    # emitter takes the angle at aperture-construction time to work around
+    # gerber-writer dropping a rotated obround's rotation (019f9af6e899); a mutation
+    # that dropped it would be testing a different function, not perturbing this one.
     monkeypatch.setattr(
         gerber, "_shape_aperture",
-        lambda shape, w, h, rratio, func: original(shape, h, w, rratio, func))
+        lambda shape, w, h, rratio, func, angle: original(
+            shape, h, w, rratio, func, angle))
 
     report = check_parity(_board(PARITY_CORNERS), PARITY_CORNERS_BASELINE)
     assert not report.ok, "transposing every gerber aperture went undetected"
@@ -552,8 +560,12 @@ def test_the_exit_condition_is_measurable():
     Asserted as an inequality rather than a target so it documents progress
     without failing today. When a baseline reaches 0, tighten this.
     """
+    # RATCHET: tightened 5 -> 3 when the rotated-oval gerber defect (019f9af6e899)
+    # was fixed and its PARITY_CORNERS entry deleted. The count going DOWN is the
+    # visible proof the defect is gone, so the bound is re-tightened on every fix —
+    # otherwise a fixed delta just leaves slack for the next one to hide in.
     total = len(SMART_REMOTE_BASELINE) + len(PARITY_CORNERS_BASELINE)
-    assert total <= 5, (
+    assert total <= 3, (
         f"{total} known parity deltas — the baseline is meant to SHRINK. If this "
         f"tripped because a new delta was added, justify the growth or fix the "
         f"surface.")
@@ -582,3 +594,90 @@ def test_diff_is_symmetric_about_extra_rows():
     extra = [d for d in deltas if d.kind == "extra_row"]
     assert len(extra) == 1
     assert "ABSENT from ir" in extra[0].render()
+
+
+# ---------------------------------------------------------------------------
+# ORIENTATION-CANONICAL extents — and the proof it is not a suppression.
+#
+# _flash_row folds a quarter-turned land to its axis-aligned representative, so
+# the IR's authored (w, h, rot=90) and gerber's (h, w, rot=0) — which the standard
+# obround aperture FORCES, having no rotation parameter — stop reading as three
+# field defects on copper that is fabricated correctly (019f9af6e899).
+#
+# A harness change that makes a parity failure disappear is indistinguishable from
+# a cover-up unless you show the failure SURVIVES when the defect is real. These
+# tests are that proof, expressed against _flash_row's own contract: no emitter is
+# monkeypatched, so there is nothing here to rot when the emitters change.
+# ---------------------------------------------------------------------------
+
+
+def _flash_table(surface: str, *, shape: str, w: float, h: float, rot: float,
+                 anonymous: bool = False) -> SurfaceTable:
+    """A one-row copper_flash table for `surface`, built through the SAME
+    constructor every real tabulator uses. `anonymous` mirrors the gerber surface,
+    where a flash carries no ref/pad/net (so only geometry is compared)."""
+    meta = dict(entity=NA, ref=NA, pad_number=NA, net_name=NA) if anonymous else \
+        dict(entity="pad", ref="J1", pad_number="2", net_name="GND")
+    row = ir_parity._flash_row("F.Cu", 10.54, 8.0, shape=shape, w=w, h=h,
+                               rot_deg=rot, **meta)
+    return SurfaceTable(surface=surface, families=frozenset({"copper_flash"}),
+                        rows=(row,))
+
+
+def test_canonicalization_equates_the_two_descriptions_of_one_turned_land():
+    # A 1.2 x 2.4 oval at 90 deg IS a 2.4 x 1.2 oval at 0 deg — the same copper,
+    # described the two legal ways. The IR carries the first, gerber is FORCED to
+    # carry the second. After canonicalisation they must agree on every field.
+    ir = _flash_table("ir", shape="oval", w=1.2, h=2.4, rot=90.0)
+    gbr = _flash_table("gerber", shape="oval", w=2.4, h=1.2, rot=0.0, anonymous=True)
+    assert not diff_against_reference(ir, gbr), (
+        "two descriptions of the SAME land still disagree — canonicalisation failed")
+
+
+def test_canonicalization_does_not_mask_a_genuinely_transposed_land():
+    """THE ANTI-MASKING PROOF. The disagreement must MOVE, never VANISH.
+
+    A gerber emitter that DROPS the rotation (the 019f9af6e899 defect) flashes an
+    axis-aligned 1.2 x 2.4 land where the IR says the land is turned 90 deg. That
+    is genuinely the wrong copper. Canonicalisation folds the IR side to
+    (2.4, 1.2, rot 0) while the buggy gerber side stays (1.2, 2.4, rot 0) — so the
+    surfaces now disagree on w_mm/h_mm instead of on rot_deg, and the gate still
+    fires. Verified end-to-end by neutering gerber._obround_rotation_swap with the
+    KnownDelta deleted: parity still failed, on w_mm/h_mm.
+    """
+    ir = _flash_table("ir", shape="oval", w=1.2, h=2.4, rot=90.0)
+    buggy = _flash_table("gerber", shape="oval", w=1.2, h=2.4, rot=0.0, anonymous=True)
+    deltas = diff_against_reference(ir, buggy)
+    assert deltas, (
+        "a land fabricated axis-aligned where the IR says it is turned 90 degrees "
+        "went UNDETECTED — the canonicalisation is masking the defect it was added "
+        "alongside. Do not ship this; find another approach.")
+    assert {d.field for d in deltas} == {"w_mm", "h_mm"}
+    assert all(d.surface == "gerber" for d in deltas)
+
+
+def test_canonicalization_refuses_a_shape_it_cannot_transpose():
+    # The identity (w, h, 90) -> (h, w, 0) needs symmetry about BOTH axes. An
+    # asymmetric shape must fail LOUDLY rather than be silently transposed into a
+    # false agreement, so adding one is a conscious decision, not an accident.
+    #
+    # The exception type matters as much as the raise. It must NOT be a
+    # ParitySurfaceUnavailable, which reports an ENVIRONMENT condition (a reader
+    # missing on this machine) that a caller may legitimately turn into "skip this
+    # surface". Routing this gap down that path would silently disable the parity
+    # gate for a newly-added asymmetric shape — so assert the types are distinct.
+    assert not issubclass(ParityCanonicalizationUnsupported, ParitySurfaceUnavailable)
+    with pytest.raises(ParityCanonicalizationUnsupported, match="_TRANSPOSABLE_SHAPES"):
+        ir_parity._flash_row("F.Cu", 10.54, 8.0, shape="trapezoid", w=1.2, h=2.4,
+                             rot_deg=90.0, entity="pad", ref="J1", pad_number="2",
+                             net_name="GND")
+
+
+@pytest.mark.parametrize("shape", ["rect", "oval", "roundrect"])
+def test_every_transposable_shape_is_genuinely_both_axis_symmetric(shape):
+    # Pins the MEMBERSHIP of the set, not just its use: each member must round-trip
+    # a quarter turn to its transpose. If a shape is added that does not, this fails.
+    turned = _flash_table("ir", shape=shape, w=1.2, h=2.4, rot=90.0)
+    flat = _flash_table("ir", shape=shape, w=2.4, h=1.2, rot=0.0)
+    assert not diff_against_reference(turned, flat)
+    assert shape in ir_parity._TRANSPOSABLE_SHAPES

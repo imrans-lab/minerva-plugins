@@ -202,12 +202,21 @@ def test_rotated_non_rect_shape_is_faithful():
 
 def test_smd_aperture_maps_each_shape_to_its_primitive():
     from gerber_writer import Circle, Rectangle, RoundedRectangle
-    assert isinstance(_smd_aperture("rect", 2.0, 1.0, None), Rectangle)
-    assert isinstance(_smd_aperture("circle", 2.0, 2.0, None), Circle)
-    assert isinstance(_smd_aperture("oval", 2.0, 1.0, None), RoundedRectangle)
-    assert isinstance(_smd_aperture("roundrect", 2.0, 1.0, 0.25), RoundedRectangle)
+    # The pad angle is a REQUIRED argument (no default) so a future call site cannot
+    # silently omit it and reintroduce the rotated-obround defect — 019f9af6e899.
+    assert isinstance(_smd_aperture("rect", 2.0, 1.0, None, 0.0), Rectangle)
+    assert isinstance(_smd_aperture("circle", 2.0, 2.0, None, 0.0), Circle)
+    assert isinstance(_smd_aperture("oval", 2.0, 1.0, None, 0.0), RoundedRectangle)
+    assert isinstance(_smd_aperture("roundrect", 2.0, 1.0, 0.25, 0.0), RoundedRectangle)
     # Unknown shape falls back to a rectangle (never crashes the emitter).
-    assert isinstance(_smd_aperture("mystery", 2.0, 1.0, None), Rectangle)
+    assert isinstance(_smd_aperture("mystery", 2.0, 1.0, None, 0.0), Rectangle)
+
+
+def test_shape_aperture_requires_an_explicit_angle():
+    # Pin the no-default contract itself: omitting the angle must be a hard TypeError
+    # at the call, not a silent fall back to 0.0 that drops a rotated land's rotation.
+    with pytest.raises(TypeError):
+        gerber._shape_aperture("oval", 2.0, 1.0, None, "SMDPad,CuDef")
 
 
 # ===========================================================================
@@ -1239,3 +1248,80 @@ def test_empty_or_missing_smd_shape_defaults_to_rect_no_raise():
     for board in (empty, missing):
         gerber.build_gerbers(board, name="conf")     # must not raise
         kicad.generate(board, base_name="conf")       # must not raise
+
+
+# ===========================================================================
+# ROTATED FULLY-ROUNDED LAND — gerber-writer drops the rotation (019f9af6e899).
+#
+# gerber-writer optimises a FULLY-ROUNDED RoundedRectangle down to the STANDARD
+# gerber obround aperture `O,xXy`, which has NO rotation parameter, and we emit no
+# %LR. Upstream gates that collapse on `angle % 90 == 0`, but an obround is
+# symmetric only under 180 degrees — so at 90/270 it emitted UNSWAPPED extents and
+# the land was FABRICATED AXIS-ALIGNED. The 90 survived only in the X2 attribute
+# COMMENT, which is metadata no CAM tool flashes.
+#
+# _shape_aperture now swaps w/h for exactly that case. Because `min(w, h)` is
+# swap-invariant the aperture still collapses to `O,` — it just carries the rotated
+# extents. The correction is keyed on the emitted RADIUS, so it covers `oval` AND a
+# `roundrect` authored at corner_rratio 0.5 (equally fully-rounded), and it lands in
+# the single shared _shape_aperture branch, so COPPER (SMD + TH) and SOLDER MASK are
+# all fixed at once. All three were wrong; all three are asserted here.
+# ===========================================================================
+
+
+def _rotate_pad(board: dict, angle: float) -> dict:
+    """Bake an ABSOLUTE rotation onto a board's single pad, leaving the component at
+    rotation 0 — the same injection-after-reuse trick _mask_pad_board uses, so the
+    TH builder does not need its own angle parameter."""
+    board["components"][0]["pads"][0]["rotation"] = angle
+    return board
+
+
+def test_rotated_oval_smd_land_swaps_obround_extents():
+    # A 2.0 x 1.0 oval SMD land at 90 degrees is 1.0 wide and 2.0 tall. Before the
+    # fix this flashed the UNROTATED '%ADD10O,2.0X1.0*%'.
+    text = _fcu(_pad_board("oval", w=2.0, h=1.0, angle=90.0))
+    assert "%ADD10O,1.0X2.0*%" in text
+    assert "%ADD10O,2.0X1.0*%" not in text
+
+
+def test_rotated_oval_th_land_swaps_obround_extents_on_both_layers():
+    # The TH copper path (_add_shaped_th) shares _shape_aperture, so an oblong TH
+    # land was wrong on F.Cu AND B.Cu too.
+    result = gerber.build_gerbers(
+        _rotate_pad(_th_pad_board(w=2.0, h=1.0, shape="oval"), 90.0), name="conf")
+    for layer in ("conf-F_Cu.gbr", "conf-B_Cu.gbr"):
+        assert re.search(r"%ADD\d+O,1\.0X2\.0\*%", result[layer]), (
+            f"{layer} fabricates the rotated TH land axis-aligned")
+        assert not re.search(r"%ADD\d+O,2\.0X1\.0\*%", result[layer])
+
+
+def test_rotated_oval_mask_opening_swaps_obround_extents():
+    # TRAP 2: the mask window goes through the SAME branch, so a rotated oblong land
+    # got a wrong copper land AND a wrong solder-mask opening. The opening is the
+    # ENLARGED copper, then rotated — so the margin is applied on the pre-swap axes.
+    m = _DEFAULT_MARGIN
+    text = _fmask(_mask_pad_board("oval", w=2.0, h=1.0, angle=90.0))
+    assert f"%ADD10O,{1.0 + 2 * m}X{2.0 + 2 * m}*%" in text
+    assert f"%ADD10O,{2.0 + 2 * m}X{1.0 + 2 * m}*%" not in text
+
+
+def test_fully_rounded_roundrect_at_90_is_corrected_too():
+    # TRAP 1: the defect is NOT specific to the `oval` token. A roundrect authored at
+    # corner_rratio 0.5 computes radius = 0.5 * min(w, h) — just as fully rounded —
+    # and hits the identical upstream collapse. A fix keyed on shape == "oval" would
+    # leave this hole open, so the correction is keyed on the emitted radius.
+    text = _fcu(_pad_board("roundrect", w=2.0, h=1.0, rratio=0.5, angle=90.0))
+    assert "%ADD10O,1.0X2.0*%" in text
+    assert "%ADD10O,2.0X1.0*%" not in text
+
+
+@pytest.mark.parametrize("angle", [0.0, 180.0])
+def test_axis_aligned_oval_land_is_unchanged(angle):
+    # NON-REGRESSION: an obround folds under 180-degree symmetry, so 0 and 180 were
+    # already correct and must keep emitting the ORIGINAL bytes. Asserted on copper
+    # and mask together, since both share the branch that changed.
+    m = _DEFAULT_MARGIN
+    assert "%ADD10O,2.0X1.0*%" in _fcu(_pad_board("oval", w=2.0, h=1.0, angle=angle))
+    assert f"%ADD10O,{2.0 + 2 * m}X{1.0 + 2 * m}*%" in \
+        _fmask(_mask_pad_board("oval", w=2.0, h=1.0, angle=angle))

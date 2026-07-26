@@ -639,10 +639,64 @@ def _add_smd(layer: DataLayer, pads, top_wanted: bool) -> None:
     for (px, py, w, h, angle, top, shape, rratio) in pads:
         if top != top_wanted:
             continue
-        layer.add_pad(_smd_aperture(shape, w, h, rratio), (px, py), angle)
+        layer.add_pad(_smd_aperture(shape, w, h, rratio, angle), (px, py), angle)
 
 
-def _shape_aperture(shape: str, w: float, h: float, rratio: float | None, func: str):
+# gerber-writer's own collapse threshold for "this RoundedRectangle is fully
+# rounded" (writer.py, RoundedRectangle branch: TOLERANCE = 0.5e-3). Mirrored —
+# not imported — because upstream declares it as a FUNCTION-LOCAL name inside the
+# dump routine, so there is nothing importable to bind to. _obround_rotation_swap
+# is pinned to upstream's behaviour by a canary test instead (see below).
+_GW_OBROUND_TOLERANCE = 0.5e-3
+
+# The angle is a float coming off a placed pad, so compare it with slack rather
+# than by equality. NB the slack is only ever applied AFTER upstream's own exact
+# `angle % 90 == 0` gate has already matched, so in practice `angle % 180` is
+# exactly 0.0 or 90.0 here; the tolerance is belt-and-braces, not load-bearing.
+_OBROUND_ANGLE_TOL_DEG = 1e-9
+
+
+def _obround_rotation_swap(w: float, h: float, radius: float, angle: float) -> bool:
+    """Does gerber-writer silently DROP this pad's rotation? (defect 019f9af6e899)
+
+    gerber-writer optimises a FULLY-ROUNDED ``RoundedRectangle`` down to the
+    STANDARD gerber obround aperture ``O,xXy`` (writer.py, the RoundedRectangle
+    branch)::
+
+        if ((min(x_size, y_size) - 2*radius) < TOLERANCE) and (angle % 90 == 0):
+            ad_body = f'O,{x_size}X{y_size}'      # <- no rotation parameter
+        else:
+            ... aperture MACRO, which DOES carry the angle ...
+
+    A standard aperture has no rotation parameter and we emit no ``%LR``, so the
+    angle survives only in the X2 attribute COMMENT — metadata a CAM tool does not
+    flash. Upstream's guard says ``angle % 90 == 0``, but an obround is symmetric
+    only under 180 degrees, so at 90/270 the emitted extents are UNSWAPPED and the
+    land is fabricated axis-aligned.
+
+    True exactly for the defect set: fully rounded AND upstream will collapse AND
+    the rotation is an odd multiple of 90 AND the extents actually differ. Callers
+    correct it by swapping w/h into the aperture, which is sound precisely because
+    ``min(w, h)`` is swap-invariant — the upstream branch condition is unchanged,
+    so the aperture still collapses to ``O,``, just carrying the rotated extents.
+
+    Deliberately NOT true for:
+      * angle 0/180  — an obround folds under 180-degree symmetry; already correct.
+      * angle 45 etc — upstream's ``% 90`` gate fails, so it takes the macro branch
+                       and carries the angle itself. Swapping would CORRUPT it.
+      * w == h       — the rotation folds away.
+    """
+    if w == h:
+        return False
+    if (min(w, h) - 2.0 * radius) >= _GW_OBROUND_TOLERANCE:
+        return False           # not fully rounded: upstream emits a macro w/ angle
+    if angle % 90 != 0:
+        return False           # upstream's EXACT gate: macro branch, angle kept
+    return abs((angle % 180.0) - 90.0) < _OBROUND_ANGLE_TOL_DEG
+
+
+def _shape_aperture(shape: str, w: float, h: float, rratio: float | None, func: str,
+                    angle: float):
     """Map a declared SUPPORTED_PAD_SHAPE to its faithful gerber aperture — the
     K3 capability-conformance requirement (019f7aed6d9e comment 628). Before this
     every SMD pad flashed a Rectangle, silently flattening circle/oval/roundrect.
@@ -659,23 +713,59 @@ def _shape_aperture(shape: str, w: float, h: float, rratio: float | None, func: 
                      (KiCad's rratio convention; default 0.25 when unspecified).
                      A zero/absent radius degenerates to a plain Rectangle.
       * rect (and any unknown shape) -> Rectangle.
+
+    ``angle`` is the pad's ABSOLUTE rotation — the same value the caller then hands
+    to ``layer.add_pad``. It is needed HERE, at aperture-construction time, purely
+    to work around gerber-writer dropping the rotation of a fully-rounded
+    RoundedRectangle; see :func:`_obround_rotation_swap` (defect 019f9af6e899).
+
+    ``angle`` is deliberately REQUIRED, not defaulted. A default would let a call
+    site added later silently omit it, which does not fail any test — it just
+    quietly reintroduces the severity-1 defect on that path's copper. All three
+    call sites (_add_smd via _smd_aperture, _add_shaped_th, _add_mask) already
+    carry the pad angle, so the parameter costs a caller nothing.
     """
     if shape == "circle":
         return Circle(w, func)
+
+    # Both rounded families reduce to a radius, then share ONE construction point
+    # below — so the rotation workaround exists in exactly one place, for copper
+    # (SMD + TH) and solder mask alike. A `roundrect` authored at corner_rratio 0.5
+    # is JUST as fully-rounded as an `oval` and hits the same upstream collapse, so
+    # the correction is keyed on the emitted RADIUS, never on the shape token.
+    radius: float | None = None
     if shape == "oval":
-        return RoundedRectangle(w, h, min(w, h) / 2.0, func)
-    if shape == "roundrect":
+        radius = min(w, h) / 2.0
+    elif shape == "roundrect":
         ratio = rratio if rratio is not None else 0.25
-        radius = ratio * min(w, h)
-        if radius > 0:
-            return RoundedRectangle(w, h, radius, func)
+        candidate = ratio * min(w, h)
+        if candidate > 0:
+            radius = candidate      # a zero/absent radius degenerates to Rectangle
+
+    if radius is not None:
+        if _obround_rotation_swap(w, h, radius, angle):
+            # KNOWN, ACCEPTED inconsistency: gerber-writer derives its X2 shape
+            # ATTRIBUTE from the master's dimensions, so the swap also transposes
+            # the comment — a 90-degree land emits `TAShape,RoundedRectangle,2.4,
+            # 1.2,0.6,90.0`, which read literally describes the land the other way
+            # round. Safe, and deliberately not chased here: X2 attributes are
+            # METADATA that no CAM tool flashes; the FABRICATED geometry is the
+            # `O,` aperture, which this swap makes correct. Fixing the attribute
+            # would mean post-processing gerber-writer's output stream. Filed as
+            # docket 019f9c9274d6 — do not "fix" it in this branch. That item
+            # closes when gerber-writer fixes its own guard upstream, which is also
+            # the moment test_gerbers.py::test_canary_gerber_writer_still_collapses
+            # _fully_rounded_to_a_rotationless_obround starts failing.
+            w, h = h, w
+        return RoundedRectangle(w, h, radius, func)
     return Rectangle(w, h, func)
 
 
-def _smd_aperture(shape: str, w: float, h: float, rratio: float | None):
+def _smd_aperture(shape: str, w: float, h: float, rratio: float | None,
+                  angle: float):
     """Copper-layer wrapper over _shape_aperture (func="SMDPad,CuDef"). Kept as a
     named entry for the copper path + the conformance unit test."""
-    return _shape_aperture(shape, w, h, rratio, "SMDPad,CuDef")
+    return _shape_aperture(shape, w, h, rratio, "SMDPad,CuDef", angle)
 
 
 def _add_annuli(layer: DataLayer, annuli) -> None:
@@ -689,7 +779,7 @@ def _add_shaped_th(layer: DataLayer, pads) -> None:
     # (func="ComponentPad,CuDef" — the TH copper function) so a shaped land keeps
     # both extents faithfully instead of collapsing to a round annulus.
     for (px, py, shape, w, h, rratio, angle) in pads:
-        layer.add_pad(_shape_aperture(shape, w, h, rratio, "ComponentPad,CuDef"),
+        layer.add_pad(_shape_aperture(shape, w, h, rratio, "ComponentPad,CuDef", angle),
                       (px, py), angle)
 
 
@@ -703,7 +793,7 @@ def _add_mask(layer: DataLayer, openings) -> None:
     # family as its copper (via _shape_aperture, func=""), enlarged by the mask
     # margin. TH annuli arrive as shape "circle" (w==h==annulus+2*margin).
     for (px, py, shape, w, h, rratio, angle) in openings:
-        layer.add_pad(_shape_aperture(shape, w, h, rratio, ""), (px, py), angle)
+        layer.add_pad(_shape_aperture(shape, w, h, rratio, "", angle), (px, py), angle)
 
 
 def _add_silk_lines(layer: DataLayer, lines) -> None:
