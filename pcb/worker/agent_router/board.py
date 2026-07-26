@@ -6,7 +6,7 @@ that loads from KiCad PCB files.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional, Sequence
 from pathlib import Path as FilePath
 
 
@@ -44,13 +44,124 @@ class Obstacle:
     layer: Optional[str] = None     # Specific layer if not all
 
 
+# ---------------------------------------------------------------------------
+# The board's OWN design rules (019f9bc3909c).
+#
+# A ``Board`` used to carry geometry ONLY — pads, nets, obstacles, extent. Its
+# rules and its already-accepted copper lived nowhere on it, so three
+# consecutive rounds threaded them through ``route_board``'s RUN OPTIONS
+# instead (A2+A3 width/clearance, A4 net-class widths + keepout values, B1
+# existing traces/vias). The cost landed exactly where you would predict: a
+# second entry point (``cli.py``) that built a Board correctly and then forgot
+# most of the option list, and routed at the engine's defaults on a board that
+# authored its own (bug 019f9b38a93f).
+#
+# The slots below make a correctly-built Board carry that data BY
+# CONSTRUCTION. Run options are unchanged and still win — they are an OVERRIDE
+# layer, not the source (see ``router.resolve_effective_rules`` for the one
+# precedence chain both entry points now share).
+# ---------------------------------------------------------------------------
+
+
+class RoutingRulesError(Exception):
+    """A design rule (or an explicit run option) is PRESENT but unusable, or no
+    admissible value could be sourced at all.
+
+    Routing FAILS CLOSED on either — the standing ruling is that canvas may
+    degrade while routing, DRC and CAM do not. Lives here rather than in
+    ``router`` because ``board`` is the lower module (router imports board), and
+    the authored-rules reader below has to raise it too.
+    """
+
+
+@dataclass(frozen=True)
+class RoutingDefaults:
+    """The board's authored routing defaults. Duck-compatible with the worker
+    IR's ``resolved_board.RoutingDefaults`` on the ONE field the precedence
+    chain reads, so the worker can hand its real IR object straight to
+    ``Board.design_rules`` with no translation step to drift.
+
+    ``trace_width_mm`` is deliberately typed ``Any`` and holds the value AS
+    AUTHORED. It is not filtered here — see :meth:`DesignRules.from_authored`.
+    """
+    trace_width_mm: Any = None
+
+
+@dataclass(frozen=True)
+class ManufacturingConstraints:
+    """The board's authored manufacturing floor. Duck-compatible with the
+    worker IR's ``resolved_board.ManufacturingConstraints`` on the ONE field
+    the precedence chain reads (see :class:`RoutingDefaults`)."""
+    min_clearance_mm: Any = None
+
+
+@dataclass(frozen=True)
+class DesignRules:
+    """A board's design rules, in the shape the precedence chain reads.
+
+    Deliberately a STRUCTURAL match for the worker's compiled
+    ``ResolvedDesignRules`` (``.defaults.trace_width_mm`` /
+    ``.minimums.min_clearance_mm``) rather than a flat pair: the worker path
+    assigns its real IR object to ``Board.design_rules`` unchanged, so there is
+    no conversion layer between "what the compiler decided" and "what the
+    router routes at" that could drift. This class exists for the callers that
+    have NO compiler — principally ``agent_router.cli`` reading an authored
+    board YAML.
+    """
+    defaults: RoutingDefaults = field(default_factory=RoutingDefaults)
+    minimums: ManufacturingConstraints = field(default_factory=ManufacturingConstraints)
+
+    @classmethod
+    def from_authored(cls, design_rules: Any) -> Optional["DesignRules"]:
+        """Build from the AUTHORED board-YAML ``design_rules`` mapping.
+
+        Mirrors the authored-to-IR field mapping the worker's compiler applies
+        (``compile_board``: authored ``trace_width_mm`` becomes
+        ``defaults.trace_width_mm``, authored ``clearance_mm`` becomes
+        ``minimums.min_clearance_mm``), so a board authoring a rule is routed at
+        that rule through EITHER entry point.
+
+        PURELY STRUCTURAL: it maps field NAMES and preserves values exactly as
+        authored. It does NOT admit or filter them. That is deliberate — a
+        filtering step here would turn an authored ``trace_width_mm: "0.35"``
+        into ``None``, indistinguishable from a board that authored no width at
+        all, and the chain would then quietly route at the engine's 0.25. That
+        silent-0.25 signature IS bug 019f9b38a93f, so admission happens in ONE
+        place (``router._board_rule_mm``) where "absent" and "present but
+        unreadable" can still be told apart and the second one can fail closed.
+
+        Returns None when the board authors no ``design_rules`` block at all —
+        a legitimate absence that falls through to the engine default. A block
+        that is PRESENT but not a mapping cannot be read and raises.
+
+        It does NOT apply the worker's v1 manufacturing FLOOR
+        (``compile_board._floor_with_clearance`` raises an authored clearance to
+        the profile minimum) — that policy lives in the compiler, which this
+        package must not import. See the note in ``cli.cmd_route``.
+        """
+        if design_rules is None:
+            return None
+        if not isinstance(design_rules, dict):
+            raise RoutingRulesError(
+                f"design_rules is present but is not a mapping "
+                f"({type(design_rules).__name__}) — routing fails closed rather "
+                f"than ignore rules the board authored")
+        return cls(
+            defaults=RoutingDefaults(
+                trace_width_mm=design_rules.get("trace_width_mm")),
+            minimums=ManufacturingConstraints(
+                min_clearance_mm=design_rules.get("clearance_mm")),
+        )
+
+
 @dataclass
 class Board:
     """
     Represents a PCB board for routing.
 
-    Contains all pads, nets, obstacles, and board dimensions.
-    Can be loaded from a KiCad PCB file.
+    Contains all pads, nets, obstacles, and board dimensions, plus the board's
+    OWN design rules and already-accepted copper (see the module note above
+    ``DesignRules``).
     """
     pads: list[Pad] = field(default_factory=list)
     nets: dict[str, Net] = field(default_factory=dict)
@@ -58,6 +169,19 @@ class Board:
     width: float = 0.0   # Board width in mm
     height: float = 0.0  # Board height in mm
     origin: tuple[float, float] = (0.0, 0.0)  # Board origin
+    # The board's OWN authored design rules, or None when it has none (a bare
+    # .kicad_pcb, which carries no rules the reader models). Anything exposing
+    # `.defaults.trace_width_mm` / `.minimums.min_clearance_mm` — the worker
+    # hands over its compiled `ResolvedDesignRules` directly.
+    design_rules: Any = None
+    # The board's ALREADY-ACCEPTED copper (019f70ebc9ed / B1). Same data the
+    # `existing_traces` / `existing_vias` run options carry; carried HERE so a
+    # caller that builds a Board from a partially-routed source inherits it
+    # rather than having to remember two more options. Engine types
+    # (`router.ExistingSegment` / `router.ExistingVia`), left untyped here to
+    # keep board.py free of an import cycle with router.py.
+    existing_traces: Sequence[Any] = ()
+    existing_vias: Sequence[Any] = ()
 
     @classmethod
     def from_kicad(cls, pcb_file: str | FilePath) -> "Board":

@@ -15,7 +15,7 @@ from collections import defaultdict
 import math
 import re
 
-from .board import Board, Pad
+from .board import Board, Pad, RoutingRulesError
 from .grid import RoutingGrid
 from .pathfinder import find_path, Path
 
@@ -728,6 +728,247 @@ def _scoped_nets(ordered: list[str], only_nets: Optional[set] = None) -> list[st
     return [n for n in ordered if n in only_nets]
 
 
+# ---------------------------------------------------------------------------
+# PRECEDENCE — the run's EFFECTIVE design rules.
+#
+# THE one implementation. It was born in pcb_worker.methods (Round E2) reading
+# the compiled IR directly, which put it out of reach of every caller that has
+# no compiler — so agent_router.cli routed at the engine's signature defaults on
+# a board that authored its own (bug 019f9b38a93f). It lives HERE now because
+# this is the module both entry points already depend on, and because the
+# chain's LAST step is this engine's own default: `route_board`'s signature is
+# three lines below, so that step is a local read rather than a cross-package
+# `inspect` of another package's function.
+#
+# The order is UNCHANGED from Round E2 + A4 — only the physical home of step 3
+# moved (from `rb.design_rules` to `board.design_rules`, which the worker fills
+# with that same IR object). Highest first:
+#
+#   1. an explicit caller option   (options.trace_width / .clearance, or the
+#                                   CLI's --trace-width / --clearance)
+#   2. a hint-authored width       (TRACE WIDTH ONLY — a route hint has no
+#                                   clearance field to author). Merged into
+#                                   `options` by the caller BEFORE this runs, so
+#                                   from here 1 and 2 are indistinguishable and
+#                                   both report as "caller_or_hint"; only
+#                                   pcb_worker.methods._route still knows which,
+#                                   and it refines the label for the reply.
+#   3. the BOARD's own design rules
+#        width     <- design_rules.defaults.trace_width_mm
+#        clearance <- design_rules.minimums.min_clearance_mm
+#   4. what this engine would have applied, read from its own signature.
+#
+# (Per-net-class minima sit BETWEEN 2 and 3 for the nets that have a class;
+# they are a per-net override applied by pcb_worker.methods on top of the
+# run-wide pair this returns, and are deliberately not folded in here — the
+# run-wide answer has to exist first for a class to narrow.)
+# ---------------------------------------------------------------------------
+
+
+# RoutingRulesError is defined in .board (the lower module, which must raise it
+# too) and re-exported here because this is where callers meet it.
+# ``pcb_worker.methods`` translates it into that package's own
+# ``UnsupportedGeometry``, so the worker's structured reply is unchanged.
+
+
+def positive_mm(value) -> Optional[float]:
+    """A finite, strictly-positive millimetre scalar, or None.
+
+    A copper dimension is never modeled from a non-positive or non-finite
+    number. (``pcb_worker.ir_candidates.positive_mm`` is the identical predicate
+    for the worker's candidate overlay; the two are separate only because this
+    package may not import that one — see the finding in the round report.)
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    v = float(value)
+    if v <= 0.0 or v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def nonnegative_mm(value) -> Optional[float]:
+    """A finite, non-negative millimetre scalar, or None.
+
+    The clearance sibling of :func:`positive_mm`. Clearance differs from a
+    copper dimension in the one way that matters: **zero is a legal value**. A
+    caller who explicitly asks for ``clearance: 0`` is asking for no clearance,
+    and silently promoting that to the board's rule would change what an
+    explicit option MEANS. ``positive_mm`` would do exactly that, so it is not
+    reused here.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    v = float(value)
+    if v < 0.0 or v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def engine_default_mm(param: str) -> Optional[float]:
+    """A millimetre default :func:`route_board` applies when the caller sets none.
+
+    Read from the function's OWN signature rather than re-spelled as a literal:
+    every consumer must model what the engine ACTUALLY does, and a duplicated
+    default that drifted would silently under- or over-state copper (or a
+    keepout). Returns None if it cannot be read, which makes the caller fail
+    closed rather than guess.
+    """
+    import inspect
+    try:
+        default = inspect.signature(route_board).parameters[param].default
+    except (KeyError, TypeError, ValueError):
+        return None
+    if isinstance(default, bool) or not isinstance(default, (int, float)):
+        return None
+    return float(default)
+
+
+def _sourced_with_label(*steps: tuple) -> tuple:
+    """The first precedence step that yields a value, plus that step's NAME.
+
+    Provenance is part of the contract (docs/routing.md, "Provenance") — a
+    consumer must be able to tell WHICH source supplied an effective value,
+    never just what the value is.
+
+    DELIBERATELY NOT AN ``or`` CHAIN. ``or`` treats ``0.0`` as absent, which is
+    the one value that differs between the two dimensions: a zero clearance is a
+    legal request, and a zero engine default would fall THROUGH to the next term
+    while still passing an ``is None`` guard — the run and the candidate overlay
+    would then disagree about the width, which is what Round E2 exists to
+    prevent. Every step is an explicit ``is None`` test.
+    """
+    for label, step in steps:
+        value = step()
+        if value is not None:
+            return value, label
+    return None, None
+
+
+def _explicit_mm(options: dict, key: str, predicate, expected: str) -> Optional[float]:
+    """An explicitly-supplied option, admitted or REJECTED — never reinterpreted.
+
+    None means "the caller said nothing", so the next precedence step applies. A
+    key that is PRESENT but inadmissible (0 or -1 for a width, NaN, a string)
+    raises instead of silently falling through to the board's rule: quietly
+    routing at a different number than the caller asked for is the same class of
+    dishonesty as quietly routing at the engine's default.
+
+    The two dimensions differ only in their PREDICATE, not in this policy:
+    ``clearance: 0`` is admissible while ``trace_width: 0`` is not.
+    """
+    if key not in options:
+        return None
+    value = predicate(options[key])
+    if value is None:
+        raise RoutingRulesError(
+            f"option {key!r}={options[key]!r} is not {expected}; routing fails "
+            f"closed rather than silently substitute a different value for the "
+            f"one the caller asked for")
+    return value
+
+
+def _board_rule_mm(board: Board, *path: str, predicate) -> Optional[float]:
+    """One design-rule scalar off ``board.design_rules``.
+
+    Returns the value, or None meaning **this board authored no such rule** — a
+    legitimate absence, and the only thing that may fall through to the next
+    precedence step. Anything PRESENT that cannot be read raises
+    :class:`RoutingRulesError`.
+
+    THAT DISTINCTION IS THE WHOLE POINT. An earlier cut of this function walked
+    a ``getattr`` chain and returned None for every failure, so a board whose
+    rules were present but shaped wrong — a plain ``dict`` instead of a rules
+    object, a misnamed field, an authored ``trace_width_mm: "0.35"`` — silently
+    resolved to the engine's 0.25/0.2. That is precisely the silent-default
+    signature of bug 019f9b38a93f, i.e. this round's own bug reintroduced one
+    layer down: previously a caller forgot to PASS rules, now a caller passes
+    rules we quietly fail to READ. Failing closed here also makes this
+    consistent with :func:`_explicit_mm`, which already refuses a
+    present-but-inadmissible run option rather than reinterpreting it.
+
+    STRING NUMERICS ARE REJECTED, NOT COERCED. ``trace_width_mm: "0.35"`` raises
+    rather than being read as 0.35. Two reasons, both deliberate: the house rule
+    puts routing in the fail-closed bucket, and the raw CAM path already rejects
+    string numerics in exactly this position (``pad_source
+    ._require_valid_authored_drill`` refuses a string ``drill_mm``) — routing
+    admitting what fabrication refuses would put the two surfaces back out of
+    step, which is the class of divergence this campaign keeps closing.
+    """
+    rules = getattr(board, "design_rules", None)
+    if rules is None:
+        return None  # authors no rules at all (a bare .kicad_pcb) — fall through
+
+    node = rules
+    walked = path[0]
+    for name in path[1:]:
+        if not hasattr(node, name):
+            raise RoutingRulesError(
+                f"this board carries design rules, but {walked!r} has no "
+                f"{name!r} — the rules are present and could not be read "
+                f"(got {type(node).__name__}). Routing fails closed rather than "
+                f"silently fall back to the engine's default and route at a "
+                f"width the board did not author")
+        node = getattr(node, name)
+        walked = f"{walked}.{name}"
+        if node is None:
+            return None  # the rule itself is unset — a partial block is legal
+
+    value = predicate(node)
+    if value is None:
+        raise RoutingRulesError(
+            f"this board authors {walked} = {node!r}, which is not a usable "
+            f"millimetre value; routing fails closed rather than ignore an "
+            f"authored rule and route at the engine's default instead")
+    return value
+
+
+def resolve_effective_rules(board: Board, options: dict) -> tuple:
+    """(trace_width_mm, width_source, clearance_mm, clearance_source).
+
+    THE precedence chain (see the module note above). ``options`` carries steps
+    1 and 2 already merged by the caller. Raises :class:`RoutingRulesError` if a
+    dimension cannot be sourced or an explicit option is inadmissible.
+
+    The pair this returns is what the ENGINE routes at, what the GRID inflates
+    its keepouts by (``clearance + trace_width / 2``), and what the candidate
+    overlay is checked at — one value, three consumers, so they cannot disagree.
+    """
+    width, width_source = _sourced_with_label(
+        ("caller_or_hint", lambda: _explicit_mm(
+            options, "trace_width", positive_mm,
+            "a positive, finite trace width in mm")),
+        ("board_rules", lambda: _board_rule_mm(
+            board, "design_rules", "defaults", "trace_width_mm",
+            predicate=positive_mm)),
+        ("engine_default", lambda: positive_mm(engine_default_mm("trace_width"))),
+    )
+    if width is None:
+        raise RoutingRulesError(
+            "no trace width could be sourced for this run (no caller option, no "
+            "hint width, no design_rules.defaults.trace_width_mm on the board, "
+            "and the engine's own default is unreadable) — routing fails closed "
+            "rather than route at an invented width")
+
+    clearance, clearance_source = _sourced_with_label(
+        ("caller_or_hint", lambda: _explicit_mm(
+            options, "clearance", nonnegative_mm,
+            "a non-negative, finite clearance in mm")),
+        ("board_rules", lambda: _board_rule_mm(
+            board, "design_rules", "minimums", "min_clearance_mm",
+            predicate=nonnegative_mm)),
+        ("engine_default", lambda: nonnegative_mm(engine_default_mm("clearance"))),
+    )
+    if clearance is None:
+        raise RoutingRulesError(
+            "no clearance could be sourced for this run (no caller option, no "
+            "design_rules.minimums.min_clearance_mm on the board, and the "
+            "engine's own default is unreadable) — routing fails closed rather "
+            "than reserve an invented keepout")
+
+    return (width, width_source, clearance, clearance_source)
+
+
 def route_board(
     board: Board,
     allow_vias: bool = True,
@@ -780,6 +1021,14 @@ def route_board(
         RoutingResult with routes and unrouted connections
     """
     result = RoutingResult()
+
+    # The BOARD's own accepted copper, when the caller named none (019f9bc3909c).
+    # A Board built from a partially-routed source carries its copper in its own
+    # slots, so a caller that forgets these two options still routes AROUND that
+    # copper instead of straight through it. An explicit option still wins — the
+    # slots are the source, options are the override layer.
+    existing_traces = existing_traces or board.existing_traces
+    existing_vias = existing_vias or board.existing_vias
 
     # Create routing grid over the board's OWN extent, anchored at its origin.
     layers = ["F.Cu"] if single_layer else ["F.Cu", "B.Cu"]
@@ -1516,6 +1765,11 @@ def route_board_with_hints(
     from .hints import RoutingHints  # Avoid circular import
 
     result = RoutingResult()
+
+    # The BOARD's own accepted copper, when the caller named none — see the
+    # identical note in ``route_board`` (019f9bc3909c).
+    existing_traces = existing_traces or board.existing_traces
+    existing_vias = existing_vias or board.existing_vias
 
     # Create routing grid over the board's OWN extent, anchored at its origin.
     layers = ["F.Cu"] if single_layer else ["F.Cu", "B.Cu"]

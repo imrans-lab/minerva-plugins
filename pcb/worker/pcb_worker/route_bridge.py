@@ -478,11 +478,15 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     faithfully model raises :class:`UnsupportedGeometry`; the caller turns that
     into zero routes plus diagnostics, never a proposal over guessed copper.
 
-    DESIGN RULES DO NOT RIDE THIS PROJECTION (Round E2). ``agent_router.Board``
-    has no slot for a width or a clearance — they are per-RUN engine options, not
-    board geometry — so the effective pair is resolved by the caller
-    (``pcb_worker.methods._effective_routing_rules``, which documents the
-    precedence) and passed to ``route_board``/``route_board_with_hints``. The
+    DESIGN RULES DO RIDE THIS PROJECTION (019f9bc3909c; they did not in Round
+    E2). ``Board.design_rules`` now carries the IR's own ``ResolvedDesignRules``
+    unchanged, so a Board built here inherits its board's rules BY CONSTRUCTION
+    instead of the caller having to remember a matching pair of run options —
+    which is exactly what ``agent_router.cli`` failed to do (bug 019f9b38a93f).
+    The rules are still not APPLIED here: the effective pair is resolved by
+    ``agent_router.router.resolve_effective_rules`` (which documents the
+    precedence, and which run options still override) and passed to
+    ``route_board``/``route_board_with_hints``. The
     grid then inflates every keepout it marks — including the ones it lays down
     for its own routed traces — by ``clearance + trace_width / 2``
     (agent_router/grid.py::keepout_margin), which COMPOSES with
@@ -554,6 +558,13 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
         width=rb.outline.width_mm,
         height=rb.outline.height_mm,
         origin=tuple(rb.outline.origin),
+        # The board's OWN rules now ride the projection (019f9bc3909c). The IR's
+        # ``ResolvedDesignRules`` is handed over UNCHANGED — ``Board.design_rules``
+        # is duck-typed on exactly the two paths the precedence chain reads
+        # (``defaults.trace_width_mm`` / ``minimums.min_clearance_mm``), so there
+        # is no translation step between what the compiler decided and what the
+        # router routes at, and therefore nothing to drift.
+        design_rules=rb.design_rules,
     )
 
 

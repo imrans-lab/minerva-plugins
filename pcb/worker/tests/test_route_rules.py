@@ -277,9 +277,8 @@ def test_a_zero_engine_default_would_still_be_sourced_not_skipped(monkeypatch):
     overlay (positive_mm) saw another. Every step is an explicit `is None` test
     and every value goes through an admission predicate, so a zero engine default
     is REJECTED as a width (0 is not copper) and HONOURED as a clearance."""
-    monkeypatch.setattr(methods, "_ir_rule_mm", lambda *a, **k: None)
-    monkeypatch.setattr(methods, "_engine_default_mm", lambda _p: 0.0)
-    monkeypatch.setattr(methods, "_engine_default_trace_width_mm", lambda: 0.0)
+    monkeypatch.setattr(engine_router, "_board_rule_mm", lambda *a, **k: None)
+    monkeypatch.setattr(engine_router, "engine_default_mm", lambda _p: 0.0)
 
     rb = _compile(_three_pin_board())
     with pytest.raises(route_bridge.UnsupportedGeometry, match="trace width"):
@@ -293,9 +292,8 @@ def test_a_rule_that_cannot_be_sourced_fails_closed(monkeypatch):
     the class of bug this campaign removes (E1 deleted a nominal 1.0x1.0 land,
     A5 deleted a 0x0 pad size). Only the two SOURCES are neutralised here; the
     resolver and _route itself run for real."""
-    monkeypatch.setattr(methods, "_ir_rule_mm", lambda *a, **k: None)
-    monkeypatch.setattr(methods, "_engine_default_mm", lambda _p: None)
-    monkeypatch.setattr(methods, "_engine_default_trace_width_mm", lambda: None)
+    monkeypatch.setattr(engine_router, "_board_rule_mm", lambda *a, **k: None)
+    monkeypatch.setattr(engine_router, "engine_default_mm", lambda _p: None)
 
     rb = _compile(_three_pin_board())
     with pytest.raises(route_bridge.UnsupportedGeometry, match="trace width"):
@@ -1395,7 +1393,7 @@ def test_the_reply_names_the_engines_own_default_as_its_source(monkeypatch):
     pinned the same way `test_a_zero_engine_default_would_still_be_sourced_
     not_skipped` already forces that step: neutralise the board-rules reader
     so only the engine's signature default is left."""
-    monkeypatch.setattr(methods, "_ir_rule_mm", lambda *a, **k: None)
+    monkeypatch.setattr(engine_router, "_board_rule_mm", lambda *a, **k: None)
     resp = _call_route({"board": _three_pin_board()})
     assert resp["ok"] is True, resp
     rules = resp["result"]["effective_routing_rules"]

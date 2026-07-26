@@ -16,8 +16,11 @@ requires-python = ">=3.12,<3.13"
 # agent_router (first-party, vendored under agent_router/) is the standalone PCB
 # routing engine behind the `route` method. It is pure-Python and its ONLY
 # external dependency is pyyaml (already listed above) — no numpy / no heavy
-# native deps — so it adds ~0 to cold start (the worker never imports it eagerly;
-# methods.route imports it lazily on first call).
+# native deps — so it adds ~0 to cold start. (It IS imported eagerly, despite
+# what this note used to claim: importing pcb_worker.methods pulls in
+# agent_router.router via pcb_worker.ir_candidates -> agent_router.layers, which
+# executes the agent_router package __init__. Verified against sys.modules, not
+# read off the source. It stays cheap because the engine is pure-Python.)
 dependencies = [
     "pyyaml>=6.0,<7",
     "gerber-writer==0.4.3.3",
