@@ -190,12 +190,25 @@ def test_smart_remote_emits_omission_and_capability_warnings(smart_remote_result
 
 
 def test_smart_remote_holes_are_npth(smart_remote_result):
-    for hole in smart_remote_result.board.holes:
+    holes = smart_remote_result.board.holes
+    # Guard against VACUITY, not against a count regression. A bare `for` over an
+    # empty collection runs no assertion at all, so if the compiler ever stopped
+    # emitting holes this test would go green and silent while testing nothing.
+    #
+    # Deliberately weaker than `== 4`: the COUNT is pinned canonically by
+    # test_smart_remote_structure, and duplicating it here would put the same
+    # fact in two places to drift apart. This guard exists so THIS test cannot
+    # become vacuous if that one is ever changed or removed.
+    assert holes, "no holes emitted — the assertion below would never run"
+    for hole in holes:
         assert hole.kind is HoleKind.NPTH and hole.plated is False
 
 
 def test_smart_remote_vias_are_through(smart_remote_result):
-    for via in smart_remote_result.board.vias:
+    vias = smart_remote_result.board.vias
+    # Same vacuity guard, same reasoning — see test_smart_remote_holes_are_npth.
+    assert vias, "no vias emitted — the assertions below would never run"
+    for via in vias:
         assert via.kind is ViaKind.THROUGH
         assert {via.from_layer, via.to_layer} == {"top", "bottom"}
 
