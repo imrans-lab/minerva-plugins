@@ -736,50 +736,133 @@ def _drc_for_routes(board_dict: dict, routes: list) -> dict:
     return drc.run_drc(post_board)
 
 
+def _run_drc_findings(runner) -> tuple[list | None, str | None]:
+    """(findings, error) for one kernel invocation. A geometry fault is reported
+    as DATA, never raised — mirrors _drc(). ``findings`` is None exactly when the
+    run could not be made, so a caller can never mistake "no violations" for
+    "no answer"; the two are different values, not the same empty list."""
+    try:
+        return list((runner() or {}).get("findings", [])), None
+    except Exception as exc:  # noqa: BLE001 - a fault is a report, not a failure
+        return None, str(exc)
+
+
 def _attach_route_drc(payload: dict, board_dict: dict) -> None:
-    """Mutate payload in place: each route dict gains
-    "drc": {"scope": "connectivity", "clean": bool, "violations": [...]} (filtered
-    to findings involving that route's net) on success, or
-    "drc": {"scope": "connectivity", "clean": None, "error": "<msg>"} if the DRC
-    engine itself faults. payload also gains a top-level "drc_summary":
-    {"scope": "connectivity", "clean", "violation_count"} (violation_count counts
-    EVERY finding, including ones not attributable to any single proposed route —
-    e.g. a crossing between two pre-existing traces). A DRC-engine fault never
-    fails the route call — routes still return, just without a clean determination.
+    """Mutate payload in place with the CONNECTIVITY DRC-at-propose payloads,
+    each partitioned into what the PROPOSAL introduces and what the BOARD already
+    had (docket 019f9cc386b6).
+
+    Per route:
+        "drc": {"scope": "connectivity", "clean": bool, "violations": [...],
+                "baseline": {"clean": bool, "violations": [...]}}
+    Top level (violation_count ABSENT when clean is None — a check that did not
+    run has no count):
+        "drc_summary": {"scope": "connectivity", "clean": bool,
+                        "violation_count": int,
+                        "baseline": {"clean": bool, "violation_count": int,
+                                     "findings": [...]}}
+
+    `clean` / `violations` / `violation_count` are PROPOSAL-SCOPED: they answer
+    "does accepting this introduce a connectivity violation?", exactly as
+    ir_candidates' `verdict` is candidate-scoped on the geometric side. The
+    board's own pre-existing violations live under `baseline` and are NEVER
+    folded in — a dirty board must not veto an honest proposal, and a clean
+    proposal must not launder a dirty board. Before this partition existed both
+    numbers billed the proposal for the board's own state — measured on
+    tests/test_route_drc.py's `_DIRTY_BASELINE` fixture, whose 3 pre-existing
+    findings plus 1 introduced crossing reported violation_count:4, with the
+    route's own `violations` listing 3 findings of which 2 predated it.
+
+    The partition comes from a SECOND kernel run over the base board — see
+    ir_connectivity.partition_findings, which documents why the geometric
+    surface's attribution mechanism cannot be reused for this kernel and why
+    `baseline` is therefore exactly a base-only DRC run's output.
+
+    THREE-WAY `clean` (unchanged contract): bool, or None meaning "could not
+    determine", with an `error` string. That happens when the post-proposal run
+    faults (the pre-existing case) and ALSO when the base run faults while the
+    post run succeeded: post findings then exist but cannot be split, so the
+    proposal-scoped question has no answer and saying `clean:false` would blame
+    the proposal for a partition we could not compute. An indeterminate
+    `baseline` carries `clean:None` + `error` and NO violation_count/findings —
+    nothing a caller could read as "the board is clean". A DRC-engine fault
+    never fails the route call.
 
     SCOPE (019f958aa6db): this is CONNECTIVITY/topology only — it runs the legacy
     centerline `drc.run_drc`, which cannot verify a clearance/width/annular ring.
     Every payload carries scope:"connectivity" so no consumer (PCBPanel.gd's status
     chip) can render it as a generic/geometric "DRC clean". It is NOT the
-    fail-closed geometric union (drc_geometric)."""
+    fail-closed geometric union (drc_geometric), and nothing computed here can
+    reach `drc_geometric_summary` — the two surfaces answer different questions
+    and are kept apart deliberately (ui/panel_tools.gd _write_records_as_proposals).
+    """
     routes = payload.get("routes")
     if not isinstance(routes, list):
         return
-    try:
-        result = _drc_for_routes(board_dict, routes)
-        error: str | None = None
-    except Exception as exc:  # geometry faults reported as data, mirrors _drc()
-        result = None
-        error = str(exc)
+
+    base_findings, base_error = _run_drc_findings(lambda: drc.run_drc(board_dict))
+    post_findings, post_error = _run_drc_findings(
+        lambda: _drc_for_routes(board_dict, routes))
+
+    # The baseline half is answerable on its own: the base run can succeed even
+    # when the post run faults, and reporting the board's real state then is
+    # strictly better than withholding it.
+    if base_error is not None:
+        base_summary = {"clean": None, "error": base_error}
+    else:
+        base_summary = {"clean": not base_findings,
+                        "violation_count": len(base_findings),
+                        "findings": base_findings}
+
+    # The proposal half needs BOTH runs: post alone cannot be attributed.
+    error = post_error or (
+        f"connectivity baseline could not be computed: {base_error}"
+        if base_error is not None else None)
 
     if error is not None:
         for r in routes:
             if isinstance(r, dict):
-                r["drc"] = {"scope": "connectivity", "clean": None, "error": error}
+                r["drc"] = {"scope": "connectivity", "clean": None, "error": error,
+                            "baseline": _baseline_for_net(base_summary, r.get("net"))}
+        # NO violation_count: the check did not run, so there is no count. It
+        # used to report 0 here, which reads as "nothing wrong" to anything that
+        # does not first branch on clean is None — the same silent degradation
+        # the indeterminate `baseline` above refuses to emit, one level up.
         payload["drc_summary"] = {"scope": "connectivity", "clean": None,
-                                  "violation_count": 0, "error": error}
+                                  "error": error, "baseline": base_summary}
         return
 
-    findings = (result or {}).get("findings", [])
+    introduced, baseline = ir_connectivity.partition_findings(
+        base_findings, post_findings)
+
     for r in routes:
         if not isinstance(r, dict):
             continue
         net = r.get("net")
-        violations = [f for f in findings if _finding_involves_net(f, net)]
+        violations = [f for f in introduced if _finding_involves_net(f, net)]
         r["drc"] = {"scope": "connectivity", "clean": len(violations) == 0,
-                    "violations": violations}
-    payload["drc_summary"] = {"scope": "connectivity", "clean": len(findings) == 0,
-                              "violation_count": len(findings)}
+                    "violations": violations,
+                    "baseline": _baseline_for_net(base_summary, net)}
+    payload["drc_summary"] = {"scope": "connectivity", "clean": len(introduced) == 0,
+                              "violation_count": len(introduced),
+                              "baseline": {"clean": not baseline,
+                                           "violation_count": len(baseline),
+                                           "findings": baseline}}
+
+
+def _baseline_for_net(base_summary: dict, net: Any) -> dict:
+    """The per-route view of the board's pre-existing state: the same baseline
+    findings, narrowed to the ones involving this route's net, in the route
+    payload's own vocabulary ("violations", matching the sibling key).
+
+    An INDETERMINATE baseline is passed through verbatim ({clean:None, error})
+    rather than narrowed to an empty list — "we could not check" must not render
+    as "this net was clean before"."""
+    if base_summary.get("clean") is None:
+        return dict(base_summary)
+    violations = [f for f in base_summary["findings"]
+                  if _finding_involves_net(f, net)]
+    return {"clean": len(violations) == 0, "violations": violations}
 
 
 # ---------------------------------------------------------------------------

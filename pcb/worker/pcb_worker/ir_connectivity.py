@@ -33,6 +33,9 @@ from a rotation the kernel would apply a second time.
 
 from __future__ import annotations
 
+import json
+from collections import Counter
+
 from agent_router.layers import kicad_to_canon
 
 from .ir_pads import UnsupportedGeometry, iter_ir_pads
@@ -142,3 +145,96 @@ def connectivity_board(rb: ResolvedBoard) -> dict:
         # board's rules instead of the kernel's built-in default.
         "design_rules": {"clearance_mm": rb.design_rules.minimums.min_clearance_mm},
     }
+
+
+# ---------------------------------------------------------------------------
+# BASELINE VS INTRODUCED (docket 019f9cc386b6)
+#
+# The GEOMETRIC candidate surface already keeps a board's pre-existing violations
+# apart from the ones a proposal introduces (``ir_candidates.check_candidates``,
+# key ``baseline``). This is the same idea for the CONNECTIVITY surface, whose
+# ``drc_summary`` used to report one flat count over base+proposal and therefore
+# billed the proposal for violations that predated it.
+#
+# THE TWO SURFACES ARE NOT MERGED AND MUST NOT BE. ``drc_summary`` answers
+# connectivity, ``drc_geometric_summary`` answers copper (see ui/panel_tools.gd
+# ``_write_records_as_proposals``); this partition is computed from connectivity
+# findings alone and cannot move a geometric verdict, or vice versa.
+# ---------------------------------------------------------------------------
+
+
+def _finding_key(finding: dict) -> str:
+    """A stable identity for one connectivity finding.
+
+    ``drc.run_drc`` findings carry NO entity id — only ``type``/``net``/``at``
+    and friends — so a canonical serialization of the whole dict is the only
+    identity available. ``sort_keys`` makes it insensitive to key order;
+    ``default=str`` keeps an unexpected non-JSON value from raising here (the
+    partition would fail closed on a TypeError otherwise, turning a reportable
+    result into an engine fault).
+
+    TWO ASSUMPTIONS THIS RELIES ON, both latent today, both load-bearing for
+    correctness now that a false match CANCELS a real violation:
+
+      * NUMERIC SPELLING IS STABLE. ``1`` and ``1.0`` serialize differently and
+        would key as different findings. Safe because every coordinate a finding
+        carries goes through ``round()``, which always yields a float — see
+        ``drc._round_pt`` and the ``round(pt[0], 3)`` calls in each check.
+      * LIST ORDER IS STABLE. ``["A","B"]`` and ``["B","A"]`` key differently.
+        Safe because the only list-valued field with two interchangeable members
+        is ``crossing["nets"]``, which ``drc._check_crossings`` builds from an
+        already-``sorted`` key.
+
+    A change to either — an int coordinate, an unsorted net pair — silently
+    turns pre-existing findings into "introduced" ones. Normalize here if that
+    ever happens; do not rely on the producer staying tidy by accident.
+    """
+    return json.dumps(finding, sort_keys=True, default=str)
+
+
+def partition_findings(base_findings: list, post_findings: list) -> tuple[list, list]:
+    """Split a post-proposal connectivity run into ``(introduced, baseline)``.
+
+    ``baseline`` is ``base_findings`` VERBATIM — the kernel's own output over the
+    board WITHOUT the proposal — so "the baseline set is exactly what a base-only
+    DRC run produces" holds by construction rather than by argument.
+    ``introduced`` is the MULTISET difference ``post - base``: every finding in
+    the post run that the board did not already have. Multiset rather than set so
+    two indistinguishable findings are not collapsed into one.
+
+    WHY NOT THE GEOMETRIC SURFACE'S MECHANISM. ``ir_candidates.check_candidates``
+    partitions by ATTRIBUTION — a finding naming at least one candidate entity is
+    introduced, everything else is baseline — and argues that equals a base-only
+    run because candidates only ADD copper primitives, so no base finding can
+    appear or disappear. Neither half of that argument survives the move to this
+    kernel:
+
+      * connectivity findings name no entity, so there is nothing to attribute
+        against (``_finding_involves_net`` matches a NET, which both a baseline
+        and an introduced finding on that net satisfy equally); and
+      * adding copper is NOT monotone here. ``drc._check_dangling`` computes
+        per-net endpoint DEGREE over base and proposed segments TOGETHER, so a
+        proposal landing on a base trace's loose end makes that base
+        ``dangling_endpoint`` finding disappear from the post run;
+        ``drc._check_layer_change`` only fires once a net has segments on both
+        sides, which a proposal can newly cause.
+
+    Under attribution the first case would drop a real pre-existing violation out
+    of BOTH partitions — the board would silently look cleaner than it is.
+    Re-running the kernel over the base board is what keeps the stated property
+    true, so that is what the caller does (``methods._attach_route_drc``).
+
+    A baseline finding the proposal happens to RESOLVE stays listed under
+    ``baseline``, and is simply absent from ``introduced``. That is deliberate:
+    ``baseline`` describes the board AS IT STANDS, which is the state a reader
+    deciding whether to accept the proposal is weighing it against.
+    """
+    remaining: Counter = Counter(_finding_key(f) for f in base_findings)
+    introduced: list = []
+    for finding in post_findings:
+        key = _finding_key(finding)
+        if remaining[key] > 0:
+            remaining[key] -= 1  # already on the board — not this proposal's doing
+            continue
+        introduced.append(finding)
+    return introduced, list(base_findings)

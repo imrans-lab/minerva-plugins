@@ -10,6 +10,14 @@ gains a top-level "drc_summary": {clean, violation_count}. A DRC-engine
 fault must never fail the route call — routes still return, with
 "drc": {clean: None, error}.
 
+BASELINE PARTITION (docket 019f9cc386b6): every one of those payloads also
+carries a "baseline" — the board's OWN pre-existing violations, from a second
+kernel run over the board WITHOUT the proposal. `clean`/`violations`/
+`violation_count` are therefore PROPOSAL-scoped: they answer "does accepting
+this introduce a violation?", never "is the board dirty?". Same separation
+ir_candidates.check_candidates gives the geometric surface, in connectivity's
+own vocabulary. See the section at the bottom of this file.
+
 Same fixture/call conventions as test_route_as_drawn.py: a 'detailed'
 single-trace hint materializes verbatim (pad -> waypoints -> pad), so the
 resulting route geometry is fully predictable and easy to collide with a
@@ -381,9 +389,15 @@ def test_route_clean_when_no_collision():
     assert len(sig) == 1
     # HONEST LABEL (019f958aa6db): a clean connectivity result is scope-tagged so
     # the UI renders "Connectivity clean", never a misleading bare "DRC clean".
-    assert sig[0]["drc"] == {"scope": "connectivity", "clean": True, "violations": []}
-    assert r["drc_summary"] == {"scope": "connectivity", "clean": True,
-                                "violation_count": 0}
+    # BASELINE PARTITION (019f9cc386b6): every payload now carries the board's own
+    # pre-existing state alongside the proposal's. On a clean board both halves
+    # are clean and empty, so the payloads stay assertable byte-for-byte.
+    assert sig[0]["drc"] == {"scope": "connectivity", "clean": True,
+                             "violations": [],
+                             "baseline": {"clean": True, "violations": []}}
+    assert r["drc_summary"] == {
+        "scope": "connectivity", "clean": True, "violation_count": 0,
+        "baseline": {"clean": True, "violation_count": 0, "findings": []}}
 
 
 # ---------------------------------------------------------------------------
@@ -658,3 +672,452 @@ def test_an_unchecked_empty_route_is_recorded_in_the_summary_not_silently_clean(
     entry = payload["drc_geometric_summary"]["per_candidate"]["route[0]"]
     assert entry["verdict"] == "indeterminate"
     assert entry["reason"]
+
+
+# ---------------------------------------------------------------------------
+# BASELINE PARTITION (docket 019f9cc386b6)
+#
+# `drc_summary` used to carry ONE flat count over base+proposal, so a board that
+# was already dirty billed the proposal for violations that predated it. The
+# GEOMETRIC surface had solved this (ir_candidates.check_candidates, key
+# "baseline"); these tests pin the same separation for CONNECTIVITY — including
+# that the two surfaces stay independent, which is the constraint the fix could
+# most easily have broken.
+# ---------------------------------------------------------------------------
+
+
+# Two pre-existing SIG dangling endpoints (a stub whose ends touch no pad) and
+# one pre-existing EXIST dangling endpoint. Authored so the EXIST trace ALSO
+# runs across the SIG pad-to-pad line at (30, 20) — a detailed hint materializes
+# that line verbatim, so the proposal introduces exactly one crossing on top of
+# three violations it did not cause. That is the shape triage measured.
+_DIRTY_BASELINE = [
+    {"net": "SIG", "layer": "top", "width_mm": 0.25,
+     "points": [{"x_mm": 20, "y_mm": 35}, {"x_mm": 26, "y_mm": 35}]},
+    {"net": "EXIST", "layer": "top", "width_mm": 0.25,
+     "points": [{"x_mm": 30, "y_mm": 5}, {"x_mm": 30, "y_mm": 25}]},
+]
+
+# The same dirty board MINUS the trace the proposal collides with: the board is
+# still dirty, the proposal introduces nothing.
+_DIRTY_BASELINE_NO_COLLISION = [_DIRTY_BASELINE[0]]
+
+
+def _base_only_drc_findings(board: dict) -> list:
+    """A SECOND, independent base-only connectivity run over the same board —
+    compiled and projected exactly as ``methods._route`` does, but WITHOUT any
+    proposal. This is the reference the reported baseline must equal; it is
+    computed here from the board alone, never read back off the reply."""
+    from pcb_worker import ir_connectivity
+    from pcb_worker.compile_board import compile_board
+
+    resolution = compile_board(board)
+    return drc_module.run_drc(
+        ir_connectivity.connectivity_board(resolution.board))["findings"]
+
+
+def _propose(board: dict) -> dict:
+    resp = _call("route", {"board": board, "route_hints": [_detailed_hint()],
+                           "selection": {"mode": "open"}})
+    assert resp["ok"] is True, resp
+    return resp["result"]
+
+
+def test_baseline_is_exactly_what_a_base_only_drc_run_produces():
+    """THE HEADLINE. A board with pre-existing connectivity violations plus a
+    proposal that introduces one more reports the two SEPARATELY, and the
+    reported baseline is the IDENTICAL SET a base-only run produces — the same
+    check triage ran against the geometric surface."""
+    board = _board(_DIRTY_BASELINE)
+    expected_baseline = _base_only_drc_findings(board)
+    assert len(expected_baseline) == 3, expected_baseline  # fixture is really dirty
+
+    summary = _propose(board)["drc_summary"]
+
+    # IDENTICAL SETS — not merely the same count.
+    assert summary["baseline"]["findings"] == expected_baseline
+    assert summary["baseline"]["violation_count"] == 3
+    assert summary["baseline"]["clean"] is False
+
+    # ...and the proposal is billed for its ONE crossing, not for all four.
+    assert summary["violation_count"] == 1, summary
+    assert summary["clean"] is False
+
+
+def test_a_proposal_that_introduces_nothing_is_not_blamed_for_a_dirty_board():
+    """The regression proper: pre-019f9cc386b6 this reported clean:False with
+    violation_count 2, all of it the board's own pre-existing state."""
+    board = _board(_DIRTY_BASELINE_NO_COLLISION)
+    assert len(_base_only_drc_findings(board)) == 2  # the board IS dirty
+
+    summary = _propose(board)["drc_summary"]
+    assert summary["clean"] is True, summary
+    assert summary["violation_count"] == 0, summary
+    # ...and the dirt is still reported, not hidden.
+    assert summary["baseline"]["clean"] is False
+    assert summary["baseline"]["violation_count"] == 2
+
+
+def test_per_route_violations_exclude_that_nets_own_pre_existing_findings():
+    """Triage measured "2 of the 3 violations attributed to the proposal
+    actually predating it". Those two are the SIG dangling endpoints, which
+    _finding_involves_net matches on the route's net just as readily as the
+    crossing the proposal really did introduce — so the per-route payload, not
+    only the summary, needed the partition."""
+    result = _propose(_board(_DIRTY_BASELINE))
+    sig = [rt for rt in result["routes"] if rt["net"] == "SIG"]
+    assert len(sig) == 1
+    drc_payload = sig[0]["drc"]
+
+    assert [v["type"] for v in drc_payload["violations"]] == ["crossing"]
+    assert drc_payload["clean"] is False
+    # The two pre-existing SIG findings are reported, under baseline.
+    assert [v["type"] for v in drc_payload["baseline"]["violations"]] == \
+        ["dangling_endpoint", "dangling_endpoint"]
+    assert drc_payload["baseline"]["clean"] is False
+    # ...and are NOT double-counted as the proposal's.
+    assert not any(v["type"] == "dangling_endpoint"
+                   for v in drc_payload["violations"])
+
+
+def test_a_dirty_connectivity_baseline_does_not_move_the_geometric_verdict():
+    """Requirement: the two surfaces stay independent. This board's CONNECTIVITY
+    baseline carries two violations while the proposal introduces no geometric
+    violation — the geometric verdict must still read clean."""
+    result = _propose(_board(_DIRTY_BASELINE_NO_COLLISION))
+    assert result["drc_summary"]["baseline"]["violation_count"] == 2
+    assert result["drc_geometric_summary"]["verdict"] == "clean", \
+        result["drc_geometric_summary"]
+
+
+def test_a_dirty_geometric_baseline_does_not_move_the_connectivity_verdict():
+    """The converse direction. G1/G2 are two different-net pads 1.0 mm apart
+    (1.6 mm lands, so their copper overlaps) with no traces at all: the GEOMETRIC
+    baseline is dirty, the CONNECTIVITY baseline is empty — the connectivity
+    payload must not inherit the geometric surface's dirt."""
+    board = _clean_board()
+    board["components"] += [
+        {"ref": "G1", "footprint": "TH_TestPoint", "x_mm": 5, "y_mm": 35,
+         "rotation_deg": 0, "layer": "top",
+         "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                   "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
+        {"ref": "G2", "footprint": "TH_TestPoint", "x_mm": 5, "y_mm": 36,
+         "rotation_deg": 0, "layer": "top",
+         "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                   "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]},
+    ]
+    board["nets"] += [{"name": "GEO_A", "pins": ["G1.1"]},
+                      {"name": "GEO_B", "pins": ["G2.1"]}]
+
+    result = _propose(board)
+    geometric_baseline = result["drc_geometric_summary"]["baseline"]["findings"]
+    assert len(geometric_baseline) == 3, geometric_baseline  # really geometrically dirty
+    assert {f["type"] for f in geometric_baseline} == \
+        {"gc2_copper_clearance", "gc6_hole_to_hole"}
+
+    assert result["drc_summary"]["clean"] is True, result["drc_summary"]
+    assert result["drc_summary"]["baseline"] == {
+        "clean": True, "violation_count": 0, "findings": []}
+
+
+# ---------------------------------------------------------------------------
+# The three-way `clean` contract under the partition.
+# ---------------------------------------------------------------------------
+
+
+def test_engine_fault_reports_an_indeterminate_baseline_not_a_clean_one():
+    """When the kernel faults, BOTH halves are undetermined. `clean` is null at
+    every level, and the baseline carries NO violation_count/findings — a zero
+    count under a failed check is exactly the silent degradation the geometric
+    surface's indeterminate union refuses to emit."""
+    from pcb_worker.methods import _attach_route_drc
+
+    def _boom(_board):
+        raise RuntimeError("synthetic DRC engine fault")
+
+    payload = {"routes": [{"net": "SIG", "segments": [
+        {"layer": "top", "width_mm": 0.25, "start": [10, 20], "end": [50, 20]}]}]}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(drc_module, "run_drc", _boom)
+        _attach_route_drc(payload, _board(_DIRTY_BASELINE))
+
+    for level in (payload["drc_summary"], payload["routes"][0]["drc"]):
+        assert level["clean"] is None
+        assert "synthetic DRC engine fault" in level["error"]
+        assert level["baseline"]["clean"] is None
+        assert "synthetic DRC engine fault" in level["baseline"]["error"]
+        assert "violation_count" not in level["baseline"]
+        assert "findings" not in level["baseline"]
+        assert "violations" not in level["baseline"]
+    # ...and the SUMMARY's own count is absent too, for the same reason: a check
+    # that did not run has no count, and 0 reads as "nothing wrong" to anything
+    # that does not branch on clean is None first.
+    assert "violation_count" not in payload["drc_summary"]
+
+
+def test_an_uncomputable_baseline_makes_the_proposal_verdict_null_not_dirty():
+    """If the BASE run faults while the post run succeeds, post findings exist
+    but cannot be attributed. Reporting clean:False would bill the proposal for
+    a partition we could not compute, and clean:True would launder it — the only
+    honest answer is the three-way null."""
+    from pcb_worker import drc as drc_mod
+    from pcb_worker.methods import _attach_route_drc
+
+    real_run_drc = drc_mod.run_drc
+    calls = {"n": 0}
+
+    def _base_only_boom(board):
+        calls["n"] += 1
+        if calls["n"] == 1:          # the base run is always made first
+            raise RuntimeError("synthetic baseline fault")
+        return real_run_drc(board)
+
+    payload = {"routes": [{"net": "SIG", "segments": [
+        {"layer": "top", "width_mm": 0.25, "start": [10, 20], "end": [50, 20]}]}]}
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(drc_mod, "run_drc", _base_only_boom)
+        _attach_route_drc(payload, _board(_DIRTY_BASELINE))
+
+    assert calls["n"] == 2, "the post run must still be attempted"
+    summary = payload["drc_summary"]
+    assert summary["clean"] is None, summary
+    assert "synthetic baseline fault" in summary["error"]
+    assert summary["baseline"]["clean"] is None
+    assert "violation_count" not in summary
+    assert payload["routes"][0]["drc"]["clean"] is None
+
+
+# ---------------------------------------------------------------------------
+# The partition primitive itself.
+# ---------------------------------------------------------------------------
+
+
+def test_the_connectivity_kernel_is_not_monotone_in_added_copper():
+    """THE REASON the geometric surface's attribution mechanism cannot be reused
+    here, proven by RUNNING the kernel rather than asserted in a comment.
+
+    ir_candidates partitions by attribution and argues that equals a base-only
+    run because candidate copper only ADDS geometric primitives, so no base
+    finding can vanish. That argument is false for this kernel: _check_dangling
+    computes per-net endpoint DEGREE over base and proposed segments TOGETHER, so
+    a proposal continuing a stub from its loose end raises that endpoint's degree
+    to 2 and the base finding disappears from the post run entirely.
+
+    Under attribution the vanished finding would land in NEITHER partition and
+    the board would silently look cleaner than it is. Re-running the base kernel
+    is what keeps it reported."""
+    from pcb_worker.methods import _drc_for_routes
+
+    board = _clean_board()
+    board["traces"] = [{"net": "SIG", "layer": "top", "width_mm": 0.25,
+                        "points": [{"x_mm": 10, "y_mm": 20},
+                                   {"x_mm": 30, "y_mm": 20}]}]  # stub, loose at (30,20)
+    continuation = [{"net": "SIG", "segments": [
+        {"layer": "top", "width_mm": 0.25, "start": [30, 20], "end": [50, 20]}]}]
+
+    base = drc_module.run_drc(board)["findings"]
+    post = _drc_for_routes(board, continuation)["findings"]
+
+    assert [f["type"] for f in base] == ["dangling_endpoint"]
+    assert base[0]["at"] == [30.0, 20.0]
+    assert post == [], post          # the base finding VANISHED — non-monotone
+
+    # And the partition still reports it, out of the base run, blaming nobody.
+    from pcb_worker.ir_connectivity import partition_findings
+    introduced, baseline = partition_findings(base, post)
+    assert introduced == []
+    assert baseline == base
+
+
+def test_partition_keeps_a_baseline_finding_the_proposal_resolves():
+    """The partition primitive's half of the case above: a base finding absent
+    from the post run stays in `baseline` (the board has it TODAY) and never
+    turns up as something the proposal introduced."""
+    from pcb_worker.ir_connectivity import partition_findings
+
+    resolved = {"type": "dangling_endpoint", "net": "SIG", "at": [20.0, 35.0]}
+    still_there = {"type": "dangling_endpoint", "net": "EXIST", "at": [30.0, 25.0]}
+    new = {"type": "crossing", "nets": ["EXIST", "SIG"], "layer": "top",
+           "at": [30.0, 20.0]}
+
+    introduced, baseline = partition_findings([resolved, still_there],
+                                              [still_there, new])
+    assert baseline == [resolved, still_there]
+    assert introduced == [new]
+
+
+def test_partition_is_a_multiset_difference_not_a_set_difference():
+    """Two indistinguishable findings must not collapse: a board carrying one
+    copy and a post run carrying two means the proposal introduced the second."""
+    from pcb_worker.ir_connectivity import partition_findings
+
+    finding = {"type": "dangling_endpoint", "net": "SIG", "at": [20.0, 35.0]}
+    introduced, baseline = partition_findings([finding], [finding, dict(finding)])
+    assert introduced == [finding]
+    assert baseline == [finding]
+
+
+def test_partition_identity_ignores_key_order():
+    """Findings are compared by canonical serialization, so a dict authored with
+    the same content in a different key order is the SAME finding — otherwise a
+    pre-existing violation would be re-reported as introduced."""
+    from pcb_worker.ir_connectivity import partition_findings
+
+    a = {"type": "crossing", "nets": ["A", "B"], "layer": "top", "at": [1.0, 2.0]}
+    b = {"at": [1.0, 2.0], "layer": "top", "nets": ["A", "B"], "type": "crossing"}
+    introduced, _ = partition_findings([a], [b])
+    assert introduced == []
+
+
+# ---------------------------------------------------------------------------
+# FAIL-OPEN REGRESSION (019f9cc386b6 cold review, severity 1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_second_crossing_of_the_same_pair_and_layer_is_reported_not_cancelled():
+    """The partition must not cancel a genuinely NEW short.
+
+    drc._check_crossings used to dedupe by (net-pair, layer) ALONE, with no
+    location. A board already carrying an EXIST/SIG crossing on `top` therefore
+    produced a base finding BYTE-IDENTICAL to the one a proposal creates by
+    shorting the same pair on the same layer somewhere else — so
+    partition_findings cancelled the new short as pre-existing and the reply read
+    `clean: true, violation_count: 0` on a board with a live short in it.
+    PCBPanel._connectivity_status_suffix renders that as "Connectivity clean".
+
+    The wall runs x=30 from y=5 to y=35. A pre-existing SIG stub crosses it at
+    (30, 30); the proposed U1->J1 route crosses it again at (30, 20). Two shorts,
+    same pair, same layer, different places — both must be visible, and the new
+    one must be billed to the proposal."""
+    board = _board([
+        {"net": "EXIST", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 30, "y_mm": 5}, {"x_mm": 30, "y_mm": 35}]},
+        {"net": "SIG", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 20, "y_mm": 30}, {"x_mm": 40, "y_mm": 30}]},
+    ])
+
+    base_crossings = [f for f in _base_only_drc_findings(board)
+                      if f["type"] == "crossing"]
+    assert [f["at"] for f in base_crossings] == [[30.0, 30.0]], base_crossings
+
+    result = _propose(board)
+    summary = result["drc_summary"]
+
+    # THE PROPOSAL IS BILLED FOR ITS OWN SHORT.
+    assert summary["clean"] is False, summary
+    introduced_crossings = [f for f in _base_only_drc_findings(board)
+                            if f["type"] == "crossing"]
+    sig = [rt for rt in result["routes"] if rt["net"] == "SIG"][0]
+    new = [v for v in sig["drc"]["violations"] if v["type"] == "crossing"]
+    assert [v["at"] for v in new] == [[30.0, 20.0]], sig["drc"]
+
+    # ...while the pre-existing one is still reported, at its OWN location.
+    baseline_crossings = [f for f in summary["baseline"]["findings"]
+                          if f["type"] == "crossing"]
+    assert [f["at"] for f in baseline_crossings] == [[30.0, 30.0]]
+    assert len(introduced_crossings) == 1  # the base run itself still sees one
+
+
+def test_two_distinct_crossings_of_one_pair_on_one_layer_are_two_findings():
+    """The kernel-level half of the fix: location is part of a crossing's
+    identity, so two shorts are two findings and not one."""
+    board = _clean_board()
+    board["nets"].append({"name": "EXIST", "pins": []})
+    board["traces"] = [
+        {"net": "SIG", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 10, "y_mm": 30}]},
+        {"net": "SIG", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 40, "y_mm": 10}, {"x_mm": 40, "y_mm": 30}]},
+        {"net": "EXIST", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 5, "y_mm": 20}, {"x_mm": 50, "y_mm": 20}]},
+    ]
+    crossings = [f for f in drc_module.run_drc(board)["findings"]
+                 if f["type"] == "crossing"]
+    assert sorted(f["at"] for f in crossings) == [[10.0, 20.0], [40.0, 20.0]], crossings
+
+
+def test_one_crossing_met_by_two_segments_of_a_polyline_stays_one_finding():
+    """The rounding in the dedupe key is load-bearing in the other direction:
+    a polyline whose two segments share the vertex that lands on a foreign trace
+    must not report the same short twice."""
+    board = _clean_board()
+    board["nets"].append({"name": "EXIST", "pins": []})
+    board["traces"] = [
+        # Two segments meeting exactly at (20, 20), the crossing point.
+        {"net": "SIG", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 10, "y_mm": 10}, {"x_mm": 20, "y_mm": 20},
+                    {"x_mm": 30, "y_mm": 30}]},
+        {"net": "EXIST", "layer": "top", "width_mm": 0.25,
+         "points": [{"x_mm": 10, "y_mm": 30}, {"x_mm": 30, "y_mm": 10}]},
+    ]
+    crossings = [f for f in drc_module.run_drc(board)["findings"]
+                 if f["type"] == "crossing"]
+    assert [f["at"] for f in crossings] == [[20.0, 20.0]], crossings
+
+
+# ---------------------------------------------------------------------------
+# Finding IDENTITY is content-based (cold review, must-fix 2)
+# ---------------------------------------------------------------------------
+
+
+def test_same_type_findings_at_different_places_are_different_findings():
+    """Pins that _finding_key is CONTENT-based, not type-based.
+
+    Every other fixture in this file happens to use distinct finding TYPES, so a
+    _finding_key of `str(finding["type"])` was indistinguishable from a correct
+    one and the whole suite passed with it. The failure that permits: the board
+    has dangling_endpoint@P1, the proposal creates dangling_endpoint@P2, and the
+    partition cancels the new one as pre-existing — clean:true on a proposal that
+    left a wire hanging."""
+    from pcb_worker.ir_connectivity import partition_findings
+
+    at_p1 = {"type": "dangling_endpoint", "net": "SIG", "at": [20.0, 35.0]}
+    at_p2 = {"type": "dangling_endpoint", "net": "SIG", "at": [26.0, 35.0]}
+
+    # DISCRIMINATING SHAPE. `base=[P1], post=[P1, P2]` would NOT be: the multiset
+    # count alone cancels exactly one of the two, so a type-only key reaches the
+    # right answer by luck. Here the proposal RESOLVES P1 and creates P2 (the
+    # non-monotone case, which really happens), so counts match at 1-vs-1 and
+    # only a content-based key can tell that nothing was cancelled.
+    introduced, baseline = partition_findings([at_p1], [at_p2])
+    assert introduced == [at_p2], introduced
+    assert baseline == [at_p1]
+
+    # And with both present, the SURVIVING content must be right, not just the
+    # count — post is ordered new-first so a type-only key cancels the wrong one.
+    introduced, _ = partition_findings([at_p1], [at_p2, at_p1])
+    assert introduced == [at_p2], introduced
+
+
+def test_same_type_and_place_findings_on_different_nets_are_different_findings():
+    """The other field that must participate in identity: two nets can dangle at
+    the same coordinate on different layers of the same board."""
+    from pcb_worker.ir_connectivity import partition_findings
+
+    sig = {"type": "dangling_endpoint", "net": "SIG", "at": [20.0, 35.0]}
+    other = {"type": "dangling_endpoint", "net": "EXIST", "at": [20.0, 35.0]}
+
+    # 1-vs-1 so the multiset count cannot mask a key that ignores "net".
+    introduced, baseline = partition_findings([sig], [other])
+    assert introduced == [other], introduced
+    assert baseline == [sig]
+
+
+def test_same_type_crossings_at_different_places_are_different_findings():
+    """The severity-1 case at the primitive level: crossing findings differing
+    ONLY in `at` must not cancel each other."""
+    from pcb_worker.ir_connectivity import partition_findings
+
+    old = {"type": "crossing", "nets": ["EXIST", "SIG"], "layer": "top",
+           "at": [30.0, 30.0]}
+    new = {"type": "crossing", "nets": ["EXIST", "SIG"], "layer": "top",
+           "at": [30.0, 20.0]}
+
+    # 1-vs-1, and then both-present ordered new-first: neither shape lets a
+    # count-only or type-only key land on the right answer by accident.
+    introduced, baseline = partition_findings([old], [new])
+    assert introduced == [new], introduced
+    assert baseline == [old]
+
+    introduced, _ = partition_findings([old], [new, old])
+    assert introduced == [new], introduced

@@ -303,11 +303,25 @@ def _check_crossings(segs) -> list[dict]:
                 continue
             if not _segments_intersect(s1.a, s1.b, s2.a, s2.b):
                 continue
-            key = tuple(sorted([str(s1.net), str(s2.net)])) + (s1.layer,)
-            if key in seen:
-                continue  # dedupe: one finding per (net-pair, layer)
-            seen.add(key)
             pt = _intersection_point(s1.a, s1.b, s2.a, s2.b)
+            # DEDUPE INCLUDES THE LOCATION (019f9cc386b6 cold review, sev 1).
+            # It used to be (net-pair, layer) only, so two shorts between the
+            # SAME pair on the SAME layer at DIFFERENT places collapsed into one
+            # finding — and, because the surviving finding is byte-identical to
+            # the other, a genuinely NEW short became indistinguishable from a
+            # pre-existing one and was cancelled as baseline by
+            # ir_connectivity.partition_findings. A finding now means what it
+            # appears to mean: one short, at one place.
+            #
+            # The rounding matches the "at" field the finding reports (and
+            # _check_dangling's own keying), so two segments of one polyline
+            # meeting the same foreign trace at a shared vertex still produce a
+            # single finding rather than one per segment.
+            key = tuple(sorted([str(s1.net), str(s2.net)])) + (s1.layer,) \
+                + _round_pt(pt)
+            if key in seen:
+                continue  # dedupe: one finding per (net-pair, layer, location)
+            seen.add(key)
             findings.append({
                 "type": "crossing",
                 "nets": [key[0], key[1]],

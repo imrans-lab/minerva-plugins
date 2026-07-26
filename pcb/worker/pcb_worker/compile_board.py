@@ -471,6 +471,25 @@ def _check_pad_capabilities(pad: PadDefinition, ref: str, diags: _Diagnostics) -
     elif pad.pad_type in ("thru_hole", "np_thru_hole"):
         if pad.drill is None:
             fail("illegal_pad_definition", f"{pad.pad_type} pad has no drill")
+        # A PLATED through-hole is an electrical pad: it must declare copper, the
+        # same way an SMD pad must (019f91a6cff1). Without this, a footprint whose
+        # thru_hole pad declares no copper layers slips past capability with
+        # has_copper=False — which also silences the `missing_pad_size` guard
+        # above, since that one only fires for copper pads — and only fails much
+        # later, when pad_source.require_th_annulus raises PadGeometryError on a
+        # pad whose size/annulus resolved to None. Nothing was ever invented, so
+        # this is an EARLIER, better-named gate, not a correctness fix.
+        #
+        # THE ASYMMETRY IS DELIBERATE: np_thru_hole is excluded. A NON-plated hole
+        # is a mechanical feature with legitimately no copper, so guarding it here
+        # would reject any mounting hole authored without copper layers. Measured
+        # caveat: widening this to np_thru_hole would NOT be caught by the seed
+        # library — its one NPTH pad (MountingHole_3.2mm_M3) declares *.Cu anyway.
+        # The exemption is pinned by the synthetic-pad tests in
+        # tests/test_compile_board.py instead.
+        if pad.pad_type == "thru_hole" and not has_copper:
+            fail("illegal_pad_definition",
+                 "plated thru-hole declares no copper layer")
     return ok
 
 

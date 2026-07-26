@@ -1479,6 +1479,83 @@ def test_pad_guard_rejects_through_hole_without_drill():
     assert "illegal_pad_definition" in [d.code for d in diags.tuple()]
 
 
+# ---------------------------------------------------------------------------
+# PLATED thru-hole must declare copper (docket 019f91a6cff1) — the symmetric
+# partner of the SMD guard above. An EARLIER, better-named gate, not a
+# correctness fix: pad_source.require_th_annulus already fail-closes downstream
+# on the resulting size/annulus of None, so nothing was ever invented.
+#
+# THE ASYMMETRY WITH np_thru_hole IS THE POINT. Both cases are asserted, because
+# guarding np_thru_hole too would reject every mounting hole on every board.
+# ---------------------------------------------------------------------------
+
+
+def test_pad_guard_rejects_plated_through_hole_without_copper():
+    diags = _Diagnostics()
+    pad = _synthetic_pad(pad_type="thru_hole", size=None, layers=(),
+                         drill=DrillDefinition(shape="round", size=(0.8, 0.8)))
+    assert not _check_pad_capabilities(pad, "X1", diags)
+    codes = [d.code for d in diags.tuple()]
+    assert "illegal_pad_definition" in codes
+    assert any("no copper layer" in d.message for d in diags.tuple()), \
+        [d.message for d in diags.tuple()]
+    # And it is caught HERE — not left to missing_pad_size, which never fires for
+    # a pad with no copper (that guard is gated on has_copper).
+    assert "missing_pad_size" not in codes
+
+
+def test_pad_guard_accepts_non_plated_through_hole_without_copper():
+    """A mounting hole is a mechanical feature with legitimately no copper."""
+    diags = _Diagnostics()
+    pad = _synthetic_pad(pad_type="np_thru_hole", size=None, layers=(),
+                         drill=DrillDefinition(shape="round", size=(3.2, 3.2)))
+    assert _check_pad_capabilities(pad, "X1", diags)
+    assert [d.code for d in diags.tuple()] == []
+
+
+def test_no_seed_library_pad_trips_the_plated_through_hole_copper_guard():
+    """Regression guard for the guard: every pad of every footprint in the seed
+    library must still pass capability.
+
+    MEASURED, not assumed: all 76 seed pads were enumerated before the guard was
+    written and every `thru_hole` among them declares `*.Cu`, so the guard adds
+    no rejection. Inverting its condition (`has_copper` instead of
+    `not has_copper`) fails this test plus 7 `test_compile_census_every_seed_
+    resolves` parametrizations — 44 failures in this module in total.
+
+    WHAT THIS TEST DOES NOT CATCH, stated because it would be easy to assume
+    otherwise: widening the guard to np_thru_hole does NOT fail here. The seed
+    library's only NPTH pad (MountingHole_3.2mm_M3) declares `*.Cu` anyway, so
+    it has copper and the widened guard would not fire on it. The np_thru_hole
+    exemption is pinned by test_pad_guard_accepts_non_plated_through_hole_
+    without_copper and by the pre-existing
+    test_pad_guard_allows_sizeless_non_copper_hole instead — a synthetic NPTH
+    pad with genuinely no layers, which is the case a real hand-authored
+    mounting hole hits."""
+    # The library root the worker itself resolves against — not a hand-rolled
+    # path that could drift away from the one production reads.
+    from pcb_worker.footprints import DEFAULT_LIBRARY_ROOT, parse_kicad_mod
+
+    modules = sorted(DEFAULT_LIBRARY_ROOT.rglob("*.kicad_mod"))
+    assert len(modules) >= 10, modules  # the library really was found
+
+    by_type: dict[str, int] = {}
+    for path in modules:
+        definition = FootprintDefinition.from_kicad_parsed(parse_kicad_mod(path))
+        assert definition.pads, path
+        for pad in definition.pads:
+            diags = _Diagnostics()
+            assert _check_pad_capabilities(pad, path.stem, diags), \
+                f"{path.name} pad {pad.number}: {[d.message for d in diags.tuple()]}"
+            by_type[pad.pad_type] = by_type.get(pad.pad_type, 0) + 1
+
+    # The library must actually EXERCISE both sides of the asymmetry, or this
+    # test would pass on a library that contains neither kind of hole.
+    assert by_type.get("thru_hole", 0) >= 1, by_type
+    assert by_type.get("np_thru_hole", 0) >= 1, by_type
+    assert sum(by_type.values()) >= 70, by_type  # 76 pads at the time of writing
+
+
 def test_pin_partial_position_fails_closed():
     board = _one_component_board("R_0805")
     board["components"][0]["pins"] = [{"number": "1", "x_mm": 0.0}]  # y_mm missing

@@ -487,8 +487,11 @@ def test_footprint_only_board_routes_AND_reports_connectivity_clean():
     assert resp["ok"] is True, resp
     result = resp["result"]
     assert result["success"] is True
-    assert result["drc_summary"] == {"scope": "connectivity", "clean": True,
-                                     "violation_count": 0}
+    # BASELINE PARTITION (019f9cc386b6): a clean board's baseline is itself clean
+    # and empty, so the whole summary is still assertable byte-for-byte.
+    assert result["drc_summary"] == {
+        "scope": "connectivity", "clean": True, "violation_count": 0,
+        "baseline": {"clean": True, "violation_count": 0, "findings": []}}
     for route in result["routes"]:
         assert route["drc"]["clean"] is True, route["drc"]
 
