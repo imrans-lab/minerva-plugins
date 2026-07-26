@@ -196,3 +196,84 @@ def test_kicad_smd_pad_without_size_fails_closed():
     }
     with pytest.raises(PadGeometryError):
         kicad.generate_kicad_pcb(board)
+
+
+# ---------------------------------------------------------------------------
+# PER-PAD IDENTITY on an ASYMMETRIC rotated footprint (docket 019f3ba0f455).
+#
+# WHY THIS EXISTS ALONGSIDE THE TESTS ABOVE. Triage 2026-07-25 re-introduced the
+# original CCW defect (``geometry.rotate_local_offset`` -> ``math.radians(deg)``)
+# in a throwaway copy of the tree and ran this module: all five tests above
+# PASSED. They cannot see the defect, for two independent reasons —
+#
+#   1. ``rotated_component.kicad_pcb`` is a 2-pad 0603 whose lands sit at local
+#      (+1,0) and (-1,0) — SYMMETRIC about the component origin. Mirroring the
+#      rotation swaps the two pads but leaves the SET of absolute positions
+#      unchanged, and ``_match_within`` matches by nearest neighbour, not by pad
+#      number, so the swap is invisible.
+#   2. ``test_kicad_pcb_pad_positions_match_ground_truth`` round-trips
+#      kicad.py -> reader, and kicad.py writes footprint-LOCAL pad coordinates
+#      plus ``(at cx cy rot)``. The reader re-applies the rotation itself, so
+#      ``rotate_local_offset`` is never exercised on that path at all.
+#
+# This test closes both holes: an ASYMMETRIC 6-pad DIP whose pads are compared
+# BY PAD NUMBER. Under the mirrored sign MIC1.4 moves 18.3mm (and lands at
+# y=114.3 on a 110mm-tall board — the exact off-the-edge symptom in the docket).
+#
+# GROUND TRUTH PROVENANCE. The expected positions below are not derived from any
+# Minerva code. They are KiCad 9.0.9's own placement, obtained by hand-authoring
+# a .kicad_pcb containing the Package_DIP:DIP-6_W7.62mm_Socket pads copied
+# VERBATIM from the shipped library .kicad_mod at ``(at 40.64 106.68 90)``, then
+# reading the pad centres back out of ``kicad-cli pcb export gerbers`` X2
+# ``%TO.P,MIC1,<n>*%`` records. Values below are exact, but SORTED by pad number
+# for legibility — kicad-cli emits them in aperture-declaration order (1, 4, 2,
+# 5, 3, 6), so this block is a re-ordering of that output, not a verbatim paste:
+#
+#   %TO.P,MIC1,1*%  X40640000Y-106680000D03*
+#   %TO.P,MIC1,2*%  X43180000Y-106680000D03*
+#   %TO.P,MIC1,3*%  X45720000Y-106680000D03*
+#   %TO.P,MIC1,4*%  X45720000Y-99060000D03*
+#   %TO.P,MIC1,5*%  X43180000Y-99060000D03*
+#   %TO.P,MIC1,6*%  X40640000Y-99060000D03*
+#
+# (Gerber Y is negated w.r.t. the .kicad_pcb frame.) The test itself is
+# hermetic — it does NOT shell out to kicad-cli.
+# ---------------------------------------------------------------------------
+
+SMART_REMOTE = HERE / "testdata" / "smart_remote.yaml"
+
+# MIC1: Package_DIP:DIP-6_W7.62mm_Socket at (40.64, 106.68), rotation_deg 90, top.
+MIC1_KICAD_GROUND_TRUTH = {
+    "1": (40.64, 106.68),
+    "2": (43.18, 106.68),
+    "3": (45.72, 106.68),
+    "4": (45.72, 99.06),
+    "5": (43.18, 99.06),
+    "6": (40.64, 99.06),
+}
+
+
+def test_rotated_dip6_pads_match_kicad_placement_by_pad_number():
+    """Every pad of a 90deg-rotated ASYMMETRIC DIP must land on KiCad's own
+    absolute position for that SPECIFIC pad number (docket 019f3ba0f455)."""
+    import yaml
+
+    from pcb_worker.compile_board import compile_board
+    from pcb_worker.resolved_board import ResolutionSuccess
+
+    result = compile_board(yaml.safe_load(SMART_REMOTE.read_text(encoding="utf-8")))
+    assert isinstance(result, ResolutionSuccess), \
+        [d.message for d in result.diagnostics if d.severity.value == "error"][:5]
+
+    mic1 = next(c for c in result.board.components if c.ref == "MIC1")
+    assert mic1.placement.rotation_deg == 90.0, "fixture MIC1 must stay at 90deg"
+
+    got = {p.source_id.split(":")[1]: (p.position[0], p.position[1])
+           for p in mic1.placed_pads}
+    assert set(got) == set(MIC1_KICAD_GROUND_TRUTH)
+
+    for num, expected in sorted(MIC1_KICAD_GROUND_TRUTH.items()):
+        assert got[num] == pytest.approx(expected, abs=TOL_MM), (
+            f"MIC1 pad {num}: worker placed {got[num]}, KiCad 9.0.9 ground truth "
+            f"{expected} — rotation convention mirrored?"
+        )
