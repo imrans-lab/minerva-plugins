@@ -144,7 +144,7 @@ def test_pad_extent_contains_the_copper_geometric_drc_checks():
     """THE safety property, cross-checked against the DRC/CAM copper owner.
 
     A rotated elongated land is the case that breaks naive sizing: the engine's
-    ``mark_pad`` discards the rotation it is handed (grid.py:133), so handing it
+    ``mark_pad`` discards the rotation it is handed (grid.py:313), so handing it
     the raw 1.0 x 1.45 land of a 45-degree 0805 pad would leave real copper
     outside the keepout. The projection hands it the land's axis-aligned bounding
     box instead — proved here to CONTAIN every copper primitive the geometric DRC

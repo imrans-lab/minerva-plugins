@@ -936,10 +936,12 @@ def test_the_via_is_what_joins_the_two_halves_of_an_accepted_net():
     with the via present, which is what this pins.
 
     Honest note on engine via PRODUCTION: the run still emits ZERO vias of its own
-    on this fixture (verified — `Route.vias` is empty on both runs). The via here
-    is one the board ALREADY CARRIES, which is what this item is about; the reply
-    shape carrying an engine-produced via remains STAGED, in
-    `_three_pin_route_reply`, and says so.
+    on this fixture — `Route.vias` is empty on both runs — but that claim is
+    background context, not something THIS test asserts (it checks only
+    `.paths` and `.unrouted` below, never `.vias`). The via here is one the
+    board ALREADY CARRIES, which is what this item is about; the reply shape
+    carrying an engine-produced via remains STAGED, in `_three_pin_route_reply`,
+    and says so.
     """
     joined = _engine_run(_committed_joined(_three_pin_board()))
     split = _engine_run(_committed_joined(_three_pin_board(), with_via=False))

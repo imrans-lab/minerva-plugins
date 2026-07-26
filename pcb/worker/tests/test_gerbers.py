@@ -238,6 +238,23 @@ def test_drill_files_omitted_when_no_holes():
 
 # ---------------------------------------------------------------------------
 # Golden byte-comparison (production path).
+#
+# DRIFT-PIN ONLY — NOT A CORRECTNESS ORACLE. Mirrors the framing in
+# tests/oracle/golden_emitter/README.md ("Why this is not a correctness
+# oracle"): these goldens are captured FROM the emitter under test (see
+# regenerate.py, which calls the same build_fab / build_raw_emitter builders
+# this test does), so a byte match only proves the emitter still agrees with
+# its past self — it cannot prove the past self was correct. That circularity
+# is why the failure message below tells you to rerun regenerate.py: that is
+# a re-bless, not evidence the new bytes are right, so a red run here is not
+# something to silence by just regenerating. What this DOES buy is real drift
+# protection — an unintended output change shows up as a failure here. For a
+# genuinely independent correctness check (not exercised by this test), see
+# tests/oracle/test_geometry_diff.py::
+# test_production_matches_spike_golden_except_cosmetic_silk, which compares
+# the "board" fixture's production output against the hand-built,
+# structurally-validated spike-gerber-v1 golden; it does not cover
+# "drilltest".
 # ---------------------------------------------------------------------------
 
 
@@ -254,8 +271,11 @@ def test_matches_goldens(board_path, base, builder):
         assert golden.exists(), f"missing golden {fname} (run regenerate.py)"
         expected = golden.read_text(encoding="utf-8")
         assert content == expected, (
-            f"{fname} differs from golden — a deliberate change means rerun "
-            f"tests/testdata/gerber_golden/regenerate.py and re-diff.")
+            f"{fname} differs from golden — DRIFT DETECTED. This golden is "
+            f"captured from the emitter under test, so it pins CHANGE, not "
+            f"correctness: rerunning tests/testdata/gerber_golden/regenerate.py "
+            f"is a RE-BLESS, not a fix. Diff the output and establish the new "
+            f"bytes are right before regenerating. See the section banner above.")
     # And no stray goldens for this base beyond what we produced.
     produced = set(files)
     for name in _golden_names():

@@ -208,8 +208,12 @@ def _route_probing_the_real_grid(monkeypatch, board: dict) -> tuple[dict, list[s
     of route_board's construction (resolution, clearance, trace_width, origin,
     which copper got marked and in what order), and a probe against a grid that
     merely resembles the router's own proves nothing about the router. Patching
-    the name ``agent_router.router.RoutingGrid`` catches it at the one place
-    route_board builds it (router.py:736).
+    the name ``agent_router.router.RoutingGrid`` catches it where ``route_board``
+    builds it (router.py:1051) — this helper is only ever driven through plain
+    ``route()`` calls with no route_hints, so that is the site exercised here.
+    The same patch would equally catch ``route_board_with_hints``'s build
+    (router.py:1814), since both functions resolve the same module-global name
+    at call time.
 
     Probing is at ``PathSegment.points`` resolution — the SAME sampling A* and
     `_segment_clear` use — so "the grid blocks this point" means exactly what it
