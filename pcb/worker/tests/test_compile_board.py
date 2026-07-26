@@ -195,10 +195,13 @@ def test_smart_remote_holes_are_npth(smart_remote_result):
     # empty collection runs no assertion at all, so if the compiler ever stopped
     # emitting holes this test would go green and silent while testing nothing.
     #
-    # Deliberately weaker than `== 4`: the COUNT is pinned canonically by
-    # test_smart_remote_structure, and duplicating it here would put the same
-    # fact in two places to drift apart. This guard exists so THIS test cannot
-    # become vacuous if that one is ever changed or removed.
+    # Deliberately weaker than `== 4`. The COUNT is already pinned TWICE — at
+    # :170-171 (test_smart_remote_structure, literal 4) and at :341/:351
+    # (test_board_geometry_is_carried_faithfully, against the source board) —
+    # so asserting it a third time here would add a third copy of one fact for
+    # them all to drift apart. This guard asserts only what THIS test needs,
+    # that the loop body is reached, and so stays correct if either census
+    # changes or is removed.
     assert holes, "no holes emitted — the assertion below would never run"
     for hole in holes:
         assert hole.kind is HoleKind.NPTH and hole.plated is False
