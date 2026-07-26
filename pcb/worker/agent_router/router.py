@@ -17,7 +17,7 @@ import re
 
 from .board import Board, Pad, RoutingRulesError
 from .grid import RoutingGrid
-from .pathfinder import find_path, Path
+from .pathfinder import find_path, unroutable_reason, Path
 
 
 # Common bus prefixes to detect related signals
@@ -336,6 +336,21 @@ class RoutingResult:
     success: bool = False
     routes: list[Route] = field(default_factory=list)
     unrouted: list[tuple[str, Pad, Pad]] = field(default_factory=list)  # (net, pad1, pad2)
+    # WHY each `unrouted` entry was refused, INDEX-ALIGNED with it: entry i here
+    # explains entry i there. Appended together at both `find_path` failure
+    # sites, so the two lists cannot drift in length.
+    #
+    # A PARALLEL LIST, not a fourth tuple element, on purpose: the tuple shape is
+    # read by `pcb_worker.methods._serialize_routing_result` and by tests, and
+    # widening it would break them for a field they do not want. See
+    # `agent_router.pathfinder.unroutable_reason` for the codes and for why this
+    # exists — round C2b's refusals are correct but were previously silent.
+    #
+    # NOT YET ON THE WIRE: `_serialize_routing_result` emits `unrouted:
+    # [{net, from, to}]` and does not read this, so the reason stops at the
+    # engine boundary. Plumbing it into the worker reply is a methods.py change
+    # outside this round's fence.
+    unrouted_reasons: list[dict] = field(default_factory=list)
     via_count: int = 0
 
     def get_route(self, net_name: str) -> Optional[Route]:
@@ -1140,12 +1155,34 @@ def route_board(
                     )
             else:
                 result.unrouted.append((net_name, pad_a, pad_b))
+                result.unrouted_reasons.append(_unrouted_reason_entry(
+                    grid, net_name, pad_a, pad_b, "F.Cu"))
 
         if route.paths:
             result.routes.append(route)
 
     result.success = len(result.unrouted) == 0
     return result
+
+
+def _unrouted_reason_entry(grid, net_name: str, pad_a: Pad, pad_b: Pad,
+                           layer: str) -> dict:
+    """One ``RoutingResult.unrouted_reasons`` entry, naming the same pair
+    ``unrouted`` names.
+
+    The pads are spelled ``"<component>.<number>"`` — the SAME spelling
+    ``pcb_worker.methods._serialize_routing_result`` already uses for
+    ``unrouted``, so a consumer that ever gets both can join them on the pair
+    rather than trusting the index alignment.
+    """
+    return {
+        "net": net_name,
+        "from": f"{pad_a.component}.{pad_a.number}",
+        "to": f"{pad_b.component}.{pad_b.number}",
+        "layer": layer,
+        "reason": unroutable_reason(grid, pad_a.position, pad_b.position,
+                                    net_name, layer),
+    }
 
 
 # Patterns that identify power/ground nets (matched case-insensitively)
@@ -1965,6 +2002,8 @@ def route_board_with_hints(
                     )
             else:
                 result.unrouted.append((net_name, pad_a, pad_b))
+                result.unrouted_reasons.append(_unrouted_reason_entry(
+                    grid, net_name, pad_a, pad_b, preferred_layer))
 
         if route.paths:
             result.routes.append(route)

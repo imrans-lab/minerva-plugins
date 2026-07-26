@@ -1055,11 +1055,40 @@ def _attach_route_geometric_drc(payload: dict, rb, *,
     payload["drc_geometric_summary"] = union
 
     if not union.get("ok"):
-        shared = {"scope": union.get("scope"), "verifies_geometry": False,
-                  "verdict": "indeterminate", "error": union.get("error")}
-        for r in routes:
-            if isinstance(r, dict):
-                r["drc_geometric"] = dict(shared)
+        # EVERY ROUTE GETS ITS OWN ENVELOPE, AND ITS OWN IDENTITY.
+        #
+        # The batch failed as a batch, so every route is indeterminate — that
+        # part is shared and stays shared. What must NOT be shared is WHO the
+        # reply is talking about. `error["candidate_id"]` names the ONE candidate
+        # that could not be modeled, so copying one envelope onto every route
+        # made route[1] carry `candidate_id: "route[0]"` — a reply that names the
+        # wrong offender and sends someone to fix a route that is fine. That is
+        # worse than the anonymity it replaced, so each route now carries:
+        #
+        #   candidate_id          -> WHICH ROUTE THIS IS (its own id in the batch)
+        #   error["candidate_id"] -> THE OFFENDER (usually a different route)
+        #
+        # Equal => this route is the offender. Different => this route was not
+        # checked because another candidate poisoned the batch. Absent from
+        # `error` => the offender could not be identified at all (see
+        # ir_candidates.UnmodelableCandidate on why absent is never null).
+        #
+        # `dict(error)` gives each route its own copy rather than an alias, so a
+        # consumer that annotates one route's error cannot rewrite another's.
+        # The ids are `f"route[{index}]"` over the ORIGINAL route list — the same
+        # expression `_routes_to_candidates` uses, and it enumerates the same
+        # list, so the two cannot drift.
+        error = union.get("error")
+        for index, r in enumerate(routes):
+            if not isinstance(r, dict):
+                continue
+            r["drc_geometric"] = {
+                "scope": union.get("scope"),
+                "verifies_geometry": False,
+                "verdict": "indeterminate",
+                "candidate_id": f"route[{index}]",
+                "error": dict(error) if isinstance(error, dict) else error,
+            }
         return
 
     # An empty route never reaches the overlay (there is no copper to project),

@@ -105,10 +105,27 @@ def find_path(
     Find a path from start to end avoiding obstacles.
 
     Tries in order:
-    1. Direct path (skipped when prefer_orthogonal=True)
-    2. L-shaped path (one bend)
+    1. Direct path — the free chord, which may be diagonal (skipped when
+       prefer_orthogonal=True)
+    2. L-shaped path (one bend). NOT one bend when the endpoints share a row or
+       a column: there is no L between two axis-aligned points, and
+       :func:`_try_l_path` emits the straight run instead. So an axis-aligned
+       pair still reaches :func:`_try_direct_path` under prefer_orthogonal — via
+       step 2 rather than step 1, and only for a run that is already orthogonal.
     3. A* path (multiple bends)
     4. Via + alternate layer (if allow_via=True)
+
+    NO EMITTED SEGMENT IS EVER ZERO-LENGTH (docket 019f9cc3245d). Degenerate
+    copper is not modelable downstream — ``pcb_worker.ir_candidates`` raises
+    ``UnsupportedGeometry`` on a zero-length leg and the whole candidate batch
+    becomes INDETERMINATE, so one degenerate leg blinds the geometric verdict for
+    every other route checked with it. The guard below and the axis-aligned
+    branches in :func:`_try_l_path` / :func:`_collapse_run` are where that
+    degeneracy was produced.
+
+    THIS IS A CLAIM ABOUT LENGTH ONLY. It is NOT the stronger "every emitted
+    segment is grid-verified" — see :func:`_segment_clear` for the measured gap
+    that claim would paper over.
 
     Args:
         grid: Routing grid with obstacles marked
@@ -124,7 +141,17 @@ def find_path(
     Returns:
         Path if found, None if no valid path exists
     """
-    # Try direct path first (skip when prefer_orthogonal — direct paths are diagonal)
+    # NOTHING TO ROUTE. Coincident endpoints have no segment between them, and
+    # the only "path" any strategy below can build for them is a zero-length one
+    # (`_try_direct_path` would happily emit it — `_segment_clear` probes a
+    # single point and passes). None is this function's own documented "no valid
+    # path exists", so the caller records the pair as unrouted instead of being
+    # handed copper of zero extent.
+    if start == end:
+        return None
+
+    # Try direct path first (skip when prefer_orthogonal — a free chord may be
+    # diagonal; the axis-aligned case still reaches it, through _try_l_path)
     if not prefer_orthogonal:
         path = _try_direct_path(grid, start, end, net, layer)
         if path:
@@ -152,6 +179,57 @@ def find_path(
             return path
 
     return None
+
+
+# Reason codes for a refused connection — see :func:`unroutable_reason`.
+UNROUTABLE_COINCIDENT = "coincident_endpoints"
+UNROUTABLE_OUT_OF_BOUNDS = "endpoint_out_of_bounds"
+UNROUTABLE_START_BLOCKED = "start_blocked"
+UNROUTABLE_END_BLOCKED = "end_blocked"
+UNROUTABLE_NO_PATH = "no_path"
+
+
+def unroutable_reason(
+    grid: RoutingGrid,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    net: str,
+    layer: str = "F.Cu",
+) -> str:
+    """Classify WHY :func:`find_path` refused a connection.
+
+    Round C2b made two refusals possible that previously returned copper: an A*
+    search out of a cell that is blocked for this net (019f9bf9c04a) and a
+    coincident-endpoint pair. Both are strictly better than what they replaced —
+    the first used to emit a segment starting inside foreign copper — but they
+    land the pair in ``RoutingResult.unrouted`` with no explanation, where a pad
+    covered by an NPTH/mounting-hole keepout looks exactly like a congested
+    board. That is ORDINARY board data, and a user who cannot tell those apart
+    cannot act on either.
+
+    RE-PROBES RATHER THAN BEING THREADED THROUGH. ``find_path`` returns
+    ``Optional[Path]``, and every caller and test depends on that; a second
+    return value would ripple through four call sites to answer a question only
+    the failure path asks. This asks the grid the SAME questions ``find_path``'s
+    strategies asked, through the same owner (``can_route_through``), so it
+    cannot disagree with them by construction — it can only be stale, and the
+    grid does not change between the two calls.
+
+    SCOPE OF THE ANSWER: it describes *layer*, the layer the primary attempt
+    used. With ``allow_via=True`` the alternate layer was also tried and also
+    failed; a ``start_blocked`` answer therefore means "blocked on the layer this
+    connection was asked for", not "blocked everywhere".
+    """
+    if start == end:
+        return UNROUTABLE_COINCIDENT
+    for point in (start, end):
+        if not grid._cell_in_bounds(*grid._pos_to_cell(point[0], point[1])):
+            return UNROUTABLE_OUT_OF_BOUNDS
+    if not grid.can_route_through(start[0], start[1], net, layer):
+        return UNROUTABLE_START_BLOCKED
+    if not grid.can_route_through(end[0], end[1], net, layer):
+        return UNROUTABLE_END_BLOCKED
+    return UNROUTABLE_NO_PATH
 
 
 def _try_direct_path(
@@ -182,7 +260,41 @@ def _try_l_path(
     adjusted:
     - ``"right_first"`` / ``"left_first"``: try horizontal-then-vertical first
     - ``"down_first"`` / ``"up_first"``: try vertical-then-horizontal first
+
+    THERE IS NO L BETWEEN TWO AXIS-ALIGNED POINTS (docket 019f9cc3245d,
+    severity 2). Both candidate corners are built FROM the endpoints' own
+    coordinates, so when the endpoints share a row (``start[1] == end[1]``) the
+    horizontal-first corner ``(end[0], start[1])`` IS ``end`` and the
+    vertical-first corner ``(start[0], end[1])`` IS ``start``; when they share a
+    column the two swap roles. Either way one leg of the "L" has zero length, and
+    the emitted path was a straight run with a degenerate stub bolted to one end.
+    Measured before the fix, on a 50x50 grid at 0.2mm with nothing marked:
+    ``find_path((10,20) -> (30,20), prefer_orthogonal=True)`` returned 2 segments,
+    the second ``(30,20) -> (30,20)``; the vertical mirror
+    ``(20,10) -> (20,30)`` returned 2 segments with the FIRST one degenerate.
+
+    THE FIX IS HERE, AT THE PRODUCER, not at the downstream guard that rejects
+    the degenerate leg — relaxing that guard would admit degenerate copper rather
+    than stop it being made. It is also here rather than in :func:`find_path`,
+    because :func:`_try_via_path` calls this function directly: a fix that only
+    tried a direct path earlier in ``find_path`` would leave the via strategy
+    still emitting stubs.
+
+    ADMITS EXACTLY THE SAME RUNS AS BEFORE. The old code accepted an axis-aligned
+    pair when ``_l_segments_clear`` passed, i.e. when ``_segment_clear(start,
+    corner)`` and ``_segment_clear(corner, end)`` both passed — and with a
+    degenerate corner one of those two IS the full straight run while the other is
+    a single-point probe of an endpoint the full run already covers. So delegating
+    to :func:`_try_direct_path` asks the identical question of the grid and
+    accepts the identical set of paths; only the segment COUNT changes, 2 -> 1.
+    The degeneracy test is exact equality rather than a tolerance because the
+    condition really is bitwise: the corner is the endpoint coordinate itself, and
+    the downstream guard this exists to keep satisfied
+    (``ir_candidates``' ``a == b``) is exact too.
     """
+    if start[0] == end[0] or start[1] == end[1]:
+        return _try_direct_path(grid, start, end, net, layer)
+
     # Default order: horizontal-first then vertical-first
     corner_h = (end[0], start[1])  # horizontal then vertical
     corner_v = (start[0], end[1])  # vertical then horizontal
@@ -239,6 +351,36 @@ def _astar_path(
     end_cell = grid._pos_to_cell(end[0], end[1])
 
     if not grid._cell_in_bounds(*start_cell) or not grid._cell_in_bounds(*end_cell):
+        return None
+
+    # THE START CELL IS VALIDATED, LIKE EVERY OTHER CELL (docket 019f9bf9c04a).
+    # The expansion loop below asks `can_route_through` about every NEIGHBOUR it
+    # steps into, and never about the cell it starts from — so a search launched
+    # from a blocked cell emitted a path whose first point sits in foreign copper.
+    # Round B1a's induction ("every emitted segment is either a verified chord or
+    # an original A* step") holds for the steps but not for the origin, and the
+    # two-point case makes it visible: `_simplify_path`/`_simplify_orthogonal`
+    # return a 2-point list untouched, so `start -> end` is emitted with no chord
+    # verification at all.
+    #
+    # WHY REFUSE HERE RATHER THAN VERIFY THE TWO-POINT CHORD (the docket's other
+    # option): a blocked start is unroutable however many points the path has, so
+    # the honest answer is the same for all of them, and the two sibling
+    # strategies already give it — `_try_direct_path` and `_try_l_path` both probe
+    # `start` through `_segment_clear` and return None. This makes all three
+    # agree instead of leaving A* alone in accepting an origin the others refuse.
+    #
+    # WHY None RATHER THAN AN EXCEPTION. Checked the callers: `route_board`
+    # (router.py) and `route_board_with_hints` pass `pad_a.position` for a pad OF
+    # the net being routed, and `mark_pad` stamps that pad's cell with that same
+    # net, so `can_route_through` returns True for its owner — no legitimate
+    # caller routes out of a blocked start today, which is the docket's condition
+    # for preferring this closure. What CAN block it is board data, not a
+    # programming error: foreign copper or an obstacle marked over the pad. Both
+    # callers already handle "no path" by recording the pair in `result.unrouted`;
+    # neither handles an exception, so raising would turn a dirty board into a
+    # crashed route call.
+    if not grid.can_route_through(start[0], start[1], net, layer):
         return None
 
     # A* algorithm
@@ -367,9 +509,29 @@ def _segment_clear(
     THE single owner of "may this net occupy this chord", sampled at
     :attr:`PathSegment.points` resolution (0.1mm) — the same test
     :func:`_try_direct_path` applies to a one-segment path and
-    :func:`_l_segments_clear` applies to each leg of an L. Simplification now
-    goes through it too, so a chord an emitted route contains is asked exactly
-    the question A* was asked about every cell it stepped through.
+    :func:`_l_segments_clear` applies to each leg of an L. Every chord
+    SIMPLIFICATION invents is asked this question too, which is what round B1a
+    added and what :func:`_simplify_path` documents.
+
+    WHAT THIS DOES **NOT** MEAN, stated plainly because an earlier draft implied
+    it: a segment the pathfinder emits is NOT guaranteed to satisfy this
+    predicate. Simplification asks it about chords it CREATES; a segment that
+    survives as an ORIGINAL A* step was never asked, because A* validates the
+    CELL it steps into and not the straight line between the two cell centres.
+    Those differ for a DIAGONAL step: 8-way movement cuts the corner between the
+    two orthogonally-adjacent cells, and if one of those is blocked the emitted
+    segment clips it.
+
+    MEASURED, on a 4000-board fuzz (12x12mm, 0.5mm cells, random obstacles):
+    62 of 3403 emitted paths carry a segment this function rejects. ALL 62 are
+    ``prefer_orthogonal=False`` (cardinal A* cannot cut a corner), ALL 62 are
+    diagonal segments, and their lengths cluster on the one-cell diagonal
+    (0.707mm at 0.5mm resolution) — single A* steps, not simplified chords. The
+    count is IDENTICAL before and after round C2b, so this is pre-existing and
+    tracked separately; it is disclosed here rather than in a comment that claims
+    an invariant the code does not hold. The invariant this module DOES hold
+    today is the weaker pair: no emitted segment is zero-length, and no
+    simplification-invented chord is unverified.
     """
     seg = PathSegment(start=start, end=end, layer=layer)
     for pt in seg.points:
@@ -656,6 +818,21 @@ def _collapse_run(
 
     Returns a list from points[start] to points[end] inclusive.
     Uses recursive bisection when a single L-bend is blocked.
+
+    THE AXIS-ALIGNED BRANCH IS A GUARD ON AN INVARIANT, not a fix for a live
+    defect — said plainly, because this module has been burned by comments that
+    claimed more than the code did. The two corners below are built from the run
+    endpoints exactly as :func:`_try_l_path`'s are, so if a run ever arrived with
+    ``s`` and ``e`` sharing a row or a column, one leg of the returned L would be
+    ZERO-LENGTH and the batch-poisoning of 019f9cc3245d would be back through a
+    second door. It cannot arrive that way today: :func:`_find_staircase_end`
+    only extends a run while segments alternate H/V with consistent signs, so a
+    run's endpoints differ on BOTH axes. Nothing pinned that, and "unreachable
+    today" is exactly how :func:`_try_l_path` looked before ``prefer_orthogonal``
+    became the default for hinted runs. The honest test for a guard is that it
+    fires when its premise is violated, and that is
+    ``test_collapse_run_refuses_to_emit_a_degenerate_leg_if_its_premise_breaks``
+    in tests/agent_router/test_pathfinder.py.
     """
     s = points[start]
     e = points[end]
@@ -663,10 +840,24 @@ def _collapse_run(
     if end - start < 3:
         return list(points[start : end + 1])
 
-    # Try full L-path (both corner orderings)
-    for corner in [(e[0], s[1]), (s[0], e[1])]:
-        if _l_segments_clear(grid, s, corner, e, net, layer):
-            return [s, corner, e]
+    if s == e:
+        # Nothing to draw between a point and itself. One point, so the caller's
+        # `result.extend(collapsed[1:])` contributes nothing rather than a
+        # zero-length segment.
+        return [s]
+
+    if s[0] == e[0] or s[1] == e[1]:
+        # Both "corners" ARE the endpoints here; the only geometry available is
+        # the straight run. Same reasoning, and the same acceptance test, as
+        # _try_l_path's branch. If the run is blocked, fall through to bisection
+        # exactly as a blocked L does.
+        if _segment_clear(grid, s, e, net, layer):
+            return [s, e]
+    else:
+        # Try full L-path (both corner orderings)
+        for corner in [(e[0], s[1]), (s[0], e[1])]:
+            if _l_segments_clear(grid, s, corner, e, net, layer):
+                return [s, corner, e]
 
     # Blocked — split at midpoint and recurse
     mid = (start + end) // 2
@@ -701,7 +892,9 @@ def _try_via_path(
 
     Strategies tried (via at start then via at end):
     1. Direct path on alt layer (skipped when prefer_orthogonal)
-    2. L-shaped path on alt layer
+    2. L-shaped path on alt layer — a STRAIGHT run when the endpoints are
+       axis-aligned, which is why this strategy no longer emits a degenerate leg
+       under prefer_orthogonal either (see :func:`_try_l_path`)
     3. A* path on alt layer
     """
     for via_pos, route_start, route_end in [

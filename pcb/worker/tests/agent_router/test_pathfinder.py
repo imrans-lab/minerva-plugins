@@ -197,7 +197,12 @@ class TestStaircaseCollapse:
     """Tests for staircase collapse in orthogonal A* paths."""
 
     def test_orthogonal_diagonal_produces_few_segments(self):
-        """prefer_orthogonal diagonal route collapses into L-bend, not staircase."""
+        """prefer_orthogonal diagonal route collapses into L-bend, not staircase.
+
+        TIGHTENED in round C2b: the comment said "2" while the bound admitted 4.
+        A bound with slack in it cannot fail when the shape degrades, which is the
+        only thing this test is for.
+        """
         grid = RoutingGrid(width=50, height=50, resolution=0.5)
         path = find_path(
             grid, start=(5, 5), end=(40, 40), net="SIG1",
@@ -205,10 +210,19 @@ class TestStaircaseCollapse:
         )
         assert path is not None
         # Without collapse this would be ~140 segments. With collapse: 2 (one L-bend).
-        assert len(path.segments) <= 4
+        assert [(s.start, s.end) for s in path.segments] == [
+            ((5, 5), (40, 5)), ((40, 5), (40, 40))]
 
     def test_orthogonal_around_obstacle_still_routes(self):
-        """Staircase collapse handles obstacle by splitting into multiple L-bends."""
+        """An obstacle off the L corridor does not force a staircase at all — the
+        L-path strategy answers first, at 2 segments.
+
+        TIGHTENED in round C2b: this asserted ``< 30`` against an actual of 2, so
+        it would have passed a route that collapsed 15x worse than it does. The
+        obstacle at (25,25) is nowhere near the (5,5)->(45,5)->(45,45) corridor,
+        which is exactly why the L is clear; the detouring case is covered by
+        ``test_l_shaped_path_around_obstacle`` and ``test_complex_maze``.
+        """
         grid = RoutingGrid(width=50, height=50, resolution=0.5)
         # Obstacle in the middle forces A* to detour
         grid.mark_obstacle(x=25, y=25, radius=5)
@@ -218,8 +232,9 @@ class TestStaircaseCollapse:
             prefer_orthogonal=True,
         )
         assert path is not None
-        # Should still be much fewer segments than raw staircase
-        assert len(path.segments) < 30
+        assert [(s.start, s.end) for s in path.segments] == [
+            ((5, 5), (45, 5)), ((45, 5), (45, 45))]
+        assert not path.passes_through(25, 25)
 
     def test_orthogonal_all_segments_hv(self):
         """After collapse, all segments are still horizontal or vertical."""
@@ -239,7 +254,14 @@ class TestStaircaseCollapse:
                 assert seg == path.segments[0] or seg == path.segments[-1]
 
     def test_straight_path_unchanged(self):
-        """A purely horizontal path is not affected by collapse."""
+        """A purely horizontal path is not affected by collapse.
+
+        TIGHTENED in round C2b (019f9cc3245d). The comment always said "one H
+        segment" while the assertion allowed two — and two is exactly what this
+        returned, the second of them ZERO-LENGTH, for as long as the bug was
+        live. A bound that admits the defect it describes is not a regression
+        lock; the count is now the one the comment claims.
+        """
         grid = RoutingGrid(width=50, height=50, resolution=0.5)
         path = find_path(
             grid, start=(5, 25), end=(45, 25), net="SIG1",
@@ -247,7 +269,8 @@ class TestStaircaseCollapse:
         )
         assert path is not None
         # L-path finds this directly: one H segment
-        assert len(path.segments) <= 2
+        assert len(path.segments) == 1
+        assert path.segments[0].length() > 0.0
 
     def test_l_path_not_degraded(self):
         """An L-shaped path stays as 2 segments after collapse."""
@@ -259,6 +282,267 @@ class TestStaircaseCollapse:
         assert path is not None
         # L-path finder should get this before A* even runs
         assert len(path.segments) == 2
+
+
+class TestNoDegenerateSegmentIsEverEmitted:
+    """Docket 019f9cc3245d (severity 2) — the pathfinder must not PRODUCE a
+    zero-length leg.
+
+    Why it matters downstream, and why the fix is here rather than there: a
+    zero-length leg is copper the candidate overlay refuses to model
+    (``ir_candidates`` raises ``UnsupportedGeometry``), and ``check_candidates``
+    turns that into ONE batch-wide indeterminate returned before any per-candidate
+    attribution — so a single straight route blinds the geometric verdict for
+    every other candidate checked with it. The end-to-end proof of that is
+    ``tests/test_route_degenerate_geometry.py``; these are the narrow locks on the
+    producer.
+    """
+
+    @pytest.mark.parametrize("start,end,axis", [
+        ((10.0, 20.0), (30.0, 20.0), "horizontal"),
+        ((20.0, 10.0), (20.0, 30.0), "vertical"),
+    ])
+    def test_an_axis_aligned_orthogonal_route_is_one_real_segment(
+            self, start, end, axis):
+        """BOTH orientations, because both were broken and they broke differently.
+
+        The corners are built from the endpoints' own coordinates, so a shared
+        ROW made the horizontal-first corner equal ``end`` (degenerate SECOND leg)
+        and a shared COLUMN made it equal ``start`` (degenerate FIRST leg). A test
+        that only covered one would have left the other shipping.
+        """
+        grid = RoutingGrid(width=50.0, height=50.0, resolution=0.2)
+        path = find_path(grid, start=start, end=end, net="N1", layer="F.Cu",
+                         prefer_orthogonal=True)
+
+        assert path is not None
+        assert len(path.segments) == 1, [(s.start, s.end) for s in path.segments]
+        assert [s for s in path.segments if s.length() == 0.0] == []
+        # ...and it is still the run that was asked for, not a shortened one.
+        assert path.start == start
+        assert path.end == end
+
+    def test_coincident_endpoints_are_refused_not_routed_as_zero_length(self):
+        """The other producer of degenerate copper: there is nothing to route
+        between a point and itself, and ``_try_direct_path`` would have emitted a
+        single zero-length segment for it (``_segment_clear`` probes one point and
+        passes). None is the honest answer — the caller records the pair unrouted.
+        """
+        grid = RoutingGrid(width=50.0, height=50.0, resolution=0.2)
+        for prefer_orthogonal in (False, True):
+            assert find_path(grid, start=(10.0, 10.0), end=(10.0, 10.0),
+                             net="N1", layer="F.Cu",
+                             prefer_orthogonal=prefer_orthogonal) is None
+
+    def test_a_non_axis_aligned_route_is_unchanged(self):
+        """REGRESSION GUARD. The L-path is the common case and the fix edits it,
+        so pin that a genuine L is untouched: two segments, bending at the
+        horizontal-first corner, no leg degenerate.
+        """
+        grid = RoutingGrid(width=50.0, height=50.0, resolution=0.2)
+        path = find_path(grid, start=(10.0, 10.0), end=(30.0, 25.0), net="N1",
+                         layer="F.Cu", prefer_orthogonal=True)
+
+        assert path is not None
+        assert [(s.start, s.end) for s in path.segments] == [
+            ((10.0, 10.0), (30.0, 10.0)),
+            ((30.0, 10.0), (30.0, 25.0)),
+        ]
+        assert all(s.length() > 0.0 for s in path.segments)
+
+    def test_the_diagonal_direct_path_is_still_taken_when_not_orthogonal(self):
+        """The other half of "unchanged": with prefer_orthogonal off, an
+        axis-aligned pair still takes the direct chord at step 1 and never reaches
+        the new branch. One segment either way — this pins that the fix did not
+        move which strategy answers.
+        """
+        grid = RoutingGrid(width=50.0, height=50.0, resolution=0.2)
+        path = find_path(grid, start=(10.0, 10.0), end=(30.0, 25.0), net="N1",
+                         layer="F.Cu", prefer_orthogonal=False)
+        assert path is not None
+        assert [(s.start, s.end) for s in path.segments] == [
+            ((10.0, 10.0), (30.0, 25.0))]
+
+
+    def test_collapse_run_refuses_to_emit_a_degenerate_leg_if_its_premise_breaks(self):
+        """``_collapse_run`` is the FIFTH place an L-corner is built from run
+        endpoints, and it had no degeneracy guard.
+
+        The honest test for a guard is that it fires when its premise is violated,
+        so the premise is violated deliberately here. ``_find_staircase_end`` only
+        extends a run while H/V alternate with consistent signs, which is what
+        keeps a run's endpoints differing on both axes and this branch unreachable
+        from the engine today; the function is called DIRECTLY with a run that
+        doubles back, so its endpoints share a row.
+
+        Without the guard, ``(e[0], s[1])`` IS ``e`` and the returned corner list
+        carries the same point twice — one zero-length segment in the emitted
+        path, and 019f9cc3245d back through a second door.
+        """
+        from agent_router.pathfinder import _collapse_run
+
+        grid = RoutingGrid(width=20, height=20, resolution=0.5)
+        # Alternating H/V that returns to its starting row: endpoints (1,1) and
+        # (4,1) share y, which a real staircase run never does.
+        points = [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0), (3.0, 2.0),
+                  (3.0, 1.0), (4.0, 1.0)]
+        collapsed = _collapse_run(points, 0, len(points) - 1, grid, "SIG", "F.Cu")
+
+        assert collapsed[0] == points[0]
+        assert collapsed[-1] == points[-1]
+        repeats = [(a, b) for a, b in zip(collapsed, collapsed[1:]) if a == b]
+        assert repeats == [], collapsed
+
+    def test_collapse_run_still_collapses_a_genuine_staircase_to_an_l(self):
+        """The guard must not be a stop-collapsing switch: a real staircase (both
+        axes advancing, which is the shape the engine actually produces) still
+        becomes two legs through one corner."""
+        from agent_router.pathfinder import _collapse_run
+
+        grid = RoutingGrid(width=20, height=20, resolution=0.5)
+        points = [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0), (3.0, 2.0),
+                  (3.0, 3.0), (4.0, 3.0)]
+        collapsed = _collapse_run(points, 0, len(points) - 1, grid, "SIG", "F.Cu")
+
+        assert collapsed == [(1.0, 1.0), (4.0, 1.0), (4.0, 3.0)]
+
+
+class TestTheRefusalReasonIsRecorded:
+    """Round C2b's new refusals are correct but were silent — a pad under an NPTH
+    keepout looked exactly like a congested board. ``unroutable_reason`` is the
+    in-engine classification; ``RoutingResult.unrouted_reasons`` is where the
+    router records it.
+    """
+
+    def test_each_refusal_gets_its_own_reason_code(self):
+        from agent_router.pathfinder import (
+            UNROUTABLE_COINCIDENT, UNROUTABLE_END_BLOCKED,
+            UNROUTABLE_NO_PATH, UNROUTABLE_OUT_OF_BOUNDS,
+            UNROUTABLE_START_BLOCKED, unroutable_reason)
+
+        grid = RoutingGrid(width=20, height=20, resolution=0.5)
+        grid.mark_pad(x=5.0, y=5.0, size=(0.4, 0.4), net="OTHER", layer="F.Cu")
+        grid.mark_pad(x=15.0, y=15.0, size=(0.4, 0.4), net="OTHER", layer="F.Cu")
+
+        assert unroutable_reason(grid, (2.0, 2.0), (2.0, 2.0), "SIG") == \
+            UNROUTABLE_COINCIDENT
+        assert unroutable_reason(grid, (-3.0, 2.0), (2.0, 2.0), "SIG") == \
+            UNROUTABLE_OUT_OF_BOUNDS
+        assert unroutable_reason(grid, (5.0, 5.0), (2.0, 2.0), "SIG") == \
+            UNROUTABLE_START_BLOCKED
+        assert unroutable_reason(grid, (2.0, 2.0), (15.0, 15.0), "SIG") == \
+            UNROUTABLE_END_BLOCKED
+        # Both ends clear: whatever the refusal was, it was not an endpoint.
+        assert unroutable_reason(grid, (2.0, 2.0), (8.0, 8.0), "SIG") == \
+            UNROUTABLE_NO_PATH
+        # ...and the same pad is NOT a blocked start for the net that owns it,
+        # which is why the canonical routing path never sees these codes.
+        assert unroutable_reason(grid, (5.0, 5.0), (2.0, 2.0), "OTHER") == \
+            UNROUTABLE_NO_PATH
+
+    def test_the_router_records_a_reason_for_every_unrouted_pair(self):
+        """The two lists are index-aligned and populated together, so a consumer
+        can always ask WHY about an entry it can see."""
+        from agent_router.board import Board, Net, Obstacle, Pad
+        from agent_router.router import route_board
+
+        # SIG's two pads, with a mounting hole sitting ON the first one — the
+        # NPTH-over-a-pad shape, which is ordinary board data, not a malformed
+        # board. Before round C2b this emitted a path starting inside the hole's
+        # keepout; now it correctly refuses, and must say why.
+        pads = [
+            Pad(component="P1", number="1", net="SIG", position=(5.0, 5.0),
+                size=(1.0, 1.0)),
+            Pad(component="P2", number="1", net="SIG", position=(15.0, 15.0),
+                size=(1.0, 1.0)),
+        ]
+        board = Board(width=20.0, height=20.0, pads=pads,
+                      nets={"SIG": Net(name="SIG", number=1, pads=pads)},
+                      obstacles=[Obstacle(position=(5.0, 5.0),
+                                          type="mounting_hole", radius=1.5)])
+
+        result = route_board(board, trace_width=0.25, clearance=0.2)
+
+        assert result.unrouted, "fixture must actually fail to route"
+        assert len(result.unrouted_reasons) == len(result.unrouted)
+        entry = result.unrouted_reasons[0]
+        assert entry["net"] == "SIG"
+        assert {entry["from"], entry["to"]} == {"P1.1", "P2.1"}
+        assert entry["reason"] == "start_blocked"
+        assert entry["layer"] == "F.Cu"
+
+    def test_a_board_that_routes_records_no_reasons(self):
+        """The list is not a running log — it says exactly as much as `unrouted`."""
+        from agent_router.board import Board, Net, Pad
+        from agent_router.router import route_board
+
+        pads = [
+            Pad(component="P1", number="1", net="SIG", position=(5.0, 5.0),
+                size=(1.0, 1.0)),
+            Pad(component="P2", number="1", net="SIG", position=(15.0, 15.0),
+                size=(1.0, 1.0)),
+        ]
+        board = Board(width=20.0, height=20.0, pads=pads,
+                      nets={"SIG": Net(name="SIG", number=1, pads=pads)})
+
+        result = route_board(board, trace_width=0.25, clearance=0.2)
+        assert result.unrouted == []
+        assert result.unrouted_reasons == []
+
+
+class TestAStarRefusesABlockedStart:
+    """Docket 019f9bf9c04a (severity 3) — A* validated every cell it stepped INTO
+    and never the one it started FROM.
+
+    Latent when found (on the canonical path the start is a pad of the net being
+    routed, so its own copper is not blocked for it), and nothing in the suite
+    exercised it. These tests are that exercise.
+    """
+
+    @staticmethod
+    def _grid_with_a_foreign_pad_over_the_start():
+        """A grid where (2.1, 2.0) is FOREIGN copper, and the two-point case is
+        reachable: start and end sit in the same 0.5mm cell, so A* pops the goal
+        immediately and `_simplify_path`'s ``len(points) <= 2`` early return hands
+        back ``start -> end`` with no chord verification anywhere."""
+        grid = RoutingGrid(width=10.0, height=10.0, resolution=0.5)
+        grid.mark_pad(x=2.25, y=2.0, size=(0.4, 0.4), net="OTHER", layer="F.Cu")
+        return grid
+
+    def test_a_blocked_start_yields_no_path_instead_of_unverified_copper(self):
+        from agent_router.pathfinder import _astar_path, _segment_clear
+
+        grid = self._grid_with_a_foreign_pad_over_the_start()
+        start, end = (2.1, 2.0), (2.4, 2.0)
+
+        # PREMISE, asserted so this test cannot pass vacuously: the start really
+        # is blocked for SIG, both points land in ONE cell (the two-point path),
+        # and the chord that used to be emitted really does run through foreign
+        # copper — i.e. there was something unsafe to stop, not merely an
+        # unnecessary path.
+        assert grid.can_route_through(start[0], start[1], "SIG") is False
+        assert grid._pos_to_cell(*start) == grid._pos_to_cell(*end)
+        assert _segment_clear(grid, start, end, "SIG", "F.Cu") is False
+
+        assert _astar_path(grid, start, end, "SIG", "F.Cu") is None
+        # ...and through the public entry point, with every strategy in play.
+        assert find_path(grid, start=start, end=end, net="SIG", layer="F.Cu") is None
+
+    def test_the_same_geometry_still_routes_for_the_net_that_owns_the_copper(self):
+        """POSITIVE CONTROL. The refusal must be about the start being blocked FOR
+        THIS NET, not about the geometry being small or the cell being occupied.
+        OTHER owns that pad, so OTHER may route out of it — which is exactly the
+        canonical case (a pad of the net being routed) the docket says keeps this
+        bug latent."""
+        from agent_router.pathfinder import _astar_path
+
+        grid = self._grid_with_a_foreign_pad_over_the_start()
+        start, end = (2.1, 2.0), (2.4, 2.0)
+
+        assert grid.can_route_through(start[0], start[1], "OTHER") is True
+        path = _astar_path(grid, start, end, "OTHER", "F.Cu")
+        assert path is not None
+        assert [(s.start, s.end) for s in path.segments] == [(start, end)]
 
 
 class TestSimplificationStaysInsideTheCorridor:

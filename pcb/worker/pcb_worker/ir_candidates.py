@@ -52,7 +52,10 @@ No approximated copper. A candidate that cannot be modeled faithfully — unknow
 net, unknown/foreign copper layer, zero-length segment, no declared width, a via
 with no declared diameter/drill — raises :class:`UnsupportedGeometry` and the
 whole reply becomes the INDETERMINATE union. Nothing is guessed and no partial
-verdict is emitted: a candidate list is checked completely or not at all.
+verdict is emitted: a candidate list is checked completely or not at all. The
+union NAMES the offending candidate (``error["candidate_id"]``) when the fault is
+attributable to one — see :class:`UnmodelableCandidate`, including the argument
+for why naming is as far as it is safe to go.
 
 Widths and via sizes are never INVENTED here. A caller must supply either
 per-candidate values or explicit defaults it can defend (``methods._route``
@@ -116,6 +119,46 @@ CANDIDATE_SCOPE = "geometric_candidate"
 # rather than a candidate. Same spelling `methods._draft_check` already uses, so
 # the two candidate-aware surfaces name the board the same way.
 BOARD_SUBJECT_ID = "board"
+
+
+class UnmodelableCandidate(UnsupportedGeometry):
+    """An :class:`UnsupportedGeometry` that knows WHICH candidate caused it.
+
+    THE BATCH VERDICT IS STILL BATCH-WIDE (docket 019f9cc3245d) — the option
+    chosen here, not the only safe one.
+
+    WHAT IS RULED OUT is the obvious relaxation: drop the offender and score the
+    survivors normally. That evaluates the survivors WITHOUT the dropped
+    candidate's copper, so a collision between it and a survivor simply vanishes
+    and the survivor comes back CLEAN. GC2/GC6 are pairwise, so this is not
+    hypothetical — it is the normal case for two ghosts routed near each other.
+    A false clean produced by malformed input is what fail-closed exists to
+    prevent.
+
+    A SAFE ALTERNATIVE DOES EXIST and is deliberately NOT implemented here: score
+    the survivors but never emit ``clean`` for any of them, reporting the findings
+    as SOUND BUT INCOMPLETE (every violation reported is real; absence of one
+    proves nothing, because the unmodelable candidate's copper was not in the
+    run). That is honest and strictly more useful than silence. It needs a
+    verdict token this union does not have — "violations, possibly more" is
+    neither ``clean`` nor ``indeterminate`` — so it is a design decision with a
+    wire-format consequence, not a refactor to slip into a bug-fix round.
+
+    What THIS class buys is the cheap part of that: NAMING the offender while the
+    batch verdict stays indeterminate — strictly more information, no change to
+    what any consumer may conclude. ``check_candidates`` puts the id in
+    ``error["candidate_id"]``.
+
+    The key is ABSENT, never null, when the fault is not attributable to one
+    candidate (a candidate that is not even a mapping; the IR rejecting the
+    assembled overlay). A consumer must be able to tell "this candidate is the
+    offender" from "the offender is unknown", and a None that reads as a default
+    would erase that difference.
+    """
+
+    def __init__(self, candidate_id: str, message: str):
+        super().__init__(message)
+        self.candidate_id = candidate_id
 
 
 # ---------------------------------------------------------------------------
@@ -242,97 +285,108 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
                 f"{type(cand).__name__}")
         cid = str(cand.get("candidate_id", "") or f"candidate:{ordinal}")
         if cid in revisions:
-            raise UnsupportedGeometry(
+            raise UnmodelableCandidate(
+                cid,
                 f"candidate {cid!r}: duplicate candidate_id — a finding could not "
                 f"be attributed to one ghost route")
         revision = cand.get("revision")
         ordered_ids.append(cid)
         revisions[cid] = revision
 
-        net_name = cand.get("net")
-        net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
-        if net_id is None:
-            # No net => no same-net exemption and no electrical meaning. Guessing
-            # (net_id=None) would make the candidate conflict with its OWN pads and
-            # report a short that does not exist, so fail closed instead.
-            raise UnsupportedGeometry(
-                f"candidate {cid!r}: net {net_name!r} is not a net of this board")
+        # ATTRIBUTION WRAPPER. Everything below is this ONE candidate's own
+        # projection, so any UnsupportedGeometry out of it names this candidate —
+        # including the ones raised inside helpers (`_copper_layer`) that have no
+        # idea whose geometry they are resolving. Re-raised as
+        # `UnmodelableCandidate` with the message VERBATIM: callers matching on
+        # the text (and `except UnsupportedGeometry`, which still catches this
+        # subclass) are unaffected; they gain a machine-readable id.
+        try:
+            net_name = cand.get("net")
+            net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
+            if net_id is None:
+                # No net => no same-net exemption and no electrical meaning. Guessing
+                # (net_id=None) would make the candidate conflict with its OWN pads and
+                # report a short that does not exist, so fail closed instead.
+                raise UnsupportedGeometry(
+                    f"candidate {cid!r}: net {net_name!r} is not a net of this board")
 
-        # Trace segments. One IR trace per candidate segment (drc_geometric
-        # projects per-segment capsules regardless of how they are grouped, and a
-        # per-segment trace keeps segment identity 1:1 with the ghost's own).
-        for seg_ordinal, seg in enumerate(cand.get("segments") or []):
-            if not isinstance(seg, dict):
-                continue
-            what = f"candidate {cid!r} segment[{seg_ordinal}]"
-            pts = _segment_points(seg)
-            if len(pts) < 2:
-                raise UnsupportedGeometry(
-                    f"{what}: needs at least two points, got {len(pts)}")
-            width = (positive_mm(seg.get("width_mm")) or positive_mm(seg.get("width"))
-                     or positive_mm(cand.get("width_mm"))
-                     or positive_mm(default_width_mm))
-            if width is None:
-                raise UnsupportedGeometry(
-                    f"{what}: no trace width declared and none supplied by the "
-                    f"caller — candidate copper is never modeled at a guessed width")
-            layer = _copper_layer(rb, seg.get("layer"), what)
-            sid = str(seg.get("id", "") or f"segment:{seg_ordinal}")
-            trace_id = derive_id("candidate-trace", rb.id, cid, str(revision),
-                                 sid, seg_ordinal)
-            ir_segments: list[ResolvedTraceSegment] = []
-            for leg, (a, b) in enumerate(zip(pts, pts[1:])):
-                if a == b:
+            # Trace segments. One IR trace per candidate segment (drc_geometric
+            # projects per-segment capsules regardless of how they are grouped, and a
+            # per-segment trace keeps segment identity 1:1 with the ghost's own).
+            for seg_ordinal, seg in enumerate(cand.get("segments") or []):
+                if not isinstance(seg, dict):
+                    continue
+                what = f"candidate {cid!r} segment[{seg_ordinal}]"
+                pts = _segment_points(seg)
+                if len(pts) < 2:
                     raise UnsupportedGeometry(
-                        f"{what}: zero-length leg at {a}")
-                seg_entity = derive_id("candidate-segment", trace_id, leg)
-                ir_segments.append(ResolvedTraceSegment(
-                    id=seg_entity, a=a, b=b, width_mm=width, layer=layer))
-                subjects[seg_entity] = {"candidate_id": cid, "revision": revision,
-                                        "segment_id": sid}
-            new_traces.append(ResolvedTrace(id=trace_id, net_id=net_id,
-                                            segments=tuple(ir_segments)))
-            subjects[trace_id] = {"candidate_id": cid, "revision": revision,
-                                  "segment_id": sid}
+                        f"{what}: needs at least two points, got {len(pts)}")
+                width = (positive_mm(seg.get("width_mm")) or positive_mm(seg.get("width"))
+                         or positive_mm(cand.get("width_mm"))
+                         or positive_mm(default_width_mm))
+                if width is None:
+                    raise UnsupportedGeometry(
+                        f"{what}: no trace width declared and none supplied by the "
+                        f"caller — candidate copper is never modeled at a guessed width")
+                layer = _copper_layer(rb, seg.get("layer"), what)
+                sid = str(seg.get("id", "") or f"segment:{seg_ordinal}")
+                trace_id = derive_id("candidate-trace", rb.id, cid, str(revision),
+                                     sid, seg_ordinal)
+                ir_segments: list[ResolvedTraceSegment] = []
+                for leg, (a, b) in enumerate(zip(pts, pts[1:])):
+                    if a == b:
+                        raise UnsupportedGeometry(
+                            f"{what}: zero-length leg at {a}")
+                    seg_entity = derive_id("candidate-segment", trace_id, leg)
+                    ir_segments.append(ResolvedTraceSegment(
+                        id=seg_entity, a=a, b=b, width_mm=width, layer=layer))
+                    subjects[seg_entity] = {"candidate_id": cid, "revision": revision,
+                                            "segment_id": sid}
+                new_traces.append(ResolvedTrace(id=trace_id, net_id=net_id,
+                                                segments=tuple(ir_segments)))
+                subjects[trace_id] = {"candidate_id": cid, "revision": revision,
+                                      "segment_id": sid}
 
-        # Vias.
-        for via_ordinal, via in enumerate(cand.get("vias") or []):
-            what = f"candidate {cid!r} via[{via_ordinal}]"
-            pos = candidate_via_position(via)
-            if pos is None:
-                raise UnsupportedGeometry(f"{what}: has no usable position")
-            via_dict = via if isinstance(via, dict) else {}
-            diameter = (positive_mm(via_dict.get("diameter_mm"))
-                        or positive_mm(default_via_diameter_mm))
-            drill = (positive_mm(via_dict.get("drill_mm"))
-                     or positive_mm(default_via_drill_mm))
-            if diameter is None or drill is None:
-                raise UnsupportedGeometry(
-                    f"{what}: no via diameter/drill declared and none supplied by "
-                    f"the caller — candidate copper is never modeled at a guessed "
-                    f"size")
-            if drill >= diameter:
-                raise UnsupportedGeometry(
-                    f"{what}: drill {drill} must be smaller than diameter {diameter}")
-            from_layer = _copper_layer(rb, via_dict.get("from_layer", "top"), what)
-            to_layer = _copper_layer(rb, via_dict.get("to_layer", "bottom"), what)
-            if from_layer.id == to_layer.id:
-                raise UnsupportedGeometry(
-                    f"{what}: span {from_layer.id!r}->{to_layer.id!r} does not "
-                    f"change layers")
-            vid = str(via_dict.get("id", "") or f"via:{via_ordinal}")
-            via_entity = derive_id("candidate-via", rb.id, cid, str(revision), vid,
-                                   via_ordinal)
-            new_vias.append(ResolvedVia(
-                id=via_entity, position=pos, diameter_mm=diameter, drill_mm=drill,
-                net_id=net_id, kind=ViaKind.THROUGH,
-                from_layer=from_layer.id, to_layer=to_layer.id,
-                # Tenting is a MASK property; it has no effect on any GC1-GC6
-                # copper/hole rule. The IR default (tented) is used rather than
-                # inventing a mask intent for a proposal.
-                tented_front=True, tented_back=True))
-            subjects[via_entity] = {"candidate_id": cid, "revision": revision,
-                                    "via_id": vid}
+            # Vias.
+            for via_ordinal, via in enumerate(cand.get("vias") or []):
+                what = f"candidate {cid!r} via[{via_ordinal}]"
+                pos = candidate_via_position(via)
+                if pos is None:
+                    raise UnsupportedGeometry(f"{what}: has no usable position")
+                via_dict = via if isinstance(via, dict) else {}
+                diameter = (positive_mm(via_dict.get("diameter_mm"))
+                            or positive_mm(default_via_diameter_mm))
+                drill = (positive_mm(via_dict.get("drill_mm"))
+                         or positive_mm(default_via_drill_mm))
+                if diameter is None or drill is None:
+                    raise UnsupportedGeometry(
+                        f"{what}: no via diameter/drill declared and none supplied by "
+                        f"the caller — candidate copper is never modeled at a guessed "
+                        f"size")
+                if drill >= diameter:
+                    raise UnsupportedGeometry(
+                        f"{what}: drill {drill} must be smaller than diameter {diameter}")
+                from_layer = _copper_layer(rb, via_dict.get("from_layer", "top"), what)
+                to_layer = _copper_layer(rb, via_dict.get("to_layer", "bottom"), what)
+                if from_layer.id == to_layer.id:
+                    raise UnsupportedGeometry(
+                        f"{what}: span {from_layer.id!r}->{to_layer.id!r} does not "
+                        f"change layers")
+                vid = str(via_dict.get("id", "") or f"via:{via_ordinal}")
+                via_entity = derive_id("candidate-via", rb.id, cid, str(revision), vid,
+                                       via_ordinal)
+                new_vias.append(ResolvedVia(
+                    id=via_entity, position=pos, diameter_mm=diameter, drill_mm=drill,
+                    net_id=net_id, kind=ViaKind.THROUGH,
+                    from_layer=from_layer.id, to_layer=to_layer.id,
+                    # Tenting is a MASK property; it has no effect on any GC1-GC6
+                    # copper/hole rule. The IR default (tented) is used rather than
+                    # inventing a mask intent for a proposal.
+                    tented_front=True, tented_back=True))
+                subjects[via_entity] = {"candidate_id": cid, "revision": revision,
+                                        "via_id": vid}
+        except UnsupportedGeometry as exc:
+            raise UnmodelableCandidate(cid, str(exc)) from exc
 
     try:
         board = replace(rb, traces=rb.traces + tuple(new_traces),
@@ -417,7 +471,8 @@ def finding_subjects(finding: dict, overlay: Overlay) -> list:
 
 
 def candidate_indeterminate(kind: str, message: str,
-                            diagnostics: tuple | list = ()) -> dict:
+                            diagnostics: tuple | list = (),
+                            *, candidate_id: str | None = None) -> dict:
     """The candidate-scoped INDETERMINATE union — case (c).
 
     Delegates to the geometric union's PUBLIC constructor
@@ -427,9 +482,18 @@ def candidate_indeterminate(kind: str, message: str,
     ``findings``/``counts``/``per_candidate``/``clean`` a caller could read as a
     pass. ``kind`` uses the shared vocabulary (docs/routing.md): ``parse`` |
     ``compile`` | ``unresolved_geometry`` | ``unsupported_geometry`` | ``route`` |
-    ``internal``."""
+    ``internal``.
+
+    ``candidate_id`` names the ONE candidate that could not be modeled, when the
+    fault is attributable to one (see :class:`UnmodelableCandidate`). It is added
+    inside ``error``, so it rides wherever that envelope already travels —
+    ``methods._attach_route_geometric_drc`` copies ``error`` verbatim onto every
+    route, so no consumer needs a new field to find it. The key is OMITTED when
+    the offender is unknown; it is never ``None``."""
     union = geometric_indeterminate(kind, message, diagnostics)
     union["scope"] = CANDIDATE_SCOPE
+    if candidate_id is not None:
+        union["error"]["candidate_id"] = candidate_id
     return union
 
 
@@ -443,12 +507,23 @@ def check_candidates(rb: ResolvedBoard, candidates: list, *,
     Returns the candidate-scoped union. See the module docstring for the three
     cases and for why the base/candidate partition is exactly the delta a second
     base-only kernel run would produce.
+
+    ONE UNMODELABLE CANDIDATE STILL MAKES THE WHOLE REPLY INDETERMINATE — it is
+    now NAMED as well. The two ``except`` arms below are the attributable and the
+    non-attributable case, kept apart deliberately rather than folded into one
+    ``getattr(exc, "candidate_id", None)``: "candidate X is the offender" and "the
+    offender is unknown" are different answers, and a default-valued key would
+    make them read the same. See :class:`UnmodelableCandidate` for why the verdict
+    stays batch-wide instead of dropping the offender and scoring the rest.
     """
     try:
         overlay = build_overlay(
             rb, candidates, default_width_mm=default_width_mm,
             default_via_diameter_mm=default_via_diameter_mm,
             default_via_drill_mm=default_via_drill_mm)
+    except UnmodelableCandidate as exc:
+        return candidate_indeterminate("unsupported_geometry", str(exc),
+                                       candidate_id=exc.candidate_id)
     except UnsupportedGeometry as exc:
         return candidate_indeterminate("unsupported_geometry", str(exc))
     except Exception as exc:  # noqa: BLE001 - fail-closed: a crash is NOT a clean.
