@@ -682,6 +682,52 @@ def _net_width(net_widths: Optional[NetWidths], net_name: Optional[str],
     return net_widths[net_name]
 
 
+# ---------------------------------------------------------------------------
+# RUN SCOPE (019f80a80123 / 019f6cf2b5f4).
+#
+# Both entry points below used to route EVERY net on the board with >= 2 pads,
+# always. A caller that asked for two nets got the whole board back — sixteen
+# proposals from two hints on the real smart-remote board — and every one of
+# them was then attributed to hints that never asked for it.
+#
+# `only_nets` scopes the run. It is deliberately applied at ONE place, to the
+# ordered net list the automatic loop walks, and NOWHERE else. Everything that
+# makes the board an obstacle course — pads (board.pads), accepted copper
+# (_mark_existing_copper), holes/keepouts (board.obstacles) — is marked on the
+# grid BEFORE this filter is consulted and is never filtered by it. That is the
+# load-bearing invariant of this parameter:
+#
+#     excluding a net from ROUTING must never exclude its copper from the GRID.
+#
+# A net left out of the run is still a wall the nets in the run must path
+# around. See tests/test_route_scope.py, which drives route() over a board whose
+# only clear path is blocked by an excluded net's accepted copper.
+#
+# Authored input (buses, chains, internal bridges) is NOT filtered — the
+# standing rule in docs/routing.md is that authored input is admitted or
+# rejected, never reinterpreted, the same reason the T7 group contraction is not
+# applied to bridges/chains below. Callers therefore must include any authored
+# net in `only_nets`; pcb_worker.methods._route does exactly that by building
+# the set from the hints it just translated.
+# ---------------------------------------------------------------------------
+
+
+def _scoped_nets(ordered: list[str], only_nets: Optional[set] = None) -> list[str]:
+    """Filter an ordered net list to the run's scope, order preserved.
+
+    ``None`` means "no scope given" — route everything, the historical
+    behaviour every unscoped caller (the CLI, design_review flows, every
+    pre-scope test) still gets. An EMPTY set is a real, honoured answer: it
+    means "the caller asked for a scoped run and nothing was in scope", which
+    routes nothing. Conflating the two is precisely the whole-board surprise
+    this parameter exists to remove, so ``if not only_nets`` would be wrong
+    here and ``is None`` is what is tested.
+    """
+    if only_nets is None:
+        return ordered
+    return [n for n in ordered if n in only_nets]
+
+
 def route_board(
     board: Board,
     allow_vias: bool = True,
@@ -695,9 +741,10 @@ def route_board(
     keepout_trace_width: Optional[float] = None,
     existing_traces: Sequence[ExistingSegment] = (),
     existing_vias: Sequence[ExistingVia] = (),
+    only_nets: Optional[set] = None,
 ) -> RoutingResult:
     """
-    Route all nets on a board.
+    Route the board's nets — all of them, or the ones in ``only_nets``.
 
     Args:
         board: Board to route
@@ -724,6 +771,10 @@ def route_board(
             already-connected, so the net may path along it and the pads it
             joins are not re-routed. Empty (every pre-T7 caller) is the
             unchanged behaviour.
+        only_nets: the run's SCOPE — see the module note above ``_scoped_nets``.
+            None (every pre-scope caller) routes every net, unchanged. A set
+            routes only those nets; the rest still occupy the grid as pads,
+            obstacles and accepted copper, so they remain obstacles.
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -787,8 +838,10 @@ def route_board(
 
     existing_by_net = _existing_copper_by_net(existing_traces, existing_vias)
 
-    # Get ordered list of nets to route
-    nets_to_route = _order_nets(board, order)
+    # Get ordered list of nets to route, narrowed to the run's scope. The
+    # filter sits HERE, after every grid marking above, so an out-of-scope net
+    # is absent from the routing loop but fully present on the grid.
+    nets_to_route = _scoped_nets(_order_nets(board, order), only_nets)
 
     # Route each net
     for net_name in nets_to_route:
@@ -1414,6 +1467,7 @@ def route_board_with_hints(
     keepout_trace_width: Optional[float] = None,
     existing_traces: Sequence[ExistingSegment] = (),
     existing_vias: Sequence[ExistingVia] = (),
+    only_nets: Optional[set] = None,
 ) -> RoutingResult:
     """
     Route a board using routing hints for guidance.
@@ -1446,6 +1500,15 @@ def route_board_with_hints(
             (T7, 019f70ebc9ed — see the module note above ``route_board``). It is
             marked on the SAME grid ``route_bus`` and the standard loop both
             draw on, so bus-routed nets see it too.
+        only_nets: the run's SCOPE — see the module note above ``_scoped_nets``.
+            Applied to the STANDARD net loop only. Buses are AUTHORED input and
+            are routed regardless, on the same "admitted or rejected, never
+            reinterpreted" rule that keeps the T7 group contraction off
+            bridges/chains below; a caller scoping a run must therefore put its
+            bus/chain/bridge nets in ``only_nets`` too, which is what
+            pcb_worker.methods._route does. Chains and bridges need no separate
+            carve-out — they are consumed INSIDE the standard loop, so the
+            filter already reaches them.
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -1553,8 +1616,13 @@ def route_board_with_hints(
             for route in bus_routes:
                 routed_nets.add(route.net)
 
-    # Route remaining nets with standard algorithm
-    nets_to_route = [n for n in _order_nets(board, order) if n not in routed_nets]
+    # Route remaining nets with standard algorithm, narrowed to the run's scope
+    # (see the module note above _scoped_nets). Ordering happens first, then the
+    # already-bus-routed nets drop out, then the scope filter — all three are
+    # pure list narrowing, so the order among them is not load-bearing; what IS
+    # load-bearing is that every grid marking above already happened.
+    nets_to_route = _scoped_nets(
+        [n for n in _order_nets(board, order) if n not in routed_nets], only_nets)
 
     # Jumper mode: track via budget
     jumper_mode = hints.global_hints.jumper_mode

@@ -535,6 +535,38 @@ def _check_bom(params: dict) -> dict:
 #      params.selection   = which hints feed the run:
 #                           {"mode":"open"|"all"|"ids"|"net", …} (default open)
 #
+# RUN SCOPE (019f80a80123, mechanism 019f6cf2b5f4) — WHICH NETS GET ROUTED:
+#
+#   route_hints ABSENT or EMPTY  -> the WHOLE board (every net with >= 2 pads).
+#                                   "Autoroute this board" is what a bare
+#                                   `route(board)` has always meant, it is the
+#                                   CLI's and every unhinted caller's contract,
+#                                   and there is no selection to narrow it with.
+#   route_hints NON-EMPTY        -> ONLY the nets the SELECTED hints implicate.
+#
+# "Implicates" = the nets those hints actually resolved to, taken verbatim from
+# the translation that is about to be handed to the engine
+# (HintTranslation.nets_by_hint + the nets of any materialized as-drawn hint) —
+# never re-derived, so scope and attribution cannot disagree. Before this, both
+# `selection` and `hint_ids` scoped only which hint ANNOTATIONS were consumed;
+# the engine still auto-routed everything, so two hints on the smart-remote
+# board returned SIXTEEN proposals, one per net.
+#
+# The empty scope is HONOURED, not widened: non-empty route_hints of which none
+# resolves to a net routes NOTHING and says so in `warnings`. Falling back to
+# the whole board there would reinstate exactly the surprise above, at the worst
+# possible moment — when the worker has just failed to understand the request.
+#
+# Nets OUT of scope are still fully present on the routing grid — their pads,
+# holes and accepted copper are all marked before the scope filter is consulted
+# (agent_router/router.py::_scoped_nets), so they remain obstacles. Excluding a
+# net from routing never excludes its copper from the grid.
+#
+# ATTRIBUTION: each returned route carries `hint_ids` — the hints that asked for
+# THAT net, not the run's whole selection. Absent-key contract, like "drc":
+# omitted entirely on an unhinted whole-board run, where no hint asked for
+# anything. `selected_hint_ids` (run-wide) stays what it always was.
+#
 # The NATIVE shape (grandchild-1's flat pad list, formerly fed through
 # _board_from_native) was RETIRED this round: it had no compile, no IR, no
 # connectivity DRC, no geometric DRC, and accepted a missing pad size as
@@ -1279,6 +1311,59 @@ def _attach_effective_routing_rules(
                 seg["width_mm"] = width
 
 
+def _hint_ids_by_net(nets_by_hint: dict, drawn_routes: list) -> dict:
+    """Invert {hint id: [nets]} into {net: [hint ids]} — the ATTRIBUTION map.
+
+    Both halves of the reply are covered: engine-routed nets come from the
+    translation's own record, as-drawn routes from the `hint_id` each one
+    already carries (route_bridge.materialize_detailed_hints stamps it, so
+    there is nothing to re-resolve there either).
+
+    Insertion order is preserved rather than sorted: it is the order the hints
+    were selected in, which is the order the caller listed them.
+    """
+    by_net: dict[str, list[str]] = {}
+    for hint_id, nets in nets_by_hint.items():
+        for net in nets:
+            ids = by_net.setdefault(str(net), [])
+            if hint_id and hint_id not in ids:
+                ids.append(hint_id)
+    for route in drawn_routes:
+        hid = str(route.get("hint_id", ""))
+        net = str(route.get("net", ""))
+        if not hid or not net:
+            continue
+        ids = by_net.setdefault(net, [])
+        if hid not in ids:
+            ids.append(hid)
+    return by_net
+
+
+def _authored_hint_nets(hints) -> set:
+    """Nets named by AUTHORED hint structures the engine routes OUTSIDE the
+    scope filter, or inside it but from a user-written pad list.
+
+    agent_router.route_board_with_hints routes buses before (and independently
+    of) the scoped net loop, and consumes chains/bridges inside it. Any net
+    named by one of those must therefore be IN the scope, or the run would
+    either ignore an explicit instruction (chain/bridge) or route a net the
+    scope says is out (bus). Folding them in here keeps `only_nets` a superset
+    of what the engine will touch BY CONSTRUCTION rather than by an argument
+    about which hint kinds route_bridge can currently emit.
+    """
+    nets: set = set()
+    for bus in getattr(hints, "buses", None) or []:
+        for net in getattr(bus, "nets", None) or []:
+            nets.add(str(net))
+    for chain in getattr(hints, "chains", None) or []:
+        if getattr(chain, "net", None):
+            nets.add(str(chain.net))
+    for bridge in getattr(hints, "internal_bridges", None) or []:
+        if getattr(bridge, "net", None):
+            nets.add(str(bridge.net))
+    return nets
+
+
 def _route(params: dict) -> dict:
     """Autoroute a board with the vendored agent_router engine.
 
@@ -1419,6 +1504,25 @@ def _route(params: dict) -> dict:
     bridge_warnings = drawn_warnings + translation.warnings
     selected_hint_ids = consumed_ids + [
         i for i in translation.selected_ids if i not in consumed_ids]
+
+    # RUN SCOPE + ATTRIBUTION (019f80a80123) — see the module note above for the
+    # rule and why the empty scope is honoured rather than widened.
+    hint_ids_by_net = _hint_ids_by_net(translation.nets_by_hint, drawn_routes)
+    only_nets: set | None = None
+    if envelopes:
+        only_nets = set(hint_ids_by_net) | _authored_hint_nets(translation.hints)
+        if not only_nets:
+            # Deliberately a warning and an empty run, NOT a whole-board
+            # fallback: the caller named hints, so it asked for a scoped run,
+            # and the hints failing to resolve is the moment to say so loudest.
+            # Every reason each individual hint failed is already in
+            # bridge_warnings above (route_bridge._net_for_hint records one per
+            # hint); this line names the CONSEQUENCE, which no per-hint warning
+            # can, because none of them knows it was the last one.
+            bridge_warnings = bridge_warnings + [{"id": "", "message":
+                "route_hints were supplied but none resolved to a net on this "
+                "board — nothing was routed (a hinted run is scoped to the "
+                "nets its hints name; see pcb/docs/routing.md, 'Run scope')"}]
     # Captured BEFORE the hint merge below, because afterwards "trace_width" in
     # kw no longer says WHICH of the two supplied it — that distinction only
     # exists here, and is what turns _effective_routing_rules_detailed's generic
@@ -1513,6 +1617,12 @@ def _route(params: dict) -> dict:
     # unhinted runs see the identical board.
     kw["existing_traces"] = existing_traces
     kw["existing_vias"] = existing_vias
+    # RUN SCOPE (019f80a80123), resolved above. Set HERE, beside the other engine
+    # kwargs, and deliberately AFTER the two lines above: `existing_traces` is
+    # the whole board's accepted copper and stays that way whatever the scope
+    # is. An out-of-scope net's copper is still marked on the grid — see
+    # agent_router/router.py::_scoped_nets.
+    kw["only_nets"] = only_nets
 
     try:
         if translation.hints.net_hints or translation.hints.buses \
@@ -1528,6 +1638,32 @@ def _route(params: dict) -> dict:
     if drawn_routes:
         payload["routes"] = drawn_routes + payload["routes"]
         payload["success"] = bool(payload.get("success", False)) or not payload.get("unrouted")
+    # PER-ROUTE ATTRIBUTION (019f80a80123). Stamped over the MERGED route list,
+    # so as-drawn and engine routes are attributed by the one map; and stamped
+    # only when hints were supplied, so an unhinted whole-board run carries no
+    # `hint_ids` key at all rather than an empty list that would read as "no
+    # hint wanted this" when the truth is "no hint was asked".
+    #
+    # A route whose net is in NO hint's list gets []. Writing the blanket
+    # `selected_hint_ids` here instead would be the exact field-that-lies this
+    # round exists to remove, and a field that lies is worse than no field at
+    # all (same ruling as routing-rule provenance, round A4).
+    #
+    # CORRECTED IN REVIEW — an earlier version of this comment claimed the []
+    # case "cannot happen under the scope above, because the scope IS the union
+    # of those lists". That is false: the scope is that union UNION
+    # `_authored_hint_nets`. A chain or bridge net reaches the run through the
+    # second term and is absent from `nets_by_hint`, so it would be stamped
+    # `hint_ids: []` — reading as "no hint wanted this" when a hint did.
+    # LATENT ONLY today: route_bridge.hints_to_router never emits chains or
+    # bridges, so the lists read above are always empty and no route can take
+    # that path. If chain/bridge authoring is ever wired up, `nets_by_hint`
+    # must gain those nets in the same pass, or this stamp starts lying.
+    if envelopes:
+        for route in payload.get("routes") or []:
+            if isinstance(route, dict):
+                route["hint_ids"] = list(
+                    hint_ids_by_net.get(str(route.get("net", "")), []))
     # Non-fatal COMPILE diagnostics travel with the proposal too (Codex ruling 2):
     # a route computed over a board that compiled with warnings must not look
     # indistinguishable from one that compiled clean.

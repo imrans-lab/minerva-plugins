@@ -93,12 +93,25 @@ _CROSSING_TRACE = [{"net": "EXIST", "layer": "top", "width_mm": 0.25,
 
 
 def _clean_board() -> dict:
-    """U1<->J1 (net SIG) ONLY — no second multi-pad net. FINDING (pre-existing,
-    confirmed by nudge hint pcb-plugin/router-reroutes-whole-board): route()
-    auto-routes EVERY net on the board with >=2 pads, not just the ones a hint
-    targets — so _board()'s EXIST net (A1/A2, 2 pads) would itself get routed
+    """U1<->J1 (net SIG) ONLY — no second multi-pad net.
+
+    HISTORY, because this docstring used to document a defect and the defect is
+    gone. It read: route() auto-routes EVERY net with >= 2 pads, not just the
+    ones a hint targets, so _board()'s EXIST net (A1/A2) would itself get routed
     and could produce its own crossing, contaminating a "nothing to report"
-    fixture. A clean-DRC fixture must therefore have only the one net."""
+    fixture — therefore a clean-DRC fixture must have only one net. That was a
+    true workaround for docket 019f6cf2b5f4 / 019f80a80123, and a working repro
+    of it.
+
+    FIXED: a hinted run is now scoped to the nets its hints name
+    (pcb/docs/routing.md, "Run scope"). Re-measured on this board: _board() with
+    the same detailed hint returns routes for SIG alone, drc clean, geometric
+    clean. So the second net can no longer contaminate anything, and this
+    fixture is now a simplification rather than a workaround — kept because a
+    one-net board is the smallest thing that makes the point, not because a
+    two-net one would break. The scoping itself is pinned by
+    tests/test_route_scope.py, which is where a regression would show up first.
+    """
     return {
         "version": 1,
         "name": "drc-at-propose-clean",

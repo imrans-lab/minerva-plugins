@@ -30,6 +30,104 @@ make a route unsafe and must not disable routing, while any dropped copper, dril
 or rule stays fatal. It is a strict subset of `FABRICATION_CRITICAL_OUTPUTS`, so a
 board that will not compile for routing will not compile for fabrication either.
 
+## Run scope — which nets a call actually routes (docket `019f80a80123`)
+
+**The rule, in one table.** It is a property of `route_hints`, nothing else.
+
+| `params.route_hints` | What gets routed |
+|---|---|
+| absent, or `[]` | **the whole board** — every net with >= 2 pads |
+| non-empty | **only the nets the selected hints resolve to** |
+
+Both answers are defensible; picking one silently is not, which is why this
+table exists. The reasoning:
+
+- **No hints ⇒ whole board.** `route(board)` with nothing else has always meant
+  "autoroute this board". It is `agent_router/cli.py`'s contract and every
+  unhinted caller's, and there is no selection to narrow it with. This is the
+  one use of the method that was never ambiguous, so it is left alone.
+- **Hints ⇒ scoped.** Before this, `selection` / `hint_ids` scoped only which
+  hint *annotations* were consumed. The engine went on auto-routing every net
+  with >= 2 pads, so two hints on the smart-remote board came back with
+  **sixteen proposals, one per net** — each tagged `proposal_for` the two hints
+  that never asked for them.
+- **An empty scope is honoured, not widened.** Non-empty `route_hints` of which
+  *none* resolves to a net (all malformed, or a `selection` that matches no
+  hint) routes **nothing**, and says so in `warnings`. Falling back to the whole
+  board there would reinstate the exact surprise above at the worst possible
+  moment — when the worker has just failed to understand the request. Every
+  individual reason is already in `warnings` from `route_bridge._net_for_hint`;
+  the added line names the consequence, which no per-hint warning can.
+
+**"Implicates" means the nets the hints actually resolved to** — taken verbatim
+from the translation that is about to be handed to the engine
+(`HintTranslation.nets_by_hint`, plus the net of any as-drawn hint), never
+re-derived afterwards. Concretely, per hint: an explicit `net_names[0]` **if the
+board has that net**, else the net of the first resolvable `source_pins` entry,
+else the first resolvable `dest_pins` entry; a `bus` hint implicates every one of
+its `net_names` **that the board actually carries** (the ones dropped with a
+warning are not in scope and are not attributed). Recording it during the same
+pass that resolves it is deliberate: a second resolution pass could disagree with
+the first, and that gap is how an attribution that lies gets built.
+
+Scope is a function of the **hints**, never of what copper is already on the
+board. A commit and its undo change the copper census; they never change which
+nets a hinted run touches.
+
+### Excluding a net from routing never excludes its copper from the grid
+
+This is the invariant to protect when touching any of this. A net left out of the
+run is still a **wall** the nets in the run must path around — its pads, its
+holes and its accepted copper are all obstacles exactly as before.
+
+It holds by construction, not by care: `only_nets` is consulted at **one** place,
+`agent_router/router.py::_scoped_nets`, applied to the ordered net list the
+automatic loop walks — and *every* grid marking (`grid.mark_pad` over
+`board.pads`, `_mark_existing_copper`, `grid.mark_obstacle`) has already happened
+by then. `existing_traces` is the whole board's accepted copper whatever the
+scope is.
+
+`only_nets=None` means "no scope given" and routes everything, which is what
+every pre-scope caller (the CLI, the tests) still gets. An **empty set** is a
+real answer meaning "scoped, and nothing was in scope". Conflating the two would
+reinstate the bug, so the code tests `is None`, never truthiness.
+
+Authored input — buses, chains, internal bridges — is **not** filtered by
+`only_nets`, on the standing rule that authored input is admitted or rejected,
+never reinterpreted (the same reason the T7 group contraction is not applied to
+bridges and chains). Callers must therefore include any authored net in the
+scope; `_route` does, via `_authored_hint_nets`, so the scope is a superset of
+what the engine will touch by construction rather than by an argument about which
+hint kinds the bridge can currently emit.
+
+### Attribution: `hint_ids` per route
+
+Each returned route carries **`hint_ids`** — the hints that asked for *that net*,
+not the run's whole selection. Absent-key contract, like `drc` and
+`drc_geometric`: an unhinted whole-board run carries no `hint_ids` at all, because
+an empty list would read as "no hint wanted this route" when the truth is that no
+hint was asked. As-drawn routes are attributed from the `hint_id` the
+materializer already stamped on them. `selected_hint_ids` is unchanged and still
+means what it always meant — *these hints fed the run* — which is exactly why it
+is not what attribution uses.
+
+Two hints that genuinely both name one net both appear on that net's route.
+Truthful is not the same as "exactly one id".
+
+**Not yet consumed by the panel.** `pcb/ui/panel_tools.gd::_source_hint_ids_for_net`
+still derives `proposal_for` by matching a route's net against each hint's
+`net_names`, and **falls back to every selected hint id** when none matches — the
+blanket list this round removed from the worker. Scoping shrinks the damage a
+lot (only implicated nets come back now), but a hint that named its net through
+`source_pins` rather than `net_names` still lands on that fallback. Switching
+that function to read the route's `hint_ids` is an out-of-fence follow-up; until
+it lands, `proposal_for` is truthful only where `hint_ids` and `net_names` agree.
+
+Pinned by `pcb/worker/tests/test_route_scope.py`, which drives `route()` for
+every one of these claims — including the docket's own repro (six routable nets,
+two hints, two proposals) and a grid probe proving an excluded net's copper is
+still blocking.
+
 ## What comes from the IR
 
 Position, rotation, side/mirror, copper-layer participation, net ownership, size,
@@ -668,6 +766,12 @@ In every failing case **zero routes** are returned — no partial proposal, no
   annulus is marked on every layer it spans. What remains refused is accepted
   copper on a layer or via span the 2-layer grid does not carry — narrowed, not
   deleted.
+- ~~Whole-board re-routing on a scoped request~~ — **done, docket
+  `019f80a80123`** (see "Run scope" above). What is LEFT is out of the worker's
+  fence: `pcb/ui/panel_tools.gd::_source_hint_ids_for_net` still builds
+  `proposal_for` from `net_names` with a blanket all-selected-hints fallback,
+  instead of reading the `hint_ids` each route now carries. The worker's half is
+  truthful; the panel's is truthful only where the two agree.
 - ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
   still accepted a missing size as `0x0`, the same class of fictional copper
   E1 removed from the canonical path — but rather than fix it, the shape

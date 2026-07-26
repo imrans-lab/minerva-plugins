@@ -682,11 +682,21 @@ class HintTranslation:
     crashing. ``trace_width_mm`` is the widest authored width among the
     selected hints (per-hint width has no RoutingHints slot — see module notes;
     the caller may adopt it as the run's trace_width).
+
+    ``nets_by_hint`` maps each selected hint's id to the net names THAT hint
+    resolved to — the run's scope and its per-route attribution, both
+    (019f80a80123). It is recorded by the SAME pass that already resolves each
+    hint's net, never re-derived afterwards: a second resolution pass could
+    disagree with the first (and would duplicate every warning
+    ``_net_for_hint`` emits), which is exactly how a `proposal_for` that lies
+    gets built. A hint that resolved to nothing is absent from the map, not
+    present-with-an-empty-list, so "which hints were usable" stays readable.
     """
     hints: RoutingHints
     warnings: list[dict] = field(default_factory=list)
     trace_width_mm: Optional[float] = None
     selected_ids: list[str] = field(default_factory=list)
+    nets_by_hint: dict[str, list[str]] = field(default_factory=dict)
 
 
 # Selection modes for which hints feed a routing run.
@@ -915,6 +925,8 @@ def hints_to_router(
     net_hints: list[dict] = []
     buses: list[dict] = []
     max_width: Optional[float] = None
+    # hint id -> nets THAT hint asked for. See HintTranslation.nets_by_hint.
+    nets_by_hint: dict[str, list[str]] = {}
 
     for env in selected:
         if not isinstance(env, dict):
@@ -960,6 +972,11 @@ def hints_to_router(
             if layer:
                 bus["preferred_layer"] = layer
             buses.append(bus)
+            # A bus hint asks for EVERY net it carries — but only the ones the
+            # board actually has, which is the same `present` list handed to the
+            # engine. Attributing the dropped `missing` nets to it would be the
+            # blanket-list lie in miniature.
+            nets_by_hint.setdefault(str(env.get("id", "")), []).extend(present)
             continue
 
         net = _net_for_hint(env, board, warnings)
@@ -974,6 +991,11 @@ def hints_to_router(
                 % kp.get("detail_level")})
         nh: dict = {"net": net, "waypoints": waypoints, "preferred_layer": layer}
         net_hints.append(nh)
+        # Recorded from the SAME `net` the engine is about to be hinted with —
+        # not re-resolved. See HintTranslation.nets_by_hint.
+        ids_for_net = nets_by_hint.setdefault(str(env.get("id", "")), [])
+        if net not in ids_for_net:
+            ids_for_net.append(net)
 
     hints_dict: dict = {}
     if net_hints:
@@ -985,6 +1007,7 @@ def hints_to_router(
     return HintTranslation(
         hints=hints,
         warnings=warnings,
+        nets_by_hint=nets_by_hint,
         trace_width_mm=max_width,
         selected_ids=selected_ids,
     )
