@@ -162,14 +162,10 @@ def _try_direct_path(
     layer: str
 ) -> Optional[Path]:
     """Try a direct straight-line path."""
-    segment = PathSegment(start=start, end=end, layer=layer)
+    if not _segment_clear(grid, start, end, net, layer):
+        return None
 
-    # Check all points along the path
-    for point in segment.points:
-        if not grid.can_route_through(point[0], point[1], net, layer):
-            return None
-
-    return Path(segments=[segment], net=net)
+    return Path(segments=[PathSegment(start=start, end=end, layer=layer)], net=net)
 
 
 def _try_l_path(
@@ -214,18 +210,12 @@ def _check_l_path(
     layer: str
 ) -> Optional[Path]:
     """Check if an L-shaped path through a corner is valid."""
-    seg1 = PathSegment(start=start, end=corner, layer=layer)
-    seg2 = PathSegment(start=corner, end=end, layer=layer)
+    if not _l_segments_clear(grid, start, corner, end, net, layer):
+        return None
 
-    for point in seg1.points:
-        if not grid.can_route_through(point[0], point[1], net, layer):
-            return None
-
-    for point in seg2.points:
-        if not grid.can_route_through(point[0], point[1], net, layer):
-            return None
-
-    return Path(segments=[seg1, seg2], net=net)
+    return Path(segments=[PathSegment(start=start, end=corner, layer=layer),
+                          PathSegment(start=corner, end=end, layer=layer)],
+                net=net)
 
 
 def _astar_path(
@@ -345,12 +335,13 @@ def _reconstruct_path(
         points.append(grid._cell_to_pos(*cell))
     points.append(end)  # Use exact end
 
-    # Simplify: merge collinear points
+    # Simplify: merge collinear points. Both branches are GRID-AWARE — see
+    # _simplify_path for why a geometry-only simplifier is not sound here.
     if prefer_orthogonal:
-        simplified = _simplify_orthogonal(points)
+        simplified = _simplify_orthogonal(points, grid, net, layer)
         simplified = _collapse_staircases(simplified, grid, net, layer)
     else:
-        simplified = _simplify_path(points)
+        simplified = _simplify_path(points, grid, net, layer)
 
     # Create segments
     segments = []
@@ -364,11 +355,110 @@ def _reconstruct_path(
     return Path(segments=segments, net=net)
 
 
-def _simplify_path(points: list[tuple[float, float]], tolerance: float = 0.1) -> list[tuple[float, float]]:
-    """Remove unnecessary waypoints from a path.
+def _segment_clear(
+    grid: RoutingGrid,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    net: str,
+    layer: str,
+) -> bool:
+    """Return True if a straight run from *start* to *end* is routable for *net*.
 
-    Uses perpendicular distance from each point to the line between its
-    neighbors. Points closer than ``tolerance`` mm are removed.
+    THE single owner of "may this net occupy this chord", sampled at
+    :attr:`PathSegment.points` resolution (0.1mm) — the same test
+    :func:`_try_direct_path` applies to a one-segment path and
+    :func:`_l_segments_clear` applies to each leg of an L. Simplification now
+    goes through it too, so a chord an emitted route contains is asked exactly
+    the question A* was asked about every cell it stepped through.
+    """
+    seg = PathSegment(start=start, end=end, layer=layer)
+    for pt in seg.points:
+        if not grid.can_route_through(pt[0], pt[1], net, layer):
+            return False
+    return True
+
+
+def _simplify_path(
+    points: list[tuple[float, float]],
+    grid: RoutingGrid,
+    net: str,
+    layer: str,
+    tolerance: float = 0.1,
+) -> list[tuple[float, float]]:
+    """Remove unnecessary waypoints from a path WITHOUT leaving its corridor.
+
+    Perpendicular distance from the last KEPT point is a cheap prefilter for
+    "this point looks droppable"; the grid is the authority on whether it may
+    actually be dropped. A point is removed only when the straight run that
+    would replace it is itself routable for this net.
+
+    WHY THE GRID AND NOT JUST BETTER GEOMETRY (docket 019f9bd5f2f2, severity 1).
+    This function used to be geometry-only, and measured each candidate against
+    ``simplified[-1]`` rather than against the original polyline. On a detour the
+    error accumulates monotonically along the curve: every point looks nearly
+    collinear with the one chord that keeps growing, so a path that correctly
+    hugged an obstacle was emitted as a single chord straight ACROSS it. A* was
+    never wrong — it found a legal detour; simplification then made it illegal.
+    Directly observed on tests/test_route_drc.py's crossing-wall fixture: 18
+    consecutive probe points along the emitted segment were blocked by the grid
+    and ``find_path`` returned that segment anyway, giving
+    ``gc2_copper_clearance`` violations of -0.20 to -0.64mm.
+
+    TWO FIXES WERE ON THE TABLE; THIS IS THE SECOND, AND THE FIRST IS NOT ENOUGH.
+    (1) measure deviation against the ORIGINAL polyline — textbook
+    Douglas-Peucker, the smaller change. Measured, not assumed: on the
+    crossing-wall fixture it DOES come out clean (11 segments where this fix
+    emits 3), so it would have passed the headline test. It is still rejected,
+    because what it guarantees is a DEVIATION bound and what is needed is a
+    CLEARANCE bound, and here the two are numerically indistinguishable —
+    ``tolerance`` is 0.1mm and ``router.route_board``'s default
+    ``grid_resolution`` is ALSO 0.1mm (router.py:692), so a chord is licensed to
+    wander a full cell sideways off the path A* proved clear.
+    The counterexample is a ONE-CELL JOG, which is exactly what A* emits when it
+    steps around a single blocked cell: for the polyline (4.95, 0.05) ->
+    (5.05, 0.05) -> (5.15, 0.15) -> (5.25, 0.05) -> (5.35, 0.05) around a cell
+    blocked at (5.15, 0.05), the jog point's deviation from the chord evaluates to
+    0.09999999999999999 — STRICTLY LESS than the 0.1 tolerance. Douglas-Peucker
+    therefore drops it and emits a chord straight through the blocked cell under
+    EITHER comparison, ``>`` or ``>=``. This is deliberately not described as a
+    knife-edge tie: a reader who thought the failure hung on a ``>`` / ``>=``
+    choice could dismiss it as a tuning question, and it is not one — no tolerance
+    at or above one cell can be made safe by tightening the comparison, because
+    the chord is a full cell away from the path A* proved. Verified against a real
+    ``RoutingGrid``; it is regression-locked by
+    ``test_simplification_keeps_a_one_cell_jog_douglas_peucker_would_drop`` in
+    tests/agent_router/test_pathfinder.py, so this paragraph cannot rot into a
+    claim nothing checks.
+    (2) re-verify the chord against the grid. It enforces the property that
+    actually matters instead of a proxy for it, and it CANNOT be wrong: the
+    unsimplified polyline is always available as the fallback, so the worst case
+    is a route with more vertices, never one through copper.
+
+    COST, MEASURED: this is O(N^2) in the number of A* points. Each drop re-probes
+    the whole grown chord, and the chord is a different line each time, so there
+    is nothing to reuse from the previous probe. Timed on a straight run — the
+    worst case, since every point is droppable and the chord grows to full length:
+    N = 200 / 500 / 1000 / 2000 -> 0.007 / 0.044 / 0.182 / 0.737s (clean 4x per
+    doubling, i.e. quadratic as stated; absolute numbers are machine-dependent,
+    the SHAPE is the claim). Bounded and
+    monotone (the loop is a single forward pass; the inner probe is finite), so it
+    cannot hang, but it IS on the routing hot path and a board that produced tens
+    of thousands of A* points would feel it. Left quadratic deliberately rather
+    than optimised speculatively: the same incremental anchoring that costs the
+    time is what makes each emitted segment individually verified.
+
+    THE SIMPLIFIER CAN SEE THE GRID — no new dependency crosses any boundary.
+    ``_reconstruct_path`` already holds ``grid``/``net``/``layer`` (it hands all
+    three to :func:`_collapse_staircases` on the orthogonal branch), so option 2
+    costs three arguments that were already in scope. Had the grid NOT been
+    reachable this would have been reported rather than plumbed.
+
+    TRAP for anyone tuning this loop: the chord that must be verified is
+    ``simplified[-1] -> points[i + 1]``, i.e. the run as it would be AFTER this
+    drop, not ``prev -> curr``. Every emitted segment is the chord checked at the
+    last drop before its far endpoint was kept, so each one is verified exactly
+    once. Checking the pre-drop run instead would verify a segment that is never
+    emitted and re-open this bug in a form that still passes a naive test.
     """
     if len(points) <= 2:
         return points
@@ -399,17 +489,59 @@ def _simplify_path(points: list[tuple[float, float]], tolerance: float = 0.1) ->
         # If not collinear, keep the point
         if perp_dist > tolerance:
             simplified.append(curr)
+            continue
+
+        # Looks droppable. It only IS droppable if what replaces it stays inside
+        # the corridor the unsimplified path occupied.
+        if not _segment_clear(grid, prev, next_pt, net, layer):
+            simplified.append(curr)
 
     simplified.append(points[-1])
     return simplified
 
 
-def _simplify_orthogonal(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+def _simplify_orthogonal(
+    points: list[tuple[float, float]],
+    grid: RoutingGrid,
+    net: str,
+    layer: str,
+) -> list[tuple[float, float]]:
     """Simplify a path while preserving orthogonal (H/V) segments.
 
     Merges consecutive segments that share the same cardinal direction
     (both horizontal or both vertical). Uses direction comparison instead
     of distance tolerance to avoid collapsing staircase steps into diagonals.
+
+    The ``_segment_clear`` call is a DEFENSIVE GUARD, NOT A BUG FIX, and it is
+    UNEXERCISED BY THE ENGINE TODAY. Saying so plainly because an earlier draft of
+    this docstring claimed it closed a real terminal-step defect, and that claim
+    was false — cold review flagged it, and working it through proves the merge is
+    exact under the invariant this function is actually called with:
+
+    * ``_reconstruct_path`` is the only caller, and it reaches here only when
+      ``prefer_orthogonal`` made A* CARDINAL, so consecutive interior points are
+      cell CENTRES differing on exactly one axis. Merging two same-direction steps
+      between them sweeps precisely the cells the two steps swept.
+    * the two ends are the case that looked dangerous, because the exact start and
+      end replace the first and last cell centres and ``_direction`` classifies by
+      ``abs(dx) > abs(dy)``. It is not: the start lies INSIDE its own cell, so
+      ``|dx|`` to that cell's centre is at most ``resolution / 2``, while a
+      vertical move to the adjacent row's centre gives ``|dy|`` of at least
+      ``resolution / 2``. ``|dx| > |dy|`` — the "H" test — therefore cannot select
+      a move that changed row, and vice versa. Classification is exact.
+    * given that, every point merged by an H run shares one row, and the exact
+      start/end lie inside that same row's span, so every y on the chord is a
+      convex combination of values within one row: the chord cannot leave it.
+      Symmetrically for V.
+
+    So the guard is kept for the INVARIANT, not for a known defect: it is what
+    catches a future change that feeds this function non-cell-centre points or
+    lets a diagonal move through under ``prefer_orthogonal``, either of which
+    silently breaks the convexity argument above. Deleting it leaves the whole
+    suite green, which is expected rather than a coverage gap — the honest test
+    for a guard is that it fires when its premise is violated, and that is
+    ``test_the_orthogonal_guard_fires_when_the_cell_centre_invariant_is_broken``
+    in tests/agent_router/test_pathfinder.py.
     """
     if len(points) <= 2:
         return points
@@ -433,8 +565,11 @@ def _simplify_orthogonal(points: list[tuple[float, float]]) -> list[tuple[float,
         dir_in = _direction(prev, curr)
         dir_out = _direction(curr, next_pt)
 
-        # Merge only if both segments go the same cardinal direction
-        if dir_in == dir_out and dir_in in ("H", "V"):
+        # Merge only if both segments go the same cardinal direction AND the
+        # merged run is routable (see the docstring: exact for interior steps,
+        # load-bearing at the two terminals).
+        if (dir_in == dir_out and dir_in in ("H", "V")
+                and _segment_clear(grid, prev, next_pt, net, layer)):
             continue  # Skip curr — extend prev→next directly
         simplified.append(curr)
 
@@ -549,12 +684,8 @@ def _l_segments_clear(
     layer: str,
 ) -> bool:
     """Return True if both legs of an L-path are routable."""
-    for seg_start, seg_end in [(start, corner), (corner, end)]:
-        seg = PathSegment(start=seg_start, end=seg_end, layer=layer)
-        for pt in seg.points:
-            if not grid.can_route_through(pt[0], pt[1], net, layer):
-                return False
-    return True
+    return all(_segment_clear(grid, seg_start, seg_end, net, layer)
+               for seg_start, seg_end in [(start, corner), (corner, end)])
 
 
 def _try_via_path(

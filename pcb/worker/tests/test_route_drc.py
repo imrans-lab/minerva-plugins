@@ -150,19 +150,15 @@ def test_the_router_routes_around_accepted_foreign_copper_instead_of_over_it():
     hint materializes AS DRAWN, bypassing the grid entirely, so it could not tell
     a seen wall from an unseen one.
 
-    WHAT THIS DOES **NOT** CLAIM: that the resulting proposal is geometrically
-    clean. It is not — `drc_geometric` reports a `gc2_copper_clearance` violation
-    against A2's land on this fixture, and the cause is NOT the grid.
-    `agent_router.pathfinder._simplify_path` measures each point's deviation
-    against the last KEPT point, so error accumulates along a gentle detour and a
-    curve that hugged an obstacle collapses into a chord straight through it.
-    Verified directly: the grid blocks nine consecutive probe points along the
-    emitted segment, and `find_path` still returns that segment. Pre-existing and
-    OUT OF THIS ROUND'S FENCE (`pathfinder.py`), but only reachable since
-    accepted-copper boards became routable at all — filed as a finding rather
-    than papered over here. Asserting `verdict == "clean"` would be a false claim;
-    the sealed-wall case in test_route_rules.py is the geometric assertion that
-    can be made honestly."""
+    THE GEOMETRIC CLAIM IS NOW MADE (019f9bd5f2f2). This docstring used to carry a
+    caveat that "routes around" did NOT mean "geometrically clean", because
+    `pathfinder._simplify_path` collapsed the detour into a chord back through
+    A2's land — 18 blocked probe points on the emitted segment, and a
+    `gc2_copper_clearance` violation to show for it. The simplifier now re-checks
+    every chord against the grid before dropping a point, so the caveat is gone
+    and the assertion it was standing in for is made directly below. The
+    corridor-level proof (probe the grid along every emitted segment) is
+    `test_no_emitted_segment_crosses_a_cell_the_routing_grid_blocked`."""
     resp = _call("route", {"board": _board(_CROSSING_TRACE)})
     assert resp["ok"] is True, resp
 
@@ -176,6 +172,111 @@ def test_the_router_routes_around_accepted_foreign_copper_instead_of_over_it():
             f"proposed SIG segment {start}->{end} crosses the accepted EXIST trace"
     # And the connectivity kernel agrees, over the same board: no crossing found.
     assert resp["result"]["drc_summary"]["clean"] is True, resp["result"]
+    # The geometric overlay — the real short detector, not the centerline-only
+    # connectivity kernel — agrees too. This is the assertion the pre-019f9bd5f2f2
+    # caveat said could not honestly be made.
+    assert resp["result"]["drc_geometric_summary"]["verdict"] == "clean", \
+        resp["result"]["drc_geometric_summary"]
+
+
+def _route_probing_the_real_grid(monkeypatch, board: dict) -> tuple[dict, list[str]]:
+    """Drive ``route()`` and probe the grid IT ACTUALLY USED along every segment
+    it emitted. Returns (result payload, list of human-readable violations).
+
+    The grid is captured rather than rebuilt: a re-derived grid is a second copy
+    of route_board's construction (resolution, clearance, trace_width, origin,
+    which copper got marked and in what order), and a probe against a grid that
+    merely resembles the router's own proves nothing about the router. Patching
+    the name ``agent_router.router.RoutingGrid`` catches it at the one place
+    route_board builds it (router.py:736).
+
+    Probing is at ``PathSegment.points`` resolution — the SAME sampling A* and
+    `_segment_clear` use — so "the grid blocks this point" means exactly what it
+    means inside the pathfinder.
+    """
+    from agent_router import router as router_mod
+    from agent_router.grid import RoutingGrid
+    from agent_router.pathfinder import PathSegment
+
+    captured: list[RoutingGrid] = []
+
+    class _RecordingGrid(RoutingGrid):
+        def __post_init__(self):
+            super().__post_init__()
+            captured.append(self)
+
+    monkeypatch.setattr(router_mod, "RoutingGrid", _RecordingGrid)
+
+    resp = _call("route", {"board": board})
+    assert resp["ok"] is True, resp
+    assert captured, "route() never built a RoutingGrid — the probe saw nothing"
+    grid = captured[-1]
+
+    problems: list[str] = []
+    for route in resp["result"]["routes"]:
+        net = route["net"]
+        for seg in route["segments"]:
+            start = (seg["start"][0], seg["start"][1])
+            end = (seg["end"][0], seg["end"][1])
+            layer = seg["layer"]
+            blocked = [pt for pt in PathSegment(start=start, end=end,
+                                                layer=layer).points
+                       if not grid.can_route_through(pt[0], pt[1], net, layer)]
+            if blocked:
+                problems.append(
+                    f"{net} segment {start}->{end} on {layer}: "
+                    f"{len(blocked)} blocked probe point(s), "
+                    f"first {blocked[0]}, last {blocked[-1]}")
+    return resp["result"], problems
+
+
+def test_no_emitted_segment_crosses_a_cell_the_routing_grid_blocked(monkeypatch):
+    """THE decisive test for 019f9bd5f2f2: a simplified path must stay inside the
+    corridor the unsimplified path occupied.
+
+    A* was never the problem — it finds a legal detour around the EXIST wall.
+    `_simplify_path` then measured each candidate's deviation against the last
+    KEPT point, so error accumulated monotonically along the detour and the whole
+    curve collapsed into one chord straight across A2's land. This test states the
+    property that failed, in the terms the router itself uses: take the grid
+    route() routed against, walk every segment route() emitted, and assert the
+    grid would have permitted every point of it.
+
+    It is deliberately NOT a test of `_simplify_path` in isolation. This campaign
+    has been burned by tests that exercised a helper directly and never its call
+    sites; the bug lives in the gap between "A* proved these cells clear" and
+    "these are the segments we shipped", and only the real entry point spans it.
+
+    MEASURED BEFORE THE FIX: 18 blocked probe points on the first of two emitted
+    segments, running from (29.28, 34.83) to (30.62, 35.86) — straight through
+    A2's pad at (30, 35). AFTER: three segments, zero blocked points.
+    """
+    result, problems = _route_probing_the_real_grid(
+        monkeypatch, _board(_CROSSING_TRACE))
+
+    assert [r["net"] for r in result["routes"]] == ["SIG"], result
+    assert result["routes"][0]["segments"], "no segments to probe — vacuous pass"
+    assert problems == [], (
+        "the router emitted copper through cells its own grid blocked:\n  "
+        + "\n  ".join(problems))
+
+
+def test_the_detour_that_exposed_the_bug_is_geometrically_clean(monkeypatch):
+    """The same detour, judged by the geometric DRC overlay rather than by the
+    grid — the two are independent verdicts and 019f9bd5f2f2 broke both.
+
+    `drc_geometric` reported `gc2_copper_clearance` violations of -0.20 to
+    -0.64mm on this board. Grid probes and the geometric overlay can disagree
+    (the grid is quantised and models a keepout, the overlay measures real copper
+    against fab rules), so a fix that satisfied only one of them would be half a
+    fix. Both are asserted, in separate tests, on purpose.
+    """
+    result, _ = _route_probing_the_real_grid(monkeypatch, _board(_CROSSING_TRACE))
+    summary = result["drc_geometric_summary"]
+    assert summary["ok"] is True, summary
+    assert summary["verdict"] == "clean", summary
+    assert not [f for f in summary["findings"]
+                if f.get("rule") == "gc2_copper_clearance"], summary
 
 
 def test_a_net_the_accepted_copper_already_joins_is_not_proposed_again():

@@ -519,6 +519,95 @@ there** — with no B.Cu in the grid nothing routes on B.Cu, and no via can be
 proposed (`allow_via = allow_vias and not single_layer`), so there is nothing
 that could cross the copper being skipped.
 
+## Path simplification stays inside the corridor (docket `019f9bd5f2f2`)
+
+A* proves clearance **per cell it steps through**: every neighbour it expands is
+asked `can_route_through` before it is entered. What it returns is therefore a
+legal detour, one grid cell at a time. Simplification runs *after* that, to turn
+that cell-by-cell polyline into a handful of segments — and it used to be purely
+geometric, which meant nothing re-checked the copper it was about to emit.
+
+The rule was "drop a point whose perpendicular distance from the run is under
+0.1mm", with the distance measured against the **last kept point**. On a detour
+the error accumulates monotonically along the curve: each successive point looks
+nearly collinear with the one ever-growing chord, so a path that had correctly
+hugged an obstacle was emitted as a single chord straight **across** it. The
+search was never wrong; simplification made its answer illegal. Observed on
+`tests/test_route_drc.py`'s crossing-wall fixture: 18 consecutive probe points
+along the emitted segment were blocked by the routing grid, `find_path` returned
+that segment anyway, and the proposal carried `gc2_copper_clearance` violations
+of −0.20 to −0.64mm. It became common only once boards with accepted copper
+became routable at all (`019f70ebc9ed`), because those are the boards that
+produce detours.
+
+**The invariant now enforced:** a point may be dropped only if the straight run
+that replaces it is itself routable for that net. `_segment_clear` is the single
+owner of that question, sampled at the same 0.1mm resolution `_try_direct_path`
+and `_l_segments_clear` already used, so a chord an emitted route contains is
+asked exactly what A* was asked about every cell. `_segment_clear` is now the
+**only** chord check in the module — `_try_direct_path`, `_check_l_path` and
+`_l_segments_clear` all route through it, so "single owner" is a fact rather
+than a label. The one remaining `can_route_through` call outside it is A*'s own
+per-cell test.
+
+The **diagonal** branch (`_simplify_path`) is where the defect was. The
+**orthogonal** branch (`_simplify_orthogonal`) also calls the check, but there it
+is a **defensive guard on an invariant, not a bug fix, and no engine input
+exercises it**: under `prefer_orthogonal` A* is cardinal, so interior points are
+cell centres one axis apart and a same-direction merge is exact. The two ends
+look dangerous — the exact start/end replace the first/last cell centre — and are
+not: the start lies inside its own cell, so `|dx|` to that centre is at most
+`resolution / 2`, while a vertical move to the next row's centre gives `|dy|` of
+at least `resolution / 2`, so the `|dx| > |dy|` test cannot misclassify a row
+change. Deleting that one check leaves the whole suite green, which is expected;
+the honest test for a guard is that it fires when its premise is violated, and
+that is what `test_the_orthogonal_guard_fires_when_the_cell_centre_invariant_is_
+broken` does. `_collapse_staircases` already re-checked its L-bends this way.
+
+**Why not just fix the geometry.** The smaller change was textbook
+Douglas–Peucker — measure deviation against the *original* polyline instead of
+the last kept point. It was measured, and on the crossing-wall fixture it does
+come out clean. It is still not enough, because what it bounds is **deviation**
+and what is needed is **clearance**, and here the two are the same number:
+the tolerance is 0.1mm and `route_board`'s default `grid_resolution` is also
+0.1mm, so a chord is licensed to wander a full cell off the path A* proved. The
+counterexample is the commonest detour there is, a **one-cell jog** around a
+single blocked cell: the jog point's deviation from the chord evaluates to
+`0.09999999999999999`, *strictly less* than the 0.1 tolerance, so Douglas–Peucker
+drops it and emits a chord through the blocked cell under either `>` or `>=`.
+This is not a knife-edge comparison choice that could be tuned away — no
+tolerance at or above one cell is safe, because the chord ends up a full cell off
+the path A* proved.
+
+**The trade, stated plainly.** Verifying incrementally means that when a chord is
+blocked the simplifier anchors at the last *verified* point, even where some
+longer chord past it would have been clear. So routes can carry more vertices
+than before: the 3-pin net-classed fixture went from 4 segments to 6. Both of
+those are clean — the pre-fix 4 was probed and had zero blocked points — but only
+one of them is *proved* clean, and the failure direction is extra vertices rather
+than copper through a keepout. That is the same asymmetry the keepout margin is
+built on: over-blocking is a cost, under-blocking is a defect.
+
+The other half of the cost is time: simplification is **O(N²)** in the number of
+A* points, because each drop re-probes the whole grown chord and the chord is a
+different line every time, so nothing carries over. Measured on the worst case (a
+straight run, every point droppable): N = 200 / 500 / 1000 / 2000 → 0.007 / 0.044
+/ 0.182 / 0.737s — a clean 4× per doubling. It is a single forward pass with a
+finite inner probe, so it cannot hang, but it is on the routing hot path and a
+board producing tens of thousands of A* points would feel it. Left quadratic
+deliberately: the incremental anchoring that costs the time is exactly what makes
+each emitted segment individually verified.
+
+Tested at the entry point, not on the helper:
+`test_no_emitted_segment_crosses_a_cell_the_routing_grid_blocked` drives
+`route()`, captures the grid the router actually built, and asserts no probe
+point along any emitted segment is blocked;
+`test_the_detour_that_exposed_the_bug_is_geometrically_clean` asserts the
+independent geometric-DRC verdict on the same detour. The Douglas–Peucker
+counterexample is regression-locked in
+`tests/agent_router/test_pathfinder.py`, alongside a test that a genuinely
+collinear run still collapses — so "stop simplifying" cannot pass as a fix.
+
 ## Fail-closed reasons
 
 | `error.kind` | Meaning |

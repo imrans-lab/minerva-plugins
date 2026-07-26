@@ -1100,13 +1100,16 @@ def test_invisible_foreign_copper_would_short_and_visible_copper_does_not():
     the centerline-only connectivity kernel) reports `violations`. That is the
     short this item exists to prevent, demonstrated rather than asserted about.
 
-    WHY THIS FIXTURE AND NOT A DETOUR ONE: `agent_router.pathfinder._simplify_path`
-    collapses an A* detour into a chord that can pass through cells the grid
-    correctly blocked (see the finding filed against this round — the grid blocks,
-    the simplifier then cuts the corner). Any fixture whose right answer is a
-    detour therefore reports geometric violations for a reason that has nothing to
-    do with whether the copper was seen. A fully-sealed board has no detour to
-    simplify, so it isolates exactly the behaviour under test.
+    WHY THIS FIXTURE AND NOT A DETOUR ONE: a fully-sealed board has no detour to
+    simplify, so it isolates exactly the behaviour under test — whether the
+    accepted copper was SEEN — from anything the path simplifier does with a
+    curve. That separation was originally forced: `_simplify_path` used to
+    collapse an A* detour into a chord through cells the grid correctly blocked,
+    so any detour fixture reported geometric violations for an unrelated reason.
+    That defect is fixed (019f9bd5f2f2), and the detour case now carries its own
+    geometric assertion — see
+    tests/test_route_drc.py::test_the_detour_that_exposed_the_bug_is_geometrically_clean.
+    This fixture stays as-is regardless: one test, one variable.
     """
     sealed = _call_route({"board": _walled_board(with_copper=True)})
     assert sealed["ok"] is True, sealed
@@ -1710,7 +1713,7 @@ def test_the_three_pin_fixture_routes_a_net_classed_net_end_to_end(
     WHAT THIS DOES NOT COVER: gate 019f70f76c2f's two-disconnected-paths +
     layer-changing-via shape. Verified (both with and without a net class):
     the real pathfinder on THIS geometry needs no via and produces ONE
-    connected F.Cu polyline of exactly 4 segments, 0 vias — nothing in this
+    connected F.Cu polyline of exactly 6 segments, 0 vias — nothing in this
     fixture forces a layer change, so the engine never chooses one. That
     shape is a property of the geometry, not of net classing, so a
     net-class-specific fixture cannot make the real engine produce it either
@@ -1735,7 +1738,19 @@ def test_the_three_pin_fixture_routes_a_net_classed_net_end_to_end(
     # The real engine's actual shape for this geometry (pinned so a future
     # change to the geometry or the engine that DOES start needing a via is
     # noticed here, rather than this test silently keeping stale numbers).
-    assert len(sig["segments"]) == 4
+    #
+    # WAS 4 BEFORE 019f9bd5f2f2, AND THE OLD 4 WAS NOT A BUG. Stated plainly
+    # because "the expected value moved" usually means a test had encoded a
+    # defect, and this one had not: the pre-fix 4-segment polyline was probed
+    # against the routing grid and had ZERO blocked points, i.e. it was a legal
+    # simplification that happened to be safe. The count rose because the
+    # simplifier now REFUSES any drop whose replacement chord it has not proved
+    # clear, and it decides incrementally — when an intermediate chord is
+    # blocked it anchors at the last verified point, even in cases where some
+    # longer chord past it would have been clear. That is the deliberate trade
+    # (see pathfinder._simplify_path): the failure mode is extra vertices, never
+    # copper through a keepout. Both shapes are clean; only one is *proved* so.
+    assert len(sig["segments"]) == 6
     assert sig["vias"] == []
     assert {s["layer"] for s in sig["segments"]} == {"F.Cu"}
 
