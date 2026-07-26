@@ -475,6 +475,42 @@ MUTANTS: tuple[dict, ...] = (
                      "(docket 019f783860c8 gap C), so every coordinate on a board that "
                      "does not start at (0, 0) is offset.",
     },
+    {
+        # Added in T0 wave 2. NOTE FOR WHOEVER READS THE SWEEP: this mutant is
+        # KILLED, and was killed BEFORE the loop-assertion tightening that
+        # prompted it — `test_smart_remote_structure` already pins
+        # `len(board.holes) == 4`. It earns its place on the defect shape, not on
+        # having exposed a gap: silently dropping every NPTH hole means the drill
+        # file loses mounting holes while the board still looks well-formed.
+        "id": "compile_unplated_holes_silently_dropped",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": "            holes.append(ResolvedHole(",
+        "replace": L(
+            "            if not raw_plated:",
+            "                continue",
+            "            holes.append(ResolvedHole(",
+        ),
+        "rationale": "Emits plated holes but silently drops unplated ones, so a board's "
+                     "NPTH mounting holes vanish from the IR (and the drill file) while "
+                     "every plated hole still arrives.",
+    },
+    {
+        # Added in T0 wave 2. Also killed pre-tightening, by the same
+        # `test_smart_remote_structure` census (`len(board.vias) == 4`).
+        # Deliberately `full`, not `half`: there is NO one-sided shape available
+        # at this site, because `kind=ViaKind.THROUGH` is hardcoded
+        # unconditionally in the constructor call, so no via attribute
+        # partitions the collection the way `plated` partitions holes.
+        "id": "compile_vias_constructed_then_discarded",
+        "file": COMPILE_BOARD,
+        "kind": "full",
+        "find": "        vias.append(ResolvedVia(",
+        "replace": "        _dropped_via = (ResolvedVia(",
+        "rationale": "Builds each via — so every per-via validation still runs and still "
+                     "reports — then throws it away instead of accumulating it, the "
+                     "shape a refactor that loses an accumulator leaves behind.",
+    },
 
     # ----------------------------------------------------- resolved_board --
     {
