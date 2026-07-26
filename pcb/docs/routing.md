@@ -620,10 +620,14 @@ that could cross the copper being skipped.
 ## Path simplification stays inside the corridor (docket `019f9bd5f2f2`)
 
 A* proves clearance **per cell it steps through**: every neighbour it expands is
-asked `can_route_through` before it is entered. What it returns is therefore a
-legal detour, one grid cell at a time. Simplification runs *after* that, to turn
-that cell-by-cell polyline into a handful of segments — and it used to be purely
-geometric, which meant nothing re-checked the copper it was about to emit.
+asked `can_route_through` before it is entered — and, since round C2d
+(`019f9d594f83`), a *diagonal* step is asked twice more, once for each of the two
+cells orthogonally adjacent to the step, so the corner the chord would cut is
+proved routable too, not just the destination cell. What it returns is
+therefore a legal detour, one grid cell at a time (and, for diagonal steps, one
+corner at a time). Simplification runs *after* that, to turn that cell-by-cell
+polyline into a handful of segments — and it used to be purely geometric, which
+meant nothing re-checked the copper it was about to emit.
 
 The rule was "drop a point whose perpendicular distance from the run is under
 0.1mm", with the distance measured against the **last kept point**. On a detour
@@ -680,10 +684,16 @@ the path A* proved.
 **The trade, stated plainly.** Verifying incrementally means that when a chord is
 blocked the simplifier anchors at the last *verified* point, even where some
 longer chord past it would have been clear. So routes can carry more vertices
-than before: the 3-pin net-classed fixture went from 4 segments to 6. Both of
-those are clean — the pre-fix 4 was probed and had zero blocked points — but only
-one of them is *proved* clean, and the failure direction is extra vertices rather
-than copper through a keepout. That is the same asymmetry the keepout margin is
+than before: the 3-pin net-classed fixture went from 4 segments to 6. (It later
+moved again, to 5, once round C2d (`019f9d594f83`) stopped A* from offering
+diagonal steps that cut a blocked cell's corner — fewer illegal-looking jogs
+reach the simplifier in the first place, so it anchors less often. All three
+counts are clean; only 6 and 5 are *proved* so end-to-end — and "proved" there
+means proved at `_segment_clear`'s 0.1mm sampling, which is itself
+corner-permissive, tracked as `019f9fb32de7`.) The pre-fix 4 was
+probed and had zero blocked points, but it was not *proved* clean the way the
+later counts are, and the failure direction here is extra vertices rather than
+copper through a keepout. That is the same asymmetry the keepout margin is
 built on: over-blocking is a cost, under-blocking is a defect.
 
 The other half of the cost is time: simplification is **O(N²)** in the number of

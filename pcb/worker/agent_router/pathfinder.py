@@ -426,6 +426,29 @@ def _astar_path(
             if not grid.can_route_through(nx, ny, net, layer):
                 continue
 
+            # A diagonal step's straight chord passes through the corner shared
+            # by the two cells orthogonally adjacent to `current` and `neighbor`
+            # — (current[0]+dx, current[1]) and (current[0], current[1]+dy). Those
+            # are never asked about above: the loop only validates the
+            # DESTINATION cell, and for a diagonal step that is not the same as
+            # the straight line between the two cell centres. If either
+            # corner-adjacent cell is not routable, the chord clips it even
+            # though both `current` and `neighbor` are themselves clear, so
+            # reject the step (019f9d594f83). Same predicate as the destination
+            # check above, so one notion of "blocked" governs the whole step.
+            #
+            # No bounds check needed on the corner cells: `neighbor` already
+            # passed `_cell_in_bounds` above, so (current[0]+dx, current[1])
+            # takes its column from `neighbor` and its row from `current` — both
+            # already known valid — and symmetrically for the other corner cell.
+            if dx != 0 and dy != 0:
+                corner1 = grid._cell_to_pos(current[0] + dx, current[1])
+                corner2 = grid._cell_to_pos(current[0], current[1] + dy)
+                if not grid.can_route_through(corner1[0], corner1[1], net, layer):
+                    continue
+                if not grid.can_route_through(corner2[0], corner2[1], net, layer):
+                    continue
+
             # Calculate cost (diagonal is sqrt(2) times cardinal)
             move_cost = math.sqrt(2) if dx != 0 and dy != 0 else 1.0
 
@@ -513,25 +536,27 @@ def _segment_clear(
     SIMPLIFICATION invents is asked this question too, which is what round B1a
     added and what :func:`_simplify_path` documents.
 
-    WHAT THIS DOES **NOT** MEAN, stated plainly because an earlier draft implied
-    it: a segment the pathfinder emits is NOT guaranteed to satisfy this
-    predicate. Simplification asks it about chords it CREATES; a segment that
-    survives as an ORIGINAL A* step was never asked, because A* validates the
-    CELL it steps into and not the straight line between the two cell centres.
-    Those differ for a DIAGONAL step: 8-way movement cuts the corner between the
-    two orthogonally-adjacent cells, and if one of those is blocked the emitted
-    segment clips it.
+    WHAT "verified" MEANS HERE, stated precisely because two earlier drafts of
+    this paragraph got it wrong in opposite directions. As of round C2d
+    (019f9d594f83), A*'s neighbour loop rejects a diagonal step whenever either
+    of the two cells orthogonally adjacent to the step (the corner the chord
+    would cut) fails ``can_route_through`` — so every ORIGINAL A* STEP has now
+    been checked across the full 2x2 cell block that step crosses, not just its
+    destination cell. SIMPLIFICATION-INVENTED CHORDS ARE NOT COVERED BY THAT
+    CHECK: the corner test lives in the neighbour loop, so a chord created by
+    :func:`_simplify_path` is verified only by this function's sampling, which
+    is the weaker guarantee described immediately below.
 
-    MEASURED, on a 4000-board fuzz (12x12mm, 0.5mm cells, random obstacles):
-    62 of 3403 emitted paths carry a segment this function rejects. ALL 62 are
-    ``prefer_orthogonal=False`` (cardinal A* cannot cut a corner), ALL 62 are
-    diagonal segments, and their lengths cluster on the one-cell diagonal
-    (0.707mm at 0.5mm resolution) — single A* steps, not simplified chords. The
-    count is IDENTICAL before and after round C2b, so this is pre-existing and
-    tracked separately; it is disclosed here rather than in a comment that claims
-    an invariant the code does not hold. The invariant this module DOES hold
-    today is the weaker pair: no emitted segment is zero-length, and no
-    simplification-invented chord is unverified.
+    THAT IS A CELL-RESOLUTION GUARANTEE, NOT WHAT THIS FUNCTION TESTS. This
+    function still only point-samples the chord at 0.1mm (see
+    :attr:`PathSegment.points`), which is coarser than "prove every cell the
+    chord's true geometry crosses is routable" — a chord can graze a blocked
+    cell's corner between two 0.1mm samples and this function will still return
+    True for it. That gap is real, independent of the A* fix above (it exists
+    for any chord, not just original diagonal steps), and is tracked separately
+    as ``019f9fb32de7``; it is OUT OF SCOPE for this function to close. So: A*
+    steps are now cell-verified at the point they are generated, and this
+    predicate remains corner-permissive at the resolution it samples.
     """
     seg = PathSegment(start=start, end=end, layer=layer)
     for pt in seg.points:

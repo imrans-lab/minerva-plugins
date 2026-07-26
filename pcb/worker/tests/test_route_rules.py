@@ -1711,7 +1711,7 @@ def test_the_three_pin_fixture_routes_a_net_classed_net_end_to_end(
     WHAT THIS DOES NOT COVER: gate 019f70f76c2f's two-disconnected-paths +
     layer-changing-via shape. Verified (both with and without a net class):
     the real pathfinder on THIS geometry needs no via and produces ONE
-    connected F.Cu polyline of exactly 6 segments, 0 vias — nothing in this
+    connected F.Cu polyline of exactly 5 segments, 0 vias — nothing in this
     fixture forces a layer change, so the engine never chooses one. That
     shape is a property of the geometry, not of net classing, so a
     net-class-specific fixture cannot make the real engine produce it either
@@ -1737,18 +1737,26 @@ def test_the_three_pin_fixture_routes_a_net_classed_net_end_to_end(
     # change to the geometry or the engine that DOES start needing a via is
     # noticed here, rather than this test silently keeping stale numbers).
     #
-    # WAS 4 BEFORE 019f9bd5f2f2, AND THE OLD 4 WAS NOT A BUG. Stated plainly
-    # because "the expected value moved" usually means a test had encoded a
-    # defect, and this one had not: the pre-fix 4-segment polyline was probed
-    # against the routing grid and had ZERO blocked points, i.e. it was a legal
-    # simplification that happened to be safe. The count rose because the
-    # simplifier now REFUSES any drop whose replacement chord it has not proved
-    # clear, and it decides incrementally — when an intermediate chord is
-    # blocked it anchors at the last verified point, even in cases where some
-    # longer chord past it would have been clear. That is the deliberate trade
-    # (see pathfinder._simplify_path): the failure mode is extra vertices, never
-    # copper through a keepout. Both shapes are clean; only one is *proved* so.
-    assert len(sig["segments"]) == 6
+    # WAS 4 BEFORE 019f9bd5f2f2, THEN 6, NOW 5 AFTER 019f9d594f83. Stated
+    # plainly because "the expected value moved" usually means a test had
+    # encoded a defect, and neither move did: the pre-fix 4-segment polyline
+    # was probed against the routing grid and had ZERO blocked points, i.e. it
+    # was a legal simplification that happened to be safe. The count rose to 6
+    # because the simplifier started REFUSING any drop whose replacement chord
+    # it has not proved clear, and it decides incrementally — when an
+    # intermediate chord is blocked it anchors at the last verified point, even
+    # in cases where some longer chord past it would have been clear (see
+    # pathfinder._simplify_path). It then fell to 5 because A*'s neighbour loop
+    # now also rejects a diagonal step when either corner-adjacent cell is not
+    # routable (019f9d594f83) — some of the diagonal steps that used to force
+    # an early "anchor here" are no longer offered to A* at all, so the
+    # unsimplified polyline itself has fewer illegal-looking jogs for the
+    # simplifier to work around. All three shapes are clean; only 6 and 5 are
+    # *proved* so end-to-end (the corner-cutting gap this round closes was
+    # specific to diagonal A* steps, which is exactly what changed the count).
+    # "Proved" is at _segment_clear's 0.1mm sampling resolution, which remains
+    # corner-permissive in its own right — tracked separately as 019f9fb32de7.
+    assert len(sig["segments"]) == 5
     assert sig["vias"] == []
     assert {s["layer"] for s in sig["segments"]} == {"F.Cu"}
 

@@ -2,6 +2,8 @@
 Tests for pathfinding algorithms.
 """
 
+import random
+
 import pytest
 from agent_router.grid import RoutingGrid
 from agent_router.pathfinder import find_path, Path, PathSegment
@@ -678,3 +680,193 @@ class TestSimplificationStaysInsideTheCorridor:
             "the guard did not fire: the peak was merged into a blocked chord"
         # The diagonal branch refuses the same merge, by the same question.
         assert _simplify_path(points, grid, "SIG", "F.Cu") == points
+
+
+class TestAStarNeverCutsABlockedCorner:
+    """Docket 019f9d594f83 (severity 2) — 8-way A* validated the DESTINATION
+    cell of a diagonal step and never the two cells the straight chord between
+    the two cell centres actually crosses. For a diagonal step ``(dx, dy)`` out
+    of ``current`` those are ``(current[0]+dx, current[1])`` and
+    ``(current[0], current[1]+dy)`` — the corner the chord cuts. If either is
+    blocked, the emitted segment clips it even though ``current`` and the
+    destination cell are both individually routable.
+
+    THE ORACLE HERE IS CELL-BASED, DELIBERATELY NOT ``_segment_clear``.
+    ``_segment_clear`` point-samples the chord at 0.1mm and can miss a corner
+    graze entirely: measured at the base SHA this round shipped from, an
+    ASCENDING and an ANTI-DIAG step both grazed the same blocked cell and
+    ``_segment_clear`` returned True for both. Asserting on cells instead of
+    world-space samples is what makes this test able to fail; see
+    :func:`pathfinder._segment_clear`'s docstring and docket ``019f9fb32de7``
+    for the point-sampling gap this test does NOT close (and is not trying
+    to).
+    """
+
+    @staticmethod
+    def _corner_cells(cell, dx, dy):
+        """The two cells orthogonally adjacent to a diagonal step out of
+        *cell* in direction (dx, dy) — the cells the chord's corner touches."""
+        return (cell[0] + dx, cell[1]), (cell[0], cell[1] + dy)
+
+    def test_a_single_blocked_corner_cell_diverts_the_exact_diagonal_step(self):
+        """DETERMINISTIC SIGNATURE: exactly one corner-adjacent orthogonal cell
+        blocked, both endpoint cells routable, A* must not take the diagonal
+        step through it. Reproduces the exact geometry measured for this
+        round: a 12x12mm/0.5mm grid with one obstacle blocking only cell
+        (5, 4); the diagonal step (4, 4) -> (5, 5) grazes that cell's corner.
+        """
+        from agent_router.pathfinder import _astar_path
+
+        grid = RoutingGrid(width=12, height=12, resolution=0.5)
+        ox, oy = grid._cell_to_pos(5, 4)
+        grid.mark_obstacle(x=ox, y=oy, radius=0.2)
+
+        start = grid._cell_to_pos(4, 4)
+        end = grid._cell_to_pos(5, 5)
+
+        # PREMISE, asserted so this cannot pass vacuously: both endpoints are
+        # routable, the corner cell (5, 4) is blocked, and the OTHER corner
+        # cell (4, 5) is not — so a legal detour exists and the only thing
+        # under test is whether A* still cuts the blocked corner instead.
+        assert grid.can_route_through(start[0], start[1], "SIG", "F.Cu") is True
+        assert grid.can_route_through(end[0], end[1], "SIG", "F.Cu") is True
+        assert grid.can_route_through(ox, oy, "SIG", "F.Cu") is False
+        other_corner = grid._cell_to_pos(4, 5)
+        assert grid.can_route_through(other_corner[0], other_corner[1], "SIG", "F.Cu") is True
+
+        path = _astar_path(grid, start, end, "SIG", "F.Cu")
+        assert path is not None, "a detour via (4, 5) exists; A* must find it"
+
+        # The illegal single-step shape this bug used to emit: one segment,
+        # exactly start -> end, cutting the blocked corner.
+        emitted = [(s.start, s.end) for s in path.segments]
+        assert (start, end) not in emitted, \
+            "A* emitted the diagonal step straight through the blocked corner"
+
+    def test_the_other_corner_cell_is_also_checked_not_just_the_first(self):
+        """SAME blocked cell as the test above, (5, 4), but reached as the
+        OTHER of the two corner-adjacent cells the fix evaluates.
+
+        The corner check in pathfinder.py tests
+        ``(current[0]+dx, current[1])`` and ``(current[0], current[1]+dy)``.
+        The previous test's step, (4, 4) -> (5, 5) with dx=dy=1, hits the
+        blocked cell as the FIRST of those, ``(current[0]+dx, current[1])``.
+        A fix that only checked that first corner would pass that test
+        vacuously. This step, (5, 5) -> (6, 4) with dx=1, dy=-1, hits the
+        SAME blocked cell as the SECOND corner, ``(current[0], current[1]+dy)``
+        == (5, 4) — so together the two tests require BOTH corners to be
+        checked, which is exactly what round C2d's mutation proof needs (a
+        check that verifies only one corner must still fail one of these
+        two). Reproduces the ANTI-DIAG case measured for this round.
+        """
+        from agent_router.pathfinder import _astar_path
+
+        grid = RoutingGrid(width=12, height=12, resolution=0.5)
+        ox, oy = grid._cell_to_pos(5, 4)
+        grid.mark_obstacle(x=ox, y=oy, radius=0.2)
+
+        start = grid._cell_to_pos(5, 5)
+        end = grid._cell_to_pos(6, 4)
+
+        # PREMISE, same shape as the sibling test: both endpoints routable,
+        # the shared blocked cell (5, 4) confirmed blocked, and the OTHER
+        # corner cell (6, 5) confirmed clear so a detour exists.
+        assert grid.can_route_through(start[0], start[1], "SIG", "F.Cu") is True
+        assert grid.can_route_through(end[0], end[1], "SIG", "F.Cu") is True
+        assert grid.can_route_through(ox, oy, "SIG", "F.Cu") is False
+        other_corner = grid._cell_to_pos(6, 5)
+        assert grid.can_route_through(other_corner[0], other_corner[1], "SIG", "F.Cu") is True
+
+        path = _astar_path(grid, start, end, "SIG", "F.Cu")
+        assert path is not None, "a detour via (6, 5) exists; A* must find it"
+
+        emitted = [(s.start, s.end) for s in path.segments]
+        assert (start, end) not in emitted, \
+            "A* emitted the diagonal step straight through the blocked corner"
+
+    def test_fuzz_no_astar_step_cuts_a_blocked_corner(self, monkeypatch):
+        """RANDOMIZED, SEEDED, DETERMINISTIC. Simplification is disabled here
+        (see the monkeypatch) so ``path.segments`` is exactly the raw A* cell
+        sequence — this test is about A*'s neighbour loop, not about anything
+        simplification might do to a chord afterwards (that chord-level
+        question is ``_segment_clear``'s, and it is out of fence for this
+        round — see ``019f9fb32de7``).
+
+        MUTATION-TESTED BY HAND (see the round's report): deleting the corner
+        check pathfinder.py adds, or weakening it to test only one of the two
+        corner cells, makes this test fail either way. Both counts are
+        reported in the round's writeup rather than wired up as an automated
+        mutation-testing dependency this module would otherwise need.
+        """
+        import agent_router.pathfinder as pf
+
+        # Simplification off: identity, so every segment IS a raw A* step.
+        monkeypatch.setattr(pf, "_simplify_path",
+                             lambda points, grid, net, layer: points)
+        monkeypatch.setattr(pf, "_simplify_orthogonal",
+                             lambda points, grid, net, layer: points)
+
+        rng = random.Random(20260724)  # seeded — reproducible or it is not a pin
+        paths_found = 0
+        diagonal_steps_checked = 0
+        violations = []
+
+        for board_i in range(60):
+            width = height = 10.0
+            resolution = 0.5
+            grid = RoutingGrid(width=width, height=height, resolution=resolution)
+            for _ in range(rng.randint(2, 8)):
+                ox = rng.uniform(1.0, width - 1.0)
+                oy = rng.uniform(1.0, height - 1.0)
+                radius = rng.uniform(0.1, 0.5)
+                grid.mark_obstacle(x=ox, y=oy, radius=radius)
+
+            def _routable_cell_centre():
+                # Endpoints are picked on ROUTABLE cell centres so a blocked
+                # start/end (a different, already-covered defect — see
+                # TestAStarRefusesABlockedStart) never masks what this test
+                # checks.
+                for _ in range(50):
+                    col = rng.randrange(0, grid.cols)
+                    row = rng.randrange(0, grid.rows)
+                    pos = grid._cell_to_pos(col, row)
+                    if grid.can_route_through(pos[0], pos[1], "SIG", "F.Cu"):
+                        return pos
+                return None
+
+            start = _routable_cell_centre()
+            end = _routable_cell_centre()
+            if start is None or end is None or start == end:
+                continue
+
+            path = pf._astar_path(grid, start, end, "SIG", "F.Cu",
+                                   prefer_orthogonal=False)
+            if path is None:
+                continue
+            paths_found += 1
+
+            cells = [grid._pos_to_cell(*start)]
+            for seg in path.segments:
+                cells.append(grid._pos_to_cell(*seg.end))
+
+            for i in range(len(cells) - 1):
+                c0, c1 = cells[i], cells[i + 1]
+                dx, dy = c1[0] - c0[0], c1[1] - c0[1]
+                if dx == 0 or dy == 0:
+                    continue  # cardinal step, no corner to cut
+                diagonal_steps_checked += 1
+                for corner in self._corner_cells(c0, dx, dy):
+                    cx, cy = grid._cell_to_pos(*corner)
+                    if not grid.can_route_through(cx, cy, "SIG", "F.Cu"):
+                        violations.append((board_i, c0, c1, corner))
+
+        # Corpus sanity: fail loudly if the fuzz stops generating anything to
+        # check, rather than passing vacuously.
+        assert paths_found >= 20, \
+            f"only {paths_found} paths found across 60 boards — fuzz corpus too weak"
+        assert diagonal_steps_checked >= 20, \
+            f"only {diagonal_steps_checked} diagonal steps seen — fuzz corpus too weak"
+        assert violations == [], (
+            f"{len(violations)} of {diagonal_steps_checked} diagonal A* steps "
+            f"cut a blocked corner: {violations[:5]}"
+        )
