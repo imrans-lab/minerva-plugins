@@ -39,6 +39,7 @@ import dataclasses
 import math
 
 import pytest
+import yaml
 
 from agent_router.grid import RoutingGrid
 from agent_router import router as engine_router
@@ -1301,18 +1302,29 @@ def test_accepted_copper_on_an_unmodelable_via_span_still_fails_closed():
 
 
 # ---------------------------------------------------------------------------
-# 5. Per-net-class minima — the NEW precedence step this round adds.
+# 5. Per-net-class minima — the precedence step between a hint-authored width
+#    and the board's blanket design rules.
 #
-# The v1 compiler emits NO net classes at all (compile_board.py hardcodes
-# `net_classes=()`; verified below) and sets no net's `net_class_id` — so the
-# only way to drive this feature through the REAL `route()` entry point is to
-# monkeypatch the compile step itself, exactly the way drc_geometric's own
-# per-net-class floors (`_net_class_minima`, closing docket 019f958b45b9) are
-# only reachable via `dataclasses.replace` in a test. `net_classed_compile`
-# below does that for
-# the FULL `_call_route` path rather than for an internal helper, so a
-# reverted call site (not just a reverted resolver function) is what these
-# tests actually exercise.
+# NET CLASSES ARE NOW AUTHORABLE, and this section's headline test drives them
+# the way a real caller does: a board YAML whose `design_rules` carries a
+# `net_classes` list, each class naming its `members`, compiled by the REAL
+# compiler. `compile_board._build_net_classes` parses that block and inverts the
+# members lists into each `ResolvedNet.net_class_id`; both consumers
+# (`methods._net_class_overrides` here, `drc_geometric._net_class_minima` on the
+# DRC side) read REFERENCED classes only, so that inversion — not the class
+# tuple — is what makes a class bite. See
+# `test_an_authored_net_class_routes_that_nets_own_copper_at_the_class_width`.
+#
+# Membership is authored ON THE CLASS rather than as a per-net key because the
+# panel's net model serialises a fixed key set (`pcb/ui/model/pcb_net.gd`),
+# which would destroy a per-net key on any UI load/save round trip, while
+# `pcb_data.gd` round-trips `design_rules` wholesale.
+#
+# The `_apply_net_class_to` / `net_classed_compile` helpers below still build
+# IRs directly. They are no longer the ONLY way in, but they remain the way to
+# reach class states an authored board cannot express (`min_trace_width_mm: 0`
+# is refused at the authoring layer by `_net_class_minimum`, yet the IR admits
+# it, so the consumers' fail-closed guards still need a way to be exercised).
 #
 # TWO DIFFERENT SHAPES, on purpose (Codex must-fix on this round's first cut):
 #   * COPPER WIDTH is genuinely per-net — `net_widths` in router.py, sourced
@@ -1408,24 +1420,159 @@ def test_the_reply_names_the_engines_own_default_as_its_source(monkeypatch):
         pytest.approx(methods._engine_default_mm("clearance"))
 
 
-def test_the_v1_compiler_emits_no_net_classes_and_no_net_class_id():
-    """Verifies the finding this round's report leads with: the IR carries the
-    slot (design_rules.net_classes, ResolvedNet.net_class_id) but nothing in
-    the v1 compiler ever populates either one from board input — a real
-    compile always has an empty tuple and every net's id is None, regardless
-    of what a caller puts in the board dict. Everything below this point is
-    therefore DORMANT on any board the compiler can actually produce today;
-    it is exercised only via `_apply_net_class_to` / `net_classed_compile`.
-    """
+def _classed_board(members=("SIG",), **class_fields) -> dict:
+    """`_three_pin_board` plus ONE authored net class over the named members.
+
+    Two nets exist (SIG, OTHER) and only SIG is a member by default, so every
+    assertion below can be net-scoped: what the class does to SIG must not
+    happen to OTHER."""
     board = _three_pin_board()
-    board["design_rules"] = dict(
-        board["design_rules"],
-        net_classes=[{"id": "nc:power", "name": "Power", "min_trace_width_mm": 0.6}])
-    for net in board["nets"]:
-        net["net_class"] = "nc:power"  # not a field the compiler reads either
+    entry = {"name": "Power", "members": list(members)}
+    entry.update(class_fields)
+    board["design_rules"] = dict(board["design_rules"], net_classes=[entry])
+    return board
+
+
+def test_the_compiler_compiles_an_authored_net_class_and_wires_its_members():
+    """The authoring surface, at the IR level: a `design_rules.net_classes`
+    entry becomes a real `NetClass` carrying the minima it authored, its id is
+    DERIVED from its name (never authored), and — the half that actually makes
+    it bite — every net named in `members` carries that class's id while every
+    other net still carries None.
+
+    Both halves are asserted because only the second one reaches a consumer:
+    `_net_class_overrides` and `_net_class_minima` both read REFERENCED classes,
+    so a compiler that populated `design_rules.net_classes` and never assigned
+    `net_class_id` would leave the feature exactly as dormant as before while
+    still looking authorable here.
+    """
+    rb = _compile(_classed_board(min_trace_width_mm=CLASS_WIDTH_MM,
+                                 min_clearance_mm=CLASS_CLEARANCE_MM))
+
+    assert len(rb.design_rules.net_classes) == 1
+    nc = rb.design_rules.net_classes[0]
+    assert nc.name == "Power"
+    assert nc.min_trace_width_mm == pytest.approx(CLASS_WIDTH_MM)
+    assert nc.min_clearance_mm == pytest.approx(CLASS_CLEARANCE_MM)
+    # Derived, board-namespaced identity — the same rule net ids follow.
+    assert nc.id.startswith("net-class:") and nc.id != "Power"
+
+    by_name = {net.name: net.net_class_id for net in rb.nets}
+    assert by_name == {"SIG": nc.id, "OTHER": None}
+
+
+def test_an_authored_net_class_routes_that_nets_own_copper_at_the_class_width():
+    """THE end-to-end outcome that changes because a class was AUTHORED, driven
+    through the real `route()` method on a real compiled board — no
+    `dataclasses.replace`, no monkeypatched compile.
+
+    The same board is routed twice. Without the class every net's copper is laid
+    at the board's own `trace_width_mm`; with the class, SIG's segments are laid
+    at the class's `min_trace_width_mm` and OTHER's are untouched. The segment
+    `width_mm` in the reply is the fabricated width, so this fails on a compiler
+    that ignores the block AND on one that builds the class tuple but never sets
+    `net_class_id` (the consumers read referenced classes only).
+    """
+    def widths(board):
+        resp = _call_route({"board": board})
+        assert resp["ok"] is True, resp
+        return {r["net"]: sorted({s["width_mm"] for s in r["segments"]})
+                for r in resp["result"]["routes"]}
+
+    baseline = widths(_three_pin_board())
+    assert baseline["SIG"] == pytest.approx([BOARD_WIDTH_MM])
+    assert baseline["OTHER"] == pytest.approx([BOARD_WIDTH_MM])
+
+    classed = widths(_classed_board(min_trace_width_mm=CLASS_WIDTH_MM))
+    assert classed["SIG"] == pytest.approx([CLASS_WIDTH_MM]), (
+        "SIG is a member of a class demanding CLASS_WIDTH_MM — its copper must "
+        "be laid at the class width, not the board's baseline")
+    assert classed["OTHER"] == pytest.approx([BOARD_WIDTH_MM]), (
+        "OTHER belongs to no class; the class must not widen its copper")
+
+
+def test_an_authored_net_class_clearance_reaches_the_runs_effective_rules():
+    """The CLEARANCE half of the authoring surface on the ROUTING side — the
+    mirror of the routed-width test above, which covers width only.
+
+    Until this test, authored `min_clearance_mm` reached neither consumer from a
+    real board: it was driven only through the synthetic `_apply_net_class_to`
+    helper, so a compiler that parsed the key and never wired it would still have
+    looked correct everywhere.
+
+    Clearance is asserted through the reply's `effective_routing_rules` rather
+    than by probing copper, because — unlike width — it is deliberately NOT
+    per-net: a keepout ring sized to one net's own requirement cannot also
+    satisfy a stricter class net that approaches that copper later, so the run
+    takes the board-wide worst case any present class demands (see
+    `_widen_for_net_classes`, and docs/routing.md "Keepout margin"). The reply's
+    `source` label is the honest read on that: it must name `net_class`, not
+    `board_rules`, once a class is authored.
+    """
+    def clearance_of(board):
+        resp = _call_route({"board": board})
+        assert resp["ok"] is True, resp
+        return resp["result"]["effective_routing_rules"]["clearance_mm"]
+
+    baseline = clearance_of(_three_pin_board())
+    assert baseline["value"] == pytest.approx(BOARD_CLEARANCE_MM)
+    assert baseline["source"] == "board_rules"
+
+    classed = clearance_of(_classed_board(min_clearance_mm=CLASS_CLEARANCE_MM))
+    assert classed["value"] == pytest.approx(CLASS_CLEARANCE_MM), (
+        "SIG's authored class demands CLASS_CLEARANCE_MM; the run must widen to "
+        "it rather than stay at the board's own clearance")
+    assert classed["source"] == "net_class", (
+        "provenance must name the class as the source — a widened value still "
+        "labelled 'board_rules' is a lying provenance field")
+
+
+def test_an_authored_net_class_nobody_joins_constrains_nothing():
+    """An UNREFERENCED class is LEGAL and changes no copper — the consumers'
+    standing rule (both read referenced classes only), pinned here at the
+    authoring layer now that a board can actually declare one. The class is
+    compiled and present in the IR; no net carries it, so every net still routes
+    at the board's baseline."""
+    board = _classed_board(members=(), min_trace_width_mm=CLASS_WIDTH_MM)
     rb = _compile(board)
-    assert rb.design_rules.net_classes == ()
+    assert len(rb.design_rules.net_classes) == 1
     assert all(net.net_class_id is None for net in rb.nets)
+
+    resp = _call_route({"board": board})
+    assert resp["ok"] is True, resp
+    for route in resp["result"]["routes"]:
+        assert sorted({s["width_mm"] for s in route["segments"]}) == \
+            pytest.approx([BOARD_WIDTH_MM])
+
+
+def test_a_net_class_member_naming_no_net_fails_the_compile_closed():
+    """A member that names no declared net is a class the author believes is in
+    force on copper that is in fact routed at the board's blanket rules — so it
+    is an ERROR, never a silently-ignored name."""
+    result = cb.compile_board(_classed_board(members=("SIG", "NOPE"),
+                                             min_trace_width_mm=CLASS_WIDTH_MM),
+                              requested_outputs=cb.V1_ROUTING_OUTPUTS)
+    assert isinstance(result, cb.ResolutionFailure)
+    codes = [d.code for d in result.diagnostics]
+    assert "net_class_unknown_member" in codes
+    assert any("NOPE" in d.message for d in result.diagnostics)
+
+
+def test_a_net_claimed_by_two_net_classes_fails_the_compile_closed():
+    """Two classes over one net has no answer the compiler may pick — whichever
+    it took would silently discard the other author's rule. Distinct from the
+    unknown-member diagnostic: both defects are membership defects, and a caller
+    must be able to tell which one it hit."""
+    board = _three_pin_board()
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Power", "members": ["SIG"], "min_trace_width_mm": 0.6},
+        {"name": "Fast", "members": ["SIG"], "min_clearance_mm": 0.5},
+    ])
+    result = cb.compile_board(board, requested_outputs=cb.V1_ROUTING_OUTPUTS)
+    assert isinstance(result, cb.ResolutionFailure)
+    codes = [d.code for d in result.diagnostics]
+    assert "duplicate_net_class_membership" in codes
+    assert "net_class_unknown_member" not in codes
 
 
 def test_net_class_overrides_reads_only_the_min_prefixed_fields():
@@ -2182,3 +2329,46 @@ def test_an_OVERLONG_unrouted_reasons_list_also_omits_the_reason_key():
         f"lengths disagree, so the correspondence is unknown. got {entry}")
     assert set(entry.keys()) == {"net", "from", "to"}, entry
     assert entry["net"] == "SIG"
+
+
+def test_the_standalone_cli_refuses_a_board_carrying_net_classes(tmp_path):
+    """C4 — THE TWO ENTRY POINTS MUST NOT ROUTE ONE BOARD DIFFERENTLY.
+
+    `agent_router` has no compiler and models no net classes: `DesignRules`
+    carries one board-wide width and one clearance, and the precedence chain in
+    `router` has no per-net step. Now that the worker's compiler turns an
+    authored class into real per-net minima, the SAME board YAML routed through
+    the standalone CLI would silently come out at the blanket rules while the
+    worker path routes its classed nets wider. So the CLI's authored-rules
+    reader fails closed instead — the same interim-refusal shape
+    `_refuse_if_source_carries_copper` uses for the other divergence it cannot
+    yet model.
+
+    A classless board (and an explicitly empty list, which declares nothing) is
+    still read normally — the guard is scoped to the divergence, not to
+    `design_rules` at large.
+    """
+    from agent_router import cli as router_cli
+    from agent_router.board import RoutingRulesError
+
+    def read(design_rules):
+        path = tmp_path / "board.yaml"
+        path.write_text(yaml.safe_dump({"name": "b", "design_rules": design_rules}))
+        return router_cli._design_rules_from_yaml(path)
+
+    plain = {"trace_width_mm": BOARD_WIDTH_MM, "clearance_mm": BOARD_CLEARANCE_MM}
+
+    # THE GUARD IS A PRESENCE TEST, NOT A TRUTHINESS ONE, and these five rows
+    # are what makes that claim checkable rather than a docstring assertion.
+    # An empty MAPPING is the discriminating case: it is falsy, so `if declared:`
+    # would wave it through, but it is a malformed declaration rather than an
+    # absent one and reading it as "no classes" would take a defect for a
+    # decision. Same shape as `compile_board`'s `unsupported_board_feature` loop.
+    assert read(plain).defaults.trace_width_mm == BOARD_WIDTH_MM
+    assert read({**plain, "net_classes": []}).defaults.trace_width_mm == BOARD_WIDTH_MM
+
+    for refused in ({}, 7, [{"name": "Power", "members": ["SIG"],
+                             "min_trace_width_mm": CLASS_WIDTH_MM}]):
+        with pytest.raises(RoutingRulesError) as exc:
+            read({**plain, "net_classes": refused})
+        assert "net_classes" in str(exc.value)

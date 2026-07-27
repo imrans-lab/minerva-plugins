@@ -984,10 +984,45 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
     A non-round hole feature still RAISES (the round-only drill seal).
 
     FAIL-CLOSED seals (mirroring the gerber bridge): a captured feature the kicad
-    emitter cannot render — a zone or a board-level graphic — must RAISE, never
-    vanish silently from a fabrication-bound file. compile_board fail-closes
-    zones/board-graphics upstream (always empty today), so these seal the adapter
-    against a future IR silently dropping copper at the cutover."""
+    emitter cannot render — a zone, a board-level graphic, or a NET CLASS — must
+    RAISE, never vanish silently from a fabrication-bound file. compile_board
+    fail-closes zones/board-graphics upstream (always empty today), so those two
+    seal the adapter against a future IR silently dropping copper at the cutover.
+
+    NET CLASSES are the case that is live NOW: ``compile_board`` compiles an
+    authored ``design_rules.net_classes`` block into real classes with real
+    per-net minima, and the ``design_rules`` mapping emitted below carries the
+    board's BLANKET defaults only — it has no per-class channel at all. Dropping
+    them would make the KiCad DRC ORACLE UNSOUND rather than merely lossy: the
+    Python kernel checks a classed net at its class floors
+    (``drc_geometric._net_class_minima``) while the .kicad_pcb this produces
+    carries none, so the two surfaces would disagree about the same board and the
+    oracle would sign off on copper the kernel rejects. Refused on a non-empty
+    tuple, the same plain truthiness test its two neighbours use — sufficient
+    here because every input is a typed IR tuple with no malformed-declaration
+    case to distinguish (unlike the authored-dict guards upstream, which must
+    tell an empty list from an empty mapping). An UNREFERENCED class constrains
+    no copper and is refused too, because over-refusing is the safe direction
+    for a seal whose alternative is an oracle that lies.
+
+    THE GERBER PATH IS DELIBERATELY EXEMPT, so this seal is one-sided: a classed
+    board is refused by ``methods._generate`` (which comes through here) and
+    still succeeds through ``methods._gerbers``, which emits the actual
+    fabrication deliverable. That is not an oversight and not a hole in
+    fail-closed fabrication. A Gerber/Excellon set has NO rules channel to carry
+    a class in — ``gerber.py`` reads one scalar off ``design_rules``
+    (``solder_mask_clearance_mm``) and emits pure geometry — so a class cannot
+    go missing from it; there is nothing it could have been written into. What
+    it emits is the copper AS ROUTED, and a class only ever raises the FLOORS
+    that copper was routed and checked against, which is a property of the
+    board, not of the artifact.
+
+    The .kicad_pcb is refused for the opposite reason on both counts: the format
+    DOES model net classes, so omitting them is a real drop rather than an
+    absence, and the file is consumed as a DRC ORACLE rather than shipped to a
+    fab, so that drop makes an independent checker disagree with the kernel
+    about the same board. Refuse where the artifact could have carried the rule
+    and is used to CHECK the board; exempt where it carries no rules at all."""
     if board.zones:
         raise ValueError(
             f"kicad._ir_board_dict: board has {len(board.zones)} zone(s) the kicad "
@@ -996,6 +1031,10 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
         raise ValueError(
             f"kicad._ir_board_dict: board has {len(board.board_graphics)} board-level "
             f"graphic(s) the kicad bridge does not map yet — refusing to drop them silently")
+    if board.design_rules.net_classes:
+        raise ValueError(
+            f"kicad._ir_board_dict: board has {len(board.design_rules.net_classes)} net "
+            f"class(es) the kicad bridge does not map yet — refusing to drop them silently")
 
     ox, oy, width_mm, height_mm = outline_frame(board.outline)
     rules = board.design_rules

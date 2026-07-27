@@ -95,6 +95,76 @@ class ManufacturingConstraints:
     min_clearance_mm: Any = None
 
 
+def _refuse_authored_net_classes(design_rules: dict) -> None:
+    """REFUSE a board whose ``design_rules`` authors ``net_classes``.
+
+    DELETE THIS WHOLE FUNCTION, its one call in
+    ``DesignRules.from_authored``, and
+    ``test_the_authored_rules_reader_refuses_a_board_carrying_net_classes``
+    when this package grows a net-class notion — then drop the net-class
+    qualifier from the entry-point-parity claim in ``from_authored``. It is
+    deliberately a standalone guard rather than logic threaded through
+    ``from_authored`` so that removal is clean.
+
+    WHY IT EXISTS. This package has NO compiler and no net-class notion at
+    all: ``DesignRules`` models exactly two scalars
+    (``defaults.trace_width_mm`` / ``minimums.min_clearance_mm``) and the
+    precedence chain in ``router`` has no per-net step to put a class into.
+    The worker's compiler, by contrast, now compiles an authored
+    ``design_rules.net_classes`` block into real per-net minima that
+    ``pcb_worker.methods`` routes at. So the SAME board YAML routed through
+    the standalone CLI would silently come out at the board's blanket width
+    and clearance while the MCP path routes its classed nets wider — two
+    entry points, one board, different copper, no signal.
+
+    That is a divergence between entry points, not a margin problem, so it
+    fails closed rather than carrying a documentation qualifier alone.
+
+    WHAT IT REFUSES, precisely — this is a PRESENCE test, not a truthiness one,
+    and the two differ on a case worth naming:
+
+      * key ABSENT                -> passes (the board declares nothing)
+      * ``net_classes: []``       -> passes (an explicitly empty LIST declares
+                                    nothing either)
+      * ``net_classes: {}``       -> REFUSED. An empty MAPPING is not an empty
+                                    list; it is a malformed declaration, and
+                                    treating it as absent would read a defect as
+                                    a decision. This is the case a truthiness
+                                    test (``if declared:``) would silently let
+                                    through, and it is the whole reason the test
+                                    is written the way it is.
+      * one or more classes       -> REFUSED
+      * any other value           -> REFUSED
+
+    Byte-for-byte the shape ``compile_board`` uses to reject recognized-but-
+    unsupported board features (the ``unsupported_board_feature`` loop over
+    ``zones``/``board_graphics``/``keepouts``, whose own comment argues exactly
+    this "PRESENCE, not truthiness" distinction from exactly the empty-mapping
+    case). Cite THAT loop, not ``compile_board`` at large: the IR-level guards
+    in ``kicad._ir_board_dict`` really are plain truthiness, because their
+    inputs are typed tuples with no malformed-declaration case to catch, and
+    conflating the two readings is how this docstring got misread once already.
+    ``test_the_standalone_cli_refuses_a_board_carrying_net_classes`` pins all
+    five rows above so this list cannot drift from the code.
+
+    It still errs toward refusing WITHIN that scope: a class with no members
+    constrains nothing today, and is refused anyway, because admitting it would
+    make the guard depend on membership semantics this package does not model.
+    """
+    declared = design_rules.get("net_classes")
+    if declared is None or (isinstance(declared, list) and not declared):
+        return
+    raise RoutingRulesError(
+        "design_rules declares net_classes, and agent_router models no net "
+        "classes at all — it has no compiler, and its rule chain carries one "
+        "board-wide width and clearance with no per-net step. Routing here "
+        "would lay a classed net's copper at the board's blanket rules while "
+        "the worker 'route' method lays it at the class minima, so the same "
+        "board would route differently through the two entry points and this "
+        "command fails closed. Use the worker 'route' method, which does "
+        "model net classes.")
+
+
 @dataclass(frozen=True)
 class DesignRules:
     """A board's design rules, in the shape the precedence chain reads.
@@ -138,6 +208,9 @@ class DesignRules:
         (``compile_board._floor_with_clearance`` raises an authored clearance to
         the profile minimum) — that policy lives in the compiler, which this
         package must not import. See the note in ``cli.cmd_route``.
+
+        AN AUTHORED ``net_classes`` BLOCK IS REFUSED — see
+        :func:`_refuse_authored_net_classes`.
         """
         if design_rules is None:
             return None
@@ -146,6 +219,7 @@ class DesignRules:
                 f"design_rules is present but is not a mapping "
                 f"({type(design_rules).__name__}) — routing fails closed rather "
                 f"than ignore rules the board authored")
+        _refuse_authored_net_classes(design_rules)
         return cls(
             defaults=RoutingDefaults(
                 trace_width_mm=design_rules.get("trace_width_mm")),

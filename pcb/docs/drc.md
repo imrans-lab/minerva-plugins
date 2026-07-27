@@ -45,7 +45,17 @@ result is a topology pass, not a proof the copper is geometrically clean.**
 
 `ManufacturingConstraints` carries the board's blanket floors, but a net may
 belong to a `NetClass` naming a stricter `min_trace_width_mm` /
-`min_clearance_mm`. `_net_class_minima` builds the `net_id -> (width, clearance)`
+`min_clearance_mm`. A board **authors** its classes under
+`design_rules.net_classes`, each entry naming its `members`.
+`compile_board._build_net_classes` parses that block and returns the inverted
+net-name -> class-id map; `compile_board._finalize_nets` is what assigns
+`ResolvedNet.net_class_id` from it, and that per-net id is the link this section
+reads. See
+[`board-yaml.md`](board-yaml.md), "Net classes", for the authored schema — in
+particular, only these two `min_`-prefixed values are authorable, for exactly the
+reason given at the end of this list.
+
+`_net_class_minima` builds the `net_id -> (width, clearance)`
 map for every net that **references** such a class, and the two checks compare
 against the raised floor: `_effective_min_trace_width` for GC1,
 `_effective_min_clearance` for GC2. What follows from that:

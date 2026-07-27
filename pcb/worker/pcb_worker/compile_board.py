@@ -88,6 +88,7 @@ from .resolved_board import (
     LayerStack,
     LineGeometry,
     ManufacturingConstraints,
+    NetClass,
     PhysicalStackup,
     Placement,
     PlacedGraphic,
@@ -332,8 +333,254 @@ def _build_layer_stack() -> LayerStack:
                       technical=technical)
 
 
-def _build_design_rules(board: dict, requested_outputs: tuple[str, ...],
-                        diags: _Diagnostics) -> Union[ResolvedDesignRules, None]:
+# Keys a ``design_rules.net_classes`` entry may author.  ``name`` is the class's
+# identity (its IR ``id`` is DERIVED from it, exactly as a net's is derived from
+# the net name) and ``members`` names the nets that belong to it; the two
+# ``min_``-prefixed keys are the only RULES an authored class may state — see
+# ``_reject_unread_net_class_fields``.
+_AUTHORED_NET_CLASS_KEYS = frozenset({
+    "name", "members", "min_trace_width_mm", "min_clearance_mm",
+})
+
+# ``NetClass`` fields the IR CARRIES but no consumer READS.  Authoring them would
+# ship a rule that lies (see ``_reject_unread_net_class_fields``).
+_UNREAD_NET_CLASS_FIELDS: tuple[str, ...] = (
+    "trace_width_mm", "via_diameter_mm", "via_drill_mm",
+)
+
+
+def _declared_but_not_modeled(what: str, requested_outputs: tuple[str, ...],
+                              diags: _Diagnostics) -> bool:
+    """The compiler's ONE policy for a design rule the source DECLARES but the v1
+    IR does not carry to any consumer.  Returns True when the loss is FATAL.
+
+    Fatal when ``rules`` is a requested output (the IR feeds DRC/routing), a
+    warning when compiling CAM-only without rules (review 625.4).
+
+    THE WARNING BRANCH IS UNREACHABLE IN PRODUCTION, and deliberately kept
+    anyway.  ``compile_board``'s ``requested_outputs`` defaults to
+    ``V1_FAB_OUTPUTS`` and its only other production value is
+    ``V1_ROUTING_OUTPUTS`` (``methods`` passes one or the other and nothing
+    else); those alias ``fab_capability``'s ``FABRICATION_CRITICAL_OUTPUTS`` and
+    ``ROUTING_CRITICAL_OUTPUTS``, and ``rules`` is in BOTH.  A caller reaching
+    the warning has hand-built an output set, which today only tests do.  The
+    branch stays because the policy is about the OUTPUT SET, not about who calls
+    it: a future CAM-only profile must degrade to a warning rather than inherit
+    a fatality argued from DRC/routing that would not apply to it.
+    """
+    if "rules" in requested_outputs:
+        diags.error("unsupported_design_rule",
+                    f"{what}; dropping them is fatal because 'rules' was requested "
+                    f"(DRC/routing)", _board_ref())
+        return True
+    diags.warning("unsupported_design_rule",
+                  f"{what}; ignored for this CAM-only ('rules' not requested) compile",
+                  _board_ref())
+    return False
+
+
+def _reject_unread_net_class_fields(entry: dict, name: str,
+                                    requested_outputs: tuple[str, ...],
+                                    diags: _Diagnostics) -> None:
+    """Refuse a class authoring a ``NetClass`` field NO CONSUMER READS.
+
+    ``methods._net_class_overrides`` and ``drc_geometric._net_class_minima`` —
+    the only two readers of a net class anywhere — read
+    ``min_trace_width_mm`` and ``min_clearance_mm``, and nothing else.  The
+    remaining ``NetClass`` geometry fields (``_UNREAD_NET_CLASS_FIELDS``) are
+    NOMINAL sizes mirroring ``RoutingDefaults``; accepting them would put a
+    number in the IR that changes no routed copper and no DRC floor, i.e. a rule
+    that LIES about being in force.  So they are refused rather than carried.
+
+    Routed through the SAME ``_declared_but_not_modeled`` policy the diff-pair
+    rules use — this is the identical situation (a declared rule the v1 IR does
+    not carry to a consumer), so it gets the identical fatality argument and the
+    identical ``unsupported_design_rule`` code, not a second policy.
+
+    A DECLARATION IS A NON-NULL VALUE, not a present key: ``via_diameter_mm:``
+    with no value states no rule, carries no number, and is IGNORED.  That is
+    the same ``is not None`` test the diff-pair check above applies, and the two
+    must agree because they are one policy with two callers.  It is also the
+    line the rationale itself draws — what is refused is a VALUE that would
+    silently fail to take effect; an empty key asserts nothing that could then
+    be a lie.  This is deliberately NOT the presence-not-truthiness rule
+    ``agent_router.board._refuse_authored_net_classes`` applies to the
+    ``net_classes`` key itself: that guard asks "is the FEATURE present", where
+    an empty mapping is a malformed declaration with no value slot at all, while
+    this asks "did the author state THIS rule's value".  Different questions,
+    different granularity; see that function's docstring for its own argument.
+
+    RETURNS NOTHING, unlike the diff-pair call site which acts on
+    ``_declared_but_not_modeled``'s fatal/non-fatal answer by returning ``None``
+    and abandoning the whole ``design_rules`` build.  There is no equivalent
+    decision to hand back here: an ERROR already fails the compile at the
+    ``diags.has_error`` gate, so abandoning the entry would change no outcome
+    while losing this entry's remaining diagnostics.
+
+    WHAT THAT DOES AND DOES NOT BUY, stated precisely because an earlier draft
+    of this docstring overclaimed it.  Walking on keeps ``_build_net_classes``
+    reporting every defect it can find ACROSS THE CLASS LIST in one pass — the
+    same way ``_build_nets_index`` keeps walking after a ``duplicate_net``.  It
+    buys NOTHING at the level of the board: ``_build_net_classes`` is the LAST
+    thing ``_build_design_rules`` does, behind four ``return None`` paths
+    (absent ``design_rules``, a non-positive scalar, ``via_drill_mm`` not
+    smaller than ``via_diameter_mm``, and a fatal diff-pair rule).  A board with
+    BOTH a rules-block defect and a broken class therefore emits the rules-block
+    diagnostic ALONE, and every class diagnostic waits for a later compile.
+    That ordering is deliberate and matches the diff-pair precedent — a rules
+    block that cannot be built has no classes to speak of — and giving net
+    classes a whole-board one-pass path that no other rule enjoys would be a
+    worse inconsistency than the deferral.
+    """
+    declared = [field for field in _UNREAD_NET_CLASS_FIELDS if entry.get(field) is not None]
+    if not declared:
+        return
+    _declared_but_not_modeled(
+        f"net class {name!r} declares {'/'.join(declared)}, which the v1 IR carries "
+        f"but no consumer reads (only min_trace_width_mm/min_clearance_mm are read, "
+        f"by routing and geometric DRC)",
+        requested_outputs, diags)
+
+
+def _net_class_minimum(entry: dict, field: str, name: str, diags: _Diagnostics) -> Union[float, None]:
+    """Admit one authored class minimum, or diagnose it.  Returns None both for
+    "the class says nothing about this dimension" (a legal, load-bearing state —
+    both consumers fall through to the board floor for THAT dimension) and for a
+    value that was rejected; the caller tracks rejection through ``diags``.
+
+    ADMITTED THROUGH ``_is_positive_number``, the SAME predicate the board-level
+    ``design_rules`` numbers above go through — deliberately STRICTER than the
+    IR's own ``NetClass`` validation, which is ``resolved_board._nonnegative``
+    (finite and ``>= 0``) and would therefore accept a ``0``.  A board-level
+    ``clearance_mm: 0`` is refused here; a net class is a design rule authored in
+    the same block by the same person, so it cannot be admitted on looser terms
+    than the blanket rule it overrides.  The IR is NOT tightened to match: it
+    stays the permissive floor for hand-built boards, and the authoring layer is
+    where authored input is judged.
+    """
+    value = entry.get(field)
+    if value is None:
+        return None
+    if not _is_positive_number(value):
+        diags.error("invalid_net_class",
+                    f"net class {name!r}: {field} must be a positive number; got {value!r}",
+                    _board_ref())
+        return None
+    return float(value)
+
+
+def _build_net_classes(rules: dict, board_id: str, requested_outputs: tuple[str, ...],
+                       diags: _Diagnostics) -> tuple[tuple[NetClass, ...], dict[str, str]]:
+    """Parse ``design_rules.net_classes`` into (classes, net name -> class id).
+
+    MEMBERSHIP IS AUTHORED ON THE CLASS, not on the net.  A class both states its
+    rules and names its member nets, all inside the board's ``design_rules``
+    block, because the panel's net model (``pcb/ui/model/pcb_net.gd``) serialises
+    a FIXED key set — a per-net class key would be destroyed by any UI
+    load/save round trip, while ``pcb_data.gd`` round-trips ``design_rules``
+    wholesale.  The IR stays PER-NET (``ResolvedNet.net_class_id``); this
+    function returns the INVERSION the compiler applies in ``_finalize_nets``.
+
+    Class IDS ARE DERIVED FROM THE NAME through ``derive_id``, board-namespaced,
+    exactly as a net id is derived from its net name — one identity rule for both
+    named entities, so the same class name in two boards yields distinct ids.
+
+    Two membership defects fail CLOSED here, mirroring the net path's own
+    diagnostics rather than being silently absorbed:
+      * two classes claiming the SAME net -> ``duplicate_net_class_membership``
+        (the shape ``duplicate_pin_ownership`` uses for a pin claimed twice);
+      * a duplicate class NAME -> ``duplicate_net_class`` (the shape
+        ``duplicate_net`` uses).
+    The third — a member naming a net that does not exist — cannot be decided
+    here because the net index is not built yet; ``compile_board`` raises
+    ``net_class_unknown_member`` for it once both halves exist.
+
+    An UNREFERENCED class (no ``members``, or a class no net ends up carrying) is
+    LEGAL and constrains nothing.  That is the consumers' existing rule — both
+    read REFERENCED classes only — and this does not change it.
+    """
+    raw = rules.get("net_classes")
+    if raw is None:
+        return (), {}
+    if not isinstance(raw, list):
+        diags.error("invalid_net_class",
+                    f"design_rules.net_classes must be a list, got {type(raw).__name__}",
+                    _board_ref())
+        return (), {}
+
+    classes: list[NetClass] = []
+    class_id_by_net: dict[str, str] = {}
+    owner_class: dict[str, str] = {}
+    seen_names: set[str] = set()
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            diags.error("invalid_net_class",
+                        f"design_rules.net_classes[{index}] is not a mapping ({entry!r})",
+                        _board_ref())
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            diags.error("invalid_net_class",
+                        f"design_rules.net_classes[{index}] has no name: {entry!r}",
+                        _board_ref())
+            continue
+        if name in seen_names:
+            diags.error("duplicate_net_class",
+                        f"net class {name!r} declared more than once", _board_ref())
+            continue
+        seen_names.add(name)
+
+        # An authored key the surface does not accept is REFUSED, never ignored.
+        # `id` lands here on purpose: identity is derived from the name, so an
+        # authored `id` would be silently overruled — the exact silent-substitution
+        # this whole surface exists to avoid.
+        unknown = sorted(set(entry) - _AUTHORED_NET_CLASS_KEYS - set(_UNREAD_NET_CLASS_FIELDS))
+        if unknown:
+            diags.error("invalid_net_class",
+                        f"net class {name!r} declares unknown key(s) {'/'.join(unknown)}; "
+                        f"an authored class accepts only "
+                        f"{'/'.join(sorted(_AUTHORED_NET_CLASS_KEYS))} "
+                        f"(its id is derived from its name)", _board_ref())
+            continue
+        _reject_unread_net_class_fields(entry, name, requested_outputs, diags)
+
+        min_width = _net_class_minimum(entry, "min_trace_width_mm", name, diags)
+        min_clearance = _net_class_minimum(entry, "min_clearance_mm", name, diags)
+
+        class_id = derive_id("net-class", board_id, name)
+        classes.append(NetClass(id=class_id, name=name,
+                                min_trace_width_mm=min_width,
+                                min_clearance_mm=min_clearance))
+
+        members = entry.get("members")
+        if members is not None and not isinstance(members, list):
+            diags.error("invalid_net_class",
+                        f"net class {name!r}: members must be a list, got "
+                        f"{type(members).__name__}", _board_ref())
+            continue
+        for member in members or []:
+            if not isinstance(member, str) or not member:
+                diags.error("invalid_net_class",
+                            f"net class {name!r}: member {member!r} is not a net name",
+                            _board_ref())
+                continue
+            prior = owner_class.get(member)
+            if prior is not None and prior != name:
+                diags.error("duplicate_net_class_membership",
+                            f"net {member!r} is claimed by both net class {prior!r} and "
+                            f"{name!r}; a net belongs to at most one class",
+                            _board_ref())
+                continue
+            owner_class[member] = name
+            class_id_by_net[member] = class_id
+    return tuple(classes), class_id_by_net
+
+
+def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str, ...],
+                        diags: _Diagnostics
+                        ) -> Union[tuple[ResolvedDesignRules, dict[str, str]], None]:
+    """Build the board's :class:`ResolvedDesignRules` and the net-name -> class-id
+    inversion its authored net classes imply (see :func:`_build_net_classes`)."""
     rules = board.get("design_rules")
     if not isinstance(rules, dict):
         diags.error("missing_design_rules",
@@ -359,19 +606,14 @@ def _build_design_rules(board: dict, requested_outputs: tuple[str, ...],
                     _board_ref())
         return None
     # The canonical schema declares diff-pair rules the v1 IR does not model.
-    # Route the loss through the SAME output policy as any other rule loss
-    # (review 625.4): fatal when 'rules' is a requested output (the IR feeds
-    # DRC/routing), a warning when compiling CAM-only without rules.
+    # Route the loss through the compiler's ONE declared-but-not-modeled policy
+    # (review 625.4) — the same one an authored net class's unread fields use.
     if any(rules.get(k) is not None for k in ("diff_pair_gap_mm", "diff_pair_width_mm")):
-        if "rules" in requested_outputs:
-            diags.error("unsupported_design_rule",
-                        "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the "
-                        "v1 IR; dropping them is fatal because 'rules' was requested (DRC/routing)",
-                        _board_ref())
+        if _declared_but_not_modeled(
+                "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the v1 IR",
+                requested_outputs, diags):
             return None
-        diags.warning("unsupported_design_rule",
-                      "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the "
-                      "v1 IR; ignored for this CAM-only ('rules' not requested) compile", _board_ref())
+    net_classes, class_id_by_net = _build_net_classes(rules, board_id, requested_outputs, diags)
     return ResolvedDesignRules(
         defaults=RoutingDefaults(
             trace_width_mm=float(trace_width),
@@ -380,9 +622,9 @@ def _build_design_rules(board: dict, requested_outputs: tuple[str, ...],
         ),
         minimums=_floor_with_clearance(float(clearance)),
         allowed_via_kinds=(ViaKind.THROUGH,),
-        net_classes=(),
+        net_classes=net_classes,
         rule_profile=V1_RULE_PROFILE,
-    )
+    ), class_id_by_net
 
 
 def _floor_with_clearance(board_clearance_mm: float) -> ManufacturingConstraints:
@@ -1490,9 +1732,21 @@ def compile_board(
     two_layer = _require_two_layer(board, diags)
     outline = _build_outline(board, diags)
     layer_stack = _build_layer_stack() if two_layer else None
-    design_rules = _build_design_rules(board, requested_outputs, diags)
+    built_rules = _build_design_rules(board, board_id, requested_outputs, diags)
+    design_rules, class_id_by_net = built_rules if built_rules is not None else (None, {})
 
     net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
+
+    # THE OTHER HALF OF THE MEMBERSHIP INVERSION. A class names its members
+    # (_build_net_classes), but only here do both halves exist, so only here can a
+    # member naming a net the board never declares be caught. It fails CLOSED: a
+    # silently-ignored member is a class the author believes is in force on a net
+    # that is in fact routed and checked at the board's blanket floors.
+    for net_name in sorted(class_id_by_net):
+        if net_name not in net_id_by_name:
+            diags.error("net_class_unknown_member",
+                        f"net class member {net_name!r} names no net declared by this board",
+                        _board_ref())
 
     interned: dict[str, FootprintDefinition] = {}
     components: list[ResolvedComponent] = []
@@ -1586,7 +1840,8 @@ def compile_board(
             if pad.net_id is not None:
                 pad_ids_by_net.setdefault(pad.net_id, []).append(pad.id)
 
-    nets = _finalize_nets(net_descriptors, pad_ids_by_net, resolved_pins, components, diags)
+    nets = _finalize_nets(net_descriptors, pad_ids_by_net, resolved_pins, components,
+                          class_id_by_net, diags)
     traces = _build_traces(board, board_id, net_id_by_name, version, diags)
     vias = _build_vias(board, board_id, net_id_by_name, version, diags)
     holes = _build_holes(board, board_id, version, diags)
@@ -1810,11 +2065,20 @@ def _resolve_side(raw_layer, ref: str, comp_ref: SourceRef,
 
 
 def _finalize_nets(descriptors, pad_ids_by_net, resolved_pins, components,
+                   class_id_by_net: dict[str, str],
                    diags: _Diagnostics) -> tuple[ResolvedNet, ...]:
     """Assemble ResolvedNets from placed-pad membership.  EVERY declared pin must
     resolve to a placed pad — a well-formed reference to a nonexistent pad is an
     ERROR, never silently dropped (K2 review 623 R3).  A net with no resolved
-    pads is likewise an error."""
+    pads is likewise an error.
+
+    This is where the authored net-class MEMBERSHIP becomes the IR's per-net
+    ``net_class_id``: ``class_id_by_net`` is the inversion of the members lists
+    ``_build_net_classes`` parsed off ``design_rules``.  Without this assignment
+    both consumers (``methods._net_class_overrides``,
+    ``drc_geometric._net_class_minima``) would still see nothing, because both
+    read REFERENCED classes only — a populated ``design_rules.net_classes`` that
+    no net points at constrains no copper."""
     placed_pad_ids = {pad.id for comp in components for pad in comp.placed_pads}
     nets: list[ResolvedNet] = []
     for net_id, name, index, declared in descriptors:
@@ -1832,7 +2096,8 @@ def _finalize_nets(descriptors, pad_ids_by_net, resolved_pins, components,
         if not ordered:
             diags.error("empty_net", f"net {name!r} has no resolved placed pads", net_ref)
             continue
-        nets.append(ResolvedNet(id=net_id, name=name, index=index, pad_refs=tuple(ordered)))
+        nets.append(ResolvedNet(id=net_id, name=name, index=index, pad_refs=tuple(ordered),
+                                net_class_id=class_id_by_net.get(name)))
     return tuple(nets)
 
 

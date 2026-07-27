@@ -289,30 +289,45 @@ this could not be observed at all, because the interim guard made any net-classe
 board `indeterminate`.) A caller who wants the class floor respected should not
 pass the option.
 
-## Per-net-class minima (this round)
+## Per-net-class minima
 
-**DORMANT on every real board — read this before anything else in this
-section.** `ResolvedDesignRules.net_classes` and `ResolvedNet.net_class_id`
-have existed in the IR since before this round, but the v1 compiler hardcodes
-`net_classes=()` (`compile_board.py`) and never reads a `net_classes` or
-per-net class key from the board dict at all. A REAL compiled board — anything
-`route()` can be handed today — always has an empty tuple and every net's
-`net_class_id` is `None`, so everything below is unreachable until the
-compiler is taught to emit a class. This round is the ROUTING (consumer) half
-only; authoring net classes on a real board is a separate, still-open
-follow-up, filed independently and out of this round's fence. Until it lands,
-the only way to exercise this surface at all is to build a `ResolvedBoard`
-with `dataclasses.replace` directly (exactly how `drc_geometric`'s own
-per-net-class floors, `_net_class_minima`, are tested) or, for an end-to-end
-test, to monkeypatch the compile step — see `tests/test_route_rules.py`'s
-`net_classed_compile` fixture.
+**Authored on the board.** A board states its classes under
+`design_rules.net_classes`, each entry naming its `members` — see
+[`board-yaml.md`](board-yaml.md), "Net classes", for the authored schema and its
+fail-closed diagnostics. The compile is three steps in two functions:
+`compile_board._build_net_classes` parses the block into
+`ResolvedDesignRules.net_classes` and returns the members lists **inverted** as
+a net-name -> class-id map; `compile_board` itself then checks every mapped name
+against the net index (`net_class_unknown_member`); and
+`compile_board._finalize_nets` is what actually assigns
+`ResolvedNet.net_class_id` from that map.
 
-That dormancy is also why the board-wide widening below (see "Keepout margin")
-is an acceptable move for THIS round: it cannot change how any real board
-routes today, because no real board can carry a class yet. It is documented as
-the permanent design, not a "for now" stopgap — it is a legitimate,
-conservative answer on its own merits (see below), not merely safe because
-nothing exercises it yet.
+That inversion, not the class tuple, is what makes a class bite: both consumers
+(`methods._net_class_overrides` here, `drc_geometric._net_class_minima` on the
+DRC side) read **referenced** classes only, so a populated `net_classes` whose
+members never reach a net constrains no copper. An unreferenced class is legal
+and does exactly nothing.
+
+Class states an authored board cannot express — principally a
+`min_trace_width_mm` of `0`, which the authoring layer refuses but the IR admits
+— are still reachable by building a `ResolvedBoard` with `dataclasses.replace`
+(how `drc_geometric`'s floors are tested) or by monkeypatching the compile step
+(`tests/test_route_rules.py`'s `net_classed_compile` fixture). Those helpers
+exercise the consumers' fail-closed guards; the authoring path is covered
+end-to-end by
+`test_an_authored_net_class_routes_that_nets_own_copper_at_the_class_width`.
+
+Two entry points **refuse** a class-carrying board rather than route or emit it
+as if it carried none: `agent_router` (the standalone CLI — it has no compiler
+and no per-net step, so the same board would come out at the blanket rules) and
+`pcb_worker.kicad._ir_board_dict` (the `.kicad_pcb` has no per-class channel, so
+the KiCad DRC oracle would check a board the Python kernel checks at stricter
+floors).
+
+The board-wide keepout widening below (see "Keepout margin") is the permanent
+design, not a "for now" stopgap — it is a legitimate, conservative answer on its
+own merits: a ring sized to one net's own requirement cannot also satisfy a
+stricter class net that approaches that copper later.
 
 **Which fields.** `pcb_worker.methods._net_class_overrides` reads
 `NetClass.min_trace_width_mm` / `.min_clearance_mm` — the SAME two fields
@@ -852,10 +867,13 @@ if they are not — a prefix of confidently-wrong reasons is worse than none.
   them too: `drc_geometric._net_class_minima` feeds GC1's
   `_effective_min_trace_width` and GC2's per-pair `_effective_min_clearance`, and
   the interim guard that made any net-classed board `indeterminate`
-  (`019f958b45b9`) is deleted. The v1 compiler still emits `net_classes=()` for
-  every real board, so both halves are reachable only via a
-  hand-built/monkeypatched `ResolvedBoard` until compiler support lands —
-  authoring net classes on a real board is a SEPARATE, still-open piece. Bus-hint
+  (`019f958b45b9`) is deleted. Boards now AUTHOR their classes under
+  `design_rules.net_classes` (`compile_board._build_net_classes` compiles them
+  and inverts each class's `members` list; `compile_board._finalize_nets`
+  assigns the resulting `ResolvedNet.net_class_id`), so
+  both halves are reachable from a real board YAML — the hand-built and
+  monkeypatched `ResolvedBoard`s remain only for class states the authoring layer
+  refuses. Bus-hint
   routing (`route_bus`) honours net-class width too — see "Bus routing now
   honours net-class width too" above.
 - ~~Existing accepted traces/vias in the grid~~ — **done, docket `019f70ebc9ed`**

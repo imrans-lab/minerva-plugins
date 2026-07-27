@@ -500,10 +500,24 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     one and passes to the engine as run options. See that function for why it
     cannot ride on the ``Board``.
 
-    NOT yet handled here, by design (each has its own owner, none of them silent):
-      * per-net-class width/clearance minima — the IR carries the slot
-        (``design_rules.net_classes``) but the v1 compiler emits none, so there
-        is nothing to honour yet; the run is one width and one clearance.
+    NOT APPLIED here, by design (each has its own owner, none of them silent):
+      * per-net-class width/clearance minima. A board AUTHORS its classes under
+        ``design_rules.net_classes`` and the compiler emits them, so the
+        ``ResolvedDesignRules`` copied onto ``Board.design_rules`` here carries
+        the classes themselves. MEMBERSHIP DOES NOT COME ACROSS: the engine's
+        :class:`~agent_router.board.Net` models ``name``/``number``/``pads`` and
+        nothing else, so the per-net ``ResolvedNet.net_class_id`` — the link
+        that decides which net a class applies to — has no slot in this
+        projection and is dropped by it.
+
+        That is not a loss, because nothing downstream of here reads it off the
+        projection. ``methods._net_class_overrides`` resolves the classes
+        against the COMPILED IR, not against this ``Board``, and hands the
+        engine a per-net ``net_widths`` map as a run option; the grid's keepout
+        margin is separately widened to the board-wide worst case
+        (``methods._widen_for_net_classes``). So a run is NOT one width and one
+        clearance — it is one baseline pair plus a per-net width override — but
+        none of that is decided, or representable, here.
     """
     _reject_unroutable_board(rb)
     routable = _routing_layer_ids(rb)

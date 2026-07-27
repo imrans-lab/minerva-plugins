@@ -17,6 +17,8 @@ belongs to K3 (review 621, trap 1).
 
 from __future__ import annotations
 
+import copy
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +29,7 @@ from pcb_worker.compile_board import (
     COINCIDENCE_TOL_MM,
     K3_EMITTED_LAYERS,
     V1_FAB_OUTPUTS,
+    V1_ROUTING_OUTPUTS,
     V1_RULE_PROFILE,
     DefaultCapabilityPolicy,
     _Diagnostics,
@@ -1654,3 +1657,389 @@ def test_failure_envelope_always_carries_an_error():
     result = compile_board(_minimal_board(name=""))
     assert isinstance(result, ResolutionFailure)
     assert any(d.severity is DiagnosticSeverity.ERROR for d in result.diagnostics)
+
+
+# --- Authored net classes (design_rules.net_classes) -----------------------
+#
+# A class both STATES its rules and NAMES its member nets, all inside
+# `design_rules`. Only the two minima both consumers read
+# (`methods._net_class_overrides`, `drc_geometric._net_class_minima`) are
+# authorable; everything else about a class is derived or refused. The
+# membership INVERSION into `ResolvedNet.net_class_id` is what makes a class
+# reach a consumer at all, and is covered end-to-end in
+# `tests/test_route_rules.py` (routed width) and `tests/test_drc_geometric.py`
+# (GC1 finding).
+
+
+def _classed_board(entry, *, nets=None) -> dict:
+    """`_one_component_board` carrying ONE authored net class.
+
+    X1 is an R_0805, so `X1.1`/`X1.2` are real pads and TWO real nets are
+    available. The default net list carries BOTH — `N1`, which the tests below
+    make a class member, and `N2`, which joins nothing. A single-net fixture
+    would let a compiler that assigns every net the first class id pass every
+    assertion here, because with one net there is no wrong answer to tell apart
+    (the campaign's identical-duplicates lesson in a new shape: one element
+    catches a DROPPED value but not a MISASSIGNED one).
+    """
+    board = _one_component_board("R_0805")
+    board["nets"] = nets if nets is not None else [{"name": "N1", "pins": ["X1.1"]},
+                                                   {"name": "N2", "pins": ["X1.2"]}]
+    board["design_rules"] = dict(board["design_rules"], net_classes=[entry])
+    return board
+
+
+def test_authored_net_class_minima_reach_the_ir_and_the_member_net():
+    """Membership is asserted BY IDENTITY, net name -> class id, over a board
+    carrying a classed net AND an unclassed one: `N1` must carry this class's
+    derived id and `N2` must carry None. Both halves are load-bearing — the
+    first fails on a compiler that never wires `net_class_id`, the second on one
+    that wires it to the wrong nets."""
+    result = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1"],
+         "min_trace_width_mm": 0.6, "min_clearance_mm": 0.4}))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    nc, = result.board.design_rules.net_classes
+    assert (nc.name, nc.min_trace_width_mm, nc.min_clearance_mm) == ("Power", 0.6, 0.4)
+    assert {net.name: net.net_class_id for net in result.board.nets} == \
+        {"N1": nc.id, "N2": None}
+
+
+def test_net_class_ids_are_derived_from_the_name_and_board_namespaced():
+    """Same identity rule net ids follow (`derive_id`): the id is a function of
+    the class NAME and the board, never authored and never the raw name — so the
+    same class name in two boards yields two distinct ids."""
+    def one(board_name):
+        board = _classed_board({"name": "Power", "members": ["N1"],
+                                "min_trace_width_mm": 0.6})
+        board["name"] = board_name
+        result = compile_board(board)
+        assert isinstance(result, ResolutionSuccess), _errors(result)
+        return result.board.design_rules.net_classes[0].id
+
+    a, b = one("board-A"), one("board-B")
+    assert a.startswith("net-class:") and b.startswith("net-class:")
+    assert a != b
+
+
+def test_duplicate_net_class_name_fails_closed():
+    """Mirrors `duplicate_net`: two classes cannot share a name, because the name
+    IS the identity the id is derived from — admitting both would mint one id for
+    two different rule sets."""
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Power", "min_trace_width_mm": 0.6},
+        {"name": "Power", "min_clearance_mm": 0.4},
+    ])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "duplicate_net_class" in _errors(result)
+
+
+def test_net_class_member_naming_no_net_fails_closed():
+    result = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1", "GHOST"], "min_trace_width_mm": 0.6}))
+    assert isinstance(result, ResolutionFailure)
+    assert "net_class_unknown_member" in _errors(result)
+
+
+def test_a_net_claimed_by_two_net_classes_fails_closed():
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Power", "members": ["N1"], "min_trace_width_mm": 0.6},
+        {"name": "Fast", "members": ["N1"], "min_clearance_mm": 0.4},
+    ])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "duplicate_net_class_membership" in _errors(result)
+
+
+@pytest.mark.parametrize("field", ["trace_width_mm", "via_diameter_mm", "via_drill_mm"])
+def test_a_net_class_field_no_consumer_reads_is_refused(field):
+    """D2: routing and geometric DRC read `min_trace_width_mm`/`min_clearance_mm`
+    and NOTHING else off a class. Carrying the nominal fields would put a number
+    in the IR that changes no copper — a rule that lies about being in force — so
+    they go through the compiler's declared-but-not-modeled policy, the same one
+    the diff-pair rules use, and are FATAL because 'rules' is requested."""
+    result = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1"], field: 0.6}))
+    assert isinstance(result, ResolutionFailure)
+    assert "unsupported_design_rule" in _errors(result)
+    # Asserted as `declares <field>,` — the diagnostic's own phrasing for the
+    # field it REJECTED — not as a bare substring. A bare `field in d.message`
+    # cannot fail for the `trace_width_mm` arm: the message's fixed boilerplate
+    # names `min_trace_width_mm`, which CONTAINS `trace_width_mm`, so the arm
+    # would pass even if the diagnostic named an entirely different field.
+    assert any(f"declares {field}," in d.message for d in result.diagnostics), \
+        [d.message for d in result.diagnostics]
+
+
+def test_a_net_class_field_no_consumer_reads_is_warned_when_cam_only():
+    """The same policy's non-fatal branch, exactly as the diff-pair pair pins it.
+    Unreachable from production (`V1_FAB_OUTPUTS` and `V1_ROUTING_OUTPUTS` both
+    contain 'rules'); pinned so a future CAM-only profile degrades rather than
+    inheriting a fatality argued from DRC/routing."""
+    result = compile_board(
+        _classed_board({"name": "Power", "members": ["N1"], "trace_width_mm": 0.6}),
+        requested_outputs=("copper", "drill", "mask"))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    assert any(d.code == "unsupported_design_rule" and d.severity is DiagnosticSeverity.WARNING
+               for d in result.diagnostics)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("min_trace_width_mm", 0),
+    ("min_trace_width_mm", -0.1),
+    ("min_trace_width_mm", "0.6"),
+    ("min_clearance_mm", 0),
+    ("min_clearance_mm", -0.1),
+])
+def test_an_inadmissible_net_class_minimum_fails_closed(field, value):
+    """D3: an authored class minimum is admitted through `_is_positive_number`,
+    the SAME predicate the board-level design_rules numbers go through — which is
+    STRICTER than the IR's own `NetClass` validation (`_nonnegative`, which would
+    take a 0). A class is a design rule authored in the same block by the same
+    person; it cannot be admitted on looser terms than the blanket rule it
+    overrides, and the IR is not relaxed to match."""
+    result = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1"], field: value}))
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_net_class" in _errors(result)
+    assert any(field in d.message for d in result.diagnostics)
+
+
+@pytest.mark.parametrize("entry", [
+    pytest.param({"name": "Power", "members": ["N1"], "id": "nc:power"},
+                 id="authored-id"),
+    pytest.param({"members": ["N1"], "min_trace_width_mm": 0.6},
+                 id="no-name-key"),
+    pytest.param({"name": "Power", "members": "N1", "min_trace_width_mm": 0.6},
+                 id="members-not-a-list"),
+    pytest.param({"name": "Power", "members": [42], "min_trace_width_mm": 0.6},
+                 id="member-not-a-string"),
+    # The three branches below were reachable but unpinned: each already behaved
+    # correctly, which is exactly the state in which a regression goes unnoticed.
+    pytest.param(42, id="entry-not-a-mapping"),
+    pytest.param({"name": "", "members": ["N1"], "min_trace_width_mm": 0.6},
+                 id="empty-name"),
+    pytest.param({"name": "Power", "members": [""], "min_trace_width_mm": 0.6},
+                 id="empty-member"),
+])
+def test_a_malformed_net_class_entry_fails_closed(entry):
+    """Every malformed authored class is refused with `invalid_net_class` —
+    asserted on the CODE, not merely on failure, so a defect that starts failing
+    for a different reason (the IR raising, or the member falling through to the
+    unknown-member pass) is not mistaken for this branch still working.
+
+    An authored `id` lands here on purpose: identity is DERIVED from the name, so
+    accepting the key would silently overrule what the author wrote. An EMPTY
+    name lands here rather than at `NetClass.__post_init__`'s own `_nonempty`
+    guard for the same reason `duplicate_net_class` does not wait for the IR's
+    `_unique_ids`: the authoring layer owes the author a diagnostic, not an
+    exception out of the compiler.
+    """
+    result = compile_board(_classed_board(entry))
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_net_class" in _errors(result)
+
+
+def test_an_explicitly_null_unread_net_class_field_is_ignored():
+    """A DECLARATION IS A NON-NULL VALUE, not a present key. `via_diameter_mm:`
+    with no value states no rule and carries no number, so there is nothing that
+    could silently fail to take effect — the whole basis on which a VALUED unread
+    field is refused. It is ignored, and the board compiles.
+
+    This is the same `is not None` test the diff-pair check applies (asserted
+    side by side below, because the two are one policy with two callers and must
+    not drift apart). It is deliberately NOT the presence-not-truthiness rule
+    `agent_router.board._refuse_authored_net_classes` applies to the
+    `net_classes` key itself; see that docstring for why the two differ.
+    """
+    ok = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1"], "via_diameter_mm": None}))
+    assert isinstance(ok, ResolutionSuccess), _errors(ok)
+    assert "unsupported_design_rule" not in _errors(ok)
+
+    # The sibling caller, same board shape, same rule.
+    board = _classed_board({"name": "Power", "members": ["N1"]})
+    board["design_rules"]["diff_pair_gap_mm"] = None
+    assert isinstance(compile_board(board), ResolutionSuccess)
+
+    # And the valued form of each still fails, so the test is about NULL only.
+    assert isinstance(compile_board(_classed_board(
+        {"name": "Power", "members": ["N1"], "via_diameter_mm": 0.9})),
+        ResolutionFailure)
+
+
+def test_a_rules_block_defect_defers_every_net_class_diagnostic():
+    """ORDERING, pinned because a docstring here once overclaimed it.
+    `_build_net_classes` is the LAST thing `_build_design_rules` does, behind
+    four `return None` paths — so a board with BOTH a rules-block defect and a
+    broken class reports the rules-block defect ALONE, and the class diagnostics
+    wait for a later compile.
+
+    That is deliberate (a rules block that cannot be built has no classes to
+    speak of) and matches the diff-pair precedent. The one-pass property net
+    classes DO have is across the class LIST, not across the board — see
+    `test_every_broken_class_in_the_list_is_reported_in_one_pass`.
+    """
+    board = _classed_board({"name": "", "members": ["N1"]})   # broken class
+    board["design_rules"]["diff_pair_gap_mm"] = 0.2           # broken rules block
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    codes = _errors(result)
+    assert "unsupported_design_rule" in codes
+    assert "invalid_net_class" not in codes, (
+        "class parsing must not have run at all — if it did, the enclosing "
+        "return-None ordering has changed and the docstring is now wrong")
+
+
+def test_every_broken_class_in_the_list_is_reported_in_one_pass():
+    """The completeness that IS real: a defect in one class does not stop the
+    walk, so an author fixing three classes needs one compile, not three."""
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "A", "min_trace_width_mm": 0},       # inadmissible minimum
+        {"name": "B", "id": "nc:b"},                  # unknown key
+        {"name": "C", "members": ["GHOST"]},          # unknown member
+    ])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    codes = _errors(result)
+    assert codes.count("invalid_net_class") == 2, codes
+    assert "net_class_unknown_member" in codes
+
+
+def test_net_classes_must_be_a_list():
+    board = _one_component_board("R_0805")
+    board["design_rules"] = dict(board["design_rules"], net_classes={"Power": {}})
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_net_class" in _errors(result)
+
+
+def test_a_board_authoring_no_net_classes_is_unchanged(smart_remote_result):
+    """THE REGRESSION FLOOR — every existing board. A board that authors no
+    `net_classes` block compiles to the same empty tuple and the same all-None
+    `net_class_id`s it did before the authoring surface existed, and raises no
+    net-class diagnostic of any kind."""
+    assert isinstance(smart_remote_result, ResolutionSuccess)
+    assert smart_remote_result.board.design_rules.net_classes == ()
+    assert all(net.net_class_id is None for net in smart_remote_result.board.nets)
+    assert not [d for d in smart_remote_result.diagnostics if "net_class" in d.code]
+
+
+def test_an_explicitly_empty_net_classes_list_declares_nothing():
+    board = _one_component_board("R_0805")
+    board["nets"] = [{"name": "N1", "pins": ["X1.1"]}]
+    board["design_rules"] = dict(board["design_rules"], net_classes=[])
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    assert result.board.design_rules.net_classes == ()
+    assert all(net.net_class_id is None for net in result.board.nets)
+
+
+# --- The schema doc's examples must COMPILE ---------------------------------
+#
+# A schema doc whose example does not compile is worse than no doc: it teaches a
+# shape the compiler rejects, and every reader who copies it starts from a broken
+# board. board-yaml.md's canonical example had drifted to where it failed FIVE
+# ways at once (unresolvable footprint, two dangling pin refs, an empty net, and
+# a fatal diff-pair rule) while reading as authoritative. This is the gate that
+# keeps it honest — the claim in that file's "Compiling the examples" section is
+# this test.
+
+_BOARD_YAML_DOC = Path(__file__).parent.parent.parent / "docs" / "board-yaml.md"
+
+
+def _doc_yaml_blocks() -> list[tuple[int, object]]:
+    text = _BOARD_YAML_DOC.read_text(encoding="utf-8")
+    return [(text[:m.start()].count("\n") + 1, yaml.safe_load(m.group(1)))
+            for m in re.finditer(r"```yaml\n(.*?)```", text, re.S)]
+
+
+def _host_for_pins(frag: dict) -> dict:
+    """A v2 board (the `override` sub-struct is v2-only) carrying the fragment's
+    pins verbatim. Hosted on a THROUGH-HOLE footprint because the fragment
+    overrides a drill, and an SMD pad has no footprint drill to deviate from."""
+    return {
+        "version": 2, "id": "board:" + "a" * 32, "name": "pins-host",
+        "width_mm": 20, "height_mm": 20, "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "U1",
+                        "footprint": "Package_DIP:DIP-6_W7.62mm_Socket",
+                        "x_mm": 5, "y_mm": 5, "rotation_deg": 0, "layer": "top",
+                        "pins": frag["pins"]}],
+        "nets": [{"name": "N", "pins": ["U1.2"]}],
+    }
+
+
+def _host_for_design_rules(frag: dict) -> dict:
+    """A board whose design_rules block IS the fragment, with the nets its
+    net_classes name actually declared."""
+    return {
+        "version": 1, "name": "rules-host", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"], "design_rules": frag["design_rules"],
+        "components": [{"ref": "R1", "footprint": "R_0805", "x_mm": 5,
+                        "y_mm": 10, "rotation_deg": 0, "layer": "top"},
+                       {"ref": "R2", "footprint": "R_0805", "x_mm": 15,
+                        "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
+        "nets": [{"name": "VCC", "pins": ["R1.1"]},
+                 {"name": "GND", "pins": ["R2.1"]}],
+    }
+
+
+_DOC_SPLICERS = {"pins": _host_for_pins, "design_rules": _host_for_design_rules}
+
+
+@pytest.mark.parametrize("outputs", [V1_FAB_OUTPUTS, V1_ROUTING_OUTPUTS],
+                         ids=["fab", "routing"])
+def test_every_yaml_example_in_board_yaml_md_compiles(outputs):
+    """Compiles EVERY yaml block in the schema doc under BOTH production output
+    profiles. A full board is compiled verbatim; a FRAGMENT is only meaningful
+    inside a board, so it is spliced into a minimal host and compiled there.
+
+    A new fragment with no splicer FAILS rather than being skipped — silently
+    passing over an example is how the canonical one rotted in the first place.
+    """
+    blocks = _doc_yaml_blocks()
+    assert len(blocks) >= 3, f"expected the doc's examples, found {len(blocks)}"
+    for line, doc in blocks:
+        where = f"{_BOARD_YAML_DOC.name} line {line}"
+        assert isinstance(doc, dict), f"{where}: example is not a mapping"
+        if "version" in doc:
+            board = doc
+        else:
+            key = next((k for k in _DOC_SPLICERS if k in doc), None)
+            assert key is not None, (
+                f"{where}: fragment declares {sorted(doc)} and no splicer knows "
+                f"how to host it — add one here rather than leaving the example "
+                f"unchecked")
+            board = _DOC_SPLICERS[key](doc)
+        result = compile_board(copy.deepcopy(board), requested_outputs=outputs)
+        assert isinstance(result, ResolutionSuccess), (
+            f"{where} does not compile: {_errors(result)}")
+
+
+def test_the_kicad_bridge_refuses_a_net_classed_board():
+    """C5. The emitted `design_rules` mapping carries the board's BLANKET
+    defaults only — there is no per-class channel — so a dropped class would make
+    the KiCad DRC oracle UNSOUND, not merely lossy: the Python kernel checks a
+    classed net at its class floors while the .kicad_pcb carries none. It refuses
+    on PRESENCE, the same test its zone and board-graphic neighbours use; a
+    classless board still passes through untouched."""
+    from pcb_worker import kicad
+
+    clean = compile_board(_one_component_board("R_0805"))
+    assert isinstance(clean, ResolutionSuccess), _errors(clean)
+    kicad._ir_board_dict(clean.board)  # the neighbour case: no class, no refusal
+
+    classed = compile_board(_classed_board(
+        {"name": "Power", "members": ["N1"], "min_trace_width_mm": 0.6}))
+    assert isinstance(classed, ResolutionSuccess), _errors(classed)
+    with pytest.raises(ValueError, match="net class"):
+        kicad._ir_board_dict(classed.board)

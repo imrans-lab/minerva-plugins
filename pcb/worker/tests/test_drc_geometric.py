@@ -557,8 +557,9 @@ def _proj(*copper):
 def _rb_clearance(clearance=0.2, net_classes=(), nets=()):
     # A 2-layer stack so GC2's known-copper-layer guard has top/bottom to fold onto;
     # the synthetic primitives sit on "top"/"bottom" (or F.Cu/B.Cu, which fold there).
-    # `nets`/`net_classes` default EMPTY (what every real compiled board carries) so
-    # GC2's per-net-class floor lookup resolves to the global clearance; the net-class
+    # `nets`/`net_classes` default EMPTY (what a board authoring no `design_rules.
+    # net_classes` block compiles to — still the overwhelming majority) so GC2's
+    # per-net-class floor lookup resolves to the global clearance; the net-class
     # tests below pass real ResolvedNet/NetClass values in.
     return SimpleNamespace(
         design_rules=SimpleNamespace(
@@ -988,8 +989,14 @@ def _apply_net_class(rb, nc: NetClass):
 def _apply_net_class_to(rb, nc: NetClass, *net_names: str):
     """Attach *nc* to the NAMED nets only, leaving every other net unclassed. The
     net-scoping tests need one board carrying both, so a board-wide scalar cannot
-    satisfy them. (D3: there is no authoring surface — `compile_board` still emits
-    `net_classes=()` — so `dataclasses.replace` is the only way in.)"""
+    satisfy them.
+
+    A board CAN now author its own classes (`design_rules.net_classes` — see
+    `test_an_authored_net_class_raises_this_nets_gc1_floor`), so this is no longer
+    the only way in. It stays because it reaches class states the authoring layer
+    refuses on purpose (`compile_board._net_class_minimum` admits only positive
+    numbers, while the IR admits a `0`) and because a synthetic `NetClass` is the
+    shortest way to control exactly which net carries what."""
     dr = dataclasses.replace(rb.design_rules, net_classes=(nc,))
     wanted = set(net_names)
     nets = tuple(dataclasses.replace(n, net_class_id=nc.id) if n.name in wanted else n
@@ -1038,6 +1045,101 @@ def test_net_class_min_trace_width_is_applied_as_a_gc1_violation():
     # acceptance 8: the finding reports the EFFECTIVE required value.
     assert found["N"]["required_mm"] == pytest.approx(0.4)
     assert found["N"]["measured_mm"] == pytest.approx(0.2)
+
+
+def test_an_authored_net_class_raises_this_nets_gc1_floor():
+    """THE SAME reproduction as above, driven the way a real caller drives it:
+    the class is AUTHORED in the board's own `design_rules.net_classes` block and
+    compiled by the real compiler — no `dataclasses.replace`, no synthetic
+    `NetClass`.
+
+    The 0.2mm trace clears the global 0.127 floor, so the identical board is
+    CLEAN without the block and a determinate GC1 violation with it, naming the
+    class's 0.4 as the required value. That difference is the whole point: it
+    fails on a compiler that ignores the block, and equally on one that builds
+    `design_rules.net_classes` but never assigns `ResolvedNet.net_class_id`,
+    because `_net_class_minima` reads REFERENCED classes only.
+
+    A SECOND net (M) is deliberately left out of `members`, so the same run also
+    pins that membership is per-net and not board-wide.
+    """
+    board = _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6),
+                    _th_pad_comp(ref="U2", x=25.0, annulus=1.6)],
+        nets=[{"name": "N", "pins": ["U1.1"]}, {"name": "M", "pins": ["U2.1"]}],
+        traces=[_trace(0.2, net="N"),
+                _trace(0.2, net="M", a=(25.0, 20.0), b=(35.0, 20.0))])
+    assert _run(board)["verdict"] == "clean"
+
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Strict", "members": ["N"], "min_trace_width_mm": 0.4}])
+    res = _run(board)
+    assert res["ok"] is True
+    assert res["verifies_geometry"] is True
+    assert res["verdict"] == "violations"
+    found = _gc1_by_net(res)
+    assert set(found) == {"N"}, "M joined no class and must keep the global floor"
+    assert found["N"]["required_mm"] == pytest.approx(0.4)
+    assert found["N"]["measured_mm"] == pytest.approx(0.2)
+
+
+def test_an_authored_net_class_raises_this_pairs_gc2_floor():
+    """The CLEARANCE half of the authoring surface, end to end — the mirror of
+    `test_an_authored_net_class_raises_this_nets_gc1_floor`, which covers width.
+
+    Without this, authored `min_clearance_mm` reached neither consumer from a
+    real board in any test: it was exercised only through the synthetic
+    `dataclasses.replace` helpers, so a compiler that parsed the key and dropped
+    it (or wired it to the wrong nets) would have gone unnoticed on the DRC side.
+
+    Gap 0.3mm: above the GLOBAL 0.2 floor, so the board is CLEAN with no class.
+    Only net A is a member — a pair's floor is the max over BOTH participants'
+    classes, so one member is enough to raise it, and the run also pins that
+    membership came from `members` rather than being applied board-wide.
+    """
+    board = _two_pad_board(11.5)
+    assert _run(board)["verdict"] == "clean"
+
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Strict", "members": ["A"], "min_clearance_mm": 0.5}])
+    res = _run(board)
+    assert res["ok"] is True
+    assert res["verifies_geometry"] is True
+    assert _gc2_refs(res) == {frozenset({"U1", "U2"})}
+    f = _findings(res, "gc2_copper_clearance")[0]
+    assert f["required_mm"] == pytest.approx(0.5), \
+        "the EFFECTIVE pair floor must be the authored class value, not the global 0.2"
+    assert f["measured_mm"] == pytest.approx(0.3)
+
+
+def test_an_authored_net_class_clearance_does_not_reach_an_unclassed_pair():
+    """The negative half: a class authored over net A must not raise the floor
+    for a pair neither of whose participants joined it. Same board, same authored
+    clearance, but the class names a net that exists and is not in this pair —
+    so the pair stays at the global floor and the board stays clean."""
+    board = _two_pad_board(11.5)
+    board["components"].append(_th_pad_comp(ref="U3", x=30.0, annulus=1.2))
+    board["nets"] = board["nets"] + [{"name": "C", "pins": ["U3.1"]}]
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Strict", "members": ["C"], "min_clearance_mm": 0.5}])
+    res = _run(board)
+    assert res["verdict"] == "clean", \
+        "A/B joined no class; their 0.3mm gap must still be judged at the global 0.2"
+
+
+def test_an_authored_net_class_nobody_joins_constrains_no_copper():
+    """An UNREFERENCED class is legal and changes nothing — the consumers' rule
+    (both read referenced classes only), now pinned against a board that really
+    authors one. The class is compiled; with no `members` it reaches no copper,
+    so the same 0.2mm trace that violates the class's 0.4 floor above stays
+    CLEAN here."""
+    board = _classed_width_board(0.2)
+    board["design_rules"] = dict(board["design_rules"], net_classes=[
+        {"name": "Strict", "min_trace_width_mm": 0.4}])
+    rb = _compile(board)
+    assert len(rb.design_rules.net_classes) == 1
+    assert all(net.net_class_id is None for net in rb.nets)
+    assert run_geometric_drc(rb)["verdict"] == "clean"
 
 
 def test_net_class_min_trace_width_below_the_global_floor_cannot_weaken_it():
