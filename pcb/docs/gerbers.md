@@ -1,11 +1,11 @@
-# Fabrication output — Gerber + Excellon (`pcb_gerbers`)
+# Fabrication output — Gerber + Excellon (`minerva_pcb_gerbers`)
 
 Docket: minerva `019eb47ddebc` · DCR `019dc140`. Built on the validation spike
 `019eb480415a` (see `pcb/spikes/gerber/REPORT.md` for the library evaluation —
 its verdict is the foundation this builds on, not re-litigated here).
 
-`pcb_gerbers` (worker method `gerbers`, `pcb_worker/gerber.py`) compiles a
-canonical board (the same `board-yaml` contract `pcb_validate` / `pcb_generate`
+`minerva_pcb_gerbers` (worker method `gerbers`, `pcb_worker/gerber.py`) compiles a
+canonical board (the same `board-yaml` contract `minerva_pcb_validate` / `minerva_pcb_generate`
 consume) into manufacturer-ready fabrication files, in **pure Python — no KiCad
 binary**. Gerber layers come from the pinned `gerber-writer` library (0.4.3.3,
 authored by Karel Tavernier / Ucamco, a principal author of the Gerber spec
@@ -15,7 +15,7 @@ itself); the Excellon drill files are emitted by this module directly, because
 ## Output
 
 `{files: {name: content}, written: [{path, bytes_written}]}` — the exact return
-convention as `pcb_generate`. `out_dir` optionally also writes to disk.
+convention as `minerva_pcb_generate`. `out_dir` optionally also writes to disk.
 
 | File (`<base>` = `name` arg or board name) | Layer / content |
 |---|---|
@@ -136,7 +136,7 @@ Structural validation + two independent parser round-trips are the automated
 acceptance gate; they are **not** a substitute for a viewer check. Before any
 board's Gerbers are treated as fab-final, a human must open all six layers plus
 both drill files in `gerbv` or KiCad GerbView and confirm (extends the spike's
-checklist to the production `pcb_gerbers` output):
+checklist to the production `minerva_pcb_gerbers` output):
 
 1. **Zero parser warnings** in the viewer for every layer.
 2. **Visual match to intent:** SMD pads show their resolved copper land, with silk

@@ -430,8 +430,8 @@ def _normalize(params: dict) -> dict:
 
 
 _NO_LIBRARY_DATA_HINT = (
-    "No KiCAD library data found under lib_dir. Run pcb_fetch_libraries first, "
-    "then retry (see pcb_library_status to check what's already fetched)."
+    "No KiCAD library data found under lib_dir. Run minerva_pcb_fetch_libraries first, "
+    "then retry (see minerva_pcb_library_status to check what's already fetched)."
 )
 
 
@@ -442,7 +442,7 @@ def _check_libraries(params: dict) -> dict:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
     lib_dir = params.get("lib_dir")
-    # lib_dir data is fetched by the Go-side pcb_fetch_libraries tool (see
+    # lib_dir data is fetched by the Go-side minerva_pcb_fetch_libraries tool (see
     # pcb/internal/libraries/ + docs/libraries.md) into a directory this
     # method never writes to — it only reads whatever is already there. With
     # no lib_dir (or one that doesn't exist / isn't a directory yet) this is

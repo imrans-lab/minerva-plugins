@@ -1,18 +1,27 @@
 // Package tools — worker-backed MCP tool specs + handlers for the PCB plugin.
 //
-// These four tools dispatch to the Python worker (python -m pcb_worker) via the
+// These tools dispatch to the Python worker (python -m pcb_worker) via the
 // shared Go↔Python bridge, exactly as the CAD plugin's mcad_validate does. The
 // worker methods are pure functions over the canonical board YAML.
 //
-// Tool-naming convention (matches CAD): CAD exposes its worker analysis tools
-// under a short prefix — mcad_validate / mcad_list_edges — distinct from its
-// dotted panel-IPC channels (cad.evaluate, cad.export) and from core Minerva's
-// minerva_cad_* tools. The PCB analog uses the pcb_ prefix for the LLM-facing
-// worker tools (pcb_validate, pcb_generate, pcb_check_libraries, pcb_check_bom),
-// keeping them distinct from the dotted pcb.serialize/... IPC channels declared
-// in the manifest and from any core minerva_pcb_* tools. The worker METHOD names
+// Tool-naming convention (round D0-expose, docket 019fa486b408): these
+// LLM-facing worker tools carry the full minerva_pcb_ prefix (minerva_pcb_validate,
+// minerva_pcb_generate, minerva_pcb_check_libraries, minerva_pcb_check_bom, ...) —
+// the SAME prefix the plugin's panel-executor tools use, and the prefix
+// PluginToolRegistry.register_plugin_tools requires of every manifest-declared
+// tool. This plugin previously followed CAD's short-prefix split (mcad_validate
+// distinct from minerva_cad_*), registering these as bare pcb_validate/pcb_generate/
+// etc — but PluginManager._discover_backend_tools() runs unconditionally on every
+// plugin start and auto-prefixes any name not already starting with
+// "minerva_pcb_", producing the double-prefixed minerva_pcb_pcb_validate. Naming
+// the spec minerva_pcb_validate from the start makes that auto-prefix step a
+// no-op, so the manifest-declared name and the backend-discovered name agree
+// under one spelling whether or not discovery has run. The worker METHOD names
+// (a different namespace — the short string passed to w.Call) are UNCHANGED and
 // carry no prefix (validate, generate, check_libraries, check_bom) — same split
-// CAD uses (MCP tool mcad_validate → worker method "validate").
+// CAD uses (MCP tool mcad_validate → worker method "validate"). The dotted
+// panel-IPC channels (pcb.route, pcb.draft_check, pcb.serialize, ...) are a
+// separate namespace again and are NOT renamed by this convention.
 package tools
 
 import (
@@ -30,10 +39,10 @@ import (
 // adapter (WorkerTool) bridges the two so both live in one Registry.
 type WorkerToolHandlerFunc func(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error)
 
-// ---- pcb_validate ----------------------------------------------------------
+// ---- minerva_pcb_validate ----------------------------------------------------------
 
 var Validate = ToolSpec{
-	Name: "pcb_validate",
+	Name: "minerva_pcb_validate",
 	Description: "Structurally validate a canonical PCB board (board-yaml contract). " +
 		"Args {yaml:<board source>} or {board:<board object>}. Returns " +
 		"{ok, errors:[{path,message}], warnings:[...]} — errors flag structural " +
@@ -53,10 +62,10 @@ func HandleValidate(ctx context.Context, w *bridge.Worker, params json.RawMessag
 	return w.Call(ctx, "validate", params)
 }
 
-// ---- pcb_generate ----------------------------------------------------------
+// ---- minerva_pcb_generate ----------------------------------------------------------
 
 var Generate = ToolSpec{
-	Name: "pcb_generate",
+	Name: "minerva_pcb_generate",
 	Description: "Generate KiCad files from a canonical PCB board. Args {yaml|board, " +
 		"name?:<basename>, out_dir?:<dir>}. Returns {files:{'<name>.kicad_pcb':text, " +
 		"'<name>.kicad_sch':text, '<name>.kicad_pro':text}, written:[{path,bytes_written}]}. " +
@@ -78,10 +87,10 @@ func HandleGenerate(ctx context.Context, w *bridge.Worker, params json.RawMessag
 	return w.Call(ctx, "generate", params)
 }
 
-// ---- pcb_gerbers -----------------------------------------------------------
+// ---- minerva_pcb_gerbers -----------------------------------------------------------
 
 var Gerbers = ToolSpec{
-	Name: "pcb_gerbers",
+	Name: "minerva_pcb_gerbers",
 	Description: "Generate fabrication files (Gerber RS-274X/X2 + Excellon drills) from a " +
 		"canonical PCB board — pure Python, no KiCad binary. Args {yaml|board, name?:<basename>, " +
 		"out_dir?:<dir>}. Returns {files:{'<name>-F_Cu.gbr':text, ...'-B_Cu/-F_Mask/-B_Mask/" +
@@ -106,12 +115,12 @@ func HandleGerbers(ctx context.Context, w *bridge.Worker, params json.RawMessage
 	return w.Call(ctx, "gerbers", params)
 }
 
-// ---- pcb_drc ---------------------------------------------------------------
+// ---- minerva_pcb_drc ---------------------------------------------------------------
 
 var DRC = ToolSpec{
-	Name: "pcb_drc",
+	Name: "minerva_pcb_drc",
 	Description: "Run a CONNECTIVITY/topology check over a canonical PCB board (pad centers " +
-		"+ trace centerlines; NOT a geometric copper DRC — use pcb_drc_geometric for copper " +
+		"+ trace centerlines; NOT a geometric copper DRC — use minerva_pcb_drc_geometric for copper " +
 		"clearance/width/annular). Pure " +
 		"Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. " +
 		"Returns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured " +
@@ -137,10 +146,10 @@ func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (j
 	return w.Call(ctx, "drc", params)
 }
 
-// ---- pcb_drc_geometric -----------------------------------------------------
+// ---- minerva_pcb_drc_geometric -----------------------------------------------------
 
 var DRCGeometric = ToolSpec{
-	Name: "pcb_drc_geometric",
+	Name: "minerva_pcb_drc_geometric",
 	Description: "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR — real " +
 		"pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args " +
 		"{yaml:<board source>} or {board:<board object>}. Compiles the board to the " +
@@ -154,7 +163,7 @@ var DRCGeometric = ToolSpec{
 		"verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, " +
 		"entity_id, net_id, layer, measured_mm, required_mm, witness}], counts, warnings} or " +
 		"indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. " +
-		"Distinct from pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
+		"Distinct from minerva_pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
@@ -168,10 +177,10 @@ func HandleDRCGeometric(ctx context.Context, w *bridge.Worker, params json.RawMe
 	return w.Call(ctx, "drc_geometric", params)
 }
 
-// ---- pcb_resolve -----------------------------------------------------------
+// ---- minerva_pcb_resolve -----------------------------------------------------------
 
 var Resolve = ToolSpec{
-	Name: "pcb_resolve",
+	Name: "minerva_pcb_resolve",
 	Description: "Enrich a canonical PCB board with footprint silkscreen + courtyard " +
 		"graphics — pure Python, no KiCad binary. Args {yaml:<board source>} or " +
 		"{board:<board object>}. For each component the footprint ref is resolved from " +
@@ -196,10 +205,10 @@ func HandleResolve(ctx context.Context, w *bridge.Worker, params json.RawMessage
 	return w.Call(ctx, "resolve", params)
 }
 
-// ---- pcb_normalize ---------------------------------------------------------
+// ---- minerva_pcb_normalize ---------------------------------------------------------
 
 var Normalize = ToolSpec{
-	Name: "pcb_normalize",
+	Name: "minerva_pcb_normalize",
 	Description: "Rewrite a canonical PCB board to its normalized v2 shape — the sync-back " +
 		"the compile fold never persists on its own. Args {yaml:<board source>} or " +
 		"{board:<board object>}. For every pin carrying deprecated inline fabrication " +
@@ -227,8 +236,8 @@ func HandleNormalize(ctx context.Context, w *bridge.Worker, params json.RawMessa
 
 // ---- pcb.route (worker-backed broker CHANNEL, not an LLM tool name) --------
 //
-// Unlike pcb_validate/pcb_generate/... (LLM-facing tool names under the pcb_
-// prefix), pcb.route is a dotted panel-IPC channel: ui/PCBPanel.gd's
+// Unlike minerva_pcb_validate/minerva_pcb_generate/... (LLM-facing tool names
+// under the minerva_pcb_ prefix), pcb.route is a dotted panel-IPC channel: ui/PCBPanel.gd's
 // route_board() emits a "pcb.route" broker request (request.emit("pcb.route",
 // params, reply_id)) driving the route-correction loop behind
 // minerva_pcb_apply_route_hints. The broker requires every declared
@@ -298,10 +307,10 @@ func HandleDraftCheckChannel(ctx context.Context, w *bridge.Worker, params json.
 	return w.Call(ctx, "draft_check", params)
 }
 
-// ---- pcb_check_libraries ---------------------------------------------------
+// ---- minerva_pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{
-	Name: "pcb_check_libraries",
+	Name: "minerva_pcb_check_libraries",
 	Description: "Verify component footprints against KiCAD footprint-library data. " +
 		"Args {yaml|board, lib_dir?:<path to a dir of *.pretty libs>}. With no lib_dir " +
 		"(the library data ships with a later child) returns {ok:true, checked:0, " +
@@ -321,10 +330,10 @@ func HandleCheckLibraries(ctx context.Context, w *bridge.Worker, params json.Raw
 	return w.Call(ctx, "check_libraries", withDefaultLibDir(params))
 }
 
-// ---- pcb_check_bom ---------------------------------------------------------
+// ---- minerva_pcb_check_bom ---------------------------------------------------------
 
 var CheckBOM = ToolSpec{
-	Name: "pcb_check_bom",
+	Name: "minerva_pcb_check_bom",
 	Description: "Extract + validate a bill of materials from a canonical PCB board. " +
 		"Args {yaml|board, lib_dir?}. Returns {ok, items:[{refs,footprint,value,qty}], " +
 		"line_count, part_count, errors, warnings}. Warns on components missing a value " +
@@ -344,10 +353,10 @@ func HandleCheckBOM(ctx context.Context, w *bridge.Worker, params json.RawMessag
 }
 
 // withDefaultLibDir fills in lib_dir with the fetched-library data directory
-// (libraries.DefaultDir — pcb_fetch_libraries's destination) whenever the
+// (libraries.DefaultDir — minerva_pcb_fetch_libraries's destination) whenever the
 // caller omits it or supplies an empty/whitespace-only value, so an LLM
 // caller doesn't need to know the path to get real footprint/symbol checks
-// once pcb_fetch_libraries has run. An explicit caller-supplied lib_dir is
+// once minerva_pcb_fetch_libraries has run. An explicit caller-supplied lib_dir is
 // never overridden. The worker's own os.path.isdir(lib_dir) guard handles the
 // not-yet-fetched case gracefully (missing_data:true + hint) — this helper
 // never needs to check presence itself.

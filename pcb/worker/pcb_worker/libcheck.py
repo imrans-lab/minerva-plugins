@@ -1,7 +1,7 @@
 """KiCAD library-data readers: footprint existence + symbol-name scanning.
 
 This module reads the DATA that ships via `libraries.lock.json` +
-`pcb_fetch_libraries` (the Go-side fetcher under `pcb/internal/libraries/`).
+`minerva_pcb_fetch_libraries` (the Go-side fetcher under `pcb/internal/libraries/`).
 It never fetches anything itself — that is the Go side's job (network I/O
 belongs in Go so it can be tested against an httptest server without a
 Python-side network stack). This module only reads whatever is already on

@@ -41,7 +41,7 @@ components:
     rotation_deg: 90
     layer: top
     symbol: Device:NE555P      # OPTIONAL, unmodeled — carried in Extra (see below);
-                                # checked informally by pcb_check_libraries when present
+                                # checked informally by minerva_pcb_check_libraries when present
     pins:
       # Component-relative offsets. Inline pin geometry must AGREE with the
       # footprint's own pad positions (see "Pin-geometry authority" below) —
@@ -124,7 +124,7 @@ spike carried through `Extra`. A **plated** board hole MUST author `annulus_mm`
 (its copper-ring diameter, `> diameter_mm`): the copper ring is never invented, so
 both the gerber and KiCad exporters emit exactly the authored ring and cannot
 diverge (finding `019f8dbb7104`); the compiler fail-closes a plated hole without
-one, and rejects `annulus_mm` on an unplated hole. The `pcb_gerbers` exporter uses
+one, and rejects `annulus_mm` on an unplated hole. The `minerva_pcb_gerbers` exporter uses
 them to build copper annuli,
 mask openings, and the PTH/NPTH Excellon split. See `docs/gerbers.md`. Producers
 may pre-split plating with the `pth_holes` / `npth_holes` INPUT aliases; the codec

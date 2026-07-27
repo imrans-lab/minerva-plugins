@@ -14,7 +14,7 @@ type Status struct {
 // whether destDir already has a verified (sha256-matching) copy. Present is
 // true only when every entry verifies — a partial/corrupt fetch reports
 // Present:false with the specific missing names, so a caller can decide
-// whether to re-run pcb_fetch_libraries.
+// whether to re-run minerva_pcb_fetch_libraries.
 func GetStatus(lockPath, destDir string) (Status, error) {
 	lock, err := LoadLock(lockPath)
 	if err != nil {

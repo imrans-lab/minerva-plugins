@@ -6,7 +6,7 @@ Every reply carries a `scope` token, and no two are spelled alike.
 
 | | `drc` (`_drc`) | `drc_geometric` (`_drc_geometric`) | candidate overlay (`ir_candidates`) |
 |---|---|---|---|
-| MCP tool | `minerva_pcb_pcb_drc` | `minerva_pcb_pcb_drc_geometric` | attached to `route()` |
+| MCP tool | `minerva_pcb_drc` | `minerva_pcb_drc_geometric` | attached to `route()` |
 | `scope` | `"connectivity"` | `"geometric"` | `"geometric_candidate"` |
 | What it reads | pad **centers** + trace **centerlines** | real **copper + hole geometry** (the ResolvedBoard IR) | the same, over base copper **+ proposed** copper |
 | Question | is the net **topology/connectivity** sane? | is the **copper geometrically** legal? | does **this proposal** introduce a geometric violation? |

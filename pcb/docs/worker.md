@@ -18,29 +18,40 @@ circuit breaker, and graceful shutdown for free.
 
 ## Methods (worker) ↔ MCP tools (Go)
 
-The worker method names carry **no prefix**; the Go router exposes each as an
-MCP tool under a `pcb_` prefix — matching CAD's split (MCP `mcad_validate` →
-worker method `validate`). The `pcb_` prefix keeps these LLM-facing analysis
-tools distinct from the dotted `pcb.serialize`/… panel-IPC channels and from
-core Minerva's `minerva_pcb_*` tools.
+The worker method names carry **no prefix**. As of round D0-expose (docket
+`019fa486b408`) the Go router exposes each as an MCP tool under the full
+`minerva_pcb_` prefix — matching every other plugin's manifest-declared
+backend tools in this monorepo (scansort, codetools, agent-relay, drive all
+register their backend tools under `minerva_<id>_*` from the start). Earlier
+this plugin followed CAD's split instead (MCP `mcad_validate` → worker method
+`validate`, tool prefix distinct from `minerva_cad_*`), registering these as
+bare `pcb_validate`/`pcb_generate`/etc — but `PluginManager._discover_backend_tools()`
+runs unconditionally on every plugin start and auto-prefixes any name not
+already starting with `minerva_pcb_`, so a bare `pcb_validate` was discovered
+as the double-prefixed `minerva_pcb_pcb_validate`. Naming the tool
+`minerva_pcb_validate` from the start makes that auto-prefix step a no-op, so
+the manifest-declared name and the backend-discovered name agree under one
+spelling whether or not discovery has run — see the durable hint
+`minerva-platform/plugin-backend-tools-need-manifest-entries-with-exact-prefixed-names`.
 
 | MCP tool | worker method | purpose |
 |---|---|---|
-| `pcb_validate` | `validate` | structural validation → `{ok, errors[], warnings[]}` |
-| `pcb_generate` | `generate` | canonical YAML → KiCad file text |
-| `pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills — see `docs/gerbers.md` |
-| `pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` (real data this round — see `docs/libraries.md`) |
-| `pcb_check_bom` | `check_bom` | BOM extraction + validation |
+| `minerva_pcb_validate` | `validate` | structural validation → `{ok, errors[], warnings[]}` |
+| `minerva_pcb_generate` | `generate` | canonical YAML → KiCad file text |
+| `minerva_pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills — see `docs/gerbers.md` |
+| `minerva_pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` (real data this round — see `docs/libraries.md`) |
+| `minerva_pcb_check_bom` | `check_bom` | BOM extraction + validation |
 | — (health) | `init`, `ping` | version/liveness handshake |
 
 Every method returns the bridge envelope `{"ok": bool, "result"|"error": …}`
 (the Go router re-wraps success as `{ok:true, result}` and worker errors as
 `{ok:false, error}` for the MCP `content[0].text` payload).
 
-**Not worker methods** — `pcb_fetch_libraries` and `pcb_library_status` are
-in-process Go tools (no Python round-trip; the fetch is plain `net/http`) that
-provide the `lib_dir` data `check_libraries`/`check_bom` read. See
-`docs/libraries.md` for the full fetch/verify/data-dir contract.
+**Not worker methods** — `minerva_pcb_fetch_libraries` and
+`minerva_pcb_library_status` are in-process Go tools (no Python round-trip;
+the fetch is plain `net/http`) that provide the `lib_dir` data
+`check_libraries`/`check_bom` read. See `docs/libraries.md` for the full
+fetch/verify/data-dir contract.
 
 ### `validate` — `{yaml}` or `{board}` → `{ok, errors[], warnings[]}`
 
@@ -91,7 +102,7 @@ netlist-carrying skeletons** (see divergence below).
 
 ### `check_libraries` — `{yaml|board, lib_dir?}` → `{ok, checked, missing[], missing_symbols[], missing_data}`
 
-The library **data** ships via `pcb_fetch_libraries` + `pcb/libraries.lock.json`
+The library **data** ships via `minerva_pcb_fetch_libraries` + `pcb/libraries.lock.json`
 (see `docs/libraries.md` for the fetch/verify/data-dir contract). The `lib_dir`
 arg is the data contract: a directory of KiCAD `*.kicad_sym` symbol libraries
 and `*.pretty` footprint libraries (`pcb_worker/libcheck.py` reads both). The
@@ -115,7 +126,7 @@ side reading" for the paren-depth scan). **Symbol match is optional/informal**
 **No-data contract (never crashes):** with no `lib_dir`, an empty/whitespace
 `lib_dir`, or one that doesn't exist, the reply is
 `{ok:true, checked:0, missing:[], missing_data:true, hint:"..."}` — `hint`
-points the caller at `pcb_fetch_libraries`. With data present:
+points the caller at `minerva_pcb_fetch_libraries`. With data present:
 `{ok, checked, missing:[{ref, footprint, path, suggestions}], missing_symbols:[{ref, symbol, path}], missing_data:false, lib_dir}`.
 
 ### `check_bom` — `{yaml|board, lib_dir?}` → `{ok, items[], line_count, part_count, errors, warnings, lib_present, missing_data, hint?}`

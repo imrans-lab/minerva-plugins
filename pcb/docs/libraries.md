@@ -1,8 +1,8 @@
-# KiCAD library-data subset (`pcb_fetch_libraries` / `pcb_check_libraries` / `pcb_check_bom`)
+# KiCAD library-data subset (`minerva_pcb_fetch_libraries` / `minerva_pcb_check_libraries` / `minerva_pcb_check_bom`)
 
 KiCAD's symbol and footprint libraries are plain **s-expression data files** —
 no KiCAD install, EDA license, or binary is needed to read them. This round
-makes `pcb_check_libraries`/`pcb_check_bom` do real work by giving them real
+makes `minerva_pcb_check_libraries`/`minerva_pcb_check_bom` do real work by giving them real
 data: a curated common-parts subset, fetched on demand from KiCAD's own
 GitLab-hosted library repos, verified by sha256, and read directly by the
 Python worker (`pcb/worker/pcb_worker/libcheck.py`).
@@ -17,7 +17,7 @@ Python worker (`pcb/worker/pcb_worker/libcheck.py`).
 - `pcb/worker/pcb_worker/libcheck.py` — the Python reader.
 
 The actual `.kicad_sym` / `.kicad_mod` bytes live only on a user's machine,
-fetched at runtime by `pcb_fetch_libraries` into the plugin's data directory
+fetched at runtime by `minerva_pcb_fetch_libraries` into the plugin's data directory
 (see "Data directory" below). Hand-authored test fixtures are the one
 exception — `pcb/worker/tests/testdata/fixture_lib/` is a tiny, deliberately
 tiny (2 symbols, 2 footprints) fixture written by hand for unit tests, not a
@@ -159,8 +159,8 @@ counted as verified (re-hashed, not just checked for existence).
 
 | Tool | Args | Returns |
 |---|---|---|
-| `pcb_fetch_libraries` | none | `{tag, fetched:[names], skipped:[names], failed:[{name,reason}]}` |
-| `pcb_library_status` | none | `{present, version_tag, entries_verified, total_entries, missing:[names]}` |
+| `minerva_pcb_fetch_libraries` | none | `{tag, fetched:[names], skipped:[names], failed:[{name,reason}]}` |
+| `minerva_pcb_library_status` | none | `{present, version_tag, entries_verified, total_entries, missing:[names]}` |
 
 Both are **in-process** Go tools (no Python worker round-trip) — the fetch is
 plain `net/http`, and status is a local sha256 re-verify.
@@ -182,18 +182,18 @@ for the worker's dev-mode `.venv` lookup.
 
 ## Offline / absent-data contract
 
-- **`pcb_fetch_libraries` with no network**: the per-entry HTTP error lands in
+- **`minerva_pcb_fetch_libraries` with no network**: the per-entry HTTP error lands in
   `FetchResult.Failed[{name,reason}]` with a clear message (e.g. connection
   refused / DNS failure) — the tool call itself never errors out or crashes;
   the reply always has the `{tag, fetched, skipped, failed}` shape so a caller
   can inspect exactly which entries failed and retry.
-- **`pcb_check_libraries` / `pcb_check_bom` with no library data present**:
+- **`minerva_pcb_check_libraries` / `minerva_pcb_check_bom` with no library data present**:
   return the pre-existing `missing_data:true` contract (unchanged shape),
   **plus** a `hint` field — `"No KiCAD library data found under lib_dir. Run
-  pcb_fetch_libraries first, then retry..."` — so an LLM caller knows exactly
+  minerva_pcb_fetch_libraries first, then retry..."` — so an LLM caller knows exactly
   what to do next. This fires whenever `lib_dir` is absent, blank, or points
   at a directory that doesn't exist yet; it never fires as a crash.
-- **Auto-resolution**: `pcb_check_libraries`/`pcb_check_bom` no longer require
+- **Auto-resolution**: `minerva_pcb_check_libraries`/`minerva_pcb_check_bom` no longer require
   the caller to know the fetch destination path — the Go router
   (`internal/tools/worker_tools.go`'s `withDefaultLibDir`) fills in
   `libraries.DefaultDir()` whenever the caller omits `lib_dir` (or passes an

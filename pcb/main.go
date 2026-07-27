@@ -7,11 +7,11 @@
 //
 // This build implements:
 //   - initialize handshake
-//   - tools/list → [ping, pcb.*, pcb_validate, pcb_generate,
-//     pcb_check_libraries, pcb_check_bom]
-//   - tools/call → in-process tools answered directly; pcb_* tools lazily spawn
-//     the Python worker (python -m pcb_worker) via the shared bridge (circuit
-//     breaker + graceful shutdown come free).
+//   - tools/list → [ping, pcb.*, minerva_pcb_validate, minerva_pcb_generate,
+//     minerva_pcb_check_libraries, minerva_pcb_check_bom, ...]
+//   - tools/call → in-process tools answered directly; minerva_pcb_* worker
+//     tools lazily spawn the Python worker (python -m pcb_worker) via the
+//     shared bridge (circuit breaker + graceful shutdown come free).
 //   - notifications/initialized + any other notification → ignored gracefully
 //   - shutdown → graceful worker shutdown, then exit 0
 //
@@ -143,11 +143,13 @@ var (
 
 // pluginRoot is resolved once in main() and reused by initWorker (Python
 // interpreter / worker dir resolution) and initRegistry (libraries.lock.json
-// location for the pcb_fetch_libraries / pcb_library_status tools).
+// location for the minerva_pcb_fetch_libraries / minerva_pcb_library_status
+// tools).
 var pluginRoot string
 
 // initWorker resolves the Python interpreter and constructs the Worker. The
-// worker is NOT spawned here — spawning is lazy (first pcb_* tool call). This
+// worker is NOT spawned here — spawning is lazy (first minerva_pcb_* tool
+// call). This
 // plugin has no embedded PBS bundle yet, so PythonPath falls through to the dev
 // tiers: <worker>/.venv, then python3 on PATH.
 func initWorker() {
@@ -161,9 +163,9 @@ func initWorker() {
 		PluginVersion:  serverVersion,
 	})
 	if err != nil {
-		log.Printf("pcb-plugin: WARNING: %v — pcb_* worker tools will fail until a .venv exists or python3 is on PATH", err)
+		log.Printf("pcb-plugin: WARNING: %v — minerva_pcb_* worker tools will fail until a .venv exists or python3 is on PATH", err)
 		emitHostNotify("error",
-			"PCB plugin: Python interpreter not found — pcb_validate/generate/check_* will fail",
+			"PCB plugin: Python interpreter not found — minerva_pcb_validate/generate/check_* will fail",
 			map[string]string{"detail": err.Error(), "fix": "Create a .venv in the plugin worker/ dir (pip install -e .) or put python3 on PATH"})
 		pythonPath = ""
 	}
@@ -260,8 +262,20 @@ func handleToolsList(id json.RawMessage) rpcResponse {
 	return okResponse(id, map[string]interface{}{"tools": mcpTools})
 }
 
-// workerBackedTools is the set of tool names that dispatch to the Python worker
-// and therefore return the worker's {ok, result|error} envelope shape.
+// workerBackedTools is a TEST-SIDE assertion helper, not a runtime envelope
+// gate: handleToolsCall below wraps EVERY successful dispatch in the same
+// {ok:true, result:...} envelope and every worker error in the same
+// {ok:false, error:...} envelope, unconditionally, regardless of whether the
+// tool name appears here — this map is never read from handleToolsCall or
+// anywhere else in the production path. Its only reader is
+// TestWorkerBackedToolsHaveSchemas (main_test.go), which uses it as an
+// allowlist of "this tool should carry a real (non-empty) input schema and
+// description" — i.e. the worker-dispatched tools, as opposed to ping (an
+// in-process health check with a trivial schema by design). Cold review
+// (docket 019fa486b408) verified this by mutation: reverting a key here back
+// to a stale pre-rename name, with the broker spec and manifest both correct,
+// left the entire test suite green — proof this map does not gate anything
+// a caller of tools/call would observe.
 //
 // pcb.route is included here even though it's a dotted panel-IPC channel name
 // (like pcb.serialize/deserialize/collect_export/apply_export), not an
@@ -273,17 +287,17 @@ func handleToolsList(id json.RawMessage) rpcResponse {
 // satisfies that invariant regardless of its dotted name — membership here
 // tracks worker-dispatch, not naming convention.
 var workerBackedTools = map[string]bool{
-	"pcb_validate":        true,
-	"pcb_generate":        true,
-	"pcb_gerbers":         true,
-	"pcb_drc":             true,
-	"pcb_drc_geometric":   true,
-	"pcb_resolve":         true,
-	"pcb_normalize":       true,
-	"pcb_check_libraries": true,
-	"pcb_check_bom":       true,
-	"pcb.route":           true,
-	"pcb.draft_check":     true,
+	"minerva_pcb_validate":        true,
+	"minerva_pcb_generate":        true,
+	"minerva_pcb_gerbers":         true,
+	"minerva_pcb_drc":             true,
+	"minerva_pcb_drc_geometric":   true,
+	"minerva_pcb_resolve":         true,
+	"minerva_pcb_normalize":       true,
+	"minerva_pcb_check_libraries": true,
+	"minerva_pcb_check_bom":       true,
+	"pcb.route":                   true,
+	"pcb.draft_check":             true,
 }
 
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {

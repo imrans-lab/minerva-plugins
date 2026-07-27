@@ -471,6 +471,121 @@
         },
         "required": ["editor_name", "yaml"]
       }
+    },
+    {
+      "name": "minerva_pcb_validate",
+      "description": "Structurally validate a canonical PCB board (board-yaml contract). Args {yaml:<board source>} or {board:<board object>}. Returns {ok, errors:[{path,message}], warnings:[...]} — errors flag structural faults (missing required fields, duplicate refs, net pin refs that don't resolve, traces on unknown nets); warnings flag soft issues (out-of-bounds coordinates, trace narrower than design rules). Cheap: no geometry engine.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_generate",
+      "description": "Generate KiCad files from a canonical PCB board. Args {yaml|board, name?:<basename>, out_dir?:<dir>}. Returns {files:{'<name>.kicad_pcb':text, '<name>.kicad_sch':text, '<name>.kicad_pro':text}, written:[{path,bytes_written}]}. The .kicad_pcb faithfully carries components/pads/traces/outline/vias at the authored coordinates; .kicad_sch/.kicad_pro are minimal netlist-carrying skeletons. When out_dir is given the files are also written to disk.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+          "name": {"type": "string", "description": "Optional output file basename (defaults to board name)."},
+          "out_dir": {"type": "string", "description": "Optional directory to also write the files to."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_gerbers",
+      "description": "Generate fabrication files (Gerber RS-274X/X2 + Excellon drills) from a canonical PCB board — pure Python, no KiCad binary. Args {yaml|board, name?:<basename>, out_dir?:<dir>}. Returns {files:{'<name>-F_Cu.gbr':text, ...'-B_Cu/-F_Mask/-B_Mask/-F_SilkS/-Edge_Cuts.gbr', '<name>-PTH.drl':text, '<name>-NPTH.drl':text}, written:[{path,bytes_written}]}. Six Gerber layers plus separate plated (PTH) and non-plated (NPTH) Excellon drill files (each drill file only when the board has holes of that class). Coordinate format is self-declared per layer (read the %FS line, not assume 4.6). Silk currently renders a courtyard-box placeholder per top component (no glyph text yet). Fab-correctness still needs a human viewer check — see docs/gerbers.md.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+          "name": {"type": "string", "description": "Optional output file basename (defaults to board name)."},
+          "out_dir": {"type": "string", "description": "Optional directory to also write the files to."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_drc",
+      "description": "Run a CONNECTIVITY/topology check over a canonical PCB board (pad centers + trace centerlines; NOT a geometric copper DRC — use minerva_pcb_drc_geometric for copper clearance/width/annular). Pure Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. Returns {ok, findings:[{type,...}], counts:{type:count}}. Findings are structured and located: 'wrong_net_pad' (a trace endpoint on a different-net pad -> short) {net, at:[x,y], pad:{ref,pin,net}}; 'crossing' (two same-layer different-net traces that intersect, deduped per net-pair-per-layer) {nets:[a,b], layer, at}; 'dangling_endpoint' (a leaf trace endpoint reaching no pad/via/same-net copper -> open) {net, at}; 'layer_change_no_via' (a net's top and bottom copper meet with no via or through-hole pad -> missing via) {net, at}. T-junction taps and same-component internal-net pads are credited so they don't read as false opens. Scope: checks key off trace endpoints/segments — this is NOT a full ratsnest/connectivity check; a pad with no trace routed near it is not flagged as unrouted.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_drc_geometric",
+      "description": "Run a GEOMETRIC copper design-rule check over the ResolvedBoard IR — real pad/trace/via/hole copper geometry, pure Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. Compiles the board to the ResolvedBoard IR, then checks GC1 min trace width, GC2 copper-copper clearance, GC3 drill/finished-hole (finished-hole is a necessary pre-DFM check — the IR carries drill diameter, not the plated finished bore), GC4 annular ring, GC5 copper-to-edge, GC6 hole-to-hole. NEVER a false clean: modeled copper is exact or a superset (fail-safe), and unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, verdict:'clean'|'violations', board_id, source_digest, rule_profile, findings:[{type, entity_id, net_id, layer, measured_mm, required_mm, witness}], counts, warnings} or indeterminate {ok:false, verdict:'indeterminate', error:{kind}} with NO clean/findings. Distinct from minerva_pcb_drc (connectivity/topology only). Corroborated against kicad-cli DRC.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_resolve",
+      "description": "Enrich a canonical PCB board with footprint silkscreen + courtyard graphics — pure Python, no KiCad binary. Args {yaml:<board source>} or {board:<board object>}. For each component the footprint ref is resolved from the sha-verified seed library and its F.SilkS body outline + F.CrtYd keep-out graphics are attached as component['graphics'] (component-LOCAL coords; the placement/rotation transform stays the renderer's job, like pins). The existing inline pads are left untouched. FAIL-CLOSED coincidence guard: every declared pin's local position must equal the footprint pad's local position (matched by number) within 0.01mm, else {ok:false, error:{kind:'coincidence', ref, pin, delta_mm}} — never attach silk that would desync from the routed copper. Returns {ok, board:<resolved board>, stats:{components, silk_graphics, courtyard_graphics}}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_normalize",
+      "description": "Rewrite a canonical PCB board to its normalized v2 shape — the sync-back the compile fold never persists on its own. Args {yaml:<board source>} or {board:<board object>}. For every pin carrying deprecated inline fabrication geometry (drill_mm/annulus_diameter_mm/pad_width_mm/pad_height_mm/plated): geometry REDUNDANT with the locked footprint pad is dropped, geometry that DIVERGES is migrated to a typed `override`, and an AMBIGUOUS pin (no matching footprint pad, or unverifiable) fail-closes the WHOLE normalize (better none than a half-normalized source). PURE — returns the normalized board for the host to persist; never writes to disk. Returns {ok:true, board:<normalized>, warnings:[{severity,code,message,...}]} on success (the warnings carry per-pin migrate/drop INFO diagnostics), or {ok:false, error:{kind:'normalize'|'parse', message, diagnostics}} on a fail-closed or parse fault. Idempotent: normalizing an already-normalized board is a no-op.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_check_libraries",
+      "description": "Verify component footprints against KiCAD footprint-library data. Args {yaml|board, lib_dir?:<path to a dir of *.pretty libs>}. With no lib_dir (the library data ships with a later child) returns {ok:true, checked:0, missing_data:true} — never a crash. With lib_dir returns {ok, checked, missing:[{ref,footprint,path}], missing_data:false}.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+          "lib_dir": {"type": "string", "description": "Directory of KiCAD *.pretty footprint libraries."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_check_bom",
+      "description": "Extract + validate a bill of materials from a canonical PCB board. Args {yaml|board, lib_dir?}. Returns {ok, items:[{refs,footprint,value,qty}], line_count, part_count, errors, warnings}. Warns on components missing a value or footprint. Footprint-presence flags are added only when lib_dir is supplied.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+          "lib_dir": {"type": "string", "description": "Optional KiCAD footprint-library dir for presence checks."}
+        }
+      }
+    },
+    {
+      "name": "minerva_pcb_fetch_libraries",
+      "description": "Fetch the curated KiCAD symbol/footprint library subset (pcb/libraries.lock.json) that minerva_pcb_check_libraries/minerva_pcb_check_bom read. Downloads each locked entry, verifies it by sha256, and skips entries already present+verified (safe to re-run). Args: none. Returns {tag, fetched:[names], skipped:[names], failed:[{name,reason}]}. Requires network access; never partially writes a corrupted/mismatched file (atomic temp+rename, reject on sha mismatch). Run this once (or after refreshing pcb/libraries.lock.json) before relying on real footprint/symbol checks — see minerva_pcb_library_status to check what's already fetched.",
+      "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+      "name": "minerva_pcb_library_status",
+      "description": "Report whether the KiCAD library-data subset (pcb/libraries.lock.json) has been fetched and verified. Args: none. Returns {present, version_tag, entries_verified, total_entries, missing:[names]}. present:false (or a non-empty missing[]) means minerva_pcb_check_libraries/minerva_pcb_check_bom will report missing_data:true — run minerva_pcb_fetch_libraries to fix. Never fails: an absent lock file or data directory reports present:false rather than erroring.",
+      "input_schema": {"type": "object", "properties": {}}
     }
   ],
   "skills": [

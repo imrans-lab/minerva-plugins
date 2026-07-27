@@ -2,7 +2,7 @@
 // subset check_libraries/check_bom read (pcb/docs/libraries.md). The library
 // DATA itself is never checked into this repo (no-FCIB policy) — only this
 // lock manifest (URLs + sha256 + size) and this code are. Data lands under
-// DefaultDir() at runtime, fetched on demand by the pcb_fetch_libraries tool.
+// DefaultDir() at runtime, fetched on demand by the minerva_pcb_fetch_libraries tool.
 package libraries
 
 import (

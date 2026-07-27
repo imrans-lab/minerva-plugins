@@ -12,7 +12,9 @@ This table records where each legacy tool went. Three destinations:
   `AnnotationHostRegistry.get_host(editor_name)` → `PcbAnnotationHost`
   (duck-typed, no plugin `class_name` references) and drives the board model
   through `host.get_board_data()` / `host.get_spatial_index()`.
-- **WORKER** — already shipped as Go/worker MCP tools (`pcb_*`); not re-created.
+- **WORKER** — already shipped as Go/worker MCP tools (`minerva_pcb_*`, round
+  D0-expose 019fa486b408 — previously bare `pcb_*`, renamed so the manifest can
+  declare them under the same name the broker registers); not re-created.
 - **RETIRED** — superseded by a core/platform surface; NOT reimplemented.
 
 The panel-local tool **names are byte-identical** to the legacy names, so the
@@ -233,14 +235,14 @@ it mints objects here and configures them via duck-typed calls.
 
 | Tool | Worker method | Purpose |
 |---|---|---|
-| `pcb_validate` | `validate` | structural validation |
-| `pcb_generate` | `generate` | canonical YAML → KiCad text |
-| `pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills |
-| `pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` |
-| `pcb_check_bom` | `check_bom` | BOM extraction + validation |
-| `pcb_fetch_libraries` / `pcb_library_status` | (in-process Go) | library data dir |
+| `minerva_pcb_validate` | `validate` | structural validation |
+| `minerva_pcb_generate` | `generate` | canonical YAML → KiCad text |
+| `minerva_pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills |
+| `minerva_pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` |
+| `minerva_pcb_check_bom` | `check_bom` | BOM extraction + validation |
+| `minerva_pcb_fetch_libraries` / `minerva_pcb_library_status` | (in-process Go) | library data dir |
 
-Gerber/fab export shipped via `pcb_gerbers` (docket `019eb47ddebc`). See
+Gerber/fab export shipped via `minerva_pcb_gerbers` (docket `019eb47ddebc`). See
 `docs/gerbers.md` for the layer set, coordinate-format decision, and the
 fab-correctness HITL gate; `docs/worker.md` for the worker method.
 

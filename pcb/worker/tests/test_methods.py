@@ -217,14 +217,14 @@ def test_check_libraries_no_lib_dir(board_yaml):
     assert r["checked"] == 0
     assert r["missing"] == []
     assert r["missing_data"] is True
-    assert "pcb_fetch_libraries" in r["hint"]
+    assert "minerva_pcb_fetch_libraries" in r["hint"]
 
 
 def test_check_libraries_empty_lib_dir(board_yaml):
     resp = _call("check_libraries", {"yaml": board_yaml, "lib_dir": "   "})
     r = resp["result"]
     assert r["missing_data"] is True
-    assert "pcb_fetch_libraries" in r["hint"]
+    assert "minerva_pcb_fetch_libraries" in r["hint"]
 
 
 def test_check_libraries_with_data(board_yaml, tmp_path):
@@ -299,7 +299,7 @@ def test_check_bom_extracts_items(board_yaml):
     # No lib_dir supplied -> the check_libraries-mirroring no-data contract.
     assert r["lib_present"] is False
     assert r["missing_data"] is True
-    assert "pcb_fetch_libraries" in r["hint"]
+    assert "minerva_pcb_fetch_libraries" in r["hint"]
 
 
 def test_check_bom_warns_missing_value():

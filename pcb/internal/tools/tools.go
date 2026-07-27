@@ -5,11 +5,11 @@
 // params and returns raw JSON result or an error.
 //
 // The worker round threads a *bridge.Worker through Dispatch, mirroring cad's
-// internal/tools so worker-backed tools (pcb_validate/generate/check_*) slot in
-// alongside the in-process tools (ping, the pcb.* project channels) without
-// reshaping the router. In-process handlers keep their original (ctx, params)
-// signature and are adapted via WrapInProcess, so their handlers and tests are
-// untouched.
+// internal/tools so worker-backed tools (minerva_pcb_validate/generate/check_*)
+// slot in alongside the in-process tools (ping, the pcb.* project channels)
+// without reshaping the router. In-process handlers keep their original
+// (ctx, params) signature and are adapted via WrapInProcess, so their handlers
+// and tests are untouched.
 package tools
 
 import (
