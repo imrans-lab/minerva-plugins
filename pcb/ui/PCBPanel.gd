@@ -925,12 +925,14 @@ static func _drc_status_suffix(result: Dictionary) -> String:
 	return _connectivity_status_suffix(result) + _geometric_status_suffix(result)
 
 
-## Connectivity fragment. drc_summary is {"scope": "connectivity",
-## "clean": bool|null, "violation_count": int, "error"?: String} — see
-## pcb_worker.methods._attach_route_drc. null means the DRC engine itself
-## faulted (never blocks propose — informs, never blocks); an absent/empty
-## dict means the worker didn't run DRC at all (e.g. an older worker), in
-## which case this fragment stays exactly as it was before (empty string).
+## Connectivity fragment. drc_summary is PROPOSAL-scoped {"scope":
+## "connectivity", "clean": bool|null, "violation_count": int, "error"?:
+## String, "baseline": {...}} — see pcb_worker.methods._attach_route_drc
+## (docket 019f9cc386b6 added the partition; docket 019f9da15929 surfaces the
+## `baseline` half here). null `clean` means the DRC engine itself faulted
+## (never blocks propose — informs, never blocks); an absent/empty dict means
+## the worker didn't run DRC at all (e.g. an older worker), in which case this
+## fragment stays exactly as it was before (empty string).
 ##
 ## HONEST LABEL (019f958aa6db): this is the CONNECTIVITY/topology checker
 ## (drc.run_drc — pad centers + trace centerlines), NOT geometric copper DRC. It
@@ -938,6 +940,15 @@ static func _drc_status_suffix(result: Dictionary) -> String:
 ## generic "DRC clean". We read scope (default "connectivity") and title-case it
 ## for the label so a clean connectivity pass reads "Connectivity clean", never
 ## the misleading bare "DRC clean".
+##
+## BASELINE (019f9da15929): `violation_count`/`clean` above answer "does
+## ACCEPTING THIS introduce a violation?" — they are proposal-scoped, exactly
+## like the geometric fragment's candidate-scoped `verdict`, and that part of
+## this func is unchanged. `baseline` is the board's own pre-existing state
+## (`methods.py` `_attach_route_drc`) and is appended as a parenthetical
+## on the SAME chip (not a second " — " scope like the geometric fragment,
+## because this is the connectivity scope's own pre-existing state, not a
+## different question). See `_baseline_suffix` below for the absence trap.
 static func _connectivity_status_suffix(result: Dictionary) -> String:
 	var summary: Dictionary = result.get("drc_summary", {})
 	if summary.is_empty():
@@ -945,12 +956,53 @@ static func _connectivity_status_suffix(result: Dictionary) -> String:
 	var scope := str(summary.get("scope", "connectivity"))
 	var label := scope.capitalize() if scope != "" else "Connectivity"
 	var clean: Variant = summary.get("clean", null)
+	var proposal_text: String
 	if clean == null:
-		return " — %s: unavailable" % label
-	if bool(clean):
-		return " — %s clean" % label
-	var count := int(summary.get("violation_count", 0))
-	return " — %s: %d violation%s" % [label, count, "" if count == 1 else "s"]
+		proposal_text = "%s: unavailable" % label
+	elif bool(clean):
+		proposal_text = "%s clean" % label
+	else:
+		var count := int(summary.get("violation_count", 0))
+		proposal_text = "%s: %d violation%s" % [label, count, "" if count == 1 else "s"]
+	return " — %s%s" % [proposal_text, _baseline_suffix(summary)]
+
+
+## Pre-existing-board-state parenthetical for the connectivity chip above.
+## `summary["baseline"]` is {"clean": bool, "violation_count": int,
+## "findings": [...]} when determinate, or {"clean": null, "error": str} —
+## with NO `violation_count`/`findings` key — when the base run itself could
+## not be completed (`methods.py` `_attach_route_drc`, the `base_error` branch).
+## An absent/empty `baseline` dict (older
+## worker that never emitted the partition) renders nothing, matching the
+## fragment's own absent-summary behaviour.
+##
+## THE TRAP (project hint 019fa0e84932, docket 019f9da15929): `baseline` is
+## present on BOTH the determinate and indeterminate top-level branches of
+## _attach_route_drc, so merely checking `summary.has("baseline")` protects
+## nothing — it is always there. What actually goes absent is ONE LEVEL DOWN:
+## an indeterminate baseline carries no `violation_count` key at all, so
+## `int(baseline.get("violation_count", 0))` would silently render "0
+## pre-existing" for a board whose state could not be determined — a
+## confident wrong answer for exactly the board that most needs a hedge. We
+## therefore branch on `baseline["clean"] == null` FIRST, before ever reading
+## a count — mirroring `methods.py` `_baseline_for_net`, which refuses to
+## narrow an indeterminate baseline to an empty list for the same reason.
+static func _baseline_suffix(summary: Dictionary) -> String:
+	var baseline: Dictionary = summary.get("baseline", {})
+	if baseline.is_empty():
+		return ""
+	if baseline.get("clean", null) == null:
+		return " (pre-existing: unknown)"
+	var count := int(baseline.get("violation_count", 0))
+	# "none" rather than "0" so the determinate-empty and indeterminate answers
+	# read as one vocabulary — "none" / "unknown" — instead of mixing a numeral
+	# with a word. A user skimming "(pre-existing: 0)" beside a sibling chip
+	# reading "(pre-existing: unknown)" can parse the word as a count; the two
+	# are answers to the same question and should look like it. The count is
+	# still a numeral whenever there IS one.
+	if count == 0:
+		return " (pre-existing: none)"
+	return " (pre-existing: %d)" % count
 
 
 ## GEOMETRIC copper fragment (docket 019f98b24284) — the complement that closes

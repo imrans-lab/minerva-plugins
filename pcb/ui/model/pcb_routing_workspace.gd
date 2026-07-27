@@ -514,8 +514,9 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	# source_hint_ids are keyed on the hints that target THIS net, not the
 	# GLOBAL propose hint set. A multi-net propose / a cross-net hint change
 	# no longer shifts an unrelated net's task_key (which would leave a stale
-	# duplicate). Mirrors panel_tools._source_hint_ids_for_net (same per-net
-	# filter + same fallback-to-all when no hint names the net).
+	# duplicate). NO LONGER MIRRORS THE PROPOSE PATH — see _hint_ids_for_net
+	# below and docket 019fa109766f. panel_tools now reads the worker's
+	# per-route hint_ids; this still re-derives, fallback and all.
 	var hint_ids := _hint_ids_for_net(source_hints, net)
 	var task_key := _task_key(net, hint_ids)
 	var generation := 1
@@ -715,11 +716,32 @@ static func _hint_ids(source_hints: Array) -> Array:
 
 
 ## Ids of the source hints whose kind_payload.net_names include `net` — the
-## PER-NET provenance/attribution set. Mirrors panel_tools._source_hint_ids_for_net
-## exactly, INCLUDING its fallback: when NO hint names this net (e.g. a route for
-## a net with no matching hint), fall back to the full hint set so a candidate is
-## never left with empty provenance. Keeping this identical to the propose path
-## means the workspace's task_key matches the proposal-linking the UI already does.
+## PER-NET provenance/attribution set. When NO hint names this net, falls back to
+## the full hint set so a candidate is never left with empty provenance.
+##
+## STALE BY DESIGN, TRACKED AS DOCKET 019fa109766f — DO NOT "RESTORE" THIS.
+## This used to say it mirrored `panel_tools._source_hint_ids_for_net` exactly,
+## fallback included, and that keeping the two identical made this task_key match
+## the UI's proposal-linking. Both claims died with docket 019f9c3a136c: that
+## function is DELETED, and the propose path now reads the worker's per-route
+## `hint_ids` (which resolve through net_names, source pin AND dest pin) instead
+## of re-deriving from net_names alone. The two paths have deliberately diverged
+## and this one is the wrong half.
+##
+## The correct answer is already on the record: `ingest_record` receives
+## `source_hint_ids`, correctly attributed by panel_tools._normalize_route_records,
+## and passes only the raw `source_hints` down here to be recomputed worse. The
+## fix is to read it and delete the fallback — same shape as the propose-path fix.
+##
+## NOT A LIVE REGRESSION, which is why it is filed rather than fixed here:
+## `task_key` is consumed only inside this file (idempotent-replace supersession
+## bookkeeping via `_task_candidate`), and prior and new candidates compute it
+## identically, so supersession stays self-consistent. What is wrong is the
+## provenance breadth, not the bookkeeping. The deletion teeth — proposal_accept
+## consuming `proposal_for` — live on the annotation path and are already fixed.
+##
+## The lesson worth keeping: this mirror was held in sync by a COMMENT, and it
+## drifted the instant one side was corrected. Prefer one shared helper.
 static func _hint_ids_for_net(source_hints: Array, net: String) -> Array:
 	var ids: Array = []
 	for hint in source_hints:

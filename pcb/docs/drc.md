@@ -72,18 +72,75 @@ parse shape.
 `drc_summary` to its result. **This is the connectivity/centerline checker
 (`drc.run_drc`), not geometric copper DRC** — it cannot verify a clearance, trace
 width, or annular ring. Both payloads therefore carry `scope:"connectivity"`
-(docket 019f958aa6db):
+(docket 019f958aa6db).
 
-- per route: `drc: {scope:"connectivity", clean:bool|null, violations:[…]}`
-  (`clean:null` + `error` when the DRC engine itself faulted).
+**Baseline vs introduced (docket 019f9cc386b6).** Like the geometric candidate
+overlay below, this surface partitions findings into what the PROPOSAL
+introduces and what the BOARD already had — a second `drc.run_drc` pass over
+the *base* board (before the proposed routes) provides the split
+(`pcb_worker.methods._attach_route_drc`, `ir_connectivity.partition_findings`).
+`clean`/`violations`/`violation_count` above are PROPOSAL-scoped: they answer
+"does accepting this introduce a connectivity violation?", exactly as the
+candidate overlay's `verdict` is candidate-scoped. The board's own pre-existing
+violations live under a sibling `baseline` key and are never folded into the
+proposal-scoped numbers — a dirty board must not veto an honest proposal, and a
+clean proposal must not launder a dirty board.
+
+- per route: `drc: {scope:"connectivity", clean:bool|null, violations:[…],
+  baseline:{…}}` (`clean:null` + `error` when the DRC engine itself faulted).
+  `baseline` here is the board's pre-existing violations narrowed to this
+  route's net (`_baseline_for_net`), and its determinate shape is
+  `{clean:bool, violations:[…]}` — the ROUTE payload's vocabulary, matching
+  its sibling `violations` key.
 - top level: `drc_summary: {scope:"connectivity", clean:bool|null,
-  violation_count:int, error?}`.
+  violation_count:int, error?, baseline:{…}}`, whose determinate `baseline`
+  shape is `{clean:bool, violation_count:int, findings:[…]}` — the SUMMARY
+  payload's vocabulary.
+
+**The two `baseline`s do not share their determinate key names**, and a reader
+written for one is wrong on the other: the summary's carries
+`violation_count`/`findings`, the per-route one carries `violations` and no
+count at all. Copying `baseline.get("violation_count", 0)` from a summary
+reader to a per-route baseline yields `0` for a net that HAS pre-existing
+violations — the same silent zero this partition exists to prevent, arrived at
+from the other direction. Count the per-route list; do not default a key that
+was never there.
+
+**What both shapes DO share is the indeterminate case** (the *base*-board DRC
+run itself faulted): `{clean:null, error:str}`, with **no counts and no
+findings/violations key at all**. That absence is deliberate: narrowing an
+indeterminate baseline to `violation_count:0` (or to an empty `violations`
+list) would render "the board is clean" for a board whose state could not be
+determined. Consumers **must** branch on `baseline.clean is None` before
+reading any count or list — see `ui/PCBPanel.gd` `_baseline_suffix` for the
+fail-closed reference implementation.
+
+**`baseline` is present on both determinate and indeterminate `drc_summary`.**
+The *top-level* `clean`/`violation_count` follow the usual three-way rule
+(`violation_count` is absent when `clean` is `null` — a check that did not run
+has no count to report), but the `baseline` key itself is always attached, on
+both branches: the base-board run is independent of the post-proposal run and
+can succeed (and be reported) even when the post run faults and the proposal
+question therefore has no answer. So checking `drc_summary.has("baseline")`
+tells a consumer nothing — always branch on `baseline.clean is None` instead,
+one level down.
 
 Consumers **must not** render this as a generic/geometric "DRC clean". The UI
 chip (`ui/PCBPanel.gd` `_drc_status_suffix`) reads the scope and renders
-"Connectivity clean" / "Connectivity: N violation(s)". The geometric complement
-is the candidate overlay below — added **beside** this payload, never replacing
-it.
+"Connectivity clean" / "Connectivity: N violation(s)" / "Connectivity:
+unavailable", and appends a `" (pre-existing: N)"` or
+`" (pre-existing: unknown)"` parenthetical for the baseline half to **all
+three** (docket 019f9da15929).
+
+That the parenthetical also rides the `unavailable` branch is the point, not an
+accident: the base run and the post-proposal run fail independently, so
+"`Connectivity: unavailable (pre-existing: 3)`" is a real and useful state —
+the proposal could not be judged, but the board's own pre-existing state is
+known and is being reported anyway. Withholding it because the other half
+faulted would discard an answer that was successfully computed.
+
+The geometric complement is the candidate overlay below — added **beside** this
+payload, never replacing it.
 
 Since Round E1 (`019f97d021a8`) its pad census comes from the **compiled IR**, via
 `ir_connectivity.connectivity_board` — the same compile the router consumes, so

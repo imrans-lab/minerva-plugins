@@ -1099,7 +1099,7 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 			"segments": (route.get("segments", []) as Array).duplicate(true) if route.get("segments", []) is Array else [],
 			"vias": (route.get("vias", []) as Array).duplicate(true) if route.get("vias", []) is Array else [],
 			"width": _width_for_net(source_hints, net),
-			"source_hint_ids": _source_hint_ids_for_net(source_hints, net),
+			"source_hint_ids": _route_hint_ids(route),
 			"polyline": _route_polyline(route),
 			"layer": _route_layer(route),
 			"source_hints": source_hints,
@@ -1339,12 +1339,33 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		if failed.is_empty():
 			to_delete = _hint_id_list(source_hints)
 		else:
-			var ok_nets: Array = []
+			# Attribution comes from the worker's own per-route "hint_ids"
+			# (methods.py _hint_ids_by_net, docket 019f9c3a136c) rather than
+			# re-derived net-name matching — it also covers source_pins/dest_pins,
+			# so the BLANKET "every selected hint" claim is gone: a hint for a net
+			# this reply never mentions is no longer swept up.
+			#
+			# WHAT THIS DOES *NOT* FIX, so the sentence above is not read as more
+			# than it says: this loop unions over EVERY route in `result`,
+			# including ones that landed in `failed`. A hint whose net produced no
+			# copper is still consumed. That is pre-existing (docket 019fa109b43c
+			# — an earlier revision carried a vestigial `ok_nets` local, since
+			# removed, showing a filter was once intended) and C3a narrowed it
+			# rather than closing it: before, a
+			# partial failure deleted every selected hint; now it deletes only
+			# those attributed to routes in the reply, failed ones included.
+			# Strictly narrower, still wrong. Do not describe this branch as
+			# "only deletes answered hints" until 019fa109b43c lands.
+			#
+			# `result` here is always the real worker reply in THIS branch (a real
+			# router run can produce a per-net partial `failed` list); the
+			# synthetic single-route result built by _proposal_accept below never
+			# reaches this branch — with exactly one route, a failure there leaves
+			# traces_added == 0 and the whole deletion block above is skipped.
 			for route in result.get("routes", []):
-				if route is Dictionary:
-					ok_nets.append(str(route.get("net", "")))
-			for net in ok_nets:
-				for hid in _source_hint_ids_for_net(source_hints, str(net)):
+				if not (route is Dictionary):
+					continue
+				for hid in _route_hint_ids(route):
 					if not (hid in to_delete):
 						to_delete.append(hid)
 		for hid in to_delete:
@@ -1604,18 +1625,29 @@ static func _width_for_net(source_hints: Array, net: String) -> float:
 	return w
 
 
-## Source hint ids that answer `net` (by net_names). Falls back to ALL source
-## hint ids when none match by net — the whole selection collectively asked to
-## route, so the proposal is still traceable to its origin.
-static func _source_hint_ids_for_net(source_hints: Array, net: String) -> Array:
-	var ids: Array = []
-	for hint in source_hints:
-		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
-		if net in _string_list(kp.get("net_names", [])):
-			ids.append(str(hint.get("id", "")))
-	if ids.is_empty():
-		return _hint_id_list(source_hints)
-	return ids
+## The worker's own per-route attribution (docket 019f9c3a136c), verbatim.
+## methods.py `_hint_ids_by_net` resolves net_names + source_pins + dest_pins
+## — strictly more than the panel could re-derive from net_names alone — and
+## is the reason this reads the worker's answer instead of re-deriving one.
+##
+## Three states collapse to two outcomes (the per-route `hint_ids` stamp in
+## `methods.py` `_route`, guarded by `if envelopes:`, is the spec):
+##   - `hint_ids` key ABSENT   -> no hints were supplied at all (unhinted
+##     whole-board run); the worker omits the key rather than sending `[]`
+##     because `[]` would read as "no hint wanted this" when the truth is "no
+##     hint was asked".
+##   - `hint_ids` present, []  -> hints WERE supplied, none named this net.
+##   - `hint_ids` present, non-empty -> those exact ids, verbatim.
+## Absent and [] mean different things but produce the same correct output
+## here (empty) — Dictionary.get(..., []) naturally collapses them without
+## needing to branch on `route.has("hint_ids")`.
+##
+## NEVER falls back to "every source hint" — that blanket claim was the bug
+## (019f9c3a136c): minerva_pcb_proposal_accept deletes exactly the hints named
+## in proposal_for, so overclaiming silently drops a hint the user never got
+## routed. An empty result here is correct and must stay empty.
+static func _route_hint_ids(route: Dictionary) -> Array:
+	return _string_list(route.get("hint_ids", []))
 
 
 static func _hint_id_list(source_hints: Array) -> Array:

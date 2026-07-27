@@ -346,10 +346,14 @@ class RoutingResult:
     # `agent_router.pathfinder.unroutable_reason` for the codes and for why this
     # exists — round C2b's refusals are correct but were previously silent.
     #
-    # NOT YET ON THE WIRE: `_serialize_routing_result` emits `unrouted:
-    # [{net, from, to}]` and does not read this, so the reason stops at the
-    # engine boundary. Plumbing it into the worker reply is a methods.py change
-    # outside this round's fence.
+    # ON THE WIRE since docket 019f9d59a49b: `_serialize_routing_result` reads
+    # this and attaches each pair's code as `unrouted[i]["reason"]`. Entries are
+    # paired BY INDEX with `unrouted`, so the two lists must be appended in
+    # lockstep — every `result.unrouted.append(...)` in this file must be
+    # followed by the matching `result.unrouted_reasons.append(...)`. The
+    # serializer verifies the lengths agree and drops `reason` from every entry
+    # if they do not, so breaking that invariant degrades the diagnostic rather
+    # than mispairing it — but it still silently costs the whole feature.
     unrouted_reasons: list[dict] = field(default_factory=list)
     via_count: int = 0
 
@@ -1172,8 +1176,17 @@ def _unrouted_reason_entry(grid, net_name: str, pad_a: Pad, pad_b: Pad,
 
     The pads are spelled ``"<component>.<number>"`` — the SAME spelling
     ``pcb_worker.methods._serialize_routing_result`` already uses for
-    ``unrouted``, so a consumer that ever gets both can join them on the pair
-    rather than trusting the index alignment.
+    ``unrouted``, so the two are readable side by side.
+
+    DO NOT JOIN ON THAT TRIPLE. An earlier version of this docstring suggested
+    a consumer could pair the lists on ``(net, from, to)`` "rather than trusting
+    the index alignment". That is unsound and docket 019f9d59a49b measured why:
+    a user-authored ``chain`` pair is appended to a net's connections
+    UNDEDUPLICATED against the automatic spanning tree, so the same triple can
+    legitimately appear twice in ``unrouted`` with two independently-computed
+    reasons. A join cannot tell those apart; it would pick one arbitrarily.
+    Index alignment is the contract — see the ``unrouted_reasons`` field
+    comment above.
     """
     return {
         "net": net_name,

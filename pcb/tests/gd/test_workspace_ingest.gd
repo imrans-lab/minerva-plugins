@@ -65,7 +65,14 @@ func check_eq(desc: String, actual, expected) -> void:
 ## A router reply for a 3-pad net whose route is TWO disconnected physical
 ## groups: {seg_a, seg_b} joined by a layer-changing via, and seg_c standing
 ## alone with no shared endpoint anywhere (INV-3 trap — no chain assumed).
-func _multipad_reply() -> Dictionary:
+## `hint_ids`, when passed, mirrors the worker's own per-route attribution
+## stamp (docket 019f9c3a136c) — group 4 below drives this through
+## panel_tools._dual_write_propose, which now reads that stamp verbatim rather
+## than re-deriving it, so a caller simulating "a hint was supplied" must set
+## it or the proposal will (correctly) come back unattributed. Groups 1-3 feed
+## this straight to PcbRoutingWorkspace.ingest_routing_result, which does its
+## own independent net-name resolution and ignores this key entirely.
+func _multipad_reply(hint_ids: Array = []) -> Dictionary:
 	return {
 		"routes": [
 			{
@@ -76,6 +83,7 @@ func _multipad_reply() -> Dictionary:
 					{"start": [50.0, 50.0], "end": [60.0, 50.0], "layer": "F.Cu"},
 				],
 				"vias": [[5.0, 0.0]],
+				"hint_ids": hint_ids,
 			}
 		],
 		"via_count": 1,
@@ -252,7 +260,7 @@ func _run_functional_floor_dual_write() -> void:
 	check_eq("workspace starts empty", pre_candidate_count, 0)
 
 	var hints := _source_hints_n1()
-	var out: Dictionary = PanelTools._dual_write_propose(host, _multipad_reply(), hints)
+	var out: Dictionary = PanelTools._dual_write_propose(host, _multipad_reply(["hint_1"]), hints)
 
 	check("_dual_write_propose reports success", bool(out.get("success", false)))
 	check_eq("_dual_write_propose reports 1 proposal (annotation path unchanged)", int(out.get("proposed", 0)), 1)

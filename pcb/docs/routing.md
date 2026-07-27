@@ -114,14 +114,30 @@ is not what attribution uses.
 Two hints that genuinely both name one net both appear on that net's route.
 Truthful is not the same as "exactly one id".
 
-**Not yet consumed by the panel.** `pcb/ui/panel_tools.gd::_source_hint_ids_for_net`
-still derives `proposal_for` by matching a route's net against each hint's
-`net_names`, and **falls back to every selected hint id** when none matches — the
-blanket list this round removed from the worker. Scoping shrinks the damage a
-lot (only implicated nets come back now), but a hint that named its net through
-`source_pins` rather than `net_names` still lands on that fallback. Switching
-that function to read the route's `hint_ids` is an out-of-fence follow-up; until
-it lands, `proposal_for` is truthful only where `hint_ids` and `net_names` agree.
+**Consumed by the panel** (docket `019f9c3a136c`). `proposal_for` is read
+straight off the worker's per-route `hint_ids` and is no longer re-derived:
+`panel_tools._route_hint_ids` forwards the list verbatim, and the old
+`_source_hint_ids_for_net` — which matched on `net_names` alone and fell back to
+**every selected hint** when nothing matched — is deleted, along with the
+fallback. A route with no attributed hints gets an empty `proposal_for`, whether
+the worker omitted the `hint_ids` key entirely (no hints were supplied) or sent
+it as `[]` (hints were supplied, none named this net). Those two states mean
+different things and only the OUTPUT collapses.
+
+This matters because `minerva_pcb_proposal_accept` deletes exactly the hints
+named in `proposal_for`. Under the fallback, a hint that named its net through
+`source_pins` rather than `net_names` never matched, so every proposal claimed
+every hint — and accepting one proposal could silently delete a hint the user
+never got an answer to.
+
+**Still re-derived elsewhere.** `pcb/ui/model/pcb_routing_workspace.gd`'s
+`_hint_ids_for_net` is an independent copy of the same net-names match and the
+same blanket fallback, feeding the workspace's shadow candidate and its
+`task_key`. `ingest_record` receives the correctly-attributed `source_hint_ids`
+on the record and ignores it. The annotation-side `proposal_for` — the one with
+the deletion teeth — is correct; the shadow model's provenance is not. Tracked
+as docket `019fa109766f`; it is a mirror, not a regression, and nothing joins
+the two `task_key`s across that boundary today.
 
 Pinned by `pcb/worker/tests/test_route_scope.py`, which drives `route()` for
 every one of these claims — including the docket's own repro (six routable nets,
@@ -738,6 +754,35 @@ kept rather than deleted with the rest.
 In every failing case **zero routes** are returned — no partial proposal, no
 `routes: []` alongside a verdict a consumer could misread as "nothing needed".
 
+### Per-pair refusal reasons on `unrouted` (docket `019f9d59a49b`)
+
+Those `error.kind` values describe a call that failed as a whole. A call can
+also SUCCEED while individual pad pairs refuse to route, and those land in
+`unrouted: [{net, from, to, reason?}]`.
+
+`reason` names why that specific pair refused — one of the five codes from
+`agent_router.pathfinder.unroutable_reason`: `coincident_endpoints`,
+`endpoint_out_of_bounds`, `start_blocked`, `end_blocked`, `no_path`. Without it,
+a hard refusal and ordinary congestion were indistinguishable. That distinction
+became more urgent, not less, when round C2b made A* refuse a blocked start: a
+mounting hole placed over a pad is ORDINARY board data, and it now produces a
+silent unroutable the user could fix in seconds if told.
+
+`reason` follows the same **absent-key contract** as `hint_ids` and `drc`
+elsewhere on this reply: a pair with no recorded reason **omits** the key
+entirely. It is never `null` and never a placeholder — a null would claim "the
+engine looked and found no reason", which is not what an unrecorded reason
+means. Consumers must test key presence (`"reason" in entry`), not truthiness.
+
+**Pairing is by INDEX, not by `(net, from, to)`.** The triple is not unique: a
+user-authored `chain` pair is appended to a net's connections undeduplicated
+against the automatic spanning tree (authored input is "admitted or rejected,
+never reinterpreted"), so the same triple can appear twice in `unrouted` with
+two independently-computed reasons. A join could not tell them apart.
+`_serialize_routing_result` verifies the two engine lists are the same length
+before trusting index *i*, and falls back to omitting `reason` on every entry
+if they are not — a prefix of confidently-wrong reasons is worse than none.
+
 ## Not yet done (each has an owner; none of it is silent)
 
 - ~~Effective width/clearance from the IR, and keepout inflation by clearance +
@@ -777,11 +822,15 @@ In every failing case **zero routes** are returned — no partial proposal, no
   copper on a layer or via span the 2-layer grid does not carry — narrowed, not
   deleted.
 - ~~Whole-board re-routing on a scoped request~~ — **done, docket
-  `019f80a80123`** (see "Run scope" above). What is LEFT is out of the worker's
-  fence: `pcb/ui/panel_tools.gd::_source_hint_ids_for_net` still builds
-  `proposal_for` from `net_names` with a blanket all-selected-hints fallback,
-  instead of reading the `hint_ids` each route now carries. The worker's half is
-  truthful; the panel's is truthful only where the two agree.
+  `019f80a80123`**, and its panel half is **done too, docket `019f9c3a136c`**
+  (see "Run scope" above). `panel_tools` reads the worker's per-route
+  `hint_ids` verbatim; `_source_hint_ids_for_net` and its blanket
+  all-selected-hints fallback are deleted. What is LEFT is narrower and is
+  filed, not forgotten: `pcb/ui/model/pcb_routing_workspace.gd` keeps an
+  independent copy of the old net-names match and fallback for its shadow
+  candidates (docket `019fa109766f`), and the partial-failure bulk-apply path
+  still consumes hints attributed to routes that FAILED to materialize (docket
+  `019fa109b43c`, pre-existing).
 - ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
   still accepted a missing size as `0x0`, the same class of fictional copper
   E1 removed from the canonical path — but rather than fix it, the shape

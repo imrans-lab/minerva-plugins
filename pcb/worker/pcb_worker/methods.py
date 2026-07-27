@@ -582,12 +582,67 @@ def _check_bom(params: dict) -> dict:
 #
 # OUTPUT: the engine's RoutingResult, serialised to plain JSON
 #   {success, via_count, routes:[{net, segments:[{start,end,layer}], vias:[[x,y]]}],
-#    unrouted:[{net, from, to}], warnings?:[{id, message}], selected_hint_ids?:[…]}
+#    unrouted:[{net, from, to, reason?}], warnings?:[{id, message}],
+#    selected_hint_ids?:[…]}
+#
+#   `reason` (docket 019f9d59a49b) is the engine's classification of WHY that
+#   pair refused to route (see agent_router.pathfinder.unroutable_reason for the
+#   codes) — without it a hard refusal (a pad under an NPTH keepout) and
+#   ordinary congestion looked identical to the caller. ABSENT-KEY CONTRACT,
+#   same shape as `hint_ids`/`drc` elsewhere on this reply: a pair with no
+#   recorded reason OMITS the key entirely. Never `null`, never a placeholder —
+#   a null would claim "the engine looked and found no reason", which is not
+#   what an unaligned/empty `unrouted_reasons` means.
 # ---------------------------------------------------------------------------
 
 
 def _serialize_routing_result(result) -> dict:
     """Serialise an agent_router.RoutingResult to plain JSON-safe dict."""
+    # PAIRING: index alignment (result.unrouted[i] <-> result.unrouted_reasons[i]),
+    # NOT a join on (net, from, to).
+    #
+    # MEASURED (agent_router/router.py, route_board_with_hints, ~line 1957-1965):
+    # a net's `connections` list is the automatic spanning-tree pairs PLUS any
+    # user-authored `chain` pairs appended verbatim, UNDEDUPLICATED against the
+    # tree — docs/routing.md's standing rule for authored input is "admitted or
+    # rejected, never reinterpreted", so a chain naming two pads the spanning
+    # tree already connects is not collapsed away. If that duplicated pair then
+    # fails to route, `result.unrouted` legitimately carries the SAME
+    # (net, from, to) triple twice, each with its own independently-computed
+    # reason in `result.unrouted_reasons`. A join on the triple could not tell
+    # those two entries apart — it would either pick one arbitrarily or pair the
+    # wrong reason to the wrong attempt. Index alignment has no such ambiguity:
+    # `unrouted` and `unrouted_reasons` are appended together, in lockstep, at
+    # both failure sites in router.py (search `unrouted_reasons.append`), so entry i
+    # of one is always entry i of the other today.
+    #
+    # That lockstep guarantee is the engine's, not this function's, so it is
+    # verified rather than assumed: only when the two lists are the same length
+    # is index i trusted to explain pair i. A shorter/mismatched
+    # `unrouted_reasons` (an older engine path, or any future one that appends
+    # to one list and not the other) falls back to the absent-key rule for
+    # EVERY entry rather than pairing by luck.
+    reasons = result.unrouted_reasons
+    reasons_aligned = len(reasons) == len(result.unrouted)
+    unrouted = []
+    for i, (net, p1, p2) in enumerate(result.unrouted):
+        entry = {"net": net, "from": f"{p1.component}.{p1.number}",
+                 "to": f"{p2.component}.{p2.number}"}
+        # `"reason" in reasons[i]` rather than `reasons[i]["reason"]`: a reason
+        # dict without that key is unreachable today (`_unrouted_reason_entry`
+        # always sets it, `unroutable_reason` returns one of five non-empty
+        # constants, and both engine append sites go through that helper), but a
+        # KeyError here would fault the ENTIRE route reply — routes, vias and
+        # all — over a missing diagnostic. Degrading to the absent-key rule
+        # costs one membership test and cannot lose real work.
+        #
+        # Deliberately NOT `reasons[i].get("reason")`: that smuggles a `None`
+        # onto the entry, and a null `reason` claims "the engine looked and
+        # found no reason" — the exact false statement the absent-key contract
+        # (hint 019f9d061f13) exists to forbid.
+        if reasons_aligned and "reason" in reasons[i]:
+            entry["reason"] = reasons[i]["reason"]
+        unrouted.append(entry)
     return {
         "success": bool(result.success),
         "via_count": int(result.via_count),
@@ -604,11 +659,7 @@ def _serialize_routing_result(result) -> dict:
             }
             for r in result.routes
         ],
-        "unrouted": [
-            {"net": net, "from": f"{p1.component}.{p1.number}",
-             "to": f"{p2.component}.{p2.number}"}
-            for net, p1, p2 in result.unrouted
-        ],
+        "unrouted": unrouted,
     }
 
 

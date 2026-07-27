@@ -63,7 +63,12 @@ func check_eq(desc: String, actual, expected) -> void:
 
 ## 3-pad net "N1": two DISCONNECTED copper groups — {seg_a,seg_b} joined by a
 ## layer-changing via, and seg_c standing alone (no shared endpoint anywhere).
-func _multipad_reply() -> Dictionary:
+## `hint_ids` mirrors the worker's own per-route attribution stamp (docket
+## 019f9c3a136c, methods.py _hint_ids_by_net) — a real worker always sets this
+## key on every route once ANY hint was supplied, so a caller simulating "a
+## hint was supplied" must stamp it too, or panel_tools._route_hint_ids
+## (correctly) reads an unstamped route as "nothing answered this".
+func _multipad_reply(hint_ids: Array = []) -> Dictionary:
 	return {
 		"routes": [
 			{
@@ -74,6 +79,7 @@ func _multipad_reply() -> Dictionary:
 					{"start": [50.0, 50.0], "end": [60.0, 50.0], "layer": "F.Cu"},
 				],
 				"vias": [[5.0, 0.0]],
+				"hint_ids": hint_ids,
 			}
 		],
 		"via_count": 1,
@@ -111,7 +117,7 @@ func _bridged_context() -> Dictionary:
 	var hint_id: String = seeded[0]
 	var source_hints: Array = seeded[1]
 
-	var out: Dictionary = PanelTools._dual_write_propose(host, _multipad_reply(), source_hints)
+	var out: Dictionary = PanelTools._dual_write_propose(host, _multipad_reply([hint_id]), source_hints)
 
 	# The proposal annotation = the pcb_route_hint carrying proposal_for.
 	var ann_id := ""

@@ -1911,3 +1911,221 @@ def test_undo_after_commit_preserves_the_net_classed_nets_own_width(
     assert sig_after["effective_routing_rules"] == sig_before["effective_routing_rules"]
     for seg in sig_after["segments"]:
         assert seg["width_mm"] == pytest.approx(CLASS_WIDTH_MM)
+
+
+# ---------------------------------------------------------------------------
+# 9. `unrouted_reasons` reaching the wire (docket 019f9d59a49b).
+#
+# `agent_router.pathfinder.unroutable_reason` and
+# `agent_router.router.RoutingResult.unrouted_reasons` (round C2b,
+# tests/agent_router/test_pathfinder.py::TestTheRefusalReasonIsRecorded)
+# already compute WHY a pair refused to route. `_serialize_routing_result`
+# never read it, so a hard refusal (a pad under an NPTH keepout) reached the
+# caller looking exactly like ordinary congestion — the two were
+# indistinguishable in the JSON reply. These pin the WORKER's half: the
+# `unrouted` entries.
+#
+# These call `agent_router.router.route_board` and
+# `pcb_worker.methods._serialize_routing_result` directly (this file already
+# does that — see `engine_router._coincidence_tolerance` and
+# `engine_router._mark_existing_copper` above) rather than round-tripping
+# through the full IR compile pipeline: the behaviour under test lives
+# entirely in the serializer, and the engine-level reason codes are already
+# covered end to end by test_pathfinder.py's own fixture, reused verbatim
+# below so this file is not asserting a DIFFERENT reason computation, only
+# that it reaches the reply.
+# ---------------------------------------------------------------------------
+
+
+def _npth_over_pad_board():
+    """Two independent 2-pin nets, each with a mounting-hole keepout sitting on
+    one of its pads — the same NPTH-over-a-pad shape as
+    test_pathfinder.py::TestTheRefusalReasonIsRecorded, duplicated onto a
+    second, well-separated net so a reason-pairing bug has a second entry to be
+    caught by.
+
+    THE TWO NETS MUST FAIL FOR *DIFFERENT* REASONS, and that is the whole point
+    of the fixture rather than an incidental detail. SIG's keepout sits on the
+    pair's START pad and SIG2's on its END pad, so the engine computes
+    `start_blocked` for one and `end_blocked` for the other.
+
+    An earlier version put both keepouts on the START pad. Both entries then
+    carried the identical code, and a cold review measured the consequence: the
+    mutation `entry["reason"] = reasons[0]["reason"]` — broadcast entry 0's
+    reason to EVERY entry — PASSED all three tests in this section. That is
+    precisely the misattribution the index-alignment design exists to prevent
+    (`_serialize_routing_result`: entry i must get ITS OWN reason, not merely
+    *a* reason), so the one invariant the design rests on was the one thing
+    unguarded. Identical duplicates catch a DROPPED reason; only DISTINCT ones
+    catch a MISPAIRED reason.
+
+    If you change this fixture, keep the two codes different and keep
+    test_every_unrouted_pair_serializes_with_the_engines_own_reason_code's
+    inequality assertion — without it this collapses back to a fixture that
+    cannot see a broadcast bug."""
+    from agent_router.board import Board, Net, Obstacle, Pad
+
+    sig_pads = [
+        Pad(component="P1", number="1", net="SIG", position=(5.0, 5.0),
+            size=(1.0, 1.0)),
+        Pad(component="P2", number="1", net="SIG", position=(15.0, 15.0),
+            size=(1.0, 1.0)),
+    ]
+    sig2_pads = [
+        Pad(component="P3", number="1", net="SIG2", position=(5.0, 15.0),
+            size=(1.0, 1.0)),
+        Pad(component="P4", number="1", net="SIG2", position=(15.0, 5.0),
+            size=(1.0, 1.0)),
+    ]
+    return Board(
+        width=20.0, height=20.0, pads=sig_pads + sig2_pads,
+        nets={"SIG": Net(name="SIG", number=1, pads=sig_pads),
+              "SIG2": Net(name="SIG2", number=2, pads=sig2_pads)},
+        obstacles=[
+            # On SIG's FIRST pad -> start_blocked.
+            Obstacle(position=(5.0, 5.0), type="mounting_hole", radius=1.5),
+            # On SIG2's SECOND pad -> end_blocked. Deliberately not (5.0, 15.0).
+            Obstacle(position=(15.0, 5.0), type="mounting_hole", radius=1.5),
+        ])
+
+
+def test_every_unrouted_pair_serializes_with_the_engines_own_reason_code():
+    """Real engine, real refusal, TWO pairs. Requirement 1 (the reply carries
+    the specific code the engine computed) and requirement 4 (`net`/`from`/
+    `to` unchanged) together."""
+    result = engine_router.route_board(_npth_over_pad_board(),
+                                       trace_width=0.25, clearance=0.2)
+    assert len(result.unrouted) == 2, "fixture must fail both nets to route"
+
+    payload = methods._serialize_routing_result(result)
+    assert len(payload["unrouted"]) == 2
+
+    by_net = {}
+    for entry in payload["unrouted"]:
+        assert set(entry.keys()) == {"net", "from", "to", "reason"}, entry
+        by_net[entry["net"]] = entry
+
+    assert {by_net["SIG"]["from"], by_net["SIG"]["to"]} == {"P1.1", "P2.1"}
+    assert {by_net["SIG2"]["from"], by_net["SIG2"]["to"]} == {"P3.1", "P4.1"}
+    # The specific code the engine computed for BOTH pairs — not merely "some
+    # string is present" on one of them.
+    assert by_net["SIG"]["reason"] == "start_blocked"
+    assert by_net["SIG2"]["reason"] == "end_blocked"
+    # EACH ENTRY GETS ITS OWN REASON. Stated as an inequality as well as by the
+    # two exact values above, because this is the invariant index alignment
+    # exists to provide and the exact-value asserts alone read as two unrelated
+    # facts. A serializer that broadcast one entry's reason to all of them —
+    # `entry["reason"] = reasons[0]["reason"]`, which passed this test when both
+    # nets failed identically — dies here. See _npth_over_pad_board's docstring.
+    assert by_net["SIG"]["reason"] != by_net["SIG2"]["reason"], (
+        "both pairs reported the same code: this fixture can no longer "
+        "distinguish a correctly-paired reason from a broadcast one")
+
+
+def test_a_fully_routed_board_serializes_no_unrouted_entries_or_spurious_keys():
+    """Requirement 2. A clean board's `unrouted` is `[]`, and the reply grows
+    no new top-level keys just because the serializer now looks at
+    `unrouted_reasons`."""
+    from agent_router.board import Board, Net, Pad
+
+    pads = [
+        Pad(component="P1", number="1", net="SIG", position=(5.0, 5.0),
+            size=(1.0, 1.0)),
+        Pad(component="P2", number="1", net="SIG", position=(15.0, 15.0),
+            size=(1.0, 1.0)),
+    ]
+    board = Board(width=20.0, height=20.0, pads=pads,
+                  nets={"SIG": Net(name="SIG", number=1, pads=pads)})
+
+    result = engine_router.route_board(board, trace_width=0.25, clearance=0.2)
+    assert not result.unrouted, "fixture must actually route cleanly"
+
+    payload = methods._serialize_routing_result(result)
+    assert payload["unrouted"] == []
+    assert set(payload.keys()) == {"success", "via_count", "routes", "unrouted"}
+
+
+def test_an_unaligned_unrouted_reasons_list_omits_the_reason_key_everywhere():
+    """Requirement 3, the absent-key corollary: if `unrouted_reasons` does not
+    line up 1:1 with `unrouted` — the empty-list shape an older engine path
+    (or any future one that appends to one list and not the other) would
+    leave behind — every entry OMITS `reason` rather than guessing or
+    fabricating one. Asserted as key ABSENCE, not falsiness:
+    `entry.get("reason")` being falsy would also pass for a smuggled `None`,
+    which is exactly the claim the absent-key contract (hint
+    pcb-routing/absent-vs-unreadable-must-be-distinct, 019f9d061f13) forbids.
+    """
+    from agent_router.board import Pad
+    from agent_router.router import RoutingResult
+
+    p1 = Pad(component="P1", number="1", net="SIG", position=(5.0, 5.0),
+             size=(1.0, 1.0))
+    p2 = Pad(component="P2", number="1", net="SIG", position=(15.0, 15.0),
+             size=(1.0, 1.0))
+    p3 = Pad(component="P3", number="1", net="OTHER", position=(1.0, 1.0),
+             size=(1.0, 1.0))
+    p4 = Pad(component="P4", number="1", net="OTHER", position=(2.0, 2.0),
+             size=(1.0, 1.0))
+    result = RoutingResult(
+        success=False,
+        unrouted=[("SIG", p1, p2), ("OTHER", p3, p4)],
+        unrouted_reasons=[],  # deliberately unaligned/empty
+    )
+
+    payload = methods._serialize_routing_result(result)
+    assert len(payload["unrouted"]) == 2
+    for entry in payload["unrouted"]:
+        assert "reason" not in entry, entry
+        assert set(entry.keys()) == {"net", "from", "to"}, entry
+    # ...and the pair identity is still reported correctly regardless.
+    assert payload["unrouted"][0]["net"] == "SIG"
+    assert payload["unrouted"][1]["net"] == "OTHER"
+
+
+def test_an_OVERLONG_unrouted_reasons_list_also_omits_the_reason_key():
+    """The other side of the alignment guard, and the one that was missing.
+
+    The test above only ever supplies FEWER reasons than pairs. An adversarial
+    review measured the consequence: relaxing the guard from
+    `len(reasons) == len(unrouted)` to `>=` left the whole file green, because
+    nothing in the repo ever built `unrouted_reasons` LONGER than `unrouted`.
+    A guard tested on one side only is half a guard.
+
+    An over-long list is the more dangerous shape of the two. A short list
+    fails loudly under naive indexing (IndexError); a long one indexes cleanly
+    and silently pairs entry i with a reason that may belong to some other
+    pair — exactly the misattribution index alignment exists to prevent, with
+    no symptom. `==` is therefore the contract, not `>=`: ANY length
+    disagreement means the correspondence is unknown, and an unknown
+    correspondence yields no `reason` at all rather than a plausible guess.
+    """
+    from agent_router.board import Pad
+    from agent_router.router import RoutingResult
+
+    p1 = Pad(component="P1", number="1", net="SIG", position=(5.0, 5.0),
+             size=(1.0, 1.0))
+    p2 = Pad(component="P2", number="1", net="SIG", position=(15.0, 15.0),
+             size=(1.0, 1.0))
+    result = RoutingResult(
+        success=False,
+        unrouted=[("SIG", p1, p2)],
+        # THREE reasons for ONE pair. Index 0 would resolve happily and look
+        # entirely plausible; that is the failure being refused.
+        unrouted_reasons=[
+            {"net": "SIG", "from": "P1.1", "to": "P2.1", "layer": "F.Cu",
+             "reason": "start_blocked"},
+            {"net": "GHOST", "from": "X1.1", "to": "X2.1", "layer": "F.Cu",
+             "reason": "no_path"},
+            {"net": "GHOST2", "from": "X3.1", "to": "X4.1", "layer": "F.Cu",
+             "reason": "end_blocked"},
+        ],
+    )
+
+    payload = methods._serialize_routing_result(result)
+    assert len(payload["unrouted"]) == 1
+    entry = payload["unrouted"][0]
+    assert "reason" not in entry, (
+        "an over-long unrouted_reasons list must not be index-paired: the "
+        f"lengths disagree, so the correspondence is unknown. got {entry}")
+    assert set(entry.keys()) == {"net", "from", "to"}, entry
+    assert entry["net"] == "SIG"
