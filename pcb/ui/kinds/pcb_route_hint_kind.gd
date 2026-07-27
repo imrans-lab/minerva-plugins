@@ -1215,7 +1215,16 @@ func summary(annotation: Dictionary) -> String:
 	if width_mm > 0.0:
 		parts.append(_fmt_mm(width_mm))
 
-	var wp_count := _waypoint_points(annotation).size()
+	# Interior waypoints ONLY (contract §5) — deliberately NOT
+	# _waypoint_points().size(): that helper prepends the anchor (and appends
+	# the cached dest_point, when present) so the RENDERER draws the full
+	# source→dest polyline. Reusing it here as a count over-reports by one (or
+	# two): a 4-bend hint would read "5 waypoints" and a bend-free pad-to-pad
+	# hint would read "1 waypoint" instead of omitting the count. The summary
+	# counts what a human means by "waypoints" — the bends they placed, not
+	# the endpoints — independently of how the polyline is rendered.
+	var raw_waypoints: Variant = payload.get("waypoints", [])
+	var wp_count: int = (raw_waypoints as Array).size() if raw_waypoints is Array else 0
 	if wp_count > 0:
 		parts.append("%d waypoint%s" % [wp_count, "s" if wp_count != 1 else ""])
 
