@@ -591,21 +591,28 @@
   "skills": [
     {
       "id": "minerva_pcb_design",
-      "title": "PCB design (migration build \u2014 worker compute online)",
+      "title": "PCB design (IR-compiled, fail-closed DRC/routing/CAM)",
       "target": "all",
-      "summary": "PCB editor under migration from Minerva core. Opens .pcbskel board documents (JSON), renders a crude component view, supports platform pcb_route_hint annotations with sidecar persistence, and has a Python compute worker: minerva_pcb_validate (board YAML structural + design-rule checks), minerva_pcb_generate (YAML -> .kicad_pcb/.kicad_sch/.kicad_pro text, no KiCad install), minerva_pcb_check_libraries / minerva_pcb_check_bom (real footprint/symbol checks + BOM suggestions against a fetched KiCAD library-data subset; minerva_pcb_fetch_libraries fetches+verifies it, minerva_pcb_library_status reports what's present). pcb.serialize/pcb.deserialize are the canonical-YAML board codec (see docs/board-yaml.md). The real editor canvas, trace routing (agent-router), and gerber export land in later rounds; .minpcb stays with the in-tree editor until cutover.",
-      "preconditions": "A .pcbskel document is open OR the user has asked for PCB work (an anonymous editor can be spawned via minerva_create_plugin_editor with editor_item_id \"new_pcb\").",
-      "outcome": "A .pcbskel board renders in the panel; pcb_route_hint annotations author via the dock and persist to the <file>.annotations.json sidecar; boards validate and generate KiCad files via the worker tools; footprint/symbol/BOM checks run against real KiCAD library data once fetched.",
-      "steps": "1. Call minerva_pcb_ping to confirm the backend is alive.\n2. Open a .pcbskel file (or create one via editor_item new_pcb).\n3. Validate a board with minerva_pcb_validate (canonical YAML per docs/board-yaml.md); generate KiCad files with minerva_pcb_generate.\n4. Run minerva_pcb_fetch_libraries once (or check minerva_pcb_library_status) so minerva_pcb_check_libraries/minerva_pcb_check_bom can resolve real footprints instead of returning missing_data.\n5. Use the core minerva_annotations_* tools against the panel's editor tab for route-hint work.\n6. For anything beyond this (real canvas editing, routing, gerbers), explain it lands in later rounds \u2014 the in-tree PCB editor still owns .minpcb.",
-      "system_prompt": "The PCB plugin is mid-migration from Minerva core. It opens .pcbskel JSON boards, draws components crudely, and supports pcb_route_hint annotations through the platform annotation substrate (dock authoring, sidecar persistence, minerva_annotations_query/render_overlay). Backend: minerva_pcb_ping; canonical-YAML board codec on pcb.serialize/pcb.deserialize; Python worker tools minerva_pcb_validate (structural + design-rule validation), minerva_pcb_generate (KiCad file text generation, pure Python), minerva_pcb_check_libraries and minerva_pcb_check_bom (real footprint/symbol checks + nearest-name BOM suggestions once library data is fetched; missing_data:true with a hint field before that). minerva_pcb_fetch_libraries downloads+sha256-verifies a curated KiCAD library subset (docs/libraries.md); minerva_pcb_library_status reports fetch state without fetching. NO trace routing or gerber export yet; .minpcb documents still open in the in-tree PCB editor, not this plugin.",
+      "summary": "Sole PCB surface (the in-tree editor and .minpcb are retired; boards are .pcbskel documents). Author canonical YAML (docs/board-yaml.md) or place parts with minerva_pcb_add_component/minerva_pcb_connect_net, then load with minerva_pcb_load_board. minerva_pcb_validate checks structure; minerva_pcb_drc checks net connectivity; minerva_pcb_drc_geometric compiles to the ResolvedBoard IR and checks real copper (width, clearance, drill, annular ring, edge, hole spacing) \u2014 fail-closed, so 'indeterminate' is not a pass. Routing is IR-native and fail-closed too: author pcb_route_hint annotations, run minerva_pcb_apply_route_hints to propose or commit routes, then accept/reject each with minerva_pcb_proposal_accept/minerva_pcb_proposal_reject. minerva_pcb_generate emits KiCad text; minerva_pcb_gerbers emits Gerber+Excellon output \u2014 both resolve footprints from a locked seed library and fail closed rather than approximate copper. minerva_pcb_check_libraries/minerva_pcb_check_bom check parts against a separate KiCAD subset minerva_pcb_fetch_libraries downloads.",
+      "preconditions": "A PCB editor tab is open (minerva_list_editors) or spawned via minerva_create_plugin_editor (editor_item_id \"new_pcb\"); the board-YAML tools (validate/generate/gerbers/drc/drc_geometric/check_libraries/check_bom) take board text directly and need no open editor.",
+      "outcome": "The board renders with real components, nets and routed copper; minerva_pcb_validate and both DRC tools report clean or name exactly what is wrong and where; minerva_pcb_gerbers/minerva_pcb_generate produce fabrication files traceable to the same footprint geometry DRC checked; route proposals are inspectable before they become copper.",
+      "steps": "1. Open the editor tab (minerva_list_editors) or create one (minerva_create_plugin_editor, editor_item_id \"new_pcb\").\n2. Author canonical YAML or place parts with minerva_pcb_add_component/minerva_pcb_connect_net, then minerva_pcb_load_board.\n3. Validate with minerva_pcb_validate; check minerva_pcb_library_status once (minerva_pcb_fetch_libraries if needed), then minerva_pcb_check_libraries/minerva_pcb_check_bom.\n4. Route: add pcb_route_hint annotations (minerva_annotations_add), minerva_pcb_apply_route_hints (commit=false) for proposals, then minerva_pcb_proposal_accept/minerva_pcb_proposal_reject each \u2014 or re-run with commit=true.\n5. Run minerva_pcb_drc and minerva_pcb_drc_geometric on the finished board; 'indeterminate' blocks, it is not a pass.\n6. Export with minerva_pcb_generate and minerva_pcb_gerbers; a human must still eyeball the output before real fabrication.",
+      "system_prompt": "Sole PCB surface; the legacy in-tree editor is gone. Routing, DRC and CAM share one ResolvedBoard IR compiler and one rule: canvas may degrade, but routing/DRC/CAM never approximate copper \u2014 unresolvable geometry fails closed. minerva_pcb_drc is connectivity-only; minerva_pcb_drc_geometric is the real copper check and must pass before fabrication. minerva_pcb_apply_route_hints always proposes before it commits. minerva_pcb_resolve exposes resolved silk/courtyard geometry directly (compile already does this internally for gerbers/generate/drc_geometric); minerva_pcb_normalize migrates legacy inline pin geometry to the current schema.",
       "tool_deps": [
-        "minerva_pcb_ping",
+        "minerva_create_plugin_editor",
+        "minerva_list_editors",
+        "minerva_pcb_load_board",
         "minerva_pcb_validate",
+        "minerva_annotations_add",
+        "minerva_pcb_apply_route_hints",
+        "minerva_pcb_proposal_accept",
+        "minerva_pcb_proposal_reject",
+        "minerva_pcb_drc",
+        "minerva_pcb_drc_geometric",
         "minerva_pcb_generate",
+        "minerva_pcb_gerbers",
         "minerva_pcb_check_libraries",
-        "minerva_pcb_check_bom",
-        "minerva_pcb_fetch_libraries",
-        "minerva_pcb_library_status"
+        "minerva_pcb_fetch_libraries"
       ]
     }
   ],
