@@ -98,7 +98,16 @@ WORKER_ENTRIES = ("agent_router", "pcb_worker", "tests", "pyproject.toml")
 #: PRODUCTION source (footprints.py) at test-collection time, and ui is scanned
 #: by the kicad-cli boundary test behind an exists() guard that silently weakens
 #: it when the directory is absent.
-PCB_SIBLINGS = ("spikes", "spec", "library", "ui")
+#:
+#: ``docs`` joined for the same reason ``ui`` did, but a step worse: the schema
+#: doc IS test input. ``test_every_yaml_example_in_board_yaml_md_compiles`` reads
+#: ``pcb/docs/board-yaml.md`` and compiles every yaml example in it, so without
+#: this the test raises FileNotFoundError in EVERY sweep run — control included —
+#: and a control that is already red makes every mutant look killed. Note the
+#: hazard that invites: the tempting "fix" is to have that test skip when the doc
+#: is absent, which would silently retire the gate exactly the way the ``ui``
+#: comment above warns about. Copy the input instead.
+PCB_SIBLINGS = ("spikes", "spec", "library", "ui", "docs")
 
 COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
 

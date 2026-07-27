@@ -68,6 +68,9 @@ IR_PARITY = "pcb_worker/ir_parity.py"
 GERBER = "pcb_worker/gerber.py"
 COMPILE_BOARD = "pcb_worker/compile_board.py"
 RESOLVED_BOARD = "pcb_worker/resolved_board.py"
+#: NOT source: the schema doc is TEST INPUT. Paths are relative to ``pcb/worker``,
+#: so this escapes one level, exactly as ``run_sweep.PCB_SIBLINGS`` copies it.
+BOARD_YAML_DOC = "../docs/board-yaml.md"
 
 
 MUTANTS: tuple[dict, ...] = (
@@ -716,6 +719,100 @@ MUTANTS: tuple[dict, ...] = (
         "rationale": "Checks one end of a two-sided range instead of both, so a "
                      "roundrect corner ratio above 0.5 (a geometrically impossible "
                      "land) is accepted.",
+    },
+
+    # --- AUTHORED NET CLASSES (905ce82) ------------------------------------
+    #
+    # A board now AUTHORS net classes under `design_rules.net_classes`, each
+    # class naming its `members`; the compiler inverts those member lists into
+    # `ResolvedNet.net_class_id`, and BOTH consumers
+    # (`methods._net_class_overrides`, `drc_geometric._net_class_minima`) read
+    # REFERENCED classes only. Everything upstream of that inversion is
+    # therefore satisfiable WITHOUT it: a compiler that parses the block,
+    # populates `design_rules.net_classes`, and never assigns a single
+    # `net_class_id` passes every "classes are authorable" assertion while both
+    # consumers still see nothing. That is the round's core risk and the first
+    # two entries below are aimed straight at it.
+    #
+    # FOUR entries, chosen against a hard budget of four (corpus 40 -> 44, the
+    # ceiling). They are picked for KILL POWER AND INDEPENDENCE, not for
+    # covering every diagnostic the round added: the membership/identity
+    # diagnostics (duplicate class name, unknown member, one net in two classes)
+    # are each killed by a dedicated fail-closed test that a deletion would take
+    # out loudly, whereas the four below guard the SILENT failures.
+    {
+        "id": "compileboard_net_class_id_never_assigned",
+        "file": COMPILE_BOARD,
+        "kind": "full",
+        "find": "                                net_class_id=class_id_by_net.get(name)))",
+        "replace": "                                net_class_id=None))  # MUTANT: never wired",
+        # KILLER: tests/test_route_rules.py::
+        #   test_an_authored_net_class_routes_that_nets_own_copper_at_the_class_width
+        # (5 more: the GC1/GC2 authored-floor pair in test_drc_geometric.py, the
+        # authored-clearance routing test, and the two IR-level wiring tests.)
+        "rationale": "THE LAZY IMPLEMENTATION. Classes are still parsed and still "
+                     "reach design_rules.net_classes, but no net ever carries an id, "
+                     "so both consumers — which read REFERENCED classes only — go on "
+                     "seeing nothing while the feature looks authorable. Measured "
+                     "killed by 6 tests across all three modules; if that number "
+                     "falls to zero the round's headline capability is untested.",
+    },
+    {
+        "id": "compileboard_net_class_assigned_to_every_net_not_its_members",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": "                                net_class_id=class_id_by_net.get(name)))",
+        "replace": L(
+            "                                net_class_id=next(",
+            "                                    iter(class_id_by_net.values()), None)))"
+            "  # MUTANT: first class, every net",
+        ),
+        # KILLER: tests/test_drc_geometric.py::
+        #   test_an_authored_net_class_clearance_does_not_reach_an_unclassed_pair
+        "rationale": "MISPAIRED, NOT DROPPED — the same site as the entry above and "
+                     "deliberately so, because the two fail differently: here every "
+                     "net DOES get an id, just the wrong one. Only a fixture carrying "
+                     "a classed AND an unclassed net can tell the two apart, which is "
+                     "why the named killer is the negative test rather than any "
+                     "positive one. A corpus that holds only the 'dropped' shape lets "
+                     "a single-net fixture look adequate forever.",
+    },
+    {
+        "id": "compileboard_net_class_min_clearance_parsed_then_dropped",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": '        min_clearance = _net_class_minimum(entry, "min_clearance_mm", name, diags)',
+        "replace": "        min_clearance = None  # MUTANT: authored clearance discarded",
+        # KILLER: tests/test_drc_geometric.py::
+        #   test_an_authored_net_class_raises_this_pairs_gc2_floor
+        "rationale": "ONE OF THE TWO AUTHORABLE DIMENSIONS, silently discarded: width "
+                     "still works, so every width test stays green and half the "
+                     "feature is dead. Clearance reached both consumers only through "
+                     "synthetic dataclasses.replace helpers until this round, which is "
+                     "exactly the state this entry exists to stop returning to.",
+    },
+    {
+        "id": "docs_board_yaml_schema_example_regains_a_fatal_rule",
+        "file": BOARD_YAML_DOC,
+        "kind": "full",
+        "find": L(
+            "  via_drill_mm: 0.4",
+            "  net_classes:                 # optional",
+        ),
+        "replace": L(
+            "  via_drill_mm: 0.4",
+            "  diff_pair_gap_mm: 0.15  # MUTANT: fatal whenever 'rules' is requested",
+            "  net_classes:                 # optional",
+        ),
+        # KILLER: tests/test_compile_board.py::
+        #   test_every_yaml_example_in_board_yaml_md_compiles
+        "rationale": "THE ONLY ENTRY TARGETING TEST INPUT RATHER THAN SOURCE. The "
+                     "canonical schema example had rotted to where it failed FIVE ways "
+                     "at once while reading as authoritative; the doc is now executable "
+                     "and this is what keeps it that way. Reproduces the exact defect "
+                     "review caught — diff-pair rules are fatal under every production "
+                     "output profile. If this survives, the schema doc is back to being "
+                     "proofread instead of compiled.",
     },
 )
 
