@@ -636,7 +636,9 @@
           "pcb.collect_export",
           "pcb.apply_export",
           "pcb.route",
-          "pcb.draft_check"
+          "pcb.draft_check",
+          "ping",
+          "capability:mcp.proxy:minerva_plugin_start"
         ],
         "save_mode": "host_owned"
       }
@@ -647,7 +649,9 @@
       "pcb.collect_export",
       "pcb.apply_export",
       "pcb.route",
-      "pcb.draft_check"
+      "pcb.draft_check",
+      "ping",
+      "capability:mcp.proxy:minerva_plugin_start"
     ]
   },
   "editor_items": [
@@ -672,7 +676,9 @@
     "apply_channel": "pcb.apply_export"
   },
   "permissions": {
-    "host_capabilities": [],
+    "host_capabilities": [
+      "mcp.proxy:minerva_plugin_start"
+    ],
     "network": {
       "mode": "unrestricted"
     },

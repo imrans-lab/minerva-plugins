@@ -1523,6 +1523,141 @@ func _on_component_lock_changed(message: String) -> void:
 				_update_status())
 
 
+## Backend lifecycle: lazy start-on-demand + process-identity verification
+## (docket bug 019f6c1e0399). Godot-scene panels are host-executed independent
+## of the plugin's own backend subprocess — PluginScenePanelBroker mounts this
+## panel regardless of whether the Go backend is RUNNING (that's the whole
+## bug: the panel opens and edits fine while the backend is stopped, and only
+## the first IPC round-trip — export/route/load — discovers it). Rather than
+## a blanket manifest autostart (which would spend a subprocess on every PCB
+## plugin install, including sessions that never touch a routing/export
+## action), every backend IPC call below goes through
+## _request_with_backend_ensure: on a plugin_not_running reply it starts the
+## backend and PROVES the connection it produced is actually "pcb" before
+## retrying — see _verify_backend_identity for why a liveness flag is not
+## enough.
+##
+## Lazy-start bridge: no host_capability exists for "start my own plugin" on
+## CapabilityBroker's named dispatch table — the only reachable lever from a
+## scene panel is capability:mcp.proxy:<tool>, which forwards verbatim to
+## MinervaMCPServer (see CapabilityBroker._handle_mcp_proxy). This proxies
+## minerva_plugin_start the same way the drive/movie-gen/3d-gen plugins already
+## proxy their own host tools. Declared in manifest.json permissions +
+## ui.ipc_messages + this panel's ipc_channels.
+const _START_BACKEND_CHANNEL := "capability:mcp.proxy:minerva_plugin_start"
+## Go-side in-process tool (internal/tools/ping.go, registered at server
+## startup — answers directly, no worker hop) — NOT the Python worker's
+## internal "ping" JSON-RPC method (worker/pcb_worker/methods.py), which is
+## bridge-internal and never reaches Minerva's MCP surface. This is the one
+## that's a real, dynamically-discovered MCP tool once the backend is running
+## (confirmed by test_pcb_plugin_smoke.gd's Section B: "ping" appears in
+## conn.list_tools()) and it echoes a caller-supplied string verbatim, which
+## is exactly the round-trip identity primitive we need.
+const _PING_CHANNEL := "ping"
+const _BACKEND_PLUGIN_ID := "pcb"
+
+
+## True only for the broker's plugin_not_running reply shape
+## (PluginErrors.plugin_not_running: {success:false, error_code:
+## "plugin_not_running", ...}) — matched by code AND by message substring, so
+## ensure-and-retry still fires if PluginErrors' wording ever changes (same
+## defensive match route_board's own plugin_not_running detection already used).
+func _reply_says_plugin_not_running(reply: Dictionary) -> bool:
+	if typeof(reply) != TYPE_DICTIONARY:
+		return false
+	var code := str(reply.get("error_code", ""))
+	var msg := str(reply.get("error_message", ""))
+	return code == "plugin_not_running" or msg.findn("not running") != -1
+
+
+## PROCESS-IDENTITY check — deliberately NOT a liveness boolean. Sends a
+## fresh, locally-generated nonce through the backend's "ping" tool and
+## requires ALL THREE: ok==true, plugin=="pcb", AND echo==the exact nonce
+## THIS call generated. Liveness alone (ok==true, or "a connection object
+## exists") does not prove the round-trip that just happened reached the
+## process we mean to talk to — a stale cached reply, a reply satisfying some
+## OTHER in-flight request, or a differently-configured backend could all
+## satisfy a bare ok==true check. Generating the nonce fresh per call (rather
+## than reusing a fixed string) is what makes the comparison meaningful: only
+## a live process that received THIS request and echoed it back, right now,
+## passes.
+func _verify_backend_identity(ipc, timeout_ms: int = 10000) -> bool:
+	if ipc == null:
+		return false
+	var nonce := "pcb-identity-%d-%d" % [Time.get_ticks_usec(), randi()]
+	var reply_id := "ping:%d" % Time.get_ticks_usec()
+	request.emit(_PING_CHANNEL, {"echo": nonce}, reply_id)
+	var reply: Dictionary = await ipc.await_reply(reply_id, timeout_ms)
+	if typeof(reply) != TYPE_DICTIONARY or not bool(reply.get("success", false)):
+		return false
+	# Two levels of unwrap between here and HandlePing's raw {ok,plugin,
+	# version,echo} body — confirmed against the REAL binary (Section C of
+	# test_pcb_backend_lifecycle.gd), not assumed: main.go's dispatch()
+	# ALWAYS wraps every tool's raw result as {ok:true, result:<raw>} before
+	# it leaves the Go process (see main.go:347-349); _dispatch_to_plugin_backend
+	# then sees that dict has an "ok" key and wraps it AGAIN via
+	# PluginErrors.backend_success — so a scene panel calling any backend tool
+	# (not just ping) sees {success, result:{ok, result:<raw>}}. This is the
+	# SAME double-wrap route_board's own unwrap already contends with for
+	# pcb.route (see its "worker envelope arrives one level deeper than the
+	# direct-stdio path" comment) — ping is just the leaf case, since its
+	# raw body IS the thing we compare, not a further worker envelope.
+	var go_envelope: Variant = reply.get("result", {})
+	if typeof(go_envelope) != TYPE_DICTIONARY:
+		return false
+	var body_variant: Variant = (go_envelope as Dictionary).get("result", {})
+	if typeof(body_variant) != TYPE_DICTIONARY:
+		return false
+	var body: Dictionary = body_variant
+	return bool(body.get("ok", false)) \
+			and str(body.get("plugin", "")) == _BACKEND_PLUGIN_ID \
+			and str(body.get("echo", "")) == nonce
+
+
+## Lazy start-on-demand: ask the host to start the pcb backend (the only
+## reachable bridge from a scene panel — see _START_BACKEND_CHANNEL), THEN
+## prove via a fresh ping round-trip that the connection it produced is
+## actually the pcb backend. minerva_plugin_start's own {ok:true} is never
+## treated as sufficient by itself — it only reflects PluginManager's state
+## flag flipping to RUNNING, not that this panel can actually reach and
+## correctly identify the process over IPC.
+func _start_and_verify_backend(ipc, timeout_ms: int = 30000) -> bool:
+	if ipc == null:
+		return false
+	var reply_id := "%s:%d" % [_START_BACKEND_CHANNEL, Time.get_ticks_usec()]
+	request.emit(_START_BACKEND_CHANNEL, {"id": _BACKEND_PLUGIN_ID}, reply_id)
+	var start_reply: Dictionary = await ipc.await_reply(reply_id, timeout_ms)
+	if typeof(start_reply) != TYPE_DICTIONARY or not bool(start_reply.get("success", false)):
+		return false
+	return await _verify_backend_identity(ipc)
+
+
+## Wraps a single backend IPC round-trip with on-demand lazy start: send the
+## request; if (and only if) the backend replies plugin_not_running, start it
+## and verify its identity, then retry ONCE. Every existing call site's error
+## handling (route_board / load_board_from_yaml / _on_export_yaml_pressed)
+## already understands the raw broker reply shape unchanged by this wrapper —
+## on any outcome other than a confirmed start+verify, the ORIGINAL
+## plugin_not_running reply is returned verbatim so those call sites' own
+## "pcb_backend_stopped" / "start via minerva_plugin_start" messaging still
+## fires exactly as before for the caller to see.
+func _request_with_backend_ensure(channel: String, payload: Dictionary, timeout_ms: int) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"success": false, "error_code": "worker_unavailable",
+			"error_message": "plugin IPC channel not ready"}
+	var reply_id := "%s:%d" % [channel, Time.get_ticks_usec()]
+	request.emit(channel, payload, reply_id)
+	var result: Dictionary = await ipc.await_reply(reply_id, timeout_ms)
+	if not _reply_says_plugin_not_running(result):
+		return result
+	if not await _start_and_verify_backend(ipc):
+		return result
+	var retry_id := "%s:%d" % [channel, Time.get_ticks_usec()]
+	request.emit(channel, payload, retry_id)
+	return await ipc.await_reply(retry_id, timeout_ms)
+
+
 ## YAML export → pcb.serialize over the plugin IPC channel (carry-in 3a). The
 ## legacy PCBEditor.export_yaml() called the dropped to_yaml(); the canonical
 ## boundary + Go channel owns YAML now. 64KiB cap surfaces as payload_too_large
@@ -1533,9 +1668,8 @@ func _on_export_yaml_pressed() -> void:
 		_set_status("YAML export unavailable — plugin IPC not ready.")
 		return
 	_set_status("Exporting YAML…")
-	var reply_id := "pcb.serialize:%d" % Time.get_ticks_usec()
-	request.emit("pcb.serialize", {"board": _data.to_board_dict()}, reply_id)
-	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	var result: Dictionary = await _request_with_backend_ensure(
+			"pcb.serialize", {"board": _data.to_board_dict()}, 30000)
 
 	if not bool(result.get("success", false)):
 		var code := str(result.get("error_code", ""))
@@ -1594,9 +1728,7 @@ func route_board(selection: Dictionary) -> Dictionary:
 		"route_hints": envelopes,
 		"selection": selection,
 	}
-	var reply_id := "pcb.route:%d" % Time.get_ticks_usec()
-	request.emit("pcb.route", params, reply_id)
-	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	var result: Dictionary = await _request_with_backend_ensure("pcb.route", params, 30000)
 	# The worker returns {ok, result}; the host IPC wrapper may nest it under
 	# "result"/"success" — normalise to the worker envelope the apply tool wants.
 	if result.has("ok"):
@@ -1645,9 +1777,7 @@ func load_board_from_yaml(yaml_text: String) -> Dictionary:
 	if ipc == null or _data == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
-	var reply_id := "pcb.deserialize:%d" % Time.get_ticks_usec()
-	request.emit("pcb.deserialize", {"yaml": yaml_text}, reply_id)
-	var result: Dictionary = await ipc.await_reply(reply_id, 30000)
+	var result: Dictionary = await _request_with_backend_ensure("pcb.deserialize", {"yaml": yaml_text}, 30000)
 
 	# Unwrap the deserialize reply. HandleDeserialize returns {board, warnings};
 	# the broker/worker path nests that under one or more {ok|success, result:{…}}
