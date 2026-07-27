@@ -29,8 +29,9 @@ result is a topology pass, not a proof the copper is geometrically clean.**
 (`compile_board.compile_board`), and runs the pure geometric kernel
 (`run_geometric_drc`) over real copper/hole shapes. Checks:
 
-- **GC1** min trace width
-- **GC2** copper-to-copper clearance (same canonical layer, same-net exempt)
+- **GC1** min trace width — per trace, against its **effective** width floor
+- **GC2** copper-to-copper clearance (same canonical layer, same-net exempt) —
+  per pair, against that pair's **effective** clearance floor
 - **GC3** drill / finished-hole minimums — the finished-hole check is a
   *necessary pre-DFM condition only*: the ResolvedBoard IR carries the **drill**
   diameter, not the plated finished bore, so `drill < min_finished` always fails,
@@ -39,6 +40,46 @@ result is a topology pass, not a proof the copper is geometrically clean.**
 - **GC4** annular ring
 - **GC5** copper-to-edge inset
 - **GC6** hole-to-hole spacing
+
+### Per-net-class minima (GC1/GC2)
+
+`ManufacturingConstraints` carries the board's blanket floors, but a net may
+belong to a `NetClass` naming a stricter `min_trace_width_mm` /
+`min_clearance_mm`. `_net_class_minima` builds the `net_id -> (width, clearance)`
+map for every net that **references** such a class, and the two checks compare
+against the raised floor: `_effective_min_trace_width` for GC1,
+`_effective_min_clearance` for GC2. What follows from that:
+
+- The class term only ever **raises** a floor (`max`), never relaxes one, so the
+  global manufacturing minimum stays a hard lower bound.
+- The clearance floor is per **pair**, not per primitive — the two participants
+  can sit on different nets with different classes, so **both** class terms fold
+  in. Copper with no net (`net_id is None`, e.g. plated board-hole copper)
+  contributes none; the other participant's class still governs.
+- Only **referenced** classes are read. A class defined on
+  `design_rules.net_classes` that no net points at constrains nothing — the same
+  rule `methods._net_class_overrides` applies on the routing side.
+- The broad phase (`_broad_phase_pairs`) is swept at the board-wide **maximum**
+  clearance floor, not the global one. Its pruning argument is only sound against
+  the largest threshold any surviving pair could be compared to; sweeping at the
+  global floor while a class demands more would discard a genuinely violating
+  pair before it was measured.
+- `NetClass.trace_width_mm`, `via_diameter_mm` and `via_drill_mm` are **nominal**
+  routing/via sizes, **not** minima. They imply **no** per-class GC1, GC3 or GC4
+  floor, and are deliberately not read — the same two `min_`-prefixed fields, and
+  no others, that routing reads. This is settled, not pending.
+- **Two fail-closed cases, one per dimension.** An unsourceable class minimum
+  returns the indeterminate union, naming the class **and** the field — for
+  `min_trace_width_mm` *and* for `min_clearance_mm`. Each goes through the same
+  predicate routing admits that field with: `ir_candidates.positive_mm` for width
+  ("zero-width copper is not copper"), `agent_router.router.nonnegative_mm` for
+  clearance. Geometric DRC reads the same two fields off the same class, so it
+  must not reach a different conclusion about a value than routing does.
+  What differs between the dimensions is the **predicate**, not the
+  fail-closed-ness: `min_clearance_mm: 0.0` is legal (a class may state zero
+  clearance) and is then a no-op under `max`, while `min_trace_width_mm: 0.0` is
+  not. That single value is the whole of the difference — a negative, NaN,
+  infinite or non-numeric clearance fails closed exactly as a bad width does.
 
 ### Result union (returned verbatim — not the `{ok, result}` wrapper)
 
@@ -55,8 +96,11 @@ result is a topology pass, not a proof the copper is geometrically clean.**
   (unknown footprint, sizeless pad), or `unsupported_geometry` when the kernel
   met geometry it does not model — a non-rectangular outline, a copper zone/pour,
   a via **per-layer padstack** (019f95893989), a copper **board/placed graphic**
-  (019f95897086), or a **net-class** width/clearance minimum (019f958b45b9) — or
-  `internal` on an unexpected fault.
+  (019f95897086), or a referenced net class whose `min_trace_width_mm` or
+  `min_clearance_mm` is not a sourceable value (see "Per-net-class minima" above)
+  — or `internal` on an unexpected fault. A net class carrying *sourceable*
+  width/clearance minima is **not** an indeterminate cause: those minima are
+  applied (019f958b45b9).
 
 Every failure at the method boundary returns the **same** indeterminate union
 (docket 019f9589b232) — there is no bespoke third shape. A board that will not
@@ -165,8 +209,12 @@ over base + candidates.
 is projected by `drc_geometric.project_board` itself — the same trace-capsule and
 via-land construction an accepted trace gets — so **propose-time and post-accept
 agree by construction**, and the kernel's fail-closed guards (zones, copper
-graphics, per-layer via padstacks, net-class minima) keep protecting this surface
-for free. The kernel is never given knowledge of candidates.
+graphics, per-layer via padstacks) keep protecting this surface for free. Candidate
+copper is likewise measured against the **per-net-class** floors above, because
+`_check_gc1_trace_width`/`_check_gc2_clearance` read the overlay board's own
+`design_rules.net_classes` — a candidate on a net-classed net is checked at that
+class's minima, not the board's blanket ones. The kernel is never given knowledge
+of candidates.
 
 ### Candidate union
 

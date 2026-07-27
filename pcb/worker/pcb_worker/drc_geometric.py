@@ -24,11 +24,15 @@ useless. Two rules enforce that here:
      passed".
 
 CHECK SET (C1 per-entity + hole-to-hole; C2 pairwise clearance + edge):
-  * GC1 min trace width      — every trace segment width  >= min_trace_width_mm.
+  * GC1 min trace width      — every trace segment width  >= its EFFECTIVE width
+                                floor (global min_trace_width_mm raised by that
+                                trace's net class; see PER-NET-CLASS MINIMA).
   * GC2 copper clearance     — edge-to-edge distance between every pair of copper
-                                primitives on the SAME canonical layer
-                                >= min_clearance_mm (same-net exempt only when both
-                                carry the same NON-NULL net_id). [C2]
+                                primitives on the SAME canonical layer >= that
+                                PAIR's EFFECTIVE clearance floor (global
+                                min_clearance_mm raised by EITHER participant's net
+                                class; same-net exempt only when both carry the same
+                                NON-NULL net_id). [C2]
   * GC3 drill / finished hole — every drill feature minor  >= min_drill_mm;
                                 plated holes also          >= min_finished_hole_mm.
   * GC4 annular ring          — PTH pads + vias + plated board holes: copper web
@@ -55,6 +59,29 @@ from the SAME neutral owner the CAM emitters use — ``pad_source.placed_pad_to_
 + ``pad_source.th_land`` — so fabricated copper (CAM) and checked copper (DRC)
 cannot drift (docket finding 019f8b7fd295, mandated by Codex #3). See
 ``_pad_land`` for the call site.
+
+PER-NET-CLASS MINIMA (GC1/GC2)
+------------------------------
+``ManufacturingConstraints`` carries the board's BLANKET floors, but a net may
+belong to a ``NetClass`` that names a STRICTER ``min_trace_width_mm`` /
+``min_clearance_mm``. Reading only the global floors would certify a net whose
+own class forbids its geometry — a false clean. GC1 therefore compares each trace
+against ``_effective_min_trace_width`` and GC2 compares each PAIR against
+``_effective_min_clearance``, both built from ``_net_class_minima``. Consequences
+worth stating once:
+
+  * The clearance floor is per PAIR, not per primitive: the two participants can
+    sit on different nets with different classes, so BOTH class terms fold in.
+  * Copper with no net (``net_id is None`` — e.g. plated board-hole copper)
+    contributes no class term; the other participant's class still applies.
+  * The class floors only ever RAISE a floor (``max``), never relax one, so the
+    global manufacturing minimum stays a hard lower bound.
+  * ``_broad_phase_pairs`` must be given the MAXIMUM clearance floor on the board,
+    not the global one — see its docstring for why.
+  * Only the ``min_``-prefixed pair is read. ``NetClass.trace_width_mm``,
+    ``via_diameter_mm`` and ``via_drill_mm`` are NOMINAL routing/via sizes, not
+    minima; they imply no per-class GC1/GC3/GC4 floor, exactly as
+    ``methods._net_class_overrides`` reads the same two fields and no others.
 
 HOLE-SIZE SEMANTICS (GC3)
 -------------------------
@@ -439,12 +466,153 @@ def _violates(measured: float, required: float) -> bool:
     return measured < required - EPS
 
 
+def _net_class_minima(rb: ResolvedBoard) -> dict[str, tuple[float | None, float | None]]:
+    """``net_id -> (class min_trace_width_mm, class min_clearance_mm)`` for every net
+    that REFERENCES a net class naming at least one of them. This is the net->class
+    map the projection does not build (``project_board`` builds only the net->NAME
+    map for finding attribution), and the single source of the per-net terms GC1/GC2
+    raise the global minima by.
+
+    THE SAME TWO FIELDS ROUTING READS. ``methods._net_class_overrides`` reads exactly
+    ``NetClass.min_trace_width_mm`` / ``.min_clearance_mm`` and deliberately ignores
+    the plain nominal ``NetClass.trace_width_mm``; so does this, so the routed width
+    and the checked width floor are sourced from one rule. Routing keys its map by net
+    NAME (the router speaks names); this keys by ``net_id``, because that is the
+    identity a projected :class:`CopperPrimitive` carries.
+
+    Only REFERENCED classes are read, again as routing does: a class sitting on
+    ``design_rules.net_classes`` that no net points at constrains no copper.
+
+    A dimension the class says NOTHING about stays ``None`` and contributes no term —
+    that net falls through to the global floor for THAT dimension exactly as if it
+    carried no class at all.
+
+    AN UNSOURCEABLE MINIMUM FAILS CLOSED, in BOTH dimensions, through the SAME
+    predicate routing uses for that dimension. Routing admits a class width through
+    ``ir_candidates.positive_mm`` and a class clearance through
+    ``agent_router.router.nonnegative_mm``, and raises ``UnsupportedGeometry`` on
+    either miss. Geometric DRC reads the SAME two fields off the SAME class, so it
+    must not reach a different conclusion about the same value: it calls those same
+    two functions and raises the same way, naming the class id and the field (the
+    kernel maps that to the INDETERMINATE envelope).
+
+    What differs between the two dimensions is the PREDICATE, not the fail-closed-ness.
+    Zero-width copper is not copper, so ``min_trace_width_mm: 0.0`` is rejected;
+    ``0.0`` clearance is a rule a class may legitimately state, so
+    ``min_clearance_mm: 0.0`` is ADMITTED and is then a no-op under ``max``. That one
+    VALUE is the whole of the difference — every other unsourceable clearance
+    (negative, NaN, infinite, non-numeric) fails closed exactly as an unsourceable
+    width does. There are TWO fail-closed cases here, not one. That is exactly the
+    split routing draws, drawn here from the same two functions.
+
+    ``NetClass`` fields are validated with ``resolved_board._nonnegative`` (which is
+    ``_finite`` plus ``>= 0``), so on a valid IR NEITHER predicate can currently fail
+    except on an exact ``min_trace_width_mm`` of ``0.0``. Both are applied anyway, and
+    for the same reason: if that validation is ever relaxed, a NaN clearance must not
+    raise in routing while silently no-opping here (``max(0.2, nan)`` returns ``0.2``
+    — a false clean). An unreachable path is not a reason to omit the predicate; it is
+    the reason the predicate is the only thing keeping the two surfaces aligned.
+
+    WHY THIS IS NOT SHARED WITH ``methods._net_class_overrides``, which it closely
+    resembles (same class dict, same loop shape, same defensive ``nc is None``, the
+    same two predicates, near-identical messages). The duplication is known and was
+    left deliberately for now: the two live in different modules, key their results by
+    different identities (``net.id`` here because that is what a
+    :class:`CopperPrimitive` carries; ``net.name`` there because the router speaks
+    names), and ``methods`` already imports :mod:`drc_geometric`, so factoring the
+    shared body out would need a THIRD module rather than one function moving. That
+    extraction is filed separately — do not re-derive this, and do not "fix" it by
+    importing across the two.
+    """
+    # These are the SAME two predicates routing admits the same two fields through —
+    # ``methods._nonnegative_mm`` is a one-line delegate to
+    # ``engine_router.nonnegative_mm``, so this reaches the identical implementation
+    # rather than a second copy of the rule.
+    #
+    # ``ir_candidates`` is imported LOCALLY because it imports THIS module at module
+    # level; a top-level import would be circular. ``agent_router.router`` has no such
+    # excuse and costs nothing either way — this module already imports
+    # ``agent_router.layers``, and ``agent_router/__init__`` does
+    # ``from .router import (...)``, so ``agent_router.router`` is in ``sys.modules``
+    # before this function ever runs. It is local purely to sit beside its sibling
+    # (``methods`` imports the engine the same way, for the same non-reason).
+    from agent_router.router import nonnegative_mm
+
+    from .ir_candidates import positive_mm
+
+    classes = {nc.id: nc for nc in rb.design_rules.net_classes}
+    minima: dict[str, tuple[float | None, float | None]] = {}
+    for net in rb.nets:
+        if not net.net_class_id:
+            continue
+        nc = classes.get(net.net_class_id)
+        if nc is None:
+            # Unreachable on a valid ResolvedBoard — its __post_init__ raises
+            # "ResolvedNet references an unknown net class" at construction. Defensive
+            # only; no behaviour is invented for a board that cannot exist.
+            continue
+        width = None
+        if nc.min_trace_width_mm is not None:
+            width = positive_mm(nc.min_trace_width_mm)
+            if width is None:
+                raise UnsupportedGeometry(
+                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
+                    f"min_trace_width_mm={nc.min_trace_width_mm!r} is not a "
+                    f"positive, finite width in mm — geometric DRC fails closed "
+                    f"rather than reinterpret the class's own rule")
+        clearance = None
+        if nc.min_clearance_mm is not None:
+            clearance = nonnegative_mm(nc.min_clearance_mm)
+            if clearance is None:
+                raise UnsupportedGeometry(
+                    f"net {net.name!r} belongs to net class {nc.id!r} whose "
+                    f"min_clearance_mm={nc.min_clearance_mm!r} is not a "
+                    f"non-negative, finite clearance in mm — geometric DRC fails "
+                    f"closed rather than reinterpret the class's own rule")
+        if width is not None or clearance is not None:
+            minima[net.id] = (width, clearance)
+    return minima
+
+
+def _effective_min_trace_width(global_min: float,
+                               minima: dict[str, tuple[float | None, float | None]],
+                               net_id: str | None) -> float:
+    """The width floor copper on *net_id* must actually meet: the board's global
+    ``min_trace_width_mm`` RAISED by that net's class minimum when its class names
+    one. Net-less copper (``net_id is None``) carries no class and no class term."""
+    entry = minima.get(net_id) if net_id is not None else None
+    if entry is None or entry[0] is None:
+        return global_min
+    return max(global_min, entry[0])
+
+
+def _effective_min_clearance(global_min: float,
+                             minima: dict[str, tuple[float | None, float | None]],
+                             *net_ids: str | None) -> float:
+    """The clearance floor a set of participating nets must actually meet: the board's
+    global ``min_clearance_mm`` RAISED by EVERY named net's class minimum. Called with
+    a PAIR's two nets for the GC2 comparison (either participant's class can tighten
+    the pair), and with every classed net at once to obtain the board-wide MAXIMUM the
+    broad phase must sweep at. A ``None`` net contributes nothing."""
+    floor = global_min
+    for net_id in net_ids:
+        entry = minima.get(net_id) if net_id is not None else None
+        if entry is not None and entry[1] is not None:
+            floor = max(floor, entry[1])
+    return floor
+
+
 def _check_gc1_trace_width(proj: Projection, rb: ResolvedBoard) -> list[dict]:
-    required = rb.design_rules.minimums.min_trace_width_mm
+    global_min = rb.design_rules.minimums.min_trace_width_mm
+    minima = _net_class_minima(rb)
     findings: list[dict] = []
     for prim in proj.copper:
         if prim.kind != "trace_seg" or prim.width_mm is None:
             continue
+        # PER-TRACE floor: the global minimum raised by this trace's own net class.
+        # Comparing every trace against the global floor alone would clean a trace its
+        # own class forbids (019f958b45b9). The finding reports the EFFECTIVE value.
+        required = _effective_min_trace_width(global_min, minima, prim.net_id)
         if _violates(prim.width_mm, required):
             shape = prim.shape
             mid = ((shape.ax + shape.bx) / 2.0, (shape.ay + shape.by) / 2.0)
@@ -577,11 +745,22 @@ def _broad_phase_pairs(prims: list[CopperPrimitive],
     only candidate index pairs whose clearance-inflated AABBs overlap, so the exact
     (O(k^2)) narrow phase runs on a small candidate set instead of all board pairs.
 
+    CALLER INVARIANT — ``margin`` MUST BE THE MAXIMUM REQUIRED CLEARANCE ANYWHERE IN
+    ``prims``, not any one pair's threshold. The pruning argument below is only sound
+    against the LARGEST threshold a surviving pair could be compared to; hand this the
+    board's global ``min_clearance_mm`` while some pair's net class demands more and
+    that pair is dropped before it is ever measured — a FALSE CLEAN. The single caller
+    (:func:`_check_gc2_clearance`) folds every net class's ``min_clearance_mm`` into
+    the margin via :func:`_effective_min_clearance` for exactly this reason.
+
     CORRECTNESS-EQUIVALENT TO ALL-PAIRS: it only prunes pairs that PROVABLY cannot
-    violate. If two shapes have edge distance < ``margin`` (= min_clearance) their
-    AABBs are < margin apart, so inflating EACH box by ``margin`` (done here on both
-    the x-sweep and the y-overlap test) leaves them overlapping — such a pair is
-    never dropped. Pruned pairs are strictly farther than the clearance floor.
+    violate. If two shapes have edge distance < ``margin`` (>= every pair's required
+    clearance, per the invariant above) their AABBs are < margin apart, so inflating
+    EACH box by ``margin`` (done here on both the x-sweep and the y-overlap test)
+    leaves them overlapping — such a pair is never dropped. Pruned pairs are strictly
+    farther apart than any clearance floor on the board, so the narrow phase would
+    have cleared them anyway. Note a pair is only pruned once its gap exceeds
+    2 x ``margin``, since BOTH boxes are inflated.
 
     Deterministic: primitives are swept in (inflated min_x, entity_id) order and
     every emitted pair is returned as ``(i, j)`` with ``i < j`` (indices into the
@@ -617,14 +796,31 @@ def _same_net_exempt(a: CopperPrimitive, b: CopperPrimitive) -> bool:
 
 
 def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
-    required = rb.design_rules.minimums.min_clearance_mm
+    global_min = rb.design_rules.minimums.min_clearance_mm
+    minima = _net_class_minima(rb)
+    # BROAD-PHASE MARGIN — the board-wide MAXIMUM required clearance (the global floor
+    # folded with EVERY classed net's floor), which is the invariant
+    # :func:`_broad_phase_pairs` prunes against. Sweeping at the global floor while a
+    # class demands more would prune a genuinely violating pair unmeasured.
+    #
+    # THE COST, STATED PLAINLY. This margin is BOARD-WIDE, so one high-clearance net
+    # class inflates the sweep box of EVERY primitive on EVERY layer — including
+    # primitives on nets that class will never be compared against — and GC2 degrades
+    # toward all-pairs as the strictest class grows. That cost scales with the
+    # STRICTEST class on the board, not with how many nets use it: a single net on a
+    # 2mm-clearance class costs exactly what a thousand of them would. It is
+    # nonetheless the right trade, because a per-pair bound is not knowable before
+    # pairing — the sweep is what DECIDES which pairs exist, so it cannot be tuned by
+    # the pair it has not formed yet. The alternative (sweep tighter, miss a pair) is
+    # a false clean, and this kernel spends performance to avoid those every time.
+    sweep_margin = _effective_min_clearance(global_min, minima, *minima)
     known = frozenset(_canon_layer(lid) for lid in _copper_layer_ids(rb))
     buckets = _bucket_copper_by_layer(proj, known)
     findings: list[dict] = []
     for layer_id in sorted(buckets):
         prims = buckets[layer_id]
         seen: set[tuple[str, str]] = set()
-        for i, j in _broad_phase_pairs(prims, required):
+        for i, j in _broad_phase_pairs(prims, sweep_margin):
             a, b = prims[i], prims[j]
             if a.entity_id == b.entity_id:
                 continue  # self-pair (a shape never conflicts with itself)
@@ -634,6 +830,12 @@ def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
             key = (lo.entity_id, hi.entity_id)
             if key in seen:
                 continue
+            # PER-PAIR floor: the two participants can sit on different nets with
+            # different classes, so BOTH class terms fold in (and a net-less
+            # participant contributes none). The finding reports this effective value,
+            # not the global one.
+            required = _effective_min_clearance(
+                global_min, minima, lo.net_id, hi.net_id)
             dist = convex_edge_distance(lo.shape, hi.shape)
             if _violates(dist, required):
                 seen.add(key)
@@ -827,25 +1029,13 @@ def run_geometric_drc(rb: ResolvedBoard, *,
                 "copper board/placed graphics are not modeled by geometric DRC; "
                 "geometric DRC is indeterminate rather than skip unmodeled copper")
 
-        # FAIL-CLOSED GUARD (019f958b45b9): the kernel applies only the GLOBAL
-        # ManufacturingConstraints minima; it never reads per-net-class
-        # min_trace_width_mm / min_clearance_mm. A net whose class carries a STRICTER
-        # width/clearance floor would false-clean under the weaker global floor. Gate
-        # whenever any net references a NetClass that carries either minimum (a class
-        # with only other fields does not trip). The compiler emits no such classes
-        # today, so this is the safe minimal v1 repair until the effective per-class
-        # thresholds are applied in GC1/GC2.
-        _net_classes = {nc.id: nc for nc in rb.design_rules.net_classes}
-        for net in rb.nets:
-            nc = _net_classes.get(net.net_class_id) if net.net_class_id else None
-            if nc is not None and (nc.min_trace_width_mm is not None
-                                   or nc.min_clearance_mm is not None):
-                return _indeterminate(
-                    "unsupported_geometry",
-                    "per-net-class width/clearance minima are not applied by "
-                    "geometric DRC yet; geometric DRC is indeterminate rather than "
-                    "risk a false clean under the weaker global floor")
-
+        # Per-net-class width/clearance minima are APPLIED, no longer gated: GC1
+        # compares each trace against _effective_min_trace_width and GC2 each pair
+        # against _effective_min_clearance, both built from _net_class_minima — which
+        # fails closed, in BOTH dimensions, on a class minimum that cannot be sourced
+        # (an unsourceable min_trace_width_mm OR min_clearance_mm), each through the
+        # same predicate routing admits that field with. See PER-NET-CLASS MINIMA in
+        # the module docstring.
         proj = project_board(rb)
 
         findings: list[dict] = []

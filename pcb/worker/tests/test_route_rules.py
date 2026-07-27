@@ -1306,9 +1306,10 @@ def test_accepted_copper_on_an_unmodelable_via_span_still_fails_closed():
 # The v1 compiler emits NO net classes at all (compile_board.py hardcodes
 # `net_classes=()`; verified below) and sets no net's `net_class_id` — so the
 # only way to drive this feature through the REAL `route()` entry point is to
-# monkeypatch the compile step itself, exactly the way the existing
-# drc_geometric fail-closed guard (docket 019f958b45b9) is only reachable via
-# `dataclasses.replace` in a test. `net_classed_compile` below does that for
+# monkeypatch the compile step itself, exactly the way drc_geometric's own
+# per-net-class floors (`_net_class_minima`, closing docket 019f958b45b9) are
+# only reachable via `dataclasses.replace` in a test. `net_classed_compile`
+# below does that for
 # the FULL `_call_route` path rather than for an internal helper, so a
 # reverted call site (not just a reverted resolver function) is what these
 # tests actually exercise.
@@ -1794,11 +1795,40 @@ def test_the_three_pin_fixture_routes_a_net_classed_net_end_to_end(
     assert all(seg["width_mm"] == pytest.approx(CLASS_WIDTH_MM)
               for seg in sig_candidate["segments"])
 
-    # drc_geometric's OWN pre-existing guard (019f958b45b9) still fires for a
-    # net-classed board — this round does not (and must not) paper over it;
-    # geometric DRC stays honestly indeterminate until IT learns to apply
-    # per-class minima too (docs/routing.md, "Not yet done").
-    assert sig["drc_geometric"]["verdict"] == "indeterminate"
+    # The proposal now gets a REAL geometric verdict. drc_geometric used to fail
+    # closed to `indeterminate` for ANY net-classed board (the interim guard
+    # from 019f958b45b9), so this pair of assertions pins only that the guard is
+    # gone and the check ran to a determinate answer.
+    assert sig["drc_geometric"]["verifies_geometry"] is True
+    assert sig["drc_geometric"]["verdict"] == "clean"
+
+    # ...and THAT verdict on its own proves nothing about WHICH floor was used:
+    # the routed 0.6 clears the global 0.127 too, so a kernel that ignored the
+    # class entirely would also say "clean". The floor is only observable on a
+    # violation, so drive one through the SAME caller-facing path
+    # (`_attach_route_geometric_drc`): re-check SIG's proposal restamped at the
+    # board baseline (0.35), the width SIG would have got WITHOUT its class.
+    # That is legal under the global floor and illegal under the class floor, so
+    # a violation appears only if the class floor is what GC1 applied, and it
+    # names the value in `required_mm`. This is what makes "routing chose 0.6
+    # for SIG and DRC verified it against the floor that chose it" a checked
+    # statement rather than a claim.
+    rb_classed = cb.compile_board(_three_pin_board()).board  # spy applies the class
+    narrow_payload = {"routes": [dict(sig, segments=[
+        dict(s, width_mm=BOARD_WIDTH_MM) for s in sig["segments"]])]}
+    methods._attach_route_geometric_drc(
+        narrow_payload, rb_classed, trace_width_mm=BOARD_WIDTH_MM)
+    probe = narrow_payload["routes"][0]["drc_geometric"]
+    assert probe["verifies_geometry"] is True
+    assert probe["verdict"] == "violations"
+    gc1 = [v for v in probe["violations"] if v["type"] == "gc1_trace_width"]
+    assert gc1, "SIG's class width floor must be what GC1 applies to SIG's copper"
+    assert {v["net_name"] for v in gc1} == {"SIG"}
+    assert all(v["required_mm"] == pytest.approx(CLASS_WIDTH_MM) for v in gc1)
+    assert all(v["measured_mm"] == pytest.approx(BOARD_WIDTH_MM) for v in gc1)
+    # ATTRIBUTED TO THE PROPOSAL, not to copper the board already had — the
+    # class floor reaches the ghost, which is the surface a human accepts from.
+    assert all(v["subjects"] for v in gc1)
 
 
 def test_the_staged_via_fixture_is_projected_at_a_net_classed_nets_own_width():
@@ -1840,18 +1870,41 @@ def test_the_staged_via_fixture_is_projected_at_a_net_classed_nets_own_width():
     # overlay would be checking this proposal at a width it was not routed
     # at (the false clean task 3 exists to prevent).
     # NOTE: `_attach_route_geometric_drc` runs the FULL geometric kernel
-    # (`run_geometric_drc`), which carries drc_geometric's own pre-existing
-    # net-class guard (019f958b45b9, fires whenever EITHER min_trace_width_mm
-    # OR min_clearance_mm is set) — so THIS verdict is "indeterminate", same
-    # as the end-to-end test above, and for the same reason (this round does
-    # not, and must not, paper over that guard). It says nothing about
-    # whether the width the OVERLAY used was correct — `build_overlay` below
-    # (which `check_candidates`/`run_geometric_drc` call internally, but which
-    # itself does not consult net_classes at all) is what actually proves that.
+    # (`run_geometric_drc`). That kernel used to fail closed to "indeterminate"
+    # on ANY net-classed board (the interim guard from 019f958b45b9), so these
+    # two assertions pin only that the guard is gone and a determinate verdict
+    # came back. They do NOT establish which floor produced it — the staged 0.6
+    # clears the global 0.127 as well, so an ignore-the-class kernel would also
+    # say "clean". The probe below is what establishes the floor. Neither says
+    # anything about which width the OVERLAY used; `build_overlay` further down
+    # (which itself does not consult net_classes at all) is what proves that.
     methods._attach_route_geometric_drc(payload, rb2, trace_width_mm=BOARD_WIDTH_MM)
     verdict = payload["routes"][0]["drc_geometric"]
-    assert verdict["verifies_geometry"] is False
-    assert verdict["verdict"] == "indeterminate"
+    assert verdict["verifies_geometry"] is True
+    assert verdict["verdict"] == "clean"
+
+    # THE FLOOR, OBSERVED, through the same caller-facing path. Re-check the same
+    # staged geometry restamped at the board baseline (0.35) — legal under the
+    # global floor, illegal under SIG's class floor — so a violation appears only
+    # if the class floor is what the kernel applied to SIG's copper, and
+    # `required_mm` names the value it used.
+    narrow_payload = {"routes": _three_pin_route_reply()}
+    for seg in narrow_payload["routes"][0]["segments"]:
+        seg["width_mm"] = BOARD_WIDTH_MM
+    methods._attach_route_geometric_drc(
+        narrow_payload, rb2, trace_width_mm=BOARD_WIDTH_MM)
+    probe = narrow_payload["routes"][0]["drc_geometric"]
+    assert probe["verifies_geometry"] is True
+    assert probe["verdict"] == "violations"
+    gc1 = [v for v in probe["violations"] if v["type"] == "gc1_trace_width"]
+    assert gc1, "SIG's class width floor must be what GC1 applies to SIG's copper"
+    assert {v["net_name"] for v in gc1} == {"SIG"}
+    assert all(v["required_mm"] == pytest.approx(CLASS_WIDTH_MM) for v in gc1)
+    assert all(v["measured_mm"] == pytest.approx(BOARD_WIDTH_MM) for v in gc1)
+    # ATTRIBUTED TO THE PROPOSAL — every GC1 violation names the candidate that
+    # authored the copper, so the class floor reaches the ghost a human accepts
+    # from and not merely the board-wide union.
+    assert all(v["subjects"] for v in gc1)
 
     candidates, empty = methods._routes_to_candidates(payload["routes"])
     assert empty == [] and len(candidates) == 1

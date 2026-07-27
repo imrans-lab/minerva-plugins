@@ -261,10 +261,33 @@ disagree about the width. Every step, step 5 included, goes through the same
 admission predicate.
 
 If nothing in the chain yields a usable number the route **fails closed**
-(`unsupported_geometry`, zero routes). There is no invented default; step 4's
+(`unsupported_geometry`, zero routes). There is no invented default: step 4's
 `min_clearance_mm` is the same field `ir_connectivity` publishes and
-`drc_geometric` enforces, so routing cannot reserve less space than DRC will
-demand.
+`drc_geometric` reads as its global floor, so a run that FALLS THROUGH to step 4
+cannot reserve less space than DRC will demand.
+
+**An explicit option can produce copper DRC will flag, and that is correct.**
+That guarantee is about step 4, and it does not extend up the chain. Steps 1–3
+can each hand the engine a number below what `drc_geometric` requires:
+
+- An explicit `options.clearance` or `options.trace_width_mm`, or a
+  hint-authored width, is admitted on its own terms — the whole point of the
+  chain is that a caller who states a number gets that number rather than a
+  silent promotion to the board's rule.
+- The class step is skipped entirely for a dimension steps 1/2 already fixed:
+  `methods._route` strips class widths from `net_overrides` when
+  `caller_set_width or hint_set_width` and class clearances when
+  `caller_set_clearance`, before `_widen_for_net_classes` ever runs. So
+  `options.clearance: 0.1` routes a board whose class demands `0.5` at `0.1`,
+  while `_effective_min_clearance` still demands `0.5` on that net's pairs.
+
+Geometric DRC has no precedence chain — a class minimum is a RULE, not a
+preference — so it reports the violation. That is the honest outcome and the
+reason the surfaces are kept separate: routing does what it was asked, DRC says
+what the result costs. (Before per-net-class minima landed in `drc_geometric`
+this could not be observed at all, because the interim guard made any net-classed
+board `indeterminate`.) A caller who wants the class floor respected should not
+pass the option.
 
 ## Per-net-class minima (this round)
 
@@ -280,8 +303,8 @@ only; authoring net classes on a real board is a separate, still-open
 follow-up, filed independently and out of this round's fence. Until it lands,
 the only way to exercise this surface at all is to build a `ResolvedBoard`
 with `dataclasses.replace` directly (exactly how `drc_geometric`'s own
-net-class guard, docket `019f958b45b9`, is tested) or, for an end-to-end test,
-to monkeypatch the compile step — see `tests/test_route_rules.py`'s
+per-net-class floors, `_net_class_minima`, are tested) or, for an end-to-end
+test, to monkeypatch the compile step — see `tests/test_route_rules.py`'s
 `net_classed_compile` fixture.
 
 That dormancy is also why the board-wide widening below (see "Keepout margin")
@@ -293,8 +316,9 @@ nothing exercises it yet.
 
 **Which fields.** `pcb_worker.methods._net_class_overrides` reads
 `NetClass.min_trace_width_mm` / `.min_clearance_mm` — the SAME two fields
-`drc_geometric`'s pre-existing fail-closed guard already watches
-(`nc.min_trace_width_mm is not None or nc.min_clearance_mm is not None`). It
+`drc_geometric._net_class_minima` reads to build GC1's and GC2's effective
+floors, so the width a net is routed at and the width it is checked against come
+from one rule. It
 deliberately does **not** read the plain `NetClass.trace_width_mm` (a nominal
 default, mirroring `RoutingDefaults.trace_width_mm` — a different concept from
 a *minimum*): the task is "route at the class's minima", and the `min_`-prefixed
@@ -448,18 +472,38 @@ candidate fell through to the run's single `default_width_mm`. A net-classed
 net is therefore now checked at the width it actually got, not the run's
 baseline — the false-clean the whole overlay surface exists to prevent (see
 "Where candidate dimensions come from" below). Clearance has no equivalent
-per-candidate concept in the overlay (geometric DRC's own clearance check
-reads `design_rules.minimums.min_clearance_mm` directly, and is unaffected by
-this round — see the fail-closed guard note below).
+per-candidate concept in the overlay: it is not a property a candidate carries,
+it is a property of the PAIR, and geometric DRC derives it there
+(`_effective_min_clearance`) from the overlay board's own net classes.
 
-**`drc_geometric`'s own guard is untouched, on purpose.** Geometric DRC has its
-own pre-existing fail-closed guard (docket `019f958b45b9`) that returns
-`indeterminate` for ANY net-classed board, because it has not yet been taught
-to apply per-class minima to GC1/GC2. This round does not touch it: a
-net-classed proposal's `drc_geometric.verdict` stays `"indeterminate"`, exactly
-as before — this round teaches ROUTING to honour class minima, not DRC, and
-leaving that guard exactly as it was is what keeps the two surfaces from
-silently disagreeing about whether a net-classed board is safe.
+**`drc_geometric` now applies the same two minima.** Geometric DRC once carried a
+fail-closed guard (docket `019f958b45b9`) that returned `indeterminate` for ANY
+net-classed board, because it read only the global `ManufacturingConstraints`
+floors and a stricter class would otherwise have false-cleaned. That guard is
+gone, replaced by the real thing: `_net_class_minima` feeds GC1's
+`_effective_min_trace_width` and GC2's `_effective_min_clearance`, so a
+net-classed proposal now gets a REAL `drc_geometric.verdict` measured against the
+class's own floors. The two surfaces read the same two fields off the same class
+rather than one of them opting out.
+
+**They still are not the same rule, and the difference is precedence.** Routing's
+class step is step 3 of a chain: `methods._route` drops the class WIDTH override
+when `caller_set_width or hint_set_width`, and the class CLEARANCE override when
+`caller_set_clearance`, because an explicit caller option and a hint-authored
+width outrank a class by design (see "Precedence" above). Geometric DRC has no
+such chain — a class minimum is a RULE, and `_effective_min_trace_width` /
+`_effective_min_clearance` apply it unconditionally. So "routing routes at the
+class value and DRC checks that value" holds only when steps 1 and 2 said
+nothing. When they did, routing honours the caller and DRC still holds the copper
+to the class floor, and the two can legitimately disagree — see "An explicit
+option can produce copper DRC will flag" under "Precedence".
+
+Both surfaces **fail closed** on a class minimum that cannot be sourced, in both
+dimensions and through the same predicate for each field: `positive_mm` for
+`min_trace_width_mm`, `nonnegative_mm` for `min_clearance_mm`. `0.0` is admitted
+for clearance and refused for width, on both sides — that single value is the
+whole of the asymmetry, and it is about the predicates, not about whether the
+dimension can fail closed at all.
 
 **Endpoint identity vs geometry.** A pad becomes a routable **endpoint** only if it
 carries an authored pad number — nets are spelled `U1.2`, hints reference `U1.2`,
@@ -803,17 +847,17 @@ if they are not — a prefix of confidently-wrong reasons is worse than none.
   `_effective_grid_size`, which grew the grid to cover any pad outside the board
   (+2mm), is gone — a pad outside the outline makes its net **unrouted** instead
   of routable off-board.
-- ~~Per-net-class width/clearance minima~~ — **done, this round**, for the
-  ROUTING consumer (see "Per-net-class minima" above). The v1 compiler still
-  emits `net_classes=()` for every real board, so this is reachable only via a
+- ~~Per-net-class width/clearance minima~~ — **done**, on BOTH sides. Routing
+  honours them (see "Per-net-class minima" above), and geometric DRC now enforces
+  them too: `drc_geometric._net_class_minima` feeds GC1's
+  `_effective_min_trace_width` and GC2's per-pair `_effective_min_clearance`, and
+  the interim guard that made any net-classed board `indeterminate`
+  (`019f958b45b9`) is deleted. The v1 compiler still emits `net_classes=()` for
+  every real board, so both halves are reachable only via a
   hand-built/monkeypatched `ResolvedBoard` until compiler support lands —
-  authoring net classes on a real board is a SEPARATE, still-open piece.
-  `drc_geometric`'s own fail-closed guard (`019f958b45b9`) also still fires for
-  any net-classed board: geometric DRC has not yet been taught to apply the
-  per-class minima this round only teaches ROUTING to honour, and this round
-  deliberately leaves that guard as-is rather than paper over it. Bus-hint
-  routing (`route_bus`) now honours net-class width too, fixed within this
-  round — see "Bus routing now honours net-class width too" above.
+  authoring net classes on a real board is a SEPARATE, still-open piece. Bus-hint
+  routing (`route_bus`) honours net-class width too — see "Bus routing now
+  honours net-class width too" above.
 - ~~Existing accepted traces/vias in the grid~~ — **done, docket `019f70ebc9ed`**
   (see "Existing copper" above). Other-net copper is an obstacle through the one
   `keepout_margin`; same-net copper is already-connected, both as space the net

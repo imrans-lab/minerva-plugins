@@ -349,6 +349,139 @@ MUTANTS: tuple[dict, ...] = (
                      "paired, and is silently uncompared.",
     },
 
+    # ------------------------------- drc_geometric: per-net-class minima --
+    #
+    # GC1's and GC2's floors are the global ManufacturingConstraints minima RAISED
+    # by the net class in play (`_net_class_minima` -> `_effective_min_trace_width`
+    # / `_effective_min_clearance`, docket 019f958b45b9). None of the four entries
+    # above touch that logic, so without these the sweep would keep reporting a
+    # healthy number while measuring nothing about it.
+    #
+    # Each entry names the test expected to kill it. An unnamed killer is one
+    # refactor away from becoming a silent survivor, because "still killed by
+    # SOMETHING" hides the loss of the test that was actually load-bearing.
+    {
+        "id": "drcgeo_gc1_class_width_floor_ignores_the_traces_own_net",
+        "file": DRC_GEOM,
+        "kind": "half",
+        "find": L(
+            "    entry = minima.get(net_id) if net_id is not None else None",
+            "    if entry is None or entry[0] is None:",
+            "        return global_min",
+            "    return max(global_min, entry[0])",
+        ),
+        "replace": L(
+            "    floors = [e[0] for e in minima.values() if e[0] is not None]",
+            "    return max([global_min] + floors)  # MUTANT: board-wide, not per-net",
+        ),
+        # KILLER: test_drc_geometric.py::
+        #   test_gc1_flags_the_classed_net_and_clears_an_unclassed_net_at_the_same_width
+        "rationale": "Collapses GC1's per-net width floor to ONE board-wide scalar: "
+                     "the strictest class's floor is applied to every trace, so an "
+                     "UNCLASSED net is held to a floor no rule gives it. This is the "
+                     "shape the whole feature is satisfiable by if net scoping is "
+                     "never asserted, which is why the scoping test exists.",
+    },
+    {
+        "id": "drcgeo_gc2_class_clearance_floor_ignores_the_pairs_own_nets",
+        "file": DRC_GEOM,
+        "kind": "half",
+        "find": L(
+            "    floor = global_min",
+            "    for net_id in net_ids:",
+            "        entry = minima.get(net_id) if net_id is not None else None",
+            "        if entry is not None and entry[1] is not None:",
+            "            floor = max(floor, entry[1])",
+            "    return floor",
+        ),
+        "replace": L(
+            "    floor = global_min",
+            "    for entry in minima.values():  # MUTANT: board-wide, not per-pair",
+            "        if entry[1] is not None:",
+            "            floor = max(floor, entry[1])",
+            "    return floor",
+        ),
+        # KILLER: test_drc_geometric.py::
+        #   test_gc2_flags_the_classed_pair_and_clears_an_unclassed_pair_at_the_same_gap
+        "rationale": "The GC2 twin of the entry above: every PAIR is compared against "
+                     "the board's strictest class rather than its own two "
+                     "participants' classes, so an unclassed-to-unclassed pair is "
+                     "flagged for violating a rule neither net carries.",
+    },
+    {
+        "id": "drcgeo_gc2_broad_phase_swept_at_the_global_floor",
+        "file": DRC_GEOM,
+        "kind": "half",
+        "find": "    sweep_margin = _effective_min_clearance(global_min, minima, *minima)",
+        "replace": "    sweep_margin = global_min  # MUTANT: un-inflated sweep margin",
+        # KILLERS: test_drc_geometric.py::
+        #   test_gc2_flags_a_pair_the_global_margin_would_have_pruned  (the false
+        #     clean itself), and
+        #   test_gc2_sweeps_the_broad_phase_at_exactly_the_board_wide_maximum
+        "rationale": "Sweeps the broad phase at the GLOBAL clearance floor while a "
+                     "class demands more. `_broad_phase_pairs` prunes anything beyond "
+                     "2 x margin, so a pair that violates the class floor but clears "
+                     "twice the global one is discarded BEFORE it is measured — a "
+                     "false clean produced entirely by the pruning, with the per-pair "
+                     "comparison left correct.",
+    },
+    {
+        "id": "drcgeo_gc2_broad_phase_swept_at_infinity",
+        "file": DRC_GEOM,
+        "kind": "half",
+        "find": "    sweep_margin = _effective_min_clearance(global_min, minima, *minima)",
+        "replace": '    sweep_margin = float("inf")  # MUTANT: sweep never prunes',
+        # KILLER (SOLE): test_drc_geometric.py::
+        #   test_gc2_sweeps_the_broad_phase_at_exactly_the_board_wide_maximum
+        # No findings-based test can see this one — it changes no verdict at all.
+        "rationale": "The opposite error to the entry above, and the one no assertion "
+                     "about FINDINGS can catch: an infinite margin is SUFFICIENT for "
+                     "correctness but not MINIMAL, so GC2 silently degrades to "
+                     "all-pairs on every board forever. Kept because 'nothing stops a "
+                     "caller passing inf' is a real review finding, and the only "
+                     "defence is a test that reads the margin itself.",
+    },
+    {
+        "id": "drcgeo_class_width_floor_lowers_instead_of_raises",
+        "file": DRC_GEOM,
+        "kind": "half",
+        "find": "    return max(global_min, entry[0])",
+        "replace": "    return min(global_min, entry[0])  # MUTANT: max -> min",
+        # KILLER: test_drc_geometric.py::
+        #   test_net_class_min_trace_width_below_the_global_floor_cannot_weaken_it
+        "rationale": "Composes the class term with min() instead of max(), so a class "
+                     "minimum BELOW the manufacturing floor RELAXES it — the global "
+                     "floor stops being a hard lower bound and copper the fab cannot "
+                     "make is certified clean.",
+    },
+    {
+        "id": "drcgeo_class_width_admission_predicate_dropped",
+        "file": DRC_GEOM,
+        "kind": "full",
+        "find": "            width = positive_mm(nc.min_trace_width_mm)",
+        "replace": "            width = float(nc.min_trace_width_mm)",
+        # KILLER: test_drc_geometric.py::
+        #   test_referenced_class_with_zero_min_trace_width_is_indeterminate
+        "rationale": "Drops the fail-closed admission on a class WIDTH, so a class "
+                     "authoring min_trace_width_mm: 0 is silently reinterpreted as "
+                     "'no floor' instead of returning indeterminate. Routing refuses "
+                     "the same value through the same predicate, so this is also the "
+                     "two surfaces disagreeing about one class.",
+    },
+    {
+        "id": "drcgeo_class_clearance_admission_predicate_dropped",
+        "file": DRC_GEOM,
+        "kind": "full",
+        "find": "            clearance = nonnegative_mm(nc.min_clearance_mm)",
+        "replace": "            clearance = float(nc.min_clearance_mm)",
+        # KILLER: test_drc_geometric.py::
+        #   test_a_class_clearance_that_is_not_a_sourceable_number_fails_closed
+        "rationale": "The clearance half of the entry above — the second of the two "
+                     "fail-closed dimensions. A non-sourceable class clearance stops "
+                     "raising and becomes a silent no-op under max() (max(0.2, nan) "
+                     "returns 0.2), while routing still fails closed on it.",
+    },
+
     # ---------------------------------------------------------- ir_parity --
     {
         "id": "irparity_key_quantum_collapses_onto_the_comparison_epsilon",
@@ -597,8 +730,18 @@ def validate_shape() -> None:
     canaries = [m for m in MUTANTS if m["kind"] == "canary"]
     if len(canaries) != 1:
         raise SystemExit(f"corpus must carry EXACTLY one canary, found {len(canaries)}")
-    if not 24 <= len(MUTANTS) <= 36:
-        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..36 band")
+    # SIZE BAND — a COST guard, not a correctness one: every entry costs ~180s of
+    # sweep, and the corpus is meant to be chosen for spread, not grown for volume.
+    # The ceiling moved 36 -> 44 when the per-net-class minima landed in
+    # drc_geometric (019f958b45b9): that round added ~250 lines of new fail-closed
+    # logic across three functions with two independent floor dimensions, a broad
+    # phase whose margin must be both sufficient AND minimal, and per-net scoping
+    # that a single board-wide scalar would otherwise satisfy. Six entries was the
+    # reviewed MINIMUM to cover it and the seventh is the GC2 twin of the scoping
+    # one; there was no way to fit that under 36 without dropping coverage the
+    # round was gated on. Raise this only with the same kind of reason.
+    if not 24 <= len(MUTANTS) <= 44:
+        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..44 band")
     for m in MUTANTS:
         for key in ("id", "file", "find", "replace", "kind", "rationale"):
             if key not in m:

@@ -16,6 +16,7 @@ import pytest
 
 from types import SimpleNamespace
 
+from pcb_worker import drc_geometric as dg
 from pcb_worker.compile_board import compile_board
 from pcb_worker.drc_geom_primitives import (
     Capsule,
@@ -30,9 +31,12 @@ from pcb_worker.drc_geometric import (
     CopperPrimitive,
     Projection,
     UnsupportedGeometry,
+    _broad_phase_pairs,
     _bucket_copper_by_layer,
     _check_gc2_clearance,
     _check_gc5_copper_to_edge,
+    _effective_min_clearance,
+    _net_class_minima,
     geometric_drc_from_resolution,
     project_board,
     run_geometric_drc,
@@ -550,12 +554,17 @@ def _proj(*copper):
     return Projection(copper=tuple(copper), holes=(), annular=())
 
 
-def _rb_clearance(clearance=0.2):
+def _rb_clearance(clearance=0.2, net_classes=(), nets=()):
     # A 2-layer stack so GC2's known-copper-layer guard has top/bottom to fold onto;
     # the synthetic primitives sit on "top"/"bottom" (or F.Cu/B.Cu, which fold there).
+    # `nets`/`net_classes` default EMPTY (what every real compiled board carries) so
+    # GC2's per-net-class floor lookup resolves to the global clearance; the net-class
+    # tests below pass real ResolvedNet/NetClass values in.
     return SimpleNamespace(
         design_rules=SimpleNamespace(
-            minimums=SimpleNamespace(min_clearance_mm=clearance)),
+            minimums=SimpleNamespace(min_clearance_mm=clearance),
+            net_classes=tuple(net_classes)),
+        nets=tuple(nets),
         layer_stack=SimpleNamespace(
             copper=(SimpleNamespace(id="top"), SimpleNamespace(id="bottom"))))
 
@@ -851,9 +860,12 @@ def test_npth_pad_suppresses_gc2_but_keeps_gc6():
 # 019f95893989, 019f95897086, 019f958b45b9, 019f9589ebb3). The result-union
 # (019f9589b232) + routing-label (019f958aa6db) repros live in
 # test_methods_drc_geometric.py / test_route_drc.py (they are method-boundary).
-# Each false-clean guard fires BEFORE projection and yields the indeterminate
-# envelope — verdict:"indeterminate", kind:"unsupported_geometry", NO
-# clean/findings/counts.
+# The first three repros are still closed by a fail-closed guard that
+# fires BEFORE projection and yields the indeterminate envelope —
+# verdict:"indeterminate", kind:"unsupported_geometry", NO clean/findings/counts.
+# 019f958b45b9 is NOT: its interim guard was replaced by the real per-net-class
+# floors (see that section below), so a net-classed board now runs to a real
+# verdict measured against the class minima.
 # ===========================================================================
 
 
@@ -939,7 +951,25 @@ def test_copper_placed_graphic_fails_closed_indeterminate():
     _assert_indeterminate_unsupported(res)
 
 
-# --- 019f958b45b9: per-net-class width/clearance minima false-clean ---------
+# --- 019f958b45b9: per-net-class width/clearance minima are ENFORCED --------
+#
+# GC1's width floor and GC2's clearance floor are the GLOBAL
+# ManufacturingConstraints minima RAISED by the net class(es) in play. This
+# section is the repair for the false clean that bug names — a net whose class
+# demands a stricter floor than the board's was certified against the weaker
+# global one. (The interim guard that made ANY net-classed board `indeterminate`
+# is gone; these tests pin its removal, not its behaviour.)
+#
+# MEASURED FIXTURE FLOORS, so the numbers below are readable:
+#   * `_base` authors clearance_mm 0.2, and `compile_board._floor_with_clearance`
+#     takes max(profile floor 0.127, authored) -> GLOBAL min_clearance_mm = 0.2.
+#   * `_base` authors trace_width_mm 0.3, but that becomes `RoutingDefaults`, NOT
+#     a minimum -> GLOBAL min_trace_width_mm stays the profile floor 0.127.
+# Every class value below is chosen strictly ABOVE its global counterpart, and
+# every geometry strictly BETWEEN the two, so only the class term can flag it.
+
+GLOBAL_MIN_WIDTH_MM = 0.127     # _V1_MANUFACTURING_FLOOR, untightenable by a board
+GLOBAL_MIN_CLEARANCE_MM = 0.2   # _base's authored clearance_mm, above the 0.127 floor
 
 
 def _net_board():
@@ -949,34 +979,436 @@ def _net_board():
 
 
 def _apply_net_class(rb, nc: NetClass):
+    """Attach *nc* to EVERY net (the whole board is one class)."""
     dr = dataclasses.replace(rb.design_rules, net_classes=(nc,))
     nets = tuple(dataclasses.replace(n, net_class_id=nc.id) for n in rb.nets)
     return dataclasses.replace(rb, design_rules=dr, nets=nets)
 
 
-def test_net_class_min_trace_width_fails_closed_indeterminate():
-    rb = _compile(_net_board())
+def _apply_net_class_to(rb, nc: NetClass, *net_names: str):
+    """Attach *nc* to the NAMED nets only, leaving every other net unclassed. The
+    net-scoping tests need one board carrying both, so a board-wide scalar cannot
+    satisfy them. (D3: there is no authoring surface — `compile_board` still emits
+    `net_classes=()` — so `dataclasses.replace` is the only way in.)"""
+    dr = dataclasses.replace(rb.design_rules, net_classes=(nc,))
+    wanted = set(net_names)
+    nets = tuple(dataclasses.replace(n, net_class_id=nc.id) if n.name in wanted else n
+                 for n in rb.nets)
+    assert wanted <= {n.name for n in rb.nets}, "fixture names a net the board lacks"
+    return dataclasses.replace(rb, design_rules=dr, nets=nets)
+
+
+def _gc1_by_net(res: dict) -> dict[str, dict]:
+    return {f["net_name"]: f for f in _findings(res, "gc1_trace_width")}
+
+
+def _gc2_refs(res: dict) -> set[frozenset]:
+    """Every GC2 finding as the unordered pair of participant refs — assertion by
+    ENTITY IDENTITY, never by count."""
+    return {frozenset(p["ref"] for p in f["participants"])
+            for f in _findings(res, "gc2_copper_clearance")}
+
+
+# -- acceptance 2: the bug reproduction is now a DETERMINATE GC1 violation ---
+
+
+def _classed_width_board(width_mm: float):
+    return _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.6)],
+        nets=[{"name": "N", "pins": ["U1.1"]}],
+        traces=[_trace(width_mm, net="N")])
+
+
+def test_net_class_min_trace_width_is_applied_as_a_gc1_violation():
+    # The 019f958b45b9 reproduction. A trace at 0.2mm clears the GLOBAL 0.127 floor,
+    # so the board is CLEAN with no class (this is what made the original false
+    # clean possible). Its net's class demands 0.4 -> the SAME board is now a
+    # determinate GC1 violation naming the EFFECTIVE 0.4 floor, not the global one.
+    rb = _compile(_classed_width_board(0.2))
+    assert run_geometric_drc(rb)["verdict"] == "clean"
+
     rb2 = _apply_net_class(rb, NetClass(id="nc:strict", name="Strict",
-                                        min_trace_width_mm=0.5))
-    _assert_indeterminate_unsupported(run_geometric_drc(rb2))
-
-
-def test_net_class_min_clearance_fails_closed_indeterminate():
-    rb = _compile(_net_board())
-    rb2 = _apply_net_class(rb, NetClass(id="nc:strict", name="Strict",
-                                        min_clearance_mm=0.5))
-    _assert_indeterminate_unsupported(run_geometric_drc(rb2))
-
-
-def test_net_class_without_relevant_minima_does_not_trip():
-    # A net class carrying only OTHER fields (via_diameter_mm) must NOT trip the
-    # guard — the kernel runs to a determinate verdict.
-    rb = _compile(_net_board())
-    rb2 = _apply_net_class(rb, NetClass(id="nc:route", name="Route",
-                                        via_diameter_mm=0.9))
+                                        min_trace_width_mm=0.4))
     res = run_geometric_drc(rb2)
     assert res["ok"] is True
-    assert res["verdict"] in ("clean", "violations")
+    assert res["verifies_geometry"] is True
+    assert res["verdict"] == "violations"
+    found = _gc1_by_net(res)
+    assert set(found) == {"N"}
+    # acceptance 8: the finding reports the EFFECTIVE required value.
+    assert found["N"]["required_mm"] == pytest.approx(0.4)
+    assert found["N"]["measured_mm"] == pytest.approx(0.2)
+
+
+def test_net_class_min_trace_width_below_the_global_floor_cannot_weaken_it():
+    # The class term only ever RAISES (max), never relaxes: a class minimum UNDER
+    # the global floor leaves the global floor in force.
+    rb = _compile(_classed_width_board(0.1))       # under the 0.127 global floor
+    rb2 = _apply_net_class(rb, NetClass(id="nc:loose", name="Loose",
+                                        min_trace_width_mm=0.05))
+    found = _gc1_by_net(run_geometric_drc(rb2))
+    assert set(found) == {"N"}
+    assert found["N"]["required_mm"] == pytest.approx(GLOBAL_MIN_WIDTH_MM)
+
+
+# -- acceptance 3: the GC2 twin ---------------------------------------------
+
+
+def _two_pad_board(x2: float, net2_pin_ref="U2"):
+    # Two TH lands of radius 0.6 (annulus 1.2) on DIFFERENT nets, so GC2 compares
+    # them; the copper gap is (x2 - 10.0) - 1.2.
+    return _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, annulus=1.2),
+                    _th_pad_comp(ref="U2", x=x2, annulus=1.2)],
+        nets=[{"name": "A", "pins": ["U1.1"]},
+              {"name": "B", "pins": ["U2.1"]}])
+
+
+def test_net_class_min_clearance_is_applied_as_a_gc2_violation():
+    # Gap 0.3mm: above the GLOBAL 0.2 floor (clean without a class), below the
+    # class's 0.5 (a violation with one). Only ONE participant carries the class —
+    # a pair's floor is the max over BOTH participants' classes.
+    rb = _compile(_two_pad_board(11.5))
+    assert run_geometric_drc(rb)["verdict"] == "clean"
+
+    rb2 = _apply_net_class_to(rb, NetClass(id="nc:strict", name="Strict",
+                                           min_clearance_mm=0.5), "A")
+    res = run_geometric_drc(rb2)
+    assert res["ok"] is True
+    assert res["verifies_geometry"] is True
+    assert _gc2_refs(res) == {frozenset({"U1", "U2"})}
+    f = _findings(res, "gc2_copper_clearance")[0]
+    # acceptance 8: the EFFECTIVE pair floor, not the global 0.2.
+    assert f["required_mm"] == pytest.approx(0.5)
+    assert f["measured_mm"] == pytest.approx(0.3)
+
+
+def test_gc2_pair_floor_is_the_max_over_both_participants_classes():
+    # Synthetic projection (precise net control): net "a" demands 0.4, net "b"
+    # demands 0.9 — the pair must be compared against 0.9, the stricter of the two.
+    nc_a = NetClass(id="nc:a", name="A", min_clearance_mm=0.4)
+    nc_b = NetClass(id="nc:b", name="B", min_clearance_mm=0.9)
+    nets = (SimpleNamespace(id="a", name="A", net_class_id="nc:a"),
+            SimpleNamespace(id="b", name="B", net_class_id="nc:b"))
+    # Discs r=0.5 whose centres are 1.6 apart -> a 0.6mm copper gap: clears 0.4,
+    # violates 0.9.
+    proj = _proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="a"),
+                 _cp("p2", Capsule.disc(1.6, 0.0, 0.5), net="b"))
+    res = _check_gc2_clearance(
+        proj, _rb_clearance(0.2, net_classes=(nc_a, nc_b), nets=nets))
+    assert len(res) == 1
+    assert res[0]["required_mm"] == pytest.approx(0.9)
+
+
+def test_gc2_netless_copper_contributes_no_class_term_but_the_other_net_still_applies():
+    # D2: a participant with net_id=None (e.g. `board_hole_copper`, which
+    # project_board hardcodes to None) carries no class. The CLASSED participant's
+    # floor still governs the pair.
+    nc = NetClass(id="nc:a", name="A", min_clearance_mm=0.9)
+    nets = (SimpleNamespace(id="a", name="A", net_class_id="nc:a"),)
+    proj = _proj(_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="a"),
+                 _cp("p2", Capsule.disc(1.6, 0.0, 0.5), net=None))
+    res = _check_gc2_clearance(
+        proj, _rb_clearance(0.2, net_classes=(nc,), nets=nets))
+    assert len(res) == 1
+    assert res[0]["required_mm"] == pytest.approx(0.9)
+
+    # Both net-less: no class term at all, so the global floor stands and the same
+    # 0.6mm gap is clean.
+    both_none = _proj(_cp("q1", Capsule.disc(0.0, 0.0, 0.5), net=None),
+                      _cp("q2", Capsule.disc(1.6, 0.0, 0.5), net=None))
+    assert _check_gc2_clearance(
+        both_none, _rb_clearance(0.2, net_classes=(nc,), nets=nets)) == []
+
+
+# -- acceptance 4: NET SCOPING (one board, classed vs unclassed side by side) --
+
+
+def test_gc1_flags_the_classed_net_and_clears_an_unclassed_net_at_the_same_width():
+    # ONE board, TWO traces at the IDENTICAL width 0.2. CLASSED's class demands 0.4;
+    # PLAIN has no class and answers only to the global 0.127. A board-wide scalar
+    # floor cannot produce this split — that is the whole point of the fixture.
+    board = _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, y=10.0, annulus=1.6),
+                    _th_pad_comp(ref="U2", x=10.0, y=20.0, annulus=1.6)],
+        nets=[{"name": "CLASSED", "pins": ["U1.1"]},
+              {"name": "PLAIN", "pins": ["U2.1"]}],
+        traces=[_trace(0.2, net="CLASSED", a=(10.0, 10.0), b=(20.0, 10.0)),
+                _trace(0.2, net="PLAIN", a=(10.0, 20.0), b=(20.0, 20.0))])
+    rb = _compile(board)
+    rb2 = _apply_net_class_to(rb, NetClass(id="nc:strict", name="Strict",
+                                           min_trace_width_mm=0.4), "CLASSED")
+    res = run_geometric_drc(rb2)
+    found = _gc1_by_net(res)
+    # BY IDENTITY: the classed net is flagged, the unclassed net at the same width
+    # is not present at all.
+    assert set(found) == {"CLASSED"}
+    assert found["CLASSED"]["required_mm"] == pytest.approx(0.4)
+
+
+def test_gc2_flags_the_classed_pair_and_clears_an_unclassed_pair_at_the_same_gap():
+    # ONE board, TWO pad pairs with the IDENTICAL 0.3mm copper gap. The pair whose
+    # participant is classed (0.5) violates; the unclassed-to-unclassed pair sits
+    # between the global 0.2 and that 0.5 and stays CLEAN.
+    board = _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, y=10.0, annulus=1.2),
+                    _th_pad_comp(ref="U2", x=11.5, y=10.0, annulus=1.2),
+                    _th_pad_comp(ref="U3", x=10.0, y=20.0, annulus=1.2),
+                    _th_pad_comp(ref="U4", x=11.5, y=20.0, annulus=1.2)],
+        nets=[{"name": "CA", "pins": ["U1.1"]}, {"name": "CB", "pins": ["U2.1"]},
+              {"name": "PA", "pins": ["U3.1"]}, {"name": "PB", "pins": ["U4.1"]}])
+    rb = _compile(board)
+    assert run_geometric_drc(rb)["verdict"] == "clean", "both gaps clear the global floor"
+
+    rb2 = _apply_net_class_to(rb, NetClass(id="nc:strict", name="Strict",
+                                           min_clearance_mm=0.5), "CA")
+    res = run_geometric_drc(rb2)
+    assert _gc2_refs(res) == {frozenset({"U1", "U2"})}
+
+
+# -- acceptance 5: the BROAD PHASE, asserted directly and both ways ----------
+
+
+def _broad_phase_fixture():
+    # Two discs r=0.5 whose AABBs are 0.45mm apart — MORE than 2 x the global 0.2
+    # (both boxes are inflated, so the prune threshold is 2 x margin) and LESS than
+    # 2 x a 0.6 class floor.
+    return [_cp("p1", Capsule.disc(0.0, 0.0, 0.5), net="a"),
+            _cp("p2", Capsule.disc(1.45, 0.0, 0.5), net="b")]
+
+
+def test_broad_phase_prunes_the_violating_pair_at_the_un_inflated_global_margin():
+    # The pruning is REAL: swept at the global floor alone, this pair never reaches
+    # the narrow phase. (If the fix had simply set margin=infinity this would fail,
+    # which is exactly what it is here to catch.)
+    assert _broad_phase_pairs(_broad_phase_fixture(), GLOBAL_MIN_CLEARANCE_MM) == []
+
+
+def test_broad_phase_keeps_the_violating_pair_at_the_class_inflated_margin():
+    # Swept at the board-wide MAXIMUM required clearance (the class's 0.6), the same
+    # pair survives to be measured.
+    assert _broad_phase_pairs(_broad_phase_fixture(), 0.6) == [(0, 1)]
+
+
+def _two_class_board():
+    """A compiled board with TWO different clearance classes in play plus one
+    unclassed net, so "the board-wide maximum" is a value distinguishable from the
+    global floor, from either class alone, and from their sum."""
+    rb = _compile(_control_board())
+    mid = NetClass(id="nc:mid", name="Mid", min_clearance_mm=0.4)
+    high = NetClass(id="nc:high", name="High", min_clearance_mm=0.9)
+    by_name = {"A": "nc:mid", "B": "nc:high"}          # net "C" stays unclassed
+    return dataclasses.replace(
+        rb,
+        design_rules=dataclasses.replace(rb.design_rules, net_classes=(mid, high)),
+        nets=tuple(dataclasses.replace(n, net_class_id=by_name[n.name])
+                   if n.name in by_name else n for n in rb.nets))
+
+
+def test_gc2_sweeps_the_broad_phase_at_exactly_the_board_wide_maximum(monkeypatch):
+    # THE CALL SITE, not just the helper. Every correctness test in this file also
+    # passes with `sweep_margin = inf` — the check would simply degrade to all-pairs
+    # and pay for it on every board forever, which no assertion about FINDINGS can
+    # see. So capture the margin GC2 actually hands the broad phase and pin it
+    # exactly: the strictest class on the board (0.9), not the global floor (which
+    # would prune a real violation) and not something merely larger.
+    rb2 = _two_class_board()
+    seen: list[float] = []
+    real = dg._broad_phase_pairs
+
+    def spy(prims, margin):
+        seen.append(margin)
+        return real(prims, margin)
+
+    monkeypatch.setattr(dg, "_broad_phase_pairs", spy)
+    assert run_geometric_drc(rb2)["ok"] is True
+    assert seen, "GC2 must actually reach the broad phase on this fixture"
+    assert set(seen) == {0.9}
+
+
+def test_the_sweep_margin_is_exactly_the_board_wide_maximum_not_merely_enough():
+    # THE MARGIN MUST BE MINIMAL, NOT JUST SUFFICIENT. Every correctness test above
+    # would also pass with `margin = inf` — the check would simply degrade to
+    # all-pairs and pay for it forever. So assert the value EXACTLY: the sweep folds
+    # in the STRICTEST class on the board (0.9) and nothing more, while a pair that
+    # does not involve that class keeps its own tighter floor (0.4). Anything that
+    # over-inflates (summing the class terms, defaulting to infinity) fails here even
+    # though it flags every violation correctly.
+    rb2 = _two_class_board()
+    ids = {n.name: n.id for n in rb2.nets}
+
+    minima = _net_class_minima(rb2)
+    assert set(minima) == {ids["A"], ids["B"]}, "only REFERENCED nets carry a term"
+
+    # The board-wide sweep bound — exactly the strictest class, not a sum, not inf.
+    sweep = _effective_min_clearance(GLOBAL_MIN_CLEARANCE_MM, minima, *minima)
+    assert sweep == 0.9
+    # ...and it really is a MAXIMUM, i.e. above every per-pair floor on the board.
+    assert _effective_min_clearance(
+        GLOBAL_MIN_CLEARANCE_MM, minima, ids["A"], ids["C"]) == 0.4
+    assert _effective_min_clearance(
+        GLOBAL_MIN_CLEARANCE_MM, minima, ids["C"], ids["C"]) == GLOBAL_MIN_CLEARANCE_MM
+    assert _effective_min_clearance(
+        GLOBAL_MIN_CLEARANCE_MM, minima, ids["A"], ids["B"]) == sweep
+
+
+def test_gc2_flags_a_pair_the_global_margin_would_have_pruned():
+    # END TO END, through run_geometric_drc: the violating gap (0.45) EXCEEDS
+    # 2 x the global floor, so without the class-inflated sweep margin the pair is
+    # discarded before comparison and the board reads CLEAN — the exact false clean
+    # this round closes.
+    rb = _compile(_two_pad_board(11.65))           # copper gap 0.45
+    assert run_geometric_drc(rb)["verdict"] == "clean"
+
+    rb2 = _apply_net_class_to(rb, NetClass(id="nc:strict", name="Strict",
+                                           min_clearance_mm=0.6), "A")
+    res = run_geometric_drc(rb2)
+    assert _gc2_refs(res) == {frozenset({"U1", "U2"})}
+    f = _findings(res, "gc2_copper_clearance")[0]
+    assert f["required_mm"] == pytest.approx(0.6)
+    assert f["measured_mm"] == pytest.approx(0.45)
+
+
+# -- acceptance 6: controls that must NOT over-trip --------------------------
+
+
+def _control_board():
+    """A CLEAN board that is nevertheless SENSITIVE in every dimension a NetClass
+    field could be misread into, so a control asserting "this class changed nothing"
+    can actually fail. A control over inert geometry would pass no matter what the
+    kernel did with the class. What each piece is here to catch:
+
+      * a 0.3mm pad-pair gap  — clean at the global 0.2, flagged by any CLEARANCE
+        floor above it;
+      * a 0.2mm trace         — clean at the global 0.127, flagged by any WIDTH
+        floor above it;
+      * a via (0.8 land / 0.4 drill, 0.2mm annular web) — clean at the global
+        min_drill 0.2 / min_annular_ring 0.13, flagged by any DRILL or ANNULAR
+        floor above those. Without it the `via_diameter_mm`/`via_drill_mm` legs of
+        the "nominal fields are not minima" control would have no GC3/GC4 subject
+        and could only ever be caught as a width/clearance misread.
+    """
+    return _base(
+        components=[_th_pad_comp(ref="U1", x=10.0, y=10.0, annulus=1.2),
+                    _th_pad_comp(ref="U2", x=11.5, y=10.0, annulus=1.2),
+                    _th_pad_comp(ref="U3", x=10.0, y=20.0, annulus=1.6)],
+        nets=[{"name": "A", "pins": ["U1.1"]}, {"name": "B", "pins": ["U2.1"]},
+              {"name": "C", "pins": ["U3.1"]}],
+        traces=[_trace(0.2, net="C", a=(10.0, 20.0), b=(20.0, 20.0))],
+        vias=[{"net": "C", "x_mm": 25.0, "y_mm": 25.0, "diameter_mm": 0.8,
+               "drill_mm": 0.4, "from_layer": "top", "to_layer": "bottom"}])
+
+
+def _assert_verdict_unchanged(res: dict, baseline: dict) -> None:
+    assert res["ok"] is True
+    assert res["verdict"] == baseline["verdict"]
+    assert res["findings"] == baseline["findings"]
+    assert res["counts"] == baseline["counts"]
+
+
+def test_net_class_with_only_nominal_via_fields_changes_no_verdict():
+    # `trace_width_mm`/`via_diameter_mm`/`via_drill_mm` on a NetClass are NOMINAL
+    # sizes, not minima: they imply no per-class GC1 floor and no per-class GC3/GC4
+    # floor. Every value below sits ABOVE the control board's sensitive geometry in
+    # EVERY dimension it could be misread into, so misreading ANY of the three as a
+    # minimum flags something and this control fails:
+    #   trace_width_mm 0.8 > the 0.2 trace (width) and > the 0.3 gap (clearance);
+    #   via_diameter_mm 0.9 > the via's 0.2 annular web (GC4), the 0.2 trace and
+    #     the 0.3 gap;
+    #   via_drill_mm   0.5 > the via's 0.4 drill (GC3), the 0.2 trace and the
+    #     0.3 gap.
+    rb = _compile(_control_board())
+    baseline = run_geometric_drc(rb)
+    assert baseline["verdict"] == "clean"
+    assert rb.vias, "the via legs of this control need a via to be about anything"
+    rb2 = _apply_net_class(rb, NetClass(id="nc:route", name="Route",
+                                        trace_width_mm=0.8, via_diameter_mm=0.9,
+                                        via_drill_mm=0.5))
+    _assert_verdict_unchanged(run_geometric_drc(rb2), baseline)
+
+
+def test_a_defined_but_unreferenced_net_class_changes_no_verdict():
+    # A strict class that NO net points at constrains no copper — only REFERENCED
+    # classes are read, exactly as `methods._net_class_overrides` reads them. Both of
+    # its minima are above the control board's sensitive geometry, so leaking EITHER
+    # dimension onto the unclassed nets fails this control.
+    rb = _compile(_control_board())
+    baseline = run_geometric_drc(rb)
+    strict = NetClass(id="nc:orphan", name="Orphan", min_trace_width_mm=0.4,
+                      min_clearance_mm=0.9)
+    rb2 = dataclasses.replace(
+        rb, design_rules=dataclasses.replace(rb.design_rules, net_classes=(strict,)))
+    _assert_verdict_unchanged(run_geometric_drc(rb2), baseline)
+
+
+# -- acceptance 7: D1, the deliberate 0.0 asymmetry, both ways round --------
+
+
+def test_referenced_class_with_zero_min_trace_width_is_indeterminate():
+    # D1. Routing rejects `min_trace_width_mm: 0` through `ir_candidates.positive_mm`
+    # ("zero-width copper is not copper"); geometric DRC reads the SAME field off the
+    # SAME class and must not reach a different conclusion, so it fails closed too.
+    # This is NOT the deleted guard: that one said "not implemented" for ANY class
+    # minimum; this says "THIS class's own rule cannot be sourced".
+    rb = _compile(_net_board())
+    rb2 = _apply_net_class(rb, NetClass(id="nc:zero", name="Zero",
+                                        min_trace_width_mm=0.0))
+    res = run_geometric_drc(rb2)
+    _assert_indeterminate_unsupported(res)
+    message = res["error"]["message"]
+    assert "nc:zero" in message            # names the class...
+    assert "min_trace_width_mm" in message  # ...and the field
+
+
+def test_a_class_clearance_that_is_not_a_sourceable_number_fails_closed():
+    """UNREACHABLE ON A VALID IR TODAY — and pinned anyway, deliberately.
+
+    `NetClass.__post_init__` validates every field with `resolved_board._nonnegative`
+    (`_finite` plus `>= 0`), so no real `NetClass` can carry NaN/inf/negative. A
+    duck-typed stand-in is the ONLY way to reach this branch, and this test claims
+    nothing else: it is not a scenario a board author can produce.
+
+    It exists so the predicate cannot be silently dropped. Routing puts this same
+    field through this same `nonnegative_mm` and RAISES; if the IR validation is ever
+    relaxed and this leg were a bare read, a NaN class clearance would fail closed in
+    routing while no-opping here — `max(0.2, nan)` returns `0.2` — and the two
+    surfaces would disagree about the same class, in the false-clean direction. The
+    width leg is guarded on exactly this reasoning; so is this one.
+    """
+    fake_class = SimpleNamespace(id="nc:nan", name="NaN", min_trace_width_mm=None,
+                                 min_clearance_mm=float("nan"))
+    fake_rb = SimpleNamespace(
+        design_rules=SimpleNamespace(net_classes=(fake_class,)),
+        nets=(SimpleNamespace(id="n1", name="N", net_class_id="nc:nan"),))
+    with pytest.raises(UnsupportedGeometry) as exc:
+        _net_class_minima(fake_rb)
+    assert "nc:nan" in str(exc.value)            # names the class...
+    assert "min_clearance_mm" in str(exc.value)  # ...and the field
+
+
+def test_referenced_class_with_zero_min_clearance_is_admitted_as_a_no_op():
+    # D1's other half, ASYMMETRIC on purpose: routing admits `min_clearance_mm: 0`
+    # through the NON-negative predicate (zero clearance is a rule a class may state),
+    # so geometric DRC admits it too. Under max() it is a no-op — the global floor
+    # stands and the verdict is unchanged.
+    rb = _compile(_control_board())
+    baseline = run_geometric_drc(rb)
+    rb2 = _apply_net_class(rb, NetClass(id="nc:zero", name="Zero",
+                                        min_clearance_mm=0.0))
+    _assert_verdict_unchanged(run_geometric_drc(rb2), baseline)
+
+
+def test_zero_min_clearance_does_not_weaken_a_violation_the_global_floor_finds():
+    # The same 0.0 on a board that genuinely violates the GLOBAL floor: admitting it
+    # must not turn a violation into a clean.
+    rb = _compile(_two_pad_board(11.3))            # copper gap 0.1, under 0.2
+    assert _gc2_refs(run_geometric_drc(rb)) == {frozenset({"U1", "U2"})}
+    rb2 = _apply_net_class(rb, NetClass(id="nc:zero", name="Zero",
+                                        min_clearance_mm=0.0))
+    res = run_geometric_drc(rb2)
+    assert _gc2_refs(res) == {frozenset({"U1", "U2"})}
+    assert _findings(res, "gc2_copper_clearance")[0]["required_mm"] == \
+        pytest.approx(GLOBAL_MIN_CLEARANCE_MM)
 
 
 # --- 019f9589ebb3: human source attribution on findings --------------------

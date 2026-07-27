@@ -43,8 +43,12 @@ consequences that are the point of the exercise:
     geometry accepted into the board cannot disagree.
   * THE KERNEL STAYS PURE AND UNTOUCHED. It is never given knowledge of
     candidates, and :mod:`drc_geometric` needed no edit at all — including its
-    fail-closed guards (zones, copper graphics, per-layer via padstacks,
-    net-class minima), which keep protecting this surface for free.
+    fail-closed guards (zones, copper graphics, per-layer via padstacks), which
+    keep protecting this surface for free. Candidate copper also inherits the
+    kernel's PER-NET-CLASS floors for free, and for the same reason: GC1/GC2 read
+    the overlay board's own ``design_rules.net_classes``, so a candidate on a
+    net-classed net is checked at that class's minima rather than the board's
+    blanket ones — no clearance/width rule is reimplemented here.
 
 FAIL-CLOSED (owner-ratified: canvas may DEGRADE; ROUTING/DRC/CAM FAIL CLOSED)
 ----------------------------------------------------------------------------

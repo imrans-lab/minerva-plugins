@@ -1045,11 +1045,13 @@ def _net_class_overrides(rb) -> dict[str, tuple[float | None, float | None]]:
     design_rules (now step 4).
 
     Reads ``NetClass.min_trace_width_mm`` / ``.min_clearance_mm`` — the SAME
-    two fields ``drc_geometric``'s existing fail-closed guard already watches
-    (``nc.min_trace_width_mm is not None or nc.min_clearance_mm is not None``,
-    docket 019f958b45b9): that guard exists precisely because a net-classed
-    board's MINIMA are these two fields, and geometric DRC cannot enforce them
-    yet. ``NetClass`` also carries a plain ``trace_width_mm`` (mirroring
+    two fields ``drc_geometric._net_class_minima`` reads to build GC1's
+    ``_effective_min_trace_width`` and GC2's per-pair
+    ``_effective_min_clearance`` (docket 019f958b45b9). A net-classed board's
+    MINIMA are these two fields on both sides, so the width a net is ROUTED at
+    and the floor it is CHECKED against are sourced from one rule rather than
+    two that could drift. ``NetClass`` also carries a plain ``trace_width_mm``
+    (mirroring
     ``RoutingDefaults.trace_width_mm``, a nominal/default width) — deliberately
     NOT read here: the task is "routes at that class's width/clearance
     MINIMA", and the minima are the ``min_``-prefixed pair, not the nominal
