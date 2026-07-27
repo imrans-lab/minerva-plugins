@@ -362,6 +362,12 @@ func add_trace(trace) -> void:
 	if trace.id.is_empty():
 		trace.id = "trace_%d" % _next_trace_id
 		_next_trace_id += 1
+	else:
+		# A caller-supplied id must not let a LATER auto-mint collide with it —
+		# the same high-water contract add_via already applies to via ids, via
+		# the shared _stable_id_suffix helper. This is what lets the import tool
+		# honour ids carried back from an export instead of renumbering.
+		_next_trace_id = maxi(_next_trace_id, _stable_id_suffix(trace.id) + 1)
 
 	traces[trace.id] = trace
 	record_change("add_trace", {
@@ -372,6 +378,28 @@ func add_trace(trace) -> void:
 	})
 	trace_changed.emit(trace.id)
 	data_changed.emit()
+
+
+## Reserve a caller-supplied trace id so a LATER auto-mint can never collide
+## with it. add_trace already high-waters for each id it accepts, but a BULK
+## importer must reserve every supplied id UP FRONT: `traces` is keyed by id, so
+## if an unnamed trace is processed before a supplied "trace_1" the auto-mint
+## produces "trace_1" itself and the supplied trace then silently overwrites it.
+## Reserving first makes the outcome independent of the caller's ordering.
+func reserve_trace_id(trace_id: String) -> void:
+	if trace_id.is_empty():
+		return
+	_next_trace_id = maxi(_next_trace_id, _stable_id_suffix(trace_id) + 1)
+
+
+## Via twin of reserve_trace_id. Vias are a list rather than an id-keyed map, so
+## nothing is overwritten — but a duplicate id would leave both vias sharing one
+## handle, and remove_via_by_id resolves only the first match, so the second
+## would be undeletable by id.
+func reserve_via_id(via_id: String) -> void:
+	if via_id.is_empty():
+		return
+	_next_via_id = maxi(_next_via_id, _stable_id_suffix(via_id) + 1)
 
 
 ## Get a trace by ID
@@ -447,16 +475,18 @@ func add_via(via_data: Dictionary) -> String:
 		_next_via_id += 1
 	else:
 		# A caller-supplied id must not let a later auto-mint collide with it.
-		_next_via_id = maxi(_next_via_id, _via_id_suffix(str(via_data["id"])) + 1)
+		_next_via_id = maxi(_next_via_id, _stable_id_suffix(str(via_data["id"])) + 1)
 	vias.append(via_data)
 	record_change("add_via", {"index": vias.size() - 1, "via_id": str(via_data["id"])})
 	data_changed.emit()
 	return str(via_data["id"])
 
 
-## Trailing integer of a via id like "via_12" -> 12; 0 if none. Feeds the
-## high-water restoration so post-load mints never collide with loaded ids.
-static func _via_id_suffix(id: String) -> int:
+## Trailing integer of a stable id like "via_12"/"trace_7" -> 12/7; 0 if none.
+## Feeds the high-water restoration so post-load mints never collide with ids
+## that arrived from outside. Shared by BOTH id families (add_via/_load_vias for
+## vias, add_trace for traces) — one parser, one contract.
+static func _stable_id_suffix(id: String) -> int:
 	var idx := id.rfind("_")
 	if idx < 0 or idx + 1 >= id.length():
 		return 0
@@ -464,12 +494,52 @@ static func _via_id_suffix(id: String) -> int:
 	return int(tail) if tail.is_valid_int() else 0
 
 
-## Remove a via by index
+## Remove a via by index.
+##
+## POSITIONAL, and therefore NOT safe to drive from a caller-supplied selection:
+## every removal shifts the index of every later via, so removing "vias 0 and 1"
+## in a loop actually removes vias 0 and 2. Kept for the existing positional
+## callers (canvas/undo paths and the model test suites, which pass an index they
+## computed one line earlier). Anything selecting vias by IDENTITY must use
+## remove_via_by_id instead.
 func remove_via(index: int) -> void:
 	if index >= 0 and index < vias.size():
 		vias.remove_at(index)
 		record_change("remove_via", {"index": index})
 		data_changed.emit()
+
+
+## Index of the via carrying `via_id`, or -1 when no via carries it.
+##
+## An EMPTY via_id never matches, and this guard is LOAD-BEARING, not defensive
+## decoration: vias restored from a board file predating stable via ids carry no
+## "id" key, so `str(via.get("id", ""))` is "" for them. A caller mapping
+## `.get("id", "")` over an exported via list therefore really can send "", and
+## the delete-traces selector passes it straight through to here. Without the
+## guard, "" would match the first id-less via and delete copper the caller
+## never named. Covered by the empty-id-selector test.
+func find_via_index(via_id: String) -> int:
+	if via_id.is_empty():
+		return -1
+	for i in range(vias.size()):
+		if str((vias[i] as Dictionary).get("id", "")) == via_id:
+			return i
+	return -1
+
+
+## Remove a via by its stable id (the "via_N" minted by add_via). Returns true
+## if a via was removed, false if no via carries that id — the caller can then
+## report the id as missing rather than guess. Index-shift-proof by construction:
+## the index is resolved fresh from the id at the moment of removal, so a
+## sequence of these calls never depends on positions captured earlier.
+func remove_via_by_id(via_id: String) -> bool:
+	var index := find_via_index(via_id)
+	if index < 0:
+		return false
+	vias.remove_at(index)
+	record_change("remove_via", {"index": index, "via_id": via_id})
+	data_changed.emit()
+	return true
 
 #endregion
 
@@ -782,6 +852,12 @@ func load_from_dict(data: Dictionary) -> void:
 	for id in trace_data:
 		var trace = PCBTraceScript.from_dict(trace_data[id])
 		traces[id] = trace
+		# High-water the trace-id counter, exactly as _load_vias already does for
+		# vias. This path writes traces[id] directly instead of going through
+		# add_trace, so without this _next_trace_id stays at 1 and the very FIRST
+		# trace drawn after loading a board whose first trace is "trace_1" mints
+		# that same id and OVERWRITES the loaded trace.
+		reserve_trace_id(str(id))
 
 	# Load vias
 	_load_vias(data.get("vias", []))
@@ -826,7 +902,7 @@ func _load_vias(vias_data: Array) -> void:
 			# collide with a loaded via's id (T2.3 stable-id contract).
 			var vid := str(via_entry.get("id", ""))
 			if not vid.is_empty():
-				_next_via_id = maxi(_next_via_id, _via_id_suffix(vid) + 1)
+				_next_via_id = maxi(_next_via_id, _stable_id_suffix(vid) + 1)
 			vias.append(via_entry)
 
 
@@ -1034,6 +1110,13 @@ func from_board_dict(data: Dictionary) -> void:
 			if trace.id.is_empty():
 				trace.id = "trace_%d" % _next_trace_id
 				_next_trace_id += 1
+			else:
+				# Same high-water contract _load_vias applies to via ids. This
+				# path writes traces[trace.id] directly rather than through
+				# add_trace, so a supplied id must reserve itself here or the
+				# FIRST subsequent auto-mint can reproduce it and overwrite this
+				# trace (traces is keyed by id).
+				reserve_trace_id(trace.id)
 			traces[trace.id] = trace
 
 	# Vias (canonical list → internal via dicts)

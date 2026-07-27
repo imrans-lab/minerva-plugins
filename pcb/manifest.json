@@ -317,12 +317,27 @@
     },
     {
       "name": "minerva_pcb_export_trace_geometry",
-      "description": "Export routed traces and vias from a PCB editor. Returns trace data in the same format accepted by import_trace_geometry, enabling round-trip workflows.",
+      "description": "Export routed traces and vias from a PCB editor. Returns trace data in the same format accepted by import_trace_geometry, enabling round-trip workflows. Every segment carries the trace_id of the trace it belongs to (the segments of one polyline trace all repeat the SAME trace_id — that is how you tell which segments are one piece of copper). Vias carry an id key when they have an identity, which is every via created through the editor or through import; the key is ABSENT on a via restored from a board file predating stable via ids, and such a via cannot be addressed by minerva_pcb_delete_traces. Use these ids with minerva_pcb_delete_traces to remove a subset, or feed them back through import_trace_geometry to keep identities stable across a round trip.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_delete_traces",
+      "description": "Delete a SUBSET of committed traces and vias by identity, without touching the rest of the board. Use this instead of exporting everything, filtering, and re-importing (import_trace_geometry clears the whole board first). Get the ids from minerva_pcb_export_trace_geometry, which stamps a trace_id on every segment and an id on every via. AT LEAST ONE of trace_ids, via_ids or net_name is REQUIRED — a call with none of them is an error, because deleting nothing and deleting everything must never be the same request. An EMPTY net_name (or empty id arrays) does not count as supplying a selector, so a call carrying only net_name:\"\" is that same error rather than a no-op. Selection is by identity ONLY — trace_ids, via_ids and net_name are combined as a union, and a trace named by both trace_ids and net_name is deleted and counted exactly once — and there is deliberately no region/bounding-box selector: to clear traces in an area, export, filter on the real coordinates yourself, then name the ids you chose. net_name selects traces only, never vias; name a via by id to remove it. Partial-trace clipping (splitting a trace at a boundary) is not supported — a trace is deleted whole or not at all. Naming an id that does not exist is NOT an error: the ids that do exist are deleted and the stale ones come back in missing_trace_ids/missing_via_ids. An EMPTY-string id is reported there too rather than skipped — that is what you get from an item predating stable ids, whose id key the export omits entirely. Those two keys are present only when you supplied the corresponding selector, so an empty array means 'checked, none stale' while an absent key means 'you named none'. Undoable in one step via the board's normal undo.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "trace_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact trace ids to delete (as returned in each segment's trace_id by export_trace_geometry)"},
+          "via_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact via ids to delete (as returned in each via's id by export_trace_geometry)"},
+          "net_name": {"type": "string", "description": "Delete every trace on this net (exact match). Does NOT delete vias on the net — name those by id."}
         },
         "required": ["editor_name"]
       }

@@ -41,13 +41,116 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_import_csv` | model `from_csv` |
 | `minerva_pcb_export_csv` | model `to_csv` |
 | `minerva_pcb_import_footprint_geometry` | mutates existing components' pad geometry + optional position correction |
-| `minerva_pcb_import_trace_geometry` | segment→polyline merge; `data.new_trace()` factory |
-| `minerva_pcb_export_trace_geometry` | round-trips with the import shape |
+| `minerva_pcb_import_trace_geometry` | segment→polyline merge; `data.new_trace()` factory; preserves supplied ids |
+| `minerva_pcb_export_trace_geometry` | round-trips with the import shape; stamps `trace_id` / via `id` |
+| `minerva_pcb_delete_traces` | removes named traces/vias without clearing the board |
 | `minerva_pcb_get_image` | snapshot-style via `host.render_content_to_image`; null-safe headless |
 | `minerva_pcb_apply_route_hints` | route the open route hints → cyan proposals (default) or committed traces (`commit=true`); see the route-correction loop below |
 
 Mutations go through the model API, so the change journal, undo history and the
 `data_changed` dirty relay come for free.
+
+## Deleting a subset of traces (`minerva_pcb_delete_traces`, docket `019f809798d1`)
+
+Before this existed, the only removal path was `minerva_pcb_import_trace_geometry`,
+which **clears the whole board** and re-imports. Removing one trace therefore meant
+exporting everything, filtering outside the tool, and pushing the full replacement
+set back through context — measured at ~7 tool calls and two large JSON payloads
+for a single partial edit.
+
+Selection is **by identity only**. `trace_ids`, `via_ids` and `net_name` are
+combined as a union; at least one is required.
+
+```
+minerva_pcb_delete_traces
+  editor_name  (required)
+  trace_ids    [String]   exact trace ids
+  via_ids      [String]   exact via ids
+  net_name     String     every trace on this net (exact match)
+```
+
+`net_name` selects **traces only, never vias**. A via on that net is copper you
+did not name; name it in `via_ids` if you want it gone. Deciding on your behalf
+that it is orphaned is exactly the silent judgement the fail-closed ruling forbids.
+
+### Identity in the export payload
+
+`minerva_pcb_export_trace_geometry` stamps identity on what it emits: every
+segment carries a `trace_id`, and every via carries an `id`.
+
+**The segments of one trace all repeat the same `trace_id`.** A trace is a
+polyline, so a 3-waypoint trace exports as 2 segments naming one id. That is the
+relationship, not a duplicate to collapse — it is how you tell which segments are
+one continuous piece of copper, and their array order is their order along the
+polyline.
+
+A via's `id` is present for any via created through the editor or through import.
+It is **absent** on a via restored from a board file predating stable via ids, and
+such a via cannot be addressed by `delete_traces`. An absent key means "no
+identity" — a different claim from an empty string.
+
+### Id stability across a round trip
+
+Import honours a supplied `trace_id`/`id` instead of renumbering positionally, so
+**export → filter → import round-trips identity**. Segments group by `trace_id`
+first, then net and layer, so two distinct traces sharing a net and layer are no
+longer merged. Id-less segments still merge by net+layer and receive fresh ids
+guaranteed not to collide with any you supplied, **regardless of the order you
+list them in** — the importer reserves every supplied id before minting anything.
+The reply returns the `trace_ids`/`via_ids` that actually landed, so preservation
+is verifiable without a second export.
+
+An id can be claimed **once per import**, and that holds for traces and vias
+alike. If one supplied id maps to several disconnected polylines — or the same
+via id arrives twice — the first claimant keeps it and the rest are minted
+fresh; no copper is dropped and none is overwritten. Traces and vias are
+separate id spaces (`trace_N` / `via_N`) with separate counters, so a trace and
+a via spelled identically never block each other.
+
+### Partial success
+
+Naming an id that no longer exists is not an error — it means your view of the
+board is slightly stale, not that the request was malformed. The ids that exist
+are deleted and the stale ones come back named:
+
+```json
+{ "success": true,
+  "deleted_trace_ids": ["trace_2"], "deleted_trace_count": 1,
+  "deleted_via_ids": [], "deleted_via_count": 0,
+  "missing_trace_ids": ["trace_9"],
+  "remaining_trace_count": 4, "remaining_via_count": 2 }
+```
+
+`missing_trace_ids` / `missing_via_ids` appear **only when you supplied the
+matching selector**. An empty array means "we checked your ids, none were stale";
+an absent key means "you named none, so there was nothing to check".
+`net_match_count` follows the same rule — a `0` there is a counted zero (the net
+was queried and has no traces), never a stand-in for "not computed". Note it
+cannot distinguish a net that exists and is unrouted from a net name you
+mistyped; both count zero.
+
+A request with no selector at all is the one hard error: deleting nothing and
+deleting everything must never be the same request. An **empty** `net_name`, or
+empty id arrays, does not count as supplying a selector — a call carrying only
+`net_name: ""` is that same error, not a no-op.
+
+### Undo
+
+A delete that changed something is one undo step, exactly like an import — one
+undo restores the deleted traces **and** vias. A delete that removed nothing takes
+no snapshot, so it adds no step you have to click past.
+
+### Known gap: no region selector, no clipping
+
+There is deliberately **no spatial or bounding-box selector**. A region predicate
+must silently decide what to do with a trace that CROSSES the boundary, and this
+project's standing ruling is that routing, DRC and CAM fail closed rather than
+approximate copper. To clear an area: export, filter on the real coordinates now
+that every segment names its trace, then pass the ids you chose.
+
+**Partial-trace clipping — splitting a trace at a boundary and keeping one side —
+is not supported.** A trace is deleted whole or not at all. To shorten one today,
+delete it and import the geometry you want in its place.
 
 ## Route-correction collaboration loop (`minerva_pcb_apply_route_hints`)
 

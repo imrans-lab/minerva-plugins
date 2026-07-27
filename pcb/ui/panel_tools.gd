@@ -105,6 +105,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _import_trace_geometry(host, args)
 		"minerva_pcb_export_trace_geometry":
 			return _export_trace_geometry(host, args)
+		"minerva_pcb_delete_traces":
+			return _delete_traces(host, args)
 		"minerva_pcb_get_image":
 			return await _get_image(host, args)
 		"minerva_pcb_set_view":
@@ -607,9 +609,16 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 	for seg in traces_input:
 		var net_name: String = seg.get("net_name", "")
 		var layer: String = seg.get("layer", "F.Cu")
-		var key := "%s_%s" % [net_name, layer]
+		# A caller-supplied trace_id (as emitted by _export_trace_geometry) is
+		# part of the GROUPING key, not just carried along: two distinct traces
+		# on the same net+layer must not be merged into one polyline group just
+		# because they share a net. Segments with no trace_id fall into the
+		# shared ""-id group and keep the historical net+layer merge behaviour.
+		var supplied_trace_id: String = str(seg.get("trace_id", ""))
+		var key := "%s|%s|%s" % [supplied_trace_id, net_name, layer]
 		if not trace_groups.has(key):
 			trace_groups[key] = {
+				"trace_id": supplied_trace_id,
 				"net_name": net_name,
 				"layer": PcbLayerStack.kicad_to_canon(layer),
 				"width": seg.get("width", 0.3),
@@ -622,7 +631,25 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 			"end": Vector2(end_pt.get("x", 0), end_pt.get("y", 0)),
 		})
 
+	# Reserve every supplied trace id BEFORE creating anything, so the result
+	# does not depend on the caller's segment ordering: an unnamed group listed
+	# ahead of a supplied "trace_1" would otherwise auto-mint "trace_1" first and
+	# be silently overwritten (PCBData.traces is keyed by id). See
+	# PCBData.reserve_trace_id.
+	for key in trace_groups:
+		data.reserve_trace_id(str(trace_groups[key].trace_id))
+
 	var trace_count := 0
+	var imported_trace_ids: Array = []
+	# One supplied id can be worn by exactly ONE trace per import, so the claim
+	# has to be tracked ACROSS groups, not per group. The group key is
+	# trace_id|net|layer, so a single supplied id appearing on two layers (or two
+	# nets) produces TWO groups; when the claim lived inside the group loop both
+	# assigned it and the second silently OVERWROTE the first in PCBData.traces
+	# (id-keyed Dictionary) — copper destroyed while the reply reported both as
+	# landed. Keyed by id, so a group whose id was already taken falls through to
+	# the auto-mint exactly like an unnamed one.
+	var claimed_trace_ids: Dictionary = {}
 	for key in trace_groups:
 		var group = trace_groups[key]
 		var polylines := _build_polylines_from_segments(group.segments)
@@ -630,28 +657,246 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 			if polyline.size() < 2:
 				continue
 			var trace = data.new_trace()
-			trace.id = "trace_%d" % trace_count
+			# Honour the caller's id so export -> filter -> import round-trips
+			# identity instead of renumbering positionally (the old
+			# "trace_%d" % trace_count, which made every id a function of
+			# iteration order and silently renamed everything on every import).
+			# An empty id is left empty on purpose: PCBData.add_trace then mints
+			# from its own monotonic counter, which high-waters past supplied
+			# ids so an auto-mint can never collide with one.
+			#
+			# One supplied id can only be worn by ONE trace (PCBData.traces is
+			# keyed by id — reusing it would overwrite). The FIRST claimant keeps
+			# it and every later one is minted fresh, so no copper is lost to a
+			# silent overwrite. This holds both WITHIN a group (one supplied id
+			# resolving to several disconnected polylines) and ACROSS groups (the
+			# same id sent on two layers or two nets) — see claimed_trace_ids.
+			var wanted_id: String = str(group.trace_id)
+			if not wanted_id.is_empty() and not claimed_trace_ids.has(wanted_id):
+				claimed_trace_ids[wanted_id] = true
+				trace.id = wanted_id
 			trace.net_name = group.net_name
 			trace.layer = group.layer
 			trace.width = group.width
 			for point in polyline:
 				trace.waypoints.append(point)
 			data.add_trace(trace)
+			imported_trace_ids.append(str(trace.id))
 			trace_count += 1
 
 	var vias_input: Array = trace_data.get("vias", [])
+	# Same up-front reservation for vias (see PCBData.reserve_via_id): an
+	# id-less via ahead of a supplied "via_1" would auto-mint that same id and
+	# leave two vias sharing one handle.
+	for via_data in vias_input:
+		data.reserve_via_id(str(via_data.get("id", "")))
+
+	var imported_via_ids: Array = []
+	# Via twin of claimed_trace_ids: one supplied via id is worn by exactly ONE
+	# via per import, first claimant keeps it, later ones mint fresh.
+	#
+	# SEPARATE from the trace claim set on purpose. Traces and vias are distinct
+	# id spaces ("trace_N" vs "via_N") backed by distinct counters
+	# (_next_trace_id / _next_via_id), so a trace id must never be able to block
+	# a via id or vice versa. Two sets, one rule.
+	#
+	# Unlike the trace case nothing is overwritten — vias are a list, so a
+	# duplicate loses no copper. What it breaks is the identity contract:
+	# PCBData.remove_via_by_id resolves the FIRST match only, so a second via
+	# wearing the same id is permanently undeletable by id, and delete_traces
+	# would report that id as deleted while a via wearing it survives. This is
+	# precisely the hazard PCBData.reserve_via_id's doc describes; the claim is
+	# what actually prevents it.
+	var claimed_via_ids: Dictionary = {}
 	for via_data in vias_input:
 		var pos = via_data.get("position", {})
-		data.add_via({
+		var via_entry := {
 			"position": Vector2(pos.get("x", 0), pos.get("y", 0)),
 			"size": via_data.get("size", 0.8),
 			"drill": via_data.get("drill", 0.4),
 			"net_name": via_data.get("net_name", ""),
 			"layers": via_data.get("layers", PcbLayerStack.default_via_kicad_layers()),
-		})
+		}
+		# Same round-trip rule as traces. The "id" key is set only when the
+		# caller supplied one AND it is still unclaimed — add_via reads its
+		# ABSENCE as "mint me a fresh id" and its presence as "keep this one, and
+		# high-water past it".
+		var supplied_via_id: String = str(via_data.get("id", ""))
+		if not supplied_via_id.is_empty() and not claimed_via_ids.has(supplied_via_id):
+			claimed_via_ids[supplied_via_id] = true
+			via_entry["id"] = supplied_via_id
+		imported_via_ids.append(data.add_via(via_entry))
 
 	data.save_to_history("Import traces")
-	return _ok({"trace_count": trace_count, "via_count": vias_input.size()})
+	# trace_ids/via_ids report the identities that actually landed, so a caller
+	# can verify preservation without a second export round trip.
+	return _ok({
+		"trace_count": trace_count,
+		"via_count": vias_input.size(),
+		"trace_ids": imported_trace_ids,
+		"via_ids": imported_via_ids,
+	})
+
+
+## Targeted removal of a SUBSET of committed copper (docket 019f809798d1).
+##
+## Before this existed the only deletion path was import_trace_geometry, which
+## clears the whole board and re-imports — so removing one trace meant exporting
+## every trace, filtering outside the tool, and pushing the entire replacement
+## set back through context.
+##
+## Selection is by IDENTITY only — `trace_ids`, `via_ids`, `net_name` — and the
+## three combine as a UNION. There is deliberately NO spatial/region selector:
+## a region predicate has to make a silent judgement about a trace that CROSSES
+## the boundary, and this project's standing ruling is that routing/DRC/CAM fail
+## closed rather than approximate copper. Now that export_trace_geometry stamps
+## a trace_id on every segment and an id on every via, a caller does its own
+## spatial filtering against real coordinates and then names exactly what it
+## chose. Partial-trace CLIPPING (splitting a trace at a boundary) is likewise
+## not offered — see the remaining-gap note in the plugin docs.
+##
+## `net_name` selects TRACES only, never vias. A via sitting on that net is
+## copper the caller did not name, and deciding it is now orphaned is exactly
+## the kind of judgement this surface refuses to make; name the via by id.
+##
+## PARTIAL SUCCESS IS A SUCCESS, and it is reported. A caller naming five ids of
+## which two are stale gets the three deletions applied and the two stale ids
+## back in `missing_trace_ids`/`missing_via_ids`. Failing the whole call would
+## punish a caller for holding a slightly old view of the board and would make a
+## retry of a partly-applied delete impossible; silently succeeding would hide
+## that the board is not what the caller thought. Only a MALFORMED request (no
+## selector at all) is an error.
+##
+## Absent vs empty in the reply: `missing_trace_ids` is present only when
+## `trace_ids` was supplied, so [] honestly means "we checked your ids, none
+## were stale" while ABSENT means "you named no trace ids, so there was nothing
+## to check". Same for `missing_via_ids`/`via_ids` and for
+## `net_name`/`net_match_count`.
+##
+## Undo: a delete that changed anything ends with save_to_history, exactly as
+## _import_trace_geometry does, so one undo restores the removed traces and
+## vias (PCBData.save_to_history snapshots both — see its F1 note). A delete
+## that removed nothing takes no snapshot: an undo step that undoes nothing is
+## noise in the history.
+static func _delete_traces(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+
+	var has_trace_ids: bool = args.has("trace_ids")
+	var has_via_ids: bool = args.has("via_ids")
+	var net_name: String = str(args.get("net_name", ""))
+	var has_net: bool = not net_name.is_empty()
+	if not (has_trace_ids or has_via_ids or has_net):
+		return _err("at least one of trace_ids, via_ids or net_name is required")
+
+	# ── Phase 1: resolve the whole selection against the board as the caller
+	# sees it, BEFORE mutating anything. Resolving first is what makes
+	# net_match_count unambiguous (it counts the net's traces on the untouched
+	# board, not on a board already thinned by the trace_ids pass) and keeps the
+	# union free of double-counting.
+	var trace_ids_to_delete: Array[String] = []
+	var missing_trace_ids: Array[String] = []
+	var selected: Dictionary = {}
+
+	if has_trace_ids:
+		for raw_id in (args.get("trace_ids", []) as Array):
+			var tid := str(raw_id)
+			if selected.has(tid):
+				continue
+			selected[tid] = true
+			# An EMPTY id is reported as missing, never skipped. Skipping it made
+			# {"trace_ids": [""]} return missing_trace_ids: [], i.e. "we checked
+			# your ids and none were stale" about a request that checked nothing —
+			# the absent-vs-empty rule broken in the direction that matters most,
+			# a confident all-clear for a call that did nothing. It is reachable:
+			# a via/trace from a board file predating stable ids has no id key, so
+			# a caller mapping `.get("id", "")` over an exported list sends "".
+			# Reported rather than rejected because an unusable handle is a stale
+			# selector, not a malformed request — the same reason a non-existent
+			# id does not fail the call. Rejecting would also punish a caller that
+			# named nine good ids and one id-less item.
+			if tid.is_empty() or data.get_trace(tid) == null:
+				missing_trace_ids.append(tid)
+			else:
+				trace_ids_to_delete.append(tid)
+
+	var net_match_count := 0
+	if has_net:
+		for trace in data.get_traces_for_net(net_name):
+			net_match_count += 1
+			var tid := str(trace.id)
+			if selected.has(tid):
+				continue
+			selected[tid] = true
+			trace_ids_to_delete.append(tid)
+
+	var via_ids_to_delete: Array[String] = []
+	var missing_via_ids: Array[String] = []
+	var via_selected: Dictionary = {}
+	if has_via_ids:
+		for raw_id in (args.get("via_ids", []) as Array):
+			var vid := str(raw_id)
+			if via_selected.has(vid):
+				continue
+			via_selected[vid] = true
+			# Empty id reported, not skipped — see the trace pass above for the
+			# reasoning.
+			#
+			# Note there is deliberately NO `vid.is_empty() or` short-circuit
+			# here: PCBData.find_via_index is the single authority on "does any
+			# via carry this id", the empty case included. Short-circuiting would
+			# duplicate that knowledge in two places AND leave find_via_index's
+			# own empty-id guard unexecuted — which is exactly what happened, and
+			# a guard nothing reaches is a guard nothing tests. Routing "" through
+			# it is what makes it load-bearing: without that guard "" matches the
+			# first via carrying NO id key (str(v.get("id","")) == "") and deletes
+			# a legacy via the caller never named.
+			#
+			# The trace pass above keeps its explicit is_empty() check because
+			# there is no equivalent helper to hold the rule — get_trace is a bare
+			# Dictionary lookup — so the selector has to state it inline.
+			if data.find_via_index(vid) < 0:
+				missing_via_ids.append(vid)
+			else:
+				via_ids_to_delete.append(vid)
+
+	# ── Phase 2: apply. Traces go by id through PCBData.remove_trace; vias go by
+	# id through remove_via_by_id, NEVER by index — remove_via is positional and
+	# every removal shifts the vias after it, so a loop over indices captured in
+	# phase 1 would delete the wrong vias.
+	var deleted_trace_ids: Array[String] = []
+	for tid in trace_ids_to_delete:
+		data.remove_trace(tid)
+		deleted_trace_ids.append(tid)
+
+	var deleted_via_ids: Array[String] = []
+	for vid in via_ids_to_delete:
+		if data.remove_via_by_id(vid):
+			deleted_via_ids.append(vid)
+		else:
+			# Only reachable if the board changed under us between phases.
+			missing_via_ids.append(vid)
+
+	if not deleted_trace_ids.is_empty() or not deleted_via_ids.is_empty():
+		data.save_to_history("Delete traces")
+
+	var reply := {
+		"deleted_trace_ids": deleted_trace_ids,
+		"deleted_trace_count": deleted_trace_ids.size(),
+		"deleted_via_ids": deleted_via_ids,
+		"deleted_via_count": deleted_via_ids.size(),
+		"remaining_trace_count": data.get_trace_ids().size(),
+		"remaining_via_count": data.vias.size(),
+	}
+	if has_trace_ids:
+		reply["missing_trace_ids"] = missing_trace_ids
+	if has_via_ids:
+		reply["missing_via_ids"] = missing_via_ids
+	if has_net:
+		reply["net_name"] = net_name
+		reply["net_match_count"] = net_match_count
+	return _ok(reply)
 
 
 static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
@@ -669,6 +914,14 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 			var start_pt: Vector2 = trace.waypoints[i]
 			var end_pt: Vector2 = trace.waypoints[i + 1]
 			traces_output.append({
+				# EVERY segment carries the id of the trace it came from. A trace
+				# is a polyline, so its N-1 segments all repeat the SAME
+				# trace_id — that is the intended relationship (it is what tells
+				# a caller which segments are one piece of copper), not a
+				# duplicate to be de-duplicated. Without it nothing in this
+				# payload NAMES a trace and coordinates are the only handle,
+				# which is why targeted deletion used to be impossible.
+				"trace_id": trace_id,
 				"start": {"x": snapped(start_pt.x, 0.0001), "y": snapped(start_pt.y, 0.0001)},
 				"end": {"x": snapped(end_pt.x, 0.0001), "y": snapped(end_pt.y, 0.0001)},
 				"width": trace.width,
@@ -679,13 +932,24 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 	var vias_output: Array = []
 	for via in data.vias:
 		var pos: Vector2 = via.get("position", Vector2.ZERO)
-		vias_output.append({
+		var via_out := {
 			"position": {"x": snapped(pos.x, 0.0001), "y": snapped(pos.y, 0.0001)},
 			"size": via.get("size", 0.8),
 			"drill": via.get("drill", 0.4),
 			"net_name": via.get("net_name", ""),
 			"layers": via.get("layers", PcbLayerStack.default_via_kicad_layers()),
-		})
+		}
+		# PCBData.add_via mints a stable id for every via it accepts, so in
+		# practice this key is always present. It is emitted CONDITIONALLY
+		# because a via restored from a legacy board file predating stable via
+		# ids genuinely has none — and an absent key ("this via has no identity")
+		# is a different claim from an empty string ("its identity is blank").
+		# A caller can then tell that the via is not addressable by
+		# minerva_pcb_delete_traces rather than sending "" and getting nothing.
+		var via_id: String = str(via.get("id", ""))
+		if not via_id.is_empty():
+			via_out["id"] = via_id
+		vias_output.append(via_out)
 
 	return _ok({
 		"trace_count": traces_output.size(),
