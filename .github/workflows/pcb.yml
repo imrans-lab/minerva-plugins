@@ -286,6 +286,14 @@ jobs:
       # reasonable choice. If you bump this SHA, take it from
       # `origin/development` and re-check that helper still exists.
       #
+      # Round 019f70a26607 relocated the 17 test_pcb_*.gd suites from
+      # Minerva src/test/ into pcb/tests/gd/ (this directory). Seven of them
+      # (plus the non-pcb test_cad_panel_tool_adoption.gd, which stays in
+      # Minerva) also preload src/test/helpers/panel_tool_registry_driver.gd
+      # — a second generic driver, distinct from plugin_panel_driver.gd.
+      # Both helpers are confirmed present at the pinned SHA below; re-check
+      # both if you bump it.
+      #
       # Head of turnrocklabs/Minerva `development` on 2026-07-25.
       MINERVA_SHA: "8cc7ace5d916f79ebfe987b22cfd36a69979572d"
     steps:
@@ -317,9 +325,13 @@ jobs:
         run: |
           mv _minerva_host "$GITHUB_WORKSPACE/../Minerva"
           # Fail loudly here rather than letting Godot report an opaque
-          # "Cannot open file res://..." twenty lines later.
+          # "Cannot open file res://..." twenty lines later. Both generic
+          # test driver helpers are asserted: 9 of the relocated suites
+          # preload plugin_panel_driver.gd and 7 preload
+          # panel_tool_registry_driver.gd (round 019f70a26607).
           test -f "$GITHUB_WORKSPACE/../Minerva/src/project.godot"
           test -f "$GITHUB_WORKSPACE/../Minerva/src/test/helpers/plugin_panel_driver.gd"
+          test -f "$GITHUB_WORKSPACE/../Minerva/src/test/helpers/panel_tool_registry_driver.gd"
 
       - name: Cache Godot download
         id: godot-cache
