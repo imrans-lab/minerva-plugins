@@ -57,6 +57,18 @@ r1_pin2 = (R1[0] + 0.95, R1[1])
 c1_pin1 = (C1[0] - 0.95, C1[1])
 c1_pin2 = (C1[0] + 0.95, C1[1])
 
+
+# --- BOARD frame -> GERBER frame ---------------------------------------------
+# Every constant above is in the BOARD frame (KiCad's file frame, Y-DOWN, the
+# frame board.yaml is authored in). RS-274X and Excellon are Y-UP. G() is the
+# frame boundary: negate Y, per vertex, at each write-site. Applied per vertex
+# rather than by pre-negating the constants so every emitted path keeps its
+# original start corner and winding and is the exact MIRROR of what this
+# generator always drew.
+def G(pt):
+    """BOARD frame (Y-down) -> GERBER frame (Y-up)."""
+    return (pt[0], -pt[1])
+
 # --- Pad masters -------------------------------------------------------------
 
 # Mask openings grow the copper land by MASK_CLEARANCE per side. round() keeps the
@@ -79,16 +91,16 @@ mount_mask_pad = Circle(MOUNT_HOLE_DIA, "")
 # F.Cu
 # =============================================================================
 f_cu = DataLayer("Copper,L1,Top,Signal", negative=False)
-f_cu.add_pad(smd_pad, r1_pin1)
-f_cu.add_pad(smd_pad, r1_pin2)
-f_cu.add_pad(smd_pad, c1_pin1)
-f_cu.add_pad(smd_pad, c1_pin2)
-f_cu.add_pad(th_pad_cu, U1)          # TH pad has copper on every copper layer
-f_cu.add_pad(via_pad_cu, VIA)
+f_cu.add_pad(smd_pad, G(r1_pin1))
+f_cu.add_pad(smd_pad, G(r1_pin2))
+f_cu.add_pad(smd_pad, G(c1_pin1))
+f_cu.add_pad(smd_pad, G(c1_pin2))
+f_cu.add_pad(th_pad_cu, G(U1))          # TH pad has copper on every copper layer
+f_cu.add_pad(via_pad_cu, G(VIA))
 # VCC: R1.2 -> via
-f_cu.add_trace_line(r1_pin2, VIA, TRACE_W, "Conductor")
+f_cu.add_trace_line(G(r1_pin2), G(VIA), TRACE_W, "Conductor")
 # GND: R1.1 -> C1.1
-f_cu.add_trace_line(r1_pin1, c1_pin1, TRACE_W, "Conductor")
+f_cu.add_trace_line(G(r1_pin1), G(c1_pin1), TRACE_W, "Conductor")
 
 with open(OUT / "board-F_Cu.gbr", "w") as fh:
     f_cu.dump_gerber(fh)
@@ -97,10 +109,10 @@ with open(OUT / "board-F_Cu.gbr", "w") as fh:
 # B.Cu
 # =============================================================================
 b_cu = DataLayer("Copper,L2,Bot,Signal", negative=False)
-b_cu.add_pad(th_pad_cu, U1)
-b_cu.add_pad(via_pad_cu, VIA)
+b_cu.add_pad(th_pad_cu, G(U1))
+b_cu.add_pad(via_pad_cu, G(VIA))
 # VCC: via -> U1 TH pad, single trace on B.Cu
-b_cu.add_trace_line(VIA, U1, TRACE_W, "Conductor")
+b_cu.add_trace_line(G(VIA), G(U1), TRACE_W, "Conductor")
 
 with open(OUT / "board-B_Cu.gbr", "w") as fh:
     b_cu.dump_gerber(fh)
@@ -109,12 +121,12 @@ with open(OUT / "board-B_Cu.gbr", "w") as fh:
 # F.Mask (openings; vias left tented -> not present in mask layer)
 # =============================================================================
 f_mask = DataLayer("Soldermask,Top", negative=False)
-f_mask.add_pad(smd_mask_pad, r1_pin1)
-f_mask.add_pad(smd_mask_pad, r1_pin2)
-f_mask.add_pad(smd_mask_pad, c1_pin1)
-f_mask.add_pad(smd_mask_pad, c1_pin2)
-f_mask.add_pad(th_mask_pad, U1)
-f_mask.add_pad(mount_mask_pad, MOUNTING_HOLE)   # NPTH: drill-size opening
+f_mask.add_pad(smd_mask_pad, G(r1_pin1))
+f_mask.add_pad(smd_mask_pad, G(r1_pin2))
+f_mask.add_pad(smd_mask_pad, G(c1_pin1))
+f_mask.add_pad(smd_mask_pad, G(c1_pin2))
+f_mask.add_pad(th_mask_pad, G(U1))
+f_mask.add_pad(mount_mask_pad, G(MOUNTING_HOLE))   # NPTH: drill-size opening
 
 with open(OUT / "board-F_Mask.gbr", "w") as fh:
     f_mask.dump_gerber(fh)
@@ -123,8 +135,8 @@ with open(OUT / "board-F_Mask.gbr", "w") as fh:
 # B.Mask (U1's TH pad copper + the NPTH mounting-hole drill-size opening)
 # =============================================================================
 b_mask = DataLayer("Soldermask,Bot", negative=False)
-b_mask.add_pad(th_mask_pad, U1)
-b_mask.add_pad(mount_mask_pad, MOUNTING_HOLE)   # NPTH: drill-size opening
+b_mask.add_pad(th_mask_pad, G(U1))
+b_mask.add_pad(mount_mask_pad, G(MOUNTING_HOLE))   # NPTH: drill-size opening
 
 with open(OUT / "board-B_Mask.gbr", "w") as fh:
     b_mask.dump_gerber(fh)
@@ -138,11 +150,11 @@ f_silks = DataLayer("Legend,Top", negative=False)
 def _courtyard(center, half_w, half_h):
     p = GPath()
     cx, cy = center
-    p.moveto((cx - half_w, cy - half_h))
-    p.lineto((cx + half_w, cy - half_h))
-    p.lineto((cx + half_w, cy + half_h))
-    p.lineto((cx - half_w, cy + half_h))
-    p.lineto((cx - half_w, cy - half_h))
+    p.moveto(G((cx - half_w, cy - half_h)))
+    p.lineto(G((cx + half_w, cy - half_h)))
+    p.lineto(G((cx + half_w, cy + half_h)))
+    p.lineto(G((cx - half_w, cy + half_h)))
+    p.lineto(G((cx - half_w, cy - half_h)))
     return p
 
 
@@ -150,8 +162,8 @@ f_silks.add_traces_path(_courtyard(R1, 1.6, 1.0), 0.15, "")
 f_silks.add_traces_path(_courtyard(C1, 1.6, 1.0), 0.15, "")
 # Pin-1 tick mark near U1 (short line offset from the pad, not overlapping copper)
 tick = GPath()
-tick.moveto((U1[0] - TH_ANNULUS / 2 - 0.6, U1[1]))
-tick.lineto((U1[0] - TH_ANNULUS / 2 - 0.2, U1[1]))
+tick.moveto(G((U1[0] - TH_ANNULUS / 2 - 0.6, U1[1])))
+tick.lineto(G((U1[0] - TH_ANNULUS / 2 - 0.2, U1[1])))
 f_silks.add_traces_path(tick, 0.15, "")
 
 with open(OUT / "board-F_SilkS.gbr", "w") as fh:
@@ -162,11 +174,11 @@ with open(OUT / "board-F_SilkS.gbr", "w") as fh:
 # =============================================================================
 edge_cuts = DataLayer("Profile,NP")
 profile = GPath()
-profile.moveto((0.0, 0.0))
-profile.lineto((BOARD_W, 0.0))
-profile.lineto((BOARD_W, BOARD_H))
-profile.lineto((0.0, BOARD_H))
-profile.lineto((0.0, 0.0))
+profile.moveto(G((0.0, 0.0)))
+profile.lineto(G((BOARD_W, 0.0)))
+profile.lineto(G((BOARD_W, BOARD_H)))
+profile.lineto(G((0.0, BOARD_H)))
+profile.lineto(G((0.0, 0.0)))
 edge_cuts.add_traces_path(profile, 0.1, "Profile")
 
 with open(OUT / "board-Edge_Cuts.gbr", "w") as fh:
@@ -199,7 +211,8 @@ def write_excellon(path: Path, tools: dict, holes: list, comment: str):
         if tool_no != current_tool:
             lines.append(f"T{tool_no}")
             current_tool = tool_no
-        lines.append(f"X{x:.3f}Y{y:.3f}")
+        gx, gy = G((x, y))
+        lines.append(f"X{gx:.3f}Y{gy:.3f}")
     lines.append("M30")
     path.write_text("\n".join(lines) + "\n")
 

@@ -1027,10 +1027,32 @@ def _gerbonara_shape(aperture) -> tuple[str, float, float, float]:
         f"ir_parity: gerbonara aperture {name} has no canonical shape mapping")
 
 
+def _board_y(y: Any) -> float:
+    """One parsed GERBER (Y-UP) ordinate -> the BOARD (Y-DOWN) frame every other
+    surface in this harness tabulates in.
+
+    This is the read-side counterpart of ``gerber._Geometry.to_gerber_frame``, and
+    it is a CORRECTION, not a convention (bug 019fa8011555). Before that fix the
+    emitter wrote board-frame Y straight into the Gerber, so this harness compared
+    the emitter's Y against the IR's Y and agreed — with BOTH surfaces read in the
+    same wrong frame. That is precisely why a global vertical mirror was invisible
+    to parity: a comparison between two parties who share an assumption cannot test
+    the assumption. Converting HERE keeps the reference frame of the harness the
+    IR's, which is the only frame the other three surfaces can speak.
+
+    Kept as a named function, applied at every gerber ordinate read below, so a
+    row type added later cannot quietly tabulate a raw gerber Y.
+    """
+    return -float(y)
+
+
 def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
     """Emit the fabrication set through the production IR path, then parse the
     BYTES back with gerbonara — the independent reader the repo already pins for
     fabrication verification (pyproject ``dev`` extra, gerbonara==1.6.3).
+
+    Y is converted back to the BOARD frame on read (see :func:`_board_y`) — the
+    emitted file is Y-UP, every other surface here is Y-DOWN.
 
     Reuses the parse idioms of tests/oracle/geometry_diff.py (``from_string``
     under a warnings guard) but NOT its canonical-key model: that module collapses
@@ -1068,7 +1090,7 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                     if kind == "Flash":
                         shape, w, h, rot = _gerbonara_shape(obj.aperture)
                         rows.append(_flash_row(
-                            token, float(obj.x), float(obj.y), shape=shape, w=w,
+                            token, float(obj.x), _board_y(obj.y), shape=shape, w=w,
                             h=h, rot_deg=rot,
                             # A Gerber flash is anonymous: no component ref, no
                             # pad number, no net, and (gerbonara drops
@@ -1076,8 +1098,8 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                             entity=NA, ref=NA, pad_number=NA, net_name=NA))
                     elif kind == "Line":
                         rows.append(_trace_row(
-                            token, (float(obj.x1), float(obj.y1)),
-                            (float(obj.x2), float(obj.y2)),
+                            token, (float(obj.x1), _board_y(obj.y1)),
+                            (float(obj.x2), _board_y(obj.y2)),
                             float(obj.aperture.diameter), NA))
             elif suffix == "Edge_Cuts":
                 rows.append(_outline_row(*_gerber_outline(parsed)))
@@ -1093,7 +1115,7 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                     raise ParitySurfaceUnavailable(
                         f"ir_parity: {filename} carries a routed slot the parity "
                         f"harness's round-only drill family cannot tabulate")
-                rows.append(_drill_row(float(obj.x), float(obj.y),
+                rows.append(_drill_row(float(obj.x), _board_y(obj.y),
                                        float(obj.tool.diameter), plated))
 
     # Stack index is NA: a Gerber output set is a bag of named files with no
@@ -1105,7 +1127,11 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
 
 
 def _gerber_outline(parsed) -> tuple[float, float, float, float]:
-    """Board frame as the axis-aligned bounds of the Edge.Cuts graphics."""
+    """Board frame as the axis-aligned bounds of the Edge.Cuts graphics.
+
+    Ordinates are converted to the BOARD frame on read (:func:`_board_y`), so the
+    ORIGIN reported here is the board-frame minimum — which is the negated gerber
+    MAXIMUM, not the negated minimum. Width/height are frame-invariant."""
     xs: list[float] = []
     ys: list[float] = []
     for obj in parsed.objects:
@@ -1113,7 +1139,7 @@ def _gerber_outline(parsed) -> tuple[float, float, float, float]:
             x, y = getattr(obj, attr_x, None), getattr(obj, attr_y, None)
             if x is not None and y is not None:
                 xs.append(float(x))
-                ys.append(float(y))
+                ys.append(_board_y(y))
     if not xs:
         raise ParitySurfaceUnavailable("ir_parity: Edge_Cuts carries no geometry")
     return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)

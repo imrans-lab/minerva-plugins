@@ -1,6 +1,6 @@
 M48
 ;PLATED THROUGH HOLES
-;CREATED_BY=gerber-writer-spike/generate.py 2026-07-18
+;CREATED_BY=gerber-writer-spike/generate.py 2026-07-28
 ;FORMAT={3:3/ absolute / metric / decimal}
 FMAT,2
 METRIC
@@ -10,7 +10,7 @@ T2C0.400
 G90
 G05
 T1
-X30.000Y15.000
+X30.000Y-15.000
 T2
-X20.000Y10.000
+X20.000Y-10.000
 M30

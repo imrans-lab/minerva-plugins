@@ -90,7 +90,9 @@ def _excellon_tools(text: str) -> set[str]:
 
 
 def _excellon_ys(text: str) -> set[float]:
-    return {float(y) for _x, y in re.findall(r"X([\d.]+)Y([\d.]+)", text)}
+    # Y is SIGNED: drill files are emitted in the GERBER frame (Y-UP) while the
+    # board model is Y-DOWN (gerber._Geometry.to_gerber_frame, bug 019fa8011555).
+    return {float(y) for _x, y in re.findall(r"X(-?[\d.]+)Y(-?[\d.]+)", text)}
 
 
 def _near(points, target, tol: float = 1e-3) -> bool:
@@ -110,8 +112,9 @@ def test_gerbers_method_happy_path_emits_full_layer_set():
     assert {"brd-F_Cu.gbr", "brd-B_Cu.gbr", "brd-F_Mask.gbr", "brd-B_Mask.gbr",
             "brd-F_SilkS.gbr", "brd-Edge_Cuts.gbr"} <= set(files)
     # ABSOLUTE placement reached copper (not the footprint-local ±0.95 origin).
+    # Board (10, 10) -> gerber (·, -10): fab files are Y-UP (to_gerber_frame).
     flashes = _flashes(files["brd-F_Cu.gbr"])
-    assert _near(flashes, (9.05, 10.0)) and _near(flashes, (10.95, 10.0)), flashes
+    assert _near(flashes, (9.05, -10.0)) and _near(flashes, (10.95, -10.0)), flashes
 
 
 def test_generate_method_happy_path_emits_kicad_triplet():
@@ -197,9 +200,11 @@ def test_bottom_side_mirror_folds_the_coordinate_via_method():
     bot = _gerbers(_board("Package_DIP:DIP-6_W7.62mm_Socket", layer="bottom"))
     top_ys = _excellon_ys(top["brd-PTH.drl"])
     bot_ys = _excellon_ys(bot["brd-PTH.drl"])
-    assert top_ys == {10.0, 12.54, 15.08}, top_ys
-    # Y-mirror about the component origin (20 - y): the fold reached the reply.
-    assert bot_ys == {round(20.0 - y, 3) for y in top_ys}, bot_ys
+    # Board-frame y {10.0, 12.54, 15.08}, emitted in the GERBER frame (negated).
+    assert top_ys == {-10.0, -12.54, -15.08}, top_ys
+    # Y-mirror about the component origin, which is board y=10 / gerber y=-10, so
+    # in the emitted frame the fold is (-20 - y): it reached the reply.
+    assert bot_ys == {round(-20.0 - y, 3) for y in top_ys}, bot_ys
     assert bot_ys != top_ys
 
 

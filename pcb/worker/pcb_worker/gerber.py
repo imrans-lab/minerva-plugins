@@ -23,6 +23,15 @@ Decisions carried from the spike (see docs/gerbers.md for the full rationale):
     ``TA...*`` comment-attributes (gerber-writer's form), not ``%TF...*%``
     extended commands. Both are spec-legal; pygerber parses the comment form
     into a structured attribute dict. Interop note in docs/gerbers.md.
+  * COORDINATE FRAME. The board model carries KiCad's file frame, which grows Y
+    DOWNWARD; Gerber and Excellon are Y-UP. This module converts BOARD -> GERBER
+    exactly once, in ``_Geometry.to_gerber_frame`` at the end of the harvest (the
+    board outline, which does not pass through ``_Geometry``, converts alongside
+    it in ``_build_gerber_layers``). Everything upstream of that boundary —
+    including arc chirality — is board-frame; everything downstream is gerber
+    frame. Read ``to_gerber_frame``'s docstring before touching a coordinate:
+    emitting board Y unconverted mirrored every layer AND left rotated copper
+    turned the wrong way (bug 019fa8011555).
   * PTH/NPTH split is OURS to own (Excellon has no first-class per-hole plated
     flag; the traditional convention is two separate files). Plated holes come
     from through-hole pads (pin.drill_mm) and vias; non-plated from board-level
@@ -177,8 +186,11 @@ def _circumcenter(a: tuple[float, float], b: tuple[float, float],
     """Circumcentre of the triangle (a, b, c) and its orientation denominator.
 
     Returns ``(center, d)`` where ``d`` is twice the signed area of a->b->c
-    (``d == 2 * cross``): ``d > 0`` means the a->b->c turn is COUNTER-clockwise
-    (gerber '+'/CCW), ``d < 0`` clockwise (gerber '-'). Returns ``None`` when the
+    (``d == 2 * cross``): ``d > 0`` means the a->b->c turn is in the
+    INCREASING-angle direction of the frame the points are given in ('+'), ``d < 0``
+    the decreasing one ('-'). Points reach here in the BOARD frame, so the caller's
+    '+'/'-' is a board-frame chirality; _Geometry.to_gerber_frame converts it along
+    with the coordinates. Returns ``None`` when the
     three points are collinear or coincident (infinite radius — caller falls back
     to a polyline, since an arc through collinear points IS a line).
     """
@@ -214,8 +226,9 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
     (``points`` has 2 entries + an ``angle`` field); and the modern KiCad 7/8
     3-point ``(start, mid, end)`` form (``points`` has 3 entries, no ``angle``) —
     emitted as an arc whose centre is the circumcircle of the three transformed
-    points, with chirality taken from the a->b->c turn in the gerber Y-up frame
-    (consistent with the legacy convention). Only when the three points are
+    points, with chirality taken from the a->b->c turn in the BOARD frame
+    (consistent with the legacy convention, and converted to the gerber frame with
+    the coordinates by _Geometry.to_gerber_frame). Only when the three points are
     collinear/coincident (infinite radius) does it fall back to a polyline — an
     arc through collinear points IS a line. Silk is cosmetic, so degenerate
     forms never raise (contrast R1/R2 copper/mask, which fail closed).
@@ -277,14 +290,17 @@ def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
             start_abs = _transform_point(cx, cy, rot, sx, sy)
             end_abs = _transform_point(cx, cy, rot, ex, ey)
             center_abs = _transform_point(cx, cy, rot, ccx, ccy)
-            # KiCad legacy arc 'angle' is measured in KiCad's Y-DOWN frame; the
-            # gerber is plotted in board coords with no Y-flip, so the sweep
-            # chirality INVERTS relative to gerber's Y-up CCW convention. A KiCad
-            # negative 'angle' must therefore emit as a CW ('-') gerber arc and a
-            # positive one as CCW ('+'). Empirically verified: the DIP-6 pin-1
-            # notch (center,start,angle=-180) must bulge INTO the body (+y here),
-            # which is CW/'-'; the opposite ('+') mirrors it outside the body.
-            # Pinned by test_legacy_arc_bulges_into_body.
+            # Chirality is decided HERE, in the BOARD frame (Y-DOWN) that every
+            # other coordinate in this harvest is also expressed in, and is
+            # converted to the gerber frame ONCE by _Geometry.to_gerber_frame —
+            # which flips '+'/'-' along with the Y negation, because a mirror
+            # reverses handedness. Nothing about this line changed when the frame
+            # boundary was introduced (bug 019fa8011555), and nothing about it
+            # should: a second correction here would cancel the conversion instead
+            # of composing with it. Empirically verified in the board frame: the
+            # DIP-6 pin-1 notch (center,start,angle=-180) must bulge INTO the body
+            # (+y in board coords), which is this '-'; the opposite ('+') mirrors it
+            # outside the body. Pinned by test_legacy_arc_bulges_into_body.
             orientation = "-" if angle < 0 else "+"
             g.silk_arcs.append((start_abs, end_abs, center_abs, orientation, width))
         elif len(pts) >= 3:
@@ -375,10 +391,80 @@ class _Geometry:
         # "warned, never fatal" (contrast fabrication-critical copper/mask, which
         # fail closed upstream). A side channel only: it changes no emitted bytes.
         self.diagnostics: list[Diagnostic] = []
+        # Which coordinate frame the buckets above are expressed in. Everything is
+        # harvested in the BOARD frame (KiCad's file frame, Y-DOWN — see
+        # geometry.py's module docstring) and converted ONCE, at the end of the
+        # harvest, by :meth:`to_gerber_frame`. Guarded so a second conversion
+        # cannot silently cancel the first.
+        self.frame = "board"
 
     def warn(self, code: str, message: str, ref: SourceRef) -> None:
         self.diagnostics.append(
             Diagnostic(DiagnosticSeverity.WARNING, code, message, ref))
+
+    def to_gerber_frame(self) -> "_Geometry":
+        """BOARD frame (Y-DOWN) -> GERBER frame (Y-UP): negate every Y, in place.
+
+        THE ONE FRAME BOUNDARY IN THE EMITTER (bug 019fa8011555). The board model
+        carries KiCad's file frame, which grows Y DOWNWARD; RS-274X coordinates are
+        Y-UP. Before this existed the harvest's board-frame Y went to gerber-writer
+        unconverted, so every emitted layer was a vertical MIRROR of the board —
+        and, worse, only the POSITIONS were mirrored: each pad's aperture ROTATION
+        is already an absolute angle in the gerber sense, so a pad rotated off a
+        multiple of 90 degrees had its copper rectangle turned the wrong way
+        relative to where it sat (up to 60 degrees out). 0/90/180/270 were immune
+        because a rectangle folds under 180-degree symmetry, which is why the whole
+        suite passed over it. Pinned by
+        tests/test_gerbers.py::test_aperture_rotation_agrees_with_pad_pair_bearing.
+
+        ONLY the Y COORDINATES move. Aperture rotations are NOT negated: they are
+        already gerber-frame angles, and negating both reintroduces the very
+        mismatch this fixes.
+
+        Arc CHIRALITY does move with the coordinates, because a mirror reverses
+        handedness: the same three points swept the same way describe the opposite
+        bulge once Y is negated. This is what retires the local compensation
+        _harvest_silk_graphic used to carry ("plotted in board coords with no
+        Y-flip, so the sweep chirality INVERTS") — chirality is now decided ONCE, in
+        the board frame, and converted here with everything else.
+
+        Applied at the END of the harvest (both _harvest and _harvest_ir) rather
+        than at each of the nine gerber-writer write-sites, so there is exactly one
+        place where the frame changes and no write-site can be added later that
+        forgets it. The board OUTLINE does not pass through _Geometry — it is built
+        straight from board bounds in :func:`_build_gerber_layers`, which converts
+        it there with a pointer back to this method.
+        """
+        if self.frame != "board":
+            raise ValueError(
+                f"_Geometry.to_gerber_frame: geometry is already in the {self.frame!r} "
+                f"frame — a second conversion would cancel the first")
+
+        self.smd_pads = [(x, -y, w, h, a, top, shape, rr)
+                         for (x, y, w, h, a, top, shape, rr) in self.smd_pads]
+        self.th_annuli = [(x, -y, d, f) for (x, y, d, f) in self.th_annuli]
+        self.th_shaped = [(x, -y, shape, w, h, rr, a)
+                          for (x, y, shape, w, h, rr, a) in self.th_shaped]
+        self.mask_top = [(x, -y, shape, w, h, rr, a)
+                         for (x, y, shape, w, h, rr, a) in self.mask_top]
+        self.mask_bot = [(x, -y, shape, w, h, rr, a)
+                         for (x, y, shape, w, h, rr, a) in self.mask_bot]
+        self.traces_top = [(x1, -y1, x2, -y2, w)
+                           for (x1, y1, x2, y2, w) in self.traces_top]
+        self.traces_bot = [(x1, -y1, x2, -y2, w)
+                           for (x1, y1, x2, y2, w) in self.traces_bot]
+        self.holes = [(x, -y, d, plated) for (x, y, d, plated) in self.holes]
+        self.silk_lines = [(x1, -y1, x2, -y2, w)
+                           for (x1, y1, x2, y2, w) in self.silk_lines]
+        self.silk_circles = [(cx, -cy, r, w) for (cx, cy, r, w) in self.silk_circles]
+        self.silk_polys = [([(px, -py) for (px, py) in pts], w, closed)
+                           for (pts, w, closed) in self.silk_polys]
+        self.silk_arcs = [((s[0], -s[1]), (e[0], -e[1]), (c[0], -c[1]),
+                           "-" if orientation == "+" else "+", w)
+                          for (s, e, c, orientation, w) in self.silk_arcs]
+
+        self.frame = "gerber"
+        return self
 
 
 # The mask-opening collapse boundary is owned by pad_source.mask_opening_dim so BOTH
@@ -664,7 +750,8 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
             annulus = _opt_num(hole.get("annulus_mm"))
             _emit_board_hole(g, key, idx, hx, hy, dia, plated, annulus, mask_clearance)
 
-    return g
+    # The ONE frame boundary: everything above is harvested in the BOARD frame.
+    return g.to_gerber_frame()
 
 
 # ---------------------------------------------------------------------------
@@ -932,15 +1019,24 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     out["F_SilkS"] = _dump(f_silks, creation_date)
 
     # Edge.Cuts — closed board-outline rectangle from origin + width/height.
+    #
+    # The outline is the ONE piece of emitted geometry that does not pass through
+    # _Geometry (it is derived from board bounds, not harvested), so it converts
+    # BOARD frame -> GERBER frame right here. Same negation, same reason, same bug:
+    # see :meth:`_Geometry.to_gerber_frame`. Negated PER VERTEX rather than by
+    # exchanging the bounds, so the emitted path stays the exact mirror of the one
+    # this always drew — same start corner, same winding — instead of silently
+    # re-ordering the rectangle's vertices as well.
     edge = DataLayer("Profile,NP")
     hw = (max_x - min_x)
     hh = (max_y - min_y)
+    y0, y1 = -min_y, -(min_y + hh)
     profile = GPath()
-    profile.moveto((min_x, min_y))
-    profile.lineto((min_x + hw, min_y))
-    profile.lineto((min_x + hw, min_y + hh))
-    profile.lineto((min_x, min_y + hh))
-    profile.lineto((min_x, min_y))
+    profile.moveto((min_x, y0))
+    profile.lineto((min_x + hw, y0))
+    profile.lineto((min_x + hw, y1))
+    profile.lineto((min_x, y1))
+    profile.lineto((min_x, y0))
     edge.add_traces_path(profile, EDGE_CUTS_WIDTH_MM, "Profile")
     out["Edge_Cuts"] = _dump(edge, creation_date)
 
@@ -1065,7 +1161,8 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
             _emit_board_hole(g, key, idx, feature.position[0], feature.position[1],
                              feature.diameter_mm, hole.plated, hole.annulus_mm,
                              mask_clearance)
-    return g
+    # The ONE frame boundary: everything above is harvested in the BOARD frame.
+    return g.to_gerber_frame()
 
 
 def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,

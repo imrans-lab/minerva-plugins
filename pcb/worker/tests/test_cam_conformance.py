@@ -624,9 +624,11 @@ def test_silk_circle_emits_true_full_circle_arc():
     assert len(arcs) == 1, f"circle must be exactly one arc, got {len(arcs)}"
     start, end, center, _mode = arcs[0]
     assert start == end, "a full circle is emitted as a start==end 360-deg arc"
-    # radius ~1.5 about the placed centre (5, 5).
+    # radius ~1.5 about the placed centre, board (5, 5) -> GERBER (5, -5): fab
+    # files are Y-UP while the board model is Y-DOWN (gerber._Geometry
+    # .to_gerber_frame, bug 019fa8011555).
     assert abs(math.hypot(start[0] - center[0], start[1] - center[1]) - 1.5) < 1e-3
-    assert abs(center[0] - 5.0) < 1e-3 and abs(center[1] - 5.0) < 1e-3
+    assert abs(center[0] - 5.0) < 1e-3 and abs(center[1] + 5.0) < 1e-3
 
 
 def test_silk_circle_not_decomposed_into_segments():
@@ -655,19 +657,24 @@ def test_silk_poly_emits_closed_path():
 
 def test_silk_three_point_arc_emits_true_arc():
     # Modern KiCad 7/8 (start, mid, end) form. start(-1,0) mid(0,1) end(1,0):
-    # circumcentre (0,0) -> placed (5,5), radius 1; midpoint bulges to +y.
+    # circumcentre (0,0) -> placed board (5,5), radius 1; the mid bulges to +y in
+    # the BOARD frame. Emitted coordinates are GERBER frame (Y-UP), so both the
+    # centre and the mid appear negated in y — one conversion, in
+    # gerber._Geometry.to_gerber_frame (bug 019fa8011555). The arc still passes
+    # THROUGH its mid point, which is what this test is really about; a
+    # conversion that moved the coordinates but not the chirality would break it.
     text = _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
                                 "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}]))
     arcs, _n_straight = _silk_draws(text)
     assert len(arcs) == 1, f"a three-point arc must emit one true arc, got {len(arcs)}"
     start, end, center, mode = arcs[0]
-    # Centre == circumcircle centre (placed local (0,0)).
-    assert abs(center[0] - 5.0) < 1e-3 and abs(center[1] - 5.0) < 1e-3, \
-        f"arc centre {center} != circumcentre (5,5)"
-    # The arc passes THROUGH the mid point (placed local (0,1) -> (5,6)).
+    # Centre == circumcircle centre (placed local (0,0) -> board (5,5)).
+    assert abs(center[0] - 5.0) < 1e-3 and abs(center[1] + 5.0) < 1e-3, \
+        f"arc centre {center} != circumcentre board (5,5) -> gerber (5,-5)"
+    # The arc passes THROUGH the mid point (placed local (0,1) -> board (5,6)).
     mx, my = _arc_midpoint(start, end, center, mode)
-    assert abs(mx - 5.0) < 1e-2 and abs(my - 6.0) < 1e-2, \
-        f"arc geometric midpoint {(mx, my)} does not pass through mid (5,6)"
+    assert abs(mx - 5.0) < 1e-2 and abs(my + 6.0) < 1e-2, \
+        f"arc geometric midpoint {(mx, my)} does not pass through mid board (5,6)"
 
 
 def test_silk_three_point_arc_not_flattened():
@@ -863,11 +870,15 @@ def test_drill_pth_npth_split_is_faithful():
     pth = _drill_hits(result["drill-PTH.drl"])
     npth = _drill_hits(result["drill-NPTH.drl"])
     # Plated features (TH pin @5,5 ; via @10,10 ; pth_holes @8,8) land in PTH ONLY.
-    assert (5.0, 5.0) in pth and (5.0, 5.0) not in npth      # TH pin
-    assert (10.0, 10.0) in pth and (10.0, 10.0) not in npth  # via
-    assert (8.0, 8.0) in pth and (8.0, 8.0) not in npth      # pth_holes entry
+    # Excellon shares the GERBER frame with the copper it belongs to, so the
+    # board-frame y is negated (gerber._Geometry.to_gerber_frame, bug
+    # 019fa8011555) — a drill file in a different frame from its own copper would
+    # put every hole at the mirror of its pad.
+    assert (5.0, -5.0) in pth and (5.0, -5.0) not in npth      # TH pin
+    assert (10.0, -10.0) in pth and (10.0, -10.0) not in npth  # via
+    assert (8.0, -8.0) in pth and (8.0, -8.0) not in npth      # pth_holes entry
     # The non-plated mounting hole (@2,20) lands in NPTH ONLY.
-    assert (2.0, 20.0) in npth and (2.0, 20.0) not in pth
+    assert (2.0, -20.0) in npth and (2.0, -20.0) not in pth
 
 
 def test_drill_degenerate_hole_warns_and_is_not_drilled():

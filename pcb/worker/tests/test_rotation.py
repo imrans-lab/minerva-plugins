@@ -171,9 +171,17 @@ def test_gerber_pad_centres_match_kicad_ground_truth():
     files = gerber.build_gerbers(board, name="rot")
 
     # SMD component on top -> flashes land on F_Cu.
+    #
+    # The ground truth is BOARD frame (KiCad's Y-DOWN file frame, which is what
+    # the reader hands back); the emitted Gerber is Y-UP, so the expectation is
+    # negated in Y — the same single conversion the emitter makes at
+    # gerber._Geometry.to_gerber_frame (bug 019fa8011555). X is untouched, which
+    # is what keeps this a real check of _rotate's SIGN: a mirrored rotation moves
+    # x as well as y, so it cannot hide behind the frame conversion.
     f_cu = files["rot-F_Cu.gbr"]
     centres = _gerber_flash_centres(f_cu)
-    _match_within(centres, list(ground_truth.values()), TOL_MM)
+    expected = [(x, -y) for (x, y) in ground_truth.values()]
+    _match_within(centres, expected, TOL_MM)
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +280,16 @@ def test_kicad_smd_pad_without_size_fails_closed():
 #   %TO.P,MIC1,5*%  X43180000Y-99060000D03*
 #   %TO.P,MIC1,6*%  X40640000Y-99060000D03*
 #
-# (Gerber Y is negated w.r.t. the .kicad_pcb frame.) The test itself is
+# Gerber Y is negated w.r.t. the .kicad_pcb frame, and that is the CONVENTION,
+# not an oddity of this capture: the .kicad_pcb file frame grows Y DOWNWARD while
+# Gerber is Y-UP, so any correct exporter negates. This note used to read as a
+# passing observation, which is part of why our own emitter shipped for months
+# WITHOUT that negation — the divergence had been seen and filed as benign (bug
+# 019fa8011555). pcb_worker now converts at exactly one place,
+# gerber._Geometry.to_gerber_frame, and matches the bytes above.
+#
+# The ground truth below is stated in the BOARD frame (as the reader returns it),
+# so a test comparing it against emitted Gerber must negate Y. The test itself is
 # hermetic — it does NOT shell out to kicad-cli.
 # ---------------------------------------------------------------------------
 

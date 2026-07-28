@@ -107,7 +107,9 @@ def _excellon_tools(text: str) -> set[str]:
 
 
 def _excellon_ys(text: str) -> set[float]:
-    return {float(y) for _x, y in re.findall(r"X([\d.]+)Y([\d.]+)", text)}
+    # Y is SIGNED: Excellon is emitted in the GERBER frame (Y-UP), so a board-frame
+    # y of +10 drills at -10 (gerber._Geometry.to_gerber_frame, bug 019fa8011555).
+    return {float(y) for _x, y in re.findall(r"X(-?[\d.]+)Y(-?[\d.]+)", text)}
 
 
 def _near(points, target, tol: float = 1e-3) -> bool:
@@ -122,10 +124,14 @@ def _near(points, target, tol: float = 1e-3) -> bool:
 
 def test_absolute_position_reaches_copper():
     """An R_0805 placed at board (10, 10) flashes its copper at the ABSOLUTE pad
-    coordinate, NOT the footprint-local one (~±0.95 about the origin)."""
+    coordinate, NOT the footprint-local one (~±0.95 about the origin).
+
+    The emitted Y is NEGATED because the fab files are written in the GERBER frame
+    (Y-UP) while the board model is KiCad's Y-DOWN file frame — see
+    gerber._Geometry.to_gerber_frame (bug 019fa8011555). X is untouched."""
     files = _placed_gerbers(_board("R_0805", x=10.0, y=10.0))
     flashes = _flashes(files["brd-F_Cu.gbr"])
-    assert _near(flashes, (9.05, 10.0)) and _near(flashes, (10.95, 10.0)), flashes
+    assert _near(flashes, (9.05, -10.0)) and _near(flashes, (10.95, -10.0)), flashes
     # Never the raw local coords (would mean the emitter re-placed instead of
     # passing the IR's absolute geometry through under identity placement).
     assert not _near(flashes, (-0.95, 0.0)) and not _near(flashes, (0.95, 0.0))
@@ -189,8 +195,11 @@ def test_bottom_side_mirror_folds_the_coordinate():
 
     top_ys = _excellon_ys(top["brd-PTH.drl"])
     bot_ys = _excellon_ys(bot["brd-PTH.drl"])
-    assert top_ys == {10.0, 12.54, 15.08}, top_ys
-    assert bot_ys == {round(20.0 - y, 3) for y in top_ys}, bot_ys
+    # Board-frame y {10.0, 12.54, 15.08}, emitted in the GERBER frame (negated).
+    assert top_ys == {-10.0, -12.54, -15.08}, top_ys
+    # The side fold is about the component origin at board y=10 (gerber y=-10), so
+    # in the emitted frame the mirror is {-20 - y}.
+    assert bot_ys == {round(-20.0 - y, 3) for y in top_ys}, bot_ys
     assert bot_ys != top_ys  # a genuine fold, not a no-op
 
 
@@ -240,10 +249,12 @@ def test_gerber_ir_carries_absolute_geometry_and_frame():
     corners = set(re.findall(r"X(-?\d+)Y(-?\d+)D0[12]\*", edge))
     d = _decimals(edge)
     got = {(int(x) / 10 ** d, int(y) / 10 ** d) for x, y in corners}
-    assert {(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)} <= got, got
-    # ABSOLUTE pad copper (9.05,10.0), never the footprint-local coord.
+    # Gerber frame: the board spans y in [-40, 0], the negation of the board
+    # frame's [0, 40] (gerber._Geometry.to_gerber_frame).
+    assert {(0.0, 0.0), (40.0, 0.0), (40.0, -40.0), (0.0, -40.0)} <= got, got
+    # ABSOLUTE pad copper (9.05,-10.0), never the footprint-local coord.
     flashes = _flashes(files["brd-F_Cu.gbr"])
-    assert _near(flashes, (9.05, 10.0)), flashes
+    assert _near(flashes, (9.05, -10.0)), flashes
     assert not _near(flashes, (-0.95, 0.0))
     # R_0805 carries F.SilkS graphics — they reach the silk layer.
     assert files["brd-F_SilkS.gbr"].count("D01*") > 0
@@ -769,7 +780,7 @@ def test_unplated_board_hole_gets_drill_size_mask_both_emitters():
     g = gerber.build_gerbers_ir(resolved, name="h")
     for layer in ("h-F_Mask.gbr", "h-B_Mask.gbr"):
         assert re.search(r"%ADD\d+C,3\.2\*%", g[layer]), f"{layer} missing the NPTH drill mask"
-        assert re.search(r"X12000000Y12000000D03", g[layer]), f"{layer} missing the mask flash"
+        assert re.search(r"X12000000Y-12000000D03", g[layer]), f"{layer} missing the mask flash"
     # kicad emits the bare np_thru_hole (which carries *.Mask) for the board hole.
     pcb = kicad.generate_ir(resolved, base_name="h")["h.kicad_pcb"]
     assert '(pad "" np_thru_hole circle' in pcb and '"*.Cu" "*.Mask"' in pcb
@@ -792,7 +803,7 @@ def test_via_tenting_gerber_mask():
                                 "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
                 "nets": [{"name": "N", "pins": ["X1.1"]}], "vias": [v]}
 
-    via_flash = r"X20000000Y20000000D03"
+    via_flash = r"X20000000Y-20000000D03"
     for tented in (None, True):   # default + explicit tented -> no via mask
         g = gerber.build_gerbers_ir(_resolve(_via_board(tented)), name="v")
         assert not re.search(via_flash, g["v-F_Mask.gbr"]), f"tented={tented} leaked a via mask"
@@ -855,7 +866,7 @@ def test_kicad_via_tenting_defaults_tented_and_agrees_with_gerber():
                                 "y_mm": 10, "rotation_deg": 0, "layer": "top"}],
                 "nets": [{"name": "N", "pins": ["X1.1"]}], "vias": [v]}
 
-    via_flash = r"X20000000Y20000000D03"
+    via_flash = r"X20000000Y-20000000D03"
     for tented in (None, True):        # default + explicit tented: kicad tents, gerber bare
         resolved = _resolve(_board(tented))
         pcb = kicad.generate_ir(resolved, base_name="v")["v.kicad_pcb"]

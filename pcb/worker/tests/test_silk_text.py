@@ -421,9 +421,13 @@ def test_ir_native_path_positions_designator_at_the_real_component_placement():
 
     expected_local = stroke_font.render(
         "MH1", size=gerber.REFDES_TEXT_SIZE_MM, x0=0.0, y0=gerber.REFDES_LOCAL_Y_MM)
-    expected_first_point = place_point(
+    placed = place_point(
         comp.placement.position[0], comp.placement.position[1],
         comp.placement.rotation_deg, *expected_local[0][0])
+    # place_point works in the BOARD frame; the emitted file is in the GERBER
+    # frame, so the expectation is negated in Y exactly once, at the same boundary
+    # the emitter crosses (gerber._Geometry.to_gerber_frame, bug 019fa8011555).
+    expected_first_point = (placed[0], -placed[1])
 
     assert any(abs(px - expected_first_point[0]) < 1e-3
               and abs(py - expected_first_point[1]) < 1e-3

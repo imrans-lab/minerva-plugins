@@ -28,6 +28,12 @@ from pcb_worker import board_model, gerber, stroke_font
 from pcb_worker.methods import handle_request
 from tests.gerber_fab import build_fab, build_raw_emitter
 
+try:  # dev/CI-only kicad-cli oracle (skips cleanly when absent).
+    from tests.oracle.kicad_drc import kicad_cli_available as _kicad_cli_available
+except Exception:  # pragma: no cover - oracle package optional
+    def _kicad_cli_available() -> bool:
+        return False
+
 HERE = Path(__file__).resolve().parent
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
@@ -97,13 +103,23 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
     assert re.search(r"TF\.FilePolarity,([^*]+)\*", text), f"{name}: no .FilePolarity"
 
     # Plotted coordinates within board bounds (unit = nm at ..6 fractional digits).
+    #
+    # THE Y BOUND IS NEGATED, AND THAT IS THE POINT (bug 019fa8011555). `bounds`
+    # is the BOARD frame, which grows Y DOWNWARD (KiCad's file frame); the emitted
+    # Gerber is Y-UP, so a board spanning y in [min_y, max_y] plots into
+    # [-max_y, -min_y]. This assertion previously compared the emitted Y against
+    # the board bounds UNNEGATED and passed — which is exactly how it PINNED the
+    # missing conversion as correct, and why every layer shipped vertically
+    # mirrored. Inverted rather than deleted: a deleted assertion proves nothing,
+    # and this one still has teeth — an emitter that stopped converting fails here.
     if xd == 6:
         for xs, ys in re.findall(r"X(-?\d+)Y(-?\d+)D0[123]\*", text):
             x_mm, y_mm = int(xs) / 1e6, int(ys) / 1e6
             assert min_x - BOUNDS_TOL_MM <= x_mm <= max_x + BOUNDS_TOL_MM, \
                 f"{name}: X {x_mm} out of bounds"
-            assert min_y - BOUNDS_TOL_MM <= y_mm <= max_y + BOUNDS_TOL_MM, \
-                f"{name}: Y {y_mm} out of bounds"
+            assert -max_y - BOUNDS_TOL_MM <= y_mm <= -min_y + BOUNDS_TOL_MM, \
+                f"{name}: Y {y_mm} out of gerber-frame bounds " \
+                f"[{-max_y}, {-min_y}] (board bounds [{min_y}, {max_y}] negated)"
 
 
 @pytest.mark.parametrize("board_path,base,builder", CASES)
@@ -545,9 +561,16 @@ def _arc_midpoint(start, end, center, mode) -> tuple[float, float]:
 def test_legacy_arc_bulges_into_body():
     """Regression: KiCad legacy (center,start,angle) arcs must emit with the
     correct gerber chirality. The DIP-6 pin-1 notch (angle=-180) must bulge
-    INTO the body, not mirror outside it. With the DIP-6 placed at rot 0 and
-    +y toward the body, the emitted arc's midpoint must sit on the +y side of
-    its centre. (The pre-fix code emitted G03, mirroring the notch outward.)"""
+    INTO the body, not mirror outside it.
+
+    With the DIP-6 placed at rot 0, the body is at +y in the BOARD frame — and
+    therefore at -y in the emitted GERBER frame, which is Y-UP (bug 019fa8011555,
+    _Geometry.to_gerber_frame). So the emitted arc's midpoint must sit BELOW its
+    centre in the file. The sense of this assertion flipped with the frame
+    conversion, not the geometry: the notch bulges into the body in both
+    statements. It still has teeth in both directions — an emitter that converted
+    the coordinates but NOT the chirality (or vice versa) mirrors the notch back
+    outside the body and fails here."""
     from pcb_worker.footprints import resolve_footprint
     from pcb_worker.resolve import resolve_board
 
@@ -567,7 +590,7 @@ def test_legacy_arc_bulges_into_body():
     assert arc is not None, "expected the DIP-6 pin-1 notch arc in F.SilkS"
     start, end, center, mode = arc
     mid = _arc_midpoint(start, end, center, mode)
-    assert mid[1] > center[1] + 0.5, \
+    assert mid[1] < center[1] - 0.5, \
         f"notch bulges the WRONG way: midpoint {mid} vs centre {center} (mode {mode})"
 
 
@@ -673,3 +696,291 @@ def test_canary_gerber_writer_still_collapses_fully_rounded_to_a_rotationless_ob
         "now honours the angle itself, THAT SWAP IS NOW A BUG and will double-rotate "
         "every oblong land — delete _obround_rotation_swap and its call site in "
         "gerber._shape_aperture, then re-run the rotated-oval conformance tests.")
+
+
+# ---------------------------------------------------------------------------
+# COORDINATE FRAME (bug 019fa8011555) — the assertion whose ABSENCE let a
+# systemic vertical mirror ship past 1556 tests, the parity harness and 24
+# goldens.
+#
+# The emitter harvests in the BOARD frame (KiCad's file frame, Y-DOWN) and
+# converts once, in gerber._Geometry.to_gerber_frame. Before that conversion
+# existed, pad CENTRES were written in the board frame while each pad's aperture
+# ROTATION was already a gerber-frame angle. Positions mirrored, rotations did
+# not — so for any pad turned off a multiple of 90 degrees the copper rectangle
+# was fabricated at the WRONG ANGLE (up to 60 degrees out), not merely drawn
+# upside down.
+#
+# WHY THE FIXTURE ANGLES ARE WHAT THEY ARE: a rectangle folds under 180-degree
+# symmetry, so a pad at 0/90/180/270 is emitted identically whether or not Y is
+# converted. A fixture built from those angles alone PASSES UNDER THE BUG. Every
+# rotation below is deliberately NOT a multiple of 90.
+# ---------------------------------------------------------------------------
+
+# Rotations chosen so that (a) none is a multiple of 90, and (b) they are not all
+# each other's supplements — under the bug a bearing theta reads back as
+# 180 - theta, which is a genuinely different angle for each of these.
+_OFF_AXIS_ROTATIONS = [30.0, 45.0, 60.0, 135.0]
+
+# Slack for the bearing/rotation comparison. Gerber ordinates are quantised to
+# the file's own coordinate format (nm at 3.6), which perturbs a bearing computed
+# from two flash centres by ~1e-5 degrees on a 0805 pad pitch. Far below the
+# ~60-degree error the bug produces, and far below the 90-degree fold that would
+# hide one.
+_BEARING_TOL_DEG = 0.01
+
+
+def _rotated_pad_board(name: str = "rotframe") -> dict:
+    """Five R_0805 (two rectangular lands each, on a 1.9 mm pitch) at rotations
+    spanning the off-axis set plus an axis-aligned control."""
+    rots = [0.0] + _OFF_AXIS_ROTATIONS
+    return {
+        "version": 1, "name": name, "width_mm": 70, "height_mm": 50,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": f"R{i + 1}", "footprint": "R_0805",
+             "x_mm": 8.0 + 12.0 * i, "y_mm": 9.0 + 6.0 * i,
+             "rotation_deg": rot, "layer": "top"}
+            for i, rot in enumerate(rots)
+        ],
+        "nets": [],
+    }
+
+
+def _compile_board_ir(board: dict):
+    from pcb_worker.compile_board import compile_board
+
+    return compile_board(board).board
+
+
+def _flash_pairs(gbr_text: str) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """Group a copper layer's flashes into the two-pad clusters of each component.
+
+    Purely geometric (single-link clustering at a radius well between the 1.9 mm
+    intra-component pad pitch and the >=12 mm inter-component spacing), so it needs
+    no ref/pad metadata — which a Gerber flash does not carry anyway."""
+    import math
+
+    remaining = _gerber_flash_points(gbr_text)
+    pairs = []
+    while remaining:
+        group = [remaining.pop()]
+        grew = True
+        while grew:
+            grew = False
+            for pt in list(remaining):
+                if any(math.hypot(pt[0] - q[0], pt[1] - q[1]) <= 4.0 for q in group):
+                    group.append(pt)
+                    remaining.remove(pt)
+                    grew = True
+        assert len(group) == 2, f"expected 2-pad clusters, got {len(group)}: {group}"
+        pairs.append(tuple(sorted(group)))
+    return sorted(pairs)
+
+
+def _aperture_angle_of(gbr_text: str, flash: tuple[float, float]) -> float:
+    """The rotation of the aperture the given flash was plotted with, read back
+    out of the emitted BYTES with gerbonara (the repo's independent reader)."""
+    import warnings
+
+    from gerbonara import GerberFile
+
+    from pcb_worker.ir_parity import _gerbonara_shape
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        parsed = GerberFile.from_string(gbr_text, filename="rotframe-F_Cu.gbr")
+    for obj in parsed.objects:
+        if type(obj).__name__ != "Flash":
+            continue
+        if abs(float(obj.x) - flash[0]) < 1e-6 and abs(float(obj.y) - flash[1]) < 1e-6:
+            return _gerbonara_shape(obj.aperture)[3]
+    raise AssertionError(f"no flash at {flash}")
+
+
+def test_aperture_rotation_agrees_with_pad_pair_bearing():
+    """THE STANDING FRAME ASSERTION. A two-pad footprint's copper must be TURNED
+    the way it is PLACED: the bearing of the line joining its two pad centres must
+    equal the rotation of the aperture those pads are flashed with, both read out
+    of the emitted Gerber, in the Gerber's own frame.
+
+    This is an INTERNAL SELF-CONSISTENCY check — it appeals to no oracle, no
+    golden and no other emitter, because the defect it catches is a
+    self-contradiction: positions in one frame, rotations in another. It is the
+    check that would have caught bug 019fa8011555 on the day it was written, and
+    its absence is why the defect shipped.
+
+    Compared modulo 180 because a rectangular land is symmetric under a half turn
+    (the pair (a, b) and (b, a) describe the same copper), which is a genuine
+    symmetry of the geometry — NOT the 180-degree fold that hides the bug. That
+    fold only rescues rotations which are multiples of 90; see _OFF_AXIS_ROTATIONS.
+    """
+    import math
+
+    pytest.importorskip("gerbonara")
+    files = gerber.build_gerbers_ir(_compile_board_ir(_rotated_pad_board()),
+                                    name="rotframe")
+    f_cu = files["rotframe-F_Cu.gbr"]
+
+    pairs = _flash_pairs(f_cu)
+    assert len(pairs) == len(_OFF_AXIS_ROTATIONS) + 1, pairs
+
+    seen: list[float] = []
+    for a, b in pairs:
+        bearing = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0])) % 180.0
+        rot = _aperture_angle_of(f_cu, a) % 180.0
+        assert _aperture_angle_of(f_cu, b) % 180.0 == rot, \
+            "both pads of one component must share an aperture rotation"
+        # Circular distance mod 180, so 0.0 and 179.99 are one hundredth apart.
+        delta = abs(((bearing - rot + 90.0) % 180.0) - 90.0)
+        assert delta <= _BEARING_TOL_DEG, (
+            f"copper is turned the WRONG WAY relative to where it sits: pad pair "
+            f"{a} -> {b} has bearing {bearing:.4f} deg but its aperture is rotated "
+            f"{rot:.4f} deg ({delta:.4f} deg apart). This is the signature of the "
+            f"board frame (Y-DOWN) reaching the Gerber unconverted while the "
+            f"aperture angle is already gerber-frame — see "
+            f"gerber._Geometry.to_gerber_frame (bug 019fa8011555).")
+        seen.append(rot)
+
+    # The fixture actually exercised off-90 rotations (guards against a future
+    # edit quietly reducing it to the symmetric angles the bug survives).
+    off_axis = [r for r in seen if abs((r % 90.0)) > _BEARING_TOL_DEG]
+    assert len(off_axis) == len(_OFF_AXIS_ROTATIONS), (
+        f"the fixture must exercise rotations that are NOT multiples of 90 — a "
+        f"pad at 0/90/180/270 passes this test even under the bug. Got {seen}")
+
+
+def test_gerber_and_excellon_share_one_frame():
+    """The drill hits must move with the copper. A through-hole pad's Excellon
+    coordinate and its copper annulus are the SAME physical feature, so a frame
+    conversion applied to one path and not the other splits a board in half —
+    holes drilled at the mirror of the pads they belong to. Pinned as its own
+    assertion because copper and drill leave the emitter through two different
+    builders (_build_gerber_layers / _build_drill_files)."""
+    board = {
+        "version": 1, "name": "frm", "width_mm": 40, "height_mm": 30,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        # Deliberately OFF-CENTRE in y so a sign error cannot land on itself.
+        "components": [{"ref": "U1", "footprint": "TH_TestPoint",
+                        "x_mm": 12.0, "y_mm": 7.0, "rotation_deg": 0.0,
+                        "layer": "top",
+                        "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                                  "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]}],
+        "nets": [],
+    }
+    files = gerber.build_gerbers_ir(_compile_board_ir(board), name="frm")
+
+    flashes = _gerber_flash_points(files["frm-F_Cu.gbr"])
+    hits = _parse_excellon(files["frm-PTH.drl"])["hits"]
+    assert len(flashes) == 1 and len(hits) == 1, (flashes, hits)
+
+    assert abs(hits[0][0] - flashes[0][0]) < 1e-3, "drill X left its copper"
+    assert abs(hits[0][1] - flashes[0][1]) < 1e-3, (
+        f"drill Y {hits[0][1]} does not sit on its copper annulus at "
+        f"{flashes[0][1]} — the copper and drill paths are in DIFFERENT frames")
+    # And both are in the GERBER frame, not the board frame: the board places this
+    # pad at y=+7, so a correctly converted file plots it at -7.
+    assert abs(flashes[0][1] + 7.0) < 1e-3, flashes
+    assert abs(hits[0][1] + 7.0) < 1e-3, hits
+
+
+def test_refdes_sits_above_its_component_and_reads_upright():
+    """The silk corollary. REFDES_LOCAL_Y_MM = -1.5 places a designator ABOVE its
+    component in the board frame (Y-DOWN); it must therefore land above it in the
+    emitted Gerber too, which is Y-UP — i.e. at a GREATER Gerber y than the part.
+
+    And it must read the right way up. stroke_font's glyph data is Y-DOWN like the
+    rest of the worker (cap top at the more NEGATIVE local y, baseline near 0), so
+    emitted unconverted the characters render mirrored top-to-bottom. Checked as
+    the 'A' glyph's own span: the ratio of ink above vs below the anchor tells
+    which way the glyph is standing, independently of where it was placed.
+    """
+    # The component authors NO graphics, so F.SilkS carries the designator strokes
+    # and NOTHING else — every seed-library footprint ships its own silk outline,
+    # which would otherwise be mixed into the same coordinate stream and mask the
+    # designator's placement (K4: no procedural box is invented for it either).
+    board = {
+        "version": 1, "name": "refdes", "width_mm": 40, "height_mm": 30,
+        "components": [{"ref": "A1", "footprint": "NOSILK",
+                        "x_mm": 20.0, "y_mm": 10.0, "rotation_deg": 0.0,
+                        "layer": "top",
+                        "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                                  "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]}],
+        "nets": [],
+    }
+    files = gerber.build_gerbers(board, name="refdes")
+    silk = files["refdes-F_SilkS.gbr"]
+
+    # The part's OWN emitted position, read out of the copper — never a literal.
+    # Everything below is relative to it, so the test asks "where is the text
+    # relative to the part it labels", which is the question, rather than "is the
+    # text at these coordinates", which a mirrored board can satisfy by accident.
+    pad = _gerber_flash_points(files["refdes-F_Cu.gbr"])
+    assert len(pad) == 1, pad
+    part_y = pad[0][1]
+
+    xd, yd = _fs_scale(silk)
+    ys = [int(v) / 10 ** yd
+          for _x, v in re.findall(r"X(-?\d+)Y(-?\d+)D0[12]\*", silk)]
+    assert ys, "expected designator strokes on F.SilkS"
+
+    assert min(ys) > part_y, (
+        f"the designator spans Gerber y in [{min(ys)}, {max(ys)}], which is BELOW "
+        f"the part at {part_y} — REFDES_LOCAL_Y_MM = {gerber.REFDES_LOCAL_Y_MM} "
+        f"means ABOVE the part, and above is GREATER y in the Y-UP Gerber frame")
+
+    # Upright, not mirrored: the glyph baseline sits at the anchor and the caps
+    # rise ~1 mm ABOVE it. Emitted unconverted the same glyph hangs below it,
+    # because stroke_font draws cap height at NEGATIVE local y (Y-DOWN, like the
+    # board) — so this is the assertion that catches the upside-down designator.
+    anchor_y = part_y - gerber.REFDES_LOCAL_Y_MM   # y0 placed into the gerber frame
+    above = [y for y in ys if y > anchor_y + 1e-6]
+    below = [y for y in ys if y < anchor_y - 1e-6]
+    assert len(above) > len(below), (
+        f"the designator renders UPSIDE-DOWN: {len(above)} stroke points above "
+        f"its baseline at {anchor_y} vs {len(below)} below (span "
+        f"[{min(ys)}, {max(ys)}], part at {part_y}).")
+    assert max(ys) > anchor_y + 0.5 * gerber.REFDES_TEXT_SIZE_MM, (
+        f"expected roughly a cap height of ink above the baseline, got "
+        f"{max(ys) - anchor_y}")
+
+
+@pytest.mark.skipif(not _kicad_cli_available(),
+                    reason="kicad-cli not on PATH (dev/CI oracle)")
+def test_flash_positions_match_kicad_cli_export():
+    """INDEPENDENT CONFIRMATION that the frame we converted TO is the right one.
+
+    The self-consistency test above proves our output stopped contradicting
+    ITSELF; it cannot, on its own, prove we did not make both halves consistently
+    wrong. kicad-cli is the one authority in this repo that is not built from our
+    emitter, our goldens or gerber-writer, so its export of the SAME board is the
+    check that our flashes land where a real toolchain puts them — in X and, the
+    whole point here, in Y.
+
+    This is the falsifier described in docket 019fa8011555: it FAILED before the
+    conversion existed (every Y exactly negated) and passes after it."""
+    from pcb_worker import kicad
+    from tests.oracle.kicad_drc import export_gerbers_on_pcb_text
+
+    rb = _compile_board_ir(_rotated_pad_board(name="oracle"))
+
+    ours = sorted((round(x, 4), round(y, 4)) for x, y in _gerber_flash_points(
+        gerber.build_gerbers_ir(rb, name="oracle")["oracle-F_Cu.gbr"]))
+
+    pcb = kicad.generate_ir(rb, base_name="oracle")["oracle.kicad_pcb"]
+    exported = export_gerbers_on_pcb_text(pcb, ["F.Cu", "B.Cu", "Edge.Cuts"],
+                                          name="oracle")
+    theirs_text = next(v for k, v in exported.items() if "F_Cu" in k)
+    theirs = sorted((round(x, 4), round(y, 4))
+                    for x, y in _gerber_flash_points(theirs_text))
+
+    assert ours == theirs, (
+        "our flash positions disagree with kicad-cli's for the same board.\n"
+        f"  ours  : {ours}\n  kicad : {theirs}\n"
+        + ("EVERY Y IS EXACTLY NEGATED — the board frame is reaching the Gerber "
+           "unconverted (bug 019fa8011555)."
+           if sorted((x, -y) for x, y in ours) == theirs else ""))
