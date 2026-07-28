@@ -1,0 +1,17 @@
+{
+  "id": "v1-fab-conservative",
+  "version": "1",
+  "source": "Minerva PCB v1 in-house conservative floor (K2 review 621 MF5, keystone comment 608 fail-closed sweep). Not a specific board house -- a deliberately conservative baseline chosen to be safe across common 2-layer through-hole/SMD prototype fab services. These are the exact numbers formerly hardcoded as compile_board._V1_MANUFACTURING_FLOOR; this file is now the sole source for them.",
+  "floor": {
+    "min_trace_width_mm": 0.127,
+    "min_clearance_mm": 0.127,
+    "min_drill_mm": 0.2,
+    "min_finished_hole_mm": 0.2,
+    "min_annular_ring_mm": 0.13,
+    "min_hole_to_hole_mm": 0.25,
+    "min_mask_sliver_mm": 0.1,
+    "solder_mask_clearance_mm": 0.05,
+    "solder_mask_expansion_mm": 0.0,
+    "copper_to_edge_mm": 0.3
+  }
+}

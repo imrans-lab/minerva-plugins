@@ -68,6 +68,7 @@ IR_PARITY = "pcb_worker/ir_parity.py"
 GERBER = "pcb_worker/gerber.py"
 COMPILE_BOARD = "pcb_worker/compile_board.py"
 RESOLVED_BOARD = "pcb_worker/resolved_board.py"
+MANUFACTURER_PROFILE = "pcb_worker/manufacturer_profile.py"
 #: NOT source: the schema doc is TEST INPUT. Paths are relative to ``pcb/worker``,
 #: so this escapes one level, exactly as ``run_sweep.PCB_SIBLINGS`` copies it.
 BOARD_YAML_DOC = "../docs/board-yaml.md"
@@ -676,6 +677,99 @@ MUTANTS: tuple[dict, ...] = (
         "rationale": "Emits tented vias but silently drops untented ones, so a board's "
                      "mask-opened vias vanish from the IR while tented ones still "
                      "arrive — the one-sided counterpart to the unconditional drop above.",
+    },
+
+    # --- K21 board-house profiles (019f762004dc) ---------------------------
+    {
+        "id": "compileboard_authored_rule_profile_selection_ignored",
+        "file": COMPILE_BOARD,
+        "kind": "full",
+        "find": '    profile_id = rules.get("rule_profile")',
+        "replace": '    profile_id = None  # MUTANT: authored profile selection ignored',
+        # KILLER: tests/test_compile_board.py::test_a_board_can_select_a_named_board_house_profile
+        # (also tests/test_drc_geometric.py::test_two_profiles_same_board_different_verdicts)
+        "rationale": "THE LAZY IMPLEMENTATION K21's acceptance wording is aimed at: the "
+                     "profile subsystem loads and pins, but a board's own "
+                     "design_rules.rule_profile is never actually read, so every board "
+                     "silently compiles against v1 regardless of what it selects — a "
+                     "profile 'loaded and recorded that changes no verdict' (the brief's "
+                     "own phrase for the lazy fix this corpus entry is shaped on).",
+    },
+    {
+        "id": "compileboard_rule_profile_reported_but_not_enforced",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": "        minimums=_floor_with_clearance(profile.floor, float(clearance)),",
+        "replace": L(
+            "        minimums=_floor_with_clearance(",
+            "            _default_rule_profile().floor, float(clearance)),",
+            "        # MUTANT: enforcement floor pinned to the default regardless of selection",
+        ),
+        # KILLER: tests/test_drc_geometric.py::test_two_profiles_same_board_different_verdicts
+        # (the OSH Park compile stays "clean" instead of "violations"; the
+        # rule_profile.id/digest reporting assertions in the SAME test still
+        # pass, which is why they alone cannot be the acceptance test.)
+        "rationale": "THE HALF THAT LOOKS WHOLE: design_rules.rule_profile and "
+                     "provenance.rule_profile_ref still carry the SELECTED profile's ref "
+                     "(drc_geometric's 'rule_profile' reporting stays correct), but the "
+                     "floor that actually gates DRC findings stays v1's regardless of "
+                     "selection. A test that only checks the reported id/digest — half of "
+                     "K21's acceptance criterion — cannot see this; only a verdict "
+                     "comparison can (brief R2's explicit warning against mistaking the "
+                     "reporting half for the whole).",
+    },
+
+    # --- manufacturer_profile: fail-closed floor loading (019f762004dc) ----
+    {
+        "id": "manufacturerprofile_missing_field_guard_removed",
+        "file": MANUFACTURER_PROFILE,
+        "kind": "full",
+        "find": L(
+            "    missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor]",
+            "    if missing:",
+            "        raise RuleProfileError(",
+            '            f"rule profile {profile_id!r} floor is missing field(s) {\'/\'.join(missing)}; "',
+            '            f"a profile must supply all ten ManufacturingConstraints fields or fail "',
+            '            f"(no merge with another profile\'s defaults)")',
+        ),
+        "replace": "    missing = []  # MUTANT: missing-field guard removed entirely",
+        # KILLER: tests/test_manufacturer_profile.py::
+        #   test_a_floor_missing_any_single_field_fails_closed_not_merged[[]*10]
+        # (all ten parametrizations; each now raises a bare KeyError instead
+        # of RuleProfileError, which pytest.raises(RuleProfileError) does not
+        # catch) and test_compile_board.py::
+        #   test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged.
+        "rationale": "Removes the ten-fields-or-fail gate outright, so a profile file "
+                     "missing any ManufacturingConstraints key is no longer refused before "
+                     "reaching ManufacturingConstraints(**numeric_floor) — the exact "
+                     "'merge with v1 defaults' failure shape the brief names by name, "
+                     "just without even a merge: here the missing key crashes downstream "
+                     "instead of being silently filled, which is still a fail-OPEN in the "
+                     "sense that the intended fail-CLOSED diagnostic (RuleProfileError "
+                     "naming the missing field) never fires.",
+    },
+    {
+        "id": "manufacturerprofile_one_required_field_exempted_from_the_check",
+        "file": MANUFACTURER_PROFILE,
+        "kind": "half",
+        "find": "    missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor]",
+        "replace": L(
+            "    missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor",
+            '                and key != "solder_mask_expansion_mm"]',
+            "    # MUTANT: one of the ten required fields silently exempted from the gate",
+        ),
+        # KILLER: tests/test_manufacturer_profile.py::
+        #   test_a_floor_missing_any_single_field_fails_closed_not_merged[solder_mask_expansion_mm]
+        # ONLY that one parametrization; the other nine still pass, which is
+        # exactly the point of parametrizing over every field instead of
+        # picking one representative.
+        "rationale": "ONE OF TEN, not all ten: the same shape as "
+                     "compileboard_net_class_min_clearance_parsed_then_dropped above — a "
+                     "single field's completeness check quietly goes missing while the "
+                     "other nine still gate correctly, so a test suite that only tries "
+                     "ONE representative missing-field case (instead of every field) would "
+                     "call this profile subsystem complete while a real board house's "
+                     "profile missing exactly this key compiles anyway.",
     },
 
     # ----------------------------------------------------- resolved_board --

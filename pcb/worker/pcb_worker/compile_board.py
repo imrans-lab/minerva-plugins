@@ -73,6 +73,12 @@ from .footprints import (
     resolve_footprint,
 )
 from .geometry import PlacementTransform, TRANSFORM_VERSION
+from .manufacturer_profile import (
+    DEFAULT_PROFILE_ROOT,
+    LoadedRuleProfile,
+    RuleProfileError,
+    load_rule_profile,
+)
 from .resolved_board import (
     ArcGeometry,
     BoardProvenance,
@@ -109,7 +115,6 @@ from .resolved_board import (
     ResolutionSuccess,
     RoundHole,
     RoutingDefaults,
-    RuleProfileRef,
     Side,
     SourceRef,
     StackupEntry,
@@ -174,30 +179,33 @@ _TECHNICAL_LAYER_IDS = (
     "F.CrtYd", "B.CrtYd", "Edge.Cuts",
 )
 
-# Conservative manufacturing floor (a VERSIONED, digest-pinned rule source — the
-# only sanctioned origin for a design-rule minimum, keystone comment 608
-# fail-closed sweep).  The board's authored clearance may only TIGHTEN
-# min_clearance above this floor, never weaken it (K2 review 621 MF5).
-_V1_MANUFACTURING_FLOOR = {
-    "min_trace_width_mm": 0.127,
-    "min_clearance_mm": 0.127,
-    "min_drill_mm": 0.2,
-    "min_finished_hole_mm": 0.2,
-    "min_annular_ring_mm": 0.13,
-    "min_hole_to_hole_mm": 0.25,
-    "min_mask_sliver_mm": 0.1,
-    "solder_mask_clearance_mm": 0.05,
-    "solder_mask_expansion_mm": 0.0,
-    "copper_to_edge_mm": 0.3,
-}
+# Manufacturing floor origin (K21, docket 019f762004dc): a VERSIONED,
+# digest-pinned rule source is the only sanctioned origin for a design-rule
+# minimum (keystone comment 608 fail-closed sweep) — the board's authored
+# clearance may only TIGHTEN min_clearance above the SELECTED profile's floor,
+# never weaken it (K2 review 621 MF5; see ``_floor_with_clearance``).
+#
+# The floor used to be a hardcoded dict here. It is now a LOADABLE, PINNED,
+# FAIL-CLOSED profile (``manufacturer_profile.load_rule_profile``): a board
+# selects one by id via ``design_rules.rule_profile``; a board that selects
+# nothing gets the SAME v1 numbers as before, now shipped as a real profile
+# file (``pcb/library/profiles/v1-fab-conservative.json``) rather than a
+# Python literal, loaded through the identical fail-closed path any other
+# profile takes. There is no separate "hardcoded default" code path to drift
+# from the shipped file.
+DEFAULT_RULE_PROFILE_ID = "v1-fab-conservative"
 
 
-def _v1_rule_profile() -> RuleProfileRef:
-    digest = content_id({"floor": _V1_MANUFACTURING_FLOOR, "profile": "v1-conservative"})
-    return RuleProfileRef(id="v1-fab-conservative", version="1", digest=digest)
+def _default_rule_profile() -> LoadedRuleProfile:
+    # Eager at import time (mirrors the prior ``V1_RULE_PROFILE = _v1_rule_profile()``
+    # module-level constant): a broken default profile file must fail the
+    # instant this module is imported, not silently the first time a board
+    # omits ``rule_profile``.
+    return load_rule_profile(DEFAULT_RULE_PROFILE_ID)
 
 
-V1_RULE_PROFILE = _v1_rule_profile()
+_DEFAULT_RULE_PROFILE = _default_rule_profile()
+V1_RULE_PROFILE = _DEFAULT_RULE_PROFILE.ref
 
 
 class DefaultCapabilityPolicy:
@@ -593,7 +601,38 @@ def _build_net_classes(rules: dict, board_id: str, requested_outputs: tuple[str,
     return tuple(classes), class_id_by_net
 
 
+def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None],
+                                diags: _Diagnostics) -> Union[LoadedRuleProfile, None]:
+    """Resolve the board's SELECTED manufacturing-floor profile.
+
+    ``design_rules.rule_profile`` names a profile id; an absent/``None`` key
+    selects :data:`DEFAULT_RULE_PROFILE_ID` (v1), through the IDENTICAL
+    fail-closed loader path any other id takes -- there is no separate
+    "use the hardcoded floor" branch left to drift from the shipped file.
+
+    FAIL CLOSED (K21, docket 019f762004dc): an unknown, unreadable, or
+    malformed profile -- including one missing any of the ten
+    ``ManufacturingConstraints`` fields -- is a compile ERROR. Never a silent
+    fall back to v1 when a DIFFERENT profile was requested and could not be
+    loaded; that would let a board's digest/verdict claim to be one board
+    house while actually enforcing another's numbers."""
+    profile_id = rules.get("rule_profile")
+    if profile_id is None:
+        profile_id = DEFAULT_RULE_PROFILE_ID
+    if not isinstance(profile_id, str) or not profile_id:
+        diags.error("invalid_design_rule",
+                    f"design_rules.rule_profile must be a non-empty string naming a "
+                    f"pinned board-house profile; got {profile_id!r}", _board_ref())
+        return None
+    try:
+        return load_rule_profile(profile_id, library_root=profile_root)
+    except RuleProfileError as exc:
+        diags.error("unknown_rule_profile", str(exc), _board_ref())
+        return None
+
+
 def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str, ...],
+                        profile_root: Union[str, Path, None],
                         diags: _Diagnostics
                         ) -> Union[tuple[ResolvedDesignRules, dict[str, str]], None]:
     """Build the board's :class:`ResolvedDesignRules` and the net-name -> class-id
@@ -630,6 +669,9 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
                 "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the v1 IR",
                 requested_outputs, diags):
             return None
+    profile = _resolve_board_rule_profile(rules, profile_root, diags)
+    if profile is None:
+        return None
     net_classes, class_id_by_net = _build_net_classes(rules, board_id, requested_outputs, diags)
     return ResolvedDesignRules(
         defaults=RoutingDefaults(
@@ -637,19 +679,21 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
             via_diameter_mm=float(via_diameter),
             via_drill_mm=float(via_drill),
         ),
-        minimums=_floor_with_clearance(float(clearance)),
+        minimums=_floor_with_clearance(profile.floor, float(clearance)),
         allowed_via_kinds=(ViaKind.THROUGH,),
         net_classes=net_classes,
-        rule_profile=V1_RULE_PROFILE,
+        rule_profile=profile.ref,
     ), class_id_by_net
 
 
-def _floor_with_clearance(board_clearance_mm: float) -> ManufacturingConstraints:
-    """v1 manufacturing floor; the board's authored clearance may only TIGHTEN
-    min_clearance above the profile floor, never weaken it (K2 review 621 MF5)."""
-    floor = dict(_V1_MANUFACTURING_FLOOR)
-    floor["min_clearance_mm"] = max(_V1_MANUFACTURING_FLOOR["min_clearance_mm"], board_clearance_mm)
-    return ManufacturingConstraints(**floor)
+def _floor_with_clearance(profile_floor: ManufacturingConstraints,
+                          board_clearance_mm: float) -> ManufacturingConstraints:
+    """The SELECTED profile's floor; the board's authored clearance may only
+    TIGHTEN min_clearance above THAT floor, never weaken it (K2 review 621
+    MF5). ``max()`` is the whole safety property here — a board may only ask
+    for MORE clearance than its chosen board house requires, never less."""
+    return replace(profile_floor,
+                   min_clearance_mm=max(profile_floor.min_clearance_mm, board_clearance_mm))
 
 
 # ---------------------------------------------------------------------------
@@ -1695,12 +1739,19 @@ def compile_board(
     requested_outputs: tuple[str, ...] = V1_FAB_OUTPUTS,
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
+    profile_root: Union[str, Path, None] = None,
 ) -> ResolutionResult:
     """Compile a canonical board dict into a :class:`ResolutionResult`.
 
     Returns :class:`ResolutionSuccess` (board + non-fatal diagnostics) or
     :class:`ResolutionFailure` (ERROR diagnostics, no board).  Never raises for
-    an INPUT defect — only genuine programmer errors propagate."""
+    an INPUT defect — only genuine programmer errors propagate.
+
+    ``profile_root`` overrides where ``design_rules.rule_profile`` is resolved
+    from (default :data:`manufacturer_profile.DEFAULT_PROFILE_ROOT`, the
+    shipped ``pcb/library/profiles/`` directory) -- mirrors ``library_root``/
+    ``lockfile`` and exists mainly so tests can exercise the fail-closed
+    profile-loading paths without touching shipped library data."""
     if policy is None:
         policy = DefaultCapabilityPolicy()
     diags = _Diagnostics()
@@ -1773,7 +1824,7 @@ def compile_board(
     two_layer = _require_two_layer(board, diags)
     outline = _build_outline(board, diags)
     layer_stack = _build_layer_stack() if two_layer else None
-    built_rules = _build_design_rules(board, board_id, requested_outputs, diags)
+    built_rules = _build_design_rules(board, board_id, requested_outputs, profile_root, diags)
     design_rules, class_id_by_net = built_rules if built_rules is not None else (None, {})
 
     net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
@@ -1913,7 +1964,12 @@ def compile_board(
         compiler_version=f"{COMPILER_VERSION}+transform/{TRANSFORM_VERSION}",
         source_digest=source_digest,
         library_lock_ref=library_lock_ref,
-        rule_profile_ref=V1_RULE_PROFILE,
+        # The SAME ref just placed on design_rules.rule_profile (guaranteed
+        # non-None by the has_error/None gate above) -- setting both from one
+        # value is what keeps ResolvedBoard's "board and design-rule
+        # provenance disagree" consistency check (:1098-1100) satisfied for
+        # every profile, not just the default (K21, docket 019f762004dc).
+        rule_profile_ref=design_rules.rule_profile,
     )
 
     try:

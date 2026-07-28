@@ -144,6 +144,76 @@ def test_determinate_result_carries_board_identity_and_rule_profile():
         "id": prof.id, "version": prof.version, "digest": prof.digest}
 
 
+# --- K21 (docket 019f762004dc): a board-house PROFILE moves a VERDICT -------
+#
+# The acceptance criterion is K21's own wording: two profiles, the SAME
+# board, and the verdict DIFFERS between them. Deliberately built on TRACE
+# WIDTH, not clearance: `compile_board._floor_with_clearance` takes
+# `max(profile_floor.min_clearance_mm, board_clearance_mm)`, so a board that
+# authors a generous clearance_mm would sail past BOTH profiles' clearance
+# floors and the fixture would prove nothing about which profile is active
+# (brief R2). Trace width has no such rescue -- each trace's authored
+# `width_mm` is compared directly against the ACTIVE profile's
+# `min_trace_width_mm`, with no board-side override.
+#
+# 0.14mm sits strictly BETWEEN the two shipped floors: v1's 0.127mm (the
+# board's own design_rules never weakens this) and OSH Park's published 6
+# mil / 0.1524mm 2-layer trace width (docs.oshpark.com/services/two-layer/,
+# see pcb/library/profiles/oshpark-2layer.json for the full citation) --
+# clean under one, a GC1 violation under the other, with every other
+# authored dimension (clearance_mm 0.2, pad drill/annulus) held fixed and
+# comfortably inside BOTH profiles' other floors, so GC1 is the only rule
+# that can move.
+
+
+def _profiled_board(profile_id: str):
+    return _base(
+        components=[_th_pad_comp(ref="U1", annulus=1.6)],
+        nets=[{"name": "N", "pins": ["U1.1"]}],
+        traces=[_trace(0.14, net="N", a=(10.0, 10.0), b=(20.0, 10.0))],
+        design_rules={"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                      "via_diameter_mm": 0.8, "via_drill_mm": 0.4,
+                      "rule_profile": profile_id})
+
+
+def test_two_profiles_same_board_different_verdicts():
+    v1_board = _profiled_board("v1-fab-conservative")
+    oshpark_board = _profiled_board("oshpark-2layer")
+
+    v1_result = compile_board(v1_board)
+    assert isinstance(v1_result, ResolutionSuccess), [
+        d.code for d in v1_result.diagnostics if d.severity is DiagnosticSeverity.ERROR]
+    v1_res = run_geometric_drc(v1_result.board)
+
+    oshpark_result = compile_board(oshpark_board)
+    assert isinstance(oshpark_result, ResolutionSuccess), [
+        d.code for d in oshpark_result.diagnostics if d.severity is DiagnosticSeverity.ERROR]
+    oshpark_res = run_geometric_drc(oshpark_result.board)
+
+    # THE VERDICT DIFFERS -- the same 0.14mm trace passes v1 and fails
+    # OSH Park. A lazy profile that loads and records but never reaches
+    # enforcement would make this assertion fail (both "clean").
+    assert v1_res["verdict"] == "clean"
+    assert _counts(v1_res, "gc1_trace_width") == 0
+    assert oshpark_res["verdict"] == "violations"
+    assert _counts(oshpark_res, "gc1_trace_width") == 1
+
+    # Output reflects the ACTIVE profile on both compiles. `drc_geometric`
+    # already emits this (brief R2) -- asserted here as the OTHER half of
+    # the acceptance criterion, not a substitute for the verdict check above.
+    assert v1_res["rule_profile"]["id"] == "v1-fab-conservative"
+    assert oshpark_res["rule_profile"]["id"] == "oshpark-2layer"
+    assert v1_res["rule_profile"]["digest"] != oshpark_res["rule_profile"]["digest"]
+
+    # BOTH design_rules.rule_profile and provenance.rule_profile_ref are set
+    # and agree for the non-default profile too (ResolvedBoard's own
+    # consistency check at resolved_board.py:1098-1100 would already refuse
+    # construction if they disagreed -- this pins the positive case).
+    board = oshpark_result.board
+    assert board.provenance.rule_profile_ref == board.design_rules.rule_profile
+    assert board.provenance.rule_profile_ref.id == "oshpark-2layer"
+
+
 def test_success_surfaces_compile_warnings_via_adapter():
     board = _base(components=[_th_pad_comp(annulus=1.6)])
     result = compile_board(board)

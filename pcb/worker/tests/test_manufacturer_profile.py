@@ -1,0 +1,193 @@
+"""K21 (docket 019f762004dc) — pinned, fail-closed board-house profiles.
+
+The manufacturing floor used to be one hardcoded dict
+(``compile_board._V1_MANUFACTURING_FLOOR``). This unit replaces it with a
+LOADABLE profile (``manufacturer_profile.load_rule_profile``): a board
+selects a board-house id via ``design_rules.rule_profile`` and the compiler
+resolves it through the same fail-closed path every profile takes -- no
+separate "use the hardcoded default" branch, no silent fall back to v1 when
+a DIFFERENT profile was requested and failed to load, and no merge of a
+partial profile's missing fields from anywhere else.
+
+Covers, at the LOADER level (this file) and the COMPILER level
+(``test_compile_board.py``/``test_drc_geometric.py``):
+  * a well-formed profile loads to a complete, pinned floor;
+  * unknown id, unreadable file, malformed JSON, non-object floor, a floor
+    missing ANY of the ten fields, an extra/unrecognized floor field, a
+    non-numeric value, and an id/filename mismatch all fail CLOSED
+    (``RuleProfileError``), never a partial or merged result;
+  * the two shipped profiles (v1, OSH Park) each load to their own complete,
+    independently-digested floor.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from pcb_worker.manufacturer_profile import (
+    DEFAULT_PROFILE_ROOT,
+    REQUIRED_FLOOR_FIELDS,
+    LoadedRuleProfile,
+    RuleProfileError,
+    load_rule_profile,
+)
+from pcb_worker.resolved_board import ManufacturingConstraints, RuleProfileRef
+
+
+# ---------------------------------------------------------------------------
+# Well-formed shipped profiles.
+# ---------------------------------------------------------------------------
+
+
+def test_v1_profile_loads_to_a_complete_pinned_floor():
+    loaded = load_rule_profile("v1-fab-conservative")
+    assert isinstance(loaded, LoadedRuleProfile)
+    assert isinstance(loaded.ref, RuleProfileRef)
+    assert loaded.ref.id == "v1-fab-conservative"
+    assert loaded.ref.version == "1"
+    assert len(loaded.ref.digest) == 64
+    assert isinstance(loaded.floor, ManufacturingConstraints)
+    # The exact numbers formerly hardcoded in compile_board._V1_MANUFACTURING_FLOOR.
+    assert loaded.floor.min_trace_width_mm == 0.127
+    assert loaded.floor.min_clearance_mm == 0.127
+    assert loaded.floor.min_drill_mm == 0.2
+    assert loaded.floor.min_finished_hole_mm == 0.2
+    assert loaded.floor.min_annular_ring_mm == 0.13
+    assert loaded.floor.min_hole_to_hole_mm == 0.25
+    assert loaded.floor.min_mask_sliver_mm == 0.1
+    assert loaded.floor.solder_mask_clearance_mm == 0.05
+    assert loaded.floor.solder_mask_expansion_mm == 0.0
+    assert loaded.floor.copper_to_edge_mm == 0.3
+
+
+def test_oshpark_profile_loads_to_a_complete_pinned_floor_distinct_from_v1():
+    loaded = load_rule_profile("oshpark-2layer")
+    assert loaded.ref.id == "oshpark-2layer"
+    assert len(loaded.ref.digest) == 64
+    v1 = load_rule_profile("v1-fab-conservative")
+    assert loaded.ref.digest != v1.ref.digest
+    # OSH Park's published 2-layer trace width/spacing (6 mil == 0.1524mm) is
+    # stricter (larger) than v1's 0.127mm -- the discriminating axis the
+    # compiler-level two-profile test exercises.
+    assert loaded.floor.min_trace_width_mm == pytest.approx(0.1524)
+    assert loaded.floor.min_trace_width_mm > v1.floor.min_trace_width_mm
+
+
+def test_shipped_profile_root_holds_exactly_the_two_shipped_profiles():
+    # Not a completeness guarantee for all time, just pins today's shipped
+    # set so an accidental extra/missing file is noticed.
+    names = sorted(p.stem for p in DEFAULT_PROFILE_ROOT.glob("*.json"))
+    assert names == ["oshpark-2layer", "v1-fab-conservative"]
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: every defect shape raises RuleProfileError, never a partial
+# or silently-merged result.
+# ---------------------------------------------------------------------------
+
+
+def _write_profile(tmp_path, name: str, payload) -> None:
+    path = tmp_path / f"{name}.json"
+    if isinstance(payload, str):
+        path.write_text(payload, encoding="utf-8")
+    else:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _valid_floor() -> dict:
+    return {
+        "min_trace_width_mm": 0.2, "min_clearance_mm": 0.2, "min_drill_mm": 0.3,
+        "min_finished_hole_mm": 0.3, "min_annular_ring_mm": 0.2,
+        "min_hole_to_hole_mm": 0.3, "min_mask_sliver_mm": 0.15,
+        "solder_mask_clearance_mm": 0.08, "solder_mask_expansion_mm": 0.01,
+        "copper_to_edge_mm": 0.4,
+    }
+
+
+def test_unknown_profile_id_fails_closed(tmp_path):
+    with pytest.raises(RuleProfileError, match="unknown rule profile"):
+        load_rule_profile("no-such-house", library_root=tmp_path)
+
+
+def test_malformed_json_fails_closed(tmp_path):
+    _write_profile(tmp_path, "bad", "{not json")
+    with pytest.raises(RuleProfileError, match="not valid JSON"):
+        load_rule_profile("bad", library_root=tmp_path)
+
+
+def test_non_object_top_level_fails_closed(tmp_path):
+    _write_profile(tmp_path, "bad", [1, 2, 3])
+    with pytest.raises(RuleProfileError, match="must be a JSON object"):
+        load_rule_profile("bad", library_root=tmp_path)
+
+
+def test_id_mismatch_between_filename_and_declared_id_fails_closed(tmp_path):
+    _write_profile(tmp_path, "acme", {"id": "different-name", "version": "1",
+                                       "floor": _valid_floor()})
+    with pytest.raises(RuleProfileError, match="does not match the requested id"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_missing_version_fails_closed(tmp_path):
+    _write_profile(tmp_path, "acme", {"id": "acme", "floor": _valid_floor()})
+    with pytest.raises(RuleProfileError, match="version"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_non_object_floor_fails_closed(tmp_path):
+    _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": "loose"})
+    with pytest.raises(RuleProfileError, match="no 'floor' mapping"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+@pytest.mark.parametrize("missing_field", REQUIRED_FLOOR_FIELDS)
+def test_a_floor_missing_any_single_field_fails_closed_not_merged(tmp_path, missing_field):
+    """THE CENTRAL fail-closed contract (brief R2): a profile supplies all
+    TEN fields or fails -- there is no fallback that fills the missing one
+    from v1 or anywhere else. Parametrized over every field so no single
+    site's check can be silently absent for one of the ten (the exact shape
+    that lost the min_finished_hole_mm enforcement site behind a shared
+    alias upstream in drc_geometric -- this loader must not repeat it)."""
+    floor = _valid_floor()
+    del floor[missing_field]
+    _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
+    with pytest.raises(RuleProfileError, match=f"missing field.*{missing_field}"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_a_floor_with_an_extra_unknown_field_fails_closed(tmp_path):
+    floor = _valid_floor()
+    floor["min_silk_width_mm"] = 0.15  # not a ManufacturingConstraints field
+    _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
+    with pytest.raises(RuleProfileError, match="unknown field"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_a_non_numeric_floor_value_fails_closed(tmp_path):
+    floor = _valid_floor()
+    floor["min_drill_mm"] = "0.3"  # string, not a number
+    _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
+    with pytest.raises(RuleProfileError, match="min_drill_mm"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_a_boolean_floor_value_is_rejected_not_coerced(tmp_path):
+    # bool is a subclass of int in Python; True/False must not silently
+    # become 1.0/0.0 mm.
+    floor = _valid_floor()
+    floor["copper_to_edge_mm"] = True
+    _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
+    with pytest.raises(RuleProfileError, match="copper_to_edge_mm"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_missing_file_directory_fails_closed(tmp_path):
+    with pytest.raises(RuleProfileError):
+        load_rule_profile("acme", library_root=tmp_path / "does-not-exist")
+
+
+def test_empty_profile_id_fails_closed():
+    with pytest.raises(RuleProfileError, match="non-empty string"):
+        load_rule_profile("")

@@ -18,6 +18,7 @@ belongs to K3 (review 621, trap 1).
 from __future__ import annotations
 
 import copy
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -613,6 +614,86 @@ def test_clearance_never_weakens_manufacturer_floor():
 def test_authored_clearance_above_floor_is_honored(smart_remote_result):
     # smart_remote authors 0.2, above the 0.127 floor.
     assert smart_remote_result.board.design_rules.minimums.min_clearance_mm == 0.2
+
+
+# ---------------------------------------------------------------------------
+# K21 (docket 019f762004dc) — the manufacturing floor is a LOADABLE, PINNED,
+# FAIL-CLOSED profile selected by design_rules.rule_profile, not a hardcoded
+# dict. See tests/test_manufacturer_profile.py for the loader's own
+# fail-closed matrix and test_drc_geometric.py::test_two_profiles_same_board_different_verdicts
+# for the K21 acceptance criterion (same board, different verdicts).
+# ---------------------------------------------------------------------------
+
+
+def test_a_board_that_names_no_profile_gets_v1_through_the_same_loader():
+    # No design_rules.rule_profile key -- resolves to DEFAULT_RULE_PROFILE_ID
+    # ("v1-fab-conservative") through manufacturer_profile.load_rule_profile,
+    # the identical path any other id takes. Same assertion shape as
+    # test_board_provenance_full_digests_and_transform's V1_RULE_PROFILE
+    # check, restated at the design_rules level.
+    result = compile_board(_one_component_board("R_0805"))
+    assert isinstance(result, ResolutionSuccess)
+    assert result.board.design_rules.rule_profile == V1_RULE_PROFILE
+    assert result.board.provenance.rule_profile_ref == V1_RULE_PROFILE
+
+
+def test_a_board_can_select_a_named_board_house_profile():
+    board = _one_component_board("R_0805")
+    board["design_rules"]["rule_profile"] = "oshpark-2layer"
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    rules = result.board.design_rules
+    assert rules.rule_profile.id == "oshpark-2layer"
+    assert rules.rule_profile != V1_RULE_PROFILE
+    # The SELECTED profile's floor is what actually lands in .minimums, not
+    # v1's -- OSH Park's published 6 mil (0.1524mm) trace width, distinct
+    # from v1's 0.127mm.
+    assert rules.minimums.min_trace_width_mm == pytest.approx(0.1524)
+    # provenance.rule_profile_ref tracks the SAME non-default ref (the
+    # ResolvedBoard consistency check at resolved_board.py:1098-1100 would
+    # already refuse construction if these two disagreed).
+    assert result.board.provenance.rule_profile_ref == rules.rule_profile
+
+
+def test_an_unknown_rule_profile_fails_the_whole_compile_closed():
+    board = _one_component_board("R_0805")
+    board["design_rules"]["rule_profile"] = "definitely-not-a-real-board-house"
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unknown_rule_profile" in _errors(result)
+
+
+def test_a_non_string_rule_profile_fails_closed():
+    board = _one_component_board("R_0805")
+    board["design_rules"]["rule_profile"] = 42
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_design_rule" in _errors(result)
+
+
+def test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged(tmp_path):
+    # THE TRAP THIS UNIT NAMES EXPLICITLY (brief R2): a loader that filled a
+    # missing field from v1 would produce a hybrid whose digest still claims
+    # to be "acme-fab" while quietly enforcing v1's number on the field it
+    # never authored. Prove the compile fails closed instead.
+    incomplete_floor = {
+        "min_trace_width_mm": 0.2, "min_clearance_mm": 0.2, "min_drill_mm": 0.3,
+        "min_finished_hole_mm": 0.3, "min_annular_ring_mm": 0.2,
+        "min_hole_to_hole_mm": 0.3, "min_mask_sliver_mm": 0.15,
+        "solder_mask_clearance_mm": 0.08,
+        # solder_mask_expansion_mm deliberately OMITTED
+        "copper_to_edge_mm": 0.4,
+    }
+    (tmp_path / "acme-fab.json").write_text(
+        json.dumps({"id": "acme-fab", "version": "1", "floor": incomplete_floor}),
+        encoding="utf-8")
+    board = _one_component_board("R_0805")
+    board["design_rules"]["rule_profile"] = "acme-fab"
+    result = compile_board(board, profile_root=tmp_path)
+    assert isinstance(result, ResolutionFailure)
+    assert "unknown_rule_profile" in _errors(result)
+    message = next(d.message for d in result.diagnostics if d.code == "unknown_rule_profile")
+    assert "solder_mask_expansion_mm" in message
 
 
 def test_stackup_asserts_no_invented_thickness(smart_remote_result):

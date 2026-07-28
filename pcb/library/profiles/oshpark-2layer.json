@@ -1,0 +1,17 @@
+{
+  "id": "oshpark-2layer",
+  "version": "1",
+  "source": "OSH Park 2-Layer Prototype Service, published design rules (fetched 2026-07-28): https://docs.oshpark.com/services/two-layer/ and https://docs.oshpark.com/design-tools/kicad/kicad-design-rules/ . Quoted values -- trace width 6 mil (0.1524mm); trace spacing 6 mil (0.1524mm); minimum drill size 10 mil (0.254mm); minimum annular ring 5 mil (0.127mm); minimum soldermask web 4 mil (0.1016mm); maximum soldermask alignment 3 mil (0.0762mm); board-edge copper keepout 15 mil (0.381mm); recommended KiCad solder mask expansion 2 mil (0.0508mm); hole-to-hole spacing is published as a 5 mil (0.127mm) RECOMMENDATION, not a hard minimum. Fields OSH Park does not separately publish (a distinct finished-hole number apart from drill size) reuse the closest published figure (drill size) rather than inventing one; see field-level notes below. NOTE: an earlier draft of this file cited 13 mil drill / 7 mil annular ring from third-party/forum recall; those numbers do NOT appear on OSH Park's own current docs pages (verified by two independent direct fetches of docs.oshpark.com on 2026-07-28) and were replaced with the values actually quoted on docs.oshpark.com above.",
+  "floor": {
+    "min_trace_width_mm": 0.1524,
+    "min_clearance_mm": 0.1524,
+    "min_drill_mm": 0.254,
+    "min_finished_hole_mm": 0.254,
+    "min_annular_ring_mm": 0.127,
+    "min_hole_to_hole_mm": 0.127,
+    "min_mask_sliver_mm": 0.1016,
+    "solder_mask_clearance_mm": 0.0762,
+    "solder_mask_expansion_mm": 0.0508,
+    "copper_to_edge_mm": 0.381
+  }
+}
