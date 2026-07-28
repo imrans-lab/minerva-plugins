@@ -21,7 +21,8 @@ WHY THE SCRATCH LAYOUT IS WHAT IT IS (two traps, both observed)
 
 2. THE PARENT-DIRECTORY TRAP. ``git ls-files pcb/worker`` returns four entries
    (agent_router, pcb_worker, tests, pyproject.toml) and a copy of those four is
-   NOT a runnable tree: 15 call sites across 11 test files resolve
+   NOT a runnable tree — see ``WORKER_ENTRIES`` for the fifth, ``tools``, which is
+   copied because it is test input. 15 call sites across 11 test files resolve
    ``Path(__file__).resolve().parents[2]`` — which is ``pcb/``, not
    ``pcb/worker/`` — and read from ``pcb/spikes`` and ``pcb/spec``. The scratch
    tree therefore preserves the ``pcb/`` parent and copies those siblings.
@@ -36,10 +37,14 @@ WHY THE SCRATCH LAYOUT IS WHAT IT IS (two traps, both observed)
      classifier refuses to score as a kill. Omitting it cost 2 collection errors
      / 0 tests collected.
    * ``pcb/ui`` — ``tests/test_kicad_cli_boundary.py`` globs ``PCB/"ui"`` for
-     ``**/*.gd`` behind ``if not root.exists(): continue``. Without it that test
-     still PASSES while silently scanning 18 fewer files. A control that passes
-     for a weaker reason than the real run is not a control, so ``ui`` is copied
-     too.
+     ``**/*.gd``. It USED to skip a missing root with ``continue``, so without
+     ``ui`` in the manifest that test still PASSED while silently scanning 18
+     fewer files — which is how the escape was found. That fail-open is now
+     closed (epoch Z, unit Z4ab, item 019fa0718a20): ``_iter_runtime_files``
+     raises on a missing root, so omitting ``ui`` today is a LOUD collection
+     failure rather than a quiet false green. ``ui`` stays in the manifest
+     regardless — the point is that the control must pass for the real reason,
+     and a copied root is cheaper than a refusal.
 
    The lesson generalises: the copy manifest is derived from what the CONTROL
    proves, never from what ``git ls-files`` suggests.
@@ -56,6 +61,29 @@ Every pytest invocation sets ``PYTHONDONTWRITEBYTECODE=1`` and passes
 the copy. A stale ``.pyc`` invalidates a mutation matrix in the reassuring
 direction, which is the exact failure this round exists to prevent.
 
+WHAT ``--compare`` REFUSES ON (exit 2), AND WHY EACH ONE EXISTS
+---------------------------------------------------------------
+This harness is the phase-boundary gate. Every guard below is there because
+without it the gate can return "clean" for a corpus or a tree that cannot
+reproduce the verdict:
+
+  * ENVIRONMENT drift (python / pytest / kicad-cli / the gerber libs) — ~15
+    oracle tests are ``skipif``, and a SKIPPED TEST KILLS NOTHING.
+  * ``source_digest`` — the production source the corpus targets.
+  * ``corpus_digest`` — the mutation SEMANTICS of the corpus itself. ``corpus.py``
+    is under neither hashed source dir, so without this an entry's
+    find/replace/file/kind can be edited under a stable ``id``: the id sets still
+    match, the kill count is preserved by making the mutant EASIER to kill, and
+    the sweep reports clean. ABSENT is refused too — assuming absent means equal
+    is the same fail-open one level up.
+  * a non-empty ``git diff`` of the production dirs against the recorded base SHA.
+  * differing mutant ID SETS between the two runs.
+
+``equivalent`` is deliberately OUTSIDE the corpus digest: it is established after
+a mutant survives, by probing it, so annotating one must not void a comparison.
+The price is that flipping it EXCUSES a survivor, so ``--sync-corpus-fields``
+reports every flip loudly and refuses to touch anything the digest covers.
+
 ENTRY POINTS
 ------------
   --check-imports            import-origin self-proof only
@@ -64,6 +92,8 @@ ENTRY POINTS
   --concurrency-check ID     one mutant serially vs the same one inside a batch
   --sweep -o results.json    the full baseline sweep
   --compare A.json B.json    acceptance: is the set of killed mutant ids identical?
+  --sync-corpus-fields R     re-derive the post-hoc `equivalent` annotation only
+  --attribution R            sole-killer (protected) + zero-unique-kill lists
 """
 
 from __future__ import annotations
@@ -92,7 +122,15 @@ sys.path.insert(0, str(HERE))
 import corpus  # noqa: E402  (deliberate: the corpus lives beside this file)
 
 #: Copied INTO the scratch tree as ``<tmp>/pcb/worker/<name>``.
-WORKER_ENTRIES = ("agent_router", "pcb_worker", "tests", "pyproject.toml")
+#:
+#: ``tools`` joined for the same reason ``docs`` joined PCB_SIBLINGS below: it IS
+#: test input. ``tests/test_mutation_harness.py`` imports ``tools/mutants/``
+#: (run_sweep + corpus) to pin this harness's own gate-integrity checks, so
+#: without this the whole file errors at COLLECTION in every sweep run — control
+#: included — and a red control makes every mutant look killed. The tempting
+#: alternative, having those tests skip when ``tools/`` is absent, is the exact
+#: silent-gate-retirement this file warns about twice below. Copy the input.
+WORKER_ENTRIES = ("agent_router", "pcb_worker", "tests", "tools", "pyproject.toml")
 #: Copied INTO the scratch tree as ``<tmp>/pcb/<name>`` — the parents[2] escapes.
 #: See the module docstring: spikes/spec are read by tests, library is read by
 #: PRODUCTION source (footprints.py) at test-collection time, and ui is scanned
@@ -161,6 +199,66 @@ def source_digest() -> str:
     return h.hexdigest()
 
 
+#: The fields that define WHAT A MUTANT IS. Under a stable ``id`` these must never
+#: change, so they — and only they — are hashed into ``corpus_digest()``.
+DIGESTED_FIELDS = ("id", "file", "find", "replace", "kind")
+
+#: Legitimately POST-HOC, and therefore deliberately excluded from the digest.
+#: ``rationale``/``equivalent_reason`` are prose. ``equivalent`` is a verdict that
+#: BY DESIGN is established only after a mutant survives, by probing it (see
+#: ``sync_corpus_fields``) — hashing it would void every comparison the moment a
+#: survivor is CORRECTLY annotated, and a check that fires on correct workflow is
+#: a check somebody deletes.
+ANNOTATION_FIELDS = ("rationale", "equivalent", "equivalent_reason")
+
+KNOWN_FIELDS = frozenset(DIGESTED_FIELDS + ANNOTATION_FIELDS)
+
+
+def corpus_digest() -> str:
+    """Content hash of the mutation SEMANTICS of every corpus entry.
+
+    ``corpus.py`` lives under NEITHER directory hashed by ``source_digest()``, so
+    without this an existing entry's ``find``/``replace``/``file``/``kind`` can be
+    edited while its ``id`` stays put: the id-set comparison still matches, the
+    kill count is unchanged, and a mutant has been quietly defanged inside the
+    tool built to detect exactly that. This is the fingerprint that closes it.
+
+    Hashes the ``(id, file, find, replace, kind)`` of each entry, sorted by id —
+    NOT ``corpus.py``'s bytes. Bytes would fire on a docstring or comment edit,
+    which is harmless; a check that cries wolf gets disabled.
+
+    Each entry's tuple INCLUDES its own id, so exchanging the semantics of two
+    entries while both ids stay put changes the digest. A digest over the sorted
+    multiset of semantics alone would not — that swap is the discriminating case.
+
+    Values are length-prefixed and each entry is terminated, so text moved across
+    a field boundary (the tail of ``find`` into the head of ``replace``) cannot
+    collide with the original.
+    """
+    h = hashlib.sha256()
+    for m in sorted(corpus.MUTANTS, key=lambda e: e["id"]):
+        unknown = sorted(set(m) - KNOWN_FIELDS)
+        if unknown:
+            raise HarnessError(
+                f"mutant {m.get('id')!r} carries unknown field(s) {unknown}. The "
+                "digest hashes an ALLOW-LIST, so a field it has never heard of is "
+                "invisible to it — which is the fail-open this digest exists to "
+                "close. Add the field to DIGESTED_FIELDS if it is mutation "
+                "semantics, or to ANNOTATION_FIELDS if it is a post-hoc "
+                "annotation. Refusing to compute a digest that would not cover it.")
+        for key in DIGESTED_FIELDS:
+            value = m[key]
+            if not isinstance(value, str):
+                raise HarnessError(
+                    f"mutant {m.get('id')!r} field {key!r} is "
+                    f"{type(value).__name__}, not str. Refusing to hash a repr.")
+            raw = value.encode()
+            h.update(f"{key}:{len(raw)}:".encode())
+            h.update(raw)
+        h.update(b"\x1e")
+    return h.hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Environment pinning
 # ---------------------------------------------------------------------------
@@ -202,6 +300,7 @@ def environment() -> dict[str, Any]:
         "gerber-writer": _pkg_version("gerber-writer"),
         "base_sha": repo_head(),
         "source_digest": source_digest(),
+        "corpus_digest": corpus_digest(),
     }
 
 
@@ -557,6 +656,30 @@ def compare(before_path: Path, after_path: Path) -> int:
             "production source under pcb_worker/ + agent_router/ CHANGED between "
             "the two sweeps (source_digest differs). The mutants are not the same "
             "mutants; the comparison is void.")
+    b_corpus = b_env.get("corpus_digest")
+    a_corpus = a_env.get("corpus_digest")
+    absent = [name for name, value in (("before", b_corpus), ("after", a_corpus))
+              if not value]
+    if absent:
+        fatal.append(
+            f"the {' and '.join(absent)} file(s) record NO corpus_digest. That file "
+            "was written by a harness which did not fingerprint the mutant corpus, "
+            "so there is NO EVIDENCE the two sweeps used the same mutants — and a "
+            "same-id edit to a find/replace is precisely what the field exists to "
+            "catch. Absent is REFUSED, not assumed equal, because assuming equal "
+            "is the fail-open being fixed. Re-sweep to regenerate the file. The "
+            "digest is deliberately NOT reconstructed from base_sha: tools/ is "
+            "outside the clean-tree assertion, so the corpus can legitimately be "
+            "dirty at sweep time and the commit would be manufactured evidence.")
+    elif b_corpus != a_corpus:
+        fatal.append(
+            "the mutant CORPUS changed between the two sweeps (corpus_digest "
+            f"differs: {b_corpus} != {a_corpus}). Some entry's file/find/replace/"
+            "kind was edited while its id stayed the same, so the id sets still "
+            "agree and the kill count can be preserved by making a mutant EASIER "
+            "to kill. The mutants are not the same mutants; the comparison is "
+            "void. (Marking an entry `equivalent` does NOT cause this — that field "
+            "is excluded from the digest by design.)")
     base = b_env.get("base_sha")
     if base:
         diff = subprocess.run(
@@ -611,33 +734,72 @@ def compare(before_path: Path, after_path: Path) -> int:
 
 
 def sync_corpus_fields(results_path: Path) -> int:
-    """Re-derive the STATIC corpus fields (``file``, ``kind``, ``equivalent``) in a
-    results file from the corpus.
+    """Re-derive the POST-HOC corpus annotation (``equivalent``) in a results file.
 
-    These are properties of the CORPUS, not of the run, so they can be corrected
-    without re-running the suite — and they need to be, because equivalence is
-    established AFTER a mutant survives, by probing it. The RUN results
-    (``killed``, ``killed_by``, ``failing``, counts, returncode) are never touched
-    here; a change to those requires a real sweep.
+    THE RULE THIS FUNCTION OBEYS: it may only rewrite fields that
+    ``corpus_digest()`` EXCLUDES.
+
+    ``equivalent`` qualifies. Equivalence is established AFTER a mutant survives,
+    by probing it, so it has to be settable without re-running a half-hour sweep;
+    that is why the digest excludes it and why syncing it is correct workflow.
+
+    ``file`` and ``kind`` do NOT qualify. They are mutation SEMANTICS, they are
+    inside the digest, and a mismatch means the corpus was edited under a stable
+    id — which already voids every comparison involving this file. Rewriting them
+    from the current corpus would erase the exact evidence the digest exists to
+    preserve, laundering a same-id semantic swap into a clean comparison. This
+    function used to do that. It now REFUSES and names the entry.
+
+    The RUN results (``killed``, ``killed_by``, ``failing``, counts, returncode)
+    are never touched here; a change to those requires a real sweep.
     """
     data = json.loads(results_path.read_text())
     index = corpus.by_id()
-    changed: list[str] = []
+    flipped: list[tuple[str, bool, bool]] = []
     for m in data["payload"]["mutants"]:
         src = index.get(m["id"])
         if src is None:
             raise HarnessError(f"results carry unknown mutant id {m['id']!r}")
-        for key, value in (("file", src["file"]), ("kind", src["kind"]),
-                           ("equivalent", bool(src.get("equivalent", False)))):
-            if m[key] != value:
-                changed.append(f"{m['id']}.{key}: {m[key]!r} -> {value!r}")
-                m[key] = value
+        for key in ("file", "kind"):
+            if m[key] != src[key]:
+                raise HarnessError(
+                    f"mutant {m['id']!r} records {key}={m[key]!r} in {results_path} "
+                    f"but the corpus now says {key}={src[key]!r}. That is mutation "
+                    f"SEMANTICS changed under a stable id, which voids every "
+                    f"comparison involving this file. REFUSING to correct it — "
+                    f"correcting it is how a defanged mutant gets laundered into a "
+                    f"clean verdict. Re-sweep, or restore the entry.")
+        want = bool(src.get("equivalent", False))
+        if m["equivalent"] != want:
+            flipped.append((m["id"], bool(m["equivalent"]), want))
+            m["equivalent"] = want
+
+    recorded = data["run_metadata"].get("environment", {}).get("corpus_digest")
+    if recorded is None:
+        print(f"NOTE: {results_path} predates corpus fingerprinting (no "
+              f"corpus_digest), so an edit to any entry's find/replace CANNOT be "
+              f"checked here. `--compare` refuses such a file outright.")
+    elif recorded != corpus_digest():
+        raise HarnessError(
+            f"{results_path} records corpus_digest={recorded} but the current "
+            f"corpus digests to {corpus_digest()}. An entry's find/replace/file/"
+            f"kind changed under a stable id. REFUSING to sync — that would write "
+            f"corpus-derived fields into a results file the corpus can no longer "
+            f"reproduce. Re-sweep, or restore the entry.")
+
     data["payload"]["equivalent_ids"] = sorted(
         m["id"] for m in data["payload"]["mutants"] if m["equivalent"])
     results_path.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
-    print(f"synced {len(changed)} static field(s) in {results_path}:")
-    for line in changed:
-        print(f"  {line}")
+    if flipped:
+        print(f"EQUIVALENCE ANNOTATION CHANGED on {len(flipped)} mutant(s) in "
+              f"{results_path} — read these, they change what a SURVIVOR means:")
+        for mid, was, now in flipped:
+            note = ("EXCUSED: a survivor of this id no longer counts as a test gap"
+                    if now else
+                    "RE-ARMED: a survivor of this id counts as a real result again")
+            print(f"  {mid}: equivalent {was} -> {now}   {note}")
+    else:
+        print(f"no equivalence annotation changed in {results_path}.")
     return 0
 
 
@@ -677,10 +839,15 @@ def attribution(results_path: Path) -> int:
     zero_unique = sorted(t for t in killed_by_test if t not in set(sole.values()))
     print(f"\nDELETION CANDIDATES — {len(zero_unique)} of {len(killed_by_test)} "
           f"killing test(s) killed nothing UNIQUELY.")
-    print("  CANDIDACY, NOT A VERDICT: this corpus samples 30 defect shapes across "
-          "9 modules.\n  A test with no unique kill here may still be the only "
-          "thing standing between\n  the suite and a defect the corpus does not "
-          "contain.")
+    # DERIVED, never written by hand: this sentence carried "30 defect shapes
+    # across 9 modules" long after the corpus reached 48 across 11 target files.
+    # Prose is the one artifact with no gate, so take the numbers from the results
+    # file itself and it cannot rot again.
+    n_files = len({m["file"] for m in mutants})
+    print(f"  CANDIDACY, NOT A VERDICT: this corpus samples {len(mutants)} defect "
+          f"shapes across\n  {n_files} target file(s). A test with no unique kill "
+          "here may still be the only\n  thing standing between the suite and a "
+          "defect the corpus does not contain.")
     for node in zero_unique:
         print(f"  {node}  (killed {len(killed_by_test[node])})")
     print(f"\nNEVER-KILLING TESTS ARE NOT LISTED: a test that killed zero mutants "
@@ -812,8 +979,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--compare", nargs=2, metavar=("BEFORE", "AFTER"))
     ap.add_argument("--sync-corpus-fields", metavar="RESULTS",
-                    help="re-derive the STATIC corpus fields (file/kind/equivalent) "
-                         "in a results file; never touches run results")
+                    help="re-derive the post-hoc `equivalent` annotation in a "
+                         "results file; REFUSES a file/kind or corpus_digest "
+                         "mismatch; never touches run results")
     ap.add_argument("--attribution", metavar="RESULTS",
                     help="derive the sole-killer (protected) and zero-unique-kill "
                          "(deletion-candidate) lists from a results JSON")
