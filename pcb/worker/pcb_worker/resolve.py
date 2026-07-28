@@ -241,11 +241,23 @@ def _pads_from_parsed(fp_pads: list) -> list:
         if x is None or y is None:
             continue
 
+        # A footprint that declares no ``(size ...)`` node gets NO fabricated
+        # land here (K14 / 019f9509a54c) — ``footprints._parse_pad`` already
+        # sets ``size = None`` for that case, and ``footprint_def.
+        # to_board_pad_dicts`` (the sibling projection, locked by
+        # test_sizeless_pad_stays_none_instead_of_inventing_geometry) emits
+        # ``{"width": None, "height": None}`` for it. Match that convention
+        # instead of inventing a 1.0x1.0 mm pad: downstream, pad_source._opt_num
+        # already turns a missing width/height into None on PadGeom, and
+        # iter_pads(require_smd_size=True) is the fail-closed gate that refuses
+        # a sizeless SMD pad on the fab path — this function is the tolerant
+        # DRC/preview projection, not the gate, so it stays honest and lets
+        # that gate do its job.
         size = p.get("size")
         if size and size[0] is not None and size[1] is not None:
             size_dict = {"width": size[0], "height": size[1]}
         else:
-            size_dict = {"width": 1.0, "height": 1.0}
+            size_dict = {"width": None, "height": None}
 
         # KiCad drill is a single float (or absent) → symmetric {x,y}; 0 == no hole.
         drill = p.get("drill")

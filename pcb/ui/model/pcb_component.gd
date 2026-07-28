@@ -683,6 +683,20 @@ func _pads_from_list(pads_data: Array) -> void:
 	for pad_data in pads_data:
 		var pad_pos: Dictionary = pad_data.get("position", {})
 		var pad_size: Dictionary = pad_data.get("size", {})
+		# U4 (019f9509a54c): a resolved pad with no authored geometry now arrives
+		# as size: {width: null, height: null} (worker no longer fabricates a
+		# 1.0x1.0mm land — see pcb_worker/resolve.py::_pads_from_parsed). Dictionary
+		# .get(key, default) only returns `default` when the KEY IS ABSENT; a
+		# key present with a stored null value comes back as null, not 1 — so an
+		# un-guarded Vector2(pad_size.get("width", 1), ...) would construct
+		# Vector2(null, null) and error. Treat a null dimension as "no pad
+		# geometry" the SAME way _pads_from_canonical_pins treats a bare
+		# positional pin (no drill, no width/height): skip the render pad
+		# entirely rather than inventing a size here too.
+		var size_w = pad_size.get("width", 1)
+		var size_h = pad_size.get("height", 1)
+		if size_w == null or size_h == null:
+			continue
 		# Handle both legacy float drill and new Vector2 dict drill
 		var drill_raw = pad_data.get("drill", 0.0)
 		var drill_vec := Vector2.ZERO
@@ -696,7 +710,7 @@ func _pads_from_list(pads_data: Array) -> void:
 			"type": pad_data.get("type", "smd"),
 			"shape": pad_data.get("shape", "rect"),
 			"position": Vector2(pad_pos.get("x", 0), pad_pos.get("y", 0)),
-			"size": Vector2(pad_size.get("width", 1), pad_size.get("height", 1)),
+			"size": Vector2(size_w, size_h),
 			"drill": drill_vec,
 			"layers": pad_data.get("layers", [])
 		})

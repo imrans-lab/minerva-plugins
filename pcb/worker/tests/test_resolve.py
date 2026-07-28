@@ -306,3 +306,61 @@ def test_pads_from_parsed_and_footprint_def_agree_on_fab_optionals():
     assert from_resolve["1"]["corner_rratio"] == pytest.approx(0.25)
     assert from_resolve["1"]["solder_mask_margin"] == pytest.approx(0.05)
     assert from_resolve["1"]["rotation"] == pytest.approx(90)
+
+
+# ---------------------------------------------------------------------------
+# U4 (019f9509a54c): a footprint pad with NO `(size ...)` node must not get a
+# fabricated 1.0x1.0mm land. K25/K14 forbids "no false clean, fictional pad,
+# nominal fallback or fabrication-safe result" — this is not a fresh call, it
+# is bringing `_pads_from_parsed` into line with the already-tested sibling
+# projection `footprint_def.to_board_pad_dicts`
+# (test_sizeless_pad_stays_none_instead_of_inventing_geometry), which already
+# emits {"width": None, "height": None} for the identical input shape.
+#
+# The discriminating fixture: a pad whose `(size ...)` node is ABSENT
+# entirely — NOT `(size 0 0)`, which is a different (authored-zero) case and
+# out of scope here. `footprints._parse_pad` sets size=None only for the
+# absent/short-node case (footprints.py:189-192), so a REAL .kicad_mod file
+# with no size clause on a pad is the only fixture that actually exercises
+# this code path end-to-end through the real KiCad s-expr parser.
+# ---------------------------------------------------------------------------
+
+_SIZELESS_PAD_MOD = """\
+(footprint "SIZELESS" (layer "F.Cu")
+  (pad "1" smd rect (at 0 0) (layers "F.Cu"))
+)
+"""
+
+
+def test_pads_from_parsed_leaves_sizeless_pad_as_none_not_1mm(tmp_path):
+    fx = tmp_path / "SIZELESS.kicad_mod"
+    fx.write_text(_SIZELESS_PAD_MOD, encoding="utf-8")
+    parsed = parse_kicad_mod(fx)
+    # Prove the discriminating fixture actually discriminates: the parser must
+    # have produced size=None (not e.g. a parse failure hiding the real case).
+    assert parsed["pads"][0]["size"] is None, "fixture did not exercise the absent-size path"
+
+    out = _pads_from_parsed(parsed["pads"])
+    assert len(out) == 1
+    size = out[0]["size"]
+    assert size == {"width": None, "height": None}
+    # Explicit anti-regression: neither the old fabricated 1.0mm default nor a
+    # degenerate 0.0 (still an invented, and worse, dimension) may appear.
+    assert size["width"] != 1.0 and size["height"] != 1.0
+    assert size["width"] != 0.0 and size["height"] != 0.0
+    assert size["width"] is None and size["height"] is None
+
+
+def test_pads_from_parsed_sizeless_matches_footprint_def_projection(tmp_path):
+    # Same fixture, run through BOTH board-dict projections — the parity
+    # invariant test_footprint_def.py's round-trip tests assert must hold for
+    # this case too, not just the sized-pad fixtures they already cover.
+    from pcb_worker.footprint_def import FootprintDefinition
+
+    fx = tmp_path / "SIZELESS.kicad_mod"
+    fx.write_text(_SIZELESS_PAD_MOD, encoding="utf-8")
+    parsed = parse_kicad_mod(fx)
+
+    from_resolve = _pads_from_parsed(parsed["pads"])
+    from_fpdef = FootprintDefinition.from_kicad_parsed(parsed).to_board_pad_dicts()
+    assert from_resolve == from_fpdef
