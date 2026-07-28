@@ -48,7 +48,7 @@ from gerber_writer import (
     set_generation_software,
 )
 
-from . import board_model
+from . import board_model, stroke_font
 from .geometry import (
     is_top as _is_top,
     place_point as _transform_point,
@@ -96,6 +96,17 @@ DEFAULT_TRACE_WIDTH_MM = 0.25
 # emitters share one raw-board default; re-exported here for back-compat callers.
 SILK_LINE_WIDTH_MM = 0.15
 EDGE_CUTS_WIDTH_MM = 0.1
+
+# Reference-designator TEXT geometry (K17: silk must carry "R1", not just
+# outline graphics — gerber-writer has no text primitive, so this is drawn
+# stroke geometry; see stroke_font.py). Stroke WIDTH deliberately reuses
+# SILK_LINE_WIDTH_MM above rather than adding a third silk line-width constant
+# (gerber.SILK_LINE_WIDTH_MM and kicad._SILK_LINE_WIDTH_MM are already both
+# 0.15 — one more would just be a second way to say the same number).
+REFDES_TEXT_SIZE_MM = 1.0
+# Local (component-frame) anchor, mirroring kicad.py's own hard-pinned
+# designator offset precedent: `(fp_text reference ... (at 0 -1.5) ...)`.
+REFDES_LOCAL_Y_MM = -1.5
 
 # Gerber output layer filenames (suffixes appended to the board base name).
 _GERBER_SUFFIXES = ("F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "Edge_Cuts")
@@ -482,6 +493,45 @@ def _emit_silk(g: _Geometry, graphics, cx: float, cy: float, rot: float,
             _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
 
 
+def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
+                 top: bool) -> None:
+    """Emit one component's REFERENCE DESIGNATOR ("R1", "U3", ...) as F.SilkS
+    stroke geometry (see stroke_font.py — gerber-writer has no text primitive,
+    so a designator is drawn as open polylines, same as any other silk shape).
+
+    Deliberately called OUTSIDE _emit_silk's graphics-present guard, and as a
+    SEPARATE call, not folded into it: _emit_silk returns early when a
+    footprint has no captured F.SilkS graphics at all (`if not (... and
+    graphics and top)`), which is correct for outline silk (no graphics really
+    does mean no outline) but would silently drop the designator too if this
+    lived inside that guard — a footprint with no silk graphics must still get
+    its "R1" (K17). Top-side only; B.SilkS is out of scope, matching
+    _emit_silk's own documented restriction.
+
+    ``cx, cy, rot`` are the component's REAL board placement, independent of
+    whatever _emit_silk was called with for this same component: on the
+    IR-native harvest (_harvest_ir) _emit_silk runs at identity (0, 0, 0)
+    because PlacedGraphic geometry there is already board-absolute, but the
+    designator text is rendered in glyph-LOCAL coordinates and must be placed
+    by the component's actual placement transform regardless.
+    """
+    if not top:
+        return
+    text = ref if isinstance(ref, str) else None
+    if not text or not text.strip():
+        return
+    for stroke in stroke_font.render(text, size=REFDES_TEXT_SIZE_MM,
+                                     x0=0.0, y0=REFDES_LOCAL_Y_MM):
+        abs_pts = [_transform_point(cx, cy, rot, lx, ly) for (lx, ly) in stroke]
+        if len(abs_pts) >= 2:
+            # OPEN polyline (closed=False): a glyph stroke must NEVER gain a
+            # closing segment back to its first point (unlike an authored
+            # fp_poly outline, which IS meant to close). _harvest_silk_graphic
+            # is not reused here for exactly this reason — it always marks a
+            # "poly" kind closed=True.
+            g.silk_polys.append((abs_pts, SILK_LINE_WIDTH_MM, False))
+
+
 def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
                      dia: float, plated: bool, annulus: float | None,
                      mask_clearance: float) -> None:
@@ -556,6 +606,7 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         _emit_pads(g, iter_pads(comp, require_smd_size=True),
                    cx, cy, rot, top, ref, mask_clearance)
         _emit_silk(g, comp.get("graphics"), cx, cy, rot, top, ref)
+        _emit_refdes(g, ref, cx, cy, rot, top)
 
     # --- Vias: copper annulus on both layers + plated drill. ---
     for via in _list(board.get("vias")):
@@ -859,9 +910,13 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     out["B_Mask"] = _dump(b_mask, creation_date)
 
     # F.SilkS — real footprint silk (line/circle/poly/arc) for components with
-    # resolved graphics ONLY; a component without graphics contributes NO silk (K4:
-    # the procedural courtyard-box placeholder is retired). Real reference-designator
-    # text is future scope (gerber-writer has no glyph/text primitive).
+    # resolved graphics ONLY; a component without graphics contributes NO outline
+    # silk (K4: the procedural courtyard-box placeholder is retired). The
+    # component's reference designator (drawn stroke text, K17 — see
+    # stroke_font.py; gerber-writer has no glyph/text primitive) is ADDITIVE to
+    # g.silk_polys and is emitted for every top-side component regardless of
+    # whether it has outline graphics at all (_emit_refdes, called outside
+    # _emit_silk's graphics-present guard).
     f_silks = DataLayer("Legend,Top", negative=False)
     _add_silk_lines(f_silks, g.silk_lines)
     _add_silk_circles(f_silks, g.silk_circles)
@@ -970,6 +1025,14 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         # simply emits no silk (no procedural box remains to fall back to).
         graphics = [graphic_to_dict(gr) for gr in comp.placed_graphics]
         _emit_silk(g, graphics, 0.0, 0.0, 0.0, top, ref)
+        # UNLIKE _emit_silk above, the designator is NOT called at identity:
+        # its geometry is glyph-LOCAL (footprint-frame), not board-absolute
+        # like PlacedGraphic, so it needs the component's REAL placement
+        # transform (comp.placement), applied explicitly here via the same
+        # place_point (_transform_point) every other component-local
+        # primitive in this worker goes through.
+        _emit_refdes(g, ref, comp.placement.position[0], comp.placement.position[1],
+                     comp.placement.rotation_deg, top)
 
     for via in board.vias:
         _emit_via(g, via.position[0], via.position[1], via.diameter_mm, via.drill_mm,

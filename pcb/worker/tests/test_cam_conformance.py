@@ -21,7 +21,7 @@ import re
 
 import pytest
 
-from pcb_worker import gerber
+from pcb_worker import gerber, stroke_font
 from pcb_worker.fab_capability import SUPPORTED_PAD_SHAPES
 from pcb_worker.gerber import _smd_aperture
 
@@ -579,6 +579,17 @@ def _arc_midpoint(start, end, center, mode) -> tuple[float, float]:
     return (center[0] + r * math.cos(am), center[1] + r * math.sin(am))
 
 
+def _refdes_straight_count(ref: str = "P1") -> int:
+    """How many G01 straight-line segments _emit_refdes's OWN designator text
+    draws for `_silk_board`'s component (ref "P1" by default) — additive on
+    EVERY `_silk_board` fixture below regardless of which primitive is under
+    test, since K17 emits a reference designator for every top-side component
+    independent of whatever silk graphics (if any) it authored. Each glyph
+    stroke of N points contributes (N - 1) straight interpolations (one
+    moveto + (N-1) linetos, per _add_silk_polys)."""
+    return sum(len(stroke) - 1 for stroke in stroke_font.render(ref))
+
+
 def _silk_signature(text: str) -> tuple[int, int, int]:
     """(full_circle_arcs, partial_arcs, straight_draws) — the primitive-shape
     fingerprint. It stays DISTINCT across line/circle/poly/arc iff none is
@@ -597,7 +608,11 @@ def test_silk_line_emits_straight_draw():
                                 "start": [-1, -1], "end": [1, 1], "width": 0.15}]))
     arcs, n_straight = _silk_draws(text)
     assert arcs == [], "a line must not emit an arc"
-    assert n_straight == 1, f"line should be one straight draw, got {n_straight}"
+    # 1 authored line + P1's own reference-designator strokes (K17, additive —
+    # _silk_board's component always has ref "P1", which always gets a
+    # designator regardless of which primitive this test exercises).
+    expected = 1 + _refdes_straight_count()
+    assert n_straight == expected, f"line should be one straight draw, got {n_straight}"
 
 
 def test_silk_circle_emits_true_full_circle_arc():
@@ -616,11 +631,14 @@ def test_silk_circle_emits_true_full_circle_arc():
 
 def test_silk_circle_not_decomposed_into_segments():
     # Regression guard: the true circle must NOT decompose into many short straight
-    # segments (the polygon-flatten failure this gate exists to prevent).
+    # segments (the polygon-flatten failure this gate exists to prevent). The only
+    # straight draws present must be P1's own designator strokes (K17, additive) —
+    # NONE attributable to the circle itself.
     _full, _partial, n_straight = _silk_signature(
         _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "circle",
                              "center": [0, 0], "radius": 1.5, "width": 0.15}])))
-    assert n_straight == 0, "circle was flattened into straight segments"
+    assert n_straight == _refdes_straight_count(), \
+        "circle was flattened into straight segments"
 
 
 def test_silk_poly_emits_closed_path():
@@ -629,8 +647,10 @@ def test_silk_poly_emits_closed_path():
                                 "width": 0.15}]))
     arcs, n_straight = _silk_draws(text)
     assert arcs == [], "a poly must not emit an arc"
-    # 4 corners closed back to the first -> 4 straight interpolations.
-    assert n_straight == 4, f"expected a closed 4-segment path, got {n_straight}"
+    # 4 corners closed back to the first -> 4 straight interpolations, PLUS
+    # P1's own reference-designator strokes (K17, additive).
+    expected = 4 + _refdes_straight_count()
+    assert n_straight == expected, f"expected a closed 4-segment path, got {n_straight}"
 
 
 def test_silk_three_point_arc_emits_true_arc():
@@ -652,12 +672,14 @@ def test_silk_three_point_arc_emits_true_arc():
 
 def test_silk_three_point_arc_not_flattened():
     # The R3 not-flattened guard: the three-point arc is a genuine arc, NOT a
-    # polyline of straight segments.
+    # polyline of straight segments. The only straight draws present must be
+    # P1's own designator strokes (K17, additive) — NONE attributable to the arc.
     full, partial, n_straight = _silk_signature(
         _fsilk(_silk_board([{"layer": "F.SilkS", "kind": "arc",
                              "points": [[-1, 0], [0, 1], [1, 0]], "width": 0.15}])))
     assert (full, partial) == (0, 1), "three-point arc must be one partial arc"
-    assert n_straight == 0, "three-point arc was flattened into straight segments"
+    assert n_straight == _refdes_straight_count(), \
+        "three-point arc was flattened into straight segments"
 
 
 def test_silk_three_point_arc_chirality_mirrors():

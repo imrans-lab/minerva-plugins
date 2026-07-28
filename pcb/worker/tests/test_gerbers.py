@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from pcb_worker import board_model, gerber
+from pcb_worker import board_model, gerber, stroke_font
 from pcb_worker.methods import handle_request
 from tests.gerber_fab import build_fab, build_raw_emitter
 
@@ -82,10 +82,13 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
             assert dcode in define_pos, f"{name}: aperture D{dcode} used but never defined"
             assert define_pos[dcode] <= i, f"{name}: D{dcode} selected before its %ADD"
 
-    # At least one plot command — EXCEPT a legend/silk layer, which is legitimately
-    # EMPTY when no component authored F.SilkS graphics (K4: the procedural courtyard
-    # box is retired; no resolved silk means an empty legend layer, still a valid
-    # gerber with header/footer).
+    # At least one plot command — EXCEPT a legend/silk layer, which CAN
+    # legitimately be empty (K4: the procedural courtyard box is retired; no
+    # resolved silk graphics means no resolved OUTLINE silk, still a valid
+    # gerber with header/footer). Since K17, F.SilkS is no longer empty on any
+    # board with a top-side, non-empty-ref component — it always carries at
+    # least that component's own reference-designator strokes — but the
+    # exemption stays for the genuinely component-less/bottom-only case.
     if not name.endswith("F_SilkS.gbr"):
         assert re.search(r"D0[123]\*", text), f"{name}: no D01/D02/D03 plot commands"
 
@@ -408,11 +411,15 @@ def test_silk_real_graphics_replaces_placeholder_box():
 
 
 def test_silk_omitted_when_component_has_no_graphics():
-    """A component with no 'graphics' contributes NO F.SilkS (K4: the procedural
-    courtyard-box placeholder is retired — no resolved silk means no silk). On a
-    mixed board only the component that authored real silk graphics appears; the
-    graphics-less one adds nothing (matching the kicad emitter, which never drew a
-    box)."""
+    """[K17] A component with no 'graphics' contributes NO OUTLINE F.SilkS (K4:
+    the procedural courtyard-box placeholder is retired — no resolved silk
+    graphics means no resolved outline silk), but it STILL gets its own
+    reference-designator TEXT: K17 requires every top-side component's "R1" to
+    reach F.SilkS, including one whose footprint carries no silk graphics at
+    all (gerber._emit_refdes runs outside _emit_silk's graphics-present guard).
+    So on a mixed board, R1 (no authored graphics) contributes ONLY its own
+    designator strokes; U1 (authored a real silk line) contributes that line
+    PLUS its own designator strokes."""
     board = {
         "version": 1, "name": "mixed", "width_mm": 40, "height_mm": 40,
         "components": [
@@ -433,11 +440,32 @@ def test_silk_omitted_when_component_has_no_graphics():
         ],
         "nets": [],
     }
+    g = gerber._harvest(board, gerber.DEFAULT_MASK_CLEARANCE_MM)
+
+    # U1 authored exactly one real silk LINE; neither component authored a
+    # circle/arc, and (K4) no procedural box exists for R1 to have contributed.
+    assert len(g.silk_lines) == 1, g.silk_lines
+    assert g.silk_circles == [] and g.silk_arcs == []
+
+    # g.silk_polys now holds ONLY reference-designator strokes for this fixture
+    # (neither component authored a poly) — one open-polyline run per ref, and
+    # it must be non-empty for R1 even though R1 authored no graphics at all.
+    assert g.silk_polys, "expected reference-designator strokes for both components"
+    assert all(closed is False for (_pts, _w, closed) in g.silk_polys), \
+        "a glyph stroke must be OPEN, never closed back to its first point"
+    expected_strokes = len(stroke_font.render("U1")) + len(stroke_font.render("R1"))
+    assert len(g.silk_polys) == expected_strokes, (
+        f"expected {expected_strokes} designator strokes (U1 + R1), got "
+        f"{len(g.silk_polys)}")
+
+    # Also confirmed at the gerber-BYTES level: F.SilkS is non-empty for BOTH
+    # components even though R1 authored no graphics.
     files = gerber.build_gerbers(board, name="mixed")
     silk = files["mixed-F_SilkS.gbr"]
     moves = _gerber_move_points(silk)
-    # Only U1's real silk line (1 D02 move). R1 has no graphics -> no box, no silk.
-    assert len(moves) == 1, f"expected only U1's real silk-line move, got {moves}"
+    assert len(moves) == expected_strokes + 1, (
+        f"expected U1's real silk-line move plus every designator stroke's own "
+        f"move, got {moves}")
 
 
 def test_silk_transform_matches_pad_transform():
@@ -464,14 +492,16 @@ def test_silk_transform_matches_pad_transform():
     assert len(pad_xy) == 1, pad_xy
 
     # The silk line's start point (local [2.0, 3.0] — identical to the pin)
-    # should land on the exact same absolute point.
+    # should land on the exact same absolute point. F.SilkS now ALSO carries
+    # U1's own reference-designator strokes (K17, additive), so there is more
+    # than one move in the layer — search all of them for the authored line's
+    # move rather than assuming it is the only (or first) one.
     silk_xy = _gerber_move_points(files["silktest-F_SilkS.gbr"])
-    assert len(silk_xy) == 1, silk_xy
+    assert len(silk_xy) >= 1, silk_xy
 
-    dx = abs(pad_xy[0][0] - silk_xy[0][0])
-    dy = abs(pad_xy[0][1] - silk_xy[0][1])
-    assert dx < 1e-3 and dy < 1e-3, \
-        f"silk transform {silk_xy[0]} != pad transform {pad_xy[0]}"
+    assert any(abs(px - pad_xy[0][0]) < 1e-3 and abs(py - pad_xy[0][1]) < 1e-3
+              for px, py in silk_xy), \
+        f"no silk move matches pad transform {pad_xy[0]} (got {silk_xy})"
 
 
 def _first_arc(gbr: str):
