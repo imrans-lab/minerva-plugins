@@ -64,8 +64,72 @@ func _init() -> void:
 	_test_spatial_query()
 	_test_mounting_holes_roundtrip()
 	_test_rotation_sign_lands_on_traces()
+	_test_null_pad_size_is_skipped_not_invented()
 
 	_finish()
+
+
+## U4 (019f9509a54c): the worker no longer fabricates a 1.0x1.0mm land for a
+## footprint pad that declares no (size ...) — resolve._pads_from_parsed now
+## emits {"width": null, "height": null}, matching footprint_def's existing
+## convention. That makes a stored NULL reachable here, and GDScript's
+## Dictionary.get(key, default) returns the STORED NULL when the key is
+## PRESENT-with-null; it only falls back to `default` when the key is ABSENT.
+## So the pre-U4 `Vector2(pad_size.get("width", 1), ...)` would construct
+## Vector2(null, null) and hard-error at runtime.
+##
+## This pins the guard, which shipped UNPINNED — the implementing unit correctly
+## reported that no gd suite exercised this path and declined to invent a test
+## outside its fence. An unpinned fail-closed guard is exactly what a later edit
+## reverts silently.
+##
+## The DISCRIMINATING case is the null-VALUE pad. A pad with the "size" key
+## ABSENT would pass either way (get() legitimately returns the default), so
+## null-vs-absent is what does the work here.
+##
+## PAD ORDER IS LOAD-BEARING — do not "tidy" it. The two null pads come FIRST
+## and the sized pad LAST. Reason, measured: a weakened guard does not merely
+## admit a bad pad, it lets Vector2(1.6, null) throw, which ABORTS the loop
+## mid-list. With the sized pad first, an abort still leaves exactly one pad and
+## every assertion below passes — the test survives the mutation and pins
+## nothing. Putting the sized pad last makes an abort observable as its absence.
+## This exact vacuity was caught by half-mutating the guard to check width only;
+## the first version of this test passed under it.
+func _test_null_pad_size_is_skipped_not_invented() -> void:
+	var comp = _PCBComponent.new()
+	comp.load_from_dict({
+		"id": "U9",
+		"pads": [
+			# THE DISCRIMINATING PAD: key present, value null (not absent).
+			{"number": "1", "position": {"x": 0.0, "y": 0.0},
+					"size": {"width": null, "height": null}, "type": "smd"},
+			# ONE axis null is still no geometry. This is what kills a guard
+			# that only checks width.
+			{"number": "2", "position": {"x": 2.0, "y": 0.0},
+					"size": {"width": 1.6, "height": null}, "type": "smd"},
+			# Sized, and LAST: its survival proves the loop ran to completion.
+			{"number": "3", "position": {"x": 4.0, "y": 0.0},
+					"size": {"width": 1.6, "height": 0.9}, "type": "smd"},
+		],
+	})
+
+	check("both null-size pads skipped, sized pad kept (1 of 3)",
+			comp.pads.size() == 1,
+			"got %d pads — a null dimension must mean 'no pad geometry', never an invented size"
+					% comp.pads.size())
+	if comp.pads.size() == 1:
+		var kept: Dictionary = comp.pads[0]
+		# Identity, not just count: proves the LAST pad survived, so the loop
+		# completed rather than aborting on the half-null pad above it.
+		check("the surviving pad is pad 3 — the loop ran to completion",
+				str(kept.get("number", "")) == "3",
+				"got pad %s; a mid-loop abort on the half-null pad would leave a different one"
+						% str(kept.get("number", "")))
+		check("it carries its authored size, not an invented one",
+				kept.get("size", Vector2.ZERO).is_equal_approx(Vector2(1.6, 0.9)),
+				"got %s" % str(kept.get("size", null)))
+		check("no pad carries the invented 1.0x1.0 land",
+				not kept.get("size", Vector2.ZERO).is_equal_approx(Vector2.ONE))
 
 
 func _finish() -> void:
