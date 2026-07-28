@@ -133,8 +133,25 @@ _TOP_ID, _BOTTOM_ID = "top", "bottom"
 # Emitter capability + the fatal-output profile come from the ONE neutral
 # authority (fab_capability), imported by K2 AND every emitter, so they cannot
 # drift independently (K2 review 623, decision a).  Captured footprint geometry
-# on a layer outside EMITTED_LAYERS is DOCUMENTATION-ONLY and warned.
+# on a layer outside EMITTED_LAYERS is DOCUMENTATION-ONLY and warned -- UNLESS
+# the layer is copper (see ``_is_emitted_layer`` / ``_place_component``): a
+# copper trace/pad that never reaches a gerber is not documentation, it is
+# fabrication silently missing what the board author authored (019fa73a8732).
 K3_EMITTED_LAYERS = EMITTED_LAYERS
+
+
+def _is_emitted_layer(layer_id: str) -> bool:
+    """``K3_EMITTED_LAYERS`` membership, canonical-id aware.
+
+    ``top``/``bottom`` are the SAME two copper layers as ``F.Cu``/``B.Cu``
+    under the canonical name (the ``agent_router.layers.CANON_TO_KICAD``
+    mapping already imported above) -- a footprint or board that spells them
+    the canonical way must not be misreported as declaring copper the emitter
+    cannot write.  ``CANON_TO_KICAD`` passes an already-KiCad or unrecognized
+    id through unchanged, so this is a strict superset of a raw membership
+    check, never a narrower one.
+    """
+    return CANON_TO_KICAD.get(layer_id, layer_id) in K3_EMITTED_LAYERS
 
 # Fabrication-critical outputs a captured-feature loss may corrupt.  Cosmetic
 # (silk/fab) and unemitted (paste) losses are warned, never fatal.
@@ -813,7 +830,22 @@ def _place_component(
         layers = _resolved_pad_layers(pad, transform, ref, diags)
         if layers is None:
             return None
-        unemitted.update(layer.id for layer in layers if layer.id not in K3_EMITTED_LAYERS)
+        for layer in layers:
+            if _is_emitted_layer(layer.id):
+                continue
+            if layer.role is LayerRole.COPPER:
+                # Copper the emitter cannot write is not documentation-only: the
+                # gerbers would generate clean and the copper simply would not be
+                # there (K4 discards clause). Scoped to COPPER -- fab/paste/silk
+                # on an unemitted layer stays a warning below.
+                diags.error(
+                    "unemitted_copper_layer",
+                    f"component {ref!r} pad {pad.number!r}: declares copper on "
+                    f"layer {layer.id!r}, which the emitter does not write -- "
+                    f"the copper would be silently absent from fabrication",
+                    SourceRef(EntityKind.PAD, pad.source_id, f"component {ref}"))
+            else:
+                unemitted.add(layer.id)
         net_id = pin_net.get((ref, pad.number))
         # Footprint values are the default; a validated per-pin `override`
         # (correlated by pad/pin number) wins ONLY on the fields it carries. A
@@ -861,8 +893,17 @@ def _place_component(
     placed_graphics: list[PlacedGraphic] = []
     for graphic in definition.graphics:
         placed_layer = transform.layer(graphic.layer)
-        if placed_layer.id not in K3_EMITTED_LAYERS:
-            unemitted.add(placed_layer.id)
+        if not _is_emitted_layer(placed_layer.id):
+            if placed_layer.role is LayerRole.COPPER:
+                diags.error(
+                    "unemitted_copper_layer",
+                    f"component {ref!r} graphic {graphic.source_id!r}: declares "
+                    f"copper on layer {placed_layer.id!r}, which the emitter "
+                    f"does not write -- the copper would be silently absent "
+                    f"from fabrication",
+                    SourceRef(EntityKind.GRAPHIC, graphic.source_id, f"component {ref}"))
+            else:
+                unemitted.add(placed_layer.id)
         placed_graphics.append(PlacedGraphic(
             id=derive_id("placed-graphic", component_id, graphic.source_id),
             component_id=component_id,
