@@ -490,13 +490,22 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 ## (empty when the record has no geometry). `record` carries net, segments (raw
 ## router shape), vias (raw), and source_hints (for width/hint/endpoint
 ## derivation — the identical inputs the annotation side used).
+## docket 019fa109766f (Shape A, comment 869): `record.source_hint_ids` is
+## ALREADY the correct per-route attribution — panel_tools._normalize_route_
+## records stamps it from the worker's own per-route `hint_ids` (net_names +
+## source_pins + dest_pins, docket 019f9c3a136c), never a net-name-only
+## re-derivation. Passing it through as `explicit_hint_ids` is the fix: this
+## is the ONLY caller that supplies it, so only THIS path stops recomputing a
+## worse answer from raw `source_hints` (see _create_candidate_for_route).
+## ingest_routing_result has no such stamp available and is left untouched.
 func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 	var hints: Array = record.get("source_hints", []) if record.get("source_hints", []) is Array else []
+	var explicit_hint_ids: Array = record.get("source_hint_ids", []) if record.get("source_hint_ids", []) is Array else []
 	return _create_candidate_for_route(
 		str(record.get("net", "")),
 		record.get("segments", []) if record.get("segments", []) is Array else [],
 		record.get("vias", []) if record.get("vias", []) is Array else [],
-		hints, board_revision)
+		hints, board_revision, explicit_hint_ids)
 
 
 ## Create + add one RouteCandidate from a raw router route (net + raw segments +
@@ -505,19 +514,39 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 ## through it so a candidate is built identically no matter the entry point.
 ## Handles the idempotent-replace supersession bookkeeping. Returns the new
 ## candidate_id, or "" when the route has no geometry.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int) -> String:
+##
+## `explicit_hint_ids` (docket 019fa109766f, Shape A): when it IS an Array
+## (even empty — that is a legitimate "nothing answered this route" verdict,
+## not "recompute"), it is the ALREADY-CORRECT per-route attribution
+## ingest_record carries on its record, used VERBATIM for source_hint_ids/
+## task_key and to select which hints seed endpoints/width — no net_names
+## re-derivation, no blanket fallback. `null` (the default, and the only
+## value ingest_routing_result ever passes — it has no such stamp available)
+## means "no pre-resolved set": the legacy net_names-match-with-fallback path
+## (_hint_ids_for_net / _endpoints_for_net / _width_for_net) runs exactly as
+## it always has. That caller is deliberately left untouched by this docket.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int, explicit_hint_ids = null) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 
-	# PER-NET attribution (T2a folds in docket #555): the task_key +
-	# source_hint_ids are keyed on the hints that target THIS net, not the
-	# GLOBAL propose hint set. A multi-net propose / a cross-net hint change
-	# no longer shifts an unrelated net's task_key (which would leave a stale
-	# duplicate). NO LONGER MIRRORS THE PROPOSE PATH — see _hint_ids_for_net
-	# below and docket 019fa109766f. panel_tools now reads the worker's
-	# per-route hint_ids; this still re-derives, fallback and all.
-	var hint_ids := _hint_ids_for_net(source_hints, net)
+	var use_explicit: bool = explicit_hint_ids is Array
+	var hint_ids: Array = []
+	var attribution_hints: Array = []
+	if use_explicit:
+		hint_ids = (explicit_hint_ids as Array).duplicate()
+		attribution_hints = _hints_by_ids(source_hints, hint_ids)
+	else:
+		# PER-NET attribution (T2a folds in docket #555): the task_key +
+		# source_hint_ids are keyed on the hints that target THIS net, not the
+		# GLOBAL propose hint set. A multi-net propose / a cross-net hint change
+		# no longer shifts an unrelated net's task_key (which would leave a stale
+		# duplicate). Only ingest_routing_result reaches this branch — see
+		# _hint_ids_for_net below (docket 019fa109766f: its blanket fallback is
+		# a known over-attribution for a pins-only hint, left alone here because
+		# this caller has no production consumer and no per-route hint_ids to
+		# read instead).
+		hint_ids = _hint_ids_for_net(source_hints, net)
 	var task_key := _task_key(net, hint_ids)
 	var generation := 1
 	var prior_id: String = str(_task_candidate.get(task_key, ""))
@@ -534,9 +563,15 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	cand.generation = generation
 	cand.base_board_revision = board_revision
 	cand.source_hint_ids = _to_string_typed_array(hint_ids)
-	cand.endpoints = _endpoints_for_net(source_hints, net)
 
-	var width := _width_for_net(source_hints, net)
+	var width: float
+	if use_explicit:
+		cand.endpoints = _endpoints_from_hints(attribution_hints)
+		width = _width_from_hints(attribution_hints)
+	else:
+		cand.endpoints = _endpoints_for_net(source_hints, net)
+		width = _width_for_net(source_hints, net)
+
 	for seg in segs:
 		if not (seg is Dictionary):
 			continue
@@ -715,42 +750,61 @@ static func _hint_ids(source_hints: Array) -> Array:
 	return out
 
 
-## Ids of the source hints whose kind_payload.net_names include `net` — the
-## PER-NET provenance/attribution set. When NO hint names this net, falls back to
-## the full hint set so a candidate is never left with empty provenance.
-##
-## STALE BY DESIGN, TRACKED AS DOCKET 019fa109766f — DO NOT "RESTORE" THIS.
-## This used to say it mirrored `panel_tools._source_hint_ids_for_net` exactly,
-## fallback included, and that keeping the two identical made this task_key match
-## the UI's proposal-linking. Both claims died with docket 019f9c3a136c: that
-## function is DELETED, and the propose path now reads the worker's per-route
-## `hint_ids` (which resolve through net_names, source pin AND dest pin) instead
-## of re-deriving from net_names alone. The two paths have deliberately diverged
-## and this one is the wrong half.
-##
-## The correct answer is already on the record: `ingest_record` receives
-## `source_hint_ids`, correctly attributed by panel_tools._normalize_route_records,
-## and passes only the raw `source_hints` down here to be recomputed worse. The
-## fix is to read it and delete the fallback — same shape as the propose-path fix.
-##
-## NOT A LIVE REGRESSION, which is why it is filed rather than fixed here:
-## `task_key` is consumed only inside this file (idempotent-replace supersession
-## bookkeeping via `_task_candidate`), and prior and new candidates compute it
-## identically, so supersession stays self-consistent. What is wrong is the
-## provenance breadth, not the bookkeeping. The deletion teeth — proposal_accept
-## consuming `proposal_for` — live on the annotation path and are already fixed.
-##
-## The lesson worth keeping: this mirror was held in sync by a COMMENT, and it
-## drifted the instant one side was corrected. Prefer one shared helper.
-static func _hint_ids_for_net(source_hints: Array, net: String) -> Array:
-	var ids: Array = []
+## Hints whose kind_payload.net_names include `net` — the net_names-only match
+## shared by the three legacy net-keyed helpers below. NET_NAMES-ONLY: a hint
+## that names its net solely through source_pins/dest_pins (no net_names
+## entry) never matches here. That is the known gap tracked as docket
+## 019fa109766f; see _hint_ids_for_net for why it stays this way.
+static func _hints_matching_net(source_hints: Array, net: String) -> Array:
+	var out: Array = []
 	for hint in source_hints:
 		if not (hint is Dictionary):
 			continue
 		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
 		var nets: Array = kp.get("net_names", []) if kp.get("net_names", []) is Array else []
 		if net in nets:
-			ids.append(str((hint as Dictionary).get("id", "")))
+			out.append(hint)
+	return out
+
+
+## Hints whose "id" is in `ids` — the explicit-attribution counterpart to
+## _hints_matching_net, used by the ingest_record path (docket 019fa109766f):
+## the caller already knows exactly which hints answered this route (worker
+## per-route `hint_ids`), so no net_names re-derivation is needed or wanted.
+static func _hints_by_ids(source_hints: Array, ids: Array) -> Array:
+	var id_set: Dictionary = {}
+	for i in ids:
+		id_set[str(i)] = true
+	var out: Array = []
+	for hint in source_hints:
+		if hint is Dictionary and id_set.has(str((hint as Dictionary).get("id", ""))):
+			out.append(hint)
+	return out
+
+
+## Ids of the source hints whose kind_payload.net_names include `net` — the
+## PER-NET provenance/attribution set. When NO hint names this net via
+## net_names, falls back to the full hint set so a candidate is never left
+## with empty provenance.
+##
+## NET_NAMES-ONLY, WITH BLANKET FALLBACK — used ONLY by the legacy bulk path
+## ingest_routing_result, via _create_candidate_for_route's
+## `explicit_hint_ids == null` branch. It over-attributes: a pins-only hint
+## (net named solely through source_pins/dest_pins, net_names empty) falls
+## through to "every selected hint" here exactly like every other unmatched
+## hint would. This is docket 019fa109766f's defect, scoped down: the FIX
+## does not touch this function. ingest_record (the production path) now
+## supplies its own already-correct attribution as `explicit_hint_ids` and
+## never calls this helper at all (see _create_candidate_for_route).
+## ingest_routing_result has no production caller and no per-route hint_ids
+## to read instead, so it is left exactly as it was — fixing it too would
+## only turn test_workspace_ingest.gd's fixtures red for a fixture reason,
+## not a defect reason (owner ruling, docket comment 869).
+static func _hint_ids_for_net(source_hints: Array, net: String) -> Array:
+	var matched := _hints_matching_net(source_hints, net)
+	var ids: Array = []
+	for hint in matched:
+		ids.append(str((hint as Dictionary).get("id", "")))
 	if ids.is_empty():
 		return _hint_ids(source_hints)
 	return ids
@@ -775,15 +829,25 @@ static func _task_key(net: String, hint_ids: Array) -> String:
 ## (kind_payload.source_pins/dest_pins, each "Component.Pin"). Positions are
 ## not resolved here (no board/pad lookup in this pure model) — component/pin
 ## identity is enough for provenance; a later task can enrich with position.
+## NET_NAMES-ONLY match (via _hints_matching_net) — used ONLY by the legacy
+## ingest_routing_result path. A pins-only hint never matches here (same gap
+## as _hint_ids_for_net, docket 019fa109766f); ingest_record instead calls
+## _endpoints_from_hints directly on its already-correct hint set.
 static func _endpoints_for_net(source_hints: Array, net: String) -> Array:
+	return _endpoints_from_hints(_hints_matching_net(source_hints, net))
+
+
+## Endpoints from an EXPLICIT hint list — no net_names filtering, so a
+## pins-only hint (net named only through source_pins/dest_pins) is not
+## silently dropped. Shared extraction logic for both _endpoints_for_net
+## (legacy, net-name-matched hints) and ingest_record's explicit-attribution
+## path (docket 019fa109766f).
+static func _endpoints_from_hints(hints: Array) -> Array:
 	var out: Array = []
-	for hint in source_hints:
+	for hint in hints:
 		if not (hint is Dictionary):
 			continue
 		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
-		var nets: Array = kp.get("net_names", []) if kp.get("net_names", []) is Array else []
-		if not (net in nets):
-			continue
 		for pin_ref in kp.get("source_pins", []):
 			out.append(_pin_ref_to_endpoint(pin_ref))
 		for pin_ref in kp.get("dest_pins", []):
@@ -803,17 +867,28 @@ static func _pin_ref_to_endpoint(pin_ref) -> Dictionary:
 ## (mirrors panel_tools._width_for_net); falls back to 0.25mm — the same
 ## default _materialize_routes applies when no hint specifies a width — so a
 ## shadow candidate's width matches what would actually be committed.
+## NET_NAMES-ONLY match (via _hints_matching_net) — used ONLY by the legacy
+## ingest_routing_result path; a pins-only hint never matches here (same gap
+## as _hint_ids_for_net, docket 019fa109766f). ingest_record instead calls
+## _width_from_hints directly on its already-correct hint set.
 static func _width_for_net(source_hints: Array, net: String) -> float:
+	return _width_from_hints(_hints_matching_net(source_hints, net))
+
+
+## Widest authored trace width from an EXPLICIT hint list — no net_names
+## filtering. Falls back to 0.25mm — the same default _materialize_routes
+## applies when no hint specifies a width. Shared extraction logic for both
+## _width_for_net (legacy, net-name-matched hints) and ingest_record's
+## explicit-attribution path (docket 019fa109766f).
+static func _width_from_hints(hints: Array) -> float:
 	var w := 0.0
-	for hint in source_hints:
+	for hint in hints:
 		if not (hint is Dictionary):
 			continue
 		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
-		var nets: Array = kp.get("net_names", []) if kp.get("net_names", []) is Array else []
-		if net in nets:
-			var hw := float(kp.get("width_mm", 0.0))
-			if hw > w:
-				w = hw
+		var hw := float(kp.get("width_mm", 0.0))
+		if hw > w:
+			w = hw
 	if w <= 0.0:
 		w = 0.25
 	return w

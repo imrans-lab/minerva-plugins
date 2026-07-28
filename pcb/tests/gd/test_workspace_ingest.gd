@@ -8,7 +8,7 @@ extends SceneTree
 ## ../../minerva-plugins reaches this plugin checkout beside it (same
 ## convention as test_layer_stack.gd / test_routing_workspace_model.gd).
 ##
-## Coverage (4 groups):
+## Coverage (6 groups):
 ##   1. Ingest a fixture router reply (multi-pad net, >=2 DISCONNECTED paths +
 ##      a via) -> candidate geometry matches exactly; base_board_revision
 ##      captured; source_hint_ids set.
@@ -16,7 +16,15 @@ extends SceneTree
 ##      candidate (generation+1, not duplicated); a DIFFERENT task adds a new,
 ##      independent candidate.
 ##   3. Empty/no-routes reply -> no candidates, no crash.
-##   4. FUNCTIONAL FLOOR (non-mocked, dual-write): a REAL PCBPanel (booted via
+##   4. ingest_record: a hint that names its net ONLY through source_pins/
+##      dest_pins (net_names empty), alongside another selected unrelated
+##      hint, is attributed EXACTLY to itself — not the whole selected set,
+##      not empty (docket 019fa109766f). Endpoints/width resolve from that
+##      same hint too, not the 0.25mm/empty defaults.
+##   5. ingest_record: a route the worker attributed to NO hint gets empty
+##      provenance/endpoints/default width — distinguishing "legitimately
+##      unattributed" from the fixed pins-only case above.
+##   6. FUNCTIONAL FLOOR (non-mocked, dual-write): a REAL PCBPanel (booted via
 ##      plugin_panel_driver) driving the EXACT production dual-write seam
 ##      (panel_tools._dual_write_propose) with a fixture router reply, proving
 ##      BOTH the annotation host got a proposal AND the routing workspace got
@@ -38,6 +46,8 @@ func _init() -> void:
 	_run_ingest_geometry()
 	_run_idempotent_replace()
 	_run_empty_reply()
+	_run_ingest_record_pins_only_attribution()
+	_run_ingest_record_unattributed_is_empty()
 	_run_functional_floor_dual_write()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -219,7 +229,100 @@ func _run_empty_reply() -> void:
 	check_eq("empty 'routes' array -> no candidates", ws.list_candidates().size(), 0)
 
 
-# ── 4. functional floor: real PCBPanel, production dual-write seam ───────────
+# ── 4. ingest_record: pins-only hint attribution (docket 019fa109766f) ───────
+
+## The discriminating fixture the docket asked for: hint_pins names its net
+## ONLY through source_pins/dest_pins — net_names is EMPTY, so the legacy
+## net-name matcher (_hints_matching_net) would never find it. hint_other is
+## a second, SELECTED-but-unrelated hint (a different net, non-empty
+## net_names) so "everything" (the old blanket fallback) and "just
+## hint_pins" (the fix) are distinguishable outcomes, not both merely
+## non-empty. `record.source_hint_ids` mirrors exactly what
+## panel_tools._normalize_route_records/_route_hint_ids stamps from the
+## worker's real per-route `hint_ids` — the CORRECT attribution ingest_record
+## must use verbatim.
+func _run_ingest_record_pins_only_attribution() -> void:
+	print("-- 4. ingest_record: pins-only hint gets exactly its own attribution --")
+	var ws = PcbRoutingWorkspace.new()
+
+	var hint_pins := {
+		"id": "hint_pins",
+		"kind_payload": {
+			"net_names": [], "width_mm": 0.4,
+			"source_pins": ["U3.1"], "dest_pins": ["U4.2"],
+		},
+	}
+	var hint_other := {
+		"id": "hint_other",
+		"kind_payload": {
+			"net_names": ["N9"], "width_mm": 0.9,
+			"source_pins": ["U9.1"], "dest_pins": ["U9.2"],
+		},
+	}
+	var record := {
+		"net": "N3",
+		"segments": [{"start": [0.0, 0.0], "end": [3.0, 0.0], "layer": "F.Cu"}],
+		"vias": [],
+		"source_hint_ids": ["hint_pins"],
+		"source_hints": [hint_pins, hint_other],
+	}
+
+	var cand_id := str(ws.ingest_record(record, 9))
+	check("ingest_record returns a candidate id", not cand_id.is_empty())
+	var cand = ws.get_candidate(cand_id)
+	check("candidate resolves", cand != null)
+	if cand == null:
+		return
+
+	check_eq("source_hint_ids carries EXACTLY the pins-only hint (not all selected, not empty)",
+		cand.source_hint_ids.size(), 1)
+	check_eq("source_hint_ids[0] is hint_pins", str(cand.source_hint_ids[0]), "hint_pins")
+
+	check_eq("endpoints resolved from the pins-only hint (not empty)", cand.endpoints.size(), 2)
+	check_eq("endpoint 0 is source pin U3.1", cand.endpoints[0], {"component": "U3", "pin": "1"})
+	check_eq("endpoint 1 is dest pin U4.2", cand.endpoints[1], {"component": "U4", "pin": "2"})
+
+	check_eq("width is the pins-only hint's authored 0.4mm (not default 0.25, not hint_other's 0.9)",
+		float(cand.segments[0].get("width")), 0.4)
+
+	check_eq("task_key uses exactly the pins-only hint id", cand.task_id, "N3|hint_pins")
+
+
+## Companion case: a route the worker attributed to NO hint at all must yield
+## EMPTY provenance/endpoints/default width — never "every selected hint" (the
+## bug) and never a symptom of a lazy fix either (this is a genuinely
+## different, legitimately-unattributed scenario from the pins-only case
+## above, not the same fixture).
+func _run_ingest_record_unattributed_is_empty() -> void:
+	print("-- 5. ingest_record: unattributed route -> empty provenance, not everything --")
+	var ws = PcbRoutingWorkspace.new()
+	var hint_other := {
+		"id": "hint_other",
+		"kind_payload": {
+			"net_names": ["N9"], "width_mm": 0.9,
+			"source_pins": ["U9.1"], "dest_pins": ["U9.2"],
+		},
+	}
+	var record := {
+		"net": "N4",
+		"segments": [{"start": [0.0, 0.0], "end": [1.0, 0.0], "layer": "F.Cu"}],
+		"vias": [],
+		"source_hint_ids": [],
+		"source_hints": [hint_other],
+	}
+	var cand_id := str(ws.ingest_record(record, 1))
+	var cand = ws.get_candidate(cand_id)
+	check("candidate resolves", cand != null)
+	if cand == null:
+		return
+	check_eq("unattributed route -> EMPTY source_hint_ids (never the whole selected set)",
+		cand.source_hint_ids.size(), 0)
+	check_eq("unattributed route -> empty endpoints (no false attribution)", cand.endpoints.size(), 0)
+	check_eq("unattributed route -> default width 0.25mm", float(cand.segments[0].get("width")), 0.25)
+	check_eq("task_key has an empty hint-id half", cand.task_id, "N4|")
+
+
+# ── 6. functional floor: real PCBPanel, production dual-write seam ───────────
 
 ## Boots a REAL PCBPanel (not a fake/stand-in) via plugin_panel_driver, wires
 ## its real AnnotationHost -> panel back-reference the same way the mount flow
