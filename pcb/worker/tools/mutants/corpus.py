@@ -931,8 +931,25 @@ def validate_shape() -> None:
     # reviewed MINIMUM to cover it and the seventh is the GC2 twin of the scoping
     # one; there was no way to fit that under 36 without dropping coverage the
     # round was gated on. Raise this only with the same kind of reason.
-    if not 24 <= len(MUTANTS) <= 44:
-        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..44 band")
+    #
+    # The ceiling moved 44 -> 56 at the epoch-2 boundary (019f783860c8). That
+    # epoch shipped FIVE new fail-closed surfaces, not one: exact swept-cell
+    # traversal replacing a point-sampling clearance predicate (pathfinder
+    # ._swept_cells), copper-on-an-unemitted-layer promoted from warning to
+    # error (compile_board._is_emitted_layer), a new .kicad_pcb existing-copper
+    # parser whose net resolution is silently wrong if it carries an int
+    # (agent_router.kicad_io), a ten-fields-or-fail board-house profile loader
+    # (manufacturer_profile), and a stroke font emitting silk text. Only the
+    # profile loader arrived with entries (4, taking the corpus to 48); the
+    # other four owe theirs and are tracked. The 8 remaining slots are
+    # allocated to exactly those four — they are not headroom for volume, and
+    # the next raise past 56 needs its own reason.
+    #
+    # Cost at 56: ~180s each over -j 6 is roughly half an hour, which is a
+    # phase-boundary price, not a per-round one. That is the number to
+    # re-examine if the ceiling is ever pushed again.
+    if not 24 <= len(MUTANTS) <= 56:
+        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..56 band")
     for m in MUTANTS:
         for key in ("id", "file", "find", "replace", "kind", "rationale"):
             if key not in m:
