@@ -71,6 +71,7 @@ func _init() -> void:
 	_test_kind_summary_string()
 	_test_author_tool_multiclick()
 	_test_capabilities()
+	_test_build_route_hint_envelope_width_mm_absent_by_default()
 
 	_finish()
 
@@ -632,6 +633,51 @@ func _test_capabilities() -> void:
 	check("substrate author colors: human=magenta, ai=cyan",
 			AnnotationRenderContext.author_color("human") == Color(1.0, 0.5, 1.0)
 			and AnnotationRenderContext.author_color("ai") == Color(0.0, 1.0, 1.0))
+
+
+# ── 17. build_route_hint_envelope width_mm: absent by default (019fa73a191e) ──
+
+## THE regression this item closes: build_route_hint_envelope's width_mm
+## parameter used to be `float = 0.25`, so EVERY hint envelope — however
+## authored — carried an explicit width_mm:0.25 that outranks the board's own
+## design_rules.defaults.trace_width_mm downstream (agent_router/router.py's
+## "caller_or_hint" step beats "board_rules"). A GDScript float cannot be
+## null, so the fix is width_mm: Variant = null, with the key omitted from
+## kind_payload entirely when null — not a 0.0 sentinel, which would render
+## and validate identically to absent (pcb_route_hint_kind.gd :1114/:1214 both
+## key off `width_mm > 0.0`) and so be undetectable here.
+func _test_build_route_hint_envelope_width_mm_absent_by_default() -> void:
+	print("\n-- build_route_hint_envelope: width_mm is ABSENT by default, not a stamped 0.25 --")
+	var host = _Host.new()
+
+	# The exact call shape every caller that never picks a width makes (the
+	# waypoint author tool, add_route_hint_at, panel_tools's proposal writer,
+	# and most gd test call sites): no width_mm argument at all.
+	var env: Dictionary = host.build_route_hint_envelope(
+			10.0, 10.0, "", "F.Cu", "waypoint", [[10.0, 10.0], [20.0, 10.0]], "human")
+	var kp: Dictionary = env.get("kind_payload", {})
+	check("an unwidened hint gesture omits width_mm from the payload entirely",
+			not kp.has("width_mm"), str(kp))
+
+	# A genuinely caller-supplied width is still authored, verbatim, when passed
+	# — the capability itself is unchanged, only the unconditional default is gone.
+	var env_widened: Dictionary = host.build_route_hint_envelope(
+			10.0, 10.0, "", "F.Cu", "waypoint", [[10.0, 10.0], [20.0, 10.0]], "human",
+			"", 0.6)
+	var kp_widened: Dictionary = env_widened.get("kind_payload", {})
+	check("a caller-supplied width_mm is still carried through, verbatim",
+			kp_widened.has("width_mm") and float(kp_widened["width_mm"]) == 0.6, str(kp_widened))
+
+	# An explicit 0.0 is a real (if degenerate) caller value, not the same thing
+	# as "no width was picked" — it must stay a present key, never collapsed to
+	# absent. This also catches a truthy-check regression of the null guard: a
+	# `if width_mm:` in place of `if width_mm != null:` would drop 0.0 here.
+	var env_zero: Dictionary = host.build_route_hint_envelope(
+			10.0, 10.0, "", "F.Cu", "waypoint", [[10.0, 10.0], [20.0, 10.0]], "human",
+			"", 0.0)
+	var kp_zero: Dictionary = env_zero.get("kind_payload", {})
+	check("an explicit 0.0 width_mm is still a present key (not treated as null)",
+			kp_zero.has("width_mm") and float(kp_zero["width_mm"]) == 0.0, str(kp_zero))
 
 
 # ──────────────────────────────────────────────────────────────────────────────

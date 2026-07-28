@@ -768,6 +768,20 @@ func _backfill_route_hint_dest_point(stored: Dictionary) -> void:
 ## Build a conformant pcb_route_hint envelope (no id — add_annotation_v2 assigns
 ## one). x_mm/y_mm are board millimetres. Shared by add_route_hint_at (MCP/test
 ## path) and the kind's RouteHintAuthorTool (toolbar click-to-author path).
+##
+## width_mm is Variant, NOT float, and defaults to null (019fa73a191e): a
+## GDScript float cannot be null, so a typed `float = 0.25` default had no way
+## to express "the author did not pick a width" — every hint, however
+## authored, stamped an explicit 0.25mm that OUTRANKS the board's own
+## design_rules.defaults.trace_width_mm in the routing precedence chain
+## (agent_router/router.py's "caller_or_hint" beats "board_rules"), discarding
+## a dimension the board actually stated. When width_mm is null here, the key
+## is omitted from kind_payload entirely, so an unwidened hint gesture falls
+## through to the board's own rule downstream instead of a UI-invented one.
+## Do NOT use 0.0 as a "no width" sentinel — pcb_route_hint_kind.gd's render
+## (:1114) and summary (:1214) logic both key off `width_mm > 0.0`, so a
+## stored 0.0 and an absent key are visually and observably identical, which
+## would make this exact defect undetectable again.
 func build_route_hint_envelope(
 		x_mm: float,
 		y_mm: float,
@@ -777,7 +791,7 @@ func build_route_hint_envelope(
 		waypoints: Array = [],
 		author_kind: String = "human",
 		detail_level: String = "",
-		width_mm: float = 0.25,
+		width_mm: Variant = null,
 		source_pins: Array = [],
 		dest_pins: Array = []) -> Dictionary:
 	if author_kind != "ai":
@@ -788,6 +802,17 @@ func build_route_hint_envelope(
 	var summary_text := "Route hint (%s, %s)" % [hint_type, layer]
 	if not text.is_empty():
 		summary_text = "%s: %s" % [summary_text, text]
+	var kind_payload := {
+		"hint_type": hint_type,
+		"detail_level": detail_level,
+		"layer": layer,
+		"source_pins": source_pins.duplicate(),
+		"dest_pins": dest_pins.duplicate(),
+		"text": text,
+		"waypoints": waypoints,
+	}
+	if width_mm != null:
+		kind_payload["width_mm"] = width_mm
 	return {
 		"id": "",
 		"kind": "pcb_route_hint",
@@ -800,16 +825,7 @@ func build_route_hint_envelope(
 				"position": [x_mm, y_mm],
 			},
 		},
-		"kind_payload": {
-			"hint_type": hint_type,
-			"detail_level": detail_level,
-			"layer": layer,
-			"width_mm": width_mm,
-			"source_pins": source_pins.duplicate(),
-			"dest_pins": dest_pins.duplicate(),
-			"text": text,
-			"waypoints": waypoints,
-		},
+		"kind_payload": kind_payload,
 		"lifecycle": "open",
 		"author": {"kind": author_kind},
 		"view_context": "pcb",

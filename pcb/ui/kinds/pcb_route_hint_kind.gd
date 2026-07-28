@@ -100,11 +100,16 @@ func _init() -> void:
 	# data for the routing loop, not review commentary. The review workbench
 	# excludes them; WorkflowAnnotationList shows them; MCP reads are unchanged.
 	workflow_class = true
+	# NOTE: no "width_mm" key here (019fa73a191e) — this dict is currently DEAD
+	# (AnnotationKind.default_payload is declared but read nowhere in either
+	# Minerva core or this repo; grepped and confirmed), but width_mm now
+	# defaults to ABSENT everywhere else in the route-hint chain
+	# (PcbAnnotationHost.build_route_hint_envelope), so a stamped 0.25 here
+	# would be an inconsistent trap for the next reader who wires this up.
 	default_payload = {
 		"hint_type": "waypoint",
 		"detail_level": "guided",
 		"layer": "F.Cu",
-		"width_mm": 0.25,
 		"source_pins": [],
 		"dest_pins": [],
 		"text": "",
@@ -280,7 +285,13 @@ class SingleTraceAuthorTool:
 	const _PAD_RADIUS_MM := 2.0
 	const _DASH_LEN_MM := 2.0
 	const _GAP_LEN_MM := 1.5
-	const _DEFAULT_WIDTH_MM := 0.25
+	# NOTE: no default width constant here (D9a-2) — width_mm is left unset
+	# (null) on commit so precedence falls through to the board's
+	# design_rules.defaults.trace_width_mm, same fix D9a applied one level up
+	# in PcbAnnotationHost.build_route_hint_envelope. A stamped constant here
+	# would silently overrule the board's authored default on every single-
+	# trace gesture; there is no user-facing width picker in this tool, so
+	# any non-null value here would be an unconditional stamp, not a choice.
 
 	var _host: AnnotationHost = null
 	var _state: String = "idle"    # "idle" | "drawing"
@@ -426,7 +437,7 @@ class SingleTraceAuthorTool:
 
 		var envelope: Dictionary = _host.call(
 			"build_route_hint_envelope", anchor_pos.x, anchor_pos.y, "", layer, "single_trace",
-			wp_arrays, "human", "", _DEFAULT_WIDTH_MM, source_pins, dest_pins)
+			wp_arrays, "human", "", null, source_pins, dest_pins)
 
 		# dest_point: a commit-time-resolved rendering/hit-test cache (NOT a
 		# semantic waypoint — kind_payload.waypoints stays interior-only per

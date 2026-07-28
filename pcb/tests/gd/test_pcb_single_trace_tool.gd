@@ -262,6 +262,15 @@ func _test_e2e3_a_human_hints_it() -> void:
 	check("A: dest_pins == [U2.1]", (kp.get("dest_pins", []) as Array) == ["U2.1"], "got %s" % str(kp.get("dest_pins")))
 	check("A: no interior waypoints (direct pad-to-pad)", (kp.get("waypoints", []) as Array).is_empty())
 	check("A: layer defaults F.Cu", str(kp.get("layer", "")) == "F.Cu")
+	# D9a-2: the single-trace gesture must NOT stamp a width — no user-facing
+	# width picker exists in this tool, so any authored width_mm key here
+	# (0.25 or otherwise) would silently overrule the board's
+	# design_rules.defaults.trace_width_mm. A stored 0.0 is explicitly NOT an
+	# acceptable stand-in for "absent" (the renderer/summary both gate on
+	# width_mm > 0.0, so a 0.0 sentinel is invisible in the UI and would pass
+	# this check by accident) — assert the key is fully absent.
+	check("A: no width_mm key stamped (falls through to board default)",
+		not kp.has("width_mm"), "kp=%s" % str(kp))
 	var author: Dictionary = ann.get("author", {})
 	check("A: author kind human", str(author.get("kind", "")) == "human")
 	var anchor: Dictionary = ann.get("anchor", {})

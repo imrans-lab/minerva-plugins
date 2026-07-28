@@ -1420,6 +1420,75 @@ def test_the_reply_names_the_engines_own_default_as_its_source(monkeypatch):
         pytest.approx(methods._engine_default_mm("clearance"))
 
 
+# ---------------------------------------------------------------------------
+# 5b. D9a (019fa73a191e, K4 discards clause) — an unwidened route-hint gesture
+# must not discard the board's own trace_width_mm.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unwidened_hint_gesture_routes_each_board_at_its_own_width():
+    """The UI's route-hint envelope builder (PcbAnnotationHost.gd
+    ``build_route_hint_envelope``) used to default its ``width_mm`` parameter
+    to ``float = 0.25`` — a GDScript float cannot be null, so every hint,
+    however authored, stamped an explicit ``width_mm: 0.25`` into
+    ``kind_payload``. Step 2 of THIS precedence chain (a hint-authored width)
+    outranks step 3 (the board's own ``design_rules.defaults.trace_width_mm``,
+    see ``resolve_effective_rules`` in agent_router/router.py) — so a board
+    authoring 0.4mm was silently routed at 0.25mm: a dimension the board
+    DID state, discarded for one it did not (worse than inventing one).
+
+    THIS TEST IS A DOWNSTREAM VERIFICATION, NOT A PIN OF A CHANGE MADE HERE.
+    The absence-handling exercised below —
+    ``route_bridge._num(kp.get("width_mm"))`` returning 0.0 on a missing key
+    and being skipped by the ``if w > 0`` guard (route_bridge.py:974-976),
+    and ``methods._route``'s ``hint_set_width = bool(translation.trace_width_mm
+    and ...)`` being False when that value is ``None`` (methods.py:1576) —
+    was already correct on this SHA and needed no edit; verified directly
+    against the unmodified worker (a width_mm-absent hint on two boards each
+    already resolved ``source: "board_rules"`` at their own width, BEFORE any
+    GDScript change was made). The actual defect, and the actual fix, live
+    entirely in the UI's envelope builder; see
+    ``test_pcb_annotation_host_semantics.gd``'s
+    ``_test_build_route_hint_envelope_width_mm_absent_by_default`` for the pin
+    of THAT change. This test pins the downstream contract an unwidened hint
+    gesture now depends on, as its own regression guard.
+
+    "one unchanged hint gesture" == a hint payload carrying NO ``width_mm``
+    key at all — exactly what the fixed builder emits when nobody picked a
+    width.
+    """
+    def _unwidened_hint() -> dict:
+        return {"id": "h1", "kind": "pcb_route_hint", "lifecycle": "open",
+                "author": {"kind": "human"},
+                "kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+                                 "net_names": ["SIG"], "waypoints": []}}
+
+    def _board(width_mm: float) -> dict:
+        return _three_pin_board(design_rules={
+            "clearance_mm": BOARD_CLEARANCE_MM, "trace_width_mm": width_mm,
+            "via_diameter_mm": 0.8, "via_drill_mm": 0.4})
+
+    for board_width in (0.35, 0.5):
+        resp = _call_route({"board": _board(board_width),
+                             "route_hints": [_unwidened_hint()]})
+        assert resp["ok"] is True, resp
+        rules = resp["result"]["effective_routing_rules"]["trace_width_mm"]
+        # Assert the SOURCE LABEL too, not just the value: a fix that produced
+        # the right width but still reported "hint" would mean the UI is still
+        # authoring A value that happens to match — not "no value at all",
+        # which is the actual capability contract this item restores.
+        assert rules == {"value": pytest.approx(board_width), "source": "board_rules"}, rules
+
+    # A GENUINELY caller-picked width still outranks the board — unchanged,
+    # the capability the fix must not remove.
+    widened_hint = _unwidened_hint()
+    widened_hint["kind_payload"]["width_mm"] = 0.6
+    resp = _call_route({"board": _board(0.35), "route_hints": [widened_hint]})
+    assert resp["ok"] is True, resp
+    rules = resp["result"]["effective_routing_rules"]["trace_width_mm"]
+    assert rules == {"value": pytest.approx(0.6), "source": "hint"}, rules
+
+
 def _classed_board(members=("SIG",), **class_fields) -> dict:
     """`_three_pin_board` plus ONE authored net class over the named members.
 
