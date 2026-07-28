@@ -13,17 +13,28 @@
 # from the actual location of THIS repo, so it works regardless of where
 # the two checkouts happen to sit relative to each other.
 #
-# Exit code: 0 if every test's SceneTree exited 0, non-zero otherwise (the
-# first non-zero exit code encountered, or 1 if any test crashed without a
-# numeric code). This is a REAL pass/fail signal: every test in
-# pcb/tests/gd/ ends its _init() with `quit(1 if _fail > 0 else 0)`, so the
-# Godot process's own exit code IS the test result — no scraping stdout.
+# Exit code: 0 only if every suite BOTH exited 0 AND printed a parseable
+# "=== Results: N passed, M failed ===" line with N > 0. A suite's process
+# exit code alone is NOT trusted as the pass/fail signal: every test in
+# pcb/tests/gd/ ends its _init() with `quit(1 if _fail > 0 else 0)`, but a
+# suite that returns/quits early — an accidental early `return`, an aborted
+# fixture, a `quit(0)` planted above the first assertion — exits 0 without
+# running a single check() and would read as a pass on exit code alone.
+# Measured directly (round 019fa603827b): inserting `quit(0); return` at the
+# top of test_pcb_panel_ui.gd::_init() made the exit code lie — 0 passed,
+# 22 real assertions skipped — while the process itself exited clean.
 #
-# 3 of the 7 tests (test_workspace_persistence, test_workspace_ingest,
-# test_parity_bridge) additionally preload
-# res://test/helpers/plugin_panel_driver.gd, which must exist inside the
-# Minerva checkout's src/test/helpers/. A stock Minerva checkout has it;
-# this script does not vendor or fake it.
+# To close that hole the runner captures each suite's stdout+stderr and, in
+# addition to checking $?, parses the Results line and enforces a floor: a
+# suite FAILS if the process exited non-zero, OR the Results line is absent
+# (the process quit/crashed before reporting), OR it reports zero total
+# assertions, OR it reports zero passed. See "How pass/fail is signalled" in
+# pcb/docs/gd-tests.md for the full contract.
+#
+# Several suites additionally preload res://test/helpers/plugin_panel_driver.gd
+# and/or res://test/helpers/panel_tool_registry_driver.gd from Minerva core,
+# to drive a real PCBPanel instead of a stand-in. A stock Minerva checkout has
+# both; this script does not vendor or fake them.
 
 set -u
 
@@ -77,6 +88,14 @@ fi
 
 overall_rc=0
 declare -a results=()
+total_pass=0
+total_suites_ok=0
+
+# Scratch file for capturing one suite's combined stdout+stderr so the
+# Results line can be parsed after the process exits. Reused across
+# iterations; cleaned up on any exit path.
+RESULTS_TMP="$(mktemp)"
+trap 'rm -f "${RESULTS_TMP}"' EXIT
 
 # Import the host project before running anything. Godot resolves `class_name`
 # globals through .godot/global_script_class_cache.cfg, which is generated on
@@ -101,17 +120,62 @@ for test_path in "${tests[@]}"; do
   name="$(basename "${test_path}")"
   res_script="res://../../minerva-plugins/pcb/tests/gd/${name}"
   echo "=== ${name} ==="
-  godot --headless --path "${MINERVA_DIR}/src" --script "${res_script}"
-  rc=$?
+
+  # Tee so the run stays human-watchable live (nothing regresses for a
+  # person reading the terminal), while also capturing the output to parse
+  # the Results line. PIPESTATUS[0] is godot's own exit code, not tee's.
+  godot --headless --path "${MINERVA_DIR}/src" --script "${res_script}" 2>&1 | tee "${RESULTS_TMP}"
+  rc="${PIPESTATUS[0]}"
   echo "--- ${name} exited ${rc} ---"
   echo
 
-  if [ "${rc}" -eq 0 ]; then
-    results+=("PASS  ${name}")
+  # Parse "=== Results: N passed, M failed ===" (all 30 suites print this
+  # exact prefix; a few append "(real_worker_used=%s)" inside the
+  # parens, which the pattern below does not need to match).
+  results_line="$(grep -m1 -E '=== Results: [0-9]+ passed, [0-9]+ failed' "${RESULTS_TMP}" || true)"
+  n_pass=""
+  n_fail=""
+  if [[ "${results_line}" =~ Results:\ ([0-9]+)\ passed,\ ([0-9]+)\ failed ]]; then
+    n_pass="${BASH_REMATCH[1]}"
+    n_fail="${BASH_REMATCH[2]}"
+  fi
+
+  # FAIL CLOSED: an absent or unparseable Results line is a FAIL, never a
+  # PASS — that is the exact case a `quit(0)` planted before the first
+  # assertion produces. A suite also fails if it reports zero total
+  # assertions, or zero passed, even when the process exit code was 0.
+  suite_ok=1
+  fail_reason=""
+  if [ "${rc}" -ne 0 ]; then
+    suite_ok=0
+    if [ -n "${n_pass}" ]; then
+      fail_reason="exit ${rc} (${n_pass} passed, ${n_fail} failed)"
+    else
+      fail_reason="exit ${rc}, no Results line (crashed or quit before reporting)"
+    fi
+  elif [ -z "${n_pass}" ]; then
+    suite_ok=0
+    fail_reason="no '=== Results: N passed, M failed' line in output — suite exited 0 without reporting (this is the quit(0)-before-assertions case)"
+  elif [ "$((n_pass + n_fail))" -eq 0 ]; then
+    suite_ok=0
+    fail_reason="Results line reports 0 total assertions"
+  elif [ "${n_pass}" -eq 0 ]; then
+    suite_ok=0
+    fail_reason="Results line reports 0 passed assertions"
+  fi
+
+  if [ "${suite_ok}" -eq 1 ]; then
+    results+=("PASS  ${name}  (${n_pass} passed, ${n_fail} failed)")
+    total_pass=$((total_pass + n_pass))
+    total_suites_ok=$((total_suites_ok + 1))
   else
-    results+=("FAIL  ${name} (exit ${rc})")
+    results+=("FAIL  ${name}  -- ${fail_reason}")
     if [ "${overall_rc}" -eq 0 ]; then
-      overall_rc="${rc}"
+      if [ "${rc}" -ne 0 ]; then
+        overall_rc="${rc}"
+      else
+        overall_rc=1
+      fi
     fi
   fi
 done
@@ -120,13 +184,16 @@ echo "=== Summary ==="
 for line in "${results[@]}"; do
   echo "${line}"
 done
+echo
+echo "Suites reporting real assertions: ${total_suites_ok}/${#tests[@]}"
+echo "Total assertions passed: ${total_pass}"
 
 if [ "${overall_rc}" -ne 0 ]; then
   echo
   echo "gd test suite FAILED"
 else
   echo
-  echo "gd test suite passed (${#tests[@]}/${#tests[@]})"
+  echo "gd test suite passed (${#tests[@]}/${#tests[@]}, ${total_pass} assertions)"
 fi
 
 exit "${overall_rc}"
