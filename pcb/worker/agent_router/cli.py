@@ -23,44 +23,48 @@ from .yaml_loader import load_board_with_hints
 
 
 def _refuse_if_source_carries_copper(pcb_path) -> None:
-    """REFUSE to route a .kicad_pcb that already contains copper (019f9d0bc17c).
+    """REFUSE to route a .kicad_pcb carrying copper this reader still cannot
+    see (019f9d0bc17c).
 
-    DELETE THIS WHOLE FUNCTION, its one call in ``cmd_route``, and
-    ``test_the_cli_refuses_a_source_that_already_carries_copper`` when
-    019f9d0bc17c lands — then drop the existing-copper qualifier from the
-    entry-point-parity claim in ``cmd_route``. It is deliberately a standalone
-    guard rather than logic threaded through ``cmd_route`` so that removal is
-    clean.
+    NARROWED, not deleted. An earlier draft of this item said delete this
+    function once ``kicad_io`` grew a parser; that was wrong.
+    ``read_kicad_pcb`` now reads ``(segment ...)`` and ``(via ...)`` into
+    ``Board.existing_traces``/``existing_vias``, but KiCad has two OTHER
+    copper-bearing forms it still does not model: a top-level ``(arc ...)``
+    (a curved copper track) and a copper-layer ``(zone ...)`` (a pour).
+    Deleting the guard the moment segments and vias were covered would have
+    swapped a loud refusal for a SILENT SHORT on any board carrying either —
+    ``existing_traces``/``existing_vias`` would come back looking complete
+    while real copper on the board stayed invisible, and a fresh route could
+    be laid straight through it.
 
-    WHY IT EXISTS. ``kicad_io.read_kicad_pcb`` parses pads, nets and obstacles
-    but NOT ``(segment ...)`` or ``(via ...)``, so a Board built here always has
-    empty ``existing_traces``/``existing_vias`` — while ``methods._route``
-    always populates them from the compiled IR. On a partially-routed board the
-    worker therefore routes AROUND existing copper and this command would route
-    straight THROUGH it, after which ``write_kicad_pcb`` appends the new
-    segments onto the preserved originals. The output is a shorted board in a
-    file that is a gerber source.
-
-    That is a SHORT, not a margin problem, so it fails closed rather than
-    carrying a documentation qualifier alone. Detection is textual because the
-    parser this guard stands in for does not exist yet; it deliberately errs
-    toward refusing (a commented-out segment would also trip it), which is the
-    safe direction for a guard whose alternative is shorted copper.
+    WHY IT STILL EXISTS AT ALL. On a board carrying an unmodelled arc or
+    zone, this command would route straight through it, after which
+    ``write_kicad_pcb`` appends the new segments onto the preserved
+    original — a shorted board in a file that is a gerber source. That is a
+    SHORT, not a margin problem, so it fails closed rather than carrying a
+    documentation qualifier alone. Detection is still textual, for the same
+    reason the original guard's was: the parser this guard stands in for
+    (arc/zone support) does not exist yet, so it deliberately errs toward
+    refusing (a commented-out arc would also trip it), which is the safe
+    direction for a guard whose alternative is shorted copper.
     """
     try:
         text = Path(pcb_path).read_text()
     except OSError:
         return  # not our error to report — the reader below will surface it
-    if not re.search(r"\(\s*(?:segment|via)\b", text):
+    if not re.search(r"\(\s*(?:arc|zone)\b", text):
         return
     raise RoutingRulesError(
-        f"{pcb_path}: this board already contains routed copper (segments "
-        f"and/or vias), and agent_router.kicad_io cannot read it yet — "
-        f"read_kicad_pcb parses pads, nets and obstacles only. Routing anyway "
-        f"would lay new copper straight through the existing copper and write "
-        f"a shorted board, so this command fails closed. Use the worker "
-        f"'route' method, which does model accepted copper. Tracking: docket "
-        f"019f9d0bc17c (agent_router.kicad_io reads no existing copper).")
+        f"{pcb_path}: this board contains copper agent_router.kicad_io still "
+        f"cannot read — a curved track ((arc ...)) and/or a copper pour "
+        f"((zone ...)); read_kicad_pcb models straight (segment ...) and "
+        f"(via ...) copper only. Routing anyway could lay new copper "
+        f"straight through the unmodelled copper and write a shorted board, "
+        f"so this command fails closed. Use the worker 'route' method, which "
+        f"does model this copper. Tracking: docket 019f9d0bc17c "
+        f"(agent_router.kicad_io reads segment/via copper; arc/zone remain "
+        f"unmodelled).")
 
 
 def _design_rules_from_yaml(board_yaml_path) -> DesignRules | None:
@@ -242,11 +246,14 @@ def cmd_route(args):
         process can build. Pinned by ``test_the_cli_routes_below_the_v1_fab_
         floor`` so it stays visible; gating it needs the floor to become
         reachable from this package, which is out of this round's fence.
-      * already-routed copper — this command cannot SEE it
-        (``kicad_io.read_kicad_pcb`` parses no segments or vias), and routing
-        through it writes a short. That one is not left to a qualifier at all:
-        ``_refuse_if_source_carries_copper`` fails the run closed. Tracking:
-        019f9d0bc17c, which also owns removing the guard and this bullet.
+      * already-routed copper — ``kicad_io.read_kicad_pcb`` now reads
+        ``(segment ...)``/``(via ...)`` into ``Board.existing_traces``/
+        ``existing_vias`` (019f9d0bc17c), so this command routes AROUND it,
+        same as the worker path. Two forms remain unmodelled — a curved
+        track (``(arc ...)``) and a copper pour (``(zone ...)``) — and a
+        board carrying either is still not left to a qualifier:
+        ``_refuse_if_source_carries_copper``, narrowed to just those two
+        forms, fails the run closed. Tracking: 019f9d0bc17c.
     """
     # Only options the user ACTUALLY set — an unset option must stay absent so
     # the chain can fall through to the board (see the note above).

@@ -15,15 +15,20 @@ unchanged and still win — they are an override layer, not the source.
 
 WHAT THIS FILE PINS, and what it deliberately does not:
 
-  * the two entry points agree — on every board that carries no already-routed
-    copper and whose authored clearance is at or above the v1 fab floor
+  * the two entry points agree — on every board whose already-routed copper is
+    entirely ``(segment ...)``/``(via ...)`` (read into ``Board.
+    existing_traces``/``existing_vias``, net NUMBER resolved to net NAME —
+    see ``tests/agent_router/test_kicad_io.py``'s
+    ``TestExistingCopper``) and whose authored clearance is at or above the
+    v1 fab floor
     (``test_the_same_board_rules_reach_the_engine_through_both_entry_points``),
     and the CLI's old answer is locked out. Both qualifiers are real and each is
     pinned: a sub-floor clearance diverges and is documented
     (``test_the_cli_routes_below_the_v1_fab_floor``); a source carrying copper
-    the CLI cannot read is REFUSED rather than qualified, because routing it
-    writes a short (``test_the_cli_refuses_a_source_that_already_carries_
-    copper``, 019f9d0bc17c);
+    the CLI STILL cannot read — a curved ``(arc ...)`` track or a ``(zone ...)``
+    pour — is REFUSED rather than qualified, because routing over it writes a
+    short (``test_the_cli_refuses_a_source_that_already_carries_copper``,
+    019f9d0bc17c);
   * the precedence chain is tested AS A CHAIN — one test per link, so a future
     change that collapses two levels fails loudly rather than silently;
   * the Board's slots are LOAD-BEARING, not decorative: a run that names no
@@ -501,21 +506,26 @@ def test_the_cli_fails_closed_on_rules_it_cannot_read(monkeypatch, tmp_path,
 
 def test_the_cli_refuses_a_source_that_already_carries_copper(
         monkeypatch, tmp_path, cli_engine_spy):
-    """THE SHORT, refused rather than qualified (019f9d0bc17c).
+    """THE SHORT, refused rather than qualified (019f9d0bc17c) — [R2] NARROWED,
+    not retired, now that segment/via copper is read.
 
-    ``kicad_io.read_kicad_pcb`` parses no ``(segment ...)`` / ``(via ...)``, so
-    a CLI-built Board always has EMPTY existing-copper slots while
-    ``methods._route`` always fills them. Routing a partially-routed board here
-    would lay copper straight through the copper already on it, and
-    ``write_kicad_pcb`` appends to the preserved original — a shorted board in a
-    gerber source. Unlike the fab-floor divergence (a margin problem, pinned and
-    documented) this one fails the run closed.
-
-    DELETE THIS TEST together with ``cli._refuse_if_source_carries_copper`` when
-    the parser lands.
+    ``kicad_io.read_kicad_pcb`` now reads ``(segment ...)``/``(via ...)`` into
+    ``Board.existing_traces``/``existing_vias``, so a board carrying only that
+    copper routes AROUND it — proved at the CLI level by
+    ``test_a_clean_source_is_not_refused`` below, and at the reader level by
+    ``TestExistingCopper`` in ``test_kicad_io.py``. What the guard still
+    catches is the copper this reader STILL cannot model: a curved
+    ``(arc ...)`` track (a ``(zone ...)`` pour is the other form; see
+    ``test_the_copper_refusal_names_what_is_missing_and_where_to_track_it``).
+    Routing a board carrying one here would lay new copper straight through
+    it, and ``write_kicad_pcb`` appends to the preserved original — a shorted
+    board in a gerber source.
     """
     pcb = tmp_path / "partial.kicad_pcb"
-    pcb.write_text(_with_copper(_kicad_pcb_text()))
+    pcb.write_text(_with_copper(
+        _kicad_pcb_text(),
+        '(arc (start 10 20) (mid 15 15) (end 20 20) (width 0.25) '
+        '(layer "F.Cu") (net 1))'))
     y = tmp_path / "partial.yaml"; y.write_text(_board_yaml_text())
 
     with pytest.raises(SystemExit) as exc:
@@ -526,23 +536,44 @@ def test_the_cli_refuses_a_source_that_already_carries_copper(
 
 
 def test_the_copper_refusal_names_what_is_missing_and_where_to_track_it(tmp_path):
-    """A guard a developer cannot act on just looks like a broken tool."""
+    """A guard a developer cannot act on just looks like a broken tool — and
+    [R2] the message must now NAME which forms are unmodelled, since it no
+    longer refuses every board carrying copper (segment/via pass through
+    clean; see ``test_a_clean_source_is_not_refused``)."""
     pcb = tmp_path / "p.kicad_pcb"
     pcb.write_text(_with_copper(
-        _kicad_pcb_text(), '(via (at 20 20) (size 0.8) (drill 0.4) (net 1))'))
+        _kicad_pcb_text(),
+        '(zone (net 1) (net_name "SIG") (layer "F.Cu") (hatch edge 0.5) '
+        '(filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 1 0) (xy 1 1))))'))
     with pytest.raises(RoutingRulesError) as exc:
         engine_cli._refuse_if_source_carries_copper(pcb)
     message = str(exc.value)
     assert "kicad_io" in message
     assert "019f9d0bc17c" in message
     assert "shorted" in message
+    assert "arc" in message
+    assert "zone" in message
 
 
 def test_a_clean_source_is_not_refused(tmp_path):
-    """The control: the guard must not refuse every board it is given."""
+    """The control: the guard must not refuse every board it is given — and
+    [R2] must no longer refuse the copper forms the parser now models
+    (segment, via). That second half IS the narrowing this round makes: pre-
+    narrowing, both boards below would have raised."""
     pcb = tmp_path / "clean.kicad_pcb"
     pcb.write_text(_kicad_pcb_text())
     engine_cli._refuse_if_source_carries_copper(pcb)  # must not raise
+
+    routed = tmp_path / "routed.kicad_pcb"
+    routed.write_text(_with_copper(_kicad_pcb_text()))  # a (segment ...)
+    engine_cli._refuse_if_source_carries_copper(routed)  # must not raise — NEW
+
+    via_board = tmp_path / "via.kicad_pcb"
+    via_board.write_text(_with_copper(
+        _kicad_pcb_text(),
+        '(via (at 20 20) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") '
+        '(net 1))'))
+    engine_cli._refuse_if_source_carries_copper(via_board)  # must not raise — NEW
 
 
 def test_the_cli_turns_a_malformed_board_yaml_into_a_clean_exit(

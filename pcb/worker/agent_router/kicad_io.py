@@ -121,7 +121,9 @@ def read_kicad_pcb(pcb_file: str | FilePath) -> "Board":
         pcb_file: Path to .kicad_pcb file
 
     Returns:
-        Board instance with pads, nets, and obstacles
+        Board instance with pads, nets, obstacles, and already-accepted copper
+        (``existing_traces`` / ``existing_vias`` — see
+        :func:`_existing_traces_from_content` / :func:`_existing_vias_from_content`).
     """
     from .board import Board, Pad, Net, Obstacle
 
@@ -185,10 +187,152 @@ def read_kicad_pcb(pcb_file: str | FilePath) -> "Board":
     # Parse obstacles (mounting holes, keepouts)
     board.obstacles = _parse_obstacles(content)
 
+    # The board's ALREADY-ACCEPTED copper (019f9d0bc17c). Net NUMBERS (KiCad's
+    # own vocabulary) are resolved to net NAMES here, via THIS file's own net
+    # table (``kicad.net_numbers``, already built above) — never carried
+    # forward as raw ints. ``router.ExistingSegment.net`` /
+    # ``router.ExistingVia.net`` are ``Optional[str]`` NAMES, and
+    # ``router._existing_copper_by_net`` keys on that name to match
+    # ``board.get_net_pads(net_name)``. Filling the slot with the int straight
+    # from the file would match no pad's ``net_name`` — copper marked on the
+    # grid under a number nothing else recognises, pre-connected groups that
+    # never merge, and a run that reports success on a net it did not finish.
+    board.existing_traces = _existing_traces_from_content(content, kicad.net_numbers)
+    board.existing_vias = _existing_vias_from_content(content, kicad.net_numbers)
+
     board.width = board.width or 100.0
     board.height = board.height or 100.0
 
     return board
+
+
+def _find_top_level_blocks(content: str, keyword: str) -> list[str]:
+    """Return the full text of every balanced ``(<keyword> ...)`` block in
+    ``content``, in file order.
+
+    Shares the same balanced-paren scan ``_parse_footprints``/``_parse_pad``
+    use — a fixed-field regex cannot safely span an s-expression whose
+    trailing tokens vary (KiCad appends ``(tstamp ...)``, ``(locked)``,
+    per-via ``(tenting ...)``, etc., and different KiCad versions order them
+    differently), so this walks parens instead of anchoring on what comes
+    after the fields this reader wants.
+    """
+    blocks = []
+    for match in re.finditer(r'\(' + keyword + r'\s', content):
+        start = match.start()
+        depth = 0
+        end = start
+        for i in range(start, len(content)):
+            if content[i] == '(':
+                depth += 1
+            elif content[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        blocks.append(content[start:end])
+    return blocks
+
+
+def _existing_traces_from_content(
+    content: str, net_numbers: dict[int, str]
+) -> tuple:
+    """Parse every top-level ``(segment ...)`` into a ``router.ExistingSegment``,
+    net NAME resolved (see the caller's note on why — the int/str net-identity
+    trap).
+
+    NO GEOMETRY DEFAULTS. KiCad always emits ``(width ...)`` on a routed
+    segment; a segment whose width cannot be read is a PARSE FAILURE, not a
+    defaulted 0.25. A trace is a CENTERLINE — keepout is
+    ``w/2 + clearance + w_new/2`` — so a defaulted width UNDER-blocks (the
+    fail-open direction) and reintroduces the short this reader exists to
+    prevent.
+    """
+    from .router import ExistingSegment
+
+    segments = []
+    for block in _find_top_level_blocks(content, "segment"):
+        start_match = re.search(r'\(start\s+([\d.-]+)\s+([\d.-]+)\)', block)
+        end_match = re.search(r'\(end\s+([\d.-]+)\s+([\d.-]+)\)', block)
+        width_match = re.search(r'\(width\s+([\d.-]+)\)', block)
+        layer_match = re.search(r'\(layer\s+"([^"]+)"\)', block)
+        if not (start_match and end_match and layer_match):
+            raise ValueError(
+                f"malformed (segment ...): missing (start ...), (end ...) "
+                f"or (layer ...) — {block!r}")
+        if not width_match:
+            raise ValueError(
+                f"(segment ...) carries no (width ...); refusing to default "
+                f"it (a defaulted width under-blocks the keepout it feeds) "
+                f"— {block!r}")
+        net_match = re.search(r'\(net\s+(\d+)', block)
+        net_num = int(net_match.group(1)) if net_match else 0
+        segments.append(ExistingSegment(
+            net=net_numbers.get(net_num),
+            start=(float(start_match.group(1)), float(start_match.group(2))),
+            end=(float(end_match.group(1)), float(end_match.group(2))),
+            width=float(width_match.group(1)),
+            layer=layer_match.group(1),
+        ))
+    return tuple(segments)
+
+
+def _existing_vias_from_content(
+    content: str, net_numbers: dict[int, str]
+) -> tuple:
+    """Parse every top-level ``(via ...)`` into a ``router.ExistingVia``, net
+    NAME resolved.
+
+    NO SIZE DEFAULT, same reasoning as segment width — KiCad always emits
+    ``(size ...)`` and a via whose size cannot be read is a parse failure, not
+    a defaulted 0.8.
+
+    NO DRILL. ``router.ExistingVia`` has no drill field (``net, position,
+    diameter, layers`` — see ``router.py:446-452``) and ``_mark_existing_copper``
+    never reads one; parsing drill into this slot would need widening
+    ``router.py``, which is out of this reader's fence. Not read here.
+
+    ``ExistingVia.layers`` is the ENUMERATED SET of layers the via's copper
+    OCCUPIES — not ``kicad_io.Via.layers``' (from, to) SPAN. On the boards
+    this package can build (agent_router.layers models exactly two copper
+    layers, top/bottom) a through-via's span and its occupied set are the
+    same two names, but they are not the same THING, and a raw ``(from, to)``
+    tuple handed straight through would be right by coincidence, not by
+    construction. ``dict.fromkeys`` mirrors ``route_bridge.
+    resolved_board_existing_copper``'s own projection (which also dedupes a
+    from==to span down to the ONE layer actually occupied) rather than
+    assuming the pair is always two distinct names.
+    """
+    from .router import ExistingVia
+
+    vias = []
+    for block in _find_top_level_blocks(content, "via"):
+        at_match = re.search(r'\(at\s+([\d.-]+)\s+([\d.-]+)\)', block)
+        size_match = re.search(r'\(size\s+([\d.-]+)\)', block)
+        layers_match = re.search(r'\(layers\s+"([^"]+)"\s+"([^"]+)"\)', block)
+        if not at_match:
+            raise ValueError(
+                f"malformed (via ...): missing (at ...) — {block!r}")
+        if not size_match:
+            raise ValueError(
+                f"(via ...) carries no (size ...); refusing to default it "
+                f"(a defaulted diameter under-blocks the keepout it feeds) "
+                f"— {block!r}")
+        if not layers_match:
+            raise ValueError(
+                f"(via ...) carries no (layers ...): its occupied layers "
+                f"cannot be determined — {block!r}")
+        net_match = re.search(r'\(net\s+(\d+)', block)
+        net_num = int(net_match.group(1)) if net_match else 0
+        occupied = tuple(dict.fromkeys(
+            (layers_match.group(1), layers_match.group(2))))
+        vias.append(ExistingVia(
+            net=net_numbers.get(net_num),
+            position=(float(at_match.group(1)), float(at_match.group(2))),
+            diameter=float(size_match.group(1)),
+            layers=occupied,
+        ))
+    return tuple(vias)
 
 
 def _parse_board_outline(content: str) -> tuple[float, float, float, float]:

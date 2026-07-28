@@ -2,9 +2,14 @@
 Tests for KiCad I/O.
 """
 
+import textwrap
+
 import pytest
 from pathlib import Path
 
+from agent_router import router as engine_router
+from agent_router.board import Board
+from agent_router.router import ExistingSegment, ExistingVia
 from agent_router.kicad_io import (
     read_kicad_pcb,
     write_kicad_pcb,
@@ -225,3 +230,214 @@ class TestKiCadPCB:
 
         assert len(pcb.vias) == 1
         assert pcb.vias[0] is via
+
+
+# ---------------------------------------------------------------------------
+# 019f9d0bc17c — read (segment ...) / (via ...) into Board.existing_traces /
+# existing_vias, net NUMBER resolved to net NAME.
+# ---------------------------------------------------------------------------
+
+
+def _pcb_text(*, extra_copper: str = "", third_pad: bool = False) -> str:
+    """A minimal routed .kicad_pcb: two (optionally three) pads on net "SIG",
+    positioned so their absolute pad centres are exact round numbers a test
+    can target with copper endpoints — no coincidence-tolerance guesswork.
+
+    P1 @ (10, 20), P2 @ (30, 20), and — if ``third_pad`` — P3 @ (50, 20), all
+    on F.Cu, all net 1 "SIG". ``extra_copper`` is inserted verbatim (one or
+    more ``(segment ...)`` / ``(via ...)`` blocks).
+    """
+    third = ""
+    if third_pad:
+        third = textwrap.dedent("""\
+            (footprint "R_0603" (layer "F.Cu")
+              (at 50 20)
+              (property "Reference" "P3")
+              (pad "1" smd rect (at 0 0) (size 1.6 1.6) (layers "F.Cu") (net 1 "SIG"))
+            )
+            """)
+    return textwrap.dedent(f"""\
+        (kicad_pcb (version 20221018) (generator pcbnew)
+          (general (thickness 1.6))
+          (paper "A4")
+          (layers
+            (0 "F.Cu" signal)
+            (31 "B.Cu" signal)
+            (44 "Edge.Cuts" user)
+          )
+          (net 0 "")
+          (net 1 "SIG")
+          (gr_rect (start 0 0) (end 60 40) (layer "Edge.Cuts") (width 0.1))
+          (footprint "R_0603" (layer "F.Cu")
+            (at 10 20)
+            (property "Reference" "P1")
+            (pad "1" smd rect (at 0 0) (size 1.6 1.6) (layers "F.Cu") (net 1 "SIG"))
+          )
+          (footprint "R_0603" (layer "F.Cu")
+            (at 30 20)
+            (property "Reference" "P2")
+            (pad "1" smd rect (at 0 0) (size 1.6 1.6) (layers "F.Cu") (net 1 "SIG"))
+          )
+          {third}{extra_copper}
+        )
+        """)
+
+
+class TestExistingCopper:
+    """``Board.from_kicad`` reads already-accepted copper (019f9d0bc17c).
+
+    The trap this class exists to catch: ``kicad_io.TraceSegment.net`` /
+    ``Via.net`` are int net NUMBERS (KiCad's own vocabulary), but
+    ``router.ExistingSegment.net`` / ``ExistingVia.net`` are ``Optional[str]``
+    net NAMES, and ``router._existing_copper_by_net`` keys on the NAME to
+    match ``board.get_net_pads(net_name)``. Fill the slot with the raw int and
+    the copper is marked under a label nothing else recognises: pre-connected
+    groups never merge, and the router proposes fresh copper across ground
+    that is already joined — a silent divergence from a board that is already
+    (partly) routed, not a crash.
+    """
+
+    def test_segment_is_read_with_correct_geometry_and_layer(self, tmp_path):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(segment (start 10 20) (end 30 20) (width 0.3) '
+                        '(layer "F.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+
+        assert len(board.existing_traces) == 1
+        seg = board.existing_traces[0]
+        assert isinstance(seg, ExistingSegment)
+        assert seg.start == (10.0, 20.0)
+        assert seg.end == (30.0, 20.0)
+        assert seg.width == 0.3
+        assert seg.layer == "F.Cu"
+
+    def test_via_is_read_with_correct_geometry_and_layers(self, tmp_path):
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(via (at 20 20) (size 0.8) (drill 0.4) '
+                        '(layers "F.Cu" "B.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+
+        assert len(board.existing_vias) == 1
+        via = board.existing_vias[0]
+        assert isinstance(via, ExistingVia)
+        assert via.position == (20.0, 20.0)
+        assert via.diameter == 0.8
+        # `ExistingVia.layers` is the OCCUPIED SET, not `kicad_io.Via.layers`'
+        # (from, to) SPAN — see the class-level note. On THIS package's boards
+        # (agent_router.layers models exactly top/bottom) the two happen to
+        # contain the same two names, which is why this assertion ALONE would
+        # pass under a naive "just copy the span tuple" implementation too;
+        # it is here for basic coverage, not as the discriminating proof —
+        # that is `test_the_net_name_not_the_net_number_is_what_merges_
+        # pre_connected_groups` below, which fails under exactly that naive
+        # implementation whenever the net type is wrong (it would also fail
+        # were the layers merely aliased rather than derived).
+        assert set(via.layers) == {"F.Cu", "B.Cu"}
+
+    def test_a_degenerate_via_span_collapses_to_the_one_layer_it_occupies(
+            self, tmp_path):
+        """The type distinction made concrete: a FROM==TO via block (malformed
+        as real copper, but a legal thing for THIS reader to be handed) has a
+        2-element SPAN by the KiCad file's own shape, but occupies exactly ONE
+        layer. `dict.fromkeys` on the pair proves the mapping enumerates
+        occupied layers rather than aliasing the span tuple — a straight
+        ``layers=via.layers`` copy would keep both (identical) entries and
+        return a 2-tuple here instead of 1."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(via (at 20 20) (size 0.8) (drill 0.4) '
+                        '(layers "F.Cu" "F.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+
+        assert len(board.existing_vias) == 1
+        assert board.existing_vias[0].layers == ("F.Cu",)
+
+    def test_the_net_name_not_the_net_number_is_what_merges_pre_connected_groups(
+            self, tmp_path):
+        """THE discriminating test (assert it directly, per the item).
+
+        P1 and P2 sit on net 1 "SIG" and are ALREADY joined by an existing
+        segment. P3 is a third "SIG" pad with no copper to it at all. If the
+        segment's net came through as the NAME "SIG", the router's
+        pre-connected-group merge recognises P1/P2 as already joined and the
+        reply needs exactly ONE new connection (folding P3 into that group —
+        the SAME shape ``test_the_via_is_what_joins_the_two_halves_of_an_
+        accepted_net`` in test_route_rules.py pins for the via case). If the
+        segment's net leaked through as the raw int ``1`` instead, ``router.
+        _existing_copper_by_net`` (keyed on the NAME) would never find it under
+        "SIG": P1 and P2 would look unconnected, the spanning tree would ask
+        for TWO connections instead of one, and — since the mislabelled
+        segment is also marked on the grid as an obstacle under a net name
+        nothing else matches — the router could reroute across it as though it
+        were a stranger's copper. Either way the run silently disagrees with
+        what is already on the board while reporting a clean result.
+        """
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            third_pad=True,
+            extra_copper='(segment (start 10 20) (end 30 20) (width 0.25) '
+                        '(layer "F.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+
+        # Assert the resolution directly, not just its downstream effect.
+        assert board.existing_traces[0].net == "SIG"
+
+        result = engine_router.route_board(
+            board, trace_width=0.25, clearance=0.2)
+        route = result.get_route("SIG")
+        assert route is not None, "P3 still needs joining in"
+        assert len(route.paths) == 1, (
+            "P1/P2 are already joined by accepted copper; only P3 is loose — "
+            "two paths here means the pre-connected groups did not merge")
+        assert not result.unrouted
+
+    def test_a_net_wholly_joined_by_existing_copper_gets_no_new_route(
+            self, tmp_path):
+        """The degenerate case: existing copper already spans the WHOLE net,
+        so nothing should be proposed at all — not a redundant parallel trace
+        laid straight over (or through) the copper already there."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(segment (start 10 20) (end 30 20) (width 0.25) '
+                        '(layer "F.Cu") (net 1))'))
+        board = Board.from_kicad(pcb)
+
+        result = engine_router.route_board(
+            board, trace_width=0.25, clearance=0.2)
+        assert result.get_route("SIG") is None
+        assert not result.unrouted
+
+    def test_a_segment_with_no_width_is_a_parse_failure_not_a_default(
+            self, tmp_path):
+        """Lazy-fix trap: populating start/end while defaulting width. A trace
+        is a CENTERLINE and keepout is derived from its width, so a defaulted
+        width under-blocks — the fail-open direction that reintroduces the
+        short this reader exists to prevent."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(segment (start 10 20) (end 30 20) '
+                        '(layer "F.Cu") (net 1))'))
+        with pytest.raises(ValueError, match="width"):
+            Board.from_kicad(pcb)
+
+    def test_a_via_with_no_size_is_a_parse_failure_not_a_default(self, tmp_path):
+        """Same lazy-fix trap, via side: no ``(size ...)`` must fail, never
+        default to 0.8."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text(
+            extra_copper='(via (at 20 20) (drill 0.4) '
+                        '(layers "F.Cu" "B.Cu") (net 1))'))
+        with pytest.raises(ValueError, match="size"):
+            Board.from_kicad(pcb)
+
+    def test_a_clean_board_still_reads_with_empty_existing_copper_slots(
+            self, tmp_path):
+        """The control: a board with no routed copper at all must not
+        fabricate any."""
+        pcb = tmp_path / "b.kicad_pcb"
+        pcb.write_text(_pcb_text())
+        board = Board.from_kicad(pcb)
+        assert board.existing_traces == ()
+        assert board.existing_vias == ()
