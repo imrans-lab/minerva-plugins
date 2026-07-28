@@ -121,7 +121,23 @@ var change_journal: Array[Dictionary] = []
 const MAX_JOURNAL_SIZE := 200
 signal journal_entry_added(entry: Dictionary)
 
-## Next trace ID counter
+## ── ID COUNTER INVARIANT (stated ONCE, here — every site below CITES this,
+## none re-derives it) ──────────────────────────────────────────────────────
+## Every path that admits a trace or via id — whether minted fresh by add_trace/
+## add_via or supplied from outside (import, board load, undo/redo restore) —
+## MUST leave the corresponding counter (_next_trace_id / _next_via_id) at or
+## above the highest id it admitted. NO PATH MAY EVER LOWER A COUNTER: not
+## clear_traces(), not clear(), not undo/redo's _restore_state. An id is never
+## reused within a session, so a stale-HIGH counter is always benign (it only
+## skips numbers) while a stale-LOW one is a collision waiting to happen —
+## `traces` is an id-keyed Dictionary, so a colliding mint OVERWRITES rather
+## than duplicates. ACCEPTED COST: an exported-then-reimported board renumbers
+## upward forever — safety over tidy numbering (owner ruling, docket
+## 019fa172dd21 comment 868). Sites this governs: reserve_trace_id/
+## reserve_via_id (the reservation half — a supplied id must push the counter
+## up), and clear_traces/clear/_restore_state (the "never lower it" half).
+
+## Next trace ID counter. Governed by the ID COUNTER INVARIANT above.
 var _next_trace_id: int = 1
 
 ## Next via ID counter (T2.3). Vias are plain dicts (no wrapper class); a via
@@ -130,7 +146,8 @@ var _next_trace_id: int = 1
 ## id rides in the via dict's extra-key passthrough (_via_to_board_dict /
 ## _vias_from_board_list already copy unknown keys), so no serialisation change
 ## is needed. Restored to a HIGH-WATER MARK on load so post-load mints never
-## collide with loaded ids (mirrors RoutingWorkspace's counter policy).
+## collide with loaded ids (mirrors RoutingWorkspace's counter policy). Governed
+## by the ID COUNTER INVARIANT above.
 var _next_via_id: int = 1
 
 
@@ -287,17 +304,23 @@ func has_net(net_name: String) -> bool:
 	return nets.has(net_name)
 
 
-## Remove a net
+## Remove a net (and every trace on it).
+##
+## No mutator may erase a collection member directly when a journalled remover
+## exists for that member (owner ruling, docket 019fa17326b5 comment 867) — so
+## each trace is removed through remove_trace() rather than a bare
+## `traces.erase()`. That is what makes journalling/signalling for a net-wide
+## delete identical, trace-for-trace, to a single-trace remove_trace() call
+## instead of a second copy of that logic that can drift out of sync.
 func remove_net(net_name: String) -> void:
 	if nets.has(net_name):
-		# Also remove traces for this net
 		var traces_to_remove: Array[String] = []
 		for trace_id in traces:
 			if traces[trace_id].net_name == net_name:
 				traces_to_remove.append(trace_id)
 
 		for trace_id in traces_to_remove:
-			traces.erase(trace_id)
+			remove_trace(trace_id)
 
 		nets.erase(net_name)
 		record_change("remove_net", {"net_name": net_name})
@@ -381,21 +404,23 @@ func add_trace(trace) -> void:
 
 
 ## Reserve a caller-supplied trace id so a LATER auto-mint can never collide
-## with it. add_trace already high-waters for each id it accepts, but a BULK
-## importer must reserve every supplied id UP FRONT: `traces` is keyed by id, so
-## if an unnamed trace is processed before a supplied "trace_1" the auto-mint
-## produces "trace_1" itself and the supplied trace then silently overwrites it.
-## Reserving first makes the outcome independent of the caller's ordering.
+## with it (the reservation half of the ID COUNTER INVARIANT above). add_trace
+## already high-waters for each id it accepts, but a BULK importer must reserve
+## every supplied id UP FRONT: `traces` is keyed by id, so if an unnamed trace
+## is processed before a supplied "trace_1" the auto-mint produces "trace_1"
+## itself and the supplied trace then silently overwrites it. Reserving first
+## makes the outcome independent of the caller's ordering.
 func reserve_trace_id(trace_id: String) -> void:
 	if trace_id.is_empty():
 		return
 	_next_trace_id = maxi(_next_trace_id, _stable_id_suffix(trace_id) + 1)
 
 
-## Via twin of reserve_trace_id. Vias are a list rather than an id-keyed map, so
-## nothing is overwritten — but a duplicate id would leave both vias sharing one
-## handle, and remove_via_by_id resolves only the first match, so the second
-## would be undeletable by id.
+## Via twin of reserve_trace_id (the reservation half of the ID COUNTER
+## INVARIANT above). Vias are a list rather than an id-keyed map, so nothing is
+## overwritten — but a duplicate id would leave both vias sharing one handle,
+## and remove_via_by_id resolves only the first match, so the second would be
+## undeletable by id.
 func reserve_via_id(via_id: String) -> void:
 	if via_id.is_empty():
 		return
@@ -456,13 +481,39 @@ func get_trace_at(position: Vector2, threshold: float = 1.0) -> String:
 	return best_id
 
 
-## Clear all traces and vias
+## Clear all traces and vias.
+##
+## Per the ID COUNTER INVARIANT (see the statement near _next_trace_id), this
+## does NOT reset _next_trace_id / _next_via_id — a stale-low counter after a
+## clear is exactly the collision hazard the invariant exists to prevent (see
+## docket 019fa172dd21 comment 868 for the concrete import->undo->mint sequence
+## this avoids: resetting here would let a later mint reproduce an id an undo
+## just restored, silently overwriting it in the id-keyed `traces` Dictionary).
+##
+## Journals WHAT was destroyed (every trace id and via id), not merely that a
+## clear happened — an empty-details entry told an agent reading
+## minerva_pcb_get_change_journal that copper vanished without saying which,
+## and this is the one clear_traces() caller with a live production trigger
+## (panel_tools.gd _import_trace_geometry / minerva_pcb_import_trace_geometry).
+## Emits trace_changed for every removed trace, matching what removing them
+## one at a time through remove_trace would have emitted; there is no
+## per-via signal to mirror (add_via/remove_via emit none either).
 func clear_traces() -> void:
+	var removed_trace_ids: Array = get_trace_ids()
+	var removed_via_ids: Array = []
+	for v in vias:
+		removed_via_ids.append(str((v as Dictionary).get("id", "")))
+
 	traces.clear()
 	vias.clear()
-	_next_trace_id = 1
-	_next_via_id = 1
-	record_change("clear_traces", {})
+	record_change("clear_traces", {
+		"trace_ids": removed_trace_ids,
+		"via_ids": removed_via_ids,
+		"trace_count": removed_trace_ids.size(),
+		"via_count": removed_via_ids.size(),
+	})
+	for trace_id in removed_trace_ids:
+		trace_changed.emit(trace_id)
 	data_changed.emit()
 
 
@@ -504,9 +555,28 @@ static func _stable_id_suffix(id: String) -> int:
 ## remove_via_by_id instead.
 func remove_via(index: int) -> void:
 	if index >= 0 and index < vias.size():
+		var details := _via_removal_details(index)
 		vias.remove_at(index)
-		record_change("remove_via", {"index": index})
+		record_change("remove_via", details)
 		data_changed.emit()
+
+
+## Journal details shared by remove_via/remove_via_by_id, so BOTH paths name
+## the same identifying fields. An index alone cannot identify the destroyed
+## via after the fact — indices shift on every removal — so via_id/net_name/
+## position ride alongside it, matching the level of detail remove_trace
+## already records for traces.
+func _via_removal_details(index: int) -> Dictionary:
+	var via: Dictionary = vias[index]
+	var pos = via.get("position", Vector2.ZERO)
+	var pos_dict: Dictionary = {"x": pos.x, "y": pos.y} if pos is Vector2 \
+		else {"x": (pos as Dictionary).get("x", 0.0), "y": (pos as Dictionary).get("y", 0.0)}
+	return {
+		"index": index,
+		"via_id": str(via.get("id", "")),
+		"net_name": str(via.get("net_name", "")),
+		"position": pos_dict,
+	}
 
 
 ## Index of the via carrying `via_id`, or -1 when no via carries it.
@@ -536,8 +606,9 @@ func remove_via_by_id(via_id: String) -> bool:
 	var index := find_via_index(via_id)
 	if index < 0:
 		return false
+	var details := _via_removal_details(index)
 	vias.remove_at(index)
-	record_change("remove_via", {"index": index, "via_id": via_id})
+	record_change("remove_via", details)
 	data_changed.emit()
 	return true
 
@@ -716,11 +787,27 @@ func _restore_state(state: Dictionary) -> void:
 	for id in trace_data:
 		var trace = PCBTraceScript.from_dict(trace_data[id])
 		traces[id] = trace
+		# ID COUNTER INVARIANT (see the statement near _next_trace_id): this path
+		# writes traces[id] directly, bypassing add_trace, so it must reserve
+		# here or a later id-less mint could reproduce a restored id and
+		# overwrite it. Mirrors load_from_dict's identical fix. The via twin of
+		# this is already covered — _load_vias below high-waters _next_via_id.
+		reserve_trace_id(str(id))
 
 	# Restore vias + mounting holes (F1 — see save_to_history). Reuse the shared
 	# loaders so Vector2/dict positions normalize the same way as file load.
+	# _load_vias already high-waters _next_via_id (T2.3) — do not duplicate that
+	# here.
 	_load_vias(state.get("vias", []))
 	_load_mounting_holes(state.get("mounting_holes", []))
+
+	# Batch state belongs to the CALLER's in-flight transaction, not to
+	# whichever board snapshot happens to be restored. Without this, undoing
+	# mid-batch leaves _batch_active set from a batch this restored state never
+	# saw, and the next end_batch() would snapshot a state the batch never
+	# produced.
+	_batch_active = false
+	_batch_touched = false
 
 #endregion
 
@@ -1281,7 +1368,12 @@ func _mounting_holes_from_board_list(hole_list: Array) -> Array:
 
 #region Utility Methods
 
-## Clear all data
+## Clear all data.
+##
+## Does NOT reset _next_trace_id / _next_via_id — see the ID COUNTER INVARIANT
+## near _next_trace_id. (This used to reset _next_trace_id only, leaving the
+## two counters governed by different rules on the same method; that asymmetry
+## is itself what the invariant closes off.)
 func clear() -> void:
 	components.clear()
 	nets.clear()
@@ -1290,7 +1382,6 @@ func clear() -> void:
 	mounting_holes.clear()
 	history.clear()
 	history_index = -1
-	_next_trace_id = 1
 	change_journal.clear()
 	structure_changed.emit()
 	data_changed.emit()

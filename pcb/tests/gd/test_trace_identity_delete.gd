@@ -56,6 +56,12 @@ extends SceneTree
 ##      reply names what landed, and both stay individually deletable by id
 ##  13. an EMPTY-string id selector is reported in missing_*, never silently
 ##      skipped — including that it does NOT match a legacy via carrying no id
+##  14. R1 (docket 019fa17326b5 / 019fa172dd21): the concrete import->clear_
+##      traces->undo->mint sequence that would OVERWRITE a restored trace if
+##      clear_traces() reset the id counter (it no longer does) or if
+##      _restore_state() failed to high-water it back up (it now does) —
+##      exercised through the real production caller, minerva_pcb_import_
+##      trace_geometry (PanelTools._import_trace_geometry)
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
@@ -89,6 +95,7 @@ func _init() -> void:
 	_run_union_overlap()
 	_run_duplicate_supplied_via_id()
 	_run_empty_id_selectors()
+	_run_import_undo_mint_no_overwrite()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -546,10 +553,16 @@ func _run_round_trip() -> void:
 		[Vector2(0, 12), Vector2(6, 12)])
 
 	print("-- 7b. a supplied numeric id listed AFTER id-less segments does not collide --")
-	# clear_traces resets the mint counter to 1, so an id-less group processed
-	# first would mint "trace_1" and the supplied "trace_1" would then overwrite
-	# it (traces is keyed by id) — one trace of copper silently lost. The
-	# reserve-first pass makes the outcome independent of this ordering.
+	# UPDATED per the owner ruling (docket 019fa172dd21 comment 868): clear_traces
+	# no longer resets _next_trace_id to 1 (the counter never lowers — see the
+	# ID COUNTER INVARIANT in pcb_data.gd). But the reserve-first pass this test
+	# pins is NOT made redundant by that: on a FRESH board (as here) the counter
+	# still starts at 1, so an id-less group processed first would mint
+	# "trace_1" and the supplied "trace_1" would then overwrite it (traces is
+	# keyed by id) — one trace of copper silently lost — regardless of whether
+	# the board is fresh or came from a clear_traces() that no longer resets.
+	# The reserve-first pass makes the outcome independent of this ordering
+	# either way.
 	var mixed = PCBData.new()
 	var mixed_reply: Dictionary = PanelTools._import_trace_geometry(_host_for(mixed), {
 		"trace_data": {
@@ -991,3 +1004,93 @@ func _run_empty_id_selectors() -> void:
 	check_eq("one via exported", exported_vias.size(), 1)
 	check("the export OMITS the id key rather than emitting an empty one",
 		not (exported_vias[0] as Dictionary).has("id"))
+
+
+# ── 14: R1 concrete failure — import->clear_traces->undo->mint overwrite ──────
+
+## THE EXACT SEQUENCE from docket 019fa172dd21 comment 868, run against the
+## REAL production caller of clear_traces() (PanelTools._import_trace_geometry,
+## i.e. the live minerva_pcb_import_trace_geometry MCP tool) rather than calling
+## PCBData.clear_traces() directly:
+##
+##   board loaded with trace_1..trace_10 (counter -> 11)
+##   -> minerva_pcb_import_trace_geometry with 2 id-less traces
+##      (clear_traces() used to drop the counter to 1; no longer does)
+##   -> 2 traces minted (counter -> 3 before the fix, -> 13 after)
+##   -> _import_trace_geometry's own save_to_history snapshots the 2-trace state
+##   -> undo() restores trace_1..trace_10
+##      (_restore_state used to leave the counter wherever import left it;
+##      now it also reserves every restored trace id, though on this path the
+##      counter was never lowered in the first place)
+##   -> the next id-less add_trace: BEFORE either fix this mints "trace_3" and
+##      OVERWRITES the just-restored trace_3 (traces is an id-keyed
+##      Dictionary) — copper destroyed, no journal entry for the loss. AFTER
+##      both fixes it mints "trace_13" (or higher) and nothing is overwritten.
+func _run_import_undo_mint_no_overwrite() -> void:
+	print("-- 14. clear_traces + undo + mint must not overwrite a restored trace (R1) --")
+
+	# Step 1: a board with trace_1..trace_10, loaded the way a real board load
+	# would be (from_board_dict), so the trace-id counter high-waters to 11
+	# exactly as production does.
+	var source = PCBData.new()
+	for i in range(1, 11):
+		_add_trace(source, "trace_%d" % i, "NET_%d" % i, "top", 0.25,
+			[Vector2(i, 0), Vector2(i, 1)])
+	var board = PCBData.new()
+	board.from_board_dict(source.to_board_dict())
+	check_eq("board loaded with all ten original traces", board.get_trace_ids().size(), 10)
+
+	# Step 2: minerva_pcb_import_trace_geometry with 2 id-less traces — the live
+	# production caller of clear_traces(). Internally this clears the board,
+	# mints two fresh traces, and calls save_to_history("Import traces") itself.
+	var import_out: Dictionary = PanelTools._import_trace_geometry(_host_for(board), {
+		"trace_data": {
+			"traces": [
+				{"start": {"x": 20, "y": 0}, "end": {"x": 20, "y": 1},
+					"width": 0.25, "layer": "F.Cu", "net_name": "IMPORTED_A"},
+				{"start": {"x": 21, "y": 0}, "end": {"x": 21, "y": 1},
+					"width": 0.25, "layer": "F.Cu", "net_name": "IMPORTED_B"},
+			],
+			"vias": [],
+		},
+	})
+	check("import succeeded", bool(import_out.get("success", false)))
+	check_eq("clear_traces + import left exactly the 2 imported traces",
+		board.get_trace_ids().size(), 2)
+
+	# Step 3: undo — restores trace_1..trace_10 from the "Load" snapshot
+	# from_board_dict took, via the same history the import call's own
+	# save_to_history pushed onto.
+	check("undo is available", board.can_undo())
+	check("undo succeeds", board.undo())
+	check_eq("all ten original traces are back", board.get_trace_ids().size(), 10)
+	check("trace_3 specifically survived the undo", board.get_trace("trace_3") != null)
+	check_eq("trace_3 kept its original net", _net_of(board, "trace_3"), "NET_3")
+	check_eq("trace_3 kept its original geometry",
+		_waypoints_of(board, "trace_3"), [Vector2(3, 0), Vector2(3, 1)])
+
+	# Step 4: THE OVERWRITE CHECK. The next id-less add_trace — exactly what
+	# drawing one more trace in the panel does. Before the fix this mints
+	# "trace_3" (counter was left at 3 by the import's two id-less mints on a
+	# counter clear_traces had reset to 1) and silently overwrites the trace_3
+	# this test just confirmed survived undo.
+	var minted = board.new_trace()
+	minted.net_name = "FRESH"
+	minted.layer = "top"
+	minted.waypoints.append(Vector2(0, 50))
+	minted.waypoints.append(Vector2(1, 50))
+	board.add_trace(minted)
+
+	check_eq("eleven traces now on the board — the new mint landed BESIDE the ten, not on top",
+		board.get_trace_ids().size(), 11)
+	check("the restored trace_3 is untouched by the new mint",
+		board.get_trace("trace_3") != null and _net_of(board, "trace_3") == "NET_3")
+
+	# THE DISCRIMINATING FACT: the mint must not collide with ANY of the ten
+	# restored ids — asserted directly rather than only via the count above.
+	var collided := false
+	for i in range(1, 11):
+		if minted.id == "trace_%d" % i:
+			collided = true
+	check("the minted id does not collide with any of the ten restored ids (minted id was %s)"
+		% minted.id, not collided)

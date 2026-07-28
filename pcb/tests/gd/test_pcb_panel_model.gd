@@ -65,6 +65,11 @@ func _init() -> void:
 	_test_mounting_holes_roundtrip()
 	_test_rotation_sign_lands_on_traces()
 	_test_null_pad_size_is_skipped_not_invented()
+	_test_remove_net_journals_like_remove_trace()
+	_test_clear_traces_journals_contents()
+	_test_counters_never_lowered_by_clear_traces_and_clear()
+	_test_remove_via_journal_identity()
+	_test_restore_state_high_waters_trace_counter_in_isolation()
 
 	_finish()
 
@@ -130,6 +135,304 @@ func _test_null_pad_size_is_skipped_not_invented() -> void:
 				"got %s" % str(kept.get("size", null)))
 		check("no pad carries the invented 1.0x1.0 land",
 				not kept.get("size", Vector2.ZERO).is_equal_approx(Vector2.ONE))
+
+
+## R1 defect A (docket 019fa17326b5): remove_net must produce one journal entry
+## and one trace_changed signal PER removed trace, identical to what
+## remove_trace itself produces — not a bare `traces.erase()` that journals
+## and signals nothing. Content-level, not count-level: the existing
+## test_journal_symmetry only ever checked action-KIND membership, and its
+## remove_net call had zero traces to remove at the time it ran (the trap
+## documented in docket comment 867), so it passed against the broken
+## implementation too.
+func _test_remove_net_journals_like_remove_trace() -> void:
+	print("\n-- remove_net journals + signals per trace, identical to remove_trace (defect A) --")
+	var data = _PCBData.new(50.0, 40.0)
+
+	var n = _PCBNet.new()
+	n.name = "PWR"
+	data.add_net(n)
+
+	var t1 = _PCBTrace.new()
+	t1.net_name = "PWR"
+	t1.layer = "top"
+	t1.add_waypoint(Vector2(0, 0))
+	t1.add_waypoint(Vector2(1, 0))
+	data.add_trace(t1)
+
+	var t2 = _PCBTrace.new()
+	t2.net_name = "PWR"
+	t2.layer = "bottom"
+	t2.add_waypoint(Vector2(0, 1))
+	t2.add_waypoint(Vector2(1, 1))
+	data.add_trace(t2)
+
+	# A trace on a DIFFERENT net must survive remove_net("PWR") untouched.
+	var t3 = _PCBTrace.new()
+	t3.net_name = "GND"
+	t3.layer = "top"
+	t3.add_waypoint(Vector2(5, 5))
+	t3.add_waypoint(Vector2(6, 6))
+	data.add_trace(t3)
+
+	var signaled: Array = []
+	data.trace_changed.connect(func(tid): signaled.append(str(tid)))
+
+	data.clear_change_journal()
+	data.remove_net("PWR")
+
+	check("both PWR traces are gone",
+			data.get_trace(t1.id) == null and data.get_trace(t2.id) == null)
+	check("the GND trace on a different net survives", data.get_trace(t3.id) != null)
+
+	signaled.sort()
+	var want_signaled: Array = [t1.id, t2.id]
+	want_signaled.sort()
+	check("trace_changed fired exactly once per removed trace (2), matching remove_trace",
+			signaled == want_signaled,
+			"got %s want %s" % [str(signaled), str(want_signaled)])
+
+	var remove_trace_entries: Array = []
+	var remove_net_entries: Array = []
+	for entry in data.get_change_journal():
+		var action := str(entry.get("action", ""))
+		if action == "remove_trace":
+			remove_trace_entries.append(entry)
+		elif action == "remove_net":
+			remove_net_entries.append(entry)
+
+	check("exactly one remove_trace journal entry per removed trace (2), not zero",
+			remove_trace_entries.size() == 2, "got %d" % remove_trace_entries.size())
+	check("exactly one remove_net journal entry for the net itself",
+			remove_net_entries.size() == 1, "got %d" % remove_net_entries.size())
+
+	var journaled_ids: Array = []
+	for entry in remove_trace_entries:
+		var details: Dictionary = entry.get("details", {})
+		journaled_ids.append(str(details.get("trace_id", "")))
+		check("remove_trace entry names net_name PWR",
+				str(details.get("net_name", "")) == "PWR",
+				"got %s" % str(details.get("net_name", "")))
+		check("remove_trace entry carries a layer field (matches remove_trace's own shape)",
+				details.has("layer"))
+		check("remove_trace entry carries a segment_count field",
+				details.has("segment_count"))
+	journaled_ids.sort()
+	var want_ids: Array = [t1.id, t2.id]
+	want_ids.sort()
+	check("the journalled trace_ids are exactly the two removed PWR traces",
+			journaled_ids == want_ids,
+			"got %s want %s" % [str(journaled_ids), str(want_ids)])
+
+
+## R1 defect C (unfiled, but the one with a live production caller): clear_traces
+## must journal WHAT it destroyed (trace/via ids), not an empty {} — and must
+## emit trace_changed per destroyed trace, same as removing them one at a time
+## would. A count cannot distinguish a journalled deletion from an unjournalled
+## one; this asserts CONTENTS.
+func _test_clear_traces_journals_contents() -> void:
+	print("\n-- clear_traces journals WHAT it destroyed, not just that it happened (defect C) --")
+	var data = _PCBData.new(50.0, 40.0)
+
+	var t1 = _PCBTrace.new()
+	t1.net_name = "A"
+	t1.add_waypoint(Vector2(0, 0))
+	t1.add_waypoint(Vector2(1, 0))
+	data.add_trace(t1)
+
+	var t2 = _PCBTrace.new()
+	t2.net_name = "B"
+	t2.add_waypoint(Vector2(0, 2))
+	t2.add_waypoint(Vector2(1, 2))
+	data.add_trace(t2)
+
+	data.add_via({"id": "via_x", "position": Vector2(4, 4), "net_name": "A"})
+
+	var signaled: Array = []
+	data.trace_changed.connect(func(tid): signaled.append(str(tid)))
+
+	data.clear_change_journal()
+	data.clear_traces()
+
+	check("all traces gone", data.get_trace_count() == 0)
+	check("all vias gone", data.vias.is_empty())
+
+	var entries: Array = data.get_change_journal()
+	check("exactly one clear_traces journal entry", entries.size() == 1,
+			"got %d" % entries.size())
+	if entries.size() == 1:
+		var details: Dictionary = entries[0].get("details", {})
+		var jt_ids: Array = (details.get("trace_ids", []) as Array).duplicate()
+		jt_ids.sort()
+		var want_ids: Array = [t1.id, t2.id]
+		want_ids.sort()
+		check("journal names the destroyed trace ids, not merely a count",
+				jt_ids == want_ids, "got %s want %s" % [str(jt_ids), str(want_ids)])
+		check("journal names the destroyed via id",
+				(details.get("via_ids", []) as Array) == ["via_x"],
+				"got %s" % str(details.get("via_ids", [])))
+
+	signaled.sort()
+	var want_signaled: Array = [t1.id, t2.id]
+	want_signaled.sort()
+	check("trace_changed fired once per destroyed trace, same as a per-item removal would",
+			signaled == want_signaled, "got %s" % str(signaled))
+
+
+## Owner ruling (docket 019fa172dd21 comment 868): clear_traces()/clear() must
+## NEVER lower _next_trace_id / _next_via_id. Proven here by minting an
+## explicit HIGH id, clearing, then minting an id-less one and asserting the
+## new id keeps climbing rather than restarting at 1 — a restart would collide
+## the very next time an entity from before the clear reappeared (e.g. via
+## undo), which is exactly what test_trace_identity_delete.gd's group 14
+## exercises end to end via the real import->undo->mint path.
+func _test_counters_never_lowered_by_clear_traces_and_clear() -> void:
+	print("\n-- clear_traces()/clear() never lower the id counters (owner ruling) --")
+
+	# clear_traces()
+	var data = _PCBData.new()
+	var t_hi = _PCBTrace.new()
+	t_hi.id = "trace_100"
+	t_hi.net_name = "X"
+	t_hi.add_waypoint(Vector2(0, 0))
+	t_hi.add_waypoint(Vector2(1, 0))
+	data.add_trace(t_hi)
+	data.add_via({"id": "via_50", "position": Vector2(0, 0), "net_name": "X"})
+
+	data.clear_traces()
+
+	var minted_trace = data.new_trace()
+	minted_trace.net_name = "Y"
+	minted_trace.add_waypoint(Vector2(2, 2))
+	minted_trace.add_waypoint(Vector2(3, 3))
+	data.add_trace(minted_trace)
+	check("trace counter climbed past 100 rather than resetting to 1",
+			minted_trace.id == "trace_101", "got %s" % minted_trace.id)
+
+	var minted_via_id: String = data.add_via({"position": Vector2(9, 9), "net_name": "Y"})
+	check("via counter climbed past 50 rather than resetting to 1",
+			minted_via_id == "via_51", "got %s" % minted_via_id)
+
+	# clear() — same expectation, the ruling covers both methods.
+	var data2 = _PCBData.new()
+	var t_hi2 = _PCBTrace.new()
+	t_hi2.id = "trace_200"
+	t_hi2.net_name = "X"
+	t_hi2.add_waypoint(Vector2(0, 0))
+	t_hi2.add_waypoint(Vector2(1, 0))
+	data2.add_trace(t_hi2)
+	data2.add_via({"id": "via_80", "position": Vector2(0, 0), "net_name": "X"})
+
+	data2.clear()
+
+	var minted_trace2 = data2.new_trace()
+	minted_trace2.net_name = "Y"
+	minted_trace2.add_waypoint(Vector2(2, 2))
+	minted_trace2.add_waypoint(Vector2(3, 3))
+	data2.add_trace(minted_trace2)
+	check("clear() also leaves the trace counter climbing, not reset (matches clear_traces)",
+			minted_trace2.id == "trace_201", "got %s" % minted_trace2.id)
+
+	var minted_via_id2: String = data2.add_via({"position": Vector2(9, 9), "net_name": "Y"})
+	check("clear() leaves the via counter climbing too",
+			minted_via_id2 == "via_81", "got %s" % minted_via_id2)
+
+
+## R1 defect D (unfiled, small): remove_via(index) and remove_via_by_id(id)
+## must journal the SAME identifying fields — an index alone cannot identify
+## the destroyed via after the fact because indices shift on every removal.
+func _test_remove_via_journal_identity() -> void:
+	print("\n-- remove_via / remove_via_by_id journal the same identifying fields (defect D) --")
+	var data = _PCBData.new()
+	data.add_via({"id": "via_a", "position": Vector2(1, 1), "net_name": "NET_A"})
+	data.add_via({"id": "via_b", "position": Vector2(2, 2), "net_name": "NET_B"})
+
+	data.clear_change_journal()
+	data.remove_via(0)   # positional removal of via_a
+
+	var entries: Array = data.get_change_journal()
+	check("remove_via produced one journal entry", entries.size() == 1)
+	var d1: Dictionary = entries[0].get("details", {}) if entries.size() == 1 else {}
+	check("remove_via(index) names the via_id", str(d1.get("via_id", "")) == "via_a",
+			"got %s" % str(d1.get("via_id", "")))
+	check("remove_via(index) names the net_name", str(d1.get("net_name", "")) == "NET_A")
+	var pos1: Dictionary = d1.get("position", {})
+	check("remove_via(index) names the position",
+			float(pos1.get("x", -999.0)) == 1.0 and float(pos1.get("y", -999.0)) == 1.0,
+			"got %s" % str(pos1))
+
+	data.clear_change_journal()
+	check("remove_via_by_id succeeds", data.remove_via_by_id("via_b"))
+	var entries2: Array = data.get_change_journal()
+	check("remove_via_by_id produced one journal entry", entries2.size() == 1)
+	var d2: Dictionary = entries2[0].get("details", {}) if entries2.size() == 1 else {}
+	check("remove_via_by_id names the via_id", str(d2.get("via_id", "")) == "via_b")
+	check("remove_via_by_id names the net_name", str(d2.get("net_name", "")) == "NET_B")
+
+	var keys1: Array = d1.keys()
+	keys1.sort()
+	var keys2: Array = d2.keys()
+	keys2.sort()
+	check("both removal paths journal the identical field set",
+			keys1 == keys2, "keys1=%s keys2=%s" % [str(keys1), str(keys2)])
+
+
+## R1 defect B (docket 019fa172dd21), pinned WITHOUT going through clear_traces/
+## clear(). save_to_history() never snapshots the counters (only the
+## entities), and undo/redo faithfully hand that snapshot to _restore_state —
+## so a history entry containing an id-suffix the counter never advanced for
+## is exactly the shape _restore_state must defend against on its own.
+## `history`/`history_index` are plain public fields on PCBData (no
+## underscore), so a test can forge one directly instead of only reaching this
+## path indirectly through clear_traces (whose OWN fix, once applied, makes
+## this path's own reservation redundant for every path reachable through the
+## public API today — see the mutation-testing note in the campaign report).
+## Forging bypasses that redundancy and pins _restore_state's reservation on
+## its own.
+func _test_restore_state_high_waters_trace_counter_in_isolation() -> void:
+	print("\n-- _restore_state high-waters the trace counter on its own (defect B) --")
+	var data = _PCBData.new()
+
+	var forged = _PCBTrace.new()
+	forged.id = "trace_1"
+	forged.net_name = "FORGED"
+	forged.add_waypoint(Vector2(0, 0))
+	forged.add_waypoint(Vector2(1, 0))
+
+	# undo() moves BACKWARD to history[history_index - 1], so the forged
+	# snapshot carrying trace_1 must be the OLDER entry, with a normal (empty)
+	# snapshot ahead of it as the "current" state undo steps back from. This
+	# mirrors exactly what save_to_history would have produced, but skips ever
+	# calling add_trace, so the counter (still at its fresh-board default of 1)
+	# never got a chance to reserve past "trace_1" the normal way.
+	data.history.append({
+		"action": "forged",
+		"components": {}, "nets": {},
+		"traces": {"trace_1": forged.to_dict()},
+		"vias": [], "mounting_holes": [],
+	})
+	data.history_index = 0
+	data.save_to_history("after")  # appends the current (trace-less) state at index 1
+
+	check("undo restores the forged trace_1", data.undo())
+	check("trace_1 is on the board after the forged restore", data.get_trace("trace_1") != null)
+
+	# The next id-less mint — exactly what drawing a trace does. Before the fix
+	# this mints "trace_1" again (the counter was never reserved past it) and
+	# SILENTLY OVERWRITES the just-restored one in the id-keyed `traces` dict.
+	var minted = data.new_trace()
+	minted.net_name = "FRESH"
+	minted.add_waypoint(Vector2(2, 2))
+	minted.add_waypoint(Vector2(3, 2))
+	data.add_trace(minted)
+
+	check("both traces are on the board — the mint did not overwrite the restored one",
+			data.get_trace_count() == 2, "got %d" % data.get_trace_count())
+	check("the restored trace_1 kept its own net (not overwritten)",
+			data.get_trace("trace_1") != null and str(data.get_trace("trace_1").net_name) == "FORGED",
+			"got %s" % (str(data.get_trace("trace_1").net_name) if data.get_trace("trace_1") != null else "<gone>"))
+	check("the minted trace got its own id, not trace_1",
+			minted.id != "trace_1", "got %s" % minted.id)
 
 
 func _finish() -> void:
@@ -367,8 +670,22 @@ func _test_journal_symmetry() -> void:
 	data.remove_via(0)                                      # remove_via
 	data.add_via({"position": Vector2(2, 2)})              # (re-add so clear has content)
 	data.clear_traces()                                    # clear_traces
+
+	# THE TRAP (docket 019fa17326b5 comment 867): the ONLY trace ever put on
+	# GND (t, above) was already removed by remove_trace before clear_traces
+	# ran, so a bare `data.remove_net("GND")` here would have ZERO traces to
+	# remove and would pass whether remove_net journals correctly or not — the
+	# appearance of coverage, not coverage. Give GND a fresh trace so
+	# remove_net below actually has real copper to clean up.
+	var t_gnd = _PCBTrace.new()
+	t_gnd.net_name = "GND"
+	t_gnd.layer = "top"
+	t_gnd.add_waypoint(Vector2(2, 2))
+	t_gnd.add_waypoint(Vector2(3, 3))
+	data.add_trace(t_gnd)
+
 	data.set_board_size(60.0, 45.0)                        # resize_board
-	data.remove_net("GND")                                 # remove_net
+	data.remove_net("GND")                                 # remove_net (removes t_gnd for real)
 	data.remove_component("U1")                            # remove_component
 
 	var actions := {}
