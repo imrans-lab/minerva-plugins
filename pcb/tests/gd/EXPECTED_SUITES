@@ -1,0 +1,45 @@
+# Manifest of the gd test suites pcb/scripts/run-gd-tests.sh MUST find under
+# pcb/tests/gd/. One filename per line, exactly as it appears on disk.
+#
+# This file is deliberately NOT named test_*.gd (it must not match the
+# runner's own `test_*.gd` glob) and NOT executable GDScript — it exists
+# purely so a suite going missing (deleted, renamed, moved off the glob) is a
+# loud, named pre-flight failure instead of a silently smaller passing run.
+# See docket item 019fa83e8310 / pcb/docs/gd-tests.md.
+#
+# Adding a suite is a deliberate two-step edit: add the test_*.gd file, AND
+# add its name here. The runner fails pre-flight in both directions:
+#   - an entry here with no corresponding file on disk (deletion/rename), and
+#   - a test_*.gd file on disk with no entry here (addition without
+#     registration).
+# Lines starting with '#' and blank lines are ignored.
+test_connectivity_baseline_surface.gd
+test_geometric_drc_surface.gd
+test_layer_stack.gd
+test_manifest_tool_registration.gd
+test_pad_synthesis.gd
+test_parity_bridge.gd
+test_pcb_annotation_host_semantics.gd
+test_pcb_apply_route_hints.gd
+test_pcb_backend_lifecycle.gd
+test_pcb_canvas_input_probe.gd
+test_pcb_drc_propose.gd
+test_pcb_explicit_propose.gd
+test_pcb_hint_refine_loop.gd
+test_pcb_legacy_annotation_migration.gd
+test_pcb_panel_layout.gd
+test_pcb_panel_model.gd
+test_pcb_panel_tools.gd
+test_pcb_panel_tools_migration.gd
+test_pcb_panel_ui.gd
+test_pcb_pin_inspector.gd
+test_pcb_plugin_smoke.gd
+test_pcb_route_hint_mcp_parity.gd
+test_pcb_single_trace_tool.gd
+test_pcb_workflow_kinds.gd
+test_proposal_attribution.gd
+test_routing_workspace_model.gd
+test_trace_identity_delete.gd
+test_workspace_check.gd
+test_workspace_ingest.gd
+test_workspace_persistence.gd

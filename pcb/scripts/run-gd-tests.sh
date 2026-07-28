@@ -35,6 +35,20 @@
 # and/or res://test/helpers/panel_tool_registry_driver.gd from Minerva core,
 # to drive a real PCBPanel instead of a stand-in. A stock Minerva checkout has
 # both; this script does not vendor or fake them.
+#
+# Suite-count floor: the per-suite checks above catch a suite that runs but
+# reports nothing. They do NOT catch a suite that never runs at all — the
+# test list is `${GD_TEST_DIR}/test_*.gd`, a bare glob, and a deleted or
+# renamed suite file simply drops out of it with nothing left to fail. Before
+# anything else runs, the runner cross-checks that glob against a checked-in
+# manifest (pcb/tests/gd/EXPECTED_SUITES, one filename per line) and fails
+# fast, by name, in both directions: a manifest entry with no file on disk
+# (deletion/rename), or a test_*.gd file with no manifest entry (addition
+# without registration). Adding a suite is meant to be a deliberate one-line
+# edit to that manifest; the count itself is never hardcoded here for exactly
+# that reason — a hardcoded integer goes stale the moment a suite is added
+# and gets "fixed" by lowering it, which is the same failure as deleting a
+# suite, performed by a different hand.
 
 set -u
 
@@ -86,6 +100,82 @@ if [ "${#tests[@]}" -eq 0 ]; then
   exit 2
 fi
 
+# Suite-count floor (pre-flight, before --import and before the loop below,
+# same "harness/environment problem" exit 2 convention as the guards above):
+# cross-check the glob against the checked-in manifest of expected suite
+# names. This is what makes deleting/renaming a suite a loud, named failure
+# instead of a smaller-but-still-green run — see the header comment.
+MANIFEST="${GD_TEST_DIR}/EXPECTED_SUITES"
+if [ ! -f "${MANIFEST}" ]; then
+  echo "error: suite manifest not found: ${MANIFEST}" >&2
+  exit 2
+fi
+
+declare -a manifest_names=()
+while IFS= read -r line; do
+  case "${line}" in
+    ""|"#"*) continue ;;
+  esac
+  manifest_names+=("${line}")
+done < "${MANIFEST}"
+
+if [ "${#manifest_names[@]}" -eq 0 ]; then
+  echo "error: suite manifest ${MANIFEST} has no entries" >&2
+  exit 2
+fi
+
+declare -a disk_names=()
+for test_path in "${tests[@]}"; do
+  disk_names+=("$(basename "${test_path}")")
+done
+
+declare -a missing_suites=()
+for name in "${manifest_names[@]}"; do
+  found=0
+  for d in "${disk_names[@]}"; do
+    if [ "${d}" = "${name}" ]; then
+      found=1
+      break
+    fi
+  done
+  if [ "${found}" -eq 0 ]; then
+    missing_suites+=("${name}")
+  fi
+done
+
+declare -a unregistered_suites=()
+for d in "${disk_names[@]}"; do
+  found=0
+  for name in "${manifest_names[@]}"; do
+    if [ "${d}" = "${name}" ]; then
+      found=1
+      break
+    fi
+  done
+  if [ "${found}" -eq 0 ]; then
+    unregistered_suites+=("${d}")
+  fi
+done
+
+if [ "${#missing_suites[@]}" -gt 0 ] || [ "${#unregistered_suites[@]}" -gt 0 ]; then
+  echo "error: gd suite manifest mismatch against ${MANIFEST}" >&2
+  if [ "${#missing_suites[@]}" -gt 0 ]; then
+    echo "  in manifest but missing on disk (deleted/renamed?):" >&2
+    for name in "${missing_suites[@]}"; do
+      echo "    - ${name}" >&2
+    done
+  fi
+  if [ "${#unregistered_suites[@]}" -gt 0 ]; then
+    echo "  on disk but not registered in manifest (add it there):" >&2
+    for name in "${unregistered_suites[@]}"; do
+      echo "    - ${name}" >&2
+    done
+  fi
+  exit 2
+fi
+
+EXPECTED_SUITE_COUNT="${#manifest_names[@]}"
+
 overall_rc=0
 declare -a results=()
 total_pass=0
@@ -129,8 +219,8 @@ for test_path in "${tests[@]}"; do
   echo "--- ${name} exited ${rc} ---"
   echo
 
-  # Parse "=== Results: N passed, M failed ===" (all 30 suites print this
-  # exact prefix; a few append "(real_worker_used=%s)" inside the
+  # Parse "=== Results: N passed, M failed ===" (every suite in the manifest
+  # prints this exact prefix; a few append "(real_worker_used=%s)" inside the
   # parens, which the pattern below does not need to match).
   results_line="$(grep -m1 -E '=== Results: [0-9]+ passed, [0-9]+ failed' "${RESULTS_TMP}" || true)"
   n_pass=""
@@ -193,7 +283,12 @@ if [ "${overall_rc}" -ne 0 ]; then
   echo "gd test suite FAILED"
 else
   echo
-  echo "gd test suite passed (${#tests[@]}/${#tests[@]}, ${total_pass} assertions)"
+  # ${total_suites_ok} and ${EXPECTED_SUITE_COUNT} are independent counts
+  # (suites that actually reported a passing verdict, vs. suites the
+  # manifest says must exist) — NOT the same variable printed over itself.
+  # A tautological N/N here (the pre-fix bug) would read as 100% coverage
+  # even after suites silently dropped out of the glob.
+  echo "gd test suite passed (${total_suites_ok}/${EXPECTED_SUITE_COUNT} suites, ${total_pass} assertions)"
 fi
 
 exit "${overall_rc}"

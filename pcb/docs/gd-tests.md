@@ -82,6 +82,41 @@ non-zero and reported the specific failing test, then restoring the file
 of them fails) was always caught correctly; it's the zero-assertion case
 above that exit-code-only checking missed.
 
+## Suite-count floor (the manifest)
+
+Everything above catches a suite that runs but reports nothing. It does
+**not** catch a suite that never runs at all: the test list is
+`${GD_TEST_DIR}/test_*.gd`, a bare glob, and a deleted or renamed suite file
+simply disappears from it with nothing left to report a failure. Before this
+was fixed (docket `019fa83e8310`), deleting 29 of the 30 suites made the
+runner print `gd test suite passed (1/1, ...)` and exit 0 — only the
+all-suites-gone case (`${#tests[@]} -eq 0`) was caught.
+
+The fix is a checked-in manifest, `pcb/tests/gd/EXPECTED_SUITES` — one
+filename per line, `#`-comments and blank lines ignored. As a **pre-flight
+step**, before `--import` and before any suite runs, `run-gd-tests.sh`
+cross-checks the glob's discovered file list against the manifest and fails
+(`exit 2`, the same "harness/environment problem" convention as the other
+pre-flight guards — not `1`, which means "a suite failed") in either
+direction:
+
+- a manifest entry with no corresponding file on disk (deletion or rename —
+  the defect above), naming the missing suite(s); or
+- a `test_*.gd` file on disk with no manifest entry (an added suite that
+  wasn't registered), naming the unregistered suite(s).
+
+The suite count is never hardcoded as an integer in the script — a literal
+`30` goes stale the first time a suite is legitimately added, and the fix
+someone reaches for is bumping the number rather than investigating, which
+is the same act as deleting a suite performed by a different hand. Adding a
+suite is meant to be a one-line, reviewed edit to the manifest file instead.
+
+The final summary line also reports real, independent counts —
+`gd test suite passed (${total_suites_ok}/${EXPECTED_SUITE_COUNT} suites, N
+assertions)` — rather than the pre-fix `${#tests[@]}/${#tests[@]}`, a ratio
+that is 100% by construction regardless of how many suites the glob actually
+found.
+
 ## CI
 
 The `panel` job in `.github/workflows/pcb.yml` runs on every push and pull
