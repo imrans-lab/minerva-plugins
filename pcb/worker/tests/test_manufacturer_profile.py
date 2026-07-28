@@ -27,6 +27,7 @@ import json
 import pytest
 
 from pcb_worker.manufacturer_profile import (
+    ALLOWED_TOP_LEVEL_FIELDS,
     DEFAULT_PROFILE_ROOT,
     REQUIRED_FLOOR_FIELDS,
     LoadedRuleProfile,
@@ -180,6 +181,61 @@ def test_a_boolean_floor_value_is_rejected_not_coerced(tmp_path):
     floor["copper_to_edge_mm"] = True
     _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
     with pytest.raises(RuleProfileError, match="copper_to_edge_mm"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_allowed_top_level_fields_is_exactly_id_version_source_floor():
+    # Pins the allow-list itself: symmetric with the floor-level guard, and
+    # wide enough to admit ``source`` (both shipped profiles carry one; see
+    # test_a_profile_with_a_top_level_source_field_loads_cleanly below) without
+    # admitting anything else.
+    assert ALLOWED_TOP_LEVEL_FIELDS == {"id", "version", "source", "floor"}
+
+
+def test_a_profile_with_a_top_level_source_field_loads_cleanly(tmp_path):
+    # ``source`` is legitimate provenance text nothing reads -- the allow-list
+    # must NOT reject it (a blanket top-level rejection would break both
+    # shipped profiles; this is that trap, reproduced against a synthetic
+    # fixture rather than the real files).
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "source": "Acme Fab published rules v3",
+        "floor": _valid_floor(),
+    })
+    loaded = load_rule_profile("acme", library_root=tmp_path)
+    assert isinstance(loaded, LoadedRuleProfile)
+
+
+def test_a_profile_with_an_unrecognized_top_level_field_fails_closed(tmp_path):
+    _write_profile(tmp_path, "acme", {
+        "id": "acme", "version": "1", "floor": _valid_floor(), "foo": "bar",
+    })
+    with pytest.raises(RuleProfileError, match="unknown top-level field.*foo"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_a_top_level_field_that_is_a_real_floor_constraint_name_still_fails_closed(tmp_path):
+    """Discriminating fixture (brief): a rule authored ONE LEVEL TOO HIGH --
+    ``min_annular_ring_mm`` is a real ManufacturingConstraints field name,
+    present in ``floor`` where it belongs, but ALSO stray at the top level.
+    A guard that only catches nonsense keys like ``foo`` but waves through a
+    real field name in the wrong place is the exact silent-fail shape this
+    brief exists to close: the author sees their rule in the JSON and
+    believes it is enforced, when the top-level copy is never read."""
+    floor = _valid_floor()
+    payload = {
+        "id": "acme", "version": "1", "floor": floor,
+        "min_annular_ring_mm": 0.5,  # stray top-level copy of a real field
+    }
+    _write_profile(tmp_path, "acme", payload)
+    with pytest.raises(RuleProfileError, match="unknown top-level field.*min_annular_ring_mm"):
+        load_rule_profile("acme", library_root=tmp_path)
+
+
+def test_whitespace_only_version_fails_closed(tmp_path):
+    # A whitespace-only string is truthy in Python, so ``not version`` alone
+    # waves it through; the guard must strip before checking emptiness.
+    _write_profile(tmp_path, "acme", {"id": "acme", "version": " ", "floor": _valid_floor()})
+    with pytest.raises(RuleProfileError, match="version"):
         load_rule_profile("acme", library_root=tmp_path)
 
 

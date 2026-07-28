@@ -57,6 +57,15 @@ from .resolved_board import ManufacturingConstraints, RuleProfileRef
 _PCB_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROFILE_ROOT = _PCB_ROOT / "library" / "profiles"
 
+# The complete set of top-level keys a profile file is allowed to declare.
+# ``source`` is legitimate free-text provenance (both shipped profiles carry
+# one) that no reader consumes; everything else that isn't ``id``/``version``/
+# ``floor`` is an unread key -- an ALLOW-LIST, not a blanket rejection, so a
+# future legitimate metadata field can be added here deliberately instead of
+# silently accepted. See the ``floor``-level unknown-field check below for
+# the same argument one level down.
+ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset({"id", "version", "source", "floor"})
+
 # The exact ManufacturingConstraints field set, in the dataclass's own
 # declaration order. A profile supplies ALL TEN or the load fails -- see the
 # module docstring's fail-closed list.
@@ -118,6 +127,18 @@ def load_rule_profile(
         raise RuleProfileError(
             f"rule profile {profile_id!r} must be a JSON object, got {type(data).__name__}")
 
+    # An authored top-level key with no reader is a rule that lies about
+    # being in force -- the same argument the floor-level unknown-field
+    # check below makes, one level up. Allow-listed (not blanket-rejected)
+    # because ``source`` is legitimate provenance text neither reader
+    # consumes but both shipped profiles carry.
+    top_level_extra = sorted(set(data) - ALLOWED_TOP_LEVEL_FIELDS)
+    if top_level_extra:
+        raise RuleProfileError(
+            f"rule profile {profile_id!r} declares unknown top-level field(s) "
+            f"{'/'.join(top_level_extra)}; an authored field with no reader is a rule "
+            f"that lies about being in force")
+
     # Identity: the file must declare the SAME id it is named after -- a
     # profile renamed on disk without updating its own declared id is a
     # malformed profile, not a silently-accepted rename.
@@ -127,7 +148,7 @@ def load_rule_profile(
             f"rule profile file {path} declares id {file_id!r}, which does not match "
             f"the requested id {profile_id!r}")
     version = data.get("version")
-    if not isinstance(version, str) or not version:
+    if not isinstance(version, str) or not version.strip():
         raise RuleProfileError(f"rule profile {profile_id!r} has no non-empty string 'version'")
 
     floor = data.get("floor")
