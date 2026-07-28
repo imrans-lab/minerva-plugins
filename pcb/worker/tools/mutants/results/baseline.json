@@ -1,6 +1,6 @@
 {
   "run_metadata": {
-    "generated_at": "2026-07-28T02:48:56-0700",
+    "generated_at": "2026-07-28T04:24:43-0700",
     "environment": {
       "python": "3.12.4",
       "kicad_cli": {
@@ -11,66 +11,66 @@
       "pygerber": "2.4.3",
       "gerbonara": "1.6.3",
       "gerber-writer": "0.4.3.3",
-      "base_sha": "b230e072c2d70db8d421ee1c3e7f6a58e688ae25",
-      "source_digest": "6ffa42072a5d11d667dba2fbd4ddf44e66ec3d69adb586f00623fb5925ff28f2"
+      "base_sha": "3b9d40560ae720b78a5532572cd202420621047a",
+      "source_digest": "03e964988a4ff9baa765df081292abb704575ef8f9b9e756241b2baa5fbd3ed9"
     },
     "control": {
-      "n_passed": 1425,
+      "n_passed": 1443,
       "n_skipped": 1,
       "returncode": 0
     },
     "concurrency": 6,
     "timeout_s": 900,
-    "wall_clock_s": 1927.6,
+    "wall_clock_s": 1829.7,
     "per_mutant_duration_s": {
-      "canary_grid_can_route_through_always_false": 115.15,
-      "compile_board_origin_reset_to_zero": 249.11,
-      "compile_plated_hole_annulus_invented_from_the_drill": 238.62,
-      "compile_unplated_holes_silently_dropped": 247.78,
-      "compile_untented_vias_silently_dropped": 231.86,
-      "compile_via_drill_may_equal_or_exceed_diameter": 242.85,
-      "compile_vias_constructed_then_discarded": 251.39,
-      "compileboard_authored_rule_profile_selection_ignored": 238.22,
-      "compileboard_net_class_assigned_to_every_net_not_its_members": 259.36,
-      "compileboard_net_class_id_never_assigned": 260.01,
-      "compileboard_net_class_min_clearance_parsed_then_dropped": 257.84,
-      "compileboard_rule_profile_reported_but_not_enforced": 240.72,
-      "docs_board_yaml_schema_example_regains_a_fatal_rule": 254.36,
-      "drc_crossing_dedupe_drops_the_location": 240.4,
-      "drc_dangling_endpoint_loses_via_credit": 242.78,
-      "drc_point_on_segment_interior_tests_one_end_only": 227.84,
-      "drcgeo_class_clearance_admission_predicate_dropped": 230.13,
-      "drcgeo_class_width_admission_predicate_dropped": 237.22,
-      "drcgeo_class_width_floor_lowers_instead_of_raises": 234.09,
-      "drcgeo_gc1_class_width_floor_ignores_the_traces_own_net": 235.53,
-      "drcgeo_gc2_broad_phase_swept_at_infinity": 240.19,
-      "drcgeo_gc2_broad_phase_swept_at_the_global_floor": 239.16,
-      "drcgeo_gc2_class_clearance_floor_ignores_the_pairs_own_nets": 232.85,
-      "drcgeo_gc5_stops_checking_the_right_board_edge": 233.01,
-      "drcgeo_same_net_exemption_treats_unassigned_as_shared": 235.17,
-      "drcgeo_unknown_copper_layer_silently_bucketed": 229.82,
-      "drcgeo_via_padstack_fail_closed_guard_removed": 228.51,
-      "gerber_obround_rotation_swap_disabled": 240.61,
-      "gerber_unplated_through_hole_pad_gets_copper": 231.91,
-      "gerber_via_tenting_ignores_the_back_side": 241.92,
-      "grid_cell_in_bounds_checks_only_the_column_axis": 184.34,
-      "grid_clearance_ring_overwrites_real_copper": 241.31,
-      "grid_keepout_margin_drops_half_trace_width": 229.68,
-      "irparity_diff_never_reports_an_extra_row": 238.07,
-      "irparity_key_quantum_collapses_onto_the_comparison_epsilon": 235.39,
-      "irparity_known_delta_matches_on_signature_without_the_row": 237.47,
-      "manufacturerprofile_missing_field_guard_removed": 228.6,
-      "manufacturerprofile_one_required_field_exempted_from_the_check": 233.3,
-      "pathfinder_astar_diagonal_checks_one_corner_only": 224.35,
-      "pathfinder_astar_start_cell_not_validated": 234.67,
-      "pathfinder_l_path_emits_degenerate_leg_when_axis_aligned": 236.15,
-      "pathfinder_simplify_drops_point_without_grid_recheck": 229.68,
-      "resolvedboard_corner_rratio_upper_bound_dropped": 255.12,
-      "resolvedboard_pad_net_crosscheck_removed": 242.1,
-      "resolvedboard_unique_id_invariant_removed": 234.28,
-      "router_coincidence_tolerance_not_capped_by_copper": 241.88,
-      "router_pad_reaches_layer_ignores_through_hole": 243.0,
-      "router_route_board_ignores_board_owned_existing_copper": 242.56
+      "canary_grid_can_route_through_always_false": 128.63,
+      "compile_board_origin_reset_to_zero": 226.12,
+      "compile_plated_hole_annulus_invented_from_the_drill": 233.1,
+      "compile_unplated_holes_silently_dropped": 224.5,
+      "compile_untented_vias_silently_dropped": 229.99,
+      "compile_via_drill_may_equal_or_exceed_diameter": 225.52,
+      "compile_vias_constructed_then_discarded": 224.29,
+      "compileboard_authored_rule_profile_selection_ignored": 222.04,
+      "compileboard_net_class_assigned_to_every_net_not_its_members": 216.99,
+      "compileboard_net_class_id_never_assigned": 220.17,
+      "compileboard_net_class_min_clearance_parsed_then_dropped": 220.27,
+      "compileboard_rule_profile_reported_but_not_enforced": 226.7,
+      "docs_board_yaml_schema_example_regains_a_fatal_rule": 219.04,
+      "drc_crossing_dedupe_drops_the_location": 226.91,
+      "drc_dangling_endpoint_loses_via_credit": 229.48,
+      "drc_point_on_segment_interior_tests_one_end_only": 226.47,
+      "drcgeo_class_clearance_admission_predicate_dropped": 226.68,
+      "drcgeo_class_width_admission_predicate_dropped": 229.44,
+      "drcgeo_class_width_floor_lowers_instead_of_raises": 228.42,
+      "drcgeo_gc1_class_width_floor_ignores_the_traces_own_net": 222.24,
+      "drcgeo_gc2_broad_phase_swept_at_infinity": 229.12,
+      "drcgeo_gc2_broad_phase_swept_at_the_global_floor": 225.34,
+      "drcgeo_gc2_class_clearance_floor_ignores_the_pairs_own_nets": 224.72,
+      "drcgeo_gc5_stops_checking_the_right_board_edge": 226.35,
+      "drcgeo_same_net_exemption_treats_unassigned_as_shared": 225.57,
+      "drcgeo_unknown_copper_layer_silently_bucketed": 229.31,
+      "drcgeo_via_padstack_fail_closed_guard_removed": 226.92,
+      "gerber_obround_rotation_swap_disabled": 228.9,
+      "gerber_unplated_through_hole_pad_gets_copper": 220.98,
+      "gerber_via_tenting_ignores_the_back_side": 226.39,
+      "grid_cell_in_bounds_checks_only_the_column_axis": 188.6,
+      "grid_clearance_ring_overwrites_real_copper": 244.18,
+      "grid_keepout_margin_drops_half_trace_width": 225.76,
+      "irparity_diff_never_reports_an_extra_row": 225.03,
+      "irparity_key_quantum_collapses_onto_the_comparison_epsilon": 230.18,
+      "irparity_known_delta_matches_on_signature_without_the_row": 229.32,
+      "manufacturerprofile_missing_field_guard_removed": 227.98,
+      "manufacturerprofile_one_required_field_exempted_from_the_check": 223.91,
+      "pathfinder_astar_diagonal_checks_one_corner_only": 245.62,
+      "pathfinder_astar_start_cell_not_validated": 245.47,
+      "pathfinder_l_path_emits_degenerate_leg_when_axis_aligned": 227.67,
+      "pathfinder_simplify_drops_point_without_grid_recheck": 224.2,
+      "resolvedboard_corner_rratio_upper_bound_dropped": 227.22,
+      "resolvedboard_pad_net_crosscheck_removed": 224.01,
+      "resolvedboard_unique_id_invariant_removed": 224.74,
+      "router_coincidence_tolerance_not_capped_by_copper": 230.65,
+      "router_pad_reaches_layer_ignores_through_hole": 229.57,
+      "router_route_board_ignores_board_owned_existing_copper": 230.97
     }
   },
   "payload": {
@@ -137,7 +137,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 99,
-        "n_passed": 1326,
+        "n_passed": 1344,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_grid.py::TestRouteChecking::test_same_net_can_overlap",
@@ -251,7 +251,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 3,
-        "n_passed": 1422,
+        "n_passed": 1440,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_origin_is_preserved",
@@ -269,7 +269,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_plated_hole_without_annulus_fails_closed"
@@ -285,7 +285,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 27,
-        "n_passed": 1398,
+        "n_passed": 1416,
         "n_skipped": 1,
         "failing": [
           "tests/oracle/test_geometry_diff.py::test_production_matches_spike_golden_except_cosmetic_silk",
@@ -327,7 +327,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 4,
-        "n_passed": 1421,
+        "n_passed": 1439,
         "n_skipped": 1,
         "failing": [
           "tests/oracle/test_kicad_gerber_export_oracle.py::test_kicad_cli_exports_nonempty_mask_with_npth_and_untented_via",
@@ -346,7 +346,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_via_drill_not_smaller_than_diameter_fails_closed"
@@ -362,7 +362,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 25,
-        "n_passed": 1400,
+        "n_passed": 1418,
         "n_skipped": 1,
         "failing": [
           "tests/oracle/test_geometry_diff.py::test_production_matches_spike_golden_except_cosmetic_silk",
@@ -402,7 +402,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 5,
-        "n_passed": 1420,
+        "n_passed": 1438,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_a_board_can_select_a_named_board_house_profile",
@@ -422,7 +422,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 5,
-        "n_passed": 1420,
+        "n_passed": 1438,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_authored_net_class_minima_reach_the_ir_and_the_member_net",
@@ -442,7 +442,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 6,
-        "n_passed": 1419,
+        "n_passed": 1437,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_authored_net_class_minima_reach_the_ir_and_the_member_net",
@@ -463,7 +463,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 6,
-        "n_passed": 1419,
+        "n_passed": 1437,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_an_inadmissible_net_class_minimum_fails_closed[min_clearance_mm--0.1]",
@@ -484,7 +484,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_a_board_can_select_a_named_board_house_profile",
@@ -501,7 +501,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_every_yaml_example_in_board_yaml_md_compiles[fab]",
@@ -518,7 +518,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_route_drc.py::test_a_second_crossing_of_the_same_pair_and_layer_is_reported_not_cancelled",
@@ -535,7 +535,7 @@
         "killed_by": "survived",
         "returncode": 0,
         "n_failing": 0,
-        "n_passed": 1425,
+        "n_passed": 1443,
         "n_skipped": 1,
         "failing": [],
         "problems": []
@@ -549,7 +549,7 @@
         "killed_by": "survived",
         "returncode": 0,
         "n_failing": 0,
-        "n_passed": 1425,
+        "n_passed": 1443,
         "n_skipped": 1,
         "failing": [],
         "problems": []
@@ -563,7 +563,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_a_class_clearance_that_is_not_a_sourceable_number_fails_closed"
@@ -579,7 +579,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_referenced_class_with_zero_min_trace_width_is_indeterminate"
@@ -595,7 +595,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 6,
-        "n_passed": 1419,
+        "n_passed": 1437,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_an_authored_net_class_raises_this_nets_gc1_floor",
@@ -616,7 +616,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_an_authored_net_class_raises_this_nets_gc1_floor",
@@ -633,7 +633,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_gc2_sweeps_the_broad_phase_at_exactly_the_board_wide_maximum"
@@ -649,7 +649,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 4,
-        "n_passed": 1421,
+        "n_passed": 1439,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_gc2_flags_a_pair_the_global_margin_would_have_pruned",
@@ -668,7 +668,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 4,
-        "n_passed": 1421,
+        "n_passed": 1439,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_an_authored_net_class_clearance_does_not_reach_an_unclassed_pair",
@@ -687,7 +687,7 @@
         "killed_by": "survived",
         "returncode": 0,
         "n_failing": 0,
-        "n_passed": 1425,
+        "n_passed": 1443,
         "n_skipped": 1,
         "failing": [],
         "problems": []
@@ -701,7 +701,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 3,
-        "n_passed": 1422,
+        "n_passed": 1440,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_gc2_compiled_none_vs_none_flags_across_both_layers",
@@ -719,7 +719,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_copper_on_unknown_layer_fails_closed"
@@ -735,7 +735,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_drc_geometric.py::test_via_padstack_fails_closed_indeterminate"
@@ -751,7 +751,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 12,
-        "n_passed": 1413,
+        "n_passed": 1431,
         "n_skipped": 1,
         "failing": [
           "tests/test_cam_conformance.py::test_fully_rounded_roundrect_at_90_is_corrected_too",
@@ -778,7 +778,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_gerbers.py::test_excellon_split_drilltest",
@@ -795,7 +795,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_ir_fab.py::test_kicad_via_tenting_defaults_tented_and_agrees_with_gerber",
@@ -812,7 +812,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 34,
-        "n_passed": 1391,
+        "n_passed": 1409,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_grid.py::TestGridOrigin::test_a_point_before_the_origin_is_out_of_bounds",
@@ -861,7 +861,7 @@
         "killed_by": "survived",
         "returncode": 0,
         "n_failing": 0,
-        "n_passed": 1425,
+        "n_passed": 1443,
         "n_skipped": 1,
         "failing": [],
         "problems": []
@@ -875,7 +875,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 8,
-        "n_passed": 1417,
+        "n_passed": 1435,
         "n_skipped": 1,
         "failing": [
           "tests/test_route_rules.py::test_a_strict_class_elsewhere_widens_the_keepout_around_an_unclassed_nets_own_copper",
@@ -898,7 +898,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 5,
-        "n_passed": 1420,
+        "n_passed": 1438,
         "n_skipped": 1,
         "failing": [
           "tests/test_ir_parity.py::test_a_displaced_baselined_row_is_not_swallowed",
@@ -918,7 +918,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 8,
-        "n_passed": 1417,
+        "n_passed": 1435,
         "n_skipped": 1,
         "failing": [
           "tests/test_ir_parity.py::test_a_displaced_baselined_row_is_not_swallowed",
@@ -941,7 +941,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_ir_parity.py::test_a_baseline_entry_only_explains_the_rows_it_names"
@@ -957,7 +957,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 11,
-        "n_passed": 1414,
+        "n_passed": 1432,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged",
@@ -983,7 +983,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_compile_board.py::test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged",
@@ -1000,7 +1000,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 3,
-        "n_passed": 1422,
+        "n_passed": 1440,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_pathfinder.py::TestAStarNeverCutsABlockedCorner::test_fuzz_no_astar_step_cuts_a_blocked_corner",
@@ -1018,7 +1018,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_pathfinder.py::TestAStarRefusesABlockedStart::test_a_blocked_start_yields_no_path_instead_of_unverified_copper"
@@ -1034,7 +1034,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 7,
-        "n_passed": 1418,
+        "n_passed": 1436,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_pathfinder.py::TestNoDegenerateSegmentIsEverEmitted::test_an_axis_aligned_orthogonal_route_is_one_real_segment[start0-end0-horizontal]",
@@ -1056,7 +1056,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 5,
-        "n_passed": 1420,
+        "n_passed": 1438,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_pathfinder.py::TestSimplificationStaysInsideTheCorridor::test_simplification_keeps_a_one_cell_jog_douglas_peucker_would_drop",
@@ -1076,7 +1076,7 @@
         "killed_by": "survived",
         "returncode": 0,
         "n_failing": 0,
-        "n_passed": 1425,
+        "n_passed": 1443,
         "n_skipped": 1,
         "failing": [],
         "problems": []
@@ -1090,7 +1090,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_resolved_board.py::test_board_rejects_dangling_or_inconsistent_relations[<lambda>-pad_refs disagree]"
@@ -1106,7 +1106,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 1,
-        "n_passed": 1424,
+        "n_passed": 1442,
         "n_skipped": 1,
         "failing": [
           "tests/test_resolved_board.py::test_board_rejects_dangling_or_inconsistent_relations[<lambda>-duplicate ids]"
@@ -1122,7 +1122,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 2,
-        "n_passed": 1423,
+        "n_passed": 1441,
         "n_skipped": 1,
         "failing": [
           "tests/test_route_rules.py::test_a_coarse_caller_grid_cannot_merge_two_genuinely_separate_stubs[0.5]",
@@ -1139,7 +1139,7 @@
         "killed_by": "survived",
         "returncode": 0,
         "n_failing": 0,
-        "n_passed": 1425,
+        "n_passed": 1443,
         "n_skipped": 1,
         "failing": [],
         "problems": []
@@ -1153,7 +1153,7 @@
         "killed_by": "assertion",
         "returncode": 1,
         "n_failing": 3,
-        "n_passed": 1422,
+        "n_passed": 1440,
         "n_skipped": 1,
         "failing": [
           "tests/agent_router/test_kicad_io.py::TestExistingCopper::test_a_net_wholly_joined_by_existing_copper_gets_no_new_route",
