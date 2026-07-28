@@ -992,10 +992,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--control-passed", type=int, default=None,
                     help="known clean-control passed count (skips re-running it)")
     ap.add_argument("--control-skipped", type=int, default=None)
-    # The CONTROL TARGET, measured in-repo at base SHA 58df4fc3 with kicad-cli
-    # 9.0.9 on PATH: `1299 passed, 1 skipped, 0 failed`. The scratch control must
+    # The CONTROL TARGET, measured in-repo at base SHA ddf8a20 (epoch Z boundary)
+    # with kicad-cli 9.0.9 on PATH: `1556 passed, 1 skipped, 0 failed`. It was
+    # 1299 at 58df4fc3 and went stale by ~257 tests across two epochs, so anyone
+    # running --control without passing the flag got a hard refusal that looked
+    # like a real failure. THIS NUMBER GOES STALE EVERY TIME THE SUITE GROWS —
+    # it is a tripwire against a silently shrinking control, not a fact about
+    # the code, so update it at each epoch boundary with the SHA it was measured
+    # at. The scratch control must
     # reproduce it exactly; it is asserted, not adopted.
-    ap.add_argument("--expect-passed", type=int, default=1299)
+    ap.add_argument("--expect-passed", type=int, default=1556)
     ap.add_argument("--expect-skipped", type=int, default=1)
     args = ap.parse_args(argv)
 
