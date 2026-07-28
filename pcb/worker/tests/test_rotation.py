@@ -95,15 +95,30 @@ def _gerber_flash_centres(gbr_text: str) -> list[tuple[float, float]]:
 
 def _match_within(got: list[tuple[float, float]],
                   expected: list[tuple[float, float]], tol: float) -> None:
-    """Assert a 1:1 correspondence: every expected point has a distinct got point
-    within *tol* (Euclidean, mm)."""
+    """Assert got[i] lands within *tol* of expected[i], for every i — an
+    ORDER-SENSITIVE (positional) check, deliberately NOT nearest-neighbour.
+
+    Pad IDENTITY here comes from EMISSION INDEX, not from re-pairing points by
+    proximity: gerber.py writes no per-pad X2 ``%TO.P`` attribute (see
+    gerber.py's emitter), so the only way to know which D03 flash is which pad
+    number is positional — pad k in the canonical board's ``pins`` list is the
+    k-th flash `iter_pads` emits. A nearest-neighbour match (the previous form
+    of this helper) treats the GOT/EXPECTED lists as unordered multisets, so it
+    reports agreement for any permutation of the same position SET — including
+    the exact mirrored-rotation defect this module exists to catch (see the
+    docket-019f3ba0f455 note below). Positional comparison is only valid
+    because callers first prove the emission-order == pin-order premise; see
+    the assertion in test_gerber_pad_centres_match_kicad_ground_truth.
+    """
     assert len(got) == len(expected), f"count mismatch: {got} vs {expected}"
-    remaining = list(got)
-    for ex in expected:
-        best = min(remaining, key=lambda g: math.hypot(g[0] - ex[0], g[1] - ex[1]))
-        d = math.hypot(best[0] - ex[0], best[1] - ex[1])
-        assert d <= tol, f"pad {ex} has no gerber flash within {tol}mm (nearest {best}, {d}mm)"
-        remaining.remove(best)
+    for i, (g, ex) in enumerate(zip(got, expected)):
+        d = math.hypot(g[0] - ex[0], g[1] - ex[1])
+        assert d <= tol, (
+            f"flash #{i} (by emission index) at {g} is not within {tol}mm of "
+            f"expected pad position {ex} (distance {d}mm) — positional identity "
+            "assumed emission order still matches pin order; if that premise "
+            "changed this failure is a false positive, re-verify it explicitly"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +143,27 @@ def test_fixture_is_rotated_ground_truth():
 
 def test_gerber_pad_centres_match_kicad_ground_truth():
     board, ground_truth = _canonical_from_fixture()
+
+    # PREMISE (must hold for the positional _match_within below to mean
+    # anything): gerber.py carries no per-pad X2 identity attribute, so this
+    # test's only handle on "which flash is pad N" is EMISSION INDEX — pad k of
+    # the canonical `pins` list becomes the k-th D03 flash (pad_source.iter_pads
+    # emits "in source order"). That is only a valid stand-in for pad identity
+    # if the canonical pin order and the KiCad ground-truth key order are the
+    # SAME sequence. Assert it explicitly, with a diagnostic message distinct
+    # from a plain position mismatch, so a future reordering of either source
+    # fails loudly here instead of masquerading as "pad in the wrong place".
+    pin_order = [p["number"] for p in board["components"][0]["pins"]]
+    ground_truth_order = list(ground_truth.keys())
+    assert pin_order == ground_truth_order, (
+        "emission order no longer matches pin order: this test pairs gerber "
+        f"D03 flashes with KiCad ground truth BY INDEX, assuming canonical pin "
+        f"order {pin_order} equals KiCad pad-read order {ground_truth_order} — "
+        "they no longer match, so positional identity below would silently "
+        "mispair pads (add a real per-pad X2 attribute instead of relying on "
+        "this premise if that is now unavoidable)"
+    )
+
     # The fixture pins carry no per-pad `rotation`, so the aperture angle still
     # comes from the component rotation_deg (the emitter only
     # overrides it when a pad carries its own absolute rotation) — this stays a

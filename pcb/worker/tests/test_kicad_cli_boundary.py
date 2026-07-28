@@ -23,6 +23,7 @@ native worker tier and keep the kicad-cli use in a tests/oracle helper.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,9 +54,22 @@ FORBIDDEN = [
 
 
 def _iter_runtime_files():
+    """Walk every RUNTIME_GLOBS root. FAILS CLOSED (raises) if a root is
+    missing — a vanished root used to `continue`, silently degrading the scan
+    to fewer files while still reporting a clean (empty violations) result.
+    Two of the three roots can disappear (e.g. a tree move, a bad rebase, a
+    scratch copy that forgot a sibling) and the guard would report the same
+    green; only ``pcb_worker`` failing is caught elsewhere, because production
+    code reads it at collection time. A silent scan is worse than no scan: it
+    reads as "verified clean" when it verified nothing."""
     for root, pattern in RUNTIME_GLOBS:
         if not root.exists():
-            continue
+            raise FileNotFoundError(
+                f"kicad-cli boundary lint: runtime scan root does not exist: "
+                f"{root!s} — refusing to silently continue with fewer roots "
+                "(a missing root used to degrade the scan without failing it; "
+                "fix RUNTIME_GLOBS or restore the root)"
+            )
         for path in sorted(root.glob(pattern)):
             if path.is_file():
                 yield path
@@ -89,14 +103,42 @@ def test_runtime_has_no_kicad_cli_dependence():
 
 def test_lint_actually_scanned_files():
     """Guard against a silently-empty scan (moved trees, bad globs) reporting a
-    false green: assert we actually saw runtime source."""
+    false green: assert we actually saw runtime source.
+
+    Checks EVERY root in RUNTIME_GLOBS individually, not just pcb_worker: the
+    previous version of this test only checked pcb_worker, so deleting either
+    ``agent_router`` or ``pcb/ui`` (both silently skipped by the old
+    ``_iter_runtime_files``) left this test green — a HALF fence that reads as
+    "already handled" but only covers one of three roots. pcb_worker still gets
+    its own belt-and-braces assertion because production code (footprints.py
+    et al.) also depends on it existing, independent of this lint."""
     scanned = list(_iter_runtime_files())
     assert scanned, (
         "boundary lint scanned ZERO runtime files — RUNTIME_GLOBS is stale, the "
         "'clean' result would be meaningless"
     )
-    # Sanity: the two load-bearing runtime roots must exist and be non-empty.
     assert any("pcb_worker" in str(p) for p in scanned), "pcb_worker not scanned"
+    assert any("agent_router" in str(p) for p in scanned), "agent_router not scanned"
+    assert any(str(p).endswith(".gd") for p in scanned), (
+        "pcb/ui (Godot .gd sources) not scanned"
+    )
+
+
+def test_scan_fails_closed_on_missing_runtime_root(monkeypatch):
+    """Discriminating fixture for the fail-open defect: point RUNTIME_GLOBS at
+    a root that does not exist and require the walk to REFUSE (raise) rather
+    than silently returning an empty/partial file list. Before the
+    ``_iter_runtime_files`` hardening above, this scenario returned ``[]`` and
+    the boundary-lint test would report a clean scan having looked at nothing —
+    exactly the failure mode that lets ``pcb/ui`` (or any other root) vanish
+    without tripping any test in this file."""
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(
+        this_module, "RUNTIME_GLOBS",
+        [(PCB / "does_not_exist", "**/*.gd")],
+    )
+    with pytest.raises(FileNotFoundError, match="does_not_exist"):
+        list(_iter_runtime_files())
 
 
 def test_scanner_has_teeth_on_synthetic_input(tmp_path):
