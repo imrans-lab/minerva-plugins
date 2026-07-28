@@ -162,7 +162,7 @@ class PadGeom:
     annulus: float | None  # round TH copper annulus diameter; None on a plated TH pad fails closed at emit (require_th_annulus) — never an emitter-invented default
     plated: bool
     shape: str
-    corner_rratio: float | None  # roundrect corner radius / min(w,h), in [0,0.5]; None => none/default
+    corner_rratio: float | None  # roundrect corner radius / min(w,h), in [0,0.5]; None => not applicable (non-roundrect shape). For a roundrect pad, None ONLY on the raw/loose-dict path — fail-closed there by _require_faithful_shape; unreachable on the compiled IR path, where compile_board resolves the 0.25 default once (019fa73a4f88)
     solder_mask_margin: float | None  # per-side mask growth over copper; None => board global clearance
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
@@ -423,10 +423,18 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
 
       * a ``circle`` whose width != height has no faithful single circular
         aperture — emitting one silently drops an axis (copper corruption);
-      * a ``roundrect`` corner ratio must be a finite number in [0, 0.5]. A
-        negative or non-numeric ratio would otherwise silently flatten to a plain
-        rectangle (the exact defect class this gate exists to kill) or crash the
-        aperture writer with no pad context.
+      * a ``roundrect`` corner ratio must be PRESENT and a finite number in
+        [0, 0.5]. A negative or non-numeric ratio would otherwise silently
+        flatten to a plain rectangle (the exact defect class this gate exists to
+        kill) or crash the aperture writer with no pad context. An ABSENT ratio
+        is also fail-closed here (019fa73a4f88, design call (b)): the
+        KiCad-convention default (0.25) is resolved exactly ONCE, upstream, onto
+        the IR pad by ``compile_board._place_component`` — a raw/loose-dict
+        roundrect pad that never went through the compiler (hand-built dicts,
+        the ``gerber.build_gerbers``/``kicad.generate`` loose-dict entries) must
+        author its own ratio rather than silently degenerating to a Rectangle.
+        This can never fire on the compiled IR path, where ``corner_rratio`` is
+        unreachable-None for a roundrect pad by construction.
 
     A THROUGH-HOLE pad's copper is a round annulus UNLESS ``th_land`` shapes it —
     either an OBLONG land, OR an equal-axis land whose shape was genuinely AUTHORED
@@ -439,17 +447,29 @@ def _require_faithful_shape(ref: Any, rawpad: dict, pad: PadGeom) -> None:
     extent) or coerced to an obround (misrepresenting a custom outline) — finding
     019f8b7fd295, "faithfully OR fail closed". The raw pad dict is needed because a
     non-numeric ``corner_rratio`` is coerced to None before it reaches PadGeom."""
-    # A roundrect corner ratio must be finite in [0, 0.5] for ANY roundrect land —
-    # SMD or a (now shapeable) TH land (D1). Checked BEFORE the drill branch so a
-    # through-hole roundrect no longer skips it (an unvalidated ratio would flatten
-    # to a plain rectangle or crash the aperture writer on fabrication-critical
-    # copper). Runs on the raw value: a non-numeric is coerced to None before PadGeom.
+    # A roundrect corner ratio must be PRESENT and finite in [0, 0.5] for ANY
+    # roundrect land — SMD or a (now shapeable) TH land (D1). Checked BEFORE the
+    # drill branch so a through-hole roundrect no longer skips it (an unvalidated
+    # ratio would flatten to a plain rectangle or crash the aperture writer on
+    # fabrication-critical copper). Runs on the raw value: a non-numeric is
+    # coerced to None before PadGeom.
     if pad.shape == "roundrect":
         rr = rawpad.get("corner_rratio")
-        if rr is not None and (isinstance(rr, bool)
-                               or not isinstance(rr, (int, float))
-                               or not math.isfinite(rr)
-                               or not 0.0 <= rr <= 0.5):
+        if rr is None:
+            # 019fa73a4f88 design call (b): the emitters no longer default an
+            # unauthored ratio to 0.25 — that default is resolved exactly ONCE,
+            # upstream, by compile_board. A pad that reaches here still carrying
+            # None came in via the raw/loose-dict entry (never compiled), so it
+            # must fail closed rather than silently degenerate to a Rectangle.
+            raise ValueError(
+                f"component {ref!r} pad {pad.number!r}: roundrect pad has no "
+                f"corner_rratio — author one explicitly (raw/loose-dict boards "
+                f"are not resolved through compile_board, which is the only "
+                f"place the 0.25 KiCad-convention default is filled in)")
+        if (isinstance(rr, bool)
+                or not isinstance(rr, (int, float))
+                or not math.isfinite(rr)
+                or not 0.0 <= rr <= 0.5):
             raise ValueError(
                 f"component {ref!r} pad {pad.number!r}: roundrect corner_rratio "
                 f"{rr!r} must be a finite number in [0, 0.5]")

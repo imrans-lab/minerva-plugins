@@ -144,6 +144,15 @@ _TOP_ID, _BOTTOM_ID = "top", "bottom"
 # fabrication silently missing what the board author authored (019fa73a8732).
 K3_EMITTED_LAYERS = EMITTED_LAYERS
 
+# The KiCad roundrect corner-ratio convention default (corner radius = ratio *
+# min(w, h)), resolved ONCE here — the single site named by 019fa73a4f88 — and
+# baked onto the IR pad (PlacedPad.corner_rratio) so neither fab emitter carries
+# its own copy of this default. Applied ONLY to a roundrect pad that authors no
+# ratio (see ``_place_component``); a rect/circle/oval pad, and an AUTHORED 0.0
+# on a roundrect pad, both pass through untouched — this is a default fill-in,
+# never a geometry override.
+DEFAULT_ROUNDRECT_RRATIO = 0.25
+
 
 def _is_emitted_layer(layer_id: str) -> bool:
     """``K3_EMITTED_LAYERS`` membership, canonical-id aware.
@@ -904,6 +913,17 @@ def _place_component(
         if override:
             size, drill, annulus, pad_type = _apply_pin_override(
                 pad, override, size, drill, annulus, pad_type, ref, diags)
+        # The ONE resolution site for the roundrect corner-ratio default
+        # (019fa73a4f88): an unauthored ratio is filled in HERE, conditioned on
+        # shape == roundrect, so the fallback lives on the IR pad instead of being
+        # re-substituted at each emitter. Gating on shape keeps
+        # ``corner_rratio is None AND shape == roundrect`` unreachable by
+        # construction downstream — a rect/circle/oval pad still carries None,
+        # and an AUTHORED 0.0 (0.0 is not None) is left exactly as authored, so
+        # the authored-zero-degenerates-to-Rectangle distinction survives.
+        corner_rratio = pad.corner_rratio
+        if pad.shape == "roundrect" and corner_rratio is None:
+            corner_rratio = DEFAULT_ROUNDRECT_RRATIO
         placed_pads.append(PlacedPad(
             id=derive_id("placed-pad", component_id, pad.source_id),
             component_id=component_id,
@@ -914,7 +934,7 @@ def _place_component(
             position=transform.point(pad.position),
             size=size,
             rotation_deg=transform.angle(pad.rotation_deg),
-            corner_rratio=pad.corner_rratio,
+            corner_rratio=corner_rratio,
             drill=drill,
             annulus=annulus,
             solder_mask_margin=pad.solder_mask_margin,

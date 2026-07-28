@@ -1260,6 +1260,34 @@ def test_th_roundrect_bad_corner_rratio_fails_closed(bad_rratio):
         kicad.generate(board, base_name="conf")
 
 
+# ---------------------------------------------------------------------------
+# Roundrect corner-ratio default resolution (019fa73a4f88): the raw/loose-dict
+# entry point NEVER goes through compile_board, so it can carry no resolved
+# default — an unauthored ratio must now fail CLOSED at the shared pad_source
+# guard rather than being silently defaulted to 0.25 by either emitter (design
+# call (b): fail-closed at pad_source._require_faithful_shape).
+# ---------------------------------------------------------------------------
+
+
+def test_smd_roundrect_no_authored_rratio_fails_closed_both_emitters():
+    board = _pad_board("roundrect")  # rratio omitted entirely -> corner_rratio absent
+    with pytest.raises(ValueError, match="corner_rratio"):
+        gerber.build_gerbers(board, name="conf")
+    with pytest.raises(ValueError, match="corner_rratio"):
+        kicad.generate(board, base_name="conf")
+
+
+def test_th_roundrect_no_authored_rratio_fails_closed_both_emitters():
+    # An OBLONG TH land is shapeable (roundrect qualifies), so it runs through the
+    # SAME corner_rratio gate as SMD — an unauthored ratio must fail closed here
+    # too, not just on the copper-land branch.
+    board = _th_pad_board(w=2.0, h=1.0, shape="roundrect")  # corner_rratio omitted
+    with pytest.raises(ValueError, match="corner_rratio"):
+        gerber.build_gerbers(board, name="conf")
+    with pytest.raises(ValueError, match="corner_rratio"):
+        kicad.generate(board, base_name="conf")
+
+
 def test_empty_or_missing_smd_shape_defaults_to_rect_no_raise():
     # An SMD pad with shape "" or no shape key legitimately defaults to "rect" (a
     # supported shape) in _from_resolved BEFORE the guard runs — it must NOT trip

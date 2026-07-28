@@ -761,8 +761,14 @@ def _shape_aperture(shape: str, w: float, h: float, rratio: float | None, func: 
       * circle    -> Circle (width is the diameter).
       * oval      -> RoundedRectangle fully rounded on the short axis (an obround).
       * roundrect -> RoundedRectangle with radius = corner_rratio * min(w, h)
-                     (KiCad's rratio convention; default 0.25 when unspecified).
-                     A zero/absent radius degenerates to a plain Rectangle.
+                     (KiCad's rratio convention). ``rratio`` is never None here for
+                     a genuine roundrect pad — the default (0.25 when unauthored)
+                     is resolved ONCE, upstream, onto the IR pad by
+                     ``compile_board._place_component``, or fail-closed for the raw
+                     loose-dict path by ``pad_source._require_faithful_shape``
+                     (019fa73a4f88) — this function does not carry its own copy of
+                     that default. An authored zero radius degenerates to a plain
+                     Rectangle.
       * rect (and any unknown shape) -> Rectangle.
 
     ``angle`` is the pad's ABSOLUTE rotation — the same value the caller then hands
@@ -788,10 +794,11 @@ def _shape_aperture(shape: str, w: float, h: float, rratio: float | None, func: 
     if shape == "oval":
         radius = min(w, h) / 2.0
     elif shape == "roundrect":
-        ratio = rratio if rratio is not None else 0.25
-        candidate = ratio * min(w, h)
+        # rratio is resolved upstream (never None here for a real roundrect pad
+        # that reached this function — see the docstring); no fallback lives here.
+        candidate = rratio * min(w, h)
         if candidate > 0:
-            radius = candidate      # a zero/absent radius degenerates to Rectangle
+            radius = candidate      # authored zero degenerates to Rectangle
 
     if radius is not None:
         if _obround_rotation_swap(w, h, radius, angle):

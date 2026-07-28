@@ -28,6 +28,7 @@ import yaml
 
 from pcb_worker.compile_board import (
     COINCIDENCE_TOL_MM,
+    DEFAULT_ROUNDRECT_RRATIO,
     K3_EMITTED_LAYERS,
     V1_FAB_OUTPUTS,
     V1_ROUTING_OUTPUTS,
@@ -37,6 +38,7 @@ from pcb_worker.compile_board import (
     _adjudicate_footprint,
     _check_coincidence,
     _check_pad_capabilities,
+    _place_component,
     _validate_pin_override,
     compile_board,
 )
@@ -106,11 +108,13 @@ def _errors(result) -> list[str]:
 
 
 def _synthetic_pad(source_id="pad:1:0", *, pad_type="smd", shape=PadShape.RECT,
-                   size=(1.0, 1.0), drill=None, layers=(Layer.from_id("F.Cu"),), unsupported=()):
+                   size=(1.0, 1.0), drill=None, layers=(Layer.from_id("F.Cu"),),
+                   unsupported=(), corner_rratio=None):
     return PadDefinition(
         source_id=source_id, number="1", pad_type=pad_type, raw_pad_type=pad_type,
         shape=shape, raw_shape=shape.value, position=(0.0, 0.0), size=size,
         drill=drill, layers=layers, unsupported=unsupported,
+        corner_rratio=corner_rratio,
     )
 
 
@@ -573,6 +577,54 @@ def test_pad_guard_allows_sizeless_non_copper_hole():
     pad = _synthetic_pad(pad_type="np_thru_hole", size=None, layers=(),
                          drill=DrillDefinition(shape="round", size=(3.2, 3.2)))
     assert _check_pad_capabilities(pad, "X1", diags)
+
+
+# ---------------------------------------------------------------------------
+# Roundrect corner-ratio default resolution (019fa73a4f88) — resolved ONCE here,
+# on the IR pad (_place_component), never re-substituted by either fab emitter.
+# ---------------------------------------------------------------------------
+
+
+def _place_one_pad(pad: PadDefinition):
+    """Run a single synthetic pad through _place_component at identity placement
+    and return its one PlacedPad — the direct unit seam for the corner_rratio
+    resolution point, without needing a real board / footprint-lookup round trip."""
+    definition = FootprintDefinition(name="fp", pads=(pad,), graphics=())
+    comp = {"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0}
+    diags = _Diagnostics()
+    result = _place_component(comp, "X1-0", definition, Side.TOP, {}, {}, "X1", diags)
+    assert result is not None, [d.message for d in diags.tuple()]
+    placed_pads, _graphics = result
+    assert len(placed_pads) == 1
+    return placed_pads[0]
+
+
+def test_roundrect_pad_with_no_authored_rratio_resolves_default_on_ir():
+    # The resolution site itself: a roundrect pad that authors no corner_rratio
+    # gets the KiCad-convention default baked onto the IR pad, ONCE, here — never
+    # re-substituted downstream by either emitter (acceptance #2).
+    placed = _place_one_pad(_synthetic_pad(shape=PadShape.ROUNDRECT, corner_rratio=None))
+    assert placed.corner_rratio == DEFAULT_ROUNDRECT_RRATIO
+
+
+def test_roundrect_pad_with_authored_zero_rratio_survives_unresolved():
+    # THE NAMED TRAP: an authored 0.0 is NOT None, so the default fill-in must
+    # NOT overwrite it. A zero radius is shape-changing (degenerates to a plain
+    # Rectangle downstream) — silently promoting it to 0.25 would corrupt
+    # fabricated copper, not just cosmetics (acceptance #3).
+    placed = _place_one_pad(_synthetic_pad(shape=PadShape.ROUNDRECT, corner_rratio=0.0))
+    assert placed.corner_rratio == 0.0
+
+
+@pytest.mark.parametrize("shape", [PadShape.RECT, PadShape.CIRCLE, PadShape.OVAL])
+def test_non_roundrect_pad_corner_rratio_stays_none(shape):
+    # The default fill-in is gated on shape == roundrect: a rect/circle/oval pad
+    # must still carry None, never a resolved 0.25 leaking into every pad on
+    # every board (the reason a non-Optional field was rejected in the design;
+    # acceptance #4).
+    size = (1.0, 1.0) if shape is PadShape.CIRCLE else (2.0, 1.0)
+    placed = _place_one_pad(_synthetic_pad(shape=shape, size=size, corner_rratio=None))
+    assert placed.corner_rratio is None
 
 
 # ---------------------------------------------------------------------------

@@ -192,13 +192,16 @@ def _smd_shape_tokens(pad) -> tuple[str, float, float, str]:
                      w==h for a circle upstream, so width IS the diameter).
       * oval      -> ``oval`` (size w h).
       * roundrect -> ``roundrect`` (size w h) + ``(roundrect_rratio R)`` so the
-                     corner radius is FAITHFUL (R from corner_rratio, default 0.25
-                     when None — matching gerber's _shape_aperture default), not a
+                     corner radius is FAITHFUL (R from corner_rratio), not a
                      constant.
 
     SMD geometry is already fail-closed upstream (iter_pads(require_smd_size=True):
-    circle w!=h, bad roundrect rratio), so this just emits the faithful token — it
-    does NOT re-validate.
+    circle w!=h, bad OR unauthored roundrect rratio — see
+    ``pad_source._require_faithful_shape``), so this just emits the faithful
+    token — it does NOT re-validate and carries no default of its own:
+    ``corner_rratio`` is never None here for a genuine roundrect pad. The default
+    (0.25 when unauthored) is resolved ONCE, upstream, onto the IR pad by
+    ``compile_board._place_component`` (019fa73a4f88).
     """
     shape = pad.shape
     w, h = pad.width, pad.height
@@ -207,8 +210,7 @@ def _smd_shape_tokens(pad) -> tuple[str, float, float, str]:
     if shape == "oval":
         return "oval", w, h, ""
     if shape == "roundrect":
-        ratio = pad.corner_rratio if pad.corner_rratio is not None else 0.25
-        return "roundrect", w, h, f" (roundrect_rratio {ratio})"
+        return "roundrect", w, h, f" (roundrect_rratio {pad.corner_rratio})"
     return "rect", w, h, ""
 
 
@@ -543,8 +545,10 @@ def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
                 mask_opening_dim(lw, mask_margin, ref, num_s)
                 mask_opening_dim(lh, mask_margin, ref, num_s)
                 if land_shape == "roundrect":
-                    ratio = lrratio if lrratio is not None else 0.25
-                    tok, suffix = "roundrect", f" (roundrect_rratio {ratio})"
+                    # lrratio is resolved upstream (never None here — see
+                    # _smd_shape_tokens docstring / 019fa73a4f88); no fallback lives
+                    # here.
+                    tok, suffix = "roundrect", f" (roundrect_rratio {lrratio})"
                 elif land_shape == "oval":
                     tok, suffix = "oval", ""
                 else:
