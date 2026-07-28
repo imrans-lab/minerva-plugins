@@ -130,14 +130,26 @@ named in `proposal_for`. Under the fallback, a hint that named its net through
 every hint — and accepting one proposal could silently delete a hint the user
 never got an answer to.
 
-**Still re-derived elsewhere.** `pcb/ui/model/pcb_routing_workspace.gd`'s
-`_hint_ids_for_net` is an independent copy of the same net-names match and the
-same blanket fallback, feeding the workspace's shadow candidate and its
-`task_key`. `ingest_record` receives the correctly-attributed `source_hint_ids`
-on the record and ignores it. The annotation-side `proposal_for` — the one with
-the deletion teeth — is correct; the shadow model's provenance is not. Tracked
-as docket `019fa109766f`; it is a mirror, not a regression, and nothing joins
-the two `task_key`s across that boundary today.
+**No longer re-derived on the production path** (docket `019fa109766f`, owner
+ruling comment 869 — Shape A). `ingest_record` now passes the record's
+correctly-attributed `source_hint_ids` into `_create_candidate_for_route` as
+`explicit_hint_ids`, and that branch resolves hint ids, endpoints and width by
+id — no net-names match, no blanket fallback.
+
+The seam matters: both ingest paths funnel into `_create_candidate_for_route`,
+so changing the shared helper's *default* would have silently fixed the bulk
+path too, which the ruling declined. The branch point is therefore the
+caller-supplied parameter. `ingest_routing_result` passes nothing, falls through
+to `_hints_matching_net`, and behaves exactly as before — it has no production
+caller and no per-route `hint_ids` stamp to read, so fixing it would have cost a
+fixture rewrite for no current benefit. It was NOT deleted: no current caller is
+not dead code.
+
+The fix also covered two siblings the docket item never mentioned:
+`_endpoints_for_net` and `_width_for_net` used the *same* net-names-only match,
+so a pins-only hint got empty endpoints and the 0.25 mm default width, not
+merely wrong attribution. Extraction is now shared by both paths; the two
+*matching* strategies are deliberately kept distinct.
 
 Pinned by `pcb/worker/tests/test_route_scope.py`, which drives `route()` for
 every one of these claims — including the docket's own repro (six routable nets,
@@ -887,12 +899,27 @@ if they are not — a prefix of confidently-wrong reasons is worse than none.
   `019f80a80123`**, and its panel half is **done too, docket `019f9c3a136c`**
   (see "Run scope" above). `panel_tools` reads the worker's per-route
   `hint_ids` verbatim; `_source_hint_ids_for_net` and its blanket
-  all-selected-hints fallback are deleted. What is LEFT is narrower and is
-  filed, not forgotten: `pcb/ui/model/pcb_routing_workspace.gd` keeps an
-  independent copy of the old net-names match and fallback for its shadow
-  candidates (docket `019fa109766f`), and the partial-failure bulk-apply path
-  still consumes hints attributed to routes that FAILED to materialize (docket
-  `019fa109b43c`, pre-existing).
+  all-selected-hints fallback are deleted. **Both of the remainders it named
+  are now done too**, in the routing batch: the workspace's independent
+  net-names copy is off the production path (docket `019fa109766f`, Shape A —
+  see "Still re-derived elsewhere" above), and the partial-failure bulk-apply
+  path no longer consumes hints attributed to routes that FAILED to
+  materialize (docket `019fa109b43c`).
+
+  `_materialize_routes` now collects a route's hint ids *at the point of
+  success*, inside the `made_any` branch, rather than re-deriving them
+  afterwards by re-looping over `result.routes` — that re-loop could not tell a
+  succeeded route from a failed one without redoing the `failed` computation,
+  which was the bug. Hint deletion is how this surface says "answered", so
+  consuming one for a route that laid no copper asserted an answer that did not
+  exist.
+
+  The same round closed an unfiled sibling in that function: the via-commit
+  loop ran *outside* the `made_any` guard, so a failed route still landed its
+  vias — and since the history snapshot is gated on `traces_added > 0`, when no
+  route produced traces those vias landed with no checkpoint at all,
+  unreachable by redo. A failed route now contributes no vias: no copper, no
+  board mutation of any kind.
 - ~~Native pad-list path~~ (`_board_from_native`) — **deleted, Round E3**. It
   still accepted a missing size as `0x0`, the same class of fictional copper
   E1 removed from the canonical path — but rather than fix it, the shape
