@@ -520,6 +520,101 @@ def _reconstruct_path(
     return Path(segments=segments, net=net)
 
 
+# Numerical tolerance for the swept-cell traversal below, in fractional
+# segment length (parametric t, not mm). Matches drc_geom_primitives.EPS
+# (1e-9mm, "numerical noise only" per that module's docstring) applied the
+# same way: it exists so an exact-at-a-grid-line crossing is not tripped by
+# float roundoff, and it is far below anything this module treats as a real
+# geometric feature — the acceptance fixture for 019f9fb32de7 pins a sliver
+# three orders of magnitude above float noise (see
+# tests/agent_router/test_segment_clear_corners.py).
+_SWEEP_EPS = 1e-9
+
+
+def _swept_cells(
+    grid: RoutingGrid,
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> set[tuple[int, int]]:
+    """Every grid cell whose closed square the closed chord *start*->*end*
+    intersects — EXACT, not sampled. The swept-cell ("supercover") half of the
+    ``019f9fb32de7`` fix; see :func:`_segment_clear` for what asks it.
+
+    A straight chord crosses each grid line (vertical ``x = col*res``,
+    horizontal ``y = row*res``, in the grid's own origin-relative frame) at
+    most once, at a single parametric point ``t`` along the chord. Collecting
+    every such crossing — for every grid line the chord's bounding box could
+    touch on either axis — and sorting them by ``t`` cuts the chord into
+    intervals; each interval's MIDPOINT is a point of the chord that lies
+    strictly inside exactly one cell (an interval endpoint sits exactly on a
+    grid line, and two points *inside* one interval can never straddle a
+    boundary, because the interval was built to stop at the next one). Take
+    that cell as "swept" and move to the next interval.
+
+    THIS IS WHAT PATTERN-MATCHES A CORNER GRAZE THAT POINT SAMPLING MISSES.
+    A chord that clips a blocked cell's corner for 1e-4mm still crosses that
+    cell's two near edges, so it still produces two crossings close together
+    in ``t`` and a real (if tiny) interval between them — the interval this
+    function reports the cell for. A fixed-step sampler
+    (:attr:`PathSegment.points`, 0.1mm) has no mechanism that adapts to an
+    interval narrower than its step; this one does, because it is driven by
+    the chord's own exact intersections with the lattice, not by a stride.
+
+    CONSERVATIVE BY CONSTRUCTION, not by margin. Every point checked (each
+    interval's midpoint) is a point the real, infinitely-thin chord actually
+    passes through, so a cell is only ever reported when the chord truly
+    enters its square — this cannot invent a false block. It also cannot omit
+    a swept cell: the crossings enumerated are EVERY grid line in the chord's
+    axis-aligned bounding box, so no interval — however short — goes
+    unrepresented. The one place approximation enters is ``_SWEEP_EPS``,
+    which drops an interval only when it is un-samplable float noise (see that
+    constant's docstring); it does not trade away real geometry.
+
+    Degenerate (``start == end``) is handled by the one-cell case directly —
+    :func:`_segment_clear` also short-circuits it, but this function stays
+    correct standalone (it is called nowhere else today, but nothing here
+    depends on that).
+    """
+    x0, y0 = start
+    x1, y1 = end
+    if x0 == x1 and y0 == y1:
+        return {grid._pos_to_cell(x0, y0)}
+
+    dx = x1 - x0
+    dy = y1 - y0
+    res = grid.resolution
+    ox, oy = grid.origin
+
+    ts = {0.0, 1.0}
+
+    if dx != 0:
+        u0 = (x0 - ox) / res
+        u1 = (x1 - ox) / res
+        lo, hi = (u0, u1) if u0 <= u1 else (u1, u0)
+        for j in range(math.floor(lo), math.ceil(hi) + 1):
+            t = (ox + j * res - x0) / dx
+            if -_SWEEP_EPS <= t <= 1.0 + _SWEEP_EPS:
+                ts.add(min(1.0, max(0.0, t)))
+
+    if dy != 0:
+        v0 = (y0 - oy) / res
+        v1 = (y1 - oy) / res
+        lo, hi = (v0, v1) if v0 <= v1 else (v1, v0)
+        for i in range(math.floor(lo), math.ceil(hi) + 1):
+            t = (oy + i * res - y0) / dy
+            if -_SWEEP_EPS <= t <= 1.0 + _SWEEP_EPS:
+                ts.add(min(1.0, max(0.0, t)))
+
+    ordered = sorted(ts)
+    cells: set[tuple[int, int]] = set()
+    for a, b in zip(ordered, ordered[1:]):
+        if b - a <= _SWEEP_EPS:
+            continue
+        tm = (a + b) / 2.0
+        cells.add(grid._pos_to_cell(x0 + tm * dx, y0 + tm * dy))
+    return cells
+
+
 def _segment_clear(
     grid: RoutingGrid,
     start: tuple[float, float],
@@ -529,38 +624,43 @@ def _segment_clear(
 ) -> bool:
     """Return True if a straight run from *start* to *end* is routable for *net*.
 
-    THE single owner of "may this net occupy this chord", sampled at
-    :attr:`PathSegment.points` resolution (0.1mm) — the same test
+    THE single owner of "may this net occupy this chord" — the same test
     :func:`_try_direct_path` applies to a one-segment path and
     :func:`_l_segments_clear` applies to each leg of an L. Every chord
     SIMPLIFICATION invents is asked this question too, which is what round B1a
     added and what :func:`_simplify_path` documents.
 
-    WHAT "verified" MEANS HERE, stated precisely because two earlier drafts of
-    this paragraph got it wrong in opposite directions. As of round C2d
-    (019f9d594f83), A*'s neighbour loop rejects a diagonal step whenever either
-    of the two cells orthogonally adjacent to the step (the corner the chord
-    would cut) fails ``can_route_through`` — so every ORIGINAL A* STEP has now
-    been checked across the full 2x2 cell block that step crosses, not just its
-    destination cell. SIMPLIFICATION-INVENTED CHORDS ARE NOT COVERED BY THAT
-    CHECK: the corner test lives in the neighbour loop, so a chord created by
-    :func:`_simplify_path` is verified only by this function's sampling, which
-    is the weaker guarantee described immediately below.
+    ROUND 019f9fb32de7 REPLACED FIXED-STEP SAMPLING WITH AN EXACT SWEEP. This
+    function used to walk :attr:`PathSegment.points` (0.1mm steps) and ask
+    ``can_route_through`` at each sample — a chord could graze a blocked
+    cell's corner strictly between two samples and this function reported the
+    segment clear anyway. It now asks :func:`_swept_cells` for EVERY cell the
+    chord's true geometry crosses, however briefly, and checks each one
+    through the grid's cell centre (the same "ask about the cell, not a
+    sampled point" pattern the A* neighbour loop already uses for its own
+    corner check at ``:444-450`` — this closes the sibling gap that check does
+    not, the one the docstring there names but explicitly leaves open).
 
-    THAT IS A CELL-RESOLUTION GUARANTEE, NOT WHAT THIS FUNCTION TESTS. This
-    function still only point-samples the chord at 0.1mm (see
-    :attr:`PathSegment.points`), which is coarser than "prove every cell the
-    chord's true geometry crosses is routable" — a chord can graze a blocked
-    cell's corner between two 0.1mm samples and this function will still return
-    True for it. That gap is real, independent of the A* fix above (it exists
-    for any chord, not just original diagonal steps), and is tracked separately
-    as ``019f9fb32de7``; it is OUT OF SCOPE for this function to close. So: A*
-    steps are now cell-verified at the point they are generated, and this
-    predicate remains corner-permissive at the resolution it samples.
+    WHY THE OWNER'S RATIFIED "GEOMETRIC DRC KERNEL AS ORACLE" (Option D) IS NOT
+    HERE: ``RoutingGrid`` keeps no shapes — ``GridCell`` is
+    ``occupied/net/layer/obstacle_type`` only, and every marker
+    (``mark_pad``/``mark_obstacle``/``mark_trace``) rasterizes its source
+    geometry into cells and discards it. Plumbing DRC shapes to this function
+    would mean editing ``grid.py`` and ``route_bridge.py``, both out of fence
+    for this round and both larger than it. This is the ratified fallback —
+    conservative swept-cell traversal — not the literal ruling; see the
+    round's report for the scoring that accepted the substitution.
+
+    A CELL-RESOLUTION GUARANTEE, LIKE THE A* CHECK, NOT A SUB-CELL ONE. Both
+    this function and the A* corner check ask ``can_route_through`` about
+    whole cells; neither models the trace's real width inside a cell (that is
+    what :attr:`RoutingGrid.keepout_margin` already inflates INTO the cells a
+    marker occupies, so the cell grid itself is the width-aware
+    representation this predicate is allowed to trust).
     """
-    seg = PathSegment(start=start, end=end, layer=layer)
-    for pt in seg.points:
-        if not grid.can_route_through(pt[0], pt[1], net, layer):
+    for col, row in _swept_cells(grid, start, end):
+        cx, cy = grid._cell_to_pos(col, row)
+        if not grid.can_route_through(cx, cy, net, layer):
             return False
     return True
 
