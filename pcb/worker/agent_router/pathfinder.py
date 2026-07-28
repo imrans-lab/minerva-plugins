@@ -531,6 +531,28 @@ def _reconstruct_path(
 _SWEEP_EPS = 1e-9
 
 
+def _straddling_indices(v: float, base: float, res: float) -> tuple[int, ...]:
+    """Which cell index/indices, along ONE axis, have a closed span touching
+    world coordinate *v* (``base`` is that axis's grid origin component).
+
+    Ordinarily a single index: :meth:`RoutingGrid._pos_to_cell`'s
+    ``floor((v - base) / res)``. But when *v* sits within ``_SWEEP_EPS`` of a
+    lattice line, it is the SHARED edge of two cells (index ``k - 1`` and
+    index ``k``, where ``k`` is that line's index) and both are returned —
+    ``_pos_to_cell``'s bare floor is a single, arbitrary pick of one side of
+    that shared edge, not evidence the chord is actually in only that one
+    cell. Used to fix a class of gaps below ``_pos_to_cell``'s single-cell
+    answer that the swept-cell traversal would otherwise miss: a chord
+    endpoint, a full run collinear with a grid line, or an interior lattice
+    corner (see ``_swept_cells``'s docstring for each).
+    """
+    u = (v - base) / res
+    k = round(u)
+    if abs(u - k) <= _SWEEP_EPS:
+        return (k - 1, k)
+    return (math.floor(u),)
+
+
 def _swept_cells(
     grid: RoutingGrid,
     start: tuple[float, float],
@@ -560,20 +582,50 @@ def _swept_cells(
     interval narrower than its step; this one does, because it is driven by
     the chord's own exact intersections with the lattice, not by a stride.
 
-    CONSERVATIVE BY CONSTRUCTION, not by margin. Every point checked (each
-    interval's midpoint) is a point the real, infinitely-thin chord actually
-    passes through, so a cell is only ever reported when the chord truly
-    enters its square — this cannot invent a false block. It also cannot omit
-    a swept cell: the crossings enumerated are EVERY grid line in the chord's
-    axis-aligned bounding box, so no interval — however short — goes
-    unrepresented. The one place approximation enters is ``_SWEEP_EPS``,
-    which drops an interval only when it is un-samplable float noise (see that
-    constant's docstring); it does not trade away real geometry.
+    CONSERVATIVE BY CONSTRUCTION IS THE GOAL, not by margin: every point
+    checked (each interval's midpoint) is a point the real, infinitely-thin
+    chord actually passes through, so a cell is only ever reported when the
+    chord truly enters its square — this cannot invent a false block. THE
+    INTERVAL SWEEP ALONE DOES NOT MEET THAT GOAL, THOUGH (round D10 — the
+    round that closed the corner-graze gap above opened a larger one): an
+    interval endpoint sits EXACTLY on a grid line, and
+    ``_pos_to_cell``'s bare ``floor`` resolves a point on that shared edge to
+    one arbitrary side, not both. Three places that matters, all fixed below
+    by resolving an on-the-line point to every cell whose CLOSED square
+    contains it (see :func:`_straddling_indices`), not just the one
+    ``_pos_to_cell`` happens to floor to:
+
+    1. THE CHORD'S OWN ENDPOINTS. If ``start`` or ``end`` itself sits on a
+       grid line, the cell ``_segment_clear`` most needs checked — where the
+       trace actually begins or ends — could be the one cell this sweep
+       omits. Measured at the production grid default (0.1mm resolution,
+       0.05mm-quantised endpoints): 44% of random chords omit their start
+       cell, 44% their end cell, 70% either.
+    2. A CHORD COLLINEAR WITH A GRID LINE FOR ITS FULL LENGTH (``dx == 0`` or
+       ``dy == 0``, landing exactly on a lattice line). Every interval
+       midpoint along such a chord shares the same on-the-line coordinate, so
+       ``_pos_to_cell`` resolves the WHOLE run to one side, leaving every
+       cell on the other side of that line unchecked — not a point graze, a
+       full row or column.
+    3. AN INTERIOR LATTICE CORNER (both axes on a grid line at the same
+       parametric ``t``, e.g. an exact 45-degree chord through cell centres).
+       That point is shared by up to four cells but is measure-zero on the
+       chord, so it never gets a nonzero-width interval of its own; the
+       interval sweep silently resolves it to at most the two cells the
+       direction of travel happens to pass through. This is the same
+       corner a diagonal A* step explicitly checks for
+       (``pathfinder.py:444-450``) — left open here until now.
+
+    The one place actual approximation enters is ``_SWEEP_EPS``, which drops
+    an interval only when it is un-samplable float noise (see that constant's
+    docstring); it does not trade away real geometry.
 
     Degenerate (``start == end``) is handled by the one-cell case directly —
     :func:`_segment_clear` also short-circuits it, but this function stays
     correct standalone (it is called nowhere else today, but nothing here
-    depends on that).
+    depends on that). It is NOT run through the closed-square treatment above
+    — a single point has no "other side" to omit; :func:`_pos_to_cell`'s pick
+    is the only cell there is an argument for.
     """
     x0, y0 = start
     x1, y1 = end
@@ -606,12 +658,66 @@ def _swept_cells(
                 ts.add(min(1.0, max(0.0, t)))
 
     ordered = sorted(ts)
-    cells: set[tuple[int, int]] = set()
+
+    # (1) Seed both endpoint cells directly through the grid's own transform,
+    # so the sweep agrees with `_pos_to_cell` BY CONSTRUCTION rather than by
+    # coincidence — that is the property that actually matters, not merely
+    # widening `_SWEEP_EPS` (which changes which slivers get dropped without
+    # making the two agree).
+    cells: set[tuple[int, int]] = {
+        grid._pos_to_cell(x0, y0),
+        grid._pos_to_cell(x1, y1),
+    }
+
     for a, b in zip(ordered, ordered[1:]):
         if b - a <= _SWEEP_EPS:
             continue
         tm = (a + b) / 2.0
         cells.add(grid._pos_to_cell(x0 + tm * dx, y0 + tm * dy))
+
+    def _add_if_in_bounds(col: int, row: int) -> None:
+        # A "straddling" index pair can name a cell that does not exist (one
+        # step past the board's own outer edge, where `_straddling_indices`
+        # sees "on a line" but there is no real neighbouring cell on the
+        # other side — only an interior grid line has two real cells sharing
+        # it). Never register those; `can_route_through` already treats an
+        # out-of-bounds probe as blocked (`grid.py` "boundary" obstacle), and
+        # adding a phantom out-of-bounds neighbour here would falsely block
+        # every chord that merely touches the board's edge exactly.
+        if grid._cell_in_bounds(col, row):
+            cells.add((col, row))
+
+    # (2) A chord collinear with a grid line for its FULL length: every cell
+    # already found above shares the on-the-line coordinate, so mirror each
+    # of them across that line's other side.
+    if dx == 0:
+        cols = _straddling_indices(x0, ox, res)
+        if len(cols) == 2:
+            for _, r in list(cells):
+                _add_if_in_bounds(cols[0], r)
+                _add_if_in_bounds(cols[1], r)
+    if dy == 0:
+        rows = _straddling_indices(y0, oy, res)
+        if len(rows) == 2:
+            for c, _ in list(cells):
+                _add_if_in_bounds(c, rows[0])
+                _add_if_in_bounds(c, rows[1])
+
+    # (3) Every point the chord is known to touch a grid line at — every
+    # entry of `ordered`, endpoints included — gets checked for an interior
+    # LATTICE CORNER (on a line on BOTH axes at once). Cheap and inert for
+    # the overwhelming majority of chords: an ordinary single-axis crossing
+    # has one axis with a single candidate, so the `== 2 and == 2` guard
+    # below never fires for it.
+    for t in ordered:
+        px, py = x0 + t * dx, y0 + t * dy
+        col_candidates = _straddling_indices(px, ox, res)
+        row_candidates = _straddling_indices(py, oy, res)
+        if len(col_candidates) == 2 and len(row_candidates) == 2:
+            for c in col_candidates:
+                for r in row_candidates:
+                    _add_if_in_bounds(c, r)
+
     return cells
 
 
