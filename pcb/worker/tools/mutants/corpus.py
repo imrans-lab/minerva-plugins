@@ -62,11 +62,13 @@ def L(*lines: str) -> str:
 PATHFINDER = "agent_router/pathfinder.py"
 GRID = "agent_router/grid.py"
 ROUTER = "agent_router/router.py"
+KICAD_IO = "agent_router/kicad_io.py"
 DRC = "pcb_worker/drc.py"
 DRC_GEOM = "pcb_worker/drc_geometric.py"
 IR_PARITY = "pcb_worker/ir_parity.py"
 GERBER = "pcb_worker/gerber.py"
 COMPILE_BOARD = "pcb_worker/compile_board.py"
+RESOLVE = "pcb_worker/resolve.py"
 RESOLVED_BOARD = "pcb_worker/resolved_board.py"
 MANUFACTURER_PROFILE = "pcb_worker/manufacturer_profile.py"
 #: NOT source: the schema doc is TEST INPUT. Paths are relative to ``pcb/worker``,
@@ -217,6 +219,72 @@ MUTANTS: tuple[dict, ...] = (
                      "candidate batch downstream.",
     },
 
+    # --- _swept_cells: the exact-traversal clearance predicate (epoch 2) ----
+    #
+    # THE SURFACE THAT SHIPPED A REGRESSION AND HAD NO CORPUS ENTRY. When exact
+    # traversal replaced point sampling, `_segment_clear` failed OPEN on 69.6%
+    # of chords, and a cold review, the round's own FULL and two HALF proofs, an
+    # orchestrator diff read and 1425 green tests all passed over it — only
+    # fuzzing found it. The four `pathfinder.py` entries above are all about
+    # A*, simplification and L-paths; NONE of them reaches `_swept_cells` or
+    # `_segment_clear`, so until these two the fix had no standing proof at all.
+    #
+    # Both fail OPEN when mutated, which is the direction that matters here: a
+    # cell the sweep does not report is a cell `_segment_clear` never asks
+    # `can_route_through` about, so it answers "clear" for a chord that is not.
+    {
+        "id": "pathfinder_swept_cells_endpoint_seed_removed",
+        "file": PATHFINDER,
+        "kind": "full",
+        "find": L(
+            "    cells: set[tuple[int, int]] = {",
+            "        grid._pos_to_cell(x0, y0),",
+            "        grid._pos_to_cell(x1, y1),",
+            "    }",
+        ),
+        "replace": "    cells: set[tuple[int, int]] = set()  # MUTANT: endpoint cells never seeded",
+        # KILLERS (measured by hand, 3): tests/agent_router/test_swept_cells.py::
+        #   TestEndpointCellProperty::test_endpoint_cells_always_present_over_quantised_coordinates
+        #   TestEndpointCellProperty::test_the_reported_production_repro_chord
+        #   TestBoundingBoxHighEdgeOnGridLine::test_high_edge_exactly_on_a_line_reports_its_cell
+        # ALL THREE LIVE IN ONE FILE. Nothing in routing, DRC or any integration
+        # test notices the shipped regression — deleting `test_swept_cells.py`
+        # would take the whole defence with it in one move. That is precisely
+        # why this entry exists rather than trusting the count.
+        "rationale": "EXACTLY THE SHIPPED REGRESSION (019f9fb32de7 / D6): the interval "
+                     "sweep alone resolves an on-a-grid-line endpoint to one arbitrary "
+                     "side via `_pos_to_cell`'s bare floor, so the cell where the trace "
+                     "actually begins or ends — the one `_segment_clear` most needs "
+                     "checked — is omitted. Measured at the production grid default: 44% "
+                     "of random chords lose their start cell, 44% their end, 70% either. "
+                     "Fails OPEN: an unreported cell is never asked about, so a blocked "
+                     "chord reads clear.",
+    },
+    {
+        "id": "pathfinder_straddling_indices_picks_one_side_of_the_shared_edge",
+        "file": PATHFINDER,
+        "kind": "half",
+        "find": "        return (k - 1, k)",
+        "replace": "        return (k,)  # MUTANT: one arbitrary side of the shared edge, not both",
+        # KILLERS (measured by hand, 7): tests/agent_router/test_swept_cells.py::
+        #   TestStraddlingIndices::{test_exactly_on_a_line_is_both_neighbours,
+        #     test_within_epsilon_of_a_line_still_counts_as_on_it,
+        #     test_negative_side_of_a_line_also_straddles}
+        #   TestCollinearWithGridLine::{test_vertical_chord_on_a_grid_line_reports_both_columns,
+        #     test_horizontal_chord_on_a_grid_line_reports_both_rows}
+        #   TestInteriorLatticeCorner::{test_exact_45_degree_chord_reports_every_corner_adjacent_cell,
+        #     test_chord_ending_exactly_at_a_lattice_corner}
+        # Same single-file concentration as the entry above.
+        "rationale": "THE OTHER HALF OF THE SAME FIX, and a `half` in the strict sense: "
+                     "a point ON a lattice line is the SHARED edge of two cells and this "
+                     "helper is the thing that returns both. Returning only the floored "
+                     "side silently disarms every consumer at once — the collinear-chord "
+                     "mirror (`len(cols) == 2` stops firing, so a full row or column on "
+                     "the far side of the line goes unchecked, not a point graze) AND the "
+                     "interior lattice-corner check (the `== 2 and == 2` guard can no "
+                     "longer fire at all). Fails OPEN in both.",
+    },
+
     # -------------------------------------------------------------- router --
     {
         "id": "router_coincidence_tolerance_not_capped_by_copper",
@@ -257,6 +325,69 @@ MUTANTS: tuple[dict, ...] = (
         "rationale": "Removes the 019f9bc3909c fallback from route_board, so a "
                      "partially-routed board whose caller passed no explicit copper is "
                      "routed straight through its own accepted traces and vias.",
+    },
+
+    # ------------------------------------------------------------ kicad_io --
+    #
+    # The .kicad_pcb existing-copper reader (019f9d0bc17c) shipped in epoch 2
+    # with ZERO corpus entries — the whole file had none. It is on the fab path
+    # by the shortest route there is: what it returns is marked straight onto
+    # the routing grid as the board's already-accepted copper.
+    {
+        "id": "kicadio_parsed_existing_copper_never_reaches_the_board",
+        "file": KICAD_IO,
+        "kind": "full",
+        "find": L(
+            "    board.existing_traces = _existing_traces_from_content(content, kicad.net_numbers)",
+            "    board.existing_vias = _existing_vias_from_content(content, kicad.net_numbers)",
+        ),
+        "replace": L(
+            "    board.existing_traces = ()  # MUTANT: parsed existing copper never reaches the board",
+            "    board.existing_vias = ()",
+        ),
+        # KILLERS (measured by hand, 7): all of tests/agent_router/test_kicad_io.py::
+        #   TestExistingCopper — including the two parse-failure tests, which die
+        #   because a reader whose output is discarded is never asked to parse.
+        # Mutated at the WIRING rather than inside either parser so ONE entry
+        # covers both `_existing_traces_from_content` and
+        # `_existing_vias_from_content`; the budget had one slot, not two.
+        "rationale": "THE LAZY IMPLEMENTATION SHAPE for this reader: both parsers still "
+                     "exist and still validate (a widthless segment still raises), but "
+                     "nothing they return reaches the board, so the router plans over a "
+                     "board it believes to be bare copper and lays new traces straight "
+                     "through the copper that is physically already there. A file-level "
+                     "'the feature is wired' proof — the one thing 1556 green tests could "
+                     "not distinguish from a dead parser.",
+    },
+    {
+        "id": "kicadio_existing_trace_net_left_as_the_raw_number",
+        "file": KICAD_IO,
+        "kind": "half",
+        "find": L(
+            "        segments.append(ExistingSegment(",
+            "            net=net_numbers.get(net_num),",
+        ),
+        "replace": L(
+            "        segments.append(ExistingSegment(",
+            "            net=net_num,  # MUTANT: raw KiCad net NUMBER, never resolved to a NAME",
+        ),
+        # KILLERS (measured by hand, 2): tests/agent_router/test_kicad_io.py::
+        #   TestExistingCopper::test_the_net_name_not_the_net_number_is_what_merges_pre_connected_groups
+        #   TestExistingCopper::test_a_net_wholly_joined_by_existing_copper_gets_no_new_route
+        # A TWO-TEST MARGIN on the identity of every piece of accepted copper.
+        # Disambiguated by the constructor line above it: the identical
+        # `net=net_numbers.get(net_num),` also appears in the VIA parser, and the
+        # corpus's exactly-once rule (correctly) refused the bare form.
+        "rationale": "THE INT/STR NET-IDENTITY TRAP the caller's own comment names: "
+                     "geometry, width and layer are still read perfectly, only the "
+                     "number->name resolution half is dropped. `ExistingSegment.net` is "
+                     "an Optional[str] NAME that `router._existing_copper_by_net` keys on "
+                     "to match `board.get_net_pads(net_name)`, so an int there matches no "
+                     "pad's net_name at all. Direction, measured rather than assumed: "
+                     "this one fails CLOSED on clearance (a net stops recognising its OWN "
+                     "copper and over-blocks) but fails OPEN on REPORTING — pre-connected "
+                     "groups never merge, so the run reports success on a net it did not "
+                     "finish. That reporting half is the silent one.",
     },
 
     # ----------------------------------------------------------------- drc --
@@ -679,6 +810,67 @@ MUTANTS: tuple[dict, ...] = (
                      "arrive — the one-sided counterpart to the unconditional drop above.",
     },
 
+    # --- epoch 2: unemitted copper is an ERROR, not a dropped layer --------
+    {
+        "id": "compileboard_unemitted_copper_demoted_to_a_warning",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": L(
+            "            if layer.role is LayerRole.COPPER:",
+            "                # Copper the emitter cannot write is not documentation-only: the",
+            "                # gerbers would generate clean and the copper simply would not be",
+            "                # there (K4 discards clause). Scoped to COPPER -- fab/paste/silk",
+            "                # on an unemitted layer stays a warning below.",
+            "                diags.error(",
+            '                    "unemitted_copper_layer",',
+            '                    f"component {ref!r} pad {pad.number!r}: declares copper on "',
+            '                    f"layer {layer.id!r}, which the emitter does not write -- "',
+            '                    f"the copper would be silently absent from fabrication",',
+            '                    SourceRef(EntityKind.PAD, pad.source_id, f"component {ref}"))',
+            "            else:",
+            "                unemitted.add(layer.id)",
+        ),
+        "replace": "            unemitted.add(layer.id)  # MUTANT: copper demoted to documentation-only",
+        # KILLERS (measured by hand, 2): tests/test_compile_board_layer_fail_closed.py::
+        #   test_pad_declaring_inner_copper_layer_fails_closed
+        #   test_inner_copper_fails_closed_even_when_board_omits_layers_key
+        # `half` on TWO axes, and both are deliberate. (a) SEVERITY: the layer is
+        # still recorded and still reported, just through the non-fatal
+        # `captured_geometry_not_emitted` warning below — the compile goes GREEN
+        # with a warning instead of failing, which is the whole defect. (b) SITE:
+        # the structurally identical promotion for GRAPHICS (`_place_component`'s
+        # second loop) is left INTACT, so this measures the PAD site alone. A
+        # future entry could take the graphics twin; today it has none, and that
+        # is a known gap rather than an assumed pass.
+        "rationale": "Copper on a layer the emitter never writes is not documentation: "
+                     "the gerbers generate clean and the copper is simply absent from the "
+                     "fabricated board (K4 discards clause). This demotes it to the same "
+                     "silent bucket as an unemitted silk or paste layer, so a pad "
+                     "declaring inner-layer copper on a 2-layer board compiles green and "
+                     "the missing copper is discovered at the board house.",
+    },
+    {
+        # NEW this epoch (unit Z8), which proved it by hand; this makes it standing.
+        "id": "compileboard_roundrect_default_overwrites_an_authored_zero",
+        "file": COMPILE_BOARD,
+        "kind": "half",
+        "find": '        if pad.shape == "roundrect" and corner_rratio is None:',
+        "replace": '        if pad.shape == "roundrect":  # MUTANT: overwrites an AUTHORED corner_rratio',
+        # KILLERS (measured by hand, 2): tests/test_compile_board.py::
+        #   test_roundrect_pad_with_authored_zero_rratio_survives_unresolved
+        #   test_complete_pad_projection_parity
+        "rationale": "ONE CONJUNCT OF A TWO-CONJUNCT GATE, and the one that makes the "
+                     "write a DEFAULT rather than an overwrite. Without `is None` the "
+                     "default is applied unconditionally to every roundrect, which "
+                     "silently overwrites an AUTHORED 0.0 — and 0.0 is not a rounding "
+                     "preference, it is the author deliberately degenerating the land to "
+                     "a plain Rectangle. SHAPE-CHANGING ON FABRICATED COPPER: the pad "
+                     "leaves as a rounded rectangle the source never asked for. The "
+                     "shape-gate half (`== \"roundrect\"`) survives, so every "
+                     "rect/circle/oval pad still correctly carries None and no test that "
+                     "only checks 'non-roundrect pads are untouched' can see this.",
+    },
+
     # --- K21 board-house profiles (019f762004dc) ---------------------------
     {
         "id": "compileboard_authored_rule_profile_selection_ignored",
@@ -770,6 +962,64 @@ MUTANTS: tuple[dict, ...] = (
                      "ONE representative missing-field case (instead of every field) would "
                      "call this profile subsystem complete while a real board house's "
                      "profile missing exactly this key compiles anyway.",
+    },
+
+    {
+        # NEW this epoch (unit Z6). Z6 shipped this top-level guard and flagged
+        # in its own report that the file's two existing entries both target the
+        # FLOOR checks, leaving the new one level with nothing. This closes that.
+        "id": "manufacturerprofile_top_level_unknown_field_guard_removed",
+        "file": MANUFACTURER_PROFILE,
+        "kind": "full",
+        "find": "    top_level_extra = sorted(set(data) - ALLOWED_TOP_LEVEL_FIELDS)",
+        "replace": "    top_level_extra = []  # MUTANT: top-level allow-list no longer enforced",
+        # KILLERS (measured by hand, 2): tests/test_manufacturer_profile.py::
+        #   test_a_profile_with_an_unrecognized_top_level_field_fails_closed
+        #   test_a_top_level_field_that_is_a_real_floor_constraint_name_still_fails_closed
+        # The second is the sharp one and the reason a single representative
+        # test is not enough: it uses a field name that IS a real
+        # ManufacturingConstraints key, authored one level too high. That is the
+        # realistic authoring slip, and it is indistinguishable from a correct
+        # profile to anything downstream.
+        "rationale": "The same argument the floor-level unknown-field check makes, ONE "
+                     "LEVEL UP, and the level where the mistake is actually made. With "
+                     "the allow-list gone, a board house's rule authored beside `floor` "
+                     "instead of inside it loads perfectly clean, is never read by "
+                     "anything, and is therefore a rule that lies about being in force — "
+                     "the fab constraint the operator believes is enforced simply is not.",
+    },
+
+    # --------------------------------------------------------------- resolve --
+    {
+        # NEW this epoch (unit U4). The K14 surface (019f9509a54c).
+        "id": "resolve_sizeless_pad_gets_an_invented_one_millimetre_land",
+        "file": RESOLVE,
+        "kind": "half",
+        "find": L(
+            "        else:",
+            '            size_dict = {"width": None, "height": None}',
+        ),
+        "replace": L(
+            "        else:",
+            '            size_dict = {"width": 1.0, "height": 1.0}  # MUTANT: invented land',
+        ),
+        # KILLERS (measured by hand, 2): tests/test_resolve.py::
+        #   test_pads_from_parsed_leaves_sizeless_pad_as_none_not_1mm
+        #   test_pads_from_parsed_sizeless_matches_footprint_def_projection
+        # `half` for the same reason `compile_plated_hole_annulus_invented_from_the_drill`
+        # is: the SIZED branch above still projects correctly and only the
+        # sizeless branch is corrupted. A fixture whose pads all declare a size
+        # cannot see this at all.
+        "rationale": "Restores the retired 1.0x1.0 fabrication: a footprint that declares "
+                     "no `(size ...)` node gets a FICTIONAL land invented for it here "
+                     "instead of the honest None. The number is not merely wrong, it is "
+                     "not sourced from anything — and because it is a plausible "
+                     "millimetre value it reads as real to every downstream consumer, "
+                     "including the `iter_pads(require_smd_size=True)` gate that exists to "
+                     "REFUSE a sizeless SMD pad on the fab path and which an invented "
+                     "size silently satisfies. Also puts this tolerant projection back "
+                     "out of step with its locked sibling "
+                     "`footprint_def.to_board_pad_dicts`.",
     },
 
     # ----------------------------------------------------- resolved_board --
@@ -944,6 +1194,33 @@ def validate_shape() -> None:
     # other four owe theirs and are tracked. The 8 remaining slots are
     # allocated to exactly those four — they are not headroom for volume, and
     # the next raise past 56 needs its own reason.
+    #
+    # THE BAND IS NOW FULL AT 56 (epoch Z wave E, 019fa80373c5). Those 8 slots
+    # were spent as: 2 on `pathfinder._swept_cells` (endpoint seeding and
+    # `_straddling_indices` — the surface that SHIPPED a regression and had
+    # none), 2 on `agent_router.kicad_io` (the wiring, and the net number->name
+    # resolution), 1 on compile_board's unemitted-copper promotion, and 3 on
+    # surfaces built during epoch Z itself (compile_board's roundrect shape
+    # gate, resolve's sizeless pad, manufacturer_profile's top-level
+    # allow-list). All 8 were proved KILLED by hand before landing.
+    #
+    # DELIBERATELY LEFT UNCOVERED, so a later reader does not mistake a full
+    # band for full coverage:
+    #   * pcb_worker/stroke_font.py — zero entries. 62 test cases pin it and the
+    #     known defect is LATENT (its only caller renders at size 1.0, where the
+    #     bug is invisible). Lowest risk of the candidates.
+    #   * gerber.py::_emit_refdes — silk designator presence. Has tests, and silk
+    #     is not fabrication-critical the way copper is.
+    #   * pcb_worker/kicad.py — still zero entries. Tracked separately as
+    #     019fa2eaef03; a whole file's worth of work, not a rider on this one.
+    #   * compile_board's GRAPHICS unemitted-copper promotion — the structurally
+    #     identical twin of the PAD site covered above (see that entry's note).
+    #   * tools/mutants/run_sweep.py — structurally NOT corpus-able: corpus paths
+    #     are relative to pcb/worker and target pcb_worker/ + agent_router/ only.
+    #     Pinned by 36 tests in test_mutation_harness.py instead.
+    #   * pcb/scripts/run-gd-tests.sh — bash, not Python. Not corpus-able.
+    # Covering any of these means either RETIRING an entry or moving the band,
+    # and moving it needs the same kind of written reason as the two raises above.
     #
     # Cost at 56: ~180s each over -j 6 is roughly half an hour, which is a
     # phase-boundary price, not a per-round one. That is the number to
