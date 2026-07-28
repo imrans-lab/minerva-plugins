@@ -261,6 +261,12 @@ func _run_reported_scenario_end_to_end() -> void:
 ## the old net-name-matching fallback, hC has no net_names at all, so matching
 ## would fail for every net and fall back to deleting ALL of source_hints,
 ## including hC. The fix must leave hC's annotation untouched.
+##
+## Route "B" also carries a via (docket 019fa109b43c, Defect B) even though it
+## has no usable segments — the discriminating fixture for "a failed route
+## contributes no vias": if _materialize_routes ever adds it back, this test
+## must catch a via landing on the board with no copper and no history
+## checkpoint behind it.
 func _run_deletion_path_teeth() -> void:
 	print("-- 7. deletion path: an unrelated selected hint is NOT swept up --")
 	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
@@ -277,29 +283,38 @@ func _run_deletion_path_teeth() -> void:
 	var result := {
 		"routes": [
 			_one_segment_route("A", {"hint_ids": [hint_a_id]}),
-			{"net": "B", "segments": [], "vias": [], "hint_ids": [hint_b_id]},  # no usable segments -> fails
+			# No usable segments -> fails. Carries a via anyway (Defect B): a
+			# real router reply could propose a via before giving up on the
+			# rest of the net's copper.
+			{"net": "B", "segments": [], "vias": [[3.0, 3.0]], "hint_ids": [hint_b_id]},
 		],
-		"via_count": 0,
+		"via_count": 1,
 	}
 
 	var mat: Dictionary = PanelTools._materialize_routes(host, data, result, source_hints)
 	check("net A materialized a trace", int(mat.get("traces_added", 0)) >= 1)
 	check("net B recorded as failed", (mat.get("failed", []) as Array).size() >= 1)
 
+	# Defect B: a route that produced no copper must not commit a via either —
+	# such a via would sit outside the traces_added > 0 -> save_to_history
+	# checkpoint (undo() would jump straight past it) AND would be a via with
+	# no trace ever connecting to it. data.vias is the actual committed board
+	# state, not just this call's reported via_ids — check both.
+	check("no via committed for the failed route (Defect B)", data.vias.is_empty())
+	check("materialize reports no via ids either", (mat.get("via_ids", []) as Array).is_empty())
+
 	var consumed: Array = mat.get("consumed_hint_ids", [])
 	check("hint A consumed (its net succeeded)", hint_a_id in consumed)
-	# CHARACTERIZATION OF A KNOWN BUG, NOT A DESIRED PROPERTY. Hint B is
-	# attributed to a route that FAILED to materialize, and it is consumed
-	# anyway — the user loses an instruction that was never carried out.
-	# Pre-existing (this branch unions over every route in the reply, failed
-	# ones included) and NOT what C3a set out to fix, so it is pinned here to
-	# make the eventual fix visible rather than left unasserted.
-	#
-	# Tracked as docket 019fa109b43c. WHEN THAT LANDS, INVERT THIS ASSERTION —
-	# do not delete it. `not (hint_b_id in consumed)` is the proof the fix
-	# worked; a deleted assertion proves nothing and lets the bug back in.
-	check("KNOWN BUG 019fa109b43c: hint B consumed even though its net FAILED",
-		hint_b_id in consumed)
+	# 019fa109b43c, Defect A — FIXED. Hint B is attributed to a route that
+	# FAILED to materialize; it must NOT be consumed. Deleting it would assert
+	# an answer that never happened — the user loses an instruction that was
+	# never carried out. This assertion used to read the opposite way (see
+	# git history / docket 019fa109b43c): it was deliberately pinned inverted,
+	# as a KNOWN BUG characterization, so the fix would have to flip it rather
+	# than have the coverage quietly deleted out from under the bug.
+	check("hint B NOT consumed — its net FAILED to materialize",
+		not (hint_b_id in consumed))
+	check("hint B annotation still present on the host", not host.get_by_id(hint_b_id).is_empty())
 	check("hint C NOT consumed — it answered neither route", not (hint_c_id in consumed))
 	check("hint C annotation still present on the host", not host.get_by_id(hint_c_id).is_empty())
 

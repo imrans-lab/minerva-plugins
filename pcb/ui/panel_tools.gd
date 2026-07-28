@@ -1528,6 +1528,11 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 	# committed copper by these ids, which survive to_board_dict()/reload).
 	var created_trace_ids: Array = []
 	var created_via_ids: Array = []
+	# Hint ids earned by a route that actually laid copper, collected AT the
+	# point of success (019fa109b43c) rather than re-derived afterward by
+	# re-looping over `result.routes` — that re-loop could not tell success
+	# from failure without re-deriving `failed`, which is exactly the bug.
+	var succeeded_hint_ids: Array = []
 	for route in result.get("routes", []):
 		if not (route is Dictionary):
 			continue
@@ -1562,7 +1567,21 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 				traces_added += 1
 				made_any = true
 		if not made_any:
+			# 019fa109b43c, Defect B: a route with no usable segments produced
+			# no copper. Its via(s), if any, would be unreachable-by-redo
+			# orphans (the F1 class this file's history-snapshot fix was
+			# written to close, on the other side of the seam) AND would
+			# assert an answer to a hint that was never carried out. Skip the
+			# via loop below entirely for this route — no copper, no via.
 			failed.append({"net": net, "reason": "no usable segments in routed result"})
+			continue
+		# 019fa109b43c, Defect A: record this route's hint ids HERE, inside the
+		# made_any success path — not by re-looping over result.routes below,
+		# which could not distinguish a succeeded route from a failed one
+		# without redoing the `failed` computation above.
+		for hid in _route_hint_ids(route):
+			if not (hid in succeeded_hint_ids):
+				succeeded_hint_ids.append(hid)
 		# Via size/drill (U2, DCR 019f7095c395 Stage-1): the board's own
 		# design_rules when set (via_diameter_mm/via_drill_mm), else the prior
 		# 0.8/0.4 defaults — never hardcoded over an authored board's rules.
@@ -1609,29 +1628,19 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 			# so the BLANKET "every selected hint" claim is gone: a hint for a net
 			# this reply never mentions is no longer swept up.
 			#
-			# WHAT THIS DOES *NOT* FIX, so the sentence above is not read as more
-			# than it says: this loop unions over EVERY route in `result`,
-			# including ones that landed in `failed`. A hint whose net produced no
-			# copper is still consumed. That is pre-existing (docket 019fa109b43c
-			# — an earlier revision carried a vestigial `ok_nets` local, since
-			# removed, showing a filter was once intended) and C3a narrowed it
-			# rather than closing it: before, a
-			# partial failure deleted every selected hint; now it deletes only
-			# those attributed to routes in the reply, failed ones included.
-			# Strictly narrower, still wrong. Do not describe this branch as
-			# "only deletes answered hints" until 019fa109b43c lands.
+			# 019fa109b43c: to_delete is succeeded_hint_ids, accumulated above
+			# INSIDE the route loop's made_any success path — never re-derived
+			# here by re-looping over result.routes. A route that landed in
+			# `failed` never reached that accumulation, so its hints are excluded
+			# here, not merely deprioritized: a hint is consumed only when the
+			# route it answers actually laid copper.
 			#
 			# `result` here is always the real worker reply in THIS branch (a real
 			# router run can produce a per-net partial `failed` list); the
 			# synthetic single-route result built by _proposal_accept below never
 			# reaches this branch — with exactly one route, a failure there leaves
 			# traces_added == 0 and the whole deletion block above is skipped.
-			for route in result.get("routes", []):
-				if not (route is Dictionary):
-					continue
-				for hid in _route_hint_ids(route):
-					if not (hid in to_delete):
-						to_delete.append(hid)
+			to_delete = succeeded_hint_ids.duplicate()
 		for hid in to_delete:
 			if str(hid).is_empty():
 				continue
