@@ -147,7 +147,16 @@ def render(text: str, size: float = 1.0, x0: float = 0.0, y0: float = 0.0,
     x = 0.0
     for c in text:
         if c == " ":
-            x += SPACE_WIDTH * size
+            # x accumulates in GLYPH-LOCAL (unscaled) units here, exactly like
+            # the regular-glyph branch below (`x += glyph_w`, no `* size`) —
+            # every point is scaled ONCE, at emit time: `(px + x) * size`.
+            # Scaling the advance here too would double-scale it (SPACE_WIDTH
+            # * size accumulated, then multiplied by size again below), which
+            # silently breaks scale-linearity and disagreement with
+            # text_width() for any size != 1.0 and any string containing a
+            # space. See render()'s docstring / stroke_font tests for the
+            # discriminating fixture ("R1 C2" at size=2.0).
+            x += SPACE_WIDTH
             continue
         width, strokes = _glyph(c)
         glyph_w = width

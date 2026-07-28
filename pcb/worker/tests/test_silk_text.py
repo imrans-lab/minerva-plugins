@@ -109,6 +109,162 @@ def test_render_center_alignment_shifts_left_alignment_by_half_the_width():
 
 
 # ---------------------------------------------------------------------------
+# 1b. Z5 — render() is scale-linear, and agrees with text_width(), even for
+# strings containing a space.
+#
+# render()'s cursor `x` must accumulate in GLYPH-LOCAL (unscaled) units, same
+# as the regular-glyph branch (`x += glyph_w`, no `* size`), and be scaled
+# exactly once at point-emit time (`(px + x) * size`). Before the Z5 fix, the
+# space branch instead did `x += SPACE_WIDTH * size` — a pre-scaled advance
+# that then got scaled AGAIN at emit, i.e. an effective SPACE_WIDTH * size**2
+# term. That is invisible at size=1.0 (size**2 == size — gerber.py's only
+# production caller always renders at REFDES_TEXT_SIZE_MM == 1.0, so no
+# shipped silk output is affected), but breaks both properties below for any
+# size != 1.0 and any string containing a space.
+# ---------------------------------------------------------------------------
+
+# Tolerance rationale: every quantity on both sides of these comparisons is
+# produced by the SAME primitive float operations (a handful of + and * on
+# the literal glyph-table constants), just grouped/ordered slightly
+# differently (e.g. `(px + x) * size` vs. `px * size + x * size`). That is
+# only a rounding-mode difference, not an accumulated-error one, so a tight
+# absolute tolerance is appropriate — 1e-9 is ~7 orders of magnitude looser
+# than IEEE-754 double epsilon at these magnitudes (glyph coords are O(1),
+# sizes tested are O(1)-O(10)).
+_TOL = 1e-9
+
+# THE discriminating fixture named in the brief: a space AND a non-unit size.
+# Under the bug this displaces every glyph after the space by
+# SPACE_WIDTH * (size**2 - size) = 0.6 * (4 - 2) = 1.2mm.
+_DISCRIMINATING_TEXT = "R1 C2"
+_DISCRIMINATING_SIZE = 2.0
+
+# A fixture with NO space (or size == 1.0) passes under the bug too — the
+# vacuous case the brief warns against. Included explicitly, at the SAME
+# size as the discriminating fixture, so the two sit side by side and the
+# space (not the size) is visibly what's doing the discriminating.
+_NO_SPACE_CONTROL_TEXT = "R1C2"
+
+
+def _scaled_polylines(polylines, s):
+    return [[(px * s, py * s) for px, py in pts] for pts in polylines]
+
+
+def test_render_scale_linearity_discriminating_fixture_has_a_space():
+    """PRIMARY property, pinned at the exact brief fixture: render("R1 C2",
+    size) must equal render("R1 C2", 1.0) with every point scaled by `size`.
+    This does NOT reference text_width() at all, so a "lazy fix" that instead
+    scales text_width's space term to match render's bug (making the two
+    functions agree with each other while both stay non-linear) still fails
+    this test — only a real fix to render()'s accumulator passes it."""
+    text, size = _DISCRIMINATING_TEXT, _DISCRIMINATING_SIZE
+    base = stroke_font.render(text, size=1.0, x0=0.0, y0=0.0, h_align="left")
+    got = stroke_font.render(text, size=size, x0=0.0, y0=0.0, h_align="left")
+    want = _scaled_polylines(base, size)
+    assert len(got) == len(want)
+    for got_st, want_st in zip(got, want):
+        assert len(got_st) == len(want_st)
+        for (gx, gy), (wx, wy) in zip(got_st, want_st):
+            assert gx == pytest.approx(wx, abs=_TOL)
+            assert gy == pytest.approx(wy, abs=_TOL)
+
+
+def test_render_scale_linearity_no_space_control_passes_either_way():
+    """The vacuous-test control: same size as the discriminating fixture
+    above, but no space in the string. This passes whether or not the Z5 bug
+    is present (the bug lives ONLY in the space branch), which is exactly why
+    a no-space fixture would have been the wrong thing to rely on above."""
+    text, size = _NO_SPACE_CONTROL_TEXT, _DISCRIMINATING_SIZE
+    base = stroke_font.render(text, size=1.0, x0=0.0, y0=0.0, h_align="left")
+    got = stroke_font.render(text, size=size, x0=0.0, y0=0.0, h_align="left")
+    want = _scaled_polylines(base, size)
+    assert len(got) == len(want)
+    for got_st, want_st in zip(got, want):
+        for (gx, gy), (wx, wy) in zip(got_st, want_st):
+            assert gx == pytest.approx(wx, abs=_TOL)
+            assert gy == pytest.approx(wy, abs=_TOL)
+
+
+@pytest.mark.parametrize("text", [
+    "R1 C2",
+    "R1C2",
+    "U10 J3 SW4",     # multiple spaces, compounding the bug if present
+    " R1",            # leading space
+    "R1 ",            # trailing space
+    "R1  C2",         # two consecutive spaces
+    "",                # empty string, degenerate case
+])
+@pytest.mark.parametrize("size", [1.0, 2.0, 0.35, 5.0])
+def test_render_is_scale_linear_property(text, size):
+    """Broader property sweep (beyond the single named fixture above) over
+    strings with/without spaces, at/away from size=1.0, including edge cases
+    (leading/trailing/doubled spaces, empty string). For h_align="left",
+    x0=y0=0: render(t, s) == scale(render(t, 1.0), s)."""
+    base = stroke_font.render(text, size=1.0, x0=0.0, y0=0.0, h_align="left")
+    got = stroke_font.render(text, size=size, x0=0.0, y0=0.0, h_align="left")
+    want = _scaled_polylines(base, size)
+    assert len(got) == len(want), (text, size)
+    for got_st, want_st in zip(got, want):
+        assert len(got_st) == len(want_st), (text, size)
+        for (gx, gy), (wx, wy) in zip(got_st, want_st):
+            assert gx == pytest.approx(wx, abs=_TOL), (text, size)
+            assert gy == pytest.approx(wy, abs=_TOL), (text, size)
+
+
+# Probe character for the render/text_width agreement property below: "I"'s
+# glyph is a single vertical stroke, so BOTH its points sit at the same
+# known, constant glyph-local x. That constancy is what makes it usable as a
+# reference mark (see the docstring of the test that uses it).
+_PROBE_CHAR = "I"
+_PROBE_PX = stroke_font._GLYPHS[_PROBE_CHAR][1][0][0][0]
+
+
+@pytest.mark.parametrize("text", [
+    "R1 C2", "R1C2", "U10 J3 SW4", " R1", "R1 ", "R1  C2", "R1", "",
+])
+@pytest.mark.parametrize("size", [1.0, 2.0, 0.35, 5.0])
+def test_render_advance_matches_text_width(text, size):
+    """SECONDARY property: the horizontal advance render() implies for `text`
+    must equal text_width(text, size).
+
+    render() does not return (or expose) its internal cursor, so "the advance
+    implied by render" has to be observed indirectly. This test appends a
+    PROBE character ("I") whose glyph is a single vertical stroke at a KNOWN,
+    constant glyph-local x (`_PROBE_PX`, both of its points share it) and
+    reads back the x-coordinate of that probe's first rendered point. With
+    h_align="left" and x0=0, render's own emit-time transform is:
+
+        rendered_x = (_PROBE_PX + cursor_before_probe) * size
+                   = _PROBE_PX * size + cursor_before_probe * size
+
+    and `cursor_before_probe * size` is, by construction (a same-units,
+    scale-once accumulator), exactly the quantity text_width(text, size) is
+    defined to equal — text_width sums `glyph_w * size` / `SPACE_WIDTH *
+    size` per character, which is the distributed form of "sum the
+    glyph-unit advances, then multiply by size once". So:
+
+        rendered_x - _PROBE_PX * size == text_width(text, size)
+
+    This indirect readback is deliberately used INSTEAD of two more obvious
+    but unsound alternatives:
+      - Reading render()'s private `x` directly: not part of the public
+        contract, and the whole point is to test the public API's observable
+        behaviour.
+      - Using the rightmost stroke point of `text`'s own trailing character
+        as a stand-in for its advance: unsound in general, because a
+        glyph's ink does not always reach its own advance width (e.g. "I"
+        itself has advance width 0.47619 but its stroke's own px is only
+        0.238095 — using "max x of the trailing glyph" would UNDERSTATE the
+        true advance for most characters in this font).
+    """
+    rendered = stroke_font.render(text + _PROBE_CHAR, size=size, x0=0.0, y0=0.0,
+                                   h_align="left")
+    probe_first_point_x = rendered[-1][0][0]
+    advance = probe_first_point_x - _PROBE_PX * size
+    assert advance == pytest.approx(stroke_font.text_width(text, size), abs=_TOL), (text, size)
+
+
+# ---------------------------------------------------------------------------
 # 2. gerber._emit_refdes — the unit.
 # ---------------------------------------------------------------------------
 
