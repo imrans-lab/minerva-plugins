@@ -45,6 +45,7 @@ wall-clock stamp pass ``creation_date=...``.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -101,17 +102,39 @@ PINNED_CREATION_DATE = "1970-01-01T00:00:00"
 DEFAULT_VIA_DIAMETER_MM = 0.8
 DEFAULT_VIA_DRILL_MM = 0.4
 DEFAULT_TRACE_WIDTH_MM = 0.25
+# Copper clearance nominal, read ONLY by the raw loose-dict path's job-file
+# design-rule block when the board authors no `design_rules.clearance_mm`. It is
+# the value the canonical board-source contract documents (docs/board-yaml.md).
+# The compiled IR path never reaches this: it reports the RESOLVED rule minimums
+# off the ResolvedBoard, which carry the selected manufacturer profile's floor.
+DEFAULT_CLEARANCE_MM = 0.2
 # DEFAULT_MASK_CLEARANCE_MM is owned by pad_source (imported above) so both CAM
 # emitters share one raw-board default; re-exported here for back-compat callers.
-SILK_LINE_WIDTH_MM = 0.15
+# --- Silk line widths: TWO constants, because KiCad's shipped footprint library
+# uses TWO different numbers and one constant cannot say both (F1, decision record
+# comment 872 on 019f783860c8). Measured on the KiCad 10.0.5 shipped library
+# (Resistor_SMD/Capacitor_SMD/Package_QFP, 272 footprints): silk GRAPHIC strokes
+# are 0.12 (1758 occurrences vs 24 at 0.15); silk TEXT thickness is 0.15 (1047
+# occurrences, dominant). Following the LIBRARY is the ratified convention — the
+# virgin-board `board_design_settings.defaults.silk_line_width` is a per-project
+# authored value that varies board to board and is NOT the convention to match.
+#
+# These are FALLBACKS only: a graphic that AUTHORS a positive width keeps it
+# (see _graphic_width). The seed library authors 0.12 explicitly, so the split
+# is byte-neutral on today's fixtures — it governs width-less sources.
+SILK_TEXT_WIDTH_MM = 0.15
+SILK_GRAPHIC_WIDTH_MM = 0.12
+# Back-compat alias for the historical single name. It means the TEXT width (its
+# original 0.15 value); every graphic-line consumer reads SILK_GRAPHIC_WIDTH_MM.
+SILK_LINE_WIDTH_MM = SILK_TEXT_WIDTH_MM
 EDGE_CUTS_WIDTH_MM = 0.1
 
 # Reference-designator TEXT geometry (K17: silk must carry "R1", not just
 # outline graphics — gerber-writer has no text primitive, so this is drawn
-# stroke geometry; see stroke_font.py). Stroke WIDTH deliberately reuses
-# SILK_LINE_WIDTH_MM above rather than adding a third silk line-width constant
-# (gerber.SILK_LINE_WIDTH_MM and kicad._SILK_LINE_WIDTH_MM are already both
-# 0.15 — one more would just be a second way to say the same number).
+# stroke geometry; see stroke_font.py). Stroke WIDTH is SILK_TEXT_WIDTH_MM: a
+# designator IS text, so it takes the library's TEXT thickness (0.15), not the
+# graphic-line width (0.12) — that distinction is exactly why the one constant
+# these used to share had to be split.
 REFDES_TEXT_SIZE_MM = 1.0
 # Local (component-frame) anchor, mirroring kicad.py's own hard-pinned
 # designator offset precedent: `(fp_text reference ... (at 0 -1.5) ...)`.
@@ -166,8 +189,13 @@ def _list(v: Any) -> list:
 
 
 def _graphic_width(graphic: dict) -> float:
+    """Stroke width for one silk GRAPHIC primitive (line/arc/circle/poly).
+
+    Authored width wins; a width-less source falls back to the library GRAPHIC
+    width (0.12), NOT the text width. kicad._graphic_width is the byte-identical
+    twin and reads the same constant, so the two emitters cannot drift."""
     w = _opt_num(graphic.get("width"))
-    return w if (w is not None and w > 0) else SILK_LINE_WIDTH_MM
+    return w if (w is not None and w > 0) else SILK_GRAPHIC_WIDTH_MM
 
 
 # Collinearity epsilon for the 3-point-arc circumcentre. Points are board mm; a
@@ -615,7 +643,7 @@ def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
             # fp_poly outline, which IS meant to close). _harvest_silk_graphic
             # is not reused here for exactly this reason — it always marks a
             # "poly" kind closed=True.
-            g.silk_polys.append((abs_pts, SILK_LINE_WIDTH_MM, False))
+            g.silk_polys.append((abs_pts, SILK_TEXT_WIDTH_MM, False))
 
 
 def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
@@ -1093,6 +1121,216 @@ def _build_drill_files(g: _Geometry, creation_date: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Gerber X2 JOB FILE (.gbrjob) — the fabrication MANIFEST that travels with the
+# layer set. Without it a board house receives a bag of files and has to guess
+# the layer count, the stackup, the finished thickness and which file is which.
+#
+# EVERY structural decision below was MEASURED from a real KiCad 10.0.5 Gerber
+# export of this repo's own spike board, not invented: the key set and ordering,
+# the ProjectId GUID derivation, the FileFunction vocabulary, the Size convention,
+# and the default stackup numbers. (The measurement was a dev-time comparison, NOT
+# a runtime dependency — nothing here shells out to KiCad.) Where KiCad
+# and the Gerber X2 spec offer a choice, KiCad wins (the ratified convention —
+# decision record comment 872 on 019f783860c8).
+# ---------------------------------------------------------------------------
+
+# KiCad names the job file `<base>-job.gbrjob`, NOT `<base>.gbrjob`.
+_GBRJOB_SUFFIX = "-job.gbrjob"
+
+# (FileFunction, FilePolarity) per emitted Gerber suffix, in the JOB FILE's OWN
+# vocabulary — which is NOT the same as the in-file ``TF.FileFunction`` token.
+# Measured divergences (KiCad 10.0.5, same export, job vs file):
+#     job "SolderPaste,Top"  <- file "Paste,Top"
+#     job "SolderMask,Top"   <- file "Soldermask,Top"
+#     job "Profile"          <- file "Profile,NP"
+# Copper agrees. Reading the job value off the emitted layer's own function
+# string would therefore produce a WRONG manifest, which is why this is an
+# explicit table rather than a derivation.
+#
+# The paste/back-silk rows are present ahead of those layers being emitted so
+# that adding them is purely a matter of producing the file: the manifest is
+# built from the ACTUAL emitted file set (see _build_job_file), so an entry for
+# a layer nobody emits is inert, never a phantom row.
+_GBRJOB_FILE_ATTRIBUTES: dict[str, tuple[str, str]] = {
+    "F_Cu": ("Copper,L1,Top", "Positive"),
+    "B_Cu": ("Copper,L2,Bot", "Positive"),
+    "F_Paste": ("SolderPaste,Top", "Positive"),
+    "B_Paste": ("SolderPaste,Bot", "Positive"),
+    "F_SilkS": ("Legend,Top", "Positive"),
+    "B_SilkS": ("Legend,Bot", "Positive"),
+    # Solder mask is the ONE negative-polarity layer: the file draws the
+    # OPENINGS, and the manifest has to say so or the mask fabricates inverted.
+    "F_Mask": ("SolderMask,Top", "Negative"),
+    "B_Mask": ("SolderMask,Bot", "Negative"),
+    "Edge_Cuts": ("Profile", "Positive"),
+}
+
+# Manifest ordering — KiCad's own relative order (copper, paste, legend, mask,
+# profile). A stable order keeps the job file byte-reproducible.
+_GBRJOB_SUFFIX_ORDER = ("F_Cu", "B_Cu", "F_Paste", "B_Paste",
+                        "F_SilkS", "B_SilkS", "F_Mask", "B_Mask", "Edge_Cuts")
+
+# Physical defaults for a v1 two-layer board. These are KiCad's own defaults, and
+# they reproduce its numbers exactly: 1.6 total, 0.035 per copper layer, 0.01 per
+# mask => a 1.51 dielectric, which is what KiCad wrote for the spike board.
+_GBRJOB_BOARD_THICKNESS_MM = 1.6
+_GBRJOB_COPPER_THICKNESS_MM = 0.035
+_GBRJOB_MASK_THICKNESS_MM = 0.01
+_GBRJOB_DIELECTRIC_MATERIAL = "FR4"
+# KiCad writes the surface finish as "None" when the stackup declares none, and
+# "rev?" as the revision when the title block carries none.
+_GBRJOB_SURFACE_FINISH = "None"
+_GBRJOB_REVISION = "rev?"
+_GBRJOB_GUID_PAD = "X"
+_GBRJOB_GUID_BYTES = 16
+
+
+def _project_guid(project_file_name: str) -> str:
+    """KiCad's ProjectId GUID for a project file name — its EXACT algorithm.
+
+    Reverse-engineered from KiCad 10.0.5 output and verified byte-identical on
+    four independent names (``board``/``a``/``zz``/a 26-character name, covering
+    the short-pad, exact-fit and truncated cases):
+
+      1. take the project FILE name INCLUDING the ``.kicad_pcb`` extension,
+      2. right-pad with ``X`` (0x58) / truncate to 16 bytes,
+      3. hex-encode (32 characters),
+      4. INSERT ``4`` at index 12 and then ``9`` at index 16 — an INSERT, not a
+         replace; the tail shifts right, which is the one detail that makes a
+         plausible-looking reimplementation produce the wrong GUID,
+      5. truncate back to 32 and format 8-4-4-4-12.
+
+    Steps 4-5 are how KiCad forces the UUID version/variant nibbles. The result is
+    a pure function of the name, so the job file stays byte-reproducible.
+    """
+    raw = (project_file_name.encode("utf-8")
+           + _GBRJOB_GUID_PAD.encode("utf-8") * _GBRJOB_GUID_BYTES)[:_GBRJOB_GUID_BYTES]
+    s = raw.hex()
+    s = s[:12] + "4" + s[12:]
+    s = s[:16] + "9" + s[16:]
+    s = s[:32]
+    return f"{s[0:8]}-{s[8:12]}-{s[12:16]}-{s[16:20]}-{s[20:32]}"
+
+
+def _material_stackup(copper_names: list[str], board_thickness_mm: float) -> list[dict]:
+    """KiCad's MaterialStackup for an N-copper-layer board, outside in.
+
+    Legend / SolderPaste / SolderMask / (Copper, Dielectric)* / Copper /
+    SolderMask / SolderPaste / Legend — the exact sequence and key set KiCad
+    emitted for the two-layer case. The dielectric absorbs whatever the copper
+    and mask do not, so the entries sum to the declared board thickness; a
+    stackup too thin for its own copper clamps at zero rather than emitting a
+    negative thickness a fab tool would reject.
+    """
+    n = len(copper_names)
+    gaps = max(n - 1, 1)
+    solid = n * _GBRJOB_COPPER_THICKNESS_MM + 2 * _GBRJOB_MASK_THICKNESS_MM
+    dielectric = max(board_thickness_mm - solid, 0.0) / gaps
+    out: list[dict] = [
+        {"Type": "Legend", "Name": "Top Silk Screen"},
+        {"Type": "SolderPaste", "Name": "Top Solder Paste"},
+        {"Type": "SolderMask", "Thickness": _GBRJOB_MASK_THICKNESS_MM,
+         "Name": "Top Solder Mask"},
+    ]
+    for i, cu in enumerate(copper_names):
+        out.append({"Type": "Copper", "Thickness": _GBRJOB_COPPER_THICKNESS_MM,
+                    "Name": cu})
+        if i + 1 < n:
+            nxt = copper_names[i + 1]
+            out.append({
+                "Type": "Dielectric",
+                "Thickness": round(dielectric, 6),
+                "Material": _GBRJOB_DIELECTRIC_MATERIAL,
+                "Name": f"{cu}/{nxt}",
+                "Notes": f"Type: dielectric layer {i + 1} (from {cu} to {nxt})",
+            })
+    out.extend([
+        {"Type": "SolderMask", "Thickness": _GBRJOB_MASK_THICKNESS_MM,
+         "Name": "Bottom Solder Mask"},
+        {"Type": "SolderPaste", "Name": "Bottom Solder Paste"},
+        {"Type": "Legend", "Name": "Bottom Silk Screen"},
+    ])
+    return out
+
+
+def _ir_board_thickness(board: ResolvedBoard) -> float:
+    """Finished board thickness from the IR's PHYSICAL stackup — the sum of every
+    entry that declares one. Falls back to the v1 default when the stackup carries
+    no thicknesses at all, so a board that never authored a stackup still gets a
+    plausible manifest rather than a 0.0 mm board."""
+    total = sum(entry.thickness_mm or 0.0
+                for entry in board.layer_stack.stackup.entries)
+    return round(total, 6) if total > 0 else _GBRJOB_BOARD_THICKNESS_MM
+
+
+def _build_job_file(base: str, filenames: list[str], outline_w: float,
+                    outline_h: float, clearance_mm: float,
+                    min_line_width_mm: float, creation_date: str,
+                    copper_names: list[str],
+                    board_thickness_mm: float) -> str:
+    """The ``.gbrjob`` manifest for one emitted file set.
+
+    ``filenames`` is the ACTUAL emitted Gerber file list, so the manifest can
+    never advertise a layer the fab house will not find in the package — the
+    single most damaging thing a job file can get wrong.
+
+    ``Size`` follows KiCad's convention: the outline extent GROWN BY the
+    Edge.Cuts stroke width (KiCad reported 40.15 x 30.15 for this repo's 40 x 30
+    spike board plotted with a 0.15 stroke), because the profile line straddles
+    the nominal edge.
+    """
+    by_suffix = {}
+    for fname in filenames:
+        if fname.endswith(".gbr"):
+            by_suffix[fname[len(base) + 1:-len(".gbr")]] = fname
+
+    files_attributes = []
+    for suffix in _GBRJOB_SUFFIX_ORDER:
+        fname = by_suffix.get(suffix)
+        if fname is None:
+            continue
+        function, polarity = _GBRJOB_FILE_ATTRIBUTES[suffix]
+        files_attributes.append({"Path": fname, "FileFunction": function,
+                                 "FilePolarity": polarity})
+
+    job = {
+        "Header": {
+            "GenerationSoftware": {
+                "Vendor": "Minerva",
+                "Application": "pcb_worker/gerber.py",
+                "Version": WORKER_VERSION,
+            },
+            "CreationDate": creation_date,
+        },
+        "GeneralSpecs": {
+            "ProjectId": {
+                "Name": base,
+                # KiCad hashes the project FILE name, extension included.
+                "GUID": _project_guid(f"{base}.kicad_pcb"),
+                "Revision": _GBRJOB_REVISION,
+            },
+            "Size": {
+                "X": round(outline_w + EDGE_CUTS_WIDTH_MM, 6),
+                "Y": round(outline_h + EDGE_CUTS_WIDTH_MM, 6),
+            },
+            "LayerNumber": len(copper_names),
+            "BoardThickness": board_thickness_mm,
+            "Finish": _GBRJOB_SURFACE_FINISH,
+        },
+        "DesignRules": [{
+            "Layers": "Outer",
+            "PadToPad": clearance_mm,
+            "PadToTrack": clearance_mm,
+            "TrackToTrack": clearance_mm,
+            "MinLineWidth": min_line_width_mm,
+        }],
+        "FilesAttributes": files_attributes,
+        "MaterialStackup": _material_stackup(copper_names, board_thickness_mm),
+    }
+    return json.dumps(job, indent=2) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------
 
@@ -1206,6 +1444,19 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
     for suffix, text in _build_drill_files(g, date).items():
         files[f"{base}-{suffix}.drl"] = text
 
+    # Job file (.gbrjob) — the IR path can source the REAL stackup: copper layer
+    # names and the summed physical thickness come off the ResolvedBoard rather
+    # than the two-layer default the loose-dict path has to assume.
+    minimums = board.design_rules.minimums
+    files[f"{base}{_GBRJOB_SUFFIX}"] = _build_job_file(
+        base, list(files), width_mm, height_mm,
+        clearance_mm=minimums.min_clearance_mm,
+        min_line_width_mm=minimums.min_trace_width_mm,
+        creation_date=date,
+        copper_names=[layer.kicad_alias for layer in board.layer_stack.copper],
+        board_thickness_mm=_ir_board_thickness(board),
+    )
+
     if isinstance(out_dir, str) and out_dir.strip():
         import os
         os.makedirs(out_dir, exist_ok=True)
@@ -1260,6 +1511,22 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
         files[f"{base}-{suffix}.gbr"] = text
     for suffix, text in _build_drill_files(g, date).items():
         files[f"{base}-{suffix}.drl"] = text
+
+    # Job file (.gbrjob). The loose-dict board carries no physical stackup, so
+    # this path assumes the v1 two-layer default; the IR path reads the real one.
+    dr = board_dict.get("design_rules")
+    dr = dr if isinstance(dr, dict) else {}
+    # Same bounds source _build_gerber_layers drew the Edge.Cuts profile from, so
+    # the manifest's Size can never describe a different board than the profile.
+    min_x, min_y, max_x, max_y = board_model.board_bounds(board_dict)
+    files[f"{base}{_GBRJOB_SUFFIX}"] = _build_job_file(
+        base, list(files), max_x - min_x, max_y - min_y,
+        clearance_mm=_num(dr.get("clearance_mm"), DEFAULT_CLEARANCE_MM),
+        min_line_width_mm=_num(dr.get("trace_width_mm"), DEFAULT_TRACE_WIDTH_MM),
+        creation_date=date,
+        copper_names=["F.Cu", "B.Cu"],
+        board_thickness_mm=_GBRJOB_BOARD_THICKNESS_MM,
+    )
 
     if isinstance(out_dir, str) and out_dir.strip():
         import os

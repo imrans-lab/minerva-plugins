@@ -1386,3 +1386,95 @@ def test_axis_aligned_oval_land_is_unchanged(angle):
     assert "%ADD10O,2.0X1.0*%" in _fcu(_pad_board("oval", w=2.0, h=1.0, angle=angle))
     assert f"%ADD10O,{2.0 + 2 * m}X{1.0 + 2 * m}*%" in \
         _fmask(_mask_pad_board("oval", w=2.0, h=1.0, angle=angle))
+
+
+# ===========================================================================
+# ROUND 4 — SILK LINE WIDTH: text stroke and graphic stroke are DIFFERENT
+# numbers, and both emitters must use the same two.
+#
+# The R4 regression (F1, decision record comment 872 on 019f783860c8): ONE
+# constant (gerber.SILK_LINE_WIDTH_MM = 0.15, mirrored as kicad._SILK_LINE_WIDTH_MM)
+# was doing TWO jobs — reference-designator text stroke AND the fallback width for
+# a footprint graphic that authors none. KiCad's shipped footprint library uses two
+# different numbers for those two jobs: TEXT thickness 0.15, GRAPHIC lines 0.12
+# (measured on the KiCad 10.0.5 library: 1758 graphics at 0.12 vs 24 at 0.15; 1047
+# texts at 0.15). Collapsing them onto 0.15 drew every width-less footprint outline
+# 25% too fat.
+#
+# These tests are BEHAVIOURAL, not constant-echoes: they read the width back out of
+# the emitted bytes on BOTH emitters, so swapping the two constants, pointing one
+# emitter at the other's value, or re-merging them into a single number all fail.
+# ===========================================================================
+
+from pcb_worker import kicad as _kicad
+
+
+def _widthless_silk_line() -> list[dict]:
+    """One F.SilkS line authoring NO width — the case the fallback governs."""
+    return [{"layer": "F.SilkS", "kind": "line", "start": [-1.0, 0.0], "end": [1.0, 0.0]}]
+
+
+def test_silk_text_and_graphic_widths_are_separate_constants():
+    assert gerber.SILK_TEXT_WIDTH_MM == 0.15
+    assert gerber.SILK_GRAPHIC_WIDTH_MM == 0.12
+    # The whole point: they must NOT be the same number again.
+    assert gerber.SILK_TEXT_WIDTH_MM != gerber.SILK_GRAPHIC_WIDTH_MM
+
+
+def test_silk_widths_agree_across_both_cam_emitters():
+    """The cross-emitter guard the Edge.Cuts stroke never had.
+
+    kicad.py duplicates these literals rather than importing them (gerber.py pulls
+    in gerber_writer at module level and kicad.py must stay free of it), so the
+    duplication needs a test or the two silently drift — which is exactly how
+    Edge.Cuts ended up as 0.1 in one emitter and 0.15 in the other."""
+    assert gerber.SILK_TEXT_WIDTH_MM == _kicad._SILK_TEXT_WIDTH_MM
+    assert gerber.SILK_GRAPHIC_WIDTH_MM == _kicad._SILK_GRAPHIC_WIDTH_MM
+
+
+def test_widthless_silk_graphic_emits_the_graphic_width_on_gerber():
+    """A width-less silk line flashes a 0.12 circle aperture — NOT 0.15."""
+    text = _fsilk(_silk_board(_widthless_silk_line()))
+    assert "%ADD10C,0.12*%" in text, text
+    assert "%ADD10C,0.15*%" not in text
+
+
+def _kicad_silk_lines(text: str) -> list[str]:
+    """Just the F.SilkS fp_line rows — deliberately NOT a whole-file substring
+    search. The board's Edge.Cuts rows carry their own hardcoded 0.15 stroke
+    (divergence bug 019fa73b1470, fixed separately), so an unscoped "0.15 is
+    absent" assertion would be measuring the wrong layer entirely."""
+    return [ln for ln in text.splitlines()
+            if "fp_line" in ln and 'layer "F.SilkS"' in ln]
+
+
+def test_widthless_silk_graphic_emits_the_graphic_width_on_kicad():
+    """Same board, same number, other emitter — read back from the .kicad_pcb."""
+    silk = _kicad_silk_lines(_kicad.generate_kicad_pcb(_silk_board(_widthless_silk_line())))
+    assert silk, "expected an F.SilkS fp_line"
+    assert all("(width 0.12)" in ln for ln in silk), silk
+    assert not any("(width 0.15)" in ln for ln in silk), silk
+
+
+def test_authored_silk_width_still_wins_over_the_fallback():
+    """NON-REGRESSION: the split changes only the FALLBACK. A graphic that authors
+    its own width keeps it — which is why the seed library (all 0.12-authored) and
+    both pinned goldens are byte-unchanged by this."""
+    authored = [{"layer": "F.SilkS", "kind": "line", "start": [-1.0, 0.0],
+                 "end": [1.0, 0.0], "width": 0.3}]
+    assert "%ADD10C,0.3*%" in _fsilk(_silk_board(authored))
+    silk = _kicad_silk_lines(_kicad.generate_kicad_pcb(_silk_board(authored)))
+    assert silk and all("(width 0.3)" in ln for ln in silk), silk
+
+
+def test_reference_designator_strokes_keep_the_text_width():
+    """The discriminating half: a refdes is TEXT, so it stays 0.15 while the
+    graphic beside it moves to 0.12. A fix that moved BOTH to 0.12 — the obvious
+    lazy edit — fails here; so does one that left both at 0.15."""
+    board = _silk_board(_widthless_silk_line())
+    board["components"][0]["ref"] = "R1"
+    text = _fsilk(board)
+    # BOTH widths present on the same layer, from the same component.
+    assert "%ADD10C,0.12*%" in text or "%ADD11C,0.12*%" in text, text
+    assert "%ADD10C,0.15*%" in text or "%ADD11C,0.15*%" in text, text
+    assert gerber.SILK_TEXT_WIDTH_MM == 0.15

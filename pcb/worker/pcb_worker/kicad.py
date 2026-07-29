@@ -118,14 +118,31 @@ def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-# Silk stroke width fallback — mirrors gerber._graphic_width / SILK_LINE_WIDTH_MM
-# so kicad and gerber default a widthless footprint graphic to the SAME stroke.
-_SILK_LINE_WIDTH_MM = 0.15
+# Silk stroke widths — the kicad-side mirror of gerber.SILK_TEXT_WIDTH_MM /
+# gerber.SILK_GRAPHIC_WIDTH_MM. TWO constants, because KiCad's shipped footprint
+# library uses two numbers: silk TEXT thickness 0.15, silk GRAPHIC line width 0.12
+# (measured on the KiCad 10.0.5 library — F1, comment 872 on 019f783860c8). The
+# single 0.15 that used to serve both jobs here silently widened every width-less
+# footprint outline by 25%.
+#
+# These are DUPLICATED rather than imported from gerber.py on purpose: gerber.py
+# imports gerber_writer at module level, and kicad.py must stay free of that
+# runtime dependency. The duplication is pinned by a cross-emitter equality test
+# (tests/test_cam_conformance.py::test_silk_widths_agree_across_emitters) — the
+# guard that a bare mirrored literal lacked, which is how the Edge.Cuts stroke
+# drifted to two different numbers in the first place.
+_SILK_TEXT_WIDTH_MM = 0.15
+_SILK_GRAPHIC_WIDTH_MM = 0.12
+# Back-compat alias for the historical single name; it means the TEXT width.
+_SILK_LINE_WIDTH_MM = _SILK_TEXT_WIDTH_MM
 
 
 def _graphic_width(graphic: dict) -> float:
+    """Stroke width for one silk GRAPHIC primitive — authored width wins, a
+    width-less source falls back to the library GRAPHIC width (0.12), NOT the
+    text width. Byte-identical twin of gerber._graphic_width."""
     w = _opt_num(graphic.get("width"))
-    return w if (w is not None and w > 0) else _SILK_LINE_WIDTH_MM
+    return w if (w is not None and w > 0) else _SILK_GRAPHIC_WIDTH_MM
 
 
 def _graphic_ref(ref: Any, layer: Any) -> SourceRef:

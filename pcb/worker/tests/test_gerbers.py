@@ -341,7 +341,8 @@ def test_gerbers_method_writes_out_dir(tmp_path):
     resp = _call("gerbers", {"yaml": SPIKE_BOARD.read_text(encoding="utf-8"),
                              "name": "board", "out_dir": str(tmp_path)})
     written = resp["result"]["written"]
-    assert len(written) == 8  # 6 gerber + PTH + NPTH
+    assert len(written) == 9  # 6 gerber + PTH + NPTH + the .gbrjob manifest
+    assert any(w["path"].endswith("board-job.gbrjob") for w in written), written
     for w in written:
         assert Path(w["path"]).is_file()
         assert w["bytes_written"] > 0
@@ -984,3 +985,156 @@ def test_flash_positions_match_kicad_cli_export():
         + ("EVERY Y IS EXACTLY NEGATED — the board frame is reaching the Gerber "
            "unconverted (bug 019fa8011555)."
            if sorted((x, -y) for x, y in ours) == theirs else ""))
+
+
+# ---------------------------------------------------------------------------
+# Gerber X2 JOB FILE (.gbrjob) — the fabrication manifest (F1).
+#
+# Every structural expectation below was MEASURED from a real KiCad 10.0.5
+# `kicad-cli pcb export gerbers` of this repo's own spike board, not invented from
+# the Gerber X2 spec: the key set, the file naming, the ProjectId GUID, the
+# FileFunction vocabulary, the Size convention and the default stackup numbers.
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+# Captured from KiCad 10.0.5's own export of a project named `board.kicad_pcb`.
+# The GUID is a pure function of the project FILE name, so this is a stable,
+# externally-sourced fixture — the anti-circularity anchor for _project_guid.
+_KICAD_GUID_FOR_BOARD = "626f6172-642e-46b6-9963-61645f706362"
+_KICAD_JOB_TOP_LEVEL_KEYS = ["Header", "GeneralSpecs", "DesignRules",
+                             "FilesAttributes", "MaterialStackup"]
+
+
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_job_file_is_emitted_and_named_like_kicads(board_path, base, builder):
+    """KiCad writes `<base>-job.gbrjob`, NOT `<base>.gbrjob`."""
+    files = builder(board_path, base)
+    assert f"{base}-job.gbrjob" in files, sorted(files)
+    assert sum(1 for k in files if k.endswith(".gbrjob")) == 1
+
+
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_job_file_structure_matches_kicads(board_path, base, builder):
+    job = _json.loads(builder(board_path, base)[f"{base}-job.gbrjob"])
+    assert list(job) == _KICAD_JOB_TOP_LEVEL_KEYS
+    assert list(job["GeneralSpecs"]) == ["ProjectId", "Size", "LayerNumber",
+                                         "BoardThickness", "Finish"]
+    assert list(job["GeneralSpecs"]["ProjectId"]) == ["Name", "GUID", "Revision"]
+    assert list(job["DesignRules"][0]) == ["Layers", "PadToPad", "PadToTrack",
+                                           "TrackToTrack", "MinLineWidth"]
+    assert job["GeneralSpecs"]["LayerNumber"] == 2
+    assert job["GeneralSpecs"]["Finish"] == "None"
+    assert job["GeneralSpecs"]["ProjectId"]["Name"] == base
+
+
+def test_job_file_project_guid_reproduces_kicads_exactly():
+    """The GUID derivation is KiCad's, verified against KiCad's own output.
+
+    A plausible-but-wrong reimplementation (REPLACING the version/variant nibbles
+    instead of INSERTING them, or padding with NUL instead of 'X') produces a
+    different GUID and fails here."""
+    files = build_fab(SPIKE_BOARD, "board")
+    job = _json.loads(files["board-job.gbrjob"])
+    assert job["GeneralSpecs"]["ProjectId"]["GUID"] == _KICAD_GUID_FOR_BOARD
+    # Pinned at the unit level too, across the pad / exact-fit / truncate cases.
+    assert gerber._project_guid("a.kicad_pcb") == "612e6b69-6361-4645-9f70-636258585858"
+    assert gerber._project_guid("zz.kicad_pcb") == "7a7a2e6b-6963-4616-945f-706362585858"
+    assert gerber._project_guid("abcdefghijklmnopqrstuvwxyz.kicad_pcb") == \
+        "61626364-6566-4676-9869-6a6b6c6d6e6f"
+
+
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_job_manifest_lists_exactly_the_emitted_gerber_layers(board_path, base, builder):
+    """THE load-bearing property: the manifest describes the package that was
+    actually produced. A job file advertising a layer the fab house will not find
+    — or omitting one it will — is worse than no job file at all.
+
+    This is also what makes the manifest survive adding B.SilkS/F.Paste/B.Paste
+    later without an edit: it is built from the emitted file set, so the table of
+    known layer functions can name layers nobody emits yet without inventing rows.
+    """
+    files = builder(board_path, base)
+    job = _json.loads(files[f"{base}-job.gbrjob"])
+    listed = [f["Path"] for f in job["FilesAttributes"]]
+    emitted = sorted(k for k in files if k.endswith(".gbr"))
+    assert sorted(listed) == emitted, (listed, emitted)
+    assert len(listed) == len(set(listed)), "duplicate manifest rows"
+
+
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_job_manifest_declares_solder_mask_negative_and_the_rest_positive(
+        board_path, base, builder):
+    """Solder mask is the ONE negative-polarity layer — the file draws OPENINGS.
+    Get this wrong and the mask fabricates inverted."""
+    job = _json.loads(builder(board_path, base)[f"{base}-job.gbrjob"])
+    for entry in job["FilesAttributes"]:
+        expected = "Negative" if "_Mask" in entry["Path"] else "Positive"
+        assert entry["FilePolarity"] == expected, entry
+
+
+@pytest.mark.parametrize("board_path,base,builder", CASES)
+def test_job_manifest_uses_the_job_files_own_filefunction_vocabulary(
+        board_path, base, builder):
+    """The .gbrjob FileFunction tokens are NOT the in-file TF.FileFunction tokens.
+    Measured on the same KiCad export: job `SolderMask,Top` vs file
+    `Soldermask,Top`; job `Profile` vs file `Profile,NP`. Deriving the manifest
+    value from the emitted layer's own function string yields the wrong words."""
+    files = builder(board_path, base)
+    job = _json.loads(files[f"{base}-job.gbrjob"])
+    by_path = {f["Path"]: f["FileFunction"] for f in job["FilesAttributes"]}
+    assert by_path[f"{base}-F_Mask.gbr"] == "SolderMask,Top"
+    assert by_path[f"{base}-B_Mask.gbr"] == "SolderMask,Bot"
+    assert by_path[f"{base}-Edge_Cuts.gbr"] == "Profile"
+    assert by_path[f"{base}-F_Cu.gbr"] == "Copper,L1,Top"
+    assert by_path[f"{base}-B_Cu.gbr"] == "Copper,L2,Bot"
+    assert by_path[f"{base}-F_SilkS.gbr"] == "Legend,Top"
+    # ... and the emitted LAYER still carries its own, different token.
+    assert "TF.FileFunction,Soldermask,Top" in files[f"{base}-F_Mask.gbr"]
+    assert "TF.FileFunction,Profile,NP" in files[f"{base}-Edge_Cuts.gbr"]
+
+
+def test_job_size_is_the_outline_grown_by_the_edge_cuts_stroke():
+    """KiCad's Size convention: the profile line straddles the nominal edge, so the
+    plotted extent is the outline PLUS the stroke width (KiCad reported 40.15 x
+    30.15 for this 40 x 30 board at a 0.15 stroke). Derived from the constant, so
+    it tracks the Edge.Cuts width instead of restating it."""
+    job = _json.loads(build_fab(SPIKE_BOARD, "board")["board-job.gbrjob"])
+    board = _load(SPIKE_BOARD)
+    assert job["GeneralSpecs"]["Size"]["X"] == pytest.approx(
+        board["width_mm"] + gerber.EDGE_CUTS_WIDTH_MM)
+    assert job["GeneralSpecs"]["Size"]["Y"] == pytest.approx(
+        board["height_mm"] + gerber.EDGE_CUTS_WIDTH_MM)
+
+
+def test_job_material_stackup_sums_to_the_declared_board_thickness():
+    """The stackup is a physical claim, not decoration: its thicknesses must add up
+    to the BoardThickness the same file declares, or the fab house is handed two
+    contradictory numbers. (KiCad's own 2-layer output: 1.6 = 2x0.035 copper +
+    2x0.01 mask + 1.51 dielectric — which is what this reproduces.)"""
+    job = _json.loads(build_fab(SPIKE_BOARD, "board")["board-job.gbrjob"])
+    total = sum(e.get("Thickness", 0.0) for e in job["MaterialStackup"])
+    assert total == pytest.approx(job["GeneralSpecs"]["BoardThickness"])
+    kinds = [e["Type"] for e in job["MaterialStackup"]]
+    assert kinds[0] == "Legend" and kinds[-1] == "Legend"
+    assert kinds.count("Copper") == job["GeneralSpecs"]["LayerNumber"]
+
+
+def test_job_file_is_byte_reproducible():
+    """Same board twice -> identical manifest bytes (the CreationDate stamp is
+    pinned and the GUID is a pure function of the name), so the job file cannot
+    break the determinism gate."""
+    a = build_fab(SPIKE_BOARD, "board")["board-job.gbrjob"]
+    b = build_fab(SPIKE_BOARD, "board")["board-job.gbrjob"]
+    assert a == b
+
+
+def test_job_file_is_not_mistaken_for_a_gerber_layer():
+    """`.gbrjob` must not be counted as a plotted layer by anything that filters on
+    `.gbr` — including the geometry-diff harness, which suffix-matches. Guards the
+    exact trap that `"x.gbrjob".endswith(".gbr")` is False but `.startswith` /
+    `in` tests would say otherwise."""
+    files = build_fab(SPIKE_BOARD, "board")
+    assert sum(1 for k in files if k.endswith(".gbr")) == 6
+    assert sum(1 for k in files if k.endswith(".drl")) == 2
+    assert not any(k.endswith(".gbr") for k in files if k.endswith(".gbrjob"))

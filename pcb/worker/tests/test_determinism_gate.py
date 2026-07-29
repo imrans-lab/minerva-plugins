@@ -104,7 +104,13 @@ def test_creation_date_is_the_only_volatile_field(board_path, base, builder):
         )
         differing = [(x, y) for x, y in zip(la, lb) if x != y]
         for x, y in differing:
-            marker = "TF.CreationDate" in x or "CREATED_BY" in x
+            # The three timestamp spellings across the emitted artifact kinds:
+            # Gerber X2 attribute, Excellon header comment, and the .gbrjob
+            # manifest's JSON field (F1). Adding a spelling here is safe only
+            # because the assertion below still requires EVERY differing line to
+            # be a recognized timestamp — an unrecognized volatile byte still fails.
+            marker = ("TF.CreationDate" in x or "CREATED_BY" in x
+                      or '"CreationDate":' in x)
             assert marker, (
                 f"{name}: a NON-timestamp line differs between two creation "
                 f"dates: {x!r} vs {y!r} — there is more than one volatile field"
