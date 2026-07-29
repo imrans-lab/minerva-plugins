@@ -486,14 +486,30 @@ def test_policy_zone_connect_is_context_sensitive():
     assert policy.is_blocking(zc, {"zones": [{}]}, V1_FAB_OUTPUTS) is True  # zones present → fatal
 
 
-def test_v1_requested_outputs_do_not_claim_paste_or_fab():
-    """Fatal-output profile + emitter layers come from the shared authority and
-    exclude unemitted paste/fab (review 623 R3/R5)."""
+def test_v1_requested_outputs_do_not_claim_fab_or_back_silk():
+    """Fatal-output profile + emitter layers come from the shared authority
+    (review 623 R3/R5), and the aliasing is `is`-identity so the compiler cannot
+    drift from the emitter's own accept-set.
+
+    PASTE MOVED. F.Paste/B.Paste are now genuinely emitted (real stencil
+    apertures from real pad geometry), so they belong in K3_EMITTED_LAYERS and a
+    paste-carrying pad no longer warns. The paste output DOMAIN still stays out
+    of V1_FAB_OUTPUTS: a stencil loss is a cosmetic/assembly problem, never a
+    fail-closed fabrication one, which is a separate judgement from whether we
+    emit the layer.
+
+    Still excluded, for two different reasons:
+      * F.Fab — KiCad's own .gbrjob calls it ``AssemblyDrawing,Top``. Not fab.
+      * B.SilkS — we WRITE the file but harvest no bottom silk, so claiming it
+        here would silence a real warning without emitting any real geometry.
+    """
     from pcb_worker import fab_capability
     assert V1_FAB_OUTPUTS == fab_capability.FABRICATION_CRITICAL_OUTPUTS
     assert K3_EMITTED_LAYERS is fab_capability.EMITTED_LAYERS
     assert "paste" not in V1_FAB_OUTPUTS and "fab" not in V1_FAB_OUTPUTS
-    assert "F.Paste" not in K3_EMITTED_LAYERS and "F.Fab" not in K3_EMITTED_LAYERS
+    assert {"F.Paste", "B.Paste"} <= K3_EMITTED_LAYERS
+    assert "F.Fab" not in K3_EMITTED_LAYERS
+    assert "B.SilkS" not in K3_EMITTED_LAYERS
 
 
 def test_policy_blocks_rules_marker_when_rules_requested():

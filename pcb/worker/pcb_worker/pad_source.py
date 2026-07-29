@@ -164,6 +164,7 @@ class PadGeom:
     shape: str
     corner_rratio: float | None  # roundrect corner radius / min(w,h), in [0,0.5]; None => not applicable (non-roundrect shape). For a roundrect pad, None ONLY on the raw/loose-dict path — fail-closed there by _require_faithful_shape; unreachable on the compiled IR path, where compile_board resolves the 0.25 default once (019fa73a4f88)
     solder_mask_margin: float | None  # per-side mask growth over copper; None => board global clearance
+    solder_paste_margin: float | None  # per-side PASTE growth over copper; None/0 => the stencil aperture equals the copper exactly (measured against KiCad 10.0.5 — see paste_aperture)
     pad_type: str          # "smd" | "thru_hole" | "np_thru_hole"
     layers: list
     from_resolve: bool     # per-pad view of has_resolved_pads(comp): resolved vs fallback
@@ -592,6 +593,106 @@ def pad_mask_margin(pad: "PadGeom", mask_clearance: float) -> float:
     return pad.solder_mask_margin if pad.solder_mask_margin is not None else mask_clearance
 
 
+def has_paste(pad: "PadGeom", top: bool) -> bool:
+    """Does this pad put SOLDER PASTE on the given side?
+
+    Read STRICTLY off the pad's own resolved layer participation — the footprint
+    said so, or it did not. Nothing is inferred from pad_type: an SMD pad whose
+    footprint omits ``F.Paste`` gets NO stencil aperture, and a THROUGH-HOLE pad
+    whose footprint declares ``*.Paste`` DOES get one.
+
+    Both halves are measured against KiCad 10.0.5, not reasoned from principle
+    (a board exported with a TH pad on ``"*.Cu" "*.Mask" "*.Paste"`` puts that
+    pad's C,1.700000 aperture in F.Paste; the same pad on ``"*.Cu" "*.Mask"``
+    contributes nothing; an SMD pad on ``"F.Cu" "F.Mask"`` likewise contributes
+    nothing). KiCad's shipped TH footprints simply do not declare paste, which is
+    why "no paste on through-hole" LOOKS like a rule — it is a consequence of the
+    library's layer lists, and driving off the layer list reproduces it exactly
+    while still honouring a footprint that genuinely wants paste in a hole
+    (paste-in-hole / pin-in-paste reflow is a real process).
+
+    VIAS never reach this function: a via is not a pad, carries no footprint
+    layer list, and KiCad emits no paste for one (measured — a via's C,0.800000
+    annulus appears in F.Cu and B.Cu and in neither paste layer).
+    """
+    want = "F.Paste" if top else "B.Paste"
+    return any(layer == want for layer in (pad.layers or []))
+
+
+def paste_aperture(shape: str, w: float, h: float, rratio: "float | None",
+                   margin: float, ref: Any,
+                   number: Any) -> tuple[str, float, float, "float | None"]:
+    """The stencil aperture for one pad as ``(shape, width, height, corner_rratio)``
+    — the COPPER LAND offset by the pad's own ``solder_paste_margin``.
+
+    Takes the copper aperture EXPLICITLY rather than reading it off the PadGeom,
+    because the copper a through-hole pad actually gets is the ``th_land``
+    decision (an equal-axis land is a round annulus regardless of ``pad.shape``),
+    not the raw shape/size fields. Passing the emitted land keeps the stencil
+    locked to the copper the board will really have.
+
+    MEASURED against KiCad 10.0.5 (its own Gerber export, F.Paste aperture vs the
+    F.Cu aperture for the same pad), never assumed:
+
+      * NO authored margin (the overwhelmingly common case) -> the paste aperture
+        is the copper aperture EXACTLY. Not inset, not shrunk by some notional
+        stencil rule: ``R,1.600000X0.800000`` copper gives ``R,1.600000X0.800000``
+        paste; a roundrect gives a byte-identical ``RoundRect,...``; an oval gives
+        the same ``O,``; a rotated rect gives the same ``RotRect,...``. This
+        function therefore returns the pad's own shape untouched at margin 0, so
+        the paste flash goes through the SAME ``_shape_aperture`` branch as its
+        copper and cannot drift from it.
+      * An authored margin is a true morphological OFFSET by ``m`` per side —
+        NOT "scale the dimensions and keep the corner ratio", which is measurably
+        wrong: a 1.6x0.8 roundrect at rratio 0.25 (radius 0.2) with margin +0.2
+        becomes radius 0.4, whereas re-applying 0.25 to the grown 2.0x1.2 outline
+        would give 0.3. KiCad holds the inner corner RECTANGLE fixed and adds the
+        margin to the RADIUS. Measured pairs, copper -> paste:
+            rect      1.6x0.8, m=-0.1  ->  R,1.400000X0.600000      (stays rect)
+            rect      1.6x0.8, m=+0.2  ->  RoundRect radius 0.2     (corners ROUND)
+            roundrect r=0.2,   m=-0.1  ->  RoundRect radius 0.1
+            roundrect r=0.2,   m=+0.2  ->  RoundRect radius 0.4
+            circle    d=1.2,   m=-0.1  ->  C,1.000000
+            circle    d=1.2,   m=+0.2  ->  C,1.600000
+            oval    1.6x0.8,   m=-0.1  ->  O,1.400000X0.600000
+            oval    1.6x0.8,   m=+0.2  ->  O,2.000000X1.200000
+        A plain rect grown OUTWARD gains rounded corners because the outward
+        offset of a sharp corner is an arc; shrunk INWARD it stays sharp. Both
+        fall out of "radius = max(0, r + m)" with r = 0 for a rect.
+
+    Fails closed (``PadGeometryError``, via the shared ``mask_opening_dim``
+    boundary) on a negative margin large enough to collapse the aperture, exactly
+    as the solder-mask path does — a vanished stencil opening is a dead joint.
+    """
+    if margin == 0.0:
+        # Byte-identical to the copper aperture by CONSTRUCTION, not by a
+        # re-derivation that could drift.
+        return shape, w, h, rratio
+
+    pw = mask_opening_dim(w, margin, ref, number)
+    ph = mask_opening_dim(h, margin, ref, number)
+
+    if shape == "circle":
+        return "circle", pw, ph, None
+    if shape == "oval":
+        # Fully rounded on the short axis before and after: an offset obround is
+        # an obround.
+        return "oval", pw, ph, None
+
+    # rect / roundrect share one rule: offset the CORNER RADIUS by the margin.
+    # A rect is just a roundrect whose radius is 0.
+    radius = (rratio * min(w, h)) if (shape == "roundrect"
+                                      and rratio is not None) else 0.0
+    radius = radius + margin
+    if radius <= 0:
+        # Radius offset away entirely -> sharp corners. (Reachable for a rect with
+        # a negative margin, and for a roundrect shrunk by more than its radius.)
+        return "rect", pw, ph, None
+    # _shape_aperture recomputes radius as rratio * min(w, h), so hand it the
+    # ratio that reproduces the radius measured above on the OFFSET dimensions.
+    return "roundrect", pw, ph, radius / min(pw, ph)
+
+
 def _from_pin(pin: dict) -> PadGeom:
     """Fallback: reconstruct a pad from a canonical pin. Matches what
     gerber/kicad/drc read directly, and normalises a FINITE 0/negative drill to
@@ -624,6 +725,10 @@ def _from_pin(pin: dict) -> PadGeom:
         shape="rect",
         corner_rratio=None,  # inline-pin fallback carries no footprint corner datum
         solder_mask_margin=_opt_num(pin.get("solder_mask_margin")),
+        # The inline-pin fallback carries no footprint paste datum, and no paste
+        # LAYER participation either (``layers=[]`` below), so this pad emits no
+        # stencil aperture at all. None here means "unauthored", not "zero".
+        solder_paste_margin=_opt_num(pin.get("solder_paste_margin")),
         pad_type=("thru_hole" if is_th_drill(drill) else "smd"),
         layers=[],
         from_resolve=False,
@@ -660,6 +765,7 @@ def _from_resolved(pad: dict) -> PadGeom:
         shape=pad.get("shape") or "rect",
         corner_rratio=_opt_num(pad.get("corner_rratio")),
         solder_mask_margin=_opt_num(pad.get("solder_mask_margin")),
+        solder_paste_margin=_opt_num(pad.get("solder_paste_margin")),
         pad_type=pad_type,
         layers=pad.get("layers") or [],
         from_resolve=True,
@@ -714,6 +820,13 @@ def placed_pad_to_geom(pad: "PlacedPad", number: str) -> PadGeom:
         d["corner_rratio"] = pad.corner_rratio
     if pad.solder_mask_margin is not None:
         d["solder_mask_margin"] = pad.solder_mask_margin
+    # The PASTE margin the IR already carried but that used to stop here: without
+    # this line the stencil datum reached PlacedPad and went no further, so the
+    # emitters could only ever have SYNTHESISED a paste aperture from the copper
+    # (fictional geometry, K14). Carried on the same terms as the mask margin —
+    # present-only, so an unauthored margin stays None rather than becoming 0.0.
+    if pad.solder_paste_margin is not None:
+        d["solder_paste_margin"] = pad.solder_paste_margin
     # D1 provenance — but an OVERRIDE annulus (pad.annulus set) is an explicitly
     # ROUND copper ring that supersedes the footprint's authored shape, so it is not
     # carried: an override-annulus pad stays a round annulus regardless of raw_shape.

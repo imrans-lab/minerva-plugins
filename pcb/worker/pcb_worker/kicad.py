@@ -30,6 +30,7 @@ from typing import Any
 
 from agent_router import layers as _layers
 
+from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .geometry import place_point
 from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import (
@@ -411,10 +412,18 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
         out.append(f'  (net {i} "{_esc(name)}")')
 
     # Board outline (Edge.Cuts rectangle from origin + width/height).
+    #
+    # The stroke width is IMPORTED from fab_capability, not written as a literal:
+    # the Gerber emitter draws the same physical edge and the two used to carry
+    # two different numbers (0.15 here, 0.1 there) with nothing keeping them in
+    # step. Unlike the silk widths just above, this needs no mirrored copy —
+    # fab_capability imports nothing, so both emitters read the one name.
+    # NEVER write `(width 0)` here hoping KiCad supplies its default: its Gerber
+    # plotter substitutes 0.1 (measured, 9.0.9 and 10.0.5 alike).
     for (x1, y1, x2, y2) in _rect_edges(min_x, min_y, max_x, max_y):
         out.append(
             f'  (gr_line (start {x1} {y1}) (end {x2} {y2}) '
-            f'(layer "Edge.Cuts") (width 0.15))'
+            f'(layer "Edge.Cuts") (width {EDGE_CUTS_WIDTH_MM}))'
         )
 
     # Components → footprints.

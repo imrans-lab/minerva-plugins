@@ -7,8 +7,8 @@ G04 #@! TF.GenerationSoftware,Minerva,pcb_worker/gerber.py,0.2.0*
 %FSLAX36Y36*%
 G75*
 G04 #@! TA.AperFunction,Profile*
-G04 #@! TAShape,Circle,0.1*
-%ADD10C,0.1*%
+G04 #@! TAShape,Circle,0.05*
+%ADD10C,0.05*%
 G04 #@! TD*
 %LPD*%
 D10*

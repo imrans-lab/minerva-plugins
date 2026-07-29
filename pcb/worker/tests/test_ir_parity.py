@@ -681,3 +681,73 @@ def test_every_transposable_shape_is_genuinely_both_axis_symmetric(shape):
     flat = _flash_table("ir", shape=shape, w=2.4, h=1.2, rot=0.0)
     assert not diff_against_reference(turned, flat)
     assert shape in ir_parity._TRANSPOSABLE_SHAPES
+
+
+# ---------------------------------------------------------------------------
+# OUTLINE STROKE WIDTH — the field the outline family used to be blind to.
+# ---------------------------------------------------------------------------
+
+
+def test_outline_row_carries_the_stroke_width_on_every_surface():
+    """The outline row must EXPRESS the stroke, or nothing below can catch it.
+
+    Before this, the outline family compared origin/width/height only: it checked
+    the rectangle and never the pen. Two emitters drew the same physical board
+    edge with two different widths (kicad 0.15, gerber 0.1) and no test on any
+    surface could see it — the class was structurally invisible, not merely
+    untested.
+    """
+    tables = tabulate_all(_board(PARITY_CORNERS))
+    for surface, table in tables.items():
+        rows = table.by_family("outline")
+        if not rows:
+            continue                       # a surface that cannot express outline
+        for row in rows.values():
+            assert "stroke_width_mm" in row.field_map(), (surface, row)
+
+
+def test_outline_stroke_width_agrees_across_the_ir_and_both_emitters():
+    """All three surfaces report the SAME edge stroke on a clean tree — which is
+    only true because both emitters now read one constant instead of carrying a
+    literal each."""
+    from pcb_worker.fab_capability import EDGE_CUTS_WIDTH_MM
+
+    tables = tabulate_all(_board(PARITY_CORNERS))
+    seen = {}
+    for surface, table in tables.items():
+        for row in table.by_family("outline").values():
+            seen[surface] = row.field_map()["stroke_width_mm"]
+    assert seen, "no surface produced an outline row"
+    assert set(seen.values()) == {EDGE_CUTS_WIDTH_MM}, seen
+
+
+def test_a_drifted_gerber_outline_stroke_is_caught_end_to_end(monkeypatch):
+    """THE TEETH. Make the GERBER emitter draw the board edge with a different
+    pen, emit real bytes, re-parse them, and demand the gate names gerber.
+
+    This is the falsifier for the whole single-source claim: unify the constant
+    but leave the parity row blind and this test still passes; add the row but
+    let an emitter keep a literal and the clean-tree test above fails. Both
+    halves have to be real.
+    """
+    from pcb_worker import gerber
+
+    monkeypatch.setattr(gerber, "EDGE_CUTS_WIDTH_MM", 0.15)
+    report = check_parity(_board(PARITY_CORNERS), PARITY_CORNERS_BASELINE)
+    assert not report.ok, "a gerber outline stroke of 0.15 vs the IR's 0.05 went undetected"
+    assert {d.surface for d in report.unexplained} == {"gerber"}
+    assert {d.field for d in report.unexplained} == {"stroke_width_mm"}
+    assert "[gerber]" in format_report(report)
+
+
+def test_a_drifted_kicad_outline_stroke_is_caught_end_to_end(monkeypatch):
+    """The same proof for the other emitter — the one that actually carried the
+    0.15 literal this work removed."""
+    from pcb_worker import kicad
+
+    monkeypatch.setattr(kicad, "EDGE_CUTS_WIDTH_MM", 0.15)
+    report = check_parity(_board(PARITY_CORNERS), PARITY_CORNERS_BASELINE)
+    assert not report.ok, "a kicad outline stroke of 0.15 vs the IR's 0.05 went undetected"
+    assert {d.surface for d in report.unexplained} == {"kicad"}
+    assert {d.field for d in report.unexplained} == {"stroke_width_mm"}
+    assert "[kicad]" in format_report(report)

@@ -25,6 +25,11 @@ import pytest
 import yaml
 
 from pcb_worker import board_model, gerber, stroke_font
+from pcb_worker.fab_capability import EMITTED_GERBER_SUFFIXES
+
+# Layers that may legitimately carry no plot commands on a given board. See the
+# per-suffix reasoning in _assert_gerber_structural.
+_MAY_BE_EMPTY = ("F_SilkS", "B_SilkS", "F_Paste", "B_Paste")
 from pcb_worker.methods import handle_request
 from tests.gerber_fab import build_fab, build_raw_emitter
 
@@ -88,14 +93,19 @@ def _assert_gerber_structural(name: str, text: str, bounds: tuple) -> None:
             assert dcode in define_pos, f"{name}: aperture D{dcode} used but never defined"
             assert define_pos[dcode] <= i, f"{name}: D{dcode} selected before its %ADD"
 
-    # At least one plot command — EXCEPT a legend/silk layer, which CAN
-    # legitimately be empty (K4: the procedural courtyard box is retired; no
-    # resolved silk graphics means no resolved OUTLINE silk, still a valid
-    # gerber with header/footer). Since K17, F.SilkS is no longer empty on any
-    # board with a top-side, non-empty-ref component — it always carries at
-    # least that component's own reference-designator strokes — but the
-    # exemption stays for the genuinely component-less/bottom-only case.
-    if not name.endswith("F_SilkS.gbr"):
+    # At least one plot command — EXCEPT the layers whose emptiness is a real
+    # board fact rather than a lost layer. An empty layer here is NOT an excused
+    # failure: it is a header/footer-complete, aperture-less, parseable Gerber,
+    # which is exactly the artifact KiCad 10.0.5 itself emits for a side with no
+    # content. Every fabrication-bearing copper/mask/edge layer must still plot.
+    #
+    #   F_SilkS  — no resolved OUTLINE silk (K4: the procedural courtyard box is
+    #              retired). Since K17 this is rare — F.SilkS carries every
+    #              top-side component's designator strokes — but the exemption
+    #              stays for the genuinely component-less/bottom-only case.
+    #   B_SilkS  — ALWAYS empty; there is no bottom-silk harvest at all.
+    #   F/B_Paste— empty when no pad on that side declares paste participation.
+    if not any(name.endswith(f"{suffix}.gbr") for suffix in _MAY_BE_EMPTY):
         assert re.search(r"D0[123]\*", text), f"{name}: no D01/D02/D03 plot commands"
 
     # X2 attributes — accept both the %TF..*% and the G04 #@! comment form.
@@ -128,9 +138,11 @@ def test_gerber_layers_structural(board_path, base, builder):
     files = builder(board_path, base)
 
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
-    # Exactly the six expected layers.
+    # Exactly the capability profile's layer set -- read from the shared authority
+    # rather than restated, so adding a layer in one place cannot leave this
+    # assertion behind as the stale definition of "all of them".
     suffixes = {n[len(base) + 1:-4] for n in gbrs}
-    assert suffixes == {"F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "Edge_Cuts"}
+    assert suffixes == set(EMITTED_GERBER_SUFFIXES)
     for name, text in gbrs.items():
         _assert_gerber_structural(name, text, bounds)
 
@@ -317,8 +329,8 @@ def test_gerbers_method_returns_files():
     resp = _call("gerbers", {"yaml": SPIKE_BOARD.read_text(encoding="utf-8")})
     assert resp["ok"] is True
     files = resp["result"]["files"]
-    # Six gerber layers + two drill files for the spike board.
-    assert sum(1 for k in files if k.endswith(".gbr")) == 6
+    # The full plotted layer set + two drill files for the spike board.
+    assert sum(1 for k in files if k.endswith(".gbr")) == len(EMITTED_GERBER_SUFFIXES)
     assert sum(1 for k in files if k.endswith(".drl")) == 2
     assert resp["result"]["written"] == []
 
@@ -341,7 +353,8 @@ def test_gerbers_method_writes_out_dir(tmp_path):
     resp = _call("gerbers", {"yaml": SPIKE_BOARD.read_text(encoding="utf-8"),
                              "name": "board", "out_dir": str(tmp_path)})
     written = resp["result"]["written"]
-    assert len(written) == 9  # 6 gerber + PTH + NPTH + the .gbrjob manifest
+    # every gerber layer + PTH + NPTH + the .gbrjob manifest
+    assert len(written) == len(EMITTED_GERBER_SUFFIXES) + 3
     assert any(w["path"].endswith("board-job.gbrjob") for w in written), written
     for w in written:
         assert Path(w["path"]).is_file()
@@ -1135,6 +1148,6 @@ def test_job_file_is_not_mistaken_for_a_gerber_layer():
     exact trap that `"x.gbrjob".endswith(".gbr")` is False but `.startswith` /
     `in` tests would say otherwise."""
     files = build_fab(SPIKE_BOARD, "board")
-    assert sum(1 for k in files if k.endswith(".gbr")) == 6
+    assert sum(1 for k in files if k.endswith(".gbr")) == len(EMITTED_GERBER_SUFFIXES)
     assert sum(1 for k in files if k.endswith(".drl")) == 2
     assert not any(k.endswith(".gbr") for k in files if k.endswith(".gbrjob"))

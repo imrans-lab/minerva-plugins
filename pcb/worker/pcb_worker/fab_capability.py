@@ -7,24 +7,81 @@ test (``tests/test_fab_capability.py``) asserts the live emitter's actual
 artifact set equals this profile, so a future emitter change that adds or drops
 a layer forces a matching, reviewed change here.
 
-Initial values are exactly today's Gerber surface (``gerber.py``
-``_GERBER_SUFFIXES`` + the PTH/NPTH Excellon split): two copper layers, both
-solder masks, TOP silk only, and the board edge.  No paste stencil, no fab, no
-back silk.
+Values are today's Gerber surface (``gerber.py`` ``_GERBER_SUFFIXES`` + the
+PTH/NPTH Excellon split): two copper layers, both solder masks, both paste
+stencils, TOP silk, a structurally-valid BACK silk, and the board edge.  No fab
+layer (see the F.Fab note below).
 """
 
 from __future__ import annotations
 
-# The physical layers the emitter actually produces (KiCad canonical ids).
+# The physical layers whose CAPTURED GEOMETRY the emitter actually fabricates.
+# The compiler reads this as its accept-set: participation on a layer NOT listed
+# here is reported as documentation-only (``captured_geometry_not_emitted``), so
+# a layer may only be added once its geometry genuinely reaches an output file.
+#
+# F.Fab is deliberately ABSENT and must stay absent: KiCad's own .gbrjob
+# classifies F.Fab as ``AssemblyDrawing,Top`` — KiCad itself says it is not a
+# fabrication layer.
+#
+# B.SilkS is likewise ABSENT *on purpose*, even though ``B_SilkS`` IS written
+# below.  The emitter has no bottom-silk harvest at all (``gerber._emit_silk``
+# and ``_emit_refdes`` are top-side only, by their own documented restriction),
+# so a bottom-side component's captured B.SilkS graphics are still NOT
+# fabricated.  Listing B.SilkS here would silence that component's
+# ``captured_geometry_not_emitted`` warning while changing nothing about the
+# emitted bytes — trading a loud, correct gap for a silent one.  This is why
+# EMITTED_LAYERS and EMITTED_GERBER_SUFFIXES are NOT a 1:1 mapping: "we write
+# this file" and "we fabricate this layer's captured geometry" are two different
+# claims, and B.SilkS is exactly the case that separates them.
 EMITTED_LAYERS: frozenset[str] = frozenset({
     "F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.SilkS", "Edge.Cuts",
+    "F.Paste", "B.Paste",
 })
 
 # The Gerber file suffixes the emitter writes — the drift test pins these to the
 # emitter's own ``_GERBER_SUFFIXES`` so this module cannot silently diverge.
+#
+# This is KiCad's default fab plot set MINUS F.Fab: F.Cu B.Cu F.Paste B.Paste
+# F.Silkscreen B.Silkscreen F.Mask B.Mask Edge.Cuts.  A layer with no content on
+# a given board is still WRITTEN, as a valid aperture-less file (measured: KiCad
+# 10.0.5 emits ``board-B_Paste.gbp`` / ``board-B_Silkscreen.gbo`` that way for a
+# board with no such content).  A fab package with a silently-ABSENT layer is
+# worse than one with an empty layer: the board house cannot tell "no back
+# legend" from "the back legend went missing in transit".
 EMITTED_GERBER_SUFFIXES: frozenset[str] = frozenset({
-    "F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "Edge_Cuts",
+    "F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "B_SilkS", "Edge_Cuts",
+    "F_Paste", "B_Paste",
 })
+
+# ---------------------------------------------------------------------------
+# Shared stroke widths — one number per physical concept, read by BOTH emitters.
+# ---------------------------------------------------------------------------
+
+# Board-outline stroke width, in mm. THE SINGLE SOURCE: ``gerber.py`` (Gerber
+# Edge_Cuts aperture) and ``kicad.py`` (the ``.kicad_pcb`` Edge.Cuts ``gr_line``
+# width) both import THIS name. It lives here, not in ``gerber.py``, because
+# ``gerber.py`` imports ``gerber_writer`` at module level and ``kicad.py`` must
+# stay free of that runtime dependency — this module imports nothing at all, so
+# both emitters can read it. ``ir_parity``'s outline family compares the value
+# against what each emitter actually WROTE, so a future divergence is caught
+# rather than merely discouraged.
+#
+# The value is KiCad's own default: BOARD_DESIGN_SETTINGS.GetLineThickness(
+# Edge_Cuts) == 0.05 (measured directly, KiCad 10.0.5).
+#
+# TWO DECOYS, both measured, neither of which drives this:
+#   * ``pcbnew.DEFAULT_PCB_EDGE_THICKNESS`` is 0.15. It exists; it is not the
+#     board-outline default.
+#   * Emitting ``(width 0)`` does NOT make KiCad substitute its default — its
+#     Gerber plotter substitutes 0.100000 (identical in 9.0.9 and 10.0.5).
+#     Never emit a zero width hoping for a default.
+#
+# NOT a defect fix. The outline stroke is fabrication-IMMATERIAL: board houses
+# route the outline centreline, so 0.1, 0.15 and 0.05 all fabricate the same
+# board. The durable value here is that ONE number governs the concept and a
+# test can see it — not the number itself.
+EDGE_CUTS_WIDTH_MM: float = 0.05
 
 # Fabrication-CRITICAL output domains: a captured feature whose loss corrupts one
 # of these (when requested) is fatal.  Silk/fab/paste/documentation losses are

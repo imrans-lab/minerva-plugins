@@ -479,8 +479,15 @@ def test_bottom_side_component_gets_no_designator_and_no_bside_layer():
                        "pad_width_mm": 0.6, "pad_height_mm": 0.5}]},
         ],
     }
-    assert "B_SilkS" not in {n.rsplit("-", 1)[-1].rsplit(".", 1)[0]
-                            for n in gerber.build_gerbers(board, name="twoside")}
+    # B_SilkS is now WRITTEN (fab packages ship all of KiCad's default layers),
+    # but it must stay EMPTY: there is no bottom-silk harvest, so a bottom-side
+    # component contributes no legend. "File present" and "content emitted" are
+    # different claims and this test guards the second one.
+    files = gerber.build_gerbers(board, name="twoside")
+    b_silk = next(text for name, text in files.items() if name.endswith("B_SilkS.gbr"))
+    assert "%ADD" not in b_silk, (
+        "B_SilkS must be an aperture-less file -- a bottom designator or outline "
+        f"leaked into it:\n{b_silk}")
 
     g = gerber._harvest(board, gerber.DEFAULT_MASK_CLEARANCE_MM)
     expected_strokes = len(stroke_font.render("TOPREF"))

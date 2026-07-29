@@ -207,11 +207,17 @@ def test_ordinary_fab_courtyard_paste_geometry_still_compiles_clean(tmp_path):
     codes = {d.code for d in warnings}
     assert "captured_geometry_not_emitted" in codes, warnings
     assert "unemitted_copper_layer" not in codes
-    # The unemitted set named in the warning is exactly the non-copper ids --
-    # F.Paste is unemitted too (R_0805-shaped: role PASTE, not COPPER).
+    # The unemitted set named in the warning is exactly the non-copper,
+    # non-emitted ids.
     combined_message = " ".join(d.message for d in warnings)
-    for layer_id in ("F.Fab", "B.CrtYd", "F.Paste"):
+    for layer_id in ("F.Fab", "B.CrtYd"):
         assert layer_id in combined_message, combined_message
+    # F.Paste is NO LONGER in that set: the emitter writes real stencil apertures
+    # now, so paste participation is emitted, not documentation-only. This
+    # assertion is the deliberate inverse of the one it replaces -- if paste ever
+    # stops being emitted, the warning must come BACK rather than the geometry
+    # quietly vanishing.
+    assert "F.Paste" not in combined_message, combined_message
 
 
 # ---------------------------------------------------------------------------

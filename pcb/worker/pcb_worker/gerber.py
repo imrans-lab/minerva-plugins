@@ -59,6 +59,7 @@ from gerber_writer import (
 )
 
 from . import board_model, stroke_font
+from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .geometry import (
     is_top as _is_top,
     place_point as _transform_point,
@@ -67,10 +68,12 @@ from .geometry import (
 from .ir_projection import graphic_to_dict, outline_frame
 from .pad_source import (
     DEFAULT_MASK_CLEARANCE_MM,
+    has_paste,
     is_through_hole,
     iter_pads,
     mask_opening_dim,
     pad_mask_margin,
+    paste_aperture,
     placed_pad_to_geom,
     require_th_annulus,
     resolve_global_mask_clearance,
@@ -127,7 +130,13 @@ SILK_GRAPHIC_WIDTH_MM = 0.12
 # Back-compat alias for the historical single name. It means the TEXT width (its
 # original 0.15 value); every graphic-line consumer reads SILK_GRAPHIC_WIDTH_MM.
 SILK_LINE_WIDTH_MM = SILK_TEXT_WIDTH_MM
-EDGE_CUTS_WIDTH_MM = 0.1
+# EDGE_CUTS_WIDTH_MM is owned by fab_capability (imported above) and re-exported
+# here under its historical name so every call site below is byte-unchanged. It
+# is NOT defined here, unlike the silk widths: the silk pair has to be mirrored
+# in kicad.py because gerber.py drags gerber_writer, whereas fab_capability
+# imports nothing and BOTH emitters can read it directly. One number, no mirror,
+# no cross-emitter equality test needed — the outline family in ir_parity
+# compares it against what each emitter actually wrote.
 
 # Reference-designator TEXT geometry (K17: silk must carry "R1", not just
 # outline graphics — gerber-writer has no text primitive, so this is drawn
@@ -141,7 +150,11 @@ REFDES_TEXT_SIZE_MM = 1.0
 REFDES_LOCAL_Y_MM = -1.5
 
 # Gerber output layer filenames (suffixes appended to the board base name).
-_GERBER_SUFFIXES = ("F_Cu", "B_Cu", "F_Mask", "B_Mask", "F_SilkS", "Edge_Cuts")
+# KiCad's default fab plot set minus F.Fab (which KiCad's own .gbrjob classifies
+# as AssemblyDrawing, i.e. not a fabrication layer). Pinned to
+# fab_capability.EMITTED_GERBER_SUFFIXES by the drift test.
+_GERBER_SUFFIXES = ("F_Cu", "B_Cu", "F_Paste", "B_Paste", "F_SilkS", "B_SilkS",
+                    "F_Mask", "B_Mask", "Edge_Cuts")
 
 
 class GerberResult(dict):
@@ -398,6 +411,15 @@ class _Geometry:
         # as shape "circle" with w==h==annulus+2*margin, rratio None, angle 0.
         self.mask_top: list[tuple] = []
         self.mask_bot: list[tuple] = []
+        # SOLDER-PASTE stencil apertures per side, in the SAME uniform tuple the
+        # mask buckets use — (x, y, shape, w, h, corner_rratio, angle) — so paste
+        # flashes go through the one shared _shape_aperture branch that copper and
+        # mask already use. Membership is per-PAD layer participation (pad_source.
+        # has_paste), never inferred from pad_type, and the dims come from
+        # pad_source.paste_aperture (the copper land offset by the pad's authored
+        # solder_paste_margin; identical to the copper aperture when unauthored).
+        self.paste_top: list[tuple] = []
+        self.paste_bot: list[tuple] = []
         # Traces per side: (x1, y1, x2, y2, width)
         self.traces_top: list[tuple[float, float, float, float, float]] = []
         self.traces_bot: list[tuple[float, float, float, float, float]] = []
@@ -477,6 +499,10 @@ class _Geometry:
                          for (x, y, shape, w, h, rr, a) in self.mask_top]
         self.mask_bot = [(x, -y, shape, w, h, rr, a)
                          for (x, y, shape, w, h, rr, a) in self.mask_bot]
+        self.paste_top = [(x, -y, shape, w, h, rr, a)
+                          for (x, y, shape, w, h, rr, a) in self.paste_top]
+        self.paste_bot = [(x, -y, shape, w, h, rr, a)
+                          for (x, y, shape, w, h, rr, a) in self.paste_bot]
         self.traces_top = [(x1, -y1, x2, -y2, w)
                            for (x1, y1, x2, y2, w) in self.traces_top]
         self.traces_bot = [(x1, -y1, x2, -y2, w)
@@ -551,6 +577,8 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                     mh = _mask_dim(lh, margin, ref, pad.number)
                     g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
                     g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
+                    _emit_paste(g, pad, px, py, land_shape, lw, lh, lrratio,
+                                pad_angle, ref)
                 else:
                     # Round land: the plated TH copper ring. FAIL-CLOSED if the pad
                     # resolved no annulus — never the retired `pad.annulus or drill*2`
@@ -562,6 +590,10 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                     # Round land: circular mask opening, enlarged by the per-pad margin.
                     g.mask_top.append(_circle_mask(px, py, mask_d))
                     g.mask_bot.append(_circle_mask(px, py, mask_d))
+                    # Stencil follows the ROUND land, not pad.shape (a defaulted-rect
+                    # TH pad's copper IS a circle here — see th_land).
+                    _emit_paste(g, pad, px, py, "circle", annulus, annulus, None,
+                                0.0, ref)
             else:
                 # UNPLATED (np_thru_hole): NO copper land — just a DRILL-size mask
                 # opening on both sides, matching kicad's np_thru_hole `(size drill
@@ -589,6 +621,37 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
             mh = _mask_dim(h, margin, ref, pad.number)
             mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
             (g.mask_top if top else g.mask_bot).append(mask)
+            # Stencil aperture, from the SAME copper land the flash above used.
+            _emit_paste(g, pad, px, py, pad.shape, w, h, pad.corner_rratio,
+                        pad_angle, ref)
+
+
+def _emit_paste(g: _Geometry, pad, px: float, py: float, shape: str,
+                w: float, h: float, rratio: float | None, angle: float, ref) -> None:
+    """Emit one pad's SOLDER-PASTE stencil apertures — the SHARED paste path for
+    the SMD, shaped-TH and round-TH copper branches above.
+
+    Participation is decided PER SIDE by the pad's own resolved layer list
+    (``has_paste``), so a pad reaches F.Paste only if the footprint put it there.
+    Nothing here keys off ``pad_type``: a through-hole pad whose footprint
+    declares ``*.Paste`` gets a stencil opening (paste-in-hole reflow is real),
+    and an SMD pad whose footprint omits ``F.Paste`` gets none. Both behaviours
+    are measured against KiCad 10.0.5, not assumed.
+
+    A pad on BOTH paste layers (a TH pad expanded from ``*.Paste``) flashes on
+    both, matching KiCad — which is also why this cannot be folded into the
+    single-sided ``top`` flag the copper path uses.
+
+    ``shape/w/h/rratio`` is the COPPER LAND as actually emitted, not the raw pad
+    fields, so the stencil can never describe copper the board does not have.
+    """
+    for want_top in (True, False):
+        if not has_paste(pad, want_top):
+            continue
+        margin = pad.solder_paste_margin or 0.0
+        ps, pw, ph, prr = paste_aperture(shape, w, h, rratio, margin, ref, pad.number)
+        (g.paste_top if want_top else g.paste_bot).append(
+            (px, py, ps, pw, ph, prr, angle))
 
 
 def _emit_silk(g: _Geometry, graphics, cx: float, cy: float, rot: float,
@@ -961,6 +1024,17 @@ def _add_traces(layer: DataLayer, traces) -> None:
         layer.add_trace_line((x1, y1), (x2, y2), w, "Conductor")
 
 
+def _add_paste(layer: DataLayer, apertures) -> None:
+    """Flash the stencil apertures. Same uniform tuple and the same
+    ``_shape_aperture`` family as copper and mask, so a circle/oval/roundrect land
+    keeps its shape on the stencil instead of collapsing to a rectangle — the R1/R2
+    flattening class, closed here before it could open on a third layer family.
+    ``func=""`` matches the mask path: the X2 aperture function is carried by the
+    LAYER attribute (``SolderPaste,Top``), not per aperture."""
+    for (px, py, shape, w, h, rratio, angle) in apertures:
+        layer.add_pad(_shape_aperture(shape, w, h, rratio, "", angle), (px, py), angle)
+
+
 def _add_mask(layer: DataLayer, openings) -> None:
     # ONE code path for SMD + TH mask openings: the opening uses the SAME aperture
     # family as its copper (via _shape_aperture, func=""), enlarged by the mask
@@ -1021,6 +1095,22 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_traces(b_cu, g.traces_bot)
     out["B_Cu"] = _dump(b_cu, creation_date)
 
+    # F.Paste / B.Paste — the solder-paste stencils.
+    #
+    # Written UNCONDITIONALLY, including when a side has no paste at all: a board
+    # with no bottom-side SMD gets a valid, aperture-less B_Paste, exactly as
+    # KiCad 10.0.5 does (measured: it emits board-B_Paste.gbp for such a board).
+    # A fab package whose layer is silently ABSENT is worse than one whose layer
+    # is present and empty — the board house cannot distinguish "no bottom paste"
+    # from "the file went missing".
+    f_paste = DataLayer("SolderPaste,Top", negative=False)
+    _add_paste(f_paste, g.paste_top)
+    out["F_Paste"] = _dump(f_paste, creation_date)
+
+    b_paste = DataLayer("SolderPaste,Bot", negative=False)
+    _add_paste(b_paste, g.paste_bot)
+    out["B_Paste"] = _dump(b_paste, creation_date)
+
     # F.Mask
     f_mask = DataLayer("Soldermask,Top", negative=False)
     _add_mask(f_mask, g.mask_top)
@@ -1045,6 +1135,25 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_silk_polys(f_silks, g.silk_polys)
     _add_silk_arcs(f_silks, g.silk_arcs)
     out["F_SilkS"] = _dump(f_silks, creation_date)
+
+    # B.SilkS — STRUCTURALLY PRESENT, ALWAYS EMPTY. Read this before adding to it.
+    #
+    # The emitter has NO bottom-silk harvest: _emit_silk and _emit_refdes are
+    # top-side only by their own documented restriction, so nothing ever reaches
+    # this layer. It is written anyway, for the same reason B_Paste is: a fab
+    # package that is missing one of KiCad's nine default layers is ambiguous,
+    # and KiCad itself emits a valid aperture-less board-B_Silkscreen.gbo for a
+    # board with no back legend.
+    #
+    # This file being EMPTY is NOT the same as this board having no back legend,
+    # and that difference is deliberately kept loud: B.SilkS is excluded from
+    # fab_capability.EMITTED_LAYERS, so a bottom-side component with captured
+    # B.SilkS graphics still raises `captured_geometry_not_emitted` from the
+    # compiler. Adding B.SilkS to EMITTED_LAYERS would silence that warning
+    # without emitting one byte more silk — swapping a loud gap for a silent one.
+    # When a real bottom-silk harvest lands, BOTH changes go in together.
+    b_silks = DataLayer("Legend,Bot", negative=False)
+    out["B_SilkS"] = _dump(b_silks, creation_date)
 
     # Edge.Cuts — closed board-outline rectangle from origin + width/height.
     #

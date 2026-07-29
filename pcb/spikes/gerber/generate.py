@@ -2,10 +2,17 @@
 """Gerber-writer validation spike: generate a tiny 2-layer test board.
 
 Board geometry mirrors board.yaml (canonical board-source contract terms).
-Emits RS-274X/X2 layers via the `gerber_writer` library (F.Cu, B.Cu, F.Mask,
-B.Mask, F.SilkS, Edge.Cuts) plus hand-written Excellon drill files (PTH and
-NPTH) since gerber_writer has no Excellon support at all (confirmed by
-reading its source: no `excellon` module, no drill-related class).
+Emits RS-274X/X2 layers via the `gerber_writer` library (F.Cu, B.Cu, F.Paste,
+B.Paste, F.SilkS, B.SilkS, F.Mask, B.Mask, Edge.Cuts) plus hand-written Excellon
+drill files (PTH and NPTH) since gerber_writer has no Excellon support at all
+(confirmed by reading its source: no `excellon` module, no drill-related class).
+
+ANTI-CIRCULARITY IS THE WHOLE POINT OF THIS FILE. It builds the golden directly
+against the gerber_writer API and must NEVER import pcb_worker. Every constant
+below is restated here on purpose: if this file read the emitter's numbers, the
+correctness oracle would be comparing the emitter against itself. Where a value
+matches production (mask clearance, edge stroke) the comment says WHERE the
+production number comes from — it does not import it.
 
 Run: python generate.py [output_dir]   (defaults to ./golden)
 """
@@ -51,6 +58,14 @@ MASK_CLEARANCE = 0.05  # per-side growth for solder mask openings. RATIFIED to
 # (legacy DEFAULT_MASK_CLEARANCE_MM in gerber.py, which now only applies to the raw
 # test path). The NPTH mount mask below is a drill-size opening and is unaffected.
 MOUNT_HOLE_DIA = 3.2
+# Board-outline stroke. RATIFIED to match production, which single-sources it as
+# fab_capability.EDGE_CUTS_WIDTH_MM — itself KiCad's own default, measured off
+# BOARD_DESIGN_SETTINGS.GetLineThickness(Edge_Cuts) in 10.0.5. Was 0.1 here.
+# Restated as a literal, NOT imported: this generator must stay independent of
+# the emitter it is used to check. Fabrication-immaterial either way (board
+# houses route the outline centreline), so this is a bookkeeping alignment, not
+# a defect fix.
+EDGE_STROKE = 0.05
 
 r1_pin1 = (R1[0] - 0.95, R1[1])
 r1_pin2 = (R1[0] + 0.95, R1[1])
@@ -142,6 +157,43 @@ with open(OUT / "board-B_Mask.gbr", "w") as fh:
     b_mask.dump_gerber(fh)
 
 # =============================================================================
+# F.Paste / B.Paste -- solder-paste stencil apertures
+#
+# THE MEASURED RULE (KiCad 10.0.5's own Gerber export, F.Paste aperture vs the
+# F.Cu aperture for the same pad): with NO authored solder_paste_margin, the
+# stencil opening is the SAME SIZE as the copper land. Not inset. So the four
+# 0805 lands get four 1.0 x 1.45 apertures, identical to their copper.
+#
+# The aperture FUNCTION differs from copper: copper carries "SMDPad,CuDef", a
+# stencil aperture carries none (the X2 file attribute SolderPaste,Top on the
+# LAYER says what it is), exactly as the mask masters above do.
+#
+# U1's through-hole pad gets NO paste: KiCad's shipped TH footprints declare
+# "*.Cu" "*.Mask" and nothing else, so no paste layer participation exists to
+# emit. The via likewise gets none -- measured, a via's annulus appears on both
+# copper layers and on neither paste layer.
+#
+# B.Paste is written and EMPTY: this board has no bottom-side SMD. KiCad emits
+# an empty B_Paste for such a board too, and a fab package with a silently
+# ABSENT layer is worse than one with an empty layer.
+# =============================================================================
+smd_paste_pad = Rectangle(SMD_PAD_X, SMD_PAD_Y, "")
+
+f_paste = DataLayer("SolderPaste,Top", negative=False)
+f_paste.add_pad(smd_paste_pad, G(r1_pin1))
+f_paste.add_pad(smd_paste_pad, G(r1_pin2))
+f_paste.add_pad(smd_paste_pad, G(c1_pin1))
+f_paste.add_pad(smd_paste_pad, G(c1_pin2))
+
+with open(OUT / "board-F_Paste.gbr", "w") as fh:
+    f_paste.dump_gerber(fh)
+
+b_paste = DataLayer("SolderPaste,Bot", negative=False)
+
+with open(OUT / "board-B_Paste.gbr", "w") as fh:
+    b_paste.dump_gerber(fh)
+
+# =============================================================================
 # F.SilkS -- component courtyard outlines + a pin-1 tick for U1
 # =============================================================================
 f_silks = DataLayer("Legend,Top", negative=False)
@@ -170,6 +222,16 @@ with open(OUT / "board-F_SilkS.gbr", "w") as fh:
     f_silks.dump_gerber(fh)
 
 # =============================================================================
+# B.SilkS -- written, EMPTY. This board has no bottom-side component, so there
+# is no back legend to draw. Present for fab-package completeness, exactly as
+# KiCad emits an empty board-B_Silkscreen.gbo in the same situation.
+# =============================================================================
+b_silks = DataLayer("Legend,Bot", negative=False)
+
+with open(OUT / "board-B_SilkS.gbr", "w") as fh:
+    b_silks.dump_gerber(fh)
+
+# =============================================================================
 # Edge.Cuts -- board outline rectangle, 0,0 -> 40,30
 # =============================================================================
 edge_cuts = DataLayer("Profile,NP")
@@ -179,7 +241,7 @@ profile.lineto(G((BOARD_W, 0.0)))
 profile.lineto(G((BOARD_W, BOARD_H)))
 profile.lineto(G((0.0, BOARD_H)))
 profile.lineto(G((0.0, 0.0)))
-edge_cuts.add_traces_path(profile, 0.1, "Profile")
+edge_cuts.add_traces_path(profile, EDGE_STROKE, "Profile")
 
 with open(OUT / "board-Edge_Cuts.gbr", "w") as fh:
     edge_cuts.dump_gerber(fh)
@@ -233,4 +295,4 @@ write_excellon(
     comment="NON-PLATED HOLES",
 )
 
-print(f"Wrote 6 gerber layers + 2 drill files to {OUT}")
+print(f"Wrote 9 gerber layers + 2 drill files to {OUT}")

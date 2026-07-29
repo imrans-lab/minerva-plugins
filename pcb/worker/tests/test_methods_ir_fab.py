@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 
+from pcb_worker.fab_capability import EMITTED_GERBER_SUFFIXES
 from pcb_worker.methods import handle_request
 
 
@@ -107,10 +108,9 @@ def _near(points, target, tol: float = 1e-3) -> bool:
 
 def test_gerbers_method_happy_path_emits_full_layer_set():
     files = _gerbers(_board("R_0805"))
-    # Six copper/mask/silk/edge layers; an all-SMD board has no drills.
-    assert sum(1 for k in files if k.endswith(".gbr")) == 6
-    assert {"brd-F_Cu.gbr", "brd-B_Cu.gbr", "brd-F_Mask.gbr", "brd-B_Mask.gbr",
-            "brd-F_SilkS.gbr", "brd-Edge_Cuts.gbr"} <= set(files)
+    # The full copper/paste/silk/mask/edge set; an all-SMD board has no drills.
+    assert sum(1 for k in files if k.endswith(".gbr")) == len(EMITTED_GERBER_SUFFIXES)
+    assert {f"brd-{suffix}.gbr" for suffix in EMITTED_GERBER_SUFFIXES} <= set(files)
     # ABSOLUTE placement reached copper (not the footprint-local ±0.95 origin).
     # Board (10, 10) -> gerber (·, -10): fab files are Y-UP (to_gerber_frame).
     flashes = _flashes(files["brd-F_Cu.gbr"])

@@ -88,6 +88,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .resolved_board import LayerRole, ResolvedBoard, RoundHole
 
 __all__ = [
@@ -677,7 +678,10 @@ def tabulate_ir(rb: ResolvedBoard) -> SurfaceTable:
                     h=hole.annulus_mm, rot_deg=0.0, entity="board_hole",
                     ref=NA, pad_number=NA, net_name=NA))
 
-    rows.append(_outline_row(*_ir_outline(rb)))
+    # The IR carries no authored outline stroke — the frame is derived from board
+    # bounds — so the CONTRACT value stands in for it. Both emitters import this
+    # same constant, so this row is what a drifted emitter is measured against.
+    rows.append(_outline_row(*_ir_outline(rb), EDGE_CUTS_WIDTH_MM))
     for index, token in enumerate(stack):
         rows.append(ParityRow.make("copper_layer", (token,), stack_index=index))
 
@@ -699,9 +703,69 @@ def _via_span_tokens(rb: ResolvedBoard, via, tokens: Mapping[str, str],
     return tuple(stack[i] for i in range(lo, hi + 1))
 
 
-def _outline_row(ox: float, oy: float, w: float, h: float) -> ParityRow:
+def _outline_row(ox: float, oy: float, w: float, h: float,
+                 stroke_width_mm: Any) -> ParityRow:
+    """One board-outline row.
+
+    ``stroke_width_mm`` is a COMPARED FIELD, not part of the key: the outline's
+    identity is "the board", and two surfaces disagreeing about how thick its
+    edge is must show up as a value delta on one row, not as a missing+extra
+    pair of differently-keyed rows.
+
+    Why the stroke belongs here at all: origin/width/height alone are blind to a
+    whole class. The edge is ONE physical feature drawn by two emitters, and they
+    carried two different widths for it (kicad 0.15, gerber 0.1) with no test
+    able to see it — the outline family compared the rectangle and never the pen.
+    The IR has no authored outline stroke (the frame is derived from bounds), so
+    the IR side reports the CONTRACT (``fab_capability.EDGE_CUTS_WIDTH_MM``) and
+    each emitter side reports what it actually WROTE. That makes this row a real
+    three-way check: an emitter that stops reading the shared constant, or writes
+    a literal beside it, diverges from the IR row and fails.
+    """
     return ParityRow.make("outline", ("board",), origin_x_mm=ox,
-                          origin_y_mm=oy, width_mm=w, height_mm=h)
+                          origin_y_mm=oy, width_mm=w, height_mm=h,
+                          stroke_width_mm=stroke_width_mm)
+
+
+_KICAD_EDGE_STROKE_RE = re.compile(
+    r'\(gr_line\b[^\n]*?\(layer\s+"Edge\.Cuts"\)[^\n]*?\(width\s+([0-9.eE+-]+)\)')
+
+
+def _kicad_outline_stroke(text: str) -> Any:
+    """The stroke width kicad.py ACTUALLY wrote on the Edge.Cuts outline.
+
+    Re-read from the emitted text here rather than taken from
+    ``agent_router.kicad_io._parse_board_outline`` (which returns geometry only)
+    — and deliberately so: an independent reading of the bytes is the whole point
+    of a parity surface. Every outline segment must agree; a board whose four
+    edges somehow carried different widths is itself the divergence, so a mixed
+    set reports as a set and fails the comparison against the single IR value.
+    """
+    widths = {float(m) for m in _KICAD_EDGE_STROKE_RE.findall(text)}
+    if not widths:
+        return NA
+    if len(widths) > 1:
+        return tuple(sorted(widths))
+    return widths.pop()
+
+
+def _gerber_outline_stroke(parsed) -> Any:
+    """The aperture diameter the Gerber Edge_Cuts strokes were drawn with.
+
+    The outline is a traced path, so its "stroke" IS its aperture diameter. Same
+    all-segments-agree rule as the kicad reader above.
+    """
+    widths = set()
+    for obj in parsed.objects:
+        aperture = getattr(obj, "aperture", None)
+        diameter = getattr(aperture, "diameter", None)
+        if diameter is not None:
+            widths.add(round(float(diameter), 6))
+    if not widths:
+        return NA
+    if len(widths) > 1:
+        return tuple(sorted(widths))
+    return widths.pop()
 
 
 def _ir_outline(rb: ResolvedBoard) -> tuple[float, float, float, float]:
@@ -951,7 +1015,7 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
         rows.append(_drill_row(float(x), float(y), float(drill), True, entity="via"))
 
     width, height, ox, oy = _parse_board_outline(text)
-    rows.append(_outline_row(ox, oy, width, height))
+    rows.append(_outline_row(ox, oy, width, height, _kicad_outline_stroke(text)))
 
     # KiCad's own layer ORDINALS (0, 2, ...) are its internal numbering, not a
     # stack index. The stack order is the order the signal layers are listed.
@@ -1102,7 +1166,8 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                             (float(obj.x2), _board_y(obj.y2)),
                             float(obj.aperture.diameter), NA))
             elif suffix == "Edge_Cuts":
-                rows.append(_outline_row(*_gerber_outline(parsed)))
+                rows.append(_outline_row(*_gerber_outline(parsed),
+                                         _gerber_outline_stroke(parsed)))
         elif filename.endswith(".drl"):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

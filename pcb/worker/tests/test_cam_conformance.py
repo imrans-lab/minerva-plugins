@@ -1478,3 +1478,278 @@ def test_reference_designator_strokes_keep_the_text_width():
     assert "%ADD10C,0.12*%" in text or "%ADD11C,0.12*%" in text, text
     assert "%ADD10C,0.15*%" in text or "%ADD11C,0.15*%" in text, text
     assert gerber.SILK_TEXT_WIDTH_MM == 0.15
+
+
+# ---------------------------------------------------------------------------
+# SOLDER PASTE — the stencil layers (F.Paste / B.Paste).
+#
+# Every number asserted below was MEASURED off KiCad 10.0.5's own Gerber export
+# of the same board, never reasoned from what a stencil "should" be. The
+# verification package at /home/imran/paste-verify rebuilds those measurements
+# from scratch (ours and KiCad's, same compiled IR, side by side).
+#
+# The headline measurement, and the one most likely to be "corrected" by someone
+# who knows stencil design: with NO authored paste margin, KiCad's paste aperture
+# is the SAME SIZE as the copper. Not inset. A 1.6x0.8 copper land gets a 1.6x0.8
+# stencil opening. Inset comes from an authored solder_paste_margin, and from
+# nowhere else.
+# ---------------------------------------------------------------------------
+
+
+def _paste_pad_board(shape: str, *, w: float = 2.0, h: float = 1.0,
+                     rratio: float | None = None,
+                     paste_margin: float | None = None,
+                     layers: list[str] | None = None,
+                     side: str = "top") -> dict:
+    """One SMD pad that participates in copper + paste on the given side."""
+    face = "F" if side == "top" else "B"
+    pad = {"number": "1", "type": "smd", "shape": shape,
+           "position": {"x": 0, "y": 0}, "size": {"width": w, "height": h},
+           "layers": layers if layers is not None else [f"{face}.Cu", f"{face}.Paste"]}
+    if rratio is not None:
+        pad["corner_rratio"] = rratio
+    if paste_margin is not None:
+        pad["solder_paste_margin"] = paste_margin
+    return {
+        "version": 2, "name": "conf", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [{"ref": "P1", "footprint": "F", "x_mm": 5, "y_mm": 5,
+                        "rotation_deg": 0.0, "layer": side, "pads": [pad]}],
+    }
+
+
+def _layer(board: dict, suffix: str) -> str:
+    return gerber.build_gerbers(board, name="conf")[f"conf-{suffix}.gbr"]
+
+
+def _flash_count(text: str) -> int:
+    return len(re.findall(r"D0?3\*", text))
+
+
+@pytest.mark.parametrize("shape,kwargs", [
+    ("rect", {}),
+    ("circle", {"w": 2.0, "h": 2.0}),
+    ("oval", {}),
+    ("roundrect", {"rratio": 0.25}),
+])
+def test_paste_aperture_equals_the_copper_aperture_when_no_margin_authored(shape, kwargs):
+    """THE measured rule, across every supported shape.
+
+    With no authored paste margin the stencil aperture is BYTE-IDENTICAL to the
+    copper aperture — same template letter, same dimensions, same macro. Measured
+    on KiCad 10.0.5: R,1.600000X0.800000 copper -> R,1.600000X0.800000 paste;
+    likewise for circle, obround and roundrect.
+
+    This also kills the shape-flattening class on a third layer family: a fix
+    that flashed every stencil opening as a rectangle passes a rect-only test and
+    fails here on circle/oval/roundrect.
+    """
+    board = _paste_pad_board(shape, **kwargs)
+    assert _aperture_defs(_layer(board, "F_Paste")) == _aperture_defs(_layer(board, "F_Cu"))
+
+
+def test_paste_is_emitted_on_the_BOTTOM_side_too():
+    """The discriminating case. A single-sided fixture passes with the whole
+    bottom-side paste path dead, so this pins the bottom half on its own: a
+    bottom-side SMD pad's stencil goes to B.Paste, and F.Paste stays empty."""
+    board = _paste_pad_board("rect", side="bottom")
+    assert _flash_count(_layer(board, "B_Paste")) == 1
+    assert _aperture_defs(_layer(board, "B_Paste")) == _aperture_defs(_layer(board, "B_Cu"))
+    assert _flash_count(_layer(board, "F_Paste")) == 0
+
+
+def test_pad_that_declares_no_paste_layer_gets_no_stencil_opening():
+    """Participation is read off the pad's LAYER LIST, never inferred from
+    pad_type. An SMD pad the footprint put on copper+mask only contributes
+    nothing to the stencil — measured: KiCad emits no paste flash for it."""
+    board = _paste_pad_board("rect", layers=["F.Cu", "F.Mask"])
+    assert _flash_count(_layer(board, "F_Paste")) == 0
+    assert _flash_count(_layer(board, "F_Cu")) == 1
+
+
+def test_through_hole_pad_gets_paste_only_when_its_footprint_declares_it():
+    """Both halves measured on KiCad 10.0.5, on one board:
+
+      * a TH pad on ``"*.Cu" "*.Mask"`` (what KiCad's shipped library actually
+        declares) puts NOTHING on either paste layer;
+      * the same pad on ``"*.Cu" "*.Mask" "*.Paste"`` puts its C,1.700000
+        aperture on BOTH paste layers.
+
+    So "no paste on through-hole" is a consequence of the library's layer lists,
+    not a rule to hard-code — and hard-coding it would break paste-in-hole
+    reflow, which is a real process. Driving off the layer list reproduces
+    KiCad's behaviour on ordinary boards AND honours the deliberate case.
+    """
+    def th_board(layers):
+        return {
+            "version": 2, "name": "conf", "width_mm": 20, "height_mm": 20,
+            "layers": ["top", "bottom"],
+            "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
+                             "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+            "components": [{"ref": "P1", "footprint": "F", "x_mm": 5, "y_mm": 5,
+                            "rotation_deg": 0.0, "layer": "top",
+                            "pads": [{"number": "1", "type": "thru_hole",
+                                      "shape": "circle",
+                                      "position": {"x": 0, "y": 0},
+                                      "size": {"width": 1.7, "height": 1.7},
+                                      "drill": {"x": 1.0, "y": 1.0},
+                                      "layers": layers}]}],
+        }
+
+    bare = th_board(["F.Cu", "B.Cu", "F.Mask", "B.Mask"])
+    assert _flash_count(_layer(bare, "F_Paste")) == 0
+    assert _flash_count(_layer(bare, "B_Paste")) == 0
+    assert _flash_count(_layer(bare, "F_Cu")) == 1     # copper is still there
+
+    pasted = th_board(["F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.Paste", "B.Paste"])
+    assert _flash_count(_layer(pasted, "F_Paste")) == 1
+    assert _flash_count(_layer(pasted, "B_Paste")) == 1
+    assert "C,1.7" in _layer(pasted, "F_Paste")
+
+
+def test_vias_never_get_paste():
+    """Measured: a via's C,0.800000 annulus appears in F.Cu and B.Cu and in
+    NEITHER paste layer. A via is not a pad and carries no footprint layer list,
+    so nothing routes it to the stencil."""
+    board = {
+        "version": 2, "name": "conf", "width_mm": 20, "height_mm": 20,
+        "layers": ["top", "bottom"],
+        "design_rules": {"trace_width_mm": 0.25, "clearance_mm": 0.2,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [],
+        "vias": [{"x_mm": 10.0, "y_mm": 10.0, "drill_mm": 0.4, "diameter_mm": 0.8}],
+    }
+    assert _flash_count(_layer(board, "F_Cu")) == 1
+    assert _flash_count(_layer(board, "F_Paste")) == 0
+    assert _flash_count(_layer(board, "B_Paste")) == 0
+
+
+@pytest.mark.parametrize("margin,expected", [
+    (-0.1, "R,1.8X0.8"),    # rect shrinks per side and STAYS a sharp rectangle
+    (0.0, "R,2.0X1.0"),     # authored zero == the copper aperture exactly
+])
+def test_rect_paste_margin_offsets_the_copper(margin, expected):
+    """Measured: rect 1.6x0.8 with margin -0.1 -> R,1.400000X0.600000. Same rule
+    on this fixture's 2.0x1.0 land. An authored 0.0 must behave exactly as an
+    unauthored margin, not as a special case."""
+    board = _paste_pad_board("rect", paste_margin=margin)
+    assert _aperture_defs(_layer(board, "F_Paste")) == [expected]
+
+
+def test_positive_rect_paste_margin_rounds_the_corners():
+    """Measured, and NOT guessable: growing a plain rect outward gives KiCad a
+    ROUNDED rectangle whose corner radius equals the margin (rect 1.6x0.8 with
+    margin +0.2 -> RoundRect radius 0.2). The outward offset of a sharp corner is
+    an arc, so a fix that just scales width/height and keeps sharp corners is
+    measurably wrong here."""
+    board = _paste_pad_board("rect", paste_margin=0.2)
+    defs = _aperture_defs(_layer(board, "F_Paste"))
+    assert len(defs) == 1
+    # The copper is a plain R; the stencil must NOT be.
+    assert _aperture_defs(_layer(board, "F_Cu")) == ["R,2.0X1.0"]
+    assert defs[0].split(",", 1)[0] == "RoundedRectangle", defs
+    # gerber_writer's RoundedRectangle macro is parameterised as
+    #   <half-width>X<half-height>X<inner half-extents...>X<corner DIAMETER>X...
+    # so the 2.0x1.0 land grown by 0.2/side is 2.4x1.4 -> halves 1.2X0.7, and the
+    # corner radius 0.2 appears as the diameter 0.4.
+    assert defs[0].startswith("RoundedRectangle,1.2X0.7X"), defs
+    assert "X0.4X" in defs[0], defs
+
+
+def test_roundrect_paste_margin_adds_to_the_RADIUS_not_the_ratio():
+    """THE trap in the offset rule, measured.
+
+    A roundrect 1.6x0.8 at rratio 0.25 has radius 0.2. With margin +0.2 KiCad
+    emits radius 0.4 -- the margin ADDED to the radius, inner corner rectangle
+    held fixed. Re-applying the 0.25 ratio to the grown 2.0x1.2 outline would
+    give 0.3 instead: close enough to look right, wrong on the stencil.
+
+    So this test discriminates the correct morphological offset from the
+    plausible-looking "scale the box, keep the ratio" version.
+    """
+    from pcb_worker.pad_source import paste_aperture
+
+    shape, w, h, rratio = paste_aperture("roundrect", 1.6, 0.8, 0.25, 0.2, "P1", "1")
+    assert shape == "roundrect"
+    assert (w, h) == (pytest.approx(2.0), pytest.approx(1.2))
+    assert rratio * min(w, h) == pytest.approx(0.4)     # measured KiCad radius
+    assert rratio * min(w, h) != pytest.approx(0.3)     # the naive-scale answer
+
+    # And the negative direction, also measured: radius 0.2, margin -0.1 -> 0.1.
+    shape, w, h, rratio = paste_aperture("roundrect", 1.6, 0.8, 0.25, -0.1, "P1", "1")
+    assert shape == "roundrect"
+    assert (w, h) == (pytest.approx(1.4), pytest.approx(0.6))
+    assert rratio * min(w, h) == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("shape,w,h,margin,expect", [
+    ("circle", 1.2, 1.2, -0.1, ("circle", 1.0, 1.0)),   # measured C,1.000000
+    ("circle", 1.2, 1.2, 0.2, ("circle", 1.6, 1.6)),    # measured C,1.600000
+    ("oval", 1.6, 0.8, -0.1, ("oval", 1.4, 0.6)),       # measured O,1.4X0.6
+    ("oval", 1.6, 0.8, 0.2, ("oval", 2.0, 1.2)),        # measured O,2.0X1.2
+])
+def test_circle_and_oval_paste_margins_match_kicad(shape, w, h, margin, expect):
+    """The remaining measured pairs, straight off KiCad 10.0.5's export."""
+    from pcb_worker.pad_source import paste_aperture
+
+    got = paste_aperture(shape, w, h, None, margin, "P1", "1")
+    assert (got[0], round(got[1], 6), round(got[2], 6)) == expect
+
+
+def test_paste_margin_that_collapses_the_aperture_fails_closed():
+    """A stencil opening offset away to nothing is a dead joint, not a small
+    one. Same fail-closed boundary the solder-mask path uses."""
+    from pcb_worker.pad_source import PadGeometryError, paste_aperture
+
+    with pytest.raises(PadGeometryError):
+        paste_aperture("rect", 1.0, 0.5, None, -0.4, "P1", "1")
+
+
+def test_authored_paste_margin_actually_reaches_the_emitter_from_the_IR():
+    """THE PLUMBING TEST.
+
+    The IR carried ``solder_paste_margin`` on PlacedPad long before anything
+    could use it: PadGeom had no such field and ``placed_pad_to_geom`` dropped
+    it. Any paste emitted before that was plumbed could only have been
+    SYNTHESISED from the copper land — fictional geometry.
+
+    This asserts the datum survives the whole IR-native path by its EFFECT on the
+    emitted bytes: the same pad, differing only in authored margin, must produce
+    different stencil apertures. A re-broken plumb makes both identical.
+    """
+    from pcb_worker.pad_source import PadGeom, _from_resolved
+
+    pad = _from_resolved({"number": "1", "type": "smd", "shape": "rect",
+                          "position": {"x": 0, "y": 0},
+                          "size": {"width": 2.0, "height": 1.0},
+                          "layers": ["F.Cu", "F.Paste"],
+                          "solder_paste_margin": -0.1})
+    assert isinstance(pad, PadGeom)
+    assert pad.solder_paste_margin == -0.1, "the margin did not survive into PadGeom"
+
+    plain = _aperture_defs(_layer(_paste_pad_board("rect"), "F_Paste"))
+    inset = _aperture_defs(_layer(_paste_pad_board("rect", paste_margin=-0.1), "F_Paste"))
+    assert plain != inset, (plain, inset)
+
+
+def test_empty_paste_and_back_silk_layers_are_valid_empty_files():
+    """A board with no bottom-side content still ships B.Paste and B.SilkS, as
+    KiCad does. They must be REAL Gerber — format spec, units, M02* — carrying no
+    apertures, not zero-length stubs and not absent."""
+    files = gerber.build_gerbers(_paste_pad_board("rect"), name="conf")
+    for suffix in ("B_Paste", "B_SilkS"):
+        text = files[f"conf-{suffix}.gbr"]
+        assert "%MOMM*%" in text, suffix
+        assert re.search(r"%FSLAX\d\dY\d\d\*%", text), suffix
+        assert text.strip().endswith("M02*"), suffix
+        assert "%ADD" not in text, f"{suffix} should carry no apertures:\n{text}"
+
+
+def test_fab_layer_is_still_not_emitted():
+    """F.Fab stays OUT. KiCad's own .gbrjob classifies it AssemblyDrawing,Top —
+    KiCad itself says it is not a fabrication layer. Adding paste must not have
+    dragged the whole documentation set along with it."""
+    files = gerber.build_gerbers(_paste_pad_board("rect"), name="conf")
+    assert not any("Fab" in name for name in files), sorted(files)

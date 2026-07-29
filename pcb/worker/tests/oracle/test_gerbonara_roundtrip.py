@@ -14,7 +14,12 @@ from pathlib import Path
 
 import pytest
 
+from pcb_worker.fab_capability import EMITTED_GERBER_SUFFIXES
 from tests.gerber_fab import build_fab, build_raw_emitter
+
+# Layers whose emptiness is a legitimate board fact rather than a lost layer.
+# Read the per-suffix reasoning at the use site below.
+_MAY_BE_EMPTY = frozenset({"F_SilkS", "B_SilkS", "F_Paste", "B_Paste"})
 
 gerbonara = pytest.importorskip("gerbonara")
 from gerbonara import ExcellonFile, GerberFile  # noqa: E402
@@ -40,15 +45,23 @@ def test_gerbonara_reads_current_exporter_output(board_path, base, expected_dril
     drls = {n: t for n, t in files.items() if n.endswith(".drl")}
 
     # --- Gerber layers: gerbonara reads each back without error. ---
-    assert len(gbrs) == 6, f"expected six gerber layers, got {sorted(gbrs)}"
+    assert len(gbrs) == len(EMITTED_GERBER_SUFFIXES), (
+        f"expected {len(EMITTED_GERBER_SUFFIXES)} gerber layers "
+        f"(the capability profile's set), got {sorted(gbrs)}")
+    assert {n.rsplit("-", 1)[-1][: -len(".gbr")] for n in gbrs} == set(EMITTED_GERBER_SUFFIXES)
     total_apertures = 0
     for name, text in gbrs.items():
         gf = GerberFile.from_string(text, filename=name)
-        # A legend/silk layer is legitimately EMPTY when no component authored F.SilkS
-        # graphics (K4: the procedural courtyard box is retired). It must still PARSE
-        # cleanly; it just carries no apertures. Every fabrication-bearing layer
-        # (copper/mask/edge) is still required non-empty.
-        if name.endswith("F_SilkS.gbr") and gf.is_empty:
+        # LEGITIMATELY-EMPTY layers. They must still PARSE cleanly as valid Gerber;
+        # they just carry no apertures. Everything else — every fabrication-bearing
+        # copper/mask/edge layer — is still required non-empty.
+        #
+        #   F_SilkS  — no component authored F.SilkS graphics (K4: the procedural
+        #              courtyard box is retired).
+        #   B_SilkS  — ALWAYS empty; there is no bottom-silk harvest at all.
+        #   F/B_Paste— empty when that side has no paste-bearing pad. Emitted
+        #              anyway, as KiCad does, so the fab package is unambiguous.
+        if gf.is_empty and name.rsplit("-", 1)[-1][: -len(".gbr")] in _MAY_BE_EMPTY:
             continue
         assert not gf.is_empty, f"{name}: gerbonara read an empty layer"
         apertures = list(gf.apertures())
