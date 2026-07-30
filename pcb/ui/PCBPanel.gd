@@ -157,6 +157,7 @@ const _VIEW_FLAGS := [
 	["Labels", "show_labels"],
 	["Traces", "show_traces"],
 	["Silk", "show_silk"],
+	["Courtyard", "show_courtyard"],
 	["Hint labels", "show_hint_labels"],
 ]
 const _VIEW_MENU_EXPORT_ID := 100

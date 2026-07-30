@@ -304,6 +304,68 @@ func _graphics_from_list(graphics_data: Array) -> void:
 		graphics.append(entry)
 
 
+## Compute the axis-aligned bbox (component-LOCAL mm, same frame as
+## `pads[].position`) of every `graphics` entry on the given layer
+## ("F.CrtYd" / "F.SilkS"). Returns null when no entry on that layer exists,
+## or the extent degenerates to zero width/height (a stray single-point
+## entry, not real body geometry) — callers treat null as "no usable bounds
+## on this layer, try the next fallback".
+func _graphics_layer_bounds(layer_name: String):
+	var min_p := Vector2(INF, INF)
+	var max_p := Vector2(-INF, -INF)
+	var found := false
+	for g in graphics:
+		if str(g.get("layer", "")) != layer_name:
+			continue
+		match str(g.get("kind", "")):
+			"line":
+				var s: Vector2 = g.get("start", Vector2.ZERO)
+				var e: Vector2 = g.get("end", Vector2.ZERO)
+				min_p.x = minf(min_p.x, minf(s.x, e.x))
+				min_p.y = minf(min_p.y, minf(s.y, e.y))
+				max_p.x = maxf(max_p.x, maxf(s.x, e.x))
+				max_p.y = maxf(max_p.y, maxf(s.y, e.y))
+				found = true
+			"circle":
+				var c: Vector2 = g.get("center", Vector2.ZERO)
+				var r: float = float(g.get("radius", 0.0))
+				min_p.x = minf(min_p.x, c.x - r)
+				min_p.y = minf(min_p.y, c.y - r)
+				max_p.x = maxf(max_p.x, c.x + r)
+				max_p.y = maxf(max_p.y, c.y + r)
+				found = true
+			"arc", "poly":
+				for pt in g.get("points", []):
+					var p: Vector2 = pt
+					min_p.x = minf(min_p.x, p.x)
+					min_p.y = minf(min_p.y, p.y)
+					max_p.x = maxf(max_p.x, p.x)
+					max_p.y = maxf(max_p.y, p.y)
+					found = true
+	if not found or max_p.x <= min_p.x or max_p.y <= min_p.y:
+		return null
+	return Rect2(min_p, max_p - min_p)
+
+
+## Derive local_bounds (and width/height, kept in sync so label placement and
+## other width/height readers agree) from the F.CrtYd graphics extent, falling
+## back to the F.SilkS bbox when the footprint carries no courtyard. LOCAL
+## frame, pre-rotation — `graphics` is already component-local mm, the same
+## frame local_bounds lives in, so no transform is applied here.
+## Returns true when a derived bounds was applied, false when `graphics` had
+## neither layer (caller keeps whatever local_bounds it already computed).
+func _derive_bounds_from_graphics() -> bool:
+	var bounds = _graphics_layer_bounds("F.CrtYd")
+	if bounds == null:
+		bounds = _graphics_layer_bounds("F.SilkS")
+	if bounds == null:
+		return false
+	local_bounds = bounds
+	width = bounds.size.x
+	height = bounds.size.y
+	return true
+
+
 ## Get a pad's world-space position and size, accounting for component rotation
 func get_pad_world_transform(pad: Dictionary) -> Dictionary:
 	var rot_rad := deg_to_rad(rotation)
@@ -859,6 +921,14 @@ func load_from_dict(data: Dictionary) -> void:
 	_pads_from_list(data.get("pads", []))
 	_graphics_from_list(data.get("graphics", []))
 
+	# U1-render unit 2: when the snapshot gave no explicit size (no local_bounds,
+	# no width/height Extra), replace the untouched default/centered bounds with
+	# the real courtyard/silk extent. Explicit width/height or local_bounds in
+	# `data` always wins — checked the same way as `data.has(...)` above, never
+	# by comparing against a hardcoded default value.
+	if bounds_data.is_empty() and not data.has("width") and not data.has("height"):
+		_derive_bounds_from_graphics()
+
 	properties = data.get("properties", {}).duplicate()
 	layer = data.get("layer", "top")
 
@@ -975,6 +1045,18 @@ func load_from_board_dict(data: Dictionary) -> void:
 	else:
 		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
 	_graphics_from_list(data.get("graphics", []))
+
+	# U1-render unit 2: when the board dict gave no explicit size (no
+	# local_bounds, no width/height Extra — the same "not (data.has(...))"
+	# check the pad-fit call above uses for `fit_body`), replace whatever got
+	# computed above — the default-centered rect OR the _fit_body_to_pads()
+	# pad-extent fit — with the real courtyard/silk extent. The courtyard is
+	# the module's true footprint; pads/defaults are only fallbacks for when
+	# nothing better is known, so this intentionally runs AFTER and can
+	# override the pad-fit result. Explicit local_bounds/width/height in
+	# `data` (checked identically) always wins and is never touched.
+	if bounds_data.is_empty() and not data.has("width") and not data.has("height"):
+		_derive_bounds_from_graphics()
 
 	properties = (data.get("properties", {}) as Dictionary).duplicate()
 	# `value` is derivative of properties.value (minpcb dual-write). Only adopt the

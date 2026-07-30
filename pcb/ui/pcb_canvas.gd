@@ -84,8 +84,15 @@ var show_pads: bool = true
 ## Mounting holes are exempt (they legitimately carry no pad geometry).
 var show_unresolved_badges: bool = true
 ## Draws F.SilkS graphics resolved by the worker's footprint-RESOLVE step
-## (component.graphics — see pcb_component.gd). Courtyard (F.CrtYd) stays off.
+## (component.graphics — see pcb_component.gd).
 var show_silk: bool = true
+## Draws F.CrtYd (courtyard) graphics from the same resolve step — the real
+## module extent (also now what local_bounds is derived from, see
+## pcb_component.gd _derive_bounds_from_graphics). Drawn dimmer/thinner than
+## silk (courtyard_color/courtyard_min_width_px) so it reads as a reference
+## outline, not a second body outline. Toggled from the panel's View menu
+## (a _VIEW_FLAGS entry, like the other show_* flags here).
+var show_courtyard: bool = true
 
 ## Copper-layer trace filter driven by the toolbar layer selector.
 ## "all" → both layers; "top" → non-bottom traces; "bottom" → bottom traces.
@@ -179,6 +186,14 @@ const UNRESOLVED_BADGE_MARGIN := 3.0
 ## Silkscreen (F.SilkS) stroke color — light/white, matching real silk ink.
 var silk_color: Color = Color(0.9, 0.9, 0.9, 1.0)
 var silk_min_width_px: float = 1.0
+
+## Courtyard (F.CrtYd) stroke — same ink family as silk but dimmed to ~40%
+## alpha and drawn thinner, so it reads as a reference outline rather than
+## competing with the silk body outline. Godot's draw_line/draw_polyline have
+## no dash support, so "visually distinct" here means dimmer+thinner, not
+## dashed.
+var courtyard_color: Color = Color(0.9, 0.9, 0.9, 0.4)
+var courtyard_min_width_px: float = 0.75
 
 ## Font
 var font: Font
@@ -577,6 +592,9 @@ func _draw_component(comp) -> void:
 	if show_silk and comp.graphics.size() > 0:
 		_draw_component_silk(comp, xform)
 
+	if show_courtyard and comp.graphics.size() > 0:
+		_draw_component_courtyard(comp, xform)
+
 	# Resolved footprint geometry vs the fallback pin renderer. The same
 	# condition the fab emitter uses to fail closed (bug 019f7736b236): a
 	# component WITHOUT real pad geometry is drawn from nominal fallback pins and
@@ -759,20 +777,21 @@ func _draw_component_pads(comp, xform: Transform2D) -> void:
 				draw_arc(screen_pos, maxf(drill_radius, 1.0), 0, TAU, 16, Color(0.4, 0.4, 0.4, 0.6), 1.0)
 
 
-## Draw F.SilkS graphics (component body outline, markings, etc.) attached by
-## the worker's footprint-RESOLVE step (component.graphics, LOCAL mm coords).
-## Transform convention MUST match _draw_component_pads EXACTLY — same `xform`
-## (comp.get_transform(), KiCAD CW rotation) and the same
-## `comp.position + (xform * local_point)` composition — so silk aligns with
-## the copper it was resolved against. F.CrtYd (courtyard) is intentionally
-## skipped; silk is the goal for this round.
-func _draw_component_silk(comp, xform: Transform2D) -> void:
+## Draw one `comp.graphics` layer (component body outline, markings, courtyard,
+## etc.) attached by the worker's footprint-RESOLVE step (component.graphics,
+## LOCAL mm coords). Transform convention MUST match _draw_component_pads
+## EXACTLY — same `xform` (comp.get_transform(), KiCAD CW rotation) and the
+## same `comp.position + (xform * local_point)` composition — so the drawn
+## layer aligns with the copper it was resolved against. Shared by
+## _draw_component_silk (F.SilkS) and _draw_component_courtyard (F.CrtYd) so
+## both layers walk the same geometry-kind handling.
+func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String, stroke_color: Color, min_width_px: float) -> void:
 	for g in comp.graphics:
-		if g.get("layer", "") != "F.SilkS":
+		if g.get("layer", "") != layer_name:
 			continue
 
 		var kind: String = g.get("kind", "")
-		var w: float = maxf(float(g.get("width", 0.15)) * zoom, silk_min_width_px)
+		var w: float = maxf(float(g.get("width", 0.15)) * zoom, min_width_px)
 
 		match kind:
 			"line":
@@ -780,7 +799,7 @@ func _draw_component_silk(comp, xform: Transform2D) -> void:
 				var end: Vector2 = g.get("end", Vector2.ZERO)
 				var p0 := world_to_screen(comp.position + (xform * start))
 				var p1 := world_to_screen(comp.position + (xform * end))
-				draw_line(p0, p1, silk_color, w)
+				draw_line(p0, p1, stroke_color, w)
 
 			"circle":
 				var center: Vector2 = g.get("center", Vector2.ZERO)
@@ -788,7 +807,7 @@ func _draw_component_silk(comp, xform: Transform2D) -> void:
 				var center_screen := world_to_screen(comp.position + (xform * center))
 				var radius_screen := radius * zoom
 				if radius_screen > 0.0:
-					draw_arc(center_screen, radius_screen, 0, TAU, 32, silk_color, w)
+					draw_arc(center_screen, radius_screen, 0, TAU, 32, stroke_color, w)
 
 			"poly":
 				var poly_points: PackedVector2Array = []
@@ -796,7 +815,7 @@ func _draw_component_silk(comp, xform: Transform2D) -> void:
 					var local_pt: Vector2 = pt
 					poly_points.append(world_to_screen(comp.position + (xform * local_pt)))
 				if poly_points.size() >= 2:
-					draw_polyline(poly_points, silk_color, w)
+					draw_polyline(poly_points, stroke_color, w)
 
 			"arc":
 				# The graphic carries 2-3 LOCAL points (start[,mid],end). A true
@@ -804,14 +823,28 @@ func _draw_component_silk(comp, xform: Transform2D) -> void:
 				# rotation/rounding makes center+angle derivation fiddly); a
 				# polyline through the transformed points is an acceptable
 				# stand-in per the round's brief — visually indistinguishable
-				# for the small radii silk arcs typically use (pin-1 dots,
-				# rounded corners).
+				# for the small radii silk/courtyard arcs typically use (pin-1
+				# dots, rounded corners).
 				var arc_points: PackedVector2Array = []
 				for pt in g.get("points", []):
 					var local_pt: Vector2 = pt
 					arc_points.append(world_to_screen(comp.position + (xform * local_pt)))
 				if arc_points.size() >= 2:
-					draw_polyline(arc_points, silk_color, w)
+					draw_polyline(arc_points, stroke_color, w)
+
+
+## Draw F.SilkS graphics (component body outline, markings, etc.). See
+## _draw_component_graphics_layer for the transform/geometry contract.
+func _draw_component_silk(comp, xform: Transform2D) -> void:
+	_draw_component_graphics_layer(comp, xform, "F.SilkS", silk_color, silk_min_width_px)
+
+
+## Draw F.CrtYd (courtyard) graphics — the module's true extent (also what
+## pcb_component.gd derives local_bounds from when the board gave no explicit
+## size). Dimmer/thinner than silk (courtyard_color/courtyard_min_width_px);
+## gated by show_courtyard independently of show_silk.
+func _draw_component_courtyard(comp, xform: Transform2D) -> void:
+	_draw_component_graphics_layer(comp, xform, "F.CrtYd", courtyard_color, courtyard_min_width_px)
 
 
 ## Fallback pin rendering when pad geometry not available.
@@ -1614,6 +1647,7 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 	copy.show_pins = show_pins
 	copy.show_pads = show_pads
 	copy.show_silk = show_silk
+	copy.show_courtyard = show_courtyard
 	copy.show_unresolved_badges = show_unresolved_badges
 	copy.snap_to_grid = snap_to_grid
 	copy.trace_layer_filter = trace_layer_filter
