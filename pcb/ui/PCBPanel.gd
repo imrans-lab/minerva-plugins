@@ -300,21 +300,6 @@ func _on_panel_unload() -> void:
 ## Build toolbar + canvas + status bar. The host gives panels the full rect; we
 ## own the whole layout (VBox: toolbar / canvas / status).
 func _build_ui() -> void:
-	# One visible frame around the WHOLE panel (toolbar → status bar). Without
-	# it the only border on screen is the canvas container's rounded box, and
-	# the dock strip + status bar render on transparent background BELOW that
-	# box — reading as UI floating outside the editor's frame (owner HITL
-	# 2026-07-30, runtime-probed: ContentHBox's framed box ended 66px above
-	# the panel's true bottom and the two bottom rows sat in the gap). An
-	# opaque panel stylebox makes the panel's real extent the frame.
-	var frame := StyleBoxFlat.new()
-	frame.bg_color = Color(0.125, 0.149, 0.204)
-	frame.border_color = Color(0.42, 0.44, 0.47)
-	frame.set_border_width_all(1)
-	frame.set_corner_radius_all(8)
-	frame.set_content_margin_all(6)
-	add_theme_stylebox_override("panel", frame)
-
 	var main_vbox := VBoxContainer.new()
 	main_vbox.name = "MainVBox"
 	main_vbox.set_anchors_preset(Control.PRESET_FULL_RECT)
