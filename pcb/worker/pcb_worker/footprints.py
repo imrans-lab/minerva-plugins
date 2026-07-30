@@ -257,6 +257,59 @@ def _parse_pad(p: list) -> dict:
             if v is not None:
                 pad[_margin] = v
 
+    # Solder-paste margin RATIO (proportional to pad size) -- distinct from the
+    # absolute solder_paste_margin parsed above, and NOT modeled here: the
+    # correct per-shape geometry (bug 019fb0155d93) has to be measured against
+    # KiCad, which this refusal-only unit is forbidden from doing. Left
+    # unflagged, the value is silently dropped and the pad falls back to
+    # ``margin == 0.0``, which paste_aperture() returns byte-identical to the
+    # copper land (pcb_worker/pad_source.py paste_aperture, measured against
+    # KiCad 10.0.5) -- the wrong aperture for any footprint that authored a
+    # nonzero ratio, cut into a physical stencil with no diagnostic at all.
+    # Flag it as PASTE-domain unsupported instead, so judge()/is_blocking
+    # (compile_board.py) fails the board closed now that "paste" is a
+    # fabrication-critical output (fab_capability.FABRICATION_CRITICAL_OUTPUTS).
+    #
+    # Attributed ONLY to a side the pad actually declares paste on (an exact
+    # "F.Paste"/"B.Paste" layer, or the "*.Paste" wildcard covering both):
+    # pad_source.has_paste() gates the emitter on that same per-side
+    # declaration, so a ratio on a pad with no paste layer is never read by
+    # anything downstream, and refusing the board over it would be a false
+    # alarm rather than a real fabrication risk.
+    # A ratio of EXACTLY 0.0 is not a defect and must not be refused: a zero
+    # proportional margin means the aperture equals the copper land, which is
+    # precisely what paste_aperture() already emits for margin == 0.0. Refusing
+    # it would reject a board that fabricates correctly -- the same false-alarm
+    # mistake the per-side gate above exists to avoid. (Malformed values are a
+    # separate gap: _num returns None for a missing or non-numeric token and we
+    # drop it here, matching how solder_paste_margin already behaves. Filed, not
+    # fixed, on 019fb0155d93.)
+    ratio_node = _kv(p, "solder_paste_margin_ratio")
+    if ratio_node is not None and len(ratio_node) > 1:
+        ratio_value = _num(ratio_node[1])
+        if ratio_value is not None and ratio_value != 0.0:
+            _paste_sides = []
+            if any(_l in ("F.Paste", "*.Paste") for _l in layers):
+                _paste_sides.append("F.Paste")
+            if any(_l in ("B.Paste", "*.Paste") for _l in layers):
+                _paste_sides.append("B.Paste")
+            for _side in _paste_sides:
+                pad.setdefault("unsupported", []).append({
+                    "feature": "solder_paste_margin_ratio",
+                    "layer": _side,
+                    "detail": (
+                        f"pad {_atom(number)!r} declares "
+                        f"solder_paste_margin_ratio={ratio_value!r} on {_side} "
+                        f"AS DECLARED (a bottom-side placement mirrors this to "
+                        f"the opposite paste layer at resolve time); this "
+                        f"proportional stencil margin is not modeled, so "
+                        f"without this refusal the paste aperture would be "
+                        f"taken from the pad's absolute margin -- 0.0 unless "
+                        f"one is also authored -- instead of the "
+                        f"ratio-adjusted size the footprint asked for"
+                    ),
+                })
+
     # Pad geometry we do NOT model (custom pad primitives): flag, never drop.
     prim = _kv(p, "primitives")
     if prim is not None:
@@ -480,8 +533,11 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     (lossless-or-flagging) adds, only when the source carries them: per-pad
     ``rotation`` / ``roundrect_rratio`` / ``drill_shape`` +
     ``drill_size`` / ``solder_mask_margin`` / ``solder_paste_margin`` and a pad
-    ``unsupported`` list (custom primitives); plus a top-level ``unsupported``
-    list of attributed markers for graphics outside the modeled kind/layer
+    ``unsupported`` list (custom primitives, drill offset, chamfer, local
+    clearance, zone connect, and a nonzero ``solder_paste_margin_ratio``); plus a
+    top-level ``unsupported`` list of attributed markers for graphics outside the
+    modeled kind/layer, and for FOOTPRINT-level ``solder_paste_margin_ratio`` /
+    ``solder_paste_ratio``
     matrix.
 
     All coordinates are footprint-LOCAL (no board transform applied).
@@ -505,6 +561,44 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     # attributed marker list (NEW top-level key, added only when non-empty so
     # footprints with only silk/courtyard graphics stay byte-identical).
     uncaptured = _uncaptured_graphics(root, graphics)
+
+    # FOOTPRINT-LEVEL paste-ratio overrides. KiCad carries these on the
+    # footprint container, NOT the pad (gerbonara's KiCad model puts
+    # solder_paste_margin_ratio and solder_paste_ratio on Footprint, not Pad),
+    # and they apply to EVERY pad in the footprint. _parse_pad only reads direct
+    # children of a pad node, so without this they were silently dropped at a
+    # BROADER scope than the per-pad hole 019fb0155d93 describes.
+    #
+    # Attributed to F.Paste so the marker lands in FeatureDomain.PASTE and
+    # therefore blocks: a footprint-level marker with no "layer" key falls to
+    # _raw_marker's else-branch with pad_layers=(), where _layer_domain(None)
+    # returns DOCUMENTATION -- which is NOT fatal. The explicit layer is what
+    # makes this fail closed rather than warn.
+    #
+    # Unlike the per-pad case this does NOT gate on a declared paste layer: the
+    # override applies footprint-wide, so the pads it would affect are not
+    # knowable from the container node alone. A ratio of exactly 0.0 is skipped
+    # for the same reason as the per-pad path -- it means "aperture equals the
+    # copper land", which is what we already emit.
+    for _fp_ratio_key in ("solder_paste_margin_ratio", "solder_paste_ratio"):
+        _node = _kv(root, _fp_ratio_key)
+        if _node is None or len(_node) <= 1:
+            continue
+        _val = _num(_node[1])
+        if _val is None or _val == 0.0:
+            continue
+        uncaptured = list(uncaptured) + [{
+            "feature": _fp_ratio_key,
+            "layer": "F.Paste",
+            "detail": (
+                f"footprint {name!r} declares {_fp_ratio_key}={_val!r} at "
+                f"FOOTPRINT level, which applies to every pad it contains; "
+                f"this proportional stencil margin is not modeled, so without "
+                f"this refusal every paste aperture in the footprint would be "
+                f"cut from the copper land instead of the ratio-adjusted size"
+            ),
+        }]
+
     if uncaptured:
         result["unsupported"] = uncaptured
     return result

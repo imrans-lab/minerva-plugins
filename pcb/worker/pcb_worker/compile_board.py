@@ -167,8 +167,14 @@ def _is_emitted_layer(layer_id: str) -> bool:
     """
     return CANON_TO_KICAD.get(layer_id, layer_id) in K3_EMITTED_LAYERS
 
-# Fabrication-critical outputs a captured-feature loss may corrupt.  Cosmetic
-# (silk/fab) and unemitted (paste) losses are warned, never fatal.
+# Fabrication-critical outputs a captured-feature loss may corrupt. WHICH
+# domains those are, and why, is stated ONCE at the definition in
+# fab_capability.py -- deliberately not restated here. This comment previously
+# carried its own copy of the rationale ("Cosmetic (silk/fab) and unemitted
+# (paste) losses are warned, never fatal"), and that copy went stale unnoticed
+# when paste emission shipped, leaving the compiler asserting paste was
+# non-fatal while the tuple it annotates made it fatal. Duplicating the
+# rationale is what let one copy rot; point at the definition instead.
 V1_FAB_OUTPUTS: tuple[str, ...] = FABRICATION_CRITICAL_OUTPUTS
 # The requested-output profile canonical ROUTING compiles against (Round E).
 V1_ROUTING_OUTPUTS: tuple[str, ...] = ROUTING_CRITICAL_OUTPUTS

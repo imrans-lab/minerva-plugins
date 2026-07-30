@@ -84,11 +84,17 @@ EMITTED_GERBER_SUFFIXES: frozenset[str] = frozenset({
 EDGE_CUTS_WIDTH_MM: float = 0.05
 
 # Fabrication-CRITICAL output domains: a captured feature whose loss corrupts one
-# of these (when requested) is fatal.  Silk/fab/paste/documentation losses are
-# cosmetic-or-unemitted and are warned, never fatal.  ``rules`` is included
-# because the IR also feeds DRC/routing, where a dropped rule is a correctness
-# hazard, not a cosmetic one.
-FABRICATION_CRITICAL_OUTPUTS: tuple[str, ...] = ("copper", "drill", "mask", "rules")
+# of these (when requested) is fatal.  ``paste`` joined copper/drill/mask here
+# because c065c2b started emitting F.Paste/B.Paste Gerbers — before that commit
+# no paste geometry reached any output file (``_GERBER_SUFFIXES`` had no
+# F_Paste/B_Paste entry), so a lost paste datum was genuinely inert; after it, a
+# dropped or wrongly-defaulted paste margin silently changes the stencil
+# aperture a board house cuts from this package, and that aperture reaches
+# physical hardware with no further review (docket 019fb0155d93 /
+# 019fb079ce60). Silk/fab/documentation losses are still cosmetic-or-unemitted
+# and are warned, never fatal.  ``rules`` is included because the IR also feeds
+# DRC/routing, where a dropped rule is a correctness hazard, not a cosmetic one.
+FABRICATION_CRITICAL_OUTPUTS: tuple[str, ...] = ("copper", "drill", "mask", "paste", "rules")
 
 # ROUTING-critical output domains (Round E, docket 019f783860c8). Routing needs
 # the same copper/drill/rules truth fabrication does, but a solder-MASK
