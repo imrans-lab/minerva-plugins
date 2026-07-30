@@ -82,6 +82,26 @@ var traces: Dictionary = {}       # trace_id -> pcb_trace.gd
 var vias: Array[Dictionary] = []  # [{position, size, drill, net_name, from_layer, to_layer}]
 var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 
+## Authored zones — copper pours and keepouts (docket 019fb43113).
+##
+## HELD VERBATIM, unlike vias / mounting_holes. Those two are re-shaped into an
+## internal dict on the way in ({position: Vector2, size, drill, ...}) because
+## the editor MUTATES them and the canvas hit-tests them. Nothing in this build
+## edits a zone: they are authored in the board YAML, carried, and drawn. So the
+## lossless thing and the simple thing coincide — keep the CANONICAL dict exactly
+## as pcb.deserialize handed it over ({id, net, layer, kind, outline:[{x_mm,y_mm}],
+## clearance_mm, thermal_*, + any Extra sibling}) and hand the same dict back on
+## the way out. No field list to keep in sync with pcb/internal/board's Zone
+## struct, and a field added there survives this model without a change here.
+##
+## `kind` ("copper_pour" | "keepout", per ZoneKind in worker/pcb_worker/
+## resolved_board.py) is NOT a modeled field on the Go Zone struct — it rides in
+## Zone.Extra and is inlined at the JSON boundary by internal/board/json.go, so
+## it arrives here as a plain key and round-trips out the same way. Verified
+## against the built plugin: YAML -> pcb.deserialize -> board dict -> pcb.serialize
+## returns `kind` unchanged.
+var zones: Array[Dictionary] = []
+
 ## Undo/redo history
 var history: Array[Dictionary] = []
 var history_index: int = -1
@@ -654,7 +674,13 @@ func save_to_history(action_name: String = "Change") -> void:
 		# rebuild them faithfully. Interim fix; the DCR (T1) unifies undo onto
 		# one complete board codec.
 		"vias": vias.duplicate(true),
-		"mounting_holes": mounting_holes.duplicate(true)
+		"mounting_holes": mounting_holes.duplicate(true),
+		# Zones ride the snapshot for the SAME reason F1 put vias here. Nothing
+		# edits a zone yet, so no undo step can currently change one — but the
+		# snapshot is applied WHOLESALE by _restore_state, so a zone absent from
+		# it is a zone DELETED by the next undo of an unrelated edit. Carrying it
+		# costs a copy and closes the hole before an editing tool opens it.
+		"zones": _zones_to_list()
 	}
 
 	history.append(state)
@@ -800,6 +826,7 @@ func _restore_state(state: Dictionary) -> void:
 	# here.
 	_load_vias(state.get("vias", []))
 	_load_mounting_holes(state.get("mounting_holes", []))
+	zones = _zones_from_list(state.get("zones", []))
 
 	# Batch state belongs to the CALLER's in-flight transaction, not to
 	# whichever board snapshot happens to be restored. Without this, undoing
@@ -902,7 +929,11 @@ func to_dict() -> Dictionary:
 		"nets": net_dict,
 		"traces": trace_dict,
 		"vias": vias_arr,
-		"mounting_holes": holes_arr
+		"mounting_holes": holes_arr,
+		# Zones are already JSON-safe (canonical dicts of floats/strings, no
+		# Vector2), so unlike vias / mounting_holes above they need no position
+		# rewrite on the way out — just a deep copy.
+		"zones": _zones_to_list()
 	}
 
 
@@ -951,6 +982,9 @@ func load_from_dict(data: Dictionary) -> void:
 
 	# Load mounting holes (mirror vias so undo snapshots don't drop them)
 	_load_mounting_holes(data.get("mounting_holes", []))
+
+	# Load zones (carried verbatim — see the `zones` declaration)
+	zones = _zones_from_list(data.get("zones", []))
 
 	# Save baseline snapshot so the first action can be undone
 	history.clear()
@@ -1138,7 +1172,7 @@ func to_board_dict() -> Dictionary:
 	for hole in mounting_holes:
 		hole_list.append(_mounting_hole_to_board_dict(hole))
 
-	return {
+	var out := {
 		"version": 1,
 		"name": board_name,
 		"width_mm": board_width,
@@ -1152,6 +1186,14 @@ func to_board_dict() -> Dictionary:
 		"vias": via_list,
 		"mounting_holes": hole_list
 	}
+	# Emitted ONLY when the board actually has zones, so a zone-free board's
+	# canonical dict — and therefore the YAML pcb.serialize writes from it — is
+	# byte-identical to what it was before zones existed. Go's Zone slice is
+	# `omitempty`, so an empty list would round-trip away anyway; not emitting it
+	# keeps that from being a thing anyone has to know.
+	if not zones.is_empty():
+		out["zones"] = _zones_to_list()
+	return out
 
 
 ## Restore board state from a canonical board-contract dict.
@@ -1211,6 +1253,9 @@ func from_board_dict(data: Dictionary) -> void:
 
 	# Mounting holes (canonical list → internal mounting-hole dicts)
 	_load_mounting_holes(_mounting_holes_from_board_list(data.get("mounting_holes", [])))
+
+	# Zones (carried verbatim — see the `zones` declaration).
+	zones = _zones_from_list(data.get("zones", []))
 
 	# annotations / route_hints: intentionally ignored — see method doc.
 
@@ -1343,6 +1388,58 @@ func _mounting_hole_to_board_dict(hole: Dictionary) -> Dictionary:
 	return d
 
 
+## Deep-copy the zone list on the way OUT, so a consumer that mutates the dict
+## it was handed (a serializer normalising numbers, a tool building a payload)
+## cannot reach back into this model's state. Mirrors the `.duplicate(true)`
+## discipline save_to_history already applies to vias / mounting_holes.
+func _zones_to_list() -> Array:
+	var result: Array = []
+	for zone in zones:
+		result.append(zone.duplicate(true))
+	return result
+
+
+## Deep-copy a canonical or snapshot zone list on the way IN. Non-dict entries are
+## dropped rather than tolerated: every other loader here does the same
+## (_vias_from_board_list, the component/net/trace loops), and a zone that is not
+## a mapping has no outline to draw.
+func _zones_from_list(zone_list) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if not (zone_list is Array):
+		return result
+	for zd in zone_list:
+		if zd is Dictionary:
+			result.append((zd as Dictionary).duplicate(true))
+	return result
+
+
+## A zone's kind, normalised: "keepout" or "copper_pour".
+##
+## Defaults to "copper_pour" for a zone that states no kind, matching the Go
+## contract — internal/board's Zone documents itself as "an authored copper-fill
+## region ... most commonly a ground or power pour", and only the Python IR's
+## ZoneKind names keepout explicitly. Defaulting the other way would silently
+## promote an under-specified pour into a warning region on the canvas.
+static func zone_kind(zone: Dictionary) -> String:
+	var kind := str(zone.get("kind", "")).strip_edges().to_lower()
+	return kind if not kind.is_empty() else "copper_pour"
+
+
+## A zone's authored outline as board-mm points. Empty (< 3 points) for a zone
+## whose outline is missing or malformed; the Go validator already rejects a
+## sub-triangle outline at the deserialize boundary, so this is belt-and-braces
+## for zones that arrive from a snapshot rather than from a load.
+static func zone_outline_points(zone: Dictionary) -> PackedVector2Array:
+	var pts := PackedVector2Array()
+	var outline = zone.get("outline", [])
+	if not (outline is Array):
+		return pts
+	for p in outline:
+		if p is Dictionary:
+			pts.append(Vector2(float(p.get("x_mm", 0.0)), float(p.get("y_mm", 0.0))))
+	return pts
+
+
 ## Map a canonical mounting-hole list back to internal mounting-hole dicts
 ## ({position,diameter,plated,+extra}). Fed to _load_mounting_holes which
 ## normalises the position to Vector2. Mirrors _vias_from_board_list.
@@ -1380,6 +1477,7 @@ func clear() -> void:
 	traces.clear()
 	vias.clear()
 	mounting_holes.clear()
+	zones.clear()
 	history.clear()
 	history_index = -1
 	change_journal.clear()

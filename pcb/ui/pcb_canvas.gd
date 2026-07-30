@@ -30,6 +30,12 @@ const PCBComponentScript := preload("model/pcb_component.gd")
 ## T1.5: canonical layer contract (only _canonical_layer migrated here; layer
 ## filter/color/rendering internals are T3's territory and untouched).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
+## Zone helpers (kind normalisation + outline decoding) are STATICS on the data
+## script, so they are reached through the script rather than through the `data`
+## instance. `data` is untyped here, so an instance call would resolve
+## dynamically at every draw; and the two helpers are pure decoding of a zone
+## dict, which belongs with the model that defines the dict's shape.
+const PCBDataScript := preload("model/pcb_data.gd")
 
 ## Signals
 signal component_selected(component_id: String)
@@ -93,6 +99,10 @@ var show_silk: bool = true
 ## outline, not a second body outline. Toggled from the panel's View menu
 ## (a _VIEW_FLAGS entry, like the other show_* flags here).
 var show_courtyard: bool = true
+## Draws authored zones — copper pours and keepouts (docket 019fb43113) — as a
+## closed outline plus a diagonal hatch. Sibling of the show_* flags above so the
+## panel's View menu can toggle it the same way.
+var show_zones: bool = true
 
 ## Copper-layer trace filter driven by the toolbar layer selector.
 ## "all" → both layers; "top" → non-bottom traces; "bottom" → bottom traces.
@@ -194,6 +204,39 @@ var silk_min_width_px: float = 1.0
 ## dashed.
 var courtyard_color: Color = Color(0.9, 0.9, 0.9, 0.4)
 var courtyard_min_width_px: float = 0.75
+
+## Zones (docket 019fb43113). A keepout is a WARNING region — "no copper here" —
+## so it gets its own amber-red, deliberately outside the copper palette
+## (trace_top/bottom, pad_copper, net colours) rather than a member of it: a
+## keepout is not copper and must never read as copper. A copper pour DOES take
+## its net's colour (falling back to this muted copper-green when the net is
+## unknown), so a GND pour reads as the same net as the GND traces.
+##
+## Both are drawn HATCHED and never filled. That is not decoration: the contract
+## models the AUTHORED OUTLINE only (internal/board Zone), the actual filled
+## copper is compiler work that does not exist yet, and the fab paths still
+## refuse a board with zones outright. A solid fill would draw copper nobody has
+## computed. Hatch is the honest rendering of "declared, not yet filled".
+var zone_keepout_color: Color = Color(0.95, 0.45, 0.15, 1.0)
+var zone_pour_fallback_color: Color = Color(0.45, 0.7, 0.5, 1.0)
+var zone_outline_alpha: float = 0.85
+var zone_hatch_alpha: float = 0.42
+var zone_outline_width_px: float = 1.5
+var zone_hatch_width_px: float = 1.0
+
+## Hatch pitch is authored in BOARD MM so the hatch scales with the artwork the
+## way copper does, then CLAMPED IN SCREEN PIXELS: below the floor a zoomed-out
+## pour degenerates into a solid block of overdraw (and stops reading as
+## hatched), above the ceiling a zoomed-in zone shows one or two stray lines and
+## stops reading as a region at all.
+const ZONE_HATCH_PITCH_MM := 1.6
+const ZONE_HATCH_MIN_PX := 7.0
+const ZONE_HATCH_MAX_PX := 26.0
+## Hard ceiling on hatch lines per zone per frame. The pitch clamp plus the
+## viewport-range clip below already bound this in every realistic view; this is
+## the backstop that keeps a pathological board (a zone spanning metres) from
+## turning one _draw() into an unbounded loop.
+const ZONE_HATCH_MAX_LINES := 2000
 
 ## Font
 var font: Font
@@ -323,6 +366,14 @@ func _draw() -> void:
 	_draw_components()
 
 	_draw_mounting_holes()
+
+	# Zones sit ABOVE components and BELOW traces. Above components because the
+	# whole point of the antenna keepout is that it overlaps U1's body — drawn
+	# underneath, the component fill would hide exactly the region being warned
+	# about. Below traces because a trace is routed copper and must stay the most
+	# legible thing on the canvas; the hatch is sparse enough to read through.
+	if show_zones:
+		_draw_zones()
 
 	if show_traces:
 		_draw_traces()
@@ -499,6 +550,144 @@ func _draw_single_trace(trace, is_bottom_layer: bool) -> void:
 		if is_selected:
 			for pt in points:
 				draw_circle(pt, 3.0, trace_selected_color)
+
+
+## Draw every authored zone: closed outline + diagonal hatch, never filled.
+##
+## Two passes so KEEPOUTS ALWAYS LAND ON TOP of pours, regardless of the order
+## the board file happened to list them in. A keepout is a constraint on the
+## pour; a pour's hatch drawn over it would read as copper permitted in a region
+## that forbids copper — the one thing this render must not say.
+func _draw_zones() -> void:
+	if data.zones.is_empty():
+		return
+	for zone in data.zones:
+		if not _is_keepout_zone(zone):
+			_draw_zone(zone, false)
+	for zone in data.zones:
+		if _is_keepout_zone(zone):
+			_draw_zone(zone, true)
+
+
+func _is_keepout_zone(zone: Dictionary) -> bool:
+	return PCBDataScript.zone_kind(zone) == "keepout"
+
+
+## Draw one zone. `is_keepout` is passed in rather than re-derived so the two
+## passes above and the colour choice here cannot disagree about a zone's kind.
+func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
+	# Layer filter: MIRRORS traces exactly — same _layer_visible() predicate, so
+	# selecting "bottom" in the toolbar hides the top-layer keepout alongside the
+	# top-layer traces and leaves the bottom-layer GND pour visible. Zone layer
+	# names arrive canonical ("top"/"bottom") from the board contract, but they
+	# are pushed through the shared kicad_to_canon mapping anyway so a zone
+	# carrying an F.Cu/B.Cu name (or a stray capital) filters correctly instead
+	# of falling through to "always visible".
+	if not _layer_visible(PcbLayerStack.kicad_to_canon(str(zone.get("layer", "")))):
+		return
+
+	var world_pts := PCBDataScript.zone_outline_points(zone)
+	if world_pts.size() < 3:
+		return
+
+	var screen_poly := PackedVector2Array()
+	for p in world_pts:
+		screen_poly.append(world_to_screen(p))
+
+	var color := zone_keepout_color
+	if not is_keepout:
+		color = zone_pour_fallback_color
+		var net = data.get_net(str(zone.get("net", "")))
+		if net:
+			color = net.color
+
+	var pitch: float = clampf(ZONE_HATCH_PITCH_MM * zoom, ZONE_HATCH_MIN_PX, ZONE_HATCH_MAX_PX)
+	# The two kinds hatch along OPPOSITE diagonals. Colour alone separates them
+	# on a healthy display; the opposing slope also separates them where colour
+	# cannot — greyscale, a screenshot handed to an LLM, or a pour whose net
+	# colour happens to land near the keepout amber.
+	_draw_polygon_hatch(screen_poly, Color(color, zone_hatch_alpha), pitch, zone_hatch_width_px, is_keepout)
+
+	var outline := screen_poly.duplicate()
+	outline.append(screen_poly[0])  # close the loop — an outline, not a polyline
+	draw_polyline(outline, Color(color, zone_outline_alpha), zone_outline_width_px)
+
+
+## Hatch a screen-space polygon with parallel diagonal lines, CLIPPED TO THE
+## POLYGON (not to its bounding box — unlike _draw_locked_hatch, which only ever
+## sees axis-aligned component rectangles where the two coincide; a zone outline
+## is an arbitrary polygon and a bounding-box hatch would paint copper-clear
+## regions as hatched).
+##
+## Method: the hatch family is the level sets of f(p) = p.x + p.y (or p.x - p.y
+## when `mirrored`), which are lines at ±45°. For each level c, intersect with
+## every polygon edge, sort the hits along the line, and stroke them in pairs —
+## the standard even-odd scanline fill, run on a diagonal axis. Correct for
+## concave outlines, not just convex ones.
+func _draw_polygon_hatch(poly: PackedVector2Array, color: Color, pitch: float, width: float, mirrored: bool) -> void:
+	if poly.size() < 3 or pitch <= 0.0:
+		return
+
+	var f_min := INF
+	var f_max := -INF
+	for p in poly:
+		var f: float = (p.x - p.y) if mirrored else (p.x + p.y)
+		f_min = minf(f_min, f)
+		f_max = maxf(f_max, f)
+	if not is_finite(f_min) or not is_finite(f_max):
+		return
+
+	# Clip the level range to what the viewport can actually show. A full-board
+	# pour zoomed in is mostly off-screen; without this we would compute and
+	# stroke thousands of lines nobody sees, every frame.
+	var view_f_min := INF
+	var view_f_max := -INF
+	for corner: Vector2 in [Vector2.ZERO, Vector2(size.x, 0.0), Vector2(0.0, size.y), size]:
+		var vf: float = (corner.x - corner.y) if mirrored else (corner.x + corner.y)
+		view_f_min = minf(view_f_min, vf)
+		view_f_max = maxf(view_f_max, vf)
+	f_min = maxf(f_min, view_f_min)
+	f_max = minf(f_max, view_f_max)
+	if f_max <= f_min:
+		return
+
+	# Snap the first level to a multiple of the pitch in the level coordinate, so
+	# the hatch is anchored to the geometry rather than to the zone's own bounds.
+	# Neighbouring zones then share one continuous hatch grid instead of each
+	# starting its own phase, and panning does not make the lines crawl.
+	var c: float = ceilf(f_min / pitch) * pitch
+	var lines := 0
+	var hits: Array[Vector2] = []
+	while c <= f_max and lines < ZONE_HATCH_MAX_LINES:
+		lines += 1
+		hits.clear()
+		for i in poly.size():
+			var a := poly[i]
+			var b := poly[(i + 1) % poly.size()]
+			var fa: float = (a.x - a.y) if mirrored else (a.x + a.y)
+			var fb: float = (b.x - b.y) if mirrored else (b.x + b.y)
+			if is_equal_approx(fa, fb):
+				continue  # edge parallel to the hatch: contributes no crossing
+			# Half-open on [min, max) — NOT on the edge's own direction. When a
+			# hatch level lands exactly on a vertex, the edge-directional form
+			# ("include t=0, exclude t=1") counts a local MAXIMUM vertex once
+			# instead of zero times, flipping the even-odd parity and inverting
+			# the fill for the rest of that line. Keying the half-open interval
+			# to min/max makes the two edges meeting at a vertex agree: a
+			# crossing vertex counts once, a touching vertex counts zero or two.
+			# (Caught numerically on a concave outline before this shipped.)
+			if c < minf(fa, fb) or c >= maxf(fa, fb):
+				continue
+			hits.append(a.lerp(b, (c - fa) / (fb - fa)))
+		if hits.size() >= 2:
+			# x increases monotonically along both hatch directions, so it is a
+			# valid ordering parameter for either family.
+			hits.sort_custom(func(u: Vector2, v: Vector2) -> bool: return u.x < v.x)
+			var j := 0
+			while j + 1 < hits.size():
+				draw_line(hits[j], hits[j + 1], color, width)
+				j += 2
+		c += pitch
 
 
 ## Draw ratsnest (unrouted net connections)

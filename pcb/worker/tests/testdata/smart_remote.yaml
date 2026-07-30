@@ -998,3 +998,54 @@ mounting_holes:
   y_mm: 105
   diameter_mm: 3.2
   plated: false
+# Authored zones (docket 019fb43113). NOTE: these are NEW design intent — no
+# smart-remote .kicad_pcb carries a zone or a keepout (hint 019fb426dfa8), so
+# there is nothing upstream to port them from and nothing to diff them against.
+#
+# COORDINATE FRAME: this file is the (0,0)-origin board frame. The census hint
+# quotes U1's extents in the KiCad file's frame, which is this frame + (20,20)
+# on both axes, so every number below is the census value MINUS (20,20).
+zones:
+# RF keepout under the ESP32-S3-DevKitC antenna overhang.
+#
+# U1 sits at (60.96, 63.5) rotated 180, and its footprint courtyard spans local
+# x -1.25..24.11, y -0.85..62.55. Rotated 180 about its origin that maps to board
+# x 36.85..62.21, y 0.95..64.35 — i.e. the module's antenna end stops 0.95 mm from
+# the board edge while its FIRST PIN ROW is at y 10.16. The ~9.2 mm strip between
+# the edge and that pin row is the bare antenna overhang, and it is the region
+# that must stay clear of copper.
+#
+# Cross-check: the census hint measures the same strip in the KiCad frame as
+# x 56.9..82.2, y 20.95..30.16. Minus (20,20) that is x 36.9..62.2, y 0.95..10.16
+# — the two derivations agree, so the rectangle below is stated in the board frame.
+#
+# `net: GND` is a schema obligation, not intent: validateZones (pcb/internal/board/
+# validate.go) requires every zone to name a DECLARED net, and a keepout is
+# net-agnostic by nature. See docket item filed against this friction.
+- kind: keepout
+  net: GND
+  layer: top
+  outline:
+  - x_mm: 36.9
+    y_mm: 0.95
+  - x_mm: 62.2
+    y_mm: 0.95
+  - x_mm: 62.2
+    y_mm: 10.16
+  - x_mm: 36.9
+    y_mm: 10.16
+# Ground plane on the bottom copper: the 80 x 110 outline inset 0.5 mm all round.
+# It renders HATCHED, never solid — the authored outline is all this contract
+# models; the actual filled copper is compiler work that does not exist yet.
+- kind: copper_pour
+  net: GND
+  layer: bottom
+  outline:
+  - x_mm: 0.5
+    y_mm: 0.5
+  - x_mm: 79.5
+    y_mm: 0.5
+  - x_mm: 79.5
+    y_mm: 109.5
+  - x_mm: 0.5
+    y_mm: 109.5
