@@ -11,10 +11,14 @@
 // before the host sees the board, and a later pcb.serialize rebuilds Board from
 // that already-lossy JSON — the extras are gone.
 //
-// Fix (owner choice a): custom MarshalJSON/UnmarshalJSON on the 9 Extra-bearing
+// Fix (owner choice a): custom MarshalJSON/UnmarshalJSON on the Extra-bearing
 // structs that inline Extra into the JSON object, so the JSON boundary is as
 // lossless as the YAML one. YAML behavior is unchanged — the `yaml:",inline"` tag
-// still governs YAML; these methods add nothing to that path.
+// still governs YAML; these methods add nothing to that path. Zone joined this
+// list when it was added to the schema (docket 019f9a73e5a2 / 019f761fda74) —
+// for the same reason as the original 9: without a Zone pair here, Zone.Extra
+// would round-trip through YAML but silently vanish on JSON marshal, exactly
+// the bug this file exists to fix.
 //
 // # Invariants
 //
@@ -27,8 +31,8 @@
 //   - Nesting composes for free: each nested struct carries its own methods, so
 //     encoding/json invokes them recursively — no hand-rolled nested handling.
 //
-// The 9 method pairs are thin wrappers over three shared helpers
-// (knownJSONKeys / mergeExtra / splitExtra) — DRY is a review gate here.
+// The method pairs (10, as of Zone) are thin wrappers over three shared
+// helpers (knownJSONKeys / mergeExtra / splitExtra) — DRY is a review gate here.
 package board
 
 import (
@@ -361,5 +365,31 @@ func (v *Via) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	v.Extra = extra
+	return nil
+}
+
+// --- Zone ---
+
+func (z Zone) MarshalJSON() ([]byte, error) {
+	type alias Zone
+	base, err := json.Marshal(alias(z))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, z.Extra, knownJSONKeys(reflect.TypeOf(Zone{})))
+}
+
+func (z *Zone) UnmarshalJSON(data []byte) error {
+	type alias Zone
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*z = Zone(a)
+	extra, err := splitExtra(data, knownJSONKeys(reflect.TypeOf(Zone{})))
+	if err != nil {
+		return err
+	}
+	z.Extra = extra
 	return nil
 }

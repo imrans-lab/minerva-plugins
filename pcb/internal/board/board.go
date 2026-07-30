@@ -69,6 +69,17 @@ type Board struct {
 	Traces      []Trace     `json:"traces,omitempty" yaml:"traces,omitempty"`
 	Vias        []Via       `json:"vias,omitempty" yaml:"vias,omitempty"`
 
+	// Zones are authored copper-fill regions (most commonly a ground/power
+	// pour) — the first entity added to this contract since the v2 schema
+	// settled (docket 019f9a73e5a2; its parent is the CAM DCR 019f761ead82,
+	// and 019f761fda74 "Canonical board YAML v2" is a SIBLING under that
+	// parent, which is where the schema half of the zone work belongs). Modeled and
+	// round-tripped losslessly here, but downstream still REFUSES a non-empty
+	// Zones list (compile_board.py:1836, route_bridge.py:362) — this contract
+	// change only makes a zone AUTHORABLE, it does not make one fabricable.
+	// See docs/board-yaml.md "Zones".
+	Zones []Zone `json:"zones,omitempty" yaml:"zones,omitempty"`
+
 	// MountingHoles are board-level drilled holes not attached to a pad — the
 	// mechanical mounting / non-plated holes the gerber exporter routes into
 	// PTH.drl or NPTH.drl by their Plated flag. Formalises the field the gerber
@@ -316,6 +327,60 @@ type Via struct {
 	// an explicit `tented: false` (untented — the via annulus is exposed). The Python
 	// compiler reads it (default true) into ResolvedVia.tented_front/back.
 	Tented *bool `json:"tented,omitempty" yaml:"tented,omitempty"`
+
+	Extra map[string]interface{} `json:"-" yaml:",inline"`
+}
+
+// Zone is an authored copper-fill region on a single layer, tied to one net —
+// most commonly a ground or power pour. It carries the AUTHORED outline only;
+// computing the actual filled copper against pads, traces, keepouts, and
+// thermal reliefs is compiler work this contract does not attempt (mirrors the
+// Python IR's split between ResolvedZone.authored_outline and its separate
+// .fill field, pcb/worker/pcb_worker/resolved_board.py) — see docs/board-yaml.md
+// "Zones" for exactly what is modeled here versus what downstream still refuses.
+//
+// Field-naming choices: Net/Layer match Trace.Net/Trace.Layer. ClearanceMM
+// matches DesignRules.ClearanceMM (this file) and the Python IR's
+// ResolvedZone.clearance_mm. ThermalGapMM / ThermalBridgeWidthMM match the
+// Python IR's ThermalSettings.gap_mm / .bridge_width_mm (same file), with a
+// `thermal_` prefix added because this struct stays FLAT like Trace/Via/Hole
+// rather than nesting a sub-struct the way Python's ThermalSettings does —
+// no other top-level board entity in this contract nests a settings sub-struct
+// for its own fields (PinOverride nests because it needs pointer semantics to
+// distinguish "unset" from "explicit zero"; that distinction is not asked for
+// here, so the flat, omitempty-float64 idiom used throughout Trace/Via/Hole/
+// DesignRules applies instead).
+type Zone struct {
+	// ID is the persistent, mint-once zone identity (schema v2+) — same
+	// rationale as Trace.ID: zones are reorderable, so an ordinal-derived id
+	// would be unstable. Opaque token ("zone:<hex>"); empty on v1; omitempty
+	// for lossless round-trip. docs/board-yaml.md already reserved the "zone"
+	// id kind for this before a Zone struct existed.
+	ID string `json:"id,omitempty" yaml:"id,omitempty"`
+	// Net and Layer are NOT omitempty (unlike Trace.Layer): a copper zone with
+	// no stated net or layer is underspecified, not merely terse, so Validate
+	// requires both non-empty and requires Net to name a declared net (and
+	// Layer, when the board declares a layer stack, to be a member of it).
+	Net   string `json:"net" yaml:"net"`
+	Layer string `json:"layer" yaml:"layer"`
+
+	// ClearanceMM is this zone's copper clearance from foreign-net copper.
+	// Zero/omitted defers to the board's blanket design_rules.clearance_mm.
+	ClearanceMM float64 `json:"clearance_mm,omitempty" yaml:"clearance_mm,omitempty"`
+	// ThermalGapMM is the copper gap left around a same-net pad that is NOT
+	// thermally relieved; ThermalBridgeWidthMM is the spoke width connecting a
+	// relieved pad to the pour. Zero/omitted defers to the compiler's own
+	// default whenever zone filling is implemented (not yet — see
+	// docs/board-yaml.md "Zones").
+	ThermalGapMM         float64 `json:"thermal_gap_mm,omitempty" yaml:"thermal_gap_mm,omitempty"`
+	ThermalBridgeWidthMM float64 `json:"thermal_bridge_width_mm,omitempty" yaml:"thermal_bridge_width_mm,omitempty"`
+
+	// Outline is the ordered polygon boundary the zone pours within. Unlike
+	// Trace.Points (an open polyline), an outline describes a closed region,
+	// so it needs at least 3 points to be a polygon at all; Validate rejects
+	// fewer. Not omitempty, matching Trace.Points — a zone's geometry is core
+	// content, not an optional extra.
+	Outline []Point `json:"outline" yaml:"outline"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }

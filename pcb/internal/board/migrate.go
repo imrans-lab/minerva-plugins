@@ -1,7 +1,10 @@
 // Package board — v1→v2 identity mint-and-write migration.
 //
 // Schema v2 (item 019f802ca3af) gives Board/Trace/Via/Hole a persistent,
-// mint-once opaque id (see board.go). This file owns the one-time migration that
+// mint-once opaque id (see board.go). Zone joined the same identity scheme
+// later (docket 019f9a73e5a2 / 019f761fda74) — it mints and validates exactly
+// like Trace/Via/Hole; nothing about the migration's shape changed to
+// accommodate it. This file owns the one-time migration that
 // assigns those ids to a v1 board and bumps it to v2. It is deliberately scoped
 // to IDENTITY only:
 //
@@ -77,9 +80,9 @@ func isMintedID(entityType, id string) bool {
 	return true
 }
 
-// MigrateV1toV2 mints a persistent id for the board and every trace/via/hole
-// that lacks a well-formed minted id, then bumps the board to schema v2. It
-// returns the number of ids minted.
+// MigrateV1toV2 mints a persistent id for the board and every trace/via/hole/
+// zone that lacks a well-formed minted id, then bumps the board to schema v2.
+// It returns the number of ids minted.
 //
 // The migration is IDEMPOTENT: a board already carrying minted ids is unchanged
 // (zero mints), and a partially-minted board only fills the gaps. A non-minted
@@ -111,6 +114,11 @@ func MigrateV1toV2(b *Board, mint IDSource) (int, error) {
 	}
 	for i := range b.Vias {
 		if err := ensure("via", &b.Vias[i].ID); err != nil {
+			return minted, err
+		}
+	}
+	for i := range b.Zones {
+		if err := ensure("zone", &b.Zones[i].ID); err != nil {
 			return minted, err
 		}
 	}

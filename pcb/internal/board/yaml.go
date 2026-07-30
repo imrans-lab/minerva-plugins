@@ -27,14 +27,22 @@ func MarshalYAML(b *Board) ([]byte, error) {
 	return out, nil
 }
 
-// entityListKeys are the five top-level entity collections whose SHAPE is part
+// entityListKeys are the top-level entity collections whose SHAPE is part
 // of the shared validation boundary: each must be a YAML sequence (or absent /
 // null == empty), and no item may be a null scalar. yaml.v3 would either reject
 // a non-sequence with a native error that does NOT carry our shared code, or
 // silently DROP a null list item before Validate ever sees it — both must fail
 // closed with a code the cross-language vector runner can assert.
+//
+// "zones" was added here with the Zone type itself, ahead of Python: the
+// Python mirror's own entity-list tuple (board_validate.py:75) does not yet
+// include "zones" (there is no Python-side zone validator yet — compile_board
+// refuses the key outright, upstream of validation). This is the same kind of
+// Go-superset gap documented in spec/board-v2.md ("Go's codec is a strict
+// superset") rather than a drift bug: it fails closed MORE eagerly on the Go
+// side, never less, so it does not need a cross-language vector to justify it.
 var entityListKeys = []string{"components", "nets", "traces", "vias",
-	"mounting_holes", "pth_holes", "npth_holes"}
+	"mounting_holes", "pth_holes", "npth_holes", "zones"}
 
 // overrideNumKeys mirrors _OVERRIDE_NUM_KEYS in board_validate.py — the typed
 // pin-override fields that must decode as numbers.

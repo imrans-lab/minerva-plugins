@@ -89,6 +89,53 @@ This is the same policy, and the same diagnostic code, that refuses the
 nominal-size fields on an authored net class (see "Net classes" below).
 `compile_board._declared_but_not_modeled` is the single place it is decided.
 
+### Zones (schema modeled, fabrication still refused)
+
+`Zone` is the first entity added to this contract since the v2 schema settled
+(docket `019f9a73e5a2`, parent `019f761fda74`) — a copper-fill region, most
+commonly a ground or power pour, on a single layer, tied to one net:
+
+| key | required | meaning |
+|---|---|---|
+| `id` | v2 only | mint-once opaque id, `"zone:<hex>"` — same rule as `trace`/`via`/`hole` |
+| `net` | yes | the net this pour is tied to; must name a declared net |
+| `layer` | yes | the copper layer this pour is on; must be a member of `layers` when the board declares one |
+| `outline` | yes | ordered polygon boundary, `[{x_mm, y_mm}, ...]`; needs at least 3 points |
+| `clearance_mm` | no | this zone's copper clearance from foreign-net copper; unset defers to `design_rules.clearance_mm` |
+| `thermal_gap_mm` | no | copper gap around a same-net pad that is NOT thermally relieved |
+| `thermal_bridge_width_mm` | no | spoke width connecting a thermally-relieved pad to the pour |
+
+`Validate` rejects an outline with fewer than 3 points (`invalid_zone_outline`),
+a `net` that names no declared net (`zone_unknown_net`), and a `layer` absent or
+outside the declared stack (`zone_unknown_layer`) — this check applies on v1
+boards too, unlike identity, which is v2-only. These three codes are Go-only for
+now: the Python worker has no zone validator to match them against yet (see
+below).
+
+**Authoring a zone is modeled and round-trips losslessly (YAML and the
+`pcb.deserialize` JSON boundary), but every downstream consumer still refuses a
+NON-EMPTY zone list** — this contract change makes a zone AUTHORABLE, not
+fabricable:
+
+- `compile_board.py:1836` rejects a board declaring one or more zones. Note the
+  refusal is presence-AND-non-empty, not presence: `zones: []` and `zones: null`
+  are explicitly skipped, because "an explicitly empty list declares nothing"
+  (review 623 R2 refuses an empty *mapping*, but allows an empty *list*).
+- `route_bridge.py:362` raises `UnsupportedGeometry` for a non-empty
+  `rb.zones` on the resolved IR side.
+- `kicad.py:1056` and `gerber.py:1526` both refuse a board whose resolved IR
+  carries zones, rather than emit unfabricated copper.
+
+Those refusals are deliberately OUT OF SCOPE for this change and must stay in
+place; later work narrows each one as its consumer learns to handle a zone
+(fill computation against pads/traces/keepouts, geometric DRC, routing
+obstacle/free-space treatment, CAM). Because every production path still
+refuses a non-empty zone list, no example in this document authors one — doing so
+would fail `test_every_yaml_example_in_board_yaml_md_compiles` (this file's own
+compile-checked-examples test, see "Compiling the examples" below), the same
+reason `diff_pair_gap_mm`/`diff_pair_width_mm` are absent from the example
+above.
+
 ### Compiling the examples
 
 **A schema example must be compiled, not eyeballed.** A schema doc whose example
@@ -145,7 +192,7 @@ any reference to it (Sol K2 review).
 
 ### The `id` field
 
-`Board`, `Trace`, `Via`, and `Hole` carry an opaque string `id`
+`Board`, `Trace`, `Via`, `Hole`, and `Zone` carry an opaque string `id`
 (`"board:<hex>"`, `"trace:<hex>"`, …):
 
 - **Mint-once, never recomputed.** The id is assigned exactly once — by the
@@ -164,8 +211,22 @@ Entities that already have a stable identity keep it and gain **no** opaque id:
 derived children of a trace (N points → N-1 segments) and are identified by the
 persisted trace id + ordinal — inserting a waypoint renumbers that one trace's
 segments, which is inherent and acceptable since segments are never referenced
-independently. `zone` ids are reserved for when zones are modeled (v1/v2 cannot
-fabricate zones at all, so no `Zone` struct exists yet).
+independently. `zone` ids mint and validate exactly like `trace`/`via`/`hole`
+ids — see "Zones" above for what a `Zone` carries; it can be AUTHORED with
+identity from the start even though v1/v2 still cannot FABRICATE one (no
+compiler fills a zone's copper yet).
+
+**Where a zone's id comes from, which is not yet convenient.** `MigrateV1toV2`
+is the only minter, and it is gated on `Version == 1`; serialize never mints, it
+writes what it is given. Unlike a trace or via, a zone has no creation tool, so
+hand-editing YAML is currently the only way to author one. On a **v1** board that
+works end to end: author `zones:` with no `id`, and migration mints it. On a
+**v2** board there is no minting pass, so a hand-added zone without an `id`
+fails `unminted_persistent_id` unless the author hand-writes a
+`zone:<32 lowercase hex>` token themselves. That is the same behaviour a
+hand-added trace has, and it fails closed rather than silently accepting an
+id-less entity — but it means the practical authoring route today is via a v1
+board, and a zone creation tool is the thing that would close it.
 
 ### Pin-geometry authority: the `override` sub-struct
 
