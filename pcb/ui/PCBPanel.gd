@@ -297,8 +297,9 @@ func _on_panel_unload() -> void:
 
 # ── UI construction ───────────────────────────────────────────────────────────
 
-## Build toolbar + canvas + status bar. The host gives panels the full rect; we
-## own the whole layout (VBox: toolbar / canvas / status).
+## Build the toolbar and one framed workspace. The host gives panels the full
+## rect; the workspace frame owns the canvas/sidebar, bottom dock, and status so
+## those rows read as one surface instead of floating below the canvas border.
 func _build_ui() -> void:
 	var main_vbox := VBoxContainer.new()
 	main_vbox.name = "MainVBox"
@@ -316,16 +317,34 @@ func _build_ui() -> void:
 	main_vbox.add_child(toolbar_scroll)
 	toolbar_scroll.add_child(_build_toolbar())
 
+	# One visual boundary owns the complete workspace below the toolbar. The
+	# previous CanvasContainer frame ended above BottomDockSlot + StatusBar,
+	# which made those rows look as though they overflowed the editor even though
+	# every control was correctly inside the panel's allocated rect.
+	var workspace_frame := PanelContainer.new()
+	workspace_frame.name = "WorkspaceFrame"
+	workspace_frame.clip_contents = true
+	workspace_frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	workspace_frame.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	main_vbox.add_child(workspace_frame)
+
+	var workspace_vbox := VBoxContainer.new()
+	workspace_vbox.name = "WorkspaceVBox"
+	workspace_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	workspace_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	workspace_frame.add_child(workspace_vbox)
+
 	# Content row: canvas (majority share) + right sidebar (legacy layout clone).
 	var content_hbox := HBoxContainer.new()
 	content_hbox.name = "ContentHBox"
 	content_hbox.clip_contents = true
 	content_hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content_hbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	main_vbox.add_child(content_hbox)
+	workspace_vbox.add_child(content_hbox)
 
-	# Canvas fills the middle.
-	var canvas_container := PanelContainer.new()
+	# Canvas fills the middle. Its container clips but draws no second panel
+	# frame; WorkspaceFrame above is the single visual boundary.
+	var canvas_container := MarginContainer.new()
 	canvas_container.name = "CanvasContainer"
 	canvas_container.clip_contents = true
 	canvas_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -338,8 +357,8 @@ func _build_ui() -> void:
 	_canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	# If an on-screen AnnotationOverlay is ever mounted here, it MUST be a child
 	# of _canvas (same origin) — NOT canvas_container: the host's view transform
-	# maps board-mm to canvas-LOCAL pixels, and the PanelContainer stylebox inset
-	# would offset every marker otherwise.
+	# maps board-mm to canvas-LOCAL pixels and every marker must share that exact
+	# local coordinate space.
 	canvas_container.add_child(_canvas)
 	_canvas.set_data(_data)
 
@@ -380,7 +399,7 @@ func _build_ui() -> void:
 	_bottom_dock_slot = VBoxContainer.new()
 	_bottom_dock_slot.name = "BottomDockSlot"
 	_bottom_dock_slot.size_flags_vertical = Control.SIZE_SHRINK_END
-	main_vbox.add_child(_bottom_dock_slot)
+	workspace_vbox.add_child(_bottom_dock_slot)
 	_bottom_dock_slot.child_entered_tree.connect(func(_n: Node) -> void:
 		call_deferred("_sync_dock_pane_mode"))
 	if _dock_parent != null:
@@ -394,7 +413,7 @@ func _build_ui() -> void:
 	_status_label = Label.new()
 	_status_label.name = "StatusBar"
 	_status_label.custom_minimum_size.y = 22
-	main_vbox.add_child(_status_label)
+	workspace_vbox.add_child(_status_label)
 
 	# Smart Select is the resting tool (finding 5) — engaged by default so the
 	# canvas is immediately click-to-select/drag-to-move without a mode hunt.
