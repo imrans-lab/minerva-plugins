@@ -74,9 +74,12 @@ type Board struct {
 	// settled (docket 019f9a73e5a2; its parent is the CAM DCR 019f761ead82,
 	// and 019f761fda74 "Canonical board YAML v2" is a SIBLING under that
 	// parent, which is where the schema half of the zone work belongs). Modeled and
-	// round-tripped losslessly here, but downstream still REFUSES a non-empty
-	// Zones list (compile_board.py:1836, route_bridge.py:362) — this contract
-	// change only makes a zone AUTHORABLE, it does not make one fabricable.
+	// round-tripped losslessly here. A zone now also COMPILES into the Python IR
+	// as ResolvedZone with fill=None (i.e. no computed copper), but every OUTPUT
+	// consumer still refuses one: route_bridge, both fab emitters, and geometric
+	// DRC (which reports indeterminate). So a zone is authorable and compilable
+	// and NOT fabricable. Filling a pour is unimplemented, and until it exists
+	// those refusals are what keep an uncomputed pour out of fabrication.
 	// See docs/board-yaml.md "Zones".
 	Zones []Zone `json:"zones,omitempty" yaml:"zones,omitempty"`
 

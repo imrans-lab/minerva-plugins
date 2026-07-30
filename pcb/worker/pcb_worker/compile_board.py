@@ -83,6 +83,8 @@ from .resolved_board import (
     ArcGeometry,
     BoardProvenance,
     CircleGeometry,
+    ConnectMode,
+    Contour,
     Diagnostic,
     DiagnosticSeverity,
     EntityKind,
@@ -110,6 +112,7 @@ from .resolved_board import (
     ResolvedTrace,
     ResolvedTraceSegment,
     ResolvedVia,
+    ResolvedZone,
     ResolutionFailure,
     ResolutionResult,
     ResolutionSuccess,
@@ -119,8 +122,10 @@ from .resolved_board import (
     SourceRef,
     StackupEntry,
     StackupKind,
+    ThermalSettings,
     UnsupportedFeature,
     ViaKind,
+    ZoneKind,
 )
 
 COMPILER_VERSION = "pcb-k2/1"
@@ -1474,11 +1479,19 @@ def _build_nets_index(board: dict, board_id: str, diags: _Diagnostics):
 
 
 def _extract_points(raw_points, ordinal: int, ref: SourceRef,
-                    diags: _Diagnostics) -> Union[list[tuple[float, float]], None]:
-    """Strict point extraction: any malformed point FAILS the trace (never
-    filtered-then-stitched — K2 review 621 MF1)."""
+                    diags: _Diagnostics, *,
+                    code: str = "trace_bad_points",
+                    label: str = "trace") -> Union[list[tuple[float, float]], None]:
+    """Strict point extraction: any malformed point FAILS the whole entity (never
+    filtered-then-stitched — K2 review 621 MF1).
+
+    ``code``/``label`` let a second point-bearing entity reuse this ONE parsing
+    convention under its own diagnostic vocabulary (a zone's ``outline``, which
+    reports ``invalid_zone_outline`` — the code Go's ``validateZones`` already
+    uses).  The defaults reproduce the trace wording verbatim, so the trace path is
+    unchanged."""
     if not isinstance(raw_points, list):
-        diags.error("trace_bad_points", f"trace {ordinal}: points must be a list", ref)
+        diags.error(code, f"{label} {ordinal}: points must be a list", ref)
         return None
     points: list[tuple[float, float]] = []
     for index, item in enumerate(raw_points):
@@ -1488,11 +1501,11 @@ def _extract_points(raw_points, ordinal: int, ref: SourceRef,
             x, y = item[0], item[1]
         else:
             # A 3-tuple point etc. is malformed — do not silently drop the extra.
-            diags.error("trace_bad_points", f"trace {ordinal}: point[{index}] is malformed ({item!r})", ref)
+            diags.error(code, f"{label} {ordinal}: point[{index}] is malformed ({item!r})", ref)
             return None
         if not (_is_number(x) and _is_number(y)):
-            diags.error("trace_bad_points",
-                        f"trace {ordinal}: point[{index}] has non-finite coordinates", ref)
+            diags.error(code,
+                        f"{label} {ordinal}: point[{index}] has non-finite coordinates", ref)
             return None
         points.append((float(x), float(y)))
     return points
@@ -1694,6 +1707,246 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
     return tuple(holes)
 
 
+# ---------------------------------------------------------------------------
+# Zones (docket 019f9a73e5a2). AUTHORED outline in, NO computed fill.
+# ---------------------------------------------------------------------------
+#
+# WHAT THIS DOES AND DOES NOT DO. A zone reaches the IR as an HONESTLY UNFILLED
+# zone: ``ResolvedZone.authored_outline`` carries the polygon the author drew and
+# ``ResolvedZone.fill`` is ``None``, which the IR distinguishes from an empty
+# tuple — ``None`` means "no copper has been COMPUTED for this zone" (its copper
+# is INDETERMINATE), an empty tuple would mean "computed, and it came out empty".
+# Computing the fill (the pour boolean against pads, traces, keepouts and thermal
+# reliefs) is deliberately NOT attempted here: it needs an independent oracle
+# (KiCad's own zone filler) to be checkable at all, so it is its own unit.
+#
+# Consequently every output consumer still refuses a board carrying zones —
+# route_bridge._reject_unroutable_board, kicad._ir_board_dict and
+# gerber.build_gerbers_ir raise, and drc_geometric.run_geometric_drc returns the
+# INDETERMINATE verdict. Nothing in this module relaxes any of those.
+#
+# CODE VOCABULARY. ``invalid_zone_outline`` / ``zone_unknown_net`` /
+# ``zone_unknown_layer`` are Go's own strings (internal/board/validate.go
+# ``validateZones``), reused verbatim as its note asks rather than invented anew.
+# ``zone_bad_clearance`` / ``zone_bad_thermal`` have NO Go counterpart because Go
+# validates neither field; they follow this module's ``<entity>_bad_<field>``
+# family (cf. ``trace_bad_width``, ``via_bad_size``).
+
+
+def _zone_contour(raw_outline, ordinal: int, ref: SourceRef,
+                  diags: _Diagnostics) -> Union[Contour, None]:
+    """The authored zone boundary as a closed :class:`Contour`, or ``None`` on error.
+
+    The Go contract carries an ``outline`` as an ordered ``[]Point`` ring; the IR
+    carries a ``Contour`` of segments whose closure is IMPLICIT (each segment's end
+    is the next one's start, and the last wraps to the first — ``Contour``'s own
+    invariant).  So point *i* becomes one ``LineGeometry`` to point *i+1*, wrapping
+    at the end: the same convention the only other ``Contour`` construction in this
+    repo uses (tests/test_drc_geometric.py builds its triangle that way).  Arc
+    segments are representable in a ``Contour`` but not in Go's ``[]Point``, so an
+    authored zone boundary is all-line today.
+
+    A ring the author closed EXPLICITLY (last point repeating the first) describes
+    the same polygon as the implicit form, so the redundant final point is dropped
+    rather than turned into a zero-length segment.  Both notations must land on the
+    identical ``Contour``."""
+    points = _extract_points(raw_outline, ordinal, ref, diags,
+                             code="invalid_zone_outline", label="zone")
+    if points is None:
+        return None
+    if len(points) >= 2 and points[0] == points[-1]:
+        points = points[:-1]
+    if len(points) < 3:
+        # Go's validateZones applies the same >= 3 floor to the RAW ring. This is
+        # stricter by exactly the explicit-closure case: Go accepts [A, B, A]
+        # (three raw points), which is a two-corner degenerate polygon once the
+        # duplicate closer is dropped. Stricter in the fail-closed direction.
+        diags.error("invalid_zone_outline",
+                    f"zone {ordinal}: outline describes {len(points)} distinct corner(s); "
+                    f"a polygon needs at least 3", ref)
+        return None
+    count = len(points)
+    for index in range(count):
+        if points[index] == points[(index + 1) % count]:
+            # Would be a zero-length segment, which LineGeometry rejects.
+            diags.error("invalid_zone_outline",
+                        f"zone {ordinal}: outline has a repeated point at "
+                        f"{points[index]} (index {index}); a boundary cannot contain a "
+                        f"zero-length segment", ref)
+            return None
+    try:
+        return Contour(segments=tuple(
+            LineGeometry(points[index], points[(index + 1) % count])
+            for index in range(count)
+        ))
+    except (ValueError, TypeError) as exc:
+        # The IR is the authority on its own invariants; surface a rejection as a
+        # structured diagnostic rather than an unhandled traceback out of compile.
+        diags.error("invalid_zone_outline",
+                    f"zone {ordinal}: outline rejected by the IR: {exc}", ref)
+        return None
+
+
+def _zone_clearance(raw: dict, ordinal: int, ref: SourceRef,
+                    diags: _Diagnostics) -> tuple[Union[float, None], bool]:
+    """``(clearance_mm, ok)`` for a zone.
+
+    Go documents ``Zone.ClearanceMM`` as "Zero/omitted defers to the board's
+    blanket design_rules.clearance_mm", so zero and absent are the SAME thing by
+    contract and both map to ``None`` (defer) — not to a 0.0 mm clearance rule the
+    author never stated.  A present negative or non-numeric value is an error, not
+    a silent defer."""
+    value = raw.get("clearance_mm")
+    if value is None:
+        return None, True
+    if not _is_number(value):
+        diags.error("zone_bad_clearance",
+                    f"zone {ordinal}: clearance_mm must be a finite number, got {value!r}", ref)
+        return None, False
+    if value < 0:
+        diags.error("zone_bad_clearance",
+                    f"zone {ordinal}: clearance_mm {value} cannot be negative", ref)
+        return None, False
+    if value == 0:
+        return None, True
+    return float(value), True
+
+
+def _zone_thermal(raw: dict, ordinal: int, ref: SourceRef, diags: _Diagnostics
+                  ) -> tuple[Union[ConnectMode, None], Union[ThermalSettings, None], bool]:
+    """``(connect_mode, thermal, ok)`` for a zone.
+
+    Go's ``Zone`` has no connect-mode field at all, only ``ThermalGapMM`` /
+    ``ThermalBridgeWidthMM``, both documented as "Zero/omitted defers to the
+    compiler's own default whenever zone filling is implemented".  So:
+
+    * NEITHER authored -> ``(None, None)``.  ``connect_mode`` is optional in the IR
+      and ``None`` states nothing; picking SOLID or THERMAL here would assert a
+      pad-connection strategy the author never wrote, and no consumer reads it yet
+      to prefer one.
+    * BOTH authored -> ``ConnectMode.THERMAL`` plus the settings.  The mode is
+      ENTAILED, not chosen: relief geometry is only meaningful under thermal
+      relief, and ``ResolvedZone`` rejects ``thermal`` set with any other mode.
+    * EXACTLY ONE authored -> error.  ``ThermalSettings`` requires both fields
+      (``bridge_width_mm`` strictly positive), so the half that is missing would
+      have to be invented; and dropping the half that WAS authored would silently
+      discard a fabrication-relevant dimension.  Fail closed instead.
+
+    Zero is read as unauthored on BOTH fields, per the Go doc above, which also
+    makes this stable across a Go round-trip (both fields are ``omitempty``, so a
+    zero would not survive re-encoding anyway).  The cost is that a deliberate
+    ``thermal_gap_mm: 0`` — a same-net pad merging flush into the pour — is not
+    expressible in today's contract; that is a limit of the schema, not a value
+    invented here."""
+    raw_gap = raw.get("thermal_gap_mm")
+    raw_bridge = raw.get("thermal_bridge_width_mm")
+    for field, value in (("thermal_gap_mm", raw_gap), ("thermal_bridge_width_mm", raw_bridge)):
+        if value is not None and not _is_number(value):
+            diags.error("zone_bad_thermal",
+                        f"zone {ordinal}: {field} must be a finite number, got {value!r}", ref)
+            return None, None, False
+        if value is not None and value < 0:
+            diags.error("zone_bad_thermal",
+                        f"zone {ordinal}: {field} {value} cannot be negative", ref)
+            return None, None, False
+    gap_authored = raw_gap is not None and raw_gap != 0
+    bridge_authored = raw_bridge is not None and raw_bridge != 0
+    if not gap_authored and not bridge_authored:
+        return None, None, True
+    if gap_authored != bridge_authored:
+        diags.error("zone_bad_thermal",
+                    f"zone {ordinal}: thermal relief needs BOTH thermal_gap_mm and a "
+                    f"positive thermal_bridge_width_mm (got {raw_gap!r} / {raw_bridge!r}); "
+                    f"the missing half would have to be invented", ref)
+        return None, None, False
+    try:
+        settings = ThermalSettings(gap_mm=float(raw_gap), bridge_width_mm=float(raw_bridge))
+    except (ValueError, TypeError) as exc:
+        diags.error("zone_bad_thermal",
+                    f"zone {ordinal}: thermal settings rejected by the IR: {exc}", ref)
+        return None, None, False
+    return ConnectMode.THERMAL, settings, True
+
+
+def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
+                 schema_version: int, diags: _Diagnostics) -> tuple[ResolvedZone, ...]:
+    """Compile authored zones into UNFILLED :class:`ResolvedZone` entries.
+
+    Every zone gets ``fill=None`` EXPLICITLY (not by relying on the field default)
+    and a WARNING recording that its copper is uncomputed, so "no computed copper"
+    is visible in the diagnostic stream and never reads as "no copper"."""
+    zones: list[ResolvedZone] = []
+    for ordinal, raw in enumerate(_dict_items(board, "zones", "zone", diags)):
+        net_name = raw.get("net")
+        zone_ref = SourceRef(EntityKind.ZONE, f"zone:{ordinal}", f"net {net_name}")
+        if not _validate_child_id("zone", raw, zone_ref, schema_version, diags):
+            continue
+        net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
+        if net_id is None:
+            # Go's Zone.Net is non-omitempty and validateZones requires it to name a
+            # declared net; a netless pour is not underspecified-but-fine, it is a
+            # region of copper with no potential.
+            diags.error("zone_unknown_net",
+                        f"zone {ordinal}: net {net_name!r} is not a declared net", zone_ref)
+            continue
+        layer_id = str(raw.get("layer") or "")
+        layer = Layer.from_id(layer_id) if layer_id else None
+        if layer is None or layer.id not in CANON_TO_KICAD:
+            # Membership in CANON_TO_KICAD is what makes this a v1 copper layer, which
+            # is also what satisfies ResolvedZone's "zones must be on copper" check.
+            diags.error("zone_unknown_layer",
+                        f"zone {ordinal}: layer {layer_id!r} is not a v1 copper layer", zone_ref)
+            continue
+        outline = _zone_contour(raw.get("outline"), ordinal, zone_ref, diags)
+        if outline is None:
+            continue
+        clearance, clearance_ok = _zone_clearance(raw, ordinal, zone_ref, diags)
+        connect_mode, thermal, thermal_ok = _zone_thermal(raw, ordinal, zone_ref, diags)
+        if not (clearance_ok and thermal_ok):
+            continue
+        try:
+            zone = ResolvedZone(
+                id=_resolve_child_id("zone", board_id, raw, (net_id, ordinal), schema_version),
+                net_id=net_id,
+                layer=layer,
+                # COPPER_POUR is the only kind Go's Zone can express: its own doc
+                # calls it "an authored copper-fill region", and it REQUIRES a
+                # declared net, which a keepout (the other ZoneKind) has no use for.
+                # There is also no keepout-shaped source for this list: board-level
+                # keepouts are authored under the separate "keepouts" key, which the
+                # loop in compile_board still refuses outright.  So COPPER_POUR is
+                # read off the schema, not chosen between two live possibilities.
+                kind=ZoneKind.COPPER_POUR,
+                authored_outline=outline,
+                # HONEST INDETERMINACY, stated rather than defaulted: no fill has
+                # been computed. NOT `()`, which would claim a computed-and-empty
+                # pour — a false clean.
+                fill=None,
+                clearance_mm=clearance,
+                # No Go counterpart for either, so neither is asserted: inventing a
+                # min-thickness or a fill priority would be a rule the author never
+                # wrote (and priority only means something once two pours overlap,
+                # which needs a filler to resolve).
+                min_thickness_mm=None,
+                priority=None,
+                connect_mode=connect_mode,
+                thermal=thermal,
+            )
+        except (ValueError, TypeError) as exc:
+            # ResolvedZone enforces several invariants of its own (copper layer,
+            # thermal/connect-mode agreement, non-negative clearance). Its rejection
+            # becomes a structured error here rather than a traceback out of compile.
+            diags.error("invalid_zone", f"zone {ordinal}: rejected by the IR: {exc}", zone_ref)
+            continue
+        diags.warning("zone_unfilled",
+                      f"zone {ordinal} on {layer.id} is compiled with an authored outline but "
+                      f"NO computed fill (fill=None): its copper is INDETERMINATE, not absent. "
+                      f"Routing, the kicad bridge and gerber output all refuse a board carrying "
+                      f"zones, and geometric DRC returns indeterminate", zone_ref)
+        zones.append(zone)
+    return tuple(zones)
+
+
 def _authored_id_ok(raw: dict, ref: SourceRef, diags: _Diagnostics) -> bool:
     """A present-but-non-string authored ``id`` is an error, not silently
     replaced by an ordinal (K2 review 625.3)."""
@@ -1707,7 +1960,7 @@ def _authored_id_ok(raw: dict, ref: SourceRef, diags: _Diagnostics) -> bool:
 
 def _validate_child_id(entity: str, raw: dict, ref: SourceRef,
                        schema_version: int, diags: _Diagnostics) -> bool:
-    """Version-dispatched id precondition for a trace/via/hole.
+    """Version-dispatched id precondition for a trace/via/hole/zone.
 
     v2 REQUIRES a persisted minted id and fails closed without one — a v2 board
     that reaches an identity-dependent compile without minted ids has skipped the
@@ -1716,8 +1969,8 @@ def _validate_child_id(entity: str, raw: dict, ref: SourceRef,
 
     NOTE: for v2 this mintedness check is REDUNDANT behind the shared gate
     (validate_board_v2, run first in compile_board — it already fails closed on
-    unminted/duplicate trace/via/hole ids across all three domains).  It is kept as
-    cheap per-entity defense-in-depth; the v1 branch (_authored_id_ok) is the part
+    unminted/duplicate trace/via/hole/zone ids across all four domains).  It is kept
+    as cheap per-entity defense-in-depth; the v1 branch (_authored_id_ok) is the part
     that is actually load-bearing here."""
     if schema_version >= 2:
         pid = raw.get("id")
@@ -1836,10 +2089,21 @@ def compile_board(
         board_id = derive_id("board", str(name or "<unnamed>"), str(version))
 
     # Reject recognized-but-unsupported board features by PRESENCE, not
-    # truthiness — an empty-mapping ``zones: {}`` is still a declaration we must
-    # refuse rather than treat as absent (review 623 R2).  An explicitly empty
+    # truthiness — an empty-mapping ``board_graphics: {}`` is still a declaration we
+    # must refuse rather than treat as absent (review 623 R2).  An explicitly empty
     # list declares nothing and is allowed.
-    for unsupported_key in ("zones", "board_graphics", "keepouts"):
+    #
+    # ``zones`` LEFT THIS LIST in epoch 4 (docket 019f9a73e5a2): an authored copper
+    # zone now COMPILES, into ``ResolvedZone`` with ``fill=None`` (see
+    # :func:`_build_zones`).  ``board_graphics`` and ``keepouts`` are a DIFFERENT
+    # capability and stay refused.  Nothing downstream was relaxed: route_bridge,
+    # kicad and gerber each still raise on a non-empty ``rb.zones`` and geometric
+    # DRC still returns INDETERMINATE, so a zone is authorable and compilable but
+    # not routable, DRC-clean, or fabricable.  A malformed ``zones`` CONTAINER is
+    # still refused, now by the shared boundary above (validate_board_v2 →
+    # ``invalid_board_structure``) rather than here, so ``zones: {}`` keeps failing
+    # closed while ``zones: []`` keeps declaring nothing.
+    for unsupported_key in ("board_graphics", "keepouts"):
         value = board.get(unsupported_key)
         if value is None or (isinstance(value, list) and not value):
             continue
@@ -1963,15 +2227,18 @@ def compile_board(
     traces = _build_traces(board, board_id, net_id_by_name, version, diags)
     vias = _build_vias(board, board_id, net_id_by_name, version, diags)
     holes = _build_holes(board, board_id, version, diags)
+    zones = _build_zones(board, board_id, net_id_by_name, version, diags)
 
     # The ordinal-id bridge diagnostic is a v1-only artifact: v2 ids are the
     # persisted minted identity (validated above), not ordinal-derived, so there
-    # is nothing to warn about.
-    if version == 1 and (traces or vias or holes):
+    # is nothing to warn about.  A v1 zone id is ordinal-derived on the same terms
+    # (board-yaml.md notes a v1 board is in fact the only convenient way to author
+    # a zone today, since MigrateV1toV2 is the only zone-id minter).
+    if version == 1 and (traces or vias or holes or zones):
         diags.info("ordinal_ids",
-                   "trace/via/hole ids are ordinal-derived and board-namespaced but NOT stable "
-                   "under reorder/insert; persisted authored identity is a YAML-v2 handoff that "
-                   "must land before any DRC/routing consumer switches onto the IR",
+                   "trace/via/hole/zone ids are ordinal-derived and board-namespaced but NOT "
+                   "stable under reorder/insert; persisted authored identity is a YAML-v2 "
+                   "handoff that must land before any DRC/routing consumer switches onto the IR",
                    _board_ref())
 
     if diags.has_error or outline is None or layer_stack is None or design_rules is None:
@@ -2011,7 +2278,7 @@ def compile_board(
             traces=traces,
             vias=vias,
             holes=holes,
-            zones=(),
+            zones=zones,
             board_graphics=(),
             provenance=provenance,
         )

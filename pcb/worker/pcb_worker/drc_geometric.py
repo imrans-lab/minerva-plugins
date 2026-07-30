@@ -995,9 +995,13 @@ def run_geometric_drc(rb: ResolvedBoard, *,
                 "geometric DRC v1 models a rectangular (RectOutline) board only; "
                 f"got {type(rb.outline).__name__}")
         if rb.zones:
-            # The compiler rejects non-empty zones today; if a future IR carries an
-            # (unfilled) copper zone, geometric DRC must be indeterminate, not
-            # ignore it (spec §4).
+            # LIVE SINCE EPOCH 4, no longer a guard against a hypothetical. This used
+            # to read "the compiler rejects non-empty zones today" — true until
+            # compile_board began building ResolvedZone with fill=None. An UNFILLED
+            # copper zone now arrives here routinely, and indeterminate is the only
+            # honest verdict: we cannot check clearance against copper whose extent
+            # has never been computed. Reporting clean would be a false clean on
+            # geometry we know we did not evaluate (spec §4).
             return _indeterminate(
                 "unsupported_geometry",
                 "geometric DRC v1 does not model copper zones/pours")

@@ -3,9 +3,11 @@
 Mirror of ``internal/board/validate.go``. Enforces the schema-level rules the Go
 codec and this validator must agree on (item 019f802ca3af, comment 629 — "K3 must
 not consume a v2 board through independently drifting validators"): schema-version
-dispatch, v2 persistent-id validity, and typed pin-override field types (which the
+dispatch, v2 persistent-id validity, typed pin-override field types (which the
 Go codec enforces structurally at unmarshal, and this validator — parsing an
-untyped dict — re-checks explicitly).
+untyped dict — re-checks explicitly), and zone structure (:func:`_check_zones`,
+added in epoch 4 with docket 019f9a73e5a2 / bug 019fb0a7aea7 item 4, when the
+compiler stopped refusing the ``zones`` key outright).
 
 It operates on a PARSED board dict and does NOT resolve footprints or geometry —
 that is the full compiler (compile_board.py). The committed vectors in
@@ -48,7 +50,9 @@ def validate_board_v2(board: dict) -> list[str]:
     """Return a list of shared-boundary error codes; an empty list means the board
     is valid at this boundary. Codes are identical to ``internal/board.Validate``:
     ``unsupported_schema_version``, ``unminted_persistent_id``,
-    ``duplicate_persistent_id``, ``invalid_pin_override``, ``invalid_board_structure``.
+    ``duplicate_persistent_id``, ``invalid_pin_override``, ``invalid_board_structure``,
+    and — for zones — ``invalid_zone_outline``, ``zone_unknown_net``,
+    ``zone_unknown_layer``.
     """
     if not isinstance(board, dict):
         return ["invalid_board_structure"]
@@ -63,22 +67,30 @@ def validate_board_v2(board: dict) -> list[str]:
     # is invalid_board_structure on both sides — the Go codec rejects a mapping or
     # scalar where it expects a slice — even for a collection this validator does
     # not otherwise inspect (nets carry no persistent id, but `nets: {}` must still
-    # fail closed on both sides). A NULL item inside any of the five collections is
+    # fail closed on both sides). A NULL item inside ANY of these collections is
     # ALSO invalid_board_structure: yaml.v3 silently drops a null list item, so a
     # canonical source entity would vanish to make the two parsers agree — rejected
     # on both sides instead (finding 019f8b7fb07e, part 3; the Go codec probes the
-    # raw node tree for the same). Nested / auxiliary containers (points, layers,
+    # raw node tree for the same). The list is deliberately not described by a COUNT:
+    # a stated count goes stale the next time an entity is modelled, which is exactly
+    # how bug 019fb0a7aea7 happened. Nested / auxiliary containers (points, layers,
     # annotations, route_hints, design_rules) are the documented Go-codec superset,
     # enforced by the codec and the full compiler, not re-checked here.
     lists: dict[str, list] = {}
     for key in ("components", "nets", "traces", "vias",
-                "mounting_holes", "pth_holes", "npth_holes"):
+                "mounting_holes", "pth_holes", "npth_holes", "zones"):
         items, ok = _as_list(board.get(key))
         lists[key] = items
         if not ok:
             codes.append("invalid_board_structure")
         elif any(item is None for item in items):
             codes.append("invalid_board_structure")
+
+    # Zone STRUCTURE is checked on v1 boards too — Go's Validate calls
+    # validateZones before its version gate, because an outline that is not a
+    # polygon or a net/layer that does not exist is wrong regardless of which
+    # identity era the board is from. Identity is the version-gated part, below.
+    _check_zones(lists["zones"], board, codes)
 
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
@@ -97,6 +109,12 @@ def validate_board_v2(board: dict) -> list[str]:
             # on both sides (Fable D2 parity note).
             [lists["mounting_holes"], lists["npth_holes"], lists["pth_holes"]],
             codes)
+        # Zones own one collection, checked LAST — the same order Go's Validate
+        # walks (trace, via, hole, zone), so a board violating two domains yields
+        # the same first code on both sides. Adding this closes the asymmetry
+        # recorded in bug 019fb0a7aea7 item 4, where Go validated zone ids and
+        # Python did not.
+        _check_entity_ids("zone", [lists["zones"]], codes)
 
     for comp in lists["components"]:
         if not isinstance(comp, dict):
@@ -109,6 +127,56 @@ def validate_board_v2(board: dict) -> list[str]:
             if isinstance(pin, dict):
                 codes.extend(_override_problems(pin.get("override")))
     return codes
+
+
+def _check_zones(zones: list, board: dict, codes: list) -> None:
+    """Mirror of Go's ``validateZones`` (internal/board/validate.go): append the FIRST
+    zone-structural violation, using Go's own code strings.
+
+    The three rules are Go's, verbatim in intent: an ``outline`` with fewer than 3
+    points is not a polygon (``invalid_zone_outline``); a ``net`` that is empty or
+    names no declared net is ``zone_unknown_net``; a ``layer`` that is empty, or —
+    when the board declares a ``layers`` list at all — outside it, is
+    ``zone_unknown_layer``.  Only the FIRST violation is appended, matching Go's
+    return-on-first-error, so a board breaking two rules reports the same code on
+    both sides.
+
+    Version-independent, exactly as in Go: these are content rules, not identity
+    rules.  A non-dict zone item is skipped here — the compiler's own ``_dict_items``
+    rejects it as ``invalid_zone``, and a ``None`` item is already
+    ``invalid_board_structure`` upstream, so skipping avoids double-coding.
+
+    This checks the same fields the full compiler re-checks in ``_build_zones``; the
+    compiler goes further (v1 copper-layer membership, thermal/clearance values,
+    degenerate segments), which this boundary deliberately does not, because Go does
+    not either and this file's job is Go parity."""
+    if not zones:
+        return
+    raw_nets, _ = _as_list(board.get("nets"))
+    net_names = {net.get("name") for net in raw_nets if isinstance(net, dict)}
+    raw_layers, _ = _as_list(board.get("layers"))
+    declared_layers = [str(item) for item in raw_layers]
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        outline = zone.get("outline")
+        if not isinstance(outline, list) or len(outline) < 3:
+            codes.append("invalid_zone_outline")
+            return
+        net = zone.get("net")
+        if not isinstance(net, str) or not net or net not in net_names:
+            codes.append("zone_unknown_net")
+            return
+        layer = zone.get("layer")
+        if not isinstance(layer, str) or not layer:
+            codes.append("zone_unknown_layer")
+            return
+        # Only checked against the declared stack when the board declares one at all
+        # (`layers` is optional) — a board with no explicit layer list has nothing to
+        # validate a zone's layer name against. Same condition as Go.
+        if declared_layers and layer not in declared_layers:
+            codes.append("zone_unknown_layer")
+            return
 
 
 def _as_list(value):

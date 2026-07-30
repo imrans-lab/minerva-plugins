@@ -1520,9 +1520,14 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
     Pinned by the gerber golden + oracle (gerbonara / KiCad export) tests."""
     # FAIL-CLOSED seal (a captured feature the gerber bridge does not map — a copper
     # zone or a board-level graphic — must RAISE, never vanish silently from a
-    # fabrication-bound file). compile_board
-    # fail-closes zone/board-graphic DECLARATIONS today, so these are always empty;
-    # the seal guards against a future IR silently dropping copper at fabrication.
+    # fabrication-bound file).
+    # THIS SEAL IS LIVE FOR ZONES, not hypothetical. It used to read "compile_board
+    # fail-closes zone DECLARATIONS today, so these are always empty" — true until
+    # epoch 4, when compile_board began building ResolvedZone (with fill=None, i.e.
+    # no computed copper). A zone now REACHES this function, and this raise is the
+    # only thing stopping a board with an uncomputed pour from being emitted as
+    # fabrication. Board graphics are still refused at compile, so that half of the
+    # seal remains a guard against a future IR.
     if board.zones:
         raise ValueError(
             f"build_gerbers_ir: board has {len(board.zones)} zone(s) the gerber bridge "
