@@ -99,9 +99,12 @@ var show_silk: bool = true
 ## outline, not a second body outline. Toggled from the panel's View menu
 ## (a _VIEW_FLAGS entry, like the other show_* flags here).
 var show_courtyard: bool = true
-## Draws authored zones — copper pours and keepouts (docket 019fb43113) — as a
-## closed outline plus a diagonal hatch. Sibling of the show_* flags above so the
-## panel's View menu can toggle it the same way.
+## Draws authored zones — copper pours and keepouts (docket 019fb43113).
+## Keepouts render as outline + diagonal hatch (a small warning region); pours
+## render as OUTLINE ONLY — a whole-board pour's hatch buried every other layer
+## in diagonal lines (owner HITL 2026-07-30), and the outline alone still says
+## "a pour is authored here" without painting anything that reads as copper.
+## Sibling of the show_* flags above so the panel's View menu can toggle it.
 var show_zones: bool = true
 
 ## Copper-layer trace filter driven by the toolbar layer selector.
@@ -371,7 +374,8 @@ func _draw() -> void:
 	# whole point of the antenna keepout is that it overlaps U1's body — drawn
 	# underneath, the component fill would hide exactly the region being warned
 	# about. Below traces because a trace is routed copper and must stay the most
-	# legible thing on the canvas; the hatch is sparse enough to read through.
+	# legible thing on the canvas — pours are outline-only and the keepout's
+	# hatch is sparse enough to read through.
 	if show_zones:
 		_draw_zones()
 
@@ -552,12 +556,12 @@ func _draw_single_trace(trace, is_bottom_layer: bool) -> void:
 				draw_circle(pt, 3.0, trace_selected_color)
 
 
-## Draw every authored zone: closed outline + diagonal hatch, never filled.
+## Draw every authored zone — pours as closed outlines, keepouts as outline +
+## hatch (see the show_zones note for why pours do not hatch). Never filled.
 ##
 ## Two passes so KEEPOUTS ALWAYS LAND ON TOP of pours, regardless of the order
-## the board file happened to list them in. A keepout is a constraint on the
-## pour; a pour's hatch drawn over it would read as copper permitted in a region
-## that forbids copper — the one thing this render must not say.
+## the board file happened to list them in: a keepout is a constraint on the
+## pour, and its warning render must not sit under pour geometry.
 func _draw_zones() -> void:
 	if data.zones.is_empty():
 		return
@@ -601,12 +605,14 @@ func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
 		if net:
 			color = net.color
 
-	var pitch: float = clampf(ZONE_HATCH_PITCH_MM * zoom, ZONE_HATCH_MIN_PX, ZONE_HATCH_MAX_PX)
-	# The two kinds hatch along OPPOSITE diagonals. Colour alone separates them
-	# on a healthy display; the opposing slope also separates them where colour
-	# cannot — greyscale, a screenshot handed to an LLM, or a pour whose net
-	# colour happens to land near the keepout amber.
-	_draw_polygon_hatch(screen_poly, Color(color, zone_hatch_alpha), pitch, zone_hatch_width_px, is_keepout)
+	# ONLY keepouts hatch. A pour outline can legitimately span the whole board
+	# (the smart-remote GND pour is the full 80x110 minus 0.5mm), and hatching it
+	# covered every layer in diagonal lines — owner HITL 2026-07-30 ordered the
+	# lines removed. The pour keeps its closed outline; honest-unfilled now reads
+	# as "outlined, no copper drawn" rather than "hatched".
+	if is_keepout:
+		var pitch: float = clampf(ZONE_HATCH_PITCH_MM * zoom, ZONE_HATCH_MIN_PX, ZONE_HATCH_MAX_PX)
+		_draw_polygon_hatch(screen_poly, Color(color, zone_hatch_alpha), pitch, zone_hatch_width_px, true)
 
 	var outline := screen_poly.duplicate()
 	outline.append(screen_poly[0])  # close the loop — an outline, not a polyline
