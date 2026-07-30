@@ -203,7 +203,13 @@ func initRegistry() {
 	// declared channel MUST have a same-named backend tool or the broker returns
 	// permission_denied (gap register A-7).
 	registry.Register(tools.Serialize, tools.WrapInProcess(tools.HandleSerialize))
-	registry.Register(tools.Deserialize, tools.WrapInProcess(tools.HandleDeserialize))
+	// pcb.deserialize is the BOARD-LOAD path, so it registers the worker-aware
+	// HandleDeserializeResolved: the same in-process codec plus a best-effort
+	// footprint-graphics attach, so components arrive carrying the silk/courtyard
+	// outlines the panel renderer already knows how to draw (unit 019fb430750a).
+	// The enrichment degrades to the plain codec on any worker fault, so this
+	// path keeps working exactly as before when the worker is unavailable.
+	registry.Register(tools.Deserialize, tools.HandleDeserializeResolved)
 	registry.Register(tools.CollectExport, tools.WrapInProcess(tools.HandleCollectExport))
 	registry.Register(tools.ApplyExport, tools.WrapInProcess(tools.HandleApplyExport))
 	// Library-data fetch/status — in-process (no Python worker involved), the

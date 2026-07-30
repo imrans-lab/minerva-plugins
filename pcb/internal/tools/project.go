@@ -26,8 +26,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/imrans-lab/minerva-plugins/pcb/internal/board"
+	"github.com/imrans-lab/minerva-plugins/shared/bridge"
 )
 
 // echoState is the shared handler for the four project channels. It unmarshals
@@ -144,7 +146,43 @@ func HandleSerialize(ctx context.Context, params json.RawMessage) (json.RawMessa
 // HandleDeserialize parses board-source into the canonical Board dict. Accepts
 // {yaml} or {minpcb_json} (the latter an object or a JSON-encoded string).
 // Returns {board, warnings}. With neither it falls back to the {state} echo.
+//
+// This is the PURE CODEC entry point (no worker, no enrichment) and is kept at
+// this arity deliberately: it is the parse contract other Go code and the codec
+// tests call directly. The registered pcb.deserialize handler is the sibling
+// HandleDeserializeResolved below, which is this same code plus a best-effort
+// footprint-graphics attach.
 func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMessage, error) {
+	return handleDeserialize(ctx, nil, params)
+}
+
+// HandleDeserializeResolved is the handler REGISTERED for the pcb.deserialize
+// channel — the board-LOAD path (docket 019fb430750a, unit 1).
+//
+// It is HandleDeserialize plus one thing: each component in the parsed board is
+// enriched, BEST-EFFORT, with its footprint's F.SilkS/F.CrtYd graphics from the
+// Python worker, so a board arrives at the panel with something for the silk
+// renderer to draw. Before this, a plain board load produced graphics=[] on
+// every component and the (already working) body-outline renderer had nothing
+// to draw — the resolver and the renderer both existed, nobody connected them.
+//
+// Enriching HERE rather than in the panel is deliberate: this is the one choke
+// point every board load funnels through, so every consumer of pcb.deserialize
+// (the panel YAML load, minerva_pcb_load_board, anything added later) inherits
+// it without opting in.
+//
+// The enrichment can NEVER fail a load. Any fault — no worker, cold-start
+// timeout, worker crash, a footprint the library cannot resolve, a coincidence
+// fault — leaves the board exactly as the codec produced it and records the
+// reason in `warnings`. Silk is a rendering nicety; the board is the contract.
+func HandleDeserializeResolved(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return handleDeserialize(ctx, w, params)
+}
+
+// handleDeserialize is the shared body. A nil worker means "codec only" — the
+// enrichment is skipped entirely and the reply is byte-identical to the
+// pre-enrichment behaviour, which is what keeps HandleDeserialize pure.
+func handleDeserialize(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	var a struct {
 		YAML       string          `json:"yaml"`
 		MinpcbJSON json.RawMessage `json:"minpcb_json"`
@@ -194,6 +232,12 @@ func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMes
 		// validator which calls it unsupported_schema_version. Fail closed.
 		return nil, fmt.Errorf("pcb.deserialize: invalid board: %w", vErr)
 	}
+	// Board-LOAD enrichment: attach each component's footprint silk/courtyard
+	// graphics, best-effort. No-op when w == nil (the pure codec path). Runs
+	// AFTER validation so we never resolve a board we are about to reject, and
+	// BEFORE the marshal so the graphics ride the normal reply.
+	warnings = attachFootprintGraphics(ctx, w, b, warnings)
+
 	if warnings == nil {
 		warnings = []string{}
 	}
@@ -201,6 +245,153 @@ func HandleDeserialize(ctx context.Context, params json.RawMessage) (json.RawMes
 		"board":    b,
 		"warnings": warnings,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Footprint-graphics enrichment (board-LOAD path, docket 019fb430750a unit 1)
+// ---------------------------------------------------------------------------
+
+// resolveGraphicsBudget bounds how long a board load will wait for the worker's
+// footprint resolve before giving up and returning the unenriched board.
+//
+// It MUST stay comfortably under the panel's 30s pcb.deserialize timeout
+// (ui/PCBPanel.gd), because the Python worker is spawned LAZILY on first call
+// and the panel's _request_with_backend_ensure warms only the GO backend — it
+// never touches the worker. So a board load can pay a cold Python start, whose
+// own ready deadline (shared/bridge, 60s) is twice the panel's patience.
+// Without this bound, a cold or wedged worker would not merely cost us silk: it
+// would blow the panel timeout and fail the WHOLE LOAD, which is strictly worse
+// than the bodyless render we are fixing.
+const resolveGraphicsBudget = 15 * time.Second
+
+// graphicsSkipped formats the single, honest warning shape for a degraded
+// enrichment. The load succeeded; the bodies just are not drawn. The reason
+// reaches the caller as result.warnings, so this degrades LOUDLY, not silently.
+func graphicsSkipped(reason string) string {
+	return "footprint graphics not attached (components render without silk body outlines): " + reason
+}
+
+// attachFootprintGraphics enriches b's components IN PLACE with their
+// footprint's F.SilkS/F.CrtYd graphics and returns warnings, extended with one
+// entry if the enrichment degraded. It never returns an error: every failure
+// mode is a degrade, because a board must load even when its bodies cannot be
+// drawn.
+//
+// Only the "graphics" key is taken from the resolve. The worker's resolve step
+// ALSO attaches real footprint pad geometry (component "pads" +
+// "has_pad_geometry"), which would change pad rendering and retire the
+// unresolved badge — a separate, deliberate change. Ignoring it here keeps this
+// unit's blast radius to exactly the body outlines.
+//
+// The attach is strictly ADDITIVE: a component whose source already carries
+// graphics keeps what the source gave it (authored data wins over derived).
+func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Board, warnings []string) []string {
+	if w == nil || b == nil || len(b.Components) == 0 {
+		return warnings // codec-only path, or nothing to enrich
+	}
+
+	// Send the board as the host will see it — the same JSON encoding the reply
+	// uses (Extra inlined, see json.go), so the worker resolves the exact board
+	// the panel is about to render, not a different projection of it.
+	boardJSON, err := json.Marshal(b)
+	if err != nil {
+		return append(warnings, graphicsSkipped(fmt.Sprintf("board could not be encoded for resolve: %v", err)))
+	}
+	reqParams, err := json.Marshal(map[string]json.RawMessage{"board": boardJSON})
+	if err != nil {
+		return append(warnings, graphicsSkipped(fmt.Sprintf("resolve request could not be encoded: %v", err)))
+	}
+
+	result, err := callResolveBestEffort(ctx, w, reqParams)
+	if err != nil {
+		return append(warnings, graphicsSkipped(err.Error()))
+	}
+
+	byRef := graphicsByRef(result)
+	if len(byRef) == 0 {
+		return append(warnings, graphicsSkipped("the resolve returned no footprint graphics"))
+	}
+
+	attached := 0
+	for i := range b.Components {
+		g, ok := byRef[b.Components[i].Ref]
+		if !ok {
+			continue // footprint unresolvable (best-effort left it inline) — badge stays
+		}
+		if b.Components[i].Extra == nil {
+			b.Components[i].Extra = map[string]interface{}{}
+		}
+		if _, exists := b.Components[i].Extra["graphics"]; exists {
+			continue // the source already carried graphics — do not overwrite it
+		}
+		b.Components[i].Extra["graphics"] = g
+		attached++
+	}
+	if attached == 0 {
+		return append(warnings, graphicsSkipped("no component matched a resolved footprint"))
+	}
+	return warnings
+}
+
+// callResolveBestEffort runs the worker's tolerant resolve under a wall-clock
+// budget and returns its raw result ({ok, board, stats}).
+//
+// The budget is enforced by this select and NOT by a context deadline, which
+// would be a trap: the bridge threads the call ctx into exec.CommandContext when
+// it LAZILY SPAWNS the worker, so cancelling a per-call ctx kills the long-lived
+// shared worker and forces a cold respawn for every other tool. That is why the
+// call itself runs on context.Background(), matching the plugin's dispatch path.
+// A call we stop waiting for is simply abandoned; the bridge discards its reply.
+func callResolveBestEffort(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	type callResult struct {
+		raw json.RawMessage
+		err error
+	}
+	// Buffered: the goroutine must never block (and so never leak) when we have
+	// already given up on this call.
+	done := make(chan callResult, 1)
+	go func() {
+		raw, err := w.Call(context.Background(), "resolve_best_effort", params)
+		done <- callResult{raw: raw, err: err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, fmt.Errorf("worker resolve failed: %w", r.err)
+		}
+		return r.raw, nil
+	case <-time.After(resolveGraphicsBudget):
+		return nil, fmt.Errorf("worker resolve exceeded its %s budget", resolveGraphicsBudget)
+	case <-ctx.Done():
+		return nil, fmt.Errorf("worker resolve abandoned: %w", ctx.Err())
+	}
+}
+
+// graphicsByRef indexes the resolve reply's per-component "graphics" arrays by
+// component ref. A component with no graphics (unresolvable footprint, left
+// inline by the best-effort resolve) is omitted, so callers can distinguish
+// "resolved to nothing" from "not resolved" and leave the latter untouched.
+func graphicsByRef(result json.RawMessage) map[string]interface{} {
+	var payload struct {
+		Board struct {
+			Components []struct {
+				Ref      string        `json:"ref"`
+				Graphics []interface{} `json:"graphics"`
+			} `json:"components"`
+		} `json:"board"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(payload.Board.Components))
+	for _, c := range payload.Board.Components {
+		if c.Ref == "" || len(c.Graphics) == 0 {
+			continue
+		}
+		out[c.Ref] = c.Graphics
+	}
+	return out
 }
 
 // unwrapJSON tolerates minpcb_json arriving as a JSON-encoded string (a common

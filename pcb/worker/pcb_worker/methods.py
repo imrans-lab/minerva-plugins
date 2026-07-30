@@ -399,6 +399,39 @@ def _resolve(params: dict) -> dict:
     return {"ok": True, "result": {"ok": True, "board": resolved, "stats": stats}}
 
 
+def _resolve_best_effort(params: dict) -> dict:
+    """TOLERANT sibling of :func:`_resolve`, for the board-LOAD path.
+
+    Identical enrichment and identical reply shape, with ONE difference: a
+    component whose footprint is unresolvable (not in the seed library) or that
+    declares no footprint ref is LEFT INLINE instead of failing the whole board.
+    A board must always load — a component the library cannot explain simply
+    renders as it does today (pads, no body outline), it does not sink the load
+    (docket 019fb430750a, unit 1).
+
+    Deliberately a SIBLING METHOD rather than a `tolerant` flag on ``resolve``:
+    the agent-facing ``minerva_pcb_resolve`` tool is STRICT by contract, and a
+    shared flag is one mis-set params key away from silently de-stricting it.
+    ``_resolve`` and the ``resolve`` method stay untouched.
+
+    A coincidence fault (the footprint RESOLVES but its pads DISAGREE with the
+    routed pins) is still NOT tolerated — silk desynced from copper is an
+    integrity fault, not a cosmetic gap — so it comes back as a structured error
+    reply and the caller degrades to the unenriched board.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    resolved = _resolve_mapped(board, tolerant=True)
+    if _is_error_reply(resolved):
+        return resolved
+
+    stats = resolve.board_graphic_stats(resolved)
+    return {"ok": True, "result": {"ok": True, "board": resolved, "stats": stats}}
+
+
 def _normalize(params: dict) -> dict:
     """Rewrite a canonical SOURCE board to its normalized v2 shape (the sync-back
     the compile fold never persists): legacy inline per-pin fabrication geometry is
@@ -2025,6 +2058,9 @@ _HANDLERS = {
     "drc": lambda req: _drc(req.get("params") or {}),
     "drc_geometric": lambda req: _drc_geometric(req.get("params") or {}),
     "resolve": lambda req: _resolve(req.get("params") or {}),
+    # Tolerant sibling of "resolve", used by the Go pcb.deserialize board-LOAD
+    # path. NOT exposed as an LLM tool: minerva_pcb_resolve stays strict.
+    "resolve_best_effort": lambda req: _resolve_best_effort(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
