@@ -1,0 +1,35 @@
+# Corpus policy gate — this repo is PUBLIC; real product board designs are
+# banned from it. See pcb/worker/tests/testdata/POLICY.md for the rule and
+# the incident that created it (2026-07-30). This is a repo-content policy
+# check, not a test suite: it greps tracked files and fails on banned
+# product data, nothing more.
+name: corpus-policy
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  no-product-boards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ban product-named files
+        run: |
+          set -euo pipefail
+          # Any tracked file NAMED after the product is banned outright.
+          # (Content references in test code are tolerated; the design data
+          # is what leaks, and it arrives as a data file.)
+          if git ls-files | grep -iE 'smart[-_]?remote'; then
+            echo "::error::files named after the smart-remote product are banned from this public repo (see pcb/worker/tests/testdata/POLICY.md)"
+            exit 1
+          fi
+      - name: Ban product board identities in YAML
+        run: |
+          set -euo pipefail
+          # A renamed file still declares its identity in the canonical
+          # board contract's `name:` field — ban the identity itself.
+          if git grep -nE '^[[:space:]]*name:[[:space:]]*["'"'"']?smart[-_]?remote' -- '*.yml' '*.yaml'; then
+            echo "::error::the smart-remote board definition is banned from this public repo (see pcb/worker/tests/testdata/POLICY.md)"
+            exit 1
+          fi
