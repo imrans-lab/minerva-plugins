@@ -556,6 +556,15 @@ class BendHandleEditTool:
 	var _drag_start_bends: Array = []   # Array[Vector2] snapshot at drag start
 	var _drag_live_point: Vector2 = Vector2.ZERO
 
+	## A8u1: this tool edits ONE hint — bend drag, bend insert, bend delete all
+	## need a single unambiguous target. With a multi-selection there is no such
+	## target, and silently picking the primary would edit an annotation the user
+	## did not aim at. So the edit gestures DISARM and the tool falls back to
+	## pure selection; draw_preview says so on-canvas instead of drawing handles.
+	## Exactly one selected → every code path below is byte-identical to pre-A8u1.
+	func _multi_selected() -> bool:
+		return AnnotationHost.multi_selected_for(_host)
+
 	func on_activate(host: AnnotationHost) -> void:
 		_host = host
 		_reset_drag()
@@ -593,6 +602,8 @@ class BendHandleEditTool:
 			# Right-click a handle of the CURRENTLY SELECTED hint deletes that
 			# bend. No selection / not a route hint / no handle hit → no-op
 			# (let the host's own right-click handling, if any, proceed).
+			if _multi_selected():
+				return false
 			var sel := _host.get_selected_annotation_id()
 			if sel.is_empty():
 				return false
@@ -612,7 +623,9 @@ class BendHandleEditTool:
 			return false
 
 		var sel := _host.get_selected_annotation_id()
-		if not sel.is_empty():
+		# Multi-selection: skip the edit-target branches entirely and go straight
+		# to selection, so a click re-targets a single hint and re-arms the tool.
+		if not sel.is_empty() and not _multi_selected():
 			var ann := _find(sel)
 			var kind := _kind()
 			if not ann.is_empty() and kind != null and str(ann.get("kind", "")) == "pcb_route_hint":
@@ -659,6 +672,10 @@ class BendHandleEditTool:
 
 	func draw_preview(ctx: AnnotationRenderContext) -> void:
 		if _host == null:
+			return
+		if _multi_selected():
+			# Visible disarm: no handles drawn, and an on-canvas reason why.
+			_Self.draw_disarm_notice(ctx, "Bend edit needs one hint — click one to edit")
 			return
 		var sel := _host.get_selected_annotation_id()
 		if sel.is_empty():
@@ -781,7 +798,10 @@ class ViaInsertTool:
 		var seg_r := _SEGMENT_HIT_PX / _zoom()
 
 		var sel := _host.get_selected_annotation_id()
-		if not sel.is_empty():
+		# Multi-selection: no unambiguous hint to insert a via into, so the
+		# insert gesture disarms and the click re-targets selection instead
+		# (same rule as BendHandleEditTool; see its _multi_selected doc).
+		if not sel.is_empty() and not _multi_selected():
 			var ann := _find(sel)
 			if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint":
 				var kp: Dictionary = ann.get("kind_payload", {})
@@ -797,7 +817,19 @@ class ViaInsertTool:
 		# route-hint-only selection, same idiom as BendHandleEditTool.
 		return _select_route_hint_at(doc_pos)
 
+	## Visible disarm (A8u1) — mirrors BendHandleEditTool.draw_preview. This tool
+	## had no preview before; it has one now solely to say why the click that
+	## normally inserts a via is not going to.
+	func draw_preview(ctx: AnnotationRenderContext) -> void:
+		if _host == null or not _multi_selected():
+			return
+		_Self.draw_disarm_notice(ctx, "Via insert needs one hint — click one to edit")
+
 	# ── internal ──────────────────────────────────────────────────────────────
+
+	## See BendHandleEditTool._multi_selected — same rule, same reason.
+	func _multi_selected() -> bool:
+		return AnnotationHost.multi_selected_for(_host)
 
 	func _zoom() -> float:
 		if _host != null and _host.has_method("get_annotation_zoom"):
@@ -830,6 +862,17 @@ class ViaInsertTool:
 			if ann is Dictionary and str((ann as Dictionary).get("id", "")) == id:
 				return ann as Dictionary
 		return {}
+
+
+## Shared on-canvas notice for the single-target tools above (BendHandleEditTool,
+## ViaInsertTool) when a multi-selection leaves them without an unambiguous edit
+## target (A8u1). Pinned to the top-left of the viewport in SCREEN pixels — the
+## disarm reason must be readable wherever the board is panned or zoomed to, and
+## must not chase the selection around. ctx.from_screen maps back to document
+## space so ctx.draw_string's own doc→screen mapping lands it where intended.
+static func draw_disarm_notice(ctx: AnnotationRenderContext, text: String) -> void:
+	ctx.draw_string(null, ctx.from_screen(Vector2(12.0, 22.0)), text,
+		Color(1.0, 0.72, 0.22, 0.95), 13)
 
 
 # ── Manual via insertion (U4, DCR 019f7095c395 Stage-2) ───────────────────────

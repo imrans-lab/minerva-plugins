@@ -2109,6 +2109,18 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		return
 	if _annotation_host == null:
 		return
+	# A8u1: hint undo/redo is a SINGLE-hint revision stack (undo_hint_revision
+	# takes one id). With a multi-selection there is no unambiguous target, so
+	# Ctrl+Z disarms rather than silently rewinding whichever hint happens to be
+	# primary. Exactly one selected → unchanged. The disarm is ANNOUNCED, not
+	# silent: no board-level Ctrl+Z exists in this plugin (see the header above),
+	# so falling through unconsumed would produce a dead key with no explanation —
+	# the same thing draw_disarm_notice exists to prevent for bend/via.
+	if _annotation_host.has_method("has_multi_selection") and _annotation_host.has_multi_selection():
+		_show_transient_status("Hint undo needs one hint selected — %d are selected." \
+			% _annotation_host.get_selected_annotation_ids().size())
+		get_viewport().set_input_as_handled()
+		return
 	var sel_id: String = _annotation_host.get_selected_annotation_id()
 	if sel_id.is_empty():
 		return
