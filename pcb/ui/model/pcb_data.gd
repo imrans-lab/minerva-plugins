@@ -635,6 +635,110 @@ func remove_via_by_id(via_id: String) -> bool:
 #endregion
 
 
+#region Zone Management
+
+## Entropy width of a minted persistent id — 16 bytes → 32 lowercase hex chars.
+## MIRRORS internal/board/migrate.go's mintedIDBytes; internal/board/validate.go
+## isMintedID() checks EXACTLY this width, so the two must not drift.
+const MINTED_ID_BYTES := 16
+
+
+## Mint a fresh persistent entity id: "<entity_type>:<32 lowercase hex>".
+##
+## THE FORMAT IS THE CONTRACT, not a convention. internal/board/validate.go's
+## isMintedID() accepts exactly "<type>:" + 32 chars from [0-9a-f]; anything else
+## (empty, "zone_1", uppercase hex, a short tail) is UNMINTED and fails
+## `unminted_persistent_id` on a v2 board. This is the FIRST UI-side minter: the
+## trace/via counters above mint ORDINAL handles ("trace_7"/"via_12") which are
+## deliberately NOT persistent ids — internal/board treats those legacy shapes as
+## unminted and re-mints them at the v1→v2 migration boundary. Zones get the real
+## thing because the contract names this exact gap: MigrateV1toV2 is the only
+## other minter, so before this tool a zone hand-added to a v2 board had no way to
+## acquire an id (docs/board-yaml.md, "Where a zone's id comes from").
+##
+## Entropy comes from Crypto (Godot's CSPRNG), not randi(), matching Go's
+## crypto/rand for the same reason it does: a mint is a one-time write and these
+## ids must stay globally unique across independently edited boards, which is what
+## lets a persistent id SUBSUME the old board-namespacing rule. 128 bits makes
+## that collision probability negligible.
+static func mint_entity_id(entity_type: String) -> String:
+	# hex_encode() emits LOWERCASE hex, which isMintedID requires.
+	return "%s:%s" % [entity_type, Crypto.new().generate_random_bytes(MINTED_ID_BYTES).hex_encode()]
+
+
+## Why the proposed zone cannot be authored, or "" when it can.
+##
+## ONE rule set, two consumers: create_zone() fail-closes on it, and the canvas
+## drawing tool shows it to the user BEFORE committing. It mirrors Go's
+## validateZones (internal/board/validate.go) field for field, because
+## pcb.serialize is a fail-closed WRITE gate that runs Validate over the WHOLE
+## board: one zone that violates these rules does not merely fail to save itself,
+## it makes the entire board unserializable. Minting such a zone into the model
+## would trade a refused gesture for a board the user cannot export at all.
+##
+## NOTE the non-obvious one: `net` is required for EVERY zone, keepouts included.
+## Go models no zone kind at all (kind rides in Zone.Extra — see the `zones`
+## declaration), so validateZones applies `zone_unknown_net` uniformly. A netless
+## keepout is not expressible in this contract today.
+func zone_author_error(net_name: String, layer: String, point_count: int) -> String:
+	if point_count < 3:
+		return "A zone outline needs at least 3 points (%d placed)." % point_count
+	if net_name.is_empty():
+		return "Pick a net first — every zone must name a declared net."
+	if not has_net(net_name):
+		return "Net \"%s\" is not declared on this board." % net_name
+	if layer.is_empty():
+		return "No copper layer to place the zone on."
+	if not layers.is_empty() and layer not in layers:
+		return "Layer \"%s\" is not in the board's declared layer stack." % layer
+	return ""
+
+
+## Create an authored zone and add it to the board. Returns the new zone dict
+## (the model's own, not a copy) or {} when zone_author_error refused it.
+##
+## Mints a persistent "zone:<hex>" id when the caller supplies none — this is the
+## whole point of the zone creation tool (docs/board-yaml.md: "a zone creation
+## tool is the thing that would close it"). The dict is built in the CANONICAL
+## shape the model stores zones in ({id, net, layer, kind, outline:[{x_mm,y_mm}]})
+## rather than an internal one, because zones are held verbatim — see the `zones`
+## declaration for why.
+##
+## `kind` is written explicitly even for a pour, though zone_kind() would default
+## it: an authored entity should state what it is, and the key round-trips through
+## Zone.Extra either way.
+func create_zone(net_name: String, layer: String, outline_points, kind: String = "copper_pour") -> Dictionary:
+	var pts := PackedVector2Array(outline_points)
+	var refusal := zone_author_error(net_name, layer, pts.size())
+	if not refusal.is_empty():
+		push_warning("[PCBData] create_zone refused: %s" % refusal)
+		return {}
+
+	var outline: Array = []
+	for p in pts:
+		outline.append({"x_mm": p.x, "y_mm": p.y})
+
+	var zone := {
+		"id": mint_entity_id("zone"),
+		"net": net_name,
+		"layer": layer,
+		"kind": kind,
+		"outline": outline,
+	}
+	zones.append(zone)
+	record_change("add_zone", {
+		"zone_id": zone["id"],
+		"net_name": net_name,
+		"layer": layer,
+		"kind": kind,
+		"point_count": pts.size(),
+	})
+	data_changed.emit()
+	return zone
+
+#endregion
+
+
 #region Board Properties
 
 ## Resize the board outline (journalled + emits structure/data changes).

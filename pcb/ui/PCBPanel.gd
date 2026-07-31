@@ -102,6 +102,10 @@ var _canvas: Control = null
 ## Toolbar widgets (built on mount).
 var _tool_buttons: Dictionary = {}   # ToolMode int -> Button
 var _layer_option: OptionButton = null
+## Net picker for the zone tools (epoch 6 unit 4). Lives in the sidebar under the
+## canvas-tools group and is only visible while a zone tool is armed — it is that
+## tool's arming state, not a persistent board control.
+var _zone_net_option: OptionButton = null
 var _board_size_label: Label = null
 var _status_label: Label = null
 
@@ -391,6 +395,7 @@ func _build_ui() -> void:
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 	_canvas.pin_selected.connect(_on_pin_selected)
+	_canvas.zone_tool_message.connect(_show_transient_status)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
 	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
@@ -622,6 +627,32 @@ func _build_sidebar() -> VBoxContainer:
 	_inspect_pin_button.pressed.connect(_on_inspect_pin_button_pressed)
 	tools_flow.add_child(_inspect_pin_button)
 	_tool_buttons[_PcbCanvasScript.ToolMode.INSPECT_PIN] = _inspect_pin_button
+
+	# Zone drawing tools (epoch 6 unit 4). They belong in THIS group, not with the
+	# Hints below: they author board entities (a Zone that serializes into the
+	# board YAML), which is what makes them canvas tools. Two buttons rather than
+	# one moded tool — the radio idiom _add_tool_button already provides is exactly
+	# "one of these is active", and a pour and a keepout are different tools to
+	# reach for, not one tool with a setting.
+	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
+		"Draw a copper pour: pick its net below, click each corner, double-click or press Enter to close "
+		+ "(needs 3+ corners; Esc/right-click cancels). Placed on the selected copper layer — on \"All\" it "
+		+ "goes on %s." % _PcbCanvasScript.ZONE_DEFAULT_LAYER)
+	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
+		"Draw a keep-out region: click each corner, double-click or press Enter to close "
+		+ "(needs 3+ corners; Esc/right-click cancels). A net is still required — the board contract "
+		+ "requires one on every zone, keepouts included.")
+
+	# The zone tools' arming control. Shown only while one of them is active, so
+	# the resting sidebar is unchanged.
+	_zone_net_option = OptionButton.new()
+	_zone_net_option.name = "ZoneNetOption"
+	_zone_net_option.tooltip_text = "Net for the zone being drawn — required by the board contract for " \
+		+ "every zone, pour or keepout"
+	_zone_net_option.visible = false
+	_rebuild_zone_net_option()
+	_zone_net_option.item_selected.connect(_on_zone_net_selected)
+	_sidebar.add_child(_zone_net_option)
 
 	_sidebar.add_child(HSeparator.new())
 	var hints_group_label := Label.new()
@@ -1568,7 +1599,61 @@ func _sync_tool_buttons(mode: int) -> void:
 
 func _on_tool_mode_changed(mode: int) -> void:
 	_sync_tool_buttons(mode)
+	_sync_zone_arm_ui(mode)
 	_update_status()
+
+
+## Show/hide the zone net picker with the zone tools, and refresh it from the
+## board on every arm (nets can be added between arms). Hooked to
+## tool_mode_changed rather than to the buttons, so every route into a zone mode
+## — button, keyboard, a programmatic set_tool_mode — arms the same way.
+func _sync_zone_arm_ui(mode: int) -> void:
+	if _zone_net_option == null:
+		return
+	var is_zone_tool: bool = mode == _PcbCanvasScript.ToolMode.ZONE_POUR \
+		or mode == _PcbCanvasScript.ToolMode.ZONE_KEEPOUT
+	_zone_net_option.visible = is_zone_tool
+	if not is_zone_tool:
+		return
+	_rebuild_zone_net_option()
+	if _data != null and _data.get_net_count() == 0:
+		_show_transient_status("This board declares no nets — a zone needs one before it can be drawn.")
+	elif _canvas != null and str(_canvas.zone_author_net).is_empty():
+		_show_transient_status("Pick a net for the zone, then click its corners.")
+
+
+## Rebuild the zone net picker from the board's declared nets. The first entry is
+## a placeholder carrying "" so "no net chosen" is a REAL state the commit path
+## can refuse, rather than an implicit selection of whichever net sorted first —
+## a pour silently tied to the wrong net is copper on the wrong net.
+func _rebuild_zone_net_option() -> void:
+	if _zone_net_option == null:
+		return
+	var previous := str(_canvas.zone_author_net) if _canvas != null else ""
+	_zone_net_option.clear()
+	_zone_net_option.add_item("Net…")
+	_zone_net_option.set_item_metadata(0, "")
+	var names: Array = _data.get_net_names() if _data != null else []
+	names.sort()
+	var selected := 0
+	for name in names:
+		var idx := _zone_net_option.item_count
+		_zone_net_option.add_item(str(name))
+		_zone_net_option.set_item_metadata(idx, str(name))
+		if str(name) == previous:
+			selected = idx
+	_zone_net_option.select(selected)
+	# Keep the canvas's armed net and the widget in step: a net that vanished with
+	# a board reload must not stay armed behind a placeholder.
+	if _canvas != null and selected == 0:
+		_canvas.zone_author_net = ""
+
+
+func _on_zone_net_selected(index: int) -> void:
+	if _canvas == null or _zone_net_option == null:
+		return
+	var meta: Variant = _zone_net_option.get_item_metadata(index)
+	_canvas.zone_author_net = str(meta) if meta != null else ""
 
 
 func _on_layer_selected(index: int) -> void:
@@ -1580,8 +1665,15 @@ func _on_layer_selected(index: int) -> void:
 
 
 func _on_component_lock_changed(message: String) -> void:
+	_show_transient_status(message)
+
+
+## Show a message in the status bar, then fall back to the standing status after
+## 2s. The ONE transient-status pathway — the component-lock channel and the zone
+## tools' feedback channel both land here rather than each growing their own timer.
+func _show_transient_status(message: String) -> void:
 	_set_status(message)
-	# Clear the transient lock message after 2s (guard: tree may be gone).
+	# Clear the transient message after 2s (guard: tree may be gone).
 	if is_inside_tree():
 		get_tree().create_timer(2.0).timeout.connect(func() -> void:
 			if is_instance_valid(_status_label):
@@ -1972,8 +2064,9 @@ func _update_status() -> void:
 	if _status_label == null or _canvas == null or _data == null:
 		return
 	var sel: Array = _canvas.get_selected_components()
-	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN.
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin"]
+	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN,
+	# ZONE_POUR, ZONE_KEEPOUT.
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout"]
 	var mode_txt := ""
 	var tm: int = _canvas.tool_mode
 	if tm > 0 and tm < mode_names.size():
@@ -1992,6 +2085,7 @@ func _update_status() -> void:
 ## Reflect the current model into the toolbar + canvas (after a load).
 func _refresh_board_ui() -> void:
 	_rebuild_layer_option()
+	_rebuild_zone_net_option()
 	_update_board_size_label()
 	_update_status()
 	if _canvas != null:

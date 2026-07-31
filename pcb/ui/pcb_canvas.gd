@@ -162,10 +162,18 @@ var _space_pan_armed: bool = false
 ## (WC-1) is the pin inspector: hover labels the nearest pad, click selects it
 ## (pin_selected), click empty clears, Escape/mode-switch clears + exits.
 ## Appended at the END so existing ToolMode-by-int callers (status bar mode
-## names) never renumber.
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN }
+## names) never renumber. ZONE_POUR / ZONE_KEEPOUT (epoch 6 unit 4) are the zone
+## drawing tools — click per vertex, double-click or Enter closes, Esc/right-click
+## cancels; they AUTHOR board entities (unlike the hint tools, which author
+## annotations), so they belong on this surface rather than the overlay's.
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
+## Transient user-facing feedback from the zone tools ("pick a net", "needs 3
+## points", "zone added"). The panel routes it to the status bar. A separate
+## signal from component_lock_changed so neither channel has to pretend to be the
+## other.
+signal zone_tool_message(text: String)
 
 ## Duck-typed back-reference to the PcbAnnotationHost (set by PCBPanel), the
 ## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
@@ -178,6 +186,27 @@ var _inspect_hover_screen_pos: Vector2 = Vector2.ZERO
 
 ## Trace selection state
 var selected_trace_id: String = ""
+
+## ── Zone authoring (epoch 6 unit 4) ───────────────────────────────────────────
+## The net a POUR is armed with, set by the panel's zone net picker. Empty means
+## "not armed": commit fails closed with a visible message rather than guessing a
+## net. A KEEPOUT needs one too — Go's validateZones requires `net` on every zone
+## regardless of kind (see pcb_data.zone_author_error), and pcb.serialize
+## validates the whole board, so a netless zone would make the board unexportable.
+var zone_author_net: String = ""
+## Default pour layer when the toolbar's layer filter is "all" — the classic
+## ground-pour side. Surfaced as a constant so the panel's tooltip and the commit
+## path name the SAME layer.
+const ZONE_DEFAULT_LAYER := "bottom"
+## Vertices placed so far, in board mm. Empty ⇔ no draw in progress.
+var _zone_points: PackedVector2Array = PackedVector2Array()
+## Live rubber-band vertex (the cursor), only meaningful while drawing.
+var _zone_preview: Vector2 = Vector2.ZERO
+var _zone_has_preview: bool = false
+## Alpha for the not-yet-committed closing edge, so an in-progress polygon reads
+## as open at the cursor and merely "about to close" at the origin.
+const ZONE_PREVIEW_CLOSE_ALPHA := 0.35
+const ZONE_PREVIEW_VERTEX_RADIUS_PX := 3.0
 
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)
@@ -390,6 +419,12 @@ func _draw() -> void:
 	# hatch is sparse enough to read through.
 	if show_zones:
 		_draw_zones()
+
+	# The polygon being drawn sits with the committed zones (same layer of the
+	# stack, same visual language) — but is NOT gated on show_zones: hiding
+	# authored zones must not blank out the one the user is drawing right now.
+	if _is_zone_tool():
+		_draw_zone_preview()
 
 	if show_traces:
 		_draw_traces()
@@ -1394,6 +1429,14 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_inspect_pin_click(world_pos)
 				return
 
+			# Zone tools (unit 4): each left-click places a vertex; a double-click
+			# closes the polygon. Owns the click outright, exactly like the pin
+			# inspector above — no select/drag/box-select fallthrough while a
+			# region is being drawn.
+			if _is_zone_tool():
+				_handle_zone_click(world_pos, event.double_click)
+				return
+
 			# Pan tool OR Space-drag: a left-drag pans the whole board view.
 			# (Discoverability for finding 2 — a visible Pan tool + the familiar
 			# Space+drag, alongside the existing right/middle-drag pan.)
@@ -1470,6 +1513,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
 		if event.pressed:
+			# Right-click CANCELS an in-progress zone (same grammar as the
+			# single-trace hint tool) instead of starting a pan / arming the
+			# context menu. Only while actually drawing — with no polygon in
+			# progress the zone tools leave right-drag panning alone.
+			if _is_zone_tool() and not _zone_points.is_empty():
+				_cancel_zone_draw(true)
+				return
 			is_panning = true
 			pan_start_mouse = event.position
 			pan_start_offset = pan_offset
@@ -1503,6 +1553,17 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	# this branch.
 	if tool_mode == ToolMode.INSPECT_PIN:
 		_update_inspect_hover(world_pos, event.position)
+	elif _is_zone_tool():
+		# Rubber-band the edge from the last placed vertex to the cursor. No
+		# component hover while a zone tool is armed — the tool owns the surface,
+		# so a highlight left over from before it was armed is dropped.
+		if not hovered_component.is_empty():
+			hovered_component = ""
+			queue_redraw()
+		if not _zone_points.is_empty():
+			_zone_preview = _zone_vertex_at(world_pos)
+			_zone_has_preview = true
+			queue_redraw()
 	else:
 		var new_hover: String = _component_at(world_pos)
 		if new_hover != hovered_component:
@@ -1544,7 +1605,18 @@ func _handle_key_input(event: InputEventKey) -> void:
 				_delete_selected_trace()
 			else:
 				_delete_selected()
+		KEY_ENTER, KEY_KP_ENTER:
+			# Closes an in-progress zone. Mirrors the single-trace hint tool's
+			# Enter commit; the canvas also honours a real double-click (it,
+			# unlike AnnotationOverlay, does receive the double_click flag).
+			if _is_zone_tool():
+				_commit_zone()
 		KEY_ESCAPE:
+			# A zone draw in progress is what Escape cancels FIRST — cancelling it
+			# should not also wipe the user's component selection.
+			if _is_zone_tool() and not _zone_points.is_empty():
+				_cancel_zone_draw(true)
+				return
 			if tool_mode == ToolMode.INSPECT_PIN:
 				_exit_inspect_pin_mode()
 			_clear_selection()
@@ -1747,10 +1819,16 @@ func _has_any_locked_components() -> bool:
 ## Set the active tool mode. Emits tool_mode_changed on a real change.
 ## Entering OR leaving INSPECT_PIN clears any pin selection (contract §3:
 ## "switching modes clears selection") — one gate covers both directions.
+##
+## Leaving a zone tool discards any half-drawn polygon, same "switching modes
+## clears in-progress state" rule. Silently: the user asked for another tool, so
+## the abandoned draw is expected, not something to report.
 func set_tool_mode(mode: ToolMode) -> void:
 	if tool_mode != mode:
 		if tool_mode == ToolMode.INSPECT_PIN or mode == ToolMode.INSPECT_PIN:
 			_clear_inspect_pin_selection()
+		if _is_zone_tool():
+			_cancel_zone_draw(false)
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		queue_redraw()
@@ -1819,6 +1897,187 @@ func _lookup_pin_info(world_pos: Vector2) -> Dictionary:
 func _clear_inspect_pin_selection() -> void:
 	_inspect_hover_label = ""
 	pin_selected.emit({})
+
+#endregion
+
+
+#region Zone Authoring (epoch 6 unit 4)
+
+## Gesture (Illustrator shape-drawing family, matching the single-trace hint
+## tool's grammar rather than inventing a second one):
+##   ARMED   --left-click-->        place a vertex
+##   DRAWING --double-click/Enter-> close and commit (needs ≥3 vertices)
+##   DRAWING --Esc/right-click-->   cancel
+##   DRAWING --tool switch-->       cancel (silently — see set_tool_mode)
+##
+## This tool AUTHORS A BOARD ENTITY (a Zone in the model, which serializes into
+## the board YAML), unlike the hint tools which author annotations. That is why it
+## lives on the canvas tool surface and journals + snapshots like any other
+## interactive board edit, and why every refusal is fail-closed: see
+## pcb_data.zone_author_error for why an invalid zone is worse than a refused
+## gesture (it makes the WHOLE board unserializable).
+
+func _is_zone_tool() -> bool:
+	return tool_mode == ToolMode.ZONE_POUR or tool_mode == ToolMode.ZONE_KEEPOUT
+
+
+## Zone kind the armed tool authors — the same two strings the render path
+## normalises through PCBDataScript.zone_kind().
+func _zone_tool_kind() -> String:
+	return "keepout" if tool_mode == ToolMode.ZONE_KEEPOUT else "copper_pour"
+
+
+## Where a click lands, in board mm. Honours snap_to_grid exactly like a
+## component drag does — a pour corner on the same grid as the parts it surrounds
+## is the useful default, and the commit gesture is the double-click flag rather
+## than "the click landed on the previous point", so snapping cannot accidentally
+## close the polygon.
+func _zone_vertex_at(world_pos: Vector2) -> Vector2:
+	if snap_to_grid and data:
+		return data.snap_to_grid(world_pos)
+	return world_pos
+
+
+## The canonical copper layer a new zone is placed on.
+##
+## The toolbar layer filter names it whenever it is scoped to one copper layer —
+## the layer you are LOOKING at is the layer you are drawing on. Under "All" there
+## is no such answer, so it falls back to ZONE_DEFAULT_LAYER ("bottom", the classic
+## ground-pour side); the tool button's tooltip states that fallback outright so
+## it is never a silent choice. Fails visible (returns "") when the board does not
+## declare the fallback layer at all, rather than authoring copper onto a layer
+## the board has never heard of.
+func zone_author_layer() -> String:
+	if not trace_layer_filter.is_empty() and trace_layer_filter != "all" \
+			and PcbLayerStack.is_copper(trace_layer_filter):
+		return trace_layer_filter
+	var declared: Array = data.layers if data else []
+	if declared.is_empty() or ZONE_DEFAULT_LAYER in declared:
+		return ZONE_DEFAULT_LAYER
+	for layer in declared:
+		if PcbLayerStack.is_copper(str(layer)):
+			return str(layer)
+	return ""
+
+
+func _handle_zone_click(world_pos: Vector2, is_double_click: bool) -> void:
+	# The second press of a physical double-click arrives AFTER the first has
+	# already placed its vertex, so it closes the polygon instead of placing a
+	# duplicate one on top of it.
+	if is_double_click:
+		_commit_zone()
+		return
+	_zone_points.append(_zone_vertex_at(world_pos))
+	_zone_has_preview = false
+	queue_redraw()
+
+
+## Close the in-progress polygon into a real zone entity.
+##
+## HISTORY ORDER — this file contains two conflicting idioms and they are NOT
+## equivalent, so this picks deliberately. _restore_state applies a snapshot
+## wholesale and undo() steps to history[index - 1], so the snapshot a step
+## carries must be the state AFTER that step:
+##   * the component-move path snapshots AFTER the mutation → undo AND redo both
+##     land correctly;
+##   * _delete_selected / _delete_selected_trace snapshot BEFORE it → undo still
+##     works (the previous snapshot is the pre-delete state either way), but redo
+##     restores the pre-mutation state and silently does nothing.
+## Measured, not assumed. Zone commit follows the MOVE idiom, so Ctrl+Z removes
+## the zone and Ctrl+Shift+Z puts it back.
+##
+## create_zone emits data_changed, which is what marks the tab dirty (PCBPanel
+## relays it to content_changed) — there is no separate dirty flag to set.
+func _commit_zone() -> void:
+	if not data or not _is_zone_tool():
+		return
+	var net := zone_author_net
+	var layer := zone_author_layer()
+	var refusal: String = data.zone_author_error(net, layer, _zone_points.size())
+	if not refusal.is_empty():
+		# Keep the placed vertices: the fix for "pick a net" is to pick a net and
+		# press Enter again, not to redraw the whole outline.
+		zone_tool_message.emit(refusal)
+		return
+
+	var kind := _zone_tool_kind()
+	var zone: Dictionary = data.create_zone(net, layer, _zone_points, kind)
+	if zone.is_empty():
+		# zone_author_error already passed, so this is a model-side refusal we did
+		# not anticipate. Report it rather than leaving a silent no-op behind.
+		zone_tool_message.emit("Zone was refused by the board model — see the log.")
+		return
+	data.save_to_history("Add %s" % ("keepout" if kind == "keepout" else "pour"))
+	var point_count := _zone_points.size()
+	_reset_zone_draw()
+	zone_tool_message.emit("Added %s on %s (%s, %d points)." % [
+		"keepout" if kind == "keepout" else "pour", layer, net, point_count])
+	queue_redraw()
+
+
+## Discard the in-progress polygon. `announce` is false for a tool switch (the
+## user already knows) and true for an explicit Esc/right-click cancel.
+func _cancel_zone_draw(announce: bool) -> void:
+	if _zone_points.is_empty():
+		return
+	_reset_zone_draw()
+	if announce:
+		zone_tool_message.emit("Zone cancelled.")
+	queue_redraw()
+
+
+func _reset_zone_draw() -> void:
+	_zone_points = PackedVector2Array()
+	_zone_has_preview = false
+
+
+## Draw the polygon being born, in the SAME visual language committed zones use
+## (net colour for a pour, the keepout amber for a keepout, same outline width) so
+## it reads as the zone itself rather than as a generic rubber band. Placed
+## vertices get dots — the one thing a committed zone does not draw, because it is
+## the one thing only an in-progress polygon has.
+func _draw_zone_preview() -> void:
+	if _zone_points.is_empty():
+		return
+
+	var is_keepout := tool_mode == ToolMode.ZONE_KEEPOUT
+	var color := zone_keepout_color
+	if not is_keepout:
+		color = zone_pour_fallback_color
+		var net = data.get_net(zone_author_net) if data else null
+		if net:
+			color = net.color
+
+	var screen_pts := PackedVector2Array()
+	for p in _zone_points:
+		screen_pts.append(world_to_screen(p))
+	var cursor_pt := world_to_screen(_zone_preview) if _zone_has_preview else Vector2.ZERO
+
+	var open_path := screen_pts.duplicate()
+	if _zone_has_preview:
+		open_path.append(cursor_pt)
+	if open_path.size() >= 2:
+		draw_polyline(open_path, Color(color, zone_outline_alpha), zone_outline_width_px)
+
+	# The closing edge back to the first vertex is dimmer: it is where the polygon
+	# WILL close, not an edge the user has drawn yet.
+	var last_pt: Vector2 = open_path[open_path.size() - 1]
+	if open_path.size() >= 3:
+		draw_line(last_pt, screen_pts[0], Color(color, ZONE_PREVIEW_CLOSE_ALPHA), zone_outline_width_px)
+
+	for pt in screen_pts:
+		draw_circle(pt, ZONE_PREVIEW_VERTEX_RADIUS_PX, Color(color, zone_outline_alpha))
+
+	# Arming label at the origin vertex — what this polygon will BECOME, mirroring
+	# the single-trace tool's "Single Trace from U1.3" preview label. Says the
+	# layer explicitly so the "All → bottom" fallback is visible while drawing.
+	if font != null:
+		var layer := zone_author_layer()
+		var label := "Keepout @ %s" % layer if is_keepout \
+			else "Pour %s @ %s" % [zone_author_net if not zone_author_net.is_empty() else "(no net)", layer]
+		label += "  ·  %d pts" % _zone_points.size()
+		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(color, zone_outline_alpha))
 
 #endregion
 
