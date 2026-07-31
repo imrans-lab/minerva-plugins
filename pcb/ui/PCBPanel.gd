@@ -559,6 +559,17 @@ func _add_tool_button(tb: Container, mode: int, text: String, tip: String, icon_
 	_tool_buttons[mode] = btn
 
 
+## Sidebar section label — the 11px caption idiom shared by all three tool
+## groups. Named "<text>GroupLabel" so existing lookups (e.g. HintsGroupLabel)
+## keep resolving.
+func _add_group_label(text: String) -> void:
+	var group_label := Label.new()
+	group_label.name = text + "GroupLabel"
+	group_label.text = text
+	group_label.add_theme_font_size_override("font_size", 11)
+	_sidebar.add_child(group_label)
+
+
 ## Loads an icon from the plugin's own assets dir (next to this script).
 ## Plugins live OUTSIDE res://, so preload() can't reach the PNGs — resolve the
 ## script's directory and load from the filesystem. Fail-safe: any miss returns
@@ -597,9 +608,12 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.custom_minimum_size.x = 120
 	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
-	## Two tool groups (grouping per docket 019fb5624e2e): canvas tools
-	## above, hint-authoring tools below, separated by an HSeparator + small
-	## "Hints" label using the same 11px idiom as _route_flow_mode_label.
+	## Three labeled tool sections (docket 019fb5624e2e; sectioning corrected
+	## per boundary bug 019fb5c74980): Select (navigation/inspection), Draw
+	## (tools that author board entities), Hints (route-hint authoring for the
+	## router). Each section is an 11px label ABOVE its flow so the label
+	## unambiguously captions the group below it; HSeparator between sections.
+	_add_group_label("Select")
 	var tools_flow := FlowContainer.new()
 	tools_flow.name = "ToolsFlow"
 	_sidebar.add_child(tools_flow)
@@ -629,34 +643,40 @@ func _build_sidebar() -> VBoxContainer:
 	tools_flow.add_child(_inspect_pin_button)
 	_tool_buttons[_PcbCanvasScript.ToolMode.INSPECT_PIN] = _inspect_pin_button
 
-	# Zone drawing tools (epoch 6 unit 4). They belong in THIS group, not with the
-	# Hints below: they author board entities (a Zone that serializes into the
-	# board YAML), which is what makes them canvas tools. Two buttons rather than
-	# one moded tool — the radio idiom _add_tool_button already provides is exactly
-	# "one of these is active", and a pour and a keepout are different tools to
-	# reach for, not one tool with a setting.
-	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
+	# Draw section (epoch 6 units 4+5; own section per boundary bug
+	# 019fb5c74980): these tools author board ENTITIES — zones and traces that
+	# serialize into the board YAML — a different altitude from the Select
+	# tools above (which touch nothing) and the router Hints below (which
+	# request copper rather than draw it). Two zone buttons rather than one
+	# moded tool — the radio idiom _add_tool_button provides is exactly "one
+	# of these is active".
+	_sidebar.add_child(HSeparator.new())
+	_add_group_label("Draw")
+	var draw_flow := FlowContainer.new()
+	draw_flow.name = "DrawFlow"
+	_sidebar.add_child(draw_flow)
+
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
 		"Draw a copper pour: pick its net below, click each corner, double-click or press Enter to close "
 		+ "(needs 3+ corners; Esc/right-click cancels). Placed on the selected copper layer — on \"All\" it "
-		+ "goes on %s." % _PcbCanvasScript.ZONE_DEFAULT_LAYER)
-	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
+		+ "goes on %s." % _PcbCanvasScript.ZONE_DEFAULT_LAYER, "pour_24.png")
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
 		"Draw a keep-out region: click each corner, double-click or press Enter to close "
 		+ "(needs 3+ corners; Esc/right-click cancels). A net is still required — the board contract "
-		+ "requires one on every zone, keepouts included.")
+		+ "requires one on every zone, keepouts included.", "keepout_24.png")
 
-	# Trace drawing tool (epoch 6 unit 5). Same group and same reason as the zone
-	# tools above: it authors a board ENTITY (a Trace that serializes into the
-	# board YAML), which is what makes it a canvas tool rather than a hint tool.
-	# It shares a name with the Hints-group Trace button below and that is
-	# deliberate — they draw the same thing at two different altitudes — so the
-	# tooltip carries the distinction outright rather than leaving it to be
-	# discovered: this one IS the copper, that one is a request for copper.
-	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.TRACE, "Trace",
+	# Trace drawing tool (epoch 6 unit 5). Same section and same reason as the
+	# zone tools above: it authors a board ENTITY. It shares a name with the
+	# Hints-group Trace button below and that is deliberate — they draw the
+	# same thing at two different altitudes — so the icon (solid pads vs the
+	# hint's hollow ones) and tooltip carry the distinction outright: this one
+	# IS the copper, that one is a request for copper.
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.TRACE, "Trace",
 		"Draw real copper directly, bypassing the router (Hints ▸ Trace asks the router for a route instead). "
 		+ "Click a pad to start — the trace takes that pad's net — then click each waypoint, and click "
 		+ "another pad to finish on it; double-click or press Enter to end it where it is. Esc/right-click "
 		+ "cancels. Drawn at the board's design-rule trace width, on the selected copper layer — on "
-		+ "\"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER)
+		+ "\"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER, "trace_draw_24.png")
 
 	# The zone tools' arming control. Shown only while one of them is active, so
 	# the resting sidebar is unchanged.
@@ -670,11 +690,7 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.add_child(_zone_net_option)
 
 	_sidebar.add_child(HSeparator.new())
-	var hints_group_label := Label.new()
-	hints_group_label.name = "HintsGroupLabel"
-	hints_group_label.text = "Hints"
-	hints_group_label.add_theme_font_size_override("font_size", 11)
-	_sidebar.add_child(hints_group_label)
+	_add_group_label("Hints")
 
 	var hints_flow := FlowContainer.new()
 	hints_flow.name = "HintsFlow"
