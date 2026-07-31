@@ -91,10 +91,10 @@ func _init() -> void:
 		check("registered: %s" % tool_name, tool_name in registered,
 				"registered set: %s" % str(registered))
 
-	# Total count pin: 29 pre-existing panel tools + these 11 == 40. Catches a
-	# manifest that silently dropped or duplicated an unrelated entry while
-	# this round's diff was being made.
-	check("total registered tool count == 40", registered.size() == 40,
+	# Total count pin: 34 panel tools (29 pre-A6 + the 5 A6 zone tools) + these
+	# 11 worker tools == 45. Catches a manifest that silently dropped or
+	# duplicated an unrelated entry while a round's diff was being made.
+	check("total registered tool count == 45", registered.size() == 45,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
