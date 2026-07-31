@@ -585,6 +585,9 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.custom_minimum_size.x = 120
 	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
+	## Two tool groups (grouping per docket 019fb5624e2e): canvas tools
+	## above, hint-authoring tools below, separated by an HSeparator + small
+	## "Hints" label using the same 11px idiom as _route_flow_mode_label.
 	var tools_flow := FlowContainer.new()
 	tools_flow.name = "ToolsFlow"
 	_sidebar.add_child(tools_flow)
@@ -614,6 +617,17 @@ func _build_sidebar() -> VBoxContainer:
 	tools_flow.add_child(_inspect_pin_button)
 	_tool_buttons[_PcbCanvasScript.ToolMode.INSPECT_PIN] = _inspect_pin_button
 
+	_sidebar.add_child(HSeparator.new())
+	var hints_group_label := Label.new()
+	hints_group_label.name = "HintsGroupLabel"
+	hints_group_label.text = "Hints"
+	hints_group_label.add_theme_font_size_override("font_size", 11)
+	_sidebar.add_child(hints_group_label)
+
+	var hints_flow := FlowContainer.new()
+	hints_flow.name = "HintsFlow"
+	_sidebar.add_child(hints_flow)
+
 	# Route-flow toolbar cluster (WC-3, contract §5): a TRUE toggle per route
 	# author tool, same idiom as the pin inspector button above. Only
 	# single-trace this round; WC-4 adds a "Bus" button beside it into the
@@ -629,7 +643,7 @@ func _build_sidebar() -> VBoxContainer:
 		+ "click a pad/double-click empty space to finish (Esc/right-click cancels)"
 	trace_btn.toggle_mode = true
 	trace_btn.pressed.connect(_on_single_trace_button_pressed)
-	tools_flow.add_child(trace_btn)
+	hints_flow.add_child(trace_btn)
 	_route_flow_buttons["single_trace"] = trace_btn
 
 	# Bend-handle editing tool (C4, docket 019f6c464ff0): select a committed
@@ -649,7 +663,7 @@ func _build_sidebar() -> VBoxContainer:
 		+ "click a segment to insert a new bend (Esc/tool-switch exits)"
 	edit_hint_btn.toggle_mode = true
 	edit_hint_btn.pressed.connect(_on_edit_hint_button_pressed)
-	tools_flow.add_child(edit_hint_btn)
+	hints_flow.add_child(edit_hint_btn)
 	_route_flow_buttons["edit_hint"] = edit_hint_btn
 
 	# Manual via-insertion tool (U4, DCR 019f7095c395 Stage-2): select a
@@ -669,7 +683,7 @@ func _build_sidebar() -> VBoxContainer:
 		+ "to the opposite copper layer (Esc/tool-switch exits)"
 	add_via_btn.toggle_mode = true
 	add_via_btn.pressed.connect(_on_add_via_button_pressed)
-	tools_flow.add_child(add_via_btn)
+	hints_flow.add_child(add_via_btn)
 	_route_flow_buttons["add_via"] = add_via_btn
 
 	# Propose button (C5, docket 019f6c465fd8, deliverable 1): explicit-propose
@@ -688,7 +702,7 @@ func _build_sidebar() -> VBoxContainer:
 		_propose_button.text = "Propose"
 	_propose_button.tooltip_text = "Run the router over open route hints and write back inspectable cyan proposals (the board is not changed)"
 	_propose_button.pressed.connect(_on_propose_button_pressed)
-	tools_flow.add_child(_propose_button)
+	hints_flow.add_child(_propose_button)
 
 	_route_flow_mode_label = Label.new()
 	_route_flow_mode_label.name = "RouteFlowModeLabel"
