@@ -297,6 +297,52 @@ var _zone_has_preview: bool = false
 const ZONE_PREVIEW_CLOSE_ALPHA := 0.35
 const ZONE_PREVIEW_VERTEX_RADIUS_PX := 3.0
 
+## ── Zone vertex editing (A5) ──────────────────────────────────────────────────
+## Outline editing of a COMMITTED zone, on the SELECTED zone only. The grammar is
+## ported from pcb_route_hint_kind.gd's BendHandleEditTool (drag a handle = move
+## that vertex, click a segment = insert one there, right-click a handle = delete
+## it) — the same gesture vocabulary, deliberately, so "edit the shape of a thing
+## made of points" means one thing across both input surfaces. The CODE is not
+## shared: that tool is an AnnotationAuthorTool driving annotations through
+## annotation_modified over an overlay host; this is the board canvas mutating
+## board entities through pcb_data with real journal + history. Nothing but the
+## grammar transfers.
+##
+## Handles are drawn slightly larger than the in-progress polygon's vertex dots
+## (ZONE_PREVIEW_VERTEX_RADIUS_PX) and hit generously outside their own radius —
+## a drawn dot only has to be SEEN, a handle has to be GRABBED. Both radii are
+## screen px (constant across zoom), like every other handle on this canvas.
+const ZONE_VERTEX_HANDLE_RADIUS_PX := 4.0
+const ZONE_VERTEX_HIT_PX := 9.0
+## How near an edge a press must land to arm a vertex insertion. MUST MATCH the
+## zone pick's own tolerance (_zone_at's 3.0 / zoom): the insertion is armed from
+## that pick's result, so a wider radius here would arm against an edge the pick
+## never considered. Also tighter than the handle radius, so a press near a corner
+## is unambiguously the corner's.
+const ZONE_EDGE_INSERT_HIT_PX := 3.0
+## A press-release pair this close together is a TAP, not a drag — the same
+## discrimination RIGHT_CLICK_THRESHOLD already makes for the context menu, at the
+## same distance, reused as a named constant of its own because it now answers a
+## second question (see _zone_edge_insert_candidate for why an edge press cannot
+## simply insert on PRESS the way the annotation tool's does).
+const ZONE_EDGE_TAP_PX := 5.0
+
+## Live vertex drag. `_zone_vertex_drag_origin` is the pre-drag outline, captured
+## once at press, so every motion frame writes `origin with one point replaced`
+## rather than nudging live geometry — the same absolute-from-origin rule
+## _drag_origins follows, and what makes Escape an exact revert.
+var _zone_vertex_drag_id: String = ""
+var _zone_vertex_drag_index: int = -1
+var _zone_vertex_drag_origin: PackedVector2Array = PackedVector2Array()
+
+## Armed edge-insertion, set at press and consumed (or discarded) at release.
+## Empty ⇔ nothing armed. Keys: zone_id, index, point, press_pos, origin.
+var _zone_edge_insert: Dictionary = {}
+## True between the PRESS that deleted a vertex and its own release, so that
+## release does not fall through into the context-menu test (which is measured
+## against a right_click_start_pos the delete branch never wrote).
+var _zone_vertex_right_consumed: bool = false
+
 ## ── Trace authoring (epoch 6 unit 5) ──────────────────────────────────────────
 ## Default copper layer when the toolbar's layer filter is "all". TOP, unlike the
 ## zone tools' "bottom": a pour under "All" wants the classic ground-pour side,
@@ -443,6 +489,15 @@ func _ready() -> void:
 	_create_context_menu()
 
 
+## Losing the window or the control's focus ends any gesture in flight: the
+## release that would have finished it will never arrive here (cold-review F7).
+## Kept to the TRANSIENT flags — the selection and the view are not gesture state.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_FOCUS_EXIT:
+		_zone_vertex_right_consumed = false
+		_zone_edge_insert = {}
+
+
 func _exit_tree() -> void:
 	if has_focus():
 		release_focus()
@@ -453,6 +508,11 @@ func _exit_tree() -> void:
 	is_dragging_selection = false
 	_drag_origins = {}
 	is_box_selecting = false
+	# Same reason the drag state above is dropped: this node is REPARENTED, and a
+	# half-finished vertex gesture must not resume against a stale outline.
+	_reset_zone_vertex_drag()
+	_zone_edge_insert = {}
+	_zone_vertex_right_consumed = false
 
 
 ## Create the right-click context menu (component lock/unlock).
@@ -892,8 +952,30 @@ func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
 		# Same selection colour + emphasis the trace pick uses, so "selected"
 		# reads identically across board entities.
 		draw_polyline(outline, trace_selected_color, zone_outline_width_px * 2.0)
+		_draw_zone_vertex_handles(str(zone.get("id", "")), screen_poly)
 	else:
 		draw_polyline(outline, Color(color, zone_outline_alpha), zone_outline_width_px)
+
+
+## Vertex handles on the SELECTED zone's outline (A5).
+##
+## Same shape and colour language the selected TRACE already uses for its
+## waypoints (draw_circle in trace_selected_color, see _draw_traces) — a selected
+## polyline-ish entity shows its points, whatever kind it is — just a touch larger,
+## because these are grabbable and a trace's are not yet.
+##
+## Drawn ONLY where the gesture actually exists (_zone_vertex_edit_active): with
+## the eraser, a zone tool or the pin inspector armed, a handle would advertise a
+## drag that click would never reach, since those tools own the click outright.
+## The vertex mid-drag gets the drag colour so the one being moved is obvious in a
+## dense outline.
+func _draw_zone_vertex_handles(zone_id: String, screen_poly: PackedVector2Array) -> void:
+	if not _zone_vertex_edit_active():
+		return
+	for i in screen_poly.size():
+		var is_dragged: bool = _zone_vertex_drag_id == zone_id and _zone_vertex_drag_index == i
+		draw_circle(screen_poly[i], ZONE_VERTEX_HANDLE_RADIUS_PX,
+			component_selected_color if is_dragged else trace_selected_color)
 
 
 ## Hatch a screen-space polygon with parallel diagonal lines, CLIPPED TO THE
@@ -1646,6 +1728,25 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				pan_start_offset = pan_offset
 				return
 
+			# Zone vertex handles (A5) are a NARROW, DELIBERATE EXCEPTION to the
+			# frozen click ladder: on a handle hit the component and trace picks
+			# below are skipped entirely, so a part sitting within
+			# ZONE_VERTEX_HIT_PX of a selected pour's corner cannot be grabbed
+			# until that pour is deselected. That is the standard handles-beat-
+			# what-is-under-them convention, and it is scoped as tightly as it can
+			# be: handles exist ONLY on an ALREADY-SELECTED zone, ONLY under the
+			# Select family (_zone_vertex_edit_active), and ONLY within a vertex's
+			# own radius. With no zone selected the ladder is untouched, and a
+			# first click on any zone still just selects it.
+			#
+			# It has to be checked BEFORE the pick rather than after: a handle sits
+			# ON the outline, which is exactly where _zone_at would re-pick the
+			# already-selected zone and start a whole-zone move, so a handle
+			# checked after the pick would be a handle no press could ever reach.
+			if _begin_zone_vertex_drag(world_pos):
+				queue_redraw()
+				return
+
 			# Smart SELECT tool (the resting tool): click selects; click-drag on
 			# any SELECTED entity moves the whole selection (snap-aware); click-
 			# drag on empty space box-selects. One tool does select + move +
@@ -1660,6 +1761,16 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			var hit: Array = _entity_at(world_pos)
 			var hit_kind: String = hit[0]
 			var hit_id: String = hit[1]
+
+			# An EDGE press only ARMS an insertion (fired at release if the press
+			# turns out to be a tap) and then falls through, because the same press
+			# is also how a selected zone is dragged. It is armed FROM THE PICK
+			# RESULT — after _entity_at, never before it — so an insertion can only
+			# ever belong to a press the frozen ladder already resolved to that
+			# zone. See _arm_zone_edge_insert for what went wrong when it armed on
+			# proximity alone. Read BEFORE the selection branch below, so
+			# "was it already selected" means what it says.
+			_arm_zone_edge_insert(world_pos, event.position, hit_kind, hit_id, event.double_click)
 
 			if event.double_click and hit_kind == KIND_COMPONENT:
 				component_double_clicked.emit(hit_id)
@@ -1690,6 +1801,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			selection_changed.emit()
 			queue_redraw()
 		else:
+			# A vertex drag owns the release outright: it never started a pan, a
+			# selection drag or a box-select, so nothing else here concerns it.
+			if not _zone_vertex_drag_id.is_empty():
+				_end_zone_vertex_drag()
+				queue_redraw()
+				return
+
 			# Release a left-drag pan (Pan tool / Space-drag).
 			if is_panning:
 				is_panning = false
@@ -1700,10 +1818,20 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				is_box_selecting = false
 				_finalize_box_selection()
 
+			# AFTER the selection drag has committed (or committed nothing): an
+			# armed edge insertion fires only when the gesture turned out to be a
+			# tap that moved the zone not at all.
+			_commit_zone_edge_insert(event.position)
+
 			queue_redraw()
 
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
 		if event.pressed:
+			# Clear a flag left over from a press whose release never arrived
+			# (focus loss, a popup grab). It is only ever read by the matching
+			# release, so clearing it at the next press means a leaked one can
+			# never swallow a later context menu (cold-review F7).
+			_zone_vertex_right_consumed = false
 			# Right-click CANCELS an in-progress zone (same grammar as the
 			# single-trace hint tool) instead of starting a pan / arming the
 			# context menu. Only while actually drawing — with no polygon in
@@ -1714,6 +1842,19 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			if tool_mode == ToolMode.TRACE and not _trace_points.is_empty():
 				_cancel_trace_draw(true)
 				return
+			# A right-click ON a vertex handle of the selected zone DELETES that
+			# vertex (A5) — ported from BendHandleEditTool's right-click-a-handle
+			# grammar. It takes priority over pan-arming for the same reason the
+			# left-button handle check takes priority over the entity pick: a
+			# handle press that armed a pan first would never reach the handle.
+			# It consumes the press outright, so no pan is armed and no context
+			# menu can follow (the menu is popped on RELEASE, gated on a
+			# right_click_start_pos this branch never writes — the release below
+			# would otherwise measure against a STALE position). A right-click
+			# anywhere else, including inside a selected pour, is untouched.
+			if _delete_zone_vertex_at(world_pos):
+				_zone_vertex_right_consumed = true
+				return
 			is_panning = true
 			pan_start_mouse = event.position
 			pan_start_offset = pan_offset
@@ -1721,6 +1862,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			context_menu_world_pos = world_pos
 		else:
 			is_panning = false
+			# The RELEASE half of a right-click that deleted a vertex. Without this
+			# the menu would still pop: it is gated on right_click_start_pos, which
+			# the delete branch deliberately never writes, so the test would measure
+			# against whatever position the PREVIOUS right-click left behind.
+			if _zone_vertex_right_consumed:
+				_zone_vertex_right_consumed = false
+				return
 			if event.position.distance_to(right_click_start_pos) < RIGHT_CLICK_THRESHOLD:
 				_show_context_menu(event.position)
 
@@ -1741,6 +1889,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 
 func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	var world_pos := screen_to_world(event.position)
+
+	# A zone vertex drag owns the pointer while it runs: no hover update, no pan,
+	# no selection drag, no marquee — it started none of them, and running the
+	# hover chain under it would fight the handle for the cursor.
+	if not _zone_vertex_drag_id.is_empty():
+		_update_zone_vertex_drag(world_pos)
+		return
 
 	# Pin inspector (WC-1) owns hover feedback instead of component hover; a
 	# middle/right-drag pan still updates below via is_panning, unaffected by
@@ -1839,6 +1994,17 @@ func _handle_key_input(event: InputEventKey) -> void:
 			elif tool_mode == ToolMode.TRACE:
 				_commit_trace()
 		KEY_ESCAPE:
+			# Escape disarms a pending edge insertion whatever else it goes on to
+			# cancel (cold-review F1): Escape is advertised as the cancel for this
+			# whole family of gestures, and the release that follows must not
+			# resurrect an insertion the user just called off.
+			_zone_edge_insert = {}
+			# A vertex drag in progress is what Escape cancels FIRST OF ALL (A5):
+			# it is the innermost gesture, nothing was journalled while it ran, and
+			# cancelling it must not also wipe the selection the handles belong to.
+			if not _zone_vertex_drag_id.is_empty():
+				_cancel_zone_vertex_drag()
+				return
 			# A zone draw in progress is what Escape cancels FIRST — cancelling it
 			# should not also wipe the user's component selection.
 			if _is_zone_tool() and not _zone_points.is_empty():
@@ -2036,6 +2202,11 @@ func _clear_selection() -> void:
 	selected_trace_ids.clear()
 	selected_zone_ids.clear()
 	focused_component = ""
+	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
+	# there is nothing for it to belong to (cold-review F1 — the deselect click
+	# itself used to fire one). _commit_zone_edge_insert re-checks selection too;
+	# this is the cheaper half of the same guarantee.
+	_zone_edge_insert = {}
 	selection_changed.emit()
 
 
@@ -2583,6 +2754,298 @@ func _point_near_outline(p: Vector2, pts: PackedVector2Array, tol: float) -> boo
 		if p.distance_to(closest) <= tol:
 			return true
 	return false
+
+
+#region Zone Vertex Editing (A5)
+
+## Is the vertex-editing surface live right now?
+##
+## Every mode listed here OWNS THE CLICK outright (see _handle_mouse_button: the
+## pin inspector, both zone tools, the trace tool and the eraser each return
+## before the Select grammar is reached; Pan turns a left-drag into a view pan).
+## Drawing handles under one of them would advertise a gesture the click can never
+## deliver, and the right-click delete would steal a press those tools do use. The
+## SELECT family is what is left, which is exactly where zone selection came from.
+func _zone_vertex_edit_active() -> bool:
+	if tool_mode == ToolMode.INSPECT_PIN or tool_mode == ToolMode.TRACE \
+			or tool_mode == ToolMode.ERASER or tool_mode == ToolMode.PAN:
+		return false
+	return not _is_zone_tool()
+
+
+## The vertex handle under `world_pos`, as {zone_id, index, points}, or {}.
+##
+## Walks SELECTED zones only, honouring _zone_visible — the SAME pair of rules
+## _draw_zone applies before it draws any handles at all, so what is grabbable is
+## exactly what is drawn (the discipline _zone_at and get_zones_in_region already
+## share). Selection order breaks ties, so with two overlapping selected zones the
+## first-selected wins, deterministically.
+func _zone_vertex_hit(world_pos: Vector2) -> Dictionary:
+	if not data or not _zone_vertex_edit_active():
+		return {}
+	var tol := ZONE_VERTEX_HIT_PX / zoom
+	for zone_id in selected_zone_ids:
+		var zone: Dictionary = data.get_zone(zone_id)
+		if zone.is_empty() or not _zone_visible(zone):
+			continue
+		var pts := PCBDataScript.zone_outline_points(zone)
+		for i in pts.size():
+			if pts[i].distance_to(world_pos) <= tol:
+				return {"zone_id": zone_id, "index": i, "points": pts}
+	return {}
+
+
+## Begin dragging a vertex handle; true when one was grabbed (the press is then
+## consumed). Captures the WHOLE pre-drag outline, not just the one point, for the
+## reason _capture_drag_origins captures whole geometries: every motion frame
+## rewrites `origin with one point replaced`, so snapping cannot accumulate drift
+## and Escape has the exact pre-drag outline to put back.
+func _begin_zone_vertex_drag(world_pos: Vector2) -> bool:
+	var hit := _zone_vertex_hit(world_pos)
+	if hit.is_empty():
+		return false
+	_zone_vertex_drag_id = str(hit["zone_id"])
+	_zone_vertex_drag_index = int(hit["index"])
+	_zone_vertex_drag_origin = (hit["points"] as PackedVector2Array).duplicate()
+	# A vertex drag is not a zone drag: drop anything the press might otherwise
+	# have been about to do, so no second gesture runs underneath it.
+	_zone_edge_insert = {}
+	return true
+
+
+## Live drag frame. Writes through set_zone_outline — the SILENT writer, which is
+## correct here and only here: this runs once per mouse-move frame, and a
+## journalling write would push one change entry (and one board_revision bump) per
+## frame. The single journal entry is owed by _end_zone_vertex_drag.
+##
+## Snapped through _author_point, the one authoring-snap rule this canvas has: a
+## vertex MOVED must land where a vertex PLACED would land, Ctrl/Cmd bypassing
+## snap in both cases.
+func _update_zone_vertex_drag(world_pos: Vector2) -> void:
+	if _zone_vertex_drag_id.is_empty() or not data:
+		return
+	if data.get_zone(_zone_vertex_drag_id).is_empty():
+		# The zone went away underneath the gesture (nothing on the interactive
+		# paths can do this today, but an MCP edit or a reload could).
+		_reset_zone_vertex_drag()
+		return
+	var moved := _zone_vertex_drag_origin.duplicate()
+	moved[_zone_vertex_drag_index] = _author_point(world_pos)
+	data.set_zone_outline(_zone_vertex_drag_id, moved)
+	queue_redraw()
+
+
+## Commit the drag as EXACTLY ONE journalled, undoable step — the same
+## mutate-then-snapshot order and the same record_change-shaped entry
+## _end_selection_drag writes for a whole-zone move (bug 019fb5ad791c: snapshot
+## BEFORE the mutation and redo silently re-applies the pre-drag state).
+##
+## A drag that ended where it began journals NOTHING and takes no snapshot, the
+## same no-op rule end_batch's _batch_touched gate gives the move gesture.
+func _end_zone_vertex_drag() -> void:
+	var zone_id := _zone_vertex_drag_id
+	var index := _zone_vertex_drag_index
+	var origin := _zone_vertex_drag_origin
+	_reset_zone_vertex_drag()
+	if zone_id.is_empty() or not data:
+		return
+	var now_pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+	if now_pts.size() != origin.size() or index < 0 or index >= now_pts.size():
+		return
+	if now_pts[index] == origin[index]:
+		return
+	_journal_zone_outline_edit(zone_id, "move_vertex", index, origin.size(), now_pts.size())
+	data.save_to_history("Move zone vertex")
+
+
+## Escape mid-drag: put the captured outline back and journal nothing. Clean
+## because the live writes were silent — no change entry, no history step and no
+## board_revision bump was ever taken for them, so there is nothing to undo, only
+## geometry to restore.
+func _cancel_zone_vertex_drag() -> void:
+	if _zone_vertex_drag_id.is_empty():
+		return
+	if data and not data.get_zone(_zone_vertex_drag_id).is_empty():
+		data.set_zone_outline(_zone_vertex_drag_id, _zone_vertex_drag_origin)
+	_reset_zone_vertex_drag()
+	queue_redraw()
+
+
+func _reset_zone_vertex_drag() -> void:
+	_zone_vertex_drag_id = ""
+	_zone_vertex_drag_index = -1
+	_zone_vertex_drag_origin = PackedVector2Array()
+
+
+## Where a new vertex would go on a CLOSED outline, as {index, point}, or {}.
+##
+## The polygon twin of pcb_route_hint_kind.nearest_bend_insertion: nearest point
+## on any edge, and the array index the new vertex would occupy. Two differences
+## follow from the geometry, not from taste — a zone outline is CLOSED (so the
+## last->first edge is a real edge, and `% size` walks it) and every point is a
+## vertex (so there is no anchor/destination offset: a hit on edge i inserts at
+## i + 1, between its endpoints).
+##
+## The point is the PROJECTION onto the edge and is deliberately NOT snapped: an
+## insertion must not change the shape it is inserting into. Snapping belongs to
+## the DRAG that follows, which is how the user then moves the new vertex
+## somewhere meaningful.
+func _zone_edge_insertion(pts: PackedVector2Array, world_pos: Vector2, tol: float) -> Dictionary:
+	if pts.size() < PCBDataScript.MIN_ZONE_OUTLINE_POINTS:
+		return {}
+	var best_dist := INF
+	var best_point := Vector2.ZERO
+	var best_edge := -1
+	for i in pts.size():
+		var closest := Geometry2D.get_closest_point_to_segment(world_pos, pts[i], pts[(i + 1) % pts.size()])
+		var d := world_pos.distance_to(closest)
+		if d < best_dist:
+			best_dist = d
+			best_point = closest
+			best_edge = i
+	if best_edge < 0 or best_dist > tol:
+		return {}
+	return {"index": best_edge + 1, "point": best_point}
+
+
+## Arm — do NOT perform — an edge insertion for this press.
+##
+## THE ONE PLACE THIS GRAMMAR DIVERGES FROM BendHandleEditTool, and why: that tool
+## inserts on PRESS, because on the annotation surface a press on a hint's segment
+## means nothing else. Here the very same press is how a selected zone is
+## DRAGGED (_begin_selection_drag anchors on the outline, since a pour hits like a
+## path). Inserting on press would delete whole-zone dragging outright; dragging
+## on press would make insertion unreachable. So the press arms both, and the
+## RELEASE decides which one happened: a TAP inserts, a DRAG moves.
+##
+## ARMED FROM THE PICK, NOT FROM PROXIMITY (cold-review F1 — this is the fix for a
+## real defect, recorded because the broken version looked reasonable). It used to
+## run BEFORE _entity_at and arm on nearness to any selected zone's edge, with a
+## radius twice the zone pick's. Nothing then tied the armed insertion to what the
+## press was actually ABOUT, so three ordinary gestures silently reshaped copper:
+## clicking a component sitting on a pour's border (the pick correctly chose the
+## component — and the pour gained a vertex), clicking empty space just outside the
+## edge to DESELECT (the zone was deselected AND grew a vertex, with its handles
+## already gone), and shift-clicking a zone out of the selection. The old guard —
+## "the outline is byte-identical at release" — proved only that the ZONE did not
+## move, which is a far weaker claim than "this press was about the zone".
+##
+## So the gate is now the frozen ladder's own answer: the press must have resolved
+## to KIND_ZONE, to THIS zone, and the zone must ALREADY have been selected (an
+## unselected zone shows no handles, and its first click just selects it). The tap
+## test at release then only has to answer "tap or drag", which is all it was ever
+## able to answer. A double-click is refused outright — its second press would
+## otherwise arm against the outline the first press just grew and insert a second
+## vertex as a second undo step (cold-review F6).
+##
+## `origin` is still captured, now as a belt-and-braces check that the drag branch
+## did not move the zone within the tap threshold (grid snapping can jump a zone
+## whose first point is off-grid on a single motion frame).
+func _arm_zone_edge_insert(world_pos: Vector2, screen_pos: Vector2, hit_kind: String, hit_id: String, is_double_click: bool) -> void:
+	_zone_edge_insert = {}
+	if not data or not _zone_vertex_edit_active() or is_double_click:
+		return
+	if hit_kind != KIND_ZONE or not is_entity_selected(KIND_ZONE, hit_id):
+		return
+	var zone: Dictionary = data.get_zone(hit_id)
+	if zone.is_empty() or not _zone_visible(zone):
+		return
+	var pts := PCBDataScript.zone_outline_points(zone)
+	# SAME tolerance the pick that got us here used (_zone_at's 3.0 / zoom). A
+	# wider radius here would insert against an edge the pick never considered —
+	# and for a KEEPOUT, whose interior hits, the pick can land far from any edge,
+	# so this is also what stops an interior keepout click inserting a vertex on
+	# whichever edge happened to be nearest.
+	var insertion := _zone_edge_insertion(pts, world_pos, ZONE_EDGE_INSERT_HIT_PX / zoom)
+	if insertion.is_empty():
+		return
+	_zone_edge_insert = {
+		"zone_id": hit_id,
+		"index": int(insertion["index"]),
+		"point": insertion["point"],
+		"press_pos": screen_pos,
+		"origin": pts,
+	}
+
+
+## Release half of the above: insert the vertex iff the gesture was a tap that left
+## the outline exactly as it found it, on a zone that is STILL selected. ONE
+## journalled, undoable step.
+func _commit_zone_edge_insert(screen_pos: Vector2) -> void:
+	var armed := _zone_edge_insert
+	_zone_edge_insert = {}
+	if armed.is_empty() or not data:
+		return
+	if screen_pos.distance_to(armed["press_pos"] as Vector2) >= ZONE_EDGE_TAP_PX:
+		return
+	var zone_id := str(armed["zone_id"])
+	# Re-checked at RELEASE, not just at press: a shift-click toggles the zone out
+	# of the selection between the two halves of the very same gesture, and a zone
+	# with no handles showing must not be reshaped.
+	if not is_entity_selected(KIND_ZONE, zone_id):
+		return
+	var origin: PackedVector2Array = armed["origin"]
+	var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+	if pts != origin:
+		# The press turned into a move after all (a snap jump inside the tap
+		# threshold). That move is already journalled; do not stack an insertion
+		# the user never asked for on top of it.
+		return
+	var grown := pts.duplicate()
+	grown.insert(int(armed["index"]), armed["point"])
+	if not data.set_zone_outline(zone_id, grown):
+		return
+	_journal_zone_outline_edit(zone_id, "insert_vertex", int(armed["index"]), pts.size(), grown.size())
+	data.save_to_history("Insert zone vertex")
+	queue_redraw()
+
+
+## Right-click a handle: delete that vertex. True when the press was consumed.
+##
+## REFUSES BELOW THE MINIMUM, VISIBLY (never silently): three points is a triangle
+## and two is not a polygon at all — PCBData.MIN_ZONE_OUTLINE_POINTS, the same
+## floor set_zone_outline and internal/board's Validate enforce. The refusal goes
+## out on zone_tool_message, the channel the panel already routes to its status bar
+## for every other zone refusal, and the press is still consumed: the user aimed at
+## a handle and gets an answer, not a pan.
+func _delete_zone_vertex_at(world_pos: Vector2) -> bool:
+	var hit := _zone_vertex_hit(world_pos)
+	if hit.is_empty():
+		return false
+	var zone_id := str(hit["zone_id"])
+	var index := int(hit["index"])
+	var pts: PackedVector2Array = hit["points"]
+	if pts.size() <= PCBDataScript.MIN_ZONE_OUTLINE_POINTS:
+		zone_tool_message.emit("A zone outline needs at least %d points — this one has %d." % [
+			PCBDataScript.MIN_ZONE_OUTLINE_POINTS, pts.size()])
+		return true
+	var shrunk := pts.duplicate()
+	shrunk.remove_at(index)
+	if not data.set_zone_outline(zone_id, shrunk):
+		return true
+	_journal_zone_outline_edit(zone_id, "delete_vertex", index, pts.size(), shrunk.size())
+	data.save_to_history("Delete zone vertex")
+	queue_redraw()
+	return true
+
+
+## The ONE journal entry shape all three outline edits share. Built on move_zone's
+## shape (_end_selection_drag) — zone_id, the point count, and the position that
+## changed — plus the `op` that says which of the three gestures it was, so a
+## journal reader can tell a vertex move from an insertion without diffing
+## geometry. record_change is what bumps board_revision; the caller takes the
+## history snapshot immediately after, mutate-then-snapshot.
+func _journal_zone_outline_edit(zone_id: String, op: String, index: int, old_count: int, new_count: int) -> void:
+	data.record_change("edit_zone_outline", {
+		"zone_id": zone_id,
+		"op": op,
+		"vertex_index": index,
+		"old_point_count": old_count,
+		"point_count": new_count,
+	})
+	data.data_changed.emit()
+
+#endregion
 
 
 ## Lock all currently selected components and clear selection.

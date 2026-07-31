@@ -221,6 +221,24 @@ compile-checked-examples test, see "Compiling the examples" below), the same
 reason `diff_pair_gap_mm`/`diff_pair_width_mm` are absent from the example
 above.
 
+**Editing a committed zone.** The editor treats all three of a zone's authored
+properties as live, and every edit goes through the same rules this section
+states, so a zone cannot be edited into a shape the validator would reject:
+
+- **Outline** — vertices can be dragged, inserted on an edge, and deleted.
+  `set_zone_outline` refuses any write leaving fewer than 3 points, the same
+  floor `invalid_zone_outline` enforces. Because `pcb.serialize` validates the
+  WHOLE board, a single degenerate outline would make the entire board
+  unexportable, so the refusal is at the writer rather than at save time.
+- **Net** — re-assignable on a `copper_pour` and validated against the declared
+  nets. Refused outright on a `keepout`: net-scoped keepouts are legal in THIS
+  contract (see above) but the editor does not author them, matching what its
+  zone drawing tool already does.
+- **Layer** — re-assignable within the declared copper stack. `set_zone_layer`
+  additionally FAILS CLOSED on a board that declares no `layers` at all, where
+  the `zone_unknown_layer` rule has nothing to check against and would otherwise
+  accept any name.
+
 ### Compiling the examples
 
 **A schema example must be compiled, not eyeballed.** A schema doc whose example
@@ -301,17 +319,21 @@ ids — see "Zones" above for what a `Zone` carries; it can be AUTHORED with
 identity from the start even though v1/v2 still cannot FABRICATE one (no
 compiler fills a zone's copper yet).
 
-**Where a zone's id comes from, which is not yet convenient.** `MigrateV1toV2`
-is the only minter, and it is gated on `Version == 1`; serialize never mints, it
-writes what it is given. Unlike a trace or via, a zone has no creation tool, so
-hand-editing YAML is currently the only way to author one. On a **v1** board that
-works end to end: author `zones:` with no `id`, and migration mints it. On a
-**v2** board there is no minting pass, so a hand-added zone without an `id`
-fails `unminted_persistent_id` unless the author hand-writes a
-`zone:<32 lowercase hex>` token themselves. That is the same behaviour a
+**Where a zone's id comes from.** On the Go side `MigrateV1toV2` is still the
+only minter, and it is gated on `Version == 1`; serialize never mints, it writes
+what it is given. So a HAND-EDITED **v2** board with a zone carrying no `id`
+still fails `unminted_persistent_id` unless the author writes a
+`zone:<32 lowercase hex>` token themselves (a **v1** board is fine: author
+`zones:` with no `id` and migration mints it). That is the same behaviour a
 hand-added trace has, and it fails closed rather than silently accepting an
-id-less entity — but it means the practical authoring route today is via a v1
-board, and a zone creation tool is the thing that would close it.
+id-less entity.
+
+What has changed is that hand-editing is no longer the only route. The PCB
+plugin's canvas now has a zone creation tool, and `pcb_data.create_zone` mints a
+real `zone:<hex>` id through `mint_entity_id` — the FIRST UI-side minter of a
+persistent id, matching `isMintedID`'s width and alphabet exactly. A zone drawn
+in the editor is therefore identity-complete from the moment it is created, on
+v1 and v2 boards alike.
 
 ### Pin-geometry authority: the `override` sub-struct
 

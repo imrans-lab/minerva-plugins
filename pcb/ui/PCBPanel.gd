@@ -116,6 +116,28 @@ var _zone_layer_option: OptionButton = null
 ## again; it starts at the board's design-rule width, which is what the tool used
 ## unconditionally before there was any UI for it.
 var _trace_width_spin: SpinBox = null
+
+## ── Zone re-property rows (A5) ────────────────────────────────────────────────
+## Properties-section controls that EDIT THE SELECTED ZONE, as distinct from the
+## two sidebar pickers above, which ARM THE TOOL that authors a NEW one. Separate
+## control instances on purpose: the arming pickers carry a placeholder that means
+## "not chosen yet" / "follow the view filter" — states a committed zone cannot be
+## in — and sharing one widget between "what am I about to draw" and "what is this
+## thing I selected" would make every rebuild of one clobber the other.
+## They populate from the SAME sources (get_net_names, and the declared copper
+## stack via _declared_copper_layer_choices, which the arming layer picker now
+## calls too).
+var _zone_prop_rows: VBoxContainer = null
+var _zone_kind_row: HBoxContainer = null
+var _zone_kind_value_label: Label = null
+var _zone_prop_net_row: HBoxContainer = null
+var _zone_prop_net_option: OptionButton = null
+var _zone_prop_layer_row: HBoxContainer = null
+var _zone_prop_layer_option: OptionButton = null
+## WHICH zone the rows describe (""  = none). The zone twin of
+## _offset_component_id, and read by the commit handlers so a selection change
+## racing a dropdown cannot re-property a zone the user is no longer looking at.
+var _zone_prop_zone_id: String = ""
 var _board_size_label: Label = null
 var _status_label: Label = null
 
@@ -917,6 +939,7 @@ func _build_properties_section() -> VBoxContainer:
 		_properties_body.add_child(row)
 
 	_properties_body.add_child(_build_group_rows())
+	_properties_body.add_child(_build_zone_rows())
 	return section
 
 
@@ -973,6 +996,72 @@ func _build_offset_edit(edit_name: String, hint: String) -> LineEdit:
 	return edit
 
 
+## The selected zone's property rows (A5), built in the SAME key-label +
+## value-control shape as the component rows above and the group rows beside them,
+## so the section still reads as one thing whichever kind is selected.
+##
+## KIND is a read-out, not a control. A pour and a keepout are different entities
+## with different rules (a pour must name a net; a keepout must not carry one
+## here), and "turn this pour into a keepout" is an authoring decision, not a
+## property tweak — offering it as a dropdown would quietly strip a net.
+##
+## The NET row is POURS ONLY, hidden (not merely disabled) for a keepout — the
+## exact rule, and the exact reasoning, the arming picker already follows: a
+## visible control is a request for input, and asking for a net the model will
+## refuse is the UI lying about the contract.
+func _build_zone_rows() -> VBoxContainer:
+	_zone_prop_rows = VBoxContainer.new()
+	_zone_prop_rows.name = "ZoneRows"
+	_zone_prop_rows.visible = false
+
+	_zone_kind_row = HBoxContainer.new()
+	_zone_kind_row.name = "ZoneKindRow"
+	var kind_key := Label.new()
+	kind_key.text = "Zone:"
+	kind_key.custom_minimum_size.x = 60
+	_zone_kind_row.add_child(kind_key)
+	_zone_kind_value_label = Label.new()
+	_zone_kind_value_label.name = "ZoneKindValue"
+	_zone_kind_value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_zone_kind_value_label.clip_text = true
+	_zone_kind_row.add_child(_zone_kind_value_label)
+	_zone_prop_rows.add_child(_zone_kind_row)
+
+	_zone_prop_net_row = HBoxContainer.new()
+	_zone_prop_net_row.name = "ZoneNetRow"
+	var net_key := Label.new()
+	net_key.text = "Net:"
+	net_key.custom_minimum_size.x = 60
+	_zone_prop_net_row.add_child(net_key)
+	_zone_prop_net_option = OptionButton.new()
+	_zone_prop_net_option.name = "ZonePropNetOption"
+	_zone_prop_net_option.tooltip_text = "The net this copper pour is tied to. Declared nets only — " \
+		+ "a pour on an undeclared net makes the whole board unexportable."
+	_zone_prop_net_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_zone_prop_net_option.clip_text = true
+	_zone_prop_net_option.item_selected.connect(_on_zone_prop_net_selected)
+	_zone_prop_net_row.add_child(_zone_prop_net_option)
+	_zone_prop_rows.add_child(_zone_prop_net_row)
+
+	_zone_prop_layer_row = HBoxContainer.new()
+	_zone_prop_layer_row.name = "ZoneLayerRow"
+	var layer_key := Label.new()
+	layer_key.text = "Layer:"
+	layer_key.custom_minimum_size.x = 60
+	_zone_prop_layer_row.add_child(layer_key)
+	_zone_prop_layer_option = OptionButton.new()
+	_zone_prop_layer_option.name = "ZonePropLayerOption"
+	_zone_prop_layer_option.tooltip_text = "The copper layer this zone sits on. The board's declared " \
+		+ "stack only — moving a zone off the stack would make the board unexportable."
+	_zone_prop_layer_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_zone_prop_layer_option.clip_text = true
+	_zone_prop_layer_option.item_selected.connect(_on_zone_prop_layer_selected)
+	_zone_prop_layer_row.add_child(_zone_prop_layer_option)
+	_zone_prop_rows.add_child(_zone_prop_layer_row)
+
+	return _zone_prop_rows
+
+
 func _set_properties_expanded(expanded: bool) -> void:
 	_properties_expanded = expanded
 	if _properties_body != null:
@@ -982,6 +1071,12 @@ func _set_properties_expanded(expanded: bool) -> void:
 		_properties_collapse_btn.text = "Properties" if expanded else "Properties…"
 
 
+## MEASURED RESTRUCTURE (A5): this used to BLANK AND RETURN whenever no component
+## was focused, so a zone-only selection could never reach any property row at
+## all — the zone rows would have been dead UI. The component half is byte-for-byte
+## what it was, only moved into an else-branch, and the zone half now runs on every
+## update regardless of what the component half decided. Nothing about a
+## component-only or empty selection changed.
 func _update_properties() -> void:
 	if _prop_labels.is_empty() or _canvas == null or _data == null:
 		return
@@ -990,16 +1085,197 @@ func _update_properties() -> void:
 		for key in _prop_labels:
 			(_prop_labels[key] as Label).text = "-"
 		_hide_group_rows()
+	else:
+		_update_group_rows(comp)
+		(_prop_labels["ID"] as Label).text = str(comp.id)
+		(_prop_labels["Position"] as Label).text = "(%.1f, %.1f)" % [comp.position.x, comp.position.y]
+		(_prop_labels["Rotation"] as Label).text = "%.0f°" % float(comp.rotation)
+		(_prop_labels["Layer"] as Label).text = str(comp.layer)
+		var fp := str(comp.footprint_id)
+		if fp.is_empty() and "FootprintType" in _PcbComponentScript:
+			fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
+		(_prop_labels["Footprint"] as Label).text = fp
+	_update_zone_rows()
+
+
+## Drive the zone re-property rows for the selected zone.
+##
+## EXACTLY ONE selected zone, or the rows hide — the same rule the component half
+## applies to a multi-selection (_property_focus_component returns null for two
+## loose parts): with two zones selected there is no single thing a dropdown could
+## re-property. A mixed component+zone selection shows BOTH halves, which is
+## honest: each describes what it says it describes.
+func _update_zone_rows() -> void:
+	if _zone_prop_rows == null:
 		return
-	_update_group_rows(comp)
-	(_prop_labels["ID"] as Label).text = str(comp.id)
-	(_prop_labels["Position"] as Label).text = "(%.1f, %.1f)" % [comp.position.x, comp.position.y]
-	(_prop_labels["Rotation"] as Label).text = "%.0f°" % float(comp.rotation)
-	(_prop_labels["Layer"] as Label).text = str(comp.layer)
-	var fp := str(comp.footprint_id)
-	if fp.is_empty() and "FootprintType" in _PcbComponentScript:
-		fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
-	(_prop_labels["Footprint"] as Label).text = fp
+	var selected: Array = _canvas.get_selected_zones()
+	if selected.size() != 1:
+		_hide_zone_rows()
+		return
+	var zone_id := str(selected[0])
+	var zone: Dictionary = _data.get_zone(zone_id)
+	if zone.is_empty():
+		_hide_zone_rows()
+		return
+
+	_zone_prop_zone_id = zone_id
+	_zone_prop_rows.visible = true
+	var kind: String = _data.zone_kind(zone)
+	var is_keepout := kind == "keepout"
+	_zone_kind_value_label.text = "keepout" if is_keepout else "copper pour"
+	_zone_prop_net_row.visible = not is_keepout
+	if not is_keepout:
+		_rebuild_zone_prop_net_option(str(zone.get("net", "")))
+	_rebuild_zone_prop_layer_option(str(zone.get("layer", "")))
+
+
+func _hide_zone_rows() -> void:
+	_zone_prop_zone_id = ""
+	if _zone_prop_rows != null:
+		_zone_prop_rows.visible = false
+
+
+## Populate the re-property net picker from the board's declared nets, selecting
+## the pour's current one.
+##
+## Entry 0 is the same "Net…" placeholder carrying "" the arming picker uses, and
+## it is here for the same reason: "this pour names no declared net" is a REAL
+## state a loaded board can be in (a net deleted out from under it), and a picker
+## that silently displayed some other net instead would be lying about the board.
+## Choosing it is not a silent no-op either — set_zone_net refuses an empty net on
+## a pour, visibly, which is exactly the message the user needs.
+func _rebuild_zone_prop_net_option(current_net: String) -> void:
+	if _zone_prop_net_option == null:
+		return
+	_zone_prop_net_option.clear()
+	_zone_prop_net_option.add_item("Net…")
+	_zone_prop_net_option.set_item_metadata(0, "")
+	var names: Array = _data.get_net_names()
+	names.sort()
+	var selected := 0
+	for net_name in names:
+		var idx := _zone_prop_net_option.item_count
+		_zone_prop_net_option.add_item(str(net_name))
+		_zone_prop_net_option.set_item_metadata(idx, str(net_name))
+		if str(net_name) == current_net:
+			selected = idx
+	_zone_prop_net_option.select(selected)
+
+
+## Populate the re-property layer picker from the declared copper stack, selecting
+## the zone's current layer.
+##
+## NO placeholder entry, unlike the arming picker: "follow the view filter" is a
+## meaningful answer for a zone about to be DRAWN and a meaningless one for a zone
+## that already exists on a layer. A board that declares no copper layers gets a
+## single disabled entry saying so, and the control goes disabled — the visible
+## half of the fail-closed refusal set_zone_layer makes in the model.
+func _rebuild_zone_prop_layer_option(current_layer: String) -> void:
+	if _zone_prop_layer_option == null:
+		return
+	_zone_prop_layer_option.clear()
+	var choices: Array = _declared_copper_layer_choices()
+	if choices.is_empty():
+		_zone_prop_layer_option.add_item("(board declares no layers)")
+		_zone_prop_layer_option.set_item_metadata(0, "")
+		_zone_prop_layer_option.select(0)
+		_zone_prop_layer_option.disabled = true
+		return
+	_zone_prop_layer_option.disabled = false
+	var canon_current := PcbLayerStack.kicad_to_canon(current_layer) if not current_layer.is_empty() else ""
+	var selected := -1
+	for choice in choices:
+		var idx := _zone_prop_layer_option.item_count
+		_zone_prop_layer_option.add_item(str(choice["label"]))
+		_zone_prop_layer_option.set_item_metadata(idx, str(choice["canon"]))
+		if str(choice["canon"]) == canon_current:
+			selected = idx
+	if selected < 0:
+		# The zone sits on a layer this board does not declare (an off-contract
+		# board, or one whose stack changed under it). Show the truth rather than
+		# silently pointing at some other layer the zone is not on.
+		_zone_prop_layer_option.add_item("%s (not declared)" % current_layer)
+		_zone_prop_layer_option.set_item_metadata(_zone_prop_layer_option.item_count - 1, "")
+		selected = _zone_prop_layer_option.item_count - 1
+	_zone_prop_layer_option.select(selected)
+
+
+## Re-property the selected pour's net. ONE journalled, undoable step; the MODEL
+## owns every rule that could refuse it (undeclared net, keepout, off-stack layer
+## — see pcb_data.set_zone_net), and its refusal string is what the user is shown.
+## A refusal re-reads the model into the picker rather than leaving the chosen
+## entry standing: the board is the truth, the dropdown is a view of it — the same
+## contract _commit_member_offset keeps with the offset fields.
+func _on_zone_prop_net_selected(index: int) -> void:
+	if _zone_prop_zone_id.is_empty() or _data == null or _zone_prop_net_option == null:
+		return
+	var meta: Variant = _zone_prop_net_option.get_item_metadata(index)
+	var chosen := str(meta) if meta != null else ""
+	var zone_id := _zone_prop_zone_id
+	# NO-OP PICKS MUST NOT REACH save_to_history (cold-review F3). Godot's
+	# OptionButton emits item_selected for EVERY popup pick, including the entry
+	# already showing, and set_zone_net returns "" for "no change needed" exactly
+	# as it does for a real write — so opening the dropdown and re-picking the
+	# current net would push a dead "Set zone net" step. The user's next Ctrl+Z
+	# would then appear to do nothing, and the one after it would eat a real edit.
+	if str(_data.get_zone(zone_id).get("net", "")) == chosen:
+		return
+	var refusal: String = _data.set_zone_net(zone_id, chosen)
+	if not refusal.is_empty():
+		_show_transient_status(refusal)
+		_update_properties()
+		return
+	_data.save_to_history("Set zone net")
+	if _canvas != null:
+		_canvas.queue_redraw()
+	_update_properties()
+
+
+## Re-property the selected zone's copper layer. Same contract as the net handler
+## above, and the same one-step-per-change history shape.
+func _on_zone_prop_layer_selected(index: int) -> void:
+	if _zone_prop_zone_id.is_empty() or _data == null or _zone_prop_layer_option == null:
+		return
+	var meta: Variant = _zone_prop_layer_option.get_item_metadata(index)
+	var chosen := str(meta) if meta != null else ""
+	var zone_id := _zone_prop_zone_id
+	# Same no-op guard as the net handler above (cold-review F3). The comparison
+	# is RAW stored value vs the picker's canonical id — deliberately, so a zone
+	# storing a KiCad name never equals the canonical pick and "F.Cu" -> "top"
+	# stays a real normalising write, not a no-op.
+	var current := str(_data.get_zone(zone_id).get("layer", ""))
+	if not chosen.is_empty() and current == chosen:
+		return
+	var refusal: String = _data.set_zone_layer(zone_id, chosen)
+	if not refusal.is_empty():
+		_show_transient_status(refusal)
+		_update_properties()
+		return
+	_data.save_to_history("Set zone layer")
+	if _canvas != null:
+		_canvas.queue_redraw()
+	_update_properties()
+
+
+## The board's declared COPPER layers as [{label, canon}], KiCad label + canonical
+## metadata. ONE list, two pickers: the zone ARMING picker and the zone
+## RE-PROPERTY picker both build from it, so the layers you can draw on and the
+## layers you can move a zone to can never drift apart. Lifted verbatim out of
+## _rebuild_zone_layer_option, whose reasoning (copper only, KiCad presentation,
+## canonical comparison) is stated there.
+func _declared_copper_layer_choices() -> Array:
+	var choices: Array = []
+	var declared: Array = _data.layers if _data != null else ["top", "bottom"]
+	for layer in declared:
+		var raw := str(layer)
+		if not PcbLayerStack.is_copper(raw):
+			continue
+		var canon := PcbLayerStack.kicad_to_canon(raw)
+		var label := PcbLayerStack.canon_to_kicad(canon)
+		if label.is_empty():
+			label = raw
+		choices.append({"label": label, "canon": canon})
+	return choices
 
 
 ## WHICH component the Properties section describes.
@@ -2037,22 +2313,16 @@ func _rebuild_zone_layer_option() -> void:
 	_zone_layer_option.clear()
 	_zone_layer_option.add_item("View layer")
 	_zone_layer_option.set_item_metadata(0, "")
-	var layers: Array = _data.layers if _data != null else ["top", "bottom"]
+	# _declared_copper_layer_choices (A5) is where the copper-only / KiCad-label /
+	# canonical-metadata rules below used to be spelled out inline; the zone
+	# RE-PROPERTY picker needs the identical list, and two copies of "which layers
+	# may a zone be on" is exactly one copy too many.
 	var selected := 0
-	for layer in layers:
-		var raw := str(layer)
-		if not PcbLayerStack.is_copper(raw):
-			continue
-		# Fold a KiCad-named declaration to canonical, exactly as the toolbar
-		# picker does, so the metadata MATCHES what zone_author_layer compares.
-		var canon := PcbLayerStack.kicad_to_canon(raw)
-		var label := PcbLayerStack.canon_to_kicad(canon)
-		if label.is_empty():
-			label = raw
+	for choice in _declared_copper_layer_choices():
 		var idx := _zone_layer_option.item_count
-		_zone_layer_option.add_item(label)
-		_zone_layer_option.set_item_metadata(idx, canon)
-		if canon == previous:
+		_zone_layer_option.add_item(str(choice["label"]))
+		_zone_layer_option.set_item_metadata(idx, str(choice["canon"]))
+		if str(choice["canon"]) == previous:
 			selected = idx
 	_zone_layer_option.select(selected)
 	# Keep the canvas's armed layer and the widget in step: a layer that vanished

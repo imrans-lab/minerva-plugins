@@ -1014,6 +1014,12 @@ func remove_via_by_id(via_id: String) -> bool:
 ## isMintedID() checks EXACTLY this width, so the two must not drift.
 const MINTED_ID_BYTES := 16
 
+## Fewest points that make a zone outline a polygon. MIRRORS internal/board's
+## Validate (`invalid_zone_outline`) and is now the ONE place the UI states it:
+## zone_author_error refuses a create below it, set_zone_outline refuses a write
+## below it, and the canvas' vertex-delete gesture refuses to go under it.
+const MIN_ZONE_OUTLINE_POINTS := 3
+
 
 ## Mint a fresh persistent entity id: "<entity_type>:<32 lowercase hex>".
 ##
@@ -1057,15 +1063,47 @@ static func mint_entity_id(entity_type: String) -> String:
 ## checked against the declared nets, so a net-scoped keepout ("no GND copper
 ## here") stays expressible and a typo in its net name is still caught here.
 func zone_author_error(net_name: String, layer: String, point_count: int, kind: String = "copper_pour") -> String:
-	var zone_is_keepout := kind.strip_edges().to_lower() == "keepout"
-	if point_count < 3:
-		return "A zone outline needs at least 3 points (%d placed)." % point_count
+	if point_count < MIN_ZONE_OUTLINE_POINTS:
+		return "A zone outline needs at least %d points (%d placed)." % [MIN_ZONE_OUTLINE_POINTS, point_count]
+	var net_refusal := zone_net_error(net_name, kind)
+	if not net_refusal.is_empty():
+		return net_refusal
+	return zone_layer_error(layer)
+
+
+## Why this NET cannot go on a zone of this KIND, or "" when it can.
+##
+## Split out of zone_author_error (cold-review F2) so a caller changing ONE field
+## is judged on THAT field. The whole-zone check above still runs both halves in
+## the same order, so create_zone and the drawing tool are unaffected — this is a
+## decomposition, not a rule change.
+##
+## The split is not cosmetic: while both clauses ran on every setter, a zone that
+## was bad in BOTH fields was permanently unrepairable. Setting its layer failed
+## with a message about its stale NET, and setting its net failed with a message
+## about its off-stack LAYER, so neither could ever be fixed and the board stayed
+## unexportable — while the panel shipped explicit affordances for repairing both
+## states. A refusal must name the control the user actually touched.
+func zone_net_error(net_name: String, kind: String = "copper_pour") -> String:
 	if net_name.is_empty():
 		# A keepout with no net is the KiCad-parity case, not a refusal.
-		if not zone_is_keepout:
-			return "Pick a net first — a copper pour must name a declared net."
-	elif not has_net(net_name):
+		if kind.strip_edges().to_lower() == "keepout":
+			return ""
+		return "Pick a net first — a copper pour must name a declared net."
+	if not has_net(net_name):
 		return "Net \"%s\" is not declared on this board." % net_name
+	return ""
+
+
+## Why this LAYER cannot carry a zone, or "" when it can. Net half's twin — see
+## zone_net_error for why the two are separable.
+##
+## NOTE the permissive clause, unchanged and deliberate here: an EMPTY declared
+## stack skips the membership test entirely. set_zone_layer refuses that case
+## itself, ahead of this call, because a picker-supplied layer on a board with no
+## stack has nothing to be valid against; create_zone's own path keeps the old
+## permissive behaviour (filed separately).
+func zone_layer_error(layer: String) -> String:
 	if layer.is_empty():
 		return "No copper layer to place the zone on."
 	if not layers.is_empty() and layer not in layers:
@@ -1166,14 +1204,141 @@ static func zone_outline_to_list(points) -> Array:
 	return outline
 
 
-## Replace a zone's outline wholesale. LIVE-DRAG WRITER — silent, for exactly the
-## reasons set out on set_trace_waypoints (the caller owes journal + history at
-## the end of the gesture).
-func set_zone_outline(zone_id: String, points) -> void:
+## Replace a zone's outline wholesale. LIVE-DRAG WRITER — silent about the WRITE
+## ITSELF, for exactly the reasons set out on set_trace_waypoints (the caller owes
+## journal + history at the end of the gesture: a per-frame record_change would
+## push one journal entry per mouse-move frame).
+##
+## It is NOT silent about a REFUSAL, and that is the difference from before A5.
+## Returns true when the outline was written, false when it was refused — the
+## bool contract remove_zone already sets for "did the model actually change".
+## The old signature returned void and wrote whatever it was handed, so ANY
+## caller could put a 0/1/2-point outline into the board; internal/board's
+## Validate rejects that as `invalid_zone_outline`, and pcb.serialize validates
+## the WHOLE board, so one degenerate outline makes the entire board
+## unexportable (the same fail-closed reasoning zone_author_error carries). A
+## degenerate outline is also unrenderable and unpickable — _draw_zone and
+## _zone_at both bail under 3 points — so it would be an invisible zone the user
+## cannot select, delete or repair from the canvas. (zone_outline_points itself
+## does NOT bail: it returns whatever it parses, however few points that is. Its
+## own docstring has long claimed otherwise; the floor lives in its CALLERS and,
+## since A5, here at the writer.)
+##
+## MINIMUM ONLY, deliberately: net/layer are not re-litigated here, because this
+## writer never touches them and re-validating them would make a live drag of a
+## zone whose net was deleted out from under it refuse mid-gesture.
+func set_zone_outline(zone_id: String, points) -> bool:
 	var i := _zone_index(zone_id)
 	if i < 0:
-		return
-	zones[i]["outline"] = zone_outline_to_list(points)
+		return false
+	var pts := PackedVector2Array(points)
+	if pts.size() < MIN_ZONE_OUTLINE_POINTS:
+		push_warning("[PCBData] set_zone_outline refused: a zone outline needs at least %d points (%d given)" % [MIN_ZONE_OUTLINE_POINTS, pts.size()])
+		return false
+	zones[i]["outline"] = zone_outline_to_list(pts)
+	return true
+
+
+## Re-assign a committed zone's net. Returns "" on success, or the user-facing
+## reason it was refused — the zone_author_error idiom (a refusal STRING, not a
+## bare bool), because every caller of this is a UI control that owes the user a
+## visible reason, and a bool would make each one invent its own wording for a
+## rule this model owns.
+##
+## SAME AUTHORITY AS create_zone, SCOPED TO THIS FIELD: the proposed (net, kind)
+## goes through zone_net_error — the very clause zone_author_error runs at
+## authoring time — so a net this board never declared is refused here exactly as
+## it is there. It does NOT re-judge the zone's layer; see zone_net_error for why
+## judging both fields made a doubly-broken zone unrepairable (cold-review F2).
+##
+## KEEPOUTS REFUSE A NET OUTRIGHT, which is STRICTER than the board contract:
+## docs/board-yaml.md and Go's validateZones both accept a net-scoped keepout
+## ("no GND copper here"). This mirrors _commit_zone verbatim — the canvas zone
+## tool already drops the armed net for a keepout and says so in as many words
+## ("net-scoped keepouts are expressible in the board contract but are not
+## something this tool can currently ask for", owner ruling 2026-07-30). One
+## authoring surface, one answer: if net-scoped keepouts are ever wanted, they
+## are wanted in BOTH places, not acquired by accident through the re-property
+## row while the drawing tool still refuses them.
+##
+## Journals via record_change and emits data_changed (remove_zone's shape); the
+## history snapshot is the CALLER's, taken AFTER this returns (mutate-then-
+## snapshot, bug 019fb5ad791c).
+##
+## "" MEANS "NOTHING TO REPORT", NOT "SOMETHING CHANGED". Re-setting the value a
+## zone already holds is a no-op: it journals nothing and returns "" exactly as a
+## real write does. A caller that snapshots history MUST therefore compare the
+## field itself first — save_to_history appends unconditionally, with no dedupe
+## against the previous snapshot, so an unguarded caller pushes an EMPTY undo step
+## and the user's next Ctrl+Z appears to do nothing (cold-review F3). See
+## PCBPanel._on_zone_prop_net_selected for the guard.
+func set_zone_net(zone_id: String, net_name: String) -> String:
+	var i := _zone_index(zone_id)
+	if i < 0:
+		return "No such zone."
+	var zone: Dictionary = zones[i]
+	var kind := zone_kind(zone)
+	if kind == "keepout":
+		return "A keepout carries no net — it forbids copper rather than being copper."
+	var old_net := str(zone.get("net", ""))
+	# The NET clause only (cold-review F2): a zone whose layer is also off-contract
+	# must still be repairable one field at a time, and a refusal must name the
+	# field the caller touched.
+	var refusal := zone_net_error(net_name, kind)
+	if not refusal.is_empty():
+		return refusal
+	if net_name == old_net:
+		return ""
+	zone["net"] = net_name
+	record_change("set_zone_net", {
+		"zone_id": zone_id,
+		"old_net": old_net,
+		"net_name": net_name,
+		"kind": kind,
+	})
+	data_changed.emit()
+	return ""
+
+
+## Re-assign a committed zone's copper layer. Same contract as set_zone_net
+## above: "" on success, the user-facing refusal otherwise; record_change +
+## data_changed here, history snapshot owed by the caller — INCLUDING the
+## "" -also-means-no-change caveat spelled out there, which the caller must guard
+## against before snapshotting.
+##
+## FAILS CLOSED ON AN EMPTY LAYER STACK, which zone_author_error does NOT.
+## MEASURED: its layer clause is `if not layers.is_empty() and layer not in
+## layers`, so a board declaring no stack accepts ANY layer name. That
+## permissiveness is defensible at CREATE time (the tool derives the layer from
+## the board itself, via zone_author_layer, so there is nothing to typo) and is
+## left exactly as it is — create_zone's own path is unchanged and the gap is
+## filed separately. It is NOT defensible here: this setter takes a layer name
+## from a picker, and with no declared stack there is no such thing as a valid
+## target, so the honest answer is a visible refusal rather than writing a layer
+## nobody can confirm.
+func set_zone_layer(zone_id: String, layer: String) -> String:
+	var i := _zone_index(zone_id)
+	if i < 0:
+		return "No such zone."
+	var zone: Dictionary = zones[i]
+	if layers.is_empty():
+		return "This board declares no layer stack — there is no layer to move the zone to."
+	var old_layer := str(zone.get("layer", ""))
+	# The LAYER clause only — see set_zone_net for why (cold-review F2).
+	var refusal := zone_layer_error(layer)
+	if not refusal.is_empty():
+		return refusal
+	if layer == old_layer:
+		return ""
+	zone["layer"] = layer
+	record_change("set_zone_layer", {
+		"zone_id": zone_id,
+		"old_layer": old_layer,
+		"layer": layer,
+		"kind": zone_kind(zone),
+	})
+	data_changed.emit()
+	return ""
 
 
 ## Every zone the marquee `region` touches, with the same `visible_filter`
