@@ -396,6 +396,7 @@ func _build_ui() -> void:
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 	_canvas.pin_selected.connect(_on_pin_selected)
 	_canvas.zone_tool_message.connect(_show_transient_status)
+	_canvas.trace_tool_message.connect(_show_transient_status)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
 	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
@@ -642,6 +643,20 @@ func _build_sidebar() -> VBoxContainer:
 		"Draw a keep-out region: click each corner, double-click or press Enter to close "
 		+ "(needs 3+ corners; Esc/right-click cancels). A net is still required — the board contract "
 		+ "requires one on every zone, keepouts included.")
+
+	# Trace drawing tool (epoch 6 unit 5). Same group and same reason as the zone
+	# tools above: it authors a board ENTITY (a Trace that serializes into the
+	# board YAML), which is what makes it a canvas tool rather than a hint tool.
+	# It shares a name with the Hints-group Trace button below and that is
+	# deliberate — they draw the same thing at two different altitudes — so the
+	# tooltip carries the distinction outright rather than leaving it to be
+	# discovered: this one IS the copper, that one is a request for copper.
+	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.TRACE, "Trace",
+		"Draw real copper directly, bypassing the router (Hints ▸ Trace asks the router for a route instead). "
+		+ "Click a pad to start — the trace takes that pad's net — then click each waypoint, and click "
+		+ "another pad to finish on it; double-click or press Enter to end it where it is. Esc/right-click "
+		+ "cancels. Drawn at the board's design-rule trace width, on the selected copper layer — on "
+		+ "\"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER)
 
 	# The zone tools' arming control. Shown only while one of them is active, so
 	# the resting sidebar is unchanged.
@@ -2065,8 +2080,8 @@ func _update_status() -> void:
 		return
 	var sel: Array = _canvas.get_selected_components()
 	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN,
-	# ZONE_POUR, ZONE_KEEPOUT.
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout"]
+	# ZONE_POUR, ZONE_KEEPOUT, TRACE.
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace"]
 	var mode_txt := ""
 	var tm: int = _canvas.tool_mode
 	if tm > 0 and tm < mode_names.size():

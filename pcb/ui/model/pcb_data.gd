@@ -739,6 +739,105 @@ func create_zone(net_name: String, layer: String, outline_points, kind: String =
 #endregion
 
 
+#region Trace Authoring
+
+## Fallback width for an authored trace when the board declares no design rule.
+## MATCHES pcb_trace.gd's own `width` default, so a board with no design_rules
+## block authors traces at the same width the rest of this model already assumes
+## rather than at a second, differently-chosen number.
+const DEFAULT_TRACE_WIDTH_MM := 0.25
+
+
+## The width a newly authored trace gets, in mm.
+##
+## `design_rules` is the canonical board block (see its declaration) and
+## `trace_width_mm` is its canonical key — the board's own answer to "how wide is
+## a trace here", so the drawing tool asks the board instead of carrying a
+## preference of its own. Non-positive or missing (an older board, or one whose
+## design_rules block never named a width) falls back to DEFAULT_TRACE_WIDTH_MM;
+## a zero-width trace is not copper, so a malformed rule must not produce one.
+func authored_trace_width() -> float:
+	var w := float(design_rules.get("trace_width_mm", 0.0))
+	return w if w > 0.0 else DEFAULT_TRACE_WIDTH_MM
+
+
+## Why the proposed trace cannot be authored, or "" when it can.
+##
+## ONE rule set, two consumers — create_trace_entity() fail-closes on it and the
+## canvas tool shows it before committing — exactly as zone_author_error() does
+## for zones. It is NOT, however, a mirror of a Go validator: validateZones has
+## no trace twin, and internal/board/validate.go says so in as many words ("there
+## is no pre-existing 'a trace's net/layer must exist' check in this function to
+## mirror"). So these are the UI's own authoring rules, deliberately set at the
+## zone bar: a trace naming a net or layer the board never declared is copper
+## nothing downstream can check (get_traces_for_net, the ratsnest and DRC all key
+## on declared net names), and refusing the gesture is cheaper than shipping it.
+##
+## The one rule Go DOES enforce on traces is IDENTITY, not content: on a v2 board
+## Validate() requires every trace id to be a minted "trace:<32hex>" — see
+## create_trace_entity for why that is the id this path mints.
+func trace_author_error(net_name: String, layer: String, point_count: int) -> String:
+	if point_count < 2:
+		return "A trace needs at least 2 points (%d placed)." % point_count
+	if net_name.is_empty():
+		return "A trace must name a net — start it on a pad that has one."
+	if not has_net(net_name):
+		return "Net \"%s\" is not declared on this board." % net_name
+	if layer.is_empty():
+		return "No copper layer to place the trace on."
+	if not layers.is_empty() and layer not in layers:
+		return "Layer \"%s\" is not in the board's declared layer stack." % layer
+	return ""
+
+
+## Create an authored trace and add it to the board. Returns the new trace
+## object, or null when trace_author_error refused it.
+##
+## MINTED, NOT ORDINAL — and this is the whole reason the path exists rather than
+## callers just using add_trace(). add_trace() mints "trace_7" for an id-less
+## trace; internal/board/migrate.go's isMintedID() rejects that shape, so on a v2
+## board Validate() fails `unminted_persistent_id` and pcb.serialize — a
+## fail-closed WHOLE-BOARD write gate — refuses to save the entire board, not
+## merely the one trace. The ordinal handles are the v1 ordinal-bridge era's, and
+## MigrateV1toV2 is what re-mints them; a trace authored today should not need
+## rescuing by a migration.
+##
+## add_trace() itself is DELIBERATELY UNCHANGED: its behaviour for its existing
+## callers (importers, the router's commit path, undo/redo restore) is load-
+## bearing — the ID COUNTER INVARIANT above is built on those ordinals — and
+## re-minting under them would renumber ids they hand back and forth. Instead this
+## path pre-sets the id and hands the trace to add_trace, which takes the
+## caller-supplied-id branch. That branch high-waters _next_trace_id via
+## _stable_id_suffix(); a minted id contains no "_", so it returns 0 and the
+## counter is left exactly where it was. Verified, not assumed — the minted path
+## therefore cannot perturb ordinal minting for anyone else. Journalling,
+## trace_changed and data_changed all come from add_trace, so there is one
+## add-a-trace code path, not two.
+##
+## History is NOT snapshotted here (no mutator in this file snapshots itself —
+## the caller decides where an undo step begins and ends); the canvas commit path
+## calls save_to_history() AFTER this returns, the move idiom.
+func create_trace_entity(net_name: String, layer: String, points, width: float = 0.0):
+	var pts := PackedVector2Array(points)
+	var refusal := trace_author_error(net_name, layer, pts.size())
+	if not refusal.is_empty():
+		push_warning("[PCBData] create_trace_entity refused: %s" % refusal)
+		return null
+
+	var trace = PCBTraceScript.new()
+	trace.id = mint_entity_id("trace")
+	trace.net_name = net_name
+	trace.layer = layer
+	trace.width = width if width > 0.0 else authored_trace_width()
+	for p in pts:
+		trace.waypoints.append(p)
+
+	add_trace(trace)
+	return trace
+
+#endregion
+
+
 #region Board Properties
 
 ## Resize the board outline (journalled + emits structure/data changes).

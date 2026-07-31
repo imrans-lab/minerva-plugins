@@ -165,8 +165,11 @@ var _space_pan_armed: bool = false
 ## names) never renumber. ZONE_POUR / ZONE_KEEPOUT (epoch 6 unit 4) are the zone
 ## drawing tools — click per vertex, double-click or Enter closes, Esc/right-click
 ## cancels; they AUTHOR board entities (unlike the hint tools, which author
-## annotations), so they belong on this surface rather than the overlay's.
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT }
+## annotations), so they belong on this surface rather than the overlay's. TRACE
+## (epoch 6 unit 5) is the same family for copper: click a pad, click waypoints,
+## click a pad to finish. It is NOT the Hints-group trace tool — that one authors
+## a route HINT for the router; this one authors the Trace entity itself.
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
 ## Transient user-facing feedback from the zone tools ("pick a net", "needs 3
@@ -174,6 +177,12 @@ signal tool_mode_changed(mode: ToolMode)
 ## signal from component_lock_changed so neither channel has to pretend to be the
 ## other.
 signal zone_tool_message(text: String)
+## The trace tool's twin of the above ("start on a pad", "trace added", the
+## different-net warning). A separate signal for the same reason zone_tool_message
+## is separate from component_lock_changed — one channel per tool, all routed to
+## the panel's single transient-status sink, so no channel has to pretend to be
+## another's.
+signal trace_tool_message(text: String)
 
 ## Duck-typed back-reference to the PcbAnnotationHost (set by PCBPanel), the
 ## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
@@ -207,6 +216,41 @@ var _zone_has_preview: bool = false
 ## as open at the cursor and merely "about to close" at the origin.
 const ZONE_PREVIEW_CLOSE_ALPHA := 0.35
 const ZONE_PREVIEW_VERTEX_RADIUS_PX := 3.0
+
+## ── Trace authoring (epoch 6 unit 5) ──────────────────────────────────────────
+## Default copper layer when the toolbar's layer filter is "all". TOP, unlike the
+## zone tools' "bottom": a pour under "All" wants the classic ground-pour side,
+## while signal routing starts on the component side. Surfaced as a constant so
+## the panel's tooltip and the commit path name the SAME layer.
+const TRACE_DEFAULT_LAYER := "top"
+## Pad capture radius for the trace tool, in board mm.
+##
+## DELIBERATELY TIGHTER than the pin inspector's 5 mm default (PcbAnnotationHost.
+## pad_at's own default, contract §2). The inspector's hit is a READ — "tell me
+## about the nearest pad" — where generosity costs nothing. Here a pad hit
+## CONSUMES the click and ends the gesture, so a 5 mm radius would make it
+## impossible to place a waypoint anywhere near a component. 1.27 mm is half a
+## 0.1" pitch: inside it, the nearest pad is unambiguously the pad clicked.
+const TRACE_PAD_SNAP_MM := 1.27
+## Waypoints placed so far, in board mm. Empty ⇔ no draw in progress.
+var _trace_points: PackedVector2Array = PackedVector2Array()
+## Arming snapshot, frozen when the FIRST pad is clicked and held for the whole
+## draw. The net is inherited from that pad (KiCad-style — copper does not get to
+## invent a net), and the layer is frozen alongside it rather than re-resolved at
+## commit: the preview is drawn in that layer's trace colour at its real width, so
+## changing the layer filter mid-draw must not silently commit a different trace
+## from the one on screen.
+var _trace_net: String = ""
+var _trace_layer: String = ""
+## "U1.22" — the starting pad, for the preview label and the commit message.
+var _trace_start_ref: String = ""
+## Live rubber-band point (the cursor), only meaningful while drawing.
+var _trace_preview: Vector2 = Vector2.ZERO
+var _trace_has_preview: bool = false
+## Alpha for the not-yet-placed segment running to the cursor, so the committed
+## polyline reads as drawn and the rubber band reads as proposed.
+const TRACE_PREVIEW_RUBBER_ALPHA := 0.45
+const TRACE_PREVIEW_VERTEX_RADIUS_PX := 3.0
 
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)
@@ -428,6 +472,13 @@ func _draw() -> void:
 
 	if show_traces:
 		_draw_traces()
+
+	# The trace being drawn sits with the committed copper (same visual language,
+	# same place in the stack) — and, like the zone preview above, is NOT gated on
+	# show_traces: hiding authored copper must not blank out the trace the user is
+	# drawing right now.
+	if tool_mode == ToolMode.TRACE:
+		_draw_trace_preview()
 
 	if show_ratsnest:
 		_draw_ratsnest()
@@ -1437,6 +1488,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_zone_click(world_pos, event.double_click)
 				return
 
+			# Trace tool (unit 5): first click must land on a pad (that is where
+			# the net comes from), later clicks place waypoints or finish on a
+			# pad. Owns the click outright, same as the two tools above.
+			if tool_mode == ToolMode.TRACE:
+				_handle_trace_click(world_pos, event.double_click)
+				return
+
 			# Pan tool OR Space-drag: a left-drag pans the whole board view.
 			# (Discoverability for finding 2 — a visible Pan tool + the familiar
 			# Space+drag, alongside the existing right/middle-drag pan.)
@@ -1520,6 +1578,9 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			if _is_zone_tool() and not _zone_points.is_empty():
 				_cancel_zone_draw(true)
 				return
+			if tool_mode == ToolMode.TRACE and not _trace_points.is_empty():
+				_cancel_trace_draw(true)
+				return
 			is_panning = true
 			pan_start_mouse = event.position
 			pan_start_offset = pan_offset
@@ -1563,6 +1624,17 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not _zone_points.is_empty():
 			_zone_preview = _zone_vertex_at(world_pos)
 			_zone_has_preview = true
+			queue_redraw()
+	elif tool_mode == ToolMode.TRACE:
+		# Rubber-band the segment from the last placed waypoint to the cursor.
+		# Same "the tool owns the surface" rule as the zone branch above, so a
+		# stale component highlight is dropped.
+		if not hovered_component.is_empty():
+			hovered_component = ""
+			queue_redraw()
+		if not _trace_points.is_empty():
+			_trace_preview = _trace_vertex_at(world_pos)
+			_trace_has_preview = true
 			queue_redraw()
 	else:
 		var new_hover: String = _component_at(world_pos)
@@ -1611,11 +1683,19 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# unlike AnnotationOverlay, does receive the double_click flag).
 			if _is_zone_tool():
 				_commit_zone()
+			# Ends an in-progress trace at its last waypoint — a dangling trace,
+			# which the model and the board contract both allow (nothing requires
+			# a trace to terminate on a pad).
+			elif tool_mode == ToolMode.TRACE:
+				_commit_trace()
 		KEY_ESCAPE:
 			# A zone draw in progress is what Escape cancels FIRST — cancelling it
 			# should not also wipe the user's component selection.
 			if _is_zone_tool() and not _zone_points.is_empty():
 				_cancel_zone_draw(true)
+				return
+			if tool_mode == ToolMode.TRACE and not _trace_points.is_empty():
+				_cancel_trace_draw(true)
 				return
 			if tool_mode == ToolMode.INSPECT_PIN:
 				_exit_inspect_pin_mode()
@@ -1820,15 +1900,18 @@ func _has_any_locked_components() -> bool:
 ## Entering OR leaving INSPECT_PIN clears any pin selection (contract §3:
 ## "switching modes clears selection") — one gate covers both directions.
 ##
-## Leaving a zone tool discards any half-drawn polygon, same "switching modes
-## clears in-progress state" rule. Silently: the user asked for another tool, so
-## the abandoned draw is expected, not something to report.
+## Leaving a zone tool discards any half-drawn polygon — and leaving the trace
+## tool any half-drawn trace — under the same "switching modes clears in-progress
+## state" rule. Silently: the user asked for another tool, so the abandoned draw
+## is expected, not something to report.
 func set_tool_mode(mode: ToolMode) -> void:
 	if tool_mode != mode:
 		if tool_mode == ToolMode.INSPECT_PIN or mode == ToolMode.INSPECT_PIN:
 			_clear_inspect_pin_selection()
 		if _is_zone_tool():
 			_cancel_zone_draw(false)
+		if tool_mode == ToolMode.TRACE:
+			_cancel_trace_draw(false)
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		queue_redraw()
@@ -1948,12 +2031,21 @@ func _zone_vertex_at(world_pos: Vector2) -> Vector2:
 ## declare the fallback layer at all, rather than authoring copper onto a layer
 ## the board has never heard of.
 func zone_author_layer() -> String:
+	return _author_layer(ZONE_DEFAULT_LAYER)
+
+
+## The layer-from-filter rule shared by every copper-authoring tool on this
+## canvas (unit 5 lifted it out of zone_author_layer verbatim rather than writing
+## a second copy for traces). ONLY the "All" fallback differs between tools — a
+## pour defaults to the ground side, a trace to the component side — so that is
+## the one thing passed in.
+func _author_layer(default_layer: String) -> String:
 	if not trace_layer_filter.is_empty() and trace_layer_filter != "all" \
 			and PcbLayerStack.is_copper(trace_layer_filter):
 		return trace_layer_filter
 	var declared: Array = data.layers if data else []
-	if declared.is_empty() or ZONE_DEFAULT_LAYER in declared:
-		return ZONE_DEFAULT_LAYER
+	if declared.is_empty() or default_layer in declared:
+		return default_layer
 	for layer in declared:
 		if PcbLayerStack.is_copper(str(layer)):
 			return str(layer)
@@ -2078,6 +2170,263 @@ func _draw_zone_preview() -> void:
 		label += "  ·  %d pts" % _zone_points.size()
 		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(color, zone_outline_alpha))
+
+#endregion
+
+
+#region Trace Authoring (epoch 6 unit 5)
+
+## Gesture (KiCad's route-a-track grammar, expressed in the same click-per-point
+## family the zone tools use — one gesture grammar on this canvas, not three):
+##   ARMED   --click a pad-->        start; net + layer frozen from that pad
+##   DRAWING --left-click-->         place a waypoint
+##   DRAWING --click ANY pad-->      finish at that pad's centre and commit
+##   DRAWING --double-click/Enter--> finish at the last waypoint (dangling)
+##   DRAWING --Esc/right-click-->    cancel
+##   DRAWING --tool switch-->        cancel (silently — see set_tool_mode)
+##
+## This is the DIRECT-AUTHORING sibling of the Hints-group trace tool, not a
+## replacement for it (owner ruling, umbrella docket 019fb5720368): that tool
+## authors a route HINT the router consumes; this one authors the Trace entity
+## itself — model, canvas and board YAML — bypassing the router entirely.
+##
+## Starting REQUIRES a pad hit, because a trace's net is INHERITED rather than
+## chosen. That is why this tool has no net picker where the zone tools have one:
+## pads are the only place on the board where "which net is this?" already has an
+## answer, and copper that invents its own net answer is copper on the wrong net.
+
+## Resolve a click to a pad and its net.
+##
+## Reuses the pin inspector's hit test — host.pad_at, the SOLE pad hit-test
+## implementation (see the _pin_inspector_host declaration) — at a tighter radius
+## (TRACE_PAD_SNAP_MM; see there for why). The net comes from
+## data.find_net_for_pin rather than host.pin_info: pin_info is the same lookup
+## plus net_members and trace_ids, work this path would build on every click and
+## throw away. Same source of truth, one field of it.
+##
+## {} on a miss AND when no host is bound — with no hit test there is no pad, so
+## the tool refuses to start rather than guessing a net.
+func _trace_pad_at(world_pos: Vector2) -> Dictionary:
+	if _pin_inspector_host == null or not _pin_inspector_host.has_method("pad_at"):
+		return {}
+	var hit: Dictionary = _pin_inspector_host.pad_at(world_pos, TRACE_PAD_SNAP_MM)
+	if hit.is_empty():
+		return {}
+	var comp := str(hit.get("component", ""))
+	var pin := str(hit.get("pin", ""))
+	var pad_net := ""
+	if data != null:
+		pad_net = data.find_net_for_pin(comp, pin)
+	return {
+		"ref": "%s.%s" % [comp, pin],
+		"position": hit.get("position", Vector2.ZERO),
+		"net": pad_net,
+	}
+
+
+## Where a waypoint click lands, in board mm. Honours snap_to_grid exactly like
+## the zone tools and a component drag do. Pad ENDPOINTS deliberately bypass this
+## — a trace must meet the pad's actual centre, and snapping it to the nearest
+## grid intersection would pull the copper off the pad it is connecting to.
+func _trace_vertex_at(world_pos: Vector2) -> Vector2:
+	if snap_to_grid and data:
+		return data.snap_to_grid(world_pos)
+	return world_pos
+
+
+## The copper layer a new trace is placed on — the layer-filter rule shared with
+## the zone tools, defaulting to TRACE_DEFAULT_LAYER ("top") under "All".
+func trace_author_layer() -> String:
+	return _author_layer(TRACE_DEFAULT_LAYER)
+
+
+func _handle_trace_click(world_pos: Vector2, is_double_click: bool) -> void:
+	# The second press of a physical double-click arrives AFTER the first has
+	# already placed its waypoint, so it ends the trace there instead of stacking
+	# a duplicate point on top of it.
+	if is_double_click:
+		_commit_trace()
+		return
+
+	var hit := _trace_pad_at(world_pos)
+
+	if _trace_points.is_empty():
+		_start_trace(hit)
+		return
+
+	if not hit.is_empty():
+		_finish_trace_on_pad(hit)
+		return
+
+	_trace_append_point(_trace_vertex_at(world_pos))
+	_trace_has_preview = false
+	queue_redraw()
+
+
+## Append a point unless it lands on top of the previous one. Returns whether it
+## was appended.
+##
+## Coincident points are zero-length segments — not copper, just geometry that
+## every downstream consumer (length, DRC, Gerber) has to special-case. Two
+## gestures produce them naturally and neither is a mistake worth punishing: grid
+## snapping can round two nearby clicks onto the same intersection, and a second
+## click on the pad the trace STARTED from would otherwise commit a whole
+## zero-length trace. Dropping the duplicate turns that second case into a
+## one-point trace, which the ≥2-points rule then refuses with a real message.
+func _trace_append_point(point: Vector2) -> bool:
+	if not _trace_points.is_empty() \
+			and _trace_points[_trace_points.size() - 1].is_equal_approx(point):
+		return false
+	_trace_points.append(point)
+	return true
+
+
+## First click: adopt the pad's net + the current layer and place the start
+## point at the pad's centre. Both refusals are transient messages, not silent
+## no-ops — a tool that does nothing when clicked is indistinguishable from a
+## broken one.
+func _start_trace(hit: Dictionary) -> void:
+	if hit.is_empty():
+		trace_tool_message.emit("Start a trace on a pad — that is where its net comes from.")
+		return
+	var pad_net := str(hit.get("net", ""))
+	if pad_net.is_empty():
+		trace_tool_message.emit("Pad %s is on no net — a trace inherits its net from the pad it starts on."
+			% str(hit.get("ref", "")))
+		return
+	var layer := trace_author_layer()
+	if layer.is_empty():
+		trace_tool_message.emit("This board declares no copper layer to draw a trace on.")
+		return
+
+	_trace_net = pad_net
+	_trace_layer = layer
+	_trace_start_ref = str(hit.get("ref", ""))
+	_trace_points = PackedVector2Array([hit.get("position", Vector2.ZERO)])
+	_trace_has_preview = false
+	trace_tool_message.emit("Trace from %s (%s) on %s — click waypoints, click a pad to finish." % [
+		_trace_start_ref, _trace_net, _trace_layer])
+	queue_redraw()
+
+
+## Finish on a pad: the trace ends at that pad's centre.
+##
+## NO SAME-NET ENFORCEMENT (owner ruling this round): DRC is the correctness net,
+## not the drawing tool. A trace landing on a different net's pad is a short, and
+## a short the user drew deliberately is still theirs to draw — but it is named
+## out loud, both nets, rather than committed quietly.
+func _finish_trace_on_pad(hit: Dictionary) -> void:
+	_trace_append_point(hit.get("position", Vector2.ZERO))
+	_trace_has_preview = false
+	var end_net := str(hit.get("net", ""))
+	var warning := ""
+	if not end_net.is_empty() and end_net != _trace_net:
+		warning = "ends on %s, which is on net %s, not %s — that is a short; DRC will flag it." % [
+			str(hit.get("ref", "")), end_net, _trace_net]
+	elif end_net.is_empty():
+		warning = "ends on %s, which is on no net." % str(hit.get("ref", ""))
+	_commit_trace(warning)
+
+
+## Turn the in-progress polyline into a real Trace entity.
+##
+## HISTORY ORDER — snapshots AFTER the mutation, the MOVE idiom, for the reason
+## spelled out at length in _commit_zone: _restore_state applies a snapshot
+## wholesale and undo() steps to history[index - 1], so the snapshot a step
+## carries must be the state AFTER that step. Ctrl+Z removes the trace and
+## Ctrl+Shift+Z puts it back.
+##
+## create_trace_entity → add_trace emits data_changed, which is what marks the tab
+## dirty (PCBPanel relays it to content_changed) and what repaints the canvas — so
+## the committed trace appears through the ordinary _draw_traces path, with no
+## special case for "just drawn". There is no separate dirty flag to set.
+func _commit_trace(warning: String = "") -> void:
+	if not data or tool_mode != ToolMode.TRACE:
+		return
+	var refusal: String = data.trace_author_error(_trace_net, _trace_layer, _trace_points.size())
+	if not refusal.is_empty():
+		# Keep the placed points: the fix for "needs 2 points" is another click,
+		# not redrawing from scratch.
+		trace_tool_message.emit(refusal)
+		return
+
+	var width: float = data.authored_trace_width()
+	var trace = data.create_trace_entity(_trace_net, _trace_layer, _trace_points, width)
+	if trace == null:
+		# trace_author_error already passed, so this is a model-side refusal we did
+		# not anticipate. Report it rather than leaving a silent no-op behind.
+		trace_tool_message.emit("Trace was refused by the board model — see the log.")
+		return
+	data.save_to_history("Add trace")
+
+	var summary := "Added trace on %s (%s, %d points, %.2f mm)." % [
+		_trace_layer, _trace_net, _trace_points.size(), width]
+	_reset_trace_draw()
+	# ONE message, not two — the panel's transient status shows the latest, so a
+	# separate warning emit would simply erase the confirmation (or be erased by
+	# it). The warning is folded into the sentence instead.
+	trace_tool_message.emit(summary if warning.is_empty() else "%s WARNING: it %s" % [summary, warning])
+	queue_redraw()
+
+
+## Discard the in-progress trace. `announce` is false for a tool switch (the user
+## already knows) and true for an explicit Esc/right-click cancel.
+func _cancel_trace_draw(announce: bool) -> void:
+	if _trace_points.is_empty():
+		return
+	_reset_trace_draw()
+	if announce:
+		trace_tool_message.emit("Trace cancelled.")
+	queue_redraw()
+
+
+func _reset_trace_draw() -> void:
+	_trace_points = PackedVector2Array()
+	_trace_net = ""
+	_trace_layer = ""
+	_trace_start_ref = ""
+	_trace_has_preview = false
+
+
+## Draw the trace being born in the SAME visual language _draw_single_trace uses
+## for committed copper — the layer's trace colour, the real design-rule width
+## scaled by zoom — so it reads as the trace itself rather than as a generic
+## rubber band, and so what lands on commit is what was on screen. The segment
+## running to the cursor is dimmer: it is proposed, not placed.
+func _draw_trace_preview() -> void:
+	if _trace_points.is_empty():
+		return
+
+	# Same rule _draw_single_trace applies: only two trace colours exist, so an
+	# inner layer borrows the top colour.
+	var color := trace_bottom_color if _trace_layer == "bottom" else trace_top_color
+	var width_px := maxf((data.authored_trace_width() if data else 0.25) * zoom, 1.0)
+
+	var screen_pts := PackedVector2Array()
+	for p in _trace_points:
+		screen_pts.append(world_to_screen(p))
+
+	if screen_pts.size() >= 2:
+		draw_polyline(screen_pts, color, width_px)
+	if _trace_has_preview:
+		draw_line(screen_pts[screen_pts.size() - 1], world_to_screen(_trace_preview),
+			Color(color, TRACE_PREVIEW_RUBBER_ALPHA), width_px)
+
+	# Placed waypoints get dots — the one thing a committed trace does not draw
+	# (unless selected), because it is the one thing only an in-progress trace has.
+	for pt in screen_pts:
+		draw_circle(pt, TRACE_PREVIEW_VERTEX_RADIUS_PX, color)
+
+	# Arming label at the start pad — what this polyline will BECOME, mirroring
+	# the zone preview's label. Names the layer explicitly so the "All → top"
+	# fallback is visible while drawing, not discovered afterwards.
+	if font != null:
+		var label := "Trace %s @ %s" % [_trace_net, _trace_layer]
+		if not _trace_start_ref.is_empty():
+			label = "Trace from %s (%s) @ %s" % [_trace_start_ref, _trace_net, _trace_layer]
+		label += "  ·  %d pts" % _trace_points.size()
+		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
 
 #endregion
 
