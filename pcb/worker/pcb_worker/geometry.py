@@ -56,11 +56,32 @@ from .resolved_board import (
 )
 
 
+_TOP_LAYER_NAMES = frozenset({"top", "f.cu", "front"})
+_BOTTOM_LAYER_NAMES = frozenset({"bottom", "b.cu", "back"})
+
+
 def is_top(layer: Any) -> bool:
-    """A component/trace is on the top side unless it explicitly says bottom."""
-    if isinstance(layer, str):
-        return layer.strip().lower() not in ("bottom", "b.cu", "back")
-    return True
+    """Which fabricable side a copper item is on.
+
+    FAILS CLOSED (docket 019fb5869f3f): a *named* layer outside the two
+    fabricable sides raises instead of silently bucketing onto top — the old
+    "not bottom, therefore top" rule put in1..in30 copper on the top
+    Gerber/DRC layer, one level below the compile step's 2-layer refusal.
+    An *unspecified* layer (None / empty string) still defaults to top:
+    absence is the legacy shape for "the default side", not a claim about a
+    layer this pipeline cannot fabricate.
+    """
+    if layer is None:
+        return True
+    name = str(layer).strip().lower()
+    if not name or name in _TOP_LAYER_NAMES:
+        return True
+    if name in _BOTTOM_LAYER_NAMES:
+        return False
+    raise ValueError(
+        f"is_top: unrecognized copper layer {layer!r} — this 2-layer pipeline "
+        "fabricates only top/bottom (F.Cu/B.Cu); refusing to default it to top"
+    )
 
 
 def rotate_local_offset(px: float, py: float, deg: float) -> tuple[float, float]:

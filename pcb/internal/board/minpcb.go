@@ -80,8 +80,14 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 	// we to trust a legacy file claiming `version: 2`, its ordinal-shaped ids
 	// like "trace_1" would skip the mint and persist forever — item 019f802ca3af,
 	// Fable Round B note.) The legacy value is consumed, not carried across.
+	// FAIL CLOSED (docket 019fb5869f3f): a malformed `layers` used to be
+	// silently discarded, leaving an empty stack — which then made
+	// validateZones' declared-layer check skip entirely. A source that
+	// declares layers it cannot parse is a refusal, same as components/nets.
 	if v, ok := root["layers"]; ok {
-		_ = json.Unmarshal(v, &b.Layers)
+		if err := json.Unmarshal(v, &b.Layers); err != nil {
+			return nil, nil, fmt.Errorf("board: parse minpcb layers: %w", err)
+		}
 	}
 
 	// --- components (id→object map → sorted slice) ---
