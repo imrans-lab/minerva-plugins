@@ -863,6 +863,56 @@ func get_traces_in_region(region: Rect2, visible_filter := Callable()) -> Array[
 ## undo replay the drag pixel by pixel. The CALLER owes the journal entry and the
 ## single save_to_history at the end of the gesture. Use move_component's
 ## journalling sibling semantics for one-shot programmatic moves instead.
+## Re-width an existing trace. "" on success, the user-facing refusal otherwise.
+##
+## JOURNALLED SETTER — deliberately the set_zone_net/set_zone_layer shape, NOT
+## set_trace_waypoints' (the live-drag writer directly above, which journals
+## nothing on purpose because a per-motion-frame entry would bury the log). A
+## width change is a discrete authoring decision with a beginning and an end, so
+## it records a change and emits, exactly as re-propertying a zone does.
+##
+## HISTORY IS THE CALLER'S, taken AFTER this returns (mutate-then-snapshot, bug
+## 019fb5ad791c) — no mutator in this file snapshots itself.
+##
+## "" MEANS "NOTHING TO REPORT", NOT "SOMETHING CHANGED" — same caveat
+## set_zone_net carries: re-setting the width a trace already has journals
+## nothing and still returns "". A caller that snapshots MUST compare first or it
+## pushes an empty undo step and the user's next Ctrl+Z appears to do nothing
+## (cold-review F3). See PCBPanel._on_trace_prop_width_changed for the guard.
+##
+## Every rule lives on pcb_trace.width_error — ONE contract, shared with the
+## width spin box's bounds and the preference registry. Out of range is REFUSED,
+## not clamped: this writes copper (see that function's note).
+##
+## SELECTION GEOMETRY MOVES WITH THE WIDTH, by design: pcb_trace.get_bounding_rect
+## pads by half the width and is_point_near widens its hit radius by the same
+## half, and both read `width` live off the trace — nothing anywhere caches a
+## trace's bounds (the spatial index indexes components only, measured). So a
+## re-widened trace is immediately easier to click, which is the honest behaviour:
+## the clickable copper IS the copper.
+func set_trace_width(trace_id: String, width_mm: float) -> String:
+	var trace = get_trace(trace_id)
+	if trace == null:
+		return "No such trace."
+	var refusal: String = PCBTraceScript.width_error(width_mm)
+	if not refusal.is_empty():
+		return refusal
+	var old_width := float(trace.width)
+	if is_equal_approx(old_width, width_mm):
+		return ""
+	trace.width = width_mm
+	record_change("set_trace_width", {
+		"trace_id": trace_id,
+		"old_width_mm": old_width,
+		"width_mm": width_mm,
+		"net_name": trace.net_name,
+		"layer": trace.layer,
+	})
+	trace_changed.emit(trace_id)
+	data_changed.emit()
+	return ""
+
+
 func set_trace_waypoints(trace_id: String, points) -> void:
 	var trace = get_trace(trace_id)
 	if trace == null:
@@ -1375,10 +1425,26 @@ func get_zones_in_region(region: Rect2, visible_filter := Callable()) -> Array[S
 #region Trace Authoring
 
 ## Fallback width for an authored trace when the board declares no design rule.
-## MATCHES pcb_trace.gd's own `width` default, so a board with no design_rules
-## block authors traces at the same width the rest of this model already assumes
-## rather than at a second, differently-chosen number.
-const DEFAULT_TRACE_WIDTH_MM := 0.25
+## MATCHES pcb_trace.gd's own `width` default (it IS that constant since A7), so
+## a board with no design_rules block authors traces at the same width the rest
+## of this model already assumes rather than at a second, differently-chosen
+## number.
+const DEFAULT_TRACE_WIDTH_MM := PCBTraceScript.DEFAULT_WIDTH_MM
+
+
+## The board's OWN declared trace width, or 0.0 when it declares none.
+##
+## Split out of authored_trace_width (A7) because the two questions are
+## different and one caller needs the harder one: authored_trace_width answers
+## "what width do I lay copper at" and is never allowed to return 0, so it cannot
+## distinguish "the board says 0.25" from "the board says nothing and 0.25 is the
+## fallback". The width control's seeding order (board rule > stored preference >
+## control default, owner ruling this round) turns on exactly that distinction —
+## a stored preference must lose to a real design rule and WIN over a fallback.
+## Non-positive is treated as absent: a malformed rule is not an answer.
+func design_rule_trace_width() -> float:
+	var w := float(design_rules.get("trace_width_mm", 0.0))
+	return w if w > 0.0 else 0.0
 
 
 ## The width a newly authored trace gets, in mm.
@@ -1389,8 +1455,12 @@ const DEFAULT_TRACE_WIDTH_MM := 0.25
 ## preference of its own. Non-positive or missing (an older board, or one whose
 ## design_rules block never named a width) falls back to DEFAULT_TRACE_WIDTH_MM;
 ## a zero-width trace is not copper, so a malformed rule must not produce one.
+##
+## UNCHANGED BEHAVIOUR after the A7 split above — same rule, same fallback, now
+## expressed through design_rule_trace_width() so there is one place that reads
+## the design_rules key.
 func authored_trace_width() -> float:
-	var w := float(design_rules.get("trace_width_mm", 0.0))
+	var w := design_rule_trace_width()
 	return w if w > 0.0 else DEFAULT_TRACE_WIDTH_MM
 
 

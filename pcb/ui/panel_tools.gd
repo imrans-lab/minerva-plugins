@@ -46,6 +46,10 @@ extends RefCounted
 const _PcbRouteHintKindScript := preload("kinds/pcb_route_hint_kind.gd")
 ## T1.5: the ONE canonical layer/via-span contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
+## A7: the plugin-scoped preference store. The SAME process-wide instance the
+## panel reads (pcb_prefs.shared()), which is what makes an agent's write and a
+## human's turn of the width box two views of one value rather than two stores.
+const _PcbPrefsScript := preload("model/pcb_prefs.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
 ## the plugin component enum carries extra values but is set by NAME,
@@ -135,6 +139,12 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _set_zone_net(host, args)
 		"minerva_pcb_set_zone_layer":
 			return _set_zone_layer(host, args)
+		"minerva_pcb_set_trace_width":
+			return _set_trace_width(host, args)
+		"minerva_pcb_get_preference":
+			return _get_preference(host, args)
+		"minerva_pcb_set_preference":
+			return _set_preference(host, args)
 	return {}
 
 
@@ -2284,6 +2294,141 @@ static func _get_spatial(host):
 ## there is no editor_name/host resolution here — the dispatcher already
 ## handed us a live host — so the only failure mode left is a host without a
 ## board model (defensive; never hit against a mounted PCBPanel).
+# ── Trace width + preferences (A7, docket 019fb92f07e2) ─────────────────────
+# Same journalled model path the human's width controls use
+# (pcb_data.set_trace_width), and the SAME process-wide preference store the
+# panel reads (pcb_prefs.shared()) — which is what makes an agent write show up
+# in the human's spin box and a human turn show up in an agent's read. The live
+# repaint rides data_changed, which set_trace_width already emits (the canvas
+# wires data.data_changed -> _on_data_changed -> queue_redraw; nothing was added
+# here or there).
+
+## Re-width one trace. Mirrors _set_zone_net's idiom exactly: current-value guard
+## FIRST (set_trace_width returns "" for both a real write and "no change
+## needed", so an unguarded caller would push an empty undo step — cold-review F3
+## in pcb_data.gd's own docs), then the model call, then ONE save_to_history.
+## Every model refusal (unknown trace, non-positive, out-of-range) surfaces
+## verbatim as an _err — the tool invents no message of its own.
+static func _set_trace_width(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var trace_id: String = str(args.get("trace_id", ""))
+	if trace_id.is_empty():
+		return _err("trace_id is required")
+	var trace = data.get_trace(trace_id)
+	if trace == null:
+		return _err("Unknown trace: %s" % trace_id)
+	if not (args.get("width_mm") is float or args.get("width_mm") is int):
+		return _err("width_mm is required and must be a number of millimetres")
+	var width_mm := float(args.get("width_mm"))
+	if is_equal_approx(float(trace.width), width_mm):
+		return _ok({"trace_id": trace_id, "width_mm": float(trace.width), "changed": false})
+	var refusal: String = data.set_trace_width(trace_id, width_mm)
+	if not refusal.is_empty():
+		return _err(refusal)
+	data.save_to_history("Set trace width")
+	# The STORED width, re-read off the trace rather than echoed from the
+	# request: the model is what a width IS, and a reply that echoed the input
+	# would be indistinguishable from a write that never landed.
+	return _ok({
+		"trace_id": trace_id,
+		"width_mm": float(trace.width),
+		"net_name": str(trace.net_name),
+		"layer": str(trace.layer),
+		"changed": true,
+	})
+
+
+## Read one plugin preference. Read-only — journals nothing, writes nothing.
+## Reports the EFFECTIVE value plus whether it was actually stored, because
+## "never chosen" and "chosen and equal to the default" are different facts the
+## panel's seeding order depends on.
+static func _get_preference(host, args: Dictionary) -> Dictionary:
+	var prefs = _PcbPrefsScript.shared()
+	var key: String = str(args.get("key", ""))
+	if key.is_empty():
+		return _err("key is required. Known keys: %s" % ", ".join(prefs.known_keys()))
+	if not prefs.is_known(key):
+		return _err("Unknown preference key \"%s\". Known keys: %s" % [
+			key, ", ".join(prefs.known_keys())])
+	var spec: Dictionary = prefs.describe(key)
+	var reply := {
+		"key": key,
+		"value": prefs.get_value(key),
+		"stored": prefs.has_stored(key),
+		"default": spec.get("default", null),
+		"description": str(spec.get("description", "")),
+	}
+	if spec.has("min"):
+		reply["min"] = spec["min"]
+	if spec.has("max"):
+		reply["max"] = spec["max"]
+	var warning := str(prefs.take_warning())
+	if not warning.is_empty():
+		reply["warning"] = warning
+	return _ok(reply)
+
+
+## Write one plugin preference, and push it into the live panel so the human sees
+## it in the same control they would have turned themselves.
+##
+## An UNKNOWN KEY is refused, never silently adopted (pcb_prefs.key_registry
+## owns that judgement, and the refusal names the keys that do exist so an agent
+## can self-correct). The store validates and CLAMPS the value by its own rules
+## and the reply reports the STORED, post-clamp value plus a `clamped` flag — a
+## clamp is visible, never silent. Note the deliberate asymmetry with
+## _set_trace_width above, which REFUSES an out-of-range width: that one writes
+## copper, this one writes a starting point (see pcb_prefs.set_value).
+##
+## The live push goes through host.get_panel() — the same duck-typed host→panel
+## back-reference run_router/load_board already use — so a headless host (no
+## panel mounted) simply stores the value and says so, rather than failing.
+static func _set_preference(host, args: Dictionary) -> Dictionary:
+	var prefs = _PcbPrefsScript.shared()
+	var key: String = str(args.get("key", ""))
+	if key.is_empty():
+		return _err("key is required. Known keys: %s" % ", ".join(prefs.known_keys()))
+	if not prefs.is_known(key):
+		return _err("Unknown preference key \"%s\". Known keys: %s" % [
+			key, ", ".join(prefs.known_keys())])
+	if not args.has("value"):
+		return _err("value is required")
+	var res: Dictionary = prefs.set_value(key, args.get("value"))
+	if not bool(res.get("ok", false)):
+		return _err(str(res.get("error", "Preference could not be stored.")))
+
+	var applied := false
+	var panel = _get_panel(host)
+	if panel != null and panel.has_method("apply_preference"):
+		panel.apply_preference(key, res.get("value"))
+		applied = true
+
+	var reply := {
+		"key": key,
+		"value": res.get("value"),
+		"requested": args.get("value"),
+		"clamped": bool(res.get("clamped", false)),
+		"changed": bool(res.get("changed", false)),
+		"applied_to_panel": applied,
+	}
+	var warning := str(prefs.take_warning())
+	if not warning.is_empty():
+		reply["warning"] = warning
+	return _ok(reply)
+
+
+## The live PCBPanel behind a host, or null (headless / before mount). Same
+## duck-typed host→panel back-reference _get_workspace uses.
+static func _get_panel(host):
+	if host == null or not host.has_method("get_panel"):
+		return null
+	var panel = host.get_panel()
+	if panel == null or not is_instance_valid(panel):
+		return null
+	return panel
+
+
 static func _resolve_data(host) -> Variant:
 	var data = _get_data(host)
 	if data == null:

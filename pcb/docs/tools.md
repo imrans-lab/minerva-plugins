@@ -53,9 +53,70 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_delete_zone` | `data.remove_zone`; one journalled step, mirrors `delete_component`'s idiom |
 | `minerva_pcb_set_zone_net` | `data.set_zone_net`; current-value guard before calling the model (below) |
 | `minerva_pcb_set_zone_layer` | `data.set_zone_layer`; current-value guard before calling the model (below) |
+| `minerva_pcb_set_trace_width` | `data.set_trace_width`; one journalled step, current-value guard, out-of-range **refused** (below) |
+| `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
+| `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
 
 Mutations go through the model API, so the change journal, undo history and the
 `data_changed` dirty relay come for free.
+
+Trace width is READABLE without a new tool: `minerva_pcb_export_trace_geometry`
+already stamps `width` on every emitted segment alongside its `trace_id`, so
+"how wide is this trace" was answerable before A7 and no describe-style tool was
+added for it.
+
+## Trace width + preferences (`minerva_pcb_set_trace_width`, `get_preference`, `set_preference`, A7)
+
+`minerva_pcb_set_trace_width` rides the same journalled model path the human's
+width row uses (`pcb_data.set_trace_width`), with the same current-value guard
+the zone setters carry — a re-set of the width a trace already has replies
+`{success:true, changed:false}` and touches neither the journal nor the undo
+history, while a real change is exactly one `save_to_history` step and repaints
+the canvas live off `data_changed`. The reply reports the width **read back off
+the trace**, not the requested number. Unknown `trace_id` is an error, never a
+silent no-op. A trace's clickable area follows its width (`is_point_near` widens
+its hit radius by half the width, live off the trace) — a re-widened trace is
+immediately easier to click, by design.
+
+**Widths are refused out of range, preferences are clamped.** The two tools
+differ deliberately: `set_trace_width` writes COPPER, so a width outside
+0.1–5.0 mm (or non-positive, or non-finite) comes back as the model's own
+refusal rather than being quietly rounded into something the caller did not ask
+for. `set_preference` writes a STARTING POINT for a range-bounded control, so an
+out-of-range value is clamped into the range that control can express and the
+reply says so (`clamped:true`) with the stored post-clamp `value`.
+
+The preference store (`pcb/ui/model/pcb_prefs.gd`) is **plugin-scoped, not a
+Minerva core preference**: it persists to `user://plugins/data/pcb/preferences.json`
+(the install-time plugin data directory Minerva's `PluginManager` creates) as
+`{"version":1,"values":{…}}`, survives app restart, and is shared by every open
+PCB tab. It has a **known-key registry** — an unrecognised key is refused by
+both tools, with the known keys named in the error, never silently adopted. A
+missing file is the normal first-run state; a corrupt or unreadable one degrades
+to defaults and reports a `warning` rather than failing.
+
+Known keys:
+
+| Key | Type | Range | Meaning |
+|---|---|---|---|
+| `trace_width_mm` | number | 0.1–5.0 | Width new traces start at when the board declares no design rule |
+
+`get_preference` returns `stored` alongside `value`, because "never chosen"
+and "chosen, and equal to the default" are different facts — the panel's seeding
+order depends on the distinction.
+
+**Seeding precedence for the width of a NEW trace** (owner ruling):
+
+1. the board's own `design_rules.trace_width_mm`, when it declares one — a board
+   that states its trace width outranks a habit carried from another board;
+2. the stored `trace_width_mm` preference, when the board declares no rule;
+3. the control's own default (0.25 mm) when neither says anything.
+
+`set_preference` on `trace_width_mm` also pushes into the live panel
+(`applied_to_panel:true`): the human's width box updates immediately and the
+canvas is armed, so the next trace they draw really is that wide. A human turn
+of that same box writes the preference back, so the agent's read and the human's
+control are two views of one value.
 
 ## Zone tools (`minerva_pcb_list_zones` / `describe_zone` / `delete_zone` / `set_zone_net` / `set_zone_layer`, A6)
 

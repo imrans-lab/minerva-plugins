@@ -17,14 +17,48 @@ var net_name: String = ""
 ## Waypoints defining the trace path (polyline in mm)
 var waypoints: Array[Vector2] = []
 
+## THE trace-width contract (A7, docket 019fb92f07e2). Declared on the entity
+## that HAS a width so the three readers — the panel's width controls, the
+## journalled model setter (pcb_data.set_trace_width) and the preference
+## registry (pcb_prefs.key_registry) — share ONE rule instead of three copies of
+## the same two numbers drifting apart.
+##
+## The bounds are SANITY RAILS, not fabrication rules — the same reasoning the
+## width spin box was built with (PCBPanel.gd ~782): below 0.1 mm is finer than
+## any hobby process etches, above 5 mm is a plane rather than a trace, and the
+## real constraint is the fab's own spec, which this editor has no way to know.
+const MIN_WIDTH_MM := 0.1
+const MAX_WIDTH_MM := 5.0
+## The width a trace has when nothing else says (also pcb_data's authored
+## fallback, and the preference registry's default).
+const DEFAULT_WIDTH_MM := 0.25
+
 ## Trace width in mm (common values: 0.15, 0.2, 0.25, 0.3, 0.5, 1.0)
-var width: float = 0.25
+var width: float = DEFAULT_WIDTH_MM
 
 ## Layer: "top", "bottom", or inner layer names
 var layer: String = "top"
 
 ## Whether this trace is locked from editing
 var locked: bool = false
+
+
+## Why `width_mm` may not be written to a trace, or "" when it may.
+##
+## REFUSES out of range rather than clamping: this guards COPPER. A caller that
+## asked for 40 mm asked for something that is not a trace, and silently laying
+## 5 mm instead would be the editor inventing a fabrication decision. (The
+## PREFERENCE store deliberately does the opposite — see pcb_prefs.set_value,
+## which clamps a starting-point value into the range its control can express.)
+static func width_error(width_mm: float) -> String:
+	if not is_finite(width_mm):
+		return "A trace width must be a finite number of millimetres."
+	if width_mm <= 0.0:
+		return "A trace width must be greater than zero — zero-width copper is not copper."
+	if width_mm < MIN_WIDTH_MM or width_mm > MAX_WIDTH_MM:
+		return "Trace width %.3f mm is outside the %.2f–%.2f mm range this editor authors." % [
+			width_mm, MIN_WIDTH_MM, MAX_WIDTH_MM]
+	return ""
 
 
 ## Add a waypoint to the trace
@@ -198,7 +232,7 @@ func to_dict() -> Dictionary:
 func load_from_dict(data: Dictionary) -> void:
 	id = data.get("id", "")
 	net_name = data.get("net_name", "")
-	width = data.get("width", 0.25)
+	width = data.get("width", DEFAULT_WIDTH_MM)
 	layer = data.get("layer", "top")
 	locked = data.get("locked", false)
 
@@ -238,7 +272,7 @@ func to_board_dict() -> Dictionary:
 func load_from_board_dict(data: Dictionary) -> void:
 	id = str(data.get("id", ""))
 	net_name = str(data.get("net", data.get("net_name", "")))
-	width = float(data.get("width_mm", 0.25))
+	width = float(data.get("width_mm", DEFAULT_WIDTH_MM))
 	layer = str(data.get("layer", "top"))
 	locked = data.get("locked", false)
 

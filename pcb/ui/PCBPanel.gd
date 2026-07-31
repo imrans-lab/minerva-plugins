@@ -55,6 +55,14 @@ const _PcbRoutingSidecarScript: Script = preload("model/pcb_routing_sidecar.gd")
 ## stays annotation-authoritative (mechanism only); T3/T5 flip individual
 ## surfaces once their write path is workspace-backed. Built beside the workspace.
 const _PcbRoutingCutoverScript: Script = preload("model/pcb_routing_cutover.gd")
+## Plugin-scoped preferences (A7, docket 019fb92f07e2). The panel reads the store
+## for seeding and writes it when the human turns the width box; the MCP surface
+## (panel_tools.gd) reaches the SAME process-wide store, which is why an agent's
+## write shows up in this panel's controls.
+const _PcbPrefsScript: Script = preload("model/pcb_prefs.gd")
+## Trace-width bounds/default — the ONE contract, shared with the model setter
+## and the preference registry (pcb_trace.gd).
+const _PcbTraceScript: Script = preload("model/pcb_trace.gd")
 
 ## The overlay Control name Editor.gd mounts the platform AnnotationOverlay
 ## under (Editor.gd:855). The route-flow cluster reaches it by find_child on
@@ -138,6 +146,20 @@ var _zone_prop_layer_option: OptionButton = null
 ## _offset_component_id, and read by the commit handlers so a selection change
 ## racing a dropdown cannot re-property a zone the user is no longer looking at.
 var _zone_prop_zone_id: String = ""
+
+## The selected TRACE's property row (A7, docket 019fb92f07e2) — one editable
+## field, its width. Built in the same key-label + value-control shape as the
+## zone rows above and shown/hidden by the same rule (exactly one selected trace,
+## or it hides: with two selected there is no single width a box could show).
+## A mixed component+trace+zone selection shows every half that applies, which is
+## what the A5 restructure of _update_properties made possible.
+var _trace_prop_rows: VBoxContainer = null
+var _trace_prop_width_spin: SpinBox = null
+## WHICH trace the row edits ("" = none) — the trace twin of _zone_prop_zone_id,
+## for the same reason: a selection change racing a spin-box commit must not
+## re-width a trace the user is no longer looking at.
+var _trace_prop_trace_id: String = ""
+
 var _board_size_label: Label = null
 var _status_label: Label = null
 
@@ -780,16 +802,16 @@ func _build_sidebar() -> VBoxContainer:
 
 	# Trace width. A SpinBox rather than a picker because width is continuous —
 	# there is no list of legal widths to choose from, only the board's design
-	# rule as a starting point. Bounds are sanity rails, not fabrication rules:
-	# below 0.1 mm is finer than any hobby process etches, above 5 mm is a plane
-	# rather than a trace, and the real constraint is the fab's own spec, which
-	# this control has no way to know.
+	# rule as a starting point. Bounds are sanity rails, not fabrication rules —
+	# stated once, on the entity that has a width (pcb_trace.MIN/MAX_WIDTH_MM),
+	# and shared with the model setter and the preference registry since A7.
 	_trace_width_spin = SpinBox.new()
 	_trace_width_spin.name = "TraceWidthSpin"
-	_trace_width_spin.tooltip_text = "Width of the trace being drawn, in mm. Starts at the board's " \
-		+ "design-rule width (design_rules.trace_width_mm); changing it affects new traces only"
-	_trace_width_spin.min_value = 0.1
-	_trace_width_spin.max_value = 5.0
+	_trace_width_spin.tooltip_text = "Width of new traces, in mm. Starts at the board's design-rule " \
+		+ "width (design_rules.trace_width_mm) when it declares one, else your stored preference; " \
+		+ "turning it stores that preference for boards that declare no rule. Affects new traces only"
+	_trace_width_spin.min_value = _PcbTraceScript.MIN_WIDTH_MM
+	_trace_width_spin.max_value = _PcbTraceScript.MAX_WIDTH_MM
 	_trace_width_spin.step = 0.05
 	_trace_width_spin.suffix = "mm"
 	_trace_width_spin.visible = false
@@ -940,6 +962,7 @@ func _build_properties_section() -> VBoxContainer:
 
 	_properties_body.add_child(_build_group_rows())
 	_properties_body.add_child(_build_zone_rows())
+	_properties_body.add_child(_build_trace_rows())
 	return section
 
 
@@ -1096,6 +1119,7 @@ func _update_properties() -> void:
 			fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
 		(_prop_labels["Footprint"] as Label).text = fp
 	_update_zone_rows()
+	_update_trace_rows()
 
 
 ## Drive the zone re-property rows for the selected zone.
@@ -1133,6 +1157,104 @@ func _hide_zone_rows() -> void:
 	_zone_prop_zone_id = ""
 	if _zone_prop_rows != null:
 		_zone_prop_rows.visible = false
+
+
+## The selected TRACE's property rows (A7). ONE row so far — its width — built in
+## the same key-label + value-control shape as the zone rows above, with a
+## SpinBox for the same reason the arming control uses one: width is continuous,
+## so there is no list of legal values to pick from.
+##
+## Bounded by the SAME contract the model setter enforces (pcb_trace MIN/MAX),
+## so a value the box can express is a value the board will accept — a control
+## that could offer 40 mm and then be refused would be the UI lying about the
+## contract, the rule the zone pickers already follow.
+func _build_trace_rows() -> VBoxContainer:
+	_trace_prop_rows = VBoxContainer.new()
+	_trace_prop_rows.name = "TraceRows"
+	_trace_prop_rows.visible = false
+
+	var row := HBoxContainer.new()
+	row.name = "TraceWidthRow"
+	var key := Label.new()
+	key.text = "Width:"
+	key.custom_minimum_size.x = 60
+	row.add_child(key)
+
+	_trace_prop_width_spin = SpinBox.new()
+	_trace_prop_width_spin.name = "TracePropWidthSpin"
+	_trace_prop_width_spin.tooltip_text = "Width of the SELECTED trace, in mm. Changing it re-widens " \
+		+ "that trace (one undoable step) — it does not change the width of new traces"
+	_trace_prop_width_spin.min_value = _PcbTraceScript.MIN_WIDTH_MM
+	_trace_prop_width_spin.max_value = _PcbTraceScript.MAX_WIDTH_MM
+	_trace_prop_width_spin.step = 0.05
+	_trace_prop_width_spin.suffix = "mm"
+	_trace_prop_width_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_trace_prop_width_spin.value_changed.connect(_on_trace_prop_width_changed)
+	row.add_child(_trace_prop_width_spin)
+	_trace_prop_rows.add_child(row)
+
+	return _trace_prop_rows
+
+
+## Drive the trace property row for the selected trace. EXACTLY ONE selected
+## trace or the row hides — the same rule the zone half applies, and for the same
+## reason: with two traces selected there is no single width a box could show.
+func _update_trace_rows() -> void:
+	if _trace_prop_rows == null:
+		return
+	var selected: Array = _canvas.get_selected_traces()
+	if selected.size() != 1:
+		_hide_trace_rows()
+		return
+	var trace_id := str(selected[0])
+	var trace = _data.get_trace(trace_id)
+	if trace == null:
+		_hide_trace_rows()
+		return
+	_trace_prop_trace_id = trace_id
+	_trace_prop_rows.visible = true
+	# set_value_no_signal for the SAME reason the arming box uses it: assigning
+	# would fire value_changed and commit the box's step-rounded number back onto
+	# the trace, so merely SELECTING a 0.254 mm trace would silently re-width it
+	# to 0.25 and push an undo step nobody asked for.
+	_trace_prop_width_spin.set_value_no_signal(float(trace.width))
+
+
+func _hide_trace_rows() -> void:
+	_trace_prop_trace_id = ""
+	if _trace_prop_rows != null:
+		_trace_prop_rows.visible = false
+
+
+## Re-width the selected trace. ONE journalled, undoable step; the MODEL owns
+## every rule that could refuse it (pcb_data.set_trace_width → pcb_trace.
+## width_error) and its refusal string is what the user is shown, after which the
+## box is re-read from the model — the board is the truth, the control is a view
+## of it, the same contract the zone re-property rows keep.
+##
+## NO-OP EDITS MUST NOT REACH save_to_history (cold-review F3, the guard the zone
+## handlers carry): SpinBox emits value_changed for a re-typed identical value,
+## and set_trace_width returns "" for "no change needed" exactly as it does for a
+## real write — so an unguarded commit would push a dead "Set trace width" step
+## and the user's next Ctrl+Z would appear to do nothing.
+func _on_trace_prop_width_changed(value: float) -> void:
+	if _trace_prop_trace_id.is_empty() or _data == null:
+		return
+	var trace_id := _trace_prop_trace_id
+	var trace = _data.get_trace(trace_id)
+	if trace == null:
+		return
+	if is_equal_approx(float(trace.width), value):
+		return
+	var refusal: String = _data.set_trace_width(trace_id, value)
+	if not refusal.is_empty():
+		_show_transient_status(refusal)
+		_update_properties()
+		return
+	_data.save_to_history("Set trace width")
+	if _canvas != null:
+		_canvas.queue_redraw()
+	_update_properties()
 
 
 ## Populate the re-property net picker from the board's declared nets, selecting
@@ -2342,7 +2464,7 @@ func _on_zone_layer_selected(index: int) -> void:
 
 
 ## Point the width box at the width the trace tool would commit right now: the
-## armed override if the user has set one, else the board's design rule.
+## armed override if the user has set one, else the seeding order below.
 ##
 ## set_value_no_signal, NOT `value =` — assigning would fire value_changed and so
 ## write the box's own (step-rounded, range-clamped) number back as an explicit
@@ -2359,16 +2481,104 @@ func _sync_trace_width_spin() -> void:
 	if armed > 0.0:
 		_trace_width_spin.set_value_no_signal(armed)
 		return
-	_trace_width_spin.set_value_no_signal(_data.authored_trace_width() if _data != null else 0.0)
+	_trace_width_spin.set_value_no_signal(seeded_trace_width())
+
+
+## SEEDING ORDER for the width box (owner ruling, A7 docket 019fb92f07e2):
+##   1. the BOARD's design_rules.trace_width_mm, when it declares one — a board
+##      that states its own trace width outranks anything the user preferred on
+##      some other board. The board is a document; the preference is a habit.
+##   2. the STORED preference, when the board declares no rule — the no-rule case
+##      is exactly the gap a preference exists to fill.
+##   3. the control's own default (pcb_trace.DEFAULT_WIDTH_MM, which is also
+##      pcb_data.DEFAULT_TRACE_WIDTH_MM) when neither says anything.
+##
+## Step 2 turns on has_stored(), NOT on the preference's value: an unstored key
+## reads back as the registry default, which would make "never chose one" and
+## "chose 0.25" indistinguishable and collapse steps 2 and 3 into one. This
+## EXTENDS pcb_data.authored_trace_width rather than forking it — that function
+## already encodes board-rule-first, and design_rule_trace_width() (A7) is the
+## same read with the "declared nothing" case still visible.
+func seeded_trace_width() -> float:
+	var rule: float = _data.design_rule_trace_width() if _data != null else 0.0
+	if rule > 0.0:
+		return rule
+	var prefs = get_preferences()
+	if prefs == null:
+		return _PcbTraceScript.DEFAULT_WIDTH_MM
+	# Drain BEFORE the has_stored branch: a corrupt prefs file loads as EMPTY
+	# values, so has_stored() is false and a drain inside that branch would
+	# never fire — the one path that generated the warning would be the one
+	# path that never showed it (cold-review A7 F1).
+	_drain_pref_warning()
+	if prefs.has_stored(_PcbPrefsScript.KEY_TRACE_WIDTH):
+		return prefs.get_float(_PcbPrefsScript.KEY_TRACE_WIDTH, _PcbTraceScript.DEFAULT_WIDTH_MM)
+	return _PcbTraceScript.DEFAULT_WIDTH_MM
 
 
 func _on_trace_width_changed(value: float) -> void:
 	if _canvas == null:
 		return
 	_canvas.trace_width_override = value
+	# The width the human just chose IS the preference (A7). Only THIS control
+	# writes it: the box arms the width of traces NOT YET DRAWN, which is exactly
+	# what a "default trace width" preference means. The trace property row below
+	# deliberately does NOT write it — re-widening one existing trace is an edit
+	# to that trace, and letting it silently repoint the default would mean
+	# inspecting an old 0.15 mm trace changed what every future trace looks like.
+	# Seeding only consults the preference when the board declares no design rule,
+	# so storing it on a board that HAS a rule is still worth doing: it is the
+	# width this human wants on the next board that declares none.
+	var prefs = get_preferences()
+	if prefs != null:
+		var res: Dictionary = prefs.set_value(_PcbPrefsScript.KEY_TRACE_WIDTH, value)
+		if not bool(res.get("ok", false)):
+			_show_transient_status(str(res.get("error", "Preference not stored.")))
+		else:
+			_drain_pref_warning()
 	# The rubber-band preview draws at the armed width, so a mid-draw change is
 	# visible immediately instead of only in the committed copper.
 	_canvas.queue_redraw()
+
+
+## The plugin-scoped preference store (pcb_prefs.gd). PROCESS-WIDE, not
+## per-panel: a preference belongs to the plugin, so two open PCB tabs cannot
+## hold two different ideas of the default trace width, and the MCP tool surface
+## can read/write it whether or not a panel is mounted. Exposed for MCP/tests.
+func get_preferences():
+	return _PcbPrefsScript.shared()
+
+
+## Show whatever the preference store last had to complain about (a corrupt file,
+## an unwritable directory, an unreadable key) on the SAME transient status line
+## refused traces and refused zone edits use. take_warning() consumes it, so a
+## problem is reported once rather than on every seeding read.
+func _drain_pref_warning() -> void:
+	var prefs = get_preferences()
+	if prefs != null and prefs.has_warning():
+		_show_transient_status(prefs.take_warning())
+
+
+## Apply a preference an AGENT wrote so the human's panel shows it immediately
+## (A7 acceptance 4). Called through the host→panel back-reference
+## (PcbAnnotationHost.get_panel) by panel_tools' minerva_pcb_set_preference —
+## the same duck-typed path run_router/load_board already use.
+##
+## An explicit preference write is an ARMING act, not merely a stored number:
+## it also sets the canvas' trace_width_override, so the next trace the human
+## draws really is that wide even on a board whose design rule says otherwise
+## (which is what "an agent pref write shows LIVE in the human's spin box" has
+## to mean to be worth anything). Unknown keys never reach here — the tool
+## validates against the store's registry first.
+func apply_preference(key: String, value: Variant) -> void:
+	if key != _PcbPrefsScript.KEY_TRACE_WIDTH:
+		return
+	var width := float(value)
+	if _canvas != null:
+		_canvas.trace_width_override = width
+		_canvas.queue_redraw()
+	if _trace_width_spin != null:
+		_trace_width_spin.set_value_no_signal(width)
 
 
 func _on_layer_selected(index: int) -> void:

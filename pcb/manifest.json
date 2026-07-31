@@ -539,6 +539,47 @@
       }
     },
     {
+      "name": "minerva_pcb_set_trace_width",
+      "description": "Set the width, in mm, of one existing trace. A real change journals exactly one undoable step and repaints the canvas live; re-setting the width the trace already has is a no-op reply (changed:false) and journals nothing. The reply reports the STORED width read back off the trace, not the requested one. Refused (as an error, with the model's own reason) for an unknown trace_id, a non-positive or non-finite width, or a width outside the 0.1-5.0 mm range this editor authors — widths are NOT clamped here, because this writes copper. Note the trace's clickable area follows its width, by design.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "trace_id": {"type": "string", "description": "Trace id to re-width (as reported by minerva_pcb_export_trace_geometry)"},
+          "width_mm": {"type": "number", "description": "New trace width in mm. Must be within 0.1-5.0; out-of-range values are refused, not clamped."}
+        },
+        "required": ["editor_name", "trace_id", "width_mm"]
+      }
+    },
+    {
+      "name": "minerva_pcb_get_preference",
+      "description": "Read one PCB plugin preference. Plugin-scoped and persistent across app restarts; NOT a Minerva core preference. Returns {key, value, stored, default, description} plus min/max where the key is bounded — `stored` distinguishes \"the user/agent actually chose this\" from \"never chosen, reading the default\", which is what decides whether the preference is consulted at all. Read-only: journals nothing, writes nothing. An unknown key is an error that lists the keys that do exist. Known keys: trace_width_mm.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "key": {"type": "string", "description": "Preference key to read (e.g. trace_width_mm)"}
+        },
+        "required": ["editor_name", "key"]
+      }
+    },
+    {
+      "name": "minerva_pcb_set_preference",
+      "description": "Write one PCB plugin preference. Plugin-scoped, persisted under the plugin's data directory, survives app restart; NOT a Minerva core preference. The value is validated and CLAMPED to the key's declared range (unlike minerva_pcb_set_trace_width, which refuses out-of-range widths because it writes copper) and the reply reports the stored post-clamp value with {clamped, changed, applied_to_panel}. An unknown key is refused, never silently adopted. Setting trace_width_mm updates the live panel's trace-width box immediately and arms it for the next trace drawn. The arming is IMMEDIATE: the next trace drawn uses this width even on a board declaring design_rules.trace_width_mm. Board-rule precedence applies at seeding time only — on the next board load the declared rule wins again and the preference fills the no-rule case.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "key": {"type": "string", "description": "Preference key to write (e.g. trace_width_mm)"},
+          "value": {"type": "number", "description": "New value. For trace_width_mm: width in mm, clamped into 0.1-5.0."}
+        },
+        "required": ["editor_name", "key", "value"]
+      }
+    },
+    {
       "name": "minerva_pcb_validate",
       "description": "Structurally validate a canonical PCB board (board-yaml contract). Args {yaml:<board source>} or {board:<board object>}. Returns {ok, errors:[{path,message}], warnings:[...]} — errors flag structural faults (missing required fields, duplicate refs, net pin refs that don't resolve, traces on unknown nets); warnings flag soft issues (out-of-bounds coordinates, trace narrower than design rules). Cheap: no geometry engine.",
       "input_schema": {
@@ -698,6 +739,7 @@
           "ui/model/pcb_component.gd",
           "ui/model/pcb_net.gd",
           "ui/model/pcb_trace.gd",
+          "ui/model/pcb_prefs.gd",
           "ui/model/pcb_spatial_index.gd"
         ],
         "file_extensions": [

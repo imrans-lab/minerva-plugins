@@ -459,6 +459,26 @@ component per row — so a CSV round trip drops `locked`, `color`, `pads` and no
 `group_id` alike. This is the pre-existing rule, not a new asymmetry: CSV is a
 placement interchange, and `.pcbskel`/canonical YAML is the lossless one.
 
+### `design_rules.trace_width_mm` and the editor's width preference (A7)
+
+`design_rules.trace_width_mm` is the board's own answer to "how wide is a trace
+here", and it is what the panel's trace tool arms with. Since round A7 the
+plugin also carries a **plugin-scoped preference** of the same name
+(`trace_width_mm`, stored under the plugin's data directory — see
+`docs/tools.md`, "Trace width + preferences"), and the precedence between them
+is fixed:
+
+1. **the board's `design_rules.trace_width_mm` wins** whenever it declares one —
+   a board is a document that states its own rules, and a preference carried
+   from some other board must not override it;
+2. the stored preference fills the case where the board declares **no** rule
+   (missing, or a non-positive value, which is treated as no answer);
+3. failing both, the editor's own default, 0.25 mm.
+
+The preference never alters the board file, and a trace's own `width_mm` is
+always what that trace was authored or re-widened to — neither the design rule
+nor the preference is re-applied to existing copper.
+
 ### Net classes (`design_rules.net_classes`)
 
 A net class states a stricter width/clearance **floor** for a named set of nets.
