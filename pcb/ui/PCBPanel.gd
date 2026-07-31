@@ -772,11 +772,11 @@ func _build_sidebar() -> VBoxContainer:
 	_propose_button.pressed.connect(_on_propose_button_pressed)
 	hints_flow.add_child(_propose_button)
 
-	_route_flow_mode_label = Label.new()
-	_route_flow_mode_label.name = "RouteFlowModeLabel"
-	_route_flow_mode_label.text = "Select"
-	_route_flow_mode_label.add_theme_font_size_override("font_size", 11)
-	_sidebar.add_child(_route_flow_mode_label)
+	# RouteFlowModeLabel removed (owner HITL 2026-07-30): its idle text
+	# "Select" read as a duplicate section header under the real ones, and the
+	# pressed state of the toggle buttons already shows the armed tool.
+	# _route_flow_mode_label stays null; _update_route_flow_mode_label is
+	# null-guarded, so every update site is a safe no-op.
 
 	_sidebar.add_child(HSeparator.new())
 
