@@ -195,8 +195,13 @@ var _space_pan_armed: bool = false
 ## annotations), so they belong on this surface rather than the overlay's. TRACE
 ## (epoch 6 unit 5) is the same family for copper: click a pad, click waypoints,
 ## click a pad to finish. It is NOT the Hints-group trace tool — that one authors
-## a route HINT for the router; this one authors the Trace entity itself.
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE }
+## a route HINT for the router; this one authors the Trace entity itself. ERASER
+## (item 019fb934827776) owns clicks the same way: each click deletes exactly the
+## entity it hits (same pick _entity_at gives the Select tool), journalled as its
+## OWN undo step (see _handle_eraser_click) — not the trash-can's batch. Clicking
+## empty space, or a locked component/trace, deletes nothing and the tool STAYS
+## ARMED (owner ruling); no drag-sweep deletion in v1.
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
 ## Transient user-facing feedback from the zone tools ("pick a net", "needs 3
@@ -1595,6 +1600,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_trace_click(world_pos, event.double_click)
 				return
 
+			# Eraser tool (item 019fb934827776): owns the click outright, exactly
+			# like the three tools above — no select/drag/box-select fallthrough
+			# while it is armed.
+			if tool_mode == ToolMode.ERASER:
+				_handle_eraser_click(world_pos)
+				return
+
 			# Pan tool OR Space-drag: a left-drag pans the whole board view.
 			# (Discoverability for finding 2 — a visible Pan tool + the familiar
 			# Space+drag, alongside the existing right/middle-drag pan.)
@@ -1761,14 +1773,10 @@ func _handle_key_input(event: InputEventKey) -> void:
 
 	match event.keycode:
 		KEY_DELETE, KEY_BACKSPACE:
-			# Delete selected trace first, then a selected zone, otherwise the
-			# selected components — mirrors the single-click pick priority.
-			if not selected_trace_ids.is_empty():
-				_delete_selected_trace()
-			elif not selected_zone_ids.is_empty():
-				_delete_selected_zone()
-			else:
-				_delete_selected()
+			# Batch-deletes the WHOLE mixed selection as ONE undo step (item
+			# 019fb92f8b83) — no more per-kind priority (trace, then zone,
+			# then components); see _delete_selection.
+			_delete_selection()
 		KEY_ENTER, KEY_KP_ENTER:
 			# Closes an in-progress zone. Mirrors the single-trace hint tool's
 			# Enter commit; the canvas also honours a real double-click (it,
@@ -1791,6 +1799,11 @@ func _handle_key_input(event: InputEventKey) -> void:
 				return
 			if tool_mode == ToolMode.INSPECT_PIN:
 				_exit_inspect_pin_mode()
+			# Esc disarms the eraser (item 019fb934827776 — "Esc or choosing
+			# another tool disarms"); an empty click deliberately does NOT (see
+			# _handle_eraser_click), so this is the only click-free way out.
+			elif tool_mode == ToolMode.ERASER:
+				set_tool_mode(ToolMode.SELECT)
 			# One call drops the whole mixed selection — components, traces and
 			# zones alike (see _clear_selection).
 			_clear_selection()
@@ -2071,9 +2084,16 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 ## locked members stay exactly where they are. Zones carry no lock in the board
 ## contract, so none is invented for them here.
 ##
-## The lock is NOT consulted by the delete paths — that is pre-existing behaviour
-## (_delete_selected has always removed locked parts too) and unifying/repairing
-## deletion is a follow-up unit's job, not this one's.
+## The lock IS now consulted by the delete paths too (adopted finding, A2
+## review — see _delete_selection and _handle_eraser_click): a locked
+## component or trace is skipped the same way it is skipped here.
+## _delete_selected_zone below is the sole survivor of the three legacy
+## single-kind delete functions (cold-review N2 deleted the other two as
+## dead code); it is UNCHANGED and does not consult the lock (zones carry no
+## lock concept, so there is nothing for it to consult) — it is no longer on
+## the interactive Delete-key path, which now goes through _delete_selection
+## exclusively, and survives only because test_zone_select_delete.gd calls it
+## directly.
 ##
 ## Geometry is DUPLICATED, never referenced: waypoints/outline arrays are live
 ## model state, and a shared reference would make the "original" track the drag.
@@ -2208,34 +2228,165 @@ func _end_selection_drag() -> void:
 #endregion
 
 
-func _delete_selected() -> void:
-	if selected_components.is_empty():
+## Is this entity locked against deletion (and move)? Shared by
+## _delete_selection and _handle_eraser_click (cold-review N1 — the same
+## 3-way lock branch was duplicated between them) and kept beside
+## _selection_of in the KIND_* idiom family, even though _capture_drag_origins
+## does not itself call through here (it predates this helper and inlines the
+## same rule for its own two kinds — left as-is, out of this unit's fence).
+##
+## Zones carry no lock concept in the board contract — checked against both
+## the zone dict shape (pcb_data.gd: id/kind/outline/net/layer, no "locked"
+## key) and board.go's `type Zone struct` (no Locked field) — so KIND_ZONE
+## always reports unlocked.
+func _is_entity_locked(kind: String, entity_id: String) -> bool:
+	match kind:
+		KIND_COMPONENT:
+			var comp = data.get_component(entity_id)
+			return comp != null and comp.locked
+		KIND_TRACE:
+			var trace = data.get_trace(entity_id)
+			return trace != null and trace.locked
+	return false
+
+
+## Remove one entity through its existing journalled remover, true if it was
+## actually removed. Shared by _delete_selection and _handle_eraser_click —
+## but ONLY the "does an entity of this kind still exist, and which single
+## remove_* call clears it" question: the per-kind remove_component/
+## remove_trace/remove_zone calls themselves are IRREDUCIBLE (different
+## signatures, different model collections) and are not — and should not
+## be — collapsed into one generic call (cold-review N1 judgement call).
+func _remove_entity(kind: String, entity_id: String) -> bool:
+	match kind:
+		KIND_COMPONENT:
+			if not data.has_component(entity_id):
+				return false
+			data.remove_component(entity_id)
+			return true
+		KIND_TRACE:
+			if data.get_trace(entity_id) == null:
+				return false
+			data.remove_trace(entity_id)
+			return true
+		KIND_ZONE:
+			return data.remove_zone(entity_id)
+	return false
+
+
+## Batch-delete the WHOLE mixed selection — components, traces and zones — as
+## ONE undo step (item 019fb92f8b83, trash-can half; also the unified Delete/
+## Backspace target — see _handle_key_input). Reuses the SAME begin_batch/
+## end_batch idiom _end_selection_drag uses for the move gesture: every
+## entity is removed through its existing journalled remover (_remove_entity,
+## which is only a thin per-kind dispatch onto remove_component/remove_trace/
+## remove_zone — no new removal path), then ONE save_to_history covers the
+## lot, so a single undo restores everything. The outer walk is the ONE
+## generic loop over KIND_COMPONENT/KIND_TRACE/KIND_ZONE via _selection_of —
+## cold-review N1: this collapsed what were three near-identical hand-written
+## loops (one per kind) into one, now that the per-kind lock check and
+## removal call each live behind a single shared helper.
+##
+## LOCKED COMPONENTS/TRACES ARE SKIPPED (adopted finding, A2 review) — same
+## semantics as the move path (_capture_drag_origins): a locked entity may
+## sit in the selection, but it is never deleted. Zones are never locked (see
+## _is_entity_locked), so every selected zone is removed regardless.
+##
+## A no-op selection (empty, or every member locked with no zone present)
+## touches nothing: end_batch's own _batch_touched gate snapshots nothing —
+## and, per cold-review N5, reports through the existing lock-feedback
+## channel (component_lock_changed, the same one _lock_selected_components
+## already uses) so an all-locked delete attempt isn't silent.
+##
+## After the batch, the WHOLE selection is cleared via _clear_selection() —
+## including any locked member that survived, and regardless of whether
+## anything was actually removed — DOCUMENTED CHOICE: "cleanly deselected"
+## rather than "stays selected", matching every existing delete path's
+## unconditional clear. Routing the clear through _clear_selection() (rather
+## than clearing the three arrays inline) is cold-review N1 too: it is what
+## makes every cleared component still emit component_deselected, exactly as
+## a plain Escape-clear does.
+func _delete_selection() -> void:
+	if not data or not has_selection():
 		return
 
-	for comp_id in selected_components:
-		data.remove_component(comp_id)
-	data.save_to_history("Delete components")
+	var removed := 0
+	data.begin_batch()
 
-	selected_components.clear()
-	selection_changed.emit()
+	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE]:
+		for entity_id in _selection_of(kind):
+			if _is_entity_locked(kind, entity_id):
+				continue
+			if _remove_entity(kind, entity_id):
+				removed += 1
+
+	data.end_batch("Delete selection (%d)" % removed)
+
+	if removed == 0:
+		component_lock_changed.emit("Selection is locked — nothing deleted")
+
+	_clear_selection()
 	queue_redraw()
 
 
-## Delete the selected traces. Now plural (the selection can hold several), but
-## otherwise untouched: same Delete-key priority, same one-snapshot-after-the-
-## mutations order. Unifying the three _delete_selected* paths into one
-## kind-blind delete is a FOLLOW-UP unit's job, not this one's.
-func _delete_selected_trace() -> void:
-	if selected_trace_ids.is_empty() or not data:
+## Eraser click (item 019fb934827776): pick exactly what the Select tool
+## would pick (_entity_at), then delete THAT ONE entity as its own journalled
+## change with its own history snapshot — deliberately NOT the
+## begin_batch/end_batch idiom _delete_selection uses, since every click is
+## its own undo step (three clicks on three kinds -> three separate undos, in
+## reverse order).
+##
+## LOCKED COMPONENTS/TRACES ARE SKIPPED — _is_entity_locked, the same helper
+## _delete_selection uses. A locked component in practice can never reach
+## here anyway (data.get_component_at, behind _component_at/_entity_at,
+## already skips locked components so clicks pass through to whatever is
+## underneath); the trace check is the one that matters, since trace picking
+## carries no such skip.
+##
+## Empty space, or a locked entity, is a no-op: no snapshot, no selection
+## change, and — per the owner ruling this item shipped with — the tool
+## STAYS ARMED either way (and stays SILENT either way — unlike the trash-
+## can's all-locked case, an eraser miss is not reported; that is the
+## "empty click does nothing" ruling itself, and a locked hit is just another
+## kind of miss). There is no drag-sweep here by design (v1 scope).
+func _handle_eraser_click(world_pos: Vector2) -> void:
+	if not data:
 		return
-	for trace_id in selected_trace_ids:
-		data.remove_trace(trace_id)
-	data.save_to_history("Delete trace")
-	selected_trace_ids.clear()
-	selection_changed.emit()
+	var hit: Array = _entity_at(world_pos)
+	var hit_kind: String = hit[0]
+	var hit_id: String = hit[1]
+	if hit_kind.is_empty() or _is_entity_locked(hit_kind, hit_id):
+		return
+	if not _remove_entity(hit_kind, hit_id):
+		return
+	data.save_to_history(_erase_label(hit_kind, hit_id))
+
+	if is_entity_selected(hit_kind, hit_id):
+		_remove_from_selection(hit_kind, hit_id)
+		selection_changed.emit()
 	queue_redraw()
 
 
+## The eraser's per-click history label. Kept OFF _remove_entity (which the
+## batch path shares and has no use for a per-entity label) — labels are
+## eraser-only, so they live with its one caller.
+func _erase_label(kind: String, entity_id: String) -> String:
+	match kind:
+		KIND_COMPONENT:
+			return "Erase %s" % entity_id
+		KIND_TRACE:
+			return "Erase trace"
+		KIND_ZONE:
+			return "Erase zone"
+	return "Erase"
+
+
+## _delete_selected_zone is the LAST of what were three legacy single-kind
+## delete paths (cold-review N2): _delete_selected and _delete_selected_trace
+## are gone — the batch/eraser paths above superseded them and neither had
+## any caller left once the Delete-key dispatch moved to _delete_selection.
+## This one survives because test_zone_select_delete.gd calls it directly; if
+## that caller ever goes away, this can fold into _delete_selection too.
 func _delete_selected_zone() -> void:
 	if selected_zone_ids.is_empty() or not data:
 		return

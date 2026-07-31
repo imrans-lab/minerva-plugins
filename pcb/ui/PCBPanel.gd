@@ -142,6 +142,13 @@ var _properties_expanded := true
 ## Pin Info section (WC-1 pin inspector). Hidden until a pin is selected;
 ## hides again on clear (canvas pin_selected({})).
 var _inspect_pin_button: Button = null
+## Trash-can (item 019fb92f8b83, delete half): a plain action button, NOT a
+## radio tool — it never joins _tool_buttons/_toggle_tool_mode's mutual
+## exclusion, it just fires _canvas._delete_selection() once. Enabled only
+## while the selection is non-empty (_update_delete_button, driven off the
+## canvas' selection_changed signal, the same wiring _update_status/
+## _update_properties already use).
+var _delete_button: Button = null
 var _pin_info_section: VBoxContainer = null
 var _pin_info_ref_label: Label = null
 var _pin_info_value_label: Label = null
@@ -401,7 +408,7 @@ func _build_ui() -> void:
 	_canvas.component_selected.connect(func(_id: String) -> void:
 		_update_status(); _update_properties())
 	_canvas.selection_changed.connect(func() -> void:
-		_update_status(); _update_properties())
+		_update_status(); _update_properties(); _update_delete_button())
 	_canvas.component_lock_changed.connect(_on_component_lock_changed)
 	_canvas.zoom_changed.connect(func(_z: float) -> void: _update_status())
 	_canvas.pin_selected.connect(_on_pin_selected)
@@ -690,6 +697,30 @@ func _build_sidebar() -> VBoxContainer:
 		+ "cancels. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place freely. Drawn at the "
 		+ "width set below (the board's design-rule width until you change it), on the selected copper "
 		+ "layer — on \"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER, "trace_draw_24.png")
+
+	# Eraser (item 019fb934827776) + Delete/trash-can (item 019fb92f8b83) live
+	# HERE, not in the Select section above (cold-review N3) — the section
+	# comment's own taxonomy draws the line at "the Select tools above ...
+	# touch nothing"; Eraser and Delete both mutate the board's entity list
+	# (they are Draw's destructive twin — Draw adds entities, these remove
+	# them), the same altitude as Pour/Keepout/Trace, not Select/Pan's
+	# navigate-only altitude. The exclusion wiring is untouched: Eraser is
+	# still just another _add_tool_button -> _toggle_tool_mode radio tool, and
+	# Delete is still the same plain action button, both merely relocated to
+	# this flow.
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ERASER, "Eraser",
+		"Click an entity to delete it — one click, one undo step. Click empty space to do nothing " \
+		+ "(stays armed). Esc or another tool disarms it. Locked components/traces are skipped.")
+
+	_delete_button = Button.new()
+	_delete_button.name = "DeleteSelectionButton"
+	_delete_button.text = "Delete"
+	_delete_button.tooltip_text = "Delete the whole selection — components, traces and zones together " \
+		+ "(Delete/Backspace does the same). One undo restores all of it. Locked components/traces " \
+		+ "are skipped."
+	_delete_button.disabled = true
+	_delete_button.pressed.connect(func() -> void: _canvas._delete_selection())
+	draw_flow.add_child(_delete_button)
 
 	# The Draw tools' arming controls. Each is shown only while the tool it arms
 	# is active, so the resting sidebar is unchanged.
@@ -1692,6 +1723,14 @@ func _toggle_tool_mode(mode: int) -> void:
 func _sync_tool_buttons(mode: int) -> void:
 	for m in _tool_buttons:
 		(_tool_buttons[m] as Button).button_pressed = (m == mode)
+
+
+## Trash-can enablement (item 019fb92f8b83): live off the canvas' own
+## selection_changed signal, the same feed _update_status/_update_properties
+## already listen on — no separate polling, no separate state to drift.
+func _update_delete_button() -> void:
+	if _delete_button != null:
+		_delete_button.disabled = _canvas == null or not _canvas.has_selection()
 
 
 func _on_tool_mode_changed(mode: int) -> void:
