@@ -15,6 +15,12 @@ that is the full compiler (compile_board.py). The committed vectors in
 codes here match ``internal/board.Validate`` verbatim. The minted-id predicate and
 override-key set live in the neutral :mod:`board_schema` module (imported by both
 this validator and the compiler) so the two Python paths cannot drift.
+
+Layer-stack structure (:func:`_check_layers`, epoch 6 unit 3a) went in on BOTH sides
+in one change, so unlike the zone codes it is exact parity from the start: the
+canonical stack is ``top``, ``in1``..``inN``, ``bottom`` in stack order, and the
+canonical inner-name parser is imported from :mod:`agent_router.layers` rather than
+re-derived here.
 """
 from __future__ import annotations
 
@@ -23,6 +29,13 @@ from __future__ import annotations
 # definition and the override field set have exactly one source of truth) — and
 # so this validator no longer depends on the compiler (finding 019f88bac172).
 from .board_schema import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
+
+# The canonical inner-layer name parser is the SAME one the canon<->KiCad mapping
+# uses (agent_router.layers is the lower, standalone package pcb_worker is allowed
+# to import upward from). Re-deriving "what is a valid in<k>" here would be a
+# second definition of the layer contract, which is exactly how the layer map
+# drifted before T1.5 — Go's innerLayerIndex is the third, unavoidable, copy.
+from agent_router.layers import inner_layer_index
 
 def _check_entity_ids(entity: str, item_lists: "list[list]", codes: list) -> None:
     """Append the first persistent-id violation across one entity DOMAIN (one or more
@@ -51,8 +64,9 @@ def validate_board_v2(board: dict) -> list[str]:
     is valid at this boundary. Codes are identical to ``internal/board.Validate``:
     ``unsupported_schema_version``, ``unminted_persistent_id``,
     ``duplicate_persistent_id``, ``invalid_pin_override``, ``invalid_board_structure``,
-    and — for zones — ``invalid_zone_outline``, ``zone_unknown_net``,
-    ``zone_unknown_layer``.
+    for the layer stack — ``invalid_layer_name``, ``duplicate_layer``,
+    ``incomplete_layer_stack``, ``invalid_layer_stack_order`` — and for zones —
+    ``invalid_zone_outline``, ``zone_unknown_net``, ``zone_unknown_layer``.
     """
     if not isinstance(board, dict):
         return ["invalid_board_structure"]
@@ -86,10 +100,12 @@ def validate_board_v2(board: dict) -> list[str]:
         elif any(item is None for item in items):
             codes.append("invalid_board_structure")
 
-    # Zone STRUCTURE is checked on v1 boards too — Go's Validate calls
-    # validateZones before its version gate, because an outline that is not a
-    # polygon or a net/layer that does not exist is wrong regardless of which
-    # identity era the board is from. Identity is the version-gated part, below.
+    # Layers BEFORE zones, exactly as Go's Validate orders them: a zone's layer
+    # is checked for MEMBERSHIP in the declared stack, so a board with a broken
+    # stack must report the stack code, not a zone code derived from it. Both are
+    # version-independent for the same reason — a malformed stack or a non-polygon
+    # outline is wrong regardless of which identity era the board is from.
+    _check_layers(board, codes)
     _check_zones(lists["zones"], board, codes)
 
     if version >= 2:
@@ -127,6 +143,63 @@ def validate_board_v2(board: dict) -> list[str]:
             if isinstance(pin, dict):
                 codes.extend(_override_problems(pin.get("override")))
     return codes
+
+
+def _check_layers(board: dict, codes: list) -> None:
+    """Mirror of Go's ``validateLayers`` (internal/board/validate.go): append the FIRST
+    layer-stack violation, using Go's own code strings.
+
+    The declared ``layers`` list is OPTIONAL, and its ORDER *IS* the physical stack
+    order — "top" first, "bottom" last, inner layers ``in1``..``inN`` (N capped by
+    :data:`agent_router.layers.MAX_INNER_LAYERS`, KiCad's 30) in index
+    order between them. Nothing sorts or dedupes it on either side, so the four rules
+    are: canonical names only (``invalid_layer_name``), no repeats
+    (``duplicate_layer``), both outer layers present (``incomplete_layer_stack``), and
+    stack order with inners CONTIGUOUS from ``in1`` (``invalid_layer_stack_order``).
+    Only the FIRST violation is appended, matching Go's return-on-first-error, so a
+    board breaking two rules reports the same code on both sides.
+
+    A ``layers`` value that is not a list at all is NOT coded here: Go's codec rejects
+    it at unmarshal, so Go's Validate never sees one, and this file mirrors Go's
+    *Validate*, not its codec (the same division of labour that leaves the other
+    auxiliary containers to the codec — see the ``lists`` comment above).
+
+    Inner layers are AUTHORABLE, NOT FABRICABLE: a 4-layer stack passes this boundary
+    on both sides, and ``compile_board._require_two_layer`` still refuses to build
+    anything but exactly ``["top", "bottom"]`` — the same shape as zones, which
+    validate here and are refused by every output consumer."""
+    raw_layers, ok = _as_list(board.get("layers"))
+    if not ok or not raw_layers:
+        return
+    layers = [str(item) for item in raw_layers]
+    seen: dict[str, int] = {}
+    for i, layer in enumerate(layers):
+        if layer not in ("top", "bottom"):
+            # A DECLARED stack entry must be the exact canonical spelling. The
+            # mapping helpers in agent_router.layers case-fold on purpose (they
+            # translate whatever a producer hands them), but Go's validator
+            # compares raw bytes, so "In1" must fail identically on both sides —
+            # hence the round-trip check against the canonical form, not just a
+            # non-zero index.
+            k = inner_layer_index(layer)
+            if k == 0 or layer != f"in{k}":
+                codes.append("invalid_layer_name")
+                return
+        if layer in seen:
+            codes.append("duplicate_layer")
+            return
+        seen[layer] = i
+    if "top" not in seen or "bottom" not in seen:
+        codes.append("incomplete_layer_stack")
+        return
+    # Both outer layers are present and unique, so the list is at least 2 long.
+    if layers[0] != "top" or layers[-1] != "bottom":
+        codes.append("invalid_layer_stack_order")
+        return
+    for i, layer in enumerate(layers[1:-1]):
+        if layer != f"in{i + 1}":
+            codes.append("invalid_layer_stack_order")
+            return
 
 
 def _check_zones(zones: list, board: dict, codes: list) -> None:

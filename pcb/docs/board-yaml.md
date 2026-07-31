@@ -20,7 +20,8 @@ name: Blinky                   # board name
 width_mm: 40                   # board outline width (mm)
 height_mm: 30                  # board outline height (mm)
 grid_mm: 2.54                  # optional snap grid (mm)
-layers: [top, bottom]          # optional layer stack
+layers: [top, bottom]          # optional copper stack; LIST ORDER IS STACK ORDER
+                               # (see "Layer stack" below)
 origin: {x_mm: 0, y_mm: 0}     # optional board origin
 design_rules:                  # board-wide manufacturing constraints
   clearance_mm: 0.2
@@ -88,6 +89,72 @@ for exactly that reason: a board carrying them does not compile.
 This is the same policy, and the same diagnostic code, that refuses the
 nominal-size fields on an authored net class (see "Net classes" below).
 `compile_board._declared_but_not_modeled` is the single place it is decided.
+
+### Layer stack (`layers`)
+
+`layers` is the board's **copper** stack. It is optional — a board that declares
+none is a 2-layer board by convention, and nothing invents a stack for it — but
+when it is declared, **the list order IS the physical stack order**: `top` first,
+`bottom` last, inner layers in index order between them. Nothing in the codec
+sorts or dedupes the list, so what an author writes is what every consumer sees.
+
+Canonical names are lowercase and 1-based, and each has exactly one KiCad alias:
+
+| canonical | KiCad | position |
+|---|---|---|
+| `top` | `F.Cu` | outer, stack index 0 |
+| `in1` … `in30` | `In1.Cu` … `In30.Cu` | inner, in stack order |
+| `bottom` | `B.Cu` | outer, last |
+
+The inner range stops at 30 because KiCad's copper stack does (32 layers total),
+so every canonical name this contract accepts has an alias a KiCad tool will
+take. `in01` is not a name (one layer, one spelling); neither is `inner1`,
+`In1.Cu` (that is the alias, not the canonical id), or any non-copper layer —
+`Edge.Cuts`, `F.SilkS` and friends are emitter concerns, not stack entries.
+
+`Validate` enforces four rules on a declared stack, first violation wins, with
+identical codes in Go (`internal/board/validate.go`, `validateLayers`) and Python
+(`worker/pcb_worker/board_validate.py`, `_check_layers`):
+
+| code | when |
+|---|---|
+| `invalid_layer_name` | an entry is not `top`, `bottom`, or `in<k>` with 1 ≤ k ≤ 30 |
+| `duplicate_layer` | the same layer is listed twice |
+| `incomplete_layer_stack` | `top` or `bottom` is missing |
+| `invalid_layer_stack_order` | the list is not `top`, `in1`…`inK`, `bottom` in that order — inner layers must be **contiguous from `in1`** |
+
+Contiguity is required because a gap (`[top, in1, in3, bottom]`) would assert a
+physical layer the board refuses to name, and would make the alias of the layer
+below the gap disagree with its position — `In3.Cu` by name, second inner by
+place. Requiring contiguity keeps a layer's name and its position the same fact.
+
+**Inner layers are AUTHORABLE, NOT FABRICABLE.** A 4-layer stack round-trips and
+validates on both sides, and `compile_board._require_two_layer` still refuses to
+build any stack other than exactly `[top, bottom]` (`unsupported_layer_stack`). This is the same pattern as
+zones below: the contract learns to *carry* the thing before any consumer learns
+to *make* it. For that reason no example in this document declares an inner
+layer — one would fail the compile-checked-examples test, exactly as a zone
+would.
+
+**Vias are through-hole only.** `from_layer`/`to_layer` describe a span that
+crosses the whole board; blind and buried vias are **not modeled**, and a span
+touching an inner layer is illegal (`is_legal_via_span`). Declaring inner layers
+does not change that — legality derives from the two-entry fabricable stack
+table, and blind/buried support needs a real span-adjacency rule, not more
+entries in it.
+
+The canonical ↔ KiCad mapping has one source of truth per language —
+`worker/agent_router/layers.py`, mirrored value-for-value by
+`ui/model/pcb_layer_stack.gd` — and the two directions are deliberately
+asymmetric:
+
+- **Write / export** (`canon_to_kicad`) **fails closed**: an empty or unknown
+  layer name raises (Python) or `push_error`s and returns `""` (GDScript). It no
+  longer defaults to `F.Cu`, because a silently defaulted layer name is copper on
+  the wrong side of a board somebody fabricates.
+- **Read / import** (`kicad_to_canon`) **fails visible**: an unknown name still
+  passes through lower-cased, so an old or foreign board stays loadable, but it
+  now emits a warning instead of being silent.
 
 ### Zones (schema modeled, fabrication still refused)
 
@@ -279,7 +346,7 @@ importer (`board.ImportMinpcb`) applies this and returns a warnings list.
 | `board_name`                                | `name`                          | |
 | `board_width` / `board_height`              | `width_mm` / `height_mm`        | |
 | `grid_size`                                 | `grid_mm`                       | |
-| `layers`                                    | `layers`                        | |
+| `layers`                                    | `layers`                        | copied as-is; must satisfy the stack rules in "Layer stack" |
 | `components` (`id`→object **map**)          | `components` (**list**, sorted by id) | deterministic order |
 | component `id`                              | `ref`                           | reference designator |
 | component `position.{x,y}`                  | `x_mm` / `y_mm`                 | origin = pin 1 |

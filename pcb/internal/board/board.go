@@ -56,12 +56,27 @@ type Board struct {
 	// user renames the board or reorders its children. Empty on a v1 board;
 	// omitempty so a pre-migration board still round-trips byte-identically.
 	// See docs/board-yaml.md "Persistent identity (v2)".
-	ID          string      `json:"id,omitempty" yaml:"id,omitempty"`
-	Name        string      `json:"name" yaml:"name"`
-	WidthMM     float64     `json:"width_mm" yaml:"width_mm"`
-	HeightMM    float64     `json:"height_mm" yaml:"height_mm"`
-	GridMM      float64     `json:"grid_mm,omitempty" yaml:"grid_mm,omitempty"`
-	Layers      []string    `json:"layers,omitempty" yaml:"layers,omitempty"`
+	ID       string  `json:"id,omitempty" yaml:"id,omitempty"`
+	Name     string  `json:"name" yaml:"name"`
+	WidthMM  float64 `json:"width_mm" yaml:"width_mm"`
+	HeightMM float64 `json:"height_mm" yaml:"height_mm"`
+	GridMM   float64 `json:"grid_mm,omitempty" yaml:"grid_mm,omitempty"`
+
+	// Layers is the OPTIONAL copper stack, and its ORDER *IS* the physical
+	// stack order: "top" first, "bottom" last, inner layers "in1".."in30" in
+	// index order between them (KiCad F.Cu / In<k>.Cu / B.Cu — the canon↔KiCad
+	// mapping lives in worker/agent_router/layers.py and its GDScript mirror).
+	// Nothing in this codec sorts or dedupes the list, so what an author writes
+	// is what every consumer sees; validateLayers enforces the shape.
+	//
+	// Inner layers are AUTHORABLE, NOT FABRICABLE — the same pattern as Zones
+	// below. A 4-layer stack round-trips and validates here, while the Python
+	// compiler still refuses any stack but exactly ["top","bottom"]
+	// (compile_board._require_two_layer). A board that declares NO layers is a
+	// 2-layer board by convention; this contract does not invent a stack for it.
+	// See docs/board-yaml.md "Layer stack".
+	Layers []string `json:"layers,omitempty" yaml:"layers,omitempty"`
+
 	Origin      *Point      `json:"origin,omitempty" yaml:"origin,omitempty"`
 	DesignRules DesignRules `json:"design_rules" yaml:"design_rules"`
 	Components  []Component `json:"components" yaml:"components"`
