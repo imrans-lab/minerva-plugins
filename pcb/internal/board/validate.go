@@ -35,8 +35,10 @@ import "fmt"
 // incomplete_layer_stack, invalid_layer_stack_order) are likewise mirrored
 // verbatim by board_validate.py's _check_layers — unlike the zone codes below,
 // they went in on both sides in the same change (epoch 6 unit 3a).
-// The zone-structural codes (invalid_zone_outline, zone_unknown_net,
-// zone_unknown_layer) are NOT yet cross-checked against Python: the Python
+// The zone-structural codes (invalid_zone_outline, invalid_zone_kind,
+// zone_unknown_net, zone_unknown_layer) are NOT yet cross-checked against
+// Python by a vector, but board_validate.py's _check_zones mirrors them
+// string-for-string and in the same order: the Python
 // compiler refuses a board that declares one or more zones
 // (compile_board.py:1836 — presence-AND-non-empty; `zones: []`/`zones: null`
 // are skipped there) rather than validating zone content, so there is no
@@ -213,14 +215,40 @@ func validateLayers(b *Board) error {
 	return nil
 }
 
+// ZoneKindCopperPour and ZoneKindKeepout are the two canonical Zone.Kind values.
+// An EMPTY kind means ZoneKindCopperPour — the shape every board authored before
+// the field existed has — so absence is not a third kind, it is a default.
+// Canonical lowercase only; see Zone.Kind (board.go) for why case is not folded.
+// The same two strings are ZoneKind in worker/pcb_worker (the Python IR) and the
+// return values of PCBData.zone_kind() in ui/model/pcb_data.gd.
+const (
+	ZoneKindCopperPour = "copper_pour"
+	ZoneKindKeepout    = "keepout"
+)
+
 // validateZones enforces zone-specific structural rules that apply regardless
 // of schema version (unlike the v2-only identity checks above, which have
 // nothing to check on a v1 board): an authored outline must actually describe
-// a polygon, and a zone's net/layer must reference something the board
-// actually declares. This is new validation introduced with the Zone type
-// itself — there is no pre-existing "a trace's net/layer must exist" check in
-// this function to mirror, so this deliberately holds zones to a stricter bar
-// than the entities already here.
+// a polygon, a zone's kind must be one this contract knows, and a zone's
+// net/layer must reference something the board actually declares. This is new
+// validation introduced with the Zone type itself — there is no pre-existing "a
+// trace's net/layer must exist" check in this function to mirror, so this
+// deliberately holds zones to a stricter bar than the entities already here.
+//
+// THE NET RULE IS KIND-DEPENDENT (owner boundary ruling 2026-07-30, docket
+// 019fb5ad6d20: "Keepouts don't need net connections"). A copper_pour is copper
+// and copper belongs to a net, so it must name a declared one. A keepout is a
+// prohibition on copper rather than copper itself — KiCad's rule areas carry no
+// net — so it may name none. A keepout that DOES name a net is still valid and
+// still checked against the declared nets: net-scoped keepouts ("no GND copper
+// here") stay expressible, and a keepout naming a net the board never declared
+// is the same authoring mistake it always was.
+//
+// CHECK ORDER IS LOAD-BEARING, not incidental: kind is validated BEFORE net
+// because kind decides which net rule applies — an unrecognized kind cannot be
+// resolved to "pour or keepout", so reporting it is the only honest answer. Only
+// the first violation per board is returned, and board_validate.py's
+// _check_zones mirrors this order violation-for-violation.
 func validateZones(b *Board) error {
 	if len(b.Zones) == 0 {
 		return nil
@@ -237,7 +265,16 @@ func validateZones(b *Board) error {
 		if len(z.Outline) < 3 {
 			return fmt.Errorf("invalid_zone_outline: zone[%d] outline has %d point(s), a polygon needs at least 3", i, len(z.Outline))
 		}
-		if z.Net == "" || !netNames[z.Net] {
+		if z.Kind != "" && z.Kind != ZoneKindCopperPour && z.Kind != ZoneKindKeepout {
+			return fmt.Errorf("invalid_zone_kind: zone[%d] kind %q is not %q or %q", i, z.Kind, ZoneKindCopperPour, ZoneKindKeepout)
+		}
+		if z.Kind == ZoneKindKeepout {
+			// Netless is the KiCad-parity case and is fine; a NAMED net must
+			// still be one the board declares.
+			if z.Net != "" && !netNames[z.Net] {
+				return fmt.Errorf("zone_unknown_net: zone[%d] net %q is not a declared net", i, z.Net)
+			}
+		} else if z.Net == "" || !netNames[z.Net] {
 			return fmt.Errorf("zone_unknown_net: zone[%d] net %q is not a declared net", i, z.Net)
 		}
 		if z.Layer == "" {

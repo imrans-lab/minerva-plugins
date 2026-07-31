@@ -349,8 +349,10 @@ type Via struct {
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 
-// Zone is an authored copper-fill region on a single layer, tied to one net —
-// most commonly a ground or power pour. It carries the AUTHORED outline only;
+// Zone is an authored region on a single layer: either a copper fill tied to one
+// net — most commonly a ground or power pour — or a keepout, a KiCad-style rule
+// area that forbids copper and needs no net at all (see Kind and Net below).
+// It carries the AUTHORED outline only;
 // computing the actual filled copper against pads, traces, keepouts, and
 // thermal reliefs is compiler work this contract does not attempt (mirrors the
 // Python IR's split between ResolvedZone.authored_outline and its separate
@@ -375,11 +377,40 @@ type Zone struct {
 	// for lossless round-trip. docs/board-yaml.md already reserved the "zone"
 	// id kind for this before a Zone struct existed.
 	ID string `json:"id,omitempty" yaml:"id,omitempty"`
-	// Net and Layer are NOT omitempty (unlike Trace.Layer): a copper zone with
-	// no stated net or layer is underspecified, not merely terse, so Validate
-	// requires both non-empty and requires Net to name a declared net (and
-	// Layer, when the board declares a layer stack, to be a member of it).
-	Net   string `json:"net" yaml:"net"`
+	// Kind is what this region IS: a copper pour ("copper_pour", the default) or
+	// a KiCad-style rule area that forbids copper ("keepout"). Empty means
+	// copper_pour — the historical shape, so every board authored before this
+	// field existed keeps its meaning. Validate accepts only "", "copper_pour"
+	// and "keepout", canonical lowercase (invalid_zone_kind); the UI's
+	// PCBData.zone_kind() normalises case before it ever reaches here, so a
+	// stray "Keepout" in hand-written source is a typo worth reporting rather
+	// than a spelling to silently accept.
+	//
+	// FIRST-CLASS, not Extra (owner ruling 2026-07-30, docket 019fb5ad6d20).
+	// Kind now DECIDES the net requirement below, and a rule that branches on a
+	// value cannot read it out of the forward-compat junk drawer: Extra is
+	// json:"-" and only reaches JSON through the inline marshalers in json.go,
+	// which by design let a modeled key win — so a validator reading
+	// Extra["kind"] would be reading a key the codec is entitled to drop. A
+	// modeled field also means knownJSONKeys() claims "kind", so splitExtra
+	// never parks it in Extra and mergeExtra never re-emits it: exactly one
+	// `kind` key on the wire, in YAML and JSON alike.
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty"`
+	// Layer is NOT omitempty: a zone with no stated layer is underspecified, not
+	// merely terse, so Validate requires it non-empty and (when the board
+	// declares a layer stack) a member of it.
+	//
+	// Net IS omitempty, and that asymmetry is the owner ruling above: a
+	// copper_pour must name a declared net (Validate: zone_unknown_net), but a
+	// keepout is a geometric prohibition, not copper, so it may name no net at
+	// all — matching KiCad, where a rule area needs no net. omitempty is what
+	// makes "no net" round-trip as an ABSENT key rather than as `net: ""`, a
+	// value that reads like a net whose name is the empty string. A pour can
+	// never hit it: Validate rejects a pour with an empty net, so the key is
+	// omitted only for the case that is allowed to lack one. A keepout that DOES
+	// name a net stays valid and stays checked — net-scoped keepouts remain
+	// expressible, and the named net must still be declared.
+	Net   string `json:"net,omitempty" yaml:"net,omitempty"`
 	Layer string `json:"layer" yaml:"layer"`
 
 	// ClearanceMM is this zone's copper clearance from foreign-net copper.

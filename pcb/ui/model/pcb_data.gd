@@ -95,11 +95,18 @@ var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 ## struct, and a field added there survives this model without a change here.
 ##
 ## `kind` ("copper_pour" | "keepout", per ZoneKind in worker/pcb_worker/
-## resolved_board.py) is NOT a modeled field on the Go Zone struct — it rides in
-## Zone.Extra and is inlined at the JSON boundary by internal/board/json.go, so
-## it arrives here as a plain key and round-trips out the same way. Verified
-## against the built plugin: YAML -> pcb.deserialize -> board dict -> pcb.serialize
-## returns `kind` unchanged.
+## resolved_board.py) IS a modeled field on the Go Zone struct as of the owner
+## ruling of 2026-07-30 (docket 019fb5ad6d20) — it used to ride in Zone.Extra and
+## reach the JSON boundary only via internal/board/json.go's inline marshalers.
+## It was first-classed because Go's validateZones now BRANCHES on it (a keepout
+## needs no net), and a rule that branches on a value cannot read it out of the
+## forward-compat junk drawer. Nothing changes on this side: it still arrives as a
+## plain `kind` key and round-trips out the same way — exactly once, since a
+## modeled field is claimed by the codec and never duplicated into Extra.
+##
+## `net` is likewise unchanged in shape but no longer universal: a keepout may
+## carry no `net` key at all (Go omits it when empty), so every read of a zone's
+## net goes through `.get("net", "")`.
 var zones: Array[Dictionary] = []
 
 ## Undo/redo history
@@ -676,16 +683,23 @@ static func mint_entity_id(entity_type: String) -> String:
 ## it makes the entire board unserializable. Minting such a zone into the model
 ## would trade a refused gesture for a board the user cannot export at all.
 ##
-## NOTE the non-obvious one: `net` is required for EVERY zone, keepouts included.
-## Go models no zone kind at all (kind rides in Zone.Extra — see the `zones`
-## declaration), so validateZones applies `zone_unknown_net` uniformly. A netless
-## keepout is not expressible in this contract today.
-func zone_author_error(net_name: String, layer: String, point_count: int) -> String:
+## NOTE the kind-dependent one: `net` is required for a COPPER POUR and OPTIONAL
+## for a KEEPOUT (owner boundary ruling 2026-07-30, docket 019fb5ad6d20:
+## "Keepouts don't need net connections"). A pour is copper and copper belongs to
+## a net; a keepout is a KiCad-style rule area — a prohibition on copper, not
+## copper — and KiCad asks for no net either. Go's validateZones branches the same
+## way on the now-modeled Zone.Kind. A keepout that DOES name a net is still
+## checked against the declared nets, so a net-scoped keepout ("no GND copper
+## here") stays expressible and a typo in its net name is still caught here.
+func zone_author_error(net_name: String, layer: String, point_count: int, kind: String = "copper_pour") -> String:
+	var zone_is_keepout := kind.strip_edges().to_lower() == "keepout"
 	if point_count < 3:
 		return "A zone outline needs at least 3 points (%d placed)." % point_count
 	if net_name.is_empty():
-		return "Pick a net first — every zone must name a declared net."
-	if not has_net(net_name):
+		# A keepout with no net is the KiCad-parity case, not a refusal.
+		if not zone_is_keepout:
+			return "Pick a net first — a copper pour must name a declared net."
+	elif not has_net(net_name):
 		return "Net \"%s\" is not declared on this board." % net_name
 	if layer.is_empty():
 		return "No copper layer to place the zone on."
@@ -705,11 +719,17 @@ func zone_author_error(net_name: String, layer: String, point_count: int) -> Str
 ## declaration for why.
 ##
 ## `kind` is written explicitly even for a pour, though zone_kind() would default
-## it: an authored entity should state what it is, and the key round-trips through
-## Zone.Extra either way.
+## it: an authored entity should state what it is, and it is a modeled field on
+## the Go Zone either way.
+##
+## `net` is written only when there IS one — a netless keepout (owner ruling
+## 2026-07-30; see zone_author_error) gets NO `net` key rather than an empty one.
+## That matches what Go emits (Zone.Net is omitempty), so a zone authored here and
+## the same zone after a save/reload are the SAME dict shape; storing `net: ""`
+## would make a fresh keepout differ from a reloaded one for no gain.
 func create_zone(net_name: String, layer: String, outline_points, kind: String = "copper_pour") -> Dictionary:
 	var pts := PackedVector2Array(outline_points)
-	var refusal := zone_author_error(net_name, layer, pts.size())
+	var refusal := zone_author_error(net_name, layer, pts.size(), kind)
 	if not refusal.is_empty():
 		push_warning("[PCBData] create_zone refused: %s" % refusal)
 		return {}
@@ -720,11 +740,12 @@ func create_zone(net_name: String, layer: String, outline_points, kind: String =
 
 	var zone := {
 		"id": mint_entity_id("zone"),
-		"net": net_name,
 		"layer": layer,
 		"kind": kind,
 		"outline": outline,
 	}
+	if not net_name.is_empty():
+		zone["net"] = net_name
 	zones.append(zone)
 	record_change("add_zone", {
 		"zone_id": zone["id"],
@@ -1619,10 +1640,16 @@ func _zones_from_list(zone_list) -> Array[Dictionary]:
 ## A zone's kind, normalised: "keepout" or "copper_pour".
 ##
 ## Defaults to "copper_pour" for a zone that states no kind, matching the Go
-## contract — internal/board's Zone documents itself as "an authored copper-fill
-## region ... most commonly a ground or power pour", and only the Python IR's
-## ZoneKind names keepout explicitly. Defaulting the other way would silently
-## promote an under-specified pour into a warning region on the canvas.
+## contract exactly: internal/board's Zone.Kind is `omitempty` and its validator
+## treats "" as ZoneKindCopperPour, so absence is a default, not a third kind.
+## Defaulting the other way would silently promote an under-specified pour into a
+## warning region on the canvas — and now that a keepout may be netless, into one
+## the net requirement no longer guards.
+##
+## Case/whitespace ARE folded here and are NOT folded in Go (which rejects
+## "Keepout" as invalid_zone_kind). Deliberate: this is a render-time read that
+## should never crash on sloppy input, while Go is the write gate that tells the
+## author about the typo.
 static func zone_kind(zone: Dictionary) -> String:
 	var kind := str(zone.get("kind", "")).strip_edges().to_lower()
 	return kind if not kind.is_empty() else "copper_pour"

@@ -159,25 +159,43 @@ asymmetric:
 ### Zones (schema modeled, fabrication still refused)
 
 `Zone` is the first entity added to this contract since the v2 schema settled
-(docket `019f9a73e5a2`, parent `019f761fda74`) — a copper-fill region, most
-commonly a ground or power pour, on a single layer, tied to one net:
+(docket `019f9a73e5a2`, parent `019f761fda74`) — an authored region on a single
+layer. A zone is one of two things, and which one it is decides whether it needs
+a net: a **copper pour** (most commonly a ground or power plane), which is copper
+and so belongs to a net; or a **keepout**, a rule area that forbids copper rather
+than being copper, which needs no net at all — the same as a KiCad rule area.
 
 | key | required | meaning |
 |---|---|---|
 | `id` | v2 only | mint-once opaque id, `"zone:<hex>"` — same rule as `trace`/`via`/`hole` |
-| `net` | yes | the net this pour is tied to; must name a declared net |
-| `layer` | yes | the copper layer this pour is on; must be a member of `layers` when the board declares one |
+| `kind` | no | `copper_pour` (the default when absent or empty) or `keepout`; canonical lowercase only |
+| `net` | **`copper_pour` only** | the net this pour is tied to; must name a declared net. **OPTIONAL on a `keepout`** — see below |
+| `layer` | yes | the copper layer this zone is on; must be a member of `layers` when the board declares one |
 | `outline` | yes | ordered polygon boundary, `[{x_mm, y_mm}, ...]`; needs at least 3 points |
 | `clearance_mm` | no | this zone's copper clearance from foreign-net copper; unset defers to `design_rules.clearance_mm` |
 | `thermal_gap_mm` | no | copper gap around a same-net pad that is NOT thermally relieved |
 | `thermal_bridge_width_mm` | no | spoke width connecting a thermally-relieved pad to the pour |
 
+**The net requirement is kind-dependent** (owner boundary ruling, 2026-07-30,
+docket `019fb5ad6d20`: *"Keepouts don't need net connections"*). A `copper_pour`
+must name a declared net; a `keepout` may omit `net` entirely, or carry it empty,
+and both mean the same thing — **this keepout applies to all copper, whatever its
+net**. A keepout that DOES name a net is still valid and still checked: it is a
+net-scoped keepout ("no `GND` copper here"), and the net it names must be
+declared, exactly as for a pour. On serialize an empty net is written as an
+ABSENT `net` key rather than `net: ""`, so a netless keepout round-trips as the
+absence it is.
+
 `Validate` rejects an outline with fewer than 3 points (`invalid_zone_outline`),
-a `net` that names no declared net (`zone_unknown_net`), and a `layer` absent or
-outside the declared stack (`zone_unknown_layer`) — this check applies on v1
-boards too, unlike identity, which is v2-only. These three codes are Go-only for
-now: the Python worker has no zone validator to match them against yet (see
-below).
+a `kind` that is neither `copper_pour` nor `keepout` (`invalid_zone_kind`; an
+absent or empty `kind` is `copper_pour`, not an error), a `net` that is missing
+on a pour or that names no declared net (`zone_unknown_net`), and a `layer`
+absent or outside the declared stack (`zone_unknown_layer`) — this check applies
+on v1 boards too, unlike identity, which is v2-only. `kind` is checked BEFORE
+`net`, because `kind` is what decides which net rule applies. These four codes
+are not yet cross-checked by a shared vector — the Python compiler still refuses
+zones outright (see below) — but `board_validate.py`'s `_check_zones` mirrors
+them string-for-string and in the same first-violation-wins order.
 
 **Authoring a zone is modeled and round-trips losslessly (YAML and the
 `pcb.deserialize` JSON boundary), but every downstream consumer still refuses a

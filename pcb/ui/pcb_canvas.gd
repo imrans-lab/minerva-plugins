@@ -198,10 +198,15 @@ var selected_trace_id: String = ""
 
 ## ── Zone authoring (epoch 6 unit 4) ───────────────────────────────────────────
 ## The net a POUR is armed with, set by the panel's zone net picker. Empty means
-## "not armed": commit fails closed with a visible message rather than guessing a
-## net. A KEEPOUT needs one too — Go's validateZones requires `net` on every zone
-## regardless of kind (see pcb_data.zone_author_error), and pcb.serialize
-## validates the whole board, so a netless zone would make the board unexportable.
+## "not armed": a pour commit fails closed with a visible message rather than
+## guessing a net.
+##
+## A KEEPOUT ignores this — it needs no net (owner boundary ruling 2026-07-30,
+## docket 019fb5ad6d20: "Keepouts don't need net connections"; Go's validateZones
+## and pcb_data.zone_author_error branch the same way, so a netless keepout
+## validates and pcb.serialize's whole-board gate accepts it). The panel HIDES the
+## net picker while the Keepout tool is armed, so this simply stays at whatever
+## the last pour left here and the keepout commit passes "" regardless.
 var zone_author_net: String = ""
 ## The copper layer a zone is armed to, set by the panel's zone layer picker.
 ## Empty — the resting state, the picker's "View layer" entry — means "follow the
@@ -2125,16 +2130,21 @@ func _handle_zone_click(world_pos: Vector2, is_double_click: bool) -> void:
 func _commit_zone() -> void:
 	if not data or not _is_zone_tool():
 		return
-	var net := zone_author_net
+	var kind := _zone_tool_kind()
+	# A keepout commits with NO net (owner ruling 2026-07-30) — see
+	# zone_author_net. The picker's leftover selection is dropped rather than
+	# quietly attached, so a keepout drawn after a pour is not net-scoped by
+	# accident; net-scoped keepouts are expressible in the board contract but are
+	# not something this tool can currently ask for.
+	var net := "" if kind == "keepout" else zone_author_net
 	var layer := zone_author_layer()
-	var refusal: String = data.zone_author_error(net, layer, _zone_points.size())
+	var refusal: String = data.zone_author_error(net, layer, _zone_points.size(), kind)
 	if not refusal.is_empty():
 		# Keep the placed vertices: the fix for "pick a net" is to pick a net and
 		# press Enter again, not to redraw the whole outline.
 		zone_tool_message.emit(refusal)
 		return
 
-	var kind := _zone_tool_kind()
 	var zone: Dictionary = data.create_zone(net, layer, _zone_points, kind)
 	if zone.is_empty():
 		# zone_author_error already passed, so this is a model-side refusal we did
@@ -2144,8 +2154,11 @@ func _commit_zone() -> void:
 	data.save_to_history("Add %s" % ("keepout" if kind == "keepout" else "pour"))
 	var point_count := _zone_points.size()
 	_reset_zone_draw()
-	zone_tool_message.emit("Added %s on %s (%s, %d points)." % [
-		"keepout" if kind == "keepout" else "pour", layer, net, point_count])
+	# The net is named only when there is one — a netless keepout would otherwise
+	# report "(, 3 points)", an empty slot that reads as a bug.
+	zone_tool_message.emit("Added %s on %s (%s%d points)." % [
+		"keepout" if kind == "keepout" else "pour", layer,
+		"" if net.is_empty() else "%s, " % net, point_count])
 	queue_redraw()
 
 

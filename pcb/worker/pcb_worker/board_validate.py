@@ -37,6 +37,18 @@ from .board_schema import _OVERRIDE_NUM_KEYS, _is_minted_id, _is_number
 # drifted before T1.5 — Go's innerLayerIndex is the third, unavoidable, copy.
 from agent_router.layers import inner_layer_index
 
+# The canonical zone kinds, mirroring ZoneKindCopperPour / ZoneKindKeepout in
+# internal/board/validate.go. An empty (or absent) kind IS a copper pour — the
+# shape every board authored before the field existed has — so "" is a member of
+# the accepted set rather than a fourth spelling to reject. Kept as literals here,
+# not imported from resolved_board.ZoneKind, because this module is the Go-PARITY
+# boundary: what it accepts must track Go's constants, and an enum defined for the
+# compiler's IR could drift from them independently.
+_ZONE_KIND_COPPER_POUR = "copper_pour"
+_ZONE_KIND_KEEPOUT = "keepout"
+_ZONE_KINDS = frozenset({"", _ZONE_KIND_COPPER_POUR, _ZONE_KIND_KEEPOUT})
+
+
 def _check_entity_ids(entity: str, item_lists: "list[list]", codes: list) -> None:
     """Append the first persistent-id violation across one entity DOMAIN (one or more
     collections that share an id namespace, e.g. the three hole alias keys). Every
@@ -66,7 +78,8 @@ def validate_board_v2(board: dict) -> list[str]:
     ``duplicate_persistent_id``, ``invalid_pin_override``, ``invalid_board_structure``,
     for the layer stack — ``invalid_layer_name``, ``duplicate_layer``,
     ``incomplete_layer_stack``, ``invalid_layer_stack_order`` — and for zones —
-    ``invalid_zone_outline``, ``zone_unknown_net``, ``zone_unknown_layer``.
+    ``invalid_zone_outline``, ``invalid_zone_kind``, ``zone_unknown_net``,
+    ``zone_unknown_layer``.
     """
     if not isinstance(board, dict):
         return ["invalid_board_structure"]
@@ -206,13 +219,31 @@ def _check_zones(zones: list, board: dict, codes: list) -> None:
     """Mirror of Go's ``validateZones`` (internal/board/validate.go): append the FIRST
     zone-structural violation, using Go's own code strings.
 
-    The three rules are Go's, verbatim in intent: an ``outline`` with fewer than 3
-    points is not a polygon (``invalid_zone_outline``); a ``net`` that is empty or
-    names no declared net is ``zone_unknown_net``; a ``layer`` that is empty, or —
-    when the board declares a ``layers`` list at all — outside it, is
-    ``zone_unknown_layer``.  Only the FIRST violation is appended, matching Go's
-    return-on-first-error, so a board breaking two rules reports the same code on
-    both sides.
+    The four rules are Go's, verbatim in intent and IN GO'S ORDER: an ``outline``
+    with fewer than 3 points is not a polygon (``invalid_zone_outline``); a ``kind``
+    outside ``{"", "copper_pour", "keepout"}`` is ``invalid_zone_kind``; a ``net``
+    that is empty or names no declared net is ``zone_unknown_net`` — EXCEPT on a
+    keepout; a ``layer`` that is empty, or — when the board declares a ``layers``
+    list at all — outside it, is ``zone_unknown_layer``.  Only the FIRST violation
+    is appended, matching Go's return-on-first-error, so a board breaking two rules
+    reports the same code on both sides.
+
+    The keepout exemption is the owner boundary ruling of 2026-07-30 (docket
+    019fb5ad6d20, "Keepouts don't need net connections"): a ``copper_pour`` is
+    copper and copper belongs to a net, but a keepout is a KiCad-style rule area —
+    a prohibition on copper, not copper — so it may name no net.  A keepout that
+    DOES name a net is still checked against the declared nets, so a net-scoped
+    keepout naming an undeclared net is still ``zone_unknown_net``.  ``kind`` is
+    checked BEFORE ``net`` on both sides because kind decides which net rule
+    applies; an unrecognized kind cannot be resolved to pour-or-keepout.  ``kind``
+    is matched case-sensitively against canonical lowercase, exactly as Go does —
+    the UI normalises case upstream (``PCBData.zone_kind()``), so a stray
+    ``"Keepout"`` in hand-written source is a typo worth reporting.  An ABSENT or
+    empty ``kind`` is ``copper_pour``, the pre-ruling shape, so every board
+    authored before this field existed keeps its meaning on both sides.  A
+    non-string ``kind`` is ``invalid_zone_kind`` too: Go's typed decode cannot even
+    load one into ``Zone.Kind`` (it fails at unmarshal), so accepting it here would
+    be Python being LOOSER than Go, the wrong direction for a fail-closed gate.
 
     Version-independent, exactly as in Go: these are content rules, not identity
     rules.  A non-dict zone item is skipped here — the compiler's own ``_dict_items``
@@ -236,8 +267,18 @@ def _check_zones(zones: list, board: dict, codes: list) -> None:
         if not isinstance(outline, list) or len(outline) < 3:
             codes.append("invalid_zone_outline")
             return
+        kind = zone.get("kind")
+        if kind is not None and (not isinstance(kind, str) or kind not in _ZONE_KINDS):
+            codes.append("invalid_zone_kind")
+            return
         net = zone.get("net")
-        if not isinstance(net, str) or not net or net not in net_names:
+        if kind == _ZONE_KIND_KEEPOUT:
+            # Netless is the KiCad-parity case and is fine; a NAMED net must still be
+            # one the board declares. `net: null` is "no net", same as absent.
+            if net is not None and (not isinstance(net, str) or (net and net not in net_names)):
+                codes.append("zone_unknown_net")
+                return
+        elif not isinstance(net, str) or not net or net not in net_names:
             codes.append("zone_unknown_net")
             return
         layer = zone.get("layer")

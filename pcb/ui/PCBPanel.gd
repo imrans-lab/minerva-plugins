@@ -674,8 +674,8 @@ func _build_sidebar() -> VBoxContainer:
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
 		"Draw a keep-out region: click each corner, double-click or press Enter to close "
 		+ "(needs 3+ corners; Esc/right-click cancels). Corners snap to a quarter of the grid — hold "
-		+ "Ctrl/Cmd to place freely. A net is still required — the board contract "
-		+ "requires one on every zone, keepouts included.", "keepout_24.png")
+		+ "Ctrl/Cmd to place freely. No net needed — a keepout forbids copper rather than being "
+		+ "copper, the same as a KiCad rule area.", "keepout_24.png")
 
 	# Trace drawing tool (epoch 6 unit 5). Same section and same reason as the
 	# zone tools above: it authors a board ENTITY. It shares a name with the
@@ -695,8 +695,8 @@ func _build_sidebar() -> VBoxContainer:
 	# is active, so the resting sidebar is unchanged.
 	_zone_net_option = OptionButton.new()
 	_zone_net_option.name = "ZoneNetOption"
-	_zone_net_option.tooltip_text = "Net for the zone being drawn — required by the board contract for " \
-		+ "every zone, pour or keepout"
+	_zone_net_option.tooltip_text = "Net for the pour being drawn — required by the board contract for " \
+		+ "a copper pour (a keepout needs none, so this picker is hidden for it)"
 	_zone_net_option.visible = false
 	_rebuild_zone_net_option()
 	_zone_net_option.item_selected.connect(_on_zone_net_selected)
@@ -1684,8 +1684,15 @@ func _on_tool_mode_changed(mode: int) -> void:
 ## rule is one function per CONCEPT ("show the arming controls for the armed
 ## tool"), not one per widget, so the trace width box joined it rather than
 ## growing a parallel sync with its own copy of the visibility logic.
+## The NET picker is a POUR control, not a zone control (owner boundary ruling
+## 2026-07-30, docket 019fb5ad6d20: "Keepouts don't need net connections"). It is
+## hidden — not merely ignored — while Keepout is armed, because a visible picker
+## is a request for input, and asking for a net the commit path will discard is
+## the UI lying about the contract. The LAYER picker stays for both: a keepout is
+## still a region on one copper layer.
 func _sync_draw_arm_ui(mode: int) -> void:
-	var is_zone_tool: bool = mode == _PcbCanvasScript.ToolMode.ZONE_POUR \
+	var is_pour_tool: bool = mode == _PcbCanvasScript.ToolMode.ZONE_POUR
+	var is_zone_tool: bool = is_pour_tool \
 		or mode == _PcbCanvasScript.ToolMode.ZONE_KEEPOUT
 	var is_trace_tool: bool = mode == _PcbCanvasScript.ToolMode.TRACE
 
@@ -1701,14 +1708,14 @@ func _sync_draw_arm_ui(mode: int) -> void:
 
 	if _zone_net_option == null:
 		return
-	_zone_net_option.visible = is_zone_tool
-	if not is_zone_tool:
+	_zone_net_option.visible = is_pour_tool
+	if not is_pour_tool:
 		return
 	_rebuild_zone_net_option()
 	if _data != null and _data.get_net_count() == 0:
-		_show_transient_status("This board declares no nets — a zone needs one before it can be drawn.")
+		_show_transient_status("This board declares no nets — a copper pour needs one before it can be drawn.")
 	elif _canvas != null and str(_canvas.zone_author_net).is_empty():
-		_show_transient_status("Pick a net for the zone, then click its corners.")
+		_show_transient_status("Pick a net for the pour, then click its corners.")
 
 
 ## Rebuild the zone net picker from the board's declared nets. The first entry is
