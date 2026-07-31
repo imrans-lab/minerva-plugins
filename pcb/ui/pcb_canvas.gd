@@ -37,6 +37,11 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## dict, which belongs with the model that defines the dict's shape.
 const PCBDataScript := preload("model/pcb_data.gd")
 
+## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
+## The one list: it gates the drill-hole render in _draw_component_pads AND the
+## "this part still has lands on every copper layer" rule in _component_visibility.
+const THT_PAD_TYPES: Array[String] = ["thru_hole", "np_thru_hole"]
+
 ## Signals
 signal component_selected(component_id: String)
 signal component_deselected(component_id: String)
@@ -107,8 +112,15 @@ var show_courtyard: bool = true
 ## Sibling of the show_* flags above so the panel's View menu can toggle it.
 var show_zones: bool = true
 
-## Copper-layer trace filter driven by the toolbar layer selector.
-## "all" → both layers; "top" → non-bottom traces; "bottom" → bottom traces.
+## Copper-layer view filter driven by the toolbar layer selector. Holds "all" or
+## a CANONICAL copper-layer id ("top" / "in1".."in30" / "bottom") — the selector
+## shows KiCad names (F.Cu / In1.Cu / B.Cu) but carries the canonical id as item
+## metadata, so nothing here has to parse a display string.
+##
+## "all" shows every layer; any other value scopes the view to THAT ONE layer —
+## its traces, its zones, the components mounted on it, plus the through-hole
+## lands of every part (a barrel pierces all copper). This is a whole-VIEW
+## filter, not just a trace filter, since epoch 6 unit 3b.
 ## Setter emits view_changed so the annotation overlay re-renders — layer-keyed
 ## workflow annotations (route hints, WC-2 C3 fix 019f33d2c9bf) must appear /
 ## disappear with the same filter change that shows/hides the traces.
@@ -297,7 +309,7 @@ func _update_context_menu_for_selection() -> void:
 	context_menu.clear()
 
 	var has_lock_section := false
-	var comp_under_cursor: String = data.get_component_at(context_menu_world_pos)
+	var comp_under_cursor: String = _component_at(context_menu_world_pos)
 	if not comp_under_cursor.is_empty() or not selected_components.is_empty():
 		has_lock_section = true
 		if not comp_under_cursor.is_empty():
@@ -326,7 +338,7 @@ func _on_context_menu_pressed(id: int) -> void:
 			if not selected_components.is_empty():
 				_lock_selected_components()
 			else:
-				var cursor_comp_id: String = data.get_component_at(context_menu_world_pos)
+				var cursor_comp_id: String = _component_at(context_menu_world_pos)
 				if not cursor_comp_id.is_empty():
 					var cursor_comp = data.get_component(cursor_comp_id)
 					if cursor_comp:
@@ -435,35 +447,43 @@ func _draw_grid() -> void:
 		line_count += 1
 
 
-## Is a trace on `layer` visible under the current layer filter?
+## Is geometry on the CANONICAL layer `layer` visible under the current filter?
+##
+## Epoch 6 unit 3b: canonical-name EQUALITY, replacing the old binary match that
+## read "top" as "anything that is not bottom". That binary shape was wrong two
+## ways: it made every inner layer render as top copper, and it is why a bottom
+## view still drew top-only parts (child bug 019fb55dc7f5).
+##
+## `layer` must already be canonical — this is a draw-loop predicate, and the
+## contract's normaliser push_warning()s on an oddball name, so normalising here
+## would spray the log once per trace per frame. Callers holding an untrusted or
+## KiCad-named layer normalise ONCE, outside the loop (see is_layer_visible and
+## _draw_zone). An unrecognised name simply matches nothing but "all" — the
+## fail-visible outcome, not a silent "always draw".
 func _layer_visible(layer: String) -> bool:
-	match trace_layer_filter:
-		"top":
-			return layer != "bottom"
-		"bottom":
-			return layer == "bottom"
-		_:
-			return true
+	# "" is treated as "all" so a canvas whose filter was cleared rather than set
+	# renders the whole board instead of going blank.
+	if trace_layer_filter.is_empty() or trace_layer_filter == "all":
+		return true
+	return layer == trace_layer_filter
 
 
 ## PUBLIC layer-visibility probe for the annotation substrate (WC-2 C3 fix
 ## 019f33d2c9bf). PcbAnnotationHost.is_annotation_visible consults this so
 ## layer-keyed route hints follow the same filter as the traces. Accepts both
-## the canvas's internal layer names ("top"/"bottom") and the KiCAD copper
-## names route-hint payloads carry ("F.Cu"/"B.Cu").
+## the canvas's canonical layer ids ("top"/"in<k>"/"bottom") and the KiCAD copper
+## names route-hint payloads carry ("F.Cu"/"In1.Cu"/"B.Cu").
 func is_layer_visible(layer: String) -> bool:
 	return _layer_visible(_canonical_layer(layer))
 
 
 static func _canonical_layer(layer: String) -> String:
-	# T1.5: delegates to the ONE canonical GD contract. This UNIFIES the
-	# semantics onto the contract (kicad_to_canon case-folds and maps empty ->
-	# "top"), which DIFFERS from the old inline match's raw, case-sensitive
-	# passthrough. Safe because the sole caller (is_layer_visible) feeds
-	# canonical inputs into a bottom/not-bottom test, where "" and "top" behave
-	# identically — so the divergence is unreachable. Only THIS mapping fn is
-	# migrated; _layer_visible and rendering internals are untouched (T3 owns
-	# those, and rewrites this file).
+	# T1.5: delegates to the ONE canonical GD contract. The public probe above is
+	# the normalisation boundary — everything past it compares canonical ids by
+	# equality, so this is where an "F.Cu"/"B.Cu"/"In1.Cu" payload name (or a
+	# stray capital) becomes something _layer_visible can match. kicad_to_canon
+	# fails VISIBLE by design: an unknown name passes through lower-cased with a
+	# warning rather than being silently defaulted onto a real layer.
 	return PcbLayerStack.kicad_to_canon(layer)
 
 
@@ -486,23 +506,56 @@ func handle_navigation_input(event: InputEvent) -> void:
 		_handle_magnify_gesture(event)
 
 
-## Draw all traces (bottom layer first, then top, then vias), honoring the filter.
-func _draw_traces() -> void:
-	for trace_id in data.traces:
-		var trace = data.traces[trace_id]
-		if trace.layer != "bottom":
-			continue
-		if not _layer_visible("bottom"):
-			continue
-		_draw_single_trace(trace, true)
+## The board's DECLARED copper stack, top-most entry first. Declared order IS
+## stack order — the board validator enforces that (epoch 6 unit 3a: Go
+## validateLayers / board_validate._check_layers, error invalid_layer_stack_order),
+## so this reads the order rather than re-deriving one. Falls back to the 2-layer
+## default when a board declares none (the same fallback pcb_data uses on load).
+func _stack_layers() -> Array:
+	if data != null and data.layers is Array and not data.layers.is_empty():
+		return data.layers
+	return ["top", "bottom"]
 
+
+## Draw all traces (bottom-most copper first, top-most copper last, then vias),
+## honoring the layer filter.
+##
+## Epoch 6 unit 3b: walks the board's declared stack instead of the two hardcoded
+## "bottom" / "everything-else" passes, so an inner layer paints in ITS stack
+## position and only when it (or "all") is selected. For the 2-layer stack this
+## produces exactly the old order — bottom, then top.
+func _draw_traces() -> void:
+	# Bucket by layer ONCE: the stack walk below is then one pass over the board
+	# rather than one full pass per declared layer.
+	var by_layer := {}
 	for trace_id in data.traces:
 		var trace = data.traces[trace_id]
-		if trace.layer == "bottom":
+		var lid := str(trace.layer)
+		if not by_layer.has(lid):
+			by_layer[lid] = []
+		by_layer[lid].append(trace)
+
+	# Backwards through the declared stack: bottom-most copper paints first so
+	# the top-most copper lands on top of it.
+	var stack: Array = _stack_layers()
+	for i in range(stack.size() - 1, -1, -1):
+		var layer_id := str(stack[i])
+		if not by_layer.has(layer_id):
 			continue
-		if not _layer_visible(trace.layer):
+		if _layer_visible(layer_id):
+			for trace in by_layer[layer_id]:
+				_draw_single_trace(trace, layer_id == "bottom")
+		by_layer.erase(layer_id)
+
+	# Traces on a layer the board never declared (an out-of-stack or malformed
+	# layer name). They are DRAWN, not dropped — hiding copper that exists would
+	# be the silent failure — but last, above the declared stack, and still gated
+	# by the filter. Under "all" this is exactly the pre-3b rendering.
+	for undeclared_id in by_layer:
+		if not _layer_visible(undeclared_id):
 			continue
-		_draw_single_trace(trace, false)
+		for undeclared_trace in by_layer[undeclared_id]:
+			_draw_single_trace(undeclared_trace, undeclared_id == "bottom")
 
 	# Vias (on top of all traces).
 	for via in data.vias:
@@ -527,7 +580,10 @@ func _draw_traces() -> void:
 		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
-## Draw a single trace with layer-appropriate styling
+## Draw a single trace with layer-appropriate styling.
+## Only two trace colours exist, so an inner layer borrows the top colour; a
+## per-layer palette would belong on the stack entries (PcbLayerStack._entry
+## already carries a `color`) and is out of scope for 3b.
 func _draw_single_trace(trace, is_bottom_layer: bool) -> void:
 	if trace.waypoints.size() < 2:
 		return
@@ -727,6 +783,42 @@ func _draw_ratsnest() -> void:
 				draw_circle(p2, 3.0, net_color)
 
 
+## How much of a component the current layer filter lets through. ONE rule,
+## shared by the draw path (_draw_component) and the hit-test path
+## (_component_at) — a user must not be able to click what is not drawn.
+## NONE  = nothing at all (the part lives entirely on another copper layer)
+## LANDS = only its through-hole lands (annular ring + drill)
+## FULL  = everything (body, silk, courtyard, pads, badge, label)
+enum CompVisibility { NONE, LANDS, FULL }
+
+
+## Classify `comp` against the current layer filter (child bug 019fb55dc7f5).
+##
+## KiCad's rule, which the owner fixed as ours: a component's BODY belongs to the
+## side it is mounted on, but a THROUGH-HOLE pad's barrel pierces EVERY copper
+## layer, so its lands exist on every layer view. Therefore, viewing one layer:
+##   * a part mounted on that layer          → FULL
+##   * a part elsewhere WITH through-hole pads → LANDS (rings only, no body)
+##   * a part elsewhere with only SMD pads    → NONE (this is the bug: a
+##     top-only SMD part used to render in full on a bottom view)
+## Under "all" every component is FULL, so nothing about the render changes.
+##
+## THT-ness is read from the pad's `type` field, NOT from pad["layers"]: `type`
+## is populated on every pad path and is already what _draw_component_pads gates
+## the drill render on, whereas pad["layers"] is only filled in by the canonical
+## pin-synthesis path (pcb_component.gd) — footprint-resolved pads pass it
+## through from the footprint and can carry [].
+func _component_visibility(comp) -> CompVisibility:
+	if _layer_visible(str(comp.layer)):
+		return CompVisibility.FULL
+	if not (comp.has_pad_geometry and comp.pads.size() > 0):
+		return CompVisibility.NONE
+	for pad in comp.pads:
+		if str(pad.get("type", "smd")) in THT_PAD_TYPES:
+			return CompVisibility.LANDS
+	return CompVisibility.NONE
+
+
 ## Draw all components
 func _draw_components() -> void:
 	for comp_id in data.components:
@@ -756,55 +848,74 @@ func _draw_mounting_holes() -> void:
 		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
-## Draw a single component using rigid body transform
+## Draw a single component using rigid body transform, scoped by the layer filter
+## (see _component_visibility for the rule). Draw ORDER is unchanged from before
+## the filter existed — body, silk, courtyard, pads/pins, badge, label — so the
+## "all" render is byte-for-byte the old one.
 func _draw_component(comp) -> void:
-	var color: Color = comp.color
-	if comp.id in selected_components:
-		color = component_selected_color
-	elif comp.id == hovered_component:
-		color = component_hover_color
-
-	if comp.locked:
-		color.a = 0.4
+	var visibility := _component_visibility(comp)
+	if visibility == CompVisibility.NONE:
+		return
+	# Everything except the through-hole lands belongs to the side the part is
+	# mounted on, so it is drawn only on that side's view.
+	var body_visible := visibility == CompVisibility.FULL
 
 	var xform: Transform2D = comp.get_transform()
-
-	var local_poly: PackedVector2Array = comp.get_local_body_polygon()
-	var screen_poly: PackedVector2Array = []
-	for point in local_poly:
-		var world_point: Vector2 = comp.position + (xform * point)
-		screen_poly.append(world_to_screen(world_point))
-
-	draw_colored_polygon(screen_poly, color)
-
-	var outline_points: PackedVector2Array = screen_poly.duplicate()
-	outline_points.append(screen_poly[0])
-	draw_polyline(outline_points, color.darkened(0.3), 1.0)
-
-	if comp.locked:
-		_draw_locked_hatch(screen_poly)
-
-	if show_silk and comp.graphics.size() > 0:
-		_draw_component_silk(comp, xform)
-
-	if show_courtyard and comp.graphics.size() > 0:
-		_draw_component_courtyard(comp, xform)
 
 	# Resolved footprint geometry vs the fallback pin renderer. The same
 	# condition the fab emitter uses to fail closed (bug 019f7736b236): a
 	# component WITHOUT real pad geometry is drawn from nominal fallback pins and
 	# would not fabricate as-is — so it is badged (step 4b, canvas degrades).
 	var has_real_pads: bool = comp.has_pad_geometry and comp.pads.size() > 0
+
+	if body_visible:
+		var color: Color = comp.color
+		if comp.id in selected_components:
+			color = component_selected_color
+		elif comp.id == hovered_component:
+			color = component_hover_color
+
+		if comp.locked:
+			color.a = 0.4
+
+		var local_poly: PackedVector2Array = comp.get_local_body_polygon()
+		var screen_poly: PackedVector2Array = []
+		for point in local_poly:
+			var world_point: Vector2 = comp.position + (xform * point)
+			screen_poly.append(world_to_screen(world_point))
+
+		draw_colored_polygon(screen_poly, color)
+
+		var outline_points: PackedVector2Array = screen_poly.duplicate()
+		outline_points.append(screen_poly[0])
+		draw_polyline(outline_points, color.darkened(0.3), 1.0)
+
+		if comp.locked:
+			_draw_locked_hatch(screen_poly)
+
+		if show_silk and comp.graphics.size() > 0:
+			_draw_component_silk(comp, xform)
+
+		if show_courtyard and comp.graphics.size() > 0:
+			_draw_component_courtyard(comp, xform)
+
 	if show_pads and has_real_pads:
-		_draw_component_pads(comp, xform)
-	elif show_pins:
+		# LANDS: pass tht_only so the SMD pads of an other-side part are skipped
+		# while its through-hole rings still draw. FULL passes false — every pad.
+		_draw_component_pads(comp, xform, not body_visible)
+	elif show_pins and body_visible:
+		# Fallback pins are nominal, not real copper, and a LANDS component has
+		# real pads by construction — so this branch is body-only.
 		_draw_fallback_pins(comp, xform)
 
-	if show_unresolved_badges and not has_real_pads \
+	if body_visible and show_unresolved_badges and not has_real_pads \
 			and comp.footprint != PCBComponentScript.FootprintType.MOUNTING_HOLE:
-		_draw_unresolved_badge(screen_poly)
+		# _component_screen_poly is the same transform the body used above (and
+		# what _get_tooltip probes), so badge draw and badge tooltip cannot
+		# disagree about where the badge is.
+		_draw_unresolved_badge(_component_screen_poly(comp))
 
-	if show_labels and comp.label_visible:
+	if body_visible and show_labels and comp.label_visible:
 		var local_center: Vector2 = comp.local_bounds.get_center()
 		var world_center: Vector2 = comp.position + (xform * local_center)
 		var screen_center := world_to_screen(world_center)
@@ -852,6 +963,27 @@ func _badge_center(screen_poly: PackedVector2Array) -> Vector2:
 		max_pt.x = maxf(max_pt.x, pt.x)
 		max_pt.y = maxf(max_pt.y, pt.y)
 	return Vector2(max_pt.x + UNRESOLVED_BADGE_MARGIN, min_pt.y - UNRESOLVED_BADGE_MARGIN)
+
+
+## Component hit-test, layer-filter aware — the ONLY component pick the canvas
+## should use. A user cannot click what is not drawn (child bug 019fb55dc7f5):
+## with the view scoped to one copper layer, a part that renders NOTHING there
+## must not select, drag, hover, or claim the context menu. A part still showing
+## its through-hole lands stays pickable (its rings are on screen, and its body
+## box is where those rings are).
+##
+## data.get_component_at() knows nothing about the view, so every call site goes
+## through here instead of calling it directly.
+func _component_at(world_pos: Vector2) -> String:
+	if data == null:
+		return ""
+	var comp_id: String = data.get_component_at(world_pos)
+	if comp_id.is_empty():
+		return ""
+	var comp = data.get_component(comp_id)
+	if comp == null:
+		return comp_id
+	return "" if _component_visibility(comp) == CompVisibility.NONE else comp_id
 
 
 ## A component's body polygon in screen space (same transform _draw_component
@@ -921,8 +1053,12 @@ func _draw_locked_hatch(screen_poly: PackedVector2Array) -> void:
 		d += spacing
 
 
-## Draw pads with accurate geometry from KiCAD footprint
-func _draw_component_pads(comp, xform: Transform2D) -> void:
+## Draw pads with accurate geometry from KiCAD footprint.
+##
+## `tht_only` renders ONLY the through-hole lands, for a component whose body is
+## on another copper layer than the one being viewed (see _component_visibility).
+## Defaults false, so the full-render callers are unchanged.
+func _draw_component_pads(comp, xform: Transform2D, tht_only: bool = false) -> void:
 	var pad_rot: float = -comp.rotation
 
 	for pad in comp.pads:
@@ -931,7 +1067,12 @@ func _draw_component_pads(comp, xform: Transform2D) -> void:
 		var local_pos: Vector2 = pad.get("position", Vector2.ZERO)
 		var pad_size: Vector2 = pad.get("size", Vector2(1, 1))
 
-		var is_tht := pad_type in ["thru_hole", "np_thru_hole"]
+		var is_tht := pad_type in THT_PAD_TYPES
+
+		# An SMD pad is copper on ONE side; it does not appear on any other
+		# layer's view. A through-hole barrel pierces them all, so its land does.
+		if tht_only and not is_tht:
+			continue
 
 		var world_pos: Vector2 = comp.position + (xform * local_pos)
 		var screen_pos := world_to_screen(world_pos)
@@ -1265,7 +1406,7 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# Smart SELECT tool (the resting tool): click selects; click-drag on
 			# a component moves it (snap-aware); click-drag on empty space
 			# box-selects. One tool does select + move + box-select; R rotates.
-			var hit_component: String = data.get_component_at(world_pos)
+			var hit_component: String = _component_at(world_pos)
 
 			if event.double_click and not hit_component.is_empty():
 				component_double_clicked.emit(hit_component)
@@ -1363,7 +1504,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	if tool_mode == ToolMode.INSPECT_PIN:
 		_update_inspect_hover(world_pos, event.position)
 	else:
-		var new_hover: String = data.get_component_at(world_pos)
+		var new_hover: String = _component_at(world_pos)
 		if new_hover != hovered_component:
 			hovered_component = new_hover
 			queue_redraw()
@@ -1484,6 +1625,11 @@ func _finalize_box_selection() -> void:
 
 	var hits: Array = data.get_components_in_region(select_rect)
 	for comp_id in hits:
+		# Same rule as the single-click pick (_component_at): a box drawn over a
+		# layer view must not sweep up parts that view does not draw.
+		var hit_comp = data.get_component(comp_id)
+		if hit_comp != null and _component_visibility(hit_comp) == CompVisibility.NONE:
+			continue
 		if comp_id not in selected_components:
 			selected_components.append(comp_id)
 			component_selected.emit(comp_id)
@@ -1579,6 +1725,10 @@ func _get_locked_component_at(world_pos: Vector2) -> String:
 		return ""
 	for comp_id in data.components:
 		var comp = data.components[comp_id]
+		# Layer-filter aware, like the other picks: the context menu must not
+		# offer to unlock a part the current layer view does not draw.
+		if _component_visibility(comp) == CompVisibility.NONE:
+			continue
 		if comp.locked and comp.contains_point(world_pos):
 			return comp_id
 	return ""

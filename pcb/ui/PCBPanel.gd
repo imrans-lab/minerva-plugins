@@ -35,6 +35,12 @@ const _LegacyAnnotationMigration: Script = preload("legacy_annotation_migration.
 const _PanelLayoutScript: Script = preload("panel_layout.gd")
 const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PanelToolsScript: Script = preload("panel_tools.gd")
+## The ONE canonical layer contract (canonical id <-> KiCad copper name). The
+## layer selector shows KiCad names and carries canonical ids — see
+## _rebuild_layer_option. Declared with `:=` (NOT `: Script =`, unlike the
+## instantiated-script consts above) so the parser keeps the GDScript class type
+## and can resolve its static funcs — a `Script`-typed const cannot.
+const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## T2 (S2.2) strangler-fig SHADOW phase: the routing workspace is populated
 ## ALONGSIDE the existing annotation proposals on every propose (dual-write,
 ## see panel_tools.gd _dual_write_propose). It drives nothing visible yet —
@@ -1499,6 +1505,15 @@ func get_layout_state() -> Dictionary:
 	}
 
 
+## Rebuild the layer selector from the board's declared stack.
+##
+## Epoch 6 unit 3b, owner ruling "layer presentation matches KiCad": the item
+## LABEL is the KiCad copper name (F.Cu / In1.Cu / … / B.Cu) because that is what
+## a PCB person reads, while the item METADATA stays the CANONICAL id ("top" /
+## "in1" / "bottom") because that is what the canvas filter and the board model
+## compare against (pcb_canvas._layer_visible is canonical-name equality). "All"
+## stays first; the rest follow the board's declared order, which IS stack order
+## (enforced by the validator, unit 3a).
 func _rebuild_layer_option() -> void:
 	if _layer_option == null:
 		return
@@ -1507,9 +1522,25 @@ func _rebuild_layer_option() -> void:
 	_layer_option.set_item_metadata(0, "all")
 	var layers: Array = _data.layers if _data != null else ["top", "bottom"]
 	for layer in layers:
+		var raw := str(layer)
+		# A valid board declares canonical ids, but fold a KiCad-named declaration
+		# too so the metadata still MATCHES trace.layer instead of filtering to an
+		# empty canvas. Non-copper names are left exactly as declared rather than
+		# pushed through the copper mapping (which would error on them).
+		var canon := raw
+		var label := raw
+		if PcbLayerStack.is_copper(raw):
+			canon = PcbLayerStack.kicad_to_canon(raw)
+			label = PcbLayerStack.canon_to_kicad(canon)
+		# canon_to_kicad FAILS CLOSED (returns "" and push_error()s) on anything
+		# it does not recognise. Show the raw declared name instead — a blank menu
+		# entry is a layer the user cannot even name, which is worse than an
+		# unfamiliar one.
+		if label.is_empty():
+			label = raw
 		var idx := _layer_option.item_count
-		_layer_option.add_item(str(layer))
-		_layer_option.set_item_metadata(idx, str(layer))
+		_layer_option.add_item(label)
+		_layer_option.set_item_metadata(idx, canon)
 	_layer_option.select(0)
 
 

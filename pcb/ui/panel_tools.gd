@@ -909,7 +909,14 @@ static func _export_trace_geometry(host, args: Dictionary) -> Dictionary:
 		var trace = data.get_trace(trace_id)
 		if not trace:
 			continue
+		# canon_to_kicad FAILS CLOSED since epoch 6 unit 3a: "" means "this is not
+		# a copper layer I can name". ABORT the whole export rather than emit a
+		# blank `layer` — this payload feeds fabrication geometry, and a segment
+		# whose layer is "" is copper of unknown side. Naming the trace and the
+		# offending layer makes the bad record findable in the board.
 		var layer_name: String = PcbLayerStack.canon_to_kicad(trace.layer)
+		if layer_name.is_empty():
+			return _err("export_trace_geometry: trace \"%s\" is on layer \"%s\", which is not a copper layer this contract can name (expected top/bottom/in1..in30 or F.Cu/B.Cu/In<k>.Cu). Export aborted — fix the trace's layer." % [trace_id, str(trace.layer)])
 		for i in range(trace.waypoints.size() - 1):
 			var start_pt: Vector2 = trace.waypoints[i]
 			var end_pt: Vector2 = trace.waypoints[i + 1]
