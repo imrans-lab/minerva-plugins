@@ -646,7 +646,7 @@ func _draw_traces() -> void:
 			continue
 		if _layer_visible(layer_id):
 			for trace in by_layer[layer_id]:
-				_draw_single_trace(trace, layer_id == "bottom")
+				_draw_single_trace(trace, layer_id)
 		by_layer.erase(layer_id)
 
 	# Traces on a layer the board never declared (an out-of-stack or malformed
@@ -657,7 +657,7 @@ func _draw_traces() -> void:
 		if not _layer_visible(undeclared_id):
 			continue
 		for undeclared_trace in by_layer[undeclared_id]:
-			_draw_single_trace(undeclared_trace, undeclared_id == "bottom")
+			_draw_single_trace(undeclared_trace, str(undeclared_id))
 
 	# Vias (on top of all traces).
 	for via in data.vias:
@@ -682,15 +682,40 @@ func _draw_traces() -> void:
 		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
-## Draw a single trace with layer-appropriate styling.
-## Only two trace colours exist, so an inner layer borrows the top colour; a
-## per-layer palette would belong on the stack entries (PcbLayerStack._entry
-## already carries a `color`) and is out of scope for 3b.
-func _draw_single_trace(trace, is_bottom_layer: bool) -> void:
+## Distinct hues for in1..in30 traces (work item 019fb59c2d17), cycled by stack
+## number. Deliberately far from the top red / bottom blue and from each other
+## at adjacent indices, so neighbouring inner layers never read as one layer.
+const _INNER_TRACE_PALETTE: Array[Color] = [
+	Color(0.85, 0.75, 0.2),   # in1  gold
+	Color(0.75, 0.3, 0.85),   # in2  purple
+	Color(0.25, 0.8, 0.65),   # in3  teal
+	Color(0.9, 0.55, 0.25),   # in4  orange
+	Color(0.55, 0.8, 0.3),    # in5  green
+	Color(0.85, 0.4, 0.55),   # in6  rose
+]
+
+
+## Trace colour for a copper layer id: top and bottom keep their themeable
+## vars; an inner layer draws from the fixed palette above. An undeclared or
+## malformed layer name falls to the top colour, exactly as before the palette
+## existed — colour is presentation, so this path stays permissive while the
+## draw loop keeps the trace visible.
+func _trace_layer_color(layer_id: String) -> Color:
+	if layer_id == "bottom":
+		return trace_bottom_color
+	var k := PcbLayerStack.inner_layer_index(layer_id)
+	if k > 0:
+		return _INNER_TRACE_PALETTE[(k - 1) % _INNER_TRACE_PALETTE.size()]
+	return trace_top_color
+
+
+## Draw a single trace with layer-appropriate styling — colour comes from
+## _trace_layer_color, so inner layers no longer borrow the top colour.
+func _draw_single_trace(trace, layer_id: String) -> void:
 	if trace.waypoints.size() < 2:
 		return
 
-	var color := trace_bottom_color if is_bottom_layer else trace_top_color
+	var color := _trace_layer_color(layer_id)
 	var is_selected: bool = (trace.id == selected_trace_id) and not selected_trace_id.is_empty()
 
 	if is_selected:
@@ -2479,9 +2504,9 @@ func _draw_trace_preview() -> void:
 	if _trace_points.is_empty():
 		return
 
-	# Same rule _draw_single_trace applies: only two trace colours exist, so an
-	# inner layer borrows the top colour.
-	var color := trace_bottom_color if _trace_layer == "bottom" else trace_top_color
+	# Same rule _draw_single_trace applies — one colour source for committed and
+	# in-progress copper, per-layer palette included.
+	var color := _trace_layer_color(str(_trace_layer))
 	var width_px := maxf(trace_author_width() * zoom, 1.0)
 
 	var screen_pts := PackedVector2Array()
