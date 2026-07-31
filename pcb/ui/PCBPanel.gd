@@ -1378,6 +1378,15 @@ func _on_overlay_active_tool_changed(tool: Object) -> void:
 	_active_route_flow_kind = ""
 	_untoggle_route_flow_buttons()
 	_update_route_flow_mode_label("")
+	# Reverse half of bug 019fb5e9c8ac: another surface (the dock's
+	# AnnotationToolbar) armed a tool on the shared overlay — release the
+	# canvas tool surface, mirroring _activate_route_flow_tool. A null tool
+	# is a clear-out, not a takeover, and must not yank the canvas tool
+	# (that path fires when WE clear the overlay while arming a canvas tool).
+	if tool != null and _canvas != null \
+			and _canvas.tool_mode != _PcbCanvasScript.ToolMode.SELECT:
+		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.SELECT)
+		_sync_tool_buttons(_canvas.tool_mode)
 
 
 ## Where the platform annotation dock must mount (Editor.gd duck-types this —
@@ -1551,9 +1560,9 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 
 
 ## Duck-typed: clears the active author tool on the mounted dock pane, AND
-## the route-flow cluster's own tool (same hidden-sidebar-eats-clicks hazard
-## the dock pane already guards against — see the call site in
-## _apply_layout_mode).
+## the route-flow cluster's own tool. Two call sites: _apply_layout_mode
+## (hidden-sidebar-eats-clicks hazard) and _toggle_tool_mode (cross-surface
+## exclusion, bug 019fb5e9c8ac — arming a canvas tool must release the dock).
 func _clear_dock_active_tool() -> void:
 	var pane := _find_dock_pane()
 	if pane != null and pane.has_method("clear_active_tool"):
@@ -1651,10 +1660,12 @@ func _rebuild_layer_option() -> void:
 func _toggle_tool_mode(mode: int) -> void:
 	if _canvas == null:
 		return
-	# Cross-surface mutual exclusion: a canvas tool press releases the
-	# route-flow cluster (guarded — never clears another surface's tool).
-	if _active_route_flow_tool != null:
-		_deactivate_route_flow_tool()
+	# Cross-surface mutual exclusion (bug 019fb5e9c8ac): a canvas tool press
+	# releases BOTH other tool surfaces — the route-flow cluster AND the
+	# platform annotation dock. The old guard only released our own cluster,
+	# so a dock-armed tool (e.g. annotation Select) stayed on the shared
+	# overlay claiming every click, and Draw-tool clicks never landed.
+	_clear_dock_active_tool()
 	# Radio behaviour: Select and Pan are the two persistent tools. Clicking a
 	# tool activates it; Select is the resting tool, so we never drop to a
 	# modeless state. Re-assert button pressed-states even when the mode is
