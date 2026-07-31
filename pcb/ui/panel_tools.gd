@@ -125,6 +125,16 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _add_via(host, args)
 		"minerva_pcb_load_board":
 			return await _load_board(host, args)
+		"minerva_pcb_list_zones":
+			return _list_zones(host, args)
+		"minerva_pcb_describe_zone":
+			return _describe_zone(host, args)
+		"minerva_pcb_delete_zone":
+			return _delete_zone(host, args)
+		"minerva_pcb_set_zone_net":
+			return _set_zone_net(host, args)
+		"minerva_pcb_set_zone_layer":
+			return _set_zone_layer(host, args)
 	return {}
 
 
@@ -2116,6 +2126,139 @@ static func _build_polylines_from_segments(segments: Array) -> Array:
 					changed = true
 		result.append(polyline)
 	return result
+
+
+# ── Zone tools (A6, docket 019fb9206e81 MCP zone parity) ─────────────────────
+# MCP parity for the zone surface the canvas already has (round A5 select/edit,
+# the delete slice): same journalled model path (data.remove_zone /
+# data.set_zone_net / data.set_zone_layer), so an agent mutation and a human
+# canvas edit are indistinguishable to pcb_data — including the data_changed
+# signal each of those model calls already emits, which is what repaints the
+# human's canvas live (pcb_canvas.set_data wires data.data_changed ->
+# _on_data_changed -> queue_redraw; nothing new was added here or there).
+
+## List every zone, summary shape. Read-only — journals nothing.
+static func _list_zones(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var zones_arr: Array = []
+	for zone in data.zones:
+		zones_arr.append({
+			"zone_id": str(zone.get("id", "")),
+			"kind": data.zone_kind(zone),
+			"net": str(zone.get("net", "")),
+			"layer": str(zone.get("layer", "")),
+			"point_count": data.zone_outline_points(zone).size(),
+		})
+	return _ok({"zone_count": zones_arr.size(), "zones": zones_arr})
+
+
+## Describe one zone in full, including its outline. Read-only — journals
+## nothing. The outline is round-tripped through zone_outline_points (parse) ->
+## zone_outline_to_list (re-encode) rather than returned raw, so a malformed
+## stored outline still comes back as a clean, canonical {x_mm,y_mm} list —
+## the same normalisation the model's own writers rely on.
+static func _describe_zone(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var zone_id: String = str(args.get("zone_id", ""))
+	if zone_id.is_empty():
+		return _err("zone_id is required")
+	var zone: Dictionary = data.get_zone(zone_id)
+	if zone.is_empty():
+		return _err("Unknown zone: %s" % zone_id)
+	var pts: PackedVector2Array = data.zone_outline_points(zone)
+	return _ok({
+		"zone_id": zone_id,
+		"kind": data.zone_kind(zone),
+		"net": str(zone.get("net", "")),
+		"layer": str(zone.get("layer", "")),
+		"point_count": pts.size(),
+		"outline": data.zone_outline_to_list(pts),
+	})
+
+
+## Delete a zone. Mirrors _delete_component's idiom: mutate then
+## save_to_history (mutate-then-snapshot, bug 019fb5ad791c — snapshotting
+## before the removal would make redo silently do nothing), ONE undo step, and
+## a reply that names what was deleted. Unknown zone_id is an explicit error,
+## never a silent no-op.
+static func _delete_zone(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var zone_id: String = str(args.get("zone_id", ""))
+	if zone_id.is_empty():
+		return _err("zone_id is required")
+	var zone: Dictionary = data.get_zone(zone_id)
+	if zone.is_empty():
+		return _err("Unknown zone: %s" % zone_id)
+	if not data.remove_zone(zone_id):
+		return _err("Unknown zone: %s" % zone_id)
+	data.save_to_history("Delete zone " + zone_id)
+	return _ok({
+		"deleted": zone_id,
+		"kind": data.zone_kind(zone),
+		"net": str(zone.get("net", "")),
+		"layer": str(zone.get("layer", "")),
+	})
+
+
+## Re-assign a zone's net. data.set_zone_net returns "" for BOTH a real write
+## and "no change needed", so this copies the current-value guard PCBPanel's
+## own net picker uses (_on_zone_prop_net_selected, ~PCBPanel.gd:1221): compare
+## the zone's stored net to the requested one FIRST, and reply a no-op success
+## without ever calling the model or journalling — an unguarded caller would
+## push an empty undo step (cold-review F3 in pcb_data.gd's own docs). A real
+## write is exactly one save_to_history call. Every model refusal (keepout,
+## undeclared net) surfaces verbatim as an _err.
+static func _set_zone_net(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var zone_id: String = str(args.get("zone_id", ""))
+	if zone_id.is_empty():
+		return _err("zone_id is required")
+	var zone: Dictionary = data.get_zone(zone_id)
+	if zone.is_empty():
+		return _err("Unknown zone: %s" % zone_id)
+	var net_name: String = str(args.get("net_name", ""))
+	if str(zone.get("net", "")) == net_name:
+		return _ok({"zone_id": zone_id, "net": net_name, "changed": false})
+	var refusal: String = data.set_zone_net(zone_id, net_name)
+	if not refusal.is_empty():
+		return _err(refusal)
+	data.save_to_history("Set zone net")
+	return _ok({"zone_id": zone_id, "net": net_name, "changed": true})
+
+
+## Re-assign a zone's copper layer. Same no-op guard as set_zone_net, and same
+## source (PCBPanel._on_zone_prop_layer_selected, ~PCBPanel.gd:1246) —
+## INCLUDING its asymmetry: an empty layer never short-circuits the guard
+## (there is no legitimate "current" empty layer to match), so it always
+## reaches the model and comes back as that setter's own refusal ("no layer
+## stack", "layer not declared"). Every model refusal surfaces verbatim as an
+## _err.
+static func _set_zone_layer(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var zone_id: String = str(args.get("zone_id", ""))
+	if zone_id.is_empty():
+		return _err("zone_id is required")
+	var zone: Dictionary = data.get_zone(zone_id)
+	if zone.is_empty():
+		return _err("Unknown zone: %s" % zone_id)
+	var layer: String = str(args.get("layer", ""))
+	if not layer.is_empty() and str(zone.get("layer", "")) == layer:
+		return _ok({"zone_id": zone_id, "layer": layer, "changed": false})
+	var refusal: String = data.set_zone_layer(zone_id, layer)
+	if not refusal.is_empty():
+		return _err(refusal)
+	data.save_to_history("Set zone layer")
+	return _ok({"zone_id": zone_id, "layer": layer, "changed": true})
 
 
 # ── Host-access helpers (moved verbatim from MCPPcbPanelTools.gd; now the

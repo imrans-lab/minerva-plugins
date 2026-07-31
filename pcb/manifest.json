@@ -473,6 +473,72 @@
       }
     },
     {
+      "name": "minerva_pcb_list_zones",
+      "description": "List every zone (copper pour or keepout) on the board. Read-only — journals nothing. Returns one summary entry per zone: {zone_id, kind, net, layer, point_count}, plus a zone_count.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_describe_zone",
+      "description": "Describe one zone in full, including its outline points. Read-only — journals nothing. Returns {zone_id, kind, net, layer, point_count, outline:[{x_mm,y_mm}]}. Unknown zone_id is an error, not an empty result.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "zone_id": {"type": "string", "description": "Zone id to describe"}
+        },
+        "required": ["editor_name", "zone_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_delete_zone",
+      "description": "Delete a zone (copper pour or keepout) from the board. One journalled, undoable step. Returns {deleted, kind, net, layer}. Unknown zone_id is an error, not a silent no-op.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "zone_id": {"type": "string", "description": "Zone id to delete"}
+        },
+        "required": ["editor_name", "zone_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_set_zone_net",
+      "description": "Re-assign a zone's net. Re-setting the net it already carries is a no-op reply (changed:false) and journals nothing. A real change journals one undoable step. Refused (as an error, with the model's own reason) for a keepout (which carries no net) or a net the board has not declared. Unknown zone_id is an error.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "zone_id": {"type": "string", "description": "Zone id to re-net"},
+          "net_name": {"type": "string", "description": "Declared net name to assign (copper pours only; keepouts are netless and refuse assignment). There is no net-clearing path."}
+        },
+        "required": ["editor_name", "zone_id", "net_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_set_zone_layer",
+      "description": "Re-assign a zone's copper layer. Re-setting the layer it already carries is a no-op reply (changed:false) and journals nothing; an empty layer always reaches the model and comes back as an error. A real change journals one undoable step. Refused (as an error, with the model's own reason) when the board declares no layer stack or the layer is not in it. Unknown zone_id is an error.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "zone_id": {"type": "string", "description": "Zone id to re-layer"},
+          "layer": {"type": "string", "description": "Copper layer to move the zone to (e.g. F.Cu, B.Cu)"}
+        },
+        "required": ["editor_name", "zone_id", "layer"]
+      }
+    },
+    {
       "name": "minerva_pcb_validate",
       "description": "Structurally validate a canonical PCB board (board-yaml contract). Args {yaml:<board source>} or {board:<board object>}. Returns {ok, errors:[{path,message}], warnings:[...]} — errors flag structural faults (missing required fields, duplicate refs, net pin refs that don't resolve, traces on unknown nets); warnings flag soft issues (out-of-bounds coordinates, trace narrower than design rules). Cheap: no geometry engine.",
       "input_schema": {

@@ -48,9 +48,43 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_delete_traces` | removes named traces/vias without clearing the board |
 | `minerva_pcb_get_image` | snapshot-style via `host.render_content_to_image`; null-safe headless |
 | `minerva_pcb_apply_route_hints` | route the open route hints → cyan proposals (default) or committed traces (`commit=true`); see the route-correction loop below |
+| `minerva_pcb_list_zones` | read-only; summary per zone (`zone_id`, `kind`, `net`, `layer`, `point_count`) |
+| `minerva_pcb_describe_zone` | read-only; full zone incl. outline points (`zone_outline_points` → `zone_outline_to_list` round trip) |
+| `minerva_pcb_delete_zone` | `data.remove_zone`; one journalled step, mirrors `delete_component`'s idiom |
+| `minerva_pcb_set_zone_net` | `data.set_zone_net`; current-value guard before calling the model (below) |
+| `minerva_pcb_set_zone_layer` | `data.set_zone_layer`; current-value guard before calling the model (below) |
 
 Mutations go through the model API, so the change journal, undo history and the
 `data_changed` dirty relay come for free.
+
+## Zone tools (`minerva_pcb_list_zones` / `describe_zone` / `delete_zone` / `set_zone_net` / `set_zone_layer`, A6)
+
+MCP parity for the zone surface the canvas already had (round A5 select/edit,
+the delete slice): all five ride the same journalled model path as the canvas
+— `pcb_data.remove_zone` / `set_zone_net` / `set_zone_layer` — so an agent
+mutation and a human canvas edit are indistinguishable to the model, and the
+canvas repaints live off the same `data_changed` signal those model calls
+already emit (`pcb_canvas.set_data` wires it to `queue_redraw`; no new canvas
+code was needed).
+
+**Unknown `zone_id` is always an error**, on every one of the five tools —
+never a silent no-op.
+
+**The two setters return `""` from the model for BOTH a real write and "no
+change needed"**, so the tool layer copies the same current-value guard
+`PCBPanel.gd`'s zone property panel already uses (`_on_zone_prop_net_selected`
+/ `_on_zone_prop_layer_selected`): compare the zone's stored value to the
+requested one *before* calling the model. A match replies
+`{success:true, changed:false}` without touching the model or the undo
+history; a real change calls the setter and, on success, takes exactly one
+`save_to_history` step. `set_zone_layer`'s guard keeps the model's own
+asymmetry — an **empty** requested layer never counts as a match (there is no
+legitimate "current" empty layer), so it always reaches the model and comes
+back as that setter's refusal.
+
+Every refusal the model can return — a keepout's net (`set_zone_net`), an
+undeclared net or layer, an empty layer stack, an unknown zone — surfaces as
+`_err(<the model's own string>)`, verbatim.
 
 ## Deleting a subset of traces (`minerva_pcb_delete_traces`, docket `019f809798d1`)
 
