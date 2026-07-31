@@ -757,6 +757,27 @@ func create_zone(net_name: String, layer: String, outline_points, kind: String =
 	data_changed.emit()
 	return zone
 
+
+## Remove an authored zone by id. Returns true when a zone was removed, false
+## for an unknown id. Mirrors remove_trace: record_change + data_changed here;
+## the history snapshot is the CALLER's job, taken after the mutation
+## (mutate-then-snapshot, bug 019fb5ad791c — snapshotting before the removal
+## would make redo silently do nothing).
+func remove_zone(zone_id: String) -> bool:
+	for i in zones.size():
+		var zone: Dictionary = zones[i]
+		if str(zone.get("id", "")) == zone_id:
+			record_change("remove_zone", {
+				"zone_id": zone_id,
+				"net_name": str(zone.get("net", "")),
+				"layer": str(zone.get("layer", "")),
+				"kind": zone_kind(zone),
+			})
+			zones.remove_at(i)
+			data_changed.emit()
+			return true
+	return false
+
 #endregion
 
 

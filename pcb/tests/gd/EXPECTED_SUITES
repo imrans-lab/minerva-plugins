@@ -44,3 +44,4 @@ test_trace_identity_delete.gd
 test_workspace_check.gd
 test_workspace_ingest.gd
 test_workspace_persistence.gd
+test_zone_select_delete.gd

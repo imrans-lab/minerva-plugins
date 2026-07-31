@@ -196,6 +196,11 @@ var _inspect_hover_screen_pos: Vector2 = Vector2.ZERO
 ## Trace selection state
 var selected_trace_id: String = ""
 
+## Zone selection state (docket 019fb5d9083a, delete slice): the committed
+## zone the Select tool has picked, or "". Selection + Delete only — vertex
+## editing and re-property stay with the parent item.
+var selected_zone_id: String = ""
+
 ## ── Zone authoring (epoch 6 unit 4) ───────────────────────────────────────────
 ## The net a POUR is armed with, set by the panel's zone net picker. Empty means
 ## "not armed": a pour commit fails closed with a visible message rather than
@@ -799,7 +804,13 @@ func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
 
 	var outline := screen_poly.duplicate()
 	outline.append(screen_poly[0])  # close the loop — an outline, not a polyline
-	draw_polyline(outline, Color(color, zone_outline_alpha), zone_outline_width_px)
+	var is_selected: bool = not selected_zone_id.is_empty() and str(zone.get("id", "")) == selected_zone_id
+	if is_selected:
+		# Same selection colour + emphasis the trace pick uses, so "selected"
+		# reads identically across board entities.
+		draw_polyline(outline, trace_selected_color, zone_outline_width_px * 2.0)
+	else:
+		draw_polyline(outline, Color(color, zone_outline_alpha), zone_outline_width_px)
 
 
 ## Hatch a screen-space polygon with parallel diagonal lines, CLIPPED TO THE
@@ -1577,12 +1588,22 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 						_clear_selection()
 					selected_trace_id = hit_trace_id
 				else:
-					if not event.shift_pressed:
-						_clear_selection()
-					selected_trace_id = ""
-					is_box_selecting = true
-					box_select_start = event.position
-					box_select_end = event.position
+					# No trace either. Try a committed zone (pour/keepout) so
+					# zones are selectable/deletable like everything else on the
+					# board; otherwise begin a box-select.
+					var hit_zone_id: String = _zone_at(world_pos)
+					if not hit_zone_id.is_empty():
+						if not event.shift_pressed:
+							_clear_selection()
+						selected_trace_id = ""
+						selected_zone_id = hit_zone_id
+					else:
+						if not event.shift_pressed:
+							_clear_selection()
+						selected_trace_id = ""
+						is_box_selecting = true
+						box_select_start = event.position
+						box_select_end = event.position
 
 			selection_changed.emit()
 			queue_redraw()
@@ -1713,9 +1734,12 @@ func _handle_key_input(event: InputEventKey) -> void:
 
 	match event.keycode:
 		KEY_DELETE, KEY_BACKSPACE:
-			# Delete selected trace first, otherwise the selected components.
+			# Delete selected trace first, then a selected zone, otherwise the
+			# selected components — mirrors the single-click pick priority.
 			if not selected_trace_id.is_empty():
 				_delete_selected_trace()
+			elif not selected_zone_id.is_empty():
+				_delete_selected_zone()
 			else:
 				_delete_selected()
 		KEY_ENTER, KEY_KP_ENTER:
@@ -1742,7 +1766,7 @@ func _handle_key_input(event: InputEventKey) -> void:
 				_exit_inspect_pin_mode()
 			_clear_selection()
 			selected_trace_id = ""
-			queue_redraw()
+			queue_redraw()  # _clear_selection also drops any selected zone
 		KEY_P:
 			if event.shift_pressed:
 				_toggle_inspect_pin_mode()
@@ -1808,6 +1832,7 @@ func _clear_selection() -> void:
 	for comp_id in selected_components:
 		component_deselected.emit(comp_id)
 	selected_components.clear()
+	selected_zone_id = ""
 	selection_changed.emit()
 
 
@@ -1850,6 +1875,56 @@ func _delete_selected_trace() -> void:
 	data.save_to_history("Delete trace")
 	selected_trace_id = ""
 	queue_redraw()
+
+
+func _delete_selected_zone() -> void:
+	if selected_zone_id.is_empty() or not data:
+		return
+	if data.remove_zone(selected_zone_id):
+		data.save_to_history("Delete zone")
+	selected_zone_id = ""
+	queue_redraw()
+
+
+## Which committed zone a Select-tool click at `world_pos` picks, or "".
+##
+## Hit rules follow the RENDER language so what you see is what you can grab:
+## a pour draws outline-only, so it hits like a path — near its outline; a
+## keepout draws hatched ("filled"), so its interior hits too. Keepouts win
+## ties because they render on top of pours (_draw_zones' two passes). A zone
+## on a filtered-out layer, or with zones hidden entirely, never claims the
+## click — same rule the pad/trace picks follow. Interior clicks on a pour
+## deliberately fall through to box-select: the smart-remote GND pour spans
+## nearly the whole board, and swallowing every interior click would kill
+## box-selection everywhere.
+func _zone_at(world_pos: Vector2) -> String:
+	if not data or data.zones.is_empty() or not show_zones:
+		return ""
+	var tol := 3.0 / zoom
+	var hit_pour := ""
+	for zone in data.zones:
+		var zone_id := str(zone.get("id", ""))
+		if zone_id.is_empty():
+			continue
+		if not _layer_visible(PcbLayerStack.kicad_to_canon(str(zone.get("layer", "")))):
+			continue
+		var pts := PCBDataScript.zone_outline_points(zone)
+		if pts.size() < 3:
+			continue
+		if _is_keepout_zone(zone):
+			if Geometry2D.is_point_in_polygon(world_pos, pts) or _point_near_outline(world_pos, pts, tol):
+				return zone_id
+		elif hit_pour.is_empty() and _point_near_outline(world_pos, pts, tol):
+			hit_pour = zone_id
+	return hit_pour
+
+
+func _point_near_outline(p: Vector2, pts: PackedVector2Array, tol: float) -> bool:
+	for i in pts.size():
+		var closest := Geometry2D.get_closest_point_to_segment(p, pts[i], pts[(i + 1) % pts.size()])
+		if p.distance_to(closest) <= tol:
+			return true
+	return false
 
 
 ## Lock all currently selected components and clear selection.
