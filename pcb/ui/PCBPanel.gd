@@ -1275,8 +1275,19 @@ func _activate_route_flow_tool(kind_key: String) -> void:
 		return
 
 	# Deactivate any route-flow tool WE previously activated (mutual exclusion
-	# within the cluster; future WC-4 bus button shares this path).
+	# within the cluster; future WC-4 bus button shares this path). Done BEFORE
+	# the dock clear below so the outgoing tool gets a proper on_deactivate()
+	# instead of being silently nulled by that call's overlay null-bounce.
 	_teardown_active_route_flow_tool()
+
+	# Cross-surface mutual exclusion, dock half (bug 019fb64fb408, same family
+	# as 019fb5e9c8ac): release any dock-armed annotation tool BEFORE this
+	# function tracks/activates its own tool below — clearing after would let
+	# the overlay's null-bounce reach _on_overlay_active_tool_changed and tear
+	# the just-armed tool back down. _active_route_flow_tool is already null
+	# by this point (teardown above), so this call's own null-bounce is a
+	# harmless no-op against our tracking.
+	_clear_dock_active_tool()
 
 	# Cross-surface mutual exclusion (contract §5 / review must_fix): arming a
 	# route-flow tool releases the canvas tool surface — Pan/Pin-Inspect drop
@@ -1560,9 +1571,13 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 
 
 ## Duck-typed: clears the active author tool on the mounted dock pane, AND
-## the route-flow cluster's own tool. Two call sites: _apply_layout_mode
-## (hidden-sidebar-eats-clicks hazard) and _toggle_tool_mode (cross-surface
-## exclusion, bug 019fb5e9c8ac — arming a canvas tool must release the dock).
+## the route-flow cluster's own tool. Three call sites: _apply_layout_mode
+## (hidden-sidebar-eats-clicks hazard), _toggle_tool_mode (cross-surface
+## exclusion, bug 019fb5e9c8ac — arming a canvas tool must release the dock),
+## and _activate_route_flow_tool (bug 019fb64fb408 — arming a route-flow tool
+## must release the dock too, called after that function's own teardown of
+## any previously-armed route-flow tool so the outgoing tool still gets its
+## on_deactivate() instead of a silent null-bounce).
 func _clear_dock_active_tool() -> void:
 	var pane := _find_dock_pane()
 	if pane != null and pane.has_method("clear_active_tool"):
