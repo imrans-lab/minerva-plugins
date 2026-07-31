@@ -317,8 +317,8 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	if args.has("value"):
 		comp.properties["value"] = args.get("value")
 
-	data.save_to_history("Add " + component_id)
 	data.add_component(comp)
+	data.save_to_history("Add " + component_id)
 
 	return _ok({
 		"component_id": component_id,
@@ -339,8 +339,8 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 		return _err("Component not found: %s" % component_id)
 
 	var new_pos: Vector2 = data.snap_to_grid(Vector2(float(args.get("x", 0.0)), float(args.get("y", 0.0))))
-	data.save_to_history("Move " + component_id)
 	data.move_component(component_id, new_pos)
+	data.save_to_history("Move " + component_id)
 	return _ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y})
 
 
@@ -363,8 +363,8 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 
 	var new_pos: Vector2 = spatial.interpret_relative_move(component_id, direction)
 	if data.has_component(component_id):
-		data.save_to_history("Move " + component_id)
 		data.move_component(component_id, data.snap_to_grid(new_pos))
+		data.save_to_history("Move " + component_id)
 
 	return _ok({
 		"component_id": component_id,
@@ -395,8 +395,8 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 	else:
 		new_rotation = float(degrees)
 
-	data.save_to_history("Rotate " + component_id)
 	data.rotate_component(component_id, new_rotation)
+	data.save_to_history("Rotate " + component_id)
 	return _ok({"component_id": component_id, "rotation": new_rotation})
 
 
@@ -410,8 +410,8 @@ static func _delete_component(host, args: Dictionary) -> Dictionary:
 	if not data.has_component(component_id):
 		return _err("Component not found: %s" % component_id)
 
-	data.save_to_history("Delete " + component_id)
 	data.remove_component(component_id)
+	data.save_to_history("Delete " + component_id)
 	return _ok({"deleted": component_id})
 
 

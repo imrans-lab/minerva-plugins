@@ -1809,9 +1809,9 @@ func _delete_selected() -> void:
 	if selected_components.is_empty():
 		return
 
-	data.save_to_history("Delete components")
 	for comp_id in selected_components:
 		data.remove_component(comp_id)
+	data.save_to_history("Delete components")
 
 	selected_components.clear()
 	selection_changed.emit()
@@ -1821,8 +1821,8 @@ func _delete_selected() -> void:
 func _delete_selected_trace() -> void:
 	if selected_trace_id.is_empty() or not data:
 		return
-	data.save_to_history("Delete trace")
 	data.remove_trace(selected_trace_id)
+	data.save_to_history("Delete trace")
 	selected_trace_id = ""
 	queue_redraw()
 
@@ -1871,7 +1871,6 @@ func _rotate_selected() -> void:
 	if selected_components.is_empty():
 		return
 
-	data.save_to_history("Rotate components")
 	for comp_id in selected_components:
 		var comp = data.get_component(comp_id)
 		if comp:
@@ -1883,6 +1882,7 @@ func _rotate_selected() -> void:
 				"new_rotation": comp.rotation
 			})
 			data.component_changed.emit(comp_id)
+	data.save_to_history("Rotate components")
 
 	queue_redraw()
 
@@ -2113,17 +2113,12 @@ func _handle_zone_click(world_pos: Vector2, is_double_click: bool) -> void:
 
 ## Close the in-progress polygon into a real zone entity.
 ##
-## HISTORY ORDER — this file contains two conflicting idioms and they are NOT
-## equivalent, so this picks deliberately. _restore_state applies a snapshot
-## wholesale and undo() steps to history[index - 1], so the snapshot a step
-## carries must be the state AFTER that step:
-##   * the component-move path snapshots AFTER the mutation → undo AND redo both
-##     land correctly;
-##   * _delete_selected / _delete_selected_trace snapshot BEFORE it → undo still
-##     works (the previous snapshot is the pre-delete state either way), but redo
-##     restores the pre-mutation state and silently does nothing.
-## Measured, not assumed. Zone commit follows the MOVE idiom, so Ctrl+Z removes
-## the zone and Ctrl+Shift+Z puts it back.
+## HISTORY ORDER — one idiom, everywhere (bug 019fb5ad791c closed the split):
+## _restore_state applies a snapshot wholesale and undo() steps to
+## history[index - 1], so the snapshot a step carries must be the state AFTER
+## that step. Snapshot BEFORE the mutation and undo still works (the previous
+## snapshot is the pre-mutation state either way) but redo re-applies the
+## pre-mutation state and silently does nothing. Measured, not assumed.
 ##
 ## create_zone emits data_changed, which is what marks the tab dirty (PCBPanel
 ## relays it to content_changed) — there is no separate dirty flag to set.
