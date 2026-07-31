@@ -14,6 +14,7 @@
 #     registration).
 # Lines starting with '#' and blank lines are ignored.
 test_connectivity_baseline_surface.gd
+test_epoch6_fix_regressions.gd
 test_geometric_drc_surface.gd
 test_layer_stack.gd
 test_manifest_tool_registration.gd
