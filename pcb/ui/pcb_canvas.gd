@@ -1970,7 +1970,8 @@ func _update_inspect_hover(world_pos: Vector2, screen_pos: Vector2) -> void:
 	_inspect_hover_screen_pos = screen_pos
 	var label := ""
 	if _pin_inspector_host != null and _pin_inspector_host.has_method("pad_at"):
-		var hit: Dictionary = _pin_inspector_host.pad_at(world_pos)
+		var hit: Dictionary = _pin_inspector_host.pad_at(
+			world_pos, 5.0, _inspectable_component_filter())
 		if not hit.is_empty():
 			label = "%s.%s" % [str(hit.get("component", "")), str(hit.get("pin", ""))]
 	if label != _inspect_hover_label:
@@ -1984,12 +1985,28 @@ func _update_inspect_hover(world_pos: Vector2, screen_pos: Vector2) -> void:
 func _lookup_pin_info(world_pos: Vector2) -> Dictionary:
 	if _pin_inspector_host == null or not _pin_inspector_host.has_method("pad_at"):
 		return {}
-	var hit: Dictionary = _pin_inspector_host.pad_at(world_pos)
+	var hit: Dictionary = _pin_inspector_host.pad_at(
+		world_pos, 5.0, _inspectable_component_filter())
 	if hit.is_empty():
 		return {}
 	if not _pin_inspector_host.has_method("pin_info"):
 		return {}
 	return _pin_inspector_host.pin_info(str(hit.get("component", "")), str(hit.get("pin", "")))
+
+
+## Layer-view predicate for the pin inspector (bug 019fb59c1a89): a pad is
+## hover/click-inspectable only when the current layer view draws its part.
+## FULL and LANDS both pass — a THT part viewed from the other side shows its
+## lands, and those lands are exactly what the inspector should still hit.
+## NONE (an SMD-only part mounted on a hidden layer) does not. The 5.0 radius
+## at the call sites is contract §2's default, restated because GDScript has
+## no named arguments. MCP lookups deliberately do NOT use this predicate.
+func _inspectable_component_filter() -> Callable:
+	return func(comp_id: String) -> bool:
+		if not data:
+			return true
+		var comp = data.get_component(comp_id)
+		return comp != null and _component_visibility(comp) != CompVisibility.NONE
 
 
 ## Clears any live pin selection/hover (mode exit, mode switch, empty click).

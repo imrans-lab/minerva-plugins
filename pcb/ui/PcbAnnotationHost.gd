@@ -538,12 +538,21 @@ func _pad_at(doc_pos: Vector2) -> String:
 ## (component, pin) lexicographic order (never insertion-order-dependent).
 ## Returns {} on miss, else {component: String, pin: String, position: Vector2
 ## (board mm, the live pin world position)}.
-func pad_at(doc_pos: Vector2, radius_mm: float = 5.0) -> Dictionary:
+##
+## component_filter (bug 019fb59c1a89): optional Callable(comp_id: String) ->
+## bool applied BEFORE the distance sort, so a filtered-out pad never shadows a
+## visible one. The canvas inspector passes its layer-view predicate; MCP
+## callers (describe_point, the parity tool) pass nothing and stay
+## view-independent by design.
+func pad_at(doc_pos: Vector2, radius_mm: float = 5.0,
+		component_filter: Callable = Callable()) -> Dictionary:
 	var data = _board_data()
 	if data == null:
 		return {}
 	var candidates: Array = []
 	for comp_id in data.components:
+		if component_filter.is_valid() and not component_filter.call(str(comp_id)):
+			continue
 		var comp = data.components[comp_id]
 		for pin_name in comp.pins:
 			var world_pin: Vector2 = comp.get_pin_world_position(pin_name)
