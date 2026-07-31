@@ -493,12 +493,22 @@ func get_trace_ids() -> Array[String]:
 
 ## Get trace at a position (for hit testing)
 ## Returns the closest trace ID, preferring shorter traces when multiple match
-func get_trace_at(position: Vector2, threshold: float = 1.0) -> String:
+##
+## `visible_filter`, when supplied, is a Callable(trace) -> bool the VIEW owns:
+## the model knows nothing about layer filters or the show_traces toggle, so the
+## canvas passes its own predicate rather than this file growing a second copy of
+## the view's rules. Applied INSIDE the walk, not to the winner afterwards — a
+## hidden trace crossing a visible one must not shadow it out of the pick.
+## Omitted (the default) means "every trace is pickable", which is exactly what
+## every pre-existing caller got.
+func get_trace_at(position: Vector2, threshold: float = 1.0, visible_filter := Callable()) -> String:
 	var best_id: String = ""
 	var best_length: float = INF
 
 	for trace_id in traces:
 		var trace = traces[trace_id]
+		if visible_filter.is_valid() and not visible_filter.call(trace):
+			continue
 		if trace.is_point_near(position, threshold):
 			var trace_length: float = trace.get_length()
 			if trace_length < best_length:
@@ -506,6 +516,46 @@ func get_trace_at(position: Vector2, threshold: float = 1.0) -> String:
 				best_id = trace_id
 
 	return best_id
+
+
+## Every trace the marquee `region` touches — the trace twin of
+## get_components_in_region, sharing its `visible_filter` contract with
+## get_trace_at above (the view owns visibility, the model owns geometry).
+##
+## GEOMETRY RULE, and why it is not the component one: a component sweeps by
+## BOUNDING RECT because a footprint IS its rectangle. A trace is a path, and its
+## bounding rect is mostly empty space — a long diagonal would be swept up by a
+## marquee that never came near the copper. So a trace is hit when the marquee
+## actually touches the polyline (see region_touches_polyline), which is the same
+## "hits like a path" language get_trace_at's proximity test already speaks.
+func get_traces_in_region(region: Rect2, visible_filter := Callable()) -> Array[String]:
+	var result: Array[String] = []
+	for trace_id in traces:
+		var trace = traces[trace_id]
+		if visible_filter.is_valid() and not visible_filter.call(trace):
+			continue
+		if region_touches_polyline(trace.waypoints, region):
+			result.append(trace_id)
+	return result
+
+
+## Replace a trace's waypoints wholesale.
+##
+## LIVE-DRAG WRITER: deliberately silent — no record_change, no signals. Mirrors
+## what a component drag has always done (the canvas writes comp.position
+## directly every motion frame and journals ONCE at release), because a per-frame
+## journal entry would bury the log and a per-frame history snapshot would make
+## undo replay the drag pixel by pixel. The CALLER owes the journal entry and the
+## single save_to_history at the end of the gesture. Use move_component's
+## journalling sibling semantics for one-shot programmatic moves instead.
+func set_trace_waypoints(trace_id: String, points) -> void:
+	var trace = get_trace(trace_id)
+	if trace == null:
+		return
+	var wp: Array[Vector2] = []
+	for p in points:
+		wp.append(p)
+	trace.waypoints = wp
 
 
 ## Clear all traces and vias.
@@ -734,15 +784,11 @@ func create_zone(net_name: String, layer: String, outline_points, kind: String =
 		push_warning("[PCBData] create_zone refused: %s" % refusal)
 		return {}
 
-	var outline: Array = []
-	for p in pts:
-		outline.append({"x_mm": p.x, "y_mm": p.y})
-
 	var zone := {
 		"id": mint_entity_id("zone"),
 		"layer": layer,
 		"kind": kind,
-		"outline": outline,
+		"outline": zone_outline_to_list(pts),
 	}
 	if not net_name.is_empty():
 		zone["net"] = net_name
@@ -764,19 +810,84 @@ func create_zone(net_name: String, layer: String, outline_points, kind: String =
 ## (mutate-then-snapshot, bug 019fb5ad791c — snapshotting before the removal
 ## would make redo silently do nothing).
 func remove_zone(zone_id: String) -> bool:
+	var i := _zone_index(zone_id)
+	if i < 0:
+		return false
+	var zone: Dictionary = zones[i]
+	record_change("remove_zone", {
+		"zone_id": zone_id,
+		"net_name": str(zone.get("net", "")),
+		"layer": str(zone.get("layer", "")),
+		"kind": zone_kind(zone),
+	})
+	zones.remove_at(i)
+	data_changed.emit()
+	return true
+
+
+## Index of a zone in `zones` by id, or -1. The ONE id->zone resolver: `zones` is
+## a verbatim-dict list rather than an id-keyed map (see the `zones` declaration
+## for why), so every by-id operation would otherwise re-write this walk.
+func _zone_index(zone_id: String) -> int:
 	for i in zones.size():
-		var zone: Dictionary = zones[i]
-		if str(zone.get("id", "")) == zone_id:
-			record_change("remove_zone", {
-				"zone_id": zone_id,
-				"net_name": str(zone.get("net", "")),
-				"layer": str(zone.get("layer", "")),
-				"kind": zone_kind(zone),
-			})
-			zones.remove_at(i)
-			data_changed.emit()
-			return true
-	return false
+		if str(zones[i].get("id", "")) == zone_id:
+			return i
+	return -1
+
+
+## A zone by id — the model's OWN dict (mutating it mutates the board), or {}.
+func get_zone(zone_id: String) -> Dictionary:
+	var i := _zone_index(zone_id)
+	return zones[i] if i >= 0 else {}
+
+
+## Encode board-mm points into the canonical outline list ({x_mm,y_mm} dicts).
+## The write half of zone_outline_points, stated once so an authored zone and a
+## moved zone cannot encode their geometry differently.
+static func zone_outline_to_list(points) -> Array:
+	var outline: Array = []
+	for p in PackedVector2Array(points):
+		outline.append({"x_mm": p.x, "y_mm": p.y})
+	return outline
+
+
+## Replace a zone's outline wholesale. LIVE-DRAG WRITER — silent, for exactly the
+## reasons set out on set_trace_waypoints (the caller owes journal + history at
+## the end of the gesture).
+func set_zone_outline(zone_id: String, points) -> void:
+	var i := _zone_index(zone_id)
+	if i < 0:
+		return
+	zones[i]["outline"] = zone_outline_to_list(points)
+
+
+## Every zone the marquee `region` touches, with the same `visible_filter`
+## contract as get_traces_in_region (Callable(zone) -> bool, view-owned).
+##
+## The hit rule MIRRORS the click pick (pcb_canvas._zone_at) so what a box grabs
+## and what a click grabs stay the same entity language: a pour hits like a PATH
+## (its outline must be touched — a marquee drawn deep inside the board-spanning
+## GND pour must not silently drag it), while a keepout hits like a FILLED region
+## (it renders hatched), so a marquee lying wholly inside one selects it.
+func get_zones_in_region(region: Rect2, visible_filter := Callable()) -> Array[String]:
+	var result: Array[String] = []
+	for zone in zones:
+		var zone_id := str(zone.get("id", ""))
+		if zone_id.is_empty():
+			continue
+		if visible_filter.is_valid() and not visible_filter.call(zone):
+			continue
+		var pts := zone_outline_points(zone)
+		if pts.size() < 3:
+			continue
+		var closed := pts.duplicate()
+		closed.append(pts[0])
+		var hit := region_touches_polyline(closed, region)
+		if not hit and zone_kind(zone) == "keepout":
+			hit = Geometry2D.is_point_in_polygon(region.get_center(), pts)
+		if hit:
+			result.append(zone_id)
+	return result
 
 #endregion
 
@@ -1749,6 +1860,39 @@ func get_net_count() -> int:
 ## Get the total trace count
 func get_trace_count() -> int:
 	return traces.size()
+
+
+## True when the marquee `region` touches the polyline `points` — any vertex
+## inside the rect, or any segment crossing a rect edge.
+##
+## The ONE region/path predicate, shared by get_traces_in_region and
+## get_zones_in_region so a trace and a zone outline cannot disagree about what
+## "the box touched it" means. Pass a CLOSED point list (first point repeated) to
+## test a polygon's outline; the caller closes it, because a trace is genuinely
+## open and a zone outline genuinely is not.
+##
+## A fully-enclosing region is caught by the vertex test; a region entirely
+## INSIDE a closed outline is deliberately NOT a hit here (see
+## get_zones_in_region, which adds that case only for keepouts).
+static func region_touches_polyline(points, region: Rect2) -> bool:
+	var pts := PackedVector2Array(points)
+	for p in pts:
+		if region.has_point(p):
+			return true
+	if pts.size() < 2:
+		return false
+	var corners := PackedVector2Array([
+		region.position,
+		Vector2(region.end.x, region.position.y),
+		region.end,
+		Vector2(region.position.x, region.end.y),
+	])
+	for i in range(pts.size() - 1):
+		for c in 4:
+			if Geometry2D.segment_intersects_segment(
+					pts[i], pts[i + 1], corners[c], corners[(c + 1) % 4]) != null:
+				return true
+	return false
 
 
 ## Snap a position to the grid

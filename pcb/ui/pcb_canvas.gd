@@ -132,8 +132,25 @@ var trace_layer_filter: String = "all":
 		view_changed.emit()
 		queue_redraw()
 
-## Selection state
+## ── SELECTION: ONE SET, THREE KINDS (item 019fb92f8b83) ───────────────────────
+## The board selection is a single set that may span components, traces and
+## zones at once. It is STORED as three id lists rather than one list of
+## (kind, id) pairs because every consumer is already kind-specific — the draw
+## loops ask "is this trace selected", the lock/rotate paths mean components,
+## the panel's property inspector reads components — so a pair list would be
+## unpacked back into these three at every use site.
+##
+## KIND_* below are the id strings that name the three lists in one place; every
+## generic selection call takes one (see _selection_of / _entity_at). New kinds
+## (vias, mounting holes) join by adding a constant, a list, and their cases in
+## _selection_of / _entity_anchor / _capture_drag_origins / _apply_drag_delta.
+const KIND_COMPONENT := "component"
+const KIND_TRACE := "trace"
+const KIND_ZONE := "zone"
+
 var selected_components: Array[String] = []
+var selected_trace_ids: Array[String] = []
+var selected_zone_ids: Array[String] = []
 var hovered_component: String = ""
 
 ## Interaction state
@@ -141,10 +158,20 @@ var is_panning: bool = false
 var pan_start_mouse: Vector2 = Vector2.ZERO
 var pan_start_offset: Vector2 = Vector2.ZERO
 
-var is_dragging_component: bool = false
-var drag_component_id: String = ""
+## Drag-move state. ONE gesture moves the WHOLE selection: the entity actually
+## grabbed is the ANCHOR (it is what snaps to the grid), and every other selected
+## entity is translated by the anchor's delta, so relative offsets survive
+## snapping untouched.
+##
+## _drag_origins is the pre-drag geometry of every MOVABLE selected entity,
+## captured once at press: {kind: {id: <Vector2 position | PackedVector2Array
+## points>}}. Every motion frame re-applies `origin + delta` rather than nudging
+## the live geometry, so snapping cannot accumulate drift and the release path has
+## the true pre-drag state for the journal without a second snapshot.
+var is_dragging_selection: bool = false
+var _drag_anchor_start: Vector2 = Vector2.ZERO
+var _drag_origins: Dictionary = {}
 var drag_start_mouse: Vector2 = Vector2.ZERO
-var drag_start_component_pos: Vector2 = Vector2.ZERO
 
 var is_box_selecting: bool = false
 var box_select_start: Vector2 = Vector2.ZERO
@@ -193,13 +220,33 @@ var _pin_inspector_host = null
 var _inspect_hover_label: String = ""
 var _inspect_hover_screen_pos: Vector2 = Vector2.ZERO
 
-## Trace selection state
-var selected_trace_id: String = ""
+## Trace / zone selection, SINGLE-PICK VIEW of the multi-set above.
+##
+## Both were plain single-id fields before mixed multi-select (019fb92f8b83).
+## They are kept as computed properties over selected_trace_ids /
+## selected_zone_ids so the pre-existing single-entity grammar keeps working
+## verbatim: reading gives the first pick (or ""), and ASSIGNING replaces that
+## kind's selection with the one id — which is exactly what `selected_zone_id =
+## "zone:x"` and `selected_trace_id = ""` meant before. Nothing outside this file
+## has to learn the new shape to keep behaving.
+##
+## Zone selection came in with docket 019fb5d9083a (delete slice): selection +
+## Delete only — vertex editing and re-property stay with the parent item.
+var selected_trace_id: String:
+	get:
+		return "" if selected_trace_ids.is_empty() else selected_trace_ids[0]
+	set(value):
+		selected_trace_ids.clear()
+		if not value.is_empty():
+			selected_trace_ids.append(value)
 
-## Zone selection state (docket 019fb5d9083a, delete slice): the committed
-## zone the Select tool has picked, or "". Selection + Delete only — vertex
-## editing and re-property stay with the parent item.
-var selected_zone_id: String = ""
+var selected_zone_id: String:
+	get:
+		return "" if selected_zone_ids.is_empty() else selected_zone_ids[0]
+	set(value):
+		selected_zone_ids.clear()
+		if not value.is_empty():
+			selected_zone_ids.append(value)
 
 ## ── Zone authoring (epoch 6 unit 4) ───────────────────────────────────────────
 ## The net a POUR is armed with, set by the panel's zone net picker. Empty means
@@ -386,7 +433,8 @@ func _exit_tree() -> void:
 	# just freed) when the annotation dock mounts; leaving it IGNORE would make
 	# the re-added canvas ignore all input. _enter_tree restores STOP on re-add.
 	is_panning = false
-	is_dragging_component = false
+	is_dragging_selection = false
+	_drag_origins = {}
 	is_box_selecting = false
 
 
@@ -721,7 +769,7 @@ func _draw_single_trace(trace, layer_id: String) -> void:
 		return
 
 	var color := _trace_layer_color(layer_id)
-	var is_selected: bool = (trace.id == selected_trace_id) and not selected_trace_id.is_empty()
+	var is_selected: bool = trace.id in selected_trace_ids
 
 	if is_selected:
 		color = trace_selected_color
@@ -804,7 +852,7 @@ func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
 
 	var outline := screen_poly.duplicate()
 	outline.append(screen_poly[0])  # close the loop — an outline, not a polyline
-	var is_selected: bool = not selected_zone_id.is_empty() and str(zone.get("id", "")) == selected_zone_id
+	var is_selected: bool = str(zone.get("id", "")) in selected_zone_ids
 	if is_selected:
 		# Same selection colour + emphasis the trace pick uses, so "selected"
 		# reads identically across board entities.
@@ -1557,53 +1605,39 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				return
 
 			# Smart SELECT tool (the resting tool): click selects; click-drag on
-			# a component moves it (snap-aware); click-drag on empty space
-			# box-selects. One tool does select + move + box-select; R rotates.
-			var hit_component: String = _component_at(world_pos)
+			# any SELECTED entity moves the whole selection (snap-aware); click-
+			# drag on empty space box-selects. One tool does select + move +
+			# box-select; R rotates.
+			#
+			# The grammar is now kind-blind (mixed multi-select, 019fb92f8b83):
+			#   plain click on an entity  -> selection becomes exactly that entity
+			#   shift-click on an entity  -> toggles it in/out of the selection
+			#   click on empty space      -> deselect all, begin a box-select
+			# The armed tool is NEVER disarmed by an empty click (owner ruling on
+			# 019fb59b5d86) — that is why this branch only touches selection.
+			var hit: Array = _entity_at(world_pos)
+			var hit_kind: String = hit[0]
+			var hit_id: String = hit[1]
 
-			if event.double_click and not hit_component.is_empty():
-				component_double_clicked.emit(hit_component)
-			elif not hit_component.is_empty():
-				if event.shift_pressed:
-					if hit_component not in selected_components:
-						selected_components.append(hit_component)
-						component_selected.emit(hit_component)
-				elif hit_component not in selected_components:
+			if event.double_click and hit_kind == KIND_COMPONENT:
+				component_double_clicked.emit(hit_id)
+			elif hit_kind.is_empty():
+				if not event.shift_pressed:
 					_clear_selection()
-					selected_components.append(hit_component)
-					component_selected.emit(hit_component)
-
-				is_dragging_component = true
-				drag_component_id = hit_component
-				drag_start_mouse = event.position
-				var comp = data.get_component(hit_component)
-				if comp:
-					drag_start_component_pos = comp.position
+				is_box_selecting = true
+				box_select_start = event.position
+				box_select_end = event.position
 			else:
-				# No component under cursor. Try a trace hit (so traces stay
-				# selectable/deletable); otherwise begin a box-select.
-				var hit_trace_id: String = data.get_trace_at(world_pos, 3.0 / zoom)
-				if not hit_trace_id.is_empty():
-					if not event.shift_pressed:
-						_clear_selection()
-					selected_trace_id = hit_trace_id
-				else:
-					# No trace either. Try a committed zone (pour/keepout) so
-					# zones are selectable/deletable like everything else on the
-					# board; otherwise begin a box-select.
-					var hit_zone_id: String = _zone_at(world_pos)
-					if not hit_zone_id.is_empty():
-						if not event.shift_pressed:
-							_clear_selection()
-						selected_trace_id = ""
-						selected_zone_id = hit_zone_id
-					else:
-						if not event.shift_pressed:
-							_clear_selection()
-						selected_trace_id = ""
-						is_box_selecting = true
-						box_select_start = event.position
-						box_select_end = event.position
+				if event.shift_pressed:
+					_toggle_entity_selected(hit_kind, hit_id)
+				elif not is_entity_selected(hit_kind, hit_id):
+					_clear_selection()
+					_add_to_selection(hit_kind, hit_id)
+
+				# A shift-click that REMOVED the entity must not then drag it;
+				# anything still selected under the cursor anchors the move.
+				if is_entity_selected(hit_kind, hit_id):
+					_begin_selection_drag(hit_kind, hit_id, event.position)
 
 			selection_changed.emit()
 			queue_redraw()
@@ -1611,19 +1645,8 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# Release a left-drag pan (Pan tool / Space-drag).
 			if is_panning:
 				is_panning = false
-			if is_dragging_component:
-				is_dragging_component = false
-				if drag_component_id:
-					var comp = data.get_component(drag_component_id)
-					if comp and comp.position != drag_start_component_pos:
-						data.save_to_history("Move " + drag_component_id)
-						data.record_change("move_component", {
-							"component_id": drag_component_id,
-							"old_position": {"x": drag_start_component_pos.x, "y": drag_start_component_pos.y},
-							"new_position": {"x": comp.position.x, "y": comp.position.y}
-						})
-						component_moved.emit(drag_component_id, comp.position)
-				drag_component_id = ""
+			if is_dragging_selection:
+				_end_selection_drag()
 
 			if is_box_selecting:
 				is_box_selecting = false
@@ -1709,14 +1732,18 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		view_changed.emit()
 		queue_redraw()
 
-	if is_dragging_component and drag_component_id:
-		var comp = data.get_component(drag_component_id)
-		if comp:
-			var new_pos: Vector2 = screen_to_world(event.position) - screen_to_world(drag_start_mouse) + drag_start_component_pos
-			if snap_to_grid:
-				new_pos = data.snap_to_grid(new_pos)
-			comp.position = new_pos
-			queue_redraw()
+	if is_dragging_selection:
+		# The ANCHOR is what snaps; everything else in the selection takes the
+		# anchor's delta verbatim, so a multi-entity move can never distort the
+		# relative offsets the user arranged (snapping each member on its own
+		# would). _snap_bypass_held() is read HERE, every frame, so pressing or
+		# releasing Ctrl/Cmd mid-drag toggles snapping immediately (item
+		# 019fb93185c8).
+		var anchor_target: Vector2 = screen_to_world(event.position) - screen_to_world(drag_start_mouse) + _drag_anchor_start
+		if snap_to_grid and not _snap_bypass_held():
+			anchor_target = data.snap_to_grid(anchor_target)
+		_apply_drag_delta(anchor_target - _drag_anchor_start)
+		queue_redraw()
 
 	if is_box_selecting:
 		box_select_end = event.position
@@ -1736,9 +1763,9 @@ func _handle_key_input(event: InputEventKey) -> void:
 		KEY_DELETE, KEY_BACKSPACE:
 			# Delete selected trace first, then a selected zone, otherwise the
 			# selected components — mirrors the single-click pick priority.
-			if not selected_trace_id.is_empty():
+			if not selected_trace_ids.is_empty():
 				_delete_selected_trace()
-			elif not selected_zone_id.is_empty():
+			elif not selected_zone_ids.is_empty():
 				_delete_selected_zone()
 			else:
 				_delete_selected()
@@ -1764,9 +1791,10 @@ func _handle_key_input(event: InputEventKey) -> void:
 				return
 			if tool_mode == ToolMode.INSPECT_PIN:
 				_exit_inspect_pin_mode()
+			# One call drops the whole mixed selection — components, traces and
+			# zones alike (see _clear_selection).
 			_clear_selection()
-			selected_trace_id = ""
-			queue_redraw()  # _clear_selection also drops any selected zone
+			queue_redraw()
 		KEY_P:
 			if event.shift_pressed:
 				_toggle_inspect_pin_mode()
@@ -1828,31 +1856,356 @@ func _center_view() -> void:
 	queue_redraw()
 
 
+#region Selection Set
+
+## The backing id list for one entity kind — the ONE place a kind string is
+## mapped to storage. Returns the live array (GDScript Arrays are references), so
+## callers mutate the real selection through it. An unknown kind yields an empty
+## throwaway rather than an error: every caller here passes a KIND_* constant,
+## and a typo silently selecting the wrong kind would be worse than a no-op.
+func _selection_of(kind: String) -> Array[String]:
+	match kind:
+		KIND_COMPONENT:
+			return selected_components
+		KIND_TRACE:
+			return selected_trace_ids
+		KIND_ZONE:
+			return selected_zone_ids
+	var empty: Array[String] = []
+	return empty
+
+
+## Is this entity in the selection? Kind-blind membership test.
+func is_entity_selected(kind: String, entity_id: String) -> bool:
+	return entity_id in _selection_of(kind)
+
+
+## Add one entity to the selection (no-op if already in it).
+##
+## component_selected/component_deselected stay COMPONENT-ONLY: they are the
+## panel's property-inspector feed, which only ever meant components. Every kind
+## reports through selection_changed, which the caller emits ONCE per gesture
+## rather than once per entity (a box-select of 40 parts is one selection change,
+## not 40).
+func _add_to_selection(kind: String, entity_id: String) -> void:
+	if entity_id.is_empty() or is_entity_selected(kind, entity_id):
+		return
+	_selection_of(kind).append(entity_id)
+	if kind == KIND_COMPONENT:
+		component_selected.emit(entity_id)
+
+
+func _remove_from_selection(kind: String, entity_id: String) -> void:
+	var sel := _selection_of(kind)
+	var idx := sel.find(entity_id)
+	if idx < 0:
+		return
+	sel.remove_at(idx)
+	if kind == KIND_COMPONENT:
+		component_deselected.emit(entity_id)
+
+
+## Shift-click semantics: in becomes out, out becomes in — for any kind.
+func _toggle_entity_selected(kind: String, entity_id: String) -> void:
+	if is_entity_selected(kind, entity_id):
+		_remove_from_selection(kind, entity_id)
+	else:
+		_add_to_selection(kind, entity_id)
+
+
+## Total selected entities across all three kinds.
+func selection_count() -> int:
+	return selected_components.size() + selected_trace_ids.size() + selected_zone_ids.size()
+
+
+func has_selection() -> bool:
+	return selection_count() > 0
+
+
+## Drop EVERY selected entity, whatever its kind. Deselect-only: the armed tool
+## is untouched (owner ruling on 019fb59b5d86 — an empty click deselects, it does
+## not disarm the tool).
 func _clear_selection() -> void:
 	for comp_id in selected_components:
 		component_deselected.emit(comp_id)
 	selected_components.clear()
-	selected_zone_id = ""
+	selected_trace_ids.clear()
+	selected_zone_ids.clear()
 	selection_changed.emit()
 
 
+## Sweep the marquee over ALL THREE kinds, each honouring the SAME visibility
+## rule its single-click pick honours (_component_visibility for parts,
+## _trace_visible for copper, _zone_visible for zones) — a box drawn over a layer
+## view must never grab what that view does not draw.
+##
+## ADDITIVE by construction: a non-shift box-select already cleared the selection
+## at press time, so this only ever adds — which is what makes shift+box extend an
+## existing mixed selection for free.
+##
+## LOCKED COMPONENTS ARE SWEPT IN, deliberately and unchanged from before this
+## unit: get_components_in_region never filtered them, and a locked part must stay
+## selectable for the Unlock UI to reach it. The lock is enforced where it means
+## something — the MOVE path skips locked entities (see _capture_drag_origins), so
+## a locked part inside a dragged selection simply stays put.
 func _finalize_box_selection() -> void:
 	var world_start := screen_to_world(box_select_start.min(box_select_end))
 	var world_end := screen_to_world(box_select_start.max(box_select_end))
 	var select_rect := Rect2(world_start, world_end - world_start)
 
-	var hits: Array = data.get_components_in_region(select_rect)
-	for comp_id in hits:
-		# Same rule as the single-click pick (_component_at): a box drawn over a
-		# layer view must not sweep up parts that view does not draw.
+	for comp_id in data.get_components_in_region(select_rect):
 		var hit_comp = data.get_component(comp_id)
 		if hit_comp != null and _component_visibility(hit_comp) == CompVisibility.NONE:
 			continue
-		if comp_id not in selected_components:
-			selected_components.append(comp_id)
-			component_selected.emit(comp_id)
+		_add_to_selection(KIND_COMPONENT, comp_id)
+
+	for trace_id in data.get_traces_in_region(select_rect, _trace_visible):
+		_add_to_selection(KIND_TRACE, trace_id)
+
+	for zone_id in data.get_zones_in_region(select_rect, _zone_visible):
+		_add_to_selection(KIND_ZONE, zone_id)
 
 	selection_changed.emit()
+
+
+## What the Select tool picks at `world_pos`, as [kind, id]; ["", ""] for empty
+## space. The PICK ORDER is unchanged from before mixed selection — component,
+## then trace, then zone — so which entity a click claims never moved; only what
+## the caller then does with it did.
+func _entity_at(world_pos: Vector2) -> Array:
+	var comp_id: String = _component_at(world_pos)
+	if not comp_id.is_empty():
+		return [KIND_COMPONENT, comp_id]
+	var trace_id: String = _trace_at(world_pos)
+	if not trace_id.is_empty():
+		return [KIND_TRACE, trace_id]
+	var zone_id: String = _zone_at(world_pos)
+	if not zone_id.is_empty():
+		return [KIND_ZONE, zone_id]
+	return ["", ""]
+
+
+## Which trace a click at `world_pos` picks, or "".
+##
+## MEASURED CORRECTION (this unit): the previous pick called data.get_trace_at()
+## raw, so it was the ONE pick on this canvas that ignored visibility — a click
+## could select copper on a filtered-out layer, or with traces hidden entirely,
+## while _component_at and _zone_at both refused. That is now impossible: pick and
+## box-sweep share _trace_visible, exactly as the zone pair share _zone_visible.
+func _trace_at(world_pos: Vector2) -> String:
+	if not data:
+		return ""
+	return data.get_trace_at(world_pos, 3.0 / zoom, _trace_visible)
+
+
+## Is this trace drawable in the current view? The trace twin of
+## _component_visibility / _zone_visible, and the single source for BOTH the
+## click pick and the box sweep. Mirrors _draw_traces: the layer filter, plus the
+## show_traces toggle (hidden copper must not be clickable copper).
+func _trace_visible(trace) -> bool:
+	return show_traces and _layer_visible(_canonical_layer(str(trace.layer)))
+
+
+## Is this zone drawable in the current view? Same predicate _zone_at applies per
+## zone, lifted out so the box sweep cannot drift from the click pick.
+func _zone_visible(zone: Dictionary) -> bool:
+	return show_zones and _layer_visible(PcbLayerStack.kicad_to_canon(str(zone.get("layer", ""))))
+
+#endregion
+
+
+#region Selection Drag-Move
+
+## True while the no-snap modifier is held. Ctrl (or Cmd on a Mac) — BOTH keys,
+## the convention _author_point established for authoring clicks, now shared with
+## the drag-move (item 019fb93185c8, owner-ruled).
+##
+## Read from Input at the moment of use rather than off the InputEvent, for the
+## reason _author_point states AND one more: a drag is a gesture, not an event.
+## The modifier is consulted on every motion frame, so pressing or releasing it
+## mid-drag toggles snapping right then — and holding it at PRESS time changes
+## nothing about selection (shift-click add/remove is read off the event, as
+## before), because press-time never asks this question.
+func _snap_bypass_held() -> bool:
+	return Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META)
+
+
+## The point that represents an entity's position: a component's origin, a
+## trace's first waypoint, a zone's first outline point.
+##
+## Falls back to Vector2.ZERO for an unknown or geometry-less entity, which no
+## real gesture can reach: the only caller anchors on what _entity_at returned,
+## and a trace with under two waypoints or a zone with under three points cannot
+## be hit by those picks in the first place.
+func _entity_anchor(kind: String, entity_id: String) -> Vector2:
+	match kind:
+		KIND_COMPONENT:
+			var comp = data.get_component(entity_id)
+			return comp.position if comp != null else Vector2.ZERO
+		KIND_TRACE:
+			var trace = data.get_trace(entity_id)
+			if trace != null and not trace.waypoints.is_empty():
+				return trace.waypoints[0]
+		KIND_ZONE:
+			var pts := PCBDataScript.zone_outline_points(data.get_zone(entity_id))
+			if not pts.is_empty():
+				return pts[0]
+	return Vector2.ZERO
+
+
+## Begin a drag-move anchored on the entity under the cursor. The anchor is only
+## the snap reference — what MOVES is the whole selection (_capture_drag_origins).
+func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2) -> void:
+	_drag_anchor_start = _entity_anchor(kind, entity_id)
+	drag_start_mouse = screen_pos
+	_capture_drag_origins()
+	is_dragging_selection = not _drag_origins.is_empty()
+
+
+## Snapshot the pre-drag geometry of every MOVABLE selected entity.
+##
+## LOCKED ENTITIES ARE SKIPPED HERE — this is where the lock is enforced for
+## movement. A locked component (or trace: pcb_trace carries the same flag) may
+## sit in the selection so the Unlock UI can still reach it, but it is never
+## captured, so no delta is ever applied to it: drag a mixed selection and the
+## locked members stay exactly where they are. Zones carry no lock in the board
+## contract, so none is invented for them here.
+##
+## The lock is NOT consulted by the delete paths — that is pre-existing behaviour
+## (_delete_selected has always removed locked parts too) and unifying/repairing
+## deletion is a follow-up unit's job, not this one's.
+##
+## Geometry is DUPLICATED, never referenced: waypoints/outline arrays are live
+## model state, and a shared reference would make the "original" track the drag.
+func _capture_drag_origins() -> void:
+	_drag_origins = {}
+	var comps := {}
+	for comp_id in selected_components:
+		var comp = data.get_component(comp_id)
+		if comp != null and not comp.locked:
+			comps[comp_id] = comp.position
+	var trace_pts := {}
+	for trace_id in selected_trace_ids:
+		var trace = data.get_trace(trace_id)
+		if trace != null and not trace.locked and not trace.waypoints.is_empty():
+			trace_pts[trace_id] = PackedVector2Array(trace.waypoints)
+	var zone_pts := {}
+	for zone_id in selected_zone_ids:
+		var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+		if not pts.is_empty():
+			zone_pts[zone_id] = pts
+	if not comps.is_empty():
+		_drag_origins[KIND_COMPONENT] = comps
+	if not trace_pts.is_empty():
+		_drag_origins[KIND_TRACE] = trace_pts
+	if not zone_pts.is_empty():
+		_drag_origins[KIND_ZONE] = zone_pts
+
+
+## Translate every captured entity to `origin + delta`. ABSOLUTE from the
+## captured origin, never incremental — an incremental nudge would accumulate the
+## snap residue of every frame into a drift the user never asked for.
+func _apply_drag_delta(delta: Vector2) -> void:
+	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
+		var comp = data.get_component(comp_id)
+		if comp != null:
+			comp.position = _drag_origins[KIND_COMPONENT][comp_id] + delta
+	for trace_id in _drag_origins.get(KIND_TRACE, {}):
+		data.set_trace_waypoints(trace_id, _translated(_drag_origins[KIND_TRACE][trace_id], delta))
+	for zone_id in _drag_origins.get(KIND_ZONE, {}):
+		data.set_zone_outline(zone_id, _translated(_drag_origins[KIND_ZONE][zone_id], delta))
+
+
+static func _translated(points: PackedVector2Array, delta: Vector2) -> PackedVector2Array:
+	var moved := PackedVector2Array()
+	for p in points:
+		moved.append(p + delta)
+	return moved
+
+
+## Finish a drag-move: journal each entity that actually moved, then take ONE
+## history snapshot for the whole gesture.
+##
+## HISTORY SHAPE — the point of the whole unit. The geometry was already mutated
+## during motion, so this is the mutate-then-snapshot order pcb_data documents
+## (bug 019fb5ad791c): snapshot AFTER, or redo re-applies the pre-drag state and
+## silently does nothing. begin_batch/end_batch is reused rather than a hand-rolled
+## "loop then save_to_history", because that pair already means exactly "one
+## save_to_history + one board_revision bump for everything inside" — so one undo
+## restores every entity's pre-drag position, and a drag that moved nothing leaves
+## _batch_touched false and snapshots NOTHING.
+func _end_selection_drag() -> void:
+	is_dragging_selection = false
+	var moved_components: Array[String] = []
+	var moved_total := 0
+
+	data.begin_batch()
+
+	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
+		var comp = data.get_component(comp_id)
+		var old_pos: Vector2 = _drag_origins[KIND_COMPONENT][comp_id]
+		if comp == null or comp.position == old_pos:
+			continue
+		# Unchanged journal shape for a component move — the single-drag entry
+		# every existing reader of the journal already parses.
+		data.record_change("move_component", {
+			"component_id": comp_id,
+			"old_position": {"x": old_pos.x, "y": old_pos.y},
+			"new_position": {"x": comp.position.x, "y": comp.position.y}
+		})
+		data.component_changed.emit(comp_id)
+		component_moved.emit(comp_id, comp.position)
+		moved_components.append(comp_id)
+		moved_total += 1
+
+	for trace_id in _drag_origins.get(KIND_TRACE, {}):
+		var trace = data.get_trace(trace_id)
+		var old_pts: PackedVector2Array = _drag_origins[KIND_TRACE][trace_id]
+		if trace == null or trace.waypoints.is_empty() or trace.waypoints[0] == old_pts[0]:
+			continue
+		# move_trace / move_zone are new action names — no movement action existed
+		# for either kind before this unit. Same shape as move_component, with the
+		# entity's ANCHOR as the position (a polyline has no single point, and the
+		# anchor is what the delta is defined against) plus the point count, so a
+		# journal reader can tell a 2-point stub from a 40-bend route.
+		data.record_change("move_trace", {
+			"trace_id": trace_id,
+			"old_position": {"x": old_pts[0].x, "y": old_pts[0].y},
+			"new_position": {"x": trace.waypoints[0].x, "y": trace.waypoints[0].y},
+			"point_count": old_pts.size()
+		})
+		data.trace_changed.emit(trace_id)
+		moved_total += 1
+
+	for zone_id in _drag_origins.get(KIND_ZONE, {}):
+		var now_pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+		var old_zone_pts: PackedVector2Array = _drag_origins[KIND_ZONE][zone_id]
+		if now_pts.is_empty() or now_pts[0] == old_zone_pts[0]:
+			continue
+		data.record_change("move_zone", {
+			"zone_id": zone_id,
+			"old_position": {"x": old_zone_pts[0].x, "y": old_zone_pts[0].y},
+			"new_position": {"x": now_pts[0].x, "y": now_pts[0].y},
+			"point_count": old_zone_pts.size()
+		})
+		moved_total += 1
+
+	# The label a single-component drag has always carried ("Move U1") survives
+	# for the single-component case; anything else says how much it moved.
+	var label := "Move selection (%d)" % moved_total
+	if moved_total == 1 and moved_components.size() == 1:
+		label = "Move " + moved_components[0]
+	data.end_batch(label)
+
+	# One data_changed for the gesture — the dirty-state feed the panel listens
+	# on. Inside the batch it would have been the same signal; outside it, it is
+	# emitted exactly once whether the drag moved one part or thirty.
+	if moved_total > 0:
+		data.data_changed.emit()
+
+	_drag_origins = {}
+
+#endregion
 
 
 func _delete_selected() -> void:
@@ -1868,21 +2221,31 @@ func _delete_selected() -> void:
 	queue_redraw()
 
 
+## Delete the selected traces. Now plural (the selection can hold several), but
+## otherwise untouched: same Delete-key priority, same one-snapshot-after-the-
+## mutations order. Unifying the three _delete_selected* paths into one
+## kind-blind delete is a FOLLOW-UP unit's job, not this one's.
 func _delete_selected_trace() -> void:
-	if selected_trace_id.is_empty() or not data:
+	if selected_trace_ids.is_empty() or not data:
 		return
-	data.remove_trace(selected_trace_id)
+	for trace_id in selected_trace_ids:
+		data.remove_trace(trace_id)
 	data.save_to_history("Delete trace")
-	selected_trace_id = ""
+	selected_trace_ids.clear()
+	selection_changed.emit()
 	queue_redraw()
 
 
 func _delete_selected_zone() -> void:
-	if selected_zone_id.is_empty() or not data:
+	if selected_zone_ids.is_empty() or not data:
 		return
-	if data.remove_zone(selected_zone_id):
+	var removed := false
+	for zone_id in selected_zone_ids:
+		removed = data.remove_zone(zone_id) or removed
+	if removed:
 		data.save_to_history("Delete zone")
-	selected_zone_id = ""
+	selected_zone_ids.clear()
+	selection_changed.emit()
 	queue_redraw()
 
 
@@ -1906,7 +2269,7 @@ func _zone_at(world_pos: Vector2) -> String:
 		var zone_id := str(zone.get("id", ""))
 		if zone_id.is_empty():
 			continue
-		if not _layer_visible(PcbLayerStack.kicad_to_canon(str(zone.get("layer", "")))):
+		if not _zone_visible(zone):
 			continue
 		var pts := PCBDataScript.zone_outline_points(zone)
 		if pts.size() < 3:
@@ -2204,12 +2567,14 @@ func _author_layer(default_layer: String) -> String:
 ## the click rather than plumbed through the InputEvent: this is called from the
 ## click and motion handlers, whose events already carry the modifier state, but
 ## reading it here keeps ONE answer for both callers and both gestures — and a
-## preview that used a different rule from the commit would be a lie.
+## preview that used a different rule from the commit would be a lie. That read
+## now lives in _snap_bypass_held(), shared with the drag-move's no-snap modifier
+## (item 019fb93185c8) so authoring and moving cannot disagree about the key.
 ##
 ## Pad ENDPOINTS deliberately never come through here — a trace must meet the
 ## pad's actual centre (see _finish_trace_on_pad).
 func _author_point(world_pos: Vector2) -> Vector2:
-	if Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META):
+	if _snap_bypass_held():
 		return world_pos
 	if snap_to_grid and data:
 		return data.snap_author_point(world_pos)
@@ -2633,9 +2998,22 @@ func set_data(new_data) -> void:
 	queue_redraw()
 
 
-## Get current selection.
+## Get current selection. Component-only by design — the panel's inspector and
+## status bar have always meant components by "the selection". The other two
+## kinds have their own getters below rather than being folded in here, because a
+## caller that asked for components must never be handed trace ids.
 func get_selected_components() -> Array[String]:
 	return selected_components.duplicate()
+
+
+## The selected trace ids (mixed multi-select, 019fb92f8b83).
+func get_selected_traces() -> Array[String]:
+	return selected_trace_ids.duplicate()
+
+
+## The selected zone ids (mixed multi-select, 019fb92f8b83).
+func get_selected_zones() -> Array[String]:
+	return selected_zone_ids.duplicate()
 
 
 ## Select a component programmatically.
@@ -2643,9 +3021,8 @@ func select_component(component_id: String, add_to_selection: bool = false) -> v
 	if not add_to_selection:
 		_clear_selection()
 
-	if component_id not in selected_components and data.has_component(component_id):
-		selected_components.append(component_id)
-		component_selected.emit(component_id)
+	if data.has_component(component_id) and not is_entity_selected(KIND_COMPONENT, component_id):
+		_add_to_selection(KIND_COMPONENT, component_id)
 		selection_changed.emit()
 		queue_redraw()
 
