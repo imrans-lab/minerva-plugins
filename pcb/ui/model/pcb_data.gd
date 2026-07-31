@@ -1711,6 +1711,37 @@ func snap_to_grid(position: Vector2) -> Vector2:
 	)
 
 
+## Fraction of the PLACEMENT grid that an AUTHORING click snaps to.
+##
+## A quarter — 0.635 mm on the 2.54 mm (0.1") default — because placement and
+## authoring are different jobs at different scales. `grid_size` is the pitch
+## COMPONENTS sit on, and a part that lands between 0.1" points is a part on the
+## wrong hole; but a pour corner or a trace bend has no such pitch to respect, and
+## on the full grid the nearest legal point can be up to 1.27 mm from where the
+## user clicked. Owner ruling (epoch 6 boundary, "pours have poor granularity;
+## snaps too far"). A quarter and not "off": snapping still keeps parallel edges
+## parallel and coincident corners coincident, which is most of what a grid is
+## for. Free placement is one modifier key away — see pcb_canvas._author_point.
+const AUTHOR_SNAP_FRACTION := 0.25
+
+
+## Snap an AUTHORING click (zone vertex, trace waypoint) to the fine grid.
+##
+## The one snapper for entity authoring, shared by every drawing tool on the
+## canvas — component drags keep snap_to_grid() above, deliberately. Guards a
+## non-positive grid_size (a malformed board's "grid_mm": 0 would otherwise divide
+## by zero and place the vertex at NaN, off the board and unserializable): with no
+## usable grid the click stands as made.
+func snap_author_point(position: Vector2) -> Vector2:
+	var step := grid_size * AUTHOR_SNAP_FRACTION
+	if step <= 0.0:
+		return position
+	return Vector2(
+		roundf(position.x / step) * step,
+		roundf(position.y / step) * step
+	)
+
+
 ## Check if a position is within the board bounds
 func is_within_bounds(position: Vector2) -> bool:
 	return position.x >= 0 and position.x <= board_width and \

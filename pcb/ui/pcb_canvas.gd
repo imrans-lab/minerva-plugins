@@ -203,6 +203,12 @@ var selected_trace_id: String = ""
 ## regardless of kind (see pcb_data.zone_author_error), and pcb.serialize
 ## validates the whole board, so a netless zone would make the board unexportable.
 var zone_author_net: String = ""
+## The copper layer a zone is armed to, set by the panel's zone layer picker.
+## Empty — the resting state, the picker's "View layer" entry — means "follow the
+## toolbar layer filter", which is exactly what the tools did before this control
+## existed, so the default behaviour is unchanged. A canonical id ("top"/"in1"/
+## "bottom") overrides the filter; see zone_author_layer.
+var zone_layer_override: String = ""
 ## Default pour layer when the toolbar's layer filter is "all" — the classic
 ## ground-pour side. Surfaced as a constant so the panel's tooltip and the commit
 ## path name the SAME layer.
@@ -232,6 +238,11 @@ const TRACE_DEFAULT_LAYER := "top"
 ## impossible to place a waypoint anywhere near a component. 1.27 mm is half a
 ## 0.1" pitch: inside it, the nearest pad is unambiguously the pad clicked.
 const TRACE_PAD_SNAP_MM := 1.27
+## Width in mm the trace tool is armed to, set by the panel's width box. 0.0 —
+## the resting state — means "use the board's design rule"
+## (pcb_data.authored_trace_width), which is what the tool did before this control
+## existed, so the default behaviour is unchanged. See trace_author_width.
+var trace_width_override: float = 0.0
 ## Waypoints placed so far, in board mm. Empty ⇔ no draw in progress.
 var _trace_points: PackedVector2Array = PackedVector2Array()
 ## Arming snapshot, frozen when the FIRST pad is clicked and held for the whole
@@ -1622,7 +1633,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 			hovered_component = ""
 			queue_redraw()
 		if not _zone_points.is_empty():
-			_zone_preview = _zone_vertex_at(world_pos)
+			_zone_preview = _author_point(world_pos)
 			_zone_has_preview = true
 			queue_redraw()
 	elif tool_mode == ToolMode.TRACE:
@@ -1633,7 +1644,7 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 			hovered_component = ""
 			queue_redraw()
 		if not _trace_points.is_empty():
-			_trace_preview = _trace_vertex_at(world_pos)
+			_trace_preview = _author_point(world_pos)
 			_trace_has_preview = true
 			queue_redraw()
 	else:
@@ -2010,27 +2021,28 @@ func _zone_tool_kind() -> String:
 	return "keepout" if tool_mode == ToolMode.ZONE_KEEPOUT else "copper_pour"
 
 
-## Where a click lands, in board mm. Honours snap_to_grid exactly like a
-## component drag does — a pour corner on the same grid as the parts it surrounds
-## is the useful default, and the commit gesture is the double-click flag rather
-## than "the click landed on the previous point", so snapping cannot accidentally
-## close the polygon.
-func _zone_vertex_at(world_pos: Vector2) -> Vector2:
-	if snap_to_grid and data:
-		return data.snap_to_grid(world_pos)
-	return world_pos
-
-
 ## The canonical copper layer a new zone is placed on.
 ##
-## The toolbar layer filter names it whenever it is scoped to one copper layer —
-## the layer you are LOOKING at is the layer you are drawing on. Under "All" there
-## is no such answer, so it falls back to ZONE_DEFAULT_LAYER ("bottom", the classic
+## The panel's zone LAYER picker names it outright when the user has chosen one —
+## that choice is the whole point of the control, so it outranks everything below
+## it (owner ruling, epoch 6 boundary: "I can't set the layer of a pour"). It is
+## still checked for copper-ness rather than trusted: the override is a String set
+## from outside this class, and copper is the only thing a zone may be poured on.
+##
+## With the picker left on "View layer" (override "", the resting state), the
+## toolbar layer filter names it whenever it is scoped to one copper layer — the
+## layer you are LOOKING at is the layer you are drawing on. Under "All" there is
+## no such answer, so it falls back to ZONE_DEFAULT_LAYER ("bottom", the classic
 ## ground-pour side); the tool button's tooltip states that fallback outright so
 ## it is never a silent choice. Fails visible (returns "") when the board does not
 ## declare the fallback layer at all, rather than authoring copper onto a layer
 ## the board has never heard of.
+##
+## _draw_zone_preview's arming label calls THIS function, so the label always
+## names the layer the commit will actually use, override or filter.
 func zone_author_layer() -> String:
+	if not zone_layer_override.is_empty() and PcbLayerStack.is_copper(zone_layer_override):
+		return zone_layer_override
 	return _author_layer(ZONE_DEFAULT_LAYER)
 
 
@@ -2052,6 +2064,36 @@ func _author_layer(default_layer: String) -> String:
 	return ""
 
 
+## Where an AUTHORING click lands, in board mm — the ONE snap rule for every
+## drawing tool on this canvas (zone vertices AND trace waypoints; unit 6's
+## boundary fix replaced the two identical per-tool copies with this).
+##
+## It does NOT snap like a component drag, and that is the point. Until the epoch
+## 6 boundary both authoring tools called data.snap_to_grid() on the reasoning
+## that "a pour corner on the same grid as the parts it surrounds is the useful
+## default" — SUPERSEDED by owner ruling ("pours have poor granularity; snaps too
+## far"). Parts must land on the placement pitch; a pour bend or a trace waypoint
+## must land where the user pointed, and on a 2.54 mm grid the nearest legal point
+## is up to 1.27 mm away. Authoring clicks now take the QUARTER grid
+## (data.snap_author_point, 0.635 mm by default) instead.
+##
+## Ctrl (or Cmd on a Mac) held at click time bypasses snapping entirely, the
+## standard "place it exactly there" modifier. Read from Input at the moment of
+## the click rather than plumbed through the InputEvent: this is called from the
+## click and motion handlers, whose events already carry the modifier state, but
+## reading it here keeps ONE answer for both callers and both gestures — and a
+## preview that used a different rule from the commit would be a lie.
+##
+## Pad ENDPOINTS deliberately never come through here — a trace must meet the
+## pad's actual centre (see _finish_trace_on_pad).
+func _author_point(world_pos: Vector2) -> Vector2:
+	if Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_META):
+		return world_pos
+	if snap_to_grid and data:
+		return data.snap_author_point(world_pos)
+	return world_pos
+
+
 func _handle_zone_click(world_pos: Vector2, is_double_click: bool) -> void:
 	# The second press of a physical double-click arrives AFTER the first has
 	# already placed its vertex, so it closes the polygon instead of placing a
@@ -2059,7 +2101,7 @@ func _handle_zone_click(world_pos: Vector2, is_double_click: bool) -> void:
 	if is_double_click:
 		_commit_zone()
 		return
-	_zone_points.append(_zone_vertex_at(world_pos))
+	_zone_points.append(_author_point(world_pos))
 	_zone_has_preview = false
 	queue_redraw()
 
@@ -2224,14 +2266,24 @@ func _trace_pad_at(world_pos: Vector2) -> Dictionary:
 	}
 
 
-## Where a waypoint click lands, in board mm. Honours snap_to_grid exactly like
-## the zone tools and a component drag do. Pad ENDPOINTS deliberately bypass this
-## — a trace must meet the pad's actual centre, and snapping it to the nearest
-## grid intersection would pull the copper off the pad it is connecting to.
-func _trace_vertex_at(world_pos: Vector2) -> Vector2:
-	if snap_to_grid and data:
-		return data.snap_to_grid(world_pos)
-	return world_pos
+## The width a new trace is drawn and committed at, in mm.
+##
+## The panel's width box names it when the user has set one (owner question at
+## the epoch 6 boundary: "how can I choose fatter traces than default?" — before
+## this there was no UI at all, only design_rules.trace_width_mm). Otherwise the
+## board's own design rule answers, exactly as it did before the control existed.
+##
+## ONE answer for both the preview and the commit path, which is the whole reason
+## it is a function: _draw_trace_preview renders at this width, _commit_trace
+## passes it to create_trace_entity, so what lands is what was on screen. The
+## no-model branch is the preview's alone (commit returns early without `data`)
+## and borrows PCBData's own default rather than repeating the number.
+func trace_author_width() -> float:
+	if trace_width_override > 0.0:
+		return trace_width_override
+	if data:
+		return data.authored_trace_width()
+	return PCBDataScript.DEFAULT_TRACE_WIDTH_MM
 
 
 ## The copper layer a new trace is placed on — the layer-filter rule shared with
@@ -2258,7 +2310,7 @@ func _handle_trace_click(world_pos: Vector2, is_double_click: bool) -> void:
 		_finish_trace_on_pad(hit)
 		return
 
-	_trace_append_point(_trace_vertex_at(world_pos))
+	_trace_append_point(_author_point(world_pos))
 	_trace_has_preview = false
 	queue_redraw()
 
@@ -2350,7 +2402,11 @@ func _commit_trace(warning: String = "") -> void:
 		trace_tool_message.emit(refusal)
 		return
 
-	var width: float = data.authored_trace_width()
+	# create_trace_entity's contract is unchanged: it reads a positive width as
+	# explicit and falls back to authored_trace_width() on anything else. Passing
+	# the resolved width keeps ONE place where the override is applied, and the
+	# summary below then names the width the trace actually got.
+	var width: float = trace_author_width()
 	var trace = data.create_trace_entity(_trace_net, _trace_layer, _trace_points, width)
 	if trace == null:
 		# trace_author_error already passed, so this is a model-side refusal we did
@@ -2389,10 +2445,11 @@ func _reset_trace_draw() -> void:
 
 
 ## Draw the trace being born in the SAME visual language _draw_single_trace uses
-## for committed copper — the layer's trace colour, the real design-rule width
-## scaled by zoom — so it reads as the trace itself rather than as a generic
-## rubber band, and so what lands on commit is what was on screen. The segment
-## running to the cursor is dimmer: it is proposed, not placed.
+## for committed copper — the layer's trace colour, the width it will actually
+## commit at (trace_author_width) scaled by zoom — so it reads as the trace itself
+## rather than as a generic rubber band, and so what lands on commit is what was
+## on screen. The segment running to the cursor is dimmer: it is proposed, not
+## placed.
 func _draw_trace_preview() -> void:
 	if _trace_points.is_empty():
 		return
@@ -2400,7 +2457,7 @@ func _draw_trace_preview() -> void:
 	# Same rule _draw_single_trace applies: only two trace colours exist, so an
 	# inner layer borrows the top colour.
 	var color := trace_bottom_color if _trace_layer == "bottom" else trace_top_color
-	var width_px := maxf((data.authored_trace_width() if data else 0.25) * zoom, 1.0)
+	var width_px := maxf(trace_author_width() * zoom, 1.0)
 
 	var screen_pts := PackedVector2Array()
 	for p in _trace_points:

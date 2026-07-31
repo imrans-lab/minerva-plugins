@@ -106,6 +106,16 @@ var _layer_option: OptionButton = null
 ## canvas-tools group and is only visible while a zone tool is armed — it is that
 ## tool's arming state, not a persistent board control.
 var _zone_net_option: OptionButton = null
+## Layer picker for the zone tools (epoch 6 boundary fix). Same rules as the net
+## picker beside it: sidebar, Draw section, visible only while a zone tool is
+## armed, rebuilt on every arm and on board load. Its "View layer" entry is the
+## resting state and means "follow the toolbar layer filter" — the behaviour that
+## was the ONLY behaviour before this control existed.
+var _zone_layer_option: OptionButton = null
+## Width box for the Draw ▸ Trace tool (epoch 6 boundary fix). Same arming rules
+## again; it starts at the board's design-rule width, which is what the tool used
+## unconditionally before there was any UI for it.
+var _trace_width_spin: SpinBox = null
 var _board_size_label: Label = null
 var _status_label: Label = null
 
@@ -657,12 +667,14 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.add_child(draw_flow)
 
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
-		"Draw a copper pour: pick its net below, click each corner, double-click or press Enter to close "
-		+ "(needs 3+ corners; Esc/right-click cancels). Placed on the selected copper layer — on \"All\" it "
-		+ "goes on %s." % _PcbCanvasScript.ZONE_DEFAULT_LAYER, "pour_24.png")
+		"Draw a copper pour: pick its net and layer below, click each corner, double-click or press Enter "
+		+ "to close (needs 3+ corners; Esc/right-click cancels). Corners snap to a quarter of the grid — "
+		+ "hold Ctrl/Cmd to place freely. With the layer left on \"View layer\" it goes on the selected "
+		+ "copper layer, and on \"All\" that means %s." % _PcbCanvasScript.ZONE_DEFAULT_LAYER, "pour_24.png")
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
 		"Draw a keep-out region: click each corner, double-click or press Enter to close "
-		+ "(needs 3+ corners; Esc/right-click cancels). A net is still required — the board contract "
+		+ "(needs 3+ corners; Esc/right-click cancels). Corners snap to a quarter of the grid — hold "
+		+ "Ctrl/Cmd to place freely. A net is still required — the board contract "
 		+ "requires one on every zone, keepouts included.", "keepout_24.png")
 
 	# Trace drawing tool (epoch 6 unit 5). Same section and same reason as the
@@ -675,11 +687,12 @@ func _build_sidebar() -> VBoxContainer:
 		"Draw real copper directly, bypassing the router (Hints ▸ Trace asks the router for a route instead). "
 		+ "Click a pad to start — the trace takes that pad's net — then click each waypoint, and click "
 		+ "another pad to finish on it; double-click or press Enter to end it where it is. Esc/right-click "
-		+ "cancels. Drawn at the board's design-rule trace width, on the selected copper layer — on "
-		+ "\"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER, "trace_draw_24.png")
+		+ "cancels. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place freely. Drawn at the "
+		+ "width set below (the board's design-rule width until you change it), on the selected copper "
+		+ "layer — on \"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER, "trace_draw_24.png")
 
-	# The zone tools' arming control. Shown only while one of them is active, so
-	# the resting sidebar is unchanged.
+	# The Draw tools' arming controls. Each is shown only while the tool it arms
+	# is active, so the resting sidebar is unchanged.
 	_zone_net_option = OptionButton.new()
 	_zone_net_option.name = "ZoneNetOption"
 	_zone_net_option.tooltip_text = "Net for the zone being drawn — required by the board contract for " \
@@ -688,6 +701,33 @@ func _build_sidebar() -> VBoxContainer:
 	_rebuild_zone_net_option()
 	_zone_net_option.item_selected.connect(_on_zone_net_selected)
 	_sidebar.add_child(_zone_net_option)
+
+	_zone_layer_option = OptionButton.new()
+	_zone_layer_option.name = "ZoneLayerOption"
+	_zone_layer_option.tooltip_text = "Copper layer for the zone being drawn. \"View layer\" follows the " \
+		+ "layer filter above (and on \"All\" that is %s)" % _PcbCanvasScript.ZONE_DEFAULT_LAYER
+	_zone_layer_option.visible = false
+	_rebuild_zone_layer_option()
+	_zone_layer_option.item_selected.connect(_on_zone_layer_selected)
+	_sidebar.add_child(_zone_layer_option)
+
+	# Trace width. A SpinBox rather than a picker because width is continuous —
+	# there is no list of legal widths to choose from, only the board's design
+	# rule as a starting point. Bounds are sanity rails, not fabrication rules:
+	# below 0.1 mm is finer than any hobby process etches, above 5 mm is a plane
+	# rather than a trace, and the real constraint is the fab's own spec, which
+	# this control has no way to know.
+	_trace_width_spin = SpinBox.new()
+	_trace_width_spin.name = "TraceWidthSpin"
+	_trace_width_spin.tooltip_text = "Width of the trace being drawn, in mm. Starts at the board's " \
+		+ "design-rule width (design_rules.trace_width_mm); changing it affects new traces only"
+	_trace_width_spin.min_value = 0.1
+	_trace_width_spin.max_value = 5.0
+	_trace_width_spin.step = 0.05
+	_trace_width_spin.suffix = "mm"
+	_trace_width_spin.visible = false
+	_trace_width_spin.value_changed.connect(_on_trace_width_changed)
+	_sidebar.add_child(_trace_width_spin)
 
 	_sidebar.add_child(HSeparator.new())
 	_add_group_label("Hints")
@@ -1630,19 +1670,37 @@ func _sync_tool_buttons(mode: int) -> void:
 
 func _on_tool_mode_changed(mode: int) -> void:
 	_sync_tool_buttons(mode)
-	_sync_zone_arm_ui(mode)
+	_sync_draw_arm_ui(mode)
 	_update_status()
 
 
-## Show/hide the zone net picker with the zone tools, and refresh it from the
-## board on every arm (nets can be added between arms). Hooked to
-## tool_mode_changed rather than to the buttons, so every route into a zone mode
-## — button, keyboard, a programmatic set_tool_mode — arms the same way.
-func _sync_zone_arm_ui(mode: int) -> void:
-	if _zone_net_option == null:
-		return
+## Show/hide the Draw tools' arming controls with the tool each one arms, and
+## refresh them from the board on every arm (nets, layers and design rules can all
+## change between arms). Hooked to tool_mode_changed rather than to the buttons,
+## so every route into a Draw mode — button, keyboard, a programmatic
+## set_tool_mode — arms the same way.
+##
+## Was _sync_zone_arm_ui until the epoch 6 boundary added a trace control; the
+## rule is one function per CONCEPT ("show the arming controls for the armed
+## tool"), not one per widget, so the trace width box joined it rather than
+## growing a parallel sync with its own copy of the visibility logic.
+func _sync_draw_arm_ui(mode: int) -> void:
 	var is_zone_tool: bool = mode == _PcbCanvasScript.ToolMode.ZONE_POUR \
 		or mode == _PcbCanvasScript.ToolMode.ZONE_KEEPOUT
+	var is_trace_tool: bool = mode == _PcbCanvasScript.ToolMode.TRACE
+
+	if _trace_width_spin != null:
+		_trace_width_spin.visible = is_trace_tool
+		if is_trace_tool:
+			_sync_trace_width_spin()
+
+	if _zone_layer_option != null:
+		_zone_layer_option.visible = is_zone_tool
+		if is_zone_tool:
+			_rebuild_zone_layer_option()
+
+	if _zone_net_option == null:
+		return
 	_zone_net_option.visible = is_zone_tool
 	if not is_zone_tool:
 		return
@@ -1685,6 +1743,92 @@ func _on_zone_net_selected(index: int) -> void:
 		return
 	var meta: Variant = _zone_net_option.get_item_metadata(index)
 	_canvas.zone_author_net = str(meta) if meta != null else ""
+
+
+## Rebuild the zone layer picker from the board's declared stack.
+##
+## Structurally the net picker above and the toolbar's _rebuild_layer_option
+## together: first entry is a placeholder carrying "" — but here "" is NOT "no
+## choice made", it is the REAL and default choice "follow the view layer filter",
+## which is what the zone tools did before this control existed. That is why it is
+## labelled "View layer" rather than "Layer…" and why landing on it is not an
+## error the commit path refuses.
+##
+## Labels are KiCad names and metadata is canonical, per the same owner ruling
+## _rebuild_layer_option cites ("layer presentation matches KiCad"): F.Cu is what
+## a PCB person reads, "top" is what zone.layer and PcbLayerStack compare against.
+## COPPER ONLY — a zone is copper (or a keepout over copper), and the canvas
+## refuses a non-copper override anyway, so offering a declared non-copper layer
+## here would offer a choice that does nothing.
+func _rebuild_zone_layer_option() -> void:
+	if _zone_layer_option == null:
+		return
+	var previous := str(_canvas.zone_layer_override) if _canvas != null else ""
+	_zone_layer_option.clear()
+	_zone_layer_option.add_item("View layer")
+	_zone_layer_option.set_item_metadata(0, "")
+	var layers: Array = _data.layers if _data != null else ["top", "bottom"]
+	var selected := 0
+	for layer in layers:
+		var raw := str(layer)
+		if not PcbLayerStack.is_copper(raw):
+			continue
+		# Fold a KiCad-named declaration to canonical, exactly as the toolbar
+		# picker does, so the metadata MATCHES what zone_author_layer compares.
+		var canon := PcbLayerStack.kicad_to_canon(raw)
+		var label := PcbLayerStack.canon_to_kicad(canon)
+		if label.is_empty():
+			label = raw
+		var idx := _zone_layer_option.item_count
+		_zone_layer_option.add_item(label)
+		_zone_layer_option.set_item_metadata(idx, canon)
+		if canon == previous:
+			selected = idx
+	_zone_layer_option.select(selected)
+	# Keep the canvas's armed layer and the widget in step: a layer that vanished
+	# with a board reload must not stay armed behind the "View layer" entry.
+	if _canvas != null and selected == 0:
+		_canvas.zone_layer_override = ""
+
+
+func _on_zone_layer_selected(index: int) -> void:
+	if _canvas == null or _zone_layer_option == null:
+		return
+	var meta: Variant = _zone_layer_option.get_item_metadata(index)
+	_canvas.zone_layer_override = str(meta) if meta != null else ""
+	# The pour preview labels itself with the effective layer, so a live redraw is
+	# what makes the choice visible mid-draw rather than only at commit.
+	_canvas.queue_redraw()
+
+
+## Point the width box at the width the trace tool would commit right now: the
+## armed override if the user has set one, else the board's design rule.
+##
+## set_value_no_signal, NOT `value =` — assigning would fire value_changed and so
+## write the box's own (step-rounded, range-clamped) number back as an explicit
+## override the user never chose. A board whose design rule is 0.254 mm would
+## silently start committing 0.25 mm. Leaving the override at 0.0 keeps
+## "untouched" meaning "the board's rule, exactly", and the box is a display until
+## the user actually turns it. The same clamp means a sub-0.1 mm design rule shows
+## as 0.1 while still committing its true value — the display rounds, the commit
+## does not.
+func _sync_trace_width_spin() -> void:
+	if _trace_width_spin == null:
+		return
+	var armed: float = float(_canvas.trace_width_override) if _canvas != null else 0.0
+	if armed > 0.0:
+		_trace_width_spin.set_value_no_signal(armed)
+		return
+	_trace_width_spin.set_value_no_signal(_data.authored_trace_width() if _data != null else 0.0)
+
+
+func _on_trace_width_changed(value: float) -> void:
+	if _canvas == null:
+		return
+	_canvas.trace_width_override = value
+	# The rubber-band preview draws at the armed width, so a mid-draw change is
+	# visible immediately instead of only in the committed copper.
+	_canvas.queue_redraw()
 
 
 func _on_layer_selected(index: int) -> void:
@@ -2117,6 +2261,16 @@ func _update_status() -> void:
 func _refresh_board_ui() -> void:
 	_rebuild_layer_option()
 	_rebuild_zone_net_option()
+	# The Draw tools' other two arming controls follow the same load rule: a new
+	# board brings its own layer stack and its own design-rule width, so neither a
+	# stack entry nor a width left over from the previous board stays armed.
+	# _rebuild_zone_layer_option drops a layer the new stack lacks by itself; the
+	# width has no such membership test, so it is cleared outright and re-reads the
+	# new board's design rule.
+	_rebuild_zone_layer_option()
+	if _canvas != null:
+		_canvas.trace_width_override = 0.0
+	_sync_trace_width_spin()
 	_update_board_size_label()
 	_update_status()
 	if _canvas != null:
