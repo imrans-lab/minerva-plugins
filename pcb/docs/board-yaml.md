@@ -383,6 +383,60 @@ importer (`board.ImportMinpcb`) applies this and returns a warnings list.
 | `annotations` (`id`→object map)             | `annotations` (list of opaque blobs) | **not interpreted** |
 | `route_hints` (`id`→object map)             | `route_hints` (list of opaque blobs) | **not interpreted** |
 
+### Component groups (`properties.group_id`)
+
+Two board components that are really **one physical part** (an amplifier module
+whose connector is drawn as its own footprint, say) can be stamped into a
+**group**: they then select, drag, rotate and delete as a rigid unit, and one
+member's offset from the group anchor is numerically editable once the real part
+is measured.
+
+**Membership lives in the component's `properties` map, under `group_id`** —
+never as a top-level component key. That is a measured constraint, not a style
+choice: `board.ImportMinpcb` walks every per-component key against
+`knownComponentFields` (`pcb/internal/board/minpcb.go`) and emits
+`component "X": non-canonical field "Y" preserved as passthrough` for anything
+outside it. `properties` **is** in that set and is carried whole, so a group id
+inside it rides every serialization path — `to_dict`, `to_board_dict`, both load
+halves, undo snapshots, and the panel's `host_owned` save/load — with **no Go
+change and no warning**. A top-level `group_id` would have needed that Go map
+extended.
+
+Nothing outside the panel interprets the value. To Go, to the worker and to the
+fab outputs it is one more opaque `properties` entry, so grouping changes no
+netlist, no copper and no CAM.
+
+```yaml
+components:
+  - ref: AMP1
+    x_mm: 40.0
+    y_mm: 25.0
+    properties:
+      group_id: "group:6f1c…"     # 32 lowercase hex, minted by the panel
+  - ref: OUT
+    x_mm: 47.62
+    y_mm: 25.0
+    properties:
+      group_id: "group:6f1c…"     # same id ⇒ same physical part
+```
+
+**A group *is* the set of components sharing an id** — there is no group registry
+block to keep in sync, no group record to go stale, and deleting the last member
+deletes the group. The **anchor** is the member with the lowest `ref` in sorted
+order, which is stable across a save/reload because `to_board_dict` emits
+components sorted by that same key; every other member's offset is defined
+against it.
+
+**Ungrouping erases the key** rather than writing an empty string, so a board
+that was grouped and then ungrouped serializes identically to one that never was.
+
+**CSV is lossy for `group_id`, exactly as it already is for `locked`.** The
+7-column placement CSV (`to_csv`/`from_csv`: `id,footprint,x,y,rotation,layer,
+value`) has never carried render or state fields, and `from_csv` builds a **fresh**
+component per row — so a CSV round trip drops `locked`, `color`, `pads` and now
+`group_id` alike. This is the pre-existing rule, not a new asymmetry: CSV is a
+placement interchange, and `.pcbskel`/canonical YAML is the lossless one.
+
 ### Net classes (`design_rules.net_classes`)
 
 A net class states a stricter width/clearance **floor** for a named set of nets.

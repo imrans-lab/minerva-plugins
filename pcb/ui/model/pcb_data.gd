@@ -307,6 +307,321 @@ func get_components_in_region(region: Rect2) -> Array[String]:
 #endregion
 
 
+#region Component Groups
+## Persistent component groups (campaign-2 A4). Two board components that are
+## really ONE physical part (the owner's AMP1 + OUT) are stamped with a shared
+## group id and thereafter move, rotate and delete as a rigid unit.
+##
+## THE MODEL OWNS GROUP SEMANTICS, not the canvas. Membership queries, the
+## group-expand of a member set, and the group mutations all live here; the canvas
+## and the MCP tools are both consumers, which is what keeps a drag and a
+## minerva_pcb_move_component call meaning the same thing.
+##
+## STORAGE is the member's own `properties[group_id]` (see pcb_component.gd's
+## GROUP_PROPERTY_KEY for the measured reason it is not a top-level field). There
+## is no group registry object: a group IS the set of components sharing an id,
+## so a group cannot go stale, cannot outlive its members, and needs no separate
+## serialization path — deleting the last member deletes the group.
+##
+## HISTORY follows this file's standing rule: NO mutator here snapshots itself
+## (the caller decides where an undo step begins and ends). Every group mutation
+## below journals through record_change and emits, exactly like its single-
+## component sibling; the caller wraps a multi-component one in
+## begin_batch/end_batch so it lands as ONE undo step.
+##
+## NESTED GROUPS ARE OUT OF SCOPE: a component carries at most one group id, and
+## grouping a selection that already contains grouped members MERGES them into a
+## single flat group (Illustrator grammar) rather than nesting.
+
+
+## The group id of one component, or "" (unknown component included).
+func component_group_id(component_id: String) -> String:
+	var comp = get_component(component_id)
+	return comp.group_id() if comp != null else ""
+
+
+## Every member of `group_id`, SORTED by component id.
+##
+## Sorted, not insertion-ordered, because `components` is a Dictionary whose key
+## order is not a contract, and group_anchor_id() is defined off the first entry
+## here — an anchor that changed between a save and a reload would silently
+## redefine every member offset.
+func group_member_ids(group_id: String) -> Array[String]:
+	var result: Array[String] = []
+	if group_id.is_empty():
+		return result
+	for comp_id in components:
+		if components[comp_id].group_id() == group_id:
+			result.append(comp_id)
+	result.sort()
+	return result
+
+
+## The group's ANCHOR: the lowest member id in sorted order.
+##
+## Deterministic across save/reload by construction — it is derived from the ids
+## themselves, and to_board_dict() emits components sorted by the same key — so
+## the offsets computed against it are stable. Returns "" for an empty/unknown
+## group.
+func group_anchor_id(group_id: String) -> String:
+	var members := group_member_ids(group_id)
+	return members[0] if not members.is_empty() else ""
+
+
+## Is this component its group's anchor? (False for an ungrouped component: it is
+## not an anchor, it is simply not in a group.)
+func is_group_anchor(component_id: String) -> bool:
+	var gid := component_group_id(component_id)
+	return not gid.is_empty() and group_anchor_id(gid) == component_id
+
+
+## A member's offset from its group's anchor, in board mm. Vector2.ZERO for the
+## anchor itself and for any ungrouped component.
+func member_offset(component_id: String) -> Vector2:
+	var gid := component_group_id(component_id)
+	if gid.is_empty():
+		return Vector2.ZERO
+	var anchor = get_component(group_anchor_id(gid))
+	var comp = get_component(component_id)
+	if anchor == null or comp == null:
+		return Vector2.ZERO
+	return comp.position - anchor.position
+
+
+## Grow a set of component ids to include every group-mate of every member.
+##
+## The ONE expand rule, shared by the canvas selection and the MCP tools. Order
+## is preserved for the ids that were passed in, with each group's extra members
+## appended right after the member that pulled them in — so a caller that cared
+## about "the one I clicked" still finds it where it put it. Ungrouped ids pass
+## through untouched, which is what makes a group-free board behave identically.
+func expand_to_groups(component_ids) -> Array[String]:
+	var result: Array[String] = []
+	for component_id in component_ids:
+		var cid := str(component_id)
+		if not result.has(cid):
+			result.append(cid)
+		var gid := component_group_id(cid)
+		if gid.is_empty():
+			continue
+		for member_id in group_member_ids(gid):
+			if not result.has(member_id):
+				result.append(member_id)
+	return result
+
+
+## WHOLE-UNIT LOCK RULE — deliberately NOT the per-entity rule.
+##
+## Everywhere else on this board a lock is PER ENTITY: the drag path skips the
+## locked members of a mixed selection and moves the rest (pcb_canvas
+## _capture_drag_origins), and the delete path does the same. A GROUP cannot work
+## that way: it is one physical part, and moving three of its four members while
+## the locked one stays put would tear the part apart. So one locked member locks
+## the WHOLE group, for drag, delete, rotate and offset-edit alike.
+##
+## Stated as its own named helper precisely so a reviewer can see the two rules
+## are different and which sites use which.
+func is_group_locked(group_id: String) -> bool:
+	if group_id.is_empty():
+		return false
+	for member_id in group_member_ids(group_id):
+		if components[member_id].locked:
+			return true
+	return false
+
+
+## The whole-unit rule addressed by COMPONENT: true when this component belongs to
+## a group and any member of that group is locked. False for every ungrouped
+## component — an ungrouped part is governed by the per-entity rule alone, so no
+## existing behaviour moves.
+func group_lock_blocks(component_id: String) -> bool:
+	return is_group_locked(component_group_id(component_id))
+
+
+## Stamp `component_ids` (and every existing group-mate of any of them) into ONE
+## group and return its id.
+##
+## RETURNS "" WHEN NOTHING CHANGED — fewer than two real components, or a set that
+## is already exactly one group. That is what lets every caller close with an
+## unconditional save_to_history() on a non-empty return and never leave an empty
+## undo step behind for a gesture that did nothing.
+##
+## MERGE, not nest (Illustrator grammar): if the selection contains members of two
+## existing groups, all of both groups end up in a single flat group. Fewer than
+## two components after expansion is refused — a group of one is not a group.
+##
+## REUSES an incoming group id rather than always minting: grouping a selection
+## that is already exactly one group is then a no-op instead of a churn of the id
+## (and of every member's serialized properties). When two or more groups merge, a
+## fresh id is minted so neither side's identity silently wins.
+func group_components(component_ids) -> String:
+	var members := expand_to_groups(component_ids)
+	var present: Array[String] = []
+	for component_id in members:
+		if has_component(component_id):
+			present.append(component_id)
+	if present.size() < 2:
+		return ""
+
+	var existing: Array[String] = []
+	for component_id in present:
+		var gid := component_group_id(component_id)
+		if not gid.is_empty() and not existing.has(gid):
+			existing.append(gid)
+
+	var group_id := existing[0] if existing.size() == 1 else mint_entity_id("group")
+	var stamped: Array[String] = []
+	for component_id in present:
+		var comp = components[component_id]
+		if comp.group_id() == group_id:
+			continue
+		comp.set_group_id(group_id)
+		stamped.append(component_id)
+		component_changed.emit(component_id)
+	if stamped.is_empty():
+		return ""
+
+	record_change("group_components", {
+		"group_id": group_id,
+		"component_ids": present.duplicate(),
+		"stamped_ids": stamped,
+		"merged_group_ids": existing,
+	})
+	data_changed.emit()
+	return group_id
+
+
+## Clear group membership from every group touched by `component_ids` and return
+## the ids that were actually released.
+##
+## WHOLE GROUPS, not the named members only: ungrouping one member of a pair would
+## leave a one-member group, which group_components refuses to create in the first
+## place. Positions are UNTOUCHED — the parts stay exactly where they are and
+## simply become independently selectable again.
+func ungroup_components(component_ids) -> Array[String]:
+	var released: Array[String] = []
+	var group_ids: Array[String] = []
+	for component_id in component_ids:
+		var gid := component_group_id(str(component_id))
+		if not gid.is_empty() and not group_ids.has(gid):
+			group_ids.append(gid)
+	for gid in group_ids:
+		for member_id in group_member_ids(gid):
+			components[member_id].set_group_id("")
+			released.append(member_id)
+			component_changed.emit(member_id)
+	if released.is_empty():
+		return released
+
+	record_change("ungroup_components", {
+		"group_ids": group_ids,
+		"component_ids": released.duplicate(),
+	})
+	data_changed.emit()
+	return released
+
+
+## Translate every member of `component_id`'s group by `delta`, preserving the
+## members' relative offsets exactly. Returns the ids that moved ([] when the
+## component is ungrouped or the group is locked).
+##
+## Each member moves through move_component(), so the journal reads exactly like
+## N single-component moves — the shape every existing journal reader already
+## parses, and the same shape the canvas drag emits. The caller owes the history
+## step (begin_batch/end_batch for one undo).
+func translate_group(component_id: String, delta: Vector2) -> Array[String]:
+	var moved: Array[String] = []
+	var gid := component_group_id(component_id)
+	if gid.is_empty() or is_group_locked(gid):
+		return moved
+	for member_id in group_member_ids(gid):
+		move_component(member_id, components[member_id].position + delta)
+		moved.append(member_id)
+	return moved
+
+
+## Rigid-body rotate a group by `degrees_delta` about its ANCHOR: every member's
+## position orbits the anchor AND every member's own rotation turns by the same
+## amount, so the unit behaves like the single footprint it physically is.
+## Returns the ids that turned ([] when ungrouped or locked).
+##
+## THE SIGN IS THE KICAD CONVENTION, not a free choice. pcb_component.get_transform
+## maps a component's own rotation through `Transform2D(deg_to_rad(-rotation))`
+## (its docstring explains why: the worker, gerber export and kicad_io all use
+## radians(-rotation_deg)). A member's position is geometry belonging to the same
+## rigid body, so it must be carried by the SAME transform — hence
+## `.rotated(deg_to_rad(-applied_delta))`. Rotating positions the other way would
+## make a 90°-turned group's parts land mirrored across the anchor relative to
+## their own turned bodies.
+##
+## THE DELTA IS SNAPPED BEFORE ANYTHING MOVES. Component bodies quantize to 90°
+## multiples (pcb_component.set_rotation), so orbiting positions by the RAW delta
+## would let the two halves of the same rigid body disagree — a 45° request
+## turned every body 90° while positions orbited 45°, silently deforming the
+## part (cold-review A4 finding 1). Snapping once through the model's single
+## quantization authority (pcb_component.snap_rotation) and using that value for
+## BOTH halves makes disagreement impossible; a delta that snaps to a full turn
+## is a no-op and journals nothing.
+func rotate_group(component_id: String, degrees_delta: float) -> Array[String]:
+	var turned: Array[String] = []
+	var gid := component_group_id(component_id)
+	if gid.is_empty() or is_group_locked(gid):
+		return turned
+	var applied_delta: float = PCBComponentScript.snap_rotation(degrees_delta)
+	if fposmod(applied_delta, 360.0) == 0.0:
+		return turned
+	var anchor_id := group_anchor_id(gid)
+	var anchor_pos: Vector2 = components[anchor_id].position
+	var radians := deg_to_rad(-applied_delta)
+	for member_id in group_member_ids(gid):
+		var comp = components[member_id]
+		rotate_component(member_id, comp.rotation + applied_delta)
+		var orbited: Vector2 = anchor_pos + (comp.position - anchor_pos).rotated(radians)
+		if orbited != comp.position:
+			move_component(member_id, orbited)
+		turned.append(member_id)
+	return turned
+
+
+## Remove every member of `component_id`'s group through the journalled
+## remove_component(). Returns the removed ids ([] when ungrouped or locked).
+## The caller owes the history step.
+func remove_group(component_id: String) -> Array[String]:
+	var removed: Array[String] = []
+	var gid := component_group_id(component_id)
+	if gid.is_empty() or is_group_locked(gid):
+		return removed
+	for member_id in group_member_ids(gid):
+		remove_component(member_id)
+		removed.append(member_id)
+	return removed
+
+
+## STAGE 2 — numeric offset editing. Reposition ONE member to
+## `anchor.position + offset`, leaving every other member of the group where it
+## is. Returns true when the member moved.
+##
+## This is the deliberate exception to "a group moves as a unit": it is how the
+## unit's INTERNAL geometry gets corrected once the real part is measured. The
+## anchor itself has no editable offset (it IS the origin — moving it would move
+## the whole group, which is what a drag is for), so anchor edits are refused.
+## Lock-gated by the same whole-unit rule as every other group mutation.
+func set_member_offset(component_id: String, offset: Vector2) -> bool:
+	var gid := component_group_id(component_id)
+	if gid.is_empty() or is_group_locked(gid):
+		return false
+	var anchor_id := group_anchor_id(gid)
+	if anchor_id == component_id:
+		return false
+	var target: Vector2 = components[anchor_id].position + offset
+	if components[component_id].position == target:
+		return false
+	move_component(component_id, target)
+	return true
+
+#endregion
+
+
 #region Net Management
 
 ## Add a net

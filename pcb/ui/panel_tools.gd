@@ -158,6 +158,16 @@ static func _get_components(host, args: Dictionary) -> Dictionary:
 		}
 		if comp.properties.has("value"):
 			comp_info["value"] = comp.properties["value"]
+		# Group membership (A4), ADDITIVE and emitted only for a grouped
+		# component — a group-free board's reply is unchanged key for key. An
+		# agent has no other way to discover that moving this part will move
+		# others, and the move/rotate/delete tools all behave as a unit on it.
+		if comp.is_grouped():
+			comp_info["group_id"] = comp.group_id()
+			comp_info["group_members"] = data.group_member_ids(comp.group_id())
+			comp_info["group_anchor"] = data.group_anchor_id(comp.group_id())
+			comp_info["group_offset"] = {
+				"x": data.member_offset(comp.id).x, "y": data.member_offset(comp.id).y}
 		components.append(comp_info)
 	return _ok({"component_count": components.size(), "components": components})
 
@@ -339,9 +349,48 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 		return _err("Component not found: %s" % component_id)
 
 	var new_pos: Vector2 = data.snap_to_grid(Vector2(float(args.get("x", 0.0)), float(args.get("y", 0.0))))
+	# A GROUPED component moves the WHOLE group, offsets preserved — the same
+	# semantics a canvas drag has (A4). Ungrouped: unchanged, byte for byte.
+	var group_reply := _move_component_group(data, component_id, new_pos)
+	if not group_reply.is_empty():
+		return group_reply
 	data.move_component(component_id, new_pos)
 	data.save_to_history("Move " + component_id)
 	return _ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y})
+
+
+## Shared group-move half of move_component / move_relative.
+##
+## Returns {} when `component_id` is UNGROUPED — the caller then runs its original
+## single-component path untouched, which is what keeps a group-free board's tool
+## behaviour identical. Otherwise it performs the whole-group translation and
+## returns the finished MCP reply.
+##
+## The reply is ADDITIVE: component_id / x / y still describe the ADDRESSED
+## component exactly as before (it does land on the requested point — the rest of
+## the group moves by the same delta), with group_id / moved_components /
+## moved_count added for a caller that wants to know the move was a unit move.
+##
+## ONE undo step via begin_batch/end_batch, the same pair the canvas drag closes
+## with, rather than N save_to_history calls.
+static func _move_component_group(data, component_id: String, new_pos: Vector2) -> Dictionary:
+	var group_id: String = str(data.component_group_id(component_id))
+	if group_id.is_empty():
+		return {}
+	if data.is_group_locked(group_id):
+		return _err("Group is locked — %s cannot be moved" % component_id)
+	var delta: Vector2 = new_pos - data.get_component(component_id).position
+	data.begin_batch()
+	var moved: Array = data.translate_group(component_id, delta)
+	data.end_batch("Move group (%d)" % moved.size())
+	return _ok({
+		"component_id": component_id,
+		"x": new_pos.x,
+		"y": new_pos.y,
+		"group_id": group_id,
+		"moved_components": moved,
+		"moved_count": moved.size(),
+	})
 
 
 static func _move_relative(host, args: Dictionary) -> Dictionary:
@@ -362,16 +411,27 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 		return _err("PCB data not available")
 
 	var new_pos: Vector2 = spatial.interpret_relative_move(component_id, direction)
-	if data.has_component(component_id):
-		data.move_component(component_id, data.snap_to_grid(new_pos))
-		data.save_to_history("Move " + component_id)
-
-	return _ok({
+	var reply := {
 		"component_id": component_id,
 		"new_x": new_pos.x,
 		"new_y": new_pos.y,
 		"interpreted_direction": direction,
-	})
+	}
+	if data.has_component(component_id):
+		# Group parity with _move_component: a grouped component carries its whole
+		# group to the interpreted destination. The reply keeps new_x/new_y (the
+		# ADDRESSED component's landing point) and adds the group fields.
+		var group_reply := _move_component_group(data, component_id, data.snap_to_grid(new_pos))
+		if not group_reply.is_empty():
+			if not bool(group_reply.get("success", false)):
+				return group_reply  # locked group — surface the refusal verbatim
+			for key in ["group_id", "moved_components", "moved_count"]:
+				reply[key] = group_reply[key]
+			return _ok(reply)
+		data.move_component(component_id, data.snap_to_grid(new_pos))
+		data.save_to_history("Move " + component_id)
+
+	return _ok(reply)
 
 
 static func _rotate_component(host, args: Dictionary) -> Dictionary:
@@ -395,6 +455,26 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 	else:
 		new_rotation = float(degrees)
 
+	# A GROUPED component rotates its whole group as a RIGID BODY about the group
+	# anchor (positions orbit, every member's own rotation turns) — the same thing
+	# R does on the canvas for a group selection. The requested rotation is
+	# ABSOLUTE for the addressed component, so the group's turn is the DELTA that
+	# gets that component there; every other member turns by the same amount.
+	var group_id: String = str(data.component_group_id(component_id))
+	if not group_id.is_empty():
+		if data.is_group_locked(group_id):
+			return _err("Group is locked — %s cannot be rotated" % component_id)
+		data.begin_batch()
+		var turned: Array = data.rotate_group(component_id, new_rotation - comp.rotation)
+		data.end_batch("Rotate group (%d)" % turned.size())
+		return _ok({
+			"component_id": component_id,
+			"rotation": comp.rotation,
+			"group_id": group_id,
+			"rotated_components": turned,
+			"rotated_count": turned.size(),
+		})
+
 	data.rotate_component(component_id, new_rotation)
 	data.save_to_history("Rotate " + component_id)
 	return _ok({"component_id": component_id, "rotation": new_rotation})
@@ -409,6 +489,24 @@ static func _delete_component(host, args: Dictionary) -> Dictionary:
 		return _err("component_id is required")
 	if not data.has_component(component_id):
 		return _err("Component not found: %s" % component_id)
+
+	# A GROUPED component deletes its WHOLE group (A4) — the group is one physical
+	# part, so removing one of its footprints and leaving the rest is a delete no
+	# caller can mean. ONE undo step (the batch pair), and `deleted` still names
+	# the addressed component so the existing reply field keeps its meaning.
+	var group_id: String = str(data.component_group_id(component_id))
+	if not group_id.is_empty():
+		if data.is_group_locked(group_id):
+			return _err("Group is locked — %s cannot be deleted" % component_id)
+		data.begin_batch()
+		var removed: Array = data.remove_group(component_id)
+		data.end_batch("Delete group (%d)" % removed.size())
+		return _ok({
+			"deleted": component_id,
+			"group_id": group_id,
+			"deleted_components": removed,
+			"deleted_count": removed.size(),
+		})
 
 	data.remove_component(component_id)
 	data.save_to_history("Delete " + component_id)

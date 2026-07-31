@@ -103,6 +103,43 @@ var graphics: Array = []
 var bbox_center_offset: Vector2 = Vector2.ZERO
 
 
+## ── Component groups (stage 1) ────────────────────────────────────────────────
+## The `properties` key group membership rides in.
+##
+## PROPERTIES, NOT A NEW TOP-LEVEL FIELD — measured, not stylistic. The legacy
+## .minpcb importer (pcb/internal/board/minpcb.go) walks every per-component key
+## against `knownComponentFields` and emits
+## `component %q: non-canonical field %q preserved as passthrough` for anything
+## outside it (minpcb.go:250). `properties` IS in that set and is already carried
+## whole, so a group id inside it rides every serialization path — to_dict,
+## to_board_dict, the two load halves, undo snapshots, host_owned save/load —
+## with no Go change and no per-component warning. A top-level `group_id` would
+## have needed the Go map extended, which is out of this round's fence.
+const GROUP_PROPERTY_KEY := "group_id"
+
+
+## This component's group id, or "" when it belongs to no group.
+func group_id() -> String:
+	return str(properties.get(GROUP_PROPERTY_KEY, ""))
+
+
+## Is this component a member of a group?
+func is_grouped() -> bool:
+	return not group_id().is_empty()
+
+
+## Join a group, or leave one when `gid` is empty.
+##
+## Leaving ERASES the key rather than storing "": an ungrouped component must
+## serialize exactly as it did before groups existed, so a board that was grouped
+## and then ungrouped round-trips byte-identical to one that never was.
+func set_group_id(gid: String) -> void:
+	if gid.is_empty():
+		properties.erase(GROUP_PROPERTY_KEY)
+	else:
+		properties[GROUP_PROPERTY_KEY] = gid
+
+
 ## Get the string name of this component's footprint enum (within-file enum
 ## access so cross-file callers never touch the enum directly — off-tree safe).
 func get_footprint_name() -> String:
@@ -427,11 +464,18 @@ func set_position(new_pos: Vector2) -> void:
 
 ## Set rotation (constrained to 0, 90, 180, 270)
 func set_rotation(degrees: float) -> void:
-	# Normalize to 0, 90, 180, 270
-	rotation = fmod(degrees, 360.0)
-	if rotation < 0:
-		rotation += 360.0
-	rotation = roundf(rotation / 90.0) * 90.0
+	rotation = snap_rotation(degrees)
+
+
+## The model's SINGLE rotation-quantization authority: normalize into [0, 360)
+## then snap to the nearest multiple of 90. Static so pcb_data.rotate_group can
+## snap a rigid-body delta through the same rule bodies use — the two halves of
+## a group rotation must never disagree (cold-review A4 finding 1).
+static func snap_rotation(degrees: float) -> float:
+	var snapped := fmod(degrees, 360.0)
+	if snapped < 0:
+		snapped += 360.0
+	return roundf(snapped / 90.0) * 90.0
 
 
 ## Rotate clockwise by 90 degrees

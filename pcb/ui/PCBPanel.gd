@@ -139,6 +139,20 @@ var _properties_body: VBoxContainer = null
 var _properties_collapse_btn: Button = null
 var _properties_expanded := true
 
+## Component-group rows (A4 stage 2). BOTH start hidden and only appear for a
+## grouped component, so the Properties section on a board with no groups renders
+## exactly the five rows it always did.
+##   _group_row    — read-out: member count, anchor ref, locked marker.
+##   _offset_row   — the editable X/Y offset of ONE member from its group anchor.
+##                   Hidden for the anchor itself (it IS the origin).
+var _group_row: HBoxContainer = null
+var _group_value_label: Label = null
+var _offset_row: HBoxContainer = null
+var _offset_x_edit: LineEdit = null
+var _offset_y_edit: LineEdit = null
+## Which component the offset fields currently edit ("" when they are hidden).
+var _offset_component_id: String = ""
+
 ## Pin Info section (WC-1 pin inspector). Hidden until a pin is selected;
 ## hides again on clear (canvas pin_selected({})).
 var _inspect_pin_button: Button = null
@@ -902,7 +916,61 @@ func _build_properties_section() -> VBoxContainer:
 		_prop_labels[field] = value_label
 		_properties_body.add_child(row)
 
+	_properties_body.add_child(_build_group_rows())
 	return section
+
+
+## The two component-group rows (A4 stage 2), built in the SAME key-label +
+## value-control shape as the five rows above so the section reads as one thing.
+##
+## The offset fields are the panel's first EDITABLE property control; everything
+## above them is a read-out. They commit on Enter (text_submitted) and on losing
+## focus, and a refused or malformed edit snaps straight back to the model's
+## value — the model, not the field, is what an offset IS.
+func _build_group_rows() -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.name = "GroupRows"
+
+	_group_row = HBoxContainer.new()
+	_group_row.name = "GroupRow"
+	_group_row.visible = false
+	var group_key := Label.new()
+	group_key.text = "Group:"
+	group_key.custom_minimum_size.x = 60
+	_group_row.add_child(group_key)
+	_group_value_label = Label.new()
+	_group_value_label.name = "GroupValue"
+	_group_value_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_group_value_label.clip_text = true
+	_group_row.add_child(_group_value_label)
+	box.add_child(_group_row)
+
+	_offset_row = HBoxContainer.new()
+	_offset_row.name = "OffsetRow"
+	_offset_row.visible = false
+	var offset_key := Label.new()
+	offset_key.text = "Offset:"
+	offset_key.custom_minimum_size.x = 60
+	_offset_row.add_child(offset_key)
+	_offset_x_edit = _build_offset_edit("OffsetX", "X mm")
+	_offset_row.add_child(_offset_x_edit)
+	_offset_y_edit = _build_offset_edit("OffsetY", "Y mm")
+	_offset_row.add_child(_offset_y_edit)
+	box.add_child(_offset_row)
+
+	return box
+
+
+func _build_offset_edit(edit_name: String, hint: String) -> LineEdit:
+	var edit := LineEdit.new()
+	edit.name = edit_name
+	edit.placeholder_text = hint
+	edit.tooltip_text = "%s offset from the group anchor, in mm" % hint
+	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	edit.custom_minimum_size.x = 48
+	edit.text_submitted.connect(func(_t: String) -> void: _commit_member_offset())
+	edit.focus_exited.connect(_commit_member_offset)
+	return edit
 
 
 func _set_properties_expanded(expanded: bool) -> void:
@@ -917,12 +985,13 @@ func _set_properties_expanded(expanded: bool) -> void:
 func _update_properties() -> void:
 	if _prop_labels.is_empty() or _canvas == null or _data == null:
 		return
-	var sel: Array = _canvas.get_selected_components()
-	var comp = _data.get_component(sel[0]) if sel.size() == 1 else null
+	var comp = _property_focus_component()
 	if comp == null:
 		for key in _prop_labels:
 			(_prop_labels[key] as Label).text = "-"
+		_hide_group_rows()
 		return
+	_update_group_rows(comp)
 	(_prop_labels["ID"] as Label).text = str(comp.id)
 	(_prop_labels["Position"] as Label).text = "(%.1f, %.1f)" % [comp.position.x, comp.position.y]
 	(_prop_labels["Rotation"] as Label).text = "%.0f°" % float(comp.rotation)
@@ -931,6 +1000,135 @@ func _update_properties() -> void:
 	if fp.is_empty() and "FootprintType" in _PcbComponentScript:
 		fp = str(_PcbComponentScript.FootprintType.keys()[comp.footprint])
 	(_prop_labels["Footprint"] as Label).text = fp
+
+
+## WHICH component the Properties section describes.
+##
+## Selecting one component still means that component — unchanged, and the ONLY
+## case a board with no groups can reach. A GROUP selection (A4) resolves to the
+## member the user last clicked (the canvas' focused_component, Illustrator's key
+## object), falling back to the anchor. A multi-select of LOOSE parts still
+## resolves to null and still blanks the section, exactly as before.
+func _property_focus_component():
+	var sel: Array = _canvas.get_selected_components()
+	if sel.size() == 1:
+		return _data.get_component(sel[0])
+	var group_id := _selected_group_id()
+	if group_id.is_empty():
+		return null
+	var focused: String = str(_canvas.focused_component)
+	if focused.is_empty() or not sel.has(focused):
+		focused = str(_data.group_anchor_id(group_id))
+	return _data.get_component(focused)
+
+
+## The group id when the selection is EXACTLY one whole group, else "".
+##
+## "Exactly": every selected component carries the same non-empty group id AND the
+## selection holds every member of it. Anything looser — two groups, a group plus
+## a loose part — is a multi-selection and gets the blank section, because there is
+## no single part whose offsets could be shown.
+func _selected_group_id() -> String:
+	var sel: Array = _canvas.get_selected_components()
+	if sel.size() < 2:
+		return ""
+	var group_id: String = str(_data.component_group_id(sel[0]))
+	if group_id.is_empty():
+		return ""
+	for comp_id in sel:
+		if str(_data.component_group_id(comp_id)) != group_id:
+			return ""
+	if _data.group_member_ids(group_id).size() != sel.size():
+		return ""
+	return group_id
+
+
+func _hide_group_rows() -> void:
+	_offset_component_id = ""
+	if _group_row != null:
+		_group_row.visible = false
+	if _offset_row != null:
+		_offset_row.visible = false
+
+
+## Drive the group read-out and the offset editor for the focused component.
+##
+## The offset fields are NOT overwritten while they have focus — otherwise a
+## selection-changed relay firing mid-typing would rewrite the digits under the
+## user's cursor. They go read-only (not hidden) when the group is locked, so the
+## values stay legible while the whole-unit lock refuses edits.
+func _update_group_rows(comp) -> void:
+	if _group_row == null or _offset_row == null:
+		return
+	var group_id: String = str(comp.group_id())
+	if group_id.is_empty():
+		_hide_group_rows()
+		return
+
+	var members: Array = _data.group_member_ids(group_id)
+	var locked: bool = _data.is_group_locked(group_id)
+	_group_row.visible = true
+	_group_value_label.text = "%d parts, anchor %s%s" % [
+		members.size(), _data.group_anchor_id(group_id), " (locked)" if locked else ""]
+
+	if _data.is_group_anchor(str(comp.id)):
+		# The anchor IS the origin — it has no offset to edit. Moving it means
+		# moving the whole group, which is what a drag does.
+		_offset_component_id = ""
+		_offset_row.visible = false
+		return
+
+	_offset_component_id = str(comp.id)
+	_offset_row.visible = true
+	var offset: Vector2 = _data.member_offset(_offset_component_id)
+	if not _offset_x_edit.has_focus():
+		_offset_x_edit.text = "%.3f" % offset.x
+	if not _offset_y_edit.has_focus():
+		_offset_y_edit.text = "%.3f" % offset.y
+	_offset_x_edit.editable = not locked
+	_offset_y_edit.editable = not locked
+
+
+## Apply the typed offset to exactly the focused member.
+##
+## ONE history step, and the model owns every rule that could refuse it (unknown
+## component, ungrouped, anchor, whole-unit lock, no actual change — see
+## pcb_data.set_member_offset). A refusal or a malformed number re-reads the model
+## into the fields rather than leaving the typed text standing: the board is the
+## truth, the field is a view of it.
+func _commit_member_offset() -> void:
+	if _offset_component_id.is_empty() or _data == null:
+		return
+	var raw_x := _offset_x_edit.text.strip_edges()
+	var raw_y := _offset_y_edit.text.strip_edges()
+	if not raw_x.is_valid_float() or not raw_y.is_valid_float():
+		_revert_offset_fields()
+		return
+	var component_id := _offset_component_id
+	if not _data.set_member_offset(component_id, Vector2(raw_x.to_float(), raw_y.to_float())):
+		_revert_offset_fields()
+		return
+	_data.save_to_history("Offset %s" % component_id)
+	if _canvas != null:
+		_canvas.queue_redraw()
+	_update_properties()
+
+
+## Snap both offset fields back to the model's value after a REFUSED commit.
+## _update_group_rows deliberately skips a field that has keyboard focus (so it
+## never clobbers live typing), but on the Enter path focus never leaves — the
+## refused text would stand while the model holds the old value (cold-review A4
+## note 3). After a refusal the typed text is exactly what must not stand, so
+## write the fields unconditionally.
+func _revert_offset_fields() -> void:
+	_update_properties()
+	if _offset_component_id.is_empty() or _data == null or _offset_row == null:
+		return
+	if not _offset_row.visible:
+		return
+	var offset: Vector2 = _data.member_offset(_offset_component_id)
+	_offset_x_edit.text = "%.3f" % offset.x
+	_offset_y_edit.text = "%.3f" % offset.y
 
 
 ## Pin Info section (WC-1, contract §3): Component.Pin + the display rule

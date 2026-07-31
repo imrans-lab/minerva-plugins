@@ -153,6 +153,18 @@ var selected_trace_ids: Array[String] = []
 var selected_zone_ids: Array[String] = []
 var hovered_component: String = ""
 
+## The component the user last CLICKED, when it is still selected — Illustrator's
+## "key object" (A4 stage 2).
+##
+## Needed because selecting a group member selects the WHOLE group, so
+## "the one component the user is working on" can no longer be inferred from a
+## selection of size 1. The panel's offset editor asks this which member's offset
+## to show; nothing about rendering, hit-testing or the selection set itself reads
+## it. Cleared by _clear_selection, but NOT maintained on every removal path
+## (shift-click toggle-out leaves it stale), so a consumer must re-validate
+## against the live selection before trusting it — _property_focus_component does.
+var focused_component: String = ""
+
 ## Interaction state
 var is_panning: bool = false
 var pan_start_mouse: Vector2 = Vector2.ZERO
@@ -472,6 +484,20 @@ func _update_context_menu_for_selection() -> void:
 	if _has_any_locked_components():
 		context_menu.add_item("Unlock All Components (Shift+L)", 404)
 
+	# Group / Ungroup (A4). Each item appears ONLY when it would do something —
+	# the same conditions _group_selection / _ungroup_selection themselves refuse
+	# on — so a board with no groups and a single-part selection sees neither and
+	# the menu is exactly what it was before groups existed.
+	var can_group := selected_components.size() >= 2 and not _selection_is_one_group()
+	var can_ungroup := _selection_has_group()
+	if can_group or can_ungroup:
+		if context_menu.item_count > 0:
+			context_menu.add_separator()
+		if can_group:
+			context_menu.add_item("Group Selection (Ctrl+G)", 411)
+		if can_ungroup:
+			context_menu.add_item("Ungroup (Ctrl+Shift+G)", 412)
+
 	if not has_lock_section and context_menu.item_count == 0:
 		context_menu.add_item("(no actions)", 0)
 		context_menu.set_item_disabled(context_menu.item_count - 1, true)
@@ -502,6 +528,10 @@ func _on_context_menu_pressed(id: int) -> void:
 					queue_redraw()
 		404:  # Unlock all components
 			_unlock_all_components()
+		411:  # Group the selected components (A4)
+			_group_selection()
+		412:  # Dissolve the selection's group(s) (A4)
+			_ungroup_selection()
 
 
 func _show_context_menu(screen_pos: Vector2) -> void:
@@ -1649,6 +1679,12 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				# A shift-click that REMOVED the entity must not then drag it;
 				# anything still selected under the cursor anchors the move.
 				if is_entity_selected(hit_kind, hit_id):
+					# Remember WHICH component was clicked (A4) — with a group
+					# selection this is the only thing that distinguishes one
+					# member from another, and it is what the panel's offset
+					# editor edits. Set only when the click leaves it selected.
+					if hit_kind == KIND_COMPONENT:
+						focused_component = hit_id
 					_begin_selection_drag(hit_kind, hit_id, event.position)
 
 			selection_changed.emit()
@@ -1769,6 +1805,20 @@ func _handle_key_input(event: InputEventKey) -> void:
 		return
 
 	if not event.pressed:
+		return
+
+	# CTRL IS READ FIRST, and for KEY_G ONLY (A4). Bare G toggles the grid in the
+	# match below and _handle_key_input never consulted a modifier for it, so
+	# Ctrl+G would otherwise have toggled the grid while claiming to group.
+	# Narrowed to this one keycode on purpose: swallowing every ctrl+<key> here
+	# would silently change what Ctrl+R / Ctrl+S / Ctrl+L do today.
+	# Cmd is accepted alongside Ctrl, the convention _snap_bypass_held and
+	# _author_point already share.
+	if event.keycode == KEY_G and (event.ctrl_pressed or event.meta_pressed):
+		if event.shift_pressed:
+			_ungroup_selection()
+		else:
+			_group_selection()
 		return
 
 	match event.keycode:
@@ -1900,12 +1950,40 @@ func is_entity_selected(kind: String, entity_id: String) -> bool:
 ## reports through selection_changed, which the caller emits ONCE per gesture
 ## rather than once per entity (a box-select of 40 parts is one selection change,
 ## not 40).
+##
+## SELECTING A GROUP MEMBER SELECTS THE WHOLE GROUP (A4). The expansion lives
+## HERE, at the one choke point every add path already funnels through — the
+## click pick, the box sweep (_finalize_box_selection), shift-click toggle-on and
+## the public select_component() — so no caller has to remember to expand and none
+## of them can disagree about what a group selection is. The recursion terminates
+## on the is_entity_selected guard above (each member is added exactly once), and
+## groups do not nest, so the depth is 1 regardless.
+##
+## An UNGROUPED component finds an empty group-mate list and this costs it one
+## dictionary read: zero behaviour change on a board with no groups.
 func _add_to_selection(kind: String, entity_id: String) -> void:
 	if entity_id.is_empty() or is_entity_selected(kind, entity_id):
 		return
 	_selection_of(kind).append(entity_id)
 	if kind == KIND_COMPONENT:
 		component_selected.emit(entity_id)
+		for member_id in _group_mates(entity_id):
+			_add_to_selection(kind, member_id)
+
+
+## The other members of this component's group ([] when it has none). Wrapped so
+## the canvas asks the MODEL the membership question in exactly one place.
+func _group_mates(component_id: String) -> Array[String]:
+	var mates: Array[String] = []
+	if not data:
+		return mates
+	var group_id: String = data.component_group_id(component_id)
+	if group_id.is_empty():
+		return mates
+	for member_id in data.group_member_ids(group_id):
+		if member_id != component_id:
+			mates.append(member_id)
+	return mates
 
 
 func _remove_from_selection(kind: String, entity_id: String) -> void:
@@ -1919,9 +1997,22 @@ func _remove_from_selection(kind: String, entity_id: String) -> void:
 
 
 ## Shift-click semantics: in becomes out, out becomes in — for any kind.
+##
+## A GROUP toggles as a unit in BOTH directions (A4): _add_to_selection expands on
+## the way in, so this expands on the way out too. Removing only the clicked
+## member would leave the rest of the physical part selected — a state the click
+## grammar can produce but no gesture can act on coherently.
+##
+## The removal expansion is spelled out here rather than pushed into
+## _remove_from_selection deliberately: that helper is also the eraser's
+## "the entity I just deleted is gone from the selection" call
+## (_handle_eraser_click), which is about ONE entity and must stay that way.
 func _toggle_entity_selected(kind: String, entity_id: String) -> void:
 	if is_entity_selected(kind, entity_id):
 		_remove_from_selection(kind, entity_id)
+		if kind == KIND_COMPONENT:
+			for member_id in _group_mates(entity_id):
+				_remove_from_selection(kind, member_id)
 	else:
 		_add_to_selection(kind, entity_id)
 
@@ -1944,6 +2035,7 @@ func _clear_selection() -> void:
 	selected_components.clear()
 	selected_trace_ids.clear()
 	selected_zone_ids.clear()
+	focused_component = ""
 	selection_changed.emit()
 
 
@@ -2097,12 +2189,18 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 ##
 ## Geometry is DUPLICATED, never referenced: waypoints/outline arrays are live
 ## model state, and a shared reference would make the "original" track the drag.
+##
+## GROUPS ARE GATED AS A UNIT (A4) — the second, different lock rule. The
+## per-entity rule above lets a mixed selection drag its unlocked members and
+## leave the locked ones behind; for a group that would tear one physical part in
+## half, so _unit_locked() refuses EVERY member of a group with any locked member.
+## Ungrouped components are untouched by it (see pcb_data.group_lock_blocks).
 func _capture_drag_origins() -> void:
 	_drag_origins = {}
 	var comps := {}
 	for comp_id in selected_components:
 		var comp = data.get_component(comp_id)
-		if comp != null and not comp.locked:
+		if comp != null and not _unit_locked(KIND_COMPONENT, comp_id):
 			comps[comp_id] = comp.position
 	var trace_pts := {}
 	for trace_id in selected_trace_ids:
@@ -2250,6 +2348,26 @@ func _is_entity_locked(kind: String, entity_id: String) -> bool:
 	return false
 
 
+## THE WHOLE-UNIT LOCK — the second lock rule, and deliberately not the one above.
+##
+## _is_entity_locked answers "is THIS entity locked". This answers "is this entity
+## unusable RIGHT NOW", which for a group member also means "is any of my
+## group-mates locked" (pcb_data.group_lock_blocks). The two are kept as separate,
+## separately-named helpers because the difference is the point: a mixed selection
+## of loose parts drags/deletes its unlocked members and skips the locked ones,
+## while a group is one physical part and does neither by halves.
+##
+## Every gesture that acts on components consults THIS one — drag
+## (_capture_drag_origins), delete (_delete_selection), eraser
+## (_handle_eraser_click), rotate (_rotate_selected) and the panel's offset edit
+## (gated in the model itself). For an ungrouped component it is exactly
+## _is_entity_locked, so nothing about a group-free board changes.
+func _unit_locked(kind: String, entity_id: String) -> bool:
+	if _is_entity_locked(kind, entity_id):
+		return true
+	return kind == KIND_COMPONENT and data != null and data.group_lock_blocks(entity_id)
+
+
 ## Remove one entity through its existing journalled remover, true if it was
 ## actually removed. Shared by _delete_selection and _handle_eraser_click —
 ## but ONLY the "does an entity of this kind still exist, and which single
@@ -2315,7 +2433,11 @@ func _delete_selection() -> void:
 
 	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE]:
 		for entity_id in _selection_of(kind):
-			if _is_entity_locked(kind, entity_id):
+			# _unit_locked, not _is_entity_locked (A4): a group with ANY locked
+			# member refuses deletion whole, for the same reason it refuses to
+			# drag by halves. Selection already expands to whole groups, so the
+			# rest of this batch delete needs no group awareness at all.
+			if _unit_locked(kind, entity_id):
 				continue
 			if _remove_entity(kind, entity_id):
 				removed += 1
@@ -2355,8 +2477,30 @@ func _handle_eraser_click(world_pos: Vector2) -> void:
 	var hit: Array = _entity_at(world_pos)
 	var hit_kind: String = hit[0]
 	var hit_id: String = hit[1]
-	if hit_kind.is_empty() or _is_entity_locked(hit_kind, hit_id):
+	if hit_kind.is_empty() or _unit_locked(hit_kind, hit_id):
 		return
+
+	# A GROUPED component erases as a WHOLE UNIT (A4), matching what
+	# minerva_pcb_delete_component does for the same component: the group is one
+	# physical part, so erasing one of its footprints and leaving the rest would
+	# be a delete the user cannot mean. Still ONE undo step per click — the
+	# begin_batch/end_batch pair _delete_selection uses, rather than this path's
+	# single save_to_history, because several components are removed.
+	var group_id: String = data.component_group_id(hit_id) if hit_kind == KIND_COMPONENT else ""
+	if not group_id.is_empty():
+		data.begin_batch()
+		var erased: Array = data.remove_group(hit_id)
+		data.end_batch("Erase group (%d)" % erased.size())
+		var was_selected := false
+		for member_id in erased:
+			if is_entity_selected(KIND_COMPONENT, member_id):
+				_remove_from_selection(KIND_COMPONENT, member_id)
+				was_selected = true
+		if was_selected:
+			selection_changed.emit()
+		queue_redraw()
+		return
+
 	if not _remove_entity(hit_kind, hit_id):
 		return
 	data.save_to_history(_erase_label(hit_kind, hit_id))
@@ -2481,11 +2625,39 @@ func _unlock_all_components() -> void:
 		queue_redraw()
 
 
+## Rotate the selected components 90° clockwise.
+##
+## TWO PATHS, deliberately (A4):
+##
+## UNGROUPED members take the ORIGINAL loop, unchanged line for line — including
+## the fact that it consults NO lock at all. That missing lock check is a
+## pre-existing defect (a locked loose part still turns under R); it is filed
+## separately and is NOT fixed here, because "grouping changed how rotate treats
+## my locked parts" would be a behaviour change smuggled in under this item.
+##
+## GROUPED members rotate as a RIGID BODY about the group anchor — positions orbit
+## the anchor and each member's own rotation turns with it (pcb_data.rotate_group
+## owns the geometry and the KiCad sign convention) — and ARE lock-gated by the
+## whole-unit rule. Each group turns ONCE no matter how many of its members the
+## selection holds (selection expands to whole groups, so it holds all of them).
+##
+## One save_to_history for the whole gesture either way, as before — now skipped
+## entirely when nothing turned, so an all-locked refusal leaves no empty undo
+## step behind.
 func _rotate_selected() -> void:
 	if selected_components.is_empty():
 		return
 
+	var group_ids: Array[String] = []
+	var refused := 0
+	var turned := 0
+
 	for comp_id in selected_components:
+		var group_id: String = data.component_group_id(comp_id)
+		if not group_id.is_empty():
+			if not group_ids.has(group_id):
+				group_ids.append(group_id)
+			continue
 		var comp = data.get_component(comp_id)
 		if comp:
 			var old_rotation: float = comp.rotation
@@ -2496,9 +2668,84 @@ func _rotate_selected() -> void:
 				"new_rotation": comp.rotation
 			})
 			data.component_changed.emit(comp_id)
-	data.save_to_history("Rotate components")
+			turned += 1
+
+	for group_id in group_ids:
+		if data.is_group_locked(group_id):
+			refused += 1
+			continue
+		turned += data.rotate_group(data.group_anchor_id(group_id), 90.0).size()
+
+	if turned > 0:
+		data.save_to_history("Rotate components")
+	elif refused > 0:
+		component_lock_changed.emit("Group is locked — nothing rotated")
 
 	queue_redraw()
+
+
+## Group the selected components into ONE group (Ctrl+G / context menu).
+##
+## ONE history step: pcb_data.group_components journals a single
+## `group_components` entry however many members it stamps, so a plain
+## save_to_history — not the batch pair — is the right closing move.
+##
+## Re-adds the resulting members to the selection afterwards because a MERGE can
+## pull in components that were not selected (grouping A+B when B was already
+## grouped with C yields A+B+C), and what is selected after the gesture should be
+## the group the user just made.
+func _group_selection() -> void:
+	if not data or selected_components.size() < 2:
+		return
+	var group_id: String = data.group_components(selected_components)
+	if group_id.is_empty():
+		return
+	var members: Array = data.group_member_ids(group_id)
+	data.save_to_history("Group %d components" % members.size())
+	for member_id in members:
+		_add_to_selection(KIND_COMPONENT, member_id)
+	selection_changed.emit()
+	queue_redraw()
+
+
+## Dissolve the group(s) the selection touches (Ctrl+Shift+G / context menu).
+## Positions are untouched; the members stay selected and become independently
+## selectable again. ONE history step, same shape as _group_selection.
+func _ungroup_selection() -> void:
+	if not data or selected_components.is_empty():
+		return
+	var released: Array = data.ungroup_components(selected_components)
+	if released.is_empty():
+		return
+	data.save_to_history("Ungroup %d components" % released.size())
+	selection_changed.emit()
+	queue_redraw()
+
+
+## True when the selection is ALREADY exactly one group — the case where "Group
+## Selection" would be a no-op (pcb_data.group_components returns "" for it), so
+## the menu item is not offered.
+func _selection_is_one_group() -> bool:
+	if not data or selected_components.is_empty():
+		return false
+	var first: String = data.component_group_id(selected_components[0])
+	if first.is_empty():
+		return false
+	for comp_id in selected_components:
+		if data.component_group_id(comp_id) != first:
+			return false
+	return true
+
+
+## True when the current selection has a group to dissolve — the enable rule the
+## Ctrl+Shift+G context-menu item shares with _ungroup_selection.
+func _selection_has_group() -> bool:
+	if not data:
+		return false
+	for comp_id in selected_components:
+		if not str(data.component_group_id(comp_id)).is_empty():
+			return true
+	return false
 
 
 ## Get a locked component at a world position (for unlock context menu).
