@@ -127,6 +127,17 @@ func _toolbar_fits(panel: Control) -> bool:
 	return bar.get_combined_minimum_size().x <= scroll.size.x + 1.0
 
 
+## The oracle _toolbar_fits CANNOT provide: the PANEL's own minimum width must
+## not exceed the pane. _toolbar_fits compares toolbar content to its scroll
+## CONTAINER — but a single unclipped Label elsewhere (the StatusBar carrying
+## the gesture hint, 933px measured) can widen the whole VBox chain, dragging
+## the container past the pane while content-vs-container stays green (the
+## container itself grew). Container-vs-panel is the assertion that catches ANY
+## row inflating anywhere in the tree.
+func _panel_min_fits(panel: Control) -> bool:
+	return panel.get_combined_minimum_size().x <= panel.size.x + 1.0
+
+
 # ── 2. Wide mode ───────────────────────────────────────────────────────────────
 
 func _test_wide_mode() -> void:
@@ -141,6 +152,7 @@ func _test_wide_mode() -> void:
 	var sidebar: Control = panel.find_child("RightSidebar", true, false)
 	check("sidebar node exists + visible", sidebar != null and sidebar.visible)
 	check("toolbar fits without h-scroll", _toolbar_fits(panel))
+	check("panel min width fits the pane (no row inflates it)", _panel_min_fits(panel))
 
 	_teardown(panel)
 
@@ -155,6 +167,7 @@ func _test_medium_mode() -> void:
 	check("state.mode == medium", str(state.get("mode", "")) == "medium")
 	check("sidebar visible", bool(state.get("sidebar_visible", false)))
 	check("toolbar fits without h-scroll at 600px", _toolbar_fits(panel))
+	check("panel min width fits the pane at 600px", _panel_min_fits(panel))
 
 	var canvas: Control = panel._canvas
 	check("canvas keeps majority width",
@@ -180,6 +193,7 @@ func _test_narrow_mode() -> void:
 	var view_menu: Control = panel.find_child("ViewMenuButton", true, false)
 	check("View menu present + visible", view_menu != null and view_menu.visible)
 	check("toolbar fits without h-scroll at 400px", _toolbar_fits(panel))
+	check("panel min width fits the pane at 400px", _panel_min_fits(panel))
 
 	# Open the drawer: sidebar becomes visible.
 	if drawer_btn is Button:
