@@ -159,6 +159,14 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _create_zone(host, args)
 		"minerva_pcb_set_zone_outline":
 			return _set_zone_outline(host, args)
+		"minerva_pcb_list_cutouts":
+			return _list_cutouts(host, args)
+		"minerva_pcb_describe_cutout":
+			return _describe_cutout(host, args)
+		"minerva_pcb_create_cutout":
+			return _create_cutout(host, args)
+		"minerva_pcb_delete_cutout":
+			return _delete_cutout(host, args)
 		"minerva_pcb_group_components":
 			return _group_components(host, args)
 		"minerva_pcb_ungroup":
@@ -2519,6 +2527,113 @@ static func _set_zone_outline(host, args: Dictionary) -> Dictionary:
 	data.data_changed.emit()
 	data.save_to_history("Set zone outline")
 	return _ok({"zone_id": zone_id, "point_count": pts.size(), "changed": true})
+
+
+# ── Cutout tools (campaign 2 epoch B, unit 3) ─────────────────────────────────
+# MCP parity for the cutout surface this unit adds to the canvas (draw tool +
+# eraser/trash/context-menu delete). Same journalled model path as the zone
+# tools above (data.create_cutout / data.remove_cutout), so an agent mutation
+# and a human canvas edit are indistinguishable to pcb_data. A cutout has no
+# net and no layer (see pcb_data.gd's Cutout Management doc), so this is the
+# FOUR-tool subset of the zone surface's seven: list/describe/create/delete,
+# with no set_net/set_layer/set_outline counterparts to author. The outline
+# parser (_parse_zone_outline, above) and the outline codecs
+# (zone_outline_points/zone_outline_to_list) are reused verbatim — they are
+# generic {x_mm,y_mm} point-list helpers, not zone-specific in what they do.
+
+## List every cutout, summary shape. Read-only — journals nothing. Mirrors
+## _list_zones minus the kind/net/layer fields a cutout does not have.
+static func _list_cutouts(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var cutouts_arr: Array = []
+	for cutout in data.cutouts:
+		cutouts_arr.append({
+			"cutout_id": str(cutout.get("id", "")),
+			"point_count": data.zone_outline_points(cutout).size(),
+		})
+	return _ok({"cutout_count": cutouts_arr.size(), "cutouts": cutouts_arr})
+
+
+## Describe one cutout in full, including its outline. Read-only — journals
+## nothing. Mirrors _describe_zone: the outline is round-tripped through
+## zone_outline_points (parse) -> zone_outline_to_list (re-encode) rather than
+## returned raw, so a malformed stored outline still comes back canonical.
+static func _describe_cutout(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var cutout_id: String = str(args.get("cutout_id", ""))
+	if cutout_id.is_empty():
+		return _err("cutout_id is required")
+	var cutout: Dictionary = data.get_cutout(cutout_id)
+	if cutout.is_empty():
+		return _err("Unknown cutout: %s" % cutout_id)
+	var pts: PackedVector2Array = data.zone_outline_points(cutout)
+	return _ok({
+		"cutout_id": cutout_id,
+		"point_count": pts.size(),
+		"outline": data.zone_outline_to_list(pts),
+	})
+
+
+## Author a new cutout and add it to the board. ONE journalled undo step:
+## data.create_cutout already record_change's + data_changed's internally
+## (mirrors create_zone's own idiom), so this owes only the closing
+## save_to_history.
+##
+## The refusal text is produced by calling data.cutout_author_error OURSELVES,
+## ahead of create_cutout, for the same reason _create_zone calls
+## zone_author_error itself: create_cutout only push_warning()s its reason to
+## the console and returns {} either way, so the model's real, verbatim
+## refusal string (too few points — the ONLY rule a cutout has) has to be
+## asked for explicitly to reach the caller.
+static func _create_cutout(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	# Cold review F5 (zone tools' own fix, reused here): a genuinely ABSENT
+	# `outline` key must say so, not fall through args.get's [] default into
+	# cutout_author_error and come back as "needs at least 3 points (0
+	# placed)" — truthful, but not the actual problem.
+	if not args.has("outline"):
+		return _err("outline is required: an array of {x_mm, y_mm} points")
+	var pts = _parse_zone_outline(args.get("outline"))
+	if pts == null:
+		return _err("outline points need x_mm and y_mm")
+	var refusal: String = data.cutout_author_error(pts.size())
+	if not refusal.is_empty():
+		return _err(refusal)
+	var cutout: Dictionary = data.create_cutout(pts)
+	if cutout.is_empty():
+		# Defensive only — cutout_author_error above already cleared the only
+		# known refusal, so create_cutout succeeding is the expected path.
+		return _err("Cutout could not be created.")
+	data.save_to_history("Create cutout")
+	return _ok({
+		"cutout_id": str(cutout.get("id", "")),
+		"point_count": data.zone_outline_points(cutout).size(),
+	})
+
+
+## Delete a cutout. Mirrors _delete_zone's idiom exactly (mutate-then-snapshot,
+## bug 019fb5ad791c; one undo step; unknown cutout_id is an explicit error,
+## never a silent no-op), minus the net/layer fields a cutout does not have.
+static func _delete_cutout(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var cutout_id: String = str(args.get("cutout_id", ""))
+	if cutout_id.is_empty():
+		return _err("cutout_id is required")
+	var cutout: Dictionary = data.get_cutout(cutout_id)
+	if cutout.is_empty():
+		return _err("Unknown cutout: %s" % cutout_id)
+	if not data.remove_cutout(cutout_id):
+		return _err("Unknown cutout: %s" % cutout_id)
+	data.save_to_history("Delete cutout " + cutout_id)
+	return _ok({"deleted": cutout_id})
 
 
 # ── Group parity (B2, item 019fba0386) ───────────────────────────────────────

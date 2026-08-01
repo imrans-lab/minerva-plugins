@@ -111,6 +111,11 @@ var show_courtyard: bool = true
 ## "a pour is authored here" without painting anything that reads as copper.
 ## Sibling of the show_* flags above so the panel's View menu can toggle it.
 var show_zones: bool = true
+## Draws authored cutouts (campaign 2 epoch B, U3) — openings through the WHOLE
+## board, rendered hatched/darkened over the board rect (v1: no polygon-with-
+## holes, see _draw_cutout). Sibling of show_zones — same "always true, no
+## _VIEW_FLAGS entry" precedent, not a new omission.
+var show_cutouts: bool = true
 
 ## Copper-layer view filter driven by the toolbar layer selector. Holds "all" or
 ## a CANONICAL copper-layer id ("top" / "in1".."in30" / "bottom") — the selector
@@ -178,11 +183,16 @@ const KIND_COMPONENT := "component"
 const KIND_TRACE := "trace"
 const KIND_ZONE := "zone"
 const KIND_VIA := "via"
+## Campaign 2 epoch B, unit 3 — added at the END of every checklist site below,
+## after KIND_VIA, per the checklist's own "a kind that joins _entity_at and
+## nothing else selects and then cannot be acted on at all, silently" warning.
+const KIND_CUTOUT := "cutout"
 
 var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
 var selected_zone_ids: Array[String] = []
 var selected_via_ids: Array[String] = []
+var selected_cutout_ids: Array[String] = []
 
 # ── UNIVERSAL SELECT: the annotation half of the selection (B1u3, 019fbb9adc) ──
 #
@@ -257,6 +267,12 @@ var drag_start_mouse: Vector2 = Vector2.ZERO
 ## Cleared on release, so one gesture is at most one notice.
 var _via_drag_notice_armed: bool = false
 const _VIA_DRAG_NOTICE_PX := 3.0
+## Cutout twin of the above (cold-review F3): cutouts do not drag either (see
+## _capture_drag_origins), and a drag attempt on a cutout-only selection was
+## silent — the exact "looks like a broken canvas" case the via notice exists
+## to prevent. Reuses _VIA_DRAG_NOTICE_PX rather than a second identical
+## 3.0-px constant.
+var _cutout_drag_notice_armed: bool = false
 
 var is_box_selecting: bool = false
 var box_select_start: Vector2 = Vector2.ZERO
@@ -286,7 +302,15 @@ var _space_pan_armed: bool = false
 ## OWN undo step (see _handle_eraser_click) — not the trash-can's batch. Clicking
 ## empty space, or a locked component/trace, deletes nothing and the tool STAYS
 ## ARMED (owner ruling); no drag-sweep deletion in v1.
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER }
+## CUTOUT (campaign 2 epoch B, unit 3) is the zone-draw family's twin for board
+## openings: click each corner, Enter/double-click closes, Esc/right-click
+## cancels — reusing the SAME click-per-point grammar as ZONE_POUR/
+## ZONE_KEEPOUT/TRACE, not a new one. APPENDED AT THE END, deliberately — see
+## the enum's own doc above: PCBPanel.gd indexes per-mode status tables by this
+## enum's raw int, so inserting anywhere but the end silently mislabels every
+## tool after it (PCBPanel.gd's own status-table comment records a prior bug of
+## exactly this class).
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
 ## Transient user-facing feedback from the zone tools ("pick a net", "needs 3
@@ -300,6 +324,12 @@ signal zone_tool_message(text: String)
 ## the panel's single transient-status sink, so no channel has to pretend to be
 ## another's.
 signal trace_tool_message(text: String)
+## The cutout tool's twin of the above ("needs 3 points", "cutout added",
+## "cutout cancelled") — its own channel for the same reason zone_tool_message
+## and trace_tool_message are separate from each other and from
+## component_lock_changed: one channel per tool, all routed to the panel's
+## single transient-status sink.
+signal cutout_tool_message(text: String)
 ## The context menu's "Set trace width…" item asking the PANEL to reveal and focus
 ## its existing width SpinBox (B1u5, owner comment 962: the numeric editor already
 ## existed and was undiscoverable). A SIGNAL rather than a canvas-side dialog
@@ -420,6 +450,25 @@ var _zone_vertex_drag_origin: PackedVector2Array = PackedVector2Array()
 ## Empty ⇔ nothing armed. Keys: zone_id, index, point, press_pos, origin.
 var _zone_edge_insert: Dictionary = {}
 
+## ── Cutout authoring (campaign 2 epoch B, unit 3) ─────────────────────────────
+## Openings through the WHOLE board (pcb/internal/board's Cutout struct — U2,
+## already landed). CLONE of the zone-draw shape above, minus everything that
+## does not apply: no net, no layer (a cutout has neither — see pcb_data.gd's
+## Cutout Management doc), and NO VERTEX EDITING (v1 scope; the ~400-line zone
+## vertex suite just above is zone-keyed and its absence here is deliberate,
+## not an oversight — reusing it would need a generic (collection,id) refactor
+## nothing in this round does). Cutouts also do NOT drag — see
+## _capture_drag_origins, same deliberate-absence idiom as vias.
+##
+## Vertices placed so far, in board mm. Empty ⇔ no draw in progress.
+var _cutout_points: PackedVector2Array = PackedVector2Array()
+## Live rubber-band vertex (the cursor), only meaningful while drawing.
+var _cutout_preview: Vector2 = Vector2.ZERO
+var _cutout_has_preview: bool = false
+## Alpha for the not-yet-committed closing edge — mirrors ZONE_PREVIEW_CLOSE_ALPHA.
+const CUTOUT_PREVIEW_CLOSE_ALPHA := 0.35
+const CUTOUT_PREVIEW_VERTEX_RADIUS_PX := 3.0
+
 ## ── Trace authoring (epoch 6 unit 5) ──────────────────────────────────────────
 ## Default copper layer when the toolbar's layer filter is "all". TOP, unlike the
 ## zone tools' "bottom": a pour under "All" wants the classic ground-pour side,
@@ -533,6 +582,21 @@ const ZONE_HATCH_MAX_PX := 26.0
 ## the backstop that keeps a pathological board (a zone spanning metres) from
 ## turning one _draw() into an unbounded loop.
 const ZONE_HATCH_MAX_LINES := 2000
+
+## Cutouts (campaign 2 epoch B, unit 3). A near-black colour, deliberately
+## outside both the copper palette AND the zone amber: a cutout is neither
+## copper nor a copper warning, it is the ABSENCE of substrate. Drawn filled
+## (dim) + crosshatched + outlined over the board rect (v1: no polygon-with-
+## holes primitive in Godot — see _draw_cutout) rather than a true hole, so it
+## reads as "the board is gone here" without claiming fab-accurate geometry.
+## Reuses ZONE_HATCH_PITCH_MM/MIN_PX/MAX_PX/MAX_LINES and zone_hatch_width_px
+## above — the pitch-clamp and line-cap logic is generic to _draw_polygon_hatch,
+## not zone-specific, so a second copy would only be able to drift from it.
+var cutout_color: Color = Color(0.02, 0.02, 0.02, 1.0)
+var cutout_fill_alpha: float = 0.55
+var cutout_hatch_alpha: float = 0.6
+var cutout_outline_alpha: float = 0.9
+var cutout_outline_width_px: float = 1.5
 
 ## Font
 var font: Font
@@ -849,6 +913,24 @@ func _draw() -> void:
 
 	_draw_board()
 
+	# The cutout BASE render (fill+hatch+plain outline) draws immediately over
+	# the board rect (v1: no polygon-with-holes primitive — see _draw_cutout),
+	# ahead of everything else, so a cutout reads as "the substrate is gone
+	# here" underneath the grid/components/copper that a well-formed board
+	# never actually places inside one. Not gated on show_cutouts vs the
+	# tool-in-progress split zones use below: there is no vertex-edit gesture
+	# to protect from a hidden toggle (v1 has none), so the flag alone is
+	# enough.
+	#
+	# The SELECTION HALO and the IN-PROGRESS PREVIEW are deliberately NOT drawn
+	# here (cold-review F2) — both moved down to the zone-preview depth, below,
+	# for the same reason the zone/trace previews sit there: a user must be
+	# able to SEE the opening they are drawing (or the cutout they selected)
+	# even over components and copper, and this early pass sits under all of
+	# that.
+	if show_cutouts:
+		_draw_cutouts()
+
 	if show_grid:
 		_draw_grid()
 
@@ -870,6 +952,15 @@ func _draw() -> void:
 	# authored zones must not blank out the one the user is drawing right now.
 	if _is_zone_tool():
 		_draw_zone_preview()
+
+	# Cutout selection halo + in-progress preview (cold-review F2) sit at this
+	# SAME depth, for the same reason the zone preview does: visible feedback
+	# over components and copper. Neither is gated on show_cutouts, mirroring
+	# the zone preview's own "hiding authored X must not blank out the one
+	# being worked on right now" rule.
+	_draw_cutout_halos()
+	if tool_mode == ToolMode.CUTOUT:
+		_draw_cutout_preview()
 
 	if show_traces:
 		_draw_traces()
@@ -1298,6 +1389,74 @@ func _draw_polygon_hatch(poly: PackedVector2Array, color: Color, pitch: float, w
 				draw_line(hits[j], hits[j + 1], color, width)
 				j += 2
 		c += pitch
+
+
+## Draw all committed cutouts. Mirrors _draw_zones' shape (one pass, no
+## kind-split — a cutout has only one kind, unlike a zone's pour/keepout pair).
+func _draw_cutouts() -> void:
+	if data.cutouts.is_empty():
+		return
+	for cutout in data.cutouts:
+		_draw_cutout(cutout)
+
+
+## Draw one cutout's BASE render only — fill + crosshatch + plain outline, no
+## selection halo (see _draw_cutout_halos for that, and why it is split out).
+## No layer filter (a cutout has no layer — see pcb_data.gd's Cutout Management
+## doc) and no vertex handles (v1 scope: no vertex editing).
+##
+## FILLED + CROSSHATCHED + OUTLINED, in that order — see the cutout_color
+## declaration for why this is a filled dim polygon plus a hatch rather than
+## the zone keepout's hatch-only: a keepout is a WARNING over real copper, a
+## cutout is the substrate itself being gone, and a flat fill reads as solidly
+## "not there" in a way a sparse hatch alone would not. Crosshatched (mirrored
+## in both directions) rather than the keepout's single diagonal, so the two
+## read as visually distinct region kinds at a glance.
+func _draw_cutout(cutout: Dictionary) -> void:
+	var world_pts := PCBDataScript.zone_outline_points(cutout)
+	if world_pts.size() < 3:
+		return
+
+	var screen_poly := PackedVector2Array()
+	for p in world_pts:
+		screen_poly.append(world_to_screen(p))
+
+	draw_colored_polygon(screen_poly, Color(cutout_color, cutout_fill_alpha))
+	var pitch: float = clampf(ZONE_HATCH_PITCH_MM * zoom, ZONE_HATCH_MIN_PX, ZONE_HATCH_MAX_PX)
+	_draw_polygon_hatch(screen_poly, Color(cutout_color, cutout_hatch_alpha), pitch, zone_hatch_width_px, false)
+	_draw_polygon_hatch(screen_poly, Color(cutout_color, cutout_hatch_alpha), pitch, zone_hatch_width_px, true)
+
+	var outline := screen_poly.duplicate()
+	outline.append(screen_poly[0])  # close the loop — an outline, not a polyline
+	draw_polyline(outline, Color(cutout_color, cutout_outline_alpha), cutout_outline_width_px)
+
+
+## Selection halo for every selected cutout — SPLIT OUT of _draw_cutout
+## (cold-review F2). The base render above draws early (right after the board
+## rect, "this substrate is gone" underneath everything a well-formed board
+## never places inside a cutout anyway); the halo draws LATE, at the same
+## depth _draw_zone_preview does (after components/mounting holes, alongside
+## committed zones, before traces), because a selection highlight is feedback
+## the user must be able to see even when the base render would otherwise sit
+## under components/copper. No vertex handles here either — see the Cutout
+## authoring block's doc for why v1 has no vertex editing.
+func _draw_cutout_halos() -> void:
+	if data.cutouts.is_empty() or selected_cutout_ids.is_empty():
+		return
+	for cutout in data.cutouts:
+		if not (str(cutout.get("id", "")) in selected_cutout_ids):
+			continue
+		var world_pts := PCBDataScript.zone_outline_points(cutout)
+		if world_pts.size() < 3:
+			continue
+		var screen_poly := PackedVector2Array()
+		for p in world_pts:
+			screen_poly.append(world_to_screen(p))
+		var outline := screen_poly.duplicate()
+		outline.append(screen_poly[0])
+		# Same selection colour + emphasis every other board entity uses, so
+		# "selected" reads identically across kinds.
+		draw_polyline(outline, trace_selected_color, cutout_outline_width_px * 2.0)
 
 
 ## Draw ratsnest (unrouted net connections)
@@ -1940,6 +2099,7 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# stale arming ends here (cold-review B1u2 F2, same shape as the
 			# context-menu target clear on the next line).
 			_via_drag_notice_armed = false
+			_cutout_drag_notice_armed = false
 			# Same idiom for the right-press target (cold-review B1u5 F5): a LEFT
 			# press means the next gesture is not the right-click that resolved
 			# them, so they stop describing anything. Harmless today — only the
@@ -1968,6 +2128,14 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# pad. Owns the click outright, same as the two tools above.
 			if tool_mode == ToolMode.TRACE:
 				_handle_trace_click(world_pos, event.double_click)
+				return
+
+			# Cutout tool (campaign 2 epoch B, unit 3): each left-click places a
+			# vertex; a double-click closes the polygon. Owns the click outright,
+			# exactly like the zone tools above (it is the same click-per-point
+			# family, minus a net/layer to arm).
+			if tool_mode == ToolMode.CUTOUT:
+				_handle_cutout_click(world_pos, event.double_click)
 				return
 
 			# Eraser tool (item 019fb934827776): owns the click outright, exactly
@@ -2114,9 +2282,11 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				queue_redraw()
 				return
 
-			# One gesture is at most one via-drag notice: whether it fired or the
-			# press never travelled far enough, the arming ends with the press.
+			# One gesture is at most one via-drag (or cutout-drag) notice: whether
+			# it fired or the press never travelled far enough, the arming ends
+			# with the press.
 			_via_drag_notice_armed = false
+			_cutout_drag_notice_armed = false
 
 			# Release a left-drag pan (Pan tool / Space-drag).
 			if is_panning:
@@ -2146,6 +2316,9 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				return
 			if tool_mode == ToolMode.TRACE and not _trace_points.is_empty():
 				_cancel_trace_draw(true)
+				return
+			if tool_mode == ToolMode.CUTOUT and not _cutout_points.is_empty():
+				_cancel_cutout_draw(true)
 				return
 			# THE ONE RIGHT-PRESS PATH (B1u5). Every right-click that is not
 			# cancelling a draw in progress arms a pan AND arms the menu; which of
@@ -2247,6 +2420,16 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 			_trace_preview = _author_point(world_pos)
 			_trace_has_preview = true
 			queue_redraw()
+	elif tool_mode == ToolMode.CUTOUT:
+		# Rubber-band the edge from the last placed vertex to the cursor. Same
+		# "the tool owns the surface" rule as the zone/trace branches above.
+		if not hovered_component.is_empty():
+			hovered_component = ""
+			queue_redraw()
+		if not _cutout_points.is_empty():
+			_cutout_preview = _author_point(world_pos)
+			_cutout_has_preview = true
+			queue_redraw()
 	else:
 		var new_hover: String = _component_at(world_pos)
 		if new_hover != hovered_component:
@@ -2270,6 +2453,17 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		component_lock_changed.emit(
 			"%d via%s stayed put — vias move with their copper, in the routing tools"
 			% [via_count, "" if via_count == 1 else "s"])
+
+	# The cutout-drag refusal (cold-review F3), same shape and threshold as
+	# the via notice just above — one announce per gesture, on the first
+	# real motion past the same 3px.
+	if _cutout_drag_notice_armed \
+			and (event.position - drag_start_mouse).length() >= _VIA_DRAG_NOTICE_PX:
+		_cutout_drag_notice_armed = false
+		var cutout_count := selected_cutout_ids.size()
+		component_lock_changed.emit(
+			"%d cutout%s stayed put — v1 has no cutout move (draw + delete only)"
+			% [cutout_count, "" if cutout_count == 1 else "s"])
 
 	if is_dragging_selection:
 		# The ANCHOR is what snaps; everything else in the selection takes the
@@ -2370,6 +2564,10 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# a trace to terminate on a pad).
 			elif tool_mode == ToolMode.TRACE:
 				_commit_trace()
+			# Closes an in-progress cutout — same grammar as the zone tools
+			# above (this is the same click-per-point family).
+			elif tool_mode == ToolMode.CUTOUT:
+				_commit_cutout()
 		KEY_ESCAPE:
 			# Escape disarms a pending edge insertion whatever else it goes on to
 			# cancel (cold-review F1): Escape is advertised as the cancel for this
@@ -2391,6 +2589,9 @@ func _handle_key_input(event: InputEventKey) -> void:
 				return
 			if tool_mode == ToolMode.TRACE and not _trace_points.is_empty():
 				_cancel_trace_draw(true)
+				return
+			if tool_mode == ToolMode.CUTOUT and not _cutout_points.is_empty():
+				_cancel_cutout_draw(true)
 				return
 			if tool_mode == ToolMode.INSPECT_PIN:
 				_exit_inspect_pin_mode()
@@ -2483,6 +2684,8 @@ func _selection_of(kind: String) -> Array[String]:
 			return selected_zone_ids
 		KIND_VIA:
 			return selected_via_ids
+		KIND_CUTOUT:
+			return selected_cutout_ids
 	var empty: Array[String] = []
 	return empty
 
@@ -2566,10 +2769,10 @@ func _toggle_entity_selected(kind: String, entity_id: String) -> void:
 		_add_to_selection(kind, entity_id)
 
 
-## Total selected entities across all four kinds.
+## Total selected entities across all five kinds.
 func selection_count() -> int:
 	return selected_components.size() + selected_trace_ids.size() \
-		+ selected_zone_ids.size() + selected_via_ids.size()
+		+ selected_zone_ids.size() + selected_via_ids.size() + selected_cutout_ids.size()
 
 
 func has_selection() -> bool:
@@ -2606,6 +2809,7 @@ func _clear_selection(announce := true) -> void:
 	selected_trace_ids.clear()
 	selected_zone_ids.clear()
 	selected_via_ids.clear()
+	selected_cutout_ids.clear()
 	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
 	# there is nothing for it to belong to (cold-review F1 — the deselect click
@@ -2656,6 +2860,13 @@ func _finalize_box_selection() -> void:
 	if _via_visible():
 		for via_id in data.get_vias_in_region(select_rect):
 			_add_to_selection(KIND_VIA, via_id)
+
+	# Cutouts sweep the SAME way vias do (campaign 2 epoch B, unit 3): the
+	# gate is board-wide (show_cutouts, a cutout has no layer to be per-entity
+	# about), so it is applied here rather than as a per-cutout Callable.
+	if _cutout_visible():
+		for cutout_id in data.cutouts_in_region(select_rect):
+			_add_to_selection(KIND_CUTOUT, cutout_id)
 
 	_sweep_annotations(select_rect)
 
@@ -2725,8 +2936,11 @@ func _sweep_annotations(select_rect: Rect2) -> void:
 ## THE TIE RULE, stated once: a click inside the via's disc picks the VIA; the
 ## same trace, clicked anywhere outside that disc, picks the TRACE.
 ##
-## Zones stay last, unchanged: a pour is the largest thing on the board and must
-## never shadow the copper drawn over it.
+## Zones stay next-to-last, unchanged: a pour is the largest thing on the board
+## and must never shadow the copper drawn over it. CUTOUTS ARE LAST (campaign 2
+## epoch B, unit 3) for the same reason, one notch further: a cutout also hits
+## like a filled region (see _cutout_at), and it must not steal a click from any
+## more specific entity either.
 func _entity_at(world_pos: Vector2) -> Array:
 	var comp_id: String = _component_at(world_pos)
 	if not comp_id.is_empty():
@@ -2740,6 +2954,9 @@ func _entity_at(world_pos: Vector2) -> Array:
 	var zone_id: String = _zone_at(world_pos)
 	if not zone_id.is_empty():
 		return [KIND_ZONE, zone_id]
+	var cutout_id: String = _cutout_at(world_pos)
+	if not cutout_id.is_empty():
+		return [KIND_CUTOUT, cutout_id]
 	return ["", ""]
 
 
@@ -2852,6 +3069,14 @@ func _entity_anchor(kind: String, entity_id: String) -> Vector2:
 			var via: Dictionary = data.get_via(entity_id)
 			if not via.is_empty():
 				return PCBDataScript.via_position(via)
+		KIND_CUTOUT:
+			# Answered for the SAME reason KIND_VIA is, immediately above, even
+			# though a cutout never MOVES either (see _capture_drag_origins): a
+			# drag started on a cutout inside a mixed selection still needs a snap
+			# reference for whatever movable entities share the selection.
+			var pts := PCBDataScript.zone_outline_points(data.get_cutout(entity_id))
+			if not pts.is_empty():
+				return pts[0]
 	return Vector2.ZERO
 
 
@@ -2867,6 +3092,7 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 	# only (nothing captured => is_dragging_selection false). Arm the notice for
 	# BOTH cases here, at the one place a move gesture begins.
 	_via_drag_notice_armed = not selected_via_ids.is_empty()
+	_cutout_drag_notice_armed = not selected_cutout_ids.is_empty()
 
 
 ## Snapshot the pre-drag geometry of every MOVABLE selected entity.
@@ -2927,6 +3153,13 @@ func _capture_drag_origins() -> void:
 	# from, and no fourth loop below to forget. The refusal is announced by
 	# _via_drag_notice_armed (see _begin_selection_drag) rather than being silent
 	# — the same "select yes, act no" shape a locked component already has.
+	# CUTOUTS ARE ALSO DELIBERATELY NOT CAPTURED (campaign 2 epoch B, unit 3),
+	# the SAME idiom as vias just above, for an analogous reason: v1 ships DRAW
+	# + DELETE only, with NO vertex editing and NO move (see the Cutout
+	# authoring block's doc), so there is no gesture that legitimately changes
+	# a cutout's outline after it is committed. Not being captured is the
+	# enforcement here too: there is no fourth walk below to forget, and
+	# _apply_drag_delta only ever touches what landed in _drag_origins.
 	if not comps.is_empty():
 		_drag_origins[KIND_COMPONENT] = comps
 	if not trace_pts.is_empty():
@@ -3070,6 +3303,13 @@ func _is_entity_locked(kind: String, entity_id: String) -> bool:
 			# for this unit — a via is protected by the fact that it cannot be
 			# dragged at all, which is a stronger guarantee than a lock flag.
 			return false
+		KIND_CUTOUT:
+			# CUTOUTS HAVE NO LOCK, same idiom as KIND_VIA and KIND_ZONE above —
+			# checked against the cutout dict shape (pcb_data.gd: id/outline only,
+			# no "locked" key) and board.go's Cutout struct (no Locked field
+			# either). A cutout is protected the same way a via is: it cannot be
+			# dragged at all (see _capture_drag_origins).
+			return false
 	return false
 
 
@@ -3123,6 +3363,8 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			# removers above — so this path needs no snapshot of its own (the
 			# batch's end_batch, or the eraser's save_to_history, owns that).
 			return data.remove_via_by_id(entity_id)
+		KIND_CUTOUT:
+			return data.remove_cutout(entity_id)
 	return false
 
 
@@ -3191,7 +3433,7 @@ func _delete_selection() -> void:
 	# THIS LITERAL ARRAY IS NOT DERIVED from the KIND_* constants — a kind missing
 	# from it selects, highlights and then survives Delete, silently. It is listed
 	# in the extension checklist at the top of this file for that reason.
-	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA]:
+	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA, KIND_CUTOUT]:
 		for entity_id in _selection_of(kind):
 			# _unit_locked, not _is_entity_locked (A4): a group with ANY locked
 			# member refuses deletion whole, for the same reason it refuses to
@@ -3328,6 +3570,8 @@ func _entity_action_label(verb: String, kind: String, entity_id: String) -> Stri
 			return "%s zone" % verb
 		KIND_VIA:
 			return "%s via" % verb
+		KIND_CUTOUT:
+			return "%s cutout" % verb
 	return verb
 
 
@@ -3391,19 +3635,63 @@ func _point_near_outline(p: Vector2, pts: PackedVector2Array, tol: float) -> boo
 	return false
 
 
+## Which committed cutout a Select-tool click at `world_pos` picks, or "".
+##
+## ALWAYS the keepout-interior hit rule (per _zone_at's own vocabulary: a
+## cutout renders filled, not outline-only, so it hits like one too) — unlike
+## _zone_at there is no pour/keepout branch to choose between, a cutout has
+## only the one shape.
+##
+## Routed through _cutout_visible() (cold-review F5), not the raw show_cutouts
+## flag inline — the same discipline _trace_at/_zone_at already keep with
+## their own _visible() twins, so a future per-entity gate on _cutout_visible
+## cannot silently bypass this pick the way an inlined flag check would.
+func _cutout_at(world_pos: Vector2) -> String:
+	if not data or data.cutouts.is_empty() or not _cutout_visible():
+		return ""
+	var tol := 3.0 / zoom
+	for cutout in data.cutouts:
+		var cutout_id := str(cutout.get("id", ""))
+		if cutout_id.is_empty():
+			continue
+		var pts := PCBDataScript.zone_outline_points(cutout)
+		if pts.size() < 3:
+			continue
+		if Geometry2D.is_point_in_polygon(world_pos, pts) or _point_near_outline(world_pos, pts, tol):
+			return cutout_id
+	return ""
+
+
+## Is a cutout drawable in the current view? The cutout twin of _zone_visible,
+## but board-wide like _via_visible rather than per-entity — a cutout has no
+## layer to filter on (see pcb_data.gd's Cutout Management doc), so the ONLY
+## gate is the show_cutouts toggle.
+func _cutout_visible() -> bool:
+	return show_cutouts
+
+
 #region Zone Vertex Editing (A5)
 
 ## Is the vertex-editing surface live right now?
 ##
 ## Every mode listed here OWNS THE CLICK outright (see _handle_mouse_button: the
-## pin inspector, both zone tools, the trace tool and the eraser each return
-## before the Select grammar is reached; Pan turns a left-drag into a view pan).
-## Drawing handles under one of them would advertise a gesture the click can never
-## deliver, and the right-click delete would steal a press those tools do use. The
-## SELECT family is what is left, which is exactly where zone selection came from.
+## pin inspector, both zone tools, the trace tool, the cutout tool and the
+## eraser each return before the Select grammar is reached; Pan turns a
+## left-drag into a view pan). Drawing handles under one of them would
+## advertise a gesture the click can never deliver, and the right-click delete
+## would steal a press those tools do use. The SELECT family is what is left,
+## which is exactly where zone selection came from.
+##
+## CUTOUT (campaign 2 epoch B, unit 3, cold-review F1) MUST be listed here: it
+## owns the click exactly like TRACE/ERASER do (see _handle_mouse_button), but
+## it is not a zone tool, so the old `not _is_zone_tool()` fallthrough answered
+## true for it — zone vertex handles on a SELECTED zone would draw, hit-resolve
+## and steal the click (placing a zone vertex instead of a cutout one) while
+## the Cutout tool was armed.
 func _zone_vertex_edit_active() -> bool:
 	if tool_mode == ToolMode.INSPECT_PIN or tool_mode == ToolMode.TRACE \
-			or tool_mode == ToolMode.ERASER or tool_mode == ToolMode.PAN:
+			or tool_mode == ToolMode.ERASER or tool_mode == ToolMode.PAN \
+			or tool_mode == ToolMode.CUTOUT:
 		return false
 	return not _is_zone_tool()
 
@@ -3962,6 +4250,7 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 			_clear_inspect_pin_selection()
 		var leaving_zone_tool := _is_zone_tool()
 		var leaving_trace_tool := tool_mode == ToolMode.TRACE
+		var leaving_cutout_tool := tool_mode == ToolMode.CUTOUT
 		# Leaving Select ends any annotation gesture in flight (B1u3) — the
 		# universal Select is disarmed by the panel on this same transition, so
 		# the release would arrive with nothing to receive it.
@@ -3972,6 +4261,8 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 			_cancel_zone_draw(announce_cancel)
 		if leaving_trace_tool:
 			_cancel_trace_draw(announce_cancel)
+		if leaving_cutout_tool:
+			_cancel_cutout_draw(announce_cancel)
 		queue_redraw()
 
 #endregion
@@ -4379,6 +4670,124 @@ func _draw_zone_preview() -> void:
 #endregion
 
 
+#region Cutout Authoring (campaign 2 epoch B, unit 3)
+
+## Gesture — the SAME click-per-point family the zone tools use (see the
+## _cutout_points declaration for what is deliberately absent):
+##   DRAWING --left-click-->         place a vertex
+##   DRAWING --double-click/Enter--> close the polygon, commit
+##   DRAWING --Esc/right-click-->    cancel (announced)
+##   DRAWING --tool switch-->        cancel (silent, unless the switch IS a
+##                                   re-click disarm — see set_tool_mode's
+##                                   announce_cancel)
+##
+## This tool AUTHORS A BOARD ENTITY (a Cutout in the model, which serializes
+## into the board YAML), exactly like the zone tools — journals + snapshots
+## like any other interactive board edit, and every refusal is fail-closed:
+## see pcb_data.cutout_author_error for why an invalid cutout is worse than a
+## refused gesture (it makes the WHOLE board unserializable).
+
+func _handle_cutout_click(world_pos: Vector2, is_double_click: bool) -> void:
+	# The second press of a physical double-click arrives AFTER the first has
+	# already placed its vertex, so it closes the polygon instead of placing a
+	# duplicate one on top of it. Mirrors _handle_zone_click exactly.
+	if is_double_click:
+		_commit_cutout()
+		return
+	_cutout_points.append(_author_point(world_pos))
+	_cutout_has_preview = false
+	queue_redraw()
+
+
+## Close the in-progress polygon into a real cutout entity. HISTORY ORDER —
+## snapshot AFTER the mutation, the same reasoning _commit_zone documents at
+## length (bug 019fb5ad791c: a pre-mutation snapshot makes redo silently do
+## nothing).
+##
+## create_cutout emits data_changed, which is what marks the tab dirty (PCBPanel
+## relays it to content_changed) — there is no separate dirty flag to set.
+##
+## The commit toast NAMES the authorable-not-compilable caveat (cold-review F6)
+## — the same line the MCP create_cutout tool's schema description carries —
+## so a human drawing one learns it here, at the moment it matters, rather than
+## discovering it only when a later Gerber/DRC export refuses the board.
+func _commit_cutout() -> void:
+	if not data or tool_mode != ToolMode.CUTOUT:
+		return
+	var refusal: String = data.cutout_author_error(_cutout_points.size())
+	if not refusal.is_empty():
+		# Keep the placed vertices: the fix for "needs 3 points" is another
+		# click, not redrawing the whole outline.
+		cutout_tool_message.emit(refusal)
+		return
+
+	var cutout: Dictionary = data.create_cutout(_cutout_points)
+	if cutout.is_empty():
+		# cutout_author_error already passed, so this is a model-side refusal we
+		# did not anticipate. Report it rather than leaving a silent no-op behind.
+		cutout_tool_message.emit("Cutout was refused by the board model — see the log.")
+		return
+	data.save_to_history("Add cutout")
+	var point_count := _cutout_points.size()
+	_reset_cutout_draw()
+	cutout_tool_message.emit(
+		"Added cutout (%d points) — authored only, not yet compiled: routing/DRC/Gerber export ignore it."
+		% point_count)
+	queue_redraw()
+
+
+## Discard the in-progress polygon. `announce` mirrors _cancel_zone_draw's: false
+## for a plain tool switch (the user already knows), true for an explicit
+## Esc/right-click cancel or a re-click disarm.
+func _cancel_cutout_draw(announce: bool) -> void:
+	if _cutout_points.is_empty():
+		return
+	_reset_cutout_draw()
+	if announce:
+		cutout_tool_message.emit("Cutout cancelled.")
+	queue_redraw()
+
+
+func _reset_cutout_draw() -> void:
+	_cutout_points = PackedVector2Array()
+	_cutout_has_preview = false
+
+
+## Draw the polygon being born, in the SAME visual language committed cutouts
+## use (cutout_color, same outline width) so it reads as the cutout itself
+## rather than a generic rubber band — mirrors _draw_zone_preview.
+func _draw_cutout_preview() -> void:
+	if _cutout_points.is_empty():
+		return
+
+	var screen_pts := PackedVector2Array()
+	for p in _cutout_points:
+		screen_pts.append(world_to_screen(p))
+	var cursor_pt := world_to_screen(_cutout_preview) if _cutout_has_preview else Vector2.ZERO
+
+	var open_path := screen_pts.duplicate()
+	if _cutout_has_preview:
+		open_path.append(cursor_pt)
+	if open_path.size() >= 2:
+		draw_polyline(open_path, Color(cutout_color, cutout_outline_alpha), cutout_outline_width_px)
+
+	# The closing edge back to the first vertex is dimmer: it is where the
+	# polygon WILL close, not an edge the user has drawn yet.
+	var last_pt: Vector2 = open_path[open_path.size() - 1]
+	if open_path.size() >= 3:
+		draw_line(last_pt, screen_pts[0], Color(cutout_color, CUTOUT_PREVIEW_CLOSE_ALPHA), cutout_outline_width_px)
+
+	for pt in screen_pts:
+		draw_circle(pt, CUTOUT_PREVIEW_VERTEX_RADIUS_PX, Color(cutout_color, cutout_outline_alpha))
+
+	if font != null:
+		var label := "Cutout  ·  %d pts" % _cutout_points.size()
+		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(cutout_color, cutout_outline_alpha))
+
+#endregion
+
+
 #region Trace Authoring (epoch 6 unit 5)
 
 ## Gesture (KiCad's route-a-track grammar, expressed in the same click-per-point
@@ -4698,6 +5107,12 @@ func get_selected_zones() -> Array[String]:
 ## a caller that means vias must never be handed trace ids, and vice versa.
 func get_selected_vias() -> Array[String]:
 	return selected_via_ids.duplicate()
+
+
+## The selected cutout ids (campaign 2 epoch B, unit 3). Completes the per-kind
+## read surface the same way get_selected_vias does.
+func get_selected_cutouts() -> Array[String]:
+	return selected_cutout_ids.duplicate()
 
 
 ## Select a component programmatically.

@@ -540,6 +540,7 @@ func _build_ui() -> void:
 	_canvas.pin_selected.connect(_on_pin_selected)
 	_canvas.zone_tool_message.connect(_show_transient_status)
 	_canvas.trace_tool_message.connect(_show_transient_status)
+	_canvas.cutout_tool_message.connect(_show_transient_status)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
@@ -875,6 +876,17 @@ func _build_sidebar() -> VBoxContainer:
 	# IS the copper, that one is a request for copper.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.TRACE, "Trace",
 		"Draw copper directly (click a pad to start)", "trace_draw_24.png")
+
+	# Cutout drawing tool (campaign 2 epoch B, unit 3). Same section and same
+	# reason as Pour/Keepout/Trace above: it authors a board ENTITY (a Cutout,
+	# an opening through the whole board). No net/layer arming control — a
+	# cutout has neither (see pcb_data.gd's Cutout Management doc) — so unlike
+	# the zone tools it needs no sidebar picker at all; _sync_draw_arm_ui's
+	# is_zone_tool/is_pour_tool/is_trace_tool booleans all fall through false
+	# for it. No icon asset exists yet, so this is a text button (_add_tool_button's
+	# own fallback contract) until one is added.
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.CUTOUT, "Cutout",
+		"Draw a board opening (click corners, Enter to close)", "cutout_24.png")
 
 	# Eraser (item 019fb934827776) + Delete/trash-can (item 019fb92f8b83) live
 	# HERE, not in the Select section above (cold-review N3) — the section
@@ -2710,6 +2722,12 @@ func _sync_draw_arm_ui(mode: int) -> void:
 	var is_pour_tool: bool = mode == _PcbCanvasScript.ToolMode.ZONE_POUR
 	var is_zone_tool: bool = is_pour_tool \
 		or mode == _PcbCanvasScript.ToolMode.ZONE_KEEPOUT
+	# CUTOUT (campaign 2 epoch B, unit 3) arms none of the controls below —
+	# stated here rather than left to fall through, so a reader does not read
+	# the omission as unfinished work. A cutout has no net, no layer and no
+	# width to pick (see pcb_data.gd's Cutout Management doc): is_pour_tool/
+	# is_zone_tool/is_trace_tool all correctly evaluate false for it already,
+	# with no widget-visibility line to add.
 	var is_trace_tool: bool = mode == _PcbCanvasScript.ToolMode.TRACE
 
 	if _trace_width_spin != null:
@@ -3362,6 +3380,7 @@ const _MODE_HINTS := {
 	7: "Click each corner, Enter/dbl-click to close (no net needed)",    # ZONE_KEEPOUT
 	8: "Click a pad to start, click waypoints, click a pad to finish",   # TRACE
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
+	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
 }
 const _ROUTE_FLOW_LABELS := {
 	"single_trace": "Single Trace",
@@ -3380,11 +3399,13 @@ func _update_status() -> void:
 		return
 	var sel: Array = _canvas.get_selected_components()
 	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN,
-	# ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER. BUG FIX: this array used to stop
-	# at 9 entries (through TRACE) while ToolMode.ERASER = 9 — tm < size() was
-	# false for the eraser, so it silently got no mode tag at all. ERASER is
-	# now entry 9.
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser"]
+	# ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT. BUG FIX: this array used to
+	# stop at 9 entries (through TRACE) while ToolMode.ERASER = 9 — tm < size()
+	# was false for the eraser, so it silently got no mode tag at all. ERASER is
+	# entry 9; CUTOUT (campaign 2 epoch B, unit 3) is APPENDED as entry 10 —
+	# ToolMode.CUTOUT is the enum's new last member, so this stays correct
+	# WITHOUT renumbering anything above it (see the enum's own append-only doc).
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout"]
 	var mode_txt := ""
 	var armed_hint := ""
 	if _active_route_flow_kind != "":

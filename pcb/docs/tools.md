@@ -55,6 +55,10 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_set_zone_layer` | `data.set_zone_layer`; current-value guard before calling the model (below) |
 | `minerva_pcb_create_zone` | `data.create_zone`; one journalled step, refused verbatim via `zone_author_error` (below) |
 | `minerva_pcb_set_zone_outline` | `data.set_zone_outline`; caller-owned journal (mirrors the canvas' vertex-drag commit), value-wise no-change guard (below) |
+| `minerva_pcb_list_cutouts` | read-only; summary per cutout (`cutout_id`, `point_count`) (below) |
+| `minerva_pcb_describe_cutout` | read-only; full cutout incl. outline points (`zone_outline_points` → `zone_outline_to_list` round trip, reused) (below) |
+| `minerva_pcb_create_cutout` | `data.create_cutout`; one journalled step, refused verbatim via `cutout_author_error` (below) |
+| `minerva_pcb_delete_cutout` | `data.remove_cutout`; one journalled step, mirrors `delete_zone`'s idiom (below) |
 | `minerva_pcb_group_components` | `data.group_components`; one journalled step, merge-no-op vs. too-few-components disambiguated at the tool layer (below) |
 | `minerva_pcb_ungroup` | `data.ungroup_components`; accepts `group_id` or `component_ids` (below) |
 | `minerva_pcb_set_group_member_offset` | `data.set_member_offset`; every refusal (unknown/ungrouped/anchor/locked) diagnosed at the tool layer, current-value guard (below) |
@@ -232,6 +236,41 @@ signal that commit already emits (`pcb_canvas.set_data` wires it to
 lists VALUE-WISE (`Vector2 == Vector2`), not the raw `{x_mm,y_mm}` dicts
 `set_zone_outline` stores them as, so a resubmit of the same outline is
 `changed:false` regardless of dict key order or float formatting.
+
+## Cutout tools (`minerva_pcb_list_cutouts` / `describe_cutout` / `create_cutout` / `delete_cutout`, campaign 2 epoch B unit 3)
+
+MCP parity for the cutout surface this round adds to the canvas (a click-per-
+point draw tool, plus delete via the eraser/trash/context menu). All four ride
+the same journalled model path the canvas gesture uses — `pcb_data.create_cutout`
+/ `remove_cutout` — so an agent mutation and a human canvas edit are
+indistinguishable to the model, and the canvas repaints live off the same
+`data_changed` signal those model calls already emit.
+
+A cutout is the SIMPLEST entity in the contract: no net, no layer, no kind — it
+is an opening through the whole board, so "which layer" is the one question it
+cannot be asked (see `pcb/internal/board/board.go`'s `Cutout` doc). That is why
+this is a four-tool subset of the zone surface's seven, not a parallel seven:
+there is no `set_net`/`set_layer` to author (nothing to set), and no
+`set_zone_outline` counterpart either — v1 ships DRAW + DELETE only, no vertex
+editing (see `pcb_canvas.gd`'s Cutout Authoring region for why).
+
+**Unknown `cutout_id` is always an error**, on every one of the four tools —
+never a silent no-op, matching the zone tools' own contract.
+
+`create_cutout` mints a persistent cutout id and journals ONE undoable step
+(`data.create_cutout` already `record_change`s + `data_changed`s internally,
+the same idiom `create_zone` uses). Its refusal text is produced by calling
+`data.cutout_author_error` explicitly, ahead of `create_cutout` — the model's
+own function only `push_warning()`s its reason and returns `{}` either way, so
+the tool asks for the real, verbatim string (the ONE rule a cutout has: an
+outline under 3 points) rather than inventing one.
+
+**A cutout is authorable, not (yet) compilable.** `compile_board` refuses any
+board declaring a non-empty `cutouts` list (`unsupported_board_feature`) — see
+`docs/board-yaml.md`'s "Cut-outs" section. These four tools only ever touch the
+GD panel model, which round-trips a cutout losslessly; routing, DRC and
+Gerber/KiCad export do not see it yet, and an agent should not expect fab
+output to change from authoring one.
 
 ## Group tools (`minerva_pcb_group_components` / `ungroup` / `set_group_member_offset`, B2)
 

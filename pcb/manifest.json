@@ -591,6 +591,68 @@
       }
     },
     {
+      "name": "minerva_pcb_list_cutouts",
+      "description": "List every cutout (an opening through the whole board) on the board. Read-only — journals nothing. Returns one summary entry per cutout: {cutout_id, point_count}, plus a cutout_count. A cutout is authorable in the board YAML but not yet compiled into fabrication output — routing, DRC and Gerber/KiCad export do not see it.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_describe_cutout",
+      "description": "Describe one cutout in full, including its outline points. Read-only — journals nothing. Returns {cutout_id, point_count, outline:[{x_mm,y_mm}]}. Unknown cutout_id is an error, not an empty result.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "cutout_id": {"type": "string", "description": "Cutout id to describe"}
+        },
+        "required": ["editor_name", "cutout_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_create_cutout",
+      "description": "Author a new cutout (an opening through the whole board) from an outline. One journalled, undoable step. Mints a persistent cutout id. A cutout has no net, no layer and no kind — it goes through every layer, so there is nothing to name. Refused (as an error, with the model's own reason) for an outline under 3 points. Reply mirrors minerva_pcb_list_cutouts' shape: {cutout_id, point_count}. Example call: {\"editor_name\": \"PCB1\", \"outline\": [{\"x_mm\": 10, \"y_mm\": 10}, {\"x_mm\": 20, \"y_mm\": 10}, {\"x_mm\": 20, \"y_mm\": 20}, {\"x_mm\": 10, \"y_mm\": 20}]}. IMPORTANT: a cutout is authorable but NOT YET COMPILED into fabrication output — compile_board refuses any board declaring a non-empty cutouts list, so routing/DRC/Gerber/KiCad export are unaffected by this call and will still refuse the board if it has one.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "outline": {
+            "type": "array",
+            "description": "Cutout outline points in board mm, in order. At least 3 required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          }
+        },
+        "required": ["editor_name", "outline"]
+      }
+    },
+    {
+      "name": "minerva_pcb_delete_cutout",
+      "description": "Delete a cutout from the board. One journalled, undoable step. Returns {deleted}. Unknown cutout_id is an error, not a silent no-op.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "cutout_id": {"type": "string", "description": "Cutout id to delete"}
+        },
+        "required": ["editor_name", "cutout_id"]
+      }
+    },
+    {
       "name": "minerva_pcb_group_components",
       "description": "Stamp two or more known components into one persistent group (merging any existing groups among them; Illustrator merge grammar, not nesting). One journalled, undoable step. A selection that is already exactly one flat group is a no-op reply (changed:false) with that group's own id/members, not an error. Refused (as an error) when fewer than two known components remain after expansion. Reply: {group_id, member_ids, changed}. Agrees with minerva_pcb_get_components' group_id/group_members fields by construction.",
       "executor": "panel",

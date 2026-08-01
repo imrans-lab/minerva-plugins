@@ -109,6 +109,18 @@ var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 ## net goes through `.get("net", "")`.
 var zones: Array[Dictionary] = []
 
+## Authored cutouts — openings through the ENTIRE board (campaign 2 epoch B, U2
+## contract: pcb/internal/board's Cutout struct).
+##
+## HELD VERBATIM, for the SAME reason zones are (see the `zones` declaration
+## just above) — and the reason is even stronger here: a cutout has no fields
+## this model would ever need to reshape (no position to drag-normalize, no
+## layer to filter on). Canonical dict is exactly what pcb.deserialize hands
+## over ({id, outline:[{x_mm,y_mm}], + any Extra sibling}) and exactly what goes
+## back out. No field list to keep in sync with Cutout, and a field added there
+## survives this model without a change here.
+var cutouts: Array[Dictionary] = []
+
 ## Undo/redo history
 var history: Array[Dictionary] = []
 var history_index: int = -1
@@ -1492,6 +1504,35 @@ func set_zone_layer(zone_id: String, layer: String) -> String:
 	return ""
 
 
+## Shared sweep behind get_zones_in_region and cutouts_in_region (cold-review
+## B4u3 F4): the two were a byte-for-byte 19-line copy save for the source
+## list and ONE predicate (a zone's interior only counts for a keepout;
+## a cutout's interior ALWAYS counts — see cutouts_in_region's own doc for
+## why). `always_interior` parameterises that one difference; everything else
+## — the id-empty skip, the visible_filter contract, the outline-point-count
+## guard, the closed-path touch test — is identical for both callers.
+static func _region_hits(entities: Array, region: Rect2, visible_filter: Callable,
+		always_interior: bool) -> Array[String]:
+	var result: Array[String] = []
+	for entity in entities:
+		var entity_id := str(entity.get("id", ""))
+		if entity_id.is_empty():
+			continue
+		if visible_filter.is_valid() and not visible_filter.call(entity):
+			continue
+		var pts := zone_outline_points(entity)
+		if pts.size() < 3:
+			continue
+		var closed := pts.duplicate()
+		closed.append(pts[0])
+		var hit := region_touches_polyline(closed, region)
+		if not hit and (always_interior or zone_kind(entity) == "keepout"):
+			hit = Geometry2D.is_point_in_polygon(region.get_center(), pts)
+		if hit:
+			result.append(entity_id)
+	return result
+
+
 ## Every zone the marquee `region` touches, with the same `visible_filter`
 ## contract as get_traces_in_region (Callable(zone) -> bool, view-owned).
 ##
@@ -1499,26 +1540,102 @@ func set_zone_layer(zone_id: String, layer: String) -> String:
 ## and what a click grabs stay the same entity language: a pour hits like a PATH
 ## (its outline must be touched — a marquee drawn deep inside the board-spanning
 ## GND pour must not silently drag it), while a keepout hits like a FILLED region
-## (it renders hatched), so a marquee lying wholly inside one selects it.
+## (it renders hatched), so a marquee lying wholly inside one selects it. Thin
+## wrapper over _region_hits (always_interior=false: only a keepout's interior
+## counts).
 func get_zones_in_region(region: Rect2, visible_filter := Callable()) -> Array[String]:
-	var result: Array[String] = []
-	for zone in zones:
-		var zone_id := str(zone.get("id", ""))
-		if zone_id.is_empty():
-			continue
-		if visible_filter.is_valid() and not visible_filter.call(zone):
-			continue
-		var pts := zone_outline_points(zone)
-		if pts.size() < 3:
-			continue
-		var closed := pts.duplicate()
-		closed.append(pts[0])
-		var hit := region_touches_polyline(closed, region)
-		if not hit and zone_kind(zone) == "keepout":
-			hit = Geometry2D.is_point_in_polygon(region.get_center(), pts)
-		if hit:
-			result.append(zone_id)
-	return result
+	return _region_hits(zones, region, visible_filter, false)
+
+#endregion
+
+
+#region Cutout Management
+
+## Fewest points that make a cutout outline a polygon. MIRRORS internal/board's
+## validateCutouts (`invalid_cutout_outline`) — the cutout twin of
+## MIN_ZONE_OUTLINE_POINTS, same value, kept as its own const because a cutout
+## has no other authored field to co-locate it with.
+const MIN_CUTOUT_OUTLINE_POINTS := 3
+
+
+## Why the proposed cutout cannot be authored, or "" when it can.
+##
+## POINT-COUNT ONLY — unlike zone_author_error, there is no net or layer half:
+## a cutout has neither (see the Cutout type's own comment on pcb/internal/
+## board/board.go — "which layer" is the one question a cutout cannot be
+## asked). One rule, one consumer pair: create_cutout() fail-closes on it, and
+## the canvas drawing tool shows it to the user before committing.
+func cutout_author_error(point_count: int) -> String:
+	if point_count < MIN_CUTOUT_OUTLINE_POINTS:
+		return "A cutout outline needs at least %d points (%d placed)." % [MIN_CUTOUT_OUTLINE_POINTS, point_count]
+	return ""
+
+
+## Create an authored cutout and add it to the board. Returns the new cutout
+## dict (the model's own, not a copy) or {} when cutout_author_error refused it.
+## Mints a persistent "cutout:<hex>" id — mirrors create_zone exactly, minus
+## the net/layer fields a cutout does not have. Reuses zone_outline_to_list:
+## that helper encodes board-mm points into the canonical {x_mm,y_mm} list and
+## is not zone-specific in its implementation.
+func create_cutout(outline_points) -> Dictionary:
+	var pts := PackedVector2Array(outline_points)
+	var refusal := cutout_author_error(pts.size())
+	if not refusal.is_empty():
+		push_warning("[PCBData] create_cutout refused: %s" % refusal)
+		return {}
+
+	var cutout := {
+		"id": mint_entity_id("cutout"),
+		"outline": zone_outline_to_list(pts),
+	}
+	cutouts.append(cutout)
+	record_change("add_cutout", {
+		"cutout_id": cutout["id"],
+		"point_count": pts.size(),
+	})
+	data_changed.emit()
+	return cutout
+
+
+## Remove an authored cutout by id. Returns true when a cutout was removed,
+## false for an unknown id. Mirrors remove_zone: record_change + data_changed
+## here; the history snapshot is the CALLER's job, taken after the mutation
+## (mutate-then-snapshot — see remove_zone for the bug this order avoids).
+func remove_cutout(cutout_id: String) -> bool:
+	var i := _cutout_index(cutout_id)
+	if i < 0:
+		return false
+	record_change("remove_cutout", {"cutout_id": cutout_id})
+	cutouts.remove_at(i)
+	data_changed.emit()
+	return true
+
+
+## Index of a cutout in `cutouts` by id, or -1. Mirrors _zone_index.
+func _cutout_index(cutout_id: String) -> int:
+	for i in cutouts.size():
+		if str(cutouts[i].get("id", "")) == cutout_id:
+			return i
+	return -1
+
+
+## A cutout by id — the model's OWN dict (mutating it mutates the board), or {}.
+func get_cutout(cutout_id: String) -> Dictionary:
+	var i := _cutout_index(cutout_id)
+	return cutouts[i] if i >= 0 else {}
+
+
+## Every cutout the marquee `region` touches, with the same `visible_filter`
+## contract as get_zones_in_region.
+##
+## Unlike get_zones_in_region, the interior hit is UNCONDITIONAL — a cutout has
+## no kind to branch on, and per the canvas render design (v1: hatched region
+## over the board rect, no polygon-with-holes) a cutout hits like a FILLED
+## region always, not like a path. A marquee lying wholly inside one selects it.
+## Thin wrapper over _region_hits (always_interior=true), the SAME extraction
+## get_zones_in_region's own doc names.
+func cutouts_in_region(region: Rect2, visible_filter := Callable()) -> Array[String]:
+	return _region_hits(cutouts, region, visible_filter, true)
 
 #endregion
 
@@ -1687,7 +1804,12 @@ func save_to_history(action_name: String = "Change") -> void:
 		# snapshot is applied WHOLESALE by _restore_state, so a zone absent from
 		# it is a zone DELETED by the next undo of an unrelated edit. Carrying it
 		# costs a copy and closes the hole before an editing tool opens it.
-		"zones": _zones_to_list()
+		"zones": _zones_to_list(),
+		# Cutouts ride the snapshot for the SAME reason zones do, one line up —
+		# create_cutout/remove_cutout are forward mutators like add_zone/
+		# remove_zone, so a cutout absent from a restored snapshot is a cutout
+		# the next undo of an unrelated edit would silently delete.
+		"cutouts": _cutouts_to_list()
 	}
 
 	history.append(state)
@@ -1834,6 +1956,7 @@ func _restore_state(state: Dictionary) -> void:
 	_load_vias(state.get("vias", []))
 	_load_mounting_holes(state.get("mounting_holes", []))
 	zones = _zones_from_list(state.get("zones", []))
+	cutouts = _cutouts_from_list(state.get("cutouts", []))
 
 	# Batch state belongs to the CALLER's in-flight transaction, not to
 	# whichever board snapshot happens to be restored. Without this, undoing
@@ -2200,6 +2323,14 @@ func to_board_dict() -> Dictionary:
 	# keeps that from being a thing anyone has to know.
 	if not zones.is_empty():
 		out["zones"] = _zones_to_list()
+	# Same conditional-emit idiom as zones, same reason: a cutout-free board's
+	# canonical dict must stay byte-identical to what it was before cutouts
+	# existed (T6 — this is the fixed-literal silent-drop point; `out` above is
+	# a literal dict, so a field not written here would round-trip away on
+	# every save even though `cutouts` itself is held verbatim). Go's Cutout
+	# slice is `omitempty` too.
+	if not cutouts.is_empty():
+		out["cutouts"] = _cutouts_to_list()
 	return out
 
 
@@ -2263,6 +2394,11 @@ func from_board_dict(data: Dictionary) -> void:
 
 	# Zones (carried verbatim — see the `zones` declaration).
 	zones = _zones_from_list(data.get("zones", []))
+
+	# Cutouts (carried verbatim — see the `cutouts` declaration). This is the
+	# fix for the T6 silent-drop: a cutouts key authored in YAML and loaded here
+	# must survive the round-trip, not be erased by a fixed-key from_board_dict.
+	cutouts = _cutouts_from_list(data.get("cutouts", []))
 
 	# annotations / route_hints: intentionally ignored — see method doc.
 
@@ -2420,6 +2556,29 @@ func _zones_from_list(zone_list) -> Array[Dictionary]:
 	return result
 
 
+## Deep-copy the cutout list on the way OUT. Mirrors _zones_to_list, same
+## reasoning: a consumer of to_board_dict() must not be able to reach back into
+## this model's state through the dict it was handed.
+func _cutouts_to_list() -> Array:
+	var result: Array = []
+	for cutout in cutouts:
+		result.append(cutout.duplicate(true))
+	return result
+
+
+## Deep-copy a canonical or snapshot cutout list on the way IN. Mirrors
+## _zones_from_list, including dropping non-dict entries rather than
+## tolerating them.
+func _cutouts_from_list(cutout_list) -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	if not (cutout_list is Array):
+		return result
+	for cd in cutout_list:
+		if cd is Dictionary:
+			result.append((cd as Dictionary).duplicate(true))
+	return result
+
+
 ## A zone's kind, normalised: "keepout" or "copper_pour".
 ##
 ## Defaults to "copper_pour" for a zone that states no kind, matching the Go
@@ -2491,6 +2650,7 @@ func clear() -> void:
 	vias.clear()
 	mounting_holes.clear()
 	zones.clear()
+	cutouts.clear()
 	history.clear()
 	history_index = -1
 	change_journal.clear()
