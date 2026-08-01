@@ -48,6 +48,7 @@ func _init() -> void:
 	await _probe_reparent_after_mount()
 	await _probe_select_tool_boxselect()
 	await _probe_pan_tool_and_gestures()
+	await _probe_right_click_context_menu()
 	_probe_empty_default_board()
 
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -372,6 +373,99 @@ func _probe_pan_tool_and_gestures() -> void:
 	await process_frame
 	check("trackpad pan-gesture pans the view (finding 1)", canvas.pan_offset != p2,
 			"pan %s -> %s" % [str(p2), str(canvas.pan_offset)])
+
+	panel.queue_free()
+	await process_frame
+
+
+## RIGHT-CLICK IS A MENU (B1u5, docket 019fbb968e — owner: "I expect right click
+## to be a menu, with delete as an option").
+##
+## This probe exists because the change it guards is a REMOVAL. A5 deleted a zone
+## vertex on right-PRESS, before any menu; the ruling retired that gesture. A
+## headless suite can prove the menu path works, but only a real press through
+## Viewport.push_input can prove the OLD path is no longer wired up underneath it —
+## which is the half that actually changed.
+func _probe_right_click_context_menu() -> void:
+	print("\n-- right-click is a menu, not a delete (B1u5) --")
+	var pc := await _mount_panel()
+	var panel = pc[0]
+	var canvas = pc[1]
+
+	var data = panel.get_data()
+	data.zones.append({
+		"id": "zone:probe", "net": "GND", "layer": "top", "kind": "copper_pour",
+		"outline": [
+			{"x_mm": 6.0, "y_mm": 6.0}, {"x_mm": 26.0, "y_mm": 6.0},
+			{"x_mm": 26.0, "y_mm": 26.0}, {"x_mm": 6.0, "y_mm": 26.0},
+		],
+	})
+	canvas.selected_zone_ids.append("zone:probe")
+	canvas.set_tool_mode(canvas.ToolMode.SELECT)
+	# Pin the view rather than inheriting zoom_to_fit's: the handle has to land
+	# inside the canvas rect for the press to reach _gui_input at all, and a fitted
+	# view that changes with the fixture board would make that a coin toss.
+	canvas.zoom = 8.0
+	canvas.pan_offset = Vector2.ZERO
+	await process_frame
+
+	var origin: Vector2 = canvas.get_global_rect().position
+	var handle: Vector2 = origin + canvas.world_to_screen(Vector2(6.0, 6.0))
+
+	# A right-click TAP on a vertex handle: press and release in the same place.
+	_push_button(handle, MOUSE_BUTTON_RIGHT, true)
+	await process_frame
+	var outline_after_press: int = data.get_zone("zone:probe")["outline"].size()
+	check("right-PRESS on a vertex handle no longer deletes it (A5 retired)",
+			outline_after_press == 4, "outline is %d points" % outline_after_press)
+
+	_push_button(handle, MOUSE_BUTTON_RIGHT, false)
+	await process_frame
+	check("the outline is still intact after the release too",
+			data.get_zone("zone:probe")["outline"].size() == 4)
+	check("the context menu popped instead",
+			canvas.context_menu != null and canvas.context_menu.visible,
+			"items=%d vertex=%s handle_local=%s (negative = the press never landed on the canvas)" % [
+				(canvas.context_menu.item_count if canvas.context_menu != null else -1),
+				str(canvas._context_menu_vertex), str(handle - origin)])
+
+	var has_delete_vertex := false
+	if canvas.context_menu != null:
+		for i in canvas.context_menu.item_count:
+			if canvas.context_menu.get_item_text(i) == "Delete vertex":
+				has_delete_vertex = true
+	check("and it carries Delete vertex", has_delete_vertex)
+
+	if canvas.context_menu != null:
+		canvas.context_menu.hide()
+
+	# "Set trace width…" with Properties COLLAPSED — the cold-review F1 case, in a
+	# REALLY MOUNTED panel, which is the only place is_visible_in_tree and
+	# has_focus mean anything. The headless suite proves the flags flip; this
+	# proves the SpinBox the owner has to type into is actually on screen and
+	# actually holding the caret.
+	var trace = load("res://../../minerva-plugins/pcb/ui/model/pcb_trace.gd").new()
+	trace.net_name = "VCC"
+	trace.layer = "top"
+	trace.width = 0.25
+	var wps: Array[Vector2] = [Vector2(8.0, 8.0), Vector2(24.0, 8.0)]
+	trace.waypoints = wps
+	data.add_trace(trace)
+	var trace_ids: Array = data.get_trace_ids()
+	if trace_ids.is_empty():
+		check("probe fixture produced a trace to width-edit", false)
+	else:
+		panel._set_properties_expanded(false)
+		canvas._request_trace_width_edit(str(trace_ids[0]))
+		await process_frame
+		var spin = panel._trace_prop_width_spin
+		check("collapsed Properties: the width SpinBox ends up VISIBLE IN TREE",
+				spin != null and spin.is_visible_in_tree(),
+				"spin=%s visible_in_tree=%s properties_expanded=%s" % [
+					str(spin != null), str(spin != null and spin.is_visible_in_tree()),
+					str(panel._properties_expanded)])
+		check("…and holding focus, ready to type",
+				spin != null and spin.get_line_edit().has_focus())
 
 	panel.queue_free()
 	await process_frame
