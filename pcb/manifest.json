@@ -533,9 +533,123 @@
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "zone_id": {"type": "string", "description": "Zone id to re-layer"},
-          "layer": {"type": "string", "description": "Copper layer to move the zone to (e.g. F.Cu, B.Cu)"}
+          "layer": {"type": "string", "description": "Copper layer to move the zone to — canonical id, not the KiCad alias (e.g. top, bottom, in1..in30; NOT F.Cu/B.Cu)"}
         },
         "required": ["editor_name", "zone_id", "layer"]
+      }
+    },
+    {
+      "name": "minerva_pcb_create_zone",
+      "description": "Author a new zone (copper pour or keepout) on the board from an outline. One journalled, undoable step. Mints a persistent zone id. A copper pour must name a declared net; a keepout may omit net (or scope one). Refused (as an error, with the model's own reason) for an outline under 3 points, an undeclared net, or a missing/undeclared layer. Reply mirrors minerva_pcb_list_zones' shape: {zone_id, kind, net, layer, point_count}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "kind": {"type": "string", "description": "Zone kind: \"copper_pour\" (default) or \"keepout\""},
+          "net": {"type": "string", "description": "Declared net name. Required for a copper pour; optional (or scoped) for a keepout."},
+          "layer": {"type": "string", "description": "Copper layer to place the zone on — canonical id, not the KiCad alias (e.g. top, bottom, in1..in30; NOT F.Cu/B.Cu)"},
+          "outline": {
+            "type": "array",
+            "description": "Zone outline points in board mm, in order. At least 3 required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          }
+        },
+        "required": ["editor_name", "layer", "outline"]
+      }
+    },
+    {
+      "name": "minerva_pcb_set_zone_outline",
+      "description": "Replace a committed zone's outline wholesale. A real change journals exactly one undoable step and repaints the canvas live (data_changed); resubmitting the identical outline (same points, in order) is a no-op reply (changed:false) and journals nothing. Refused (as an error, with the model's own reason) for an outline under 3 points. Unknown zone_id is an error.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "zone_id": {"type": "string", "description": "Zone id to re-outline"},
+          "outline": {
+            "type": "array",
+            "description": "Full replacement outline, board mm, in order. At least 3 points required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          }
+        },
+        "required": ["editor_name", "zone_id", "outline"]
+      }
+    },
+    {
+      "name": "minerva_pcb_group_components",
+      "description": "Stamp two or more known components into one persistent group (merging any existing groups among them; Illustrator merge grammar, not nesting). One journalled, undoable step. A selection that is already exactly one flat group is a no-op reply (changed:false) with that group's own id/members, not an error. Refused (as an error) when fewer than two known components remain after expansion. Reply: {group_id, member_ids, changed}. Agrees with minerva_pcb_get_components' group_id/group_members fields by construction.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "component_ids": {
+            "type": "array",
+            "description": "Component ids to group (two or more after expansion to existing group-mates)",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["editor_name", "component_ids"]
+      }
+    },
+    {
+      "name": "minerva_pcb_ungroup",
+      "description": "Dissolve the group(s) touched by group_id or component_ids. Positions are untouched — members simply become independently selectable/movable again. One journalled, undoable step when anything is released; releasing nothing (already ungrouped) is a no-op reply (changed:false), not an error. group_id takes precedence when both are given; an unknown group_id, or component_ids naming no known component, is an error.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "group_id": {"type": "string", "description": "Group id to dissolve (takes precedence over component_ids)"},
+          "component_ids": {
+            "type": "array",
+            "description": "Component ids whose group(s) should be dissolved (any member pulls in the whole group)",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_set_group_member_offset",
+      "description": "Reposition ONE grouped member relative to its group's anchor (the whole-unit lock's stage-2 numeric editor — PCBPanel's offset fields, MCP counterpart). A real change journals exactly one undoable step; resubmitting the same offset is a no-op reply (changed:false) and journals nothing. Refused (as an error) for an unknown component, a component not in a group, the group's own anchor (which has no editable offset), or a locked group. Reply: {component_id, group_id, dx_mm, dy_mm, changed}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "component_id": {"type": "string", "description": "Grouped, non-anchor component id to offset"},
+          "dx_mm": {"type": "number", "description": "X offset from the group anchor, in mm"},
+          "dy_mm": {"type": "number", "description": "Y offset from the group anchor, in mm"}
+        },
+        "required": ["editor_name", "component_id", "dx_mm", "dy_mm"]
+      }
+    },
+    {
+      "name": "minerva_pcb_get_layout_state",
+      "description": "Structured panel layout state, for verifying responsive UI behavior as data instead of screenshots. Returns {mode, width, sidebar_visible, drawer_open, view_menu_visible, properties_expanded, dock_position, plugin_build}. plugin_build is a hand-maintained deployed-script-vintage marker (not a git SHA, which is unavailable at runtime) — use it to tell which round's scripts a running panel is actually built from. Read-only — journals nothing.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
       }
     },
     {

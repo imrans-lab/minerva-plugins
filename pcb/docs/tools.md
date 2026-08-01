@@ -53,11 +53,17 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_delete_zone` | `data.remove_zone`; one journalled step, mirrors `delete_component`'s idiom |
 | `minerva_pcb_set_zone_net` | `data.set_zone_net`; current-value guard before calling the model (below) |
 | `minerva_pcb_set_zone_layer` | `data.set_zone_layer`; current-value guard before calling the model (below) |
+| `minerva_pcb_create_zone` | `data.create_zone`; one journalled step, refused verbatim via `zone_author_error` (below) |
+| `minerva_pcb_set_zone_outline` | `data.set_zone_outline`; caller-owned journal (mirrors the canvas' vertex-drag commit), value-wise no-change guard (below) |
+| `minerva_pcb_group_components` | `data.group_components`; one journalled step, merge-no-op vs. too-few-components disambiguated at the tool layer (below) |
+| `minerva_pcb_ungroup` | `data.ungroup_components`; accepts `group_id` or `component_ids` (below) |
+| `minerva_pcb_set_group_member_offset` | `data.set_member_offset`; every refusal (unknown/ungrouped/anchor/locked) diagnosed at the tool layer, current-value guard (below) |
 | `minerva_pcb_set_trace_width` | `data.set_trace_width`; one journalled step, current-value guard, out-of-range **refused** (below) |
 | `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`) (below) |
 | `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
 | `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
+| `minerva_pcb_get_layout_state` | read-only; `PCBPanel.get_layout_state()` plus a `plugin_build` deploy-vintage stamp (below) |
 
 Mutations go through the model API, so the change journal, undo history and the
 `data_changed` dirty relay come for free.
@@ -192,6 +198,107 @@ back as that setter's refusal.
 Every refusal the model can return — a keepout's net (`set_zone_net`), an
 undeclared net or layer, an empty layer stack, an unknown zone — surfaces as
 `_err(<the model's own string>)`, verbatim.
+
+## Zone geometry parity (`minerva_pcb_create_zone` / `set_zone_outline`, B2)
+
+Rounds out the A6 zone surface (list/describe/delete/set_net/set_layer, above)
+with authoring and geometry editing, so the whole zone lifecycle is
+agent-reachable the way the canvas' A5 drawing tool and vertex-drag already
+are. Both ride the model path only — `data.create_zone` / `data.set_zone_outline`
+— never a board-YAML serialize/reload round trip, which would take a
+different, untested path from every human gesture and could drift from it
+silently.
+
+`create_zone` mints a persistent zone id and journals ONE undoable step
+(`data.create_zone` already `record_change`s + `data_changed`s internally, the
+same idiom `add_component` uses). Its refusal text is produced by calling
+`data.zone_author_error` explicitly, ahead of `create_zone` — `create_zone`
+itself only `push_warning()`s its reason to the console and returns `{}`
+either way, so the tool asks the model's own rule for the real, verbatim
+string (too few points, an undeclared net, a missing/undeclared layer) rather
+than inventing one.
+
+`set_zone_outline` is the MCP counterpart of the canvas' vertex-drag commit
+(`pcb_canvas._end_zone_vertex_drag`). It journals the SAME
+`"edit_zone_outline"` shape that gesture already writes (`zone_id`, `op`,
+`vertex_index`, `old_point_count`, `point_count`), with `op: "set_outline"`
+and `vertex_index: -1` marking a whole-outline replace rather than a
+single-vertex edit. `data.set_zone_outline` is itself a LIVE-DRAG WRITER
+(silent about a real write, vocal about a refusal), so the tool owns the
+journal entry and the closing `save_to_history` the same way the canvas'
+drag-end commit does; the canvas repaints live off the same `data_changed`
+signal that commit already emits (`pcb_canvas.set_data` wires it to
+`queue_redraw` — no new canvas code). The no-change guard compares the point
+lists VALUE-WISE (`Vector2 == Vector2`), not the raw `{x_mm,y_mm}` dicts
+`set_zone_outline` stores them as, so a resubmit of the same outline is
+`changed:false` regardless of dict key order or float formatting.
+
+## Group tools (`minerva_pcb_group_components` / `ungroup` / `set_group_member_offset`, B2)
+
+MCP counterparts of the canvas' Ctrl+G / Ctrl+Shift+G gestures
+(`pcb_canvas._group_selection` / `_ungroup_selection`) and `PCBPanel`'s offset
+LineEdits (`_commit_member_offset`). All three ride `pcb_data`'s group model
+(A4 / A4 stage-2) directly — `group_components` / `ungroup_components` /
+`set_member_offset` — so an agent's grouping and a human's are the same
+operation to the board, and `minerva_pcb_get_components`' `group_id` /
+`group_members` / `group_anchor` / `group_offset` fields (already shipped)
+describe exactly what these three mutate.
+
+**No lock concept on group/ungroup.** `is_group_locked` gates the operations
+that move geometry (translate/rotate/remove/`set_member_offset`) — a lock
+protects a physical layout, not the grouping relationship itself.
+`group_components` and `ungroup_components` carry no lock check in the model,
+and none is added at the tool layer either; only `set_group_member_offset` can
+refuse "locked".
+
+`group_components` returns `""` from the model for TWO different reasons it
+does not itself distinguish: fewer than two real components after expansion
+to existing group-mates, or a selection that is ALREADY exactly one flat
+group. The tool tells them apart itself — the first is a real `_err`, the
+second is a no-op reply (`changed:false`) carrying the existing group's own id
+and members, the same "nothing to do, not a refusal" shape `set_zone_net`'s
+current-value guard uses.
+
+`ungroup` accepts either `group_id` (resolved to its member list, so an
+unknown `group_id` is an explicit error) or `component_ids` (any member of a
+touched group pulls in the whole group) — `group_id` takes precedence when
+both are given. Releasing nothing (every named component already ungrouped)
+is `changed:false`, not an error.
+
+`set_member_offset` returns a bare `bool` that conflates four different
+outcomes (ungrouped, locked, anchor, already-there) into one `false`, so
+`set_group_member_offset` re-derives each refusal reason itself, in the
+model's own check order (`component_group_id` empty, then `is_group_locked`,
+then anchor), before ever calling the model — the caller gets a specific,
+stable reason (`Unknown component: …` / `Component … is not in a group.` /
+`Group is locked — nothing offset.` / `The anchor has no editable offset —
+moving it would move the whole group.`) instead of one bare "refused". The
+no-change comparison (target position == current position) is done ahead of
+the model call too, so a resubmit of the same offset is `changed:false` and
+journals nothing — the same guard idiom every other setter in this file uses.
+
+## Layout state observability (`minerva_pcb_get_layout_state`, B2)
+
+Exposes `PCBPanel.get_layout_state()` — already built for the gd-test suite's
+own responsive-layout assertions (`test_pcb_panel_layout.gd`) — as an MCP
+tool, plus a `plugin_build` field the panel adds to that same dict.
+Read-only: journals nothing, mutates nothing.
+
+**`plugin_build` design choice.** A git SHA is not available at runtime for a
+deployed/packaged plugin. Reading `pcb/manifest.json`'s `version` off disk was
+considered and rejected: it is a `FileAccess` round trip whose correct path
+depends on where this off-tree script happens to live (the dev source dir
+today, but not guaranteed for every packaged layout), for a fact whose only
+job is "did the human deploy the latest scripts". Instead `PCBPanel.gd`
+declares `const PLUGIN_BUILD` — a hand-bumped marker string, the same pattern
+`pcb_prefs.gd`'s and `pcb_routing_sidecar.gd`'s `SCHEMA_VERSION` already use
+for version-shaped facts in this plugin. It is derived once, at script load
+(a constant needs no runtime derivation), and is honest about what it is: a
+marker the person editing these scripts bumps by hand, not an
+automatically-computed build id. Left stale it under-reports rather than
+lying forward. Bump it in `PCBPanel.gd` whenever a round's changes are worth
+distinguishing during an HITL "which script is actually running" deploy
+check.
 
 ## Deleting a subset of traces (`minerva_pcb_delete_traces`, docket `019f809798d1`)
 

@@ -41,6 +41,29 @@ const _PanelToolsScript: Script = preload("panel_tools.gd")
 ## instantiated-script consts above) so the parser keeps the GDScript class type
 ## and can resolve its static funcs — a `Script`-typed const cannot.
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
+## B2 (MCP parity round) — deployed-script-vintage stamp, surfaced by
+## minerva_pcb_get_layout_state's `plugin_build` field. DESIGN CHOICE, and why
+## the alternatives were rejected:
+##   - git SHA: NOT available at runtime (no VCS metadata ships with a
+##     deployed/packaged plugin; the round brief names this explicitly).
+##   - reading pcb/manifest.json's "version" off disk: adds a FileAccess round
+##     trip whose path is relative to wherever this off-tree script's file
+##     happens to sit (dev source dir today per data_directory, but the
+##     manifest's own docs describe host_owned/packaged layouts too) — fragile
+##     for a fact whose only job is "did the human deploy the latest scripts".
+##   - a hand-bumped const: what every other version-shaped fact in this
+##     plugin already does (pcb_prefs.gd SCHEMA_VERSION, pcb_routing_sidecar.gd
+##     SCHEMA_VERSION) — cheap, zero runtime dependency, and HONEST about what
+##     it is: a marker the person editing this file bumps, not an
+##     automatically-derived build id. Left stale, it under-reports rather than
+##     lying forward (an old value never claims to be newer than it is).
+## Bump this string whenever panel_tools.gd/PCBPanel.gd/pcb_data.gd change in
+## a way worth distinguishing during an HITL "which script is actually
+## running" deploy check. Format is free text; "<manifest version>+<round
+## tag>" is the convention started here so it still roughly tracks
+## manifest.json's own "version" (0.2.0) without reading it.
+const PLUGIN_BUILD := "0.2.0+b2-mcp-parity"
+
 ## T2 (S2.2) strangler-fig SHADOW phase: the routing workspace is populated
 ## ALONGSIDE the existing annotation proposals on every propose (dual-write,
 ## see panel_tools.gd _dual_write_propose). It drives nothing visible yet —
@@ -2425,6 +2448,14 @@ func _on_view_menu_id_pressed(id: int) -> void:
 
 ## Structured layout state for MCP/tests — lets an agent verify responsive
 ## behavior as data instead of screenshots (LLM-ergonomics requirement).
+##
+## `plugin_build` (B2): a deployed-script-vintage stamp, PLUGIN_BUILD's own
+## constant value read straight through — see that const's docs for why it is
+## a hand-bumped marker rather than a git SHA (unavailable at runtime) or a
+## manifest.json disk read (fragile path assumption for an off-tree script).
+## It answers "which round's scripts is this running panel actually built
+## from", the recurring HITL deploy-confusion question this round was asked
+## to close, cheaply and honestly.
 func get_layout_state() -> Dictionary:
 	return {
 		"mode": _layout_mode,
@@ -2434,6 +2465,7 @@ func get_layout_state() -> Dictionary:
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
 		"properties_expanded": _properties_expanded,
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
+		"plugin_build": PLUGIN_BUILD,
 	}
 
 

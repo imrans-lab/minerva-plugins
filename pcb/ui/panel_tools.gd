@@ -50,6 +50,12 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## panel reads (pcb_prefs.shared()), which is what makes an agent's write and a
 ## human's turn of the width box two views of one value rather than two stores.
 const _PcbPrefsScript := preload("model/pcb_prefs.gd")
+## B2 (MCP parity round): static-func + const access for the zone outline
+## helpers (zone_outline_to_list/zone_outline_points, MIN_ZONE_OUTLINE_POINTS)
+## without depending on GDScript's instance-forwarding for consts across a
+## duck-typed `data` reference — mirrors pcb_canvas.gd's own PCBDataScript
+## const, same off-tree preload-by-path convention.
+const _PcbDataScript := preload("model/pcb_data.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
 ## the plugin component enum carries extra values but is set by NAME,
@@ -149,6 +155,18 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _get_preference(host, args)
 		"minerva_pcb_set_preference":
 			return _set_preference(host, args)
+		"minerva_pcb_create_zone":
+			return _create_zone(host, args)
+		"minerva_pcb_set_zone_outline":
+			return _set_zone_outline(host, args)
+		"minerva_pcb_group_components":
+			return _group_components(host, args)
+		"minerva_pcb_ungroup":
+			return _ungroup(host, args)
+		"minerva_pcb_set_group_member_offset":
+			return _set_group_member_offset(host, args)
+		"minerva_pcb_get_layout_state":
+			return _get_layout_state(host, args)
 	return {}
 
 
@@ -2362,6 +2380,328 @@ static func _set_zone_layer(host, args: Dictionary) -> Dictionary:
 		return _err(refusal)
 	data.save_to_history("Set zone layer")
 	return _ok({"zone_id": zone_id, "layer": layer, "changed": true})
+
+
+# ── Zone geometry parity (B2, item 019fbb964c) ───────────────────────────────
+# create_zone/set_zone_outline round out the A6 zone surface (list/describe/
+# delete/set_net/set_layer) with authoring + geometry editing, so the whole
+# zone lifecycle is agent-reachable the way the canvas' A5 drawing tool and
+# vertex-drag already are. Both ride the MODEL path only — data.create_zone /
+# data.set_zone_outline — never the board-YAML round trip (the A6 lazy-fix
+# catch: a tool that serializes/reloads to make an edit takes a different,
+# untested path from every human gesture and drifts from it silently).
+
+## Parse an MCP outline arg ([{x_mm,y_mm}, ...]) into a PackedVector2Array, or
+## null when malformed — the ONE parser shared by create_zone and
+## set_zone_outline so a bad point is rejected identically by both.
+static func _parse_zone_outline(raw) -> Variant:
+	if not (raw is Array):
+		return null
+	var pts := PackedVector2Array()
+	for p in raw:
+		if not (p is Dictionary) or not p.has("x_mm") or not p.has("y_mm"):
+			return null
+		pts.append(Vector2(float(p["x_mm"]), float(p["y_mm"])))
+	return pts
+
+
+## Author a new zone (pour or keepout) and add it to the board. ONE journalled
+## undo step: data.create_zone already record_change's + data_changed's
+## internally (mirrors add_component's own idiom), so this owes only the
+## closing save_to_history.
+##
+## The refusal text is produced by calling data.zone_author_error OURSELVES,
+## ahead of create_zone, rather than reading create_zone's return — create_zone
+## only push_warning()s its reason to the console and returns {} either way, so
+## the model's real, verbatim refusal string (unknown net, unknown layer, too
+## few points, no layer) has to be asked for explicitly to reach the caller.
+## zone_author_error is the SAME rule create_zone itself runs, so the tool
+## invents no wording of its own — see zone_author_error's own docs for why
+## the net/layer clauses are ordered points-first.
+static func _create_zone(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var kind: String = str(args.get("kind", "copper_pour"))
+	var net_name: String = str(args.get("net", ""))
+	var layer: String = str(args.get("layer", ""))
+	# Cold review F5: a genuinely ABSENT `outline` key must say so, not fall
+	# through args.get's [] default into zone_author_error and come back as
+	# "needs at least 3 points (0 placed)" — truthful, but not the actual
+	# problem (the arg was never given).
+	if not args.has("outline"):
+		return _err("outline is required: an array of {x_mm, y_mm} points")
+	var pts = _parse_zone_outline(args.get("outline"))
+	if pts == null:
+		return _err("outline points need x_mm and y_mm")
+	var refusal: String = data.zone_author_error(net_name, layer, pts.size(), kind)
+	if not refusal.is_empty():
+		return _err(refusal)
+	var zone: Dictionary = data.create_zone(net_name, layer, pts, kind)
+	if zone.is_empty():
+		# Defensive only — zone_author_error above already cleared every known
+		# refusal, so create_zone succeeding is the expected path.
+		return _err("Zone could not be created.")
+	data.save_to_history("Create zone")
+	return _ok({
+		"zone_id": str(zone.get("id", "")),
+		"kind": data.zone_kind(zone),
+		"net": str(zone.get("net", "")),
+		"layer": str(zone.get("layer", "")),
+		"point_count": data.zone_outline_points(zone).size(),
+	})
+
+
+## Replace a committed zone's outline wholesale — the MCP counterpart of the
+## canvas' vertex-drag commit (pcb_canvas._end_zone_vertex_drag /
+## _journal_zone_outline_edit). Journals the SAME "edit_zone_outline" shape
+## that reader already parses (zone_id, op, vertex_index, old_point_count,
+## point_count), with op="set_outline" and vertex_index=-1 marking a
+## whole-outline replace rather than a single-vertex edit — no existing reader
+## requires vertex_index, so widening the op vocabulary is additive.
+##
+## NO-CHANGE GUARD compares the point LISTS VALUE-WISE (Vector2 == Vector2),
+## not the raw dicts set_zone_outline stores them as — a caller resubmitting
+## the same outline in a different dict key order or float formatting must
+## still land on changed:false, exactly like set_zone_net/set_zone_layer's
+## guard on their scalar fields. set_zone_outline itself is a LIVE-DRAG WRITER
+## (silent about a real write, vocal about a refusal — see its own docs), so
+## this tool owns the journal + one save_to_history the same way the canvas'
+## drag-end commit does.
+static func _set_zone_outline(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var zone_id: String = str(args.get("zone_id", ""))
+	if zone_id.is_empty():
+		return _err("zone_id is required")
+	var zone: Dictionary = data.get_zone(zone_id)
+	if zone.is_empty():
+		return _err("Unknown zone: %s" % zone_id)
+	# Cold review F5: same distinction as _create_zone — an absent `outline`
+	# key names itself, rather than silently becoming a 0-point outline that
+	# reports the wrong (if truthful) reason.
+	if not args.has("outline"):
+		return _err("outline is required: an array of {x_mm, y_mm} points")
+	var pts = _parse_zone_outline(args.get("outline"))
+	if pts == null:
+		return _err("outline points need x_mm and y_mm")
+
+	var old_pts: PackedVector2Array = data.zone_outline_points(zone)
+	if pts.size() == old_pts.size():
+		var identical := true
+		for i in pts.size():
+			if pts[i] != old_pts[i]:
+				identical = false
+				break
+		if identical:
+			return _ok({"zone_id": zone_id, "point_count": pts.size(), "changed": false})
+
+	var old_count := old_pts.size()
+	if not data.set_zone_outline(zone_id, pts):
+		# Cold review F3: this MUST read exactly like zone_author_error's own
+		# string (pcb_data.gd:1218), not set_zone_outline's push_warning-only
+		# wording ("given" vs "placed") — one rule, one spelling, everywhere a
+		# caller (create_zone or this tool) can actually see it.
+		return _err("A zone outline needs at least %d points (%d placed)." % [
+			_PcbDataScript.MIN_ZONE_OUTLINE_POINTS, pts.size()])
+	data.record_change("edit_zone_outline", {
+		"zone_id": zone_id,
+		"op": "set_outline",
+		"vertex_index": -1,
+		"old_point_count": old_count,
+		"point_count": pts.size(),
+	})
+	# set_zone_outline is deliberately silent about the write (LIVE-DRAG WRITER
+	# contract); the canvas repaints off THIS signal — the same data_changed
+	# relay pcb_canvas.set_data wires to _on_data_changed -> queue_redraw, no
+	# new canvas code involved.
+	data.data_changed.emit()
+	data.save_to_history("Set zone outline")
+	return _ok({"zone_id": zone_id, "point_count": pts.size(), "changed": true})
+
+
+# ── Group parity (B2, item 019fba0386) ───────────────────────────────────────
+# MCP counterparts of the canvas' Ctrl+G / Ctrl+Shift+G gestures
+# (pcb_canvas._group_selection / _ungroup_selection) and PCBPanel's offset
+# fields (_commit_member_offset). All three ride pcb_data's group model
+# (A4/A4-stage-2) directly — group_components / ungroup_components /
+# set_member_offset — so an agent's grouping and a human's are the same
+# operation to the board, and minerva_pcb_get_components' group_id/
+# group_members/group_anchor/group_offset fields (already shipped) describe
+# exactly what these three mutate.
+#
+# NO LOCK CONCEPT ON GROUP/UNGROUP: is_group_locked gates the operations that
+# move geometry (translate/rotate/remove/set_member_offset) — a lock protects
+# a physical layout, not the grouping relationship itself. group_components
+# and ungroup_components carry no lock check in the model, and none is added
+# here; only set_group_member_offset (below) can refuse "locked".
+
+## Stamp two or more known components into one group (merging any existing
+## groups among them). ONE journalled undo step: data.group_components already
+## record_change's + data_changed's internally (mirrors create_zone's idiom),
+## so this owes only the closing save_to_history — same label the canvas'
+## Ctrl+G gesture uses ("Group %d components").
+##
+## group_components returns "" for TWO different reasons the model does not
+## distinguish (cold facts, not a model refusal string to relay verbatim):
+## fewer than two REAL components after expansion, or a selection that is
+## ALREADY exactly one group. This tool tells them apart itself — the first is
+## a real error, the second is a no-op reply (changed:false) with the
+## existing group's id and members, the same idiom set_zone_net's current-
+## value guard uses.
+static func _group_components(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var raw = args.get("component_ids", [])
+	if not (raw is Array) or raw.is_empty():
+		return _err("component_ids is required: an array of two or more component ids")
+	var ids: Array[String] = []
+	for cid in raw:
+		ids.append(str(cid))
+
+	var members: Array = data.expand_to_groups(ids)
+	var present: Array[String] = []
+	for cid in members:
+		if data.has_component(cid):
+			present.append(cid)
+	if present.size() < 2:
+		return _err("Grouping needs at least two known components (%d found)." % present.size())
+
+	var group_id: String = data.group_components(ids)
+	if group_id.is_empty():
+		# present.size() >= 2 but nothing was stamped. The ONLY case this
+		# tool's own pre-check (mirroring group_components:457-464) predicts is
+		# "the selection is already exactly one flat group" — but the model's
+		# own floor is the real authority, and re-deriving it here (rather than
+		# asking the model for a reason) is exactly the drift hazard cold
+		# review F2 named: if the model ever refuses for a DIFFERENT reason,
+		# present[0] would not actually be grouped, existing_gid comes back
+		# "", and returning _ok() for it would be a success-shaped reply for a
+		# refused op. Guard that case explicitly instead of trusting the
+		# no-op assumption.
+		var existing_gid: String = data.component_group_id(present[0])
+		if existing_gid.is_empty():
+			return _err("Grouping was refused.")
+		return _ok({
+			"group_id": existing_gid,
+			"member_ids": data.group_member_ids(existing_gid),
+			"changed": false,
+		})
+	var member_ids: Array = data.group_member_ids(group_id)
+	data.save_to_history("Group %d components" % member_ids.size())
+	return _ok({"group_id": group_id, "member_ids": member_ids, "changed": true})
+
+
+## Dissolve the group(s) touched by `group_id` or `component_ids`. Positions
+## are untouched (ungroup_components' own contract) — members simply become
+## independently selectable/movable again. ONE journalled undo step, same
+## label the canvas' Ctrl+Shift+G gesture uses ("Ungroup %d components").
+##
+## Accepts EITHER a group_id (resolved to its member list via
+## group_member_ids, so an unknown group_id is an explicit error) OR
+## component_ids (any member of a touched group pulls in the whole group,
+## ungroup_components' own contract) — group_id takes precedence when both are
+## given. Releasing nothing (every named component already ungrouped) is a
+## no-op reply (changed:false), not an error — the same "nothing to do" shape
+## group_components' merge case uses, not a refusal.
+static func _ungroup(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var group_id_arg: String = str(args.get("group_id", ""))
+	var ids: Array[String] = []
+	if not group_id_arg.is_empty():
+		var members: Array[String] = data.group_member_ids(group_id_arg)
+		if members.is_empty():
+			return _err("Unknown group: %s" % group_id_arg)
+		ids = members
+	else:
+		var raw = args.get("component_ids", [])
+		if not (raw is Array) or raw.is_empty():
+			return _err("component_ids or group_id is required")
+		var known: Array[String] = []
+		for cid in raw:
+			var s := str(cid)
+			ids.append(s)
+			if data.has_component(s):
+				known.append(s)
+		if known.is_empty():
+			return _err("Unknown component(s): %s" % ", ".join(ids))
+
+	var released: Array = data.ungroup_components(ids)
+	if released.is_empty():
+		return _ok({"released": [], "changed": false})
+	data.save_to_history("Ungroup %d components" % released.size())
+	return _ok({"released": released, "changed": true})
+
+
+## Reposition ONE grouped member relative to its group's anchor (A4 stage-2) —
+## the MCP counterpart of PCBPanel's offset LineEdits (_commit_member_offset).
+##
+## set_member_offset returns a BARE bool that conflates four different
+## outcomes (ungrouped, locked, anchor, no-op-already-there) into one `false`,
+## so — same reasoning as _create_zone above — this tool re-derives EACH
+## refusal reason itself, in the model's own check order (component_group_id
+## empty/locked, THEN anchor), before ever calling the model, so the caller
+## gets a specific, stable reason instead of one bare "refused". The no-change
+## comparison is done here too (target position == current position) so a
+## resubmit of the same offset is changed:false and journals nothing, the same
+## guard idiom every other setter in this file uses.
+static func _set_group_member_offset(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var component_id: String = str(args.get("component_id", ""))
+	if component_id.is_empty():
+		return _err("component_id is required")
+	if not data.has_component(component_id):
+		return _err("Unknown component: %s" % component_id)
+	if not (args.get("dx_mm") is float or args.get("dx_mm") is int) \
+			or not (args.get("dy_mm") is float or args.get("dy_mm") is int):
+		return _err("dx_mm and dy_mm are required and must be numbers of millimetres")
+
+	var gid: String = data.component_group_id(component_id)
+	if gid.is_empty():
+		return _err("Component %s is not in a group." % component_id)
+	if data.is_group_locked(gid):
+		return _err("Group is locked — nothing offset.")
+	var anchor_id: String = data.group_anchor_id(gid)
+	if anchor_id == component_id:
+		return _err("The anchor has no editable offset — moving it would move the whole group.")
+
+	var offset := Vector2(float(args.get("dx_mm")), float(args.get("dy_mm")))
+	var anchor_pos: Vector2 = data.get_component(anchor_id).position
+	var target: Vector2 = anchor_pos + offset
+	var comp = data.get_component(component_id)
+	if comp.position == target:
+		return _ok({
+			"component_id": component_id, "group_id": gid,
+			"dx_mm": offset.x, "dy_mm": offset.y, "changed": false,
+		})
+	if not data.set_member_offset(component_id, offset):
+		# Defensive only — every refusal case above (ungrouped/locked/anchor)
+		# is already handled ahead of this call.
+		return _err("Could not set offset for %s." % component_id)
+	data.save_to_history("Offset %s" % component_id)
+	return _ok({
+		"component_id": component_id, "group_id": gid,
+		"dx_mm": offset.x, "dy_mm": offset.y, "changed": true,
+	})
+
+
+# ── Observability (B2, item 019fbb7156) ──────────────────────────────────────
+
+## Structured panel layout state (mode/width/sidebar/drawer/dock/plugin_build
+## — see PCBPanel.get_layout_state's own docs for the full shape, including
+## the plugin_build design choice). Read-only — journals nothing, mutates
+## nothing.
+static func _get_layout_state(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_layout_state"):
+		return _err("PCB panel not available")
+	return _ok(panel.get_layout_state())
 
 
 # ── Host-access helpers (moved verbatim from MCPPcbPanelTools.gd; now the
