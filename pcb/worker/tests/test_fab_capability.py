@@ -77,9 +77,12 @@ def test_edge_cuts_width_is_the_single_source_both_emitters_read():
 
 
 def test_fabrication_critical_outputs_exclude_unemitted_domains():
-    # Paste/fab/silk are never fabrication-critical (unemitted or cosmetic).
-    for domain in ("paste", "fab", "silk"):
+    # Fab/silk are never fabrication-critical (unemitted or cosmetic). Paste
+    # MOVED into the fail-closed set at ff0544f (a lost stencil layer refuses
+    # fabrication) — pinned present, not absent.
+    for domain in ("fab", "silk"):
         assert domain not in fab_capability.FABRICATION_CRITICAL_OUTPUTS
+    assert "paste" in fab_capability.FABRICATION_CRITICAL_OUTPUTS
 
 
 def test_profile_declares_geometry_capability_dimensions():

@@ -590,12 +590,10 @@ def test_v1_requested_outputs_do_not_claim_fab_or_back_silk():
     (review 623 R3/R5), and the aliasing is `is`-identity so the compiler cannot
     drift from the emitter's own accept-set.
 
-    PASTE MOVED. F.Paste/B.Paste are now genuinely emitted (real stencil
-    apertures from real pad geometry), so they belong in K3_EMITTED_LAYERS and a
-    paste-carrying pad no longer warns. The paste output DOMAIN still stays out
-    of V1_FAB_OUTPUTS: a stencil loss is a cosmetic/assembly problem, never a
-    fail-closed fabrication one, which is a separate judgement from whether we
-    emit the layer.
+    PASTE MOVED TWICE. First into K3_EMITTED_LAYERS (real stencil apertures
+    from real pad geometry, c065c2b). Then ff0544f reversed the domain
+    judgement too: the paste OUTPUT is now fail-closed (in V1_FAB_OUTPUTS) —
+    a lost stencil layer refuses fabrication rather than warning.
 
     Still excluded, for two different reasons:
       * F.Fab — KiCad's own .gbrjob calls it ``AssemblyDrawing,Top``. Not fab.
@@ -605,7 +603,8 @@ def test_v1_requested_outputs_do_not_claim_fab_or_back_silk():
     from pcb_worker import fab_capability
     assert V1_FAB_OUTPUTS == fab_capability.FABRICATION_CRITICAL_OUTPUTS
     assert K3_EMITTED_LAYERS is fab_capability.EMITTED_LAYERS
-    assert "paste" not in V1_FAB_OUTPUTS and "fab" not in V1_FAB_OUTPUTS
+    assert "paste" in V1_FAB_OUTPUTS  # fail-closed since ff0544f
+    assert "fab" not in V1_FAB_OUTPUTS
     assert {"F.Paste", "B.Paste"} <= K3_EMITTED_LAYERS
     assert "F.Fab" not in K3_EMITTED_LAYERS
     assert "B.SilkS" not in K3_EMITTED_LAYERS
@@ -907,11 +906,14 @@ def test_non_mapping_component_fails_closed():
 
 
 def test_declared_zones_fail_closed():
+    # Zones are no longer an unsupported feature: the compiler VALIDATES them
+    # (invalid_zone_outline vocabulary, mirroring Go's validateZones). A zone
+    # with no outline still fails closed — under the validation contract.
     board = _one_component_board("R_0805")
     board["zones"] = [{"net": "GND", "layer": "top"}]
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
-    assert "unsupported_board_feature" in _errors(result)
+    assert "invalid_zone_outline" in _errors(result)
 
 
 def test_unknown_component_side_fails_closed():
@@ -943,7 +945,9 @@ def test_empty_zones_mapping_fails_closed():
     board["zones"] = {}  # malformed empty mapping — a declaration, not absence
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
-    assert "unsupported_board_feature" in _errors(result)
+    # A present non-list collection is rejected up front by validate_board_v2,
+    # same shared-boundary contract as test_non_list_traces above.
+    assert "invalid_board_structure" in _errors(result)
 
 
 def test_empty_zones_list_is_allowed():
@@ -1901,9 +1905,25 @@ def test_missing_design_rules_fails_closed():
 
 
 def test_non_two_layer_stack_fails_closed():
+    # Canonical layer vocabulary is top/bottom only, so a non-two-layer stack
+    # can be refused at either of two gates. Pin BOTH: a stack of valid names
+    # with the wrong count hits unsupported_layer_stack; a stack naming a
+    # non-canonical layer hits invalid_layer_name before the count check.
+    # Every non-two-layer shape now has its own granular refusal code from
+    # up-front validation, which shadows _require_two_layer's blanket
+    # unsupported_layer_stack (still present as defence in depth, but not
+    # reachable through compile_board's validated path). Pin the granular trio.
+    result = compile_board(_minimal_board(layers=["bottom", "top"]))
+    assert isinstance(result, ResolutionFailure)
+    assert "invalid_layer_stack_order" in _errors(result)
+
+    result = compile_board(_minimal_board(layers=["top"]))
+    assert isinstance(result, ResolutionFailure)
+    assert "incomplete_layer_stack" in _errors(result)
+
     result = compile_board(_minimal_board(layers=["top", "inner1", "bottom"]))
     assert isinstance(result, ResolutionFailure)
-    assert "unsupported_layer_stack" in _errors(result)
+    assert "invalid_layer_name" in _errors(result)
 
 
 def test_missing_outline_fails_closed():
@@ -2291,7 +2311,26 @@ def _host_for_design_rules(frag: dict) -> dict:
     }
 
 
-_DOC_SPLICERS = {"pins": _host_for_pins, "design_rules": _host_for_design_rules}
+def _host_for_components(frag: dict) -> dict:
+    """A board hosting a doc fragment's components verbatim. Fragments written
+    for prose (e.g. the grouping example) may omit footprint/layer — supply
+    compiler-required fields without overwriting anything the fragment says."""
+    comps = []
+    for c in frag["components"]:
+        comp = {"footprint": "R_0805", "rotation_deg": 0, "layer": "top"}
+        comp.update(c)
+        comps.append(comp)
+    return {
+        "version": 1, "name": "components-host", "width_mm": 60, "height_mm": 60,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": comps,
+    }
+
+
+_DOC_SPLICERS = {"pins": _host_for_pins, "design_rules": _host_for_design_rules,
+                 "components": _host_for_components}
 
 
 @pytest.mark.parametrize("outputs", [V1_FAB_OUTPUTS, V1_ROUTING_OUTPUTS],

@@ -17,12 +17,20 @@ from pcb_worker import kicad
 # Round-trip + empty-string defaults
 # ---------------------------------------------------------------------------
 
+import pytest
+
+
 def test_canon_to_kicad_basic_and_default():
     assert layers.canon_to_kicad("top") == "F.Cu"
     assert layers.canon_to_kicad("bottom") == "B.Cu"
-    # empty -> F.Cu (mirrors route_bridge._canon_layer)
-    assert layers.canon_to_kicad("") == "F.Cu"
-    assert layers.canon_to_kicad(None) == "F.Cu"
+    # empty/None now FAIL CLOSED (ValueError) — the silent F.Cu default was
+    # killed with the epoch-6 contract change; mirrors the GD-side pin in
+    # pcb/tests/gd/test_layer_stack.gd (chore 019fb59164b6).
+    import pytest
+    with pytest.raises(ValueError):
+        layers.canon_to_kicad("")
+    with pytest.raises(ValueError):
+        layers.canon_to_kicad(None)
     # unknown / already-KiCad passes through
     assert layers.canon_to_kicad("F.Cu") == "F.Cu"
 
