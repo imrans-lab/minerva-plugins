@@ -28,6 +28,7 @@ func v1BoardWithChildren() *Board {
 		Traces:        []Trace{{Net: "N", Points: []Point{{XMM: 1, YMM: 1}, {XMM: 2, YMM: 2}}}, {Net: "N", Points: []Point{{XMM: 3, YMM: 3}, {XMM: 4, YMM: 4}}}},
 		Vias:          []Via{{XMM: 5, YMM: 5}},
 		MountingHoles: []Hole{{XMM: 1, YMM: 1, DiameterMM: 3}},
+		Cutouts:       []Cutout{{Outline: []Point{{XMM: 2, YMM: 2}, {XMM: 4, YMM: 2}, {XMM: 4, YMM: 4}}}},
 	}
 }
 
@@ -42,7 +43,7 @@ func TestMigrateMintsAndBumpsVersion(t *testing.T) {
 	if b.Version != 2 {
 		t.Fatalf("version: want 2, got %d", b.Version)
 	}
-	wantMinted := 1 + len(b.Traces) + len(b.Vias) + len(b.MountingHoles) // board + children
+	wantMinted := 1 + len(b.Traces) + len(b.Vias) + len(b.MountingHoles) + len(b.Cutouts) // board + children
 	if n != wantMinted {
 		t.Fatalf("minted count: want %d, got %d", wantMinted, n)
 	}
@@ -59,6 +60,12 @@ func TestMigrateMintsAndBumpsVersion(t *testing.T) {
 	}
 	if !isMintedID("hole", b.MountingHoles[0].ID) {
 		t.Errorf("hole id not minted-shape: %q", b.MountingHoles[0].ID)
+	}
+	// A cutout mints like every other id-bearing entity — the half of the pair
+	// whose other half is the cutout id loop in Validate. Drop this mint and a
+	// migrated board carrying a cutout fails unminted_persistent_id instead.
+	if !isMintedID("cutout", b.Cutouts[0].ID) {
+		t.Errorf("cutout id not minted-shape: %q", b.Cutouts[0].ID)
 	}
 	// Distinct entities get distinct ids.
 	if b.Traces[0].ID == b.Traces[1].ID {
@@ -104,9 +111,9 @@ func TestMigrateReMintsLegacyOrdinalIds(t *testing.T) {
 	if b.Vias[0].ID == "via_legacy" || !isMintedID("via", b.Vias[0].ID) {
 		t.Errorf("legacy via id not re-minted: %q", b.Vias[0].ID)
 	}
-	// board + trace[0] + trace[1] + via + hole all needed minting.
-	if n != 5 {
-		t.Fatalf("minted count: want 5 (all unminted), got %d", n)
+	// board + trace[0] + trace[1] + via + hole + cutout all needed minting.
+	if n != 6 {
+		t.Fatalf("minted count: want 6 (all unminted), got %d", n)
 	}
 }
 
@@ -123,9 +130,9 @@ func TestMigratePreservesWellFormedIds(t *testing.T) {
 	if b.ID != keep {
 		t.Errorf("well-formed board id churned: got %q, want %q", b.ID, keep)
 	}
-	// board id preserved → only the 2 traces + via + hole minted.
-	if n != 4 {
-		t.Fatalf("minted count: want 4 (board id preserved), got %d", n)
+	// board id preserved → only the 2 traces + via + hole + cutout minted.
+	if n != 5 {
+		t.Fatalf("minted count: want 5 (board id preserved), got %d", n)
 	}
 }
 

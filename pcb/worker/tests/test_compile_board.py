@@ -851,6 +851,47 @@ def test_empty_zones_list_is_allowed():
     assert isinstance(compile_board(board), ResolutionSuccess)
 
 
+# --- cutouts: authorable, NOT compilable -------------------------------------
+# These three pin the fail-closed keystone of the cutout contract (campaign 2
+# epoch B). A cutout is a modeled, validated, round-tripping entity that the
+# compiler REFUSES outright — because ir_projection.outline_frame silently
+# degrades a ProfileOutline to its bounding box and drops every cutout, so a
+# compiled cutout would ship a SOLID board (docket 019fbd30f7). If the refusal
+# is ever relaxed, these tests are what says so out loud.
+
+
+def test_declared_cutouts_fail_closed():
+    board = _one_component_board("R_0805")
+    # A STRUCTURALLY VALID cutout — it clears the shared boundary and is refused
+    # by the unsupported-feature denylist, which is the behaviour under test.
+    # (A malformed one would be caught earlier and would prove nothing here.)
+    board["cutouts"] = [{"outline": [{"x_mm": 4, "y_mm": 4}, {"x_mm": 8, "y_mm": 4},
+                                     {"x_mm": 8, "y_mm": 8}]}]
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    assert "unsupported_board_feature" in _errors(result)
+
+
+def test_empty_cutouts_mapping_fails_closed():
+    board = _one_component_board("R_0805")
+    board["cutouts"] = {}  # malformed empty mapping — a declaration, not absence
+    result = compile_board(board)
+    assert isinstance(result, ResolutionFailure)
+    # Fails closed at the SHARED BOUNDARY, one step earlier than the denylist:
+    # `cutouts` is an entity-list key on both sides (entityListKeys in yaml.go,
+    # the tuple in board_validate.py), so a non-list container is
+    # invalid_board_structure and compile_board returns before the denylist runs.
+    # Either code is a refusal; asserting the one the system actually emits is
+    # what keeps this test honest about WHERE the gate is.
+    assert "invalid_board_structure" in _errors(result)
+
+
+def test_empty_cutouts_list_is_allowed():
+    board = _one_component_board("R_0805")
+    board["cutouts"] = []  # explicitly nothing declared
+    assert isinstance(compile_board(board), ResolutionSuccess)
+
+
 def test_string_plated_fails_closed():
     board = _minimal_board(mounting_holes=[{"x_mm": 5, "y_mm": 5, "diameter_mm": 3.2,
                                             "plated": "false"}])
