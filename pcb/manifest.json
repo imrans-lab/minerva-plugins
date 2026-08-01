@@ -553,6 +553,31 @@
       }
     },
     {
+      "name": "minerva_pcb_list_vias",
+      "description": "List every VIA on the board — the plated holes that carry a net from one copper layer to another. Read-only; journals nothing. Returns a via_count plus one entry per via: {via_id, x_mm, y_mm, net_name, from_layer, to_layer, size_mm, drill_mm}. Use this to answer \"which vias exist and where\" without pulling the whole fabrication payload: minerva_pcb_export_trace_geometry also carries a vias[] block, but that call walks every trace segment on the board and ABORTS entirely if any trace sits on a layer it cannot name, so an unrelated bad layer can make the via list unreadable. Both read the same board state, so the two never disagree. `via_id` is ABSENT (not blank) on a via restored from a board file predating stable via ids — such a via has no identity, so it cannot be deleted by id and cannot be selected on the canvas either. NOTE: minerva_pcb_add_via is NOT the counterpart of this tool — it edits a route-hint PROPOSAL, not the board, so nothing it adds appears here. Board vias are created by committing routes (minerva_pcb_apply_route_hints with commit, or minerva_pcb_import_trace_geometry); they are removed by minerva_pcb_delete_via or minerva_pcb_delete_traces' via_ids.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_delete_via",
+      "description": "Delete ONE board via by id. Exactly one journalled, undoable step — a single undo puts the via back. Get the id from minerva_pcb_list_vias (or from the `id` on each via in minerva_pcb_export_trace_geometry). Returns {deleted, net_name, x_mm, y_mm, remaining_via_count}. An unknown via_id — including an empty one, which is what an id-less legacy via yields — is an ERROR, never a silent no-op: nothing is removed and nothing is journalled. This deletes the via ONLY; the traces meeting it are left exactly as they are, which can leave copper that changes layer with nothing connecting it, so check the routing afterwards. To remove several vias at once (or vias together with traces) in a single undo step, use minerva_pcb_delete_traces with via_ids instead. The human's Delete key, trash button and eraser on the canvas remove vias through this same model path and the same undo history.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "via_id": {"type": "string", "description": "Via id to delete (as reported by minerva_pcb_list_vias)"}
+        },
+        "required": ["editor_name", "via_id"]
+      }
+    },
+    {
       "name": "minerva_pcb_get_preference",
       "description": "Read one PCB plugin preference. Plugin-scoped and persistent across app restarts; NOT a Minerva core preference. Returns {key, value, stored, default, description} plus min/max where the key is bounded — `stored` distinguishes \"the user/agent actually chose this\" from \"never chosen, reading the default\", which is what decides whether the preference is consulted at all. Read-only: journals nothing, writes nothing. An unknown key is an error that lists the keys that do exist. Known keys: trace_width_mm.",
       "executor": "panel",

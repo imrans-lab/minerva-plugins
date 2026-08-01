@@ -1054,6 +1054,107 @@ func remove_via_by_id(via_id: String) -> bool:
 	data_changed.emit()
 	return true
 
+
+## The via carrying `via_id`, or {} when none does. The identity-keyed read to
+## put beside remove_via_by_id, so a caller that has an id never has to walk
+## `vias` itself (and never has to reproduce find_via_index's load-bearing
+## empty-id guard — "" resolves to {} here for exactly that reason).
+func get_via(via_id: String) -> Dictionary:
+	var index := find_via_index(via_id)
+	return vias[index] if index >= 0 else {}
+
+
+## A via's centre in board mm, whatever shape the stored "position" happens to
+## be. ONE parser for the three shapes that reach this file: Vector2 (what
+## _load_vias normalises to), {x,y} (what a caller-built dict or a JSON
+## round-trip carries) and "(x, y)" (Vector2 stringified by a JSON round-trip).
+##
+## Written as a static helper rather than left inlined because via geometry now
+## has FOUR readers — the canvas draw loop, the click pick, the marquee sweep and
+## the MCP list tool — and four hand-rolled copies of a three-way shape check is
+## exactly how one of them ends up silently returning ZERO for a legitimate via.
+static func via_position(via: Dictionary) -> Vector2:
+	var pos = via.get("position", Vector2.ZERO)
+	if pos is Vector2:
+		return pos
+	if pos is Dictionary:
+		return Vector2(pos.get("x", 0.0), pos.get("y", 0.0))
+	if pos is String:
+		var s: String = str(pos).replace("(", "").replace(")", "").strip_edges()
+		var parts: PackedStringArray = s.split(",")
+		if parts.size() >= 2:
+			return Vector2(float(parts[0].strip_edges()), float(parts[1].strip_edges()))
+	return Vector2.ZERO
+
+
+## A via's outer radius in board mm (half its "size", the outer copper diameter).
+## Defaults match add_via's own documented defaults, so a via dict that omits the
+## key measures the same everywhere.
+static func via_radius(via: Dictionary) -> float:
+	return float(via.get("size", 0.8)) / 2.0
+
+
+## Which via a click at `position` picks, or "".
+##
+## `min_radius` is the VIEW's minimum click target in board mm (the canvas passes
+## a fixed screen-pixel radius divided by zoom): a 0.8mm via is a ~4px disc at a
+## typical zoom, which is a target no hand can hit. The pick radius is therefore
+## max(the via's own radius, min_radius) — the via's real copper when zoomed in,
+## a comfortable target when zoomed out. Omitted (the default 0.0) means "pick by
+## true geometry only", which is what the model's own tests want.
+##
+## TIES GO TO THE NEAREST CENTRE, not the smallest via: two vias overlapping at
+## all is a board error, and "the one I clicked closest to" is the only answer a
+## user can predict. (Contrast get_trace_at, which prefers the SHORTEST match —
+## that rule exists because a long trace legitimately passes under a short one.)
+##
+## ID-LESS VIAS ARE SKIPPED, deliberately. Selection stores bare id strings, so a
+## via restored from a board file predating stable via ids (no "id" key — see
+## find_via_index) has nothing to store: picking it would put "" in the selection,
+## which find_via_index then refuses to resolve, giving a via that highlights and
+## cannot be deleted. Not pickable is the honest outcome; the via still draws, and
+## export_trace_geometry still reports it as the id-less via it is.
+func get_via_at(position: Vector2, min_radius: float = 0.0) -> String:
+	var best_id: String = ""
+	var best_distance: float = INF
+	for via in vias:
+		var via_id := str(via.get("id", ""))
+		if via_id.is_empty():
+			continue
+		var centre := via_position(via)
+		var reach := maxf(via_radius(via), min_radius)
+		var distance := centre.distance_to(position)
+		if distance <= reach and distance < best_distance:
+			best_distance = distance
+			best_id = via_id
+	return best_id
+
+
+## Every via the marquee `region` touches — the via twin of
+## get_traces_in_region / get_zones_in_region.
+##
+## GEOMETRY RULE: a via IS its disc, so the sweep is an exact circle-vs-rect
+## intersection (nearest point of the rect to the centre, within the radius).
+## NO click-target slack is added here, and that asymmetry with get_via_at is the
+## point: a marquee is drawn around what the user can see, so it should grab
+## exactly the copper inside it, while a click is a single point that needs a
+## target. Components and traces already sweep by true geometry the same way.
+##
+## Skips id-less vias for the same reason get_via_at does.
+func get_vias_in_region(region: Rect2) -> Array[String]:
+	var result: Array[String] = []
+	for via in vias:
+		var via_id := str(via.get("id", ""))
+		if via_id.is_empty():
+			continue
+		var centre := via_position(via)
+		var nearest := Vector2(
+			clampf(centre.x, region.position.x, region.position.x + region.size.x),
+			clampf(centre.y, region.position.y, region.position.y + region.size.y))
+		if nearest.distance_to(centre) <= via_radius(via):
+			result.append(via_id)
+	return result
+
 #endregion
 
 

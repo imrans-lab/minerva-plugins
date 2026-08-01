@@ -141,6 +141,10 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _set_zone_layer(host, args)
 		"minerva_pcb_set_trace_width":
 			return _set_trace_width(host, args)
+		"minerva_pcb_list_vias":
+			return _list_vias(host, args)
+		"minerva_pcb_delete_via":
+			return _delete_via(host, args)
 		"minerva_pcb_get_preference":
 			return _get_preference(host, args)
 		"minerva_pcb_set_preference":
@@ -2162,6 +2166,95 @@ static func _list_zones(host, args: Dictionary) -> Dictionary:
 			"point_count": data.zone_outline_points(zone).size(),
 		})
 	return _ok({"zone_count": zones_arr.size(), "zones": zones_arr})
+
+
+## List every board via (item 019fbb96cf). Read-only — journals nothing.
+##
+## WHY THIS EXISTS when export_trace_geometry already emits a vias[] block: that
+## tool's payload is FABRICATION geometry — it aborts the whole export when any
+## trace sits on a layer it cannot name, it emits KiCad layer names, and it walks
+## every trace segment on the board to produce them. An agent that only wants to
+## know which vias exist should not have to survive an unrelated trace's bad
+## layer, nor parse thousands of segments to reach the via list. The two are kept
+## agreeing by construction all the same: both read data.vias directly, and both
+## emit `id` only when the via really carries one.
+##
+## THIS IS NOT THE PARTNER OF minerva_pcb_add_via. That tool edits a route-hint
+## PROPOSAL annotation, not the board (it splits a proposed segment and inserts a
+## via into the proposal), so it neither creates nor can name anything listed
+## here. Board vias are created by committing routes — apply_route_hints with
+## commit, or import_trace_geometry. The honest siblings of this tool are
+## minerva_pcb_delete_via (below) and minerva_pcb_delete_traces' via_ids.
+##
+## ID-LESS VIAS ARE LISTED, with the key absent rather than blank — the same
+## claim export_trace_geometry makes: a via from a board file predating stable
+## via ids genuinely has no identity, and "absent" says that, while "" would
+## claim its identity is the empty string. Such a via cannot be deleted by id and
+## cannot be clicked on the canvas either; both surfaces agree about that.
+static func _list_vias(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var vias_arr: Array = []
+	for via in data.vias:
+		var pos: Vector2 = data.via_position(via)
+		var entry := {
+			"x_mm": snapped(pos.x, 0.0001),
+			"y_mm": snapped(pos.y, 0.0001),
+			"net_name": str(via.get("net_name", "")),
+			"from_layer": str(via.get("from_layer", "")),
+			"to_layer": str(via.get("to_layer", "")),
+			"size_mm": float(via.get("size", 0.8)),
+			"drill_mm": float(via.get("drill", 0.4)),
+		}
+		var via_id: String = str(via.get("id", ""))
+		if not via_id.is_empty():
+			entry["via_id"] = via_id
+		vias_arr.append(entry)
+	return _ok({"via_count": vias_arr.size(), "vias": vias_arr})
+
+
+## Delete ONE board via by id — one journalled, undoable step.
+##
+## The single-target twin of minerva_pcb_delete_traces' via_ids array, and the
+## agent's half of what the human's Delete key and eraser now do on the canvas.
+## Both ride the SAME model call (remove_via_by_id) and the same undo history, so
+## an agent's delete and a human's are indistinguishable to the board.
+##
+## Mutate-then-snapshot (bug 019fb5ad791c): remove first, save_to_history after —
+## snapshotting before the removal makes redo silently replay the pre-delete
+## state. remove_via_by_id journals the "remove_via" entry itself; this owes only
+## the single history step, per the model's house rule that no mutator snapshots
+## itself.
+##
+## Unknown (or empty) via_id is an explicit error, never a silent no-op — the
+## same contract delete_zone keeps. The empty case is routed through the model's
+## find_via_index rather than short-circuited here, for the reason _delete_traces
+## spells out: "" would otherwise match the first via carrying no id key and
+## delete copper the caller never named, and the guard that prevents it must stay
+## the one being executed.
+static func _delete_via(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var via_id: String = str(args.get("via_id", ""))
+	var via: Dictionary = data.get_via(via_id)
+	if via.is_empty():
+		return _err("Unknown via: %s" % via_id)
+	# Read the reply fields BEFORE the removal — afterwards the dict is off the
+	# board and `data.vias` no longer holds it.
+	var pos: Vector2 = data.via_position(via)
+	var net_name: String = str(via.get("net_name", ""))
+	if not data.remove_via_by_id(via_id):
+		return _err("Unknown via: %s" % via_id)
+	data.save_to_history("Delete via " + via_id)
+	return _ok({
+		"deleted": via_id,
+		"net_name": net_name,
+		"x_mm": snapped(pos.x, 0.0001),
+		"y_mm": snapped(pos.y, 0.0001),
+		"remaining_via_count": data.vias.size(),
+	})
 
 
 ## Describe one zone in full, including its outline. Read-only — journals

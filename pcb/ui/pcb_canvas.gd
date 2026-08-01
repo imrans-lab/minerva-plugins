@@ -140,17 +140,39 @@ var trace_layer_filter: String = "all":
 ## the panel's property inspector reads components — so a pair list would be
 ## unpacked back into these three at every use site.
 ##
-## KIND_* below are the id strings that name the three lists in one place; every
-## generic selection call takes one (see _selection_of / _entity_at). New kinds
-## (vias, mounting holes) join by adding a constant, a list, and their cases in
-## _selection_of / _entity_anchor / _capture_drag_origins / _apply_drag_delta.
+## KIND_* below are the id strings that name the four lists in one place; every
+## generic selection call takes one (see _selection_of / _entity_at).
+##
+## THE FULL EXTENSION CHECKLIST, written down because vias (item 019fbb96cf)
+## proved the short version was not enough — a kind that joins _entity_at and
+## nothing else selects and then cannot be acted on at all, silently. A new kind
+## needs a constant, a list, and a case in EVERY one of these:
+##   _selection_of      — the id list behind the kind (the choke point)
+##   _entity_at         — the click pick, and its rung in the frozen ladder
+##   _entity_anchor     — the point a drag snaps against
+##   _capture_drag_origins / _apply_drag_delta — the move gesture (a kind that
+##                        does not move says so THERE, in a comment, rather than
+##                        being left out and looking like an oversight)
+##   _is_entity_locked  — the lock rule, even when the answer is "no such concept"
+##   _remove_entity     — the journalled remover behind Delete and the eraser
+##   _erase_label       — the eraser's per-click history label
+##   _delete_selection  — the LITERAL kind array it loops (it is not derived)
+##   _end_selection_drag — the journal loops that COMMIT a move; a movable kind
+##                        absent here moves live but records nothing (silent
+##                        undo hole — cold-review B1u2 F1)
+##   _finalize_box_selection — the marquee sweep (also not derived)
+##   selection_count / _clear_selection / get_selected_* — the counts, the clear
+##                        and the public read surface
+##   the draw loop      — a selected entity with no halo is invisible feedback
 const KIND_COMPONENT := "component"
 const KIND_TRACE := "trace"
 const KIND_ZONE := "zone"
+const KIND_VIA := "via"
 
 var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
 var selected_zone_ids: Array[String] = []
+var selected_via_ids: Array[String] = []
 var hovered_component: String = ""
 
 ## The component the user last CLICKED, when it is still selected — Illustrator's
@@ -184,6 +206,15 @@ var is_dragging_selection: bool = false
 var _drag_anchor_start: Vector2 = Vector2.ZERO
 var _drag_origins: Dictionary = {}
 var drag_start_mouse: Vector2 = Vector2.ZERO
+
+## Armed at press when the selection contains vias, fired ONCE on the first real
+## motion of that gesture: vias do not move (see _capture_drag_origins), and a
+## refusal nobody can see is indistinguishable from a bug. Armed at press but
+## fired on MOTION deliberately — announcing at press would flash the status bar
+## on every plain click on a via, which is a selection, not a refused drag.
+## Cleared on release, so one gesture is at most one notice.
+var _via_drag_notice_armed: bool = false
+const _VIA_DRAG_NOTICE_PX := 3.0
 
 var is_box_selecting: bool = false
 var box_select_start: Vector2 = Vector2.ZERO
@@ -807,18 +838,15 @@ func _draw_traces() -> void:
 		for undeclared_trace in by_layer[undeclared_id]:
 			_draw_single_trace(undeclared_trace, str(undeclared_id))
 
-	# Vias (on top of all traces).
+	# Vias (on top of all traces) — which is also why the click ladder gives them
+	# the tie against a trace running through them (see _entity_at).
 	for via in data.vias:
-		var pos_data = via.get("position", Vector2.ZERO)
-		var pos: Vector2
-		if pos_data is Vector2:
-			pos = world_to_screen(pos_data)
-		elif pos_data is Dictionary:
-			pos = world_to_screen(Vector2(pos_data.get("x", 0), pos_data.get("y", 0)))
-		else:
-			continue
+		# ONE position parser, shared with the click pick and the marquee sweep
+		# (PCBData.via_position), so what is drawn and what is hit can never drift
+		# apart on a via whose stored position is a dict or a stringified Vector2.
+		var pos: Vector2 = world_to_screen(PCBDataScript.via_position(via))
 
-		var outer_radius: float = (via.get("size", 0.8) / 2.0) * zoom
+		var outer_radius: float = maxf((via.get("size", 0.8) / 2.0) * zoom, 2.0)
 		var inner_radius: float = (via.get("drill", 0.4) / 2.0) * zoom
 
 		var color := pad_copper_color
@@ -826,7 +854,18 @@ func _draw_traces() -> void:
 		if net:
 			color = net.color
 
-		draw_circle(pos, maxf(outer_radius, 2.0), color)
+		# Selection halo — the trace idiom (_draw_single_trace), transposed to a
+		# disc: a translucent ring of the shared selection colour UNDER the via,
+		# so the via's own net colour still reads through. Drawn at the pick
+		# radius, not the copper radius, so what is highlighted is what a click
+		# would actually claim.
+		var is_selected: bool = str(via.get("id", "")) in selected_via_ids
+		if is_selected:
+			var halo_radius: float = maxf(outer_radius, VIA_HIT_RADIUS_PX)
+			draw_circle(pos, halo_radius + 3.0, Color(trace_selected_color, 0.25))
+			draw_arc(pos, halo_radius + 3.0, 0.0, TAU, 24, trace_selected_color, 2.0)
+
+		draw_circle(pos, outer_radius, color)
 		draw_circle(pos, maxf(inner_radius, 1.0), drill_hole_color)
 
 
@@ -1690,6 +1729,12 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 		if event.pressed:
 			grab_focus()
 
+			# Defensive: a lost release (focus stolen mid-gesture) can leave the
+			# via-drag notice armed; a fresh press starts a fresh gesture, so the
+			# stale arming ends here (cold-review B1u2 F2, same shape as the
+			# zone-vertex right-consumed clear below).
+			_via_drag_notice_armed = false
+
 			# Pin inspector (WC-1): click selects the nearest pad within radius,
 			# or clears when empty space is clicked. Owns the click outright —
 			# no select/drag/box-select fallthrough while the mode is active.
@@ -1807,6 +1852,10 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_end_zone_vertex_drag()
 				queue_redraw()
 				return
+
+			# One gesture is at most one via-drag notice: whether it fired or the
+			# press never travelled far enough, the arming ends with the press.
+			_via_drag_notice_armed = false
 
 			# Release a left-drag pan (Pan tool / Space-drag).
 			if is_panning:
@@ -1934,6 +1983,19 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		pan_offset = pan_start_offset + (event.position - pan_start_mouse)
 		view_changed.emit()
 		queue_redraw()
+
+	# The via-drag refusal, announced once per gesture on the first REAL motion
+	# (see _via_drag_notice_armed). Checked outside the is_dragging_selection
+	# block on purpose: a selection of vias ONLY captures nothing, so that flag is
+	# false and the drag the user is attempting would otherwise be completely
+	# silent — which is the case that most looks like a broken canvas.
+	if _via_drag_notice_armed \
+			and (event.position - drag_start_mouse).length() >= _VIA_DRAG_NOTICE_PX:
+		_via_drag_notice_armed = false
+		var via_count := selected_via_ids.size()
+		component_lock_changed.emit(
+			"%d via%s stayed put — vias move with their copper, in the routing tools"
+			% [via_count, "" if via_count == 1 else "s"])
 
 	if is_dragging_selection:
 		# The ANCHOR is what snaps; everything else in the selection takes the
@@ -2100,6 +2162,8 @@ func _selection_of(kind: String) -> Array[String]:
 			return selected_trace_ids
 		KIND_ZONE:
 			return selected_zone_ids
+		KIND_VIA:
+			return selected_via_ids
 	var empty: Array[String] = []
 	return empty
 
@@ -2183,9 +2247,10 @@ func _toggle_entity_selected(kind: String, entity_id: String) -> void:
 		_add_to_selection(kind, entity_id)
 
 
-## Total selected entities across all three kinds.
+## Total selected entities across all four kinds.
 func selection_count() -> int:
-	return selected_components.size() + selected_trace_ids.size() + selected_zone_ids.size()
+	return selected_components.size() + selected_trace_ids.size() \
+		+ selected_zone_ids.size() + selected_via_ids.size()
 
 
 func has_selection() -> bool:
@@ -2201,6 +2266,7 @@ func _clear_selection() -> void:
 	selected_components.clear()
 	selected_trace_ids.clear()
 	selected_zone_ids.clear()
+	selected_via_ids.clear()
 	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
 	# there is nothing for it to belong to (cold-review F1 — the deselect click
@@ -2241,17 +2307,50 @@ func _finalize_box_selection() -> void:
 	for zone_id in data.get_zones_in_region(select_rect, _zone_visible):
 		_add_to_selection(KIND_ZONE, zone_id)
 
+	# Vias sweep under the SAME rule the via click pick honours (_via_visible),
+	# exactly as the three kinds above do. The visibility gate is applied HERE
+	# rather than passed into the model as a per-via Callable — unlike traces and
+	# zones, whose visibility is a per-entity question (which layer is this on),
+	# a via's is board-wide (show_traces), so a callable would be one that ignores
+	# its own argument. See _via_visible.
+	if _via_visible():
+		for via_id in data.get_vias_in_region(select_rect):
+			_add_to_selection(KIND_VIA, via_id)
+
 	selection_changed.emit()
 
 
 ## What the Select tool picks at `world_pos`, as [kind, id]; ["", ""] for empty
-## space. The PICK ORDER is unchanged from before mixed selection — component,
-## then trace, then zone — so which entity a click claims never moved; only what
-## the caller then does with it did.
+## space. The pick order is component, then VIA, then trace, then zone.
+##
+## THE VIA RUNG SITS ABOVE TRACE — the one deliberate decision this unit made
+## about the ladder (item 019fbb96cf), and the reasoning is worth keeping:
+##
+##  * PAINT ORDER. Vias draw ON TOP of every trace (_draw_traces paints them last,
+##    after the whole layer stack). "What you see on top is what you click" is the
+##    rule every direct-manipulation surface keeps, and it is the rule the zone
+##    vertex handles already keep on this canvas.
+##  * A VIA IS ALWAYS UNDER A TRACE. Vias exist precisely where copper changes
+##    layer, so essentially EVERY via has a trace passing through it. Below trace,
+##    the via rung would be dead code — no click could ever reach it, which is a
+##    worse outcome than any tie rule.
+##  * THE VIA'S CLAIM IS TIGHT, not greedy. It reaches only its own disc (plus a
+##    minimum click target, see _via_at), while a trace is claimable along its
+##    whole length. So the trace loses ONLY inside the via disc and wins
+##    everywhere else — including one via-radius further along the same copper.
+##
+## THE TIE RULE, stated once: a click inside the via's disc picks the VIA; the
+## same trace, clicked anywhere outside that disc, picks the TRACE.
+##
+## Zones stay last, unchanged: a pour is the largest thing on the board and must
+## never shadow the copper drawn over it.
 func _entity_at(world_pos: Vector2) -> Array:
 	var comp_id: String = _component_at(world_pos)
 	if not comp_id.is_empty():
 		return [KIND_COMPONENT, comp_id]
+	var via_id: String = _via_at(world_pos)
+	if not via_id.is_empty():
+		return [KIND_VIA, via_id]
 	var trace_id: String = _trace_at(world_pos)
 	if not trace_id.is_empty():
 		return [KIND_TRACE, trace_id]
@@ -2259,6 +2358,41 @@ func _entity_at(world_pos: Vector2) -> Array:
 	if not zone_id.is_empty():
 		return [KIND_ZONE, zone_id]
 	return ["", ""]
+
+
+## Minimum via click target, in SCREEN pixels of radius — divided by zoom at the
+## point of use, the px-constants-through-the-zoom idiom this file already keeps
+## for ZONE_VERTEX_HIT_PX and the 3.0/zoom trace tolerance. A 0.8mm via is a ~4px
+## disc at a working zoom; without a floor it is a target nobody can hit, and
+## with too generous a floor it starts stealing clicks from the trace it sits on.
+## 6.0 (a 12px-wide target) is deliberately SMALLER than ZONE_VERTEX_HIT_PX (9.0):
+## a vertex handle is a handle on an already-selected zone, while a via competes
+## with the copper drawn through it.
+const VIA_HIT_RADIUS_PX := 6.0
+
+
+## Which via a click at `world_pos` picks, or "".
+##
+## VISIBILITY — the trap this pick exists to avoid (the same one _trace_at's note
+## records for copper). Vias are drawn ONLY inside `if show_traces:` (see _draw),
+## so with traces hidden there is no via on screen; a pick that ignored that would
+## select copper the user cannot see. There is deliberately NO layer filter here:
+## the via DRAW has none either (a via spans layers by definition), and the rule
+## is "pick exactly what is drawn". If the draw ever gains a layer filter, this
+## must gain the identical one — that is what _via_visible is for.
+func _via_at(world_pos: Vector2) -> String:
+	if not data or not _via_visible():
+		return ""
+	return data.get_via_at(world_pos, VIA_HIT_RADIUS_PX / zoom)
+
+
+## Is a via drawable in the current view? The via twin of _trace_visible /
+## _zone_visible, and the single source for BOTH the click pick and the box
+## sweep. Takes no via argument because the rule is board-wide: vias ride the
+## show_traces toggle (they are drawn inside _draw_traces) and carry no layer
+## filter of their own.
+func _via_visible() -> bool:
+	return show_traces
 
 
 ## Which trace a click at `world_pos` picks, or "".
@@ -2326,6 +2460,15 @@ func _entity_anchor(kind: String, entity_id: String) -> Vector2:
 			var pts := PCBDataScript.zone_outline_points(data.get_zone(entity_id))
 			if not pts.is_empty():
 				return pts[0]
+		KIND_VIA:
+			# A via IS a point, so its anchor is exact. It is answered here even
+			# though a via never MOVES (see _capture_drag_origins): the anchor is
+			# also the snap reference for a drag STARTED on a via whose selection
+			# holds movable entities, and Vector2.ZERO there would translate the
+			# whole selection to the board origin on the first motion frame.
+			var via: Dictionary = data.get_via(entity_id)
+			if not via.is_empty():
+				return PCBDataScript.via_position(via)
 	return Vector2.ZERO
 
 
@@ -2336,6 +2479,11 @@ func _begin_selection_drag(kind: String, entity_id: String, screen_pos: Vector2)
 	drag_start_mouse = screen_pos
 	_capture_drag_origins()
 	is_dragging_selection = not _drag_origins.is_empty()
+	# Vias in the selection are about to be left behind by whatever this gesture
+	# turns out to be — including "no gesture at all" when the selection is vias
+	# only (nothing captured => is_dragging_selection false). Arm the notice for
+	# BOTH cases here, at the one place a move gesture begins.
+	_via_drag_notice_armed = not selected_via_ids.is_empty()
 
 
 ## Snapshot the pre-drag geometry of every MOVABLE selected entity.
@@ -2383,6 +2531,19 @@ func _capture_drag_origins() -> void:
 		var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
 		if not pts.is_empty():
 			zone_pts[zone_id] = pts
+	# VIAS ARE DELIBERATELY NOT CAPTURED, and this comment is the decision, not a
+	# note about an omission (item 019fbb96cf). A via is not free geometry: it is
+	# the point where one net's copper changes layer, and the trace ends that meet
+	# there are stored separately from it. Dragging the via alone would silently
+	# detach it from its own copper and leave a board that looks routed and is
+	# not. Moving a via therefore belongs to the routing tools, which can move the
+	# trace ends with it — not to the generic select-and-drag gesture.
+	#
+	# Not being captured is ALSO the enforcement: _apply_drag_delta only ever
+	# walks what is in here, so there is no second place a via could be moved
+	# from, and no fourth loop below to forget. The refusal is announced by
+	# _via_drag_notice_armed (see _begin_selection_drag) rather than being silent
+	# — the same "select yes, act no" shape a locked component already has.
 	if not comps.is_empty():
 		_drag_origins[KIND_COMPONENT] = comps
 	if not trace_pts.is_empty():
@@ -2516,6 +2677,16 @@ func _is_entity_locked(kind: String, entity_id: String) -> bool:
 		KIND_TRACE:
 			var trace = data.get_trace(entity_id)
 			return trace != null and trace.locked
+		KIND_VIA:
+			# VIAS HAVE NO LOCK, and this case exists to SAY SO rather than to let
+			# the fall-through below answer by accident (item 019fbb96cf). Checked
+			# the same way KIND_ZONE's answer was: the via dict shape in
+			# pcb_data.gd carries id/position/size/drill/net_name/from_layer/
+			# to_layer and no "locked" key, and there is no via lock in the board
+			# contract on either side of the wire. No lock concept was INVENTED
+			# for this unit — a via is protected by the fact that it cannot be
+			# dragged at all, which is a stronger guarantee than a lock flag.
+			return false
 	return false
 
 
@@ -2560,6 +2731,15 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			return true
 		KIND_ZONE:
 			return data.remove_zone(entity_id)
+		KIND_VIA:
+			# BY ID, never remove_via(index): that sibling is positional and every
+			# removal shifts the vias after it, so a batch delete driven from a
+			# selection would remove the wrong copper from the second entry on.
+			# remove_via_by_id resolves the index fresh at the moment of removal
+			# and journals a "remove_via" entry itself, exactly like the three
+			# removers above — so this path needs no snapshot of its own (the
+			# batch's end_batch, or the eraser's save_to_history, owns that).
+			return data.remove_via_by_id(entity_id)
 	return false
 
 
@@ -2602,7 +2782,10 @@ func _delete_selection() -> void:
 	var removed := 0
 	data.begin_batch()
 
-	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE]:
+	# THIS LITERAL ARRAY IS NOT DERIVED from the KIND_* constants — a kind missing
+	# from it selects, highlights and then survives Delete, silently. It is listed
+	# in the extension checklist at the top of this file for that reason.
+	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA]:
 		for entity_id in _selection_of(kind):
 			# _unit_locked, not _is_entity_locked (A4): a group with ANY locked
 			# member refuses deletion whole, for the same reason it refuses to
@@ -2693,6 +2876,8 @@ func _erase_label(kind: String, entity_id: String) -> String:
 			return "Erase trace"
 		KIND_ZONE:
 			return "Erase zone"
+		KIND_VIA:
+			return "Erase via"
 	return "Erase"
 
 
@@ -3875,6 +4060,12 @@ func get_selected_traces() -> Array[String]:
 ## The selected zone ids (mixed multi-select, 019fb92f8b83).
 func get_selected_zones() -> Array[String]:
 	return selected_zone_ids.duplicate()
+
+
+## The selected via ids (item 019fbb96cf). Completes the per-kind read surface —
+## a caller that means vias must never be handed trace ids, and vice versa.
+func get_selected_vias() -> Array[String]:
+	return selected_via_ids.duplicate()
 
 
 ## Select a component programmatically.

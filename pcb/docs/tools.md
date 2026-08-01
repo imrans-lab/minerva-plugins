@@ -54,6 +54,8 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_set_zone_net` | `data.set_zone_net`; current-value guard before calling the model (below) |
 | `minerva_pcb_set_zone_layer` | `data.set_zone_layer`; current-value guard before calling the model (below) |
 | `minerva_pcb_set_trace_width` | `data.set_trace_width`; one journalled step, current-value guard, out-of-range **refused** (below) |
+| `minerva_pcb_list_vias` | read-only; one entry per board via (`via_id`, `x_mm`, `y_mm`, `net_name`, `from_layer`, `to_layer`, `size_mm`, `drill_mm`) (below) |
+| `minerva_pcb_delete_via` | `data.remove_via_by_id`; one journalled step, unknown/empty id **refused** (below) |
 | `minerva_pcb_get_preference` | read-only; plugin-scoped preference store (below) |
 | `minerva_pcb_set_preference` | validated + clamped write, pushed live into the panel (below) |
 
@@ -117,6 +119,50 @@ order depends on the distinction.
 canvas is armed, so the next trace they draw really is that wide. A human turn
 of that same box writes the preference back, so the agent's read and the human's
 control are two views of one value.
+
+## Board-via tools (`minerva_pcb_list_vias` / `delete_via`, B1-U2)
+
+MCP parity for the via surface the canvas gained in the same unit (a via is now
+a first-class selectable entity: click, marquee, Delete/trash, eraser). Both
+tools ride the same journalled model path the canvas does — `data.vias` for the
+read, `pcb_data.remove_via_by_id` for the delete — so an agent's delete and a
+human's Delete key are indistinguishable to the board and share one undo
+history.
+
+**`minerva_pcb_add_via` is NOT the counterpart of these.** It edits a
+route-hint **proposal annotation** (splitting a proposed segment and inserting a
+via into the proposal, via `PcbRouteHintKind.apply_via_at_point`), not the
+board. Nothing it adds appears in `list_vias`. Board vias are created only by
+committing routes — `apply_route_hints` with `commit`, or
+`import_trace_geometry`. The honest board-via surface is: **create** by
+committing routes, **read** by `list_vias` (or `export_trace_geometry`'s
+`vias[]`), **delete** by `delete_via` (one) or `delete_traces`' `via_ids`
+(several, one undo step). There is deliberately no `move_via`: moving a via
+detaches it from the trace ends that meet it, which is routing-tool work, and
+the canvas refuses the drag for the same reason.
+
+**Why `list_vias` exists alongside `export_trace_geometry`'s `vias[]`:** that
+payload is fabrication geometry — it walks every trace segment on the board and
+**aborts the whole export** when any trace sits on a layer it cannot name, so an
+unrelated bad layer makes the via list unreadable. `list_vias` reads `data.vias`
+directly and answers only "which vias exist and where". Both read the same board
+state, so they cannot disagree.
+
+**`via_id` is absent, not blank, on a legacy via.** A via restored from a board
+file predating stable via ids carries no `id` key. The key is omitted rather
+than emitted as `""`, because "this via has no identity" is a different claim
+from "its identity is the empty string" — the same distinction
+`export_trace_geometry` already makes. Such a via cannot be deleted by id, and
+cannot be selected on the canvas either (`pcb_data.get_via_at` skips it): a
+selection stores bare id strings, so picking it would put `""` in the selection
+and produce a via that highlights and cannot be deleted.
+
+**Unknown `via_id` is always an error**, empty included — never a silent no-op.
+The empty case is routed through `pcb_data.find_via_index` rather than
+short-circuited in the tool, for the reason `delete_traces` spells out: `""`
+would otherwise match the first via carrying no `id` key and delete copper the
+caller never named, and the guard that prevents it has to be the one being
+executed.
 
 ## Zone tools (`minerva_pcb_list_zones` / `describe_zone` / `delete_zone` / `set_zone_net` / `set_zone_layer`, A6)
 
