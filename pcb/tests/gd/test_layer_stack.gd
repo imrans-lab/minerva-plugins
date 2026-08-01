@@ -80,7 +80,18 @@ func _run_contract() -> void:
 	print("-- contract: canon<->kicad + via-span --")
 	check_eq("canon_to_kicad top", PcbLayerStack.canon_to_kicad("top"), "F.Cu")
 	check_eq("canon_to_kicad bottom", PcbLayerStack.canon_to_kicad("bottom"), "B.Cu")
-	check_eq("canon_to_kicad empty -> F.Cu", PcbLayerStack.canon_to_kicad(""), "F.Cu")
+	# FAILS CLOSED (epoch 6): an empty/unrecognised canonical layer id must NOT
+	# silently default to "F.Cu" — canon_to_kicad push_error()s (see
+	# pcb_layer_stack.gd's "FAILS CLOSED" doc comment on canon_to_kicad, which
+	# names the exact message shape: 'PcbLayerStack.canon_to_kicad: unknown
+	# copper layer "<id>" — expected "top", "bottom", "in1"..."in<N>", or a
+	# KiCad copper name ("F.Cu"/"B.Cu"/"In<k>.Cu")') and returns "" instead of a
+	# defaulted alias. The empty-string return IS the refusal signal at this
+	# pure-function boundary — there is no structured error dict here (unlike
+	# the dispatcher-boundary error shapes in other suites); GDScript has no
+	# hook to assert on a push_error's message text from a test script, so the
+	# message content is pinned by the production doc comment instead.
+	check_eq("canon_to_kicad empty -> refuses (returns \"\", not a defaulted F.Cu)", PcbLayerStack.canon_to_kicad(""), "")
 	check_eq("kicad_to_canon F.Cu", PcbLayerStack.kicad_to_canon("F.Cu"), "top")
 	check_eq("kicad_to_canon B.Cu", PcbLayerStack.kicad_to_canon("B.Cu"), "bottom")
 	check_eq("kicad_to_canon empty -> top", PcbLayerStack.kicad_to_canon(""), "top")

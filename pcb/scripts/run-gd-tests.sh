@@ -36,6 +36,23 @@
 # to drive a real PCBPanel instead of a stand-in. A stock Minerva checkout has
 # both; this script does not vendor or fake them.
 #
+# SETUP STEP (chore 019fb6632a4e / round B5u1): any suite that exercises a
+# REAL plugin subprocess start (PluginManager.start_plugin -> MCP STDIO
+# transport — e.g. test_pcb_backend_lifecycle.gd, test_pcb_plugin_smoke.gd)
+# needs the Minerva checkout's `terminal` GDExtension BUILT, i.e.
+# <minerva-checkout>/src/bin/libterminal.<platform>.*.so/.dylib/.dll must
+# exist (see CLAUDE.md "Building C++ Extensions" / scripts/build-extensions.sh
+# in the Minerva repo). That extension registers the native `SubProcess`
+# class MCPServerConnection.gd's STDIO transport requires
+# (ClassDB.class_exists("SubProcess")); a checkout/scaffold without a src/bin/
+# directory at all has never run build-extensions.sh and fails EVERY
+# start_plugin call with "Subprocess failed to start: Unavailable" /
+# "SubProcess GDExtension not available - STDIO transport not supported" —
+# for every plugin, not just pcb. This is a scaffold-config gap, not a
+# pcb-plugin defect: verified on this host by running the pcb-plugin binary
+# directly (`pcb/pcb-plugin --help`) and confirming it starts fine; the
+# failure is entirely on the Godot-host side of the STDIO pipe.
+#
 # Suite-count floor: the per-suite checks above catch a suite that runs but
 # reports nothing. They do NOT catch a suite that never runs at all — the
 # test list is `${GD_TEST_DIR}/test_*.gd`, a bare glob, and a deleted or

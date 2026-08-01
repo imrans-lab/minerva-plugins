@@ -117,6 +117,41 @@ assertions)` — rather than the pre-fix `${#tests[@]}/${#tests[@]}`, a ratio
 that is 100% by construction regardless of how many suites the glob actually
 found.
 
+## Real plugin-subprocess suites need a BUILT Minerva checkout
+
+`test_pcb_backend_lifecycle.gd` and `test_pcb_plugin_smoke.gd` (and any other
+suite that calls `PluginManager.start_plugin` for a real, un-mocked
+subprocess) additionally require the Minerva checkout's `terminal`
+GDExtension to be **built**, not just checked out: `<minerva>/src/bin/`
+must contain `libterminal.<platform>.*.so` (or `.dylib`/`.dll`), produced by
+`scripts/build-extensions.sh` in the Minerva repo (see that repo's
+`CLAUDE.md`, "Building C++ Extensions"). A checkout with no `src/bin/`
+directory at all has never run that build.
+
+That extension registers the native `SubProcess` class that
+`MCPServerConnection.gd`'s STDIO transport instantiates
+(`ClassDB.class_exists("SubProcess")`). Without it, `start_plugin` fails for
+**every** plugin — not a pcb-specific problem — with:
+
+```
+ERROR: SubProcess GDExtension not available - STDIO transport not supported
+ERROR: [PluginManager] Failed to start plugin '<name>': Unavailable
+FAIL: start_plugin returns ok — got: { "error": "Subprocess failed to start: Unavailable" }
+```
+
+Diagnosed (round B5u1, chore 019fb6632a4e) by first suspecting the
+**pcb-plugin** binary itself, then ruling that out: running
+`pcb/pcb-plugin --help` directly on the host starts the process cleanly
+(prints its startup banner, finds `worker/`, exits 0 on stdin close) — the
+binary and its worker venv are fine. The failure is entirely on the
+Godot-host side of the STDIO pipe, before the pcb-plugin binary is even
+reached. A scaffold used only for the bare-script suites above (mode
+resolvers, model logic, panel construction) has no reason to have run
+`build-extensions.sh`, so this is an expected gap on such a host, not a
+regression — attribute FAILs from these two suites to it (`start_plugin
+returns ok`, `plugin state == RUNNING`/`connection exists post-start`)
+rather than re-investigating the pcb plugin.
+
 ## CI
 
 The `panel` job in `.github/workflows/pcb.yml` runs on every push and pull

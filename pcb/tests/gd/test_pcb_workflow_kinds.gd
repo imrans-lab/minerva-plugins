@@ -46,7 +46,17 @@ var data = null
 var ann_tools = null
 
 var overlay: AnnotationOverlay = null
-var select_tool: AnnotationSelectTool = null
+# R4/chore 019fb6632a4e: AnnotationSelectTool no longer exists in core —
+# owner-ratified chore 019fb59b34ee deleted it (and its 3 siblings) outright
+# after commit 38ea58cf ("promote AnnotationTransformTool as THE select tool;
+# press-drag selects and moves") folded click-to-select semantics into
+# AnnotationTransformTool ("OUTSIDE / no selection → select semantics
+# (hit-test annotations)" — see its own class doc). This left the reference a
+# hard parse error (Identifier "AnnotationSelectTool" not declared), failing
+# the WHOLE script to load. AnnotationTransformTool is the direct, currently
+# supported replacement; same on_activate(host)/on_deactivate() interface.
+# Same fix already applied in test_pcb_single_trace_tool.gd (round B5u1).
+var select_tool: AnnotationTransformTool = null
 var workbench = null
 var workflow_list = null
 
@@ -136,7 +146,7 @@ func _mount() -> bool:
 	overlay = AnnotationOverlay.new()
 	panel.get_annotation_overlay_parent().add_child(overlay)
 	overlay.set_host(host)
-	select_tool = AnnotationSelectTool.new()
+	select_tool = AnnotationTransformTool.new()
 	select_tool.on_activate(host)
 	overlay.set_active_tool(select_tool)
 	await process_frame

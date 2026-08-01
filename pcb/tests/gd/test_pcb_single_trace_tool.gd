@@ -239,7 +239,18 @@ func _test_e2e3_a_human_hints_it() -> void:
 
 	await _press_trace_button()
 	check("A: Trace button toggled on", (panel._route_flow_buttons["single_trace"] as Button).button_pressed)
-	check("A: mode label shows Single Trace", panel._route_flow_mode_label.text == "Single Trace")
+	# RouteFlowModeLabel was deleted (owner HITL 2026-07-30, see PCBPanel.gd's
+	# comment above _update_route_flow_mode_label): its idle "Select" text read
+	# as a duplicate section header, so _route_flow_mode_label now stays null
+	# permanently and every update site is a null-guarded no-op. The old
+	# ".text == \"Single Trace\"" assertion here crashed on that null
+	# ("Invalid access to property or key 'text' on a base object of type
+	# 'Nil'"), which GDScript treats as a script error that skips the
+	# statement rather than failing it — the assertion was silently dropped
+	# from the tally, not counted as a FAIL. The pressed-button toggle above
+	# and the active-tool check below are the CURRENT signals for "armed".
+	check("A: mode label intentionally removed (null by design, not stale)",
+		panel._route_flow_mode_label == null)
 	check("A: overlay's active tool is our tool", overlay.has_active_tool() and _active_tool() != null)
 
 	await _click_world(U1_PIN1)
@@ -285,8 +296,19 @@ func _test_e2e3_a_human_hints_it() -> void:
 	# Canvas state assertion ("DRAWS"): the hint is visible + hit-testable —
 	# clicking its polyline midpoint (with the Select tool) selects it. Swap
 	# in a Select tool the same way the dock would after deactivating Trace.
+	#
+	# R4/chore 019fb6632a4e: AnnotationSelectTool no longer exists in core —
+	# owner-ratified chore 019fb59b34ee deleted it (and its 3 siblings)
+	# outright after commit 38ea58cf ("promote AnnotationTransformTool as THE
+	# select tool; press-drag selects and moves") folded click-to-select
+	# semantics into AnnotationTransformTool ("OUTSIDE / no selection → select
+	# semantics (hit-test annotations)" — see its own class doc). This left
+	# the reference here a hard parse error (Identifier "AnnotationSelectTool"
+	# not declared), failing the WHOLE script to load — not merely leaving
+	# annotations empty. AnnotationTransformTool is the direct, currently
+	# supported replacement; same on_activate(host)/on_deactivate() interface.
 	await _release_trace_button()
-	var select_tool := AnnotationSelectTool.new()
+	var select_tool := AnnotationTransformTool.new()
 	select_tool.on_activate(host)
 	overlay.set_active_tool(select_tool)
 	await process_frame

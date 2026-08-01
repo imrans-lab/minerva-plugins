@@ -141,8 +141,27 @@ func _toolbar_fits(panel: Control) -> bool:
 ## the container past the pane while content-vs-container stays green (the
 ## container itself grew). Container-vs-panel is the assertion that catches ANY
 ## row inflating anywhere in the tree.
+##
+## bug 019fbcdfe35a: this used to read panel.get_combined_minimum_size().x
+## directly — VACUOUS in this bare-script harness. load(PANEL_PATH).new()
+## instantiates PCBPanel.gd standalone (a plain Control, not the PCBPanel.tscn
+## PanelContainer root), and a plain Control does not aggregate an anchored
+## child's minimum size the way a Container does (the same finding the B3
+## HEIGHT oracle's comment above _panel_min_height_fits records for .y). That
+## made the old assertion "0 <= pane width", which can never fail. Re-aimed at
+## the same found-node recipe the HEIGHT oracle uses: MainVBox is a REAL
+## VBoxContainer (a proper Container, unlike the panel root) that owns the
+## whole visible tree — ToolbarScroll, WorkspaceFrame → WorkspaceVBox →
+## ContentHBox → CanvasContainer + RightSidebar, BottomDockSlot, StatusBar —
+## so its combined-minimum-size aggregates correctly through every real
+## Container in that chain, including the StatusBar Label the comment above
+## warns about. Mutation-proven below (revert the StatusBar TRIM_ELLIPSIS
+## line): this oracle goes RED where the old one stayed green.
 func _panel_min_fits(panel: Control) -> bool:
-	return panel.get_combined_minimum_size().x <= panel.size.x + 1.0
+	var main_vbox: Control = panel.find_child("MainVBox", true, false)
+	if main_vbox == null:
+		return false
+	return main_vbox.get_combined_minimum_size().x <= panel.size.x + 1.0
 
 
 # ── 2. Wide mode ───────────────────────────────────────────────────────────────
@@ -374,29 +393,78 @@ func _test_properties_panel() -> void:
 # ── 8. Tool buttons render (round C icons) ─────────────────────────────────────
 
 func _test_tool_buttons_render() -> void:
-	print("\n-- tool buttons (icon or text, never blank) --")
+	print("\n-- tool buttons (icon or text, never blank; by-name pin) --")
 	var panel := await _mount_panel_at(700.0)
+	var PcbCanvasScript := load(CANVAS_PATH)
 
-	var flow: Control = panel.find_child("ToolsFlow", true, false)
-	check("tools flow lives in the sidebar", flow != null)
-	if flow != null:
-		var buttons := 0
-		for child in flow.get_children():
+	# chore 019fb59164b6 / R2: the old pin read ONLY "ToolsFlow" and asserted a
+	# bare count of 7. Since then, boundary-bug fix 019fb5c74980 split the
+	# sidebar's tool buttons across THREE labeled sections/FlowContainers
+	# (_build_sidebar: "Select" -> ToolsFlow, "Tools" -> DrawFlow, "Proposals"
+	# -> HintsFlow) — Trace/Edit Hint/Add Via/Propose never lived in ToolsFlow
+	# once that split happened, so the old count against ToolsFlow alone was
+	# checking the wrong container entirely, on top of being stale about which
+	# tools exist. Re-pinned against the actual current set, BY NAME, across
+	# all three flows — a bare count can't tell a rename from an addition, so
+	# each button's stable identity (Godot node .name where the production
+	# code sets one, else its _tool_buttons/_route_flow_buttons dict key) is
+	# checked individually.
+	var tools_flow: Control = panel.find_child("ToolsFlow", true, false)
+	var draw_flow: Control = panel.find_child("DrawFlow", true, false)
+	var hints_flow: Control = panel.find_child("HintsFlow", true, false)
+	check("ToolsFlow lives in the sidebar", tools_flow != null)
+	check("DrawFlow lives in the sidebar", draw_flow != null)
+	check("HintsFlow lives in the sidebar", hints_flow != null)
+
+	var all_buttons: Array[Button] = []
+	for flow in [tools_flow, draw_flow, hints_flow]:
+		if flow == null:
+			continue
+		for child in (flow as Control).get_children():
 			if child is Button:
-				buttons += 1
 				var b := child as Button
+				all_buttons.append(b)
 				check("tool button has icon or text",
 					b.icon != null or not b.text.is_empty())
-		# WC-3 (contract §5) added a fourth button (Trace — the route-flow
-		# cluster's single-trace author tool toggle) to the same ToolsFlow
-		# container, next to Select/Pan/Pin Inspect. C5 (docket 019f6c465fd8)
-		# adds a sixth: Propose (a non-toggle act button, not part of the
-		# route-flow mutual-exclusion set, but rendered in the same
-		# ToolsFlow for discoverability — see PCBPanel.gd's _propose_button).
-		# U4 (DCR 019f7095c395 Stage-2) adds a seventh: Add Via (another
-		# route-flow toggle tool, ViaInsertTool, in the same
-		# _route_flow_buttons mutual-exclusion set as Trace/Edit Hint).
-		check("seven tool buttons (Select/Pan/Pin Inspect/Trace/Edit Hint/Add Via/Propose)", buttons == 7)
+
+	# Radio-toggle "select a tool mode" buttons (ToolsFlow's Select/Pan/Pin
+	# Inspect + DrawFlow's Pour/Keepout/Trace/Cutout/Eraser): most are
+	# icon-only (no Godot node .name set in _add_tool_button), so their
+	# ToolMode enum key in _tool_buttons IS the stable name a rename would
+	# change.
+	var expected_tool_modes := [
+		PcbCanvasScript.ToolMode.SELECT, PcbCanvasScript.ToolMode.PAN,
+		PcbCanvasScript.ToolMode.INSPECT_PIN, PcbCanvasScript.ToolMode.ZONE_POUR,
+		PcbCanvasScript.ToolMode.ZONE_KEEPOUT, PcbCanvasScript.ToolMode.TRACE,
+		PcbCanvasScript.ToolMode.CUTOUT, PcbCanvasScript.ToolMode.ERASER,
+	]
+	var tool_buttons: Dictionary = panel._tool_buttons
+	check("_tool_buttons has exactly the 8 current radio tool modes (got %d)" % tool_buttons.keys().size(),
+		tool_buttons.keys().size() == expected_tool_modes.size())
+	for mode in expected_tool_modes:
+		check("radio tool button registered + mounted for ToolMode %s" % mode,
+			tool_buttons.has(mode) and (tool_buttons[mode] as Button) in all_buttons)
+
+	# Route-flow cluster (HintsFlow's Trace hint/Edit Hint/Add Via) — keyed by
+	# string in _route_flow_buttons, its own mutual-exclusion set.
+	var expected_route_flow_keys := ["single_trace", "edit_hint", "add_via"]
+	var route_flow_buttons: Dictionary = panel._route_flow_buttons
+	check("_route_flow_buttons has exactly the 3 current route-flow tools (got %d)" % route_flow_buttons.keys().size(),
+		route_flow_buttons.keys().size() == expected_route_flow_keys.size())
+	for key in expected_route_flow_keys:
+		check("route-flow button registered for \"%s\"" % key,
+			route_flow_buttons.has(key) and (route_flow_buttons[key] as Button) in all_buttons)
+
+	# Named single-instance buttons: Delete (DrawFlow) + Propose (HintsFlow),
+	# neither of which belongs to either dict above (Delete is a plain action
+	# button, Propose is a non-toggle act button — see PCBPanel.gd comments).
+	for node_name in ["InspectPinButton", "DeleteSelectionButton",
+			"SingleTraceButton", "EditHintButton", "AddViaButton", "ProposeButton"]:
+		check("%s node present in the sidebar" % node_name,
+			panel.find_child(node_name, true, false) != null)
+
+	check("13 tool buttons total across ToolsFlow/DrawFlow/HintsFlow (8 radio tools + 3 route-flow + Delete + Propose; got %d)" % all_buttons.size(),
+		all_buttons.size() == 13)
 
 	_teardown(panel)
 
