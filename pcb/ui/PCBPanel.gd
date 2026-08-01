@@ -191,6 +191,32 @@ var _status_label: Label = null
 var _layout_mode: String = ""
 var _drawer_open := false
 var _sidebar: VBoxContainer = null
+## The sidebar's actual row content, one level inside a ScrollContainer (B3b,
+## docket 019fbbad9dac comment 970 — RCA measured RightSidebar's unscrolled
+## min-height as the dominant term in the panel's 640px/718px-armed min-height
+## floor). _sidebar itself stays the named "RightSidebar" node every external
+## caller (tests, get_annotation_dock_parent's ancestor check) already expects;
+## only what lives INSIDE it changed. Every add_child that used to target
+## _sidebar directly now targets this instead.
+var _sidebar_content: VBoxContainer = null
+## The ScrollContainer wrapping _sidebar_content (B3b). Kept as a member — not
+## just a _build_sidebar local — so the reveal path (_on_edit_trace_width_requested
+## / _reveal_trace_width_spin, F3 cold review 2026-08-01, round 2) can
+## explicitly scroll a specific row into view.
+##
+## follow_focus is ALSO set true here, for the general "keyboard Tab lands on
+## a control the scroll then keeps visible" behavior a scrollable sidebar
+## should have. It is NOT what fixes the trace-width reveal, and round 1's
+## claim that it was measured load-bearing there was WRONG — corrected in
+## round 2: that measurement was confounded by a same-frame ordering bug (see
+## _reveal_trace_width_spin) that affected follow_focus's own internal
+## scroll-on-focus exactly the same way it affected the explicit
+## ensure_control_visible call. Once the reveal is properly DEFERRED one
+## layout pass, ensure_control_visible alone reaches 31/31px visible at both
+## reference panes (500px and 400px) with follow_focus removed entirely —
+## verified by mutation. follow_focus is kept for the keyboard path, which
+## this round did not build a test for.
+var _sidebar_scroll: ScrollContainer = null
 var _dock_parent: VBoxContainer = null
 ## Bottom strip slot for the annotation dock (medium/narrow — HITL note:
 ## 3-col wants the dock along the bottom; only wide keeps it in the sidebar).
@@ -722,7 +748,7 @@ func _add_group_label(text: String) -> void:
 	group_label.name = text + "GroupLabel"
 	group_label.text = text
 	group_label.add_theme_font_size_override("font_size", 11)
-	_sidebar.add_child(group_label)
+	_sidebar_content.add_child(group_label)
 
 
 ## Loads an icon from the plugin's own assets dir (next to this script).
@@ -755,6 +781,39 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.custom_minimum_size.x = 120
 	_sidebar.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
+	# B3b height relief (docket 019fbbad9dac comment 970): RightSidebar's own
+	# unscrolled row content was the dominant term in the panel's min-height
+	# floor (measured 558px at rest / 636px with ZONE_POUR armed — nearly all
+	# of WorkspaceFrame's 598/676px, which in turn drove the whole editor
+	# column's 640/718px). A ScrollContainer's minimum size does NOT include
+	# its child's content size (that is the entire point of the control), so
+	# wrapping every row in one caps what RightSidebar can force onto its
+	# ancestors regardless of how many picker rows a future armed tool adds —
+	# the content simply scrolls in a short pane instead of pushing the whole
+	# editor tab into overflow. horizontal_scroll_mode stays DISABLED so the
+	# WIDTH behavior (driven by _sidebar.custom_minimum_size.x above + the
+	# FlowContainers' own wrap) is byte-identical to before this change; only
+	# the vertical axis is relieved.
+	_sidebar_scroll = ScrollContainer.new()
+	_sidebar_scroll.name = "RightSidebarScroll"
+	_sidebar_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	_sidebar_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_sidebar_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_sidebar_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	# General "keyboard focus stays on screen" behavior for a scrollable
+	# sidebar. NOT what fixes the trace-width reveal (see
+	# _reveal_trace_width_spin, F3 round 2) — that path's own explicit
+	# ensure_control_visible call, deferred one layout pass, is what reaches
+	# 31/31px visible at both reference panes; verified by mutation that this
+	# flag can be removed entirely once the reveal is properly deferred. Kept
+	# for the keyboard-Tab path, which this round did not build a test for.
+	_sidebar_scroll.follow_focus = true
+	_sidebar.add_child(_sidebar_scroll)
+
+	_sidebar_content = VBoxContainer.new()
+	_sidebar_content.name = "RightSidebarContent"
+	_sidebar_scroll.add_child(_sidebar_content)
+
 	## Three labeled tool sections (docket 019fb5624e2e; sectioning corrected
 	## per boundary bug 019fb5c74980): Select (navigation/inspection), Draw
 	## (tools that author board entities), Hints (route-hint authoring for the
@@ -763,7 +822,7 @@ func _build_sidebar() -> VBoxContainer:
 	_add_group_label("Select")
 	var tools_flow := FlowContainer.new()
 	tools_flow.name = "ToolsFlow"
-	_sidebar.add_child(tools_flow)
+	_sidebar_content.add_child(tools_flow)
 
 	# ONE smart Select tool + a Pan tool (Photoshop / GraphicsEditor style,
 	# finding 5). Select does select + move + box-select + rotate; Pan drags
@@ -797,11 +856,11 @@ func _build_sidebar() -> VBoxContainer:
 	# request copper rather than draw it). Two zone buttons rather than one
 	# moded tool — the radio idiom _add_tool_button provides is exactly "one
 	# of these is active".
-	_sidebar.add_child(HSeparator.new())
+	_sidebar_content.add_child(HSeparator.new())
 	_add_group_label("Tools")
 	var draw_flow := FlowContainer.new()
 	draw_flow.name = "DrawFlow"
-	_sidebar.add_child(draw_flow)
+	_sidebar_content.add_child(draw_flow)
 
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
 		"Draw a copper pour (pick a net, click corners, Enter to close)", "pour_24.png")
@@ -852,7 +911,7 @@ func _build_sidebar() -> VBoxContainer:
 	_zone_net_option.visible = false
 	_rebuild_zone_net_option()
 	_zone_net_option.item_selected.connect(_on_zone_net_selected)
-	_sidebar.add_child(_zone_net_option)
+	_sidebar_content.add_child(_zone_net_option)
 
 	_zone_layer_option = OptionButton.new()
 	_zone_layer_option.name = "ZoneLayerOption"
@@ -860,7 +919,7 @@ func _build_sidebar() -> VBoxContainer:
 	_zone_layer_option.visible = false
 	_rebuild_zone_layer_option()
 	_zone_layer_option.item_selected.connect(_on_zone_layer_selected)
-	_sidebar.add_child(_zone_layer_option)
+	_sidebar_content.add_child(_zone_layer_option)
 
 	# Trace width. A SpinBox rather than a picker because width is continuous —
 	# there is no list of legal widths to choose from, only the board's design
@@ -876,14 +935,14 @@ func _build_sidebar() -> VBoxContainer:
 	_trace_width_spin.suffix = "mm"
 	_trace_width_spin.visible = false
 	_trace_width_spin.value_changed.connect(_on_trace_width_changed)
-	_sidebar.add_child(_trace_width_spin)
+	_sidebar_content.add_child(_trace_width_spin)
 
-	_sidebar.add_child(HSeparator.new())
+	_sidebar_content.add_child(HSeparator.new())
 	_add_group_label("Proposals")
 
 	var hints_flow := FlowContainer.new()
 	hints_flow.name = "HintsFlow"
-	_sidebar.add_child(hints_flow)
+	_sidebar_content.add_child(hints_flow)
 
 	# Route-flow toolbar cluster (WC-3, contract §5): a TRUE toggle per route
 	# author tool, same idiom as the pin inspector button above. Only
@@ -962,20 +1021,20 @@ func _build_sidebar() -> VBoxContainer:
 	# _route_flow_mode_label stays null; _update_route_flow_mode_label is
 	# null-guarded, so every update site is a safe no-op.
 
-	_sidebar.add_child(HSeparator.new())
+	_sidebar_content.add_child(HSeparator.new())
 
 	# Platform annotation dock mounts here (Editor duck-types
 	# get_annotation_dock_parent — round A). Fills the remaining column.
 	_dock_parent = VBoxContainer.new()
 	_dock_parent.name = "AnnotationDockParent"
 	_dock_parent.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_sidebar.add_child(_dock_parent)
+	_sidebar_content.add_child(_dock_parent)
 
-	_sidebar.add_child(HSeparator.new())
-	_sidebar.add_child(_build_properties_section())
+	_sidebar_content.add_child(HSeparator.new())
+	_sidebar_content.add_child(_build_properties_section())
 
-	_sidebar.add_child(HSeparator.new())
-	_sidebar.add_child(_build_pin_info_section())
+	_sidebar_content.add_child(HSeparator.new())
+	_sidebar_content.add_child(_build_pin_info_section())
 
 	return _sidebar
 
@@ -1297,9 +1356,31 @@ func _hide_trace_rows() -> void:
 ## (`_set_properties_expanded(wide)`), and the whole sidebar hides behind
 ## _drawer_open in narrow. A handler that only checked the row would leave the
 ## owner picking "Set trace width…" in a medium pane and seeing nothing happen at
-## all — comment 962's bug, delivered by its own fix. So both enclosures are opened
-## first, in outside-in order (drawer, then section, then row), and the focus test
-## below is is_visible_in_tree, which is the question actually being asked.
+## all — comment 962's bug, delivered by its own fix. So enclosures are opened
+## first, in outside-in order (drawer, then section, then row); the row-visible
+## test that used to sit here now lives in _reveal_trace_width_spin, one layout
+## pass later (below).
+##
+## B3b (cold review F3, 2026-08-01) added a FOURTH enclosure this handler did not
+## originally know about: RightSidebarScroll, the ScrollContainer the sidebar's
+## rows now live inside (see _sidebar_scroll). Opening the drawer/section/row
+## enclosures is not enough if the target row is still scrolled OUT of the
+## viewport — is_visible_in_tree is true for a clipped-but-mounted control, so a
+## same-frame grab_focus() would silently succeed on an invisible field (measured:
+## 28px below the fold at the round's own 500px reference pane, fully hidden at
+## 400px). ROUND 2 (cold review, same day): the FIRST fix attempt called
+## ensure_control_visible in the SAME frame as the drawer/section expansion above
+## and was STILL wrong — that call races the just-triggered expansion's own
+## layout pass and clamps its scroll target short by exactly one row height
+## (measured: pane 500px, the SpinBox landed with its top edge exactly ON the
+## viewport's bottom edge — 0 of 31px actually visible, not the "fine" a
+## boundary-touching Rect2.intersects() check wrongly reported). The fix is to
+## DEFER the reveal one layout pass — call_deferred("_reveal_trace_width_spin"),
+## the same idiom _sync_dock_pane_mode uses for the identical class of race — so
+## ensure_control_visible runs against the POST-expansion layout instead of the
+## pre-expansion one. Verified by mutation: 31/31px visible at BOTH reference
+## panes with the deferred call; 0/31 at 500px (31/31 at 400px, the marginal case
+## happens to survive there) when called same-frame instead.
 ##
 ## The canvas selects the trace BEFORE emitting, and selection_changed drives
 ## _update_properties, so the row is already populated by the time we get here. The
@@ -1324,6 +1405,31 @@ func _on_edit_trace_width_requested(trace_id: String) -> void:
 
 	if _trace_prop_width_spin == null:
 		return
+	# F3 ROUND 2 (cold review 2026-08-01): the scroll-reveal + focus is
+	# DEFERRED one layout pass, same idiom _sync_dock_pane_mode uses
+	# (call_deferred, see _build_ui's comment on it) for exactly the same
+	# reason — a same-frame call races the drawer/section expansion just
+	# triggered above. MEASURED root cause: ensure_control_visible() called
+	# in the SAME frame as _set_properties_expanded(true)/_on_drawer_toggled()
+	# clamps its scroll target against the PRE-expansion content height, short
+	# by exactly one row (measured: pane 500, spin_y lands [468,499] against
+	# viewport [50,468] — ZERO of 31px visible, the control flush against and
+	# entirely BELOW the fold). One deferred call, after the just-triggered
+	# expansion's own sort_children pass has run, targets the POST-expansion
+	# layout and lands fully on-screen (measured: spin_y [437,468] — 31/31px
+	# visible). See _reveal_trace_width_spin.
+	call_deferred("_reveal_trace_width_spin")
+
+
+## The deferred second half of _on_edit_trace_width_requested (F3 round 2):
+## scrolls the SpinBox into view and focuses its LineEdit, one layout pass
+## after the drawer/section enclosures were opened. Re-checks visibility
+## itself rather than trusting the caller's frame — is_visible_in_tree can
+## still be false if the drawer/section reveal was itself refused for some
+## reason between the two calls (e.g. the panel was torn down mid-flight).
+func _reveal_trace_width_spin() -> void:
+	if _trace_prop_width_spin == null or not is_instance_valid(_trace_prop_width_spin):
+		return
 	var line_edit := _trace_prop_width_spin.get_line_edit()
 	# grab_focus() on a control outside the tree is a hard engine error, and the
 	# panel is legitimately un-mounted in the headless suites that drive this hook.
@@ -1333,6 +1439,14 @@ func _on_edit_trace_width_requested(trace_id: String) -> void:
 		return
 	if not line_edit.is_visible_in_tree():
 		return
+	# Scroll the fourth enclosure open BEFORE focusing — a control can be
+	# is_visible_in_tree() (not clipped by a hidden ancestor's .visible flag)
+	# while still sitting outside the scroll viewport's current scroll offset.
+	# _sidebar_scroll.follow_focus is also set true, but MEASURED as
+	# insufficient alone for this programmatic path — this explicit call is
+	# required alongside it (see _sidebar_scroll's own doc comment).
+	if _sidebar_scroll != null:
+		_sidebar_scroll.ensure_control_visible(_trace_prop_width_spin)
 	line_edit.grab_focus()
 	line_edit.select_all()
 
@@ -3286,12 +3400,16 @@ func _update_status() -> void:
 		hint = "  •  %s" % armed_hint
 	# Below wide mode the toolbar's board-size label is hidden — carry it here
 	# (unchanged). BUG FIX: the gesture hint above used to be blanked here too,
-	# for EVERY non-wide mode — but MEDIUM is the 3-col PRIMARY design target
-	# (panel_layout.gd), so that silently hid the armed tool's grammar at the
-	# panel's most common width, defeating the very teaching this round moved
-	# here. Only NARROW (sidebar behind a drawer, toolbar folded into a View
-	# menu — already the one mode that compacts every other secondary readout)
-	# still drops it; MEDIUM keeps both the board size AND the hint.
+	# for EVERY non-wide mode — but a 3-col pane does not reliably land in any
+	# one mode: mode selection is WIDTH-based (panel_layout.gd) and deliberately
+	# hardware-dependent — on a large display a 3-col pane classifies WIDE, not
+	# MEDIUM (owner ruling 019fbb7115: status quo px thresholds kept, "3 col is
+	# probably good enough"; there is no single PRIMARY design-target width).
+	# Blanking the hint at every non-wide width therefore hid the armed tool's
+	# grammar at ordinary panel sizes, defeating the very teaching this round
+	# moved here. Only NARROW (sidebar behind a drawer, toolbar folded into a
+	# View menu — already the one mode that compacts every other secondary
+	# readout) still drops it; MEDIUM keeps both the board size AND the hint.
 	var board_txt := ""
 	if _layout_mode != _PanelLayoutScript.MODE_WIDE:
 		board_txt = "  •  %s×%smm" % [_data.board_width, _data.board_height]
