@@ -1665,6 +1665,31 @@ func design_rule_trace_width() -> float:
 	return w if w > 0.0 else 0.0
 
 
+## The board's OWN declared copper-to-copper clearance, or 0.0 when it declares
+## none. mm.
+##
+## EXACT MIRROR of design_rule_trace_width above — same canonical block, same
+## "non-positive is not an answer" reading, same 0.0-means-no-rule return. The
+## two are the pair a parallel-bus pitch needs (pcb_bus_geometry.pitch_between
+## takes both widths and this clearance), so they are deliberately the same shape
+## rather than one of them growing a fallback of its own.
+##
+## THE FALLBACK ASYMMETRY IS ON PURPOSE. authored_trace_width() exists because a
+## zero-width trace is not copper, so a missing width MUST become something.
+## There is no authored_clearance() twin: a missing clearance is a real answer —
+## "this board states no separation requirement" — and the honest handling is to
+## surface the 0.0 to the caller, who can then space a bus at touching-but-not-
+## overlapping pitch, or refuse, or ask. Inventing a house clearance here would
+## put a number the board never declared into copper the fab will build.
+##
+## This is the FIRST reader of design_rules.clearance_mm anywhere in pcb/ui/ —
+## the key has round-tripped through to_board_dict/from_board_dict since zones
+## landed, but nothing had asked it a question until the bus geometry did.
+func design_rule_clearance() -> float:
+	var c := float(design_rules.get("clearance_mm", 0.0))
+	return c if c > 0.0 else 0.0
+
+
 ## The width a newly authored trace gets, in mm.
 ##
 ## `design_rules` is the canonical board block (see its declaration) and
