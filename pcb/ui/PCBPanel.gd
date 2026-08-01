@@ -783,11 +783,17 @@ func _build_sidebar() -> VBoxContainer:
 	# Delete is still the same plain action button, both merely relocated to
 	# this flow.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ERASER, "Eraser",
-		"Click an entity to delete it (Esc to disarm)")
+		"Click an entity to delete it (Esc to disarm)", "eraser_24.png")
 
 	_delete_button = Button.new()
 	_delete_button.name = "DeleteSelectionButton"
-	_delete_button.text = "Delete"
+	# Icon with text fallback, same contract as _add_tool_button: a missing
+	# asset yields a text button, never a blank one.
+	var trash_icon := _load_icon("trash_24.png")
+	if trash_icon != null:
+		_delete_button.icon = trash_icon
+	else:
+		_delete_button.text = "Delete"
 	_delete_button.tooltip_text = _wrap_tooltip("Delete the whole selection (Delete/Backspace)")
 	_delete_button.disabled = true
 	_delete_button.pressed.connect(func() -> void: _canvas._delete_selection())
