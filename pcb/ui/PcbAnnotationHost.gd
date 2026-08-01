@@ -147,7 +147,22 @@ func get_capabilities() -> Dictionary:
 		# kinds (BuiltinKinds.register_all) PLUS the one pcb domain kind. Generic
 		# annotations author through the core kinds — no pcb-namespaced duplicates.
 		"kinds": ["pcb_route_hint", "2d_arrow", "2d_text", "2d_region", "2d_polyline"],
+		# Left as-is on purpose: it still describes the one built-in tool this
+		# host's annotations answer to. What changed (B1u3) is WHERE that tool is
+		# offered — see tools_excluded.
 		"tools": ["select"],
+		# THE DOCK MUST NOT OFFER ITS OWN SELECT HERE (B1u3, universal select).
+		# This panel shows exactly one Select, on the board canvas, and it picks
+		# annotations AND board entities through one ladder; a second Select in
+		# the annotation dock would be a second, half-blind selection mode
+		# sitting next to it.
+		#
+		# It has to be an EXCLUSION, not an empty allow-list: AnnotationToolbar
+		# treats an empty "tools" array as ALLOW-ALL, so "tools": [] would SHOW
+		# the button. An older core that does not read this key simply keeps its
+		# dock Select — which is precisely the two-tool world this panel had
+		# before, and the right thing to degrade to.
+		"tools_excluded": ["select"],
 		"anchor_types": [
 			_ANCHOR_TYPE, _ANCHOR_TYPE_PAD, _ANCHOR_TYPE_COMPONENT,
 			_ANCHOR_TYPE_NET, _ANCHOR_TYPE_TRACE, "core/canvas.point",
@@ -471,6 +486,255 @@ func forward_navigation_input(event: InputEvent) -> void:
 		return
 	if _canvas.has_method("handle_navigation_input"):
 		_canvas.handle_navigation_input(event)
+
+
+# ── UNIVERSAL SELECT router (B1u3, item 019fbb9adc) ───────────────────────────
+#
+# This panel offers ONE Select. The board canvas owns the click and asks the
+# verbs below whether the annotation layer claims it; when it does, the canvas
+# drives the CORE AnnotationTransformTool through them for the whole gesture.
+# Nothing here re-implements annotation selection — every verb delegates to the
+# core tool or to AnnotationHost's own multi-select API.
+#
+# WHY THE CANVAS OWNS THE CLICK and not the overlay: an armed tool flips
+# AnnotationOverlay to MOUSE_FILTER_STOP, and Godot's gui walk ENDS at a STOP
+# control whether or not the event was accepted — so an overlay-armed tool
+# cannot decline a click and let the board have it. Routing the other way would
+# mean forwarding the canvas's entire input surface (right-click menu, pan,
+# every key binding) through the overlay. Instead the tool is armed PASSIVELY
+# (AnnotationOverlay.set_active_tool(tool, true)): it draws, it owns the
+# selection visual, its caption editor still parents to the overlay, but the
+# overlay stays transparent and the canvas keeps the pointer.
+#
+# EVERY core member touched here is duck-typed with has_method. A core without
+# the passive-pointer arming never gets a tool armed at all, every verb below
+# returns its empty answer, and the panel degrades to exactly the two-tool world
+# it had before this unit (the dock keeps its own Select — see get_capabilities).
+# This is the off-tree rule from hint pcb-plugin/off-tree-core-api-coupling: a
+# class_name reference to a member the running core lacks is a PARSE error that
+# takes the whole script down, so nothing here names a new core symbol.
+
+## Core script path for the ONE manipulation tool. load()ed at runtime, never
+## preload()ed and never named by class_name: a missing file must degrade to
+## "no universal select", not to a parse error that unloads this host.
+const _TRANSFORM_TOOL_PATH := "res://Scripts/Services/Annotations/kinds/AnnotationTransformTool.gd"
+
+## The single passively-armed AnnotationTransformTool instance, or null when the
+## running core cannot supply one. Built once and reused: it carries the caption
+## editor and the drag snapshots, so churning it per arm would drop an edit.
+var _select_tool: AnnotationAuthorTool = null
+
+## The AnnotationOverlay we armed, while we are the one that armed it.
+var _select_overlay: Control = null
+
+## True only between arm_universal_select(on) and its matching disarm. Cleared
+## without touching the overlay by notify_universal_select_detached() when some
+## OTHER surface takes the overlay over, so a later disarm can never yank a tool
+## we no longer own.
+var _select_armed: bool = false
+
+
+## The tool instance, or null on a core that cannot provide one.
+func get_universal_select_tool() -> Object:
+	if _select_tool != null:
+		return _select_tool
+	var script: Variant = load(_TRANSFORM_TOOL_PATH)
+	if script == null or not (script is Script):
+		return null
+	var made: Variant = (script as Script).new()
+	if not (made is AnnotationAuthorTool):
+		return null
+	_select_tool = made
+	return _select_tool
+
+
+## Arm (or release) the universal Select tool on `overlay`, passively.
+## Idempotent in both directions. A core whose overlay does not advertise
+## passive-pointer support is left completely alone.
+func arm_universal_select(overlay: Control, on: bool) -> void:
+	if on:
+		if _select_armed:
+			return
+		if overlay == null or not is_instance_valid(overlay):
+			return
+		if not overlay.has_method("supports_passive_pointer") \
+				or not bool(overlay.supports_passive_pointer()):
+			return
+		var tool := get_universal_select_tool()
+		if tool == null or not tool.has_method("claims_point"):
+			return
+		tool.on_activate(self)
+		overlay.set_active_tool(tool, true)
+		_select_overlay = overlay
+		_select_armed = true
+		return
+
+	if not _select_armed:
+		return
+	_select_armed = false
+	if _select_overlay != null and is_instance_valid(_select_overlay) \
+			and _select_overlay.has_method("clear_active_tool"):
+		_select_overlay.clear_active_tool()
+	_select_overlay = null
+	if _select_tool != null:
+		_select_tool.on_deactivate()
+
+
+## Another surface (the dock toolbar, the route-flow cluster) replaced or cleared
+## our tool on the shared overlay. Forget the arming WITHOUT touching the overlay
+## — it belongs to whoever armed it now.
+func notify_universal_select_detached() -> void:
+	if not _select_armed:
+		return
+	_select_armed = false
+	_select_overlay = null
+	if _select_tool != null:
+		_select_tool.on_deactivate()
+
+
+func is_universal_select_armed() -> bool:
+	return _select_armed
+
+
+## The armed tool, or null — every verb below funnels through this so a
+## disarmed/degraded panel answers "no" uniformly.
+func _armed_tool() -> Object:
+	if not _select_armed or _select_tool == null:
+		return null
+	return _select_tool
+
+
+## Repaint the overlay after a routed gesture. Drags that emit
+## annotation_modified redraw via annotations_changed, but a marquee-less
+## gizmo press, a rotate arc mid-drag and the caption notice have no model
+## change to ride on.
+func _redraw_overlay() -> void:
+	if _select_overlay != null and is_instance_valid(_select_overlay):
+		_select_overlay.queue_redraw()
+
+
+## Does the annotation layer claim a LEFT press at `canvas_pos` (canvas-local
+## pixels)? The canvas asks this at the TOP of its Select ladder.
+##
+## `mods` is the modifier mask and MUST be passed through: the tool's answer
+## branches on shift (a shift-press off the ink is a marquee press, and the
+## marquee belongs to the canvas so it can sweep BOTH halves). Sending 0 here
+## would hand the annotation layer shift+box gestures it then resolves as an
+## annotation-only marquee.
+func annotation_claims_point(canvas_pos: Vector2, mods: int = 0) -> bool:
+	var tool := _armed_tool()
+	if tool == null or not tool.has_method("claims_point"):
+		return false
+	return bool(tool.claims_point(canvas_pos, mods))
+
+
+func annotation_pointer_down(canvas_pos: Vector2, button: int, mods: int) -> bool:
+	var tool := _armed_tool()
+	if tool == null:
+		return false
+	var consumed := bool(tool.on_pointer_down(canvas_pos, button, mods))
+	_redraw_overlay()
+	return consumed
+
+
+## Double-click leg, mirroring AnnotationOverlay's own order: the opt-in
+## on_pointer_double_click hook first, and a tool that declines it falls straight
+## through to the ordinary press.
+func annotation_pointer_double_click(canvas_pos: Vector2, button: int, mods: int) -> bool:
+	var tool := _armed_tool()
+	if tool == null:
+		return false
+	if tool.has_method("on_pointer_double_click") \
+			and bool(tool.on_pointer_double_click(canvas_pos, button, mods)):
+		_redraw_overlay()
+		return true
+	return annotation_pointer_down(canvas_pos, button, mods)
+
+
+## Pseudo-pointer KEY channel — the SAME convention AnnotationOverlay uses for
+## Escape/Delete/Enter: the keycode rides in the mods slot of a pointer-down at
+## Vector2.ZERO. Returns true when the tool consumed it.
+##
+## This is what makes the tool's own Escape grammar reachable in this panel:
+## mid-drag Escape REVERTS the drag (every other panel does), rather than the
+## canvas quietly clearing selections while the drag runs on to commit.
+func annotation_key(keycode: int) -> bool:
+	var tool := _armed_tool()
+	if tool == null:
+		return false
+	var consumed := bool(tool.on_pointer_down(Vector2.ZERO, MOUSE_BUTTON_LEFT, keycode))
+	_redraw_overlay()
+	return consumed
+
+
+func annotation_pointer_move(canvas_pos: Vector2) -> void:
+	var tool := _armed_tool()
+	if tool == null:
+		return
+	tool.on_pointer_move(canvas_pos)
+	_redraw_overlay()
+
+
+func annotation_pointer_up(canvas_pos: Vector2, button: int, mods: int) -> void:
+	var tool := _armed_tool()
+	if tool == null:
+		return
+	tool.on_pointer_up(canvas_pos, button, mods)
+	_redraw_overlay()
+
+
+## The marquee half. `rect` is BOARD-MM (the canvas's world space), which is this
+## host's document space verbatim — no conversion, and none wanted.
+##
+## Returns ids only. The AABBs this is computed from are zoom-ephemeral (kinds
+## size part of their footprint in screen px and divide by the live view zoom),
+## so nothing derived from them is cached here or anywhere upstream.
+func annotations_in_world_rect(rect: Rect2) -> PackedStringArray:
+	var tool := _armed_tool()
+	if tool == null or not tool.has_method("annotations_intersecting"):
+		return PackedStringArray()
+	return tool.annotations_intersecting(rect)
+
+
+## Union `ids` into the annotation selection. Additive by construction, matching
+## the board marquee: a plain (non-shift) press already cleared both halves at
+## press time, so a sweep only ever adds — which is what makes shift+box extend
+## a mixed board/annotation selection for free.
+func add_annotations_to_selection(ids: PackedStringArray) -> void:
+	if ids.is_empty():
+		return
+	var result := get_selected_annotation_ids()
+	for id in ids:
+		if not result.has(id):
+			result.append(id)
+	# Primary = the topmost annotation this sweep sat on (document order).
+	set_selected_annotation_ids(result, ids[ids.size() - 1])
+	_redraw_overlay()
+
+
+func clear_annotation_selection() -> void:
+	if get_selected_annotation_ids().is_empty():
+		return
+	set_selected_annotation_ids(PackedStringArray())
+	_redraw_overlay()
+
+
+func selected_annotation_count() -> int:
+	return get_selected_annotation_ids().size()
+
+
+## Delete every selected annotation and return how many went. THERE IS NO UNDO
+## for this half — the annotation substrate has no undo stack at all — which is
+## why the canvas announces the count rather than deleting silently.
+func delete_selected_annotations() -> int:
+	var doomed := get_selected_annotation_ids()
+	if doomed.is_empty():
+		return 0
+	for id in doomed:
+		remove_annotation(id)
+	set_selected_annotation_ids(PackedStringArray())
+	_redraw_overlay()
+	return doomed.size()
 
 
 ## Resolve the live board data model (pcb_data.gd), preferring the canvas's model

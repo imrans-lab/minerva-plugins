@@ -233,6 +233,10 @@ var _active_route_flow_tool: AnnotationAuthorTool = null
 ## mutually exclusive").
 var _overlay_tool_signal_bound: Control = null
 
+## The tool the shared overlay currently holds, tracked off active_tool_changed
+## so _sync_universal_select can tell OUR passive arm from another surface's.
+var _overlay_active_tool: Object = null
+
 ## View-flag table shared by the wide-mode CheckButtons and the medium/narrow
 ## View menu (single source of truth: the canvas flags themselves).
 const _VIEW_FLAGS := [
@@ -374,6 +378,10 @@ func _on_panel_unload() -> void:
 	# canvas is freed (symmetric with set_canvas in _build_ui).
 	if _annotation_host != null and _annotation_host.has_method("set_canvas"):
 		_annotation_host.set_canvas(null)
+	# Release the passively-armed universal Select before the overlay goes with
+	# the panel (B1u3) — symmetric with the arming in _sync_universal_select.
+	if _annotation_host != null and _annotation_host.has_method("arm_universal_select"):
+		_annotation_host.arm_universal_select(null, false)
 	if _registered_editor_name != "":
 		AnnotationHostRegistry.deregister(_registered_editor_name)
 		_registered_editor_name = ""
@@ -459,6 +467,18 @@ func _build_ui() -> void:
 	# lookup locally.
 	if _annotation_host != null and _canvas.has_method("set_pin_inspector_host"):
 		_canvas.set_pin_inspector_host(_annotation_host)
+	# UNIVERSAL SELECT (B1u3): the canvas owns the click for BOTH halves of the
+	# selection and asks the host for the annotation half. Same duck-typed
+	# handshake as the two bindings above.
+	if _annotation_host != null and _canvas.has_method("set_annotation_router"):
+		_canvas.set_annotation_router(_annotation_host)
+	# The platform mounts its AnnotationOverlay as a CHILD of this canvas, some
+	# frames after the panel is built (Editor.gd). Arming the universal Select
+	# needs that overlay to exist, so we watch for it arriving rather than
+	# guessing a frame — and _sync_universal_select is idempotent, so a canvas
+	# that gains other children costs one cheap re-check each.
+	if not _canvas.child_entered_tree.is_connected(_on_canvas_child_entered):
+		_canvas.child_entered_tree.connect(_on_canvas_child_entered)
 
 	# Canvas → panel signal wiring.
 	_canvas.tool_mode_changed.connect(_on_tool_mode_changed)
@@ -1951,6 +1971,69 @@ func _activate_route_flow_tool(kind_key: String) -> void:
 	_update_route_flow_mode_label(kind_key)
 
 
+# ── Universal Select (B1u3, item 019fbb9adc) ──────────────────────────────────
+#
+# This panel offers ONE Select. The board canvas owns the click; the annotation
+# half rides along through the PcbAnnotationHost router (see
+# pcb_canvas.set_annotation_router). What this section owns is the ARMING: the
+# core AnnotationTransformTool is armed PASSIVELY on the shared overlay whenever
+# the canvas is in Select mode and no other surface holds the overlay.
+#
+# "Passively" means the overlay draws the tool and keeps every host wiring but
+# stays transparent to the pointer, so the canvas keeps owning clicks — an
+# ordinarily-armed tool flips the overlay to MOUSE_FILTER_STOP and Godot's gui
+# walk ends there, accepted or not, which is why a tool cannot decline a click.
+#
+# EVERYTHING IS DUCK-TYPED. A core that cannot arm passively never gets a tool
+# armed, the canvas router answers "no" to everything, and this panel behaves
+# exactly as it did before this unit — with the dock's own Select still offered,
+# because the older AnnotationToolbar ignores the tools_excluded capability too.
+
+## Re-entrancy guard: arming/clearing the overlay emits active_tool_changed
+## synchronously, and that handler calls back in here.
+var _universal_select_syncing: bool = false
+
+
+## The passively-armable tool instance, or null when the core cannot supply one.
+func _universal_select_tool() -> Object:
+	if _annotation_host == null or not _annotation_host.has_method("get_universal_select_tool"):
+		return null
+	return _annotation_host.get_universal_select_tool()
+
+
+## Arm or release the universal Select to match the current state. Idempotent,
+## and safe to call from any of the three edges that can change the answer:
+## the canvas tool mode, the overlay's active tool, and the overlay's arrival.
+func _sync_universal_select() -> void:
+	if _universal_select_syncing:
+		return
+	if _annotation_host == null or not _annotation_host.has_method("arm_universal_select"):
+		return
+	var overlay := _find_annotation_overlay()
+	if overlay == null:
+		return
+	# Armed only when the canvas is resting in Select AND nothing else holds the
+	# overlay. A route-flow tool or a dock author tool is a deliberate mode; the
+	# universal Select is what the panel falls back to when they let go.
+	var ours := _universal_select_tool()
+	var foreign := _overlay_active_tool != null and _overlay_active_tool != ours
+	# Typed explicitly: _canvas is untyped (duck-typed plugin script), so the
+	# tool_mode comparison yields a Variant and inference would refuse.
+	var want: bool = _canvas != null \
+		and _canvas.tool_mode == _PcbCanvasScript.ToolMode.SELECT \
+		and _active_route_flow_tool == null \
+		and not foreign
+	_universal_select_syncing = true
+	_annotation_host.arm_universal_select(overlay, want)
+	_universal_select_syncing = false
+
+
+## The overlay mounts as a child of the canvas after this panel is built; that
+## arrival is the third edge _sync_universal_select watches.
+func _on_canvas_child_entered(_node: Node) -> void:
+	_sync_universal_select()
+
+
 ## Deactivates the cluster's own active tool (if any) and restores Select —
 ## contract §5: "deactivation restores Select." Does not touch the overlay's
 ## assignment when some OTHER surface is now driving it (cross-surface case;
@@ -2023,7 +2106,24 @@ func _on_route_flow_cancelled() -> void:
 ## outside), drop our own button/label state without touching the overlay
 ## again (avoids a feedback loop).
 func _on_overlay_active_tool_changed(tool: Object) -> void:
+	_overlay_active_tool = tool
+	# UNIVERSAL SELECT (B1u3): our own passive arm is not a cross-surface
+	# takeover — it IS this panel's resting state, and running the teardown below
+	# for it would untoggle the route-flow buttons and blank the mode label every
+	# time Select re-arms.
+	if tool != null and tool == _universal_select_tool():
+		return
+	# The overlay now holds something that is NOT our passive Select — another
+	# surface's tool, or nothing at all. Either way, let the host forget it armed
+	# anything, so a later disarm can never yank a tool we no longer own. This
+	# runs BEFORE the route-flow early-out below on purpose: the commonest way
+	# our tool gets cleared is _deactivate_route_flow_tool's unconditional
+	# overlay.clear_active_tool() with no route tool active at all, which lands
+	# here as tool == _active_route_flow_tool == null.
+	if _annotation_host != null and _annotation_host.has_method("notify_universal_select_detached"):
+		_annotation_host.notify_universal_select_detached()
 	if tool == _active_route_flow_tool:
+		_sync_universal_select()
 		return
 	_active_route_flow_tool = null
 	_active_route_flow_kind = ""
@@ -2038,6 +2138,9 @@ func _on_overlay_active_tool_changed(tool: Object) -> void:
 			and _canvas.tool_mode != _PcbCanvasScript.ToolMode.SELECT:
 		_canvas.set_tool_mode(_PcbCanvasScript.ToolMode.SELECT)
 		_sync_tool_buttons(_canvas.tool_mode)
+	# A clear-out hands the canvas surface back: re-arm the universal Select if
+	# nothing else is holding the overlay now.
+	_sync_universal_select()
 
 
 ## Where the platform annotation dock must mount (Editor.gd duck-types this —
@@ -2342,13 +2445,25 @@ func _sync_tool_buttons(mode: int) -> void:
 ## already listen on — no separate polling, no separate state to drift.
 func _update_delete_button() -> void:
 	if _delete_button != null:
-		_delete_button.disabled = _canvas == null or not _canvas.has_selection()
+		# has_ANY_selection (B1u3): the trash empties the whole panel selection,
+		# annotations included, so it must be live when only an annotation is
+		# selected. Duck-typed for the same reason every other canvas call here
+		# is — a canvas without the verb keeps the board-only answer.
+		var live := false
+		if _canvas != null:
+			live = _canvas.has_any_selection() if _canvas.has_method("has_any_selection") \
+				else _canvas.has_selection()
+		_delete_button.disabled = not live
 
 
 func _on_tool_mode_changed(mode: int) -> void:
 	_sync_tool_buttons(mode)
 	_sync_draw_arm_ui(mode)
 	_update_status()
+	# The universal Select is armed with the canvas's Select mode and released
+	# with it (B1u3) — one tool, one arming, whichever route got us here (button,
+	# keyboard, a programmatic set_tool_mode).
+	_sync_universal_select()
 
 
 ## Show/hide the Draw tools' arming controls with the tool each one arms, and

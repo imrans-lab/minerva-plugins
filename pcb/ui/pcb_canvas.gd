@@ -164,6 +164,11 @@ var trace_layer_filter: String = "all":
 ##   selection_count / _clear_selection / get_selected_* — the counts, the clear
 ##                        and the public read surface
 ##   the draw loop      — a selected entity with no halo is invisible feedback
+## And, since B1u3, the two UNIFIED-SELECTION sites that are not per-kind at all:
+##   _clear_selection_all / _delete_selection — they carry the ANNOTATION half of
+##                        the same gesture; a board kind added without them still
+##                        works, but a change to how the two halves combine has
+##                        to land in both.
 const KIND_COMPONENT := "component"
 const KIND_TRACE := "trace"
 const KIND_ZONE := "zone"
@@ -173,6 +178,38 @@ var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
 var selected_zone_ids: Array[String] = []
 var selected_via_ids: Array[String] = []
+
+# ── UNIVERSAL SELECT: the annotation half of the selection (B1u3, 019fbb9adc) ──
+#
+# This panel shows ONE Select, and it picks annotations as well as board
+# entities. The annotation half does NOT live in a fifth id list here — it lives
+# where it always has, on the AnnotationHost (core's multi-select set). What this
+# canvas owns is the GESTURE: the click ladder, the marquee, Escape and Delete
+# each ask the router below to do the annotation half of what they just did to
+# the board half.
+#
+# The router is the PcbAnnotationHost, handed over by PCBPanel and duck-typed
+# here on every call. Null router (headless fixtures, an older core that cannot
+# arm the core transform tool passively) means every hook below is skipped and
+# this canvas behaves exactly as it did before this unit.
+#
+# ORDER, decided and documented once — ANNOTATIONS CLAIM FIRST. See the claim
+# rung in _handle_mouse_button for the reasoning and the tie rules.
+var _annotation_router = null
+
+## True between a claimed press and its release: the whole gesture belongs to the
+## annotation tool, so hover, pan, selection-drag and marquee all stand down.
+var _annotation_gesture: bool = false
+
+## Screen-pixel travel a box-select must exceed before it sweeps ANNOTATIONS.
+## Mirrors core AnnotationTransformTool.SELECT_DRAG_THRESHOLD_PX (3.0), and it is
+## load-bearing rather than cosmetic: the annotation sweep matches kind.bounds()
+## AABBs while the click pick matches kind.hit_test() INK, so a zero-travel
+## "marquee" would select every annotation whose bounding box merely contains the
+## click — including ones whose ink is nowhere near it. Below this threshold the
+## release is a click, not a box, and the annotation half is left alone (which is
+## also exactly core's own zero-travel marquee semantics).
+const ANNOTATION_MARQUEE_TRAVEL_PX := 3.0
 var hovered_component: String = ""
 
 ## The component the user last CLICKED, when it is still selected — Illustrator's
@@ -527,6 +564,10 @@ func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_FOCUS_EXIT:
 		_zone_vertex_right_consumed = false
 		_zone_edge_insert = {}
+		# A claimed annotation gesture is transient gesture state too (B1u3):
+		# the release that would clear it is never coming, and a leaked flag
+		# would send the NEXT press's motion into the annotation tool.
+		_annotation_gesture = false
 
 
 func _exit_tree() -> void:
@@ -544,6 +585,7 @@ func _exit_tree() -> void:
 	_reset_zone_vertex_drag()
 	_zone_edge_insert = {}
 	_zone_vertex_right_consumed = false
+	_annotation_gesture = false
 
 
 ## Create the right-click context menu (component lock/unlock).
@@ -1773,6 +1815,31 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				pan_start_offset = pan_offset
 				return
 
+			# ── UNIVERSAL SELECT, rung 0: ANNOTATIONS (B1u3) ─────────────────
+			# Annotations claim the press BEFORE any board entity, including the
+			# zone-vertex handles below. Three reasons, all the same reason the
+			# via rung sits above trace:
+			#  * PAINT ORDER. The annotation overlay is a CHILD of this canvas,
+			#    so every annotation is drawn on top of every board entity.
+			#    "What you see on top is what you click."
+			#  * ANNOTATIONS ARE FOREGROUND COMMENTARY. They exist to point AT
+			#    board entities, so an annotation is almost always over one; put
+			#    below the board ladder its rung would be nearly dead code.
+			#  * THE CLAIM IS TIGHT, not greedy. It is kind.hit_test() ink plus
+			#    8 screen px of slack, plus — for the ONE already-selected
+			#    annotation — its gizmo and caption handles. Empty space is never
+			#    claimed, so the marquee below is untouched.
+			# TIE RULES, stated once: an annotation body over a component picks
+			# the ANNOTATION; a zone vertex handle under annotation ink loses to
+			# the annotation (both are handles-on-a-selected-thing, and the one
+			# drawn on top wins); everything the annotation layer does not claim
+			# reaches the board ladder byte-identically.
+			# Arrives BEFORE _arm_zone_edge_insert too — an insertion armed from
+			# a press the annotation layer took would fire on a release the zone
+			# never saw.
+			if _claim_annotation_press(event):
+				return
+
 			# Zone vertex handles (A5) are a NARROW, DELIBERATE EXCEPTION to the
 			# frozen click ladder: on a handle hit the component and trace picks
 			# below are skipped entirely, so a part sitting within
@@ -1821,7 +1888,11 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				component_double_clicked.emit(hit_id)
 			elif hit_kind.is_empty():
 				if not event.shift_pressed:
-					_clear_selection()
+					# BOTH halves (B1u3): the annotation layer already declined
+					# this point, so an empty press is empty for the whole
+					# panel — and the box-select this arms sweeps both halves,
+					# so it has to start from a cleared state on both.
+					_clear_selection_all()
 				is_box_selecting = true
 				box_select_start = event.position
 				box_select_end = event.position
@@ -1829,7 +1900,14 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				if event.shift_pressed:
 					_toggle_entity_selected(hit_kind, hit_id)
 				elif not is_entity_selected(hit_kind, hit_id):
-					_clear_selection()
+					# BOTH halves (B1u3): a plain board pick replaces the whole
+					# panel selection, annotations included — the mirror of what
+					# an annotation claim does to the board half, and what makes
+					# this read as ONE selection rather than two that overlap.
+					# Only on an entity that was NOT already selected: clicking
+					# something already in the set starts a drag of that set and
+					# must not edit it (the pre-existing rule, unchanged).
+					_clear_selection_all()
 					_add_to_selection(hit_kind, hit_id)
 
 				# A shift-click that REMOVED the entity must not then drag it;
@@ -1846,6 +1924,18 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			selection_changed.emit()
 			queue_redraw()
 		else:
+			# A claimed annotation gesture owns its release outright, same as the
+			# vertex drag below (B1u3). The tool's own release logic commits or
+			# discards whatever it armed at press.
+			if _annotation_gesture:
+				_annotation_gesture = false
+				var ann_router = _router_with("annotation_pointer_up")
+				if ann_router != null:
+					ann_router.annotation_pointer_up(
+						event.position, MOUSE_BUTTON_LEFT, _annotation_mods(event))
+				queue_redraw()
+				return
+
 			# A vertex drag owns the release outright: it never started a pan, a
 			# selection drag or a box-select, so nothing else here concerns it.
 			if not _zone_vertex_drag_id.is_empty():
@@ -1939,6 +2029,16 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	var world_pos := screen_to_world(event.position)
 
+	# A claimed annotation gesture owns the pointer for its whole life (B1u3),
+	# for the same reason the zone vertex drag below does: it started no pan, no
+	# selection drag and no marquee, and running the board hover chain underneath
+	# it would fight the annotation gizmo for the cursor.
+	if _annotation_gesture:
+		var ann_router = _router_with("annotation_pointer_move")
+		if ann_router != null:
+			ann_router.annotation_pointer_move(event.position)
+		return
+
 	# A zone vertex drag owns the pointer while it runs: no hover update, no pan,
 	# no selection drag, no marquee — it started none of them, and running the
 	# hover chain under it would fight the handle for the cursor.
@@ -2024,6 +2124,47 @@ func _handle_key_input(event: InputEventKey) -> void:
 	if not event.pressed:
 		return
 
+	# ── A LIVE ANNOTATION GESTURE OWNS Escape AND Delete (B1u3, cold review N2) ─
+	# Same rule, and the same reason, as the zone-vertex drag further down: it is
+	# the INNERMOST gesture, and the tool driving it has its own grammar for both
+	# keys — Escape REVERTS the drag it started, Delete removes what it holds.
+	# Without this the tool never hears either key in this panel: Escape would
+	# clear both selections while the drag ran on to commit anyway, which is the
+	# opposite of what Escape means on every other annotation surface.
+	#
+	# ORDER, decided: the tool first, and NEITHER selection is touched. Escape
+	# here cancels the GESTURE and nothing else — exactly the carve-out the
+	# vertex-drag branch below already makes ("cancelling it must not also wipe
+	# the selection the handles belong to"). What you reverted stays selected, so
+	# you can try the drag again. A SECOND Escape, with no gesture live, falls
+	# through to the ordinary ladder and clears everything.
+	# (In practice the board half is usually already empty here: a plain claim
+	# replaces the whole panel selection at press time. The guarantee that
+	# matters is the one this branch actually makes — Escape during a gesture is
+	# a gesture-level cancel, never a selection-level one.)
+	#
+	# Consuming ENDS the gesture: the tool resets its own drag state in both
+	# branches, so there is nothing left for the release to finish, and routing
+	# further motion at a reverted (or deleted) target would be writing to a
+	# gesture that no longer exists.
+	if _annotation_gesture and event.keycode in [KEY_ESCAPE, KEY_DELETE, KEY_BACKSPACE]:
+		# Echo gate (re-review nit): a held key auto-repeats, and the repeat
+		# would fall through AFTER the first press consumed the gesture —
+		# collapsing the deliberate two-Esc ladder into clear-all. Same gate
+		# the overlay applies.
+		if event.is_echo():
+			return
+		var ann_router = _router_with("annotation_key")
+		if ann_router != null:
+			# BACKSPACE is normalised to DELETE, the same normalisation
+			# AnnotationOverlay applies (macOS labels Backspace "Delete"), so the
+			# tool sees one keycode.
+			var code: int = KEY_DELETE if event.keycode == KEY_BACKSPACE else event.keycode
+			if bool(ann_router.annotation_key(code)):
+				_annotation_gesture = false
+				queue_redraw()
+				return
+
 	# CTRL IS READ FIRST, and for KEY_G ONLY (A4). Bare G toggles the grid in the
 	# match below and _handle_key_input never consulted a modifier for it, so
 	# Ctrl+G would otherwise have toggled the grid while claiming to group.
@@ -2082,9 +2223,11 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# _handle_eraser_click), so this is the only click-free way out.
 			elif tool_mode == ToolMode.ERASER:
 				set_tool_mode(ToolMode.SELECT)
-			# One call drops the whole mixed selection — components, traces and
-			# zones alike (see _clear_selection).
-			_clear_selection()
+			# ONE Escape drops the whole selection — components, traces, zones and
+			# vias, AND the annotations (B1u3). One Select, one Escape; leaving
+			# an annotation halo lit after Escape is exactly the two-worlds
+			# symptom this unit exists to remove.
+			_clear_selection_all()
 			queue_redraw()
 		KEY_P:
 			if event.shift_pressed:
@@ -2257,6 +2400,22 @@ func has_selection() -> bool:
 	return selection_count() > 0
 
 
+## Is ANYTHING selected in this panel — board entity or annotation (B1u3)?
+##
+## Separate from has_selection(), which stays BOARD-ONLY on purpose: it gates the
+## board delete batch and every board-side caller, and widening it there would
+## make an annotation-only selection open an empty undo batch. This one exists
+## for the surfaces that speak for the whole panel — the trash button, which
+## must be live when only an annotation is selected.
+func has_any_selection() -> bool:
+	if has_selection():
+		return true
+	var router = _router_with("selected_annotation_count")
+	if router == null:
+		return false
+	return int(router.selected_annotation_count()) > 0
+
+
 ## Drop EVERY selected entity, whatever its kind. Deselect-only: the armed tool
 ## is untouched (owner ruling on 019fb59b5d86 — an empty click deselects, it does
 ## not disarm the tool).
@@ -2317,7 +2476,50 @@ func _finalize_box_selection() -> void:
 		for via_id in data.get_vias_in_region(select_rect):
 			_add_to_selection(KIND_VIA, via_id)
 
+	_sweep_annotations(select_rect)
+
 	selection_changed.emit()
+
+
+## The ANNOTATION half of the one marquee (B1u3). Same box, same gesture, same
+## release — a sweep over a component and an arrow selects both.
+##
+## THREE THINGS ARE DELIBERATE HERE, and each one is a trap if it is "tidied":
+##
+##  1. THE TRAVEL GATE. Board sweeps run on any release; the annotation sweep
+##     needs real travel first. The board pick and the board sweep agree on
+##     geometry, but the annotation pick uses kind.hit_test() INK while the
+##     annotation sweep uses kind.bounds() AABBs (core's own documented marquee
+##     grammar). A degenerate box therefore matches every annotation whose
+##     bounding box merely CONTAINS the click — which would make a plain click on
+##     empty board silently select a long diagonal arrow passing nowhere near it.
+##     See ANNOTATION_MARQUEE_TRAVEL_PX.
+##  2. THE ASYMMETRY ITSELF stays. Marquee-by-AABB is what every canvas does and
+##     what core's annotation marquee has always done; there is no kind-level
+##     rect-intersect API to do better, and inventing one here would make this
+##     panel's marquee disagree with the annotation dock's.
+##  3. ADDITIVE BY CONSTRUCTION, exactly like the board half above: a non-shift
+##     press already cleared BOTH halves (see _clear_selection_all at the press
+##     site), so this only ever adds, and shift+box extends a mixed selection for
+##     free.
+##
+## Locked entities are swept in on the board side, deliberately (see this
+## function's caller). Annotations have no lock concept at all, so there is
+## nothing to mirror.
+func _sweep_annotations(select_rect: Rect2) -> void:
+	if (box_select_end - box_select_start).length() < ANNOTATION_MARQUEE_TRAVEL_PX:
+		return
+	var router = _router_with("annotations_in_world_rect")
+	if router == null:
+		return
+	# Board-mm in, ids out. The AABBs behind this answer are zoom-ephemeral —
+	# they are consumed inside this call and never stored.
+	var picked: PackedStringArray = router.annotations_in_world_rect(select_rect)
+	if picked.is_empty():
+		return
+	var adder = _router_with("add_annotations_to_selection")
+	if adder != null:
+		adder.add_annotations_to_selection(picked)
 
 
 ## What the Select tool picks at `world_pos`, as [kind, id]; ["", ""] for empty
@@ -2776,7 +2978,30 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 ## makes every cleared component still emit component_deselected, exactly as
 ## a plain Escape-clear does.
 func _delete_selection() -> void:
+	# ── ANNOTATION HALF FIRST (B1u3) ──────────────────────────────────────────
+	# Runs BEFORE the board guard below, which returns early when only
+	# annotations are selected — the "neither half silently skipped" rule.
+	#
+	# THE COMPOSITE BEHAVIOUR, decided and announced rather than hidden: the
+	# board half goes as ONE journalled batch and ONE undo brings all of it back;
+	# the annotation half is gone for good, because the annotation substrate has
+	# no undo stack at all (this unit did not invent one, and a half-undo that
+	# silently resurrects only the copper would be a worse lie than saying so).
+	# The alternative — refusing to delete a mixed selection — was rejected: the
+	# user asked for one selection, and a Delete that works on some of it and
+	# refuses the rest is two worlds again.
+	var ann_removed := 0
+	var ann_deleter = _router_with("delete_selected_annotations")
+	if ann_deleter != null:
+		ann_removed = int(ann_deleter.delete_selected_annotations())
+
 	if not data or not has_selection():
+		if ann_removed > 0:
+			component_lock_changed.emit(_annotation_delete_notice(ann_removed, 0))
+			# Same reason the claim press emits: the trash button's enablement
+			# feed is this signal, and it has just gone empty.
+			selection_changed.emit()
+			queue_redraw()
 		return
 
 	var removed := 0
@@ -2798,11 +3023,27 @@ func _delete_selection() -> void:
 
 	data.end_batch("Delete selection (%d)" % removed)
 
-	if removed == 0:
+	# One transient line per Delete, and the annotation half wins the slot when
+	# there is one: "nothing deleted" would be a lie if annotations just went.
+	if ann_removed > 0:
+		component_lock_changed.emit(_annotation_delete_notice(ann_removed, removed))
+	elif removed == 0:
 		component_lock_changed.emit("Selection is locked — nothing deleted")
 
 	_clear_selection()
 	queue_redraw()
+
+
+## The one place the no-undo asymmetry is spoken out loud. Routed through
+## component_lock_changed, this panel's single transient-status pathway (the same
+## one the via-drag refusal uses).
+static func _annotation_delete_notice(ann_removed: int, board_removed: int) -> String:
+	var line := "%d annotation%s deleted — annotations have no undo" \
+		% [ann_removed, "" if ann_removed == 1 else "s"]
+	if board_removed > 0:
+		line += "; the %d board item%s undo as one step" \
+			% [board_removed, "" if board_removed == 1 else "s"]
+	return line
 
 
 ## Eraser click (item 019fb934827776): pick exactly what the Select tool
@@ -3437,6 +3678,10 @@ func set_tool_mode(mode: ToolMode) -> void:
 			_cancel_zone_draw(false)
 		if tool_mode == ToolMode.TRACE:
 			_cancel_trace_draw(false)
+		# Leaving Select ends any annotation gesture in flight (B1u3) — the
+		# universal Select is disarmed by the panel on this same transition, so
+		# the release would arrive with nothing to receive it.
+		_annotation_gesture = false
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		queue_redraw()
@@ -3450,6 +3695,95 @@ func set_tool_mode(mode: ToolMode) -> void:
 ## canvas never hit-tests pads itself, it only drives the host through it.
 func set_pin_inspector_host(host) -> void:
 	_pin_inspector_host = host
+
+
+## Bind the annotation half of the unified Select (B1u3). `router` is the
+## PcbAnnotationHost; PCBPanel wires it beside set_pin_inspector_host. Passing
+## null (teardown, headless fixtures) restores board-only behavior.
+func set_annotation_router(router) -> void:
+	_annotation_router = router
+	_annotation_gesture = false
+
+
+## Duck-typed reach into the router. Returns null unless the router is alive AND
+## advertises `method` — one guard, used by every hook, so a router that only
+## half-implements the protocol degrades per-verb instead of erroring.
+func _router_with(method: String):
+	if _annotation_router == null:
+		return null
+	if _annotation_router is Object and not is_instance_valid(_annotation_router):
+		return null
+	if not _annotation_router.has_method(method):
+		return null
+	return _annotation_router
+
+
+## The modifier mask an annotation tool expects, built from a mouse event.
+## Mirrors AnnotationOverlay._mods_from_event — the tools' documented contract is
+## the mask, and the canvas is standing in for the overlay here.
+static func _annotation_mods(event: InputEventWithModifiers) -> int:
+	var mods := 0
+	if event.shift_pressed:
+		mods |= KEY_MASK_SHIFT
+	if event.ctrl_pressed:
+		mods |= KEY_MASK_CTRL
+	if event.alt_pressed:
+		mods |= KEY_MASK_ALT
+	if event.meta_pressed:
+		mods |= KEY_MASK_META
+	return mods
+
+
+## Is the annotation layer claiming this LEFT press? True means the gesture has
+## been handed over and the caller must return.
+##
+## A plain (non-shift) claim REPLACES the whole selection, so the board half is
+## dropped here — that is what makes one Select feel like one Select rather than
+## two selections that happen to share a button. A shift-claim edits set
+## membership and leaves the board half alone, matching what shift does on either
+## side taken separately.
+func _claim_annotation_press(event: InputEventMouseButton) -> bool:
+	var router = _router_with("annotation_claims_point")
+	if router == null:
+		return false
+	# mods GO IN, not just out: the annotation layer declines a shift-press that
+	# misses its ink, because a shift+box has to be swept by the canvas so it can
+	# take BOTH halves. Handing the claim a bare position instead loses the board
+	# half of every shift-drag that starts inside a selected annotation's gizmo
+	# ring — a ~14px band around something already selected (cold review N1).
+	var mods := _annotation_mods(event)
+	if not bool(router.annotation_claims_point(event.position, mods)):
+		return false
+
+	if not event.shift_pressed:
+		_clear_selection()
+
+	_annotation_gesture = true
+	if event.double_click and _router_with("annotation_pointer_double_click") != null:
+		router.annotation_pointer_double_click(event.position, MOUSE_BUTTON_LEFT, mods)
+	elif _router_with("annotation_pointer_down") != null:
+		router.annotation_pointer_down(event.position, MOUSE_BUTTON_LEFT, mods)
+	# The PANEL's selection changed even though no board id list did: this is the
+	# feed the trash button, the status bar and the property inspector live on,
+	# and a Select that lights up half of them is the two-worlds symptom again.
+	selection_changed.emit()
+	queue_redraw()
+	return true
+
+
+## Drop BOTH halves of the unified selection.
+##
+## The two GESTURE-level clears use this — Escape, and a plain press on empty
+## space — because in this panel both mean "nothing is selected" and a stale
+## annotation halo left behind by an Escape is the whole bug this closes.
+## Board-internal and programmatic clears keep calling _clear_selection(), which
+## stays board-only on purpose: a component selected through the MCP surface must
+## not silently deselect the annotation the user is reading.
+func _clear_selection_all() -> void:
+	_clear_selection()
+	var router = _router_with("clear_annotation_selection")
+	if router != null:
+		router.clear_annotation_selection()
 
 
 ## Toolbar toggle / Shift+P: arm INSPECT_PIN, or exit back to Select if already
