@@ -71,6 +71,21 @@ func _init() -> void:
 	_test_remove_via_journal_identity()
 	_test_restore_state_high_waters_trace_counter_in_isolation()
 
+	# Campaign-2 boundary block (BT-08…11, 13…17, 24…26, 29).
+	_test_group_serialization_roundtrip()
+	_test_group_typed_offset_in_serialized_output()
+	_test_group_undo_restores_member_positions()
+	_test_group_rotation_is_rigid()
+	_test_zone_edit_serialized_outline()
+	_test_zone_edit_journal_deltas()
+	_test_zone_refusals_are_the_models_own_strings()
+	_test_zone_roundtrip_preserves_outline_net_layer()
+	_test_width_roundtrips_through_serialization()
+	_test_width_journal_deltas()
+	_test_width_undo_restores_geometry_not_just_the_field()
+	_test_width_bounds_live_in_exactly_one_file()
+	_assert_every_section_ran()
+
 	_finish()
 
 
@@ -831,3 +846,613 @@ func check(description: String, condition: bool, detail: String = "") -> void:
 			printerr("  FAIL: %s — %s" % [description, detail])
 		else:
 			printerr("  FAIL: %s" % description)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CAMPAIGN-2 BOUNDARY BLOCK — BT-08…11 (group lifecycle, round A4),
+# BT-13…17 (zone edit, A5), BT-24…26 + 29 (trace width, A7).
+#
+# ORACLE RULE, from the rounds' own verbatim oracles: assert in the SERIALIZED
+# representation, not in canvas state and not through the setter that just ran.
+# "host_owned JSON alone is a weak oracle" (A4 oracle 1) — so group membership
+# and offsets are read back out of to_board_dict()/from_board_dict(), and trace
+# width is checked through the GEOMETRY functions rather than the width field.
+#
+# SHARED HELPERS: this file's journal-delta counter is _journal_len() below. The
+# same idiom is implemented once more in test_pcb_panel_tools.gd (its own
+# process, no common base to share from) and is needed a third time by the
+# canvas suite's BT-52 — recorded in the boundary report rather than solved by a
+# cross-fence edit.
+# ══════════════════════════════════════════════════════════════════════════════
+
+const BOUNDARY_TRACE_PATH := MODEL_DIR + "pcb_trace.gd"
+const BOUNDARY_PREFS_PATH := MODEL_DIR + "pcb_prefs.gd"
+const BOUNDARY_DATA_SRC := MODEL_DIR + "pcb_data.gd"
+const BOUNDARY_PANEL_SRC := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
+
+
+## SECTION REGISTRY — the structural answer to the silent-abort trap.
+##
+## A GDScript runtime error aborts the whole enclosing FUNCTION, not the line.
+## Every assertion after it simply never runs, and a suite that counts only
+## PASS/FAIL reports a clean green while an entire oracle executed nothing. This
+## file lost four oracles that way (BT-24/25/26/29) before the guard existed; the
+## only reason it surfaced was a mutation that failed to go red.
+##
+## So each boundary section declares itself on entry, and a final guard — which
+## runs in _init AFTER every section, so an abort inside one cannot skip it —
+## proves each declared section actually produced assertions.
+var _section_marks: Array = []
+
+
+func _begin_section(label: String) -> void:
+	_section_marks.append({"label": label, "at": _pass_count + _fail_count})
+
+
+## Called LAST. Every declared section must have contributed at least one
+## assertion, and the section after it must have started later than it did.
+func _assert_every_section_ran() -> void:
+	print("\n-- boundary block: every section actually ran --")
+	var silent: Array = []
+	for i in range(_section_marks.size()):
+		var mark: Dictionary = _section_marks[i]
+		var next_at: int = int(_section_marks[i + 1]["at"]) if i + 1 < _section_marks.size() \
+				else _pass_count + _fail_count
+		if next_at - int(mark["at"]) <= 0:
+			silent.append(str(mark["label"]))
+	check("no boundary section produced ZERO assertions (silent: %s)" % str(silent),
+			silent.is_empty())
+	check("all 12 boundary sections declared themselves (%d)" % _section_marks.size(),
+			_section_marks.size() == 12)
+
+
+func _journal_len(data) -> int:
+	return data.change_journal.size()
+
+
+func _history_len(data) -> int:
+	for member in ["_history", "history", "_undo_stack"]:
+		var v: Variant = data.get(member)
+		if v is Array:
+			return (v as Array).size()
+	return -1
+
+
+func _read_src(path: String) -> String:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return ""
+	var t := f.get_as_text()
+	f.close()
+	return t
+
+
+## A two-part group on a blank board. Returns [data, group_id].
+func _boundary_group_fixture() -> Array:
+	var data = _PCBData.new(80.0, 60.0)
+	for entry in [["A1", Vector2(10.0, 10.0)], ["A2", Vector2(20.0, 10.0)],
+			["A3", Vector2(20.0, 20.0)]]:
+		var comp = _PCBComponent.new()
+		comp.id = str(entry[0])
+		comp.position = entry[1]
+		comp.rotation = 0.0
+		comp.pins = {"1": Vector2(0.0, 0.0)}
+		data.add_component(comp)
+	var gid: String = data.group_components(["A1", "A2", "A3"])
+	return [data, gid]
+
+
+## Every component's serialized position, keyed by ref. The SERIALIZED dict, not
+## the live objects — that is the whole discipline of this block.
+func _serialized_positions(data) -> Dictionary:
+	var out := {}
+	for entry in data.to_board_dict().get("components", []):
+		var e: Dictionary = entry
+		out[str(e.get("ref", e.get("id", "")))] = Vector2(
+				float(e.get("x_mm", 0.0)), float(e.get("y_mm", 0.0)))
+	return out
+
+
+func _serialized_rotations(data) -> Dictionary:
+	var out := {}
+	for entry in data.to_board_dict().get("components", []):
+		var e: Dictionary = entry
+		out[str(e.get("ref", e.get("id", "")))] = float(e.get("rotation_deg", 0.0))
+	return out
+
+
+# ── BT-08. Group membership survives the SERIALIZATION path ──────────────────
+
+## A4 oracle (1): "serialization round-trip through the pcb.serialize YAML path —
+## group membership+offsets asserted in the SERIALIZED representation, not via
+## canvas code; host_owned JSON alone is a weak oracle."
+##
+## So: to_board_dict() -> from_board_dict() into a SECOND model -> read
+## properties["group_id"] off the RELOADED components. The canvas is never
+## touched, and neither is the group API that wrote the stamp — a stamp that
+## lives only in memory (or only in the host_owned blob) reds here.
+func _test_group_serialization_roundtrip() -> void:
+	_begin_section("BT-08")
+	print("\n-- BT-08: group membership survives to_board_dict -> from_board_dict --")
+	var fixture := _boundary_group_fixture()
+	var data = fixture[0]
+	var gid: String = fixture[1]
+	check("the fixture really is grouped", not gid.is_empty())
+
+	var reloaded = _PCBData.new(80.0, 60.0)
+	reloaded.from_board_dict(data.to_board_dict())
+
+	var stamps := {}
+	for cid in ["A1", "A2", "A3"]:
+		var comp = reloaded.get_component(cid)
+		stamps[cid] = "" if comp == null else str(
+				comp.properties.get(_PCBComponent.GROUP_PROPERTY_KEY, ""))
+	check("all three members carry a group stamp after the round trip (%s)" % str(stamps),
+			not str(stamps["A1"]).is_empty()
+			and not str(stamps["A2"]).is_empty()
+			and not str(stamps["A3"]).is_empty())
+	check("...and it is the SAME stamp for all three (a per-component id would "
+			+ "round-trip too, and would not be a group)",
+			stamps["A1"] == stamps["A2"] and stamps["A2"] == stamps["A3"])
+	# The reloaded model must also AGREE through its own group reader — two
+	# representations of one fact.
+	check("the reloaded model reports the three as one group's members",
+			reloaded.group_member_ids(str(stamps["A1"])).size() == 3)
+
+
+# ── BT-09. A typed offset IS member.position − anchor.position ───────────────
+
+## A4 oracle (2), asserted as ARITHMETIC ON THE SERIALIZED DICT: the difference
+## between the member's and the anchor's serialized positions must equal the
+## offset that was typed. A mutation that applies the offset to the ANCHOR
+## instead flips the sign/target and reds here without any UI in the picture.
+func _test_group_typed_offset_in_serialized_output() -> void:
+	_begin_section("BT-09")
+	print("\n-- BT-09: typed offset == member.position - anchor.position, in the serialized dict --")
+	var fixture := _boundary_group_fixture()
+	var data = fixture[0]
+	var gid: String = fixture[1]
+	var anchor_id: String = data.group_anchor_id(gid)
+	var member_id := "A3" if anchor_id != "A3" else "A2"
+
+	var typed := Vector2(7.5, -3.25)
+	var moved: bool = data.set_member_offset(member_id, typed)
+	check("set_member_offset reports it moved the member", moved)
+
+	var positions := _serialized_positions(data)
+	var difference: Vector2 = (positions[member_id] as Vector2) - (positions[anchor_id] as Vector2)
+	check("serialized (member - anchor) == the typed offset (typed %s, got %s)"
+			% [str(typed), str(difference)], difference.is_equal_approx(typed))
+	# The anchor must NOT have moved: that is the half a "apply it to the anchor"
+	# mutation gets wrong while the difference could still look plausible.
+	check("the anchor stayed where it was (%s)" % str(positions[anchor_id]),
+			(positions[anchor_id] as Vector2).is_equal_approx(Vector2(10.0, 10.0))
+			or anchor_id != "A1")
+
+
+# ── BT-10. Undo restores member positions from journal snapshots ─────────────
+
+## A4 oracle (3), read from the SERIALIZED dict on both sides of the gesture, so
+## "undo worked" means the document came back — not that some in-memory field
+## was reassigned.
+func _test_group_undo_restores_member_positions() -> void:
+	_begin_section("BT-10")
+	print("\n-- BT-10: undo restores every member's serialized position --")
+	var fixture := _boundary_group_fixture()
+	var data = fixture[0]
+	data.save_to_history("Baseline")
+	var before := _serialized_positions(data)
+
+	data.translate_group("A1", Vector2(12.0, 8.0))
+	data.save_to_history("Move group")
+	var after := _serialized_positions(data)
+	var any_moved := false
+	for cid in before:
+		if not (before[cid] as Vector2).is_equal_approx(after[cid] as Vector2):
+			any_moved = true
+	check("the gesture actually moved the group (fixture is not a no-op)", any_moved)
+
+	check("undo() reports it did something", data.undo())
+	var restored := _serialized_positions(data)
+	var mismatched: Array = []
+	for cid in before:
+		if not restored.has(cid) or not (before[cid] as Vector2).is_equal_approx(
+				restored[cid] as Vector2):
+			mismatched.append(cid)
+	check("every member's serialized position is back (mismatched: %s)"
+			% str(mismatched), mismatched.is_empty())
+	check("...and that is ALL THREE members, not just the anchor",
+			restored.size() == 3)
+
+
+# ── BT-11. The rigid-body invariant ─────────────────────────────────────────
+
+## A4 oracle (4), and the round's own must_fix: "for ANY delta, all member bodies
+## turn by the same quantized amount positions orbit by (deform-detection: assert
+## body-delta == orbit-delta)".
+##
+## Two INDEPENDENTLY DERIVED quantities per member:
+##   * the BODY delta — the change in the component's own serialized
+##     rotation_deg;
+##   * the ORBIT delta — the change in the angle of (member − anchor), measured
+##     from the serialized positions.
+## A rigid body turns both by the same amount. A rotation path that quantizes one
+## and not the other deforms the group, which looks fine at 90 degrees and wrong
+## at 45 — hence the sweep.
+func _test_group_rotation_is_rigid() -> void:
+	_begin_section("BT-11")
+	print("\n-- BT-11: body rotation delta == orbit delta, for every member, at every angle --")
+	for requested in [45.0, 17.0, 90.0, 180.0, -45.0]:
+		var fixture := _boundary_group_fixture()
+		var data = fixture[0]
+		var gid: String = fixture[1]
+		var anchor_id: String = data.group_anchor_id(gid)
+
+		var pos_before := _serialized_positions(data)
+		var rot_before := _serialized_rotations(data)
+		var turned: Array = data.rotate_group("A1", requested)
+		var pos_after := _serialized_positions(data)
+		var rot_after := _serialized_rotations(data)
+
+		# The model quantizes to the nearest quarter turn through ONE authority.
+		var expected: float = _PCBComponent.snap_rotation(requested)
+		if fposmod(expected, 360.0) == 0.0:
+			check("%.0f deg quantizes to a no-op and turns nothing" % requested,
+					turned.is_empty())
+			continue
+
+		var deformed: Array = []
+		for member_id in ["A1", "A2", "A3"]:
+			if member_id == anchor_id:
+				continue
+			var body_delta: float = fposmod(
+					float(rot_after[member_id]) - float(rot_before[member_id]), 360.0)
+			var before_vec: Vector2 = (pos_before[member_id] as Vector2) \
+					- (pos_before[anchor_id] as Vector2)
+			var after_vec: Vector2 = (pos_after[member_id] as Vector2) \
+					- (pos_after[anchor_id] as Vector2)
+			# Screen-space y is down, so a positive KiCad-sign body rotation
+			# corresponds to a NEGATIVE angle sweep in this coordinate system —
+			# the same -deg convention rotate_group itself applies. Compare the
+			# magnitudes after normalising both into [0, 360).
+			var orbit_delta: float = fposmod(
+					rad_to_deg(before_vec.angle() - after_vec.angle()), 360.0)
+			if absf(body_delta - orbit_delta) > 0.01:
+				deformed.append("%s body=%.3f orbit=%.3f" % [member_id, body_delta, orbit_delta])
+			# And the member must not have changed its DISTANCE from the anchor:
+			# an orbit is a rotation, never a scale.
+			if absf(before_vec.length() - after_vec.length()) > 1e-4:
+				deformed.append("%s radius %.4f -> %.4f"
+						% [member_id, before_vec.length(), after_vec.length()])
+		check("%.0f deg (quantized %.0f): every member is rigid (%s)"
+				% [requested, expected, str(deformed)], deformed.is_empty())
+
+
+# ── BT-13/14/15. Zone outline edits: serialized outline + journal deltas ────
+
+func _boundary_zone_fixture() -> Array:
+	var data = _PCBData.new(80.0, 60.0)
+	var net = _PCBNet.new()
+	net.name = "ZN"
+	data.add_net(net)
+	var zone: Dictionary = data.create_zone("ZN", "top", PackedVector2Array([
+			Vector2(5.0, 5.0), Vector2(25.0, 5.0), Vector2(25.0, 20.0),
+			Vector2(5.0, 20.0)]), "copper_pour")
+	return [data, str(zone.get("id", ""))]
+
+
+func _serialized_outline(data, zone_id: String) -> Array:
+	for entry in data.to_board_dict().get("zones", []):
+		var e: Dictionary = entry
+		if str(e.get("id", "")) == zone_id:
+			var pts: Array = []
+			for p in e.get("outline", e.get("points", [])):
+				var pd: Dictionary = p
+				pts.append(Vector2(float(pd.get("x_mm", pd.get("x", 0.0))),
+						float(pd.get("y_mm", pd.get("y", 0.0)))))
+			return pts
+	return []
+
+
+## A5 oracle (1): the serialized outline after an edit == the expected point
+## list. Read out of to_board_dict, never from the zone dictionary the setter
+## just wrote.
+func _test_zone_edit_serialized_outline() -> void:
+	_begin_section("BT-13")
+	print("\n-- BT-13: the edited outline, read out of to_board_dict --")
+	var fixture := _boundary_zone_fixture()
+	var data = fixture[0]
+	var zone_id: String = fixture[1]
+	check("the fixture zone exists", not zone_id.is_empty())
+	check("its serialized outline has the 4 authored points",
+			_serialized_outline(data, zone_id).size() == 4)
+
+	var replacement := PackedVector2Array([
+			Vector2(6.0, 6.0), Vector2(26.0, 6.0), Vector2(26.0, 21.0)])
+	check("set_zone_outline accepts a 3-point outline",
+			data.set_zone_outline(zone_id, replacement))
+	var serialized := _serialized_outline(data, zone_id)
+	check("the serialized outline is now the 3 new points (got %d)" % serialized.size(),
+			serialized.size() == 3)
+	var wrong: Array = []
+	for i in range(mini(serialized.size(), replacement.size())):
+		if not (serialized[i] as Vector2).is_equal_approx(replacement[i]):
+			wrong.append(i)
+	check("...point for point (mismatched indices: %s)" % str(wrong), wrong.is_empty())
+
+
+## A5 oracles (2) and (4): ONE history step per gesture, and a REFUSED gesture
+## leaves the journal alone.
+func _test_zone_edit_journal_deltas() -> void:
+	_begin_section("BT-14/15")
+	print("\n-- BT-14/15: one step per gesture; a refused gesture journals nothing --")
+	var fixture := _boundary_zone_fixture()
+	var data = fixture[0]
+	var zone_id: String = fixture[1]
+
+	var j0 := _journal_len(data)
+	var h0 := _history_len(data)
+	data.set_zone_outline(zone_id, PackedVector2Array([
+			Vector2(1.0, 1.0), Vector2(9.0, 1.0), Vector2(9.0, 9.0)]))
+	data.save_to_history("Edit zone outline")
+	check("a committed outline edit is ONE history step (delta %d)"
+			% (_history_len(data) - h0), _history_len(data) - h0 == 1)
+	# MEASURED, and it is the documented contract rather than a gap:
+	# set_zone_outline is a LIVE-DRAG WRITER — "silent about a real write, vocal
+	# about a refusal" (pcb_data.gd's own doc) — because a vertex drag emits one
+	# write per mouse motion and journalling each would bury the gesture. The
+	# JOURNAL entry belongs to whoever ends the gesture: the canvas' drag-end
+	# commit, or panel_tools._set_zone_outline (pinned in
+	# test_pcb_panel_tools.gd's BT-73 leg). Pinned as +0 here so a future edit
+	# that "fixes" the silence by journalling per motion reds at this layer.
+	check("the model-layer write itself journals nothing (delta %d) — the "
+			% (_journal_len(data) - j0)
+			+ "gesture's owner writes the entry, not the setter",
+			_journal_len(data) - j0 == 0)
+
+	# THE REFUSAL. A 2-point outline is not an outline; the model must refuse it
+	# and leave both counters exactly where they were.
+	var j1 := _journal_len(data)
+	var h1 := _history_len(data)
+	var accepted: bool = data.set_zone_outline(zone_id, PackedVector2Array([
+			Vector2(0.0, 0.0), Vector2(1.0, 1.0)]))
+	check("a 2-point outline is REFUSED", not accepted)
+	check("a refused gesture journals nothing (delta %d)"
+			% (_journal_len(data) - j1), _journal_len(data) - j1 == 0)
+	check("...and pushes no history step", _history_len(data) - h1 == 0)
+	check("...and the zone still carries its previous 3 points",
+			_serialized_outline(data, zone_id).size() == 3)
+
+
+## A5 oracle (3): the refusal STRINGS are the model's own, compared to the
+## authority that owns each rule. Two call sites, one source.
+func _test_zone_refusals_are_the_models_own_strings() -> void:
+	_begin_section("BT-16")
+	print("\n-- BT-16: zone_net_error / zone_layer_error own their own wording --")
+	var fixture := _boundary_zone_fixture()
+	var data = fixture[0]
+
+	var net_refusal := str(data.zone_net_error("NOPE", "copper_pour"))
+	check("an undeclared net on a copper pour is refused (%s)" % net_refusal,
+			not net_refusal.is_empty())
+	# A KEEPOUT is the exemption — the decomposition's whole point. A mutation
+	# that deletes the exemption reds here and nowhere else.
+	check("...but a keepout may carry no net at all",
+			str(data.zone_net_error("", "keepout")).is_empty())
+
+	var layer_refusal := str(data.zone_layer_error("F.Cu"))
+	check("an undeclared (KiCad-alias) layer is refused (%s)" % layer_refusal,
+			not layer_refusal.is_empty())
+	check("...and a declared canonical layer is accepted",
+			str(data.zone_layer_error("top")).is_empty())
+
+	# The COMPOSITE authority must AGREE with each half for the same input —
+	# that is what keeps a doubly-stale zone independently repairable rather
+	# than collapsing back into one zone_author_error.
+	check("zone_author_error surfaces the NET half verbatim",
+			str(data.zone_author_error("NOPE", "top", 4, "copper_pour")) == net_refusal)
+	check("zone_author_error surfaces the LAYER half verbatim",
+			str(data.zone_author_error("ZN", "F.Cu", 4, "copper_pour")) == layer_refusal)
+
+
+## A5 oracle (5): outline, net and layer all survive the round trip.
+func _test_zone_roundtrip_preserves_outline_net_layer() -> void:
+	_begin_section("BT-17")
+	print("\n-- BT-17: to_board_dict/from_board_dict preserves outline + net + layer --")
+	var fixture := _boundary_zone_fixture()
+	var data = fixture[0]
+	var zone_id: String = fixture[1]
+	data.set_zone_outline(zone_id, PackedVector2Array([
+			Vector2(2.0, 2.0), Vector2(12.0, 2.0), Vector2(12.0, 12.0)]))
+
+	var reloaded = _PCBData.new(80.0, 60.0)
+	reloaded.from_board_dict(data.to_board_dict())
+	var zone: Dictionary = reloaded.get_zone(zone_id)
+	check("the zone survived the round trip under its own id", not zone.is_empty())
+	check("its outline came back with 3 points",
+			_serialized_outline(reloaded, zone_id).size() == 3)
+	check("its net came back", str(zone.get("net", "")) == "ZN")
+	check("its layer came back", str(zone.get("layer", "")) == "top")
+
+
+# ── BT-24/25/26/29. Trace width ─────────────────────────────────────────────
+
+func _boundary_trace_fixture() -> Array:
+	var data = _PCBData.new(80.0, 60.0)
+	var trace = _PCBTrace.new()
+	trace.id = "TW1"
+	trace.net_name = "N1"
+	trace.layer = "top"
+	trace.width = 0.25
+	# waypoints is Array[Vector2], NOT PackedVector2Array. Assigning the wrong
+	# packed type is a RUNTIME error that aborts the WHOLE test function and
+	# silently drops every assertion after it — which is exactly what happened to
+	# BT-24/25/26/29 in this file's first draft: four oracles ran nothing while
+	# the suite reported 124 passed / 0 failed. See _assert_every_section_ran().
+	var pts: Array[Vector2] = [Vector2(10.0, 10.0), Vector2(40.0, 10.0)]
+	trace.waypoints = pts
+	# add_trace() returns VOID and stamps the id onto the object, so there is no
+	# return value to assert. Prove the fixture landed by COUNTING instead.
+	var before: int = data.get_trace_count() if data.has_method("get_trace_count") \
+			else data.traces.size()
+	data.add_trace(trace)
+	var after: int = data.get_trace_count() if data.has_method("get_trace_count") \
+			else data.traces.size()
+	check("trace fixture landed on the board (%d -> %d)" % [before, after],
+			after == before + 1)
+	return [data, "TW1"]
+
+
+func _serialized_trace_width(data, trace_id: String) -> float:
+	for entry in data.to_board_dict().get("traces", []):
+		var e: Dictionary = entry
+		if str(e.get("id", "")) == trace_id:
+			if e.has("width_mm"):
+				return float(e["width_mm"])
+			return float(e.get("width", -1.0))
+	return -1.0
+
+
+## A7 oracle (1): the width round-trips through SERIALIZATION.
+func _test_width_roundtrips_through_serialization() -> void:
+	_begin_section("BT-24")
+	print("\n-- BT-24: the set width appears in the serialized dict --")
+	var fixture := _boundary_trace_fixture()
+	var data = fixture[0]
+	check_width_set(data, "TW1", 0.8)
+	check("the serialized trace carries 0.8 (got %.3f)"
+			% _serialized_trace_width(data, "TW1"),
+			is_equal_approx(_serialized_trace_width(data, "TW1"), 0.8))
+	# The DISCRIMINATING fixture for "serialize the preference instead of the
+	# trace's own width": the value set here is deliberately NOT the model's
+	# default, so the two cannot coincide.
+	check("0.8 is not the model default (%.3f), so a default-echoing serializer "
+			% float(_PCBTrace.DEFAULT_WIDTH_MM) + "cannot pass by coincidence",
+			not is_equal_approx(0.8, float(_PCBTrace.DEFAULT_WIDTH_MM)))
+
+	var reloaded = _PCBData.new(80.0, 60.0)
+	reloaded.from_board_dict(data.to_board_dict())
+	check("...and it survives the reload",
+			is_equal_approx(_serialized_trace_width(reloaded, "TW1"), 0.8))
+
+
+func check_width_set(data, trace_id: String, width: float) -> void:
+	var refusal := str(data.set_trace_width(trace_id, width))
+	check("set_trace_width(%.3f) accepted (%s)" % [width, refusal], refusal.is_empty())
+
+
+## A7 oracle (2): journal +1 on a real change, +0 on a no-op.
+func _test_width_journal_deltas() -> void:
+	_begin_section("BT-25")
+	print("\n-- BT-25: journal +1 per real width change, +0 per no-op --")
+	var fixture := _boundary_trace_fixture()
+	var data = fixture[0]
+
+	var j0 := _journal_len(data)
+	check_width_set(data, "TW1", 0.6)
+	check("a real width change journals exactly one entry (delta %d)"
+			% (_journal_len(data) - j0), _journal_len(data) - j0 == 1)
+
+	var j1 := _journal_len(data)
+	check_width_set(data, "TW1", 0.6)
+	check("setting the SAME width journals nothing (delta %d)"
+			% (_journal_len(data) - j1), _journal_len(data) - j1 == 0)
+
+	# A REFUSED width journals nothing either, and leaves the copper alone.
+	var j2 := _journal_len(data)
+	var refusal := str(data.set_trace_width("TW1", 40.0))
+	check("an out-of-range width is refused (%s)" % refusal, not refusal.is_empty())
+	check("a refused width journals nothing", _journal_len(data) - j2 == 0)
+	check("...and the serialized width is untouched",
+			is_equal_approx(_serialized_trace_width(data, "TW1"), 0.6))
+
+
+## A7 oracle (3): undo restores the width AND the GEOMETRY that depends on it.
+##
+## The width FIELD is deliberately never asserted here. get_bounding_rect() and
+## is_point_near() are the functions every hit-test and every render actually
+## consults; a restore that puts the number back while leaving a cached rect
+## stale is a bug the field assertion cannot see.
+func _test_width_undo_restores_geometry_not_just_the_field() -> void:
+	_begin_section("BT-26")
+	print("\n-- BT-26: undo restores bounding rect + hit radius, not just the number --")
+	var fixture := _boundary_trace_fixture()
+	var data = fixture[0]
+	data.save_to_history("Baseline")
+
+	var trace = data.get_trace("TW1")
+	var rect_before: Rect2 = trace.get_bounding_rect()
+	# A probe point just outside the NARROW trace's half-width, and inside the
+	# WIDE one's. 10.0 + 0.25/2 = 10.125, so 10.4 is outside at 0.25 and inside
+	# at 1.2 (half-width 0.6).
+	var probe := Vector2(25.0, 10.4)
+	check("the probe is OUTSIDE the narrow trace to begin with",
+			not trace.is_point_near(probe, 0.0))
+
+	check_width_set(data, "TW1", 1.2)
+	data.save_to_history("Widen")
+	var widened = data.get_trace("TW1")
+	check("widening grew the bounding rect (%.3f -> %.3f tall)"
+			% [rect_before.size.y, widened.get_bounding_rect().size.y],
+			widened.get_bounding_rect().size.y > rect_before.size.y + 1e-6)
+	check("...and the probe is now INSIDE it", widened.is_point_near(probe, 0.0))
+
+	check("undo() reports it did something", data.undo())
+	var restored = data.get_trace("TW1")
+	check("the bounding rect is back to its pre-widen size (%.3f)"
+			% restored.get_bounding_rect().size.y,
+			is_equal_approx(restored.get_bounding_rect().size.y, rect_before.size.y))
+	check("...and the hit radius is back too: the probe is outside again",
+			not restored.is_point_near(probe, 0.0))
+
+
+## A7 oracle (6): the bounds live in exactly ONE file, and the refusal text is
+## width_error()'s own.
+##
+## The grep half is the durable one. A second hard-coded copy of 0.1/5.0/0.25
+## anywhere else is how the spin box, the model setter and the preference
+## registry start disagreeing — the reviewer grep-verified single-source at ship,
+## and this makes that verification standing.
+func _test_width_bounds_live_in_exactly_one_file() -> void:
+	_begin_section("BT-29")
+	print("\n-- BT-29: one bounds authority; refusal text is width_error's own --")
+	var data = _boundary_trace_fixture()[0]
+	for bad in [40.0, 0.0, -1.0]:
+		var tool_text := str(data.set_trace_width("TW1", bad))
+		var model_text := str(_PCBTrace.width_error(bad))
+		check("width %.2f: the model refuses" % bad, not model_text.is_empty())
+		check("width %.2f: set_trace_width's refusal is width_error's, verbatim "
+				% bad + "(%s == %s)" % [tool_text, model_text], tool_text == model_text)
+
+	# THE SINGLE-SOURCE GREP. Only pcb_trace.gd may DECLARE the numbers; every
+	# other file must reach them through MIN_WIDTH_MM / MAX_WIDTH_MM /
+	# DEFAULT_WIDTH_MM.
+	#
+	# VACUITY GUARD, and it is not decoration: the first draft of this check read
+	# four files, silently got "" for one of them, and therefore PASSED under a
+	# mutation that planted a second copy of the bounds in PCBPanel.gd. A source
+	# scan whose corpus can quietly become empty is the purest form of
+	# assert-on-nothing. Every file is now proved READ before it is scanned, and
+	# the scan is proved to FIND something (pcb_trace.gd) before its absence
+	# elsewhere is allowed to mean anything.
+	var scanned := [BOUNDARY_TRACE_PATH, BOUNDARY_PREFS_PATH, BOUNDARY_DATA_SRC,
+			BOUNDARY_PANEL_SRC]
+	var declarers: Array = []
+	var unread: Array = []
+	var re := RegEx.new()
+	re.compile("const\\s+(MIN_WIDTH_MM|MAX_WIDTH_MM|DEFAULT_WIDTH_MM)\\s*:=")
+	for path in scanned:
+		var src := _read_src(path)
+		if src.length() < 200:
+			unread.append("%s (%d bytes)" % [path, src.length()])
+			continue
+		if re.search(src) != null:
+			declarers.append(str(path).get_file())
+	check("every file in the scan corpus was actually READ (unread: %s)" % str(unread),
+			unread.is_empty())
+	check("the scan corpus is the four files that could hold a copy (%d)" % scanned.size(),
+			scanned.size() == 4)
+	check("the scan FINDS the real authority (positive control): %s" % str(declarers),
+			declarers.has("pcb_trace.gd"))
+	check("exactly ONE file declares the width bounds (%s)" % str(declarers),
+			declarers.size() == 1 and declarers[0] == "pcb_trace.gd")

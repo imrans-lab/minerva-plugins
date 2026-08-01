@@ -20,6 +20,18 @@ is inverted — these tests now pin the NEW contract:
       kind:"coincidence").
   (d) FUNCTIONAL FLOOR (non-mocked) — real dispatch, real resolve, real gerber
       carrying real (non-placeholder) pad geometry.
+
+FIXTURE (docket 019fbe68c5f8, testdata/POLICY.md): this suite used to resolve
+``testdata/footprints/smart-remote-orig.yaml``, a REAL Turnrock product board.
+It was withdrawn from the corpus on 2026-07-30 because a real design (netlist +
+placement) in a public repo is an IP leak. The replacement,
+``testdata/footprints/resolve_corners.yaml``, uses the SAME real, public-origin
+KiCad library parts (ESP32-S3-DevKitC, DIP-6, EVP-ASAC1A, ...) at new, synthetic
+refs/positions/nets — see that file's header for the full rationale. It keeps
+the ref shapes this module keys off: U1 is the ESP32 (thru-hole), SW1 is the
+EVP-ASAC1A tactile switch (SMD, real 2.0x2.0mm lands), and it carries four
+unplated mounting holes. NEVER repair this module by restoring the deleted
+fixture from git history.
 """
 
 from __future__ import annotations
@@ -43,7 +55,7 @@ from tests.oracle.geometry_diff import parse_output_set
 
 HERE = Path(__file__).resolve().parent
 # The one board whose footprints all resolve cleanly (coincidence passes).
-BOARD_YAML = HERE / "testdata" / "footprints" / "smart-remote-orig.yaml"
+BOARD_YAML = HERE / "testdata" / "footprints" / "resolve_corners.yaml"
 
 # Placeholder vs real, per bug 019f7736b236: the EVP-ASAC1A tactile switch
 # footprint's real SMD lands are 2.0x2.0mm; the OLD raw fab placeholder was
@@ -175,7 +187,7 @@ def test_gerbers_resolve_geometry_off_is_ignored_still_compiles():
 
 
 def test_generate_emits_mounting_holes_and_ignores_gate():
-    # W8.2b: the spike board carries NPTH mounting_holes. This test USED to assert
+    # W8.2b: BOARD_YAML carries NPTH mounting_holes. This test USED to assert
     # `generate` fail-closed with kind:"generate" — but that failure came from the
     # OLD kicad-bridge RAISE on board.holes, NOT from the resolve gate (which W8.2
     # already made moot). Now the kicad bridge EMITS mounting holes faithfully, so

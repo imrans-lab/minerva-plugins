@@ -86,6 +86,9 @@ func _init() -> void:
 	await _run_roundtrips()
 	await _run_error_shapes()
 	await _run_get_image()
+	# Campaign-2 boundary block (BT-19…22, 53, 71…76). Runs LAST so it can set
+	# up its own board state without disturbing the golden-parity fixtures above.
+	await _run_boundary_mcp_parity()
 
 	_teardown()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
@@ -435,3 +438,819 @@ func _run_get_image() -> void:
 	check("empty save_to_path returns success (%s)" % str(empty_sp), empty_sp.get("success", false))
 	check("empty save_to_path uses default image_data shape, not saved_to (%s)" % str(empty_sp),
 		empty_sp.has("image_data") and not empty_sp.has("saved_to"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CAMPAIGN-2 BOUNDARY BLOCK — BT-19…22, BT-53, BT-71…76
+#
+# Seeded by the B2 cold-review probe (nudge c2-epochB key B2.review), which
+# established these facts LIVE and is not re-derived here.
+#
+# ORACLE RULE for everything below: the tool's REPLY is never checked against
+# itself. Each assertion reads a SECOND representation — the model read directly,
+# a different tool's read path, the manifest file on disk, or the plugin's own
+# source text — because a tool that builds its reply from its request arguments
+# passes every self-consistent check ever written.
+#
+# ── SHARED HELPERS (plan §4) ────────────────────────────────────────────────
+# Two idioms recur across five surfaces in this campaign, and the plan asked for
+# ONE implementation of each rather than five:
+#
+#   * the JOURNAL-DELTA COUNTER (_journal_len/_history_len below) — BT-14, 20,
+#     25, 52, 73. Assertions stay separate; the counter does not.
+#   * the REFUSAL-STRING DRIFT DETECTOR (_check_refusal_matches_model) — BT-21,
+#     29, 75. It compares the tool's message BYTE FOR BYTE to the model function
+#     that owns the rule, so a reword on either side is caught from the other.
+#
+# NOTE FOR THE CANVAS AUTHOR: BT-52 (via delete journal/history asymmetry, in
+# test_pcb_canvas_input_probe.gd) needs the same counter pair. It is duplicated
+# there rather than shared because the two suites have no common base — flagged
+# in the boundary report rather than solved by a cross-fence edit.
+# ══════════════════════════════════════════════════════════════════════════════
+
+const MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
+const PCB_NET_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_net.gd"
+const PANEL_TOOLS_PATH := "res://../../minerva-plugins/pcb/ui/panel_tools.gd"
+const PANEL_SOURCE_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
+
+
+## Journal length — the model's own append-only change log.
+## SECTION REGISTRY — see test_pcb_panel_model.gd's copy for the incident that
+## created it. A GDScript runtime error aborts the whole enclosing FUNCTION, so
+## an oracle can contribute ZERO assertions while the suite reports clean green.
+## Each boundary section declares itself; the final guard proves each one ran.
+var _section_marks: Array = []
+
+
+func _begin_section(label: String) -> void:
+	_section_marks.append({"label": label, "at": _pass + _fail})
+
+
+func _assert_every_section_ran() -> void:
+	print("\n-- boundary block: every section actually ran --")
+	var silent: Array = []
+	for i in range(_section_marks.size()):
+		var mark: Dictionary = _section_marks[i]
+		var next_at: int = int(_section_marks[i + 1]["at"]) if i + 1 < _section_marks.size() \
+				else _pass + _fail
+		if next_at - int(mark["at"]) <= 0:
+			silent.append(str(mark["label"]))
+	check("no boundary section produced ZERO assertions (silent: %s)" % str(silent),
+			silent.is_empty())
+	check("all 9 boundary sections declared themselves (%d)" % _section_marks.size(),
+			_section_marks.size() == 9)
+
+
+func _journal_len() -> int:
+	return data.change_journal.size()
+
+
+## Undo-history depth. Deliberately a SECOND counter: several operations are
+## "one journal entry, one history step" but a batch is "N journal entries, ONE
+## history step", and only two counters can express that asymmetry.
+func _history_len() -> int:
+	if data.has_method("get_history_size"):
+		return int(data.get_history_size())
+	# The model stores history in an Array; read whichever member it exposes.
+	for member in ["_history", "history", "_undo_stack"]:
+		var v: Variant = data.get(member)
+		if v is Array:
+			return (v as Array).size()
+	# D1 oracle-integrity review, finding 4: a lookup MISS used to return -1
+	# silently, and `-1 == -1` makes every "history delta +0" assertion in this
+	# file vacuously green — the counter would agree with itself forever while
+	# measuring nothing. Fail loudly instead, at every call site that relied on it.
+	check("history counter is readable (a -1 miss makes every delta assertion vacuous)",
+			false)
+	return -1
+
+
+## THE REFUSAL-STRING DRIFT DETECTOR.
+##
+## `reply` must be a refusal whose message is BYTE-IDENTICAL to `model_message`,
+## which the caller obtained by asking the MODEL the same question. Wording that
+## drifts on either side of the seam fails, which is the point: the tool must not
+## own a second copy of a rule the model already states.
+func _check_refusal_matches_model(desc: String, reply: Dictionary,
+		model_message: String) -> void:
+	check("%s — the model itself refuses (fixture is a real refusal)" % desc,
+			not model_message.is_empty())
+	check("%s — the tool refuses too (success:false)" % desc,
+			reply.get("success", true) == false)
+	var tool_message := str(reply.get("error", ""))
+	check("%s — verbatim: tool %s == model %s" % [desc, tool_message, model_message],
+			tool_message == model_message)
+
+
+## Declare a net on the board. The model's add_net takes a NET OBJECT, not a
+## name — a string silently blows up on `net.name`, which is how the first draft
+## of this block failed.
+func _declare_net(net_name: String) -> void:
+	var net = load(PCB_NET_PATH).new()
+	net.name = net_name
+	data.add_net(net)
+
+
+func _read_text(path: String) -> String:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return ""
+	var t := f.get_as_text()
+	f.close()
+	return t
+
+
+func _run_boundary_mcp_parity() -> void:
+	_boundary_manifest_dispatch_parity()          # BT-22
+	_boundary_no_false_ok_shapes()                # BT-75 (mechanical half)
+	_boundary_description_promises_are_true()     # BT-71 (reframed — see below)
+	await _boundary_layout_state_is_read_only()   # BT-76
+	await _boundary_zone_lifecycle()              # BT-19, 20, 21, 72, 73, 75-live
+	await _boundary_group_agreement()             # BT-74
+	await _boundary_via_read_paths_agree()        # BT-53
+	# Campaign-2 boundary GAP block.
+	await _boundary_agent_preference_surface()    # G2
+	_boundary_build_stamp_tracks_schema()         # G4
+	_assert_every_section_ran()
+
+
+# ── BT-22. manifest ↔ handle() dispatch parity ───────────────────────────────
+
+## The reviewer's programmatic cross-check, made standing.
+##
+## TWO directions, plus the executor leg. Names alone are not enough: hint
+## 019fba4240 records that an entry with NO `executor` silently routes to the Go
+## broker, so a panel tool that loses its executor keyword stops reaching this
+## file at all while both name sets still match perfectly.
+func _boundary_manifest_dispatch_parity() -> void:
+	_begin_section("BT-22")
+	print("\n-- BT-22: manifest <-> panel_tools.handle() dispatch parity --")
+	var manifest_text := _read_text(MANIFEST_PATH)
+	var parsed: Variant = JSON.parse_string(manifest_text)
+	check("manifest.json parses", parsed is Dictionary)
+	if not (parsed is Dictionary):
+		return
+	var tools: Array = (parsed as Dictionary).get("tools", [])
+	check("manifest declares tools", tools.size() > 0)
+
+	var declared_panel := {}
+	var declared_other := {}
+	for entry in tools:
+		var e: Dictionary = entry
+		var name := str(e.get("name", ""))
+		if str(e.get("executor", "")) == "panel":
+			declared_panel[name] = true
+		else:
+			declared_other[name] = true
+
+	# Dispatch branches, read out of the SOURCE TEXT — not from a list this test
+	# maintains, which would just be a third place to forget.
+	var source := _read_text(PANEL_TOOLS_PATH)
+	var dispatched := {}
+	var re := RegEx.new()
+	re.compile("\"(minerva_pcb_[a-z0-9_]+)\":")
+	for m in re.search_all(source):
+		dispatched[m.get_string(1)] = true
+
+	var missing_branch: Array = []
+	for name in declared_panel:
+		if not dispatched.has(name):
+			missing_branch.append(name)
+	missing_branch.sort()
+	check("every executor:\"panel\" tool has a handle() branch (missing: %s)"
+			% str(missing_branch), missing_branch.is_empty())
+
+	var missing_manifest: Array = []
+	for name in dispatched:
+		if not declared_panel.has(name):
+			missing_manifest.append(name)
+	missing_manifest.sort()
+	check("every dispatched name is declared executor:\"panel\" (stray: %s)"
+			% str(missing_manifest), missing_manifest.is_empty())
+
+	# THE EXECUTOR LEG. A worker tool must not be dispatched here, and a panel
+	# tool must not be missing its keyword — the two failures the name-parity
+	# legs above cannot tell apart.
+	var wrongly_broker: Array = []
+	for name in dispatched:
+		if declared_other.has(name):
+			wrongly_broker.append(name)
+	wrongly_broker.sort()
+	check("no dispatched tool is declared without executor:\"panel\" — an absent "
+			+ "executor routes to the Go broker (hint 019fba4240): %s" % str(wrongly_broker),
+			wrongly_broker.is_empty())
+	check("the panel set is non-trivial (%d tools)" % declared_panel.size(),
+			declared_panel.size() >= 40)
+
+
+# ── BT-75 (mechanical half). No false-ok reply shapes ────────────────────────
+
+## Every refusal in this file must be an _err(). A handler that returns
+## `{"ok": false}` or a bare `false` produces a reply with NO "error" key and NO
+## success:false — the agent reads it as a success with missing fields, which is
+## the F2 class the B2 review caught by hand.
+##
+## Grep-level, deliberately: the live half is below, in the zone block, where
+## every refusal path is actually CALLED. Neither half is sufficient — a scan
+## cannot reach a runtime branch, and a runtime call cannot enumerate the ones
+## nobody thought to call.
+func _boundary_no_false_ok_shapes() -> void:
+	_begin_section("BT-75a")
+	print("\n-- BT-75a: no false-ok reply shapes in panel_tools.gd --")
+	var source := _read_text(PANEL_TOOLS_PATH)
+	check("panel_tools.gd source is readable", not source.is_empty())
+
+	# The scan is scoped to REAL HANDLERS — the functions the dispatch match
+	# actually routes to. panel_tools.gd also contains internal BRIDGE helpers
+	# (_run_router) whose {ok, error} envelope is an input to a handler, not a
+	# reply to an agent; flagging those would be a false positive that trains
+	# people to weaken the scan. Handler names are read out of the dispatch
+	# block itself, so a new tool is covered the day it is wired up.
+	var handlers := {}
+	var dispatch_re := RegEx.new()
+	dispatch_re.compile("return (?:await )?(_[a-z0-9_]+)\\(host")
+	for m in dispatch_re.search_all(source):
+		handlers[m.get_string(1)] = true
+	check("dispatch handlers were discovered (%d)" % handlers.size(), handlers.size() >= 40)
+
+	var offenders: Array = []
+	var lines := source.split("\n")
+	var current := ""
+	var func_re := RegEx.new()
+	func_re.compile("^static func (_[a-z0-9_]+)\\(")
+	for i in range(lines.size()):
+		var raw := str(lines[i])
+		var fm := func_re.search(raw)
+		if fm != null:
+			current = fm.get_string(1)
+		var line := raw.strip_edges()
+		if line.begins_with("#") or not handlers.has(current):
+			continue
+		if line.begins_with("return {\"ok\":") or line.begins_with("return false"):
+			offenders.append("%s:%d %s" % [current, i + 1, line])
+	check("no handler returns an {\"ok\": …} shape (offenders: %s)" % str(offenders),
+			offenders.is_empty())
+
+	# The POSITIVE half of the same claim: _err is the one refusal constructor,
+	# and it emits both keys an agent branches on.
+	check("_err emits an \"error\" message AND success:false",
+			source.find("return {\"error\": msg, \"success\": false}") >= 0)
+
+
+# ── BT-71 (reframed). The schema's own prose must be executable ──────────────
+
+## BT-71 as planned reads "every schema example executable-valid (paste-and-
+## succeed per tool)". MEASURED while writing this: the manifest carries prose
+## examples for essentially one tool, so "execute every example" would be a test
+## over a population of one, and would read as coverage it does not have.
+##
+## What the manifest DOES carry, on many tools, is `e.g.` TOKENS inside property
+## descriptions — and that is precisely where the B2 review's F1 defect lived:
+## create_zone's `layer` description offered "F.Cu, B.Cu" while the model accepts
+## only canonical ids, so an agent's very first call, written straight off the
+## schema, was refused. The durable hint is
+## `pcb-plugin/manifest-schema-prose-is-agent-truth`.
+##
+## So the assertion is the one that would have caught F1: a layer/net token
+## OFFERED by a description must be one the model would ACCEPT. Executed against
+## the live model, not pattern-matched.
+func _boundary_description_promises_are_true() -> void:
+	_begin_section("BT-71")
+	print("\n-- BT-71: layer tokens promised by the schema are tokens the model accepts --")
+	var parsed: Variant = JSON.parse_string(_read_text(MANIFEST_PATH))
+	if not (parsed is Dictionary):
+		check("manifest parses for the prose scan", false)
+		return
+
+	# KiCad aliases are what F1 shipped. They are never valid canonical ids.
+	var kicad_aliases := ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]
+	var offenders: Array = []
+	for entry in (parsed as Dictionary).get("tools", []):
+		var e: Dictionary = entry
+		if str(e.get("executor", "")) != "panel":
+			continue
+		var schema: Dictionary = e.get("input_schema", {})
+		var props: Dictionary = schema.get("properties", {})
+		if not props.has("layer"):
+			continue
+		var desc := str((props["layer"] as Dictionary).get("description", ""))
+		for alias in kicad_aliases:
+			# An alias may be NAMED as a counter-example ("NOT F.Cu") — that is
+			# the F1 fix's own wording and must not read as a regression. Only an
+			# alias offered WITHOUT a negation is an offender.
+			if desc.find(alias) >= 0 and desc.findn("not ") < 0:
+				offenders.append("%s.layer offers %s" % [str(e.get("name", "")), alias])
+	check("no panel tool's `layer` description offers a KiCad alias the model "
+			+ "refuses (offenders: %s)" % str(offenders), offenders.is_empty())
+
+	# ... and the counter-proof, executed: the model really does refuse them, so
+	# the assertion above is guarding a live failure and not a style preference.
+	var alias_refusal := str(data.zone_layer_error("F.Cu"))
+	check("the model refuses the alias F.Cu outright (%s)" % alias_refusal,
+			not alias_refusal.is_empty())
+	var canonical_refusal := str(data.zone_layer_error("top"))
+	check("...and accepts the canonical id the schema now offers",
+			canonical_refusal.is_empty())
+
+
+# ── BT-76. get_layout_state is a read; plugin_build is not invented ──────────
+
+func _boundary_layout_state_is_read_only() -> void:
+	_begin_section("BT-76")
+	print("\n-- BT-76: get_layout_state journals nothing; plugin_build tracks the source --")
+	var journal_before := _journal_len()
+	var history_before := _history_len()
+	var last: Dictionary = {}
+	for _i in range(4):
+		last = await h("minerva_pcb_get_layout_state", _args())
+	check("get_layout_state succeeds", last.get("success", false))
+	check_eq("4 reads journalled nothing", _journal_len(), journal_before)
+	check_eq("4 reads pushed no history step", _history_len(), history_before)
+
+	# plugin_build vs the CONSTANT IN THE SOURCE FILE — two representations. A
+	# hardcoded string in the reply matches until somebody bumps the const, which
+	# is exactly the F4 failure mode (an operator reads a stale stamp and
+	# concludes the deploy failed).
+	var source := _read_text(PANEL_SOURCE_PATH)
+	var re := RegEx.new()
+	re.compile("const PLUGIN_BUILD\\s*:=\\s*\"([^\"]*)\"")
+	var m := re.search(source)
+	check("PCBPanel.gd declares PLUGIN_BUILD", m != null)
+	if m != null:
+		check_eq("the reply's plugin_build IS the source constant",
+				str(last.get("plugin_build", "")), m.get_string(1))
+		check("the stamp is non-empty (an empty stamp answers nothing)",
+				not m.get_string(1).is_empty())
+	# NOTE (F4, reported not authored): pinning the LITERAL so an unbumped round
+	# goes red belongs in test_pcb_manifest_tool_registration.gd, which already
+	# owns the plugin's count/version pins and is outside this file's fence.
+
+
+# ── BT-19/20/21/72/73 + the live half of BT-75. Zone lifecycle ───────────────
+
+func _boundary_zone_lifecycle() -> void:
+	_begin_section("BT-19/20/21/72/73")
+	print("\n-- BT-19/20/21/72/73: zone tools vs the model, journal deltas, refusals --")
+	# Fixture: one declared net on a two-layer board.
+	_declare_net("BND_NET")
+	var outline := [
+		{"x_mm": 5.0, "y_mm": 5.0}, {"x_mm": 25.0, "y_mm": 5.0},
+		{"x_mm": 25.0, "y_mm": 20.0}, {"x_mm": 5.0, "y_mm": 20.0},
+	]
+
+	# ── BT-72 + BT-19: create, then read back through a SEPARATE path.
+	var j0 := _journal_len()
+	var created := await h("minerva_pcb_create_zone", _args({
+		"kind": "copper_pour", "net": "BND_NET", "layer": "top", "outline": outline}))
+	check("create_zone succeeds", created.get("success", false))
+	var zone_id := str(created.get("zone_id", ""))
+	check("create_zone minted a non-empty id", not zone_id.is_empty())
+	check("create_zone journalled exactly one entry", _journal_len() - j0 == 1)
+
+	# BT-72: the id must be present in a SEPARATE list call, not just echoed.
+	var listed := await h("minerva_pcb_list_zones", _args())
+	var listed_ids: Array = []
+	var listed_entry: Dictionary = {}
+	for z in listed.get("zones", []):
+		listed_ids.append(str((z as Dictionary).get("zone_id", "")))
+		if str((z as Dictionary).get("zone_id", "")) == zone_id:
+			listed_entry = z
+	check("the minted id appears in list_zones (%s)" % str(listed_ids),
+			listed_ids.has(zone_id))
+	# ... and the PAYLOAD agrees, not merely the id (the plan's own extension of
+	# this leg: agreeing on an id while disagreeing on the outline is worse than
+	# disagreeing outright, because it looks correct).
+	check_eq("list_zones agrees on the point count",
+			int(listed_entry.get("point_count", -1)), outline.size())
+	check_eq("list_zones agrees on the net", str(listed_entry.get("net", "")), "BND_NET")
+	check_eq("list_zones agrees on the layer", str(listed_entry.get("layer", "")), "top")
+
+	# BT-19: the reply's claim vs the MODEL read directly. A tool that mutated a
+	# copy and returned the intended value passes every reply-only check.
+	var model_zone: Dictionary = data.get_zone(zone_id)
+	check("the model itself holds a zone under that id", not model_zone.is_empty())
+	check_eq("model net == reply net", str(model_zone.get("net", "")), "BND_NET")
+	check_eq("model layer == reply layer", str(model_zone.get("layer", "")), "top")
+	check_eq("model point count == reply point_count",
+			data.zone_outline_points(model_zone).size(), int(created.get("point_count", -1)))
+
+	# ── BT-20: journal deltas across the four call classes.
+	var j1 := _journal_len()
+	await h("minerva_pcb_list_zones", _args())
+	await h("minerva_pcb_describe_zone", _args({"zone_id": zone_id}))
+	check("reads journal NOTHING (+0)", _journal_len() - j1 == 0)
+
+	var j2 := _journal_len()
+	var set_net := await h("minerva_pcb_set_zone_net", _args({
+			"zone_id": zone_id, "net_name": "BND_NET"}))
+	check("a no-change set succeeds", set_net.get("success", false))
+	check("a no-change set reports changed:false", set_net.get("changed", true) == false)
+	check("a no-change set journals NOTHING (+0)", _journal_len() - j2 == 0)
+
+	_declare_net("BND_NET2")
+	var j3 := _journal_len()
+	var real_set := await h("minerva_pcb_set_zone_net", _args({
+			"zone_id": zone_id, "net_name": "BND_NET2"}))
+	check("a real set succeeds and reports changed:true",
+			real_set.get("success", false) and real_set.get("changed", false))
+	check("a real set journals exactly one entry (+1)", _journal_len() - j3 == 1)
+	check_eq("...and the MODEL carries the new net (not just the reply)",
+			str(data.get_zone(zone_id).get("net", "")), "BND_NET2")
+
+	# ── BT-73: outline set — journal deltas + value-wise undo restore.
+	var before_points: PackedVector2Array = data.zone_outline_points(data.get_zone(zone_id))
+	var j4 := _journal_len()
+	var same_outline := await h("minerva_pcb_set_zone_outline", _args({
+			"zone_id": zone_id, "outline": outline}))
+	check("re-submitting the SAME outline is a no-change (+0 journal)",
+			same_outline.get("success", false) and _journal_len() - j4 == 0)
+
+	var moved := [
+		{"x_mm": 6.0, "y_mm": 6.0}, {"x_mm": 26.0, "y_mm": 6.0},
+		{"x_mm": 26.0, "y_mm": 21.0},
+	]
+	var j5 := _journal_len()
+	var h5 := _history_len()
+	var set_outline := await h("minerva_pcb_set_zone_outline", _args({
+			"zone_id": zone_id, "outline": moved}))
+	check("a real outline set succeeds", set_outline.get("success", false))
+	check("a real outline set journals exactly one entry (+1)", _journal_len() - j5 == 1)
+	check("...and pushes exactly one history step (+1)", _history_len() - h5 == 1)
+
+	var undone: bool = data.undo()
+	check("undo() reports it did something", undone)
+	var restored: PackedVector2Array = data.zone_outline_points(data.get_zone(zone_id))
+	# VALUE-wise, not by reference: a comparison by identity passes on the same
+	# array and reds on an equal-but-new one, which is the wrong way round.
+	var same_size := restored.size() == before_points.size()
+	var same_values := same_size
+	if same_size:
+		for i in range(restored.size()):
+			if not restored[i].is_equal_approx(before_points[i]):
+				same_values = false
+				break
+	check("undo restored the outline POINT VALUES (%d pts)" % restored.size(), same_values)
+
+	# ── BT-21 + BT-75 (live). Refusals are _err(), verbatim from the model.
+	var undeclared := await h("minerva_pcb_set_zone_net", _args({
+			"zone_id": zone_id, "net_name": "NO_SUCH_NET"}))
+	_check_refusal_matches_model("undeclared net", undeclared,
+			str(data.zone_net_error("NO_SUCH_NET", data.zone_kind(data.get_zone(zone_id)))))
+
+	var bad_layer := await h("minerva_pcb_set_zone_layer", _args({
+			"zone_id": zone_id, "layer": "F.Cu"}))
+	_check_refusal_matches_model("KiCad-alias layer", bad_layer,
+			str(data.zone_layer_error("F.Cu")))
+
+	var j6 := _journal_len()
+	var two_points := await h("minerva_pcb_set_zone_outline", _args({
+			"zone_id": zone_id,
+			"outline": [{"x_mm": 0.0, "y_mm": 0.0}, {"x_mm": 1.0, "y_mm": 1.0}]}))
+	check("a 2-point outline is refused with an error key",
+			two_points.get("success", true) == false and two_points.has("error"))
+	check("a refused outline set journals NOTHING", _journal_len() - j6 == 0)
+
+	# Every refusal above must carry BOTH keys. Asserted as a set so a reply that
+	# is merely falsy — the false-ok shape BT-75a scans for — cannot pass.
+	for pair in [["undeclared net", undeclared], ["bad layer", bad_layer],
+			["two-point outline", two_points]]:
+		var r: Dictionary = pair[1]
+		check("%s refusal carries success:false AND a non-empty error" % str(pair[0]),
+				r.get("success", true) == false and not str(r.get("error", "")).is_empty())
+
+
+# ── BT-74. Group replies agree with get_components ──────────────────────────
+
+func _boundary_group_agreement() -> void:
+	_begin_section("BT-74")
+	print("\n-- BT-74: group tools agree with get_components' own reporting --")
+	await h("minerva_pcb_add_component", _args({
+			"id": "G1", "footprint": "RESISTOR", "x": 10.0, "y": 40.0}))
+	await h("minerva_pcb_add_component", _args({
+			"id": "G2", "footprint": "RESISTOR", "x": 20.0, "y": 40.0}))
+
+	var grouped := await h("minerva_pcb_group_components", _args({
+			"component_ids": ["G1", "G2"]}))
+	check("group_components succeeds", grouped.get("success", false))
+	var gid := str(grouped.get("group_id", ""))
+	check("a non-empty group id was minted", not gid.is_empty())
+
+	# The SECOND read path: get_components' own group reporting.
+	var comps := await h("minerva_pcb_get_components", _args())
+	var seen := {}
+	for c in comps.get("components", []):
+		var cd: Dictionary = c
+		# get_components keys a component by "id" (panel_tools.gd:201).
+		var ref := str(cd.get("id", ""))
+		if ref == "G1" or ref == "G2":
+			seen[ref] = cd
+	check("get_components reports both members", seen.size() == 2)
+	for ref in seen:
+		check_eq("get_components reports %s's group_id as the minted one" % ref,
+				str((seen[ref] as Dictionary).get("group_id", "")), gid)
+
+	# The OFFSET leg — the half a "reports membership but not offsets" mutation
+	# leaves behind.
+	var offset_reply := await h("minerva_pcb_set_group_member_offset", _args({
+			"group_id": gid, "component_id": "G2", "dx_mm": 3.0, "dy_mm": 0.0}))
+	if offset_reply.get("success", false):
+		var after := await h("minerva_pcb_get_components", _args())
+		var g2: Dictionary = {}
+		for c in after.get("components", []):
+			if str((c as Dictionary).get("id", "")) == "G2":
+				g2 = c
+		check("get_components reports a group_offset for the moved member",
+				g2.has("group_offset"))
+	else:
+		# A refusal is a legitimate outcome (anchor/lock gates) — but it must be
+		# an honest one, not a success-shaped nothing.
+		check("a refused offset write says why",
+				not str(offset_reply.get("error", "")).is_empty())
+
+
+# ── BT-53. Two independent readers must agree about vias ────────────────────
+
+func _boundary_via_read_paths_agree() -> void:
+	_begin_section("BT-53")
+	print("\n-- BT-53: list_vias agrees with export_trace_geometry.vias[] --")
+	var made: Array = []
+	for i in range(3):
+		made.append(data.add_via({
+			"position": Vector2(30.0 + i * 5.0, 50.0), "size": 0.8, "drill": 0.4,
+			"net_name": "BND_NET"}))
+
+	var listed := await h("minerva_pcb_list_vias", _args())
+	var exported := await h("minerva_pcb_export_trace_geometry", _args())
+	check("both readers succeed",
+			listed.get("success", false) and exported.get("success", false))
+
+	var export_vias: Array = (exported.get("trace_data", {}) as Dictionary).get("vias", [])
+	check_eq("count agrees", int(listed.get("via_count", -1)), export_vias.size())
+
+	var list_ids: Array = []
+	for v in listed.get("vias", []):
+		list_ids.append(str((v as Dictionary).get("via_id", "")))
+	var export_ids: Array = []
+	for v in export_vias:
+		export_ids.append(str((v as Dictionary).get("id", "")))
+	list_ids.sort()
+	export_ids.sort()
+	# ID-SET equality, not just arity: a reader that re-mints ids on read agrees
+	# on the count forever and never on the identities.
+	check("id sets agree (%s == %s)" % [str(list_ids), str(export_ids)],
+			list_ids == export_ids)
+	for made_id in made:
+		check("the via just added is in BOTH readers (%s)" % str(made_id),
+				list_ids.has(str(made_id)) and export_ids.has(str(made_id)))
+
+	# POSITIONS, from the two shapes the two readers happen to use.
+	var by_id_list := {}
+	for v in listed.get("vias", []):
+		var vd: Dictionary = v
+		by_id_list[str(vd.get("via_id", ""))] = Vector2(
+				float(vd.get("x_mm", 0.0)), float(vd.get("y_mm", 0.0)))
+	var mismatched: Array = []
+	for v in export_vias:
+		var vd: Dictionary = v
+		var pos: Dictionary = vd.get("position", {})
+		var here := Vector2(float(pos.get("x", 0.0)), float(pos.get("y", 0.0)))
+		var vid := str(vd.get("id", ""))
+		if by_id_list.has(vid) and not (by_id_list[vid] as Vector2).is_equal_approx(here):
+			mismatched.append(vid)
+	check("positions agree for every shared id (mismatched: %s)" % str(mismatched),
+			mismatched.is_empty())
+
+	# The DELETE leg — the mutation that separates a live reader from a cached
+	# one. A stale cache agrees on everything above and diverges only here.
+	var victim := str(made[0])
+	var deleted := await h("minerva_pcb_delete_via", _args({"via_id": victim}))
+	check("delete_via succeeds", deleted.get("success", false))
+	var listed2 := await h("minerva_pcb_list_vias", _args())
+	var exported2 := await h("minerva_pcb_export_trace_geometry", _args())
+	var ids2: Array = []
+	for v in listed2.get("vias", []):
+		ids2.append(str((v as Dictionary).get("via_id", "")))
+	var eids2: Array = []
+	for v in (exported2.get("trace_data", {}) as Dictionary).get("vias", []):
+		eids2.append(str((v as Dictionary).get("id", "")))
+	check("after a delete, neither reader still reports the deleted id",
+			not ids2.has(victim) and not eids2.has(victim))
+	ids2.sort()
+	eids2.sort()
+	check("...and the two readers still agree with each other", ids2 == eids2)
+
+
+# ── G2. THE AGENT-FACING PREFERENCE SURFACE ─────────────────────────────────
+#
+# WHY THIS SECTION EXISTS. Campaign 2's third promise is "plugin-scoped
+# preferences that PERSIST and are READABLE AND WRITABLE BY THE AGENT". The
+# boundary carried only the UI half: BT-27/28 pin the panel's seeding order and
+# the on-disk file. Nothing pinned minerva_pcb_get_preference /
+# minerva_pcb_set_preference — the clause that makes the preference an agent
+# surface at all (completeness critic, gap 5).
+#
+# ORACLE, three representations, none of them the tool's own reply:
+#   1. the STORE the panel itself reads — panel.get_preferences(), the accessor
+#      PCBPanel's own seeding path calls;
+#   2. the panel's SEEDING READ — panel.seeded_trace_width(), a consumer that
+#      knows nothing about MCP;
+#   3. for the refusals, the STORE's own error text, byte-compared against the
+#      tool's (the drift detector this file already applies to zone errors).
+# A tool that wrote a private dictionary and read it back would satisfy the
+# reply-level round trip perfectly and fail 1 and 2 — which is the FULL mutation.
+#
+# THE STORE IS PROCESS-WIDE AND PERSISTS TO DISK (user://plugins/data/pcb/
+# preferences.json), so this section captures the pre-existing state and puts it
+# back before it returns. Leaving a stored width behind would silently re-seed
+# every later run of the width-preference suite.
+const PREF_TRACE_WIDTH := "trace_width_mm"
+## In contract (0.1 … 5.0) and deliberately NOT the registry default (0.25), so a
+## tool that answered "default" for everything cannot pass.
+const PREF_PROBE_VALUE := 0.37
+
+
+func _boundary_agent_preference_surface() -> void:
+	_begin_section("G2")
+	print("\n-- G2: the MCP preference surface round-trips into the store the panel reads --")
+	var prefs = panel.get_preferences()
+	check("G2 fixture: the panel exposes a preference store", prefs != null)
+	if prefs == null:
+		return
+	check("G2 fixture: %s is a declared key (a rename must red here, not go quiet)"
+			% PREF_TRACE_WIDTH, prefs.is_known(PREF_TRACE_WIDTH))
+
+	# Capture-and-restore state.
+	var had_stored: bool = prefs.has_stored(PREF_TRACE_WIDTH)
+	var prior_value: Variant = prefs.get_value(PREF_TRACE_WIDTH)
+
+	# A board design rule OUTRANKS the preference in seeded_trace_width(), so the
+	# seeding leg below would be blind to the preference if one were declared.
+	data.design_rules.erase("trace_width_mm")
+	check("G2 fixture: the board declares no trace-width rule (leg 2 is not masked)",
+			data.design_rule_trace_width() <= 0.0)
+
+	var j0 := _journal_len()
+	var h0 := _history_len()
+
+	# ── write through the AGENT surface.
+	var wrote := await h("minerva_pcb_set_preference",
+			_args({"key": PREF_TRACE_WIDTH, "value": PREF_PROBE_VALUE}))
+	check("G2: set_preference succeeds", wrote.get("success", false))
+	check_approx("G2: the reply names the STORED value", float(wrote.get("value", -1.0)),
+			PREF_PROBE_VALUE)
+	check_eq("G2: an in-contract value is not clamped", wrote.get("clamped", true), false)
+	check_eq("G2: …and it reports a real change", wrote.get("changed", false), true)
+
+	# ── read it back through the AGENT surface.
+	var read := await h("minerva_pcb_get_preference", _args({"key": PREF_TRACE_WIDTH}))
+	check("G2: get_preference succeeds", read.get("success", false))
+	check_approx("G2: the agent reads back what the agent wrote",
+			float(read.get("value", -1.0)), PREF_PROBE_VALUE)
+	check_eq("G2: …and reports it as STORED, not defaulted",
+			read.get("stored", false), true)
+	check("G2: the reply still names the registry default separately "
+			+ "(stored != default is observable)",
+			read.has("default") and not is_equal_approx(float(read.get("default", -1.0)),
+					PREF_PROBE_VALUE))
+
+	# ── LEG 1: the store the PANEL reads, not the reply.
+	check_approx("G2: the value is in the store panel.get_preferences() returns",
+			prefs.get_float(PREF_TRACE_WIDTH, -1.0), PREF_PROBE_VALUE)
+	check("G2: …and the store agrees it was stored, not defaulted",
+			prefs.has_stored(PREF_TRACE_WIDTH))
+
+	# ── LEG 2: the panel's own seeding read — a consumer with no idea MCP exists.
+	check_approx("G2: the panel's seeded_trace_width() sees the agent's write",
+			float(panel.seeded_trace_width()), PREF_PROBE_VALUE)
+
+	check_eq("G2: writing a preference journalled NOTHING (it is not a board edit)",
+			_journal_len(), j0)
+	check_eq("G2: …and pushed no undo step", _history_len(), h0)
+
+	# ── REFUSALS. Both must refuse, journal nothing, and leave the store alone.
+	var bogus := await h("minerva_pcb_set_preference",
+			_args({"key": "no_such_preference", "value": 1.0}))
+	check_eq("G2: an unknown key is REFUSED", bogus.get("success", true), false)
+	# Drift detector: the tool must not own a second copy of the store's message.
+	var store_refusal: Dictionary = prefs.set_value("no_such_preference", 1.0)
+	check("G2: …verbatim from the store (tool %s == store %s)"
+			% [str(bogus.get("error", "")), str(store_refusal.get("error", ""))],
+			str(bogus.get("error", "")) == str(store_refusal.get("error", "")))
+
+	var wrong_type := await h("minerva_pcb_set_preference",
+			_args({"key": PREF_TRACE_WIDTH, "value": "wide"}))
+	check_eq("G2: a wrong-TYPE value is REFUSED", wrong_type.get("success", true), false)
+	var store_type_refusal: Dictionary = prefs.set_value(PREF_TRACE_WIDTH, "wide")
+	check("G2: …verbatim from the store too (tool %s == store %s)"
+			% [str(wrong_type.get("error", "")), str(store_type_refusal.get("error", ""))],
+			str(wrong_type.get("error", "")) == str(store_type_refusal.get("error", "")))
+
+	check_eq("G2: neither refusal journalled anything", _journal_len(), j0)
+	check_eq("G2: neither refusal pushed an undo step", _history_len(), h0)
+	check_approx("G2: neither refusal disturbed the stored value",
+			prefs.get_float(PREF_TRACE_WIDTH, -1.0), PREF_PROBE_VALUE)
+	check("G2: the refused key was NOT silently adopted",
+			not prefs.is_known("no_such_preference")
+			and not (prefs.snapshot().get("stored", {}) as Dictionary).has("no_such_preference"))
+
+	var read_bogus := await h("minerva_pcb_get_preference",
+			_args({"key": "no_such_preference"}))
+	check_eq("G2: reading an unknown key is refused as well",
+			read_bogus.get("success", true), false)
+
+	# ── restore.
+	if had_stored:
+		prefs.set_value(PREF_TRACE_WIDTH, prior_value)
+	else:
+		prefs.clear_value(PREF_TRACE_WIDTH)
+	check("G2: the store was put back the way this section found it",
+			prefs.has_stored(PREF_TRACE_WIDTH) == had_stored)
+
+
+# ── G4. PLUGIN_BUILD MUST MOVE WHEN A SCHEMA_VERSION MOVES ──────────────────
+#
+# BT-76's orphaned half (review F4). BT-76 already pins the REPLY's plugin_build
+# against the source constant; what it explicitly did not author — and what the
+# completeness critic recorded as reassigned to nobody — is the ENFORCEMENT: a
+# deploy stamp that never moves when the persisted schema does lets an operator
+# read a familiar build string off a panel that is speaking a different schema.
+#
+# REPRESENTATION: all three constants are read out of SOURCE TEXT by regex, from
+# three different files. Nothing here calls the running code, so a runtime that
+# reported whatever it liked could not satisfy it.
+#
+# THE INVARIANT IS A PAIRING, NOT A LITERAL PIN. The witness below records the
+# values as of authoring. The assertion is:
+#
+#     (any SCHEMA_VERSION moved) == (PLUGIN_BUILD moved)
+#
+# so a paired bump stays GREEN — that is the intended path, and asserting it
+# explicitly is what stops this pin from being a tax on every legitimate schema
+# change. Exactly one of them moving is RED. When you move one on purpose,
+# update the witness in the same commit; the diff is then the review artifact
+# that says "yes, I considered the other one".
+const PREFS_SOURCE_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_prefs.gd"
+const SIDECAR_SOURCE_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_routing_sidecar.gd"
+
+## The witness pair, as of this test's authoring.
+const WITNESS_PLUGIN_BUILD := "0.2.0+b2-mcp-parity"
+const WITNESS_PREFS_SCHEMA := "1"
+const WITNESS_SIDECAR_SCHEMA := "1"
+
+
+## `const <name> :=` or `const <name>: <type> =` — both forms appear in these files.
+func _const_in_source(source: String, const_name: String) -> String:
+	var re := RegEx.new()
+	re.compile("const\\s+" + const_name + "\\s*(?::\\s*\\w+\\s*)?:?=\\s*\"?([^\"\\n]*?)\"?\\s*(?:#.*)?$")
+	for line in source.split("\n"):
+		var m := re.search(line)
+		if m != null:
+			return m.get_string(1).strip_edges()
+	return ""
+
+
+func _boundary_build_stamp_tracks_schema() -> void:
+	_begin_section("G4")
+	print("\n-- G4: PLUGIN_BUILD and the persisted SCHEMA_VERSIONs move together --")
+	var panel_src := _read_text(PANEL_SOURCE_PATH)
+	var prefs_src := _read_text(PREFS_SOURCE_PATH)
+	var sidecar_src := _read_text(SIDECAR_SOURCE_PATH)
+	check("G4 fixture: all three sources were read",
+			panel_src.length() > 100 and prefs_src.length() > 100
+			and sidecar_src.length() > 100)
+
+	var build := _const_in_source(panel_src, "PLUGIN_BUILD")
+	var prefs_schema := _const_in_source(prefs_src, "SCHEMA_VERSION")
+	var sidecar_schema := _const_in_source(sidecar_src, "SCHEMA_VERSION")
+	check("G4: PCBPanel.gd declares PLUGIN_BUILD (%s)" % build, not build.is_empty())
+	check("G4: pcb_prefs.gd declares SCHEMA_VERSION (%s)" % prefs_schema,
+			not prefs_schema.is_empty())
+	check("G4: pcb_routing_sidecar.gd declares SCHEMA_VERSION (%s)" % sidecar_schema,
+			not sidecar_schema.is_empty())
+
+	var schema_moved: bool = prefs_schema != WITNESS_PREFS_SCHEMA \
+			or sidecar_schema != WITNESS_SIDECAR_SCHEMA
+	var build_moved: bool = build != WITNESS_PLUGIN_BUILD
+	check("G4: THE PAIRING — a moved SCHEMA_VERSION and a moved PLUGIN_BUILD "
+			+ "travel together (schema_moved=%s build_moved=%s; witness %s/%s/%s)"
+			% [str(schema_moved), str(build_moved), WITNESS_PLUGIN_BUILD,
+				WITNESS_PREFS_SCHEMA, WITNESS_SIDECAR_SCHEMA],
+			schema_moved == build_moved)
+	# Stated as its own assertion so the intended path is visible in the log and
+	# a future reader cannot mistake this pin for "the build string is frozen".
+	check("G4: a PAIRED bump is explicitly allowed (this leg is green whenever "
+			+ "both moved or neither did)",
+			not (schema_moved != build_moved))
+
+	# The convention has to be DISCOVERABLE, or the next author bumps one and
+	# never learns the other exists. PCBPanel.gd's own doc block is where it is
+	# written down; a rewrite that drops it reds here.
+	var doc_start := panel_src.find("## B2 (MCP parity round)")
+	var doc_stop := panel_src.find("const PLUGIN_BUILD")
+	var doc_block := panel_src.substr(doc_start, doc_stop - doc_start) \
+			if doc_start >= 0 and doc_stop > doc_start else ""
+	check("G4: PLUGIN_BUILD's own doc block names the SCHEMA_VERSION convention "
+			+ "it is paired with (block starts: %s)" % doc_block.left(60),
+			doc_block.contains("SCHEMA_VERSION")
+			and doc_block.contains("pcb_prefs.gd")
+			and doc_block.contains("pcb_routing_sidecar.gd"))

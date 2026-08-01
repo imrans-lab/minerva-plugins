@@ -45,6 +45,10 @@ func _init() -> void:
 	_test_content_changed_dirty_relay()
 	_test_annotation_host_registration()
 	_test_trace_context_menu()
+	await _test_reclick_disarm()
+	await _test_reclick_triple_agreement()
+	await _test_first_click_and_cross_tool_unchanged()
+	await _test_width_menu_focus_at_every_tier()
 
 	_finish()
 
@@ -366,3 +370,194 @@ func check(description: String, condition: bool, detail: String = "") -> void:
 			printerr("  FAIL: %s — %s" % [description, detail])
 		else:
 			printerr("  FAIL: %s" % description)
+
+
+# ── Campaign 2 boundary: BT-63, BT-64, BT-65, BT-68 ───────────────────────────
+#
+# DELTA DISCIPLINE. 9b887e9 pinned the width-menu REVEAL at all three layout
+# tiers (visibility of the row + the drawer). BT-68's delta is the FOCUS half —
+# the leg the first fix missed — which needs a panel that is really IN THE TREE,
+# so these mount rather than using the off-tree driver.
+#
+# BT-63/64/65 (re-click disarm, item 019fbbadd8f0) had no coverage in this suite.
+
+
+## A panel mounted in the real tree, so is_visible_in_tree() and has_focus()
+## mean something.
+func _mount_panel_in_tree(width: float = 1100.0) -> Variant:
+	var panel: Variant = load(PANEL_PATH).new()
+	get_root().add_child(panel)
+	panel.position = Vector2.ZERO
+	panel.size = Vector2(width, 700)
+	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
+	panel.get_data().from_board_dict(_canonical_board())
+	for _i in range(6):
+		await process_frame
+	return panel
+
+
+## BT-63 — re-clicking an ARMED tool mid-polygon disarms to Select AND says so.
+##
+## ORACLE: the rendered STATUS LABEL TEXT read AT CALL RETURN. Asserting the
+## zone_tool_message signal alone passes falsely — the standing status refresh
+## (_update_status, driven off tool_mode_changed) runs after the cancel and would
+## clobber the cancel line. That clobbering IS the shipped bug this pins, so the
+## label is the only representation that can see it.
+func _test_reclick_disarm() -> void:
+	print("\n-- BT-63: re-click mid-polygon disarms, and the LABEL says so --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+
+	panel._toggle_tool_mode(canvas.ToolMode.ZONE_POUR)
+	await process_frame
+	check("BT-63 fixture: the pour tool is armed",
+			canvas.tool_mode == canvas.ToolMode.ZONE_POUR)
+
+	# Place two corners so there is a polygon in flight to abandon.
+	canvas._zone_points = PackedVector2Array([Vector2(4, 4), Vector2(12, 4)])
+	check("BT-63 fixture: a polygon is in flight", canvas._zone_points.size() == 2)
+
+	var messages: Array = []
+	canvas.zone_tool_message.connect(func(t: String) -> void: messages.append(t))
+
+	panel._toggle_tool_mode(canvas.ToolMode.ZONE_POUR)   # the RE-click
+	var label_at_return: String = str(panel._status_label.text)
+
+	check("BT-63: the re-click disarmed back to SELECT",
+			canvas.tool_mode == canvas.ToolMode.SELECT, "tool_mode=%d" % canvas.tool_mode)
+	check("BT-63: …and the in-flight polygon was dropped",
+			canvas._zone_points.is_empty(), "%d points left" % canvas._zone_points.size())
+	check("BT-63: …and the cancel was emitted at all",
+			messages.size() == 1 and messages[0] == "Zone cancelled.", str(messages))
+	check("BT-63: …and the STATUS LABEL still carries it AT CALL RETURN "
+			+ "(signal-only assertions pass while this is wrong)",
+			label_at_return.contains("Zone cancelled"),
+			"label=%s" % label_at_return)
+
+	panel.queue_free()
+	await process_frame
+
+
+## BT-64 — the re-click triple: mode, buttons, hint. All six radios.
+##
+## ORACLE: THREE independently owned readings — the canvas enum, the panel's
+## Button widgets, and the _MODE_HINTS table lookup that feeds the status bar.
+func _test_reclick_triple_agreement() -> void:
+	print("\n-- BT-64: re-click each radio → mode/buttons/hint agree --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+	var P := load(PANEL_PATH)
+
+	for mode in panel._tool_buttons.keys():
+		var m := int(mode)
+		if m == canvas.ToolMode.SELECT:
+			continue   # Select IS the resting tool; a re-click is a documented no-op.
+		panel._toggle_tool_mode(m)
+		await process_frame
+		check("BT-64: mode %d arms" % m, canvas.tool_mode == m)
+		panel._toggle_tool_mode(m)   # re-click
+		await process_frame
+
+		check("BT-64 (1/3) mode %d: the ENUM disarmed to SELECT" % m,
+				canvas.tool_mode == canvas.ToolMode.SELECT, "tool_mode=%d" % canvas.tool_mode)
+		var pressed: Array = []
+		for k in panel._tool_buttons.keys():
+			if (panel._tool_buttons[k] as Button).button_pressed:
+				pressed.append(int(k))
+		check("BT-64 (2/3) mode %d: exactly the SELECT BUTTON is pressed" % m,
+				pressed == [int(canvas.ToolMode.SELECT)], "pressed=%s" % str(pressed))
+		check("BT-64 (3/3) mode %d: the status HINT is SELECT's" % m,
+				str(panel._status_label.text).contains(str(P._MODE_HINTS[canvas.ToolMode.SELECT])),
+				"label=%s" % str(panel._status_label.text))
+
+	panel.queue_free()
+	await process_frame
+
+
+## BT-65 — the FIRST click and CROSS-TOOL switches are untouched by the re-click
+## feature (was_armed == false on both).
+##
+## ORACLE: a full state DICT compared against the pre-feature behaviour — arming
+## a tool from Select, and switching tool→tool, must both leave the requested
+## tool armed, not collapse to Select.
+func _test_first_click_and_cross_tool_unchanged() -> void:
+	print("\n-- BT-65: first-click + cross-tool paths unchanged --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+
+	panel._toggle_tool_mode(canvas.ToolMode.SELECT)
+	await process_frame
+	panel._toggle_tool_mode(canvas.ToolMode.PAN)
+	await process_frame
+	check("BT-65: a FIRST click on a tool arms it (does not disarm instantly)",
+			_tool_state(panel, canvas) == {"mode": int(canvas.ToolMode.PAN),
+					"pressed": [int(canvas.ToolMode.PAN)]},
+			"state=%s" % str(_tool_state(panel, canvas)))
+
+	panel._toggle_tool_mode(canvas.ToolMode.ERASER)   # cross-tool switch
+	await process_frame
+	check("BT-65: a CROSS-TOOL switch lands on the new tool, not SELECT",
+			_tool_state(panel, canvas) == {"mode": int(canvas.ToolMode.ERASER),
+					"pressed": [int(canvas.ToolMode.ERASER)]},
+			"state=%s" % str(_tool_state(panel, canvas)))
+
+	panel._toggle_tool_mode(canvas.ToolMode.ERASER)   # NOW a re-click
+	await process_frame
+	check("BT-65: only the SAME-tool re-click disarms",
+			canvas.tool_mode == canvas.ToolMode.SELECT)
+
+	panel.queue_free()
+	await process_frame
+
+
+func _tool_state(panel: Variant, canvas: Variant) -> Dictionary:
+	var pressed: Array = []
+	for k in panel._tool_buttons.keys():
+		if (panel._tool_buttons[k] as Button).button_pressed:
+			pressed.append(int(k))
+	pressed.sort()
+	return {"mode": int(canvas.tool_mode), "pressed": pressed}
+
+
+## BT-68 — "Set trace width…" at EVERY layout tier: the SpinBox ends up both
+## VISIBLE IN TREE and HOLDING FOCUS.
+##
+## ORACLE: two properties, at all three tiers. 9b887e9 pins the row's `visible`
+## flag and the drawer; visibility alone is what the first fix satisfied while
+## the caret was still nowhere — the medium tier (Properties collapsed by
+## default) being the dead end. Reveal assertions are taken AFTER deferred frames
+## per hint pcb-plugin/scroll-reveal-needs-deferred-frame.
+func _test_width_menu_focus_at_every_tier() -> void:
+	print("\n-- BT-68: width menu → SpinBox visible AND focused, all three tiers --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var canvas: Variant = panel._canvas
+	var data: Variant = panel.get_data()
+	var trace_id: String = str(data.get_trace_ids()[0])
+	canvas._create_context_menu()
+	var layout = load("res://../../minerva-plugins/pcb/ui/panel_layout.gd")
+
+	for mode in [layout.MODE_WIDE, layout.MODE_MEDIUM, layout.MODE_NARROW]:
+		panel._apply_layout_mode(mode, true)
+		panel._set_properties_expanded(false)      # the collapsed medium default
+		panel._drawer_open = false
+		for _i in range(4):
+			await process_frame
+
+		canvas._context_menu_target = [canvas.KIND_TRACE, trace_id]
+		canvas._on_context_menu_pressed(canvas.MENU_ID_SET_TRACE_WIDTH)
+		# The reveal defers one layout pass on purpose (hint
+		# pcb-plugin/scroll-reveal-needs-deferred-frame) — assert after it lands.
+		for _i in range(6):
+			await process_frame
+
+		var spin: Variant = panel._trace_prop_width_spin
+		check("BT-68 %s: the width SpinBox is VISIBLE IN TREE" % mode,
+				spin != null and spin.is_visible_in_tree(),
+				"spin=%s expanded=%s drawer=%s" % [str(spin != null),
+						str(panel._properties_expanded), str(panel._drawer_open)])
+		check("BT-68 %s: …and it HOLDS FOCUS, ready to type" % mode,
+				spin != null and spin.get_line_edit().has_focus(),
+				"focus_owner=%s" % str(panel.get_viewport().gui_get_focus_owner()))
+
+	panel.queue_free()
+	await process_frame

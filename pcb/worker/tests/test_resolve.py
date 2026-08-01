@@ -1,14 +1,23 @@
 """Footprint-resolve step tests (offline).
 
 Covers:
-  (a) resolving the smart-remote board attaches F.SilkS + F.CrtYd graphics to
-      every component; ESP32 (U1) gains its body-outline silk; coincidence passes,
+  (a) resolving the fixture board attaches F.SilkS + F.CrtYd graphics to every
+      component; ESP32 (U1) gains its body-outline silk; coincidence passes,
   (b) the fail-closed coincidence guard: a pin nudged 1mm off its footprint pad
       raises ResolveCoincidenceError,
   (c) determinism: resolve twice -> identical output, input not mutated,
   (d) the `resolve` worker method's {ok, board, stats} envelope.
 
 All fixtures are vendored in-repo; no network access.
+
+FIXTURE (docket 019fbe68c5f8, testdata/POLICY.md): this suite used to resolve
+``testdata/footprints/smart-remote-orig.yaml``, a REAL Turnrock product board.
+It was withdrawn from the corpus on 2026-07-30 because a real design (netlist +
+placement) in a public repo is an IP leak. The replacement,
+``testdata/footprints/resolve_corners.yaml``, uses the SAME real, public-origin
+KiCad library parts (ESP32-S3-DevKitC, DIP-6, EVP-ASAC1A, ...) at new, synthetic
+refs/positions/nets — see that file's header for the full rationale. NEVER
+repair this module by restoring the deleted fixture from git history.
 """
 
 from __future__ import annotations
@@ -24,7 +33,7 @@ from pcb_worker.methods import handle_request
 from pcb_worker.resolve import ResolveCoincidenceError, resolve_board
 
 HERE = Path(__file__).resolve().parent
-BOARD_YAML = HERE / "testdata" / "footprints" / "smart-remote-orig.yaml"
+BOARD_YAML = HERE / "testdata" / "footprints" / "resolve_corners.yaml"
 
 
 def _load_board() -> dict:
@@ -68,8 +77,10 @@ def test_resolve_esp32_gets_body_outline_silk():
     assert len(_crtyd(u1)) >= 1, "ESP32 (U1) has no courtyard graphic"
 
 
-def test_resolve_coincidence_passes_for_smart_remote():
-    # No exception == guard passed for all 10 components.
+def test_resolve_coincidence_passes_for_all_components():
+    # No exception == guard passed for all 5 components (renamed from
+    # ...for_smart_remote when the fixture moved off the withdrawn product
+    # board, docket 019fbe68c5f8 — the assertion is unchanged, just the name).
     resolve_board(_load_board())
 
 

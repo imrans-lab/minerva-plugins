@@ -376,8 +376,15 @@ def test_gerbers_method_malformed_yaml_errors():
 # behaviour: components WITH 'graphics' emit real silk instead of a box.
 # ---------------------------------------------------------------------------
 
+# FIXTURE (docket 019fbe68c5f8, testdata/POLICY.md): this used to be
+# ``smart-remote-orig.yaml``, a REAL Turnrock product board, withdrawn from the
+# corpus on 2026-07-30 because a real design (netlist + placement) in a public
+# repo is an IP leak. ``resolve_corners.yaml`` uses the SAME real, public-origin
+# KiCad library parts at new, synthetic refs/positions/nets — see its header
+# for the full rationale. NEVER repair this by restoring the deleted fixture
+# from git history.
 FOOTPRINTS_DIR = HERE / "testdata" / "footprints"
-SMART_REMOTE_BOARD = FOOTPRINTS_DIR / "smart-remote-orig.yaml"
+RESOLVE_CORNERS_BOARD = FOOTPRINTS_DIR / "resolve_corners.yaml"
 
 
 def _fs_scale(gbr_text: str) -> tuple[int, int]:
@@ -412,7 +419,7 @@ def test_silk_real_graphics_replaces_placeholder_box():
     )
     from pcb_worker.resolve import resolve_board
 
-    board = _load(SMART_REMOTE_BOARD)
+    board = _load(RESOLVE_CORNERS_BOARD)
     resolved = resolve_board(board)
     n_components = len(resolved["components"])
     assert n_components > 0
@@ -423,7 +430,7 @@ def test_silk_real_graphics_replaces_placeholder_box():
     silk = files["smartremote-F_SilkS.gbr"]
 
     # The old placeholder drew exactly 4 line segments (a box) per component;
-    # real silk (line/circle/poly/arc across ~10 components) draws far more.
+    # real silk (line/circle/poly/arc across 5 components) draws far more.
     draw_ops = len(re.findall(r"D0[123]\*", silk))
     assert draw_ops > 4 * n_components, \
         f"F.SilkS looks like it's still boxes ({draw_ops} draws for {n_components} components)"

@@ -62,6 +62,7 @@ func _init() -> void:
 	_run_pitch_between()
 	_run_cumulative_offsets()
 	_run_design_rule_clearance()
+	_run_loaded_board_composition()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -486,3 +487,78 @@ func _run_design_rule_clearance() -> void:
 	data.design_rules = {"clearance_mm": "0.4"}
 	check_near("numeric string is coerced, same as the width reader does",
 		data.design_rule_clearance(), 0.4)
+
+
+## ── BT-87 (campaign-2 boundary, delta-only) ─────────────────────────────────
+##
+## The ONE case this suite was missing, and the only one the round record asked
+## the boundary station to add: the COMPOSITION, end to end, through a LOADED
+## board.
+##
+## Everything above tests the pure module against hand-derived numbers, and
+## _run_design_rule_clearance tests the board reader against a hand-set
+## `design_rules` dictionary. Neither exercises the seam between them the way the
+## bus tool will: a board arriving as a DICT through from_board_dict, its declared
+## clearance read back out, and that number driving cumulative_offsets for a bus
+## whose tracks are NOT all the same width.
+##
+## Why the fixture is shaped this way — both properties are load-bearing:
+##
+##   * The board declares clearance 0.30, which is NOT any default anywhere in
+##     the model (pcb_data's own trace-width default is 0.25, and there is no
+##     default clearance constant at all). A reader that answered with a constant
+##     instead of the board's value therefore lands on different numbers here.
+##   * The three tracks are 0.20 / 0.40 / 0.20 — MIXED. cumulative_offsets is
+##     documented to use the per-adjacent-pair pitch, so a caller that collapsed
+##     the bundle to one width would still be symmetric and still look plausible;
+##     it is only wrong by a measurable amount when the widths differ.
+##
+## HAND-DERIVED, per pcb_bus_geometry.pitch_between = a/2 + clearance + b/2:
+##   gap 0-1 = 0.20/2 + 0.30 + 0.40/2 = 0.10 + 0.30 + 0.20 = 0.60
+##   gap 1-2 = 0.40/2 + 0.30 + 0.20/2 = 0.20 + 0.30 + 0.10 = 0.60
+##   positions before centring = [0.00, 0.60, 1.20], centre = 1.20 / 2 = 0.60
+##   centred                   = [-0.60, 0.00, 0.60]
+##
+## (The two gaps come out equal here BECAUSE the bundle is symmetric — that is
+## what makes the outer offsets a clean +/-0.60 to check by eye. The per-pair
+## arithmetic is still what produced them, and the assertion below on a
+## uniform-width bundle is what proves the widths were actually consulted.)
+func _run_loaded_board_composition() -> void:
+	print("\n-- BT-87: a LOADED board's declared clearance driving a mixed-width bundle --")
+	var data = PCBData.new(80.0, 60.0)
+	data.from_board_dict({
+		"version": 1, "name": "BusComposition",
+		"width_mm": 80.0, "height_mm": 60.0,
+		"design_rules": {"clearance_mm": 0.30, "trace_width_mm": 0.20},
+		"components": [], "nets": [], "traces": [],
+	})
+
+	# The board's own number survived the dict -> model hop. Asserted first so a
+	# failure below is attributable to the composition, not to the load.
+	check_near("the loaded board reports its declared clearance (0.30)",
+		data.design_rule_clearance(), 0.30)
+	check("0.30 is not the model's trace-width default (so a constant-returning "
+		+ "reader cannot pass by coincidence)",
+		not is_equal_approx(0.30, data.design_rule_trace_width()))
+
+	var widths: Array = [0.20, 0.40, 0.20]
+	var offsets: Array = BusGeom.cumulative_offsets(widths, data.design_rule_clearance())
+
+	check("three tracks in, three offsets out", offsets.size() == 3)
+	if offsets.size() == 3:
+		check_near("track 0 sits at -0.60 mm (hand-derived above)", float(offsets[0]), -0.60)
+		check_near("track 1 sits on the spine", float(offsets[1]), 0.0)
+		check_near("track 2 sits at +0.60 mm", float(offsets[2]), 0.60)
+
+	# THE DISCRIMINATOR. Feed the SAME board clearance to a bundle whose widths
+	# are all the first track's width. If the widths were being ignored, this
+	# would produce the same offsets as the mixed bundle above; it must not.
+	var uniform: Array = BusGeom.cumulative_offsets([0.20, 0.20, 0.20],
+		data.design_rule_clearance())
+	check("a uniform-width bundle at the same clearance is NOT the mixed one "
+		+ "(proves the per-pair widths reached the pitch)",
+		uniform.size() == 3 and not is_equal_approx(float(uniform[0]), float(offsets[0])))
+	# ... and its own hand-derived value: 0.20/2 + 0.30 + 0.20/2 = 0.50 per gap,
+	# positions [0, 0.50, 1.00], centred [-0.50, 0, +0.50].
+	if uniform.size() == 3:
+		check_near("uniform bundle outer track at -0.50 mm", float(uniform[0]), -0.50)

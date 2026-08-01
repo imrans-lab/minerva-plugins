@@ -6,11 +6,16 @@ DRC attached to that proposal reported it CLEAN. The connectivity checker cannot
 see that fault (traces are centerlines, pads are points); geometric DRC detects
 it exactly, but only ever ran on ACCEPTED copper.
 
-BASELINE ROBUSTNESS. ``smart_remote.yaml`` already carries 12 geometric
-violations of its own (bug 019f989d3179, tracked separately — the board is NOT
-repaired here). Every assertion below is therefore about the DELTA a candidate
-introduces, or about a specific attributed finding. Nothing asserts "clean" on a
-whole board, and no count is hard-coded against the fixture's own dirt.
+BASELINE ROBUSTNESS. ``parity_corners.yaml`` (docket 019fbe68c5f8 — replaces the
+withdrawn product board ``smart_remote.yaml``, see testdata/POLICY.md) already
+carries 6 geometric violations of its own, incidentally: it was authored to reach
+parity-gate geometry classes, not to be DRC-clean, and a couple of its library
+footprint's un-overridden pins land close enough to routed copper to trip
+gc2/gc5 on their own. Nothing here fixes that — it plays exactly the role
+smart_remote's 12 incidental violations used to play. Every assertion below is
+therefore about the DELTA a candidate introduces, or about a specific attributed
+finding. Nothing asserts "clean" on a whole board, and no count is hard-coded
+against the fixture's own dirt.
 """
 
 from __future__ import annotations
@@ -21,11 +26,11 @@ from pcb_worker import board_model, compile_board, ir_candidates
 from pcb_worker.ir_pads import UnsupportedGeometry
 from pcb_worker.methods import handle_request
 
-SMART_REMOTE = "tests/testdata/smart_remote.yaml"
+PARITY_CORNERS = "tests/testdata/parity_corners.yaml"
 
 
-def _smart_remote_dict() -> dict:
-    with open(SMART_REMOTE) as fh:
+def _parity_corners_dict() -> dict:
+    with open(PARITY_CORNERS) as fh:
         return yaml.safe_load(fh)
 
 
@@ -35,31 +40,36 @@ def _compile(board: dict):
     return result.board
 
 
-def _compiled_smart_remote():
-    return _compile(board_model.load_board({"yaml": yaml.safe_dump(_smart_remote_dict())}))
+def _compiled_parity_corners():
+    return _compile(board_model.load_board({"yaml": yaml.safe_dump(_parity_corners_dict())}))
 
 
-# The exact geometry of bug 019f80b5124d: an I2S_SD trace on the bottom layer
-# running straight down x=45.72 through MIC1 pad 4, which belongs to I2S_WS.
+# A DELIBERATE short, built the same way bug 019f80b5124d looked in the wild: a
+# candidate trace on one net (N_OBL) running straight through a placed pad that
+# belongs to a DIFFERENT, real net (SW9 pad B, N_BOT). Unlike smart_remote's
+# MIC1/I2S short, this is not an accident the fixture happened to contain — it is
+# constructed here on purpose, because parity_corners is not otherwise dirty in
+# this specific spot (docket 019fbe68c5f8: repointing away from a withdrawn
+# product board must not quietly stop exercising the thing the test proves).
 SHORTING_SEGMENT = {
-    "id": "seg-0", "layer": "bottom", "width_mm": 0.3,
-    "points": [[45.72, 90.0], [45.72, 106.68]],
+    "id": "seg-0", "layer": "top", "width_mm": 0.3,
+    "points": [[10.0, 16.0], [10.0, 22.0]],
 }
 
 
 def _shorting_candidate(candidate_id: str = "ghost-1", revision=7) -> dict:
-    return {"candidate_id": candidate_id, "revision": revision, "net": "I2S_SD",
+    return {"candidate_id": candidate_id, "revision": revision, "net": "N_OBL",
             "segments": [dict(SHORTING_SEGMENT)]}
 
 
-def _mic1_pad4_findings(findings: list) -> list:
-    """Findings that name MIC1 pad 4 AND the trespassing net — the short itself."""
+def _sw9_padB_findings(findings: list) -> list:
+    """Findings that name SW9 pad B AND the trespassing net — the short itself."""
     out = []
     for f in findings:
         participants = f.get("participants") or []
         names = {(p.get("ref"), p.get("pad")) for p in participants}
         nets = {p.get("net_name") for p in participants}
-        if ("MIC1", "4") in names and nets == {"I2S_WS", "I2S_SD"}:
+        if ("SW9", "B") in names and nets == {"N_OBL", "N_BOT"}:
             out.append(f)
     return out
 
@@ -70,7 +80,7 @@ def _mic1_pad4_findings(findings: list) -> list:
 
 
 def test_shorting_proposal_is_caught_before_acceptance():
-    rb = _compiled_smart_remote()
+    rb = _compiled_parity_corners()
     union = ir_candidates.check_candidates(rb, [_shorting_candidate()])
 
     # Case (b): the check RAN and found violations — unmistakably geometric, and
@@ -80,15 +90,15 @@ def test_shorting_proposal_is_caught_before_acceptance():
     assert union["verifies_geometry"] is True
     assert union["verdict"] == "violations"
 
-    shorts = _mic1_pad4_findings(union["findings"])
+    shorts = _sw9_padB_findings(union["findings"])
     assert len(shorts) == 1, union["findings"]
     short = shorts[0]
     assert short["type"] == "gc2_copper_clearance"
     # Measured, attributed, and located — not merely "something is wrong".
-    assert short["measured_mm"] == -0.95
+    assert short["measured_mm"] == -0.15
     assert short["required_mm"] == 0.2
-    assert short["closest"] == [45.72, 99.06]
-    assert short["layer"] == "bottom"
+    assert short["closest"] == [10.0, 20.2]
+    assert short["layer"] == "top"
 
     # Attribution back to the specific ghost route + its revision, so a canvas can
     # highlight THAT trace and detect a stale result.
@@ -111,9 +121,9 @@ def test_connectivity_drc_still_calls_the_same_geometry_clean():
     from pcb_worker.methods import _attach_route_drc
     from pcb_worker import ir_connectivity
 
-    rb = _compiled_smart_remote()
-    payload = {"routes": [{"net": "I2S_SD", "segments": [
-        {"layer": "bottom", "start": [45.72, 90.0], "end": [45.72, 106.68]}]}]}
+    rb = _compiled_parity_corners()
+    payload = {"routes": [{"net": "N_OBL", "segments": [
+        {"layer": "top", "start": [10.0, 16.0], "end": [10.0, 22.0]}]}]}
     _attach_route_drc(payload, ir_connectivity.connectivity_board(rb))
     route_drc = payload["routes"][0]["drc"]
     assert route_drc["scope"] == "connectivity"
@@ -153,19 +163,19 @@ def _comparable(finding: dict) -> dict:
 def test_proposed_and_accepted_geometry_produce_the_identical_finding():
     """The proposal and the same trace accepted into the board must agree — the
     whole point of overlaying at the IR level instead of re-deriving primitives."""
-    rb = _compiled_smart_remote()
+    rb = _compiled_parity_corners()
     proposed = ir_candidates.check_candidates(rb, [_shorting_candidate()])
 
-    accepted_src = _smart_remote_dict()
+    accepted_src = _parity_corners_dict()
     accepted_src["traces"].append({
-        "net": "I2S_SD", "layer": "bottom", "width_mm": 0.3,
-        "points": [{"x_mm": 45.72, "y_mm": 90.0}, {"x_mm": 45.72, "y_mm": 106.68}]})
+        "net": "N_OBL", "layer": "top", "width_mm": 0.3,
+        "points": [{"x_mm": 10.0, "y_mm": 16.0}, {"x_mm": 10.0, "y_mm": 22.0}]})
     accepted = handle_request({"id": "a", "method": "drc_geometric",
                                "params": {"yaml": yaml.safe_dump(accepted_src)}})["result"]
     assert accepted["ok"] is True and accepted["verdict"] == "violations"
 
-    proposed_short = _comparable(_mic1_pad4_findings(proposed["findings"])[0])
-    accepted_short = _comparable(_mic1_pad4_findings(accepted["findings"])[0])
+    proposed_short = _comparable(_sw9_padB_findings(proposed["findings"])[0])
+    accepted_short = _comparable(_sw9_padB_findings(accepted["findings"])[0])
     assert proposed_short == accepted_short
 
     # And the whole delta agrees, not just the headline finding: every violation
@@ -178,13 +188,13 @@ def test_proposed_and_accepted_geometry_produce_the_identical_finding():
 
 
 def test_baseline_is_reported_separately_and_never_charged_to_a_candidate():
-    """The fixture's 12 pre-existing violations (019f989d3179) belong to the BOARD.
+    """The fixture's incidental pre-existing violations belong to the BOARD.
     They must be visible — hiding them would be dishonest — but never attributed to
     a proposal, and never allowed to make a clean proposal look dirty."""
-    rb = _compiled_smart_remote()
+    rb = _compiled_parity_corners()
     whole_board = handle_request({
         "id": "b", "method": "drc_geometric",
-        "params": {"yaml": yaml.safe_dump(_smart_remote_dict())}})["result"]
+        "params": {"yaml": yaml.safe_dump(_parity_corners_dict())}})["result"]
 
     union = ir_candidates.check_candidates(rb, [_shorting_candidate()])
     assert len(union["baseline"]["findings"]) == len(whole_board["findings"])
@@ -197,12 +207,12 @@ def test_baseline_is_reported_separately_and_never_charged_to_a_candidate():
 def test_a_clean_candidate_on_a_dirty_board_is_reported_clean():
     """Case (a) over a board that is NOT clean: the candidate verdict is about the
     candidate. A dirty board must not veto an honest proposal."""
-    rb = _compiled_smart_remote()
+    rb = _compiled_parity_corners()
     # Empty top-left corner of the board, well clear of every placed part.
     union = ir_candidates.check_candidates(rb, [{
-        "candidate_id": "ghost-clean", "revision": 1, "net": "I2S_SD",
-        "segments": [{"id": "s0", "layer": "bottom", "width_mm": 0.3,
-                      "points": [[2.0, 66.0], [2.0, 70.0]]}]}])
+        "candidate_id": "ghost-clean", "revision": 1, "net": "N_OBL",
+        "segments": [{"id": "s0", "layer": "top", "width_mm": 0.3,
+                      "points": [[2.0, 2.0], [2.0, 5.0]]}]}])
     assert union["ok"] is True
     assert union["verdict"] == "clean"
     assert union["findings"] == []

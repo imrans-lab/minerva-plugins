@@ -67,6 +67,10 @@ func _init() -> void:
 	await _test_tool_buttons_render()
 	await _test_panel_height_relief()
 	await _test_trace_width_reveal_scrolls_into_view()
+	_test_tooltip_length_invariant()
+	_test_wrap_tooltip_preserves_content()
+	await _test_mode_tables_track_the_enum()
+	await _test_docs_names_match_code()
 
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -631,3 +635,334 @@ func _test_trace_width_reveal_scrolls_into_view() -> void:
 			line_edit != null and line_edit.has_focus())
 
 	_teardown(panel)
+
+
+# ── Campaign 2 boundary: tooltips, mode tables, docs (BT-44…47) ────────────────
+#
+# These four are SOURCE-TEXT and TABLE oracles. They deliberately do not mount a
+# panel where they do not need one: the thing under test is a written artefact
+# (the .gd source, the docs, the constant tables), and reading it back through a
+# live widget would only re-assert what the widget copied.
+
+const _PANEL_SRC := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
+const _CANVAS_SRC := "res://../../minerva-plugins/pcb/ui/pcb_canvas.gd"
+const _MANIFEST_SRC := "res://../../minerva-plugins/pcb/manifest.json"
+const _DOCS_TOOLS := "res://../../minerva-plugins/pcb/docs/tools.md"
+
+const _TOOLTIP_MAX_CHARS := 90
+
+
+## Every tooltip STRING LITERAL in PCBPanel.gd, from BOTH shapes:
+##   1. `tooltip_text = "…"` (optionally wrapped)
+##   2. `_add_tool_button(container, mode, "Text", "TIP", "icon")` — the fourth
+##      positional argument.
+##
+## SHAPE 2 IS THE WHOLE POINT (BT-44's methodology lesson): the A9 review scanned
+## only shape 1 and therefore MISSED the five longest tooltips in the file, which
+## are all tool buttons. A scanner that covers one shape is a scanner that passes
+## while the regression walks through the other.
+func _tooltip_sites() -> Array:
+	var src := FileAccess.get_file_as_string(_PANEL_SRC)
+	var out: Array = []
+	if src.is_empty():
+		return out
+
+	var re_assign := RegEx.new()
+	re_assign.compile('tooltip_text\\s*=\\s*(?:_wrap_tooltip\\()?"([^"\\\\]*)"')
+	for m in re_assign.search_all(src):
+		out.append(["tooltip_text", m.get_string(1)])
+
+	# _add_tool_button(...) calls span two source lines; take the whole call text
+	# and read its string literals positionally.
+	var re_lit := RegEx.new()
+	re_lit.compile('"([^"\\\\]*)"')
+	var from := 0
+	while true:
+		var at := src.find("_add_tool_button(", from)
+		if at < 0:
+			break
+		from = at + 17
+		# The definition line itself has no string literals — skip it naturally.
+		var close := src.find(")\n", from)
+		if close < 0:
+			break
+		var call_text := src.substr(from, close - from)
+		var lits := re_lit.search_all(call_text)
+		if lits.size() >= 2:
+			out.append(["_add_tool_button", lits[1].get_string(1)])
+	return out
+
+
+## BT-44 — char-length invariant over EVERY tooltip site.
+## ORACLE: the source text of PCBPanel.gd, scanned mechanically. Independent of
+## any live Button, and independent of _wrap_tooltip (a wrapped 500-char tip is
+## still a 500-char tip).
+func _test_tooltip_length_invariant() -> void:
+	print("\n-- BT-44: every tooltip site is <= %d chars --" % _TOOLTIP_MAX_CHARS)
+	var sites := _tooltip_sites()
+	check("BT-44: the scanner found tooltip sites at all (>= 20)", sites.size() >= 20)
+
+	var from_buttons := 0
+	for s in sites:
+		if str(s[0]) == "_add_tool_button":
+			from_buttons += 1
+	check("BT-44: …including the _add_tool_button shape (>= 5 sites) — the shape the "
+			+ "first review's grep missed", from_buttons >= 5)
+
+	var worst := 0
+	var worst_text := ""
+	var worst_shape := ""
+	for s in sites:
+		var t := str(s[1])
+		if t.length() > worst:
+			worst = t.length()
+			worst_text = t
+			worst_shape = str(s[0])
+	check("BT-44: max tooltip length is %d <= %d (longest: %s \"%s\")" % [
+			worst, _TOOLTIP_MAX_CHARS, worst_shape, worst_text.substr(0, 70)],
+			worst <= _TOOLTIP_MAX_CHARS)
+
+
+## BT-45 — _wrap_tooltip preserves CONTENT.
+## ORACLE: the token list of the output joined back and compared to the input's
+## token list — a content-preservation oracle that says nothing about where the
+## breaks landed, so it cannot be satisfied by copying the implementation.
+func _test_wrap_tooltip_preserves_content() -> void:
+	print("\n-- BT-45: _wrap_tooltip preserves every word, touches nothing short --")
+	var P := load(PANEL_PATH)
+
+	var short_text := "Draw a copper pour"
+	check("BT-45: a string at or under the wrap width is returned BYTE-IDENTICAL",
+			P._wrap_tooltip(short_text) == short_text)
+	var exactly_60 := "Click a pad to start the trace and then click each waypoint!".substr(0, 60)
+	check("BT-45: exactly-60 is untouched (boundary is <=, not <; len=%d)" % exactly_60.length(),
+			exactly_60.length() == 60 and P._wrap_tooltip(exactly_60) == exactly_60)
+
+	# FIXTURE TRAP, measured: if the 60th character happens to be a SPACE, a hard
+	# character chop coincidentally breaks on a word boundary and the
+	# content-preservation oracle passes the mutation. The boundary must fall
+	# INSIDE a word, and the test says so rather than hoping.
+	var long_text := ("Click a pad to begin the trace and then click on each waypoint "
+			+ "in turn before clicking another pad to finish the run on it")
+	check("BT-45 fixture: the wrap boundary falls INSIDE a word (\"%s\")"
+			% long_text.substr(58, 4), not long_text.substr(58, 4).contains(" "))
+	var wrapped: String = P._wrap_tooltip(long_text)
+	check("BT-45: a long string actually wrapped (the comparison below is not vacuous)",
+			wrapped.contains("\n"))
+	check("BT-45: no word was split or lost — token lists are equal",
+			_tokens(wrapped.replace("\n", " ")) == _tokens(long_text),
+			)
+	var longest_line := 0
+	for line in wrapped.split("\n"):
+		longest_line = maxi(longest_line, (line as String).length())
+	check("BT-45: no wrapped line exceeds the wrap width (%d)" % longest_line,
+			longest_line <= 60)
+
+
+func _tokens(s: String) -> Array:
+	var out: Array = []
+	for w in s.split(" "):
+		if not (w as String).is_empty():
+			out.append(w)
+	return out
+
+
+## BT-46 — the mode tables track the ToolMode enum.
+##
+## ORACLE: THREE independently maintained structures — pcb_canvas's `ToolMode`
+## enum, PCBPanel's `mode_names` status-bar array, and `_MODE_HINTS`. The enum is
+## read from the CANVAS source text (the enum's own declaration), not from the
+## panel, so the two cannot drift into agreement by sharing a copy.
+##
+## MEASURED SHAPE, stated because it is not what a naive reading of A9's F1 says:
+## `_MODE_HINTS` is SPARSE by construction (NONE/TRANSLATE/ROTATE/PAN carry no
+## while-armed hint), so the invariant is NOT three equal sizes. It is:
+##   (a) mode_names.size() == ToolMode.size()  — the status-bar array is dense;
+##   (b) every _MODE_HINTS key is a real ToolMode ordinal;
+##   (c) every mode that has a TOOLBAR BUTTON has a non-empty mode_names entry.
+## (c) is what actually reds when a ToolMode is appended and the table is not
+## extended — the trap B4-U3 hit twice.
+func _test_mode_tables_track_the_enum() -> void:
+	print("\n-- BT-46: mode_names / _MODE_HINTS track the ToolMode enum --")
+	var enum_names := _tool_mode_names_from_source()
+	check("BT-46: the enum was parsed out of pcb_canvas.gd (%d members)" % enum_names.size(),
+			enum_names.size() >= 10)
+
+	var P := load(PANEL_PATH)
+	var panel := await _mount_panel_at(1100.0)
+	var mode_names: Array = panel._status_mode_names() if panel.has_method("_status_mode_names") \
+			else _mode_names_from_source()
+	check("BT-46 (a): mode_names.size() == ToolMode.size() (%d vs %d)"
+			% [mode_names.size(), enum_names.size()],
+			mode_names.size() == enum_names.size())
+
+	var hints: Dictionary = P._MODE_HINTS
+	var bad_keys: Array = []
+	for k in hints.keys():
+		if int(k) < 0 or int(k) >= enum_names.size():
+			bad_keys.append(k)
+	check("BT-46 (b): every _MODE_HINTS key is a real ToolMode ordinal (stray: %s)"
+			% str(bad_keys), bad_keys.is_empty())
+
+	var unnamed: Array = []
+	for mode in panel._tool_buttons.keys():
+		var i := int(mode)
+		if i < 0 or i >= mode_names.size() or str(mode_names[i]).is_empty():
+			unnamed.append(enum_names[i] if i < enum_names.size() else str(i))
+	check("BT-46 (c): every toolbar tool has a status-bar name (unnamed: %s)"
+			% str(unnamed), unnamed.is_empty())
+
+	_teardown(panel)
+
+
+func _tool_mode_names_from_source() -> Array:
+	var src := FileAccess.get_file_as_string(_CANVAS_SRC)
+	var re := RegEx.new()
+	re.compile("enum ToolMode \\{([^}]*)\\}")
+	var m := re.search(src)
+	if m == null:
+		return []
+	var out: Array = []
+	for part in m.get_string(1).split(","):
+		var name := (part as String).strip_edges()
+		if not name.is_empty():
+			out.append(name)
+	return out
+
+
+func _mode_names_from_source() -> Array:
+	var src := FileAccess.get_file_as_string(_PANEL_SRC)
+	var re := RegEx.new()
+	re.compile('var mode_names := \\[([^\\]]*)\\]')
+	var m := re.search(src)
+	if m == null:
+		return []
+	var out: Array = []
+	for part in m.get_string(1).split(","):
+		var lit := (part as String).strip_edges()
+		out.append(lit.trim_prefix('"').trim_suffix('"'))
+	return out
+
+
+## BT-47 — docs/tools.md agrees with the code, MECHANICALLY.
+##
+## SCOPE, per the campaign plan: this is the mechanical subset ONLY. The
+## prose-vs-behaviour half ("does the documented grammar match what the tool
+## does") is adversary-station work and is deliberately NOT faked here.
+##
+## ORACLE: the docs file's own section structure versus manifest.json and the
+## ToolMode enum — three artefacts maintained by hand, in different languages.
+##
+## MEASURED SCOPE CORRECTION: a flat both-directions set equality over every
+## `minerva_pcb_*` string in the file is FALSE at HEAD and always will be — the
+## file documents RETIRED tools (which must be absent) and the manifest carries
+## worker tools the doc never enumerates. The mechanically true statements are
+## the two below, which are what a rename actually breaks.
+func _test_docs_names_match_code() -> void:
+	print("\n-- BT-47: docs/tools.md names exist in manifest.json / ToolMode --")
+	var doc := FileAccess.get_file_as_string(_DOCS_TOOLS)
+	check("BT-47: docs/tools.md is readable", not doc.is_empty())
+
+	var manifest_names := _manifest_tool_names()
+	check("BT-47: manifest.json parsed (%d tools)" % manifest_names.size(),
+			manifest_names.size() >= 50)
+
+	# Direction 1: every tool NAMED IN A SECTION HEADING (i.e. documented as a
+	# shipped feature) exists in the manifest. Renaming a tool without touching
+	# docs reds here.
+	var documented := _tool_names_in_headings(doc, false)
+	check("BT-47: the heading scan found documented tools (%d)" % documented.size(),
+			documented.size() >= 8)
+	var missing: Array = []
+	for n in documented:
+		if not manifest_names.has(n):
+			missing.append(n)
+	check("BT-47 dir1: every heading-documented tool exists in the manifest (missing: %s)"
+			% str(missing), missing.is_empty())
+
+	# Direction 2: every tool listed under "Retired" is ABSENT from the manifest.
+	# Documenting a tool as retired while it still ships is the same drift read
+	# from the other end.
+	var retired := _tool_names_in_retired(doc)
+	check("BT-47: the Retired section names tools (%d)" % retired.size(), retired.size() >= 3)
+	var zombies: Array = []
+	for n in retired:
+		if manifest_names.has(n):
+			zombies.append(n)
+	check("BT-47 dir2: no retired tool is still in the manifest (zombies: %s)" % str(zombies),
+			zombies.is_empty())
+
+	# Direction 3: every TOOLBAR tool's status-bar name is described in the
+	# "Canvas gestures" section.
+	#
+	# RECORDED GAP (campaign 2 boundary finding, NOT a test defect): CUTOUT
+	# shipped in epoch B unit 3 and its gesture grammar was never added to that
+	# section — docs/tools.md mentions "Cutout" only in its MCP-tools heading.
+	# The exception below is deliberate and must be DELETED when the docs are
+	# fixed; leaving the assertion red at HEAD would poison the boundary run,
+	# and dropping the assertion entirely would absorb the gap silently.
+	var gestures := _canvas_gestures_section(doc)
+	check("BT-47: the Canvas gestures section was located", gestures.length() > 500)
+	var undocumented: Array = []
+	for name in ["Select", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout"]:
+		if not gestures.contains(name):
+			undocumented.append(name)
+	check("BT-47 dir3: every toolbar tool but the recorded CUTOUT gap is described "
+			+ "in Canvas gestures (undocumented: %s)" % str(undocumented),
+			undocumented == ["Cutout"])
+
+
+func _manifest_tool_names() -> Array:
+	var raw := FileAccess.get_file_as_string(_MANIFEST_SRC)
+	var parsed: Variant = JSON.parse_string(raw)
+	var out: Array = []
+	if not (parsed is Dictionary):
+		return out
+	for t in (parsed as Dictionary).get("tools", []):
+		if t is Dictionary:
+			out.append(str((t as Dictionary).get("name", "")))
+	return out
+
+
+func _tool_names_in_headings(doc: String, retired: bool) -> Array:
+	var re := RegEx.new()
+	re.compile("minerva_pcb_[a-z_]+")
+	var out: Array = []
+	for line in doc.split("\n"):
+		var l := line as String
+		if not l.begins_with("## "):
+			continue
+		if l.contains("Retired") != retired:
+			continue
+		for m in re.search_all(l):
+			var n := m.get_string(0)
+			if not out.has(n):
+				out.append(n)
+	return out
+
+
+func _tool_names_in_retired(doc: String) -> Array:
+	var start := doc.find("## Retired")
+	if start < 0:
+		return []
+	var stop := doc.find("\n## ", start + 4)
+	if stop < 0:
+		stop = doc.length()
+	var re := RegEx.new()
+	re.compile("minerva_pcb_[a-z_]+")
+	var out: Array = []
+	for m in re.search_all(doc.substr(start, stop - start)):
+		var n := m.get_string(0)
+		if not out.has(n):
+			out.append(n)
+	return out
+
+
+func _canvas_gestures_section(doc: String) -> String:
+	var start := doc.find("## Canvas gestures")
+	if start < 0:
+		return ""
+	var stop := doc.find("\n## ", start + 4)
+	if stop < 0:
+		stop = doc.length()
+	return doc.substr(start, stop - start)

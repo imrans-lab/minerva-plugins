@@ -31,7 +31,6 @@ from pcb_worker.footprint_def import (
 
 HERE = Path(__file__).resolve().parent
 FIXTURE_LIB = HERE / "testdata" / "fixture_lib"
-SMART_REMOTE = HERE / "testdata" / "smart_remote.yaml"
 
 # The new + existing local fixtures (roundrect SMD + rect SMD).
 _LOCAL_FIXTURES = [
@@ -42,18 +41,21 @@ _LOCAL_FIXTURES = [
 ]
 
 
-def _smart_remote_parsed():
-    """Yield (ref, parsed) for every resolvable footprint the smart-remote
-    board references — the real seed library, sha-verified via resolve."""
-    import yaml
+def _seed_library_parsed():
+    """Yield (ref, parsed) for every footprint in the real seed library
+    (``load_lockfile()``), sha-verified via resolve.
 
-    board = yaml.safe_load(SMART_REMOTE.read_text(encoding="utf-8"))
-    seen = set()
-    for comp in board.get("components", []):
-        ref = comp.get("footprint")
-        if not ref or ref in seen:
-            continue
-        seen.add(ref)
+    Used to iterate EVERY footprint any board could reference, rather than only
+    those a specific board's component list happens to name. This used to walk
+    a real product board's (``smart_remote.yaml``) component list; that board was
+    withdrawn from the corpus (docket 019fbe68c5f8, an IP concern — see
+    testdata/POLICY.md), and going through the lockfile directly is not just a
+    workaround but a strictly STRONGER proof: it covers every seed footprint,
+    board-shaped or not, and needs no fixture at all — see
+    ``test_lockfile_wide_adapter_census_is_explicit_and_nonblocking`` below, which
+    already iterates the same lockfile with no board involved."""
+    lock = load_lockfile()
+    for ref in sorted(lock):
         try:
             parsed = resolve.resolve_footprint(ref)
         except Exception:
@@ -74,14 +76,14 @@ def test_roundtrip_matches_resolve_pads_from_parsed_local(fx):
     assert got == expected
 
 
-def test_roundtrip_matches_resolve_for_smart_remote_parts():
+def test_roundtrip_matches_resolve_for_every_seed_footprint():
     checked = 0
-    for ref, parsed in _smart_remote_parsed():
+    for ref, parsed in _seed_library_parsed():
         got = FootprintDefinition.from_kicad_parsed(parsed).to_board_pad_dicts()
         expected = resolve._pads_from_parsed(parsed["pads"])
         assert got == expected, f"round-trip drift for {ref}"
         checked += 1
-    assert checked > 0, "no smart-remote footprints resolved — proof did not run"
+    assert checked > 0, "no seed-library footprints resolved — proof did not run"
 
 
 # ---------------------------------------------------------------------------

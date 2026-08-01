@@ -25,6 +25,7 @@ test_pcb_apply_route_hints.gd
 test_pcb_backend_lifecycle.gd
 test_pcb_bus_geometry.gd
 test_pcb_canvas_input_probe.gd
+test_pcb_cutout.gd
 test_pcb_drc_propose.gd
 test_pcb_explicit_propose.gd
 test_pcb_hint_refine_loop.gd
@@ -38,6 +39,8 @@ test_pcb_pin_inspector.gd
 test_pcb_plugin_smoke.gd
 test_pcb_route_hint_mcp_parity.gd
 test_pcb_single_trace_tool.gd
+test_pcb_trace_tool.gd
+test_pcb_width_prefs.gd
 test_pcb_workflow_kinds.gd
 test_proposal_attribution.gd
 test_routing_workspace_model.gd

@@ -3,12 +3,21 @@
 Covers:
   (a) parse all 8 seed footprints -> expected pad counts + silk/courtyard graphics,
   (b) COINCIDENCE golden -- resolved-footprint pad LOCAL positions equal the
-      smart-remote board's declared pin LOCAL positions within 0.01mm (the
-      validated prototype measured 0.000mm for all 10 components),
+      fixture board's declared pin LOCAL positions within 0.01mm (measured
+      0.000mm for every component),
   (c) lockfile sha256 integrity.
 
 All fixtures are vendored in-repo (pcb/library/footprints + tests/testdata);
 no network access.
+
+FIXTURE (docket 019fbe68c5f8, testdata/POLICY.md): the coincidence golden used
+to run against ``testdata/footprints/smart-remote-orig.yaml``, a REAL Turnrock
+product board. It was withdrawn from the corpus on 2026-07-30 because a real
+design (netlist + placement) in a public repo is an IP leak. The replacement,
+``testdata/footprints/resolve_corners.yaml``, uses the SAME real, public-origin
+KiCad library parts at new, synthetic refs/positions/nets — see that file's
+header for the full rationale. NEVER repair this module by restoring the
+deleted fixture from git history.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ from pcb_worker.footprints import (
 )
 
 HERE = Path(__file__).resolve().parent
-BOARD_YAML = HERE / "testdata" / "footprints" / "smart-remote-orig.yaml"
+BOARD_YAML = HERE / "testdata" / "footprints" / "resolve_corners.yaml"
 
 # Expected pad count per footprint ref. From the real KiCad footprints.
 EXPECTED_PAD_COUNTS = {
@@ -135,9 +144,9 @@ def _load_board() -> dict:
 
 
 def test_coincidence_golden_all_components():
-    """For every smart-remote component, the resolved footprint's pad LOCAL
+    """For every fixture component, the resolved footprint's pad LOCAL
     positions must equal the board's declared pin LOCAL positions within
-    0.01mm. The validated prototype measured 0.000mm for all 10 components."""
+    0.01mm. Measured 0.000mm for every one of the 5 components."""
     board = _load_board()
     tol = 0.01
     overall_worst = 0.0

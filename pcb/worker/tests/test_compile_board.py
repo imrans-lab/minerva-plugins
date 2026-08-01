@@ -75,13 +75,25 @@ TESTDATA = Path(__file__).parent / "testdata"
 
 
 @pytest.fixture(scope="module")
-def smart_remote() -> dict:
-    return yaml.safe_load((TESTDATA / "smart_remote.yaml").read_text(encoding="utf-8"))
+def corner_board() -> dict:
+    """The primary compile-board fixture (docket 019fbe68c5f8).
+
+    Was ``testdata/smart_remote.yaml``, a REAL Turnrock product board, withdrawn
+    from this public repo on 2026-07-30 (testdata/POLICY.md) because a real
+    design is an IP leak. Replaced by ``testdata/parity_corners.yaml`` — a small,
+    purpose-built synthetic board (4 components) deliberately authored to reach
+    specific geometry classes: through-hole + SMD pads, both board sides, oblong
+    (non-square) rotated lands, a plated AND an unplated board hole, a via, and a
+    half-turn placement. See that file's own header comment for the full gap
+    analysis. NEVER restore the deleted fixture from git history — that IS the
+    IP leak the policy exists to prevent.
+    """
+    return yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
-def smart_remote_result(smart_remote):
-    return compile_board(smart_remote)
+def corner_board_result(corner_board):
+    return compile_board(corner_board)
 
 
 def _minimal_board(**overrides) -> dict:
@@ -164,25 +176,40 @@ def test_compile_census_every_seed_resolves(ref):
 # ---------------------------------------------------------------------------
 
 
-def test_smart_remote_resolves_success(smart_remote_result):
-    assert isinstance(smart_remote_result, ResolutionSuccess)
-    assert not any(d.severity is DiagnosticSeverity.ERROR for d in smart_remote_result.diagnostics)
+def test_smart_remote_resolves_success(corner_board_result):
+    assert isinstance(corner_board_result, ResolutionSuccess)
+    assert not any(d.severity is DiagnosticSeverity.ERROR for d in corner_board_result.diagnostics)
 
 
-def test_smart_remote_structure(smart_remote_result):
-    board = smart_remote_result.board
+def test_smart_remote_structure(corner_board, corner_board_result):
+    board = corner_board_result.board
     assert isinstance(board, ResolvedBoard)
-    assert len(board.components) == 10
-    assert len(board.nets) == 16
-    assert len(board.traces) == 28
-    assert len(board.vias) == 4
-    assert len(board.holes) == 4
-    assert len(board.footprint_definitions) == 7  # SW1-4 share EVP-ASAC1A
-    assert sum(len(c.placed_pads) for c in board.components) == 76
+    # Counts are read from the SOURCE dict rather than hard-coded (docket
+    # 019fbe68c5f8) so this stays correct if parity_corners.yaml is ever
+    # extended, instead of drifting the way the withdrawn smart_remote.yaml's
+    # hard-coded 10/16/28/4/4/7/76 did the moment the fixture changed.
+    assert len(board.components) == len(corner_board["components"])
+    assert len(board.nets) == len(corner_board["nets"])
+    assert len(board.traces) == len(corner_board["traces"])
+    assert len(board.vias) == len(corner_board["vias"])
+    assert len(board.holes) == (len(corner_board.get("mounting_holes", []))
+                                 + len(corner_board.get("pth_holes", []))
+                                 + len(corner_board.get("npth_holes", [])))
+    # Footprint definitions are interned by footprint STRING (U2 and U3 both
+    # reference Package_DIP:DIP-6_W7.62mm_Socket), so this is distinct
+    # footprints referenced, not component count.
+    assert len(board.footprint_definitions) == len(
+        {c["footprint"] for c in corner_board["components"]})
+    # placed_pads is the FOOTPRINT's full pad set, not the authored `pins:`
+    # override list (which may cover only a subset of a footprint's pins) —
+    # not derivable from the source dict alone, so it stays a literal. Was 76
+    # against the withdrawn smart_remote.yaml; parity_corners.yaml's 4
+    # components (J1=4, U2=6, SW9=2, U3=6 pads) total 18.
+    assert sum(len(c.placed_pads) for c in board.components) == 18
 
 
-def test_smart_remote_interned_definitions_marker_free_but_provenanced(smart_remote_result):
-    for definition in smart_remote_result.board.footprint_definitions:
+def test_smart_remote_interned_definitions_marker_free_but_provenanced(corner_board_result):
+    for definition in corner_board_result.board.footprint_definitions:
         assert definition.unsupported == ()
         assert all(pad.unsupported == () for pad in definition.pads)
         # Source identity survives adjudication (review 621 MF4).
@@ -190,33 +217,37 @@ def test_smart_remote_interned_definitions_marker_free_but_provenanced(smart_rem
         assert definition.provenance.source_id
 
 
-def test_smart_remote_emits_omission_and_capability_warnings(smart_remote_result):
-    codes = {d.code for d in smart_remote_result.diagnostics
+def test_smart_remote_emits_omission_and_capability_warnings(corner_board_result):
+    codes = {d.code for d in corner_board_result.diagnostics
              if d.severity is DiagnosticSeverity.WARNING}
     assert "feature_omitted" in codes
     assert "captured_geometry_not_emitted" in codes  # F.Fab/F.CrtYd/paste are doc-only
 
 
-def test_smart_remote_holes_are_npth(smart_remote_result):
-    holes = smart_remote_result.board.holes
-    # Guard against VACUITY, not against a count regression. A bare `for` over an
-    # empty collection runs no assertion at all, so if the compiler ever stopped
-    # emitting holes this test would go green and silent while testing nothing.
-    #
-    # Deliberately weaker than `== 4`. The COUNT is already pinned TWICE — at
-    # :170-171 (test_smart_remote_structure, literal 4) and at :341/:351
-    # (test_board_geometry_is_carried_faithfully, against the source board) —
-    # so asserting it a third time here would add a third copy of one fact for
-    # them all to drift apart. This guard asserts only what THIS test needs,
-    # that the loop body is reached, and so stays correct if either census
-    # changes or is removed.
+def test_smart_remote_holes_are_npth(corner_board_result):
+    # On the withdrawn smart_remote.yaml every mounting hole was unplated, so
+    # this test's property was "every hole is NPTH". parity_corners.yaml's GAP
+    # 3 (see its own header) deliberately authors ONE plated hole alongside the
+    # unplated one, precisely so the PTH/NPTH split is cross-checked — so the
+    # property this test proves now is that a hole's KIND is correctly DERIVED
+    # from its authored plating (never invented, never dropped), which is
+    # actually a stronger and more faithful claim than the old blanket NPTH one.
+    holes = corner_board_result.board.holes
+    # Guard against VACUITY, not against a count regression — see
+    # test_smart_remote_structure for where the count itself is pinned (from
+    # the source dict, not a literal here).
     assert holes, "no holes emitted — the assertion below would never run"
+    # ...and guard the branch coverage itself: if the fixture ever collapsed
+    # back to one plating value, the loop below would still pass while
+    # exercising only half of what it claims to.
+    assert {h.plated for h in holes} == {True, False}, (
+        "expected both a plated and an unplated hole (parity_corners.yaml GAP 3)")
     for hole in holes:
-        assert hole.kind is HoleKind.NPTH and hole.plated is False
+        assert hole.kind is (HoleKind.PTH if hole.plated else HoleKind.NPTH)
 
 
-def test_smart_remote_vias_are_through(smart_remote_result):
-    vias = smart_remote_result.board.vias
+def test_smart_remote_vias_are_through(corner_board_result):
+    vias = corner_board_result.board.vias
     # Same vacuity guard, same reasoning — see test_smart_remote_holes_are_npth.
     assert vias, "no vias emitted — the assertions below would never run"
     for via in vias:
@@ -224,17 +255,26 @@ def test_smart_remote_vias_are_through(smart_remote_result):
         assert {via.from_layer, via.to_layer} == {"top", "bottom"}
 
 
-def test_net_pad_membership_agrees(smart_remote_result):
-    board = smart_remote_result.board
-    gnd = next(n for n in board.nets if n.name == "GND")
-    assert len(gnd.pad_refs) >= 10
-    assert all(board.pad_net[pad_id] == gnd.id for pad_id in gnd.pad_refs)
+def test_net_pad_membership_agrees(corner_board_result):
+    # parity_corners.yaml has no GND net (its nets are N_OBL/N_BOT/N_HT), so
+    # the property is proven over EVERY net rather than one hard-coded name —
+    # which is a strictly stronger form of the same check (docket 019fbe68c5f8).
+    board = corner_board_result.board
+    assert board.nets, "no nets emitted — the assertions below would never run"
+    for net in board.nets:
+        assert net.pad_refs, f"net {net.name!r} owns no pads"
+        assert all(board.pad_net[pad_id] == net.id for pad_id in net.pad_refs)
 
 
-def test_components_carry_value(smart_remote_result):
-    by_ref = {c.ref: c for c in smart_remote_result.board.components}
-    assert by_ref["U1"].value == "ESP32-S3-DevKitC-1"
-    assert by_ref["BAT1"].value == "BATTERY"
+def test_components_carry_value(corner_board, corner_board_result):
+    # Checked against EVERY component's authored value, read from the source
+    # dict, rather than two hard-coded refs that only existed on the withdrawn
+    # smart_remote.yaml (docket 019fbe68c5f8).
+    by_ref = {c.ref: c for c in corner_board_result.board.components}
+    src_value = {c["ref"]: c["value"] for c in corner_board["components"]}
+    assert src_value, "no components authored — the assertion below would never run"
+    for ref, value in src_value.items():
+        assert by_ref[ref].value == value
 
 
 # ---------------------------------------------------------------------------
@@ -242,24 +282,42 @@ def test_components_carry_value(smart_remote_result):
 # ---------------------------------------------------------------------------
 
 
-def test_complete_pad_projection_parity(smart_remote, smart_remote_result):
+def test_complete_pad_projection_parity(corner_board, corner_board_result):
     """EVERY placed pad, matched by (ref, source_id), equals an INDEPENDENT
     projection of a freshly-parsed footprint through the placement transform —
     on the COMPLETE field set: position, rotation, size, shape, full drill
     (shape/x/y/plating), corner ratio, both margins, side, and expanded layers
-    (review 623 R6).  Exact equality, no rounding."""
-    from pcb_worker.compile_board import _resolved_pad_layers
+    (review 623 R6).  Exact equality, no rounding.
+
+    parity_corners.yaml's GAP 2 deliberately authors PIN OVERRIDES (inline
+    pad_width_mm/pad_height_mm/drill_mm on J1 and SW9, migrated to typed
+    overrides — see test_inline_pin_geometry_is_diagnosed) that diverge from
+    the locked footprint, so the "fresh footprint" baseline for size/drill must
+    fold those overrides too. The withdrawn smart_remote.yaml also authored
+    inline geometry on every pin, but only annulus_diameter_mm diverged there,
+    which never touches PlacedPad.size/.drill (compile_board.py:1020) — so the
+    plain footprint-only comparison held by coincidence, not because overrides
+    don't apply. The fold is done with `_apply_pin_override`, the SAME
+    function the compiler itself uses and which is independently unit-tested
+    below (test_override_*) — reusing it here does not retest override
+    correctness, it only supplies the right expected value so THIS test can
+    stay focused on what it actually proves: the PLACEMENT TRANSFORM (position/
+    rotation/shape/margins/side/layers), independent of compile_board's own
+    transform code.
+    """
+    from pcb_worker.compile_board import _apply_pin_override, _resolved_pad_layers
     from pcb_worker.footprint_def import FootprintDefinition
     from pcb_worker.footprints import resolve_footprint
     from pcb_worker.geometry import PlacementTransform
 
-    src_by_ref = {c["ref"]: c for c in smart_remote["components"]}
+    src_by_ref = {c["ref"]: c for c in corner_board["components"]}
     diags = _Diagnostics()
     checked = 0
-    for comp in smart_remote_result.board.components:
+    for comp in corner_board_result.board.components:
         src = src_by_ref[comp.ref]
         fresh = FootprintDefinition.from_kicad_parsed(resolve_footprint(src["footprint"]))
         local_by_source = {p.source_id: p for p in fresh.pads}
+        pin_overrides = _check_coincidence(src, fresh, comp.ref, _Diagnostics())
         transform = PlacementTransform(position=comp.placement.position,
                                        rotation_deg=comp.placement.rotation_deg,
                                        side=comp.placement.side)
@@ -267,22 +325,30 @@ def test_complete_pad_projection_parity(smart_remote, smart_remote_result):
             local = local_by_source[placed.source_id]
             assert placed.position == transform.point(local.position)
             assert placed.rotation_deg == transform.angle(local.rotation_deg)
-            expected_size = (None if local.size is None
-                             else (float(local.size[0]), float(local.size[1])))
+            override = pin_overrides.get(local.number, {})
+            expected_size, expected_drill, _expected_ann, _expected_type = _apply_pin_override(
+                local, override, local.size, local.drill, None, local.pad_type,
+                comp.ref, diags)
+            expected_size = (None if expected_size is None
+                             else (float(expected_size[0]), float(expected_size[1])))
             assert placed.size == expected_size
             assert placed.shape == local.shape
-            assert placed.drill == local.drill            # shape + (x, y) + plating
+            assert placed.drill == expected_drill          # shape + (x, y) + plating
             assert placed.corner_rratio == local.corner_rratio
             assert placed.solder_mask_margin == local.solder_mask_margin
             assert placed.solder_paste_margin == local.solder_paste_margin
             assert placed.side is comp.placement.side
             assert placed.layers == _resolved_pad_layers(local, transform, comp.ref, diags)
             checked += 1
-    assert checked == 76
+    # Vacuity guard on the loop actually running, not just a count check — was
+    # 76 against the withdrawn smart_remote.yaml (docket 019fbe68c5f8); the 4
+    # components on parity_corners.yaml place 18 pads total (see
+    # test_smart_remote_structure for how that number is derived).
+    assert checked == 18
     assert not diags.has_error
 
 
-def test_complete_graphic_projection_parity(smart_remote, smart_remote_result):
+def test_complete_graphic_projection_parity(corner_board, corner_board_result):
     """Every placed GRAPHIC, matched by (ref, source_id), equals an independent
     projection of a freshly-parsed footprint graphic through the placement
     transform — layer, primitive geometry, and width (review 625.5)."""
@@ -291,9 +357,9 @@ def test_complete_graphic_projection_parity(smart_remote, smart_remote_result):
     from pcb_worker.footprints import resolve_footprint
     from pcb_worker.geometry import PlacementTransform
 
-    src_by_ref = {c["ref"]: c for c in smart_remote["components"]}
+    src_by_ref = {c["ref"]: c for c in corner_board["components"]}
     checked = 0
-    for comp in smart_remote_result.board.components:
+    for comp in corner_board_result.board.components:
         fresh = FootprintDefinition.from_kicad_parsed(
             resolve_footprint(src_by_ref[comp.ref]["footprint"]))
         local_by_source = {g.source_id: g for g in fresh.graphics}
@@ -306,40 +372,61 @@ def test_complete_graphic_projection_parity(smart_remote, smart_remote_result):
             assert placed.geometry == transform.graphic(_to_geometry(local))
             assert placed.width_mm == local.width_mm
             checked += 1
-    assert checked == sum(len(c.placed_graphics) for c in smart_remote_result.board.components)
-    assert checked == 207
+    assert checked == sum(len(c.placed_graphics) for c in corner_board_result.board.components)
+    # Was 207 against the withdrawn smart_remote.yaml (docket 019fbe68c5f8);
+    # parity_corners.yaml's 4 components place 83 graphics total.
+    assert checked == 83
 
 
-def test_pad_position_cross_checks_the_live_path(smart_remote, smart_remote_result):
+def test_pad_position_cross_checks_the_live_path(corner_board, corner_board_result):
     """Independent cross-check: absolute pad centres also match the current
-    resolve+place_point projection (a second algorithm)."""
-    resolved = resolve_board(smart_remote)
+    resolve+place_point projection (a second algorithm).
+
+    Scoped to TOP-side components. ``place_point``/``resolve_board`` (the
+    legacy path exercised here) is a plain rotate+translate with no side
+    mirroring — ``geometry.place_point`` docstring vs. ``PlacementTransform``,
+    which explicitly mirrors the local Y axis for a bottom-side placement
+    before rotating. Every component on the withdrawn smart_remote.yaml was
+    `top` (see parity_corners.yaml's own header, GAP 1), so the two algorithms
+    could never actually disagree there. parity_corners.yaml deliberately adds
+    a BOTTOM-side component (U2, GAP 1) so the mirror fold is cross-surface
+    checked elsewhere (test_rotation.py's k1_bottom_oracle, and the ir_parity
+    gate) — asserting legacy/live agreement for U2 here would fail by
+    correctly-mismatched DESIGN, not by defect, so it is excluded from this
+    specific two-algorithm check rather than weakening it board-wide.
+    """
+    resolved = resolve_board(corner_board)
     ref = {}
     for comp in resolved["components"]:
         cx, cy, rot = comp["x_mm"], comp["y_mm"], comp.get("rotation_deg", 0.0)
         for pad in comp.get("pads", []):
             ax, ay = place_point(cx, cy, rot, pad["position"]["x"], pad["position"]["y"])
             ref[(comp["ref"], str(pad["number"]))] = (round(ax, 6), round(ay, 6))
-    index = smart_remote_result.board.footprint_index
-    for comp in smart_remote_result.board.components:
+    index = corner_board_result.board.footprint_index
+    checked = 0
+    for comp in corner_board_result.board.components:
+        if comp.placement.side is not Side.TOP:
+            continue
         by_source = {p.source_id: p for p in index[comp.footprint_id].pads}
         for placed in comp.placed_pads:
             number = by_source[placed.source_id].number
             assert (round(placed.position[0], 6), round(placed.position[1], 6)) == ref[(comp.ref, number)]
+            checked += 1
+    assert checked, "no top-side pads checked — the assertion above would never run"
 
 
-def test_board_geometry_is_carried_faithfully(smart_remote, smart_remote_result):
+def test_board_geometry_is_carried_faithfully(corner_board, corner_board_result):
     """Outline, traces, vias and holes are the authored geometry with COMPLETE
     properties — not dropped, not resampled, not partially compared."""
-    board = smart_remote_result.board
-    assert board.outline.width_mm == smart_remote["width_mm"]
-    assert board.outline.height_mm == smart_remote["height_mm"]
+    board = corner_board_result.board
+    assert board.outline.width_mm == corner_board["width_mm"]
+    assert board.outline.height_mm == corner_board["height_mm"]
 
     net_name = {n.id: n.name for n in board.nets}
 
     # Traces: full ordered polyline + width + layer + NET membership for EVERY trace.
-    assert len(board.traces) == len(smart_remote["traces"])
-    for src, got in zip(smart_remote["traces"], board.traces):
+    assert len(board.traces) == len(corner_board["traces"])
+    for src, got in zip(corner_board["traces"], board.traces):
         pts = [(float(p["x_mm"]), float(p["y_mm"])) for p in src["points"]]
         seg_points = [got.segments[0].a] + [s.b for s in got.segments]
         assert seg_points == pts
@@ -348,7 +435,7 @@ def test_board_geometry_is_carried_faithfully(smart_remote, smart_remote_result)
         assert net_name[got.net_id] == src["net"]
 
     # Vias: position, diameter, drill, span, and net membership.
-    src_vias = {(float(v["x_mm"]), float(v["y_mm"])): v for v in smart_remote["vias"]}
+    src_vias = {(float(v["x_mm"]), float(v["y_mm"])): v for v in corner_board["vias"]}
     assert len(board.vias) == len(src_vias)
     for via in board.vias:
         s = src_vias[(round(via.position[0], 6), round(via.position[1], 6))]
@@ -357,26 +444,38 @@ def test_board_geometry_is_carried_faithfully(smart_remote, smart_remote_result)
         assert {via.from_layer, via.to_layer} == {s["from_layer"], s["to_layer"]}
         assert net_name[via.net_id] == s["net"]
 
-    # Holes: diameter, plating, and derived kind.
-    src_holes = {(float(h["x_mm"]), float(h["y_mm"])): h for h in smart_remote["mounting_holes"]}
+    # Holes: diameter, plating, and derived kind. parity_corners.yaml authors
+    # holes under TWO aliased keys (GAP 3: a pth_holes entry plus a
+    # mounting_holes entry) whose DEFAULT plating differs per key
+    # (compile_board._build_holes: mounting_holes/npth_holes default False,
+    # pth_holes defaults True and the key wins over any explicit `plated`) — so
+    # the source-of-truth lookup below reproduces that per-key default instead
+    # of assuming every hole authors an explicit `plated` field, which is all
+    # the withdrawn smart_remote.yaml (mounting_holes only) needed.
+    src_holes = {}
+    for key, default_plated in (("mounting_holes", False), ("npth_holes", False),
+                                 ("pth_holes", True)):
+        for h in corner_board.get(key, []):
+            plated = h.get("plated", default_plated) if key == "mounting_holes" else default_plated
+            src_holes[(float(h["x_mm"]), float(h["y_mm"]))] = (h, plated)
     assert len(board.holes) == len(src_holes)
     for hole in board.holes:
-        s = src_holes[(round(hole.feature.position[0], 6), round(hole.feature.position[1], 6))]
+        s, plated = src_holes[(round(hole.feature.position[0], 6), round(hole.feature.position[1], 6))]
         assert hole.feature.diameter_mm == s["diameter_mm"]
-        assert hole.plated == s["plated"]
-        assert hole.kind is (HoleKind.PTH if s["plated"] else HoleKind.NPTH)
+        assert hole.plated == plated
+        assert hole.kind is (HoleKind.PTH if plated else HoleKind.NPTH)
 
 
-def test_origin_is_preserved(smart_remote):
-    board = dict(smart_remote)
+def test_origin_is_preserved(corner_board):
+    board = dict(corner_board)
     board["origin"] = {"x_mm": 7.0, "y_mm": 9.0}
     result = compile_board(board)
     assert isinstance(result, ResolutionSuccess)
     assert result.board.outline.origin == (7.0, 9.0)
 
 
-def test_placed_geometry_materialized_once_and_recomputes(smart_remote_result):
-    board = smart_remote_result.board
+def test_placed_geometry_materialized_once_and_recomputes(corner_board_result):
+    board = corner_board_result.board
     comp = board.components[0]
     definition = board.footprint_for(comp)
     transform = PlacementTransform(position=comp.placement.position,
@@ -387,14 +486,14 @@ def test_placed_geometry_materialized_once_and_recomputes(smart_remote_result):
         assert placed.position == transform.point(by_source[placed.source_id].position)
 
 
-def test_placed_pad_is_immutable(smart_remote_result):
-    pad = smart_remote_result.board.components[0].placed_pads[0]
+def test_placed_pad_is_immutable(corner_board_result):
+    pad = corner_board_result.board.components[0].placed_pads[0]
     with pytest.raises((AttributeError, TypeError)):
         pad.position = (0.0, 0.0)  # type: ignore[misc]
 
 
-def test_compile_is_deterministic(smart_remote):
-    a, b = compile_board(smart_remote), compile_board(smart_remote)
+def test_compile_is_deterministic(corner_board):
+    a, b = compile_board(corner_board), compile_board(corner_board)
     assert isinstance(a, ResolutionSuccess) and isinstance(b, ResolutionSuccess)
     assert [p.id for c in a.board.components for p in c.placed_pads] == \
            [p.id for c in b.board.components for p in c.placed_pads]
@@ -406,8 +505,8 @@ def test_compile_is_deterministic(smart_remote):
 # ---------------------------------------------------------------------------
 
 
-def test_no_placed_pad_retains_a_wildcard_layer(smart_remote_result):
-    for comp in smart_remote_result.board.components:
+def test_no_placed_pad_retains_a_wildcard_layer(corner_board_result):
+    for comp in corner_board_result.board.components:
         for pad in comp.placed_pads:
             assert all(not layer.is_wildcard for layer in pad.layers), \
                 f"{comp.ref} pad {pad.source_id} kept a wildcard"
@@ -648,15 +747,15 @@ def test_non_roundrect_pad_corner_rratio_stays_none(shape):
 # ---------------------------------------------------------------------------
 
 
-def test_component_provenance_populated_from_lock(smart_remote_result):
+def test_component_provenance_populated_from_lock(corner_board_result):
     lock = load_lockfile()
-    for comp in smart_remote_result.board.components:
+    for comp in corner_board_result.board.components:
         assert comp.provenance.source_id
         assert comp.provenance.sha256 == lock[comp.provenance.source_id]["sha256"]
 
 
-def test_board_provenance_full_digests_and_transform(smart_remote_result):
-    prov = smart_remote_result.board.provenance
+def test_board_provenance_full_digests_and_transform(corner_board_result):
+    prov = corner_board_result.board.provenance
     assert "transform/kicad-flip-v1" in prov.compiler_version
     assert len(prov.source_digest) == 64          # full SHA-256, not truncated
     assert len(prov.library_lock_ref) == 64
@@ -679,9 +778,11 @@ def test_clearance_never_weakens_manufacturer_floor():
     assert result.board.design_rules.minimums.min_clearance_mm == 0.127
 
 
-def test_authored_clearance_above_floor_is_honored(smart_remote_result):
-    # smart_remote authors 0.2, above the 0.127 floor.
-    assert smart_remote_result.board.design_rules.minimums.min_clearance_mm == 0.2
+def test_authored_clearance_above_floor_is_honored(corner_board_result):
+    # parity_corners.yaml (like the withdrawn smart_remote.yaml before it)
+    # authors clearance_mm: 0.2 in its design_rules block, above the 0.127
+    # floor — see the fixture's own design_rules section.
+    assert corner_board_result.board.design_rules.minimums.min_clearance_mm == 0.2
 
 
 # ---------------------------------------------------------------------------
@@ -764,15 +865,15 @@ def test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged(t
     assert "solder_mask_expansion_mm" in message
 
 
-def test_stackup_asserts_no_invented_thickness(smart_remote_result):
-    for entry in smart_remote_result.board.layer_stack.stackup.entries:
+def test_stackup_asserts_no_invented_thickness(corner_board_result):
+    for entry in corner_board_result.board.layer_stack.stackup.entries:
         assert entry.thickness_mm is None
         assert entry.material is None
 
 
-def test_ordinal_id_bridge_is_diagnosed(smart_remote_result):
+def test_ordinal_id_bridge_is_diagnosed(corner_board_result):
     assert any(d.code == "ordinal_ids" and d.severity is DiagnosticSeverity.INFO
-               for d in smart_remote_result.diagnostics)
+               for d in corner_board_result.diagnostics)
 
 
 # ---------------------------------------------------------------------------
@@ -780,8 +881,8 @@ def test_ordinal_id_bridge_is_diagnosed(smart_remote_result):
 # ---------------------------------------------------------------------------
 
 
-def test_malformed_origin_fails_closed(smart_remote):
-    board = dict(smart_remote)
+def test_malformed_origin_fails_closed(corner_board):
+    board = dict(corner_board)
     board["origin"] = {"x_mm": "nope"}
     result = compile_board(board)
     assert isinstance(result, ResolutionFailure)
@@ -1313,14 +1414,21 @@ def test_uncanonicalizable_annotation_fails_closed():
     assert "uncanonicalizable_board" in _errors(result)
 
 
-def test_inline_pin_geometry_is_diagnosed(smart_remote_result):
-    # smart_remote carries legacy inline drill/annulus on every pin, and its
-    # annulus DIVERGES from the footprint (2.0 vs 1.2) but is verifiable → the fold
-    # auto-migrates it to a typed override (INFO), never the retired ignore-warning.
-    codes = [d.code for d in smart_remote_result.diagnostics]
+def test_inline_pin_geometry_is_diagnosed(corner_board_result):
+    # parity_corners.yaml authors legacy inline pin geometry (drill_mm /
+    # pad_width_mm / pad_height_mm / annulus_diameter_mm) on every pin (see its
+    # header), and on J1 and SW9 those authored values DIVERGE from the locked
+    # footprint (e.g. J1 pin 1: drill 0.8 vs footprint 1.0) but are verifiable
+    # → the fold auto-migrates them to typed overrides (INFO), never the
+    # retired ignore-warning. Was "every pin" on the withdrawn smart_remote.yaml;
+    # here it is J1 and SW9's pins specifically (U2/U3's inline geometry
+    # matches their footprint and is folded away silently instead — see
+    # test_inline_geometry_matching_footprint_is_dropped_silently for that
+    # branch), which is enough to prove the migration path fires at all.
+    codes = [d.code for d in corner_board_result.diagnostics]
     assert any(d.code == "inline_pin_geometry_migrated"
                and d.severity is DiagnosticSeverity.INFO
-               for d in smart_remote_result.diagnostics)
+               for d in corner_board_result.diagnostics)
     assert "inline_pin_geometry_ignored" not in codes
 
 
@@ -2111,15 +2219,15 @@ def test_net_classes_must_be_a_list():
     assert "invalid_net_class" in _errors(result)
 
 
-def test_a_board_authoring_no_net_classes_is_unchanged(smart_remote_result):
+def test_a_board_authoring_no_net_classes_is_unchanged(corner_board_result):
     """THE REGRESSION FLOOR — every existing board. A board that authors no
     `net_classes` block compiles to the same empty tuple and the same all-None
     `net_class_id`s it did before the authoring surface existed, and raises no
     net-class diagnostic of any kind."""
-    assert isinstance(smart_remote_result, ResolutionSuccess)
-    assert smart_remote_result.board.design_rules.net_classes == ()
-    assert all(net.net_class_id is None for net in smart_remote_result.board.nets)
-    assert not [d for d in smart_remote_result.diagnostics if "net_class" in d.code]
+    assert isinstance(corner_board_result, ResolutionSuccess)
+    assert corner_board_result.board.design_rules.net_classes == ()
+    assert all(net.net_class_id is None for net in corner_board_result.board.nets)
+    assert not [d for d in corner_board_result.diagnostics if "net_class" in d.code]
 
 
 def test_an_explicitly_empty_net_classes_list_declares_nothing():

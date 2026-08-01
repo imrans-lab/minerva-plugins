@@ -2,13 +2,23 @@
 
 Two layers of coverage:
 
-  * REGRESSION — the real HITL board (testdata/smart_remote.yaml) must report
-    EXACTLY its known defects (2 wrong-net shorts + 7 different-net crossings)
-    and NOTHING else. Its GND net has T-junction taps and U1 (ESP32 module) has
-    several internal-net GND pins; the false-positive guards must keep the
-    dangling / layer-change checks silent on it.
+  * REGRESSION — a real board (testdata/parity_corners.yaml) must report EXACTLY
+    its known findings and NOTHING else. Until 2026-07-30 this ran over
+    ``smart_remote.yaml``, a real Turnrock product board withdrawn from the
+    corpus as an IP leak (docket 019fbe68c5f8, see testdata/POLICY.md); its
+    known defects were 2 wrong-net shorts + 7 different-net crossings.
+    ``parity_corners.yaml`` was authored for the CROSS-SURFACE geometry parity
+    gate, not for connectivity DRC, so it does not happen to reproduce that
+    defect shape — measured, it reports exactly ONE dangling endpoint (its
+    routed N_OBL trace's far end does not land on the SW9.A pad it is nominally
+    headed for) and nothing else. That is still a real, exact, regression-worthy
+    claim; it is just a smaller one than the withdrawn board made. NEVER repair
+    this module by restoring the deleted fixture from git history.
   * ISOLATION goldens — tiny hand-built boards that each trip exactly one check,
-    proving every check fires (and that the clean board stays clean).
+    proving every check fires (and that the clean board stays clean). These
+    still carry the crossing / wrong-net-pad / layer-change-no-via / dangling
+    cases the withdrawn board's regression used to exercise together; the
+    fixture change only affects what runs against the ONE real-board fixture.
 
 Handlers are exercised both directly (run_drc) and through handle_request, the
 same stdio-bypass pattern the other worker tests use.
@@ -23,7 +33,7 @@ import yaml
 from pcb_worker import drc
 from pcb_worker.methods import handle_request
 
-SMART_REMOTE = Path(__file__).resolve().parent / "testdata" / "smart_remote.yaml"
+PARITY_CORNERS = Path(__file__).resolve().parent / "testdata" / "parity_corners.yaml"
 
 
 def _run(board: dict) -> dict:
@@ -39,7 +49,7 @@ def test_drc_result_declares_connectivity_scope_not_geometric():
     only — pad centers + trace centerlines, no copper extents — so it must
     self-describe as such. A zero-finding result must never be read as a
     geometric/fab-clean verdict; these fields make that explicit."""
-    board = yaml.safe_load(SMART_REMOTE.read_text(encoding="utf-8"))
+    board = yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8"))
     r = _run(board)
     assert r["ok"] is True
     assert r["scope"] == "connectivity"
@@ -47,56 +57,54 @@ def test_drc_result_declares_connectivity_scope_not_geometric():
 
 
 # ---------------------------------------------------------------------------
-# Regression: the smart-remote HITL board — exact known defects, no noise.
+# Regression: the parity-corners real board — exact known findings, no noise.
+#
+# docket 019fbe68c5f8: this used to run over smart_remote.yaml and pin its two
+# wrong-net shorts + seven crossings. That board was withdrawn (see
+# testdata/POLICY.md); parity_corners.yaml is authored for a different purpose
+# (cross-surface geometry parity, not connectivity DRC) and its ACTUAL,
+# MEASURED connectivity story is smaller: one dangling endpoint, nothing else.
+# The isolation goldens below still independently prove every check (crossing,
+# wrong_net_pad, layer_change_no_via, dangling_endpoint) fires on a purpose-
+# built board; this test's job is only to pin the real board's exact findings
+# so a regression here is caught, whatever they happen to be.
 # ---------------------------------------------------------------------------
 
 
-def test_smart_remote_exact_findings():
-    board = yaml.safe_load(SMART_REMOTE.read_text(encoding="utf-8"))
+def test_parity_corners_exact_findings():
+    board = yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8"))
     r = _run(board)
     assert r["ok"] is True
     assert r["counts"] == {
-        "wrong_net_pad": 2,
-        "crossing": 7,
-        "dangling_endpoint": 0,
+        "wrong_net_pad": 0,
+        "crossing": 0,
+        "dangling_endpoint": 1,
         "layer_change_no_via": 0,
     }
 
-    # The two shorts: BTN4 endpoint on SW4.B(GND); GND endpoint on SW4.A(BTN4).
-    wnp = _of_type(r, "wrong_net_pad")
-    by_net = {(f["net"], tuple(f["at"])): f for f in wnp}
-    assert ("BTN4", (66.5, 104.14)) in by_net
-    assert by_net[("BTN4", (66.5, 104.14))]["pad"] == {
-        "ref": "SW4", "pin": "B", "net": "GND"}
-    assert ("GND", (60.5, 104.14)) in by_net
-    assert by_net[("GND", (60.5, 104.14))]["pad"] == {
-        "ref": "SW4", "pin": "A", "net": "BTN4"}
+    # The one dangling endpoint: the routed N_OBL trace's far end (7.0, 22.0)
+    # does not land on the SW9.A pad (10.0, 25.0) it is nominally headed for —
+    # incidental to how the fixture was authored for geometry parity, not
+    # routing precision, but a real and stable connectivity finding.
+    dangling = _of_type(r, "dangling_endpoint")
+    assert len(dangling) == 1
+    assert dangling[0]["net"] == "N_OBL"
+    assert dangling[0]["at"] == [7.0, 22.0]
 
-    # The seven net-pair crossings, all on the top layer.
-    crossings = _of_type(r, "crossing")
-    assert all(f["layer"] == "top" for f in crossings)
-    pairs = {tuple(sorted(f["nets"])) for f in crossings}
-    assert pairs == {
-        ("I2C_SCL", "I2S_DOUT"),
-        ("I2C_SDA", "I2S_DOUT"),
-        ("I2S_DOUT", "I2S_SCK"),
-        ("I2S_DOUT", "I2S_WS"),
-        ("I2S_SCK", "I2S_WS"),
-        ("I2S_SCK", "VCC_3V3"),
-        ("I2S_WS", "VCC_3V3"),
-    }
-    # Guards held: GND taps (T-junctions) + U1 internal GND pins stay quiet.
-    assert _of_type(r, "dangling_endpoint") == []
+    # No noise from the other checks.
+    assert _of_type(r, "wrong_net_pad") == []
+    assert _of_type(r, "crossing") == []
     assert _of_type(r, "layer_change_no_via") == []
 
 
-def test_smart_remote_via_worker_method():
+def test_parity_corners_via_worker_method():
     resp = handle_request({"id": "d1", "method": "drc",
-                           "params": {"yaml": SMART_REMOTE.read_text(encoding="utf-8")}})
+                           "params": {"yaml": PARITY_CORNERS.read_text(encoding="utf-8")}})
     assert resp["id"] == "d1"
     assert resp["ok"] is True
-    assert resp["result"]["counts"]["wrong_net_pad"] == 2
-    assert resp["result"]["counts"]["crossing"] == 7
+    assert resp["result"]["counts"]["wrong_net_pad"] == 0
+    assert resp["result"]["counts"]["crossing"] == 0
+    assert resp["result"]["counts"]["dangling_endpoint"] == 1
 
 
 # ---------------------------------------------------------------------------

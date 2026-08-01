@@ -171,8 +171,12 @@ def test_drill_on_smd_pad_inline_fails_not_persisted():
 
 def test_normalize_success_implies_compile_success():
     # The FIX-1 invariant, end to end: whatever normalize returns a board for, the
-    # compiler accepts (no pad-override rejection surfaces on recompile).
-    board = yaml.safe_load((TESTDATA / "smart_remote.yaml").read_text(encoding="utf-8"))
+    # compiler accepts (no pad-override rejection surfaces on recompile). Uses
+    # parity_corners.yaml — a real (non-synthetic-unit-fixture) board — because a
+    # round-trip on the full compile path is the point, not any specific board's
+    # content (docket 019fbe68c5f8; smart_remote.yaml was withdrawn, see
+    # testdata/POLICY.md).
+    board = yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
     normalized, _ = normalize_board(board)
     assert normalized is not None
     result = compile_board(normalized)
@@ -246,8 +250,12 @@ def test_normalize_is_idempotent():
     assert twice == once  # a second pass is a no-op
 
 
-def test_smart_remote_normalize_is_idempotent():
-    board = yaml.safe_load((TESTDATA / "smart_remote.yaml").read_text(encoding="utf-8"))
+def test_parity_corners_normalize_is_idempotent():
+    # A real board (docket 019fbe68c5f8: parity_corners.yaml replaces the
+    # withdrawn smart_remote.yaml, see testdata/POLICY.md), not a synthetic
+    # single-pin unit fixture — proves idempotence survives a board with several
+    # components and pin overrides, not just the minimal case above.
+    board = yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
     once, d1 = normalize_board(board)
     assert once is not None and not any(x.severity is DiagnosticSeverity.ERROR for x in d1)
     twice, _ = normalize_board(once)
@@ -302,7 +310,10 @@ def _placed_pad_geometry(result) -> dict:
 
 
 def test_recompiling_normalized_board_preserves_placed_geometry():
-    original = yaml.safe_load((TESTDATA / "smart_remote.yaml").read_text(encoding="utf-8"))
+    # docket 019fbe68c5f8: parity_corners.yaml replaces the withdrawn
+    # smart_remote.yaml (see testdata/POLICY.md) as the real, multi-component
+    # board this round-trip is proven against.
+    original = yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
     normalized, diags = normalize_board(original)
     assert normalized is not None
     assert not any(d.severity is DiagnosticSeverity.ERROR for d in diags)

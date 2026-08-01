@@ -293,7 +293,28 @@ def test_kicad_smd_pad_without_size_fails_closed():
 # hermetic — it does NOT shell out to kicad-cli.
 # ---------------------------------------------------------------------------
 
-SMART_REMOTE = HERE / "testdata" / "smart_remote.yaml"
+# docket 019fbe68c5f8: this used to load MIC1 out of testdata/smart_remote.yaml,
+# a real Turnrock product board withdrawn from the corpus as an IP leak (see
+# testdata/POLICY.md). The ground truth below is a fact about the FOOTPRINT
+# (Package_DIP:DIP-6_W7.62mm_Socket, from the real seed library, at the
+# specific position/rotation captured — see the provenance note above) — it
+# does not depend on anything else the withdrawn board contained. So rather
+# than reproduce a board-shaped fixture (shared or synthetic) this test now
+# builds a ONE-COMPONENT board LITERAL, inline, right here: same footprint
+# reference, same position, same rotation, referencing only the real seed
+# library (no board-specific content, no IP concern, no shared-fixture
+# coordination needed). compile_board resolves its pads from the library the
+# same way it would for any board that references this footprint.
+_MIC1_BOARD = {
+    "version": 1, "name": "rotated-dip6", "width_mm": 100, "height_mm": 120,
+    "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                     "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+    "components": [
+        {"ref": "MIC1", "footprint": "Package_DIP:DIP-6_W7.62mm_Socket",
+         "x_mm": 40.64, "y_mm": 106.68, "rotation_deg": 90, "layer": "top"},
+    ],
+    "nets": [],
+}
 
 # MIC1: Package_DIP:DIP-6_W7.62mm_Socket at (40.64, 106.68), rotation_deg 90, top.
 MIC1_KICAD_GROUND_TRUTH = {
@@ -309,12 +330,10 @@ MIC1_KICAD_GROUND_TRUTH = {
 def test_rotated_dip6_pads_match_kicad_placement_by_pad_number():
     """Every pad of a 90deg-rotated ASYMMETRIC DIP must land on KiCad's own
     absolute position for that SPECIFIC pad number (docket 019f3ba0f455)."""
-    import yaml
-
     from pcb_worker.compile_board import compile_board
     from pcb_worker.resolved_board import ResolutionSuccess
 
-    result = compile_board(yaml.safe_load(SMART_REMOTE.read_text(encoding="utf-8")))
+    result = compile_board(_MIC1_BOARD)
     assert isinstance(result, ResolutionSuccess), \
         [d.message for d in result.diagnostics if d.severity.value == "error"][:5]
 

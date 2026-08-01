@@ -1,0 +1,278 @@
+# RESOLVE-STAGE FIXTURE — synthetic board built from REAL public-origin library
+# footprints (docket 019fbe68c5f8, see testdata/POLICY.md).
+#
+# HISTORY. Until 2026-07-30 the footprint-resolve suites below pointed at
+# ``testdata/footprints/smart-remote-orig.yaml``, a REAL Turnrock product board.
+# It was deleted from the corpus because a real design (netlist + placement) is
+# an IP leak the moment it is pushed to this public repo, and history keeps it
+# forever — POLICY.md is explicit that git history must never be mined to bring
+# it back. This file REPLACES it, not by trying to reproduce the product, but by
+# placing the SAME real, public-origin KiCad library parts (the ones already
+# vendored under ``pcb/library/footprints/`` and locked in the footprint
+# lockfile) at entirely new, synthetic reference designators, positions and
+# nets. Per POLICY.md: "Library footprints of public origin ... are fine; a
+# board built from them is not [when it reproduces the product's] netlist +
+# placement" — this board's netlist and placement are authored fresh for this
+# fixture and correspond to no shipped product.
+#
+# WHY THESE FIVE PARTS. Each ref below exists to give the resolve-stage suites
+# (test_resolve.py, test_step3_resolve_fab.py, test_footprints.py,
+# test_gerbers.py) a genuine real-footprint case for the geometry class its
+# name in those files implies — nothing here is a stand-in or placeholder pad:
+#
+#   U1   Espressif:ESP32-S3-DevKitC        44-pin thru-hole module. The large,
+#        irregular (non-uniform) real pad set test_resolve_pad_shape_and_size_
+#        fidelity wants, the ALL-thru-hole component test_resolve_tht_vs_smd_
+#        drill wants, and the rich (7-line) F.SilkS body outline test_resolve_
+#        esp32_gets_body_outline_silk / test_esp32_has_rich_silkscreen_body_
+#        outline want. Pin "1" sits at the footprint's own pad-1 local origin
+#        (0, 0), so test_resolve_fails_when_pin_desyncs_from_pad's 1mm nudge
+#        starts from genuine coincidence, not an authored fudge.
+#
+#   MIC1 Package_DIP:DIP-6_W7.62mm_Socket  6-pin thru-hole DIP socket. Supplies
+#        the second pad-count case test_resolve_pad_counts_match_footprints
+#        checks (6, not 44), and its real F.SilkS carries the ONE true ARC
+#        (the pin-1 corner notch) that test_gerbers.py's
+#        test_silk_real_graphics_replaces_placeholder_box asserts as a genuine
+#        G02/G03 draw op, not a polyline approximation of one.
+#
+#   SW1  EVP-ASAC1A:SW_EVP-ASAC1A          2-pad SMD tactile switch, real lands
+#        2.0 x 2.0mm. Supplies the SMD-vs-thru-hole contrast test_resolve_tht_
+#        vs_smd_drill wants (every SW1 pad drill-less) and is the fixed
+#        REAL_SW_WH geometry test_step3_resolve_fab.py's fail-closed /
+#        resolved-real-geometry pair of tests measure against (any ref
+#        starting "SW" is stripped of its inline pad_width_mm/pad_height_mm by
+#        that file's _board_no_smd_geometry() helper, so only SW1 need exist).
+#
+#   J1   Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical
+#        4-pin header, real 1.7mm round-ish thru-hole lands (1.0mm drill).
+#
+#   J2   Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal
+#        2-pin JST connector, whose real silkscreen alone (25 F.SilkS lines) is
+#        most of the draw-op headroom test_silk_real_graphics_replaces_
+#        placeholder_box needs over the retired 4-lines-per-component
+#        placeholder box.
+#
+# J1 and J2 are not individually named by any assertion; they exist so the
+# board is FIVE real components rather than the bare minimum three, which is
+# what actually proves the "many components with real graphics" claim in
+# test_silk_real_graphics_replaces_placeholder_box (a 3-component board clears
+# the raw draw-op floor too, but with much less margin, and a 2-component
+# board would not read as "many").
+#
+# COINCIDENCE. Every pin declared below was measured off the REAL vendored
+# footprint via ``resolve_footprint(ref)`` (pcb_worker.footprints) rather than
+# guessed — see the recipe in this repo's repair notes for
+# test_ir_parity.py / parity_corners.yaml. Not every real pad is declared as a
+# pin (nobody needs U1's other 40); resolve_board() always attaches the FULL
+# real pad set from the footprint regardless of how many pins the board
+# declares, and the coincidence guard only checks the pins that ARE declared
+# — same convention parity_corners.yaml already uses for J1/SW9 there.
+#
+# The four mounting holes (mechanical, unplated, 3.2mm) exist only for
+# test_step3_resolve_fab.py's test_generate_emits_mounting_holes_and_ignores_
+# gate, which counts NPTH pads in the generated .kicad_pcb.
+#
+# Deliberately un-fancy: nets/traces below are illustrative synthetic wiring
+# (power/ground/switch/mic conceptually connected) — not a claim about how any
+# real remote is built, and no routing DRC is asserted against them by the
+# suites this file serves.
+version: 1
+name: resolve-corners
+width_mm: 70
+height_mm: 80
+layers:
+- top
+- bottom
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.3
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+components:
+
+# The MCU module. All-thru-hole, 44 real pads, rich real silkscreen outline.
+- ref: U1
+  footprint: Espressif:ESP32-S3-DevKitC
+  value: ESP32_MCU
+  x_mm: 15.0
+  y_mm: 5.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - number: '1'
+    name: IO0
+    x_mm: 0.0
+    y_mm: 0.0
+  - number: '2'
+    name: IO1
+    x_mm: 0.0
+    y_mm: 2.54
+  - number: '23'
+    name: IO22
+    x_mm: 22.86
+    y_mm: 53.34
+  - number: '44'
+    name: IO43
+    x_mm: 22.86
+    y_mm: 0.0
+
+# The DIP-socketed mic. 6 real thru-hole pads; real silk carries the one true
+# arc (pin-1 notch) this corpus needs for the silk-arc assertion.
+- ref: MIC1
+  footprint: Package_DIP:DIP-6_W7.62mm_Socket
+  value: MIC_DIP6
+  x_mm: 45.0
+  y_mm: 10.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - number: '1'
+    name: MIC_1
+    x_mm: 0.0
+    y_mm: 0.0
+  - number: '2'
+    name: MIC_2
+    x_mm: 0.0
+    y_mm: 2.54
+  - number: '3'
+    name: MIC_3
+    x_mm: 0.0
+    y_mm: 5.08
+  - number: '4'
+    name: MIC_4
+    x_mm: 7.62
+    y_mm: 5.08
+  - number: '5'
+    name: MIC_5
+    x_mm: 7.62
+    y_mm: 2.54
+  - number: '6'
+    name: MIC_6
+    x_mm: 7.62
+    y_mm: 0.0
+
+# The tactile switch. SMD, real 2.0x2.0mm lands, both drill-less.
+- ref: SW1
+  footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+  value: TACT_SWITCH
+  x_mm: 45.0
+  y_mm: 25.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - number: A
+    name: SW_A
+    x_mm: -3.0
+    y_mm: 0.0
+  - number: B
+    name: SW_B
+    x_mm: 3.0
+    y_mm: 0.0
+
+# A 4-pin header. Real round thru-hole lands.
+- ref: J1
+  footprint: Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical
+  value: HEADER_4POS
+  x_mm: 45.0
+  y_mm: 35.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - number: '1'
+    name: HDR_1
+    x_mm: 0.0
+    y_mm: 0.0
+  - number: '2'
+    name: HDR_2
+    x_mm: 0.0
+    y_mm: 2.54
+  - number: '3'
+    name: HDR_3
+    x_mm: 0.0
+    y_mm: 5.08
+  - number: '4'
+    name: HDR_4
+    x_mm: 0.0
+    y_mm: 7.62
+
+# A 2-pin power connector. Its real silkscreen alone supplies most of the
+# draw-op margin the silk-graphics suite needs over the retired placeholder.
+- ref: J2
+  footprint: Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal
+  value: JST_PWR
+  x_mm: 45.0
+  y_mm: 50.0
+  rotation_deg: 0
+  layer: top
+  pins:
+  - number: '1'
+    name: VBAT
+    x_mm: 0.0
+    y_mm: 0.0
+  - number: '2'
+    name: GND
+    x_mm: 2.0
+    y_mm: 0.0
+
+nets:
+- name: N_PWR
+  pins:
+  - J2.1
+  - U1.1
+- name: N_GND
+  pins:
+  - J2.2
+  - MIC1.1
+  - J1.1
+- name: N_SW
+  pins:
+  - SW1.A
+  - U1.2
+- name: N_MIC
+  pins:
+  - MIC1.4
+  - U1.44
+- name: N_HDR
+  pins:
+  - J1.4
+  - SW1.B
+
+traces:
+- net: N_PWR
+  layer: top
+  width_mm: 0.3
+  points:
+  - x_mm: 45.0
+    y_mm: 50.0
+  - x_mm: 15.0
+    y_mm: 5.0
+- net: N_SW
+  layer: top
+  width_mm: 0.3
+  points:
+  - x_mm: 42.0
+    y_mm: 25.0
+  - x_mm: 15.0
+    y_mm: 7.54
+
+# Four unplated mechanical mounting holes at the board corners — the fixture
+# test_generate_emits_mounting_holes_and_ignores_gate needs to count NPTH pads
+# in the generated .kicad_pcb.
+mounting_holes:
+- x_mm: 5.0
+  y_mm: 5.0
+  diameter_mm: 3.2
+  plated: false
+- x_mm: 65.0
+  y_mm: 5.0
+  diameter_mm: 3.2
+  plated: false
+- x_mm: 5.0
+  y_mm: 75.0
+  diameter_mm: 3.2
+  plated: false
+- x_mm: 65.0
+  y_mm: 75.0
+  diameter_mm: 3.2
+  plated: false

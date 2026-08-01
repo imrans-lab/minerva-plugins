@@ -24,11 +24,42 @@ perturbations are applied to the TABULATED ROWS, never by monkeypatching an
 emitter — so a teeth test can never accidentally leave a worker module modified,
 and the thing being proven is that the DIFF reports a break, which is exactly the
 harness's job.
+
+FIXTURES — SYNTHETIC ONLY (docket 019fbe68c5f8, testdata/POLICY.md)
+------------------------------------------------------------------
+This suite's primary case used to be ``testdata/smart_remote.yaml``, a REAL
+Turnrock product board. It was deleted from the corpus on 2026-07-30 because a
+real design in a public repo is an IP leak, and this module kept a hard reference
+to it — which is why four pcb jobs were red for two days.
+
+The primary case is now ``testdata/parity_corners.yaml``, the purpose-built corner
+fixture, joined by the independent synthetic ``pcb/spikes/gerber/board.yaml`` so
+the gate is still proven over MORE THAN ONE board (a gate tuned to one fixture
+certifies nothing about the next one).
+
+Repointing a gate at a smaller fixture is how a gate silently narrows, so the
+narrowing is measured rather than assumed:
+
+  * ``test_the_synthetic_primary_reaches_every_geometry_class_the_gate_needs``
+    is an explicit COVERAGE FLOOR — every geometry class the removed board
+    contributed (through-hole and SMD lands, both board sides, plated and
+    unplated board holes, vias, multi-layer traces, multi-net ownership,
+    non-square lands, half- and quarter-turn placements) must be reachable on the
+    synthetic primary, or this suite fails and says which class went missing.
+  * ``test_the_excellon_micron_grid_rounding_class_is_still_exercised`` keeps the
+    ONE class the removed board carried that no static synthetic fixture can:
+    drill coordinates off the Excellon 1-micron grid. It was previously a
+    SUPPRESSION (``SMART_REMOTE_BASELINE``); it is now a POSITIVE assertion built
+    from a synthetic board, which is strictly stronger — the behaviour has to be
+    present and correctly attributed, not merely tolerated.
+
+NEVER repair this module by restoring the deleted fixture from git history.
 """
 
 from __future__ import annotations
 
 import ast
+import copy
 from dataclasses import replace
 from pathlib import Path
 
@@ -40,7 +71,6 @@ from pcb_worker.compile_board import compile_board
 from pcb_worker.ir_parity import (
     NA,
     PARITY_CORNERS_BASELINE,
-    SMART_REMOTE_BASELINE,
     Delta,
     KnownDelta,
     ParityRow,
@@ -55,8 +85,15 @@ from pcb_worker.ir_parity import (
 from pcb_worker.resolved_board import ResolutionSuccess
 
 HERE = Path(__file__).resolve().parent
-SMART_REMOTE = HERE / "testdata" / "smart_remote.yaml"
+#: The PRIMARY case. Synthetic, purpose-built, and the only fixture the teeth
+#: tests tabulate — see the module docstring on why it replaced a product board.
 PARITY_CORNERS = HERE / "testdata" / "parity_corners.yaml"
+#: A SECOND, independently authored synthetic board (blessed by
+#: testdata/POLICY.md). It exists to keep the gate's claim plural: a harness run
+#: over exactly one fixture proves only that the fixture agrees with itself. It
+#: lives outside tests/, so a run from a packaged tree may not have it — that is
+#: a skip, never a silent pass, because its case is a bonus rather than the floor.
+GERBER_SPIKE = HERE.parent.parent / "spikes" / "gerber" / "board.yaml"
 
 gerbonara = pytest.importorskip(
     "gerbonara",
@@ -74,17 +111,24 @@ def _board(path: Path):
 
 
 @pytest.fixture(scope="module")
-def smart_remote_tables():
+def corner_tables():
     """Tabulated once per module: the four surfaces each emit a full fabrication
     set, which is the slowest thing here. Safe to share because every table is
     frozen (``ParityRow``/``SurfaceTable`` are frozen dataclasses holding tuples)
     and every perturbation below builds a NEW table rather than mutating one."""
-    return tabulate_all(_board(SMART_REMOTE))
+    return tabulate_all(_board(PARITY_CORNERS))
 
+
+_needs_spike = pytest.mark.skipif(
+    not GERBER_SPIKE.exists(),
+    reason="pcb/spikes/gerber/board.yaml is outside tests/ and absent from this "
+           "tree; the primary synthetic case still runs")
 
 CASES = (
-    pytest.param(SMART_REMOTE, SMART_REMOTE_BASELINE, id="smart_remote"),
     pytest.param(PARITY_CORNERS, PARITY_CORNERS_BASELINE, id="parity_corners"),
+    # An EMPTY baseline is the assertion, not an omission: this board's four
+    # surfaces agree on every row with nothing enumerated away.
+    pytest.param(GERBER_SPIKE, (), id="gerber_spike", marks=_needs_spike),
 )
 
 
@@ -101,7 +145,8 @@ def test_surfaces_agree_within_the_enumerated_baseline(path, baseline):
     assert report.ok, "\n" + format_report(report)
 
 
-@pytest.mark.parametrize("path", [SMART_REMOTE, PARITY_CORNERS])
+@pytest.mark.parametrize("path", [
+    PARITY_CORNERS, pytest.param(GERBER_SPIKE, marks=_needs_spike)])
 def test_every_surface_actually_produced_rows(path):
     """A harness that silently tabulated NOTHING would pass the gate above.
 
@@ -115,6 +160,199 @@ def test_every_surface_actually_produced_rows(path):
         missing = table.families - families
         assert not missing, f"surface {name!r} claims {missing} but emitted no such rows"
         assert len(table.rows) > 10, f"surface {name!r} produced only {len(table.rows)} rows"
+
+
+#: The geometry classes the cross-surface gate exists to compare. Each is a place
+#: where two surfaces can legitimately disagree, so a fixture that cannot reach a
+#: class leaves that disagreement unwatched. Named individually so a failure says
+#: WHICH class went missing rather than "coverage dropped".
+#:
+#: Every entry maps a class name to a predicate over the tabulated IR table and
+#: the compiled board — the two things the gate actually reads. Deriving them from
+#: the FIXTURE TEXT instead would prove only that the YAML still contains some
+#: words; deriving them from the tabulation proves the class survives compilation
+#: and reaches the diff.
+def _reached_classes(board, ir_table) -> set[str]:
+    flashes = list(ir_table.by_family("copper_flash").values())
+    drills = list(ir_table.by_family("drill").values())
+    traces = ir_table.by_family("copper_trace")
+    nets = ir_table.by_family("net_ownership")
+
+    def entities(kind):
+        return [d for d in drills if d.field_map().get("entity") == kind]
+
+    reached = set()
+    th_keys = {(round(d.field_map()["x_mm"], 2), round(d.field_map()["y_mm"], 2))
+               for d in entities("pad")}
+    flash_layers_at = {}
+    for row in flashes:
+        layer, x, y = row.key
+        flash_layers_at.setdefault((round(x, 2), round(y, 2)), set()).add(layer)
+
+    if any(len(flash_layers_at.get(k, ())) >= 2 for k in th_keys):
+        reached.add("through_hole_land_on_every_copper_layer")
+    if any(k not in th_keys and len(v) == 1 for k, v in flash_layers_at.items()):
+        reached.add("smd_land_on_one_side_only")
+    if {row.key[0] for row in flashes} >= {"F.Cu", "B.Cu"}:
+        reached.add("copper_on_both_board_sides")
+    if any(d.field_map().get("plated") for d in entities("board_hole")):
+        reached.add("plated_board_hole")
+    if any(not d.field_map().get("plated") for d in entities("board_hole")):
+        reached.add("unplated_board_hole")
+    if entities("via"):
+        reached.add("via")
+    if len({row.key[0] for row in traces.values()}) >= 2:
+        reached.add("traces_on_more_than_one_layer")
+    if len({row.field_map().get("net_name") for row in nets.values()
+            if row.field_map().get("net_name")}) >= 2:
+        reached.add("more_than_one_owning_net")
+    if any(abs(row.field_map().get("w_mm", 0.0)
+               - row.field_map().get("h_mm", 0.0)) > 1e-6 for row in flashes):
+        reached.add("non_square_land")
+
+    sides = {c.placement.side for c in board.components}
+    turns = {round(c.placement.rotation_deg % 360.0, 3) for c in board.components}
+    if len(sides) >= 2:
+        reached.add("components_placed_on_both_sides")
+    if turns & {90.0, 270.0}:
+        reached.add("quarter_turn_placement")
+    if 180.0 in turns:
+        reached.add("half_turn_placement")
+    return reached
+
+
+GEOMETRY_CLASS_FLOOR = frozenset({
+    "through_hole_land_on_every_copper_layer",
+    "smd_land_on_one_side_only",
+    "copper_on_both_board_sides",
+    "plated_board_hole",
+    "unplated_board_hole",
+    "via",
+    "traces_on_more_than_one_layer",
+    "more_than_one_owning_net",
+    "non_square_land",
+    "components_placed_on_both_sides",
+    "quarter_turn_placement",
+    "half_turn_placement",
+})
+
+
+def test_the_synthetic_primary_reaches_every_geometry_class_the_gate_needs():
+    """THE ANTI-NARROWING FLOOR (docket 019fbe68c5f8).
+
+    Repointing a gate at a different fixture is the cheapest way to gut it: the
+    suite stays green, the assertions all still run, and the geometry they were
+    watching quietly stops existing. When the product board was withdrawn from
+    this corpus, nothing in the tree could have told you which classes went with
+    it.
+
+    So the classes are ENUMERATED and asserted, not assumed. A future edit that
+    trims parity_corners.yaml — or a compile change that stops emitting a class —
+    fails here and names the class, instead of silently shrinking what four CI
+    jobs are certifying.
+
+    This is a floor, not a ceiling: extending the fixture is always fine, and the
+    set is expected to GROW as the gate learns to compare more (zones, for
+    instance, are not a parity family at all today — ir_parity.FAMILIES has no
+    entry for them — so a zone-bearing fixture would prove nothing here yet).
+    """
+    board = _board(PARITY_CORNERS)
+    reached = _reached_classes(board, tabulate_all(board)["ir"])
+    missing = GEOMETRY_CLASS_FLOOR - reached
+    assert not missing, (
+        "the primary parity fixture no longer reaches: " + ", ".join(sorted(missing))
+        + " — extend testdata/parity_corners.yaml (see its own header) rather than "
+          "lowering this floor, and NEVER by importing a product board")
+
+
+def test_the_geometry_class_floor_is_not_vacuous():
+    """The floor above is only worth its line count if a missing class is
+    DETECTED. A predicate that answers "reached" for everything would pass the
+    floor on an empty board and certify nothing.
+
+    Proven against the second synthetic case, which is deliberately simpler: it
+    must reach FEWER classes than the primary. If the two ever report the same
+    set, either the predicates stopped discriminating or the fixtures converged —
+    both of which make the floor above meaningless.
+    """
+    corners = _reached_classes(_board(PARITY_CORNERS),
+                              tabulate_all(_board(PARITY_CORNERS))["ir"])
+    spike_board = _board(GERBER_SPIKE) if GERBER_SPIKE.exists() else None
+    if spike_board is not None:
+        spike = _reached_classes(spike_board, tabulate_all(spike_board)["ir"])
+        assert spike < corners, (
+            "the simpler synthetic board reaches the same classes as the corner "
+            f"fixture ({sorted(spike)}) — the predicates are not discriminating")
+    # ... and the predicates must report NOTHING for a board with no geometry,
+    # which is the degenerate case a permissive predicate set would pass.
+    empty = SurfaceTable(surface="ir", families=frozenset(ir_parity.FAMILIES),
+                         rows=())
+
+    class _NoComponents:
+        components = ()
+
+    assert _reached_classes(_NoComponents(), empty) == set()
+
+
+def test_the_excellon_micron_grid_rounding_class_is_still_exercised():
+    """THE ONE CLASS THE WITHDRAWN FIXTURE CARRIED THAT A STATIC SYNTHETIC CANNOT.
+
+    The Excellon writer emits metric 3.3 decimal — a 1-micron grid
+    (gerber.py:_excellon, ";FORMAT={3:3/ absolute / metric / decimal}"). A pad
+    whose absolute coordinate falls BETWEEN grid steps is therefore reported by
+    the drill file at a rounded position while every other surface reports it
+    exactly. The product fixture happened to author three pads at x_mm -0.00368
+    and hit this; parity_corners authors everything on clean coordinates and never
+    will, because a fixture that hit it would need a permanent baseline entry
+    suppressing its own deltas.
+
+    So the class moves from SUPPRESSION to ASSERTION. The board is derived here,
+    in the test, by nudging one synthetic component off the micron grid — and the
+    gate must then report the rounding, ONLY on gerber, ONLY on drill x, and
+    within one micron. Strictly stronger than the old ``SMART_REMOTE_BASELINE``:
+    that entry tolerated the deltas, this demands them.
+
+    FAILURE MEANINGS. No deltas: the drill surface stopped reading live
+    coordinates, or the Excellon format silently gained precision. Deltas larger
+    than a micron, or on another surface: the rounding is no longer just the
+    format's own quantum, and somebody must look.
+    """
+    grid_mm = 1e-3
+    off_grid = 0.00368          # the displacement the withdrawn fixture happened to have
+    assert 0 < off_grid % grid_mm < grid_mm, "the nudge must land BETWEEN grid steps"
+
+    authored = yaml.safe_load(PARITY_CORNERS.read_text(encoding="utf-8"))
+    board_yaml = copy.deepcopy(authored)
+    nudged = 0
+    for component in board_yaml["components"]:
+        if component["ref"] == "U2":
+            component["x_mm"] = component["x_mm"] + off_grid
+            nudged += 1
+    assert nudged == 1, "fixture changed: expected exactly one U2 to nudge"
+
+    result = compile_board(board_yaml)
+    assert isinstance(result, ResolutionSuccess)
+
+    # Baseline the SYNTHETIC board's own known delta away, so what is left is
+    # attributable to the nudge alone.
+    report = check_parity(result.board, PARITY_CORNERS_BASELINE)
+    rounding = [d for d in report.unexplained if d.family == "drill"]
+    assert rounding, (
+        "a component placed off the Excellon 1-micron grid produced NO drill "
+        "delta — either the drill surface is not reading live coordinates, or the "
+        "Excellon coordinate format changed. Both need a human.")
+    assert {d.surface for d in rounding} == {"gerber"}, (
+        "only the Excellon writer quantises; another surface rounding drill "
+        f"coordinates is a defect: {sorted({d.surface for d in rounding})}")
+    assert {d.field for d in rounding} == {"x_mm"}, (
+        "the nudge was on x alone, so a y delta means the surfaces disagree about "
+        "something other than the grid")
+    for delta in rounding:
+        assert delta.kind == "field", "a sub-micron shift must still JOIN the rows"
+        assert abs(delta.surface_value - delta.reference_value) <= grid_mm, (
+            f"{delta.render()} is larger than the 1-micron Excellon quantum — that "
+            f"is not rounding, that is a real disagreement")
+    assert "[gerber]" in format_report(report)
 
 
 def test_tabulation_is_deterministic():
@@ -236,7 +474,7 @@ def _set_field(name: str, value):
 
 
 @pytest.mark.parametrize("surface", ["gerber", "kicad", "drc"])
-def test_a_moved_pad_on_any_one_surface_fails_and_names_it(smart_remote_tables,
+def test_a_moved_pad_on_any_one_surface_fails_and_names_it(corner_tables,
                                                            surface):
     """THE ACCEPTANCE CRITERION. Move one copper land on ONE surface by 0.5 mm;
     the gate must fail and the message must name that surface.
@@ -244,8 +482,8 @@ def test_a_moved_pad_on_any_one_surface_fails_and_names_it(smart_remote_tables,
     Run for THREE surfaces, because a harness that only catches the surface its
     author was thinking about is worse than none — it certifies the other two.
     """
-    tables = _perturb(smart_remote_tables, surface, "copper_flash", _move)
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    tables = _perturb(corner_tables, surface, "copper_flash", _move)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
     assert not report.ok
     message = format_report(report)
     offenders = {d.surface for d in report.unexplained}
@@ -268,7 +506,7 @@ def test_a_moved_pad_on_any_one_surface_fails_and_names_it(smart_remote_tables,
     ("gerber", "drill", "plated", False),
 ])
 def test_a_wrong_field_on_one_surface_fails_and_names_the_field(
-        smart_remote_tables, surface, family, field, value):
+        corner_tables, surface, family, field, value):
     """Corrupt ONE field on ONE surface; the failure must name the SURFACE, the
     ENTITY and the FIELD, and print both values.
 
@@ -276,9 +514,9 @@ def test_a_wrong_field_on_one_surface_fails_and_names_the_field(
     (size, shape, rotation, width, diameter) and non-geometry (net ownership,
     plating) so the gate is proven to be watching all of it, not just centres.
     """
-    tables = _perturb(smart_remote_tables, surface, family,
+    tables = _perturb(corner_tables, surface, family,
                       _set_field(field, value), field=field)
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
     assert not report.ok, f"corrupting {surface}.{family}.{field} was not detected"
 
     named = [d for d in report.unexplained
@@ -298,7 +536,7 @@ def test_a_wrong_field_on_one_surface_fails_and_names_the_field(
     assert delta.entity in message
 
 
-def test_a_dropped_row_on_one_surface_fails(smart_remote_tables):
+def test_a_dropped_row_on_one_surface_fails(corner_tables):
     """A surface that silently LOSES copper must fail — the fabrication defect
     that matters most, and the one a field-by-field diff would miss if it only
     compared rows both sides happen to have.
@@ -309,13 +547,13 @@ def test_a_dropped_row_on_one_surface_fails(smart_remote_tables):
     class, so it must land in `unexplained` — which is the channel that says
     "nobody has an explanation for this".
     """
-    table = smart_remote_tables["gerber"]
+    table = corner_tables["gerber"]
     victim = next(r for r in table.rows if r.family == "copper_flash")
     kept = tuple(r for r in table.rows if r is not victim)
-    tables = dict(smart_remote_tables)
+    tables = dict(corner_tables)
     tables["gerber"] = replace(table, rows=kept)
 
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
     assert not report.ok
     missing = [d for d in report.unexplained if d.kind == "missing_row"]
     assert len(missing) == 1
@@ -333,8 +571,10 @@ def test_a_real_emitter_perturbation_is_caught_end_to_end(monkeypatch):
     transposes every aperture inside ``gerber._shape_aperture`` and goes through
     the whole path: emit -> gerbonara parse -> tabulate -> diff.
 
-    Uses parity_corners, not smart_remote: every land in smart_remote is square,
-    so transposing w/h there is a no-op and the test would silently prove nothing.
+    Needs a NON-SQUARE land to mean anything: transposing w/h on a square is a
+    no-op and the test would silently prove nothing. parity_corners carries
+    oblong lands deliberately (its GAP 2 / SMD_OBLONG components) — which is one
+    of the classes the coverage-floor test below pins so this stays true.
     """
     from pcb_worker import gerber
 
@@ -376,7 +616,7 @@ def test_a_real_kicad_position_perturbation_is_caught_end_to_end(monkeypatch):
     assert "[kicad]" in format_report(report)
 
 
-def test_a_sub_bucket_displacement_is_reported_as_a_position_field(smart_remote_tables):
+def test_a_sub_bucket_displacement_is_reported_as_a_position_field(corner_tables):
     """A displacement SMALLER than the key quantum must still be caught — as a
     legible ``x_mm`` field delta, with the rows still joined.
 
@@ -393,16 +633,16 @@ def test_a_sub_bucket_displacement_is_reported_as_a_position_field(smart_remote_
         fields["x_mm"] = fields["x_mm"] + nudge
         return replace(row, fields=tuple(sorted(fields.items())))
 
-    tables = _perturb(smart_remote_tables, "kicad", "copper_flash", shift,
+    tables = _perturb(corner_tables, "kicad", "copper_flash", shift,
                       field="x_mm")
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
     assert not report.ok
     named = [d for d in report.unexplained if d.field == "x_mm"]
     assert len(named) == 1 and named[0].surface == "kicad"
     assert named[0].kind == "field", "a sub-bucket shift must still JOIN the rows"
 
 
-def test_not_applicable_never_reads_as_a_disagreement(smart_remote_tables):
+def test_not_applicable_never_reads_as_a_disagreement(corner_tables):
     """A surface reporting NA for a field it cannot express must not fail the gate
     — and must not be able to hide a real value behind NA either.
 
@@ -410,13 +650,13 @@ def test_not_applicable_never_reads_as_a_disagreement(smart_remote_tables):
     can be gated at all; the second is why NA is a distinct sentinel rather than
     ``None``, which is a REAL value in this domain.
     """
-    tables = _perturb(smart_remote_tables, "kicad", "copper_flash",
+    tables = _perturb(corner_tables, "kicad", "copper_flash",
                       _set_field("net_name", NA))
-    assert check_parity(None, SMART_REMOTE_BASELINE, tables=tables).ok
+    assert check_parity(None, PARITY_CORNERS_BASELINE, tables=tables).ok
 
     # ... whereas None is a claim ("this pad has no net"), and contradicting the
     # IR with it is a failure.
-    ir_rows = smart_remote_tables["ir"].by_family("net_ownership")
+    ir_rows = corner_tables["ir"].by_family("net_ownership")
     keyed = next(k for k, r in ir_rows.items() if r.field_map()["net_name"])
     table = tables["kicad"]
     rows = [_set_field("net_name", None)(r) if (r.family == "net_ownership"
@@ -424,19 +664,19 @@ def test_not_applicable_never_reads_as_a_disagreement(smart_remote_tables):
             for r in table.rows]
     tables = dict(tables)
     tables["kicad"] = replace(table, rows=tuple(rows))
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
     assert not report.ok
     assert any(d.field == "net_name" and d.surface_value is None
                for d in report.unexplained)
 
 
-def test_a_family_a_surface_cannot_express_is_skipped_not_failed(smart_remote_tables):
+def test_a_family_a_surface_cannot_express_is_skipped_not_failed(corner_tables):
     """gerber carries no nets AT ALL. That must read as non-participation, never
-    as "gerber lost 76 net assignments"."""
-    gerber = smart_remote_tables["gerber"]
+    as "gerber lost every net assignment on the board"."""
+    gerber = corner_tables["gerber"]
     assert "net_ownership" not in gerber.families
     assert not [r for r in gerber.rows if r.family == "net_ownership"]
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=smart_remote_tables)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=corner_tables)
     assert ("gerber", "net_ownership") in report.skipped
     assert not [d for d in report.deltas
                 if d.surface == "gerber" and d.family == "net_ownership"]
@@ -447,27 +687,27 @@ def test_a_family_a_surface_cannot_express_is_skipped_not_failed(smart_remote_ta
 # ---------------------------------------------------------------------------
 
 
-def test_a_listed_delta_does_not_fail(smart_remote_tables):
+def test_a_listed_delta_does_not_fail(corner_tables):
     """The known Excellon-rounding deltas ARE present, and the baseline explains
     them. Asserted positively so a future run that no longer produces them fails
     loudly (via the staleness check below) rather than quietly passing."""
-    report = check_parity(None, (), tables=smart_remote_tables)
+    report = check_parity(None, (), tables=corner_tables)
     assert report.deltas, "expected the known baseline deltas to exist"
-    assert not check_parity(None, SMART_REMOTE_BASELINE,
-                            tables=smart_remote_tables).unexplained
+    assert not check_parity(None, PARITY_CORNERS_BASELINE,
+                            tables=corner_tables).unexplained
 
 
-def test_a_new_delta_of_an_unlisted_class_fails(smart_remote_tables):
+def test_a_new_delta_of_an_unlisted_class_fails(corner_tables):
     """An unexplained delta in a class NO baseline entry covers must fail."""
-    tables = _perturb(smart_remote_tables, "kicad", "copper_flash",
+    tables = _perturb(corner_tables, "kicad", "copper_flash",
                       _set_field("h_mm", 12.5))
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
     assert not report.ok
     assert [d for d in report.unexplained
             if d.surface == "kicad" and d.field == "h_mm"]
 
 
-def test_a_displaced_baselined_row_is_not_swallowed(smart_remote_tables):
+def test_a_displaced_baselined_row_is_not_swallowed(corner_tables):
     """REGRESSION (review finding). A baselined row that MOVES must fail.
 
     The hole this reproduces: when a KnownDelta matched on
@@ -478,25 +718,35 @@ def test_a_displaced_baselined_row_is_not_swallowed(smart_remote_tables):
 
     KnownDelta now pins the exact ROW KEYS, so the moved row is unexplained and
     the entry that lost it is stale.
+
+    The victim is read OUT OF THE BASELINE rather than hard-coded, so this test
+    keeps testing the property when the baseline shrinks (it is meant to) or when
+    the fixture under it changes — the previous hard-coded gerber-drill key is
+    exactly what made this test unrunnable when its fixture was withdrawn.
     """
-    table = smart_remote_tables["gerber"]
-    victim_key = (60.96, 12.7)          # one of the three baselined Excellon rows
-    moved_key = (5.0, 90.0)             # the reviewer's 80 mm displacement
+    entry = PARITY_CORNERS_BASELINE[0]
+    table = corner_tables[entry.surface]
+    victim_key = entry.keys[0]
+    # An 80 mm displacement, expressed in the victim's own key shape (copper keys
+    # carry a leading layer name; drill keys do not).
+    moved_key = victim_key[:-2] + (5.0, 90.0)
     rows = []
     displaced = 0
     for row in table.rows:
-        if row.family == "drill" and row.key == victim_key:
+        if row.family == entry.family and row.key == victim_key:
             fields = dict(row.fields)
-            fields["x_mm"], fields["y_mm"] = moved_key
+            fields["x_mm"], fields["y_mm"] = moved_key[-2:]
             rows.append(replace(row, key=moved_key, fields=tuple(sorted(fields.items()))))
             displaced += 1
         else:
             rows.append(row)
-    assert displaced == 1, "fixture changed: expected exactly one baselined row here"
+    assert displaced == 1, (
+        f"fixture changed: {entry.surface}/{entry.family} has no row at the "
+        f"baselined key {victim_key} — the baseline names a row nobody emits")
 
-    tables = dict(smart_remote_tables)
-    tables["gerber"] = replace(table, rows=tuple(rows))
-    report = check_parity(None, SMART_REMOTE_BASELINE, tables=tables)
+    tables = dict(corner_tables)
+    tables[entry.surface] = replace(table, rows=tuple(rows))
+    report = check_parity(None, PARITY_CORNERS_BASELINE, tables=tables)
 
     assert not report.ok, (
         "an 80 mm displacement of a BASELINED row passed the gate — the baseline "
@@ -519,7 +769,7 @@ def test_a_baseline_entry_only_explains_the_rows_it_names():
     assert not entry.matches(displaced)
 
 
-def test_a_fixed_delta_forces_the_baseline_to_shrink(smart_remote_tables):
+def test_a_fixed_delta_forces_the_baseline_to_shrink(corner_tables):
     """A baseline entry naming a row that no longer disagrees must FAIL, not
     silently pass. Otherwise the list rots into a record of things that used to be
     true and "the baseline is empty" stops meaning anything.
@@ -527,10 +777,10 @@ def test_a_fixed_delta_forces_the_baseline_to_shrink(smart_remote_tables):
     Simulated by declaring a row that does not disagree; the real trigger is a fix
     landing in a worker module.
     """
-    inflated = (replace(SMART_REMOTE_BASELINE[0],
-                        keys=SMART_REMOTE_BASELINE[0].keys + ((1.0, 1.0),)),
-                ) + SMART_REMOTE_BASELINE[1:]
-    report = check_parity(None, inflated, tables=smart_remote_tables)
+    inflated = (replace(PARITY_CORNERS_BASELINE[0],
+                        keys=PARITY_CORNERS_BASELINE[0].keys + ((1.0, 1.0),)),
+                ) + PARITY_CORNERS_BASELINE[1:]
+    report = check_parity(None, inflated, tables=corner_tables)
     assert not report.ok
     assert report.stale
     message = format_report(report)
@@ -541,7 +791,7 @@ def test_a_fixed_delta_forces_the_baseline_to_shrink(smart_remote_tables):
 def test_every_baseline_entry_is_explained_and_attributed():
     """A baseline entry with no reason, or with an invented docket id, is a
     suppression dressed up as documentation."""
-    for baseline in (SMART_REMOTE_BASELINE, PARITY_CORNERS_BASELINE):
+    for _, baseline in ((c.values[0], c.values[1]) for c in CASES):
         for entry in baseline:
             assert entry.count > 0 and len(set(entry.keys)) == entry.count
             assert len(entry.reason) > 40, f"{entry} has no usable reason"
@@ -555,7 +805,7 @@ def test_every_baseline_entry_is_explained_and_attributed():
 
 
 def test_the_exit_condition_is_measurable():
-    """The migration's visible finish line: both baselines empty.
+    """The migration's visible finish line: every live baseline empty.
 
     Asserted as an inequality rather than a target so it documents progress
     without failing today. When a baseline reaches 0, tighten this.
@@ -564,8 +814,17 @@ def test_the_exit_condition_is_measurable():
     # was fixed and its PARITY_CORNERS entry deleted. The count going DOWN is the
     # visible proof the defect is gone, so the bound is re-tightened on every fix —
     # otherwise a fixed delta just leaves slack for the next one to hide in.
-    total = len(SMART_REMOTE_BASELINE) + len(PARITY_CORNERS_BASELINE)
-    assert total <= 3, (
+    #
+    # RATCHET: tightened 3 -> 1 when the product-board fixture was withdrawn
+    # (019fbe68c5f8). SMART_REMOTE_BASELINE's two Excellon-rounding entries are no
+    # longer attached to any board, so counting them would leave two slots of
+    # permanent slack for a real delta to hide in. The behaviour they described is
+    # now asserted POSITIVELY by
+    # test_the_excellon_micron_grid_rounding_class_is_still_exercised.
+    # The dead constant itself still lives in ir_parity.__all__; deleting it is a
+    # production change this suite deliberately does not make.
+    total = sum(len(case.values[1]) for case in CASES)
+    assert total <= 1, (
         f"{total} known parity deltas — the baseline is meant to SHRINK. If this "
         f"tripped because a new delta was added, justify the growth or fix the "
         f"surface.")

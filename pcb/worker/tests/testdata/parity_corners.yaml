@@ -31,7 +31,13 @@
 # purpose-built footprint in the test library, which is a bigger change than this
 # fixture. NOTE: non-rect THROUGH-HOLE lands ARE covered, via J1 pin 2 below.
 #
-# Deliberately MINIMAL: 3 components and 2 holes, no routing beyond one segment
+# A FIFTH gap was closed on 2026-07-31 when the product fixture this file was
+# written to COMPLEMENT was withdrawn from the corpus (docket 019fbe68c5f8, see
+# POLICY.md): half-turn placements. It is documented inline at component U3, and
+# every reference above to what "smart_remote" covers is now history, not a live
+# division of labour — this file is the primary parity fixture.
+#
+# Deliberately MINIMAL: 4 components and 2 holes, no routing beyond one segment
 # per layer, because this fixture exists to reach geometry the acceptance fixture
 # misses — not to be a second acceptance fixture. Every pad here is authored
 # INLINE (drill_mm / pad_width_mm / pad_height_mm / annulus_diameter_mm) so the
@@ -138,6 +144,42 @@ components:
     pad_width_mm: 2.4
     pad_height_mm: 1.2
 
+# GAP 5 (added 2026-07-31, docket 019fbe68c5f8) — a HALF-TURN placement.
+#
+# Every other component here is turned a QUARTER turn, and a quarter turn SWAPS
+# the local x and y axes. A half turn instead NEGATES both, so it is the only
+# placement that catches a sign error in the mirror/rotation fold — a defect that
+# a 90-degree-only fixture reports as correct copper.
+#
+# This class used to be reached by the withdrawn product fixture (its U1 sat at
+# 180 degrees). It is reproduced here rather than lost, because withdrawing a
+# fixture must not quietly withdraw the geometry it was covering. Pinned by
+# test_the_synthetic_primary_reaches_every_geometry_class_the_gate_needs.
+#
+# Pins 1 and 4 sit on OPPOSITE rows of the DIP, so the pad set is asymmetric about
+# the component origin and a dropped or doubled half turn MOVES copper here
+# instead of cancelling out.
+- ref: U3
+  footprint: Package_DIP:DIP-6_W7.62mm_Socket
+  value: HALF_TURN
+  x_mm: 30.0
+  y_mm: 6.0
+  rotation_deg: 180
+  layer: top
+  pins:
+  - number: '1'
+    name: HT_1
+    x_mm: 0.0
+    y_mm: 0.0
+    drill_mm: 0.8
+    annulus_diameter_mm: 1.6
+  - number: '4'
+    name: HT_4
+    x_mm: 7.62
+    y_mm: 5.08
+    drill_mm: 0.8
+    annulus_diameter_mm: 1.6
+
 nets:
 - name: N_OBL
   pins:
@@ -147,6 +189,10 @@ nets:
   pins:
   - U2.1
   - SW9.B
+- name: N_HT
+  pins:
+  - U3.1
+  - U3.4
 
 traces:
 - net: N_OBL

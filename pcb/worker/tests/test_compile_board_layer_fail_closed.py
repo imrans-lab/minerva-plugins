@@ -59,11 +59,18 @@ TESTDATA = Path(__file__).parent / "testdata"
 
 
 @pytest.fixture(scope="module")
-def smart_remote_result():
+def parity_corners_result():
     # Local copy of test_compile_board.py's fixture -- pytest fixtures are not
     # shared across test files without a conftest.py, and this module doesn't
     # need the rest of that file's fixtures/helpers.
-    board = yaml.safe_load((TESTDATA / "smart_remote.yaml").read_text(encoding="utf-8"))
+    #
+    # parity_corners.yaml (docket 019fbe68c5f8) -- the real board this compiles
+    # here is a multi-component, multi-layer board with placed copper on both
+    # sides, which is what this gate is scoped to. smart_remote.yaml, the board
+    # this fixture used to load, was withdrawn from the corpus as a product-IP
+    # leak (see testdata/POLICY.md); parity_corners.yaml is its designated
+    # synthetic replacement.
+    board = yaml.safe_load((TESTDATA / "parity_corners.yaml").read_text(encoding="utf-8"))
     return compile_board(board)
 
 # ---------------------------------------------------------------------------
@@ -266,15 +273,16 @@ def test_inner_copper_fails_closed_even_when_board_omits_layers_key(tmp_path):
 # ---------------------------------------------------------------------------
 # 6. Real seed-library evidence: the compile census (test_compile_board.py,
 #    parametrized over every locked ref) already proves every REAL footprint
-#    still resolves under the new gate. Re-assert it against the full
-#    smart_remote board fixture here too, scoped to the new code specifically,
-#    so a regression in this unit's own test file catches it without relying
-#    on test_compile_board.py being run in the same invocation.
+#    still resolves under the new gate. Re-assert it against a full real board
+#    fixture here too (parity_corners.yaml, docket 019fbe68c5f8), scoped to the
+#    new code specifically, so a regression in this unit's own test file catches
+#    it without relying on test_compile_board.py being run in the same
+#    invocation.
 # ---------------------------------------------------------------------------
 
 
-def test_smart_remote_seed_board_has_no_unemitted_copper_errors(smart_remote_result):
-    assert isinstance(smart_remote_result, ResolutionSuccess)
-    codes = {d.code for d in smart_remote_result.diagnostics
+def test_parity_corners_seed_board_has_no_unemitted_copper_errors(parity_corners_result):
+    assert isinstance(parity_corners_result, ResolutionSuccess)
+    codes = {d.code for d in parity_corners_result.diagnostics
              if d.severity is DiagnosticSeverity.ERROR}
     assert "unemitted_copper_layer" not in codes
