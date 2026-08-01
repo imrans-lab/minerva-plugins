@@ -526,7 +526,7 @@ func _build_toolbar() -> HBoxContainer:
 	_drawer_button = Button.new()
 	_drawer_button.name = "SidebarDrawerButton"
 	_drawer_button.text = "☰"
-	_drawer_button.tooltip_text = "Show/hide the tools sidebar"
+	_drawer_button.tooltip_text = _wrap_tooltip("Show/hide the tools sidebar")
 	_drawer_button.toggle_mode = true
 	_drawer_button.visible = false
 	_drawer_button.pressed.connect(_on_drawer_toggled)
@@ -535,7 +535,7 @@ func _build_toolbar() -> HBoxContainer:
 	# Zoom controls.
 	var zoom_out := Button.new()
 	zoom_out.text = "−"  # minus sign
-	zoom_out.tooltip_text = "Zoom out (-)"
+	zoom_out.tooltip_text = _wrap_tooltip("Zoom out (-)")
 	zoom_out.pressed.connect(func() -> void: _canvas._zoom_at(_canvas.size / 2, 0.8))
 	tb.add_child(zoom_out)
 
@@ -545,13 +545,13 @@ func _build_toolbar() -> HBoxContainer:
 		zoom_fit.icon = fit_icon
 	else:
 		zoom_fit.text = "Fit"
-	zoom_fit.tooltip_text = "Zoom to fit"
+	zoom_fit.tooltip_text = _wrap_tooltip("Zoom to fit")
 	zoom_fit.pressed.connect(func() -> void: _canvas.zoom_to_fit())
 	tb.add_child(zoom_fit)
 
 	var zoom_in := Button.new()
 	zoom_in.text = "+"
-	zoom_in.tooltip_text = "Zoom in (+)"
+	zoom_in.tooltip_text = _wrap_tooltip("Zoom in (+)")
 	zoom_in.pressed.connect(func() -> void: _canvas._zoom_at(_canvas.size / 2, 1.2))
 	tb.add_child(zoom_in)
 
@@ -602,7 +602,7 @@ func _build_toolbar() -> HBoxContainer:
 	_export_button = Button.new()
 	_export_button.name = "ExportButton"
 	_export_button.text = "Export YAML"
-	_export_button.tooltip_text = "Serialize the board to canonical YAML via the plugin backend"
+	_export_button.tooltip_text = _wrap_tooltip("Export YAML — serialize the board via the plugin backend")
 	_export_button.pressed.connect(_on_export_yaml_pressed)
 	tb.add_child(_export_button)
 
@@ -618,6 +618,41 @@ func _build_toolbar() -> HBoxContainer:
 	return tb
 
 
+## Shared tooltip-wrap mechanism (docket 019fb933d4a9, tooltip overflow fix).
+## Godot's default tooltip popup sizes itself to raw tooltip_text with NO
+## word-wrap, so anything past a few dozen characters runs off the edge of
+## the screen instead of wrapping — there is no engine flag for this. The
+## standard trick is to insert our OWN line breaks at word boundaries before
+## the text ever reaches tooltip_text; the default tooltip Label honors "\n"
+## exactly like any other Label, so no custom Control or _make_custom_tooltip
+## override is needed (least invasive, and verifiable by inspecting this
+## function's own output — no live app required).
+##
+## EVERY tooltip_text assignment in this file routes through this function,
+## even short ones that are already under the wrap width — that is what makes
+## this a MECHANISM rather than a one-off patch: the next tooltip anyone adds
+## here, short or long, wraps automatically as long as it is assigned through
+## this function too.
+const _TOOLTIP_WRAP_CHARS := 60
+
+static func _wrap_tooltip(text: String, max_chars: int = _TOOLTIP_WRAP_CHARS) -> String:
+	if text.length() <= max_chars:
+		return text
+	var lines: PackedStringArray = []
+	var current := ""
+	for word in text.split(" "):
+		if current.is_empty():
+			current = word
+		elif current.length() + 1 + word.length() <= max_chars:
+			current += " " + word
+		else:
+			lines.append(current)
+			current = word
+	if not current.is_empty():
+		lines.append(current)
+	return "\n".join(lines)
+
+
 func _add_tool_button(tb: Container, mode: int, text: String, tip: String, icon_file := "") -> void:
 	var btn := Button.new()
 	var icon := _load_icon(icon_file) if not icon_file.is_empty() else null
@@ -627,7 +662,7 @@ func _add_tool_button(tb: Container, mode: int, text: String, tip: String, icon_
 		btn.icon = icon
 	else:
 		btn.text = text
-	btn.tooltip_text = tip
+	btn.tooltip_text = _wrap_tooltip(tip)
 	btn.toggle_mode = true
 	btn.pressed.connect(func() -> void: _toggle_tool_mode(mode))
 	tb.add_child(btn)
@@ -697,10 +732,10 @@ func _build_sidebar() -> VBoxContainer:
 	# finding 5). Select does select + move + box-select + rotate; Pan drags
 	# the whole view.
 	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.SELECT, "Select",
-		"Select & move (S) — click selects; drag a part to move (snaps); drag empty to box-select; R rotates selection",
+		"Select & move (S) — click to select, drag to move",
 		"select_24.png")
 	_add_tool_button(tools_flow, _PcbCanvasScript.ToolMode.PAN, "Pan",
-		"Pan the view — drag anywhere. Also works: right-drag, middle-drag, or hold Space and drag.",
+		"Pan the view (drag anywhere)",
 		"pan_24.png")
 
 	# Pin inspector (WC-1) — a TRUE toggle (unlike the Select/Pan radio tools):
@@ -712,7 +747,7 @@ func _build_sidebar() -> VBoxContainer:
 		_inspect_pin_button.icon = inspect_icon
 	else:
 		_inspect_pin_button.text = "Pin"
-	_inspect_pin_button.tooltip_text = "Click on a pin to see its info (Shift+P)"
+	_inspect_pin_button.tooltip_text = _wrap_tooltip("Click a pin to see its info (Shift+P)")
 	_inspect_pin_button.toggle_mode = true
 	_inspect_pin_button.pressed.connect(_on_inspect_pin_button_pressed)
 	tools_flow.add_child(_inspect_pin_button)
@@ -732,15 +767,9 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.add_child(draw_flow)
 
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
-		"Draw a copper pour: pick its net and layer below, click each corner, double-click or press Enter "
-		+ "to close (needs 3+ corners; Esc/right-click cancels). Corners snap to a quarter of the grid — "
-		+ "hold Ctrl/Cmd to place freely. With the layer left on \"View layer\" it goes on the selected "
-		+ "copper layer, and on \"All\" that means %s." % _PcbCanvasScript.ZONE_DEFAULT_LAYER, "pour_24.png")
+		"Draw a copper pour (pick a net, click corners, Enter to close)", "pour_24.png")
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
-		"Draw a keep-out region: click each corner, double-click or press Enter to close "
-		+ "(needs 3+ corners; Esc/right-click cancels). Corners snap to a quarter of the grid — hold "
-		+ "Ctrl/Cmd to place freely. No net needed — a keepout forbids copper rather than being "
-		+ "copper, the same as a KiCad rule area.", "keepout_24.png")
+		"Draw a keep-out region (click corners, Enter to close)", "keepout_24.png")
 
 	# Trace drawing tool (epoch 6 unit 5). Same section and same reason as the
 	# zone tools above: it authors a board ENTITY. It shares a name with the
@@ -749,12 +778,7 @@ func _build_sidebar() -> VBoxContainer:
 	# hint's hollow ones) and tooltip carry the distinction outright: this one
 	# IS the copper, that one is a request for copper.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.TRACE, "Trace",
-		"Draw real copper directly, bypassing the router (Hints ▸ Trace asks the router for a route instead). "
-		+ "Click a pad to start — the trace takes that pad's net — then click each waypoint, and click "
-		+ "another pad to finish on it; double-click or press Enter to end it where it is. Esc/right-click "
-		+ "cancels. Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place freely. Drawn at the "
-		+ "width set below (the board's design-rule width until you change it), on the selected copper "
-		+ "layer — on \"All\" it goes on %s." % _PcbCanvasScript.TRACE_DEFAULT_LAYER, "trace_draw_24.png")
+		"Draw copper directly (click a pad to start)", "trace_draw_24.png")
 
 	# Eraser (item 019fb934827776) + Delete/trash-can (item 019fb92f8b83) live
 	# HERE, not in the Select section above (cold-review N3) — the section
@@ -767,15 +791,12 @@ func _build_sidebar() -> VBoxContainer:
 	# Delete is still the same plain action button, both merely relocated to
 	# this flow.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.ERASER, "Eraser",
-		"Click an entity to delete it — one click, one undo step. Click empty space to do nothing " \
-		+ "(stays armed). Esc or another tool disarms it. Locked components/traces are skipped.")
+		"Click an entity to delete it (Esc to disarm)")
 
 	_delete_button = Button.new()
 	_delete_button.name = "DeleteSelectionButton"
 	_delete_button.text = "Delete"
-	_delete_button.tooltip_text = "Delete the whole selection — components, traces and zones together " \
-		+ "(Delete/Backspace does the same). One undo restores all of it. Locked components/traces " \
-		+ "are skipped."
+	_delete_button.tooltip_text = _wrap_tooltip("Delete the whole selection (Delete/Backspace)")
 	_delete_button.disabled = true
 	_delete_button.pressed.connect(func() -> void: _canvas._delete_selection())
 	draw_flow.add_child(_delete_button)
@@ -784,8 +805,7 @@ func _build_sidebar() -> VBoxContainer:
 	# is active, so the resting sidebar is unchanged.
 	_zone_net_option = OptionButton.new()
 	_zone_net_option.name = "ZoneNetOption"
-	_zone_net_option.tooltip_text = "Net for the pour being drawn — required by the board contract for " \
-		+ "a copper pour (a keepout needs none, so this picker is hidden for it)"
+	_zone_net_option.tooltip_text = _wrap_tooltip("Net for the pour being drawn")
 	_zone_net_option.visible = false
 	_rebuild_zone_net_option()
 	_zone_net_option.item_selected.connect(_on_zone_net_selected)
@@ -793,8 +813,7 @@ func _build_sidebar() -> VBoxContainer:
 
 	_zone_layer_option = OptionButton.new()
 	_zone_layer_option.name = "ZoneLayerOption"
-	_zone_layer_option.tooltip_text = "Copper layer for the zone being drawn. \"View layer\" follows the " \
-		+ "layer filter above (and on \"All\" that is %s)" % _PcbCanvasScript.ZONE_DEFAULT_LAYER
+	_zone_layer_option.tooltip_text = _wrap_tooltip("Copper layer for the zone being drawn")
 	_zone_layer_option.visible = false
 	_rebuild_zone_layer_option()
 	_zone_layer_option.item_selected.connect(_on_zone_layer_selected)
@@ -807,9 +826,7 @@ func _build_sidebar() -> VBoxContainer:
 	# and shared with the model setter and the preference registry since A7.
 	_trace_width_spin = SpinBox.new()
 	_trace_width_spin.name = "TraceWidthSpin"
-	_trace_width_spin.tooltip_text = "Width of new traces, in mm. Starts at the board's design-rule " \
-		+ "width (design_rules.trace_width_mm) when it declares one, else your stored preference; " \
-		+ "turning it stores that preference for boards that declare no rule. Affects new traces only"
+	_trace_width_spin.tooltip_text = _wrap_tooltip("Width of new traces, in mm (design-rule default)")
 	_trace_width_spin.min_value = _PcbTraceScript.MIN_WIDTH_MM
 	_trace_width_spin.max_value = _PcbTraceScript.MAX_WIDTH_MM
 	_trace_width_spin.step = 0.05
@@ -836,8 +853,7 @@ func _build_sidebar() -> VBoxContainer:
 		trace_btn.icon = trace_icon
 	else:
 		trace_btn.text = "Trace"
-	trace_btn.tooltip_text = "Draw a single-trace route hint: click a pad or point, click waypoints, " \
-		+ "click a pad/double-click empty space to finish (Esc/right-click cancels)"
+	trace_btn.tooltip_text = _wrap_tooltip("Draw a single-trace route hint (click pad, waypoints, pad)")
 	trace_btn.toggle_mode = true
 	trace_btn.pressed.connect(_on_single_trace_button_pressed)
 	hints_flow.add_child(trace_btn)
@@ -855,9 +871,7 @@ func _build_sidebar() -> VBoxContainer:
 		edit_hint_btn.icon = edit_hint_icon
 	else:
 		edit_hint_btn.text = "Edit Hint"
-	edit_hint_btn.tooltip_text = "Edit a route hint's bend points: click the hint to select it, " \
-		+ "drag a handle to move a bend, right-click a handle to delete it, " \
-		+ "click a segment to insert a new bend (Esc/tool-switch exits)"
+	edit_hint_btn.tooltip_text = _wrap_tooltip("Edit a route hint's bend points")
 	edit_hint_btn.toggle_mode = true
 	edit_hint_btn.pressed.connect(_on_edit_hint_button_pressed)
 	hints_flow.add_child(edit_hint_btn)
@@ -875,9 +889,7 @@ func _build_sidebar() -> VBoxContainer:
 		add_via_btn.icon = add_via_icon
 	else:
 		add_via_btn.text = "Add Via"
-	add_via_btn.tooltip_text = "Insert a via on a selected proposal: click the proposal to select it, " \
-		+ "then click a point on its route to split it, add a via, and flip the trace past that point " \
-		+ "to the opposite copper layer (Esc/tool-switch exits)"
+	add_via_btn.tooltip_text = _wrap_tooltip("Insert a via on a selected proposal")
 	add_via_btn.toggle_mode = true
 	add_via_btn.pressed.connect(_on_add_via_button_pressed)
 	hints_flow.add_child(add_via_btn)
@@ -897,7 +909,7 @@ func _build_sidebar() -> VBoxContainer:
 		_propose_button.icon = propose_icon
 	else:
 		_propose_button.text = "Propose"
-	_propose_button.tooltip_text = "Run the router over open route hints and write back inspectable cyan proposals (the board is not changed)"
+	_propose_button.tooltip_text = _wrap_tooltip("Run the router over open route hints (board unchanged)")
 	_propose_button.pressed.connect(_on_propose_button_pressed)
 	hints_flow.add_child(_propose_button)
 
@@ -1011,7 +1023,7 @@ func _build_offset_edit(edit_name: String, hint: String) -> LineEdit:
 	var edit := LineEdit.new()
 	edit.name = edit_name
 	edit.placeholder_text = hint
-	edit.tooltip_text = "%s offset from the group anchor, in mm" % hint
+	edit.tooltip_text = _wrap_tooltip("%s offset from the group anchor, in mm" % hint)
 	edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	edit.custom_minimum_size.x = 48
 	edit.text_submitted.connect(func(_t: String) -> void: _commit_member_offset())
@@ -1058,8 +1070,7 @@ func _build_zone_rows() -> VBoxContainer:
 	_zone_prop_net_row.add_child(net_key)
 	_zone_prop_net_option = OptionButton.new()
 	_zone_prop_net_option.name = "ZonePropNetOption"
-	_zone_prop_net_option.tooltip_text = "The net this copper pour is tied to. Declared nets only — " \
-		+ "a pour on an undeclared net makes the whole board unexportable."
+	_zone_prop_net_option.tooltip_text = _wrap_tooltip("Net this pour is tied to (declared nets only)")
 	_zone_prop_net_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_zone_prop_net_option.clip_text = true
 	_zone_prop_net_option.item_selected.connect(_on_zone_prop_net_selected)
@@ -1074,8 +1085,7 @@ func _build_zone_rows() -> VBoxContainer:
 	_zone_prop_layer_row.add_child(layer_key)
 	_zone_prop_layer_option = OptionButton.new()
 	_zone_prop_layer_option.name = "ZonePropLayerOption"
-	_zone_prop_layer_option.tooltip_text = "The copper layer this zone sits on. The board's declared " \
-		+ "stack only — moving a zone off the stack would make the board unexportable."
+	_zone_prop_layer_option.tooltip_text = _wrap_tooltip("Copper layer this zone sits on (declared stack only)")
 	_zone_prop_layer_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_zone_prop_layer_option.clip_text = true
 	_zone_prop_layer_option.item_selected.connect(_on_zone_prop_layer_selected)
@@ -1182,8 +1192,7 @@ func _build_trace_rows() -> VBoxContainer:
 
 	_trace_prop_width_spin = SpinBox.new()
 	_trace_prop_width_spin.name = "TracePropWidthSpin"
-	_trace_prop_width_spin.tooltip_text = "Width of the SELECTED trace, in mm. Changing it re-widens " \
-		+ "that trace (one undoable step) — it does not change the width of new traces"
+	_trace_prop_width_spin.tooltip_text = _wrap_tooltip("Width of the selected trace, in mm (re-widens it)")
 	_trace_prop_width_spin.min_value = _PcbTraceScript.MIN_WIDTH_MM
 	_trace_prop_width_spin.max_value = _PcbTraceScript.MAX_WIDTH_MM
 	_trace_prop_width_spin.step = 0.05
@@ -1975,18 +1984,23 @@ func _untoggle_route_flow_buttons() -> void:
 			b.set_pressed_no_signal(false)
 
 
+## Also refreshes the status bar (docket 019fb933d4a9): the route-flow
+## cluster's tools arm/disarm outside _canvas.tool_mode (they drive an
+## AnnotationAuthorTool on the shared overlay, not the canvas tool surface —
+## see the class doc above _MODE_HINTS), so _on_tool_mode_changed's own
+## _update_status() call never fires for them. This is the one function every
+## arm/disarm/cross-surface-takeover path already calls, so it is the natural
+## single place to keep the status bar's armed-tool tag and gesture hint in
+## step, the same way _sync_tool_buttons stays in step off tool_mode_changed.
 func _update_route_flow_mode_label(kind_key: String) -> void:
-	if _route_flow_mode_label == null:
-		return
-	match kind_key:
-		"single_trace":
-			_route_flow_mode_label.text = "Single Trace"
-		"edit_hint":
-			_route_flow_mode_label.text = "Edit Hint"
-		"add_via":
-			_route_flow_mode_label.text = "Add Via"
-		_:
-			_route_flow_mode_label.text = "Select"
+	# DRY fix (cold review F7): _ROUTE_FLOW_LABELS (declared near _update_status,
+	# below) is now the ONE authority for these three strings — this used to
+	# carry its own match block producing the identical labels, so renaming one
+	# tool meant remembering to edit two places ~10 lines apart in the same call
+	# chain (the status-bar tag was the one that silently went stale).
+	if _route_flow_mode_label != null:
+		_route_flow_mode_label.text = str(_ROUTE_FLOW_LABELS.get(kind_key, "Select"))
+	_update_status()
 
 
 ## Forwards a committed envelope to the host (same single call-site convention
@@ -2997,22 +3011,72 @@ func _set_status(text: String) -> void:
 		_status_label.text = text
 
 
+## While-armed gesture grammar (docket 019fb933d4a9): the teaching prose that
+## used to live in the tool tooltips (now one clause each — see the
+## _wrap_tooltip call sites) relocates HERE, not to a toast. This is a live
+## status readout that stays visible for as long as the tool is armed, unlike
+## _show_transient_status's 2s toast — the right lifetime for something a user
+## needs to read while they work, not glance at once.
+##
+## Keyed by ToolMode; the route-flow cluster's tools (single_trace/edit_hint/
+## add_via, WC-3/C4/U4) aren't in that enum — they arm an AnnotationAuthorTool
+## on the shared overlay instead of driving _canvas.tool_mode — so they're
+## looked up separately, off _active_route_flow_kind, below.
+const _MODE_HINTS := {
+	1: "Drag a part to move · drag empty to box-select · R rotates",     # SELECT
+	5: "Click a pin to see its info",                                    # INSPECT_PIN
+	6: "Pick a net below, click each corner, Enter/dbl-click to close",  # ZONE_POUR
+	7: "Click each corner, Enter/dbl-click to close (no net needed)",    # ZONE_KEEPOUT
+	8: "Click a pad to start, click waypoints, click a pad to finish",   # TRACE
+	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
+}
+const _ROUTE_FLOW_LABELS := {
+	"single_trace": "Single Trace",
+	"edit_hint": "Edit Hint",
+	"add_via": "Add Via",
+}
+const _ROUTE_FLOW_HINTS := {
+	"single_trace": "Click a pad/point, waypoints, then a pad to finish",
+	"edit_hint": "Drag a handle to move a bend, right-click to delete it",
+	"add_via": "Click the proposal, then a point on its route to add a via",
+}
+
+
 func _update_status() -> void:
 	if _status_label == null or _canvas == null or _data == null:
 		return
 	var sel: Array = _canvas.get_selected_components()
 	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN,
-	# ZONE_POUR, ZONE_KEEPOUT, TRACE.
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace"]
+	# ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER. BUG FIX: this array used to stop
+	# at 9 entries (through TRACE) while ToolMode.ERASER = 9 — tm < size() was
+	# false for the eraser, so it silently got no mode tag at all. ERASER is
+	# now entry 9.
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser"]
 	var mode_txt := ""
-	var tm: int = _canvas.tool_mode
-	if tm > 0 and tm < mode_names.size():
-		mode_txt = "  [%s]" % mode_names[tm]
+	var armed_hint := ""
+	if _active_route_flow_kind != "":
+		mode_txt = "  [%s]" % _ROUTE_FLOW_LABELS.get(_active_route_flow_kind, "")
+		armed_hint = str(_ROUTE_FLOW_HINTS.get(_active_route_flow_kind, ""))
+	else:
+		var tm: int = _canvas.tool_mode
+		if tm > 0 and tm < mode_names.size():
+			mode_txt = "  [%s]" % mode_names[tm]
+		armed_hint = str(_MODE_HINTS.get(tm, ""))
 	var hint := "  •  wheel/pinch zoom · Pan tool or Space/right/middle-drag to pan"
-	# Below wide mode the toolbar's board-size label is hidden — carry it here.
+	if not armed_hint.is_empty():
+		hint = "  •  %s" % armed_hint
+	# Below wide mode the toolbar's board-size label is hidden — carry it here
+	# (unchanged). BUG FIX: the gesture hint above used to be blanked here too,
+	# for EVERY non-wide mode — but MEDIUM is the 3-col PRIMARY design target
+	# (panel_layout.gd), so that silently hid the armed tool's grammar at the
+	# panel's most common width, defeating the very teaching this round moved
+	# here. Only NARROW (sidebar behind a drawer, toolbar folded into a View
+	# menu — already the one mode that compacts every other secondary readout)
+	# still drops it; MEDIUM keeps both the board size AND the hint.
 	var board_txt := ""
 	if _layout_mode != _PanelLayoutScript.MODE_WIDE:
 		board_txt = "  •  %s×%smm" % [_data.board_width, _data.board_height]
+	if _layout_mode == _PanelLayoutScript.MODE_NARROW:
 		hint = ""
 	_status_label.text = "%d parts, %d nets, %d traces  •  %d selected%s%s%s" % [
 		_data.get_component_count(), _data.get_net_count(), _data.get_trace_count(),

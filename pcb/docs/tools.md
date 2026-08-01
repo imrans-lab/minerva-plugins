@@ -352,6 +352,105 @@ fab-correctness HITL gate; `docs/worker.md` for the worker method.
 | `minerva_create_pcb_editor` | `minerva_create_plugin_editor` |
 | `minerva_pcb_export_yaml` | worker `pcb.serialize` / the panel's **Export YAML** toolbar action |
 
+## Canvas gestures (human UI, docket `019fb933d4a9`)
+
+The panel's tool tooltips are short by design (Illustrator-style: name +
+shortcut + one-phrase action) so the default Godot tooltip popup never
+overflows the screen — see `PCBPanel._wrap_tooltip` and the while-armed status
+bar text (`_update_status`) for the mechanism. The full step-by-step grammar
+each tooltip used to carry lives here instead, and (for the tools that draw or
+edit something) as a one-line hint in the status bar for as long as the tool
+stays armed.
+
+**Select & move (S)** — click to select; drag a part to move it (snaps to
+grid); drag empty canvas to box-select; `R` rotates the selection.
+
+**Pan** — drag anywhere while armed. Also works from any other tool: right-
+drag, middle-drag, or hold Space and drag.
+
+**Inspect Pin (Shift+P)** — click a pin to see its info in the Pin Info
+section; press the button again to exit (clicking empty canvas just clears
+the readout — the tool stays armed).
+
+**Group / ungroup (Ctrl/Cmd+G / Ctrl/Cmd+Shift+G)** — with 2+ components
+selected, groups them so they move as one; ungroups the selected group.
+Bare `G` alone toggles the grid instead, not a modifier miss.
+
+**Zone vertex editing** (on a SELECTED zone) — drag a handle to move a
+corner, right-click a handle to delete it, click an edge to insert a new
+corner there (a zone can't drop below 3 corners — the delete is refused).
+
+**Draw ▸ Pour** — pick its net and layer in the sidebar pickers, then click
+each corner on the canvas; double-click or press Enter to close (needs 3+
+corners; Esc or right-click cancels mid-draw). Corners snap to a quarter of
+the grid — hold Ctrl/Cmd to place freely. With the layer picker left on "View
+layer" the pour goes on the toolbar's selected copper layer; on "All" it
+falls back to the hardcoded `ZONE_DEFAULT_LAYER`, the bottom copper layer.
+
+**Draw ▸ Keepout** — same corner-clicking grammar as Pour (double-click/Enter
+to close, Esc/right-click to cancel, quarter-grid snap with Ctrl/Cmd to place
+freely), but no net picker: a keepout forbids copper rather than being copper,
+the same as a KiCad rule area.
+
+**Draw ▸ Trace** — draws real copper directly, bypassing the router (Hints ▸
+Trace below instead asks the router for a route). Click a pad to start — the
+trace takes that pad's net — then click each waypoint, then click another pad
+to finish on it (or double-click/Enter to end it where it is; Esc/right-click
+cancels). Waypoints snap to a quarter of the grid — hold Ctrl/Cmd to place
+freely. Drawn at the width set in the sidebar's trace-width box, on the
+toolbar's selected copper layer (or the hardcoded `TRACE_DEFAULT_LAYER`, the
+top copper layer, when the filter is "All"). Note this is the OPPOSITE
+default from Draw ▸ Pour above (bottom) — leaving the filter on "All" and
+drawing both puts them on different layers with no warning.
+
+**Eraser** — click an entity to delete it: one click, one undo step. Clicking
+empty space does nothing and leaves the tool armed. Esc or switching tools
+disarms it. Locked components/traces are skipped.
+
+**Delete (trash-can button)** — deletes the WHOLE selection — components,
+traces and zones together (Delete/Backspace does the same). One undo restores
+all of it. Locked components/traces are skipped.
+
+**Trace-width box** (sidebar, arms alongside Draw ▸ Trace) — width of NEW
+traces, in mm. Starts at the board's own `design_rules.trace_width_mm` when it
+declares one, else your stored preference (`minerva_pcb_get/set_preference`,
+key `trace_width_mm`); turning it stores that preference for boards that
+declare no rule. Affects new traces only — it does not re-width anything
+already drawn.
+
+**Zone net / layer pickers** (sidebar, arm alongside Pour/Keepout) — the net
+picker is required by the board contract for a pour (a keepout needs none, so
+the picker hides for it); the layer picker follows the toolbar's layer filter
+while left on "View layer", and falls back to `ZONE_DEFAULT_LAYER` (bottom
+copper) when the filter is "All".
+
+**Hints ▸ Trace (single-trace route hint)** — click a pad or point to start,
+click waypoints, then click a pad or double-click empty space to finish
+(Esc/right-click cancels). This authors a route REQUEST for the router, not
+copper — see Draw ▸ Trace above for drawing copper directly.
+
+**Hints ▸ Edit Hint** — click a committed route hint to select it, drag a
+handle to move a bend, right-click a handle to delete it, click a segment to
+insert a new bend (Esc or switching tools exits).
+
+**Hints ▸ Add Via** — click a proposal to select it, then click a point on its
+route to split the segment, add a via, and flip the trace past that point to
+the opposite copper layer (Esc or switching tools exits).
+
+**Propose button** — runs the router over open route hints and writes back
+inspectable cyan proposals; the board itself is not changed until an applied
+route hint is committed (see the route-correction loop above).
+
+**Properties ▸ zone Net / Layer** (re-property an already-drawn zone) — Net
+accepts declared nets only (an undeclared net would make the whole board
+unexportable); Layer accepts the board's declared copper stack only (moving a
+zone off the stack would make the board unexportable).
+
+**Properties ▸ trace Width** (re-property an already-drawn, selected trace) —
+changing it re-widens that one trace as a single undoable step; it does not
+touch the width used for new traces (that is the sidebar trace-width box
+above).
+
 ## Coexistence & name collision (until cutover)
 
 The legacy in-tree `MCPPCBTools` STAYS registered until cutover and sits earlier
