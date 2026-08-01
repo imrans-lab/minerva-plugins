@@ -563,7 +563,16 @@ class BendHandleEditTool:
 	## pure selection; draw_preview says so on-canvas instead of drawing handles.
 	## Exactly one selected → every code path below is byte-identical to pre-A8u1.
 	func _multi_selected() -> bool:
-		return AnnotationHost.multi_selected_for(_host)
+		# Duck-typed against the HOST INSTANCE, not AnnotationHost's new
+		# static: a class_name reference to a member the running host lacks
+		# is a PARSE error that unregisters the whole kind (measured, CI run
+		# 30673225191 — hint pcb-plugin/off-tree-core-api-coupling). A host
+		# predating the multi-select API can never hold a multi-selection,
+		# so false is the truthful degraded answer, and every gesture below
+		# then behaves exactly as it did against that host before A8u1.
+		if _host == null or not _host.has_method("get_selected_annotation_ids"):
+			return false
+		return _host.get_selected_annotation_ids().size() > 1
 
 	func on_activate(host: AnnotationHost) -> void:
 		_host = host
@@ -829,7 +838,16 @@ class ViaInsertTool:
 
 	## See BendHandleEditTool._multi_selected — same rule, same reason.
 	func _multi_selected() -> bool:
-		return AnnotationHost.multi_selected_for(_host)
+		# Duck-typed against the HOST INSTANCE, not AnnotationHost's new
+		# static: a class_name reference to a member the running host lacks
+		# is a PARSE error that unregisters the whole kind (measured, CI run
+		# 30673225191 — hint pcb-plugin/off-tree-core-api-coupling). A host
+		# predating the multi-select API can never hold a multi-selection,
+		# so false is the truthful degraded answer, and every gesture below
+		# then behaves exactly as it did against that host before A8u1.
+		if _host == null or not _host.has_method("get_selected_annotation_ids"):
+			return false
+		return _host.get_selected_annotation_ids().size() > 1
 
 	func _zoom() -> float:
 		if _host != null and _host.has_method("get_annotation_zoom"):
