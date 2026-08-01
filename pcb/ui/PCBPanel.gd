@@ -172,7 +172,6 @@ var _dock_parent: VBoxContainer = null
 ## Bottom strip slot for the annotation dock (medium/narrow — HITL note:
 ## 3-col wants the dock along the bottom; only wide keeps it in the sidebar).
 var _bottom_dock_slot: VBoxContainer = null
-var _view_toggles_box: HBoxContainer = null
 var _view_menu_button: MenuButton = null
 var _drawer_button: Button = null
 var _export_button: Button = null
@@ -557,23 +556,16 @@ func _build_toolbar() -> HBoxContainer:
 
 	tb.add_child(VSeparator.new())
 
-	# View toggles — a named box so responsive modes can show/hide it whole.
-	# Wide mode shows the inline CheckButtons; medium/narrow use the View menu
-	# below (both drive the same canvas flags, so they can't drift apart).
-	_view_toggles_box = HBoxContainer.new()
-	_view_toggles_box.name = "ViewTogglesBox"
-	for entry in _VIEW_FLAGS:
-		var flag: String = entry[1]
-		_view_toggles_box.add_child(_make_toggle(entry[0], true, func(p: bool) -> void:
-			_canvas.set(flag, p); _canvas.queue_redraw()))
-	tb.add_child(_view_toggles_box)
-
-	# Compact View menu (medium/narrow): the same flags as checkable items,
-	# synced from the canvas each time it opens. Narrow also gets Export here.
+	# The compact View menu is the ONE view-flags surface at every width
+	# (owner ruling 2026-08-01, bug 019fbb6242): the former wide-mode inline
+	# CheckButton row overflowed the toolbar at every width in ~[880, 1250]
+	# because the WIDE threshold was calibrated when the flag list was five
+	# entries long and the list grew to seven. The menu carries every flag as
+	# a checkable item, synced from the canvas each time it opens, plus
+	# Export YAML (the inline Export button hides at narrow).
 	_view_menu_button = MenuButton.new()
 	_view_menu_button.name = "ViewMenuButton"
 	_view_menu_button.text = "View"
-	_view_menu_button.visible = false
 	var popup := _view_menu_button.get_popup()
 	for i in _VIEW_FLAGS.size():
 		popup.add_check_item(_VIEW_FLAGS[i][0], i)
@@ -696,14 +688,6 @@ func _load_icon(fname: String) -> Texture2D:
 	if img == null:
 		return null
 	return ImageTexture.create_from_image(img)
-
-
-func _make_toggle(text: String, on: bool, cb: Callable) -> CheckButton:
-	var c := CheckButton.new()
-	c.text = text
-	c.button_pressed = on
-	c.toggled.connect(cb)
-	return c
 
 
 # ── Right sidebar (legacy layout clone) ────────────────────────────────────────
@@ -2163,11 +2147,11 @@ func _on_panel_resized() -> void:
 		_apply_layout_mode(mode)
 
 
-## Applies a layout mode. Visibility matrix:
-##   wide:   sidebar shown; inline view toggles; Export + board label inline.
-##   medium: sidebar shown; toggles fold into the View menu (3-col width is
-##           too tight for five labeled CheckButtons); board label → status.
-##   narrow: sidebar behind the drawer toggle; View menu carries Export too.
+## Applies a layout mode. Visibility matrix (the View menu is the one
+## view-flags surface at EVERY mode — owner ruling, bug 019fbb6242):
+##   wide:   sidebar shown; Export button + board label inline.
+##   medium: sidebar shown; board label → status.
+##   narrow: sidebar behind the drawer toggle; Export lives in the View menu.
 func _apply_layout_mode(mode: String, force := false) -> void:
 	if mode == _layout_mode and not force:
 		return
@@ -2199,17 +2183,9 @@ func _apply_layout_mode(mode: String, force := false) -> void:
 	if _drawer_button != null:
 		_drawer_button.visible = narrow
 		_drawer_button.button_pressed = _drawer_open
-	if _view_toggles_box != null:
-		_view_toggles_box.visible = wide
-		if wide and _canvas != null:
-			# Re-sync the inline CheckButtons from the canvas flags — the View
-			# menu can change flags while the toggles are hidden (medium/narrow).
-			for i in mini(_VIEW_FLAGS.size(), _view_toggles_box.get_child_count()):
-				var c := _view_toggles_box.get_child(i) as CheckButton
-				if c != null:
-					c.set_pressed_no_signal(bool(_canvas.get(_VIEW_FLAGS[i][1])))
-	if _view_menu_button != null:
-		_view_menu_button.visible = not wide
+	# The View menu is unconditional at every mode (owner ruling, bug
+	# 019fbb6242) — no inline-toggle sibling exists to sync or swap with; the
+	# menu re-reads canvas flags on about_to_popup, so it can never go stale.
 	if _export_button != null:
 		_export_button.visible = not narrow
 	if _board_size_label != null:
@@ -2277,7 +2253,6 @@ func get_layout_state() -> Dictionary:
 		"width": size.x,
 		"sidebar_visible": _sidebar != null and _sidebar.visible,
 		"drawer_open": _drawer_open,
-		"view_toggles_inline": _view_toggles_box != null and _view_toggles_box.visible,
 		"view_menu_visible": _view_menu_button != null and _view_menu_button.visible,
 		"properties_expanded": _properties_expanded,
 		"dock_position": "sidebar" if _current_dock_slot() == _dock_parent else "bottom",
