@@ -700,39 +700,59 @@ func annotations_in_world_rect(rect: Rect2) -> PackedStringArray:
 ## the board marquee: a plain (non-shift) press already cleared both halves at
 ## press time, so a sweep only ever adds — which is what makes shift+box extend
 ## a mixed board/annotation selection for free.
+## LATE-BOUND multi-select access. These wrap the A8u1 base-class API through
+## has_method + call() because a BARE self-call to an inherited-but-new base
+## member is PARSE-resolved against whatever AnnotationHost the running core
+## ships — on a pre-A8u1 core it is "Function not found in base self" and this
+## whole script fails to load, taking every dependent suite with it (CI run
+## 30689717389; hint pcb-plugin/off-tree-core-api-coupling, variant 2). On an
+## old core the selection set degrades to empty = the single-id world.
+func _selected_ids_compat() -> PackedStringArray:
+	if has_method("get_selected_annotation_ids"):
+		var ids: Variant = call("get_selected_annotation_ids")
+		if ids is PackedStringArray:
+			return ids
+	return PackedStringArray()
+
+
+func _set_selected_ids_compat(ids: PackedStringArray, primary: String = "") -> void:
+	if has_method("set_selected_annotation_ids"):
+		call("set_selected_annotation_ids", ids, primary)
+
+
 func add_annotations_to_selection(ids: PackedStringArray) -> void:
 	if ids.is_empty():
 		return
-	var result := get_selected_annotation_ids()
+	var result := _selected_ids_compat()
 	for id in ids:
 		if not result.has(id):
 			result.append(id)
 	# Primary = the topmost annotation this sweep sat on (document order).
-	set_selected_annotation_ids(result, ids[ids.size() - 1])
+	_set_selected_ids_compat(result, ids[ids.size() - 1])
 	_redraw_overlay()
 
 
 func clear_annotation_selection() -> void:
-	if get_selected_annotation_ids().is_empty():
+	if _selected_ids_compat().is_empty():
 		return
-	set_selected_annotation_ids(PackedStringArray())
+	_set_selected_ids_compat(PackedStringArray())
 	_redraw_overlay()
 
 
 func selected_annotation_count() -> int:
-	return get_selected_annotation_ids().size()
+	return _selected_ids_compat().size()
 
 
 ## Delete every selected annotation and return how many went. THERE IS NO UNDO
 ## for this half — the annotation substrate has no undo stack at all — which is
 ## why the canvas announces the count rather than deleting silently.
 func delete_selected_annotations() -> int:
-	var doomed := get_selected_annotation_ids()
+	var doomed := _selected_ids_compat()
 	if doomed.is_empty():
 		return 0
 	for id in doomed:
 		remove_annotation(id)
-	set_selected_annotation_ids(PackedStringArray())
+	_set_selected_ids_compat(PackedStringArray())
 	_redraw_overlay()
 	return doomed.size()
 
