@@ -193,30 +193,37 @@ on a pour or that names no declared net (`zone_unknown_net`), and a `layer`
 absent or outside the declared stack (`zone_unknown_layer`) — this check applies
 on v1 boards too, unlike identity, which is v2-only. `kind` is checked BEFORE
 `net`, because `kind` is what decides which net rule applies. These four codes
-are not yet cross-checked by a shared vector — the Python compiler still refuses
-zones outright (see below) — but `board_validate.py`'s `_check_zones` mirrors
-them string-for-string and in the same first-violation-wins order.
+are not yet cross-checked by a shared vector, but `board_validate.py`'s
+`_check_zones` mirrors them string-for-string and in the same
+first-violation-wins order. (Zones COMPILE since epoch 4 — the refusal
+lives further downstream; see the fabricability paragraph below.)
 
-**Authoring a zone is modeled and round-trips losslessly (YAML and the
-`pcb.deserialize` JSON boundary), but every downstream consumer still refuses a
-NON-EMPTY zone list** — this contract change makes a zone AUTHORABLE, not
-fabricable:
+**A zone is AUTHORABLE and COMPILABLE and NOT FABRICABLE.** It round-trips
+losslessly (YAML and the `pcb.deserialize` JSON boundary), and since epoch 4 it
+also *compiles*: `compile_board`'s `_build_zones` produces a `ResolvedZone` with
+`fill=None` — no computed copper — and emits a `zone_unfilled` WARNING. Zones
+therefore left `compile_board`'s `unsupported_board_feature` denylist; what still
+refuses one is every consumer downstream of the IR:
 
-- `compile_board.py:1836` rejects a board declaring one or more zones. Note the
-  refusal is presence-AND-non-empty, not presence: `zones: []` and `zones: null`
-  are explicitly skipped, because "an explicitly empty list declares nothing"
-  (review 623 R2 refuses an empty *mapping*, but allows an empty *list*).
-- `route_bridge.py:362` raises `UnsupportedGeometry` for a non-empty
-  `rb.zones` on the resolved IR side.
-- `kicad.py:1056` and `gerber.py:1526` both refuse a board whose resolved IR
-  carries zones, rather than emit unfabricated copper.
+- `route_bridge` raises `UnsupportedGeometry` for a non-empty `rb.zones`.
+- `drc_geometric` returns INDETERMINATE for the whole run rather than report a
+  verdict it cannot compute against unfilled copper.
+- `kicad` and `gerber` both refuse a resolved board carrying zones, rather than
+  emit copper nobody computed.
 
-Those refusals are deliberately OUT OF SCOPE for this change and must stay in
-place; later work narrows each one as its consumer learns to handle a zone
-(fill computation against pads/traces/keepouts, geometric DRC, routing
-obstacle/free-space treatment, CAM). Because every production path still
-refuses a non-empty zone list, no example in this document authors one — doing so
-would fail `test_every_yaml_example_in_board_yaml_md_compiles` (this file's own
+A malformed zone *container* still fails closed, but at the shared boundary
+rather than in the compiler: `zones: {}` is `invalid_board_structure`
+(`validate_board_v2`), while `zones: []` and `zones: null` declare nothing and
+are allowed — "an explicitly empty list declares nothing" (review 623 R2 refuses
+an empty *mapping*, but allows an empty *list*).
+
+Those refusals are deliberately OUT OF SCOPE and must stay in place; later work
+narrows each one as its consumer learns to handle a zone (fill computation
+against pads/traces/keepouts, geometric DRC, routing obstacle/free-space
+treatment, CAM). Because a zone still reaches no production output, no example in
+this document authors one — an example that stopped at a warning would teach a
+shape no fabrication path accepts, and the examples are compiled by
+`test_every_yaml_example_in_board_yaml_md_compiles` (this file's own
 compile-checked-examples test, see "Compiling the examples" below), the same
 reason `diff_pair_gap_mm`/`diff_pair_width_mm` are absent from the example
 above.
@@ -238,6 +245,66 @@ states, so a zone cannot be edited into a shape the validator would reject:
   additionally FAILS CLOSED on a board that declares no `layers` at all, where
   the `zone_unknown_layer` rule has nothing to check against and would otherwise
   accept any name.
+
+### Cut-outs (schema modeled, compilation refused)
+
+A `cutout` is an opening through the **entire board** — an internal slot or
+window milled out of the substrate. Top-level key `cutouts`, a list.
+
+| key | required | meaning |
+|---|---|---|
+| `id` | v2 only | mint-once opaque id, `"cutout:<hex>"` — same rule as `trace`/`via`/`hole`/`zone` |
+| `outline` | yes | ordered polygon boundary, `[{x_mm, y_mm}, ...]`; needs at least 3 points |
+
+That is the whole entity, and each missing field is a decision:
+
+- **No `layer`.** A cutout goes through every layer, so "which layer" is the one
+  question it cannot be asked. This is why it is a separate entity rather than a
+  third zone `kind`: a keepout is a per-layer prohibition on *copper*, a cutout
+  is the absence of *board*.
+- **No `net`.** Nothing connects to a hole in the substrate.
+- **No `kind`.** There is exactly one thing a v1 cutout can be.
+- **No circle or arc variant.** A round opening the fab will drill is already a
+  `mounting_holes` entry (it carries `diameter_mm`), and the IR's contour type
+  already admits arc segments — so curves are a later *widening* of `outline`,
+  not a competing shape. If they arrive, `pth_holes`/`npth_holes` is the
+  precedent: an input alias normalized into the canonical form at parse time.
+
+`Validate` rejects an outline with fewer than 3 points
+(`invalid_cutout_outline`), on v1 boards too — identity is the only v2-gated
+cutout rule. Go's `validateCutouts` and `board_validate.py`'s `_check_cutouts`
+went in together and are asserted against each other by the committed vectors in
+`spec/vectors/`, so this code string means the same thing on both sides.
+
+**What is NOT checked, deliberately:** that a cutout lies inside the board
+outline; that it avoids pads, traces, vias or zones; that it does not
+self-intersect or overlap another cutout; any minimum internal milling radius.
+None of those check classes exists anywhere in this contract — nothing
+bounds-checks a `mounting_holes` entry or a zone outline either — so enforcing
+containment for cut-outs *alone* would make a mounting hole 3 mm off the board
+edge legal while a cutout there is not. Containment should arrive once, applied
+to holes, zones and cut-outs together.
+
+**A cutout is AUTHORABLE and NOT COMPILABLE.** This is the strongest refusal in
+the contract, and it is deliberate rather than unfinished:
+
+- `compile_board` refuses any board declaring a non-empty `cutouts` with
+  `unsupported_board_feature` — the same denylist that refuses `board_graphics`
+  and `keepouts`, with the same presence-not-truthiness rule: `cutouts: []`
+  declares nothing and is allowed, and `cutouts: {}` fails closed one step
+  earlier as `invalid_board_structure` at the shared boundary.
+- The reason is a **fail-open on the fabrication path** (docket `019fbd30f7`):
+  the IR has a shape for this (`ProfileOutline.cutouts`), but the projection both
+  fab emitters read (`ir_projection.outline_frame`) silently degrades a
+  `ProfileOutline` to its outer axis-aligned bounding box, **discarding every
+  cutout with no warning**. A cutout that compiled today would ship a board with
+  no opening in it. That bug must be fixed before this key leaves the denylist.
+
+Because the compiler refuses it, **this section has no yaml example**:
+`test_every_yaml_example_in_board_yaml_md_compiles` compiles every yaml block in
+this document under both production output profiles, so an example authoring a
+cutout would go red against the very refusal above. The table is the spec here,
+the same way the Zones section handles `diff_pair_gap_mm`.
 
 ### Compiling the examples
 

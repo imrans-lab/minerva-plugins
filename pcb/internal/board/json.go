@@ -15,10 +15,15 @@
 // structs that inline Extra into the JSON object, so the JSON boundary is as
 // lossless as the YAML one. YAML behavior is unchanged — the `yaml:",inline"` tag
 // still governs YAML; these methods add nothing to that path. Zone joined this
-// list when it was added to the schema (docket 019f9a73e5a2 / 019f761fda74) —
-// for the same reason as the original 9: without a Zone pair here, Zone.Extra
-// would round-trip through YAML but silently vanish on JSON marshal, exactly
-// the bug this file exists to fix.
+// list when it was added to the schema (docket 019f9a73e5a2 / 019f761fda74), and
+// Cutout when it was (campaign 2 epoch B) — for the same reason as the original
+// 9: without a pair here, that struct's Extra would round-trip through YAML but
+// silently vanish on JSON marshal, exactly the bug this file exists to fix.
+//
+// THE RULE THIS FILE ENFORCES: every NEW Extra-bearing struct needs a pair here.
+// Field additions to an EXISTING struct are free (knownJSONKeys is reflective
+// and memoized per type), but a new struct without a pair fails SILENTLY and
+// only across IPC — which is why the failure went unnoticed for 9 structs.
 //
 // # Invariants
 //
@@ -31,7 +36,7 @@
 //   - Nesting composes for free: each nested struct carries its own methods, so
 //     encoding/json invokes them recursively — no hand-rolled nested handling.
 //
-// The method pairs (10, as of Zone) are thin wrappers over three shared
+// The method pairs (11, as of Cutout) are thin wrappers over three shared
 // helpers (knownJSONKeys / mergeExtra / splitExtra) — DRY is a review gate here.
 package board
 
@@ -391,5 +396,31 @@ func (z *Zone) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	z.Extra = extra
+	return nil
+}
+
+// --- Cutout ---
+
+func (c Cutout) MarshalJSON() ([]byte, error) {
+	type alias Cutout
+	base, err := json.Marshal(alias(c))
+	if err != nil {
+		return nil, err
+	}
+	return mergeExtra(base, c.Extra, knownJSONKeys(reflect.TypeOf(Cutout{})))
+}
+
+func (c *Cutout) UnmarshalJSON(data []byte) error {
+	type alias Cutout
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*c = Cutout(a)
+	extra, err := splitExtra(data, knownJSONKeys(reflect.TypeOf(Cutout{})))
+	if err != nil {
+		return err
+	}
+	c.Extra = extra
 	return nil
 }

@@ -21,12 +21,20 @@ import (
 
 // knownRootFields are the top-level keys ImportMinpcb explicitly understands.
 // Anything else at the root is preserved in Board.Extra and warned about.
+//
+// MEMBERSHIP HERE IS A PROMISE, NOT A LABEL: this map is consulted ONLY as the
+// skip-list of the passthrough loop below, so a key listed here with no import
+// branch above is neither mapped NOR parked in Extra NOR warned — it is silently
+// dropped. Every entry must therefore have a branch. (Parking a MODELED key in
+// Extra instead is not an option either: mergeExtra lets the modeled field win,
+// so the Extra copy vanishes on the next JSON marshal — that is exactly how the
+// holes were lost in finding 019f8b7fb07e.)
 var knownRootFields = map[string]bool{
 	"version": true, "board_name": true, "board_width": true,
 	"board_height": true, "grid_size": true, "layers": true,
 	"components": true, "nets": true, "traces": true, "vias": true,
 	"mounting_holes": true, "pth_holes": true, "npth_holes": true,
-	"annotations": true, "route_hints": true,
+	"cutouts": true, "annotations": true, "route_hints": true,
 }
 
 // knownComponentFields are the per-component keys mapped or intentionally
@@ -159,6 +167,30 @@ func ImportMinpcb(data []byte) (*Board, []string, error) {
 			}
 			*hk.dst = holes
 		}
+	}
+
+	// --- cutouts: map into the TYPED collection, for the same reason the holes
+	// above are. `cutouts` is a modeled key, so parking it in Extra would let
+	// mergeExtra drop it on the next JSON marshal (finding 019f8b7fb07e), and
+	// listing it in knownRootFields WITHOUT this branch would drop it outright.
+	// Decoded through POINTERS so a JSON `null` item is rejected rather than
+	// becoming a phantom outline-less cutout that v1->v2 minting would then mint
+	// an id for — the same fail-closed rule UnmarshalYAML's null-item probe
+	// applies on the YAML path, which this JSON import bypasses.
+	if raw, ok := root["cutouts"]; ok {
+		var ptrs []*Cutout
+		if err := json.Unmarshal(raw, &ptrs); err != nil {
+			return nil, nil, fmt.Errorf("board: parse minpcb cutouts: %w", err)
+		}
+		cutouts := make([]Cutout, 0, len(ptrs))
+		for i, p := range ptrs {
+			if p == nil {
+				return nil, nil, fmt.Errorf(
+					"board: import minpcb: invalid_board_structure: cutouts[%d] is a null item", i)
+			}
+			cutouts = append(cutouts, *p)
+		}
+		b.Cutouts = cutouts
 	}
 
 	// --- annotations / route_hints: opaque passthrough (id→object → []Blob) ---

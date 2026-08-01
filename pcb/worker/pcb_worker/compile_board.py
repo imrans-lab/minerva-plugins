@@ -2103,7 +2103,21 @@ def compile_board(
     # still refused, now by the shared boundary above (validate_board_v2 →
     # ``invalid_board_structure``) rather than here, so ``zones: {}`` keeps failing
     # closed while ``zones: []`` keeps declaring nothing.
-    for unsupported_key in ("board_graphics", "keepouts"):
+    #
+    # ``cutouts`` JOINED this list the day the entity was modeled (campaign 2 epoch
+    # B), and that refusal is the POINT of the entity, not a placeholder for work
+    # not done yet: a cutout is AUTHORABLE and NOT COMPILABLE.  The IR has a shape
+    # for it (``ProfileOutline.cutouts``), but nothing can safely reach it —
+    # ``ir_projection.outline_frame`` silently degrades a ``ProfileOutline`` to its
+    # outer axis-aligned bounding box, DISCARDING every cutout with no warning, and
+    # both fab emitters read exactly that projection.  A cutout that compiled today
+    # would therefore ship a board with no opening in it, silently.  That fail-open
+    # is filed as docket 019fbd30f7 and must be fixed BEFORE this key leaves the
+    # list; ``route_bridge`` and geometric DRC additionally refuse a non-Rect
+    # outline by type, which is the second line of defence.  Same presence-not-
+    # truthiness rule as the others: ``cutouts: {}`` is a declaration and is
+    # refused, ``cutouts: []`` declares nothing and is allowed.
+    for unsupported_key in ("board_graphics", "keepouts", "cutouts"):
         value = board.get(unsupported_key)
         if value is None or (isinstance(value, list) and not value):
             continue

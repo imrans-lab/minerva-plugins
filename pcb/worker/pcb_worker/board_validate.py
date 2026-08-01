@@ -77,9 +77,9 @@ def validate_board_v2(board: dict) -> list[str]:
     ``unsupported_schema_version``, ``unminted_persistent_id``,
     ``duplicate_persistent_id``, ``invalid_pin_override``, ``invalid_board_structure``,
     for the layer stack — ``invalid_layer_name``, ``duplicate_layer``,
-    ``incomplete_layer_stack``, ``invalid_layer_stack_order`` — and for zones —
+    ``incomplete_layer_stack``, ``invalid_layer_stack_order`` — for zones —
     ``invalid_zone_outline``, ``invalid_zone_kind``, ``zone_unknown_net``,
-    ``zone_unknown_layer``.
+    ``zone_unknown_layer`` — and for cutouts, ``invalid_cutout_outline``.
     """
     if not isinstance(board, dict):
         return ["invalid_board_structure"]
@@ -105,7 +105,7 @@ def validate_board_v2(board: dict) -> list[str]:
     # enforced by the codec and the full compiler, not re-checked here.
     lists: dict[str, list] = {}
     for key in ("components", "nets", "traces", "vias",
-                "mounting_holes", "pth_holes", "npth_holes", "zones"):
+                "mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts"):
         items, ok = _as_list(board.get(key))
         lists[key] = items
         if not ok:
@@ -120,6 +120,7 @@ def validate_board_v2(board: dict) -> list[str]:
     # outline is wrong regardless of which identity era the board is from.
     _check_layers(board, codes)
     _check_zones(lists["zones"], board, codes)
+    _check_cutouts(lists["cutouts"], codes)
 
     if version >= 2:
         if not _is_minted_id("board", board.get("id")):
@@ -144,6 +145,11 @@ def validate_board_v2(board: dict) -> list[str]:
         # recorded in bug 019fb0a7aea7 item 4, where Go validated zone ids and
         # Python did not.
         _check_entity_ids("zone", [lists["zones"]], codes)
+        # Cutouts own one collection and are checked LAST, the same order Go's
+        # Validate walks (trace, via, hole, zone, cutout) and the same order
+        # MigrateV1toV2 mints in, so a board violating two domains yields the
+        # same first code on both sides.
+        _check_entity_ids("cutout", [lists["cutouts"]], codes)
 
     for comp in lists["components"]:
         if not isinstance(comp, dict):
@@ -290,6 +296,39 @@ def _check_zones(zones: list, board: dict, codes: list) -> None:
         # validate a zone's layer name against. Same condition as Go.
         if declared_layers and layer not in declared_layers:
             codes.append("zone_unknown_layer")
+            return
+
+
+def _check_cutouts(cutouts: list, codes: list) -> None:
+    """Mirror of Go's ``validateCutouts`` (internal/board/validate.go): append the
+    FIRST cutout-structural violation, using Go's own code string.
+
+    A cutout has exactly ONE content rule, because it has exactly one authored
+    field besides its id: an ``outline`` with fewer than 3 points is not a polygon
+    (``invalid_cutout_outline``).  There is no kind, no net and no layer to check —
+    a cutout goes through the WHOLE board, which is what makes it a cutout rather
+    than a third zone kind.  Only the first violation is appended, matching Go's
+    return-on-first-error.
+
+    Version-independent, exactly as in Go: a two-point "polygon" is wrong on a v1
+    board too.  A non-dict item is skipped (a ``None`` item is already
+    ``invalid_board_structure`` upstream, so skipping avoids double-coding).
+
+    Unlike zones, there is no fuller re-check downstream: ``compile_board`` REFUSES
+    any board declaring a non-empty ``cutouts`` (``unsupported_board_feature``), so
+    a cutout is authorable and NOT compilable, and this boundary is the only place
+    that ever inspects one.  Containment in the board outline, self-intersection and
+    overlap with other entities are deliberately NOT checked on either side — see
+    the Cutout type's comment in board.go for why that asymmetry would be worse
+    than the gap."""
+    if not cutouts:
+        return
+    for cutout in cutouts:
+        if not isinstance(cutout, dict):
+            continue
+        outline = cutout.get("outline")
+        if not isinstance(outline, list) or len(outline) < 3:
+            codes.append("invalid_cutout_outline")
             return
 
 

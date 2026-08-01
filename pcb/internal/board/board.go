@@ -98,6 +98,24 @@ type Board struct {
 	// See docs/board-yaml.md "Zones".
 	Zones []Zone `json:"zones,omitempty" yaml:"zones,omitempty"`
 
+	// Cutouts are authored openings THROUGH the whole board — an internal slot
+	// or window milled out of the substrate (docket 019fb92108 campaign 2,
+	// epoch B). Modeled and round-tripped losslessly here, and that is ALL:
+	// unlike a zone, a cutout is AUTHORABLE and NOT COMPILABLE. compile_board
+	// refuses any board declaring a non-empty `cutouts` via the
+	// unsupported_board_feature denylist, so a cutout never reaches the Python
+	// IR at all.
+	//
+	// The refusal is the fail-closed keystone, not a stub: the IR HAS a shape
+	// for this (ProfileOutline.cutouts, resolved_board.py) but the projection
+	// every fab emitter reads (ir_projection.outline_frame) silently degrades a
+	// ProfileOutline to its outer axis-aligned bounding box, DISCARDING the
+	// cutouts with no warning — a board authored with a window would ship as
+	// SOLID copper-clad substrate. That fail-open is filed as 019fbd30f7. Until
+	// it is fixed, refusing at compile is the only honest treatment, and it is
+	// exactly how zones started.
+	Cutouts []Cutout `json:"cutouts,omitempty" yaml:"cutouts,omitempty"`
+
 	// MountingHoles are board-level drilled holes not attached to a pad — the
 	// mechanical mounting / non-plated holes the gerber exporter routes into
 	// PTH.drl or NPTH.drl by their Plated flag. Formalises the field the gerber
@@ -429,6 +447,52 @@ type Zone struct {
 	// so it needs at least 3 points to be a polygon at all; Validate rejects
 	// fewer. Not omitempty, matching Trace.Points — a zone's geometry is core
 	// content, not an optional extra.
+	Outline []Point `json:"outline" yaml:"outline"`
+
+	Extra map[string]interface{} `json:"-" yaml:",inline"`
+}
+
+// Cutout is an opening through the ENTIRE board — an internal slot or window
+// milled out of the substrate. It is deliberately the SIMPLEST entity in this
+// contract, and each absence below is a decision, not an oversight:
+//
+//   - No Layer. A cutout goes through every layer; "which layer" is the one
+//     question a cutout cannot be asked. This is the whole reason it is a
+//     separate entity from Zone rather than a third Zone.Kind — a keepout is a
+//     per-layer prohibition on copper, a cutout is the absence of board.
+//   - No Net. Nothing is connected to a hole in the substrate.
+//   - No Kind. v1 has exactly one thing a cutout can be. A kind field with one
+//     legal value teaches nothing and would have to be validated anyway.
+//   - No circle/arc variant. The Python IR's Contour already admits arc
+//     segments, so circles are a later WIDENING of Outline, not a competing
+//     shape; and a round opening the fab will drill is already expressible as
+//     a mounting hole (Hole carries diameter_mm). Two shape variants would
+//     double the validator, the renderer, the hit-test and the MCP surface for
+//     a case nothing needs yet. If circles are wanted later, PTHHoles /
+//     NPTHHoles (NormalizeHoles) is the precedent: an input alias normalized
+//     into the canonical form at every parse boundary.
+//
+// Validate checks STRUCTURE only (outline point count, minted+unique v2 id).
+// It does NOT check that a cutout lies inside the board outline, that it avoids
+// pads/traces/vias/zones, that it is non-self-intersecting, or that another
+// cutout does not overlap it. That is not an oversight either: containment is a
+// check class NOTHING in this contract has — neither Go nor Python bounds-checks
+// a mounting hole or a zone — so adding it for cutouts alone would make a hole
+// 3 mm off the board edge legal while a cutout there is not. Containment should
+// arrive once, applied to holes+zones+cutouts together.
+type Cutout struct {
+	// ID is the persistent, mint-once cutout identity (schema v2+) — same
+	// rationale as Trace.ID and Zone.ID: cutouts are reorderable, so an
+	// ordinal-derived id would be unstable. Opaque token ("cutout:<32 hex>");
+	// empty on v1; omitempty for lossless round-trip.
+	ID string `json:"id,omitempty" yaml:"id,omitempty"`
+
+	// Outline is the ordered polygon boundary of the opening. Like Zone.Outline
+	// it describes a CLOSED region, so it needs at least 3 points to be a
+	// polygon at all; Validate rejects fewer (invalid_cutout_outline). Not
+	// omitempty, matching Zone.Outline and Trace.Points — the geometry IS the
+	// entity here, not an optional extra, and a cutout with no outline is the
+	// one shape that must never serialize as if it were merely terse.
 	Outline []Point `json:"outline" yaml:"outline"`
 
 	Extra map[string]interface{} `json:"-" yaml:",inline"`

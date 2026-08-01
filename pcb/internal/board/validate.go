@@ -20,13 +20,15 @@ import "fmt"
 // Validate enforces the shared boundary on a parsed Board:
 //   - schema version must be 1 or 2;
 //   - a v2 board carries a minted persistent id ("<kind>:<32 lowercase hex>") on
-//     the board and on every trace/via/hole/zone. v1 has NO id requirement — it
-//     is the ordinal-bridge era, before identity was minted;
+//     the board and on every trace/via/hole/zone/cutout. v1 has NO id requirement
+//     — it is the ordinal-bridge era, before identity was minted;
 //   - a declared layer stack names only canonical copper layers, in stack
 //     order, with no duplicates and no gaps. See validateLayers;
 //   - every zone (v1 or v2 — this rule is NOT version-gated, unlike identity)
 //     has a structurally valid outline and names a net/layer that exists. See
-//     validateZones.
+//     validateZones;
+//   - every cutout (likewise not version-gated) has an outline that is a
+//     polygon. See validateCutouts.
 //
 // The error codes (unsupported_schema_version, unminted_persistent_id,
 // duplicate_persistent_id) are the SAME strings the Python compiler and
@@ -36,18 +38,14 @@ import "fmt"
 // verbatim by board_validate.py's _check_layers — unlike the zone codes below,
 // they went in on both sides in the same change (epoch 6 unit 3a).
 // The zone-structural codes (invalid_zone_outline, invalid_zone_kind,
-// zone_unknown_net, zone_unknown_layer) are NOT yet cross-checked against
-// Python by a vector, but board_validate.py's _check_zones mirrors them
-// string-for-string and in the same order: the Python
-// compiler refuses a board that declares one or more zones
-// (compile_board.py:1836 — presence-AND-non-empty; `zones: []`/`zones: null`
-// are skipped there) rather than validating zone content, so there is no
-// Python-side zone validator yet to match strings with. The zone IDENTITY codes
-// are Go-only for the same reason: board_validate.py's entity tuple does not
-// include zones, so Go validates zone ids more eagerly than Python does. That
-// asymmetry is fail-closed in the safe direction, but it is an asymmetry. A
-// future round that teaches Python to accept zones should reuse these exact
-// strings rather than inventing new ones, and should add zones to that tuple.
+// zone_unknown_net, zone_unknown_layer) are mirrored string-for-string and in
+// the same first-violation-wins order by board_validate.py's _check_zones, and
+// zone ids are checked on both sides (its entity tuple includes zones) — the
+// Go-only asymmetry this comment used to record was closed when the Python
+// compiler stopped refusing the zones key outright (bug 019fb0a7aea7 item 4).
+// invalid_cutout_outline and the cutout identity codes went in on BOTH sides in
+// one change and are asserted by committed vectors, so cutouts never had that
+// asymmetry to begin with.
 func Validate(b *Board) error {
 	if b.Version != 1 && b.Version != 2 {
 		return fmt.Errorf("unsupported_schema_version: version %d (want 1 or 2)", b.Version)
@@ -60,6 +58,9 @@ func Validate(b *Board) error {
 		return err
 	}
 	if err := validateZones(b); err != nil {
+		return err
+	}
+	if err := validateCutouts(b); err != nil {
 		return err
 	}
 	if b.Version < 2 {
@@ -117,6 +118,22 @@ func Validate(b *Board) error {
 			return fmt.Errorf("duplicate_persistent_id: zone[%d] id %q duplicates zone[%d]", i, id, j)
 		}
 		seenZone[id] = i
+	}
+	// Cutouts LAST, matching MigrateV1toV2's mint order and board_validate.py's
+	// check order, so a board violating two domains reports the same first code
+	// everywhere. This loop and the cutout mint loop in migrate.go MUST stay
+	// together: minting without checking is a silent gap, and checking without
+	// minting makes EVERY migrated board fail unminted_persistent_id.
+	seenCutout := make(map[string]int, len(b.Cutouts))
+	for i := range b.Cutouts {
+		id := b.Cutouts[i].ID
+		if !isMintedID("cutout", id) {
+			return fmt.Errorf("unminted_persistent_id: cutout[%d] id %q is not minted", i, id)
+		}
+		if j, ok := seenCutout[id]; ok {
+			return fmt.Errorf("duplicate_persistent_id: cutout[%d] id %q duplicates cutout[%d]", i, id, j)
+		}
+		seenCutout[id] = i
 	}
 	return nil
 }
@@ -285,6 +302,34 @@ func validateZones(b *Board) error {
 		// list has nothing to validate a zone's layer name against.
 		if len(b.Layers) > 0 && !knownLayers[z.Layer] {
 			return fmt.Errorf("zone_unknown_layer: zone[%d] layer %q is not in the declared layer stack", i, z.Layer)
+		}
+	}
+	return nil
+}
+
+// validateCutouts enforces the ONLY rule a cutout has: its outline is a polygon.
+// There is no kind to check, no net to resolve and no layer to look up — a
+// cutout goes through the whole board, which is what makes it a cutout (see the
+// Cutout type's own comment for why each of those fields is absent).
+//
+// Like validateZones this is NOT version-gated: a two-point "polygon" is wrong
+// on a v1 board too. Identity is the only v2-gated cutout rule, and it lives in
+// Validate with the other id domains.
+//
+// Deliberately ABSENT, and the absence is on the record: containment in the
+// board rect, self-intersection, overlap with pads/traces/vias/zones/other
+// cutouts, minimum internal radius. None of those check classes exists anywhere
+// in this contract today (nothing bounds-checks a mounting hole or a zone
+// either), so adding them for cutouts alone would create an asymmetry rather
+// than close one. board_validate.py's _check_cutouts mirrors this
+// string-for-string; committed vectors assert the valid round-trip and the
+// short-outline refusal on both sides (unminted-id and [null]-item cases are
+// covered by each language's own tests, not yet by a shared vector —
+// cold-review B4u2 N2).
+func validateCutouts(b *Board) error {
+	for i, c := range b.Cutouts {
+		if len(c.Outline) < 3 {
+			return fmt.Errorf("invalid_cutout_outline: cutout[%d] outline has %d point(s), a polygon needs at least 3", i, len(c.Outline))
 		}
 	}
 	return nil

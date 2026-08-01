@@ -34,15 +34,15 @@ func MarshalYAML(b *Board) ([]byte, error) {
 // silently DROP a null list item before Validate ever sees it — both must fail
 // closed with a code the cross-language vector runner can assert.
 //
-// "zones" was added here with the Zone type itself, ahead of Python: the
-// Python mirror's own entity-list tuple (board_validate.py:75) does not yet
-// include "zones" (there is no Python-side zone validator yet — compile_board
-// refuses the key outright, upstream of validation). This is the same kind of
-// Go-superset gap documented in spec/board-v2.md ("Go's codec is a strict
-// superset") rather than a drift bug: it fails closed MORE eagerly on the Go
-// side, never less, so it does not need a cross-language vector to justify it.
+// "zones" was added here with the Zone type itself, AHEAD of Python; Python has
+// since caught up (board_validate.py's entity-list tuple and _check_zones).
+// "cutouts" went in on BOTH sides in one change, so it is exact parity from the
+// start — and it is covered by committed vectors, which is what keeps the two
+// lists from drifting apart again. THE INVARIANT: this slice and
+// board_validate.py's tuple must name the same keys, or a malformed collection
+// fails closed in one language and passes in the other.
 var entityListKeys = []string{"components", "nets", "traces", "vias",
-	"mounting_holes", "pth_holes", "npth_holes", "zones"}
+	"mounting_holes", "pth_holes", "npth_holes", "zones", "cutouts"}
 
 // overrideNumKeys mirrors _OVERRIDE_NUM_KEYS in board_validate.py — the typed
 // pin-override fields that must decode as numbers.

@@ -81,7 +81,7 @@ func isMintedID(entityType, id string) bool {
 }
 
 // MigrateV1toV2 mints a persistent id for the board and every trace/via/hole/
-// zone that lacks a well-formed minted id, then bumps the board to schema v2.
+// zone/cutout that lacks a well-formed minted id, then bumps the board to v2.
 // It returns the number of ids minted.
 //
 // The migration is IDEMPOTENT: a board already carrying minted ids is unchanged
@@ -119,6 +119,15 @@ func MigrateV1toV2(b *Board, mint IDSource) (int, error) {
 	}
 	for i := range b.Zones {
 		if err := ensure("zone", &b.Zones[i].ID); err != nil {
+			return minted, err
+		}
+	}
+	// Cutouts mint here for the same reason zones do, and this loop is ATOMIC
+	// with the cutout id loop in Validate: split them across two changes and
+	// every migrated board carrying a cutout fails unminted_persistent_id the
+	// moment it is validated.
+	for i := range b.Cutouts {
+		if err := ensure("cutout", &b.Cutouts[i].ID); err != nil {
 			return minted, err
 		}
 	}

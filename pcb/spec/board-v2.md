@@ -29,17 +29,20 @@ codec additionally rejects a non-integer `version` at unmarshal.)
 
 A minted id is exactly `"<kind>:<32 lowercase hex>"` — a 128-bit crypto-random
 mint, **not** a content hash (a trace's geometry mutates under editing; its
-identity must survive the edit). The kinds are `board`, `trace`, `via`, `hole`.
+identity must survive the edit). The kinds are `board`, `trace`, `via`, `hole`,
+`zone`, `cutout`.
 
-On a **v2** board, the board `id` and the `id` of every trace, via, and mounting
-hole MUST be a well-formed minted id. Anything else — absent, empty, a legacy
+On a **v2** board, the board `id` and the `id` of every trace, via, mounting
+hole, zone and cutout MUST be a well-formed minted id. Anything else — absent, empty, a legacy
 ordinal shape like `trace_1` carried in from a `.minpcb` import, uppercase hex,
 or a foreign shape — is `unminted_persistent_id` and fails closed. v1 boards have
 no id requirement.
 
 Minted ids must also be **unique within their entity domain**: the board id is a
 single global value; trace ids are unique among traces, via ids among vias, hole
-ids among mounting holes. Two entities of the same kind carrying the same token
+ids among mounting holes, zone ids among zones, cutout ids among cut-outs. Note
+the hole domain spans THREE keys — `mounting_holes`, `pth_holes`, `npth_holes`
+all fold into it. Two entities of the same kind carrying the same token
 is `duplicate_persistent_id`. Uniqueness is **per-domain**, so a `trace:<hex>` and
 a `via:<hex>` that happen to share the same hex tail are DISTINCT ids (the kind
 prefix differs) and both valid.
