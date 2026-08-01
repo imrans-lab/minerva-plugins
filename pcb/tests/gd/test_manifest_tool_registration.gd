@@ -91,12 +91,14 @@ func _init() -> void:
 		check("registered: %s" % tool_name, tool_name in registered,
 				"registered set: %s" % str(registered))
 
-	# Total count pin: 39 panel tools (29 pre-A6 + the 5 A6 zone tools + the 3 A7
+	# Total count pin: 45 panel tools (29 pre-A6 + the 5 A6 zone tools + the 3 A7
 	# trace-width/preference tools: set_trace_width, get_preference,
-	# set_preference + the 2 B1-U2 board-via tools: list_vias, delete_via) +
-	# these 11 worker tools == 50. Catches a manifest that silently dropped or
-	# duplicated an unrelated entry while a round's diff was being made.
-	check("total registered tool count == 50", registered.size() == 50,
+	# set_preference + the 2 B1-U2 board-via tools: list_vias, delete_via + the
+	# 6 B2 MCP-parity tools: create_zone, set_zone_outline, group_components,
+	# ungroup, set_group_member_offset, get_layout_state) + these 11 worker
+	# tools == 56. Catches a manifest that silently dropped or duplicated an
+	# unrelated entry while a round's diff was being made.
+	check("total registered tool count == 56", registered.size() == 56,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
