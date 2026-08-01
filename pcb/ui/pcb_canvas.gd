@@ -3668,22 +3668,49 @@ func _has_any_locked_components() -> bool:
 ##
 ## Leaving a zone tool discards any half-drawn polygon — and leaving the trace
 ## tool any half-drawn trace — under the same "switching modes clears in-progress
-## state" rule. Silently: the user asked for another tool, so the abandoned draw
-## is expected, not something to report.
-func set_tool_mode(mode: ToolMode) -> void:
+## state" rule. Silent by default: the user asked for another tool, so the
+## abandoned draw is expected, not something to report. `announce_cancel` lets a
+## caller opt into the OTHER house convention _cancel_zone_draw/_cancel_trace_draw
+## already support for an explicit Esc/right-click cancel, for a transition that
+## is not a plain tool switch — PCBPanel's re-click-disarm (item 5, 019fbbadd8f0)
+## is exactly that: the user re-clicked the armed button as an explicit "get me
+## out" gesture, so any abandoned polygon/trace is announced, not silently dropped.
+##
+## ORDER MATTERS when announce_cancel is true (cold review F1): the cancel call
+## — and therefore its toast — is deliberately made AFTER tool_mode_changed.emit
+## below, not before. tool_mode_changed is synchronous and PCBPanel's handler
+## ends in an unconditional _update_status() that overwrites the status label
+## with the standing text; emitting the cancel toast before that point gets it
+## clobbered in the same call, before a frame ever renders (measured). Emitting
+## it after means the toast lands on top of the just-refreshed standing text,
+## which is what _show_transient_status's 2s-revert contract assumes. The
+## "leaving a zone/trace tool" decision itself still reads the OUTGOING
+## tool_mode, captured into locals before the reassignment below — by the time
+## the cancel call runs, tool_mode already holds the new value, but nothing in
+## _cancel_zone_draw/_cancel_trace_draw ever reads tool_mode, so this is safe.
+##
+## TWO STANDING GUARANTEES the emit window relies on (re-review N1/N2 — pin
+## them here so a future edit re-checks): tool_mode_changed has exactly ONE
+## listener repo-wide, and _sync_draw_arm_ui's in-window status write is safe
+## only because the re-click disarm target is hardcoded SELECT. Adding a
+## second listener, or a disarm target with in-progress draw state, re-opens
+## the clobber/re-entrancy questions measured in cold review B1u4.
+func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 	if tool_mode != mode:
 		if tool_mode == ToolMode.INSPECT_PIN or mode == ToolMode.INSPECT_PIN:
 			_clear_inspect_pin_selection()
-		if _is_zone_tool():
-			_cancel_zone_draw(false)
-		if tool_mode == ToolMode.TRACE:
-			_cancel_trace_draw(false)
+		var leaving_zone_tool := _is_zone_tool()
+		var leaving_trace_tool := tool_mode == ToolMode.TRACE
 		# Leaving Select ends any annotation gesture in flight (B1u3) — the
 		# universal Select is disarmed by the panel on this same transition, so
 		# the release would arrive with nothing to receive it.
 		_annotation_gesture = false
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
+		if leaving_zone_tool:
+			_cancel_zone_draw(announce_cancel)
+		if leaving_trace_tool:
+			_cancel_trace_draw(announce_cancel)
 		queue_redraw()
 
 #endregion
@@ -3866,8 +3893,10 @@ func _clear_inspect_pin_selection() -> void:
 ## tool's grammar rather than inventing a second one):
 ##   ARMED   --left-click-->        place a vertex
 ##   DRAWING --double-click/Enter-> close and commit (needs ≥3 vertices)
-##   DRAWING --Esc/right-click-->   cancel
-##   DRAWING --tool switch-->       cancel (silently — see set_tool_mode)
+##   DRAWING --Esc/right-click-->   cancel (announced)
+##   DRAWING --tool switch-->       cancel (silent, unless the switch IS a
+##                                  re-click disarm — see set_tool_mode's
+##                                  announce_cancel)
 ##
 ## This tool AUTHORS A BOARD ENTITY (a Zone in the model, which serializes into
 ## the board YAML), unlike the hint tools which author annotations. That is why it
@@ -4019,8 +4048,11 @@ func _commit_zone() -> void:
 	queue_redraw()
 
 
-## Discard the in-progress polygon. `announce` is false for a tool switch (the
-## user already knows) and true for an explicit Esc/right-click cancel.
+## Discard the in-progress polygon. `announce` is false for a plain tool switch
+## (the user already knows) and true for an explicit Esc/right-click cancel OR
+## a re-click disarm (set_tool_mode's announce_cancel — that switch IS the
+## explicit "get me out" the user asked for, not an incidental side effect of
+## picking a different tool).
 func _cancel_zone_draw(announce: bool) -> void:
 	if _zone_points.is_empty():
 		return
@@ -4094,8 +4126,10 @@ func _draw_zone_preview() -> void:
 ##   DRAWING --left-click-->         place a waypoint
 ##   DRAWING --click ANY pad-->      finish at that pad's centre and commit
 ##   DRAWING --double-click/Enter--> finish at the last waypoint (dangling)
-##   DRAWING --Esc/right-click-->    cancel
-##   DRAWING --tool switch-->        cancel (silently — see set_tool_mode)
+##   DRAWING --Esc/right-click-->    cancel (announced)
+##   DRAWING --tool switch-->        cancel (silent, unless the switch IS a
+##                                   re-click disarm — see set_tool_mode's
+##                                   announce_cancel)
 ##
 ## This is the DIRECT-AUTHORING sibling of the Proposals-group trace tool, not a
 ## replacement for it (owner ruling, umbrella docket 019fb5720368): that tool
@@ -4295,8 +4329,11 @@ func _commit_trace(warning: String = "") -> void:
 	queue_redraw()
 
 
-## Discard the in-progress trace. `announce` is false for a tool switch (the user
-## already knows) and true for an explicit Esc/right-click cancel.
+## Discard the in-progress trace. `announce` is false for a plain tool switch
+## (the user already knows) and true for an explicit Esc/right-click cancel OR
+## a re-click disarm (set_tool_mode's announce_cancel — that switch IS the
+## explicit "get me out" the user asked for, not an incidental side effect of
+## picking a different tool).
 func _cancel_trace_draw(announce: bool) -> void:
 	if _trace_points.is_empty():
 		return

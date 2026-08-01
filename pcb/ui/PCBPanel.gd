@@ -2427,17 +2427,35 @@ func _toggle_tool_mode(mode: int) -> void:
 	# so a dock-armed tool (e.g. annotation Select) stayed on the shared
 	# overlay claiming every click, and Draw-tool clicks never landed.
 	_clear_dock_active_tool()
-	# Radio behaviour: Select and Pan are the two persistent tools. Clicking a
-	# tool activates it; Select is the resting tool, so we never drop to a
-	# modeless state. Re-assert button pressed-states even when the mode is
-	# unchanged (clicking the already-active toggle button flipped it visually).
-	_canvas.set_tool_mode(mode)
+	# Re-click disarm (item 5, 019fbbadd8f0, owner ruling): clicking the
+	# ALREADY-armed radio button (Pan, Pour, Keepout, Trace, Eraser) is a
+	# second explicit press on the same tool, not a request to re-arm it — it
+	# disarms back to Select, the resting tool. Same OUTCOME the route-flow
+	# cluster (_activate_route_flow_tool/_deactivate_route_flow_tool) and the
+	# pin inspector (_toggle_inspect_pin_mode) already give on their own
+	# surfaces — this brings the Tools/Select radio cluster in line with
+	# them — but NOT the same mechanism: those two branch on the widget's
+	# post-flip `button_pressed`, where this branches on `_canvas.tool_mode`,
+	# the model state, which cannot be desynced by a stray button write (see
+	# _sync_tool_buttons below, which does exactly such a write on every
+	# call). A re-click on Select itself needs no special case — target is
+	# already SELECT, and set_tool_mode's same-mode guard keeps that a no-op
+	# exactly as it is today.
+	var was_armed: bool = _canvas.tool_mode == mode
+	var target: int = _PcbCanvasScript.ToolMode.SELECT if was_armed else mode
+	# `was_armed` doubles as the announce flag: a disarm re-click is an
+	# explicit "get me out" gesture, so any abandoned in-progress zone/trace
+	# draw is announced, not silently discarded the way an ordinary
+	# tool-to-tool switch discards one. set_tool_mode itself is responsible
+	# for making that announce actually land AFTER the mode change settles
+	# (cold review F1) — see its doc block.
+	_canvas.set_tool_mode(target, was_armed)
 	_sync_tool_buttons(_canvas.tool_mode)
 
 
 func _sync_tool_buttons(mode: int) -> void:
 	for m in _tool_buttons:
-		(_tool_buttons[m] as Button).button_pressed = (m == mode)
+		(_tool_buttons[m] as Button).set_pressed_no_signal(m == mode)
 
 
 ## Trash-can enablement (item 019fb92f8b83): live off the canvas' own
