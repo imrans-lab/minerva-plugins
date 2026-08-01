@@ -287,8 +287,11 @@ func _test_transitions_preserve_board() -> void:
 	check("medium→narrow: board intact", panel.get_data().components.size() == parts_before)
 	check("medium→narrow: canvas alive", is_instance_valid(panel._canvas))
 
-	# Flip a view flag through the View MENU while narrow (inline toggles are
-	# hidden), then widen — the inline CheckButton must show the live flag.
+	# Flip a view flag through the View MENU while narrow, then widen. The
+	# menu is the ONE view-flags surface at every mode (owner ruling, bug
+	# 019fbb6242 — the former wide-mode inline toggle row is deleted), so at
+	# wide the flag must still be live on the canvas, the menu must still be
+	# there, and no inline toggle row may exist to drift from it.
 	panel._on_view_menu_id_pressed(0)  # toggles show_grid off
 	check("menu toggled canvas flag", panel._canvas.show_grid == false)
 
@@ -300,10 +303,12 @@ func _test_transitions_preserve_board() -> void:
 	check("narrow→wide: sidebar visible again",
 		bool(panel.get_layout_state().get("sidebar_visible", false)))
 
-	var toggles: Control = panel.find_child("ViewTogglesBox", true, false)
-	var grid_toggle: CheckButton = toggles.get_child(0) as CheckButton if toggles != null and toggles.get_child_count() > 0 else null
-	check("inline Grid toggle re-synced from canvas flag",
-		grid_toggle != null and grid_toggle.button_pressed == false)
+	check("canvas flag survives the mode change", panel._canvas.show_grid == false)
+	var view_menu_wide: Control = panel.find_child("ViewMenuButton", true, false)
+	check("View menu present + visible at wide",
+		view_menu_wide != null and view_menu_wide.visible)
+	check("no inline toggle row exists (bug 019fbb6242)",
+		panel.find_child("ViewTogglesBox", true, false) == null)
 
 	_teardown(panel)
 
