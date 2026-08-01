@@ -96,9 +96,13 @@ func _init() -> void:
 	# set_preference + the 2 B1-U2 board-via tools: list_vias, delete_via + the
 	# 6 B2 MCP-parity tools: create_zone, set_zone_outline, group_components,
 	# ungroup, set_group_member_offset, get_layout_state) + these 11 worker
-	# tools == 56. Catches a manifest that silently dropped or duplicated an
-	# unrelated entry while a round's diff was being made.
-	check("total registered tool count == 56", registered.size() == 56,
+	# tools + the 4 campaign-2-epoch-B unit-3 cutout tools (list_cutouts,
+	# describe_cutout, create_cutout, delete_cutout — the zone surface's
+	# four-tool subset, minus set_net/set_layer/set_outline, which a netless,
+	# layerless cutout has nothing to name) == 60. Catches a manifest that
+	# silently dropped or duplicated an unrelated entry while a round's diff
+	# was being made.
+	check("total registered tool count == 60", registered.size() == 60,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
