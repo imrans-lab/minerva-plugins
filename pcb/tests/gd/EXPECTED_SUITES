@@ -23,6 +23,7 @@ test_parity_bridge.gd
 test_pcb_annotation_host_semantics.gd
 test_pcb_apply_route_hints.gd
 test_pcb_backend_lifecycle.gd
+test_pcb_bus_geometry.gd
 test_pcb_canvas_input_probe.gd
 test_pcb_drc_propose.gd
 test_pcb_explicit_propose.gd
