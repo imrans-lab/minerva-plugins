@@ -495,10 +495,18 @@ func _build_ui() -> void:
 	# Model → toolbar (board size label) refresh.
 	_data.structure_changed.connect(_update_board_size_label)
 
-	# Status bar.
+	# Status bar. TRIM_ELLIPSIS is load-bearing, not cosmetic: an unclipped
+	# Label's MINIMUM width is its full text width, and this label carries the
+	# armed-tool gesture hint (933px measured at medium) — without overrun
+	# handling it inflates the whole WorkspaceVBox→MainVBox chain past the
+	# pane and drags every stretch-width row off-screen (bug: the pane clips,
+	# nothing scrolls; hint pcb-plugin/label-min-width-inflates-panel). The
+	# full untruncated text is mirrored into the tooltip by _set_status.
 	_status_label = Label.new()
 	_status_label.name = "StatusBar"
 	_status_label.custom_minimum_size.y = 22
+	_status_label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	_status_label.mouse_filter = Control.MOUSE_FILTER_PASS
 	workspace_vbox.add_child(_status_label)
 
 	# Smart Select is the resting tool (finding 5) — engaged by default so the
@@ -2981,9 +2989,13 @@ func _update_board_size_label() -> void:
 		_board_size_label.text = "Board: %s×%smm" % [_data.board_width, _data.board_height]
 
 
+## The ONE status-text writer: the label ellipsizes on overflow (see its
+## build-site comment), so the tooltip always carries the full text — hover
+## recovers whatever a narrow pane trimmed.
 func _set_status(text: String) -> void:
 	if _status_label != null:
 		_status_label.text = text
+		_status_label.tooltip_text = text
 
 
 ## While-armed gesture grammar (docket 019fb933d4a9): the teaching prose that
@@ -3053,9 +3065,9 @@ func _update_status() -> void:
 		board_txt = "  •  %s×%smm" % [_data.board_width, _data.board_height]
 	if _layout_mode == _PanelLayoutScript.MODE_NARROW:
 		hint = ""
-	_status_label.text = "%d parts, %d nets, %d traces  •  %d selected%s%s%s" % [
+	_set_status("%d parts, %d nets, %d traces  •  %d selected%s%s%s" % [
 		_data.get_component_count(), _data.get_net_count(), _data.get_trace_count(),
-		sel.size(), mode_txt, board_txt, hint]
+		sel.size(), mode_txt, board_txt, hint])
 
 
 ## Reflect the current model into the toolbar + canvas (after a load).
