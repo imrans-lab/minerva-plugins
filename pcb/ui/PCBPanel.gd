@@ -670,7 +670,8 @@ func _add_tool_button(tb: Container, mode: int, text: String, tip: String, icon_
 
 
 ## Sidebar section label — the 11px caption idiom shared by all three tool
-## groups. Named "<text>GroupLabel" so existing lookups (e.g. HintsGroupLabel)
+## groups. Named "<text>GroupLabel" (e.g. ProposalsGroupLabel; a repo-wide grep
+## 2026-08-01 found NO name lookups, so renaming a section is a text-only change)
 ## keep resolving.
 func _add_group_label(text: String) -> void:
 	var group_label := Label.new()
@@ -753,7 +754,7 @@ func _build_sidebar() -> VBoxContainer:
 	# moded tool — the radio idiom _add_tool_button provides is exactly "one
 	# of these is active".
 	_sidebar.add_child(HSeparator.new())
-	_add_group_label("Draw")
+	_add_group_label("Tools")
 	var draw_flow := FlowContainer.new()
 	draw_flow.name = "DrawFlow"
 	_sidebar.add_child(draw_flow)
@@ -765,7 +766,7 @@ func _build_sidebar() -> VBoxContainer:
 
 	# Trace drawing tool (epoch 6 unit 5). Same section and same reason as the
 	# zone tools above: it authors a board ENTITY. It shares a name with the
-	# Hints-group Trace button below and that is deliberate — they draw the
+	# Proposals-group Trace button below and that is deliberate — they draw the
 	# same thing at two different altitudes — so the icon (solid pads vs the
 	# hint's hollow ones) and tooltip carry the distinction outright: this one
 	# IS the copper, that one is a request for copper.
@@ -834,7 +835,7 @@ func _build_sidebar() -> VBoxContainer:
 	_sidebar.add_child(_trace_width_spin)
 
 	_sidebar.add_child(HSeparator.new())
-	_add_group_label("Hints")
+	_add_group_label("Proposals")
 
 	var hints_flow := FlowContainer.new()
 	hints_flow.name = "HintsFlow"

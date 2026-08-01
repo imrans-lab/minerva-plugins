@@ -206,7 +206,7 @@ var _space_pan_armed: bool = false
 ## cancels; they AUTHOR board entities (unlike the hint tools, which author
 ## annotations), so they belong on this surface rather than the overlay's. TRACE
 ## (epoch 6 unit 5) is the same family for copper: click a pad, click waypoints,
-## click a pad to finish. It is NOT the Hints-group trace tool — that one authors
+## click a pad to finish. It is NOT the Proposals-group trace tool — that one authors
 ## a route HINT for the router; this one authors the Trace entity itself. ERASER
 ## (item 019fb934827776) owns clicks the same way: each click deletes exactly the
 ## entity it hits (same pick _entity_at gives the Select tool), journalled as its
@@ -3578,7 +3578,7 @@ func _draw_zone_preview() -> void:
 ##   DRAWING --Esc/right-click-->    cancel
 ##   DRAWING --tool switch-->        cancel (silently — see set_tool_mode)
 ##
-## This is the DIRECT-AUTHORING sibling of the Hints-group trace tool, not a
+## This is the DIRECT-AUTHORING sibling of the Proposals-group trace tool, not a
 ## replacement for it (owner ruling, umbrella docket 019fb5720368): that tool
 ## authors a route HINT the router consumes; this one authors the Trace entity
 ## itself — model, canvas and board YAML — bypassing the router entirely.
