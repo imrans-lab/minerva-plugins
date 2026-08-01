@@ -155,7 +155,12 @@ var trace_layer_filter: String = "all":
 ##                        being left out and looking like an oversight)
 ##   _is_entity_locked  — the lock rule, even when the answer is "no such concept"
 ##   _remove_entity     — the journalled remover behind Delete and the eraser
-##   _erase_label       — the eraser's per-click history label
+##   _entity_action_label — the per-entity noun, shared by the eraser's history
+##                        label and the context menu's "Delete <entity>" item
+##                        (B1u5): a kind missing here is deletable but unnameable
+##   _update_context_menu_for_selection — the per-target right-click menu (B1u5);
+##                        a kind absent there has no menu entry, which is now the
+##                        ONLY discoverable way to delete a single entity
 ##   _delete_selection  — the LITERAL kind array it loops (it is not derived)
 ##   _end_selection_drag — the journal loops that COMMIT a move; a movable kind
 ##                        absent here moves live but records nothing (silent
@@ -295,6 +300,14 @@ signal zone_tool_message(text: String)
 ## the panel's single transient-status sink, so no channel has to pretend to be
 ## another's.
 signal trace_tool_message(text: String)
+## The context menu's "Set trace width…" item asking the PANEL to reveal and focus
+## its existing width SpinBox (B1u5, owner comment 962: the numeric editor already
+## existed and was undiscoverable). A SIGNAL rather than a canvas-side dialog
+## because there is no dialog anywhere in this panel — every numeric edit is an
+## inline sidebar row, and the row already owns the no-op guard, the refusal
+## routing and the single journalled set_trace_width call. The canvas must not
+## grow a second way to set a width.
+signal edit_trace_width_requested(trace_id: String)
 
 ## Duck-typed back-reference to the PcbAnnotationHost (set by PCBPanel), the
 ## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
@@ -406,10 +419,6 @@ var _zone_vertex_drag_origin: PackedVector2Array = PackedVector2Array()
 ## Armed edge-insertion, set at press and consumed (or discarded) at release.
 ## Empty ⇔ nothing armed. Keys: zone_id, index, point, press_pos, origin.
 var _zone_edge_insert: Dictionary = {}
-## True between the PRESS that deleted a vertex and its own release, so that
-## release does not fall through into the context-menu test (which is measured
-## against a right_click_start_pos the delete branch never wrote).
-var _zone_vertex_right_consumed: bool = false
 
 ## ── Trace authoring (epoch 6 unit 5) ──────────────────────────────────────────
 ## Default copper layer when the toolbar's layer filter is "all". TOP, unlike the
@@ -529,11 +538,32 @@ const ZONE_HATCH_MAX_LINES := 2000
 var font: Font
 var font_size: int = 12
 
-## Context menu (component lock/unlock only — annotation/route-hint items stripped)
+## Context menu — the ONE menu authority for the board surface (B1u5, owner
+## ruling on 019fbb968e: "I expect right click to be a menu, with delete as an
+## option"). Per-target items are added to THIS PopupMenu by
+## _update_context_menu_for_selection; nothing on this canvas pops a second one.
 var context_menu: PopupMenu = null
 var context_menu_world_pos: Vector2 = Vector2.ZERO
 var right_click_start_pos: Vector2 = Vector2.ZERO
 const RIGHT_CLICK_THRESHOLD := 5.0  # Pixels — below this a right-click is a tap → context menu
+
+## WHAT THE RIGHT-CLICK WAS AIMED AT, resolved once at PRESS and read at RELEASE.
+##
+## Resolved at press for the same reason context_menu_world_pos is WRITTEN at
+## press: the menu pops on RELEASE, and the release position is allowed to differ
+## from the press position by up to RIGHT_CLICK_THRESHOLD. Re-picking at release
+## would let a 4 px drift hand the menu a different entity than the one the user
+## pressed on — the menu would then act on something the press never touched.
+## Both are written together, in the SAME branch, and are only ever read together.
+##
+## `_context_menu_target` is an [kind, id] pair in _entity_at's own shape (["",""]
+## = empty space). `_context_menu_vertex` is _zone_vertex_hit's dictionary ({} =
+## no handle under the cursor); it is kept SEPARATE because a vertex handle is not
+## an entity in the frozen ladder — it is the same narrow, deliberate exception
+## the left button already makes for it (see _begin_zone_vertex_drag).
+var _context_menu_target: Array = ["", ""]
+var _context_menu_vertex: Dictionary = {}
+var _context_menu_edge_insert: Dictionary = {}
 
 
 func _enter_tree() -> void:
@@ -562,12 +592,12 @@ func _ready() -> void:
 ## Kept to the TRANSIENT flags — the selection and the view are not gesture state.
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_FOCUS_EXIT:
-		_zone_vertex_right_consumed = false
 		_zone_edge_insert = {}
 		# A claimed annotation gesture is transient gesture state too (B1u3):
 		# the release that would clear it is never coming, and a leaked flag
 		# would send the NEXT press's motion into the annotation tool.
 		_annotation_gesture = false
+		_reset_context_menu_target()
 
 
 func _exit_tree() -> void:
@@ -584,8 +614,8 @@ func _exit_tree() -> void:
 	# half-finished vertex gesture must not resume against a stale outline.
 	_reset_zone_vertex_drag()
 	_zone_edge_insert = {}
-	_zone_vertex_right_consumed = false
 	_annotation_gesture = false
+	_reset_context_menu_target()
 
 
 ## Create the right-click context menu (component lock/unlock).
@@ -596,14 +626,36 @@ func _create_context_menu() -> void:
 	context_menu.id_pressed.connect(_on_context_menu_pressed)
 
 
-## Rebuild the dynamic (lock) items of the context menu for the current cursor.
+## Rebuild the context menu for what the right-press was aimed at.
+##
+## ONE MENU AUTHORITY (B1u5). Every board right-click ends here; there is no
+## second popup system and no per-entity menu built elsewhere. Sections are added
+## most-specific-first, because that is the order the press resolved them in:
+##
+##   1. VERTEX     — a handle of a selected zone (the A5 gesture's replacement)
+##   2. EDGE       — an insertion point on a selected zone's outline
+##   3. TARGET     — the entity the frozen ladder picked (trace/via/zone/component)
+##   4. LOCK       — the pre-existing component lock/unlock section, UNCHANGED
+##   5. GROUP      — the pre-existing A4 group/ungroup section, UNCHANGED
+##
+## EMPTY SPACE IS BYTE-IDENTICAL to what it was before this unit: with no vertex,
+## no edge and no target, sections 1-3 add nothing at all and the lock/group logic
+## below runs on exactly the inputs it always did, down to the "(no actions)" stub.
+##
+## Every item routes to the SAME journalled model call its direct gesture uses —
+## _delete_zone_vertex, _insert_zone_vertex, _delete_picked_entity, and (for the
+## width) the panel's own SpinBox handler. No menu action mutates the board by a
+## path a gesture could not also take.
 func _update_context_menu_for_selection() -> void:
 	context_menu.clear()
+
+	_add_context_menu_target_items()
 
 	var has_lock_section := false
 	var comp_under_cursor: String = _component_at(context_menu_world_pos)
 	if not comp_under_cursor.is_empty() or not selected_components.is_empty():
 		has_lock_section = true
+		_context_menu_separate()
 		if not comp_under_cursor.is_empty():
 			context_menu.add_item("Lock %s (L)" % comp_under_cursor, 401)
 		else:
@@ -624,8 +676,7 @@ func _update_context_menu_for_selection() -> void:
 	var can_group := selected_components.size() >= 2 and not _selection_is_one_group()
 	var can_ungroup := _selection_has_group()
 	if can_group or can_ungroup:
-		if context_menu.item_count > 0:
-			context_menu.add_separator()
+		_context_menu_separate()
 		if can_group:
 			context_menu.add_item("Group Selection (Ctrl+G)", 411)
 		if can_ungroup:
@@ -633,6 +684,82 @@ func _update_context_menu_for_selection() -> void:
 
 	if not has_lock_section and context_menu.item_count == 0:
 		context_menu.add_item("(no actions)", 0)
+		context_menu.set_item_disabled(context_menu.item_count - 1, true)
+
+
+## Drop the right-press target. Called wherever the OTHER transient gesture flags
+## are dropped — focus loss, _exit_tree, Escape and the next LEFT press — so the
+## three fields never outlive the gesture that resolved them (cold-review B1u5 F5).
+func _reset_context_menu_target() -> void:
+	_context_menu_target = ["", ""]
+	_context_menu_vertex = {}
+	_context_menu_edge_insert = {}
+
+
+## A separator BETWEEN sections and never at the top — the rule the group section
+## already applied inline, lifted out because a second section now needs it and
+## two copies of "if item_count > 0" is how the first one drifts from the second.
+func _context_menu_separate() -> void:
+	if context_menu.item_count > 0:
+		context_menu.add_separator()
+
+
+## Menu ids. 4xx was already this menu's block (401/402/404 lock, 411/412 group);
+## the per-target items claim 42x so an id alone says which section it came from.
+const MENU_ID_DELETE_VERTEX := 421
+const MENU_ID_INSERT_VERTEX := 422
+const MENU_ID_SET_TRACE_WIDTH := 423
+const MENU_ID_DELETE_TARGET := 424
+
+
+## Sections 1-3 of the menu: what the press was actually aimed at.
+##
+## Reads ONLY the three fields resolved at press (_context_menu_vertex,
+## _context_menu_edge_insert, _context_menu_target) — never re-picks from
+## context_menu_world_pos, so this cannot disagree with what the press decided.
+func _add_context_menu_target_items() -> void:
+	if not data:
+		return
+
+	# 1 + 2. The zone-outline pair. Mutually exclusive by construction (the press
+	# only looks for an edge insertion when no handle was under the cursor), which
+	# keeps "Delete vertex" and "Insert vertex here" from ever offering to do
+	# opposite things at the same point.
+	if not _context_menu_vertex.is_empty():
+		# ENABLED EVEN AT THE MINIMUM, deliberately. The min-3 refusal is a
+		# MESSAGE, not a missing item: a greyed-out entry says "not here" while the
+		# refusal says WHY ("a zone outline needs at least 3 points"), which is the
+		# answer the A5 gesture gave and the answer the owner is owed. The item
+		# only ever appears when a handle really is under the cursor, so it is
+		# never a dead entry either way.
+		context_menu.add_item("Delete vertex", MENU_ID_DELETE_VERTEX)
+	elif not _context_menu_edge_insert.is_empty():
+		# The DISCOVERABLE half of the edge-tap gesture, which stays exactly as it
+		# is (left-tap on a selected zone's edge). Same gate, same insertion point,
+		# same journalled write — the menu is a second doorway onto one behaviour,
+		# not a second behaviour.
+		context_menu.add_item("Insert vertex here", MENU_ID_INSERT_VERTEX)
+
+	# 3. The entity the frozen ladder picked.
+	var kind := str(_context_menu_target[0])
+	var target_id := str(_context_menu_target[1])
+	if kind.is_empty():
+		return
+	_context_menu_separate()
+
+	if kind == KIND_TRACE:
+		# THE ENTRY POINT THE OWNER COULD NOT FIND (comment 962). The width editor
+		# already existed as a sidebar row that only appears once exactly one trace
+		# is selected — which is precisely the state a user who has not found it
+		# cannot reach on purpose. The item selects the trace and asks the panel to
+		# focus that row; it does not set a width itself.
+		context_menu.add_item("Set trace width…", MENU_ID_SET_TRACE_WIDTH)
+
+	context_menu.add_item(_entity_action_label("Delete", kind, target_id), MENU_ID_DELETE_TARGET)
+	if _unit_locked(kind, target_id):
+		# Locked (or locked-by-group): shown-but-disabled rather than hidden, so
+		# the lock is visible as the reason instead of the entry silently missing.
+		# The lock/unlock section directly below is how it gets undone.
 		context_menu.set_item_disabled(context_menu.item_count - 1, true)
 
 
@@ -665,6 +792,43 @@ func _on_context_menu_pressed(id: int) -> void:
 			_group_selection()
 		412:  # Dissolve the selection's group(s) (A4)
 			_ungroup_selection()
+		MENU_ID_DELETE_VERTEX:  # B1u5 — A5's gesture, now an item
+			_delete_zone_vertex(_context_menu_vertex)
+		MENU_ID_INSERT_VERTEX:  # B1u5 — the edge-tap gesture, now also an item
+			var ins := _context_menu_edge_insert
+			if not ins.is_empty():
+				_insert_zone_vertex(str(ins["zone_id"]), int(ins["index"]), ins["point"])
+		MENU_ID_SET_TRACE_WIDTH:  # B1u5 — reveal the panel's existing width row
+			_request_trace_width_edit(str(_context_menu_target[1]))
+		MENU_ID_DELETE_TARGET:  # B1u5 — delete the entity the press picked
+			_delete_picked_entity(str(_context_menu_target[0]), str(_context_menu_target[1]), "Delete")
+
+
+## "Set trace width…": make the trace the WHOLE selection, then ask the panel to
+## reveal and focus its width row.
+##
+## Selecting first is not a side effect, it is the mechanism: the row is driven by
+## "exactly one trace selected" (_update_trace_rows), so a menu item that focused
+## the row without selecting would focus a hidden control, and one that set a width
+## without selecting would edit something the sidebar is not showing. Selecting is
+## also the recoverable half — a mispicked trace is re-picked by clicking another,
+## which is the whole reason the owner ruled for a menu (comment 945).
+##
+## ORDER: selection first, signal second. The panel rebuilds its property rows off
+## selection_changed, so the row exists by the time the focus request arrives.
+func _request_trace_width_edit(trace_id: String) -> void:
+	if trace_id.is_empty() or data == null or data.get_trace(trace_id) == null:
+		return
+	# ONE selection_changed for one menu action (cold-review F6): the clear is
+	# silenced and the single emit below covers both halves, so the panel rebuilds
+	# its property rows once — against the final selection, not against the empty
+	# one it passed through — and the row is populated by the time the focus
+	# request goes out.
+	_clear_selection(false)
+	_add_to_selection(KIND_TRACE, trace_id)
+	selection_changed.emit()
+	queue_redraw()
+	edit_trace_width_requested.emit(trace_id)
 
 
 func _show_context_menu(screen_pos: Vector2) -> void:
@@ -1774,8 +1938,15 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# Defensive: a lost release (focus stolen mid-gesture) can leave the
 			# via-drag notice armed; a fresh press starts a fresh gesture, so the
 			# stale arming ends here (cold-review B1u2 F2, same shape as the
-			# zone-vertex right-consumed clear below).
+			# context-menu target clear on the next line).
 			_via_drag_notice_armed = false
+			# Same idiom for the right-press target (cold-review B1u5 F5): a LEFT
+			# press means the next gesture is not the right-click that resolved
+			# them, so they stop describing anything. Harmless today — only the
+			# release→popup path reads them, and every popup follows a press that
+			# rewrites all three — but a second reader would inherit stale values
+			# silently, which is exactly how the via-drag notice bug happened.
+			_reset_context_menu_target()
 
 			# Pin inspector (WC-1): click selects the nearest pad within radius,
 			# or clears when empty space is clicked. Owns the click outright —
@@ -1966,11 +2137,6 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 
 	elif event.button_index == MOUSE_BUTTON_RIGHT:
 		if event.pressed:
-			# Clear a flag left over from a press whose release never arrived
-			# (focus loss, a popup grab). It is only ever read by the matching
-			# release, so clearing it at the next press means a leaked one can
-			# never swallow a later context menu (cold-review F7).
-			_zone_vertex_right_consumed = false
 			# Right-click CANCELS an in-progress zone (same grammar as the
 			# single-trace hint tool) instead of starting a pan / arming the
 			# context menu. Only while actually drawing — with no polygon in
@@ -1981,33 +2147,41 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			if tool_mode == ToolMode.TRACE and not _trace_points.is_empty():
 				_cancel_trace_draw(true)
 				return
-			# A right-click ON a vertex handle of the selected zone DELETES that
-			# vertex (A5) — ported from BendHandleEditTool's right-click-a-handle
-			# grammar. It takes priority over pan-arming for the same reason the
-			# left-button handle check takes priority over the entity pick: a
-			# handle press that armed a pan first would never reach the handle.
-			# It consumes the press outright, so no pan is armed and no context
-			# menu can follow (the menu is popped on RELEASE, gated on a
-			# right_click_start_pos this branch never writes — the release below
-			# would otherwise measure against a STALE position). A right-click
-			# anywhere else, including inside a selected pour, is untouched.
-			if _delete_zone_vertex_at(world_pos):
-				_zone_vertex_right_consumed = true
-				return
+			# THE ONE RIGHT-PRESS PATH (B1u5). Every right-click that is not
+			# cancelling a draw in progress arms a pan AND arms the menu; which of
+			# the two happens is decided at release, by distance alone.
+			#
+			# A5's instant "right-click a vertex handle deletes it" branch USED to
+			# sit here, above the pan arming, and returned outright. It is gone by
+			# owner ruling ("I expect right click to be a menu, with delete as an
+			# option"): a gesture that destroys geometry with no menu and no
+			# modifier is not discoverable and not recoverable. The vertex is still
+			# deletable from exactly the same press — it is now resolved into
+			# _context_menu_vertex below and offered as a menu item, through the
+			# same journalled _delete_zone_vertex call the gesture used.
+			#
+			# Two things follow from the removal, both intended: a right-DRAG that
+			# starts on a handle now pans (it used to be swallowed), and the
+			# _zone_vertex_right_consumed release-swallow flag no longer exists,
+			# because no right press is consumed at press time any more.
 			is_panning = true
 			pan_start_mouse = event.position
 			pan_start_offset = pan_offset
 			right_click_start_pos = event.position
 			context_menu_world_pos = world_pos
+			# Resolve the menu's target HERE, beside the position it belongs to —
+			# see the _context_menu_target declaration for why not at release.
+			_context_menu_vertex = _zone_vertex_hit(world_pos)
+			_context_menu_target = _entity_at(world_pos)
+			# An edge insertion is only looked for when NO handle was hit: the
+			# handle radius (9 px) is deliberately wider than the edge tolerance
+			# (3 px) so "a press near a corner is unambiguously the corner's", and
+			# that rule is worth exactly as much on the right button as the left.
+			_context_menu_edge_insert = {} if not _context_menu_vertex.is_empty() \
+					else _zone_edge_insert_candidate(
+						world_pos, str(_context_menu_target[0]), str(_context_menu_target[1]))
 		else:
 			is_panning = false
-			# The RELEASE half of a right-click that deleted a vertex. Without this
-			# the menu would still pop: it is gated on right_click_start_pos, which
-			# the delete branch deliberately never writes, so the test would measure
-			# against whatever position the PREVIOUS right-click left behind.
-			if _zone_vertex_right_consumed:
-				_zone_vertex_right_consumed = false
-				return
 			if event.position.distance_to(right_click_start_pos) < RIGHT_CLICK_THRESHOLD:
 				_show_context_menu(event.position)
 
@@ -2202,6 +2376,8 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# whole family of gestures, and the release that follows must not
 			# resurrect an insertion the user just called off.
 			_zone_edge_insert = {}
+			# Same rule for a resolved right-press target (cold-review B1u5 F5).
+			_reset_context_menu_target()
 			# A vertex drag in progress is what Escape cancels FIRST OF ALL (A5):
 			# it is the innermost gesture, nothing was journalled while it ran, and
 			# cancelling it must not also wipe the selection the handles belong to.
@@ -2419,7 +2595,11 @@ func has_any_selection() -> bool:
 ## Drop EVERY selected entity, whatever its kind. Deselect-only: the armed tool
 ## is untouched (owner ruling on 019fb59b5d86 — an empty click deselects, it does
 ## not disarm the tool).
-func _clear_selection() -> void:
+## `announce` exists for ONE caller: a path that clears and then immediately
+## selects something else owes the panel ONE selection_changed, not two (a second
+## emit rebuilds every property row against a selection that already moved on —
+## cold-review F6). Defaults to true, so every existing caller is unchanged.
+func _clear_selection(announce := true) -> void:
 	for comp_id in selected_components:
 		component_deselected.emit(comp_id)
 	selected_components.clear()
@@ -2432,7 +2612,8 @@ func _clear_selection() -> void:
 	# itself used to fire one). _commit_zone_edge_insert re-checks selection too;
 	# this is the cheaper half of the same guarantee.
 	_zone_edge_insert = {}
-	selection_changed.emit()
+	if announce:
+		selection_changed.emit()
 
 
 ## Sweep the marquee over ALL THREE kinds, each honouring the SAME visibility
@@ -3070,14 +3251,29 @@ func _handle_eraser_click(world_pos: Vector2) -> void:
 	if not data:
 		return
 	var hit: Array = _entity_at(world_pos)
-	var hit_kind: String = hit[0]
-	var hit_id: String = hit[1]
-	if hit_kind.is_empty() or _unit_locked(hit_kind, hit_id):
-		return
+	_delete_picked_entity(str(hit[0]), str(hit[1]), "Erase")
 
-	# A GROUPED component erases as a WHOLE UNIT (A4), matching what
+
+## Delete ONE picked entity as its own journalled, undoable step. True if anything
+## went. Shared by the ERASER (verb "Erase") and the context menu's per-target
+## "Delete <entity>" item (verb "Delete", B1u5).
+##
+## ONE PATH, TWO DOORWAYS. The two gestures differ only in the word that lands in
+## the undo history, so they share everything else: the lock rule, the whole-group
+## rule, the journalled remover and the selection bookkeeping. Duplicating this for
+## the menu is what cold-review N1 collapsed once already for the eraser and the
+## trash can; it is not worth un-collapsing for a third caller.
+##
+## A locked (or locked-by-group) entity and an empty pick are both silent no-ops —
+## the eraser's "empty click does nothing" ruling. The MENU never reaches that case
+## for a lock, because it disables the item instead and says so on the face of it.
+func _delete_picked_entity(hit_kind: String, hit_id: String, verb: String) -> bool:
+	if not data or hit_kind.is_empty() or _unit_locked(hit_kind, hit_id):
+		return false
+
+	# A GROUPED component goes as a WHOLE UNIT (A4), matching what
 	# minerva_pcb_delete_component does for the same component: the group is one
-	# physical part, so erasing one of its footprints and leaving the rest would
+	# physical part, so removing one of its footprints and leaving the rest would
 	# be a delete the user cannot mean. Still ONE undo step per click — the
 	# begin_batch/end_batch pair _delete_selection uses, rather than this path's
 	# single save_to_history, because several components are removed.
@@ -3085,7 +3281,7 @@ func _handle_eraser_click(world_pos: Vector2) -> void:
 	if not group_id.is_empty():
 		data.begin_batch()
 		var erased: Array = data.remove_group(hit_id)
-		data.end_batch("Erase group (%d)" % erased.size())
+		data.end_batch("%s group (%d)" % [verb, erased.size()])
 		var was_selected := false
 		for member_id in erased:
 			if is_entity_selected(KIND_COMPONENT, member_id):
@@ -3094,32 +3290,45 @@ func _handle_eraser_click(world_pos: Vector2) -> void:
 		if was_selected:
 			selection_changed.emit()
 		queue_redraw()
-		return
+		return true
 
 	if not _remove_entity(hit_kind, hit_id):
-		return
-	data.save_to_history(_erase_label(hit_kind, hit_id))
+		return false
+	data.save_to_history(_entity_action_label(verb, hit_kind, hit_id))
 
 	if is_entity_selected(hit_kind, hit_id):
 		_remove_from_selection(hit_kind, hit_id)
 		selection_changed.emit()
 	queue_redraw()
+	return true
 
 
-## The eraser's per-click history label. Kept OFF _remove_entity (which the
-## batch path shares and has no use for a per-entity label) — labels are
-## eraser-only, so they live with its one caller.
-func _erase_label(kind: String, entity_id: String) -> String:
+## The per-entity noun, verb-first: "Erase trace", "Delete R1", "Delete via".
+##
+## ONE naming authority for two consumers that must not drift (B1u5): the eraser's
+## history label and the context menu's "Delete <entity>" item text. A menu that
+## said "Delete trace" while the undo entry said something else would be two names
+## for one act. Named in the extension checklist at the top of this file — a kind
+## missing a case here is deletable but unnameable, and falls back to the bare verb.
+func _entity_action_label(verb: String, kind: String, entity_id: String) -> String:
 	match kind:
 		KIND_COMPONENT:
-			return "Erase %s" % entity_id
+			# A GROUPED part names the GROUP, because that is what goes (A4 — the
+			# whole-unit rule in _delete_picked_entity). "Delete R1" on a menu that
+			# is about to remove four footprints is the one place the rule would be
+			# invisible until after the click (cold-review F4); the undo label was
+			# already honest, so this makes the two agree.
+			var mates := _group_mates(entity_id)
+			if not mates.is_empty():
+				return "%s group (%d parts)" % [verb, mates.size() + 1]
+			return "%s %s" % [verb, entity_id]
 		KIND_TRACE:
-			return "Erase trace"
+			return "%s trace" % verb
 		KIND_ZONE:
-			return "Erase zone"
+			return "%s zone" % verb
 		KIND_VIA:
-			return "Erase via"
-	return "Erase"
+			return "%s via" % verb
+	return verb
 
 
 ## _delete_selected_zone is the LAST of what were three legacy single-kind
@@ -3369,13 +3578,40 @@ func _zone_edge_insertion(pts: PackedVector2Array, world_pos: Vector2, tol: floa
 ## whose first point is off-grid on a single motion frame).
 func _arm_zone_edge_insert(world_pos: Vector2, screen_pos: Vector2, hit_kind: String, hit_id: String, is_double_click: bool) -> void:
 	_zone_edge_insert = {}
-	if not data or not _zone_vertex_edit_active() or is_double_click:
+	if is_double_click:
 		return
+	var candidate := _zone_edge_insert_candidate(world_pos, hit_kind, hit_id)
+	if candidate.is_empty():
+		return
+	_zone_edge_insert = {
+		"zone_id": candidate["zone_id"],
+		"index": int(candidate["index"]),
+		"point": candidate["point"],
+		"press_pos": screen_pos,
+		"origin": candidate["origin"],
+	}
+
+
+## WHERE — and WHETHER — a vertex insertion is legal for this pick, as
+## {zone_id, index, point, origin} or {}.
+##
+## THE ONE GATE, shared by the left-button tap gesture (_arm_zone_edge_insert) and
+## the right-button "Insert vertex here" menu item (B1u5). Both doorways must agree
+## about what is insertable, so neither owns the rule: a menu that offered an
+## insertion the gesture would have refused (or vice versa) is two behaviours
+## wearing one name.
+##
+## The double-click refusal stays with the ARMING half — it is a property of the
+## press sequence, not of the geometry, and a menu item has no second press to
+## refuse.
+func _zone_edge_insert_candidate(world_pos: Vector2, hit_kind: String, hit_id: String) -> Dictionary:
+	if not data or not _zone_vertex_edit_active():
+		return {}
 	if hit_kind != KIND_ZONE or not is_entity_selected(KIND_ZONE, hit_id):
-		return
+		return {}
 	var zone: Dictionary = data.get_zone(hit_id)
 	if zone.is_empty() or not _zone_visible(zone):
-		return
+		return {}
 	var pts := PCBDataScript.zone_outline_points(zone)
 	# SAME tolerance the pick that got us here used (_zone_at's 3.0 / zoom). A
 	# wider radius here would insert against an edge the pick never considered —
@@ -3384,12 +3620,11 @@ func _arm_zone_edge_insert(world_pos: Vector2, screen_pos: Vector2, hit_kind: St
 	# whichever edge happened to be nearest.
 	var insertion := _zone_edge_insertion(pts, world_pos, ZONE_EDGE_INSERT_HIT_PX / zoom)
 	if insertion.is_empty():
-		return
-	_zone_edge_insert = {
+		return {}
+	return {
 		"zone_id": hit_id,
 		"index": int(insertion["index"]),
 		"point": insertion["point"],
-		"press_pos": screen_pos,
 		"origin": pts,
 	}
 
@@ -3417,38 +3652,64 @@ func _commit_zone_edge_insert(screen_pos: Vector2) -> void:
 		# threshold). That move is already journalled; do not stack an insertion
 		# the user never asked for on top of it.
 		return
+	_insert_zone_vertex(zone_id, int(armed["index"]), armed["point"])
+
+
+## THE journalled insertion write, shared by the edge-tap gesture above and the
+## "Insert vertex here" menu item. True when the outline actually grew.
+##
+## Re-reads the live outline instead of trusting the caller's copy: the menu path's
+## point was resolved at PRESS and the popup sits between then and now, so the
+## array it was measured against is a snapshot, not the board.
+func _insert_zone_vertex(zone_id: String, index: int, point: Vector2) -> bool:
+	if not data:
+		return false
+	var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+	if index < 0 or index > pts.size():
+		return false
 	var grown := pts.duplicate()
-	grown.insert(int(armed["index"]), armed["point"])
+	grown.insert(index, point)
 	if not data.set_zone_outline(zone_id, grown):
-		return
-	_journal_zone_outline_edit(zone_id, "insert_vertex", int(armed["index"]), pts.size(), grown.size())
+		return false
+	_journal_zone_outline_edit(zone_id, "insert_vertex", index, pts.size(), grown.size())
 	data.save_to_history("Insert zone vertex")
 	queue_redraw()
+	return true
 
 
-## Right-click a handle: delete that vertex. True when the press was consumed.
+## "Delete vertex": drop one point from a zone outline. ONE journalled, undoable
+## step. True when the outline actually shrank.
+##
+## THE MENU'S ITEM, not a gesture (B1u5). It was A5's right-click-a-handle gesture
+## and it is now reached through _on_context_menu_pressed instead — same hit
+## (_zone_vertex_hit, resolved at press), same refusal, same journal entry, same
+## history label. Nothing about WHAT it does changed; only how it is asked for.
 ##
 ## REFUSES BELOW THE MINIMUM, VISIBLY (never silently): three points is a triangle
 ## and two is not a polygon at all — PCBData.MIN_ZONE_OUTLINE_POINTS, the same
 ## floor set_zone_outline and internal/board's Validate enforce. The refusal goes
 ## out on zone_tool_message, the channel the panel already routes to its status bar
-## for every other zone refusal, and the press is still consumed: the user aimed at
-## a handle and gets an answer, not a pan.
-func _delete_zone_vertex_at(world_pos: Vector2) -> bool:
-	var hit := _zone_vertex_hit(world_pos)
-	if hit.is_empty():
+## for every other zone refusal. Choosing a menu item and being told nothing at all
+## would be worse than the gesture was, not better.
+##
+## Re-reads the live outline for the same reason _insert_zone_vertex does: `hit`
+## was captured at press, and a popup stands between press and action.
+func _delete_zone_vertex(hit: Dictionary) -> bool:
+	if hit.is_empty() or not data:
 		return false
 	var zone_id := str(hit["zone_id"])
 	var index := int(hit["index"])
-	var pts: PackedVector2Array = hit["points"]
+	var pts := PCBDataScript.zone_outline_points(data.get_zone(zone_id))
+	if index < 0 or index >= pts.size():
+		return false
 	if pts.size() <= PCBDataScript.MIN_ZONE_OUTLINE_POINTS:
 		zone_tool_message.emit("A zone outline needs at least %d points — this one has %d." % [
 			PCBDataScript.MIN_ZONE_OUTLINE_POINTS, pts.size()])
-		return true
+		return false
 	var shrunk := pts.duplicate()
 	shrunk.remove_at(index)
 	if not data.set_zone_outline(zone_id, shrunk):
-		return true
+		return false
 	_journal_zone_outline_edit(zone_id, "delete_vertex", index, pts.size(), shrunk.size())
 	data.save_to_history("Delete zone vertex")
 	queue_redraw()

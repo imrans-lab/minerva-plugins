@@ -491,6 +491,7 @@ func _build_ui() -> void:
 	_canvas.pin_selected.connect(_on_pin_selected)
 	_canvas.zone_tool_message.connect(_show_transient_status)
 	_canvas.trace_tool_message.connect(_show_transient_status)
+	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
 	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
@@ -1252,6 +1253,65 @@ func _hide_trace_rows() -> void:
 	_trace_prop_trace_id = ""
 	if _trace_prop_rows != null:
 		_trace_prop_rows.visible = false
+
+
+## The canvas context menu's "Set trace width…" landing (B1u5, owner comment 962:
+## the numeric editor already existed and nobody could find it).
+##
+## NO SECOND EDITOR — but it does more than reveal one row. It CLEARS THE PATH to
+## the SpinBox built by _build_trace_rows and then focuses it, so the commit still
+## runs through _on_trace_prop_width_changed, which owns the no-op guard (no dead
+## undo step), the model's refusal string verbatim in the status bar, and the
+## single journalled data.set_trace_width. A menu item that set a width itself
+## would be a second mutation path onto the same field, with its own copy of all
+## three rules to keep in step; there is also no dialog anywhere in this panel to
+## put one in.
+##
+## CLEARING THE PATH IS THE WHOLE POINT, and getting it wrong reproduces the very
+## complaint this item exists to answer (cold-review F1, empirically proven). The
+## row's own `visible` flag is NOT enough: it lives inside _properties_body, which
+## _apply_layout_mode COLLAPSES BY DEFAULT in the medium (3-column) tier
+## (`_set_properties_expanded(wide)`), and the whole sidebar hides behind
+## _drawer_open in narrow. A handler that only checked the row would leave the
+## owner picking "Set trace width…" in a medium pane and seeing nothing happen at
+## all — comment 962's bug, delivered by its own fix. So both enclosures are opened
+## first, in outside-in order (drawer, then section, then row), and the focus test
+## below is is_visible_in_tree, which is the question actually being asked.
+##
+## The canvas selects the trace BEFORE emitting, and selection_changed drives
+## _update_properties, so the row is already populated by the time we get here. The
+## re-drive below is the belt for that braces: if some future ordering change left
+## the row stale, focusing a control showing another trace's width would be worse
+## than a wasted call.
+func _on_edit_trace_width_requested(trace_id: String) -> void:
+	if _trace_prop_trace_id != trace_id:
+		_update_trace_rows()
+	if _trace_prop_rows == null or not _trace_prop_rows.visible:
+		return
+
+	# Outside in: drawer, then section. The drawer relayouts through
+	# _apply_layout_mode(force), which leaves the expanded state alone on a forced
+	# re-apply (`if mode_changed:` guards _set_properties_expanded there) — so this
+	# order is safe today AND stays safe if that guard is ever relaxed, which the
+	# reverse order would not.
+	if _layout_mode == _PanelLayoutScript.MODE_NARROW and not _drawer_open:
+		_on_drawer_toggled()
+	if not _properties_expanded:
+		_set_properties_expanded(true)
+
+	if _trace_prop_width_spin == null:
+		return
+	var line_edit := _trace_prop_width_spin.get_line_edit()
+	# grab_focus() on a control outside the tree is a hard engine error, and the
+	# panel is legitimately un-mounted in the headless suites that drive this hook.
+	# is_visible_in_tree (not .visible) because a focused control inside a hidden
+	# ancestor is exactly the dead end above.
+	if line_edit == null or not line_edit.is_inside_tree():
+		return
+	if not line_edit.is_visible_in_tree():
+		return
+	line_edit.grab_focus()
+	line_edit.select_all()
 
 
 ## Re-width the selected trace. ONE journalled, undoable step; the MODEL owns

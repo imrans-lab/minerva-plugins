@@ -611,6 +611,19 @@ class BendHandleEditTool:
 			# Right-click a handle of the CURRENTLY SELECTED hint deletes that
 			# bend. No selection / not a route hint / no handle hit → no-op
 			# (let the host's own right-click handling, if any, proceed).
+			#
+			# DELIBERATELY NOT CONVERTED TO A MENU (B1u5, item 019fbb968e).
+			# The board canvas's right-click became a menu because it is the
+			# canvas's ONE ambient gesture — anyone can right-click a pour without
+			# having asked for anything. This is different in kind: it only fires
+			# while this AUTHOR TOOL is armed from the annotation dock, where
+			# right-click already means "cancel / no-op" in the two sibling tools
+			# above, and the whole surface is a modal editing mode the user
+			# explicitly entered. Converting it would need a SECOND popup owner on
+			# the annotation overlay: this kind talks to the host, never to the
+			# canvas, so it cannot reach pcb_canvas's context_menu without new
+			# cross-surface plumbing — which is precisely the "one menu authority"
+			# the unit was ruled to preserve. Left as a gesture, on purpose.
 			if _multi_selected():
 				return false
 			var sel := _host.get_selected_annotation_id()
