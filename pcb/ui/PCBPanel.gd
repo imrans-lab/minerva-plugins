@@ -3249,7 +3249,17 @@ func _on_export_yaml_pressed() -> void:
 ## to the worker `route` method (internal/tools RouteChannel/HandleRouteChannel,
 ## bug 019f3815e9f9). The route-correction loop is LIVE; worker_unavailable is
 ## returned only when the IPC channel is genuinely not ready (panel not mounted).
-func route_board(selection: Dictionary) -> Dictionary:
+## `extra` is optional: {"scope": <route_bridge.parse_route_scope shape>,
+## "pinned_candidates": <route_bridge.existing_copper_with_pinned shape>} — the
+## GD-side half of DCR finding 7 (worker route() shipped both params in C2;
+## nothing on this side reached them). Keys are stamped onto `params` ONLY when
+## `extra` supplies them, so every existing caller (there are several — grep
+## `route_board(`/`run_router(`, all still passing one argument) gets the
+## EXACT pre-existing {board, route_hints, selection} payload, byte-for-byte;
+## an absent key is also already what the worker treats "unscoped run" /
+## "no pinned overlay" to mean (see parse_route_scope / existing_copper_with_pinned
+## docstrings), so this is additive, never a behavior change on its own.
+func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null or _data == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
@@ -3271,6 +3281,10 @@ func route_board(selection: Dictionary) -> Dictionary:
 		"route_hints": envelopes,
 		"selection": selection,
 	}
+	if extra.has("scope"):
+		params["scope"] = extra["scope"]
+	if extra.has("pinned_candidates"):
+		params["pinned_candidates"] = extra["pinned_candidates"]
 	var result: Dictionary = await _request_with_backend_ensure("pcb.route", params, 30000)
 	# The worker returns {ok, result}; the host IPC wrapper may nest it under
 	# "result"/"success" — normalise to the worker envelope the apply tool wants.

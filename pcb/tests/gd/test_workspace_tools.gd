@@ -48,6 +48,11 @@ extends SceneTree
 ##      it does NOT refuse silently either — it emits a notice naming Reject.
 ##   9. CHECK GATE: a stale candidate refuses the draft check by name, and
 ##      include_stale is the stated second exit.
+##  11. ROUTE-REQUEST EXTRA (DCR finding 7, docket 019fc1b0db34): a pinned
+##      active candidate makes `pinned_candidates` reach the router; an
+##      explicit `scope` reaches it from a reroute's task/net and from a
+##      propose whose selected hint names its net; and an unpinned/unscoped
+##      call still builds the pre-existing byte-identical request.
 ##
 ## NUMERIC-COMPARISON RULE for this file (same as the C1/C3 suites): every
 ## numeric assertion is normalised with int()/float() before comparing, and NO
@@ -60,6 +65,10 @@ const PcbData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PcbWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 const PcbCutover := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_cutover.gd")
+## Group 11's board-net seeding needs a NET OBJECT, not a name — add_net(name)
+## silently blows up on `net.name` (same gotcha test_pcb_panel_tools.gd's
+## _declare_net documents), hence load() + set .name rather than a string arg.
+const PCB_NET_PATH := "res://../../minerva-plugins/pcb/ui/model/pcb_net.gd"
 const PCB_PANEL_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const ANNOTATION_HOST_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PcbAnnotationHost.gd"
 ## C4b (S5) group 10 only — same helper the shipped panel-tool suites use for
@@ -94,6 +103,7 @@ func _init() -> void:
 	await _run_eraser_adjudication()
 	await _run_check_stale_gate()
 	await _run_removal_contract()
+	await _run_route_request_extra()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -181,6 +191,48 @@ func _seed_source_hint(host) -> Array:
 	}]]
 
 
+## A real source-hint annotation whose kind_payload.net_names ACTUALLY names
+## `net` (group 11's _propose_scope needs a hint the panel can read a net off
+## directly — the default _seed_source_hint above builds a bare waypoint with
+## no net_names at all, resolvable only worker-side via source/dest pins).
+## Returns the hint id.
+func _seed_net_named_hint(host, net: String) -> String:
+	var env: Dictionary = host.build_route_hint_envelope(
+		0.0, 0.0, "", "F.Cu", "waypoint", [[0.0, 0.0], [5.0, 0.0]], "human")
+	var kp: Dictionary = env.get("kind_payload", {})
+	kp["net_names"] = [net]
+	env["kind_payload"] = kp
+	return str(host.add_annotation_v2(env))
+
+
+## A real BUS-type source-hint annotation whose net_names lists TWO real nets
+## (review fix c2-epochD: route_bridge.hints_to_router gives hint_type=="bus"
+## hints a DIFFERENT resolution rule than _net_for_hint — EVERY present
+## net_names entry, not just [0] — so _propose_scope/_reroute_scope must
+## recognize and bail on this shape rather than mirror the single-net rule
+## against it). Returns the hint id.
+func _seed_bus_hint(host, net_a: String, net_b: String) -> String:
+	var env: Dictionary = host.build_route_hint_envelope(
+		0.0, 0.0, "", "F.Cu", "waypoint", [[0.0, 0.0], [5.0, 0.0]], "human")
+	var kp: Dictionary = env.get("kind_payload", {})
+	kp["hint_type"] = "bus"
+	kp["net_names"] = [net_a, net_b]
+	env["kind_payload"] = kp
+	return str(host.add_annotation_v2(env))
+
+
+## Declare a net ON THE BOARD (PCBData.nets), not just in a candidate/route
+## fixture — review fix c2-epochD's board-membership check
+## (_propose_scope/_reroute_scope's `board_nets`) reads PCBData.get_net_names(),
+## which candidate/route fixtures like _multipad_record never touch. Same
+## add_net(name-object-not-string) gotcha test_pcb_panel_tools.gd's
+## _declare_net documents.
+func _declare_net(data, net_name: String) -> void:
+	var net = load(PCB_NET_PATH).new()
+	net.name = net_name
+	data.add_net(net)
+
+
 ## Forward every host call the workspace tools make to the REAL host, and answer
 ## the ROUTER hop with a fixture. This is the one substitution in the panel
 ## groups — the router worker is Python and does not run under the gd scaffold.
@@ -193,8 +245,13 @@ class RouterShim extends RefCounted:
 		real = real_host
 		reply = router_reply
 
-	func run_router(selection: Dictionary) -> Dictionary:
-		calls.append(selection)
+	## `extra` (DCR finding 7 — scope/pinned_candidates) recorded ALONGSIDE
+	## selection, not merged into it: a caller asserting "the request panel_tools
+	## built" needs to tell "no scope/pinned_candidates were computed" (extra
+	## == {}) apart from "selection itself happened to be empty", which a merge
+	## would blur.
+	func run_router(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
+		calls.append({"selection": selection, "extra": extra})
 		return {"ok": true, "result": reply}
 
 	func get_board_data():
@@ -1311,3 +1368,241 @@ func _run_removal_no_drc_via_mcp_annotations() -> void:
 	AnnotationHostRegistry._reset_for_test()
 
 	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 11. ROUTE-REQUEST EXTRA: pinned_candidates + scope reach the router ═══════
+# (DCR finding 7, docket 019fc1b0db34 — PCBPanel.route_board previously sent
+# only {board, route_hints, selection}; C2 shipped `scope` and
+# `pinned_candidates` worker-side and nothing on the GD side reached them.)
+#
+# `shim.calls` (RouterShim, see the fixtures above) records EVERY run_router
+# call as {"selection":…, "extra":…} — the exact two arguments panel_tools.gd
+# built and handed to the router bridge, i.e. "the built request" this group
+# asserts on. Reading the LAST call after each tool invocation isolates that
+# call's own request from whatever earlier calls in the same context recorded.
+
+func _run_route_request_extra() -> void:
+	print("-- 11. route-request extra: pinned_candidates + scope --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+
+	# ── NO-REGRESSION: nothing pinned, no explicit-hint selection -> the
+	# pre-existing {mode:"open"} selection and an EMPTY extra (route_board
+	# stamps neither "scope" nor "pinned_candidates" onto params in that case,
+	# reproducing the old {board, route_hints, selection} wire payload exactly).
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose (nothing pinned) succeeded", bool(first.get("success", false)))
+	var call_a: Dictionary = shim.calls[shim.calls.size() - 1]
+	check_eq("open propose: selection unchanged", call_a.get("selection", {}), {"mode": "open"})
+	check_eq("open propose: no-regression — extra is empty",
+		(call_a.get("extra", {}) as Dictionary).size(), 0)
+	var cid := str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	check("propose landed a candidate to pin", not cid.is_empty())
+
+	# ── PINNED-ACTIVE: pin it, propose again (still no explicit hint_ids/scope)
+	# -> pinned_candidates appears in the request, alone.
+	var pinned: Dictionary = PanelTools._workspace_pin(shim, _args({"candidate_id": cid}))
+	check("pin succeeded", bool(pinned.get("success", false)))
+	var held: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose (one pinned) still succeeded", bool(held.get("success", false)))
+	var call_b: Dictionary = shim.calls[shim.calls.size() - 1]
+	var extra_b: Dictionary = call_b.get("extra", {})
+	check("pinned-active propose: request carries pinned_candidates", extra_b.has("pinned_candidates"))
+	check("pinned-active propose: request carries NO scope (open selection, HALF-mutation isolation)",
+		not extra_b.has("scope"))
+	var pinned_wire: Array = extra_b.get("pinned_candidates", [])
+	check_eq("pinned_candidates names exactly the pinned candidate", pinned_wire.size(), 1)
+	if pinned_wire.size() == 1:
+		var pw: Dictionary = pinned_wire[0]
+		check_eq("pinned wire candidate_id matches", str(pw.get("candidate_id", "")), cid)
+		check_eq("pinned wire net matches", str(pw.get("net", "")), "N1")
+		check_eq("pinned wire carries the candidate's 3 segments",
+			(pw.get("segments", []) as Array).size(), 3)
+		check_eq("pinned wire carries the candidate's 1 via",
+			(pw.get("vias", []) as Array).size(), 1)
+		check("pinned wire is the SAME candidate language as draft_check (ir_candidates.build_overlay)",
+			pw.has("revision") and pw.has("segments") and pw.has("vias"))
+
+	# ── SCOPE FROM A TASK (reroute): the candidate is still pinned, so this
+	# request carries BOTH keys — scope is asserted independently of the
+	# pinned_candidates checks above (HALF-mutation isolation the other way).
+	var task_id_before := str(ws.get_candidate(cid).task_id)
+	var reroute_out: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({"candidate_id": cid}))
+	check("reroute succeeded", bool(reroute_out.get("success", false)))
+	var call_c: Dictionary = shim.calls[shim.calls.size() - 1]
+	var extra_c: Dictionary = call_c.get("extra", {})
+	check("reroute: request carries an explicit scope", extra_c.has("scope"))
+	var scope_c: Dictionary = extra_c.get("scope", {})
+	var tasks_c: Array = scope_c.get("tasks", [])
+	check_eq("reroute scope names exactly one task", tasks_c.size(), 1)
+	if tasks_c.size() == 1:
+		var t: Dictionary = tasks_c[0]
+		check_eq("reroute scope task_id matches the candidate's own task", str(t.get("task_id", "")), task_id_before)
+		check_eq("reroute scope net matches the candidate's own net", str(t.get("net", "")), "N1")
+		check("reroute scope names no endpoints (whole net, never a span)", not t.has("endpoints"))
+	check("reroute: request ALSO still carries pinned_candidates (both channels wire independently)",
+		extra_c.has("pinned_candidates"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+	# ── SCOPE FROM SELECTED HINTS (propose): a fresh, unpinned context where the
+	# explicitly-selected hint names its net via kind_payload.net_names — the
+	# ONE case panel_tools.gd can assert completely (see _propose_scope).
+	var ctx2: Dictionary = await _panel_context()
+	var shim2 = ctx2["shim"]
+	var host2 = ctx2["host"]
+	var data2 = ctx2["data"]
+	_declare_net(data2, "N1")
+	var net_hint_id: String = _seed_net_named_hint(host2, "N1")
+	var scoped_out: Dictionary = await PanelTools._workspace_propose(
+		shim2, _args({"hint_ids": [net_hint_id]}))
+	check("hint-scoped propose succeeded", bool(scoped_out.get("success", false)))
+	var call_d: Dictionary = shim2.calls[shim2.calls.size() - 1]
+	var extra_d: Dictionary = call_d.get("extra", {})
+	check("hint-scoped propose: request carries an explicit scope", extra_d.has("scope"))
+	var nets_d: Array = (extra_d.get("scope", {}) as Dictionary).get("nets", [])
+	check_eq("hint-scoped propose scope names exactly one net", nets_d.size(), 1)
+	if nets_d.size() == 1:
+		check_eq("hint-scoped propose scope names N1", str(nets_d[0]), "N1")
+	check("hint-scoped propose: request carries NO pinned_candidates (fresh, nothing pinned)",
+		not extra_d.has("pinned_candidates"))
+
+	ctx2["driver"].free_panel(ctx2["panel"])
+
+	# ── REVIEW FIX (c2-epochD): the 3 PROVEN consequences of unioning the whole
+	# net_names array instead of mirroring route_bridge._net_for_hint /
+	# hints_to_router's bus branch exactly. Each case is a request-shape
+	# assertion the SAME way the ones above are — no live worker involved (the
+	# RouterShim answers every call with the canned multipad reply regardless
+	# of args), so these prove what THIS PANEL builds, matching what the real
+	# route_bridge.py functions cited in each comment actually do.
+
+	# ── CASE 1 — STALE names[0]: net_names[0] names a net the board does NOT
+	# have. route_bridge._net_for_hint trusts names[0] only if `names[0] in
+	# board.nets`; otherwise it WARNS and falls through to source/dest pin
+	# resolution — which could easily resolve to a DIFFERENT, real net. A scope
+	# built from the stale name regardless (the pre-fix bug) would disagree
+	# with whatever the worker actually resolves and hard-refuse
+	# (unsupported_scope) a run that used to work unscoped. The fix: bail to
+	# unscoped the moment names[0] fails the board-membership check.
+	var ctx3: Dictionary = await _panel_context()
+	var shim3 = ctx3["shim"]
+	var host3 = ctx3["host"]
+	var data3 = ctx3["data"]
+	_declare_net(data3, "N1")  # the board's REAL net — deliberately NOT named by the hint below
+	var stale_hint_id: String = _seed_net_named_hint(host3, "STALE_NET")
+	var stale_out: Dictionary = await PanelTools._workspace_propose(
+		shim3, _args({"hint_ids": [stale_hint_id]}))
+	check("stale-name propose still succeeded (unscoped, same as pre-fix)", bool(stale_out.get("success", false)))
+	var call_e: Dictionary = shim3.calls[shim3.calls.size() - 1]
+	check("CASE 1 stale-first-name: request carries NO scope (names[0] not on the board)",
+		not (call_e.get("extra", {}) as Dictionary).has("scope"))
+	ctx3["driver"].free_panel(ctx3["panel"])
+
+	# ── CASE 2 — TWO-NAME WIDENING: a NON-bus hint whose net_names carries TWO
+	# real, board-present nets. _net_for_hint trusts ONLY names[0] — a hint is
+	# never multi-net unless hint_type=="bus" (hints_to_router). The pre-fix
+	# bug unioned the WHOLE array into scope.nets; methods.py:~1778's
+	# disagreement check then PASSES (the worker's one resolved net is a
+	# subset of the too-wide scope) and OVERWRITES only_nets with the full
+	# scope — silently routing the second net too, copper nobody asked for.
+	# The fix: take names[0] only, never the rest of the array.
+	var ctx4: Dictionary = await _panel_context()
+	var shim4 = ctx4["shim"]
+	var host4 = ctx4["host"]
+	var data4 = ctx4["data"]
+	_declare_net(data4, "N1")
+	_declare_net(data4, "N2")
+	# A non-bus hint (hint_type stays the "waypoint" default) whose net_names
+	# names TWO real, board-present nets — built directly rather than via
+	# _seed_net_named_hint (which only ever sets one name).
+	var two_name_env: Dictionary = host4.build_route_hint_envelope(
+		0.0, 0.0, "", "F.Cu", "waypoint", [[0.0, 0.0], [5.0, 0.0]], "human")
+	var two_name_kp: Dictionary = two_name_env.get("kind_payload", {})
+	two_name_kp["net_names"] = ["N1", "N2"]
+	two_name_env["kind_payload"] = two_name_kp
+	var two_name_hint_id: String = str(host4.add_annotation_v2(two_name_env))
+	var widen_out: Dictionary = await PanelTools._workspace_propose(
+		shim4, _args({"hint_ids": [two_name_hint_id]}))
+	check("two-name propose still succeeded", bool(widen_out.get("success", false)))
+	var call_f: Dictionary = shim4.calls[shim4.calls.size() - 1]
+	var scope_f: Dictionary = (call_f.get("extra", {}) as Dictionary).get("scope", {})
+	var nets_f: Array = scope_f.get("nets", [])
+	check_eq("CASE 2 two-name-widening: scope names exactly ONE net (names[0] only, never both)",
+		nets_f.size(), 1)
+	if nets_f.size() == 1:
+		check_eq("CASE 2: the one net named is N1 (names[0]), never N2",
+			str(nets_f[0]), "N1")
+	ctx4["driver"].free_panel(ctx4["panel"])
+
+	# ── CASE 3 — BUS-HINT REROUTE REFUSAL: a candidate whose SOLE source hint
+	# is a bus hint naming two real nets (N1, N2). Selecting that hint (a
+	# reroute always selects the candidate's own source_hint_ids) makes the
+	# worker's hint-derived nets include BOTH — route_bridge.hints_to_router's
+	# bus branch asks for every present net_names entry, not just this
+	# candidate's own. A scope naming only this candidate's single net (the
+	# pre-fix behavior) would disagree with that and get hard-refused
+	# (unsupported_scope) — for EITHER candidate the bus produced, since both
+	# would select the same hint. The fix: recognize the bus hint and skip the
+	# scope entirely; the reroute still runs, unscoped.
+	var ctx5: Dictionary = await _panel_context()
+	var shim5 = ctx5["shim"]
+	var host5 = ctx5["host"]
+	var data5 = ctx5["data"]
+	var ws5 = ctx5["ws"]
+	_declare_net(data5, "N1")
+	_declare_net(data5, "N2")
+	var bus_hint_id: String = _seed_bus_hint(host5, "N1", "N2")
+	var bus_cid := str(ws5.ingest_record(_multipad_record([bus_hint_id]), int(data5.board_revision)))
+	check("CASE 3 setup: bus-attributed candidate landed", not bus_cid.is_empty())
+	var bus_reroute_out: Dictionary = await PanelTools._workspace_reroute_route(
+		shim5, _args({"candidate_id": bus_cid}))
+	check("bus-hint reroute still succeeded (unscoped, same as pre-fix)",
+		bool(bus_reroute_out.get("success", false)))
+	var call_g: Dictionary = shim5.calls[shim5.calls.size() - 1]
+	check("CASE 3 bus-hint-reroute: request carries NO scope (the bus hint attributes beyond this candidate's own net)",
+		not (call_g.get("extra", {}) as Dictionary).has("scope"))
+	ctx5["driver"].free_panel(ctx5["panel"])
+
+	# ── CASE 4 — DEGENERATE BUS (review fix c2-epochD, round 2): a bus hint
+	# (hint_type=="bus", 2 net_names) where FEWER than 2 of those names are
+	# actually present on the board. route_bridge.hints_to_router still ENTERS
+	# the bus branch on this hint (entry condition is `hint_type=="bus" and
+	# len(names)>=2`, checked BEFORE board presence) and then `continue`s past
+	# it having contributed ZERO nets ("bus hint resolved to <2 present nets —
+	# skipped") — it does NOT fall back to _net_for_hint's names[0] rule. A
+	# first cut of the panel-side check required the bus's PRESENT count to be
+	# >=2 before treating it as "a bus", so this exact shape fell through to
+	# the names[0] rule and scoped to N1 — a net the worker resolved NOTHING
+	# from — which methods.py's disagreement check (0 resolved nets is always
+	# a subset) then let overwrite only_nets with. The fix: mirror the
+	# worker's BRANCH-ENTRY condition, not the resolved outcome — hint_type
+	# =="bus" with >=2 net_names bails scope regardless of how many of those
+	# names the board actually has.
+	var ctx6: Dictionary = await _panel_context()
+	var shim6 = ctx6["shim"]
+	var host6 = ctx6["host"]
+	var data6 = ctx6["data"]
+	var ws6 = ctx6["ws"]
+	_declare_net(data6, "N1")  # the ONLY one of the bus's two names present
+	var degenerate_bus_hint_id: String = _seed_bus_hint(host6, "N1", "MISSING_NET")
+	var degenerate_propose_out: Dictionary = await PanelTools._workspace_propose(
+		shim6, _args({"hint_ids": [degenerate_bus_hint_id]}))
+	check("degenerate-bus propose still succeeded (unscoped, same as pre-fix)",
+		bool(degenerate_propose_out.get("success", false)))
+	var call_h: Dictionary = shim6.calls[shim6.calls.size() - 1]
+	check("CASE 4 degenerate-bus propose: request carries NO scope (the bus hint resolves to zero nets, not names[0])",
+		not (call_h.get("extra", {}) as Dictionary).has("scope"))
+
+	var degenerate_cid := str(ws6.ingest_record(
+		_multipad_record([degenerate_bus_hint_id]), int(data6.board_revision)))
+	check("CASE 4 setup: degenerate-bus-attributed candidate landed", not degenerate_cid.is_empty())
+	var degenerate_reroute_out: Dictionary = await PanelTools._workspace_reroute_route(
+		shim6, _args({"candidate_id": degenerate_cid}))
+	check("degenerate-bus reroute still succeeded (unscoped, same as pre-fix)",
+		bool(degenerate_reroute_out.get("success", false)))
+	var call_i: Dictionary = shim6.calls[shim6.calls.size() - 1]
+	check("CASE 4 degenerate-bus reroute: request carries NO scope",
+		not (call_i.get("extra", {}) as Dictionary).has("scope"))
+	ctx6["driver"].free_panel(ctx6["panel"])

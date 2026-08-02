@@ -1479,11 +1479,174 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 ## envelope, or a structured worker_unavailable when no bridge is reachable
 ## (headless / channel not registered — see the WORKER-INVOCATION note in the
 ## contract doc).
-static func _run_router(host, selection: Dictionary) -> Dictionary:
+## `extra` (DCR finding 7) carries the optional `scope`/`pinned_candidates` keys
+## through to PCBPanel.route_board — see _route_request_extra. Every existing
+## caller passes one argument and gets the default {}, so the wire payload it
+## produces is unchanged.
+static func _run_router(host, selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	if host != null and host.has_method("run_router"):
-		return await host.run_router(selection)
+		return await host.run_router(selection, extra)
 	return {"ok": false, "error": {"kind": "worker_unavailable",
 		"message": "host has no run_router bridge to the router worker"}}
+
+
+## Build the `extra` argument _run_router forwards to route_board: pinned-
+## candidate keep-outs (DCR finding 7 part 1) plus an explicit `scope` (part 2),
+## each added ONLY when there is something to say. Nothing pinned and no scope
+## derived -> {} -> route_board stamps neither key -> the pre-existing
+## {board, route_hints, selection} wire payload, byte-for-byte (the no-regression
+## requirement: "absent scope keeps today's behavior byte-identical").
+static func _route_request_extra(workspace, scope) -> Dictionary:
+	var out: Dictionary = {}
+	if workspace != null:
+		var pinned: Array = workspace.pinned_candidates_wire()
+		if not pinned.is_empty():
+			out["pinned_candidates"] = pinned
+	if scope is Dictionary and not (scope as Dictionary).is_empty():
+		out["scope"] = scope
+	return out
+
+
+## Non-empty net_names entries, in order, exactly as route_bridge._net_for_hint
+## / hints_to_router read them (kp.get("net_names") filtered on `str(n)`).
+static func _hint_net_names(kp: Dictionary) -> Array:
+	var out: Array = []
+	for n in _string_list(kp.get("net_names", [])):
+		if n != "":
+			out.append(n)
+	return out
+
+
+## Board net names as a lookup set, for the "is this name actually on the
+## board" check both scope builders below need (mirrors `n in board.nets` /
+## `n in board.nets` on the worker side, against this panel's own PCBData).
+static func _board_net_set(data) -> Dictionary:
+	var out: Dictionary = {}
+	if data != null:
+		for n in data.get_net_names():
+			out[str(n)] = true
+	return out
+
+
+## True iff `kp` enters route_bridge.hints_to_router's BUS BRANCH:
+## `hint_type == "bus" and len(names) >= 2` — the worker's own ENTRY
+## condition, mirrored exactly, NOT the outcome once inside it. Board presence
+## is deliberately NOT checked here (review fix c2-epochD, round 2): a hint
+## that enters the branch but resolves to <2 PRESENT nets is DEGENERATE —
+## hints_to_router still `continue`s past it contributing ZERO nets (see
+## "bus hint resolved to <2 present nets — skipped") rather than falling back
+## to _net_for_hint's single-net rule. So inside the branch there are only two
+## outcomes, multi-net (>=2 present) or zero (<2 present), and NEITHER is the
+## single name this panel could express as `scope.nets` — a first cut that
+## required `present >= 2` here left the zero-contribution case
+## mis-classified as "not a bus hint", falling through to the names[0] rule
+## and emitting a scope for a net the worker resolved NOTHING from (proven:
+## methods.py's disagreement check then passes and overwrites only_nets with
+## it). A hint_type=="bus" hint with FEWER than 2 net_names never enters this
+## branch at all worker-side — it falls to _net_for_hint like any other
+## hint — so it is correctly EXCLUDED here too (len(names) < 2 -> false).
+static func _is_bus_branch_hint(kp: Dictionary) -> bool:
+	if str(kp.get("hint_type", "waypoint")) != "bus":
+		return false
+	return _hint_net_names(kp).size() >= 2
+
+
+## Scope for a REROUTE (DCR finding 7 part 2; review fix c2-epochD, docket
+## 019fc1b0db34): the candidate's OWN task/net — but ONLY when that net is the
+## UNAMBIGUOUS resolution of the SAME source hints this reroute selects.
+##
+## PROVEN REGRESSION this guards against: a BUS-BRANCH hint (see
+## _is_bus_branch_hint — hint_type=="bus" with >=2 net_names, mirroring the
+## worker's branch ENTRY condition, not its outcome) is NOT resolved by
+## _net_for_hint's names[0]-only rule — route_bridge.hints_to_router gives it a
+## dedicated branch whose only two outcomes are "every PRESENT net in the bus"
+## or, degenerately, "zero nets" (see _is_bus_branch_hint's doc — neither is a
+## single name this panel can express). Selecting that hint (this reroute
+## always selects the candidate's OWN source_hint_ids) therefore makes the
+## worker's hint-derived nets diverge from a scope naming only THIS
+## candidate's single net — disagreement, hard refusal (parse_route_scope
+## refuses rather than narrows), for EITHER candidate the bus produced, since
+## both select the same hint. So: if any source hint feeding this reroute is a
+## bus-branch hint, skip the scope entirely; the reroute still runs, unscoped,
+## exactly as before this fix.
+##
+## `endpoints` is deliberately omitted from the task entry: an endpoints list
+## would ask parse_route_scope to validate a SPAN, and a reroute always means
+## "the whole route for this task" (reroute-span is the documented degrade to
+## whole-route, see _workspace_reroute_span) — never a span, so omitting it
+## resolves to the whole net.
+static func _reroute_scope(c, source_hints: Array, _data) -> Dictionary:
+	for hint in source_hints:
+		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		if _is_bus_branch_hint(kp):
+			return {}
+	return {"tasks": [{"task_id": str(c.task_id), "net": str(c.net)}]}
+
+
+## Scope for a PROPOSE with an explicit hint_ids selection (DCR finding 7 part
+## 2; review fix c2-epochD, docket 019fc1b0db34): the nets EVERY selected hint
+## resolves to, mirroring route_bridge._net_for_hint / hints_to_router's
+## resolution EXACTLY rather than approximating it — the prior version unioned
+## the WHOLE net_names array per hint, which is neither of the worker's two
+## real resolution rules and was PROVEN to both under- and over-scope:
+##   - a stale names[0] (renamed/removed net) that the worker falls through to
+##     resolve via source_pins/dest_pins would make this panel scope to the
+##     stale name while the worker routes the resolved one — disagreement,
+##     hard unsupported_scope, where an unscoped run used to work.
+##   - a NON-bus hint with >1 net_names (_net_for_hint only ever trusts
+##     names[0]) would scope to BOTH names; methods.py's disagreement check
+##     passes (the worker's one resolved net is a subset) and then OVERWRITES
+##     only_nets with the full (too-wide) scope — silently routing a net
+##     nothing asked for.
+##   - a DEGENERATE bus hint (hint_type=="bus", >=2 net_names, but FEWER than
+##     2 of them present on the board) enters hints_to_router's bus branch and
+##     contributes ZERO nets there (see _is_bus_branch_hint) — a first cut that
+##     required the bus's PRESENT count to be >=2 before treating it as "a bus"
+##     mis-classified this case as "not a bus", fell through to the names[0]
+##     rule, and emitted a scope for a net the worker resolved NOTHING from;
+##     methods.py's disagreement check then passed (0 resolved nets is always
+##     a subset) and overwrote only_nets with that phantom scope.
+##
+## The mirror, per selected hint:
+##   - a BUS-BRANCH hint (see _is_bus_branch_hint — the worker's branch ENTRY
+##     condition, hint_type=="bus" with >=2 net_names, checked WITHOUT regard
+##     to how many resolve) is a DIFFERENT rule from the single-net one below,
+##     with only two possible outcomes (multi-net or degenerate-zero) and
+##     NEITHER is a single name this panel can express — so its presence bails
+##     the WHOLE scope to unscoped, same as an unresolvable hint. This is an
+##     entry-condition check, not an outcome check: it must not be narrowed by
+##     re-deriving present-count here, or the degenerate case reopens.
+##   - otherwise: drop empty strings, take names[0] ONLY (never the rest of
+##     the array), and trust it only if the board actually carries it — the
+##     exact _net_for_hint priority up to and including its board-membership
+##     check. A hint with no usable name here falls through to WORKER-SIDE pin
+##     resolution (source_pins/dest_pins against the compiled board), which
+##     this panel cannot replicate — so it bails the whole scope too.
+##
+## Built only when EVERY selected hint resolves this way with total
+## confidence; any hint this panel cannot mirror exactly takes the WHOLE
+## propose back to unscoped (the established completely-derivable-or-nothing
+## rule) rather than guess a scope that could disagree with what the worker
+## actually routes.
+static func _propose_scope(hint_ids: Array, source_hints: Array, data) -> Variant:
+	if hint_ids.is_empty():
+		return null
+	var board_nets: Dictionary = _board_net_set(data)
+	var nets := {}
+	for hint in source_hints:
+		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		if _is_bus_branch_hint(kp):
+			return null  # a different resolution rule — not mirrored here
+		var names: Array = _hint_net_names(kp)
+		if names.is_empty():
+			return null  # falls through to pin resolution worker-side
+		var first: String = names[0]
+		if not board_nets.has(first):
+			return null  # stale name — worker falls through to pin resolution
+		nets[first] = true
+	if nets.is_empty():
+		return null
+	return {"nets": nets.keys()}
 
 
 ## Structured failure-as-feedback when the worker did not answer.
@@ -3128,7 +3291,9 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	else:
 		selection = {"mode": "ids", "ids": _hint_id_list(source_hints)}
 
-	var reply: Dictionary = await _run_router(host, selection)
+	var route_extra: Dictionary = _route_request_extra(
+		workspace, _propose_scope(hint_ids, source_hints, data))
+	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
 	var result: Dictionary = reply.get("result", {})
@@ -3342,16 +3507,18 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dic
 
 	var hint_ids: Array = _string_list(c.source_hint_ids)
 	if hint_ids.is_empty():
-		# FAIL CLOSED rather than run a whole-board route. The worker HAS an
-		# explicit scope argument (route_bridge.parse_route_scope, C2), but the
-		# GD→worker bridge does not forward it: PCBPanel.route_board builds
-		# params as {board, route_hints, selection} only, and PCBPanel.gd is
-		# outside this unit's fence. So a candidate with no hint provenance
-		# cannot be addressed, and rerouting the whole board in its name would
-		# return copper nobody asked for.
+		# FAIL CLOSED rather than run a whole-board route. `route_board`/
+		# `run_router` DO now forward an explicit `scope` (DCR finding 7,
+		# _reroute_scope below, built straight from this candidate's own
+		# task_id/net) — but only AFTER this gate: this verb still requires
+		# hint provenance FIRST and uses `scope` as a belt-and-suspenders
+		# assertion alongside it, not as a substitute for it. Lifting this gate
+		# so a hint-less candidate could be addressed by task/net scope alone
+		# is a separate, larger change to this function's control flow — not
+		# part of this fence.
 		return {
 			"success": false, "error": "no_source_hints", "candidate_id": cid,
-			"note": "this candidate carries no source route-hint ids, and the panel's router bridge forwards only a HINT selection (PCBPanel.route_board sends {board, route_hints, selection}); the worker's explicit scope argument is not reachable from here yet, so a scoped reroute cannot be addressed",
+			"note": "this candidate carries no source route-hint ids; reroute is gated on hint provenance before the router bridge is even called, so an explicit task/net scope cannot be substituted for it here (see pcb/docs/tools.md's route-request note for what scope/pinned_candidates now cover)",
 		}
 	var source_hints: Array = _gather_route_hints(host, hint_ids)
 	if source_hints.is_empty():
@@ -3361,7 +3528,10 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dic
 			"note": "the route hints this candidate came from are no longer on the board, so the run cannot be scoped to it",
 		}
 
-	var reply: Dictionary = await _run_router(host, {"mode": "ids", "ids": _hint_id_list(source_hints)})
+	var route_extra: Dictionary = _route_request_extra(
+		workspace, _reroute_scope(c, source_hints, data))
+	var reply: Dictionary = await _run_router(
+		host, {"mode": "ids", "ids": _hint_id_list(source_hints)}, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
 

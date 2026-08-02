@@ -364,6 +364,32 @@ func is_pinned(id: String) -> bool:
 	return pinned.has(id)
 
 
+## PINNED candidates in the wire shape route_bridge.existing_copper_with_pinned
+## / ir_candidates.build_overlay accept — the SAME candidate language begin_check
+## above already speaks (see _candidate_wire), reused rather than invented a
+## second time (DCR finding 7, part 1: "the hold protects the CANDIDATE; it does
+## not yet protect the SPACE"). A caller hands this straight through as the
+## route request's `pinned_candidates` param and the router treats every one as
+## fixed copper — an obstacle at keepout margin on another net, pathable-along on
+## its own — so a future run routes AROUND a pin instead of through it.
+##
+## `pinned` is a DERIVED index of disposition=="pinned" (_sync_pinned_set), so it
+## already excludes superseded/rejected/committed candidates: a routing run's
+## keep-out set is exactly "what the user is still holding right now", never
+## stale or dead geometry. Empty when nothing is pinned — the caller omits the
+## `pinned_candidates` key entirely in that case (see panel_tools.gd
+## _route_request_extra), which is what "no pin" already means to the worker.
+func pinned_candidates_wire() -> Array:
+	var out: Array = []
+	for id in pinned:
+		var cid := str(id)
+		var c = get_candidate(cid)
+		if c == null:
+			continue
+		out.append(_candidate_wire(cid, c))
+	return out
+
+
 ## TARGETED Try-again: supersede THIS candidate, by the user's explicit act on
 ## it. This is the verb that legally retires a PINNED candidate — batch ingest
 ## deliberately will not (see the ingest policy on _create_candidate_for_route):
@@ -534,13 +560,7 @@ func begin_check(candidate_ids: Array = []) -> Dictionary:
 			continue
 		_pending_check[cid] = {"revision": int(c.candidate_revision), "prior": str(c.validation)}
 		set_validation(cid, "checking")  # emits validation_changed
-		out_candidates.append({
-			"candidate_id": cid,
-			"net": str(c.net),
-			"revision": int(c.candidate_revision),
-			"segments": _segments_wire(c),
-			"vias": _vias_wire(c),
-		})
+		out_candidates.append(_candidate_wire(cid, c))
 	return {
 		"board_token": board_token,
 		"workspace_generation": int(_workspace_generation),
@@ -623,6 +643,20 @@ static func _findings_for_subject(findings: Array, cid: String) -> Array:
 				out.append(f)
 				break
 	return out
+
+
+## ONE candidate, wire-shaped: {candidate_id, net, revision, segments, vias} —
+## the shape both begin_check (draft_check) and pinned_candidates_wire (routing
+## keep-outs) hand to the worker, factored here so the two call sites can never
+## drift into two different candidate languages.
+func _candidate_wire(cid: String, c) -> Dictionary:
+	return {
+		"candidate_id": cid,
+		"net": str(c.net),
+		"revision": int(c.candidate_revision),
+		"segments": _segments_wire(c),
+		"vias": _vias_wire(c),
+	}
 
 
 ## Serialise a candidate's segments to the draft_check wire shape: points as

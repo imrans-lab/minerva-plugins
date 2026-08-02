@@ -620,15 +620,40 @@ net and return copper between pads the task never named"). So
 span-scoped task — recording a span question whose answer is whole-route geometry
 would make the model claim a scope it never had.
 
-### Known gap: the worker's explicit scope is not reachable from the panel
+### Pinned candidates route around as keep-outs; scope reaches the worker where it can be stated completely
 
-The worker's `route` method accepts `scope` (RouteTask/net) and
-`pinned_candidates` parameters, but `PCBPanel.route_board` builds its request as
-`{board, route_hints, selection}` only, so neither is reachable from the GD side
-yet. Consequences, both visible in the replies rather than hidden: a reroute is
-scoped by the candidate's **source hint ids** and is refused (`no_source_hints`)
-when it has none, and pinned candidates are not yet sent to the router as
-keep-outs on this path.
+(Closes DCR finding 7, docket `019fc1b0db34`.) The worker's `route` method
+accepts `scope` (RouteTask/net) and `pinned_candidates` parameters; both now
+reach it from `PCBPanel.route_board(selection, extra)`, whose `extra` argument
+`panel_tools.gd` computes at every propose/reroute call site
+(`_route_request_extra`):
+
+- **`pinned_candidates`** — whenever `RoutingWorkspace.pinned` is non-empty,
+  every pinned candidate is serialised to the wire shape
+  `ir_candidates.build_overlay` already accepts (`pinned_candidates_wire`, the
+  same candidate language `begin_check`/draft_check uses) and sent as fixed
+  copper. The router treats it exactly like already-accepted copper: an
+  obstacle at keepout margin on another net, pathable-along on its own. A pin
+  now protects the **space**, not only the candidate.
+- **`scope`** — added only where it can be stated *completely*, never guessed:
+  - a **reroute** always carries `{"tasks": [{"task_id", "net"}]}` from the
+    candidate's own task (no `endpoints`, so it names the whole net, never a
+    span).
+  - a **propose** with an explicit `hint_ids` selection carries
+    `{"nets": [...]}` only when *every* selected hint names its net directly
+    via `kind_payload.net_names`. A hint resolvable only through
+    `source_pins`/`dest_pins` needs the compiled board to resolve — strictly
+    more than the panel can re-derive — so a partial scope is never sent (it
+    would make `parse_route_scope` refuse a run that used to work). That call
+    stays unscoped, exactly as before.
+  - absent scope/no pins: the request is `{board, route_hints, selection}`,
+    byte-identical to before this fix.
+
+**Still open:** a reroute on a candidate with no `source_hint_ids` is still
+refused (`no_source_hints`) rather than being addressed via `scope` alone —
+the reroute call sites still gate on hint provenance first. Fixing that is a
+separate, larger change to `_workspace_reroute`'s control flow, not part of
+this fence.
 
 ## Bus tool (`minerva_pcb_route_bus_direct`, campaign 2 epoch C unit 5, DCR `019fb572b888` S3+S4)
 

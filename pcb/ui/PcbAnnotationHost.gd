@@ -287,9 +287,12 @@ func get_spatial_index():
 ## and the worker `route` method is otherwise reachable only via a Go MCP tool
 ## (internal/tools/worker_tools.go), neither of which is in this round's fence.
 ## The in-fence half (host→panel→broker request) is wired and ready.
-func run_router(selection: Dictionary) -> Dictionary:
+## `extra` (DCR finding 7 — scope/pinned_candidates) passes straight through to
+## PCBPanel.route_board, which is the only thing that reads it; omitted here it
+## defaults to {}, reproducing the pre-existing call exactly.
+func run_router(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	if _panel != null and is_instance_valid(_panel) and _panel.has_method("route_board"):
-		return await _panel.route_board(selection)
+		return await _panel.route_board(selection, extra)
 	return {"ok": false, "error": {"kind": "worker_unavailable",
 		"message": "no panel bound — router broker unreachable (headless / before mount)"}}
 
