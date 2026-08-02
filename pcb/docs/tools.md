@@ -47,7 +47,7 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_export_trace_geometry` | round-trips with the import shape; stamps `trace_id` / via `id` |
 | `minerva_pcb_delete_traces` | removes named traces/vias without clearing the board |
 | `minerva_pcb_get_image` | snapshot-style via `host.render_content_to_image`; null-safe headless |
-| `minerva_pcb_apply_route_hints` | route the open route hints → cyan proposals (default) or committed traces (`commit=true`); see the route-correction loop below |
+| `minerva_pcb_apply_route_hints` | route the open route hints → RouteCandidates in the routing workspace (default) or committed traces (`commit=true`); see the route-correction loop below |
 | `minerva_pcb_list_zones` | read-only; summary per zone (`zone_id`, `kind`, `net`, `layer`, `point_count`) |
 | `minerva_pcb_describe_zone` | read-only; full zone incl. outline points (`zone_outline_points` → `zone_outline_to_list` round trip) |
 | `minerva_pcb_delete_zone` | `data.remove_zone`; one journalled step, mirrors `delete_component`'s idiom |
@@ -139,12 +139,17 @@ read, `pcb_data.remove_via_by_id` for the delete — so an agent's delete and a
 human's Delete key are indistinguishable to the board and share one undo
 history.
 
-**`minerva_pcb_add_via` is NOT the counterpart of these.** It edits a
-route-hint **proposal annotation** (splitting a proposed segment and inserting a
-via into the proposal, via `PcbRouteHintKind.apply_via_at_point`), not the
-board. Nothing it adds appears in `list_vias`. Board vias are created only by
-committing routes — `apply_route_hints` with `commit`, or
-`import_trace_geometry`. The honest board-via surface is: **create** by
+**`minerva_pcb_add_via` is NOT the counterpart of these.** It edits any
+`pcb_route_hint` annotation carrying per-segment geometry (`kind_payload.
+segments`) — splitting a segment and inserting a via, via
+`PcbRouteHintKind.apply_via_at_point` — not the board. Since S5 (C4b, DCR
+`019f7095c395`) retired proposal annotations, its live target today is a
+pre-cutover proposal a `.pcbskel` may still carry until migration drops it, or
+any future annotation shape that stamps `segments` itself; it was never
+gated on proposal-hood specifically. Nothing it adds appears in `list_vias`.
+Board vias are created only by committing routes — `apply_route_hints` with
+`commit`, `minerva_pcb_workspace_commit`, or `import_trace_geometry`. The
+honest board-via surface is: **create** by
 committing routes, **read** by `list_vias` (or `export_trace_geometry`'s
 `vias[]`), **delete** by `delete_via` (one) or `delete_traces`' `via_ids`
 (several, one undo step). There is deliberately no `move_via`: moving a via
@@ -446,32 +451,34 @@ delete it and import the geometry you want in its place.
 Closes the route-correction loop (agent-router child `019eb47eb567`, DCR
 `019dc140`). Signature: `{editor_name, hint_ids?, commit?}`.
 
-**propose → inspect → apply → iterate**
+**propose → inspect → resolve → iterate**
 
 1. **PROPOSE** (`commit` absent/false) — gather the board's OPEN `pcb_route_hint`
-   annotations (or the given `hint_ids`), route them through the worker, and write
-   each routed polyline back as an **AI-authored proposal annotation**. Proposals
-   do NOT mutate the board — the user inspects them in the dock/canvas first.
-   Returns `{proposed, proposals:[…], unrouted:[…], stuck:[…]}`.
-2. **APPLY** (`commit=true`) — re-route the selected open hints and MATERIALIZE the
-   results as real traces in the model (journalled via `save_to_history`), then
-   transition the source hints `open → applied`. Returns
-   `{applied, applied_hint_ids, traces_added, failed:[…], unrouted, stuck}`.
-3. **ITERATE** — applied hints drop out of the default (open) gather, and AI
-   proposals are never re-routed (they carry `kind_payload.proposal_for`), so
-   re-running after the user edits/adds hints picks up only the fresh open hints.
-
-**Proposal representation (decision).** A proposal is an AI-authored
-`pcb_route_hint` envelope — the simplest conformant carrier, no new kind:
-
-- `author.kind = "ai"` → renders in the substrate **author cyan** (the kind's
-  `render()` swaps its layer tint for cyan when the author is AI), visually
-  distinct from a human, layer-tinted hint.
-- `kind_payload.hint_type = "single_trace"`, `waypoints` = the routed polyline,
-  `net_names = [net]`, and `proposal_for = [source hint id(s)]` linking the
-  proposal to the hint it answers. `lifecycle = "open"`.
-- Built through the existing `host.build_route_hint_envelope(…, author_kind="ai")`
-  + `add_annotation_v2` — no bespoke authoring path.
+   annotations (or the given `hint_ids`), route them through the worker, and land
+   each routed polyline as a **RouteCandidate** in the panel's routing workspace
+   (`pcb_routing_workspace.gd`) — the exact landing path
+   `minerva_pcb_workspace_propose` uses. This does NOT mutate the board and does
+   NOT write an annotation — the user inspects candidates on the canvas (ghost
+   traces) or via `minerva_pcb_workspace_list`/`get_active` first. Returns
+   `{proposed, proposals:[…], holds:[…], unrouted:[…], stuck:[…]}`; each
+   `proposals[]` entry is result-derived (`net`, `layer`, `waypoint_count`,
+   `width_mm`, `drc_geometric?`, `source_hint_ids`, `candidate_id`) — `candidate_id`
+   (aliased as `id`) is the workspace id to resolve, never an annotation id.
+2. **RESOLVE** each candidate — `minerva_pcb_workspace_commit(candidate_id)`
+   materializes it as real trace(s)/via(s) in ONE undoable step;
+   `minerva_pcb_workspace_reject(candidate_id)` discards it and reopens its task
+   for iteration. (Retired, S5/C4b: the old per-proposal
+   `minerva_pcb_proposal_accept`/`minerva_pcb_proposal_reject` annotation verbs —
+   there is no longer an annotation to accept or reject.)
+3. **APPLY** (`commit=true`) — re-route the selected open hints and MATERIALIZE the
+   results as real traces in the model directly (journalled via `save_to_history`),
+   then transition the source hints `open → applied`. Returns
+   `{applied, applied_hint_ids, traces_added, failed:[…], unrouted, stuck}`. Skips
+   the propose step entirely — use this for a batch that needs no per-route review.
+4. **ITERATE** — applied hints drop out of the default (open) gather; a workspace
+   candidate is never itself gathered as a source hint (only `pcb_route_hint`
+   ANNOTATIONS are), so re-running after the user edits/adds hints picks up only
+   the fresh open hints.
 
 **Failure as feedback.** Partial/failed routing returns WHERE it got stuck rather
 than a bare "failed": `stuck` carries each unrouted net with its blocked pad pair
@@ -521,11 +528,13 @@ it mints objects here and configures them via duck-typed calls.
 ## Routing-workspace verbs (`minerva_pcb_workspace_propose` / `minerva_pcb_workspace_commit` / `minerva_pcb_workspace_check` + 7 more, C4a / DCR `019f7095c395` S4)
 
 Ten tools over the **routing workspace** — the store that owns route
-*candidates* (ghost routes) instead of the cyan proposal *annotations* the
-route-correction loop above writes. They are the agent's doorway onto exactly
-the verbs the canvas context menu offers a human, calling the same
-`RoutingWorkspace` methods through the same legality table, so neither surface
-can gain a power the other lacks.
+*candidates* (ghost routes). Both `minerva_pcb_apply_route_hints` (commit=false)
+above and `minerva_pcb_workspace_propose` land in this SAME store (S5, C4b,
+DCR `019f7095c395` retired the proposal-annotation path both used to also
+write). These ten are the agent's doorway onto exactly the verbs the canvas
+context menu offers a human, calling the same `RoutingWorkspace` methods
+through the same legality table, so neither surface can gain a power the
+other lacks.
 
 | Tool | Notes |
 |---|---|
@@ -728,13 +737,17 @@ copper — see Draw ▸ Trace above for drawing copper directly.
 handle to move a bend, right-click a handle to delete it, click a segment to
 insert a new bend (Esc or switching tools exits).
 
-**Hints ▸ Add Via** — click a proposal to select it, then click a point on its
-route to split the segment, add a via, and flip the trace past that point to
-the opposite copper layer (Esc or switching tools exits).
+**Hints ▸ Add Via** — click a route-hint annotation carrying segment geometry
+to select it, then click a point on its route to split the segment, add a
+via, and flip the trace past that point to the opposite copper layer (Esc or
+switching tools exits). Its live target today is a legacy pre-cutover
+proposal still on a `.pcbskel` (see S5 above) — a fresh propose lands a
+canvas candidate instead, edited via the candidate context menu.
 
-**Propose button** — runs the router over open route hints and writes back
-inspectable cyan proposals; the board itself is not changed until an applied
-route hint is committed (see the route-correction loop above).
+**Propose button** — runs the router over open route hints and lands
+inspectable candidates in the routing workspace (rendered as ghost traces on
+the canvas); the board itself is not changed until a candidate is committed
+(see the route-correction loop above).
 
 **Properties ▸ zone Net / Layer** (re-property an already-drawn zone) — Net
 accepts declared nets only (an undeclared net would make the whole board

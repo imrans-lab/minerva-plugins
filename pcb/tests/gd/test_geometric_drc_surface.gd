@@ -44,9 +44,13 @@ extends SceneTree
 ##      its record
 ##   8. a route with no drc_geometric key (older worker) leaves the record
 ##      without one — absent-key contract, not an invented default
-##   9. _dual_write_propose's reply carries drc_geometric_summary AND each
-##      proposal entry carries its OWN drc_geometric verdict (specific-proposal
-##      attribution, not just "something in the batch is dirty")
+##   9. propose's reply carries drc_geometric_summary AND each proposal entry
+##      carries its OWN drc_geometric verdict (specific-candidate attribution,
+##      not just "something in the batch is dirty"). S5 (C4b, DCR
+##      019f7095c395): drives panel_tools.gd _propose_into_workspace (lands a
+##      workspace candidate) rather than the retired _dual_write_propose
+##      (which also wrote a proposal annotation) — the reply SHAPE this test
+##      pins is unchanged either way.
 
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 const PCBPanel := preload("res://../../minerva-plugins/pcb/ui/PCBPanel.gd")
@@ -227,11 +231,12 @@ func _run_normalize_absent_key_contract() -> void:
 # ── 9: end-to-end dual-write propose (real host, mirrors test_parity_bridge.gd) ─
 
 func _run_dual_write_propose_attribution() -> void:
-	print("-- 9. _dual_write_propose: reply + proposal entry both carry the geometric verdict --")
+	print("-- 9. propose (S5): reply + candidate entry both carry the geometric verdict --")
 	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
 	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
+	var data = panel.get_data()
 
 	var geom_route := {"scope": "geometric_candidate", "verifies_geometry": true,
 		"verdict": "violations", "violations": [{"type": "clearance"}]}
@@ -246,14 +251,16 @@ func _run_dual_write_propose_attribution() -> void:
 		"drc_geometric_summary": _geom_summary_violations(),
 	}
 
-	var out: Dictionary = PanelTools._dual_write_propose(host, reply, [])
-	check_eq("one proposal written", (out.get("proposals", []) as Array).size(), 1)
+	var out: Dictionary = PanelTools._propose_into_workspace(host, data, reply, [])
+	check("propose ok", bool(out.get("success", false)))
+	check_eq("one candidate landed", (out.get("proposals", []) as Array).size(), 1)
 	var prop: Dictionary = (out.get("proposals", []) as Array)[0]
-	check_eq("proposal carries its OWN drc_geometric verdict (not just the batch summary)",
+	check_eq("candidate entry carries its OWN drc_geometric verdict (not just the batch summary)",
 		str((prop.get("drc_geometric", {}) as Dictionary).get("verdict", "")), "violations")
 	var out_summary: Dictionary = out.get("drc_geometric_summary", {})
 	check("top-level reply carries drc_geometric_summary", not out_summary.is_empty())
 	check_eq("top-level summary verdict forwarded verbatim", str(out_summary.get("verdict", "")), "violations")
+	check_eq("no proposal annotation written (S5)", host.get_annotations().size(), 0)
 
 	driver.free_panel(panel)
 

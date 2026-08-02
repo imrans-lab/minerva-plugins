@@ -6,31 +6,43 @@ extends SceneTree
 ## the round brief: never run headless godot from the non-worktree checkout).
 ##
 ## Product contract v2 (owner-ratified): the router NEVER runs implicitly —
-## proposing routes is always an explicit human or agent act. Proposals (cyan
-## AI annotations linked to hints via kind_payload.proposal_for) are
-## individually answerable: ACCEPT materializes that proposal's trace, deletes
-## the consumed source hint(s) AND the proposal; REJECT deletes the proposal,
-## source hints stay open for iteration.
+## proposing routes is always an explicit human or agent act.
+##
+## S5 UPDATE (C4b, DCR 019f7095c395): "Proposals (cyan AI annotations linked to
+## hints via kind_payload.proposal_for)" — the ORIGINAL C5 contract this file's
+## name still honors — is RETIRED. Propose now lands RouteCandidates in the
+## routing workspace ONLY (panel_tools.gd _propose_into_workspace); no
+## annotation is written. Individually answerable still holds, just moved:
+## minerva_pcb_workspace_commit(candidate_id) materializes that candidate's
+## trace (source hints are left OPEN — the workspace never touches
+## annotations, unlike the retired per-proposal accept);
+## minerva_pcb_workspace_reject(candidate_id) discards it and reopens its task,
+## source hints stay open for iteration either way.
 ##
 ## Scenarios:
-##   A) Human draws a hint via the Trace tool (real input) → NO proposal exists
-##      (nothing auto-fires — panel mount / tool activation / annotation
+##   A) Human draws a hint via the Trace tool (real input) → NO candidate
+##      exists (nothing auto-fires — panel mount / tool activation / annotation
 ##      changes never invoke the router; this is deliverable 4's audit,
 ##      exercised live).
 ##   B) Click the Propose button (real input on the actual Button, not a
 ##      direct handler call for the click itself — see _click_propose_button)
-##      → a cyan AI-authored proposal linked to the hint appears; the board is
-##      NOT mutated. Also proves the WorkflowAnnotationList generic
-##      Accept/Reject wiring (deliverable 2's UI half): the proposal row gets
-##      Accept/Reject buttons, the plain-hint row does not.
-##   C) minerva_pcb_proposal_reject via REAL panel-tool dispatch (
+##      → a candidate linked to the hint lands in the routing workspace; the
+##      board is NOT mutated and NO annotation is added. Also proves the
+##      RETIREMENT of the WorkflowAnnotationList generic Accept/Reject wiring
+##      (deliverable 2's UI half, DCR finding 4): NEITHER the (would-be)
+##      proposal row NOR the plain-hint row ever grows Accept/Reject buttons,
+##      because PcbAnnotationHost no longer implements the duck-typed verb pair
+##      at all — not because nothing happens to be AI-authored.
+##   C) minerva_pcb_workspace_reject via REAL panel-tool dispatch (
 ##      panel_tool_registry_driver, same rig test_pcb_apply_route_hints.gd /
-##      test_pcb_hint_refine_loop.gd use for panel-executed tools) → proposal
-##      gone, source hint still open, zero residue.
-##   D) Propose again → accept via minerva_pcb_proposal_accept (REAL dispatch)
-##      → a real trace matches the proposal's own polyline exactly; the source
-##      hint AND the proposal are both deleted; the board has exactly one
-##      trace.
+##      test_pcb_hint_refine_loop.gd use for panel-executed tools) → candidate
+##      discarded, source hint still open, zero annotation residue (there was
+##      never any to begin with).
+##   D) Propose again → commit via minerva_pcb_workspace_commit (REAL dispatch)
+##      → a real trace matches the candidate's own polyline exactly; the
+##      source hint is left OPEN (S5: commit is a board+disposition
+##      transaction only — it cannot delete an annotation it has no reference
+##      to); the board has exactly one trace.
 ##   E) Backend-stopped affordance (bug 019f6c1e0399): sabotage the IPC seam
 ##      the way test_pcb_apply_route_hints.gd simulates worker-unavailable
 ##      (a fake "_MinervaIPC" node intercepting panel.request) — but replying
@@ -41,15 +53,15 @@ extends SceneTree
 ##      human-actionable message; the tool result carries the structured
 ##      pcb_backend_stopped error + recovery hint.
 ##   F) Bulk regression: minerva_pcb_apply_route_hints commit=true still works
-##      through the SAME _materialize_routes machinery the new per-proposal
-##      accept path now shares — delete-on-commit contract intact.
+##      through the SAME _materialize_routes machinery — unaffected by S5 (that
+##      branch never wrote an annotation) — delete-on-commit contract intact.
 ##
 ## REUSE SCAN: mount/fixture/input/real-worker-stdio conventions copied
 ## verbatim from test_pcb_hint_refine_loop.gd (real PCBPanel boot headless,
 ## real input via get_root().push_input(), the e2e_route_stdio.py bridge +
 ## documented canned fallback for real-worker steps, the FakeBrokerIpc
-## broker-fidelity shape). REAL panel-tool dispatch for the new proposal
-## accept/reject tools uses test/helpers/panel_tool_registry_driver.gd (same
+## broker-fidelity shape). REAL panel-tool dispatch for the workspace
+## commit/reject tools uses test/helpers/panel_tool_registry_driver.gd (same
 ## fixture test_pcb_panel_tools_migration.gd established, reused by every pcb
 ## panel-tool suite since).
 ##
@@ -80,7 +92,9 @@ const U3_PIN1 := Vector2(15.0, 55.0)
 const U4_PIN1 := Vector2(55.0, 55.0)
 
 var _hint_id := ""
-var _proposal_id := ""
+## Workspace candidate id (S5, C4b: propose lands a candidate, not an
+## annotation — see the class doc). Renamed from the pre-S5 _proposal_id.
+var _candidate_id := ""
 
 
 class FakeEditor extends RefCounted:
@@ -290,11 +304,13 @@ func raw_worker_envelope(params: Dictionary) -> Dictionary:
 ## source_pins' component's connected net — falls back to "SIG" when absent,
 ## which is the only net every fixture hint in this suite ever uses).
 ##
-## Stamps the worker's own per-route `hint_ids` (docket 019f9c3a136c: a
-## proposal's ONLY proof of proposal-hood is a non-empty
-## kind_payload.proposal_for, taken verbatim from these) with the hint's own
-## id — a canned reply that omitted them made every proposal this fixture
-## produced unattributed.
+## Stamps the worker's own per-route `hint_ids` (docket 019f9c3a136c) with the
+## hint's own id — a canned reply that omitted them made every candidate this
+## fixture produced unattributed (source_hint_ids empty instead of [_hint_id]).
+## Pre-S5 this attribution surfaced as an annotation's kind_payload.
+## proposal_for; S5 moved it onto the landed candidate's own source_hint_ids
+## (see panel_tools.gd _propose_into_workspace) — the underlying worker
+## contract this stamp exercises is unchanged.
 func _canned_result_for(params: Dictionary) -> Dictionary:
 	var routes: Array = []
 	for hint in params.get("route_hints", []):
@@ -362,19 +378,47 @@ func _test_a_draw_hint_nothing_auto_fires() -> void:
 	check("A: dest_pins == [U2.1]", (ann.get("kind_payload", {}).get("dest_pins", []) as Array) == ["U2.1"])
 
 	# Deliverable 4 (nothing auto-fires), exercised live: drawing a hint alone
-	# never invokes the router — no proposal exists, board unmutated.
-	check("A: NO proposal exists — nothing auto-fired",
+	# never invokes the router — no candidate exists, board unmutated.
+	check("A: NO annotation carries proposal_for — nothing auto-fired",
 		not _any_proposal_exists(), "annotations=%s" % str(host.get_annotations()))
+	check("A: NO candidate landed in the routing workspace either",
+		_workspace_candidate_count() == 0)
 	check("A: board has zero traces (nothing auto-fired)", data.get_trace_count() == 0)
 
 	await _release_trace_button()
 
 
+## S5 (C4b): kept as a pin on the NEGATIVE — nothing ever mints
+## kind_payload.proposal_for anymore, on any annotation, for any reason (a
+## fresh regression here would mean the retired write-back path came back).
 func _any_proposal_exists() -> bool:
 	for ann in host.get_annotations():
 		if ann is Dictionary and not (ann.get("kind_payload", {}).get("proposal_for", []) as Array).is_empty():
 			return true
 	return false
+
+
+func _workspace_candidate_count() -> int:
+	var workspace = panel.get_routing_workspace()
+	if workspace == null:
+		return 0
+	return workspace.list_candidates().size()
+
+
+## LIVE-only lookup (matches _workspace_list's own live-by-default rule): a
+## terminal candidate from an earlier scenario (e.g. C's rejected cand_1) must
+## never shadow the fresh one a later propose lands for the same net.
+func _find_candidate(net: String):
+	var workspace = panel.get_routing_workspace()
+	if workspace == null:
+		return null
+	var live: Dictionary = {}
+	for id in workspace.live_candidate_ids():
+		live[str(id)] = true
+	for c in workspace.list_candidates():
+		if c != null and str(c.net) == net and live.has(str(c.candidate_id)):
+			return c
+	return null
 
 
 # ── B: click Propose; a cyan proposal appears; board unmutated ───────────────
@@ -402,55 +446,56 @@ func _test_b_propose_creates_proposal() -> void:
 	check("B: status label reports one proposal" + (" (DRC clean)" if _used_real_worker else ""),
 		panel._status_label.text == expected_b_status,
 		"got '%s' expected '%s'" % [panel._status_label.text, expected_b_status])
-	check("B: host now has 2 annotations (hint + proposal)", host.get_annotations().size() == 2,
-		"count=%d" % host.get_annotations().size())
+	# S5 (C4b): propose lands a workspace candidate now, no annotation — the
+	# host still holds only the source hint from A.
+	check("B: host still has exactly 1 annotation (the hint; no proposal written)",
+		host.get_annotations().size() == 1, "count=%d" % host.get_annotations().size())
 	check("B: board still unmutated — zero traces", data.get_trace_count() == 0)
 
-	# Found by kind+author, NOT by non-empty proposal_for: the old lookup made
-	# an unattributed proposal INVISIBLE (found nothing, so downstream checks
-	# went vacuous) rather than WRONG (found it, and the proposal_for check
-	# below fails honestly). A proposal is identifiable by what it IS
-	# (an AI-authored pcb_route_hint), independent of whether its attribution
-	# happens to be correct.
-	var proposal: Dictionary = {}
-	for ann in host.get_annotations():
-		if ann is Dictionary and str(ann.get("kind", "")) == "pcb_route_hint" \
-				and str((ann.get("author", {}) as Dictionary).get("kind", "")) == "ai":
-			proposal = ann
-	check("B: a proposal exists (found by kind+author, not by proposal_for)", not proposal.is_empty())
-	_proposal_id = str(proposal.get("id", ""))
-	check("B: proposal id assigned", not _proposal_id.is_empty())
-	check("B: proposal is AI-authored (cyan)", str(proposal.get("author", {}).get("kind", "")) == "ai")
-	check("B: proposal links back to the source hint",
-		(proposal.get("kind_payload", {}).get("proposal_for", []) as Array) == [_hint_id],
-		"got %s" % str(proposal.get("kind_payload", {}).get("proposal_for", [])))
-	check("B: proposal carries a routable polyline (>=2 points)",
-		(proposal.get("kind_payload", {}).get("waypoints", []) as Array).size() >= 2)
+	var cand = _find_candidate("SIG")
+	check("B: a candidate landed in the routing workspace", cand != null)
+	if cand != null:
+		_candidate_id = str(cand.candidate_id)
+		check("B: candidate id assigned", not _candidate_id.is_empty())
+		check("B: candidate links back to the source hint",
+			cand.source_hint_ids == [_hint_id],
+			"got %s" % str(cand.source_hint_ids))
+		check("B: candidate carries a routable polyline (>=1 segment)",
+			(cand.segments as Array).size() >= 1)
 
 	panel.request.disconnect(fake.on_request)
 	fake.queue_free()
 	await process_frame
 
-	await _test_b2_workflow_list_generic_wiring(proposal.duplicate(true))
+	await _test_b2_workflow_list_generic_wiring()
 
 
-## B2 (deliverable 2's UI half): mount the CORE WorkflowAnnotationList against
-## the SAME live host and prove the generic accept/reject wiring — the
-## proposal row gets Accept/Reject buttons, the plain human-drawn hint row
-## does not. Zero pcb-specific knowledge on the core side (the row match is by
-## the proposal's own distinct summary text, "Proposed route …", which
-## _write_back_proposals stamps — not by any pcb kind_payload field name).
-func _test_b2_workflow_list_generic_wiring(proposal: Dictionary) -> void:
-	print("-- B2: WorkflowAnnotationList generic per-row Accept/Reject wiring --")
-	# Supersession contract: the hint this proposal answers is REPRESENTED by
-	# the proposal and must not hold its own row. Seed a second, unanswered
-	# hint so the listing still carries one of each row type (the plain-hint
-	# row is what proves Accept/Reject are proposal-only).
-	var plain_env: Dictionary = host.build_route_hint_envelope(
+## B2 (deliverable 2's UI half, DCR finding 4 — S5/C4b RETIREMENT): mount the
+## CORE WorkflowAnnotationList against the SAME live host and prove NEITHER
+## row ever grows Accept/Reject buttons — not even an AI-authored one. Before
+## S5, core's duck-typed check (author.kind=="ai") would have offered them on
+## a proposal row; DCR finding 4 named that inference wrong for a SOURCE hint
+## an agent happens to author (intent/commentary, not a proposal), and the
+## fix removes the plugin-side verb pair entirely rather than trying to make
+## core's inference smarter (core is out of fence this epoch — see
+## PcbAnnotationHost.gd's own note at the retirement site). Seeds a SECOND
+## hint stamped author.kind="ai" (not human) specifically to prove the
+## negative unconditionally: an AI-authored source hint gets no buttons
+## either, because the host simply no longer implements
+## accept_annotation_proposal/reject_annotation_proposal — not because
+## author.kind happens not to match this time.
+func _test_b2_workflow_list_generic_wiring() -> void:
+	print("-- B2: WorkflowAnnotationList — NO Accept/Reject on any row (S5 retirement) --")
+	check("B2: host has no duck-typed accept_annotation_proposal",
+		not host.has_method("accept_annotation_proposal"))
+	check("B2: host has no duck-typed reject_annotation_proposal",
+		not host.has_method("reject_annotation_proposal"))
+
+	var ai_env: Dictionary = host.build_route_hint_envelope(
 		U3_PIN1.x, U3_PIN1.y, "", "F.Cu", "single_trace",
-		[[U3_PIN1.x, U3_PIN1.y], [U3_PIN1.x + 4.0, U3_PIN1.y]], "human")
-	var plain_id := str(host.add_annotation_v2(plain_env))
-	check("B2: unanswered hint seeded", not plain_id.is_empty())
+		[[U3_PIN1.x, U3_PIN1.y], [U3_PIN1.x + 4.0, U3_PIN1.y]], "ai")
+	var ai_id := str(host.add_annotation_v2(ai_env))
+	check("B2: AI-authored hint seeded", not ai_id.is_empty())
 
 	var wf_list := WorkflowAnnotationList.new()
 	get_root().add_child(wf_list)
@@ -458,70 +503,64 @@ func _test_b2_workflow_list_generic_wiring(proposal: Dictionary) -> void:
 	await process_frame
 
 	var listing: Array = wf_list.get_listing()
-	check("B2: listing has 2 entries (proposal + unanswered hint)", listing.size() == 2, "got %d" % listing.size())
+	check("B2: listing has 2 entries (human hint + AI hint — nothing is superseded anymore)",
+		listing.size() == 2, "got %d" % listing.size())
 	var listed_ids: Array = []
 	for e in listing:
 		listed_ids.append(str((e as Dictionary).get("id", "")))
-	check("B2: superseded hint has NO row of its own", not (_hint_id in listed_ids), "listed=%s" % str(listed_ids))
-	check("B2: its proposal IS listed", _proposal_id in listed_ids)
-	check("B2: the unanswered hint keeps its row", plain_id in listed_ids)
+	check("B2: the human source hint keeps its row", _hint_id in listed_ids, "listed=%s" % str(listed_ids))
+	check("B2: the AI hint keeps its row too", ai_id in listed_ids)
 
-	var proposal_summary := str(proposal.get("summary", ""))
 	# Recursive: rows live inside the capped ScrollContainer.
 	var groups_node := wf_list.find_child("WorkflowGroups", true, false)
 	check("B2: WorkflowGroups node mounted", groups_node != null)
 	if groups_node != null:
-		var proposal_row: Control = null
-		var hint_row: Control = null
+		var row_count := 0
+		var any_buttons := false
 		for child in groups_node.get_children():
 			if not (child is HBoxContainer):
 				continue
-			if str((child as Control).tooltip_text) == proposal_summary:
-				proposal_row = child
-			else:
-				hint_row = child   # the only other row — the plain human hint
-		check("B2: proposal row found", proposal_row != null)
-		check("B2: hint row found", hint_row != null)
-		if proposal_row != null:
-			check("B2: proposal row has an Accept button",
-				proposal_row.find_child("AcceptButton", false, false) != null)
-			check("B2: proposal row has a Reject button",
-				proposal_row.find_child("RejectButton", false, false) != null)
-		if hint_row != null:
-			check("B2: plain hint row has NO Accept button",
-				hint_row.find_child("AcceptButton", false, false) == null)
-			check("B2: plain hint row has NO Reject button",
-				hint_row.find_child("RejectButton", false, false) == null)
+			row_count += 1
+			if (child as Control).find_child("AcceptButton", false, false) != null \
+					or (child as Control).find_child("RejectButton", false, false) != null:
+				any_buttons = true
+		check("B2: both rows present in the UI tree", row_count == 2, "got %d" % row_count)
+		check("B2: NO row anywhere has an Accept or Reject button (human OR AI author)",
+			not any_buttons)
 
 	# Remove the B2-only seeded hint: later scenarios assert exact annotation
 	# counts and consumed-hint ids against the original fixture board.
-	check("B2: seeded hint removed", host.remove_annotation(plain_id))
+	check("B2: seeded AI hint removed", host.remove_annotation(ai_id))
 
 	wf_list.queue_free()
 	await process_frame
 
 
-# ── C: reject via REAL panel-tool dispatch — proposal gone, hint stays open ──
+# ── C: reject via REAL panel-tool dispatch — candidate discarded, hint open ──
 
 func _test_c_reject_via_real_dispatch() -> void:
-	print("-- C: minerva_pcb_proposal_reject via REAL registry dispatch --")
+	print("-- C: minerva_pcb_workspace_reject via REAL registry dispatch --")
 	var registry: PluginToolRegistry = REGISTRY_DRIVER.new().build(
-		panel, PCB_PLUGIN_ID, EDITOR_NAME, ["minerva_pcb_proposal_reject", "minerva_pcb_proposal_accept"])
+		panel, PCB_PLUGIN_ID, EDITOR_NAME, ["minerva_pcb_workspace_reject", "minerva_pcb_workspace_commit"])
 	check("C: dispatch registry built", registry != null)
 	if registry == null:
 		return
 
-	var result: Dictionary = await registry.handle_tool_call("minerva_pcb_proposal_reject", {
-		"editor_name": EDITOR_NAME, "id": _proposal_id,
+	var result: Dictionary = await registry.handle_tool_call("minerva_pcb_workspace_reject", {
+		"editor_name": EDITOR_NAME, "candidate_id": _candidate_id,
 	})
 	check("C: reject ok", bool(result.get("success", false)), str(result))
-	check_eq("C: removed_proposal_id", str(result.get("removed_proposal_id", "")), _proposal_id)
-	check("C: source_hints_still_open == [hint_id]",
-		(result.get("source_hints_still_open", []) as Array) == [_hint_id],
-		"got %s" % str(result.get("source_hints_still_open", [])))
+	check_eq("C: disposition is rejected", str(result.get("disposition", "")), "rejected")
+	# S5: reject is a workspace-only transaction — it has no reference to the
+	# annotation host, so it cannot report "source_hints_still_open" the way
+	# the retired minerva_pcb_proposal_reject did. It stays open because
+	# nothing ever touched it, verified directly below.
+	check("C: reply names the candidate's own source_hint_ids == [hint_id]",
+		(result.get("source_hint_ids", []) as Array) == [_hint_id],
+		"got %s" % str(result.get("source_hint_ids", [])))
 
-	check("C: proposal gone, zero residue — exactly 1 annotation left", host.get_annotations().size() == 1,
-		"count=%d" % host.get_annotations().size())
+	check("C: no annotation residue — exactly 1 annotation left (the hint; never had a proposal)",
+		host.get_annotations().size() == 1, "count=%d" % host.get_annotations().size())
 	var remaining: Dictionary = host.get_by_id(_hint_id)
 	check("C: the source hint itself is untouched and still open",
 		not remaining.is_empty() and str(remaining.get("lifecycle", "")) == "open")
@@ -546,10 +585,10 @@ func _cleanup_stale_registry_dispatch() -> void:
 			child.queue_free()
 
 
-# ── D: propose again, then accept via REAL dispatch ───────────────────────────
+# ── D: propose again, then commit via REAL dispatch ───────────────────────────
 
 func _test_d_propose_again_then_accept_via_real_dispatch() -> void:
-	print("-- D: propose again, then minerva_pcb_proposal_accept via REAL dispatch --")
+	print("-- D: propose again, then minerva_pcb_workspace_commit via REAL dispatch --")
 
 	var fake := FakeBrokerIpc.new()
 	fake.name = "_MinervaIPC"
@@ -568,37 +607,36 @@ func _test_d_propose_again_then_accept_via_real_dispatch() -> void:
 	fake.queue_free()
 	await process_frame
 
-	# Found by kind+author, not by non-empty proposal_for — see scenario B's
-	# comment: the old lookup made an unattributed proposal invisible rather
-	# than wrong.
-	var new_proposal: Dictionary = {}
-	for ann in host.get_annotations():
-		if ann is Dictionary and str(ann.get("kind", "")) == "pcb_route_hint" \
-				and str((ann.get("author", {}) as Dictionary).get("kind", "")) == "ai":
-			new_proposal = ann
-	check("D: a fresh proposal exists (found by kind+author, not by proposal_for)", not new_proposal.is_empty())
-	var new_proposal_id := str(new_proposal.get("id", ""))
-	var proposal_waypoints: Array = new_proposal.get("kind_payload", {}).get("waypoints", [])
-	check("D: proposal links back to the source hint",
-		(new_proposal.get("kind_payload", {}) as Dictionary).get("proposal_for", []) == [_hint_id],
-		"got %s" % str((new_proposal.get("kind_payload", {}) as Dictionary).get("proposal_for", [])))
+	# S5 (C4b): propose lands a fresh candidate in the workspace (task C's
+	# reject reopened the SIG task, so a re-propose gets a new generation for
+	# the same task) — no annotation involved, see scenario B's comment.
+	var new_cand = _find_candidate("SIG")
+	check("D: a fresh candidate exists", new_cand != null)
+	if new_cand == null:
+		return
+	var new_cid := str(new_cand.candidate_id)
+	var cand_segments: Array = new_cand.segments
+	check("D: candidate links back to the source hint",
+		new_cand.source_hint_ids == [_hint_id],
+		"got %s" % str(new_cand.source_hint_ids))
 
 	var registry: PluginToolRegistry = REGISTRY_DRIVER.new().build(
-		panel, PCB_PLUGIN_ID, EDITOR_NAME, ["minerva_pcb_proposal_accept"])
+		panel, PCB_PLUGIN_ID, EDITOR_NAME, ["minerva_pcb_workspace_commit"])
 	check("D: dispatch registry built", registry != null)
 	if registry == null:
 		return
 
 	check("D: no traces on the board yet", data.get_trace_count() == 0)
-	var result: Dictionary = await registry.handle_tool_call("minerva_pcb_proposal_accept", {
-		"editor_name": EDITOR_NAME, "id": new_proposal_id,
+	var result: Dictionary = await registry.handle_tool_call("minerva_pcb_workspace_commit", {
+		"editor_name": EDITOR_NAME, "candidate_id": new_cid,
 	})
-	check("D: accept ok", bool(result.get("success", false)), str(result))
-	check("D: trace_added true", bool(result.get("trace_added", false)))
+	check("D: commit ok", bool(result.get("success", false)), str(result))
+	check("D: at least one trace_id reported", not (result.get("trace_ids", []) as Array).is_empty())
 	check("D: consumed_hint_ids == [hint_id]",
 		(result.get("consumed_hint_ids", []) as Array) == [_hint_id],
 		"got %s" % str(result.get("consumed_hint_ids", [])))
-	check_eq("D: removed_proposal_id", str(result.get("removed_proposal_id", "")), new_proposal_id)
+	check_eq("D: committed candidate's own disposition is committed",
+		str((result.get("candidate", {}) as Dictionary).get("disposition", "")), "committed")
 
 	check("D: exactly one trace on the board", data.get_trace_count() == 1,
 		"count=%d" % data.get_trace_count())
@@ -606,20 +644,40 @@ func _test_d_propose_again_then_accept_via_real_dispatch() -> void:
 	check("D: SIG trace exists", sig_traces.size() == 1)
 	if sig_traces.size() == 1:
 		var t = sig_traces[0]
+		# Reconstruct the expected polyline from the candidate's own segment
+		# shape: {"id","layer","width","points":Array[Vector2],"locked"}
+		# (pcb_route_candidate.gd make_segment) — NOT the router-reply/
+		# annotation shape {start:[x,y], end:[x,y], layer}. First segment's
+		# full point list, then every later segment's own points.
 		var expected: Array = []
-		for wp in proposal_waypoints:
-			expected.append(Vector2(wp[0], wp[1]))
-		check("D: trace polyline matches the proposal's own polyline exactly (point count)",
+		for seg in cand_segments:
+			var pts: Array = (seg as Dictionary).get("points", [])
+			for p in pts:
+				if expected.is_empty() or not (expected[-1] as Vector2).is_equal_approx(p as Vector2):
+					expected.append(p as Vector2)
+		check("D: trace polyline matches the candidate's own polyline exactly (point count)",
 			(t.waypoints as Array).size() == expected.size(),
 			"expected=%s actual=%s" % [str(expected), str(t.waypoints)])
-		check("D: trace polyline matches the proposal's own polyline exactly (points)",
+		check("D: trace polyline matches the candidate's own polyline exactly (points)",
 			_points_equal(t.waypoints, expected) or _points_equal(t.waypoints, _reversed(expected)),
 			"expected=%s actual=%s" % [str(expected), str(t.waypoints)])
 
-	check("D: source hint deleted", host.get_by_id(_hint_id).is_empty())
-	check("D: proposal deleted", host.get_by_id(new_proposal_id).is_empty())
-	check("D: zero annotations left", host.get_annotations().is_empty(),
-		"count=%d" % host.get_annotations().size())
+	# MF-2 REVERT (review): the pin this used to assert here ("hint stays open,
+	# workspace verbs never touch annotations") was a WRONG pin-move. The
+	# retired per-proposal accept deleted BOTH the source hint and the
+	# proposal annotation; owner-ratified HITL-2 (manifest.json's own
+	# apply_route_hints text; the DCR's composite-transaction text) says the
+	# TRUE semantic was never delete — it is open→applied, and
+	# minerva_pcb_workspace_commit now performs exactly that as its half of
+	# the composite transaction (panel_tools.gd _workspace_commit →
+	# _set_hint_lifecycle). The hint annotation survives (it is durable
+	# intent/commentary), only its lifecycle field closes.
+	var hint_after_commit: Dictionary = host.get_by_id(_hint_id)
+	check("D: source hint SURVIVES commit (not deleted)", not hint_after_commit.is_empty())
+	check_eq("D: source hint lifecycle closed: open -> applied",
+		str(hint_after_commit.get("lifecycle", "")), "applied")
+	check("D: exactly 1 annotation left (the hint) — there was never a proposal to delete",
+		host.get_annotations().size() == 1, "count=%d" % host.get_annotations().size())
 
 	_cleanup_stale_registry_dispatch()
 	await process_frame
@@ -764,10 +822,16 @@ func _test_f_bulk_commit_regression() -> void:
 	var sig2_traces: Array = data.get_traces_for_net("SIG2")
 	check("F: exactly one SIG2 trace exists", sig2_traces.size() == 1, "count=%d" % sig2_traces.size())
 
-	# Delete-on-commit contract intact: the consumed source hint is gone.
+	# MF-2(b2) UNIFIED (narrow re-review, moved pin): "delete-on-commit" was
+	# the LEGACY-era reading; the owner-visible contract is open→applied,
+	# never delete — _materialize_routes (this bulk commit=true path) now
+	# closes the same way minerva_pcb_workspace_commit does.
 	check("F: SIG2 hint consumed", (result.get("consumed_hint_ids", []) as Array) == [sig2_hint_id],
 		"got %s" % str(result.get("consumed_hint_ids", [])))
-	check("F: SIG2 hint deleted from the host", host.get_by_id(sig2_hint_id).is_empty())
+	var sig2_hint_after: Dictionary = host.get_by_id(sig2_hint_id)
+	check("F: SIG2 hint SURVIVES commit (not deleted)", not sig2_hint_after.is_empty())
+	check_eq("F: SIG2 hint lifecycle closed: open -> applied",
+		str(sig2_hint_after.get("lifecycle", "")), "applied")
 
 	panel.request.disconnect(fake.on_request)
 	fake.queue_free()

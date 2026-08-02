@@ -380,42 +380,16 @@
     },
     {
       "name": "minerva_pcb_apply_route_hints",
-      "description": "Route the board's open route hints and either PROPOSE routes (default) or COMMIT them as real traces. Default (commit absent/false): runs the router over the selected open route hints and writes the results back as AI-authored (cyan) proposal annotations — inspectable polylines that do NOT mutate the board; each proposal links to the source hint(s) it answers (kind_payload.proposal_for). Set commit=true to materialize the routed polylines as real traces in the board model (journaled) and transition the source hints open→applied. Partial/failed routing returns WHERE it got stuck (unrouted nets with their blocked pad pairs) as structured feedback. Iterate: edit/add hints and re-run; applied hints are excluded by default so only fresh open hints re-route.",
+      "description": "Route the board's open route hints and either PROPOSE routes (default) or COMMIT them as real traces. Default (commit absent/false): runs the router over the selected open route hints and lands the results as RouteCandidates in the panel's routing workspace (no annotation is written; the board is not mutated) — resolve a candidate via minerva_pcb_workspace_commit/_reject(candidate_id), or minerva_pcb_workspace_list/get_active to inspect it first. Set commit=true to materialize the routed polylines as real traces in the board model (journaled) and transition the source hints open→applied. Partial/failed routing returns WHERE it got stuck (unrouted nets with their blocked pad pairs) as structured feedback. Iterate: edit/add hints and re-run; applied hints are excluded by default so only fresh open hints re-route.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "hint_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit route-hint annotation ids to route. Omit to route all OPEN route hints (applied/resolved hints are excluded)."},
-          "commit": {"type": "boolean", "description": "false/absent (default): write back cyan proposal annotations only, board unchanged. true: materialize routed traces + mark source hints applied."}
+          "commit": {"type": "boolean", "description": "false/absent (default): land RouteCandidates in the routing workspace only, board unchanged. true: materialize routed traces + mark source hints applied."}
         },
         "required": ["editor_name"]
-      }
-    },
-    {
-      "name": "minerva_pcb_proposal_accept",
-      "description": "Accept ONE AI-authored route proposal (a cyan pcb_route_hint annotation carrying kind_payload.proposal_for, written back by minerva_pcb_apply_route_hints with commit=false or the panel's Propose button). Materializes ONLY that proposal's polyline as a real trace in the board model (journaled), then deletes the consumed source hint(s) (kind_payload.proposal_for) AND the proposal itself — accepted scaffolding disappears. Shares its materialization logic with the bulk apply (commit=true) path, so the resulting trace geometry is identical either way.",
-      "executor": "panel",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "id": {"type": "string", "description": "The proposal annotation id to accept (must carry kind_payload.proposal_for)"}
-        },
-        "required": ["editor_name", "id"]
-      }
-    },
-    {
-      "name": "minerva_pcb_proposal_reject",
-      "description": "Reject ONE AI-authored route proposal: deletes the proposal annotation only. The source hint(s) it answered (kind_payload.proposal_for) are left open for further iteration (re-propose, edit, or a different route).",
-      "executor": "panel",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "id": {"type": "string", "description": "The proposal annotation id to reject (must carry kind_payload.proposal_for)"}
-        },
-        "required": ["editor_name", "id"]
       }
     },
     {
@@ -1034,10 +1008,10 @@
       "id": "minerva_pcb_design",
       "title": "PCB design (IR-compiled, fail-closed DRC/routing/CAM)",
       "target": "all",
-      "summary": "Sole PCB surface (the in-tree editor and .minpcb are retired; boards are .pcbskel documents). Author canonical YAML (docs/board-yaml.md) or place parts with minerva_pcb_add_component/minerva_pcb_connect_net, then load with minerva_pcb_load_board. minerva_pcb_validate checks structure; minerva_pcb_drc checks net connectivity; minerva_pcb_drc_geometric compiles to the ResolvedBoard IR and checks real copper (width, clearance, drill, annular ring, edge, hole spacing) \u2014 fail-closed, so 'indeterminate' is not a pass. Routing is IR-native and fail-closed too: author pcb_route_hint annotations, run minerva_pcb_apply_route_hints to propose or commit routes, then accept/reject each with minerva_pcb_proposal_accept/minerva_pcb_proposal_reject. minerva_pcb_generate emits KiCad text; minerva_pcb_gerbers emits Gerber+Excellon output \u2014 both resolve footprints from a locked seed library and fail closed rather than approximate copper. minerva_pcb_check_libraries/minerva_pcb_check_bom check parts against a separate KiCAD subset minerva_pcb_fetch_libraries downloads.",
+      "summary": "Sole PCB surface (the in-tree editor and .minpcb are retired; boards are .pcbskel documents). Author canonical YAML (docs/board-yaml.md) or place parts with minerva_pcb_add_component/minerva_pcb_connect_net, then load with minerva_pcb_load_board. minerva_pcb_validate checks structure; minerva_pcb_drc checks net connectivity; minerva_pcb_drc_geometric compiles to the ResolvedBoard IR and checks real copper (width, clearance, drill, annular ring, edge, hole spacing) \u2014 fail-closed, so 'indeterminate' is not a pass. Routing is IR-native and fail-closed too: author pcb_route_hint annotations, run minerva_pcb_apply_route_hints (or minerva_pcb_workspace_propose) to land RouteCandidates in the routing workspace, then resolve each with minerva_pcb_workspace_commit/minerva_pcb_workspace_reject. minerva_pcb_generate emits KiCad text; minerva_pcb_gerbers emits Gerber+Excellon output \u2014 both resolve footprints from a locked seed library and fail closed rather than approximate copper. minerva_pcb_check_libraries/minerva_pcb_check_bom check parts against a separate KiCAD subset minerva_pcb_fetch_libraries downloads.",
       "preconditions": "A PCB editor tab is open (minerva_list_editors) or spawned via minerva_create_plugin_editor (editor_item_id \"new_pcb\"); the board-YAML tools (validate/generate/gerbers/drc/drc_geometric/check_libraries/check_bom) take board text directly and need no open editor.",
       "outcome": "The board renders with real components, nets and routed copper; minerva_pcb_validate and both DRC tools report clean or name exactly what is wrong and where; minerva_pcb_gerbers/minerva_pcb_generate produce fabrication files traceable to the same footprint geometry DRC checked; route proposals are inspectable before they become copper.",
-      "steps": "1. Open the editor tab (minerva_list_editors) or create one (minerva_create_plugin_editor, editor_item_id \"new_pcb\").\n2. Author canonical YAML or place parts with minerva_pcb_add_component/minerva_pcb_connect_net, then minerva_pcb_load_board.\n3. Validate with minerva_pcb_validate; check minerva_pcb_library_status once (minerva_pcb_fetch_libraries if needed), then minerva_pcb_check_libraries/minerva_pcb_check_bom.\n4. Route: add pcb_route_hint annotations (minerva_annotations_add), minerva_pcb_apply_route_hints (commit=false) for proposals, then minerva_pcb_proposal_accept/minerva_pcb_proposal_reject each \u2014 or re-run with commit=true.\n5. Run minerva_pcb_drc and minerva_pcb_drc_geometric on the finished board; 'indeterminate' blocks, it is not a pass.\n6. Export with minerva_pcb_generate and minerva_pcb_gerbers; a human must still eyeball the output before real fabrication.",
+      "steps": "1. Open the editor tab (minerva_list_editors) or create one (minerva_create_plugin_editor, editor_item_id \"new_pcb\").\n2. Author canonical YAML or place parts with minerva_pcb_add_component/minerva_pcb_connect_net, then minerva_pcb_load_board.\n3. Validate with minerva_pcb_validate; check minerva_pcb_library_status once (minerva_pcb_fetch_libraries if needed), then minerva_pcb_check_libraries/minerva_pcb_check_bom.\n4. Route: add pcb_route_hint annotations (minerva_annotations_add), minerva_pcb_apply_route_hints (commit=false) or minerva_pcb_workspace_propose to land candidates, then minerva_pcb_workspace_commit/minerva_pcb_workspace_reject each candidate_id \u2014 or re-run apply_route_hints with commit=true.\n5. Run minerva_pcb_drc and minerva_pcb_drc_geometric on the finished board; 'indeterminate' blocks, it is not a pass.\n6. Export with minerva_pcb_generate and minerva_pcb_gerbers; a human must still eyeball the output before real fabrication.",
       "system_prompt": "Sole PCB surface; the legacy in-tree editor is gone. Routing, DRC and CAM share one ResolvedBoard IR compiler and one rule: canvas may degrade, but routing/DRC/CAM never approximate copper \u2014 unresolvable geometry fails closed. minerva_pcb_drc is connectivity-only; minerva_pcb_drc_geometric is the real copper check and must pass before fabrication. minerva_pcb_apply_route_hints always proposes before it commits. minerva_pcb_resolve exposes resolved silk/courtyard geometry directly (compile already does this internally for gerbers/generate/drc_geometric); minerva_pcb_normalize migrates legacy inline pin geometry to the current schema.",
       "tool_deps": [
         "minerva_create_plugin_editor",
@@ -1046,8 +1020,8 @@
         "minerva_pcb_validate",
         "minerva_annotations_add",
         "minerva_pcb_apply_route_hints",
-        "minerva_pcb_proposal_accept",
-        "minerva_pcb_proposal_reject",
+        "minerva_pcb_workspace_commit",
+        "minerva_pcb_workspace_reject",
         "minerva_pcb_drc",
         "minerva_pcb_drc_geometric",
         "minerva_pcb_generate",

@@ -128,10 +128,6 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _set_view(host, args)
 		"minerva_pcb_apply_route_hints":
 			return await _apply_route_hints(host, args)
-		"minerva_pcb_proposal_accept":
-			return _proposal_accept(host, args)
-		"minerva_pcb_proposal_reject":
-			return _proposal_reject(host, args)
 		"minerva_pcb_hint_undo":
 			return _hint_undo(host, args)
 		"minerva_pcb_hint_redo":
@@ -1392,22 +1388,33 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 # child 019eb47eb567). The propose→inspect→apply→iterate flow:
 #
 #   1. PROPOSE (commit absent/false): gather the board's OPEN pcb_route_hint
-#      annotations (or the given hint_ids), route them through the worker, and
-#      write the routed polylines back as AI-authored (author.kind="ai" → cyan)
-#      pcb_route_hint PROPOSAL annotations. A proposal carries the routed
-#      waypoints + kind_payload.net_names=[net] + kind_payload.proposal_for=
-#      [source hint ids]. Proposals do NOT mutate the board — the user inspects
-#      them in the dock/canvas first.
+#      annotations (or the given hint_ids) and route them through the worker.
+#      S5 removal (C4b, DCR 019f7095c395): the routed polylines land as
+#      RouteCandidates in the panel's RoutingWorkspace — NOT as AI-authored
+#      proposal annotations. The workspace is the sole propose store now (this
+#      is the exact landing path minerva_pcb_workspace_propose uses). The
+#      reply's `proposals` array is a RESULT-DERIVED summary (net/layer/
+#      waypoint_count/width_mm/drc_geometric/source_hint_ids/candidate_id) kept
+#      in the pre-S5 shape on purpose — see _propose_into_workspace. Proposing
+#      does NOT mutate the board — the user inspects candidates on the canvas
+#      or via minerva_pcb_workspace_list/get_active first.
 #   2. APPLY (commit=true): re-route the selected open hints and MATERIALIZE the
 #      results as real traces in the model (journaled via save_to_history), then
 #      transition the source hints open→applied. Returns applied/traces_added.
-#   3. ITERATE: applied hints are excluded from the default (open) gather and AI
-#      proposals are never re-routed (they carry proposal_for), so re-running
-#      after the user edits/adds hints picks up only the fresh open hints.
+#      Unaffected by S5 — this branch never wrote annotations.
+#   3. ITERATE: applied hints are excluded from the default (open) gather; a
+#      workspace candidate is never itself gathered as a source hint (only
+#      pcb_route_hint ANNOTATIONS are), so re-running after the user edits/adds
+#      hints picks up only the fresh open hints.
 #
 # FAILURE AS FEEDBACK: partial/failed routing returns WHERE it got stuck —
 # result.unrouted (net + blocked pad pair) surfaced as `stuck`, plus bridge
 # warnings — structured data the agent can reason about, not a bare "failed".
+#
+# RETIRED (S5, C4b): minerva_pcb_proposal_accept/_reject, the per-proposal
+# annotation verbs. A candidate landed by PROPOSE above is resolved through
+# minerva_pcb_workspace_commit/_reject(candidate_id) — or the canvas candidate
+# context menu — never through an annotation id.
 
 static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	if host == null:
@@ -1418,6 +1425,20 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 
 	var hint_ids: Array = args.get("hint_ids", [])
 	var commit: bool = bool(args.get("commit", false))
+
+	# MF-2(b1) (review): reconcile BEFORE gathering — a hint left "applied" by
+	# a since-undone commit (see _reconcile_hint_lifecycle's doc: the two-store
+	# undo gap means a plain data.undo() cannot revert it synchronously) must
+	# reopen to "open" before _gather_route_hints' default (open-only) scope
+	# decides whether to offer it to THIS run. Reconciling only inside
+	# _workspace_ctx (the workspace tools' own entry point) would leave a
+	# stranded hint skipped for one full apply_route_hints call — this is the
+	# OTHER production entry point onto the same gather, and needs the same
+	# fix. No workspace bound (headless / before mount) is a silent no-op,
+	# same as every other duck-typed workspace touch in this function.
+	var workspace_for_reconcile = _get_workspace(host)
+	if workspace_for_reconcile != null:
+		_reconcile_hint_lifecycle(host, workspace_for_reconcile)
 
 	var source_hints: Array = _gather_route_hints(host, hint_ids)
 	if source_hints.is_empty():
@@ -1443,7 +1464,7 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	var result: Dictionary = reply.get("result", {})
 	if commit:
 		return _materialize_routes(host, data, result, source_hints)
-	return _dual_write_propose(host, result, source_hints)
+	return _propose_into_workspace(host, data, result, source_hints)
 
 
 ## Reach the router worker through the in-fence host bridge (async). The host
@@ -1564,45 +1585,75 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 	return records
 
 
-## PROPOSE: routed polylines → AI-authored cyan proposal annotations. The board
-## is NOT mutated — only annotations are added. Each proposal links to the source
-## hint id(s) answering the same net. Thin wrapper: normalize once, then project.
-static func _write_back_proposals(host, result: Dictionary, source_hints: Array) -> Dictionary:
-	return _write_records_as_proposals(host, _normalize_route_records(result, source_hints), result)
+## PROPOSE (S5, C4b, DCR 019f7095c395): routed polylines → RouteCandidates in
+## the panel's RoutingWorkspace. RETIRED: this used to also write an
+## AI-authored cyan proposal ANNOTATION per record
+## (_write_back_proposals/_write_records_as_proposals/_write_one_proposal,
+## dual-written alongside the workspace ingest by _dual_write_propose during
+## the T2 shadow phase). The workspace is the sole propose store now — no
+## annotation is written, so there is nothing left for
+## minerva_pcb_proposal_accept/_reject to act on; those two tools are RETIRED
+## in the same change (see docs/tools.md). The board is NOT mutated by this
+## call either way.
+##
+## The reply's `proposals` array is kept in the PRE-S5 shape on purpose
+## (net/layer/waypoint_count/width_mm/drc_geometric/source_hint_ids) — it is
+## RESULT-derived, never annotation-derived, so PCBPanel's status-line
+## rendering (_offending_nets/_geometric_status_suffix, out of this unit's
+## fence) needs no change. `id`/`candidate_id` in each entry is the WORKSPACE
+## candidate id: resolve it via minerva_pcb_workspace_commit/_reject/pin, or
+## the canvas candidate menu — never via an annotation id.
+static func _propose_into_workspace(host, data, result: Dictionary, source_hints: Array) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
 
-
-## Annotation projection of the normalized records. Writes one AI-authored
-## proposal annotation per record (skipping a record whose polyline is
-## degenerate, exactly as before), STAMPS each record it wrote with its
-## `annotation_id` (so the caller can correlate the candidate to it), and returns
-## the unchanged _dual_write_propose/_write_back_proposals result shape.
-static func _write_records_as_proposals(host, records: Array, result: Dictionary) -> Dictionary:
+	var records: Array = _normalize_route_records(result, source_hints)
+	var revision: int = int(data.board_revision) if data != null else 0
 	var proposals: Array = []
+	var holds: Array = []
 	for rec in records:
-		var new_id: String = _write_one_proposal(host, rec)
-		rec["annotation_id"] = new_id
-		if new_id.is_empty():
-			continue
-		var proposal: Dictionary = {
-			"id": new_id,
+		var pts: Array = rec.get("polyline", [])
+		if pts.size() < 2:
+			continue  # degenerate polyline — _write_one_proposal used to skip these too
+		var cid: String = str(workspace.ingest_record(rec, revision))
+		# last_ingest_holds is PER CALL and ingest_record resets it on entry — see
+		# _ingest_result_into_workspace's identical accumulation-in-loop note.
+		for hold in workspace.last_ingest_holds:
+			holds.append(hold)
+		if cid.is_empty():
+			continue  # HELD — the task's active candidate is pinned; see `holds`
+		var entry: Dictionary = {
+			"id": cid,
+			"candidate_id": cid,
 			"net": str(rec.get("net", "")),
 			"layer": str(rec.get("layer", "F.Cu")),
-			"waypoint_count": (rec.get("polyline", []) as Array).size(),
-			"proposal_for": rec.get("source_hint_ids", []),
+			"waypoint_count": pts.size(),
+			"source_hint_ids": rec.get("source_hint_ids", []),
 			"width_mm": float(rec.get("width", 0.0)),
 		}
-		# GEOMETRIC DRC-at-propose (docket 019f98b24284): stamp THIS proposal's own
-		# candidate verdict (absent-key ⇒ older worker, same contract as "drc"
-		# above) so a caller can name WHICH proposal is geometrically dirty
-		# instead of only knowing the batch contains a violation somewhere.
+		# DRC-at-propose (docket 019f6f1492e0): the per-route CONNECTIVITY verdict
+		# (absent-key ⇒ older worker / non-canonical path that skipped the attach).
+		# This used to be stamped ONLY on the annotation's kind_payload.drc
+		# (_write_one_proposal) — with no annotation to carry it, the reply is
+		# now the only place it can land; added here for parity with
+		# drc_geometric below rather than silently dropping the field.
+		if rec.has("drc"):
+			entry["drc"] = rec.get("drc")
+		# GEOMETRIC DRC-at-propose (docket 019f98b24284): stamp THIS candidate's
+		# own verdict (absent-key ⇒ older worker, same contract as "drc" above)
+		# so a caller can name WHICH candidate is geometrically dirty instead of
+		# only knowing the batch contains a violation somewhere.
 		if rec.has("drc_geometric"):
-			proposal["drc_geometric"] = rec.get("drc_geometric")
-		proposals.append(proposal)
-	return {
-		"success": true,
+			entry["drc_geometric"] = rec.get("drc_geometric")
+		proposals.append(entry)
+
+	return _ok({
 		"committed": false,
 		"proposed": proposals.size(),
 		"proposals": proposals,
+		"holds": holds,
 		"unrouted": result.get("unrouted", []),
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
@@ -1615,75 +1666,9 @@ static func _write_records_as_proposals(host, records: Array, result: Dictionary
 		# and PCBPanel._geometric_status_suffix reads only this key so a dirty
 		# baseline can never mark a clean proposal dirty (or vice versa).
 		"drc_geometric_summary": result.get("drc_geometric_summary", {}),
-	}
-
-
-## Author ONE proposal annotation from a normalized record. Returns the new
-## annotation id, or "" when the record's polyline is degenerate / the host
-## rejected the envelope. Lossless carry (U2): the record's EXACT per-segment
-## geometry + vias are stored verbatim in kind_payload so _proposal_accept can
-## commit precisely what was proposed; `waypoints`/`layer` stay the flattened
-## badge summary (backward-compat).
-static func _write_one_proposal(host, rec: Dictionary) -> String:
-	var pts: Array = rec.get("polyline", [])
-	if pts.size() < 2:
-		return ""
-	var net: String = str(rec.get("net", ""))
-	var layer: String = str(rec.get("layer", "F.Cu"))
-	var width: float = float(rec.get("width", 0.0))
-	var first: Array = pts[0]
-	var envelope: Dictionary = host.call("build_route_hint_envelope",
-		float(first[0]), float(first[1]), "", layer, "single_trace", pts, "ai")
-	var kp: Dictionary = envelope.get("kind_payload", {})
-	kp["net_names"] = [net]
-	kp["proposal_for"] = rec.get("source_hint_ids", [])
-	if width > 0.0:
-		kp["width_mm"] = width
-	kp["segments"] = (rec.get("segments", []) as Array).duplicate(true)
-	kp["vias"] = (rec.get("vias", []) as Array).duplicate(true)
-	if rec.has("drc"):
-		kp["drc"] = rec.get("drc")
-	envelope["kind_payload"] = kp
-	envelope["summary"] = "Proposed route %s (%d waypoints, %s)" % [net, pts.size(), layer]
-	return str(host.call("add_annotation_v2", envelope))
-
-
-## T2 (S2.2) strangler-fig SHADOW-phase seam: PROPOSE dual-write. Runs the
-## EXISTING _write_back_proposals verbatim (annotation proposals stay the
-## UI's source of truth — unchanged behavior, unchanged return shape) and
-## THEN, ALONGSIDE it, ingests the SAME raw router `result` into the panel's
-## RoutingWorkspace (in-memory shadow model; persistence is T2a). Both writes
-## fire off the same reply so the shadow model sees exactly the geometry the
-## annotation path saw. Reached via host.get_panel() (the same duck-typed
-## host->panel back-reference run_router/route_board already use above) so a
-## host with no bound panel (headless / before mount) simply skips the shadow
-## write — the annotation proposals still return normally either way; a
-## missing/stub workspace on the panel is likewise a silent no-op (defensive,
-## never hit against a mounted PCBPanel post-T2).
-static func _dual_write_propose(host, result: Dictionary, source_hints: Array) -> Dictionary:
-	# ONE normalization → BOTH projections (T2.3). The annotation projection runs
-	# first and stamps each record with its annotation_id; the workspace then
-	# ingests the SAME records and correlates each candidate to its annotation so
-	# the two shadow stores are bridged, not two independent parses that drift.
-	var records: Array = _normalize_route_records(result, source_hints)
-	var out: Dictionary = _write_records_as_proposals(host, records, result)
-
-	var workspace = _get_workspace(host)
-	if workspace != null and workspace.has_method("ingest_record"):
-		var data = _get_data(host)
-		var revision: int = int(data.board_revision) if data != null else 0
-		for rec in records:
-			var ann_id: String = str(rec.get("annotation_id", ""))
-			if ann_id.is_empty():
-				continue  # annotation projection skipped this record → no candidate to bridge
-			var cand_id: String = str(workspace.ingest_record(rec, revision))
-			if cand_id.is_empty() or not workspace.has_method("correlate"):
-				continue
-			var cand = workspace.get_candidate(cand_id)
-			var task_id: String = str(cand.task_id) if cand != null else ""
-			var generation: int = int(cand.generation) if cand != null else 0
-			workspace.correlate(cand_id, ann_id, task_id, generation)
-	return out
+		"stale_candidate_ids": _stale_ids(workspace),
+		"note": "candidates landed in the routing workspace; no proposal annotation was written (S5, DCR 019f7095c395) — resolve via minerva_pcb_workspace_commit/_reject(candidate_id) or the canvas candidate menu",
+	})
 
 
 ## The panel's RoutingWorkspace off a host (duck-typed through the same
@@ -1792,16 +1777,28 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 	if traces_added > 0:
 		data.save_to_history("Apply route hints")
 
-	# Owner-ratified contract (HITL-2, 2026-07-16): an accepted hint is DELETED
-	# once its real trace exists — it was scaffolding, and leaving it (or its
-	# proposals) behind clutters the board. Hints whose nets failed to
-	# materialize stay open for iteration. Proposals answering a consumed hint
-	# (kind_payload.proposal_for) are removed with it.
+	# MF-2(b2) UNIFIED (narrow re-review, 2026-08-02, adjudicated — no
+	# escalation needed): this used to DELETE an accepted hint once its real
+	# trace existed (HITL-2, 2026-07-16) — that was the LEGACY-era reading.
+	# The owner-visible contract manifest.json's own apply_route_hints text
+	# states, and minerva_pcb_workspace_commit now also implements
+	# (_workspace_commit, above), is open→applied, never delete: a hint is
+	# durable intent/commentary, and _gather_route_hints' default (open-only)
+	# scope already excludes non-open lifecycle, so an applied hint is
+	# excluded from the next iterate without having to be gone. Both commit
+	# paths (workspace-native and this bulk one) now close the SAME way.
+	# RECORDED for HITL: the owner may still veto this unification
+	# ("materialize now marks applied instead of deleting" is on the rulings
+	# list) — applied here per review adjudication, not an independent
+	# new ruling. Proposals answering a consumed hint (kind_payload.
+	# proposal_for) are still removed with it — that sweep is proposal-annotation
+	# cleanup (S5 already retires proposal annotations entirely), unrelated
+	# to the hint's own lifecycle.
 	var consumed_ids: Array = []
-	if traces_added > 0 and host.has_method("remove_annotation"):
-		var to_delete: Array = []
+	if traces_added > 0:
+		var to_close: Array = []
 		if failed.is_empty():
-			to_delete = _hint_id_list(source_hints)
+			to_close = _hint_id_list(source_hints)
 		else:
 			# Attribution comes from the worker's own per-route "hint_ids"
 			# (methods.py _hint_ids_by_net, docket 019f9c3a136c) rather than
@@ -1809,23 +1806,17 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 			# so the BLANKET "every selected hint" claim is gone: a hint for a net
 			# this reply never mentions is no longer swept up.
 			#
-			# 019fa109b43c: to_delete is succeeded_hint_ids, accumulated above
+			# 019fa109b43c: to_close is succeeded_hint_ids, accumulated above
 			# INSIDE the route loop's made_any success path — never re-derived
 			# here by re-looping over result.routes. A route that landed in
 			# `failed` never reached that accumulation, so its hints are excluded
 			# here, not merely deprioritized: a hint is consumed only when the
 			# route it answers actually laid copper.
-			#
-			# `result` here is always the real worker reply in THIS branch (a real
-			# router run can produce a per-net partial `failed` list); the
-			# synthetic single-route result built by _proposal_accept below never
-			# reaches this branch — with exactly one route, a failure there leaves
-			# traces_added == 0 and the whole deletion block above is skipped.
-			to_delete = succeeded_hint_ids.duplicate()
-		for hid in to_delete:
+			to_close = succeeded_hint_ids.duplicate()
+		for hid in to_close:
 			if str(hid).is_empty():
 				continue
-			if host.remove_annotation(str(hid)):
+			if _set_hint_lifecycle(host, str(hid), "applied"):
 				consumed_ids.append(str(hid))
 	var removed_proposals: Array = []
 	if not consumed_ids.is_empty() and host.has_method("get_annotations"):
@@ -1857,173 +1848,18 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 	}
 
 
-## PER-PROPOSAL accept (C5, docket 019f6c465fd8, deliverable 2; lossless carry
-## U2, DCR 019f7095c395 Stage-1). Materializes ONE proposal's own stored route
-## as real trace(s)/via(s), sharing _materialize_routes verbatim rather than
-## re-implementing trace synthesis: the proposal's kind_payload.segments +
-## kind_payload.vias (the EXACT per-segment-layer geometry and vias
-## _write_back_proposals stores verbatim from the router's route) are handed
-## through unchanged in a synthetic single-route "result" shaped exactly like
-## a router reply ({routes:[{net, segments, vias}]}). LEGACY proposals written
-## before U2 (no kind_payload.segments) fall back to chopping
-## kind_payload.waypoints (the FULL polyline — always anchor..dest, never
-## interior-only) into single-layer segments on kind_payload.layer, with no
-## vias — the pre-U2 lossy behavior, kept only for old proposals still on a
-## board. Either way the result is handed to _materialize_routes together with
-## the REAL source-hint dicts kind_payload.proposal_for points at (so width/
-## consumed-id resolution — and the removed_proposal_ids cleanup pass that
-## finds and deletes proposals linking to a consumed hint — are the exact same
-## code the bulk commit=true path runs). Owner-ratified contract (HITL-2): an
-## accepted proposal AND its source hint(s) are both deleted; regular (non-
-## proposal) hints are untouched.
-static func _proposal_accept(host, args: Dictionary) -> Dictionary:
-	if host == null or not host.has_method("get_by_id"):
-		return _err("PCB annotation host not available")
-	var data = _get_data(host)
-	if data == null:
-		return _err("PCB data not available")
-
-	var id: String = str(args.get("id", ""))
-	if id.is_empty():
-		return _err("id is required")
-	var proposal: Dictionary = host.get_by_id(id)
-	if proposal.is_empty():
-		return _err("proposal not found: %s" % id)
-	if str(proposal.get("kind", "")) != "pcb_route_hint":
-		return _err("annotation '%s' is not a route-hint proposal" % id)
-
-	var kp: Dictionary = proposal.get("kind_payload", {})
-	var linked: Array = _string_list(kp.get("proposal_for", []))
-	if linked.is_empty():
-		return _err("annotation '%s' is not a proposal (no kind_payload.proposal_for)" % id)
-
-	var net_names := _string_list(kp.get("net_names", []))
-	var net: String = net_names[0] if not net_names.is_empty() else ""
-
-	# Lossless path (U2): when the proposal carries its EXACT per-segment
-	# geometry (written by _write_back_proposals above), commit that verbatim
-	# — real per-segment layers + real vias — instead of reconstructing a
-	# single-layer, no-via approximation from the flattened `waypoints`
-	# polyline (that would silently re-introduce the collision the via
-	# resolved). Fall back to waypoint reconstruction only for LEGACY
-	# proposals written before U2 (no `segments` key).
-	var segments: Array = []
-	var vias: Array = []
-	var raw_segments: Variant = kp.get("segments", [])
-	if raw_segments is Array and not (raw_segments as Array).is_empty():
-		segments = (raw_segments as Array).duplicate(true)
-		var raw_vias: Variant = kp.get("vias", [])
-		if raw_vias is Array:
-			vias = (raw_vias as Array).duplicate(true)
-	else:
-		var pts: Array = []
-		for wp in kp.get("waypoints", []):
-			pts.append(_arr_to_vec2(wp))
-		if pts.size() < 2:
-			return _err("proposal '%s' has no routable polyline" % id)
-		var kicad_layer := str(kp.get("layer", "F.Cu"))
-		for i in range(pts.size() - 1):
-			segments.append({"start": pts[i], "end": pts[i + 1], "layer": kicad_layer})
-
-	if segments.is_empty():
-		return _err("proposal '%s' has no routable polyline" % id)
-
-	# The REAL source-hint dicts (for width fallback + so _materialize_routes'
-	# own consumed-id / removed-proposal cleanup runs against the true hints,
-	# not a synthetic stand-in). A hint may already be gone (a prior accept/
-	# reject raced it) — fabricate a minimal stand-in carrying the proposal's
-	# own net/width so materialization can still size the trace; there is then
-	# nothing further to delete for that (already-gone) hint.
-	var source_hints: Array = []
-	for hid in linked:
-		var h: Dictionary = host.get_by_id(hid)
-		if not h.is_empty():
-			source_hints.append(h)
-	if source_hints.is_empty():
-		source_hints = [{"id": "", "kind_payload": {"net_names": [net], "width_mm": kp.get("width_mm", 0.0)}}]
-
-	# T2.3 bridged accept: if this proposal is correlated to a shadow candidate,
-	# resolve it BEFORE materialization (materialize deletes the annotation, but
-	# the correlation is keyed by candidate_id so it survives either way).
-	var workspace = _get_workspace(host)
-	var bridged_candidate: String = ""
-	if workspace != null and workspace.has_method("candidate_for_annotation"):
-		bridged_candidate = str(workspace.candidate_for_annotation(id))
-
-	var synth_result := {"routes": [{"net": net, "segments": segments, "vias": vias}]}
-	var mat: Dictionary = _materialize_routes(host, data, synth_result, source_hints)
-	if not bool(mat.get("success", false)) or int(mat.get("traces_added", 0)) <= 0:
-		return _err("failed to materialize proposal '%s'" % id)
-
-	# Route the ACCEPT through the workspace commit of the correlated candidate so
-	# accepting an annotation proposal can never leave its candidate live: flip it
-	# to disposition="committed" and record the stable trace/via ids just
-	# materialized (the ResolvedBoard IR references committed copper by these ids).
-	# Never independently mutates both stores — the candidate is a projection of
-	# the same accept, driven by the correlation.
-	if not bridged_candidate.is_empty() and workspace.has_method("mark_committed"):
-		workspace.mark_committed(bridged_candidate, mat.get("trace_ids", []), mat.get("via_ids", []))
-
-	# _materialize_routes already removes any proposal whose proposal_for links
-	# a just-consumed hint — that generically catches THIS proposal since
-	# consumed_hint_ids == linked. Fall back to a direct delete only for the
-	# edge case above (source hints already gone, so nothing was "consumed" to
-	# trigger that cleanup pass) — acceptance must never leave the proposal
-	# behind.
-	var removed_proposals: Array = mat.get("removed_proposal_ids", [])
-	var removed_id := id if (id in removed_proposals) else ""
-	if removed_id.is_empty() and host.has_method("remove_annotation"):
-		if host.remove_annotation(id):
-			removed_id = id
-
-	return _ok({
-		"trace_added": true,
-		"consumed_hint_ids": mat.get("consumed_hint_ids", []),
-		"removed_proposal_id": removed_id,
-		"committed_candidate_id": bridged_candidate,
-	})
-
-
-## PER-PROPOSAL reject (C5 deliverable 2): deletes the proposal only. Source
-## hints stay open — owner contract: "REJECT deletes the proposal; source hints
-## stay open for iteration."
-static func _proposal_reject(host, args: Dictionary) -> Dictionary:
-	if host == null or not host.has_method("get_by_id"):
-		return _err("PCB annotation host not available")
-	var id: String = str(args.get("id", ""))
-	if id.is_empty():
-		return _err("id is required")
-	var proposal: Dictionary = host.get_by_id(id)
-	if proposal.is_empty():
-		return _err("proposal not found: %s" % id)
-
-	var kp: Dictionary = proposal.get("kind_payload", {})
-	var linked: Array = _string_list(kp.get("proposal_for", []))
-	if linked.is_empty():
-		return _err("annotation '%s' is not a proposal (no kind_payload.proposal_for)" % id)
-
-	# T2.3 bridged reject: resolve the correlated candidate BEFORE removing the
-	# annotation, then route the rejection through the workspace (disposition→
-	# rejected) so the candidate leaves the live set in lockstep with the
-	# annotation removal. Removing the proposal annotation also un-supersedes the
-	# source hint(s) (is_annotation_superseded returns false once no proposal links
-	# them) — both stores coherent, neither independently mutated.
-	var workspace = _get_workspace(host)
-	var bridged_candidate: String = ""
-	if workspace != null and workspace.has_method("candidate_for_annotation"):
-		bridged_candidate = str(workspace.candidate_for_annotation(id))
-
-	if not host.has_method("remove_annotation") or not host.remove_annotation(id):
-		return _err("failed to remove proposal '%s'" % id)
-
-	if not bridged_candidate.is_empty() and workspace.has_method("reject"):
-		workspace.reject(bridged_candidate)
-
-	return _ok({
-		"removed_proposal_id": id,
-		"source_hints_still_open": linked,
-		"rejected_candidate_id": bridged_candidate,
-	})
+## RETIRED (S5, C4b, DCR 019f7095c395): _proposal_accept / _proposal_reject —
+## the per-proposal annotation verbs behind minerva_pcb_proposal_accept/_reject
+## — are removed. PROPOSE no longer writes a proposal annotation
+## (_propose_into_workspace, above) for either of them to act on; a landed
+## candidate is resolved through minerva_pcb_workspace_commit(candidate_id) /
+## minerva_pcb_workspace_reject(candidate_id) instead, which own the exact same
+## concerns these used to (commit shares _materialize_routes' trace synthesis
+## transitively via RoutingWorkspace.commit; reject flips disposition→rejected
+## and leaves source hints open for iteration). _materialize_routes' own
+## removed_proposal_ids sweep (below) is left in place, unchanged, as a
+## defensive cleanup for legacy proposal annotations a pre-S5 .pcbskel may
+## still carry — see the load-time migration notice in PCBPanel.gd.
 
 
 ## unrouted nets (+ bridge warnings) → structured "stuck" feedback the agent can
@@ -2097,9 +1933,10 @@ static func _width_for_net(source_hints: Array, net: String) -> float:
 ## needing to branch on `route.has("hint_ids")`.
 ##
 ## NEVER falls back to "every source hint" — that blanket claim was the bug
-## (019f9c3a136c): minerva_pcb_proposal_accept deletes exactly the hints named
-## in proposal_for, so overclaiming silently drops a hint the user never got
-## routed. An empty result here is correct and must stay empty.
+## (019f9c3a136c): _materialize_routes consumes (marks applied) exactly the hints
+## named here, and a landed workspace candidate's source_hint_ids is this same
+## list — either way, overclaiming silently drops/misattributes a hint the
+## user never got routed. An empty result here is correct and must stay empty.
 static func _route_hint_ids(route: Dictionary) -> Array:
 	return _string_list(route.get("hint_ids", []))
 
@@ -3039,13 +2876,15 @@ static func _load_board(host, args: Dictionary) -> Dictionary:
 # RoutingWorkspace calls, the same legality table, the same named refusals — so
 # neither surface can drift into having a power the other lacks.
 #
-# HOW THIS DIFFERS FROM THE ANNOTATION PROPOSE PATH IT REPLACES:
-# minerva_pcb_apply_route_hints writes cyan PROPOSAL ANNOTATIONS
-# (_write_back_proposals) and dual-writes a shadow candidate.
-# minerva_pcb_workspace_propose writes CANDIDATES ONLY — the workspace is the
-# answer, not a shadow of one. It writes no annotation, so it also cannot leave
-# the two stores disagreeing. The annotation half is retired by S5 (C4b); until
-# then BOTH tools exist and a caller picks the store it means.
+# HOW THIS RELATES TO minerva_pcb_apply_route_hints's PROPOSE BRANCH:
+# S5 (C4b, DCR 019f7095c395) retired the annotation half — apply_route_hints
+# (commit=false) now also lands CANDIDATES ONLY, via _propose_into_workspace,
+# the same ingest_record landing path this cluster's own _workspace_propose
+# uses below. Both tools write to the same one store; neither writes an
+# annotation. A caller picks apply_route_hints for the legacy gather-by-hint_
+# ids shape (and its PCBPanel-compatible `proposals` reply array) or
+# minerva_pcb_workspace_propose for the workspace-native `candidates` shape —
+# same underlying candidates land either way.
 #
 # EVERY REFUSAL IS NAMED. A tool that could not do what was asked returns
 # {success:false, error:"<code>", …} with the workspace's own code
@@ -3077,7 +2916,79 @@ static func _workspace_ctx(host) -> Dictionary:
 		}}
 	if data.has_method("bind_routing_workspace"):
 		data.bind_routing_workspace(workspace)
+	# MF-2 (review, owner-ratified HITL-2 — undo coherence): see
+	# _reconcile_hint_lifecycle's own doc for why this lazy self-heal, run at
+	# the top of EVERY workspace verb, is the compensating half for a gap that
+	# cannot be closed synchronously.
+	_reconcile_hint_lifecycle(host, workspace)
 	return {"ok": true, "ws": workspace, "data": data}
+
+
+## MF-2 (review, owner-ratified HITL-2 contract; DCR finding 6's "two-store
+## gap"): minerva_pcb_workspace_commit closes the source-hint lifecycle
+## (open→applied — see _workspace_commit) as its half of the composite
+## commit transaction. That transition CANNOT ride pcb_data's board-history
+## undo/redo the way the candidate's own disposition does (INV-1's paired
+## snapshot, RoutingWorkspace.snapshot_dispositions/restore_dispositions) —
+## annotations are a SEPARATE store with their own per-hint revision stack,
+## entirely unconnected to pcb_data's history buckets, and restore_dispositions
+## itself lives in pcb_routing_workspace.gd (out of this unit's fence) with
+## deliberately NO reference to the annotation host (the same "model never
+## touches annotations" rule _workspace_commit itself honors). So a plain
+## data.undo() after a commit reverts the candidate's disposition back to
+## live automatically, but leaves any hint it had marked "applied" stranded —
+## exactly the state that would make the next propose silently skip a hint
+## the user believes is still open, and risk "iterate lands duplicate copper"
+## the other direction (a re-authored hint answering the same net getting no
+## fresh candidate because the stale one still LOOKS live via its hint).
+##
+## COMPENSATING HALF: rather than reach into the out-of-fence restore path (or
+## giving the model a host reference it was deliberately never given), this
+## reconciles the INVARIANT directly — "applied" is only a truthful lifecycle
+## for a hint whose candidate is ACTUALLY committed right now — every time any
+## workspace verb runs (they all resolve through _workspace_ctx first,
+## including propose). A hint the reader finds "applied" with no live
+## committed candidate backing it (undo happened since) reopens to "open"
+## before the verb's own work proceeds. This closes the loop by the next
+## propose at the latest — the exact point the "duplicate copper" failure
+## mode would otherwise strike.
+static func _reconcile_hint_lifecycle(host, workspace) -> void:
+	if host == null or not host.has_method("get_all_annotations"):
+		return
+	if workspace == null or not workspace.has_method("list_candidates"):
+		return
+	var committed_hint_ids: Dictionary = {}
+	for c in workspace.list_candidates():
+		if c != null and str(c.disposition) == "committed":
+			for hid in c.source_hint_ids:
+				committed_hint_ids[str(hid)] = true
+	for ann in host.get_all_annotations():
+		if not (ann is Dictionary):
+			continue
+		if str((ann as Dictionary).get("kind", "")) != "pcb_route_hint":
+			continue
+		if str((ann as Dictionary).get("lifecycle", "open")) != "applied":
+			continue
+		var hid := str((ann as Dictionary).get("id", ""))
+		if not committed_hint_ids.has(hid):
+			_set_hint_lifecycle(host, hid, "open")
+
+
+## Mutate ONE hint's top-level `lifecycle` field through the standard
+## mutate-with-history seam (host.update_annotation — the same one
+## _add_via/BendHandleEditTool use), leaving every other field untouched.
+## Returns false (silently — this is a best-effort compensating/closing
+## action, never itself the reason a caller's own verb fails) when the
+## annotation is gone or the host cannot persist the change.
+static func _set_hint_lifecycle(host, hint_id: String, lifecycle: String) -> bool:
+	if host == null or not host.has_method("get_by_id") or not host.has_method("update_annotation"):
+		return false
+	var ann: Dictionary = host.get_by_id(hint_id)
+	if ann.is_empty():
+		return false
+	var updated: Dictionary = ann.duplicate(true)
+	updated["lifecycle"] = lifecycle
+	return bool(host.update_annotation(hint_id, updated))
 
 
 ## One candidate, as the shape every workspace tool reports it in.
@@ -3348,9 +3259,25 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		}
 	var reply: Dictionary = res.duplicate(true)
 	reply.erase("ok")
+
+	# MF-2 (review, owner-ratified HITL-2 contract; manifest.json's own
+	# apply_route_hints text and the DCR's composite-transaction text both
+	# still encode it): commit closes the source-hint lifecycle — each
+	# consumed hint transitions open→applied, NEVER deleted. Applied hints
+	# are durable intent/commentary that answered THIS route, kept for the
+	# record; _gather_route_hints' default (open-only) scope already excludes
+	# non-open lifecycle, so the next propose skips them without further
+	# wiring — that is what keeps iterate from landing duplicate copper on a
+	# hint already answered. Undo coherence for this transition is handled
+	# separately, lazily, by _reconcile_hint_lifecycle (see its doc) — it
+	# cannot ride this same board-history step (a different store).
+	var consumed_hint_ids: Array = res.get("consumed_hint_ids", [])
+	for hid in consumed_hint_ids:
+		_set_hint_lifecycle(host, str(hid), "applied")
+
 	reply["candidate"] = _candidate_record(workspace, workspace.get_candidate(cid))
 	reply["stale_candidate_ids"] = _stale_ids(workspace)
-	reply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes this copper AND returns the candidate to its pre-commit disposition"
+	reply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes this copper AND returns the candidate to its pre-commit disposition — the source hint(s) reopen the next time any workspace tool runs (see _reconcile_hint_lifecycle), not synchronously with this undo"
 	return _ok(reply)
 
 

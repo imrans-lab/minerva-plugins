@@ -9,9 +9,26 @@ extends SceneTree
 ##
 ## Every functional group boots a REAL PCBPanel (plugin_panel_driver), wires the
 ## real host→panel back-reference (host.set_panel — the mount-time wiring), and
-## drives the EXACT production seams: panel_tools._dual_write_propose /
-## _proposal_accept / _proposal_reject / _add_via. No fakes; only the router
-## worker hop is substituted by a fixture reply (worker *.py is out of fence).
+## drives production seams. No fakes; only the router worker hop is
+## substituted by a fixture reply (worker *.py is out of fence).
+##
+## S5 UPDATE (C4b, DCR 019f7095c395): panel_tools._dual_write_propose /
+## _proposal_accept / _proposal_reject are RETIRED — PROPOSE now lands a
+## workspace candidate ONLY (_propose_into_workspace), never a correlated
+## annotation, so production code can no longer CONSTRUCT the bridged
+## (annotation ↔ candidate) state this suite exercises. The bridge MODEL
+## machinery itself (RoutingWorkspace.correlate/candidate_for_annotation/
+## annotation_for_candidate/is_candidate_bridged/is_annotation_bridged, and
+## _add_via's bridged-sync via sync_candidate_geometry) is UNTOUCHED and
+## out of this round's fence (pcb_routing_workspace.gd) — dormant,
+## forward-compatible capability, not deleted. Groups 1/2/4/5 below now
+## hand-build the bridged starting state directly (ingest_record + correlate)
+## instead of routing it through the retired dual-write, so they keep proving
+## the model mechanics work; group 3's "accept" step and group 5's "undo after
+## accept" step move onto the NEW production path,
+## minerva_pcb_workspace_commit, which is what an agent/human actually calls
+## now. is_annotation_superseded is ALSO retired (nothing supersedes a hint
+## anymore) — the two assertions that exercised it are removed, not ported.
 ##
 ## MANDATORY fixtures (the via bugs all hid behind 2-pin single-path fixtures):
 ##   * a multi-pad (3-pin) net whose route is TWO DISCONNECTED copper paths + a
@@ -87,9 +104,8 @@ func _multipad_reply(hint_ids: Array = []) -> Dictionary:
 
 
 ## A REAL source-hint annotation stored on the host + a propose-shaped source_hints
-## array referencing its real id (so the proposal's proposal_for links a live
-## annotation and is_annotation_superseded can be exercised). Returns [hint_id,
-## source_hints].
+## array referencing its real id (so the hand-built proposal's proposal_for
+## links a live annotation). Returns [hint_id, source_hints].
 func _seed_source_hint(host) -> Array:
 	var env: Dictionary = host.build_route_hint_envelope(0.0, 0.0, "", "F.Cu", "waypoint", [[0.0, 0.0], [5.0, 0.0]], "human")
 	var hint_id: String = str(host.add_annotation_v2(env))
@@ -103,9 +119,14 @@ func _seed_source_hint(host) -> Array:
 	return [hint_id, source_hints]
 
 
-## Boot a real PCBPanel + host wired with the panel back-reference, dual-write a
-## propose of the multipad fixture, and return a context dict with the driver,
-## panel, host, workspace, the source hint id, and the bridged {ann_id, cand_id}.
+## Boot a real PCBPanel + host wired with the panel back-reference, and
+## HAND-BUILD a bridged pair (proposal-shaped annotation + correlated
+## candidate) exactly the shape the now-retired _dual_write_propose used to
+## produce — production can no longer construct this state (S5), but the
+## model-level bridge machinery that CONSUMES it is untouched, so this
+## reproduces its precondition directly instead of routing it through a
+## deleted function. Returns a context dict with the driver, panel, host,
+## workspace, the source hint id, and the bridged {ann_id, cand_id}.
 func _bridged_context() -> Dictionary:
 	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
 	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
@@ -117,20 +138,30 @@ func _bridged_context() -> Dictionary:
 	var hint_id: String = seeded[0]
 	var source_hints: Array = seeded[1]
 
-	var out: Dictionary = PanelTools._dual_write_propose(host, _multipad_reply([hint_id]), source_hints)
+	var records: Array = PanelTools._normalize_route_records(_multipad_reply([hint_id]), source_hints)
+	check("fixture normalizes to exactly one record", records.size() == 1)
+	var rec: Dictionary = records[0]
+	var pts: Array = rec.get("polyline", [])
+	var first: Array = pts[0]
+	var envelope: Dictionary = host.build_route_hint_envelope(
+		float(first[0]), float(first[1]), "", str(rec.get("layer", "F.Cu")), "single_trace", pts, "ai")
+	var kp: Dictionary = envelope.get("kind_payload", {})
+	kp["net_names"] = [str(rec.get("net", ""))]
+	kp["proposal_for"] = rec.get("source_hint_ids", [])
+	kp["segments"] = (rec.get("segments", []) as Array).duplicate(true)
+	kp["vias"] = (rec.get("vias", []) as Array).duplicate(true)
+	envelope["kind_payload"] = kp
+	var ann_id := str(host.add_annotation_v2(envelope))
 
-	# The proposal annotation = the pcb_route_hint carrying proposal_for.
-	var ann_id := ""
-	for ann in host.get_all_annotations():
-		if ann is Dictionary and (ann as Dictionary).get("kind_payload", {}) is Dictionary:
-			var kp: Dictionary = (ann as Dictionary).get("kind_payload", {})
-			if kp.has("proposal_for"):
-				ann_id = str((ann as Dictionary).get("id", ""))
-				break
-	var cand_id := str(ws.candidate_for_annotation(ann_id))
+	var cand_id := str(ws.ingest_record(rec, int(panel.get_data().board_revision)))
+	if not cand_id.is_empty():
+		var cand = ws.get_candidate(cand_id)
+		ws.correlate(cand_id, ann_id, str(cand.task_id) if cand != null else "",
+			int(cand.generation) if cand != null else 0)
+
 	return {
 		"driver": driver, "panel": panel, "host": host, "ws": ws,
-		"hint_id": hint_id, "ann_id": ann_id, "cand_id": cand_id, "out": out,
+		"hint_id": hint_id, "ann_id": ann_id, "cand_id": cand_id,
 	}
 
 
@@ -183,41 +214,67 @@ func _run_reject_bridge() -> void:
 	var cand_id: String = ctx["cand_id"]
 	var hint_id: String = ctx["hint_id"]
 
-	# Pre-reject: candidate live, hint superseded by the proposal.
+	# Pre-reject: candidate live.
 	check("candidate live before reject", cand_id in ws.live_candidate_ids())
-	check("hint superseded before reject", host.is_annotation_superseded(host.get_by_id(hint_id)))
 
-	var res: Dictionary = PanelTools._proposal_reject(host, {"id": ann_id})
-	check("reject succeeds", bool(res.get("success", false)))
-	check_eq("reject reports the bridged candidate", str(res.get("rejected_candidate_id", "")), cand_id)
+	# S5: the retired _proposal_reject did exactly these two calls internally
+	# (remove the annotation, then reject the correlated candidate) — hand-run
+	# them directly since the tool body is gone. is_annotation_superseded is
+	# ALSO retired (see the class doc) — the pre/post supersession assertions
+	# it used to make are removed, not ported.
+	check("proposal annotation removed", host.remove_annotation(ann_id))
+	check("candidate reject succeeds", ws.reject(cand_id))
 
-	# Post-reject: candidate rejected (out of live set), hint un-superseded.
+	# Post-reject: candidate rejected (out of live set), the SEPARATE source
+	# hint (not the proposal) is untouched — reject never touches annotations
+	# it doesn't itself remove.
 	check_eq("candidate disposition == rejected", ws.get_candidate(cand_id).disposition, "rejected")
 	check("candidate NOT in live set after reject", not (cand_id in ws.live_candidate_ids()))
-	check("proposal annotation removed", host.get_by_id(ann_id).is_empty())
-	check("hint un-superseded after reject", not host.is_annotation_superseded(host.get_by_id(hint_id)))
+	check("proposal annotation gone", host.get_by_id(ann_id).is_empty())
+	check("source hint untouched by reject", not host.get_by_id(hint_id).is_empty())
 
 	ctx["driver"].free_panel(ctx["panel"])
 
 
-# ── 3. accept-via-bridge: committed + stable trace/via ids survive reload ──────
+# ── 3. commit-via-bridge: committed + stable trace/via ids survive reload ──────
+#
+# S5 (C4b): the retired _proposal_accept is replaced by the production path
+# an agent/human actually calls now, minerva_pcb_workspace_commit(candidate_id)
+# — a board+disposition transaction that does NOT DELETE the correlated
+# proposal annotation OR the real source hint (unlike the retired
+# _proposal_accept, which deleted both). MF-2 (review, owner-ratified HITL-2):
+# the RoutingWorkspace MODEL still has no reference to the annotation host
+# (unchanged), but the panel_tools.gd TOOL LAYER does, and _workspace_commit
+# uses it to close the source-hint lifecycle — open→applied — as its half of
+# the composite transaction. The STABLE-ids-survive-reload concern under test
+# is unchanged either way.
 
 func _run_accept_bridge_stable_ids() -> void:
-	print("-- 3. accept-via-bridge: committed + STABLE ids survive to_board_dict/reload --")
+	print("-- 3. commit-via-bridge: committed + STABLE ids survive to_board_dict/reload --")
 	var ctx := _bridged_context()
 	var host = ctx["host"]
 	var ws = ctx["ws"]
 	var panel = ctx["panel"]
 	var ann_id: String = ctx["ann_id"]
 	var cand_id: String = ctx["cand_id"]
+	var hint_id: String = ctx["hint_id"]
 
-	var res: Dictionary = PanelTools._proposal_accept(host, {"id": ann_id})
-	check("accept succeeds", bool(res.get("success", false)))
-	check_eq("accept reports the committed candidate", str(res.get("committed_candidate_id", "")), cand_id)
+	var res: Dictionary = PanelTools._workspace_commit(host, {"candidate_id": cand_id})
+	check("commit succeeds", bool(res.get("success", false)))
+	check_eq("commit reports the same candidate_id", str(res.get("candidate_id", "")), cand_id)
 
-	# Candidate committed → left the live set (accept cannot leave it live).
+	# Candidate committed → left the live set (commit cannot leave it live).
 	check_eq("candidate disposition == committed", ws.get_candidate(cand_id).disposition, "committed")
-	check("candidate NOT in live set after accept", not (cand_id in ws.live_candidate_ids()))
+	check("candidate NOT in live set after commit", not (cand_id in ws.live_candidate_ids()))
+	# The bridged PROPOSAL annotation (ann_id) is not itself named in
+	# consumed_hint_ids (that names the REAL source hint, hint_id) — it
+	# survives untouched either way, since nothing ever deletes it.
+	check("bridged proposal annotation left untouched by commit", not host.get_by_id(ann_id).is_empty())
+	# MF-2: the REAL source hint's lifecycle closes — open -> applied, not deleted.
+	var hint_after_commit: Dictionary = host.get_by_id(hint_id)
+	check("bridged source hint SURVIVES commit (not deleted)", not hint_after_commit.is_empty())
+	check_eq("bridged source hint lifecycle closed: open -> applied",
+		str(hint_after_commit.get("lifecycle", "")), "applied")
 
 	var committed: Dictionary = ws.committed_copper_ids(cand_id)
 	var trace_ids: Array = committed.get("trace_ids", [])
@@ -284,13 +341,17 @@ func _run_undo_after_commit() -> void:
 	var ws = ctx["ws"]
 	var panel = ctx["panel"]
 	var data = panel.get_data()
-	var ann_id: String = ctx["ann_id"]
 	var cand_id: String = ctx["cand_id"]
+	var hint_id: String = ctx["hint_id"]
 
-	PanelTools._proposal_accept(host, {"id": ann_id})
-	check("board has traces after accept", data.traces.size() >= 1)
-	check("board has vias after accept", data.vias.size() == 1)
-	check_eq("candidate committed after accept", ws.get_candidate(cand_id).disposition, "committed")
+	# S5: minerva_pcb_workspace_commit replaces the retired _proposal_accept —
+	# same board+disposition transaction, same GATE INV-1 undo concern.
+	PanelTools._workspace_commit(host, {"candidate_id": cand_id})
+	check("board has traces after commit", data.traces.size() >= 1)
+	check("board has vias after commit", data.vias.size() == 1)
+	check_eq("candidate committed after commit", ws.get_candidate(cand_id).disposition, "committed")
+	check_eq("MF-2: source hint lifecycle closed by commit: open -> applied",
+		str(host.get_by_id(hint_id).get("lifecycle", "")), "applied")
 
 	# Board-level undo of the accept: F1 restores traces AND vias together.
 	var undone: bool = data.undo()
@@ -300,15 +361,39 @@ func _run_undo_after_commit() -> void:
 	# (0) in lockstep with the traces, never left dangling.
 	check_eq("undo removed all vias (not orphaned)", data.vias.size(), 0)
 
-	# Workspace side: uncommit brings the candidate back to a live disposition,
-	# coherent with a board that no longer holds its copper.
-	var reverted: bool = ws.uncommit(cand_id)
-	check("workspace.uncommit reports success", reverted)
-	check_eq("candidate reverted to proposed", ws.get_candidate(cand_id).disposition, "proposed")
-	check("candidate live again after uncommit", cand_id in ws.live_candidate_ids())
+	# S5 CONTRACT CHANGE (moved pin, rationale): minerva_pcb_workspace_commit IS
+	# INV-1's composite transaction — commit() pairs a PRE-commit disposition
+	# snapshot onto the board's OWN history entry (pcb_data.gd bucket 8), so
+	# data.undo() above ALREADY restores the candidate's disposition in
+	# lockstep with the board — no separate ws.uncommit() call is needed. The
+	# retired _proposal_accept went through mark_committed() directly (not the
+	# INV-1 batch), which is why the pre-S5 version of this test called
+	# ws.uncommit() by hand afterward; under the new path that call is not
+	# merely redundant, it now REFUSES (the candidate is no longer "committed"
+	# by the time undo has already reverted it) — asserted explicitly below.
+	check_eq("candidate disposition restored to proposed BY data.undo() alone",
+		ws.get_candidate(cand_id).disposition, "proposed")
+	check("candidate live again after undo (no manual uncommit needed)",
+		cand_id in ws.live_candidate_ids())
 	var after: Dictionary = ws.committed_copper_ids(cand_id)
 	check_eq("committed trace ids cleared", (after.get("trace_ids", []) as Array).size(), 0)
 	check_eq("committed via ids cleared", (after.get("via_ids", []) as Array).size(), 0)
+	check("a stray ws.uncommit() now correctly refuses (already proposed, not committed)",
+		not ws.uncommit(cand_id))
+
+	# MF-2 undo-coherence, demonstrated end to end: the hint lifecycle CANNOT
+	# ride this same board-history undo (a separate store — see
+	# _reconcile_hint_lifecycle's doc) — it is REAL, not hypothetical: right
+	# after data.undo() above, the hint is STILL "applied" even though its
+	# candidate is already back to "proposed". The compensating half is lazy:
+	# it fires the next time ANY workspace tool resolves through
+	# _workspace_ctx — proven here with a read-only one (_workspace_list),
+	# which must not require its OWN candidate_id/mutation to trigger it.
+	check_eq("hint STAYS applied immediately after undo (the gap is real)",
+		str(host.get_by_id(hint_id).get("lifecycle", "")), "applied")
+	PanelTools._workspace_list(host, {})
+	check_eq("hint REOPENS to 'open' the next time any workspace tool runs (compensating half)",
+		str(host.get_by_id(hint_id).get("lifecycle", "")), "open")
 
 	ctx["driver"].free_panel(panel)
 

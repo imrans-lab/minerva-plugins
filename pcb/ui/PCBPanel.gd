@@ -309,6 +309,12 @@ var _restoring := false
 ## tests/telemetry via get_last_migration_summary().
 var _last_migration: Dictionary = {"migrated": 0, "warnings": []}
 
+## Count of legacy proposal annotations dropped on the most recent sidecar load
+## (S5, C4b, DCR 019f7095c395 — see _drop_legacy_proposal_annotations). 0 when
+## no drop has run (never loaded a sidecar, or nothing to drop). Exposed for
+## tests/telemetry via get_last_legacy_proposals_dropped().
+var _last_legacy_proposals_dropped := 0
+
 
 func _init() -> void:
 	# Build the host eagerly so get_annotation_host() is valid the instant the
@@ -3572,6 +3578,16 @@ func _on_panel_load_request(document: Dictionary) -> void:
 		elif _has_legacy_annotation_blobs(doc):
 			_run_legacy_migration(doc)
 		# else: no sidecar, no legacy blobs — leave the host's list empty.
+		# S5 migration notice (cheap-note fix, review): runs after EITHER branch
+		# above, not just the sidecar one. A pre-cutover .minpcb's inline
+		# route_hints blob is not KNOWN to ever carry proposal_for (that field
+		# postdates the inline format), but nothing enforces that absence —
+		# _has_legacy_annotation_blobs/_run_legacy_migration accept whatever
+		# Dictionary shape the on-disk document happened to hold, and a
+		# hand-edited or intermediate-format file could carry the key anyway.
+		# Running the drop unconditionally after annotation loading closes that
+		# gap defensively instead of trusting a shape guarantee no code enforces.
+		_drop_legacy_proposal_annotations()
 
 	# T2a: load the routing workspace sidecar, coherence-gated. Runs INSIDE the
 	# _restoring gate (a restore, not a user edit). The fingerprint is recomputed
@@ -3609,6 +3625,60 @@ func _run_legacy_migration(doc: Dictionary) -> void:
 ## when no migrating load has run. Exposed for tests / telemetry.
 func get_last_migration_summary() -> Dictionary:
 	return _last_migration
+
+
+## S5 MIGRATION (C4b, DCR 019f7095c395): a .pcbskel sidecar saved before this
+## cutover may still carry AI-authored proposal annotations
+## (kind_payload.proposal_for) — the annotation-side propose/accept/reject
+## machinery this round retires (see panel_tools.gd _propose_into_workspace).
+##
+## DECISION (documented drop, not a one-shot importer — see the C4b report for
+## the full decider package): DROP the annotations, never import them into the
+## routing workspace. Since the T2 shadow-write phase (well before this
+## cutover) every propose already ALSO landed a correlated RoutingWorkspace
+## candidate alongside the annotation, persisted in the SAME sidecar — so on
+## any board saved with that machinery live, nothing is lost: the workspace
+## half survives this drop untouched (loaded separately, above, via
+## _PcbRoutingSidecarScript.load_into_workspace) and stays fully actionable
+## through minerva_pcb_workspace_commit/_reject. Only a genuinely
+## pre-shadow-phase board (annotation-only, no correlated candidate) loses the
+## already-computed geometry — recoverable with one re-propose against the
+## still-open source hint(s), which this drop deliberately leaves untouched:
+## only the proposal_for-carrying annotation itself is removed, never the
+## hint(s) it names. An importer was rejected because a proposal minted before
+## U2 (lossless carry) is WAYPOINT-FLATTENED — no per-segment layer, no vias —
+## and would mint a WRONG (silently single-layer, via-less) candidate; there is
+## no way to tell a pre-U2 from a post-U2 proposal apart from an importer's own
+## code without re-deriving the same fidelity check U2's fallback already
+## performs, at which point it is no longer "one importer" but two.
+##
+## Runs inside the _restoring gate (a load-time cleanup, not a user edit) so it
+## never dirties the tab. Silent when there is nothing to drop.
+func _drop_legacy_proposal_annotations() -> void:
+	if _annotation_host == null:
+		return
+	var dropped: Array = []
+	for ann in _annotation_host.get_annotations():
+		if not (ann is Dictionary):
+			continue
+		if str((ann as Dictionary).get("kind", "")) != "pcb_route_hint":
+			continue
+		var kp: Variant = (ann as Dictionary).get("kind_payload", {})
+		if kp is Dictionary and (kp as Dictionary).has("proposal_for"):
+			dropped.append(str((ann as Dictionary).get("id", "")))
+	for id in dropped:
+		_annotation_host.remove_annotation(id)
+	_last_legacy_proposals_dropped = dropped.size()
+	if not dropped.is_empty():
+		_set_status("%d legacy route proposal%s dropped (pre-S5 cutover) — repropose from the open hint(s) via Propose or minerva_pcb_workspace_propose." % [
+			dropped.size(), "" if dropped.size() == 1 else "s"])
+
+
+## Count of legacy proposal annotations dropped on the most recent sidecar
+## load. 0 when no drop has run (never loaded a sidecar, or nothing to drop).
+## Exposed for tests / telemetry.
+func get_last_legacy_proposals_dropped() -> int:
+	return _last_legacy_proposals_dropped
 
 
 ## True when the loaded document still carries a NON-EMPTY inline annotations or

@@ -64,6 +64,10 @@ const PcbWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_rout
 const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 const PcbCutover := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_cutover.gd")
 const PCB_PANEL_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
+const ANNOTATION_HOST_SCRIPT_PATH := "res://../../minerva-plugins/pcb/ui/PcbAnnotationHost.gd"
+## C4b (S5) group 10 only — same helper the shipped panel-tool suites use for
+## the load-request drive + temp-sidecar cleanup idiom.
+const DRIVER := preload("res://test/helpers/plugin_panel_driver.gd")
 
 var _pass := 0
 var _fail := 0
@@ -92,6 +96,7 @@ func _init() -> void:
 	_run_inv3_degenerate_refusals()
 	await _run_eraser_adjudication()
 	await _run_check_stale_gate()
+	await _run_removal_contract()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -634,21 +639,45 @@ func _run_inv2_stale_matrix() -> void:
 	# changed shape. The bumped candidate_revision does NOT cover this: it only
 	# discards an IN-FLIGHT check, never a verdict that already landed.
 	#
-	# Driven through the REAL bridged path (dual-write propose -> the proposal
-	# annotation -> the real _add_via tool), because the whole point is that the
-	# staling survives the annotation-side entry, not just a direct model call.
+	# Driven through the REAL bridged path — but S5 (C4b, DCR 019f7095c395)
+	# retired _dual_write_propose: PROPOSE no longer writes a proposal
+	# annotation, only a workspace candidate (panel_tools.gd
+	# _propose_into_workspace). This scenario is therefore a LEGACY-BOARD case
+	# now, not a fresh-propose one: a board saved before the cutover may still
+	# carry a proposal annotation correlated to a candidate (both stores were
+	# written together back then, by the now-retired dual-write). Hand-build
+	# that exact pre-S5 pairing — same envelope shape, same ingest+correlate —
+	# so the bridged-staling behavior under test (legacy Add-Via still reaching
+	# a correlated candidate) is exercised unchanged.
 	var ctx: Dictionary = await _panel_context()
 	var host = ctx["host"]
 	var bws = ctx["ws"]
 	var seeded := _seed_source_hint(host)
-	PanelTools._dual_write_propose(host, _multipad_reply([str(seeded[0])]), seeded[1])
+	var legacy_records: Array = PanelTools._normalize_route_records(
+		_multipad_reply([str(seeded[0])]), seeded[1])
+	check("legacy fixture: one route record normalized", legacy_records.size() == 1)
 	var ann_id := ""
-	for ann in host.get_all_annotations():
-		if ann is Dictionary and (ann as Dictionary).get("kind_payload", {}) is Dictionary \
-				and ((ann as Dictionary).get("kind_payload", {}) as Dictionary).has("proposal_for"):
-			ann_id = str((ann as Dictionary).get("id", ""))
-	var bcid := str(bws.candidate_for_annotation(ann_id))
-	check("the dual-write bridged a candidate to its proposal", not bcid.is_empty())
+	var bcid := ""
+	if legacy_records.size() == 1:
+		var lrec: Dictionary = legacy_records[0]
+		var lpts: Array = lrec.get("polyline", [])
+		var lfirst: Array = lpts[0]
+		var lenv: Dictionary = host.build_route_hint_envelope(
+			float(lfirst[0]), float(lfirst[1]), "", str(lrec.get("layer", "F.Cu")),
+			"single_trace", lpts, "ai")
+		var lkp: Dictionary = lenv.get("kind_payload", {})
+		lkp["net_names"] = [str(lrec.get("net", ""))]
+		lkp["proposal_for"] = lrec.get("source_hint_ids", [])
+		lkp["segments"] = (lrec.get("segments", []) as Array).duplicate(true)
+		lkp["vias"] = (lrec.get("vias", []) as Array).duplicate(true)
+		lenv["kind_payload"] = lkp
+		ann_id = str(host.add_annotation_v2(lenv))
+		bcid = str(bws.ingest_record(lrec, int(ctx["data"].board_revision)))
+		if not bcid.is_empty() and bws.has_method("correlate"):
+			var lcand = bws.get_candidate(bcid)
+			bws.correlate(bcid, ann_id, str(lcand.task_id) if lcand != null else "",
+				int(lcand.generation) if lcand != null else 0)
+	check("the legacy pairing bridged a candidate to its proposal", not bcid.is_empty())
 	bws.set_validation(bcid, "clean")
 	var rev_before: int = int(bws.get_candidate(bcid).candidate_revision)
 
@@ -1070,5 +1099,195 @@ func _run_check_stale_gate() -> void:
 		str(forced.get("error", "")), "draft_check_no_reply")
 	check_eq("the candidate is still stale, never clean, never stuck checking",
 		str(tws.get_candidate(tcid).validation), "stale")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 10. S5 REMOVAL CONTRACT (C4b, DCR 019f7095c395) ═══════════════════════════
+#
+# PARKED APPEND (C4b): the proposal-as-annotation machinery C4a's own comment
+# marked "retired by S5" is actually gone by the time this group runs — the
+# two per-proposal MCP tools are absent from the manifest and unreachable
+# through the dispatcher, the plugin no longer exposes the duck-typed
+# Accept/Reject verb pair core's WorkflowAnnotationList checks for (nor the
+# is_annotation_superseded hook that hid an answered hint behind its
+# proposal), and a pre-cutover .pcbskel's leftover proposal annotations are
+# DROPPED at load time with a visible, counted notice — never silently
+# ignored, never silently re-materialized into workspace candidates (see the
+# C4b report's decider package for why an importer was rejected: a pre-U2
+# proposal is waypoint-flattened, and an importer built against that shape
+# would mint a WRONG single-layer, via-less candidate).
+func _run_removal_contract() -> void:
+	print("\n-- 10. S5 removal contract (C4b) --")
+	await _run_removal_manifest_tools_absent()
+	_run_removal_no_accept_reject_verbs()
+	_run_removal_legacy_load_notice()
+	await _run_removal_no_drc_via_mcp_annotations()
+
+
+## (a) proposal tools absent from the manifest AND unreachable through the
+## dispatcher (handle() returns {} for an unrecognised tool_name — the
+## PluginToolRegistry contract that maps to tool_unhandled).
+func _run_removal_manifest_tools_absent() -> void:
+	var manifest_text := FileAccess.get_file_as_string("res://../../minerva-plugins/pcb/manifest.json")
+	check("manifest.json readable", not manifest_text.is_empty())
+	var parsed: Variant = JSON.parse_string(manifest_text)
+	check("manifest.json parses", parsed is Dictionary)
+	if not (parsed is Dictionary):
+		return
+	var names: Array = []
+	for t in (parsed as Dictionary).get("tools", []):
+		if t is Dictionary:
+			names.append(str((t as Dictionary).get("name", "")))
+	check("minerva_pcb_proposal_accept absent from manifest", not ("minerva_pcb_proposal_accept" in names))
+	check("minerva_pcb_proposal_reject absent from manifest", not ("minerva_pcb_proposal_reject" in names))
+	check_eq("manifest tool count == 68 (70 - the 2 S5-removed proposal tools)",
+		names.size(), 68)
+
+	# Unreachable through the dispatcher too, not just missing from the list —
+	# a bare host with no panel is enough: handle() matches on tool_name alone
+	# before it ever touches the host.
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var accept_reply: Dictionary = await PanelTools.handle(host, "minerva_pcb_proposal_accept", {"id": "x"})
+	check("dispatch: proposal_accept unhandled (empty dict, got %s)" % str(accept_reply), accept_reply.is_empty())
+	var reject_reply: Dictionary = await PanelTools.handle(host, "minerva_pcb_proposal_reject", {"id": "x"})
+	check("dispatch: proposal_reject unhandled (empty dict, got %s)" % str(reject_reply), reject_reply.is_empty())
+
+
+## (b) hint annotations carry no Accept/Reject verbs. The plugin-side
+## duck-typed methods core's WorkflowAnnotationList checks for
+## (accept_annotation_proposal / reject_annotation_proposal, has_method-gated)
+## are gone from PcbAnnotationHost, so no pcb annotation — hint or (formerly)
+## proposal — can ever grow the buttons regardless of author.kind (DCR
+## finding 4: an agent-authored SOURCE hint is intent/commentary, not a
+## proposal, and must not either). is_annotation_superseded — the sibling hook
+## that hid a hint behind its live proposal — is gone with it: nothing
+## supersedes a hint anymore.
+func _run_removal_no_accept_reject_verbs() -> void:
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	check("host has no accept_annotation_proposal", not host.has_method("accept_annotation_proposal"))
+	check("host has no reject_annotation_proposal", not host.has_method("reject_annotation_proposal"))
+	check("host has no is_annotation_superseded", not host.has_method("is_annotation_superseded"))
+
+
+## (c) legacy-proposal load produces the notice + drops cleanly. Seeds a
+## sidecar (via a first panel) carrying one AI-authored proposal annotation in
+## the pre-S5 shape (kind_payload.proposal_for) alongside its still-open
+## source hint, then loads that same file into a FRESH panel and asserts: the
+## proposal is gone, the drop count is exact, the source hint (never named by
+## the drop — only the proposal_for-carrying annotation itself is removed) is
+## untouched, and the status label carries the notice.
+func _run_removal_legacy_load_notice() -> void:
+	var driver = DRIVER.new()
+	var board_dir: String = driver.make_temp_board_dir("c4b_legacy_proposal_drop")
+	var board_path := board_dir + "/legacy.pcbskel"
+	driver.cleanup_sidecar(board_path)
+
+	var seed_panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
+	var seed_host = seed_panel.get_annotation_host()
+	seed_host.set_document_path(board_path)
+	var seed_data = seed_panel.get_data()
+	seed_data.board_width = 40.0
+	seed_data.board_height = 30.0
+
+	# The still-open source hint the (soon-legacy) proposal answers.
+	var hint_env: Dictionary = seed_host.build_route_hint_envelope(
+		1.0, 1.0, "", "F.Cu", "waypoint", [], "human")
+	var hint_id := str(seed_host.add_annotation_v2(hint_env))
+	check("seed: source hint added", not hint_id.is_empty())
+
+	# A pre-S5-shaped AI proposal answering it — the exact envelope shape the
+	# now-retired panel_tools.gd _write_one_proposal used to author (hand-built
+	# here since that helper no longer exists).
+	var prop_env: Dictionary = seed_host.build_route_hint_envelope(
+		1.0, 1.0, "", "F.Cu", "single_trace", [[1.0, 1.0], [5.0, 1.0]], "ai")
+	var pkp: Dictionary = prop_env.get("kind_payload", {})
+	pkp["net_names"] = ["N1"]
+	pkp["proposal_for"] = [hint_id]
+	prop_env["kind_payload"] = pkp
+	var proposal_id := str(seed_host.add_annotation_v2(prop_env))
+	check("seed: legacy proposal added", not proposal_id.is_empty())
+	check_eq("seed: exactly 2 annotations before save", seed_host.get_annotations().size(), 2)
+
+	var save_err: int = seed_host.save_sidecar(board_path)
+	check_eq("seed: sidecar saved", save_err, OK)
+	driver.free_panel(seed_panel)
+
+	# Fresh panel, fresh load — the actual load-time drop path under test.
+	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
+	driver.drive_load_merged(panel, board_path, {"width_mm": 40.0, "height_mm": 30.0, "name": "Legacy"})
+
+	check_eq("drop: exactly 1 legacy proposal dropped", panel.get_last_legacy_proposals_dropped(), 1)
+	var host = panel.get_annotation_host()
+	check("drop: proposal annotation gone", host.get_by_id(proposal_id).is_empty())
+	check("drop: source hint UNTOUCHED (drop never names the hints it answered)",
+		not host.get_by_id(hint_id).is_empty())
+	check_eq("drop: exactly 1 annotation remains (the hint)", host.get_annotations().size(), 1)
+	check("drop: status label carries the notice (got '%s')" % panel._status_label.text,
+		panel._status_label.text.find("legacy route proposal") != -1)
+
+	driver.free_panel(panel)
+	driver.cleanup_sidecar(board_path)
+	driver.cleanup_board_file(board_path)
+
+
+## (d) MF-1 (narrow re-review, 2026-08-02): the MCP annotations_list negative
+## proof — "no annotation carries kind_payload.drc post-S5" — moved here from
+## test_pcb_drc_propose.gd, where it sat behind a structurally unreachable
+## _used_real_worker gate (docket 019fc22284537bdfa9861c159bad76b1,
+## "Workerless e2e rig defects" — two independent rig bugs, filed not fixed,
+## keep that suite's real-worker branch dead in every environment). This
+## group drives propose through _propose_into_workspace DIRECTLY with a
+## hand-built reply carrying a per-route `drc` verdict (the exact shape
+## pcb_worker.methods._attach_route_drc produces) — no RouterShim/run_router
+## indirection needed, since _propose_into_workspace takes the router `result`
+## as a plain argument — so it actually executes once this file is promoted
+## to tests/gd/ at the epoch boundary, unlike the suite it was moved out of.
+func _run_removal_no_drc_via_mcp_annotations() -> void:
+	print("-- 10d. MF-1: no annotation carries kind_payload.drc post-S5 (moved from drc_propose) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var data = ctx["data"]
+	var hint_id: String = ctx["hint_id"]
+
+	var reply := {
+		"routes": [{
+			"net": "N1",
+			"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+			"drc": {"scope": "connectivity", "clean": false, "violation_count": 1,
+				"violations": [{"type": "clearance"}]},
+		}],
+		"via_count": 0,
+		"drc_summary": {"scope": "connectivity", "clean": false, "violation_count": 1},
+	}
+	var source_hints: Array = [{
+		"id": hint_id,
+		"kind_payload": {"net_names": ["N1"], "width_mm": 0.3,
+			"source_pins": ["U1.3"], "dest_pins": ["U2.7"]},
+	}]
+
+	var out: Dictionary = PanelTools._propose_into_workspace(host, data, reply, source_hints)
+	check("propose ok", bool(out.get("success", false)))
+	check("propose landed a candidate carrying its own drc verdict",
+		((out.get("proposals", []) as Array)[0] as Dictionary).get("drc", {}).get("clean", true) == false)
+
+	# MCPAnnotationTools._annotations_list resolves its host via
+	# AnnotationHostRegistry (editor_name -> host) — none of the OTHER groups
+	# in this file need it (they call PanelTools/model functions directly),
+	# so register/reset locally rather than widen _panel_context for one group.
+	const _EDITOR_NAME := "MF1RemovalProbe"
+	AnnotationHostRegistry._reset_for_test()
+	AnnotationHostRegistry.register(_EDITOR_NAME, host)
+	var ann_tools = MCPAnnotationTools.new(null)
+	var list_result: Dictionary = ann_tools._annotations_list({"editor_name": _EDITOR_NAME})
+	var any_drc_via_mcp := false
+	for a in (list_result.get("annotations", []) as Array):
+		if a is Dictionary and (a as Dictionary).get("kind_payload", {}).has("drc"):
+			any_drc_via_mcp = true
+	check("no annotation carries kind_payload.drc post-S5 (nothing left to carry it)",
+		not any_drc_via_mcp)
+	AnnotationHostRegistry._reset_for_test()
 
 	ctx["driver"].free_panel(ctx["panel"])

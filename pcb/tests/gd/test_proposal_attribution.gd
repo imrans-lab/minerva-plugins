@@ -8,9 +8,17 @@ extends SceneTree
 ## (never through `net_names`) hit that fallback EVERY time, so every proposal
 ## in a batch claimed to answer every hint in the selection.
 ##
-## This matters because `minerva_pcb_proposal_accept` CONSUMES (deletes) the
-## hints named in `proposal_for`. Blanket attribution means accepting one
-## proposal can silently delete a hint that was never actually answered.
+## This mattered because `minerva_pcb_proposal_accept` (S5/C4b, DCR
+## 019f7095c395: RETIRED) used to CONSUME (delete) the hints named in
+## `proposal_for` — blanket attribution meant accepting one proposal could
+## silently delete a hint that was never actually answered. The same
+## attribution now lands on the workspace CANDIDATE's `source_hint_ids`
+## (panel_tools.gd _propose_into_workspace) instead of an annotation's
+## `proposal_for`, and the same "verbatim, no fallback" concern still governs
+## it — a wrongly-attributed candidate would let minerva_pcb_workspace_commit
+## report the wrong consumed_hint_ids. `_materialize_routes` (the commit=true
+## bulk path, scenario 7 below) is UNCHANGED by S5 and still deletes hints —
+## that deletion path's own attribution is what scenario 7 pins.
 ##
 ## The fix: read the worker's own per-route `hint_ids` (methods.py
 ## `_hint_ids_by_net`, which resolves net_names + source_pins + dest_pins —
@@ -37,12 +45,13 @@ extends SceneTree
 ##      (the reported bug's direct regression test)
 ##   3. no hint_ids key at all -> source_hint_ids EMPTY (pure)
 ##   4. multiple hint ids legitimately attributed to one route -> all survive
-##   5. THE REPORTED SCENARIO end to end (real host, _dual_write_propose):
-##      two hints that name their nets ONLY through source_pins/dest_pins (no
-##      net_names — net-name matching could never resolve these), two routes
-##      each carrying the worker's correct per-route hint_ids; each proposal's
-##      proposal_for names only its own hint, never the other's
-##   6. absent hint_ids through the REAL host -> proposal_for EMPTY. The
+##   5. THE REPORTED SCENARIO end to end (real host, S5's
+##      _propose_into_workspace): two hints that name their nets ONLY through
+##      source_pins/dest_pins (no net_names — net-name matching could never
+##      resolve these), two routes each carrying the worker's correct
+##      per-route hint_ids; each landed candidate's source_hint_ids names only
+##      its own hint, never the other's
+##   6. absent hint_ids through the REAL host -> source_hint_ids EMPTY. The
 ##      host-level twin of 3: this round converted the repo's only two
 ##      host-level absent-key fixtures to present-key, leaving the wiring
 ##      (as opposed to the pure helper) unguarded on that path
@@ -149,7 +158,16 @@ func _run_multiple_hint_ids_survive() -> void:
 	check("h3 present", "h3" in ids)
 
 
-# ── 5-6: real-host paths (_dual_write_propose) ───────────────────────────────
+# ── 5-6: real-host paths (S5, C4b: _propose_into_workspace) ─────────────────
+#
+# S5 (C4b, DCR 019f7095c395) retired _dual_write_propose: PROPOSE now lands
+# workspace candidates only (panel_tools.gd _propose_into_workspace), no
+# annotation. Its reply's `proposals[]` entries are result-derived and carry
+# `source_hint_ids` directly (the same attribution field _normalize_route_
+# records already produced above) — there is no `proposal_for` key anymore
+# (that named an ANNOTATION's own field; a candidate is not one). The
+# attribution CONCERN under test — the worker's per-route hint_ids, verbatim,
+# no net-name fallback — is unchanged; only where it lands moved.
 
 ## A REAL source-hint annotation on the host whose kind_payload names its net
 ## ONLY through source_pins/dest_pins (no net_names at all) — the exact shape
@@ -181,11 +199,12 @@ func _seed_pin_only_hint(host, source_pin: String, dest_pin: String) -> String:
 ## claimed every selected hint here, which is what made accepting one proposal
 ## able to consume a hint nobody answered.
 func _run_absent_hint_ids_through_the_host() -> void:
-	print("-- 6. absent hint_ids through the real host -> proposal_for is EMPTY --")
+	print("-- 6. absent hint_ids through the real host -> source_hint_ids is EMPTY --")
 	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
 	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
+	var data = panel.get_data()
 
 	# Two real hints ARE selected — so a blanket fallback would have something
 	# to wrongly claim. The route simply carries no attribution.
@@ -195,24 +214,30 @@ func _run_absent_hint_ids_through_the_host() -> void:
 
 	var reply := {"routes": [_one_segment_route("SIG_A")], "via_count": 0}
 
-	var out: Dictionary = PanelTools._dual_write_propose(host, reply, source_hints)
+	var out: Dictionary = PanelTools._propose_into_workspace(host, data, reply, source_hints)
+	check("propose ok", bool(out.get("success", false)))
 	var proposals: Array = out.get("proposals", [])
-	check_eq("one proposal written", proposals.size(), 1)
+	check_eq("one candidate landed", proposals.size(), 1)
 
-	var linked: Array = (proposals[0] as Dictionary).get("proposal_for", [])
-	check_eq("proposal_for is empty for an unattributed route", linked, [])
+	var linked: Array = (proposals[0] as Dictionary).get("source_hint_ids", [])
+	check_eq("source_hint_ids is empty for an unattributed route", linked, [])
 	check("does not claim hint A", not (hint_a_id in linked))
 	check("does not claim hint B", not (hint_b_id in linked))
+
+	# No annotation is written either way (S5) — the host still holds exactly
+	# the 2 seeded source hints.
+	check_eq("no annotation added by propose", host.get_annotations().size(), 2)
 
 	driver.free_panel(panel)
 
 
 func _run_reported_scenario_end_to_end() -> void:
-	print("-- 5. reported scenario: two pin-only hints, two proposals, no cross-talk --")
+	print("-- 5. reported scenario: two pin-only hints, two candidates, no cross-talk --")
 	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
 	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
 	var host = panel.get_annotation_host()
 	host.set_panel(panel)
+	var data = panel.get_data()
 
 	var hint_a_id := _seed_pin_only_hint(host, "U1.1", "U2.1")
 	var hint_b_id := _seed_pin_only_hint(host, "U3.1", "U4.1")
@@ -229,9 +254,10 @@ func _run_reported_scenario_end_to_end() -> void:
 		"via_count": 0,
 	}
 
-	var out: Dictionary = PanelTools._dual_write_propose(host, reply, source_hints)
+	var out: Dictionary = PanelTools._propose_into_workspace(host, data, reply, source_hints)
+	check("propose ok", bool(out.get("success", false)))
 	var proposals: Array = out.get("proposals", [])
-	check_eq("two proposals written", proposals.size(), 2)
+	check_eq("two candidates landed", proposals.size(), 2)
 
 	var prop_a: Dictionary = {}
 	var prop_b: Dictionary = {}
@@ -240,13 +266,17 @@ func _run_reported_scenario_end_to_end() -> void:
 			prop_a = p
 		elif str((p as Dictionary).get("net", "")) == "SIG_B":
 			prop_b = p
-	check("proposal for SIG_A found", not prop_a.is_empty())
-	check("proposal for SIG_B found", not prop_b.is_empty())
+	check("candidate for SIG_A found", not prop_a.is_empty())
+	check("candidate for SIG_B found", not prop_b.is_empty())
 
-	check_eq("proposal A names only hint A", prop_a.get("proposal_for", []), [hint_a_id])
-	check_eq("proposal B names only hint B", prop_b.get("proposal_for", []), [hint_b_id])
-	check("proposal A does NOT claim hint B", not (hint_b_id in (prop_a.get("proposal_for", []) as Array)))
-	check("proposal B does NOT claim hint A", not (hint_a_id in (prop_b.get("proposal_for", []) as Array)))
+	check_eq("candidate A names only hint A", prop_a.get("source_hint_ids", []), [hint_a_id])
+	check_eq("candidate B names only hint B", prop_b.get("source_hint_ids", []), [hint_b_id])
+	check("candidate A does NOT claim hint B", not (hint_b_id in (prop_a.get("source_hint_ids", []) as Array)))
+	check("candidate B does NOT claim hint A", not (hint_a_id in (prop_b.get("source_hint_ids", []) as Array)))
+
+	# No annotation is written either (S5) — the host still holds exactly the
+	# 2 seeded source hints.
+	check_eq("no annotation added by propose", host.get_annotations().size(), 2)
 
 	driver.free_panel(panel)
 

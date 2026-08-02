@@ -3,12 +3,19 @@ extends SceneTree
 ##
 ## Extends the C5 explicit-propose product contract (test_pcb_explicit_propose.gd)
 ## with the DRC-at-propose deliverable: after Propose routes open hints, each
-## proposal's kind_payload.drc carries the worker's per-route DRC verdict
-## (pcb_worker.methods._attach_route_drc reusing drc.py's existing geometric
-## checks verbatim), the propose envelope surfaces a top-level drc_summary, the
-## panel status label appends a DRC suffix, the WorkflowAnnotationList dock
-## renders a warning badge for a dirty proposal and none for a clean one, and
-## accepting a violating proposal still works (informs, never blocks).
+## landed candidate's own `drc` verdict (pcb_worker.methods._attach_route_drc
+## reusing drc.py's existing geometric checks verbatim) carries the worker's
+## per-route DRC verdict, the propose envelope surfaces a top-level
+## drc_summary, and the panel status label appends a DRC suffix.
+##
+## S5 (C4b, DCR 019f7095c395) UPDATE: propose no longer writes a proposal
+## annotation (panel_tools.gd _propose_into_workspace), so the per-route `drc`
+## verdict — formerly stamped on kind_payload.drc — now lands directly on the
+## reply's own proposals[] entries instead (see the drc/drc_geometric parity
+## note at that call site). The WorkflowAnnotationList dock badge deliverable
+## is now a negative proof (no annotation ever carries drc, so no row ever
+## grows a badge), and "accepting a violating proposal" is
+## minerva_pcb_workspace_commit(candidate_id) — still informs, never blocks.
 ##
 ## Run: godot --headless --path . --script test/test_pcb_drc_propose.gd
 ## (from the Minerva WORKTREE's src/ directory — never the owner's live
@@ -324,32 +331,39 @@ func _test_propose_flags_dirty_and_clean_routes() -> void:
 		panel._status_label.text.findn("DRC:") != -1 and panel._status_label.text.findn("violation") != -1,
 		"got '%s'" % panel._status_label.text)
 
-	# -- per-proposal kind_payload.drc (deliverable 2) --------------------------
-	var dirty_proposal: Dictionary = {}
-	var clean_proposal: Dictionary = {}
-	for ann in host.get_annotations():
-		if not (ann is Dictionary):
+	# -- per-candidate drc (deliverable 2, S5/C4b moved off the annotation) -----
+	# S5 (C4b, DCR 019f7095c395): propose no longer writes an annotation, so
+	# there is no kind_payload.drc to read anymore — it was only ever stamped
+	# there by the now-retired _write_one_proposal. The per-route connectivity
+	# verdict now lands directly on THIS reply's own proposals[] entries
+	# (panel_tools.gd _propose_into_workspace, extended for parity with
+	# drc_geometric below) — read it from there instead.
+	var dirty_entry: Dictionary = {}
+	var clean_entry: Dictionary = {}
+	for p in (reply.get("proposals", []) as Array):
+		if not (p is Dictionary):
 			continue
-		var kp: Dictionary = ann.get("kind_payload", {})
-		var nets: Array = kp.get("net_names", [])
-		if nets == ["SIG1"]:
-			dirty_proposal = ann
-		elif nets == ["SIG2"]:
-			clean_proposal = ann
+		match str((p as Dictionary).get("net", "")):
+			"SIG1":
+				dirty_entry = p
+			"SIG2":
+				clean_entry = p
 
-	check("SIG1 proposal exists", not dirty_proposal.is_empty(), str(host.get_annotations()))
-	check("SIG2 proposal exists", not clean_proposal.is_empty(), str(host.get_annotations()))
+	check("SIG1 candidate exists in the reply", not dirty_entry.is_empty(), str(reply.get("proposals", [])))
+	check("SIG2 candidate exists in the reply", not clean_entry.is_empty(), str(reply.get("proposals", [])))
+	check("no proposal annotation was written by propose (S5)", host.get_annotations().size() == 2,
+		"count=%d" % host.get_annotations().size())
 
-	if not dirty_proposal.is_empty():
-		var dirty_drc: Dictionary = dirty_proposal.get("kind_payload", {}).get("drc", {})
-		check("SIG1 proposal kind_payload.drc.clean == false", dirty_drc.get("clean", true) == false, str(dirty_drc))
-		check("SIG1 proposal kind_payload.drc.violations non-empty",
+	if not dirty_entry.is_empty():
+		var dirty_drc: Dictionary = dirty_entry.get("drc", {})
+		check("SIG1 candidate drc.clean == false", dirty_drc.get("clean", true) == false, str(dirty_drc))
+		check("SIG1 candidate drc.violations non-empty",
 			(dirty_drc.get("violations", []) as Array).size() >= 1, str(dirty_drc))
 
-	if not clean_proposal.is_empty():
-		var clean_drc: Dictionary = clean_proposal.get("kind_payload", {}).get("drc", {})
-		check("SIG2 proposal kind_payload.drc.clean == true", clean_drc.get("clean", false) == true, str(clean_drc))
-		check("SIG2 proposal kind_payload.drc.violations empty",
+	if not clean_entry.is_empty():
+		var clean_drc: Dictionary = clean_entry.get("drc", {})
+		check("SIG2 candidate drc.clean == true", clean_drc.get("clean", false) == true, str(clean_drc))
+		check("SIG2 candidate drc.violations empty",
 			(clean_drc.get("violations", []) as Array).size() == 0, str(clean_drc))
 
 	# Propose is fully resolved — drop the route-worker fake before any further
@@ -360,77 +374,73 @@ func _test_propose_flags_dirty_and_clean_routes() -> void:
 	fake.queue_free()
 	await process_frame
 
-	# -- MCP annotations_list surfaces kind_payload.drc unmodified (deliverable 2) --
-	# MCPAnnotationTools reads the live AnnotationHost directly (no route-worker
-	# IPC involved) — instantiated the same way test_pcb_route_hint_mcp_parity.gd
-	# does (ANN_MODULE.new(null): mcp_server unused for a direct handler call).
-	var ann_tools = MCPAnnotationTools.new(null)
-	var list_result: Dictionary = ann_tools._annotations_list({"editor_name": EDITOR_NAME})
-	check("annotations_list ok", bool(list_result.get("success", false)), str(list_result))
-	var found_drc_via_mcp := false
-	for a in (list_result.get("annotations", []) as Array):
-		if not (a is Dictionary):
-			continue
-		var kp2: Dictionary = (a as Dictionary).get("kind_payload", {})
-		if (kp2.get("net_names", []) as Array) == ["SIG1"] and kp2.has("drc"):
-			found_drc_via_mcp = true
-	check("annotations_list exposes kind_payload.drc for the dirty proposal", found_drc_via_mcp,
-		str(list_result))
+	# MF-1 (narrow re-review, 2026-08-02): the MCP annotations_list negative
+	# proof that used to live here ("no annotation carries kind_payload.drc
+	# post-S5") is DELETED, not just inverted — this whole branch sits after
+	# the _used_real_worker early-return above, and that branch is
+	# STRUCTURALLY unreachable in any environment today: two independent rig
+	# defects (e2e_route_stdio.py swallows the binary's host.notify line;
+	# the serialized board fails worker compile on a None
+	# design_rules.trace_width_mm) keep _used_real_worker false unconditionally
+	# — see docket 019fc22284537bdfa9861c159bad76b1 ("Workerless e2e rig
+	# defects"), filed, not fixed here (out of scope). An assertion that can
+	# never run is worse than none: it reads as coverage that does not exist.
+	# The equivalent proof now lives in the PARKED suite
+	# pcb/tests/pending/test_workspace_tools.gd (group 10d), which drives
+	# propose through a fixture RouterShim rather than the broken real-worker
+	# rig, so it actually executes once promoted at the epoch boundary.
 
-	# -- WorkflowAnnotationList dock badge (deliverable 4) ----------------------
+	# -- WorkflowAnnotationList dock badge (deliverable 4, S5 moved pin) --------
+	# S5 (C4b): no proposal annotation exists to carry kind_payload.drc, so the
+	# badge mechanism has nothing to render — the dock lists ONLY the two plain
+	# source hints, and NEITHER carries a `drc` key (propose never touches
+	# hints). Proves the negative rather than a badge on a row that no longer
+	# exists.
 	var wf_list := WorkflowAnnotationList.new()
 	get_root().add_child(wf_list)
 	wf_list.set_host(host)
 	await process_frame
 
+	var listing: Array = wf_list.get_listing()
+	check("dock lists exactly the 2 open hints, no proposal row", listing.size() == 2,
+		"got %d" % listing.size())
+
 	# Recursive: rows moved inside a capped ScrollContainer (dock-size fix).
 	var groups_node := wf_list.find_child("WorkflowGroups", true, false)
 	check("WorkflowGroups node mounted", groups_node != null)
-	if groups_node != null and not dirty_proposal.is_empty() and not clean_proposal.is_empty():
-		var dirty_summary := str(dirty_proposal.get("summary", ""))
-		var clean_summary := str(clean_proposal.get("summary", ""))
-		var dirty_row: Control = null
-		var clean_row: Control = null
+	if groups_node != null:
+		var any_badge := false
 		for child in groups_node.get_children():
-			if not (child is HBoxContainer):
-				continue
-			var tt := str((child as Control).tooltip_text)
-			if tt == dirty_summary:
-				dirty_row = child
-			elif tt == clean_summary:
-				clean_row = child
-		check("dirty proposal row found", dirty_row != null)
-		check("clean proposal row found", clean_row != null)
-		if dirty_row != null:
-			var badge := dirty_row.find_child("DrcBadge", false, false)
-			check("dirty row has a DRC badge", badge != null)
-			if badge != null:
-				check("dirty badge text starts with a warning glyph", str(badge.text).begins_with("⚠"),
-					"got '%s'" % str(badge.text))
-		if clean_row != null:
-			check("clean row has NO DRC badge", clean_row.find_child("DrcBadge", false, false) == null)
+			if child is HBoxContainer and (child as Control).find_child("DrcBadge", false, false) != null:
+				any_badge = true
+		check("no row anywhere carries a DRC badge (no annotation carries drc post-S5)", not any_badge)
 
 	wf_list.queue_free()
 	await process_frame
 
-	# -- accept a VIOLATING proposal still works (informs, never blocks) --------
-	# panel_tool_registry_driver.build() attaches its OWN real "_MinervaIPC"
-	# helper node to `panel` (test_pcb_explicit_propose.gd's documented
-	# platform-gap finding, scenario C) — clean it up afterward so it can't
-	# collide with anything else. The route-worker `fake` above is already
+	# -- commit a VIOLATING candidate still works (informs, never blocks) ------
+	# S5 (C4b): the retired minerva_pcb_proposal_accept is replaced by
+	# minerva_pcb_workspace_commit(candidate_id) — same "informs, never blocks"
+	# contract (commit() does not consult validation/findings at all, see
+	# panel_tools.gd _workspace_commit's own doc), same payoff (a trace lands
+	# despite the violation). panel_tool_registry_driver.build() attaches its
+	# OWN real "_MinervaIPC" helper node to `panel` (test_pcb_explicit_propose.gd's
+	# documented platform-gap finding, scenario C) — clean it up afterward so it
+	# can't collide with anything else. The route-worker `fake` above is already
 	# disconnected/freed by this point, so there is nothing else to preserve.
-	if not dirty_proposal.is_empty():
-		var dirty_id := str(dirty_proposal.get("id", ""))
+	if not dirty_entry.is_empty():
+		var dirty_cid := str(dirty_entry.get("candidate_id", ""))
+		check("dirty candidate_id present in the reply", not dirty_cid.is_empty())
 		var traces_before: int = data.get_trace_count()
 		var registry: PluginToolRegistry = REGISTRY_DRIVER.new().build(
-			panel, PCB_PLUGIN_ID, EDITOR_NAME, ["minerva_pcb_proposal_accept"])
-		check("accept-dispatch registry built", registry != null)
+			panel, PCB_PLUGIN_ID, EDITOR_NAME, ["minerva_pcb_workspace_commit"])
+		check("commit-dispatch registry built", registry != null)
 		if registry != null:
-			var accept_result: Dictionary = await registry.handle_tool_call("minerva_pcb_proposal_accept", {
-				"editor_name": EDITOR_NAME, "id": dirty_id,
+			var commit_result: Dictionary = await registry.handle_tool_call("minerva_pcb_workspace_commit", {
+				"editor_name": EDITOR_NAME, "candidate_id": dirty_cid,
 			})
-			check("accepting a violating proposal still succeeds (informs, never blocks)",
-				bool(accept_result.get("success", false)), str(accept_result))
+			check("committing a violating candidate still succeeds (informs, never blocks)",
+				bool(commit_result.get("success", false)), str(commit_result))
 			check("a trace was added despite the violation",
 				data.get_trace_count() > traces_before,
 				"before=%d after=%d" % [traces_before, data.get_trace_count()])

@@ -35,7 +35,9 @@ extends SceneTree
 ##   G) Apply via minerva_pcb_apply_route_hints (REAL worker when the
 ##      pcb-plugin binary is built, contract-allowed canned fallback
 ##      otherwise) → the committed trace matches the FINAL payload (squared,
-##      undragged) exactly; the consumed hint is deleted (existing contract).
+##      undragged) exactly; the consumed hint's lifecycle closes open→applied
+##      (MF-2b2, narrow re-review — unified with minerva_pcb_workspace_commit;
+##      survives, not deleted).
 ##   H) A SEPARATE fresh hint (G consumed the scenario A-G hint) proves the
 ##      revision stack survives a sidecar save/reload and is bounded at the
 ##      25-entry cap (oldest dropped).
@@ -528,16 +530,29 @@ func _test_g_apply_matches_final_payload() -> void:
 	var consumed_ids: Array = commit_res.get("consumed_hint_ids", [])
 	check("G: source hint consumed", consumed_ids.size() == 1 and str(consumed_ids[0]) == _hint_id,
 		"consumed=%s hint_id=%s" % [str(consumed_ids), _hint_id])
-	check("G: consumed hint DELETED from the host", host.get_by_id(_hint_id).is_empty())
+	# MF-2(b2) UNIFIED (narrow re-review, moved pin): this used to pin the
+	# LEGACY-era HITL-2 reading ("consumed hint DELETED"). The owner-visible
+	# contract is open→applied, never delete — _materialize_routes now closes
+	# the same way minerva_pcb_workspace_commit does.
+	var consumed_ann: Dictionary = host.get_by_id(_hint_id)
+	check("G: consumed hint SURVIVES commit (not deleted)", not consumed_ann.is_empty())
+	check("G: consumed hint lifecycle closed: open -> applied",
+		str(consumed_ann.get("lifecycle", "")) == "applied",
+		"got '%s'" % str(consumed_ann.get("lifecycle", "")))
 
-	# The PROPOSE step above wrote an AI-authored proposal linked to _hint_id
-	# via proposal_for; the removed_proposal_ids sweep in _materialize_routes
-	# keys off that link, so it only fires when the worker's per-route
-	# hint_ids were actually stamped (see _canned_detailed_result's class
-	# doc). Pinning this here so a future fixture regression is caught HERE,
-	# not as unexplained residue landing in H.
-	check("G: no proposal residue left on the host (the propose-step proposal was cleaned up)",
-		host.get_annotations().is_empty(), "annotations=%s" % str(host.get_annotations()))
+	# S5 (C4b, DCR 019f7095c395): the PROPOSE step above no longer writes an
+	# annotation at all (it lands a workspace candidate — see panel_tools.gd
+	# _propose_into_workspace) — so there is no proposal for
+	# _materialize_routes' removed_proposal_ids sweep to find or clean up here.
+	# MF-2(b2): the only annotation on the board is _hint_id itself, and it now
+	# SURVIVES commit (applied, not deleted) — so "no residue" is reframed as
+	# "no EXTRA annotation beyond the one hint commit closed", not "zero
+	# annotations". Kept as a pin so a future regression (e.g. an annotation
+	# write-back resurrected, or the hint deleted instead of closed) is caught
+	# HERE, not as unexplained residue/absence landing in H (which resets its
+	# own state regardless, so this pin's job is purely local).
+	check("G: exactly 1 annotation left (the closed hint) — no other residue",
+		host.get_annotations().size() == 1, "annotations=%s" % str(host.get_annotations()))
 
 
 # ── H: revision stack survives sidecar save/reload; bounded at cap ───────────
@@ -673,10 +688,14 @@ func raw_worker_envelope(params: Dictionary) -> Dictionary:
 ## singular `hint_id` per route_bridge.py/methods.py, but that never survives
 ## onto the wire — methods.py._route always translates it into the outward
 ## `hint_ids` list via _hint_ids_by_net before the reply leaves the worker).
-## Without this, G's PROPOSE step writes a proposal with an EMPTY
-## proposal_for, and _materialize_routes' removed_proposal_ids sweep (which
-## keys off proposal_for) then never cleans it up — the residue silently
-## outlives G and lands in H's own annotation count (docket 019fa57977fa).
+## Without this, the route's `hint_ids` attribution is EMPTY, and
+## _materialize_routes' succeeded_hint_ids/consumed_hint_ids bookkeeping (G's
+## commit=true step) then has nothing to consume — the source hint would
+## silently outlive G and land in H's own annotation count (docket
+## 019fa57977fa). (S5, C4b: G's earlier PROPOSE step no longer writes an
+## annotation at all — see the note above _test_g's residue check — so this
+## is purely about commit=true's own hint-consumption attribution now, not a
+## proposal's proposal_for.)
 func _canned_detailed_result() -> Dictionary:
 	var ann: Dictionary = host.get_by_id(_hint_id)
 	var kp: Dictionary = ann.get("kind_payload", {})

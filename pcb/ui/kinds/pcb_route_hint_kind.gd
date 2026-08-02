@@ -1415,7 +1415,8 @@ static func _anchor_position(annotation: Dictionary) -> Vector2:
 ## coexist (discriminated by presence of kind_payload.dest_point, WC-3):
 ##
 ##   * Legacy full-path (hint_type "waypoint" AND AI-authored "single_trace"
-##     proposals from MCPPcbPanelTools._write_back_proposals): `waypoints`
+##     proposal annotations — retired S5/C4b, DCR 019f7095c395; a pre-cutover
+##     .pcbskel may still carry one until migration drops it): `waypoints`
 ##     already carries EVERY point including source and dest
 ##     (WaypointRouteHintAuthorTool / the router's routed polyline both build
 ##     it that way) — used as-is.

@@ -171,6 +171,9 @@ func check_eq(desc: String, actual, expected) -> void:
 	check("%s (expected %s, got %s)" % [desc, str(expected), str(actual)], actual == expected)
 
 
+## S5 (C4b, DCR 019f7095c395): proposals are no longer written as annotations.
+## Kept to prove the NEGATIVE — no annotation ever carries proposal_for again —
+## rather than to find a live proposal (see _find_candidate below for that).
 func _find_proposal(net: String) -> Dictionary:
 	for ann in host.get_all_annotations():
 		if not (ann is Dictionary):
@@ -183,6 +186,21 @@ func _find_proposal(net: String) -> Dictionary:
 		if net in _names(kp.get("net_names", [])):
 			return ann
 	return {}
+
+
+## The workspace candidate landed for `net` by the most recent propose, or
+## null. Candidates are the post-S5 propose store — this replaces
+## _find_proposal for locating what PROPOSE actually produces now.
+func _find_candidate(workspace, net: String):
+	if workspace == null:
+		return null
+	var live: Dictionary = {}
+	for id in workspace.live_candidate_ids():
+		live[str(id)] = true
+	for c in workspace.list_candidates():
+		if c != null and str(c.net) == net and live.has(str(c.candidate_id)):
+			return c
+	return null
 
 
 func _names(raw) -> Array:
@@ -222,18 +240,27 @@ func _run_error_shapes() -> void:
 	check("board unmutated by unavailable route", data.get_trace_count() == 0)
 
 
-# ── propose: write-back cyan proposals, board unmutated ───────────────────────
+# ── propose (S5): lands workspace candidates, no annotation, board unmutated ──
 
 func _run_write_back() -> void:
-	print("-- propose (write-back) --")
+	print("-- propose (S5, C4b: lands workspace candidates — no annotation) --")
 	var source_hints: Array = PANEL_TOOLS._gather_route_hints(host, [])
 	check_eq("gather open source hints", source_hints.size(), 2)
 
-	var res: Dictionary = PANEL_TOOLS._write_back_proposals(host, _canned_result(), source_hints)
-	check("write-back ok", bool(res.get("success", false)))
+	var workspace = PANEL_TOOLS._get_workspace(host)
+	check("routing workspace bound to the panel", workspace != null)
+
+	var res: Dictionary = PANEL_TOOLS._propose_into_workspace(host, data, _canned_result(), source_hints)
+	check("propose ok", bool(res.get("success", false)))
 	check_eq("proposed count", res.get("proposed", 0), 2)
 	check_eq("not committed", res.get("committed", true), false)
 	check("board still unmutated (no traces)", data.get_trace_count() == 0)
+
+	# S5: no annotation is written by propose — the host still holds exactly
+	# the 2 source hints seeded in _setup(), and neither carries proposal_for.
+	check_eq("no annotation was added by propose", host.get_all_annotations().size(), 2)
+	check("nothing carries proposal_for (proposals no longer exist as annotations)",
+		_find_proposal("GND").is_empty() and _find_proposal("SIG").is_empty())
 
 	# Stuck feedback carries the unrouted net's blocked pad pair.
 	var stuck: Array = res.get("stuck", [])
@@ -243,28 +270,33 @@ func _run_write_back() -> void:
 		check_eq("stuck from", (stuck[0] as Dictionary).get("from", ""), "U2.1")
 		check_eq("stuck to", (stuck[0] as Dictionary).get("to", ""), "J1.2")
 
-	# GND proposal: AI-authored (→ cyan), linked to the GND source hint, 3 waypoints.
-	var gnd: Dictionary = _find_proposal("GND")
-	check("GND proposal exists", not gnd.is_empty())
-	if not gnd.is_empty():
-		var author: Dictionary = gnd.get("author", {})
-		check_eq("GND proposal author is ai (cyan)", author.get("kind", ""), "ai")
-		check_eq("GND proposal lifecycle open", gnd.get("lifecycle", ""), "open")
-		var kp: Dictionary = gnd.get("kind_payload", {})
-		var linked: Array = kp.get("proposal_for", [])
-		check_eq("GND proposal_for is exactly [gnd_hint_id]", linked, [_gnd_hint_id])
-		var wps: Array = kp.get("waypoints", [])
-		check_eq("GND proposal 3 waypoints", wps.size(), 3)
-		if wps.size() == 3:
-			check("GND wp0 == [0,0]", float(wps[0][0]) == 0.0 and float(wps[0][1]) == 0.0)
-			check("GND wp2 == [5,5]", float(wps[2][0]) == 5.0 and float(wps[2][1]) == 5.0)
-		check_eq("GND proposal width from hint", float(kp.get("width_mm", 0.0)), 0.4)
+	# GND candidate: landed in the workspace, linked to the GND source hint.
+	var gnd = _find_candidate(workspace, "GND")
+	check("GND candidate exists", gnd != null)
+	if gnd != null:
+		check_eq("GND candidate disposition == proposed", str(gnd.disposition), "proposed")
+		check_eq("GND candidate source_hint_ids == [gnd_hint_id]",
+			gnd.source_hint_ids, [_gnd_hint_id])
+		check_eq("GND candidate 2 segments", (gnd.segments as Array).size(), 2)
+		check_eq("GND candidate 1 via", (gnd.vias as Array).size(), 1)
 
-	var sig: Dictionary = _find_proposal("SIG")
-	check("SIG proposal exists", not sig.is_empty())
-	if not sig.is_empty():
-		var sig_linked: Array = (sig.get("kind_payload", {}) as Dictionary).get("proposal_for", [])
-		check_eq("SIG proposal_for is exactly [sig_hint_id]", sig_linked, [_sig_hint_id])
+	var sig = _find_candidate(workspace, "SIG")
+	check("SIG candidate exists", sig != null)
+	if sig != null:
+		check_eq("SIG candidate source_hint_ids == [sig_hint_id]",
+			sig.source_hint_ids, [_sig_hint_id])
+
+	# The reply's own `proposals[]` entries — result-derived (PCBPanel status-
+	# line compat shape), never annotation-derived; `id`/`candidate_id` names
+	# the workspace candidate, not an annotation.
+	var reply_nets: Array = []
+	for p in (res.get("proposals", []) as Array):
+		var pd: Dictionary = p as Dictionary
+		reply_nets.append(str(pd.get("net", "")))
+		check("reply entry's candidate_id resolves in the workspace",
+			workspace.get_candidate(str(pd.get("candidate_id", ""))) != null)
+	check("reply proposals[] names both nets (got %s)" % str(reply_nets),
+			"GND" in reply_nets and "SIG" in reply_nets)
 
 
 # ── commit: materialize traces + open→applied, then iterate ───────────────────
@@ -315,31 +347,42 @@ func _run_commit_and_iterate() -> void:
 	data.redo()
 	check_eq("redo re-applies traces (2)", data.get_trace_count(), 2)
 
-	# Owner-ratified contract (HITL-2): consumed hints are DELETED on commit
-	# (not kept as lifecycle=applied); answering proposals are removed too.
+	# MF-2(b2) UNIFIED (narrow re-review, moved pin): this used to pin the
+	# LEGACY-era HITL-2 reading ("consumed hints are DELETED on commit"). The
+	# owner-visible contract (manifest.json's apply_route_hints text;
+	# minerva_pcb_workspace_commit's own unified behavior) is open→applied,
+	# never delete — _materialize_routes now closes the SAME way
+	# _workspace_commit does. Answering proposal ANNOTATIONS (a separate,
+	# already-retired-by-S5 concern) are still swept up when present.
 	for hid in res.get("consumed_hint_ids", []):
-		check("source hint %s deleted on commit" % hid, host.get_by_id(str(hid)).is_empty())
+		var consumed_ann: Dictionary = host.get_by_id(str(hid))
+		check("source hint %s SURVIVES commit (not deleted)" % hid, not consumed_ann.is_empty())
+		check_eq("source hint %s lifecycle closed: open -> applied" % hid,
+			str(consumed_ann.get("lifecycle", "")), "applied")
 
-	# ITERATE: consumed hints are gone and AI proposals are excluded from the
-	# default gather, so a re-run finds no fresh open source hints.
+	# ITERATE: consumed hints are now lifecycle=applied (excluded by
+	# _gather_route_hints' open-only default scope, same as a deleted hint
+	# would have been) and AI proposals are excluded from the default gather
+	# too, so a re-run finds no fresh open source hints.
 	var after: Array = PANEL_TOOLS._gather_route_hints(host, [])
 	check_eq("re-gather finds no fresh open hints", after.size(), 0)
 
 
-# ── U2: lossless propose→accept — real per-segment layers + real vias ────────
+# ── U2: lossless propose→commit (S5) — real per-segment layers + real vias ───
 #
-# DCR 019f7095c395 Stage-1 crux fix: before this round the two-step PROPOSE→
-# ACCEPT path (unlike bulk commit=true above, which _materialize_routes always
-# handled correctly) flattened multi-layer routes and dropped vias — accepting
-# a via-using route committed SINGLE-LAYER, NO-VIA copper, re-introducing the
-# collision the via resolved. This scenario feeds a SYNTHETIC multi-layer
-# route WITH a via through _write_back_proposals (the same static helper
-# _run_write_back above exercises), asserts the resulting proposal's
-# kind_payload carries the EXACT segments (2, on different layers) + vias (1)
-# verbatim, then _proposal_accept()s it and asserts the committed board has
-# real traces on BOTH layers (top AND bottom) + a real via (not vias:[]).
+# DCR 019f7095c395 Stage-1 crux fix (pre-S5): the two-step PROPOSE→ACCEPT path
+# used to flatten multi-layer routes and drop vias unless it carried lossless
+# per-segment geometry. S5 (C4b) moves that whole loop onto the workspace: the
+# candidate IS the lossless carrier now (pcb_route_candidate.gd's segments/vias
+# are never flattened at all — there is no waypoint-summary fallback to lose
+# fidelity to). This scenario feeds a SYNTHETIC multi-layer route WITH a via
+# through _propose_into_workspace (the same helper _run_write_back above
+# exercises), asserts the resulting CANDIDATE carries the EXACT segments (2, on
+# different layers) + vias (1) verbatim, then minerva_pcb_workspace_commit's
+# body materializes it and asserts the board has real traces on BOTH layers
+# (top AND bottom) + a real via (not vias:[]).
 func _run_lossless_multilayer_via_carry() -> void:
-	print("-- U2: lossless multi-layer via carry (propose -> accept) --")
+	print("-- U2: lossless multi-layer via carry (propose -> workspace commit, S5) --")
 
 	var hid: String = _seed_hint("VIA2L", 0.3, [], [])
 	var source_hints: Array = PANEL_TOOLS._gather_route_hints(host, [hid])
@@ -367,35 +410,33 @@ func _run_lossless_multilayer_via_carry() -> void:
 		"warnings": [],
 	}
 
-	var propose_res: Dictionary = PANEL_TOOLS._write_back_proposals(host, synth_result, source_hints)
-	check("VIA2L write-back ok", bool(propose_res.get("success", false)))
+	var workspace = PANEL_TOOLS._get_workspace(host)
+	var propose_res: Dictionary = PANEL_TOOLS._propose_into_workspace(host, data, synth_result, source_hints)
+	check("VIA2L propose ok", bool(propose_res.get("success", false)))
 
-	var prop: Dictionary = _find_proposal("VIA2L")
-	check("VIA2L proposal exists", not prop.is_empty())
-	if prop.is_empty():
+	var cand = _find_candidate(workspace, "VIA2L")
+	check("VIA2L candidate exists", cand != null)
+	if cand == null:
 		return
-	check_eq("VIA2L proposal_for is exactly [hid]",
-		(prop.get("kind_payload", {}) as Dictionary).get("proposal_for", []), [hid])
-	var kp: Dictionary = prop.get("kind_payload", {})
+	check_eq("VIA2L candidate source_hint_ids is exactly [hid]", cand.source_hint_ids, [hid])
 
-	var segs: Array = kp.get("segments", [])
-	check_eq("VIA2L proposal carries the route's 2 segments verbatim", segs.size(), 2)
+	var segs: Array = cand.segments
+	check_eq("VIA2L candidate carries the route's 2 segments verbatim", segs.size(), 2)
 	if segs.size() == 2:
-		check_eq("segment 0 keeps its real layer (F.Cu)", str((segs[0] as Dictionary).get("layer", "")), "F.Cu")
-		check_eq("segment 1 keeps its real layer (B.Cu)", str((segs[1] as Dictionary).get("layer", "")), "B.Cu")
+		# Candidate segments store the CANONICAL layer name (top/bottom), unlike
+		# an annotation's kind_payload.segments which kept the router's own
+		# KiCad-style name (F.Cu/B.Cu) verbatim — ingest_record/
+		# _create_candidate_for_route runs every segment's layer through
+		# PcbLayerStack.kicad_to_canon() on the way in.
+		check_eq("segment 0 keeps its real layer (F.Cu -> top)", str((segs[0] as Dictionary).get("layer", "")), "top")
+		check_eq("segment 1 keeps its real layer (B.Cu -> bottom)", str((segs[1] as Dictionary).get("layer", "")), "bottom")
 
-	var vias: Array = kp.get("vias", [])
-	check_eq("VIA2L proposal carries the route's 1 via verbatim", vias.size(), 1)
+	var vias: Array = cand.vias
+	check_eq("VIA2L candidate carries the route's 1 via verbatim", vias.size(), 1)
 
-	# Backward-compat fields (waypoints/layer) are KEPT, not removed, for the
-	# renderer + legacy code paths.
-	check_eq("VIA2L waypoints stays the flattened 3-point chain", (kp.get("waypoints", []) as Array).size(), 3)
-	check_eq("VIA2L layer stays the first-segment summary", str(kp.get("layer", "")), "F.Cu")
-
-	var prop_id := str(prop.get("id", ""))
-	var accept_res: Dictionary = PANEL_TOOLS._proposal_accept(host, {"id": prop_id})
-	check("VIA2L accept ok (%s)" % str(accept_res), bool(accept_res.get("success", false)))
-	check("VIA2L trace_added true", bool(accept_res.get("trace_added", false)))
+	var cid := str(cand.candidate_id)
+	var commit_res: Dictionary = PANEL_TOOLS._workspace_commit(host, {"candidate_id": cid})
+	check("VIA2L commit ok (%s)" % str(commit_res), bool(commit_res.get("success", false)))
 
 	var via2l_traces: Array = data.get_traces_for_net("VIA2L")
 	check_eq("VIA2L committed exactly 2 traces (one per real layer)", via2l_traces.size(), 2)
@@ -411,60 +452,63 @@ func _run_lossless_multilayer_via_carry() -> void:
 			via2l_via_count += 1
 	check_eq("VIA2L committed exactly 1 real via (not vias:[])", via2l_via_count, 1)
 
-	check("VIA2L source hint deleted on accept", host.get_by_id(hid).is_empty())
-	check("VIA2L proposal deleted on accept", host.get_by_id(prop_id).is_empty())
+	# MF-2 REVERT (review): the pin this used to assert here ("hint stays open,
+	# workspace verbs never touch hints") was a WRONG pin-move. Owner-ratified
+	# HITL-2 contract (manifest.json's own apply_route_hints text; the DCR's
+	# composite-transaction text) says commit closes the source-hint lifecycle
+	# — open→applied, NOT deleted (the old annotation-side accept's DELETE was
+	# never the ratified semantic either) and NOT left untouched. panel_tools.gd
+	# _workspace_commit performs this transition explicitly (consumed_hint_ids
+	# → _set_hint_lifecycle(..., "applied")) as its half of the composite
+	# transaction; the hint annotation itself survives (durable record), only
+	# its lifecycle field moves.
+	check_eq("commit reports consumed_hint_ids == [hid]",
+		commit_res.get("consumed_hint_ids", []), [hid])
+	var hint_after_commit: Dictionary = host.get_by_id(hid)
+	check("VIA2L source hint SURVIVES commit (not deleted)", not hint_after_commit.is_empty())
+	check_eq("VIA2L source hint lifecycle closed: open -> applied",
+		str(hint_after_commit.get("lifecycle", "")), "applied")
 
 
-# ── U4: manual via insertion — split, layer-run toggle, accept ───────────────
+# ── U4: manual via insertion — split, layer-run toggle (S5: hint-side edit) ──
 #
 # The autorouter avoids vias (prefers single-layer detours); U4 lets a human
-# resolve a collision by hand: click a point on a proposed route to split the
-# segment, insert a via, and flip the following run of segments to the
-# opposite copper layer — a second via jumps it back. This scenario starts
-# from a SINGLE-LAYER proposal (all F.Cu, vias:[]) and invokes the shared
-# add-via logic (panel_tools.gd._add_via — the SAME static helper the canvas
-# ViaInsertTool calls, pcb_route_hint_kind.gd.apply_via_at_point) twice,
-# asserting the layer-run toggle at each step, then accepts the proposal and
-# asserts the committed board has real vias + traces on BOTH copper layers.
+# resolve a collision by hand — invokes the shared add-via logic
+# (panel_tools.gd._add_via, the SAME static helper the canvas ViaInsertTool
+# calls, pcb_route_hint_kind.gd.apply_via_at_point) twice, asserting the
+# layer-run toggle at each step. S5 (C4b) note: _add_via was never gated on
+# proposal-hood — it edits ANY pcb_route_hint annotation carrying
+# kind_payload.segments — so this scenario now hand-builds that annotation
+# directly (mirroring what a legacy pre-cutover proposal, or any future
+# segment-carrying hint, looks like) instead of routing it through the retired
+# propose→annotation write-back. There is no more per-annotation "accept" to
+# close the scenario with; it ends by proving the final segment/via state on
+# the annotation itself, which is the whole of what _add_via promises.
 func _run_manual_via_insertion() -> void:
-	print("-- U4: manual via insertion (split + layer-run toggle + accept) --")
+	print("-- U4: manual via insertion (split + layer-run toggle, S5 hint-side) --")
 
 	var hid: String = _seed_hint("VIAADD", 0.3, [], [])
 	var source_hints: Array = PANEL_TOOLS._gather_route_hints(host, [hid])
 	check_eq("VIAADD source hint gathered", source_hints.size(), 1)
 
-	# Single-layer proposal: one F.Cu segment, no vias.
-	var synth_result := {
-		"success": true,
-		"via_count": 0,
-		"routes": [
-			{
-				"net": "VIAADD",
-				"segments": [
-					{"start": [30.0, 0.0], "end": [40.0, 0.0], "layer": "F.Cu"},
-				],
-				"vias": [],
-				"hint_ids": [hid],
-			},
-		],
-		"unrouted": [],
-		"warnings": [],
-	}
-	var propose_res: Dictionary = PANEL_TOOLS._write_back_proposals(host, synth_result, source_hints)
-	check("VIAADD write-back ok", bool(propose_res.get("success", false)))
-
-	var prop: Dictionary = _find_proposal("VIAADD")
-	check("VIAADD proposal exists", not prop.is_empty())
-	if prop.is_empty():
-		return
-	var prop_id := str(prop.get("id", ""))
-	var kp0: Dictionary = prop.get("kind_payload", {})
-	check_eq("VIAADD proposal_for is exactly [hid]", kp0.get("proposal_for", []), [hid])
+	# Hand-built annotation carrying one F.Cu segment, no vias — the exact
+	# shape a segment-carrying route-hint annotation takes (formerly minted
+	# only by the now-retired propose write-back; the shape itself is
+	# unrelated to proposal-hood, see the note above).
+	var env: Dictionary = host.build_route_hint_envelope(
+		30.0, 0.0, "", "F.Cu", "single_trace", [[30.0, 0.0], [40.0, 0.0]], "ai")
+	var kp0: Dictionary = env.get("kind_payload", {})
+	kp0["net_names"] = ["VIAADD"]
+	kp0["segments"] = [{"start": [30.0, 0.0], "end": [40.0, 0.0], "layer": "F.Cu"}]
+	kp0["vias"] = []
+	env["kind_payload"] = kp0
+	var ann_id := str(host.add_annotation_v2(env))
+	check("VIAADD annotation seeded", not ann_id.is_empty())
 	check_eq("VIAADD starts with 1 segment", (kp0.get("segments", []) as Array).size(), 1)
 	check_eq("VIAADD starts with 0 vias", (kp0.get("vias", []) as Array).size(), 0)
 
 	# Via #1 at (33, 0) — on the segment (30,0)-(40,0).
-	var add1: Dictionary = PANEL_TOOLS._add_via(host, {"id": prop_id, "x": 33.0, "y": 0.0})
+	var add1: Dictionary = PANEL_TOOLS._add_via(host, {"id": ann_id, "x": 33.0, "y": 0.0})
 	check("via #1 insert ok (%s)" % str(add1), bool(add1.get("success", false)))
 	check_eq("via #1 via_count", add1.get("via_count", -1), 1)
 	var segs1: Array = add1.get("segments", [])
@@ -474,13 +518,13 @@ func _run_manual_via_insertion() -> void:
 		check_eq("via #1 tail flips to B.Cu", str((segs1[1] as Dictionary).get("layer", "")), "B.Cu")
 
 	# Persisted through host.update_annotation (the shared BendHandleEditTool seam).
-	var prop_after1: Dictionary = host.get_by_id(prop_id)
-	var kp1: Dictionary = prop_after1.get("kind_payload", {})
+	var ann_after1: Dictionary = host.get_by_id(ann_id)
+	var kp1: Dictionary = ann_after1.get("kind_payload", {})
 	check_eq("VIAADD persisted 1 via", (kp1.get("vias", []) as Array).size(), 1)
 	check_eq("VIAADD persisted 2 segments", (kp1.get("segments", []) as Array).size(), 2)
 
 	# Via #2 at (37, 0) — inside the now-B.Cu tail segment (33,0)-(40,0).
-	var add2: Dictionary = PANEL_TOOLS._add_via(host, {"id": prop_id, "x": 37.0, "y": 0.0})
+	var add2: Dictionary = PANEL_TOOLS._add_via(host, {"id": ann_id, "x": 37.0, "y": 0.0})
 	check("via #2 insert ok (%s)" % str(add2), bool(add2.get("success", false)))
 	check_eq("via #2 via_count", add2.get("via_count", -1), 2)
 	var segs2: Array = add2.get("segments", [])
@@ -492,31 +536,14 @@ func _run_manual_via_insertion() -> void:
 
 	# A click nowhere near the route is a no-op (structured error, no crash,
 	# nothing persisted).
-	var miss: Dictionary = PANEL_TOOLS._add_via(host, {"id": prop_id, "x": 1000.0, "y": 1000.0})
+	var miss: Dictionary = PANEL_TOOLS._add_via(host, {"id": ann_id, "x": 1000.0, "y": 1000.0})
 	check("far-off click is a no-op error, not a crash", not bool(miss.get("success", true)))
-	var prop_unchanged: Dictionary = host.get_by_id(prop_id)
-	var kp_unchanged: Dictionary = prop_unchanged.get("kind_payload", {})
+	var ann_unchanged: Dictionary = host.get_by_id(ann_id)
+	var kp_unchanged: Dictionary = ann_unchanged.get("kind_payload", {})
 	check_eq("no-op leaves via count at 2", (kp_unchanged.get("vias", []) as Array).size(), 2)
 
-	# Accept the proposal — committed board should have real vias + traces on
-	# BOTH copper layers (the collision-resolution payoff).
-	var accept_res: Dictionary = PANEL_TOOLS._proposal_accept(host, {"id": prop_id})
-	check("VIAADD accept ok (%s)" % str(accept_res), bool(accept_res.get("success", false)))
-	check("VIAADD trace_added true", bool(accept_res.get("trace_added", false)))
-
-	var viaadd_traces: Array = data.get_traces_for_net("VIAADD")
-	check_eq("VIAADD committed 3 trace segments (F/B/F non-adjacent same-layer runs stay separate)", viaadd_traces.size(), 3)
-	var layers_seen2 := {}
-	for t in viaadd_traces:
-		layers_seen2[t.layer] = true
-	check("VIAADD has a trace on the top layer (F.Cu) (%s)" % str(layers_seen2), layers_seen2.has("top"))
-	check("VIAADD has a trace on the bottom layer (B.Cu) (%s)" % str(layers_seen2), layers_seen2.has("bottom"))
-
-	var viaadd_via_count := 0
-	for v in data.vias:
-		if str(v.get("net_name", "")) == "VIAADD":
-			viaadd_via_count += 1
-	check_eq("VIAADD committed both vias", viaadd_via_count, 2)
-
-	check("VIAADD source hint deleted on accept", host.get_by_id(hid).is_empty())
-	check("VIAADD proposal deleted on accept", host.get_by_id(prop_id).is_empty())
+	# S5: no accept step exists for a hint-side annotation — the source hint
+	# (a SEPARATE annotation, seeded above) is left exactly as _seed_hint made
+	# it, and the edited annotation itself is the only thing this tool touches.
+	check("VIAADD source hint untouched by _add_via (a different annotation)",
+		not host.get_by_id(hid).is_empty())

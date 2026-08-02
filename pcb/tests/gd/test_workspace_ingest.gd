@@ -24,13 +24,16 @@ extends SceneTree
 ##   5. ingest_record: a route the worker attributed to NO hint gets empty
 ##      provenance/endpoints/default width — distinguishing "legitimately
 ##      unattributed" from the fixed pins-only case above.
-##   6. FUNCTIONAL FLOOR (non-mocked, dual-write): a REAL PCBPanel (booted via
-##      plugin_panel_driver) driving the EXACT production dual-write seam
-##      (panel_tools._dual_write_propose) with a fixture router reply, proving
-##      BOTH the annotation host got a proposal AND the routing workspace got
-##      a candidate from the SAME reply. See the group's header comment for
-##      why this bypasses the router-worker subprocess specifically (out of
-##      T2's fence — worker *.py).
+##   6. FUNCTIONAL FLOOR (non-mocked, S5 workspace-only): a REAL PCBPanel
+##      (booted via plugin_panel_driver) driving the EXACT production propose
+##      seam (panel_tools._propose_into_workspace) with a fixture router
+##      reply, proving the routing workspace got a candidate from the reply
+##      AND the annotation host got NOTHING (S5, C4b, DCR 019f7095c395 retired
+##      the dual-write's annotation half — this suite's own name commemorates
+##      the T2 shadow phase that _propose_into_workspace's landing path
+##      outlived). See the group's header comment for why this bypasses the
+##      router-worker subprocess specifically (out of T2's fence — worker
+##      *.py).
 
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbLayerStack := preload("res://../../minerva-plugins/pcb/ui/model/pcb_layer_stack.gd")
@@ -76,10 +79,10 @@ func check_eq(desc: String, actual, expected) -> void:
 ## groups: {seg_a, seg_b} joined by a layer-changing via, and seg_c standing
 ## alone with no shared endpoint anywhere (INV-3 trap — no chain assumed).
 ## `hint_ids`, when passed, mirrors the worker's own per-route attribution
-## stamp (docket 019f9c3a136c) — group 4 below drives this through
-## panel_tools._dual_write_propose, which now reads that stamp verbatim rather
+## stamp (docket 019f9c3a136c) — group 6 below drives this through
+## panel_tools._propose_into_workspace, which reads that stamp verbatim rather
 ## than re-deriving it, so a caller simulating "a hint was supplied" must set
-## it or the proposal will (correctly) come back unattributed. Groups 1-3 feed
+## it or the candidate will (correctly) come back unattributed. Groups 1-3 feed
 ## this straight to PcbRoutingWorkspace.ingest_routing_result, which does its
 ## own independent net-name resolution and ignores this key entirely.
 func _multipad_reply(hint_ids: Array = []) -> Dictionary:
@@ -322,16 +325,26 @@ func _run_ingest_record_unattributed_is_empty() -> void:
 	check_eq("task_key has an empty hint-id half", cand.task_id, "N4|")
 
 
-# ── 6. functional floor: real PCBPanel, production dual-write seam ───────────
+# ── 6. functional floor: real PCBPanel, production propose seam (S5) ─────────
 
 ## Boots a REAL PCBPanel (not a fake/stand-in) via plugin_panel_driver, wires
 ## its real AnnotationHost -> panel back-reference the same way the mount flow
 ## (_on_panel_loaded/_build_ui) does — `host.set_panel(panel)` — WITHOUT
 ## running full UI mount (no Control tree / canvas needed for this seam), then
-## drives panel_tools.gd's `_dual_write_propose` DIRECTLY with a fixture
-## router reply. `_dual_write_propose` is the exact static function
-## `_apply_route_hints` calls once it HAS a router reply (see panel_tools.gd
-## ~911) — this test exercises that real production function, not a copy.
+## drives panel_tools.gd's `_propose_into_workspace` DIRECTLY with a fixture
+## router reply. `_propose_into_workspace` is the exact static function
+## `_apply_route_hints` calls once it HAS a router reply — this test exercises
+## that real production function, not a copy.
+##
+## S5 UPDATE (C4b, DCR 019f7095c395): this group used to be the T2 shadow-
+## phase's "functional floor: production DUAL-WRITE seam" — proving ONE
+## propose call updated BOTH the annotation host (a proposal) AND the routing
+## workspace (a candidate). S5 retired the annotation half
+## (_write_back_proposals/_dual_write_propose are gone); the workspace is the
+## SOLE propose store now. This group now proves the opposite floor: propose
+## updates the workspace ONLY, and writes NO annotation — the shadow-phase
+## dual-write invariant this suite's name commemorates is exactly what got
+## retired.
 ##
 ## Why not go through `_apply_route_hints`/`minerva_pcb_apply_route_hints`
 ## end-to-end instead? That path awaits `host.run_router` -> `panel.route_board`,
@@ -339,11 +352,11 @@ func _run_ingest_record_unattributed_is_empty() -> void:
 ## backend subprocess (PCBPanel.gd route_board ~1355) — only present when the
 ## panel is mounted inside a real Editor scene with the plugin broker running.
 ## That's headless-unreachable and, per this task's fence, the router worker
-## (*.py) is explicitly OUT of scope. Driving `_dual_write_propose` directly
+## (*.py) is explicitly OUT of scope. Driving `_propose_into_workspace` directly
 ## with a fixture reply is the documented fallback: same handler seam
 ## production calls, fixture reply substituted only for the worker hop.
 func _run_functional_floor_dual_write() -> void:
-	print("-- 4. functional floor: real PCBPanel, production dual-write seam --")
+	print("-- 6. functional floor: real PCBPanel, production propose seam (S5: workspace-only) --")
 	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
 	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
 	check("real PCBPanel instantiated", panel != null)
@@ -354,8 +367,8 @@ func _run_functional_floor_dual_write() -> void:
 	check("panel has a real AnnotationHost", host != null)
 	# Mirrors the mount-time wiring (_on_panel_loaded -> _build_ui) without
 	# building the full Control/canvas tree — this seam needs only the
-	# host->panel back-reference so host.get_panel() (which _dual_write_propose
-	# duck-types through) resolves.
+	# host->panel back-reference so host.get_panel() (which
+	# _propose_into_workspace duck-types through) resolves.
 	host.set_panel(panel)
 
 	var pre_annotation_count: int = host.get_all_annotations().size()
@@ -363,30 +376,32 @@ func _run_functional_floor_dual_write() -> void:
 	check_eq("workspace starts empty", pre_candidate_count, 0)
 
 	var hints := _source_hints_n1()
-	var out: Dictionary = PanelTools._dual_write_propose(host, _multipad_reply(["hint_1"]), hints)
+	var out: Dictionary = PanelTools._propose_into_workspace(
+		host, panel.get_data(), _multipad_reply(["hint_1"]), hints)
 
-	check("_dual_write_propose reports success", bool(out.get("success", false)))
-	check_eq("_dual_write_propose reports 1 proposal (annotation path unchanged)", int(out.get("proposed", 0)), 1)
+	check("_propose_into_workspace reports success", bool(out.get("success", false)))
+	check_eq("_propose_into_workspace reports 1 candidate landed", int(out.get("proposed", 0)), 1)
 
-	# Annotation host got a proposal (the SAME behavior _write_back_proposals
-	# always had — this must NOT have changed).
+	# S5: the annotation host is UNCHANGED — no proposal annotation is written.
+	check_eq("annotation host UNCHANGED — no proposal annotation written",
+		host.get_all_annotations().size(), pre_annotation_count)
 	var proposals: Array = []
 	for ann in host.get_all_annotations():
 		if ann is Dictionary and str((ann as Dictionary).get("kind", "")) == "pcb_route_hint":
 			var kp: Dictionary = (ann as Dictionary).get("kind_payload", {})
-			if kp.get("proposal_for", []) == ["hint_1"]:
+			if kp.has("proposal_for"):
 				proposals.append(ann)
-	check_eq("annotation host got the proposal annotation", host.get_all_annotations().size(), pre_annotation_count + 1)
-	check_eq("proposal links back to source hint_1", proposals.size(), 1)
+	check_eq("nothing on the host carries proposal_for", proposals.size(), 0)
 
-	# Routing workspace got a candidate from the SAME reply, dual-write.
+	# Routing workspace got the candidate — the SOLE store propose writes now.
 	var ws = panel.get_routing_workspace()
-	check_eq("routing workspace got 1 candidate from the same reply", ws.list_candidates().size(), pre_candidate_count + 1)
+	check_eq("routing workspace got 1 candidate from the reply", ws.list_candidates().size(), pre_candidate_count + 1)
 	var cand = ws.list_candidates()[0]
-	check_eq("shadow candidate net matches the reply", cand.net, "N1")
-	check_eq("shadow candidate segment count matches the reply", cand.segments.size(), 3)
-	check_eq("shadow candidate via count matches the reply", cand.vias.size(), 1)
-	check_eq("shadow candidate base_board_revision == live board_revision",
+	check_eq("candidate net matches the reply", cand.net, "N1")
+	check_eq("candidate segment count matches the reply", cand.segments.size(), 3)
+	check_eq("candidate via count matches the reply", cand.vias.size(), 1)
+	check_eq("candidate base_board_revision == live board_revision",
 		cand.base_board_revision, int(panel.get_data().board_revision))
+	check_eq("candidate source_hint_ids == [hint_1]", cand.source_hint_ids, ["hint_1"])
 
 	driver.free_panel(panel)

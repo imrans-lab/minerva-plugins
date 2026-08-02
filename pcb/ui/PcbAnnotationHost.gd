@@ -35,12 +35,6 @@ const _PcbRouteHintKindScript: Script = preload("kinds/pcb_route_hint_kind.gd")
 const _PcbSpatialIndexScript: Script = preload("model/pcb_spatial_index.gd")
 ## T1.5: the ONE canonical layer contract (top/bottom <-> F.Cu/B.Cu).
 const PcbLayerStack := preload("model/pcb_layer_stack.gd")
-## Panel-executed MCP tool surface (C5, docket 019f6c465fd8): the generic
-## accept_annotation_proposal/reject_annotation_proposal wrappers below forward
-## to the SAME minerva_pcb_proposal_accept/_reject tool bodies the MCP dispatch
-## path calls (one implementation, two entry points — mirrors run_router/
-## route_board's host→panel forwarding convention above).
-const _PanelToolsScript: Script = preload("panel_tools.gd")
 
 ## Storage: Array of v2 envelope Dictionaries.
 var _annotations: Array = []
@@ -376,10 +370,6 @@ func get_annotation_zoom() -> float:
 ## layer, and headless hosts (no canvas) are always visible. UI-only: MCP
 ## reads and the stored list are unaffected.
 func is_annotation_visible(annotation: Dictionary) -> bool:
-	# A superseded hint is drawn by its proposal (same geometry + verdict) —
-	# drawing both stacks near-identical polylines on the canvas.
-	if is_annotation_superseded(annotation):
-		return false
 	if _registry == null:
 		return true
 	var kind: AnnotationKind = _registry.get_annotation_kind(StringName(str(annotation.get("kind", ""))))
@@ -457,23 +447,19 @@ func clear_annotations_by_author(author_kind: String) -> int:
 	return removed
 
 
-## GENERIC per-proposal accept/reject (C5, docket 019f6c465fd8, deliverable 2).
-## Named without any "route_hint"/"pcb" vocabulary on purpose: this is the
-## duck-typed verb pair core's WorkflowAnnotationList checks for (mirroring
-## clear_annotations_by_author's opt-in above) to offer per-row Accept/Reject
-## on any AI-authored (author.kind=="ai") workflow annotation — the substrate's
-## own generic "this is a machine PROPOSAL" signal (AnnotationRenderContext.
-## author_color("ai") cyan), not a pcb-specific concept. pcb is simply the
-## first plugin to implement the two verbs. Both awaited: panel_tools.gd's
-## handle() is a coroutine as a whole once ANY branch in it awaits (the
-## apply_route_hints branch does) — awaiting an already-resolved branch here
-## is a documented no-op wait (see panel_tools.gd's class doc).
-func accept_annotation_proposal(id: String) -> Dictionary:
-	return await _PanelToolsScript.handle(self, "minerva_pcb_proposal_accept", {"id": id})
-
-
-func reject_annotation_proposal(id: String) -> Dictionary:
-	return await _PanelToolsScript.handle(self, "minerva_pcb_proposal_reject", {"id": id})
+## RETIRED (S5, C4b, DCR 019f7095c395): accept_annotation_proposal /
+## reject_annotation_proposal — the duck-typed verb pair core's
+## WorkflowAnnotationList checked for (has_method) to offer per-row Accept/
+## Reject on any AI-authored workflow annotation. DCR finding 4: that
+## inference (author.kind=="ai" ⇒ offer Accept/Reject) is wrong for an
+## agent-authored SOURCE hint, which is intent/commentary, not a proposal —
+## core's inference itself is out of fence this epoch (WorkflowAnnotationList.gd
+## is core), so the fix is pcb opting OUT of the duck-typed pair entirely: with
+## both methods gone, `_host.has_method(_ACCEPT_METHOD)` is false and no pcb
+## row — hint or (formerly) proposal — ever grows the buttons. A landed
+## workspace candidate is resolved via minerva_pcb_workspace_commit/_reject or
+## the canvas candidate menu instead (see panel_tools.gd
+## _propose_into_workspace).
 
 
 ## Navigation pass-through target (WC-2 §1a): the platform AnnotationOverlay
@@ -993,33 +979,16 @@ func add_annotation(annotation: Dictionary) -> String:
 	return add_annotation_v2(annotation)
 
 
-## Supersession (owner HITL 2026-07-17): a route hint answered by a live
-## proposal is REPRESENTED by that proposal — the proposal carries the same
-## routed geometry plus its DRC verdict, so showing the hint too means the
-## reviewer sees each route twice and learns its verdict only from the far
-## copy. Superseded hints are hidden from the workflow list (core consults
-## this duck-typed hook) and from the canvas (is_annotation_visible above).
-## UI-only and reversible: rejecting the proposal un-supersedes the hint,
-## which returns to the list/canvas ready for iteration; accepting deletes
-## both. MCP reads always see everything.
-func is_annotation_superseded(annotation: Dictionary) -> bool:
-	var ann_id := str(annotation.get("id", ""))
-	if ann_id.is_empty():
-		return false
-	var kp: Variant = annotation.get("kind_payload", {})
-	# A proposal is never itself superseded (it IS the successor).
-	if kp is Dictionary and (kp as Dictionary).has("proposal_for"):
-		return false
-	for other in _annotations:
-		if not (other is Dictionary):
-			continue
-		var okp: Variant = (other as Dictionary).get("kind_payload", {})
-		if not (okp is Dictionary):
-			continue
-		var links: Variant = (okp as Dictionary).get("proposal_for", null)
-		if links is Array and ann_id in (links as Array):
-			return true
-	return false
+## RETIRED (S5, C4b, DCR 019f7095c395): is_annotation_superseded — supersession
+## existed only to hide a hint answered by a live PROPOSAL ANNOTATION (same
+## routed geometry, drawn twice otherwise). Proposals no longer exist as
+## annotations (see panel_tools.gd _propose_into_workspace) and route hints
+## are never superseded by anything else, so this duck-typed hook (core's
+## WorkflowAnnotationList consulted it via has_method) is removed rather than
+## kept as a permanently-false stub — "everything proposal-shaped goes". A
+## pre-S5 .pcbskel may still carry legacy proposal annotations with a stale
+## kind_payload.proposal_for; those are dropped at load time with a notice
+## (PCBPanel.gd), never read by this host once loaded.
 
 
 ## View-flag relay (canvas show_hint_labels → kind label gate). The kind's

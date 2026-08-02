@@ -124,11 +124,16 @@ the worker omitted the `hint_ids` key entirely (no hints were supplied) or sent
 it as `[]` (hints were supplied, none named this net). Those two states mean
 different things and only the OUTPUT collapses.
 
-This matters because `minerva_pcb_proposal_accept` deletes exactly the hints
-named in `proposal_for`. Under the fallback, a hint that named its net through
-`source_pins` rather than `net_names` never matched, so every proposal claimed
-every hint — and accepting one proposal could silently delete a hint the user
-never got an answer to.
+This mattered because `minerva_pcb_proposal_accept` (S5, C4b, DCR
+`019f7095c395`: RETIRED — replaced by `minerva_pcb_workspace_commit`, which
+reads the same attribution as `consumed_hint_ids` and closes each hint's
+lifecycle open→applied rather than deleting it) used to delete exactly the
+hints named in `proposal_for`. Under the fallback, a hint that named its net
+through `source_pins` rather than `net_names` never matched, so every
+proposal claimed every hint — and accepting one proposal could silently
+delete a hint the user never got an answer to. The same attribution
+discipline (worker `hint_ids` verbatim, no net-name fallback) still governs
+`consumed_hint_ids` on the current path.
 
 **No longer re-derived on the production path** (docket `019fa109766f`, owner
 ruling comment 869 — Shape A). `ingest_record` now passes the record's

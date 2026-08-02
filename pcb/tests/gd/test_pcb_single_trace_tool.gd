@@ -9,9 +9,10 @@ extends SceneTree
 ## E2E-3 "human hints it, agent routes it" (two-pin test board, one net, no
 ## traces): A) simulate human with the single-trace tool: click pin 1 pad →
 ## click pin 2 pad → hint commits and DRAWS. B) agent sees it via MCP
-## (annotations_list/query). C) agent acts: apply_route_hints → cyan proposal
-## → commit → REAL trace connecting pin1-pin2. D) serialize → trace in saved
-## YAML/board dict; reload → trace and hint state intact.
+## (annotations_list/query). C) agent acts: apply_route_hints → workspace
+## candidate (S5, C4b, DCR 019f7095c395 — was a cyan proposal annotation
+## before this round) → commit → REAL trace connecting pin1-pin2. D) serialize
+## → trace in saved YAML/board dict; reload → trace and hint state intact.
 ##
 ## E2E-4 "human changes their mind" (same board): A) start, add a waypoint,
 ## right-click cancel → nothing persisted. B) start again, click the source
@@ -30,6 +31,11 @@ extends SceneTree
 ## documented canned result ONLY if the binary genuinely isn't built at
 ## <minerva-plugins>/pcb/pcb-plugin (contract-allowed fallback), and always
 ## reports which path ran.
+##
+## S5 (C4b, DCR 019f7095c395): PANEL_TOOLS._write_back_proposals — referenced
+## in the two REUSE SCAN paragraphs below by name for history — is RETIRED;
+## E2E-3C now calls _propose_into_workspace, which lands a RouteCandidate
+## instead of a proposal annotation.
 ##
 ## C3 migration (docket 019f6c4604ba, wave 2 + core deletion): the core
 ## module MCPPcbPanelTools.gd this suite used to construct directly
@@ -370,20 +376,21 @@ func _test_e2e3_c_agent_routes_it() -> void:
 	check("C: route result reports success", bool(result.get("success", false)), str(result))
 	check("C: route result has a SIG route", _has_route_for_net(result, "SIG"), str(result))
 
-	# PROPOSE (write-back): cyan proposal, board unmutated.
-	var propose_res: Dictionary = PANEL_TOOLS._write_back_proposals(host, result, source_hints)
+	# PROPOSE (S5): lands a workspace candidate, board unmutated, no annotation.
+	var propose_res: Dictionary = PANEL_TOOLS._propose_into_workspace(host, data, result, source_hints)
 	check("C: propose ok", bool(propose_res.get("success", false)), str(propose_res))
-	check("C: exactly one proposal", int(propose_res.get("proposed", 0)) == 1, str(propose_res))
+	check("C: exactly one candidate landed", int(propose_res.get("proposed", 0)) == 1, str(propose_res))
 	check("C: board still has 0 traces after propose", data.get_trace_count() == 0)
+	check("C: no proposal annotation was written (S5)", _find_proposal().is_empty())
 
-	var proposal := _find_proposal()
-	check("C: cyan (ai-authored) proposal exists", not proposal.is_empty())
-	if not proposal.is_empty():
-		check("C: proposal author is ai", str((proposal.get("author", {}) as Dictionary).get("kind", "")) == "ai")
-		var linked: Array = (proposal.get("kind_payload", {}) as Dictionary).get("proposal_for", [])
+	var workspace = PANEL_TOOLS._get_workspace(host)
+	var cand = _find_candidate(workspace, "SIG")
+	check("C: candidate for SIG exists", cand != null)
+	if cand != null:
 		var expected_linked: Array = [str((source_hints[0] as Dictionary).get("id", ""))]
-		check("C: proposal_for is exactly [the SIG source hint id]", linked == expected_linked,
-			"got=%s expected=%s" % [str(linked), str(expected_linked)])
+		check("C: candidate source_hint_ids is exactly [the SIG source hint id]",
+			cand.source_hint_ids == expected_linked,
+			"got=%s expected=%s" % [str(cand.source_hint_ids), str(expected_linked)])
 
 	# COMMIT (materialize): REAL trace connecting pin1-pin2 along the hinted line.
 	var commit_res: Dictionary = PANEL_TOOLS._materialize_routes(host, data, result, source_hints)
@@ -401,13 +408,27 @@ func _test_e2e3_c_agent_routes_it() -> void:
 			or (t.get_end() as Vector2).is_equal_approx(U2_PIN1), "start=%s end=%s" % [str(t.get_start()), str(t.get_end())])
 
 	# Owner-ratified contract (HITL-2): an accepted hint is DELETED once its
-	# real trace exists; proposals answering it are removed with it.
+	# real trace exists. commit=true here goes through _materialize_routes
+	# DIRECTLY (unaffected by S5 — that branch never wrote an annotation), so
+	# the consumed-hint deletion is unchanged; its removed_proposal_ids sweep
+	# now finds nothing (S5: propose above wrote no proposal for it to find),
+	# not because anything went wrong, but because there was never one to
+	# remove — the workspace candidate propose landed is a SEPARATE store commit
+	# never touches.
+	# MF-2(b2) UNIFIED (narrow re-review, moved pin): "delete-on-commit" was
+	# the LEGACY-era HITL-2 reading; the owner-visible contract is
+	# open→applied, never delete — _materialize_routes now closes the same
+	# way minerva_pcb_workspace_commit does.
 	var consumed_ids: Array = commit_res.get("consumed_hint_ids", [])
 	check("C: source hint consumed", consumed_ids.size() == 1)
 	if consumed_ids.size() == 1:
-		check("C: source hint DELETED from host", host.get_by_id(str(consumed_ids[0])).is_empty())
+		var consumed_ann: Dictionary = host.get_by_id(str(consumed_ids[0]))
+		check("C: source hint SURVIVES commit (not deleted)", not consumed_ann.is_empty())
+		check("C: source hint lifecycle closed: open -> applied",
+			str(consumed_ann.get("lifecycle", "")) == "applied",
+			"got '%s'" % str(consumed_ann.get("lifecycle", "")))
 	var removed_props: Array = commit_res.get("removed_proposal_ids", [])
-	check("C: the answering proposal was removed too", removed_props.size() == 1, str(commit_res))
+	check("C: no proposal to remove (S5: propose never wrote one)", removed_props.is_empty(), str(commit_res))
 	for ann in host.get_annotations():
 		var kp2: Dictionary = (ann as Dictionary).get("kind_payload", {})
 		check("C: no proposal residue on the board", not (kp2 is Dictionary and kp2.has("proposal_for")))
@@ -465,11 +486,9 @@ func _real_route_result(board_dict: Dictionary, hints: Array, selection: Diction
 ## test_pcb_apply_route_hints.gd's _canned_result() uses, specialised to a
 ## direct pin1→pin2 SIG route (no waypoints, matches our fixture).
 ##
-## Stamps the worker's own per-route `hint_ids` (docket 019f9c3a136c: a
-## proposal's ONLY proof of proposal-hood is a non-empty
-## kind_payload.proposal_for, taken verbatim from these) from source_hints'
-## real ids — a canned reply that omitted them made every proposal this
-## fixture produced unattributed.
+## Stamps the worker's own per-route `hint_ids` (docket 019f9c3a136c) from
+## source_hints' real ids — a canned reply that omitted them made every
+## candidate this fixture produced unattributed (empty source_hint_ids).
 func _canned_fallback_result(source_hints: Array = []) -> Dictionary:
 	var hint_ids: Array = []
 	for h in source_hints:
@@ -495,6 +514,9 @@ func _has_route_for_net(result: Dictionary, net: String) -> bool:
 	return false
 
 
+## S5 (C4b): kept as a pin on the NEGATIVE — nothing ever mints
+## kind_payload.proposal_for anymore. Superseded for FINDING what propose
+## actually produces by _find_candidate below.
 func _find_proposal() -> Dictionary:
 	for ann in host.get_all_annotations():
 		if not (ann is Dictionary):
@@ -505,6 +527,18 @@ func _find_proposal() -> Dictionary:
 		if kp.has("proposal_for"):
 			return ann
 	return {}
+
+
+func _find_candidate(workspace, net: String):
+	if workspace == null:
+		return null
+	var live: Dictionary = {}
+	for id in workspace.live_candidate_ids():
+		live[str(id)] = true
+	for c in workspace.list_candidates():
+		if c != null and str(c.net) == net and live.has(str(c.candidate_id)):
+			return c
+	return null
 
 
 # ── E2E-3D: serialize → reload, trace + hint state intact ────────────────────
@@ -521,9 +555,12 @@ func _test_e2e3_d_serialize_reload() -> void:
 	panel._file_path = board_path
 	host.set_document_path(board_path)
 
-	# Post-HITL-2 contract: commit DELETES consumed hints + proposals, so the
-	# board carries no annotations here. Seed a fresh OPEN hint so this
-	# round-trip still proves annotation persistence alongside the trace.
+	# MF-2(b2) UNIFIED: commit now closes consumed hints open→applied rather
+	# than deleting them, so C's hint may still be on the board here (as
+	# "applied") — hint_count_before/hint_ids_before are captured DYNAMICALLY
+	# right after seeding this scenario's own fresh hint below, so the
+	# round-trip assertions prove fidelity of whatever state actually exists
+	# at this point rather than assuming a specific starting count.
 	var env_d: Dictionary = host.build_route_hint_envelope(
 		U1_PIN1.x, U1_PIN1.y, "", "F.Cu", "single_trace",
 		[[U1_PIN1.x, U1_PIN1.y], [U2_PIN1.x, U2_PIN1.y]], "human")
