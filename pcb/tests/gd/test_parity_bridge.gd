@@ -368,6 +368,26 @@ func _run_undo_after_commit() -> void:
 	check_eq("MF-2: source hint lifecycle closed by commit: open -> applied",
 		str(host.get_by_id(hint_id).get("lifecycle", "")), "applied")
 
+	# MF-2, THE OTHER HALF OF THE ORPHAN CRITERION (chore 019fc36555d3, D0-2):
+	# the assertion further down proves the reconciler REOPENS a stranded hint.
+	# On its own that is only half a pin — a reconciler that reopened EVERY
+	# applied hint unconditionally (drop the `committed_hint_ids.has(hid)` test
+	# in _reconcile_hint_lifecycle and reopen in all cases) also satisfies it,
+	# and was measured to leave every workspace/parity suite green. That
+	# over-reconciliation is not benign: it is the "duplicate copper" failure
+	# mode running the OTHER direction — a hint whose candidate is committed
+	# and live on the board flips back to "open", so the next propose treats
+	# it as unanswered and lands a second candidate for copper that already
+	# exists. So pin the negative case at the one moment it is observable:
+	# candidate STILL committed (no undo yet), run a workspace verb — which
+	# resolves through _workspace_ctx and therefore fires the reconciler — and
+	# the hint must be left exactly where commit put it.
+	PanelTools._workspace_list(host, {})
+	check_eq("hint STAYS 'applied' when its candidate is still committed (reconciler reopens ONLY orphans)",
+		str(host.get_by_id(hint_id).get("lifecycle", "")), "applied")
+	check_eq("the still-committed candidate is untouched by the reconciler",
+		ws.get_candidate(cand_id).disposition, "committed")
+
 	# Board-level undo of the accept: F1 restores traces AND vias together.
 	var undone: bool = data.undo()
 	check("data.undo() reports success", undone)
