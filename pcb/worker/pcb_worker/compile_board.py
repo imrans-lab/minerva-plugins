@@ -73,6 +73,7 @@ from .footprints import (
     resolve_footprint,
 )
 from .geometry import PlacementTransform, TRANSFORM_VERSION
+from .zone_fill import ZoneFillError, fill_area_mm2, fill_board_zones
 from .manufacturer_profile import (
     DEFAULT_PROFILE_ROOT,
     LoadedRuleProfile,
@@ -1868,6 +1869,36 @@ def _zone_thermal(raw: dict, ordinal: int, ref: SourceRef, diags: _Diagnostics
     return ConnectMode.THERMAL, settings, True
 
 
+def _zone_kind(raw: dict, ordinal: int, ref: SourceRef,
+               diags: _Diagnostics) -> Union[ZoneKind, None]:
+    """The AUTHORED zone kind, or ``None`` after recording ``invalid_zone_kind``.
+
+    Go's ``Zone.Kind`` (board.go:416) accepts exactly ``""``, ``"copper_pour"``
+    and ``"keepout"``, canonical lowercase, and documents empty as
+    ``copper_pour`` so every board authored before the field existed keeps its
+    meaning.  Mirrored here rather than delegated: ``board_validate._check_zones``
+    is the shared-boundary gate and normally rejects a bad kind first, but
+    ``compile_board`` is reachable on its own and a compiler that TRUSTS an
+    upstream check is a compiler that fails open the day the upstream check is
+    bypassed.  Case-sensitive, exactly as Go: the UI normalises case
+    (``PCBData.zone_kind()``), so a stray ``"Keepout"`` here is a typo worth
+    reporting rather than a spelling to silently accept."""
+    value = raw.get("kind")
+    if value is None or value == "":
+        return ZoneKind.COPPER_POUR
+    if not isinstance(value, str):
+        diags.error("invalid_zone_kind",
+                    f"zone {ordinal}: kind must be a string, got {value!r}", ref)
+        return None
+    try:
+        return ZoneKind(value)
+    except ValueError:
+        diags.error("invalid_zone_kind",
+                    f"zone {ordinal}: kind {value!r} is not "
+                    f"{ZoneKind.COPPER_POUR.value!r} or {ZoneKind.KEEPOUT.value!r}", ref)
+        return None
+
+
 def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
                  schema_version: int, diags: _Diagnostics) -> tuple[ResolvedZone, ...]:
     """Compile authored zones into UNFILLED :class:`ResolvedZone` entries.
@@ -1881,11 +1912,24 @@ def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
         zone_ref = SourceRef(EntityKind.ZONE, f"zone:{ordinal}", f"net {net_name}")
         if not _validate_child_id("zone", raw, zone_ref, schema_version, diags):
             continue
+        kind = _zone_kind(raw, ordinal, zone_ref, diags)
+        if kind is None:
+            continue
         net_id = net_id_by_name.get(net_name) if isinstance(net_name, str) else None
-        if net_id is None:
-            # Go's Zone.Net is non-omitempty and validateZones requires it to name a
-            # declared net; a netless pour is not underspecified-but-fine, it is a
-            # region of copper with no potential.
+        if kind is ZoneKind.KEEPOUT:
+            # A keepout is a PROHIBITION on copper, not copper, so it needs no net
+            # (owner ruling 019fb5ad6d20, mirrored by Go validate.go:288-293 and
+            # board_validate._check_zones). A NAMED net still has to be declared —
+            # a net-scoped keepout that names a net the board does not have is a
+            # typo, not a broader prohibition.
+            if net_name is not None and net_name != "" and net_id is None:
+                diags.error("zone_unknown_net",
+                            f"zone {ordinal}: keepout net {net_name!r} is not a declared net",
+                            zone_ref)
+                continue
+        elif net_id is None:
+            # A pour IS copper, and copper belongs to a net; a netless pour is not
+            # underspecified-but-fine, it is a region of copper with no potential.
             diags.error("zone_unknown_net",
                         f"zone {ordinal}: net {net_name!r} is not a declared net", zone_ref)
             continue
@@ -1909,14 +1953,18 @@ def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
                 id=_resolve_child_id("zone", board_id, raw, (net_id, ordinal), schema_version),
                 net_id=net_id,
                 layer=layer,
-                # COPPER_POUR is the only kind Go's Zone can express: its own doc
-                # calls it "an authored copper-fill region", and it REQUIRES a
-                # declared net, which a keepout (the other ZoneKind) has no use for.
-                # There is also no keepout-shaped source for this list: board-level
-                # keepouts are authored under the separate "keepouts" key, which the
-                # loop in compile_board still refuses outright.  So COPPER_POUR is
-                # read off the schema, not chosen between two live possibilities.
-                kind=ZoneKind.COPPER_POUR,
+                # THE AUTHORED kind, read off the board (defect fix, C6 stage 1).
+                # This used to be hardcoded to COPPER_POUR with a comment claiming
+                # COPPER_POUR was "the only kind Go's Zone can express". That was
+                # true when it was written and STALE by the time it was read: Go's
+                # Zone.Kind landed 2026-07-30 (owner ruling 019fb5ad6d20) and both
+                # validators accept `kind: keepout`. The hardcode therefore made
+                # VALIDATE AND COMPILE DISAGREE — a netless keepout passed
+                # board_validate and was then rejected here as zone_unknown_net,
+                # because the pour net rule was applied to something that is not a
+                # pour. The separate top-level `keepouts:` key is a DIFFERENT thing
+                # and stays refused (:2120-2125); do not conflate them.
+                kind=kind,
                 authored_outline=outline,
                 # HONEST INDETERMINACY, stated rather than defaulted: no fill has
                 # been computed. NOT `()`, which would claim a computed-and-empty
@@ -1938,11 +1986,13 @@ def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
             # becomes a structured error here rather than a traceback out of compile.
             diags.error("invalid_zone", f"zone {ordinal}: rejected by the IR: {exc}", zone_ref)
             continue
-        diags.warning("zone_unfilled",
-                      f"zone {ordinal} on {layer.id} is compiled with an authored outline but "
-                      f"NO computed fill (fill=None): its copper is INDETERMINATE, not absent. "
-                      f"Routing, the kicad bridge and gerber output all refuse a board carrying "
-                      f"zones, and geometric DRC returns indeterminate", zone_ref)
+        # NO `zone_unfilled` WARNING IS EMITTED HERE ANY MORE. It used to be, and
+        # it was correct while nothing computed a fill: every zone left this
+        # function with fill=None and the warning said so. Now a pour is filled
+        # by the zone-fill pass at the end of compile (or the compile FAILS), so
+        # a warning emitted here would fire on every pour and then be false by
+        # the time the caller read it — the worst kind of diagnostic. The
+        # per-pour outcome is reported after the fill instead (`zone_filled`).
         zones.append(zone)
     return tuple(zones)
 
@@ -2299,6 +2349,50 @@ def compile_board(
     except (ValueError, TypeError) as exc:
         diags.error("board_invariant", f"resolved board rejected: {exc}", _board_ref())
         return ResolutionFailure(diagnostics=_ensure_error(diags))
+
+    # ZONE FILL — the last compile step, and it runs HERE (on the assembled
+    # ResolvedBoard) rather than inside _build_zones for one reason: a pour is
+    # defined by everything else on its layer. It carves around pads, traces,
+    # vias and drills, so it cannot be computed until all of them exist. Running
+    # it on the finished board also lets it share the geometric DRC's copper
+    # PROJECTION instead of forking a second harvest — so the copper a pour
+    # carves around and the copper the DRC checks are the same set by
+    # construction (see zone_fill.fill_board_zones).
+    #
+    # FAIL-CLOSED: a pour that cannot be filled is a compile ERROR naming the
+    # zone, never a board that compiles with approximated or missing copper.
+    try:
+        resolved = fill_board_zones(resolved)
+    except ZoneFillError as exc:
+        diags.error("zone_fill_failed", str(exc),
+                    SourceRef(EntityKind.ZONE, exc.zone_id))
+        return ResolutionFailure(diagnostics=_ensure_error(diags))
+    except (ValueError, TypeError) as exc:
+        diags.error("zone_fill_failed", f"zone fill rejected the board: {exc}",
+                    _board_ref())
+        return ResolutionFailure(diagnostics=_ensure_error(diags))
+
+    for zone in resolved.zones:
+        if zone.kind is not ZoneKind.COPPER_POUR:
+            continue
+        area = fill_area_mm2(zone)
+        if not zone.fill:
+            # COMPUTED and empty — a real answer (a pour entirely covered by a
+            # keepout, say), not the uncomputed fill=None this used to warn
+            # about. Reported at WARNING because an author who drew a pour and
+            # got no copper almost certainly did not mean to.
+            diags.warning(
+                "zone_fill_empty",
+                f"zone {zone.id} on {zone.layer.id} computed a fill with NO copper: "
+                f"its outline is entirely consumed by keepouts, clearance or the "
+                f"board-edge inset. The pour is empty, not uncomputed",
+                SourceRef(EntityKind.ZONE, zone.id))
+            continue
+        diags.info(
+            "zone_filled",
+            f"zone {zone.id} on {zone.layer.id} filled: {len(zone.fill)} region(s), "
+            f"{area:.4f} mm^2 of copper (solid connect)",
+            SourceRef(EntityKind.ZONE, zone.id))
 
     return ResolutionSuccess(board=resolved, diagnostics=diags.tuple())
 

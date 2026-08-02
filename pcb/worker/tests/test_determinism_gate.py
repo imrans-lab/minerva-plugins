@@ -36,12 +36,31 @@ from tests.gerber_fab import build_fab, build_raw_emitter
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
+ZONE_BOARD = HERE / "testdata" / "zone_fill.yaml"
 
 # (board path, base name, builder). Spike -> PRODUCTION fab path (compile -> IR);
 # drilltest -> raw loose-dict emitter (explicit drift fixture, not production).
 CASES = [
     pytest.param(SPIKE_BOARD, "board", build_fab, id="board-production"),
     pytest.param(DRILL_BOARD, "drilltest", build_raw_emitter, id="drilltest-raw"),
+    # ZONE FILL — added when pours became fabricable copper (C6).
+    #
+    # This gate is normally left alone during an epoch and this row is the
+    # deliberate exception, for a reason specific to what a fill is. Every other
+    # emitted feature is a direct transcription of an authored number: a pad is
+    # where the author put it, a trace runs where the author drew it. A pour is
+    # the only geometry the compiler DERIVES, through a polygon-boolean pipeline
+    # with an offset kernel, a hole-to-outer assignment, a sort, and a fracture
+    # step — four places where an unstable iteration order would produce
+    # different-but-plausible copper on a second run, and nothing else in the
+    # suite would notice. The fill is claimed to be deterministic BY
+    # CONSTRUCTION (exact integer arithmetic in nanometres, no floats in the
+    # booleans); this row is what turns that claim into something checked.
+    #
+    # It is also the gate that guards the fab story: two runs of the same board
+    # must produce the same Gerber, or a "reproducible" fabrication package is a
+    # lie the moment a pour is on the board.
+    pytest.param(ZONE_BOARD, "zonefill", build_fab, id="zonefill-production"),
 ]
 
 

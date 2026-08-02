@@ -50,6 +50,34 @@ FORBIDDEN = [
     (re.compile(r"\bkicad_drc\b"), "reference to the kicad_drc oracle module"),
     (re.compile(r"\b(run_drc_on_board|run_drc_on_pcb_text|kicad_cli_available)\b"),
      "call into the kicad-cli DRC oracle API"),
+    # KiCad's PYTHON BINDINGS are the same boundary as its binary, and until the
+    # zone-fill oracle landed nothing here said so (C6 decider claim C31). Every
+    # pattern above keys on `kicad-cli`, so `import pcbnew` — a heavier
+    # dependency than the CLI, shipped only with a full KiCad install and absent
+    # from the deploy target — went straight through this lint. Runtime code that
+    # imports pcbnew is exactly as broken on a user machine as runtime code that
+    # shells out to kicad-cli, and now fails the same guard.
+    #
+    # MATCHED ON THE IMPORT, NOT THE WORD. `pcbnew` appears in ~15 runtime
+    # COMMENTS across kicad.py / ir_parity.py / route_bridge.py / fab_capability.py
+    # recording behaviour that was verified against pcbnew 9.0.9, and once as a
+    # literal `.kicad_pro` JSON key (kicad.py:646). Those are documentation and
+    # file format — no dependency is created by naming a tool you compared
+    # against, and a lint that forbade the name would push exactly that
+    # provenance out of the comments. The crossing is BINDING the module.
+    (re.compile(r"^\s*(import\s+pcbnew|from\s+pcbnew\b)"),
+     "import of KiCad's pcbnew python bindings"),
+    (re.compile(r"""import_module\(\s*["']pcbnew["']|__import__\(\s*["']pcbnew["']"""),
+     "dynamic import of KiCad's pcbnew python bindings"),
+    # Same import-not-word rule as above, and for the same reason: three runtime
+    # comments legitimately name ``ZONE_FILLER`` and ``zone_fill_oracle.py`` while
+    # explaining WHY the filler matches KiCad's fractured-contour representation
+    # and where its independent judge lives. That provenance belongs in the code
+    # it explains. Binding the module is the crossing; ``pcbnew.ZONE_FILLER(...)``
+    # is unreachable without an ``import pcbnew``, which the two patterns above
+    # already catch.
+    (re.compile(r"^\s*(from|import)\s+.*\bzone_fill_oracle\b"),
+     "import of the dev-only pcbnew zone-fill oracle"),
 ]
 
 

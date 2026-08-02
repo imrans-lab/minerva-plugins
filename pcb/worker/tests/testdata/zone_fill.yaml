@@ -1,0 +1,201 @@
+# ZONE-FILL FIXTURE — the geometry a copper pour has to survive.
+#
+# SYNTHETIC, per POLICY.md. Authored for this test; not derived from any product
+# board. Before this file existed, NO fixture anywhere in the repo authored a
+# `zones:` key at all — zones lived only as inline literals inside test bodies —
+# so every pour case had to be built by hand in Python and none of them ever
+# reached the emitters. This is the first board that carries one end to end.
+#
+# WHY NOT EXTEND parity_corners.yaml. That file is the primary parity fixture and
+# feeds the golden, gerbonara, geometry-diff and IR-parity suites. Adding a pour
+# to it would change every one of those goldens for reasons that have nothing to
+# do with what they test, and would make a zone-fill regression show up as eight
+# unrelated failures. A pour is a big enough new geometry class to deserve its
+# own board.
+#
+# WHAT EACH FEATURE IS FOR — every one is a distinct way a filler can be wrong:
+#
+#   FOREIGN-NET SMD PAD (R1.2, R2.2 on SIG, inside the pour)
+#       The base case: copper the pour must carve a clearance void around. A
+#       filler that ignores layer namespaces, or subtracts nothing at all, fills
+#       straight over these and emits a short. (That exact bug happened during
+#       implementation and was invisible until the oracle was run.)
+#
+#   SAME-NET SMD PAD (R1.1, R2.1 on GND, inside the pour)
+#       The opposite case, and the one a "subtract everything" filler gets wrong:
+#       same-net copper must NOT be carved around. v1 connects SOLID, so the pad
+#       and the pour merge into one region. If these were carved, the pour would
+#       be electrically disconnected from the net it names.
+#
+#   FOREIGN-NET TRACE (SIG, crossing the pour on top)
+#       A capsule rather than a rectangle: the filler has to inflate a segment by
+#       (half-width + clearance) rather than offset a polygon. It also splits the
+#       pour's boundary into a concave shape, which is what exercises fracturing.
+#
+#   FOREIGN-NET VIA (SIG, inside the pour)
+#       Copper AND a drill at the same place, on both layers. Catches a filler
+#       that carves the land but not the barrel, or that treats a via as
+#       top-only.
+#
+#   NETLESS MOUNTING HOLE (unplated, inside the pour)
+#       A drill with NO net at all. A filler that keys "do I carve this?" off net
+#       comparison alone will happily pour copper over a hole the drill goes
+#       through.
+#
+#   NETLESS KEEPOUT (top, overlapping the pour)
+#       Subtracts from the pour and emits no copper of its own. Also the reason
+#       this board is deliberately NOT a routing fixture: the routing grid does
+#       not model keepouts, so route_bridge still fails this board closed. That
+#       is correct — see route_bridge._reject_unroutable_board.
+#
+# WHAT IS DELIBERATELY ABSENT:
+#
+#   * NO thermal_gap_mm / thermal_bridge_width_mm. v1 fill is SOLID connect and
+#     REFUSES a board that authors those fields (the owner ruling on solid vs
+#     thermal spokes is pending). A refusal case belongs in a test that asserts
+#     the refusal, not in the fixture every other test compiles.
+#   * NO pour island. A pour fragment cut off from all same-net copper is kept by
+#     v1 and DROPPED by KiCad's filler, so a fixture containing one could not
+#     reach oracle parity. The geometry here is laid out so the pour stays in one
+#     piece: the SIG trace crosses it but does not sever it.
+#   * NO second pour. Two different-net pours on one layer have no authored
+#     priority in this schema, and the filler refuses that case rather than
+#     inventing a winner.
+#   * NO arcs in the zone outline. v1 has no arc-discretisation policy, and any
+#     policy chosen here would be one the oracle did not choose.
+#
+# The pour is inset well clear of the board edge (2 mm on a 30x24 board) so the
+# copper-to-edge clip never binds. That keeps the oracle comparison a comparison
+# of CARVING, not of two different edge-clearance conventions.
+version: 1
+name: zone-fill
+width_mm: 30
+height_mm: 24
+layers:
+- top
+- bottom
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.3
+  via_diameter_mm: 0.8
+  via_drill_mm: 0.4
+
+components:
+
+# Same-net pad 1 (GND) + foreign-net pad 2 (SIG), both inside the pour.
+- ref: R1
+  footprint: R_0805
+  x_mm: 9.0
+  y_mm: 8.0
+  rotation_deg: 0
+  layer: top
+
+# A second pair, rotated 90 degrees, so the foreign void is carved around a land
+# whose long axis runs the other way. A filler that drops rotation produces a
+# void of the right area and the wrong shape, which an area-only check would miss
+# and the containment check will not.
+- ref: R2
+  footprint: R_0805
+  x_mm: 21.0
+  y_mm: 16.0
+  rotation_deg: 90
+  layer: top
+
+nets:
+- name: GND
+  pins:
+  - R1.1
+  - R2.1
+- name: SIG
+  pins:
+  - R1.2
+  - R2.2
+
+traces:
+# Foreign-net trace crossing the pour. Runs corner to corner but stops short of
+# both pour edges, so it indents the pour rather than cutting it in two.
+- net: SIG
+  layer: top
+  width_mm: 0.3
+  points:
+  - x_mm: 6.0
+    y_mm: 18.0
+  - x_mm: 24.0
+    y_mm: 6.0
+
+vias:
+# Foreign-net via inside the pour: copper on both layers plus a drill.
+- x_mm: 15.0
+  y_mm: 6.5
+  drill_mm: 0.4
+  diameter_mm: 0.8
+  net: SIG
+  from_layer: top
+  to_layer: bottom
+
+# SAME-NET STITCHING VIA — a GND via inside the GND pour.
+#
+# The case that catches the "moat" bug. A stitching via exists precisely to TIE
+# the pour to the other layer, so its land must stay merged with the pour. Its
+# LAND is same-net and correctly not carved; the trap is its DRILL, which a
+# filler that carves every hole at (radius + clearance) will surround with a
+# clearance ring wider than the land itself. At clearance 0.2 the 0.4 mm land is
+# exactly consumed and the via hangs on by a sliver; at 0.3 it is a free-floating
+# island in a moat. Either way the pour is silently open on the fab path, and
+# every other check on the board still passes.
+- x_mm: 8.0
+  y_mm: 15.0
+  drill_mm: 0.4
+  diameter_mm: 0.8
+  net: GND
+  from_layer: top
+  to_layer: bottom
+
+mounting_holes:
+# NETLESS, unplated. Carved because it is a hole, not because of its net.
+#
+# POSITION IS LOAD-BEARING. It sat at (24.5, 19.5) first, which put its clearance
+# void 0.2 mm below the pour's top edge and left a 0.64 x 0.2 mm ribbon of copper
+# stranded between the two. KiCad's filler DROPS that ribbon (its zone
+# min_thickness is 0.25 mm); ours keeps it, because min-thickness is not
+# authorable in this schema and inventing one would be a rule nobody wrote. The
+# oracle caught it — a real 0.128 mm^2 disagreement that survived a 130 um
+# dilation, i.e. a shape difference and not a boundary approximation.
+#
+# The hole is moved clear rather than the tolerance widened. A parity test whose
+# band is loose enough to swallow a known missing feature stops being able to
+# catch an unknown one. The min-thickness gap is recorded where it belongs — as
+# a stated v1 gap in zone_fill.py and a parked case in pending_zone_fill.py.
+- x_mm: 24.0
+  y_mm: 18.0
+  diameter_mm: 2.2
+  plated: false
+
+zones:
+# The pour under test.
+- net: GND
+  layer: top
+  clearance_mm: 0.2
+  outline:
+  - x_mm: 3.0
+    y_mm: 3.0
+  - x_mm: 27.0
+    y_mm: 3.0
+  - x_mm: 27.0
+    y_mm: 21.0
+  - x_mm: 3.0
+    y_mm: 21.0
+
+# Netless keepout overlapping the pour's lower-left region. Subtracts from the
+# pour; emits nothing.
+- kind: keepout
+  layer: top
+  outline:
+  - x_mm: 4.5
+    y_mm: 4.5
+  - x_mm: 9.5
+    y_mm: 4.5
+  - x_mm: 9.5
+    y_mm: 5.5
+  - x_mm: 4.5
+    y_mm: 5.5

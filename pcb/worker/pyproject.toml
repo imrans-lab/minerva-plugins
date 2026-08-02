@@ -21,9 +21,37 @@ requires-python = ">=3.12,<3.13"
 # agent_router.router via pcb_worker.ir_candidates -> agent_router.layers, which
 # executes the agent_router package __init__. Verified against sys.modules, not
 # read off the source. It stays cheap because the engine is pure-Python.)
+#
+# pyclipper (PyPI "pyclipper", import name "pyclipper") is the exact INTEGER
+# polygon-boolean kernel behind copper-zone fill (pcb_worker.zone_fill). PINNED
+# to 1.4.0. It is a hard dependency rather than an extra because a board with a
+# pour cannot be COMPILED without it — the fill is part of the IR, not a
+# late-bound emitter concern — and the alternative to having it is refusing to
+# fabricate the board.
+#
+# WHY THIS ONE, measured 2026-08-02 rather than assumed:
+#   * INTEGER domain. Its booleans are exact 64-bit integer arithmetic, so a
+#     fill computed in nanometres is bit-reproducible by construction rather
+#     than by hope. shapely/GEOS was rejected for exactly this: float booleans
+#     are not bit-stable across library builds, and testdata/gerber_golden/
+#     README.md already flags emitter version-sensitivity as a live hazard.
+#   * LICENSE: MIT, read from the installed package metadata (not from
+#     recollection). It binds Angus Johnson's Clipper, which is Boost-1.0. Both
+#     permissive.
+#   * WHEELS for every platform the plugin installs on, verified against the
+#     PyPI release files for 1.4.0 / cp312: manylinux_2_17_x86_64,
+#     manylinux_2_28_aarch64, macosx_10_13_universal2 (arm64 + x86_64), win32
+#     and win_amd64. This was the named falsifier for adding the dep at all — no
+#     wheel on a target platform would have meant a source build on a user
+#     machine — and it is discharged.
+#
+# NO FCIB: a pinned PyPI wheel, never a committed binary — the precedent
+# recorded in pcb/spikes/cam/DECISION.md:100, and the same treatment the already
+# tolerated native dep (rtree, via the dev extra) gets.
 dependencies = [
     "pyyaml>=6.0,<7",
     "gerber-writer==0.4.3.3",
+    "pyclipper==1.4.0",
 ]
 
 [project.optional-dependencies]

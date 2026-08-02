@@ -77,6 +77,7 @@ from .resolved_board import (
     ResolvedBoard,
     RoundHole,
     SlotHole,
+    ZoneKind,
 )
 
 
@@ -414,8 +415,71 @@ def _reject_unroutable_board(rb: ResolvedBoard) -> None:
         raise UnsupportedGeometry(
             f"routing v1 models a rectangular (RectOutline) board only; got "
             f"{type(rb.outline).__name__}")
-    if rb.zones:
-        raise UnsupportedGeometry("routing v1 does not model copper zones/pours")
+    keepouts = [z for z in rb.zones if z.kind is ZoneKind.KEEPOUT]
+    if keepouts:
+        # A KEEPOUT stays fail-closed, and the distinction from a pour below is
+        # the whole point. A keepout is an authored PROHIBITION on copper.
+        #
+        # THE RIGHT ANSWER IS TO ROUTE AROUND IT, NOT TO REFUSE. A keepout IS a
+        # routing constraint — that is most of what it means — so the correct v1
+        # is to hand its outline to the grid as an obstacle region. That is not
+        # done here because the engine CANNOT EXPRESS ONE, verified by execution
+        # rather than by reading: ``agent_router.board.Obstacle`` declares
+        # ``polygon``, ``layer`` and ``blocks_all_layers``, and ``router.py``
+        # reads NONE of them (0 occurrences of each; its two obstacle loops at
+        # :1099 and :1870 are both ``if obstacle.radius:``). The grid is handed a
+        # centre and a radius, and marks every layer. The same gap is already
+        # recorded a few hundred lines below in ``_hole_obstacle``.
+        #
+        # A disc CAN approximate a polygon — that is exactly what ``_hole_obstacle``
+        # and ``_unaddressable_pad_obstacle`` do for ovals and slots, over-blocking
+        # on the safe side. It is not done for a keepout because the approximation
+        # would over-block on TWO independent axes at once: the circumscribing disc
+        # of a long thin keepout (an antenna cut-out is the motivating case) covers
+        # a large multiple of its area, and the layer field being unread means a
+        # top-only keepout would also block the bottom. A board that "routes" while
+        # a spurious disc blocks half of it is a worse failure than one that says
+        # why it will not route, because the first is silent.
+        #
+        # Closing this belongs in the grid, which owns rasterisation, not in a
+        # second rasteriser bolted on this side of the boundary. Filed for the
+        # router item family (019fc155bc32).
+        raise UnsupportedGeometry(
+            f"routing v1 cannot honour keepout zones; board declares "
+            f"{len(keepouts)} ({', '.join(z.id for z in keepouts)}). A keepout "
+            f"forbids copper in a region the routing grid has no way to represent: "
+            f"agent_router.board.Obstacle declares polygon/layer/blocks_all_layers "
+            f"but router.py reads only (position, radius), so a polygon obstacle "
+            f"handed to it is SILENTLY IGNORED. Routing fails closed rather than "
+            f"lay copper inside a region the author declared must stay clear. "
+            f"Fix belongs in the grid's rasteriser (router item 019fc155bc32)")
+    # COPPER POURS ARE DELIBERATELY NOT AN OBSTACLE — and this is a narrowing of a
+    # refusal, so read the reason before widening it back.
+    #
+    # This function used to reject ANY zone, which meant DRAWING A POUR MADE THE
+    # BOARD UNROUTABLE: seven zone MCP tools and a canvas zone tool ship, so a
+    # user could break routing by using a shipped feature (C6 decider, "worse than
+    # feature missing"). The fix is not to relax the fail-closed rule but to
+    # observe that the rule never applied to a pour in the first place.
+    #
+    # The other entries here fail closed because they are copper the grid CANNOT
+    # SEE, and invisible copper is what lets a proposal cross real copper. A pour
+    # is the opposite case: it is copper that YIELDS. The fill is computed after
+    # routing, from the routed result, and carves itself back by the clearance
+    # around every foreign-net trace and via the router laid down. A trace cannot
+    # collide with a pour, because the pour is defined as the region left over
+    # once that trace has taken its clearance. Treating it as an obstacle would
+    # not be conservative; it would be WRONG — it would refuse to route through
+    # the exact area a pour exists to make routable.
+    #
+    # Two real limits of v1, stated rather than papered over:
+    #   * SAME-NET REDUNDANCY. A GND pour already connects its pads, so the
+    #     router may lay GND traces the pour makes unnecessary. Redundant
+    #     same-net copper is harmless, just not optimal.
+    #   * ISLANDING. A trace crossing a pour can cut it into pieces, and v1 does
+    #     not detect a pour severed into isolated islands. That is a pour-quality
+    #     gap, NOT copper the router is unaware of — it costs pour connectivity,
+    #     it does not produce a short.
     if any(g.layer.role is LayerRole.COPPER for g in rb.board_graphics) or any(
             g.layer.role is LayerRole.COPPER
             for comp in rb.components for g in comp.placed_graphics):

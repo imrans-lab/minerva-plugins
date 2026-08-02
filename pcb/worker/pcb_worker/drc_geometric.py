@@ -135,6 +135,7 @@ from .resolved_board import (
     ResolvedBoard,
     RoundHole,
     SlotHole,
+    ZoneKind,
 )
 
 # EPS (threshold slack) is imported from drc_geom_primitives — ONE shared boundary
@@ -900,6 +901,124 @@ def _check_gc5_copper_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]
 # ---------------------------------------------------------------------------
 
 
+def _check_gc7_zone_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC7 — POUR COPPER IS COPPER. Filled zone copper vs foreign-net copper.
+
+    WHY THIS IS NOT GC2. GC2 measures distance between CONVEX cores
+    (``drc_geom_primitives._decompose`` accepts a Capsule or an OrientedRect and
+    nothing else; ``_point_in_convex`` and the GJK separation both ASSUME
+    convexity). A filled pour is a fractured keyhole polygon — about as non-convex
+    as a shape gets. Pushing one through that kernel would not raise; it would
+    return a confidently wrong distance and report CLEAN. That is a false clean on
+    the largest single piece of copper on the board, so pour copper gets its own
+    check with a kernel that can actually represent it.
+
+    WHY IT IS NOT CIRCULAR. The obvious objection to checking a fill we computed
+    is that we would be asking the filler whether it obeyed itself. It is not the
+    same rule on both sides: the FILLER carves by the ZONE's authored
+    ``clearance_mm`` (falling back to the board minimum), while this check uses
+    ``_effective_min_clearance`` — the board minimum RAISED by either net's class.
+    A zone that authors a clearance BELOW what its net class demands fills happily
+    and is caught here. The independent judge for the fill's SHAPE is the pcbnew
+    oracle (tests/oracle/zone_fill_oracle.py), not this.
+
+    Exact integer arithmetic via the same kernel that computed the fill: inflate
+    each foreign primitive by the required clearance and intersect with the pour.
+    A non-empty intersection means copper is closer than the rule allows.
+    """
+    zones = [z for z in rb.zones
+             if z.kind is ZoneKind.COPPER_POUR and z.fill]
+    if not zones:
+        return []
+
+    from .zone_fill import NM_PER_MM, _capsule_ring, _rect_ring  # noqa: PLC0415
+
+    pyclipper = _zone_clipper()
+    if pyclipper is None:  # pragma: no cover - install-time condition
+        raise UnsupportedGeometry(
+            "zone clearance needs pyclipper (the exact polygon kernel the fill "
+            "was computed with) and it is not installed")
+
+    minima = _net_class_minima(rb)
+    global_min = rb.design_rules.minimums.min_clearance_mm
+    net_names = {net.id: net.name for net in rb.nets}
+    findings: list[dict] = []
+
+    for zone in zones:
+        fill_paths = [[(int(round(x * NM_PER_MM)), int(round(y * NM_PER_MM)))
+                       for (x, y) in poly.points] for poly in zone.fill]
+        # Simplify first: a self-touching keyhole ring is NOT a valid Clipper
+        # SUBJECT (measured — the boolean returns overlapping garbage pieces and
+        # the areas do not reconcile). Simplifying converts it to the equivalent
+        # outer + hole ring set the kernel can operate on.
+        fill_paths = pyclipper.SimplifyPolygons(fill_paths, pyclipper.PFT_NONZERO)
+        zone_canon = _canon_layer(zone.layer.id)
+
+        for prim in proj.copper:
+            if zone_canon not in {_canon_layer(lid) for lid in prim.layers}:
+                continue
+            if prim.net_id is not None and prim.net_id == zone.net_id:
+                continue  # same net: solid connect, no clearance applies
+            required = _effective_min_clearance(global_min, minima,
+                                                zone.net_id, prim.net_id)
+            if isinstance(prim.shape, Capsule):
+                ring, closed, reach = _capsule_ring(prim.shape), False, prim.shape.r + required
+            elif isinstance(prim.shape, OrientedRect):
+                ring, closed, reach = _rect_ring(prim.shape), True, required
+            else:
+                raise UnsupportedGeometry(
+                    f"zone clearance cannot model copper shape "
+                    f"{type(prim.shape).__name__} on {prim.entity_id!r}")
+
+            offset = pyclipper.PyclipperOffset(2.0, 5000)
+            offset.AddPath(ring, pyclipper.JT_ROUND,
+                           pyclipper.ET_CLOSEDPOLYGON if closed
+                           else pyclipper.ET_OPENROUND)
+            inflated = offset.Execute(int(round(reach * NM_PER_MM)))
+            if not inflated:
+                continue
+
+            clipper = pyclipper.Pyclipper()
+            clipper.AddPaths(fill_paths, pyclipper.PT_SUBJECT, True)
+            clipper.AddPaths(inflated, pyclipper.PT_CLIP, True)
+            overlap = clipper.Execute(pyclipper.CT_INTERSECTION,
+                                      pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
+            if not overlap:
+                continue
+
+            centre = _overlap_centroid(overlap, NM_PER_MM)
+            findings.append(_finding(
+                "gc7_zone_clearance", zone.id, None, "zone_copper",
+                zone.net_id, zone.layer.id,
+                # The pour intrudes into the required band; how FAR in is not
+                # recovered by an intersection test, so the measurement reported
+                # is the honest one we have: 0 means "inside the band", not
+                # "touching". `required` is the rule it broke.
+                measured=0.0, required=required,
+                closest=list(centre), witness=list(centre),
+                extra={"against_entity_id": prim.entity_id,
+                       "against_kind": prim.kind},
+                ref=prim.ref, pad=prim.pad_number,
+                net_name=net_names.get(zone.net_id)))
+    return findings
+
+
+def _zone_clipper():
+    try:
+        import pyclipper  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - install-time condition
+        return None
+    return pyclipper
+
+
+def _overlap_centroid(paths, scale: int) -> tuple[float, float]:
+    """A deterministic point inside the offending overlap, in mm — the MINIMUM
+    vertex of the minimum path, so the reported location does not depend on
+    Clipper's contour ordering."""
+    best = min(min(path) for path in paths)
+    return (best[0] / scale, best[1] / scale)
+
+
 def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
              net_id: str | None, layer: str | None,
              measured: float, required: float, *,
@@ -935,6 +1054,7 @@ def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
 _COUNT_KEYS = (
     "gc1_trace_width", "gc2_copper_clearance", "gc3_drill", "gc3_finished_hole",
     "gc4_annular_ring", "gc5_copper_to_edge", "gc6_hole_to_hole",
+    "gc7_zone_clearance",
 )
 
 
@@ -994,17 +1114,21 @@ def run_geometric_drc(rb: ResolvedBoard, *,
                 "unsupported_geometry",
                 "geometric DRC v1 models a rectangular (RectOutline) board only; "
                 f"got {type(rb.outline).__name__}")
-        if rb.zones:
-            # LIVE SINCE EPOCH 4, no longer a guard against a hypothetical. This used
-            # to read "the compiler rejects non-empty zones today" — true until
-            # compile_board began building ResolvedZone with fill=None. An UNFILLED
-            # copper zone now arrives here routinely, and indeterminate is the only
-            # honest verdict: we cannot check clearance against copper whose extent
-            # has never been computed. Reporting clean would be a false clean on
-            # geometry we know we did not evaluate (spec §4).
+        unfilled = [z.id for z in rb.zones
+                    if z.kind is ZoneKind.COPPER_POUR and z.fill is None]
+        if unfilled:
+            # NARROWED, not relaxed (C6). This used to reject ANY zone, because no
+            # zone had ever carried a computed fill and indeterminate was the only
+            # honest verdict for copper whose extent was never computed. Pours are
+            # filled by the compiler now, so the condition that matters is FILL
+            # STATE: an UNFILLED pour is still copper we cannot check, and clean
+            # would still be a false clean on geometry we know we did not evaluate
+            # (spec §4). A FILLED pour is checked by GC7 below. A KEEPOUT emits no
+            # copper at all, so it needs neither.
             return _indeterminate(
                 "unsupported_geometry",
-                "geometric DRC v1 does not model copper zones/pours")
+                f"geometric DRC cannot check {len(unfilled)} copper pour(s) whose "
+                f"fill was never computed ({', '.join(unfilled)})")
 
         # FAIL-CLOSED GUARD (019f95893989): a via carrying a PER-LAYER PADSTACK has
         # per-layer land diameters the GC2/GC5 copper projection does not model
@@ -1049,6 +1173,7 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         findings += _check_gc4_annular(proj, rb)
         findings += _check_gc5_copper_to_edge(proj, rb)
         findings += _check_gc6_hole_to_hole(proj, rb)
+        findings += _check_gc7_zone_clearance(proj, rb)
     except UnsupportedGeometry as exc:
         return _indeterminate("unsupported_geometry", str(exc))
     except Exception as exc:  # noqa: BLE001 - fail-closed: a crash is NOT a clean.

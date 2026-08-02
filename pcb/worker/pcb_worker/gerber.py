@@ -88,6 +88,7 @@ from .resolved_board import (
     RoundHole,
     Side,
     SourceRef,
+    ZoneKind,
 )
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest / methods.WORKER_VERSION
@@ -423,6 +424,15 @@ class _Geometry:
         # Traces per side: (x1, y1, x2, y2, width)
         self.traces_top: list[tuple[float, float, float, float, float]] = []
         self.traces_bot: list[tuple[float, float, float, float, float]] = []
+        # COPPER-POUR fill per side: one point ring per emitted region. Already
+        # carved (clearance voids subtracted) and FRACTURED into self-touching
+        # keyhole contours by pcb_worker.zone_fill, because the region primitive
+        # these become — gerber_writer's add_region — has no hole support at all.
+        # Rings only: a pour needs no width, no aperture and no per-region
+        # attributes, which is why this bucket is a plain list of point lists
+        # rather than the (x, y, shape, w, h, ...) tuple the flashed families use.
+        self.zone_fill_top: list[list[tuple[float, float]]] = []
+        self.zone_fill_bot: list[list[tuple[float, float]]] = []
         # Drill hits: (x, y, diameter, plated?)
         self.holes: list[tuple[float, float, float, bool]] = []
         # Real footprint silk (top side, components WITH graphics), harvested
@@ -507,6 +517,8 @@ class _Geometry:
                            for (x1, y1, x2, y2, w) in self.traces_top]
         self.traces_bot = [(x1, -y1, x2, -y2, w)
                            for (x1, y1, x2, y2, w) in self.traces_bot]
+        self.zone_fill_top = [[(x, -y) for (x, y) in ring] for ring in self.zone_fill_top]
+        self.zone_fill_bot = [[(x, -y) for (x, y) in ring] for ring in self.zone_fill_bot]
         self.holes = [(x, -y, d, plated) for (x, y, d, plated) in self.holes]
         self.silk_lines = [(x1, -y1, x2, -y2, w)
                            for (x1, y1, x2, y2, w) in self.silk_lines]
@@ -1024,6 +1036,41 @@ def _add_traces(layer: DataLayer, traces) -> None:
         layer.add_trace_line((x1, y1), (x2, y2), w, "Conductor")
 
 
+def _add_zone_fill(layer: DataLayer, rings) -> None:
+    """Write each pour region as ONE Gerber region graphics object.
+
+    ``add_region`` is the only primitive in gerber-writer that emits filled
+    2D area (G36/G37), and until now it had ZERO call sites in this worker —
+    every other copper feature is a flashed aperture or a stroked path. Pour
+    copper is the first geometry that is genuinely an arbitrary polygon.
+
+    THE CONTOUR IS ALREADY A KEYHOLE. ``add_region`` cannot express a hole:
+    ``negative=`` sets Gerber LAYER POLARITY (%LPC/%LPD), which flips whether an
+    object is dark or clear — it does not punch a void into another object. So
+    voids arrive here already fractured into self-touching rings by
+    ``zone_fill``, one ``add_region`` per ring, all positive. This is the same
+    representation KiCad's own filler produces, which is what lets the two be
+    compared as copper rather than as fracture policies.
+
+    ``lineto`` back to the start point is REQUIRED, not decorative: gerber-writer
+    sets ``Path.contour`` from the last operator alone, and ``add_region``
+    rejects a path whose final subpath does not close.
+    """
+    for ring in rings:
+        if len(ring) < 3:
+            # Unreachable from zone_fill (it raises on a degenerate contour), so
+            # this is the belt to that braces: a 2-point "region" is a line, and
+            # a fab file must never carry copper we cannot describe.
+            raise ValueError(
+                f"zone fill region has {len(ring)} point(s); a region needs at least 3")
+        path = GPath()
+        path.moveto(ring[0])
+        for point in ring[1:]:
+            path.lineto(point)
+        path.lineto(ring[0])
+        layer.add_region(path, "Conductor")
+
+
 def _add_paste(layer: DataLayer, apertures) -> None:
     """Flash the stencil apertures. Same uniform tuple and the same
     ``_shape_aperture`` family as copper and mask, so a circle/oval/roundrect land
@@ -1085,6 +1132,12 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_annuli(f_cu, g.th_annuli)
     _add_shaped_th(f_cu, g.th_shaped)
     _add_traces(f_cu, g.traces_top)
+    # Pour LAST on the layer: a Gerber layer is an ordered stream and every
+    # object here is positive (dark), so the pour is additive to the pads and
+    # traces it was carved around rather than something that could cover them.
+    # Emitting it last also keeps the diff of a board that gains a pour confined
+    # to the tail of the file.
+    _add_zone_fill(f_cu, g.zone_fill_top)
     out["F_Cu"] = _dump(f_cu, creation_date)
 
     # B.Cu
@@ -1093,6 +1146,7 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_annuli(b_cu, g.th_annuli)
     _add_shaped_th(b_cu, g.th_shaped)
     _add_traces(b_cu, g.traces_bot)
+    _add_zone_fill(b_cu, g.zone_fill_bot)
     out["B_Cu"] = _dump(b_cu, creation_date)
 
     # F.Paste / B.Paste — the solder-paste stencils.
@@ -1493,6 +1547,22 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
             bucket = g.traces_top if _is_top(seg.layer.id) else g.traces_bot
             bucket.append((seg.a[0], seg.a[1], seg.b[0], seg.b[1], seg.width_mm))
 
+    # COPPER POURS. Only COPPER_POUR contributes copper: a KEEPOUT is a
+    # prohibition on copper, not copper, so it emits nothing here — emitting it
+    # would put metal exactly where the author said none may go. Its effect is
+    # already baked in, as area subtracted from the pours that share its layer.
+    #
+    # The fill is READ, never computed here. compile_board owns it (it needs the
+    # whole board to carve against), and a zone reaching a fabrication file with
+    # fill=None is refused outright by build_gerbers_ir — an emitter that filled
+    # its own zones would be a second filler nobody diffed against the first.
+    for zone in board.zones:
+        if zone.kind is not ZoneKind.COPPER_POUR or not zone.fill:
+            continue
+        bucket = g.zone_fill_top if _is_top(zone.layer.id) else g.zone_fill_bot
+        for polygon in zone.fill:
+            bucket.append([(x, y) for (x, y) in polygon.points])
+
     # Board holes: bucket by kind and iterate in the loose-dict harvest's order so a
     # multi-hole board's flash/drill stream is byte-identical.
     by_kind: dict[HoleKind, list] = {k: [] for k, _ in _IR_HOLE_ORDER}
@@ -1528,10 +1598,23 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
     # only thing stopping a board with an uncomputed pour from being emitted as
     # fabrication. Board graphics are still refused at compile, so that half of the
     # seal remains a guard against a future IR.
-    if board.zones:
+    unfilled = [z.id for z in board.zones
+                if z.kind is ZoneKind.COPPER_POUR and z.fill is None]
+    if unfilled:
+        # NARROWED, not relaxed (C6). The seal used to reject ANY zone, because
+        # no zone had ever carried a computed fill. Now the compiler fills pours,
+        # so the condition that actually matters is FILL STATE, not presence:
+        # what must never reach a fab file is a pour whose copper was never
+        # computed. `fill=None` means INDETERMINATE copper; an empty tuple means
+        # computed-and-empty, which is a real answer and is allowed through.
+        #
+        # A KEEPOUT is deliberately not checked: it emits no copper by
+        # definition, so there is nothing it could silently drop. Its geometry is
+        # already accounted for in the pours it carved.
         raise ValueError(
-            f"build_gerbers_ir: board has {len(board.zones)} zone(s) the gerber bridge "
-            f"does not map yet — refusing to emit fabrication that silently drops copper")
+            f"build_gerbers_ir: board has {len(unfilled)} copper pour(s) with NO "
+            f"computed fill ({', '.join(unfilled)}) — refusing to emit fabrication "
+            f"that silently drops copper")
     if board.board_graphics:
         raise ValueError(
             f"build_gerbers_ir: board has {len(board.board_graphics)} board-level "

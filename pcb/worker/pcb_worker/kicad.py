@@ -55,6 +55,7 @@ from .resolved_board import (
     RoundHole,
     Side,
     SourceRef,
+    ZoneKind,
 )
 
 
@@ -351,6 +352,13 @@ def _net_table(board: dict) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
     return net_index, pad_net
 
 
+# KiCad's own default zone min-thickness. NOT tuned to make our filler agree:
+# a smaller value here would let KiCad keep slivers our filler keeps and quietly
+# improve the parity number, which is fitting the oracle to the answer. Left at
+# KiCad's default so any disagreement it causes is a real one.
+_ZONE_MIN_THICKNESS_MM = 0.25
+
+
 def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None) -> str:
     """Emit a minimal .kicad_pcb (s-expression) for the canonical board.
 
@@ -472,8 +480,73 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
             f'{tenting} (net {net_no}))'
         )
 
+    # Zones — OUTLINE AND RULES ONLY, never a computed fill. See _zone_sexpr.
+    for zone in _list(board.get("zones")):
+        if isinstance(zone, dict):
+            out.append(_zone_sexpr(zone, net_index))
+
     out.append(")")
     return "\n".join(out) + "\n"
+
+
+def _zone_sexpr(zone: dict, net_index: dict[str, int]) -> str:
+    """One ``(zone ...)`` node: the authored outline plus the fill RULES.
+
+    THE COMPUTED FILL IS DELIBERATELY NOT WRITTEN, and that is the whole value
+    of this emitter. A ``.kicad_pcb`` can carry ``(filled_polygon ...)``, and
+    writing ours into it would make every downstream KiCad check — the DRC
+    oracle, the zone-fill parity oracle — read our own answer back and agree
+    with it. Docket hint 019faf103eee names exactly that trap: a KiCad export of
+    OUR board is not an oracle for anything we authored into it. Emitting the
+    outline and the rules and NOTHING else is what leaves KiCad free to fill the
+    zone itself, from geometry it derived, which is the only thing that makes
+    the comparison independent.
+
+    KEEPOUTS become KiCad RULE AREAS (``(keepout ...)``), which is what they
+    are: a region that forbids copper rather than a region of copper. A rule
+    area carries no net and is never filled, so the two kinds diverge here
+    rather than sharing a shape with a flag.
+    """
+    layer = _copper_layer(zone.get("layer"))
+    pts = [p for p in _list(zone.get("outline")) if isinstance(p, dict)]
+    polygon = " ".join(f'(xy {_num(p.get("x_mm"))} {_num(p.get("y_mm"))})' for p in pts)
+
+    if zone.get("kind") == "keepout":
+        return (
+            f'  (zone (net 0) (net_name "") (layer "{layer}") '
+            f'(hatch edge 0.5) (name "{_esc(str(zone.get("id") or "keepout"))}")\n'
+            f"    (keepout (tracks not_allowed) (vias not_allowed) "
+            f"(pads not_allowed) (copperpour not_allowed) (footprints allowed))\n"
+            f"    (polygon (pts {polygon})))"
+        )
+
+    net_name = str(zone.get("net") or "")
+    net_no = net_index.get(net_name, 0)
+    # NO LOCAL DEFAULT. This used to fall back to a hardcoded 0.2, which silently
+    # disagreed with the filler on any board whose blanket min_clearance is not
+    # 0.2: KiCad would fill to 0.2 while we filled to the board's rule, and the
+    # oracle would report a difference that was ours to cause. The IR projection
+    # resolves the fallback (see _kicad_zone_dicts) so there is one number.
+    clearance = zone.get("clearance_mm")
+    if clearance is None:
+        raise ValueError(
+            f"kicad._zone_sexpr: zone {zone.get('id')!r} reached the emitter with "
+            f"no resolved clearance — the projection must resolve the board-minimum "
+            f"fallback so the exported zone and the computed fill state one rule")
+    clearance = _num(clearance)
+    # `connect_pads yes` is SOLID connect, stated EXPLICITLY. Omitting the
+    # keyword does not mean "default"; in KiCad it means THERMAL RELIEFS, so a
+    # zone written without it would be filled by KiCad with spokes while our own
+    # filler poured solid — and the oracle comparison would then be measuring the
+    # disagreement between two connect modes rather than between two fillers.
+    return (
+        f'  (zone (net {net_no}) (net_name "{_esc(net_name)}") (layer "{layer}") '
+        f"(hatch edge 0.5)\n"
+        f"    (connect_pads yes (clearance {clearance}))\n"
+        f"    (min_thickness {_ZONE_MIN_THICKNESS_MM})\n"
+        f"    (fill yes (thermal_gap {clearance}) (thermal_bridge_width 0.5))\n"
+        f"    (polygon (pts {polygon})))"
+    )
 
 
 def _footprint(comp: dict, pad_net: dict[str, dict[str, int]],
@@ -1053,10 +1126,19 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
     fab, so that drop makes an independent checker disagree with the kernel
     about the same board. Refuse where the artifact could have carried the rule
     and is used to CHECK the board; exempt where it carries no rules at all."""
-    if board.zones:
+    unfilled = [z.id for z in board.zones
+                if z.kind is ZoneKind.COPPER_POUR and z.fill is None]
+    if unfilled:
+        # NARROWED, not relaxed (C6) — same reasoning as the gerber seal, with one
+        # extra edge to it here. This file is consumed as an INDEPENDENT DRC
+        # oracle, so a board whose pour has never been computed must not become a
+        # .kicad_pcb: KiCad would fill the zone itself, check the board it just
+        # filled, and return a verdict about copper the kernel never evaluated.
+        # A green from that is worse than no check at all.
         raise ValueError(
-            f"kicad._ir_board_dict: board has {len(board.zones)} zone(s) the kicad "
-            f"bridge does not map yet — refusing to silently drop copper")
+            f"kicad._ir_board_dict: board has {len(unfilled)} copper pour(s) with "
+            f"NO computed fill ({', '.join(unfilled)}) — refusing to hand a DRC "
+            f"oracle a board whose copper we never computed")
     if board.board_graphics:
         raise ValueError(
             f"kicad._ir_board_dict: board has {len(board.board_graphics)} board-level "
@@ -1094,7 +1176,39 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
         "components": components,
         "traces": _kicad_trace_dicts(board, net_name_of),
         "vias": _kicad_via_dicts(board, net_name_of),
+        "zones": _kicad_zone_dicts(board, net_name_of),
     }
+
+
+def _kicad_zone_dicts(board: ResolvedBoard, net_name_of: dict[str, str]) -> list[dict]:
+    """Project IR zones onto the emitter's loose-dict shape.
+
+    Carries the AUTHORED outline, not ``zone.fill`` — see :func:`_zone_sexpr`
+    for why the computed fill must not cross this boundary.
+    """
+    return [
+        {
+            "id": zone.id,
+            "kind": zone.kind.value,
+            "net": net_name_of.get(zone.net_id) if zone.net_id else None,
+            "layer": zone.layer.id,
+            # THE RESOLVED clearance, not the authored one. `clearance_mm` is
+            # optional on a zone and defers to the board's blanket minimum when
+            # absent (Go's Zone.ClearanceMM doc; compile_board._zone_clearance
+            # maps zero-or-absent to None). The FILLER resolves that fallback
+            # against `design_rules.minimums.min_clearance_mm`, so the exported
+            # zone has to carry the same number or KiCad fills the zone to a
+            # DIFFERENT rule than we did — and the oracle comparison silently
+            # stops comparing two fillers on one board and starts comparing two
+            # boards. Resolved HERE because this is where design_rules is in
+            # scope; the s-expression writer takes a loose dict and has no board.
+            "clearance_mm": (zone.clearance_mm if zone.clearance_mm is not None
+                             else board.design_rules.minimums.min_clearance_mm),
+            "outline": [{"x_mm": seg.a[0], "y_mm": seg.a[1]}
+                        for seg in zone.authored_outline.segments],
+        }
+        for zone in board.zones
+    ]
 
 
 def generate_ir(board: ResolvedBoard, base_name: str | None = None) -> KicadResult:
