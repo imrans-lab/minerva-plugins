@@ -11,10 +11,26 @@ extends RefCounted
 ## the largest numeric suffix actually present in the loaded ids — so ids minted
 ## after a load can never collide with loaded ones.
 ##
+## ── C1 completion: what this file now OWNS ────────────────────────────────────
+## 1. DISPOSITION LEGALITY. Every workflow verb (pin/unpin/reject/mark_committed
+##    /ingest-supersede) funnels through _apply_disposition, which consults
+##    PcbRouteCandidate's DISPOSITION_TRANSITIONS table and REFUSES an illegal
+##    move with a named error (last_transition_error + transition_refused +
+##    push_warning) instead of silently applying it. uncommit is the single
+##    COMPENSATING exit from "committed" and does not go through the table.
+## 2. ROUTE TASKS. `tasks` is the registry of routing JOBS (net + optional SPAN
+##    scope) with an open/closed lifecycle DERIVED from the candidate set. A
+##    PINNED active candidate HOLDS its task against batch ingest (the pin is
+##    the user's keep-out); only a targeted verb retires it.
+## 3. BOARD-REVISION STALENESS. rebase(rev) binds the workspace to a board
+##    revision and marks candidates whose base_board_revision differs
+##    validation="stale" (disposition preserved) — per candidate, not all.
+##
 ## Off-tree plugin: NO class_name; relative preload + duck typing.
 
 const _Self := preload("pcb_routing_workspace.gd")
 const PcbRouteCandidate := preload("pcb_route_candidate.gd")
+const PcbRouteTask := preload("pcb_route_task.gd")
 const PcbLayerStack := preload("pcb_layer_stack.gd")
 
 ## Emitted when a candidate is inserted.
@@ -27,9 +43,31 @@ signal candidate_removed(id: String)
 signal active_candidate_changed(id: String)
 ## Emitted when a candidate's validation axis changes.
 signal validation_changed(id: String)
+## Emitted when a disposition move is REFUSED by the legality table. `error` is
+## the named code from PcbRouteCandidate (unknown_disposition /
+## terminal_disposition / illegal_disposition_transition / not_committed).
+signal transition_refused(id: String, from: String, to: String, error: String)
+## Emitted when a RouteTask's open/closed state changes.
+signal task_state_changed(task_id: String, state: String)
+## Emitted when an INGEST declines to replace a task's active candidate. Today
+## the one reason is HOLD_PINNED — see the ingest policy on
+## _create_candidate_for_route. The panel surfaces this ("task X held: pinned
+## candidate kept") so a batch re-route that silently changed nothing for a task
+## is never invisible.
+signal ingest_task_held(task_id: String, held_candidate_id: String, reason: String)
+
+## Named ingest-hold reason: the task's active candidate is PINNED, so the
+## incoming batch candidate was not created.
+const HOLD_PINNED := "pinned_candidate_held"
 
 ## candidate_id -> RouteCandidate.
 var candidates: Dictionary = {}
+## task_id -> RouteTask. The registry of routing JOBS (the questions) beside the
+## candidates (the answers). Populated by ingest via ensure_task(); a task's
+## open/closed state is DERIVED from its candidates (see _refresh_task_state).
+## Persisted (design intent: which nets/spans still need copper), and backfilled
+## from the candidate set when loading a sidecar written before tasks existed.
+var tasks: Dictionary = {}
 ## The candidate the UI is focused on ("" = none).
 var active_candidate_id: String = ""
 ## Set of pinned candidate ids (Dictionary used as a set: id -> true).
@@ -89,6 +127,28 @@ var _workspace_generation: int = 0
 ## against it. Transient — never persisted.
 var board_token: String = ""
 
+## ── C1: the board REVISION this workspace is currently bound to ───────────────
+## TRANSIENT, exactly like board_token above: the OWNER (PCBPanel) binds it, it
+## is DELIBERATELY absent from to_dict/to_sidecar_dict, and it resets to 0 on a
+## fresh session/load. Per-candidate staleness is `candidate.base_board_revision
+## != board_revision` (PcbRouteCandidate.is_stale_for_board_revision).
+##
+## Ingest deliberately does NOT write this: staling the set is an explicit REBASE
+## decision (rebase()), never a side effect of proposing a route — otherwise a
+## multi-net propose at a newer revision would silently quarantine candidates the
+## user never touched.
+var board_revision: int = 0
+
+## The HOLDS from the most recent ingest call (reset at the start of every
+## ingest_routing_result / ingest_record): [{task_id, held_candidate_id, net,
+## reason}, …]. Empty when the ingest replaced/created everything it was given.
+var last_ingest_holds: Array = []
+
+## The most recent REFUSED disposition move (empty when the last one was legal):
+## {"candidate_id","from","to","error","verb"}. Kept so a UI/tool caller that
+## only sees a `false` return can still report WHY without re-deriving it.
+var last_transition_error: Dictionary = {}
+
 ## In-flight begin_check snapshot: candidate_id -> {"revision": int,
 ## "prior": String}. Captured when begin_check flips a candidate to "checking"
 ## so apply_check_result can (a) detect a per-candidate revision drift and
@@ -140,8 +200,13 @@ func add_candidate(candidate) -> String:
 			via["id"] = next_via_id()
 	var id: String = candidate.candidate_id
 	candidates[id] = candidate
-	if candidate.disposition == "pinned":
-		pinned[id] = true
+	_sync_pinned_set(id, str(candidate.disposition))
+	# Every candidate answers a task — keep the registry complete even for
+	# hand-built candidates (ingest has already ensured its own task).
+	var tid := str(candidate.task_id)
+	if not tid.is_empty():
+		ensure_task(tid, str(candidate.net))
+		_refresh_task_state(tid)
 	_bump_generation()  # candidate-set grew → any in-flight draft-check is stale
 	candidate_added.emit(id)
 	return id
@@ -172,6 +237,7 @@ func candidates_for_task(task_id: String) -> Array:
 func remove_candidate(id: String) -> void:
 	if not candidates.has(id):
 		return
+	var task_id := str(candidates[id].task_id)
 	candidates.erase(id)
 	pinned.erase(id)
 	_findings.erase(id)
@@ -182,6 +248,11 @@ func remove_candidate(id: String) -> void:
 	if not ann.is_empty() and str(_annotation_to_candidate.get(ann, "")) == id:
 		_annotation_to_candidate.erase(ann)
 	correlations.erase(id)
+	# The task survives the candidate (it is the question, not the answer) but
+	# its derived state may have moved — e.g. removing the only committed
+	# candidate reopens it. The task is NOT deleted even when its last candidate
+	# goes: an unanswered task is exactly what "open" means.
+	_refresh_task_state(task_id)
 	_bump_generation()  # candidate-set shrank → any in-flight draft-check is stale
 	if active_candidate_id == id:
 		active_candidate_id = ""
@@ -195,40 +266,203 @@ func set_active(id: String) -> void:
 	active_candidate_changed.emit(id)
 
 
-## Pin a candidate: add to the pinned set AND set disposition=pinned.
-func pin(id: String) -> void:
+# ── the ONE disposition write path (legality-gated) ───────────────────────────
+
+## Move a candidate's disposition through the legality table. THE single funnel:
+## every workflow verb below (pin/unpin/reject/mark_committed, and ingest's
+## supersede) goes through here, so there is exactly one place that (a) consults
+## PcbRouteCandidate.DISPOSITION_TRANSITIONS, (b) keeps the `pinned` index in
+## sync, (c) refreshes the owning task's open/closed state, (d) bumps the
+## workspace generation, and (e) emits.
+##
+## Returns true when applied. On refusal: the candidate is UNCHANGED, the named
+## error is recorded in last_transition_error, transition_refused is emitted, a
+## push_warning names the code, and false is returned — no silent clamp.
+## `verb` is the caller's own name, carried into the error record for the UI.
+func _apply_disposition(id: String, to: String, verb: String) -> bool:
 	var c = get_candidate(id)
 	if c == null:
-		return
-	pinned[id] = true
-	c.disposition = "pinned"
-	_bump_generation()  # disposition change alters the live set → invalidate in-flight check
+		return false
+	var from := str(c.disposition)
+	var err: String = c.transition_to(to)
+	if not err.is_empty():
+		_record_refusal(id, from, to, err, verb)
+		return false
+	if from == to:
+		# Identity no-op: nothing moved, so nothing to invalidate or announce
+		# beyond keeping the derived indexes honest. The move was LEGAL, so the
+		# error record clears exactly as it does on any other legal move (the
+		# record means "the LAST move was refused", not "a move happened").
+		last_transition_error = {}
+		_sync_pinned_set(id, to)
+		return true
+	last_transition_error = {}
+	_sync_pinned_set(id, to)
+	_refresh_task_state(str(c.task_id))
+	_bump_generation()  # the live set moved → any in-flight draft-check is stale
 	candidate_changed.emit(id)
+	return true
 
 
-## Unpin a candidate: drop from the pinned set AND revert disposition to proposed.
-func unpin(id: String) -> void:
+func _record_refusal(id: String, from: String, to: String, err: String, verb: String) -> void:
+	last_transition_error = {
+		"candidate_id": id, "from": from, "to": to, "error": err, "verb": verb,
+	}
+	push_warning("[RoutingWorkspace] %s refused: %s (%s -> %s) on %s" % [verb, err, from, to, id])
+	transition_refused.emit(id, from, to, err)
+
+
+## `pinned` is a DERIVED index of "disposition == pinned", not an independent
+## store — so a candidate that LEAVES the pinned disposition (superseded by a
+## re-propose, rejected, committed) also leaves the pinned set. That matters
+## beyond tidiness: the pinned set is what future routing treats as a keep-out,
+## and a superseded/committed candidate must stop acting as one.
+func _sync_pinned_set(id: String, disposition: String) -> void:
+	if disposition == "pinned":
+		pinned[id] = true
+	else:
+		pinned.erase(id)
+
+
+## True iff `to` is a legal move for this candidate right now (UI verb gating).
+func can_transition(id: String, to: String) -> bool:
 	var c = get_candidate(id)
 	if c == null:
-		return
-	pinned.erase(id)
-	c.disposition = "proposed"
-	_bump_generation()
-	candidate_changed.emit(id)
+		return false
+	return c.can_transition_to(to)
+
+
+## Pin a candidate: disposition=pinned (and the derived pinned-set entry).
+## Returns false (with a named refusal) when the move is illegal.
+func pin(id: String) -> bool:
+	return _apply_disposition(id, "pinned", "pin")
+
+
+## Unpin a candidate: revert disposition to proposed (drops the pinned entry).
+## Unpinning an already-proposed candidate is a legal no-op; unpinning a
+## terminal one (superseded/rejected/committed) is REFUSED — it would resurrect
+## geometry that has left the live set.
+func unpin(id: String) -> bool:
+	return _apply_disposition(id, "proposed", "unpin")
 
 
 func is_pinned(id: String) -> bool:
 	return pinned.has(id)
 
 
-## Reject a candidate: disposition=rejected + emit candidate_changed.
-func reject(id: String) -> void:
-	var c = get_candidate(id)
-	if c == null:
+## TARGETED Try-again: supersede THIS candidate, by the user's explicit act on
+## it. This is the verb that legally retires a PINNED candidate — batch ingest
+## deliberately will not (see the ingest policy on _create_candidate_for_route):
+## acting on a specific candidate is consent about that candidate; a whole-board
+## re-route is not.
+func supersede(id: String) -> bool:
+	return _apply_disposition(id, "superseded", "supersede")
+
+
+## Reject a candidate: disposition=rejected. Per the DCR, rejecting discards the
+## candidate and REOPENS the task (handled by _refresh_task_state — the task
+## returns to open unless some other candidate for it is committed).
+func reject(id: String) -> bool:
+	return _apply_disposition(id, "rejected", "reject")
+
+
+# ── RouteTask registry: scope (net + optional span) + open/closed lifecycle ────
+# A task is the QUESTION ("route net N", or "reroute just this span"); a
+# candidate is an ANSWER. State is DERIVED from the answers, never stored
+# free-standing, so the two can never disagree:
+#
+#   CLOSED ⇔ the task's current answer is committed copper: at least one
+#            COMMITTED candidate AND no LIVE (proposed/pinned) one.
+#   OPEN   ⇔ anything else — never routed, superseded/rejected only, or
+#            committed-but-re-proposed (the user is asking again).
+#
+# Consequences that fall out for free, matching the DCR vocabulary: Accept
+# closes the task; a board undo + uncommit reopens it; Reject reopens it
+# (rejecting is not committing); Try-again keeps it open across the supersede.
+
+## Get-or-create the task with this id. An existing task is returned untouched
+## except that a still-unknown net/span is filled in (ingest learns the net; a
+## legacy backfill may not have had the span). Never overwrites a known scope.
+func ensure_task(task_id: String, net: String = "", span: Dictionary = {}):
+	if task_id.is_empty():
+		return null
+	var t = tasks.get(task_id, null)
+	if t == null:
+		t = PcbRouteTask.new()
+		t.task_id = task_id
+		t.net = net
+		t.span = span.duplicate(true)
+		tasks[task_id] = t
+		return t
+	if str(t.net).is_empty() and not net.is_empty():
+		t.net = net
+	if (t.span as Dictionary).is_empty() and not span.is_empty():
+		t.span = span.duplicate(true)
+	return t
+
+
+func get_task(task_id: String):
+	return tasks.get(task_id, null)
+
+
+func list_tasks() -> Array:
+	return tasks.values()
+
+
+## "open" / "closed", or "" when the task is unknown.
+func task_state(task_id: String) -> String:
+	var t = get_task(task_id)
+	return str(t.state) if t != null else ""
+
+
+func is_task_open(task_id: String) -> bool:
+	return task_state(task_id) == "open"
+
+
+func open_task_ids() -> Array:
+	var out: Array = []
+	for tid in tasks:
+		if tasks[tid].is_open():
+			out.append(str(tid))
+	return out
+
+
+func closed_task_ids() -> Array:
+	var out: Array = []
+	for tid in tasks:
+		if not tasks[tid].is_open():
+			out.append(str(tid))
+	return out
+
+
+## Re-derive one task's state from its candidates (see the section header).
+## Emits task_state_changed ONLY on an actual change.
+func _refresh_task_state(task_id: String) -> void:
+	var t = get_task(task_id)
+	if t == null:
 		return
-	c.disposition = "rejected"
-	_bump_generation()  # rejected leaves the live set → invalidate in-flight check
-	candidate_changed.emit(id)
+	var has_live := false
+	var has_committed := false
+	for id in candidates:
+		var c = candidates[id]
+		if str(c.task_id) != task_id:
+			continue
+		var d := str(c.disposition)
+		if d == "proposed" or d == "pinned":
+			has_live = true
+		elif d == "committed":
+			has_committed = true
+	var want := "closed" if (has_committed and not has_live) else "open"
+	if str(t.state) == want:
+		return
+	t.state = want
+	task_state_changed.emit(task_id, want)
+
+
+## Re-derive EVERY task's state. For owners that mutated candidates in bulk.
+func refresh_task_states() -> void:
+	for tid in tasks:
+		_refresh_task_state(str(tid))
 
 
 ## Set a candidate's validation axis + emit validation_changed. Leaves the
@@ -466,17 +700,27 @@ func _vias_wire(c) -> Array:
 ## candidate is kept (not removed) as an audit trail; candidates_for_task()
 ## (non-superseded) is what stays size-1 across re-proposes for that task — a
 ## DIFFERENT task adds a genuinely new, independent candidate.
+##
+## EXCEPTION — a PINNED active candidate HOLDS its task: the incoming candidate
+## is not created and the task is reported in last_ingest_holds (+ the
+## ingest_task_held signal). See the policy block in _create_candidate_for_route.
+## The returned id array is therefore SHORTER than the reply's route list when
+## any task was held — read last_ingest_holds to say which and why.
 func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], board_revision: int = 0) -> Array:
+	last_ingest_holds = []  # per-call: holds describe THIS ingest, not history
 	var new_ids: Array = []
 	for route in router_reply.get("routes", []):
 		if not (route is Dictionary):
 			continue
 		var route_dict: Dictionary = route
+		# A route may carry an optional SPAN scope (reroute-span): it selects the
+		# task, so it is read per-route, not per-reply.
+		var route_span: Dictionary = route_dict.get("span", {}) if route_dict.get("span", {}) is Dictionary else {}
 		var new_id := _create_candidate_for_route(
 			str(route_dict.get("net", "")),
 			route_dict.get("segments", []),
 			route_dict.get("vias", []),
-			source_hints, board_revision)
+			source_hints, board_revision, null, route_span)
 		if not new_id.is_empty():
 			new_ids.append(new_id)
 	return new_ids
@@ -499,13 +743,15 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 ## worse answer from raw `source_hints` (see _create_candidate_for_route).
 ## ingest_routing_result has no such stamp available and is left untouched.
 func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
+	last_ingest_holds = []  # per-call (see ingest_routing_result)
 	var hints: Array = record.get("source_hints", []) if record.get("source_hints", []) is Array else []
 	var explicit_hint_ids: Array = record.get("source_hint_ids", []) if record.get("source_hint_ids", []) is Array else []
+	var span: Dictionary = record.get("span", {}) if record.get("span", {}) is Dictionary else {}
 	return _create_candidate_for_route(
 		str(record.get("net", "")),
 		record.get("segments", []) if record.get("segments", []) is Array else [],
 		record.get("vias", []) if record.get("vias", []) is Array else [],
-		hints, board_revision, explicit_hint_ids)
+		hints, board_revision, explicit_hint_ids, span)
 
 
 ## Create + add one RouteCandidate from a raw router route (net + raw segments +
@@ -525,7 +771,13 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 ## means "no pre-resolved set": the legacy net_names-match-with-fallback path
 ## (_hint_ids_for_net / _endpoints_for_net / _width_for_net) runs exactly as
 ## it always has. That caller is deliberately left untouched by this docket.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int, explicit_hint_ids = null) -> String:
+##
+## `span` (C1) is the OPTIONAL span scope of the task this route answers ({} ⇒
+## whole-net). It participates in the task key, so a "reroute just this stretch"
+## proposal gets its OWN task (and its own generation chain) instead of
+## superseding the whole-net candidate — and re-proposing the SAME span
+## supersedes exactly like a whole-net re-propose does.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int, explicit_hint_ids = null, span: Dictionary = {}) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -547,15 +799,35 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		# this caller has no production consumer and no per-route hint_ids to
 		# read instead).
 		hint_ids = _hint_ids_for_net(source_hints, net)
-	var task_key := _task_key(net, hint_ids)
+	var task_key := _task_key(net, hint_ids, PcbRouteTask.span_key(span))
+	# The task (the question) exists before its answer; state is derived after
+	# the candidate lands (add_candidate → _refresh_task_state).
+	ensure_task(task_key, net, span)
 	var generation := 1
 	var prior_id: String = str(_task_candidate.get(task_key, ""))
 	if not prior_id.is_empty() and candidates.has(prior_id):
 		var prior = candidates[prior_id]
+		# ── PINNED PRIOR ⇒ HOLD THE TASK (do not replace) ────────────────────
+		# DCR vocabulary: "Keep/Pin = ghost stays draft but future routing routes
+		# AROUND it". A pin is the user's standing instruction that this stretch
+		# of copper is settled — so a batch re-route must not quietly retire it.
+		# The incoming candidate is NOT created; the pinned prior is untouched;
+		# the skip is recorded + announced so the caller can say WHICH task was
+		# held rather than silently reporting fewer routes.
+		# The user CAN still retire it: supersede()/unpin() act on THAT candidate
+		# (explicit consent), and the legality table allows pinned → superseded.
+		# The distinction is batch-ingest vs targeted verb, not legal vs illegal.
+		if str(prior.disposition) == "pinned":
+			_record_ingest_hold(task_key, prior_id, net, HOLD_PINNED)
+			return ""
 		generation = int(prior.generation) + 1
-		prior.disposition = "superseded"
-		_bump_generation()  # supersede leaves the live set (add_candidate bumps for the new one)
-		candidate_changed.emit(prior_id)
+		# Try-again supersedes the task's current answer — but ONLY when that
+		# answer is still LIVE. A prior that already left the live set
+		# (rejected/committed/superseded) is TERMINAL: superseding it would be an
+		# illegal transition, and there is nothing to replace. The new candidate
+		# still continues the generation chain (the question was asked again).
+		if str(prior.disposition) == "proposed":
+			_apply_disposition(prior_id, "superseded", "ingest_replace")
 
 	var cand = PcbRouteCandidate.new()
 	cand.task_id = task_key
@@ -646,15 +918,29 @@ func mark_committed(candidate_id: String, trace_ids: Array = [], via_ids: Array 
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return false
+	var prior := str(c.disposition)
+	# LEGALITY FIRST: a candidate that cannot legally reach "committed" (already
+	# superseded/rejected) must not have its copper ids recorded either — a
+	# refused transition is never half-applied.
+	if not _apply_disposition(candidate_id, "committed", "mark_committed"):
+		return false
 	var rec: Dictionary = correlations.get(candidate_id, {})
-	if str(c.disposition) != "committed":
-		rec["prior_disposition"] = str(c.disposition)
+	if prior != "committed":
+		rec["prior_disposition"] = prior
 	rec["committed_trace_ids"] = _to_string_array(trace_ids)
 	rec["committed_via_ids"] = _to_string_array(via_ids)
 	correlations[candidate_id] = rec
-	c.disposition = "committed"
-	_bump_generation()  # committed leaves the live set
-	candidate_changed.emit(candidate_id)
+	if prior == "committed":
+		# RE-COMMIT (identity move): _apply_disposition emits nothing for an
+		# identity transition, but the committed copper ids DID just change and
+		# committed_copper_ids() is read by the UI. The file's emit discipline is
+		# "every observable mutation announces itself", so announce it here.
+		# REFUSING instead would be wrong: the shipped code deliberately handles
+		# a re-commit (it keeps the ORIGINAL prior_disposition rather than
+		# stamping "committed" over it), i.e. re-commit is a supported call, not
+		# a caller error. No _bump_generation(): the LIVE candidate set did not
+		# move, and that counter exists only to invalidate in-flight draft checks.
+		candidate_changed.emit(candidate_id)
 	return true
 
 
@@ -682,13 +968,25 @@ func uncommit(candidate_id: String) -> bool:
 		return false
 	var rec: Dictionary = correlations.get(candidate_id, {})
 	var prior := str(rec.get("prior_disposition", "proposed"))
-	if prior.is_empty() or prior == "committed":
+	# Clamp to a legal uncommit target: an absent/garbled/self-referential prior
+	# falls back to "proposed" (the safe live state) rather than refusing — the
+	# board undo already happened, so leaving the candidate committed would be
+	# the INCOHERENT outcome.
+	if not (prior in PcbRouteCandidate.UNCOMMIT_TARGETS):
 		prior = "proposed"
+	# The ONLY exit from "committed" — a COMPENSATING move, not a workflow verb,
+	# so it goes through uncommit_to() rather than the legality table.
+	var err: String = c.uncommit_to(prior)
+	if not err.is_empty():
+		_record_refusal(candidate_id, "committed", prior, err, "uncommit")
+		return false
 	rec["committed_trace_ids"] = []
 	rec["committed_via_ids"] = []
 	rec["prior_disposition"] = ""
 	correlations[candidate_id] = rec
-	c.disposition = prior
+	last_transition_error = {}
+	_sync_pinned_set(candidate_id, prior)
+	_refresh_task_state(str(c.task_id))  # the copper is gone → the task reopens
 	_bump_generation()
 	candidate_changed.emit(candidate_id)
 	return true
@@ -731,6 +1029,16 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 	_bump_generation()
 	candidate_changed.emit(candidate_id)
 	return true
+
+
+## Record + announce one ingest hold (see the pinned-prior policy above).
+func _record_ingest_hold(task_id: String, held_candidate_id: String, net: String, reason: String) -> void:
+	last_ingest_holds.append({
+		"task_id": task_id, "held_candidate_id": held_candidate_id,
+		"net": net, "reason": reason,
+	})
+	push_warning("[RoutingWorkspace] ingest held task '%s': %s (%s)" % [task_id, reason, held_candidate_id])
+	ingest_task_held.emit(task_id, held_candidate_id, reason)
 
 
 static func _to_string_array(arr: Array) -> Array:
@@ -818,11 +1126,18 @@ static func _to_string_typed_array(ids: Array) -> Array[String]:
 
 
 ## Deterministic task-identity key — see the ingest_routing_result contract doc.
-static func _task_key(net: String, hint_ids: Array) -> String:
+## `span_key` (C1) is PcbRouteTask.span_key of the task's span scope and is
+## APPENDED ONLY when non-empty, so every whole-net key ("<net>|<hint ids>") is
+## byte-identical to what it was before spans existed — no key churn, no
+## silently-duplicated tasks on upgrade.
+static func _task_key(net: String, hint_ids: Array, span_key: String = "") -> String:
 	var sorted_ids: Array = hint_ids.duplicate()
 	sorted_ids.sort()
 	var joined := ",".join(sorted_ids)
-	return "%s|%s" % [net, joined]
+	var key := "%s|%s" % [net, joined]
+	if not span_key.is_empty():
+		key += "|span:%s" % span_key
+	return key
 
 
 ## Endpoints seeded from the matching source hints' pin references
@@ -965,6 +1280,7 @@ func to_dict() -> Dictionary:
 		pinned_out.append(id)
 	return {
 		"candidates": cand_out,
+		"tasks": _tasks_out(),
 		"active_candidate_id": active_candidate_id,
 		"pinned": pinned_out,
 		"selected_finding_id": selected_finding_id,
@@ -994,6 +1310,9 @@ func to_sidecar_dict() -> Dictionary:
 		pinned_out.append(id)
 	return {
 		"candidates": cand_out,
+		# Tasks ARE durable: "which nets/spans still need copper" is design
+		# intent, not session state (unlike active/selected, dropped below).
+		"tasks": _tasks_out(),
 		"pinned": pinned_out,
 		"correlations": _correlations_out(),
 		"counters": {
@@ -1002,6 +1321,14 @@ func to_sidecar_dict() -> Dictionary:
 			"via": _via_counter,
 		},
 	}
+
+
+## task_id -> task.to_dict() (JSON-safe; span Vector2s are {x,y}-ified there).
+func _tasks_out() -> Dictionary:
+	var out: Dictionary = {}
+	for tid in tasks:
+		out[str(tid)] = tasks[tid].to_dict()
+	return out
 
 
 ## Deep-copy the correlation map for serialisation (JSON-safe: all values are
@@ -1024,9 +1351,61 @@ func mark_all_stale() -> void:
 		validation_changed.emit(str(id))
 
 
-func load_from_dict(data: Dictionary) -> void:
+## ── PER-CANDIDATE staleness on a board-revision mismatch (C1) ─────────────────
+## Candidate ids whose base_board_revision != `rev` — the candidates the board
+## has moved out from under. Pure query, mutates nothing.
+func stale_candidate_ids_for_revision(rev: int) -> Array:
+	var out: Array = []
+	for id in candidates:
+		if candidates[id].is_stale_for_board_revision(rev):
+			out.append(str(id))
+	return out
+
+
+## REBASE the workspace onto board revision `rev`: bind it, then mark every
+## candidate generated against a DIFFERENT revision validation="stale".
+##
+## Three deliberate choices:
+##   1. STALE, NOT ERROR. A rebased candidate is not wrong, it is UNVERIFIED
+##      against this board — "error" would claim a verdict nobody computed.
+##      "stale" is the existing quarantine signal (mark_all_stale, sidecar
+##      fingerprint mismatch) and the same one the DRC path already understands.
+##   2. DISPOSITION PRESERVED. Staleness is the VALIDATION axis; a pinned or
+##      committed candidate keeps its disposition through a rebase (the two axes
+##      are orthogonal — see RouteCandidate's header).
+##   3. PER CANDIDATE, not blunt-force-all. Candidates already at `rev` are left
+##      exactly as they are, so re-binding to the revision you are already on is
+##      a no-op instead of quarantining freshly-checked work. (mark_all_stale
+##      stays for the coarser sidecar-level "the whole board changed" case.)
+## Returns the ids newly marked stale (already-stale ones are skipped, so this is
+## idempotent and emits no duplicate validation_changed).
+func rebase(rev: int) -> Array:
+	board_revision = int(rev)
+	var marked: Array = []
+	for id in candidates:
+		var c = candidates[id]
+		if not c.is_stale_for_board_revision(board_revision):
+			continue
+		if str(c.validation) == "stale":
+			continue
+		set_validation(str(id), "stale")  # emits validation_changed
+		marked.append(str(id))
+	return marked
+
+
+## `board_revision_hint` (C1): the CURRENT board revision the loaded workspace is
+## being restored against. Default -1 means "unknown — do not rebase" (0 is a
+## legitimate revision for a fresh board, so it cannot be the sentinel). When a
+## caller passes a real revision, the load is followed by rebase(): candidates
+## whose base_board_revision differs are marked validation="stale" with their
+## dispositions preserved. The routing sidecar already threads a
+## current_board_revision through load_into_workspace — wiring that argument
+## through to here is the natural call site, and is left to the owner of that
+## file (out of this unit's fence).
+func load_from_dict(data: Dictionary, board_revision_hint: int = -1) -> void:
 	candidates.clear()
 	pinned.clear()
+	tasks.clear()
 	_findings.clear()
 	correlations.clear()
 	_annotation_to_candidate.clear()
@@ -1034,6 +1413,18 @@ func load_from_dict(data: Dictionary) -> void:
 	var cand_data: Dictionary = data.get("candidates", {})
 	for id in cand_data:
 		candidates[id] = PcbRouteCandidate.from_dict(cand_data[id])
+
+	# Tasks. Absent for any sidecar written before tasks existed — the backfill
+	# below reconstructs them from the candidates, so an old file loads with a
+	# complete, correctly-stated registry rather than an empty one. That is why
+	# adding "tasks" needs no sidecar schema bump: old readers ignore the key,
+	# new readers can do without it.
+	var task_data: Dictionary = data.get("tasks", {}) if data.get("tasks", {}) is Dictionary else {}
+	for tid in task_data:
+		if task_data[tid] is Dictionary:
+			var t = PcbRouteTask.from_dict(task_data[tid])
+			t.task_id = str(tid)
+			tasks[str(tid)] = t
 
 	# Restore correlations + rebuild the derived reverse (annotation→candidate)
 	# index. int()/str() normalise JSON round-trip types (generation is a float).
@@ -1057,6 +1448,18 @@ func load_from_dict(data: Dictionary) -> void:
 
 	for id in data.get("pinned", []):
 		pinned[str(id)] = true
+	# `pinned` is DERIVED from the disposition axis (see _sync_pinned_set), so
+	# reconcile it after a load: a stored entry whose candidate is gone or no
+	# longer pinned is dropped, and a pinned candidate missing from the stored
+	# set is added. A hand-edited or partially-written sidecar can therefore
+	# never leave a phantom keep-out behind.
+	for id in pinned.keys():
+		var pc = candidates.get(id, null)
+		if pc == null or str(pc.disposition) != "pinned":
+			pinned.erase(id)
+	for id in candidates:
+		if str(candidates[id].disposition) == "pinned":
+			pinned[str(id)] = true
 
 	# Restore counters to a HIGH-WATER MARK: max of the stored counter and the
 	# largest numeric suffix present in loaded ids (int() tolerates JSON floats).
@@ -1080,6 +1483,19 @@ func load_from_dict(data: Dictionary) -> void:
 	# contract), but it IS deterministically reconstructable from the loaded set.
 	_rebuild_task_index()
 
+	# Backfill any task a candidate references but the file did not carry, then
+	# re-derive EVERY task's open/closed state from the loaded candidate set —
+	# the state is derived, so it is never trusted from disk over the answers.
+	for id in candidates:
+		var c = candidates[id]
+		var tid := str(c.task_id)
+		if not tid.is_empty():
+			ensure_task(tid, str(c.net))
+	refresh_task_states()
+
+	if board_revision_hint >= 0:
+		rebase(board_revision_hint)
+
 
 ## Rebuild _task_candidate: task_key -> the CURRENT (non-superseded, highest-
 ## generation) candidate answering it. Deterministic over the loaded candidates.
@@ -1097,9 +1513,9 @@ func _rebuild_task_index() -> void:
 			_task_candidate[tk] = str(id)
 
 
-static func from_dict(data: Dictionary):
+static func from_dict(data: Dictionary, board_revision_hint: int = -1):
 	var ws = _Self.new()
-	ws.load_from_dict(data)
+	ws.load_from_dict(data, board_revision_hint)
 	return ws
 
 

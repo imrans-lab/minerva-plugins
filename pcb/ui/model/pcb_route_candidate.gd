@@ -33,6 +33,64 @@ const PcbRouteTask := preload("pcb_route_task.gd")
 const DISPOSITIONS := ["proposed", "pinned", "superseded", "rejected", "committed"]
 const VALIDATIONS := ["unchecked", "checking", "clean", "violating", "stale", "error"]
 
+## ── DISPOSITION TRANSITION LEGALITY TABLE ─────────────────────────────────────
+## from → the dispositions it may legally move to. An IDENTITY move (x → x) is
+## always legal and is a no-op: re-asserting the state a candidate is already in
+## is not a transition, and refusing it would force every caller to guard its own
+## writes. Anything else not listed here is REFUSED with a named error (see
+## transition_error); the workspace surfaces the refusal rather than silently
+## clamping, so an illegal workflow verb is visibly rejected, never half-applied.
+##
+## Rationale per row (DCR 019f7095c395 vocabulary: Accept/Commit, Keep/Pin,
+## Reject, Try-again):
+##   proposed   — the live draft: the FULL fan-out. Pin it (Keep), replace it
+##                (Try-again ⇒ superseded), discard it (Reject), or commit it
+##                (Accept).
+##   pinned     — still a DRAFT, not copper. → proposed is Unpin. → superseded is
+##                an explicit user Try-again on the same task; the pin is dropped
+##                from the live keep-out set and the geometry survives as audit,
+##                so nothing is silently lost. → rejected is a later, stronger
+##                intent than the earlier pin. → committed because pinning must
+##                not block Accept (the DCR's "Edit … and pin it", then commit).
+##   superseded — TERMINAL. A superseded candidate is the historical record of a
+##                replaced generation. Reviving it (→ proposed/pinned) would put
+##                TWO live candidates on one task and break the one-live-answer
+##                invariant candidates_for_task/_task_candidate depend on;
+##                rejecting a candidate that already left the live set carries no
+##                user meaning. The way "back" is a new propose, not a revival.
+##   rejected   — TERMINAL. Reject means discard-and-reopen-the-task; the way
+##                back is a NEW candidate from a new propose, so an un-reject
+##                would resurrect stale geometry the user already refused.
+##   committed  — TERMINAL for every WORKFLOW verb: once the copper is on the
+##                board, pin/reject/supersede are meaningless against the
+##                candidate. The ONE exit is UNCOMMIT (see UNCOMMIT_TARGETS),
+##                which is a COMPENSATING transition mirroring a board undo, not
+##                a workflow decision.
+const DISPOSITION_TRANSITIONS := {
+	"proposed": ["pinned", "superseded", "rejected", "committed"],
+	"pinned": ["proposed", "superseded", "rejected", "committed"],
+	"superseded": [],
+	"rejected": [],
+	"committed": [],
+}
+
+## Dispositions no WORKFLOW verb may leave (see the table's rationale).
+const TERMINAL_DISPOSITIONS := ["superseded", "rejected", "committed"]
+
+## The ONLY exits from "committed", and NOT a workflow verb: uncommit is the
+## compensating half of a board undo (the board no longer holds the candidate's
+## copper, so the candidate must become live again). It may only restore a
+## disposition the candidate could have HELD before commit — proposed or pinned.
+## Reached via uncommit_to(), never via transition_to(), so a caller can never
+## reach it by accident. Shipped + pinned by test_parity_bridge.gd (GATE INV-1).
+const UNCOMMIT_TARGETS := ["proposed", "pinned"]
+
+## Named refusal codes (the "named error" a refused transition reports).
+const ERR_UNKNOWN_DISPOSITION := "unknown_disposition"
+const ERR_TERMINAL_DISPOSITION := "terminal_disposition"
+const ERR_ILLEGAL_TRANSITION := "illegal_disposition_transition"
+const ERR_NOT_COMMITTED := "not_committed"
+
 ## Identity / versioning.
 var candidate_id: String = ""       ## stable, workspace-scoped (e.g. "cand_1")
 var task_id: String = ""            ## the RouteTask this answers
@@ -69,8 +127,16 @@ var validation: String:
 		set_validation(value)
 
 
-## Validating setter for the disposition axis. Rejects out-of-set values and does
-## NOT touch the validation axis.
+## RAW validating setter for the disposition axis. Rejects out-of-set values and
+## does NOT touch the validation axis.
+##
+## NOTE (C1): this is the SET-MEMBERSHIP setter only — it deliberately does NOT
+## consult DISPOSITION_TRANSITIONS, because it is also the RESTORE path
+## (load_from_dict must be able to reinstate a stored "superseded"/"rejected"/
+## "committed" on a freshly constructed candidate, which is not a workflow
+## transition at all). WORKFLOW verbs must go through transition_to() below, or
+## through RoutingWorkspace's pin/unpin/reject/mark_committed/uncommit, which
+## funnel every workflow move through the legality table.
 func set_disposition(value: String) -> void:
 	if value in DISPOSITIONS:
 		_disposition = value
@@ -85,6 +151,62 @@ func set_validation(value: String) -> void:
 		_validation = value
 	else:
 		push_warning("[RouteCandidate] ignored invalid validation '%s'" % value)
+
+
+# ── disposition transition gate ───────────────────────────────────────────────
+
+## The named error for moving `from` → `to`, or "" when the move is LEGAL.
+## Identity moves are legal (no-op). Order of checks matters: an unknown value is
+## reported as unknown BEFORE any terminal/legality verdict, so a typo is never
+## mis-reported as a workflow violation.
+static func transition_error(from: String, to: String) -> String:
+	if not (from in DISPOSITIONS) or not (to in DISPOSITIONS):
+		return ERR_UNKNOWN_DISPOSITION
+	if from == to:
+		return ""  # identity: re-asserting the current state is not a transition
+	if to in (DISPOSITION_TRANSITIONS.get(from, []) as Array):
+		return ""
+	if from in TERMINAL_DISPOSITIONS:
+		return ERR_TERMINAL_DISPOSITION
+	return ERR_ILLEGAL_TRANSITION
+
+
+## True iff this candidate may legally move to `to` right now.
+func can_transition_to(to: String) -> bool:
+	return transition_error(_disposition, to).is_empty()
+
+
+## GATED workflow mutator: move the disposition to `to`. Returns "" on success
+## (value applied) or the NAMED error on refusal (value UNCHANGED — a refused
+## transition is never half-applied). The validation axis is never touched.
+func transition_to(to: String) -> String:
+	var err := transition_error(_disposition, to)
+	if not err.is_empty():
+		return err
+	_disposition = to
+	return ""
+
+
+## COMPENSATING exit from "committed" (see UNCOMMIT_TARGETS). Returns "" on
+## success or a named error: ERR_NOT_COMMITTED when the candidate is not
+## committed, ERR_ILLEGAL_TRANSITION when `to` is not a legal uncommit target.
+func uncommit_to(to: String) -> String:
+	if _disposition != "committed":
+		return ERR_NOT_COMMITTED
+	if not (to in UNCOMMIT_TARGETS):
+		return ERR_ILLEGAL_TRANSITION
+	_disposition = to
+	return ""
+
+
+# ── board-revision staleness (per candidate) ──────────────────────────────────
+
+## True iff this candidate was generated against a DIFFERENT board revision than
+## `board_revision` — i.e. the board moved underneath it. int() on both sides
+## because a JSON round-trip hands back whole numbers as float (5.0 != 5 under
+## GDScript's type-strict ==).
+func is_stale_for_board_revision(board_revision: int) -> bool:
+	return int(base_board_revision) != int(board_revision)
 
 
 # ── geometry builders ─────────────────────────────────────────────────────────
