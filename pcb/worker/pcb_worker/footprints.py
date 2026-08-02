@@ -465,6 +465,92 @@ def _parse_graphics(root: Any) -> list[dict]:
     return graphics
 
 
+def _fp_text_type(g: list) -> Union[str, None]:
+    """The fp_text TYPE token (``reference`` / ``value`` / ``user``) — the 2nd
+    element of ``(fp_text TYPE "content" (at ...) ...)``."""
+    return _atom(g[1]) if len(g) > 1 else None
+
+
+def _fp_text_hidden(g: list) -> bool:
+    """True if the fp_text node is authored hidden. Covers both forms seen in
+    the wild: KiCad 6's bare ``hide`` atom as a direct child of the fp_text
+    node, and KiCad 7/8's ``(effects ... (hide yes))``. A bare ``(hide)`` with
+    no value counts as hidden; an explicit ``(hide no)`` does not."""
+    for c in g:
+        if isinstance(c, str) and c == "hide":
+            return True
+    effects = _kv(g, "effects")
+    if effects:
+        h = _kv(effects, "hide")
+        if h:
+            if len(h) <= 1:
+                return True
+            return _atom(h[1]) not in ("no", False, "false")
+    return False
+
+
+def _is_captured_reference_fp_text(g: list) -> bool:
+    """True for the ONE fp_text node 019f77fd6d69's fix captures: the
+    footprint's own visible REFERENCE designator field on F.SilkS with a
+    usable ``(at x y)``. Never ``value``/``user`` text (those stay
+    unrendered — docs/gerbers.md), never B.SilkS/F.Fab (frozen
+    fab_capability.py boundary — this module never widens what the emitter
+    claims to fabricate, only WHERE on F.SilkS the already-shipped stroke
+    designator gets drawn). Shared by :func:`_parse_reference_text` (which
+    captures it) and :func:`_uncaptured_graphics` (which must stop calling it
+    omitted once it is)."""
+    if _fp_text_type(g) != "reference":
+        return False
+    if _graphic_layer(g) != "F.SilkS":
+        return False
+    if _fp_text_hidden(g):
+        return False
+    at = _kv(g, "at")
+    if not at or len(at) < 3:
+        return False
+    return _num(at[1]) is not None and _num(at[2]) is not None
+
+
+def _parse_reference_text(root: Any) -> Union[dict, None]:
+    """Extract the footprint's authored REFERENCE fp_text placement (local
+    position, KiCad clockwise text rotation, font cap-height size), so the
+    emitter can draw the synthesized designator stroke text where the
+    footprint's author actually put it instead of always using a fixed
+    default offset (019f77fd6d69). Returns ``None`` when the footprint has no
+    qualifying reference text (see :func:`_is_captured_reference_fp_text`) —
+    callers then keep the pre-existing default placement, unchanged."""
+    for g in _find_all(root, "fp_text"):
+        if not _is_captured_reference_fp_text(g):
+            continue
+        at = _kv(g, "at")
+        x, y = _num(at[1]), _num(at[2])
+        rot = _num(at[3]) if len(at) > 3 else 0.0
+        size_mm = 1.0
+        effects = _kv(g, "effects")
+        if effects:
+            font = _kv(effects, "font")
+            if font:
+                sz = _kv(font, "size")
+                if sz and len(sz) > 2:
+                    a = _num(sz[1])
+                    b = _num(sz[2])
+                    # KiCad authors (size <a> <b>) where the two values are
+                    # height/width. Every seed font is SQUARE, so the scalar is
+                    # unambiguous when a == b. A non-square font would make the
+                    # index choice load-bearing (and stroke_font.render only
+                    # takes one cap-height scalar) — rather than bet on the
+                    # order, refuse the capture: return None so the fp_text
+                    # falls into the uncaptured-graphic marker (the documented
+                    # degrade path) instead of silently mis-scaling.
+                    if a is None or b is None or a <= 0 or b <= 0:
+                        return None
+                    if a != b:
+                        return None
+                    size_mm = a
+        return {"x_mm": x, "y_mm": y, "rotation_deg": rot or 0.0, "size_mm": size_mm}
+    return None
+
+
 def _uncaptured_graphics(root: Any, captured: list[dict]) -> list[dict]:
     """Surface every graphic that the modeled kind/layer matrix cannot hold.
 
@@ -485,6 +571,13 @@ def _uncaptured_graphics(root: Any, captured: list[dict]) -> list[dict]:
     for tag in _FAB_GRAPHIC_TAGS:
         kind = tag[len("fp_"):]  # line / circle / arc / poly
         for g in _find_all(root, tag):
+            # 019f77fd6d69: the footprint's own visible reference-designator
+            # fp_text on F.SilkS is now captured (see
+            # _is_captured_reference_fp_text) — it must stop being counted as
+            # an omission. Every OTHER fp_text (value/user, hidden, missing
+            # (at ...), or on any other layer) still counts exactly as before.
+            if tag == "fp_text" and _is_captured_reference_fp_text(g):
+                continue
             layer = _graphic_layer(g)
             key = (layer, kind)
             if (tag in _CAPTURED_GRAPHIC_TAGS and layer in GRAPHIC_LAYERS
@@ -527,7 +620,13 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
           "name": str,
           "pads": [{number, type, shape, x_mm, y_mm, size:[w,h], drill, layers}],
           "graphics": [{layer, kind, ...coords, width}],
+          "reference_text": {x_mm, y_mm, rotation_deg, size_mm},  # optional
         }
+
+    ``reference_text`` (019f77fd6d69) is present only when the footprint has a
+    visible, well-formed ``reference`` fp_text on F.SilkS — see
+    ``_parse_reference_text``. Its absence changes nothing: the emitter falls
+    back to the pre-existing default designator placement.
 
     The eight original pad keys above stay byte-identical. K1
     (lossless-or-flagging) adds, only when the source carries them: per-pad
@@ -557,6 +656,13 @@ def parse_kicad_mod(path_or_text: Union[str, Path]) -> dict:
     pads = [_parse_pad(p) for p in _find_all(root, "pad")]
     graphics = _parse_graphics(root)
     result = {"name": name, "pads": pads, "graphics": graphics}
+    # 019f77fd6d69 ADDITIVE: the footprint's own reference-designator fp_text
+    # placement, when it qualifies (see _parse_reference_text) — a NEW
+    # top-level key, added only when present, so a footprint with none (or an
+    # unqualifying one) stays byte-identical to before this fix.
+    reference_text = _parse_reference_text(root)
+    if reference_text is not None:
+        result["reference_text"] = reference_text
     # K1 ADDITIVE: surface fab geometry on layers we do not capture as an
     # attributed marker list (NEW top-level key, added only when non-empty so
     # footprints with only silk/courtyard graphics stay byte-identical).

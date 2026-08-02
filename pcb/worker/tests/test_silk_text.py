@@ -419,11 +419,36 @@ def test_ir_native_path_positions_designator_at_the_real_component_placement():
     moves = _move_points(silk)
     assert moves, "expected at least one move in F.SilkS"
 
+    # 019f77fd6d69: MountingHole_3.2mm_M3 carries its OWN authored reference
+    # fp_text on F.SilkS (`(at 0 -4.2)`, no rotation) — the IR-native path now
+    # places the designator there instead of the generic REFDES_LOCAL_Y_MM
+    # default, so the expectation is derived from the SAME captured
+    # reference_text the emitter itself reads (board.footprint_for(comp)
+    # .reference_text), not the old hand-picked default offset.
+    reference_text = rb.footprint_for(comp).reference_text
+    assert reference_text is not None, (
+        "MountingHole_3.2mm_M3 is expected to carry an authored reference "
+        "fp_text on F.SilkS — if this footprint ever loses it, this test's "
+        "premise (proving the AUTHORED-position path) is gone")
+    # LITERAL anchor pin (review note: everything below derives its expectation
+    # from the SAME captured object the emitter reads, so a mis-parsed `at`
+    # index would pass green. These literals come from the .kicad_mod source
+    # itself: `(at 0 -4.2)`, no rotation, square (size 1 1) captured as the
+    # scalar cap-height 1.0 — the assertions the capture cannot launder.
+    # (Non-square fonts are refused at capture — see footprints.py — because
+    # the height/width index order would become load-bearing; this literal
+    # also pins that the SQUARE path yields the authored value.)
+    assert reference_text.position == (0.0, -4.2), reference_text.position
+    assert reference_text.rotation_deg == 0.0
+    assert reference_text.size_mm == 1.0, reference_text.size_mm
     expected_local = stroke_font.render(
-        "MH1", size=gerber.REFDES_TEXT_SIZE_MM, x0=0.0, y0=gerber.REFDES_LOCAL_Y_MM)
+        "MH1", size=reference_text.size_mm, x0=0.0, y0=0.0)
+    footprint_local_first = place_point(
+        reference_text.position[0], reference_text.position[1],
+        reference_text.rotation_deg, *expected_local[0][0])
     placed = place_point(
         comp.placement.position[0], comp.placement.position[1],
-        comp.placement.rotation_deg, *expected_local[0][0])
+        comp.placement.rotation_deg, *footprint_local_first)
     # place_point works in the BOARD frame; the emitted file is in the GERBER
     # frame, so the expectation is negated in Y exactly once, at the same boundary
     # the emitter crosses (gerber._Geometry.to_gerber_frame, bug 019fa8011555).

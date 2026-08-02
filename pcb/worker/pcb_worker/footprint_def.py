@@ -228,6 +228,32 @@ GraphicDefinition: TypeAlias = LineGraphic | CircleGraphic | ArcGraphic | PolyGr
 
 
 @dataclass(frozen=True)
+class ReferenceTextDefinition:
+    """The footprint's OWN authored reference-designator fp_text placement:
+    footprint-LOCAL position, KiCad clockwise text rotation, and font
+    cap-height size (019f77fd6d69). Captured ONLY for the ``reference`` TYPE
+    fp_text on F.SilkS (never ``value``/``user``, never B.SilkS/F.Fab — those
+    stay outside the modeled contract, matching fab_capability.py's frozen
+    boundary). When present, the emitter draws the already-shipped
+    synthesized designator stroke text here instead of a fixed default
+    offset; when absent, placement is unchanged from before this fix."""
+    position: Point
+    rotation_deg: float = 0.0
+    size_mm: float = 1.0
+
+    def __post_init__(self) -> None:
+        _point(self.position, "ReferenceTextDefinition.position")
+        if (isinstance(self.rotation_deg, bool)
+                or not isinstance(self.rotation_deg, (int, float))
+                or not math.isfinite(self.rotation_deg)):
+            raise ValueError("ReferenceTextDefinition.rotation_deg must be finite")
+        if (isinstance(self.size_mm, bool)
+                or not isinstance(self.size_mm, (int, float))
+                or not math.isfinite(self.size_mm) or self.size_mm <= 0):
+            raise ValueError("ReferenceTextDefinition.size_mm must be finite and positive")
+
+
+@dataclass(frozen=True)
 class Model3D:
     path: str | None = None
 
@@ -381,6 +407,7 @@ class FootprintDefinition:
     model3d: Model3D | None = None
     provenance: Provenance | None = None
     unsupported: tuple[UnsupportedFeature, ...] = ()
+    reference_text: ReferenceTextDefinition | None = None
     content_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -397,6 +424,9 @@ class FootprintDefinition:
             raise TypeError("FootprintDefinition.graphics has an unknown variant")
         if any(not isinstance(item, UnsupportedFeature) for item in self.unsupported):
             raise TypeError("FootprintDefinition.unsupported entries must be UnsupportedFeature")
+        if (self.reference_text is not None
+                and not isinstance(self.reference_text, ReferenceTextDefinition)):
+            raise TypeError("FootprintDefinition.reference_text must be ReferenceTextDefinition")
         source_ids = [item.source_id for item in (*self.pads, *self.graphics)]
         if len(source_ids) != len(set(source_ids)):
             raise ValueError("FootprintDefinition source ids must be unique")
@@ -406,6 +436,11 @@ class FootprintDefinition:
             "graphics": [_graphic_to_payload(graphic) for graphic in self.graphics],
             "model3d": self.model3d.path if self.model3d else None,
             "unsupported": [_unsupported_to_payload(item) for item in self.unsupported],
+            "reference_text": None if self.reference_text is None else {
+                "position": self.reference_text.position,
+                "rotation_deg": self.reference_text.rotation_deg,
+                "size_mm": self.reference_text.size_mm,
+            },
         }
         object.__setattr__(self, "content_id", hash_content(payload))
 
@@ -593,12 +628,33 @@ class FootprintDefinition:
             )
             for item in (parsed.get("unsupported") or ()) if isinstance(item, dict)
         )
+
+        # 019f77fd6d69: the footprint's own reference-designator fp_text
+        # placement, when the parser found a qualifying one (see
+        # footprints._parse_reference_text). Defensive isinstance/try guards
+        # the same way every other optional field here does — a malformed
+        # value here must fall back to None (no reference_text), never raise
+        # and never block the footprint.
+        reference_text = None
+        raw_rt = parsed.get("reference_text")
+        if isinstance(raw_rt, dict):
+            try:
+                reference_text = ReferenceTextDefinition(
+                    position=_point((raw_rt.get("x_mm"), raw_rt.get("y_mm")),
+                                    "reference_text.position"),
+                    rotation_deg=float(raw_rt.get("rotation_deg") or 0.0),
+                    size_mm=float(raw_rt.get("size_mm") or 1.0),
+                )
+            except (TypeError, ValueError):
+                reference_text = None
+
         return cls(
             name=name,
             pads=tuple(pads),
             graphics=tuple(graphics),
             provenance=provenance,
             unsupported=tuple(footprint_markers),
+            reference_text=reference_text,
         )
 
     def to_board_pad_dicts(self) -> list:

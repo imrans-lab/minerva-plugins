@@ -60,6 +60,7 @@ from gerber_writer import (
 
 from . import board_model, stroke_font
 from .fab_capability import EDGE_CUTS_WIDTH_MM
+from .footprint_def import ReferenceTextDefinition
 from .geometry import (
     is_top as _is_top,
     place_point as _transform_point,
@@ -683,7 +684,7 @@ def _emit_silk(g: _Geometry, graphics, cx: float, cy: float, rot: float,
 
 
 def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
-                 top: bool) -> None:
+                 top: bool, reference_text: ReferenceTextDefinition | None = None) -> None:
     """Emit one component's REFERENCE DESIGNATOR ("R1", "U3", ...) as F.SilkS
     stroke geometry (see stroke_font.py — gerber-writer has no text primitive,
     so a designator is drawn as open polylines, same as any other silk shape).
@@ -703,15 +704,45 @@ def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
     because PlacedGraphic geometry there is already board-absolute, but the
     designator text is rendered in glyph-LOCAL coordinates and must be placed
     by the component's actual placement transform regardless.
+
+    ``reference_text`` (019f77fd6d69) is the footprint's OWN authored
+    reference fp_text placement (``footprint_def.ReferenceTextDefinition``),
+    when the IR-native harvest found one (``ResolvedBoard.footprint_for(comp)
+    .reference_text``) — see ``_harvest_ir``. When given, the synthesized
+    designator is drawn at the footprint's authored local anchor/rotation/size
+    instead of the fixed ``REFDES_LOCAL_Y_MM`` default: glyphs are rendered
+    anchored at the origin (``x0=y0=0``), then EACH point goes through the
+    text's own local rotate-then-translate (``place_point`` with
+    ``reference_text.position``/``.rotation_deg`` — the same primitive KiCad's
+    own reader composes pad/graphic transforms with) BEFORE the component's
+    placement transform (``cx, cy, rot``) — a two-step nested transform,
+    because the anchor is footprint-local, not board-absolute. The default
+    (``reference_text=None``, e.g. every call from the loose-dict harvest,
+    which has no footprint definition to consult) keeps today's exact
+    single-step placement, unchanged.
     """
     if not top:
         return
     text = ref if isinstance(ref, str) else None
     if not text or not text.strip():
         return
-    for stroke in stroke_font.render(text, size=REFDES_TEXT_SIZE_MM,
-                                     x0=0.0, y0=REFDES_LOCAL_Y_MM):
-        abs_pts = [_transform_point(cx, cy, rot, lx, ly) for (lx, ly) in stroke]
+    if reference_text is not None:
+        size = reference_text.size_mm
+        rtx, rty = reference_text.position
+        rt_rot = reference_text.rotation_deg
+    else:
+        size = REFDES_TEXT_SIZE_MM
+        rtx = rty = rt_rot = None
+    for stroke in stroke_font.render(text, size=size, x0=0.0,
+                                     y0=(0.0 if reference_text is not None
+                                         else REFDES_LOCAL_Y_MM)):
+        if reference_text is not None:
+            # Text-local rotate-then-translate to the footprint's authored
+            # anchor, THEN the component's own board placement (see docstring).
+            footprint_local = [_transform_point(rtx, rty, rt_rot, lx, ly) for (lx, ly) in stroke]
+            abs_pts = [_transform_point(cx, cy, rot, lx, ly) for (lx, ly) in footprint_local]
+        else:
+            abs_pts = [_transform_point(cx, cy, rot, lx, ly) for (lx, ly) in stroke]
         if len(abs_pts) >= 2:
             # OPEN polyline (closed=False): a glyph stroke must NEVER gain a
             # closing segment back to its first point (unlike an authored
@@ -1535,8 +1566,16 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         # transform (comp.placement), applied explicitly here via the same
         # place_point (_transform_point) every other component-local
         # primitive in this worker goes through.
+        #
+        # 019f77fd6d69: pass the footprint's OWN authored reference-text
+        # placement, when it has one, so the designator lands where the
+        # footprint's author actually put it instead of always the fixed
+        # default offset (see _emit_refdes's docstring for the two-step
+        # transform this triggers). footprint_for is the SAME lookup the pad
+        # numbering above already uses on this loop iteration.
         _emit_refdes(g, ref, comp.placement.position[0], comp.placement.position[1],
-                     comp.placement.rotation_deg, top)
+                     comp.placement.rotation_deg, top,
+                     reference_text=board.footprint_for(comp).reference_text)
 
     for via in board.vias:
         _emit_via(g, via.position[0], via.position[1], via.diameter_mm, via.drill_mm,

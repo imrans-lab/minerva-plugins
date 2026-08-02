@@ -278,25 +278,38 @@ def test_real_dip6_legacy_arc_normalizes_center_start_sweep():
 
 
 _EXPECTED_SEED_MARKERS = {
+    # 019f77fd6d69: each of these seed footprints carries EXACTLY one fp_text
+    # on F.SilkS — its own visible ``reference`` field — and nothing else on
+    # that layer. The parser now captures that one node (see
+    # footprints._is_captured_reference_fp_text / _parse_reference_text), so
+    # its ``('uncaptured_graphic', 'F.SilkS', 'silk')`` marker drops OUT of
+    # this census entirely (count reaches zero). Only the reference field is
+    # affected — the F.Fab entries below are untouched (F.Fab stays out of
+    # scope; see fab_capability.py's frozen boundary).
     "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal":
-        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+        (("uncaptured_graphic", "F.Fab", "fab"),),
     "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical":
-        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+        (("uncaptured_graphic", "F.Fab", "fab"),),
     "Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical":
-        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+        (("uncaptured_graphic", "F.Fab", "fab"),),
     "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical":
-        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+        (("uncaptured_graphic", "F.Fab", "fab"),),
     "EVP-ASAC1A:SW_EVP-ASAC1A":
-        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    # ESP32-S3-DevKitC is the control case: its F.SilkS carries the reference
+    # field (now captured, excluded) PLUS its own ``value`` field and ~45
+    # ``user`` GPIO-label fp_text nodes on the SAME layer — none of those are
+    # captured (value/user stay unmodeled, docs/gerbers.md), so the
+    # ('uncaptured_graphic', 'F.SilkS', 'silk') marker correctly SURVIVES
+    # here (nonzero count), unlike the reference-only footprints above.
     "Espressif:ESP32-S3-DevKitC":
         (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
     "MountingHole:MountingHole_3.2mm_M3": (
         ("uncaptured_graphic", "Cmts.User", "documentation"),
-        ("uncaptured_graphic", "F.SilkS", "silk"),
         ("uncaptured_graphic", "F.Fab", "fab"),
     ),
     "Package_DIP:DIP-6_W7.62mm_Socket":
-        (("uncaptured_graphic", "F.SilkS", "silk"), ("uncaptured_graphic", "F.Fab", "fab")),
+        (("uncaptured_graphic", "F.Fab", "fab"),),
 }
 
 
