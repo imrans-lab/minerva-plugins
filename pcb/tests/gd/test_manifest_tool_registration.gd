@@ -99,10 +99,20 @@ func _init() -> void:
 	# tools + the 4 campaign-2-epoch-B unit-3 cutout tools (list_cutouts,
 	# describe_cutout, create_cutout, delete_cutout — the zone surface's
 	# four-tool subset, minus set_net/set_layer/set_outline, which a netless,
-	# layerless cutout has nothing to name) == 60. Catches a manifest that
-	# silently dropped or duplicated an unrelated entry while a round's diff
-	# was being made.
-	check("total registered tool count == 60", registered.size() == 60,
+	# layerless cutout has nothing to name) == 60, + the 10 C4a routing-workspace
+	# verb tools (workspace_propose, workspace_list, workspace_get_active,
+	# workspace_pin, workspace_unpin, workspace_reject, workspace_commit,
+	# workspace_reroute_route, workspace_reroute_span, workspace_check — the
+	# agent's doorway onto the same verbs the canvas candidate menu offers a
+	# human; DCR 019f7095c395 S4) == 70. Catches a manifest that silently
+	# dropped or duplicated an unrelated entry while a round's diff was being
+	# made.
+	#
+	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
+	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
+	# rather than riding along inside a feature change where a silently-dropped
+	# entry could hide behind it.
+	check("total registered tool count == 70", registered.size() == 70,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
