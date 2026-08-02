@@ -13,6 +13,16 @@
 # unrelated failures. A pour is a big enough new geometry class to deserve its
 # own board.
 #
+# ALSO USED BY (C9): pcb/scripts/hermetic-fab-check.sh's default synthetic
+# board. It already carries pours + a keepout + named refs (silk designators
+# are automatic on any compiled board with refs — no separate authoring
+# needed); C9 added `value`/`mpn` to R1/R2 (see the components: block) so the
+# same board is also assembly-identity-clean, letting one fixture exercise
+# every v1 fab output (copper incl. pour, drill, mask, paste, silk, BOM+CPL)
+# in a single compile. Reused rather than minting a third board — see the
+# parity_corners rationale just above for why a NEW board was warranted here
+# but a fourth one for C9 was not.
+#
 # WHAT EACH FEATURE IS FOR — every one is a distinct way a filler can be wrong:
 #
 #   FOREIGN-NET SMD PAD (R1.2, R2.2 on SIG, inside the pour)
@@ -83,8 +93,20 @@ design_rules:
 components:
 
 # Same-net pad 1 (GND) + foreign-net pad 2 (SIG), both inside the pour.
+#
+# value/mpn (C9): tolerant Extra fields (board-yaml.md; same precedent as
+# assembly_boards/assembly_fixture.yaml) added so this board is ALSO
+# assembly-identity-clean for the C9 hermetic-fab-check rehearsal, which
+# needs one board that exercises pours + keepout + silk designators (refs
+# R1/R2, emitted automatically by the production compile path) + BOM/CPL in
+# a single compile. `value` is a first-class compiled field (compile_board.py
+# reads comp["value"]); `mpn` is not read by compile at all — it passes
+# through inert and is read only by assembly_outputs.py's raw-dict BOM/CPL
+# path. Neither affects the zone-fill geometry this fixture exists for.
 - ref: R1
   footprint: R_0805
+  value: "10k"
+  mpn: C25804
   x_mm: 9.0
   y_mm: 8.0
   rotation_deg: 0
@@ -96,6 +118,8 @@ components:
 # and the containment check will not.
 - ref: R2
   footprint: R_0805
+  value: "10k"
+  mpn: C25804
   x_mm: 21.0
   y_mm: 16.0
   rotation_deg: 90
