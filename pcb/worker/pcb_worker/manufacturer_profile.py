@@ -15,17 +15,20 @@ too):
 * An unknown id (no matching file) is an ERROR.
 * Malformed JSON, a non-object top level, a missing/wrong-type ``version``,
   a missing/non-object ``floor``, is an ERROR.
-* A floor missing ANY of the ten :class:`ManufacturingConstraints` fields is
-  an ERROR -- there is NO merge with another profile's (e.g. v1's) values to
-  fill the gap. A loader that filled missing keys from a default floor would
-  produce a hybrid whose digest CLAIMS to be a specific board house while
+* A floor missing ANY of the ten REQUIRED :class:`ManufacturingConstraints`
+  fields is an ERROR -- there is NO merge with another profile's (e.g. v1's)
+  values to fill the gap. A loader that filled missing keys from a default floor
+  would produce a hybrid whose digest CLAIMS to be a specific board house while
   actually enforcing someone else's numbers on the fields it didn't author --
   exactly the silent failure this module exists to prevent.
 * A floor declaring an EXTRA (unrecognized) field is also an ERROR: an
   authored key with no reader is a rule that lies about being in force (the
   same argument ``compile_board._reject_unread_net_class_fields`` makes for
-  net classes).
-* A non-numeric floor value is an ERROR.
+  net classes). ``OPTIONAL_FLOOR_FIELDS`` are recognized, so they are not
+  "extra"; everything outside both tuples still fails.
+* A non-numeric floor value is an ERROR -- for OPTIONAL fields exactly as much
+  as for required ones. Optional governs whether a field may be ABSENT, never
+  whether it may be wrong.
 
 Callers never catch a partial success: :func:`load_rule_profile` returns a
 COMPLETE :class:`LoadedRuleProfile` or raises :class:`RuleProfileError`.
@@ -80,6 +83,24 @@ REQUIRED_FLOOR_FIELDS: tuple[str, ...] = (
     "solder_mask_clearance_mm",
     "solder_mask_expansion_mm",
     "copper_to_edge_mm",
+)
+
+# Floor fields a profile MAY declare and that a reader consumes when present.
+#
+# WHY A SECOND TIER AT ALL, given the module's whole argument is that a missing
+# field must fail rather than default. The required ten are quantities every
+# board house publishes, so an absent one means the profile is INCOMPLETE and
+# guessing it would invent a rule. `min_hole_to_copper_mm` is different in kind:
+# neither shipped profile states it, and a fab that does not publish a
+# hole-to-copper number has not thereby set it to zero — it has said nothing.
+# `None` records "said nothing", and the pour falls back to the ordinary copper
+# clearance, which is the behaviour that was already in force.
+#
+# THE FAIL-CLOSED PART IS NOT WEAKENED: an optional field that IS declared gets
+# the same numeric validation and the same unknown-field rejection as a required
+# one. What is optional is its PRESENCE, never its correctness.
+OPTIONAL_FLOOR_FIELDS: tuple[str, ...] = (
+    "min_hole_to_copper_mm",
 )
 
 
@@ -164,7 +185,7 @@ def load_rule_profile(
             f"rule profile {profile_id!r} floor is missing field(s) {'/'.join(missing)}; "
             f"a profile must supply all ten ManufacturingConstraints fields or fail "
             f"(no merge with another profile's defaults)")
-    extra = sorted(set(floor) - set(REQUIRED_FLOOR_FIELDS))
+    extra = sorted(set(floor) - set(REQUIRED_FLOOR_FIELDS) - set(OPTIONAL_FLOOR_FIELDS))
     if extra:
         raise RuleProfileError(
             f"rule profile {profile_id!r} floor declares unknown field(s) {'/'.join(extra)}; "
@@ -172,6 +193,26 @@ def load_rule_profile(
 
     numeric_floor: dict[str, float] = {}
     for key in REQUIRED_FLOOR_FIELDS:
+        value = floor[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuleProfileError(
+                f"rule profile {profile_id!r} floor.{key} must be a number; got {value!r}")
+        numeric_floor[key] = float(value)
+
+    # OPTIONAL fields are validated exactly as strictly as required ones when
+    # PRESENT, and are simply absent from `numeric_floor` when not. Two
+    # consequences, both deliberate:
+    #   * The DIGEST is computed over `numeric_floor`, so a profile that omits
+    #     an optional field digests exactly as it did before the field existed
+    #     — adding the field pins no existing profile to a new id. A profile
+    #     that DECLARES one digests differently, which is correct: its rule set
+    #     really did change.
+    #   * `ManufacturingConstraints(**numeric_floor)` then takes the field's own
+    #     `None` default, which is the "this profile states no such rule" fact
+    #     rather than a substituted number.
+    for key in OPTIONAL_FLOOR_FIELDS:
+        if key not in floor:
+            continue
         value = floor[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise RuleProfileError(

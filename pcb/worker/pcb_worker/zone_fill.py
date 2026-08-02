@@ -74,13 +74,31 @@ A pour whose fill is legitimately EMPTY (entirely covered by a keepout, say) is
 NOT an error — it returns ``()``. That is a computed-and-empty pour, which is a
 different fact from ``None`` (uncomputed), and the emitters distinguish them.
 
+=== ISLANDS AND SLIVERS ARE REFUSED, NOT EMITTED AND NOT CULLED ===
+
+A fill that breaks into a region overlapping no same-net copper (an ISLAND), or
+into a region nowhere as wide as the profile's ``min_trace_width_mm`` (a
+SLIVER), is REFUSED by name. Both used to be emitted in silence, recorded only
+in this docstring and in three skipped tests — a skip reads as coverage in a
+green tally, which is why they are now executable.
+
+KiCad culls both instead, and the difference is not an oversight: it culls
+against per-zone properties ITS schema has and ours does not (``min_thickness``,
+``island_removal_mode``). Deleting the author's copper by a rule the author
+never wrote is exactly the silent-damage class every other refusal here exists
+to prevent. See :func:`_refuse_unfabricable_regions` for the measurement behind
+this, for why it does not prejudge the thermal ruling, and for the one case it
+deliberately does not catch (sub-floor necks inside an otherwise sound region,
+which need an authored min-thickness).
+
 === KNOWN v1 GAPS (stated, not hidden) ===
 
-  * ISLAND REMOVAL. A pour fragment connected to no same-net copper is kept.
-    KiCad drops such islands by default, so a fixture that produces one will not
-    reach oracle parity. Dropping copper the author drew needs a rule, and the
-    schema has none (``min_thickness_mm`` and ``priority`` exist in the IR and
-    are never populated). Left in, and left loud.
+  * ZONE MIN-THICKNESS IS NOT AUTHORABLE. ``ResolvedZone.min_thickness_mm``
+    exists in the IR and is never populated, so the deflate/re-inflate opening
+    KiCad performs — which sheds sub-thickness necks and rounds every convex
+    corner — has no number to run at. Adding one is a board-schema change and
+    needs the Go validator to agree, or validate and compile would disagree
+    about a fabrication parameter.
   * POUR-TO-POUR PRIORITY. Two pours of different nets overlapping on one layer
     would both claim the overlap. ``priority`` is unpopulated, so there is no
     authored answer; the case is refused rather than resolved arbitrarily.
@@ -319,6 +337,45 @@ def _is_outer(ring) -> bool:
     return _ring_area2(ring) > 0
 
 
+def _group_regions(pc, zone_id: str, solution):
+    """Split a Clipper contour set into DISJOINT FILLED REGIONS.
+
+    Returns ``(outers, {outer_index: [hole, ...]})``. Each outer ring plus the
+    holes assigned to it is one physically separate piece of copper — the unit
+    both the island check and the sliver check are stated over, and the unit
+    :func:`_fracture` turns into one keyhole ring.
+
+    Extracted so those three readers share ONE definition of "a region". They
+    used to be the same six lines written twice, which is precisely how a check
+    ends up grading a different set of shapes than the emitter emits.
+    """
+    outers = [list(p) for p in solution if _is_outer(p)]
+    holes = [list(p) for p in solution if not _is_outer(p)]
+    assigned: dict[int, list[list[tuple[int, int]]]] = {i: [] for i in range(len(outers))}
+    if not outers:
+        # Returned BEFORE the hole assignment below, which would otherwise raise
+        # "a void inside no filled region" for every hole. Preserved exactly as
+        # _fracture ordered it before this function was extracted: an empty
+        # solution is an empty fill, not a malformed one.
+        return outers, assigned
+    # Assign each hole to the outer ring that contains it. A hole is inside
+    # exactly one outer ring in a well-formed Clipper solution.
+    for hole in holes:
+        probe = hole[0]
+        owner = None
+        for index, outer in enumerate(outers):
+            if pc.PointInPolygon(probe, outer) != 0:
+                owner = index
+                break
+        if owner is None:
+            raise ZoneFillError(
+                zone_id,
+                "fill produced a void that lies inside no filled region — the "
+                "boolean result is not a well-formed polygon set")
+        assigned[owner].append(hole)
+    return outers, assigned
+
+
 def _fracture(pc, zone_id: str, solution) -> list[list[tuple[int, int]]]:
     """Turn Clipper's (outer + hole) contour set into self-touching keyhole rings.
 
@@ -342,30 +399,13 @@ def _fracture(pc, zone_id: str, solution) -> list[list[tuple[int, int]]]:
     fracture and raises: the check is exact (integer domain, no tolerance), so it
     cannot pass a fracture that lost or double-counted area.
     """
-    outers = [list(p) for p in solution if _is_outer(p)]
-    holes = [list(p) for p in solution if not _is_outer(p)]
+    outers, assigned = _group_regions(pc, zone_id, solution)
     if not outers:
         return []
 
     # Doubled areas throughout — exact integers, never halved, never floats.
-    expected = sum(_ring_area2(r) for r in outers + holes)  # holes are negative
-
-    # Assign each hole to the outer ring that contains it. A hole is inside
-    # exactly one outer ring in a well-formed Clipper solution.
-    assigned: dict[int, list[list[tuple[int, int]]]] = {i: [] for i in range(len(outers))}
-    for hole in holes:
-        probe = hole[0]
-        owner = None
-        for index, outer in enumerate(outers):
-            if pc.PointInPolygon(probe, outer) != 0:
-                owner = index
-                break
-        if owner is None:
-            raise ZoneFillError(
-                zone_id,
-                "fill produced a void that lies inside no filled region — the "
-                "boolean result is not a well-formed polygon set")
-        assigned[owner].append(hole)
+    expected = sum(_ring_area2(r) for r in outers)
+    expected += sum(_ring_area2(h) for holes in assigned.values() for h in holes)
 
     rings: list[list[tuple[int, int]]] = []
     for index, outer in enumerate(outers):
@@ -506,6 +546,41 @@ def _clearance_mm(zone: ResolvedZone, board: ResolvedBoard,
     return floor
 
 
+def _hole_clearance_mm(zone: ResolvedZone, board: ResolvedBoard,
+                       class_clearance: dict[str, float], hole) -> float:
+    """The gap this pour must leave around one DRILLED hole.
+
+    The copper clearance from :func:`_clearance_mm`, raised to the profile's
+    ``min_hole_to_copper_mm`` when it states one. MAXIMUM, never replacement:
+    both are floors, and a hole that also carries foreign copper (a via) must
+    still clear that copper by the copper rule.
+
+    WHY A SEPARATE RULE AT ALL. Copper-to-copper clearance answers "how close may
+    two potentials sit"; hole-to-copper answers "how far can the drill wander".
+    They are different physical failures with different numbers, and a board
+    house publishes them separately. Before this existed the pour carved every
+    hole at the copper number, which on the reference fixture was 0.2 mm against
+    KiCad's 0.25 mm — MEASURED as the single largest term in the oracle parity
+    gap (0.4626 of 0.5487 mm^2), showing up as a 50.5 um annulus around one
+    mounting hole. Not a geometry error on either side: it was the only rule our
+    schema could state.
+
+    APPLIED ONLY TO HOLES THE POUR ACTUALLY CARVES, which is why this is called
+    after the same-net-plated skip above and not before it. Raising the gap on a
+    same-net stitching via would reinstate the moat bug that skip exists to
+    prevent — and there is nothing to protect there anyway: the barrel is the
+    same net as the pour, so a drill that wanders into it shorts nothing.
+    """
+    gap = _clearance_mm(zone, board, class_clearance, hole.net_id)
+    hole_to_copper = board.design_rules.minimums.min_hole_to_copper_mm
+    if hole_to_copper is None:
+        # The profile states no hole-to-copper rule. The copper clearance is then
+        # the only floor our schema can name, which is what v1 has always done —
+        # now as a stated fallback rather than an unexamined one.
+        return gap
+    return max(gap, hole_to_copper)
+
+
 def _obstacle_paths(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
                     class_clearance: dict[str, float]):
     """Every (path, closed?, offset_nm) this pour must carve around, on its layer.
@@ -581,7 +656,7 @@ def _obstacle_paths(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
         # it for the obvious reason.
         if hole.net_id is not None and hole.net_id == zone.net_id and hole.plated:
             continue
-        gap = _clearance_mm(zone, board, class_clearance, hole.net_id)
+        gap = _hole_clearance_mm(zone, board, class_clearance, hole)
         for capsule in hole.capsules:
             items.append((_capsule_ring(capsule), False, _to_nm(capsule.r + gap)))
 
@@ -739,6 +814,254 @@ def _refuse_overlapping_pours(pc, pours) -> None:
                     f"this schema, so which pour owns it has no answer to read")
 
 
+QUANTUM_NM = 1
+"""One nanometre — the smallest distance the emitted Gerber can express.
+
+Used to dilate same-net copper before the island test so that copper TOUCHING a
+region counts as attached to it. Clipper's intersection of two shapes that share
+only a boundary is empty, which would report a pad sitting exactly on the pour's
+edge as unconnected. This is not a tolerance and no number was chosen: one
+quantum is the smallest representable non-zero in the domain the whole filler
+works in, so it can absorb an exact-touch and nothing else.
+"""
+
+
+def _same_net_copper_paths(pc, zone: ResolvedZone, projection):
+    """Same-net copper on this pour's layer, as a dilated integer-nm path set.
+
+    This is what the pour is FOR: under SOLID connect it is not carved around,
+    so a region of fill that overlaps some of it is electrically attached to the
+    net, and a region that overlaps none of it is attached to nothing.
+    """
+    layer_canon = kicad_to_canon(zone.layer.id)
+    items = []
+    for prim in projection.copper:
+        if prim.net_id is None or prim.net_id != zone.net_id:
+            continue
+        if layer_canon not in {kicad_to_canon(lid) for lid in prim.layers}:
+            continue
+        if isinstance(prim.shape, Capsule):
+            items.append((_capsule_ring(prim.shape), False,
+                          _to_nm(prim.shape.r) + QUANTUM_NM))
+        elif isinstance(prim.shape, OrientedRect):
+            items.append((_rect_ring(prim.shape), True, QUANTUM_NM))
+        else:
+            raise ZoneFillError(
+                zone.id,
+                f"same-net copper primitive {prim.entity_id!r} has shape "
+                f"{type(prim.shape).__name__}, which the filler cannot inflate")
+    if not items:
+        return []
+    return _inflate(pc, items)
+
+
+def _net_name(board: ResolvedBoard, net_id: str | None) -> str:
+    """The authored net NAME for a diagnostic, falling back to the id.
+
+    A refusal that says "overlaps no net:2781cb9ca13e..." names a hash the author
+    has never seen; one that says "overlaps no GND copper" names the thing they
+    drew. The id is kept as the fallback rather than dropped, so a net that
+    somehow has no entry still identifies itself.
+    """
+    if net_id is None:
+        return "(netless)"
+    for net in board.nets:
+        if net.id == net_id:
+            return net.name
+    return net_id
+
+
+def _region_bbox_mm(outer):
+    xs = [p[0] for p in outer]
+    ys = [p[1] for p in outer]
+    return (_to_mm(min(xs)), _to_mm(min(ys)), _to_mm(max(xs)), _to_mm(max(ys)))
+
+
+def _region_area_mm2(outer, holes) -> float:
+    doubled = _ring_area2(outer) + sum(_ring_area2(h) for h in holes)
+    return abs(doubled) / 2.0 / (NM_PER_MM * NM_PER_MM)
+
+
+def _refuse_unfabricable_regions(pc, zone: ResolvedZone, board: ResolvedBoard,
+                                 projection, solution) -> None:
+    """Refuse a pour whose fill broke into copper that cannot go to fab.
+
+    TWO FAULTS, both stated over one disjoint filled REGION (see
+    :func:`_group_regions`), both previously EMITTED IN SILENCE and recorded only
+    as skipped tests:
+
+      * ISLAND — a region overlapping no same-net copper at all. It is live
+        copper attached to nothing: an antenna, floating at whatever potential
+        it couples to, and on a ground pour it is also ground plane the designer
+        believes they have and do not. KiCad removes these by default
+        (MEASURED against KiCad 9.0.9: a 20 mm^2 severed fragment vanishes from
+        ``ZONE_FILLER``'s output, and reappears at exactly 19.9745 mm^2 when
+        ``island_removal_mode`` is set to 1 or 2 — so removal is the default and
+        the fragment is exactly what removal takes).
+      * SLIVER — a region that is nowhere as wide as the board house's minimum
+        feature, so no part of it can be etched reliably. Detected by deflating
+        the region by half the floor and asking whether ANYTHING survives: a
+        shape contains a disc of radius d/2 exactly when it is at least d wide
+        somewhere, so an empty deflation is a proof of sub-floor width, not an
+        estimate of one. No tolerance and no area threshold appears here.
+
+    === WHY REFUSE RATHER THAN CULL, WHEN KiCad CULLS ===
+
+    KiCad culls both, and we deliberately do not copy it, because KiCad culls
+    against NUMBERS ITS AUTHOR SUPPLIED and we have none. Its sliver cull runs at
+    the zone's own ``min_thickness`` (default 0.25 mm) and its island cull at the
+    zone's own ``island_removal_mode``; both are per-zone authored properties in
+    its schema. Ours has neither field, and ``ResolvedZone.min_thickness_mm``
+    exists in the IR precisely as a place one would go — it is never populated.
+
+    So the choice is not "cull or refuse", it is "invent a rule and silently
+    delete the author's copper by it, or hand the author the fact". Deleting
+    copper on a rule nobody wrote is the failure mode this module's every other
+    refusal exists to prevent, and it is worse here than elsewhere because the
+    deletion is invisible: the pour still fills, still passes DRC, and still
+    emits plausible Gerbers with less ground plane than the designer drew.
+
+    THE FLOOR IS NOT INVENTED. ``min_trace_width_mm`` is the pinned profile's own
+    published minimum feature — a rule the author DID write, by choosing that
+    board house. A fragment thinner than it is unmanufacturable by the fab's own
+    statement, which is a fact about the fab and not a policy of ours.
+
+    === WHY THIS DOES NOT PREJUDGE THE THERMAL RULING (R-d) ===
+
+    Both faults would, in general, interact with thermal relief: under spokes it
+    is the SPOKES that attach a pad's surrounding fill to the pour, so which
+    regions count as islands can depend on spoke geometry. That interaction
+    cannot arise here, because :func:`_refuse_thermal` refuses any board that
+    authors thermal fields BEFORE the fill runs. Everything this function ever
+    sees is SOLID-connect fill, where "region overlaps same-net copper" is the
+    whole of the connectivity question — the measurement above confirms KiCad
+    reaches the same verdict on the same geometry in both modes.
+
+    When R-d lands and spokes are implemented, the spokes become part of the fill
+    and both tests read them for free: a region joined by a spoke overlaps the
+    pad it is spoked to, and a spoke narrower than the minimum feature is a
+    genuine sliver rather than a false positive. What must NOT happen is spokes
+    being added downstream of this check.
+
+    === WHAT THIS DOES NOT CATCH ===
+
+    Two things, both xfailed by name in tests/test_zone_fill.py rather than
+    skipped, so the tally counts them as open:
+
+      * Sub-floor copper INSIDE an otherwise sound region — a thin neck or spike
+        on a fragment that is elsewhere wide. Detecting it needs the
+        deflate/inflate opening KiCad performs, which rounds every convex corner
+        and so cannot be distinguished from a real defect without a fitted area
+        threshold; the honest form is an authored ``min_thickness`` applied as
+        KiCad applies it.
+      * A pour with NO same-net copper on its layer at all. That is a whole-pour
+        fact rather than a severed-fragment fact, and the island test is scoped
+        away from it deliberately — see the ``if not attached`` branch.
+    """
+    outers, assigned = _group_regions(pc, zone.id, solution)
+    if not outers:
+        return
+
+    floor_mm = board.design_rules.minimums.min_trace_width_mm
+    floor_nm = _to_nm(floor_mm)
+    attached = _same_net_copper_paths(pc, zone, projection)
+
+    faults: list[tuple[tuple, str]] = []
+    survivors: list[tuple[tuple, float, tuple, bool]] = []
+    for index, outer in enumerate(outers):
+        holes = assigned[index]
+        bbox = _region_bbox_mm(outer)
+        area = _region_area_mm2(outer, holes)
+        sort_key = (bbox[0], bbox[1], bbox[2], bbox[3], area)
+
+        # SLIVER IS REPORTED IN PREFERENCE TO ISLAND when a region is both, and
+        # the order is fixed rather than incidental: a fragment that cannot be
+        # etched at all is a fact about the fab, while whether it connects to
+        # anything is a fact about the netlist, and reporting the second while
+        # the first holds would send the author to fix the wrong thing.
+        if floor_nm > 0 and not _survives_deflation(pc, outer, holes, floor_nm):
+            faults.append((sort_key, (
+                f"SLIVER at ({bbox[0]:.4f},{bbox[1]:.4f})-({bbox[2]:.4f},"
+                f"{bbox[3]:.4f}) of {area:.6f} mm^2 is nowhere as wide as the "
+                f"{floor_mm} mm minimum feature this board's profile publishes "
+                f"(min_trace_width_mm), so no part of it etches reliably")))
+            continue
+
+        survivors.append((sort_key, area, bbox,
+                          _overlaps_any(pc, outer, holes, attached)))
+
+    # AN ISLAND IS A REGION SEVERED FROM *THIS POUR'S OWN* ATTACHED COPPER, so
+    # the rule only engages once some region of this pour IS attached. That
+    # condition is the whole of the scoping, and it is not a convenience:
+    #
+    #   * If NO region is attached, the pour as a whole touches none of its net
+    #     — a bottom-side GND pour on a board whose only GND copper is top-side,
+    #     say. Nothing was severed from anything. Reporting every region would
+    #     be reporting a WHOLE-POUR fact ("this pour attaches to nothing") in
+    #     the vocabulary of a per-fragment one, while having lost the ability to
+    #     tell a severed fragment from an intact one. That fact deserves its own
+    #     diagnostic and is recorded as an open in tests/test_zone_fill.py, not
+    #     smuggled in here.
+    #   * If SOME region is attached and others are not, the carve genuinely cut
+    #     those others loose. That is the fault this rule names.
+    #
+    # A netless pour also lands in the first case (nothing can match a null net),
+    # which keeps a future schema change from silently deleting its copper;
+    # compile_board rejects one upstream today.
+    if any(is_attached for _, _, _, is_attached in survivors):
+        for sort_key, area, bbox, is_attached in survivors:
+            if is_attached:
+                continue
+            faults.append((sort_key, (
+                f"ISLAND at ({bbox[0]:.4f},{bbox[1]:.4f})-({bbox[2]:.4f},"
+                f"{bbox[3]:.4f}) of {area:.6f} mm^2 overlaps no "
+                f"{_net_name(board, zone.net_id)} copper on "
+                f"{kicad_to_canon(zone.layer.id)}, so it is live copper "
+                f"severed from the rest of this pour")))
+
+    if not faults:
+        return
+    # Sorted by geometry, never by Clipper's contour order, so the message a
+    # given board produces is the same message on every run and every platform.
+    detail = "\n  - ".join(text for _, text in sorted(faults))
+    raise ZoneFillError(
+        zone.id,
+        f"fill broke into {len(faults)} region(s) that cannot be fabricated:\n"
+        f"  - {detail}\n"
+        f"Neither fault is culled: dropping copper the author drew needs a rule "
+        f"the author wrote, and this schema has neither a zone min-thickness nor "
+        f"an island-removal mode to read one from")
+
+
+def _survives_deflation(pc, outer, holes, floor_nm: int) -> bool:
+    """True when the region still holds a disc of radius ``floor_nm/2``.
+
+    Exactly the "is it ever as wide as the floor" question, asked in the integer
+    kernel. NEGATIVE offsets on a region are why the holes must be included: a
+    ring of copper around a big void is thin everywhere, and deflating only its
+    outer boundary would report it as solid.
+    """
+    offset = pc.PyclipperOffset()
+    offset.MiterLimit = MITER_LIMIT
+    offset.ArcTolerance = ARC_TOLERANCE_NM
+    offset.AddPath(outer, pc.JT_ROUND, pc.ET_CLOSEDPOLYGON)
+    for hole in holes:
+        offset.AddPath(hole, pc.JT_ROUND, pc.ET_CLOSEDPOLYGON)
+    return bool(offset.Execute(-floor_nm / 2.0))
+
+
+def _overlaps_any(pc, outer, holes, clip_paths) -> bool:
+    """True when the region shares ANY area with ``clip_paths``."""
+    if not clip_paths:
+        return False
+    clipper = pc.Pyclipper()
+    clipper.AddPath(outer, pc.PT_SUBJECT, True)
+    for hole in holes:
+        clipper.AddPath(hole, pc.PT_SUBJECT, True)
+    clipper.AddPaths(clip_paths, pc.PT_CLIP, True)
+    return bool(clipper.Execute(pc.CT_INTERSECTION, pc.PFT_NONZERO, pc.PFT_NONZERO))
+
+
 def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
               class_clearance: dict[str, float]) -> tuple[PolygonGeometry, ...]:
     subject = _contour_ring(zone)
@@ -775,6 +1098,12 @@ def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
         # Legitimately nothing left (fully covered by a keepout, say). A COMPUTED
         # empty pour, which is not the same fact as an uncomputed one.
         return ()
+
+    # BEFORE fracturing, because fracturing merges each region's voids into a
+    # self-touching keyhole and the two checks below are stated over regions and
+    # their voids as separate rings. Checking afterwards would ask both questions
+    # of a shape that no longer distinguishes copper from the window in it.
+    _refuse_unfabricable_regions(pc, zone, board, projection, solution)
 
     rings = _fracture(pc, zone.id, solution)
     polygons = []

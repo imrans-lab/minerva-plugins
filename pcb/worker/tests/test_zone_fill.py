@@ -1,16 +1,18 @@
-"""PARKED — zone-fill cases authored during C6, not collected this epoch.
+"""ZONE FILL — hand-derived arithmetic and the refusal matrix.
 
-Named ``pending_*`` so pytest's default ``test_*`` discovery never picks it up
-(verified: ``--collect-only`` reports zero of these). It is checked in inert, and
-it py-compiles, so it cannot rot silently while it waits.
+LIVE AND COLLECTED. This file was authored during C6 as ``pending_zone_fill.py``,
+deliberately outside pytest's ``test_*`` discovery, and its docstring said so.
+It has since been renamed into the suite, and that paragraph went on claiming
+"``--collect-only`` reports zero of these" while every test in it ran — a
+docstring asserting its own file was inert. Corrected here, in the same change
+that removed three silent skips from it, because a stale claim about what is
+covered is the same failure as a skip that reads as green.
 
-WHAT IS PARKED HERE, AND WHY IT IS NOT IN THE LIVE SUITE. The executable tests
-that shipped with C6 prove the fill is RIGHT (oracle parity), REPRODUCIBLE
-(determinism gate) and FAIL-CLOSED at the four emitter seals. These add the
-hand-derived arithmetic and the refusal matrix — the cases whose value is that a
-human worked out the answer independently of the code, which is exactly the kind
-of test the epoch's regime holds until the boundary so the numbers get read
-rather than run.
+WHAT IS HERE. The executable tests that shipped with C6 prove the fill is RIGHT
+(oracle parity), REPRODUCIBLE (determinism gate) and FAIL-CLOSED at the four
+emitter seals. These add the hand-derived arithmetic and the refusal matrix —
+the cases whose value is that a human worked out the answer independently of the
+code.
 
 The hand-computed coordinates below were derived on paper from the clearance
 definition (a Minkowski sum with a disc of radius = clearance), NOT copied out of
@@ -21,6 +23,7 @@ came from the implementation proves the implementation equals itself.
 from __future__ import annotations
 
 import copy
+import json
 import math
 from dataclasses import replace
 
@@ -399,49 +402,390 @@ def test_fill_is_quantized_to_whole_nanometres():
 
 
 # --------------------------------------------------------------------------
-# 5. STATED v1 GAPS — parked as the record of what v1 does NOT do.
-#    These document behaviour, they do not bless it.
+# 5. UNFABRICABLE FILL REGIONS — islands and slivers are REFUSED.
+#
+#    These three cases used to be SILENT pytest.skip()s carrying prose about
+#    what v1 did not do. A skip reads as coverage in a green tally, so the
+#    tally said 3 green over three known-broken behaviours. They are now
+#    executable, and the one piece that genuinely cannot be built inside this
+#    schema is xfail-with-reason rather than skipped.
+#
+#    EVERY EXPECTED NUMBER BELOW IS HAND-DERIVED from the clearance definition
+#    and the profile's published floor, exactly as section 1 derives its areas.
+#    None was read off the filler.
 # --------------------------------------------------------------------------
 
+# v1-fab-conservative's published minimum feature. Quoted as a literal rather
+# than read from the profile at test time: a test that imports the number it is
+# checking cannot notice the number changing.
+MIN_FEATURE_MM = 0.127
 
-def test_GAP_min_thickness_sliver_is_kept():
-    """v1 KEEPS a copper ribbon thinner than KiCad's 0.25 mm min-thickness.
 
-    Measured against the oracle at implementation time: a mounting hole placed so
-    its clearance void stopped 0.2 mm short of the pour edge left a 0.64 x 0.2 mm
-    ribbon that KiCad dropped and we kept — a 0.128 mm^2 disagreement that
-    survived a 130 um dilation, so a shape difference rather than a boundary
-    approximation.
+def _severing_trace(y_mm):
+    """A SIG trace running clear across the pour at ``y_mm``, 0.3 mm wide.
 
-    Not a defect under the current contract: no min-thickness is authorable
-    (``ResolvedZone.min_thickness_mm`` exists in the IR and is never populated),
-    and dropping copper the author drew needs a rule the author wrote. It IS a
-    fabrication concern — a sliver that thin can lift or under-etch — so it is
-    recorded here rather than left to be rediscovered.
+    Its clearance void reaches 0.15 (half width) + 0.2 (clearance) = 0.35 mm
+    each side of the centreline, so the void's near edge sits at y - 0.35. The
+    trace starts and ends OUTSIDE the pour, so the void spans the pour's full
+    width and the strip below it is a separate region.
     """
-    pytest.skip("documents a stated v1 gap; unskip when min-thickness is authorable")
+    return [{"net": "SIG", "layer": "top", "width_mm": 0.3,
+             "points": [{"x_mm": 2.0, "y_mm": y_mm}, {"x_mm": 18.0, "y_mm": y_mm}]}]
 
 
-def test_GAP_isolated_island_is_kept():
-    """v1 KEEPS a pour fragment connected to no same-net copper; KiCad drops it.
+def test_a_sub_floor_fill_fragment_is_REFUSED_and_named():
+    """A fill region nowhere as wide as the fab's minimum feature is refused.
 
-    An island is live copper attached to nothing — an antenna, and on a ground
-    pour a small one at that. KiCad removes them by default. v1 does not, for the
-    same reason as above: the rule is not authorable. A fixture containing one
-    cannot reach oracle parity, which is why the C6 fixture is laid out to avoid
-    producing one.
+    THE ARITHMETIC, on paper. Pour (3,3)-(17,17). A SIG trace at y = 3.47 puts
+    its void's near edge at 3.47 - 0.35 = 3.12, so the strip left between the
+    pour's bottom edge and that void is
+
+        y from 3.00 to 3.12   ->   0.120 mm tall
+        x from 3.00 to 17.00  ->  14.000 mm long
+        area = 14.000 * 0.120 =  1.680000 mm^2
+
+    and 0.120 mm is below v1-fab-conservative's 0.127 mm min_trace_width_mm, so
+    no part of that strip etches reliably. The refusal must NAME it: an author
+    told only "zone failed" has to rediscover which piece and why.
+
+    WHY REFUSED RATHER THAN CULLED. KiCad sheds this strip silently, at its
+    zone's own min_thickness. Our schema has no such field to read, so culling
+    would mean deleting the author's copper by a rule invented here. See
+    zone_fill._refuse_unfabricable_regions.
     """
-    pytest.skip("documents a stated v1 gap; unskip when island removal is authorable")
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
+        traces=_severing_trace(3.47)))
+    assert isinstance(result, ResolutionFailure)
+    assert "zone_fill_failed" in _errors(result)
+    message = next(d.message for d in result.diagnostics
+                   if d.code == "zone_fill_failed")
+    assert "SLIVER" in message
+    assert "1.680000 mm^2" in message, message
+    assert f"{MIN_FEATURE_MM} mm minimum feature" in message, message
+    # The bounding box locates the offending piece on the board.
+    assert "(3.0000,3.0000)-(17.0000,3.1200)" in message, message
 
 
-def test_GAP_hole_to_copper_clearance_is_not_modeled():
-    """Our schema has no hole-to-copper rule, so holes get the COPPER clearance.
+def test_a_fill_fragment_attached_to_no_same_net_copper_is_REFUSED_and_named():
+    """An island — live copper attached to nothing — is refused, not emitted.
 
-    ``ManufacturingConstraints`` carries ``min_hole_to_hole_mm`` and
-    ``min_annular_ring_mm`` but nothing for hole-to-copper. KiCad's default is
-    0.25 mm; our zone clearance on the C6 fixture is 0.20 mm, and the 50 um
-    difference is the LARGEST single term in the oracle parity gap (0.4626 of
-    0.5487 mm^2). Fabrication-relevant: a drill that wanders can break into
-    copper 0.2 mm away.
+    THE ARITHMETIC. Same pour, but the trace moves to y = 4.35 so its void's
+    near edge lands at 4.35 - 0.35 = 4.00 and the strip below is
+
+        y from 3.00 to 4.00   ->  1.000 mm tall   (7.9x the 0.127 floor, so
+                                                   this is NOT a sliver)
+        x from 3.00 to 17.00  -> 14.000 mm long
+        area = 14.000 * 1.000 = 14.000000 mm^2
+
+    The strip contains no GND copper: R1's GND pad is at (9.05, 10), far above
+    it. The rest of the pour keeps that pad and is therefore attached.
+
+    THE HEIGHT IS LOAD-BEARING. At 1.000 mm this region is comfortably
+    manufacturable, so the ONLY thing wrong with it is that it connects to
+    nothing — which is what makes this a test of the island rule and not of the
+    sliver rule wearing its name.
+
+    MEASURED AGAINST THE ORACLE (KiCad 9.0.9): pcbnew's ZONE_FILLER deletes a
+    severed fragment like this one, and restoring it requires setting
+    island_removal_mode away from its default. So the FAULT is real and
+    independently confirmed; only the response (refuse vs cull) differs, for
+    the reason the sliver test states.
     """
-    pytest.skip("documents a missing schema field; unskip when the rule exists")
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
+        traces=_severing_trace(4.35)))
+    assert isinstance(result, ResolutionFailure)
+    assert "zone_fill_failed" in _errors(result)
+    message = next(d.message for d in result.diagnostics
+                   if d.code == "zone_fill_failed")
+    assert "ISLAND" in message
+    assert "14.000000 mm^2" in message, message
+    assert "(3.0000,3.0000)-(17.0000,4.0000)" in message, message
+    # Named by the AUTHORED net name, not by the internal net id hash.
+    assert "overlaps no GND copper on top" in message, message
+    assert "severed from the rest of this pour" in message, message
+
+
+def test_sliver_wins_over_island_when_one_region_is_both():
+    """Fixed precedence, so the message does not depend on evaluation order.
+
+    The 0.120 mm strip of the sliver case is ALSO attached to no GND copper, so
+    both faults hold of it. The report names the sliver: "cannot be etched" is a
+    fact about the fab and outranks "connects to nothing", which is a fact about
+    the netlist. An author sent to fix the netlist first would reconnect a strip
+    that still cannot be made.
+    """
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}],
+        traces=_severing_trace(3.47)))
+    message = next(d.message for d in result.diagnostics
+                   if d.code == "zone_fill_failed")
+    assert "SLIVER" in message
+    assert "ISLAND" not in message, message
+    assert "1 region(s)" in message, message
+
+
+def test_a_sound_pour_trips_NEITHER_refusal():
+    """The no-false-positive seal, and the reason the two checks are safe to add.
+
+    A plain pour over both of R1's pads has one region, is far wider than the
+    floor everywhere, and holds the GND pad. Neither check may fire. Without
+    this, a check that refused everything would pass all three tests above.
+    """
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top", "outline": _rect(3, 3, 17, 17)}]))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    assert _pour(result.board).fill
+
+
+def test_a_convex_corner_is_not_mistaken_for_a_sliver():
+    """The sliver test is topological, so corner geometry cannot trip it.
+
+    KiCad's min-thickness pass rounds every convex corner, because it deflates
+    and re-inflates. A check built that way would have to tell corner rounding
+    from a real defect by area, i.e. by a fitted threshold. This one asks only
+    whether the region still contains a disc of radius floor/2 — which a square
+    corner does — so a pour made ENTIRELY of sharp corners stays clean.
+    """
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top",
+          "outline": [{"x_mm": 3, "y_mm": 3}, {"x_mm": 17, "y_mm": 3},
+                      {"x_mm": 17, "y_mm": 17}, {"x_mm": 11, "y_mm": 17},
+                      {"x_mm": 11, "y_mm": 11}, {"x_mm": 3, "y_mm": 11}]}]))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+
+
+def test_the_island_rule_is_scoped_to_pours_that_HAVE_same_net_copper():
+    """The check's reference set, pinned — this is why two older tests still pass.
+
+    A GND pour placed clear of every GND feature has no same-net copper on its
+    layer at all. "Island" means the carve SEVERED a piece from the net's
+    copper; with no such copper there is nothing to be severed from, and a check
+    that answered anyway would report every region of every floating pour while
+    having lost the ability to tell a severed fragment from an intact one.
+
+    So the rule is scoped, and the scope is sealed here rather than left as an
+    accident of the code — which is what makes the remaining hole (the xfail
+    below) a stated boundary instead of an unnoticed one.
+    """
+    result = compile_board(_board([
+        {"net": "GND", "layer": "top", "outline": _rect(2, 2, 9, 9)}]))
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    assert _pour(result.board).fill
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="STATED GAP, not a flake: a pour with NO same-net copper on its layer "
+           "is filled and emitted. It is floating copper, and KiCad would delete "
+           "all of it, but it is a WHOLE-POUR fact rather than the severed-"
+           "fragment fact the island rule is about, and the existing suite "
+           "blesses it (test_DISJOINT_same_net_pours_are_allowed). Closing it is "
+           "a separate behaviour change with its own diagnostic, NOT blocked on "
+           "the thermal ruling R-d.")
+def test_GAP_a_pour_attached_to_no_same_net_copper_at_all_is_still_emitted():
+    """The residue of the island gap, stated as a failing expectation."""
+    result = compile_board(_board([
+        {"net": "GND", "layer": "top", "outline": _rect(2, 2, 9, 9)}]))
+    assert isinstance(result, ResolutionFailure)
+    assert "zone_fill_failed" in _errors(result)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="STATED GAP, not a flake: a sub-floor NECK inside an otherwise sound "
+           "region is not detected. Catching it needs the deflate/re-inflate "
+           "opening KiCad performs, which rounds every convex corner and so "
+           "cannot be told from a real defect without a fitted area threshold. "
+           "The honest form is an authored ResolvedZone.min_thickness_mm applied "
+           "as KiCad applies it — a board-schema change that also needs the Go "
+           "validator to carry the field, or validate and compile would disagree "
+           "about a fabrication parameter. OUT OF SCOPE for a pcb/worker-only "
+           "change; NOT blocked on the thermal ruling R-d.")
+def test_GAP_a_sub_floor_neck_inside_a_sound_region_is_not_detected():
+    """The residue of the min-thickness gap, stated as a failing expectation.
+
+    A mounting hole whose void stops 0.120 mm short of the pour edge leaves a
+    crescent of copper that is thinner than the 0.127 mm floor at its waist but
+    is CONNECTED to the pour around both ends. The region as a whole is wide,
+    so the region-level deflation survives and nothing is reported.
+
+    Hole at (10, 16.68), diameter 2.0 -> void radius 1.0 + 0.2 = 1.2, so the
+    void's top reaches 16.68 + 1.2 = 17.88 against a pour edge at 18.00: a
+    0.120 mm waist.
+
+    This is the case KiCad DOES catch, at its zone min_thickness. Recorded as an
+    xfail so the tally counts it as a known open rather than as coverage.
+    """
+    result = compile_board(_board(
+        [{"net": "GND", "layer": "top", "outline": _rect(2, 2, 18, 18)}],
+        mounting_holes=[{"x_mm": 10.0, "y_mm": 16.68, "diameter_mm": 2.0,
+                         "plated": False}]))
+    assert isinstance(result, ResolutionFailure)
+    assert "zone_fill_failed" in _errors(result)
+
+
+# --------------------------------------------------------------------------
+# 6. HOLE-TO-COPPER — the rule the schema could not previously state.
+#
+#    Was a silent skip reading "documents a missing schema field". The field
+#    now exists as ManufacturingConstraints.min_hole_to_copper_mm, OPTIONAL so
+#    that a profile which publishes no such number is not made to invent one.
+# --------------------------------------------------------------------------
+
+# A floor identical to v1-fab-conservative except where a test says otherwise.
+# Spelled out rather than loaded and mutated: a fixture that copies the shipped
+# profile would silently follow it if it changed, and these expectations are
+# hand-computed against these exact numbers.
+_BASE_FLOOR = {
+    "min_trace_width_mm": 0.127, "min_clearance_mm": 0.127, "min_drill_mm": 0.2,
+    "min_finished_hole_mm": 0.2, "min_annular_ring_mm": 0.13,
+    "min_hole_to_hole_mm": 0.25, "min_mask_sliver_mm": 0.1,
+    "solder_mask_clearance_mm": 0.05, "solder_mask_expansion_mm": 0.0,
+    "copper_to_edge_mm": 0.3,
+}
+
+
+def _profile(tmp_path, **floor_overrides):
+    """Write a one-off profile and return its id."""
+    floor = dict(_BASE_FLOOR)
+    floor.update(floor_overrides)
+    (tmp_path / "probe-fab.json").write_text(
+        json.dumps({"id": "probe-fab", "version": "1", "floor": floor}),
+        encoding="utf-8")
+    return "probe-fab"
+
+
+def _holed_board(profile_id):
+    """Pour (5,5)-(15,15) with ONE netless unplated hole at (7,13), d = 2.0.
+
+    The hole sits clear of R1's pads (which are at y = 10) so its void never
+    merges with the pad void and the two areas stay separately derivable.
+    """
+    board = _board([{"net": "GND", "layer": "top", "outline": _rect(5, 5, 15, 15)}],
+                   mounting_holes=[{"x_mm": 7.0, "y_mm": 13.0,
+                                    "diameter_mm": 2.0, "plated": False}])
+    board["design_rules"]["rule_profile"] = profile_id
+    return board
+
+
+def _fill_of(board, tmp_path):
+    result = compile_board(board, profile_root=tmp_path)
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    return fill_area_mm2(_pour(result.board))
+
+
+def test_a_profile_stating_hole_to_copper_widens_the_drill_void(tmp_path):
+    """The rule reaches the copper, and by exactly the derived amount.
+
+    THE ARITHMETIC. The hole's radius is 1.0 mm. A clearance is a Minkowski sum
+    with a disc, so the void around a round hole is a disc of radius
+    (1.0 + gap) and its area is pi(1.0 + gap)^2.
+
+        gap = 0.2 (the zone clearance, no hole rule)  -> pi(1.2)^2 = 4.523893
+        gap = 0.5 (min_hole_to_copper_mm = 0.5)       -> pi(1.5)^2 = 7.068583
+
+        the pour loses exactly the annulus between them:
+            pi(1.5^2 - 1.2^2) = pi(0.81) = 2.544690 mm^2
+
+    THE TOLERANCE IS DERIVED, as everywhere else in this file. Both voids are
+    inscribed polygon approximations at ARC_TOLERANCE_NM = 5 um, so each
+    UNDER-states its circle by at most (2/3) * perimeter * t:
+
+        r = 1.2 ->  (2/3)(2*pi*1.2)(0.005) = 0.025133
+        r = 1.5 ->  (2/3)(2*pi*1.5)(0.005) = 0.031416
+
+    The difference of the two errors lies in [-0.025133, +0.031416], so 0.035
+    mm^2 is the budget and nothing smaller than the effect is being tested: the
+    annulus is 2.54 mm^2, seventy times the budget.
+    """
+    strict = _profile(tmp_path, min_hole_to_copper_mm=0.5)
+    with_rule = _fill_of(_holed_board(strict), tmp_path)
+
+    (tmp_path / "loose-fab.json").write_text(
+        json.dumps({"id": "loose-fab", "version": "1", "floor": dict(_BASE_FLOOR)}),
+        encoding="utf-8")
+    without_rule = _fill_of(_holed_board("loose-fab"), tmp_path)
+
+    lost = without_rule - with_rule
+    assert lost == pytest.approx(math.pi * (1.5 ** 2 - 1.2 ** 2), abs=0.035)
+
+
+def test_a_profile_omitting_hole_to_copper_carves_at_the_copper_clearance(tmp_path):
+    """The fallback, pinned as a NUMBER rather than as "unchanged".
+
+    A profile that states no hole-to-copper rule leaves the pour carving the
+    hole at the ordinary 0.2 mm zone clearance — v1's behaviour, now a stated
+    fallback. Pinned against the hand-derived total so that "no rule" cannot
+    quietly start meaning "some other rule":
+
+        pour                     10 x 10           = 100.000000 mm^2
+        minus R1 pad 2's void    (section 1)       =  -2.555664
+        minus the hole's void    pi(1.0 + 0.2)^2   =  -4.523893
+                                                     ------------
+                                                      92.920443 mm^2
+
+    Budget: the two inscribed voids under-state by at most 0.004189 and 0.025133
+    respectively, so 0.030 mm^2.
+    """
+    plain = _profile(tmp_path)
+    assert "min_hole_to_copper_mm" not in _BASE_FLOOR
+    expected = 100.0 - (1.40 * 1.85 - 4 * 0.04 + math.pi * 0.04) - math.pi * 1.2 ** 2
+    assert _fill_of(_holed_board(plain), tmp_path) == pytest.approx(expected, abs=0.030)
+
+
+def test_hole_to_copper_does_NOT_reinstate_the_same_net_stitching_via_moat(tmp_path):
+    """The trap this rule could most easily have re-opened.
+
+    A same-net plated via inside its own pour is deliberately NOT carved at all
+    (see zone_fill._obstacle_paths): its barrel is the pour's own net, so it is
+    the connection rather than a hazard, and carving it moats the via and
+    silently disconnects the pour. A hole-to-copper rule applied to EVERY hole
+    would put that moat straight back — at a LARGER radius than the bug that was
+    fixed, since the whole point of the rule is a bigger number.
+
+    So the rule is applied after the same-net-plated skip, and this pins it: an
+    aggressive 0.9 mm hole-to-copper (which would carve a void of radius
+    1.0 + 0.9 = 1.9 mm around a 0.4 mm via land, obliterating it) must leave the
+    fill EXACTLY as it is without the rule.
+    """
+    board_kwargs = dict(
+        vias=[{"x_mm": 8.0, "y_mm": 8.0, "drill_mm": 0.4, "diameter_mm": 0.8,
+               "net": "GND", "from_layer": "top", "to_layer": "bottom"}])
+    strict = _profile(tmp_path, min_hole_to_copper_mm=0.9)
+    board = _board([{"net": "GND", "layer": "top", "outline": _rect(5, 5, 15, 15)}],
+                   **board_kwargs)
+    board["design_rules"]["rule_profile"] = strict
+    with_rule = _fill_of(board, tmp_path)
+
+    (tmp_path / "loose-fab.json").write_text(
+        json.dumps({"id": "loose-fab", "version": "1", "floor": dict(_BASE_FLOOR)}),
+        encoding="utf-8")
+    board2 = _board([{"net": "GND", "layer": "top", "outline": _rect(5, 5, 15, 15)}],
+                    **board_kwargs)
+    board2["design_rules"]["rule_profile"] = "loose-fab"
+    without_rule = _fill_of(board2, tmp_path)
+
+    assert with_rule == without_rule, (
+        "a hole-to-copper rule carved the same-net stitching via — the moat bug "
+        "is back, and the pour is silently open")
+
+
+def test_hole_to_copper_is_a_FLOOR_not_a_replacement(tmp_path):
+    """A hole rule BELOW the copper clearance must not shrink the void.
+
+    Both numbers are floors, so the carve takes the maximum. A rule that simply
+    replaced the clearance would let a permissive hole number undercut the
+    copper clearance a foreign via still has to respect.
+    """
+    lax = _profile(tmp_path, min_hole_to_copper_mm=0.05)
+    with_lax = _fill_of(_holed_board(lax), tmp_path)
+
+    (tmp_path / "loose-fab.json").write_text(
+        json.dumps({"id": "loose-fab", "version": "1", "floor": dict(_BASE_FLOOR)}),
+        encoding="utf-8")
+    without_rule = _fill_of(_holed_board("loose-fab"), tmp_path)
+
+    assert with_lax == without_rule, (
+        "a 0.05 mm hole rule shrank the void below the 0.2 mm copper clearance")

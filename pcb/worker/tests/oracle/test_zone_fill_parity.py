@@ -55,16 +55,19 @@ not a number chosen because it made the test pass.
 
 from __future__ import annotations
 
+import json
+import math
+from pathlib import Path
+
 import pytest
 
 from pcb_worker import kicad
 from pcb_worker.compile_board import compile_board
+from pcb_worker.manufacturer_profile import DEFAULT_PROFILE_ROOT
 from pcb_worker.resolved_board import ResolutionSuccess, ZoneKind
 from pcb_worker.zone_fill import NM_PER_MM, fill_area_mm2
 from tests.gerber_fab import load_board
 from tests.oracle.zone_fill_oracle import fill_zones, pcbnew_available
-
-from pathlib import Path
 
 FIXTURE = Path(__file__).resolve().parents[1] / "testdata" / "zone_fill.yaml"
 
@@ -264,3 +267,113 @@ def test_the_expected_voids_are_actually_there(ours):
         f"expected {EXPECTED_VOIDS} voids (2 foreign pads, 1 trace, 1 FOREIGN via, "
         f"1 mounting hole, 1 keepout — and NO void at the same-net stitching "
         f"via); got {len(holes)}")
+
+
+# --------------------------------------------------------------------------
+# HOLE-TO-COPPER — the rule difference, closed and re-measured.
+#
+# The module docstring decomposes this fixture's 0.5487 mm^2 excess and puts
+# the LARGEST single term on the hole-to-copper rule: KiCad carves 0.25 mm
+# around the unplated mounting hole and we carved the zone's 0.2 mm copper
+# clearance, because ManufacturingConstraints had no hole-to-copper field.
+#
+# It has one now (optional -- neither shipped profile publishes a number, and
+# a fab that states none has not thereby stated zero). This is the oracle
+# witnessing that the field is REAL: state KiCad's own 0.25 and the term it
+# was blamed for has to disappear. Nothing but a genuinely wired rule can do
+# that, and no assertion inside our own filler could have shown it.
+# --------------------------------------------------------------------------
+
+# MEASURED against KiCad 9.0.9, both runs, on this fixture:
+#     no hole rule           ours 399.978964   oracle 399.430251   +0.548713
+#     min_hole_to_copper 0.25 ours 399.562054  oracle 399.430251   +0.131803
+# so stating the rule closes 0.416910 mm^2 of a 0.548713 mm^2 disagreement.
+PARITY_EXCESS_WITHOUT_RULE_MM2 = 0.548713
+PARITY_EXCESS_WITH_RULE_MM2 = 0.131803
+
+# HAND-DERIVED, and the reason this test can assert a number rather than "less".
+# The only hole whose void MOVES is the unplated mounting hole (diameter 2.2, so
+# radius 1.1): its void grows from radius 1.1+0.20 = 1.30 to 1.1+0.25 = 1.35, and
+# the pour loses exactly that annulus:
+#
+#     pi(1.35^2 - 1.30^2) = pi(0.1325) = 0.416261 mm^2
+#
+# The SIG via's drill does NOT move the fill, which is worth stating because it
+# looks like it should: its 0.8 mm land is FOREIGN copper carved at 0.4+0.2 =
+# 0.6 mm, and the drill's void at 0.45 mm is entirely inside that, so raising the
+# hole rule cannot reach past the copper rule already in force. The same-net
+# stitching via is not carved at all.
+EXPECTED_ANNULUS_MM2 = math.pi * (1.35 ** 2 - 1.30 ** 2)
+
+
+@pytest.fixture(scope="module")
+def hole_rule_board(tmp_path_factory):
+    """The same fixture board, compiled against a profile stating 0.25 mm.
+
+    A one-off profile rather than an edit to a shipped one: the shipped profiles
+    state no hole-to-copper rule, and that is a fact about those board houses,
+    not a gap to be filled to make a test pass.
+    """
+    root = tmp_path_factory.mktemp("profiles")
+    floor = dict(json.loads(
+        (DEFAULT_PROFILE_ROOT / "v1-fab-conservative.json").read_text(
+            encoding="utf-8"))["floor"])
+    floor["min_hole_to_copper_mm"] = 0.25
+    (root / "kicad-parity.json").write_text(
+        json.dumps({"id": "kicad-parity", "version": "1", "floor": floor}),
+        encoding="utf-8")
+
+    raw = load_board(FIXTURE)
+    raw["design_rules"]["rule_profile"] = "kicad-parity"
+    result = compile_board(raw, profile_root=root)
+    assert isinstance(result, ResolutionSuccess), [d.code for d in result.diagnostics]
+    return result.board
+
+
+def test_stating_the_hole_rule_closes_the_largest_parity_term(board, hole_rule_board):
+    """Our copper shrinks by exactly the derived annulus, and by nothing else.
+
+    Asserted as an EQUALITY against hand-computed geometry rather than as "the
+    area went down": a rule wired to the wrong holes, or applied as a
+    replacement instead of a floor, would also reduce the area.
+    """
+    pours = [z for z in board.zones if z.kind is ZoneKind.COPPER_POUR]
+    strict = [z for z in hole_rule_board.zones if z.kind is ZoneKind.COPPER_POUR]
+    lost = fill_area_mm2(pours[0]) - fill_area_mm2(strict[0])
+    # Budget: both voids are inscribed approximations at ARC_TOLERANCE_NM = 5 um,
+    # each under-stating its circle by at most (2/3)*perimeter*t -- 0.02723 mm^2
+    # at r = 1.30 and 0.02827 at r = 1.35 -- so their difference lies within
+    # 0.029 mm^2. The annulus is 0.416 mm^2, fourteen times that.
+    assert lost == pytest.approx(EXPECTED_ANNULUS_MM2, abs=0.029)
+
+
+def test_the_oracle_agrees_far_more_closely_once_the_rule_is_stated(hole_rule_board):
+    """THE INDEPENDENT HALF. KiCad refilled the same board and moved toward us.
+
+    The test above compares our filler against arithmetic; this one compares it
+    against a different codebase. The excess must fall from 0.5487 to 0.1318
+    mm^2 -- a 76% reduction -- because the rule we now state is the rule KiCad
+    was already applying.
+
+    A generous band (25% of each figure) on purpose: the point is the SIZE of
+    the move, and pinning KiCad's exact arithmetic would make a point release
+    that shifts an arc approximation look like a regression in our filler.
+    """
+    pour = [z for z in hole_rule_board.zones if z.kind is ZoneKind.COPPER_POUR][0]
+    pcb_text = next(v for k, v in kicad.generate_ir(hole_rule_board, "zonefill").items()
+                    if k.endswith(".kicad_pcb"))
+    result = fill_zones(pcb_text)
+    assert result.filled, "pcbnew's ZONE_FILLER reported failure"
+    oracle_pour = [z for z in result.zones if not z.is_rule_area][0]
+
+    excess = fill_area_mm2(pour) - oracle_pour.area_mm2
+    assert excess > 0, (
+        "our fill is no longer a superset of the oracle's — the hole rule "
+        "over-carved past what KiCad removes")
+    assert excess == pytest.approx(PARITY_EXCESS_WITH_RULE_MM2, rel=0.25), (
+        f"excess {excess:.6f} mm^2; expected about "
+        f"{PARITY_EXCESS_WITH_RULE_MM2} once the hole rule is stated (it was "
+        f"{PARITY_EXCESS_WITHOUT_RULE_MM2} without it)")
+    assert excess < PARITY_EXCESS_WITHOUT_RULE_MM2 / 2, (
+        "stating KiCad's own hole-to-copper rule did not materially close the "
+        "gap the module docstring attributes to it")

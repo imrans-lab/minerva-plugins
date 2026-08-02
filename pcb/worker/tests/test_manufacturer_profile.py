@@ -247,3 +247,123 @@ def test_missing_file_directory_fails_closed(tmp_path):
 def test_empty_profile_id_fails_closed():
     with pytest.raises(RuleProfileError, match="non-empty string"):
         load_rule_profile("")
+
+
+# ---------------------------------------------------------------------------
+# OPTIONAL floor fields (min_hole_to_copper_mm).
+#
+# The second tier exists because a fab that publishes no hole-to-copper number
+# has not thereby set it to zero -- it has said nothing, and `None` records
+# that. What is optional is a field's PRESENCE; its correctness when present is
+# validated exactly as strictly as a required field's.
+# ---------------------------------------------------------------------------
+
+
+def _floor(**overrides):
+    floor = {
+        "min_trace_width_mm": 0.2, "min_clearance_mm": 0.2, "min_drill_mm": 0.3,
+        "min_finished_hole_mm": 0.3, "min_annular_ring_mm": 0.2,
+        "min_hole_to_hole_mm": 0.3, "min_mask_sliver_mm": 0.15,
+        "solder_mask_clearance_mm": 0.08, "solder_mask_expansion_mm": 0.0,
+        "copper_to_edge_mm": 0.4,
+    }
+    floor.update(overrides)
+    return floor
+
+
+def _write(tmp_path, profile_id, floor):
+    (tmp_path / f"{profile_id}.json").write_text(
+        json.dumps({"id": profile_id, "version": "1", "floor": floor}),
+        encoding="utf-8")
+    return profile_id
+
+
+def test_an_omitted_optional_field_loads_as_None_not_as_a_number(tmp_path):
+    """`None` is the recorded absence of a rule, never a substituted default.
+
+    The whole argument for a second tier collapses if omission quietly becomes
+    a number -- that would be exactly the merge-from-defaults behaviour this
+    module exists to refuse, wearing a different name.
+    """
+    loaded = load_rule_profile(_write(tmp_path, "silent-fab", _floor()),
+                               library_root=tmp_path)
+    assert loaded.floor.min_hole_to_copper_mm is None
+
+
+def test_both_shipped_profiles_state_no_hole_to_copper_rule():
+    """Pinned so that adding the field did not silently give either one a value."""
+    for profile_id in ("v1-fab-conservative", "oshpark-2layer"):
+        assert load_rule_profile(profile_id).floor.min_hole_to_copper_mm is None
+
+
+def test_omitting_an_optional_field_does_not_disturb_the_DIGEST(tmp_path):
+    """A profile that omits the field digests as it did before the field existed.
+
+    THE PIN THAT MATTERS FOR EXISTING BOARDS. The digest is the profile's
+    identity, and every compiled board carries it. Had the optional field
+    entered the digest as a literal `None`, adding the field would have
+    re-identified both shipped profiles and every board pinned to them --
+    a schema addition silently invalidating existing provenance.
+
+    Proven by CONSTRUCTION rather than by a copied hash: two profiles with
+    identical ten-field floors, one written before this field was conceivable
+    and one written after, are the same profile and must digest the same. The
+    id is part of the digest, so both use the same id from different roots.
+    """
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    _write(root_a, "same-fab", _floor())
+    _write(root_b, "same-fab", _floor())
+    assert (load_rule_profile("same-fab", library_root=root_a).ref.digest
+            == load_rule_profile("same-fab", library_root=root_b).ref.digest)
+
+
+def test_declaring_an_optional_field_DOES_change_the_digest(tmp_path):
+    """The other half: a stated rule is a different rule set, so a different id.
+
+    Without this, a profile could tighten its hole-to-copper rule and hand back
+    boards whose provenance claims the looser one.
+    """
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    _write(root_a, "strict-fab", _floor())
+    _write(root_b, "strict-fab", _floor(min_hole_to_copper_mm=0.25))
+    plain = load_rule_profile("strict-fab", library_root=root_a)
+    stated = load_rule_profile("strict-fab", library_root=root_b)
+    assert stated.floor.min_hole_to_copper_mm == 0.25
+    assert stated.ref.digest != plain.ref.digest
+
+
+@pytest.mark.parametrize("bad", ["0.25", None, True, [0.25], {}])
+def test_a_non_numeric_optional_field_fails_the_load_CLOSED(tmp_path, bad):
+    """Optional governs presence, never correctness.
+
+    `True` is in the list deliberately: bool is a subclass of int in Python, so
+    a validator written as `isinstance(v, (int, float))` accepts it and a floor
+    of `min_hole_to_copper_mm: true` becomes 1.0 mm of clearance. The required
+    fields already guard against this; the optional path must not be the one
+    place the guard was forgotten.
+    """
+    profile_id = _write(tmp_path, "bad-fab", _floor(min_hole_to_copper_mm=bad))
+    with pytest.raises(RuleProfileError, match="min_hole_to_copper_mm"):
+        load_rule_profile(profile_id, library_root=tmp_path)
+
+
+def test_a_negative_optional_field_is_rejected_by_the_IR(tmp_path):
+    """Numeric is not enough -- a negative clearance is not a clearance."""
+    profile_id = _write(tmp_path, "neg-fab", _floor(min_hole_to_copper_mm=-0.1))
+    with pytest.raises(RuleProfileError, match="min_hole_to_copper_mm"):
+        load_rule_profile(profile_id, library_root=tmp_path)
+
+
+def test_an_unrecognized_field_is_STILL_rejected(tmp_path):
+    """Adding an optional tier must not turn the unknown-field check into a
+    blanket allowance. Only the names in the two tuples are recognized."""
+    profile_id = _write(tmp_path, "typo-fab",
+                        _floor(min_hole_to_coper_mm=0.25))  # note the typo
+    with pytest.raises(RuleProfileError, match="unknown field.*min_hole_to_coper_mm"):
+        load_rule_profile(profile_id, library_root=tmp_path)

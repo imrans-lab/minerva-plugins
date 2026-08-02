@@ -480,6 +480,22 @@ class ManufacturingConstraints:
     solder_mask_clearance_mm: float
     solder_mask_expansion_mm: float
     copper_to_edge_mm: float
+    # HOLE-TO-COPPER: how far copper must stay from a DRILLED hole, as distinct
+    # from how far it must stay from other copper.
+    #
+    # OPTIONAL, and the `None` is load-bearing rather than a convenience. The
+    # other ten fields are required because every board house states them and a
+    # missing one would have to be invented; this one is genuinely absent from
+    # the two shipped profiles, so a required field would force a number nobody
+    # published. `None` means "this profile states no hole-to-copper rule", and
+    # the pour then carves holes at the ordinary copper clearance — which is what
+    # v1 already did, now as a stated fallback instead of an unnoticed one.
+    #
+    # NOT DEFAULTED TO KiCad's 0.25. That number is KiCad's editor default, not
+    # a fabrication floor any profile here declares, and baking it in would make
+    # every existing board's pour geometry change on the strength of a constant
+    # read off another tool. A profile that wants it says so.
+    min_hole_to_copper_mm: float | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -490,6 +506,9 @@ class ManufacturingConstraints:
         ):
             _nonnegative(getattr(self, field), f"ManufacturingConstraints.{field}")
         _finite(self.solder_mask_expansion_mm, "ManufacturingConstraints.solder_mask_expansion_mm")
+        if self.min_hole_to_copper_mm is not None:
+            _nonnegative(self.min_hole_to_copper_mm,
+                         "ManufacturingConstraints.min_hole_to_copper_mm")
 
 
 class ViaKind(str, Enum):

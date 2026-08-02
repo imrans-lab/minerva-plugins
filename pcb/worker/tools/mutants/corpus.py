@@ -71,6 +71,7 @@ COMPILE_BOARD = "pcb_worker/compile_board.py"
 RESOLVE = "pcb_worker/resolve.py"
 RESOLVED_BOARD = "pcb_worker/resolved_board.py"
 MANUFACTURER_PROFILE = "pcb_worker/manufacturer_profile.py"
+ZONE_FILL = "pcb_worker/zone_fill.py"
 #: NOT source: the schema doc is TEST INPUT. Paths are relative to ``pcb/worker``,
 #: so this escapes one level, exactly as ``run_sweep.PCB_SIBLINGS`` copies it.
 BOARD_YAML_DOC = "../docs/board-yaml.md"
@@ -1158,6 +1159,126 @@ MUTANTS: tuple[dict, ...] = (
                      "output profile. If this survives, the schema doc is back to being "
                      "proofread instead of compiled.",
     },
+    # ----------------------------------------------------------- zone fill --
+    #
+    # zone_fill.py had ZERO entries before this, which is why these are worth
+    # their slots: it is the module that decides what copper reaches the fab,
+    # and its two newest rules both DELETE-OR-REFUSE on geometry no other check
+    # models (the geometric DRC projects pads/traces/vias and never zone fill).
+    {
+        "id": "zone_fill_sliver_refusal_never_fires",
+        "file": ZONE_FILL,
+        "kind": "full",
+        "find": "        if floor_nm > 0 and not _survives_deflation(pc, outer, holes, floor_nm):",
+        "replace": "        if False:",
+        "rationale": "The sub-minimum-feature refusal is removed outright, so a "
+                     "pour fragment nowhere as wide as the board house's floor is "
+                     "emitted to fab as copper that cannot be etched.",
+    },
+    {
+        "id": "zone_fill_sliver_floor_halved",
+        "file": ZONE_FILL,
+        "kind": "half",
+        "find": "    return bool(offset.Execute(-floor_nm / 2.0))",
+        "replace": "    return bool(offset.Execute(-floor_nm / 4.0))",
+        "rationale": "HALF: the deflation probes for a disc of a QUARTER the "
+                     "minimum feature instead of a half, so the check still fires "
+                     "on grossly thin copper and silently passes anything between "
+                     "half and one times the floor — a guard that looks present "
+                     "and admits the marginal cases it exists for.",
+    },
+    {
+        "id": "zone_fill_island_refusal_never_fires",
+        "file": ZONE_FILL,
+        "kind": "full",
+        "find": "    if any(is_attached for _, _, _, is_attached in survivors):",
+        "replace": "    if False:",
+        "rationale": "Island refusal removed outright: a pour fragment severed "
+                     "from every same-net feature is emitted as live copper "
+                     "attached to nothing.",
+    },
+    {
+        "id": "zone_fill_island_scope_guard_dropped",
+        "file": ZONE_FILL,
+        "kind": "half",
+        "find": "    if any(is_attached for _, _, _, is_attached in survivors):",
+        "replace": "    if True:",
+        "rationale": "HALF, the OTHER branch of the same decision: the rule stops "
+                     "asking whether this pour is attached anywhere and refuses "
+                     "every region of a legitimately floating pour. Catches the "
+                     "severed case correctly while rejecting sound boards, which "
+                     "is the failure a kill-count alone would call a pass.",
+    },
+    {
+        "id": "zone_fill_hole_to_copper_rule_ignored",
+        "file": ZONE_FILL,
+        "kind": "full",
+        "find": "    return max(gap, hole_to_copper)",
+        "replace": "    return gap",
+        "rationale": "A profile's stated hole-to-copper rule is loaded, validated, "
+                     "digested — and then never reaches the carve, so the pour "
+                     "crowds every drill at the copper clearance while the board's "
+                     "provenance claims the stricter rule.",
+    },
+    {
+        "id": "zone_fill_hole_to_copper_replaces_instead_of_floors",
+        "file": ZONE_FILL,
+        "kind": "half",
+        "find": "    return max(gap, hole_to_copper)",
+        "replace": "    return hole_to_copper",
+        "rationale": "HALF: the hole rule is applied but as a REPLACEMENT rather "
+                     "than a floor, so it works whenever it is the stricter of the "
+                     "two and silently undercuts the copper clearance whenever it "
+                     "is not.",
+    },
+
+    # ------------------------------------------- manufacturer profile (opt) --
+    {
+        "id": "profile_optional_field_numeric_guard_removed",
+        "file": MANUFACTURER_PROFILE,
+        "kind": "full",
+        "find": L(
+            "    for key in OPTIONAL_FLOOR_FIELDS:",
+            "        if key not in floor:",
+            "            continue",
+            "        value = floor[key]",
+            "        if isinstance(value, bool) or not isinstance(value, (int, float)):",
+        ),
+        "replace": L(
+            "    for key in OPTIONAL_FLOOR_FIELDS:",
+            "        if key not in floor:",
+            "            continue",
+            "        value = floor[key]",
+            "        if False:",
+        ),
+        "rationale": "The optional tier stops validating, so a floor carrying "
+                     "min_hole_to_copper_mm: \"0.25\" crashes at float() or "
+                     "sails through — the fail-closed promise holding for required "
+                     "fields and quietly not for optional ones.",
+    },
+    {
+        "id": "profile_optional_field_accepts_a_bool",
+        "file": MANUFACTURER_PROFILE,
+        "kind": "half",
+        "find": L(
+            "    for key in OPTIONAL_FLOOR_FIELDS:",
+            "        if key not in floor:",
+            "            continue",
+            "        value = floor[key]",
+            "        if isinstance(value, bool) or not isinstance(value, (int, float)):",
+        ),
+        "replace": L(
+            "    for key in OPTIONAL_FLOOR_FIELDS:",
+            "        if key not in floor:",
+            "            continue",
+            "        value = floor[key]",
+            "        if not isinstance(value, (int, float)):",
+        ),
+        "rationale": "HALF: one conjunct dropped. bool subclasses int in Python, "
+                     "so `min_hole_to_copper_mm: true` becomes 1.0 mm of drill "
+                     "clearance while every string and list is still rejected and "
+                     "the guard looks intact.",
+    },
 )
 
 
@@ -1222,11 +1343,30 @@ def validate_shape() -> None:
     # Covering any of these means either RETIRING an entry or moving the band,
     # and moving it needs the same kind of written reason as the two raises above.
     #
-    # Cost at 56: ~180s each over -j 6 is roughly half an hour, which is a
-    # phase-boundary price, not a per-round one. That is the number to
-    # re-examine if the ceiling is ever pushed again.
-    if not 24 <= len(MUTANTS) <= 56:
-        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..56 band")
+    # RAISED 56 -> 64 for the zone-fill rules (D0-3). The written reason, at the
+    # standard the two earlier raises set:
+    #
+    #   * zone_fill.py had ZERO entries while being the module that decides what
+    #     copper reaches the fab. That is the exact "full band mistaken for full
+    #     coverage" shape this list exists to prevent, and it was worse here than
+    #     the items left uncovered above: silk is not fabrication-critical and
+    #     stroke_font's defect is latent, whereas a wrong pour is etched.
+    #   * The three rules added are all DELETE-OR-REFUSE decisions on geometry NO
+    #     OTHER CHECK MODELS — the geometric DRC projects pads, traces and vias
+    #     and never zone fill, so a defect in them is invisible to every other
+    #     test in the suite and reaches the Gerber unopposed.
+    #   * Six of the eight are FULL/HALF pairs on the same site. The halves are
+    #     the point: a quartered sliver floor and a hole rule applied as a
+    #     replacement instead of a floor both leave a guard that reads correctly
+    #     and admits precisely the marginal cases it was written for.
+    #
+    # Cost at 64: ~180s each over -j 6 is roughly 32 minutes, still a
+    # phase-boundary price rather than a per-round one. Retiring entries was
+    # considered and rejected: nothing in the existing set covers ground these
+    # eight would duplicate. That is the number to re-examine if the ceiling is
+    # ever pushed again.
+    if not 24 <= len(MUTANTS) <= 64:
+        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..64 band")
     for m in MUTANTS:
         for key in ("id", "file", "find", "replace", "kind", "rationale"):
             if key not in m:
