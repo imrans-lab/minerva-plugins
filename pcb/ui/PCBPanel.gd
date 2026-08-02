@@ -123,8 +123,10 @@ var _data = null
 var _routing_workspace = null
 
 ## T2.3 cutover coordinator (pcb_routing_cutover.gd), built eagerly beside the
-## workspace so get_routing_cutover() is valid from construction. Mechanism only
-## this round — all surfaces annotation-authoritative until T3/T5 flip them.
+## workspace so get_routing_cutover() is valid from construction. Every surface
+## starts annotation-authoritative; _build_ui flips "canvas" to workspace at the
+## canvas handoff (S5 — see the flip site there for the criterion it asserts).
+## An UNMOUNTED panel therefore still reports all-annotation-authoritative.
 var _routing_cutover = null
 
 ## The ported board canvas (custom-drawn Control child), built on mount.
@@ -378,8 +380,10 @@ func get_routing_workspace():
 
 
 ## T2.3: the cutover coordinator (pcb_routing_cutover.gd). Exposed for MCP/tests
-## and the surfaces that will consult it once cutover begins (T3/T5). In T2.3 it
-## reports every surface annotation-authoritative.
+## and for the surfaces that consult it. Post-S5 a MOUNTED panel reports the
+## "canvas" surface workspace-authoritative (flipped in _build_ui) and every
+## other surface annotation-authoritative; an unmounted one reports all
+## annotation. Also the rollback door: get_routing_cutover().rollback("canvas").
 func get_routing_cutover():
 	return _routing_cutover
 
@@ -535,11 +539,51 @@ func _build_ui() -> void:
 	#
 	# The canvas connects itself to the workspace's redraw-worthy signals inside
 	# this call — it is the side that knows which workspace instance is current, so
-	# it is the side that can disconnect a previous one. Nothing here flips the
-	# cutover flag: every surface stays annotation-authoritative until a workspace-
-	# backed WRITE path exists (C4a), so this binding is inert by design today.
+	# it is the side that can disconnect a previous one.
 	if _canvas.has_method("set_routing_workspace"):
 		_canvas.set_routing_workspace(_routing_workspace, _routing_cutover)
+		# ── THE CUTOVER FLIP (S5 / C4a-C4b, DCR 019f7095c395) ──────────────────
+		# THE PRODUCTION FLIP SITE. Until this line existed, set_workspace_
+		# authoritative had no production caller at all: the canvas surface stayed
+		# annotation-authoritative forever, _candidates_active() was permanently
+		# false, and — since C4b retired the proposal-annotation write-back — a
+		# Propose produced NO visible geometry anywhere. The flag is the whole
+		# gate, so the flip is the whole cutover.
+		#
+		# THE COORDINATOR'S OWN CRITERION, honored literally: "flips a surface to
+		# workspace ONLY when the caller ASSERTS that this surface's WRITE path is
+		# already workspace-backed" (pcb_routing_cutover.gd, "never flip on a
+		# hope"). That assertion is TRUE here, and it is true UNCONDITIONALLY at
+		# HEAD rather than being a hope about a future round:
+		#   * propose WRITES to the workspace and only the workspace —
+		#     panel_tools._propose_into_workspace / _workspace_propose both land
+		#     candidates via RoutingWorkspace.ingest_record and write NO proposal
+		#     annotation (S5; see their shared "no proposal annotation was
+		#     written" reply note).
+		#   * the canvas's own verbs write there too — _run_candidate_verb calls
+		#     RoutingWorkspace.commit/pin/unpin/reject/supersede, and commit owns
+		#     the board batch + history snapshot + disposition together (INV-1).
+		#   * NOTHING writes candidate state to the annotation store any more;
+		#     C4b's _drop_legacy_proposal_annotations removes the last remnant on
+		#     load. So there is no store left for the read to diverge from — the
+		#     precise divergence the "never flip on a hope" rule guards against.
+		#
+		# WHY HERE, AND WHY ONLY "canvas". Here, because the flip must be paired
+		# with the handoff above: the canvas surface is only meaningfully
+		# workspace-authoritative once the canvas actually HAS the workspace, and
+		# both facts then arrive in one place that a rollback can undo in one
+		# place. Only "canvas", because it is the ONLY surface any production code
+		# reads (pcb_canvas._candidates_active is the sole is_workspace_
+		# authoritative caller, and it asks for "canvas"). Flipping "verbs" /
+		# "mcp" / "persistence" as well would assert migrations no reader consults
+		# and no test pins — a hope by another name. Each stays a latch to be
+		# flipped by whoever lands its reader.
+		#
+		# ROLLBACK is still one line and still safe: get_routing_cutover().
+		# rollback("canvas") restores the pre-cutover canvas exactly, because the
+		# gate is read live on every draw/pick/verb.
+		if _routing_cutover != null:
+			_routing_cutover.set_workspace_authoritative("canvas", true)
 	# The platform mounts its AnnotationOverlay as a CHILD of this canvas, some
 	# frames after the panel is built (Editor.gd). Arming the universal Select
 	# needs that overlay to exist, so we watch for it arriving rather than

@@ -417,11 +417,13 @@ var _pin_inspector_host = null
 ## THE CUTOVER FLAG GATES THE WHOLE SURFACE. Nothing about candidates renders,
 ## hit-tests, selects or reaches the context menu unless the cutover coordinator
 ## says the "canvas" surface is workspace-authoritative
-## (RoutingCutover.is_workspace_authoritative). Every surface defaults to
-## "annotation" and NOTHING in this unit flips it — the flip is a later decision
-## made once the workspace WRITE path is real (C4a's verbs), per the cutover
-## contract's "never flip on a hope" rule. Flag off ⇒ byte-identical behaviour,
-## which is what the existing canvas suites prove.
+## (RoutingCutover.is_workspace_authoritative). Every surface still DEFAULTS to
+## "annotation" — a bare canvas, a headless fixture and an unmounted panel are
+## all inert, and flag off is still byte-identical behaviour, which is what the
+## existing canvas suites prove. What changed at S5 is that the flip now has a
+## PRODUCTION caller: PCBPanel._build_ui flips "canvas" immediately after the
+## set_routing_workspace handoff below, because the workspace write path is real
+## (propose lands candidates only; C4b retired the proposal annotation).
 var _routing_workspace = null
 var _routing_cutover = null
 
@@ -5935,9 +5937,11 @@ func _on_workspace_changed(_a: String = "", _b: String = "", _c: String = "") ->
 ## coordinator's own rule is that an unrecognised surface can never be treated as
 ## migrated, and the same fail-safe applies to a canvas nobody wired one into.
 ##
-## THIS IS WHY THE EXISTING SUITES ARE THE PROOF OF "no behaviour change": every
-## surface starts (and, until C4a's write path lands, stays) annotation-
-## authoritative, so this returns false and the whole unit is inert.
+## THE DEFAULT IS STILL OFF, which is why the existing suites remain the proof of
+## "no behaviour change" for every unwired canvas: a fixture that builds a canvas
+## without a coordinator, or with a fresh one, gets false here and the whole unit
+## is inert. A canvas belonging to a MOUNTED PCBPanel gets true — C4a's write path
+## landed and PCBPanel._build_ui flips "canvas" at the workspace handoff.
 func _candidates_active() -> bool:
 	if _routing_workspace == null or _routing_cutover == null:
 		return false
