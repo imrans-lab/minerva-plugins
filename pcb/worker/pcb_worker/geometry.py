@@ -56,8 +56,18 @@ from .resolved_board import (
 )
 
 
-_TOP_LAYER_NAMES = frozenset({"top", "f.cu", "front"})
-_BOTTOM_LAYER_NAMES = frozenset({"bottom", "b.cu", "back"})
+#: Single source of truth for the top/bottom side-token vocabulary (docket
+#: 019fc3105828 — this table used to be hand-copied at compile_board.py's and
+#: assembly_outputs.py's own ``_resolve_side`` in addition to here). Public
+#: (no leading underscore) so those two modules can import and read the SAME
+#: frozensets rather than re-typing the token list — one source for what a
+#: "top"/"bottom" token IS, while each caller keeps its own refusal shape
+#: (return None vs. raise AssemblyBoardError vs. raise ValueError) local, on
+#: purpose: unifying the token set is DRY, unifying error handling is a
+#: different, un-asked-for change across call sites with different failure
+#: contracts.
+TOP_LAYER_NAMES = frozenset({"top", "f.cu", "front"})
+BOTTOM_LAYER_NAMES = frozenset({"bottom", "b.cu", "back"})
 
 
 def is_top(layer: Any) -> bool:
@@ -74,9 +84,9 @@ def is_top(layer: Any) -> bool:
     if layer is None:
         return True
     name = str(layer).strip().lower()
-    if not name or name in _TOP_LAYER_NAMES:
+    if not name or name in TOP_LAYER_NAMES:
         return True
-    if name in _BOTTOM_LAYER_NAMES:
+    if name in BOTTOM_LAYER_NAMES:
         return False
     raise ValueError(
         f"is_top: unrecognized copper layer {layer!r} — this 2-layer pipeline "

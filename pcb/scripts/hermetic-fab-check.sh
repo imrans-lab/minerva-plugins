@@ -28,7 +28,7 @@
 #                per POLICY.md must never enter this repo:
 #
 #                  pcb/scripts/hermetic-fab-check.sh \
-#                      ~/gitlab/ccsandbox/smart-remote/EDA/minerva-fab/smart-remote-canonical.yaml
+#                      ~/path/to/private/product-board.yaml
 #
 #                Nothing about the private board's content, name, or path is
 #                written back into this repo by the script (no golden files,

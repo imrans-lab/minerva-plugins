@@ -903,23 +903,17 @@ func _test_docs_names_match_code() -> void:
 			zombies.is_empty())
 
 	# Direction 3: every TOOLBAR tool's status-bar name is described in the
-	# "Canvas gestures" section.
-	#
-	# RECORDED GAP (campaign 2 boundary finding, NOT a test defect): CUTOUT
-	# shipped in epoch B unit 3 and its gesture grammar was never added to that
-	# section — docs/tools.md mentions "Cutout" only in its MCP-tools heading.
-	# The exception below is deliberate and must be DELETED when the docs are
-	# fixed; leaving the assertion red at HEAD would poison the boundary run,
-	# and dropping the assertion entirely would absorb the gap silently.
+	# "Canvas gestures" section. CUTOUT's gesture grammar landed in docs/tools.md
+	# (docket 019fbead4e92) — no more allowlist exception here.
 	var gestures := _canvas_gestures_section(doc)
 	check("BT-47: the Canvas gestures section was located", gestures.length() > 500)
 	var undocumented: Array = []
 	for name in ["Select", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout"]:
 		if not gestures.contains(name):
 			undocumented.append(name)
-	check("BT-47 dir3: every toolbar tool but the recorded CUTOUT gap is described "
-			+ "in Canvas gestures (undocumented: %s)" % str(undocumented),
-			undocumented == ["Cutout"])
+	check("BT-47 dir3: every toolbar tool is described in Canvas gestures "
+			+ "(undocumented: %s)" % str(undocumented),
+			undocumented.is_empty())
 
 
 func _manifest_tool_names() -> Array:

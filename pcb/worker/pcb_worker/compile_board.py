@@ -72,7 +72,12 @@ from .footprints import (
     load_lockfile,
     resolve_footprint,
 )
-from .geometry import PlacementTransform, TRANSFORM_VERSION
+from .geometry import (
+    BOTTOM_LAYER_NAMES,
+    PlacementTransform,
+    TOP_LAYER_NAMES,
+    TRANSFORM_VERSION,
+)
 from .zone_fill import ZoneFillError, fill_area_mm2, fill_board_zones
 from .manufacturer_profile import (
     DEFAULT_PROFILE_ROOT,
@@ -2549,13 +2554,18 @@ def normalize_board(
 def _resolve_side(raw_layer, ref: str, comp_ref: SourceRef,
                   diags: _Diagnostics) -> Union[Side, None]:
     """Map a component's authored side to Side, fail-closed on anything unknown
-    (never default an unrecognized value to TOP — review 621 MF1)."""
+    (never default an unrecognized value to TOP — review 621 MF1).
+
+    Token vocabulary read from geometry.TOP_LAYER_NAMES / BOTTOM_LAYER_NAMES —
+    the single authority (docket 019fc3105828); the refusal shape here (return
+    None + diags.error) stays local to this module, deliberately not unified
+    with assembly_outputs._resolve_side's raise-based one."""
     if raw_layer is None:
         return Side.TOP
     token = str(raw_layer).strip().lower()
-    if token in ("top", "f.cu", "front"):
+    if token in TOP_LAYER_NAMES:
         return Side.TOP
-    if token in ("bottom", "b.cu", "back"):
+    if token in BOTTOM_LAYER_NAMES:
         return Side.BOTTOM
     diags.error("invalid_component",
                 f"component {ref!r}: unknown layer/side {raw_layer!r}", comp_ref)

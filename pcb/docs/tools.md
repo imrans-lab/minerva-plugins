@@ -766,6 +766,16 @@ to close, Esc/right-click to cancel, quarter-grid snap with Ctrl/Cmd to place
 freely), but no net picker: a keepout forbids copper rather than being copper,
 the same as a KiCad rule area.
 
+**Draw ▸ Cutout** — same corner-clicking grammar as Pour/Keepout: click each
+corner on the canvas; double-click or Enter closes the polygon (needs 3+
+corners); Esc or right-click cancels mid-draw, discarding every placed vertex
+(not just the last one). Corners snap to a quarter of the grid — hold Ctrl/Cmd
+to place freely. No net or layer picker — a cutout is an opening through the
+WHOLE board (every layer at once), not copper on one of them, so neither field
+applies. The commit toast names the same caveat as the MCP `create_cutout`
+tool's schema: authored and validated only — routing, DRC and Gerber export
+all ignore a cutout today (see "Cut-outs" in `board-yaml.md`).
+
 **Draw ▸ Trace** — draws real copper directly, bypassing the router (Hints ▸
 Trace below instead asks the router for a route). Click a pad to start — the
 trace takes that pad's net — then click each waypoint, then click another pad

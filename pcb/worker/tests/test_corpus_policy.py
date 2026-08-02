@@ -310,6 +310,98 @@ def test_no_tracked_file_is_named_after_the_product(repo):
         f"[{repo.name}] files named after the product are banned: {offenders}")
 
 
+#: A PATH reference to the product, not board data. ``test_bus_routing.py``
+#: (removed 2026-08-02, see docket 019fc1559f3c) hardcoded a path into the
+#: owner's private ``ccsandbox`` checkout, with the product's own name as the
+#: directory component — no netlist, no nets, nothing the density scan above
+#: would ever see, but it is exactly
+#: the "somewhere outside the repo" the private board is supposed to live,
+#: spelled out in a public file. The bare product string is explicitly NOT
+#: banned (``_IDENTITY``'s comment above), so this pattern is narrower than
+#: "contains the token": it fires only when the token appears as a PATH
+#: SEGMENT — immediately preceded by a bare ``/`` with no quote or space in
+#: between. That catches a real filesystem path (``.../ccsandbox/smart-
+#: remote/eda/...``) while leaving alone a symbol like
+#: ``SMART_REMOTE_BASELINE`` or this file's own
+#: ``Path.home() / "gitlab" / "ccsandbox" / "smart-remote"`` construction —
+#: there the token is its own quoted literal, not path-adjacent text.
+# KNOWN-ACCEPTED GAP (review F2, adjudicated): a filename that CONTINUES past
+# the product name (``smart_remote_board.kicad_pcb``) is not matched — the
+# boundary lookahead stops at a path separator/quote/space deliberately.
+# Widening the tail to [-_.] was tried and flags 12 files of HISTORICAL PROSE
+# (POLICY.md's own history note, ir_parity comments citing the REMOVED
+# ``testdata/smart_remote.yaml``) — a regex cannot tell a live reference from
+# a citation of a deleted one. The observed leak classes (a path INTO the
+# private tree, the bare directory segment) are covered; the continuing-
+# filename hypothetical is accepted and recorded here so the next widening
+# attempt starts from this measurement.
+_PATH_REFERENCE = re.compile(r"/smart[-_]?remote(?=[/\"'\s]|$)", re.IGNORECASE)
+
+
+#: Scope decision: PLUGINS_ROOT only, deliberately narrower than ``_repos()``.
+#: This pattern targets a CODE-level hazard — a test/fixture that DEFAULTS to
+#: reading a private path, exactly what ``test_bus_routing.py`` did — which is
+#: a property of this repo's own test corpus. It is not applied to MINERVA_ROOT
+#: because that repo's tracked docket database (``Docs/minerva.dct``) is
+#: project-management prose that discusses this very cleanup (and the
+#: historical board removal) in the course of describing it — a different
+#: governance question than "does a test hardcode a private default", and one
+#: this suite has no authority to remediate (a different repo, and its docket
+#: is live state, not source). The identity/filename bans above stay
+#: cross-repo because THEIR hazard — a board file or identity declaration
+#: landing anywhere public — is real in both repos regardless of file kind.
+_PATH_REFERENCE_REPOS = [PLUGINS_ROOT]
+
+
+@pytest.mark.parametrize("repo", _PATH_REFERENCE_REPOS, ids=lambda p: p.name)
+def test_no_tracked_file_references_the_product_via_a_path_literal(repo):
+    """A hardcoded PATH to the private board is not board data — the density
+    scan above would never see it — but it is the same reference class:
+    naming where the private design lives, in a public file. See
+    ``_PATH_REFERENCE`` for why this is narrower than the bare-string ban,
+    and ``_PATH_REFERENCE_REPOS`` for why the repo scope is narrower too."""
+    offenders = [name for name in _tracked_text_files(repo)
+                 if _PATH_REFERENCE.search(
+                     (repo / name).read_text(encoding="utf-8", errors="ignore"))]
+    assert not offenders, (
+        f"[{repo.name}] these tracked files hardcode a path referencing the "
+        f"banned product board: {offenders} — see "
+        f"pcb/worker/tests/testdata/POLICY.md")
+
+
+def test_the_path_reference_pattern_catches_a_hardcoded_private_path():
+    """POSITIVE CONTROL, synthetic — proves the pattern has teeth without
+    re-adding the real private path to this repo. This is structurally the
+    line ``test_bus_routing.py`` carried before its removal (docket
+    019fc1559f3c): a bare ``/`` immediately in front of the product token,
+    inside a path string.
+
+    Built by concatenation, not as one literal, so THIS file's own source
+    bytes never contain the contiguous ``/smart-remote`` substring — the scan
+    test above would otherwise flag this fixture as its own violation."""
+    dash = "-"
+    offending = ('    pcb_file = "/home/imran/gitlab/ccsandbox/smart' + dash
+                 + 'remote/eda/output/smart_remote_board.kicad_pcb"')
+    assert _PATH_REFERENCE.search(offending), (
+        "the path-reference pattern does not catch a hardcoded private-board "
+        "path — it would have missed the exact violation it was written for")
+
+
+def test_the_path_reference_pattern_does_not_flag_the_bare_symbol():
+    """NEGATIVE CONTROL — the bare product string is explicitly allowed
+    (``_IDENTITY``'s own comment: it "legitimately appears as a symbol... in
+    about fifteen source files"). A pattern that flagged every mention would
+    make this suite itself an offender and would train people to route
+    around the guard rather than trust it."""
+    benign = 'SMART_REMOTE_BASELINE = "corpus fixture id, not a path"'
+    assert not _PATH_REFERENCE.search(benign)
+    quoted_join = 'Path.home() / "gitlab" / "ccsandbox" / "smart-remote"'
+    assert not _PATH_REFERENCE.search(quoted_join), (
+        "the pattern flagged this file's own Path()-join construction — "
+        "each segment there is its own quoted literal, not a path-adjacent "
+        "reference, and must stay unflagged")
+
+
 def test_the_identity_scan_really_covers_more_than_the_workflow_does():
     """ANTI-VACUITY for the two tests above.
 

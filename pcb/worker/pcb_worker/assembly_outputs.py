@@ -99,6 +99,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .board_model import _as_list, _is_number
+from .geometry import BOTTOM_LAYER_NAMES, TOP_LAYER_NAMES
 
 CSV_EOL = "\r\n"  # JLC's own templates ship CRLF; keep it stable either way.
 
@@ -235,13 +236,20 @@ def _resolve_side(raw_layer, ref: str) -> str:
     ``None`` (its own docstring: "absence is the legacy shape for the
     default side"), which is a real behavioral difference from compile_board
     and a cross-surface fail-open a caller could trigger with
-    ``layer: ""``."""
+    ``layer: ""``.
+
+    Token vocabulary now read from geometry.TOP_LAYER_NAMES /
+    BOTTOM_LAYER_NAMES — the single authority both this function and
+    compile_board._resolve_side read (docket 019fc3105828), so the "field-
+    for-field" claim above can no longer drift by hand-edit. The refusal
+    shape (raise AssemblyBoardError) stays local, unchanged, and still
+    deliberately different from compile_board's (return None + diags.error)."""
     if raw_layer is None:
         return "top"
     token = str(raw_layer).strip().lower()
-    if token in ("top", "f.cu", "front"):
+    if token in TOP_LAYER_NAMES:
         return "top"
-    if token in ("bottom", "b.cu", "back"):
+    if token in BOTTOM_LAYER_NAMES:
         return "bottom"
     raise AssemblyBoardError(
         f"component {ref!r}: unrecognized layer/side {raw_layer!r} — refusing "

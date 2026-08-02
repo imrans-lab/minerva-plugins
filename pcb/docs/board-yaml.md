@@ -198,18 +198,61 @@ are not yet cross-checked by a shared vector, but `board_validate.py`'s
 first-violation-wins order. (Zones COMPILE since epoch 4 — the refusal
 lives further downstream; see the fabricability paragraph below.)
 
-**A zone is AUTHORABLE and COMPILABLE and NOT FABRICABLE.** It round-trips
-losslessly (YAML and the `pcb.deserialize` JSON boundary), and since epoch 4 it
-also *compiles*: `compile_board`'s `_build_zones` produces a `ResolvedZone` with
-`fill=None` — no computed copper — and emits a `zone_unfilled` WARNING. Zones
-therefore left `compile_board`'s `unsupported_board_feature` denylist; what still
-refuses one is every consumer downstream of the IR:
+**A `copper_pour` zone is AUTHORABLE, COMPILABLE, and FABRICABLE (solid connect
+only); a `keepout` zone is AUTHORABLE and COMPILABLE but still refused at
+routing.** It round-trips losslessly (YAML and the `pcb.deserialize` JSON
+boundary), and `compile_board`'s `_build_zones` produces a `ResolvedZone`, then
+`fill_board_zones` (`zone_fill.py`) runs as the LAST compile step — on the
+assembled board, sharing the geometric DRC's own copper projection, because a
+pour is carved around everything else on its layer (pads, traces, vias, drills)
+and cannot be computed before they exist. There is no `zone_unfilled` warning
+any more; fill is always attempted, and the outcome is one of three diagnostics:
 
-- `route_bridge` raises `UnsupportedGeometry` for a non-empty `rb.zones`.
-- `drc_geometric` returns INDETERMINATE for the whole run rather than report a
-  verdict it cannot compute against unfilled copper.
-- `kicad` and `gerber` both refuse a resolved board carrying zones, rather than
-  emit copper nobody computed.
+- `zone_fill_failed` (**ERROR** — the whole compile fails, naming the zone).
+  Covers every way a pour cannot be filled without inventing a rule the author
+  never wrote: a self-intersecting outline; a copper-to-edge inset that leaves
+  no fillable area; overlapping same-net pours; `thermal_gap_mm` /
+  `thermal_bridge_width_mm` authored on a zone (v1 fill implements SOLID
+  connect only — filling solid would silently discard an authored fabrication
+  parameter, so the board is refused rather than mis-filled); and, once a fill
+  is computed, two **unfabricable-region** faults reported by name in the same
+  error (D0-3): **SLIVER** (a disjoint filled region nowhere as wide as the
+  board profile's `min_trace_width_mm` — proven by an empty deflation at half
+  that floor, not an area estimate) and **ISLAND** (a region overlapping none
+  of the pour's own same-net copper — live copper severed from everything,
+  scored only once some other region of the same pour IS attached). Sliver is
+  reported in preference to island when a region is both, because an
+  unetchable fragment is a fab fact and whether it connects is a netlist fact,
+  and sending the author to fix the netlist first would be the wrong order.
+  Neither fault is culled the way KiCad culls them — KiCad culls against
+  numbers its own schema supplies (`min_thickness`, `island_removal_mode`);
+  this contract has neither field yet, so it hands the author the fact instead
+  of silently deleting copper.
+- `zone_fill_empty` (**WARNING**) — the fill computed successfully with NO
+  copper (the outline is entirely consumed by keepouts, clearance, or the
+  board-edge inset). A real, computed answer, not the old uncomputed
+  `fill=None`; flagged because an author who drew a pour and got none almost
+  certainly did not mean to.
+- `zone_filled` (**INFO**) — the pour filled: region count and copper area in
+  mm².
+
+Downstream of a successful fill:
+
+- `gerber` and `kicad` both EMIT a filled `copper_pour`'s copper — no longer a
+  blanket refusal. `kicad` writes the outline plus fill rules (KiCad re-fills
+  on open, the same parity oracle checks agree with our computed geometry);
+  `gerber` emits the computed fill rings directly.
+- `drc_geometric` runs a real clearance check against filled copper instead of
+  returning INDETERMINATE for the whole run: finding type `gc7_zone_clearance`
+  fires when foreign-net copper (or a hole) sits closer to a pour than its
+  effective minimum clearance allows — pour copper now participates in
+  clearance like any other copper.
+- `route_bridge` still raises `UnsupportedGeometry`, but now ONLY for a
+  `keepout` zone, not for a `copper_pour`. A keepout is an authored
+  prohibition on copper the routing grid has no way to represent yet
+  (`agent_router.board.Obstacle` declares a polygon field the router never
+  reads); the fix belongs in the grid's rasteriser, not here, and is filed
+  separately (item family `019fc155bc32`).
 
 A malformed zone *container* still fails closed, but at the shared boundary
 rather than in the compiler: `zones: {}` is `invalid_board_structure`
@@ -217,12 +260,9 @@ rather than in the compiler: `zones: {}` is `invalid_board_structure`
 are allowed — "an explicitly empty list declares nothing" (review 623 R2 refuses
 an empty *mapping*, but allows an empty *list*).
 
-Those refusals are deliberately OUT OF SCOPE and must stay in place; later work
-narrows each one as its consumer learns to handle a zone (fill computation
-against pads/traces/keepouts, geometric DRC, routing obstacle/free-space
-treatment, CAM). Because a zone still reaches no production output, no example in
-this document authors one — an example that stopped at a warning would teach a
-shape no fabrication path accepts, and the examples are compiled by
+No example in this document authors a zone: what a fill produces depends on
+every other authored entity on its layer, which would make the example fragile
+rather than illustrative, and the examples are compiled by
 `test_every_yaml_example_in_board_yaml_md_compiles` (this file's own
 compile-checked-examples test, see "Compiling the examples" below), the same
 reason `diff_pair_gap_mm`/`diff_pair_width_mm` are absent from the example
