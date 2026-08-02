@@ -432,18 +432,28 @@ func _test_tool_buttons_render() -> void:
 					b.icon != null or not b.text.is_empty())
 
 	# Radio-toggle "select a tool mode" buttons (ToolsFlow's Select/Pan/Pin
-	# Inspect + DrawFlow's Pour/Keepout/Trace/Cutout/Eraser): most are
+	# Inspect + DrawFlow's Pour/Keepout/Trace/Cutout/Bus/Eraser): most are
 	# icon-only (no Godot node .name set in _add_tool_button), so their
 	# ToolMode enum key in _tool_buttons IS the stable name a rename would
 	# change.
+	#
+	# DELIBERATE PIN BUMP (C5, campaign 2 epoch C unit 5, DCR 019fb572b888):
+	# 8 -> 9 radio tool modes, the Bus tool's own toolbar button
+	# (PCBPanel.gd's _build_ui, right after Cutout) — the same
+	# "count moves only when a round adds a tool ON PURPOSE" convention
+	# test_manifest_tool_registration.gd's own count pin documents. This file
+	# was not in C5's stated fence; fixed here as the mechanical consequence
+	# of a REQUIRED new toolbar button, mirroring that same convention rather
+	# than leaving a suite this round's own work broke.
 	var expected_tool_modes := [
 		PcbCanvasScript.ToolMode.SELECT, PcbCanvasScript.ToolMode.PAN,
 		PcbCanvasScript.ToolMode.INSPECT_PIN, PcbCanvasScript.ToolMode.ZONE_POUR,
 		PcbCanvasScript.ToolMode.ZONE_KEEPOUT, PcbCanvasScript.ToolMode.TRACE,
-		PcbCanvasScript.ToolMode.CUTOUT, PcbCanvasScript.ToolMode.ERASER,
+		PcbCanvasScript.ToolMode.CUTOUT, PcbCanvasScript.ToolMode.BUS,
+		PcbCanvasScript.ToolMode.ERASER,
 	]
 	var tool_buttons: Dictionary = panel._tool_buttons
-	check("_tool_buttons has exactly the 8 current radio tool modes (got %d)" % tool_buttons.keys().size(),
+	check("_tool_buttons has exactly the 9 current radio tool modes (got %d)" % tool_buttons.keys().size(),
 		tool_buttons.keys().size() == expected_tool_modes.size())
 	for mode in expected_tool_modes:
 		check("radio tool button registered + mounted for ToolMode %s" % mode,
@@ -467,8 +477,8 @@ func _test_tool_buttons_render() -> void:
 		check("%s node present in the sidebar" % node_name,
 			panel.find_child(node_name, true, false) != null)
 
-	check("13 tool buttons total across ToolsFlow/DrawFlow/HintsFlow (8 radio tools + 3 route-flow + Delete + Propose; got %d)" % all_buttons.size(),
-		all_buttons.size() == 13)
+	check("14 tool buttons total across ToolsFlow/DrawFlow/HintsFlow (9 radio tools + 3 route-flow + Delete + Propose; got %d)" % all_buttons.size(),
+		all_buttons.size() == 14)
 
 	_teardown(panel)
 

@@ -109,16 +109,21 @@ func _init() -> void:
 	# DCR 019f7095c395 S5. PROPOSE no longer writes a proposal annotation for
 	# either to act on — panel_tools.gd _propose_into_workspace lands
 	# RouteCandidates in the routing workspace instead, resolved through
-	# minerva_pcb_workspace_commit/_reject, already counted above) == 68.
+	# minerva_pcb_workspace_commit/_reject, already counted above) == 68,
+	# + 1 C5 bus-tool MCP parity tool (minerva_pcb_route_bus_direct — the
+	# agent's doorway onto the canvas Bus tool, DCR 019fb572b888 S3+S4;
+	# panel_tools.gd bus_plan/bus_commit_plan is the ONE implementation both
+	# the gesture and this tool call) == 69.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is C4b's bump (70 -> 68), sequenced after
-	# C4a's (60 -> 70) — both queue behind the same serialization point.
-	check("total registered tool count == 68", registered.size() == 68,
+	# entry could hide behind it. This is C5's bump (68 -> 69), sequenced after
+	# C4b's (70 -> 68), sequenced after C4a's (60 -> 70) — all three queue
+	# behind the same serialization point.
+	check("total registered tool count == 69", registered.size() == 69,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
