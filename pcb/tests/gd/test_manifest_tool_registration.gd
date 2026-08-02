@@ -104,15 +104,21 @@ func _init() -> void:
 	# workspace_pin, workspace_unpin, workspace_reject, workspace_commit,
 	# workspace_reroute_route, workspace_reroute_span, workspace_check — the
 	# agent's doorway onto the same verbs the canvas candidate menu offers a
-	# human; DCR 019f7095c395 S4) == 70. Catches a manifest that silently
-	# dropped or duplicated an unrelated entry while a round's diff was being
-	# made.
+	# human; DCR 019f7095c395 S4) == 70, - the 2 C4b S5-removal tools
+	# (proposal_accept, proposal_reject — the per-proposal ANNOTATION verbs;
+	# DCR 019f7095c395 S5. PROPOSE no longer writes a proposal annotation for
+	# either to act on — panel_tools.gd _propose_into_workspace lands
+	# RouteCandidates in the routing workspace instead, resolved through
+	# minerva_pcb_workspace_commit/_reject, already counted above) == 68.
+	# Catches a manifest that silently dropped or duplicated an unrelated entry
+	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it.
-	check("total registered tool count == 70", registered.size() == 70,
+	# entry could hide behind it. This is C4b's bump (70 -> 68), sequenced after
+	# C4a's (60 -> 70) — both queue behind the same serialization point.
+	check("total registered tool count == 68", registered.size() == 68,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
