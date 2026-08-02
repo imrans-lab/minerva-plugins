@@ -116,6 +116,16 @@ var show_zones: bool = true
 ## holes, see _draw_cutout). Sibling of show_zones — same "always true, no
 ## _VIEW_FLAGS entry" precedent, not a new omission.
 var show_cutouts: bool = true
+## Draws GHOST route candidates from the RoutingWorkspace (campaign 2 epoch C,
+## unit 3 — DCR 019f7095c395 S3). Sibling of show_zones/show_cutouts — same
+## "always true, no _VIEW_FLAGS entry" precedent, not a new omission.
+##
+## SEPARATE FROM show_traces on purpose: a reviewer comparing a proposal against
+## the copper already on the board wants to hide one WITHOUT hiding the other.
+## The per-layer filter (trace_layer_filter) still applies to candidate segments
+## — see _candidate_segment_visible — because a ghost on a hidden layer would be
+## copper the view says is not there.
+var show_route_candidates: bool = true
 
 ## Copper-layer view filter driven by the toolbar layer selector. Holds "all" or
 ## a CANONICAL copper-layer id ("top" / "in1".."in30" / "bottom") — the selector
@@ -187,12 +197,32 @@ const KIND_VIA := "via"
 ## after KIND_VIA, per the checklist's own "a kind that joins _entity_at and
 ## nothing else selects and then cannot be acted on at all, silently" warning.
 const KIND_CUTOUT := "cutout"
+## Campaign 2 epoch C, unit 3 (DCR 019f7095c395 S3) — a ROUTE CANDIDATE from the
+## RoutingWorkspace. Appended at the END like every kind before it.
+##
+## THE ONE KIND THAT IS NOT A BOARD ENTITY, and the checklist above is answered
+## per-site with that in mind. A candidate is a DRAFT answer to a RouteTask: it
+## lives in the workspace (pcb_routing_workspace.gd), not in `data`, it is not
+## fabricable copper, and every verb that acts on one (Accept/Commit, Keep/Pin,
+## Reject, Try-again, Edit) belongs to the workspace tool surface (C4a), NOT to
+## this canvas's board gestures. So the checklist sites split cleanly in two:
+##   * SELECT + DRAW + PICK — fully implemented here (that is this unit).
+##   * MOVE / DELETE / LOCK — deliberately NOT implemented, each with its reason
+##     stated at the site, exactly as vias and cutouts state theirs.
+const KIND_CANDIDATE := "candidate"
 
 var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
 var selected_zone_ids: Array[String] = []
 var selected_via_ids: Array[String] = []
 var selected_cutout_ids: Array[String] = []
+## Selected route candidates (S3). Backed by a LIST like every other kind so
+## _selection_of / _add_to_selection / _toggle_entity_selected work unchanged;
+## the public read surface is get_selected_candidate_id() (singular) because the
+## plain-click grammar makes this at most one in practice and the workspace
+## verbs C4a will add each act on ONE candidate. A shift-click can still put two
+## in here; that is harmless while no verb reads the list.
+var selected_candidate_ids: Array[String] = []
 
 # ── UNIVERSAL SELECT: the annotation half of the selection (B1u3, 019fbb9adc) ──
 #
@@ -343,6 +373,23 @@ signal edit_trace_width_requested(trace_id: String)
 ## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
 ## canvas does no hit-testing of its own, only rendering + input plumbing.
 var _pin_inspector_host = null
+
+## ── ROUTING WORKSPACE (S3) ────────────────────────────────────────────────────
+## Duck-typed refs to pcb_routing_workspace.gd and pcb_routing_cutover.gd, both
+## handed over by PCBPanel through set_routing_workspace(). Null (headless
+## fixtures, an older panel) means every candidate path below is inert and this
+## canvas behaves exactly as it did before this unit.
+##
+## THE CUTOVER FLAG GATES THE WHOLE SURFACE. Nothing about candidates renders,
+## hit-tests, selects or reaches the context menu unless the cutover coordinator
+## says the "canvas" surface is workspace-authoritative
+## (RoutingCutover.is_workspace_authoritative). Every surface defaults to
+## "annotation" and NOTHING in this unit flips it — the flip is a later decision
+## made once the workspace WRITE path is real (C4a's verbs), per the cutover
+## contract's "never flip on a hope" rule. Flag off ⇒ byte-identical behaviour,
+## which is what the existing canvas suites prove.
+var _routing_workspace = null
+var _routing_cutover = null
 
 ## Hover state for the INSPECT_PIN nearest-pad label (native L1444 parity).
 var _inspect_hover_label: String = ""
@@ -598,6 +645,58 @@ var cutout_hatch_alpha: float = 0.6
 var cutout_outline_alpha: float = 0.9
 var cutout_outline_width_px: float = 1.5
 
+## ── GHOST STYLING for route candidates (S3) ───────────────────────────────────
+##
+## THE RULE, and it is a hard one (DCR 019f7095c395 S3): a candidate segment is
+## ALWAYS drawn in its own REAL layer colour (_trace_layer_color), only at a
+## reduced alpha. Disposition and validation are expressed in SEPARATE visual
+## channels — an OUTLINE (pinned), a DASH (stale) and a MARKER (violating) — and
+## NEVER by recolouring the stroke. Recolouring is what the old proposal render
+## did (all-AI-cyan), and it is exactly why a reviewer could not tell F.Cu from
+## B.Cu on a 16-proposal board (owner req 2026-07-17, recorded on the route-hint
+## kind's render()). A ghost that is not its layer's colour is a lie about which
+## side of the board the copper lands on.
+##
+## SELF-HIGHLIGHTING OVERLAP is a consequence, not a feature bolted on: each
+## segment is its own draw_polyline call at CANDIDATE_GHOST_ALPHA, so two ghost
+## segments crossing on the SAME layer composite to a visibly denser colour while
+## a single pass stays faint. Do NOT "optimise" this into one batched polyline
+## with pre-multiplied alpha — the accumulation IS the overlap signal.
+const CANDIDATE_GHOST_ALPHA := 0.45
+## Minimum ghost stroke, in screen px — the same floor _draw_single_trace applies
+## to committed copper, so a hair-thin candidate stays visible when zoomed out.
+const CANDIDATE_MIN_WIDTH_PX := 1.0
+## PINNED outline (channel 1). A neutral casing stroke drawn UNDER the ghost, so
+## the ghost's own layer colour is untouched — "pinned" reads as a cased line, not
+## as a differently-coloured one. Width is the ghost width plus this margin.
+var candidate_pinned_outline_color: Color = Color(0.95, 0.95, 0.85, 0.75)
+const CANDIDATE_PINNED_OUTLINE_MARGIN_PX := 3.0
+## STALE dash (channel 2), in screen px. Applied when validation == "stale" — the
+## board moved under the candidate (base_board_revision mismatch, see
+## RouteCandidate.is_stale_for_board_revision), so its geometry is no longer known
+## to be answering the board on screen.
+const CANDIDATE_STALE_DASH_PX := 6.0
+## VIOLATING marker (channel 3): a small ring at each segment midpoint / via
+## centre when validation is "violating" or "error". Marker colour is deliberately
+## NOT a copper colour — it is a verdict about the geometry, not the geometry.
+var candidate_violation_color: Color = Color(1.0, 0.35, 0.25, 0.95)
+const CANDIDATE_MARKER_RADIUS_PX := 5.0
+## Ghost via ring geometry (screen px floor, mirroring the committed-via draw).
+const CANDIDATE_VIA_MIN_RADIUS_PX := 3.0
+const CANDIDATE_VIA_RING_WIDTH_PX := 1.5
+## Selection halo, reusing trace_selected_color exactly as the trace and via
+## halos do — selection is a FOURTH channel and must not be confused with any
+## disposition/validation channel above.
+const CANDIDATE_SELECT_HALO_MARGIN_PX := 4.0
+## Extra click slack for a ghost, in screen px on top of half the segment width.
+## Larger than the committed trace's 3.0 px: a ghost is a working object the user
+## is reviewing and repeatedly grabbing, and it competes with nothing above it in
+## the ladder (see _entity_at).
+const CANDIDATE_HIT_SLACK_PX := 4.0
+## Minimum click radius for a ghost via, screen px — the via twin of the slack
+## above, and the same shape as VIA_HIT_RADIUS_PX for committed vias.
+const CANDIDATE_VIA_HIT_RADIUS_PX := 6.0
+
 ## Font
 var font: Font
 var font_size: int = 12
@@ -811,6 +910,22 @@ func _add_context_menu_target_items() -> void:
 		return
 	_context_menu_separate()
 
+	# ── C4a SEAM: route-candidate verbs ──────────────────────────────────────
+	# A candidate takes the ONE existing menu authority (that is the point of
+	# routing its rung through _entity_at at all), and then RETURNS — it must not
+	# fall through to the board items below. "Delete route candidate" would be a
+	# dead item: _remove_entity refuses KIND_CANDIDATE by design, so the entry
+	# would look live, click cleanly and do nothing.
+	#
+	# What lands here in C4a: Accept/Commit, Keep/Pin, Reject, Try-again, Edit —
+	# each calling a GATED workspace transition, none of them a board mutation.
+	# This unit ships the seam, not the verbs, so the menu says exactly what the
+	# press resolved (which candidate, in which state) and offers nothing it
+	# cannot actually do. See _add_candidate_menu_seam.
+	if kind == KIND_CANDIDATE:
+		_add_candidate_menu_seam(target_id)
+		return
+
 	if kind == KIND_TRACE:
 		# THE ENTRY POINT THE OWNER COULD NOT FIND (comment 962). The width editor
 		# already existed as a sidebar row that only appears once exactly one trace
@@ -964,6 +1079,22 @@ func _draw() -> void:
 
 	if show_traces:
 		_draw_traces()
+
+	# ── GHOST ROUTE CANDIDATES (S3) ──────────────────────────────────────────
+	# DEPTH, decided here once: ABOVE committed copper, BELOW the in-progress
+	# tool previews. Both halves matter and both follow the zone/cutout/trace
+	# preview convention established directly above and below this line.
+	#  * ABOVE COPPER, because a candidate is what the user is REVIEWING right
+	#    now, and a proposal hidden under the copper it is meant to replace is a
+	#    proposal nobody can judge. It is drawn at reduced alpha precisely so
+	#    sitting on top does not erase what is underneath.
+	#  * BELOW THE TOOL PREVIEW, because the preview is what the user's HAND is
+	#    doing this instant; nothing may cover that. Same reason the zone/cutout
+	#    previews sit above their own committed geometry.
+	# Gated on show_route_candidates, and NOT on show_traces — see the flag's own
+	# note for why hiding copper must not also hide the proposal against it.
+	if show_route_candidates:
+		_draw_route_candidates()
 
 	# The trace being drawn sits with the committed copper (same visual language,
 	# same place in the stack) — and, like the zone preview above, is NOT gated on
@@ -2686,6 +2817,8 @@ func _selection_of(kind: String) -> Array[String]:
 			return selected_via_ids
 		KIND_CUTOUT:
 			return selected_cutout_ids
+		KIND_CANDIDATE:
+			return selected_candidate_ids
 	var empty: Array[String] = []
 	return empty
 
@@ -2769,7 +2902,18 @@ func _toggle_entity_selected(kind: String, entity_id: String) -> void:
 		_add_to_selection(kind, entity_id)
 
 
-## Total selected entities across all five kinds.
+## Total selected BOARD entities across the five board kinds.
+##
+## ROUTE CANDIDATES ARE DELIBERATELY NOT COUNTED (S3), and this is a decision, not
+## an omission. This count is what has_selection() is built on, and has_selection()
+## gates the board DELETE batch: counting a ghost here would open a begin_batch /
+## end_batch pair that removes nothing and then report "Selection is locked —
+## nothing deleted", which is a lie about a candidate that is neither locked nor
+## deletable-by-this-gesture. A candidate's verbs are workspace verbs (C4a), so a
+## selected ghost must leave every board-batch gate exactly where it found it.
+## The same split already exists one function down: has_selection() is BOARD-ONLY
+## while has_any_selection() speaks for the whole panel.
+## The candidate selection is read through get_selected_candidate_id().
 func selection_count() -> int:
 	return selected_components.size() + selected_trace_ids.size() \
 		+ selected_zone_ids.size() + selected_via_ids.size() + selected_cutout_ids.size()
@@ -2810,6 +2954,14 @@ func _clear_selection(announce := true) -> void:
 	selected_zone_ids.clear()
 	selected_via_ids.clear()
 	selected_cutout_ids.clear()
+	# Candidates ARE cleared here even though they are not counted by
+	# selection_count() (S3): "clear the selection" has to mean everything this
+	# canvas is holding selected, or a plain click on a component would leave a
+	# ghost lit — the two-worlds symptom the unified Select exists to remove. The
+	# asymmetry with selection_count() is deliberate and documented there: this is
+	# about what the canvas is SHOWING as selected, that one is about what a board
+	# DELETE batch may act on.
+	selected_candidate_ids.clear()
 	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
 	# there is nothing for it to belong to (cold-review F1 — the deselect click
@@ -2868,6 +3020,14 @@ func _finalize_box_selection() -> void:
 		for cutout_id in data.cutouts_in_region(select_rect):
 			_add_to_selection(KIND_CUTOUT, cutout_id)
 
+	# ROUTE CANDIDATES ARE NOT SWEPT (S3), and this comment is the decision — the
+	# extension checklist's "a kind that does not sweep says so THERE" rule.
+	# The marquee is a BOARD-EDITING gesture: everything it collects is something
+	# the next Delete/drag will act on as one batch. A candidate can be acted on by
+	# neither, so sweeping ghosts in would only produce a selection whose members
+	# silently refuse every gesture that follows — and a box drawn to grab three
+	# components would quietly also grab the four proposals crossing them. The
+	# click pick (_entity_at) is the one, deliberate way to select a ghost.
 	_sweep_annotations(select_rect)
 
 	selection_changed.emit()
@@ -2941,7 +3101,45 @@ func _sweep_annotations(select_rect: Rect2) -> void:
 ## epoch B, unit 3) for the same reason, one notch further: a cutout also hits
 ## like a filled region (see _cutout_at), and it must not steal a click from any
 ## more specific entity either.
+##
+## ── THE CANDIDATE RUNG SITS FIRST — ABOVE COMPONENT (campaign 2 epoch C, unit 3)
+## The second deliberate ladder decision this file has made, stated in full for
+## the same reason the via rung's was. The FULL panel order is now:
+##
+##     annotations  >  ROUTE CANDIDATES  >  component > via > trace > zone > cutout
+##     └─ claimed before this function is ever called (_claim_annotation_press)
+##
+## Candidates sit BETWEEN the annotation rung and the component rung. Why there,
+## and not either side of it:
+##
+##  * BELOW ANNOTATIONS. Annotations are foreground commentary drawn by an
+##    overlay that is a CHILD of this canvas — they are literally on top of the
+##    candidate ghosts, and "what you see on top is what you click" is the rule
+##    every rung here already keeps. An annotation pointing AT a proposal must
+##    still be grabbable.
+##  * ABOVE EVERY BOARD ENTITY. A ghost is a WORKING OBJECT: it exists only while
+##    a human is deciding about it, it is drawn above the committed copper (see
+##    _draw), and the whole review gesture is "grab this proposal and act on it".
+##    Board copper, by contrast, is settled — it is not what the user is reaching
+##    for during a routing review. Put below the component rung, the candidate
+##    rung would also be near-dead code for the same reason the via rung would
+##    have been below trace: a route candidate for a net is drawn ACROSS the pads
+##    of the components it connects, so most of the interesting clicks (the
+##    endpoints) land on a component first.
+##  * THE CLAIM IS TIGHT, not greedy. It is exact segment/via geometry plus a few
+##    screen px of slack (CANDIDATE_HIT_SLACK_PX) — never a bounding box, never a
+##    filled region. Empty board is never claimed, so the marquee, the box-select
+##    and every board pick outside a ghost's own ink are untouched.
+##
+## THE TIE RULE, stated once: a click within a ghost's stroke picks the CANDIDATE;
+## the component/via/trace under it, clicked anywhere outside that stroke, picks
+## as it always did. And with the cutover flag off (the default — see
+## _candidates_active) this rung returns "" unconditionally, so the ladder is
+## byte-identical to what it was before this unit.
 func _entity_at(world_pos: Vector2) -> Array:
+	var candidate_id: String = _candidate_at(world_pos)
+	if not candidate_id.is_empty():
+		return [KIND_CANDIDATE, candidate_id]
 	var comp_id: String = _component_at(world_pos)
 	if not comp_id.is_empty():
 		return [KIND_COMPONENT, comp_id]
@@ -3077,6 +3275,22 @@ func _entity_anchor(kind: String, entity_id: String) -> Vector2:
 			var pts := PCBDataScript.zone_outline_points(data.get_cutout(entity_id))
 			if not pts.is_empty():
 				return pts[0]
+		KIND_CANDIDATE:
+			# Answered for the SAME reason KIND_VIA and KIND_CUTOUT are, even though
+			# a candidate never MOVES either (see _capture_drag_origins): a drag
+			# started on a ghost that shares a selection with movable board entities
+			# still needs a real snap reference, and Vector2.ZERO would translate
+			# that whole selection to the board origin on the first motion frame.
+			# The anchor is the first point of the first drawn item — the same
+			# "first point of the geometry" rule KIND_TRACE and KIND_ZONE use, read
+			# from the SAME exact-geometry source the draw and the pick read
+			# (candidate_draw_items — never waypoints, see INV-4).
+			for item in candidate_draw_items():
+				if str(item.get("candidate_id", "")) != entity_id:
+					continue
+				var item_pts: Array = item.get("points", [])
+				if not item_pts.is_empty():
+					return item_pts[0]
 	return Vector2.ZERO
 
 
@@ -3160,6 +3374,18 @@ func _capture_drag_origins() -> void:
 	# a cutout's outline after it is committed. Not being captured is the
 	# enforcement here too: there is no fourth walk below to forget, and
 	# _apply_drag_delta only ever touches what landed in _drag_origins.
+	#
+	# ROUTE CANDIDATES ARE ALSO DELIBERATELY NOT CAPTURED (S3), same idiom again,
+	# and for the strongest reason of the three: a candidate is not this canvas's
+	# geometry at all. It lives in the RoutingWorkspace, its edits are REVISION-
+	# GUARDED (candidate_revision) and PATH-SCOPED (add_vertex / add_via /
+	# reroute_span), and every one of them must mark the candidate stale and
+	# re-run the draft check. A generic select-and-drag would translate the whole
+	# route by a mouse delta behind the workspace's back, leaving a ghost whose
+	# geometry no longer matches the revision the router validated. Candidate
+	# geometry editing is C4a's, through the workspace's own gated verbs.
+	# Not being captured is the enforcement here too — there is no sixth walk
+	# below to forget, and _end_selection_drag journals only what was captured.
 	if not comps.is_empty():
 		_drag_origins[KIND_COMPONENT] = comps
 	if not trace_pts.is_empty():
@@ -3256,6 +3482,13 @@ func _end_selection_drag() -> void:
 		})
 		moved_total += 1
 
+	# NO CANDIDATE LOOP, and the checklist requires saying why rather than leaving
+	# the absence to be read as an oversight (S3): candidates are never captured
+	# (_capture_drag_origins), so there is nothing here to journal — and there
+	# could not be, because a candidate move is not a board change and has no
+	# place in the board's undo history at all. Its edits are revision-guarded
+	# workspace calls (C4a), journalled by the workspace, not by pcb_data.
+	#
 	# The label a single-component drag has always carried ("Move U1") survives
 	# for the single-component case; anything else says how much it moved.
 	var label := "Move selection (%d)" % moved_total
@@ -3309,6 +3542,18 @@ func _is_entity_locked(kind: String, entity_id: String) -> bool:
 			# no "locked" key) and board.go's Cutout struct (no Locked field
 			# either). A cutout is protected the same way a via is: it cannot be
 			# dragged at all (see _capture_drag_origins).
+			return false
+		KIND_CANDIDATE:
+			# CANDIDATES HAVE NO SELECTION LOCK, and this case exists to SAY SO —
+			# the KIND_VIA / KIND_CUTOUT idiom above. There IS a `locked` flag on a
+			# candidate's segment and via dicts (pcb_route_candidate.make_segment /
+			# make_via), but it means something else entirely: it is the ROUTER's
+			# "do not reroute this stretch" instruction, per-segment, consumed by
+			# the routing verbs. Reporting it here would make an unrelated router
+			# hint silently veto a UI gesture, and it is per-SEGMENT while this
+			# question is per-ENTITY. A candidate is protected the way a via is —
+			# it cannot be dragged or deleted through this canvas at all, which is
+			# a stronger guarantee than a flag.
 			return false
 	return false
 
@@ -3365,6 +3610,28 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			return data.remove_via_by_id(entity_id)
 		KIND_CUTOUT:
 			return data.remove_cutout(entity_id)
+		KIND_CANDIDATE:
+			# NEVER REMOVED THROUGH THIS PATH (S3), and the case is here to say so
+			# rather than let the fall-through answer by accident. Discarding a
+			# candidate is Reject — a WORKSPACE verb with its own legality gate
+			# (RoutingWorkspace.reject → the disposition transition table), its own
+			# task-lifecycle consequence (rejecting reopens the RouteTask) and its
+			# own audit trail. Routing it through the board's journalled remover
+			# would delete a draft as if it were copper, produce a board history
+			# entry for something that was never on the board, and leave the task
+			# closed with no answer. C4a owns the verb.
+			#
+			# Two of the three callers are already blocked before they reach this
+			# line: _delete_selection never loops KIND_CANDIDATE (see its literal
+			# kind array), and the context menu offers no Delete item for a
+			# candidate (see _add_context_menu_target_items). The THIRD is the
+			# ERASER, which picks through _entity_at and so CAN resolve a ghost —
+			# it lands here and is refused, which is exactly the eraser's own
+			# documented "a locked hit is just another kind of miss" behaviour:
+			# silent, no snapshot, tool stays armed. Deliberate — an eraser that
+			# discarded a routing proposal would be a destructive, unjournalled
+			# workflow decision taken by a board-editing tool.
+			return false
 	return false
 
 
@@ -3433,6 +3700,16 @@ func _delete_selection() -> void:
 	# THIS LITERAL ARRAY IS NOT DERIVED from the KIND_* constants — a kind missing
 	# from it selects, highlights and then survives Delete, silently. It is listed
 	# in the extension checklist at the top of this file for that reason.
+	#
+	# KIND_CANDIDATE IS DELIBERATELY ABSENT FROM IT (S3) — the one kind that is
+	# meant to be missing, said out loud so it does not read as the exact bug the
+	# comment above warns about. A candidate is not board geometry and Delete is
+	# not its verb: discarding one is Reject, a gated workspace transition that
+	# also reopens the RouteTask (see _remove_entity's KIND_CANDIDATE case). Until
+	# C4a lands those verbs, Delete over a selected ghost does nothing at all,
+	# which is the honest state — selection_count() excludes candidates precisely
+	# so this path is not even entered on a candidate-only selection, and no
+	# "nothing deleted" line is emitted about something that was never deletable.
 	for kind in [KIND_COMPONENT, KIND_TRACE, KIND_ZONE, KIND_VIA, KIND_CUTOUT]:
 		for entity_id in _selection_of(kind):
 			# _unit_locked, not _is_entity_locked (A4): a group with ANY locked
@@ -3572,6 +3849,13 @@ func _entity_action_label(verb: String, kind: String, entity_id: String) -> Stri
 			return "%s via" % verb
 		KIND_CUTOUT:
 			return "%s cutout" % verb
+		KIND_CANDIDATE:
+			# Named here per the checklist even though NO delete path reaches a
+			# candidate today (see _remove_entity / _delete_selection): the noun is
+			# what a future workspace verb's label will read, and the checklist's
+			# own warning is that a kind missing here is "deletable but unnameable".
+			# A kind that is neither is still better named than not.
+			return "%s route candidate" % verb
 	return verb
 
 
@@ -5061,6 +5345,468 @@ func _draw_trace_preview() -> void:
 		label += "  ·  %d pts" % _trace_points.size()
 		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+
+#endregion
+
+
+#region Route Candidates (S3 — DCR 019f7095c395)
+
+## ── ONE GEOMETRY SOURCE FOR THREE CONSUMERS ───────────────────────────────────
+##
+## candidate_draw_items() below is the SINGLE derivation of what a route candidate
+## looks like on this canvas. The draw path walks it, the click pick walks it, and
+## the anchor lookup walks it. That is not tidiness — it is the unit's central
+## correctness claim (rendered geometry == hit-test geometry == model geometry),
+## and it is the only way to make that claim testable on an IMMEDIATE-MODE canvas,
+## which has no child nodes to inspect after a frame. A test asserts on the data
+## the draw path reads.
+##
+## ── INV-4: EXACT GEOMETRY, NEVER WAYPOINTS ────────────────────────────────────
+## Every item is built from RouteCandidate.segments (each with its OWN layer,
+## width and ordered points) and RouteCandidate.vias. The word "waypoint" does not
+## appear anywhere in this region, and must not: waypoints are the FLATTENED,
+## layer-losing polyline the route-HINT annotation kind carries
+## (pcb_route_hint_kind.gd, whose fork now refuses candidate-sourced payloads —
+## see the guard there). Flattening a candidate would hide the very layer changes
+## a reviewer has to see before accepting. If a future edit needs a polyline for a
+## candidate, it comes from a segment's points, not from a waypoint list.
+##
+## Points are in WORLD (board mm) — the model's own units, unconverted — so an
+## item's geometry is bit-for-bit the candidate's geometry. The draw loop applies
+## world_to_screen; the pick converts its tolerances the other way (the
+## px-constants-through-the-zoom idiom this file already keeps).
+
+## Bind the routing workspace + cutover coordinator (PCBPanel wires both). Passing
+## null for either restores pre-S3 behaviour exactly.
+##
+## THE SIGNAL WIRING LIVES HERE, not in the panel, for the same reason set_data
+## owns its own reconnects: this is the one place that knows which workspace
+## instance is current, so it is the one place that can disconnect the previous
+## one. Duck-typed throughout — a workspace missing a signal simply is not
+## connected to it, and the surface degrades per-signal rather than erroring.
+func set_routing_workspace(workspace, cutover = null) -> void:
+	if _routing_workspace == workspace and _routing_cutover == cutover:
+		return
+	_disconnect_workspace_signals()
+	_routing_workspace = workspace
+	_routing_cutover = cutover
+	_connect_workspace_signals()
+	queue_redraw()
+
+
+## The workspace signals whose payloads change what this canvas draws.
+##
+## WHY THESE FIVE, named rather than "everything the workspace emits":
+##   candidate_added        — an ingest landed a new ghost (propose / re-propose)
+##   candidate_changed      — a DISPOSITION moved (pin/unpin/reject/supersede/
+##                            commit): the outline channel and the terminal filter
+##                            both read it
+##   candidate_removed      — the ghost is gone
+##   validation_changed     — the STALE dash and the VIOLATING marker channels
+##   ingest_task_held       — a pinned candidate held its task, so the batch
+##                            landed FEWER ghosts than routes were requested; the
+##                            frame that follows must show the pinned prior still
+##                            standing rather than a phantom replacement
+## transition_refused and task_state_changed are deliberately NOT here: neither
+## changes a single pixel (a refused move left the value unchanged by contract,
+## and task state is derived bookkeeping with no render of its own). Connecting
+## them would buy a redraw per refusal and prove nothing.
+const _WORKSPACE_REDRAW_SIGNALS := [
+	"candidate_added", "candidate_changed", "candidate_removed",
+	"validation_changed", "ingest_task_held",
+]
+
+
+func _connect_workspace_signals() -> void:
+	if _routing_workspace == null:
+		return
+	for sig in _WORKSPACE_REDRAW_SIGNALS:
+		if not _routing_workspace.has_signal(sig):
+			continue
+		if not _routing_workspace.is_connected(sig, _on_workspace_changed):
+			_routing_workspace.connect(sig, _on_workspace_changed)
+
+
+func _disconnect_workspace_signals() -> void:
+	if _routing_workspace == null:
+		return
+	if _routing_workspace is Object and not is_instance_valid(_routing_workspace):
+		_routing_workspace = null
+		return
+	for sig in _WORKSPACE_REDRAW_SIGNALS:
+		if not _routing_workspace.has_signal(sig):
+			continue
+		if _routing_workspace.is_connected(sig, _on_workspace_changed):
+			_routing_workspace.disconnect(sig, _on_workspace_changed)
+
+
+## ONE handler for all five signals. Variadic-by-ignoring: every one of them
+## carries between one and three String arguments, and none of them is read — the
+## canvas re-derives the whole candidate set each frame anyway (immediate mode),
+## so a per-id incremental redraw would be strictly more code for the same pixels.
+func _on_workspace_changed(_a: String = "", _b: String = "", _c: String = "") -> void:
+	queue_redraw()
+
+
+## Is the candidate surface live? THE ONE GATE — every render, pick, anchor and
+## menu path below asks this first.
+##
+## Three conditions, all required: a workspace to read, a cutover coordinator to
+## ask, and that coordinator saying the "canvas" surface is workspace-authoritative
+## (pcb_routing_cutover.gd). A MISSING cutover reads as OFF, not as ON: the
+## coordinator's own rule is that an unrecognised surface can never be treated as
+## migrated, and the same fail-safe applies to a canvas nobody wired one into.
+##
+## THIS IS WHY THE EXISTING SUITES ARE THE PROOF OF "no behaviour change": every
+## surface starts (and, until C4a's write path lands, stays) annotation-
+## authoritative, so this returns false and the whole unit is inert.
+func _candidates_active() -> bool:
+	if _routing_workspace == null or _routing_cutover == null:
+		return false
+	if _routing_workspace is Object and not is_instance_valid(_routing_workspace):
+		return false
+	if not _routing_cutover.has_method("is_workspace_authoritative"):
+		return false
+	return bool(_routing_cutover.is_workspace_authoritative("canvas"))
+
+
+## Which dispositions put a candidate on the canvas at all.
+##
+## ONLY NON-TERMINAL CANDIDATES RENDER, and each exclusion is a decision:
+##   proposed / pinned  — DRAW. These are the live drafts the human is judging.
+##   superseded         — never. It is the historical record of a replaced
+##                        generation; drawing it would put two answers to one
+##                        task on screen and make the newer one unreadable where
+##                        they overlap (and the overlap is total — a re-route of
+##                        the same net covers the same ground).
+##   rejected           — never. The user already said no; redrawing it is the
+##                        canvas arguing with them.
+##   committed          — never, AND THIS ONE IS THE TRAP: a committed candidate's
+##                        copper IS on the board, drawn by _draw_traces from
+##                        PCBData as REAL copper. Rendering the ghost too would
+##                        DOUBLE-DRAW the same route — a brighter, thicker line
+##                        that reads as a DRC-worthy overlap and is not one. The
+##                        board is the display of a committed candidate.
+const CANDIDATE_RENDERED_DISPOSITIONS := ["proposed", "pinned"]
+
+
+## Is this candidate segment drawable in the current view? The candidate twin of
+## _trace_visible / _zone_visible / _via_visible, and the SINGLE source for both
+## the draw and the pick (which share candidate_draw_items, so they cannot drift).
+##
+## The per-layer filter applies for the reason _trace_at's note records for
+## copper: a pick that ignored the view would select geometry the user cannot see.
+## show_route_candidates is checked by the callers rather than here — the draw
+## gates on it in _draw (beside every other show_* flag) and the pick gates on it
+## in _candidate_at, exactly as show_traces is handled for copper.
+func _candidate_segment_visible(layer: String) -> bool:
+	return _layer_visible(_canonical_layer(layer))
+
+
+## Is this candidate VIA drawable? Board-wide, like _via_visible: a via spans
+## layers by definition, so there is no single layer to filter it on. Kept as its
+## own named predicate rather than inlined `true` so that if the committed-via
+## draw ever gains a filter, there is one obvious place to mirror it.
+func _candidate_via_visible() -> bool:
+	return true
+
+
+## THE DERIVATION. Every ghost on this canvas, as flat draw records, in paint
+## order (segments first, then vias — vias land on top, mirroring _draw_traces).
+##
+## Each item:
+##   candidate_id  String   the owning candidate
+##   item_kind     String   "segment" | "via"
+##   item_id       String   the segment's / via's own stable id
+##   layer         String   CANONICAL copper layer (segments) or the via's
+##                          from_layer (vias) — the colour authority
+##   points        Array    Array[Vector2] in BOARD MM. Segments: the segment's
+##                          own ordered points, copied verbatim from the model.
+##                          Vias: a single-element array holding the via centre,
+##                          so every item has geometry in the same field and the
+##                          pick/anchor walks do not have to branch to find it.
+##   width         float    board mm — stroke width (segments) / diameter (vias)
+##   color         Color    _trace_layer_color(layer) at CANDIDATE_GHOST_ALPHA
+##   outlined      bool     disposition == "pinned"   (channel 1)
+##   dashed        bool     validation  == "stale"    (channel 2)
+##   marked        bool     validation in violating/error (channel 3)
+##   selected      bool     in selected_candidate_ids (channel 4)
+##
+## RETURNS [] WHEN THE SURFACE IS OFF — the single gate, so no caller can forget
+## it. A malformed segment (fewer than 2 points) is skipped rather than drawn as a
+## degenerate stroke; a via with no position is skipped the same way.
+func candidate_draw_items() -> Array:
+	var items: Array = []
+	if not _candidates_active():
+		return items
+	if not _routing_workspace.has_method("list_candidates"):
+		return items
+
+	for cand in _routing_workspace.list_candidates():
+		if cand == null:
+			continue
+		if not (str(cand.disposition) in CANDIDATE_RENDERED_DISPOSITIONS):
+			continue
+		var cid := str(cand.candidate_id)
+		var outlined: bool = str(cand.disposition) == "pinned"
+		var validation := str(cand.validation)
+		var dashed: bool = validation == "stale"
+		var marked: bool = validation == "violating" or validation == "error"
+		var selected: bool = cid in selected_candidate_ids
+
+		for seg in cand.segments:
+			if not (seg is Dictionary):
+				continue
+			var seg_dict: Dictionary = seg
+			var layer := str(seg_dict.get("layer", "top"))
+			if not _candidate_segment_visible(layer):
+				continue
+			var pts: Array = []
+			for p in seg_dict.get("points", []):
+				if p is Vector2:
+					pts.append(p)
+			if pts.size() < 2:
+				continue
+			items.append({
+				"candidate_id": cid,
+				"item_kind": "segment",
+				"item_id": str(seg_dict.get("id", "")),
+				"layer": layer,
+				"points": pts,
+				"width": float(seg_dict.get("width", 0.25)),
+				"color": Color(_trace_layer_color(_canonical_layer(layer)), CANDIDATE_GHOST_ALPHA),
+				"outlined": outlined,
+				"dashed": dashed,
+				"marked": marked,
+				"selected": selected,
+			})
+
+		if not _candidate_via_visible():
+			continue
+		for via in cand.vias:
+			if not (via is Dictionary):
+				continue
+			var via_dict: Dictionary = via
+			var pos: Variant = via_dict.get("position", null)
+			if not (pos is Vector2):
+				continue
+			# A via's colour comes from the layer it STARTS on — the same choice
+			# the committed-via draw makes by taking the net colour rather than
+			# inventing a two-tone disc. from_layer is where the reviewer's eye is
+			# already travelling along the incoming segment.
+			var from_layer := str(via_dict.get("from_layer", "top"))
+			items.append({
+				"candidate_id": cid,
+				"item_kind": "via",
+				"item_id": str(via_dict.get("id", "")),
+				"layer": from_layer,
+				"points": [pos as Vector2],
+				"width": float(via_dict.get("diameter", 0.8)),
+				"color": Color(_trace_layer_color(_canonical_layer(from_layer)), CANDIDATE_GHOST_ALPHA),
+				"outlined": outlined,
+				"dashed": dashed,
+				"marked": marked,
+				"selected": selected,
+			})
+
+	return items
+
+
+## Paint every ghost. Immediate mode: no nodes are created, so what this function
+## reads (candidate_draw_items) is the only thing a test can assert on.
+func _draw_route_candidates() -> void:
+	for item in candidate_draw_items():
+		if str(item["item_kind"]) == "via":
+			_draw_candidate_via(item)
+		else:
+			_draw_candidate_segment(item)
+
+
+## One ghost segment, in the four channels this unit defines. Order matters —
+## halo, then outline, then stroke, then marker — because each later layer must
+## stay legible over the earlier one.
+func _draw_candidate_segment(item: Dictionary) -> void:
+	var screen_pts := PackedVector2Array()
+	for p in item["points"]:
+		screen_pts.append(world_to_screen(p))
+	if screen_pts.size() < 2:
+		return
+	var stroke_px: float = maxf(float(item["width"]) * zoom, CANDIDATE_MIN_WIDTH_PX)
+
+	# Channel 4 — SELECTION. Same translucent halo the trace and via selections
+	# use, in the same colour, so "selected" reads identically for every kind.
+	if bool(item["selected"]):
+		draw_polyline(screen_pts, Color(trace_selected_color, 0.3),
+			stroke_px + CANDIDATE_SELECT_HALO_MARGIN_PX * 2.0)
+
+	# Channel 1 — PINNED OUTLINE. A casing UNDER the stroke, never a recolour of
+	# it (see the styling block's rule).
+	if bool(item["outlined"]):
+		draw_polyline(screen_pts, candidate_pinned_outline_color,
+			stroke_px + CANDIDATE_PINNED_OUTLINE_MARGIN_PX)
+
+	# THE GHOST ITSELF — always the layer colour, always at ghost alpha, one
+	# draw call per segment so same-layer overlaps composite (see the styling
+	# block). Channel 2 (STALE) changes the STROKE PATTERN only, not the colour.
+	var color: Color = item["color"]
+	if bool(item["dashed"]):
+		for i in range(screen_pts.size() - 1):
+			_draw_dashed_line(screen_pts[i], screen_pts[i + 1], color, stroke_px,
+				CANDIDATE_STALE_DASH_PX)
+	else:
+		draw_polyline(screen_pts, color, stroke_px)
+
+	# Channel 3 — VIOLATION MARKER at the segment's midpoint. A ring, not a fill:
+	# it must say "look here" without hiding the copper it is about. The midpoint
+	# is the CENTRE OF THE MIDDLE SUB-SEGMENT, not the average of the endpoints:
+	# on an L-shaped route the average lands off the copper entirely, marking
+	# empty board.
+	if bool(item["marked"]):
+		var mid_seg: int = int(floor(float(screen_pts.size() - 1) * 0.5))
+		_draw_candidate_marker((screen_pts[mid_seg] + screen_pts[mid_seg + 1]) * 0.5)
+
+
+## One ghost via — the same four channels, transposed to a disc, exactly as the
+## committed-via draw transposes the trace idiom.
+func _draw_candidate_via(item: Dictionary) -> void:
+	var pos := world_to_screen(item["points"][0])
+	var radius: float = maxf(float(item["width"]) * 0.5 * zoom, CANDIDATE_VIA_MIN_RADIUS_PX)
+
+	if bool(item["selected"]):
+		draw_circle(pos, radius + CANDIDATE_SELECT_HALO_MARGIN_PX,
+			Color(trace_selected_color, 0.3))
+	if bool(item["outlined"]):
+		draw_arc(pos, radius + CANDIDATE_PINNED_OUTLINE_MARGIN_PX * 0.5, 0.0, TAU, 24,
+			candidate_pinned_outline_color, CANDIDATE_VIA_RING_WIDTH_PX)
+
+	# A RING, not a filled disc: a candidate via is a proposed hole, and a solid
+	# disc at ghost alpha over committed copper reads as a pad that exists.
+	# STALE (channel 2) breaks the ring into arcs — the disc's dash.
+	var color: Color = item["color"]
+	if bool(item["dashed"]):
+		for k in range(6):
+			var a0 := TAU * float(k) / 6.0
+			draw_arc(pos, radius, a0, a0 + TAU / 12.0, 6, color, CANDIDATE_VIA_RING_WIDTH_PX)
+	else:
+		draw_arc(pos, radius, 0.0, TAU, 24, color, CANDIDATE_VIA_RING_WIDTH_PX)
+
+	if bool(item["marked"]):
+		_draw_candidate_marker(pos)
+
+
+## Channel 3's mark, in one place so a segment's and a via's verdict look alike.
+func _draw_candidate_marker(screen_pos: Vector2) -> void:
+	draw_arc(screen_pos, CANDIDATE_MARKER_RADIUS_PX, 0.0, TAU, 16,
+		candidate_violation_color, 2.0)
+
+
+## Which candidate a click at `world_pos` picks, or "".
+##
+## EXACT GEOMETRY, THE SAME EXACT GEOMETRY THE DRAW USED — this walks
+## candidate_draw_items(), so a ghost is clickable exactly where it is visible and
+## nowhere else. Not a bounding box, not a flattened polyline, not waypoints.
+##
+## VIAS BEFORE SEGMENTS, for the reason _entity_at gives for the committed via
+## rung: a candidate via sits ON the segments that meet there (that is what a via
+## IS), so tested after them it could never be reached. Its claim is tight — its
+## own disc plus a minimum click target — so a segment loses only inside that disc.
+##
+## Within each pass the LAST item wins, so the topmost ghost under the cursor is
+## the one picked (items are in paint order — same "what you see on top is what
+## you click" rule the whole ladder keeps).
+func _candidate_at(world_pos: Vector2) -> String:
+	if not show_route_candidates:
+		return ""
+	var items: Array = candidate_draw_items()
+	if items.is_empty():
+		return ""
+
+	var via_hit := ""
+	var seg_hit := ""
+	for item in items:
+		if str(item["item_kind"]) == "via":
+			var centre: Vector2 = item["points"][0]
+			var radius: float = maxf(float(item["width"]) * 0.5,
+				CANDIDATE_VIA_HIT_RADIUS_PX / zoom)
+			if centre.distance_to(world_pos) <= radius:
+				via_hit = str(item["candidate_id"])
+			continue
+		# Point-to-SEGMENT distance against half the stroke width plus a fixed
+		# screen-px slack divided by zoom — the px-constants-through-the-zoom
+		# idiom used by the trace and vertex picks above.
+		var tol: float = float(item["width"]) * 0.5 + CANDIDATE_HIT_SLACK_PX / zoom
+		var pts: Array = item["points"]
+		for i in range(pts.size() - 1):
+			if _dist_point_to_segment(world_pos, pts[i], pts[i + 1]) <= tol:
+				seg_hit = str(item["candidate_id"])
+				break
+
+	return via_hit if not via_hit.is_empty() else seg_hit
+
+
+## Perpendicular distance from `p` to the SEGMENT ab (not the infinite line):
+## the projection is clamped to [0,1] so the endpoints answer for anything past
+## them. Static + local because the pick must not reach into the annotation kind
+## for it (INV-4 keeps the two paths apart, helpers included).
+static func _dist_point_to_segment(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var len_sq := ab.length_squared()
+	if len_sq <= 0.0:
+		return p.distance_to(a)
+	var t: float = clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
+	return p.distance_to(a + ab * t)
+
+
+## The selected route candidate's id, or "" — the public read surface named in the
+## extension checklist. Singular by design (see selected_candidate_ids): every
+## workspace verb C4a adds acts on ONE candidate, so this is the shape those verbs
+## will read. The list itself stays available through get_selected_candidates()
+## for the same reason every other kind exposes one.
+func get_selected_candidate_id() -> String:
+	return "" if selected_candidate_ids.is_empty() else selected_candidate_ids[0]
+
+
+func get_selected_candidates() -> Array[String]:
+	return selected_candidate_ids.duplicate()
+
+
+## The context menu's candidate section — THE C4a SEAM, and deliberately not a
+## menu of verbs that do nothing.
+##
+## What it adds today is ONE DISABLED IDENTITY LINE naming the candidate the press
+## resolved and the state it is in ("Route candidate cand_3 — pinned, stale").
+## That is information the user cannot otherwise get from a ghost, it is honest
+## about there being no action yet, and it is one line to replace rather than a
+## row of live-looking entries that silently no-op. Disabled-rather-than-absent is
+## the same choice the locked-entity Delete item already makes here.
+##
+## ── WHAT C4a INSERTS, RIGHT BELOW THE IDENTITY LINE ───────────────────────────
+## Accept/Commit · Keep/Pin (or Unpin) · Reject · Try-again · Edit… — each gated
+## on RoutingWorkspace.can_transition(id, <target>) so an illegal move is a
+## DISABLED item rather than a refusal after the click, each routed through the
+## workspace's own gated verb (never through _remove_entity or any board path),
+## and each claiming an id in this menu's 43x block (42x is the per-target board
+## block — see MENU_ID_DELETE_VERTEX and friends). No id is reserved here: an
+## unused constant is indistinguishable from a forgotten one.
+func _add_candidate_menu_seam(candidate_id: String) -> void:
+	context_menu.add_item(_candidate_menu_label(candidate_id), 0)
+	context_menu.set_item_disabled(context_menu.item_count - 1, true)
+
+
+## "Route candidate cand_3 — pinned, stale". Falls back to the bare id when the
+## workspace can no longer resolve it (a candidate removed between the press and
+## the release), which is a label, never an error.
+func _candidate_menu_label(candidate_id: String) -> String:
+	if _routing_workspace == null or not _routing_workspace.has_method("get_candidate"):
+		return "Route candidate %s" % candidate_id
+	var cand = _routing_workspace.get_candidate(candidate_id)
+	if cand == null:
+		return "Route candidate %s" % candidate_id
+	var state := str(cand.disposition)
+	var validation := str(cand.validation)
+	if validation != "unchecked" and validation != "clean":
+		state += ", %s" % validation
+	return "Route candidate %s — %s" % [candidate_id, state]
 
 #endregion
 

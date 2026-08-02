@@ -1206,10 +1206,41 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	# joint. Draw those per-segment (each in ITS layer's color) when present;
 	# fall back to the single-color flattened polyline for hints/legacy
 	# proposals that only carry `waypoints`. AI strokes stay dashed either way.
+	#
+	# ── INV-4 FENCE (campaign 2 epoch C, unit 3 — GATE 019f70f76c2f) ───────────
+	# THE WAYPOINT FALLBACK BELOW SERVES ROUTE HINTS. IT MUST NEVER SERVE A ROUTE
+	# CANDIDATE.
+	#
+	# The two things are different objects with different contracts:
+	#   * A route HINT is a human's authored INSTRUCTION to the router — "go
+	#     roughly this way". Its `waypoints` are a single flattened polyline on
+	#     ONE named layer, and that is the whole truth about it. Flattening loses
+	#     nothing, because there was never per-segment layer information to lose.
+	#   * A route CANDIDATE is the router's ANSWER. Its truth is
+	#     RouteCandidate.segments — independent entities, EACH with its own layer,
+	#     width, id and ordered points, plus explicit vias where copper changes
+	#     side. Flattening it into one polyline destroys exactly the information a
+	#     reviewer needs before accepting: which side of the board the copper
+	#     lands on, and where it changes.
+	#
+	# Candidates are therefore rendered, hit-tested and bounded by
+	# pcb_canvas.gd's own exact-geometry path (candidate_draw_items /
+	# _candidate_at / _entity_anchor), which reads segments and vias and contains
+	# no waypoint read at all. This kind is not on that path.
+	#
+	# THE GUARD IS FAIL-CLOSED, not advisory: a payload that identifies itself as
+	# candidate-sourced and yet carries no `segments` is a CONTRACT VIOLATION (a
+	# candidate always has exact geometry — it is constructed from it), so the
+	# polyline is REFUSED with a named warning rather than silently drawn as a
+	# flattened lie. The marker and label still draw, so the annotation does not
+	# vanish; what is withheld is the misleading stroke.
 	var segments_raw: Variant = payload.get("segments", [])
 	var per_segment: Array = (segments_raw as Array) if segments_raw is Array else []
 	if not per_segment.is_empty():
 		_draw_per_segment_polyline(ctx, per_segment, stroke_px, is_ai)
+	elif _is_candidate_sourced(payload):
+		push_warning("[pcb_route_hint] INV-4: refusing to render a candidate-sourced payload (%s) through the waypoint path — route candidates render from exact segments on the canvas, never from flattened waypoints" \
+			% _candidate_marker_of(payload))
 	else:
 		var pts := _waypoint_points(annotation)
 		if pts.size() >= 2:
@@ -1250,6 +1281,12 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 
 ## Path-based hit-test: distance to any polyline segment (not the AABB), plus the
 ## marker disc around the anchor. threshold is in document (board-mm) units.
+##
+## INV-4: this is a HINT surface. It reads _waypoint_points, and that is correct
+## HERE — see the fence in render(). A route CANDIDATE is never picked through
+## this function: candidates are hit-tested by pcb_canvas._candidate_at against
+## exact segment/via geometry, on the canvas's own selection ladder, with no
+## waypoint read anywhere in that path.
 func hit_test(annotation: Dictionary, point: Vector2, threshold: float) -> bool:
 	var payload: Dictionary = annotation.get("kind_payload", {})
 	var effective := threshold + _HIT_THRESHOLD_MM + float(payload.get("width_mm", 0.0)) * 0.5
@@ -1266,6 +1303,9 @@ func hit_test(annotation: Dictionary, point: Vector2, threshold: float) -> bool:
 	return false
 
 
+## INV-4: a HINT bounds, waypoint-derived and correctly so (see hit_test above).
+## A candidate's extent is derived from its exact segments/vias
+## (pcb_canvas.candidate_draw_items), never from here.
 func bounds(annotation: Dictionary) -> Rect2:
 	var pos := _anchor_position(annotation)
 	var r := _MARKER_RADIUS
@@ -1531,6 +1571,34 @@ static func _to_vec2(raw: Variant) -> Vector2:
 		if d.has("position"):
 			return _to_vec2(d.get("position", []))
 	return Vector2.ZERO
+
+
+## ── INV-4 support (see the fence in render()) ─────────────────────────────────
+## The keys by which a kind_payload declares itself the shadow of a RoutingWorkspace
+## candidate. Nothing writes them today — the dual-write correlation is kept in the
+## workspace itself (RoutingWorkspace.correlate), not on the annotation — and that
+## is precisely why the guard exists NOW: the day a writer stamps one of these on a
+## proposal envelope, the flattened waypoint fallback must already be closed to it
+## rather than quietly rendering a candidate as a single-layer polyline.
+const _CANDIDATE_SOURCE_KEYS := ["candidate_id", "workspace_candidate_id"]
+
+
+## True iff this payload claims to be a route CANDIDATE rather than a route HINT.
+static func _is_candidate_sourced(payload: Dictionary) -> bool:
+	for key in _CANDIDATE_SOURCE_KEYS:
+		if not str(payload.get(key, "")).is_empty():
+			return true
+	return false
+
+
+## Which marker made _is_candidate_sourced true — named in the refusal so the
+## warning identifies the offending payload instead of just complaining.
+static func _candidate_marker_of(payload: Dictionary) -> String:
+	for key in _CANDIDATE_SOURCE_KEYS:
+		var value := str(payload.get(key, ""))
+		if not value.is_empty():
+			return "%s=%s" % [key, value]
+	return "unknown"
 
 
 static func _dist_point_to_segment(p: Vector2, a: Vector2, b: Vector2) -> float:

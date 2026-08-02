@@ -521,6 +521,19 @@ func _build_ui() -> void:
 	# handshake as the two bindings above.
 	if _annotation_host != null and _canvas.has_method("set_annotation_router"):
 		_canvas.set_annotation_router(_annotation_host)
+	# S3 route-candidate rendering (DCR 019f7095c395): hand the canvas the routing
+	# workspace it renders ghosts from, together with the cutover coordinator that
+	# GATES the whole surface. Symmetric with the two bindings above and duck-typed
+	# the same way. Both objects are built at construction (see _routing_workspace
+	# / _routing_cutover), so neither can be null here.
+	#
+	# The canvas connects itself to the workspace's redraw-worthy signals inside
+	# this call — it is the side that knows which workspace instance is current, so
+	# it is the side that can disconnect a previous one. Nothing here flips the
+	# cutover flag: every surface stays annotation-authoritative until a workspace-
+	# backed WRITE path exists (C4a), so this binding is inert by design today.
+	if _canvas.has_method("set_routing_workspace"):
+		_canvas.set_routing_workspace(_routing_workspace, _routing_cutover)
 	# The platform mounts its AnnotationOverlay as a CHILD of this canvas, some
 	# frames after the panel is built (Editor.gd). Arming the universal Select
 	# needs that overlay to exist, so we watch for it arriving rather than
