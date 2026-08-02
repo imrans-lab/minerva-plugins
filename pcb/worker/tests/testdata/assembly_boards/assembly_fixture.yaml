@@ -1,0 +1,66 @@
+# Synthetic fixture for the BOM/CPL assembly-output emitters (C8, docket
+# 019f763cdf5b). Hand-authored, NOT fetched or derived from KiCad data — small
+# enough that every CPL row and BOM group in tests/test_assembly_outputs.py is
+# hand-derivable by inspection of this file alone.
+#
+# Deliberately exercises:
+#   * two components sharing (footprint, value, mpn) -> one grouped BOM line
+#     with two refs (R1, R2).
+#   * a non-zero, non-right-angle-adjacent rotation (R2 @ 90 deg) -- the CPL
+#     rotation convention seal.
+#   * a BOTTOM-side component (D1 @ 45 deg, layer: bottom) -- CPL side column
+#     + the rotation convention on the mirrored side.
+#   * every component carries `mpn` (tolerant Extra field, board-yaml.md) so
+#     this fixture is IDENTITY-CLEAN by construction; the identity-refusal
+#     path is exercised in test_assembly_outputs.py by mutating a loaded copy
+#     of this same fixture, not by a second committed fixture file.
+version: 1
+name: AssemblyFixture
+width_mm: 30
+height_mm: 20
+origin: {x_mm: 0, y_mm: 0}
+layers: [top, bottom]
+design_rules:
+  clearance_mm: 0.2
+  trace_width_mm: 0.25
+
+components:
+  - ref: R1
+    footprint: R_0805
+    value: "10k"
+    mpn: C25804
+    x_mm: 10.0
+    y_mm: 5.0
+    rotation_deg: 0
+    layer: top
+    pins:
+      - {number: "1", name: "1", x_mm: -1.0, y_mm: 0}
+      - {number: "2", name: "2", x_mm: 1.0, y_mm: 0}
+  - ref: R2
+    footprint: R_0805
+    value: "10k"
+    mpn: C25804
+    x_mm: 15.0
+    y_mm: 5.0
+    rotation_deg: 90
+    layer: top
+    pins:
+      - {number: "1", name: "1", x_mm: -1.0, y_mm: 0}
+      - {number: "2", name: "2", x_mm: 1.0, y_mm: 0}
+  - ref: D1
+    footprint: D_SOD-123
+    value: 1N4148
+    mpn: C2128
+    x_mm: 12.5
+    y_mm: 14.0
+    rotation_deg: 45
+    layer: bottom
+    pins:
+      - {number: "1", name: A, x_mm: -0.9, y_mm: 0}
+      - {number: "2", name: K, x_mm: 0.9, y_mm: 0}
+
+nets:
+  - name: NET1
+    pins: ["R1.2", "R2.1"]
+  - name: NET2
+    pins: ["R2.2", "D1.1"]

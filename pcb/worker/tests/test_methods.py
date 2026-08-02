@@ -322,3 +322,65 @@ def test_check_bom_footprint_found_and_suggestions_with_lib_dir(board_yaml):
     # suggestion offered from the present library.
     assert items_by_fp["R_0805"]["footprint_found"] is False
     assert "R_0805_2012Metric" in items_by_fp["R_0805"]["suggestions"]
+
+
+# ---------------------------------------------------------------------------
+# assembly_bom / assembly_cpl — RPC wiring only (see test_assembly_outputs.py
+# for emitter mechanics: grouping, rotation convention, identity refusal).
+# ---------------------------------------------------------------------------
+
+ASSEMBLY_BOARD = (Path(__file__).resolve().parent / "testdata" / "assembly_boards"
+                  / "assembly_fixture.yaml")
+
+
+@pytest.fixture()
+def assembly_yaml() -> str:
+    return ASSEMBLY_BOARD.read_text(encoding="utf-8")
+
+
+def test_assembly_bom_dispatch_default_profile(assembly_yaml):
+    resp = _call("assembly_bom", {"yaml": assembly_yaml})
+    assert resp["ok"] is True
+    files = resp["result"]["files"]
+    assert list(files.keys()) == ["board-bom-jlc.csv"]
+    assert "LCSC Part #" in next(iter(files.values()))
+
+
+def test_assembly_cpl_dispatch_default_profile(assembly_yaml):
+    resp = _call("assembly_cpl", {"yaml": assembly_yaml, "name": "afix"})
+    assert resp["ok"] is True
+    files = resp["result"]["files"]
+    assert list(files.keys()) == ["afix-cpl-jlc.csv"]
+    assert "Rotation" in next(iter(files.values()))
+
+
+def test_assembly_cpl_unknown_house_is_named_refusal(assembly_yaml):
+    resp = _call("assembly_cpl", {"yaml": assembly_yaml, "profile": "acme"})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "assembly"
+    assert "acme" in resp["error"]["message"]
+
+
+def test_assembly_bom_house_without_assembly_service_is_named_refusal(assembly_yaml):
+    resp = _call("assembly_bom", {"yaml": assembly_yaml, "profile": "oshpark"})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "assembly"
+    assert "OSH Park" in resp["error"]["message"]
+
+
+def test_assembly_bom_missing_identity_is_named_refusal():
+    src = ASSEMBLY_BOARD.read_text(encoding="utf-8").replace("    mpn: C25804\n", "", 1)
+    resp = _call("assembly_bom", {"yaml": src})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "assembly"
+    assert "R1" in resp["error"]["message"]
+    assert "mpn" in resp["error"]["message"]
+
+
+def test_assembly_bom_writes_out_dir(assembly_yaml, tmp_path):
+    resp = _call("assembly_bom", {"yaml": assembly_yaml, "out_dir": str(tmp_path)})
+    assert resp["ok"] is True
+    written = resp["result"]["written"]
+    assert len(written) == 1
+    assert (tmp_path / "board-bom-jlc.csv").is_file()
+    assert written[0]["bytes_written"] == (tmp_path / "board-bom-jlc.csv").stat().st_size

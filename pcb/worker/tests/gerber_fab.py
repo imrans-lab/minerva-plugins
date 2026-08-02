@@ -30,7 +30,7 @@ from pathlib import Path
 
 import yaml
 
-from pcb_worker import gerber
+from pcb_worker import assembly_outputs, gerber
 from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import DiagnosticSeverity, ResolutionSuccess
 
@@ -79,3 +79,26 @@ def build_raw_emitter(path, base: str, **kwargs) -> gerber.GerberResult:
     :func:`build_fab`.
     """
     return gerber.build_gerbers(load_board(path), name=base, **kwargs)
+
+
+def build_assembly_bom(path, base: str, **kwargs) -> assembly_outputs.AssemblyResult:
+    """Emit a fixture's JLC BOM (C8, docket 019f763cdf5b) — operates on the RAW
+    loose board dict, mirroring ``methods._assembly_bom`` exactly (no IR
+    compile; see ``assembly_outputs.py``'s module docstring for why).
+
+    Accepts and IGNORES a ``creation_date`` kwarg so this can share
+    ``test_determinism_gate.py``'s parametrized CASES list with the Gerber
+    builders: there is no wall-clock-volatile byte in a BOM/CPL CSV (no
+    timestamp field exists to pin), so the "two different creation_date ->
+    only timestamp lines differ" proof degenerates to "zero lines differ",
+    which is the correct (not merely convenient) result for this emitter.
+    """
+    kwargs.pop("creation_date", None)
+    return assembly_outputs.build_bom(load_board(path), "jlc", name=base, **kwargs)
+
+
+def build_assembly_cpl(path, base: str, **kwargs) -> assembly_outputs.AssemblyResult:
+    """Emit a fixture's JLC CPL — see :func:`build_assembly_bom` (same
+    contract, same reason ``creation_date`` is accepted-and-ignored)."""
+    kwargs.pop("creation_date", None)
+    return assembly_outputs.build_cpl(load_board(path), "jlc", name=base, **kwargs)

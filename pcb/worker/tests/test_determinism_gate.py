@@ -31,12 +31,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.gerber_fab import build_fab, build_raw_emitter
+from tests.gerber_fab import (build_assembly_bom, build_assembly_cpl, build_fab,
+                               build_raw_emitter)
 
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
 ZONE_BOARD = HERE / "testdata" / "zone_fill.yaml"
+ASSEMBLY_BOARD = HERE / "testdata" / "assembly_boards" / "assembly_fixture.yaml"
 
 # (board path, base name, builder). Spike -> PRODUCTION fab path (compile -> IR);
 # drilltest -> raw loose-dict emitter (explicit drift fixture, not production).
@@ -61,6 +63,14 @@ CASES = [
     # must produce the same Gerber, or a "reproducible" fabrication package is a
     # lie the moment a pour is on the board.
     pytest.param(ZONE_BOARD, "zonefill", build_fab, id="zonefill-production"),
+    # ASSEMBLY OUTPUTS — added when BOM/CPL became emitted artifacts (C8,
+    # docket 019f763cdf5b), the SAME "extend the standing gate with one data
+    # row" pattern C6 used for zonefill above. Two rows, not one: BOM and CPL
+    # are two independent emitters (assembly_outputs.build_bom /
+    # .build_cpl), each with its own file-set/ordering/formatting code path —
+    # a determinism bug in one would not show up in the other.
+    pytest.param(ASSEMBLY_BOARD, "afix", build_assembly_bom, id="assembly-bom-production"),
+    pytest.param(ASSEMBLY_BOARD, "afix", build_assembly_cpl, id="assembly-cpl-production"),
 ]
 
 

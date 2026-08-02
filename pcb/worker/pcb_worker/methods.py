@@ -24,8 +24,8 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import (board_model, compile_board, drc, footprints, gerber,
-               ir_candidates, ir_connectivity, kicad, libcheck, resolve)
+from . import (assembly_outputs, board_model, compile_board, drc, footprints,
+               gerber, ir_candidates, ir_connectivity, kicad, libcheck, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -551,6 +551,86 @@ def _check_bom(params: dict) -> dict:
     if not lib_present:
         result["hint"] = _NO_LIBRARY_DATA_HINT
     return {"ok": True, "result": result}
+
+
+# ---------------------------------------------------------------------------
+# assembly_bom / assembly_cpl — pre-assembled-order package outputs (docket
+# 019f763cdf5b, C8). Operate on the RAW canonical board dict, the same input
+# `_check_bom` already reads (NOT the compiled ResolvedBoard IR — see
+# assembly_outputs.py's module docstring for why). Return/write-to-disk
+# convention deliberately mirrors `_gerbers` ({files, written}), so a caller
+# that already knows how to consume a gerbers reply needs no new shape.
+# ---------------------------------------------------------------------------
+
+def _write_assembly_files(files: dict, out_dir) -> list | dict:
+    """Shared out_dir writer for assembly outputs — same convention as
+    `_gerbers`'s inline writer (utf-8 text, one file per dict entry)."""
+    if not (isinstance(out_dir, str) and out_dir.strip()):
+        return []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        written = []
+        for fname, text in files.items():
+            p = Path(out_dir) / fname
+            data = text.encode("utf-8")
+            p.write_bytes(data)
+            written.append({"path": str(p), "bytes_written": len(data)})
+        return written
+    except OSError as exc:
+        return {"ok": False, "error": {
+            "kind": "io", "message": f"failed to write to out_dir: {exc}"}}
+
+
+def _assembly_bom(params: dict) -> dict:
+    """Generate a house-formatted BOM CSV. params: yaml|board, profile
+    (house id, default "jlc" — the only assembly-capable profile shipped),
+    name (base filename), out_dir (optional disk write)."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    profile_id = params.get("profile") or "jlc"
+    base_name = params.get("name") if isinstance(params.get("name"), str) else None
+    try:
+        files = assembly_outputs.build_bom(board, profile_id, name=base_name)
+    except Exception as exc:  # matches _gerbers' own comment: "geometry/library
+        # faults reported as data, not crash" (methods.py _gerbers, above) —
+        # a broad catch here is the dispatcher's established convention for an
+        # emitter call over caller-supplied board data, not an exception to it.
+        # A NAMED assembly_outputs error (AssemblyProfileError/IdentityError/
+        # BoardError, all ValueError subclasses) is the common case; the broad
+        # catch is the backstop so nothing escapes handle_request's own
+        # try/except as a bare {"kind":"python", "traceback": ...} reply.
+        return {"ok": False, "error": {"kind": "assembly", "message": str(exc)}}
+
+    written = _write_assembly_files(files, params.get("out_dir"))
+    if _is_error_reply(written):
+        return written
+    return {"ok": True, "result": {"files": files, "written": written}}
+
+
+def _assembly_cpl(params: dict) -> dict:
+    """Generate a house-formatted CPL/pick-and-place CSV. Same params/return
+    convention as `_assembly_bom`."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    profile_id = params.get("profile") or "jlc"
+    base_name = params.get("name") if isinstance(params.get("name"), str) else None
+    try:
+        files = assembly_outputs.build_cpl(board, profile_id, name=base_name)
+    except Exception as exc:  # see _assembly_bom's comment: matches _gerbers'
+        # broad-catch convention ("geometry/library faults reported as data,
+        # not crash"), backstopping the named assembly_outputs errors.
+        return {"ok": False, "error": {"kind": "assembly", "message": str(exc)}}
+
+    written = _write_assembly_files(files, params.get("out_dir"))
+    if _is_error_reply(written):
+        return written
+    return {"ok": True, "result": {"files": files, "written": written}}
 
 
 # ---------------------------------------------------------------------------
@@ -2170,6 +2250,8 @@ _HANDLERS = {
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
+    "assembly_bom": lambda req: _assembly_bom(req.get("params") or {}),
+    "assembly_cpl": lambda req: _assembly_cpl(req.get("params") or {}),
     "route": lambda req: _route(req.get("params") or {}),
     "draft_check": lambda req: _draft_check(req.get("params") or {}),
     "ping": lambda req: _ping(req.get("params") or {}),
