@@ -894,6 +894,139 @@
       "name": "minerva_pcb_library_status",
       "description": "Report whether the KiCAD library-data subset (pcb/libraries.lock.json) has been fetched and verified. Args: none. Returns {present, version_tag, entries_verified, total_entries, missing:[names]}. present:false (or a non-empty missing[]) means minerva_pcb_check_libraries/minerva_pcb_check_bom will report missing_data:true — run minerva_pcb_fetch_libraries to fix. Never fails: an absent lock file or data directory reports present:false rather than erroring.",
       "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+      "name": "minerva_pcb_workspace_propose",
+      "description": "Route the open route hints into the ROUTING WORKSPACE as candidates (ghost routes), writing no proposal annotations. The workspace-native replacement for minerva_pcb_apply_route_hints' propose half: candidates carry exact per-segment layers/widths and vias, stable ids, and a disposition (proposed/pinned/superseded/rejected/committed) you act on with the other minerva_pcb_workspace_* verbs. Args {editor_name, hint_ids?}. Returns {proposed, candidates:[{candidate_id, task_id, net, generation, disposition, validation, segment_count, via_count, layers}], holds, routes_returned, unrouted, stuck, drc_summary, drc_geometric_summary, stale_candidate_ids}. HOLDS: a task whose current candidate is PINNED is HELD — the incoming candidate is NOT created and the pin stands, so candidates[] is SHORTER than routes_returned; holds[] names {task_id, held_candidate_id, net, reason} for each. Unpin or reject that candidate (or minerva_pcb_workspace_reroute_route it) to replace it.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "hint_ids": {"type": "array", "items": {"type": "string"}, "description": "Route-hint annotation ids to route. Omit/empty to route every OPEN hint."}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_list",
+      "description": "List the routing workspace: candidates, tasks and selection. Read-only; journals nothing. Args {editor_name, include_terminal?, task_id?, net?}. Returns {candidates:[…], count, tasks:[{task_id, net, state, span_scoped}], open_task_ids, active_candidate_id, pinned_candidate_ids, stale_candidate_ids}. LIVE candidates only by default — superseded/rejected/committed ones are history and would bury the answers you are deciding between; pass include_terminal:true to see them. A candidate's two axes are independent: disposition is the workflow decision, validation is the DRC health (unchecked/checking/clean/violating/stale/error).",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "include_terminal": {"type": "boolean", "description": "Include superseded/rejected/committed candidates (default false)"},
+          "task_id": {"type": "string", "description": "Only candidates answering this routing task"},
+          "net": {"type": "string", "description": "Only candidates on this net"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_get_active",
+      "description": "The route candidate the panel is focused on, with its findings. Read-only. Args {editor_name}. Returns {active_candidate_id, candidate:{…}, findings:[…]}. No active candidate is a SUCCESS with active_candidate_id \"\" — \"nothing is selected\" is an answer, not an error; pass candidate_id explicitly to the verb you meant.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_pin",
+      "description": "PIN a route candidate (the DCR's Keep): it stays a draft, and future routing runs route AROUND it instead of relitigating it. A batch re-propose will not replace a pinned candidate — it HOLDS the task and says so (see minerva_pcb_workspace_propose's holds). Args {editor_name, candidate_id}. Returns the updated candidate record. Pinning marks NOTHING stale: it moves no copper and does not change the set a draft-check scores, so a check you already ran still stands. Refused by name (illegal_disposition_transition / terminal_disposition) for a candidate that has already left the live set.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_unpin",
+      "description": "UNPIN a route candidate — it becomes a plain draft again and stops acting as a keep-out for future routing runs. Args {editor_name, candidate_id}. Returns the updated candidate record. Like pin, marks nothing stale. Unpinning an already-unpinned candidate is a legal no-op; unpinning a terminal one (superseded/rejected/committed) is refused by name — that would resurrect geometry that has left the live set.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_reject",
+      "description": "REJECT a route candidate: discard it and REOPEN its routing task. Args {editor_name, candidate_id}. Returns the updated candidate record plus stale_candidate_ids. Rejecting is TERMINAL — there is no un-reject, and the way back is a new proposal (minerva_pcb_workspace_propose / _reroute_route), because un-rejecting would resurrect geometry the user already refused. It also marks every still-live candidate's verdict STALE: draft-check is set-scoped, so a verdict computed against a set that included this candidate no longer holds.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_commit",
+      "description": "COMMIT a route candidate (the DCR's Accept): its exact geometry becomes REAL COPPER on the board — one trace per candidate segment on that segment's own layer and width, plus its vias — and the candidate becomes 'committed', in ONE UNDOABLE STEP. A single undo removes the copper AND returns the candidate to its pre-commit disposition; the two can never drift apart. Args {editor_name, candidate_id}. Returns {candidate_id, task_id, task_state, trace_ids, via_ids, consumed_hint_ids, validation_at_commit, candidate, stale_candidate_ids}. Source hints are CONSUMED BY RECORD, not deleted — no annotation is removed, so nothing outside the undo step happens. ALL validation precedes ALL mutation: a refused commit (illegal transition, a segment with fewer than two points, a zero width, an illegal via span) leaves the board, the disposition and the history untouched. validation_at_commit reports the candidate's DRC state at the moment it became copper; committing an unchecked or violating candidate is allowed and reported, never silently blessed.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_reroute_route",
+      "description": "TRY AGAIN on a whole route: re-run the router scoped to this candidate's own source hints and land a NEW generation for the same task. Args {editor_name, candidate_id}. Returns the propose-shaped reply plus {rerouted_candidate_id, prior_task_id, same_task}. The router runs FIRST and the prior candidate is retired only after it answers, so a routing failure never leaves the task with no answer at all. Refused by name when the candidate has already left the live set, or when it carries no source route-hint provenance (no_source_hints) — the panel's router bridge can only scope a run by hint selection today, so an unaddressable reroute would silently become a whole-board run.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id to reroute"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_reroute_span",
+      "description": "Reroute only part of a route — CURRENTLY DEGRADED TO A WHOLE-ROUTE REROUTE, and every reply says so. Args {editor_name, candidate_id, segment_ids}. The routing engine scopes by WHOLE NET and refuses a span outright rather than widening it, so span-scoped replacement geometry cannot be obtained; this verb therefore reroutes the ENTIRE route and stamps {degraded:true, degraded_to:\"whole_route\", requested_segment_ids, limitation, limitation_docket:\"019fc155bc32\"} on the reply. It deliberately creates NO span-scoped task: recording a span question whose answer is whole-route geometry would make the model claim a scope it never had. Use minerva_pcb_workspace_reroute_route directly if a whole-route reroute is what you meant.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id whose span should be rerouted"},
+          "segment_ids": {"type": "array", "items": {"type": "string"}, "description": "Segment ids of the interval to replace. Echoed as requested_segment_ids; NOT honoured while the verb is degraded."}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_check",
+      "description": "SET-SCOPED draft DRC over route candidates: runs the DRC rules over the UNION of the board's committed copper and every checked candidate's draft copper, so a collision between two candidates, or between a candidate and real copper, is found. Args {editor_name, candidate_ids?, include_stale?}. Omit candidate_ids to check every live candidate. Returns {checked, checked_stale, per_candidate:{candidate_id: clean|violating|error}, findings, validation, board_token, workspace_generation, newly_stale_candidate_ids}. Findings name SUBJECT IDENTITY — subjects:[{candidate_id, segment_id|via_id}] — not just a net, so a violation points at the exact ghost segment or via. STALE CANDIDATES REFUSE: the workspace is rebased onto the live board revision first, and a candidate generated against a different revision (or invalidated by a verb) comes back as error \"stale_candidates\" rather than a verdict. Two exits, both named in the refusal: reroute/re-propose it for geometry against THIS board, or re-run with include_stale:true to check the existing geometry deliberately.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_ids": {"type": "array", "items": {"type": "string"}, "description": "Candidates to check. Omit/empty to check every LIVE candidate."},
+          "include_stale": {"type": "boolean", "description": "Check stale candidates too instead of refusing (default false)"}
+        },
+        "required": ["editor_name"]
+      }
     }
   ],
   "skills": [

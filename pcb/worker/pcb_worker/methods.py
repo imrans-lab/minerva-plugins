@@ -1027,6 +1027,50 @@ def _engine_default_trace_width_mm() -> float | None:
     return _engine_default_mm("trace_width")
 
 
+def _candidate_overlay_defaults(rb, *,
+                                run_trace_width_mm: float | None = None) -> dict:
+    """THE precedence for ``ir_candidates.build_overlay``'s fallback dimensions.
+
+    ONE function, both call sites (chore 019fc15cdf13). Before this, the
+    propose/route path handed pinned candidates to ``build_overlay`` with NO
+    defaults while the geometric-DRC path passed the board's — so the same
+    candidate could project on one surface and come back
+    ``unsupported_geometry`` on the other. Benign only for as long as every
+    candidate happens to carry explicit dimensions; a cross-surface
+    inconsistency is exactly the class the parity work exists to remove.
+
+    The precedence, stated once:
+
+      1. the ENTITY's own declared dimensions — ``build_overlay``'s own job, and
+         always first: a segment/via that states its size is never overridden.
+      2. the RUN's effective trace width, and ONLY for copper THIS RUN PRODUCED.
+         That is what keeps the E2 property intact (a proposal is scored at the
+         width it was actually routed at, never at a nominal one); it is
+         deliberately NOT applied to copper the CALLER handed in, whose width is
+         nothing to do with this run's options.
+      3. the BOARD's own authored routing defaults (``design_rules.defaults``) —
+         the same values acceptance writes, so a dimension-less candidate is
+         modelled at what it would BECOME rather than at a guess.
+      4. fail closed. ``build_overlay`` still raises when nothing above supplies
+         a value; this widens where a value can come FROM, never what happens
+         when there is none.
+
+    Step 3 is unreachable on the propose path in practice — every route segment
+    is stamped with its width by ``_stamp_effective_routing_rules`` and
+    ``run_trace_width_mm`` is the resolved run width — so this is a widening of
+    the rule, not a change to any shipped verdict.
+    """
+    defaults = rb.design_rules.defaults
+    width = ir_candidates.positive_mm(run_trace_width_mm)
+    if width is None:
+        width = ir_candidates.positive_mm(defaults.trace_width_mm)
+    return {
+        "default_width_mm": width,
+        "default_via_diameter_mm": defaults.via_diameter_mm,
+        "default_via_drill_mm": defaults.via_drill_mm,
+    }
+
+
 def _effective_routing_rules_detailed(kw: dict, rb) -> tuple[float, str, float, str]:
     """(trace_width_mm, width_source, clearance_mm, clearance_source), or raise
     UnsupportedGeometry.
@@ -1211,12 +1255,12 @@ def _attach_route_geometric_drc(payload: dict, rb, *,
 
     candidates, empty = _routes_to_candidates(routes)
     try:
-        defaults = rb.design_rules.defaults
+        # ONE precedence, shared with the pinned-candidate projection in
+        # _route (chore 019fc15cdf13) — see _candidate_overlay_defaults. This
+        # copper IS what the run produced, so the run's width is passed.
         union = ir_candidates.check_candidates(
             rb, candidates,
-            default_width_mm=trace_width_mm,
-            default_via_diameter_mm=defaults.via_diameter_mm,
-            default_via_drill_mm=defaults.via_drill_mm)
+            **_candidate_overlay_defaults(rb, run_trace_width_mm=trace_width_mm))
     except Exception as exc:  # noqa: BLE001 - a fault is NOT a clean.
         union = ir_candidates.candidate_indeterminate(
             "internal", f"geometric candidate DRC raised {exc!r}")
@@ -1537,9 +1581,18 @@ def _route(params: dict) -> dict:
         # candidate is a decision the user already made, so the run routes AROUND
         # it exactly as it routes around accepted copper — see
         # route_bridge.existing_copper_with_pinned.
+        # SAME overlay-default precedence the geometric DRC uses (chore
+        # 019fc15cdf13) — see _candidate_overlay_defaults. No run width is
+        # passed: a PINNED candidate is copper the CALLER already has, not
+        # copper this run produced, so this run's trace_width option has
+        # nothing to say about it; a dimension-less pinned candidate falls to
+        # the board's own authored routing defaults, and to fail-closed after
+        # that. (kw["trace_width"] is not even resolved yet at this point in
+        # _route, which is a second reason the run width does not belong here.)
         existing_traces, existing_vias = \
             route_bridge.existing_copper_with_pinned(
-                compiled.board, params.get("pinned_candidates"))
+                compiled.board, params.get("pinned_candidates"),
+                **_candidate_overlay_defaults(compiled.board))
         # It now also lives ON the Board (019f9bc3909c). Still passed explicitly
         # below — this path always did, correctly, and that is unchanged — but a
         # Board handed to the engine WITHOUT those options no longer silently

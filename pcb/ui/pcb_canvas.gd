@@ -873,6 +873,15 @@ const MENU_ID_DELETE_VERTEX := 421
 const MENU_ID_INSERT_VERTEX := 422
 const MENU_ID_SET_TRACE_WIDTH := 423
 const MENU_ID_DELETE_TARGET := 424
+## C4a — the route-candidate verb block (43x, kept apart from the 42x per-target
+## BOARD block above because these mutate the routing WORKSPACE and never the
+## board's entity set; the one that does touch copper, Commit, goes through the
+## workspace's own transaction). See _add_candidate_menu_seam.
+const MENU_ID_CANDIDATE_COMMIT := 430
+const MENU_ID_CANDIDATE_PIN := 431
+const MENU_ID_CANDIDATE_UNPIN := 432
+const MENU_ID_CANDIDATE_REJECT := 433
+const MENU_ID_CANDIDATE_TRY_AGAIN := 434
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -981,6 +990,18 @@ func _on_context_menu_pressed(id: int) -> void:
 			_request_trace_width_edit(str(_context_menu_target[1]))
 		MENU_ID_DELETE_TARGET:  # B1u5 — delete the entity the press picked
 			_delete_picked_entity(str(_context_menu_target[0]), str(_context_menu_target[1]), "Delete")
+		# C4a — the route-candidate verbs. Every one resolves the candidate from
+		# the FROZEN press target (never a re-pick), exactly like the board items.
+		MENU_ID_CANDIDATE_COMMIT:
+			_run_candidate_verb("commit", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_PIN:
+			_run_candidate_verb("pin", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_UNPIN:
+			_run_candidate_verb("unpin", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_REJECT:
+			_run_candidate_verb("reject", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_TRY_AGAIN:
+			_run_candidate_verb("try_again", str(_context_menu_target[1]))
 
 
 ## "Set trace width…": make the trace the WHOLE selection, then ask the panel to
@@ -2854,6 +2875,12 @@ func _add_to_selection(kind: String, entity_id: String) -> void:
 		component_selected.emit(entity_id)
 		for member_id in _group_mates(entity_id):
 			_add_to_selection(kind, member_id)
+	elif kind == KIND_CANDIDATE:
+		# C4a: a ghost carries no label and no inspector row, so selecting one
+		# has to say what it is and what can be done to it. This is the ONE place
+		# a candidate becomes selected, which is why the line is emitted here
+		# rather than at each caller.
+		_emit_candidate_teach_line(entity_id)
 
 
 ## The other members of this component's group ([] when it has none). Wrapped so
@@ -3621,16 +3648,16 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			# entry for something that was never on the board, and leave the task
 			# closed with no answer. C4a owns the verb.
 			#
-			# Two of the three callers are already blocked before they reach this
-			# line: _delete_selection never loops KIND_CANDIDATE (see its literal
-			# kind array), and the context menu offers no Delete item for a
-			# candidate (see _add_context_menu_target_items). The THIRD is the
-			# ERASER, which picks through _entity_at and so CAN resolve a ghost —
-			# it lands here and is refused, which is exactly the eraser's own
-			# documented "a locked hit is just another kind of miss" behaviour:
-			# silent, no snapshot, tool stays armed. Deliberate — an eraser that
-			# discarded a routing proposal would be a destructive, unjournalled
-			# workflow decision taken by a board-editing tool.
+			# ALL THREE callers are now blocked before they reach this line, and
+			# this case is the backstop rather than the mechanism:
+			# _delete_selection never loops KIND_CANDIDATE (see its literal kind
+			# array), the context menu offers no Delete item for a candidate (it
+			# offers the WORKSPACE verbs instead — see _add_candidate_menu_seam),
+			# and the ERASER, which picks through _entity_at and so CAN resolve a
+			# ghost, now stops at _handle_eraser_click with a VISIBLE notice
+			# naming Reject as the verb that does it (C4a, chore 019fc179be76 —
+			# the adjudication is written out there). Anything that still arrives
+			# here is a caller that was not meant to, and gets a false.
 			return false
 	return false
 
@@ -3770,6 +3797,30 @@ func _handle_eraser_click(world_pos: Vector2) -> void:
 	if not data:
 		return
 	var hit: Array = _entity_at(world_pos)
+	# ── ERASER-ON-GHOST: A VISIBLE HOLD, NOT A DELETE (C4a, chore 019fc179be76)
+	#
+	# ADJUDICATED against the DCR vocabulary, and the answer is NOT "eraser =
+	# Reject". Two reasons, both about contracts this file already makes:
+	#
+	#  1. The eraser's whole grammar is ONE JOURNALLED, UNDOABLE STEP — every
+	#     other kind it touches goes through _delete_picked_entity's
+	#     save_to_history, and the user's recourse is Ctrl+Z. Reject is TERMINAL
+	#     in the disposition legality table (pcb_route_candidate.gd:
+	#     "rejected" has NO outgoing transitions) and rides no board history
+	#     bucket, so mapping the eraser onto it would let a tool that promises
+	#     undo perform the one act in this surface that cannot be undone. That
+	#     is worse than the silence it replaces, not better.
+	#  2. A candidate is a DRAFT, not copper. The eraser is a board-editing tool;
+	#     Reject is a workflow decision that also reopens a RouteTask. Giving one
+	#     the other's meaning collapses a distinction the DCR draws on purpose.
+	#
+	# So the refusal STAYS a refusal — and stops being silent, which is the
+	# actual defect the chore names. The notice says what was hit, why the
+	# eraser will not take it, and the exact verb that will.
+	if str(hit[0]) == KIND_CANDIDATE:
+		trace_tool_message.emit("Route candidate %s is a draft, not copper — the eraser only removes board entities. Right-click it and choose Reject (that discards it and reopens its task)."
+			% str(hit[1]))
+		return
 	_delete_picked_entity(str(hit[0]), str(hit[1]), "Erase")
 
 
@@ -5780,17 +5831,161 @@ func get_selected_candidates() -> Array[String]:
 ## row of live-looking entries that silently no-op. Disabled-rather-than-absent is
 ## the same choice the locked-entity Delete item already makes here.
 ##
-## ── WHAT C4a INSERTS, RIGHT BELOW THE IDENTITY LINE ───────────────────────────
-## Accept/Commit · Keep/Pin (or Unpin) · Reject · Try-again · Edit… — each gated
-## on RoutingWorkspace.can_transition(id, <target>) so an illegal move is a
-## DISABLED item rather than a refusal after the click, each routed through the
-## workspace's own gated verb (never through _remove_entity or any board path),
-## and each claiming an id in this menu's 43x block (42x is the per-target board
-## block — see MENU_ID_DELETE_VERTEX and friends). No id is reserved here: an
-## unused constant is indistinguishable from a forgotten one.
+## ── THE VERBS (C4a) ───────────────────────────────────────────────────────────
+## Commit · Pin (or Unpin) · Reject · Try again — the DCR's own vocabulary, in
+## the DCR's own order. Each is ENABLED-OR-DISABLED by
+## RoutingWorkspace.can_transition(id, <target>), so an illegal move is a greyed
+## item the user can see the shape of rather than a refusal that arrives after
+## the click; and each runs the workspace's OWN gated verb, so the menu and
+## minerva_pcb_workspace_* cannot drift into different powers.
+##
+## PIN AND UNPIN ARE ONE SLOT, not two items one of which is always dead: a
+## candidate is either pinned or it is not, so the slot shows the move that is
+## available from where it stands.
+##
+## "TRY AGAIN" DOES THE HALF THE CANVAS OWNS, and says so. Try-again is
+## "retire this answer and ask the question again"; retiring is a model
+## transition (RoutingWorkspace.supersede — documented there as exactly the
+## targeted Try-again) and the canvas performs it, which also REOPENS the task.
+## The asking is a ROUTER RUN, which is asynchronous, panel-owned and not
+## something a context menu can await — the panel's Propose button and
+## minerva_pcb_workspace_reroute_route are the two doorways onto it. So the item
+## does its half and the status line names the other half by name. That is a
+## split, stated; it is not a silent no-op.
 func _add_candidate_menu_seam(candidate_id: String) -> void:
 	context_menu.add_item(_candidate_menu_label(candidate_id), 0)
 	context_menu.set_item_disabled(context_menu.item_count - 1, true)
+	if _routing_workspace == null or not _routing_workspace.has_method("can_transition"):
+		return
+	var cand = _routing_workspace.get_candidate(candidate_id)
+	if cand == null:
+		return
+	var pinned: bool = str(cand.disposition) == "pinned"
+
+	_context_menu_separate()
+	_add_candidate_verb_item("Commit", MENU_ID_CANDIDATE_COMMIT, candidate_id, "committed")
+	if pinned:
+		_add_candidate_verb_item("Unpin", MENU_ID_CANDIDATE_UNPIN, candidate_id, "proposed")
+	else:
+		_add_candidate_verb_item("Pin", MENU_ID_CANDIDATE_PIN, candidate_id, "pinned")
+	_add_candidate_verb_item("Reject", MENU_ID_CANDIDATE_REJECT, candidate_id, "rejected")
+	_add_candidate_verb_item("Try again", MENU_ID_CANDIDATE_TRY_AGAIN, candidate_id, "superseded")
+
+
+## One verb item, disabled when the legality table says the move is not
+## available from where this candidate stands. Shown-but-disabled rather than
+## hidden, the same choice the locked-entity Delete item makes: a missing item
+## says nothing, a greyed one says "not from here".
+##
+## TWO conditions, and the second is not redundant. The legality table treats an
+## IDENTITY move (x -> x) as LEGAL — deliberately, so a caller re-asserting a
+## state need not guard its own writes — which would leave "Commit" live on an
+## already-committed candidate and "Reject" live on a rejected one. Clicking
+## Commit there would lay a SECOND full set of copper for one candidate.
+## RoutingWorkspace.commit refuses that too, by name, so this is the outer of two
+## guards rather than the only one; but an item whose only possible effect is to
+## re-assert the state it is already in is a dead item, and it greys out.
+func _add_candidate_verb_item(label: String, menu_id: int, candidate_id: String, target: String) -> void:
+	context_menu.add_item(label, menu_id)
+	var cand = _routing_workspace.get_candidate(candidate_id)
+	var identity: bool = cand != null and str(cand.disposition) == target
+	if identity or not _routing_workspace.can_transition(candidate_id, target):
+		context_menu.set_item_disabled(context_menu.item_count - 1, true)
+
+
+## Run ONE candidate verb and report the outcome on the status line.
+##
+## THE TWO DOORWAYS SHARE THE MODEL, NOT THE PROSE: this is the human's doorway
+## and minerva_pcb_workspace_* is the agent's; both call the same workspace verb
+## and both surface the same NAMED refusal code, but only this one turns it into
+## a sentence. Nothing here mutates the board directly — Commit hands the whole
+## transaction to RoutingWorkspace.commit, which owns the batch, the history
+## snapshot and the disposition together (INV-1).
+func _run_candidate_verb(verb: String, candidate_id: String) -> void:
+	if not _candidates_active() or candidate_id.is_empty():
+		return
+	var cand = _routing_workspace.get_candidate(candidate_id)
+	if cand == null:
+		trace_tool_message.emit("Route candidate %s is no longer in the workspace." % candidate_id)
+		queue_redraw()
+		return
+
+	if verb == "commit":
+		if data == null:
+			trace_tool_message.emit("No board to commit onto.")
+			return
+		var res: Dictionary = _routing_workspace.commit(candidate_id, data)
+		if bool(res.get("ok", false)):
+			trace_tool_message.emit("Committed %s as %d trace(s) and %d via(s) — one undo step reverts the copper AND the candidate."
+				% [candidate_id, (res.get("trace_ids", []) as Array).size(),
+					(res.get("via_ids", []) as Array).size()])
+		else:
+			trace_tool_message.emit("Commit refused (%s): %s"
+				% [str(res.get("error", "unknown")), str(res.get("message", ""))])
+		queue_redraw()
+		return
+
+	var applied := false
+	match verb:
+		"pin":
+			applied = _routing_workspace.pin(candidate_id)
+		"unpin":
+			applied = _routing_workspace.unpin(candidate_id)
+		"reject":
+			applied = _routing_workspace.reject(candidate_id)
+		"try_again":
+			applied = _routing_workspace.supersede(candidate_id)
+	if not applied:
+		var err: Dictionary = _routing_workspace.last_transition_error \
+			if _routing_workspace.last_transition_error is Dictionary else {}
+		trace_tool_message.emit("%s refused (%s): %s is %s."
+			% [verb.capitalize(), str(err.get("error", "transition_refused")),
+				candidate_id, str(cand.disposition)])
+		queue_redraw()
+		return
+
+	match verb:
+		"pin":
+			trace_tool_message.emit("Pinned %s — future routing routes around it. Its check still stands (pinning changes no copper)."
+				% candidate_id)
+		"unpin":
+			trace_tool_message.emit("Unpinned %s — it is a plain draft again." % candidate_id)
+		"reject":
+			trace_tool_message.emit("Rejected %s — task %s is open again."
+				% [candidate_id, str(cand.task_id)])
+		"try_again":
+			# The half-and-half is named out loud, per the seam's own contract.
+			trace_tool_message.emit("Retired %s — task %s is open again. Run Propose (or minerva_pcb_workspace_reroute_route) for a new route."
+				% [candidate_id, str(cand.task_id)])
+	# Clear the selection of a candidate that just left the drawn set, so the
+	# canvas is not holding a lit id for a ghost it no longer paints.
+	if not (str(cand.disposition) in CANDIDATE_RENDERED_DISPOSITIONS) \
+			and candidate_id in selected_candidate_ids:
+		selected_candidate_ids.erase(candidate_id)
+		selection_changed.emit()
+	queue_redraw()
+
+
+## The teach line shown when a candidate becomes the selection — the "status-line
+## teach text while a candidate is selected" half of C4a's UI verbs.
+##
+## It goes out on trace_tool_message, the canvas's EXISTING teach channel
+## (PCBPanel connects it to the status writer). That channel is transient by
+## construction, so the line appears on selection and on every verb outcome
+## rather than persisting for as long as the ghost stays lit; the persistent
+## while-selected readout is keyed by ToolMode (PCBPanel._MODE_HINTS) and a
+## candidate is a selection KIND, not a mode — wiring a selection-keyed
+## persistent line needs a PCBPanel-side hook, which is outside this unit's
+## fence. Filed rather than faked.
+func _emit_candidate_teach_line(candidate_id: String) -> void:
+	if not _candidates_active():
+		return
+	var cand = _routing_workspace.get_candidate(candidate_id)
+	if cand == null:
+		return
+	trace_tool_message.emit("%s — right-click for Commit · %s · Reject · Try again."
+		% [_candidate_menu_label(candidate_id),
+			"Unpin" if str(cand.disposition) == "pinned" else "Pin"])
 
 
 ## "Route candidate cand_3 — pinned, stale". Falls back to the bare id when the

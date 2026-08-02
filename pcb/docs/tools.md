@@ -518,6 +518,109 @@ Plus two factories on `pcb/ui/model/pcb_data.gd` — `new_component()` /
 `new_trace()` — because the core module cannot preload the plugin object scripts;
 it mints objects here and configures them via duck-typed calls.
 
+## Routing-workspace verbs (`minerva_pcb_workspace_propose` / `minerva_pcb_workspace_commit` / `minerva_pcb_workspace_check` + 7 more, C4a / DCR `019f7095c395` S4)
+
+Ten tools over the **routing workspace** — the store that owns route
+*candidates* (ghost routes) instead of the cyan proposal *annotations* the
+route-correction loop above writes. They are the agent's doorway onto exactly
+the verbs the canvas context menu offers a human, calling the same
+`RoutingWorkspace` methods through the same legality table, so neither surface
+can gain a power the other lacks.
+
+| Tool | Notes |
+|---|---|
+| `minerva_pcb_workspace_propose` | router reply → candidates (no annotations); `holds[]` names any task a PINNED candidate held |
+| `minerva_pcb_workspace_list` | live candidates + tasks + selection; `include_terminal` for history |
+| `minerva_pcb_workspace_get_active` | the focused candidate + its findings; empty active id is a success, not an error |
+| `minerva_pcb_workspace_pin` | Keep — future routing routes around it; stales nothing |
+| `minerva_pcb_workspace_unpin` | back to a plain draft; stales nothing |
+| `minerva_pcb_workspace_reject` | discard + reopen the task; terminal; stales every still-live verdict |
+| `minerva_pcb_workspace_commit` | Accept — candidate → real copper, in ONE undoable step (below) |
+| `minerva_pcb_workspace_reroute_route` | Try-again on the whole route; router runs before the prior is retired |
+| `minerva_pcb_workspace_reroute_span` | **DEGRADED** to a whole-route reroute, named on every reply (below) |
+| `minerva_pcb_workspace_check` | set-scoped draft DRC; findings name candidate/segment/via ids; stale candidates refuse |
+
+### Two axes, never coupled
+
+A candidate carries a **disposition** (`proposed` → `pinned` / `superseded` /
+`rejected` / `committed` — the workflow decision) and a **validation**
+(`unchecked` → `checking` → `clean` / `violating` / `stale` / `error` — the DRC
+health). Setting one never moves the other. Every disposition move goes through
+one legality table (`pcb_route_candidate.gd::DISPOSITION_TRANSITIONS`);
+`superseded`, `rejected` and `committed` are terminal for workflow verbs, and a
+refused move comes back with its own name (`illegal_disposition_transition`,
+`terminal_disposition`, `candidate_not_found`, …) rather than prose alone.
+
+### Commit is one transaction (INV-1)
+
+`minerva_pcb_workspace_commit` writes one trace per candidate segment — on that
+segment's own layer at its own width, so a multi-layer or multi-path route
+survives intact — plus its vias, inside a single `begin_batch`/`end_batch`, and
+marks the candidate `committed` inside the same batch. PCBData's history
+snapshot carries an **eighth bucket** beside the seven board ones
+(components/nets/traces/vias/mounting_holes/zones/cutouts): the workspace's
+disposition layer. The commit also stamps the *pre*-commit layer onto the entry
+the undo will land on, so **one undo removes the copper and returns the
+candidate to its pre-commit disposition**. The bucket is an overlay keyed by
+candidate id — a candidate proposed *after* a snapshot is never touched by an
+undo of an unrelated edit.
+
+All validation precedes all mutation: a refused commit leaves the board, the
+disposition and the history untouched. Source hints are **consumed by record**
+(`consumed_hint_ids`), never deleted — deleting an annotation inside a step whose
+promise is "one Ctrl+Z reverts it" would put an un-undoable side effect in it.
+
+### Staleness (INV-2)
+
+A verb marks `stale` exactly the candidates whose verdict it invalidated:
+
+- **geometry** edits (via insert, a reroute's re-ingest) → the edited candidate;
+- **live-set** verbs (reject / commit / try-again / undo-driven uncommit) →
+  every candidate that is live *afterwards*, because the draft check is
+  set-scoped and their verdicts named a set that no longer holds;
+- **pin / unpin** → nothing, deliberately. Pinning moves no copper and does not
+  change the set a check scores; it changes what a *future router run* treats as
+  a keep-out. Staling there would erase the very check the user ran in order to
+  decide to pin.
+
+Only real verdicts (`clean`/`violating`/`error`) are staled — `unchecked` has no
+verdict to lose and `checking` is already covered by the workspace-generation
+guard. Every verb reports `stale_candidate_ids`, so re-check scope is never
+something a caller has to infer.
+
+### Path-scoped edits (INV-3)
+
+A candidate for a multi-pad net can hold **two or more disconnected copper
+paths**. `RoutingWorkspace.add_via` — the edit entry the canvas via gesture and
+any future edit tool call — resolves the connected path out of the *segment
+graph* (endpoint adjacency over the exact points), splits only the segment the
+click landed on, and walks the downstream layer flip over that graph. Segments in
+another path are returned in `untouched_segment_ids`, untouched. Degenerate
+inserts are named no-ops, never nudged to a nearby legal point:
+`degenerate_insert_at_endpoint` (splitting there yields zero-length copper) and
+`degenerate_insert_on_via` (two holes at one point).
+
+### Reroute-span degrades, loudly
+
+`agent_router` scopes a run by **whole net**, and `route_bridge.parse_route_scope`
+refuses a span rather than widening it ("honouring this would route the entire
+net and return copper between pads the task never named"). So
+`minerva_pcb_workspace_reroute_span` performs a whole-route reroute and stamps
+`degraded: true`, `degraded_to: "whole_route"`, `requested_segment_ids`,
+`limitation` and `limitation_docket: "019fc155bc32"` on the reply. It creates no
+span-scoped task — recording a span question whose answer is whole-route geometry
+would make the model claim a scope it never had.
+
+### Known gap: the worker's explicit scope is not reachable from the panel
+
+The worker's `route` method accepts `scope` (RouteTask/net) and
+`pinned_candidates` parameters, but `PCBPanel.route_board` builds its request as
+`{board, route_hints, selection}` only, so neither is reachable from the GD side
+yet. Consequences, both visible in the replies rather than hidden: a reroute is
+scoped by the candidate's **source hint ids** and is refused (`no_source_hints`)
+when it has none, and pinned candidates are not yet sent to the router as
+keep-outs on this path.
+
 ## Worker (already live — credited, not re-created)
 
 | Tool | Worker method | Purpose |

@@ -56,6 +56,11 @@ const _PcbPrefsScript := preload("model/pcb_prefs.gd")
 ## duck-typed `data` reference — mirrors pcb_canvas.gd's own PCBDataScript
 ## const, same off-tree preload-by-path convention.
 const _PcbDataScript := preload("model/pcb_data.gd")
+## C4a: the disposition legality vocabulary (DISPOSITIONS, TERMINAL_DISPOSITIONS
+## and the named refusal codes). Preloaded so the workspace verb tools NAME their
+## refusals from the canonical const set instead of re-listing it — a second copy
+## of the terminal set is a second thing to keep in step with the legality table.
+const _PcbRouteCandidateScript := preload("model/pcb_route_candidate.gd")
 
 ## Footprint names accepted by add_component (mirrors the legacy schema enum;
 ## the plugin component enum carries extra values but is set by NAME,
@@ -175,6 +180,27 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _set_group_member_offset(host, args)
 		"minerva_pcb_get_layout_state":
 			return _get_layout_state(host, args)
+		# ── C4a: the routing-workspace VERB surface (S4, DCR 019f7095c395) ────
+		"minerva_pcb_workspace_propose":
+			return await _workspace_propose(host, args)
+		"minerva_pcb_workspace_list":
+			return _workspace_list(host, args)
+		"minerva_pcb_workspace_get_active":
+			return _workspace_get_active(host, args)
+		"minerva_pcb_workspace_pin":
+			return _workspace_pin(host, args)
+		"minerva_pcb_workspace_unpin":
+			return _workspace_unpin(host, args)
+		"minerva_pcb_workspace_reject":
+			return _workspace_reject(host, args)
+		"minerva_pcb_workspace_commit":
+			return _workspace_commit(host, args)
+		"minerva_pcb_workspace_reroute_route":
+			return await _workspace_reroute_route(host, args)
+		"minerva_pcb_workspace_reroute_span":
+			return await _workspace_reroute_span(host, args)
+		"minerva_pcb_workspace_check":
+			return await _workspace_check(host, args)
 	return {}
 
 
@@ -3004,6 +3030,526 @@ static func _load_board(host, args: Dictionary) -> Dictionary:
 		var err_info: Dictionary = reply.get("error", {})
 		return _err(str(err_info.get("message", "load_board failed")))
 	return _ok(reply.get("result", {}))
+
+
+# ══ C4a — ROUTING-WORKSPACE VERB TOOLS (S4, DCR 019f7095c395) ════════════════
+#
+# Ten tools, one model. They are the AGENT's doorway onto exactly the verbs the
+# canvas context menu offers a human (pcb_canvas.gd's candidate menu) — the same
+# RoutingWorkspace calls, the same legality table, the same named refusals — so
+# neither surface can drift into having a power the other lacks.
+#
+# HOW THIS DIFFERS FROM THE ANNOTATION PROPOSE PATH IT REPLACES:
+# minerva_pcb_apply_route_hints writes cyan PROPOSAL ANNOTATIONS
+# (_write_back_proposals) and dual-writes a shadow candidate.
+# minerva_pcb_workspace_propose writes CANDIDATES ONLY — the workspace is the
+# answer, not a shadow of one. It writes no annotation, so it also cannot leave
+# the two stores disagreeing. The annotation half is retired by S5 (C4b); until
+# then BOTH tools exist and a caller picks the store it means.
+#
+# EVERY REFUSAL IS NAMED. A tool that could not do what was asked returns
+# {success:false, error:"<code>", …} with the workspace's own code
+# (illegal_disposition_transition, terminal_disposition, candidate_not_found,
+# unmodelable_segment, …) rather than a prose-only message, so an agent can
+# branch on the reason and a human can be told which one it was.
+
+
+## Resolve the workspace + board a verb needs, and BIND them to each other.
+##
+## The binding is the load-bearing line: PCBData's history bucket 8 only exists
+## while a delegate is bound (see pcb_data.bind_routing_workspace), and the
+## natural session-start wiring point is PCBPanel, which is outside this unit's
+## fence. Binding here — idempotently, at the top of every workspace verb — is
+## what makes undo-after-commit work without reaching into the panel. commit()
+## additionally pairs the PRE-commit snapshot, so the binding's timing cannot
+## change the outcome.
+##
+## Returns {"ok":true,"ws":…,"data":…} or {"ok":false,"reply":<error envelope>}.
+static func _workspace_ctx(host) -> Dictionary:
+	var data = _get_data(host)
+	if data == null:
+		return {"ok": false, "reply": _err("PCB data not available")}
+	var workspace = _get_workspace(host)
+	if workspace == null:
+		return {"ok": false, "reply": {
+			"success": false, "error": "workspace_unavailable",
+			"note": "no routing workspace is bound to this panel (headless / before mount)",
+		}}
+	if data.has_method("bind_routing_workspace"):
+		data.bind_routing_workspace(workspace)
+	return {"ok": true, "ws": workspace, "data": data}
+
+
+## One candidate, as the shape every workspace tool reports it in.
+static func _candidate_record(workspace, c) -> Dictionary:
+	if c == null:
+		return {}
+	var cid := str(c.candidate_id)
+	var layers: Array = []
+	for seg in c.segments:
+		if seg is Dictionary:
+			var lyr := str((seg as Dictionary).get("layer", ""))
+			if not lyr.is_empty() and not (lyr in layers):
+				layers.append(lyr)
+	var rec: Dictionary = {
+		"candidate_id": cid,
+		"task_id": str(c.task_id),
+		"net": str(c.net),
+		"generation": int(c.generation),
+		"disposition": str(c.disposition),
+		"validation": str(c.validation),
+		"segment_count": (c.segments as Array).size(),
+		"via_count": (c.vias as Array).size(),
+		"layers": layers,
+		"base_board_revision": int(c.base_board_revision),
+		"candidate_revision": int(c.candidate_revision),
+		"source_hint_ids": _string_list(c.source_hint_ids),
+		"task_state": str(workspace.task_state(str(c.task_id))),
+	}
+	if workspace.has_method("committed_copper_ids"):
+		var copper: Dictionary = workspace.committed_copper_ids(cid)
+		if not (copper.get("trace_ids", []) as Array).is_empty() \
+				or not (copper.get("via_ids", []) as Array).is_empty():
+			rec["committed_trace_ids"] = copper.get("trace_ids", [])
+			rec["committed_via_ids"] = copper.get("via_ids", [])
+	if workspace.has_method("findings_for_candidate"):
+		var f: Array = workspace.findings_for_candidate(cid)
+		if not f.is_empty():
+			rec["finding_count"] = f.size()
+	return rec
+
+
+## The named-refusal envelope for a disposition verb that came back false. Reads
+## the workspace's own last_transition_error so the tool never invents a reason.
+static func _workspace_refusal(workspace, verb: String, candidate_id: String) -> Dictionary:
+	var err: Dictionary = workspace.last_transition_error if workspace.last_transition_error is Dictionary else {}
+	var code := str(err.get("error", "transition_refused"))
+	return {
+		"success": false,
+		"error": code,
+		"candidate_id": candidate_id,
+		"verb": verb,
+		"from": str(err.get("from", "")),
+		"to": str(err.get("to", "")),
+		"note": "the disposition legality table refused this move (see pcb_route_candidate.gd DISPOSITION_TRANSITIONS)",
+	}
+
+
+## Shared body of pin / unpin / reject — one implementation, three names, so the
+## three cannot drift in what they report.
+static func _workspace_disposition_verb(host, args: Dictionary, verb: String) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var cid: String = str(args.get("candidate_id", ""))
+	if cid.is_empty():
+		return _err("candidate_id is required")
+	if workspace.get_candidate(cid) == null:
+		return {"success": false, "error": "candidate_not_found", "candidate_id": cid}
+	var applied: bool = false
+	match verb:
+		"pin":
+			applied = workspace.pin(cid)
+		"unpin":
+			applied = workspace.unpin(cid)
+		"reject":
+			applied = workspace.reject(cid)
+	if not applied:
+		return _workspace_refusal(workspace, verb, cid)
+	var reply: Dictionary = {"verb": verb}
+	reply.merge(_candidate_record(workspace, workspace.get_candidate(cid)))
+	# INV-2 is observable, not merely internal: name the candidates whose verdict
+	# this verb invalidated so a caller knows what needs re-checking.
+	reply["stale_candidate_ids"] = _stale_ids(workspace)
+	return _ok(reply)
+
+
+## Every candidate currently carrying validation == "stale" — the INV-2 read
+## surface the verbs report so staleness is never something a caller has to
+## infer from a separate list call.
+static func _stale_ids(workspace) -> Array:
+	var out: Array = []
+	for c in workspace.list_candidates():
+		if c != null and str(c.validation) == "stale":
+			out.append(str(c.candidate_id))
+	return out
+
+
+## PROPOSE into the workspace. Runs the router exactly as
+## minerva_pcb_apply_route_hints does (same host bridge, same hint gathering,
+## same normalization seam) and lands RouteCandidates — no annotations.
+##
+## HOLDS ARE SURFACED, NOT SWALLOWED. A task whose active candidate is PINNED is
+## HELD by the workspace: the incoming candidate is not created and the pin
+## stands (RoutingWorkspace's ingest policy — a batch re-route is not consent
+## about a candidate the user pinned). The reply therefore reports FEWER
+## candidates than routes, and `holds` says which task, which candidate and why,
+## so "nothing changed for net N3" is never invisible.
+##
+## last_ingest_holds is PER CALL and ingest_record resets it on entry, so the
+## holds are accumulated here across the per-record loop rather than read once
+## at the end — reading it after the loop would report only the last record's.
+static func _workspace_propose(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_ids: Array = args.get("hint_ids", []) if args.get("hint_ids", []) is Array else []
+	var source_hints: Array = _gather_route_hints(host, hint_ids)
+	if source_hints.is_empty():
+		return _ok({
+			"proposed": 0, "candidates": [], "holds": [], "unrouted": [], "stuck": [],
+			"note": "no open route hints to route (add hints or pass hint_ids)",
+		})
+	var selection: Dictionary
+	if hint_ids.is_empty():
+		selection = {"mode": "open"}
+	else:
+		selection = {"mode": "ids", "ids": _hint_id_list(source_hints)}
+
+	var reply: Dictionary = await _run_router(host, selection)
+	if not bool(reply.get("ok", false)):
+		return _router_unavailable(reply, source_hints)
+	var result: Dictionary = reply.get("result", {})
+	return _ingest_result_into_workspace(workspace, data, result, source_hints, {})
+
+
+## The SHARED landing path for every tool that turns a router reply into
+## candidates (propose, reroute-route, reroute-span). One place that normalizes,
+## ingests, accumulates holds and shapes the reply, so the three verbs report
+## identically and a fix to one is a fix to all. `extra` is merged last so a
+## caller can stamp its own metadata (e.g. the span degrade notice).
+static func _ingest_result_into_workspace(workspace, data, result: Dictionary,
+		source_hints: Array, extra: Dictionary) -> Dictionary:
+	var records: Array = _normalize_route_records(result, source_hints)
+	var revision: int = int(data.board_revision) if data != null else 0
+	var landed: Array = []
+	var holds: Array = []
+	for rec in records:
+		var cid: String = str(workspace.ingest_record(rec, revision))
+		for hold in workspace.last_ingest_holds:
+			holds.append(hold)
+		if cid.is_empty():
+			continue
+		landed.append(_candidate_record(workspace, workspace.get_candidate(cid)))
+	var out: Dictionary = {
+		"proposed": landed.size(),
+		"candidates": landed,
+		"holds": holds,
+		"routes_returned": (result.get("routes", []) as Array).size() if result.get("routes", []) is Array else 0,
+		"unrouted": result.get("unrouted", []),
+		"stuck": _stuck_from_result(result),
+		"via_count": int(result.get("via_count", 0)),
+		"drc_summary": result.get("drc_summary", {}),
+		"drc_geometric_summary": result.get("drc_geometric_summary", {}),
+		"stale_candidate_ids": _stale_ids(workspace),
+		"note": "candidates landed in the routing workspace; no proposal annotations were written",
+	}
+	out.merge(extra, true)
+	return _ok(out)
+
+
+## LIST the workspace. Live candidates by default — a terminal one is history and
+## would bury the two or three answers a caller is actually deciding between.
+static func _workspace_list(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var include_terminal: bool = bool(args.get("include_terminal", false))
+	var want_task: String = str(args.get("task_id", ""))
+	var want_net: String = str(args.get("net", ""))
+	var live: Dictionary = {}
+	for id in workspace.live_candidate_ids():
+		live[str(id)] = true
+	var out: Array = []
+	for c in workspace.list_candidates():
+		if c == null:
+			continue
+		var cid := str(c.candidate_id)
+		if not include_terminal and not live.has(cid):
+			continue
+		if not want_task.is_empty() and str(c.task_id) != want_task:
+			continue
+		if not want_net.is_empty() and str(c.net) != want_net:
+			continue
+		out.append(_candidate_record(workspace, c))
+	var tasks: Array = []
+	for t in workspace.list_tasks():
+		tasks.append({
+			"task_id": str(t.task_id), "net": str(t.net), "state": str(t.state),
+			"span_scoped": bool(t.is_span_scoped()),
+		})
+	return _ok({
+		"candidates": out,
+		"count": out.size(),
+		"tasks": tasks,
+		"open_task_ids": workspace.open_task_ids(),
+		"active_candidate_id": str(workspace.active_candidate_id),
+		"pinned_candidate_ids": workspace.pinned.keys(),
+		"stale_candidate_ids": _stale_ids(workspace),
+		"include_terminal": include_terminal,
+	})
+
+
+## The candidate the UI is focused on. Empty active id is a SUCCESS with
+## active_candidate_id "" — "nothing is selected" is an answer, not an error.
+static func _workspace_get_active(host, _args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var cid: String = str(workspace.active_candidate_id)
+	if cid.is_empty():
+		return _ok({"active_candidate_id": "", "candidate": {},
+			"note": "no candidate is active (select one on the canvas, or pass candidate_id to the verb you meant)"})
+	var reply: Dictionary = {"active_candidate_id": cid,
+		"candidate": _candidate_record(workspace, workspace.get_candidate(cid))}
+	if workspace.has_method("findings_for_candidate"):
+		reply["findings"] = workspace.findings_for_candidate(cid)
+	return _ok(reply)
+
+
+static func _workspace_pin(host, args: Dictionary) -> Dictionary:
+	return _workspace_disposition_verb(host, args, "pin")
+
+
+static func _workspace_unpin(host, args: Dictionary) -> Dictionary:
+	return _workspace_disposition_verb(host, args, "unpin")
+
+
+static func _workspace_reject(host, args: Dictionary) -> Dictionary:
+	return _workspace_disposition_verb(host, args, "reject")
+
+
+## COMMIT — INV-1. A thin tool over RoutingWorkspace.commit, which owns the whole
+## transaction (board writes + disposition + the paired history snapshot). The
+## tool deliberately adds NO board mutation of its own: a second writer would be
+## a second thing to undo.
+static func _workspace_commit(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+	var cid: String = str(args.get("candidate_id", ""))
+	if cid.is_empty():
+		return _err("candidate_id is required")
+	var res: Dictionary = workspace.commit(cid, data)
+	if not bool(res.get("ok", false)):
+		return {
+			"success": false,
+			"error": str(res.get("error", "commit_failed")),
+			"candidate_id": str(res.get("candidate_id", cid)),
+			"note": str(res.get("message", "")),
+		}
+	var reply: Dictionary = res.duplicate(true)
+	reply.erase("ok")
+	reply["candidate"] = _candidate_record(workspace, workspace.get_candidate(cid))
+	reply["stale_candidate_ids"] = _stale_ids(workspace)
+	reply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes this copper AND returns the candidate to its pre-commit disposition"
+	return _ok(reply)
+
+
+## TRY-AGAIN over the WHOLE route. Runs the router again scoped to the
+## candidate's own source hints and lands a NEW generation for the same task.
+##
+## THE ROUTER IS RUN FIRST, then the prior is retired. Retiring first would mean
+## a router failure left the task with no answer at all — the old geometry gone
+## and nothing in its place. A PROPOSED prior is superseded by the ingest itself;
+## only a PINNED prior needs the explicit targeted supersede, which is exactly
+## the consent the workspace's ingest policy demands (acting on THIS candidate)
+## and not the batch consent it refuses.
+static func _workspace_reroute_route(host, args: Dictionary) -> Dictionary:
+	return await _workspace_reroute(host, args, {})
+
+
+## REROUTE-SPAN — DEGRADED, and it says so on every reply.
+##
+## The DCR's Reroute-Span "replaces only a selected interval". The routing engine
+## cannot express that: agent_router scopes by WHOLE NET, and
+## route_bridge.parse_route_scope REFUSES a span rather than widening it —
+## "honouring this would route the entire net and return copper between pads the
+## task never named". So this verb does the only honest thing available: it
+## performs a WHOLE-ROUTE reroute and stamps `degraded`, `degraded_to`,
+## `limitation` and the docket id on the reply. It deliberately does NOT create a
+## span-scoped RouteTask: recording a span question whose answer is whole-route
+## geometry would make the model claim a scope it never had.
+## Tracked as docket 019fc155bc32; when agent_router grows span support this verb
+## stops degrading and the model's reroute_span stub becomes the implementation.
+static func _workspace_reroute_span(host, args: Dictionary) -> Dictionary:
+	var requested: Array = _string_list(args.get("segment_ids", []))
+	return await _workspace_reroute(host, args, {
+		"degraded": true,
+		"degraded_to": "whole_route",
+		"requested_segment_ids": requested,
+		"limitation": "span-scoped routing is not available: the routing engine scopes by whole net (route_bridge.parse_route_scope refuses a span rather than widening it), so this call rerouted the ENTIRE route, not only the segments named. The reply's candidate is whole-route geometry.",
+		"limitation_docket": "019fc155bc32",
+	})
+
+
+static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+	var cid: String = str(args.get("candidate_id", ""))
+	if cid.is_empty():
+		return _err("candidate_id is required")
+	var c = workspace.get_candidate(cid)
+	if c == null:
+		return {"success": false, "error": "candidate_not_found", "candidate_id": cid}
+	if not workspace.can_transition(cid, "superseded"):
+		return _workspace_refusal_static(cid, str(c.disposition))
+
+	var hint_ids: Array = _string_list(c.source_hint_ids)
+	if hint_ids.is_empty():
+		# FAIL CLOSED rather than run a whole-board route. The worker HAS an
+		# explicit scope argument (route_bridge.parse_route_scope, C2), but the
+		# GD→worker bridge does not forward it: PCBPanel.route_board builds
+		# params as {board, route_hints, selection} only, and PCBPanel.gd is
+		# outside this unit's fence. So a candidate with no hint provenance
+		# cannot be addressed, and rerouting the whole board in its name would
+		# return copper nobody asked for.
+		return {
+			"success": false, "error": "no_source_hints", "candidate_id": cid,
+			"note": "this candidate carries no source route-hint ids, and the panel's router bridge forwards only a HINT selection (PCBPanel.route_board sends {board, route_hints, selection}); the worker's explicit scope argument is not reachable from here yet, so a scoped reroute cannot be addressed",
+		}
+	var source_hints: Array = _gather_route_hints(host, hint_ids)
+	if source_hints.is_empty():
+		return {
+			"success": false, "error": "source_hints_missing", "candidate_id": cid,
+			"hint_ids": hint_ids,
+			"note": "the route hints this candidate came from are no longer on the board, so the run cannot be scoped to it",
+		}
+
+	var reply: Dictionary = await _run_router(host, {"mode": "ids", "ids": _hint_id_list(source_hints)})
+	if not bool(reply.get("ok", false)):
+		return _router_unavailable(reply, source_hints)
+
+	# The router answered — NOW retire the prior. A pinned prior would otherwise
+	# HOLD its task and the fresh geometry would be dropped on the floor.
+	var prior_task: String = str(c.task_id)
+	if str(c.disposition) == "pinned" and not workspace.supersede(cid):
+		return _workspace_refusal(workspace, "reroute", cid)
+
+	var landed: Dictionary = _ingest_result_into_workspace(
+		workspace, data, reply.get("result", {}), source_hints, extra)
+	landed["rerouted_candidate_id"] = cid
+	landed["prior_task_id"] = prior_task
+	# A reroute is meant to answer the SAME question again. Say plainly whether
+	# it did: the task key is derived from the worker's own per-route hint
+	# attribution, so a reply that attributes differently lands a NEW task, and
+	# a caller that assumed otherwise would be looking at the wrong generation.
+	var same := false
+	for rec in landed.get("candidates", []):
+		if rec is Dictionary and str((rec as Dictionary).get("task_id", "")) == prior_task:
+			same = true
+	landed["same_task"] = same
+	return landed
+
+
+## Refusal envelope for a verb blocked by the legality table BEFORE it was
+## attempted (can_transition said no, so last_transition_error is not set).
+## The terminal-set test reads the CANONICAL const on PcbRouteCandidate rather
+## than re-listing its members: a second copy of that list is a second thing to
+## keep in step with the legality table, and it would drift silently.
+static func _workspace_refusal_static(candidate_id: String, from: String) -> Dictionary:
+	var terminal: Array = _PcbRouteCandidateScript.TERMINAL_DISPOSITIONS
+	return {
+		"success": false,
+		"error": _PcbRouteCandidateScript.ERR_TERMINAL_DISPOSITION if from in terminal \
+			else _PcbRouteCandidateScript.ERR_ILLEGAL_TRANSITION,
+		"candidate_id": candidate_id,
+		"from": from,
+		"to": "superseded",
+		"note": "a %s candidate cannot be rerouted — it has already left the live set" % from,
+	}
+
+
+## SET-SCOPED draft DRC over the workspace.
+##
+## Runs the panel's existing draft-check plumbing verbatim
+## (PCBPanel.check_draft → the pcb.draft_check broker channel → worker
+## methods._draft_check), which checks the UNION of committed copper and every
+## checked candidate's draft copper and returns findings whose subjects name
+## CANDIDATE / SEGMENT / VIA ids. The workspace's own guards (board_token,
+## workspace_generation, per-candidate revision) decide what is written back, so
+## a stale reply can never mark anything clean; this tool adds no verdict of its
+## own.
+##
+## STALE CANDIDATES REFUSE. Before checking, the workspace is REBASED onto the
+## live board revision — which is what makes the gate mean anything: a candidate
+## generated against an older board is marked stale right here, and checking it
+## silently would hand back a verdict that reads as "this proposal is fine" about
+## geometry generated for a board that has since moved. Two exits, both stated in
+## the refusal: reroute/re-propose it (fresh geometry against this board), or ask
+## again with include_stale:true to check the old geometry deliberately.
+static func _workspace_check(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+	var include_stale: bool = bool(args.get("include_stale", false))
+
+	# Bind + mark. This is also the wiring gap C1 filed (019fc14e3884): nothing
+	# else threads the live board revision into the workspace, so the check is
+	# where it happens.
+	var newly_stale: Array = workspace.rebase(int(data.board_revision))
+
+	var requested: Array = _string_list(args.get("candidate_ids", []))
+	var targets: Array = requested if not requested.is_empty() else workspace.live_candidate_ids()
+	var unknown: Array = []
+	for t in targets:
+		if workspace.get_candidate(str(t)) == null:
+			unknown.append(str(t))
+	if not unknown.is_empty():
+		return {"success": false, "error": "candidate_not_found", "candidate_ids": unknown}
+	if targets.is_empty():
+		return _ok({"checked": [], "per_candidate": {}, "findings": [],
+			"note": "no live candidates to check"})
+
+	var stale: Array = []
+	for t in targets:
+		if str(workspace.get_candidate(str(t)).validation) == "stale":
+			stale.append(str(t))
+	if not stale.is_empty() and not include_stale:
+		return {
+			"success": false, "error": "stale_candidates", "stale_candidate_ids": stale,
+			"newly_stale_candidate_ids": newly_stale,
+			"board_revision": int(data.board_revision),
+			"note": "these candidates were generated against a different board revision, or a verb invalidated their verdict. Reroute/re-propose them for geometry against THIS board, or re-run with include_stale:true to check the existing geometry against it deliberately.",
+		}
+
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("check_draft"):
+		return {"success": false, "error": "draft_check_unavailable",
+			"note": "no panel bridge to the pcb.draft_check worker channel (headless / before mount)"}
+	var result: Dictionary = await panel.check_draft(targets)
+	if result.is_empty() or not result.has("per_candidate"):
+		return {"success": false, "error": "draft_check_no_reply",
+			"checked": targets,
+			"note": "the draft_check worker channel did not answer; every checked candidate was reverted to the validation it had before (never left 'checking')"}
+	var after: Dictionary = {}
+	for t in targets:
+		var c = workspace.get_candidate(str(t))
+		if c != null:
+			after[str(t)] = str(c.validation)
+	return _ok({
+		"checked": targets,
+		"checked_stale": stale,
+		"per_candidate": result.get("per_candidate", {}),
+		"findings": result.get("findings", []),
+		"validation": after,
+		"board_token": result.get("board_token", ""),
+		"workspace_generation": result.get("workspace_generation", 0),
+		"newly_stale_candidate_ids": newly_stale,
+	})
 
 
 static func _ok(data: Dictionary = {}) -> Dictionary:

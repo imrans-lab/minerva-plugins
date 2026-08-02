@@ -1804,6 +1804,81 @@ func set_board_size(new_width: float, new_height: float) -> void:
 
 #region Undo/Redo Support
 
+## ── HISTORY BUCKET 8: the routing workspace's disposition layer (C4a/INV-1) ───
+##
+## The seven buckets below this line are BOARD state. The eighth is not: it is
+## the routing workspace's answer to "which candidate produced this copper, and
+## what was it before it did". It rides the same snapshot because committing a
+## route candidate is ONE act with two halves — copper appears AND the candidate
+## becomes committed — and an undo that reverted only the copper would leave the
+## workspace claiming copper that is no longer on the board.
+##
+## The board does not know what a RoutingWorkspace is. It holds a DUCK-TYPED
+## delegate and calls exactly two method names on it (snapshot_dispositions /
+## restore_dispositions), so this file preloads nothing from the routing model
+## and the pure board model stays pure. An unbound delegate means the key is
+## simply absent from the snapshot and no restore is attempted — never a guess.
+var _workspace_delegate = null
+
+## Bind (or unbind, with null) the routing-workspace delegate. Idempotent.
+func bind_routing_workspace(delegate) -> void:
+	_workspace_delegate = delegate
+
+
+## The bound delegate, or null. Read surface for the owner and the tests.
+func routing_workspace_delegate():
+	return _workspace_delegate
+
+
+## The delegate's snapshot, or {} when there is nothing to ask.
+func _workspace_snapshot() -> Dictionary:
+	if _workspace_delegate == null or not is_instance_valid(_workspace_delegate):
+		return {}
+	if not _workspace_delegate.has_method("snapshot_dispositions"):
+		return {}
+	var snap = _workspace_delegate.snapshot_dispositions()
+	return snap if snap is Dictionary else {}
+
+
+## THE PAIRED SNAPSHOT. Stamp the CURRENT workspace layer onto the history entry
+## that is already on top — the one that represents the board as it is RIGHT
+## NOW, before the caller's about-to-happen mutation.
+##
+## Why this exists at all: undo() restores the PREVIOUS entry, so for
+## undo-after-commit to restore the PRE-commit disposition, the pre-commit
+## disposition has to be sitting on the previous entry. A delegate bound at the
+## moment of the first commit was not bound when that entry was written, so the
+## key would be missing and the undo would restore the board while leaving the
+## candidate committed. Calling this immediately before the commit's own batch
+## closes that window deterministically, regardless of when binding happened.
+##
+## Returns false when there is no entry to stamp (a board with no history has
+## nothing to undo TO, so there is nothing to pair).
+func attach_workspace_snapshot() -> bool:
+	if history_index < 0 or history_index >= history.size():
+		return false
+	var entry: Dictionary = history[history_index]
+	entry["workspace"] = _workspace_snapshot()
+	history[history_index] = entry
+	return true
+
+
+## Hand a restored snapshot's workspace layer back to the delegate.
+## ABSENT KEY ⇒ UNTOUCHED: an entry written before a delegate was bound says
+## nothing about the workspace, and "says nothing" must never be read as "had no
+## candidates" — that would silently reset dispositions on every undo of a
+## pre-binding edit.
+func _restore_workspace_snapshot(state: Dictionary) -> void:
+	if not state.has("workspace"):
+		return
+	if _workspace_delegate == null or not is_instance_valid(_workspace_delegate):
+		return
+	if not _workspace_delegate.has_method("restore_dispositions"):
+		return
+	var snap = state.get("workspace", {})
+	_workspace_delegate.restore_dispositions(snap if snap is Dictionary else {})
+
+
 ## Save current state to history
 func save_to_history(action_name: String = "Change") -> void:
 	# Remove any redo states
@@ -1836,6 +1911,13 @@ func save_to_history(action_name: String = "Change") -> void:
 		# the next undo of an unrelated edit would silently delete.
 		"cutouts": _cutouts_to_list()
 	}
+
+	# BUCKET 8 — the routing workspace's disposition layer (see the block above
+	# this function). Added ONLY when a delegate is bound, so a board with no
+	# routing workspace produces byte-identical snapshots to the seven-bucket
+	# ones it always did, and _restore_state's absent-key rule stays meaningful.
+	if _workspace_delegate != null and is_instance_valid(_workspace_delegate):
+		state["workspace"] = _workspace_snapshot()
 
 	history.append(state)
 	history_index = history.size() - 1
@@ -1982,6 +2064,11 @@ func _restore_state(state: Dictionary) -> void:
 	_load_mounting_holes(state.get("mounting_holes", []))
 	zones = _zones_from_list(state.get("zones", []))
 	cutouts = _cutouts_from_list(state.get("cutouts", []))
+
+	# BUCKET 8 — restore the workspace disposition layer LAST, after the board is
+	# whole, so a delegate that reads the board while restoring sees the state
+	# this snapshot describes rather than a half-applied one.
+	_restore_workspace_snapshot(state)
 
 	# Batch state belongs to the CALLER's in-flight transaction, not to
 	# whichever board snapshot happens to be restored. Without this, undoing

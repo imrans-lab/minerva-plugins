@@ -300,8 +300,22 @@ func _apply_disposition(id: String, to: String, verb: String) -> bool:
 	_sync_pinned_set(id, to)
 	_refresh_task_state(str(c.task_id))
 	_bump_generation()  # the live set moved → any in-flight draft-check is stale
+	# INV-2 (C4a), live-set half. A move ACROSS the live/terminal boundary
+	# changes the set draft_check scores, so every candidate that is live
+	# afterwards loses its verdict. A move WITHIN the live set (pin/unpin) does
+	# not — see the rule on VERDICT_VALIDATIONS for why that is a decision and
+	# not an omission.
+	if _is_live_disposition(from) != _is_live_disposition(to):
+		_stale_live_verdicts()
 	candidate_changed.emit(id)
 	return true
+
+
+## Is this disposition one that keeps a candidate in the LIVE routing set? The
+## single predicate behind live_candidate_ids() and the INV-2 boundary test, so
+## the two can never disagree about what "live" means.
+static func _is_live_disposition(disposition: String) -> bool:
+	return not (disposition in ["superseded", "rejected", "committed"])
 
 
 func _record_refusal(id: String, from: String, to: String, err: String, verb: String) -> void:
@@ -493,7 +507,7 @@ func live_candidate_ids() -> Array:
 	var out: Array = []
 	for id in candidates:
 		var c = candidates[id]
-		if str(c.disposition) in ["superseded", "rejected", "committed"]:
+		if not _is_live_disposition(str(c.disposition)):
 			continue
 		out.append(str(id))
 	return out
@@ -882,6 +896,9 @@ func correlate(candidate_id: String, annotation_id: String, task_id: String = ""
 		"committed_trace_ids": prev.get("committed_trace_ids", []),
 		"committed_via_ids": prev.get("committed_via_ids", []),
 		"prior_disposition": prev.get("prior_disposition", ""),
+		# C4a: the source hints a COMMIT consumed (recorded, never deleted — see
+		# commit()'s contract). Carried across a re-correlate like the copper ids.
+		"consumed_hint_ids": prev.get("consumed_hint_ids", []),
 	}
 	_annotation_to_candidate[annotation_id] = candidate_id
 
@@ -954,6 +971,14 @@ func committed_copper_ids(candidate_id: String) -> Dictionary:
 	}
 
 
+## The source-hint ids a COMMIT consumed for this candidate (empty when it has
+## not been committed). Recorded rather than acted on — see commit()'s contract
+## for why no annotation is removed.
+func consumed_hint_ids(candidate_id: String) -> Array:
+	var rec: Dictionary = correlations.get(candidate_id, {})
+	return (rec.get("consumed_hint_ids", []) as Array).duplicate()
+
+
 ## UNDO of a bridged accept (T2.3, GATE INV-1): the board undo has restored the
 ## pre-commit state (its traces AND vias — never orphaning vias, F1) — revert the
 ## candidate from committed back to its prior disposition and clear the recorded
@@ -983,11 +1008,19 @@ func uncommit(candidate_id: String) -> bool:
 	rec["committed_trace_ids"] = []
 	rec["committed_via_ids"] = []
 	rec["prior_disposition"] = ""
+	rec["consumed_hint_ids"] = []
 	correlations[candidate_id] = rec
 	last_transition_error = {}
 	_sync_pinned_set(candidate_id, prior)
 	_refresh_task_state(str(c.task_id))  # the copper is gone → the task reopens
 	_bump_generation()
+	# INV-2 (C4a), live-set half — stated here as well as in _apply_disposition
+	# because uncommit deliberately does NOT go through the legality table (it is
+	# the compensating half of a board undo). The candidate is live again and the
+	# board just lost its copper, so every live verdict was scored against a
+	# board and a set that no longer exist — INCLUDING this candidate's own,
+	# which is why the rule is "every candidate live AFTERWARDS".
+	_stale_live_verdicts()
 	candidate_changed.emit(candidate_id)
 	return true
 
@@ -1026,6 +1059,17 @@ func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Ar
 	c.segments = new_segments
 	c.vias = new_vias
 	c.candidate_revision = int(c.candidate_revision) + 1
+	# INV-2, geometry half (C4a). This IS a geometry verb — it replaces the
+	# candidate's whole segment/via set — so it stales exactly as add_via does,
+	# and for a reason the bumped candidate_revision does NOT cover: that counter
+	# only discards an IN-FLIGHT draft check (apply_check_result's guard 3). A
+	# verdict that already LANDED is a stored "clean" on the candidate, and
+	# nothing here would have moved it, so the bridged legacy Add-Via path
+	# (panel_tools._add_via, which re-derives a correlated candidate's geometry
+	# from an edited annotation) could carry a clean verdict onto copper that
+	# just changed shape. No exception applies: unlike pin/unpin, this moves the
+	# geometry itself.
+	mark_stale(candidate_id)
 	_bump_generation()
 	candidate_changed.emit(candidate_id)
 	return true
@@ -1238,35 +1282,704 @@ static func _via_pt(raw) -> Vector2:
 	return _pt(raw)
 
 
-## T5: apply a candidate's geometry to the board as ONE batched transaction and
-## mark it committed. STUB.
-func commit(_candidate_id: String, _board = null) -> bool:
-	push_warning("[RoutingWorkspace] commit is a stub (T5)")
-	return false
+# ══ C4a — THE VERB LAYER (S4, DCR 019f7095c395) ══════════════════════════════
+#
+# Three invariants live below. Each is stated where it is enforced, not only
+# here, but the map is:
+#
+#   INV-1  commit() is ONE undoable transaction: candidate geometry -> real
+#          copper, candidate -> committed, source hints recorded, in a single
+#          board history step whose snapshot ALSO carries the workspace's
+#          disposition layer (PCBData's eighth history bucket) so a board undo
+#          restores BOTH stores.
+#   INV-2  every candidate-mutating verb marks the invalidated verdicts
+#          "stale" — see _stale_live_verdicts / _mark_stale and the rule stated
+#          on VERDICT_VALIDATIONS.
+#   INV-3  a via/layer EDIT is PATH-SCOPED: add_via() resolves the CONNECTED
+#          PATH the click landed on out of the exact segment graph and never
+#          touches a disconnected path of the same candidate. Degenerate
+#          inserts (on an endpoint, on an existing via) are NAMED refusals.
+
+## Validations that represent a REAL VERDICT — the only ones staleness can
+## invalidate.
+##
+## THE INV-2 RULE, in one sentence: a verb marks "stale" exactly the candidates
+## whose verdict it invalidated, and nothing else.
+##   * GEOMETRY verbs (add_via, sync_candidate_geometry, a reroute's re-ingest)
+##     stale the EDITED candidate — its own copper moved.
+##   * LIVE-SET verbs (reject / commit / supersede / ingest-replace / uncommit)
+##     stale every candidate that is LIVE AFTERWARDS, because draft_check is
+##     SET-SCOPED (methods._draft_check runs drc over committed copper UNION
+##     every live candidate's draft copper): a verdict named a set that no
+##     longer holds. Stating it as "live afterwards" is what makes the rule
+##     self-consistent in both directions — the departing candidate is terminal
+##     and therefore excluded, and an UNCOMMITTED one is live again and
+##     therefore included.
+##   * pin / unpin stale NOTHING, and that is a decision rather than an
+##     omission: pinning moves no geometry and does not change the set
+##     draft_check scores (a pinned candidate is still live copper in the
+##     check). It changes only what a FUTURE ROUTER RUN treats as keep-out
+##     (route_bridge.existing_copper_with_pinned). Staling on pin would erase
+##     the very check the user ran in order to decide to pin.
+##   * "unchecked"/"stale" carry no verdict to lose, and "checking" is already
+##     guarded by the workspace-generation token (apply_check_result discards a
+##     reply whose generation moved) — so only these three are touched. Without
+##     that filter a routine re-propose would stale every freshly-added
+##     candidate for no reason, which is noise, not safety.
+const VERDICT_VALIDATIONS := ["clean", "violating", "error"]
+
+## Named refusal codes for the verb layer (the transition codes live on
+## PcbRouteCandidate; these are the ones only a verb can produce).
+const ERR_NO_CANDIDATE := "candidate_not_found"
+const ERR_NO_BOARD := "board_unavailable"
+const ERR_NO_GEOMETRY := "candidate_has_no_geometry"
+const ERR_UNMODELABLE_SEGMENT := "unmodelable_segment"
+const ERR_UNMODELABLE_VIA := "unmodelable_via"
+const ERR_ILLEGAL_VIA_SPAN := "illegal_via_span"
+const ERR_BOARD_WRITE := "board_write_failed"
+const ERR_NOT_EDITABLE := "candidate_not_editable"
+const ERR_ALREADY_COMMITTED := "already_committed"
+const ERR_NO_SEGMENT_AT_POINT := "no_segment_at_point"
+const ERR_DEGENERATE_AT_ENDPOINT := "degenerate_insert_at_endpoint"
+const ERR_DEGENERATE_ON_VIA := "degenerate_insert_on_via"
+const ERR_SEGMENT_LOCKED := "segment_locked"
+const ERR_LAYER_MISMATCH := "from_layer_mismatch"
+
+## Coincidence epsilon for edit geometry, in board mm. Two points closer than
+## this are the SAME point — which is what makes a split at an endpoint a
+## degenerate (zero-length) insert rather than a legal one.
+const EDIT_EPS_MM := 1.0e-4
+## Floor for the "did the click land on this segment" tolerance, so a hair-thin
+## candidate is still clickable. The real tolerance is half the segment's own
+## width (its copper), which is the same rule the canvas pick uses.
+const EDIT_MIN_TOL_MM := 0.05
 
 
-## T7: add a via to a candidate at an interactive edit point. STUB.
-func add_via(_candidate_id: String, _position: Vector2, _from_layer: String, _to_layer: String) -> bool:
-	push_warning("[RoutingWorkspace] add_via is a stub (T7)")
-	return false
+## Mark ONE candidate's validation "stale" and DROP its stored findings.
+##
+## The findings go because a finding names SUBJECT IDENTITY (candidate_id +
+## segment_id/via_id, see apply_check_result) and a verb that changed the set or
+## the geometry may have destroyed those subjects. Keeping them would be keeping
+## a claim about copper that is gone — the exact "stale findings render against
+## new geometry" failure INV-2 exists to prevent, closed once at the store
+## instead of at every future render site.
+##
+## rebase() deliberately does NOT drop findings: a board-revision change removes
+## no subject — the candidate's own segments/vias are all still there — so its
+## findings still describe things that exist. Different cause, different
+## disposal.
+func mark_stale(candidate_id: String) -> bool:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return false
+	if str(c.validation) == "stale":
+		return false
+	set_validation(candidate_id, "stale")  # emits validation_changed
+	_findings.erase(candidate_id)
+	return true
 
 
-## T7: insert a vertex into a candidate segment. STUB.
+## INV-2, live-set half: stale every candidate that is LIVE right now and holds
+## a real verdict. Called AFTER the move that changed the set. Returns the ids
+## actually marked (already-stale/unchecked ones are skipped, so it is
+## idempotent and emits no duplicate validation_changed).
+func _stale_live_verdicts() -> Array:
+	var marked: Array = []
+	for id in live_candidate_ids():
+		var c = get_candidate(str(id))
+		if c == null or not (str(c.validation) in VERDICT_VALIDATIONS):
+			continue
+		if mark_stale(str(id)):
+			marked.append(str(id))
+	return marked
+
+
+# ── INV-1: the composite COMMIT transaction ───────────────────────────────────
+
+## Turn a candidate into real copper on `board` as ONE undoable step.
+##
+## WHAT "ONE STEP" MEANS HERE, precisely:
+##   * every trace and via is written inside a single begin_batch/end_batch
+##     pair, so PCBData performs exactly ONE save_to_history and ONE
+##     board_revision bump for the whole commit (one Ctrl+Z reverts all of it);
+##   * the candidate is marked committed INSIDE that batch, so the history
+##     entry end_batch appends carries the POST-commit workspace layer;
+##   * and attach_workspace_snapshot() stamps the PRE-commit workspace layer
+##     onto the history entry that already represents the pre-commit BOARD.
+##     That pairing is what makes undo-after-commit restore BOTH stores: undo
+##     restores the PREVIOUS entry, so the pre-commit disposition has to be on
+##     the PREVIOUS entry, and this is the moment we know it.
+##
+## ATOMICITY: ALL validation precedes ALL mutation. Every failure mode below is
+## detected before begin_batch, so a refused commit leaves the board untouched,
+## the disposition untouched and no history entry behind. The post-begin_batch
+## rollback is defensive only (a board that accepted an add and then cannot find
+## it) and is documented at its site.
+##
+## SOURCE HINTS are CONSUMED BY RECORD, not by deletion: the candidate's
+## source_hint_ids are written onto its correlation as `consumed_hint_ids` and
+## the task closes (derived). No annotation is removed. Deleting the hint
+## annotations here would put an un-undoable side effect inside a step whose
+## whole promise is that one Ctrl+Z reverts it — annotations are not board state
+## and ride no history bucket — and the annotation store itself is what S5
+## (C4b) retires. Provenance is not lost either way: source_hint_ids stays on
+## the candidate.
+##
+## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
+func commit(candidate_id: String, board = null) -> Dictionary:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return _verb_error(ERR_NO_CANDIDATE, "no candidate '%s' in this workspace" % candidate_id, candidate_id)
+	if board == null or not is_instance_valid(board) \
+			or not board.has_method("begin_batch") or not board.has_method("end_batch") \
+			or not board.has_method("new_trace") or not board.has_method("add_trace") \
+			or not board.has_method("add_via"):
+		return _verb_error(ERR_NO_BOARD,
+			"no board to commit onto (a commit writes real copper — it cannot run against the model alone)",
+			candidate_id)
+
+	# RE-COMMIT IS REFUSED, and it has to be refused HERE rather than left to the
+	# legality table. An IDENTITY move (committed -> committed) is LEGAL by that
+	# table, deliberately: mark_committed supports a re-commit because the
+	# annotation-accept path may re-record the copper ids of a candidate that is
+	# already committed, and refusing that would break a supported call. But THIS
+	# verb WRITES COPPER. Running it twice would lay a second full set of traces
+	# and vias for one candidate and then overwrite the recorded ids with the new
+	# ones — the old copper orphaned on the board, unreachable by the undo that
+	# only reverts the last step. So the composite transaction refuses by name
+	# where the raw marker does not.
+	if str(c.disposition) == "committed":
+		return _verb_error(ERR_ALREADY_COMMITTED,
+			"candidate '%s' is already committed — its copper is on the board; undo the commit (or uncommit it) before committing again"
+				% candidate_id, candidate_id)
+
+	# LEGALITY — the same table every other workflow verb consults, so
+	# "commit an already-rejected candidate" is refused by name, before the
+	# board is opened.
+	var legality: String = PcbRouteCandidate.transition_error(str(c.disposition), "committed")
+	if not legality.is_empty():
+		_record_refusal(candidate_id, str(c.disposition), "committed", legality, "commit")
+		return _verb_error(legality,
+			"cannot commit a candidate whose disposition is '%s'" % str(c.disposition), candidate_id)
+
+	# GEOMETRY PRE-FLIGHT. Everything the board write needs, checked up front.
+	if c.segments.is_empty() and c.vias.is_empty():
+		return _verb_error(ERR_NO_GEOMETRY, "candidate '%s' carries no segments and no vias" % candidate_id, candidate_id)
+	var seg_plan: Array = []
+	for seg in c.segments:
+		if not (seg is Dictionary):
+			return _verb_error(ERR_UNMODELABLE_SEGMENT, "candidate '%s' holds a non-dictionary segment" % candidate_id, candidate_id)
+		var seg_dict: Dictionary = seg
+		var pts: Array = []
+		for p in seg_dict.get("points", []):
+			if p is Vector2:
+				pts.append(p)
+		if pts.size() < 2:
+			return _verb_error(ERR_UNMODELABLE_SEGMENT,
+				"segment '%s' has %d usable point(s); copper needs at least two"
+					% [str(seg_dict.get("id", "")), pts.size()], candidate_id)
+		var w := float(seg_dict.get("width", 0.0))
+		if w <= 0.0:
+			return _verb_error(ERR_UNMODELABLE_SEGMENT,
+				"segment '%s' declares width %s — zero-width copper is not copper"
+					% [str(seg_dict.get("id", "")), str(w)], candidate_id)
+		seg_plan.append({
+			"id": str(seg_dict.get("id", "")),
+			"layer": PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "top")),
+			"width": w, "points": pts,
+		})
+	var via_plan: Array = []
+	for via in c.vias:
+		if not (via is Dictionary):
+			return _verb_error(ERR_UNMODELABLE_VIA, "candidate '%s' holds a non-dictionary via" % candidate_id, candidate_id)
+		var via_dict: Dictionary = via
+		if not (via_dict.get("position", null) is Vector2):
+			return _verb_error(ERR_UNMODELABLE_VIA,
+				"via '%s' has no usable position" % str(via_dict.get("id", "")), candidate_id)
+		if not c.via_span_legal(via_dict):
+			return _verb_error(ERR_ILLEGAL_VIA_SPAN,
+				"via '%s' spans %s->%s, which is not a legal via span on this stack"
+					% [str(via_dict.get("id", "")), str(via_dict.get("from_layer", "")),
+						str(via_dict.get("to_layer", ""))], candidate_id)
+		via_plan.append(via_dict)
+
+	# ── mutation ──────────────────────────────────────────────────────────────
+	# Bind FIRST so every history snapshot from here on carries bucket 8, then
+	# pair the pre-commit workspace layer onto the entry the undo will land on.
+	if board.has_method("bind_routing_workspace"):
+		board.bind_routing_workspace(self)
+	if board.has_method("attach_workspace_snapshot"):
+		board.attach_workspace_snapshot()
+
+	var net := str(c.net)
+	var trace_ids: Array = []
+	var via_ids: Array = []
+	board.begin_batch()
+	for plan in seg_plan:
+		var trace = board.new_trace()
+		trace.net_name = net
+		trace.layer = str(plan["layer"])
+		trace.width = float(plan["width"])
+		for point in plan["points"]:
+			trace.waypoints.append(point)
+		board.add_trace(trace)
+		var tid := str(trace.id)
+		# Defensive only: pre-flight already proved this geometry is modelable,
+		# so a board that accepted the add and then cannot find it is a board
+		# fault, not a caller fault. Roll the batch's writes back rather than
+		# leaving half a route on the copper.
+		if tid.is_empty() or (board.has_method("get_trace") and board.get_trace(tid) == null):
+			return _rollback_commit(board, trace_ids, via_ids, candidate_id,
+				"board refused a trace for segment '%s'" % str(plan["id"]))
+		trace_ids.append(tid)
+	var dr: Dictionary = board.design_rules if board.design_rules is Dictionary else {}
+	for via_dict in via_plan:
+		var via_size := float(via_dict.get("diameter", 0.0))
+		if via_size <= 0.0:
+			via_size = float(dr.get("via_diameter_mm", 0.0))
+		if via_size <= 0.0:
+			via_size = 0.8
+		var via_drill := float(via_dict.get("drill", 0.0))
+		if via_drill <= 0.0:
+			via_drill = float(dr.get("via_drill_mm", 0.0))
+		if via_drill <= 0.0:
+			via_drill = 0.4
+		var vid := str(board.add_via({
+			"position": via_dict.get("position"),
+			"size": via_size,
+			"drill": via_drill,
+			"net_name": net,
+			"from_layer": str(via_dict.get("from_layer", "top")),
+			"to_layer": str(via_dict.get("to_layer", "bottom")),
+		}))
+		if vid.is_empty():
+			return _rollback_commit(board, trace_ids, via_ids, candidate_id,
+				"board refused a via for '%s'" % str(via_dict.get("id", "")))
+		via_ids.append(vid)
+
+	var validation_at_commit := str(c.validation)
+	# INSIDE the batch: the entry end_batch appends must show the candidate as
+	# committed, or a REDO would restore the copper without the disposition.
+	# mark_committed funnels through _apply_disposition, so the live-set half of
+	# INV-2 fires here (every candidate still live loses its verdict — the board
+	# they were scored against just gained this route's copper).
+	if not mark_committed(candidate_id, trace_ids, via_ids):
+		return _rollback_commit(board, trace_ids, via_ids, candidate_id,
+			"the candidate refused the committed transition after the copper was written")
+	var rec: Dictionary = correlations.get(candidate_id, {})
+	rec["consumed_hint_ids"] = _to_string_array(c.source_hint_ids)
+	correlations[candidate_id] = rec
+	var action := "Commit route candidate %s (%s)" % [candidate_id, net if not net.is_empty() else "no net"]
+	board.end_batch(action)
+
+	return {
+		"ok": true,
+		"candidate_id": candidate_id,
+		"task_id": str(c.task_id),
+		"task_state": task_state(str(c.task_id)),
+		"trace_ids": trace_ids,
+		"via_ids": via_ids,
+		"consumed_hint_ids": _to_string_array(c.source_hint_ids),
+		"validation_at_commit": validation_at_commit,
+		"action": action,
+	}
+
+
+## Undo the writes a failing commit already made, close the batch, and report.
+## Named so the "no half-state" claim is a function, not a comment.
+func _rollback_commit(board, trace_ids: Array, via_ids: Array, candidate_id: String, why: String) -> Dictionary:
+	for tid in trace_ids:
+		if board.has_method("remove_trace"):
+			board.remove_trace(str(tid))
+	for vid in via_ids:
+		if board.has_method("remove_via_by_id"):
+			board.remove_via_by_id(str(vid))
+	# PCBData has no abort_batch, and adding one is outside this unit's fence
+	# (pcb_data.gd is in fence for the history CODEC only), so the batch is
+	# closed the only way it can be. Because the batch was touched, this leaves
+	# ONE history entry describing a board identical to the one before it — a
+	# redundant entry, never a wrong one. Unreachable in practice: the pre-flight
+	# above proves the geometry before any of this runs.
+	board.end_batch("Commit route candidate %s (rolled back)" % candidate_id)
+	return _verb_error(ERR_BOARD_WRITE, why, candidate_id)
+
+
+static func _verb_error(code: String, message: String, candidate_id: String = "") -> Dictionary:
+	return {"ok": false, "error": code, "message": message, "candidate_id": candidate_id}
+
+
+# ── INV-3: the PATH-SCOPED via/layer edit entry ───────────────────────────────
+
+## Insert a via into a candidate at `position`, flipping the run DOWNSTREAM of
+## that point onto `to_layer`.
+##
+## THIS IS THE EDIT ENTRY INV-3 NAMES, and the whole point of it is the word
+## PATH. A candidate for a multi-pad net can hold ≥2 DISCONNECTED copper paths
+## (pcb_route_candidate.gd's own header says so, and forbids a connected-chain
+## invariant). The router's flat-array hazard was exactly this: treating
+## `segments` as one concatenated run, so an edit on path A re-layered path B.
+## Here the affected set is derived from the SEGMENT GRAPH — endpoint adjacency
+## over the exact points — and every segment outside the hit segment's connected
+## component is returned in `untouched_segment_ids` untouched, which is what the
+## GATE fixture asserts.
+##
+## DEGENERATE INSERTS ARE REFUSED, NOT CLAMPED. An insert exactly on a segment
+## endpoint would split off a zero-length segment (copper with no length is not
+## copper, and the worker's build_overlay refuses it too), and an insert on an
+## existing via would stack two holes at one point. Both come back as named
+## no-ops with the candidate untouched, rather than a silent nudge to a nearby
+## legal point — a nudged via is copper the user did not ask for.
+##
+## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
+func add_via(candidate_id: String, position: Vector2, from_layer: String, to_layer: String) -> Dictionary:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return _verb_error(ERR_NO_CANDIDATE, "no candidate '%s' in this workspace" % candidate_id, candidate_id)
+	# A terminal candidate is not an editing surface: superseded/rejected are
+	# history, and committed is copper (edit the BOARD, not the ghost).
+	if str(c.disposition) in PcbRouteCandidate.TERMINAL_DISPOSITIONS:
+		return _verb_error(ERR_NOT_EDITABLE,
+			"candidate '%s' is %s — a terminal candidate is a record, not a draft"
+				% [candidate_id, str(c.disposition)], candidate_id)
+	var canon_from := PcbLayerStack.kicad_to_canon(from_layer)
+	var canon_to := PcbLayerStack.kicad_to_canon(to_layer)
+	if not PcbLayerStack.is_legal_via_span(canon_from, canon_to):
+		return _verb_error(ERR_ILLEGAL_VIA_SPAN,
+			"%s->%s is not a legal via span on this stack" % [canon_from, canon_to], candidate_id)
+
+	# Refuse ON-VIA before looking for a segment: a click on an existing via is
+	# a different mistake from a click on empty board, and must say so.
+	#
+	# TOLERANCE IS THE VIA'S OWN DISC, floored at EDIT_MIN_TOL_MM — the same
+	# shape the segment hit uses (its own half-width, floored), because both
+	# answer the same GESTURE question: what did the user click? A via is a
+	# visible disc, and matching its mathematical centre to EDIT_EPS_MM (1e-4mm)
+	# would let a click one hundredth of a millimetre off the middle of a via
+	# fall through to the segment underneath and stack a second hole on it.
+	# EDIT_EPS_MM stays where it answers a GEOMETRY question instead — endpoint
+	# adjacency and the zero-length split — which is exact by nature.
+	for via in c.vias:
+		if via is Dictionary and (via as Dictionary).get("position", null) is Vector2:
+			var via_dict: Dictionary = via
+			var claim: float = maxf(float(via_dict.get("diameter", 0.0)) * 0.5, EDIT_MIN_TOL_MM)
+			if ((via_dict["position"]) as Vector2).distance_to(position) <= claim:
+				return _verb_error(ERR_DEGENERATE_ON_VIA,
+					"there is already a via at %s (via '%s', claim %.3fmm)"
+						% [str(position), str(via_dict.get("id", "")), claim],
+					candidate_id)
+
+	var hit: Dictionary = _segment_hit(c, position)
+	if hit.is_empty():
+		return _verb_error(ERR_NO_SEGMENT_AT_POINT,
+			"no segment of candidate '%s' passes through %s" % [candidate_id, str(position)], candidate_id)
+	var seg_index := int(hit["segment_index"])
+	var hit_seg: Dictionary = c.segments[seg_index]
+	# THE CALLER'S from_layer MUST BE THE LAYER THE COPPER IS ACTUALLY ON.
+	# Without this the split silently RE-LAYERS the head onto whatever the caller
+	# claimed, moving copper the user did not touch — a via insert would quietly
+	# become a layer change of the upstream run. Refused rather than corrected to
+	# the segment's real layer: a caller that named the wrong layer asked for
+	# something else, and doing the right thing under a wrong request is how a
+	# gesture ends up depending on the correction. Added BEFORE any gesture is
+	# wired to this entry, so nothing can come to rely on the loose behaviour.
+	var seg_layer := PcbLayerStack.kicad_to_canon(hit_seg.get("layer", "top"))
+	if seg_layer != canon_from:
+		return _verb_error(ERR_LAYER_MISMATCH,
+			"segment '%s' is on %s, not the %s this via was asked to leave"
+				% [str(hit_seg.get("id", "")), seg_layer, canon_from], candidate_id)
+	if bool(hit_seg.get("locked", false)):
+		return _verb_error(ERR_SEGMENT_LOCKED,
+			"segment '%s' is locked" % str(hit_seg.get("id", "")), candidate_id)
+	var at: Vector2 = hit["point"]
+	for p in hit_seg.get("points", []):
+		if p is Vector2 and (p as Vector2).distance_to(at) <= EDIT_EPS_MM:
+			return _verb_error(ERR_DEGENERATE_AT_ENDPOINT,
+				"%s is a vertex of segment '%s' — splitting there would produce a zero-length segment"
+					% [str(at), str(hit_seg.get("id", ""))], candidate_id)
+
+	# The connected path this click landed on, resolved BEFORE the split so the
+	# answer is about the geometry the user clicked.
+	var path_indices: Array = _connected_path_indices(c, seg_index)
+	var untouched_ids: Array = []
+	for i in range(c.segments.size()):
+		if not (i in path_indices):
+			untouched_ids.append(str((c.segments[i] as Dictionary).get("id", "")))
+
+	# SPLIT. The head keeps the incoming layer and the segment's id (it is the
+	# same copper the user was looking at); the tail is new copper on to_layer.
+	var leg := int(hit["leg"])
+	var pts: Array = []
+	for p in hit_seg.get("points", []):
+		if p is Vector2:
+			pts.append(p)
+	var head_pts: Array = pts.slice(0, leg + 1)
+	head_pts.append(at)
+	var tail_pts: Array = [at]
+	tail_pts.append_array(pts.slice(leg + 1, pts.size()))
+	var width := float(hit_seg.get("width", 0.25))
+	var head := PcbRouteCandidate.make_segment(str(hit_seg.get("id", "")), canon_from, width, head_pts,
+		bool(hit_seg.get("locked", false)))
+	var tail := PcbRouteCandidate.make_segment(next_segment_id(), canon_to, width, tail_pts, false)
+	c.segments[seg_index] = head
+	c.segments.insert(seg_index + 1, tail)
+
+	# LAYER-RUN TOGGLE, walked over the graph rather than the array. Seeded at
+	# the TAIL and forbidden from crossing back through the HEAD, so the upstream
+	# side keeps its layer; it only traverses segments still on `from_layer`, so
+	# it stops at an existing via/layer change instead of flipping past one; and
+	# it can never leave the connected component, so a disconnected path is
+	# unreachable by construction, not by a filter someone can forget.
+	var relayered: Array = [str(tail["id"])]
+	for idx in _relayer_walk_indices(c, seg_index + 1, seg_index, canon_from):
+		var s: Dictionary = c.segments[idx]
+		s["layer"] = canon_to
+		relayered.append(str(s.get("id", "")))
+
+	var via_id := next_via_id()
+	c.add_via(PcbRouteCandidate.make_via(via_id, at, canon_from, canon_to))
+	c.candidate_revision = int(c.candidate_revision) + 1
+	# INV-2, geometry half: this candidate's own copper moved, so its verdict is
+	# gone. Its findings go with it (see mark_stale) — they name segment ids that
+	# the split just changed the meaning of.
+	mark_stale(candidate_id)
+	_bump_generation()
+	candidate_changed.emit(candidate_id)
+
+	var path_ids: Array = []
+	for i in path_indices:
+		path_ids.append(str((c.segments[int(i)] as Dictionary).get("id", "")))
+	return {
+		"ok": true,
+		"candidate_id": candidate_id,
+		"via_id": via_id,
+		"at": [at.x, at.y],
+		"from_layer": canon_from,
+		"to_layer": canon_to,
+		"head_segment_id": str(head["id"]),
+		"tail_segment_id": str(tail["id"]),
+		"relayered_segment_ids": relayered,
+		"untouched_segment_ids": untouched_ids,
+		"candidate_revision": int(c.candidate_revision),
+		"validation": str(c.validation),
+	}
+
+
+## T7: insert a vertex into a candidate segment. STILL A STUB — C4a implements
+## the VIA/layer edit entry (add_via above) because that is the one INV-3 names;
+## the vertex drag and the routing gate are their own gestures and land with T7.
+## Left as a warning-and-false placeholder rather than deleted: the signature is
+## the contract the canvas edit tools will call.
 func add_vertex(_candidate_id: String, _segment_id: String, _index: int, _position: Vector2) -> bool:
 	push_warning("[RoutingWorkspace] add_vertex is a stub (T7)")
 	return false
 
 
-## T7: add a routing gate/keepout constraint. STUB.
+## T7: add a routing gate/keepout constraint. STUB (see add_vertex).
 func add_gate(_candidate_id: String, _gate: Dictionary) -> bool:
 	push_warning("[RoutingWorkspace] add_gate is a stub (T7)")
 	return false
 
 
-## T7: reroute one span of a candidate (partial re-route). STUB.
+## T7: reroute one span of a candidate IN THE MODEL. STILL A STUB, and it must
+## stay one until the ROUTER can answer a span question: agent_router scopes by
+## WHOLE NET (route_bridge.parse_route_scope refuses a span outright rather than
+## widening it), so there is no way to obtain replacement geometry for an
+## interval. The MCP verb minerva_pcb_workspace_reroute_span therefore DEGRADES
+## to a whole-route reroute and says so in its reply — see panel_tools.gd and
+## docket 019fc155bc32. Implementing this half against a router that cannot
+## honour it would be the silent widening the campaign exists to kill.
 func reroute_span(_candidate_id: String, _segment_id: String) -> bool:
-	push_warning("[RoutingWorkspace] reroute_span is a stub (T7)")
+	push_warning("[RoutingWorkspace] reroute_span is a stub (T7 — the router has no span scope; see 019fc155bc32)")
 	return false
+
+
+## Segment ids of the connected path containing `segment_id` — the public read
+## of the graph add_via scopes its edit to. Empty when the segment is unknown.
+func connected_path_segment_ids(candidate_id: String, segment_id: String) -> Array:
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return []
+	var seed := -1
+	for i in range(c.segments.size()):
+		if str((c.segments[i] as Dictionary).get("id", "")) == segment_id:
+			seed = i
+			break
+	if seed < 0:
+		return []
+	var out: Array = []
+	for i in _connected_path_indices(c, seed):
+		out.append(str((c.segments[int(i)] as Dictionary).get("id", "")))
+	return out
+
+
+## Which segment (and which leg of it) `position` lands on, and where exactly.
+## {} when nothing does. Tolerance is HALF THE SEGMENT'S OWN WIDTH — its copper
+## — with a floor, the same rule the canvas pick uses; the closest hit wins so
+## an overlap resolves deterministically.
+func _segment_hit(c, position: Vector2) -> Dictionary:
+	var best: Dictionary = {}
+	var best_d := INF
+	for i in range(c.segments.size()):
+		if not (c.segments[i] is Dictionary):
+			continue
+		var seg: Dictionary = c.segments[i]
+		var pts: Array = []
+		for p in seg.get("points", []):
+			if p is Vector2:
+				pts.append(p)
+		if pts.size() < 2:
+			continue
+		var tol: float = maxf(float(seg.get("width", 0.25)) * 0.5, EDIT_MIN_TOL_MM)
+		for leg in range(pts.size() - 1):
+			var proj := _project_on_segment(position, pts[leg], pts[leg + 1])
+			var d: float = position.distance_to(proj)
+			if d <= tol and d < best_d:
+				best_d = d
+				best = {"segment_index": i, "leg": leg, "point": proj}
+	return best
+
+
+## Closest point on the SEGMENT ab (not the infinite line) to p.
+static func _project_on_segment(p: Vector2, a: Vector2, b: Vector2) -> Vector2:
+	var ab := b - a
+	var len_sq := ab.length_squared()
+	if len_sq <= 0.0:
+		return a
+	return a + ab * clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
+
+
+## Do these two segments share an endpoint (within EDIT_EPS_MM)? THE adjacency
+## relation of the segment graph. Layer-agnostic on purpose: a via joins copper
+## on two layers AT ONE POINT, so their endpoints coincide and the two sides are
+## correctly one path.
+static func _segments_adjacent(a: Dictionary, b: Dictionary) -> bool:
+	for pa in a.get("points", []):
+		if not (pa is Vector2):
+			continue
+		for pb in b.get("points", []):
+			if pb is Vector2 and (pa as Vector2).distance_to(pb as Vector2) <= EDIT_EPS_MM:
+				return true
+	return false
+
+
+## Indices of the connected component containing `seed` (endpoint adjacency).
+func _connected_path_indices(c, seed: int) -> Array:
+	var seen: Dictionary = {seed: true}
+	var queue: Array = [seed]
+	while not queue.is_empty():
+		var cur: int = int(queue.pop_back())
+		for i in range(c.segments.size()):
+			if seen.has(i) or not (c.segments[i] is Dictionary):
+				continue
+			if _segments_adjacent(c.segments[cur], c.segments[i]):
+				seen[i] = true
+				queue.append(i)
+	var out: Array = seen.keys()
+	out.sort()
+	return out
+
+
+## Indices to re-layer: everything reachable from `start` WITHOUT passing
+## through `blocked`, travelling only over segments still on `layer`. Excludes
+## `start` itself (the caller already owns the tail).
+func _relayer_walk_indices(c, start: int, blocked: int, layer: String) -> Array:
+	var seen: Dictionary = {start: true, blocked: true}
+	var queue: Array = [start]
+	var out: Array = []
+	while not queue.is_empty():
+		var cur: int = int(queue.pop_back())
+		for i in range(c.segments.size()):
+			if seen.has(i) or not (c.segments[i] is Dictionary):
+				continue
+			var other: Dictionary = c.segments[i]
+			if PcbLayerStack.kicad_to_canon(other.get("layer", "top")) != layer:
+				continue  # a layer change already happened here — stop, do not flip past it
+			if not _segments_adjacent(c.segments[cur], other):
+				continue
+			seen[i] = true
+			out.append(i)
+			queue.append(i)
+	return out
+
+
+# ── PCBData history BUCKET 8: the workspace disposition layer ─────────────────
+#
+# PCBData snapshots SEVEN board buckets (components, nets, traces, vias,
+# mounting_holes, zones, cutouts). INV-1 needs an EIGHTH, because "undo the
+# commit" has to mean "the copper goes AND the candidate is live again" — the
+# two halves of one act.
+#
+# It is an OVERLAY, not a wholesale store, and that distinction is the whole
+# design. A wholesale workspace snapshot would make undoing an UNRELATED board
+# edit delete every candidate proposed since — the inverted twin of the trap the
+# zones bucket's own comment records. So the snapshot carries only the
+# DISPOSITION LAYER (disposition + the correlation's commit bookkeeping) keyed by
+# candidate_id, and the restore touches only candidates named in it: a candidate
+# that arrived after the snapshot is LEFT ALONE, because it is not board state
+# and no board undo has anything to say about it.
+#
+# The board reaches these through a DUCK-TYPED delegate (PCBData.
+# bind_routing_workspace) — pcb_data.gd preloads nothing from this file and
+# knows only two method names, so the pure board model stays free of the routing
+# model.
+
+## The disposition layer of every candidate, for a history snapshot.
+func snapshot_dispositions() -> Dictionary:
+	var out: Dictionary = {}
+	for id in candidates:
+		var rec: Dictionary = correlations.get(id, {})
+		out[str(id)] = {
+			"disposition": str(candidates[id].disposition),
+			"prior_disposition": str(rec.get("prior_disposition", "")),
+			"committed_trace_ids": _to_string_array(rec.get("committed_trace_ids", []) if rec.get("committed_trace_ids", []) is Array else []),
+			"committed_via_ids": _to_string_array(rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []),
+			"consumed_hint_ids": _to_string_array(rec.get("consumed_hint_ids", []) if rec.get("consumed_hint_ids", []) is Array else []),
+		}
+	return out
+
+
+## Apply a snapshot taken by snapshot_dispositions(). Returns the ids that
+## actually MOVED (an unchanged candidate is not reported and emits nothing).
+##
+## RESTORE IS NOT A WORKFLOW TRANSITION, so it writes through the RAW setter
+## rather than the legality table — for the same reason load_from_dict does:
+## reinstating a stored "committed"/"rejected" is not a move a user made, and
+## running it through the table would refuse exactly the terminal states an undo
+## most needs to reinstate. uncommit_to()'s contract is untouched by this; it
+## remains the only WORKFLOW exit from committed.
+##
+## A restored candidate whose disposition moved is marked STALE: a board undo
+## changed the copper underneath it, so any verdict it carried was scored
+## against a board that no longer exists.
+func restore_dispositions(snap: Dictionary) -> Array:
+	var moved: Array = []
+	for raw_id in snap:
+		var cid := str(raw_id)
+		var c = get_candidate(cid)
+		if c == null:
+			continue  # a candidate the snapshot knew and this workspace no longer has
+		var entry: Dictionary = snap[raw_id] if snap[raw_id] is Dictionary else {}
+		var want := str(entry.get("disposition", ""))
+		if want.is_empty() or not (want in PcbRouteCandidate.DISPOSITIONS):
+			continue
+		var rec: Dictionary = correlations.get(cid, {})
+		rec["prior_disposition"] = str(entry.get("prior_disposition", ""))
+		rec["committed_trace_ids"] = _to_string_array(entry.get("committed_trace_ids", []) if entry.get("committed_trace_ids", []) is Array else [])
+		rec["committed_via_ids"] = _to_string_array(entry.get("committed_via_ids", []) if entry.get("committed_via_ids", []) is Array else [])
+		rec["consumed_hint_ids"] = _to_string_array(entry.get("consumed_hint_ids", []) if entry.get("consumed_hint_ids", []) is Array else [])
+		correlations[cid] = rec
+		if str(c.disposition) == want:
+			continue
+		c.set_disposition(want)  # RAW restore setter — see the doc above
+		_sync_pinned_set(cid, want)
+		mark_stale(cid)
+		moved.append(cid)
+		candidate_changed.emit(cid)
+	if not moved.is_empty():
+		_rebuild_task_index()
+		refresh_task_states()
+		_bump_generation()
+	return moved
 
 
 # ── serialisation ─────────────────────────────────────────────────────────────
@@ -1439,6 +2152,10 @@ func load_from_dict(data: Dictionary, board_revision_hint: int = -1) -> void:
 			"committed_trace_ids": _to_string_array(rec.get("committed_trace_ids", []) if rec.get("committed_trace_ids", []) is Array else []),
 			"committed_via_ids": _to_string_array(rec.get("committed_via_ids", []) if rec.get("committed_via_ids", []) is Array else []),
 			"prior_disposition": str(rec.get("prior_disposition", "")),
+			# Absent in any sidecar written before C4a — an empty list is the
+			# correct reading of "this file predates consumed-hint recording",
+			# and it round-trips forward from here.
+			"consumed_hint_ids": _to_string_array(rec.get("consumed_hint_ids", []) if rec.get("consumed_hint_ids", []) is Array else []),
 		}
 		if not ann.is_empty():
 			_annotation_to_candidate[ann] = str(cid)
