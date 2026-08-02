@@ -139,7 +139,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PCB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${PCB_DIR}/.." && pwd)"
-VENV_PYTHON="${REPO_ROOT}/pcb/worker/.venv/bin/python"
+# INTERPRETER RESOLUTION (in order): $HERMETIC_FAB_PYTHON override (CI/pytest
+# pass their own interpreter — it already carries the worker deps), then the
+# local dev venv, then python3 on PATH. Whichever wins must import pyclipper
+# (probed below) or the run is a named harness error — never a false green.
+if [ -n "${HERMETIC_FAB_PYTHON:-}" ]; then
+  VENV_PYTHON="${HERMETIC_FAB_PYTHON}"
+elif [ -x "${REPO_ROOT}/pcb/worker/.venv/bin/python" ]; then
+  VENV_PYTHON="${REPO_ROOT}/pcb/worker/.venv/bin/python"
+else
+  VENV_PYTHON="$(command -v python3 || true)"
+fi
 DEFAULT_BOARD_REL="pcb/worker/tests/testdata/zone_fill.yaml"
 BASE_NAME="hermetic"
 
@@ -180,10 +190,18 @@ sha256_of() {
 
 # --- Pre-flight -------------------------------------------------------------
 
-if [ ! -x "${VENV_PYTHON}" ]; then
-  harness_fail "venv interpreter not found at ${VENV_PYTHON} — build it first" \
-    "(pcb/worker/.venv is gitignored, a local build artifact; see this" \
-    "script's INTERPRETER CONTRACT header comment)"
+if [ -z "${VENV_PYTHON}" ] || [ ! -x "${VENV_PYTHON}" ]; then
+  harness_fail "no usable python found — set HERMETIC_FAB_PYTHON, build" \
+    "pcb/worker/.venv, or put python3 on PATH (see this script's" \
+    "INTERPRETER CONTRACT header comment)"
+fi
+# Dependency probe: the resolved interpreter must actually carry the worker's
+# geometry dep, else every downstream failure would masquerade as a compile
+# problem. Named harness error instead.
+if ! "${VENV_PYTHON}" -c "import pyclipper" >/dev/null 2>&1; then
+  harness_fail "resolved interpreter ${VENV_PYTHON} cannot import pyclipper —" \
+    "install the worker deps for it, or point HERMETIC_FAB_PYTHON at one" \
+    "that has them"
 fi
 
 if ! command -v git >/dev/null 2>&1; then

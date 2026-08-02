@@ -60,6 +60,14 @@ from pathlib import Path
 
 import pytest
 
+# The script is bash; the Windows CI runner has no usable WSL distribution and
+# bash.exe there prints a WSL setup banner instead of running the script.
+# Platform-inapplicable, named — not a silent pass.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="hermetic-fab-check.sh is a bash script; Windows CI has no bash/WSL",
+)
+
 HERE = Path(__file__).resolve().parent  # pcb/worker/tests
 REPO_ROOT = HERE.parents[2]  # pcb/worker/tests -> pcb/worker -> pcb -> repo root
 SCRIPT = REPO_ROOT / "pcb" / "scripts" / "hermetic-fab-check.sh"
@@ -103,6 +111,11 @@ def tiny_board(tmp_path: Path) -> Path:
 def _run(args: list[str], env: dict | None = None) -> subprocess.CompletedProcess:
     import os
     full_env = dict(os.environ)
+    # CI has no pcb/worker/.venv (a gitignored local build artifact); the
+    # pytest interpreter running THIS test already carries the worker deps,
+    # so hand it to the script via its documented override. Locally this is
+    # the venv interpreter anyway, so behavior is identical.
+    full_env.setdefault("HERMETIC_FAB_PYTHON", sys.executable)
     if env:
         full_env.update(env)
     return subprocess.run(
