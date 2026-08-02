@@ -116,6 +116,58 @@ def _canon_layer(layer: Any) -> str:
     return _layers.canon_to_kicad(layer)
 
 
+class UnresolvableComponentLayer(ValueError):
+    """A board-source component whose copper SIDE cannot be resolved.
+
+    ADJUDICATED (epoch C, unit C2). The alternative — default a component with
+    no authored ``layer`` to "top" — is the exact class of defect this campaign
+    has spent two epochs removing: ``agent_router.layers.canon_to_kicad`` used to
+    return "F.Cu" for an empty/None layer and epoch 6 unit 3a deleted that
+    default *by name*, because "a silently defaulted layer name puts copper on
+    the wrong side of a board that then gets fabricated" (layers.py:145-152).
+    Re-introducing the same default one call frame upstream, inside the board
+    builder, would restore the defect with a longer stack trace.
+
+    So this builder REFUSES. Every pad of a component inherits the component's
+    side, so an unresolvable side is not a missing detail — it is the router not
+    knowing which physical copper layer an entire footprint's lands live on.
+
+    A ``ValueError`` subclass on purpose: :func:`board_to_router`'s documented
+    contract is "raises ``ValueError`` on a structurally unusable board", and
+    ``canon_to_kicad`` already raised a bare ``ValueError`` here, so every
+    existing caller and test that catches ``ValueError`` is unaffected. What is
+    new is the STRUCTURE — ``component_ref`` and ``layer`` are attributes, not
+    prose a caller has to regex out of a message that never named the component
+    at all.
+    """
+
+    def __init__(self, ref: Any, layer: Any, reason: str = ""):
+        self.component_ref = str(ref)
+        self.layer = layer
+        detail = f": {reason}" if reason else ""
+        super().__init__(
+            f"component {self.component_ref!r}: unresolvable copper layer "
+            f"{layer!r}{detail} — routing fails closed rather than place a "
+            f"whole footprint's lands on a defaulted side. Author an explicit "
+            f'component "layer" ("top"/"bottom", or a KiCad copper name).')
+
+
+def _component_layer(ref: Any, comp: dict) -> str:
+    """The KiCad copper layer a component's lands sit on, or fail closed.
+
+    The ONE place the legacy raw-dict builder resolves a component side. Absent,
+    empty and unrecognised all take the same exit — a missing key is not more
+    forgivable than a typo, because both leave the router guessing which side a
+    footprint's copper is on.
+    """
+    raw = comp.get("layer")
+    try:
+        return _canon_layer(raw)
+    except ValueError as exc:
+        reason = "no \"layer\" key" if "layer" not in comp else str(exc)
+        raise UnresolvableComponentLayer(ref, raw, reason) from exc
+
+
 def _rotate_offset(px: float, py: float, rotation_deg: float) -> tuple[float, float]:
     """Rotate a component-relative pin offset into board space.
 
@@ -190,9 +242,11 @@ def board_to_router(canonical_board: dict) -> Board:
     pad membership, and carries obstacles (mounting holes) + board size.
 
     Raises ``ValueError`` on a structurally unusable board (not a mapping / no
-    components). Unresolvable *net* pin refs are skipped silently — the
-    canonical validator (board_model.validate_board) owns that diagnostic;
-    unresolvable *hint* pin refs are surfaced as warnings by ``hints_to_router``.
+    components), and its named subclass :class:`UnresolvableComponentLayer` on a
+    component whose copper side cannot be resolved. Unresolvable *net* pin refs
+    are skipped silently — the canonical validator (board_model.validate_board)
+    owns that diagnostic; unresolvable *hint* pin refs are surfaced as warnings
+    by ``hints_to_router``.
     """
     if not isinstance(canonical_board, dict):
         raise ValueError("board must be a mapping")
@@ -211,7 +265,9 @@ def board_to_router(canonical_board: dict) -> Board:
         cx = _num(comp.get("x_mm"))
         cy = _num(comp.get("y_mm"))
         rot = _num(comp.get("rotation_deg"))
-        layer = _canon_layer(comp.get("layer"))
+        # Fail closed, BY NAME (see UnresolvableComponentLayer). Resolved here,
+        # before the pin loop, because every pad below inherits this one value.
+        layer = _component_layer(ref, comp)
 
         # Render-detail pad geometry (component "Extra" from YAML), matched by
         # pad number for size resolution. Absent for JSON-dict boards.
@@ -676,6 +732,250 @@ def resolved_board_existing_copper(
             layers=span))
 
     return segments, vias
+
+
+# ---------------------------------------------------------------------------
+# PINNED-CANDIDATE COPPER — the "treat the rest as FIXED" half of DCR finding 7
+# ---------------------------------------------------------------------------
+# WHAT WAS ALREADY SHIPPED, and therefore is NOT rebuilt here (measured at
+# minerva-plugins a978d06):
+#
+#   * ACCEPTED copper -> engine keepouts: ``resolved_board_existing_copper``
+#     above (T7, 019f70ebc9ed), wired at ``pcb_worker.methods._route``.
+#   * CANDIDATE dicts -> IR traces/vias: ``ir_candidates.build_overlay``
+#     (019f952b99f2). It is already fail-closed on every dimension (no guessed
+#     width, no guessed via size, no invented layer), already names the offending
+#     candidate (``UnmodelableCandidate``), and already returns a ResolvedBoard
+#     that is ``base + candidate`` copper rather than candidates alone.
+#
+# WHAT WAS MISSING is the composition of those two: a routing run could not see
+# PINNED draft copper at all. ``route()`` accepted no candidate parameter — only
+# ``draft_check`` and the geometric DRC did — so a run scoped to one task routed
+# as if every pinned candidate on the board were empty space, and could propose
+# copper straight through a route the user had already decided to keep. That is
+# the same invisible-copper failure T7 fixed for ACCEPTED copper, one lifecycle
+# state earlier.
+#
+# It is a composition and not a second projection on purpose: a private
+# candidate->keepout path here would be a second candidate LANGUAGE, and the two
+# would drift exactly the way ``_draft_check``'s coercion and the geometric one
+# drifted before ``ir_candidates`` was made their common owner.
+
+
+def existing_copper_with_pinned(
+    rb: ResolvedBoard,
+    pinned_candidates: Any = None,
+    *,
+    default_width_mm: float | None = None,
+    default_via_diameter_mm: float | None = None,
+    default_via_drill_mm: float | None = None,
+) -> tuple[list[ExistingSegment], list[ExistingVia]]:
+    """The board's fixed copper — ACCEPTED plus PINNED-candidate — for the grid.
+
+    Pinned candidates enter through the SAME projection as accepted copper, with
+    their own net name, so the engine treats them identically: other-net copper
+    is an obstacle marked at the run's keepout margin, same-net copper is already
+    connected and may be pathed along. That is the correct reading of a pin — a
+    pinned candidate is a decision the user has made and the run must not
+    relitigate, which is precisely what ``existing`` means to the engine.
+
+    FAIL-CLOSED, and deliberately fatal to the whole run rather than to the one
+    candidate: a pinned candidate that cannot be modeled is copper the grid would
+    not see, and a run over a partially-visible board can return a proposal that
+    shorts it. ``ir_candidates.build_overlay`` raises ``UnmodelableCandidate``
+    (an ``UnsupportedGeometry``), which the caller's existing
+    ``UnsupportedGeometry`` boundary already turns into a structured zero-route
+    reply naming the candidate.
+
+    ``pinned_candidates`` empty/None is the pre-existing behaviour exactly —
+    accepted copper only, no overlay built.
+    """
+    if not pinned_candidates:
+        return resolved_board_existing_copper(rb)
+    if not isinstance(pinned_candidates, list):
+        raise UnsupportedGeometry(
+            f"pinned_candidates must be a list of candidate mappings, got "
+            f"{type(pinned_candidates).__name__}")
+    # Imported here, not at module scope: ir_candidates pulls in drc_geometric,
+    # and this module is imported by the hint helpers on paths that need neither.
+    from . import ir_candidates
+
+    overlay = ir_candidates.build_overlay(
+        rb, pinned_candidates,
+        default_width_mm=default_width_mm,
+        default_via_diameter_mm=default_via_diameter_mm,
+        default_via_drill_mm=default_via_drill_mm)
+    return resolved_board_existing_copper(overlay.board)
+
+
+# ---------------------------------------------------------------------------
+# RUN SCOPE — the explicit task/span argument (the other half of finding 7)
+# ---------------------------------------------------------------------------
+# WHAT WAS ALREADY SHIPPED: a run scope EXISTS (019f80a80123). The engine takes
+# ``only_nets`` (agent_router/router.py::_scoped_nets) and honours the
+# None-vs-empty-set distinction, and ``pcb_worker.methods._route`` builds that
+# set. Nothing of that is rebuilt here.
+#
+# WHAT WAS MISSING: the set is INFERRED, and only from route-hint annotations —
+# ``methods._route`` computes it inside ``if envelopes:`` and leaves it ``None``
+# otherwise. So "route this ONE task and leave everything else alone" could not
+# be ASKED for: a caller with a workspace RouteTask in hand and no hint
+# annotation got a whole-board run. This turns the scope into a first-class
+# argument the caller states.
+#
+# SPAN SCOPING IS REFUSED, NOT APPROXIMATED (the load-bearing decision here).
+# A RouteTask may name ENDPOINTS — a sub-path of a multi-pad net. The vendored
+# engine cannot express that: ``_scoped_nets`` filters WHOLE nets out of the
+# ordered net list, and ``route_board`` then connects every pad of each net that
+# survives. Widening a 2-endpoint span on a 3-pad net to "route the whole net"
+# would silently return copper the caller did not ask for and did not see coming
+# — the identical surprise the run-scope work exists to remove. Narrowing the
+# engine to a pad SUBSET is an ``agent_router`` change, and agent_router is the
+# BASE package this module imports from; changing it is out of this unit's
+# fence. So a span is named and refused, and the refusal is the record of where
+# that gap lives.
+
+
+class UnsupportedRouteScope(ValueError):
+    """An explicit run scope this bridge will not silently reinterpret."""
+
+
+@dataclass(frozen=True)
+class RouteScope:
+    """A resolved run scope: which nets route, and what the caller was told.
+
+    ``nets`` is handed to the engine as ``only_nets``. An EMPTY frozenset is a
+    real answer meaning "scoped, and nothing was in scope" (routes nothing) —
+    never conflated with no scope at all, which is ``None`` from
+    :func:`parse_route_scope`.
+    """
+
+    nets: frozenset
+    task_ids: tuple
+    warnings: tuple = ()
+
+
+def _scope_task_nets(task: Any, ordinal: int, pads_by_net: dict) -> tuple:
+    """One scope task -> (task_id, net_name or None, warning or None)."""
+    if not isinstance(task, dict):
+        raise UnsupportedRouteScope(
+            f"scope.tasks[{ordinal}]: expected a mapping, got "
+            f"{type(task).__name__}")
+    task_id = str(task.get("task_id", "") or f"task:{ordinal}")
+    net = task.get("net")
+    if not isinstance(net, str) or not net:
+        raise UnsupportedRouteScope(
+            f"scope task {task_id!r}: no net named — a task's net is what the "
+            f"run is scoped to and there is nothing to infer it from")
+
+    endpoints = task.get("endpoints")
+    if endpoints is not None:
+        if not isinstance(endpoints, list):
+            raise UnsupportedRouteScope(
+                f"scope task {task_id!r}: endpoints must be a list of "
+                f'"Ref.Pad" strings, got {type(endpoints).__name__}')
+        named = {str(e) for e in endpoints}
+        on_net = pads_by_net.get(net)
+        if on_net is not None:
+            unknown = sorted(named - on_net)
+            if unknown:
+                raise UnsupportedRouteScope(
+                    f"scope task {task_id!r}: endpoint(s) {unknown} are not "
+                    f"pads of net {net!r} ({sorted(on_net)})")
+            if named and named != on_net:
+                raise UnsupportedRouteScope(
+                    f"scope task {task_id!r}: endpoints {sorted(named)} are a "
+                    f"SPAN of net {net!r}, which has pads {sorted(on_net)}. The "
+                    f"routing engine scopes by whole net only, so honouring "
+                    f"this would route the entire net and return copper between "
+                    f"pads the task never named. Refused rather than widened; "
+                    f"span-level routing needs agent_router support that does "
+                    f"not exist.")
+
+    if net not in pads_by_net:
+        # Same disposition the bus-net scope already uses: a net the board does
+        # not have is DROPPED from the scope with a warning, never ADDED to it.
+        return (task_id, None,
+                f"scope task {task_id!r} names net {net!r}, which this board "
+                f"does not have — dropped from the run scope")
+    return (task_id, net, None)
+
+
+def parse_route_scope(spec: Any, board: Board) -> Optional[RouteScope]:
+    """Resolve an explicit ``scope`` argument against the board being routed.
+
+    ``spec`` is ``None``/absent for an unscoped run (returns ``None`` — the
+    engine's "route everything", unchanged for every existing caller), or a
+    mapping::
+
+        {"tasks": [{"task_id": ..., "net": ..., "endpoints": ["U1.2", ...]}],
+         "nets":  ["SIG", ...]}
+
+    Both keys are optional and additive. ``nets`` is the plain form for a caller
+    with no workspace task in hand; ``tasks`` is the RouteTask form, and carries
+    the task ids back out so the reply can name what it routed.
+
+    Refuses (``UnsupportedRouteScope``) rather than reinterprets: a malformed
+    spec, a task with no net, an endpoint that is not on its net, and — the one
+    that matters — a task whose endpoints name a SPAN of a multi-pad net (see
+    the module note above).
+    """
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise UnsupportedRouteScope(
+            f"scope must be a mapping with \"tasks\" and/or \"nets\", got "
+            f"{type(spec).__name__}")
+    unknown_keys = sorted(set(spec) - {"tasks", "nets"})
+    if unknown_keys:
+        raise UnsupportedRouteScope(
+            f"scope carries unknown key(s) {unknown_keys}; a scope that is "
+            f"read only in part is a scope that silently widens")
+    tasks = spec.get("tasks")
+    nets_spec = spec.get("nets")
+    if tasks is None and nets_spec is None:
+        raise UnsupportedRouteScope(
+            "scope names neither \"tasks\" nor \"nets\"; an empty scope would "
+            "route nothing, which is a decision the caller must state")
+
+    pads_by_net = {name: {f"{p.component}.{p.number}" for p in net.pads}
+                   for name, net in board.nets.items()}
+
+    scoped: set = set()
+    task_ids: list = []
+    warnings: list = []
+
+    if tasks is not None:
+        if not isinstance(tasks, list):
+            raise UnsupportedRouteScope(
+                f"scope.tasks must be a list, got {type(tasks).__name__}")
+        for ordinal, task in enumerate(tasks):
+            task_id, net, warning = _scope_task_nets(task, ordinal, pads_by_net)
+            task_ids.append(task_id)
+            if warning:
+                warnings.append(warning)
+            if net is not None:
+                scoped.add(net)
+
+    if nets_spec is not None:
+        if not isinstance(nets_spec, list):
+            raise UnsupportedRouteScope(
+                f"scope.nets must be a list of net names, got "
+                f"{type(nets_spec).__name__}")
+        for ordinal, name in enumerate(nets_spec):
+            if not isinstance(name, str) or not name:
+                raise UnsupportedRouteScope(
+                    f"scope.nets[{ordinal}]: expected a non-empty net name, "
+                    f"got {name!r}")
+            if name in pads_by_net:
+                scoped.add(name)
+            else:
+                warnings.append(
+                    f"scope names net {name!r}, which this board does not have "
+                    f"— dropped from the run scope")
+
+    return RouteScope(nets=frozenset(scoped), task_ids=tuple(task_ids),
+                      warnings=tuple(warnings))
 
 
 def _split_pin_ref(ref: Any) -> tuple[Optional[str], str]:

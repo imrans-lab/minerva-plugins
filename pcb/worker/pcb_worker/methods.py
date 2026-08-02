@@ -1529,12 +1529,17 @@ def _route(params: dict) -> dict:
     # would have escaped the route error envelope entirely.
     try:
         board = route_bridge.resolved_board_to_router(compiled.board)
-        # The board's ALREADY-ACCEPTED copper (T7 019f70ebc9ed). Inside the SAME
-        # boundary as the other two projections, for the same reason they are:
-        # existing copper the grid cannot model must produce the identical
-        # structured zero-route reply, not escape as an unhandled exception.
+        # The board's FIXED copper: ALREADY-ACCEPTED (T7 019f70ebc9ed) plus any
+        # PINNED workspace candidate the caller named (DCR finding 7). Inside the
+        # SAME boundary as the other two projections, for the same reason they
+        # are: copper the grid cannot model must produce the identical structured
+        # zero-route reply, not escape as an unhandled exception. A pinned
+        # candidate is a decision the user already made, so the run routes AROUND
+        # it exactly as it routes around accepted copper — see
+        # route_bridge.existing_copper_with_pinned.
         existing_traces, existing_vias = \
-            route_bridge.resolved_board_existing_copper(compiled.board)
+            route_bridge.existing_copper_with_pinned(
+                compiled.board, params.get("pinned_candidates"))
         # It now also lives ON the Board (019f9bc3909c). Still passed explicitly
         # below — this path always did, correctly, and that is unchanged — but a
         # Board handed to the engine WITHOUT those options no longer silently
@@ -1562,6 +1567,25 @@ def _route(params: dict) -> dict:
     if not isinstance(envelopes, list):
         return {"ok": False, "error": {"kind": "parse",
                 "message": "route_hints must be a list of envelopes"}}
+    # EXPLICIT RUN SCOPE (DCR finding 7) — the caller STATES the scope instead of
+    # it being inferred from whatever hint annotations happen to exist. See
+    # route_bridge.parse_route_scope for the shape, and for why a SPAN is refused
+    # rather than widened to its whole net.
+    #
+    # Parsed HERE, against the INTACT board, and deliberately BEFORE
+    # materialize_detailed_hints below pops as-drawn nets out of `board.nets`. A
+    # scope naming a net an as-drawn hint had already consumed would otherwise be
+    # told that net "is not on this board", which is both false and the wrong
+    # diagnosis to hand a human. It is APPLIED further down, once the
+    # hint-inferred scope it has to be reconciled with exists.
+    try:
+        explicit_scope = route_bridge.parse_route_scope(
+            params.get("scope"), board)
+    except route_bridge.UnsupportedRouteScope as exc:
+        return {"ok": False, "error": {
+            "kind": "unsupported_scope", "message": str(exc),
+            "diagnostics": compile_warnings}}
+
     # Route-as-drawn (HITL-2): 'detailed' single-trace hints ARE the route.
     # Materialize them directly, consume their nets so the engine neither
     # re-routes nor duplicates them, and keep everything else on the
@@ -1598,6 +1622,29 @@ def _route(params: dict) -> dict:
                 "route_hints were supplied but none resolved to a net on this "
                 "board — nothing was routed (a hinted run is scoped to the "
                 "nets its hints name; see pcb/docs/routing.md, 'Run scope')"}]
+
+    # The explicit scope (parsed above, against the intact board) is APPLIED here.
+    if explicit_scope is not None:
+        # A hinted run ALSO carries a scope (above). Two scopes that disagree is
+        # the caller telling us two different things, and picking either one
+        # silently is the whole defect class this argument exists to close — so
+        # the disagreement is named. Intersecting would drop a hint the caller
+        # authored without saying so; unioning would route past the scope the
+        # caller just stated. Neither is safe to do quietly.
+        outside = sorted(n for n in (only_nets or set())
+                         if n not in explicit_scope.nets)
+        if outside:
+            return {"ok": False, "error": {"kind": "unsupported_scope", "message": (
+                f"route_hints resolve to net(s) {outside} that the explicit "
+                f"scope does not name ({sorted(explicit_scope.nets)}). The run "
+                f"has two scopes and they disagree; widening to the union would "
+                f"route past the scope you stated, narrowing to the "
+                f"intersection would drop a hint you authored. Name the same "
+                f"nets in both, or drop one."),
+                "diagnostics": compile_warnings}}
+        only_nets = set(explicit_scope.nets)
+        bridge_warnings = bridge_warnings + [
+            {"id": "", "message": w} for w in explicit_scope.warnings]
     # Captured BEFORE the hint merge below, because afterwards "trace_width" in
     # kw no longer says WHICH of the two supplied it — that distinction only
     # exists here, and is what turns _effective_routing_rules_detailed's generic
@@ -1751,6 +1798,12 @@ def _route(params: dict) -> dict:
         payload["warnings"] = bridge_warnings + compile_warnings
     if selected_hint_ids:
         payload["selected_hint_ids"] = selected_hint_ids
+    # Echoed so a task-form scope is distinguishable from a net-form one in the
+    # reply — the caller sent RouteTask ids, and a reply that drops them makes
+    # the two forms indistinguishable to the workspace that has to file the
+    # result back against a task.
+    if explicit_scope is not None and explicit_scope.task_ids:
+        payload["scope_task_ids"] = list(explicit_scope.task_ids)
 
     # PROVENANCE (this round; docs/routing.md "Provenance") — attached to every
     # route, including drawn/as_drawn ones merged in above, BEFORE the DRC

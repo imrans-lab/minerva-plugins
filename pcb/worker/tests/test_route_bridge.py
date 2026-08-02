@@ -102,6 +102,11 @@ def test_board_to_router_matches_godot_transform_simulation():
         b = route_bridge.board_to_router({
             "components": [{
                 "ref": "X", "x_mm": 3.0, "y_mm": 7.0, "rotation_deg": rot,
+                # Explicit, because the builder REFUSES a component with no
+                # resolvable side (test_board_to_router_refuses_a_layerless_
+                # component below). This fixture is about the rotation
+                # transform; the side is stated so it can be.
+                "layer": "top",
                 "pins": [{"number": "p", "x_mm": 1.5, "y_mm": -0.95,
                           "pad_width_mm": 1.0, "pad_height_mm": 1.0}],
             }],
@@ -165,7 +170,11 @@ def test_board_to_router_non_positive_or_nonfinite_drill_is_smd(bad_drill):
 
 def test_board_to_router_mounting_hole_obstacle():
     board = route_bridge.board_to_router({
+        # "layer" is explicit for the same reason as above — the component is
+        # incidental scenery for a mounting-hole assertion, but the builder has
+        # no side-defaulting mode to fall into.
         "components": [{"ref": "R1", "x_mm": 1, "y_mm": 1, "rotation_deg": 0,
+                        "layer": "top",
                         "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
                                   "pad_width_mm": 1.0, "pad_height_mm": 1.0}]}],
         "nets": [],
@@ -175,6 +184,77 @@ def test_board_to_router_mounting_hole_obstacle():
     obs = board.obstacles[0]
     assert obs.position == pytest.approx((5.0, 6.0))
     assert obs.radius == pytest.approx(1.6)
+
+
+# ---------------------------------------------------------------------------
+# The layerless-component REFUSAL (epoch C, unit C2).
+#
+# The two tests above were red for exactly this reason: their fixtures omitted
+# "layer", and route_bridge resolved it through agent_router.layers.canon_to_kicad,
+# which has raised on None since epoch 6 unit 3a deleted its "empty means F.Cu"
+# default. The adjudication is that the DELETED DEFAULT WAS RIGHT and the
+# fixtures were wrong — so the fixtures now state a side, and the builder refuses
+# by name instead of leaking a bare ValueError from two packages down that never
+# says which component is at fault.
+#
+# What is NOT acceptable, and is what these tests exist to prevent coming back:
+# a component with no authored side silently routing as if it were top-side. A
+# whole footprint's lands on the wrong copper layer is fabricable, wrong, and
+# invisible until the board comes back from the house.
+# ---------------------------------------------------------------------------
+
+
+def _layerless_board(layer_value=..., ref: str = "U7") -> dict:
+    """A one-component board whose "layer" is omitted (default) or set to ``layer_value``."""
+    comp = {"ref": ref, "x_mm": 1.0, "y_mm": 2.0, "rotation_deg": 0,
+            "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                      "pad_width_mm": 1.0, "pad_height_mm": 1.0}]}
+    if layer_value is not ...:
+        comp["layer"] = layer_value
+    return {"components": [comp], "nets": []}
+
+
+def test_board_to_router_refuses_a_layerless_component():
+    with pytest.raises(route_bridge.UnresolvableComponentLayer) as excinfo:
+        route_bridge.board_to_router(_layerless_board())
+
+    exc = excinfo.value
+    # STRUCTURED: the component ref is an attribute, not prose to regex out.
+    assert exc.component_ref == "U7"
+    assert exc.layer is None
+    # ...and it is in the message too, because that is what a human reads.
+    assert "U7" in str(exc)
+    # The message says what to do about it rather than only what went wrong.
+    assert "layer" in str(exc)
+
+
+@pytest.mark.parametrize("bad_layer", [None, "", "  ", "middle", "F.Silk", 3])
+def test_board_to_router_refuses_every_unresolvable_side(bad_layer):
+    """Absent, empty, blank, misspelled, non-copper and non-string all refuse.
+
+    A missing key is not more forgivable than a typo — both leave the router
+    guessing which side a footprint's copper is on."""
+    with pytest.raises(route_bridge.UnresolvableComponentLayer) as excinfo:
+        route_bridge.board_to_router(_layerless_board(bad_layer, ref="J9"))
+    assert excinfo.value.component_ref == "J9"
+
+
+def test_the_layerless_refusal_is_still_a_value_error():
+    """board_to_router's documented contract is "raises ValueError"; the named
+    subclass ADDS structure without moving that contract out from under any
+    existing caller (test_board_to_router_rejects_empty relies on it)."""
+    assert issubclass(route_bridge.UnresolvableComponentLayer, ValueError)
+    with pytest.raises(ValueError):
+        route_bridge.board_to_router(_layerless_board())
+
+
+def test_an_authored_side_is_honoured_not_merely_tolerated():
+    """The refusal must not be satisfiable by writing any layer at all: the
+    stated side has to actually reach the pad."""
+    for canon, kicad in (("top", "F.Cu"), ("bottom", "B.Cu"),
+                         ("F.Cu", "F.Cu"), ("B.Cu", "B.Cu")):
+        board = route_bridge.board_to_router(_layerless_board(canon))
+        assert board.get_pad("U7", "1").layer == kicad
 
 
 def test_board_to_router_rejects_empty():
