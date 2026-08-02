@@ -2,13 +2,12 @@ extends SceneTree
 ## The CANVAS bus tool (ToolMode.BUS, S3 picker + S4 armed tool) — campaign 2
 ## epoch C, unit 5, DCR 019fb572b888.
 ##
-## PARKED (docket regime): authored + parsed this epoch, NEVER EXECUTED until
-## the boundary — not in EXPECTED_SUITES, not globbed by run-gd-tests.sh
-## (pcb/tests/pending/ is a sibling of pcb/tests/gd/). See the C5 brief and
-## nudge c2-epochC "brief-review" for the parking-scheme verification.
+## UN-PARKED at the epoch-C boundary (Station 1, un-park + execute): moved
+## from pcb/tests/pending/ into pcb/tests/gd/ and added to EXPECTED_SUITES —
+## it now runs as part of the normal run-gd-tests.sh sweep.
 ##
-## Run (once promoted, or ad hoc via the parked-suite recipe):
-##   godot --headless --path src --script ../../minerva-plugins/pcb/tests/pending/test_bus_tool.gd
+## Run:
+##   godot --headless --path src --script ../../minerva-plugins/pcb/tests/gd/test_bus_tool.gd
 ##
 ## STYLE NOTE: this suite follows test_pcb_trace_tool.gd's LIGHT rig (a bare
 ## pcb_canvas.gd instance + a StubPadHost + direct calls into the tool's own

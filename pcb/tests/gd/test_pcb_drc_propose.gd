@@ -127,6 +127,25 @@ func _mount() -> bool:
 func _build_fixture_board(d) -> void:
 	d.board_width = 70.0
 	d.board_height = 80.0
+	# The worker's compile_board._build_design_rules fail-closed refuses a
+	# board whose design_rules block omits/nulls any of the four positive-
+	# number rules (design_rules.trace_width_mm/via_diameter_mm/via_drill_mm/
+	# clearance_mm) — "v1 refuses to invent trace/via/clearance" — rather than
+	# defaulting silently. This fixture's default (unset) design_rules = {}
+	# therefore made every real-worker compile fail with
+	# "design_rules.trace_width_mm must be a positive number; got None"
+	# (docket 019fc22284537bdfa9861c159bad76b1 defect 2), keeping the
+	# real-worker branch below unreachable. Fix is fixture-side: author real
+	# rules, matching the canonical values other worker fixtures use
+	# (pcb/worker/tests/test_ir_fab.py etc.) and the 0.25 width already
+	# authored on the EXIST trace + both route hints below, so nothing in this
+	# suite's geometry assumptions changes.
+	d.design_rules = {
+		"trace_width_mm": 0.25,
+		"clearance_mm": 0.2,
+		"via_diameter_mm": 0.8,
+		"via_drill_mm": 0.4,
+	}
 
 	var u1 = d.new_component()
 	u1.id = "U1"
@@ -157,6 +176,24 @@ func _build_fixture_board(d) -> void:
 
 	d.connect_pin_to_net("SIG2", "U3", "SIG2")
 	d.connect_pin_to_net("SIG2", "J3", "SIG2")
+
+	# EXIST is fixed pre-existing copper, not an auto-routable net — its trace
+	# must still name a net the board actually declares (compile_board.py:
+	# "trace 0: references unknown net 'EXIST'" otherwise, a real canonical-
+	# format constraint the router-only path never exercised), and that net
+	# must resolve to >=1 real placed pad (compile_board.py's _finalize_nets:
+	# "net 'EXIST' has no resolved placed pads" otherwise — an unpinned net is
+	# not a legal board any more than an untraced one is). One anchor
+	# component, pinned at the EXIST trace's own start point, satisfies both
+	# without breaking the fixture's actual invariant: board_to_router()'s
+	# "route every net with >=2 pads" heuristic only fires at 2, so a
+	# ONE-pad EXIST still never gets auto-rerouted (see the class doc above).
+	var exist_anchor = d.new_component()
+	exist_anchor.id = "EXIST_ANCHOR"
+	exist_anchor.position = Vector2(30.0, 5.0)
+	exist_anchor.pins = {"1": Vector2(0.0, 0.0)}
+	d.add_component(exist_anchor)
+	d.connect_pin_to_net("EXIST", "EXIST_ANCHOR", "1")
 
 	var exist_trace = d.new_trace()
 	exist_trace.net_name = "EXIST"
@@ -208,6 +245,82 @@ class FakeBrokerIpc:
 		return {"success": true, "result": worker_env}
 
 
+## The GD board model's component "footprint" field (pcb_data.gd's
+## to_board_dict()) is always the RENDER-ONLY FootprintType enum name
+## (RESISTOR/CUSTOM/MODULE/…) — there is no component API that can carry a
+## real KiCad library ref, and no fixture change alone can produce one.
+## pcb_worker's compile_board.resolve_footprint() requires an EXACT
+## pcb/library/footprints.lock.json key or refuses "footprint ref ... is not
+## in the seed library lockfile" (fail-closed, Round E cutover 019f783860c8 —
+## routing never approximates copper). TH_TestPoint is the lockfile's one
+## single-pad thru_hole part (pad "1" at local origin 0,0 — see
+## pcb/library/footprints/TestPoint.pretty/TH_TestPoint.kicad_mod) and is an
+## exact physical match for this fixture's components, which are all
+## single-pin stand-ins placed with a zero local pin offset. See docket
+## 019fc22284537bdfa9861c159bad76b1 (this rig-fix item) for the full chase.
+const _REAL_FOOTPRINT_REF := "TH_TestPoint"
+
+
+## Rewrites a WIRE COPY of the request so its components resolve against the
+## real worker's footprint library — never the request `raw_worker_envelope`
+## captured for any other purpose (params itself, and _params on the fake, are
+## left untouched, so an assertion on the ORIGINAL request shape is unaffected
+## by this real-worker-only patch).
+##
+## Renumbering is necessary, not just the footprint ref: compile_board.py's
+## _check_coincidence requires each authored pin's "number" to match a REAL
+## pad number on the (now TH_TestPoint) footprint — "1", not this fixture's
+## readability-motivated pin name ("SIG1"/"SIG2", chosen to equal the net
+## name). A net's own pin refs ("Ref.PinName") must point at that same
+## renumbered pin or compile_board's net-membership check fails closed too.
+## The mapping is DERIVED from each component's own authored pin (never
+## hardcoded "SIG1"->"1"), so this works unchanged if the fixture's pin names
+## ever do.
+func _with_resolvable_footprints(params: Dictionary) -> Dictionary:
+	var wire: Dictionary = params.duplicate(true)
+	var board: Dictionary = wire.get("board", {})
+	var renumber: Dictionary = {}  # "CompRef.OldPinName" -> "CompRef.1"
+	for c in (board.get("components", []) as Array):
+		if not (c is Dictionary):
+			continue
+		var comp: Dictionary = c
+		comp["footprint"] = _REAL_FOOTPRINT_REF
+		var ref := str(comp.get("ref", ""))
+		for p in (comp.get("pins", []) as Array):
+			if p is Dictionary:
+				var old_number := str((p as Dictionary).get("number", ""))
+				renumber["%s.%s" % [ref, old_number]] = "%s.1" % ref
+				(p as Dictionary)["number"] = "1"
+	for n in (board.get("nets", []) as Array):
+		if not (n is Dictionary):
+			continue
+		var pin_refs: Array = (n as Dictionary).get("pins", [])
+		for i in range(pin_refs.size()):
+			var old_ref := str(pin_refs[i])
+			if renumber.has(old_ref):
+				pin_refs[i] = renumber[old_ref]
+	# The route hints (params.route_hints, separate from params.board) name
+	# their endpoints the SAME "Ref.PinName" way — kind_payload.source_pins/
+	# dest_pins — and need the identical rename or the router logs "pin ...
+	# does not resolve to a pad on the board" and falls back to unhinted
+	# engine-guided routing (silently losing this suite's whole "detailed
+	# hint, pad-to-pad, identical geometry on either path" contract — see the
+	# class doc above).
+	for hint in (wire.get("route_hints", []) as Array):
+		if not (hint is Dictionary):
+			continue
+		var kp: Variant = (hint as Dictionary).get("kind_payload")
+		if not (kp is Dictionary):
+			continue
+		for key in ["source_pins", "dest_pins"]:
+			var pins: Array = (kp as Dictionary).get(key, [])
+			for i in range(pins.size()):
+				var old_ref := str(pins[i])
+				if renumber.has(old_ref):
+					pins[i] = renumber[old_ref]
+	return wire
+
+
 func raw_worker_envelope(params: Dictionary) -> Dictionary:
 	var binary_path := ProjectSettings.globalize_path(PLUGIN_ROOT + "/pcb-plugin")
 	var wrapper_path := ProjectSettings.globalize_path(PLUGIN_ROOT + "/scripts/e2e_route_stdio.py")
@@ -215,7 +328,7 @@ func raw_worker_envelope(params: Dictionary) -> Dictionary:
 		var req_uri := "user://drc_propose_route_request.json"
 		var f := FileAccess.open(req_uri, FileAccess.WRITE)
 		if f != null:
-			f.store_string(JSON.stringify(params))
+			f.store_string(JSON.stringify(_with_resolvable_footprints(params)))
 			f.close()
 			var req_abs := ProjectSettings.globalize_path(req_uri)
 			var output: Array = []
@@ -311,8 +424,13 @@ func _test_propose_flags_dirty_and_clean_routes() -> void:
 		printerr("SKIP-NOTE: real pcb-plugin binary unavailable — DRC assertions below " +
 			"require the real worker (the canned fallback carries no drc/drc_summary). " +
 			"Verifying graceful degradation only.")
-		check("no-DRC degrade: status label has no DRC suffix",
-			not panel._status_label.text.contains("DRC"),
+		# Checks the CHIPS, not the word "DRC": since the honest-label rename
+		# (019f958aa6db) no status text contains "DRC" at all, so the old
+		# spelling of this claim had become vacuously true. Both suffix
+		# builders emit " — <Scope>…", so their absence is the real degrade.
+		check("no-DRC degrade: status label carries neither DRC chip",
+			not panel._status_label.text.contains("— Connectivity")
+				and not panel._status_label.text.contains("— Geometric"),
 			"got '%s'" % panel._status_label.text)
 		panel.request.disconnect(fake.on_request)
 		fake.queue_free()
@@ -327,8 +445,22 @@ func _test_propose_flags_dirty_and_clean_routes() -> void:
 	check("drc_summary.violation_count >= 1", int(summary.get("violation_count", 0)) >= 1, str(summary))
 
 	# -- status label (deliverable 3) ------------------------------------------
-	check("status label reports a DRC violation count",
-		panel._status_label.text.findn("DRC:") != -1 and panel._status_label.text.findn("violation") != -1,
+	# THE LABEL IS "Connectivity:", NOT "DRC:" — and that is the shipped, correct
+	# name, not a cosmetic drift to chase. PCBPanel._connectivity_status_suffix
+	# reads drc_summary.scope (default "connectivity") and title-cases it
+	# precisely so this chip cannot imply a generic "DRC clean" when what ran was
+	# the connectivity/topology checker (pad centres + trace centrelines) and NOT
+	# geometric copper DRC — the honest-label ruling 019f958aa6db, landed in
+	# 32ff10a. The geometric half is a SEPARATE chip ("Geometric: N violations",
+	# _geometric_status_suffix). This assertion was authored against the
+	# pre-rename text and is updated to the shipped vocabulary; filed as
+	# 019fc342a660.
+	check("status label reports a CONNECTIVITY violation count (honest label 019f958aa6db)",
+		panel._status_label.text.findn("Connectivity:") != -1
+			and panel._status_label.text.findn("violation") != -1,
+		"got '%s'" % panel._status_label.text)
+	check("...and it does NOT use the misleading bare 'DRC:' prefix the rename removed",
+		panel._status_label.text.findn("DRC:") == -1,
 		"got '%s'" % panel._status_label.text)
 
 	# -- per-candidate drc (deliverable 2, S5/C4b moved off the annotation) -----
@@ -376,19 +508,22 @@ func _test_propose_flags_dirty_and_clean_routes() -> void:
 
 	# MF-1 (narrow re-review, 2026-08-02): the MCP annotations_list negative
 	# proof that used to live here ("no annotation carries kind_payload.drc
-	# post-S5") is DELETED, not just inverted — this whole branch sits after
-	# the _used_real_worker early-return above, and that branch is
-	# STRUCTURALLY unreachable in any environment today: two independent rig
-	# defects (e2e_route_stdio.py swallows the binary's host.notify line;
-	# the serialized board fails worker compile on a None
-	# design_rules.trace_width_mm) keep _used_real_worker false unconditionally
-	# — see docket 019fc22284537bdfa9861c159bad76b1 ("Workerless e2e rig
-	# defects"), filed, not fixed here (out of scope). An assertion that can
-	# never run is worse than none: it reads as coverage that does not exist.
-	# The equivalent proof now lives in the PARKED suite
-	# pcb/tests/pending/test_workspace_tools.gd (group 10d), which drives
-	# propose through a fixture RouterShim rather than the broken real-worker
-	# rig, so it actually executes once promoted at the epoch boundary.
+	# post-S5") is DELETED, not just inverted — it was written when this whole
+	# branch (after the _used_real_worker early-return above) was
+	# STRUCTURALLY unreachable in any environment: two independent rig defects
+	# (e2e_route_stdio.py swallowing the binary's host.notify line; the
+	# serialized board failing worker compile on a None
+	# design_rules.trace_width_mm because this suite's own fixture authored no
+	# design_rules block) kept _used_real_worker false unconditionally. Both
+	# are FIXED as of docket 019fc22284537bdfa9861c159bad76b1 ("Workerless e2e
+	# rig defects") — see _build_fixture_board's design_rules block and
+	# e2e_route_stdio.py's recv_id loop — so this branch now executes. The
+	# deleted assertion is NOT reinstated here (that call stands on its own;
+	# an assertion removed for being unreachable does not become owed just
+	# because reachability was restored). The equivalent proof still lives in
+	# pcb/tests/gd/test_workspace_tools.gd (group 10d, un-parked at the epoch-C
+	# boundary), which drives propose through a fixture RouterShim rather than
+	# this rig.
 
 	# -- WorkflowAnnotationList dock badge (deliverable 4, S5 moved pin) --------
 	# S5 (C4b): no proposal annotation exists to carry kind_payload.drc, so the

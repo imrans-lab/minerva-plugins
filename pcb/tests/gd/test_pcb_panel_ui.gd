@@ -45,6 +45,7 @@ func _init() -> void:
 	_test_content_changed_dirty_relay()
 	_test_annotation_host_registration()
 	_test_trace_context_menu()
+	_test_cutover_flip_on_boot()
 	await _test_reclick_disarm()
 	await _test_reclick_triple_agreement()
 	await _test_first_click_and_cross_tool_unchanged()
@@ -370,6 +371,125 @@ func check(description: String, condition: bool, detail: String = "") -> void:
 			printerr("  FAIL: %s — %s" % [description, detail])
 		else:
 			printerr("  FAIL: %s" % description)
+
+
+# ── Epoch-C boundary G1: the cutover flag has a PRODUCTION flip ───────────────
+#
+# THE DEFECT THIS PINS, stated as it was found: nothing in production ever called
+# RoutingCutover.set_workspace_authoritative. The canvas surface therefore stayed
+# annotation-authoritative forever, pcb_canvas._candidates_active() was
+# permanently false, and every candidate path it gates (candidate_draw_items,
+# _candidate_at through the _entity_at ladder, _run_candidate_verb,
+# _emit_candidate_teach_line) was dead. Combined with C4b retiring the proposal
+# ANNOTATION write-back, a Propose at that HEAD landed a real candidate in the
+# workspace and rendered NOTHING, anywhere — the routing HITL session could not
+# run at all.
+#
+# WHY THIS SUITE OWNS IT. The existing candidate coverage
+# (test_candidate_canvas.gd) proves the canvas draws once a cutover is flipped —
+# but it flips the coordinator ITSELF, in the fixture, so it passes identically
+# whether or not production ever flips one. Only a REAL BOOTED PANEL can tell
+# those two worlds apart, and the panel-boot suite is here. That is the whole
+# delta: no assertion below constructs a cutover or calls a flip.
+#
+# TWO LEGS, deliberately:
+#   1. the GATE — _candidates_active() is TRUE on a freshly booted panel's canvas
+#      (the flag itself, read where production reads it);
+#   2. the RENDER — a candidate ingested through THE PANEL'S OWN workspace
+#      produces non-empty candidate_draw_items(), i.e. the geometry actually
+#      reaches the paint path. Leg 1 alone would still pass if the wiring between
+#      panel and canvas were broken; leg 2 alone would not name the flag.
+#
+# The candidate is ingested through the panel's workspace rather than a
+# stand-in, so the object under assertion is the one _build_ui handed the canvas.
+func _test_cutover_flip_on_boot() -> void:
+	print("\n-- G1: booting the panel flips the canvas cutover, and ghosts render --")
+	var panel: Variant = _driver.load_panel(PANEL_PATH)
+
+	# BEFORE the mount hook: still all-annotation-authoritative. This is not a
+	# formality — it pins that the flip is the MOUNT's doing (paired with the
+	# workspace handoff) and not an unconditional _init side effect, which is
+	# exactly what keeps a bare, unmounted panel inert.
+	var cutover_pre: Variant = panel.get_routing_cutover()
+	check("G1: an UNMOUNTED panel is still all-annotation-authoritative",
+			cutover_pre != null and cutover_pre.all_annotation_authoritative())
+
+	panel._on_panel_loaded({"editor": FakeEditor.new(), "file_path": ""})
+	panel.get_data().from_board_dict(_canonical_board())
+
+	var canvas: Variant = panel._canvas
+	var cutover: Variant = panel.get_routing_cutover()
+	check("G1 fixture: the booted panel built a canvas", canvas != null)
+	check("G1 fixture: the booted panel exposes a cutover coordinator", cutover != null)
+	if canvas == null or cutover == null:
+		_driver.free_panel(panel)
+		return
+
+	# LEG 1 — THE GATE, read exactly where production reads it.
+	check("G1: the panel flipped the 'canvas' surface to workspace-authoritative",
+			cutover.is_workspace_authoritative("canvas"),
+			"authority=%s" % str(cutover.authority("canvas")))
+	check("G1: _candidates_active() is TRUE on a booted panel's canvas "
+			+ "(false here = a Propose renders nothing, anywhere)",
+			canvas._candidates_active())
+
+	# ONLY "canvas" is claimed. The other surfaces have no production reader, so
+	# flipping them would assert a migration nothing consults — pinned so a later
+	# blanket flip has to argue with a test rather than slip through.
+	check("G1: 'verbs' surface is NOT flipped (no production reader)",
+			not cutover.is_workspace_authoritative("verbs"))
+	check("G1: 'persistence' surface is NOT flipped (no production reader)",
+			not cutover.is_workspace_authoritative("persistence"))
+
+	# LEG 2 — THE RENDER, end to end through the panel's OWN workspace.
+	var ws: Variant = panel.get_routing_workspace()
+	check("G1 fixture: the booted panel exposes a routing workspace", ws != null)
+	if ws == null:
+		_driver.free_panel(panel)
+		return
+	check("G1 baseline: an empty workspace draws no ghosts",
+			canvas.candidate_draw_items().is_empty(),
+			"%d items" % canvas.candidate_draw_items().size())
+
+	var new_ids: Array = ws.ingest_routing_result(
+			{"routes": [{
+				"net": "N7",
+				"segments": [
+					{"start": [0.0, 0.0], "end": [10.0, 0.0], "layer": "F.Cu"},
+					{"start": [10.0, 0.0], "end": [10.0, 5.0], "layer": "B.Cu"},
+				],
+				"vias": [[10.0, 0.0]],
+			}]},
+			[{"id": "h7", "kind_payload": {"net_names": ["N7"], "width_mm": 0.3}}],
+			int(panel.get_data().board_revision))
+	check("G1 fixture: the panel's workspace really ingested a candidate",
+			new_ids.size() == 1 and not str(new_ids[0]).is_empty(), str(new_ids))
+
+	var items: Array = canvas.candidate_draw_items()
+	check("G1: the ingested candidate REACHES THE PAINT PATH "
+			+ "(candidate_draw_items non-empty)",
+			not items.is_empty(), "%d items" % items.size())
+	check("G1: 2 segments + 1 via, from the panel's own workspace",
+			items.size() == 3, "%d items" % items.size())
+	check("G1: every draw item belongs to the ingested candidate",
+			_all_items_for(items, str(new_ids[0])))
+
+	# And the rollback door still closes the surface on a live panel — the flip
+	# is a latch, not a one-way door (the cutover contract's own promise).
+	cutover.rollback("canvas")
+	check("G1: rollback('canvas') closes the surface again on a LIVE panel",
+			canvas.candidate_draw_items().is_empty(),
+			"%d items" % canvas.candidate_draw_items().size())
+
+	_driver.free_panel(panel)
+
+
+## True iff every draw item names `candidate_id` as its owner.
+func _all_items_for(items: Array, candidate_id: String) -> bool:
+	for it in items:
+		if str(it.get("candidate_id", "")) != candidate_id:
+			return false
+	return not items.is_empty()
 
 
 # ── Campaign 2 boundary: BT-63, BT-64, BT-65, BT-68 ───────────────────────────

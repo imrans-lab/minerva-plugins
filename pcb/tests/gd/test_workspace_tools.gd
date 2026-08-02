@@ -3,14 +3,11 @@ extends SceneTree
 ## contracts, the composite COMMIT transaction (INV-1), the stale-on-every-verb
 ## matrix (INV-2), the PATH-SCOPED via edit (INV-3), and the eraser adjudication.
 ##
-## ── PARKED (epoch C regime) ───────────────────────────────────────────────────
-## This file lives in pcb/tests/pending/, NOT pcb/tests/gd/. It is deliberately
-## invisible to the runner (run-gd-tests.sh globs pcb/tests/gd/test_*.gd) and to
-## the EXPECTED_SUITES manifest cross-check. It is AUTHORED for review this
-## epoch and EXECUTED at the epoch boundary, where it moves into gd/ and is added
-## to EXPECTED_SUITES in the same commit.
+## ── UN-PARKED at the epoch-C boundary (Station 1, un-park + execute) ───────────
+## Moved from pcb/tests/pending/ into pcb/tests/gd/ and added to EXPECTED_SUITES
+## — it now runs as part of the normal run-gd-tests.sh sweep.
 ##
-## Run (at the boundary, via a Minerva scaffold as the Godot host — NEVER the
+## Run (via a Minerva scaffold as the Godot host — NEVER the
 ## live checkout):
 ##   godot --headless --path <minerva-scaffold>/src \
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_workspace_tools.gd
@@ -620,12 +617,26 @@ func _run_inv2_stale_matrix() -> void:
 
 	# ── findings go with the verdict (stale findings can never render) ────────
 	var f := _stale_context()
+	# begin_check FIRST — this is not ceremony. apply_check_result's GUARD 3
+	# (pcb_routing_workspace.gd) discards, per candidate, any verdict for a
+	# candidate that is not in the CURRENT in-flight check: `_pending_check`
+	# holds the revision+prior snapshot begin_check took, and an empty snapshot
+	# means "nobody asked for this candidate", which is a reply that must never
+	# set a verdict or store a finding. Calling apply_check_result cold — as this
+	# group did when it was authored — therefore stores nothing BY DESIGN, and
+	# the drop assertion below would then pass vacuously (0 == 0). Drive the real
+	# two-step and echo the payload's own coherence tokens, the same pattern
+	# test_workspace_check.gd's _fixture/_matching_reply use.
+	var check_payload: Dictionary = f["ws"].begin_check([f["b"]])
+	check("begin_check enrolled the candidate under test",
+		(check_payload.get("candidates", []) as Array).size() == 1)
 	f["ws"].apply_check_result({
-		"board_token": f["ws"].board_token,
-		"workspace_generation": f["ws"].workspace_generation(),
+		"board_token": check_payload.get("board_token", ""),
+		"workspace_generation": check_payload.get("workspace_generation", -1),
 		"per_candidate": {f["b"]: "violating"},
 		"findings": [{"type": "crossing", "subjects": [{"candidate_id": f["b"], "segment_id": "seg_1"}]}],
 	})
+	check_eq("the verdict landed", str(f["ws"].get_candidate(f["b"]).validation), "violating")
 	check_eq("the finding was stored", (f["ws"].findings_for_candidate(f["b"]) as Array).size(), 1)
 	check("reject the other candidate", f["ws"].reject(f["a"]))
 	check_eq("staling DROPPED the findings (they name subjects that may be gone)",
@@ -1141,8 +1152,15 @@ func _run_removal_manifest_tools_absent() -> void:
 			names.append(str((t as Dictionary).get("name", "")))
 	check("minerva_pcb_proposal_accept absent from manifest", not ("minerva_pcb_proposal_accept" in names))
 	check("minerva_pcb_proposal_reject absent from manifest", not ("minerva_pcb_proposal_reject" in names))
-	check_eq("manifest tool count == 68 (70 - the 2 S5-removed proposal tools)",
-		names.size(), 68)
+	# 69 = 70 - the 2 S5-removed proposal tools + minerva_pcb_route_bus_direct.
+	# The pin was WRITTEN at 68 (post-C4b, when this suite was parked) and C5
+	# landed the bus tool afterwards, so the number was stale on the day this
+	# suite first EXECUTED — not a regression. Verified against manifest.json's
+	# own tail entry (`minerva_pcb_route_bus_direct`), which is the C5 addition.
+	check_eq("manifest tool count == 69 (70 - the 2 S5-removed proposal tools + the C5 bus tool)",
+		names.size(), 69)
+	check("the C5 bus tool is the addition this count accounts for",
+		"minerva_pcb_route_bus_direct" in names)
 
 	# Unreachable through the dispatcher too, not just missing from the list —
 	# a bare host with no panel is enough: handle() matches on tool_name alone
@@ -1282,6 +1300,8 @@ func _run_removal_no_drc_via_mcp_annotations() -> void:
 	AnnotationHostRegistry.register(_EDITOR_NAME, host)
 	var ann_tools = MCPAnnotationTools.new(null)
 	var list_result: Dictionary = ann_tools._annotations_list({"editor_name": _EDITOR_NAME})
+	check("annotations list is non-vacuous (the seeded hint annotation is present)",
+		(list_result.get("annotations", []) as Array).size() >= 1)
 	var any_drc_via_mcp := false
 	for a in (list_result.get("annotations", []) as Array):
 		if a is Dictionary and (a as Dictionary).get("kind_payload", {}).has("drc"):

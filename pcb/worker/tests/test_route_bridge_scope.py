@@ -470,19 +470,80 @@ def test_a_pinned_candidate_reads_the_same_wire_shape_the_draft_check_does():
             (seg["end"][0], seg["end"][1]), _WALL_A, _WALL_B)
 
 
-def test_a_pinned_candidate_with_no_width_fails_the_WHOLE_run_by_name():
-    """Fail-closed, and deliberately fatal to the run rather than to the one
-    candidate: dropping the offender and routing the survivors routes over
-    copper the grid never saw. The reply names the candidate so a human can fix
-    the right ghost."""
-    error = _err({"board": _unaccepted_walled_board(),
+_WIDTHLESS_WALL_SEGMENTS = [{"id": "s1", "layer": "top",
+                             "points": [[30.0, 5.0], [30.0, 35.0]]}]
+
+
+def test_a_pinned_candidate_with_no_width_falls_to_the_BOARDS_authored_default():
+    """THE CONTRACT MOVED AFTER THIS FILE WAS PARKED, and this pair of tests is
+    the corrected reading of it.
+
+    As authored (unit C2) this asserted that a widthless pinned candidate is
+    FATAL to the whole run. Chore ``019fc15cdf13`` then landed
+    ``methods._candidate_overlay_defaults``, which states ONE precedence for
+    ``build_overlay``'s fallback dimensions across both call sites (the propose/
+    route path and the geometric-DRC path, which had disagreed):
+
+      1. the entity's own declared dimensions;
+      2. the RUN's effective width — only for copper THIS run produced, which a
+         pinned candidate is not, so ``_route`` deliberately passes none;
+      3. the BOARD's own authored routing defaults (``design_rules``), i.e. what
+         the candidate would BECOME on acceptance;
+      4. fail closed.
+
+    So the run does NOT abort — and, the load-bearing half, the candidate is NOT
+    invisible either. THE HAZARD THIS FILE EXISTS TO KILL IS UNSEEN COPPER, so
+    that is what is asserted: the widthless ghost still marks the grid and SIG
+    still detours around it. A width read from the board's own design rules is a
+    real design value, not the guessed dimension the no-approximated-copper
+    ruling forbids.
+    """
+    result = _ok({"board": _unaccepted_walled_board(),
                   "scope": {"nets": ["SIG"]},
-                  "pinned_candidates": [_pinned_wall(segments=[{
-                      "id": "s1", "layer": "top",
-                      "points": [[30.0, 5.0], [30.0, 35.0]]}])]})
-    assert error["kind"] == "unsupported_geometry"
-    assert "cand-wall" in error["message"]
-    assert "width" in error["message"]
+                  "pinned_candidates": [
+                      _pinned_wall(segments=_WIDTHLESS_WALL_SEGMENTS)]})
+    sig = [r for r in result["routes"] if r["net"] == "SIG"][0]
+    assert sig["segments"], sig
+    for seg in sig["segments"]:
+        assert not drc_module._segments_intersect(
+            (seg["start"][0], seg["start"][1]),
+            (seg["end"][0], seg["end"][1]), _WALL_A, _WALL_B), (
+            f"proposed SIG segment {seg} crosses a pinned candidate that "
+            "declared no width — the board-default fallback left the ghost "
+            "invisible to the grid, which is the failure the fallback exists "
+            "to avoid")
+
+
+def test_the_fail_closed_FLOOR_still_exists_and_still_names_the_candidate():
+    """Step 4 of that precedence, pinned at the layer that owns it.
+
+    It cannot be reached THROUGH ``route``: ``compile_board`` refuses a board
+    whose ``design_rules.trace_width_mm`` is absent or non-positive
+    ("design_rules.trace_width_mm must be a positive number; got None"), so
+    every board that reaches ``existing_copper_with_pinned`` already carries a
+    positive authored default and step 3 always answers first. Asserting the
+    floor through the run would therefore be asserting an unreachable state.
+
+    It is asserted here instead, at ``existing_copper_with_pinned`` with no
+    default supplied — the exact call ``_route`` makes minus the defaults — so
+    the guarantee stays executable rather than becoming a comment. Both halves
+    of the original claim survive: the refusal is an ``UnsupportedGeometry`` (so
+    the caller's boundary turns it into a structured zero-route reply of kind
+    ``unsupported_geometry``), and it NAMES the candidate and the missing
+    dimension so a human can fix the right ghost.
+    """
+    from pcb_worker import compile_board
+
+    compiled = compile_board.compile_board(
+        _unaccepted_walled_board(),
+        requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
+    with pytest.raises(route_bridge.UnsupportedGeometry) as excinfo:
+        route_bridge.existing_copper_with_pinned(
+            compiled.board,
+            [_pinned_wall(segments=_WIDTHLESS_WALL_SEGMENTS)])
+    message = str(excinfo.value)
+    assert "cand-wall" in message
+    assert "width" in message
 
 
 def test_a_pinned_candidate_on_a_net_the_board_lacks_fails_closed():

@@ -51,18 +51,30 @@ def main() -> int:
         proc.stdin.write(json.dumps(msg) + "\n")
         proc.stdin.flush()
 
-    def recv():
-        line = proc.stdout.readline()
-        if not line:
-            raise RuntimeError("pcb-plugin closed stdout unexpectedly (stderr: %s)" % proc.stderr.read()[-4000:])
-        return json.loads(line)
+    def recv_id(want):
+        # The binary's stdout interleaves JSON-RPC replies with unsolicited
+        # host.notify frames (main.go emitHostNotify — e.g. worker startup
+        # progress), which carry a "method" but no "id" (see main.go
+        # hostNotify / notifyParams and main_test.go's readID, the Go side's
+        # own harness for this exact framing). A single readline() can land
+        # on one of those instead of the reply, desyncing every message after
+        # it. Loop until a frame's own "id" matches the request we're
+        # waiting on, discarding notification frames along the way.
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                raise RuntimeError("pcb-plugin closed stdout unexpectedly (stderr: %s)" % proc.stderr.read()[-4000:])
+            msg = json.loads(line)
+            if msg.get("id") == want:
+                return msg
+            # notification frame (no id, or an id from an unrelated message) — skip.
 
     try:
         send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-        recv()
+        recv_id(1)
         send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
               "params": {"name": "pcb.route", "arguments": request}})
-        reply = recv()
+        reply = recv_id(2)
         proc.stdin.close()
         proc.wait(timeout=15)
 

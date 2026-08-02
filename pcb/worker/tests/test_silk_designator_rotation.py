@@ -96,6 +96,30 @@ import pytest
 from pcb_worker import gerber
 from pcb_worker.footprint_def import ReferenceTextDefinition
 
+# THE SAME TOLERANCE AND THE SAME COMPARISON SHAPE AS ``test_silk_text._TOL``
+# (1e-9), and for the same stated reason: these coordinates come out of one
+# stroke-font render plus one affine placement, so the only difference a correct
+# implementation can show is IEEE-754 rounding mode — 1e-9 is ~7 orders of
+# magnitude looser than double epsilon at O(1)-O(10) magnitudes.
+#
+# THE TRAP THIS HELPER EXISTS TO AVOID, which is why the comparison is written
+# out per coordinate rather than as ``pts == pytest.approx([(x, y), ...])``:
+# ``pytest.approx`` does NOT recurse into a nested sequence. Given a list of
+# TUPLES it wraps each tuple in ``ApproxScalar``, whose ``__eq__`` returns False
+# for a non-numeric actual — so the tolerance is silently discarded and the
+# assertion degrades to EXACT tuple equality. That is what made this test red:
+# the values agreed to ~1e-15 (11.952380999999999 vs 11.952381) and the
+# `abs=1e-6` in the source was doing nothing at all. pytest even prints
+# "Mismatched elements: 0 / 2" while failing, which is the tell.
+_TOL = 1e-9
+
+
+def _assert_points(got, want) -> None:
+    assert len(got) == len(want), (got, want)
+    for (gx, gy), (wx, wy) in zip(got, want):
+        assert gx == pytest.approx(wx, abs=_TOL), (got, want)
+        assert gy == pytest.approx(wy, abs=_TOL), (got, want)
+
 
 def test_emit_refdes_honors_authored_reference_text_rotation():
     reference_text = ReferenceTextDefinition(
@@ -108,7 +132,7 @@ def test_emit_refdes_honors_authored_reference_text_rotation():
                   if width == gerber.SILK_TEXT_WIDTH_MM]
     assert len(text_polys) == 1, "the 'I' glyph is exactly one open stroke"
     pts = text_polys[0]
-    assert pts == pytest.approx([(11.952381, 4.0), (10.952381, 4.0)], abs=1e-6)
+    _assert_points(pts, [(11.952381, 4.0), (10.952381, 4.0)])
 
 
 def test_emit_refdes_falls_back_to_default_when_reference_text_is_absent():
@@ -130,4 +154,7 @@ def test_emit_refdes_falls_back_to_default_when_reference_text_is_absent():
     text_polys = [pts for (pts, width, closed) in g.silk_polys
                   if width == gerber.SILK_TEXT_WIDTH_MM]
     assert len(text_polys) == 1
-    assert text_polys[0] == pytest.approx(expected, abs=1e-6)
+    # Same helper as the rotated case above — this line carried the identical
+    # nested-approx trap and was passing only because both sides happened to be
+    # bit-identical, i.e. it was an exact comparison wearing a tolerance.
+    _assert_points(text_polys[0], expected)

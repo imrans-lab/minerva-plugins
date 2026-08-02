@@ -2,14 +2,11 @@ extends SceneTree
 ## C3 (S3) — CANVAS route-candidate rendering, hit-testing and selection-ladder
 ## integration (DCR 019f7095c395 Stage 3; GATE 019f70f76c2f INV-4).
 ##
-## ── PARKED (epoch C regime) ───────────────────────────────────────────────────
-## This file lives in pcb/tests/pending/, NOT pcb/tests/gd/. It is deliberately
-## invisible to the runner (run-gd-tests.sh globs pcb/tests/gd/test_*.gd) and to
-## the EXPECTED_SUITES manifest cross-check. It is AUTHORED for review this epoch
-## and EXECUTED at the epoch boundary, where it moves into gd/ and is added to
-## EXPECTED_SUITES in the same commit.
+## ── UN-PARKED at the epoch-C boundary (Station 1, un-park + execute) ───────────
+## Moved from pcb/tests/pending/ into pcb/tests/gd/ and added to EXPECTED_SUITES
+## — it now runs as part of the normal run-gd-tests.sh sweep.
 ##
-## Run (at the boundary, via a Minerva scaffold as the Godot host — NEVER the
+## Run (via a Minerva scaffold as the Godot host — NEVER the
 ## live checkout):
 ##   godot --headless --path <minerva-scaffold>/src \
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_candidate_canvas.gd
@@ -905,9 +902,59 @@ func _run_inv4_no_waypoints() -> void:
 	# _entity_anchor is the one candidate-path function that lives OUTSIDE the
 	# region (it is a checklist site, so it belongs with its siblings). Assert its
 	# candidate branch reads the same source rather than anything waypoint-shaped.
+	# Scoped to the FUNCTION BODY, not to a fixed character window. This read
+	# `src.substr(anchor_at, 1800)` when it was authored (C3); C4a/C5 added the
+	# KIND_VIA and KIND_CUTOUT branches with their own doc blocks ABOVE
+	# KIND_CANDIDATE, which pushed the candidate branch to offset ~2049 — past
+	# the window. The suite then reported an INV-4 violation that was not one:
+	# the branch still reads candidate_draw_items(), it had just moved. A window
+	# that has to be re-tuned every time a sibling branch gains a comment is a
+	# fixture that fails on edits it does not care about, so bound the slice by
+	# the next top-level `func` instead — the function's real extent.
 	var anchor_at := src.find("func _entity_anchor")
+	check("the anchor function exists", anchor_at >= 0)
+	if anchor_at < 0:
+		return
+	var anchor_end := src.find("\nfunc ", anchor_at + 1)
+	if anchor_end < 0:
+		anchor_end = src.length()
+	var anchor_body := src.substr(anchor_at, anchor_end - anchor_at)
 	check("the anchor's candidate branch reads candidate_draw_items()",
-		anchor_at >= 0 and src.substr(anchor_at, 1800).contains("candidate_draw_items()"))
+		anchor_body.contains("candidate_draw_items()"))
+	# Non-vacuous: the slice really is only _entity_anchor, not the rest of the
+	# file (which of course also mentions candidate_draw_items).
+	check("the slice is _entity_anchor's own body and stops at the next func",
+		anchor_body.contains("KIND_CANDIDATE") and anchor_body.length() < 4000)
+
+	# ── BEHAVIOURAL PIN (boundary polish, epoch C): the source scan above proves
+	# the branch READS candidate_draw_items(); it does not prove the branch
+	# tracks that source's own filtering. Drive it: hide segment 0's layer
+	# ("top", segment A (0,0)->(10,0)) via the layer filter, so the first item
+	# candidate_draw_items() still yields is segment B (bottom, (10,0)->(10,5))
+	# — _entity_anchor must follow, landing on segment B's first point rather
+	# than staying pinned to segment A's. Uses the same GATE fixture as group 2.
+	var acc10 := _armed_canvas()
+	var canvas10 = acc10[0]
+	var cid10: String = str(acc10[3])
+	canvas10.trace_layer_filter = "bottom"
+	check_eq("filtering out segment 0's layer leaves segment B as the first item",
+		_items_of_kind(canvas10.candidate_draw_items(), "segment")[0]["item_id"], "seg_2")
+	check_eq("_entity_anchor follows the filtered draw order onto segment B's first point",
+		canvas10._entity_anchor(canvas10.KIND_CANDIDATE, cid10), Vector2(10.0, 0.0))
+	canvas10.free()
+
+	# And with the cutover flag OFF (canvas surface annotation-authoritative,
+	# never flipped), candidate_draw_items() is empty and _entity_anchor must
+	# fall back to the documented ZERO rather than reading stale/model geometry.
+	var ws11 = PcbRoutingWorkspace.new()
+	var cutover11 = PcbRoutingCutover.new()
+	var cid11: String = str(ws11.ingest_routing_result(_multipad_reply(), [_hint("h7", "N7")], 4)[0])
+	var canvas11 = PcbCanvasScript.new()
+	canvas11.zoom = 10.0
+	canvas11.set_routing_workspace(ws11, cutover11)
+	check_eq("cutover flag off ⇒ _entity_anchor is the documented ZERO fallback",
+		canvas11._entity_anchor(canvas11.KIND_CANDIDATE, cid11), Vector2.ZERO)
+	canvas11.free()
 
 	# ── THE OTHER HALF OF THE FENCE: the hint kind refuses to serve a candidate ─
 	# The waypoint fork in pcb_route_hint_kind.gd stays, because HINTS legitimately

@@ -3,14 +3,11 @@ extends SceneTree
 ## RouteTask SPAN scope + open/closed lifecycle, and PER-CANDIDATE staleness on
 ## a board-revision mismatch.
 ##
-## ── PARKED (epoch C regime) ───────────────────────────────────────────────────
-## This file lives in pcb/tests/pending/, NOT pcb/tests/gd/. It is deliberately
-## invisible to the runner (run-gd-tests.sh globs pcb/tests/gd/test_*.gd) and to
-## the EXPECTED_SUITES manifest cross-check. It is AUTHORED for review this
-## epoch and EXECUTED at the epoch boundary, where it moves into gd/ and is added
-## to EXPECTED_SUITES in the same commit.
+## ── UN-PARKED at the epoch-C boundary (Station 1, un-park + execute) ───────────
+## Moved from pcb/tests/pending/ into pcb/tests/gd/ and added to EXPECTED_SUITES
+## — it now runs as part of the normal run-gd-tests.sh sweep.
 ##
-## Run (at the boundary, via a Minerva scaffold as the Godot host — NEVER the
+## Run (via a Minerva scaffold as the Godot host — NEVER the
 ## live checkout):
 ##   godot --headless --path <minerva-scaffold>/src \
 ##     --script res://../../minerva-plugins/pcb/tests/gd/test_routing_workspace_v2.gd

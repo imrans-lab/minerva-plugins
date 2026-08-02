@@ -21,14 +21,24 @@ extends SceneTree
 ## annotation_for_candidate/is_candidate_bridged/is_annotation_bridged, and
 ## _add_via's bridged-sync via sync_candidate_geometry) is UNTOUCHED and
 ## out of this round's fence (pcb_routing_workspace.gd) — dormant,
-## forward-compatible capability, not deleted. Groups 1/2/4/5 below now
-## hand-build the bridged starting state directly (ingest_record + correlate)
-## instead of routing it through the retired dual-write, so they keep proving
-## the model mechanics work; group 3's "accept" step and group 5's "undo after
-## accept" step move onto the NEW production path,
+## forward-compatible capability, not deleted. Group 3's "accept" step and
+## group 5's "undo after accept" step move onto the NEW production path,
 ## minerva_pcb_workspace_commit, which is what an agent/human actually calls
 ## now. is_annotation_superseded is ALSO retired (nothing supersedes a hint
 ## anymore) — the two assertions that exercised it are removed, not ported.
+##
+## BOUNDARY POLISH (epoch C, oracle-integrity F2 — correlate() has zero
+## production callers): groups 1 and 2 hand-built the bridged state via
+## ingest_record + correlate() only to re-assert geometry test_workspace_ingest.gd
+## already pins directly (group 1) or to replay two primitives glued together
+## only by test code (group 2) — both retired; see the comments at their old
+## positions below for the full disposition. Group 4 is KEPT as dormant-
+## capability coverage of _add_via's bridged sync — it still exercises real,
+## compiling, forward-compatible code, just not a reachable production path
+## today. Group 5 no longer calls correlate() at all: it never read the
+## correlated annotation id, so its setup was rebuilt (_committed_candidate_context)
+## to mint only the candidate + source-hint state the group's assertions
+## actually use.
 ##
 ## MANDATORY fixtures (the via bugs all hid behind 2-pin single-path fixtures):
 ##   * a multi-pad (3-pin) net whose route is TWO DISCONNECTED copper paths + a
@@ -48,8 +58,6 @@ var _fail := 0
 
 func _init() -> void:
 	print("=== Shadow Parity Bridge (T2.3) Tests ===\n")
-	_run_ingest_correlation()
-	_run_reject_bridge()
 	_run_accept_bridge_stable_ids()
 	_run_add_via_bridge()
 	_run_undo_after_commit()
@@ -165,75 +173,71 @@ func _bridged_context() -> Dictionary:
 	}
 
 
-# ── 1. one ingest → identical geometry + bidirectional correlation ────────────
+## Boot a real PCBPanel + host and mint a workspace candidate carrying a real
+## source-hint attribution — WITHOUT the bridge/correlate() machinery
+## _bridged_context() builds. Group 5 (undo-after-commit) never reads ann_id
+## or any correlation lookup; it only needs a candidate whose source_hint_ids
+## resolves to a real hint so minerva_pcb_workspace_commit has a lifecycle to
+## close. Routing that through correlate() (boundary polish, epoch C: dropped
+## per oracle-integrity F2, correlate() has zero production callers) only
+## obscured which state the group's assertions actually depend on — this
+## builds exactly that state directly. Returns a context dict with the
+## driver, panel, host, workspace, the source hint id, and the candidate id.
+func _committed_candidate_context() -> Dictionary:
+	var driver = preload("res://test/helpers/plugin_panel_driver.gd").new()
+	var panel = driver.load_panel(PCB_PANEL_SCRIPT_PATH)
+	var host = panel.get_annotation_host()
+	host.set_panel(panel)
+	var ws = panel.get_routing_workspace()
 
-func _run_ingest_correlation() -> void:
-	print("-- 1. one ingest -> identical geometry + bidirectional correlation --")
-	var ctx := _bridged_context()
-	var host = ctx["host"]
-	var ws = ctx["ws"]
-	var ann_id: String = ctx["ann_id"]
-	var cand_id: String = ctx["cand_id"]
+	var seeded := _seed_source_hint(host)
+	var hint_id: String = seeded[0]
+	var source_hints: Array = seeded[1]
 
-	check("proposal annotation authored", not ann_id.is_empty())
-	check("candidate created", not cand_id.is_empty())
+	var records: Array = PanelTools._normalize_route_records(_multipad_reply([hint_id]), source_hints)
+	check("fixture normalizes to exactly one record", records.size() == 1)
+	var rec: Dictionary = records[0]
+	var cand_id := str(ws.ingest_record(rec, int(panel.get_data().board_revision)))
 
-	# Bidirectional correlation.
-	check_eq("candidate_for_annotation(ann) -> cand", ws.candidate_for_annotation(ann_id), cand_id)
-	check_eq("annotation_for_candidate(cand) -> ann", ws.annotation_for_candidate(cand_id), ann_id)
-	check("is_candidate_bridged", ws.is_candidate_bridged(cand_id))
-	check("is_annotation_bridged", ws.is_annotation_bridged(ann_id))
-
-	# Identical geometry: candidate vs the annotation projection's kind_payload.
-	var proposal: Dictionary = host.get_by_id(ann_id)
-	var kp: Dictionary = proposal.get("kind_payload", {})
-	var cand = ws.get_candidate(cand_id)
-	check_eq("segment count identical", cand.segments.size(), (kp.get("segments", []) as Array).size())
-	check_eq("via count identical", cand.vias.size(), (kp.get("vias", []) as Array).size())
-	check_eq("candidate has 3 segments (INV-3, not merged)", cand.segments.size(), 3)
-	check_eq("candidate has 1 via", cand.vias.size(), 1)
-	# Geometry parity on the disconnected standalone segment (seg 2).
-	var raw_seg2: Dictionary = (kp.get("segments", [])[2]) as Dictionary
-	var cand_seg2_start: Vector2 = cand.segments[2].get("points")[0]
-	check_eq("seg2 start x parity", cand_seg2_start.x, float((raw_seg2.get("start") as Array)[0]))
-	check_eq("seg2 start y parity", cand_seg2_start.y, float((raw_seg2.get("start") as Array)[1]))
-	var via_pos: Vector2 = cand.vias[0].get("position")
-	check_eq("via position parity", via_pos, Vector2(5.0, 0.0))
-
-	ctx["driver"].free_panel(ctx["panel"])
+	return {
+		"driver": driver, "panel": panel, "host": host, "ws": ws,
+		"hint_id": hint_id, "cand_id": cand_id,
+	}
 
 
-# ── 2. reject-via-bridge: candidate leaves live set + hint un-supersedes ───────
+# ── 1. RETIRED (boundary polish, epoch C) ──────────────────────────────────────
+#
+# _run_ingest_correlation used to prove two things: (a) raw ingest geometry
+# (segment count/layers/disconnection/via position) and (b) the bidirectional
+# correlate() bridge (candidate_for_annotation / annotation_for_candidate /
+# is_candidate_bridged / is_annotation_bridged). Half (b) is the dormant
+# correlation machinery named in oracle-integrity F2 (correlate() has ZERO
+# production callers — grep --include=*.gd, excluding tests) and is dropped
+# here rather than kept as coverage nothing production can construct. Half
+# (a) is not unique: test_workspace_ingest.gd::_run_ingest_geometry drives
+# the IDENTICAL fixture (same net "N1", same three segments, same via at
+# (5,0)) straight through PcbRoutingWorkspace.ingest_routing_result and
+# already pins segment count == 3, per-segment canonical layers, the seg-2
+# disconnection (INV-3), via position, and via layer span. Nothing survives
+# rewriting here that test_workspace_ingest.gd does not already assert more
+# directly (no panel, no hand-built annotation) — so the group is folded
+# into this comment rather than kept as a weaker duplicate. See
+# pcb/tests/gd/test_workspace_ingest.gd:122 for the live proof.
 
-func _run_reject_bridge() -> void:
-	print("-- 2. reject-via-bridge: candidate leaves live set + hint un-supersedes --")
-	var ctx := _bridged_context()
-	var host = ctx["host"]
-	var ws = ctx["ws"]
-	var ann_id: String = ctx["ann_id"]
-	var cand_id: String = ctx["cand_id"]
-	var hint_id: String = ctx["hint_id"]
 
-	# Pre-reject: candidate live.
-	check("candidate live before reject", cand_id in ws.live_candidate_ids())
-
-	# S5: the retired _proposal_reject did exactly these two calls internally
-	# (remove the annotation, then reject the correlated candidate) — hand-run
-	# them directly since the tool body is gone. is_annotation_superseded is
-	# ALSO retired (see the class doc) — the pre/post supersession assertions
-	# it used to make are removed, not ported.
-	check("proposal annotation removed", host.remove_annotation(ann_id))
-	check("candidate reject succeeds", ws.reject(cand_id))
-
-	# Post-reject: candidate rejected (out of live set), the SEPARATE source
-	# hint (not the proposal) is untouched — reject never touches annotations
-	# it doesn't itself remove.
-	check_eq("candidate disposition == rejected", ws.get_candidate(cand_id).disposition, "rejected")
-	check("candidate NOT in live set after reject", not (cand_id in ws.live_candidate_ids()))
-	check("proposal annotation gone", host.get_by_id(ann_id).is_empty())
-	check("source hint untouched by reject", not host.get_by_id(hint_id).is_empty())
-
-	ctx["driver"].free_panel(ctx["panel"])
+# ── 2. RETIRED (boundary polish, epoch C) ──────────────────────────────────────
+#
+# _run_reject_bridge hand-ran the two calls the retired _proposal_reject tool
+# used to make internally (host.remove_annotation(ann_id) then
+# ws.reject(cand_id)) — its own doc comment said as much: "hand-run them
+# directly since the tool body is gone." With S5's dual-write removed,
+# nothing in production wires those two primitives together anymore, so the
+# group was two independently-correct calls glued only by test code, not a
+# proof of any production seam. Retired rather than kept as a test asserting
+# its own hand-authored sequence. host.remove_annotation and
+# PcbRoutingWorkspace.reject remain covered individually by their owning
+# suites (annotation lifecycle tests, test_routing_workspace_v2.gd's
+# disposition-transition matrix).
 
 
 # ── 3. commit-via-bridge: committed + stable trace/via ids survive reload ──────
@@ -299,7 +303,18 @@ func _run_accept_bridge_stable_ids() -> void:
 	ctx["driver"].free_panel(panel)
 
 
-# ── 4. add-via on a bridged candidate: candidate + annotation both updated ─────
+# ── 4. DORMANT-CAPABILITY COVERAGE: _add_via's bridged sync ────────────────────
+#
+# Per oracle-integrity F2, correlate() (and everything downstream of it —
+# is_candidate_bridged / annotation_for_candidate / the bridged-sync branch at
+# panel_tools.gd:1377-1383) has ZERO production callers today: S5 retired the
+# only path that ever CONSTRUCTED a correlated pair. This group is KEPT, not
+# because production can reach it now, but because the bridged-sync code
+# itself (PanelTools._add_via re-deriving BOTH the workspace candidate and the
+# correlated annotation's kind_payload on a route-through) still exists,
+# compiles, and is forward-compatible — a future caller of correlate() would
+# inherit this behaviour, and this is the only suite that exercises it. Treat
+# it as coverage of dormant capability, not of a reachable production path.
 
 func _run_add_via_bridge() -> void:
 	print("-- 4. add-via on a bridged candidate: route-through updates BOTH stores --")
@@ -336,7 +351,7 @@ func _run_add_via_bridge() -> void:
 
 func _run_undo_after_commit() -> void:
 	print("-- 5. undo after commit: both stores restored, vias NOT orphaned (GATE INV-1) --")
-	var ctx := _bridged_context()
+	var ctx := _committed_candidate_context()
 	var host = ctx["host"]
 	var ws = ctx["ws"]
 	var panel = ctx["panel"]

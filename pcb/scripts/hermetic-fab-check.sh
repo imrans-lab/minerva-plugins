@@ -149,11 +149,11 @@ BASE_NAME="hermetic"
 # the worktree existing yet, and must run its pre-flight checks before any
 # worktree/venv wiring happens). DRIFT GUARD: this exact literal
 # (`GERBER_SUFFIXES=(...)` on one line) is read back and compared against
-# fab_capability.EMITTED_GERBER_SUFFIXES by a PARKED pin,
-# pcb/worker/tests/pending_hermetic_check.py::
+# fab_capability.EMITTED_GERBER_SUFFIXES by a pin,
+# pcb/worker/tests/test_hermetic_check.py::
 # test_script_gerber_suffix_list_matches_fab_capability_authority — a 10th
 # emitted layer added to fab_capability.py without updating this line fails
-# THAT pin at the epoch boundary, not silently here.
+# THAT pin, not silently here.
 GERBER_SUFFIXES=(F_Cu B_Cu F_Mask B_Mask F_SilkS B_SilkS Edge_Cuts F_Paste B_Paste)
 DRILL_SUFFIXES=(PTH NPTH)
 
@@ -386,7 +386,7 @@ log "run 2/2 -> ${OUT2}"
 run_compile "${OUT2}"
 
 # TEST-ONLY SEAM, unset by default and never set by a real invocation of this
-# script. Its sole purpose is letting pcb/worker/tests/pending_hermetic_check.py
+# script. Its sole purpose is letting pcb/worker/tests/test_hermetic_check.py
 # drive the "first divergent file is named correctly" pin via a real subprocess
 # call — the production compile path is deterministic BY DESIGN (that is the
 # thing this whole script exists to prove), so there is no honest way to
