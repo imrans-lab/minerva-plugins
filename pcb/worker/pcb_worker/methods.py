@@ -317,7 +317,7 @@ def _drc(params: dict) -> dict:
 
 
 def _drc_geometric(params: dict) -> dict:
-    """Geometric copper DRC over the ResolvedBoard IR (GC1-GC6): reads REAL copper
+    """Geometric copper DRC over the ResolvedBoard IR (GC1-GC7): reads REAL copper
     and hole geometry, fail-closed, and NEVER emits a false ``clean``. This is the
     geometric counterpart to :func:`_drc` (the connectivity/centerline checker,
     which cannot verify a clearance).

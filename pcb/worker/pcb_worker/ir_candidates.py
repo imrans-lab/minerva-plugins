@@ -415,7 +415,7 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
 def _finding_entity_ids(finding: dict) -> list:
     """Every IR entity a geometric finding names, in a stable order.
 
-    Per-entity findings (GC1/GC3/GC4/GC5) carry a single ``entity_id``; the
+    Per-entity findings (GC1/GC3/GC4/GC5/GC7) carry a single ``entity_id``; the
     pairwise ones (GC2/GC6) carry ``"<lo>|<hi>"`` plus a ``participants`` /
     ``entities`` list. Both are read so attribution does not depend on which rule
     produced the finding."""
