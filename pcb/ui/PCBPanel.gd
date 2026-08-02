@@ -560,6 +560,7 @@ func _build_ui() -> void:
 	_canvas.zone_tool_message.connect(_show_transient_status)
 	_canvas.trace_tool_message.connect(_show_transient_status)
 	_canvas.cutout_tool_message.connect(_show_transient_status)
+	_canvas.bus_tool_message.connect(_show_transient_status)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
@@ -907,6 +908,17 @@ func _build_sidebar() -> VBoxContainer:
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.CUTOUT, "Cutout",
 		"Draw a board opening (click corners, Enter to close)", "cutout_24.png")
 
+	# Bus tool (campaign 2 epoch C, unit 5, DCR 019fb572b888 S3+S4). Same
+	# section and same reason as Pour/Keepout/Trace/Cutout above: it authors
+	# board ENTITIES (N real Trace entities, one undo step). No sidebar
+	# picker: unlike Pour's net picker, the net LIST is authored by clicking
+	# pads/traces on the canvas itself (the S3 picker), not a widget — see
+	# pcb_canvas.gd's Bus Authoring region. No icon asset exists yet, so this
+	# is a text button (_add_tool_button's own fallback contract) until one
+	# is added, same as Cutout was at launch.
+	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
+		"Draw a parallel bus (click pads/traces to pick nets, Enter to draw the spine)", "bus_24.png")
+
 	# Eraser (item 019fb934827776) + Delete/trash-can (item 019fb92f8b83) live
 	# HERE, not in the Select section above (cold-review N3) — the section
 	# comment's own taxonomy draws the line at "the Select tools above ...
@@ -977,8 +989,16 @@ func _build_sidebar() -> VBoxContainer:
 
 	# Route-flow toolbar cluster (WC-3, contract §5): a TRUE toggle per route
 	# author tool, same idiom as the pin inspector button above. Only
-	# single-trace this round; WC-4 adds a "Bus" button beside it into the
-	# same _route_flow_buttons table (mutual exclusion is already generic).
+	# single-trace lives here today (mutual exclusion via _route_flow_buttons
+	# is already generic, so a future route-HINT tool can still join it).
+	# STALE FORWARD-REFERENCE, CORRECTED (C5, campaign 2 epoch C unit 5, DCR
+	# 019fb572b888): this comment used to promise a "Bus" button landing HERE,
+	# in _route_flow_buttons. The bus tool that shipped is a DIRECT-copper
+	# author (ToolMode.BUS, real Trace entities, no router involved) — the
+	# same altitude as Pour/Keepout/Trace/Cutout, not the Proposals/route-hint
+	# family this cluster is — so it is a Draw-flow radio button in
+	# _tool_buttons (see _add_tool_button(draw_flow, ToolMode.BUS, "Bus", ...)
+	# below), not a member of this table.
 	var trace_btn := Button.new()
 	trace_btn.name = "SingleTraceButton"
 	var trace_icon := _load_icon("trace_24.png")
@@ -2747,6 +2767,11 @@ func _sync_draw_arm_ui(mode: int) -> void:
 	# width to pick (see pcb_data.gd's Cutout Management doc): is_pour_tool/
 	# is_zone_tool/is_trace_tool all correctly evaluate false for it already,
 	# with no widget-visibility line to add.
+	# BUS (campaign 2 epoch C, unit 5) arms none of these either, same reason:
+	# its net LIST is picked by clicking pads/traces on the canvas (S3), not a
+	# sidebar widget, and its per-net widths auto-derive (pcb_canvas.gd's
+	# _bus_net_width) rather than reading the trace-width box. is_pour_tool/
+	# is_zone_tool/is_trace_tool all correctly evaluate false for it already.
 	var is_trace_tool: bool = mode == _PcbCanvasScript.ToolMode.TRACE
 
 	if _trace_width_spin != null:
@@ -3400,6 +3425,7 @@ const _MODE_HINTS := {
 	8: "Click a pad to start, click waypoints, click a pad to finish",   # TRACE
 	9: "Click an entity to delete it (Esc to disarm)",                   # ERASER
 	10: "Click each corner, Enter/dbl-click to close (no net needed)",  # CUTOUT
+	11: "Click pads/traces to pick nets (2+), Enter to draw the spine, then click vertices and Enter/dbl-click to commit",  # BUS
 }
 const _ROUTE_FLOW_LABELS := {
 	"single_trace": "Single Trace",
@@ -3418,13 +3444,14 @@ func _update_status() -> void:
 		return
 	var sel: Array = _canvas.get_selected_components()
 	# Indexed by ToolMode: NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN,
-	# ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT. BUG FIX: this array used to
-	# stop at 9 entries (through TRACE) while ToolMode.ERASER = 9 — tm < size()
-	# was false for the eraser, so it silently got no mode tag at all. ERASER is
-	# entry 9; CUTOUT (campaign 2 epoch B, unit 3) is APPENDED as entry 10 —
-	# ToolMode.CUTOUT is the enum's new last member, so this stays correct
+	# ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT, BUS. BUG FIX: this array
+	# used to stop at 9 entries (through TRACE) while ToolMode.ERASER = 9 —
+	# tm < size() was false for the eraser, so it silently got no mode tag at
+	# all. ERASER is entry 9; CUTOUT (campaign 2 epoch B, unit 3) is entry 10;
+	# BUS (campaign 2 epoch C, unit 5) is APPENDED as entry 11 —
+	# ToolMode.BUS is the enum's new last member, so this stays correct
 	# WITHOUT renumbering anything above it (see the enum's own append-only doc).
-	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout"]
+	var mode_names := ["", "Select", "Move", "Rotate", "Pan", "Inspect Pin", "Pour", "Keepout", "Trace", "Eraser", "Cutout", "Bus"]
 	var mode_txt := ""
 	var armed_hint := ""
 	if _active_route_flow_kind != "":

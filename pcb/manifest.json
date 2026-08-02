@@ -1001,6 +1001,37 @@
         },
         "required": ["editor_name"]
       }
+    },
+    {
+      "name": "minerva_pcb_route_bus_direct",
+      "description": "Draw a parallel bus of real copper directly (campaign 2 epoch C unit 5, DCR 019fb572b888) — the MCP parity tool for the canvas Bus tool, calling the SAME validation path and the SAME single-journal-step commit. Takes an ORDERED list of already-declared net names (order is preserved verbatim — never re-sorted, which is what lets a human pick 'the I2S trio' in a specific order and get one net per track in that order) and a spine polyline; emits one parallel Trace per net, offset from the spine at clearance-or-better pitch (each net's width auto-derives from its widest EXISTING trace, else the board default, unless width_override is given), mitered through bends so pitch stays constant. Needs 2+ nets and a 2+ point spine after duplicate points are dropped. REFUSES (never commits self-overlapping copper) when any spine segment is shorter than the widest per-net offset — the inner track would fold back on itself; the error names the offending segment and offset. All N traces land in ONE undoable history step: Ctrl+Z (or PCBData.undo) removes every trace this call created. Returns {trace_ids, nets, widths, layer, undo_note} or a named error. Example call: {\"editor_name\": \"PCB1\", \"nets\": [\"I2S_BCLK\", \"I2S_LRCLK\", \"I2S_DATA\"], \"points\": [{\"x_mm\": 10, \"y_mm\": 10}, {\"x_mm\": 30, \"y_mm\": 10}, {\"x_mm\": 30, \"y_mm\": 30}], \"layer\": \"top\"}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "nets": {
+            "type": "array",
+            "description": "Declared net names, in the ORDER tracks should be assigned (never re-sorted). At least 2 required.",
+            "items": {"type": "string"}
+          },
+          "points": {
+            "type": "array",
+            "description": "Bus spine points in board mm, in order. At least 2 distinct points required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          },
+          "layer": {"type": "string", "description": "Canonical copper layer ('top' / 'in1'..'in30' / 'bottom') every track lands on. Required unless the board declares exactly one copper layer."},
+          "width_override": {"type": "number", "description": "Uniform trace width in mm for every net (optional). Omit/0 to auto-derive each net's width from its widest existing trace, else the board default."}
+        },
+        "required": ["editor_name", "nets", "points"]
+      }
     }
   ],
   "skills": [

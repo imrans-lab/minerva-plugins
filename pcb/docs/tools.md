@@ -630,6 +630,51 @@ scoped by the candidate's **source hint ids** and is refused (`no_source_hints`)
 when it has none, and pinned candidates are not yet sent to the router as
 keep-outs on this path.
 
+## Bus tool (`minerva_pcb_route_bus_direct`, campaign 2 epoch C unit 5, DCR `019fb572b888` S3+S4)
+
+MCP parity for the canvas **Bus** tool — a two-phase gesture (pick an ORDERED
+net list, then draw one spine polyline) that emits N real parallel Trace
+entities, mitered through bends so the pitch between tracks stays constant.
+It authors copper directly, the same altitude as Draw ▸ Trace — it does not
+touch the router or the routing workspace.
+
+**Order is the caller's order**, always. `pcb_bus_geometry.gd`'s
+`cumulative_offsets` deliberately does NOT re-sort nets by any geometric
+property (unlike the router's `route_bus`, which re-sorts by destination-side
+perpendicular to minimise crossings) — the bus tool's whole premise is that a
+human (or an agent) picks "the I2S trio" in a specific order and gets one net
+per track in that order. Reversing the net list mirrors which physical side
+each track lands on; it is not a bug.
+
+**One call, one implementation shared with the gesture.** `panel_tools.gd`'s
+`bus_plan` (pure: per-net width resolution → `PCBData.design_rule_clearance()`
+→ `pcb_bus_geometry.pitch_between` via `cumulative_offsets` → `offset_polyline`
+per net → the inner-fold guard) and `bus_commit_plan` (mutating: N
+`create_trace_entity` calls + one `save_to_history`) are called by BOTH the
+canvas tool's commit path and this MCP tool — not two independently
+maintained copies of the same math.
+
+**Per-net width**, absent `width_override`: the widest EXISTING trace already
+on that net, else the board's own `design_rules.trace_width_mm` default (same
+rule `authored_trace_width()` gives a fresh trace). `width_override`, when
+given, replaces every net's width uniformly.
+
+**The INNER-FOLD GUARD** (`pcb_bus_geometry.gd:78-82`'s documented gap,
+assigned to this tool layer): a segment shorter than the widest `|offset|` in
+the bus would make the inner offset polyline fold back on itself — copper
+crossing itself. Refused, never silently accepted, naming the offending
+segment (by endpoint index) and the offset that tripped it. The canvas
+preview shows the same refusal live, before Enter is ever pressed (tinted
+spine + the reason appended to the on-canvas label).
+
+**One undo step for the whole bus.** Every net's trace is created before the
+single `save_to_history` call, so `Ctrl+Z` (or `PCBData.undo()`) removes all
+N traces together — never a partial bus.
+
+`layer` is required unless the board declares exactly one copper layer (there
+is no toolbar layer filter to fall back on from an MCP call, unlike the
+canvas gesture's `trace_author_layer()`).
+
 ## Worker (already live — credited, not re-created)
 
 | Tool | Worker method | Purpose |
@@ -706,6 +751,22 @@ toolbar's selected copper layer (or the hardcoded `TRACE_DEFAULT_LAYER`, the
 top copper layer, when the filter is "All"). Note this is the OPPOSITE
 default from Draw ▸ Pour above (bottom) — leaving the filter on "All" and
 drawing both puts them on different layers with no warning.
+
+**Draw ▸ Bus** — draws N parallel traces at once (campaign 2 epoch C unit 5,
+DCR `019fb572b888`). Two phases in one tool: **PICKING** — click a pad or a
+trace to add that net to an ORDERED list (click an already-listed net again
+to remove it; 2+ needed); **DRAWING** — press Enter to freeze the layer and
+start the spine, then click each vertex the same way Draw ▸ Trace does
+(double-click/Enter commits, Esc/right-click cancels). While drawing, N ghost
+offset tracks preview live, coloured by net, alongside the raw spine — that
+preview IS what commits, mitered through bends at clearance-or-better pitch.
+Esc/right-click is a TWO-STEP ladder: the first press cancels an in-progress
+spine back to PICKING (net list kept); a second press then clears the net
+list. Refuses to commit (spine tinted red, reason shown) when any spine
+segment is shorter than the widest track offset — that segment's inner track
+would fold back on itself. All N traces land in ONE undo step. See the "Bus
+tool" section above for `minerva_pcb_route_bus_direct`, the MCP parity tool
+calling the exact same commit path.
 
 **Eraser** — click an entity to delete it: one click, one undo step. Clicking
 empty space does nothing and leaves the tool armed. Esc or switching tools

@@ -36,6 +36,21 @@ const PcbLayerStack := preload("model/pcb_layer_stack.gd")
 ## dynamically at every draw; and the two helpers are pure decoding of a zone
 ## dict, which belongs with the model that defines the dict's shape.
 const PCBDataScript := preload("model/pcb_data.gd")
+## Bus tool (S3+S4, docket 019fb572b888): the pure mitered-offset/pitch module
+## (S1+S2, already shipped and pinned by test_pcb_bus_geometry.gd — 83 checks,
+## a standing pin this unit consumes and never edits). Zero imports itself, so
+## preloading it here adds no further dependency weight.
+const BusGeom := preload("model/pcb_bus_geometry.gd")
+## The MCP tool surface (panel_tools.gd) is preloaded HERE too, for the bus
+## tool only: bus_plan()/bus_commit_plan() (its static funcs) are the ONE
+## shared implementation of "resolve per-net widths, compute offsets, run the
+## inner-fold guard, create the traces, one save_to_history" — both
+## _commit_bus below and minerva_pcb_route_bus_direct call the SAME two
+## functions, so "the gesture and the tool agree on the same input" is true by
+## construction rather than by two hand-synchronised copies. This is a NEW
+## dependency edge (canvas -> panel_tools); the reverse edge does not exist
+## (panel_tools.gd never references pcb_canvas.gd), so it introduces no cycle.
+const _PanelToolsScript := preload("panel_tools.gd")
 
 ## Pad `type` values whose barrel goes THROUGH the board (plated and unplated).
 ## The one list: it gates the drill-hole render in _draw_component_pads AND the
@@ -340,7 +355,22 @@ var _space_pan_armed: bool = false
 ## enum's raw int, so inserting anywhere but the end silently mislabels every
 ## tool after it (PCBPanel.gd's own status-table comment records a prior bug of
 ## exactly this class).
-enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT }
+## BUS (campaign 2 epoch C, unit 5 — DCR 019fb572b888 S3+S4) turns the pure
+## offset/pitch geometry (pcb_bus_geometry.gd, S1+S2) into copper. TWO PHASES
+## under ONE ToolMode, not two modes — see the "Bus Authoring" region below for
+## the full grammar:
+##   PICKING (the resting state on arming) — click a pad or a trace to add
+##     that pad/trace's net to an ORDERED list (T11: the order is the picker's
+##     order, never re-sorted); click an already-listed net again to remove
+##     it. Enter with 2+ nets picked starts the DRAWING phase.
+##   DRAWING — the SAME click-per-point family TRACE uses: click places a
+##     spine vertex, Enter/double-click commits, Esc/right-click cancels the
+##     spine (back to PICKING, net list kept — a second Esc/right-click then
+##     clears the net list too; the ladder set_tool_mode's own doc names).
+## APPENDED AT THE END, same append-only rule as CUTOUT's own note above —
+## PCBPanel.gd's raw-int status tables (_MODE_HINTS, _update_status's
+## mode_names) both gain an entry for it.
+enum ToolMode { NONE, SELECT, TRANSLATE, ROTATE, PAN, INSPECT_PIN, ZONE_POUR, ZONE_KEEPOUT, TRACE, ERASER, CUTOUT, BUS }
 var tool_mode: ToolMode = ToolMode.NONE
 signal tool_mode_changed(mode: ToolMode)
 ## Transient user-facing feedback from the zone tools ("pick a net", "needs 3
@@ -360,6 +390,10 @@ signal trace_tool_message(text: String)
 ## component_lock_changed: one channel per tool, all routed to the panel's
 ## single transient-status sink.
 signal cutout_tool_message(text: String)
+## The bus tool's twin of the above ("Bus: [...] — pick at least 1 more net",
+## "Added bus: 3 traces on top", the inner-fold refusal) — its own channel,
+## same reason as the three above.
+signal bus_tool_message(text: String)
 ## The context menu's "Set trace width…" item asking the PANEL to reveal and focus
 ## its existing width SpinBox (B1u5, owner comment 962: the numeric editor already
 ## existed and was undiscoverable). A SIGNAL rather than a canvas-side dialog
@@ -555,6 +589,59 @@ var _trace_has_preview: bool = false
 ## polyline reads as drawn and the rubber band reads as proposed.
 const TRACE_PREVIEW_RUBBER_ALPHA := 0.45
 const TRACE_PREVIEW_VERTEX_RADIUS_PX := 3.0
+
+## ── Bus authoring (campaign 2 epoch C, unit 5 — DCR 019fb572b888 S3+S4) ───────
+## PICKING state: nets picked so far, in CLICK ORDER (T11 — this order is what
+## pcb_bus_geometry.cumulative_offsets assigns track position by; it is never
+## re-sorted). _bus_net_refs is the parallel "picked from" ref (a pad ref like
+## "U1.3" or "trace <id>") for the teach line only — nothing reads it for
+## geometry. Both empty ⇔ nothing picked yet.
+var _bus_nets: Array[String] = []
+var _bus_net_refs: Array[String] = []
+## DRAWING state. _bus_drawing is what actually distinguishes the two phases:
+## _bus_spine_points is empty both before drawing starts AND for one instant
+## after Enter starts it (before the first vertex lands), so the points array
+## alone cannot tell PICKING from "just started drawing".
+var _bus_drawing: bool = false
+## Vertices placed so far, in board mm. Meaningful only while _bus_drawing.
+var _bus_spine_points: PackedVector2Array = PackedVector2Array()
+## Live rubber-band vertex (the cursor), only meaningful while _bus_drawing.
+var _bus_preview: Vector2 = Vector2.ZERO
+var _bus_has_preview: bool = false
+## The copper layer every trace in this bus lands on. Frozen at the moment
+## DRAWING starts (_start_bus_draw), the same "arm once, hold for the whole
+## draw" rule _trace_layer freezes under — the preview is drawn in that
+## layer's colour at the real per-net widths, so a layer-filter change
+## mid-draw must not silently commit different copper from what is on screen.
+var _bus_layer: String = ""
+## PREVIEW-FRAME MEMO (cold review N4). _draw_bus_preview calls
+## panel_tools.bus_plan on every redraw while drawing, and mouse motion queues
+## one every tick (_handle_mouse_motion's BUS branch). bus_plan's per-net
+## width resolution is O(nets × board traces) (bus_net_width walks
+## get_traces_for_net for each net) — cheap for a handful of nets/traces, but
+## nets and _bus_layer are FROZEN for the whole DRAWING phase (_start_bus_draw)
+## and the board's own trace list cannot change mid-draw (nothing commits
+## until Enter/double-click), so only the SPINE actually varies frame to
+## frame. Recomputing the full plan — width lookup included — on every motion
+## tick is pure waste past the first frame at an unchanged spine. Keyed on
+## exactly what bus_plan's result depends on; _draw_bus_preview skips the call
+## entirely when the key matches. Cleared on _reset_bus_tool so a stale cache
+## is never read into a new arming.
+var _bus_plan_cache_key: Array = []
+var _bus_plan_cache: Dictionary = {}
+## Alpha for the N ghost offset polylines shown while drawing — the same
+## "not committed yet" value TRACE_PREVIEW_RUBBER_ALPHA and CANDIDATE_GHOST_ALPHA
+## already use, reused rather than re-chosen, so a bus ghost, a trace rubber
+## band and a route candidate all read as "proposed" the same way.
+const BUS_GHOST_ALPHA := 0.45
+## The raw spine's own rubber-band colour — pale, so the N coloured/net ghost
+## polylines it centres stay the visually dominant thing on screen.
+const BUS_SPINE_PREVIEW_COLOR := Color(0.85, 0.85, 0.85, 1.0)
+## The spine's colour when the CURRENT geometry would trip the inner-fold
+## guard (panel_tools.bus_plan's own refusal — see _draw_bus_preview) — shown
+## live while drawing, not only after a failed commit, so "never commit
+## self-overlapping copper" is visible before the user ever presses Enter.
+const BUS_REFUSAL_COLOR := Color(1.0, 0.35, 0.25, 1.0)
 
 ## Colors
 var board_color: Color = Color(0.15, 0.25, 0.15, 1.0)
@@ -1123,6 +1210,16 @@ func _draw() -> void:
 	# drawing right now.
 	if tool_mode == ToolMode.TRACE:
 		_draw_trace_preview()
+
+	# The bus tool's preview sits with the trace preview, at the SAME depth —
+	# it is TOOL PREVIEW geometry (docket 019fb572b888 S4), not a workspace
+	# candidate, even though it renders N ghost polylines the way
+	# _draw_route_candidates does one. The distinction that matters is WHERE
+	# in this stack it sits: ABOVE _draw_route_candidates (nothing may cover
+	# what the user's hand is doing right now — see that call's own comment)
+	# rather than gated with it.
+	if tool_mode == ToolMode.BUS:
+		_draw_bus_preview()
 
 	if show_ratsnest:
 		_draw_ratsnest()
@@ -2290,6 +2387,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				_handle_cutout_click(world_pos, event.double_click)
 				return
 
+			# Bus tool (campaign 2 epoch C, unit 5): PICKING clicks add/remove a
+			# net; once DRAWING it is the same click-per-point family as the
+			# tools above. Owns the click outright in BOTH phases.
+			if tool_mode == ToolMode.BUS:
+				_handle_bus_click(world_pos, event.double_click)
+				return
+
 			# Eraser tool (item 019fb934827776): owns the click outright, exactly
 			# like the three tools above — no select/drag/box-select fallthrough
 			# while it is armed.
@@ -2472,6 +2576,9 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			if tool_mode == ToolMode.CUTOUT and not _cutout_points.is_empty():
 				_cancel_cutout_draw(true)
 				return
+			if tool_mode == ToolMode.BUS and (_bus_drawing or not _bus_nets.is_empty()):
+				_cancel_bus_step(true)
+				return
 			# THE ONE RIGHT-PRESS PATH (B1u5). Every right-click that is not
 			# cancelling a draw in progress arms a pan AND arms the menu; which of
 			# the two happens is decided at release, by distance alone.
@@ -2581,6 +2688,17 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if not _cutout_points.is_empty():
 			_cutout_preview = _author_point(world_pos)
 			_cutout_has_preview = true
+			queue_redraw()
+	elif tool_mode == ToolMode.BUS:
+		# Same "the tool owns the surface" rule. Only DRAWING rubber-bands (a
+		# spine segment to the cursor); PICKING has no line to draw yet — each
+		# pick is a discrete click, not a polyline in progress.
+		if not hovered_component.is_empty():
+			hovered_component = ""
+			queue_redraw()
+		if _bus_drawing and not _bus_spine_points.is_empty():
+			_bus_preview = _author_point(world_pos)
+			_bus_has_preview = true
 			queue_redraw()
 	else:
 		var new_hover: String = _component_at(world_pos)
@@ -2720,6 +2838,15 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# above (this is the same click-per-point family).
 			elif tool_mode == ToolMode.CUTOUT:
 				_commit_cutout()
+			# Bus tool: Enter is the PHASE TRANSITION (PICKING -> DRAWING, needs
+			# 2+ nets picked) while picking, and the commit while drawing — the
+			# same "Enter closes/advances" idiom every draw tool on this canvas
+			# uses, just spanning two phases instead of one.
+			elif tool_mode == ToolMode.BUS:
+				if _bus_drawing:
+					_commit_bus()
+				else:
+					_start_bus_draw()
 		KEY_ESCAPE:
 			# Escape disarms a pending edge insertion whatever else it goes on to
 			# cancel (cold-review F1): Escape is advertised as the cancel for this
@@ -2744,6 +2871,17 @@ func _handle_key_input(event: InputEventKey) -> void:
 				return
 			if tool_mode == ToolMode.CUTOUT and not _cutout_points.is_empty():
 				_cancel_cutout_draw(true)
+				return
+			# Bus tool's TWO-STEP Esc ladder (docket 019fb572b888 S4): a spine in
+			# progress is the innermost gesture, so it is what the first Esc
+			# cancels — back to PICKING, net list kept, exactly like the
+			# right-click branch above. Only once nothing is drawing does a
+			# second Esc reach the net list itself. Both branches return, same
+			# as every other tool's Esc handling in this match — falling
+			# through to _clear_selection_all() below is reserved for "nothing
+			# to cancel at this level".
+			if tool_mode == ToolMode.BUS and (_bus_drawing or not _bus_nets.is_empty()):
+				_cancel_bus_step(true)
 				return
 			if tool_mode == ToolMode.INSPECT_PIN:
 				_exit_inspect_pin_mode()
@@ -4023,10 +4161,16 @@ func _cutout_visible() -> bool:
 ## true for it — zone vertex handles on a SELECTED zone would draw, hit-resolve
 ## and steal the click (placing a zone vertex instead of a cutout one) while
 ## the Cutout tool was armed.
+## BUS (campaign 2 epoch C, unit 5) is listed for the IDENTICAL reason —
+## exactly the B4-U3/F1 class the CUTOUT note above records: it owns the click
+## outright in BOTH its phases (see _handle_mouse_button's BUS branch), and
+## without this exclusion a zone vertex handle would draw (and, had the click
+## reached this far, hit-resolve) UNDER an armed bus tool, advertising a drag
+## the click ladder's early return would never let happen.
 func _zone_vertex_edit_active() -> bool:
 	if tool_mode == ToolMode.INSPECT_PIN or tool_mode == ToolMode.TRACE \
 			or tool_mode == ToolMode.ERASER or tool_mode == ToolMode.PAN \
-			or tool_mode == ToolMode.CUTOUT:
+			or tool_mode == ToolMode.CUTOUT or tool_mode == ToolMode.BUS:
 		return false
 	return not _is_zone_tool()
 
@@ -4586,6 +4730,7 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 		var leaving_zone_tool := _is_zone_tool()
 		var leaving_trace_tool := tool_mode == ToolMode.TRACE
 		var leaving_cutout_tool := tool_mode == ToolMode.CUTOUT
+		var leaving_bus_tool := tool_mode == ToolMode.BUS
 		# Leaving Select ends any annotation gesture in flight (B1u3) — the
 		# universal Select is disarmed by the panel on this same transition, so
 		# the release would arrive with nothing to receive it.
@@ -4598,6 +4743,15 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 			_cancel_trace_draw(announce_cancel)
 		if leaving_cutout_tool:
 			_cancel_cutout_draw(announce_cancel)
+		if leaving_bus_tool:
+			# Leaving the tool ENTIRELY discards BOTH halves of its state
+			# (picks AND any in-progress spine) in one go — unlike the Esc
+			# ladder's incremental peel (_cancel_bus_step), which exists so a
+			# user mid-draw can back off one level without losing the net
+			# order they already picked. A plain tool switch abandons all of
+			# it, the same "switching modes clears in-progress state" rule
+			# TRACE/CUTOUT/zone already follow.
+			_reset_bus_tool(announce_cancel)
 		queue_redraw()
 
 #endregion
@@ -5396,6 +5550,279 @@ func _draw_trace_preview() -> void:
 		label += "  ·  %d pts" % _trace_points.size()
 		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+
+#endregion
+
+
+#region Bus Authoring (campaign 2 epoch C, unit 5 — DCR 019fb572b888 S3+S4)
+
+## Gesture, in two phases (S3 then S4):
+##   PICKING --click a pad/trace-->     add that net to the ordered list
+##   PICKING --click an ALREADY-LISTED net's pad/trace--> remove it
+##   PICKING --Enter (2+ nets)-->       start DRAWING, freezing the layer
+##   PICKING --Enter (< 2 nets)-->      refused (transient message, stays armed)
+##   DRAWING --left-click-->            place a spine vertex
+##   DRAWING --double-click/Enter-->    commit (needs >=2 spine points; see
+##                                      the INNER-FOLD GUARD below)
+##   DRAWING --Esc/right-click-->       cancel the SPINE ONLY, back to PICKING
+##                                      with the net list kept (announced)
+##   PICKING --Esc/right-click-->       (nothing drawing) clear the net list
+##                                      (announced) — the ladder's second step
+##   --tool switch-->                   cancel EVERYTHING, silently unless the
+##                                      switch IS a re-click disarm (see
+##                                      set_tool_mode's announce_cancel)
+##
+## This tool AUTHORS N BOARD ENTITIES (real Trace entities, same as Draw ▸
+## Trace) in ONE undo step — see _commit_bus. It is the direct-authoring
+## sibling of the router's route_bus(), not a UI on top of it: the router is
+## never called (see pcb_bus_geometry.gd's own "why not reuse route_bus" note).
+##
+## THE GEOMETRY PIPELINE (bus_plan/bus_commit_plan, on panel_tools.gd — see the
+## preload note at the top of this file) is the ONE implementation shared with
+## minerva_pcb_route_bus_direct: per-net width resolution -> board clearance ->
+## pitch_between (via BusGeom.cumulative_offsets) -> BusGeom.offset_polyline
+## per net -> the INNER-FOLD GUARD (pcb_bus_geometry.gd:78-82's documented
+## gap, assigned to this tool layer) -> N create_trace_entity calls -> ONE
+## save_to_history. Both the live preview below and the eventual commit call
+## bus_plan with the SAME inputs, so what is on screen when Enter is pressed
+## is what commits, or refuses for the reason shown.
+
+
+## Resolve a click to a net, trying a PAD first (reuses the trace tool's own
+## lookup — same source of truth, same net-inheritance rule) then a TRACE
+## (data.get_trace's net_name). {} on a miss.
+func _bus_net_at(world_pos: Vector2) -> Dictionary:
+	var pad_hit := _trace_pad_at(world_pos)
+	if not pad_hit.is_empty():
+		return {"net": str(pad_hit.get("net", "")), "ref": str(pad_hit.get("ref", ""))}
+	if data == null:
+		return {}
+	var trace_id := _trace_at(world_pos)
+	if not trace_id.is_empty():
+		var trace = data.get_trace(trace_id)
+		if trace != null:
+			return {"net": str(trace.net_name), "ref": "trace %s" % trace_id}
+	return {}
+
+
+func _handle_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
+	if is_double_click and _bus_drawing:
+		_commit_bus()
+		return
+	if not _bus_drawing:
+		# The PICKING grammar has no double-click verb. A physical double-click
+		# arrives as TWO press events (see the zone/trace/cutout tools' own
+		# note on this) — the FIRST already performed the pick/remove-by-
+		# reclick; without this guard the SECOND event would hit
+		# _handle_bus_pick_click again and immediately toggle the same net
+		# back off, silently netting to "nothing picked" on what looked like
+		# one click to the user.
+		if is_double_click:
+			return
+		_handle_bus_pick_click(world_pos)
+		return
+	# DRAWING: place a spine vertex, same shape as _handle_trace_click's
+	# waypoint branch (this tool has no pad-to-finish shortcut — a spine ends
+	# on Enter/double-click only, since it is not itself copper on a net).
+	_bus_spine_points.append(_author_point(world_pos))
+	_bus_has_preview = false
+	queue_redraw()
+
+
+## PICKING click: resolve the net, then toggle it in/out of the ordered list.
+func _handle_bus_pick_click(world_pos: Vector2) -> void:
+	var hit := _bus_net_at(world_pos)
+	if hit.is_empty():
+		bus_tool_message.emit("Click a pad or a trace — that is where a net comes from.")
+		return
+	var net := str(hit.get("net", ""))
+	if net.is_empty():
+		bus_tool_message.emit("%s is on no net." % str(hit.get("ref", "")))
+		return
+
+	var idx := _bus_nets.find(net)
+	if idx != -1:
+		# Click an already-listed net again to remove it (S3's own contract).
+		_bus_nets.remove_at(idx)
+		_bus_net_refs.remove_at(idx)
+		bus_tool_message.emit("Removed %s from the bus (%d picked)." % [net, _bus_nets.size()])
+		queue_redraw()
+		return
+
+	_bus_nets.append(net)
+	_bus_net_refs.append(str(hit.get("ref", "")))
+	var msg := "Bus: [%s] (%d picked)" % [_bus_nets_joined(), _bus_nets.size()]
+	msg += " — Enter to draw the spine." if _bus_nets.size() >= 2 else " — pick at least 1 more net."
+	bus_tool_message.emit(msg)
+	queue_redraw()
+
+
+func _bus_nets_joined() -> String:
+	var parts := PackedStringArray()
+	for net in _bus_nets:
+		parts.append(net)
+	return " → ".join(parts)
+
+
+## PICKING -> DRAWING. Freezes the layer the same way _start_trace freezes
+## _trace_layer — the preview below draws in that layer's colour at the real
+## per-net widths, so a toolbar layer-filter change mid-draw cannot silently
+## commit different copper from what is on screen.
+func _start_bus_draw() -> void:
+	if _bus_nets.size() < 2:
+		bus_tool_message.emit("Pick at least 2 nets before drawing the spine (%d picked)." % _bus_nets.size())
+		return
+	var layer := trace_author_layer()
+	if layer.is_empty():
+		bus_tool_message.emit("This board declares no copper layer to draw the bus on.")
+		return
+	_bus_layer = layer
+	_bus_drawing = true
+	_bus_spine_points = PackedVector2Array()
+	_bus_has_preview = false
+	bus_tool_message.emit(
+		"Spine for [%s] on %s — click vertices, Enter/dbl-click to commit (Esc cancels the spine)."
+			% [_bus_nets_joined(), _bus_layer])
+	queue_redraw()
+
+
+## Turn the drawn spine into N real Trace entities, ONE undo step. Delegates
+## the whole pipeline (widths -> offsets -> inner-fold guard -> create -> one
+## save_to_history) to panel_tools.bus_plan/bus_commit_plan — see the region
+## doc above for why this is the SAME call minerva_pcb_route_bus_direct makes.
+func _commit_bus() -> void:
+	if not data or tool_mode != ToolMode.BUS or not _bus_drawing:
+		return
+	var plan: Dictionary = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points, _bus_layer)
+	if not bool(plan.get("ok", false)):
+		# Keep the placed vertices AND the net list: the fix for "needs 2
+		# points" or an inner-fold refusal is another click or a wider corner,
+		# not redrawing the whole bus from scratch.
+		bus_tool_message.emit(str(plan.get("error", "Bus was refused.")))
+		return
+
+	var result: Dictionary = _PanelToolsScript.bus_commit_plan(
+		data, plan, "Add bus (%d traces)" % _bus_nets.size())
+	if not bool(result.get("ok", false)):
+		bus_tool_message.emit(str(result.get("error", "Bus was refused by the board model.")))
+		return
+
+	var trace_ids: Array = result.get("trace_ids", [])
+	var summary := "Added bus: %d traces on %s (%s)." % [
+		trace_ids.size(), _bus_layer, _bus_nets_joined()]
+	_reset_bus_tool(false)
+	bus_tool_message.emit(summary)
+	queue_redraw()
+
+
+## The Esc/right-click LADDER (S4): peel ONE level per press. A spine in
+## progress is the innermost gesture — cancelling it must not also throw away
+## the net order the user already picked, which is the whole point of
+## treating this as a ladder instead of one flat reset (that flat reset is
+## _reset_bus_tool, reserved for actually leaving the tool — see
+## set_tool_mode).
+func _cancel_bus_step(announce: bool) -> void:
+	if _bus_drawing:
+		_bus_drawing = false
+		_bus_spine_points = PackedVector2Array()
+		_bus_has_preview = false
+		_bus_layer = ""
+		if announce:
+			bus_tool_message.emit("Bus spine cancelled — net list kept (%d picked)." % _bus_nets.size())
+		queue_redraw()
+		return
+	if not _bus_nets.is_empty():
+		_bus_nets = []
+		_bus_net_refs = []
+		if announce:
+			bus_tool_message.emit("Bus net picks cleared.")
+		queue_redraw()
+
+
+## Full reset — BOTH the net list and any in-progress spine. Used only when
+## actually LEAVING the tool (set_tool_mode) or after a successful commit,
+## never by the Esc ladder above (see _cancel_bus_step).
+func _reset_bus_tool(announce: bool) -> void:
+	var had_progress := _bus_drawing or not _bus_nets.is_empty()
+	_bus_drawing = false
+	_bus_spine_points = PackedVector2Array()
+	_bus_has_preview = false
+	_bus_layer = ""
+	_bus_nets = []
+	_bus_net_refs = []
+	_bus_plan_cache_key = []
+	_bus_plan_cache = {}
+	if announce and had_progress:
+		bus_tool_message.emit("Bus tool disarmed — picks and spine discarded.")
+
+
+## Draw the bus being born: the raw spine as a rubber band (same visual
+## language _draw_trace_preview uses), then the N per-net GHOST offset
+## polylines bus_plan would commit — TOOL PREVIEW geometry, not a workspace
+## candidate (see the region doc + this file's _draw for the depth this
+## renders at). The spine tints BUS_REFUSAL_COLOR the instant the current
+## geometry would trip the inner-fold guard, so the refusal is visible before
+## Enter is ever pressed, not only after a failed commit.
+func _draw_bus_preview() -> void:
+	if not _bus_drawing:
+		return
+
+	var screen_pts := PackedVector2Array()
+	for p in _bus_spine_points:
+		screen_pts.append(world_to_screen(p))
+	var cursor_pt := world_to_screen(_bus_preview) if _bus_has_preview else Vector2.ZERO
+
+	var plan: Dictionary = {}
+	if _bus_spine_points.size() >= 2:
+		# Memo (N4): reuse last frame's plan when nothing it depends on moved
+		# — see _bus_plan_cache_key's own doc for why only the spine actually
+		# varies frame to frame during DRAWING.
+		var cache_key: Array = [_bus_nets.duplicate(), _bus_spine_points.duplicate(), _bus_layer]
+		if cache_key == _bus_plan_cache_key:
+			plan = _bus_plan_cache
+		else:
+			plan = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points, _bus_layer)
+			_bus_plan_cache_key = cache_key
+			_bus_plan_cache = plan
+	var refused: bool = _bus_spine_points.size() >= 2 and not bool(plan.get("ok", false))
+	var spine_color: Color = BUS_REFUSAL_COLOR if refused else BUS_SPINE_PREVIEW_COLOR
+
+	var open_path := screen_pts.duplicate()
+	if _bus_has_preview:
+		open_path.append(cursor_pt)
+	if open_path.size() >= 2:
+		draw_polyline(open_path, spine_color, 1.0)
+	for pt in screen_pts:
+		draw_circle(pt, TRACE_PREVIEW_VERTEX_RADIUS_PX, spine_color)
+
+	# N ghost offset polylines — only once the plan is valid (a refused plan
+	# has no polylines to show; the tinted spine above already carries the
+	# refusal). Net colour where the net has one, layer colour otherwise —
+	# mirrors _draw_zone_preview's fallback.
+	if bool(plan.get("ok", false)):
+		var nets: Array = plan.get("nets", [])
+		var widths: Array = plan.get("widths", [])
+		var polylines: Array = plan.get("polylines", [])
+		for i in range(nets.size()):
+			var pts: PackedVector2Array = polylines[i]
+			if pts.size() < 2:
+				continue
+			var ghost_color := _trace_layer_color(_bus_layer)
+			var net_obj = data.get_net(str(nets[i])) if data else null
+			if net_obj:
+				ghost_color = net_obj.color
+			var ghost_pts := PackedVector2Array()
+			for p in pts:
+				ghost_pts.append(world_to_screen(p))
+			var width_px := maxf(float(widths[i]) * zoom, 1.0)
+			draw_polyline(ghost_pts, Color(ghost_color, BUS_GHOST_ALPHA), width_px)
+
+	if font != null and not screen_pts.is_empty():
+		var label := "Bus [%s] @ %s  ·  %d pts" % [_bus_nets_joined(), _bus_layer, _bus_spine_points.size()]
+		if refused:
+			label += "  ·  %s" % str(plan.get("error", ""))
+		draw_string(font, screen_pts[0] + Vector2(6.0, -6.0), label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, spine_color)
 
 #endregion
 
