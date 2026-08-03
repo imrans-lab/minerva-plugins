@@ -55,6 +55,10 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// overrides (W8.4 / SB6; exposes the worker "normalize" method, follow-up
 		// 019f8c0b7194).
 		"minerva_pcb_normalize",
+		// worker-backed — pre-assembly BOM+CPL package (D0-5, docket
+		// 019fc2f8b903): exposes the worker's assembly_bom + assembly_cpl
+		// methods, shipped worker-side by C8 with no agent-facing tool until now.
+		"minerva_pcb_export_assembly",
 		// worker-backed — dotted panel-IPC channel forwarding to the worker's
 		// "route" method (this round; docket 019f3815e9f9). NOT renamed by
 		// round D0-expose (019fa486b408) — dotted panel-IPC channels are a
@@ -652,6 +656,18 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 			// go test (same carve-out as every other test in this file).
 			continue
 		}
+		if name == "minerva_pcb_export_assembly" {
+			// This test's knownValues can only supply "yaml"/"name" — the spike
+			// board (spikes/gerber/board.yaml) carries no "mpn" on any
+			// component, and the default profile ("jlc") REQUIRES mpn for every
+			// part (AssemblyIdentityError, by design — see D0-5, docket
+			// 019fc2f8b903). Dispatching this tool with only yaml/name against
+			// that board is a NAMED refusal every time, correctly — not a
+			// dispatch failure this generic sweep should flag. Exercised
+			// properly (happy path + both refusal shapes) by
+			// TestPCBWorkerStdioSmoke_ExportAssembly instead.
+			continue
+		}
 		spec := specs[name]
 		var schema map[string]any
 		if err := json.Unmarshal(spec.InputSchema, &schema); err != nil {
@@ -688,6 +704,192 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 		}
 		t.Logf("STDIO SMOKE PASS: %s dispatched cleanly using only its declared schema keys %v", name, args)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// minerva_pcb_export_assembly (D0-5, docket 019fc2f8b903)
+// ---------------------------------------------------------------------------
+
+// TestPCBWorkerStdioSmoke_ExportAssembly is the dispatch-level test for the
+// new minerva_pcb_export_assembly tool: happy path (both CSVs written, row
+// counts matching C8's own hand-derived seals — see
+// worker/tests/test_assembly_outputs.py), identity-refusal passthrough
+// (missing mpn, naming the component), and unknown-house refusal (naming the
+// house id) — all through the REAL plugin binary + worker, over stdio,
+// exactly like every other tool's coverage in this file.
+//
+// Uses the C8 assembly fixture (worker/tests/testdata/assembly_boards/
+// assembly_fixture.yaml), NOT the shared spikes/gerber/board.yaml spike
+// board — that board carries no "mpn" on any component and would refuse
+// under every assembly-capable profile (see the carve-out comment in
+// TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly above).
+func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
+	c, cleanup := startPlugin(t, "pcb-plugin-export-assembly")
+	defer cleanup()
+
+	fixturePath := filepath.Join("worker", "tests", "testdata", "assembly_boards", "assembly_fixture.yaml")
+	fixture, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatalf("read assembly fixture: %v", err)
+	}
+
+	// --- happy path: both files written, row counts match C8's seals -------
+	// (2 grouped BOM rows: R_0805 x2 refs + the diode; 3 CPL rows: one per
+	// component — hand-derived in worker/tests/test_assembly_outputs.py).
+	outDir := t.TempDir()
+	env := c.call("minerva_pcb_export_assembly", map[string]any{
+		"yaml": string(fixture), "name": "afix", "out_dir": outDir,
+	})
+	if env["ok"] != true {
+		t.Fatalf("minerva_pcb_export_assembly (happy path) ok != true: %v", env)
+	}
+	res := asMap(t, env["result"], "export_assembly.result")
+	if res["profile"] != "jlc" {
+		t.Fatalf("minerva_pcb_export_assembly profile != \"jlc\" (default): %v", res["profile"])
+	}
+	bom := asMap(t, res["bom"], "export_assembly.bom")
+	cpl := asMap(t, res["cpl"], "export_assembly.cpl")
+	if bom["filename"] != "afix-bom-jlc.csv" {
+		t.Fatalf("minerva_pcb_export_assembly bom.filename = %v, want afix-bom-jlc.csv", bom["filename"])
+	}
+	if cpl["filename"] != "afix-cpl-jlc.csv" {
+		t.Fatalf("minerva_pcb_export_assembly cpl.filename = %v, want afix-cpl-jlc.csv", cpl["filename"])
+	}
+	if rows, _ := bom["rows"].(float64); rows != 2 {
+		t.Fatalf("minerva_pcb_export_assembly bom.rows = %v, want 2 (R_0805 group + diode)", bom["rows"])
+	}
+	if rows, _ := cpl["rows"].(float64); rows != 3 {
+		t.Fatalf("minerva_pcb_export_assembly cpl.rows = %v, want 3 (R1, R2, D1)", cpl["rows"])
+	}
+
+	// The tool's own row-count claim alone is exactly what a FULL mutation
+	// ("returns success without writing") or a HALF mutation ("writes BOM not
+	// CPL") would leave untouched — the real red-line proof reads the files
+	// BACK OFF DISK independently, never trusting the reply's numbers alone.
+	bomPath, _ := bom["path"].(string)
+	cplPath, _ := cpl["path"].(string)
+	if bomPath == "" || cplPath == "" {
+		t.Fatalf("minerva_pcb_export_assembly missing written paths: bom=%v cpl=%v", bom, cpl)
+	}
+	bomBytes, err := os.ReadFile(bomPath)
+	if err != nil {
+		t.Fatalf("minerva_pcb_export_assembly bom file not written at %s: %v", bomPath, err)
+	}
+	cplBytes, err := os.ReadFile(cplPath)
+	if err != nil {
+		t.Fatalf("minerva_pcb_export_assembly cpl file not written at %s: %v", cplPath, err)
+	}
+	if !strings.Contains(string(bomBytes), "LCSC Part #") {
+		t.Fatalf("minerva_pcb_export_assembly bom file missing JLC header: %q", string(bomBytes))
+	}
+	if !strings.Contains(string(cplBytes), "Rotation") {
+		t.Fatalf("minerva_pcb_export_assembly cpl file missing JLC header: %q", string(cplBytes))
+	}
+	if got := onDiskDataRowCount(string(bomBytes)); got != 2 {
+		t.Fatalf("minerva_pcb_export_assembly bom file on disk has %d data rows, want 2", got)
+	}
+	if got := onDiskDataRowCount(string(cplBytes)); got != 3 {
+		t.Fatalf("minerva_pcb_export_assembly cpl file on disk has %d data rows, want 3", got)
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly happy path — bom=%v cpl=%v", bom, cpl)
+
+	// --- identity refusal passthrough: missing mpn names the component -----
+	// Mirrors worker/tests/test_methods.py::test_assembly_bom_missing_identity_is_named_refusal
+	// exactly (same replace-first-occurrence mutation of the same fixture) —
+	// removes ONLY R1's mpn (R2 keeps its own), so the message naming "R1"
+	// specifically is a real assertion, not a coincidence of every component
+	// losing its mpn at once.
+	noIdentity := strings.Replace(string(fixture), "    mpn: C25804\n", "", 1)
+	idEnv := c.call("minerva_pcb_export_assembly", map[string]any{"yaml": noIdentity})
+	if idEnv["ok"] != false {
+		t.Fatalf("minerva_pcb_export_assembly (missing mpn) ok != false: %v", idEnv)
+	}
+	idErr := asMap(t, idEnv["error"], "export_assembly identity-refusal error")
+	if idErr["kind"] != "assembly" {
+		t.Fatalf("minerva_pcb_export_assembly (missing mpn) error.kind = %v, want \"assembly\"", idErr["kind"])
+	}
+	idMsg, _ := idErr["message"].(string)
+	if !strings.Contains(idMsg, "R1") || !strings.Contains(idMsg, "mpn") {
+		t.Fatalf("minerva_pcb_export_assembly (missing mpn) message does not name the component/field verbatim: %q", idMsg)
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly identity refusal — %q", idMsg)
+
+	// --- unknown-house refusal -----------------------------------------------
+	houseEnv := c.call("minerva_pcb_export_assembly", map[string]any{
+		"yaml": string(fixture), "profile": "acme",
+	})
+	if houseEnv["ok"] != false {
+		t.Fatalf("minerva_pcb_export_assembly (unknown house) ok != false: %v", houseEnv)
+	}
+	houseErr := asMap(t, houseEnv["error"], "export_assembly unknown-house error")
+	if houseErr["kind"] != "assembly" {
+		t.Fatalf("minerva_pcb_export_assembly (unknown house) error.kind = %v, want \"assembly\"", houseErr["kind"])
+	}
+	houseMsg, _ := houseErr["message"].(string)
+	if !strings.Contains(houseMsg, "acme") {
+		t.Fatalf("minerva_pcb_export_assembly (unknown house) message does not name the house id verbatim: %q", houseMsg)
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly unknown-house refusal — %q", houseMsg)
+
+	// --- no-stray-artifact: a CPL-ONLY board fault must leave ZERO files on
+	// disk, not a stray BOM CSV (cold review, HALF-WRITE elevated finding).
+	// assembly_outputs._bom_rows never reads x_mm/y_mm (BOM has no position
+	// column), but _cpl_rows requires them numeric — so a non-numeric x_mm
+	// passes BOM's checks cleanly while failing CPL's (measured live: a bad
+	// "layer" token does NOT reach assembly_outputs at all — methods._load's
+	// migration normalizes/coerces it before assembly_outputs ever sees the
+	// board, confirmed by direct venv repro). A naive bom-then-cpl sequence
+	// that lets the WORKER write out_dir on each call independently would
+	// write the BOM file on the first (successful) call, then leave it
+	// stranded when the second call refuses. This must never happen: a
+	// refusal is all-or-nothing, zero artifacts either way.
+	cplOnlyFaultBoard := strings.Replace(string(fixture), "x_mm: 12.5\n", "x_mm: \"bad\"\n", 1)
+	strayDir := t.TempDir()
+	strayEnv := c.call("minerva_pcb_export_assembly", map[string]any{
+		"yaml": cplOnlyFaultBoard, "name": "stray", "out_dir": strayDir,
+	})
+	if strayEnv["ok"] != false {
+		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) ok != false: %v", strayEnv)
+	}
+	strayErr := asMap(t, strayEnv["error"], "export_assembly CPL-only-fault error")
+	if strayErr["kind"] != "assembly" {
+		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) error.kind = %v, want \"assembly\"", strayErr["kind"])
+	}
+	strayMsg, _ := strayErr["message"].(string)
+	if !strings.Contains(strayMsg, "D1") || !strings.Contains(strayMsg, "x_mm") {
+		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) message does not name the component/bad field verbatim: %q", strayMsg)
+	}
+	entries, err := os.ReadDir(strayDir)
+	if err != nil {
+		t.Fatalf("read strayDir: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) left stray file(s) on disk: %v — a refusal must leave zero artifacts", names)
+	}
+	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly CPL-only fault leaves zero artifacts on disk — %q", strayMsg)
+}
+
+// onDiskDataRowCount is the test-side row counter, deliberately a SEPARATE
+// implementation from internal/tools's (unexported, package-private) row
+// counter — reading the produced files back independently, rather than
+// reusing the tool's own counting code, is what makes the on-disk assertions
+// above a real mutation guard instead of a tautology.
+func onDiskDataRowCount(content string) int {
+	lines := strings.Split(strings.TrimRight(content, "\r\n"), "\n")
+	n := 0
+	for _, l := range lines {
+		if strings.TrimRight(l, "\r") != "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return n - 1
 }
 
 // ---------------------------------------------------------------------------

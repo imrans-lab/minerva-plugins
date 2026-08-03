@@ -117,11 +117,17 @@ func TestManifestBrokerParity(t *testing.T) {
 	if len(inBrokerNotManifest) > 0 {
 		t.Errorf("broker registers agent-facing tool(s) the manifest does not declare: %v", inBrokerNotManifest)
 	}
-	if len(manifestTools) != 11 {
-		t.Errorf("manifest backend-executor tool count = %d, want 11 (the D0-expose set)", len(manifestTools))
+	// 11 (the D0-expose set) + 1: minerva_pcb_export_assembly (D0-5, docket
+	// 019fc2f8b903) — a SEPARATE unstaged bump from this same round's manifest
+	// addition, per the same "reviewed as its own diff" convention the GD
+	// registration-count pin (pcb/tests/gd/test_manifest_tool_registration.gd)
+	// documents; this count is a hard gate (not discretionary), so it moves in
+	// lockstep with the manifest/broker entry rather than trailing it.
+	if len(manifestTools) != 12 {
+		t.Errorf("manifest backend-executor tool count = %d, want 12 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly)", len(manifestTools))
 	}
-	if len(brokerSpecs) != 11 {
-		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 11", len(brokerSpecs))
+	if len(brokerSpecs) != 12 {
+		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 12", len(brokerSpecs))
 	}
 }
 
@@ -196,16 +202,18 @@ var toolIdentityKeyword = map[string]string{
 	"minerva_pcb_check_bom":       "bill of materials",
 	"minerva_pcb_fetch_libraries": "curated KiCAD symbol/footprint library subset",
 	"minerva_pcb_library_status":  "fetched and verified",
+	"minerva_pcb_export_assembly": "pre-assembly order package",
 }
 
-// TestDescriptionKeywordPinsToolIdentity is the S2 fix: for each of the 11
-// tools, assert its MANIFEST description contains its distinctive keyword,
-// and — the part that actually catches a swap — that NO OTHER tool's
-// description contains that same keyword. A pure "keyword present" check
-// alone would not catch two tools swapping wholesale, since each swapped
-// description would just be missing FROM THE WRONG ENTRY without anything
-// checking that other entries didn't pick it up; checking uniqueness across
-// all 11 is what makes this a pairing pin rather than a presence check.
+// TestDescriptionKeywordPinsToolIdentity is the S2 fix: for each of the 12
+// tools (the D0-expose 11 + D0-5's minerva_pcb_export_assembly), assert its
+// MANIFEST description contains its distinctive keyword, and — the part that
+// actually catches a swap — that NO OTHER tool's description contains that
+// same keyword. A pure "keyword present" check alone would not catch two
+// tools swapping wholesale, since each swapped description would just be
+// missing FROM THE WRONG ENTRY without anything checking that other entries
+// didn't pick it up; checking uniqueness across all 12 is what makes this a
+// pairing pin rather than a presence check.
 func TestDescriptionKeywordPinsToolIdentity(t *testing.T) {
 	manifestTools := loadManifestBackendTools(t)
 

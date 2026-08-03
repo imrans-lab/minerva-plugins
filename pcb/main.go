@@ -227,6 +227,10 @@ func initRegistry() {
 	registry.Register(tools.Normalize, tools.HandleNormalize)
 	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
 	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
+	// minerva_pcb_export_assembly — pre-assembly BOM+CPL package (D0-5, docket
+	// 019fc2f8b903). Two worker calls (assembly_bom then assembly_cpl) behind
+	// one MCP tool; see worker_tools.go's HandleExportAssembly doc comment.
+	registry.Register(tools.ExportAssembly, tools.HandleExportAssembly)
 	// pcb.route is a dotted panel-IPC channel (like pcb.serialize/...), not an
 	// LLM-facing pcb_* tool name — but unlike the in-process project channels,
 	// it forwards to the Python worker's "route" method (see worker_tools.go),
@@ -302,6 +306,7 @@ var workerBackedTools = map[string]bool{
 	"minerva_pcb_normalize":       true,
 	"minerva_pcb_check_libraries": true,
 	"minerva_pcb_check_bom":       true,
+	"minerva_pcb_export_assembly": true,
 	"pcb.route":                   true,
 	"pcb.draft_check":             true,
 }

@@ -29,7 +29,10 @@ const PCB_MANIFEST_PATH := "res://../../minerva-plugins/pcb/manifest.json"
 
 ## The 11 tools round D0-expose (docket 019fa486b408) renamed from bare
 ## pcb_* broker names to minerva_pcb_* and declared in the manifest for the
-## first time. Kept as a literal list (not derived from the manifest) so this
+## first time, PLUS D0-5's minerva_pcb_export_assembly (docket 019fc2f8b903)
+## — same worker-backed shape, added to this same list so a rename/swap of
+## the new tool reds BY NAME here too, not just via the aggregate count pin
+## below. Kept as a literal list (not derived from the manifest) so this
 ## test pins the EXPECTED set independently of whatever the manifest happens
 ## to contain — a manifest that dropped one silently would still fail this.
 const EXPECTED_WORKER_TOOLS := [
@@ -40,6 +43,7 @@ const EXPECTED_WORKER_TOOLS := [
 	"minerva_pcb_drc_geometric",
 	"minerva_pcb_resolve",
 	"minerva_pcb_normalize",
+	"minerva_pcb_export_assembly",
 	"minerva_pcb_check_libraries",
 	"minerva_pcb_check_bom",
 	"minerva_pcb_fetch_libraries",
@@ -113,17 +117,20 @@ func _init() -> void:
 	# + 1 C5 bus-tool MCP parity tool (minerva_pcb_route_bus_direct — the
 	# agent's doorway onto the canvas Bus tool, DCR 019fb572b888 S3+S4;
 	# panel_tools.gd bus_plan/bus_commit_plan is the ONE implementation both
-	# the gesture and this tool call) == 69.
+	# the gesture and this tool call) == 69, + 1 D0-5 worker-backed tool
+	# (minerva_pcb_export_assembly — the Go/manifest wiring onto C8's
+	# already-shipped worker-side assembly_bom/assembly_cpl emitters, docket
+	# 019fc2f8b903) == 70.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is C5's bump (68 -> 69), sequenced after
-	# C4b's (70 -> 68), sequenced after C4a's (60 -> 70) — all three queue
-	# behind the same serialization point.
-	check("total registered tool count == 69", registered.size() == 69,
+	# entry could hide behind it. This is D0-5's bump (69 -> 70), sequenced
+	# after C5's (68 -> 69), sequenced after C4b's (70 -> 68), sequenced after
+	# C4a's (60 -> 70) — all four queue behind the same serialization point.
+	check("total registered tool count == 70", registered.size() == 70,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

@@ -1209,13 +1209,21 @@ func _run_removal_manifest_tools_absent() -> void:
 			names.append(str((t as Dictionary).get("name", "")))
 	check("minerva_pcb_proposal_accept absent from manifest", not ("minerva_pcb_proposal_accept" in names))
 	check("minerva_pcb_proposal_reject absent from manifest", not ("minerva_pcb_proposal_reject" in names))
-	# 69 = 70 - the 2 S5-removed proposal tools + minerva_pcb_route_bus_direct.
+	# This is a count of ALL manifest.json tools[] entries (names.size() above
+	# iterates every tool, not just worker-backed ones) — it moves whenever
+	# ANY tool is added or removed, not only on a proposal-tool-removal-shaped
+	# change. 69 = 70 - the 2 S5-removed proposal tools + minerva_pcb_route_bus_direct.
 	# The pin was WRITTEN at 68 (post-C4b, when this suite was parked) and C5
 	# landed the bus tool afterwards, so the number was stale on the day this
 	# suite first EXECUTED — not a regression. Verified against manifest.json's
 	# own tail entry (`minerva_pcb_route_bus_direct`), which is the C5 addition.
-	check_eq("manifest tool count == 69 (70 - the 2 S5-removed proposal tools + the C5 bus tool)",
-		names.size(), 69)
+	# + 1 D0-5 worker-backed tool (minerva_pcb_export_assembly, docket
+	# 019fc2f8b903) == 70. This is a SECOND, independent count pin on the same
+	# manifest.json this round's tools[] addition touches — see
+	# tests/gd/test_manifest_tool_registration.gd's own pin (69->70) for the
+	# "deliberate bump, its own diff" convention this follows.
+	check_eq("manifest tool count == 70 (ALL manifest.json tools[] entries)",
+		names.size(), 70)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 

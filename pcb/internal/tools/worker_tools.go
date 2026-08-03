@@ -27,6 +27,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/imrans-lab/minerva-plugins/pcb/internal/libraries"
@@ -350,6 +353,224 @@ var CheckBOM = ToolSpec{
 
 func HandleCheckBOM(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
 	return w.Call(ctx, "check_bom", withDefaultLibDir(params))
+}
+
+// ---- minerva_pcb_export_assembly ---------------------------------------------------
+//
+// D0-5 (docket 019fc2f8b903): C8 shipped assembly_outputs.py (BOM+CPL
+// emitters) and the assembly_bom/assembly_cpl worker dispatch entries
+// (methods.py) worker-side only, with no agent-facing tool exposing them —
+// that Go/manifest wiring is this unit's whole scope.
+//
+// NAMING DEVIATION FROM BRIEF, MEASURED: the brief that filed this unit
+// specifies a "house" param. The worker's ACTUAL dispatch-level contract key
+// is "profile" (methods.py _assembly_bom/_assembly_cpl read
+// params.get("profile"); worker/tests/test_methods.py's own dispatch tests
+// call it that way, e.g. test_assembly_cpl_unknown_house_is_named_refusal
+// passes {"profile": "acme"} despite its own test NAME saying "house"). Every
+// existing worker-backed Handle* in this file forwards params to w.Call
+// UNCHANGED — zero translation layer — so naming this tool's schema property
+// "house" and forwarding raw would silently break: the worker would never
+// see the caller's choice under the key it actually reads, defaulting to
+// "jlc" every time and making the unknown-house/oshpark refusal paths
+// unreachable. Renaming here to match the measured wire contract, instead of
+// adding a house->profile translation shim (which WOULD be a new dispatch
+// style — none of Validate/Generate/Gerbers/etc. do any param rewriting
+// beyond withDefaultLibDir's lib_dir fill, which never renames a caller key).
+// Same reasoning for "out_dir" vs the brief's "output_dir": _write_assembly_files
+// (methods.py) reads params.get("out_dir") — the exact key minerva_pcb_gerbers
+// already uses — so this tool reuses "out_dir" verbatim rather than a
+// same-meaning-different-spelling key the worker would silently ignore.
+var ExportAssembly = ToolSpec{
+	Name: "minerva_pcb_export_assembly",
+	Description: "Generate a pre-assembly order package (BOM CSV + CPL/pick-and-place CSV) " +
+		"from a canonical PCB board for one assembly house profile — pure Python, no KiCad " +
+		"binary. Args {yaml|board, profile?:<house id, default \"jlc\">, name?:<basename>, " +
+		"out_dir?:<dir>}. \"jlc\" is the only house profile that currently offers assembly " +
+		"service; \"oshpark\" is a KNOWN house that refuses (bare-board only — no assembly " +
+		"service). Returns {profile, bom:{filename,rows,path}, cpl:{filename,rows,path}} — " +
+		"rows counts data rows (header excluded); path is omitted unless out_dir was given, " +
+		"in which case both CSVs are also written to disk. Refusals are NAMED, never a " +
+		"silent best-guess format or a blank identity cell: a component the profile requires " +
+		"identity for (jlc requires mpn) and lacks it refuses naming the component ref; an " +
+		"unrecognized or assembly-incapable house id refuses naming the id. CPL rotation is " +
+		"emitted verbatim from the authored rotation_deg (KiCad-equivalent clockwise " +
+		"convention); CPL Y is the authored y_mm negated, X verbatim. Calls the worker's " +
+		"assembly_bom then assembly_cpl methods over the same board+profile — whichever " +
+		"refuses first is the error this tool surfaces.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+			"profile": {"type": "string", "description": "Assembly house profile id (default \"jlc\" — the only assembly-capable profile shipped; \"oshpark\" is known but refuses — bare-board only)."},
+			"name": {"type": "string", "description": "Optional output file basename (defaults to \"board\")."},
+			"out_dir": {"type": "string", "description": "Optional directory to also write the files to."}
+		}
+	}`),
+}
+
+// assemblyCallReply is the shape ONE worker call (assembly_bom or
+// assembly_cpl) replies with on success: {files:{filename:content}, ...}.
+// This tool always calls with out_dir stripped (see stripOutDir), so the
+// worker's own "written" field is never populated here and is deliberately
+// not decoded — disk writing is this tool's OWN job, done in Go, only after
+// BOTH calls succeed (see HandleExportAssembly's HALF-WRITE fix comment).
+// Exactly one entry in files per call, since each call emits exactly one CSV.
+type assemblyCallReply struct {
+	Files map[string]string `json:"files"`
+}
+
+// assemblyOutputSummary is this tool's per-file reply shape. The worker's own
+// reply carries no row count (AssemblyResult.rows is a Python-side attribute,
+// not part of the {filename:content} dict that gets JSON-serialized) — rows
+// is derived here from the returned CSV text itself.
+type assemblyOutputSummary struct {
+	Filename string `json:"filename"`
+	Rows     int    `json:"rows"`
+	Path     string `json:"path,omitempty"`
+}
+
+// decodeAssemblyFile pulls the (single) filename+content pair out of one
+// worker call's {files:{filename:content}} reply, without writing anything —
+// writing is HandleExportAssembly's job, deferred until BOTH calls are known
+// to have succeeded.
+func decodeAssemblyFile(raw json.RawMessage) (filename, content string, err error) {
+	var r assemblyCallReply
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return "", "", fmt.Errorf("decode assembly worker reply: %w", err)
+	}
+	for f, c := range r.Files {
+		filename, content = f, c
+	}
+	return filename, content, nil
+}
+
+// csvDataRowCount counts non-empty data lines in the emitted CSV, excluding
+// the header row. Splits on "\n" and trims a trailing "\r" per line so it is
+// agnostic to the emitter's CSV_EOL choice ("\r\n" today, per
+// assembly_outputs.py) rather than hard-coding that literal here.
+func csvDataRowCount(content string) int {
+	lines := strings.Split(content, "\n")
+	n := 0
+	for _, l := range lines {
+		if strings.TrimRight(l, "\r") != "" {
+			n++
+		}
+	}
+	if n == 0 {
+		return 0
+	}
+	return n - 1 // header row
+}
+
+// stripOutDir returns params with out_dir removed. HandleExportAssembly ALWAYS
+// computes both assembly_bom and assembly_cpl with out_dir stripped —
+// HALF-WRITE FIX (cold review, elevated finding): forwarding out_dir straight
+// to both worker calls (mirroring every other worker-backed tool's
+// convention, e.g. HandleGerbers) would let the worker write the BOM CSV to
+// disk on the FIRST call, then strand that file if the SECOND call refuses
+// for a reason the BOM computation never hits — measured live: an invalid
+// x_mm/y_mm (or a bad rotation_deg/layer token) fails only
+// assembly_outputs._cpl_rows/_resolve_side, never _bom_rows, since BOM rows
+// carry no position/side column. A refusal must be all-or-nothing: zero
+// artifacts on disk either way. So this tool computes BOTH CSVs first (worker
+// never touches disk), then — only once both have succeeded — writes both
+// itself, in Go (see writeAssemblyFile below), with the first file removed
+// again if the second write fails for a filesystem-level reason.
+func stripOutDir(params json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if len(params) == 0 {
+		return params
+	}
+	if err := json.Unmarshal(params, &m); err != nil {
+		return params
+	}
+	delete(m, "out_dir")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return params
+	}
+	return out
+}
+
+// writeAssemblyFile writes one CSV to out_dir/filename, mkdir'ing out_dir as
+// needed. Errors come back as a *bridge.WorkerError{Kind:"io"} — the same
+// kind methods.py's own _write_assembly_files uses for an OSError — so a
+// disk-level fault reads identically to the shape callers already handle for
+// every other worker-backed tool's out_dir failures.
+func writeAssemblyFile(outDir, filename, content string) error {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return &bridge.WorkerError{Kind: "io", Message: fmt.Sprintf("failed to write to out_dir: %v", err)}
+	}
+	if err := os.WriteFile(filepath.Join(outDir, filename), []byte(content), 0o644); err != nil {
+		return &bridge.WorkerError{Kind: "io", Message: fmt.Sprintf("failed to write to out_dir: %v", err)}
+	}
+	return nil
+}
+
+func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	var p struct {
+		Profile string `json:"profile"`
+		OutDir  string `json:"out_dir"`
+	}
+	_ = json.Unmarshal(params, &p) // best-effort; empty/malformed falls through to the defaults below
+
+	// Compute BOTH CSVs BEFORE writing anything — see stripOutDir's doc
+	// comment (HALF-WRITE fix).
+	computeParams := stripOutDir(params)
+
+	bomRaw, err := w.Call(ctx, "assembly_bom", computeParams)
+	if err != nil {
+		return nil, err
+	}
+	bomFilename, bomContent, err := decodeAssemblyFile(bomRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	cplRaw, err := w.Call(ctx, "assembly_cpl", computeParams)
+	if err != nil {
+		return nil, err
+	}
+	cplFilename, cplContent, err := decodeAssemblyFile(cplRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	bomSummary := assemblyOutputSummary{Filename: bomFilename, Rows: csvDataRowCount(bomContent)}
+	cplSummary := assemblyOutputSummary{Filename: cplFilename, Rows: csvDataRowCount(cplContent)}
+
+	// Both computations succeeded — NOW write, only here, and only both
+	// together: if the CPL write fails after the BOM write already landed,
+	// remove the BOM file too, so a filesystem-level fault leaves zero
+	// artifacts exactly like a worker-level refusal does.
+	if strings.TrimSpace(p.OutDir) != "" {
+		if err := writeAssemblyFile(p.OutDir, bomFilename, bomContent); err != nil {
+			return nil, err
+		}
+		bomPath := filepath.Join(p.OutDir, bomFilename)
+		bomSummary.Path = bomPath
+		if err := writeAssemblyFile(p.OutDir, cplFilename, cplContent); err != nil {
+			_ = os.Remove(bomPath)
+			return nil, err
+		}
+		cplSummary.Path = filepath.Join(p.OutDir, cplFilename)
+	}
+
+	profile := p.Profile
+	if profile == "" {
+		profile = "jlc" // mirrors the worker's own default (methods.py _assembly_bom/_assembly_cpl)
+	}
+	data, err := json.Marshal(map[string]interface{}{
+		"profile": profile,
+		"bom":     bomSummary,
+		"cpl":     cplSummary,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
 }
 
 // withDefaultLibDir fills in lib_dir with the fetched-library data directory

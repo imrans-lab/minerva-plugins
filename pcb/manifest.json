@@ -860,6 +860,20 @@
       }
     },
     {
+      "name": "minerva_pcb_export_assembly",
+      "description": "Generate a pre-assembly order package (BOM CSV + CPL/pick-and-place CSV) from a canonical PCB board for one assembly house profile — pure Python, no KiCad binary. Args {yaml|board, profile?:<house id, default \"jlc\">, name?:<basename>, out_dir?:<dir>}. \"jlc\" is the only house profile that currently offers assembly service; \"oshpark\" is a KNOWN house that refuses (bare-board only — no assembly service). Returns {profile, bom:{filename,rows,path}, cpl:{filename,rows,path}} — rows counts data rows (header excluded); path is omitted unless out_dir was given, in which case both CSVs are also written to disk. Refusals are NAMED, never a silent best-guess format or a blank identity cell: a component the profile requires identity for (jlc requires mpn) and lacks it refuses naming the component ref; an unrecognized or assembly-incapable house id refuses naming the id. CPL rotation is emitted verbatim from the authored rotation_deg (KiCad-equivalent clockwise convention); CPL Y is the authored y_mm negated, X verbatim. Calls the worker's assembly_bom then assembly_cpl methods over the same board+profile — whichever refuses first is the error this tool surfaces.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object (alternative to yaml)."},
+          "profile": {"type": "string", "description": "Assembly house profile id (default \"jlc\" — the only assembly-capable profile shipped; \"oshpark\" is known but refuses — bare-board only)."},
+          "name": {"type": "string", "description": "Optional output file basename (defaults to \"board\")."},
+          "out_dir": {"type": "string", "description": "Optional directory to also write the files to."}
+        }
+      }
+    },
+    {
       "name": "minerva_pcb_fetch_libraries",
       "description": "Fetch the curated KiCAD symbol/footprint library subset (pcb/libraries.lock.json) that minerva_pcb_check_libraries/minerva_pcb_check_bom read. Downloads each locked entry, verifies it by sha256, and skips entries already present+verified (safe to re-run). Args: none. Returns {tag, fetched:[names], skipped:[names], failed:[{name,reason}]}. Requires network access; never partially writes a corrupted/mismatched file (atomic temp+rename, reject on sha mismatch). Run this once (or after refreshing pcb/libraries.lock.json) before relying on real footprint/symbol checks — see minerva_pcb_library_status to check what's already fetched.",
       "input_schema": {"type": "object", "properties": {}}

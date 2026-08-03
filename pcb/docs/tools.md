@@ -709,11 +709,20 @@ canvas gesture's `trace_author_layer()`).
 | `minerva_pcb_gerbers` | `gerbers` | canonical YAML → Gerber (RS-274X/X2) + Excellon drills |
 | `minerva_pcb_check_libraries` | `check_libraries` | footprint/symbol existence vs a `lib_dir` |
 | `minerva_pcb_check_bom` | `check_bom` | BOM extraction + validation |
+| `minerva_pcb_export_assembly` | `assembly_bom` + `assembly_cpl` | pre-assembly order package (BOM + CPL/pick-and-place CSVs, house profile — `jlc` today) |
 | `minerva_pcb_fetch_libraries` / `minerva_pcb_library_status` | (in-process Go) | library data dir |
 
 Gerber/fab export shipped via `minerva_pcb_gerbers` (docket `019eb47ddebc`). See
 `docs/gerbers.md` for the layer set, coordinate-format decision, and the
 fab-correctness HITL gate; `docs/worker.md` for the worker method.
+
+Assembly export (`minerva_pcb_export_assembly`, docket `019fc2f8b903`, D0-5):
+C8 shipped the `assembly_bom`/`assembly_cpl` worker methods
+(`worker/pcb_worker/assembly_outputs.py`) with dispatch tests but no
+agent-facing tool; this round is the Go/manifest wiring only — one MCP tool
+calling both worker methods over the same board+profile, refusals (unknown
+house, missing part identity) surfaced verbatim via the same `isError`
+convention every other worker-backed tool uses.
 
 ## Retired (superseded — NOT reimplemented)
 
