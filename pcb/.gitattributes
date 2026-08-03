@@ -1,0 +1,14 @@
+# Board/fixture YAML checks out with LF on EVERY platform.
+#
+# WINDOWS CI BREAK, run 30773825956 (job "pcb test (windows-latest)"): the
+# GitHub Windows runner checks out with git's Windows default core.autocrlf,
+# so committed *.yaml arrived as CRLF. Go's os.ReadFile is byte-exact (unlike
+# Python's read_text(), which normalizes newlines and is why the worker's
+# pytest suite stayed green), so a Go test mutating a fixture with an
+# LF-terminated literal pattern silently matched NOTHING and exercised the
+# UNMUTATED board — see TestPCBWorkerStdioSmoke_ExportAssembly in main_test.go
+# and the fail-closed replaceOnceLF helper beside it. Pinning EOL here removes
+# the platform difference at its source; the helper's no-op refusal is the
+# belt to this file's braces.
+*.yaml text eol=lf
+*.yml text eol=lf

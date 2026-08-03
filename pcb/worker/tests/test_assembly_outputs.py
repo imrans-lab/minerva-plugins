@@ -263,6 +263,27 @@ def test_cpl_missing_mpn_is_named_refusal_not_blank_cell():
     assert "D1" in str(exc_info.value)
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\r", "\r\n", "\t"])
+def test_whitespace_only_mpn_is_treated_as_missing_not_a_blank_cell(blank):
+    """An mpn that is present-but-empty must refuse exactly like an ABSENT
+    one — the identity contract is about a usable part number reaching the
+    assembly house, not about a key existing.
+
+    The "\\r" cases are not hypothetical: they are the shape a CRLF-mangled
+    edit (or a hand-quoted value copied off a Windows checkout) leaves behind,
+    and a house would receive a BOM line whose LCSC column is a lone carriage
+    return. Pins the `.strip()` in assembly_outputs._component_property as
+    load-bearing, not cosmetic (see the Windows-CI note on replaceOnceLF in
+    pcb/main_test.go for the sibling break on the Go side).
+    """
+    board = _load()
+    board["components"][0]["mpn"] = blank  # R1
+    with pytest.raises(ao.AssemblyIdentityError) as exc_info:
+        ao.build_bom(board, "jlc")
+    assert "R1" in str(exc_info.value)
+    assert "mpn" in str(exc_info.value)
+
+
 def test_identity_from_nested_properties_mapping_also_satisfies():
     """The tolerant `properties.mpn` fallback (module docstring) satisfies the
     same identity requirement as a top-level `mpn` scalar."""

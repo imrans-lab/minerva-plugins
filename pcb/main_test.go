@@ -799,7 +799,7 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	// removes ONLY R1's mpn (R2 keeps its own), so the message naming "R1"
 	// specifically is a real assertion, not a coincidence of every component
 	// losing its mpn at once.
-	noIdentity := strings.Replace(string(fixture), "    mpn: C25804\n", "", 1)
+	noIdentity := mustMutateFixture(t, string(fixture), "    mpn: C25804\n", "")
 	idEnv := c.call("minerva_pcb_export_assembly", map[string]any{"yaml": noIdentity})
 	if idEnv["ok"] != false {
 		t.Fatalf("minerva_pcb_export_assembly (missing mpn) ok != false: %v", idEnv)
@@ -843,7 +843,7 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 	// write the BOM file on the first (successful) call, then leave it
 	// stranded when the second call refuses. This must never happen: a
 	// refusal is all-or-nothing, zero artifacts either way.
-	cplOnlyFaultBoard := strings.Replace(string(fixture), "x_mm: 12.5\n", "x_mm: \"bad\"\n", 1)
+	cplOnlyFaultBoard := mustMutateFixture(t, string(fixture), "x_mm: 12.5\n", "x_mm: \"bad\"\n")
 	strayDir := t.TempDir()
 	strayEnv := c.call("minerva_pcb_export_assembly", map[string]any{
 		"yaml": cplOnlyFaultBoard, "name": "stray", "out_dir": strayDir,
@@ -871,6 +871,112 @@ func TestPCBWorkerStdioSmoke_ExportAssembly(t *testing.T) {
 		t.Fatalf("minerva_pcb_export_assembly (CPL-only fault) left stray file(s) on disk: %v — a refusal must leave zero artifacts", names)
 	}
 	t.Logf("STDIO SMOKE PASS: minerva_pcb_export_assembly CPL-only fault leaves zero artifacts on disk — %q", strayMsg)
+}
+
+// ---------------------------------------------------------------------------
+// Fixture mutation: line-ending agnostic, and FAIL-CLOSED on a no-op
+// ---------------------------------------------------------------------------
+
+// replaceOnceLF applies ONE literal substitution to a committed fixture's
+// text, after normalizing both the source and the pattern to LF, and returns
+// an ERROR when the pattern matches nothing. A test that mutates a fixture is
+// asserting something about the MUTATED board; a substitution that quietly
+// matched nothing turns that assertion into an assertion about the ORIGINAL
+// board, which is how a green-looking test proves the opposite of what it
+// claims.
+//
+// WINDOWS CI BREAK THIS EXISTS FOR — run 30773825956, job "pcb test
+// (windows-latest)", TestPCBWorkerStdioSmoke_ExportAssembly, 2026-08:
+//
+//	Linux/macOS/oracle green, Windows red. The identity-refusal subcase
+//	expected ok:false and got ok:true with a REAL export attached
+//	({bom:{filename:board-bom-jlc.csv rows:2}, cpl:{... rows:3}, profile:jlc}
+//	— no "path" fields, because that subcase passes no out_dir, so the shape
+//	was the tool's normal no-write shape, NOT a stale/misrouted reply). Cause:
+//	the GitHub Windows runner checks out with git's Windows default
+//	core.autocrlf, so assembly_fixture.yaml arrived CRLF. os.ReadFile is
+//	byte-exact, so strings.Replace(..., "    mpn: C25804\n", "", 1) — an
+//	LF-terminated pattern — matched nothing against "...C25804\r\n". The
+//	"missing mpn" board therefore still carried all three mpns, the worker
+//	correctly exported it, and the test read that correct success as a
+//	regression. The worker was never wrong: verified live in the venv, the
+//	genuinely-mutated board refuses ("component 'R1' is missing required
+//	identity field(s) mpn"), so the Linux pass was earned, not accidental.
+//	The pcb/.gitattributes added alongside this helper removes the CRLF at
+//	its source; this helper is the fail-closed backstop for the general case
+//	(fixture edited, pattern gone stale) on any platform.
+//
+// The Python side of the same fixture is immune by construction and needs no
+// equivalent: worker/tests/test_assembly_outputs.py mutates the PARSED dict
+// (del board["components"][0]["mpn"]), and pathlib.read_text() normalizes
+// newlines anyway.
+func replaceOnceLF(src, old, new string) (string, error) {
+	lf := strings.ReplaceAll(src, "\r\n", "\n")
+	oldLF := strings.ReplaceAll(old, "\r\n", "\n")
+	if !strings.Contains(lf, oldLF) {
+		return "", fmt.Errorf("fixture mutation matched nothing: pattern %q is not present "+
+			"(fixture edited out from under the test, or a line-ending/whitespace mismatch) — "+
+			"refusing to hand back an UNMUTATED fixture, which would silently assert against the wrong board", old)
+	}
+	return strings.Replace(lf, oldLF, new, 1), nil
+}
+
+// mustMutateFixture is replaceOnceLF with a no-op treated as a test failure.
+func mustMutateFixture(t *testing.T, src, old, new string) string {
+	t.Helper()
+	out, err := replaceOnceLF(src, old, new)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return out
+}
+
+// TestReplaceOnceLF pins the mechanism of the Windows break documented on
+// replaceOnceLF, platform-independently: the same mutation must produce the
+// same board from an LF and from a CRLF checkout of the fixture, and a
+// pattern that matches nothing must be an ERROR rather than a pass-through of
+// the original. Runs everywhere, needs no plugin binary or worker, and fails
+// on the pre-fix code (plain strings.Replace) for the CRLF case.
+func TestReplaceOnceLF(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("worker", "tests", "testdata", "assembly_boards", "assembly_fixture.yaml"))
+	if err != nil {
+		t.Fatalf("read assembly fixture: %v", err)
+	}
+	lf := strings.ReplaceAll(string(fixture), "\r\n", "\n")
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+
+	// Sanity: the CRLF copy really is the byte-different thing a Windows
+	// checkout produces — otherwise the case below is vacuous.
+	if crlf == lf {
+		t.Fatalf("CRLF copy is identical to the LF fixture — the case this test exists for cannot be exercised")
+	}
+
+	const pattern = "    mpn: C25804\n"
+
+	fromLF, err := replaceOnceLF(lf, pattern, "")
+	if err != nil {
+		t.Fatalf("replaceOnceLF on LF fixture: %v", err)
+	}
+	fromCRLF, err := replaceOnceLF(crlf, pattern, "")
+	if err != nil {
+		t.Fatalf("replaceOnceLF on CRLF fixture (the Windows checkout shape): %v", err)
+	}
+	if fromLF != fromCRLF {
+		t.Fatalf("CRLF checkout produced a DIFFERENT board than the LF checkout — mutation is not line-ending agnostic")
+	}
+	// The mutation must have actually removed an mpn, not merely returned
+	// something: 3 mpn keys in, 2 out.
+	if got, want := strings.Count(fromLF, "mpn:"), 2; got != want {
+		t.Fatalf("mutated board has %d mpn keys, want %d — the substitution did not remove R1's mpn", got, want)
+	}
+	if fromLF == lf {
+		t.Fatalf("mutated board is identical to the fixture — a no-op mutation was handed back as a success")
+	}
+
+	// A stale/absent pattern must be a refusal, never the original text.
+	if _, err := replaceOnceLF(lf, "    mpn: NOT_IN_THIS_FIXTURE\n", ""); err == nil {
+		t.Fatalf("replaceOnceLF returned no error for a pattern that matches nothing — a no-op mutation must fail closed")
+	}
 }
 
 // onDiskDataRowCount is the test-side row counter, deliberately a SEPARATE
