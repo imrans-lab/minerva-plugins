@@ -304,6 +304,31 @@ var _drag_anchor_start: Vector2 = Vector2.ZERO
 var _drag_origins: Dictionary = {}
 var drag_start_mouse: Vector2 = Vector2.ZERO
 
+# ── Component ROTATE handles (owner HITL, docket 019fcb93d367) ────────────────
+# The universal select's per-kind manipulation contract: components rotate (and
+# translate via the existing drag) but never scale, so their selection chrome is
+# corner ROTATE zones ONLY — the same ring-outside-the-corner geometry and the
+# same orange as AnnotationTransformTool's rotate handles, so one gizmo language
+# serves both halves of the select. Drag rotates the selection about the bbox
+# centre. SNAP TIERS (owner-ruled, MS/Adobe-persona: PowerPoint right-click
+# verbs + modifier-constrained handles, never EDA muscle memory): plain drag
+# snaps 90° (board convention), Shift refines to 45°, Ctrl/Cmd frees to 1°.
+# Ungrouped components live-preview each snapped step (direct set_rotation, no
+# journal); rigid GROUPS apply once at release through the journalled
+# rotate_group — their preview is the angle readout, not live geometry (a
+# per-step rotate_group would spray journal entries into the single history
+# step this gesture owes).
+const _ROTATE_RING_INNER_PX := 8.0
+const _ROTATE_RING_OUTER_PX := 26.0
+const _ROTATE_HANDLE_COLOR := Color(1.0, 0.5, 0.0)
+
+var _rotate_drag_active: bool = false
+var _rotate_drag_center: Vector2 = Vector2.ZERO       # world (board mm)
+var _rotate_drag_pointer_start: float = 0.0           # radians, at press
+var _rotate_drag_applied: float = 0.0                 # degrees, snapped, live-applied to ungrouped comps
+var _rotate_start_rotations: Dictionary = {}          # comp_id -> rotation° at press
+var _rotate_drag_groups: Array[String] = []           # unlocked groups, applied at release
+
 ## Armed at press when the selection contains vias, fired ONCE on the first real
 ## motion of that gesture: vias do not move (see _capture_drag_origins), and a
 ## refusal nobody can see is indistinguishable from a bug. Armed at press but
@@ -328,8 +353,10 @@ var box_select_end: Vector2 = Vector2.ZERO
 var _space_pan_armed: bool = false
 
 ## General tool mode. SELECT is the single smart tool (click selects, drag a
-## part moves it snap-aware, drag empty space box-selects, R rotates the
-## selection); PAN drags the whole view. TRANSLATE/ROTATE are kept for
+## part moves it snap-aware, drag empty space box-selects; a component
+## selection shows corner ROTATE handles — drag snaps 90°, Shift 45°,
+## Ctrl/Cmd free — with R/Shift+R and the context menu's Rotate Right/Left
+## as twins, docket 019fcb93d367); PAN drags the whole view. TRANSLATE/ROTATE are kept for
 ## back-compat with the tool_mode_changed contract but are no longer distinct
 ## toolbar tools — the smart SELECT tool subsumes both (finding 5). INSPECT_PIN
 ## (WC-1) is the pin inspector: hover labels the nearest pad, click selects it
@@ -908,6 +935,12 @@ func _update_context_menu_for_selection() -> void:
 	if not comp_under_cursor.is_empty() or not selected_components.is_empty():
 		has_lock_section = true
 		_context_menu_separate()
+		# Rotate verbs (docket 019fcb93d367): the menu twin of the corner
+		# rotate handles, phrased the way PowerPoint phrases them — the
+		# secondary affordance for the maker persona; the handles are primary.
+		context_menu.add_item("Rotate Right 90°", MENU_ID_ROTATE_CW)
+		context_menu.add_item("Rotate Left 90°", MENU_ID_ROTATE_CCW)
+		_context_menu_separate()
 		if not comp_under_cursor.is_empty():
 			context_menu.add_item("Lock %s (L)" % comp_under_cursor, 401)
 		else:
@@ -971,6 +1004,11 @@ const MENU_ID_CANDIDATE_PIN := 431
 const MENU_ID_CANDIDATE_UNPIN := 432
 const MENU_ID_CANDIDATE_REJECT := 433
 const MENU_ID_CANDIDATE_TRY_AGAIN := 434
+## Component transform section (docket 019fcb93d367) — 44x; 43x above belongs
+## to the candidate verbs. PowerPoint's own right-click vocabulary ("Rotate
+## Right 90°"), the convention the owner's maker persona actually knows.
+const MENU_ID_ROTATE_CW := 441
+const MENU_ID_ROTATE_CCW := 442
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1044,6 +1082,14 @@ func _on_context_menu_pressed(id: int) -> void:
 	if not data:
 		return
 	match id:
+		MENU_ID_ROTATE_CW, MENU_ID_ROTATE_CCW:
+			# The menu acts on what you clicked: a right-click on an UNSELECTED
+			# component adopts it as the selection first, same rule as Lock.
+			if selected_components.is_empty():
+				var target: String = _component_at(context_menu_world_pos)
+				if not target.is_empty():
+					selected_components = [target]
+			_rotate_selected(id == MENU_ID_ROTATE_CCW)
 		401:  # Lock component(s) — selected ones, or the one under cursor
 			if not selected_components.is_empty():
 				_lock_selected_components()
@@ -1228,6 +1274,8 @@ func _draw() -> void:
 
 	if is_box_selecting:
 		_draw_selection_box()
+
+	_draw_component_rotate_chrome()
 
 	if tool_mode == ToolMode.INSPECT_PIN and not _inspect_hover_label.is_empty():
 		_draw_inspect_hover_label()
@@ -2456,6 +2504,17 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 				queue_redraw()
 				return
 
+			# Component ROTATE handles (docket 019fcb93d367) — the same
+			# handles-on-a-selected-thing convention as the zone vertices above:
+			# they exist ONLY when the selection holds components, ONLY under
+			# Select, and ONLY in the ring band outside the selection bbox's
+			# corners (empty space that would otherwise start a box-select — the
+			# narrowest possible steal, and a deliberate one: a handle you can
+			# see must be a handle you can press).
+			if _begin_component_rotate_drag(event.position):
+				queue_redraw()
+				return
+
 			# Smart SELECT tool (the resting tool): click selects; click-drag on
 			# any SELECTED entity moves the whole selection (snap-aware); click-
 			# drag on empty space box-selects. One tool does select + move +
@@ -2537,6 +2596,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# selection drag or a box-select, so nothing else here concerns it.
 			if not _zone_vertex_drag_id.is_empty():
 				_end_zone_vertex_drag()
+				queue_redraw()
+				return
+
+			# Same ownership rule for a rotate drag: journal the one history
+			# step it owes and end the gesture.
+			if _rotate_drag_active:
+				_finish_component_rotate_drag()
 				queue_redraw()
 				return
 
@@ -2652,6 +2718,12 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	# hover chain under it would fight the handle for the cursor.
 	if not _zone_vertex_drag_id.is_empty():
 		_update_zone_vertex_drag(world_pos)
+		return
+
+	# A rotate drag owns the pointer for its whole life, same rule as the two
+	# gestures above — it started no pan, no selection drag, no marquee.
+	if _rotate_drag_active:
+		_update_component_rotate_drag(event)
 		return
 
 	# Pin inspector (WC-1) owns hover feedback instead of component hover; a
@@ -2866,6 +2938,11 @@ func _handle_key_input(event: InputEventKey) -> void:
 			if not _zone_vertex_drag_id.is_empty():
 				_cancel_zone_vertex_drag()
 				return
+			# Same innermost-gesture rule for a rotate drag: revert the previewed
+			# rotation (nothing was journalled) and keep the selection.
+			if _rotate_drag_active:
+				_cancel_component_rotate_drag()
+				return
 			# A zone draw in progress is what Escape cancels FIRST — cancelling it
 			# should not also wipe the user's component selection.
 			if _is_zone_tool() and not _zone_points.is_empty():
@@ -2905,7 +2982,12 @@ func _handle_key_input(event: InputEventKey) -> void:
 			if event.shift_pressed:
 				_toggle_inspect_pin_mode()
 		KEY_R:
-			_rotate_selected()
+			# Keyboard twin of the corner rotate handles (docket 019fcb93d367).
+			# Shift+R = counter-clockwise. Kept as an EXTRA, never the primary
+			# affordance — the owner's persona (maker, MS/Adobe conventions, no
+			# EDA muscle memory) discovers rotation through the handles and the
+			# context menu, not a bare keybinding.
+			_rotate_selected(event.shift_pressed)
 		KEY_G:
 			show_grid = not show_grid
 			queue_redraw()
@@ -3462,6 +3544,173 @@ func _entity_anchor(kind: String, entity_id: String) -> Vector2:
 				if not item_pts.is_empty():
 					return item_pts[0]
 	return Vector2.ZERO
+
+
+# ── Component rotate gesture (docket 019fcb93d367) ───────────────────────────
+
+## World-space AABB over the selected components' bodies, Rect2() when none.
+func _selected_components_bbox() -> Rect2:
+	var rect := Rect2()
+	var first := true
+	for comp_id in selected_components:
+		var comp = data.get_component(comp_id)
+		if comp == null:
+			continue
+		var r: Rect2 = comp.get_bounding_rect()
+		rect = r if first else rect.merge(r)
+		first = false
+	return rect if not first else Rect2()
+
+
+## Press in a corner rotate zone → begin the gesture. False leaves the press
+## for the pick/marquee ladder untouched. The zones only exist when the
+## selection holds at least one ROTATABLE target (an ungrouped component or an
+## unlocked group) — chrome for a selection that cannot rotate would be a lie.
+func _begin_component_rotate_drag(screen_pos: Vector2) -> bool:
+	if tool_mode != ToolMode.SELECT or data == null or selected_components.is_empty():
+		return false
+	var bbox := _selected_components_bbox()
+	if bbox.size == Vector2.ZERO:
+		return false
+	var bbox_screen := Rect2(world_to_screen(bbox.position),
+		world_to_screen(bbox.end) - world_to_screen(bbox.position))
+	if bbox_screen.has_point(screen_pos):
+		return false  # inside the bbox is the move-drag's territory
+	var in_zone := false
+	for corner in [bbox.position, Vector2(bbox.end.x, bbox.position.y),
+			bbox.end, Vector2(bbox.position.x, bbox.end.y)]:
+		var d := screen_pos.distance_to(world_to_screen(corner))
+		if d >= _ROTATE_RING_INNER_PX and d <= _ROTATE_RING_OUTER_PX:
+			in_zone = true
+			break
+	if not in_zone:
+		return false
+
+	_rotate_start_rotations = {}
+	_rotate_drag_groups = []
+	for comp_id in selected_components:
+		var group_id: String = data.component_group_id(comp_id)
+		if not group_id.is_empty():
+			if not data.is_group_locked(group_id) and not _rotate_drag_groups.has(group_id):
+				_rotate_drag_groups.append(group_id)
+			continue
+		var comp = data.get_component(comp_id)
+		if comp:
+			_rotate_start_rotations[comp_id] = float(comp.rotation)
+	if _rotate_start_rotations.is_empty() and _rotate_drag_groups.is_empty():
+		return false  # nothing rotatable (e.g. locked groups only)
+
+	_rotate_drag_active = true
+	_rotate_drag_center = bbox.get_center()
+	_rotate_drag_pointer_start = (screen_pos - world_to_screen(_rotate_drag_center)).angle()
+	_rotate_drag_applied = 0.0
+	return true
+
+
+## Snap tier for the CURRENT modifier state: 90° plain (board convention),
+## 45° with Shift, 1° with Ctrl/Cmd — read live per motion event, so the tier
+## can change mid-drag exactly like Adobe's constrain modifiers.
+func _rotate_snap_step(event: InputEventWithModifiers) -> float:
+	if event.ctrl_pressed or event.meta_pressed:
+		return 1.0
+	if event.shift_pressed:
+		return 45.0
+	return 90.0
+
+
+func _update_component_rotate_drag(event: InputEventMouseMotion) -> void:
+	var pointer_angle := (event.position - world_to_screen(_rotate_drag_center)).angle()
+	var delta_deg := rad_to_deg(pointer_angle - _rotate_drag_pointer_start)
+	var step := _rotate_snap_step(event)
+	var target := roundf(delta_deg / step) * step
+	if target != _rotate_drag_applied:
+		_apply_rotate_preview(target - _rotate_drag_applied)
+		_rotate_drag_applied = target
+	queue_redraw()
+
+
+## Live-preview a snapped delta on the UNGROUPED components only (direct
+## set_rotation + changed signal, deliberately no journal entry — the release
+## owes exactly one). Groups wait for release (see the state-block note).
+func _apply_rotate_preview(delta_deg: float) -> void:
+	for comp_id in _rotate_start_rotations:
+		var comp = data.get_component(comp_id)
+		if comp:
+			comp.set_rotation(fposmod(comp.rotation + delta_deg, 360.0))
+			data.component_changed.emit(comp_id)
+
+
+func _finish_component_rotate_drag() -> void:
+	_rotate_drag_active = false
+	var net := fposmod(_rotate_drag_applied, 360.0)
+	if is_zero_approx(net):
+		# A no-op gesture reverts any float residue and journals nothing.
+		_cancel_rotate_revert()
+		queue_redraw()
+		return
+	var turned := 0
+	for comp_id in _rotate_start_rotations:
+		var comp = data.get_component(comp_id)
+		if comp:
+			data.record_change("rotate_component", {
+				"component_id": comp_id,
+				"old_rotation": _rotate_start_rotations[comp_id],
+				"new_rotation": comp.rotation,
+			})
+			turned += 1
+	for group_id in _rotate_drag_groups:
+		turned += data.rotate_group(data.group_anchor_id(group_id), _rotate_drag_applied).size()
+	if turned > 0:
+		data.save_to_history("Rotate components")
+	_rotate_start_rotations = {}
+	_rotate_drag_groups = []
+	queue_redraw()
+
+
+func _cancel_component_rotate_drag() -> void:
+	_rotate_drag_active = false
+	_cancel_rotate_revert()
+	_rotate_start_rotations = {}
+	_rotate_drag_groups = []
+	queue_redraw()
+
+
+## Put every live-previewed component back exactly where the press found it.
+func _cancel_rotate_revert() -> void:
+	for comp_id in _rotate_start_rotations:
+		var comp = data.get_component(comp_id)
+		if comp:
+			comp.set_rotation(_rotate_start_rotations[comp_id])
+			data.component_changed.emit(comp_id)
+
+
+## Selection chrome for rotatable component selections: quarter-arc rotate
+## handles just OUTSIDE each bbox corner — the transform tool's orange, its
+## ring geometry, and deliberately NOTHING else (no scale/edge handles: the
+## absent affordances say "components don't scale"). During a drag, the live
+## angle reads out beside the cursor.
+func _draw_component_rotate_chrome() -> void:
+	if tool_mode != ToolMode.SELECT or selected_components.is_empty():
+		return
+	var bbox := _selected_components_bbox()
+	if bbox.size == Vector2.ZERO:
+		return
+	var tl := world_to_screen(bbox.position)
+	var br := world_to_screen(bbox.end)
+	var corners: Array = [tl, Vector2(br.x, tl.y), br, Vector2(tl.x, br.y)]
+	# Each corner's arc faces OUTWARD — a quarter arc centred on the corner's
+	# own diagonal direction, drawn mid-ring.
+	var out_angles: Array = [PI * 1.25, PI * 1.75, PI * 0.25, PI * 0.75]
+	var radius := (_ROTATE_RING_INNER_PX + _ROTATE_RING_OUTER_PX) * 0.5
+	for i in corners.size():
+		var c: Vector2 = corners[i]
+		var mid: float = out_angles[i]
+		draw_arc(c, radius, mid - 0.6, mid + 0.6, 12, _ROTATE_HANDLE_COLOR, 2.0, true)
+	if _rotate_drag_active:
+		var label := "%.0f°" % fposmod(_rotate_drag_applied, 360.0)
+		var pos := get_local_mouse_position() + Vector2(14, -10)
+		draw_string(ThemeDB.fallback_font, pos, label,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, _ROTATE_HANDLE_COLOR)
 
 
 ## Begin a drag-move anchored on the entity under the cursor. The anchor is only
@@ -4566,7 +4815,7 @@ func _unlock_all_components() -> void:
 ## One save_to_history for the whole gesture either way, as before — now skipped
 ## entirely when nothing turned, so an all-locked refusal leaves no empty undo
 ## step behind.
-func _rotate_selected() -> void:
+func _rotate_selected(ccw: bool = false) -> void:
 	if selected_components.is_empty():
 		return
 
@@ -4583,7 +4832,10 @@ func _rotate_selected() -> void:
 		var comp = data.get_component(comp_id)
 		if comp:
 			var old_rotation: float = comp.rotation
-			comp.rotate_clockwise()
+			if ccw:
+				comp.rotate_counterclockwise()
+			else:
+				comp.rotate_clockwise()
 			data.record_change("rotate_component", {
 				"component_id": comp_id,
 				"old_rotation": old_rotation,
@@ -4596,7 +4848,8 @@ func _rotate_selected() -> void:
 		if data.is_group_locked(group_id):
 			refused += 1
 			continue
-		turned += data.rotate_group(data.group_anchor_id(group_id), 90.0).size()
+		turned += data.rotate_group(
+			data.group_anchor_id(group_id), -90.0 if ccw else 90.0).size()
 
 	if turned > 0:
 		data.save_to_history("Rotate components")
