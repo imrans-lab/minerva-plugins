@@ -435,15 +435,16 @@
     },
     {
       "name": "minerva_pcb_load_board",
-      "description": "Load a complete PCB board from canonical YAML into the editor in ONE call — components (with pins and pad geometry), nets, traces, vias, and mounting holes. This is the whole-board importer; it replaces the multi-call add_component / connect_net / import_footprint_geometry / import_trace_geometry sequence. The `yaml` is the canonical board contract (width_mm/height_mm, components[].ref whose pins carry pad geometry via drill_mm/annulus_diameter_mm for through-hole or pad_width_mm/pad_height_mm for SMD, plus nets, traces, vias, mounting_holes). Returns component_count, net_count, and any deserialize warnings. DESTRUCTIVE REPLACE with an honesty report: loading swaps the WHOLE live board, and the reply's `delta` field names what the incoming source lacked relative to the live board it replaced (components_removed, traces_reduced per net, vias_removed, zones/cutouts/mounting_holes_removed, plus `dropped` sentences). READ IT — a source missing entities the live board had (e.g. a YAML with no zones) destroys them; reconciliation is the CALLER's judgment, this tool only reports.",
+      "description": "Load a complete PCB board from canonical YAML into the editor in ONE call — components (with pins and pad geometry), nets, traces, vias, and mounting holes. This is the whole-board importer; it replaces the multi-call add_component / connect_net / import_footprint_geometry / import_trace_geometry sequence. Provide EXACTLY ONE of `path` (absolute file path, read server-side — PREFER THIS for files on disk: it costs ~20 tokens instead of the whole board twice) or `yaml` (inline canonical board source, for boards you authored in-context). The canonical contract: width_mm/height_mm, components[].ref whose pins carry pad geometry via drill_mm/annulus_diameter_mm for through-hole or pad_width_mm/pad_height_mm for SMD, plus nets, traces, vias, mounting_holes. Returns component_count, net_count, deserialize warnings, board_name, and source_digest (sha256 of the loaded YAML text — compare it to verify the board that landed is byte-identical to your source). DESTRUCTIVE REPLACE with an honesty report: loading swaps the WHOLE live board, and the reply's `delta` field names what the incoming source lacked relative to the live board it replaced (components_removed, traces_reduced per net, vias_removed, zones/cutouts/mounting_holes_removed, plus `dropped` sentences). READ IT — a source missing entities the live board had (e.g. a YAML with no zones) destroys them; reconciliation is the CALLER's judgment, this tool only reports.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "yaml": {"type": "string", "description": "Canonical board YAML (see docs/board-yaml.md)"}
+          "yaml": {"type": "string", "description": "Canonical board YAML source, inline (see docs/board-yaml.md). Mutually exclusive with path."},
+          "path": {"type": "string", "description": "Absolute filesystem path to a canonical board YAML file, read server-side. Mutually exclusive with yaml — prefer this for files on disk."}
         },
-        "required": ["editor_name", "yaml"]
+        "required": ["editor_name"]
       }
     },
     {

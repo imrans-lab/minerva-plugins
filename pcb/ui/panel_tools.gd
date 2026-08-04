@@ -3083,9 +3083,27 @@ static func _resolve_data(host) -> Variant:
 static func _load_board(host, args: Dictionary) -> Dictionary:
 	if host == null:
 		return _err("PCB data not available")
+	# Dual-key source (docket 019fcbdef1f1, the annotations_list convention):
+	# inline `yaml` OR an absolute `path` read server-side — exactly one. The
+	# path form exists because the inline form taxes an agent the whole board
+	# TWICE in context (measured ~12-14K tokens for a small board), which is
+	# precisely the pressure that invites bypassing the MCP surface.
 	var yaml_text: String = str(args.get("yaml", ""))
-	if yaml_text.is_empty():
-		return _err("yaml is required")
+	var src_path: String = str(args.get("path", ""))
+	if yaml_text.is_empty() and src_path.is_empty():
+		return _err("provide one of 'yaml' (inline board source) or 'path' (absolute file path)")
+	if not yaml_text.is_empty() and not src_path.is_empty():
+		return _err("provide only one of 'yaml' or 'path', not both")
+	if not src_path.is_empty():
+		if not FileAccess.file_exists(src_path):
+			return _err("file_not_found: %s" % src_path)
+		var f := FileAccess.open(src_path, FileAccess.READ)
+		if f == null:
+			return _err("file_unreadable: %s (error %d)" % [src_path, FileAccess.get_open_error()])
+		yaml_text = f.get_as_text()
+		f.close()
+		if yaml_text.strip_edges().is_empty():
+			return _err("file_empty: %s" % src_path)
 	if not host.has_method("load_board"):
 		return _err("host has no load_board bridge to the panel")
 	# Census BEFORE the destructive replace (docket 019fcb6ffeba): load_board
@@ -3106,6 +3124,16 @@ static func _load_board(host, args: Dictionary) -> Dictionary:
 	var delta: Dictionary = _census_delta(before, after)
 	if not delta.is_empty():
 		out["delta"] = delta
+	# Verification anchors (docket 019fcbdef1f1): the digest lets an agent that
+	# hand-carried the YAML PROVE the board it loaded is byte-identical to its
+	# source (the inline path has silent-corruption risk with no detection
+	# otherwise); the name + echoed path say WHAT landed at a glance.
+	out["source_digest"] = yaml_text.sha256_text()
+	if not src_path.is_empty():
+		out["path"] = src_path
+	var loaded_data = _get_data(host)
+	if loaded_data != null:
+		out["board_name"] = str(loaded_data.board_name)
 	return _ok(out)
 
 
