@@ -1439,6 +1439,42 @@ func _stale_live_verdicts() -> Array:
 
 # ── INV-1: the composite COMMIT transaction ───────────────────────────────────
 
+## Endpoint-coincidence epsilon (board mm) for chaining consecutive validated
+## seg_plan entries into one trace. The router splits at EXACT shared points, so
+## this only absorbs float noise — the same constant family as the canvas
+## draw-time run merge (pcb_canvas.gd CANDIDATE_RUN_CHAIN_EPSILON_MM).
+const _COMMIT_CHAIN_EPSILON_MM := 0.0001
+
+
+## Merge consecutive seg_plan entries that share layer + width and whose
+## endpoints coincide into single multi-point entries (docket 019fce6184c2).
+## Consecutive-only, deliberately: seg_plan preserves the router's emission
+## order, which is the route's walk order — a non-adjacent same-layer segment
+## is a genuinely separate run (e.g. the far side of a via) and must stay its
+## own trace. The merged entry keeps the FIRST segment's id (ids are only read
+## by post-merge error messages).
+static func _chain_seg_plan(seg_plan: Array) -> Array:
+	var out: Array = []
+	for plan in seg_plan:
+		if not out.is_empty():
+			var prev: Dictionary = out[out.size() - 1]
+			var prev_pts: Array = prev["points"]
+			var pts: Array = plan["points"]
+			if str(prev["layer"]) == str(plan["layer"]) \
+					and is_equal_approx(float(prev["width"]), float(plan["width"])) \
+					and (prev_pts[prev_pts.size() - 1] as Vector2).distance_to(pts[0] as Vector2) \
+						<= _COMMIT_CHAIN_EPSILON_MM:
+				for k in range(1, pts.size()):
+					prev_pts.append(pts[k])
+				continue
+		out.append({
+			"id": str(plan["id"]),
+			"layer": str(plan["layer"]),
+			"width": float(plan["width"]),
+			"points": (plan["points"] as Array).duplicate(),
+		})
+	return out
+
 ## Turn a candidate into real copper on `board` as ONE undoable step.
 ##
 ## WHAT "ONE STEP" MEANS HERE, precisely:
@@ -1531,6 +1567,15 @@ func commit(candidate_id: String, board = null) -> Dictionary:
 			"layer": PcbLayerStack.kicad_to_canon(seg_dict.get("layer", "top")),
 			"width": w, "points": pts,
 		})
+	# ONE TRACE PER CONTIGUOUS RUN, not per segment (docket 019fce6184c2). The
+	# router emits a bend as two segments sharing an endpoint; materializing
+	# each as its own 2-point trace fragments one piece of copper into N trace
+	# identities — rendered as N butt-capped polylines with a wedge gap at
+	# every shared corner (HITL-3: "outer corners disconnected"), promoted to
+	# YAML as N entries where the canonical style is one multi-point polyline.
+	# Chaining here, after per-segment validation, keeps the pre-flight errors
+	# named per segment while the copper lands the way a human would draw it.
+	seg_plan = _chain_seg_plan(seg_plan)
 	var via_plan: Array = []
 	for via in c.vias:
 		if not (via is Dictionary):

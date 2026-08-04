@@ -420,6 +420,92 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	})
 
 
+## Pad-coincidence epsilon (board mm) for the dangling-copper sweep below.
+## Trace endpoints land ON pad centres (the router snaps them there), so this
+## only absorbs float noise from the transform math.
+const _DANGLE_EPSILON_MM := 0.05
+
+
+## Mutation honesty for component transforms (docket 019fce619a30, same family
+## as load_board's delta and the landing verbs' cross_candidate_check): copper
+## does NOT follow parts, so a move/rotate can orphan committed traces that
+## ended on the part's pads — and in HITL-3 that orphan surfaced two calls
+## later as a DRC dangling_endpoint instead of in the mover's own reply.
+##
+## `pre_pins_by_comp` maps component_id -> get_all_pin_positions() captured
+## BEFORE the transform (one entry for a single move, one per member for a
+## group move). After the transform, every committed trace endpoint that sat
+## on one of those pre-transform pads and now touches NONE of that component's
+## pads is named: trace_id, net, position. The caller appends the result as
+## `dangling_copper` — advisory only, never a refusal (the move already
+## happened, honestly and undoably; this is the map to the mess).
+static func _dangling_copper_warnings(data, pre_pins_by_comp: Dictionary) -> Array:
+	var warnings: Array = []
+	for comp_id in pre_pins_by_comp:
+		var comp = data.get_component(str(comp_id))
+		if comp == null:
+			continue
+		var pre_pins: Dictionary = pre_pins_by_comp[comp_id]
+		var post_pins: Dictionary = comp.get_all_pin_positions()
+		for trace_id in data.traces:
+			var trace = data.traces[trace_id]
+			var wp: Array = trace.waypoints
+			if wp.size() < 2:
+				continue
+			for endpoint in [wp[0] as Vector2, wp[wp.size() - 1] as Vector2]:
+				var was_on_pad := false
+				for pin_name in pre_pins:
+					if (pre_pins[pin_name] as Vector2).distance_to(endpoint) <= _DANGLE_EPSILON_MM:
+						was_on_pad = true
+						break
+				if not was_on_pad:
+					continue
+				var still_on_pad := false
+				for pin_name in post_pins:
+					if (post_pins[pin_name] as Vector2).distance_to(endpoint) <= _DANGLE_EPSILON_MM:
+						still_on_pad = true
+						break
+				if not still_on_pad:
+					warnings.append({
+						"trace_id": str(trace.id),
+						"net": str(trace.net_name),
+						"at": [endpoint.x, endpoint.y],
+						"component_id": str(comp_id),
+						"message": "trace endpoint at (%.2f, %.2f) on net '%s' sat on a %s pad before this transform and now dangles — copper does not follow parts; delete it (minerva_pcb_delete_traces) or reroute" \
+							% [endpoint.x, endpoint.y, str(trace.net_name), str(comp_id)],
+					})
+	return warnings
+
+
+## Pre-transform pad snapshot for _dangling_copper_warnings: the addressed
+## component, plus every group member when it is grouped (a group transform
+## moves ALL their pads).
+static func _pre_transform_pins(data, component_id: String) -> Dictionary:
+	var out: Dictionary = {}
+	var ids: Array = [component_id]
+	var group_id: String = str(data.component_group_id(component_id))
+	if not group_id.is_empty() and data.has_method("group_member_ids"):
+		for mid in data.group_member_ids(group_id):
+			if not (str(mid) in ids):
+				ids.append(str(mid))
+	for cid in ids:
+		var comp = data.get_component(str(cid))
+		if comp != null:
+			out[str(cid)] = comp.get_all_pin_positions()
+	return out
+
+
+## Append the dangling-copper sweep to a successful transform reply (no-op on
+## refusals and on a clean sweep, so untouched boards see untouched replies).
+static func _with_dangling_copper(data, reply: Dictionary, pre_pins_by_comp: Dictionary) -> Dictionary:
+	if not bool(reply.get("success", false)):
+		return reply
+	var warnings: Array = _dangling_copper_warnings(data, pre_pins_by_comp)
+	if not warnings.is_empty():
+		reply["dangling_copper"] = warnings
+	return reply
+
+
 static func _move_component(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -430,15 +516,17 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 	if not data.has_component(component_id):
 		return _err("Component not found: %s" % component_id)
 
+	var pre_pins: Dictionary = _pre_transform_pins(data, component_id)
 	var new_pos: Vector2 = data.snap_to_grid(Vector2(float(args.get("x", 0.0)), float(args.get("y", 0.0))))
 	# A GROUPED component moves the WHOLE group, offsets preserved — the same
 	# semantics a canvas drag has (A4). Ungrouped: unchanged, byte for byte.
 	var group_reply := _move_component_group(data, component_id, new_pos)
 	if not group_reply.is_empty():
-		return group_reply
+		return _with_dangling_copper(data, group_reply, pre_pins)
 	data.move_component(component_id, new_pos)
 	data.save_to_history("Move " + component_id)
-	return _ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y})
+	return _with_dangling_copper(data,
+		_ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y}), pre_pins)
 
 
 ## Shared group-move half of move_component / move_relative.
@@ -500,6 +588,7 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 		"interpreted_direction": direction,
 	}
 	if data.has_component(component_id):
+		var pre_pins: Dictionary = _pre_transform_pins(data, component_id)
 		# Group parity with _move_component: a grouped component carries its whole
 		# group to the interpreted destination. The reply keeps new_x/new_y (the
 		# ADDRESSED component's landing point) and adds the group fields.
@@ -509,9 +598,10 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 				return group_reply  # locked group — surface the refusal verbatim
 			for key in ["group_id", "moved_components", "moved_count"]:
 				reply[key] = group_reply[key]
-			return _ok(reply)
+			return _with_dangling_copper(data, _ok(reply), pre_pins)
 		data.move_component(component_id, data.snap_to_grid(new_pos))
 		data.save_to_history("Move " + component_id)
+		return _with_dangling_copper(data, _ok(reply), pre_pins)
 
 	return _ok(reply)
 
@@ -537,6 +627,7 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 	else:
 		new_rotation = float(degrees)
 
+	var pre_pins: Dictionary = _pre_transform_pins(data, component_id)
 	# A GROUPED component rotates its whole group as a RIGID BODY about the group
 	# anchor (positions orbit, every member's own rotation turns) — the same thing
 	# R does on the canvas for a group selection. The requested rotation is
@@ -549,17 +640,18 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 		data.begin_batch()
 		var turned: Array = data.rotate_group(component_id, new_rotation - comp.rotation)
 		data.end_batch("Rotate group (%d)" % turned.size())
-		return _ok({
+		return _with_dangling_copper(data, _ok({
 			"component_id": component_id,
 			"rotation": comp.rotation,
 			"group_id": group_id,
 			"rotated_components": turned,
 			"rotated_count": turned.size(),
-		})
+		}), pre_pins)
 
 	data.rotate_component(component_id, new_rotation)
 	data.save_to_history("Rotate " + component_id)
-	return _ok({"component_id": component_id, "rotation": new_rotation})
+	return _with_dangling_copper(data,
+		_ok({"component_id": component_id, "rotation": new_rotation}), pre_pins)
 
 
 static func _delete_component(host, args: Dictionary) -> Dictionary:
@@ -3375,6 +3467,46 @@ static func _candidate_record(workspace, c) -> Dictionary:
 	return rec
 
 
+## The candidate's GEOMETRY, JSON-shaped (docket 019fce3ac3f5 item 3): segments
+## as {id, layer, width, points:[[x,y],…]} and vias as {id, position:[x,y],
+## diameter, from_layer, to_layer}. This is the pre-commit review object — until
+## it existed, an agent could read a committed trace's every coordinate
+## (export_trace_geometry) but had to approve a PROPOSAL on segment counts and
+## DRC verdicts alone; HITL-3 shipped an under-body bend and a pad-row corridor
+## that one look at the numbers would have caught. Opt-in via include_geometry
+## so default lists and the landing verbs' candidate records stay lean.
+static func _candidate_geometry(c) -> Dictionary:
+	var segments: Array = []
+	for seg in c.segments:
+		if not (seg is Dictionary):
+			continue
+		var seg_dict: Dictionary = seg
+		var pts: Array = []
+		for p in seg_dict.get("points", []):
+			if p is Vector2:
+				pts.append([(p as Vector2).x, (p as Vector2).y])
+		segments.append({
+			"id": str(seg_dict.get("id", "")),
+			"layer": str(seg_dict.get("layer", "")),
+			"width": float(seg_dict.get("width", 0.0)),
+			"points": pts,
+		})
+	var vias: Array = []
+	for via in c.vias:
+		if not (via is Dictionary):
+			continue
+		var via_dict: Dictionary = via
+		var pos: Variant = via_dict.get("position", null)
+		vias.append({
+			"id": str(via_dict.get("id", "")),
+			"position": [(pos as Vector2).x, (pos as Vector2).y] if pos is Vector2 else [],
+			"diameter": float(via_dict.get("diameter", 0.0)),
+			"from_layer": str(via_dict.get("from_layer", "")),
+			"to_layer": str(via_dict.get("to_layer", "")),
+		})
+	return {"segments": segments, "vias": vias}
+
+
 ## The named-refusal envelope for a disposition verb that came back false. Reads
 ## the workspace's own last_transition_error so the tool never invents a reason.
 static func _workspace_refusal(workspace, verb: String, candidate_id: String) -> Dictionary:
@@ -3573,6 +3705,7 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 		return ctx.get("reply")
 	var workspace = ctx["ws"]
 	var include_terminal: bool = bool(args.get("include_terminal", false))
+	var include_geometry: bool = bool(args.get("include_geometry", false))
 	var want_task: String = str(args.get("task_id", ""))
 	var want_net: String = str(args.get("net", ""))
 	var live: Dictionary = {}
@@ -3589,7 +3722,10 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 			continue
 		if not want_net.is_empty() and str(c.net) != want_net:
 			continue
-		out.append(_candidate_record(workspace, c))
+		var rec: Dictionary = _candidate_record(workspace, c)
+		if include_geometry:
+			rec["geometry"] = _candidate_geometry(c)
+		out.append(rec)
 	var tasks: Array = []
 	for t in workspace.list_tasks():
 		tasks.append({
@@ -3610,7 +3746,7 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 
 ## The candidate the UI is focused on. Empty active id is a SUCCESS with
 ## active_candidate_id "" — "nothing is selected" is an answer, not an error.
-static func _workspace_get_active(host, _args: Dictionary) -> Dictionary:
+static func _workspace_get_active(host, args: Dictionary) -> Dictionary:
 	var ctx: Dictionary = _workspace_ctx(host)
 	if not bool(ctx.get("ok", false)):
 		return ctx.get("reply")
@@ -3619,8 +3755,10 @@ static func _workspace_get_active(host, _args: Dictionary) -> Dictionary:
 	if cid.is_empty():
 		return _ok({"active_candidate_id": "", "candidate": {},
 			"note": "no candidate is active (select one on the canvas, or pass candidate_id to the verb you meant)"})
-	var reply: Dictionary = {"active_candidate_id": cid,
-		"candidate": _candidate_record(workspace, workspace.get_candidate(cid))}
+	var rec: Dictionary = _candidate_record(workspace, workspace.get_candidate(cid))
+	if bool(args.get("include_geometry", false)):
+		rec["geometry"] = _candidate_geometry(workspace.get_candidate(cid))
+	var reply: Dictionary = {"active_candidate_id": cid, "candidate": rec}
 	if workspace.has_method("findings_for_candidate"):
 		reply["findings"] = workspace.findings_for_candidate(cid)
 	return _ok(reply)

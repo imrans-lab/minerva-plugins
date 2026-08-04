@@ -105,6 +105,7 @@ func _init() -> void:
 	await _run_removal_contract()
 	await _run_route_request_extra()
 	await _run_cross_candidate_check_reply()
+	await _run_review_and_honesty_batch()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1663,5 +1664,119 @@ func _run_cross_candidate_check_reply() -> void:
 	check_eq("no worker bridge ⇒ the NAMED skip, never a hang or a failure",
 		str((out2.get("cross_candidate_check", {}) as Dictionary).get("skipped", "")),
 		"draft_check_no_reply")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 13. HITL-3 review + honesty batch ═════════════════════════════════════════
+#
+# Three fixes from the owner's committed-copper review, one fixture context:
+#   a) include_geometry (docket 019fce3ac3f5 item 3): workspace_list/get_active
+#      expose a candidate's exact segments/vias — the pre-commit review object.
+#   b) commit polyline chaining (docket 019fce6184c2): contiguous same-layer/
+#      -width segments land as ONE multi-point trace, not N butt-capped 2-point
+#      traces with wedge-gapped corners.
+#   c) dangling-copper honesty (docket 019fce619a30): a move whose component
+#      had committed copper on its pads names the orphaned trace endpoints in
+#      the SAME reply.
+
+func _run_review_and_honesty_batch() -> void:
+	print("-- 13. HITL-3 batch: geometry read / commit chaining / dangling copper --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var data = ctx["data"]
+
+	# ── a) include_geometry ───────────────────────────────────────────────────
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose landed the gate candidate", int(out.get("proposed", 0)) == 1)
+	var lean: Dictionary = PanelTools._workspace_list(shim, _args())
+	check("default list carries NO geometry key",
+		not ((lean.get("candidates", []) as Array)[0] as Dictionary).has("geometry"))
+	var rich: Dictionary = PanelTools._workspace_list(shim, _args({"include_geometry": true}))
+	var rec: Dictionary = (rich.get("candidates", []) as Array)[0]
+	check("include_geometry adds the geometry key", rec.has("geometry"))
+	var geo: Dictionary = rec.get("geometry", {})
+	check_eq("geometry names all 3 segments", (geo.get("segments", []) as Array).size(), 3)
+	check_eq("geometry names the via", (geo.get("vias", []) as Array).size(), 1)
+	var seg0: Dictionary = (geo.get("segments", []) as Array)[0]
+	check("segment points are JSON arrays, not Vector2s",
+		(seg0.get("points", []) as Array)[0] is Array)
+	check_eq("segment 0 starts at the fixture's (0,0)",
+		((seg0.get("points", []) as Array)[0] as Array), [0.0, 0.0])
+	check("segment carries layer and width",
+		not str(seg0.get("layer", "")).is_empty() and float(seg0.get("width", 0.0)) > 0.0)
+
+	# ── b) commit chains contiguous same-layer segments into one polyline ─────
+	# A fresh hint + reply whose 3 segments chain on ONE layer: the commit must
+	# land ONE trace with the 4-point walk, not three 2-point fragments.
+	var hint3: String = _seed_net_named_hint(ctx["host"], "N3")
+	shim.reply = {"routes": [{
+		"net": "N3",
+		"segments": [
+			{"start": [0.0, 20.0], "end": [10.0, 20.0], "layer": "F.Cu"},
+			{"start": [10.0, 20.0], "end": [10.0, 25.0], "layer": "F.Cu"},
+			{"start": [10.0, 25.0], "end": [20.0, 25.0], "layer": "F.Cu"},
+		],
+		"vias": [],
+		"hint_ids": [hint3],
+	}], "via_count": 0}
+	var landed: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint3]}))
+	var cid3 := str(((landed.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var committed: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid3}))
+	check("chained commit succeeded", bool(committed.get("success", false)))
+	var tids: Array = committed.get("trace_ids", [])
+	check_eq("three chained segments became ONE trace", tids.size(), 1)
+	if tids.size() == 1:
+		var trace = data.get_trace(str(tids[0]))
+		check("the trace exists on the board", trace != null)
+		if trace != null:
+			check_eq("the one trace walks all four points", (trace.waypoints as Array).size(), 4)
+			check_eq("…ending at the route's far end",
+				trace.waypoints[3], Vector2(20.0, 25.0))
+
+	# The GATE candidate (layer break at the via + a disconnected path) must
+	# still commit as THREE traces — chaining never fuses across layers or gaps.
+	var cid_gate := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var gate_committed: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid_gate}))
+	check("gate commit succeeded", bool(gate_committed.get("success", false)))
+	check_eq("layer-break + disconnected path still commit as three traces",
+		(gate_committed.get("trace_ids", []) as Array).size(), 3)
+
+	# ── c) dangling-copper honesty on move/rotate ─────────────────────────────
+	var added: Dictionary = await PanelTools._add_component(shim,
+		_args({"id": "U9", "footprint": "IC_DIP", "x": 30.0, "y": 40.0}))
+	check("fixture component added", bool(added.get("success", false)))
+	var comp = data.get_component("U9")
+	var pin_positions: Dictionary = comp.get_all_pin_positions()
+	var first_pin: Vector2 = pin_positions[pin_positions.keys()[0]]
+	var stub = data.new_trace()
+	stub.net_name = "N9"
+	stub.layer = "top"
+	stub.width = 0.3
+	stub.waypoints.append(first_pin)
+	stub.waypoints.append(first_pin + Vector2(6.0, 0.0))
+	data.add_trace(stub)
+	var stub_id := str(stub.id)
+
+	var moved: Dictionary = PanelTools._move_component(shim,
+		_args({"component_id": "U9", "x": 60.0, "y": 70.0}))
+	check("move succeeded", bool(moved.get("success", false)))
+	check("the move names its orphaned copper", moved.has("dangling_copper"))
+	var dangles: Array = moved.get("dangling_copper", [])
+	check_eq("exactly one endpoint dangles", dangles.size(), 1)
+	if dangles.size() == 1:
+		var d: Dictionary = dangles[0]
+		check_eq("the warning names the stub trace", str(d.get("trace_id", "")), stub_id)
+		check_eq("…and its net", str(d.get("net", "")), "N9")
+		check_eq("…and the component that abandoned it", str(d.get("component_id", "")), "U9")
+
+	# NEGATIVE GATE: after the move the stub no longer touches U9's pads, so a
+	# further rotate must NOT re-report it (was_on_pad is the filter) — and a
+	# component with no copper reports nothing at all.
+	var rotated: Dictionary = PanelTools._rotate_component(shim,
+		_args({"component_id": "U9", "degrees": 90}))
+	check("rotate succeeded", bool(rotated.get("success", false)))
+	check("rotate does NOT re-report copper that was already orphaned",
+		not rotated.has("dangling_copper"))
 
 	ctx["driver"].free_panel(ctx["panel"])

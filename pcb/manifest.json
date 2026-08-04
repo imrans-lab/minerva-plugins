@@ -139,7 +139,7 @@
     },
     {
       "name": "minerva_pcb_move_component",
-      "description": "Move a component to an absolute position. Requires editor_name from minerva_list_editors and component names from minerva_pcb_get_components.",
+      "description": "Move a component to an absolute position. Requires editor_name from minerva_list_editors and component names from minerva_pcb_get_components. On success the reply may carry dangling_copper: committed trace endpoints that sat on this component's (or its group members') pads before the move and now touch none of them [{trace_id, net, at:[x,y], component_id, message}] — copper does not follow parts; delete (minerva_pcb_delete_traces) or reroute those traces before routing new work.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -154,7 +154,7 @@
     },
     {
       "name": "minerva_pcb_move_relative",
-      "description": "Move a component using natural language direction (e.g., 'down a bit', 'closer to U3').",
+      "description": "Move a component using natural language direction (e.g., 'down a bit', 'closer to U3'). On success the reply may carry dangling_copper (same shape as minerva_pcb_move_component's).",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -168,14 +168,14 @@
     },
     {
       "name": "minerva_pcb_rotate_component",
-      "description": "Rotate a component. Positive degrees rotate counter-clockwise (CCW), negative rotate clockwise (CW). Requires editor_name from minerva_list_editors.",
+      "description": "Set a component's ABSOLUTE rotation in degrees — the numeric value is the final orientation, NOT a delta: a component at 90 called with degrees:-90 lands at 270, not 0. For relative 90-degree turns pass the string 'clockwise' or 'counterclockwise' instead. Grouped components rotate their whole group as a rigid body about the group anchor. On success the reply may carry dangling_copper (same shape as minerva_pcb_move_component's) — copper does not follow parts. Requires editor_name from minerva_list_editors.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "component_id": {"type": "string", "description": "Component ID to rotate"},
-          "degrees": {"type": "number", "description": "Rotation angle. Positive = counter-clockwise (CCW), negative = clockwise (CW). Common values: 90 (CCW), -90 (CW), 180."}
+          "degrees": {"type": "number", "description": "ABSOLUTE final rotation in degrees (0/90/180/270 or any angle) — NOT a delta. Negative values wrap mod 360 (-90 = 270)."}
         },
         "required": ["editor_name", "component_id", "degrees"]
       }
@@ -899,13 +899,14 @@
     },
     {
       "name": "minerva_pcb_workspace_list",
-      "description": "List the routing workspace: candidates, tasks and selection. Read-only; journals nothing. Args {editor_name, include_terminal?, task_id?, net?}. Returns {candidates:[…], count, tasks:[{task_id, net, state, span_scoped}], open_task_ids, active_candidate_id, pinned_candidate_ids, stale_candidate_ids}. LIVE candidates only by default — superseded/rejected/committed ones are history and would bury the answers you are deciding between; pass include_terminal:true to see them. A candidate's two axes are independent: disposition is the workflow decision, validation is the DRC health (unchecked/checking/clean/violating/stale/error).",
+      "description": "List the routing workspace: candidates, tasks and selection. Read-only; journals nothing. Args {editor_name, include_terminal?, include_geometry?, task_id?, net?}. Returns {candidates:[…], count, tasks:[{task_id, net, state, span_scoped}], open_task_ids, active_candidate_id, pinned_candidate_ids, stale_candidate_ids}. LIVE candidates only by default — superseded/rejected/committed ones are history and would bury the answers you are deciding between; pass include_terminal:true to see them. Pass include_geometry:true to read each candidate's exact segments/vias — THE pre-commit review object: check the route's actual coordinates against your intent (waypoint adherence, bend placement, corridors) instead of trusting counts and DRC verdicts alone. A candidate's two axes are independent: disposition is the workflow decision, validation is the DRC health (unchecked/checking/clean/violating/stale/error).",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "include_terminal": {"type": "boolean", "description": "Include superseded/rejected/committed candidates (default false)"},
+          "include_geometry": {"type": "boolean", "description": "Add each candidate's exact geometry under a 'geometry' key: segments [{id, layer, width, points:[[x,y],…]}] and vias [{id, position:[x,y], diameter, from_layer, to_layer}], board mm. Opt-in (default false) so default lists stay lean."},
           "task_id": {"type": "string", "description": "Only candidates answering this routing task"},
           "net": {"type": "string", "description": "Only candidates on this net"}
         },
@@ -914,12 +915,13 @@
     },
     {
       "name": "minerva_pcb_workspace_get_active",
-      "description": "The route candidate the panel is focused on, with its findings. Read-only. Args {editor_name}. Returns {active_candidate_id, candidate:{…}, findings:[…]}. No active candidate is a SUCCESS with active_candidate_id \"\" — \"nothing is selected\" is an answer, not an error; pass candidate_id explicitly to the verb you meant.",
+      "description": "The route candidate the panel is focused on, with its findings. Read-only. Args {editor_name, include_geometry?}. Returns {active_candidate_id, candidate:{…}, findings:[…]}; include_geometry:true adds the candidate's exact segments/vias (same shape as minerva_pcb_workspace_list's). No active candidate is a SUCCESS with active_candidate_id \"\" — \"nothing is selected\" is an answer, not an error; pass candidate_id explicitly to the verb you meant.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
-          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "include_geometry": {"type": "boolean", "description": "Add the active candidate's exact geometry (same shape as minerva_pcb_workspace_list's include_geometry)."}
         },
         "required": ["editor_name"]
       }
