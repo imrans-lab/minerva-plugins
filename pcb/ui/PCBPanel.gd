@@ -947,8 +947,7 @@ func _build_sidebar() -> VBoxContainer:
 	# cutout has neither (see pcb_data.gd's Cutout Management doc) — so unlike
 	# the zone tools it needs no sidebar picker at all; _sync_draw_arm_ui's
 	# is_zone_tool/is_pour_tool/is_trace_tool booleans all fall through false
-	# for it. No icon asset exists yet, so this is a text button (_add_tool_button's
-	# own fallback contract) until one is added.
+	# for it.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.CUTOUT, "Cutout",
 		"Draw a board opening (click corners, Enter to close)", "cutout_24.png")
 
@@ -957,11 +956,9 @@ func _build_sidebar() -> VBoxContainer:
 	# board ENTITIES (N real Trace entities, one undo step). No sidebar
 	# picker: unlike Pour's net picker, the net LIST is authored by clicking
 	# pads/traces on the canvas itself (the S3 picker), not a widget — see
-	# pcb_canvas.gd's Bus Authoring region. No icon asset exists yet, so this
-	# is a text button (_add_tool_button's own fallback contract) until one
-	# is added, same as Cutout was at launch.
+	# pcb_canvas.gd's Bus Authoring region.
 	_add_tool_button(draw_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
-		"Draw a parallel bus (click pads/traces to pick nets, Enter to draw the spine)", "bus_24.png")
+		"Draw a parallel bus (pick nets by clicking pads; Enter commits, Shift+Enter proposes)", "bus_24.png")
 
 	# Eraser (item 019fb934827776) + Delete/trash-can (item 019fb92f8b83) live
 	# HERE, not in the Select section above (cold-review N3) — the section
