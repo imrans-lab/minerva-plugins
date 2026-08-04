@@ -55,6 +55,17 @@ EXPECTED_PAD_COUNTS = {
     "R_0805": 2,
     "C_0805": 2,
     "TH_TestPoint": 1,
+    # Smart-remote real-ref batch (2026-08-04, docket 019fcb06e8d0 round):
+    # the board's own part names, authored fresh into the seed library.
+    "Adafruit:MAX98357A_I2S_1x7_P2.54mm": 7,
+    # The speaker-output screw terminals as pins 8/9 — the owner-ruled
+    # non-standard extension; 1x7 header + 2 terminal pads.
+    "Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals": 9,
+    # CORRECTED pinout geometry: 7.62mm row spacing (DIP numbering).
+    "INMP441:INMP441_I2S_2x3_P2.54mm": 6,
+    "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical": 2,
+    # Power-path Schottky (SS34/JLCPCB C8678), SMD lap pads.
+    "Diode_SMD:D_SMA": 2,
 }
 
 # MountingHole is a purely-mechanical footprint: it carries NO F.SilkS graphics

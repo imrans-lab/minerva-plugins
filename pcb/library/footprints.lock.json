@@ -1,13 +1,13 @@
 {
  "Adafruit:MAX98357A_I2S_1x7_P2.54mm": {
   "path": "Adafruit.pretty/MAX98357A_I2S_1x7_P2.54mm.kicad_mod",
-  "sha256": "d5b0f1896b6aa7a625b44db7e10ef16814172064f5610b85680e4a10a97deda2",
-  "size_bytes": 1713
+  "sha256": "aff24285c1339f129cb866bc21168948b1b5af5815575d1f2994fa12b3cf6fc5",
+  "size_bytes": 2013
  },
  "Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals": {
   "path": "Adafruit.pretty/MAX98357A_I2S_1x7_P2.54mm_WithTerminals.kicad_mod",
-  "sha256": "05293868de17f3102860e92cfbd1651d395fae07406b04bd405c001c0db23207",
-  "size_bytes": 1974
+  "sha256": "8363aae04230f657c37f7642f1c86fc470cdf86ba1e352baafe862a726f91647",
+  "size_bytes": 2278
  },
  "C_0805": {
   "path": "Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
@@ -21,8 +21,8 @@
  },
  "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical": {
   "path": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
-  "sha256": "03305269476ab2913e64865c6b5516461808530f97d213d4784b80fc40efd082",
-  "size_bytes": 1200
+  "sha256": "d5ac19c4d2a8248d6bdb67fee2db15f11d6a63af7c5bd63dd6faf23103b60c1c",
+  "size_bytes": 1496
  },
  "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical": {
   "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x04_P2.54mm_Vertical.kicad_mod",
@@ -56,8 +56,8 @@
  },
  "INMP441:INMP441_I2S_2x3_P2.54mm": {
   "path": "INMP441.pretty/INMP441_I2S_2x3_P2.54mm.kicad_mod",
-  "sha256": "0290a2caff6f93ed59637295d9fbca49bd2fe17b56a27a65eddf36d2a9fe11cd",
-  "size_bytes": 1655
+  "sha256": "a5aa6281c453b7a6cdee181c5333a1a0f25eaa73778047eb633a165d5be1809c",
+  "size_bytes": 1955
  },
  "MountingHole:MountingHole_3.2mm_M3": {
   "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",

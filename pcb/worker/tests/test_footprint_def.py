@@ -288,6 +288,19 @@ _EXPECTED_SEED_MARKERS = {
     # scope; see fab_capability.py's frozen boundary).
     "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal":
         (("uncaptured_graphic", "F.Fab", "fab"),),
+    # Smart-remote real-ref batch (2026-08-04): same shape as the connector
+    # rows above — one visible reference on F.SilkS (captured, excluded) plus
+    # one ``value`` fp_text on F.Fab (out of scope, stays a marker).
+    "Adafruit:MAX98357A_I2S_1x7_P2.54mm":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "INMP441:INMP441_I2S_2x3_P2.54mm":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
+    "Diode_SMD:D_SMA":
+        (("uncaptured_graphic", "F.Fab", "fab"),),
     "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical":
         (("uncaptured_graphic", "F.Fab", "fab"),),
     "Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical":
