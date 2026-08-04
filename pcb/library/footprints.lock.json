@@ -39,6 +39,11 @@
   "sha256": "daa80f4afdb4d94abaf11e36a9056242730bf75320857144d7e704ade5390f27",
   "size_bytes": 2464
  },
+ "Diode_SMD:D_SMA": {
+  "path": "Diode_SMD.pretty/D_SMA.kicad_mod",
+  "sha256": "d6a4e8fccab59b1baa2fba3ae6d20865103477c00cf60044749af496e1f9f505",
+  "size_bytes": 1381
+ },
  "EVP-ASAC1A:SW_EVP-ASAC1A": {
   "path": "EVP-ASAC1A.pretty/SW_EVP-ASAC1A.kicad_mod",
   "sha256": "d03af0c4bb8f399f3b271e79a116823a3206c9be6104bb231173686c9191ee62",
