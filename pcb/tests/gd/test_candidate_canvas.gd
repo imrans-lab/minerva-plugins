@@ -88,6 +88,7 @@ func _init() -> void:
 	_run_redraw_wiring()
 	_run_context_menu_seam()
 	_run_inv4_no_waypoints()
+	_run_stroke_run_merge()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -970,3 +971,79 @@ func _run_inv4_no_waypoints() -> void:
 		not PcbRouteHintKind._is_candidate_sourced({"candidate_id": ""}))
 	check("the refusal names the offending key AND its value",
 		PcbRouteHintKind._candidate_marker_of({"candidate_id": "cand_7"}) == "candidate_id=cand_7")
+
+
+# ── 11. draw-time stroke-run merge (docket 019fce3a9b6d) ──────────────────────
+#
+# _merged_candidate_stroke_items chains CONSECUTIVE same-candidate/-layer/-width
+# segment items whose endpoints coincide into one polyline item, so the draw
+# joins bends the way _draw_single_trace's whole-chain call does for committed
+# copper. DRAW ONLY: candidate_draw_items() itself stays per-segment (asserted
+# here against the GATE fixture), so the pick/anchor walks are untouched.
+
+func _seg_item(cid: String, layer: String, width: float, pts: Array) -> Dictionary:
+	return {"candidate_id": cid, "item_kind": "segment", "item_id": "",
+		"layer": layer, "points": pts, "width": width,
+		"color": Color.WHITE, "outlined": false, "dashed": false,
+		"marked": false, "selected": false}
+
+
+func _run_stroke_run_merge() -> void:
+	print("-- 11. stroke-run merge: bends join, nothing else fuses --")
+	var canvas = PcbCanvasScript.new()
+
+	# The positive case: an L-bend on one layer becomes ONE 3-point run.
+	var chained: Array = canvas._merged_candidate_stroke_items([
+		_seg_item("c1", "top", 0.3, [Vector2(0, 0), Vector2(10, 0)]),
+		_seg_item("c1", "top", 0.3, [Vector2(10, 0), Vector2(10, 5)]),
+	])
+	check_eq("two chained same-layer segments merge to one run", chained.size(), 1)
+	check_eq("the run's polyline is the full chained point list",
+		chained[0]["points"], [Vector2(0, 0), Vector2(10, 0), Vector2(10, 5)])
+
+	# Every axis that must BREAK the chain, one at a time.
+	check_eq("a layer change breaks the run (the via boundary must stay visible)",
+		canvas._merged_candidate_stroke_items([
+			_seg_item("c1", "top", 0.3, [Vector2(0, 0), Vector2(10, 0)]),
+			_seg_item("c1", "bottom", 0.3, [Vector2(10, 0), Vector2(10, 5)]),
+		]).size(), 2)
+	check_eq("a width change breaks the run",
+		canvas._merged_candidate_stroke_items([
+			_seg_item("c1", "top", 0.3, [Vector2(0, 0), Vector2(10, 0)]),
+			_seg_item("c1", "top", 0.5, [Vector2(10, 0), Vector2(10, 5)]),
+		]).size(), 2)
+	check_eq("another candidate's segment never joins the run",
+		canvas._merged_candidate_stroke_items([
+			_seg_item("c1", "top", 0.3, [Vector2(0, 0), Vector2(10, 0)]),
+			_seg_item("c2", "top", 0.3, [Vector2(10, 0), Vector2(10, 5)]),
+		]).size(), 2)
+	check_eq("a real gap (beyond float noise) breaks the run",
+		canvas._merged_candidate_stroke_items([
+			_seg_item("c1", "top", 0.3, [Vector2(0, 0), Vector2(10, 0)]),
+			_seg_item("c1", "top", 0.3, [Vector2(10.5, 0), Vector2(10.5, 5)]),
+		]).size(), 2)
+
+	# A via item passes through verbatim and never fuses with anything.
+	var with_via: Array = canvas._merged_candidate_stroke_items([
+		_seg_item("c1", "top", 0.3, [Vector2(0, 0), Vector2(10, 0)]),
+		_seg_item("c1", "top", 0.3, [Vector2(10, 0), Vector2(10, 5)]),
+		{"candidate_id": "c1", "item_kind": "via", "item_id": "via_1",
+			"layer": "top", "points": [Vector2(10, 0)], "width": 0.8,
+			"color": Color.WHITE, "outlined": false, "dashed": false,
+			"marked": false, "selected": false},
+	])
+	check_eq("run + via ⇒ two items", with_via.size(), 2)
+	check_eq("the via survives untouched", str(with_via[1]["item_kind"]), "via")
+
+	# The GATE fixture end-to-end: A/B share (10,0) on DIFFERENT layers and C is
+	# disconnected, so the merge is a no-op there — and the derivation itself
+	# must still be per-segment (the pick's geometry, unmerged).
+	var acc := _armed_canvas()
+	var canvas12 = acc[0]
+	check_eq("gate fixture: derivation stays per-segment for the pick",
+		_items_of_kind(canvas12.candidate_draw_items(), "segment").size(), 3)
+	check_eq("gate fixture: the merge fuses nothing (layer break + disconnection)",
+		_items_of_kind(canvas12._merged_candidate_stroke_items(
+			canvas12.candidate_draw_items()), "segment").size(), 3)
+	canvas12.free()
+	canvas.free()

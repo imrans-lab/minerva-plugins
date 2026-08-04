@@ -774,10 +774,16 @@ var cutout_outline_width_px: float = 1.5
 ## side of the board the copper lands on.
 ##
 ## SELF-HIGHLIGHTING OVERLAP is a consequence, not a feature bolted on: each
-## segment is its own draw_polyline call at CANDIDATE_GHOST_ALPHA, so two ghost
-## segments crossing on the SAME layer composite to a visibly denser colour while
-## a single pass stays faint. Do NOT "optimise" this into one batched polyline
-## with pre-multiplied alpha — the accumulation IS the overlap signal.
+## stroke RUN is its own draw_polyline call at CANDIDATE_GHOST_ALPHA, so two
+## ghost runs crossing on the SAME layer composite to a visibly denser colour
+## while a single pass stays faint. Do NOT "optimise" this into one batched
+## polyline with pre-multiplied alpha — the accumulation IS the overlap signal.
+## A "run" is a chain of CONSECUTIVE same-candidate/-layer/-width segments whose
+## endpoints coincide, merged at DRAW TIME ONLY (_merged_candidate_stroke_items,
+## docket 019fce3a9b6d): butt-ended per-segment rectangles left a wedge gap on
+## the outside of every bend AND a double-alpha dot at every shared endpoint —
+## both lies about continuous copper. Crossings are between NON-consecutive
+## geometry, so merging chains removes neither accumulation signal.
 const CANDIDATE_GHOST_ALPHA := 0.45
 ## Minimum ghost stroke, in screen px — the same floor _draw_single_trace applies
 ## to committed copper, so a hair-thin candidate stays visible when zoomed out.
@@ -6368,10 +6374,54 @@ func candidate_draw_items() -> Array:
 	return items
 
 
+## Endpoint-coincidence epsilon (board mm) for chaining consecutive candidate
+## segments into one stroke run. The router splits a route at EXACT shared
+## points, so this only has to absorb float noise — it must stay far below any
+## real segment length or two distinct-but-close segments would fuse.
+const CANDIDATE_RUN_CHAIN_EPSILON_MM := 0.0001
+
+
+## DRAW-TIME merge of candidate segment items into stroke runs (docket
+## 019fce3a9b6d). Consecutive segment items of the SAME candidate, layer and
+## width whose endpoints coincide become ONE item whose points are the chained
+## polyline — draw_polyline then joins the bends the way _draw_single_trace's
+## whole-chain call does for committed copper, instead of leaving wedge gaps
+## between butt-ended per-segment rectangles.
+##
+## DRAW ONLY: candidate_draw_items() stays per-segment for the pick and anchor
+## walks (a run's point union is exactly its segments' point union, so nothing
+## clickable moved). Via items and non-chaining segments pass through verbatim.
+## The merged item drops item_id (a run spans several) — the draw path never
+## reads it.
+func _merged_candidate_stroke_items(items: Array) -> Array:
+	var out: Array = []
+	for item in items:
+		var prev: Dictionary = out[out.size() - 1] if not out.is_empty() else {}
+		if str(item["item_kind"]) == "segment" and not prev.is_empty() \
+				and str(prev.get("item_kind", "")) == "segment" \
+				and str(prev["candidate_id"]) == str(item["candidate_id"]) \
+				and str(prev["layer"]) == str(item["layer"]) \
+				and is_equal_approx(float(prev["width"]), float(item["width"])):
+			var prev_pts: Array = prev["points"]
+			var pts: Array = item["points"]
+			if (prev_pts[prev_pts.size() - 1] as Vector2).distance_to(pts[0] as Vector2) \
+					<= CANDIDATE_RUN_CHAIN_EPSILON_MM:
+				var merged: Array = prev_pts.duplicate()
+				for k in range(1, pts.size()):
+					merged.append(pts[k])
+				prev["points"] = merged
+				continue
+		var run: Dictionary = item.duplicate()
+		run["points"] = (item["points"] as Array).duplicate()
+		out.append(run)
+	return out
+
+
 ## Paint every ghost. Immediate mode: no nodes are created, so what this function
-## reads (candidate_draw_items) is the only thing a test can assert on.
+## reads (candidate_draw_items, through the draw-time run merge) is the only
+## thing a test can assert on.
 func _draw_route_candidates() -> void:
-	for item in candidate_draw_items():
+	for item in _merged_candidate_stroke_items(candidate_draw_items()):
 		if str(item["item_kind"]) == "via":
 			_draw_candidate_via(item)
 		else:

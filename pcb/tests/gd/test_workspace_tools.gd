@@ -104,6 +104,7 @@ func _init() -> void:
 	await _run_check_stale_gate()
 	await _run_removal_contract()
 	await _run_route_request_extra()
+	await _run_cross_candidate_check_reply()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1618,3 +1619,49 @@ func _run_route_request_extra() -> void:
 	check("CASE 4 degenerate-bus reroute: request carries NO scope",
 		not (call_i.get("extra", {}) as Dictionary).has("scope"))
 	ctx6["driver"].free_panel(ctx6["panel"])
+
+
+# ══ 12. propose reply honesty: cross_candidate_check (docket 019fce3a6c57) ════
+#
+# A router reply's drc summaries are candidate-vs-board only, so two live
+# ghosts crossing each other on one layer read "clean" in every propose reply
+# (HITL-3: the GND span shorted BOTH power spans and the user saw it before
+# any tool did). The landing path now runs the SAME set-scoped check
+# minerva_pcb_workspace_check runs whenever the live set holds >=2 candidates
+# and reports it under cross_candidate_check — degrading to a NAMED skip when
+# the worker bridge is absent, never failing the landing verb.
+
+func _run_cross_candidate_check_reply() -> void:
+	print("-- 12. propose reply honesty: the set-scoped check rides the landing --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+
+	# ONE live candidate ⇒ no field at all: a single ghost has no sibling to
+	# cross, and the router's own draft DRC already covered candidate-vs-board.
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("single-candidate propose succeeded", bool(out.get("success", false)))
+	check("one live candidate ⇒ NO cross_candidate_check field",
+		not out.has("cross_candidate_check"))
+
+	# A SECOND task's candidate lands ⇒ live set is 2 and the check must run.
+	# This unmounted panel has no _MinervaIPC bridge, so check_draft answers {}
+	# and the field must be the NAMED skip — present, honest, non-fatal.
+	var hint2: String = _seed_net_named_hint(ctx["host"], "N2")
+	shim.reply = {"routes": [{
+		"net": "N2",
+		"segments": [{"start": [20.0, 0.0], "end": [25.0, 0.0], "layer": "F.Cu"}],
+		"vias": [],
+		"hint_ids": [hint2],
+	}], "via_count": 0}
+	var out2: Dictionary = await PanelTools._workspace_propose(
+		shim, _args({"hint_ids": [hint2]}))
+	check("second propose succeeded", bool(out2.get("success", false)))
+	check_eq("the workspace now holds two live candidates",
+		(ctx["ws"].live_candidate_ids() as Array).size(), 2)
+	check("two live candidates ⇒ cross_candidate_check present",
+		out2.has("cross_candidate_check"))
+	check_eq("no worker bridge ⇒ the NAMED skip, never a hang or a failure",
+		str((out2.get("cross_candidate_check", {}) as Dictionary).get("skipped", "")),
+		"draft_check_no_reply")
+
+	ctx["driver"].free_panel(ctx["panel"])

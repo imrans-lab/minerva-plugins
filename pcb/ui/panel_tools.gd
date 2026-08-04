@@ -206,7 +206,7 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _route_bus_direct(host, args)
 		# ── Bus-propose (docket 019fcac1509d): the bus's PROPOSAL verb ────────
 		"minerva_pcb_workspace_propose_bus":
-			return _workspace_propose_bus(host, args)
+			return await _workspace_propose_bus(host, args)
 	return {}
 
 
@@ -3484,7 +3484,44 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 				+ "beyond the ask was NOT attempted — propose net-level hints "
 				+ "(or omit endpoints) to route whole nets.",
 		}
-	return _ingest_result_into_workspace(workspace, data, result, source_hints, extra)
+	return await _ingest_result_into_workspace(host, workspace, data, result, source_hints, extra)
+
+
+## Reply honesty for every candidate-landing verb (docket 019fce3a6c57): when
+## the LIVE set holds two or more candidates, run the SAME set-scoped draft
+## check minerva_pcb_workspace_check runs — union of committed copper and every
+## live candidate's draft copper — and hand back its findings. The per-route
+## drc summaries in a router reply are candidate-vs-board only, so two live
+## ghosts crossing each other on one layer read "clean" everywhere else; this
+## is the one place a landing verb can tell the caller about that short.
+##
+## NEVER the reason a landing verb fails: no bridge (headless / before mount)
+## or no worker reply degrades to a named skip, and a single live candidate
+## returns {} (the router's own draft DRC already covered candidate-vs-board).
+## Stale siblings are checked DELIBERATELY (their existing geometry is what is
+## on screen next to the fresh ghost) — the ids are named in `checked_stale`.
+static func _cross_candidate_check(host, workspace, data) -> Dictionary:
+	var live: Array = _string_list(workspace.live_candidate_ids())
+	if live.size() < 2:
+		return {}
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("check_draft"):
+		return {"skipped": "draft_check_unavailable"}
+	workspace.rebase(int(data.board_revision))
+	var stale: Array = []
+	for cid in live:
+		var c = workspace.get_candidate(str(cid))
+		if c != null and str(c.validation) == "stale":
+			stale.append(str(cid))
+	var result: Dictionary = await panel.check_draft(live)
+	if result.is_empty() or not result.has("per_candidate"):
+		return {"skipped": "draft_check_no_reply"}
+	return {
+		"checked": live,
+		"checked_stale": stale,
+		"per_candidate": result.get("per_candidate", {}),
+		"findings": result.get("findings", []),
+	}
 
 
 ## The SHARED landing path for every tool that turns a router reply into
@@ -3492,7 +3529,7 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 ## ingests, accumulates holds and shapes the reply, so the three verbs report
 ## identically and a fix to one is a fix to all. `extra` is merged last so a
 ## caller can stamp its own metadata (e.g. the span degrade notice).
-static func _ingest_result_into_workspace(workspace, data, result: Dictionary,
+static func _ingest_result_into_workspace(host, workspace, data, result: Dictionary,
 		source_hints: Array, extra: Dictionary) -> Dictionary:
 	var records: Array = _normalize_route_records(result, source_hints)
 	var revision: int = int(data.board_revision) if data != null else 0
@@ -3518,6 +3555,12 @@ static func _ingest_result_into_workspace(workspace, data, result: Dictionary,
 		"stale_candidate_ids": _stale_ids(workspace),
 		"note": "candidates landed in the routing workspace; no proposal annotations were written",
 	}
+	var cross: Dictionary = await _cross_candidate_check(host, workspace, data)
+	if not cross.is_empty():
+		out["cross_candidate_check"] = cross
+		if not (cross.get("findings", []) as Array).is_empty():
+			out["note"] = str(out["note"]) \
+				+ "; WARNING: the set-scoped check found findings across the live candidate set — see cross_candidate_check"
 	out.merge(extra, true)
 	return _ok(out)
 
@@ -3728,8 +3771,8 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dic
 	if str(c.disposition) == "pinned" and not workspace.supersede(cid):
 		return _workspace_refusal(workspace, "reroute", cid)
 
-	var landed: Dictionary = _ingest_result_into_workspace(
-		workspace, data, reply.get("result", {}), source_hints, extra)
+	var landed: Dictionary = await _ingest_result_into_workspace(
+		host, workspace, data, reply.get("result", {}), source_hints, extra)
 	landed["rerouted_candidate_id"] = cid
 	landed["prior_task_id"] = prior_task
 	# A reroute is meant to answer the SAME question again. Say plainly whether
@@ -4117,7 +4160,7 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 	if not bool(out.get("ok", false)):
 		return _err(str(out.get("error", "Bus proposal was refused.")))
 
-	return _ok({
+	var reply: Dictionary = {
 		"proposed": out.get("proposed", 0),
 		"candidates": out.get("candidates", []),
 		"holds": out.get("holds", []),
@@ -4125,7 +4168,14 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 		"widths": out.get("widths", []),
 		"layer": str(out.get("layer", "")),
 		"note": "ghost candidates landed in the routing workspace; no copper was committed — resolve via minerva_pcb_workspace_commit/_reject/pin.",
-	})
+	}
+	var cross: Dictionary = await _cross_candidate_check(host, workspace, data)
+	if not cross.is_empty():
+		reply["cross_candidate_check"] = cross
+		if not (cross.get("findings", []) as Array).is_empty():
+			reply["note"] = str(reply["note"]) \
+				+ "; WARNING: the set-scoped check found findings across the live candidate set — see cross_candidate_check"
+	return _ok(reply)
 
 
 ## minerva_pcb_route_bus_direct — the agent's doorway onto the SAME gesture
