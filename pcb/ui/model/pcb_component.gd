@@ -1006,9 +1006,16 @@ static func from_dict(data: Dictionary):
 
 ## Serialize to a canonical board-contract component dict.
 func to_board_dict() -> Dictionary:
+	# Emit the PRESERVED authored library ref for CUSTOM-enum components (see
+	# load_from_board_dict's read-side preservation note) — "CUSTOM" is a
+	# panel-internal enum bucket, not a board identity, and the hermetic
+	# compiler fail-closes on it. Enum-known footprints keep their enum name.
+	var fp_out := get_footprint_name()
+	if footprint == FootprintType.CUSTOM and not footprint_id.is_empty():
+		fp_out = footprint_id
 	var d := {
 		"ref": id,
-		"footprint": get_footprint_name(),
+		"footprint": fp_out,
 		"x_mm": position.x,
 		"y_mm": position.y,
 		"rotation_deg": rotation,
@@ -1048,8 +1055,17 @@ func to_board_dict() -> Dictionary:
 ## Restore from a canonical board-contract component dict.
 func load_from_board_dict(data: Dictionary) -> void:
 	id = str(data.get("ref", data.get("id", "")))
-	set_footprint_by_name(str(data.get("footprint", "CUSTOM")))
+	var authored_fp := str(data.get("footprint", "CUSTOM"))
+	set_footprint_by_name(authored_fp)
 	footprint_id = str(data.get("footprint_id", ""))
+	# Read-side ref preservation (docket 019fcb32d81c / the 019fa9640ac1 hard
+	# prerequisite): a canonical library ref ("Lib:Name") is no enum name, so
+	# set_footprint_by_name maps it to CUSTOM — and without keeping the
+	# authored string, to_board_dict could only ever hand the worker "CUSTOM",
+	# which the hermetic compiler refuses. An explicit footprint_id from the
+	# Extra round-trip wins; otherwise the authored ref IS the identity.
+	if footprint_id.is_empty() and footprint == FootprintType.CUSTOM and authored_fp != "CUSTOM":
+		footprint_id = authored_fp
 	position = Vector2(float(data.get("x_mm", 0.0)), float(data.get("y_mm", 0.0)))
 	rotation = float(data.get("rotation_deg", 0.0))
 	layer = str(data.get("layer", "top"))
