@@ -120,17 +120,21 @@ func _init() -> void:
 	# the gesture and this tool call) == 69, + 1 D0-5 worker-backed tool
 	# (minerva_pcb_export_assembly — the Go/manifest wiring onto C8's
 	# already-shipped worker-side assembly_bom/assembly_cpl emitters, docket
-	# 019fc2f8b903) == 70.
+	# 019fc2f8b903) == 70, + 1 bus-propose tool
+	# (minerva_pcb_workspace_propose_bus — the proposal twin of
+	# route_bus_direct; panel_tools.gd bus_propose_plan is the ONE
+	# implementation both the Shift+Enter gesture and this tool call, docket
+	# 019fcac1509d) == 71.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is D0-5's bump (69 -> 70), sequenced
-	# after C5's (68 -> 69), sequenced after C4b's (70 -> 68), sequenced after
-	# C4a's (60 -> 70) — all four queue behind the same serialization point.
-	check("total registered tool count == 70", registered.size() == 70,
+	# entry could hide behind it. This is bus-propose's bump (70 -> 71),
+	# sequenced after D0-5's (69 -> 70), C5's (68 -> 69), C4b's (70 -> 68) and
+	# C4a's (60 -> 70) — all queue behind the same serialization point.
+	check("total registered tool count == 71", registered.size() == 71,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

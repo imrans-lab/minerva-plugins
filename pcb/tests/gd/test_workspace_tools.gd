@@ -1218,14 +1218,18 @@ func _run_removal_manifest_tools_absent() -> void:
 	# suite first EXECUTED — not a regression. Verified against manifest.json's
 	# own tail entry (`minerva_pcb_route_bus_direct`), which is the C5 addition.
 	# + 1 D0-5 worker-backed tool (minerva_pcb_export_assembly, docket
-	# 019fc2f8b903) == 70. This is a SECOND, independent count pin on the same
-	# manifest.json this round's tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (69->70) for the
+	# 019fc2f8b903) == 70, + 1 bus-propose tool
+	# (minerva_pcb_workspace_propose_bus, docket 019fcac1509d) == 71. This is a
+	# SECOND, independent count pin on the same manifest.json this round's
+	# tools[] addition touches — see
+	# tests/gd/test_manifest_tool_registration.gd's own pin (70->71) for the
 	# "deliberate bump, its own diff" convention this follows.
-	check_eq("manifest tool count == 70 (ALL manifest.json tools[] entries)",
-		names.size(), 70)
+	check_eq("manifest tool count == 71 (ALL manifest.json tools[] entries)",
+		names.size(), 71)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
+	check("the bus-propose tool is the addition THIS count accounts for",
+		"minerva_pcb_workspace_propose_bus" in names)
 
 	# Unreachable through the dispatcher too, not just missing from the list —
 	# a bare host with no panel is enough: handle() matches on tool_name alone
