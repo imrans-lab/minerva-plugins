@@ -204,6 +204,9 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		# ── C5: the bus tool's MCP parity surface (S3+S4, DCR 019fb572b888) ────
 		"minerva_pcb_route_bus_direct":
 			return _route_bus_direct(host, args)
+		# ── Bus-propose (docket 019fcac1509d): the bus's PROPOSAL verb ────────
+		"minerva_pcb_workspace_propose_bus":
+			return _workspace_propose_bus(host, args)
 	return {}
 
 
@@ -3818,6 +3821,129 @@ static func bus_commit_plan(data, plan: Dictionary, history_label: String) -> Di
 	return {"ok": true, "error": "", "trace_ids": created_ids, "nets": nets, "widths": widths, "layer": layer}
 
 
+## GHOST twin of bus_commit_plan (docket 019fcac1509d): the SAME ok'd plan, but
+## the N traces land as workspace RouteCandidates (one per net, disposition
+## "proposed") instead of board copper. NOTHING is journalled and the board is
+## not mutated — resolution happens through the normal workspace verbs
+## (minerva_pcb_workspace_commit/_reject/pin, or the canvas candidate menu),
+## so a bus finally participates in the propose → steer → accept loop (S4)
+## instead of being the one author verb that bypassed it.
+##
+## Each record carries the plan's exact offset polyline as raw router-shape
+## segments ({start,end,layer}) plus a width_override — the per-net width
+## bus_plan already resolved from the board's own copper — so ingest does not
+## fall through to _width_from_hints' 0.25mm hintless default. source_hint_ids
+## is [] ON PURPOSE (a legitimate "no hint answered this" verdict, docket
+## 019fa109766f), which keys each candidate to the whole-net task: re-proposing
+## the same bus supersedes the prior ghost per net, same as any re-propose.
+## A PINNED prior holds its net's task (candidate not created, reported in
+## holds) — identical semantics to _workspace_propose's ingest.
+static func bus_propose_plan(workspace, data, plan: Dictionary) -> Dictionary:
+	if workspace == null:
+		return {"ok": false, "error": "no routing workspace is bound to this panel (headless / before mount)"}
+	var nets: Array = plan.get("nets", [])
+	var widths: Array = plan.get("widths", [])
+	var polylines: Array = plan.get("polylines", [])
+	var layer: String = str(plan.get("layer", ""))
+	var revision: int = int(data.board_revision) if data != null else 0
+	var landed: Array = []
+	var holds: Array = []
+	for i in range(nets.size()):
+		var poly: PackedVector2Array = polylines[i]
+		var segs: Array = []
+		for j in range(poly.size() - 1):
+			segs.append({
+				"start": [poly[j].x, poly[j].y],
+				"end": [poly[j + 1].x, poly[j + 1].y],
+				"layer": layer,
+			})
+		var rec: Dictionary = {
+			"net": str(nets[i]),
+			"segments": segs,
+			"vias": [],
+			"source_hints": [],
+			"source_hint_ids": [],
+			"width_override": float(widths[i]),
+		}
+		var cid: String = str(workspace.ingest_record(rec, revision))
+		# last_ingest_holds is PER CALL and ingest_record resets it on entry —
+		# accumulate in-loop, same as _ingest_result_into_workspace.
+		for hold in workspace.last_ingest_holds:
+			holds.append(hold)
+		if cid.is_empty():
+			continue
+		landed.append(_candidate_record(workspace, workspace.get_candidate(cid)))
+	return {
+		"ok": true, "error": "",
+		"proposed": landed.size(), "candidates": landed, "holds": holds,
+		"nets": nets, "widths": widths, "layer": layer,
+	}
+
+
+## Shared arg → plan parsing for the two bus MCP handlers (_route_bus_direct
+## and _workspace_propose_bus): ordered nets + spine points + layer +
+## width_override, then bus_plan. Returns bus_plan's own {ok, error, ...} shape
+## so a parse refusal and a plan refusal surface identically.
+static func _bus_plan_from_args(data, args: Dictionary) -> Dictionary:
+	if not args.has("nets"):
+		return {"ok": false, "error": "nets is required: an ordered array of declared net names (2+)"}
+	var raw_nets = args.get("nets")
+	if not (raw_nets is Array):
+		return {"ok": false, "error": "nets must be an array of net names"}
+	var nets: Array = []
+	for n in raw_nets:
+		nets.append(str(n))
+
+	if not args.has("points"):
+		return {"ok": false, "error": "points is required: an array of {x_mm, y_mm} spine vertices"}
+	var pts = _parse_zone_outline(args.get("points"))
+	if pts == null:
+		return {"ok": false, "error": "points need x_mm and y_mm"}
+
+	var layer: String = str(args.get("layer", ""))
+	if layer.is_empty():
+		var declared: Array = data.layers if data else []
+		if declared.size() == 1:
+			layer = str(declared[0])
+		else:
+			return {"ok": false, "error": "layer is required (the board declares %d copper layers, not exactly 1)." % declared.size()}
+
+	var width_override: float = float(args.get("width_override", 0.0))
+	return bus_plan(data, nets, pts, layer, width_override)
+
+
+## minerva_pcb_workspace_propose_bus — the bus's PROPOSAL doorway (docket
+## 019fcac1509d): same args, same validation path (_bus_plan_from_args →
+## bus_plan) as minerva_pcb_route_bus_direct, but the plan lands as workspace
+## candidates via bus_propose_plan instead of committing copper. The canvas
+## gesture's Shift+Enter calls the SAME bus_propose_plan, so agent and human
+## propose identical geometry by construction.
+static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+
+	var plan: Dictionary = _bus_plan_from_args(data, args)
+	if not bool(plan.get("ok", false)):
+		return _err(str(plan.get("error", "Bus was refused.")))
+
+	var out: Dictionary = bus_propose_plan(workspace, data, plan)
+	if not bool(out.get("ok", false)):
+		return _err(str(out.get("error", "Bus proposal was refused.")))
+
+	return _ok({
+		"proposed": out.get("proposed", 0),
+		"candidates": out.get("candidates", []),
+		"holds": out.get("holds", []),
+		"nets": out.get("nets", []),
+		"widths": out.get("widths", []),
+		"layer": str(out.get("layer", "")),
+		"note": "ghost candidates landed in the routing workspace; no copper was committed — resolve via minerva_pcb_workspace_commit/_reject/pin.",
+	})
+
+
 ## minerva_pcb_route_bus_direct — the agent's doorway onto the SAME gesture
 ## the canvas Bus tool draws (see the region doc above): an ORDERED net list
 ## (T11 — echoed back verbatim, never re-sorted) plus a spine polyline in one
@@ -3832,36 +3958,11 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	if not (data is Object):
 		return data
 
-	if not args.has("nets"):
-		return _err("nets is required: an ordered array of declared net names (2+)")
-	var raw_nets = args.get("nets")
-	if not (raw_nets is Array):
-		return _err("nets must be an array of net names")
-	var nets: Array = []
-	for n in raw_nets:
-		nets.append(str(n))
-
-	if not args.has("points"):
-		return _err("points is required: an array of {x_mm, y_mm} spine vertices")
-	var pts = _parse_zone_outline(args.get("points"))
-	if pts == null:
-		return _err("points need x_mm and y_mm")
-
-	var layer: String = str(args.get("layer", ""))
-	if layer.is_empty():
-		var declared: Array = data.layers if data else []
-		if declared.size() == 1:
-			layer = str(declared[0])
-		else:
-			return _err("layer is required (the board declares %d copper layers, not exactly 1)." % declared.size())
-
-	var width_override: float = float(args.get("width_override", 0.0))
-
-	var plan: Dictionary = bus_plan(data, nets, pts, layer, width_override)
+	var plan: Dictionary = _bus_plan_from_args(data, args)
 	if not bool(plan.get("ok", false)):
 		return _err(str(plan.get("error", "Bus was refused.")))
 
-	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d traces)" % nets.size())
+	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d traces)" % (plan.get("nets", []) as Array).size())
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "Bus was refused by the board model.")))
 
@@ -3869,7 +3970,7 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 		"trace_ids": result.get("trace_ids", []),
 		"nets": result.get("nets", []),
 		"widths": result.get("widths", []),
-		"layer": layer,
+		"layer": str(result.get("layer", "")),
 		"undo_note": "one board history step: Ctrl+Z (or PCBData.undo) removes all traces this call created.",
 	})
 

@@ -1046,6 +1046,37 @@
         },
         "required": ["editor_name", "nets", "points"]
       }
+    },
+    {
+      "name": "minerva_pcb_workspace_propose_bus",
+      "description": "PROPOSE a parallel bus as ghost candidates (docket 019fcac1509d) — the proposal twin of minerva_pcb_route_bus_direct: same args, same validation path (ordered nets + spine + inner-fold guard), but the N offset tracks land in the ROUTING WORKSPACE as RouteCandidates (one per net, disposition 'proposed', exact per-net widths carried from the board's own copper) instead of committing real traces. NOTHING is journalled and the board is not mutated — resolve each candidate with minerva_pcb_workspace_commit/_reject/pin, or the canvas candidate menu. The canvas gesture's Shift+Enter calls the SAME bus_propose_plan, so agent and human propose identical geometry by construction. Re-proposing the same bus supersedes the prior ghost per net; a net whose current candidate is PINNED is HELD (candidate not created, named in holds[]), same as minerva_pcb_workspace_propose. Returns {proposed, candidates:[{candidate_id, task_id, net, generation, disposition, validation, segment_count, via_count, layers}], holds, nets, widths, layer} or a named error.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "nets": {
+            "type": "array",
+            "description": "Declared net names, in the ORDER tracks should be assigned (never re-sorted). At least 2 required.",
+            "items": {"type": "string"}
+          },
+          "points": {
+            "type": "array",
+            "description": "Bus spine points in board mm, in order. At least 2 distinct points required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          },
+          "layer": {"type": "string", "description": "Canonical copper layer ('top' / 'in1'..'in30' / 'bottom') every track lands on. Required unless the board declares exactly one copper layer."},
+          "width_override": {"type": "number", "description": "Uniform trace width in mm for every net (optional). Omit/0 to auto-derive each net's width from its widest existing trace, else the board default."}
+        },
+        "required": ["editor_name", "nets", "points"]
+      }
     }
   ],
   "skills": [

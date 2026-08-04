@@ -679,6 +679,31 @@ per net → the inner-fold guard) and `bus_commit_plan` (mutating: N
 canvas tool's commit path and this MCP tool — not two independently
 maintained copies of the same math.
 
+## Bus propose (`minerva_pcb_workspace_propose_bus`, docket `019fcac1509d`)
+
+The bus's PROPOSAL verb — same args and same validation path as
+`minerva_pcb_route_bus_direct` (`_bus_plan_from_args` → `bus_plan`), but the
+ok'd plan lands through `bus_propose_plan` as one workspace RouteCandidate
+per net (disposition `proposed`) instead of committing copper. Nothing is
+journalled and the board is not mutated; each ghost is resolved through the
+normal workspace verbs (`minerva_pcb_workspace_commit`/`_reject`/`pin`, or
+the canvas candidate menu). This closes the S4 gap where the bus was the one
+author verb that bypassed the propose → steer → accept loop entirely.
+
+- **Widths are the plan's own.** Each record carries a `width_override` — the
+  per-net width `bus_plan` resolved from the board's widest existing trace on
+  that net (else the board default) — honoured by
+  `RoutingWorkspace.ingest_record`, so a hintless bus candidate does NOT fall
+  through to `_width_from_hints`' 0.25 mm default.
+- **Task identity is whole-net.** `source_hint_ids` is `[]` (a legitimate
+  "no hint answered this" verdict), so re-proposing the same bus supersedes
+  the prior ghost per net; a net whose current candidate is PINNED is HELD —
+  the candidate is not created and `holds[]` names the task, identical to
+  `minerva_pcb_workspace_propose`.
+- **The gesture is the same code.** The canvas Bus tool's **Shift+Enter**
+  (Enter still commits) calls the SAME `bus_propose_plan`, so a human's
+  proposed bus and an agent's are identical geometry by construction.
+
 **Per-net width**, absent `width_override`: the widest EXISTING trace already
 on that net, else the board's own `design_rules.trace_width_mm` default (same
 rule `authored_trace_width()` gives a fresh trace). `width_override`, when

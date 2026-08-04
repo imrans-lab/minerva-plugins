@@ -799,7 +799,8 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 		str(record.get("net", "")),
 		record.get("segments", []) if record.get("segments", []) is Array else [],
 		record.get("vias", []) if record.get("vias", []) is Array else [],
-		hints, board_revision, explicit_hint_ids, span)
+		hints, board_revision, explicit_hint_ids, span,
+		float(record.get("width_override", 0.0)))
 
 
 ## Create + add one RouteCandidate from a raw router route (net + raw segments +
@@ -825,7 +826,13 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 ## proposal gets its OWN task (and its own generation chain) instead of
 ## superseding the whole-net candidate — and re-proposing the SAME span
 ## supersedes exactly like a whole-net re-propose does.
-func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int, explicit_hint_ids = null, span: Dictionary = {}) -> String:
+## `width_override` (bus-propose, docket 019fcac1509d): a caller that already
+## KNOWS its exact per-trace width — bus_propose_plan resolved each net's width
+## from the board's own copper before any candidate existed — passes it here so
+## a hintless record does not fall through to _width_from_hints' 0.25mm
+## default (the exact stamped-default bug class of docket 019fa73a191e).
+## 0.0 (the default) means "no override": every hint-derived path is unchanged.
+func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_hints: Array, board_revision: int, explicit_hint_ids = null, span: Dictionary = {}, width_override: float = 0.0) -> String:
 	if segs.is_empty() and vias.is_empty():
 		return ""
 	var via_span: Array = PcbLayerStack.default_through_via_span()
@@ -891,6 +898,8 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	else:
 		cand.endpoints = _endpoints_for_net(source_hints, net)
 		width = _width_for_net(source_hints, net)
+	if width_override > 0.0:
+		width = width_override
 
 	for seg in segs:
 		if not (seg is Dictionary):

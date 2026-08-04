@@ -2843,10 +2843,13 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# Bus tool: Enter is the PHASE TRANSITION (PICKING -> DRAWING, needs
 			# 2+ nets picked) while picking, and the commit while drawing — the
 			# same "Enter closes/advances" idiom every draw tool on this canvas
-			# uses, just spanning two phases instead of one.
+			# uses, just spanning two phases instead of one. Shift+Enter while
+			# drawing PROPOSES instead (ghost candidates via bus_propose_plan,
+			# docket 019fcac1509d) — same plan, resolved through the workspace
+			# verbs rather than committed as copper.
 			elif tool_mode == ToolMode.BUS:
 				if _bus_drawing:
-					_commit_bus()
+					_commit_bus(event.shift_pressed)
 				else:
 					_start_bus_draw()
 		KEY_ESCAPE:
@@ -5683,7 +5686,7 @@ func _start_bus_draw() -> void:
 	_bus_spine_points = PackedVector2Array()
 	_bus_has_preview = false
 	bus_tool_message.emit(
-		"Spine for [%s] on %s — click vertices, Enter/dbl-click to commit (Esc cancels the spine)."
+		"Spine for [%s] on %s — click vertices, Enter/dbl-click commits, Shift+Enter proposes ghosts (Esc cancels the spine)."
 			% [_bus_nets_joined(), _bus_layer])
 	queue_redraw()
 
@@ -5692,7 +5695,10 @@ func _start_bus_draw() -> void:
 ## the whole pipeline (widths -> offsets -> inner-fold guard -> create -> one
 ## save_to_history) to panel_tools.bus_plan/bus_commit_plan — see the region
 ## doc above for why this is the SAME call minerva_pcb_route_bus_direct makes.
-func _commit_bus() -> void:
+## `propose` (Shift+Enter, docket 019fcac1509d): the same ok'd plan lands as
+## workspace GHOST candidates via panel_tools.bus_propose_plan — the identical
+## function minerva_pcb_workspace_propose_bus calls — instead of copper.
+func _commit_bus(propose: bool = false) -> void:
 	if not data or tool_mode != ToolMode.BUS or not _bus_drawing:
 		return
 	var plan: Dictionary = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points, _bus_layer)
@@ -5701,6 +5707,21 @@ func _commit_bus() -> void:
 		# points" or an inner-fold refusal is another click or a wider corner,
 		# not redrawing the whole bus from scratch.
 		bus_tool_message.emit(str(plan.get("error", "Bus was refused.")))
+		return
+
+	if propose:
+		var out: Dictionary = _PanelToolsScript.bus_propose_plan(_routing_workspace, data, plan)
+		if not bool(out.get("ok", false)):
+			bus_tool_message.emit(str(out.get("error", "Bus proposal was refused.")))
+			return
+		var held: Array = out.get("holds", []) if out.get("holds", []) is Array else []
+		var prop_summary := "Proposed bus: %d ghost traces on %s (%s) — accept/reject/pin in the workspace." % [
+			int(out.get("proposed", 0)), _bus_layer, _bus_nets_joined()]
+		if not held.is_empty():
+			prop_summary += " %d net(s) held by a pinned candidate." % held.size()
+		_reset_bus_tool(false)
+		bus_tool_message.emit(prop_summary)
+		queue_redraw()
 		return
 
 	var result: Dictionary = _PanelToolsScript.bus_commit_plan(
