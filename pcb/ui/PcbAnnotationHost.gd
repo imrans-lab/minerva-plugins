@@ -759,10 +759,18 @@ func _board_data():
 # ── Semantic hit-testing (describe_point) ─────────────────────────────────────
 
 ## Return a semantic identifier for whatever is at board-mm point doc_pos.
-## Precedence:  pad ("pad:U1.3") → component ("component:U3") →
-##              trace ("trace:GND") → fallback ("canvas.point (x.x, y.y) mm").
+## Precedence:  pad ("pad:U1.3") → via ("via:GND@(50.8, 86.6)") →
+##              component ("component:U3") → trace ("trace:GND") →
+##              fallback ("canvas.point (x.x, y.y) mm").
 ## Stamped into annotation["anchored_to"] by AnnotationHost._stamp_anchor on
 ## add/update; surfaced by minerva_annotations_list via AnnotationSchema.
+##
+## Via outranks component and trace (owner HITL, docket 019fcb06e8d0): a via is a
+## POINT entity like a pad — an annotation head landing inside its disc means
+## the via, not the copper run it happens to stitch. Before this tier existed,
+## "Remove this via" resolved to "trace:GND" and the agent had to re-derive
+## the target from raw geometry. Pad stays first: a pad carries the more
+## specific pin identity, and the two rarely overlap.
 func describe_point(doc_pos: Vector2) -> String:
 	var data = _board_data()
 	if data == null:
@@ -773,20 +781,93 @@ func describe_point(doc_pos: Vector2) -> String:
 	if not pad_ref.is_empty():
 		return "pad:" + pad_ref
 
-	# 2. component — inside a component body but not on a pad.
+	# 2. via — a point entity; label by net (falling back to via id), with the
+	# position so N same-net stitching vias stay distinguishable in the string
+	# form (anchor_detail carries the exact id).
+	var via_id := str(data.get_via_at(doc_pos, _VIA_HIT_MIN_RADIUS_MM))
+	if not via_id.is_empty():
+		var via: Dictionary = data.get_via(via_id)
+		var via_net := str(via.get("net_name", ""))
+		var via_pos: Vector2 = data.via_position(via)
+		return "via:%s@(%.1f, %.1f)" % [
+			via_net if not via_net.is_empty() else via_id, via_pos.x, via_pos.y]
+
+	# 3. component — inside a component body but not on a pad.
 	var comp_id := str(data.get_component_at(doc_pos))
 	if not comp_id.is_empty():
 		return "component:" + comp_id
 
-	# 3. trace — on a routed trace; label by its net (falling back to trace id).
+	# 4. trace — on a routed trace; label by its net (falling back to trace id).
 	var trace_id := str(data.get_trace_at(doc_pos, _TRACE_HIT_THRESHOLD_MM))
 	if not trace_id.is_empty():
 		var trace = data.get_trace(trace_id)
 		var net_name := str(trace.net_name) if trace != null else ""
 		return "trace:" + (net_name if not net_name.is_empty() else trace_id)
 
-	# 4. fallback — a bare board point.
+	# 5. fallback — a bare board point.
 	return _canvas_point_label(doc_pos)
+
+
+## Minimum click/anchor slack for the via tier: a hair over this board's common
+## 0.4mm via radius so an annotation head placed by eye still lands the via,
+## but far under _PAD_HIT_RADIUS_MM so a via 5mm away never claims a point.
+## get_via_at maxf's this with each via's true radius, so larger vias keep
+## their full disc.
+const _VIA_HIT_MIN_RADIUS_MM := 0.5
+
+
+## Structured anchor resolution for ONE annotation (LLM ergonomics, docket
+## 019fcafd) — the machine-readable twin of describe_point's string. Called
+## duck-typed by minerva_annotations_list on live hosts; returns {} when the
+## anchor point resolves to nothing (the entry simply omits anchor_detail).
+## Same tier order as describe_point; every hit carries the entity id, net
+## (when it has one), position (board mm) and distance_mm from the anchor
+## point, so an agent can verify the resolution instead of trusting it.
+func describe_anchor_detail(annotation: Dictionary) -> Dictionary:
+	var data = _board_data()
+	if data == null or _registry == null:
+		return {}
+	var kind = _registry.get_annotation_kind(StringName(str(annotation.get("kind", ""))))
+	if kind == null:
+		return {}
+	var point: Vector2 = kind.primary_anchor_point(annotation)
+
+	var pad_hit := pad_at(point, _PAD_HIT_RADIUS_MM)
+	if not pad_hit.is_empty():
+		var pad_pos: Vector2 = pad_hit.get("position", Vector2.ZERO)
+		return {
+			"kind": "pad",
+			"id": "%s.%s" % [str(pad_hit.get("component", "")), str(pad_hit.get("pin", ""))],
+			"position": [pad_pos.x, pad_pos.y],
+			"distance_mm": snappedf(pad_pos.distance_to(point), 0.001),
+		}
+
+	var via_id := str(data.get_via_at(point, _VIA_HIT_MIN_RADIUS_MM))
+	if not via_id.is_empty():
+		var via: Dictionary = data.get_via(via_id)
+		var via_pos: Vector2 = data.via_position(via)
+		return {
+			"kind": "via",
+			"id": via_id,
+			"net": str(via.get("net_name", "")),
+			"position": [via_pos.x, via_pos.y],
+			"distance_mm": snappedf(via_pos.distance_to(point), 0.001),
+		}
+
+	var comp_id := str(data.get_component_at(point))
+	if not comp_id.is_empty():
+		return {"kind": "component", "id": comp_id, "distance_mm": 0.0}
+
+	var trace_id := str(data.get_trace_at(point, _TRACE_HIT_THRESHOLD_MM))
+	if not trace_id.is_empty():
+		var trace = data.get_trace(trace_id)
+		return {
+			"kind": "trace",
+			"id": trace_id,
+			"net": str(trace.net_name) if trace != null else "",
+		}
+
+	return {}
 
 
 func _canvas_point_label(doc_pos: Vector2) -> String:
