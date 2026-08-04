@@ -747,6 +747,31 @@ def _scoped_nets(ordered: list[str], only_nets: Optional[set] = None) -> list[st
     return [n for n in ordered if n in only_nets]
 
 
+def _terminal_pads(pads: list, net_name: str,
+                   net_terminals: Optional[dict] = None) -> list:
+    """Narrow a net's pad list to the caller-named TERMINAL subset.
+
+    Span-scoped routing (docket 019fcb6f9d20, un-refusing route_bridge's
+    documented gap 019fc155bc32): ``net_terminals`` maps net name -> a set of
+    ``"Component.Pad"`` refs. A net with an entry routes ONLY between those
+    pads; the omitted same-net pads keep their grid presence (they were marked
+    with every other pad before any loop ran) but are no longer connection
+    targets, so "connect MIC1.6 to AMP1.6" on a 14-pad GND net returns exactly
+    that span instead of stitching the whole net. ``None`` (every pre-span
+    caller) and a net with no entry are byte-identical to the historical
+    whole-net behaviour. Terminal refs are matched on the same
+    ``f"{component}.{number}"`` identity route_bridge validated against the
+    board, so an unknown ref cannot silently widen the run — it simply matches
+    nothing and the (< 2 pads) guard skips the net.
+    """
+    if net_terminals is None:
+        return pads
+    named = net_terminals.get(net_name)
+    if named is None:
+        return pads
+    return [p for p in pads if f"{p.component}.{p.number}" in named]
+
+
 # ---------------------------------------------------------------------------
 # PRECEDENCE — the run's EFFECTIVE design rules.
 #
@@ -1002,6 +1027,7 @@ def route_board(
     existing_traces: Sequence[ExistingSegment] = (),
     existing_vias: Sequence[ExistingVia] = (),
     only_nets: Optional[set] = None,
+    net_terminals: Optional[dict] = None,
 ) -> RoutingResult:
     """
     Route the board's nets — all of them, or the ones in ``only_nets``.
@@ -1113,7 +1139,7 @@ def route_board(
 
     # Route each net
     for net_name in nets_to_route:
-        pads = board.get_net_pads(net_name)
+        pads = _terminal_pads(board.get_net_pads(net_name), net_name, net_terminals)
         if len(pads) < 2:
             continue  # Skip nets with less than 2 pads
 
@@ -1767,6 +1793,7 @@ def route_board_with_hints(
     existing_traces: Sequence[ExistingSegment] = (),
     existing_vias: Sequence[ExistingVia] = (),
     only_nets: Optional[set] = None,
+    net_terminals: Optional[dict] = None,
 ) -> RoutingResult:
     """
     Route a board using routing hints for guidance.
@@ -1934,7 +1961,7 @@ def route_board_with_hints(
     jumpers_used = result.via_count  # count vias from bus routing
 
     for net_name in nets_to_route:
-        pads = board.get_net_pads(net_name)
+        pads = _terminal_pads(board.get_net_pads(net_name), net_name, net_terminals)
         if len(pads) < 2:
             continue
 

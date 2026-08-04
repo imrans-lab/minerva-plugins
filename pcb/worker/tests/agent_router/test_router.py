@@ -712,3 +712,50 @@ class TestInternalNetsRouting:
         assert len(gnd_routes) == 1
         # Should have exactly 3 paths: U1.22->BAT1, U1.23->SW1, U1.44->SW2
         assert len(gnd_routes[0].paths) == 3
+
+
+class TestNetTerminals:
+    """Span-scoped routing (docket 019fcb6f9d20): ``net_terminals`` narrows a
+    net's connection targets to a caller-named pad subset. The ask is the task
+    boundary — "connect A to B" on a 3-pad net returns A↔B copper only."""
+
+    @staticmethod
+    def _three_pad_board() -> Board:
+        board = Board(width=60, height=40)
+        board.pads = [
+            Pad("U1", "1", "SIG", (10, 20), (1, 1)),
+            Pad("U2", "1", "SIG", (30, 20), (1, 1)),
+            Pad("U3", "1", "SIG", (50, 20), (1, 1)),
+        ]
+        board.nets = {"SIG": Net("SIG", 1, list(board.pads))}
+        return board
+
+    def test_terminals_route_only_the_named_span(self):
+        board = self._three_pad_board()
+        result = route_board(
+            board, net_terminals={"SIG": {"U1.1", "U2.1"}})
+        assert result.success is True
+        assert len(result.routes) == 1
+        xs = [x for seg in result.routes[0].segments
+              for x in (seg.start[0], seg.end[0])]
+        # Copper spans U1.1 (x=10) .. U2.1 (x=30) and never reaches
+        # U3.1 (x=50): the omitted pad is not a connection target.
+        assert max(xs) <= 31.0, xs
+        assert min(xs) >= 9.0, xs
+
+    def test_no_terminals_is_the_historical_whole_net_run(self):
+        board = self._three_pad_board()
+        result = route_board(board)
+        assert result.success is True
+        xs = [x for r in result.routes for seg in r.segments
+              for x in (seg.start[0], seg.end[0])]
+        # Whole-net run reaches all three pads.
+        assert max(xs) >= 49.0, xs
+
+    def test_unknown_terminal_refs_route_nothing_not_everything(self):
+        """A terminal set that matches no pads must SHRINK the run to nothing
+        (the < 2 pads guard skips the net) — never silently widen it."""
+        board = self._three_pad_board()
+        result = route_board(
+            board, net_terminals={"SIG": {"NOPE.1", "NOPE.2"}})
+        assert result.routes == []

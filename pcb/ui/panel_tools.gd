@@ -1636,10 +1636,20 @@ static func _propose_scope(hint_ids: Array, source_hints: Array, data) -> Varian
 		return null
 	var board_nets: Dictionary = _board_net_set(data)
 	var nets := {}
+	var tasks: Array = []
 	for hint in source_hints:
 		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
 		if _is_bus_branch_hint(kp):
 			return null  # a different resolution rule — not mirrored here
+		# SPAN FORM first (docket 019fcb6f9d20 — the ask is the task boundary):
+		# a hint carrying explicit source+dest pins that all resolve to ONE
+		# board net becomes a span task — the worker routes exactly that span
+		# (route_bridge parse_route_scope -> engine net_terminals) instead of
+		# widening to the whole net and stitching islands the ask never named.
+		var span: Dictionary = _span_task_for_hint(hint, kp, data, board_nets)
+		if not span.is_empty():
+			tasks.append(span)
+			continue
 		var names: Array = _hint_net_names(kp)
 		if names.is_empty():
 			return null  # falls through to pin resolution worker-side
@@ -1647,9 +1657,52 @@ static func _propose_scope(hint_ids: Array, source_hints: Array, data) -> Varian
 		if not board_nets.has(first):
 			return null  # stale name — worker falls through to pin resolution
 		nets[first] = true
-	if nets.is_empty():
+	if nets.is_empty() and tasks.is_empty():
 		return null
-	return {"nets": nets.keys()}
+	var scope := {}
+	if not tasks.is_empty():
+		scope["tasks"] = tasks
+	if not nets.is_empty():
+		scope["nets"] = nets.keys()
+	return scope
+
+
+## The span-task mirror of the worker's pin resolution, kept to the same
+## completely-derivable-or-nothing discipline as the net rule above: {} unless
+## the hint carries 1+ source AND 1+ dest pins, every pin resolves on the live
+## board, and they all agree on ONE net the board carries. Any ambiguity
+## returns {} so the hint falls back to the net rule (or takes the whole scope
+## to unscoped) rather than shipping a span the worker would refuse.
+static func _span_task_for_hint(hint: Dictionary, kp: Dictionary, data, board_nets: Dictionary) -> Dictionary:
+	if data == null:
+		return {}
+	var src: Array = kp.get("source_pins", []) if kp.get("source_pins", []) is Array else []
+	var dst: Array = kp.get("dest_pins", []) if kp.get("dest_pins", []) is Array else []
+	if src.is_empty() or dst.is_empty():
+		return {}
+	var endpoints: Array = []
+	var net := ""
+	for pin_ref in src + dst:
+		var ref := str(pin_ref)
+		var comp := ref.rsplit(".", true, 1)
+		if comp.size() != 2 or String(comp[0]).is_empty() or String(comp[1]).is_empty():
+			return {}
+		var pin_net := str(data.find_net_for_pin(String(comp[0]), String(comp[1])))
+		if pin_net.is_empty():
+			return {}
+		if net.is_empty():
+			net = pin_net
+		elif pin_net != net:
+			return {}  # endpoints disagree on the net — not a clean span
+		if not endpoints.has(ref):
+			endpoints.append(ref)
+	if net.is_empty() or not board_nets.has(net) or endpoints.size() < 2:
+		return {}
+	return {
+		"task_id": str(hint.get("id", "")),
+		"net": net,
+		"endpoints": endpoints,
+	}
 
 
 ## Structured failure-as-feedback when the worker did not answer.
@@ -3294,13 +3347,25 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	else:
 		selection = {"mode": "ids", "ids": _hint_id_list(source_hints)}
 
-	var route_extra: Dictionary = _route_request_extra(
-		workspace, _propose_scope(hint_ids, source_hints, data))
+	var scope: Variant = _propose_scope(hint_ids, source_hints, data)
+	var route_extra: Dictionary = _route_request_extra(workspace, scope)
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
 	var result: Dictionary = reply.get("result", {})
-	return _ingest_result_into_workspace(workspace, data, result, source_hints, {})
+	# Narrate the ask boundary (docket 019fcb6f9d20): when the run was
+	# span-scoped, say so — the caller should never have to infer from the
+	# candidate list whether net-completion was attempted.
+	var extra := {}
+	if scope is Dictionary and (scope as Dictionary).has("tasks"):
+		var span_tasks: Array = (scope as Dictionary).get("tasks", [])
+		extra["scope"] = {
+			"span_tasks": span_tasks.size(),
+			"note": "span-scoped to the hints' own endpoints; net-completion "
+				+ "beyond the ask was NOT attempted — propose net-level hints "
+				+ "(or omit endpoints) to route whole nets.",
+		}
+	return _ingest_result_into_workspace(workspace, data, result, source_hints, extra)
 
 
 ## The SHARED landing path for every tool that turns a router reply into

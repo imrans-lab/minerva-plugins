@@ -204,37 +204,78 @@ def test_endpoints_naming_the_whole_net_are_accepted():
     assert scope.nets == frozenset({"SIG"})
 
 
-def test_a_span_of_a_multi_pad_net_is_REFUSED_not_widened():
-    """THE decision this unit made, and the one most likely to be "helpfully"
-    relaxed later.
+def test_a_span_of_a_multi_pad_net_resolves_to_a_terminal_set():
+    """THE deliberate rewrite the old refusal test demanded of whoever landed
+    span routing (docket 019fcb6f9d20, formerly gap 019fc155bc32).
 
     ``_three_pin_board``'s SIG has three pads. A task naming two of them is a
-    SPAN. The vendored engine cannot express it: ``_scoped_nets`` filters whole
-    nets, and ``route_board`` then connects every pad of every surviving net. So
-    honouring the task would return copper between a pair of pads the task never
-    named — the exact "I asked for two things and got sixteen" surprise the run
-    scope exists to remove, re-created one layer up.
-
-    Narrowing the engine to a pad SUBSET is an ``agent_router`` change, and
-    ``agent_router`` is the BASE package ``route_bridge`` imports from. This
-    refusal is the record of where that gap lives; the day span routing lands,
-    THIS test is what has to be rewritten, deliberately.
+    SPAN, and it now resolves to a per-net TERMINAL set the engine narrows to
+    (agent_router ``_terminal_pads``) instead of being refused: the run scopes
+    to SIG, and ``net_terminals`` records exactly the named pair, so routing
+    returns copper between those two pads only — the ask is the task boundary.
     """
     board = _bridge_board(_three_pin_board())
     pads = {f"{p.component}.{p.number}" for p in board.nets["SIG"].pads}
     assert len(pads) >= 3, pads
     span = sorted(pads)[:2]
 
+    scope = route_bridge.parse_route_scope(
+        {"tasks": [{"task_id": "t-span", "net": "SIG",
+                    "endpoints": span}]}, board)
+    assert scope.nets == frozenset({"SIG"})
+    assert scope.task_ids == ("t-span",)
+    assert scope.net_terminals == {"SIG": frozenset(span)}
+
+
+def test_endpoints_naming_the_whole_net_carry_no_terminal_narrowing():
+    """The whole-net form stays byte-identical to pre-span behaviour: a task
+    whose endpoints ARE the net's full pad set produces no net_terminals
+    entry, so the engine's historical whole-net path runs unchanged."""
+    board = _bridge_board(_two_net_board())
+    scope = route_bridge.parse_route_scope(
+        {"tasks": [{"task_id": "t-1", "net": "SIG",
+                    "endpoints": ["U1.1", "J1.1"]}]}, board)
+    assert scope.net_terminals is None
+
+
+def test_a_single_endpoint_span_is_refused_not_widened():
+    """One pad is not a routable span. Approximating it to the whole net would
+    be exactly the silent widening the scope argument exists to remove."""
+    board = _bridge_board(_three_pin_board())
+    pads = sorted(f"{p.component}.{p.number}" for p in board.nets["SIG"].pads)
     with pytest.raises(route_bridge.UnsupportedRouteScope) as excinfo:
         route_bridge.parse_route_scope(
-            {"tasks": [{"task_id": "t-span", "net": "SIG",
-                        "endpoints": span}]}, board)
+            {"tasks": [{"task_id": "t-one", "net": "SIG",
+                        "endpoints": pads[:1]}]}, board)
     message = str(excinfo.value)
-    assert "SPAN" in message
-    assert "t-span" in message
-    # It must name the gap rather than merely decline — a refusal that does not
-    # say what is missing gets "fixed" by deleting the check.
-    assert "agent_router" in message
+    assert "t-one" in message
+    assert "single endpoint" in message or "2+" in message
+
+
+def test_two_span_tasks_on_one_net_merge_terminals_with_a_warning():
+    """The engine routes ONE tree per net; two spans on the same net union
+    their terminal sets, and the merge is NAMED so the caller sees it."""
+    board = _bridge_board(_three_pin_board())
+    pads = sorted(f"{p.component}.{p.number}" for p in board.nets["SIG"].pads)
+    assert len(pads) >= 3
+    scope = route_bridge.parse_route_scope(
+        {"tasks": [
+            {"task_id": "t-a", "net": "SIG", "endpoints": pads[:2]},
+            {"task_id": "t-b", "net": "SIG", "endpoints": pads[1:3]},
+        ]}, board)
+    assert scope.net_terminals == {"SIG": frozenset(pads[:3])}
+    assert any("merged" in w for w in scope.warnings)
+
+
+def test_a_whole_net_ask_beats_a_span_narrowing_on_the_same_net():
+    """Explicitly stated wider ask wins; the narrowing is dropped LOUDLY."""
+    board = _bridge_board(_three_pin_board())
+    pads = sorted(f"{p.component}.{p.number}" for p in board.nets["SIG"].pads)
+    scope = route_bridge.parse_route_scope(
+        {"tasks": [{"task_id": "t-a", "net": "SIG", "endpoints": pads[:2]}],
+         "nets": ["SIG"]}, board)
+    assert scope.net_terminals is None
+    assert any("whole-net ask wins" in w for w in scope.warnings)
 
 
 def test_an_endpoint_that_is_not_on_its_net_is_refused():

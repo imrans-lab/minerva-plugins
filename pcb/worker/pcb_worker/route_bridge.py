@@ -887,17 +887,19 @@ def existing_copper_with_pinned(
 # annotation got a whole-board run. This turns the scope into a first-class
 # argument the caller states.
 #
-# SPAN SCOPING IS REFUSED, NOT APPROXIMATED (the load-bearing decision here).
-# A RouteTask may name ENDPOINTS — a sub-path of a multi-pad net. The vendored
-# engine cannot express that: ``_scoped_nets`` filters WHOLE nets out of the
-# ordered net list, and ``route_board`` then connects every pad of each net that
-# survives. Widening a 2-endpoint span on a 3-pad net to "route the whole net"
-# would silently return copper the caller did not ask for and did not see coming
-# — the identical surprise the run-scope work exists to remove. Narrowing the
-# engine to a pad SUBSET is an ``agent_router`` change, and agent_router is the
-# BASE package this module imports from; changing it is out of this unit's
-# fence. So a span is named and refused, and the refusal is the record of where
-# that gap lives.
+# SPAN SCOPING IS SUPPORTED (docket 019fcb6f9d20; formerly refused — the
+# refusal was the record of gap 019fc155bc32, and the enabling engine change
+# has landed). A RouteTask naming ENDPOINTS that are a proper subset (2+) of a
+# multi-pad net resolves to a per-net TERMINAL set, handed to the engine as
+# ``net_terminals`` (agent_router/router.py::_terminal_pads): the engine
+# connects ONLY the named pads and the omitted same-net pads keep their grid
+# presence without becoming connection targets. "Connect MIC1.6 to AMP1.6"
+# on a 14-pad GND net returns exactly that span. What is STILL refused, not
+# reinterpreted: a malformed spec, a task with no net, an endpoint not on its
+# net, and a single-endpoint task (one pad is not a routable span). Two tasks
+# naming the same net merge their terminal sets — the engine routes one tree
+# over the union, which is the closest expressible answer and is named in the
+# scope's warnings so the caller sees the merge.
 
 
 class UnsupportedRouteScope(ValueError):
@@ -917,10 +919,22 @@ class RouteScope:
     nets: frozenset
     task_ids: tuple
     warnings: tuple = ()
+    # Span scoping (docket 019fcb6f9d20): net name -> frozenset of
+    # "Component.Pad" terminal refs. Only nets whose task named a PROPER
+    # subset of the net's pads appear here; a whole-net task carries no entry
+    # (byte-identical to the pre-span behaviour). Handed to the engine as
+    # ``net_terminals``.
+    net_terminals: Optional[dict] = None
 
 
 def _scope_task_nets(task: Any, ordinal: int, pads_by_net: dict) -> tuple:
-    """One scope task -> (task_id, net_name or None, warning or None)."""
+    """One scope task -> (task_id, net_name or None, terminals or None,
+    warning or None).
+
+    ``terminals`` is a frozenset of "Component.Pad" refs when the task named a
+    PROPER subset (2+) of the net's pads — the span form (docket
+    019fcb6f9d20). ``None`` means whole-net (no endpoints, or endpoints that
+    name every pad the net has)."""
     if not isinstance(task, dict):
         raise UnsupportedRouteScope(
             f"scope.tasks[{ordinal}]: expected a mapping, got "
@@ -932,6 +946,7 @@ def _scope_task_nets(task: Any, ordinal: int, pads_by_net: dict) -> tuple:
             f"scope task {task_id!r}: no net named — a task's net is what the "
             f"run is scoped to and there is nothing to infer it from")
 
+    terminals = None
     endpoints = task.get("endpoints")
     if endpoints is not None:
         if not isinstance(endpoints, list):
@@ -946,23 +961,28 @@ def _scope_task_nets(task: Any, ordinal: int, pads_by_net: dict) -> tuple:
                 raise UnsupportedRouteScope(
                     f"scope task {task_id!r}: endpoint(s) {unknown} are not "
                     f"pads of net {net!r} ({sorted(on_net)})")
-            if named and named != on_net:
+            if len(named) == 1:
+                # One pad is not a routable span; approximating it to the
+                # whole net would be exactly the silent widening this
+                # argument exists to remove.
                 raise UnsupportedRouteScope(
-                    f"scope task {task_id!r}: endpoints {sorted(named)} are a "
-                    f"SPAN of net {net!r}, which has pads {sorted(on_net)}. The "
-                    f"routing engine scopes by whole net only, so honouring "
-                    f"this would route the entire net and return copper between "
-                    f"pads the task never named. Refused rather than widened; "
-                    f"span-level routing needs agent_router support that does "
-                    f"not exist.")
+                    f"scope task {task_id!r}: a single endpoint "
+                    f"({sorted(named)}) is not a routable span of net "
+                    f"{net!r}; name 2+ pads, or omit endpoints to route the "
+                    f"whole net")
+            if named and named != on_net:
+                # The span form: route ONLY between these pads. Resolved to a
+                # terminal set the engine narrows to (agent_router
+                # _terminal_pads); the omitted pads keep their grid presence.
+                terminals = frozenset(named)
 
     if net not in pads_by_net:
         # Same disposition the bus-net scope already uses: a net the board does
         # not have is DROPPED from the scope with a warning, never ADDED to it.
-        return (task_id, None,
+        return (task_id, None, None,
                 f"scope task {task_id!r} names net {net!r}, which this board "
                 f"does not have — dropped from the run scope")
-    return (task_id, net, None)
+    return (task_id, net, terminals, None)
 
 
 def parse_route_scope(spec: Any, board: Board) -> Optional[RouteScope]:
@@ -1008,18 +1028,42 @@ def parse_route_scope(spec: Any, board: Board) -> Optional[RouteScope]:
     scoped: set = set()
     task_ids: list = []
     warnings: list = []
+    span_terminals: dict = {}
 
     if tasks is not None:
         if not isinstance(tasks, list):
             raise UnsupportedRouteScope(
                 f"scope.tasks must be a list, got {type(tasks).__name__}")
         for ordinal, task in enumerate(tasks):
-            task_id, net, warning = _scope_task_nets(task, ordinal, pads_by_net)
+            task_id, net, terminals, warning = _scope_task_nets(
+                task, ordinal, pads_by_net)
             task_ids.append(task_id)
             if warning:
                 warnings.append(warning)
             if net is not None:
                 scoped.add(net)
+                if terminals is not None:
+                    prior = span_terminals.get(net)
+                    if prior is not None:
+                        # Two span tasks on one net: the engine routes ONE
+                        # tree per net, so the closest expressible answer is
+                        # the union of both terminal sets — named, not silent.
+                        span_terminals[net] = prior | terminals
+                        warnings.append(
+                            f"two span tasks name net {net!r}; their "
+                            f"terminal sets are merged into one routed tree "
+                            f"({sorted(prior | terminals)})")
+                    else:
+                        span_terminals[net] = terminals
+                elif net in span_terminals:
+                    # A whole-net task and a span task on the same net: the
+                    # whole-net ask wins (it is the wider explicit statement),
+                    # and the narrowing is dropped with a warning.
+                    del span_terminals[net]
+                    warnings.append(
+                        f"a whole-net task and a span task both name net "
+                        f"{net!r}; the whole-net ask wins and the span "
+                        f"narrowing is dropped")
 
     if nets_spec is not None:
         if not isinstance(nets_spec, list):
@@ -1038,8 +1082,19 @@ def parse_route_scope(spec: Any, board: Board) -> Optional[RouteScope]:
                     f"scope names net {name!r}, which this board does not have "
                     f"— dropped from the run scope")
 
+    if nets_spec is not None:
+        # A bare nets entry is a whole-net ask; it wins over any span task
+        # naming the same net, same disposition as the task-vs-task case above.
+        for name in (set(nets_spec) & set(span_terminals)):
+            del span_terminals[name]
+            warnings.append(
+                f"scope.nets names {name!r} whole-net while a span task "
+                f"narrows it; the whole-net ask wins and the span narrowing "
+                f"is dropped")
+
     return RouteScope(nets=frozenset(scoped), task_ids=tuple(task_ids),
-                      warnings=tuple(warnings))
+                      warnings=tuple(warnings),
+                      net_terminals=dict(span_terminals) or None)
 
 
 def _split_pin_ref(ref: Any) -> tuple[Optional[str], str]:

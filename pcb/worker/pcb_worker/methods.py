@@ -1776,6 +1776,14 @@ def _route(params: dict) -> dict:
                 f"nets in both, or drop one."),
                 "diagnostics": compile_warnings}}
         only_nets = set(explicit_scope.nets)
+        # Span scoping (docket 019fcb6f9d20): per-net terminal subsets resolved
+        # by parse_route_scope ride beside only_nets into the engine — the ask
+        # is the task boundary, so "connect A to B" routes A↔B, not the whole
+        # net. None when every task was whole-net (unchanged behaviour).
+        if explicit_scope.net_terminals:
+            kw["net_terminals"] = {
+                net: set(refs)
+                for net, refs in explicit_scope.net_terminals.items()}
         bridge_warnings = bridge_warnings + [
             {"id": "", "message": w} for w in explicit_scope.warnings]
     # Captured BEFORE the hint merge below, because afterwards "trace_width" in
