@@ -3088,11 +3088,102 @@ static func _load_board(host, args: Dictionary) -> Dictionary:
 		return _err("yaml is required")
 	if not host.has_method("load_board"):
 		return _err("host has no load_board bridge to the panel")
+	# Census BEFORE the destructive replace (docket 019fcb6ffeba): load_board
+	# swaps the whole board, and an incoming source that lacks entities the
+	# live board carries destroys them without either the agent or the owner
+	# being told (measured: a canonical YAML with no zones: section silently
+	# vaporized 2 live zones). Board↔YAML reconciliation is an LLM task by
+	# owner ruling — this tool's job is to be HONEST about what changed, not
+	# to merge. Entity identity is type-level (ids re-mint on load): component
+	# refs, per-net trace counts, via positions, zone/cutout/hole counts.
+	var before: Dictionary = _board_census(_get_data(host))
 	var reply: Dictionary = await host.load_board(yaml_text)
 	if not bool(reply.get("ok", false)):
 		var err_info: Dictionary = reply.get("error", {})
 		return _err(str(err_info.get("message", "load_board failed")))
-	return _ok(reply.get("result", {}))
+	var out: Dictionary = reply.get("result", {})
+	var after: Dictionary = _board_census(_get_data(host))
+	var delta: Dictionary = _census_delta(before, after)
+	if not delta.is_empty():
+		out["delta"] = delta
+	return _ok(out)
+
+
+## Type-level inventory of the live board, for _load_board's honesty report.
+## {} when there is no board yet (first load has nothing to lose).
+static func _board_census(data) -> Dictionary:
+	if data == null:
+		return {}
+	var trace_nets := {}
+	for tid in data.traces:
+		var t = data.traces[tid]
+		var net := str(t.net_name) if t != null else ""
+		trace_nets[net] = int(trace_nets.get(net, 0)) + 1
+	var via_positions: Array = []
+	for via in data.vias:
+		var pos: Vector2 = data.via_position(via)
+		via_positions.append("(%.2f, %.2f)" % [pos.x, pos.y])
+	return {
+		"components": data.components.keys(),
+		"trace_nets": trace_nets,
+		"vias": via_positions,
+		"zones": data.zones.size(),
+		"cutouts": data.cutouts.size(),
+		"mounting_holes": data.mounting_holes.size(),
+	}
+
+
+## What the replace removed/changed, keyed by entity kind — only kinds that
+## actually shrank or changed appear, so an identical reload reports {}.
+## `dropped` restates the shrinkage as sentences an agent can surface verbatim.
+static func _census_delta(before: Dictionary, after: Dictionary) -> Dictionary:
+	if before.is_empty():
+		return {}
+	var delta := {}
+	var dropped: Array = []
+
+	var before_comps: Array = before.get("components", [])
+	var after_comps: Array = after.get("components", [])
+	var removed_comps: Array = []
+	for ref in before_comps:
+		if not after_comps.has(ref):
+			removed_comps.append(ref)
+	if not removed_comps.is_empty():
+		delta["components_removed"] = removed_comps
+		dropped.append("components removed: %s" % str(removed_comps))
+
+	var before_nets: Dictionary = before.get("trace_nets", {})
+	var after_nets: Dictionary = after.get("trace_nets", {})
+	var trace_changes := {}
+	for net in before_nets:
+		var b: int = int(before_nets[net])
+		var a: int = int(after_nets.get(net, 0))
+		if a < b:
+			trace_changes[net] = {"before": b, "after": a}
+	if not trace_changes.is_empty():
+		delta["traces_reduced"] = trace_changes
+		dropped.append("trace counts reduced on net(s): %s" % str(trace_changes.keys()))
+
+	var before_vias: Array = before.get("vias", [])
+	var after_vias: Array = after.get("vias", [])
+	var removed_vias: Array = []
+	for pos in before_vias:
+		if not after_vias.has(pos):
+			removed_vias.append(pos)
+	if not removed_vias.is_empty():
+		delta["vias_removed"] = removed_vias
+		dropped.append("vias removed at: %s" % str(removed_vias))
+
+	for kind in ["zones", "cutouts", "mounting_holes"]:
+		var b2: int = int(before.get(kind, 0))
+		var a2: int = int(after.get(kind, 0))
+		if a2 < b2:
+			delta["%s_removed" % kind] = b2 - a2
+			dropped.append("%d %s removed (live board had %d, incoming source has %d)" % [b2 - a2, kind, b2, a2])
+
+	if not dropped.is_empty():
+		delta["dropped"] = dropped
+	return delta
 
 
 # ══ C4a — ROUTING-WORKSPACE VERB TOOLS (S4, DCR 019f7095c395) ════════════════
