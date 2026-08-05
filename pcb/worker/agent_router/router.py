@@ -17,7 +17,25 @@ import re
 
 from .board import Board, Pad, RoutingRulesError
 from .grid import RoutingGrid
-from .pathfinder import find_path, unroutable_reason, Path
+from .pathfinder import find_path, unroutable_reason, Path, _path_points
+from .corridor import Corridor, measure_adherence, DEFAULT_TOLERANCE_MM
+
+
+def _corridor_from_hint(conn_hint, reversed_dir: bool) -> Optional[Corridor]:
+    """Build the travelled-direction Corridor for a connection hint.
+
+    A hint is authored source -> destination; the engine may route the pair in
+    either direction. Reversing here (rather than at the grading step alone)
+    keeps pricing and reporting on the same oriented polyline.
+    """
+    if not conn_hint.waypoints:
+        return None
+    pts = tuple((w.x, w.y) for w in conn_hint.waypoints)
+    if reversed_dir:
+        pts = tuple(reversed(pts))
+    tol = conn_hint.tolerance_mm
+    return Corridor(waypoints=pts,
+                    tolerance_mm=float(tol) if tol else DEFAULT_TOLERANCE_MM)
 
 
 # Common bus prefixes to detect related signals
@@ -320,6 +338,10 @@ class Route:
     net: str
     paths: list[Path] = field(default_factory=list)
     vias: list[tuple[float, float]] = field(default_factory=list)
+    #: Per-connection corridor grading, one entry per guided connection routed
+    #: on this net (bug 019fcf152791). Empty for every unguided route, so an
+    #: existing caller sees exactly what it always did.
+    corridor_adherence: list[dict] = field(default_factory=list)
 
     @property
     def segments(self) -> list:
@@ -2005,17 +2027,49 @@ def route_board_with_hints(
         connections.extend(net_chains)
 
         for pad_a, pad_b in connections:
+            # AUTHORED CORRIDOR for THIS connection (bug 019fcf152791).
+            # Keyed on the pad pair, not the net, so a corridor authored for
+            # one span is never applied to another span of the same net — and
+            # a second hint on the net is no longer silently lost. The hint's
+            # own preferred_layer wins over the net-wide one for this
+            # connection (precedence, amendment A4).
+            conn_corridor = None
+            conn_layer = preferred_layer
+            matched = hints.get_hint_for_connection(
+                f"{pad_a.component}.{pad_a.number}",
+                f"{pad_b.component}.{pad_b.number}")
+            if matched is not None:
+                conn_hint, reversed_dir = matched
+                conn_corridor = _corridor_from_hint(conn_hint, reversed_dir)
+                if conn_hint.preferred_layer:
+                    conn_layer = conn_hint.preferred_layer
+
             path = find_path(
                 grid=grid,
                 start=pad_a.position,
                 end=pad_b.position,
                 net=net_name,
-                layer=preferred_layer,
+                layer=conn_layer,
                 allow_via=can_via,
                 avoid_areas=avoid_areas,
                 preferred_direction=preferred_direction,
                 prefer_orthogonal=hints.global_hints.prefer_orthogonal,
+                corridor=conn_corridor,
             )
+
+            # Grade the result against what was asked for, with the SAME exact
+            # geometry the planner priced (amendment A7) — so "followed" and
+            # "reported as followed" cannot disagree. Rides the route so the
+            # bridge can attach it per hint.
+            if path and conn_corridor:
+                adherence = measure_adherence(
+                    _path_points(path), conn_corridor,
+                    pad_a.position, pad_b.position)
+                entry = adherence.to_dict()
+                entry["hint_id"] = conn_hint.hint_id
+                entry["endpoints"] = [f"{pad_a.component}.{pad_a.number}",
+                                      f"{pad_b.component}.{pad_b.number}"]
+                route.corridor_adherence.append(entry)
 
             if path:
                 route.paths.append(path)

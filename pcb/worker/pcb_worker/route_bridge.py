@@ -1097,6 +1097,29 @@ def parse_route_scope(spec: Any, board: Board) -> Optional[RouteScope]:
                       net_terminals=dict(span_terminals) or None)
 
 
+def _resolved_pad_refs(pins: Any, board: Board) -> list[str]:
+    """Pin refs that ACTUALLY resolve to a pad, as ``"Component.Pad"`` strings.
+
+    The single-endpoint contract for guided corridors (amendment A5) is a
+    statement about RESOLVED pads, not about how many refs were typed: a hint
+    naming two source pins of which one is a typo has one real endpoint, and
+    should be treated as such rather than refused. Returns the canonical
+    identity string the engine matches on (``f"{component}.{number}"``).
+    """
+    out: list[str] = []
+    for ref in pins or []:
+        comp, pad = _split_pin_ref(ref)
+        if comp is None:
+            continue
+        hit = board.get_pad(comp, pad)
+        if hit is None:
+            continue
+        canonical = f"{hit.component}.{hit.number}"
+        if canonical not in out:
+            out.append(canonical)
+    return out
+
+
 def _split_pin_ref(ref: Any) -> tuple[Optional[str], str]:
     """Split a "Ref.Pad" pin ref into (component, pad). ('U1.15' -> ('U1','15')).
 
@@ -1368,6 +1391,7 @@ def hints_to_router(
 
     net_hints: list[dict] = []
     buses: list[dict] = []
+    connection_hints: list[dict] = []
     max_width: Optional[float] = None
     # hint id -> nets THAT hint asked for. See HintTranslation.nets_by_hint.
     nets_by_hint: dict[str, list[str]] = {}
@@ -1437,33 +1461,48 @@ def hints_to_router(
                 "bridge path (only 'detailed' single-trace hints route as "
                 "drawn), not engine behaviour"
                 % kp.get("detail_level")})
-        # WAYPOINTS ARE NOT CONSUMED ON THIS PATH (bug 019fcf152791). The
-        # engine's only net-hint reader (agent_router/router.py, the
-        # get_hint_for_net call) takes preferred_layer / avoid_areas /
-        # preferred_direction and never NetHint.waypoints, so an authored
-        # corridor on a non-'detailed' single-net hint changes nothing about
-        # the returned geometry. Until guided corridor support lands, say so
-        # in a MACHINE-READABLE field keyed to the hint — a free-text
-        # sentence in a warnings list is exactly what went unnoticed through
-        # two HITL cycles. `waypoint_status` is what callers should branch on;
-        # `message` stays for humans.
+        # AUTHORED WAYPOINTS BECOME A CONNECTION HINT (bug 019fcf152791
+        # Stage B). They used to be handed to the engine as
+        # NetHint.waypoints, which nothing read — the dead field at the heart
+        # of this bug. A corridor belongs to a CONNECTION, so it now rides an
+        # endpoint-keyed ConnectionHint instead, and the engine's
+        # product-state A* actually follows it.
+        #
+        # SINGLE-ENDPOINT CONTRACT (amendment A5): a guided corridor needs
+        # EXACTLY ONE resolved source pad and ONE resolved destination pad.
+        # One polyline between multi-endpoint sets is ambiguous by
+        # construction — silently taking the first pair, or expanding a
+        # cross-product, would both invent an intent the author never
+        # expressed. Refuse BY NAME and fall back to unguided routing.
         if waypoints:
-            warnings.append({
-                "id": str(env.get("id", "")),
-                "waypoint_status": "ignored",
-                "waypoint_count": len(waypoints),
-                "net": net,
-                "message":
-                    "%d authored waypoint(s) IGNORED: this hint's geometry is "
-                    "ordinary pad-to-pad autorouting, not the authored "
-                    "corridor. Single-net hints have no engine waypoint slot "
-                    "(bug 019fcf152791) — a 'clean' DRC verdict says nothing "
-                    "about corridor adherence. To lay the polyline literally, "
-                    "author detail_level='detailed', which materializes the "
-                    "waypoints as drawn and BYPASSES obstacle avoidance "
-                    "entirely." % len(waypoints),
-            })
-        nh: dict = {"net": net, "waypoints": waypoints, "preferred_layer": layer}
+            src_refs = _resolved_pad_refs(kp.get("source_pins"), board)
+            dst_refs = _resolved_pad_refs(kp.get("dest_pins"), board)
+            if len(src_refs) == 1 and len(dst_refs) == 1:
+                connection_hints.append({
+                    "net": net,
+                    "endpoints": [src_refs[0], dst_refs[0]],
+                    "waypoints": waypoints,
+                    "preferred_layer": layer,
+                    "hint_id": str(env.get("id", "")),
+                })
+            else:
+                warnings.append({
+                    "id": str(env.get("id", "")),
+                    "waypoint_status": "ignored",
+                    "waypoint_count": len(waypoints),
+                    "net": net,
+                    "reason": "ambiguous_span",
+                    "message":
+                        "%d authored waypoint(s) IGNORED: a guided corridor "
+                        "needs exactly one resolved source pad and one "
+                        "resolved destination pad, but this hint resolved to "
+                        "%d source and %d destination pad(s). One polyline "
+                        "between multi-endpoint sets is ambiguous, so the "
+                        "corridor was refused rather than guessed; the route "
+                        "is ordinary pad-to-pad autorouting."
+                        % (len(waypoints), len(src_refs), len(dst_refs)),
+                })
+        nh: dict = {"net": net, "preferred_layer": layer}
         net_hints.append(nh)
         # Recorded from the SAME `net` the engine is about to be hinted with —
         # not re-resolved. See HintTranslation.nets_by_hint.
@@ -1476,6 +1515,8 @@ def hints_to_router(
         hints_dict["net_hints"] = net_hints
     if buses:
         hints_dict["buses"] = buses
+    if connection_hints:
+        hints_dict["connection_hints"] = connection_hints
 
     hints = parse_hints(hints_dict) if hints_dict else RoutingHints()
     return HintTranslation(

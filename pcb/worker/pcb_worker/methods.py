@@ -769,6 +769,11 @@ def _serialize_routing_result(result) -> dict:
                     for s in r.segments
                 ],
                 "vias": [[v[0], v[1]] for v in r.vias],
+                # Per-connection corridor grading (bug 019fcf152791). Present
+                # only for guided connections; an unguided route's shape is
+                # byte-identical to what it always was.
+                **({"corridor_adherence": list(r.corridor_adherence)}
+                   if getattr(r, "corridor_adherence", None) else {}),
             }
             for r in result.routes
         ],
@@ -1939,6 +1944,16 @@ def _route(params: dict) -> dict:
         payload["warnings"] = bridge_warnings + compile_warnings
     if selected_hint_ids:
         payload["selected_hint_ids"] = selected_hint_ids
+    # CORRIDOR ADHERENCE, hoisted to the top level (bug 019fcf152791 Stage B).
+    # It lives per-route as well, but the caller that has to decide whether a
+    # proposal honoured its author's intent should not have to walk every
+    # route to discover that one corridor was missed.
+    _corridor_report: list = []
+    for _route in payload.get("routes") or []:
+        if isinstance(_route, dict):
+            _corridor_report.extend(_route.get("corridor_adherence") or [])
+    if _corridor_report:
+        payload["corridor_adherence"] = _corridor_report
     # Echoed so a task-form scope is distinguishable from a net-form one in the
     # reply — the caller sent RouteTask ids, and a reply that drops them makes
     # the two forms indistinguishable to the workspace that has to file the

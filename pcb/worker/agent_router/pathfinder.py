@@ -11,6 +11,8 @@ import heapq
 import math
 
 from .grid import RoutingGrid
+from . import corridor as corridor_mod
+from .corridor import Corridor
 
 
 @dataclass
@@ -100,6 +102,7 @@ def find_path(
     avoid_areas: Optional[list] = None,
     preferred_direction: Optional[str] = None,
     prefer_orthogonal: bool = False,
+    corridor: Optional[Corridor] = None,
 ) -> Optional[Path]:
     """
     Find a path from start to end avoiding obstacles.
@@ -149,6 +152,54 @@ def find_path(
     # handed copper of zero extent.
     if start == end:
         return None
+
+    # ── AUTHORED CORRIDOR: one planner, one objective (amendment A2) ─────────
+    #
+    # When the caller supplied a corridor, the direct/L shortcuts are SKIPPED
+    # rather than tried-and-scored. Two reasons, both from review:
+    #
+    #  * They pre-empt. They return BEFORE A* is ever reached, so a corridor
+    #    cost that lived only in A* would leave this bug unfixed for exactly
+    #    the routes that opened it (the VBAT span is a plain L). This is the
+    #    "fix ships green, repro unchanged" trap.
+    #  * Scoring them alongside a corridor search would mean comparing a
+    #    lexicographic preference (adherence, then length) against A*'s scalar
+    #    (length + corridor + skip). Those are different objectives and the
+    #    argmin of one need not win the other.
+    #
+    # A straight or L-shaped route that genuinely follows the corridor is
+    # REPRESENTABLE in the product-state search's own output and wins there on
+    # its own merits — so nothing is lost by not enumerating it separately.
+    # (It also sidesteps _try_l_path returning its FIRST clear corner rather
+    # than the better of the two.)
+    #
+    # Layer choice stays a WHOLE-PATH decision, as it already is: each
+    # candidate below is internally layer-consistent, so there is no
+    # concatenation of legs and therefore none of the layer-discontinuity
+    # hazard that a sequential sub-search design would carry.
+    if corridor:
+        best: Optional[Path] = None
+        best_cost = float("inf")
+        for cand_layer, via_cost in _corridor_layer_candidates(layer, allow_via):
+            found = _corridor_astar(
+                grid, start, end, net, cand_layer, corridor,
+                avoid_areas=avoid_areas, prefer_orthogonal=prefer_orthogonal)
+            if not found:
+                continue
+            cand, skipped = found
+            cost = _corridor_objective(cand, corridor, start, end, skipped, via_cost)
+            if cost < best_cost:
+                best, best_cost = cand, cost
+        # ATOMIC: a corridor route is emitted whole or not at all — a partial
+        # corridor walk is never returned.
+        if best is not None:
+            return best
+        # NO CORRIDOR ROUTE EXISTS (obstacles, or none inside the bounded
+        # excursion). Waypoints are NOT mandatory — the approved semantics —
+        # so falling through to ordinary routing is the honest degrade: the
+        # user keeps their connection, and the adherence report says the
+        # corridor was not followed. Refusing here would make a rough authored
+        # corridor cost someone a route, which is the opposite of guidance.
 
     # Try direct path first (skip when prefer_orthogonal — a free chord may be
     # diagonal; the axis-aligned case still reaches it, through _try_l_path)
@@ -476,6 +527,231 @@ def _astar_path(
     return None
 
 
+def _simplify_points(
+    points: list[tuple[float, float]],
+    grid: RoutingGrid,
+    net: str,
+    layer: str,
+    prefer_orthogonal: bool,
+) -> list[tuple[float, float]]:
+    """The existing grid-aware simplification, as one reusable step."""
+    if prefer_orthogonal:
+        simplified = _simplify_orthogonal(points, grid, net, layer)
+        return _collapse_staircases(simplified, grid, net, layer)
+    return _simplify_path(points, grid, net, layer)
+
+
+def _segments_from_points(points: list[tuple[float, float]],
+                          layer: str) -> list[PathSegment]:
+    """Points -> segments, DROPPING zero-length pairs.
+
+    Zero-length copper is not modelable downstream (see find_path's docstring
+    and docket 019f9cc3245d). Coincident consecutive points arise legitimately
+    here: a corridor's REACH/SKIP transitions change milestone state without
+    moving the cell, so the raw walk can repeat a position.
+    """
+    segments: list[PathSegment] = []
+    for i in range(len(points) - 1):
+        a, b = points[i], points[i + 1]
+        if a == b:
+            continue
+        segments.append(PathSegment(start=a, end=b, layer=layer))
+    return segments
+
+
+#: Cost, in mm-equivalent, charged for the layer change a via represents when
+#: comparing corridor candidates across layers. Physical units, converted like
+#: every other corridor cost (amendment A6). It exists so a corridor route that
+#: needs a via is not preferred over an equally corridor-faithful single-layer
+#: one purely because the other layer happened to be emptier.
+CORRIDOR_VIA_COST_MM: float = 8.0
+
+
+def _corridor_layer_candidates(layer: str, allow_via: bool) -> list[tuple[str, float]]:
+    """Layers a corridor route may be planned on, with each one's via cost.
+
+    The requested layer is free; the opposite layer is offered only when vias
+    are permitted and carries CORRIDOR_VIA_COST_MM. Both candidates are WHOLE
+    paths — this is what keeps layer choice a single, internally consistent
+    decision instead of something threaded across legs.
+    """
+    out = [(layer, 0.0)]
+    if allow_via:
+        out.append(("B.Cu" if layer == "F.Cu" else "F.Cu", CORRIDOR_VIA_COST_MM))
+    return out
+
+
+def _corridor_objective(path: Path,
+                        corridor: Corridor,
+                        start: tuple[float, float],
+                        end: tuple[float, float],
+                        skipped: list[int],
+                        via_cost_mm: float) -> float:
+    """ONE scalar (amendment A2) ranking corridor candidates.
+
+    Deliberately the SAME shape the planner minimises — length plus corridor
+    infidelity plus skip cost — so the candidate chosen here is the candidate
+    the search itself considered best, rather than the winner of a second,
+    differently-shaped preference. Adherence is measured with the exact
+    geometry the report uses (amendment A7), so "the planner thought this was
+    on-corridor" and "the report grades it on-corridor" cannot disagree.
+    """
+    points = _path_points(path)
+    adherence = corridor_mod.measure_adherence(points, corridor, start, end, skipped)
+    return (path.total_length()
+            + corridor_mod.CORRIDOR_WEIGHT * adherence.max_deviation_mm
+            + corridor_mod.SKIP_PENALTY_MM * len(skipped)
+            + via_cost_mm)
+
+
+def _path_points(path: Path) -> list[tuple[float, float]]:
+    """A path's own VERTICES (never PathSegment.points tessellation, A7)."""
+    if not path.segments:
+        return []
+    pts = [path.segments[0].start]
+    for seg in path.segments:
+        pts.append(seg.end)
+    return pts
+
+
+def _corridor_astar(
+    grid: RoutingGrid,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    net: str,
+    layer: str,
+    corridor: Corridor,
+    avoid_areas: Optional[list] = None,
+    prefer_orthogonal: bool = False,
+) -> Optional[tuple[Path, list[int]]]:
+    """PRODUCT-STATE A* over ``(cell, milestone)`` — the Stage B planner.
+
+    THE STRUCTURE (bug 019fcf152791, design comment 1023 as amended by 1024).
+    A plain A* keyed on cells cannot express "visit these points IN ORDER":
+    ``g_score[cell]`` cannot distinguish standing at a cell having passed
+    waypoint 1 from standing at the same cell having not. So the node becomes
+    a PAIR ``(cell, k)`` where ``k`` is how many authored waypoints are behind
+    us, and the goal is ``(end_cell, N)``.
+
+    Three transitions:
+      MOVE  (cell,k) -> (neighbour,k)  base move cost, multiplied by the
+                                       off-corridor penalty for the CURRENT
+                                       leg (leg k), so attraction is ordered.
+      REACH (cell,k) -> (cell,k+1)     free, when the cell is within
+                                       REACH_RADIUS of waypoint k.
+      SKIP  (cell,k) -> (cell,k+1)     SKIP_PENALTY. This is what makes
+                                       waypoints SOFT rather than mandatory:
+                                       a blocked or unreachable waypoint costs
+                                       one skip and the route still completes.
+
+    INVARIANT (amendment A3, correcting an overclaim in the first design): a
+    waypoint is either REACHED in order or explicitly SKIPPED in order — it is
+    never silently credited out of order. The search can still shortcut a bend,
+    but only by paying for a skip, and the skip is reported.
+
+    COSTS ARE NON-NEGATIVE and expressed in PHYSICAL mm, converted to grid cost
+    here (amendment A6) — never a negative "bonus", which would break A*
+    ordering, and never a constant in grid units, which would change meaning
+    with grid resolution. The heuristic stays Euclidean-to-end: with
+    milestones outstanding the true remaining cost is at least the straight
+    line to the goal, so it never overestimates and A* stays admissible.
+    """
+    start_cell = grid._pos_to_cell(start[0], start[1])
+    end_cell = grid._pos_to_cell(end[0], end[1])
+    if not grid._cell_in_bounds(*start_cell) or not grid._cell_in_bounds(*end_cell):
+        return None
+    # Same start-cell validation the plain A* performs (docket 019f9bf9c04a).
+    if not grid.can_route_through(start[0], start[1], net, layer):
+        return None
+
+    res = max(float(getattr(grid, "resolution", 1.0)), 1e-9)
+    skip_cost = corridor_mod.SKIP_PENALTY_MM / res
+    n = corridor.count
+    goal = (end_cell, n)
+
+    if prefer_orthogonal:
+        directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+    else:
+        directions = [(1, 0), (-1, 0), (0, 1), (0, -1),
+                      (1, 1), (1, -1), (-1, 1), (-1, -1)]
+    avoid_penalty = 5.0
+
+    counter = 0
+    start_state = (start_cell, 0)
+    open_set = [(0.0, counter, start_state)]
+    came_from: dict[tuple, tuple] = {}
+    g_score: dict[tuple, float] = {start_state: 0.0}
+
+    while open_set:
+        _, _, current = heapq.heappop(open_set)
+        cell, k = current
+        if current == goal:
+            return _reconstruct_corridor_path(
+                came_from, current, start, end, net, layer, grid,
+                prefer_orthogonal, corridor)
+
+        base_g = g_score[current]
+
+        # ── state-only transitions: REACH (free) and SKIP (penalised) ────────
+        if k < n:
+            pos = grid._cell_to_pos(*cell)
+            advance = (cell, k + 1)
+            step = 0.0 if _within_reach(pos, corridor, k) else skip_cost
+            tentative = base_g + step
+            if advance not in g_score or tentative < g_score[advance]:
+                came_from[advance] = (current, "reach" if step == 0.0 else "skip")
+                g_score[advance] = tentative
+                h = math.hypot(cell[0] - end_cell[0], cell[1] - end_cell[1])
+                counter += 1
+                heapq.heappush(open_set, (tentative + h, counter, advance))
+
+        # ── MOVE ────────────────────────────────────────────────────────────
+        leg_a, leg_b = corridor_mod.segment_for_leg(corridor, k, start, end)
+        for dx, dy in directions:
+            neighbor = (cell[0] + dx, cell[1] + dy)
+            if not grid._cell_in_bounds(*neighbor):
+                continue
+            nx, ny = grid._cell_to_pos(*neighbor)
+            if not grid.can_route_through(nx, ny, net, layer):
+                continue
+            # Diagonal corner-clipping guard, identical to the plain A*.
+            if dx != 0 and dy != 0:
+                c1 = grid._cell_to_pos(cell[0] + dx, cell[1])
+                c2 = grid._cell_to_pos(cell[0], cell[1] + dy)
+                if not grid.can_route_through(c1[0], c1[1], net, layer):
+                    continue
+                if not grid.can_route_through(c2[0], c2[1], net, layer):
+                    continue
+
+            move_cost = math.sqrt(2) if dx != 0 and dy != 0 else 1.0
+            if avoid_areas:
+                for area in avoid_areas:
+                    if hasattr(area, "contains") and area.contains(nx, ny):
+                        move_cost *= avoid_penalty
+                        break
+            # Ordered attraction: price against the leg being travelled NOW.
+            d = corridor_mod.point_segment_distance((nx, ny), leg_a, leg_b)
+            # BOUNDED EXCURSION (amendment A8, measured): prune cells far
+            # outside the tube instead of merely taxing them. Penalty-inflated
+            # costs make the plain Euclidean heuristic weak, so an unbounded
+            # search expands nearly the whole board — 21-26s on the real board
+            # at 0.1mm. The bound is what keeps a guided route interactive.
+            if d > corridor_mod.CORRIDOR_MAX_EXCURSION_MM:
+                continue
+            move_cost *= corridor_mod.off_corridor_multiplier(d, corridor.tolerance_mm)
+
+            nxt = (neighbor, k)
+            tentative = base_g + move_cost
+            if nxt not in g_score or tentative < g_score[nxt]:
+                came_from[nxt] = (current, "move")
+                g_score[nxt] = tentative
+                h = math.hypot(neighbor[0] - end_cell[0], neighbor[1] - end_cell[1])
+                counter += 1
+                heapq.heappush(open_set, (tentative + h, counter, nxt))
+
+    return None
+
+
 def _reconstruct_path(
     came_from: dict[tuple[int, int], tuple[int, int]],
     current: tuple[int, int],
@@ -502,22 +778,111 @@ def _reconstruct_path(
 
     # Simplify: merge collinear points. Both branches are GRID-AWARE — see
     # _simplify_path for why a geometry-only simplifier is not sound here.
-    if prefer_orthogonal:
-        simplified = _simplify_orthogonal(points, grid, net, layer)
-        simplified = _collapse_staircases(simplified, grid, net, layer)
-    else:
-        simplified = _simplify_path(points, grid, net, layer)
+    simplified = _simplify_points(points, grid, net, layer, prefer_orthogonal)
 
-    # Create segments
-    segments = []
-    for i in range(len(simplified) - 1):
-        segments.append(PathSegment(
-            start=simplified[i],
-            end=simplified[i + 1],
-            layer=layer
-        ))
+    return Path(segments=_segments_from_points(simplified, layer), net=net)
 
-    return Path(segments=segments, net=net)
+
+def _reconstruct_corridor_path(
+    came_from: dict,
+    current: tuple,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    net: str,
+    layer: str,
+    grid: RoutingGrid,
+    prefer_orthogonal: bool,
+    corridor: Corridor,
+) -> tuple[Path, list[int]]:
+    """CORRIDOR-AWARE reconstruction (bug 019fcf152791, amendment A1).
+
+    Two hazards the plain reconstruction above cannot handle, both found in
+    review before implementation:
+
+    1. STATE-ONLY STEPS. REACH and SKIP advance the milestone index WITHOUT
+       moving the cell, so the raw walk repeats positions. Emitted naively
+       those become zero-length segments, which this router forbids.
+
+    2. CORRIDOR-BLIND SIMPLIFICATION. ``_simplify_orthogonal`` /
+       ``_collapse_staircases`` / ``_simplify_path`` are obstacle-aware but
+       know nothing about the corridor: run across the whole walk they would
+       straighten a corridor-following route back into the very shortcut this
+       bug is about, and the fix would ship green while the repro still failed.
+
+    THE RULE (amendment A1): reached waypoints are ANCHORS, and anchors
+    PARTITION the path. The existing simplifiers run WITHIN each partition and
+    never across an anchor. Corridor fidelity is structural — an anchor cannot
+    be simplified away because no simplifier is ever handed two of them — while
+    the staircase/collinear cleanup that keeps ordinary routes tidy is
+    retained inside each leg. This also resolves the tension with amendment A2
+    (once direct/L shortcuts are skipped, this output IS the final geometry,
+    so it still has to be clean).
+
+    Returns the path and the indices of waypoints the search declined (SKIP),
+    which the caller reports as planner metadata — never as the geometric
+    verdict (amendment A7).
+    """
+    # Walk back through (cell, k) states, remembering where milestones were
+    # REACHED so those positions survive simplification as anchors.
+    states = [current]
+    while current in came_from:
+        current = came_from[current][0]
+        states.append(current)
+    states.reverse()
+
+    reached: dict[int, int] = {}      # milestone index -> position index
+    skipped: list[int] = []
+    points: list[tuple[float, float]] = []
+    for i, (cell, k) in enumerate(states):
+        if i == 0:
+            pos = start
+        elif i == len(states) - 1:
+            pos = end
+        else:
+            pos = grid._cell_to_pos(*cell)
+        # A state-only transition (REACH/SKIP) repeats the position; keep one
+        # copy and record what happened there.
+        if points and pos == points[-1]:
+            prev_k = states[i - 1][1]
+            if k > prev_k:
+                # Which milestones advanced here, and how.
+                for advanced in range(prev_k, k):
+                    if _within_reach(pos, corridor, advanced):
+                        reached[advanced] = len(points) - 1
+                    else:
+                        skipped.append(advanced)
+            continue
+        prev_k = states[i - 1][1] if i > 0 else 0
+        if k > prev_k:
+            for advanced in range(prev_k, k):
+                if _within_reach(pos, corridor, advanced):
+                    reached[advanced] = len(points)
+                else:
+                    skipped.append(advanced)
+        points.append(pos)
+
+    # Partition on anchors and simplify each partition independently.
+    anchor_positions = sorted(set(reached.values()))
+    bounds = [0] + [a for a in anchor_positions if 0 < a < len(points) - 1] + [len(points) - 1]
+    bounds = sorted(set(bounds))
+
+    simplified: list[tuple[float, float]] = []
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        leg = _simplify_points(points[lo:hi + 1], grid, net, layer, prefer_orthogonal)
+        # Splice, avoiding a duplicated anchor at the seam.
+        simplified.extend(leg if not simplified else leg[1:])
+
+    return (Path(segments=_segments_from_points(simplified, layer), net=net),
+            sorted(set(skipped)))
+
+
+def _within_reach(pos: tuple[float, float], corridor: Corridor, k: int) -> bool:
+    """Did ``pos`` actually reach waypoint ``k``, or was the milestone skipped?"""
+    if k >= corridor.count:
+        return False
+    wx, wy = corridor.waypoints[k]
+    return math.hypot(pos[0] - wx, pos[1] - wy) <= corridor_mod.REACH_RADIUS_MM
 
 
 # Numerical tolerance for the swept-cell traversal below, in fractional

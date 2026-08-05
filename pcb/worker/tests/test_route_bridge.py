@@ -294,18 +294,50 @@ def _route_hint(**payload) -> dict:
 
 
 def test_hints_to_router_waypoints_bit_exact():
+    """Pixel-accurate user corrections survive with ZERO drift.
+
+    The guarantee is unchanged; the CHANNEL moved (bug 019fcf152791 Stage B).
+    Waypoints used to be handed to the engine as NetHint.waypoints, which
+    nothing ever read — the dead field at the heart of that bug. They now ride
+    an endpoint-keyed ConnectionHint, which the router actually follows, so
+    this test asserts bit-exactness where the data now lives.
+    """
     board = route_bridge.board_to_router(_rotated_board())
-    # Pixel-accurate user corrections — must survive with ZERO drift.
     wps = [[12.3456789012345, 20.987654321], [15.111111111, 17.46]]
-    env = _route_hint(source_pins=["U1.2"], waypoints=[list(w) for w in wps])
+    env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
+                      waypoints=[list(w) for w in wps])
     out = route_bridge.hints_to_router([env], board)
 
-    assert len(out.hints.net_hints) == 1
-    nh = out.hints.net_hints[0]
-    assert nh.net == "SIG"
-    got = [[w.x, w.y] for w in nh.waypoints]
+    assert len(out.hints.connection_hints) == 1
+    ch = out.hints.connection_hints[0]
+    assert ch.net == "SIG"
+    assert ch.endpoints == ("U1.2", "R1.1")
+    got = [[w.x, w.y] for w in ch.waypoints]
     # Bit-exact equality (==, not approx) — the whole point of the deliverable.
     assert got == wps
+    # And the dead channel stays dead: nothing may repopulate NetHint.waypoints.
+    assert all(not nh.waypoints for nh in out.hints.net_hints)
+
+
+def test_hints_to_router_single_endpoint_contract_refuses_ambiguous_span():
+    """A corridor needs exactly ONE source and ONE destination pad (A5).
+
+    One polyline between multi-endpoint sets is ambiguous by construction:
+    silently taking the first pair, or expanding a cross-product, would invent
+    an intent the author never expressed. The corridor is refused BY NAME and
+    the route degrades to ordinary autorouting — never a guess.
+    """
+    board = route_bridge.board_to_router(_rotated_board())
+    env = _route_hint(source_pins=["U1.2"], dest_pins=[],
+                      waypoints=[[12.0, 20.0]])
+    out = route_bridge.hints_to_router([env], board)
+
+    assert out.hints.connection_hints == []
+    refusal = [w for w in out.warnings if w.get("reason") == "ambiguous_span"]
+    assert len(refusal) == 1, out.warnings
+    assert refusal[0]["waypoint_status"] == "ignored"
+    assert refusal[0]["id"] == "ann1"
+    assert "exactly one resolved source pad" in refusal[0]["message"]
 
 
 def test_hints_to_router_pin_ref_resolves_to_net():

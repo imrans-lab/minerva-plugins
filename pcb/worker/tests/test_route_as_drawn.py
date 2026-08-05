@@ -195,17 +195,21 @@ def test_route_method_guided_hint_keeps_engine_path():
     assert any("detail_level 'guided' has no agent_router slot" in w.get("message", "")
                for w in r.get("warnings", []))
 
-    # STAGE A (bug 019fcf152791): a guided hint's authored waypoints are NOT
-    # consumed by the engine, and the run must say so in a machine-readable
-    # field keyed to the hint — not only in prose a caller can skim past.
-    ignored = [w for w in r.get("warnings", []) if w.get("waypoint_status") == "ignored"]
-    assert len(ignored) == 1, r.get("warnings", [])
-    assert ignored[0]["id"] == "g1"
-    assert ignored[0]["waypoint_count"] == len(_WAYPOINTS)
-    assert ignored[0]["net"] == "SIG"
-    # The message must warn that a clean DRC verdict says nothing about
-    # adherence, and that the 'detailed' escape hatch costs obstacle avoidance.
-    assert "BYPASSES obstacle avoidance" in ignored[0]["message"]
+    # STAGE B (bug 019fcf152791): a guided hint's waypoints are now HONOURED
+    # by the engine's product-state A*, so the Stage A "ignored" status must
+    # NO LONGER fire — its presence would mean the corridor was dropped again.
+    assert not [w for w in r.get("warnings", []) if w.get("waypoint_status") == "ignored"]
+
+    # And the run reports how well it followed the corridor, per hint.
+    adherence = r.get("corridor_adherence", [])
+    assert len(adherence) == 1, r
+    a = adherence[0]
+    assert a["hint_id"] == "g1"
+    assert a["status"] in ("honored", "partial")
+    assert a["skipped_waypoints"] == []
+    assert len(a["per_waypoint"]) == len(_WAYPOINTS)
+    # Every authored waypoint influenced the route.
+    assert all(w["within_tolerance"] for w in a["per_waypoint"]), a
 
 
 def test_route_method_sparse_hint_without_waypoints_reports_no_status():

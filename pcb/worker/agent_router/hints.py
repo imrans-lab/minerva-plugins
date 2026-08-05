@@ -81,9 +81,18 @@ class BusHint:
 
 @dataclass
 class NetHint:
-    """Hints for routing a specific net."""
+    """Net-wide routing guidance.
+
+    ``waypoints`` IS DEAD AND MUST NOT BE USED (bug 019fcf152791). It was
+    populated by the bridge, serialized, parser-tested — and never read by the
+    engine, so every authored corridor sent through this field silently did
+    nothing for two HITL cycles. A corridor belongs to a CONNECTION, not to a
+    net: see :class:`ConnectionHint`, which is the channel that works. The
+    field is retained only so old serialized hint files still parse; the
+    router ignores it, and new code must not set it.
+    """
     net: str
-    waypoints: list[Waypoint] = field(default_factory=list)
+    waypoints: list[Waypoint] = field(default_factory=list)  # DEAD — see docstring
     avoid_areas: list[AvoidArea] = field(default_factory=list)
     preferred_direction: Optional[str] = None  # "right_first", "down_first", etc.
     preferred_layer: Optional[str] = None
@@ -129,13 +138,59 @@ class GlobalHints:
 
 
 @dataclass
+class ConnectionHint:
+    """Authored guidance for ONE connection — an ordered pad pair.
+
+    Bug 019fcf152791. ``NetHint`` is keyed by NET, which is why its waypoints
+    could never be honoured: on a multi-pad net there is no way to say which
+    spanning-tree edge a corridor belongs to, and ``get_hint_for_net`` returns
+    the FIRST match so a second hint on the same net was silently ignored
+    (bug 019fcf36957c). A connection hint names its endpoints, so lookup is
+    per-connection and both problems disappear rather than being patched.
+
+    ``endpoints`` are ``"Component.Pad"`` refs in AUTHORED order (source
+    first) — the same identity string ``_terminal_pads`` already matches on,
+    so no new notion of pad identity enters the engine.
+    """
+    net: str
+    endpoints: tuple[str, str]
+    waypoints: list[Waypoint] = field(default_factory=list)
+    preferred_layer: Optional[str] = None
+    hint_id: str = ""
+    tolerance_mm: Optional[float] = None
+
+
+@dataclass
 class RoutingHints:
     """Complete set of routing hints."""
     buses: list[BusHint] = field(default_factory=list)
     net_hints: list[NetHint] = field(default_factory=list)
+    connection_hints: list[ConnectionHint] = field(default_factory=list)
     global_hints: GlobalHints = field(default_factory=GlobalHints)
     internal_bridges: list[InternalBridge] = field(default_factory=list)
     chains: list[ChainHint] = field(default_factory=list)
+
+    def get_hint_for_connection(self, ref_a: str, ref_b: str) -> Optional[tuple["ConnectionHint", bool]]:
+        """The hint for this pad pair, plus whether it is REVERSED.
+
+        Matches either orientation: a connection the engine happens to route
+        dest -> source is the same connection the author described source ->
+        dest. The bool is True when the caller is travelling against the
+        authored direction, which is the caller's signal to reverse the
+        corridor before pricing or grading it — an ordered corridor traversed
+        backwards would otherwise be graded as maximally out-of-order.
+
+        Returns None when no hint names this pair. Deliberately NOT a
+        net-level fallback: a corridor authored for one span must never be
+        applied to a different span of the same net.
+        """
+        for hint in self.connection_hints:
+            a, b = hint.endpoints
+            if a == ref_a and b == ref_b:
+                return hint, False
+            if a == ref_b and b == ref_a:
+                return hint, True
+        return None
 
     def get_bus_for_net(self, net_name: str) -> Optional[BusHint]:
         """Get the bus hint that includes a specific net."""
@@ -241,6 +296,38 @@ def parse_hints(data: dict) -> RoutingHints:
                 preferred_layer=net_data.get('preferred_layer')
             )
             hints.net_hints.append(hint)
+
+    # Parse connection hints (bug 019fcf152791). Endpoint-keyed guidance —
+    # the only channel through which authored waypoints actually influence
+    # routing; NetHint.waypoints is dead and deprecated (see its docstring).
+    if 'connection_hints' in hints_data:
+        seen: dict[frozenset, str] = {}
+        for c_data in hints_data['connection_hints']:
+            eps = c_data.get('endpoints') or []
+            if len(eps) != 2 or not all(str(e) for e in eps):
+                raise ValueError(
+                    "connection_hints entry needs exactly two non-empty "
+                    f"endpoints, got {eps!r}")
+            key = frozenset(str(e) for e in eps)
+            # TWO HINTS ON ONE CONNECTION is an authoring conflict, not
+            # something to resolve silently by taking the first — that is the
+            # very failure mode (019fcf36957c) this channel exists to end.
+            if key in seen:
+                raise ValueError(
+                    "duplicate_connection_hint: %s and %s both guide the "
+                    "connection %s—%s; resolve the conflict rather than "
+                    "letting one win silently"
+                    % (seen[key], str(c_data.get('hint_id', '')),
+                       str(eps[0]), str(eps[1])))
+            seen[key] = str(c_data.get('hint_id', ''))
+            hints.connection_hints.append(ConnectionHint(
+                net=str(c_data.get('net', '')),
+                endpoints=(str(eps[0]), str(eps[1])),
+                waypoints=[Waypoint.from_list(w) for w in c_data.get('waypoints', [])],
+                preferred_layer=c_data.get('preferred_layer'),
+                hint_id=str(c_data.get('hint_id', '')),
+                tolerance_mm=c_data.get('tolerance_mm'),
+            ))
 
     # Parse global hints
     if 'global' in hints_data:
