@@ -106,6 +106,7 @@ func _init() -> void:
 	await _run_route_request_extra()
 	await _run_cross_candidate_check_reply()
 	await _run_review_and_honesty_batch()
+	await _run_hint_status_placement()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1778,5 +1779,75 @@ func _run_review_and_honesty_batch() -> void:
 	check("rotate succeeded", bool(rotated.get("success", false)))
 	check("rotate does NOT re-report copper that was already orphaned",
 		not rotated.has("dangling_copper"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 14. Stage A: structured hint status lands ON THE CANDIDATE ═══════════════
+#
+# Bug 019fcf152791 Stage A. The router reports a machine-readable
+# {id, waypoint_status, waypoint_count, net, message} when a non-'detailed'
+# single-net hint's authored waypoints were not consumed. PLACEMENT is the
+# fix: those statuses also ride stuck[] like every other bridge warning, and
+# stuck[] is where 1-3 real notes sit under ~28 repeated emitter warnings
+# (019fce3ac3f5 nit 2) — which is precisely how this went unread through two
+# HITL cycles. The status must appear on the CANDIDATE the hint produced.
+
+func _run_hint_status_placement() -> void:
+	print("-- 14. Stage A: waypoint_status rides the candidate, matched by hint id --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	# Router reply carrying BOTH warning shapes: the structured status keyed to
+	# this run's real hint id, a structured status for a hint that is NOT this
+	# candidate's (must not attach), and a bare legacy warning (must stay in
+	# stuck[] only — this is additive, not a re-route of the warning channel).
+	var reply: Dictionary = _multipad_reply([hint_id])
+	reply["warnings"] = [
+		{"id": hint_id, "waypoint_status": "ignored", "waypoint_count": 3,
+			"net": "N1", "message": "3 authored waypoint(s) IGNORED — BYPASSES obstacle avoidance"},
+		{"id": "some_other_hint", "waypoint_status": "ignored", "waypoint_count": 1,
+			"net": "NZ", "message": "not this candidate's hint"},
+		{"id": hint_id, "message": "a bare legacy warning with no status field"},
+	]
+	shim.reply = reply
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(out.get("success", false)))
+	var rec: Dictionary = (out.get("candidates", []) as Array)[0]
+
+	check("the candidate carries hint_status", rec.has("hint_status"))
+	var statuses: Array = rec.get("hint_status", [])
+	check_eq("only the status for THIS candidate's hint attaches", statuses.size(), 1)
+	if statuses.size() == 1:
+		var s: Dictionary = statuses[0]
+		check_eq("…matched by hint id, never by net", str(s.get("id", "")), hint_id)
+		check_eq("…machine-readable status is what a caller branches on",
+			str(s.get("waypoint_status", "")), "ignored")
+		check_eq("…and it counts the waypoints that were dropped",
+			int(s.get("waypoint_count", 0)), 3)
+		check("…the prose warns the 'detailed' escape hatch costs obstacle avoidance",
+			str(s.get("message", "")).find("BYPASSES obstacle avoidance") != -1)
+
+	# The warning channel is unchanged: every warning still reaches stuck[],
+	# including the bare one. Lifting is a COPY onto the candidate, not a move.
+	var stuck_msgs: Array = []
+	for entry in out.get("stuck", []):
+		if entry is Dictionary and (entry as Dictionary).has("warning"):
+			stuck_msgs.append((entry as Dictionary)["warning"])
+	check_eq("all three warnings still ride stuck[] (nothing was moved)",
+		stuck_msgs.size(), 3)
+
+	# NEGATIVE GATE: a run with no structured statuses leaves candidates clean,
+	# so hint_status never becomes ambient noise on every propose.
+	var plain: Dictionary = _multipad_reply([hint_id])
+	plain["warnings"] = [{"id": hint_id, "message": "bare warning only"}]
+	shim.reply = plain
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var recs2: Array = out2.get("candidates", [])
+	if recs2.size() > 0:
+		check("no structured status ⇒ NO hint_status key on the candidate",
+			not (recs2[0] as Dictionary).has("hint_status"))
 
 	ctx["driver"].free_panel(ctx["panel"])

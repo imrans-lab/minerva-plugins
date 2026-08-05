@@ -1426,13 +1426,43 @@ def hints_to_router(
         net = _net_for_hint(env, board, warnings)
         if net is None:
             continue  # warning already recorded
-        # detail_level (sparse|guided|detailed) is a UI density hint with no
-        # RoutingHints slot — surface the drop so the omission is honest
-        # (per-hint width is likewise unslotted; see HintTranslation docstring).
+        # detail_level (sparse|guided|detailed) has no RoutingHints slot, but it
+        # is NOT inert: one level up, _routes_as_drawn consumes `detailed`
+        # single-trace hints as literal geometry. Saying "dropped — no
+        # agent_router equivalent" full stop was misleading (bug 019fcf152791);
+        # name the ENGINE-side omission specifically.
         if kp.get("detail_level"):
             warnings.append({"id": str(env.get("id", "")), "message":
-                "detail_level '%s' dropped — no agent_router equivalent"
+                "detail_level '%s' has no agent_router slot — it selects the "
+                "bridge path (only 'detailed' single-trace hints route as "
+                "drawn), not engine behaviour"
                 % kp.get("detail_level")})
+        # WAYPOINTS ARE NOT CONSUMED ON THIS PATH (bug 019fcf152791). The
+        # engine's only net-hint reader (agent_router/router.py, the
+        # get_hint_for_net call) takes preferred_layer / avoid_areas /
+        # preferred_direction and never NetHint.waypoints, so an authored
+        # corridor on a non-'detailed' single-net hint changes nothing about
+        # the returned geometry. Until guided corridor support lands, say so
+        # in a MACHINE-READABLE field keyed to the hint — a free-text
+        # sentence in a warnings list is exactly what went unnoticed through
+        # two HITL cycles. `waypoint_status` is what callers should branch on;
+        # `message` stays for humans.
+        if waypoints:
+            warnings.append({
+                "id": str(env.get("id", "")),
+                "waypoint_status": "ignored",
+                "waypoint_count": len(waypoints),
+                "net": net,
+                "message":
+                    "%d authored waypoint(s) IGNORED: this hint's geometry is "
+                    "ordinary pad-to-pad autorouting, not the authored "
+                    "corridor. Single-net hints have no engine waypoint slot "
+                    "(bug 019fcf152791) — a 'clean' DRC verdict says nothing "
+                    "about corridor adherence. To lay the polyline literally, "
+                    "author detail_level='detailed', which materializes the "
+                    "waypoints as drawn and BYPASSES obstacle avoidance "
+                    "entirely." % len(waypoints),
+            })
         nh: dict = {"net": net, "waypoints": waypoints, "preferred_layer": layer}
         net_hints.append(nh)
         # Recorded from the SAME `net` the engine is about to be hinted with —

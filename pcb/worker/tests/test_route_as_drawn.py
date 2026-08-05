@@ -169,9 +169,13 @@ def test_route_method_detailed_hint_routes_as_drawn():
     assert sig[0].get("as_drawn") is True
     pts = [sig[0]["segments"][0]["start"]] + [s["end"] for s in sig[0]["segments"]]
     assert pts[1:-1] == _WAYPOINTS
-    # The honest-omission warning must NOT fire for a materialized hint.
+    # The honest-omission warning must NOT fire for a materialized hint —
+    # neither the detail_level note nor the waypoints-ignored status (bug
+    # 019fcf152791): this hint's waypoints WERE honoured, as drawn.
     assert not [w for w in r.get("warnings", [])
-                if "detail_level 'detailed' dropped" in w.get("message", "")]
+                if "detail_level 'detailed'" in w.get("message", "")]
+    assert not [w for w in r.get("warnings", [])
+                if w.get("waypoint_status") == "ignored"]
 
 
 def test_route_method_guided_hint_keeps_engine_path():
@@ -185,5 +189,37 @@ def test_route_method_guided_hint_keeps_engine_path():
     sig = [rt for rt in r["routes"] if rt["net"] == "SIG"]
     assert len(sig) == 1
     assert not sig[0].get("as_drawn", False)
-    assert any("detail_level 'guided' dropped" in w.get("message", "")
+    # detail_level is reported as having no ENGINE slot — not as inert
+    # (bug 019fcf152791: the old "dropped — no agent_router equivalent"
+    # wording hid that detail_level selects the bridge path one level up).
+    assert any("detail_level 'guided' has no agent_router slot" in w.get("message", "")
                for w in r.get("warnings", []))
+
+    # STAGE A (bug 019fcf152791): a guided hint's authored waypoints are NOT
+    # consumed by the engine, and the run must say so in a machine-readable
+    # field keyed to the hint — not only in prose a caller can skim past.
+    ignored = [w for w in r.get("warnings", []) if w.get("waypoint_status") == "ignored"]
+    assert len(ignored) == 1, r.get("warnings", [])
+    assert ignored[0]["id"] == "g1"
+    assert ignored[0]["waypoint_count"] == len(_WAYPOINTS)
+    assert ignored[0]["net"] == "SIG"
+    # The message must warn that a clean DRC verdict says nothing about
+    # adherence, and that the 'detailed' escape hatch costs obstacle avoidance.
+    assert "BYPASSES obstacle avoidance" in ignored[0]["message"]
+
+
+def test_route_method_sparse_hint_without_waypoints_reports_no_status():
+    """No authored corridor ⇒ nothing was ignored ⇒ no status (negative gate).
+
+    Guards against the status becoming ambient noise on every hint, which is
+    how the warning channel became unreadable in the first place.
+    """
+    resp = _call("route", {"board": _ir_two_pin_board(),
+                           "route_hints": [_detailed_hint(detail_level="sparse", _id="s1",
+                                                          source_pins=["U1.1"],
+                                                          dest_pins=["J1.1"],
+                                                          waypoints=[])],
+                           "selection": {"mode": "open"}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    assert not [w for w in r.get("warnings", []) if w.get("waypoint_status")]

@@ -3656,6 +3656,49 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 	}
 
 
+## Lift MACHINE-READABLE per-hint statuses out of the router's flat warning
+## list and onto the CANDIDATE they concern (bug 019fcf152791, Stage A).
+##
+## PLACEMENT IS THE POINT. These statuses also ride `stuck[]` like every other
+## bridge warning — and `stuck[]` is where 1-3 real per-hint notes sit buried
+## under ~28 repeated emitter-capability warnings on every single call
+## (019fce3ac3f5 nit 2). A status that says "your authored corridor was
+## ignored" is worthless in that channel: it went unread through two HITL
+## cycles. It belongs on the candidate record, beside the geometry it is a
+## statement about, where the pre-commit review actually happens.
+##
+## Matching is by hint id against each candidate's own source_hint_ids — never
+## by net (two hints can name one net) and never positionally.
+static func _attach_hint_status(landed: Array, result: Dictionary) -> void:
+	var by_hint: Dictionary = {}
+	for w in result.get("warnings", []):
+		if not (w is Dictionary):
+			continue
+		var wd: Dictionary = w
+		# Only STRUCTURED statuses are lifted; a bare {id, message} stays in
+		# stuck[] where it always was (this is additive, not a re-route of the
+		# whole warning channel).
+		if not wd.has("waypoint_status"):
+			continue
+		var hid := str(wd.get("id", ""))
+		if hid.is_empty():
+			continue
+		if not by_hint.has(hid):
+			by_hint[hid] = []
+		(by_hint[hid] as Array).append(wd)
+	if by_hint.is_empty():
+		return
+	for rec in landed:
+		if not (rec is Dictionary):
+			continue
+		var statuses: Array = []
+		for hid in (rec as Dictionary).get("source_hint_ids", []):
+			for wd in by_hint.get(str(hid), []):
+				statuses.append(wd)
+		if not statuses.is_empty():
+			(rec as Dictionary)["hint_status"] = statuses
+
+
 ## The SHARED landing path for every tool that turns a router reply into
 ## candidates (propose, reroute-route, reroute-span). One place that normalizes,
 ## ingests, accumulates holds and shapes the reply, so the three verbs report
@@ -3674,6 +3717,7 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		if cid.is_empty():
 			continue
 		landed.append(_candidate_record(workspace, workspace.get_candidate(cid)))
+	_attach_hint_status(landed, result)
 	var out: Dictionary = {
 		"proposed": landed.size(),
 		"candidates": landed,
