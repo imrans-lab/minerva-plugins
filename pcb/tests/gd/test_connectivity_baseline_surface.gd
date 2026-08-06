@@ -63,6 +63,7 @@ func _init() -> void:
 	_run_absent_summary()
 	_run_absent_baseline_key()
 	_run_both_scopes_distinguishable()
+	_run_completeness_fragment()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -233,3 +234,68 @@ func _run_both_scopes_distinguishable() -> void:
 		s.find("Connectivity") < s.find("Geometric"))
 	check_eq("full combined status line, in order", s,
 		" — Connectivity clean (pre-existing: 3) — Geometric: 2 violations")
+
+
+# ── 9: COMPLETENESS fragment (work item 019fd5fdfcdd, DCR 019fd5fd9084) ───────
+#
+# HITL-4's F2: drc_summary reported "Connectivity clean" while VCC_5V had ZERO
+# copper — the summary answers "does this proposal INTRODUCE a violation?",
+# never "is every net actually routed?". board_health.complete is the
+# whole-board completeness verdict; the renderer appends it to the
+# connectivity chip ("·"-joined — same scope, not a new " — " one):
+#   complete false -> "· INCOMPLETE — N net(s) unrouted[, M fragmented]"
+#   complete null  -> "· completeness indeterminate" (fail-closed, like the
+#                     geometric fragment's own indeterminate)
+#   complete true / absent board_health -> renders nothing (no-regression;
+#                     test 8's full-line assertion above is the absent case).
+
+func _run_completeness_fragment() -> void:
+	print("-- 9. completeness fragment: clean-but-INCOMPLETE is finally sayable --")
+
+	# clean:true + complete:false — THE F2 shape: connectivity clean while a
+	# whole net has no copper. Both fragments must render, in order.
+	var result := {
+		"drc_summary": {"scope": "connectivity", "clean": true, "violation_count": 0},
+		"board_health": {"complete": false, "missing_copper": ["VCC_5V"],
+			"partial": [], "assembly": {"status": "pass", "findings": []},
+			"approximate": true},
+	}
+	var s := PCBPanel._drc_status_suffix(result)
+	check_eq("clean + incomplete renders BOTH truths, '·'-joined on the connectivity chip",
+		s, " — Connectivity clean · INCOMPLETE — 1 net unrouted")
+
+	# Plural nets + fragmented count.
+	result["board_health"] = {"complete": false,
+		"missing_copper": ["VCC_5V", "GND"],
+		"partial": [{"net": "SDA", "pin_groups": [["U1.1"], ["U2.2"]]}]}
+	s = PCBPanel._drc_status_suffix(result)
+	check_eq("plural + fragmented", s,
+		" — Connectivity clean · INCOMPLETE — 2 nets unrouted, 1 fragmented")
+
+	# complete:null — the check could not run; never read as complete.
+	result["board_health"] = {"complete": null}
+	s = PCBPanel._drc_status_suffix(result)
+	check_eq("indeterminate completeness renders the hedge, no counts",
+		s, " — Connectivity clean · completeness indeterminate")
+
+	# complete:true — nothing appended, byte-identical pre-DCR rendering.
+	result["board_health"] = {"complete": true, "missing_copper": [], "partial": []}
+	s = PCBPanel._drc_status_suffix(result)
+	check_eq("complete board renders the unchanged pre-DCR chip",
+		s, " — Connectivity clean")
+
+	# Ordering with the geometric fragment: connectivity · completeness — geometric.
+	result["board_health"] = {"complete": false, "missing_copper": ["VCC_5V"]}
+	result["drc_geometric_summary"] = {"verdict": "clean"}
+	s = PCBPanel._drc_status_suffix(result)
+	check_eq("completeness sits INSIDE the connectivity scope, before the geometric one",
+		s, " — Connectivity clean · INCOMPLETE — 1 net unrouted — Geometric clean")
+
+	# Dirty connectivity keeps its own rendering; completeness still appends.
+	result = {
+		"drc_summary": {"scope": "connectivity", "clean": false, "violation_count": 2},
+		"board_health": {"complete": false, "missing_copper": ["VCC_5V"]},
+	}
+	s = PCBPanel._drc_status_suffix(result)
+	check_eq("existing dirty rendering is kept, completeness appended",
+		s, " — Connectivity: 2 violations · INCOMPLETE — 1 net unrouted")

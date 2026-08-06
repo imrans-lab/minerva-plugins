@@ -69,6 +69,11 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// the suite red; restored here (docket 019f7abf9c8e). Also NOT renamed
 		// — dotted panel-IPC channel, same as pcb.route above.
 		"pcb.draft_check",
+		// worker-backed — on-demand assembly advisory seam (DCR 019fd5fd9084,
+		// work items 019fd5fe1241/019fd5fe2724), forwarding to the worker's
+		// "assembly_check" method. Dotted panel-IPC channel, same namespace
+		// note as pcb.route/pcb.draft_check above.
+		"pcb.assembly_check",
 	}
 	for _, name := range want {
 		if !got[name] {

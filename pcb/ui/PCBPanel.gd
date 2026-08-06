@@ -129,6 +129,67 @@ var _routing_workspace = null
 ## An UNMOUNTED panel therefore still reports all-annotation-authoritative.
 var _routing_cutover = null
 
+## ── DCR 019fd5fd9084: panel-owned board_health enrichment state ───────────────
+#
+# Two small pieces of PANEL truth that the worker cannot know and that ride
+# every board_health reply (panel_tools._attach_board_health):
+#
+# 1. RENDER PREFLIGHT (DCR item 3, warn-only): the board_revision that was live
+#    the last time a minerva_pcb_get_image capture actually SUCCEEDED. -1 means
+#    "never rendered this session". board_health.preflight.rendered_this_revision
+#    is derived by comparing this against the CURRENT board_revision — a standing
+#    nudge ("you are proposing copper over a board you have not looked at"),
+#    NEVER a refusal anywhere.
+var _last_rendered_board_revision: int = -1
+
+# 2. ASSEMBLY-STATE CACHE (DCR item 2): the most recent tri-state assembly
+#    verdict {assembly:{status, findings, ...}, board_revision:<int at cache
+#    time>} from ANY source — a routing reply's board_health.assembly, a
+#    pcb.assembly_check round-trip (load-time / placement ops). {} = no cache.
+#    _workspace_commit's acknowledgment gate consults this; a revision mismatch
+#    makes it advisory-only (stale), never blocking — see panel_tools.gd's
+#    decision table.
+var _assembly_state: Dictionary = {}
+
+
+## Stamp a successful get_image capture (panel_tools._get_image calls this
+## through the host→panel duck-typed path). Takes the revision rather than
+## reading _data directly so the stamp names the board that was actually
+## captured, even if a caller races a mutation in between.
+func note_render_captured(board_revision: int) -> void:
+	_last_rendered_board_revision = board_revision
+
+
+## The board_revision of the last successful capture (-1 = never). Read by
+## panel_tools._attach_board_health for preflight.rendered_this_revision.
+func get_last_rendered_board_revision() -> int:
+	return _last_rendered_board_revision
+
+
+## Feed the assembly-state cache (see _assembly_state above). `assembly` is the
+## tri-state object verbatim ({status:"pass"|"findings"|"indeterminate", ...});
+## board_revision is the revision the verdict was computed against.
+func set_assembly_state(assembly: Dictionary, board_revision: int) -> void:
+	_assembly_state = {
+		"assembly": assembly.duplicate(true),
+		"board_revision": board_revision,
+	}
+
+
+## The cached assembly state ({assembly, board_revision}) or {} when absent /
+## invalidated. Callers judge freshness themselves against the live
+## board_revision — the cache never pretends to be current.
+func get_assembly_state() -> Dictionary:
+	return _assembly_state
+
+
+## Drop the cache outright (placement verbs call this the moment they mutate,
+## BEFORE their own refresh round-trip — a refresh that fails must leave no
+## stale verdict behind claiming to describe the new placement).
+func invalidate_assembly_state() -> void:
+	_assembly_state = {}
+
+
 ## The ported board canvas (custom-drawn Control child), built on mount.
 var _canvas: Control = null
 
@@ -2008,7 +2069,8 @@ func _on_propose_button_pressed() -> void:
 ## Extracted to a static func (no `self` reads) so the gd test suite can drive
 ## it with plain result dictionaries — no live PCBPanel/host required.
 static func _drc_status_suffix(result: Dictionary) -> String:
-	return _connectivity_status_suffix(result) + _geometric_status_suffix(result)
+	return _connectivity_status_suffix(result) + _completeness_status_suffix(result) \
+		+ _geometric_status_suffix(result)
 
 
 ## Connectivity fragment. drc_summary is PROPOSAL-scoped {"scope":
@@ -2089,6 +2151,45 @@ static func _baseline_suffix(summary: Dictionary) -> String:
 	if count == 0:
 		return " (pre-existing: none)"
 	return " (pre-existing: %d)" % count
+
+
+## COMPLETENESS fragment (work item 019fd5fdfcdd, DCR 019fd5fd9084 — the F2
+## renderer half): the connectivity chip above answers "does this proposal
+## INTRODUCE a violation?"; it structurally cannot say "this net has no copper
+## at all" (HITL-4's VCC_5V — the summary read clean while a whole net was
+## unrouted). board_health carries the whole-board completeness verdict:
+##   complete == true    -> render nothing; the chip stays exactly as it was
+##                          (absent-key no-regression, same as every fragment).
+##   complete == false   -> " · INCOMPLETE — N net(s) unrouted[, M fragmented]"
+##                          from missing_copper (zero-copper nets) and partial
+##                          (nets with SOME copper but disconnected pin groups).
+##   complete == null    -> " · completeness indeterminate" — the check could
+##                          not run; the same fail-closed hedge the geometric
+##                          fragment renders for its own indeterminate, never
+##                          silently read as complete.
+## An absent/empty board_health (older worker, or a non-routing reply) renders
+## nothing. Rendered between the connectivity and geometric fragments because
+## completeness IS a connectivity-scope statement ("·" joins it to that chip
+## rather than opening a new " — " scope), not a copper-geometry one.
+static func _completeness_status_suffix(result: Dictionary) -> String:
+	var health: Dictionary = result.get("board_health", {}) \
+		if result.get("board_health", {}) is Dictionary else {}
+	if health.is_empty() or not health.has("complete"):
+		return ""
+	var complete: Variant = health.get("complete", null)
+	if complete == null:
+		return " · completeness indeterminate"
+	if bool(complete):
+		return ""
+	var missing: Array = health.get("missing_copper", []) \
+		if health.get("missing_copper", []) is Array else []
+	var partial: Array = health.get("partial", []) \
+		if health.get("partial", []) is Array else []
+	var text := " · INCOMPLETE — %d net%s unrouted" % [
+		missing.size(), "" if missing.size() == 1 else "s"]
+	if not partial.is_empty():
+		text += ", %d fragmented" % partial.size()
+	return text
 
 
 ## GEOMETRIC copper fragment (docket 019f98b24284) — the complement that closes
@@ -3282,6 +3383,17 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 		params["scope"] = extra["scope"]
 	if extra.has("pinned_candidates"):
 		params["pinned_candidates"] = extra["pinned_candidates"]
+	# HITL-4 live bug (Codex 1047 epoch, found in the first post-boundary
+	# owner round): this allow-list predates Epoch UX1 station 9, so the
+	# task_constraints half of `extra` — the ONLY channel through which a
+	# task's routing_constraint corridor reaches the router — was silently
+	# dropped on the LIVE path. Every surrounding layer was tested against a
+	# double of this function (panel_tools against RouterShim, route_bridge
+	# against pytest fixtures), so both suites were green while production
+	# steering was a no-op: candidates landed with no constraint_revision, no
+	# adherence, and geometry that ignored the authored corridor.
+	if extra.has("task_constraints"):
+		params["task_constraints"] = extra["task_constraints"]
 	var result: Dictionary = await _request_with_backend_ensure("pcb.route", params, 30000)
 	# The worker returns {ok, result}; the host IPC wrapper may nest it under
 	# "result"/"success" — normalise to the worker envelope the apply tool wants.
@@ -3361,10 +3473,23 @@ func load_board_from_yaml(yaml_text: String) -> Dictionary:
 	_refresh_board_ui()
 	_zoom_to_fit_deferred()
 
+	# LOAD-TIME ASSEMBLY ADVISORY (work item 019fd5fe1241, DCR 019fd5fd9084):
+	# run the worker's assembly_check over the DESERIALIZED board dict — that is
+	# the enriched dict carrying the worker-attached courtyard graphics, which is
+	# exactly what makes the courtyard basis available to the check (the live
+	# board's own to_board_dict() may not round-trip them) — and attach the
+	# tri-state verdict to the load reply as `assembly`, feeding the panel cache.
+	# A channel failure attaches {status:"indeterminate", error} — it NEVER
+	# blocks the load (the board is already rebuilt above) and is never silent.
+	var assembly: Dictionary = _PanelToolsScript._assembly_tri_state(
+		await assembly_check(board))
+	set_assembly_state(assembly, int(_data.board_revision))
+
 	return {"ok": true, "result": {
 		"component_count": _data.get_component_count(),
 		"net_count": _data.nets.size(),
 		"warnings": warnings,
+		"assembly": assembly,
 	}}
 
 
@@ -3428,6 +3553,43 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	var inner: Dictionary = _unwrap_draft_check(result)
 	_routing_workspace.apply_check_result(inner)
 	return inner
+
+
+## On-demand assembly advisory check (DCR 019fd5fd9084, work items
+## 019fd5fe1241/019fd5fe2724). Drives the DECLARED pcb.assembly_check broker
+## channel — which forwards to the Python worker's "assembly_check" method
+## (internal/tools/worker_tools.go AssemblyCheckChannel) — with a canonical
+## board dict, and normalizes the reply to the worker envelope {ok, result:
+## {status, findings, indeterminate?, error?}} the same way route_board does
+## for pcb.route. Callers (panel_tools' load/placement seams) convert failures
+## to a tri-state {status:"indeterminate", error} via
+## panel_tools._assembly_tri_state — an unreachable worker degrades to an
+## honest "could not check", never a crash and never a silent pass.
+## Async, mirroring the pcb.serialize / route_board await pattern.
+func assembly_check(board: Dictionary) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var result: Dictionary = await _request_with_backend_ensure(
+		"pcb.assembly_check", {"board": board}, 30000)
+	# Same envelope normalisation as route_board: direct worker {ok, result},
+	# or the broker's {success, result:{ok, result}} double wrap.
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		var inner: Dictionary = result.get("result")
+		if inner.has("ok"):
+			return inner
+		return {"ok": true, "result": inner}
+	var code := str(result.get("error_code", ""))
+	var msg := str(result.get("error_message", ""))
+	if code == "plugin_not_running" or msg.findn("not running") != -1:
+		return {"ok": false, "error": {"kind": "plugin_not_running",
+			"message": msg if not msg.is_empty() else "Plugin is not running",
+			"hint": "start via minerva_plugin_start"}}
+	return {"ok": false, "error": {"kind": "worker_error",
+		"message": str(result.get("error_message", result.get("error", "assembly_check failed")))}}
 
 
 ## Dig the draft_check result dict out of whatever envelope the broker returned.

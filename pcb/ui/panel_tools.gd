@@ -96,14 +96,18 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _get_pin_position(host, args)
 		"minerva_pcb_pin_info":
 			return _pin_info(host, args)
+		# The four placement verbs are coroutines since work item 019fd5fe2724
+		# (they await the pcb.assembly_check channel after mutating) — awaited
+		# here exactly like _apply_route_hints/_load_board; handle() was already
+		# a coroutine as a whole (see PCBPanel.handle_tool's Godot 4.6 note).
 		"minerva_pcb_add_component":
-			return _add_component(host, args)
+			return await _add_component(host, args)
 		"minerva_pcb_move_component":
-			return _move_component(host, args)
+			return await _move_component(host, args)
 		"minerva_pcb_move_relative":
-			return _move_relative(host, args)
+			return await _move_relative(host, args)
 		"minerva_pcb_rotate_component":
-			return _rotate_component(host, args)
+			return await _rotate_component(host, args)
 		"minerva_pcb_delete_component":
 			return _delete_component(host, args)
 		"minerva_pcb_connect_net":
@@ -436,12 +440,14 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	data.add_component(comp)
 	data.save_to_history("Add " + component_id)
 
-	return _ok({
+	# Work item 019fd5fe2724: placement changed — invalidate + re-check assembly,
+	# attach the tri-state as `assembly` (coroutine; handle() awaits this verb).
+	return await _with_assembly_after_placement(host, data, _ok({
 		"component_id": component_id,
 		"x": comp.position.x,
 		"y": comp.position.y,
 		"pin_count": comp.pins.size(),
-	})
+	}))
 
 
 ## Pad-coincidence epsilon (board mm) for the dangling-copper sweep below.
@@ -530,6 +536,27 @@ static func _with_dangling_copper(data, reply: Dictionary, pre_pins_by_comp: Dic
 	return reply
 
 
+## PLACEMENT-OP assembly surfacing (work item 019fd5fe2724, DCR 019fd5fd9084):
+## after a placement verb (add/move/rotate/move_relative) has MUTATED the
+## board, (a) the panel's assembly cache is invalidated FIRST — the old verdict
+## describes a placement that no longer exists, and a refresh that fails below
+## must not leave it standing — then (b) the pcb.assembly_check channel re-runs
+## over the current board and the tri-state verdict is attached to the verb's
+## reply as `assembly`, refreshing the cache (inside _run_assembly_check).
+## Headless / channel-down degrades to {status:"indeterminate", ...} — attached,
+## never silent, and NEVER a gate here (the gate lives at commit, where ghost
+## geometry becomes copper). No-op on refusal replies: nothing mutated, the
+## cache still tells the truth.
+static func _with_assembly_after_placement(host, data, reply: Dictionary) -> Dictionary:
+	if not bool(reply.get("success", false)):
+		return reply
+	var panel = _get_panel(host)
+	if panel != null and panel.has_method("invalidate_assembly_state"):
+		panel.invalidate_assembly_state()
+	reply["assembly"] = await _run_assembly_check(host, data)
+	return reply
+
+
 static func _move_component(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -546,11 +573,14 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 	# semantics a canvas drag has (A4). Ungrouped: unchanged, byte for byte.
 	var group_reply := _move_component_group(data, component_id, new_pos)
 	if not group_reply.is_empty():
-		return _with_dangling_copper(data, group_reply, pre_pins)
+		# Work item 019fd5fe2724: assembly re-check on every mutating exit (the
+		# helper no-ops on a locked-group refusal — nothing moved).
+		return await _with_assembly_after_placement(host, data,
+			_with_dangling_copper(data, group_reply, pre_pins))
 	data.move_component(component_id, new_pos)
 	data.save_to_history("Move " + component_id)
-	return _with_dangling_copper(data,
-		_ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y}), pre_pins)
+	return await _with_assembly_after_placement(host, data, _with_dangling_copper(data,
+		_ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y}), pre_pins))
 
 
 ## Shared group-move half of move_component / move_relative.
@@ -622,11 +652,16 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 				return group_reply  # locked group — surface the refusal verbatim
 			for key in ["group_id", "moved_components", "moved_count"]:
 				reply[key] = group_reply[key]
-			return _with_dangling_copper(data, _ok(reply), pre_pins)
+			# Work item 019fd5fe2724: mutating exit — see _add_component's stamp.
+			return await _with_assembly_after_placement(host, data,
+				_with_dangling_copper(data, _ok(reply), pre_pins))
 		data.move_component(component_id, data.snap_to_grid(new_pos))
 		data.save_to_history("Move " + component_id)
-		return _with_dangling_copper(data, _ok(reply), pre_pins)
+		return await _with_assembly_after_placement(host, data,
+			_with_dangling_copper(data, _ok(reply), pre_pins))
 
+	# Non-mutating exit (component unknown to the model — interpretation only):
+	# nothing moved, so no cache invalidation and no assembly re-check.
 	return _ok(reply)
 
 
@@ -664,18 +699,19 @@ static func _rotate_component(host, args: Dictionary) -> Dictionary:
 		data.begin_batch()
 		var turned: Array = data.rotate_group(component_id, new_rotation - comp.rotation)
 		data.end_batch("Rotate group (%d)" % turned.size())
-		return _with_dangling_copper(data, _ok({
+		# Work item 019fd5fe2724: mutating exit — see _add_component's stamp.
+		return await _with_assembly_after_placement(host, data, _with_dangling_copper(data, _ok({
 			"component_id": component_id,
 			"rotation": comp.rotation,
 			"group_id": group_id,
 			"rotated_components": turned,
 			"rotated_count": turned.size(),
-		}), pre_pins)
+		}), pre_pins))
 
 	data.rotate_component(component_id, new_rotation)
 	data.save_to_history("Rotate " + component_id)
-	return _with_dangling_copper(data,
-		_ok({"component_id": component_id, "rotation": new_rotation}), pre_pins)
+	return await _with_assembly_after_placement(host, data, _with_dangling_copper(data,
+		_ok({"component_id": component_id, "rotation": new_rotation}), pre_pins))
 
 
 static func _delete_component(host, args: Dictionary) -> Dictionary:
@@ -1392,6 +1428,18 @@ static func _get_image(host, args: Dictionary) -> Dictionary:
 	var png_buf: PackedByteArray = img.save_png_to_buffer()
 	if png_buf.is_empty():
 		return _err("Failed to encode PCB image")
+
+	# RENDER PREFLIGHT stamp (DCR 019fd5fd9084 item 3): a capture that actually
+	# produced pixels marks the CURRENT board_revision as "seen" — board_health's
+	# preflight.rendered_this_revision (see _attach_board_health) compares
+	# against this. Stamped for BOTH delivery forms below (save_to_path write
+	# failure falls through to its own error before reaching the stamp's return,
+	# but the pixels were already rendered — stamping here, after encode, is the
+	# honest "the model could have looked" point). Warn-only downstream, never a
+	# refusal.
+	var stamp_panel = _get_panel(host)
+	if stamp_panel != null and stamp_panel.has_method("note_render_captured") and data != null:
+		stamp_panel.note_render_captured(int(data.board_revision))
 
 	if using_save_path:
 		var save_err: Error = img.save_png(save_to_path)
@@ -2463,6 +2511,8 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
 		"drc_summary": result.get("drc_summary", {}),
+		# (F1/F3 pass-throughs are appended below the literal — see the
+		# _pass_through_result_key calls before the return.)
 		# GEOMETRIC DRC-at-propose (docket 019f98b24284): the candidate-scoped
 		# union — findings/per_candidate attributed to route[<i>], PLUS the
 		# board's own pre-existing "baseline" violations kept SEPARATE (see
@@ -2479,12 +2529,18 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 	# legal-successors sentence instead of the bare note above.
 	if not proposals.is_empty():
 		reply["note"] = _next_steps("propose", {"count": proposals.size()})
-	# docket 019fce3ac3f5 item 2: emitter-capability notes split out of stuck[]
-	# — additive, absent-when-empty so a caller with no capability warnings
+	# docket 019fce3ac3f5 item 2 + F6 (HITL-4): capability notes split out of
+	# stuck[], and since F6 summarised to a count on routing replies —
+	# additive, absent-when-empty so a caller with no capability warnings
 	# sees no shape change.
-	var emitter_notes: Array = _emitter_notes_from_result(result)
-	if not emitter_notes.is_empty():
-		reply["emitter_notes"] = emitter_notes
+	var emitter_summary: Dictionary = _emitter_notes_summary_from_result(result)
+	if not emitter_summary.is_empty():
+		reply["emitter_notes_summary"] = emitter_summary
+	_pass_through_result_key(reply, result, "span_outcomes")
+	# DCR 019fd5fd9084: board_health replaced the worker's old top-level
+	# assembly_advisories key — verbatim pass-through + the two panel-owned
+	# enrichment fields + assembly-cache feed, see _attach_board_health.
+	_attach_board_health(host, reply, result)
 	return _ok(reply)
 
 
@@ -2663,11 +2719,15 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
 	}
-	# docket 019fce3ac3f5 item 2: same split as _propose_into_workspace above —
-	# additive, absent-when-empty.
-	var emitter_notes: Array = _emitter_notes_from_result(result)
-	if not emitter_notes.is_empty():
-		reply["emitter_notes"] = emitter_notes
+	# docket 019fce3ac3f5 item 2 + F6 (HITL-4): same summarised split as
+	# _propose_into_workspace above — additive, absent-when-empty.
+	var emitter_summary: Dictionary = _emitter_notes_summary_from_result(result)
+	if not emitter_summary.is_empty():
+		reply["emitter_notes_summary"] = emitter_summary
+	_pass_through_result_key(reply, result, "span_outcomes")
+	# DCR 019fd5fd9084: board_health replaced assembly_advisories — see
+	# _attach_board_health (pass-through + panel enrichment + cache feed).
+	_attach_board_health(host, reply, result)
 	return reply
 
 
@@ -2729,6 +2789,143 @@ static func _emitter_notes_from_result(result: Dictionary) -> Array:
 		if w is Dictionary and str((w as Dictionary).get("code", "")) in _EMITTER_NOTE_CODES:
 			notes.append({"warning": w})
 	return notes
+
+
+## F1/F3 (HITL-4, docs/llm-ergonomics.md): copy one additive worker-result
+## key onto a reply VERBATIM — worker owns the shape; absent/empty stays
+## absent (the same absent-when-empty contract every additive key here uses).
+static func _pass_through_result_key(reply: Dictionary, result: Dictionary, key: String) -> void:
+	var v: Variant = result.get(key)
+	if v is Array and not (v as Array).is_empty():
+		reply[key] = v
+
+
+## Dictionary-typed sibling of _pass_through_result_key (DCR 019fd5fd9084):
+## same verbatim / absent-when-empty contract, for worker-result keys whose
+## value is an object rather than a list (board_health). Kept separate rather
+## than widening the Array helper's type check — each call site names exactly
+## the shape it expects, so a worker shape drift fails loudly as an absent key
+## instead of passing the wrong container through.
+static func _pass_through_result_dict(reply: Dictionary, result: Dictionary, key: String) -> void:
+	var v: Variant = result.get(key)
+	if v is Dictionary and not (v as Dictionary).is_empty():
+		reply[key] = v
+
+
+## ── board_health attach + panel enrichment (DCR 019fd5fd9084) ─────────────────
+##
+## The worker's whole-board health ledger ({complete:true|false|null,
+## missing_copper:[net], partial:[{net,pin_groups}]?, indeterminate:[...]?,
+## assembly:{status:"pass"|"findings"|"indeterminate", findings, ...},
+## approximate:true} — always present on ok routing results; the old top-level
+## assembly_advisories key is GONE) is passed through VERBATIM, then enriched
+## with the two fields only the PANEL can know:
+##
+##   board_health.board_revision  — the live PCBData.board_revision, so a caller
+##                                  can tell which board state the verdict
+##                                  describes (the same provenance stamp every
+##                                  candidate already carries).
+##   board_health.preflight       — {rendered_this_revision: bool} (DCR item 3):
+##                                  whether a minerva_pcb_get_image capture has
+##                                  succeeded SINCE the last board mutation.
+##                                  WARN-ONLY — a standing nudge field, NEVER a
+##                                  refusal anywhere ("geometry authored blind is
+##                                  geometry authored wrong", llm-ergonomics F9).
+##
+## Side effect: a present board_health.assembly FEEDS the panel's assembly-state
+## cache (DCR item 2) at the stamped revision — the commit acknowledgment gate
+## reads that cache. Absent/empty board_health (older worker) attaches nothing
+## and feeds nothing, same absent-key contract as every additive key here.
+static func _attach_board_health(host, reply: Dictionary, result: Dictionary) -> void:
+	var bh: Variant = result.get("board_health")
+	if not (bh is Dictionary) or (bh as Dictionary).is_empty():
+		return
+	var health: Dictionary = (bh as Dictionary).duplicate(true)
+	var data = _get_data(host)
+	var revision: int = int(data.board_revision) if data != null else 0
+	health["board_revision"] = revision
+	var rendered := false
+	var panel = _get_panel(host)
+	if panel != null and panel.has_method("get_last_rendered_board_revision"):
+		rendered = int(panel.get_last_rendered_board_revision()) == revision
+	health["preflight"] = {"rendered_this_revision": rendered}
+	reply["board_health"] = health
+	var assembly: Variant = health.get("assembly")
+	if assembly is Dictionary and not (assembly as Dictionary).is_empty():
+		_feed_assembly_cache(host, assembly, revision)
+
+
+## Normalize an assembly_check round-trip reply ({ok, result:{status, findings,
+## indeterminate?, error?}} — PCBPanel.assembly_check / a worker board_health.
+## assembly object) to the bare TRI-STATE dict the load/placement replies and
+## the cache carry. Failure-as-feedback: any envelope that does not carry a
+## recognisable status degrades to {status:"indeterminate", error} — never a
+## crash, never silently a pass (the same fail-closed reading
+## _geometric_status_suffix documents for its verdict string).
+static func _assembly_tri_state(reply: Dictionary) -> Dictionary:
+	if bool(reply.get("ok", false)) and reply.get("result", null) is Dictionary:
+		var tri: Dictionary = (reply.get("result") as Dictionary).duplicate(true)
+		if str(tri.get("status", "")) in ["pass", "findings", "indeterminate"]:
+			return tri
+		return {"status": "indeterminate",
+			"error": "assembly_check returned an unrecognised status '%s'" % str(tri.get("status", ""))}
+	var err: Variant = reply.get("error", {})
+	var msg: String = str((err as Dictionary).get("message", "assembly_check failed")) \
+		if err is Dictionary else str(err)
+	return {"status": "indeterminate", "error": msg}
+
+
+## Write one tri-state verdict into the panel's assembly cache (silently a no-op
+## headless / when no panel is bound — the cache is PANEL state; a model-only
+## context has no commit gate to feed).
+static func _feed_assembly_cache(host, assembly: Dictionary, board_revision: int) -> void:
+	var panel = _get_panel(host)
+	if panel != null and panel.has_method("set_assembly_state"):
+		panel.set_assembly_state(assembly, board_revision)
+
+
+## Run the pcb.assembly_check channel over the LIVE board and return the
+## tri-state verdict, feeding the cache as a side effect (work item
+## 019fd5fe2724 — the placement verbs' refresh half). A host without the
+## bridge (headless model-only fixtures) or a failed channel degrades to
+## {status:"indeterminate", ...} — advisory, NEVER a gate here.
+static func _run_assembly_check(host, data) -> Dictionary:
+	if data == null or host == null or not host.has_method("assembly_check"):
+		return {"status": "indeterminate",
+			"reason": "assembly check unavailable — no channel bridge (headless / before mount)"}
+	var reply: Dictionary = await host.assembly_check(data.to_board_dict())
+	var tri: Dictionary = _assembly_tri_state(reply)
+	_feed_assembly_cache(host, tri, int(data.board_revision))
+	return tri
+
+
+## F6 (HITL-4, docs/llm-ergonomics.md): the ROUTING-family replies carry a
+## one-line COUNT SUMMARY of the emitter-capability notes, not the ~27-entry
+## verbatim list. Those notes are per-BOARD static facts (footprint fab-text
+## omissions, courtyard participation) — identical on every propose for a
+## given board — and at three-per-component they dominated every routing
+## reply while carrying zero routing signal. The full verbatim text still
+## exists where it is decision-relevant: the fab/export surfaces
+## (minerva_pcb_gerbers / export replies) and the worker result itself.
+## {} when the result carries none — same absent-when-empty contract the
+## old list had.
+static func _emitter_notes_summary_from_result(result: Dictionary) -> Dictionary:
+	var by_code: Dictionary = {}
+	var count := 0
+	for w in result.get("warnings", []):
+		if not (w is Dictionary):
+			continue
+		var code := str((w as Dictionary).get("code", ""))
+		if code in _EMITTER_NOTE_CODES:
+			count += 1
+			by_code[code] = int(by_code.get(code, 0)) + 1
+	if count == 0:
+		return {}
+	return {
+		"count": count,
+		"codes": by_code,
+		"note": "per-board emitter-capability notes (static for this board; decision-relevant at fab/export time) — full text rides the gerbers/export replies",
+	}
 
 
 ## Ordered polyline (Array of [x, y]) chaining a route's segment endpoints. Layer
@@ -4333,7 +4530,14 @@ static func _attach_hint_status(landed: Array, result: Dictionary) -> void:
 		var statuses: Array = []
 		for hid in (rec as Dictionary).get("source_hint_ids", []):
 			for wd in by_hint.get(str(hid), []):
-				statuses.append(wd)
+				# F5 (HITL-4, docs/llm-ergonomics.md): the worker's JSON float
+				# for the revision key is normalised to int here, matching the
+				# candidate's own durable int field — the rest of the entry
+				# stays verbatim (worker owns the shape).
+				var entry: Dictionary = (wd as Dictionary).duplicate(true)
+				if entry.has("constraint_revision"):
+					entry["constraint_revision"] = int(entry.get("constraint_revision"))
+				statuses.append(entry)
 		if not statuses.is_empty():
 			(rec as Dictionary)["hint_status"] = statuses
 
@@ -4399,6 +4603,15 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		"stale_candidate_ids": _stale_ids(workspace),
 		"note": "candidates landed in the routing workspace; no proposal annotations were written",
 	}
+	# F1/F3 (HITL-4, docs/llm-ergonomics.md): the worker's per-span outcome
+	# accounting ("already_connected" spans etc. — every asked-about span lands
+	# in exactly one of candidates/holds/unrouted/span_outcomes) — additive,
+	# absent-when-empty, passed VERBATIM (worker owns the shape). The F3
+	# assembly half moved into board_health (DCR 019fd5fd9084): verbatim
+	# pass-through + the panel-owned board_revision/preflight enrichment +
+	# assembly-cache feed, see _attach_board_health.
+	_pass_through_result_key(out, result, "span_outcomes")
+	_attach_board_health(host, out, result)
 	# Epoch UX1 station 11: a non-empty landing gets the compact legal-
 	# successors sentence instead of the bare "landed" note above — the
 	# reroute callers (_workspace_reroute) refresh this again with their own
@@ -4406,12 +4619,12 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 	# minerva_pcb_workspace_propose itself.
 	if not landed.is_empty():
 		out["note"] = _next_steps("propose", {"count": landed.size()})
-	# docket 019fce3ac3f5 item 2: same split as apply_route_hints — additive,
-	# absent-when-empty so the shared shape stays unchanged when the worker
-	# reports no capability notes.
-	var emitter_notes: Array = _emitter_notes_from_result(result)
-	if not emitter_notes.is_empty():
-		out["emitter_notes"] = emitter_notes
+	# docket 019fce3ac3f5 item 2 + F6 (HITL-4): same summarised split as
+	# apply_route_hints — additive, absent-when-empty so the shared shape
+	# stays unchanged when the worker reports no capability notes.
+	var emitter_summary: Dictionary = _emitter_notes_summary_from_result(result)
+	if not emitter_summary.is_empty():
+		out["emitter_notes_summary"] = emitter_summary
 	# F4: additive, absent-when-empty — the overwhelming common case (no
 	# merge happened, or the merge's absorbed tasks never conflicted).
 	if not constraint_conflicts.is_empty():
@@ -4523,12 +4736,169 @@ static func _workspace_reject(host, args: Dictionary) -> Dictionary:
 ## transaction (board writes + disposition + the paired history snapshot). The
 ## tool deliberately adds NO board mutation of its own: a second writer would be
 ## a second thing to undo.
+## ── COMMIT-time assembly acknowledgment gate (DCR 019fd5fd9084 item 2) ───────
+##
+## The design line: advisory-grade approximations NEVER hard-block — but KNOWN
+## findings at the commit point require explicit acknowledgment. Committing is
+## the one moment ghost geometry becomes real copper, and HITL-4's root cause
+## was copper routed through a placement the owner had already ruled broken
+## with no automated signal firing (llm-ergonomics F3/F9: "placement questions
+## settle before copper"). Decision table, evaluated against the PANEL's
+## assembly-state cache (fed by board_health pass-throughs, load-time checks
+## and placement-op refreshes — see _attach_board_health/_run_assembly_check):
+##
+##   cache state                     │ gate behaviour
+##   ────────────────────────────────┼──────────────────────────────────────────
+##   absent (never fed/invalidated)  │ WARN: reply carries assembly_note
+##                                   │ {status:"indeterminate"} — never blocks.
+##   stale (revision mismatch)       │ WARN: same — a verdict about a different
+##                                   │ board must not gate this one.
+##   fresh, status "indeterminate"   │ WARN: same — "could not check" is not a
+##                                   │ finding; indeterminate warns.
+##   fresh, status "pass"            │ silent — nothing to say.
+##   fresh, status "findings", NO    │ silent — the findings don't touch this
+##     component intersection        │ candidate's endpoints; not its blocker.
+##   fresh, status "findings", ≥1    │ REFUSE "placement_blocker_unacknowledged"
+##     finding's components intersect│ listing blocking_findings — UNLESS
+##     the candidate's endpoint      │ args.acknowledge_placement == true, in
+##     components                    │ which case the commit proceeds and the
+##                                   │ reply records acknowledged_placement_
+##                                   │ findings.
+##
+## BATCH: the gate runs per-member in PREFLIGHT (before commit_batch lays any
+## copper) — one unacknowledged blocked member refuses the WHOLE batch, the
+## existing all-or-nothing convention ("ALL validation precedes ALL mutation").
+
+
+## Classify the panel's cached assembly state against the live board revision.
+## Returns {mode:"absent"|"stale"|"indeterminate"|"pass"|"findings",
+## assembly?:Dictionary, cached_revision?:int}.
+static func _assembly_gate(host, data) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_assembly_state"):
+		return {"mode": "absent"}
+	var cached: Dictionary = panel.get_assembly_state()
+	if cached.is_empty():
+		return {"mode": "absent"}
+	var revision: int = int(data.board_revision) if data != null else 0
+	var cached_revision: int = int(cached.get("board_revision", -1))
+	if cached_revision != revision:
+		return {"mode": "stale", "cached_revision": cached_revision}
+	var assembly: Dictionary = cached.get("assembly", {}) \
+		if cached.get("assembly", {}) is Dictionary else {}
+	var status := str(assembly.get("status", ""))
+	if status == "findings":
+		return {"mode": "findings", "assembly": assembly}
+	if status == "pass":
+		return {"mode": "pass", "assembly": assembly}
+	# "indeterminate" and any unrecognised status both read as indeterminate —
+	# the same fail-closed vocabulary rule _geometric_status_suffix pins.
+	return {"mode": "indeterminate", "assembly": assembly}
+
+
+## The advisory assembly_note for a non-blocking gate outcome, or {} when the
+## gate has nothing to say (pass / findings — findings either block or are not
+## this candidate's business). Indeterminate WARNS, findings GATE.
+static func _assembly_gate_note(gate: Dictionary) -> Dictionary:
+	match str(gate.get("mode", "")):
+		"absent":
+			return {"status": "indeterminate",
+				"reason": "no assembly state cached — a load, propose, or placement op refreshes it"}
+		"stale":
+			return {"status": "indeterminate",
+				"reason": "cached assembly state is stale (computed at board_revision %d) — placement changed since; a load, propose, or placement op refreshes it" \
+					% int(gate.get("cached_revision", -1))}
+		"indeterminate":
+			var assembly: Dictionary = gate.get("assembly", {}) \
+				if gate.get("assembly", {}) is Dictionary else {}
+			return {"status": "indeterminate",
+				"reason": str(assembly.get("error", assembly.get("reason", "assembly check could not run")))}
+	return {}
+
+
+## The COMPONENT REFS a candidate's route terminates on, for the gate's
+## intersection test. Three sources, most-authoritative first:
+##   1. the candidate's own endpoints (copied from its task at ingest —
+##      {"component","pin","position"} open dicts, RouteTask.endpoints shape);
+##   2. its task's endpoints (a candidate ingested before endpoints were copied,
+##      or a sidecar round-trip that dropped them);
+##   3. FALLBACK: parse the component out of the source hints' own pin refs
+##      (kind_payload.source_pins/dest_pins, "U1.3" → "U1") via host.get_by_id.
+## Empty result ⇒ the gate cannot attribute findings to this candidate and
+## stays silent (never guesses an intersection).
+static func _candidate_endpoint_components(host, workspace, c) -> Array:
+	var comps: Array = []
+	if c == null:
+		return comps
+	var sources: Array = c.endpoints if (c.endpoints as Array).size() > 0 else []
+	if sources.is_empty() and workspace != null and workspace.has_method("get_task"):
+		var task = workspace.get_task(str(c.task_id))
+		if task != null and (task.endpoints as Array).size() > 0:
+			sources = task.endpoints
+	for e in sources:
+		if e is Dictionary:
+			var comp := str((e as Dictionary).get("component", ""))
+			if not comp.is_empty() and not (comp in comps):
+				comps.append(comp)
+	if comps.is_empty() and host != null and host.has_method("get_by_id"):
+		for hid in c.source_hint_ids:
+			var ann: Dictionary = host.get_by_id(str(hid))
+			if ann.is_empty():
+				continue
+			var kp: Dictionary = ann.get("kind_payload", {}) \
+				if ann.get("kind_payload", {}) is Dictionary else {}
+			for key in ["source_pins", "dest_pins"]:
+				var pins: Array = kp.get(key, []) if kp.get(key, []) is Array else []
+				for pin_ref in pins:
+					var ref := str(pin_ref)
+					var dot := ref.find(".")
+					if dot > 0:
+						var comp2 := ref.substr(0, dot)
+						if not (comp2 in comps):
+							comps.append(comp2)
+	return comps
+
+
+## The subset of a fresh "findings" assembly state whose findings touch any of
+## `comps` (finding.components ∩ comps ≠ ∅ — the worker contract's finding
+## shape names the colliding components). Empty when comps is empty: an
+## unattributable candidate is never blocked on a guess.
+static func _blocking_findings_for(assembly: Dictionary, comps: Array) -> Array:
+	var out: Array = []
+	if comps.is_empty():
+		return out
+	var findings: Array = assembly.get("findings", []) \
+		if assembly.get("findings", []) is Array else []
+	for f in findings:
+		if not (f is Dictionary):
+			continue
+		var f_comps: Array = (f as Dictionary).get("components", []) \
+			if (f as Dictionary).get("components", []) is Array else []
+		for fc in f_comps:
+			if str(fc) in comps:
+				out.append(f)
+				break
+	return out
+
+
+const _PLACEMENT_BLOCKER_NOTE := "the panel's FRESH assembly state carries findings touching this candidate's endpoint components — placement questions settle before copper (DCR 019fd5fd9084). Re-place the parts and re-check, or pass acknowledge_placement:true to commit anyway (the reply then records acknowledged_placement_findings)"
+
+
 static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 	var ctx: Dictionary = _workspace_ctx(host)
 	if not bool(ctx.get("ok", false)):
 		return ctx.get("reply")
 	var workspace = ctx["ws"]
 	var data = ctx["data"]
+
+	# DCR 019fd5fd9084 item 2: classify the cached assembly state ONCE, up
+	# front — both the single and batch paths below consult it in preflight
+	# (before any copper) and stamp the advisory note on success. SYNCHRONOUS
+	# by design: the gate reads the cache, it never runs the check itself, so
+	# commit keeps its no-worker-hop contract.
+	var assembly_gate: Dictionary = _assembly_gate(host, data)
+	var assembly_note: Dictionary = _assembly_gate_note(assembly_gate)
+	var acknowledge: bool = bool(args.get("acknowledge_placement", false))
 
 	# BATCH FORM (docket 019fd0ab6dd2): candidate_ids commits several
 	# candidates as ONE undoable step through RoutingWorkspace.commit_batch —
@@ -4545,6 +4915,34 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		var batch_ids: Array = _string_list(args.get("candidate_ids", []))
 		if batch_ids.is_empty():
 			return _err("candidate_ids must name at least one candidate (empty batch)")
+		# PLACEMENT GATE, per-member, in PREFLIGHT (DCR 019fd5fd9084 item 2 —
+		# before commit_batch lays ANY copper): one unacknowledged blocked
+		# member refuses the WHOLE batch, the existing all-or-nothing
+		# convention. A member id the workspace doesn't know is skipped here —
+		# commit_batch's own validation refuses it by name, and this gate
+		# never pre-empts a more specific refusal.
+		var batch_acknowledged: Array = []
+		if str(assembly_gate.get("mode", "")) == "findings":
+			var blocked: Array = []
+			for bid in batch_ids:
+				var member = workspace.get_candidate(str(bid))
+				if member == null:
+					continue
+				var member_blocking: Array = _blocking_findings_for(
+					assembly_gate.get("assembly", {}),
+					_candidate_endpoint_components(host, workspace, member))
+				if not member_blocking.is_empty():
+					blocked.append({"candidate_id": str(bid),
+						"blocking_findings": member_blocking})
+			if not blocked.is_empty():
+				if not acknowledge:
+					return {
+						"success": false,
+						"error": "placement_blocker_unacknowledged",
+						"blocked_members": blocked,
+						"note": "batch refused whole (all-or-nothing): " + _PLACEMENT_BLOCKER_NOTE,
+					}
+				batch_acknowledged = blocked
 		var batch: Dictionary = workspace.commit_batch(batch_ids, data)
 		if not bool(batch.get("ok", false)):
 			return {
@@ -4569,11 +4967,37 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		# Epoch UX1 station 11: additive alongside undo_note (a different
 		# question — "what next", not "how to take it back").
 		breply["note"] = _next_steps("commit", {})
+		# DCR 019fd5fd9084 item 2, additive + absent-when-empty: the advisory
+		# note for a non-blocking gate state, and the acknowledged-findings
+		# record when acknowledge_placement carried a commit through blockers.
+		if not assembly_note.is_empty():
+			breply["assembly_note"] = assembly_note
+		if not batch_acknowledged.is_empty():
+			breply["acknowledged_placement_findings"] = batch_acknowledged
 		return _ok(breply)
 
 	var cid: String = str(args.get("candidate_id", ""))
 	if cid.is_empty():
 		return _err("candidate_id is required")
+	# PLACEMENT GATE (DCR 019fd5fd9084 item 2), single form — same preflight
+	# position as the batch gate above: before workspace.commit lays copper.
+	# An unknown cid is skipped (null candidate → no endpoints → no blocking);
+	# workspace.commit refuses it by name just below.
+	var acknowledged_findings: Array = []
+	if str(assembly_gate.get("mode", "")) == "findings":
+		var blocking: Array = _blocking_findings_for(
+			assembly_gate.get("assembly", {}),
+			_candidate_endpoint_components(host, workspace, workspace.get_candidate(cid)))
+		if not blocking.is_empty():
+			if not acknowledge:
+				return {
+					"success": false,
+					"error": "placement_blocker_unacknowledged",
+					"candidate_id": cid,
+					"blocking_findings": blocking,
+					"note": _PLACEMENT_BLOCKER_NOTE,
+				}
+			acknowledged_findings = blocking
 	var res: Dictionary = workspace.commit(cid, data)
 	if not bool(res.get("ok", false)):
 		return {
@@ -4606,6 +5030,12 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 	# Epoch UX1 station 11: additive alongside undo_note (a different
 	# question — "what next", not "how to take it back").
 	reply["note"] = _next_steps("commit", {})
+	# DCR 019fd5fd9084 item 2, additive + absent-when-empty — see the batch
+	# path's twin stamp above for the contract.
+	if not assembly_note.is_empty():
+		reply["assembly_note"] = assembly_note
+	if not acknowledged_findings.is_empty():
+		reply["acknowledged_placement_findings"] = acknowledged_findings
 	return _ok(reply)
 
 

@@ -44,6 +44,7 @@ test_pcb_single_trace_tool.gd
 test_pcb_trace_tool.gd
 test_pcb_width_prefs.gd
 test_pcb_workflow_kinds.gd
+test_production_seam.gd
 test_proposal_attribution.gd
 test_routing_workspace_model.gd
 test_routing_workspace_v2.gd

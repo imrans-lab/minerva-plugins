@@ -386,6 +386,40 @@ class RoutingResult:
     # if they do not, so breaking that invariant degrades the diagnostic rather
     # than mispairing it — but it still silently costs the whole feature.
     unrouted_reasons: list[dict] = field(default_factory=list)
+    # HITL-4 (docs/llm-ergonomics.md F1): per-span OUTCOMES for every net/span
+    # the run was asked about but produced neither a route nor an `unrouted`
+    # pair for. Before this field existed, a span whose endpoints the board's
+    # EXISTING copper already joins produced NOTHING — routes empty, unrouted
+    # empty — byte-identical to a dropped request (the live GND BAT1.2→U1.22
+    # reproduction cost a geometry dump and a full trace export to diagnose).
+    # The skip was implicit: `_connections_for_net`'s group contraction yields
+    # zero missing edges, so the per-net loop simply appended nothing anywhere.
+    #
+    # ACCOUNTING IDENTITY: every net the routing loop VISITS now lands in
+    # exactly one of `routes`, `unrouted`, or here — silence is impossible.
+    # Entries are plain dicts (JSON-shaped, like `unrouted_reasons`) with a
+    # named `status`:
+    #
+    #   already_connected   — the automatic spanning tree over the accepted-
+    #                         copper groups needed no edge: existing copper
+    #                         already joins every requested terminal.
+    #                         `connected_via` (best effort, absent-key when the
+    #                         copper carries no source ids) lists the accepted
+    #                         trace/via ids doing the joining.
+    #   terminals_unmatched — a span-scoped ask (net_terminals) whose named
+    #                         refs matched < 2 pads on this board. Defence in
+    #                         depth: route_bridge.parse_route_scope refuses
+    #                         unknown endpoints before the engine ever runs,
+    #                         but the engine must not go silent if reached
+    #                         through another door.
+    #   bridge_absorbed     — an internal-bridge net whose pin assignments
+    #                         left no external connection to route (all pads
+    #                         assigned or internally bonded). Unreachable from
+    #                         the worker today (route_bridge.hints_to_router
+    #                         never emits bridges) but named rather than
+    #                         folded into already_connected, which would be a
+    #                         lie about the mechanism.
+    span_outcomes: list[dict] = field(default_factory=list)
     via_count: int = 0
 
     def get_route(self, net_name: str) -> Optional[Route]:
@@ -472,6 +506,13 @@ class ExistingSegment:
     end: tuple[float, float]
     width: float
     layer: str
+    # HITL-4 (docs/llm-ergonomics.md F1): the ACCEPTED trace this segment was
+    # decomposed from (ResolvedTrace.id on the worker's canonical path), so an
+    # `already_connected` span outcome can name WHICH copper satisfies the
+    # span (`connected_via`, best effort). Optional with a None default: every
+    # existing positional constructor call is untouched, and a caller that
+    # carries no ids simply produces outcomes without the `connected_via` key.
+    source_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -481,6 +522,9 @@ class ExistingVia:
     position: tuple[float, float]
     diameter: float
     layers: tuple[str, ...]
+    # HITL-4 (docs/llm-ergonomics.md F1): same best-effort attribution slot as
+    # ExistingSegment.source_id, for the accepted via's own id.
+    source_id: Optional[str] = None
 
 
 def _mark_existing_copper(
@@ -635,6 +679,29 @@ def _preconnected_groups(
     """
     if not pads:
         return {}
+    find, _seg_node, _via_node = _copper_union(pads, segments, vias, tolerance)
+    return {pi: find(pi) for pi in range(len(pads))}
+
+
+def _copper_union(
+    pads: list[Pad],
+    segments: Sequence[ExistingSegment],
+    vias: Sequence[ExistingVia],
+    tolerance: float,
+):
+    """The shared pad/segment/via union-find behind :func:`_preconnected_groups`.
+
+    HITL-4 (docs/llm-ergonomics.md F1): extracted so the `already_connected`
+    span outcome can attribute WHICH copper joins the pads
+    (:func:`_connected_copper_ids`) with the IDENTICAL coincidence rules the
+    grouping decision itself used — a second, hand-rolled traversal here would
+    be free to disagree with the decision it is explaining. Every rule
+    (centre-coincidence only, shared endpoints only, via spans) is documented
+    on `_preconnected_groups`, which remains the semantic owner.
+
+    Returns ``(find, seg_node, via_node)``: the find function over the packed
+    node universe, and the index offsets where segment/via nodes begin.
+    """
     n_pads = len(pads)
     parent = list(range(n_pads + len(segments) + len(vias)))
 
@@ -680,7 +747,110 @@ def _preconnected_groups(
             if coincident(seg.start, via.position) or coincident(seg.end, via.position):
                 union(via_node + vi, seg_node + si)
 
-    return {pi: find(pi) for pi in range(n_pads)}
+    return find, seg_node, via_node
+
+
+def _connected_copper_ids(
+    pads: list[Pad],
+    segments: Sequence[ExistingSegment],
+    vias: Sequence[ExistingVia],
+    tolerance: float,
+) -> list[str]:
+    """Best-effort ids of the accepted copper joining ``pads``' components.
+
+    HITL-4 (docs/llm-ergonomics.md F1): the ``connected_via`` field of an
+    `already_connected` span outcome. Runs the SAME union
+    (:func:`_copper_union`, same tolerance) the grouping decision ran, then
+    collects the ``source_id`` of every segment/via sharing a connected
+    component with any of the pads. BEST EFFORT by contract: copper without a
+    source id (any caller predating the field) contributes nothing, and the
+    caller omits the key entirely when this comes back empty — absent-key,
+    never an invented placeholder. Order is the copper's own (deterministic:
+    the projection walks IR traces in board order), deduplicated because one
+    ResolvedTrace decomposes into many segments carrying the same id.
+    """
+    if not pads:
+        return []
+    find, seg_node, via_node = _copper_union(pads, segments, vias, tolerance)
+    pad_roots = {find(pi) for pi in range(len(pads))}
+    ids: list[str] = []
+    for si, seg in enumerate(segments):
+        sid = seg.source_id
+        if sid and find(seg_node + si) in pad_roots and sid not in ids:
+            ids.append(sid)
+    for vi, via in enumerate(vias):
+        vid = via.source_id
+        if vid and find(via_node + vi) in pad_roots and vid not in ids:
+            ids.append(vid)
+    return ids
+
+
+# ---------------------------------------------------------------------------
+# HITL-4 (docs/llm-ergonomics.md F1) — the per-span outcome builders.
+#
+# One builder per named status, called from BOTH entry points' net loops at the
+# exact decision site that used to fall through silently. They build plain
+# JSON-shaped dicts (the same convention as `_unrouted_reason_entry`) so the
+# serializer passes them through without an engine-type hop. Pad spelling is
+# the reply's own "<component>.<number>".
+# ---------------------------------------------------------------------------
+
+
+def _already_connected_outcome(
+    net_name: str,
+    pads: list[Pad],
+    existing_by_net: dict,
+    grid_resolution: float,
+) -> dict:
+    """The outcome for a net/span whose spanning tree needed ZERO edges.
+
+    Reachable ONLY through the automatic branch (`_connections_for_net`): with
+    >= 2 pads, `_build_spanning_tree` over bare pads always yields an edge, so
+    an empty connection list is possible exactly when the accepted-copper
+    group contraction merged every pad into one node — i.e. the board already
+    connects everything that was asked for.
+    """
+    entry = {
+        "net": net_name,
+        "status": "already_connected",
+        "pads": [f"{p.component}.{p.number}" for p in pads],
+    }
+    segments, vias = existing_by_net.get(net_name, ((), ()))
+    if segments or vias:
+        ids = _connected_copper_ids(
+            pads, segments, vias,
+            _coincidence_tolerance(grid_resolution, segments, vias))
+        # Absent-key contract (hint 019f9d061f13): no ids means "the copper
+        # carries no source ids", not "nothing connects these pads" — an empty
+        # list would read as the latter.
+        if ids:
+            entry["connected_via"] = ids
+    return entry
+
+
+def _skipped_span_outcome(
+    net_name: str,
+    pads: list[Pad],
+    net_terminals: Optional[dict],
+) -> Optional[dict]:
+    """The outcome for a net the loop skipped at the `< 2 pads` guard.
+
+    Only a SPAN-SCOPED ask (a `net_terminals` entry for this net) gets an
+    outcome: the caller named endpoints and fewer than two of them resolved,
+    which is an answer the caller must see (`terminals_unmatched`). A net with
+    no entry returns None — `_order_nets` never lists a net with < 2 pads, so
+    that skip is not an ask that went unanswered, and inventing an outcome for
+    it would put entries on the reply nobody asked about.
+    """
+    named = (net_terminals or {}).get(net_name)
+    if named is None:
+        return None
+    return {
+        "net": net_name,
+        "status": "terminals_unmatched",
+        "requested": sorted(str(r) for r in named),
+        "matched": [f"{p.component}.{p.number}" for p in pads],
+    }
 
 
 def _existing_copper_by_net(
@@ -1172,6 +1342,13 @@ def route_board(
     for net_name in nets_to_route:
         pads = _terminal_pads(board.get_net_pads(net_name), net_name, net_terminals)
         if len(pads) < 2:
+            # HITL-4 (docs/llm-ergonomics.md F1): a span-scoped ask whose
+            # terminals resolved to < 2 pads is answered, not skipped in
+            # silence — see _skipped_span_outcome for why only the span form
+            # gets an entry.
+            outcome = _skipped_span_outcome(net_name, pads, net_terminals)
+            if outcome is not None:
+                result.span_outcomes.append(outcome)
             continue  # Skip nets with less than 2 pads
 
         net_width = _net_width(net_widths, net_name, trace_width)
@@ -1182,6 +1359,15 @@ def route_board(
         # rather than routed again from scratch (T7, 019f70ebc9ed).
         connections = _connections_for_net(
             pads, net_name, existing_by_net, grid_resolution)
+        if not connections:
+            # HITL-4 (docs/llm-ergonomics.md F1): zero needed edges with >= 2
+            # pads means the accepted copper already joins everything asked
+            # for (see _already_connected_outcome). This used to fall through
+            # producing NOTHING — no route, no unrouted pair — which made an
+            # already-satisfied span byte-identical to a dropped request.
+            result.span_outcomes.append(_already_connected_outcome(
+                net_name, pads, existing_by_net, grid_resolution))
+            continue
 
         for pad_a, pad_b in connections:
             path = find_path(
@@ -1994,6 +2180,12 @@ def route_board_with_hints(
     for net_name in nets_to_route:
         pads = _terminal_pads(board.get_net_pads(net_name), net_name, net_terminals)
         if len(pads) < 2:
+            # HITL-4 (docs/llm-ergonomics.md F1): same named answer as
+            # route_board's loop — a span ask whose terminals resolved to < 2
+            # pads must not vanish (see _skipped_span_outcome).
+            outcome = _skipped_span_outcome(net_name, pads, net_terminals)
+            if outcome is not None:
+                result.span_outcomes.append(outcome)
             continue
 
         # Check for net-specific hints
@@ -2039,6 +2231,28 @@ def route_board_with_hints(
         # Add chain connections (sequential pad-to-pad)
         net_chains = chain_pad_pairs.get(net_name, [])
         connections.extend(net_chains)
+
+        if not connections:
+            # HITL-4 (docs/llm-ergonomics.md F1): the hinted loop's version of
+            # route_board's zero-connections answer. Checked AFTER the chain
+            # extend, so a net whose only work is user-authored chain pairs is
+            # accounted by those pairs routing (or landing in `unrouted`),
+            # never by an outcome claiming nothing was needed. The branch that
+            # emptied `connections` names the mechanism honestly: the
+            # automatic tree's group contraction means already-connected;
+            # empty BRIDGE assignments mean the bridge absorbed every pad
+            # (unreachable from the worker today — hints_to_router emits no
+            # bridges — but a lie is not a fallback, so it gets its own name).
+            if net_bridges:
+                result.span_outcomes.append({
+                    "net": net_name,
+                    "status": "bridge_absorbed",
+                    "pads": [f"{p.component}.{p.number}" for p in pads],
+                })
+            else:
+                result.span_outcomes.append(_already_connected_outcome(
+                    net_name, pads, existing_by_net, grid_resolution))
+            continue
 
         for pad_a, pad_b in connections:
             # AUTHORED CORRIDOR for THIS connection (bug 019fcf152791).

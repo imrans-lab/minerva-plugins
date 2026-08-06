@@ -399,8 +399,15 @@ def test_route_clean_when_no_collision():
     assert sig[0]["drc"] == {"scope": "connectivity", "clean": True,
                              "violations": [],
                              "baseline": {"clean": True, "violations": []}}
+    # HITL-4 (docs/llm-ergonomics.md F2): the summary now ALSO answers the
+    # completeness question — `clean` alone could not say "and no in-scope net
+    # is missing its copper". Fully-routed clean board: complete, nothing
+    # missing (and no `partial`/`indeterminate` key at all — absent-key when
+    # empty). `approximate` is the census's standing centerline-basis honesty
+    # label (DCR 019fd5fd9084).
     assert r["drc_summary"] == {
         "scope": "connectivity", "clean": True, "violation_count": 0,
+        "complete": True, "missing_copper": [], "approximate": True,
         "baseline": {"clean": True, "violation_count": 0, "findings": []}}
 
 
@@ -1125,3 +1132,192 @@ def test_same_type_crossings_at_different_places_are_different_findings():
 
     introduced, _ = partition_findings([old], [new, old])
     assert introduced == [new], introduced
+
+
+# ---------------------------------------------------------------------------
+# Connectivity COMPLETENESS on the route reply — HITL-4 (docs/llm-ergonomics.md
+# F2). The propose-side surface of the same fix tests/test_drc.py pins for the
+# standalone method: `drc_summary` gains `complete` + `missing_copper`
+# (+ `partial`, absent-key) computed over the POST-proposal board, narrowed to
+# the run's scope. `clean` keeps meaning exactly what it meant (no introduced
+# short/mismatch), so a blocked net now reads clean:True + complete:False —
+# honestly split — where it used to read just "clean".
+# ---------------------------------------------------------------------------
+
+
+def _f2_tp(ref: str, x: float, y: float) -> dict:
+    """Through-hole test point — the same shape _board()'s components use,
+    factored because this section places them at parametrised positions."""
+    return {"ref": ref, "footprint": "TH_TestPoint", "x_mm": x, "y_mm": y,
+            "rotation_deg": 0, "layer": "top",
+            "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                      "drill_mm": 0.8, "annulus_diameter_mm": 1.6}]}
+
+
+def _walled_vcc_board() -> dict:
+    """VCC needs to cross a full-height foreign wall; with single_layer there
+    is no way around or under, so VCC comes back unrouted — leaving an
+    in-scope net with pins and ZERO copper on the post-proposal board."""
+    return {
+        "version": 1, "name": "missing-copper", "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            _f2_tp("U2", 10, 20), _f2_tp("J2", 50, 20),
+            _f2_tp("A1", 30, 0.8), _f2_tp("A2", 30, 39.2),
+        ],
+        "nets": [{"name": "VCC", "pins": ["U2.1", "J2.1"]},
+                 {"name": "EXIST", "pins": ["A1.1", "A2.1"]}],
+        "traces": [{"net": "EXIST", "layer": "top", "width_mm": 0.25,
+                    "points": [{"x_mm": 30, "y_mm": 0.8},
+                               {"x_mm": 30, "y_mm": 39.2}]}],
+    }
+
+
+def test_an_unroutable_scoped_net_is_named_missing_copper_not_just_clean():
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["VCC"]},
+                           "options": {"single_layer": True}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    assert {u["net"] for u in r["unrouted"]} == {"VCC"}
+    summary = r["drc_summary"]
+    # The old halves keep their meaning: nothing was introduced, so clean.
+    assert summary["scope"] == "connectivity"
+    assert summary["clean"] is True
+    # The new half says what "clean" never could: the copper is not there.
+    assert summary["complete"] is False
+    assert summary["missing_copper"] == ["VCC"]
+
+
+def test_missing_copper_is_scoped_to_the_nets_the_run_asked_about():
+    """EXIST is fully wired and is the whole scope; VCC has zero copper but
+    was NOT asked about, so it must not be named HERE — drc_summary is the
+    PROPOSAL ledger and answers the request. The whole board's state is the
+    `board_health` BOARD ledger's job (tested below) and the standalone `drc`
+    method's."""
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["EXIST"]}})
+    assert resp["ok"] is True, resp
+    summary = resp["result"]["drc_summary"]
+    assert summary["complete"] is True
+    assert summary["missing_copper"] == []
+    assert "partial" not in summary
+
+
+def test_a_fully_routed_run_reports_complete():
+    """Negative gate at the route level: route VCC with both layers available
+    and the summary is complete with nothing missing."""
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["VCC"]}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    assert {rt["net"] for rt in r["routes"]} == {"VCC"}
+    assert r["drc_summary"]["complete"] is True
+    assert r["drc_summary"]["missing_copper"] == []
+
+
+# ---------------------------------------------------------------------------
+# board_health — the WHOLE-BOARD ledger (DCR 019fd5fd9084). drc_summary above
+# is the PROPOSAL ledger (scoped to the run's only_nets); board_health rides
+# every ok route reply regardless of scope, over the same post-proposal board:
+# whole-board census + the tri-state assembly verdict.
+# ---------------------------------------------------------------------------
+
+
+def test_board_health_reports_the_whole_board_despite_a_narrow_scope():
+    """THE ledger split in one test: a run scoped to fully-wired EXIST keeps a
+    scoped (clean, complete) drc_summary — and board_health still names
+    un-asked-about VCC's missing copper, because the board ledger answers
+    "what state is the BOARD in?" no matter what this run was asked."""
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["EXIST"]}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    # The proposal ledger stays scoped (previous test) …
+    assert r["drc_summary"]["complete"] is True
+    assert r["drc_summary"]["missing_copper"] == []
+    # … while the board ledger tells the whole truth.
+    health = r["board_health"]
+    assert health["complete"] is False
+    assert health["missing_copper"] == ["VCC"]
+    assert "partial" not in health
+    assert health["approximate"] is True
+    assert health["assembly"]["status"] in ("pass", "findings",
+                                            "indeterminate")
+
+
+def test_board_health_is_always_present_and_carries_assembly():
+    """Every ok route reply carries board_health — including a fully-healthy
+    run, where it is the measured all-clear: complete, nothing missing, and a
+    tri-state assembly verdict (TH test points resolve to measurable pad
+    extents, so this board's parts are judged, not skipped)."""
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["VCC"]}})
+    assert resp["ok"] is True, resp
+    health = resp["result"]["board_health"]
+    assert health["complete"] is True
+    assert health["missing_copper"] == []
+    assert health["approximate"] is True
+    assert health["assembly"] == {"status": "pass", "findings": []}
+
+
+def test_board_health_census_faults_degrade_to_indeterminate(monkeypatch):
+    """A census fault inside board_health is a report, not a failure: complete
+    None + completeness_error, NO missing_copper key a consumer could read as
+    "nothing missing" — and the route reply itself still succeeds."""
+    real = drc_module.connectivity_completeness
+
+    def _boom(board, scope_nets=None):
+        if scope_nets is None:  # the board-ledger (whole-board) call only
+            raise RuntimeError("synthetic census fault")
+        return real(board, scope_nets)
+
+    monkeypatch.setattr(drc_module, "connectivity_completeness", _boom)
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["VCC"]}})
+    assert resp["ok"] is True, resp
+    health = resp["result"]["board_health"]
+    assert health["complete"] is None
+    assert "synthetic census fault" in health["completeness_error"]
+    assert "missing_copper" not in health
+    assert health["approximate"] is True
+    # The assembly half is a separate computation and still answers.
+    assert health["assembly"]["status"] in ("pass", "findings",
+                                            "indeterminate")
+
+
+def test_a_zone_bearing_net_reads_indeterminate_on_both_ledgers():
+    """CENSUS CORRECTION 019fd5fdeef3b at the propose-reply seams: a poured
+    net is unjudgeable copper — {net, reason: "zone_copper"} — and flips
+    `complete` to None (tri-state) rather than the pre-fix auto-complete, on
+    the scoped summary AND the board ledger alike.
+
+    Exercised at the attach seams (`_attach_route_drc` / `_board_health`)
+    rather than through `route`: the routing path fails closed on
+    zone-bearing boards (UnsupportedGeometry) before either ledger exists, so
+    this seam is how zone copper actually reaches these summaries (e.g. via
+    the drawn/as-drawn reply assembly)."""
+    from pcb_worker.methods import _attach_route_drc, _board_health
+
+    board = _walled_vcc_board()
+    board["zones"] = [{"net": "EXIST", "layer": "bottom",
+                       "points": [{"x_mm": 0, "y_mm": 0},
+                                  {"x_mm": 60, "y_mm": 0},
+                                  {"x_mm": 60, "y_mm": 40},
+                                  {"x_mm": 0, "y_mm": 40}]}]
+    payload: dict = {"routes": []}
+    _attach_route_drc(payload, board, scope_nets={"EXIST"})
+    summary = payload["drc_summary"]
+    assert summary["complete"] is None  # nothing missing, one net unjudgeable
+    assert summary["missing_copper"] == []
+    assert summary["indeterminate"] == [
+        {"net": "EXIST", "reason": "zone_copper"}]
+    assert summary["approximate"] is True
+
+    health = _board_health(board, [], board)
+    assert health["complete"] is False  # whole board: VCC is measurably missing
+    assert health["missing_copper"] == ["VCC"]
+    assert health["indeterminate"] == [
+        {"net": "EXIST", "reason": "zone_copper"}]

@@ -333,6 +333,19 @@ func load_board(yaml_text: String) -> Dictionary:
 		"message": "no panel bound — pcb.deserialize broker unreachable (headless / before mount)"}}
 
 
+## Assembly advisory bridge (DCR 019fd5fd9084, work item 019fd5fe2724). The
+## placement verbs (panel_tools._add_component/_move_component/_rotate_component/
+## _move_relative) reach the worker's assembly_check method through HERE — same
+## host→panel duck-typed path as run_router/load_board, same structured
+## worker_unavailable degradation when no panel is bound (the caller converts it
+## to a tri-state {status:"indeterminate"} — advisory, never a gate).
+func assembly_check(board: Dictionary) -> Dictionary:
+	if _panel != null and is_instance_valid(_panel) and _panel.has_method("assembly_check"):
+		return await _panel.assembly_check(board)
+	return {"ok": false, "error": {"kind": "worker_unavailable",
+		"message": "no panel bound — pcb.assembly_check broker unreachable (headless / before mount)"}}
+
+
 func _connect_canvas() -> void:
 	if _canvas == null or not is_instance_valid(_canvas):
 		return

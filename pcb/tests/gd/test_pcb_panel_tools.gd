@@ -268,15 +268,21 @@ func _run_golden_parity() -> void:
 		check("pins is Array", c0.get("pins", null) is Array)
 
 	print("\n-- GOLDEN: add_component shape --")
-	# Legacy → {success, component_id, x, y, pin_count}
+	# Legacy → {success, component_id, x, y, pin_count}. `assembly` is the
+	# work-item 019fd5fe2724 (DCR 019fd5fd9084) addition: every placement verb
+	# attaches the tri-state assembly verdict after mutating (headless here →
+	# {status:"indeterminate"} — the channel bridge degrades honestly, never
+	# silently).
 	var ga := await h("minerva_pcb_add_component", _args({"id": "C3", "footprint": "CAPACITOR", "x": 10.0, "y": 50.0}))
-	check_keys("add_component result", ga, ["success", "component_id", "x", "y", "pin_count"])
+	check_keys("add_component result", ga, ["success", "component_id", "x", "y", "pin_count", "assembly"])
 	check_eq("component_id echoed", ga.get("component_id", ""), "C3")
+	check_eq("placement verb attaches the tri-state assembly verdict (indeterminate headless)",
+		str((ga.get("assembly", {}) as Dictionary).get("status", "")), "indeterminate")
 
 	print("\n-- GOLDEN: move_component shape --")
-	# Legacy → {success, component_id, x, y}
+	# Legacy → {success, component_id, x, y} + the 019fd5fe2724 `assembly` key.
 	var gm := await h("minerva_pcb_move_component", _args({"component_id": "C3", "x": 12.0, "y": 52.0}))
-	check_keys("move_component result", gm, ["success", "component_id", "x", "y"])
+	check_keys("move_component result", gm, ["success", "component_id", "x", "y", "assembly"])
 
 	print("\n-- GOLDEN: spatial_query shape --")
 	# Legacy → {success, reference, radius_mm, nearby_count, nearby:[{id, relationship}]}

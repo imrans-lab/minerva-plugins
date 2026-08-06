@@ -764,7 +764,12 @@ def resolved_board_existing_copper(
                 start=(float(seg.a[0]), float(seg.a[1])),
                 end=(float(seg.b[0]), float(seg.b[1])),
                 width=float(seg.width_mm),
-                layer=layer))
+                layer=layer,
+                # HITL-4 (docs/llm-ergonomics.md F1): the TRACE's id, not the
+                # per-segment one — an `already_connected` span outcome names
+                # the copper a human can find on the board, and the board
+                # knows its traces, not this decomposition's segments.
+                source_id=str(trace.id)))
 
     vias: list[ExistingVia] = []
     for via in rb.vias:
@@ -793,7 +798,10 @@ def resolved_board_existing_copper(
             net=net_name_by_id.get(via.net_id),
             position=(float(via.position[0]), float(via.position[1])),
             diameter=diameter,
-            layers=span))
+            layers=span,
+            # HITL-4 (docs/llm-ergonomics.md F1): same best-effort span-outcome
+            # attribution as the segments above.
+            source_id=str(via.id)))
 
     return segments, vias
 
@@ -1536,17 +1544,6 @@ def hints_to_router(
         net = _net_for_hint(env, board, warnings)
         if net is None:
             continue  # warning already recorded
-        # detail_level (sparse|guided|detailed) has no RoutingHints slot, but it
-        # is NOT inert: one level up, _routes_as_drawn consumes `detailed`
-        # single-trace hints as literal geometry. Saying "dropped — no
-        # agent_router equivalent" full stop was misleading (bug 019fcf152791);
-        # name the ENGINE-side omission specifically.
-        if kp.get("detail_level"):
-            warnings.append({"id": str(env.get("id", "")), "message":
-                "detail_level '%s' has no agent_router slot — it selects the "
-                "bridge path (only 'detailed' single-trace hints route as "
-                "drawn), not engine behaviour"
-                % kp.get("detail_level")})
         # AUTHORED WAYPOINTS BECOME A CONNECTION HINT (bug 019fcf152791
         # Stage B). They used to be handed to the engine as
         # NetHint.waypoints, which nothing read — the dead field at the heart
@@ -1562,10 +1559,37 @@ def hints_to_router(
         # hint whose task was never given a corridor) falls through to the
         # legacy waypoints exactly as before — byte-identical, no
         # constraint_revision key anywhere.
+        #
+        # HITL-4 (docs/llm-ergonomics.md F4): computed BEFORE the detail_level
+        # warning below, which used to fire first and therefore could not know
+        # whether a constraint applies. Ordering only — the override itself is
+        # unchanged.
         ann_id = str(env.get("id", ""))
         constraint_pts, constraint_layer, constraint_revision = \
             _corridor_from_task_constraint(
                 task_constraints.get(ann_id), warnings, ann_id)
+        # detail_level (sparse|guided|detailed) has no RoutingHints slot, but it
+        # is NOT inert: one level up, _routes_as_drawn consumes `detailed`
+        # single-trace hints as literal geometry. Saying "dropped — no
+        # agent_router equivalent" full stop was misleading (bug 019fcf152791);
+        # name the ENGINE-side omission specifically.
+        #
+        # HITL-4 (docs/llm-ergonomics.md F4): SUPPRESSED when a task_constraints
+        # entry APPLIES to this hint (constraint_pts truthy — the exact
+        # predicate the override below runs on). Intent-minted hints never
+        # carry waypoints; their steering rides task_constraints, and for them
+        # this warning read as "the corridor might not steer" on exactly the
+        # hints where it does — an active red herring during the F0 live
+        # diagnosis. The constraint-steered path already reports itself
+        # (superseded_by_task_constraint / constraint_revision stamping), so
+        # nothing goes silent. A hint with NO applying constraint keeps the
+        # warning verbatim.
+        if kp.get("detail_level") and not constraint_pts:
+            warnings.append({"id": str(env.get("id", "")), "message":
+                "detail_level '%s' has no agent_router slot — it selects the "
+                "bridge path (only 'detailed' single-trace hints route as "
+                "drawn), not engine behaviour"
+                % kp.get("detail_level")})
         if constraint_pts:
             effective_waypoints = constraint_pts
             effective_layer = constraint_layer or layer

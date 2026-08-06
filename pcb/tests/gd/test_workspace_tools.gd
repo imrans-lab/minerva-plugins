@@ -169,6 +169,7 @@ func _init() -> void:
 	_run_station10_edit_candidate()
 	await _run_ux1_station11_next_step_guidance()
 	await _run_station12_legacy_seeding()
+	await _run_board_health_and_commit_gate()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -354,6 +355,28 @@ class RouterShim extends RefCounted:
 	## REAL host through this shim, same as every other duck-typed call above.
 	func update_annotation(id: String, new_annotation: Dictionary) -> bool:
 		return bool(real.update_annotation(id, new_annotation))
+
+	## DCR 019fd5fd9084 (work item 019fd5fe2724): the placement verbs call
+	## host.assembly_check after mutating. A canned `assembly_reply` SIMULATES
+	## the worker contract's {ok, result:{status, findings, ...}} envelope
+	## (the worker is Python — same substitution rationale as run_router);
+	## left {} it forwards to the REAL host, whose panel has no IPC headless,
+	## so the verbs degrade to the honest tri-state indeterminate — the real
+	## bridge chain, exercised end to end minus the wire.
+	var assembly_reply: Dictionary = {}
+	var assembly_calls: int = 0
+
+	func assembly_check(board: Dictionary) -> Dictionary:
+		assembly_calls += 1
+		if not assembly_reply.is_empty():
+			return assembly_reply
+		return await real.assembly_check(board)
+
+	## Forwarded for the placement-verb group (23e): _move_relative resolves
+	## the spatial index through host.get_spatial_index — same duck-typed
+	## forwarding as get_board_data above.
+	func get_spatial_index():
+		return real.get_spatial_index()
 
 
 ## Boot a real PCBPanel, wire the host->panel back-reference, and wrap the host
@@ -1844,7 +1867,7 @@ func _run_review_and_honesty_batch() -> void:
 	data.add_trace(stub)
 	var stub_id := str(stub.id)
 
-	var moved: Dictionary = PanelTools._move_component(shim,
+	var moved: Dictionary = await PanelTools._move_component(shim,
 		_args({"component_id": "U9", "x": 60.0, "y": 70.0}))
 	check("move succeeded", bool(moved.get("success", false)))
 	check("the move names its orphaned copper", moved.has("dangling_copper"))
@@ -1859,7 +1882,7 @@ func _run_review_and_honesty_batch() -> void:
 	# NEGATIVE GATE: after the move the stub no longer touches U9's pads, so a
 	# further rotate must NOT re-report it (was_on_pad is the filter) — and a
 	# component with no copper reports nothing at all.
-	var rotated: Dictionary = PanelTools._rotate_component(shim,
+	var rotated: Dictionary = await PanelTools._rotate_component(shim,
 		_args({"component_id": "U9", "degrees": 90}))
 	check("rotate succeeded", bool(rotated.get("success", false)))
 	check("rotate does NOT re-report copper that was already orphaned",
@@ -2084,20 +2107,24 @@ func _run_ux1_emitter_notes_split() -> void:
 	check("…the unrouted N2 pair is in stuck[]", has_unrouted)
 	check("…the per-hint routing warning is in stuck[]", has_per_hint_warning)
 
-	check("emitter_notes carries the capability warning", out.has("emitter_notes"))
-	var notes: Array = out.get("emitter_notes", [])
-	check_eq("…exactly the one feature_omitted note", notes.size(), 1)
-	if notes.size() == 1:
-		var n: Dictionary = notes[0]
-		check_eq("…verbatim, still wrapped the way stuck[] entries wrap a warning",
-			str((n.get("warning", {}) as Dictionary).get("code", "")), "feature_omitted")
+	# F6 (HITL-4, docs/llm-ergonomics.md): routing replies carry a COUNT
+	# SUMMARY, never the verbatim per-component list — that list is per-board
+	# static and was drowning every propose reply (~27 entries live).
+	check("emitter_notes_summary carries the capability count", out.has("emitter_notes_summary"))
+	check("…and the verbatim list is GONE from routing replies", not out.has("emitter_notes"))
+	var summary: Dictionary = out.get("emitter_notes_summary", {})
+	check_eq("…count is 1", int(summary.get("count", 0)), 1)
+	check_eq("…broken down by code", int((summary.get("codes", {}) as Dictionary).get("feature_omitted", 0)), 1)
+	check("…note points at the fab/export surfaces",
+		str(summary.get("note", "")).find("gerbers") != -1)
 
-	# NEGATIVE GATE: no capability-coded warnings ⇒ no emitter_notes key —
+	# NEGATIVE GATE: no capability-coded warnings ⇒ no summary key —
 	# additive, never ambient on every propose.
 	var plain: Dictionary = _multipad_reply([hint_id])
 	shim.reply = plain
 	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
-	check("no capability warnings ⇒ NO emitter_notes key", not out2.has("emitter_notes"))
+	check("no capability warnings ⇒ NO emitter_notes_summary key", not out2.has("emitter_notes_summary"))
+	check("…and no emitter_notes key either", not out2.has("emitter_notes"))
 
 	ctx["driver"].free_panel(ctx["panel"])
 
@@ -5223,5 +5250,356 @@ func _run_station12_recon_undo_of_conversion() -> void:
 	check("hint RE-STAMPED by the seeder",
 		(host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
 			.has("waypoints_superseded_by_constraint_revision"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 23. DCR 019fd5fd9084 — board_health ledger + commit acknowledgment gate ═══
+#
+# The worker-contract split (built in parallel; the RouterShim fixtures below
+# SIMULATE it): every ok routing result carries a top-level `board_health`
+# {complete:true|false|null, missing_copper:[net], partial:[...], assembly:
+# {status:"pass"|"findings"|"indeterminate", findings:[...]}, approximate:true}
+# — the old assembly_advisories key is GONE. The PANEL (a) passes board_health
+# through verbatim, enriched with board_revision + preflight.rendered_this_
+# revision (stamped by a successful get_image capture — simulated here via the
+# same panel.note_render_captured seam _get_image calls, since a headless
+# unmounted panel has no canvas to actually rasterize); (b) feeds an
+# assembly-state cache the COMMIT verbs consult: fresh findings intersecting
+# the committing candidate's endpoint components refuse
+# placement_blocker_unacknowledged unless acknowledge_placement:true; stale/
+# absent/indeterminate WARN (assembly_note) and never block; a batch refuses
+# whole on one blocked member (all-or-nothing). (c) The four placement verbs
+# (work item 019fd5fe2724) invalidate the cache and re-check via the
+# pcb.assembly_check channel, attaching the tri-state as `assembly`.
+
+func _run_board_health_and_commit_gate() -> void:
+	print("-- 23. DCR 019fd5fd9084: board_health + commit acknowledgment gate --")
+	await _run_bh_pass_through_and_enrichment()
+	await _run_bh_commit_gate_matrix()
+	await _run_bh_endpoint_fallback_and_tri_state()
+	await _run_bh_batch_gate()
+	await _run_bh_placement_verb_tri_state()
+
+
+## The worker-contract board_health fixture (benign completeness by default so
+## the enrichment tests can flip individual axes explicitly).
+func _board_health_fixture() -> Dictionary:
+	return {
+		"complete": false,
+		"missing_copper": ["VCC_5V"],
+		"partial": [],
+		"assembly": {"status": "pass", "findings": []},
+		"approximate": true,
+	}
+
+
+func _run_bh_pass_through_and_enrichment() -> void:
+	print("  -- 23a. board_health pass-through + panel enrichment + preflight flip --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var panel = ctx["panel"]
+	var data = ctx["data"]
+	var revision: int = int(data.board_revision)
+
+	var reply: Dictionary = _multipad_reply([str(ctx["hint_id"])])
+	reply["board_health"] = _board_health_fixture()
+	shim.reply = reply
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(out.get("success", false)))
+	check("reply carries board_health", out.has("board_health"))
+	var bh: Dictionary = out.get("board_health", {})
+	check_eq("worker completeness verdict passes through VERBATIM",
+		bh.get("complete", null), false)
+	check("missing_copper passes through verbatim",
+		"VCC_5V" in (bh.get("missing_copper", []) as Array))
+	check_eq("panel enrichment: board_revision is the LIVE board's",
+		int(bh.get("board_revision", -1)), revision)
+	var preflight: Dictionary = bh.get("preflight", {})
+	check_eq("preflight: nothing rendered yet this session -> false",
+		preflight.get("rendered_this_revision", null), false)
+
+	# The pass-through FEEDS the assembly cache at the stamped revision.
+	var cached: Dictionary = panel.get_assembly_state()
+	check("board_health.assembly fed the panel cache", not cached.is_empty())
+	check_eq("…with the assembly status",
+		str((cached.get("assembly", {}) as Dictionary).get("status", "")), "pass")
+	check_eq("…at the stamped revision", int(cached.get("board_revision", -2)), revision)
+
+	# PREFLIGHT FLIP: simulate a successful get_image capture via the SAME seam
+	# _get_image stamps through (note_render_captured — an unmounted panel has
+	# no canvas, so the capture itself cannot run headless), then re-propose.
+	panel.note_render_captured(int(data.board_revision))
+	out = await PanelTools._workspace_propose(shim, _args())
+	var bh2: Dictionary = out.get("board_health", {})
+	check_eq("preflight flips true once THIS revision was rendered",
+		(bh2.get("preflight", {}) as Dictionary).get("rendered_this_revision", null), true)
+
+	# OLDER WORKER: a result with NO board_health attaches nothing (absent-key
+	# contract) and leaves the cache alone.
+	shim.reply = _multipad_reply([str(ctx["hint_id"])])
+	out = await PanelTools._workspace_propose(shim, _args())
+	check("absent board_health stays absent on the reply (older worker)",
+		not out.has("board_health"))
+	check("…and the previously fed cache is untouched",
+		not panel.get_assembly_state().is_empty())
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+func _run_bh_commit_gate_matrix() -> void:
+	print("  -- 23b. commit gate matrix: findings gate, ack records, stale/indeterminate warn --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var panel = ctx["panel"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var cid := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	check("fixture candidate landed", not cid.is_empty())
+	# Endpoint components via the PRIMARY source: the candidate's own endpoints
+	# (RouteTask.endpoints open-dict shape, {"component","pin"}).
+	var cand = ws.get_candidate(cid)
+	cand.endpoints = [{"component": "U1", "pin": "3"}, {"component": "U2", "pin": "7"}]
+
+	var finding := {"kind": "courtyard_overlap", "components": ["U1", "D1"],
+		"message": "U1 and D1 courtyards overlap — parts cannot be assembled"}
+
+	# ── FRESH findings INTERSECTING the endpoints, no acknowledgment: REFUSE ──
+	panel.set_assembly_state({"status": "findings", "findings": [finding]},
+		int(data.board_revision))
+	var res: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid}))
+	check("gated commit refused", not bool(res.get("success", true)))
+	check_eq("…by name", str(res.get("error", "")), "placement_blocker_unacknowledged")
+	check_eq("…listing the blocking finding", (res.get("blocking_findings", []) as Array).size(), 1)
+	check("…which names the colliding components",
+		"U1" in (((res.get("blocking_findings", []) as Array)[0] as Dictionary).get("components", []) as Array))
+	check_eq("refusal left the candidate un-committed (no copper laid)",
+		str(ws.get_candidate(cid).disposition), "proposed")
+
+	# ── FRESH findings NOT intersecting: silent commit-eligible (proved next
+	# via a fresh non-blocking state), covered here by flipping the components.
+	panel.set_assembly_state({"status": "findings",
+		"findings": [{"kind": "courtyard_overlap", "components": ["D1", "BAT1"]}]},
+		int(data.board_revision))
+	# (do not commit yet — the intersecting-findings ack case below consumes cid)
+
+	# ── acknowledge_placement carries the commit THROUGH the blocker ──────────
+	panel.set_assembly_state({"status": "findings", "findings": [finding]},
+		int(data.board_revision))
+	res = PanelTools._workspace_commit(shim,
+		_args({"candidate_id": cid, "acknowledge_placement": true}))
+	check("acknowledged commit succeeded", bool(res.get("success", false)))
+	check_eq("…and RECORDS the acknowledged findings",
+		(res.get("acknowledged_placement_findings", []) as Array).size(), 1)
+	check("…no advisory note on a fresh findings state", not res.has("assembly_note"))
+	check_eq("copper landed", str(ws.get_candidate(cid).disposition), "committed")
+
+	# ── STALE cache (revision mismatch): WARN, never block ────────────────────
+	# The commit above bumped board_revision, so land a SECOND candidate and
+	# feed the cache at a deliberately old revision.
+	var hint2: String = _seed_net_named_hint(ctx["host"], "N1")
+	shim.reply = _multipad_reply([hint2])
+	out = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint2]}))
+	var cid2 := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var cand2 = ws.get_candidate(cid2)
+	cand2.endpoints = [{"component": "U1", "pin": "3"}]
+	panel.set_assembly_state({"status": "findings", "findings": [finding]},
+		int(data.board_revision) - 1)
+	res = PanelTools._workspace_commit(shim, _args({"candidate_id": cid2}))
+	check("stale findings do NOT block the commit", bool(res.get("success", false)))
+	var note: Dictionary = res.get("assembly_note", {})
+	check_eq("…but the reply WARNS with an indeterminate assembly_note",
+		str(note.get("status", "")), "indeterminate")
+	check("…whose reason names the staleness",
+		str(note.get("reason", "")).findn("stale") != -1)
+
+	# ── INDETERMINATE state: WARN, never block ────────────────────────────────
+	var hint3: String = _seed_net_named_hint(ctx["host"], "N1")
+	shim.reply = _multipad_reply([hint3])
+	out = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint3]}))
+	var cid3 := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	panel.set_assembly_state({"status": "indeterminate", "error": "worker faulted: kaboom"},
+		int(data.board_revision))
+	res = PanelTools._workspace_commit(shim, _args({"candidate_id": cid3}))
+	check("indeterminate assembly state does NOT block", bool(res.get("success", false)))
+	note = res.get("assembly_note", {})
+	check_eq("…and warns indeterminate", str(note.get("status", "")), "indeterminate")
+	check("…carrying the worker's own error", str(note.get("reason", "")).findn("kaboom") != -1)
+
+	# ── ABSENT cache: WARN, never block ───────────────────────────────────────
+	var hint4: String = _seed_net_named_hint(ctx["host"], "N1")
+	shim.reply = _multipad_reply([hint4])
+	out = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint4]}))
+	var cid4 := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	panel.invalidate_assembly_state()
+	res = PanelTools._workspace_commit(shim, _args({"candidate_id": cid4}))
+	check("absent cache does NOT block", bool(res.get("success", false)))
+	check_eq("…and warns indeterminate",
+		str((res.get("assembly_note", {}) as Dictionary).get("status", "")), "indeterminate")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+func _run_bh_endpoint_fallback_and_tri_state() -> void:
+	print("  -- 23c. endpoint-component fallback (pin-ref parse) + tri-state normalizer --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var host = ctx["host"]
+	var hint_id := str(ctx["hint_id"])
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var cid := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var cand = ws.get_candidate(cid)
+
+	# The default fixture hint carries no pin refs, so BOTH structured sources
+	# are empty — prove the gate falls back to parsing the source hints' own
+	# kind_payload.source_pins/dest_pins ("U7.3" -> "U7") through host.get_by_id.
+	cand.endpoints = []
+	var task = ws.get_task(str(cand.task_id))
+	if task != null:
+		task.endpoints = []
+	var ann: Dictionary = (host.get_by_id(hint_id) as Dictionary).duplicate(true)
+	var kp: Dictionary = ann.get("kind_payload", {})
+	kp["source_pins"] = ["U7.3"]
+	kp["dest_pins"] = ["U8.1"]
+	ann["kind_payload"] = kp
+	check("fixture hint updated with pin refs", bool(host.update_annotation(hint_id, ann)))
+	var comps: Array = PanelTools._candidate_endpoint_components(shim, ws, cand)
+	check("fallback parsed the source-pin component", "U7" in comps)
+	check("…and the dest-pin component", "U8" in comps)
+	check_eq("…exactly the two components", comps.size(), 2)
+
+	# ── _assembly_tri_state: the normalizer every seam shares ─────────────────
+	var tri: Dictionary = PanelTools._assembly_tri_state(
+		{"ok": true, "result": {"status": "findings", "findings": [{"components": ["A", "B"]}]}})
+	check_eq("ok envelope with a recognised status passes verbatim",
+		str(tri.get("status", "")), "findings")
+	check_eq("…findings intact", (tri.get("findings", []) as Array).size(), 1)
+	tri = PanelTools._assembly_tri_state(
+		{"ok": false, "error": {"kind": "worker_unavailable", "message": "no backend"}})
+	check_eq("a failed channel degrades to indeterminate", str(tri.get("status", "")), "indeterminate")
+	check("…carrying the error message", str(tri.get("error", "")).findn("no backend") != -1)
+	tri = PanelTools._assembly_tri_state({"ok": true, "result": {"status": "sideways"}})
+	check_eq("an unrecognised status fails CLOSED to indeterminate (never a pass)",
+		str(tri.get("status", "")), "indeterminate")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+func _run_bh_batch_gate() -> void:
+	print("  -- 23d. batch: ONE unacknowledged blocked member refuses the WHOLE batch --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var panel = ctx["panel"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+	var host = ctx["host"]
+
+	# Two candidates on two nets (two net-named hints, one shim route each).
+	var h_a: String = _seed_net_named_hint(host, "NA")
+	var h_b: String = _seed_net_named_hint(host, "NB")
+	shim.reply = {"routes": [
+		{"net": "NA", "segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [], "hint_ids": [h_a]},
+		{"net": "NB", "segments": [{"start": [0.0, 10.0], "end": [5.0, 10.0], "layer": "F.Cu"}],
+			"vias": [], "hint_ids": [h_b]},
+	], "via_count": 0}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [h_a, h_b]}))
+	check_eq("two candidates landed", int(out.get("proposed", 0)), 2)
+	var recs: Array = out.get("candidates", [])
+	var cid_a := str((recs[0] as Dictionary).get("candidate_id", ""))
+	var cid_b := str((recs[1] as Dictionary).get("candidate_id", ""))
+	ws.get_candidate(cid_a).endpoints = [{"component": "U1", "pin": "1"}]
+	ws.get_candidate(cid_b).endpoints = [{"component": "U5", "pin": "1"}]
+
+	# Findings touch ONLY candidate A's endpoint component.
+	panel.set_assembly_state({"status": "findings",
+		"findings": [{"kind": "courtyard_overlap", "components": ["U1", "D1"]}]},
+		int(data.board_revision))
+
+	var res: Dictionary = PanelTools._workspace_commit(shim,
+		_args({"candidate_ids": [cid_a, cid_b]}))
+	check("batch with one blocked member refused WHOLE", not bool(res.get("success", true)))
+	check_eq("…by name", str(res.get("error", "")), "placement_blocker_unacknowledged")
+	var blocked: Array = res.get("blocked_members", [])
+	check_eq("…naming exactly the one blocked member", blocked.size(), 1)
+	if blocked.size() == 1:
+		check_eq("…which is candidate A", str((blocked[0] as Dictionary).get("candidate_id", "")), cid_a)
+	check_eq("all-or-nothing: the UNBLOCKED member laid no copper either",
+		str(ws.get_candidate(cid_b).disposition), "proposed")
+	check_eq("…and neither did the blocked one",
+		str(ws.get_candidate(cid_a).disposition), "proposed")
+
+	# Acknowledged: the whole batch proceeds and the reply records per-member.
+	res = PanelTools._workspace_commit(shim,
+		_args({"candidate_ids": [cid_a, cid_b], "acknowledge_placement": true}))
+	check("acknowledged batch succeeded", bool(res.get("success", false)))
+	check_eq("…committing both members", int(res.get("committed_count", 0)), 2)
+	var acked: Array = res.get("acknowledged_placement_findings", [])
+	check_eq("…recording the one blocked member's findings", acked.size(), 1)
+	if acked.size() == 1:
+		check_eq("…attributed to candidate A",
+			str((acked[0] as Dictionary).get("candidate_id", "")), cid_a)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+func _run_bh_placement_verb_tri_state() -> void:
+	print("  -- 23e. placement verbs: cache invalidate + assembly_check re-run + attach --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var panel = ctx["panel"]
+	var data = ctx["data"]
+
+	# Canned channel reply SIMULATING the worker contract's assembly_check.
+	shim.assembly_reply = {"ok": true, "result": {"status": "findings",
+		"findings": [{"kind": "courtyard_overlap", "components": ["U9", "D1"]}]}}
+	var added: Dictionary = await PanelTools._add_component(shim,
+		_args({"id": "U9", "footprint": "RESISTOR", "x": 10.0, "y": 10.0}))
+	check("add succeeded", bool(added.get("success", false)))
+	check_eq("verb reply carries the tri-state assembly verdict",
+		str((added.get("assembly", {}) as Dictionary).get("status", "")), "findings")
+	check_eq("the channel was called exactly once", int(shim.assembly_calls), 1)
+	var cached: Dictionary = panel.get_assembly_state()
+	check_eq("cache refreshed with the verdict",
+		str((cached.get("assembly", {}) as Dictionary).get("status", "")), "findings")
+	check_eq("…at the post-mutation revision",
+		int(cached.get("board_revision", -1)), int(data.board_revision))
+
+	# Channel down next op ({} forwards to the REAL host -> headless panel ->
+	# worker_unavailable): the verb attaches indeterminate and the cache follows
+	# — proving invalidate-then-refresh, not stale-verdict survival.
+	shim.assembly_reply = {}
+	var moved: Dictionary = await PanelTools._move_component(shim,
+		_args({"component_id": "U9", "x": 20.0, "y": 20.0}))
+	check("move succeeded", bool(moved.get("success", false)))
+	check_eq("channel-down move attaches indeterminate (never silent)",
+		str((moved.get("assembly", {}) as Dictionary).get("status", "")), "indeterminate")
+	check_eq("…and the cache followed (old findings verdict did NOT survive)",
+		str((panel.get_assembly_state().get("assembly", {}) as Dictionary).get("status", "")),
+		"indeterminate")
+
+	# rotate + move_relative wear the same stamp.
+	shim.assembly_reply = {"ok": true, "result": {"status": "pass", "findings": []}}
+	var rotated: Dictionary = await PanelTools._rotate_component(shim,
+		_args({"component_id": "U9", "degrees": 90}))
+	check_eq("rotate attaches the tri-state too",
+		str((rotated.get("assembly", {}) as Dictionary).get("status", "")), "pass")
+	var mr: Dictionary = await PanelTools._move_relative(shim,
+		_args({"component_id": "U9", "direction": "right"}))
+	check_eq("move_relative attaches the tri-state too",
+		str((mr.get("assembly", {}) as Dictionary).get("status", "")), "pass")
+
+	# A REFUSAL mutates nothing and re-checks nothing: the cache stays put.
+	var calls_before: int = int(shim.assembly_calls)
+	var bad: Dictionary = await PanelTools._add_component(shim,
+		_args({"footprint": "BOGUS", "x": 1.0, "y": 1.0}))
+	check("refusal reply carries no assembly key",
+		not bool(bad.get("success", true)) and not bad.has("assembly"))
+	check_eq("…and did not re-run the channel", int(shim.assembly_calls), calls_before)
 
 	ctx["driver"].free_panel(ctx["panel"])

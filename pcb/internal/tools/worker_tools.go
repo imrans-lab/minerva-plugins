@@ -310,6 +310,40 @@ func HandleDraftCheckChannel(ctx context.Context, w *bridge.Worker, params json.
 	return w.Call(ctx, "draft_check", params)
 }
 
+// ---- pcb.assembly_check (worker-backed broker CHANNEL) ---------------------
+//
+// DCR 019fd5fd9084 (work items 019fd5fe1241 load-time advisories +
+// 019fd5fe2724 placement-op surfacing): the on-demand assembly/courtyard
+// advisory seam behind ui/PCBPanel.gd's assembly_check(). Like pcb.route and
+// pcb.draft_check it is a dotted panel-IPC channel (NOT an LLM-facing pcb_*
+// tool) that forwards verbatim to the Python worker — here the new
+// "assembly_check" method, which runs the approximate (bbox-level) courtyard/
+// body-overlap pass over a canonical board dict. Every declared ipc_channels
+// entry needs a same-named backend tool (main.go registry, gap A-7), and the
+// computation is Python, so this forwards rather than computing.
+
+var AssemblyCheckChannel = ToolSpec{
+	Name: "pcb.assembly_check",
+	Description: "Panel IPC channel backing ui/PCBPanel.gd's on-demand assembly " +
+		"advisory check (DCR 019fd5fd9084). Forwards verbatim to the Python " +
+		"worker's 'assembly_check' method, which runs the approximate " +
+		"courtyard/body-overlap pass over a canonical board dict — the same " +
+		"object pcb.route replies embed as board_health.assembly, computable " +
+		"here WITHOUT a routing run (load-time and placement-op surfacing). " +
+		"Args: {board:<canonical Board dict with a 'components' list — see " +
+		"docs/board-yaml.md>}. Returns {ok, result:{status:'pass'|'findings'|" +
+		"'indeterminate', findings:[...], indeterminate?:[...], error?:str}} — " +
+		"tri-state and ADVISORY-GRADE: 'indeterminate' means the check could " +
+		"not run (never silently a pass), and no result from this channel ever " +
+		"hard-blocks an operation on its own; the GD side owns the commit-time " +
+		"acknowledgment gate.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleAssemblyCheckChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "assembly_check", params)
+}
+
 // ---- minerva_pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

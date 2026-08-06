@@ -24,8 +24,9 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import (assembly_outputs, board_model, compile_board, drc, footprints,
-               gerber, ir_candidates, ir_connectivity, kicad, libcheck, resolve)
+from . import (assembly_advisory, assembly_outputs, board_model, compile_board,
+               drc, footprints, gerber, ir_candidates, ir_connectivity, kicad,
+               libcheck, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -429,7 +430,51 @@ def _resolve_best_effort(params: dict) -> dict:
         return resolved
 
     stats = resolve.board_graphic_stats(resolved)
-    return {"ok": True, "result": {"ok": True, "board": resolved, "stats": stats}}
+    result: dict = {"ok": True, "board": resolved, "stats": stats}
+    # ASSEMBLY (HITL-4 F3, tri-state since work item 019fd5fddc09): load time
+    # is where the owner most wants "these parts collide" — the D1/BAT1 body
+    # overlap PRE-EXISTED its routing session and nothing named it. Computed
+    # over the RESOLVED board directly (footprint courtyards were just
+    # attached above, so the honest "courtyard" basis is available for every
+    # library part — no second resolve; unresolved components fall back to
+    # pad extents). ALWAYS attached, replacing the old absent-when-empty
+    # `assembly_advisories` list: {status: "pass"} is a measured all-clear a
+    # missing key never was. Never allowed to sink a board load (same
+    # boundary as _assembly_tri_state).
+    try:
+        assembly = assembly_advisory.assembly_check(resolved)
+    except Exception as exc:  # noqa: BLE001 - an advisory must never sink the load
+        assembly = {"status": "indeterminate", "findings": [],
+                    "error": str(exc)}
+    result["assembly"] = assembly
+    return {"ok": True, "result": result}
+
+
+def _assembly_check(params: dict) -> dict:
+    """Standalone tri-state assembly check (DCR 019fd5fd9084, work item
+    019fd5fddc09) — the method surface for `board_health.assembly` computed
+    on demand, so the panel can ask "can these parts be assembled?" without
+    proposing copper.
+
+    params: {board: <canonical board dict>} (or yaml source — anything
+    `_load` accepts, mirroring the sibling methods). Reply::
+
+        {ok: True, result: {status: "pass"|"findings"|"indeterminate",
+                            findings: [<advisory dict>, ...],
+                            indeterminate: [{component, reason}],  # absent
+                                                                   # when empty
+                            error?: str}}
+
+    Same computation as every other assembly surface (_assembly_tri_state:
+    tolerant resolve first for courtyard bases, fault -> status
+    "indeterminate" + error — NEVER a silent pass, NEVER an unstructured
+    exception). Only an unparseable board param is a structured {ok: False}
+    parse error, the same envelope every sibling method uses."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    return {"ok": True, "result": _assembly_tri_state(board)}
 
 
 def _normalize(params: dict) -> dict:
@@ -696,7 +741,13 @@ def _assembly_cpl(params: dict) -> dict:
 # OUTPUT: the engine's RoutingResult, serialised to plain JSON
 #   {success, via_count, routes:[{net, segments:[{start,end,layer}], vias:[[x,y]]}],
 #    unrouted:[{net, from, to, reason?}], warnings?:[{id, message}],
-#    selected_hint_ids?:[…]}
+#    selected_hint_ids?:[…],
+#    span_outcomes?:[{net, status, pads, connected_via?, hint_ids?}]}
+#
+#   `span_outcomes` (HITL-4, docs/llm-ergonomics.md F1): the per-span outcome
+#   channel for asks that produce neither a route nor an `unrouted` pair —
+#   see _serialize_routing_result and RoutingResult.span_outcomes. Absent-key
+#   when empty.
 #
 #   `reason` (docket 019f9d59a49b) is the engine's classification of WHY that
 #   pair refused to route (see agent_router.pathfinder.unroutable_reason for the
@@ -735,12 +786,29 @@ def _serialize_routing_result(result) -> dict:
     # `unrouted_reasons` (an older engine path, or any future one that appends
     # to one list and not the other) falls back to the absent-key rule for
     # EVERY entry rather than pairing by luck.
+    # HITL-4 (docs/llm-ergonomics.md F1): PER-SPAN OUTCOMES ride the reply.
+    # ACCOUNTING IDENTITY — every span/net the engine was asked about lands in
+    # exactly ONE of `routes`, `unrouted`, or `span_outcomes`; a reply with
+    # routes_returned 0, empty unrouted AND no span_outcomes entry for the ask
+    # is no longer producible (the live GND BAT1.2→U1.22 already-connected
+    # span used to come back byte-identical to a dropped request). ABSENT-KEY
+    # contract like `reason`/`hint_ids`: a run with nothing to report carries
+    # no `span_outcomes` key at all, so every pre-F1 consumer sees the exact
+    # bytes it always saw. Entries are the engine's own JSON-shaped dicts
+    # ({span-level `net`, `status` ("already_connected" /
+    # "terminals_unmatched" / "bridge_absorbed"), `pads`, best-effort
+    # `connected_via` trace/via ids}) — see RoutingResult.span_outcomes for
+    # the status vocabulary. `getattr` tolerance for the same reason the
+    # corridor_adherence read below uses it: an older engine object without
+    # the field must degrade to the absent key, not fault the reply.
+    span_outcomes = [dict(o) for o in getattr(result, "span_outcomes", None) or []
+                     if isinstance(o, dict)]
     reasons = result.unrouted_reasons
     reasons_aligned = len(reasons) == len(result.unrouted)
     unrouted = []
     for i, (net, p1, p2) in enumerate(result.unrouted):
-        entry = {"net": net, "from": f"{p1.component}.{p1.number}",
-                 "to": f"{p2.component}.{p2.number}"}
+        entry: dict = {"net": net, "from": f"{p1.component}.{p1.number}",
+                       "to": f"{p2.component}.{p2.number}"}
         # `"reason" in reasons[i]` rather than `reasons[i]["reason"]`: a reason
         # dict without that key is unreachable today (`_unrouted_reason_entry`
         # always sets it, `unroutable_reason` returns one of five non-empty
@@ -789,6 +857,8 @@ def _serialize_routing_result(result) -> dict:
             for r in result.routes
         ],
         "unrouted": unrouted,
+        # Absent-key when empty — see the span_outcomes note at the top.
+        **({"span_outcomes": span_outcomes} if span_outcomes else {}),
     }
 
 
@@ -897,15 +967,19 @@ def _finding_involves_net(finding: dict, net: Any) -> bool:
     return False
 
 
-def _drc_for_routes(board_dict: dict, routes: list) -> dict:
-    """Run drc.run_drc over (board_dict's existing traces/vias + every
-    proposed route materialized as traces/vias). Shallow-copies board_dict
+def _post_route_board(board_dict: dict, routes: list) -> dict:
+    """The POST-proposal board: board_dict's existing traces/vias + every
+    proposed route materialized as traces/vias. Shallow-copies board_dict
     and replaces only "traces"/"vias" with new lists — the input's own lists
     are never mutated, and no other board field (components/nets/design_rules/
     revision bookkeeping — board_dict is the canonical board, which never
     carries per-hint revision_stack in the first place; that's stripped from
     the route_hints ANNOTATION envelopes upstream by PcbAnnotationHost.
-    strip_hint_history, not from this board) is touched."""
+    strip_hint_history, not from this board) is touched.
+
+    Extracted from _drc_for_routes (HITL-4, docs/llm-ergonomics.md F2) so the
+    connectivity COMPLETENESS pass reads the identical post-proposal board the
+    violation kernel reads — one composition, two questions."""
     post_board = dict(board_dict)
     existing_traces = post_board.get("traces")
     post_board["traces"] = (list(existing_traces) if isinstance(existing_traces, list) else []) \
@@ -913,7 +987,12 @@ def _drc_for_routes(board_dict: dict, routes: list) -> dict:
     existing_vias = post_board.get("vias")
     post_board["vias"] = (list(existing_vias) if isinstance(existing_vias, list) else []) \
         + _routes_to_vias(routes)
-    return drc.run_drc(post_board)
+    return post_board
+
+
+def _drc_for_routes(board_dict: dict, routes: list) -> dict:
+    """Run drc.run_drc over the post-proposal board (see _post_route_board)."""
+    return drc.run_drc(_post_route_board(board_dict, routes))
 
 
 def _run_drc_findings(runner) -> tuple[list | None, str | None]:
@@ -927,7 +1006,8 @@ def _run_drc_findings(runner) -> tuple[list | None, str | None]:
         return None, str(exc)
 
 
-def _attach_route_drc(payload: dict, board_dict: dict) -> None:
+def _attach_route_drc(payload: dict, board_dict: dict,
+                      scope_nets: set | None = None) -> None:
     """Mutate payload in place with the CONNECTIVITY DRC-at-propose payloads,
     each partitioned into what the PROPOSAL introduces and what the BOARD already
     had (docket 019f9cc386b6).
@@ -939,8 +1019,31 @@ def _attach_route_drc(payload: dict, board_dict: dict) -> None:
     run has no count):
         "drc_summary": {"scope": "connectivity", "clean": bool,
                         "violation_count": int,
+                        "complete": bool|None, "missing_copper": [net, ...],
+                        "partial": [{"net", "pin_groups"}]  (absent when empty),
+                        "indeterminate": [{"net", "reason"}] (absent when empty),
+                        "approximate": True,
                         "baseline": {"clean": bool, "violation_count": int,
                                      "findings": [...]}}
+
+    COMPLETENESS (HITL-4, docs/llm-ergonomics.md F2): `clean` keeps meaning
+    exactly what it meant — "this proposal introduces no short/mismatch" — so
+    no existing consumer flips. What it could never say is "and the copper is
+    all there": on the live round the summary read clean while net VCC_5V had
+    ZERO copper on the board, because missing copper is not a violation the
+    kernel can find. The census keys are computed by
+    drc.connectivity_completeness over the SAME post-proposal board the
+    violation runs read, narrowed to ``scope_nets`` (the run's `only_nets` —
+    the nets this request actually asked about; None = whole-board run, every
+    net); see _completeness_keys for the tri-state `complete` semantics,
+    `indeterminate` (e.g. zone-bearing nets, reason "zone_copper") and the
+    standing `approximate` label (DCR 019fd5fd9084 census corrections).
+    Attached in the INDETERMINATE branch too: completeness is a separate
+    census, and a kernel fault on the violation side does not un-answer it.
+
+    These scoped keys are the PROPOSAL ledger. The BOARD ledger — the same
+    census, whole-board scope, plus the assembly tri-state — is the top-level
+    `board_health` every ok route reply carries (see _board_health).
 
     `clean` / `violations` / `violation_count` are PROPOSAL-SCOPED: they answer
     "does accepting this introduce a connectivity violation?", exactly as
@@ -1010,6 +1113,8 @@ def _attach_route_drc(payload: dict, board_dict: dict) -> None:
         # the indeterminate `baseline` above refuses to emit, one level up.
         payload["drc_summary"] = {"scope": "connectivity", "clean": None,
                                   "error": error, "baseline": base_summary}
+        _attach_completeness(payload["drc_summary"], board_dict, routes,
+                             scope_nets)
         return
 
     introduced, baseline = ir_connectivity.partition_findings(
@@ -1028,6 +1133,60 @@ def _attach_route_drc(payload: dict, board_dict: dict) -> None:
                               "baseline": {"clean": not baseline,
                                            "violation_count": len(baseline),
                                            "findings": baseline}}
+    _attach_completeness(payload["drc_summary"], board_dict, routes, scope_nets)
+
+
+def _completeness_keys(board_dict: dict, routes: list,
+                       scope_nets: set | None) -> dict:
+    """The connectivity COMPLETENESS census as reply-surface keys.
+
+    ONE kernel behind BOTH ledgers (DCR 019fd5fd9084): the scoped
+    `drc_summary` keys (the PROPOSAL ledger — scope_nets = the run's
+    only_nets) and `board_health` (the BOARD ledger — scope_nets=None) both
+    come from here, so the two can never disagree about what a census key
+    means. Runs over the POST-proposal board (committed copper + this reply's
+    routes, `_post_route_board`).
+
+    Keys (reply-surface conventions applied — `partial`/`indeterminate`
+    absent when empty)::
+
+        {"complete": True|False|None,       # tri-state, drc.py module note
+         "missing_copper": [net, ...],
+         "partial": [{"net", "pin_groups"}],       # absent when empty
+         "indeterminate": [{"net", "reason"}],     # absent when empty
+         "approximate": True}                       # standing honesty label
+
+    A census FAULT degrades to `{"complete": None, "completeness_error": str,
+    "approximate": True}` (the three-way-clean convention drc_summary already
+    uses) — deliberately NO `missing_copper` key then, since an empty list a
+    consumer could read as "nothing missing" would be the exact lie-by-
+    omission class this census exists to remove. Never raises: a diagnostic
+    must not sink the reply it rides."""
+    try:
+        completeness = drc.connectivity_completeness(
+            _post_route_board(board_dict, routes), scope_nets)
+    except Exception as exc:  # noqa: BLE001 - a fault is a report, not a failure
+        return {"complete": None, "completeness_error": str(exc),
+                "approximate": True}
+    keys: dict = {"complete": completeness["complete"],
+                  "missing_copper": completeness["missing_copper"],
+                  "approximate": True}
+    if completeness["partial"]:
+        keys["partial"] = completeness["partial"]
+    if completeness["indeterminate"]:
+        keys["indeterminate"] = completeness["indeterminate"]
+    return keys
+
+
+def _attach_completeness(summary: dict, board_dict: dict, routes: list,
+                         scope_nets: set | None) -> None:
+    """Fold the connectivity COMPLETENESS census into a drc_summary in place.
+
+    HITL-4 (docs/llm-ergonomics.md F2) — see _attach_route_drc's docstring for
+    the contract, and _completeness_keys for the key shapes + fault
+    degradation (`complete: None` + `completeness_error`, never an absent
+    `complete` a consumer could read as the pre-F2 shape, never a raise)."""
+    summary.update(_completeness_keys(board_dict, routes, scope_nets))
 
 
 def _baseline_for_net(base_summary: dict, net: Any) -> dict:
@@ -1043,6 +1202,65 @@ def _baseline_for_net(base_summary: dict, net: Any) -> dict:
     violations = [f for f in base_summary["findings"]
                   if _finding_involves_net(f, net)]
     return {"clean": len(violations) == 0, "violations": violations}
+
+
+def _assembly_tri_state(board_dict: dict) -> dict:
+    """The tri-state assembly check over the tolerantly-RESOLVED board.
+
+    DCR 019fd5fd9084 / work item 019fd5fddc09 — the one computation behind
+    every surface that carries an assembly verdict (the `assembly_check`
+    method, route `board_health.assembly`, and resolve_best_effort's
+    `assembly`), so no two surfaces can disagree about the same board.
+
+    RESOLVE-FIRST, tolerantly, for the same reason the pre-tri-state route
+    attach did (HITL-4 retry finding): the RAW canonical board carries no
+    courtyard captures — resolve.py attaches those from the footprint
+    libraries — so checking the raw dict silently degrades every library part
+    to the pad_extent basis, which provably cannot see the D1/BAT1 class of
+    collision (the JST body reaches ~4.5mm past its pads). Any resolution
+    failure falls back to the raw board (pad_extent floor) rather than
+    checking nothing.
+
+    assembly_check owns its own fault->indeterminate boundary; the outer
+    except here makes "never an unstructured exception, never a silent pass"
+    a guarantee of THIS seam rather than a reading of that module's source
+    (same belt-and-braces the old advisory attach used)."""
+    try:
+        adv_board = board_dict
+        resolved_adv = _resolve_mapped(board_dict, tolerant=True)
+        if isinstance(resolved_adv, dict) and not _is_error_reply(resolved_adv):
+            adv_board = resolved_adv
+        return assembly_advisory.assembly_check(adv_board)
+    except Exception as exc:  # noqa: BLE001 - a fault is a report, not a failure
+        return {"status": "indeterminate", "findings": [], "error": str(exc)}
+
+
+def _board_health(census_board: dict, routes: list,
+                  assembly_board: dict) -> dict:
+    """The WHOLE-BOARD health ledger every ok route reply carries
+    (DCR 019fd5fd9084).
+
+    The scoped keys in `drc_summary` are the PROPOSAL ledger — they answer
+    "did this run finish what it was asked?" over `only_nets`. This is the
+    BOARD ledger: the same census kernel, whole-board scope
+    (scope_nets=None), over the same post-proposal board — so a scoped route
+    on net A still names net B's missing copper HERE while drc_summary stays
+    honestly scoped. Shape::
+
+        {"complete": True|False|None,          # tri-state (drc.py note)
+         "missing_copper": [net, ...],          # whole-board census
+         "partial": [{"net", "pin_groups"}],    # absent when empty
+         "indeterminate": [{"net", "reason"}],  # absent when empty
+         "assembly": {status, findings, indeterminate?, error?},
+         "approximate": True}
+
+    `census_board` is the connectivity projection the run's DRC read (one
+    board, both ledgers); `assembly_board` is the RAW canonical board —
+    assembly is placement-only, needs the captured graphics the projection
+    drops, and _assembly_tri_state re-resolves it tolerantly for courtyards."""
+    health = _completeness_keys(census_board, routes, None)
+    health["assembly"] = _assembly_tri_state(assembly_board)
+    return health
 
 
 # ---------------------------------------------------------------------------
@@ -1952,6 +2170,14 @@ def _route(params: dict) -> dict:
             if isinstance(route, dict):
                 route["hint_ids"] = list(
                     hint_ids_by_net.get(str(route.get("net", "")), []))
+        # HITL-4 (docs/llm-ergonomics.md F1): span OUTCOMES are attributed by
+        # the same net->hints map as routes, under the same hinted-run-only
+        # gate — an already-connected span the caller's hint asked about must
+        # be filed back against that hint exactly as a routed one would be.
+        for outcome in payload.get("span_outcomes") or []:
+            if isinstance(outcome, dict):
+                outcome["hint_ids"] = list(
+                    hint_ids_by_net.get(str(outcome.get("net", "")), []))
     # Non-fatal COMPILE diagnostics travel with the proposal too (Codex ruling 2):
     # a route computed over a board that compiled with warnings must not look
     # indistinguishable from one that compiled clean.
@@ -1991,7 +2217,9 @@ def _route(params: dict) -> dict:
     # canonical path (the native pad-list shape is rejected at the top of
     # _route, everything else by load_board), so drc_board is always set below.
     if drc_board is not None:
-        _attach_route_drc(payload, drc_board)
+        # `only_nets` (None = whole-board) scopes the F2 completeness census to
+        # the nets this request asked about — see _attach_route_drc.
+        _attach_route_drc(payload, drc_board, scope_nets=only_nets)
     # GEOMETRIC DRC-at-propose (019f952b99f2) — the copper complement, attached
     # ALONGSIDE the connectivity result above (never instead of it). The overlay
     # is checked at the width the run ACTUALLY routed at: since E2 that is
@@ -2004,6 +2232,21 @@ def _route(params: dict) -> dict:
         _attach_route_geometric_drc(
             payload, geometric_board,
             trace_width_mm=ir_candidates.positive_mm(kw.get("trace_width")))
+
+    # BOARD HEALTH (DCR 019fd5fd9084): the whole-board ledger, ALWAYS present
+    # on an ok route result regardless of request scope — the scoped
+    # drc_summary keys above are the PROPOSAL ledger, this is the BOARD one
+    # (see _board_health). It replaces the old optional top-level
+    # `assembly_advisories` key: the assembly verdict now rides INSIDE it as
+    # the tri-state `board_health.assembly` (work item 019fd5fddc09), so a
+    # clean board says "pass" out loud instead of saying nothing. Census over
+    # the SAME connectivity projection the run's DRC read (drc_board is
+    # always set on this path — module comment above — but the raw canonical
+    # board is an honest fallback, not a skipped ledger, if that ever
+    # changes); assembly over the raw board, re-resolved for courtyards.
+    payload["board_health"] = _board_health(
+        drc_board if drc_board is not None else board_dict,
+        payload.get("routes") or [], board_dict)
 
     return {"ok": True, "result": payload}
 
@@ -2285,6 +2528,9 @@ _HANDLERS = {
     # Tolerant sibling of "resolve", used by the Go pcb.deserialize board-LOAD
     # path. NOT exposed as an LLM tool: minerva_pcb_resolve stays strict.
     "resolve_best_effort": lambda req: _resolve_best_effort(req.get("params") or {}),
+    # Tri-state assembly check (DCR 019fd5fd9084 / 019fd5fddc09) — the
+    # standalone surface for board_health.assembly.
+    "assembly_check": lambda req: _assembly_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),

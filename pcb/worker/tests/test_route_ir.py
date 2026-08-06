@@ -489,8 +489,13 @@ def test_footprint_only_board_routes_AND_reports_connectivity_clean():
     assert result["success"] is True
     # BASELINE PARTITION (019f9cc386b6): a clean board's baseline is itself clean
     # and empty, so the whole summary is still assertable byte-for-byte.
+    # HITL-4 (docs/llm-ergonomics.md F2): + the completeness half — a fully
+    # routed board is complete with nothing missing (no `partial`/
+    # `indeterminate` key; `approximate` is the census's standing
+    # centerline-basis label, DCR 019fd5fd9084).
     assert result["drc_summary"] == {
         "scope": "connectivity", "clean": True, "violation_count": 0,
+        "complete": True, "missing_copper": [], "approximate": True,
         "baseline": {"clean": True, "violation_count": 0, "findings": []}}
     for route in result["routes"]:
         assert route["drc"]["clean"] is True, route["drc"]

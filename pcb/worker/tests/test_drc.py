@@ -294,3 +294,263 @@ def test_drc_parse_error_is_structured():
     resp = handle_request({"id": "d2", "method": "drc", "params": {"yaml": "]["}})
     assert resp["ok"] is False
     assert resp["error"]["kind"] == "parse"
+
+
+# ---------------------------------------------------------------------------
+# Connectivity COMPLETENESS — HITL-4 (docs/llm-ergonomics.md F2).
+#
+# THE BUG, from the live round: the connectivity summary reported clean while
+# net VCC_5V (D1.1→U1.21) had ZERO copper on the board. All four checks are
+# violation detectors — copper that is MISSING was structurally unreportable,
+# so "clean" was a lie by omission and the owner found the open by eye. run_drc
+# now carries `complete` + `missing_copper` (+ `partial`, absent-key when
+# empty) beside the unchanged findings/counts; `clean`-equivalent consumers of
+# counts see exactly what they always saw.
+# ---------------------------------------------------------------------------
+
+# The live shape in miniature: a >=2-pin net declared with NO copper at all.
+_ZERO_COPPER = """
+version: 1
+name: zerocopper
+width_mm: 20
+height_mm: 20
+design_rules: {clearance_mm: 0.2}
+components:
+  - {ref: D1, footprint: R, x_mm: 5, y_mm: 5, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+  - {ref: U1, footprint: R, x_mm: 15, y_mm: 5, rotation_deg: 0,
+     pins: [{number: '21', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+nets:
+  - {name: VCC_5V, pins: ['D1.1', 'U1.21']}
+"""
+
+# Copper exists but strands a pin: three pads, one trace joining two of them.
+_PARTIAL = """
+version: 1
+name: partialnet
+width_mm: 30
+height_mm: 20
+design_rules: {clearance_mm: 0.2}
+components:
+  - {ref: P1, footprint: R, x_mm: 5, y_mm: 5, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+  - {ref: P2, footprint: R, x_mm: 15, y_mm: 5, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+  - {ref: P3, footprint: R, x_mm: 25, y_mm: 15, rotation_deg: 0,
+     pins: [{number: '1', x_mm: 0, y_mm: 0, pad_width_mm: 1, pad_height_mm: 1}]}
+nets:
+  - {name: SIG, pins: ['P1.1', 'P2.1', 'P3.1']}
+traces:
+  - {net: SIG, layer: top, width_mm: 0.25,
+     points: [{x_mm: 5, y_mm: 5}, {x_mm: 15, y_mm: 5}]}
+"""
+
+
+def test_a_zero_copper_net_is_named_missing_never_silently_clean():
+    """The VCC_5V reproduction: every violation count is zero — the OLD reply
+    in full — and the new keys say what the old reply could not."""
+    r = _run(yaml.safe_load(_ZERO_COPPER))
+    assert r["findings"] == []  # nothing WRONG — the copper is absent, not bad
+    assert r["complete"] is False
+    assert r["missing_copper"] == ["VCC_5V"]
+    assert "partial" not in r
+
+
+def test_a_complete_board_reports_complete_and_names_nothing():
+    """Negative gate: the clean golden is also COMPLETE — `complete: True`,
+    empty `missing_copper`, and no `partial` key at all (absent-key)."""
+    r = _run(yaml.safe_load(_CLEAN))
+    assert r["complete"] is True
+    assert r["missing_copper"] == []
+    assert "partial" not in r
+
+
+def test_partial_connectivity_reports_the_island_count():
+    """Copper exists but P3 is stranded: not `missing_copper` (there IS
+    copper), but two pin islands — reported, with the count."""
+    r = _run(yaml.safe_load(_PARTIAL))
+    assert r["complete"] is False
+    assert r["missing_copper"] == []
+    assert r["partial"] == [{"net": "SIG", "pin_groups": 2}]
+
+
+def test_single_pin_nets_are_never_incomplete():
+    """A 1-pin net has nothing to connect — it must not be reported missing
+    (the _DANGLING golden's net D is exactly that shape)."""
+    r = _run(yaml.safe_load(_DANGLING))
+    assert r["missing_copper"] == []
+
+
+def test_a_zone_counts_as_copper_but_is_indeterminate_not_complete():
+    """CENSUS CORRECTION 019fd5fdeef3b (DCR 019fd5fd9084): a poured net is
+    COPPER (not missing_copper), but pour connectivity is a geometry question
+    this centerline kernel cannot answer honestly — in EITHER direction. The
+    pre-fix rule "zone counts as copper => complete" was a false complete
+    over copper nobody measured; the net is now INDETERMINATE ({net, reason:
+    "zone_copper"}), never falsely `partial` and never auto-complete —
+    flipping the board's `complete` from True to None (tri-state: nothing
+    known-missing, one net unjudgeable)."""
+    board = yaml.safe_load(_ZERO_COPPER)
+    board["zones"] = [{"net": "VCC_5V", "layer": "top",
+                       "points": [{"x_mm": 0, "y_mm": 0},
+                                  {"x_mm": 20, "y_mm": 0},
+                                  {"x_mm": 20, "y_mm": 20},
+                                  {"x_mm": 0, "y_mm": 20}]}]
+    r = _run(board)
+    assert r["missing_copper"] == []
+    assert "partial" not in r
+    assert r["complete"] is None
+    assert r["indeterminate"] == [{"net": "VCC_5V", "reason": "zone_copper"}]
+
+
+def test_a_known_defect_outranks_an_indeterminate_zone():
+    """Tri-state precedence: with a zone-bearing net AND a zero-copper net in
+    scope, `complete` is False (a measured defect), not None — indeterminate
+    only withholds a True, it never masks a False."""
+    board = yaml.safe_load(_ZERO_COPPER)
+    # Second net, poured: VCC_5V stays zero-copper (missing), GNDZ is poured.
+    board["components"].append(
+        {"ref": "Z1", "footprint": "R", "x_mm": 5, "y_mm": 15,
+         "rotation_deg": 0,
+         "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                   "pad_width_mm": 1, "pad_height_mm": 1}]})
+    board["components"].append(
+        {"ref": "Z2", "footprint": "R", "x_mm": 15, "y_mm": 15,
+         "rotation_deg": 0,
+         "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                   "pad_width_mm": 1, "pad_height_mm": 1}]})
+    board["nets"].append({"name": "GNDZ", "pins": ["Z1.1", "Z2.1"]})
+    board["zones"] = [{"net": "GNDZ", "layer": "top",
+                       "points": [{"x_mm": 0, "y_mm": 0},
+                                  {"x_mm": 20, "y_mm": 0},
+                                  {"x_mm": 20, "y_mm": 20},
+                                  {"x_mm": 0, "y_mm": 20}]}]
+    r = _run(board)
+    assert r["complete"] is False
+    assert r["missing_copper"] == ["VCC_5V"]
+    assert r["indeterminate"] == [{"net": "GNDZ", "reason": "zone_copper"}]
+
+
+def test_parallel_traces_a_clearance_apart_do_not_union():
+    """CENSUS CORRECTION 019fd5fdeef3a (DCR 019fd5fd9084): two parallel
+    same-net traces 0.15mm apart with NO touching endpoints are SEPARATE
+    copper — 0.15mm is an air gap, not a connection. The pre-fix census
+    unioned segment endpoints at design-clearance (0.2mm) distance, so this
+    exact board read falsely "complete"; the copper-copper credit now uses
+    the coincidence epsilon (COPPER_COINCIDENT_EPS_MM, 1e-3mm) and the board
+    reads `partial` with two pin islands."""
+    board = {
+        "version": 1, "name": "parallel", "width_mm": 30, "height_mm": 20,
+        "design_rules": {"clearance_mm": 0.2},
+        "components": [
+            {"ref": "P1", "footprint": "R", "x_mm": 5, "y_mm": 5,
+             "rotation_deg": 0,
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "pad_width_mm": 1, "pad_height_mm": 1}]},
+            {"ref": "P2", "footprint": "R", "x_mm": 15, "y_mm": 5.15,
+             "rotation_deg": 0,
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "pad_width_mm": 1, "pad_height_mm": 1}]},
+        ],
+        "nets": [{"name": "SIG", "pins": ["P1.1", "P2.1"]}],
+        # Trace A ends mid-air at (10, 5); trace B starts mid-air at
+        # (10, 5.15) — endpoint gap 0.15mm, no interior touch, no crossing.
+        "traces": [
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 5, "y_mm": 5}, {"x_mm": 10, "y_mm": 5}]},
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 10, "y_mm": 5.15},
+                        {"x_mm": 15, "y_mm": 5.15}]},
+        ],
+    }
+    r = _run(board)
+    assert r["complete"] is False
+    assert r["missing_copper"] == []
+    assert r["partial"] == [{"net": "SIG", "pin_groups": 2}]
+
+
+def test_a_same_layer_plus_sign_crossing_is_one_pin_group():
+    """CENSUS CORRECTION 019fd5fdeef3c (DCR 019fd5fd9084): two same-net
+    traces that properly INTERSECT on ONE layer (an X-crossing with no shared
+    endpoint) are physically connected copper. The pre-fix census had no
+    intersection credit, so this plus-sign read as TWO pin islands (a false
+    "partial"); it is one."""
+    board = {
+        "version": 1, "name": "plus-sign", "width_mm": 30, "height_mm": 30,
+        "design_rules": {"clearance_mm": 0.2},
+        "components": [
+            {"ref": c["ref"], "footprint": "R", "x_mm": c["x"], "y_mm": c["y"],
+             "rotation_deg": 0,
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "pad_width_mm": 1, "pad_height_mm": 1}]}
+            for c in ({"ref": "W", "x": 5, "y": 15},
+                      {"ref": "E", "x": 25, "y": 15},
+                      {"ref": "N", "x": 15, "y": 5},
+                      {"ref": "S", "x": 15, "y": 25})
+        ],
+        "nets": [{"name": "SIG",
+                  "pins": ["W.1", "E.1", "N.1", "S.1"]}],
+        # The horizontal bar joins W-E, the vertical bar joins N-S; they cross
+        # at (15, 15), which is no segment's endpoint.
+        "traces": [
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 5, "y_mm": 15}, {"x_mm": 25, "y_mm": 15}]},
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 15, "y_mm": 5}, {"x_mm": 15, "y_mm": 25}]},
+        ],
+    }
+    r = _run(board)
+    assert r["complete"] is True
+    assert r["missing_copper"] == []
+    assert "partial" not in r
+
+
+def test_a_cross_layer_x_crossing_earns_no_intersection_credit():
+    """The negative gate on 019fd5fdeef3c: the same plus-sign with the bars on
+    DIFFERENT layers is NOT connected (layers overlap freely; only a via or a
+    TH pad bridges them) — two pin islands."""
+    board = {
+        "version": 1, "name": "cross-layer", "width_mm": 30, "height_mm": 30,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2},
+        "components": [
+            {"ref": c["ref"], "footprint": "R", "x_mm": c["x"], "y_mm": c["y"],
+             "rotation_deg": 0,
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "pad_width_mm": 1, "pad_height_mm": 1}]}
+            for c in ({"ref": "W", "x": 5, "y": 15},
+                      {"ref": "E", "x": 25, "y": 15},
+                      {"ref": "N", "x": 15, "y": 5},
+                      {"ref": "S", "x": 15, "y": 25})
+        ],
+        "nets": [{"name": "SIG",
+                  "pins": ["W.1", "E.1", "N.1", "S.1"]}],
+        "traces": [
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 5, "y_mm": 15}, {"x_mm": 25, "y_mm": 15}]},
+            {"net": "SIG", "layer": "bottom", "width_mm": 0.25,
+             "points": [{"x_mm": 15, "y_mm": 5}, {"x_mm": 15, "y_mm": 25}]},
+        ],
+    }
+    r = _run(board)
+    assert r["complete"] is False
+    assert r["partial"] == [{"net": "SIG", "pin_groups": 2}]
+
+
+def test_every_census_reply_carries_the_approximate_label():
+    """DCR 019fd5fd9084: the census basis is centerline coincidence, not
+    geometric copper — every census output says so (`approximate: True`),
+    complete or not."""
+    assert _run(yaml.safe_load(_CLEAN))["approximate"] is True
+    assert _run(yaml.safe_load(_ZERO_COPPER))["approximate"] is True
+
+
+def test_completeness_rides_the_worker_drc_method_too():
+    """The standalone `drc` method reply (the surface the owner actually read
+    "clean" from) carries the same keys."""
+    resp = handle_request({"id": "d3", "method": "drc",
+                           "params": {"yaml": _ZERO_COPPER}})
+    assert resp["ok"] is True
+    assert resp["result"]["complete"] is False
+    assert resp["result"]["missing_copper"] == ["VCC_5V"]
+    assert resp["result"]["approximate"] is True

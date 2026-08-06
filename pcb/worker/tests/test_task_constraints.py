@@ -345,3 +345,75 @@ def test_route_method_no_task_constraints_is_byte_identical():
     adherence = route.get("corridor_adherence", [])
     assert len(adherence) == 1, route
     assert "constraint_revision" not in adherence[0]
+
+
+# ---------------------------------------------------------------------------
+# HITL-4 (docs/llm-ergonomics.md F4): the detail_level warning must not fire on
+# a constraint-steered hint.
+#
+# Intent-minted hints NEVER carry waypoints — their steering rides
+# task_constraints — and every one of them carries a detail_level. During the
+# F0 live diagnosis the bridge drew "detail_level 'sparse' has no agent_router
+# slot … not engine behaviour" on exactly those hints, implying the corridor
+# might not steer on exactly the hints where it does: an active red herring.
+# The warning used to be emitted BEFORE the constraint override was computed,
+# so it could not know better; it is now computed after, and gated on the SAME
+# constraint_pts predicate the override itself runs on. The constraint-steered
+# path already reports itself (superseded_by_task_constraint /
+# constraint_revision stamping), so suppression removes a lie, not a signal.
+# ---------------------------------------------------------------------------
+
+_SLOT_WARNING = "has no agent_router slot"
+
+
+def _slot_warnings(out) -> list[dict]:
+    return [w for w in out.warnings if _SLOT_WARNING in w.get("message", "")]
+
+
+def test_a_constraint_steered_sparse_hint_draws_no_slot_warning():
+    """The reproduction: an intent-minted-shaped hint (detail_level 'sparse',
+    NO waypoints of its own, steering in task_constraints) must not be told
+    its detail_level 'selects the bridge path, not engine behaviour' — the
+    constraint corridor IS engine behaviour, and it applied."""
+    board = route_bridge.board_to_router(_rotated_board())
+    env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
+                      detail_level="sparse")
+    out = route_bridge.hints_to_router(
+        [env], board, task_constraints={
+            "ann1": {"corridor_points": [list(w) for w in _CONSTRAINT_WPS],
+                     "preferred_layer": "F.Cu", "revision": 1},
+        })
+    assert _slot_warnings(out) == [], out.warnings
+    # …and the steering it would have cast doubt on really did land: the
+    # constraint's own reporting channel carries the story instead.
+    assert len(out.hints.connection_hints) == 1
+    assert out.hints.connection_hints[0].constraint_revision == 1
+
+
+def test_an_unconstrained_sparse_hint_still_draws_the_warning_verbatim():
+    """Negative gate: with no constraint applying, the warning is exactly what
+    it always was — the honest bridge-path note stays for the hints it is
+    true of."""
+    board = route_bridge.board_to_router(_rotated_board())
+    env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
+                      detail_level="sparse")
+    out = route_bridge.hints_to_router([env], board)
+    warnings = _slot_warnings(out)
+    assert len(warnings) == 1, out.warnings
+    assert warnings[0]["message"] == (
+        "detail_level 'sparse' has no agent_router slot — it selects the "
+        "bridge path (only 'detailed' single-trace hints route as "
+        "drawn), not engine behaviour")
+
+
+def test_a_refused_constraint_entry_keeps_the_warning():
+    """A task_constraints entry that does NOT apply (unusable corridor_points
+    — the same 'no override' degrade every malformed entry takes) leaves the
+    hint on the legacy path, so the warning stays true and stays emitted."""
+    board = route_bridge.board_to_router(_rotated_board())
+    env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
+                      detail_level="sparse")
+    out = route_bridge.hints_to_router(
+        [env], board,
+        task_constraints={"ann1": {"corridor_points": "not-points"}})
+    assert len(_slot_warnings(out)) == 1, out.warnings

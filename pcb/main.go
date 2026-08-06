@@ -239,6 +239,10 @@ func initRegistry() {
 	// pcb.draft_check — same dotted panel-IPC channel shape as pcb.route,
 	// forwarding to the worker's "draft_check" method (T2.4). See worker_tools.go.
 	registry.Register(tools.DraftCheckChannel, tools.HandleDraftCheckChannel)
+	// pcb.assembly_check — same dotted panel-IPC channel shape again,
+	// forwarding to the worker's "assembly_check" method (DCR 019fd5fd9084,
+	// work items 019fd5fe1241/019fd5fe2724). See worker_tools.go.
+	registry.Register(tools.AssemblyCheckChannel, tools.HandleAssemblyCheckChannel)
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +313,10 @@ var workerBackedTools = map[string]bool{
 	"minerva_pcb_export_assembly": true,
 	"pcb.route":                   true,
 	"pcb.draft_check":             true,
+	// pcb.assembly_check dispatches to the worker (HandleAssemblyCheckChannel
+	// calls w.Call(ctx, "assembly_check", params)) — same membership rationale
+	// as pcb.route/pcb.draft_check above: worker-dispatch, not naming.
+	"pcb.assembly_check": true,
 }
 
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {

@@ -663,3 +663,155 @@ def test_commit_then_undo_under_a_scoped_run_scopes_the_same_both_times():
     other = [r for r in undone["routes"] if r["net"] == "OTHER"][0]
     assert other["effective_routing_rules"]["trace_width_mm"]["value"] == \
         pytest.approx(BOARD_WIDTH_MM)
+
+
+# ---------------------------------------------------------------------------
+# 8. PER-SPAN OUTCOMES — HITL-4 (docs/llm-ergonomics.md F1).
+#
+# THE BUG, from the live HITL-4 round (smart-remote board): a span-scoped ask
+# for GND BAT1.2→U1.22 whose endpoints an existing B.Cu trace already joined
+# returned routes_returned:0, unrouted:[], no warning — byte-identical to a
+# dropped request. Diagnosing "the copper is already there" cost a geometry
+# dump, a solo re-propose and a full trace export. The skip was implicit: the
+# T7 group contraction (agent_router._connections_for_net) yields zero missing
+# edges and the per-net loop appended nothing anywhere.
+#
+# THE CONTRACT these tests pin: every asked-about span/net lands in exactly ONE
+# of `routes`, `unrouted`, or the additive `span_outcomes` key — and the key is
+# ABSENT entirely when there is nothing to report, so a pre-F1 consumer sees
+# the exact bytes it always saw.
+# ---------------------------------------------------------------------------
+
+
+def _gnd_span_board(with_copper: bool = True) -> dict:
+    """The live shape in miniature: a 3-pad GND net whose B1.1↔U1.1 span is
+    (optionally) already satisfied by an existing BOTTOM-layer trace — the
+    same "satisfied by B.Cu copper the ask never mentioned" twist as the real
+    GND BAT1.2→U1.22 reproduction. X1 is the deliberately-unconnected third
+    pad that makes B1.1/U1.1 a PROPER subset, so the scope resolves to the
+    span form (net_terminals) rather than collapsing to whole-net."""
+    board = {
+        "version": 1, "name": "span-outcome", "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [_tp("B1", 10, 10), _tp("U1", 50, 10), _tp("X1", 30, 30)],
+        "nets": [{"name": "GND", "pins": ["B1.1", "U1.1", "X1.1"]}],
+    }
+    if with_copper:
+        board["traces"] = [{"net": "GND", "layer": "bottom", "width_mm": 0.25,
+                            "points": [{"x_mm": 10, "y_mm": 10},
+                                       {"x_mm": 50, "y_mm": 10}]}]
+    return board
+
+
+_GND_SPAN_SCOPE = {"tasks": [{"task_id": "t-gnd", "net": "GND",
+                              "endpoints": ["B1.1", "U1.1"]}]}
+
+
+def test_an_already_connected_span_reports_an_outcome_not_silence():
+    """The reproduction. The span's endpoints are already joined by existing
+    copper, so nothing routes and nothing is unrouted — and that answer must
+    now be STATED, with the joining copper named (best effort)."""
+    result = _ok({"board": _gnd_span_board(), "scope": _GND_SPAN_SCOPE})
+    assert result.get("routes", []) == []
+    assert result.get("unrouted", []) == []
+    outcomes = result.get("span_outcomes")
+    assert outcomes is not None, (
+        "an already-connected span produced NO outcome — the reply is again "
+        "indistinguishable from a dropped request")
+    assert len(outcomes) == 1, outcomes
+    outcome = outcomes[0]
+    assert outcome["net"] == "GND"
+    assert outcome["status"] == "already_connected"
+    assert sorted(outcome["pads"]) == ["B1.1", "U1.1"]
+    # Best-effort attribution: the compiled trace's own id (ordinal-derived on
+    # a v1 board — the ID SCHEME is the compiler's business, non-emptiness is
+    # this contract's).
+    assert outcome["connected_via"], outcome
+    assert all(isinstance(t, str) and t for t in outcome["connected_via"])
+
+
+def test_a_normal_span_still_routes_and_carries_no_span_outcomes_key():
+    """Negative gate: remove the pre-existing copper and the identical ask
+    routes exactly as before, with NO span_outcomes key at all (absent-key,
+    not an empty list a consumer might have to learn to ignore)."""
+    result = _ok({"board": _gnd_span_board(with_copper=False),
+                  "scope": _GND_SPAN_SCOPE})
+    assert _nets_of(result) == ["GND"], _nets_of(result)
+    assert result.get("unrouted", []) == []
+    assert "span_outcomes" not in result
+
+
+def test_every_asked_net_lands_in_exactly_one_reply_bucket():
+    """The accounting identity itself, over a mixed scope: one net already
+    connected, one net needing (and getting) a route."""
+    board = _gnd_span_board()
+    board["components"] += [_tp("L9", 10, 35), _tp("R9", 50, 35)]
+    board["nets"].append({"name": "SIG", "pins": ["L9.1", "R9.1"]})
+    result = _ok({"board": board,
+                  "scope": {"tasks": _GND_SPAN_SCOPE["tasks"]
+                            + [{"task_id": "t-sig", "net": "SIG"}]}})
+    routed = {r["net"] for r in result.get("routes", [])}
+    unrouted = {u["net"] for u in result.get("unrouted", [])}
+    outcome_nets = {o["net"] for o in result.get("span_outcomes", [])}
+    for net in ("GND", "SIG"):
+        buckets = [net in routed, net in unrouted, net in outcome_nets]
+        assert buckets.count(True) == 1, (net, result)
+    assert outcome_nets == {"GND"}
+    assert routed == {"SIG"}
+
+
+def test_a_whole_net_already_connected_by_copper_reports_the_outcome():
+    """Whole-net form of the same silence: `scope.nets` naming a net whose
+    copper is complete used to come back empty-handed with no explanation."""
+    board = _gnd_span_board()
+    board["nets"] = [{"name": "GND", "pins": ["B1.1", "U1.1"]}]
+    del board["components"][2]  # X1 is off the net now; drop it entirely
+    result = _ok({"board": board, "scope": {"nets": ["GND"]}})
+    assert result.get("routes", []) == []
+    outcomes = result.get("span_outcomes")
+    assert outcomes and outcomes[0]["status"] == "already_connected"
+    assert outcomes[0]["net"] == "GND"
+    assert sorted(outcomes[0]["pads"]) == ["B1.1", "U1.1"]
+
+
+def test_span_outcomes_are_attributed_to_the_hints_that_asked():
+    """A HINTED run's outcome carries `hint_ids` — the same net->hints map and
+    the same hinted-run-only gate the routes themselves use, so an
+    already-connected span can be filed back against the hint that asked."""
+    board = _many_net_board(traces=[{
+        "net": "NET_A", "layer": "top", "width_mm": 0.25,
+        "points": [{"x_mm": 10.0, "y_mm": 6.0}, {"x_mm": 50.0, "y_mm": 6.0}]}])
+    result = _ok({"board": board, "route_hints": [_hint("h_a", 0)],
+                  "selection": {"mode": "open"}})
+    assert _nets_of(result) == [], _nets_of(result)
+    outcomes = result.get("span_outcomes")
+    assert outcomes and outcomes[0]["net"] == "NET_A"
+    assert outcomes[0]["status"] == "already_connected"
+    assert outcomes[0]["hint_ids"] == ["h_a"]
+
+
+def test_an_unhinted_outcome_carries_no_hint_ids_key():
+    """Same absent-key rule as routes' own `hint_ids`: no hint was asked, so
+    no attribution key exists — an empty list would read as "no hint wanted
+    this" on a run where no hint was ever consulted."""
+    result = _ok({"board": _gnd_span_board(), "scope": _GND_SPAN_SCOPE})
+    assert "hint_ids" not in result["span_outcomes"][0]
+
+
+def test_unmatched_span_terminals_get_their_own_named_status():
+    """Engine-level defence in depth: parse_route_scope refuses unknown
+    endpoints long before the engine runs, but the engine itself must not go
+    silent if a caller reaches it through another door with terminal refs
+    that match nothing. Named `terminals_unmatched`, never folded into
+    `already_connected` (a lie about the mechanism)."""
+    from agent_router.router import route_board
+    from pcb_worker import route_bridge as rb
+
+    board = rb.board_to_router(_gnd_span_board(with_copper=False))
+    result = route_board(board, net_terminals={"GND": {"NOPE.1", "ALSO.2"}})
+    assert result.routes == [] and result.unrouted == []
+    assert result.span_outcomes == [{
+        "net": "GND", "status": "terminals_unmatched",
+        "requested": ["ALSO.2", "NOPE.1"], "matched": []}]

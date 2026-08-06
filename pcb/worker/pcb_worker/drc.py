@@ -52,6 +52,26 @@ DEFAULT_COINCIDENT_MM = 0.2
 MERGE_EPS_MM = 1e-3
 ORIENT_EPS = 1e-9
 
+# COPPER-COPPER coincidence epsilon for the COMPLETENESS census (work item
+# 019fd5fdeef3, DCR 019fd5fd9084). The census used to union two same-net
+# trace segments whenever their endpoints came within the DESIGN CLEARANCE
+# (~0.2mm) of each other — but clearance is the minimum legal AIR GAP between
+# separate copper, so that credit declared traces "connected" at exactly the
+# spacing where they are guaranteed to be legally SEPARATE (the measured
+# false-complete: two parallel same-net traces 0.15mm apart, touching
+# nothing, read as one island). Trace-to-trace connection in a centerline
+# kernel is an authoring-identity question — the points were written to BE
+# the same point — so the credit uses this coincidence epsilon (the same
+# 1e-3mm scale MERGE_EPS_MM already uses for endpoint-degree bookkeeping).
+#
+# DELIBERATE ASYMMETRY: PAD- and VIA-involved credits KEEP the clearance-
+# scale tolerance. A pad is a LAND with real extent (typically >=0.5mm
+# across) and a via has a barrel + annulus, so a centerline endpoint within
+# clearance of the pad/via CENTER genuinely reaches that copper; a bare
+# segment endpoint has no extent at all in this kernel, so there is no land
+# geometry to justify reaching it.
+COPPER_COINCIDENT_EPS_MM = 1e-3
+
 
 # ---------------------------------------------------------------------------
 # Loosely-typed board helpers (mirror gerber.py so behaviour matches).
@@ -410,6 +430,221 @@ def _check_layer_change(segs, pads, vias, clr) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Connectivity COMPLETENESS — HITL-4 (docs/llm-ergonomics.md F2).
+#
+# The four checks above are all VIOLATION detectors: they can only report
+# copper that is WRONG, never copper that is MISSING. On the live smart-remote
+# round that made "clean" a lie by omission — net VCC_5V (D1.1→U1.21) had ZERO
+# copper on the board and the connectivity summary had no vocabulary to say
+# so; the owner found the open by eye. This section gives the summary that
+# vocabulary. It deliberately does NOT change what `clean` means (no shorts /
+# mismatches, exactly as before — existing consumers must not flip); it adds
+# `complete` + the lists beside it.
+#
+# Same centerline scope as everything else in this module: pad centers and
+# trace centerlines, the kernel's own coincidence credits. A ZONE-carrying net
+# is counted as having copper (a pour IS copper) but the kernel cannot judge
+# POUR connectivity at all — so such a net is reported INDETERMINATE
+# ({net, reason: "zone_copper"}; census correction 019fd5fdeef3b), never
+# auto-complete (the pre-fix behaviour: "has a zone => complete", a false
+# complete over copper nobody measured) and never falsely "partial".
+#
+# `complete` is TRI-STATE since 019fd5fdeef3d: True = every in-scope
+# multi-pin net fully connected AND none indeterminate; False = any
+# missing_copper or partial; None = nothing missing/partial but >=1
+# indeterminate net (the census cannot vouch for the whole scope). Every
+# census output also carries `approximate: True` — a standing honesty label
+# for the centerline basis (coincidence credits over pad centers, not
+# geometric copper).
+# ---------------------------------------------------------------------------
+
+
+def _board_clearance(board: dict) -> float:
+    """The board's coincidence tolerance — the same derivation run_drc uses."""
+    dr = board.get("design_rules") or {}
+    clr = DEFAULT_COINCIDENT_MM
+    if isinstance(dr, dict):
+        c = _opt_num(dr.get("clearance_mm"))
+        if c is not None and c > 0:
+            clr = c
+    return clr
+
+
+def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
+                    clr: float) -> int:
+    """How many disconnected pin ISLANDS this net's copper leaves, >= 1.
+
+    Union-find over the net's own pads + trace segments, joined by the SAME
+    credits the violation checks above extend (a finding and a completeness
+    verdict must not disagree about what "touches" means):
+
+      * a segment endpoint within ``clr`` of a pad CENTER joins pad<->segment
+        (the wrong_net_pad / dangling credit, same-net restricted here);
+      * a pad CENTER on a segment's interior joins too — same-net copper run
+        straight across a pad is physically connected copper;
+      * two segments join at COINCIDENT endpoints (within
+        COPPER_COINCIDENT_EPS_MM — NOT clearance; see the constant's rationale
+        for the census correction 019fd5fdeef3a and the pad/via asymmetry),
+        or where one's endpoint lies on the other's interior (the T-junction
+        credit, same epsilon);
+      * two SAME-LAYER segments that properly INTERSECT (an X-crossing with no
+        shared endpoint) join — touching copper on one layer IS connected
+        copper (census correction 019fd5fdeef3c; a same-net plus-sign pair is
+        one island, not two). Cross-layer crossings earn NO such credit —
+        different layers overlap freely and only connect at a via/TH pad;
+      * a via joins every same-net segment endpoint within ``clr`` of it —
+        the harvest carries via POSITIONS only (see _harvest_vias), which is
+        exactly the "a via exists here" fact layer bridging needs.
+
+    Segments on different layers joined at a COINCIDENT point are joined here
+    without demanding the via: check D (layer_change_no_via) already reports
+    that fault, and double-billing it as ALSO "partial" would report one
+    defect as two.
+    """
+    net_pads = [p for p in pads if p.net == net]
+    if len(net_pads) < 2:
+        return 1  # one pin (or none harvested) cannot be an island count > 1
+    net_segs = [s for s in segs if s.net == net]
+
+    n_pads = len(net_pads)
+    parent = list(range(n_pads + len(net_segs)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    seg_node = n_pads
+    for si, seg in enumerate(net_segs):
+        for pi, pad in enumerate(net_pads):
+            if (_dist(seg.a, pad.pt) <= clr or _dist(seg.b, pad.pt) <= clr
+                    or _point_on_segment_interior(pad.pt, seg.a, seg.b, clr)):
+                union(pi, seg_node + si)
+        for sj in range(si + 1, len(net_segs)):
+            other = net_segs[sj]
+            # Copper-copper credits at COINCIDENCE epsilon, not clearance
+            # (019fd5fdeef3a — see COPPER_COINCIDENT_EPS_MM), plus the
+            # same-layer proper-intersection credit (019fd5fdeef3c). The
+            # intersect predicate subsumes exact shared endpoints and
+            # collinear overlap on the same layer; the epsilon terms remain
+            # load-bearing for NEAR-coincident endpoints and for cross-layer
+            # hand-offs (which check D bills separately — comment above).
+            eps = COPPER_COINCIDENT_EPS_MM
+            if (_dist(seg.a, other.a) <= eps or _dist(seg.a, other.b) <= eps
+                    or _dist(seg.b, other.a) <= eps
+                    or _dist(seg.b, other.b) <= eps
+                    or _point_on_segment_interior(seg.a, other.a, other.b, eps)
+                    or _point_on_segment_interior(seg.b, other.a, other.b, eps)
+                    or _point_on_segment_interior(other.a, seg.a, seg.b, eps)
+                    or _point_on_segment_interior(other.b, seg.a, seg.b, eps)
+                    or (seg.layer == other.layer
+                        and _segments_intersect(seg.a, seg.b,
+                                                other.a, other.b))):
+                union(seg_node + si, seg_node + sj)
+    for v in vias:
+        touching = [seg_node + si for si, seg in enumerate(net_segs)
+                    if _dist(seg.a, v) <= clr or _dist(seg.b, v) <= clr]
+        touching += [pi for pi, pad in enumerate(net_pads)
+                     if _dist(pad.pt, v) <= clr]
+        for node in touching[1:]:
+            union(touching[0], node)
+
+    return len({find(pi) for pi in range(n_pads)})
+
+
+def connectivity_completeness(board: dict, scope_nets=None) -> dict:
+    """Which in-scope nets are missing or only partially wired.
+
+    HITL-4 (docs/llm-ergonomics.md F2). ``scope_nets`` narrows the census to
+    the nets a run was ASKED about (``None`` = every net the board declares —
+    the standalone whole-board DRC, and any unscoped route). Returns::
+
+        {"complete": bool | None,    # tri-state — module note (019fd5fdeef3d):
+                                     #   True  = all connected, none indeterminate
+                                     #   False = any missing_copper or partial
+                                     #   None  = only indeterminate stands between
+                                     #           the scope and "complete"
+         "missing_copper": [name],   # >=2-pin nets with ZERO copper (no trace,
+                                     #   no netted via, no zone)
+         "partial": [{"net": name,   # copper exists but leaves > 1 pin island
+                      "pin_groups": k}],
+         "indeterminate": [{"net": name,   # copper the kernel cannot judge
+                            "reason": "zone_copper"}],
+         "approximate": True}        # standing centerline-basis honesty label
+
+    Every key is ALWAYS present here (this is the internal census; reply
+    surfaces apply their own absent-when-empty conventions). Nets with fewer
+    than two pins are never incomplete — there is nothing to connect.
+    Zone-carrying nets count as having copper (never ``missing_copper``) but
+    are INDETERMINATE, not auto-complete (module note above).
+    """
+    clr = _board_clearance(board)
+    pads = _harvest_pads(board)
+    segs = _harvest_segments(board)
+    vias = _harvest_vias(board)
+
+    pin_counts: dict[str, int] = {}
+    for net in _list(board.get("nets")):
+        if isinstance(net, dict) and isinstance(net.get("name"), str):
+            pin_counts[net["name"]] = len(_list(net.get("pins")))
+
+    trace_nets = {s.net for s in segs}
+    zone_nets = {z.get("net") for z in _list(board.get("zones"))
+                 if isinstance(z, dict) and z.get("net")}
+    # _harvest_vias deliberately drops net ownership (positions are all the
+    # violation checks need); the copper CENSUS reads it off the raw dicts so
+    # a netted via still counts as that net's copper.
+    netted_via_nets = {v.get("net") for v in _list(board.get("vias"))
+                       if isinstance(v, dict) and v.get("net")}
+
+    missing: list[str] = []
+    partial: list[dict] = []
+    indeterminate: list[dict] = []
+    for name in sorted(pin_counts):
+        if scope_nets is not None and name not in scope_nets:
+            continue
+        if pin_counts[name] < 2:
+            continue
+        if not (name in trace_nets or name in zone_nets
+                or name in netted_via_nets):
+            missing.append(name)
+            continue
+        if name in zone_nets:
+            # 019fd5fdeef3b: a pour IS copper, but pour connectivity is a
+            # geometry question this centerline kernel cannot answer — the
+            # net is INDETERMINATE, never auto-complete (and never falsely
+            # "partial" either; traces it may also carry change nothing,
+            # because the pour could bridge whatever islands they leave).
+            indeterminate.append({"net": name, "reason": "zone_copper"})
+            continue
+        groups = _net_pin_groups(name, pads, segs, vias, clr)
+        if groups > 1:
+            partial.append({"net": name, "pin_groups": groups})
+
+    # Tri-state `complete` (019fd5fdeef3d): a defect anywhere is False even
+    # when other nets are indeterminate (a known defect outranks an unknown);
+    # indeterminate alone withholds the True a nobody-measured pour cannot
+    # earn.
+    if missing or partial:
+        complete: bool | None = False
+    elif indeterminate:
+        complete = None
+    else:
+        complete = True
+    return {"complete": complete,
+            "missing_copper": missing,
+            "partial": partial,
+            "indeterminate": indeterminate,
+            "approximate": True}
+
+
+# ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------
 
@@ -425,12 +660,7 @@ def run_drc(board: dict) -> dict:
     verdict. Geometric-copper DRC + DFM are reported separately once resolved
     geometry exists (ResolvedBoard IR).
     """
-    dr = board.get("design_rules") or {}
-    clr = DEFAULT_COINCIDENT_MM
-    if isinstance(dr, dict):
-        c = _opt_num(dr.get("clearance_mm"))
-        if c is not None and c > 0:
-            clr = c
+    clr = _board_clearance(board)
 
     pads = _harvest_pads(board)
     segs = _harvest_segments(board)
@@ -451,7 +681,15 @@ def run_drc(board: dict) -> dict:
     for f in findings:
         counts[f["type"]] = counts.get(f["type"], 0) + 1
 
-    return {
+    # HITL-4 (docs/llm-ergonomics.md F2): the standalone method's reply says
+    # "incomplete" too — whole-board scope here (scope_nets=None). Additive
+    # keys beside the unchanged findings/counts; `partial`/`indeterminate`
+    # follow the absent-key contract (an empty list is not a fact worth a
+    # key). `complete` is tri-state and the census carries its standing
+    # `approximate` honesty label (work item 019fd5fdeef3, DCR 019fd5fd9084).
+    completeness = connectivity_completeness(board)
+
+    out = {
         "ok": True,
         # HONEST SCOPE (docket 019f7abf7e7b): connectivity/topology over pad
         # centers + trace centerlines — NOT geometric copper DRC. A zero-finding
@@ -460,4 +698,12 @@ def run_drc(board: dict) -> dict:
         "verifies_geometry": False,
         "findings": findings,
         "counts": counts,
+        "complete": completeness["complete"],
+        "missing_copper": completeness["missing_copper"],
+        "approximate": True,
     }
+    if completeness["partial"]:
+        out["partial"] = completeness["partial"]
+    if completeness["indeterminate"]:
+        out["indeterminate"] = completeness["indeterminate"]
+    return out
