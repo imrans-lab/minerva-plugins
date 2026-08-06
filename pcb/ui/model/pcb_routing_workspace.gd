@@ -144,6 +144,38 @@ var board_revision: int = 0
 ## reason}, …]. Empty when the ingest replaced/created everything it was given.
 var last_ingest_holds: Array = []
 
+## F4 (cold review, Epoch UX1 station 9): CONFLICTING routing_constraints
+## found by _absorb_eager_tasks_for_merge during the most recent
+## ingest_record call — reset at the START of every ingest_record, same
+## per-call convention as last_ingest_holds above. [{task_ids, reason}, …],
+## empty on the overwhelming common case (no merge happened, or the merge's
+## absorbed tasks never conflicted). Since P1-A (Codex 1047) a conflict no
+## longer DROPS anything — the constrained singletons survive un-absorbed
+## and keep steering their own hints per-hint — but the merged task is left
+## unconstrained, and that outcome still reaches the caller here: panel_
+## tools.gd's _ingest_result_into_workspace reads this alongside
+## last_ingest_holds and threads it into the reply as `constraint_conflicts`
+## — a merge outcome visible only as a push_warning nobody outside the
+## engine console ever sees was the defect this exists to close.
+var last_ingest_constraint_conflicts: Array = []
+
+## Codex 1047 fix round, verdict 6: the STRUCTURED records from the most recent
+## load-time supersession reconciliation pass (panel_tools.gd's
+## reconcile_superseded_waypoint_state — written by that pass, reset at its
+## start, the same per-call convention as last_ingest_holds /
+## last_ingest_constraint_conflicts above, and the same "structured record, not
+## push_warning prose, is the supported contract" idiom F4 established for
+## constraint conflicts). One entry per TORN two-store state the pass repaired:
+## [{hint_id, task_id, action: "restamped_marker"|"released_stale_marker",
+##   reason: "constraint_without_marker"|"marker_out_of_shape"|
+##           "marker_without_constraint", constraint_revision?}, …]
+## Empty on the overwhelming common case: the annotations sidecar and this
+## workspace's sidecar loaded mutually consistent. TRANSIENT — deliberately
+## absent from to_dict/to_sidecar_dict (it describes what THIS load repaired,
+## not durable design state), and running the pass again on the repaired
+## stores must leave it empty (the pass's own idempotence contract).
+var last_load_reconciliation: Array = []
+
 ## The most recent REFUSED disposition move (empty when the last one was legal):
 ## {"candidate_id","from","to","error","verb"}. Kept so a UI/tool caller that
 ## only sees a `false` return can still report WHY without re-deriving it.
@@ -279,11 +311,25 @@ func set_active(id: String) -> void:
 ## error is recorded in last_transition_error, transition_refused is emitted, a
 ## push_warning names the code, and false is returned — no silent clamp.
 ## `verb` is the caller's own name, carried into the error record for the UI.
-func _apply_disposition(id: String, to: String, verb: String) -> bool:
+func _apply_disposition(id: String, to: String, verb: String, from_transaction := false) -> bool:
 	var c = get_candidate(id)
 	if c == null:
 		return false
 	var from := str(c.disposition)
+	# REENTRANCY GUARD (docket 019fd0ab6dd2, Codex re-review 1032):
+	# "synchronous" does not mean "non-reentrant" — candidate_changed /
+	# validation_changed handlers execute synchronously DURING commit_batch's
+	# disposition phase, and a handler that calls pin/reject/supersede/… would
+	# mutate a later batch member before the transaction reaches it, making
+	# the phase-B refusal branch reachable through the public signal surface.
+	# Every disposition move funnels through here, so ONE check makes the
+	# policy: while a commit transaction is applying, every mutating verb that
+	# is not the transaction's own call REFUSES BY NAME. The supported
+	# contract for signal handlers during a commit is observe-and-redraw, not
+	# mutate — this guard is that contract, enforced.
+	if _commit_transaction_active and not from_transaction:
+		_record_refusal(id, from, to, ERR_COMMIT_IN_PROGRESS, verb)
+		return false
 	var err: String = c.transition_to(to)
 	if not err.is_empty():
 		_record_refusal(id, from, to, err, verb)
@@ -305,8 +351,20 @@ func _apply_disposition(id: String, to: String, verb: String) -> bool:
 	# afterwards loses its verdict. A move WITHIN the live set (pin/unpin) does
 	# not — see the rule on VERDICT_VALIDATIONS for why that is a decision and
 	# not an omission.
+	#
+	# BATCH SUPPRESSION (docket 019fd0ab6dd2, Codex review P1): inside
+	# commit_batch's disposition phase the pass is DEFERRED, not skipped —
+	# member A's commit would otherwise stale members B..N of the same
+	# approved batch and erase their findings mid-transaction. commit_batch
+	# runs ONE _stale_live_verdicts() after every member has left the live
+	# set, so exactly the candidates OUTSIDE the batch are staled, order-
+	# independently. The flag is private and only ever set around that
+	# synchronous phase (no awaits), so no other verb can observe it.
 	if _is_live_disposition(from) != _is_live_disposition(to):
-		_stale_live_verdicts()
+		if _defer_stale_pass:
+			_deferred_stale_needed = true
+		else:
+			_stale_live_verdicts()
 	candidate_changed.emit(id)
 	return true
 
@@ -447,6 +505,80 @@ func get_task(task_id: String):
 
 func list_tasks() -> Array:
 	return tasks.values()
+
+
+## The task whose key attribution ("<net>|<hint_ids>[|span:...]", see
+## _task_key/_task_key_hint_set) includes `hint_id` — station 9's (DCR
+## 019fd095e694) propose-time lookup: "does the task this hint would answer
+## already carry a routing_constraint", asked BEFORE any candidate exists (so
+## a candidate's own task_id, available everywhere else, is not yet an
+## option). Mirrors drop_empty_tasks_for_hint's own key-parsing rather than
+## re-deriving the format a second place.
+##
+## F11 (cold review): the task whose key names `hint_id` as its ONLY hint
+## (the exact singleton "<net>|hint_id" shape) is preferred over any task
+## that merely MEMBERS `hint_id` among others (a merged multi-hint key) — an
+## exact match is unambiguous ownership, a membership match is not, and the
+## two should never both exist for one hint in practice (H3-1 absorption
+## folds the singleton into the merge), but preferring the exact match keeps
+## this lookup correct even if that invariant is ever violated, rather than
+## depending on dict iteration order to happen to find the right one first.
+## Membership is still returned as a FALLBACK when no exact singleton exists
+## — H3-1 absorption keeps a hint attributed to at most one open task in
+## practice, so that fallback is what ordinarily fires for a merged task's
+## member hints. Returns null when `hint_id` names no task at all (the common
+## case: most hints carry no corridor).
+func task_for_hint(hint_id: String):
+	if hint_id.is_empty():
+		return null
+	var fallback = null
+	for tid in tasks:
+		var hint_set: Array = _task_key_hint_set(str(tid))
+		if hint_set.size() == 1 and str(hint_set[0]) == hint_id:
+			return tasks[tid]
+		if fallback == null and hint_id in hint_set:
+			fallback = tasks[tid]
+	return fallback
+
+
+## F3 (cold review): the hint ids `task_id`'s own key names — [] for an
+## unknown task_id or one with no hint attribution, [hint_id] for the common
+## single-hint case, [hidA, hidB, ...] for a merged multi-hint task (H3-1
+## absorption). Public wrapper over the private _task_key_hint_set parser so
+## callers outside this file (panel_tools.gd's steering path — F3's
+## multi_span_task refusal) never re-derive the "<net>|<hint_ids>[|span:...]"
+## key format themselves.
+func task_hint_ids(task_id: String) -> Array:
+	return _task_key_hint_set(task_id)
+
+
+## H2-1 (cold review, DCR 019fd095e694/docket 019fd057ea0b comment 1028's
+## deletion-cascade precondition): drop every CANDIDATE-LESS task whose key
+## names `hint_id` as its ONLY hint attribution — the shape
+## minerva_pcb_add_route_intent's eager task takes ("net|hint_id"), or a
+## merged multi-hint task that has collapsed back down to exactly this one
+## hint after H3-1 absorption removed every other member. Called by
+## PcbAnnotationHost when the pcb_route_hint annotation for `hint_id` is
+## removed — deleting the connectivity object for a still-unanswered intent
+## should not leave a dead task sitting in the workspace forever. A task any
+## candidate has ever landed on is HISTORY, deleted annotation or not, and is
+## left untouched — only the candidate-less placeholder disappears. Returns
+## the dropped task ids.
+func drop_empty_tasks_for_hint(hint_id: String) -> Array:
+	var dropped: Array = []
+	if hint_id.is_empty():
+		return dropped
+	for tid in tasks.keys().duplicate():
+		var key := str(tid)
+		var hints: Array = _task_key_hint_set(key)
+		if hints.size() != 1 or str(hints[0]) != hint_id:
+			continue
+		if _task_has_any_candidate(key):
+			continue
+		tasks.erase(key)
+		_task_candidate.erase(key)
+		dropped.append(key)
+	return dropped
 
 
 ## "open" / "closed", or "" when the task is unknown.
@@ -791,16 +923,30 @@ func ingest_routing_result(router_reply: Dictionary, source_hints: Array = [], b
 ## worse answer from raw `source_hints` (see _create_candidate_for_route).
 ## ingest_routing_result has no such stamp available and is left untouched.
 func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
+	# Reentrancy guard (see _apply_disposition): a handler landing a NEW
+	# candidate mid-commit would change the very live set the deferred INV-2
+	# pass is about to score.
+	if _commit_transaction_active:
+		push_warning("[RoutingWorkspace] ingest_record refused: %s" % ERR_COMMIT_IN_PROGRESS)
+		return ""
 	last_ingest_holds = []  # per-call (see ingest_routing_result)
+	last_ingest_constraint_conflicts = []  # per-call (see the field's own doc)
 	var hints: Array = record.get("source_hints", []) if record.get("source_hints", []) is Array else []
 	var explicit_hint_ids: Array = record.get("source_hint_ids", []) if record.get("source_hint_ids", []) is Array else []
 	var span: Dictionary = record.get("span", {}) if record.get("span", {}) is Dictionary else {}
-	return _create_candidate_for_route(
+	var cid := _create_candidate_for_route(
 		str(record.get("net", "")),
 		record.get("segments", []) if record.get("segments", []) is Array else [],
 		record.get("vias", []) if record.get("vias", []) is Array else [],
 		hints, board_revision, explicit_hint_ids, span,
 		float(record.get("width_override", 0.0)))
+	# P1-B (Codex 1047): the record's generating-constraint provenance becomes
+	# DURABLE candidate state, not just a reply stamp — the commit preflight's
+	# staleness comparison (ERR_CONSTRAINT_STALE) reads it back from here, and
+	# it round-trips through the sidecar with the rest of the candidate.
+	if not cid.is_empty() and candidates.has(cid) and record.has("constraint_revision"):
+		candidates[cid].constraint_revision = int(record.get("constraint_revision"))
+	return cid
 
 
 ## Create + add one RouteCandidate from a raw router route (net + raw segments +
@@ -854,7 +1000,21 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		# this caller has no production consumer and no per-route hint_ids to
 		# read instead).
 		hint_ids = _hint_ids_for_net(source_hints, net)
-	var task_key := _task_key(net, hint_ids, PcbRouteTask.span_key(span))
+	var span_key := PcbRouteTask.span_key(span)
+	var task_key := _task_key(net, hint_ids, span_key)
+	# H3-1 (cold review, Epoch UX1 station 8 follow-up): before minting/reusing
+	# task_key, absorb any still-open, CANDIDATE-LESS "eager" task whose OWN key
+	# is a single-hint slice of THIS route's attribution — the shape
+	# minerva_pcb_add_route_intent mints per intent ("net|hint_id", panel_tools.
+	# _add_route_intent). Two open intents on one net can attribute to ONE
+	# worker route (hint_ids.size() > 1 here): the merged key "net|hidA,hidB"
+	# is never equal to either eager key "net|hidA" / "net|hidB", so without
+	# this both eager tasks orphan forever AND a THIRD task mints for the real
+	# answer. The singleton case (hint_ids == [h], task_key == "net|h") is
+	# UNCHANGED: ensure_task's own get-or-create already reuses that exact
+	# task, so the absorption loop below finds no OTHER task to fold in.
+	if not tasks.has(task_key) and hint_ids.size() > 1:
+		_absorb_eager_tasks_for_merge(task_key, net, span, hint_ids, span_key)
 	# The task (the question) exists before its answer; state is derived after
 	# the candidate lands (add_candidate → _refresh_task_state).
 	ensure_task(task_key, net, span)
@@ -974,15 +1134,18 @@ func is_annotation_bridged(annotation_id: String) -> bool:
 ## ids). Stashes the prior disposition so an undo can restore it (uncommit). The
 ## pure model does no board mutation itself — the annotation-authoritative accept
 ## path already did that; this only keeps the shadow candidate coherent.
-func mark_committed(candidate_id: String, trace_ids: Array = [], via_ids: Array = []) -> bool:
+func mark_committed(candidate_id: String, trace_ids: Array = [], via_ids: Array = [],
+		from_transaction := false) -> bool:
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return false
 	var prior := str(c.disposition)
 	# LEGALITY FIRST: a candidate that cannot legally reach "committed" (already
 	# superseded/rejected) must not have its copper ids recorded either — a
-	# refused transition is never half-applied.
-	if not _apply_disposition(candidate_id, "committed", "mark_committed"):
+	# refused transition is never half-applied. `from_transaction` threads the
+	# reentrancy-guard bypass for commit_batch's OWN phase-B calls (see
+	# _apply_disposition's guard doc); every external caller leaves it false.
+	if not _apply_disposition(candidate_id, "committed", "mark_committed", from_transaction):
 		return false
 	var rec: Dictionary = correlations.get(candidate_id, {})
 	if prior != "committed":
@@ -1029,6 +1192,11 @@ func consumed_hint_ids(candidate_id: String) -> Array:
 ## matching a board that no longer holds its trace/vias). Returns true if a
 ## committed candidate was reverted.
 func uncommit(candidate_id: String) -> bool:
+	# Reentrancy guard (see _apply_disposition): uncommit bypasses the legality
+	# funnel by design, so it carries the transaction check itself.
+	if _commit_transaction_active:
+		_record_refusal(candidate_id, "committed", "", ERR_COMMIT_IN_PROGRESS, "uncommit")
+		return false
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return false
@@ -1227,6 +1395,103 @@ static func _task_key(net: String, hint_ids: Array, span_key: String = "") -> St
 	return key
 
 
+## H3-1 absorption helper (cold review, Epoch UX1 station 8 follow-up — see
+## the call site in _create_candidate_for_route for the full rationale).
+## `task_key` is the about-to-be-created MERGED task key; `hint_ids` is its
+## full (size > 1, checked by the caller) hint attribution. Folds in every
+## still-open, CANDIDATE-LESS eager task keyed "net|h" for h in hint_ids —
+## the shape minerva_pcb_add_route_intent mints per intent — into the merged
+## task: creates/reuses it via ensure_task (never reimplemented), transfers a
+## SOLITARY absorbed routing_constraint onto it (the merged task is freshly
+## created here, so it never already carries one of its own), and on a
+## CONFLICT (two absorbed tasks both constrained) keeps NEITHER and
+## push_warns naming both task ids rather than guessing a winner — AND (F4,
+## cold review) records the conflict onto last_ingest_constraint_conflicts,
+## so the drop reaches the ingest_record caller's reply instead of living
+## only in a push_warning nobody outside the engine console ever sees.
+## Absorbed tasks are erased outright, never left as dead entries. A task any
+## candidate has ever landed on is HISTORY and is never absorbed — the same
+## rule drop_empty_tasks_for_hint (H2-1) applies to the deletion-cascade side.
+func _absorb_eager_tasks_for_merge(task_key: String, net: String, span: Dictionary, hint_ids: Array, span_key: String) -> void:
+	var to_absorb: Array = []
+	var constrained: Array = []
+	for h in hint_ids:
+		var eager_key := _task_key(net, [str(h)], span_key)
+		if eager_key == task_key:
+			continue
+		var t = tasks.get(eager_key, null)
+		if t == null:
+			continue
+		if _task_has_any_candidate(eager_key):
+			continue  # history — never absorbed
+		to_absorb.append(eager_key)
+		if t.is_constrained():
+			constrained.append({"task_id": eager_key, "constraint": t.routing_constraint})
+	if to_absorb.is_empty():
+		return
+	var merged = ensure_task(task_key, net, span)
+	var kept_on_conflict: Dictionary = {}
+	if constrained.size() == 1:
+		merged.routing_constraint = (constrained[0]["constraint"] as Dictionary).duplicate(true)
+	elif constrained.size() > 1:
+		var names: Array = []
+		for c in constrained:
+			names.append(str(c["task_id"]))
+			# P1-A (Codex 1047, consolidated review): a conflicting merge used
+			# to keep NEITHER constraint AND erase both singleton tasks. For
+			# station-12-seeded legacy hints that was a PERMANENT dead state:
+			# both annotations stay stamped waypoints_superseded_by_constraint_
+			# revision (edit-refused by the host), while panel_tools.gd's
+			# seeding gate (H1-2 membership branch) refuses to ever re-seed a
+			# hint that MEMBERS a merged task — superseded waypoints with no
+			# surviving constraint steering anything. The refusal shape now:
+			# the MERGED task stays unconstrained (there is genuinely no single
+			# task-level winner), but the constrained SINGLETONS survive
+			# un-absorbed — the task_constraints wire channel is per-hint
+			# (owner_hint_id-gated, _task_constraints_for_hints), so each
+			# surviving singleton keeps steering ITS OWN hint on the next
+			# propose, and the supersession stamps stay truthful.
+			kept_on_conflict[str(c["task_id"])] = true
+		push_warning("[RoutingWorkspace] H3-1/P1-A: merge into task '%s' found CONFLICTING routing_constraints on %s — merged task left unconstrained, constrained singletons KEPT (Codex 1047 fix round)" % [task_key, ", ".join(names)])
+		# F4: the same outcome, surfaced to the caller rather than only the
+		# engine console — panel_tools.gd's _ingest_result_into_workspace
+		# reads this per ingest_record call and threads it into the reply as
+		# `constraint_conflicts`.
+		last_ingest_constraint_conflicts.append({
+			"task_ids": names, "reason": "conflicting_constraints_kept_on_singletons",
+		})
+	for tid in to_absorb:
+		if kept_on_conflict.has(tid):
+			continue
+		tasks.erase(tid)
+		_task_candidate.erase(tid)
+
+
+## True iff any candidate — any disposition; committed/rejected/superseded
+## count as HISTORY, not just the live ones — has ever named `task_key` as its
+## task_id. The shared "is this task an empty placeholder or does it already
+## have an answer" test both H3-1's absorption and H2-1's deletion cascade
+## (drop_empty_tasks_for_hint) need.
+func _task_has_any_candidate(task_key: String) -> bool:
+	for id in candidates:
+		if str(candidates[id].task_id) == task_key:
+			return true
+	return false
+
+
+## Parse a task key's hint-id set out of "<net>|<hint_ids>[|span:...]" — the
+## middle segment, comma-split; an empty segment (no hints attributed) parses
+## to [], never [""].
+static func _task_key_hint_set(task_key: String) -> Array:
+	var parts: Array = task_key.split("|")
+	if parts.size() < 2:
+		return []
+	var joined := str(parts[1])
+	if joined.is_empty():
+		return []
+	return joined.split(",")
+
+
 ## Endpoints seeded from the matching source hints' pin references
 ## (kind_payload.source_pins/dest_pins, each "Component.Pin"). Positions are
 ## not resolved here (no board/pad lookup in this pure model) — component/pin
@@ -1382,11 +1647,19 @@ const ERR_ILLEGAL_VIA_SPAN := "illegal_via_span"
 const ERR_BOARD_WRITE := "board_write_failed"
 const ERR_NOT_EDITABLE := "candidate_not_editable"
 const ERR_ALREADY_COMMITTED := "already_committed"
+const ERR_DUPLICATE_CANDIDATE := "duplicate_candidate_id"
+const ERR_COMMIT_IN_PROGRESS := "commit_in_progress"
 const ERR_NO_SEGMENT_AT_POINT := "no_segment_at_point"
 const ERR_DEGENERATE_AT_ENDPOINT := "degenerate_insert_at_endpoint"
 const ERR_DEGENERATE_ON_VIA := "degenerate_insert_on_via"
 const ERR_SEGMENT_LOCKED := "segment_locked"
 const ERR_LAYER_MISMATCH := "from_layer_mismatch"
+## Epoch UX1 station 10 (DCR 019fd095e694, docket 019fd057ea0b comments 1026/
+## 1028): move_junction's own named refusals.
+const ERR_CONSTRAINT_STALE := "constraint_stale_candidate"
+const ERR_JUNCTION_NOT_FOUND := "junction_not_found"
+const ERR_AMBIGUOUS_JUNCTION := "ambiguous_junction"
+const ERR_DEGENERATE_RESULT := "degenerate_result"
 
 ## Coincidence epsilon for edit geometry, in board mm. Two points closer than
 ## this are the SAME point — which is what makes a split at an endpoint a
@@ -1438,6 +1711,26 @@ func _stale_live_verdicts() -> Array:
 
 
 # ── INV-1: the composite COMMIT transaction ───────────────────────────────────
+
+## Batch-scoped INV-2 deferral (docket 019fd0ab6dd2, Codex review P1). While
+## true, _apply_disposition RECORDS that a live-boundary move wants the stale
+## pass instead of running it; commit_batch fires the pass ONCE after every
+## member has left the live set, so batch members never stale each other and
+## exactly the outside candidates lose their verdicts. Set ONLY around
+## commit_batch's synchronous disposition phase — never across an await, never
+## by any other verb.
+var _defer_stale_pass := false
+var _deferred_stale_needed := false
+
+## Reentrancy guard (Codex re-review on 019fd0bf2a04): true while commit_batch
+## is writing copper or applying dispositions. Every disposition verb that is
+## not the transaction's own call refuses with ERR_COMMIT_IN_PROGRESS while
+## set (see _apply_disposition). Cleared BEFORE the deferred INV-2 stale pass
+## and end_batch: by then the batch is fully applied and consistent, so a
+## handler reacting to those emissions acts on exactly the state a
+## single-commit handler always did.
+var _commit_transaction_active := false
+
 
 ## Endpoint-coincidence epsilon (board mm) for chaining consecutive validated
 ## seg_plan entries into one trace. The router splits at EXACT shared points, so
@@ -1506,15 +1799,76 @@ static func _chain_seg_plan(seg_plan: Array) -> Array:
 ##
 ## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
 func commit(candidate_id: String, board = null) -> Dictionary:
+	# Thin wrapper over commit_batch — ONE implementation of the composite
+	# transaction (docket 019fd0ab6dd2). The reply is kept byte-compatible with
+	# the pre-batch shape every existing caller and test reads.
+	var batch: Dictionary = commit_batch([candidate_id], board)
+	if not bool(batch.get("ok", false)):
+		return batch
+	var r: Dictionary = (batch.get("results", []) as Array)[0]
+	return {
+		"ok": true,
+		"candidate_id": str(r["candidate_id"]),
+		"task_id": str(r["task_id"]),
+		"task_state": str(r["task_state"]),
+		"trace_ids": r["trace_ids"],
+		"via_ids": r["via_ids"],
+		"consumed_hint_ids": r["consumed_hint_ids"],
+		"validation_at_commit": str(r["validation_at_commit"]),
+		"action": str(batch.get("action", "")),
+	}
+
+
+## P1-B (Codex 1047): the CURRENT constraint revision governing a candidate —
+## the max across (a) the candidate's own task's constraint and (b) each
+## source hint's owner-gated constraint via task_for_hint (the exact
+## per-hint set _task_constraints_for_hints would emit on the next propose,
+## which since P1-A may live on surviving singletons beside a merged task).
+## -1 = nothing constrained governs this candidate. KNOWN LIMIT (documented
+## in the Codex-1047 trail): the candidate's stamp is a single int (the
+## revision methods.py threaded onto the route), so with MULTIPLE governing
+## constraints the comparison is against the max — a lower-revision sibling
+## advancing to a value still <= the stamped max is not flagged. Per-hint
+## stamps end-to-end are post-boundary engine work.
+func _governing_constraint_revision(c) -> int:
+	var rev := -1
+	var own = tasks.get(str(c.task_id), null)
+	if own != null and own.is_constrained():
+		rev = max(rev, int(own.routing_constraint.get("revision", 0)))
+	for h in c.source_hint_ids:
+		var t = task_for_hint(str(h))
+		if t != null and t.is_constrained() \
+				and str(t.routing_constraint.get("owner_hint_id", "")) == str(h):
+			rev = max(rev, int(t.routing_constraint.get("revision", 0)))
+	return rev
+
+
+## Per-candidate PRE-FLIGHT: everything the commit transaction can refuse,
+## checked before ANY mutation. Extracted verbatim from the single-candidate
+## commit so batch and single share one set of refusals (docket 019fd0ab6dd2).
+## Returns {ok:true, candidate, candidate_id, seg_plan, via_plan,
+## validation_at_commit} or a _verb_error dict.
+##
+## validation_at_commit is CAPTURED HERE, before any batch member mutates the
+## board — that is the whole point of batching: committing candidate 1 bumps
+## the board revision and (correctly) stales the live set, but candidates 2..N
+## of the SAME approved batch must report the verdict they actually carried at
+## the decision moment, not the staleness their own batch-mate caused.
+func _commit_preflight(candidate_id: String, board) -> Dictionary:
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return _verb_error(ERR_NO_CANDIDATE, "no candidate '%s' in this workspace" % candidate_id, candidate_id)
+	# remove_trace / remove_via_by_id are REQUIRED up front (Codex review P2):
+	# they are the rollback path's tools, and a board that can accept copper
+	# but cannot take it back cannot honour the no-half-state claim — refuse
+	# before writing rather than discovering it mid-fault.
 	if board == null or not is_instance_valid(board) \
 			or not board.has_method("begin_batch") or not board.has_method("end_batch") \
 			or not board.has_method("new_trace") or not board.has_method("add_trace") \
-			or not board.has_method("add_via"):
+			or not board.has_method("add_via") or not board.has_method("remove_trace") \
+			or not board.has_method("remove_via_by_id"):
 		return _verb_error(ERR_NO_BOARD,
-			"no board to commit onto (a commit writes real copper — it cannot run against the model alone)",
+			"no board to commit onto (a commit writes real copper and must be able to roll it back — it cannot run against the model alone)",
 			candidate_id)
 
 	# RE-COMMIT IS REFUSED, and it has to be refused HERE rather than left to the
@@ -1540,6 +1894,21 @@ func commit(candidate_id: String, board = null) -> Dictionary:
 		_record_refusal(candidate_id, str(c.disposition), "committed", legality, "commit")
 		return _verb_error(legality,
 			"cannot commit a candidate whose disposition is '%s'" % str(c.disposition), candidate_id)
+
+	# P1-B (Codex 1047): CONSTRAINT STALENESS. A steer (or a fresh station-12
+	# seed) advances the governing task constraint; if the reroute that was
+	# meant to answer it then FAILED, the still-live prior candidate was
+	# generated against the OLD constraint. Committing it would silently land
+	# copper the current steering explicitly moved away from — refuse by name,
+	# before any mutation, same up-front discipline as every check above.
+	# candidate.constraint_revision is the DURABLE generation stamp
+	# (ingest_record); -1 (generated unconstrained / pre-provenance record)
+	# is stale against ANY current constraint by the same rule.
+	var governing := _governing_constraint_revision(c)
+	if governing >= 0 and int(c.constraint_revision) < governing:
+		return _verb_error(ERR_CONSTRAINT_STALE,
+			"candidate '%s' was generated against constraint revision %d but the governing constraint has advanced to revision %d — re-propose/reroute under the current constraint (or clear the constraint) before committing"
+				% [candidate_id, int(c.constraint_revision), governing], candidate_id)
 
 	# GEOMETRY PRE-FLIGHT. Everything the board write needs, checked up front.
 	if c.segments.is_empty() and c.vias.is_empty():
@@ -1591,7 +1960,66 @@ func commit(candidate_id: String, board = null) -> Dictionary:
 						str(via_dict.get("to_layer", ""))], candidate_id)
 		via_plan.append(via_dict)
 
-	# ── mutation ──────────────────────────────────────────────────────────────
+	return {"ok": true, "candidate": c, "candidate_id": candidate_id,
+		"seg_plan": seg_plan, "via_plan": via_plan,
+		"validation_at_commit": str(c.validation)}
+
+
+## INV-1 ACROSS A BATCH (docket 019fd0ab6dd2): commit several candidates as ONE
+## undoable step. Sequential single commits punished the reviewer for approving
+## a batch — the first commit bumped the board revision and marked its CLEAN,
+## just-set-checked siblings stale, so commits 2..N reported
+## validation_at_commit "stale" on geometry nothing had invalidated but their
+## own batch-mate. Here:
+##   * ALL validation precedes ALL mutation, across the WHOLE batch — any
+##     refusal (unknown id, duplicate id, illegal disposition, unmodelable
+##     geometry) aborts before begin_batch with the board untouched;
+##   * one begin_batch/end_batch pair — ONE history entry, ONE board_revision
+##     bump, one Ctrl+Z reverting every batch member's copper AND disposition;
+##   * validation_at_commit per member is the PRE-BATCH verdict (see
+##     _commit_preflight's doc);
+##   * mid-write board faults roll back EVERY batch member's copper written so
+##     far (the accumulated id lists), not just the failing candidate's — the
+##     no-half-state claim holds for the batch exactly as it held for one.
+func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
+	# A commit inside a commit (a signal handler re-entering) is refused, not
+	# nested — see _apply_disposition's reentrancy-guard doc.
+	if _commit_transaction_active:
+		return _verb_error(ERR_COMMIT_IN_PROGRESS,
+			"a commit transaction is already applying; workspace verbs called from its signal handlers are refused")
+	var ids: Array = []
+	for cid in candidate_ids:
+		ids.append(str(cid))
+	if ids.is_empty():
+		return _verb_error(ERR_NO_CANDIDATE, "commit_batch needs at least one candidate id")
+	var seen: Dictionary = {}
+	for cid in ids:
+		# A duplicate inside one batch would be the same double-commit hazard
+		# the single verb refuses (see the re-commit doc in _commit_preflight),
+		# just spelled differently — refused under its OWN name (Codex review
+		# P2): the candidate is not already committed, it is named twice, and
+		# the error must say which mistake was made.
+		if seen.has(cid):
+			return _verb_error(ERR_DUPLICATE_CANDIDATE,
+				"candidate '%s' appears more than once in one batch" % cid, cid)
+		seen[cid] = true
+
+	# ALL validation precedes ALL mutation — for the batch, not per member.
+	var plans: Array = []
+	for cid in ids:
+		var pf: Dictionary = _commit_preflight(cid, board)
+		if not bool(pf.get("ok", false)):
+			return pf
+		plans.append(pf)
+
+	# ── mutation, PHASE A: ALL copper, NO workspace state (Codex review P1) ───
+	# Copper writes are the only step that can fail mid-batch (a board fault on
+	# add_trace/add_via). Writing every member's copper BEFORE any disposition
+	# moves means a phase-A rollback touches ONLY the board: no member has been
+	# marked, no verdict staled, no correlation written — the workspace is
+	# bitwise what it was before the call, so "refused batch left the workspace
+	# untouched" is true by construction rather than by compensation.
+	#
 	# Bind FIRST so every history snapshot from here on carries bucket 8, then
 	# pair the pre-commit workspace layer onto the entry the undo will land on.
 	if board.has_method("bind_routing_workspace"):
@@ -1599,78 +2027,161 @@ func commit(candidate_id: String, board = null) -> Dictionary:
 	if board.has_method("attach_workspace_snapshot"):
 		board.attach_workspace_snapshot()
 
-	var net := str(c.net)
-	var trace_ids: Array = []
-	var via_ids: Array = []
+	var all_trace_ids: Array = []
+	var all_via_ids: Array = []
+	var copper: Array = []  # per-plan {trace_ids, via_ids}, index-aligned with plans
+	_commit_transaction_active = true
 	board.begin_batch()
-	for plan in seg_plan:
-		var trace = board.new_trace()
-		trace.net_name = net
-		trace.layer = str(plan["layer"])
-		trace.width = float(plan["width"])
-		for point in plan["points"]:
-			trace.waypoints.append(point)
-		board.add_trace(trace)
-		var tid := str(trace.id)
-		# Defensive only: pre-flight already proved this geometry is modelable,
-		# so a board that accepted the add and then cannot find it is a board
-		# fault, not a caller fault. Roll the batch's writes back rather than
-		# leaving half a route on the copper.
-		if tid.is_empty() or (board.has_method("get_trace") and board.get_trace(tid) == null):
-			return _rollback_commit(board, trace_ids, via_ids, candidate_id,
-				"board refused a trace for segment '%s'" % str(plan["id"]))
-		trace_ids.append(tid)
-	var dr: Dictionary = board.design_rules if board.design_rules is Dictionary else {}
-	for via_dict in via_plan:
-		var via_size := float(via_dict.get("diameter", 0.0))
-		if via_size <= 0.0:
-			via_size = float(dr.get("via_diameter_mm", 0.0))
-		if via_size <= 0.0:
-			via_size = 0.8
-		var via_drill := float(via_dict.get("drill", 0.0))
-		if via_drill <= 0.0:
-			via_drill = float(dr.get("via_drill_mm", 0.0))
-		if via_drill <= 0.0:
-			via_drill = 0.4
-		var vid := str(board.add_via({
-			"position": via_dict.get("position"),
-			"size": via_size,
-			"drill": via_drill,
-			"net_name": net,
-			"from_layer": str(via_dict.get("from_layer", "top")),
-			"to_layer": str(via_dict.get("to_layer", "bottom")),
-		}))
-		if vid.is_empty():
-			return _rollback_commit(board, trace_ids, via_ids, candidate_id,
-				"board refused a via for '%s'" % str(via_dict.get("id", "")))
-		via_ids.append(vid)
+	for pf in plans:
+		var c = pf["candidate"]
+		var cid := str(pf["candidate_id"])
+		var net := str(c.net)
+		var trace_ids: Array = []
+		var via_ids: Array = []
+		for plan in pf["seg_plan"]:
+			var trace = board.new_trace()
+			trace.net_name = net
+			trace.layer = str(plan["layer"])
+			trace.width = float(plan["width"])
+			for point in plan["points"]:
+				trace.waypoints.append(point)
+			board.add_trace(trace)
+			var tid := str(trace.id)
+			# Defensive only: pre-flight already proved this geometry is
+			# modelable, so a board that accepted the add and then cannot find
+			# it is a board fault, not a caller fault. Roll back EVERYTHING the
+			# batch has written — earlier members included, and THIS id too
+			# when the board minted one but lost the trace (Codex review P2:
+			# the failing item must be in the rollback list, not just the
+			# accepted ones).
+			if tid.is_empty() or (board.has_method("get_trace") and board.get_trace(tid) == null):
+				var rb_traces: Array = all_trace_ids + trace_ids
+				if not tid.is_empty():
+					rb_traces.append(tid)
+				_commit_transaction_active = false
+				return _rollback_commit(board, rb_traces, all_via_ids + via_ids,
+					cid, "board refused a trace for segment '%s'" % str(plan["id"]))
+			trace_ids.append(tid)
+		var dr: Dictionary = board.design_rules if board.design_rules is Dictionary else {}
+		for via_dict in pf["via_plan"]:
+			var via_size := float(via_dict.get("diameter", 0.0))
+			if via_size <= 0.0:
+				via_size = float(dr.get("via_diameter_mm", 0.0))
+			if via_size <= 0.0:
+				via_size = 0.8
+			var via_drill := float(via_dict.get("drill", 0.0))
+			if via_drill <= 0.0:
+				via_drill = float(dr.get("via_drill_mm", 0.0))
+			if via_drill <= 0.0:
+				via_drill = 0.4
+			var vid := str(board.add_via({
+				"position": via_dict.get("position"),
+				"size": via_size,
+				"drill": via_drill,
+				"net_name": net,
+				"from_layer": str(via_dict.get("from_layer", "top")),
+				"to_layer": str(via_dict.get("to_layer", "bottom")),
+			}))
+			if vid.is_empty():
+				# LIMITATION, acknowledged (Codex 1032): a board that INSERTS a
+				# via and then returns an empty handle cannot be recovered by
+				# id-list deletion — only a true board abort/snapshot could.
+				# PCBData guarantees a non-empty id for an inserted via today,
+				# so this branch only fires when nothing was inserted.
+				_commit_transaction_active = false
+				return _rollback_commit(board, all_trace_ids + trace_ids, all_via_ids + via_ids,
+					cid, "board refused a via for '%s'" % str(via_dict.get("id", "")))
+			via_ids.append(vid)
+		all_trace_ids.append_array(trace_ids)
+		all_via_ids.append_array(via_ids)
+		copper.append({"trace_ids": trace_ids, "via_ids": via_ids})
 
-	var validation_at_commit := str(c.validation)
-	# INSIDE the batch: the entry end_batch appends must show the candidate as
-	# committed, or a REDO would restore the copper without the disposition.
-	# mark_committed funnels through _apply_disposition, so the live-set half of
-	# INV-2 fires here (every candidate still live loses its verdict — the board
-	# they were scored against just gained this route's copper).
-	if not mark_committed(candidate_id, trace_ids, via_ids):
-		return _rollback_commit(board, trace_ids, via_ids, candidate_id,
-			"the candidate refused the committed transition after the copper was written")
-	var rec: Dictionary = correlations.get(candidate_id, {})
-	rec["consumed_hint_ids"] = _to_string_array(c.source_hint_ids)
-	correlations[candidate_id] = rec
-	var action := "Commit route candidate %s (%s)" % [candidate_id, net if not net.is_empty() else "no net"]
+	# ── mutation, PHASE B: dispositions, structurally non-failing ─────────────
+	# Every transition was proved legal at pre-flight and this function is
+	# synchronous (no awaits), so nothing can have changed a disposition in
+	# between — mark_committed cannot refuse here except through a programming
+	# error, and the defensive revert below exists only for that impossibility.
+	# The INV-2 stale pass is DEFERRED (see _apply_disposition): member A's
+	# commit must not stale members B..N of the same approved batch. After the
+	# loop, ONE pass fires — batch members have all left the live set by then,
+	# so exactly the candidates OUTSIDE the batch lose their verdicts.
+	var results: Array = []
+	_defer_stale_pass = true
+	_deferred_stale_needed = false
+	for i in range(plans.size()):
+		var pf: Dictionary = plans[i]
+		var c = pf["candidate"]
+		var cid := str(pf["candidate_id"])
+		var member_copper: Dictionary = copper[i]
+		if not mark_committed(cid, member_copper["trace_ids"], member_copper["via_ids"], true):
+			# Unreachable by construction — and the reentrancy guard now
+			# ENFORCES the construction (a signal handler mutating a later
+			# member is refused, see _apply_disposition), so this survives only
+			# as the emergency path for a genuine programming error. Restore
+			# every disposition this phase already moved — direct field
+			# restore, deliberately bypassing the legality table because the
+			# goal is the exact pre-batch state — then remove all copper.
+			_defer_stale_pass = false
+			_commit_transaction_active = false
+			for j in range(i):
+				var prev = plans[j]["candidate"]
+				prev.disposition = str(correlations.get(str(plans[j]["candidate_id"]), {}).get("prior_disposition", "proposed"))
+				_sync_pinned_set(str(plans[j]["candidate_id"]), str(prev.disposition))
+				_refresh_task_state(str(prev.task_id))
+				var bad_rec: Dictionary = correlations.get(str(plans[j]["candidate_id"]), {})
+				bad_rec.erase("committed_trace_ids")
+				bad_rec.erase("committed_via_ids")
+				bad_rec.erase("prior_disposition")
+				correlations[str(plans[j]["candidate_id"])] = bad_rec
+			return _rollback_commit(board, all_trace_ids, all_via_ids,
+				cid, "the candidate refused the committed transition after the copper was written")
+		var rec: Dictionary = correlations.get(cid, {})
+		rec["consumed_hint_ids"] = _to_string_array(c.source_hint_ids)
+		correlations[cid] = rec
+		results.append({
+			"candidate_id": cid,
+			"task_id": str(c.task_id),
+			"net": str(c.net),
+			"trace_ids": member_copper["trace_ids"],
+			"via_ids": member_copper["via_ids"],
+			"consumed_hint_ids": _to_string_array(c.source_hint_ids),
+			"validation_at_commit": str(pf["validation_at_commit"]),
+		})
+	_defer_stale_pass = false
+	# Guard drops BEFORE the deferred stale pass and end_batch: the batch is
+	# fully applied and consistent from here, so handlers reacting to the
+	# remaining emissions act on exactly the state single-commit handlers
+	# always did.
+	_commit_transaction_active = false
+	if _deferred_stale_needed:
+		_deferred_stale_needed = false
+		# The one INV-2 pass for the whole batch: members are terminal now, so
+		# this stales exactly the live candidates OUTSIDE the batch.
+		_stale_live_verdicts()
+
+	# History label: the single-candidate wording is preserved verbatim for a
+	# one-element batch so existing history/undo expectations stay intact.
+	var action: String
+	if results.size() == 1:
+		var net0 := str((results[0] as Dictionary).get("net", ""))
+		action = "Commit route candidate %s (%s)" % [str((results[0] as Dictionary)["candidate_id"]),
+			net0 if not net0.is_empty() else "no net"]
+	else:
+		var nets: PackedStringArray = PackedStringArray()
+		for r in results:
+			var n := str((r as Dictionary).get("net", ""))
+			if not n.is_empty() and not (n in nets):
+				nets.append(n)
+		action = "Commit %d route candidates (%s)" % [results.size(), ", ".join(nets)]
 	board.end_batch(action)
 
-	return {
-		"ok": true,
-		"candidate_id": candidate_id,
-		"task_id": str(c.task_id),
-		"task_state": task_state(str(c.task_id)),
-		"trace_ids": trace_ids,
-		"via_ids": via_ids,
-		"consumed_hint_ids": _to_string_array(c.source_hint_ids),
-		"validation_at_commit": validation_at_commit,
-		"action": action,
-	}
+	# task_state is DERIVED and read after the whole batch landed, so a batch
+	# committing two generations' tasks reports each task's final state.
+	for r in results:
+		(r as Dictionary)["task_state"] = task_state(str((r as Dictionary)["task_id"]))
+
+	return {"ok": true, "results": results, "committed_count": results.size(),
+		"trace_ids": all_trace_ids, "via_ids": all_via_ids, "action": action}
 
 
 ## Undo the writes a failing commit already made, close the batch, and report.
@@ -1720,6 +2231,11 @@ static func _verb_error(code: String, message: String, candidate_id: String = ""
 ##
 ## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
 func add_via(candidate_id: String, position: Vector2, from_layer: String, to_layer: String) -> Dictionary:
+	# Reentrancy guard (see _apply_disposition): a geometry edit mid-commit
+	# would mutate a member the transaction has already planned from.
+	if _commit_transaction_active:
+		return _verb_error(ERR_COMMIT_IN_PROGRESS,
+			"a commit transaction is applying; candidate edits from its signal handlers are refused", candidate_id)
 	var c = get_candidate(candidate_id)
 	if c == null:
 		return _verb_error(ERR_NO_CANDIDATE, "no candidate '%s' in this workspace" % candidate_id, candidate_id)
@@ -1847,6 +2363,252 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 		"tail_segment_id": str(tail["id"]),
 		"relayered_segment_ids": relayered,
 		"untouched_segment_ids": untouched_ids,
+		"candidate_revision": int(c.candidate_revision),
+		"validation": str(c.validation),
+	}
+
+
+# ── Epoch UX1 station 10 (DCR 019fd095e694): JUNCTION IDENTITY, not a bend index ──
+#
+# Docket 019fd057ea0b comment 1026 (Codex, ratified by 1027/1028): "Do not use
+# move_bend(candidate_id, bend_index, point) as the candidate API. Candidates
+# can carry disconnected paths, and a bend is commonly the shared endpoint of
+# multiple segment IDs. Use stable segment/vertex identity and atomically move
+# every coincident endpoint in that junction, or introduce explicit junction
+# identity. A flattened bend index would reintroduce the multi-path topology
+# bug class." — the same INV-3 hazard add_via's own header names.
+#
+# So a "junction" here is not an index into any one segment's points array. It
+# is EVERY point (segment endpoint, or via) across the WHOLE candidate that
+# coincides with the caller's `point`, moved together, atomically, to `to`.
+
+## Move every segment endpoint AND every via coincident with `point` (within
+## EDIT_EPS_MM — the same tight coincidence epsilon _segments_adjacent uses,
+## deliberately, so "coincident" means the same thing here as it does to the
+## connected-path graph) to `to`. A via is included because it is a POINT
+## OBJECT anchored exactly at the split it sits on (add_via's own `at`) — moving
+## the junction and leaving its via behind would orphan a hole in copper that no
+## longer touches it, the identical silent-corruption shape this station exists
+## to close, just on the via side of the graph instead of the segment side.
+##
+## AMBIGUITY IS CANDIDATE-WIDE FOR SEGMENT ENDPOINTS, THEN VIA HITS ARE
+## INTERSECTED WITH THE RESOLVED PATH (fix round, docket 019fd095e694 station
+## 10 review, P3): every matching segment endpoint is first found across the
+## WHOLE candidate (not seeded from one path), then grouped by connected-path
+## membership via _connected_path_indices (add_via's own path-scoped
+## derivation, reused verbatim rather than reimplemented). If those matches
+## span MORE than one distinct connected path, this is refused BY NAME
+## (ambiguous_junction) rather than silently acting on whichever path was
+## found first — exactly the flattened-index failure mode 1026 warned against,
+## just approached from "which point matched" instead of "which index was
+## passed". In ordinary geometry two segments sharing an exact coincident
+## endpoint are ALREADY one connected path (that coincidence IS
+## _segments_adjacent's own definition), so this refusal's real target is
+## float-noise near-misses — e.g. a router reply that went through a JSON
+## round-trip and left two logically-separate junctions a few microns apart,
+## each independently within tolerance of the caller's `point` but not of each
+## other. Only once every segment match is confirmed to belong to ONE path
+## does the move proceed. A hit VIA is NOT automatically co-moved just because
+## its position is within EDIT_EPS_MM of `point` — it must ALSO be coincident
+## (within EDIT_EPS_MM) with one of the resolved path's own matched endpoints,
+## the same "does this actually belong to the junction we resolved" question
+## the segment-ambiguity check answers, asked on the via side of the graph
+## instead of the segment side (the earlier draft of this function collected
+## via hits candidate-wide and moved every one of them unconditionally,
+## bypassing this check — a via that merely sat within tolerance of `point`
+## but belonged to a different, disconnected junction would have been dragged
+## along with a path it does not touch). A via that fails that membership test
+## is refused ambiguous_junction (it names a second, distinct junction the
+## resolved path does not reach); a bare via hit with NO segment endpoint
+## match at all (an isolated via, nothing coincident to resolve a path from)
+## is refused junction_not_found — this verb identifies a junction from
+## connected-path membership, and a via with no segment to anchor it to has no
+## path to resolve.
+##
+## DEGENERATE RESULTS ARE REFUSED, NOT EMITTED (docket 019f9cc3245d — the same
+## "no zero-length segment, ever" rule the router's own pathfinder enforces
+## worker-side, and add_via's own on-endpoint check mirrors candidate-side).
+## Simulated BEFORE any mutation: for every matched endpoint, would moving it
+## to `to` make it coincide with its OWN segment's immediate neighbour point?
+## If so, refused whole — nothing here is a partial apply. TWO MATCHED
+## ENDPOINTS THAT ARE EACH OTHER'S NEIGHBOUR (fix round, P4a) are a special
+## case of this, not an oversight: if a segment's point[i] and point[i-1] (or
+## [i+1]) are BOTH in the moved set, they already sit within 2*EDIT_EPS_MM of
+## each other (both matched `point` independently) — the leg between them is
+## effectively the SAME junction already. Moving both to the identical `to`
+## collapses that leg to EXACT zero length regardless of what `to` is, so this
+## is refused unconditionally, not by comparing a neighbour's stale pre-move
+## position against `to` (which is the wrong comparison once the neighbour is
+## itself moving).
+##
+## EDIT != POLICY (docket 019fd057ea0b comment 1028): this touches ONLY this
+## candidate's own geometry. It never reads or writes the candidate's task or
+## its routing_constraint — a direct candidate edit must never silently become
+## future router policy. A caller that wants THIS shape to survive a re-propose
+## reroutes with preserve_shape_as_corridor:true (station 9), a deliberate,
+## visible decision — not a side effect of moving a junction. NO AUTO-PIN
+## either: moving a junction does not hold the candidate against ingest: pin is
+## its own explicit verb.
+##
+## Returns {"ok": true, …} or {"ok": false, "error": <named code>, "message"}.
+func move_junction(candidate_id: String, point: Vector2, to: Vector2) -> Dictionary:
+	# Reentrancy guard (see _apply_disposition / add_via): a geometry edit mid-
+	# commit would mutate a member the transaction has already planned from.
+	if _commit_transaction_active:
+		return _verb_error(ERR_COMMIT_IN_PROGRESS,
+			"a commit transaction is applying; candidate edits from its signal handlers are refused", candidate_id)
+	var c = get_candidate(candidate_id)
+	if c == null:
+		return _verb_error(ERR_NO_CANDIDATE, "no candidate '%s' in this workspace" % candidate_id, candidate_id)
+	# A terminal candidate is not an editing surface: superseded/rejected are
+	# history, and committed is copper (edit the BOARD, not the ghost) — the
+	# exact rule add_via already enforces, mirrored verbatim.
+	if str(c.disposition) in PcbRouteCandidate.TERMINAL_DISPOSITIONS:
+		return _verb_error(ERR_NOT_EDITABLE,
+			"candidate '%s' is %s — a terminal candidate is a record, not a draft"
+				% [candidate_id, str(c.disposition)], candidate_id)
+
+	# ── 1. FIND every coincident endpoint, candidate-wide ──────────────────────
+	var hit_seg_indices: Array = []      # distinct segment indices with >=1 hit
+	var hit_endpoints: Array = []        # [{segment_index, point_index}], every hit
+	for i in range(c.segments.size()):
+		var seg = c.segments[i]
+		if not (seg is Dictionary):
+			continue
+		var pts: Array = (seg as Dictionary).get("points", [])
+		for pi in range(pts.size()):
+			if pts[pi] is Vector2 and (pts[pi] as Vector2).distance_to(point) <= EDIT_EPS_MM:
+				hit_endpoints.append({"segment_index": i, "point_index": pi})
+				if not (i in hit_seg_indices):
+					hit_seg_indices.append(i)
+
+	var hit_via_indices: Array = []
+	for vi in range(c.vias.size()):
+		var via = c.vias[vi]
+		if via is Dictionary and (via as Dictionary).get("position", null) is Vector2:
+			if (((via as Dictionary)["position"]) as Vector2).distance_to(point) <= EDIT_EPS_MM:
+				hit_via_indices.append(vi)
+
+	if hit_seg_indices.is_empty() and hit_via_indices.is_empty():
+		return _verb_error(ERR_JUNCTION_NOT_FOUND,
+			"no segment endpoint or via of candidate '%s' is within %.4fmm of %s"
+				% [candidate_id, EDIT_EPS_MM, str(point)], candidate_id)
+
+	# ── 2. AMBIGUITY: every hit segment must resolve to the SAME connected path ─
+	var resolved_path: Array = []
+	for i in hit_seg_indices:
+		var path: Array = _connected_path_indices(c, i)
+		if resolved_path.is_empty():
+			resolved_path = path
+		elif path != resolved_path:
+			return _verb_error(ERR_AMBIGUOUS_JUNCTION,
+				"%s matches junctions on more than one disconnected path of candidate '%s' — move each path's junction separately, or supply a point that identifies only one"
+					% [str(point), candidate_id], candidate_id)
+
+	# ── 2b. VIA MEMBERSHIP (P3): a hit via co-moves ONLY when it is coincident
+	# with an endpoint of the RESOLVED path — proximity to `point` alone is not
+	# enough, or a via belonging to an entirely different junction that merely
+	# happens to sit within EDIT_EPS_MM of the same query point would be dragged
+	# along with copper it does not touch.
+	if hit_seg_indices.is_empty():
+		# A via-only hit: nothing coincident to resolve a connected path from,
+		# so there is no junction here for this verb to identify.
+		if not hit_via_indices.is_empty():
+			return _verb_error(ERR_JUNCTION_NOT_FOUND,
+				"%s is within %.4fmm of a via on candidate '%s' but no segment endpoint — move_junction identifies a junction from connected-path membership, and an isolated via has no path to resolve"
+					% [str(point), EDIT_EPS_MM, candidate_id], candidate_id)
+	else:
+		for vi in hit_via_indices:
+			var via: Dictionary = c.vias[vi]
+			var via_pos: Vector2 = via.get("position", Vector2())
+			var belongs := false
+			for spec in hit_endpoints:
+				if not (int(spec["segment_index"]) in resolved_path):
+					continue
+				var seg: Dictionary = c.segments[int(spec["segment_index"])]
+				var pts: Array = seg.get("points", [])
+				var endpoint: Vector2 = pts[int(spec["point_index"])]
+				if endpoint.distance_to(via_pos) <= EDIT_EPS_MM:
+					belongs = true
+					break
+			if not belongs:
+				return _verb_error(ERR_AMBIGUOUS_JUNCTION,
+					"via '%s' is within %.4fmm of %s but not coincident with the resolved path's own junction on candidate '%s' — it belongs to a separate junction; move each separately, or supply a point that identifies only one"
+						% [str(via.get("id", "")), EDIT_EPS_MM, str(point), candidate_id], candidate_id)
+
+	# ── 3. DEGENERACY: simulate BEFORE mutating — never a partial apply ────────
+	# Index the moved set by (segment_index, point_index) so a neighbour check
+	# can tell whether ITS neighbour is ALSO moving, not just where the
+	# neighbour currently, pre-move, sits.
+	var moved_point_keys: Dictionary = {}
+	for spec in hit_endpoints:
+		moved_point_keys["%d:%d" % [int(spec["segment_index"]), int(spec["point_index"])]] = true
+
+	for spec in hit_endpoints:
+		var seg: Dictionary = c.segments[int(spec["segment_index"])]
+		var pts: Array = seg.get("points", [])
+		var si := int(spec["segment_index"])
+		var pi := int(spec["point_index"])
+		if pi > 0:
+			if moved_point_keys.has("%d:%d" % [si, pi - 1]):
+				# The previous point is itself in the moved set: both matched
+				# `point` independently, so pre-move they already sit within
+				# 2*EDIT_EPS_MM of each other — the same junction. Moving both
+				# to the identical `to` collapses this leg to EXACT zero length
+				# unconditionally; `to`'s value cannot rescue it.
+				return _verb_error(ERR_DEGENERATE_RESULT,
+					"segment '%s' has both ends of a leg coincident with %s — moving them together would collapse it to zero length"
+						% [str(seg.get("id", "")), str(point)], candidate_id)
+			elif (pts[pi - 1] as Vector2).distance_to(to) <= EDIT_EPS_MM:
+				return _verb_error(ERR_DEGENERATE_RESULT,
+					"moving %s to %s would collapse segment '%s' to zero length"
+						% [str(point), str(to), str(seg.get("id", ""))], candidate_id)
+		if pi < pts.size() - 1:
+			if moved_point_keys.has("%d:%d" % [si, pi + 1]):
+				return _verb_error(ERR_DEGENERATE_RESULT,
+					"segment '%s' has both ends of a leg coincident with %s — moving them together would collapse it to zero length"
+						% [str(seg.get("id", "")), str(point)], candidate_id)
+			elif (pts[pi + 1] as Vector2).distance_to(to) <= EDIT_EPS_MM:
+				return _verb_error(ERR_DEGENERATE_RESULT,
+					"moving %s to %s would collapse segment '%s' to zero length"
+						% [str(point), str(to), str(seg.get("id", ""))], candidate_id)
+
+	# ── 4. APPLY, atomically: every matched endpoint AND matched via moves ─────
+	var moved_segment_ids: Array = []
+	for spec in hit_endpoints:
+		var seg: Dictionary = c.segments[int(spec["segment_index"])]
+		var pts: Array = seg.get("points", [])
+		pts[int(spec["point_index"])] = to
+		seg["points"] = pts
+		var sid := str(seg.get("id", ""))
+		if not (sid in moved_segment_ids):
+			moved_segment_ids.append(sid)
+
+	var moved_via_ids: Array = []
+	for vi in hit_via_indices:
+		var via: Dictionary = c.vias[vi]
+		via["position"] = to
+		moved_via_ids.append(str(via.get("id", "")))
+
+	c.candidate_revision = int(c.candidate_revision) + 1
+	# INV-2, geometry half: this candidate's own copper moved, so its verdict is
+	# gone (mirrors add_via's own reasoning — see mark_stale).
+	mark_stale(candidate_id)
+	_bump_generation()
+	candidate_changed.emit(candidate_id)
+
+	var path_ids: Array = []
+	for i in resolved_path:
+		path_ids.append(str((c.segments[int(i)] as Dictionary).get("id", "")))
+
+	return {
+		"ok": true,
+		"candidate_id": candidate_id,
+		"from": [point.x, point.y],
+		"to": [to.x, to.y],
+		"moved_segment_ids": moved_segment_ids,
+		"moved_via_ids": moved_via_ids,
+		"path_segment_ids": path_ids,
 		"candidate_revision": int(c.candidate_revision),
 		"validation": str(c.validation),
 	}

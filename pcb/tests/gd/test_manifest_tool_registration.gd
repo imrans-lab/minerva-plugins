@@ -124,17 +124,29 @@ func _init() -> void:
 	# (minerva_pcb_workspace_propose_bus — the proposal twin of
 	# route_bus_direct; panel_tools.gd bus_propose_plan is the ONE
 	# implementation both the Shift+Enter gesture and this tool call, docket
-	# 019fcac1509d) == 71.
+	# 019fcac1509d) == 71, + 1 Epoch UX1 station 8 tool
+	# (minerva_pcb_add_route_intent — the narrow connectivity-intent verb,
+	# DCR 019fd095e694) == 72, + 1 Epoch UX1 station 10 tool
+	# (minerva_pcb_workspace_edit_candidate — the ONE discriminated
+	# candidate-edit verb, move_junction/insert_via, DCR 019fd095e694) == 73,
+	# + 1 Codex 1047 fix-round verdict-4 tool
+	# (minerva_pcb_hint_convert_to_detailed — the NAMED guided→detailed
+	# conversion that clears a singly-owned task constraint and strips the
+	# station-12 supersession marker in ordered two-store writes; NOT atomic
+	# across the two sidecars — Codex 1047 verdict 6, load-time
+	# reconciliation owns the torn shapes) == 74.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is bus-propose's bump (70 -> 71),
-	# sequenced after D0-5's (69 -> 70), C5's (68 -> 69), C4b's (70 -> 68) and
-	# C4a's (60 -> 70) — all queue behind the same serialization point.
-	check("total registered tool count == 71", registered.size() == 71,
+	# entry could hide behind it. This is the Codex 1047 verdict-4 bump
+	# (73 -> 74), sequenced after station 10's (72 -> 73), station 8's
+	# (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's (68 -> 69),
+	# C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the same
+	# serialization point.
+	check("total registered tool count == 74", registered.size() == 74,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

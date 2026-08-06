@@ -296,6 +296,11 @@ func _test_e2e_1_scenario() -> void:
 		str(r1.get("display_name", "")) == "GND", "got %s" % str(r1))
 	check("D: MCP U1.1 net_members matches UI ([U2.A])",
 		r1.get("net_members", []) == ["U2.A"], "got %s" % str(r1.get("net_members", [])))
+	# docket 019fd0ab4c65: reply now carries "position" — the pad's WORLD
+	# position in board mm, matching pcb_component.get_pin_world_position
+	# exactly (same rigid-body transform pad_at()/pin_info() use internally).
+	check("D: MCP U1.1 position matches get_pin_world_position",
+		r1.get("position", []) == [world_1.x, world_1.y], "got %s" % str(r1.get("position", [])))
 
 	var r15: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info", {"editor_name": EDITOR_NAME, "ref": "U1.15"})
 	check("D: MCP U1.15 pin_name matches UI ('3V3')",
@@ -304,18 +309,24 @@ func _test_e2e_1_scenario() -> void:
 		str(r15.get("display_name", "")) == "3V3", "got %s" % str(r15))
 	check("D: MCP U1.15 net_members matches UI ([U3.1])",
 		r15.get("net_members", []) == ["U3.1"], "got %s" % str(r15.get("net_members", [])))
+	check("D: MCP U1.15 position matches get_pin_world_position",
+		r15.get("position", []) == [world_15.x, world_15.y], "got %s" % str(r15.get("position", [])))
 
 	var r2: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info", {"editor_name": EDITOR_NAME, "ref": "U1.2"})
 	check("D: MCP U1.2 display_name = '(unconnected)'",
 		str(r2.get("display_name", "")) == "(unconnected)", "got %s" % str(r2))
 	check("D: MCP U1.2 net_members is empty",
 		(r2.get("net_members", []) as Array).is_empty(), "got %s" % str(r2.get("net_members", [])))
+	check("D: MCP U1.2 position present even though the pin is unconnected",
+		r2.get("position", []) == [world_2.x, world_2.y], "got %s" % str(r2.get("position", [])))
 
 	# x_mm/y_mm variant hits the same pad as the ref variant.
 	var r_xy: Dictionary = await registry.handle_tool_call("minerva_pcb_pin_info",
 		{"editor_name": EDITOR_NAME, "x_mm": world_1.x, "y_mm": world_1.y})
 	check("D: MCP x_mm/y_mm resolves the same pin as ref", str(r_xy.get("ref", "")) == "U1.1",
 		"got %s" % str(r_xy))
+	check("D: MCP x_mm/y_mm variant also carries position (both resolution paths covered)",
+		r_xy.get("position", []) == [world_1.x, world_1.y], "got %s" % str(r_xy.get("position", [])))
 
 	# ── E. Click empty space clears; malformed/unknown MCP refs error cleanly. ──
 	_last_pin_selected = {"__unset__": true}

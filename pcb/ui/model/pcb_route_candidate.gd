@@ -110,6 +110,24 @@ var vias: Array = []
 ## Ids of the route-hints this candidate was generated from (provenance).
 var source_hint_ids: Array[String] = []
 
+## ── P1-B (Codex 1047, consolidated review): CONSTRAINT provenance ─────────────
+## Which task-constraint revision GENERATED this candidate, and the per-hint
+## status the router reported doing it. Pre-fix these were stamped only onto
+## the immediate propose/reroute reply dictionaries — they vanished from every
+## later workspace listing and from sidecar reloads, so a candidate generated
+## against an OLD constraint (steer bumped the revision, the reroute then
+## failed) was indistinguishable from a current one and could be silently
+## committed. -1 = generated with no constraint in play (also every candidate
+## persisted before this field existed). The workspace's commit preflight
+## compares this against the governing tasks' CURRENT constraint revisions and
+## refuses a stale commit (ERR_CONSTRAINT_STALE in pcb_routing_workspace.gd).
+var constraint_revision: int = -1
+
+## Per-hint router status captured at generation ([{hint_id, status, ...}], the
+## same records the reply's hint_status carries — corridor_adherence included
+## when the router reported it). Empty when the router reported nothing.
+var hint_status: Array = []
+
 ## ── axis 1: disposition ───────────────────────────────────────────────────────
 var _disposition: String = "proposed"
 var disposition: String:
@@ -293,6 +311,8 @@ func to_dict() -> Dictionary:
 		"source_hint_ids": hints,
 		"disposition": _disposition,
 		"validation": _validation,
+		"constraint_revision": constraint_revision,
+		"hint_status": hint_status.duplicate(true),
 	}
 
 
@@ -322,6 +342,12 @@ func load_from_dict(data: Dictionary) -> void:
 	source_hint_ids.clear()
 	for h in data.get("source_hint_ids", []):
 		source_hint_ids.append(str(h))
+
+	# P1-B: absent on every pre-provenance record — defaults to -1/[] (the
+	# "generated unconstrained / unknown" shape), int() for the JSON float.
+	constraint_revision = int(data.get("constraint_revision", -1))
+	hint_status = (data.get("hint_status", []) as Array).duplicate(true) \
+		if data.get("hint_status", []) is Array else []
 
 	# Route through the validating setters (bad stored values fall back to defaults).
 	set_disposition(str(data.get("disposition", "proposed")))

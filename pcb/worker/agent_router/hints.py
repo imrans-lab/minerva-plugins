@@ -151,6 +151,13 @@ class ConnectionHint:
     ``endpoints`` are ``"Component.Pad"`` refs in AUTHORED order (source
     first) — the same identity string ``_terminal_pads`` already matches on,
     so no new notion of pad identity enters the engine.
+
+    ``constraint_revision`` (Epoch UX1 station 9, DCR 019fd095e694): set ONLY
+    when this hint's corridor came from a task's durable ``routing_constraint``
+    (the ``task_constraints`` wire channel — station 8's steering object) rather
+    than from a hint's own legacy inline waypoints. None for the legacy path,
+    so a caller can tell "this route cites steering it can re-propose against"
+    from "this route followed as-authored waypoints with no task behind them".
     """
     net: str
     endpoints: tuple[str, str]
@@ -158,6 +165,7 @@ class ConnectionHint:
     preferred_layer: Optional[str] = None
     hint_id: str = ""
     tolerance_mm: Optional[float] = None
+    constraint_revision: Optional[int] = None
 
 
 @dataclass
@@ -320,6 +328,21 @@ def parse_hints(data: dict) -> RoutingHints:
                     % (seen[key], str(c_data.get('hint_id', '')),
                        str(eps[0]), str(eps[1])))
             seen[key] = str(c_data.get('hint_id', ''))
+            _cr = c_data.get('constraint_revision')
+            # F10 (cold review, Epoch UX1 station 9): `int()` on a garbled
+            # constraint_revision must never raise — this is a general-
+            # purpose YAML loader (load_hints), so `_cr` can be whatever a
+            # human hand-editing a hints file typed. route_bridge.py's own
+            # wire boundary (hints_to_router's construction of the
+            # connection_hints dict this function consumes on THAT call path)
+            # already guards and warns; this is defense-in-depth for the
+            # OTHER caller (load_hints/YAML), where there is no warnings sink
+            # to report through — degrade to "no revision" rather than fail
+            # the whole file's parse over one bad scalar.
+            try:
+                _cr_int = int(_cr) if _cr is not None else None
+            except (TypeError, ValueError):
+                _cr_int = None
             hints.connection_hints.append(ConnectionHint(
                 net=str(c_data.get('net', '')),
                 endpoints=(str(eps[0]), str(eps[1])),
@@ -327,6 +350,7 @@ def parse_hints(data: dict) -> RoutingHints:
                 preferred_layer=c_data.get('preferred_layer'),
                 hint_id=str(c_data.get('hint_id', '')),
                 tolerance_mm=c_data.get('tolerance_mm'),
+                constraint_revision=_cr_int,
             ))
 
     # Parse global hints

@@ -94,7 +94,7 @@
     },
     {
       "name": "minerva_pcb_pin_info",
-      "description": "Pin inspector parity tool (WC-1): returns the SAME info the panel's Pin Info section shows for a pin — footprint geometry pin name, net, net members, and touching traces — plus display_name computed by the exact display rule the UI uses (geometry pin_name > net > \"(unconnected)\"). Identify the pin either by ref (\"U1.15\") or by a board point (x_mm/y_mm, hit-tests the nearest pad).",
+      "description": "Pin inspector parity tool (WC-1): returns the SAME info the panel's Pin Info section shows for a pin — footprint geometry pin name, net, net members, and touching traces — plus display_name computed by the exact display rule the UI uses (geometry pin_name > net > \"(unconnected)\"). Identify the pin either by ref (\"U1.15\") or by a board point (x_mm/y_mm, hit-tests the nearest pad). Reply also carries position:[x,y] — the pad's world position in board mm (docket 019fd0ab4c65).",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -380,7 +380,7 @@
     },
     {
       "name": "minerva_pcb_apply_route_hints",
-      "description": "Route the board's open route hints and either PROPOSE routes (default) or COMMIT them as real traces. Default (commit absent/false): runs the router over the selected open route hints and lands the results as RouteCandidates in the panel's routing workspace (no annotation is written; the board is not mutated) — resolve a candidate via minerva_pcb_workspace_commit/_reject(candidate_id), or minerva_pcb_workspace_list/get_active to inspect it first. Set commit=true to materialize the routed polylines as real traces in the board model (journaled) and transition the source hints open→applied. Partial/failed routing returns WHERE it got stuck (unrouted nets with their blocked pad pairs) as structured feedback. Iterate: edit/add hints and re-run; applied hints are excluded by default so only fresh open hints re-route.",
+      "description": "Route the board's open route hints and either PROPOSE routes (default) or COMMIT them as real traces. Default (commit absent/false): runs the router over the selected open route hints and lands the results as RouteCandidates in the panel's routing workspace (no annotation is written; the board is not mutated) — resolve a candidate via minerva_pcb_workspace_commit/_reject(candidate_id), or minerva_pcb_workspace_list/get_active to inspect it first. Set commit=true to materialize the routed polylines as real traces in the board model (journaled) and transition the source hints open→applied. Partial/failed routing returns WHERE it got stuck (unrouted nets with their blocked pad pairs) as structured feedback. Iterate: edit/add hints and re-run; applied hints are excluded by default so only fresh open hints re-route. LEGACY MIGRATION (Epoch UX1 station 12, DCR 019fd095e694): a selected non-'detailed' hint carrying inline waypoints whose task has no routing_constraint yet has that corridor seeded ONCE into a durable task constraint (authored_by \"migration\") before routing runs, and the hint's waypoints are then marked superseded and refuse further edits.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -416,6 +416,19 @@
           "id": {"type": "string", "description": "The pcb_route_hint annotation id to redo"}
         },
         "required": ["editor_name", "id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_hint_convert_to_detailed",
+      "description": "Convert a SUPERSEDED guided route hint to 'detailed', reclaiming manual waypoint control. A legacy guided hint whose inline waypoints were seeded into a task-level routing constraint (marked kind_payload.waypoints_superseded_by_constraint_revision — the station-12 migration, or a live steer) has inert waypoints: the host refuses waypoint edits and routing reads only the constraint. This named operation clears that task constraint (only when this hint singly owns it), then strips the supersession marker and the offline lock fields and sets detail_level='detailed' — ordered two-store writes, NOT a spanning transaction: a torn save is repaired by deterministic load-time reconciliation, and undo restores the annotation side only (one history step; re-run this tool to complete a half-undone conversion) — afterwards the hint's waypoints are editable again, routing follows them literally (as-drawn) on the next propose, and the hint is never re-seeded. Use it when an edit was refused with error 'waypoints_superseded' (or offline with 'live_editor_required') and you want to hand-edit the path instead of steering the constraint. Refuses by name: constraint_not_singly_owned when a merged multi-hint task owns the constraint (converting would orphan shared steering — steer via minerva_pcb_workspace_reroute_route instead), not_superseded for an ordinary unstamped hint, hint_not_found / not_a_route_hint otherwise.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "hint_id": {"type": "string", "description": "The superseded pcb_route_hint annotation id to convert"}
+        },
+        "required": ["editor_name", "hint_id"]
       }
     },
     {
@@ -886,7 +899,7 @@
     },
     {
       "name": "minerva_pcb_workspace_propose",
-      "description": "Route the open route hints into the ROUTING WORKSPACE as candidates (ghost routes), writing no proposal annotations. The workspace-native replacement for minerva_pcb_apply_route_hints' propose half: candidates carry exact per-segment layers/widths and vias, stable ids, and a disposition (proposed/pinned/superseded/rejected/committed) you act on with the other minerva_pcb_workspace_* verbs. Args {editor_name, hint_ids?}. Returns {proposed, candidates:[{candidate_id, task_id, net, generation, disposition, validation, segment_count, via_count, layers}], holds, routes_returned, unrouted, stuck, drc_summary, drc_geometric_summary, stale_candidate_ids}. HOLDS: a task whose current candidate is PINNED is HELD — the incoming candidate is NOT created and the pin stands, so candidates[] is SHORTER than routes_returned; holds[] names {task_id, held_candidate_id, net, reason} for each. Unpin or reject that candidate (or minerva_pcb_workspace_reroute_route it) to replace it.",
+      "description": "Route the open route hints into the ROUTING WORKSPACE as candidates (ghost routes), writing no proposal annotations. The workspace-native replacement for minerva_pcb_apply_route_hints' propose half: candidates carry exact per-segment layers/widths and vias, stable ids, and a disposition (proposed/pinned/superseded/rejected/committed) you act on with the other minerva_pcb_workspace_* verbs. Args {editor_name, hint_ids?}. Returns {proposed, candidates:[{candidate_id, task_id, net, generation, disposition, validation, segment_count, via_count, layers}], holds, routes_returned, unrouted, stuck, drc_summary, drc_geometric_summary, stale_candidate_ids}. HOLDS: a task whose current candidate is PINNED is HELD — the incoming candidate is NOT created and the pin stands, so candidates[] is SHORTER than routes_returned; holds[] names {task_id, held_candidate_id, net, reason} for each. Unpin or reject that candidate (or minerva_pcb_workspace_reroute_route it) to replace it. Per-component emitter capability notes now ride `emitter_notes` (when non-empty); stuck[] is unrouted pad pairs plus per-hint routing warnings only. TASK CONSTRAINTS ARE CONSUMED (Epoch UX1 station 9, DCR 019fd095e694): a selected hint whose task carries a routing_constraint (minted by minerva_pcb_add_route_intent's corridor arg, or by a prior minerva_pcb_workspace_reroute_route corridor/preserve_shape_as_corridor) steers THIS proposal's router run — the stored corridor overrides that hint's own legacy waypoints, if it even has any. Every candidate a constraint steered carries an additive `constraint_revision` key naming which revision produced it. LEGACY MIGRATION (Epoch UX1 station 12): a selected non-'detailed' hint carrying inline waypoints whose task has no routing_constraint yet has that corridor seeded ONCE into a durable task constraint (authored_by \"migration\") before this run, and the hint's waypoints are then marked superseded and refuse further edits.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -967,26 +980,30 @@
     },
     {
       "name": "minerva_pcb_workspace_commit",
-      "description": "COMMIT a route candidate (the DCR's Accept): its exact geometry becomes REAL COPPER on the board — one trace per candidate segment on that segment's own layer and width, plus its vias — and the candidate becomes 'committed', in ONE UNDOABLE STEP. A single undo removes the copper AND returns the candidate to its pre-commit disposition; the two can never drift apart. Args {editor_name, candidate_id}. Returns {candidate_id, task_id, task_state, trace_ids, via_ids, consumed_hint_ids, validation_at_commit, candidate, stale_candidate_ids}. Source hints are CONSUMED BY RECORD, not deleted — no annotation is removed, so nothing outside the undo step happens. ALL validation precedes ALL mutation: a refused commit (illegal transition, a segment with fewer than two points, a zero width, an illegal via span) leaves the board, the disposition and the history untouched. validation_at_commit reports the candidate's DRC state at the moment it became copper; committing an unchecked or violating candidate is allowed and reported, never silently blessed.",
+      "description": "COMMIT route candidates (the DCR's Accept): exact geometry becomes REAL COPPER on the board — contiguous same-layer/-width segments chain into ONE polyline trace each (docket 019fce6184c2), plus vias — and each candidate becomes 'committed', in ONE UNDOABLE STEP. Pass EXACTLY ONE of candidate_id (single) or candidate_ids (BATCH, docket 019fd0ab6dd2). A batch is one history entry and ONE undo reverting every member's copper and disposition together, and each member's validation_at_commit is its PRE-batch verdict — sequential single commits would mark clean batch-mates stale purely from the sibling's own revision bump. Single form returns {candidate_id, task_id, task_state, trace_ids, via_ids, consumed_hint_ids, validation_at_commit, candidate, stale_candidate_ids}; batch form returns {results:[per-member], committed_count, trace_ids, via_ids, candidates, stale_candidate_ids}. Source hints are CONSUMED BY RECORD, not deleted. ALL validation precedes ALL mutation across the WHOLE batch: any refusal (illegal transition, unmodelable geometry, duplicate id) leaves the board, dispositions and history untouched and names the offending candidate. Committing an unchecked or violating candidate is allowed and reported, never silently blessed.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list). Mutually exclusive with candidate_ids."},
+          "candidate_ids": {"type": "array", "items": {"type": "string"}, "description": "Candidate ids to commit as ONE undoable batch. Mutually exclusive with candidate_id."}
         },
-        "required": ["editor_name", "candidate_id"]
+        "required": ["editor_name"]
       }
     },
     {
       "name": "minerva_pcb_workspace_reroute_route",
-      "description": "TRY AGAIN on a whole route: re-run the router scoped to this candidate's own source hints and land a NEW generation for the same task. Args {editor_name, candidate_id}. Returns the propose-shaped reply plus {rerouted_candidate_id, prior_task_id, same_task}. The router runs FIRST and the prior candidate is retired only after it answers, so a routing failure never leaves the task with no answer at all. Refused by name when the candidate has already left the live set, or when it carries no source route-hint provenance (no_source_hints) — the panel's router bridge can only scope a run by hint selection today, so an unaddressable reroute would silently become a whole-board run.",
+      "description": "TRY AGAIN on a whole route: re-run the router scoped to this candidate's own source hints and land a NEW generation for the same task. Args {editor_name, candidate_id, corridor?, preserve_shape_as_corridor?, expected_constraint_revision?}. Returns the propose-shaped reply plus {rerouted_candidate_id, prior_task_id, same_task}. The router runs FIRST and the prior candidate is retired only after it answers, so a routing failure never leaves the task with no answer at all. Refused by name when the candidate has already left the live set, or when it carries no source route-hint provenance (no_source_hints) — the panel's router bridge can only scope a run by hint selection today, so an unaddressable reroute would silently become a whole-board run. STEERING (Epoch UX1 station 9, DCR 019fd095e694, docket 019fd057ea0b comment 1028): `corridor` (Array of {x_mm,y_mm}) REPLACES the candidate's task's durable routing_constraint with this corridor, bumping its revision; `preserve_shape_as_corridor` (bool) DERIVES that new corridor from the candidate's OWN current geometry instead, before this same call reroutes it away — the visible alternative to a hidden 'promote edit to steering' verb. The two are mutually exclusive BY PRESENCE (refused corridor_args_conflict if both keys are sent). `expected_constraint_revision` (int; 0 for an unconstrained task) is optimistic concurrency on the task's constraint — a mismatch refuses constraint_revision_conflict naming the actual revision and steers nothing. preserve_shape_as_corridor is refused multi_span_task when the candidate's task answers more than one hint (no single owner for the derived corridor), and no_single_path when the candidate's own geometry is more than one disconnected run (it is never bridged with a fabricated jump); an explicit corridor:[] is refused corridor_present_but_empty. ALL of these preconditions — candidate exists, its disposition can still reach superseded, its source hints are still present, and (when steering) the task/revision/corridor checks above — are checked BEFORE anything is written. DURABILITY: only once every precondition has passed is the constraint written, BEFORE the router runs — a router failure after that point (worker unavailable, etc.) leaves the bumped constraint standing rather than undoing it, and the failure reply says so: it carries `steered:true` and the NEW `constraint_revision` so the bump is never silent — pass that revision, not whatever you read before this call, as expected_constraint_revision on a retry.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "candidate_id": {"type": "string", "description": "Candidate id to reroute"}
+          "candidate_id": {"type": "string", "description": "Candidate id to reroute"},
+          "corridor": {"type": "array", "items": {"type": "object", "properties": {"x_mm": {"type": "number"}, "y_mm": {"type": "number"}}}, "description": "Replaces the candidate's task routing_constraint with this corridor before rerouting (bumps its revision). Mutually exclusive with preserve_shape_as_corridor by presence."},
+          "preserve_shape_as_corridor": {"type": "boolean", "description": "Derive the new task corridor from this candidate's CURRENT geometry before rerouting it away, instead of passing corridor explicitly. Mutually exclusive with corridor by presence."},
+          "expected_constraint_revision": {"type": "integer", "description": "Optimistic concurrency: the task's constraint_revision you last read (0 if the task was unconstrained). A mismatch refuses constraint_revision_conflict rather than steering. Only consulted when corridor or preserve_shape_as_corridor:true is also given."}
         },
         "required": ["editor_name", "candidate_id"]
       }
@@ -1079,6 +1096,71 @@
           "width_override": {"type": "number", "description": "Uniform trace width in mm for every net (optional). Omit/0 to auto-derive each net's width from its widest existing trace, else the board default."}
         },
         "required": ["editor_name", "nets", "points"]
+      }
+    },
+    {
+      "name": "minerva_pcb_add_route_intent",
+      "description": "Author a ROUTE INTENT — connectivity between two pins, no routing performed (Epoch UX1 station 8, DCR 019fd095e694). Atomically creates: (a) a pcb_route_hint annotation carrying ONLY source_pin/dest_pin/note — waypoints is always empty; the corridor NEVER lands on this object. (b) an eagerly-created RouteTask in the routing workspace (task_id \"NET|hint_id\"): a later propose of THIS hint alone reuses that same task, and a propose that merges this intent's route with another open intent's on the same net (one worker-attributed answer naming both hint ids) ABSORBS both eager tasks into the merged one — carrying over a solitary routing_constraint (two conflicting ones are dropped, with a warning) — rather than orphaning either eager task or minting a third (cold review H3-1). (c) when `corridor` is given, a routing_constraint stored ON THE TASK ({corridor_points, revision:1, authored_by:\"ai\", base_board_revision}) — durable steering with one authoritative home, distinct from the connectivity annotation. minerva_pcb_workspace_propose CONSUMES this constraint (Epoch UX1 station 9): it steers that proposal's router run and the landed candidate carries the constraint_revision that produced it. source_pin and dest_pin must already share exactly one net (connect them first with minerva_pcb_connect_net otherwise). Deleting the intent annotation before it is answered cascades: its still-candidate-less eager task is dropped too (a task any candidate has landed on is left alone). Returns {success, hint_id, task_id, net, ref?, constraint_revision?, note} where note names the legal next step (minerva_pcb_workspace_propose or minerva_pcb_apply_route_hints with hint_ids:[hint_id]), or a named refusal: pin_unresolvable, cross_net_pins, single_endpoint_only, workspace_unavailable, annotation_rejected.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "source_pin": {"type": "string", "description": "Source pin ref \"Component.Pin\", e.g. \"BAT1.1\"."},
+          "dest_pin": {"type": "string", "description": "Destination pin ref \"Component.Pin\", e.g. \"D1.2\". Must resolve to the SAME net as source_pin."},
+          "note": {"type": "string", "description": "Optional discussion text carried on the intent annotation."},
+          "corridor": {
+            "type": "array",
+            "description": "Optional initial steering corridor, board mm, in order. Stored on the eagerly-created RouteTask's routing_constraint (revision 1) — never on the intent annotation. Read by minerva_pcb_workspace_propose and minerva_pcb_workspace_reroute_route (Epoch UX1 station 9): a selected hint whose task carries this constraint has it override the hint's own waypoints for that router run, and the landed candidate cites the constraint's revision. An EXPLICITLY EMPTY array (corridor: []) is refused (\"corridor present but empty\") rather than silently treated as \"no corridor\" — omit the key entirely for that.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          }
+        },
+        "required": ["editor_name", "source_pin", "dest_pin"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_edit_candidate",
+      "description": "Edit ONE candidate's own geometry — the ONE discriminated candidate-edit verb (Epoch UX1 station 10, DCR 019fd095e694, docket 019fd057ea0b comments 1026/1028). EDIT != POLICY: this touches only the named candidate — never its task, never its routing_constraint — and it does NOT pin. To make an edited shape survive the next re-propose, reroute with minerva_pcb_workspace_reroute_route's preserve_shape_as_corridor:true instead; to hold this exact candidate against a batch re-propose, pin it explicitly (minerva_pcb_workspace_pin). Args {editor_name, candidate_id, op, expected_candidate_revision?, …op args}. op == \"move_junction\" (args point:[x_mm,y_mm], to:[x_mm,y_mm]): junction IDENTITY, not a flattened bend index — a candidate can carry ≥2 DISCONNECTED copper paths (INV-3), and a bend is commonly the shared endpoint of multiple segment ids, so every segment endpoint AND every via coincident with point (within the same tight epsilon the segment graph's own adjacency test uses) moves atomically to to. Refused BY NAME: junction_not_found (nothing coincident with point), ambiguous_junction (point matches junctions on more than one of this candidate's disconnected paths — move each path's junction separately, or supply a point that identifies only one), degenerate_result (the move would collapse a segment to zero length — never emitted, docket 019f9cc3245d). Moving a route's TERMINAL endpoint (the end that anchors a pad on a real board) is an ALLOWED edit, not refused — it detaches the draft's copper from that pad, but this candidate's staled validation and bumped candidate_revision are exactly what a subsequent check/commit exists to report, not a gap this tool needs to close itself. op == \"insert_via\" (args position:[x_mm,y_mm], from_layer, to_layer): DELEGATES verbatim to the existing RoutingWorkspace.add_via — the path-scoped via/layer edit entry INV-3 names, not reimplemented. Its own named refusals (illegal_via_span, no_segment_at_point, degenerate_insert_at_endpoint, degenerate_insert_on_via, segment_locked, from_layer_mismatch) pass through unchanged. CONCURRENCY (symmetric with station 9's expected_constraint_revision): expected_candidate_revision, when given, is checked against the candidate's CURRENT candidate_revision BEFORE either op runs — a mismatch refuses candidate_revision_conflict {candidate_id, expected_candidate_revision, actual_candidate_revision} and mutates nothing; a successful edit bumps candidate_revision and the reply reports the new one — chain a second edit with THAT number, not whatever was read before this call. Both ops refuse a TERMINAL candidate (committed/rejected/superseded) by name (candidate_not_editable) — a terminal candidate is a record, not a draft.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id to edit (from minerva_pcb_workspace_list)"},
+          "op": {"type": "string", "enum": ["move_junction", "insert_via"], "description": "Which candidate-local geometry edit to perform."},
+          "point": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "move_junction only: [x_mm, y_mm] — the junction's CURRENT position. Every segment endpoint and via coincident with this point, on ONE connected path, moves atomically."
+          },
+          "to": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "move_junction only: [x_mm, y_mm] — where the junction moves to."
+          },
+          "position": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "insert_via only: [x_mm, y_mm] — where to split a segment and insert a via. Delegates verbatim to RoutingWorkspace.add_via."
+          },
+          "from_layer": {"type": "string", "description": "insert_via only: the layer the copper AT position is actually on — a mismatch is refused (from_layer_mismatch), never silently corrected."},
+          "to_layer": {"type": "string", "description": "insert_via only: the layer the via's downstream run flips to."},
+          "expected_candidate_revision": {"type": "integer", "description": "Optimistic concurrency: the candidate_revision you last read. A mismatch refuses candidate_revision_conflict rather than editing anything."}
+        },
+        "required": ["editor_name", "candidate_id", "op"]
       }
     }
   ],

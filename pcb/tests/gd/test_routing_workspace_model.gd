@@ -47,6 +47,9 @@ func _init() -> void:
 	_run_board_revision()
 	_run_inv1_undo()
 	_run_batch()
+	_run_commit_batch()
+	_run_commit_batch_review_round()
+	_run_commit_batch_reentrancy()
 	_run_via_span()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
@@ -82,8 +85,28 @@ func _run_roundtrip() -> void:
 		{"component": "U1", "pin": "3", "position": Vector2(1, 2)},
 		{"component": "U2", "pin": "7", "position": Vector2(9, 4)},
 	]
-	var task2 = PcbRouteTask.from_dict(task.to_dict())
+	# V8 (Codex 1047): the station-12 seeding provenance keys survive a REAL
+	# JSON round-trip as exact ints — JSON.parse_string returns whole numbers
+	# as floats, and _constraint_from_json must normalise them back.
+	task.routing_constraint = {
+		"corridor_points": [Vector2(1, 1), Vector2(2, 1)],
+		"preferred_layer": "F.Cu", "revision": 1, "authored_by": "migration",
+		"base_board_revision": 4, "owner_hint_id": "h1",
+		"seeded_from_hint_id": "h1", "seeded_from_hint_revision": 2,
+	}
+	var task2 = PcbRouteTask.from_dict(JSON.parse_string(JSON.stringify(task.to_dict())))
 	check_eq("task round-trip task_id", task2.task_id, "task_1")
+	var rc2: Dictionary = task2.routing_constraint
+	check_eq("constraint JSON round-trip revision (int)", rc2.get("revision"), 1)
+	check("constraint JSON round-trip revision is TYPE_INT",
+		typeof(rc2.get("revision")) == TYPE_INT)
+	check_eq("constraint JSON round-trip seeded_from_hint_revision (int, V8)",
+		rc2.get("seeded_from_hint_revision"), 2)
+	check("constraint JSON round-trip seeded_from_hint_revision is TYPE_INT (V8)",
+		typeof(rc2.get("seeded_from_hint_revision")) == TYPE_INT)
+	check_eq("constraint JSON round-trip seeded_from_hint_id", str(rc2.get("seeded_from_hint_id", "")), "h1")
+	check("constraint JSON round-trip corridor point is Vector2",
+		(rc2.get("corridor_points", []) as Array)[0] is Vector2)
 	check_eq("task round-trip net", task2.net, "N1")
 	check_eq("task round-trip endpoint count", task2.endpoints.size(), 2)
 	check_eq("task round-trip endpoint pin", str(task2.endpoints[0].get("pin", "")), "3")
@@ -105,8 +128,13 @@ func _run_roundtrip() -> void:
 	cand.add_via(PcbRouteCandidate.make_via("via_1", Vector2(5, 0), "top", "bottom", 0.8, 0.4, true))
 	cand.disposition = "pinned"
 	cand.validation = "clean"
+	# P1-B (Codex 1047): constraint provenance is durable candidate state and
+	# must survive persistence — through a REAL JSON round-trip (sidecar shape),
+	# with the int normalised back from JSON's float.
+	cand.constraint_revision = 2
+	cand.hint_status = [{"hint_id": "h1", "status": "corridor_honored"}]
 
-	var cand2 = PcbRouteCandidate.from_dict(cand.to_dict())
+	var cand2 = PcbRouteCandidate.from_dict(JSON.parse_string(JSON.stringify(cand.to_dict())))
 	check_eq("cand round-trip candidate_id", cand2.candidate_id, "cand_1")
 	check_eq("cand round-trip task_id", cand2.task_id, "task_1")
 	check_eq("cand round-trip net", cand2.net, "N1")
@@ -129,6 +157,20 @@ func _run_roundtrip() -> void:
 	check_eq("cand round-trip via locked", bool(cand2.vias[0].get("locked", false)), true)
 	check_eq("cand round-trip disposition axis", cand2.disposition, "pinned")
 	check_eq("cand round-trip validation axis", cand2.validation, "clean")
+	check_eq("cand round-trip constraint_revision (int, P1-B)", cand2.constraint_revision, 2)
+	check("cand round-trip constraint_revision is TYPE_INT (P1-B)",
+		typeof(cand2.constraint_revision) == TYPE_INT)
+	check_eq("cand round-trip hint_status size (P1-B)", cand2.hint_status.size(), 1)
+	if cand2.hint_status.size() == 1:
+		check_eq("cand round-trip hint_status entry hint_id",
+			str((cand2.hint_status[0] as Dictionary).get("hint_id", "")), "h1")
+	# A PRE-provenance record (absent keys) restores to the sentinel shape.
+	var legacy_dict: Dictionary = cand.to_dict()
+	legacy_dict.erase("constraint_revision")
+	legacy_dict.erase("hint_status")
+	var cand3 = PcbRouteCandidate.from_dict(legacy_dict)
+	check_eq("pre-provenance record defaults constraint_revision to -1", cand3.constraint_revision, -1)
+	check("pre-provenance record defaults hint_status to empty", cand3.hint_status.is_empty())
 
 	# RoutingWorkspace + counter high-water
 	var ws = PcbRoutingWorkspace.new()
@@ -405,3 +447,285 @@ func _run_via_span() -> void:
 	# Round-trip keeps the illegal via (model does not drop it).
 	var c2 = PcbRouteCandidate.from_dict(c.to_dict())
 	check_eq("illegal via survives round-trip", c2.vias.size(), 2)
+
+
+# ── 7b. commit_batch (docket 019fd0ab6dd2) ────────────────────────────────────
+#
+# Sequential single commits punished an approved batch: the first commit's
+# revision bump marked its CLEAN siblings stale, so commits 2..N reported
+# validation_at_commit "stale" on geometry nothing had invalidated but their
+# own batch-mate. commit_batch is INV-1 across the whole batch: all validation
+# before any mutation, one history entry, one revision bump, one undo, and
+# every member reports its PRE-batch verdict.
+
+## A proposed candidate on `net` with two CHAINED same-layer segments — the
+## chaining path (019fce6184c2) must hold inside a batch exactly as it does in
+## a single commit, so each member lands ONE polyline trace, not two.
+func _batch_candidate(ws, net: String, x0: float) -> String:
+	var c = PcbRouteCandidate.new()
+	c.net = net
+	# First-execution fix (boundary run): the fixture must mint a TASK too —
+	# add_candidate only ensures a task for a non-empty task_id, and 7c's
+	# "task states still open after rollback" assertion reads task_state(),
+	# which is "" for a task that never existed. Same "<net>|<hints>" key
+	# shape production uses; the fixture hint id is inert (no constraints).
+	c.task_id = "%s|batch_fixture" % net
+	c.add_segment(PcbRouteCandidate.make_segment("", "top", 0.3,
+		[Vector2(x0, 0), Vector2(x0 + 5, 0)]))
+	c.add_segment(PcbRouteCandidate.make_segment("", "top", 0.3,
+		[Vector2(x0 + 5, 0), Vector2(x0 + 5, 5)]))
+	c.validation = "clean"
+	return str(ws.add_candidate(c))
+
+
+func _run_commit_batch() -> void:
+	print("-- 7b. commit_batch: one step, one bump, pre-batch verdicts --")
+
+	# ── the self-staling regression, stated as the CONTRAST first ─────────────
+	# Sequential path (the old workflow): committing A stales B (INV-2, correct
+	# for candidates outside a batch), so B's own commit reports "stale".
+	var ws_seq = PcbRoutingWorkspace.new()
+	var data_seq = PCBData.new()
+	var a_seq := _batch_candidate(ws_seq, "N1", 0.0)
+	var b_seq := _batch_candidate(ws_seq, "N2", 20.0)
+	var first: Dictionary = ws_seq.commit(a_seq, data_seq)
+	check("sequential: first commit ok", bool(first.get("ok", false)))
+	check_eq("sequential: INV-2 staled the sibling",
+		str(ws_seq.get_candidate(b_seq).validation), "stale")
+	var second: Dictionary = ws_seq.commit(b_seq, data_seq)
+	check_eq("sequential: sibling reports the staleness its batch-mate caused",
+		str(second.get("validation_at_commit", "")), "stale")
+
+	# ── the batch path: same setup, ONE call ──────────────────────────────────
+	var ws = PcbRoutingWorkspace.new()
+	var data = PCBData.new()
+	data.save_to_history("baseline")
+	var hist_before := int(data.history.size())
+	var rev_before := int(data.board_revision)
+	var a := _batch_candidate(ws, "N1", 0.0)
+	var b := _batch_candidate(ws, "N2", 20.0)
+
+	var out: Dictionary = ws.commit_batch([a, b], data)
+	check("batch commit ok", bool(out.get("ok", false)))
+	check_eq("batch committed_count", int(out.get("committed_count", 0)), 2)
+	var results: Array = out.get("results", [])
+	check_eq("batch results per member", results.size(), 2)
+	check_eq("member A reports its PRE-batch verdict",
+		str((results[0] as Dictionary).get("validation_at_commit", "")), "clean")
+	check_eq("member B reports its PRE-batch verdict — NOT the staleness A caused",
+		str((results[1] as Dictionary).get("validation_at_commit", "")), "clean")
+	check_eq("both dispositions committed (A)", str(ws.get_candidate(a).disposition), "committed")
+	check_eq("both dispositions committed (B)", str(ws.get_candidate(b).disposition), "committed")
+
+	# ONE history entry, ONE revision bump — the batch is one undoable step.
+	check_eq("batch adds exactly ONE history entry", data.history.size(), hist_before + 1)
+	check_eq("batch does exactly ONE revision bump", data.board_revision, rev_before + 1)
+
+	# Chained segments landed as ONE polyline trace per member (019fce6184c2).
+	check_eq("one trace per member (chaining holds in batch)", data.get_trace_count(), 2)
+	check_eq("member A trace_ids", ((results[0] as Dictionary).get("trace_ids", []) as Array).size(), 1)
+	var t = data.get_trace(str(((results[0] as Dictionary).get("trace_ids", []) as Array)[0]))
+	check("member A trace exists on the board", t != null)
+	if t != null:
+		check_eq("member A trace walks the full 3-point chain", (t.waypoints as Array).size(), 3)
+
+	# One undo reverts EVERY member's copper together.
+	data.undo()
+	check_eq("one undo reverts the whole batch's copper", data.get_trace_count(), 0)
+
+	# ── refusals: all validation precedes all mutation, across the batch ──────
+	var ws2 = PcbRoutingWorkspace.new()
+	var data2 = PCBData.new()
+	data2.save_to_history("baseline")
+	var h2 := int(data2.history.size())
+	var good := _batch_candidate(ws2, "N1", 0.0)
+	var bad := _batch_candidate(ws2, "N2", 20.0)
+	check("fixture: reject the second member", ws2.reject(bad))
+
+	var refused: Dictionary = ws2.commit_batch([good, bad], data2)
+	check("a batch with one illegal member refuses WHOLE", not bool(refused.get("ok", true)))
+	check_eq("the refusal names the offending candidate",
+		str(refused.get("candidate_id", "")), bad)
+	check_eq("refused batch wrote NOTHING", data2.get_trace_count(), 0)
+	check_eq("refused batch left NO history entry", data2.history.size(), h2)
+	check_eq("the legal member was not committed either",
+		str(ws2.get_candidate(good).disposition), "proposed")
+
+	var dup: Dictionary = ws2.commit_batch([good, good], data2)
+	check("duplicate id in one batch refuses by name", not bool(dup.get("ok", true)))
+	check_eq("duplicate refusal wrote nothing", data2.get_trace_count(), 0)
+
+	var empty: Dictionary = ws2.commit_batch([], data2)
+	check("empty batch refuses", not bool(empty.get("ok", true)))
+
+	# ── single-candidate wrapper compatibility ────────────────────────────────
+	# commit() now delegates to commit_batch([id]); its reply keys and its
+	# history action label are the PRE-batch shape, byte for byte.
+	var single: Dictionary = ws2.commit(good, data2)
+	check("wrapper single commit ok", bool(single.get("ok", false)))
+	for key in ["candidate_id", "task_id", "task_state", "trace_ids", "via_ids",
+			"consumed_hint_ids", "validation_at_commit", "action"]:
+		check("wrapper reply carries '%s'" % key, single.has(key))
+	check("wrapper keeps the single-candidate action label",
+		str(single.get("action", "")).begins_with("Commit route candidate %s" % good))
+
+
+# ── 7c. commit_batch: Codex review round (question 019fd0bf2a04) ──────────────
+#
+# The review's two P1s, as tests: (1) batch members must keep their PRE-batch
+# validation STATE — not merely report it — while candidates OUTSIDE the batch
+# are the only ones INV-2 stales; (2) a mid-batch board fault must leave the
+# WORKSPACE bitwise untouched (phase A writes copper before any disposition
+# moves, so a fault has nothing to compensate). Plus the undo-restores-
+# dispositions pairing and the review's "most important missing test".
+
+## Board double for fault injection: swallows the Nth add_trace, so the trace
+## is minted but never registered — get_trace() returns null and the defensive
+## rollback branch fires, exactly the board-fault shape the atomicity claim
+## covers.
+class SabotageBoard extends PCBData:
+	var swallow_at := 2
+	var _adds := 0
+	func add_trace(trace) -> void:
+		_adds += 1
+		if _adds == swallow_at:
+			return
+		super.add_trace(trace)
+
+
+func _run_commit_batch_review_round() -> void:
+	print("-- 7c. commit_batch review round: state retention, outside-only stale, fault atomicity --")
+
+	# ── success path: STATE retention + outside-only INV-2 ────────────────────
+	var ws = PcbRoutingWorkspace.new()
+	var data = PCBData.new()
+	data.save_to_history("baseline")
+	var a := _batch_candidate(ws, "N1", 0.0)
+	var b := _batch_candidate(ws, "N2", 20.0)
+	var outside := _batch_candidate(ws, "N3", 40.0)  # NOT in the batch
+
+	var out: Dictionary = ws.commit_batch([a, b], data)
+	check("review batch ok", bool(out.get("ok", false)))
+	# P1 regression: the members' LIVE STATE keeps the pre-batch verdict — the
+	# deferred pass never touched them (they were terminal when it ran).
+	check_eq("member A STATE keeps pre-batch verdict", str(ws.get_candidate(a).validation), "clean")
+	check_eq("member B STATE keeps pre-batch verdict — not staled by A's commit",
+		str(ws.get_candidate(b).validation), "clean")
+	# INV-2 still fires — for exactly the candidates OUTSIDE the batch.
+	check_eq("outside candidate IS staled (INV-2 preserved)",
+		str(ws.get_candidate(outside).validation), "stale")
+
+	# Undo pairing: one undo restores copper AND every member's disposition.
+	data.undo()
+	check_eq("undo removes the batch copper", data.get_trace_count(), 0)
+	check_eq("undo restores member A disposition", str(ws.get_candidate(a).disposition), "proposed")
+	check_eq("undo restores member B disposition", str(ws.get_candidate(b).disposition), "proposed")
+
+	# ── the review's "most important missing test": mid-batch board fault ─────
+	var ws2 = PcbRoutingWorkspace.new()
+	var board2 = SabotageBoard.new()
+	board2.save_to_history("baseline")
+	var h2 := int(board2.history.size())
+	var a2 := _batch_candidate(ws2, "N1", 0.0)
+	var b2 := _batch_candidate(ws2, "N2", 20.0)
+	board2.swallow_at = 2  # member B's (chained, single) trace gets swallowed
+
+	var refused: Dictionary = ws2.commit_batch([a2, b2], board2)
+	check("mid-batch board fault refuses", not bool(refused.get("ok", true)))
+	check_eq("fault names the failing member", str(refused.get("candidate_id", "")), b2)
+	# BOARD: all copper rolled back — including member A's already-written trace.
+	check_eq("no copper survives the fault", board2.get_trace_count(), 0)
+	# WORKSPACE: bitwise pre-batch — phase ordering means no disposition, no
+	# verdict, no correlation ever moved before the fault.
+	check_eq("member A disposition untouched", str(ws2.get_candidate(a2).disposition), "proposed")
+	check_eq("member B disposition untouched", str(ws2.get_candidate(b2).disposition), "proposed")
+	check_eq("member A verdict untouched", str(ws2.get_candidate(a2).validation), "clean")
+	check_eq("member B verdict untouched", str(ws2.get_candidate(b2).validation), "clean")
+	check("no committed copper ids recorded for A",
+		(ws2.committed_copper_ids(a2).get("trace_ids", []) as Array).is_empty())
+	check("no committed copper ids recorded for B",
+		(ws2.committed_copper_ids(b2).get("trace_ids", []) as Array).is_empty())
+	check_eq("task states still open (A)", str(ws2.task_state(str(ws2.get_candidate(a2).task_id))), "open")
+	# The rolled-back batch leaves exactly ONE redundant (board-identical)
+	# history entry — the documented _rollback_commit shape, never a wrong one.
+	check_eq("rollback leaves at most one redundant history entry",
+		int(board2.history.size()), h2 + 1)
+	# And the workspace remains fully usable: the same batch commits cleanly on
+	# a healthy board afterwards.
+	var board3 = PCBData.new()
+	var retry: Dictionary = ws2.commit_batch([a2, b2], board3)
+	check("the refused batch commits cleanly after the fault", bool(retry.get("ok", false)))
+
+
+# ── 7d. commit_batch: reentrancy + ghost-id (Codex re-review 1032) ────────────
+
+## Board double for the "minted a non-empty id, then lookup fails" branch: the
+## trace IS inserted and an id IS minted, but get_trace cannot find the
+## sabotaged one — the defensive check must fire AND the rollback list must
+## include that id so removal is attempted (and, because the insert was real,
+## succeeds).
+class GhostIdBoard extends PCBData:
+	var ghost_at := 2
+	var _adds := 0
+	var _ghost_id := ""
+	func add_trace(trace) -> void:
+		_adds += 1
+		super.add_trace(trace)
+		if _adds == ghost_at:
+			_ghost_id = str(trace.id)
+	func get_trace(trace_id: String):
+		if not _ghost_id.is_empty() and trace_id == _ghost_id:
+			return null
+		return super.get_trace(trace_id)
+
+
+func _run_commit_batch_reentrancy() -> void:
+	print("-- 7d. commit_batch: reentrant handlers refused; ghost-id rollback --")
+
+	# ── reentrancy: a candidate_changed handler tries to reject the NEXT
+	# member mid-transaction. The verb must refuse by name and the batch must
+	# complete atomically. ──────────────────────────────────────────────────────
+	var ws = PcbRoutingWorkspace.new()
+	var data = PCBData.new()
+	var a := _batch_candidate(ws, "N1", 0.0)
+	var b := _batch_candidate(ws, "N2", 20.0)
+	var handler_results: Array = []
+	ws.candidate_changed.connect(func(changed_id: String) -> void:
+		# Fires synchronously from phase B. Attacking the other member: if the
+		# guard is missing, this rejects B before its own mark_committed runs.
+		# last_transition_error is captured AT REFUSAL TIME (first-execution
+		# fix, boundary run): the field's documented contract is "empty when
+		# the last move was legal", so the batch's OWN later legal moves
+		# (member B's mark_committed) clear it before the post-batch reads
+		# below could see it.
+		if changed_id == a:
+			handler_results.append(ws.reject(b))
+			handler_results.append(ws.last_transition_error.duplicate(true)))
+
+	var out: Dictionary = ws.commit_batch([a, b], data)
+	check("batch completed despite the mutating handler", bool(out.get("ok", false)))
+	check_eq("both members committed (A)", str(ws.get_candidate(a).disposition), "committed")
+	check_eq("both members committed (B)", str(ws.get_candidate(b).disposition), "committed")
+	check("the reentrant reject was invoked", handler_results.size() >= 2)
+	check("the reentrant reject was REFUSED", handler_results.size() >= 2 and handler_results[0] == false)
+	check_eq("…by name", str((handler_results[1] as Dictionary).get("error", ""))
+		if handler_results.size() >= 2 else "",
+		PcbRoutingWorkspace.ERR_COMMIT_IN_PROGRESS)
+
+	# ── ghost-id: minted id, failed lookup → id IS in the rollback list ───────
+	var ws2 = PcbRoutingWorkspace.new()
+	var board2 = GhostIdBoard.new()
+	board2.save_to_history("baseline")
+	var a2 := _batch_candidate(ws2, "N1", 0.0)
+	var b2 := _batch_candidate(ws2, "N2", 20.0)
+	board2.ghost_at = 2  # member B's trace: inserted, id minted, lookup fails
+
+	var refused: Dictionary = ws2.commit_batch([a2, b2], board2)
+	check("ghost-id fault refuses", not bool(refused.get("ok", true)))
+	# The ghost trace was REALLY inserted; only rollback removal can clear it.
+	# trace_count == 0 therefore proves the minted id reached the rollback
+	# list and remove_trace ran for it — the exact branch 1032 flagged as
+	# untested by the swallowing double.
+	check_eq("rollback removed the ghost trace too", board2.get_trace_count(), 0)
+	check_eq("member A untouched", str(ws2.get_candidate(a2).disposition), "proposed")
+	check_eq("member A verdict untouched", str(ws2.get_candidate(a2).validation), "clean")

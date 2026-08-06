@@ -53,6 +53,61 @@ extends SceneTree
 ##      explicit `scope` reaches it from a reroute's task/net and from a
 ##      propose whose selected hint names its net; and an unpinned/unscoped
 ##      call still builds the pre-existing byte-identical request.
+##  20. EPOCH UX1 STATION 10 — minerva_pcb_workspace_edit_candidate: move_junction
+##      moves every coincident endpoint (and via) on ONE path atomically, refuses
+##      ambiguous_junction across disconnected paths sharing near-coincident
+##      points, refuses degenerate_result rather than emitting zero-length
+##      copper; expected_candidate_revision guards BOTH ops before any mutation;
+##      insert_via delegates verbatim to RoutingWorkspace.add_via (refusals pass
+##      through); a terminal candidate refuses either op; and a successful edit
+##      never touches the candidate's task/routing_constraint (edit != policy).
+##  21. EPOCH UX1 STATION 11 — "Replies name legal successors": a compact GATE
+##      (string-contains on verb names only) that the guidance `note` key is
+##      present and names its expected legal-successor verb(s) on the propose,
+##      edit_candidate, commit and reject replies.
+##  22. EPOCH UX1 STATION 12 — legacy waypoint-hint migration (DCR 019fd095e694,
+##      docket 019fd057ea0b comment 1028, adopted verbatim): a legacy guided
+##      hint carrying inline waypoints seeds its task's routing_constraint
+##      ONCE at propose time (authored_by "migration", seeded_from_hint_id/
+##      _revision provenance, revision 1), task_constraints carries it into
+##      the router request, and the hint is stamped superseded; the seed
+##      survives a failed router leg (durability, comment 1028); a second
+##      propose does not re-seed (revision stays 1); a hint whose task is
+##      ALREADY constrained by some other channel is never re-read; a
+##      post-seed edit that CHANGES kind_payload.waypoints is refused by
+##      PcbAnnotationHost.update_annotation while a non-waypoints edit passes;
+##      a 'detailed' hint is untouched by all of it (never seeded, never
+##      refused). Fix-round additions (cold review, same DCR): a bus-branch
+##      hint carrying waypoints is never seeded (H1-1); the OTHER propose-time
+##      entry point (minerva_pcb_apply_route_hints, not just
+##      minerva_pcb_workspace_propose) also seeds; the
+##      waypoints_superseded_by_constraint_revision marker is HOST-OWNED and
+##      is re-injected server-side whenever an update omits it, closing both
+##      the accidental-strip and the two-step-bypass shapes (H2-1); the
+##      undo/redo seam (_suppress_hint_history) never trips the edit-refusal
+##      guard, and the marker's re-injection keeps the guard armed across a
+##      restore (H2-2); a hint whose singleton task was absorbed into a
+##      MERGED multi-hint task is never re-seeded, constrained or not (H1-2).
+##      Codex 1047 fix round, verdict 4 (22m): the NAMED exit —
+##      minerva_pcb_hint_convert_to_detailed clears the singly-owned task
+##      constraint and, in the SAME call (ordered two-store writes, workspace
+##      first — deliberately NOT described as atomic, per verdict 6: the two
+##      stores persist in separate sidecars), strips the marker + verdict-5
+##      lock fields (_locked_fields/_lock_reason, stamped beside the marker
+##      for core's offline live_editor_required refusal), sets detail_level
+##      'detailed', re-permits waypoint edits, and a fresh propose never
+##      re-seeds; refuses by name on an unstamped hint (not_superseded) and
+##      on a merged-task-owned constraint (constraint_not_singly_owned).
+##      Codex 1047 fix round, verdict 6 (22n): BOTH torn-save permutations of
+##      the constraint+marker pair are repaired by deterministic load-time
+##      reconciliation (reconcile_superseded_waypoint_state — workspace
+##      constraint store authoritative, marker derived): marker-without-
+##      constraint strips marker+locks preserving detail_level as found,
+##      constraint-without-marker re-stamps at the constraint's revision
+##      (locks included — doubling as the pre-lock-era backfill); every
+##      repair emits a structured record (the supported contract) on
+##      workspace.last_load_reconciliation, creates NO undo history, and a
+##      second pass is a no-op (idempotence).
 ##
 ## NUMERIC-COMPARISON RULE for this file (same as the C1/C3 suites): every
 ## numeric assertion is normalised with int()/float() before comparing, and NO
@@ -107,6 +162,13 @@ func _init() -> void:
 	await _run_cross_candidate_check_reply()
 	await _run_review_and_honesty_batch()
 	await _run_hint_status_placement()
+	await _run_ux1_additive_reply_keys()
+	await _run_ux1_batch_commit_tool()
+	await _run_ux1_add_route_intent()
+	await _run_station9_task_constraints()
+	_run_station10_edit_candidate()
+	await _run_ux1_station11_next_step_guidance()
+	await _run_station12_legacy_seeding()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -243,6 +305,12 @@ class RouterShim extends RefCounted:
 	var real
 	var reply: Dictionary = {}
 	var calls: Array = []
+	## Station 9 durability test (docket 019fd057ea0b comment 1028): flip to
+	## false to make run_router answer worker_unavailable WITHOUT touching the
+	## canned `reply` — proves a task's steering write survives a router leg
+	## that never lands a candidate. Every existing caller leaves this at its
+	## default (true), so their requests are unaffected.
+	var answer_ok: bool = true
 
 	func _init(real_host, router_reply: Dictionary) -> void:
 		real = real_host
@@ -255,6 +323,8 @@ class RouterShim extends RefCounted:
 	## would blur.
 	func run_router(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 		calls.append({"selection": selection, "extra": extra})
+		if not answer_ok:
+			return {"ok": false, "error": {"kind": "worker_unavailable", "message": "forced test failure"}}
 		return {"ok": true, "result": reply}
 
 	func get_board_data():
@@ -278,6 +348,12 @@ class RouterShim extends RefCounted:
 
 	func remove_annotation(id: String) -> bool:
 		return bool(real.remove_annotation(id))
+
+	## F2 (cold review, Epoch UX1 station 9): forwarded so
+	## _stamp_waypoints_superseded's host.update_annotation call reaches the
+	## REAL host through this shim, same as every other duck-typed call above.
+	func update_annotation(id: String, new_annotation: Dictionary) -> bool:
+		return bool(real.update_annotation(id, new_annotation))
 
 
 ## Boot a real PCBPanel, wire the host->panel back-reference, and wrap the host
@@ -1222,17 +1298,26 @@ func _run_removal_manifest_tools_absent() -> void:
 	# own tail entry (`minerva_pcb_route_bus_direct`), which is the C5 addition.
 	# + 1 D0-5 worker-backed tool (minerva_pcb_export_assembly, docket
 	# 019fc2f8b903) == 70, + 1 bus-propose tool
-	# (minerva_pcb_workspace_propose_bus, docket 019fcac1509d) == 71. This is a
-	# SECOND, independent count pin on the same manifest.json this round's
-	# tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (70->71) for the
+	# (minerva_pcb_workspace_propose_bus, docket 019fcac1509d) == 71, + 1 Epoch
+	# UX1 station 8 tool (minerva_pcb_add_route_intent, DCR 019fd095e694) == 72,
+	# + 1 Epoch UX1 station 10 tool (minerva_pcb_workspace_edit_candidate, the
+	# ONE discriminated candidate-edit verb, DCR 019fd095e694) == 73,
+	# + 1 Codex-1047 verdict-4 tool (minerva_pcb_hint_convert_to_detailed,
+	# the named guided->detailed conversion) == 74.
+	# This is a SECOND, independent count pin on the same manifest.json this
+	# round's tools[] addition touches — see
+	# tests/gd/test_manifest_tool_registration.gd's own pin (73->74) for the
 	# "deliberate bump, its own diff" convention this follows.
-	check_eq("manifest tool count == 71 (ALL manifest.json tools[] entries)",
-		names.size(), 71)
+	check_eq("manifest tool count == 74 (ALL manifest.json tools[] entries)",
+		names.size(), 74)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",
 		"minerva_pcb_workspace_propose_bus" in names)
+	check("the station-8 route-intent tool is the addition THIS round's count accounts for",
+		"minerva_pcb_add_route_intent" in names)
+	check("the station-10 candidate-edit tool is the addition THIS round's count accounts for",
+		"minerva_pcb_workspace_edit_candidate" in names)
 
 	# Unreachable through the dispatcher too, not just missing from the list —
 	# a bare host with no panel is enough: handle() matches on tool_name alone
@@ -1849,5 +1934,3294 @@ func _run_hint_status_placement() -> void:
 	if recs2.size() > 0:
 		check("no structured status ⇒ NO hint_status key on the candidate",
 			not (recs2[0] as Dictionary).has("hint_status"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 15. Epoch UX1: corridor_adherence attach, width provenance, emitter/stuck split ══
+#
+# Three additive-reply-key stations, all extending the SAME shared landing
+# path (_ingest_result_into_workspace / _attach_hint_status / _stuck_from_result)
+# group 14 already exercises — kept together so a change to one station's
+# wiring cannot silently leak into another's assertions without a failure
+# showing up in this same group.
+
+func _run_ux1_additive_reply_keys() -> void:
+	print("-- 15. UX1: corridor_adherence -> hint_status, width provenance, emitter_notes split --")
+	await _run_ux1_corridor_adherence()
+	await _run_ux1_width_provenance()
+	await _run_ux1_emitter_notes_split()
+
+
+## Station 2 (docket 019fcf152791, "GDScript side"): result.corridor_adherence
+## entries lift onto the candidate's hint_status list — same placement argument
+## and same hint-id-only matching as waypoint_status (group 14) — attached
+## VERBATIM (the worker owns the shape) rather than reshaped into a new vocabulary.
+func _run_ux1_corridor_adherence() -> void:
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	# Reply carries a corridor_adherence entry for THIS run's real hint id, and
+	# one for a hint that is not this candidate's — the foreign one must not
+	# attach, mirroring group 14's "matched by hint id, never by net" gate.
+	var reply: Dictionary = _multipad_reply([hint_id])
+	reply["corridor_adherence"] = [
+		{"hint_id": hint_id, "endpoints": [[0.0, 0.0], [5.0, 0.0]], "status": "honored",
+			"corridor_honored": true, "max_deviation_mm": 0.02, "tolerance_mm": 0.1,
+			"per_waypoint": [], "skipped_waypoints": []},
+		{"hint_id": "some_other_hint", "endpoints": [[9.0, 9.0], [10.0, 10.0]],
+			"status": "violated", "corridor_honored": false, "max_deviation_mm": 3.5,
+			"tolerance_mm": 0.1, "per_waypoint": [], "skipped_waypoints": []},
+	]
+	shim.reply = reply
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(out.get("success", false)))
+	var rec: Dictionary = (out.get("candidates", []) as Array)[0]
+	check("the candidate carries hint_status for its own corridor_adherence entry",
+		rec.has("hint_status"))
+	var statuses: Array = rec.get("hint_status", [])
+	check_eq("only the entry for THIS candidate's hint attaches", statuses.size(), 1)
+	if statuses.size() == 1:
+		var s: Dictionary = statuses[0]
+		check_eq("…matched by hint_id, never by net", str(s.get("hint_id", "")), hint_id)
+		check_eq("…attached verbatim: status", str(s.get("status", "")), "honored")
+		check_eq("…attached verbatim: corridor_honored", bool(s.get("corridor_honored", false)), true)
+		check_eq("…attached verbatim: max_deviation_mm", float(s.get("max_deviation_mm", -1.0)), 0.02)
+		check_eq("…attached verbatim: tolerance_mm", float(s.get("tolerance_mm", -1.0)), 0.1)
+
+	# NEGATIVE GATE: no corridor_adherence AND no waypoint_status in the reply
+	# ⇒ no hint_status key at all — additive, never ambient.
+	var plain: Dictionary = _multipad_reply([hint_id])
+	shim.reply = plain
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var recs2: Array = out2.get("candidates", [])
+	if recs2.size() > 0:
+		check("no corridor_adherence, no waypoint_status ⇒ NO hint_status key",
+			not (recs2[0] as Dictionary).has("hint_status"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## Station 3 (docket 019fd0ab5af8): the worker's per-route effective width
+## provenance (methods.py _attach_effective_routing_rules,
+## route["effective_routing_rules"]["trace_width_mm"]) threads onto the
+## candidate record as width_mm/width_source — this is what makes an
+## owner-authored hint's width falling back to the router's hintless default
+## OBSERVABLE instead of silently indistinguishable from an intentional value.
+func _run_ux1_width_provenance() -> void:
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	var reply: Dictionary = _multipad_reply([hint_id])
+	reply["routes"][0]["effective_routing_rules"] = {
+		"trace_width_mm": {"value": 0.5, "source": "hint"},
+		"clearance_mm": {"value": 0.2, "source": "board_rules"},
+	}
+	shim.reply = reply
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(out.get("success", false)))
+	var rec: Dictionary = (out.get("candidates", []) as Array)[0]
+	check("candidate carries width_mm when the worker attached provenance", rec.has("width_mm"))
+	check_eq("…width_mm is the worker's effective width", float(rec.get("width_mm", -1.0)), 0.5)
+	check("candidate carries width_source", rec.has("width_source"))
+	check_eq("…width_source is relayed verbatim, never reinterpreted",
+		str(rec.get("width_source", "")), "hint")
+
+	# NEGATIVE GATE: no effective_routing_rules on the route ⇒ no width_mm/
+	# width_source — a missing key must never be mistaken for "board default".
+	var plain: Dictionary = _multipad_reply([hint_id])
+	shim.reply = plain
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var recs2: Array = out2.get("candidates", [])
+	if recs2.size() > 0:
+		var rec2: Dictionary = recs2[0]
+		check("no effective_routing_rules ⇒ NO width_mm key", not rec2.has("width_mm"))
+		check("no effective_routing_rules ⇒ NO width_source key", not rec2.has("width_source"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## Station 5 (docket 019fce3ac3f5 item 2): the ~28 per-component
+## emitter-capability warnings ("feature_omitted", "captured_geometry_not_emitted",
+## "ordinal_ids") split out of stuck[] into their own emitter_notes list, so the
+## 1-3 real per-hint routing warnings in stuck[] are no longer buried.
+func _run_ux1_emitter_notes_split() -> void:
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	# One per-hint routing warning (must stay in stuck[]), one emitter
+	# capability note (must move to emitter_notes), one unrouted pad pair
+	# (always genuine stuck[] feedback).
+	var reply: Dictionary = _multipad_reply([hint_id])
+	reply["unrouted"] = [{"net": "N2", "from": "U3.1", "to": "U4.2"}]
+	reply["warnings"] = [
+		{"id": hint_id, "waypoint_status": "ignored", "waypoint_count": 2,
+			"net": "N1", "message": "per-hint routing warning"},
+		{"code": "feature_omitted", "component": "U5", "message": "capability note"},
+	]
+	shim.reply = reply
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(out.get("success", false)))
+
+	var stuck: Array = out.get("stuck", [])
+	check_eq("stuck has exactly the unrouted entry + the per-hint warning", stuck.size(), 2)
+	var has_unrouted := false
+	var has_per_hint_warning := false
+	for entry in stuck:
+		if not (entry is Dictionary):
+			continue
+		var ed: Dictionary = entry
+		if ed.has("reason") and str(ed.get("net", "")) == "N2":
+			has_unrouted = true
+		if ed.has("warning") and str((ed.get("warning", {}) as Dictionary).get("waypoint_status", "")) == "ignored":
+			has_per_hint_warning = true
+	check("…the unrouted N2 pair is in stuck[]", has_unrouted)
+	check("…the per-hint routing warning is in stuck[]", has_per_hint_warning)
+
+	check("emitter_notes carries the capability warning", out.has("emitter_notes"))
+	var notes: Array = out.get("emitter_notes", [])
+	check_eq("…exactly the one feature_omitted note", notes.size(), 1)
+	if notes.size() == 1:
+		var n: Dictionary = notes[0]
+		check_eq("…verbatim, still wrapped the way stuck[] entries wrap a warning",
+			str((n.get("warning", {}) as Dictionary).get("code", "")), "feature_omitted")
+
+	# NEGATIVE GATE: no capability-coded warnings ⇒ no emitter_notes key —
+	# additive, never ambient on every propose.
+	var plain: Dictionary = _multipad_reply([hint_id])
+	shim.reply = plain
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("no capability warnings ⇒ NO emitter_notes key", not out2.has("emitter_notes"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 16. batch commit through the TOOL (docket 019fd0ab6dd2) ═══════════════════
+#
+# The model-level transaction is covered in test_routing_workspace_model group
+# 7b; THIS group covers the MCP wrapper: the candidate_id/candidate_ids
+# exactly-one contract, the batch reply shape, per-member hint-lifecycle
+# closure, and the batch undo note.
+
+func _run_ux1_batch_commit_tool() -> void:
+	print("-- 16. workspace_commit batch form: one call, one undoable step --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var hint_a: String = str(ctx["hint_id"])
+
+	# Land two candidates on two tasks (N1 via the seeded hint, N2 via a second).
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var cand_a := str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var hint_b: String = _seed_net_named_hint(ctx["host"], "N2")
+	shim.reply = {"routes": [{
+		"net": "N2",
+		"segments": [{"start": [20.0, 0.0], "end": [25.0, 0.0], "layer": "F.Cu"}],
+		"vias": [],
+		"hint_ids": [hint_b],
+	}], "via_count": 0}
+	var second: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_b]}))
+	var cand_b := str(((second.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+
+	# EXACTLY-ONE contract, judged by argument PRESENCE (Codex review P2).
+	var both: Dictionary = PanelTools._workspace_commit(shim,
+		_args({"candidate_id": cand_a, "candidate_ids": [cand_b]}))
+	check("candidate_id + candidate_ids together refuses", not bool(both.get("success", true)))
+	var both_empty: Dictionary = PanelTools._workspace_commit(shim,
+		_args({"candidate_id": cand_a, "candidate_ids": []}))
+	check("candidate_id + EMPTY candidate_ids is still the ambiguous ask",
+		not bool(both_empty.get("success", true)))
+	var empty_batch: Dictionary = PanelTools._workspace_commit(shim,
+		_args({"candidate_ids": []}))
+	check("candidate_ids: [] refuses with the batch form's own error",
+		not bool(empty_batch.get("success", true)))
+	check("…and the error names the empty batch",
+		str(empty_batch.get("error", "")).find("empty batch") != -1)
+
+	# The batch itself.
+	var out: Dictionary = PanelTools._workspace_commit(shim,
+		_args({"candidate_ids": [cand_a, cand_b]}))
+	check("batch commit succeeded", bool(out.get("success", false)))
+	check_eq("committed_count", int(out.get("committed_count", 0)), 2)
+	check_eq("per-member results", (out.get("results", []) as Array).size(), 2)
+	check_eq("candidate records ride the reply", (out.get("candidates", []) as Array).size(), 2)
+	for rec in out.get("candidates", []):
+		check_eq("member '%s' is committed" % str((rec as Dictionary).get("candidate_id", "")),
+			str((rec as Dictionary).get("disposition", "")), "committed")
+	check("batch undo note names the whole-batch revert",
+		str(out.get("undo_note", "")).find("EVERY batch member") != -1)
+
+	# MF-2 closure ran per member: both source hints transitioned open→applied.
+	check_eq("hint A applied", str(ctx["host"].get_by_id(hint_a).get("lifecycle", "")), "applied")
+	check_eq("hint B applied", str(ctx["host"].get_by_id(hint_b).get("lifecycle", "")), "applied")
+
+	# THE UNDO ACTUALLY RUNS (Codex review): one undo removes every member's
+	# copper and returns both candidates to their pre-commit dispositions.
+	var data = ctx["data"]
+	check("batch landed copper", data.get_trace_count() > 0)
+	data.undo()
+	check_eq("one undo removes the whole batch's copper", data.get_trace_count(), 0)
+	check_eq("undo restores member A to proposed",
+		str(ctx["ws"].get_candidate(cand_a).disposition), "proposed")
+	check_eq("undo restores member B to proposed",
+		str(ctx["ws"].get_candidate(cand_b).disposition), "proposed")
+
+	ctx["driver"].free_panel(ctx["panel"])
+# ══ 17. Epoch UX1 station 8: minerva_pcb_add_route_intent ═════════════════════
+#
+# ONE authoring call, ATOMICALLY: (a) a connectivity-only pcb_route_hint
+# annotation — no waypoints, ever; (b) an eagerly-created RouteTask (task_id
+# "NET|hint_id", reusing RoutingWorkspace.ensure_task — no reimplementation);
+# (c) when a corridor is given, a routing_constraint STORED ON THE TASK
+# (revision 1, authored_by "ai", base_board_revision), never on the
+# annotation. NO ROUTING is performed. DCR 019fd095e694, converged on docket
+# 019fd057ea0b comment 1028 (eager task creation dissolves the "two router
+# round-trips" objection; the corridor's one authoritative home is the task,
+# never a second inert copy on the durable connectivity object).
+#
+# Model-only fixture (no scene mount, no router) — this tool never reaches
+# the router, so the same "bare model, no panel" idiom groups 3-7 use is
+# enough: a real PcbData with two real 1-pin components on one net, a real
+# PcbAnnotationHost, and a bare PcbWorkspace behind a minimal stub panel.
+
+## Stub panel exposing get_data()/get_routing_workspace() — the two duck-typed
+## methods _get_data()/_get_workspace() need — without a scene-tree mount.
+class _RouteIntentStubPanel extends RefCounted:
+	var _data
+	var _ws
+
+	func get_data():
+		return _data
+
+	func get_routing_workspace():
+		return _ws
+
+
+## A panel with board data but NO get_routing_workspace() method at all, so
+## _get_workspace() degrades to null the same way a headless/pre-mount host
+## does — the fixture for the workspace_unavailable refusal.
+class _RouteIntentStubPanelNoWorkspace extends RefCounted:
+	var _data
+
+	func get_data():
+		return _data
+
+
+## Two 1-pin components on net "PWR" (BAT1.1, D1.2), a third 1-pin component
+## on its own net "GND" (U1.1, for the cross-net refusal), all on a real
+## PCBData bound to a real PcbAnnotationHost via the stub panel above.
+## Returns {"host", "data", "ws"}.
+func _route_intent_context() -> Dictionary:
+	var data = PcbData.new()
+	data.save_to_history("baseline")
+
+	var bat1 = data.new_component()
+	bat1.id = "BAT1"
+	bat1.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(bat1)
+
+	var d1 = data.new_component()
+	d1.id = "D1"
+	d1.pins = {"2": Vector2(0.0, 0.0)}
+	data.add_component(d1)
+
+	data.connect_pin_to_net("PWR", "BAT1", "1")
+	data.connect_pin_to_net("PWR", "D1", "2")
+
+	var u1 = data.new_component()
+	u1.id = "U1"
+	u1.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(u1)
+	data.connect_pin_to_net("GND", "U1", "1")
+
+	var ws = PcbWorkspace.new()
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var stub := _RouteIntentStubPanel.new()
+	stub._data = data
+	stub._ws = ws
+	host.set_panel(stub)
+	return {"host": host, "data": data, "ws": ws}
+
+
+func _run_ux1_add_route_intent() -> void:
+	print("-- 17. Station 8: minerva_pcb_add_route_intent (intent+task+constraint, atomic, no routing) --")
+	await _run_route_intent_happy_path_with_corridor()
+	_run_route_intent_task_constraint_round_trip()
+	_run_route_intent_no_corridor_success()
+	_run_route_intent_refusals()
+	# ── Cold review fix round (H3-1 orphan/duplicate absorption, H2-1 deletion
+	# cascade, SECONDARY: annotation_rejected leg, corridor:[] refusal, JSON
+	# round trip, workspace_list constraint surface) ──────────────────────────
+	await _run_route_intent_merge_absorption()
+	_run_route_intent_deletion_cascade()
+	_run_route_intent_annotation_rejected()
+	_run_route_intent_constraint_json_round_trip()
+	_run_route_intent_corridor_empty_and_workspace_list()
+
+
+## Happy path WITH a corridor: asserts the atomic triple lands, no routing
+## happened, the annotation carries NO waypoints/corridor, and the reply
+## shape names hint_id/task_id/net/constraint_revision + a legal next step.
+## Goes through the DISPATCHER (PanelTools.handle), not the static func
+## directly, so the manifest→dispatch wiring is covered at least once.
+func _run_route_intent_happy_path_with_corridor() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+	var data = ctx["data"]
+	var ws = ctx["ws"]
+	var anns_before: int = (host.get_all_annotations() as Array).size()
+	var cands_before: int = (ws.list_candidates() as Array).size()
+
+	var args := {
+		"editor_name": "PCB",
+		"source_pin": "BAT1.1",
+		"dest_pin": "D1.2",
+		"note": "power feed",
+		"corridor": [{"x_mm": 1.0, "y_mm": 0.0}, {"x_mm": 5.0, "y_mm": 0.0}],
+	}
+	var reply: Dictionary = await PanelTools.handle(host, "minerva_pcb_add_route_intent", args)
+	check("add_route_intent succeeded", bool(reply.get("success", false)))
+	var hint_id: String = str(reply.get("hint_id", ""))
+	check("reply carries a hint_id", not hint_id.is_empty())
+	check_eq("reply names the resolved net", str(reply.get("net", "")), "PWR")
+	check_eq("reply names the eager task id (NET|hint_id)",
+		str(reply.get("task_id", "")), "PWR|%s" % hint_id)
+	check_eq("reply carries constraint_revision 1 (a corridor was given)",
+		int(reply.get("constraint_revision", 0)), 1)
+	check("reply names a legal next step (propose)",
+		str(reply.get("note", "")).find("workspace_propose") != -1)
+
+	# ── (a) the annotation: CONNECTIVITY ONLY, no waypoints, ever ────────────
+	check_eq("exactly one annotation was created",
+		(host.get_all_annotations() as Array).size(), anns_before + 1)
+	var ann: Dictionary = host.get_by_id(hint_id)
+	check("the annotation exists", not ann.is_empty())
+	check_eq("it is a pcb_route_hint", str(ann.get("kind", "")), "pcb_route_hint")
+	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	check_eq("source_pins carries exactly source_pin",
+		(kp.get("source_pins", []) as Array), ["BAT1.1"])
+	check_eq("dest_pins carries exactly dest_pin",
+		(kp.get("dest_pins", []) as Array), ["D1.2"])
+	check_eq("note lands as text", str(kp.get("text", "")), "power feed")
+	check_eq("waypoints is EMPTY — corridor never lands on the annotation, by construction",
+		(kp.get("waypoints", []) as Array).size(), 0)
+	check("no corridor-shaped key leaked onto the annotation payload",
+		not kp.has("corridor") and not kp.has("corridor_points"))
+
+	# ── (b) the eager task, SAME key format ingest mints ─────────────────────
+	var task_id: String = str(reply.get("task_id", ""))
+	var task = ws.get_task(task_id)
+	check("the task exists in the workspace", task != null)
+	if task != null:
+		check_eq("task net matches the resolved net", str(task.net), "PWR")
+		check_eq("task is open — nothing has been routed yet", str(task.state), "open")
+
+		# ── (c) the constraint — stored ON THE TASK, revision 1 ───────────────
+		check("the task carries a routing_constraint", task.is_constrained())
+		var rc: Dictionary = task.routing_constraint
+		check_eq("constraint revision is 1", int(rc.get("revision", 0)), 1)
+		check_eq("constraint authored_by is ai", str(rc.get("authored_by", "")), "ai")
+		check_eq("constraint base_board_revision matches the board",
+			int(rc.get("base_board_revision", -1)), int(data.board_revision))
+		check_eq("constraint corridor carries both points",
+			(rc.get("corridor_points", []) as Array).size(), 2)
+		var pts: Array = rc.get("corridor_points", [])
+		if pts.size() == 2:
+			check("first corridor point matches", (pts[0] as Vector2).is_equal_approx(Vector2(1.0, 0.0)))
+			check("second corridor point matches", (pts[1] as Vector2).is_equal_approx(Vector2(5.0, 0.0)))
+
+	# ── NO ROUTING WAS PERFORMED ──────────────────────────────────────────────
+	check_eq("no candidate was created — this tool never routes",
+		(ws.list_candidates() as Array).size(), cands_before)
+
+
+## The task's routing_constraint (corridor_points, revision, authored_by,
+## base_board_revision) survives RoutingWorkspace.to_dict() / load_from_dict()
+## — the same round trip every other task field already goes through.
+func _run_route_intent_task_constraint_round_trip() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+	var data = ctx["data"]
+	var ws = ctx["ws"]
+
+	var reply: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [{"x_mm": 2.0, "y_mm": 3.0}],
+	})
+	check("intent with corridor succeeded", bool(reply.get("success", false)))
+	var task_id: String = str(reply.get("task_id", ""))
+
+	var dumped: Dictionary = ws.to_dict()
+	var ws2 = PcbWorkspace.new()
+	ws2.load_from_dict(dumped)
+	var task2 = ws2.get_task(task_id)
+	check("the task survives a round trip through to_dict/load_from_dict", task2 != null)
+	if task2 != null:
+		check("the round-tripped task is still constrained", task2.is_constrained())
+		var rc2: Dictionary = task2.routing_constraint
+		check_eq("round-tripped revision survives", int(rc2.get("revision", 0)), 1)
+		check_eq("round-tripped authored_by survives", str(rc2.get("authored_by", "")), "ai")
+		check_eq("round-tripped base_board_revision survives",
+			int(rc2.get("base_board_revision", -1)), int(data.board_revision))
+		var pts2: Array = rc2.get("corridor_points", [])
+		check_eq("round-tripped corridor point count survives", pts2.size(), 1)
+		if pts2.size() == 1:
+			check("round-tripped corridor point value survives (Vector2, not a JSON dict)",
+				(pts2[0] as Vector2).is_equal_approx(Vector2(2.0, 3.0)))
+
+
+## No corridor at all: the task is created (eagerly, still) but carries NO
+## routing_constraint, and the reply carries NO constraint_revision key —
+## absent, not zero, so a caller can tell "no corridor was given" from "a
+## corridor was given at revision 0".
+func _run_route_intent_no_corridor_success() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+
+	var reply: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("intent without corridor succeeded", bool(reply.get("success", false)))
+	check("no constraint_revision key when no corridor was given",
+		not reply.has("constraint_revision"))
+	var task = ws.get_task(str(reply.get("task_id", "")))
+	check("the task still exists (eager creation does not depend on a corridor)", task != null)
+	if task != null:
+		check("the task carries NO routing_constraint", not task.is_constrained())
+
+
+## Named refusals: unresolvable pin (missing component AND missing pin, both
+## sides), cross-net pins, single-endpoint-only, and workspace_unavailable.
+## NOTHING is half-created by any refusal — the fixture host's annotation
+## count stays at zero throughout.
+func _run_route_intent_refusals() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+
+	var bad_component: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "NOPE.1", "dest_pin": "D1.2",
+	})
+	check("an unknown component is refused", not bool(bad_component.get("success", true)))
+	check_eq("refusal is named pin_unresolvable", str(bad_component.get("error", "")), "pin_unresolvable")
+	check_eq("refusal names the source side", str(bad_component.get("which", "")), "source")
+
+	var bad_pin: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.99", "dest_pin": "D1.2",
+	})
+	check("an unknown pin on a real component is refused", not bool(bad_pin.get("success", true)))
+	check_eq("refusal is named pin_unresolvable", str(bad_pin.get("error", "")), "pin_unresolvable")
+
+	var cross: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "U1.1",
+	})
+	check("pins on two different nets are refused", not bool(cross.get("success", true)))
+	check_eq("refusal is named cross_net_pins", str(cross.get("error", "")), "cross_net_pins")
+	check_eq("refusal names the source net", str(cross.get("source_net", "")), "PWR")
+	check_eq("refusal names the dest net", str(cross.get("dest_net", "")), "GND")
+
+	var multi: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": ["BAT1.1"], "dest_pin": "D1.2",
+	})
+	check("an array source_pin is refused (single-endpoint only)", not bool(multi.get("success", true)))
+	check_eq("refusal is named single_endpoint_only", str(multi.get("error", "")), "single_endpoint_only")
+
+	var host_no_ws = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var stub_no_ws := _RouteIntentStubPanelNoWorkspace.new()
+	stub_no_ws._data = ctx["data"]
+	host_no_ws.set_panel(stub_no_ws)
+	var unavailable: Dictionary = PanelTools._add_route_intent(host_no_ws, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("no live workspace is refused", not bool(unavailable.get("success", true)))
+	check_eq("refusal is named workspace_unavailable", str(unavailable.get("error", "")), "workspace_unavailable")
+
+	check_eq("no refusal above left an annotation behind",
+		(host.get_all_annotations() as Array).size(), 0)
+
+
+# ══ 18. Station 8 fix round (cold review): H3-1 absorption, H2-1 deletion ═════
+# ══ cascade, annotation_rejected, corridor:[] refusal, JSON round trip,     ═══
+# ══ workspace_list constraint surface ══════════════════════════════════════
+#
+# H3-1 (orphan/duplicate tasks on a shared net): the eager task key
+# minerva_pcb_add_route_intent mints is "net|hint_id"; ingest_record mints
+# "net|<sorted hint ids>" from the worker's BY-NET attribution. Two open
+# intents on one net whose route merges into ONE worker answer (hint_ids ==
+# [hidA, hidB]) used to produce a THIRD task key equal to neither eager key,
+# orphaning both. The fix (_absorb_eager_tasks_for_merge,
+# pcb_routing_workspace.gd) folds the candidate-less eager tasks into the
+## merged task instead.
+#
+# H2-1 (deletion cascade): removing a pcb_route_hint annotation for a
+# still-unanswered intent now drops its candidate-less eager task too
+# (PcbAnnotationHost.remove_annotation → RoutingWorkspace.
+# drop_empty_tasks_for_hint). A task with a candidate survives.
+
+
+## THE ONE THAT FAILED BEFORE THIS FIX ROUND (H3-1). Real mounted panel +
+## RouterShim (group 1's idiom) rather than the bare _route_intent_context
+## fixture, because this test needs a real workspace_propose round trip —
+## two add_route_intent calls on ONE net, then a shimmed propose whose reply
+## attributes BOTH hint ids to a SINGLE worker route on that net (methods.py's
+## BY-NET attribution — exactly what a worker does when two open intents on
+## the same net get answered by one route). Asserts: the candidate lands on
+## ONE task (the merged key, not a freshly-minted third), both eager tasks are
+## gone (absorbed, not orphaned), and the constraint from the ONE intent that
+## carried one survives the absorption onto the merged task.
+func _run_route_intent_merge_absorption() -> void:
+	print("-- 18. H3-1/H2-1/SECONDARY fix round --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	# Two real 1-pin components on a real net "PWR" — the SAME two-component-
+	# one-net shape _route_intent_context builds, layered onto this group's
+	# real mounted board (connect_pin_to_net auto-creates the net).
+	var bat1 = data.new_component()
+	bat1.id = "BAT1"
+	bat1.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(bat1)
+	var d1 = data.new_component()
+	d1.id = "D1"
+	d1.pins = {"2": Vector2(0.0, 0.0)}
+	data.add_component(d1)
+	data.connect_pin_to_net("PWR", "BAT1", "1")
+	data.connect_pin_to_net("PWR", "D1", "2")
+
+	# add_route_intent never reaches the router — called on the REAL host
+	# directly (not the RouterShim, whose build_route_hint_envelope forwarder
+	# only mirrors the shorter toolbar-authoring signature); the shim is used
+	# below ONLY for the propose call, which is the one hop that needs it.
+	var intent_a: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [{"x_mm": 1.0, "y_mm": 0.0}],
+	})
+	check("intent A (with a corridor) succeeded", bool(intent_a.get("success", false)))
+	var hint_a := str(intent_a.get("hint_id", ""))
+	var task_a := str(intent_a.get("task_id", ""))
+
+	var intent_b: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("intent B (no corridor) succeeded", bool(intent_b.get("success", false)))
+	var hint_b := str(intent_b.get("hint_id", ""))
+	var task_b := str(intent_b.get("task_id", ""))
+
+	check("both eager tasks exist before propose",
+		ws.get_task(task_a) != null and ws.get_task(task_b) != null)
+	check_eq("two open, candidate-less tasks so far", (ws.list_tasks() as Array).size(), 2)
+
+	var sorted_ids: Array = [hint_a, hint_b]
+	sorted_ids.sort()
+	var merged_key := "PWR|%s" % ",".join(sorted_ids)
+
+	shim.reply = {
+		"routes": [{
+			"net": "PWR",
+			"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_a, hint_b],
+		}],
+		"via_count": 0,
+	}
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_a, hint_b]}))
+	check("propose succeeded", bool(out.get("success", false)))
+	var cands: Array = out.get("candidates", [])
+	check_eq("exactly ONE candidate landed for the merged route (not two, not zero)", cands.size(), 1)
+	if cands.size() == 1:
+		check_eq("...on the MERGED task key, never a freshly-minted third task",
+			str((cands[0] as Dictionary).get("task_id", "")), merged_key)
+
+	check("eager task A was absorbed, not left orphaned", ws.get_task(task_a) == null)
+	check("eager task B was absorbed, not left orphaned", ws.get_task(task_b) == null)
+	var merged_task = ws.get_task(merged_key)
+	check("the merged task exists", merged_task != null)
+	check_eq("no orphan and no third task — exactly ONE task remains",
+		(ws.list_tasks() as Array).size(), 1)
+
+	if merged_task != null:
+		check("the solitary constraint (only intent A carried one) transferred onto the merge",
+			merged_task.is_constrained())
+		var rc: Dictionary = merged_task.routing_constraint
+		check_eq("...revision preserved", int(rc.get("revision", 0)), 1)
+		check_eq("...authored_by preserved", str(rc.get("authored_by", "")), "ai")
+		var pts: Array = rc.get("corridor_points", [])
+		check_eq("...corridor point count preserved", pts.size(), 1)
+		if pts.size() == 1:
+			check("...corridor point value preserved (Vector2)",
+				(pts[0] as Vector2).is_equal_approx(Vector2(1.0, 0.0)))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## H2-1: deletion cascade. Two legs on the SAME bare-model fixture group 17
+## already uses: (1) an intent with no answer — deleting its annotation via
+## the host drops its eager task; (2) an intent a candidate has already
+## landed on (the singleton case: one hint, so ingest_record's task_key
+## converges on the SAME eager key — no merge needed to exercise this) —
+## deleting its annotation leaves the task alone, because a task with a
+## candidate is HISTORY (H2-1's own "tasks with candidates stay" rule).
+func _run_route_intent_deletion_cascade() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	# ── leg 1: unanswered intent — its annotation's removal drops the task ────
+	var reply_a: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("intent A succeeded", bool(reply_a.get("success", false)))
+	var hint_a := str(reply_a.get("hint_id", ""))
+	var task_a := str(reply_a.get("task_id", ""))
+	check("task A exists before deletion", ws.get_task(task_a) != null)
+
+	check("removing the annotation succeeds", host.remove_annotation(hint_a))
+	check("the unanswered task is GONE after its annotation is deleted",
+		ws.get_task(task_a) == null)
+
+	# ── leg 2: propose-then-delete — a task WITH a candidate survives ─────────
+	var reply_b: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("intent B succeeded", bool(reply_b.get("success", false)))
+	var hint_b := str(reply_b.get("hint_id", ""))
+	var task_b := str(reply_b.get("task_id", ""))
+
+	# Singleton ingest (one hint) converges on the SAME eager key — no panel/
+	# router needed to prove this leg, ws.ingest_record is the model-level
+	# entry point _ingest_result_into_workspace itself funnels through.
+	var cid := str(ws.ingest_record({
+		"net": "PWR",
+		"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+		"vias": [],
+		"source_hint_ids": [hint_b],
+		"source_hints": [],
+	}, int(data.board_revision)))
+	check("a candidate landed", not cid.is_empty())
+	check_eq("...on the SAME eager task (singleton case converges)",
+		str(ws.get_candidate(cid).task_id), task_b)
+
+	check("removing the answered annotation still succeeds", host.remove_annotation(hint_b))
+	check("the task WITH a candidate SURVIVES — it is history, not a placeholder",
+		ws.get_task(task_b) != null)
+
+
+## SECONDARY: force add_annotation_v2 to fail (a host stub whose
+## add_annotation_v2 always returns "", the validation-rejected contract
+## add_annotation_v2 itself documents) so the annotation_rejected leg is
+## reachable without needing a genuinely schema-invalid envelope. Asserts the
+## named refusal AND that nothing was half-created (no task minted either).
+class _RejectingAnnotationHost extends RefCounted:
+	var real
+
+	func _init(real_host) -> void:
+		real = real_host
+
+	func get_panel():
+		return real.get_panel()
+
+	# First-execution fix (boundary run): _add_route_intent resolves the
+	# source/dest pins off the BOARD before it ever builds the envelope, so
+	# a stub without this forwarder dies at "PCB data not available" and the
+	# annotation_rejected leg under test is never reached.
+	func get_board_data():
+		return real.get_board_data()
+
+	func get_all_annotations() -> Array:
+		return real.get_all_annotations()
+
+	func build_route_hint_envelope(x_mm: float, y_mm: float, text: String = "",
+			layer: String = "F.Cu", hint_type: String = "waypoint", waypoints: Array = [],
+			author_kind: String = "human", detail_level: String = "", width_mm: Variant = null,
+			source_pins: Array = [], dest_pins: Array = []) -> Dictionary:
+		return real.build_route_hint_envelope(x_mm, y_mm, text, layer, hint_type,
+			waypoints, author_kind, detail_level, width_mm, source_pins, dest_pins)
+
+	func add_annotation_v2(_envelope: Dictionary) -> String:
+		return ""
+
+
+func _run_route_intent_annotation_rejected() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var rejecting_host := _RejectingAnnotationHost.new(ctx["host"])
+
+	var reply: Dictionary = PanelTools._add_route_intent(rejecting_host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("a rejected envelope refuses", not bool(reply.get("success", true)))
+	check_eq("refusal is named annotation_rejected", str(reply.get("error", "")), "annotation_rejected")
+	check_eq("no task was created — nothing is half-created by this refusal",
+		(ctx["ws"].list_tasks() as Array).size(), 0)
+
+
+## SECONDARY: full JSON TEXT round trip (to_dict → JSON.stringify →
+## JSON.parse_string → load_from_dict), not just the direct dict hand-off the
+## group-17 round-trip test already covers — this is what actually exercises
+## _constraint_from_json's int()/str() normalisation (JSON turns a whole
+## number into a float on the wire) and proves corridor_points come back as
+## USABLE Vector2s, not {x,y} dicts, after crossing real JSON text.
+func _run_route_intent_constraint_json_round_trip() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+
+	var reply: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [{"x_mm": 2.5, "y_mm": -3.25}, {"x_mm": 10.0, "y_mm": 0.0}],
+	})
+	check("intent with a corridor succeeded", bool(reply.get("success", false)))
+	var task_id := str(reply.get("task_id", ""))
+
+	var json_text: String = JSON.stringify(ws.to_dict())
+	var parsed: Variant = JSON.parse_string(json_text)
+	check("the dumped workspace round-trips through JSON text", parsed is Dictionary)
+	if not (parsed is Dictionary):
+		return
+
+	var ws2 = PcbWorkspace.new()
+	ws2.load_from_dict(parsed as Dictionary)
+	var task2 = ws2.get_task(task_id)
+	check("the task survives the FULL JSON-text round trip", task2 != null)
+	if task2 == null:
+		return
+	check("the round-tripped task is still constrained", task2.is_constrained())
+	var rc: Dictionary = task2.routing_constraint
+	check_eq("revision coerces back to int (JSON gave a float on the wire)",
+		int(rc.get("revision", -1)), 1)
+	check("...revision's actual stored type is int, not float", typeof(rc.get("revision")) == TYPE_INT)
+	check_eq("base_board_revision coerces back to int too",
+		int(rc.get("base_board_revision", -1)), int(ctx["data"].board_revision))
+	check("...its actual stored type is int, not float",
+		typeof(rc.get("base_board_revision")) == TYPE_INT)
+	var pts: Array = rc.get("corridor_points", [])
+	check_eq("both corridor points survive", pts.size(), 2)
+	if pts.size() == 2:
+		check("point 0 is a USABLE Vector2, not a {x,y} dict",
+			pts[0] is Vector2 and (pts[0] as Vector2).is_equal_approx(Vector2(2.5, -3.25)))
+		check("point 1 is a USABLE Vector2, not a {x,y} dict",
+			pts[1] is Vector2 and (pts[1] as Vector2).is_equal_approx(Vector2(10.0, 0.0)))
+
+
+## SECONDARY: corridor: [] refuses by ARGUMENT PRESENCE with the named error
+## ("corridor present but empty"), and workspace_list's task records gain the
+## additive constrained/constraint_revision keys — present only on a
+## constrained task, absent on every other one (never ambient).
+func _run_route_intent_corridor_empty_and_workspace_list() -> void:
+	var ctx: Dictionary = _route_intent_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var anns_before: int = (host.get_all_annotations() as Array).size()
+
+	var empty_corridor: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [],
+	})
+	check("corridor: [] is refused (present-but-empty, not \"no corridor\")",
+		not bool(empty_corridor.get("success", true)))
+	check("...named 'corridor present but empty'",
+		str(empty_corridor.get("error", "")).find("corridor present but empty") != -1)
+	check_eq("no annotation was created by the refused call",
+		(host.get_all_annotations() as Array).size(), anns_before)
+	check_eq("no task was created either", (ws.list_tasks() as Array).size(), 0)
+
+	# One constrained intent, one unconstrained — workspace_list's additive
+	# keys must appear on exactly the constrained one.
+	var with_corridor: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [{"x_mm": 1.0, "y_mm": 1.0}],
+	})
+	check("intent WITH a corridor succeeds", bool(with_corridor.get("success", false)))
+	var task_id_c := str(with_corridor.get("task_id", ""))
+
+	var without_corridor: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("intent WITHOUT a corridor succeeds", bool(without_corridor.get("success", false)))
+	var task_id_u := str(without_corridor.get("task_id", ""))
+
+	var listing: Dictionary = PanelTools._workspace_list(host, {"editor_name": "PCB"})
+	check("workspace_list succeeded", bool(listing.get("success", false)))
+	var trec_c: Variant = null
+	var trec_u: Variant = null
+	for t in listing.get("tasks", []):
+		var td: Dictionary = t
+		if str(td.get("task_id", "")) == task_id_c:
+			trec_c = td
+		elif str(td.get("task_id", "")) == task_id_u:
+			trec_u = td
+	check("the constrained task's record is present in workspace_list", trec_c != null)
+	if trec_c != null:
+		check_eq("...constrained:true", bool((trec_c as Dictionary).get("constrained", false)), true)
+		check_eq("...constraint_revision == 1", int((trec_c as Dictionary).get("constraint_revision", 0)), 1)
+	check("the unconstrained task's record is present too", trec_u != null)
+	if trec_u != null:
+		check("...NO 'constrained' key (additive-only, never ambient)",
+			not (trec_u as Dictionary).has("constrained"))
+		check("...NO 'constraint_revision' key either",
+			not (trec_u as Dictionary).has("constraint_revision"))
+
+
+# ══ 19. Station 9 (DCR 019fd095e694): task constraint CONSUMPTION ═══════════
+#
+# Station 8 (comment 1042) landed PcbRouteTask.routing_constraint — created,
+# round-tripped, but never READ. This group covers the read side:
+#   19a. PROPOSE READS THE CONSTRAINT — a selected hint whose task carries a
+#        routing_constraint gets a "task_constraints" entry attached to the
+#        router request; an unconstrained hint's request carries no such key.
+#   19b. CANDIDATES CITE THE REVISION — the landed candidate record echoes
+#        whatever "constraint_revision" the (shimmed) worker reply attached to
+#        its route, additively.
+#   19c. REROUTE STEERS THE TASK — corridor bumps the task's constraint
+#        revision BEFORE the router runs; a stale expected_constraint_revision
+#        is refused BY NAME, naming the actual revision, and does NOT bump it.
+#   19d. DURABILITY (comment 1028's invariant) — a router failure after the
+#        steering write leaves the bumped constraint standing, AND (F1, cold
+#        review) the failure reply itself carries steered:true +
+#        constraint_revision, so the bump is never silent.
+#   19e. preserve_shape_as_corridor derives the corridor from the candidate's
+#        OWN current geometry — but ONLY when it endpoint-chains into ONE
+#        continuous path (F6, cold review): the mandatory GATE fixture (two
+#        disconnected runs) refuses no_single_path, and a genuinely single-
+#        path fixture succeeds.
+#   19f. corridor + preserve_shape_as_corridor together is refused BY NAME,
+#        by argument PRESENCE, before the router is ever called.
+#   19g. F2 (cold review): steering a task whose owning hint still carries
+#        legacy kind_payload.waypoints stamps that hint's
+#        waypoints_superseded_by_constraint_revision through the standard
+#        mutate-with-history seam.
+#   19h. F3/F4 (cold review): two separately-constrained route intents that
+#        merge onto ONE task (H3-1 absorption, two hints on one net) surface
+#        the CONFLICT via propose's `constraint_conflicts`, and neither
+#        hint's own task_constraints entry gets the OTHER hint's corridor
+#        (owner-keyed emission — no dangling citation).
+
+
+func _run_station9_task_constraints() -> void:
+	print("-- 19. Station 9: task constraint CONSUMPTION (propose + reroute) --")
+	await _run_station9_propose_reads_constraint()
+	await _run_station9_reroute_steers_and_guards()
+	await _run_station9_durability_survives_router_failure()
+	await _run_station9_preserve_shape_as_corridor()
+	await _run_station9_both_args_refused()
+	await _run_station9_legacy_hint_steered_stamp()
+	await _run_station9_two_constrained_intents_one_net()
+	await _run_station9_stale_candidate_commit_refused()
+
+
+## Real 1-pin BAT1/D1 components on net "PWR", layered onto a real mounted
+## panel — the same shape group 18's H3-1 fixture builds — so
+## minerva_pcb_add_route_intent's pin resolution has real pads to resolve
+## against while the propose call still goes through the RouterShim.
+func _station9_intent_context() -> Dictionary:
+	var ctx: Dictionary = await _panel_context()
+	var data = ctx["data"]
+	var bat1 = data.new_component()
+	bat1.id = "BAT1"
+	bat1.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(bat1)
+	var d1 = data.new_component()
+	d1.id = "D1"
+	d1.pins = {"2": Vector2(0.0, 0.0)}
+	data.add_component(d1)
+	data.connect_pin_to_net("PWR", "BAT1", "1")
+	data.connect_pin_to_net("PWR", "D1", "2")
+	return ctx
+
+
+## 19a + 19b combined (one propose round trip covers both halves cheaply):
+## the request built for a constrained hint carries task_constraints keyed by
+## hint id with the constraint's own corridor/preferred_layer/revision; an
+## UNCONSTRAINED hint proposed alongside it contributes NO entry; and the
+## landed candidate record echoes whatever constraint_revision the (shimmed)
+## worker reply attached to its route.
+func _run_station9_propose_reads_constraint() -> void:
+	print("-- 19a/19b. propose attaches task_constraints; candidate cites constraint_revision --")
+	var ctx: Dictionary = await _station9_intent_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+
+	var intent: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [{"x_mm": 1.0, "y_mm": 2.0}, {"x_mm": 3.0, "y_mm": 4.0}],
+		"note": "steered",
+	})
+	check("constrained intent succeeded", bool(intent.get("success", false)))
+	var hint_id: String = str(intent.get("hint_id", ""))
+	check_eq("intent reply carries revision 1", int(intent.get("constraint_revision", 0)), 1)
+
+	# The unconstrained control: the panel context's own seeded hint, ALREADY
+	# attributed by the shim's default multipad reply — no task ever gave it a
+	# corridor.
+	var plain_hint_id: String = str(ctx["hint_id"])
+
+	shim.reply = {
+		"routes": [{
+			"net": "PWR",
+			"segments": [{"start": [1.0, 2.0], "end": [3.0, 4.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+			# Simulates the worker echoing the constraint revision it consumed
+			# (route_bridge/router.py/methods.py, worker-side of this station) —
+			# the panel-side stamping half is what this assertion actually tests.
+			"constraint_revision": 1,
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose (constrained hint) succeeded", bool(out.get("success", false)))
+	var call: Dictionary = shim.calls[shim.calls.size() - 1]
+	var extra: Dictionary = call.get("extra", {})
+	check("request carries task_constraints", extra.has("task_constraints"))
+	var tc: Dictionary = extra.get("task_constraints", {})
+	check_eq("task_constraints names exactly the constrained hint", tc.size(), 1)
+	if tc.has(hint_id):
+		var entry: Dictionary = tc[hint_id]
+		var pts: Array = entry.get("corridor_points", [])
+		check_eq("wire corridor carries both points", pts.size(), 2)
+		if pts.size() == 2:
+			check_eq("point 0 x", float((pts[0] as Array)[0]), 1.0)
+			check_eq("point 0 y", float((pts[0] as Array)[1]), 2.0)
+			check_eq("point 1 x", float((pts[1] as Array)[0]), 3.0)
+			check_eq("point 1 y", float((pts[1] as Array)[1]), 4.0)
+		check_eq("wire preferred_layer (unset -> empty string)", str(entry.get("preferred_layer", "?")), "")
+		check_eq("wire revision echoed", int(entry.get("revision", 0)), 1)
+
+	var cands: Array = out.get("candidates", [])
+	check_eq("exactly one candidate landed", cands.size(), 1)
+	if cands.size() == 1:
+		check_eq("candidate record cites constraint_revision (shim reply echo)",
+			int((cands[0] as Dictionary).get("constraint_revision", 0)), 1)
+
+	# ── unconstrained control, same shim/host, a DIFFERENT hint ──────────────
+	shim.reply = _multipad_reply([plain_hint_id])
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [plain_hint_id]}))
+	check("propose (unconstrained hint) succeeded", bool(out2.get("success", false)))
+	var call2: Dictionary = shim.calls[shim.calls.size() - 1]
+	check("unconstrained hint's request carries NO task_constraints key at all (byte-identical no-regression)",
+		not (call2.get("extra", {}) as Dictionary).has("task_constraints"))
+	var cands2: Array = out2.get("candidates", [])
+	if cands2.size() > 0:
+		check("unconstrained candidate carries NO constraint_revision key",
+			not (cands2[0] as Dictionary).has("constraint_revision"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 19c: corridor STEERS the task (revision 0 -> 1 -> 2 across two successful
+## reroutes), and a STALE expected_constraint_revision is refused BY NAME —
+## constraint_revision_conflict, naming the actual revision — WITHOUT bumping
+## the task, before trying again with the correct value.
+func _run_station9_reroute_steers_and_guards() -> void:
+	print("-- 19c. reroute corridor bumps revision; expected_constraint_revision guards it --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var task_id: String = str(ws.get_candidate(cid).task_id)
+	var task = ws.get_task(task_id)
+	check("task starts UNCONSTRAINED", task != null and not task.is_constrained())
+
+	# ── successful steer: revision 0 -> 1 ────────────────────────────────────
+	var reroute1: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 9.0, "y_mm": 9.0}],
+	}))
+	check("reroute with corridor succeeded", bool(reroute1.get("success", false)))
+	check("task is now CONSTRAINED", task.is_constrained())
+	check_eq("revision bumped to 1", int(task.routing_constraint.get("revision", 0)), 1)
+	check_eq("authored_by is ai", str(task.routing_constraint.get("authored_by", "")), "ai")
+	var cid2: String = str(((reroute1.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	check("reroute landed a NEW candidate generation", not cid2.is_empty() and cid2 != cid)
+
+	# ── stale expected_constraint_revision: refused, revision UNCHANGED ──────
+	var reroute2: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "corridor": [{"x_mm": 1.0, "y_mm": 1.0}],
+		"expected_constraint_revision": 0,
+	}))
+	check("stale expected_constraint_revision is refused", not bool(reroute2.get("success", true)))
+	check_eq("refusal named constraint_revision_conflict", str(reroute2.get("error", "")), "constraint_revision_conflict")
+	check_eq("refusal names the ACTUAL revision (1)", int(reroute2.get("actual_constraint_revision", -1)), 1)
+	check_eq("refusal echoes what was expected", int(reroute2.get("expected_constraint_revision", -1)), 0)
+	check_eq("the refused call did NOT bump the revision", int(task.routing_constraint.get("revision", 0)), 1)
+	check_eq("...and did not touch the corridor either", (task.routing_constraint.get("corridor_points", []) as Array).size(), 1)
+
+	# ── correct expected_constraint_revision: succeeds, revision 1 -> 2 ──────
+	var reroute3: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "corridor": [{"x_mm": 2.0, "y_mm": 2.0}, {"x_mm": 3.0, "y_mm": 3.0}],
+		"expected_constraint_revision": 1,
+	}))
+	check("correctly-guarded reroute succeeded", bool(reroute3.get("success", false)))
+	check_eq("revision bumped to 2", int(task.routing_constraint.get("revision", 0)), 2)
+	check_eq("corridor replaced (2 points now)", (task.routing_constraint.get("corridor_points", []) as Array).size(), 2)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 19d (docket 019fd057ea0b comment 1028's durability invariant): the
+## constraint is written BEFORE the router runs, so a router that then FAILS
+## leaves the bump standing — steering does not depend on obtaining a
+## candidate. F1 (cold review): the FAILURE REPLY ITSELF now says so —
+## `steered:true` + `constraint_revision` (the NEW revision) — so a caller
+## never has to separately re-read the task to discover the bump happened.
+func _run_station9_durability_survives_router_failure() -> void:
+	print("-- 19d. durability: a failed router leg does not undo the steering write, and REPORTS it (F1) --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var task = ws.get_task(str(ws.get_candidate(cid).task_id))
+	check("task starts unconstrained", task != null and not task.is_constrained())
+
+	shim.answer_ok = false
+	var reroute_fail: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 7.0, "y_mm": 7.0}],
+	}))
+	check("the router leg itself failed (worker_unavailable)", not bool(reroute_fail.get("success", true)))
+	check("the task is CONSTRAINED anyway — the write happened before the failed router call",
+		task.is_constrained())
+	check_eq("revision bumped to 1 despite the router failure", int(task.routing_constraint.get("revision", 0)), 1)
+	check("no NEW candidate landed (the router leg genuinely failed)",
+		str(reroute_fail.get("rerouted_candidate_id", "")).is_empty())
+
+	# ── F1: the failure envelope itself carries the bump ─────────────────────
+	check("failure reply carries steered:true (F1: the bump is never silent)",
+		bool(reroute_fail.get("steered", false)))
+	check_eq("failure reply's constraint_revision matches the NEW revision (1) — "
+		+ "a retry passes THIS number as expected_constraint_revision",
+		int(reroute_fail.get("constraint_revision", -1)), 1)
+
+	# ── F1 ordering: a plain (non-steering) reroute failure carries NEITHER
+	# key — `steered` is stamped only when THIS call actually steered.
+	var plain_fail: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({"candidate_id": cid}))
+	check("a non-steering reroute also fails while the worker is down",
+		not bool(plain_fail.get("success", true)))
+	check("...but carries no steered key (nothing was steered by this call)",
+		not plain_fail.has("steered"))
+	check("...and no constraint_revision key either",
+		not plain_fail.has("constraint_revision"))
+
+	shim.answer_ok = true
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 19e: preserve_shape_as_corridor derives the corridor from the candidate's
+## OWN current geometry (chained segment points, joints deduped) rather than
+## from an explicit `corridor` arg — but ONLY when every segment
+## endpoint-chains into ONE continuous path (F6, cold review, Epoch UX1
+## station 9). The mandatory GATE fixture (_multipad_reply, see its own doc)
+## is deliberately TWO disconnected paths; the pre-fix implementation
+## concatenated them anyway, fabricating a jump the candidate's own geometry
+## never drew — this asserts that is now a NAMED refusal instead, and adds a
+## genuinely single-path fixture proving the honouring case still works.
+func _run_station9_preserve_shape_as_corridor() -> void:
+	print("-- 19e. preserve_shape_as_corridor: disconnected refuses (F6), single path succeeds --")
+
+	# ── disconnected geometry (the mandatory GATE fixture): refused, no mutation ──
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var task = ws.get_task(str(ws.get_candidate(cid).task_id))
+	check("task starts unconstrained", task != null and not task.is_constrained())
+
+	# _multipad_reply's own geometry: two joined segments ((0,0)->(5,0)->(5,5))
+	# plus a THIRD, disconnected one ((50,50)->(60,50)) — 2 disconnected runs.
+	var out: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "preserve_shape_as_corridor": true,
+	}))
+	check("disconnected geometry is refused, not silently bridged with a fabricated jump",
+		not bool(out.get("success", true)))
+	check_eq("refusal named no_single_path", str(out.get("error", "")), "no_single_path")
+	check_eq("refusal names the run count (2 disconnected paths)", int(out.get("runs", 0)), 2)
+	check("the task is still UNCONSTRAINED — a refused steer writes nothing",
+		not task.is_constrained())
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+	# ── single connected path: succeeds, derives the chained/deduped points ──
+	var ctx2: Dictionary = await _panel_context()
+	var shim2 = ctx2["shim"]
+	var ws2 = ctx2["ws"]
+	var hint_id2: String = str(ctx2["hint_id"])
+	shim2.reply = {
+		"routes": [{
+			"net": "N1",
+			"segments": [
+				{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"},
+				{"start": [5.0, 0.0], "end": [5.0, 5.0], "layer": "F.Cu"},
+			],
+			"vias": [],
+			"hint_ids": [hint_id2],
+		}],
+		"via_count": 0,
+	}
+	var first2: Dictionary = await PanelTools._workspace_propose(shim2, _args())
+	check("connected-fixture propose succeeded", bool(first2.get("success", false)))
+	var cid2: String = str(((first2.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var task2 = ws2.get_task(str(ws2.get_candidate(cid2).task_id))
+	check("connected task starts unconstrained", task2 != null and not task2.is_constrained())
+
+	var out2: Dictionary = await PanelTools._workspace_reroute_route(shim2, _args({
+		"candidate_id": cid2, "preserve_shape_as_corridor": true,
+	}))
+	check("preserve_shape_as_corridor succeeds on a single connected path",
+		bool(out2.get("success", false)))
+	check("task is now constrained", task2.is_constrained())
+	check_eq("revision bumped to 1", int(task2.routing_constraint.get("revision", 0)), 1)
+	var pts2: Array = task2.routing_constraint.get("corridor_points", [])
+	check_eq("derived corridor carries 3 chained/deduped points", pts2.size(), 3)
+	var expected2: Array = [Vector2(0, 0), Vector2(5, 0), Vector2(5, 5)]
+	if pts2.size() == 3:
+		for i in range(3):
+			check("point %d matches the candidate's own geometry" % i,
+				(pts2[i] as Vector2).is_equal_approx(expected2[i]))
+
+	ctx2["driver"].free_panel(ctx2["panel"])
+
+
+## 19f: corridor and preserve_shape_as_corridor together — refused BY NAME, by
+## ARGUMENT PRESENCE (this file's established P2 convention), BEFORE the
+## router is ever reached (no new call recorded on the shim).
+func _run_station9_both_args_refused() -> void:
+	print("-- 19f. corridor + preserve_shape_as_corridor together is refused --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var calls_before: int = shim.calls.size()
+
+	var out: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 1.0, "y_mm": 1.0}],
+		"preserve_shape_as_corridor": true,
+	}))
+	check("both-args reroute is refused", not bool(out.get("success", true)))
+	check_eq("refusal named corridor_args_conflict", str(out.get("error", "")), "corridor_args_conflict")
+	check_eq("the router was NEVER reached — refused before any call", shim.calls.size(), calls_before)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 19g (F2, cold review): steering a task whose owning hint still carries
+## legacy kind_payload.waypoints stamps that hint's
+## waypoints_superseded_by_constraint_revision through the standard
+## mutate-with-history seam (host.update_annotation) — the
+## duplicated-authority guard: an editor looking at the hint's own waypoints
+## must be able to tell they no longer describe what steers the route.
+func _run_station9_legacy_hint_steered_stamp() -> void:
+	print("-- 19g. F2: steering stamps the owning hint's legacy waypoints as superseded --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var host = ctx["host"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	# _panel_context's own seeded hint (_seed_source_hint) carries REAL legacy
+	# waypoints ([[0,0],[5,0]]) on the actual annotation (not just the
+	# fabricated source_hints shape a few other tests build by hand) —
+	# confirm the fixture assumption before relying on it.
+	var seeded_ann: Dictionary = host.get_by_id(hint_id)
+	var seeded_kp: Dictionary = seeded_ann.get("kind_payload", {})
+	check("fixture sanity: the seeded hint carries legacy waypoints",
+		not (seeded_kp.get("waypoints", []) as Array).is_empty())
+	check("fixture sanity: not yet superseded",
+		not seeded_kp.has("waypoints_superseded_by_constraint_revision"))
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+
+	var out: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 8.0, "y_mm": 8.0}],
+	}))
+	check("steered reroute succeeded", bool(out.get("success", false)))
+
+	var after_ann: Dictionary = host.get_by_id(hint_id)
+	var after_kp: Dictionary = after_ann.get("kind_payload", {})
+	check("legacy waypoints are STILL PRESENT — additive, never cleared",
+		not (after_kp.get("waypoints", []) as Array).is_empty())
+	check("...now stamped waypoints_superseded_by_constraint_revision",
+		after_kp.has("waypoints_superseded_by_constraint_revision"))
+	check_eq("...naming revision 1 (the constraint this steer just wrote)",
+		int(after_kp.get("waypoints_superseded_by_constraint_revision", -1)), 1)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## Two independent 1-pin pairs (BAT1.1—D1.2, R1.1—R2.1), both on net "PWR" —
+## the shape 19h needs to mint two SEPARATE single-hint intents that later
+## merge onto one worker-attributed route.
+func _station9_two_intent_context() -> Dictionary:
+	var ctx: Dictionary = await _panel_context()
+	var data = ctx["data"]
+	var bat1 = data.new_component()
+	bat1.id = "BAT1"
+	bat1.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(bat1)
+	var d1 = data.new_component()
+	d1.id = "D1"
+	d1.pins = {"2": Vector2(0.0, 0.0)}
+	data.add_component(d1)
+	var r1 = data.new_component()
+	r1.id = "R1"
+	r1.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(r1)
+	var r2 = data.new_component()
+	r2.id = "R2"
+	r2.pins = {"1": Vector2(0.0, 0.0)}
+	data.add_component(r2)
+	data.connect_pin_to_net("PWR", "BAT1", "1")
+	data.connect_pin_to_net("PWR", "D1", "2")
+	data.connect_pin_to_net("PWR", "R1", "1")
+	data.connect_pin_to_net("PWR", "R2", "1")
+	return ctx
+
+
+## 19h (F3/F4, cold review): two SEPARATELY-CONSTRAINED route intents that
+## share ONE net. Their eager, still-open tasks are each a SINGLETON
+## ("PWR|hintA", "PWR|hintB") and each carries its OWN corridor — proposing
+## BOTH hints together must build a task_constraints request that cites EACH
+## hint's OWN corridor under EXACTLY that hint's own key (F3: owner-keyed
+## emission, no dangling citation — the pre-fix defect would have echoed one
+## hint's corridor for the other too, purely because a merged task's
+## membership test matched both). When the (shimmed) worker reply then fuses
+## both hints onto ONE route (hint_ids:[hintA,hintB]), the resulting merge
+## finds both eager tasks constrained — a genuine authoring conflict — and
+## that outcome must reach the reply as `constraint_conflicts` (F4), not
+## live only in a push_warning nobody outside the engine console ever sees.
+## P1-A (Codex 1047): the conflict no longer ABSORBS the constrained
+## singletons — they survive with their constraints intact (per-hint
+## steering continues next propose via the owner_hint_id-gated
+## task_constraints channel); only the MERGED task is left unconstrained.
+## The old behavior (erase both singletons, keep neither constraint) was a
+## permanent dead state for station-12-seeded legacy hints: stamped
+## superseded + edit-refused, yet nothing left steering.
+func _run_station9_two_constrained_intents_one_net() -> void:
+	print("-- 19h. F3/F4: two constrained intents, one net — owner-keyed request, conflict surfaced --")
+	var ctx: Dictionary = await _station9_two_intent_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+
+	var intent_a: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+		"corridor": [{"x_mm": 1.0, "y_mm": 1.0}],
+	})
+	check("intent A succeeded", bool(intent_a.get("success", false)))
+	var hint_a: String = str(intent_a.get("hint_id", ""))
+
+	var intent_b: Dictionary = PanelTools._add_route_intent(host, {
+		"editor_name": "PCB", "source_pin": "R1.1", "dest_pin": "R2.1",
+		"corridor": [{"x_mm": 2.0, "y_mm": 2.0}, {"x_mm": 3.0, "y_mm": 3.0}],
+	})
+	check("intent B succeeded", bool(intent_b.get("success", false)))
+	var hint_b: String = str(intent_b.get("hint_id", ""))
+
+	check("the two intents minted DIFFERENT singleton tasks",
+		str(intent_a.get("task_id", "")) != str(intent_b.get("task_id", "")))
+
+	# ── F3: the OUTGOING request is owner-keyed, no dangling citation ────────
+	shim.reply = {
+		"routes": [{
+			"net": "PWR",
+			"segments": [{"start": [0.0, 0.0], "end": [1.0, 1.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_a, hint_b],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_a, hint_b]}))
+	check("propose (two constrained hints) succeeded", bool(out.get("success", false)))
+	var call: Dictionary = shim.calls[shim.calls.size() - 1]
+	var tc: Dictionary = (call.get("extra", {}) as Dictionary).get("task_constraints", {})
+	check_eq("task_constraints names BOTH hints", tc.size(), 2)
+	if tc.has(hint_a):
+		var pts_a: Array = (tc[hint_a] as Dictionary).get("corridor_points", [])
+		check_eq("hint A's entry carries ITS OWN corridor (1 point) — not hint B's", pts_a.size(), 1)
+	if tc.has(hint_b):
+		var pts_b: Array = (tc[hint_b] as Dictionary).get("corridor_points", [])
+		check_eq("hint B's entry carries ITS OWN corridor (2 points) — not hint A's", pts_b.size(), 2)
+
+	# ── F4: the merge conflict reaches the reply ─────────────────────────────
+	check("propose reply carries constraint_conflicts", out.has("constraint_conflicts"))
+	var conflicts: Array = out.get("constraint_conflicts", [])
+	check_eq("exactly one conflict recorded (one merge, two constrained absorbed tasks)",
+		conflicts.size(), 1)
+	if conflicts.size() == 1:
+		var conflict: Dictionary = conflicts[0]
+		check_eq("conflict named conflicting_constraints_kept_on_singletons (P1-A)",
+			str(conflict.get("reason", "")), "conflicting_constraints_kept_on_singletons")
+		var ids: Array = conflict.get("task_ids", [])
+		check_eq("conflict names both conflicting task ids", ids.size(), 2)
+		check("...naming hint A's eager task", str(intent_a.get("task_id", "")) in ids)
+		check("...naming hint B's eager task", str(intent_b.get("task_id", "")) in ids)
+
+	# ── P1-A (Codex 1047): the constrained singletons SURVIVE the merge ─────
+	var surv_a = ws.get_task(str(intent_a.get("task_id", "")))
+	var surv_b = ws.get_task(str(intent_b.get("task_id", "")))
+	check("hint A's constrained singleton survived the conflicting merge", surv_a != null)
+	check("hint B's constrained singleton survived the conflicting merge", surv_b != null)
+	if surv_a != null:
+		check("...A still carries its OWN constraint", surv_a.is_constrained())
+	if surv_b != null:
+		check("...B still carries its OWN constraint", surv_b.is_constrained())
+
+	# The merged task itself ends up UNCONSTRAINED (no single task-level
+	# winner exists) — but per-hint steering continues off the singletons.
+	var cands: Array = out.get("candidates", [])
+	check_eq("exactly one candidate landed (the merged route)", cands.size(), 1)
+	if cands.size() == 1:
+		var merged_task = ws.get_task(str((cands[0] as Dictionary).get("task_id", "")))
+		check("the merged task exists", merged_task != null)
+		if merged_task != null:
+			check("the merged task is UNCONSTRAINED — neither conflicting corridor won",
+				not merged_task.is_constrained())
+
+		# ── V2 (Codex 1047 — boundary-delta test 2): EXPLICIT-corridor steering
+		# on the merged multi-hint task refuses BEFORE mutation and BEFORE the
+		# worker call. Pre-fix it "succeeded": revision bumped, owner_hint_id
+		# written as "" — a constraint _task_constraints_for_hints deliberately
+		# emits for NO hint, i.e. a successful-looking durable no-op.
+		var merged_cid: String = str((cands[0] as Dictionary).get("candidate_id", ""))
+		var calls_before: int = shim.calls.size()
+		var steer: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+			"candidate_id": merged_cid, "corridor": [{"x_mm": 5.0, "y_mm": 5.0}],
+		}))
+		check("explicit-corridor steer on a merged task is refused", not bool(steer.get("success", true)))
+		check_eq("...named multi_span_task (same name as the preserve-shape refusal)",
+			str(steer.get("error", "")), "multi_span_task")
+		var refused_hints: Array = steer.get("hint_ids", [])
+		check_eq("...naming both member hints", refused_hints.size(), 2)
+		if merged_task != null:
+			check("...refused BEFORE mutation: merged task still unconstrained",
+				not merged_task.is_constrained())
+		check_eq("...refused BEFORE the worker call: no new router hop",
+			shim.calls.size(), calls_before)
+		check("...and no steered flag (nothing was durably written)", not steer.has("steered"))
+
+
+## 19i (P1-B, Codex 1047 consolidated review — boundary-delta tests 3 + 4):
+## candidate constraint provenance is DURABLE, and a candidate generated
+## against an OLD constraint cannot be silently committed after steering
+## advanced it. The exact correctness-critical sequence Codex named: steer
+## succeeds (candidate at revision 1) → steer again but the router FAILS
+## (revision durably 2, prior candidate still live) → committing that prior
+## candidate must refuse constraint_stale_candidate with NO copper written →
+## rerouting under the current revision lands a fresh candidate that commits
+## cleanly. Also asserts the provenance survives into minerva_pcb_workspace_
+## list records (pre-fix it lived only on the immediate propose reply).
+func _run_station9_stale_candidate_commit_refused() -> void:
+	print("-- 19i. stale-constraint candidate: durable provenance + commit refusal (P1-B) --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	check_eq("unconstrained candidate carries the -1 sentinel durably",
+		int(ws.get_candidate(cid).constraint_revision), -1)
+
+	# ── steer 1: worker reply stamps the generating revision + hint status ───
+	var reply1: Dictionary = _multipad_reply([hint_id])
+	(reply1["routes"][0] as Dictionary)["constraint_revision"] = 1
+	reply1["warnings"] = [{"id": hint_id, "waypoint_status": "corridor_honored",
+		"message": "corridor honored"}]
+	shim.reply = reply1
+	var steer1: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 4.0, "y_mm": 4.0}],
+	}))
+	check("steer 1 succeeded", bool(steer1.get("success", false)))
+	var cid2: String = str(((steer1.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var c2 = ws.get_candidate(cid2)
+	check_eq("candidate 2 DURABLY carries constraint_revision 1 (not reply-only)",
+		int(c2.constraint_revision), 1)
+	check("candidate 2 DURABLY carries hint_status", not (c2.hint_status as Array).is_empty())
+
+	# ── boundary-delta 4: the provenance reaches workspace LIST records ──────
+	var listed: Dictionary = PanelTools._workspace_list(shim, _args())
+	var listed_rec: Dictionary = {}
+	for r in listed.get("candidates", []):
+		if str((r as Dictionary).get("candidate_id", "")) == cid2:
+			listed_rec = r
+	check("list found candidate 2", not listed_rec.is_empty())
+	check_eq("...list record carries constraint_revision",
+		int(listed_rec.get("constraint_revision", -99)), 1)
+	check("...list record carries hint_status", listed_rec.has("hint_status"))
+
+	# ── steer 2 FAILS at the router: revision durably 2, cid2 still live ─────
+	shim.answer_ok = false
+	var steer2: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "corridor": [{"x_mm": 8.0, "y_mm": 8.0}],
+		"expected_constraint_revision": 1,
+	}))
+	check("steer 2's router leg failed (by design)", not bool(steer2.get("success", true)))
+	check("...but reported steered:true", bool(steer2.get("steered", false)))
+	var task = ws.get_task(str(c2.task_id))
+	check_eq("task constraint durably at revision 2", int(task.routing_constraint.get("revision", 0)), 2)
+	check_eq("candidate 2 still live (proposed)", str(c2.disposition), "proposed")
+
+	# ── the stale commit is REFUSED by name, before any mutation ─────────────
+	var stale_commit: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid2}))
+	check("committing the pre-steer candidate is refused", not bool(stale_commit.get("success", true)))
+	check_eq("...named constraint_stale_candidate", str(stale_commit.get("error", "")), "constraint_stale_candidate")
+	check_eq("...no disposition move happened", str(c2.disposition), "proposed")
+
+	# ── reroute under the CURRENT revision, then commit cleanly ──────────────
+	shim.answer_ok = true
+	var reply2: Dictionary = _multipad_reply([hint_id])
+	(reply2["routes"][0] as Dictionary)["constraint_revision"] = 3
+	shim.reply = reply2
+	var steer3: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "corridor": [{"x_mm": 8.0, "y_mm": 8.0}],
+		"expected_constraint_revision": 2,
+	}))
+	check("reroute under the current revision succeeded", bool(steer3.get("success", false)))
+	var cid3: String = str(((steer3.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	check_eq("fresh candidate stamped with the generating revision (3)",
+		int(ws.get_candidate(cid3).constraint_revision), 3)
+	var clean_commit: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid3}))
+	check("committing the current-revision candidate succeeds", bool(clean_commit.get("success", false)))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 20. EPOCH UX1 STATION 10: minerva_pcb_workspace_edit_candidate ═══════════
+#
+# The ONE discriminated candidate-edit tool (DCR 019fd095e694, docket
+# 019fd057ea0b comments 1026/1028): move_junction (junction IDENTITY, not a
+# flattened bend index) and insert_via (delegates verbatim to
+# RoutingWorkspace.add_via). Model-only fixture (no scene mount, no router) —
+# same "bare model behind a minimal stub panel" idiom station 8's group 17
+# already exercises — so a change to one station's fixture idiom is caught by
+# a change to the shared helper, not by two copies drifting apart.
+
+## A real PcbData + a bare PcbWorkspace behind _RouteIntentStubPanel (reused
+## from group 17, DEFINED ABOVE), holding ONE multipad candidate — path A:
+## (0,0)->(5,0)->(5,5) via a via AT (5,0) [the join point under test], path B:
+## (50,50)->(60,50) wholly disconnected. Returns {"host","data","ws","cid"}.
+func _edit_candidate_context() -> Dictionary:
+	var data = PcbData.new()
+	data.save_to_history("baseline")
+	var ws = PcbWorkspace.new()
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var stub := _RouteIntentStubPanel.new()
+	stub._data = data
+	stub._ws = ws
+	host.set_panel(stub)
+	var cid := str(ws.ingest_record(_multipad_record(), int(data.board_revision)))
+	return {"host": host, "data": data, "ws": ws, "cid": cid}
+
+
+## A SECOND candidate, on its OWN net, built from two segments whose nearest
+## endpoints are 1.5*EDIT_EPS_MM apart: (0,0)->(5,0) and
+## (5.0+1.5*EPS,0)->(10,0). That gap is OUTSIDE the coincidence epsilon (so
+## _segments_adjacent does NOT merge them — they stay two genuinely
+## disconnected paths; the eps-radius match balls around each endpoint don't
+## even need to touch each other to both be found by a query point sitting
+## between them, since 1.5*EPS < 2*EPS). This is the realistic shape of the
+## ambiguous_junction hazard: not two paths sharing one exact coordinate
+## (impossible — exact coincidence IS the adjacency test, so it would merge
+## them), but two logically-separate junctions a few float-ULPs apart, e.g.
+## after a router reply's own JSON round-trip, that a naive single-epsilon
+## match would silently resolve to whichever path was found first.
+## Returns {"host","data","ws","cid","eps"}.
+func _near_miss_context() -> Dictionary:
+	var eps: float = PcbWorkspace.EDIT_EPS_MM
+	var data = PcbData.new()
+	data.save_to_history("baseline")
+	var ws = PcbWorkspace.new()
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var stub := _RouteIntentStubPanel.new()
+	stub._data = data
+	stub._ws = ws
+	host.set_panel(stub)
+	var record: Dictionary = {
+		"net": "N2",
+		"segments": [
+			{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"},
+			{"start": [5.0 + 1.5 * eps, 0.0], "end": [10.0, 0.0], "layer": "F.Cu"},
+		],
+		"vias": [],
+		"width": 0.3,
+		"source_hint_ids": ["hint_near_miss"],
+		"source_hints": [],
+	}
+	var cid := str(ws.ingest_record(record, int(data.board_revision)))
+	return {"host": host, "data": data, "ws": ws, "cid": cid, "eps": eps}
+
+
+func _run_station10_edit_candidate() -> void:
+	print("-- 20. Station 10: minerva_pcb_workspace_edit_candidate (move_junction / insert_via) --")
+	_run_station10_move_junction_happy_path()
+	_run_station10_move_junction_terminal_endpoint_allowed()
+	_run_station10_move_junction_ambiguous()
+	_run_station10_move_junction_via_membership_ambiguous()
+	_run_station10_move_junction_not_found()
+	_run_station10_move_junction_degenerate()
+	_run_station10_move_junction_degenerate_neighbor_in_moved_set()
+	_run_station10_revision_conflict()
+	_run_station10_commit_in_progress_guard()
+	_run_station10_insert_via_delegation()
+	_run_station10_terminal_candidate_refused()
+	_run_station10_edit_never_touches_task_constraint()
+	_run_station10_unknown_op_refused()
+
+
+## move_junction moves EVERY coincident endpoint (both segments' shared point)
+## AND the via sitting on it, atomically, in ONE connected path — and leaves
+## the wholly disconnected path byte-identical. The mandatory INV-3-style GATE
+## assertion this station's own tests must carry, per the file's group 6/7
+## convention.
+func _run_station10_move_junction_happy_path() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+
+	# Path B, captured BEFORE the edit — the untouched-path assertion is a
+	# comparison, not a claim (same convention as group 6's _run_inv3_path_scoped_edit).
+	var path_b_pts_before: Array = (cand.segments[2] as Dictionary).get("points", []).duplicate()
+
+	var out: Dictionary = PanelTools._workspace_edit_candidate(host, _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("move_junction succeeded", bool(out.get("success", false)))
+	check_eq("op is echoed", str(out.get("op", "")), "move_junction")
+	var moved_segs: Array = out.get("moved_segment_ids", [])
+	check_eq("both of path A's segments (sharing the join) moved", moved_segs.size(), 2)
+	var moved_vias: Array = out.get("moved_via_ids", [])
+	check_eq("the via sitting on the junction moved too", moved_vias.size(), 1)
+	check_eq("candidate_revision bumped by exactly one",
+		int(out.get("candidate_revision", -1)), rev_before + 1)
+	check_eq("validation went stale (INV-2, geometry half)",
+		str(out.get("validation", "")), "stale")
+
+	# ── THE GATE: the moved endpoints, exactly ─────────────────────────────
+	var seg_a: Dictionary = cand.segments[0]
+	var seg_b: Dictionary = cand.segments[1]
+	check("path A's first leg now ends at the new point",
+		(seg_a.get("points", []) as Array)[1] == Vector2(5.0, 20.0))
+	check("path A's second leg now starts at the new point",
+		(seg_b.get("points", []) as Array)[0] == Vector2(5.0, 20.0))
+	var via: Dictionary = cand.vias[0]
+	check_eq("the via itself moved to the new point", via.get("position", Vector2()), Vector2(5.0, 20.0))
+
+	# ── path B is byte-identical ─────────────────────────────────────────────
+	var path_b_after: Array = (cand.segments[2] as Dictionary).get("points", [])
+	check_eq("disconnected path B's point count is unchanged", path_b_after.size(), path_b_pts_before.size())
+	check("disconnected path B's first point is unchanged", path_b_after[0] == path_b_pts_before[0])
+	check("disconnected path B's last point is unchanged", path_b_after[1] == path_b_pts_before[1])
+
+	# ── candidate-local: no auto-pin, disposition untouched ───────────────────
+	check_eq("the candidate was NOT pinned by editing it", str(cand.disposition), "proposed")
+	check("the reply names the edit-local / not-durable contract",
+		str(out.get("note", "")).contains("candidate-local") and str(out.get("note", "")).contains("pin"))
+
+
+## P2 (fix round, docket 019fd095e694): moving a route's TERMINAL endpoint —
+## path A's (0,0) end, the end a real board would anchor to a pad — is an
+## ALLOWED edit, not refused. move_junction has no pad/board awareness (a pure
+## candidate model has no pad lookup, same as add_via's own header notes) and
+## does not need one to do its job correctly: detaching the draft's copper
+## from its pad is exactly the kind of change re-validation exists to catch
+## (INV-2) — the candidate_revision bump and staled verdict below ARE that
+## catch, not a gap. This test makes that ruling explicit rather than leaving
+## it an inference from the happy-path test's shared, non-terminal junction.
+func _run_station10_move_junction_terminal_endpoint_allowed() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+
+	var out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [0.0, 0.0], "to": [0.0, 30.0],
+	}))
+	check("moving path A's own pad-anchored terminal endpoint succeeds", bool(out.get("success", false)))
+	check_eq("candidate_revision bumped", int(out.get("candidate_revision", -1)), rev_before + 1)
+	check_eq("validation went stale — the detach IS what check/commit must now catch",
+		str(out.get("validation", "")), "stale")
+	var seg_a: Dictionary = cand.segments[0]
+	check("the terminal point actually moved",
+		(seg_a.get("points", []) as Array)[0] == Vector2(0.0, 30.0))
+
+
+## Two genuinely disconnected paths whose junctions each independently fall
+## within EDIT_EPS_MM of the query point, but not within it of EACH OTHER —
+## refused BY NAME rather than silently acting on whichever path was found
+## first (the exact flattened-index failure class docket 1026 warned against).
+func _run_station10_move_junction_ambiguous() -> void:
+	var ctx: Dictionary = _near_miss_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var eps: float = ctx["eps"]
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+	var pts_before: Array = [
+		(cand.segments[0] as Dictionary).get("points", []).duplicate(),
+		(cand.segments[1] as Dictionary).get("points", []).duplicate(),
+	]
+
+	var midpoint := Vector2(5.0 + 0.75 * eps, 0.0)
+	var out: Dictionary = PanelTools._workspace_edit_candidate(host, _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [midpoint.x, midpoint.y], "to": [5.0, 20.0],
+	}))
+	check("ambiguous move_junction is refused", not bool(out.get("success", true)))
+	check_eq("named ambiguous_junction", str(out.get("error", "")), PcbWorkspace.ERR_AMBIGUOUS_JUNCTION)
+
+	# NO-OP: neither path moved, no revision bump.
+	check_eq("candidate_revision did not move", int(cand.candidate_revision), rev_before)
+	for i in range(2):
+		var seg: Dictionary = cand.segments[i]
+		check("segment %d's points are untouched by the refusal" % i,
+			(seg.get("points", []) as Array) == pts_before[i])
+
+
+## P3 (fix round, docket 019fd095e694): a hit VIA that is within EDIT_EPS_MM
+## of the query point but NOT coincident with the resolved path's own matched
+## endpoint — a via belonging to a separate junction (the shape a via anchored
+## on a disconnected path B takes when float noise happens to land it within
+## tolerance of path A's query point) — is refused ambiguous_junction, same as
+## a segment-level near-miss, and NOTHING moves. Before this station's fix
+## round, via hits were collected candidate-wide by raw distance to `point`
+## and moved unconditionally, without ever checking path membership — this is
+## the regression test for that gap.
+func _run_station10_move_junction_via_membership_ambiguous() -> void:
+	var eps: float = PcbWorkspace.EDIT_EPS_MM
+	var ctx: Dictionary = _edit_candidate_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+
+	# A stray via near path A's real junction (5,0), but NOT coincident with it
+	# — the position a via genuinely anchored elsewhere (path B) would land at
+	# after a small coordinate perturbation.
+	var stray_via: Dictionary = PcbRouteCandidate.make_via(
+		"via_stray_b", Vector2(5.0 + 1.2 * eps, 0.0), "top", "bottom")
+	cand.add_via(stray_via)
+
+	var segs_before: Array = [
+		(cand.segments[0] as Dictionary).get("points", []).duplicate(),
+		(cand.segments[1] as Dictionary).get("points", []).duplicate(),
+	]
+	var vias_before: Array = [
+		(cand.vias[0] as Dictionary).get("position", Vector2()),
+		(cand.vias[1] as Dictionary).get("position", Vector2()),
+	]
+
+	# Query point sits within EDIT_EPS_MM of path A's REAL junction (5,0) — so
+	# path A's own segment endpoints are hit cleanly, no segment-level
+	# ambiguity — but ALSO within EDIT_EPS_MM of the stray via, whose actual
+	# position (5+1.2*eps) is itself MORE than EDIT_EPS_MM from (5,0).
+	var query := Vector2(5.0 + 0.3 * eps, 0.0)
+	var out: Dictionary = PanelTools._workspace_edit_candidate(host, _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [query.x, query.y], "to": [5.0, 20.0],
+	}))
+	check("a via not coincident with the resolved path's endpoint is refused", not bool(out.get("success", true)))
+	check_eq("named ambiguous_junction", str(out.get("error", "")), PcbWorkspace.ERR_AMBIGUOUS_JUNCTION)
+
+	# NO-OP: nothing moved — not path A's segments, not either via.
+	check_eq("candidate_revision did not move", int(cand.candidate_revision), rev_before)
+	check("path A's segments are untouched",
+		(cand.segments[0] as Dictionary).get("points", []) == segs_before[0]
+			and (cand.segments[1] as Dictionary).get("points", []) == segs_before[1])
+	check("both vias (the real one AND the stray one) are untouched",
+		(cand.vias[0] as Dictionary).get("position", Vector2()) == vias_before[0]
+			and (cand.vias[1] as Dictionary).get("position", Vector2()) == vias_before[1])
+
+
+## No segment endpoint or via anywhere near the query point.
+func _run_station10_move_junction_not_found() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": ctx["cid"], "op": "move_junction",
+		"point": [500.0, 500.0], "to": [5.0, 20.0],
+	}))
+	check("a move on empty geometry is refused", not bool(out.get("success", true)))
+	check_eq("named junction_not_found", str(out.get("error", "")), PcbWorkspace.ERR_JUNCTION_NOT_FOUND)
+
+
+## Moving path A's join point (5,0) onto (5,5) — path A's OTHER endpoint of
+## the second leg — collapses that leg to zero length. Refused, not emitted
+## (docket 019f9cc3245d), and no-op like every other refusal in this group.
+func _run_station10_move_junction_degenerate() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+
+	var out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 5.0],
+	}))
+	check("a degenerate move is refused", not bool(out.get("success", true)))
+	check_eq("named degenerate_result", str(out.get("error", "")), PcbWorkspace.ERR_DEGENERATE_RESULT)
+	check_eq("candidate_revision did not move", int(cand.candidate_revision), rev_before)
+	check_eq("nothing was split or added",
+		(cand.segments as Array).size(), 3)
+
+
+## P4a (fix round, docket 019fd095e694): a segment short enough that BOTH its
+## endpoints independently fall within EDIT_EPS_MM of the query point — its
+## OWN neighbour is ITSELF in the moved set. Pre-move the two points already
+## sit within 2*EDIT_EPS_MM of each other (the same junction, wearing two
+## point-indices); moving both to `to` collapses the leg to EXACT zero length
+## regardless of what `to` is. `to` here is 50mm away — nowhere near either
+## point's PRE-move position — proving the refusal is unconditional rather
+## than the old check's accidental catch (which only fired when `to` happened
+## to land near a STATIC, non-moving neighbour).
+func _run_station10_move_junction_degenerate_neighbor_in_moved_set() -> void:
+	var eps: float = PcbWorkspace.EDIT_EPS_MM
+	var data = PcbData.new()
+	data.save_to_history("baseline")
+	var ws = PcbWorkspace.new()
+	var host = load(ANNOTATION_HOST_SCRIPT_PATH).new()
+	var stub := _RouteIntentStubPanel.new()
+	stub._data = data
+	stub._ws = ws
+	host.set_panel(stub)
+	var record: Dictionary = {
+		"net": "N3",
+		"segments": [
+			{"start": [0.0, 0.0], "end": [0.4 * eps, 0.0], "layer": "F.Cu"},
+		],
+		"vias": [],
+		"width": 0.3,
+		"source_hint_ids": ["hint_degenerate_neighbor"],
+		"source_hints": [],
+	}
+	var cid := str(ws.ingest_record(record, int(data.board_revision)))
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+	var pts_before: Array = (cand.segments[0] as Dictionary).get("points", []).duplicate()
+
+	var query := Vector2(0.2 * eps, 0.0)
+	var out: Dictionary = PanelTools._workspace_edit_candidate(host, _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [query.x, query.y], "to": [50.0, 50.0],
+	}))
+	check("a move whose neighbour is itself in the moved set is refused", not bool(out.get("success", true)))
+	check_eq("named degenerate_result", str(out.get("error", "")), PcbWorkspace.ERR_DEGENERATE_RESULT)
+	check_eq("candidate_revision did not move", int(cand.candidate_revision), rev_before)
+	check("segment points are untouched",
+		(cand.segments[0] as Dictionary).get("points", []) == pts_before)
+
+
+## expected_candidate_revision guards BOTH ops, before either op's own
+## model-side work runs — a stale caller is refused candidate_revision_conflict
+## and nothing mutates. Symmetric with station 9's expected_constraint_revision.
+func _run_station10_revision_conflict() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var actual: int = int(cand.candidate_revision)
+
+	var stale_move: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction", "expected_candidate_revision": actual + 5,
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("stale move_junction is refused", not bool(stale_move.get("success", true)))
+	check_eq("named candidate_revision_conflict", str(stale_move.get("error", "")), "candidate_revision_conflict")
+	check_eq("the refusal names the expected revision", int(stale_move.get("expected_candidate_revision", -1)), actual + 5)
+	check_eq("the refusal names the ACTUAL revision", int(stale_move.get("actual_candidate_revision", -1)), actual)
+	check_eq("nothing mutated", int(cand.candidate_revision), actual)
+
+	var stale_via: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "insert_via", "expected_candidate_revision": actual + 5,
+		"position": [50.0, 50.0], "from_layer": "top", "to_layer": "bottom",
+	}))
+	check("stale insert_via is refused too (BOTH ops guarded)", not bool(stale_via.get("success", true)))
+	check_eq("named candidate_revision_conflict", str(stale_via.get("error", "")), "candidate_revision_conflict")
+	check_eq("nothing mutated by the via leg either", int(cand.candidate_revision), actual)
+
+	# The CORRECT revision succeeds, and the reply's bumped number is the one
+	# a chained second edit must supply.
+	var ok_move: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction", "expected_candidate_revision": actual,
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("the correct expected_candidate_revision succeeds", bool(ok_move.get("success", false)))
+	check_eq("candidate_revision bumped by one", int(ok_move.get("candidate_revision", -1)), actual + 1)
+
+
+## P4b (fix round, docket 019fd095e694 — the "guard-parity VERIFIED" review
+## finding, sharpest question of the cold review): move_junction's OWN
+## reentrancy guard (mirrored, comment-for-comment, from add_via's) actually
+## refuses commit_in_progress and mutates nothing while a commit transaction
+## is mid-flight — not just an assertion in a doc comment. Both ops are
+## exercised through the SAME candidate/workspace with the flag forced true,
+## proving the guard holds for move_junction with the identical shape it
+## already held for add_via (station 10's insert_via, delegating verbatim).
+func _run_station10_commit_in_progress_guard() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var rev_before: int = int(cand.candidate_revision)
+	var segs_before: int = (cand.segments as Array).size()
+	var vias_before: int = (cand.vias as Array).size()
+
+	ws._commit_transaction_active = true
+
+	var move_out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("move_junction refuses mid-commit", not bool(move_out.get("success", true)))
+	check_eq("named commit_in_progress", str(move_out.get("error", "")), PcbWorkspace.ERR_COMMIT_IN_PROGRESS)
+
+	var via_out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "insert_via",
+		"position": [2.5, 0.0], "from_layer": "top", "to_layer": "bottom",
+	}))
+	check("insert_via (add_via) refuses mid-commit too", not bool(via_out.get("success", true)))
+	check_eq("named commit_in_progress", str(via_out.get("error", "")), PcbWorkspace.ERR_COMMIT_IN_PROGRESS)
+
+	# Reset the flag — this is a fixture-local simulation of reentrancy, not a
+	# real commit, and a stuck flag would wedge every later edit on this
+	# workspace.
+	ws._commit_transaction_active = false
+
+	check_eq("candidate_revision did not move", int(cand.candidate_revision), rev_before)
+	check_eq("no segment was added or split", (cand.segments as Array).size(), segs_before)
+	check_eq("no via was added or moved", (cand.vias as Array).size(), vias_before)
+
+
+## insert_via delegates VERBATIM to RoutingWorkspace.add_via — success shape
+## and refusals both pass through unchanged, proving this is delegation, not
+## a reimplementation.
+func _run_station10_insert_via_delegation() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var segs_before: int = (cand.segments as Array).size()
+	var vias_before: int = (cand.vias as Array).size()
+
+	# Success leg: split path A's top leg at its midpoint, same shape the
+	# model-level INV-3 gate (group 6) exercises directly.
+	var out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "insert_via",
+		"position": [2.5, 0.0], "from_layer": "top", "to_layer": "bottom",
+	}))
+	check("insert_via succeeded", bool(out.get("success", false)))
+	check_eq("op is echoed", str(out.get("op", "")), "insert_via")
+	check("via_id is present (add_via's own reply field, passed through)", not str(out.get("via_id", "")).is_empty())
+	check_eq("one segment was added (the split)", (cand.segments as Array).size(), segs_before + 1)
+	check_eq("one via was added", (cand.vias as Array).size(), vias_before + 1)
+	check_eq("candidate_revision reported matches the model",
+		int(out.get("candidate_revision", -1)), int(cand.candidate_revision))
+
+	# Refusal leg: add_via's own degenerate-on-vertex refusal, named identically
+	# through this tool as it is called directly on the model (group 7).
+	var refused: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "insert_via",
+		"position": [0.0, 0.0], "from_layer": "top", "to_layer": "bottom",
+	}))
+	check("an on-vertex insert_via is refused", not bool(refused.get("success", true)))
+	check_eq("add_via's own named refusal passes through unchanged",
+		str(refused.get("error", "")), PcbWorkspace.ERR_DEGENERATE_AT_ENDPOINT)
+
+
+## A terminal candidate (committed/rejected/superseded) is a record, not a
+## draft — both ops refuse it, the same rule add_via already enforced before
+## this station existed.
+func _run_station10_terminal_candidate_refused() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	check("reject the candidate", ws.reject(cid))
+
+	var move_out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("move_junction on a terminal candidate is refused", not bool(move_out.get("success", true)))
+	check_eq("named candidate_not_editable", str(move_out.get("error", "")), PcbWorkspace.ERR_NOT_EDITABLE)
+
+	var via_out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "insert_via",
+		"position": [2.5, 0.0], "from_layer": "top", "to_layer": "bottom",
+	}))
+	check("insert_via on a terminal candidate is refused too", not bool(via_out.get("success", true)))
+	check_eq("named candidate_not_editable", str(via_out.get("error", "")), PcbWorkspace.ERR_NOT_EDITABLE)
+
+
+## EDIT != POLICY, asserted directly (docket 1028): a candidate's task carries
+## an EXPLICIT routing_constraint BEFORE the edit; move_junction and insert_via
+## both succeed; the task's constraint (object identity AND revision) is
+## BYTE-IDENTICAL afterward — a direct candidate edit never silently becomes
+## future router policy, and it does not pin either.
+func _run_station10_edit_never_touches_task_constraint() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var cid: String = ctx["cid"]
+	var cand = ws.get_candidate(cid)
+	var task = ws.get_task(str(cand.task_id))
+	check("the candidate's task exists", task != null)
+	if task == null:
+		return
+	task.routing_constraint = {
+		"corridor_points": [Vector2(1.0, 1.0), Vector2(2.0, 2.0)],
+		"preferred_layer": "top",
+		"revision": 7,
+		"authored_by": "human",
+		"base_board_revision": 0,
+		"owner_hint_id": "hint_1",
+	}
+	var constraint_before: Dictionary = (task.routing_constraint as Dictionary).duplicate(true)
+
+	var move_out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("move_junction succeeded", bool(move_out.get("success", false)))
+	check("the task's routing_constraint is BYTE-IDENTICAL after the edit",
+		(task.routing_constraint as Dictionary) == constraint_before)
+	check_eq("the constraint revision in particular did not move",
+		int((task.routing_constraint as Dictionary).get("revision", -1)), 7)
+	check_eq("the candidate was NOT pinned", str(cand.disposition), "proposed")
+
+	var via_out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		# First-execution fix (boundary run): [50,50] is path B's START VERTEX
+		# — add_via correctly refuses that as degenerate_insert_at_endpoint.
+		# The midpoint of path B ((50,50)->(60,50)) is the intended split.
+		"candidate_id": cid, "op": "insert_via",
+		"position": [55.0, 50.0], "from_layer": "top", "to_layer": "bottom",
+	}))
+	check("insert_via succeeded", bool(via_out.get("success", false)))
+	check("the task's routing_constraint is STILL byte-identical after the via edit too",
+		(task.routing_constraint as Dictionary) == constraint_before)
+	check_eq("the candidate was NOT pinned by the via edit either", str(cand.disposition), "proposed")
+
+
+## An op outside {move_junction, insert_via} is refused by name rather than
+## silently doing nothing or falling through to one of the two.
+func _run_station10_unknown_op_refused() -> void:
+	var ctx: Dictionary = _edit_candidate_context()
+	var out: Dictionary = PanelTools._workspace_edit_candidate(ctx["host"], _args({
+		"candidate_id": ctx["cid"], "op": "delete_segment",
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	check("an unknown op is refused", not bool(out.get("success", true)))
+	check_eq("named unknown_op", str(out.get("error", "")), "unknown_op")
+
+
+# ══ 21. EPOCH UX1 STATION 11 — replies name legal successors ═════════════════
+
+## COMPACT GATE for station 11 (DCR 019fd095e694, docket 019fd095e694 "MCP
+## surface" bullet "Replies name legal successors"): the `note` guidance key
+## is present and names its expected legal-successor verb(s) on propose,
+## edit_candidate, commit and reject. STRING-CONTAINS on verb names only —
+## same convention this file's own line ~2246 already uses for
+## add_route_intent's note — never a full-prose comparison, so a wording tweak
+## to the sentence around the verb name does not make this suite brittle.
+func _run_ux1_station11_next_step_guidance() -> void:
+	print("-- 21. Station 11: replies name legal successors --")
+
+	# ── propose reply names workspace_commit / workspace_reject ──────────────
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var proposed: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var propose_note := str(proposed.get("note", ""))
+	check("propose reply carries a guidance note", not propose_note.is_empty())
+	check("propose guidance names workspace_commit", propose_note.contains("workspace_commit"))
+	check("propose guidance names workspace_reject", propose_note.contains("workspace_reject"))
+	var proposed_cands: Array = proposed.get("candidates", [])
+	check("propose landed a candidate to commit next", proposed_cands.size() > 0)
+	var cid := str((proposed_cands[0] as Dictionary).get("candidate_id", "")) if proposed_cands.size() > 0 else ""
+
+	# ── commit reply names propose (what's next once copper lands) ───────────
+	var committed: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid}))
+	var commit_note := str(committed.get("note", ""))
+	check("commit reply carries a guidance note", not commit_note.is_empty())
+	check("commit guidance names propose", commit_note.contains("propose"))
+	ctx["driver"].free_panel(ctx["panel"])
+
+	# ── edit_candidate reply names pin / reroute_route ────────────────────────
+	var edit_ctx: Dictionary = _edit_candidate_context()
+	var edited: Dictionary = PanelTools._workspace_edit_candidate(edit_ctx["host"], _args({
+		"candidate_id": edit_ctx["cid"], "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 20.0],
+	}))
+	var edit_note := str(edited.get("note", ""))
+	check("edit_candidate reply carries a guidance note", not edit_note.is_empty())
+	check("edit_candidate guidance names pin", edit_note.contains("pin"))
+	check("edit_candidate guidance names reroute_route", edit_note.contains("reroute_route"))
+
+	# ── reject reply names re-propose / edit the intent ───────────────────────
+	var reject_ctx: Dictionary = await _panel_context()
+	var reject_shim = reject_ctx["shim"]
+	var reproposed: Dictionary = await PanelTools._workspace_propose(reject_shim, _args())
+	var reproposed_cands: Array = reproposed.get("candidates", [])
+	check("second propose landed a candidate to reject next", reproposed_cands.size() > 0)
+	var rcid := str((reproposed_cands[0] as Dictionary).get("candidate_id", "")) \
+		if reproposed_cands.size() > 0 else ""
+	var rejected: Dictionary = PanelTools._workspace_reject(reject_shim, _args({"candidate_id": rcid}))
+	var reject_note := str(rejected.get("note", ""))
+	check("reject reply carries a guidance note", not reject_note.is_empty())
+	check("reject guidance names re-propose", reject_note.contains("re-propose"))
+	reject_ctx["driver"].free_panel(reject_ctx["panel"])
+
+
+# ══ 22. EPOCH UX1 STATION 12: legacy waypoint-hint migration ═════════════════
+#
+# DCR 019fd095e694, docket 019fd057ea0b comment 1028, §"LEGACY WAYPOINT-HINT
+# MIGRATION" (adopted verbatim). panel_tools.gd's _seed_legacy_waypoint_constraints
+# (propose-time, before _run_router) + PcbAnnotationHost._refuses_superseded_waypoint_edit
+# (update_annotation's own edit-refusal gate).
+
+## A REAL pcb_route_hint annotation carrying real inline waypoints AND
+## net_names naming a REAL board net — the legacy-authoring shape this
+## station migrates. Built the same way _seed_net_named_hint (group 11) does,
+## with an explicit detail_level so a 'detailed' control case can be built
+## too (default "" lets build_route_hint_envelope auto-derive it from
+## waypoint count — 2-3 points -> "guided", the common legacy case). Declares
+## `net` on the board first (station 12's own net resolution needs
+## PCBData.get_net_names() to carry it, same as every other
+## _propose_scope/_reroute_scope net-membership check in this file). Returns
+## the hint id.
+func _seed_legacy_waypoint_hint(host, data, net: String, waypoints: Array, detail_level: String = "") -> String:
+	_declare_net(data, net)
+	var env: Dictionary = host.build_route_hint_envelope(
+		0.0, 0.0, "", "F.Cu", "waypoint", waypoints, "human", detail_level)
+	var kp: Dictionary = env.get("kind_payload", {})
+	kp["net_names"] = [net]
+	env["kind_payload"] = kp
+	return str(host.add_annotation_v2(env))
+
+
+func _run_station12_legacy_seeding() -> void:
+	print("-- 22. Station 12: legacy waypoint-hint migration (seeding + edit refusal) --")
+	await _run_station12_seeds_on_propose()
+	await _run_station12_seed_survives_router_failure()
+	await _run_station12_second_propose_does_not_reseed()
+	await _run_station12_post_seed_edit_refusal()
+	await _run_station12_detailed_hint_untouched()
+	await _run_station12_already_constrained_task_not_reseeded()
+	await _run_station12_bus_hint_never_seeded()
+	await _run_station12_apply_route_hints_also_seeds()
+	await _run_station12_marker_reinjected_on_omission()
+	await _run_station12_undo_seam_reinjects_marker()
+	await _run_station12_merged_task_never_reseeded()
+	await _run_station12_conflicting_seeds_survive_merge()
+	await _run_station12_convert_to_detailed()
+	await _run_station12_recon_consistent_noop()
+	await _run_station12_recon_marker_without_constraint()
+	await _run_station12_recon_constraint_without_marker()
+	await _run_station12_recon_marker_out_of_shape()
+	await _run_station12_recon_undo_of_conversion()
+
+
+## 22a: a legacy guided hint carrying waypoints seeds its task's
+## routing_constraint at propose time — authored_by "migration",
+## seeded_from_hint_id/_revision provenance, revision 1, corridor equal to the
+## hint's own waypoints — task_constraints carries it into the router
+## request, and the owning hint is stamped
+## waypoints_superseded_by_constraint_revision (waypoints themselves
+## untouched, additive-only, same contract station 9's own stamp already
+## established).
+func _run_station12_seeds_on_propose() -> void:
+	print("-- 22a. legacy guided hint with waypoints: propose seeds the task constraint --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [5.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_PWR", wp)
+
+	# ── fixture sanity ────────────────────────────────────────────────────
+	var before_ann: Dictionary = host.get_by_id(hint_id)
+	var before_kp: Dictionary = before_ann.get("kind_payload", {})
+	check("fixture sanity: hint carries waypoints", not (before_kp.get("waypoints", []) as Array).is_empty())
+	check_eq("fixture sanity: detail_level auto-derived to guided (2 points)",
+		str(before_kp.get("detail_level", "")), "guided")
+	check("fixture sanity: not yet superseded",
+		not before_kp.has("waypoints_superseded_by_constraint_revision"))
+	check("fixture sanity: task does not exist yet", ws.task_for_hint(hint_id) == null)
+
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_PWR",
+			"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded", bool(out.get("success", false)))
+
+	var task = ws.task_for_hint(hint_id)
+	check("task now exists (eagerly minted, singleton 'net|hint_id' key)", task != null)
+	if task != null:
+		check("task is constrained", task.is_constrained())
+		check_eq("revision is 1", int(task.routing_constraint.get("revision", 0)), 1)
+		check_eq("authored_by is migration", str(task.routing_constraint.get("authored_by", "")), "migration")
+		check_eq("owner_hint_id names this hint", str(task.routing_constraint.get("owner_hint_id", "")), hint_id)
+		check_eq("seeded_from_hint_id names this hint",
+			str(task.routing_constraint.get("seeded_from_hint_id", "")), hint_id)
+		check_eq("seeded_from_hint_revision is 0 (a fresh, never-edited hint)",
+			int(task.routing_constraint.get("seeded_from_hint_revision", -1)), 0)
+		var pts: Array = task.routing_constraint.get("corridor_points", [])
+		check_eq("corridor carries both of the hint's own waypoints", pts.size(), 2)
+		if pts.size() == 2:
+			check("point 0 matches the hint's own first waypoint",
+				(pts[0] as Vector2).is_equal_approx(Vector2(0.0, 0.0)))
+			check("point 1 matches the hint's own second waypoint",
+				(pts[1] as Vector2).is_equal_approx(Vector2(5.0, 0.0)))
+
+	# ── the seeded constraint reached the router request (station 9, unmodified) ──
+	var call: Dictionary = shim.calls[shim.calls.size() - 1]
+	var tc: Dictionary = (call.get("extra", {}) as Dictionary).get("task_constraints", {})
+	check("request carries task_constraints for the seeded hint", tc.has(hint_id))
+
+	# ── the hint itself: stamped, waypoints preserved ────────────────────────
+	var after_ann: Dictionary = host.get_by_id(hint_id)
+	var after_kp: Dictionary = after_ann.get("kind_payload", {})
+	check("legacy waypoints are STILL PRESENT — additive, never cleared",
+		not (after_kp.get("waypoints", []) as Array).is_empty())
+	check("...now stamped waypoints_superseded_by_constraint_revision",
+		after_kp.has("waypoints_superseded_by_constraint_revision"))
+	check_eq("...naming revision 1 (the constraint this seed just wrote)",
+		int(after_kp.get("waypoints_superseded_by_constraint_revision", -1)), 1)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22b (docket 019fd057ea0b comment 1028's durability invariant, same wording
+## station 9's own 19d test carries): the seeded constraint is written BEFORE
+## the router runs, so a router leg that then FAILS leaves the seed standing
+## — steering durability must not depend on obtaining a candidate.
+func _run_station12_seed_survives_router_failure() -> void:
+	print("-- 22b. seeding survives a failed router leg (durability, comment 1028) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_PWR2", [[1.0, 1.0], [2.0, 2.0]])
+	check("task does not exist yet", ws.task_for_hint(hint_id) == null)
+
+	shim.answer_ok = false
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose itself failed (router unavailable)", not bool(out.get("success", true)))
+
+	var task = ws.task_for_hint(hint_id)
+	check("the task was seeded anyway — the write happened before the failed router call",
+		task != null and task.is_constrained())
+	if task != null:
+		check_eq("authored_by is migration", str(task.routing_constraint.get("authored_by", "")), "migration")
+		check_eq("revision is 1", int(task.routing_constraint.get("revision", 0)), 1)
+
+	var ann: Dictionary = host.get_by_id(hint_id)
+	check("the hint is stamped superseded despite the router failure",
+		(ann.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+
+	shim.answer_ok = true
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22c: a SECOND propose of the same hint does not re-seed — the constraint's
+## revision stays 1, and its fields (authored_by included) are untouched. This
+## is the "singleton task already constrained" half of the ONE-TIME gate
+## (22f below is the "task constrained by a DIFFERENT channel" half).
+func _run_station12_second_propose_does_not_reseed() -> void:
+	print("-- 22c. a second propose does not re-seed (revision stays 1) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_PWR3", [[0.0, 0.0], [3.0, 0.0]])
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_PWR3",
+			"segments": [{"start": [0.0, 0.0], "end": [3.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("first propose succeeded", bool(first.get("success", false)))
+	var task = ws.task_for_hint(hint_id)
+	check("task constrained after the first propose", task != null and task.is_constrained())
+	check_eq("revision is 1 after the first propose", int(task.routing_constraint.get("revision", 0)), 1)
+
+	var second: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("second propose succeeded", bool(second.get("success", false)))
+	var task2 = ws.task_for_hint(hint_id)
+	check("still the SAME constrained task", task2 != null and task2 == task)
+	check_eq("revision is STILL 1 — the hint's waypoints were not re-read",
+		int(task2.routing_constraint.get("revision", 0)), 1)
+	check_eq("authored_by still migration (never overwritten)",
+		str(task2.routing_constraint.get("authored_by", "")), "migration")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22d (station 12's other half — PcbAnnotationHost.update_annotation): once
+## a hint is stamped superseded, an update that CHANGES kind_payload.waypoints
+## is refused (return false, no mutation); an update that leaves waypoints
+## untouched (here: kind_payload.text) passes through unaffected.
+func _run_station12_post_seed_edit_refusal() -> void:
+	print("-- 22d. post-seed waypoints edit refused; non-waypoints edit passes --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [4.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_PWR4", wp)
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_PWR4",
+			"segments": [{"start": [0.0, 0.0], "end": [4.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded", bool(out.get("success", false)))
+
+	var ann: Dictionary = host.get_by_id(hint_id)
+	check("fixture sanity: hint is stamped superseded",
+		(ann.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+
+	# ── waypoints edit: refused, nothing mutated ──────────────────────────
+	var changed: Dictionary = ann.duplicate(true)
+	var changed_kp: Dictionary = (changed.get("kind_payload", {}) as Dictionary).duplicate(true)
+	changed_kp["waypoints"] = [[0.0, 0.0], [9.0, 9.0]]
+	changed["kind_payload"] = changed_kp
+	var ok1: bool = host.update_annotation(hint_id, changed)
+	check("a waypoints edit on a superseded hint is REFUSED (returns false)", not ok1)
+	var still: Dictionary = host.get_by_id(hint_id)
+	var still_kp: Dictionary = still.get("kind_payload", {})
+	var still_wp: Array = still_kp.get("waypoints", [])
+	check_eq("stored waypoints unchanged by the refused edit", still_wp.size(), 2)
+	if still_wp.size() == 2:
+		check_eq("...still the original second point's x", float((still_wp[1] as Array)[0]), 4.0)
+
+	# ── non-waypoints edit on the SAME superseded hint: passes ───────────────
+	var changed2: Dictionary = still.duplicate(true)
+	var changed2_kp: Dictionary = (changed2.get("kind_payload", {}) as Dictionary).duplicate(true)
+	changed2_kp["text"] = "edited note"
+	changed2["kind_payload"] = changed2_kp
+	var ok2: bool = host.update_annotation(hint_id, changed2)
+	check("a non-waypoints edit on the SAME superseded hint SUCCEEDS", ok2)
+	var after2: Dictionary = host.get_by_id(hint_id)
+	var after2_kp: Dictionary = after2.get("kind_payload", {})
+	check_eq("text field actually changed", str(after2_kp.get("text", "")), "edited note")
+	check_eq("waypoints still unchanged by the accepted edit",
+		(after2_kp.get("waypoints", []) as Array).size(), 2)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22e: a 'detailed' hint (the as-drawn channel) is untouched by every half of
+## this station — never seeded (no task constraint lands), never stamped, and
+## therefore an edit to its waypoints is never refused by the guard either.
+## detail_level is passed explicitly here (rather than relying on
+## auto-derivation from waypoint count) so the test asserts the FIELD, not an
+## accident of point count.
+func _run_station12_detailed_hint_untouched() -> void:
+	print("-- 22e. a 'detailed' hint is never seeded and never refused --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [1.0, 0.0], [2.0, 1.0], [3.0, 1.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_PWR5", wp, "detailed")
+
+	var before_ann: Dictionary = host.get_by_id(hint_id)
+	check_eq("fixture sanity: detail_level is detailed",
+		str((before_ann.get("kind_payload", {}) as Dictionary).get("detail_level", "")), "detailed")
+
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_PWR5",
+			"segments": [{"start": [0.0, 0.0], "end": [3.0, 1.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded", bool(out.get("success", false)))
+
+	var task = ws.task_for_hint(hint_id)
+	check("no SEEDED constraint landed on this hint's task",
+		task == null or not task.is_constrained())
+
+	var after_ann: Dictionary = host.get_by_id(hint_id)
+	check("the hint was NEVER stamped superseded",
+		not (after_ann.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+
+	# an edit to its waypoints is NOT refused either — nothing ever marked it.
+	var changed: Dictionary = after_ann.duplicate(true)
+	var changed_kp: Dictionary = (changed.get("kind_payload", {}) as Dictionary).duplicate(true)
+	changed_kp["waypoints"] = [[0.0, 0.0], [5.0, 5.0]]
+	changed["kind_payload"] = changed_kp
+	var ok: bool = host.update_annotation(hint_id, changed)
+	check("a waypoints edit on a 'detailed' hint is NOT refused by station 12's guard", ok)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22f: a hint carrying waypoints whose task is ALREADY constrained by some
+## OTHER channel (here: a direct write, standing in for a prior
+## add_route_intent corridor or an explicit steer) is left completely alone —
+## the pre-existing constraint's fields are untouched, and the hint is never
+## stamped (nothing this station did caused the supersession).
+func _run_station12_already_constrained_task_not_reseeded() -> void:
+	print("-- 22f. a hint whose task is ALREADY constrained by another channel is not re-seeded --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_PWR6", [[0.0, 0.0], [7.0, 0.0]])
+
+	# Pre-constrain the hint's own eager task through some OTHER channel —
+	# the SAME singleton key ("net|hint_id") ensure_task/_add_route_intent
+	# mint, so this is indistinguishable, model-side, from a prior
+	# add_route_intent corridor or an explicit steer having landed first.
+	var task_id: String = "LEGACY_PWR6|%s" % hint_id
+	var pre_task = ws.ensure_task(task_id, "LEGACY_PWR6")
+	pre_task.routing_constraint = {
+		"corridor_points": [Vector2(100.0, 100.0)],
+		"preferred_layer": "",
+		"revision": 5,
+		"authored_by": "human",
+		"base_board_revision": 0,
+		"owner_hint_id": hint_id,
+	}
+
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_PWR6",
+			"segments": [{"start": [0.0, 0.0], "end": [7.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded", bool(out.get("success", false)))
+
+	var task = ws.task_for_hint(hint_id)
+	check("still the SAME pre-existing task", task != null and task == pre_task)
+	check_eq("constraint UNCHANGED — authored_by still human",
+		str(task.routing_constraint.get("authored_by", "")), "human")
+	check_eq("revision UNCHANGED (still 5)", int(task.routing_constraint.get("revision", 0)), 5)
+	check_eq("corridor UNCHANGED (1 point — not replaced by the hint's own 2 waypoints)",
+		(task.routing_constraint.get("corridor_points", []) as Array).size(), 1)
+
+	var ann: Dictionary = host.get_by_id(hint_id)
+	check("the hint was NEVER stamped — this station never touched it",
+		not (ann.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22g (H1-1, fix round): a BUS-BRANCH hint (_is_bus_branch_hint —
+## hint_type=="bus" with >=2 net_names, mirroring route_bridge.
+## hints_to_router's own bus-branch ENTRY condition) carrying waypoints is
+## NEVER seeded — its waypoints are not the single-net corridor this station
+## writes, the exact "PROVEN REGRESSION" class _propose_scope's own doc names
+## for the scope builders (group 11 CASE 3/4), reused here rather than
+## re-derived. No task is minted at all (not merely left unconstrained), and
+## the hint is never stamped superseded.
+func _run_station12_bus_hint_never_seeded() -> void:
+	print("-- 22g. a bus-branch hint carrying waypoints is never seeded (H1-1) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	_declare_net(data, "BUS_LEG_A")
+	_declare_net(data, "BUS_LEG_B")
+	var bus_hint_id: String = _seed_bus_hint(host, "BUS_LEG_A", "BUS_LEG_B")
+	var before_kp: Dictionary = (host.get_by_id(bus_hint_id).get("kind_payload", {}) as Dictionary)
+	check("fixture sanity: the bus hint carries waypoints",
+		not (before_kp.get("waypoints", []) as Array).is_empty())
+	check("fixture sanity: task does not exist yet", ws.task_for_hint(bus_hint_id) == null)
+
+	# Router leg forced to fail (same isolation idiom as 22b) so the only
+	# thing under test is the SEEDING gate itself, run before any router hop.
+	shim.answer_ok = false
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [bus_hint_id]}))
+	check("propose itself failed (router unavailable, by design)", not bool(out.get("success", true)))
+
+	check("no task was ever minted for the bus hint",
+		ws.task_for_hint(bus_hint_id) == null)
+	var after_kp: Dictionary = (host.get_by_id(bus_hint_id).get("kind_payload", {}) as Dictionary)
+	check("the bus hint was never stamped superseded",
+		not after_kp.has("waypoints_superseded_by_constraint_revision"))
+
+	shim.answer_ok = true
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22h (claim coverage): minerva_pcb_apply_route_hints is the OTHER
+## propose-time entry point _seed_legacy_waypoint_constraints is wired into
+## (panel_tools.gd's own doc names both callers) — only _workspace_propose was
+## exercised above. Same fixture/assertions as 22a, driven through
+## PanelTools._apply_route_hints instead (commit defaults false, so this
+## exercises the SAME _propose_into_workspace landing path as
+## _workspace_propose, sharing one router round trip with the commit=true
+## branch per that function's own doc).
+func _run_station12_apply_route_hints_also_seeds() -> void:
+	print("-- 22h. the OTHER entry point (_apply_route_hints) also seeds --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [6.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_APPLY", wp)
+	check("fixture sanity: task does not exist yet", ws.task_for_hint(hint_id) == null)
+
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_APPLY",
+			"segments": [{"start": [0.0, 0.0], "end": [6.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._apply_route_hints(shim, _args({"hint_ids": [hint_id]}))
+	check("apply_route_hints (propose branch) succeeded", bool(out.get("success", false)))
+
+	var task = ws.task_for_hint(hint_id)
+	check("task now exists (eagerly minted, singleton 'net|hint_id' key)", task != null)
+	if task != null:
+		check("task is constrained", task.is_constrained())
+		check_eq("authored_by is migration", str(task.routing_constraint.get("authored_by", "")), "migration")
+		check_eq("revision is 1", int(task.routing_constraint.get("revision", 0)), 1)
+
+	var after_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("...now stamped waypoints_superseded_by_constraint_revision via THIS entry point too",
+		after_kp.has("waypoints_superseded_by_constraint_revision"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22i (H2-1, fix round): the marker is HOST-OWNED state. An update whose
+## incoming kind_payload OMITS waypoints_superseded_by_constraint_revision —
+## standing in for a partial-payload caller (e.g. an MCP patch) or the first
+## half of a deliberate two-step bypass — while leaving waypoints themselves
+## untouched (so it is not itself refused) must not be able to strip the
+## marker: PcbAnnotationHost.update_annotation re-injects it from `old`
+## before storing. Proven both by re-reading the stored annotation AND by
+## showing the guard is still armed: a FOLLOW-UP edit that changes waypoints
+## is still refused, which could only happen if the marker truly survived in
+## STORAGE, not just in the update's return value.
+func _run_station12_marker_reinjected_on_omission() -> void:
+	print("-- 22i. update omitting the marker still stores it (H2-1); guard re-arms --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [8.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_REINJECT", wp)
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_REINJECT",
+			"segments": [{"start": [0.0, 0.0], "end": [8.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded", bool(out.get("success", false)))
+	var seeded_ann: Dictionary = host.get_by_id(hint_id)
+	check("fixture sanity: hint is stamped superseded",
+		(seeded_ann.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+
+	# ── an update that OMITS the marker, waypoints UNCHANGED ─────────────────
+	var stripped: Dictionary = seeded_ann.duplicate(true)
+	var stripped_kp: Dictionary = (stripped.get("kind_payload", {}) as Dictionary).duplicate(true)
+	stripped_kp.erase("waypoints_superseded_by_constraint_revision")
+	stripped["kind_payload"] = stripped_kp
+	var ok1: bool = host.update_annotation(hint_id, stripped)
+	check("the marker-omitting update itself succeeds (waypoints untouched, not refused)", ok1)
+
+	var restored: Dictionary = host.get_by_id(hint_id)
+	var restored_kp: Dictionary = restored.get("kind_payload", {})
+	check("the marker is STILL PRESENT in storage — re-injected, not silently dropped",
+		restored_kp.has("waypoints_superseded_by_constraint_revision"))
+	check_eq("...re-injected value matches what `old` carried",
+		int(restored_kp.get("waypoints_superseded_by_constraint_revision", -1)), 1)
+
+	# ── the guard is still armed: a waypoints edit is STILL refused ──────────
+	var changed: Dictionary = restored.duplicate(true)
+	var changed_kp: Dictionary = (changed.get("kind_payload", {}) as Dictionary).duplicate(true)
+	changed_kp.erase("waypoints_superseded_by_constraint_revision")  # the bypass's 2nd step
+	changed_kp["waypoints"] = [[0.0, 0.0], [99.0, 99.0]]
+	changed["kind_payload"] = changed_kp
+	var ok2: bool = host.update_annotation(hint_id, changed)
+	check("a waypoints edit — even one that ALSO tries to drop the marker in the same call — is REFUSED", not ok2)
+	var still: Dictionary = host.get_by_id(hint_id)
+	check_eq("stored waypoints unchanged by the refused edit",
+		((still.get("kind_payload", {}) as Dictionary).get("waypoints", []) as Array).size(), 2)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22j (H2-2, fix round): the undo/redo seam
+## (_shift_hint_revision/_suppress_hint_history) must not be caught by the
+## edit-refusal guard — a restored PRIOR payload legitimately changes
+## waypoints back to a pre-seed value, and that IS the undo, not an editor
+## trying to bypass the guard. Fixture: a legacy hint is edited ONCE (pushing
+## a pre-seed waypoints snapshot onto its revision stack) before it is seeded
+## and stamped, so its revision stack holds a real prior payload predating
+## the marker. undo_hint_revision must then (1) succeed despite changing
+## waypoints, and (2) leave the marker PRESENT on the restored annotation
+## (H2-1's re-injection, proven the same way as 22i: a fresh waypoints edit
+## right after the undo is still refused — the guard re-arms).
+func _run_station12_undo_seam_reinjects_marker() -> void:
+	print("-- 22j. undo restores pre-seed waypoints without refusal; guard re-arms after (H2-2) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var data = ctx["data"]
+
+	var wp0: Array = [[0.0, 0.0], [3.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_UNDO", wp0)
+
+	# A REAL prior edit, before any seeding — pushes wp0 onto the revision
+	# stack and leaves the hint's CURRENT waypoints at wp1.
+	var wp1: Array = [[0.0, 0.0], [3.0, 0.0], [6.0, 0.0]]
+	var pre_seed_ann: Dictionary = host.get_by_id(hint_id)
+	var edited: Dictionary = pre_seed_ann.duplicate(true)
+	var edited_kp: Dictionary = (edited.get("kind_payload", {}) as Dictionary).duplicate(true)
+	edited_kp["waypoints"] = wp1
+	edited["kind_payload"] = edited_kp
+	check("fixture setup: the pre-seed waypoints edit succeeds", host.update_annotation(hint_id, edited))
+	var stack_before_seed: Array = (host.get_by_id(hint_id).get("revision_stack", []) as Array)
+	check_eq("fixture sanity: one prior revision recorded (the wp0 payload)", stack_before_seed.size(), 1)
+
+	# Seed + stamp against the CURRENT waypoints (wp1).
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_UNDO",
+			"segments": [{"start": [0.0, 0.0], "end": [6.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded", bool(out.get("success", false)))
+	var seeded_ann: Dictionary = host.get_by_id(hint_id)
+	var seeded_kp: Dictionary = seeded_ann.get("kind_payload", {})
+	check("fixture sanity: seeded against the CURRENT (wp1) waypoints",
+		JSON.stringify(seeded_kp.get("waypoints", [])) == JSON.stringify(wp1))
+	check("fixture sanity: stamped superseded",
+		seeded_kp.has("waypoints_superseded_by_constraint_revision"))
+
+	# ── the undo itself: changes waypoints back to wp0, must NOT be refused ──
+	var undo_result: Dictionary = host.undo_hint_revision(hint_id)
+	check("undo_hint_revision succeeds despite restoring different waypoints (not refused)",
+		bool(undo_result.get("ok", false)))
+
+	var after_undo_ann: Dictionary = host.get_by_id(hint_id)
+	var after_undo_kp: Dictionary = after_undo_ann.get("kind_payload", {})
+	check("waypoints actually restored to the pre-seed (wp0) value",
+		JSON.stringify(after_undo_kp.get("waypoints", [])) == JSON.stringify(wp0))
+	check("the marker is PRESENT on the restored annotation — re-injected across the undo (H2-1)",
+		after_undo_kp.has("waypoints_superseded_by_constraint_revision"))
+
+	# ── the guard re-arms: a FRESH waypoints edit right after is refused ─────
+	var reedit: Dictionary = after_undo_ann.duplicate(true)
+	var reedit_kp: Dictionary = (reedit.get("kind_payload", {}) as Dictionary).duplicate(true)
+	reedit_kp["waypoints"] = [[0.0, 0.0], [42.0, 42.0]]
+	reedit["kind_payload"] = reedit_kp
+	var ok: bool = host.update_annotation(hint_id, reedit)
+	check("a fresh waypoints edit after the undo is REFUSED again — the guard re-armed", not ok)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22k (H1-2, fix round, MED): a hint whose OWN singleton task was absorbed
+## into a MERGED multi-hint task (H3-1 absorption — some other hint's route
+## merged with this one) must never be re-seeded: task_for_hint's membership
+## fallback returns the merged task, but that task is NOT this hint's own —
+## minting a fresh singleton beside it (the pre-fix behavior whenever the
+## merged task happened to land unconstrained — e.g. an absorption of
+## never-constrained singletons; since P1-A/Codex 1047 a constraint CONFLICT
+## keeps its singletons alive instead of dropping them, so the unconstrained
+## merge arises only from genuinely unconstrained absorptions) would fork a
+## corridor away from the task the router actually answers for this hint.
+## The merged task is built directly (same direct-injection technique 22f
+## uses to simulate "another channel") rather than via a real merging
+## propose, so the assertion isolates the SEEDING gate itself — the fabricated
+## task's key names TWO hints, deliberately UNCONSTRAINED, which is exactly
+## the shape the OLD code's `is_constrained()`-only check let slip through.
+func _run_station12_merged_task_never_reseeded() -> void:
+	print("-- 22k. a hint whose singleton was absorbed into a merged task is never re-seeded (H1-2) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [4.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "MERGED_NET", wp)
+
+	# Fabricate the merged task exactly as a real H3-1 absorption would leave
+	# it: a key naming BOTH this hint and some other hint, UNCONSTRAINED
+	# (e.g. the absorption's own CONFLICT rule kept neither absorbed
+	# constraint). Same "<net>|<sorted hint ids>" format group 18's real
+	# merge-absorption fixture asserts (_task_key, pcb_routing_workspace.gd).
+	var sorted_ids: Array = [hint_id, "other_hint_owning_this_merge"]
+	sorted_ids.sort()
+	var merged_task_id := "MERGED_NET|%s" % ",".join(sorted_ids)
+	var merged_task = ws.ensure_task(merged_task_id, "MERGED_NET")
+	check("fixture setup: the merged task is genuinely a 2-hint membership",
+		ws.task_hint_ids(merged_task_id).size() == 2)
+	check("fixture setup: the merged task starts UNCONSTRAINED (the shape the old code slipped past)",
+		not merged_task.is_constrained())
+	check("fixture sanity: task_for_hint falls back to the merged task (membership match)",
+		ws.task_for_hint(hint_id) == merged_task)
+
+	# Router leg forced to fail (22b/22g's isolation idiom) so only the
+	# seeding gate itself is under test.
+	shim.answer_ok = false
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose itself failed (router unavailable, by design)", not bool(out.get("success", true)))
+
+	check("no NEW singleton task was minted beside the merged one",
+		ws.get_task("MERGED_NET|%s" % hint_id) == null)
+	check_eq("exactly the one (merged) task exists — no resurrection", (ws.list_tasks() as Array).size(), 1)
+	check("the merged task is STILL unconstrained — untouched by this station",
+		not merged_task.is_constrained())
+	check("task_for_hint still resolves to the SAME merged task", ws.task_for_hint(hint_id) == merged_task)
+
+	var ann: Dictionary = host.get_by_id(hint_id)
+	check("the hint was never stamped — this station never touched it",
+		not (ann.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+
+	shim.answer_ok = true
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22l (P1-A, Codex 1047 consolidated review — boundary-delta test 1): TWO
+## guided legacy hints on ONE net, both seeded on the same propose, whose
+## (shimmed) worker reply fuses both hint ids onto a single route. The merge
+## absorption finds two conflicting seeded constraints. Pre-fix this was the
+## PERMANENT dead state Codex's P1 named: both singletons erased, neither
+## constraint kept, both hints still stamped superseded (edit-refused), and
+## the H1-2 membership gate refusing to ever re-seed — superseded waypoints
+## with nothing left steering. Post-fix contract asserted here: both
+## singleton tasks SURVIVE with their own constraints, the merged task is
+## unconstrained, the supersession stamps stay TRUTHFUL (a live constraint
+## still matches each stamp), the conflict is surfaced, and a SECOND propose
+## still emits BOTH corridors per-hint — steering never dies.
+func _run_station12_conflicting_seeds_survive_merge() -> void:
+	print("-- 22l. two guided legacy hints, one net: conflicting merge keeps both seeds steering (P1-A) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_a: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_MERGE", [[0.0, 0.0], [5.0, 0.0]])
+	var hint_b: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_MERGE", [[0.0, 2.0], [5.0, 2.0], [6.0, 2.0]])
+
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_MERGE",
+			"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_a, hint_b],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_a, hint_b]}))
+	check("first propose succeeded", bool(out.get("success", false)))
+
+	# ── the conflict is surfaced, not silent ─────────────────────────────────
+	var conflicts: Array = out.get("constraint_conflicts", [])
+	check_eq("exactly one constraint conflict surfaced", conflicts.size(), 1)
+	if conflicts.size() == 1:
+		check_eq("...named conflicting_constraints_kept_on_singletons",
+			str((conflicts[0] as Dictionary).get("reason", "")), "conflicting_constraints_kept_on_singletons")
+
+	# ── both seeded singletons SURVIVE, each with its OWN corridor ───────────
+	var task_a = ws.get_task("LEGACY_MERGE|%s" % hint_a)
+	var task_b = ws.get_task("LEGACY_MERGE|%s" % hint_b)
+	check("hint A's seeded singleton survived the conflicting merge", task_a != null)
+	check("hint B's seeded singleton survived the conflicting merge", task_b != null)
+	if task_a != null and task_b != null:
+		check("...A still constrained", task_a.is_constrained())
+		check("...B still constrained", task_b.is_constrained())
+		check_eq("...A keeps ITS OWN 2-point corridor",
+			(task_a.routing_constraint.get("corridor_points", []) as Array).size(), 2)
+		check_eq("...B keeps ITS OWN 3-point corridor",
+			(task_b.routing_constraint.get("corridor_points", []) as Array).size(), 3)
+
+	# ── the merged task exists, holds the candidate, stays unconstrained ─────
+	var sorted_ids: Array = [hint_a, hint_b]
+	sorted_ids.sort()
+	var merged_key := "LEGACY_MERGE|%s" % ",".join(sorted_ids)
+	var merged_task = ws.get_task(merged_key)
+	check("the merged task exists", merged_task != null)
+	if merged_task != null:
+		check("...and is UNCONSTRAINED (no single task-level winner)",
+			not merged_task.is_constrained())
+	check_eq("exactly three tasks: two surviving singletons + the merge",
+		(ws.list_tasks() as Array).size(), 3)
+
+	# ── the stamps stay TRUTHFUL: stamped rev 1, and a live constraint at
+	#    rev 1 still exists for each hint (no stale supersession markers) ─────
+	for hid in [hint_a, hint_b]:
+		var kp: Dictionary = (host.get_by_id(str(hid)) as Dictionary).get("kind_payload", {})
+		check_eq("hint %s still stamped superseded at revision 1" % str(hid),
+			int(kp.get("waypoints_superseded_by_constraint_revision", -1)), 1)
+	if task_a != null:
+		check_eq("...matched by A's live constraint revision",
+			int(task_a.routing_constraint.get("revision", 0)), 1)
+	if task_b != null:
+		check_eq("...matched by B's live constraint revision",
+			int(task_b.routing_constraint.get("revision", 0)), 1)
+
+	# ── a SECOND propose still steers BOTH hints — the dead state is gone ────
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_a, hint_b]}))
+	check("second propose succeeded", bool(out2.get("success", false)))
+	var call: Dictionary = shim.calls[shim.calls.size() - 1]
+	var tc: Dictionary = (call.get("extra", {}) as Dictionary).get("task_constraints", {})
+	check_eq("second request's task_constraints still names BOTH hints", tc.size(), 2)
+	if tc.has(hint_a):
+		check_eq("...hint A steered by its OWN 2-point corridor",
+			((tc[hint_a] as Dictionary).get("corridor_points", []) as Array).size(), 2)
+	if tc.has(hint_b):
+		check_eq("...hint B steered by its OWN 3-point corridor",
+			((tc[hint_b] as Dictionary).get("corridor_points", []) as Array).size(), 3)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22m (Codex 1047 fix round, verdict 4): minerva_pcb_hint_convert_to_detailed
+## — the NAMED guided→detailed conversion, end to end against the REAL host +
+## workspace. The "stuck state" verdict 4 rules on is: seeded constraint +
+## superseded stamp + edit refusal, with no honest exit. This test walks the
+## full exit: seed via a real propose, convert, and assert EVERY half is
+## released by the one call (ordered two-store writes, workspace half first —
+## NOT atomic across the two sidecars, per verdict 6; the load-time
+## reconciliation suite 22n owns the torn shapes) — task unconstrained,
+## marker gone, verdict-5 lock
+## fields gone, detail_level 'detailed', a waypoints edit now ACCEPTED by
+## host.update_annotation, and a FRESH propose does NOT re-seed (the seeder's
+## own `detailed` gate) — plus the two named refusals: an ordinary unstamped
+## hint (not_superseded) and a constraint owned by a MERGED multi-hint task
+## (constraint_not_singly_owned — fabricated via ws.ensure_task, 22k's
+## direct-injection technique). The convert call goes to the REAL host (not
+## the RouterShim): the verb never touches the router, and in production the
+## dispatcher hands the tool the panel's real host.
+func _run_station12_convert_to_detailed() -> void:
+	print("-- 22m. minerva_pcb_hint_convert_to_detailed: full exit from the superseded state (v4) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 0.0], [5.0, 0.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "LEGACY_CONVERT", wp)
+	shim.reply = {
+		"routes": [{
+			"net": "LEGACY_CONVERT",
+			"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [],
+			"hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("propose succeeded (seed + stamp landed)", bool(out.get("success", false)))
+	var task = ws.task_for_hint(hint_id)
+	check("fixture sanity: task constrained by the seed", task != null and task.is_constrained())
+	var seeded_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("fixture sanity: stamped superseded",
+		seeded_kp.has("waypoints_superseded_by_constraint_revision"))
+	check("fixture sanity: verdict-5 lock fields stamped alongside the marker",
+		seeded_kp.get("_locked_fields", null) is Array
+		and "waypoints" in (seeded_kp.get("_locked_fields", []) as Array)
+		and "detail_level" in (seeded_kp.get("_locked_fields", []) as Array))
+	check("fixture sanity: _lock_reason names the convert tool",
+		str(seeded_kp.get("_lock_reason", "")).contains("minerva_pcb_hint_convert_to_detailed"))
+
+	# ── the conversion itself ─────────────────────────────────────────────────
+	var conv: Dictionary = PanelTools._hint_convert_to_detailed(host, _args({"hint_id": hint_id}))
+	check("conversion succeeded", bool(conv.get("success", false)))
+	check_eq("reply names the hint", str(conv.get("hint_id", "")), hint_id)
+	check_eq("reply names the governing task", str(conv.get("task_id", "")), str(task.task_id))
+	check_eq("reply carries cleared_constraint_revision 1 (the seed's revision)",
+		int(conv.get("cleared_constraint_revision", -1)), 1)
+	check_eq("reply's detail_level is detailed", str(conv.get("detail_level", "")), "detailed")
+	check("reply note says waypoints are editable + routed as-drawn",
+		str(conv.get("note", "")).contains("as-drawn"))
+
+	# ── every half released ──────────────────────────────────────────────────
+	check("task is UNCONSTRAINED after conversion", not task.is_constrained())
+	var conv_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("marker GONE (not re-injected — the sanctioned release bypassed H2-1)",
+		not conv_kp.has("waypoints_superseded_by_constraint_revision"))
+	check("_locked_fields gone", not conv_kp.has("_locked_fields"))
+	check("_lock_reason gone", not conv_kp.has("_lock_reason"))
+	check_eq("detail_level is detailed", str(conv_kp.get("detail_level", "")), "detailed")
+	check("legacy waypoints preserved through the conversion",
+		(conv_kp.get("waypoints", []) as Array).size() == 2)
+
+	# ── the stuck state is exited: waypoints editable again ──────────────────
+	var edited: Dictionary = host.get_by_id(hint_id)
+	var edited_kp: Dictionary = (edited.get("kind_payload", {}) as Dictionary).duplicate(true)
+	edited_kp["waypoints"] = [[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]]
+	edited["kind_payload"] = edited_kp
+	check("a waypoints edit is now ACCEPTED by host.update_annotation",
+		host.update_annotation(hint_id, edited))
+	check_eq("...and stored", ((host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+		.get("waypoints", []) as Array).size(), 3)
+
+	# ── a fresh propose does NOT re-seed (the seeder's `detailed` gate) ──────
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("second propose succeeded", bool(out2.get("success", false)))
+	check("task STILL unconstrained — never re-seeded", not task.is_constrained())
+	var after2_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("hint never re-stamped — the detailed gate holds",
+		not after2_kp.has("waypoints_superseded_by_constraint_revision"))
+
+	# ── refusal: an ordinary, never-stamped hint has nothing to convert ──────
+	var plain_id: String = _seed_legacy_waypoint_hint(host, data, "PLAIN_NET", [[0.0, 0.0], [2.0, 0.0]])
+	var plain: Dictionary = PanelTools._hint_convert_to_detailed(host, _args({"hint_id": plain_id}))
+	check("unstamped hint: refused", not bool(plain.get("success", true)))
+	check_eq("...by name: not_superseded", str(plain.get("error", "")), "not_superseded")
+
+	# ── refusal: unknown id / non-hint id ────────────────────────────────────
+	var missing: Dictionary = PanelTools._hint_convert_to_detailed(host, _args({"hint_id": "ann_nope"}))
+	check_eq("unknown id refused by name: hint_not_found", str(missing.get("error", "")), "hint_not_found")
+
+	# ── refusal: constraint owned by a MERGED multi-hint task ────────────────
+	var shared_id: String = _seed_legacy_waypoint_hint(host, data, "SHARED_NET", [[0.0, 0.0], [3.0, 0.0]])
+	# Fabricate the merged CONSTRAINED task directly (22k's technique), keyed
+	# "<net>|<sorted hint ids>" — task_for_hint's membership fallback finds it.
+	var sorted_ids: Array = [shared_id, "other_hint_sharing_this_merge"]
+	sorted_ids.sort()
+	var merged_id := "SHARED_NET|%s" % ",".join(sorted_ids)
+	var merged_task = ws.ensure_task(merged_id, "SHARED_NET")
+	merged_task.routing_constraint = {
+		"corridor_points": [Vector2(1.0, 1.0), Vector2(2.0, 2.0)],
+		"preferred_layer": "",
+		"revision": 2,
+		"authored_by": "ai",
+		"base_board_revision": 0,
+		"owner_hint_id": "",
+	}
+	# Stamp the hint superseded (the real steer path would have) so the ONLY
+	# thing refusing is ownership, not not_superseded.
+	PanelTools._stamp_waypoints_superseded(host, shared_id, 2)
+	check("fixture sanity: shared hint is stamped",
+		(host.get_by_id(shared_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
+	var shared: Dictionary = PanelTools._hint_convert_to_detailed(host, _args({"hint_id": shared_id}))
+	check("merged-owned constraint: refused", not bool(shared.get("success", true)))
+	check_eq("...by name: constraint_not_singly_owned",
+		str(shared.get("error", "")), "constraint_not_singly_owned")
+	check_eq("...naming the owning task", str(shared.get("task_id", "")), merged_id)
+	check("...note names reroute_route as the legal alternative",
+		str(shared.get("note", "")).contains("reroute_route"))
+	check("the merged task's constraint is UNTOUCHED by the refusal", merged_task.is_constrained())
+	check("the shared hint is STILL stamped (no half-release)",
+		(host.get_by_id(shared_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ── 22n (Codex 1047 fix round, verdict 6): boundary-delta test 7 — both
+# torn-save permutations of the constraint+marker pair, repaired by the
+# deterministic load-time reconciliation pass. The entry point is exercised
+# EXACTLY the way production calls it: PCBPanel._on_panel_load_request calls
+# PanelTools.reconcile_superseded_waypoint_state(host, workspace) once both
+# sidecars are in memory — the pass is a static seam (same technique every
+# other station-12 test uses), so these tests drive that same callable
+# directly against the real host + workspace, fabricating each torn state the
+# way the real world produces it (constraint cleared under a surviving marker;
+# constraint written with no stamp; pre-lock-era stamp; undo of a conversion).
+# AUTHORITY RULE under test: the workspace constraint store is authoritative,
+# the marker is derived. detail_level rule under test: the strip PRESERVES it
+# as found (rationale pinned on reconcile_strip_superseded_marker's own doc).
+
+
+## 22n-1: the consistent case — a real propose seeds constraint AND marker,
+## and reconciliation finds NOTHING: zero records, zero writes (payload
+## byte-identical), the workspace channel left empty, and a second pass is
+## equally empty (idempotence on the common path — the pass must be safe to
+## run on every single load).
+func _run_station12_recon_consistent_noop() -> void:
+	print("-- 22n-1. load reconciliation: consistent stores are a strict no-op (v6) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "RECON_OK", [[0.0, 0.0], [5.0, 0.0]])
+	shim.reply = {
+		"routes": [{
+			"net": "RECON_OK",
+			"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+			"vias": [], "hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("fixture: propose succeeded (both stores written)", bool(out.get("success", false)))
+	var task = ws.task_for_hint(hint_id)
+	check("fixture: constraint present", task != null and task.is_constrained())
+	check("fixture: marker present", (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+		.has("waypoints_superseded_by_constraint_revision"))
+
+	var payload_before: String = JSON.stringify(host.get_by_id(hint_id).get("kind_payload", {}))
+	var records: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("consistent stores: ZERO records", records.size(), 0)
+	check_eq("workspace channel empty", (ws.last_load_reconciliation as Array).size(), 0)
+	check("payload byte-identical (no writes)",
+		JSON.stringify(host.get_by_id(hint_id).get("kind_payload", {})) == payload_before)
+	var records2: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("second pass equally empty (idempotence)", records2.size(), 0)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22n-2: MARKER-WITHOUT-CONSTRAINT — the "annotations sidecar saved, workspace
+## sidecar not" (or crash-after-stamp-then-constraint-lost) permutation,
+## fabricated the way it really occurs: a real seed, then the constraint
+## vanishes under the surviving marker. Reconciliation strips marker + lock
+## keys through the host's sanctioned bookkeeping path, PRESERVES detail_level
+## as found ('guided' — the pinned rule), emits ONE structured record, creates
+## NO history step, re-permits waypoint edits, and a second pass is a no-op.
+func _run_station12_recon_marker_without_constraint() -> void:
+	print("-- 22n-2. load reconciliation: marker-without-constraint strips (detail_level preserved) (v6) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "RECON_TORN_A", [[1.0, 0.0], [6.0, 0.0]])
+	shim.reply = {
+		"routes": [{
+			"net": "RECON_TORN_A",
+			"segments": [{"start": [1.0, 0.0], "end": [6.0, 0.0], "layer": "F.Cu"}],
+			"vias": [], "hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("fixture: propose seeded both stores", bool(out.get("success", false)))
+	var task = ws.task_for_hint(hint_id)
+	check("fixture: constrained", task != null and task.is_constrained())
+
+	# The tear: the constraint is gone, the marker survives (the exact shape a
+	# lost workspace sidecar — or the documented undo-of-conversion asymmetry —
+	# produces on the next load).
+	task.routing_constraint = {}
+	check("fixture sanity: marker still present under the cleared constraint",
+		(host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
+
+	var stack_before: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	var records: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("exactly ONE record", records.size(), 1)
+	if records.size() == 1:
+		var rec: Dictionary = records[0]
+		check_eq("record names the hint", str(rec.get("hint_id", "")), hint_id)
+		check_eq("record action: released_stale_marker", str(rec.get("action", "")), "released_stale_marker")
+		check_eq("record reason: marker_without_constraint",
+			str(rec.get("reason", "")), "marker_without_constraint")
+		check_eq("record names the (now unconstrained) task", str(rec.get("task_id", "")), str(task.task_id))
+	check_eq("workspace channel mirrors the records",
+		(ws.last_load_reconciliation as Array).size(), 1)
+
+	var kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("marker stripped", not kp.has("waypoints_superseded_by_constraint_revision"))
+	check("_locked_fields stripped", not kp.has("_locked_fields"))
+	check("_lock_reason stripped", not kp.has("_lock_reason"))
+	check_eq("detail_level PRESERVED as found — 'guided', never forced 'detailed' (the pinned rule)",
+		str(kp.get("detail_level", "")), "guided")
+	check("waypoints untouched", (kp.get("waypoints", []) as Array).size() == 2)
+
+	# (f) reconciliation is bookkeeping — no undo history step.
+	var stack_after: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	check("NO history step created by the repair", stack_after == stack_before)
+
+	# The stale guard is disarmed: waypoint edits are live authority again.
+	var edit: Dictionary = host.get_by_id(hint_id)
+	var edit_kp: Dictionary = (edit.get("kind_payload", {}) as Dictionary).duplicate(true)
+	edit_kp["waypoints"] = [[1.0, 0.0], [6.0, 0.0], [6.0, 4.0]]
+	edit["kind_payload"] = edit_kp
+	check("waypoints edit ACCEPTED after the repair", host.update_annotation(hint_id, edit))
+
+	# Idempotence: the repaired state reconciles to nothing.
+	var records2: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("second pass: ZERO records (idempotence)", records2.size(), 0)
+	check_eq("second pass: channel reset to empty (per-call convention)",
+		(ws.last_load_reconciliation as Array).size(), 0)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22n-3: CONSTRAINT-WITHOUT-MARKER — the "workspace sidecar saved, annotations
+## sidecar not" (or crash between the seed's constraint write and its stamp)
+## permutation, fabricated exactly as the crash leaves it: the constraint dict
+## the seeder writes (owner_hint_id + seeded_from provenance, revision 1) on
+## the eagerly-minted singleton task, with the hint never stamped.
+## Reconciliation re-stamps the marker AT THE CONSTRAINT'S REVISION via the
+## same _stamp_waypoints_superseded every live writer uses — lock keys
+## included — emits ONE structured record, creates NO history step, and the
+## edit-refusal guard is RE-ARMED afterwards.
+func _run_station12_recon_constraint_without_marker() -> void:
+	print("-- 22n-3. load reconciliation: constraint-without-marker re-stamps (guard re-armed) (v6) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var wp: Array = [[0.0, 2.0], [4.0, 2.0]]
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "RECON_TORN_B", wp)
+	# The crash shape: constraint landed (workspace store), stamp never ran.
+	var task = ws.ensure_task("RECON_TORN_B|%s" % hint_id, "RECON_TORN_B")
+	task.routing_constraint = {
+		"corridor_points": [Vector2(0.0, 2.0), Vector2(4.0, 2.0)],
+		"preferred_layer": "F.Cu",
+		"revision": 1,
+		"authored_by": "migration",
+		"base_board_revision": 0,
+		"owner_hint_id": hint_id,
+		"seeded_from_hint_id": hint_id,
+		"seeded_from_hint_revision": 0,
+	}
+	check("fixture sanity: hint carries NO marker",
+		not (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
+
+	var stack_before: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	var records: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("exactly ONE record", records.size(), 1)
+	if records.size() == 1:
+		var rec: Dictionary = records[0]
+		check_eq("record names the hint", str(rec.get("hint_id", "")), hint_id)
+		check_eq("record action: restamped_marker", str(rec.get("action", "")), "restamped_marker")
+		check_eq("record reason: constraint_without_marker",
+			str(rec.get("reason", "")), "constraint_without_marker")
+		check_eq("record carries the constraint's revision", int(rec.get("constraint_revision", -1)), 1)
+		check_eq("record names the governing task", str(rec.get("task_id", "")), str(task.task_id))
+
+	var kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("marker re-stamped", kp.has("waypoints_superseded_by_constraint_revision"))
+	check_eq("...at the constraint's revision (the authoritative store's number)",
+		int(kp.get("waypoints_superseded_by_constraint_revision", -1)), 1)
+	check("lock keys present (the stamp writes them — CX-C shape)",
+		kp.get("_locked_fields", null) is Array and kp.has("_lock_reason"))
+	check("NO history step created by the repair",
+		(host.get_by_id(hint_id).get("revision_stack", []) as Array).size() == stack_before)
+
+	# The guard is RE-ARMED: a waypoints edit is refused again.
+	var edit: Dictionary = host.get_by_id(hint_id)
+	var edit_kp: Dictionary = (edit.get("kind_payload", {}) as Dictionary).duplicate(true)
+	edit_kp["waypoints"] = [[0.0, 2.0], [9.0, 9.0]]
+	edit["kind_payload"] = edit_kp
+	check("waypoints edit REFUSED after the re-stamp", not host.update_annotation(hint_id, edit))
+	check_eq("...with the structured refusal populated",
+		str((host.last_update_refusal as Dictionary).get("error", "")), "waypoints_superseded")
+
+	# Idempotence: marker now matches the constraint — nothing on pass two.
+	var records2: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("second pass: ZERO records (idempotence)", records2.size(), 0)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22n-4: MARKER-OUT-OF-SHAPE — two sub-shapes, one rule ("re-stamp to current
+## shape"): (a) the PRE-LOCK-ERA stamp (marker present, verdict-5 lock keys
+## absent — a sidecar stamped before CX-C existed; core's offline lock
+## convention names this exact backfill as CX-D's) gets its locks backfilled;
+## (b) a marker naming a STALE revision under a constraint that has moved on
+## is re-stamped to the constraint's revision. Both emit reason
+## "marker_out_of_shape" with the constraint's (authoritative) revision.
+func _run_station12_recon_marker_out_of_shape() -> void:
+	print("-- 22n-4. load reconciliation: pre-lock-era + stale-revision stamps re-shaped (v6) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	# (a) pre-lock-era: marker WITHOUT lock keys. Fabricated by adding the
+	# marker alone through the ordinary update seam (marker ADDITION is never
+	# refused, and H2-1 re-injection no-ops because `old` carried no marker) —
+	# exactly the payload a CX-C-predating sidecar loads with.
+	var old_id: String = _seed_legacy_waypoint_hint(host, data, "RECON_PRELOCK", [[0.0, 4.0], [3.0, 4.0]])
+	var old_task = ws.ensure_task("RECON_PRELOCK|%s" % old_id, "RECON_PRELOCK")
+	old_task.routing_constraint = {
+		"corridor_points": [Vector2(0.0, 4.0), Vector2(3.0, 4.0)],
+		"preferred_layer": "F.Cu", "revision": 3, "authored_by": "migration",
+		"base_board_revision": 0, "owner_hint_id": old_id,
+		"seeded_from_hint_id": old_id, "seeded_from_hint_revision": 0,
+	}
+	var pre: Dictionary = host.get_by_id(old_id)
+	var pre_kp: Dictionary = (pre.get("kind_payload", {}) as Dictionary).duplicate(true)
+	pre_kp["waypoints_superseded_by_constraint_revision"] = 3
+	pre["kind_payload"] = pre_kp
+	check("fixture: pre-lock-era stamp accepted", host.update_annotation(old_id, pre))
+	check("fixture sanity: marker present, locks ABSENT",
+		(host.get_by_id(old_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision")
+		and not (host.get_by_id(old_id).get("kind_payload", {}) as Dictionary).has("_locked_fields"))
+
+	var records: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("pre-lock-era: exactly ONE record", records.size(), 1)
+	if records.size() == 1:
+		check_eq("...reason marker_out_of_shape", str((records[0] as Dictionary).get("reason", "")),
+			"marker_out_of_shape")
+		check_eq("...action restamped_marker", str((records[0] as Dictionary).get("action", "")),
+			"restamped_marker")
+	var back_kp: Dictionary = (host.get_by_id(old_id).get("kind_payload", {}) as Dictionary)
+	check("locks BACKFILLED by the re-stamp", back_kp.get("_locked_fields", null) is Array
+		and "waypoints" in (back_kp.get("_locked_fields", []) as Array)
+		and back_kp.has("_lock_reason"))
+	check_eq("marker still at the constraint's revision",
+		int(back_kp.get("waypoints_superseded_by_constraint_revision", -1)), 3)
+
+	# (b) stale-revision marker: constraint moved to revision 5, marker says 3.
+	old_task.routing_constraint["revision"] = 5
+	var records_b: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("stale revision: exactly ONE record", records_b.size(), 1)
+	if records_b.size() == 1:
+		check_eq("...reason marker_out_of_shape", str((records_b[0] as Dictionary).get("reason", "")),
+			"marker_out_of_shape")
+		check_eq("...carrying the NEW revision", int((records_b[0] as Dictionary)
+			.get("constraint_revision", -1)), 5)
+	check_eq("marker re-stamped to the constraint's revision",
+		int((host.get_by_id(old_id).get("kind_payload", {}) as Dictionary)
+			.get("waypoints_superseded_by_constraint_revision", -1)), 5)
+
+	# Idempotence after both repairs.
+	check_eq("final pass: ZERO records",
+		(PanelTools.reconcile_superseded_waypoint_state(host, ws) as Array).size(), 0)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 22n-5: the UNDO-OF-CONVERSION torn state reconciles per the strip rule on
+## the next load, and the guided flow RESUMES end-to-end: seed via a real
+## propose → convert (clears constraint + releases marker) → undo (restores
+## the pre-conversion payload wholesale — marker, locks, 'guided' — while the
+## constraint stays cleared: the DOCUMENTED asymmetry) → reconcile (the "next
+## load"): marker stripped, detail_level 'guided' PRESERVED (the undo restored
+## it, and preserving it is exactly what lets the seeder re-run) → a fresh
+## propose RE-SEEDS constraint + marker at revision 1 — the pre-torn guided
+## intent, recovered without any user action beyond reloading.
+func _run_station12_recon_undo_of_conversion() -> void:
+	print("-- 22n-5. load reconciliation: undo-of-conversion torn state → guided flow resumes (v6) --")
+	var ctx: Dictionary = await _panel_context()
+	var host = ctx["host"]
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var data = ctx["data"]
+
+	var hint_id: String = _seed_legacy_waypoint_hint(host, data, "RECON_UNDO", [[2.0, 0.0], [7.0, 0.0]])
+	shim.reply = {
+		"routes": [{
+			"net": "RECON_UNDO",
+			"segments": [{"start": [2.0, 0.0], "end": [7.0, 0.0], "layer": "F.Cu"}],
+			"vias": [], "hint_ids": [hint_id],
+		}],
+		"via_count": 0,
+	}
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("fixture: propose seeded both stores", bool(out.get("success", false)))
+	var task = ws.task_for_hint(hint_id)
+	check("fixture: constrained", task != null and task.is_constrained())
+
+	var conv: Dictionary = PanelTools._hint_convert_to_detailed(host, _args({"hint_id": hint_id}))
+	check("conversion succeeded", bool(conv.get("success", false)))
+	check("...task unconstrained", not task.is_constrained())
+
+	var undone: Dictionary = host.undo_hint_revision(hint_id)
+	check("undo of the conversion ok", bool(undone.get("ok", false)))
+	var undone_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("undo restored the marker (annotation side only — the documented asymmetry)",
+		undone_kp.has("waypoints_superseded_by_constraint_revision"))
+	check_eq("undo restored detail_level 'guided' (pre-conversion payload, wholesale)",
+		str(undone_kp.get("detail_level", "")), "guided")
+	check("the constraint stays cleared — the torn state under test", not task.is_constrained())
+
+	# "The next load": reconciliation repairs per rule (a).
+	var records: Array = PanelTools.reconcile_superseded_waypoint_state(host, ws)
+	check_eq("ONE record: marker_without_constraint", records.size(), 1)
+	if records.size() == 1:
+		check_eq("...reason", str((records[0] as Dictionary).get("reason", "")),
+			"marker_without_constraint")
+	var recon_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("marker stripped", not recon_kp.has("waypoints_superseded_by_constraint_revision"))
+	check_eq("detail_level STILL 'guided' — preserved, so the seeder can resume",
+		str(recon_kp.get("detail_level", "")), "guided")
+
+	# The guided flow resumes: a fresh propose re-seeds constraint + marker.
+	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
+	check("re-propose succeeded", bool(out2.get("success", false)))
+	check("task RE-CONSTRAINED by the seeder (revision 1 — a fresh seed)",
+		task.is_constrained() and int(task.routing_constraint.get("revision", 0)) == 1)
+	check("hint RE-STAMPED by the seeder",
+		(host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
 
 	ctx["driver"].free_panel(ctx["panel"])

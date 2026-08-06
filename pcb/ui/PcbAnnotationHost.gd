@@ -60,6 +60,32 @@ const _REDO_KEY := "redo_stack"
 ## (that would make undo un-undo-able).
 var _suppress_hint_history := false
 
+## Codex 1047 fix round, verdict 3: the STRUCTURED reason the most recent
+## update_annotation() call was refused for POLICY reasons — {} whenever the
+## last update succeeded, or failed for a non-policy reason (unknown id).
+## update_annotation's bool return stays (three shipped callers switch on it);
+## this field is the additive side channel a caller that wants MORE than the
+## bool reads immediately after a false return. Written ONLY by the
+## _refuses_superseded_waypoint_edit refusal path, cleared at the START of
+## every update_annotation call so it can never describe a stale earlier
+## refusal. Consumed duck-typed (host.get("last_update_refusal")) by core's
+## MCPAnnotationTools._annotations_update, which previously collapsed this
+## refusal into a dishonest {"error": "not_found"}.
+var last_update_refusal: Dictionary = {}
+
+## Codex 1047 fix round, verdict 4: set true only for the duration of the
+## single update_annotation() call a host-sanctioned marker strip performs.
+## There are exactly TWO sanctioned strip paths, both funnelled through
+## _strip_superseded_state: release_superseded_waypoints() (the verdict-4
+## conversion — an undoable user-level act) and, since verdict 6,
+## reconcile_strip_superseded_marker() (load-time reconciliation of a
+## marker-without-constraint torn state — pure bookkeeping). While set,
+## _reinject_superseded_marker is a no-op (the strip is the point, not an
+## accident to be repaired) and _refuses_superseded_waypoint_edit stands down
+## (belt-and-braces; neither strip ever changes waypoints, but a sanctioned
+## strip must not be refusable by the machinery it is dismantling).
+var _bypass_superseded_release := false
+
 ## Monotonic id counter for generated envelope ids.
 var _id_counter: int = 0
 
@@ -1243,11 +1269,57 @@ func get_by_id(annotation_id: String) -> Dictionary:
 ## bend-drag are captured identically (reliability: no seam an editor can
 ## bypass; see _apply_hint_history below).
 func update_annotation(annotation_id: String, new_annotation: Dictionary) -> bool:
+	# Codex 1047 fix round, verdict 3: every call starts with a clean slate —
+	# the refusal record below describes THIS call or nothing.
+	last_update_refusal = {}
 	for i in range(_annotations.size()):
 		if _annotations[i] is Dictionary and str(_annotations[i].get("id", "")) == annotation_id:
 			var old: Dictionary = _annotations[i]
+			# Epoch UX1 station 12 (DCR 019fd095e694, docket 019fd057ea0b
+			# comment 1028: "never accept an edit that cannot affect
+			# routing"): refuse BEFORE any mutation — see
+			# _refuses_superseded_waypoint_edit's own doc.
+			if _refuses_superseded_waypoint_edit(old, new_annotation):
+				# Codex 1047 fix round, verdict 3: the refusal is now NAMED,
+				# not just a bool + push_warning — a caller (live MCP, a panel
+				# surface) reads last_update_refusal right after the false
+				# return and can surface the reason and BOTH exits: steer the
+				# constraint, or reclaim the waypoints by converting the hint
+				# to 'detailed' (minerva_pcb_hint_convert_to_detailed,
+				# verdict 4's named operation).
+				last_update_refusal = {
+					"error": "waypoints_superseded",
+					"hint_id": annotation_id,
+					"constraint_revision": int(_hint_payload_of(old).get(
+						"waypoints_superseded_by_constraint_revision", 0)),
+					"note": "kind_payload.waypoints on this hint is superseded by its task's "
+						+ "routing_constraint — routing no longer reads the hint's own waypoints, "
+						+ "so this edit could never affect copper. Steer the route in the live "
+						+ "editor via minerva_pcb_workspace_reroute_route (`corridor` or "
+						+ "`preserve_shape_as_corridor`), or reclaim manual waypoint control with "
+						+ "minerva_pcb_hint_convert_to_detailed (clears the task constraint and "
+						+ "converts this hint to 'detailed' so its waypoints are editable and "
+						+ "routed as-drawn).",
+				}
+				push_warning(("[PcbAnnotationHost] refused waypoints edit on pcb_route_hint '%s' — " +
+					"its kind_payload.waypoints_superseded_by_constraint_revision marker means " +
+					"this field is inert for routing; the task's routing_constraint is the real " +
+					"channel now — steer it via minerva_pcb_workspace_reroute_route's `corridor` " +
+					"or `preserve_shape_as_corridor` argument, or reclaim the waypoints with " +
+					"minerva_pcb_hint_convert_to_detailed") % annotation_id)
+				return false
 			var updated := new_annotation.duplicate(true)
 			updated["id"] = annotation_id
+			# H2-1 (fix round, station 12): the marker is HOST-OWNED state, not
+			# editor-authored data — re-arm it on `updated` before it is stored.
+			# Must run AFTER the refusal check (which still needs to see `old`
+			# carry the marker so a same-call waypoints-change-plus-marker-drop
+			# is caught) and BEFORE _apply_hint_history/storage, unconditionally
+			# — including the _suppress_hint_history undo/redo path (H2-2),
+			# which is exactly what lets a restored pre-seed snapshot re-arm
+			# the guard for the NEXT edit. See _reinject_superseded_marker's
+			# own doc.
+			_reinject_superseded_marker(old, updated)
 			_apply_hint_history(old, updated)
 			# Re-stamp anchored_to so it reflects the current board (a component
 			# may have moved under the marker since it was authored).
@@ -1386,6 +1458,245 @@ static func _hint_payload_changed(a: Dictionary, b: Dictionary) -> bool:
 	return false
 
 
+## Epoch UX1 station 12 (DCR 019fd095e694, docket 019fd057ea0b comment 1028
+## "never accept an edit that cannot affect routing"): true iff `old` is a
+## pcb_route_hint whose kind_payload already carries
+## waypoints_superseded_by_constraint_revision (stamped by
+## panel_tools.gd's _seed_legacy_waypoint_constraints — station 12's legacy
+## seed — or station 9's _stamp_waypoints_superseded for a live steer; ONE
+## marker, one meaning regardless of which channel wrote the constraint that
+## made the field inert) AND `new_annotation` CHANGES kind_payload.waypoints
+## relative to `old`.
+##
+## Once that marker exists, panel_tools.gd's route_bridge.hints_to_router
+## OVERRIDES kind_payload.waypoints outright with the task's
+## routing_constraint (that function's own doc: the constraint's corridor
+## REPLACES the hint's waypoints, never merged) — so an edit to the waypoints
+## array literally cannot change what gets routed. Accepting it anyway would
+## be the same silent-input failure class comment 1028 exists to close: an
+## editor sees the edit "succeed" and reasonably believes it steers routing,
+## when nothing downstream will ever read the new value again.
+##
+## Only a WAYPOINTS change is refused. Every other field on the SAME
+## superseded hint — note, text, lifecycle, layer, … — passes through
+## unaffected; this is not a freeze on the annotation, only on the one field
+## that no longer means anything. A 'detailed' hint never carries this marker
+## (station 12 never seeds one — its waypoints ARE consumed, literally, by
+## the bridge's as-drawn path — see _seed_legacy_waypoint_constraints' own
+## doc), so this guard never fires for it: it bypasses this mechanism by
+## construction, unconditionally, same as it bypasses seeding.
+func _refuses_superseded_waypoint_edit(old: Dictionary, new_annotation: Dictionary) -> bool:
+	# H2-2 (fix round, station 12): undo_hint_revision/redo_hint_revision
+	# (_shift_hint_revision) route their snapshot restore through this SAME
+	# update_annotation() call, with _suppress_hint_history set for its
+	# duration — deliberately, so a restore is never itself recorded as a new
+	# edit (see _apply_hint_history's own doc). A restored PRIOR payload can
+	# legitimately carry different waypoints than the current (superseded)
+	# payload — that IS the undo, not an editor trying to sneak a steering
+	# change past the guard — so it must never be refused here. update_
+	# annotation's H2-1 re-injection (see _reinject_superseded_marker) still
+	# runs on this same call and puts the marker back onto the restored
+	# annotation whenever `old` carried one, so the guard RE-ARMS immediately
+	# after: the undo itself always succeeds, but a fresh waypoints edit
+	# following it is refused again exactly as before the undo.
+	if _suppress_hint_history:
+		return false
+	# Codex 1047 fix round, verdict 4: release_superseded_waypoints() is the
+	# ONE host-sanctioned strip of the marker — its single update must not be
+	# refusable (belt-and-braces: the release never changes waypoints, so this
+	# guard would not fire anyway, but the release's contract is "cannot be
+	# refused by the supersession machinery it is dismantling").
+	if _bypass_superseded_release:
+		return false
+	if str(old.get("kind", "")) != "pcb_route_hint":
+		return false
+	var old_kp: Dictionary = _hint_payload_of(old)
+	if not old_kp.has("waypoints_superseded_by_constraint_revision"):
+		return false
+	var new_kp: Dictionary = _hint_payload_of(new_annotation)
+	var old_wp: Variant = old_kp.get("waypoints", [])
+	var new_wp: Variant = new_kp.get("waypoints", [])
+	return JSON.stringify(old_wp) != JSON.stringify(new_wp)
+
+
+## H2-1 (cold review, fix round — DCR 019fd095e694 station 12):
+## waypoints_superseded_by_constraint_revision is HOST-OWNED state — it
+## records a fact about THIS host's own workspace (a task now carries a
+## routing_constraint that overrides this hint's waypoints), not something an
+## editor authors or should be able to author away. An incoming `updated`
+## payload that simply OMITS the marker `old` already carried — whether by
+## accident (a partial-payload caller, e.g. an MCP patch that round-trips
+## only the fields it means to touch) or by a deliberate two-step bypass
+## (first an update that drops the marker with waypoints left untouched,
+## legally passing _refuses_superseded_waypoint_edit since only WAYPOINTS
+## changes are checked, THEN a second update that changes waypoints against
+## an annotation that no longer appears superseded) — must not be able to
+## erase it. Re-injecting it here, unconditionally, on every update_
+## annotation call closes both: the accidental strip is simply restored, and
+## the deliberate two-step bypass never gets a marker-less annotation to
+## stage its second step against, because THIS call already put it back.
+##
+## No-op when `old` is not a pcb_route_hint, carries no marker to begin with,
+## or `updated` already names one explicitly (a caller that DELIBERATELY sets
+## a different revision number — e.g. this station's own re-stamp after a
+## fresh steer — is never overridden by a stale re-injection).
+##
+## Codex 1047 fix round, verdict 4+5 additions:
+##   - While _bypass_superseded_release is set (release_superseded_waypoints'
+##     single sanctioned update), this whole function is a no-op — the strip
+##     IS the operation, not an accident to repair.
+##   - The verdict-5 offline-lock keys (_locked_fields/_lock_reason, stamped
+##     beside the marker by panel_tools._stamp_waypoints_superseded so core's
+##     OFFLINE sidecar-update path can refuse locked-field patches) are
+##     host-owned for exactly the marker's own reason, and ride the same
+##     re-injection: a marker-preserving update that dropped only the lock
+##     keys would otherwise save a sidecar whose offline protection silently
+##     vanished. They are restored whenever `old` carried the marker and
+##     `updated` omits them — handled SEPARATELY from the marker's own
+##     already-named early-out, so a caller keeping the marker but dropping a
+##     lock key still gets the lock key back.
+func _reinject_superseded_marker(old: Dictionary, updated: Dictionary) -> void:
+	if _bypass_superseded_release:
+		return
+	if str(old.get("kind", "")) != "pcb_route_hint":
+		return
+	var old_kp: Dictionary = _hint_payload_of(old)
+	if not old_kp.has("waypoints_superseded_by_constraint_revision"):
+		return
+	var new_kp: Dictionary = _hint_payload_of(updated).duplicate(true)
+	var patched := false
+	if not new_kp.has("waypoints_superseded_by_constraint_revision"):
+		new_kp["waypoints_superseded_by_constraint_revision"] = old_kp["waypoints_superseded_by_constraint_revision"]
+		patched = true
+	# Verdict 5: the offline-lock keys ride the marker (see the doc above).
+	for lock_key in ["_locked_fields", "_lock_reason"]:
+		if old_kp.has(lock_key) and not new_kp.has(lock_key):
+			var v: Variant = old_kp[lock_key]
+			new_kp[lock_key] = (v as Array).duplicate(true) if v is Array else v
+			patched = true
+	if patched:
+		updated["kind_payload"] = new_kp
+
+
+## Codex 1047 fix round, verdict 4: the ONE host-sanctioned strip of the
+## station-12 supersession marker — the annotation-side half of the
+## guided→detailed conversion (panel_tools._hint_convert_to_detailed owns the
+## workspace-side half: clearing the task's routing_constraint FIRST, or
+## refusing by name when the constraint is not singly owned; this method never
+## reads the workspace at all, deliberately — a torn marker-only state, where
+## the constraint is already gone, must still be releasable).
+##
+## Performs ONE update_annotation call with _bypass_superseded_release set, so
+## the H2-1 re-injection guard does not put the marker straight back and the
+## edit-refusal guard cannot fire: strips
+## waypoints_superseded_by_constraint_revision plus the verdict-5 offline-lock
+## keys (_locked_fields/_lock_reason), and sets kind_payload.detail_level =
+## "detailed" — the level station 12's seeder and the render taxonomy both
+## already treat as "waypoints are the literal, as-drawn routing input" (the
+## seeder's own `detailed` gate is what makes the conversion durable: a later
+## propose never re-seeds/re-stamps this hint).
+##
+## UNDOABILITY DECISION (deliberate, per the fix-round brief): the conversion
+## IS one user-visible history step — _suppress_hint_history is NOT set, so
+## _apply_hint_history pushes the prior payload (marker, lock keys and
+## 'guided' detail_level included) onto the hint's revision stack, exactly
+## like any other explicit edit. Rationale: unlike the bookkeeping stamp
+## (which suppresses history because nobody "did" it), converting is an
+## explicit user/agent-level act and Ctrl+Z/minerva_pcb_hint_undo should be
+## able to take it back. KNOWN ASYMMETRY, on purpose: undoing the conversion
+## restores only the ANNOTATION side (the marker returns via the snapshot;
+## the re-injection seam then keeps it armed) — the cleared task constraint
+## is NOT resurrected, because the workspace has no history seam for
+## constraints. That leaves the documented marker-only torn state, which has
+## TWO named recoveries: re-running the conversion (via _hint_convert_to_
+## detailed's torn-state branch) completes the release again immediately, and
+## — Codex 1047 fix round, verdict 6 — the next board LOAD repairs it
+## deterministically (panel_tools.gd reconcile_superseded_waypoint_state
+## strips the stale marker through reconcile_strip_superseded_marker below,
+## PRESERVING the restored 'guided' detail_level so the seeder resumes the
+## guided flow on the next propose — see that pass's own doc for the rule).
+##
+## Returns {ok:true} on success, or {ok:false, error:
+## "not_found"|"not_a_route_hint"|"update_failed"} — never crashes.
+func release_superseded_waypoints(hint_id: String) -> Dictionary:
+	return _strip_superseded_state(hint_id, true, false)
+
+
+## Codex 1047 fix round, verdict 6: the LOAD-TIME RECONCILIATION strip — the
+## second (and only other) host-sanctioned removal of the supersession marker
+## + verdict-5 offline-lock keys, used exclusively by panel_tools.gd's
+## reconcile_superseded_waypoint_state for the marker-without-constraint torn
+## state (marker present on the loaded annotation while no owner-attributed
+## task constraint governs the hint — the workspace store is authoritative,
+## the marker is derived, so a marker the workspace cannot back is stale).
+##
+## Differs from release_superseded_waypoints on exactly the two axes that
+## make it BOOKKEEPING rather than a user-level conversion:
+##   - detail_level is PRESERVED as found, never forced to "detailed".
+##     Reconciliation cannot know whether the tear came from a crash between
+##     the two seeding writes (pre-torn intent: guided) or from an undo of a
+##     conversion (undo restored the pre-conversion payload wholesale,
+##     detail_level "guided" included) — and BOTH shapes carry the
+##     detail_level that describes the pre-torn intent, so preserving it is
+##     the deterministic rule that is honest in every reachable case: a
+##     'guided' hint resumes guided seeding on the next propose (waypoints
+##     intact, the seeder rebuilds constraint + marker), and nothing ever
+##     invents a 'detailed' claim nobody made.
+##   - _suppress_hint_history is set for the single update, so the repair
+##     never becomes an undoable history step (nobody "did" it — same
+##     rationale as the stamp path, whose marker/lock writes stay out of
+##     history because they touch no _HINT_HISTORY_FIELDS entry; the
+##     suppression here is belt-and-braces on top of that same property).
+##
+## No-op by contract when the hint carries neither the marker nor a lock key
+## ({ok:true, changed:false}) so the reconciliation pass stays idempotent
+## without special-casing. Never crashes.
+func reconcile_strip_superseded_marker(hint_id: String) -> Dictionary:
+	return _strip_superseded_state(hint_id, false, true)
+
+
+## Shared body of the two sanctioned strips above (Codex 1047 fix round,
+## verdicts 4+6 — ONE implementation so the bypass-flag discipline can never
+## drift between them). `set_detailed` is the conversion's detail_level
+## promotion; `bookkeeping` routes the update through the history-suppression
+## seam. Both strips run their single update_annotation call with
+## _bypass_superseded_release set, so the H2-1 re-injection guard does not put
+## the marker straight back and the edit-refusal guard cannot fire.
+func _strip_superseded_state(hint_id: String, set_detailed: bool, bookkeeping: bool) -> Dictionary:
+	var ann: Dictionary = get_by_id(hint_id)
+	if ann.is_empty():
+		return {"ok": false, "error": "not_found"}
+	if str(ann.get("kind", "")) != "pcb_route_hint":
+		return {"ok": false, "error": "not_a_route_hint"}
+	var updated := ann.duplicate(true)
+	var kp: Dictionary = _hint_payload_of(updated).duplicate(true)
+	var had_superseded_state: bool = kp.has("waypoints_superseded_by_constraint_revision") \
+		or kp.has("_locked_fields") or kp.has("_lock_reason")
+	if bookkeeping and not had_superseded_state:
+		# Reconciliation's idempotence contract: nothing to strip is a clean
+		# no-op, never a phantom write (the release path deliberately still
+		# writes in this case — it must land detail_level "detailed" even on
+		# a hint whose marker is already gone, see its own doc).
+		return {"ok": true, "changed": false}
+	kp.erase("waypoints_superseded_by_constraint_revision")
+	kp.erase("_locked_fields")
+	kp.erase("_lock_reason")
+	if set_detailed:
+		kp["detail_level"] = "detailed"
+	updated["kind_payload"] = kp
+	updated["updated_at"] = int(Time.get_unix_time_from_system())
+	_bypass_superseded_release = true
+	if bookkeeping:
+		_suppress_hint_history = true
+	var ok := update_annotation(hint_id, updated)
+	if bookkeeping:
+		_suppress_hint_history = false
+	_bypass_superseded_release = false
+	if not ok:
+		return {"ok": false, "error": "update_failed"}
+	return {"ok": true, "changed": true}
+
+
 func update(annotation: Dictionary) -> void:
 	var annotation_id := str(annotation.get("id", ""))
 	if not annotation_id.is_empty():
@@ -1395,13 +1706,38 @@ func update(annotation: Dictionary) -> void:
 func remove_annotation(annotation_id: String) -> bool:
 	for i in range(_annotations.size()):
 		if _annotations[i] is Dictionary and str(_annotations[i].get("id", "")) == annotation_id:
+			var removed_kind := str((_annotations[i] as Dictionary).get("kind", ""))
 			_annotations.remove_at(i)
 			# Base contract: removing the selected annotation clears selection.
 			if get_selected_annotation_id() == annotation_id:
 				set_selected_annotation_id("")
 			annotations_changed.emit()
+			# H2-1 (cold review, DCR 019fd095e694/docket 019fd057ea0b comment
+			# 1028's deletion-cascade precondition): removing a pcb_route_hint's
+			# connectivity object cascades to its still-unanswered eager task —
+			# see RoutingWorkspace.drop_empty_tasks_for_hint's own doc. A task
+			# with a candidate is history and stays regardless of this removal.
+			if removed_kind == "pcb_route_hint":
+				_cascade_drop_empty_tasks_for_hint(annotation_id)
 			return true
 	return false
+
+
+## H2-1's duck-typed seam: host → panel → workspace, the SAME hop
+## _has_live_candidate (pcb_route_hint_kind.gd) and _get_workspace
+## (panel_tools.gd) already use. Null-safe/headless-safe at every link — a
+## host with no panel, a panel predating get_routing_workspace(), or a
+## workspace predating drop_empty_tasks_for_hint all degrade to a no-op
+## rather than erroring; a test double supplying only what it needs (e.g.
+## test_workspace_tools.gd's stub panels) is exactly what this is for.
+func _cascade_drop_empty_tasks_for_hint(hint_id: String) -> void:
+	var panel = get_panel()
+	if panel == null or not is_instance_valid(panel) or not panel.has_method("get_routing_workspace"):
+		return
+	var workspace = panel.get_routing_workspace()
+	if workspace == null or not workspace.has_method("drop_empty_tasks_for_hint"):
+		return
+	workspace.drop_empty_tasks_for_hint(hint_id)
 
 
 func set_annotations(list: Array) -> void:

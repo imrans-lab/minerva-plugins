@@ -95,6 +95,17 @@ func _init() -> void:
 	await _test_e_mcp_unchanged_while_hidden()
 	await _test_f_sidecar_round_trip()
 	await _test_mcp_add_regression()
+	# Runs LAST and adds its own extra hint (see the test's own doc for why):
+	# every test above this line depends on the fixture's exact annotation
+	# counts (A-F assert the original 3; the ADD regression asserts before/
+	# before+1 and workflow-listing==3), so a G that mutated state earlier
+	# would silently break those hard-coded counts.
+	await _test_g_universal_select_path_bend_editing()
+	# Runs after G for the same reason G runs after everything else: it adds
+	# its own fixture hint too, so anything depending on G's exact
+	# post-conditions has to come first. G's own (d) is also what arms the
+	# real universal-select tool this test needs — see H's own doc.
+	await _test_h_canvas_real_input_path()
 
 	_cleanup_sidecar()
 	panel.queue_free()
@@ -482,6 +493,422 @@ func _test_mcp_add_regression() -> void:
 	workflow_list.refresh()
 	check("ADD: workflow listing now shows 3 hints", workflow_list.get_listing().size() == 3,
 		"size=%d" % workflow_list.get_listing().size())
+
+
+# ── G. universal select offers bend handles on a "path"-profile kind ─────────
+# (UX1 station 6, docket 019fd09b209e). The modal "Edit hint" toolbar tool
+# (BendHandleEditTool, pcb_route_hint_kind.gd) already exercises this exact
+# bend API under its own hint-only selection semantics (see
+# test_pcb_hint_refine_loop.gd) — this proves the SAME api/host commit path
+# now also works through the shared universal-select AnnotationTransformTool
+# (`select_tool`, already mounted in _mount()), which is the whole point of
+# the round: no separate modal tool is needed to move/insert/delete a bend.
+#
+# Drives select_tool directly (position = canvas.world_to_screen(world_pos),
+# matching PcbAnnotationHost.transform_screen_to_doc's "overlay-local pixels"
+# contract) rather than through push_input/_click_world: on_pointer_move has
+# no InputEventMouseMotion equivalent in that helper, and driving the tool
+# directly is the exact idiom the core suite (test_annotation_transform_tool.gd)
+# already uses for drag gestures. The tool's own annotation_modified signal is
+# still connected to the REAL overlay (set_active_tool wired it in _mount()),
+# so every commit below goes through the production host.update_annotation
+# path — including the per-hint revision-history push (C4, docket
+# 019f6c464ff0) BendHandleEditTool's drag also produces, asserted below via
+# kind_payload.revision_stack growth.
+
+const HINT_G_ANCHOR := Vector2(90.0, 50.0)
+const HINT_G_BEND1  := Vector2(90.0, 58.0)
+const HINT_G_BEND2  := Vector2(82.0, 58.0)
+const HINT_G_DEST   := Vector2(82.0, 50.0)
+
+
+func _hint_g_revision_count(ann: Dictionary) -> int:
+	# TOP-LEVEL, not kind_payload (Codex re-review on 019fd10557c8):
+	# PcbAnnotationHost.update_annotation pushes the prior kind_payload onto
+	# the ANNOTATION's revision_stack — reading it off kind_payload always
+	# returned zero, which made every "revision count grew" assertion in G a
+	# guaranteed failure at the boundary run.
+	var stack: Variant = ann.get("revision_stack", [])
+	return (stack as Array).size() if stack is Array else 0
+
+
+func _test_g_universal_select_path_bend_editing() -> void:
+	print("-- G: universal select offers bend handles on pcb_route_hint (path profile) --")
+
+	# Legacy full-path waypoints convention (build_route_hint_envelope's
+	# default): [anchor, bend, bend, dest] → bend_points() returns the 2
+	# interior points (see pcb_route_hint_kind.gd bend_points() doc).
+	var hint_g_id: String = host.add_route_hint_at(
+		HINT_G_ANCHOR.x, HINT_G_ANCHOR.y, "bend-edit probe", "F.Cu", "waypoint",
+		[[HINT_G_ANCHOR.x, HINT_G_ANCHOR.y], [HINT_G_BEND1.x, HINT_G_BEND1.y],
+			[HINT_G_BEND2.x, HINT_G_BEND2.y], [HINT_G_DEST.x, HINT_G_DEST.y]])
+	check("G: fixture hint stored", not hint_g_id.is_empty())
+
+	var kind: AnnotationKind = host.get_registry().get_annotation_kind(&"pcb_route_hint")
+	check("G: pcb_route_hint kind resolved", kind != null)
+	if kind == null:
+		return
+
+	check("G: pcb_route_hint.manipulation_profile() == 'path'",
+		kind.manipulation_profile() == "path", "got '%s'" % kind.manipulation_profile())
+	check("G: select_tool accepts the real kind as path-eligible", select_tool._is_path_kind(kind))
+
+	host.set_selected_annotation_id(hint_g_id)
+	check("G: fixture hint selected", host.get_selected_annotation_id() == hint_g_id)
+
+	var before_ann: Dictionary = host.get_by_id(hint_g_id)
+	var before_bends: Array = kind.bend_points(before_ann)
+	check("G: fixture starts with 2 interior bends", before_bends.size() == 2,
+		"size=%d" % before_bends.size())
+	var before_revisions := _hint_g_revision_count(before_ann)
+
+	# ── (c) bend drag: ONE commit, moved point, ONE revision pushed ───────────
+	var press_screen: Vector2 = canvas.world_to_screen(HINT_G_BEND1)
+	check("G: press on bend[0]'s screen position arms a BEND drag",
+		select_tool.on_pointer_down(press_screen, MOUSE_BUTTON_LEFT, 0))
+	check("G: select_tool armed Zone.BEND",
+		select_tool._active_zone == AnnotationTransformTool.Zone.BEND,
+		"zone=%s" % str(select_tool._active_zone))
+
+	var dragged_to := Vector2(88.0, 56.0)
+	var dragged_to_screen: Vector2 = canvas.world_to_screen(dragged_to)
+	select_tool.on_pointer_move(dragged_to_screen)
+	var mid_drag_ann: Dictionary = host.get_by_id(hint_g_id)
+	check("G: host annotation UNCHANGED mid-drag (preview only, real host too)",
+		(kind.bend_points(mid_drag_ann)[0] as Vector2) == (before_bends[0] as Vector2))
+
+	select_tool.on_pointer_up(dragged_to_screen, MOUSE_BUTTON_LEFT, 0)
+	var after_drag_ann: Dictionary = host.get_by_id(hint_g_id)
+	var after_drag_bends: Array = kind.bend_points(after_drag_ann)
+	check("G: still 2 bends after the drag", after_drag_bends.size() == 2,
+		"size=%d" % after_drag_bends.size())
+	if after_drag_bends.size() == 2:
+		var moved: Vector2 = after_drag_bends[0]
+		check("G: dragged bend landed at the release position",
+			moved.distance_to(dragged_to) < 0.01, "moved=%s" % str(moved))
+		check("G: the OTHER bend is untouched",
+			(after_drag_bends[1] as Vector2).distance_to(HINT_G_BEND2) < 0.01)
+	check("G: exactly ONE revision pushed by the drag",
+		_hint_g_revision_count(after_drag_ann) == before_revisions + 1,
+		"count=%d" % _hint_g_revision_count(after_drag_ann))
+
+	# ── (d) right-click a bend handle → THE CANVAS MENU, not a direct tool
+	# gesture (station 6 fix F1, docket 019fd104e1c6 — Codex review, docket
+	# 019fd10557c8 comment 1034).
+	#
+	# REWORKED. The ORIGINAL assertion here drove
+	# `select_tool.on_pointer_down(bend2_screen, MOUSE_BUTTON_RIGHT, 0)`
+	# directly — core AnnotationTransformTool DOES have a right-click-deletes-
+	# a-bend branch (_try_delete_bend_at), so that call "passed", but it
+	# exercised a gesture pcb_canvas can never actually reach in production:
+	# the canvas's RIGHT mouse button never calls into the annotation router
+	# at ALL (see pcb_canvas.gd _handle_mouse_button's MOUSE_BUTTON_RIGHT
+	# branch — every right press there arms a pan/menu directly, never
+	# annotation_pointer_down). The assertion was passing "artificially".
+	#
+	# The REAL path is the canvas's OWN context menu (F1's "Delete bend"
+	# item), and it IS reachable in this harness: `canvas` is the real
+	# production pcb_canvas instance and its `_annotation_router` is already
+	# wired to `host` (panel._build_ui() did that in _mount()). What stood in
+	# the way is the harness's OWN `overlay`, mounted ACTIVE (non-passive,
+	# mouse_filter STOP) for letters A-G's plain-click tests — an active
+	# overlay sits ON TOP of the canvas at the same screen rect and absorbs
+	# EVERY mouse button, including right-clicks, before pcb_canvas's own
+	# _gui_input ever runs (AnnotationOverlay._gui_input handles
+	# MOUSE_BUTTON_RIGHT unconditionally). So: release the harness's tool and
+	# re-arm PASSIVELY through the REAL host entry point
+	# (PcbAnnotationHost.arm_universal_select) — the exact topology
+	# PCBPanel._sync_universal_select sets up in production. This flip holds
+	# for the rest of this script's run (nothing after this point depends on
+	# the old active wiring); the new canvas-input test (H) below relies on
+	# it too.
+	overlay.clear_active_tool()
+	host.arm_universal_select(overlay, true)
+	check("G: universal select is armed PASSIVELY on the real overlay",
+		host.is_universal_select_armed() and overlay.mouse_filter == Control.MOUSE_FILTER_IGNORE,
+		"armed=%s filter=%d" % [str(host.is_universal_select_armed()), overlay.mouse_filter])
+	# REBIND (Codex re-review P1): clear_active_tool DISCONNECTED the harness's
+	# own select_tool from annotation_modified — every direct-tool call below
+	# must go through the HOST-VENDED tool the arming just wired, or the host
+	# can never observe the edit and the assertions fail deterministically.
+	select_tool = host.get_universal_select_tool()
+	check("G: rebound to the armed host-vended tool", select_tool != null)
+
+	# A REAL right-press+release, through get_root().push_input — the same
+	# idiom test_pcb_canvas_input_probe.gd's own "RIGHT-CLICK IS A MENU"
+	# probe uses (that file already proves PopupMenu.popup() works headless).
+	var bend2_root: Vector2 = _world_to_root_screen(HINT_G_BEND2)
+	_push_button(bend2_root, MOUSE_BUTTON_RIGHT, true)
+	await process_frame
+	_push_button(bend2_root, MOUSE_BUTTON_RIGHT, false)
+	await process_frame
+	check("G: right-click on the remaining bend handle pops the REAL context menu",
+		canvas.context_menu != null and canvas.context_menu.visible,
+		"items=%d bend_hit=%s" % [
+			(canvas.context_menu.item_count if canvas.context_menu != null else -1),
+			str(canvas._context_menu_annotation_bend)])
+	var has_delete_bend := false
+	if canvas.context_menu != null:
+		for i in canvas.context_menu.item_count:
+			if canvas.context_menu.get_item_text(i) == "Delete bend":
+				has_delete_bend = true
+	check("G: …and it carries 'Delete bend'", has_delete_bend)
+
+	# Fire the handler the SAME way the real popup does — through its
+	# id_pressed signal (_create_context_menu wires _on_context_menu_pressed
+	# to it) — rather than simulating a raw pixel click INSIDE the live
+	# popup's own item list, which no suite in this codebase attempts
+	# (test_pcb_canvas_input_probe.gd's own menu probe stops at "the item is
+	# present" plus a manual .hide(), and never clicks an item via real
+	# input either). This is the "assert the menu item presence + its
+	# handler effect directly" fallback the round's own instructions name,
+	# used for JUST the handler-firing step — the item's PRESENCE above came
+	# from the fully real press.
+	if canvas.context_menu != null:
+		canvas.context_menu.hide()
+		canvas.context_menu.id_pressed.emit(canvas.MENU_ID_DELETE_ANNOTATION_BEND)
+
+	var after_delete_ann: Dictionary = host.get_by_id(hint_g_id)
+	var after_delete_bends: Array = kind.bend_points(after_delete_ann)
+	check("G: 1 bend remains after delete", after_delete_bends.size() == 1,
+		"size=%d" % after_delete_bends.size())
+	check("G: exactly TWO revisions pushed so far",
+		_hint_g_revision_count(after_delete_ann) == before_revisions + 2,
+		"count=%d" % _hint_g_revision_count(after_delete_ann))
+
+	# ── (e) click the path (not a handle) inserts a bend, ONE more revision ──
+	# Midpoint of the remaining segment moved_bend1(88,56) -> dest(82,50):
+	# (85,53). >4mm from both endpoints, well clear of the 12px/4.0zoom=3mm
+	# handle radius, so this can only land as an insert, never a handle hit.
+	var insert_at_world := Vector2(85.0, 53.0)
+	var insert_screen: Vector2 = canvas.world_to_screen(insert_at_world)
+	var insert_consumed := select_tool.on_pointer_down(insert_screen, MOUSE_BUTTON_LEFT, 0)
+	check("G: segment click is consumed (insert)", insert_consumed)
+	check("G: insert did not leave select_tool mid-drag", not select_tool._dragging)
+	var after_insert_ann: Dictionary = host.get_by_id(hint_g_id)
+	var after_insert_bends: Array = kind.bend_points(after_insert_ann)
+	check("G: 2 bends after insert", after_insert_bends.size() == 2,
+		"size=%d" % after_insert_bends.size())
+	if after_insert_bends.size() == 2:
+		check("G: inserted point sits at the segment midpoint",
+			(after_insert_bends[1] as Vector2).distance_to(insert_at_world) < 0.01)
+	check("G: exactly THREE revisions pushed in total",
+		_hint_g_revision_count(after_insert_ann) == before_revisions + 3,
+		"count=%d" % _hint_g_revision_count(after_insert_ann))
+
+	host.set_selected_annotation_id("")
+
+
+# ── H. universal select through the REAL pcb_canvas input path ──────────────
+# (station 6 fix F3, docket 019fd10557c8 comment 1034). G above drives
+# select_tool directly; this test drives the CANVAS instead — real
+# InputEventMouseButton via get_root().push_input -> pcb_canvas._gui_input ->
+# _handle_mouse_button -> _claim_annotation_press ->
+# host.annotation_claims_point / annotation_pointer_down — the same
+# production topology PCBPanel._sync_universal_select sets up, now reachable
+# because G's own (d) flipped `overlay` passive and armed `host` for real
+# (host.arm_universal_select). Runs AFTER G on purpose, same reason G runs
+# after everything else: it adds its own fixture hint and would otherwise
+# perturb A-F/G's hard-coded counts.
+#
+# NON-UNIT ZOOM (2.0) — deliberately different from every earlier letter's
+# fixed 4.0, so a probe/press pair that only agreed by coincidence at an
+# integer px/mm ratio would be caught.
+#
+# THE PROBE/PRESS MIRROR CONTRACT: for each of the four press classes, this
+# calls host.annotation_claims_point(canvas_local_pos, 0) — the SAME query
+# pcb_canvas._claim_annotation_press makes internally, at the SAME
+# canvas-local pixel position _handle_mouse_button would receive — as a
+# PREDICTION, then drives the identical point through a REAL
+# InputEventMouseButton and checks the prediction against what the real
+# dispatch actually did. claimed ⇔ consumed: a predicted claim leaves the
+# fixture selected and arms the tool's matching zone (or, for the segment
+# case, commits the insert immediately — that gesture has no drag to arm); a
+# predicted decline means the press falls through to the board ladder, whose
+# own empty-click branch clears the annotation half (every point below also
+# misses every OTHER fixture's ink, so "declined" here always means "board
+# saw an empty click", never "board hit something else instead").
+
+const HINT_H_ANCHOR := Vector2(5.0, 38.0)
+const HINT_H_BEND1  := Vector2(5.0, 53.0)
+const HINT_H_BEND2  := Vector2(25.0, 53.0)
+const HINT_H_DEST   := Vector2(25.0, 38.0)
+## Nearest point of the fixture's own bounds Rect2(5,38,20,15) is its corner
+## (25,38) — 35.1mm away, far past the 6mm handle radius zoom=2.0 gives (12px
+## / 2.0). ARROW_AT(50,30)/FCU_AT(20,15)/BCU_AT(80,45) (module-level consts,
+## _seed_annotations) are all ≥22mm away too — comfortably past every other
+## fixture's own ink-hit slack (8px / 2.0 = 4mm).
+const HINT_H_OUTSIDE := Vector2(60.0, 55.0)
+
+
+func _test_h_canvas_real_input_path() -> void:
+	print("-- H: universal select through the REAL pcb_canvas input path (F3) --")
+
+	# Non-unit zoom, pan recomputed the same way _mount() centres the board
+	# at its own (different) fixed zoom.
+	canvas.zoom = 2.0
+	canvas.pan_offset = -Vector2(data.board_width, data.board_height) / 2.0 * canvas.zoom
+	canvas.queue_redraw()
+	await process_frame
+
+	var hint_h_id: String = host.add_route_hint_at(
+		HINT_H_ANCHOR.x, HINT_H_ANCHOR.y, "canvas-input probe", "F.Cu", "waypoint",
+		[[HINT_H_ANCHOR.x, HINT_H_ANCHOR.y], [HINT_H_BEND1.x, HINT_H_BEND1.y],
+			[HINT_H_BEND2.x, HINT_H_BEND2.y], [HINT_H_DEST.x, HINT_H_DEST.y]])
+	check("H: fixture hint stored", not hint_h_id.is_empty())
+	var kind: AnnotationKind = host.get_registry().get_annotation_kind(&"pcb_route_hint")
+	check("H: pcb_route_hint kind resolved", kind != null)
+	if kind == null:
+		return
+
+	# The REAL, host-vended tool (G's (d) armed it on `host` for real) — NOT
+	# the harness's own `select_tool`, which is a separate instance never
+	# wired to the canvas at all.
+	var real_tool = host.get_universal_select_tool()
+	check("H: host vends the real universal-select tool", real_tool != null)
+	if real_tool == null:
+		return
+
+	# ── (1) press ON A BEND HANDLE ───────────────────────────────────────────
+	host.set_selected_annotation_id(hint_h_id)
+	var bend_local: Vector2 = canvas.world_to_screen(HINT_H_BEND1)
+	var bend_claimed: bool = host.annotation_claims_point(bend_local, 0)
+	check("H: probe predicts the bend handle is claimed", bend_claimed)
+	var bend_root: Vector2 = _world_to_root_screen(HINT_H_BEND1)
+	_push_button(bend_root, MOUSE_BUTTON_LEFT, true)
+	await process_frame
+	check("H: claimed ⇔ consumed — a real press on the handle arms Zone.BEND",
+		bend_claimed == (real_tool._active_zone == AnnotationTransformTool.Zone.BEND
+			and real_tool._drag_bend_index == 0),
+		"zone=%s idx=%d" % [str(real_tool._active_zone), real_tool._drag_bend_index])
+	check("H: fixture stays selected through a claimed press",
+		host.get_selected_annotation_id() == hint_h_id)
+	_push_button(bend_root, MOUSE_BUTTON_LEFT, false)
+	await process_frame
+	# Zero-travel release (fix F4): the gesture was claimed and consumed, but
+	# a press-release with no motion between them must not commit ANYTHING —
+	# count alone would stay 2 even after an unintended move (Codex re-review),
+	# so assert the COORDINATE and the revision history too.
+	var h_after_click: Dictionary = host.get_by_id(hint_h_id)
+	check("H: no-move bend click emits no revision (F4)",
+		kind.bend_points(h_after_click).size() == 2
+			and (kind.bend_points(h_after_click)[0] as Vector2).distance_to(HINT_H_BEND1) < 0.001
+			and (h_after_click.get("revision_stack", []) as Array).is_empty(),
+		"bend0=%s revs=%d" % [str(kind.bend_points(h_after_click)[0]),
+			(h_after_click.get("revision_stack", []) as Array).size()])
+
+	# STATIONARY OFF-CENTRE press (the F4 re-review defect): a motionless click
+	# 4-11px from the handle centre is a VALID hit, and the guard must measure
+	# pointer TRAVEL — comparing release-to-centre would read this as a "drag"
+	# and jump the bend to the pointer. Offset 2mm world at zoom 2.0 = 4px,
+	# inside the 12px/2.0=6mm hit radius, outside the 3px travel threshold's
+	# reach of the centre.
+	var off_centre_root: Vector2 = _world_to_root_screen(HINT_H_BEND1 + Vector2(2.0, 0.0))
+	_push_button(off_centre_root, MOUSE_BUTTON_LEFT, true)
+	await process_frame
+	_push_button(off_centre_root, MOUSE_BUTTON_LEFT, false)
+	await process_frame
+	var h_after_off: Dictionary = host.get_by_id(hint_h_id)
+	check("H: stationary OFF-CENTRE click does not jump the bend",
+		(kind.bend_points(h_after_off)[0] as Vector2).distance_to(HINT_H_BEND1) < 0.001
+			and (h_after_off.get("revision_stack", []) as Array).is_empty(),
+		"bend0=%s revs=%d" % [str(kind.bend_points(h_after_off)[0]),
+			(h_after_off.get("revision_stack", []) as Array).size()])
+
+	# ── (2) press INSIDE bounds only — no handle, no segment — translate ────
+	host.set_selected_annotation_id(hint_h_id)
+	var inside_world := Vector2(15.0, 40.0)
+	var inside_local: Vector2 = canvas.world_to_screen(inside_world)
+	var inside_claimed: bool = host.annotation_claims_point(inside_local, 0)
+	check("H: probe predicts the bounds interior is claimed", inside_claimed)
+	var inside_root: Vector2 = _world_to_root_screen(inside_world)
+	_push_button(inside_root, MOUSE_BUTTON_LEFT, true)
+	await process_frame
+	check("H: claimed ⇔ consumed — a real press inside bounds arms Zone.INSIDE",
+		inside_claimed == (real_tool._active_zone == AnnotationTransformTool.Zone.INSIDE),
+		"zone=%s" % str(real_tool._active_zone))
+	check("H: fixture stays selected", host.get_selected_annotation_id() == hint_h_id)
+	_push_button(inside_root, MOUSE_BUTTON_LEFT, false)
+	await process_frame
+
+	# ── (3) press ON THE PATH (a segment, not a handle) — insertion ─────────
+	host.set_selected_annotation_id(hint_h_id)
+	var seg_world: Vector2 = (HINT_H_BEND1 + HINT_H_BEND2) / 2.0  # midpoint, (15, 53)
+	var seg_local: Vector2 = canvas.world_to_screen(seg_world)
+	var seg_claimed: bool = host.annotation_claims_point(seg_local, 0)
+	check("H: probe predicts the segment is claimed", seg_claimed)
+	var before_bends: int = kind.bend_points(host.get_by_id(hint_h_id)).size()
+	var seg_root: Vector2 = _world_to_root_screen(seg_world)
+	_push_button(seg_root, MOUSE_BUTTON_LEFT, true)
+	await process_frame
+	var after_bends: int = kind.bend_points(host.get_by_id(hint_h_id)).size()
+	check("H: claimed ⇔ consumed — a real press on the segment inserts a bend immediately (no drag armed)",
+		seg_claimed == (after_bends == before_bends + 1),
+		"before=%d after=%d" % [before_bends, after_bends])
+	_push_button(seg_root, MOUSE_BUTTON_LEFT, false)
+	await process_frame
+
+	# ── (4) press OUTSIDE everything ─────────────────────────────────────────
+	host.set_selected_annotation_id(hint_h_id)
+	var outside_local: Vector2 = canvas.world_to_screen(HINT_H_OUTSIDE)
+	var outside_claimed: bool = host.annotation_claims_point(outside_local, 0)
+	check("H: probe predicts empty space is NOT claimed", not outside_claimed)
+	var outside_root: Vector2 = _world_to_root_screen(HINT_H_OUTSIDE)
+	_push_button(outside_root, MOUSE_BUTTON_LEFT, true)
+	await process_frame
+	# BOTH expected outcomes asserted DIRECTLY (Codex re-review P1: the old
+	# claimed==cleared equality inverted — claimed is false and cleared is
+	# true, so the mirror phrasing evaluated false==true and failed).
+	check("H: outside press is NOT claimed", not outside_claimed)
+	check("H: outside press cleared the annotation selection",
+		host.get_selected_annotation_id() == "",
+		"selected='%s'" % host.get_selected_annotation_id())
+	_push_button(outside_root, MOUSE_BUTTON_LEFT, false)
+	await process_frame
+
+	# ── (5) STALE MENU IDENTITY (Codex re-review on 019fd10557c8, P2): a bend
+	# inserted BEFORE the frozen index while the menu sits open shifts every
+	# index — the delete must no-op rather than remove a bend the user never
+	# aimed at. The guard's identity check is the frozen POINT at a tight
+	# epsilon, so the shifted neighbour (well inside the old handle-radius
+	# tolerance) must NOT pass for the aimed bend.
+	host.set_selected_annotation_id(hint_h_id)
+	var bend2_root: Vector2 = _world_to_root_screen(HINT_H_BEND2)
+	_push_button(bend2_root, MOUSE_BUTTON_RIGHT, true)
+	await process_frame
+	_push_button(bend2_root, MOUSE_BUTTON_RIGHT, false)
+	await process_frame
+	# The FROZEN INDEX is captured dynamically, never hardcoded (Codex: H3's
+	# earlier midpoint insert already shifted BEND2's index once — a literal
+	# here would assert the wrong element and fail; dynamic capture also keeps
+	# H5 immune to any future mutation upstream in this test).
+	var frozen_index := int(canvas._context_menu_annotation_bend.get("index", -1))
+	check("H5: menu froze the aimed bend (by point, index captured dynamically)",
+		not canvas._context_menu_annotation_bend.is_empty() and frozen_index >= 0
+			and (canvas._context_menu_annotation_bend.get("point", Vector2.INF) as Vector2)
+				.distance_to(HINT_H_BEND2) < 0.001,
+		"frozen=%s" % str(canvas._context_menu_annotation_bend))
+	# Mutate WHILE the menu is open: insert a bend AT the frozen index, 1mm
+	# from BEND2 — inside the 6mm handle radius the old guard accepted, far
+	# outside the tight epsilon — shifting the aimed bend to frozen_index + 1.
+	var h_live: Dictionary = host.get_by_id(hint_h_id)
+	var shifted: Array = kind.bend_points(h_live).duplicate()
+	shifted.insert(frozen_index, HINT_H_BEND2 + Vector2(1.0, 0.0))
+	host.update_annotation(hint_h_id, kind.with_bend_points(h_live, shifted))
+	var count_before_delete: int = kind.bend_points(host.get_by_id(hint_h_id)).size()
+	canvas.context_menu.id_pressed.emit(canvas.MENU_ID_DELETE_ANNOTATION_BEND)
+	await process_frame
+	var h_after_stale: Dictionary = host.get_by_id(hint_h_id)
+	check("H5: stale-index delete is a NO-OP (count unchanged)",
+		kind.bend_points(h_after_stale).size() == count_before_delete,
+		"count=%d expected=%d" % [kind.bend_points(h_after_stale).size(), count_before_delete])
+	check("H5: the aimed bend survives at frozen_index + 1",
+		(kind.bend_points(h_after_stale)[frozen_index + 1] as Vector2)
+			.distance_to(HINT_H_BEND2) < 0.001)
+	if canvas.context_menu.visible:
+		canvas.context_menu.hide()
+
+	host.set_selected_annotation_id("")
 
 
 # ── cleanup + assertion helper ────────────────────────────────────────────────

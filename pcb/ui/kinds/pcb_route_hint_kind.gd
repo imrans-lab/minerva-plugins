@@ -77,6 +77,23 @@ const _COLOR_VIA := Color(1.0, 0.85, 0.2, 0.95)
 const _VIA_MARKER_RADIUS_MM: float = 0.5
 const _VIA_MARKER_MIN_PX: float = 4.0
 
+## Superseded cue (Codex 1047 fix round, verdict 1): neutral gray slash drawn
+## across each endpoint marker of a hint whose waypoints were superseded by a
+## task-level routing constraint (station 12 marker). Gray on purpose — it must
+## not read as a layer tint (magenta/green), AI authorship (cyan), a via
+## (amber), or selection (yellow); it reads as "struck out". The slash is the
+## geometry-level half of the superseded treatment: it survives labels_visible
+## being off, where the "superseded" label prefix (the text-level half) does
+## not, so a dimmed superseded hint can never be mistaken for a merely
+## consumed ("markers_dimmed") one.
+const _COLOR_SUPERSEDED_CUE := Color(0.8, 0.8, 0.8, 0.9)
+
+## Dimming factor shared by the superseded polyline stroke and (via the same
+## 0.5 the "markers_dimmed" branch uses for markers/label) the whole
+## superseded treatment: visible enough to show what was authored, dim enough
+## to never compete with the constraint-owned live geometry.
+const _SUPERSEDED_STROKE_DIM: float = 0.4
+
 ## Path hit-test tolerance in document (board-mm) units, on top of stroke half-width.
 const _HIT_THRESHOLD_MM: float = 0.6
 
@@ -633,6 +650,11 @@ class BendHandleEditTool:
 			var kind := _kind()
 			if ann.is_empty() or kind == null or str(ann.get("kind", "")) != "pcb_route_hint":
 				return false
+			# Codex 1047 fix round, verdict 3: a superseded hint's path is
+			# LOCKED (path_editing_locked — the host refuses the write), so the
+			# bend-delete gesture never arms against it; draw_preview shows why.
+			if _path_locked(ann):
+				return false
 			var bends: Array = kind.bend_points(ann)
 			var idx := _hit_bend(bends, doc_pos, handle_r)
 			if idx < 0:
@@ -650,7 +672,14 @@ class BendHandleEditTool:
 		if not sel.is_empty() and not _multi_selected():
 			var ann := _find(sel)
 			var kind := _kind()
-			if not ann.is_empty() and kind != null and str(ann.get("kind", "")) == "pcb_route_hint":
+			# Codex 1047 fix round, verdict 3: the drag/insert gestures disarm
+			# on a path-locked (superseded) hint exactly like the delete gesture
+			# above — the click falls through to selection re-targeting instead,
+			# the same fallback a multi-selection already takes. The host would
+			# refuse the resulting write anyway; disarming here removes the
+			# dead-end affordance BEFORE the user invests a drag in it.
+			if not ann.is_empty() and kind != null and str(ann.get("kind", "")) == "pcb_route_hint" \
+					and not _path_locked(ann):
 				var bends: Array = kind.bend_points(ann)
 				var idx := _hit_bend(bends, doc_pos, handle_r)
 				if idx >= 0:
@@ -706,6 +735,17 @@ class BendHandleEditTool:
 		var kind := _kind()
 		if ann.is_empty() or kind == null or str(ann.get("kind", "")) != "pcb_route_hint":
 			return
+		# Codex 1047 fix round, verdict 3: the visible-feedback half of the
+		# gesture disarm above — no handles are drawn for a path-locked
+		# (superseded) hint (handles ARE the promise of an edit the host will
+		# refuse), and the standing disarm notice says why and names the way
+		# forward. The full tool pointer (minerva_pcb_hint_convert_to_detailed)
+		# lives in the host's structured refusal / warning; the canvas keeps
+		# the human phrasing, same idiom as the multi-select notice above.
+		if _path_locked(ann):
+			_Self.draw_disarm_notice(ctx,
+				"Superseded route — waypoints locked; convert to detailed to edit, or steer the route")
+			return
 		var bends: Array = kind.bend_points(ann)
 		var half := (_HANDLE_SIZE_PX / _zoom()) * 0.5
 		for i in range(bends.size()):
@@ -722,6 +762,18 @@ class BendHandleEditTool:
 		if _host != null and _host.has_method("get_annotation_zoom"):
 			return maxf(float(_host.get_annotation_zoom()), 0.01)
 		return 1.0
+
+	## Codex 1047 fix round, verdict 3: the ONE lock predicate, reused — the
+	## kind's own path_editing_locked (true iff the station-12 supersession
+	## marker is present), the SAME hook core's AnnotationTransformTool probes
+	## for its vertex-edit disarm, so every edit surface answers "may this
+	## path be hand-edited?" from one place. has_method-guarded (off-tree
+	## caution idiom) so a registry serving an older kind degrades to
+	## "unlocked" — exactly the pre-verdict behavior.
+	func _path_locked(ann: Dictionary) -> bool:
+		var kind := _kind()
+		return kind != null and kind.has_method("path_editing_locked") \
+				and bool(kind.path_editing_locked(ann))
 
 	func _select_route_hint_at(doc_pos: Vector2) -> bool:
 		var registry := _host.get_registry()
@@ -825,7 +877,12 @@ class ViaInsertTool:
 		# (same rule as BendHandleEditTool; see its _multi_selected doc).
 		if not sel.is_empty() and not _multi_selected():
 			var ann := _find(sel)
-			if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint":
+			# Codex 1047 fix round, verdict 3: the via-insert gesture disarms
+			# on a path-locked (superseded) hint, same rule + same fallback as
+			# BendHandleEditTool's gestures — the click re-targets selection
+			# instead of arming an edit the supersession machinery owns.
+			if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint" \
+					and not _path_locked(ann):
 				var kp: Dictionary = ann.get("kind_payload", {})
 				var result: Dictionary = _Self.apply_via_at_point(kp, doc_pos.x, doc_pos.y, seg_r)
 				if bool(result.get("ok", false)):
@@ -841,11 +898,25 @@ class ViaInsertTool:
 
 	## Visible disarm (A8u1) — mirrors BendHandleEditTool.draw_preview. This tool
 	## had no preview before; it has one now solely to say why the click that
-	## normally inserts a via is not going to.
+	## normally inserts a via is not going to. Codex 1047 fix round, verdict 3
+	## added the second disarm reason: a path-locked (superseded) selection.
 	func draw_preview(ctx: AnnotationRenderContext) -> void:
-		if _host == null or not _multi_selected():
+		if _host == null:
 			return
-		_Self.draw_disarm_notice(ctx, "Via insert needs one hint — click one to edit")
+		if _multi_selected():
+			_Self.draw_disarm_notice(ctx, "Via insert needs one hint — click one to edit")
+			return
+		# Codex 1047 fix round, verdict 3: same visible-feedback seam as
+		# BendHandleEditTool — the gesture above is disarmed for this
+		# selection, and the notice says why (the full tool pointer lives in
+		# the host's structured refusal; the canvas keeps the human phrasing).
+		var sel := _host.get_selected_annotation_id()
+		if sel.is_empty():
+			return
+		var ann := _find(sel)
+		if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint" and _path_locked(ann):
+			_Self.draw_disarm_notice(ctx,
+				"Superseded route — via insert disarmed; convert to detailed to edit, or steer the route")
 
 	# ── internal ──────────────────────────────────────────────────────────────
 
@@ -866,6 +937,24 @@ class ViaInsertTool:
 		if _host != null and _host.has_method("get_annotation_zoom"):
 			return maxf(float(_host.get_annotation_zoom()), 0.01)
 		return 1.0
+
+	## See BendHandleEditTool._kind — same registry lookup, mirrored here
+	## because these tool classes deliberately share no base beyond
+	## AnnotationAuthorTool (Codex 1047 fix round, verdict 3).
+	func _kind() -> AnnotationKind:
+		if _host == null:
+			return null
+		var registry := _host.get_registry()
+		if registry == null:
+			return null
+		return registry.get_annotation_kind(StringName("pcb_route_hint"))
+
+	## See BendHandleEditTool._path_locked — same predicate, same reason
+	## (Codex 1047 fix round, verdict 3).
+	func _path_locked(ann: Dictionary) -> bool:
+		var kind := _kind()
+		return kind != null and kind.has_method("path_editing_locked") \
+				and bool(kind.path_editing_locked(ann))
 
 	func _select_route_hint_at(doc_pos: Vector2) -> bool:
 		var registry := _host.get_registry()
@@ -1033,6 +1122,25 @@ static func _toggle_layer(layer: String) -> String:
 # class with no implicit access to this outer script's members) reaches them
 # through _host.get_registry().get_annotation_kind(&"pcb_route_hint").
 
+## Manipulation profile (universal select, docket 019fd09b209e): a route hint
+## is a POLYLINE, not a box — scaling or rotating it is geometrically
+## meaningless (there is no "corner" a waypoint chain has), so declaring
+## "path" here tells AnnotationTransformTool to offer this kind's corners
+## (bend_points/with_bend_points/nearest_bend_insertion, right above/below)
+## through the SAME universal-select gizmo every other annotation uses,
+## instead of the TRS scale/rotate handles. Per-kind contract: manipulation
+## follows GEOMETRY class, not authorship or workflow-class. Translate (body
+## drag) is unaffected — sliding the whole hint is still meaningful and stays
+## on.
+##
+## The modal "Edit hint" toolbar tool (BendHandleEditTool, above) is NOT
+## replaced by this — it remains for bend editing under its own
+## hint-only selection semantics (selecting via that tool narrows selection to
+## pcb_route_hint annotations only, which universal select does not do).
+func manipulation_profile() -> String:
+	return "path"
+
+
 ## Interior bend points, in document (board-mm) space.
 func bend_points(annotation: Dictionary) -> Array:
 	var payload: Dictionary = annotation.get("kind_payload", {})
@@ -1105,11 +1213,25 @@ func nearest_bend_insertion(annotation: Dictionary, doc_pos: Vector2, threshold:
 			best_seg = i
 	if best_seg < 0 or best_dist > threshold:
 		return {}
-	# full[0] is the anchor (not a bend); full[k] for k in 1..size-2 are
-	# bends (== bend_points()[k-1]); full[-1] is the destination. Segment i
-	# spans full[i]..full[i+1], so inserting there means "insert_at = i" in
-	# bend_points()'s array (0-based, since bend_points()[0] == full[1]).
-	return {"point": best_point, "insert_at": best_seg}
+	# Map the polyline segment index into bend_points()-array space by COUNTING,
+	# not by assuming full == [anchor, bends…, dest] (boundary run
+	# first-execution fix): in the LEGACY full-path convention `waypoints`
+	# already carries the anchor as its first element AND _waypoint_points()
+	# prepends _anchor_position() unconditionally, so `full` is
+	# [anchor, anchor, bends…, dest] there — two leading non-bend points, not
+	# one — and the old "insert_at = i" mapping was off by one (an insert on the
+	# last segment produced an out-of-range index and the edit was lost). The
+	# bends always sit as one contiguous run ending one before the destination
+	# (both storage conventions — see bend_points()/with_bend_points()), so the
+	# number of leading non-bend points is size-derived:
+	#   lead = full.size() - bend_count - 1 (the trailing destination).
+	# Segment i spans full[i]..full[i+1]; a point inserted there goes before
+	# full[i+1], i.e. bend index (i + 1) - lead, clamped to the valid 0..count
+	# insertion range for the anchor-side segments that sit before any bend.
+	var bend_count := bend_points(annotation).size()
+	var lead := full.size() - bend_count - 1
+	return {"point": best_point,
+		"insert_at": clampi(best_seg + 1 - lead, 0, bend_count)}
 
 
 static func _project_on_segment(a: Vector2, b: Vector2, p: Vector2) -> Vector2:
@@ -1168,11 +1290,262 @@ func validate(annotation: Dictionary) -> Array:
 	return errors
 
 
+# ── Render-taxonomy gate (Epoch UX1 station 7, docket 019fcb32b5 / epoch
+# 019fd0ac09ea) ────────────────────────────────────────────────────────────────
+#
+# Owner ruling: a route hint whose task ALREADY has a live candidate, drawn as
+# a full polyline, reads as a SECOND, competing route sitting right next to the
+# candidate's own corridor on canvas — the intent is answered, so the hint's
+# job from here is just to say "this is what that candidate is for", which
+# endpoint markers + its label do without the visual collision. A consumed
+# hint (lifecycle "applied" — a candidate built from it has already been
+# committed to copper) gets the same intent-only treatment, additionally
+# dimmed: it is no longer live authoring input, only a historical record of
+# what was asked for. Selecting a hint always wins back the full corridor —
+# editing (bend-drag, via-insert) needs the whole path on screen regardless of
+# candidate/lifecycle state.
+
+## Pure decision: which render mode `annotation` gets, given `host` (duck-typed,
+## may be null/incomplete — see _has_live_candidate below). Returns one of
+## "full" | "markers" | "markers_dimmed" | "superseded". Consumed directly by
+## render(); kept side-effect-free and host-optional so it is testable in
+## isolation.
+##
+## Priority order (first match wins):
+##  -1. kind_payload.waypoints_superseded_by_constraint_revision  -> "superseded"
+##   0. host == null (headless / no host at all)                  -> "full"
+##   1. selected — ANY selection-set membership, not just primary -> "full"
+##   2. lifecycle == "applied" (consumed)                         -> "markers_dimmed"
+##   3. a live candidate's source_hint_ids names this hint        -> "markers"
+##   4. otherwise — the hint is the route's sole representation   -> "full"
+##
+## Step -1 (Codex 1047 fix round, verdict 1) outranks EVERYTHING below,
+## selection included, and deliberately sits ABOVE even the host-null degrade:
+## the station-12 supersession marker means the hint's waypoints are INERT —
+## routing authority moved to a task-level routing constraint, and the host
+## REFUSES edits to those waypoints (PcbAnnotationHost's marker guard). Letting
+## selection win "full" here (the pre-fix behavior) rendered the corridor at
+## full authority and exposed vertex edit handles for geometry the host will
+## refuse to write — an affordance that is a lie. The check is a pure
+## kind_payload read needing no host at all, which is why it may sit above the
+## step-0 reachability degrade without breaking that rule's promise: step 0
+## exists so a headless render is byte-identical to PRE-station-7 rendering,
+## and no pre-station-7 hint carries the (station-12) marker — a stamped hint
+## has no "old behavior" to preserve. The marker vanishing (guided→detailed
+## conversion strips it) restores the ordinary ladder purely from payload
+## state — nothing here is cached.
+##
+## Step 0 (cold review F4) sits ABOVE the "applied" check on purpose: with it
+## below, a headless render (ctx.host == null) of an APPLIED hint fell into
+## step 2 anyway and answered "markers_dimmed" — a behavior change from
+## pre-station rendering that a caller with no host at all never asked for.
+## Checking reachability first is what makes rule 5 (host-null renders
+## EXACTLY as before this station) actually true rather than just documented.
+##
+## Degrade rule: any missing hop in step 3's host→panel→workspace duck-typed
+## walk (see _has_live_candidate) reads as "no live candidate", which falls
+## through to step 4 — "full". A host predating get_panel()/get_routing_workspace()
+## therefore renders EXACTLY as before this station too, never errors.
+func _render_mode_for(annotation: Dictionary, host) -> String:
+	if _is_superseded(annotation):
+		return "superseded"
+	var ann_id := str(annotation.get("id", ""))
+	if host == null:
+		return "full"
+	if not ann_id.is_empty() and _is_selected(ann_id, host):
+		return "full"
+	if str(annotation.get("lifecycle", "open")) == "applied":
+		return "markers_dimmed"
+	if _has_live_candidate(ann_id, host):
+		return "markers"
+	return "full"
+
+
+## True iff this hint carries the station-12 legacy-migration supersession
+## marker: kind_payload.waypoints_superseded_by_constraint_revision, an int
+## >= 1 naming the routing-constraint revision that now owns this route.
+## Numeric-but-float is accepted (a payload that crossed a JSON boundary
+## carries floats); 0 / negative / non-numeric values are NOT a marker —
+## the stamp contract (panel_tools' migration writer) is int >= 1, and a
+## malformed value must degrade to ordinary (unlocked) behavior rather than
+## silently freezing a hint nobody actually stamped.
+## (Codex 1047 fix round, verdict 1.)
+static func _is_superseded(annotation: Dictionary) -> bool:
+	var kp: Variant = annotation.get("kind_payload", {})
+	if not (kp is Dictionary):
+		return false
+	var rev: Variant = (kp as Dictionary).get("waypoints_superseded_by_constraint_revision", null)
+	if rev is int or rev is float:
+		return int(rev) >= 1
+	return false
+
+
+## Duck-typed lock hook for core's AnnotationTransformTool (Codex 1047 fix
+## round, verdict 1): true iff this annotation's path geometry must NOT be
+## offered vertex-edit affordances (no BEND zone, no bend claims, no bend
+## insert/delete). The transform tool probes this via has_method — a kind
+## without the method is unlocked, so every other path kind keeps its default
+## behavior. True exactly when the station-12 supersession marker is present:
+## the host refuses waypoint writes on such a hint, so handles would promise
+## an edit that can never land. Pure payload read — no cached state, so
+## stripping the marker (guided→detailed conversion) unlocks immediately.
+func path_editing_locked(annotation: Dictionary) -> bool:
+	return _is_superseded(annotation)
+
+
+## True iff `ann_id` is a member of the CURRENT selection (F3, cold review):
+## a hint caught up in a multi-selection is still something the user is
+## actively working with and needs its full corridor, not just markers — not
+## just when it happens to be the lone/primary selection. Duck-typed against
+## get_selected_annotation_ids() (the multi-select seam), with a fallback to
+## primary-only get_selected_annotation_id() for a host predating it — the
+## SAME fallback convention BendHandleEditTool._multi_selected uses above.
+func _is_selected(ann_id: String, host) -> bool:
+	if host.has_method("get_selected_annotation_ids"):
+		var ids: Variant = host.get_selected_annotation_ids()
+		if ids is Array or ids is PackedStringArray:
+			for id in ids:
+				if str(id) == ann_id:
+					return true
+		return false
+	if host.has_method("get_selected_annotation_id"):
+		return str(host.get_selected_annotation_id()) == ann_id
+	return false
+
+
+## True iff some candidate in the routing workspace's LIVE set (proposed/
+## pinned — anything not superseded/rejected/committed) names `hint_id` in its
+## source_hint_ids, i.e. this hint's routing intent is already answered by an
+## on-canvas candidate corridor.
+##
+## Duck-typed host → panel → workspace, the SAME seam panel_tools.gd's
+## _get_workspace(host) uses (host.get_panel() to reach the live PCBPanel).
+## Off-tree rule: no class_name, so every hop is has_method-guarded — a host,
+## panel, or workspace that predates the routing workspace (or a test double
+## missing one of these methods) degrades to false rather than erroring.
+func _has_live_candidate(hint_id: String, host) -> bool:
+	if hint_id.is_empty() or host == null or not host.has_method("get_panel"):
+		return false
+	var panel = host.get_panel()
+	if panel == null or not is_instance_valid(panel) or not panel.has_method("get_routing_workspace"):
+		return false
+	var workspace = panel.get_routing_workspace()
+	if workspace == null or not workspace.has_method("live_candidate_ids") \
+			or not workspace.has_method("get_candidate"):
+		return false
+	for cid in workspace.live_candidate_ids():
+		var c = workspace.get_candidate(str(cid))
+		if c == null:
+			continue
+		# F6 (cold review): a candidate object that doesn't carry
+		# source_hint_ids at all is a degrade case, not a hard error — the
+		# ONE hop in this walk that reads a member off `c` directly instead
+		# of duck-typing through has_method first.
+		if not ("source_hint_ids" in c):
+			continue
+		for hid in c.source_hint_ids:
+			if str(hid) == hint_id:
+				return true
+	return false
+
+
+## Diamond marker at `pos`, `radius` px, solid `color`. Factored out of render()
+## so the full-polyline path and the intent-render (markers-only) path draw
+## byte-identical ink from one call site each.
+func _draw_endpoint_marker(ctx: AnnotationRenderContext, pos: Vector2, radius: float, color: Color) -> void:
+	var diamond := PackedVector2Array([
+		pos + Vector2(0, -radius), pos + Vector2(radius, 0),
+		pos + Vector2(0, radius), pos + Vector2(-radius, 0),
+	])
+	var cols := PackedColorArray([color, color, color, color])
+	ctx.draw_polygon(diamond, cols)
+
+
+## Gray strike-through across an endpoint marker — the geometry-level
+## "superseded" cue (Codex 1047 fix round, verdict 1; see
+## _COLOR_SUPERSEDED_CUE's doc for why a slash and why gray). Drawn slightly
+## wider than the diamond (1.4 × radius) so it visibly crosses OUT the marker
+## rather than blending into its fill.
+func _draw_superseded_slash(ctx: AnnotationRenderContext, pos: Vector2, radius: float) -> void:
+	var r := radius * 1.4
+	ctx.draw_line(pos + Vector2(-r, r), pos + Vector2(r, -r), _COLOR_SUPERSEDED_CUE, 1.5)
+
+
+## The endpoint marker points drawn in "markers"/"markers_dimmed" mode: the
+## anchor, plus the hint's other known endpoint (see _far_endpoint), when it
+## has one. Single source of truth for render()'s intent-render branch AND
+## _visible_ink_hit/pcb_canvas.gd's F1 claim gate, so all three agree on
+## exactly what ink is on screen.
+func _marker_points(annotation: Dictionary) -> Array:
+	var pts: Array = [_anchor_position(annotation)]
+	var far: Variant = _far_endpoint(annotation)
+	if far != null:
+		pts.append(far)
+	return pts
+
+
+## The hint's far/dest endpoint for marker purposes, independent of
+## _waypoint_points()'s render-oriented fallback chain. H1 (cold review): a
+## LEGACY segments-bearing hint (kind_payload.segments, no dest_point, no
+## interior waypoints) has nothing past the anchor for _waypoint_points() to
+## return, so fall back to the last segment's `end` — the same far point the
+## per-segment render path already draws. null when nothing names one.
+func _far_endpoint(annotation: Dictionary) -> Variant:
+	var wp_pts := _waypoint_points(annotation)
+	if wp_pts.size() >= 2:
+		return wp_pts[wp_pts.size() - 1]
+	var segments_raw: Variant = annotation.get("kind_payload", {}).get("segments", [])
+	if segments_raw is Array and not (segments_raw as Array).is_empty():
+		var last_seg: Variant = (segments_raw as Array).back()
+		if last_seg is Dictionary and (last_seg as Dictionary).has("end"):
+			return _to_vec2((last_seg as Dictionary)["end"])
+	return null
+
+
+## Visible-ink hit-test for the "markers"/"markers_dimmed" render modes (F1,
+## cold review station 7 fix round): true iff `point` (document space) lands
+## within `threshold` of the anchor/far-end marker disc, or inside the
+## label's drawn rect — the ONLY ink those modes actually put on screen (see
+## render()'s intent-render branch). `zoom` reproduces render()'s own
+## px-floor marker radius so this matches what is actually drawn at the
+## current view, not a document-space-only approximation.
+##
+## Distinct from hit_test() (which sweeps the WHOLE corridor regardless of
+## render mode, by design — see hit_test()'s own doc comment): this is the
+## narrower probe pcb_canvas.gd's _claim_annotation_press / _sweep_annotations
+## F1 gates use so a press or marquee that misses the visible ink can fall
+## through to whatever candidate or board entity is actually drawn under it,
+## instead of being swallowed by the hint's now-invisible corridor.
+func _visible_ink_hit(annotation: Dictionary, point: Vector2, threshold: float, zoom: float) -> bool:
+	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(zoom, 0.001))
+	var effective := threshold + d
+	for p in _marker_points(annotation):
+		if (p as Vector2).distance_to(point) <= effective:
+			return true
+	if not labels_visible:
+		return false
+	var font: Font = ThemeDB.fallback_font
+	if font == null:
+		return false
+	var pos := _anchor_position(annotation)
+	var size := font.get_string_size(summary(annotation), HORIZONTAL_ALIGNMENT_LEFT, -1, _LABEL_FONT_SIZE)
+	var label_pos := pos + Vector2(d + 3.0, 4.0)
+	var rect := Rect2(label_pos - Vector2(0.0, size.y), size).grow(threshold)
+	return rect.has_point(point)
+
+
 # ── Required rendering hooks ──────────────────────────────────────────────────
 
 ## Waypoint polyline with a layer-tinted, width/zoom-aware stroke + a diamond
 ## marker at the anchor + a text label. Coordinates are document-space (board mm);
 ## the substrate AnnotationOverlay applies the host transform before calling us.
+##
+## Render-taxonomy gate (see block above): when _render_mode_for resolves to
+## "markers"/"markers_dimmed" the polyline (and its via markers, which only
+## make sense alongside the polyline) is withheld — a live candidate is
+## already drawing that corridor — and this draws ENDPOINT MARKERS + the label
+## only. "full" (still the ONLY path when ctx.host is null/incomplete) is
+## byte-identical to pre-station-7 rendering.
 func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	if ctx == null:
 		return
@@ -1192,6 +1565,8 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	var author: Variant = annotation.get("author", null)
 	var is_ai: bool = author is Dictionary and str((author as Dictionary).get("kind", "human")) == "ai"
 
+	var mode := _render_mode_for(annotation, ctx.host)
+
 	# Stroke width: width_mm scaled by zoom (pixels-per-mm), floored to 1px so a
 	# hair-thin hint stays visible when zoomed out.
 	var width_mm := float(payload.get("width_mm", 0.0))
@@ -1199,76 +1574,113 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	if width_mm > 0.0:
 		stroke_px = maxf(1.0, width_mm * ctx.zoom)
 
-	# Waypoint polyline. Lossless proposals (U2, DCR 019f7095c395 Stage-1) carry
-	# kind_payload.segments — the route's EXACT per-segment geometry, each with
-	# its own real layer — so a reviewer SEES a layer change before accepting
-	# instead of the flattened `waypoints` polyline hiding it as one continuous
-	# joint. Draw those per-segment (each in ITS layer's color) when present;
-	# fall back to the single-color flattened polyline for hints/legacy
-	# proposals that only carry `waypoints`. AI strokes stay dashed either way.
-	#
-	# ── INV-4 FENCE (campaign 2 epoch C, unit 3 — GATE 019f70f76c2f) ───────────
-	# THE WAYPOINT FALLBACK BELOW SERVES ROUTE HINTS. IT MUST NEVER SERVE A ROUTE
-	# CANDIDATE.
-	#
-	# The two things are different objects with different contracts:
-	#   * A route HINT is a human's authored INSTRUCTION to the router — "go
-	#     roughly this way". Its `waypoints` are a single flattened polyline on
-	#     ONE named layer, and that is the whole truth about it. Flattening loses
-	#     nothing, because there was never per-segment layer information to lose.
-	#   * A route CANDIDATE is the router's ANSWER. Its truth is
-	#     RouteCandidate.segments — independent entities, EACH with its own layer,
-	#     width, id and ordered points, plus explicit vias where copper changes
-	#     side. Flattening it into one polyline destroys exactly the information a
-	#     reviewer needs before accepting: which side of the board the copper
-	#     lands on, and where it changes.
-	#
-	# Candidates are therefore rendered, hit-tested and bounded by
-	# pcb_canvas.gd's own exact-geometry path (candidate_draw_items /
-	# _candidate_at / _entity_anchor), which reads segments and vias and contains
-	# no waypoint read at all. This kind is not on that path.
-	#
-	# THE GUARD IS FAIL-CLOSED, not advisory: a payload that identifies itself as
-	# candidate-sourced and yet carries no `segments` is a CONTRACT VIOLATION (a
-	# candidate always has exact geometry — it is constructed from it), so the
-	# polyline is REFUSED with a named warning rather than silently drawn as a
-	# flattened lie. The marker and label still draw, so the annotation does not
-	# vanish; what is withheld is the misleading stroke.
-	var segments_raw: Variant = payload.get("segments", [])
-	var per_segment: Array = (segments_raw as Array) if segments_raw is Array else []
-	if not per_segment.is_empty():
-		_draw_per_segment_polyline(ctx, per_segment, stroke_px, is_ai)
-	elif _is_candidate_sourced(payload):
-		push_warning("[pcb_route_hint] INV-4: refusing to render a candidate-sourced payload (%s) through the waypoint path — route candidates render from exact segments on the canvas, never from flattened waypoints" \
-			% _candidate_marker_of(payload))
-	else:
-		var pts := _waypoint_points(annotation)
-		if pts.size() >= 2:
-			if is_ai:
-				_draw_dashed_polyline(ctx, pts, stroke_color, stroke_px)
-			else:
-				ctx.draw_polyline(pts, stroke_color, stroke_px)
-
-	# Via markers (U2): a small amber ring at each via position so a layer
-	# change reads as an explicit, deliberate via — not a silent joint —
-	# before the human accepts the proposal.
-	var vias_raw: Variant = payload.get("vias", [])
-	var via_list: Array = (vias_raw as Array) if vias_raw is Array else []
-	for v in via_list:
-		_draw_via_marker(ctx, _to_vec2(v))
-
-	# Diamond marker at the anchor (AI keeps the substrate cyan so authorship
-	# stays one-glance even though strokes are now layer-tinted).
-	if is_ai:
-		pass  # marker color set below
-	var marker_color := AnnotationRenderContext.author_color("ai") if is_ai else stroke_color
 	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(ctx.zoom, 0.001))
-	var diamond := PackedVector2Array([
-		pos + Vector2(0, -d), pos + Vector2(d, 0),
-		pos + Vector2(0, d), pos + Vector2(-d, 0),
-	])
-	var cols := PackedColorArray([marker_color, marker_color, marker_color, marker_color])
-	ctx.draw_polygon(diamond, cols)
+	var marker_color := AnnotationRenderContext.author_color("ai") if is_ai else stroke_color
+	# "superseded" (Codex 1047 fix round, verdict 1) shares the consumed-hint
+	# marker dimming — both are "no longer live authoring input" states; what
+	# distinguishes superseded is its own branch below (dimmed corridor + slash).
+	if mode == "markers_dimmed" or mode == "superseded":
+		marker_color = Color(marker_color.r, marker_color.g, marker_color.b, marker_color.a * 0.5)
+
+	if mode == "full":
+		# Waypoint polyline. Lossless proposals (U2, DCR 019f7095c395 Stage-1) carry
+		# kind_payload.segments — the route's EXACT per-segment geometry, each with
+		# its own real layer — so a reviewer SEES a layer change before accepting
+		# instead of the flattened `waypoints` polyline hiding it as one continuous
+		# joint. Draw those per-segment (each in ITS layer's color) when present;
+		# fall back to the single-color flattened polyline for hints/legacy
+		# proposals that only carry `waypoints`. AI strokes stay dashed either way.
+		#
+		# ── INV-4 FENCE (campaign 2 epoch C, unit 3 — GATE 019f70f76c2f) ───────────
+		# THE WAYPOINT FALLBACK BELOW SERVES ROUTE HINTS. IT MUST NEVER SERVE A ROUTE
+		# CANDIDATE.
+		#
+		# The two things are different objects with different contracts:
+		#   * A route HINT is a human's authored INSTRUCTION to the router — "go
+		#     roughly this way". Its `waypoints` are a single flattened polyline on
+		#     ONE named layer, and that is the whole truth about it. Flattening loses
+		#     nothing, because there was never per-segment layer information to lose.
+		#   * A route CANDIDATE is the router's ANSWER. Its truth is
+		#     RouteCandidate.segments — independent entities, EACH with its own layer,
+		#     width, id and ordered points, plus explicit vias where copper changes
+		#     side. Flattening it into one polyline destroys exactly the information a
+		#     reviewer needs before accepting: which side of the board the copper
+		#     lands on, and where it changes.
+		#
+		# Candidates are therefore rendered, hit-tested and bounded by
+		# pcb_canvas.gd's own exact-geometry path (candidate_draw_items /
+		# _candidate_at / _entity_anchor), which reads segments and vias and contains
+		# no waypoint read at all. This kind is not on that path.
+		#
+		# THE GUARD IS FAIL-CLOSED, not advisory: a payload that identifies itself as
+		# candidate-sourced and yet carries no `segments` is a CONTRACT VIOLATION (a
+		# candidate always has exact geometry — it is constructed from it), so the
+		# polyline is REFUSED with a named warning rather than silently drawn as a
+		# flattened lie. The marker and label still draw, so the annotation does not
+		# vanish; what is withheld is the misleading stroke.
+		var segments_raw: Variant = payload.get("segments", [])
+		var per_segment: Array = (segments_raw as Array) if segments_raw is Array else []
+		if not per_segment.is_empty():
+			_draw_per_segment_polyline(ctx, per_segment, stroke_px, is_ai)
+		elif _is_candidate_sourced(payload):
+			push_warning("[pcb_route_hint] INV-4: refusing to render a candidate-sourced payload (%s) through the waypoint path — route candidates render from exact segments on the canvas, never from flattened waypoints" \
+				% _candidate_marker_of(payload))
+		else:
+			var pts := _waypoint_points(annotation)
+			if pts.size() >= 2:
+				if is_ai:
+					_draw_dashed_polyline(ctx, pts, stroke_color, stroke_px)
+				else:
+					ctx.draw_polyline(pts, stroke_color, stroke_px)
+
+		# Via markers (U2): a small amber ring at each via position so a layer
+		# change reads as an explicit, deliberate via — not a silent joint —
+		# before the human accepts the proposal.
+		var vias_raw: Variant = payload.get("vias", [])
+		var via_list: Array = (vias_raw as Array) if vias_raw is Array else []
+		for v in via_list:
+			_draw_via_marker(ctx, _to_vec2(v))
+
+		# Diamond marker at the anchor (AI keeps the substrate cyan so authorship
+		# stays one-glance even though strokes are now layer-tinted).
+		_draw_endpoint_marker(ctx, pos, d, marker_color)
+	elif mode == "superseded":
+		# Superseded render (Codex 1047 fix round, verdict 1): the station-12
+		# marker says these waypoints are INERT — authority moved to a
+		# task-level routing constraint, and the host refuses edits to them.
+		# The ruling: never full-authority rendering, even selected — but a
+		# user who selects a stamped hint must still see what they selected.
+		# So: the legacy corridor as a heavily DIMMED solid polyline (visible
+		# history, never a competitor to the constraint-owned live geometry),
+		# dimmed endpoint markers, and a gray slash struck through each marker
+		# as the unambiguous "superseded, not merely dimmed" cue (see
+		# _COLOR_SUPERSEDED_CUE — the cue must survive labels being off). No
+		# via markers: vias only make sense alongside a live-authority stroke.
+		# Stamped hints are legacy WAYPOINT hints by construction (station 12
+		# only stamps those), so the flattened _waypoint_points polyline is
+		# the correct — and only — corridor geometry they carry.
+		var ghost_pts := _waypoint_points(annotation)
+		if ghost_pts.size() >= 2:
+			var ghost := Color(stroke_color.r, stroke_color.g, stroke_color.b,
+				stroke_color.a * _SUPERSEDED_STROKE_DIM)
+			ctx.draw_polyline(ghost_pts, ghost, stroke_px)
+		_draw_endpoint_marker(ctx, pos, d, marker_color)
+		_draw_superseded_slash(ctx, pos, d)
+		var far_end: Variant = _far_endpoint(annotation)
+		if far_end != null:
+			_draw_endpoint_marker(ctx, far_end, d, marker_color)
+			_draw_superseded_slash(ctx, far_end, d)
+	else:
+		# Intent render (markers/markers_dimmed): no polyline, no via markers — a
+		# live candidate (or the committed copper an "applied" hint already
+		# produced) already owns that ink. Mark BOTH ends so a withheld polyline
+		# doesn't read as a headless pin: the anchor, plus the hint's other known
+		# endpoint (H1: dest_point / last waypoint / a legacy segments-bearing
+		# hint's own far end — see _far_endpoint), when it has one.
+		_draw_endpoint_marker(ctx, pos, d, marker_color)
+		var far: Variant = _far_endpoint(annotation)
+		if far != null:
+			_draw_endpoint_marker(ctx, far, d, marker_color)
 
 	# Label: the enriched summary — gated by the view flag (canvas
 	# show_hint_labels → host relay → this instance property).
@@ -1276,7 +1688,16 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 		return
 	var font: Font = ThemeDB.fallback_font
 	if font != null:
-		ctx.draw_string(font, pos + Vector2(d + 3.0, 4.0), summary(annotation), _LABEL_COLOR, _LABEL_FONT_SIZE)
+		var label_color := _LABEL_COLOR
+		if mode == "markers_dimmed" or mode == "superseded":
+			label_color = Color(label_color.r, label_color.g, label_color.b, label_color.a * 0.5)
+		var label_text := summary(annotation)
+		if mode == "superseded":
+			# Text-level half of the superseded cue (Codex 1047 fix round,
+			# verdict 1) — the slash on the markers is the half that survives
+			# labels being toggled off.
+			label_text = "superseded · %s" % label_text
+		ctx.draw_string(font, pos + Vector2(d + 3.0, 4.0), label_text, label_color, _LABEL_FONT_SIZE)
 
 
 ## Path-based hit-test: distance to any polyline segment (not the AABB), plus the

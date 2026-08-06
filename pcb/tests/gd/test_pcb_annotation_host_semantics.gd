@@ -72,6 +72,10 @@ func _init() -> void:
 	_test_author_tool_multiclick()
 	_test_capabilities()
 	_test_build_route_hint_envelope_width_mm_absent_by_default()
+	_test_render_mode_gate()
+	_test_render_mode_superseded()
+	_test_superseded_refusal_and_release()
+	_test_reconcile_strip_bookkeeping()
 
 	_finish()
 
@@ -678,6 +682,539 @@ func _test_build_route_hint_envelope_width_mm_absent_by_default() -> void:
 	var kp_zero: Dictionary = env_zero.get("kind_payload", {})
 	check("an explicit 0.0 width_mm is still a present key (not treated as null)",
 			kp_zero.has("width_mm") and float(kp_zero["width_mm"]) == 0.0, str(kp_zero))
+
+
+# ── 18. render-taxonomy gate (Epoch UX1 station 7, docket 019fcb32b5) ─────────
+#
+# Pure-function test of kind._render_mode_for / kind._has_live_candidate — no
+# real PCBPanel/canvas mount needed (the gate reads its inputs entirely through
+# a duck-typed host → panel → workspace walk). Fakes below implement ONLY the
+# methods the gate's has_method guards look for, per hop, so each "degrade"
+# assertion below is exercising a specific missing hop, not a stand-in for
+# every method a real host/panel/workspace exposes.
+
+## Minimal live-candidate stand-in: the ONE field _has_live_candidate reads.
+class FakeCandidate extends RefCounted:
+	var source_hint_ids: Array = []
+
+
+## F6 (cold review): a candidate object that does NOT carry source_hint_ids at
+## all — proves _has_live_candidate's `"source_hint_ids" in c` guard degrades
+## instead of hard-erroring on the one hop that reads a member off `c`
+## directly.
+class FakeCandidateNoSourceHintIds extends RefCounted:
+	pass
+
+
+## Minimal routing-workspace stand-in: live_candidate_ids() + get_candidate(id),
+## the two methods _has_live_candidate duck-types against.
+class FakeWorkspace extends RefCounted:
+	var _live_ids: Array = []
+	var _candidates: Dictionary = {}
+
+	func add_live_candidate(id: String, hint_ids: Array) -> void:
+		var c := FakeCandidate.new()
+		c.source_hint_ids = hint_ids
+		_candidates[id] = c
+		_live_ids.append(id)
+
+	## A live_candidate_ids() entry that resolves to NOTHING (get_candidate
+	## returns null) — proves the `if c == null: continue` degrade branch in
+	## the walk, rather than just never exercising it.
+	func add_live_id_without_candidate(id: String) -> void:
+		_live_ids.append(id)
+
+	## Registers an arbitrary object as a live candidate — used by the F6 test
+	## to put a FakeCandidateNoSourceHintIds into the walk without going
+	## through add_live_candidate's own source_hint_ids-bearing shape.
+	func add_live_object(id: String, obj) -> void:
+		_candidates[id] = obj
+		_live_ids.append(id)
+
+	func live_candidate_ids() -> Array:
+		return _live_ids
+
+	func get_candidate(id: String):
+		return _candidates.get(id, null)
+
+
+## Minimal panel stand-in: get_routing_workspace(), the method
+## _has_live_candidate calls after host.get_panel().
+class FakePanel extends RefCounted:
+	var workspace = null
+	func get_routing_workspace():
+		return workspace
+
+
+## Panel stand-in that deliberately OMITS get_routing_workspace() — proves the
+## panel-hop degrade branch (host.get_panel() succeeds, but the panel itself
+## predates the routing workspace).
+class FakePanelNoWorkspaceMethod extends RefCounted:
+	pass
+
+
+## Full host stand-in: get_selected_annotation_id() + get_panel(), the two
+## methods _render_mode_for/_has_live_candidate duck-type against.
+class FakeGateHost extends RefCounted:
+	var selected_id: String = ""
+	var panel = null
+	func get_selected_annotation_id() -> String:
+		return selected_id
+	func get_panel():
+		return panel
+
+
+## Host stand-in that deliberately OMITS get_panel() — proves the host-hop
+## degrade branch (a host predating the routing-workspace seam entirely).
+class FakeHostNoPanelMethod extends RefCounted:
+	var selected_id: String = ""
+	func get_selected_annotation_id() -> String:
+		return selected_id
+
+
+## F3 (cold review): a host with a MULTI-selection set —
+## get_selected_annotation_ids() — plus get_panel(), so _is_selected's plural
+## branch can be exercised independently of, and together with, the
+## _has_live_candidate walk (a multi-selected hint with a live candidate must
+## still render "full").
+class FakeMultiSelectHost extends RefCounted:
+	var selected_ids: PackedStringArray = PackedStringArray()
+	var panel = null
+	func get_selected_annotation_ids() -> PackedStringArray:
+		return selected_ids
+	func get_panel():
+		return panel
+
+
+func _test_render_mode_gate() -> void:
+	print("\n-- kind._render_mode_for: render-taxonomy gate (station 7) --")
+	var kind = _Kind.new()
+
+	var hint_id := "hint_1"
+	var ann := {
+		"id": hint_id,
+		"lifecycle": "open",
+		"anchor": {"plugin": "pcb", "type": "board.point", "id": {"x": 0.0, "y": 0.0},
+				"snapshot": {"position": [0.0, 0.0]}},
+		"kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+				"waypoints": [[0.0, 0.0], [10.0, 0.0]]},
+	}
+
+	# Workspace unreachable (no host at all) → full (degrade — today's behavior).
+	check("no host at all -> full (degrade)",
+			kind._render_mode_for(ann, null) == "full")
+
+	# F4: an APPLIED hint with no host at all must ALSO render "full", not
+	# "markers_dimmed" — the reachability degrade sits ABOVE the lifecycle
+	# check precisely so a headless render (ctx.host == null) of a consumed
+	# hint is byte-identical to pre-station-7 rendering, which never looked at
+	# lifecycle for the polyline at all.
+	var applied_no_host_ann := ann.duplicate(true)
+	applied_no_host_ann["lifecycle"] = "applied"
+	check("applied hint, no host at all -> full (F4, headless byte-identical)",
+			kind._render_mode_for(applied_no_host_ann, null) == "full")
+
+	var workspace := FakeWorkspace.new()
+	var panel := FakePanel.new()
+	panel.workspace = workspace
+	var host := FakeGateHost.new()
+	host.panel = panel
+
+	# No candidate answers this hint → full (it is the route's sole representation).
+	check("no live candidate -> full",
+			kind._render_mode_for(ann, host) == "full")
+
+	# A live candidate whose source_hint_ids names this hint → markers, no polyline.
+	workspace.add_live_candidate("cand_1", [hint_id])
+	check("hint with live candidate -> markers",
+			kind._render_mode_for(ann, host) == "markers")
+
+	# A live candidate that answers a DIFFERENT hint must not false-match.
+	var other_ann := ann.duplicate(true)
+	other_ann["id"] = "hint_2"
+	check("live candidate answering a different hint -> full",
+			kind._render_mode_for(other_ann, host) == "full")
+
+	# Selected always wins back the full corridor, even with a live candidate.
+	host.selected_id = hint_id
+	check("selected hint -> full even with a live candidate",
+			kind._render_mode_for(ann, host) == "full")
+	host.selected_id = ""
+
+	# Consumed (lifecycle "applied") -> markers_dimmed, independent of candidate state.
+	var applied_ann := ann.duplicate(true)
+	applied_ann["lifecycle"] = "applied"
+	check("consumed (applied) hint -> markers_dimmed",
+			kind._render_mode_for(applied_ann, host) == "markers_dimmed")
+
+	# Selected still wins over "applied" — editing always needs the full corridor.
+	host.selected_id = hint_id
+	check("selected + applied -> full (selection still wins)",
+			kind._render_mode_for(applied_ann, host) == "full")
+	host.selected_id = ""
+
+	# Degrade, hop by hop: workspace-unreachable must resolve "full" no matter
+	# WHICH hop is missing, not just a totally absent host.
+	var host_no_panel_method := FakeHostNoPanelMethod.new()
+	check("host lacking get_panel() -> full (degrade)",
+			kind._render_mode_for(ann, host_no_panel_method) == "full")
+
+	var host_null_panel := FakeGateHost.new()
+	host_null_panel.panel = null
+	check("get_panel() returns null -> full (degrade)",
+			kind._render_mode_for(ann, host_null_panel) == "full")
+
+	var panel_no_workspace_method := FakePanelNoWorkspaceMethod.new()
+	var host_bad_panel := FakeGateHost.new()
+	host_bad_panel.panel = panel_no_workspace_method
+	check("panel lacking get_routing_workspace() -> full (degrade)",
+			kind._render_mode_for(ann, host_bad_panel) == "full")
+
+	var panel_null_workspace := FakePanel.new()
+	panel_null_workspace.workspace = null
+	var host_null_workspace := FakeGateHost.new()
+	host_null_workspace.panel = panel_null_workspace
+	check("get_routing_workspace() returns null -> full (degrade)",
+			kind._render_mode_for(ann, host_null_workspace) == "full")
+
+	# F3: multi-selection membership must win the same way primary selection
+	# does — ANY member, not just the primary id. `panel` (still carrying the
+	# hint_id -> cand_1 live candidate from above) is reused so this proves
+	# selection beats "markers", not just beats the no-candidate default.
+	var multi_host := FakeMultiSelectHost.new()
+	multi_host.panel = panel
+	multi_host.selected_ids = PackedStringArray(["some_other_id", hint_id])
+	check("hint is a NON-primary member of a multi-selection -> full (F3)",
+			kind._render_mode_for(ann, multi_host) == "full")
+
+	multi_host.selected_ids = PackedStringArray(["some_other_id"])
+	check("multi-selection NOT containing this hint, live candidate present -> markers",
+			kind._render_mode_for(ann, multi_host) == "markers")
+
+	multi_host.selected_ids = PackedStringArray()
+	check("empty multi-selection, live candidate present -> markers",
+			kind._render_mode_for(ann, multi_host) == "markers")
+
+	# Degrade: a live_candidate_ids() entry that resolves to a null candidate
+	# (get_candidate returns null) must be skipped, not error, and must not
+	# false-match.
+	var ws_null_cand := FakeWorkspace.new()
+	ws_null_cand.add_live_id_without_candidate("ghost_cand")
+	var panel_null_cand := FakePanel.new()
+	panel_null_cand.workspace = ws_null_cand
+	var host_null_cand := FakeGateHost.new()
+	host_null_cand.panel = panel_null_cand
+	check("live candidate id resolving to null candidate -> degrades to full, no error",
+			kind._render_mode_for(ann, host_null_cand) == "full")
+
+	# F6: a candidate object that doesn't carry source_hint_ids at all must
+	# degrade (skip, no match) rather than hard-error reading the field.
+	var ws_no_field := FakeWorkspace.new()
+	ws_no_field.add_live_object("bad_cand", FakeCandidateNoSourceHintIds.new())
+	var panel_no_field := FakePanel.new()
+	panel_no_field.workspace = ws_no_field
+	var host_no_field := FakeGateHost.new()
+	host_no_field.panel = panel_no_field
+	check("candidate object missing source_hint_ids -> no error, no match (F6)",
+			kind._render_mode_for(ann, host_no_field) == "full")
+
+
+## Supersession marker in the render gate (Codex 1047 fix round, verdict 1).
+## Station 12 stamps kind_payload.waypoints_superseded_by_constraint_revision
+## (int >= 1) on legacy waypoint hints whose routing authority moved to a
+## task-level routing constraint — the host REFUSES edits to those waypoints.
+## The ruling: the marker must participate in the render gate and OUTRANK the
+## selected/full-corridor rule, else selection exposes handles for geometry the
+## host refuses to write. Same pure-function fixtures as _test_render_mode_gate
+## above; everything here is a kind_payload/host permutation of that group's
+## `ann`, so the two groups A/B directly.
+func _test_render_mode_superseded() -> void:
+	print("\n-- kind._render_mode_for: supersession outranks selection (Codex 1047 v1) --")
+	var kind = _Kind.new()
+
+	var hint_id := "hint_s"
+	var ann := {
+		"id": hint_id,
+		"lifecycle": "open",
+		"anchor": {"plugin": "pcb", "type": "board.point", "id": {"x": 0.0, "y": 0.0},
+				"snapshot": {"position": [0.0, 0.0]}},
+		"kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+				"waypoints": [[0.0, 0.0], [10.0, 0.0]],
+				"waypoints_superseded_by_constraint_revision": 1},
+	}
+
+	var workspace := FakeWorkspace.new()
+	workspace.add_live_candidate("cand_s", [hint_id])
+	var panel := FakePanel.new()
+	panel.workspace = workspace
+	var host := FakeGateHost.new()
+	host.panel = panel
+
+	# Unselected: the marker wins over BOTH the live-candidate rule and the
+	# sole-representation default — never "markers", never "full".
+	check("unselected superseded hint, live candidate present -> superseded (not markers)",
+			kind._render_mode_for(ann, host) == "superseded")
+	var host_no_candidate := FakeGateHost.new()
+	check("unselected superseded hint, no candidate -> superseded (not full)",
+			kind._render_mode_for(ann, host_no_candidate) == "superseded")
+
+	# THE RULING: selection must NOT win back "full" — the host refuses edits
+	# to these waypoints, so full-authority rendering (and the edit handles it
+	# implies) would be a lie.
+	host.selected_id = hint_id
+	check("SELECTED superseded hint -> superseded, NEVER full (the verdict-1 rule)",
+			kind._render_mode_for(ann, host) == "superseded")
+	host.selected_id = ""
+
+	# Marker outranks lifecycle too — "applied" must not demote it to the
+	# weaker markers_dimmed treatment (which lacks the superseded cue).
+	var applied := ann.duplicate(true)
+	applied["lifecycle"] = "applied"
+	check("superseded + applied lifecycle -> superseded (marker outranks)",
+			kind._render_mode_for(applied, host) == "superseded")
+
+	# Host-null: the marker is a pure payload read, so it applies headless
+	# too — no pre-station-7 hint ever carried this (station-12) marker, so
+	# there is no old headless behavior for step 0 to preserve here.
+	check("superseded hint with NO host at all -> superseded (pure payload read)",
+			kind._render_mode_for(ann, null) == "superseded")
+
+	# A float revision (a payload that crossed a JSON boundary) still counts.
+	var float_ann := ann.duplicate(true)
+	(float_ann["kind_payload"] as Dictionary)["waypoints_superseded_by_constraint_revision"] = 2.0
+	check("float marker (JSON round-trip) -> superseded",
+			kind._render_mode_for(float_ann, host) == "superseded")
+
+	# Contract edge: the stamp contract is int >= 1 — a 0 (or malformed) value
+	# is NOT a marker, and the ordinary ladder resumes.
+	var zero_ann := ann.duplicate(true)
+	(zero_ann["kind_payload"] as Dictionary)["waypoints_superseded_by_constraint_revision"] = 0
+	check("revision 0 is NOT a marker -> ordinary ladder (markers: live candidate)",
+			kind._render_mode_for(zero_ann, host) == "markers")
+
+	# ── The duck-typed transform-tool lock hook rides the same predicate ──────
+	check("path_editing_locked TRUE on a stamped hint",
+			bool(kind.path_editing_locked(ann)))
+	check("path_editing_locked FALSE on revision 0",
+			not bool(kind.path_editing_locked(zero_ann)))
+
+	# ── Scenario (b), statelessness: stripping the marker (guided→detailed
+	# conversion does exactly this) restores normal rendering AND unlock purely
+	# from kind_payload state — nothing may be cached anywhere.
+	var stripped := ann.duplicate(true)
+	(stripped["kind_payload"] as Dictionary).erase("waypoints_superseded_by_constraint_revision")
+	check("marker stripped: unselected + live candidate -> markers again",
+			kind._render_mode_for(stripped, host) == "markers")
+	host.selected_id = hint_id
+	check("marker stripped: selected -> full again (regression guard)",
+			kind._render_mode_for(stripped, host) == "full")
+	host.selected_id = ""
+	check("marker stripped: path_editing_locked FALSE again",
+			not bool(kind.path_editing_locked(stripped)))
+
+
+## Codex 1047 fix round, verdicts 3+4 — the host's structured refusal channel
+## and the sanctioned release seam:
+##   - last_update_refusal is {} on a fresh host, POPULATED (error
+##     "waypoints_superseded", the hint id, the stamped revision, and a note
+##     naming minerva_pcb_hint_convert_to_detailed) by a refused waypoints
+##     edit, and CLEARED again by the next successful unrelated edit — it
+##     always describes the MOST RECENT call or nothing.
+##   - release_superseded_waypoints strips the marker + verdict-5 lock keys
+##     WITHOUT the H2-1 re-injection putting them back, sets detail_level
+##     "detailed", and waypoint edits are accepted again afterwards.
+##   - UNDOABILITY DECISION PINNED: the release is ONE ordinary history step
+##     (revision stack grows by one; undo_hint_revision takes it back,
+##     restoring the marker via the snapshot — the documented annotation-side
+##     asymmetry on release_superseded_waypoints' own doc).
+func _test_superseded_refusal_and_release() -> void:
+	print("\n-- host.last_update_refusal + release_superseded_waypoints (Codex 1047 v3+v4) --")
+	var host = _Host.new()
+
+	var wp: Array = [[0.0, 0.0], [4.0, 0.0]]
+	var hint_id: String = str(host.add_route_hint_at(0.0, 0.0, "", "F.Cu", "waypoint", wp, "human"))
+	check("fixture: hint added", not hint_id.is_empty())
+	check("fixture: refusal channel starts empty", (host.last_update_refusal as Dictionary).is_empty())
+
+	# Stamp the marker + verdict-5 lock keys through the ordinary update seam
+	# (marker ADDITION is never refused — only waypoint CHANGES are), the same
+	# write shape panel_tools._stamp_waypoints_superseded produces.
+	var stamped: Dictionary = host.get_by_id(hint_id)
+	var stamped_kp: Dictionary = (stamped.get("kind_payload", {}) as Dictionary).duplicate(true)
+	stamped_kp["waypoints_superseded_by_constraint_revision"] = 3
+	stamped_kp["_locked_fields"] = ["waypoints", "detail_level"]
+	stamped_kp["_lock_reason"] = "superseded by task constraint revision 3"
+	stamped["kind_payload"] = stamped_kp
+	check("fixture: stamping update accepted", host.update_annotation(hint_id, stamped))
+	check("fixture: stamping update leaves the refusal channel empty",
+			(host.last_update_refusal as Dictionary).is_empty())
+
+	# ── refused waypoints edit → structured refusal ───────────────────────────
+	var edit: Dictionary = host.get_by_id(hint_id)
+	var edit_kp: Dictionary = (edit.get("kind_payload", {}) as Dictionary).duplicate(true)
+	edit_kp["waypoints"] = [[0.0, 0.0], [9.0, 9.0]]
+	edit["kind_payload"] = edit_kp
+	check("waypoints edit on the stamped hint returns false", not host.update_annotation(hint_id, edit))
+	var refusal: Dictionary = host.last_update_refusal
+	check("refusal channel is now POPULATED", not refusal.is_empty())
+	check("refusal.error == waypoints_superseded",
+			str(refusal.get("error", "")) == "waypoints_superseded")
+	check("refusal names the hint", str(refusal.get("hint_id", "")) == hint_id)
+	check("refusal carries the stamped constraint revision",
+			int(refusal.get("constraint_revision", -1)) == 3)
+	check("refusal note names minerva_pcb_hint_convert_to_detailed (the way forward)",
+			str(refusal.get("note", "")).contains("minerva_pcb_hint_convert_to_detailed"))
+
+	# ── successful unrelated edit → channel cleared ───────────────────────────
+	var note_edit: Dictionary = host.get_by_id(hint_id)
+	var note_kp: Dictionary = (note_edit.get("kind_payload", {}) as Dictionary).duplicate(true)
+	note_kp["text"] = "still annotatable"
+	note_edit["kind_payload"] = note_kp
+	check("non-waypoints edit on the SAME hint succeeds", host.update_annotation(hint_id, note_edit))
+	check("refusal channel cleared by the successful call",
+			(host.last_update_refusal as Dictionary).is_empty())
+
+	# ── lock keys are host-owned: an update dropping them gets them back ─────
+	var strip: Dictionary = host.get_by_id(hint_id)
+	var strip_kp: Dictionary = (strip.get("kind_payload", {}) as Dictionary).duplicate(true)
+	strip_kp.erase("_locked_fields")
+	strip_kp.erase("_lock_reason")
+	strip["kind_payload"] = strip_kp
+	check("lock-stripping update itself succeeds (marker kept, waypoints untouched)",
+			host.update_annotation(hint_id, strip))
+	var after_strip_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("_locked_fields re-injected (verdict 5 rides the marker's H2-1 seam)",
+			after_strip_kp.get("_locked_fields", null) is Array)
+	check("_lock_reason re-injected alongside",
+			not str(after_strip_kp.get("_lock_reason", "")).is_empty())
+
+	# ── the release: ONE sanctioned update, no re-injection ──────────────────
+	var stack_before: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	var released: Dictionary = host.release_superseded_waypoints(hint_id)
+	check("release_superseded_waypoints ok", bool(released.get("ok", false)))
+	var released_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("marker GONE from storage — not re-injected",
+			not released_kp.has("waypoints_superseded_by_constraint_revision"))
+	check("_locked_fields gone", not released_kp.has("_locked_fields"))
+	check("_lock_reason gone", not released_kp.has("_lock_reason"))
+	check("detail_level is now detailed", str(released_kp.get("detail_level", "")) == "detailed")
+
+	# ── waypoints are editable again ─────────────────────────────────────────
+	var free_edit: Dictionary = host.get_by_id(hint_id)
+	var free_kp: Dictionary = (free_edit.get("kind_payload", {}) as Dictionary).duplicate(true)
+	free_kp["waypoints"] = [[0.0, 0.0], [12.0, 12.0]]
+	free_edit["kind_payload"] = free_kp
+	check("waypoints edit ACCEPTED after the release", host.update_annotation(hint_id, free_edit))
+	check("refusal channel stays empty across the accepted edit",
+			(host.last_update_refusal as Dictionary).is_empty())
+
+	# ── undoability pinned: the release was ONE ordinary history step ────────
+	var stack_after: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	check("release pushed exactly one revision (undoable, by decision)",
+			stack_after == stack_before + 1 + 1)  # +release +the free edit above
+	# Two undos: take back the free edit, then the release itself — the marker
+	# returns via the snapshot (the documented annotation-side asymmetry).
+	check("undo #1 (the free edit) ok", bool(host.undo_hint_revision(hint_id).get("ok", false)))
+	check("undo #2 (the release) ok", bool(host.undo_hint_revision(hint_id).get("ok", false)))
+	var undone_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("undoing the release restores the marker (annotation-side only, as documented)",
+			undone_kp.has("waypoints_superseded_by_constraint_revision"))
+	check("...and the guard re-arms: a fresh waypoints edit is refused again",
+			not host.update_annotation(hint_id, _with_waypoints(host.get_by_id(hint_id), [[1.0, 1.0], [2.0, 2.0]])))
+	check("...with the structured refusal populated again",
+			str((host.last_update_refusal as Dictionary).get("error", "")) == "waypoints_superseded")
+
+	# ── release refusals never crash ─────────────────────────────────────────
+	check("release on an unknown id → not_found",
+			str(host.release_superseded_waypoints("nope").get("error", "")) == "not_found")
+
+
+## Codex 1047 fix round, verdict 6 — the host's SECOND sanctioned strip:
+## reconcile_strip_superseded_marker, the annotation-side half of load-time
+## two-store reconciliation (panel_tools.gd reconcile_superseded_waypoint_
+## state calls it for the marker-without-constraint torn state). Pins the
+## contract that distinguishes it from release_superseded_waypoints:
+##   - marker + verdict-5 lock keys stripped WITHOUT the H2-1 re-injection
+##     putting them back (same _bypass_superseded_release seam);
+##   - detail_level PRESERVED as found — never forced to 'detailed' (the
+##     deliberate reconciliation rule: both reachable torn shapes carry the
+##     detail_level describing the pre-torn intent; see the method's doc);
+##   - BOOKKEEPING, not an edit: no history step is created (revision_stack
+##     unchanged), so undo never "takes back" a repair nobody performed;
+##   - idempotent by contract: a second call is {ok:true, changed:false} and
+##     writes nothing;
+##   - the edit-refusal guard disarms afterwards (waypoint edits accepted).
+func _test_reconcile_strip_bookkeeping() -> void:
+	print("\n-- host.reconcile_strip_superseded_marker (Codex 1047 v6, load reconciliation) --")
+	var host = _Host.new()
+
+	var wp: Array = [[0.0, 0.0], [6.0, 0.0]]
+	var hint_id: String = str(host.add_route_hint_at(0.0, 0.0, "", "F.Cu", "waypoint", wp, "human"))
+	check("fixture: hint added", not hint_id.is_empty())
+	var pre_detail: String = str((host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+		.get("detail_level", ""))
+	check("fixture: detail_level is NOT 'detailed' (so preservation is observable)",
+			pre_detail != "detailed")
+
+	# Stamp marker + lock keys through the ordinary update seam (marker
+	# ADDITION is never refused), same shape panel_tools._stamp_waypoints_
+	# superseded writes — the same fixture technique the v3+v4 group uses.
+	var stamped: Dictionary = host.get_by_id(hint_id)
+	var stamped_kp: Dictionary = (stamped.get("kind_payload", {}) as Dictionary).duplicate(true)
+	stamped_kp["waypoints_superseded_by_constraint_revision"] = 2
+	stamped_kp["_locked_fields"] = ["waypoints", "detail_level"]
+	stamped_kp["_lock_reason"] = "superseded by task constraint revision 2"
+	stamped["kind_payload"] = stamped_kp
+	check("fixture: stamping update accepted", host.update_annotation(hint_id, stamped))
+	check("fixture: guard armed (waypoints edit refused)",
+			not host.update_annotation(hint_id, _with_waypoints(host.get_by_id(hint_id), [[9.0, 9.0], [1.0, 1.0]])))
+
+	# ── the bookkeeping strip ────────────────────────────────────────────────
+	var stack_before: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	var res: Dictionary = host.reconcile_strip_superseded_marker(hint_id)
+	check("strip ok", bool(res.get("ok", false)))
+	check("strip reports changed:true (it had a marker to remove)", bool(res.get("changed", false)))
+	var after_kp: Dictionary = (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+	check("marker GONE — not re-injected (sanctioned bypass, same as the release)",
+			not after_kp.has("waypoints_superseded_by_constraint_revision"))
+	check("_locked_fields gone", not after_kp.has("_locked_fields"))
+	check("_lock_reason gone", not after_kp.has("_lock_reason"))
+	check("detail_level PRESERVED as found — the reconciliation rule, NOT forced 'detailed'",
+			str(after_kp.get("detail_level", "")) == pre_detail)
+	check("waypoints untouched by the strip",
+			(after_kp.get("waypoints", []) as Array).size() == 2)
+
+	# ── bookkeeping: no history step ─────────────────────────────────────────
+	var stack_after: int = (host.get_by_id(hint_id).get("revision_stack", []) as Array).size()
+	check("revision_stack UNCHANGED — the repair is not an undoable edit",
+			stack_after == stack_before)
+
+	# ── guard disarmed: waypoints editable again ─────────────────────────────
+	check("waypoints edit ACCEPTED after the strip",
+			host.update_annotation(hint_id, _with_waypoints(host.get_by_id(hint_id), [[0.0, 0.0], [7.0, 7.0]])))
+
+	# ── idempotence: second call is a clean no-op ────────────────────────────
+	var payload_snapshot: String = JSON.stringify(host.get_by_id(hint_id).get("kind_payload", {}))
+	var res2: Dictionary = host.reconcile_strip_superseded_marker(hint_id)
+	check("second strip ok", bool(res2.get("ok", false)))
+	check("second strip reports changed:false (nothing left to strip)",
+			not bool(res2.get("changed", true)))
+	check("second strip wrote nothing (payload byte-identical)",
+			JSON.stringify(host.get_by_id(hint_id).get("kind_payload", {})) == payload_snapshot)
+
+	# ── refusals never crash ─────────────────────────────────────────────────
+	check("strip on an unknown id → not_found",
+			str(host.reconcile_strip_superseded_marker("nope").get("error", "")) == "not_found")
+
+
+## Small fixture helper for the group above: `ann` with its
+## kind_payload.waypoints replaced (deep-copied, never mutating the input).
+func _with_waypoints(ann: Dictionary, wp: Array) -> Dictionary:
+	var out := ann.duplicate(true)
+	var kp: Dictionary = (out.get("kind_payload", {}) as Dictionary).duplicate(true)
+	kp["waypoints"] = wp
+	out["kind_payload"] = kp
+	return out
 
 
 # ──────────────────────────────────────────────────────────────────────────────

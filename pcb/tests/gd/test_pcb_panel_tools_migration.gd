@@ -79,6 +79,14 @@ const _GREP_GATE_ALLOWED_FILES: Array[String] = [
 	"res://Scripts/Services/MCP/Modules/MCPAnnotationTools.gd",
 	"res://Scripts/UI/Controls/AnnotationDockPane/AnnotationWorkbench.gd",
 	"res://Scripts/UI/Controls/AnnotationDockPane/WorkflowAnnotationList.gd",
+	# Epoch UX1 station 6 + Codex 1047 fix round: the transform tool grew the
+	# GENERIC path-manipulation profile (Zone.BEND) and the duck-typed
+	# path_editing_locked hook — its doc comments cite pcb_route_hint(_kind)
+	# as the concrete "e.g." implementation of both mechanisms, the exact
+	# citation category this allow-list exists for. The code itself stays
+	# kind-agnostic (has_method probes only; asserted by the transform tool's
+	# own suite with method-less stub kinds).
+	"res://Scripts/Services/Annotations/kinds/AnnotationTransformTool.gd",
 ]
 
 ## Identifiers that would indicate PCB workflow semantics leaking back into

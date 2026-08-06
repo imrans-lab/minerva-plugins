@@ -342,6 +342,15 @@ class Route:
     #: on this net (bug 019fcf152791). Empty for every unguided route, so an
     #: existing caller sees exactly what it always did.
     corridor_adherence: list[dict] = field(default_factory=list)
+    #: Epoch UX1 station 9 (DCR 019fd095e694): the task routing_constraint
+    #: revision that steered a guided connection on this net, when one did.
+    #: None for every unguided route AND for a route guided only by legacy
+    #: inline hint waypoints (no task behind them) — see ConnectionHint's own
+    #: doc. LAST-WRITE-WINS across multiple guided connections sharing one net
+    #: (a documented simplification, not a claim that only one can exist);
+    #: methods.py attaches it exactly like corridor_adherence, one key per
+    #: route dict.
+    constraint_revision: Optional[int] = None
 
     @property
     def segments(self) -> list:
@@ -2000,6 +2009,11 @@ def route_board_with_hints(
 
         net_width = _net_width(net_widths, net_name, trace_width)
         route = Route(net=net_name)
+        # F4 (cold review, Epoch UX1 station 9): every DISTINCT constraint
+        # revision cited by a guided connection on THIS net — see the
+        # route-level assignment after the connections loop below for why
+        # this is collected rather than written straight onto `route`.
+        route_constraint_revisions: set = set()
 
         # Use bridge-aware routing if bridge assignments exist
         net_bridges = bridge_map.get(net_name, [])
@@ -2069,6 +2083,14 @@ def route_board_with_hints(
                 entry["hint_id"] = conn_hint.hint_id
                 entry["endpoints"] = [f"{pad_a.component}.{pad_a.number}",
                                       f"{pad_b.component}.{pad_b.number}"]
+                # Station 9: cite the task constraint revision that produced
+                # THIS corridor, when one did (None for legacy inline hint
+                # waypoints — see ConnectionHint.constraint_revision's doc).
+                # F4: collected into the per-net set, NOT written straight
+                # onto `route` — see the route-level assignment below.
+                if conn_hint.constraint_revision is not None:
+                    entry["constraint_revision"] = conn_hint.constraint_revision
+                    route_constraint_revisions.add(conn_hint.constraint_revision)
                 route.corridor_adherence.append(entry)
 
             if path:
@@ -2100,6 +2122,21 @@ def route_board_with_hints(
                     grid, net_name, pad_a, pad_b, preferred_layer))
 
         if route.paths:
+            # F4 (cold review, Epoch UX1 station 9): the route-level key is a
+            # CONVENIENCE for the single-constraint-per-net common case, not
+            # a second source of truth — corridor_adherence's per-entry
+            # `constraint_revision` (collected above, one per guided
+            # connection) is what's authoritative. When two guided
+            # connections on ONE net cite DIFFERENT revisions (two
+            # separately-steered spans sharing a net), there is no single
+            # truthful answer a route-level key could give; the old
+            # last-write-wins behaviour picked whichever connection happened
+            # to route last, silently wrong for every such net. Set the key
+            # ONLY when every guided connection on this net agreed; omit it
+            # otherwise so a caller reads the per-adherence-entry values
+            # instead of a route-level lie.
+            if len(route_constraint_revisions) == 1:
+                route.constraint_revision = next(iter(route_constraint_revisions))
             result.routes.append(route)
 
     result.success = len(result.unrouted) == 0

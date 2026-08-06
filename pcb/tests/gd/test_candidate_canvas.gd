@@ -75,6 +75,9 @@ var _fail := 0
 var _rec_held: Array = []
 var _rec_validation: Array = []
 
+# Signal recorder (group 12 — Codex 1047 fix round, verdict 7).
+var _rec_view_changed: int = 0
+
 
 func _init() -> void:
 	print("=== PCB canvas route-candidate rendering + hit-test (C3/S3) Tests ===\n")
@@ -89,6 +92,7 @@ func _init() -> void:
 	_run_context_menu_seam()
 	_run_inv4_no_waypoints()
 	_run_stroke_run_merge()
+	_run_workspace_repaint_edge()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1046,4 +1050,69 @@ func _run_stroke_run_merge() -> void:
 		_items_of_kind(canvas12._merged_candidate_stroke_items(
 			canvas12.candidate_draw_items()), "segment").size(), 3)
 	canvas12.free()
+	canvas.free()
+
+
+# ── 12. F2: workspace changes reach the annotation-overlay repaint edge ───────
+# (Codex 1047 fix round, verdict 7 — the fix-before half.)
+#
+# Group 8 proved (a) the canvas is SUBSCRIBED to the workspace signals and
+# (b) the workspace really EMITS them. What it never proved is the OTHER half
+# of _on_workspace_changed: the relay to view_changed — the same poke pan/zoom/
+# fit use to reach the ANNOTATION overlay (PcbAnnotationHost forwards it to the
+# base AnnotationHost signal AnnotationOverlay listens on). That relay is what
+# keeps a route hint's render-taxonomy mode honest when a workspace-only change
+# (propose/reject/supersede) alters the live-candidate answer: without it, a
+# rejected candidate left its hint stuck in "markers" with the candidate gone —
+# no visible representation of the route at all until an unrelated pan/zoom.
+# view_changed IS observable (a plain signal, unlike queue_redraw's private
+# flag), so this group asserts the relay directly AND end-to-end.
+
+
+func _on_view_changed() -> void:
+	_rec_view_changed += 1
+
+
+func _run_workspace_repaint_edge() -> void:
+	print("-- 12. F2: workspace change relays to view_changed (repaint edge) --")
+	var acc := _armed_canvas()
+	var canvas = acc[0]
+	var ws = acc[1]
+	var cid: String = str(acc[3])
+
+	canvas.view_changed.connect(_on_view_changed)
+
+	# The seam itself, driven directly: ONE handler invocation → exactly ONE
+	# view_changed. (The handler is what all five workspace signals share, so
+	# this is the relay's whole contract in one call.)
+	_rec_view_changed = 0
+	canvas._on_workspace_changed()
+	check_eq("_on_workspace_changed relays exactly one view_changed", _rec_view_changed, 1)
+
+	# End-to-end via a REAL disposition move: pin(cid) → candidate_changed →
+	# _on_workspace_changed → view_changed. Same event order as group 8 (pin
+	# before rebase — a stale candidate refuses the pin).
+	_rec_view_changed = 0
+	check("pin lands (fixture sanity)", ws.pin(cid))
+	check("the pin's candidate_changed reached view_changed (>= 1 relay)",
+		_rec_view_changed >= 1)
+
+	# End-to-end via a REAL validation event: rebase → validation_changed →
+	# view_changed. (Group 8 already proved this emission names cid.)
+	_rec_view_changed = 0
+	check_eq("rebase staled the candidate (fixture sanity)", ws.rebase(9).size(), 1)
+	check("the stale emission reached view_changed (>= 1 relay)",
+		_rec_view_changed >= 1)
+
+	# Unbinding severs the whole chain: group 8 proved the workspace-side
+	# disconnect; here the view_changed side stays silent through a real
+	# emission from the ORPHANED workspace (rebase to yet another revision on
+	# ws2-less ws emits nothing canvas-ward once disconnected — drive the
+	# signal explicitly so the assertion is not vacuous).
+	canvas.set_routing_workspace(null, null)
+	_rec_view_changed = 0
+	ws.validation_changed.emit(cid)
+	check_eq("after unbinding, a workspace emission no longer reaches view_changed",
+		_rec_view_changed, 0)
+
 	canvas.free()

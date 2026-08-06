@@ -1265,15 +1265,15 @@ def _net_for_hint(envelope: dict, board: Board, warnings: list[dict]) -> Optiona
     return None
 
 
-def _waypoints_of(envelope: dict) -> list[list[float]]:
-    """Extract waypoints as [[x, y], …] in exact board mm (no rounding).
+def _points_from_raw(raw: Any) -> list[list[float]]:
+    """Parse a wire point list into [[x, y], …] float pairs, bit-exact.
 
-    Reads kind_payload.waypoints (the authoritative pixel-accurate polyline the
-    panel stores as [[x_mm, y_mm], …]). Each coordinate is passed through
-    float() only — an identity on values already float, so no drift.
+    Tolerates both the array-pair wire shape (``[[x, y], …]``, what panels
+    actually send) and a ``{"x":…, "y":…}`` dict shape (what a JSON round trip
+    of a GDScript Vector2 corridor also produces — see PcbRouteTask's own
+    _constraint_to_json). Anything else in the list is skipped rather than
+    raising: one malformed point must not blank the whole corridor.
     """
-    kp = envelope.get("kind_payload") or {}
-    raw = kp.get("waypoints")
     out: list[list[float]] = []
     if isinstance(raw, list):
         for wp in raw:
@@ -1282,6 +1282,68 @@ def _waypoints_of(envelope: dict) -> list[list[float]]:
             elif isinstance(wp, dict) and "x" in wp and "y" in wp:
                 out.append([float(wp["x"]), float(wp["y"])])
     return out
+
+
+def _waypoints_of(envelope: dict) -> list[list[float]]:
+    """Extract waypoints as [[x, y], …] in exact board mm (no rounding).
+
+    Reads kind_payload.waypoints (the authoritative pixel-accurate polyline the
+    panel stores as [[x_mm, y_mm], …]). Each coordinate is passed through
+    float() only — an identity on values already float, so no drift.
+    """
+    kp = envelope.get("kind_payload") or {}
+    return _points_from_raw(kp.get("waypoints"))
+
+
+def _corridor_from_task_constraint(
+    constraint: Any, warnings: Optional[list[dict]] = None, hint_id: str = "",
+) -> tuple[list[list[float]], Optional[str], Optional[int]]:
+    """Parse ONE ``task_constraints[hint_id]`` entry (Epoch UX1 station 9).
+
+    Wire shape (panel_tools.gd's ``_task_constraints_for_hints``, mirroring
+    PcbRouteTask.routing_constraint): ``{corridor_points:[[x,y],…],
+    preferred_layer, revision}``. Returns (points, preferred_layer_or_None,
+    revision_or_None); points is [] and the other two None for anything not a
+    dict or carrying no usable corridor_points — the caller treats an empty
+    result as "no override", falling back to the legacy waypoints channel
+    exactly as if `task_constraints` had no entry for this hint at all.
+
+    F10 (cold review, Epoch UX1 station 9): ``revision`` reaches this
+    function straight off the wire (methods.py's ``_route`` forwards
+    ``params.get("task_constraints")`` unvalidated), so a non-numeric value
+    is a caller mistake, not an engine invariant — ``int()`` on it must never
+    raise. A coercion failure SKIPS the whole entry (same "no override,
+    fall back to legacy waypoints" degrade every other malformed shape this
+    function already handles takes) and, when a `warnings` sink is given,
+    records a structured note naming the hint so the caller can see why its
+    steering silently did not apply.
+    """
+    if not isinstance(constraint, dict):
+        return [], None, None
+    pts = _points_from_raw(constraint.get("corridor_points"))
+    if not pts:
+        return [], None, None
+    layer = constraint.get("preferred_layer")
+    layer = str(layer) if layer else None
+    raw_revision = constraint.get("revision")
+    revision: Optional[int]
+    if raw_revision is None:
+        revision = None
+    else:
+        try:
+            revision = int(raw_revision)
+        except (TypeError, ValueError):
+            if warnings is not None:
+                warnings.append({
+                    "id": hint_id,
+                    "message":
+                        "task_constraints revision %r is not numeric — this "
+                        "hint's corridor override was skipped; it routed "
+                        "against its own legacy kind_payload.waypoints "
+                        "instead" % (raw_revision,),
+                })
+            return [], None, None
+    return pts, layer, revision
 
 
 def materialize_detailed_hints(
@@ -1377,6 +1439,7 @@ def hints_to_router(
     hint_envelopes: list[dict],
     board: Board,
     selection: Any = None,
+    task_constraints: Optional[dict] = None,
 ) -> HintTranslation:
     """Translate pcb_route_hint envelopes into native ``RoutingHints``.
 
@@ -1384,10 +1447,33 @@ def hints_to_router(
     + buses) and calls it — the dataclass is never re-implemented here. Waypoint
     coordinates are carried bit-exact. Per-hint issues become warnings; the
     method never raises on bad hint data.
+
+    ``task_constraints`` (Epoch UX1 station 9, DCR 019fd095e694): optional
+    ``{hint_id: {corridor_points, preferred_layer, revision}}`` — the durable
+    task-owned steering station 8 introduced (PcbRouteTask.routing_constraint),
+    forwarded here by panel_tools.gd's propose/reroute request-builders. An
+    entry for a hint OVERRIDES that hint's legacy ``kind_payload.waypoints``
+    channel entirely (constraint corridor + preferred_layer used instead, and
+    the connection_hint carries the constraint's revision); a hint with NO
+    entry here is completely unaffected — same waypoints, same layer, no
+    `constraint_revision` key anywhere on its output, byte-identical to a call
+    that never knew this parameter existed. Absent/None/non-dict input is the
+    empty case: no hint is overridden. A non-numeric `revision` on an entry
+    (F10, cold review) never raises — that ONE entry degrades to "no
+    override" (a warning names the hint) rather than the whole call failing.
+
+    F2/F5 (cold review): when an override DOES apply and the hint's own
+    ``kind_payload.waypoints`` was non-empty, a structured
+    ``waypoint_status:"superseded_by_task_constraint"`` warning names the now-
+    dead legacy field; if the override is then refused ``ambiguous_span``
+    (multi-endpoint span), that warning carries ``source:"task_constraint"``
+    and says TASK STEERING was dropped, not "authored waypoints" — a
+    constraint-only hint never had authored waypoints of its own to drop.
     """
     warnings: list[dict] = []
     selected = select_hints(hint_envelopes, selection)
     selected_ids = [str(e.get("id", "")) for e in selected]
+    task_constraints = task_constraints if isinstance(task_constraints, dict) else {}
 
     net_hints: list[dict] = []
     buses: list[dict] = []
@@ -1468,31 +1554,100 @@ def hints_to_router(
         # endpoint-keyed ConnectionHint instead, and the engine's
         # product-state A* actually follows it.
         #
+        # STATION 9 (DCR 019fd095e694): a `task_constraints` entry for this
+        # hint OVERRIDES the legacy `kind_payload.waypoints` channel entirely
+        # — the constraint's corridor + preferred_layer are used, and the
+        # emitted ConnectionHint carries the constraint's revision. No entry
+        # (the common case for every hint predating this station, and every
+        # hint whose task was never given a corridor) falls through to the
+        # legacy waypoints exactly as before — byte-identical, no
+        # constraint_revision key anywhere.
+        ann_id = str(env.get("id", ""))
+        constraint_pts, constraint_layer, constraint_revision = \
+            _corridor_from_task_constraint(
+                task_constraints.get(ann_id), warnings, ann_id)
+        if constraint_pts:
+            effective_waypoints = constraint_pts
+            effective_layer = constraint_layer or layer
+        else:
+            effective_waypoints = waypoints
+            effective_layer = layer
+
+        # F2 (cold review, Epoch UX1 station 9): duplicated-authority guard.
+        # An override APPLIES (constraint_pts is truthy) and this hint's own
+        # kind_payload.waypoints is non-empty — that legacy field is now DEAD
+        # for routing (the constraint corridor is what actually steers), but
+        # nothing on the hint itself said so until now. A structured per-hint
+        # note, independent of whether the override below ultimately lands a
+        # ConnectionHint or gets refused ambiguous_span — the supersession is
+        # true either way, since it describes the WAYPOINTS field, not the
+        # route outcome. Rides `hint_status` via the existing
+        # _attach_hint_status lift (panel_tools.gd) — any warning carrying
+        # "waypoint_status" is lifted onto the candidate by hint id already;
+        # no GDScript-side change needed for this to surface. Render / edit-
+        # refusal implications (e.g. should the canvas grey out or refuse to
+        # hand-edit a superseded corridor) are explicitly OUT OF FENCE here —
+        # deferred to the pre-boundary Codex round per the cold review.
+        if constraint_pts and waypoints:
+            warnings.append({
+                "id": ann_id,
+                "waypoint_status": "superseded_by_task_constraint",
+                "constraint_revision": constraint_revision,
+            })
+
         # SINGLE-ENDPOINT CONTRACT (amendment A5): a guided corridor needs
         # EXACTLY ONE resolved source pad and ONE resolved destination pad.
         # One polyline between multi-endpoint sets is ambiguous by
         # construction — silently taking the first pair, or expanding a
         # cross-product, would both invent an intent the author never
         # expressed. Refuse BY NAME and fall back to unguided routing.
-        if waypoints:
+        # Unchanged by station 9 — a task_constraints override is still
+        # subject to this exact same gate, never bypassing it.
+        if effective_waypoints:
             src_refs = _resolved_pad_refs(kp.get("source_pins"), board)
             dst_refs = _resolved_pad_refs(kp.get("dest_pins"), board)
             if len(src_refs) == 1 and len(dst_refs) == 1:
-                connection_hints.append({
+                ch: dict = {
                     "net": net,
                     "endpoints": [src_refs[0], dst_refs[0]],
-                    "waypoints": waypoints,
-                    "preferred_layer": layer,
-                    "hint_id": str(env.get("id", "")),
-                })
+                    "waypoints": effective_waypoints,
+                    "preferred_layer": effective_layer,
+                    "hint_id": ann_id,
+                }
+                if constraint_revision is not None:
+                    ch["constraint_revision"] = constraint_revision
+                connection_hints.append(ch)
             else:
-                warnings.append({
-                    "id": str(env.get("id", "")),
+                # F5 (cold review, Epoch UX1 station 9): a corridor that came
+                # from a task's routing_constraint gets its own vocabulary —
+                # `source:"task_constraint"` + `constraint_revision`, and a
+                # message that says TASK STEERING was dropped rather than
+                # "authored waypoints" (a constraint-only hint, station 8's
+                # own contract, never carries authored waypoints of its own —
+                # see minerva_pcb_add_route_intent's doc — so the old wording
+                # was actively wrong for this case, not just imprecise).
+                warn: dict = {
+                    "id": ann_id,
                     "waypoint_status": "ignored",
-                    "waypoint_count": len(waypoints),
+                    "waypoint_count": len(effective_waypoints),
                     "net": net,
                     "reason": "ambiguous_span",
-                    "message":
+                }
+                if constraint_pts:
+                    warn["source"] = "task_constraint"
+                    warn["constraint_revision"] = constraint_revision
+                    warn["message"] = (
+                        "%d point(s) of TASK STEERING IGNORED: a guided "
+                        "corridor needs exactly one resolved source pad and "
+                        "one resolved destination pad, but this hint "
+                        "resolved to %d source and %d destination pad(s). "
+                        "One polyline between multi-endpoint sets is "
+                        "ambiguous, so the task's routing_constraint "
+                        "corridor was refused rather than guessed; the "
+                        "route is ordinary pad-to-pad autorouting."
+                        % (len(effective_waypoints), len(src_refs), len(dst_refs)))
+                else:
+                    warn["message"] = (
                         "%d authored waypoint(s) IGNORED: a guided corridor "
                         "needs exactly one resolved source pad and one "
                         "resolved destination pad, but this hint resolved to "
@@ -1500,8 +1655,8 @@ def hints_to_router(
                         "between multi-endpoint sets is ambiguous, so the "
                         "corridor was refused rather than guessed; the route "
                         "is ordinary pad-to-pad autorouting."
-                        % (len(waypoints), len(src_refs), len(dst_refs)),
-                })
+                        % (len(effective_waypoints), len(src_refs), len(dst_refs)))
+                warnings.append(warn)
         nh: dict = {"net": net, "preferred_layer": layer}
         net_hints.append(nh)
         # Recorded from the SAME `net` the engine is about to be hinted with —

@@ -270,6 +270,23 @@ var _annotation_gesture: bool = false
 ## release is a click, not a box, and the annotation half is left alone (which is
 ## also exactly core's own zero-travel marquee semantics).
 const ANNOTATION_MARQUEE_TRAVEL_PX := 3.0
+
+## Screen-pixel hit radius for a path-kind annotation's bend handle (station 6
+## fix F1, docket 019fd104e1c6 / question 019fd10557c8). Mirrors core
+## AnnotationTransformTool.HANDLE_HIT_RADIUS_DOC exactly, duplicated here for
+## the same reason ANNOTATION_MARQUEE_TRAVEL_PX duplicates
+## SELECT_DRAG_THRESHOLD_PX above: this off-tree script cannot reference core
+## by class (parse-crash risk — see the file's own Round B note), so the
+## constant is restated rather than shared.
+const ANNOTATION_BEND_HIT_PX := 12.0
+
+## Screen-pixel ink slack for the topmost-annotation walk in
+## _route_hint_masks_claim (F1 fix, cold review station 7). Mirrors core
+## AnnotationTransformTool._hit_test_topmost's own "8 screen px of slack" —
+## duplicated here for the same off-tree reason ANNOTATION_BEND_HIT_PX and
+## ANNOTATION_MARQUEE_TRAVEL_PX are: this script cannot reference core by
+## class.
+const ANNOTATION_HIT_SLACK_PX := 8.0
 var hovered_component: String = ""
 
 ## The component the user last CLICKED, when it is still selected — Illustrator's
@@ -850,6 +867,24 @@ var _context_menu_target: Array = ["", ""]
 var _context_menu_vertex: Dictionary = {}
 var _context_menu_edge_insert: Dictionary = {}
 
+## A bend handle of the single-selected PATH-KIND ANNOTATION under the press,
+## or {} on a miss (station 6 fix F1). Resolved and consumed on the SAME
+## press/release split as _context_menu_vertex, for the same reason: the menu
+## pops at RELEASE. {ann_id: String, index: int} on a hit.
+##
+## THIS IS THE ONLY DOORWAY to core AnnotationTransformTool's path-kind
+## right-click-deletes-a-bend gesture (_try_delete_bend_at, UX1 station 6) on
+## THIS canvas: the RIGHT mouse button never reaches the annotation router at
+## all (see _handle_mouse_button's MOUSE_BUTTON_RIGHT branch — every right
+## press here arms a pan/menu directly, it is never handed to
+## annotation_pointer_down), so that core branch is dead code through this
+## panel and the gesture has to be re-offered here, as a menu item — the
+## SAME "one menu authority" deal BendHandleEditTool's own right-click doc
+## already states ("DELIBERATELY NOT CONVERTED TO A MENU (B1u5, item
+## 019fbb968e) ... precisely the 'one menu authority' the unit was ruled to
+## preserve").
+var _context_menu_annotation_bend: Dictionary = {}
+
 
 func _enter_tree() -> void:
 	# Input config MUST be re-applied on every tree entry, not just once in
@@ -882,7 +917,18 @@ func _notification(what: int) -> void:
 		# the release that would clear it is never coming, and a leaked flag
 		# would send the NEXT press's motion into the annotation tool.
 		_annotation_gesture = false
-		_reset_context_menu_target()
+		# boundary run first-execution fix: opening the context menu ITSELF
+		# steals focus — context_menu.popup() opens a Window, and the canvas
+		# gets WM_WINDOW_FOCUS_OUT/FOCUS_EXIT while the menu is coming up.
+		# Wiping the frozen right-press target here destroyed every deferred
+		# menu action (Delete bend / Delete vertex / Insert vertex / Delete
+		# <entity>) before its id_pressed handler could read it. Focus lost TO
+		# OUR OWN OPEN MENU is not a dead gesture — the frozen target is
+		# exactly what that menu exists to act on — so keep it while the menu
+		# is visible. Every other reset site (next LEFT press, Escape,
+		# _exit_tree, a focus loss with no menu open) is unchanged.
+		if context_menu == null or not context_menu.visible:
+			_reset_context_menu_target()
 
 
 func _exit_tree() -> void:
@@ -985,6 +1031,7 @@ func _reset_context_menu_target() -> void:
 	_context_menu_target = ["", ""]
 	_context_menu_vertex = {}
 	_context_menu_edge_insert = {}
+	_context_menu_annotation_bend = {}
 
 
 ## A separator BETWEEN sections and never at the top — the rule the group section
@@ -1015,6 +1062,11 @@ const MENU_ID_CANDIDATE_TRY_AGAIN := 434
 ## Right 90°"), the convention the owner's maker persona actually knows.
 const MENU_ID_ROTATE_CW := 441
 const MENU_ID_ROTATE_CCW := 442
+## Station 6 fix F1 (docket 019fd104e1c6, question 019fd10557c8) — the one
+## doorway onto core's path-kind bend-delete gesture on this canvas; see
+## _context_menu_annotation_bend's doc for why a menu item and not the
+## gesture core itself offers.
+const MENU_ID_DELETE_ANNOTATION_BEND := 443
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1024,6 +1076,16 @@ const MENU_ID_ROTATE_CCW := 442
 ## context_menu_world_pos, so this cannot disagree with what the press decided.
 func _add_context_menu_target_items() -> void:
 	if not data:
+		return
+
+	# 0. ANNOTATION BEND — a bend handle of the single-selected path-kind
+	# annotation (station 6 fix F1). Checked, and RETURNED, first: an
+	# annotation is not a board entity in the frozen ladder (_entity_at never
+	# resolves one), so there is nothing in sections 1-3 below that could
+	# describe the same point, and offering both would risk a "Delete <board
+	# thing underneath>" item next to "Delete bend" for one press.
+	if not _context_menu_annotation_bend.is_empty():
+		context_menu.add_item("Delete bend", MENU_ID_DELETE_ANNOTATION_BEND)
 		return
 
 	# 1 + 2. The zone-outline pair. Mutually exclusive by construction (the press
@@ -1131,6 +1193,8 @@ func _on_context_menu_pressed(id: int) -> void:
 			_request_trace_width_edit(str(_context_menu_target[1]))
 		MENU_ID_DELETE_TARGET:  # B1u5 — delete the entity the press picked
 			_delete_picked_entity(str(_context_menu_target[0]), str(_context_menu_target[1]), "Delete")
+		MENU_ID_DELETE_ANNOTATION_BEND:  # Station 6 fix F1 — the frozen bend hit
+			_delete_annotation_bend(_context_menu_annotation_bend)
 		# C4a — the route-candidate verbs. Every one resolves the candidate from
 		# the FROZEN press target (never a re-pick), exactly like the board items.
 		MENU_ID_CANDIDATE_COMMIT:
@@ -1143,6 +1207,65 @@ func _on_context_menu_pressed(id: int) -> void:
 			_run_candidate_verb("reject", str(_context_menu_target[1]))
 		MENU_ID_CANDIDATE_TRY_AGAIN:
 			_run_candidate_verb("try_again", str(_context_menu_target[1]))
+
+
+## Commit the ONE bend delete the frozen press resolved (station 6 fix F1).
+## Re-resolves ann/kind from the LIVE host rather than trusting stale
+## snapshot data in `hit` — the press only froze WHICH annotation and WHICH
+## index, exactly the same "re-fetch, don't cache the mutable part" discipline
+## _delete_zone_vertex and _delete_picked_entity already follow for their own
+## frozen targets. A no-op (empty hit, annotation gone, no longer a path kind,
+## index now out of range) leaves the board untouched rather than erroring —
+## the router or the annotation could plausibly have changed between the
+## right-press and this release-triggered menu action.
+func _delete_annotation_bend(hit: Dictionary) -> void:
+	if hit.is_empty():
+		return
+	var router = _router_with("get_by_id")
+	if router == null or not router.has_method("get_registry") \
+			or not router.has_method("update_annotation"):
+		return
+	var ann_id := str(hit.get("ann_id", ""))
+	var index := int(hit.get("index", -1))
+	if ann_id.is_empty() or index < 0:
+		return
+	var ann: Dictionary = router.get_by_id(ann_id)
+	if ann.is_empty():
+		return
+	var registry = router.get_registry()
+	if registry == null:
+		return
+	var kind: AnnotationKind = registry.get_annotation_kind(StringName(str(ann.get("kind", ""))))
+	if not _is_path_kind(kind):
+		return
+	var bends: Array = kind.bend_points(ann)
+	if index >= bends.size():
+		return
+	# STALE-INDEX GUARD (Codex re-review on 019fd10557c8, P2): the menu froze
+	# {ann_id, index, point} at right-press, but the annotation can move under
+	# an OPEN menu — an agent edit over MCP, an undo — and then `index` names a
+	# DIFFERENT bend. The frozen POINT is the identity check: if the live bend
+	# at this index no longer sits where the user right-clicked it, deleting by
+	# index would delete a bend they never aimed at — no-op instead. Epsilon is
+	# TIGHT (0.001mm): the frozen value IS the bend's own centre captured at
+	# right-press, so identity means float-noise equality — a handle-radius
+	# tolerance would accept a different bend inserted nearby under the open
+	# menu, the exact hazard this guard exists for.
+	var frozen: Variant = hit.get("point", null)
+	if frozen is Vector2:
+		# TIGHT epsilon, not the handle radius (Codex re-review): the frozen
+		# value IS the bend's own centre captured at right-press, so identity
+		# means float-noise equality — a handle-radius tolerance (6mm at zoom
+		# 2) would happily delete a DIFFERENT bend inserted nearby while the
+		# menu sat open, which is the exact hazard this guard exists for.
+		var live: Variant = bends[index]
+		if not (live is Vector2):
+			return
+		if (live as Vector2).distance_to(frozen) > 0.001:
+			return
+	bends.remove_at(index)
+	router.update_annotation(ann_id, kind.with_bend_points(ann, bends))
+	queue_redraw()
 
 
 ## "Set trace width…": make the trace the WHOLE selection, then ask the panel to
@@ -2679,6 +2802,9 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# see the _context_menu_target declaration for why not at release.
 			_context_menu_vertex = _zone_vertex_hit(world_pos)
 			_context_menu_target = _entity_at(world_pos)
+			# Station 6 fix F1: a path-kind annotation's bend handle, resolved
+			# the same way — see _context_menu_annotation_bend's own doc.
+			_context_menu_annotation_bend = _annotation_bend_hit_at(world_pos)
 			# An edge insertion is only looked for when NO handle was hit: the
 			# handle radius (9 px) is deliberately wider than the edge tolerance
 			# (3 px) so "a press near a corner is unambiguously the corner's", and
@@ -3327,9 +3453,49 @@ func _sweep_annotations(select_rect: Rect2) -> void:
 	var picked: PackedStringArray = router.annotations_in_world_rect(select_rect)
 	if picked.is_empty():
 		return
+	picked = _filter_masked_route_hints(picked, select_rect, router)
+	if picked.is_empty():
+		return
 	var adder = _router_with("add_annotations_to_selection")
 	if adder != null:
 		adder.add_annotations_to_selection(picked)
+
+
+## F1 box-select leg (cold review, station 7 fix round): bounds() — like
+## hit_test() — has no host param, so it still reports the FULL corridor AABB
+## for a markers-mode route hint, and the marquee sweep above uses that AABB
+## verbatim (core's own documented marquee grammar; see this function's own
+## doc, point 2 — there is no kind-level rect-intersect API to do better).
+## Since bounds() itself cannot know the render mode, the mode-awareness has
+## to be applied HERE, at the canvas sweep site: drop a picked route hint
+## from the sweep unless the box ALSO reaches its visible ink (the marker
+## discs — the same points _route_hint_masks_claim's click-level gate uses),
+## so dragging a marquee across a hidden corridor does not scoop the hint up
+## and pop it back to "full", the box-select twin of the click-level bug.
+func _filter_masked_route_hints(ids: PackedStringArray, select_rect: Rect2, router) -> PackedStringArray:
+	if not router.has_method("get_registry") or not router.has_method("get_by_id"):
+		return ids
+	var registry = router.get_registry()
+	if registry == null:
+		return ids
+	var out := PackedStringArray()
+	for id in ids:
+		var ann: Dictionary = router.get_by_id(id)
+		var kind: AnnotationKind = null
+		if not ann.is_empty():
+			kind = registry.get_annotation_kind(StringName(str(ann.get("kind", ""))))
+		if kind != null and kind.has_method("_render_mode_for") and kind.has_method("_marker_points"):
+			var mode: String = kind._render_mode_for(ann, router)
+			if mode == "markers" or mode == "markers_dimmed":
+				var reaches_ink := false
+				for p in kind._marker_points(ann):
+					if select_rect.has_point(p as Vector2):
+						reaches_ink = true
+						break
+				if not reaches_ink:
+					continue
+		out.append(id)
+	return out
 
 
 ## What the Select tool picks at `world_pos`, as [kind, id]; ["", ""] for empty
@@ -5087,6 +5253,23 @@ func _claim_annotation_press(event: InputEventMouseButton) -> bool:
 	if not bool(router.annotation_claims_point(event.position, mods)):
 		return false
 
+	# F1 (cold review, station 7 fix round): "what you see on top is what you
+	# click" — rung 0's OWN justification, restated above — is exactly what
+	# breaks if this claim is honored blind. A route hint whose _render_mode_for
+	# has withheld its polyline ("markers"/"markers_dimmed": a live candidate or
+	# committed copper already owns that corridor) still answers hit_test() as
+	# if the whole corridor were drawn — AnnotationKind.hit_test() has no host
+	# param (documented limitation, pcb_route_hint_kind.gd), so it cannot know
+	# its own render mode. The router's claim above is therefore blind to it
+	# too. So: a press the router just claimed, but that only landed ink on a
+	# markers-mode hint's now-INVISIBLE corridor (not its visible marker discs
+	# / label — the ink actually on screen), is declined here and falls through
+	# to the board ladder below, so the candidate ghost actually drawn on top
+	# takes the click instead of the hidden hint popping back to "full" via
+	# selection and resurrecting the very route the candidate is superseding.
+	if _route_hint_masks_claim(event.position):
+		return false
+
 	if not event.shift_pressed:
 		_clear_selection()
 
@@ -5101,6 +5284,119 @@ func _claim_annotation_press(event: InputEventMouseButton) -> bool:
 	selection_changed.emit()
 	queue_redraw()
 	return true
+
+
+## F1 gate (cold review, station 7 fix round): does the press at `screen_pos`
+## land only on a pcb_route_hint's INVISIBLE corridor while that hint is
+## rendering in a "markers"/"markers_dimmed" mode? See _claim_annotation_press's
+## own comment for why this has to be checked at all.
+##
+## Walks annotations topmost-first, testing kind.hit_test() ink — the SAME
+## algorithm core AnnotationTransformTool._hit_test_topmost uses, which is also
+## exactly what claims_point() falls back to for a plain click on an
+## unselected annotation (the common case this finding names: clicking a
+## candidate ghost sitting under a hint's hidden corridor). Stops at the FIRST
+## ink hit — the topmost annotation is the only one whose claim could need
+## masking here, same "what's on top wins" rule the rest of the ladder uses.
+##
+## Scope, stated honestly: this does not replicate claims_point()'s gizmo-zone
+## or caption-handle branches (those only ever fire for the SINGLE
+## already-selected annotation, which — per _render_mode_for rule 1 — always
+## renders "full" and so never needs masking).
+func _route_hint_masks_claim(screen_pos: Vector2) -> bool:
+	var router = _router_with("get_registry")
+	if router == null or not router.has_method("get_annotations") \
+			or not router.has_method("transform_screen_to_doc") \
+			or not router.has_method("is_annotation_visible"):
+		return false
+	var registry = router.get_registry()
+	if registry == null:
+		return false
+	var doc_pos: Vector2 = router.transform_screen_to_doc(screen_pos)
+	var hit_threshold := ANNOTATION_HIT_SLACK_PX / maxf(zoom, 0.01)
+	var annotations: Array = router.get_annotations()
+	for i in range(annotations.size() - 1, -1, -1):
+		var ann_v: Variant = annotations[i]
+		if not (ann_v is Dictionary):
+			continue
+		var ann: Dictionary = ann_v
+		if not router.is_annotation_visible(ann):
+			continue
+		var kind: AnnotationKind = registry.get_annotation_kind(StringName(str(ann.get("kind", ""))))
+		if kind == null or not kind.hit_test(ann, doc_pos, hit_threshold):
+			continue
+		# Topmost ink hit — mask only if it is a route hint currently in a
+		# markers mode AND the press missed its visible ink; anything else
+		# (a different kind, or a "full" hint) is a legitimate claim.
+		if kind.has_method("_render_mode_for") and kind.has_method("_visible_ink_hit"):
+			var mode: String = kind._render_mode_for(ann, router)
+			if mode == "markers" or mode == "markers_dimmed":
+				return not bool(kind._visible_ink_hit(ann, doc_pos, hit_threshold, zoom))
+		return false
+	return false
+
+
+## Duck-typed twin of core AnnotationTransformTool._is_path_kind (station 6
+## fix F1). This off-tree script cannot preload/class-reference that tool
+## (a dangling off-tree class reference is a parse error that deregisters the
+## whole kind — see the file's own Round B note), so the gate is restated
+## against the SAME three methods rather than shared. A kind that declares
+## "path" without the full API degrades safely to "not path-eligible" here,
+## exactly like core's own gate.
+static func _is_path_kind(kind: AnnotationKind) -> bool:
+	if kind == null:
+		return false
+	if kind.manipulation_profile() != "path":
+		return false
+	return kind.has_method("bend_points") \
+		and kind.has_method("with_bend_points") \
+		and kind.has_method("nearest_bend_insertion")
+
+
+## Resolve a path-kind annotation's bend handle at `world_pos` (board mm) —
+## station 6 fix F1. {} on ANY miss: no router, no exactly-one selection, the
+## selection is not a path kind, or the press missed every handle. Only the
+## SINGLE currently-selected annotation is considered — mirrors core's own
+## gate (AnnotationTransformTool._is_path_kind is reached only from a
+## single-selection branch) and BendHandleEditTool's _multi_selected rule:
+## with more than one thing selected there is no unambiguous edit target.
+func _annotation_bend_hit_at(world_pos: Vector2) -> Dictionary:
+	var router = _router_with("get_selected_annotation_id")
+	if router == null or not router.has_method("get_by_id") \
+			or not router.has_method("get_registry") \
+			or not router.has_method("selected_annotation_count"):
+		return {}
+	if router.selected_annotation_count() != 1:
+		return {}
+	var ann_id: String = router.get_selected_annotation_id()
+	if ann_id.is_empty():
+		return {}
+	var ann: Dictionary = router.get_by_id(ann_id)
+	if ann.is_empty():
+		return {}
+	var registry = router.get_registry()
+	if registry == null:
+		return {}
+	var kind: AnnotationKind = registry.get_annotation_kind(StringName(str(ann.get("kind", ""))))
+	if not _is_path_kind(kind):
+		return {}
+
+	var bends: Array = kind.bend_points(ann)
+	# Same px→doc conversion core uses for HANDLE_HIT_RADIUS_DOC (divide the
+	# screen-px constant by the live zoom) — `zoom` here IS what
+	# PcbAnnotationHost.get_annotation_zoom() returns (it reads this same
+	# field), so this is the identical radius core's own hit test computes.
+	var handle_r := ANNOTATION_BEND_HIT_PX / maxf(zoom, 0.01)
+	for i in range(bends.size()):
+		var p: Variant = bends[i]
+		if not p is Vector2:
+			continue
+		if world_pos.distance_to(p as Vector2) < handle_r:
+			# The POINT rides along as the bend's identity for the deferred
+			# menu action — an index alone can name a different bend by the
+			# time the menu closes (see _delete_annotation_bend's guard).
+			return {"ann_id": ann_id, "index": i, "point": p as Vector2}
+	return {}
 
 
 ## Drop BOTH halves of the unified selection.
@@ -6206,6 +6502,20 @@ func _disconnect_workspace_signals() -> void:
 ## so a per-id incremental redraw would be strictly more code for the same pixels.
 func _on_workspace_changed(_a: String = "", _b: String = "", _c: String = "") -> void:
 	queue_redraw()
+	# F2 (cold review, station 7 fix round): pcb_route_hint_kind.render() now
+	# depends on live-candidate state (its render-taxonomy gate), but that
+	# render lives on the ANNOTATION overlay — a separate CanvasItem that only
+	# redraws on ITS OWN annotations/selection/view signals, none of which a
+	# workspace-only change (propose/reject/supersede) fires. Without this, a
+	# reject left a route hint stuck in "markers" mode (no polyline — a live
+	# candidate drew that corridor a moment ago) with the candidate now GONE
+	# too: no visible representation of the route at all, until some unrelated
+	# interaction (pan/zoom/select) happened to repaint the overlay. Reusing
+	# view_changed here is the SAME poke pan/zoom/fit already use to reach the
+	# overlay (PcbAnnotationHost relays it to the base AnnotationHost signal
+	# AnnotationOverlay listens on) — no new seam, and a safe no-op if nothing
+	# is listening (headless canvas, no panel wired).
+	view_changed.emit()
 
 
 ## Is the candidate surface live? THE ONE GATE — every render, pick, anchor and

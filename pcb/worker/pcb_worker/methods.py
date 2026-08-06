@@ -774,6 +774,17 @@ def _serialize_routing_result(result) -> dict:
                 # byte-identical to what it always was.
                 **({"corridor_adherence": list(r.corridor_adherence)}
                    if getattr(r, "corridor_adherence", None) else {}),
+                # Station 9 (DCR 019fd095e694): the task routing_constraint
+                # revision that steered this route, when a task_constraints
+                # entry (not legacy inline waypoints) was what produced it.
+                # Same absent-key contract as corridor_adherence above — a
+                # route nothing steered from a task carries no such key.
+                # F9 (cold review): `is not None`, NOT truthiness — revision 0
+                # is a legitimate value (a task's very first constraint, or a
+                # caller-supplied 0), and the truthy form used to drop it
+                # silently, indistinguishable from "no task steered this".
+                **({"constraint_revision": r.constraint_revision}
+                   if getattr(r, "constraint_revision", None) is not None else {}),
             }
             for r in result.routes
         ],
@@ -1736,8 +1747,12 @@ def _route(params: dict) -> dict:
     remaining = [e for e in envelopes
                  if str((e or {}).get("id", "")) not in consumed_ids] \
         if consumed_ids else envelopes
+    # Station 9 (DCR 019fd095e694): the panel-built `task_constraints` map
+    # ({hint_id: {corridor_points, preferred_layer, revision}}) rides straight
+    # through — hints_to_router owns the override-vs-legacy-waypoints decision
+    # per hint; this call site's only job is to not lose the key.
     translation = route_bridge.hints_to_router(
-        remaining, board, params.get("selection"))
+        remaining, board, params.get("selection"), params.get("task_constraints"))
     bridge_warnings = drawn_warnings + translation.warnings
     selected_hint_ids = consumed_ids + [
         i for i in translation.selected_ids if i not in consumed_ids]

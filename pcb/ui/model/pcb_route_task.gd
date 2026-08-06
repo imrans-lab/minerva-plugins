@@ -56,6 +56,51 @@ var endpoints: Array = []
 ## OPTIONAL span interval ({} ⇒ whole-net scope). See make_span for the shape.
 var span: Dictionary = {}
 
+## OPTIONAL task-owned steering (Epoch UX1 station 8, DCR 019fd095e694 §"The
+## flows"/"MCP surface"; converged on docket 019fd057ea0b comment 1028). {} ⇒
+## no constraint — a task with no routing_constraint steers nothing beyond its
+## net/span, byte-identical to every task that existed before this station.
+## Shape when present:
+##   corridor_points     Array[Vector2]  the steering polyline, board mm.
+##   preferred_layer     String          "" ⇒ unset.
+##   revision             int            bumped on every constraint change —
+##                         candidates cite the revision that generated them
+##                         (station 9's consumption side, not this station's).
+##   authored_by          String         "ai" / "human".
+##   base_board_revision  int            PCBData.board_revision at authoring
+##                         time — same provenance field RouteCandidate already
+##                         carries, so a constraint's staleness is checkable
+##                         the same way a candidate's is.
+##   owner_hint_id         String         F3 (cold review, Epoch UX1 station 9
+##                         follow-up): the ONE hint id this constraint answers
+##                         for. "" when the task's key names zero or more than
+##                         one hint (steering an ambiguously-attributed task
+##                         degrades to "no owner", never guesses). This is
+##                         what closes the "duplicated authority" hazard for a
+##                         MERGED multi-hint task (H3-1 absorption, station 8
+##                         follow-up): without it, a constraint authored for
+##                         hint A would read as ALSO steering sibling hint B
+##                         just because both share one task_key. Station 9's
+##                         consumption side (panel_tools.gd's
+##                         _task_constraints_for_hints) emits a task's
+##                         constraint ONLY under this exact hint id.
+## Deliberately NEVER mirrored onto a pcb_route_hint annotation's kind_payload:
+## the corridor has exactly ONE authoritative home (this field). Duplicating it
+## onto the durable connectivity object was the "inert seeded waypoints" hazard
+## comment 1028 rejected — an edit to a second copy that cannot affect routing
+## is the same silent-input failure class the DCR exists to close.
+## THIS STATION creates and round-trips this field only; propose/router reading
+## it (constraint CONSUMPTION) is station 9 — see the field's own doc above.
+var routing_constraint: Dictionary = {}
+
+
+## True iff this task carries a routing_constraint (steering beyond bare
+## net/span connectivity). Mirrors is_span_scoped()'s empty-dict-means-none
+## idiom.
+func is_constrained() -> bool:
+	return not routing_constraint.is_empty()
+
+
 ## ── lifecycle axis: open / closed ─────────────────────────────────────────────
 var _state: String = "open"
 var state: String:
@@ -123,6 +168,7 @@ func duplicate_task():
 	copy.net = net
 	copy.endpoints = _endpoints_deep_copy(endpoints)
 	copy.span = span.duplicate(true)
+	copy.routing_constraint = routing_constraint.duplicate(true)
 	copy.set_state(_state)
 	return copy
 
@@ -148,6 +194,7 @@ func to_dict() -> Dictionary:
 		"net": net,
 		"endpoints": eps,
 		"span": _span_to_json(span),
+		"routing_constraint": _constraint_to_json(routing_constraint),
 		"state": _state,
 	}
 
@@ -160,6 +207,11 @@ func load_from_dict(data: Dictionary) -> void:
 		endpoints.append(_endpoint_from_json(e))
 	var raw_span: Variant = data.get("span", {})
 	span = _span_from_json(raw_span as Dictionary) if raw_span is Dictionary else {}
+	# Absent for any task written before this station (same "old readers ignore
+	# the key, new readers do without it" no-schema-bump rule the span backfill
+	# above already documents) — an absent/malformed key loads as {} (unconstrained).
+	var raw_constraint: Variant = data.get("routing_constraint", {})
+	routing_constraint = _constraint_from_json(raw_constraint as Dictionary) if raw_constraint is Dictionary else {}
 	# Route through the validating setter — an absent/garbled state falls back to
 	# "open" (the safe default: an unknown task still needs routing).
 	set_state(str(data.get("state", "open")))
@@ -208,6 +260,55 @@ static func _span_from_json(s: Dictionary) -> Dictionary:
 		ids.append(str(i))
 	out["segment_ids"] = ids
 	out["candidate_id"] = str(out.get("candidate_id", ""))
+	return out
+
+
+## routing_constraint → JSON-safe dict (Vector2 corridor_points → {x,y} list).
+## Empty constraint stays empty (the "unconstrained" byte-identical case).
+static func _constraint_to_json(c: Dictionary) -> Dictionary:
+	if c.is_empty():
+		return {}
+	var out: Dictionary = c.duplicate(true)
+	var pts: Array = []
+	for p in c.get("corridor_points", []):
+		if p is Vector2:
+			pts.append({"x": p.x, "y": p.y})
+		else:
+			pts.append(p)
+	out["corridor_points"] = pts
+	return out
+
+
+## routing_constraint ← JSON dict ({x,y} list → Vector2 corridor_points), with
+## int()/str() normalisation for the scalar fields (JSON round-trips a whole
+## number as float — same gotcha this file's header note calls out for span).
+static func _constraint_from_json(c: Dictionary) -> Dictionary:
+	if c.is_empty():
+		return {}
+	var out: Dictionary = c.duplicate(true)
+	var pts: Array = []
+	for p in c.get("corridor_points", []):
+		if p is Dictionary:
+			pts.append(Vector2(float(p.get("x", 0.0)), float(p.get("y", 0.0))))
+		else:
+			pts.append(p)
+	out["corridor_points"] = pts
+	out["preferred_layer"] = str(out.get("preferred_layer", ""))
+	out["revision"] = int(out.get("revision", 0))
+	out["authored_by"] = str(out.get("authored_by", ""))
+	out["base_board_revision"] = int(out.get("base_board_revision", 0))
+	# F3 (cold review): owner_hint_id is absent on any constraint written
+	# before this follow-up landed — normalises to "" (the same "no owner"
+	# degrade a live-created constraint gets when the task is ambiguously
+	# attributed), never a missing-key crash on the consumption side.
+	out["owner_hint_id"] = str(out.get("owner_hint_id", ""))
+	# V8 (Codex 1047): the station-12 seeding provenance keys are OPTIONAL
+	# (present only on migration-seeded constraints) — normalise only when
+	# present, same float-round-trip gotcha as revision above.
+	if out.has("seeded_from_hint_revision"):
+		out["seeded_from_hint_revision"] = int(out.get("seeded_from_hint_revision", 0))
+	if out.has("seeded_from_hint_id"):
+		out["seeded_from_hint_id"] = str(out.get("seeded_from_hint_id", ""))
 	return out
 
 

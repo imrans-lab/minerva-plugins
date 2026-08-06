@@ -3680,6 +3680,26 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	if _routing_workspace != null and not _file_path.is_empty():
 		_PcbRoutingSidecarScript.load_into_workspace(
 			_file_path, _routing_workspace, _data.to_board_dict(), int(_data.board_revision))
+
+	# Codex 1047 fix round, verdict 6: deterministic load-time reconciliation
+	# of the TWO supersession stores, run at the ONE point where both are in
+	# memory — the annotations sidecar (loaded above) and the routing-workspace
+	# sidecar (loaded just now). The legacy-waypoint constraint + marker pair
+	# is written ordered but NOT atomically (two sidecar files — see
+	# panel_tools.gd reconcile_superseded_waypoint_state's own doc for the
+	# authority rule, the detail_level decision, and the structured record
+	# shape published on workspace.last_load_reconciliation). Runs INSIDE the
+	# _restoring gate: a repair is a restore-class bookkeeping act, never a
+	# user edit — it must not dirty the tab (and, host-side, it never creates
+	# an undo step). The repaired annotations are NOT force-saved here — the
+	# pass re-derives the same outcome on every load (idempotent), and the
+	# sidecar rewrites consistent on the next ordinary save.
+	if _annotation_host != null and _routing_workspace != null:
+		var reconciled: Array = _PanelToolsScript.reconcile_superseded_waypoint_state(
+			_annotation_host, _routing_workspace)
+		if not reconciled.is_empty():
+			_set_status("Reconciled %d superseded-waypoint marker%s against the routing workspace (torn save repaired — see warnings)." % [
+				reconciled.size(), "" if reconciled.size() == 1 else "s"])
 	_restoring = false
 
 	_refresh_board_ui()

@@ -136,6 +136,9 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _hint_undo(host, args)
 		"minerva_pcb_hint_redo":
 			return _hint_redo(host, args)
+		# Codex 1047 fix round, verdict 4: the NAMED guided→detailed conversion
+		"minerva_pcb_hint_convert_to_detailed":
+			return _hint_convert_to_detailed(host, args)
 		"minerva_pcb_add_via":
 			return _add_via(host, args)
 		"minerva_pcb_load_board":
@@ -207,6 +210,12 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 		# ── Bus-propose (docket 019fcac1509d): the bus's PROPOSAL verb ────────
 		"minerva_pcb_workspace_propose_bus":
 			return await _workspace_propose_bus(host, args)
+		# ── Epoch UX1 station 8 (DCR 019fd095e694): the ROUTE INTENT verb ──────
+		"minerva_pcb_add_route_intent":
+			return _add_route_intent(host, args)
+		# Epoch UX1 station 10 (DCR 019fd095e694): the CANDIDATE-EDIT verb
+		"minerva_pcb_workspace_edit_candidate":
+			return _workspace_edit_candidate(host, args)
 	return {}
 
 
@@ -351,6 +360,21 @@ static func _pin_info(host, args: Dictionary) -> Dictionary:
 
 	var result: Dictionary = info.duplicate(true)
 	result["display_name"] = host.pin_display_name(info) if host.has_method("pin_display_name") else ""
+
+	# docket 019fd0ab4c65: pin_info gains "position" — the pad's WORLD position
+	# in board mm, via the same rigid-body transform pad_at()/pin_info() use
+	# internally (pcb_component.get_pin_world_position, applies rotation +
+	# component origin). Both resolution paths (ref and x_mm/y_mm hit-test)
+	# converge on `component`/`pin` above, so one lookup here covers both.
+	# Additive only — a data-resolution miss here degrades to no "position"
+	# key rather than failing a request that host.pin_info() already answered.
+	var data = _resolve_data(host)
+	if data is Object:
+		var comp = data.get_component(component)
+		if comp != null:
+			var world_pos: Vector2 = comp.get_pin_world_position(pin)
+			result["position"] = [float(world_pos.x), float(world_pos.y)]
+
 	return _ok(result)
 
 
@@ -1425,6 +1449,148 @@ static func _hint_redo(host, args: Dictionary) -> Dictionary:
 	return _ok({"id": id, "kind_payload": result.get("kind_payload", {})})
 
 
+## Codex 1047 fix round, verdict 4 — minerva_pcb_hint_convert_to_detailed:
+## the NAMED live-editor operation for the guided→detailed transition on a
+## SUPERSEDED hint. Verdict 4's ruling: this transition must remove the task
+## constraint AND the supersession marker as one NAMED operation, then permit
+## waypoint editing — a plain annotation patch cannot honestly coordinate
+## that (the host's re-injection guard would restore a stripped marker, and
+## nothing annotation-side can clear a workspace constraint), so it is a verb
+## with its own refusal table instead.
+##
+## NOT ATOMIC — ordered two-store writes (Codex 1047 fix round, verdict 6):
+## the constraint lives in the routing workspace (persisted in the workspace
+## sidecar) and the marker lives on the annotation (persisted in the
+## annotations sidecar) — two stores, two files, no transaction spans them. A
+## crash between the two writes, or a later save that lands one sidecar but
+## not the other, leaves a TORN state. The supported contract is therefore:
+## ordered writes (workspace first, annotation second) + DETERMINISTIC
+## LOAD-TIME RECONCILIATION (reconcile_superseded_waypoint_state below, run
+## from the panel's load path once both sidecars are in memory) + the
+## structured record each repair emits (workspace.last_load_reconciliation).
+##
+## Order of operations (workspace FIRST, annotation second — a refusal must
+## land before ANY mutation, and the annotation release is the half that
+## cannot fail once the constraint question is settled):
+##   1. hint exists and is a pcb_route_hint, else hint_not_found /
+##      not_a_route_hint.
+##   2. Resolve the governing task via workspace.task_for_hint (singleton
+##      preferred, membership fallback — that function's own contract):
+##      (a) a CONSTRAINED task whose key names exactly this hint AND whose
+##          constraint's owner_hint_id is this hint → clear
+##          task.routing_constraint = {} (the workspace half, written first);
+##      (b) a CONSTRAINED task that is merged/multi-hint, or whose constraint
+##          names a different owner → REFUSE constraint_not_singly_owned:
+##          clearing it would orphan or damage steering other hints share —
+##          the reply names the owning task and the legal alternative
+##          (steer via minerva_pcb_workspace_reroute_route);
+##      (c) no task, or an UNCONSTRAINED task, while the marker is present →
+##          proceed with the marker-only cleanup. This is the documented TORN
+##          state (e.g. an undo of a prior conversion restored the marker but
+##          not the constraint — see release_superseded_waypoints' own
+##          undoability doc) and this verb is its named recovery.
+##   3. A hint with NO marker and no singly-owned constraint has nothing to
+##      convert → not_superseded (an ordinary hint's detail_level is plain
+##      annotation data, editable through the normal update path).
+##   4. host.release_superseded_waypoints(hint_id): ONE update with the
+##      re-injection and edit-refusal guards stood down — strips the marker
+##      plus the verdict-5 lock keys, sets detail_level "detailed". Undoable
+##      as ONE history step (deliberate; rationale + the constraint-side
+##      asymmetry live on that method's doc, the single home for the
+##      decision).
+##
+## After success: the hint's waypoints are editable again (the host guard
+## keys off the now-absent marker — pure payload state, nothing cached), the
+## seeder's `detailed` gate guarantees no future propose re-seeds/re-stamps
+## it, and route_bridge consumes the waypoints literally (as-drawn) — the
+## reply's note says exactly that.
+static func _hint_convert_to_detailed(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("get_by_id") \
+			or not host.has_method("release_superseded_waypoints"):
+		return _err("PCB annotation host not available")
+	var hint_id: String = str(args.get("hint_id", ""))
+	if hint_id.is_empty():
+		return _err("hint_id is required")
+
+	var ann: Dictionary = host.get_by_id(hint_id)
+	if ann.is_empty():
+		return {
+			"success": false, "error": "hint_not_found", "hint_id": hint_id,
+			"note": "no annotation with this id exists on the board — list route hints via minerva_annotations_list",
+		}
+	if str(ann.get("kind", "")) != "pcb_route_hint":
+		return {
+			"success": false, "error": "not_a_route_hint", "hint_id": hint_id,
+			"kind": str(ann.get("kind", "")),
+			"note": "only a pcb_route_hint can be converted — this annotation is a %s" % str(ann.get("kind", "")),
+		}
+
+	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	var has_marker: bool = kp.has("waypoints_superseded_by_constraint_revision")
+
+	# ── the workspace half: clear (case a), refuse (case b), or skip (case c) ─
+	var task_id: String = ""
+	var cleared_constraint_revision: int = 0
+	var workspace = _get_workspace(host)
+	var task = workspace.task_for_hint(hint_id) if workspace != null else null
+	var cleared := false
+	if task != null:
+		task_id = str(task.task_id)
+		if task.is_constrained():
+			var owner_hints: Array = workspace.task_hint_ids(task_id)
+			var singly_owned: bool = owner_hints.size() == 1 \
+					and str(owner_hints[0]) == hint_id \
+					and str((task.routing_constraint as Dictionary).get("owner_hint_id", "")) == hint_id
+			if not singly_owned:
+				# Case (b): a merged multi-hint task's constraint (or one
+				# attributed to a different hint) is NOT this conversion's to
+				# clear — doing so would orphan/damage steering the other
+				# hint(s) share. Refuse BEFORE any mutation.
+				return {
+					"success": false, "error": "constraint_not_singly_owned",
+					"hint_id": hint_id, "task_id": task_id, "hint_ids": owner_hints,
+					"note": ("task '%s' owns the governing routing constraint and its key names %d hint(s) "
+						+ "(%s) — converting this hint alone would orphan or damage steering they share. "
+						+ "Steer that task via minerva_pcb_workspace_reroute_route instead, or reroute "
+						+ "the individual hint's own task first.") % [task_id, owner_hints.size(), ", ".join(owner_hints)],
+				}
+			# Case (a): singly owned — the workspace half, written first (see
+			# the two-store note in the header: NOT atomic with the annotation
+			# release below; load-time reconciliation owns the torn shapes).
+			cleared_constraint_revision = int((task.routing_constraint as Dictionary).get("revision", 0))
+			task.routing_constraint = {}
+			cleared = true
+
+	if not has_marker and not cleared:
+		# Nothing to convert: never stamped, and no singly-owned constraint to
+		# clear. An ordinary hint's detail_level is plain annotation data —
+		# edit it through minerva_annotations_update, not this verb.
+		return {
+			"success": false, "error": "not_superseded", "hint_id": hint_id,
+			"note": "this hint carries no waypoints_superseded_by_constraint_revision marker and no "
+				+ "singly-owned task constraint — there is nothing to convert; set detail_level via a "
+				+ "normal annotation update instead",
+		}
+
+	# ── the annotation half: the host-sanctioned single-update release ────────
+	var released: Dictionary = host.release_superseded_waypoints(hint_id)
+	if not bool(released.get("ok", false)):
+		return _err("conversion release failed: %s" % str(released.get("error", "unknown")))
+
+	var reply: Dictionary = {
+		"hint_id": hint_id,
+		"task_id": task_id,
+		"detail_level": "detailed",
+		"note": "converted to 'detailed' — the supersession marker and offline locks are gone, the "
+			+ "hint's waypoints are editable again, and routing will follow them literally (as-drawn) "
+			+ "on the next propose; this hint is never re-seeded. The conversion is one undoable "
+			+ "history step (minerva_pcb_hint_undo restores the annotation side only).",
+	}
+	if cleared:
+		reply["cleared_constraint_revision"] = cleared_constraint_revision
+	return _ok(reply)
+
+
 # ── Manual via insertion (U4, DCR 019f7095c395 Stage-2) ───────────────────────
 
 ## MCP parity for ViaInsertTool (pcb_route_hint_kind.gd's canvas gesture):
@@ -1538,9 +1704,9 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	# OTHER production entry point onto the same gather, and needs the same
 	# fix. No workspace bound (headless / before mount) is a silent no-op,
 	# same as every other duck-typed workspace touch in this function.
-	var workspace_for_reconcile = _get_workspace(host)
-	if workspace_for_reconcile != null:
-		_reconcile_hint_lifecycle(host, workspace_for_reconcile)
+	var workspace = _get_workspace(host)
+	if workspace != null:
+		_reconcile_hint_lifecycle(host, workspace)
 
 	var source_hints: Array = _gather_route_hints(host, hint_ids)
 	if source_hints.is_empty():
@@ -1559,7 +1725,26 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	else:
 		selection = {"mode": "ids", "ids": _hint_id_list(source_hints)}
 
-	var reply: Dictionary = await _run_router(host, selection)
+	# Epoch UX1 station 12: one-time legacy waypoint-hint migration, BEFORE
+	# the router runs — see _seed_legacy_waypoint_constraints' own doc for the
+	# full contract (durability, one-time gate, net-resolution discipline).
+	_seed_legacy_waypoint_constraints(host, workspace, data, source_hints)
+
+	# F7 (cold review, Epoch UX1 station 9): this verb SHARES ONE router
+	# round-trip across BOTH its branches (commit=true -> _materialize_routes,
+	# commit=false -> _propose_into_workspace both read `result` off the SAME
+	# reply below), so fixing this ONE _run_router call fixes both at once.
+	# It never built the `task_constraints` half of `extra` at all — a
+	# selected hint whose task carried a routing_constraint silently routed
+	# UNSTEERED through this call, even though the identical hint would be
+	# steered through minerva_pcb_workspace_propose. Mirrors that call's own
+	# extra-building exactly: _route_request_extra(workspace, {}, hint_ids) —
+	# no `scope` here (this verb's own contract never built one; DCR finding
+	# 7 part 2 is propose/reroute-only), just the additive task_constraints
+	# key. `workspace` may be null (headless/no mount) — _route_request_extra
+	# already null-checks it, same as every other caller.
+	var route_extra: Dictionary = _route_request_extra(workspace, {}, _hint_id_list(source_hints))
+	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
 
@@ -1586,12 +1771,18 @@ static func _run_router(host, selection: Dictionary, extra: Dictionary = {}) -> 
 
 
 ## Build the `extra` argument _run_router forwards to route_board: pinned-
-## candidate keep-outs (DCR finding 7 part 1) plus an explicit `scope` (part 2),
-## each added ONLY when there is something to say. Nothing pinned and no scope
-## derived -> {} -> route_board stamps neither key -> the pre-existing
-## {board, route_hints, selection} wire payload, byte-for-byte (the no-regression
-## requirement: "absent scope keeps today's behavior byte-identical").
-static func _route_request_extra(workspace, scope) -> Dictionary:
+## candidate keep-outs (DCR finding 7 part 1), an explicit `scope` (part 2),
+## and — Epoch UX1 station 9 (DCR 019fd095e694) — `task_constraints` (part 3),
+## each added ONLY when there is something to say. Nothing pinned, no scope
+## derived and no selected hint's task constrained -> {} -> route_board stamps
+## NONE of the three keys -> the pre-existing {board, route_hints, selection}
+## wire payload, byte-for-byte (the no-regression requirement every one of
+## these additive keys shares: "absent keeps today's behavior byte-identical").
+## `hint_ids` is the SAME selected-hint-id list the caller already built for
+## `selection` — passed separately (not re-derived from `scope`, which several
+## callers deliberately leave empty) so a task_constraints lookup never depends
+## on a scope having been computed.
+static func _route_request_extra(workspace, scope, hint_ids: Array = []) -> Dictionary:
 	var out: Dictionary = {}
 	if workspace != null:
 		var pinned: Array = workspace.pinned_candidates_wire()
@@ -1599,6 +1790,64 @@ static func _route_request_extra(workspace, scope) -> Dictionary:
 			out["pinned_candidates"] = pinned
 	if scope is Dictionary and not (scope as Dictionary).is_empty():
 		out["scope"] = scope
+	var task_constraints: Dictionary = _task_constraints_for_hints(workspace, hint_ids)
+	if not task_constraints.is_empty():
+		out["task_constraints"] = task_constraints
+	return out
+
+
+## Station 9's propose-side half of "the task constraint becomes consumed":
+## one entry per hint in `hint_ids` whose own task (workspace.task_for_hint —
+## the same "net|hint_id[,...]" key format station 8's eager creation and
+## ingest both mint) carries a routing_constraint. Wire shape per entry
+## mirrors PcbRouteTask.routing_constraint verbatim: {corridor_points:[[x,y],
+## ...], preferred_layer, revision} — route_bridge.hints_to_router reads this
+## exact shape. Absent entirely (empty Dictionary) when no selected hint's
+## task is constrained, which is the overwhelming common case — every hint
+## nobody ever gave a corridor to.
+##
+## F3 (cold review): emitted ONLY when `hid_str` is the constraint's own
+## owner_hint_id. Without this gate, a MERGED multi-hint task ("net|hidA,
+## hidB" — H3-1 absorption) whose constraint answers hidA alone would echo
+## that SAME corridor for hidB too, purely because task_for_hint(hidB) also
+## resolves to the merged task — a duplicated-authority bug: steering one
+## span of a net would silently also steer a sibling span nobody touched. An
+## unattributed constraint (owner_hint_id == "", e.g. one written before this
+## follow-up, or via a steer call that could not name a single owner) emits
+## for NO hint — a safe no-op rather than a guess, same spirit as every other
+## ambiguity refusal in this file.
+static func _task_constraints_for_hints(workspace, hint_ids: Array) -> Dictionary:
+	var out: Dictionary = {}
+	if workspace == null:
+		return out
+	for hid in hint_ids:
+		var hid_str := str(hid)
+		if hid_str.is_empty() or out.has(hid_str):
+			continue
+		var task = workspace.task_for_hint(hid_str)
+		if task == null or not task.is_constrained():
+			continue
+		var c: Dictionary = task.routing_constraint
+		if str(c.get("owner_hint_id", "")) != hid_str:
+			continue
+		out[hid_str] = {
+			"corridor_points": _corridor_points_wire(c.get("corridor_points", [])),
+			"preferred_layer": str(c.get("preferred_layer", "")),
+			"revision": int(c.get("revision", 0)),
+		}
+	return out
+
+
+## PcbRouteTask.routing_constraint.corridor_points (Array[Vector2] at runtime)
+## -> the wire shape route_bridge._corridor_from_task_constraint parses:
+## [[x,y], ...]. A stray non-Vector2 entry (should not occur — the field's own
+## setter contract is Vector2-only, see pcb_route_task.gd) is skipped rather
+## than crashing the request build.
+static func _corridor_points_wire(points: Array) -> Array:
+	var out: Array = []
+	for p in points:
+		if p is Vector2:
+			out.append([(p as Vector2).x, (p as Vector2).y])
 	return out
 
 
@@ -1858,6 +2107,213 @@ static func _gather_route_hints(host, hint_ids: Array) -> Array:
 	return out
 
 
+## Epoch UX1 station 12 (DCR 019fd095e694, docket 019fd057ea0b comment 1028,
+## §"LEGACY WAYPOINT-HINT MIGRATION" — adopted verbatim): ONE-TIME seeding of
+## a legacy hint's inline kind_payload.waypoints into its own task's durable
+## routing_constraint, run at PROPOSE-TIME hint gathering — both
+## minerva_pcb_apply_route_hints and minerva_pcb_workspace_propose call this
+## right after _gather_route_hints, BEFORE _run_router — so the write lands
+## even when the router leg that follows never succeeds (1028: "steering
+## durability must not depend on obtaining a candidate").
+##
+## Station 8's minerva_pcb_add_route_intent is the NEW-PATH tool and NEVER
+## carries waypoints on its own hint (its corridor goes straight to the task —
+## see that function's own doc). This is the COMPATIBILITY path for every
+## hint authored before that station existed, or by any other caller still
+## drawing waypoints onto a hint.
+##
+## Seeds a hint iff ALL of:
+##   - kind_payload.detail_level != "detailed" — a 'detailed' hint IS the
+##     as-drawn channel (route_bridge.materialize_detailed_hints consumes its
+##     waypoints literally as the routed geometry, worker-side); it is NEVER
+##     seeded and NEVER refused by PcbAnnotationHost's edit guard (station
+##     12's other half) — it bypasses this whole mechanism by construction,
+##     unconditionally.
+##   - NOT a bus-branch hint (H1-1, fix round — _is_bus_branch_hint) — a bus
+##     hint's waypoints are never the single-net corridor this station
+##     writes; see the gate's own comment at the call site.
+##   - kind_payload.waypoints is non-empty.
+##   - the hint's net is cleanly derivable — mirrors route_bridge._net_for_hint's
+##     own priority (net_names[0] if the board carries it, else the first
+##     source_pins/dest_pins pin that resolves to a board net) via
+##     _resolve_hint_net_for_seeding, kept to this file's own
+##     completely-derivable-or-nothing discipline (_propose_scope's doc). A
+##     hint this panel cannot resolve a net for is left UNSEEDED —
+##     best-effort migration, not a refusal; it keeps routing off its own
+##     legacy waypoints exactly as it always has.
+##   - the hint's task (workspace.task_for_hint, singleton "net|hint_id" key —
+##     the SAME key ensure_task/ingest mint, reused verbatim, never
+##     reimplemented) is either UNKNOWN or that EXACT singleton — never a
+##     task this hint merely MEMBERS (H1-2, fix round — a merged multi-hint
+##     key some other hint's absorbed route already owns; see the gate's own
+##     comment) — and carries NO routing_constraint yet. This is what makes
+##     seeding ONE-TIME: a task already constrained by ANY channel (a prior
+##     seed, an add_route_intent corridor, an explicit steer) is left
+##     completely alone — its owning hint's waypoints are never re-read.
+##
+## SEEDED CONSTRAINT shape (PcbRouteTask.routing_constraint — the SAME dict
+## every other station writes, plus two migration-only provenance keys 1028
+## asked for by name):
+##   corridor_points        the hint's OWN waypoints, converted to Vector2.
+##   preferred_layer        the hint's kind_payload.layer.
+##   revision                1 (a fresh constraint, same as station 8's).
+##   authored_by             "migration" — distinct from "ai"/"human": this
+##                           corridor was never actually AUTHORED by this
+##                           call, it is a mechanical carry-over of what the
+##                           hint already said.
+##   base_board_revision     PCBData.board_revision at seed time.
+##   owner_hint_id           hint_id — unambiguous by construction (the
+##                           eagerly-minted task names exactly this one hint,
+##                           same as station 8's own singleton task).
+##   seeded_from_hint_id     hint_id again, explicit per 1028's own list
+##                           ("Record seeded_from_hint_id and
+##                           seeded_from_hint_revision").
+##   seeded_from_hint_revision  the hint's OWN revision_stack size at seed
+##                           time — how many prior edits its kind_payload has
+##                           already been through (0 for a hint never edited).
+##
+## Once written, station 9's UNCHANGED _task_constraints_for_hints is the
+## SOLE consumer any propose/reroute reads through, and
+## route_bridge.hints_to_router OVERRIDES kind_payload.waypoints outright once
+## a task_constraints entry exists for a hint (that function's own doc:
+## constraint_pts REPLACES kp.waypoints, never merged with it). ASSERTION:
+## this function's is_constrained() gate above, together with
+## _task_constraints_for_hints' identical gate (station 9, unmodified by this
+## station — it emits a task's constraint only under its own owner_hint_id,
+## never re-deriving anything from the hint's waypoints), together guarantee
+## a constrained task's owning hint's waypoints are read for ROUTING exactly
+## ONCE: at the seed that first constrains the task. No later propose/reroute
+## re-reads them.
+##
+## Immediately after seeding, the hint is stamped
+## kind_payload.waypoints_superseded_by_constraint_revision via the SAME
+## _stamp_waypoints_superseded station 9 already uses for a live steer — one
+## marker, one meaning, regardless of which channel wrote the constraint that
+## made the legacy field inert. PcbAnnotationHost.update_annotation (station
+## 12's other half) refuses any FURTHER edit that changes kind_payload.waypoints
+## on a hint carrying that marker — see that function's own doc.
+##
+## TWO-STORE CONTRACT (Codex 1047 fix round, verdict 6): the constraint write
+## and the stamp above are ORDERED (constraint first) but NOT atomic — they
+## land in two stores persisted to two different sidecar files. A crash
+## between them, or a save of one sidecar without the other, is repaired
+## deterministically at the next load by reconcile_superseded_waypoint_state
+## (see its own doc for the authority rule and record shape) — never papered
+## over by an atomicity claim.
+##
+## Deliberately NOT implemented here: 1028's step 4, a HARD REFUSAL of
+## waypoint-carrying hints at propose time, is explicitly post-boundary — this
+## function only ever ADDS a constraint, it never refuses a propose for a hint
+## carrying legacy waypoints. That refusal, if the epoch ever adopts it, is a
+## separate, later change to _gather_route_hints or its callers.
+static func _seed_legacy_waypoint_constraints(host, workspace, data, source_hints: Array) -> void:
+	if workspace == null or data == null:
+		return
+	for hint in source_hints:
+		if not (hint is Dictionary):
+			continue
+		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		if str(kp.get("detail_level", "")) == "detailed":
+			continue
+		# H1-1 (fix round, epoch UX1 station 12): a BUS-BRANCH hint
+		# (_is_bus_branch_hint — hint_type=="bus" with >=2 net_names, the
+		# worker's own bus-branch ENTRY condition) is NEVER a single-net
+		# corridor seed candidate — route_bridge.hints_to_router resolves it
+		# through a DIFFERENT rule entirely (every present net_names entry, or
+		# degenerate-zero; see _is_bus_branch_hint's own doc), never the
+		# single corridor this station writes. Seeding one anyway would stamp
+		# waypoints_superseded_by_constraint_revision on a hint whose
+		# waypoints were never the routing input to begin with, and later
+		# refuse edits to a field that was never inert — the SAME
+		# "PROVEN REGRESSION" class _propose_scope's own doc names for the
+		# scope builders (a bus hint mis-handled by the single-net rule);
+		# this gate reuses that exact guard rather than re-deriving a second
+		# bus check.
+		if _is_bus_branch_hint(kp):
+			continue
+		var raw_waypoints: Array = kp.get("waypoints", []) if kp.get("waypoints", []) is Array else []
+		if raw_waypoints.is_empty():
+			continue
+		var hint_id: String = str(hint.get("id", ""))
+		if hint_id.is_empty():
+			continue
+		# ONE-TIME gate: any existing task this hint already attributes to
+		# (exact singleton or merged-membership fallback — task_for_hint's own
+		# priority) that is ALREADY constrained means some channel got here
+		# first. Never re-read the hint's waypoints in that case.
+		var existing_task = workspace.task_for_hint(hint_id)
+		if existing_task != null:
+			# H1-2 (fix round, MED): a task this hint merely MEMBERS (a merged
+			# multi-hint key, H3-1 absorption) is never this seed's to touch,
+			# constrained or not. The exact-singleton branch of task_for_hint
+			# (hint_set.size()==1) is the ONLY shape this station itself ever
+			# mints ("<net>|<hint_id>"); a membership match means some OTHER
+			# hint's route already merged with this one and owns (or, on a
+			# constraint conflict, deliberately DROPPED) whatever steering
+			# applies now. Minting a fresh singleton beside that merged task
+			# would resurrect a dropped conflict (or fork a corridor away from
+			# the task the router actually answers for this hint) — strictly
+			# worse than leaving a still-unconstrained legacy hint unseeded,
+			# which is only ever the pre-station-12 behavior it always had.
+			var owner_hints: Array = workspace.task_hint_ids(str(existing_task.task_id))
+			if owner_hints.size() != 1 or str(owner_hints[0]) != hint_id:
+				continue
+			if existing_task.is_constrained():
+				continue
+		var net: String = _resolve_hint_net_for_seeding(kp, data)
+		if net.is_empty():
+			continue  # net not cleanly derivable — best-effort, no seed
+		var corridor_points: Array = []
+		for wp in raw_waypoints:
+			corridor_points.append(_arr_to_vec2(wp))
+		if corridor_points.is_empty():
+			continue
+		var task_id: String = "%s|%s" % [net, hint_id]
+		var task = workspace.ensure_task(task_id, net)
+		if task.is_constrained():
+			continue  # ensure_task resolved onto an already-constrained task
+		var revision_stack: Array = hint.get("revision_stack", []) if hint.get("revision_stack", []) is Array else []
+		task.routing_constraint = {
+			"corridor_points": corridor_points,
+			"preferred_layer": str(kp.get("layer", "")),
+			"revision": 1,
+			"authored_by": "migration",
+			"base_board_revision": int(data.board_revision),
+			"owner_hint_id": hint_id,
+			"seeded_from_hint_id": hint_id,
+			"seeded_from_hint_revision": revision_stack.size(),
+		}
+		_stamp_waypoints_superseded(host, hint_id, 1)
+
+
+## Net resolution mirror of route_bridge._net_for_hint's priority (Python,
+## worker-side), kept to this file's own completely-derivable-or-nothing
+## discipline (see _propose_scope's own doc for the established convention):
+## try kind_payload.net_names[0] when the board carries it, else the first
+## source_pins/dest_pins pin ref that resolves to a board net. "" when
+## neither resolves — the caller's contract is "no seed" for that outcome,
+## never a guess.
+static func _resolve_hint_net_for_seeding(kp: Dictionary, data) -> String:
+	var names: Array = _hint_net_names(kp)
+	if not names.is_empty():
+		var first: String = names[0]
+		if _board_net_set(data).has(first):
+			return first
+		# stale net_names[0] — falls through to pin resolution, same as
+		# _net_for_hint's own fallback.
+	for key in ["source_pins", "dest_pins"]:
+		var refs: Array = kp.get(key, []) if kp.get(key, []) is Array else []
+		for raw_ref in refs:
+			var ref := str(raw_ref)
+			var dot := ref.rfind(".")
+			if dot <= 0 or dot >= ref.length() - 1:
+				continue
+			var net := str(data.find_net_for_pin(ref.left(dot), ref.substr(dot + 1)))
+			if not net.is_empty():
+				return net
+	return ""
+
+
 ## T2.3 normalization seam: derive ONE normalized route record per route, ONCE,
 ## from the raw router `result` + the propose call's source hints. BOTH shadow
 ## projections — the annotation proposal (_write_records_as_proposals below) and
@@ -1899,6 +2355,32 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 		# above was ever attached to a route.
 		if route.has("drc_geometric"):
 			rec["drc_geometric"] = route.get("drc_geometric")
+		# WIDTH PROVENANCE (docket 019fd0ab5af8): the worker already resolves
+		# which source supplied this route's width (methods.py
+		# _attach_effective_routing_rules — "caller_option"/"hint"/"board_rules"/
+		# "engine_default"/"net_class") and stamps it per-route as
+		# route["effective_routing_rules"]["trace_width_mm"]. HITL found an
+		# owner-drawn hint with no width fell back to the router's 0.25mm default
+		# silently where 0.5mm was intended — this is what makes that fallback
+		# OBSERVABLE instead of indistinguishable from an intentional 0.25mm.
+		# Same absent-key contract as drc/drc_geometric above: an older worker
+		# that never attached effective_routing_rules stamps nothing here, and
+		# _ingest_result_into_workspace's stamping onto the candidate record
+		# stays absent too (never invented).
+		var erules: Dictionary = route.get("effective_routing_rules", {})
+		var width_entry: Dictionary = erules.get("trace_width_mm", {}) if erules.get("trace_width_mm", {}) is Dictionary else {}
+		if width_entry.has("value"):
+			rec["effective_width_mm"] = float(width_entry.get("value", 0.0))
+			rec["effective_width_source"] = str(width_entry.get("source", ""))
+		# STATION 9 (DCR 019fd095e694): the task routing_constraint revision that
+		# steered this route, when a task_constraints entry (not legacy inline
+		# waypoints) produced it — methods.py attaches "constraint_revision" onto
+		# a route dict with the SAME absent-key contract as drc/drc_geometric
+		# above (see route_bridge.hints_to_router's own doc). Carried through
+		# unchanged so _ingest_result_into_workspace/_propose_into_workspace can
+		# stamp it onto the candidate record without re-deriving it.
+		if route.has("constraint_revision"):
+			rec["constraint_revision"] = int(route.get("constraint_revision"))
 		records.append(rec)
 	return records
 
@@ -1965,9 +2447,14 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		# only knowing the batch contains a violation somewhere.
 		if rec.has("drc_geometric"):
 			entry["drc_geometric"] = rec.get("drc_geometric")
+		# STATION 9: same additive key _stamp_constraint_revision stamps onto
+		# the workspace-native candidate record, here in the pre-S5 proposals
+		# shape for parity — absent when `rec` carries none.
+		if rec.has("constraint_revision"):
+			entry["constraint_revision"] = int(rec.get("constraint_revision"))
 		proposals.append(entry)
 
-	return _ok({
+	var reply: Dictionary = {
 		"committed": false,
 		"proposed": proposals.size(),
 		"proposals": proposals,
@@ -1986,7 +2473,19 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		"drc_geometric_summary": result.get("drc_geometric_summary", {}),
 		"stale_candidate_ids": _stale_ids(workspace),
 		"note": "candidates landed in the routing workspace; no proposal annotation was written (S5, DCR 019f7095c395) — resolve via minerva_pcb_workspace_commit/_reject(candidate_id) or the canvas candidate menu",
-	})
+	}
+	# Epoch UX1 station 11: same refresh as _ingest_result_into_workspace's
+	# "propose" default — a non-empty landing gets the compact
+	# legal-successors sentence instead of the bare note above.
+	if not proposals.is_empty():
+		reply["note"] = _next_steps("propose", {"count": proposals.size()})
+	# docket 019fce3ac3f5 item 2: emitter-capability notes split out of stuck[]
+	# — additive, absent-when-empty so a caller with no capability warnings
+	# sees no shape change.
+	var emitter_notes: Array = _emitter_notes_from_result(result)
+	if not emitter_notes.is_empty():
+		reply["emitter_notes"] = emitter_notes
+	return _ok(reply)
 
 
 ## The panel's RoutingWorkspace off a host (duck-typed through the same
@@ -2149,7 +2648,7 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 					if not pid.is_empty() and host.remove_annotation(pid):
 						removed_proposals.append(pid)
 					break
-	return {
+	var reply: Dictionary = {
 		"success": true,
 		"committed": true,
 		"applied": consumed_ids.size(),
@@ -2164,6 +2663,12 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		"stuck": _stuck_from_result(result),
 		"via_count": int(result.get("via_count", 0)),
 	}
+	# docket 019fce3ac3f5 item 2: same split as _propose_into_workspace above —
+	# additive, absent-when-empty.
+	var emitter_notes: Array = _emitter_notes_from_result(result)
+	if not emitter_notes.is_empty():
+		reply["emitter_notes"] = emitter_notes
+	return reply
 
 
 ## RETIRED (S5, C4b, DCR 019f7095c395): _proposal_accept / _proposal_reject —
@@ -2180,8 +2685,23 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 ## still carry — see the load-time migration notice in PCBPanel.gd.
 
 
+## docket 019fce3ac3f5 item 2: ~28 per-COMPONENT emitter-capability warnings
+## ("feature_omitted", "captured_geometry_not_emitted", "ordinal_ids" — the
+## worker's own capability bookkeeping, not routing feedback) rode stuck[] on
+## every single propose and buried the 1-3 real per-hint routing warnings
+## under them — unread through two HITL cycles. These three codes are the
+## split key between _stuck_from_result (genuine stuck) and
+## _emitter_notes_from_result (capability noise) below.
+const _EMITTER_NOTE_CODES: Array[String] = [
+	"feature_omitted", "captured_geometry_not_emitted", "ordinal_ids",
+]
+
 ## unrouted nets (+ bridge warnings) → structured "stuck" feedback the agent can
-## reason about: which net, which pad pair is blocked.
+## reason about: which net, which pad pair is blocked. Emitter-capability notes
+## (see _EMITTER_NOTE_CODES) are excluded — they ride result["emitter_notes"]
+## via _emitter_notes_from_result instead (docket 019fce3ac3f5 item 2); a
+## warning without a "code", or whose code isn't a capability note, is treated
+## as genuine stuck feedback, same as before this split.
 static func _stuck_from_result(result: Dictionary) -> Array:
 	var stuck: Array = []
 	for u in result.get("unrouted", []):
@@ -2193,8 +2713,22 @@ static func _stuck_from_result(result: Dictionary) -> Array:
 				"reason": "unrouted — blocked pad pair (congestion or no legal path)",
 			})
 	for w in result.get("warnings", []):
+		if w is Dictionary and str((w as Dictionary).get("code", "")) in _EMITTER_NOTE_CODES:
+			continue
 		stuck.append({"warning": w})
 	return stuck
+
+
+## Sibling of _stuck_from_result: the emitter-capability notes it filters OUT,
+## kept verbatim (same {"warning": …} wrapper stuck[] entries used) so nothing
+## is silently dropped — just moved off the channel the real routing warnings
+## need to be readable in (docket 019fce3ac3f5 item 2).
+static func _emitter_notes_from_result(result: Dictionary) -> Array:
+	var notes: Array = []
+	for w in result.get("warnings", []):
+		if w is Dictionary and str((w as Dictionary).get("code", "")) in _EMITTER_NOTE_CODES:
+			notes.append({"warning": w})
+	return notes
 
 
 ## Ordered polyline (Array of [x, y]) chaining a route's segment endpoints. Layer
@@ -3454,6 +3988,15 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		"source_hint_ids": _string_list(c.source_hint_ids),
 		"task_state": str(workspace.task_state(str(c.task_id))),
 	}
+	# P1-B (Codex 1047): constraint provenance is DURABLE candidate state now
+	# (PcbRouteCandidate.constraint_revision / .hint_status, set at ingest) —
+	# every listing surfaces it, not just the immediate propose/reroute reply.
+	# Same absent-key contract as _stamp_constraint_revision: -1/-empty means
+	# "generated with no constraint in play" and the key is simply absent.
+	if int(c.constraint_revision) >= 0:
+		rec["constraint_revision"] = int(c.constraint_revision)
+	if not (c.hint_status as Array).is_empty():
+		rec["hint_status"] = (c.hint_status as Array).duplicate(true)
 	if workspace.has_method("committed_copper_ids"):
 		var copper: Dictionary = workspace.committed_copper_ids(cid)
 		if not (copper.get("trace_ids", []) as Array).is_empty() \
@@ -3550,6 +4093,11 @@ static func _workspace_disposition_verb(host, args: Dictionary, verb: String) ->
 	# INV-2 is observable, not merely internal: name the candidates whose verdict
 	# this verb invalidated so a caller knows what needs re-checking.
 	reply["stale_candidate_ids"] = _stale_ids(workspace)
+	# Epoch UX1 station 11: reject is the one disposition verb that reopens a
+	# task with no successor of its own — say so. pin/unpin already read as
+	# self-explanatory holds/releases and are unchanged.
+	if verb == "reject":
+		reply["note"] = _next_steps("reject", {})
 	return _ok(reply)
 
 
@@ -3562,6 +4110,40 @@ static func _stale_ids(workspace) -> Array:
 		if c != null and str(c.validation) == "stale":
 			out.append(str(c.candidate_id))
 	return out
+
+
+## Epoch UX1 station 11 (DCR 019fd095e694, docket 019fd095e694 "MCP surface"
+## bullet "Replies name legal successors"): the ONE place that composes the
+## compact next-step sentence a workspace-verb reply's `note` key carries, so
+## the phrasing of "what can I legally call next" cannot drift between the
+## reply sites that need it. TEXT ONLY — no behavior, schema, or tool
+## surface change; every call site already had (or gains) exactly one `note`
+## key, never a second one. `kind` selects the reply site; `ctx` carries just
+## the values that sentence needs (e.g. a landed count). An unrecognised
+## `kind` returns "" so a caller can guard with `if not text.is_empty()`
+## instead of every call site re-deciding what "no guidance" means.
+static func _next_steps(kind: String, ctx: Dictionary) -> String:
+	match kind:
+		"route_intent":
+			var hint_id: String = str(ctx.get("hint_id", ""))
+			var text := "no routing was performed. Legal next steps: minerva_pcb_workspace_propose(hint_ids:[\"%s\"]) or minerva_pcb_apply_route_hints(hint_ids:[\"%s\"]) to generate a candidate for review" % [hint_id, hint_id]
+			var rev: Variant = ctx.get("constraint_revision")
+			if rev != null:
+				text += "; the stored corridor steers minerva_pcb_workspace_propose's router run (Epoch UX1 station 9) — the landed candidate will carry constraint_revision %d" % int(rev)
+			return text
+		"propose":
+			return "%d candidate(s) await review: read geometry with workspace_list include_geometry:true, adjust with workspace_edit_candidate or reroute_route (corridor/preserve_shape_as_corridor), then workspace_commit (single or candidate_ids batch) or workspace_reject" % int(ctx.get("count", 0))
+		"workspace_list":
+			return "%d live candidate(s) pending: read geometry with workspace_list include_geometry:true, adjust with workspace_edit_candidate or reroute_route, then workspace_commit or workspace_reject" % int(ctx.get("count", 0))
+		"edit_candidate":
+			return "edited geometry is candidate-local; pin to hold it, or reroute_route preserve_shape_as_corridor to make it durable steering; commit when ready"
+		"reroute_route":
+			return "a fresh candidate replaced the prior generation; review it (workspace_list include_geometry:true), then workspace_commit or workspace_reject"
+		"commit":
+			return "copper landed; undo reverts; propose remaining open hints"
+		"reject":
+			return "task reopened; re-propose or edit the intent"
+	return ""
 
 
 ## PROPOSE into the workspace. Runs the router exactly as
@@ -3598,8 +4180,17 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	else:
 		selection = {"mode": "ids", "ids": _hint_id_list(source_hints)}
 
+	# Epoch UX1 station 12: one-time legacy waypoint-hint migration, BEFORE
+	# the router runs — see _seed_legacy_waypoint_constraints' own doc for the
+	# full contract (durability, one-time gate, net-resolution discipline).
+	_seed_legacy_waypoint_constraints(host, workspace, data, source_hints)
+
 	var scope: Variant = _propose_scope(hint_ids, source_hints, data)
-	var route_extra: Dictionary = _route_request_extra(workspace, scope)
+	# task_constraints (station 9) is keyed on the RESOLVED selection
+	# (_hint_id_list(source_hints)), not the caller's raw hint_ids arg — an
+	# "open" propose (hint_ids empty, selection {"mode":"open"}) still needs
+	# every ACTUALLY-selected hint's task consulted, not none.
+	var route_extra: Dictionary = _route_request_extra(workspace, scope, _hint_id_list(source_hints))
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
@@ -3656,6 +4247,33 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 	}
 
 
+## Stamp width PROVENANCE (docket 019fd0ab5af8) from a _normalize_route_records
+## record onto the candidate record it produced — additive keys "width_mm"
+## (the route's effective width) and "width_source" (whatever vocabulary
+## methods.py _attach_effective_routing_rules emits — "caller_option", "hint",
+## "board_rules", "engine_default", "net_class" — relayed verbatim, never
+## reinterpreted here). Absent when `route_rec` carries no
+## "effective_width_mm" (the worker attached no provenance for this route —
+## see _normalize_route_records' own absent-key note), so a caller can never
+## mistake "we don't know" for "board default".
+static func _stamp_width_provenance(candidate_rec: Dictionary, route_rec: Dictionary) -> void:
+	if not route_rec.has("effective_width_mm"):
+		return
+	candidate_rec["width_mm"] = route_rec.get("effective_width_mm")
+	candidate_rec["width_source"] = route_rec.get("effective_width_source", "")
+
+
+## STATION 9 (DCR 019fd095e694), the "candidates cite the revision" half:
+## additive `constraint_revision` key, same absent-key contract as
+## _stamp_width_provenance above — absent when `route_rec` carries none (an
+## unguided route, a route guided only by legacy inline waypoints, or an older
+## worker that predates this station), never invented as 0.
+static func _stamp_constraint_revision(candidate_rec: Dictionary, route_rec: Dictionary) -> void:
+	if not route_rec.has("constraint_revision"):
+		return
+	candidate_rec["constraint_revision"] = int(route_rec.get("constraint_revision"))
+
+
 ## Lift MACHINE-READABLE per-hint statuses out of the router's flat warning
 ## list and onto the CANDIDATE they concern (bug 019fcf152791, Stage A).
 ##
@@ -3669,6 +4287,17 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 ##
 ## Matching is by hint id against each candidate's own source_hint_ids — never
 ## by net (two hints can name one net) and never positionally.
+##
+## docket 019fcf152791 (GDScript side): ALSO lifts result.corridor_adherence —
+## the router's per-hint verdict on whether a route honored an owner-authored
+## waypoint corridor ({hint_id, endpoints, status, corridor_honored,
+## max_deviation_mm, tolerance_mm, per_waypoint, skipped_waypoints}). Same
+## placement argument as the warnings above: this is a statement about a
+## specific hint's geometry, so it belongs beside that geometry on the
+## candidate record, not in stuck[]. Entries are attached VERBATIM (worker
+## owns the shape) into the SAME rec["hint_status"] list the warnings-derived
+## statuses use — one list, matched by hint id only, so a caller reads one
+## place instead of two channels that could drift.
 static func _attach_hint_status(landed: Array, result: Dictionary) -> void:
 	var by_hint: Dictionary = {}
 	for w in result.get("warnings", []):
@@ -3686,6 +4315,16 @@ static func _attach_hint_status(landed: Array, result: Dictionary) -> void:
 		if not by_hint.has(hid):
 			by_hint[hid] = []
 		(by_hint[hid] as Array).append(wd)
+	for ca in result.get("corridor_adherence", []):
+		if not (ca is Dictionary):
+			continue
+		var cad: Dictionary = ca
+		var chid := str(cad.get("hint_id", ""))
+		if chid.is_empty():
+			continue
+		if not by_hint.has(chid):
+			by_hint[chid] = []
+		(by_hint[chid] as Array).append(cad)
 	if by_hint.is_empty():
 		return
 	for rec in landed:
@@ -3710,14 +4349,43 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 	var revision: int = int(data.board_revision) if data != null else 0
 	var landed: Array = []
 	var holds: Array = []
+	# F4 (cold review): merge absorption's dropped-constraint conflicts —
+	# same per-call accumulation idiom as `holds` above (workspace.
+	# last_ingest_constraint_conflicts is reset at the start of every
+	# ingest_record call, so this loop collects exactly the conflicts THIS
+	# ingest caused).
+	var constraint_conflicts: Array = []
 	for rec in records:
 		var cid: String = str(workspace.ingest_record(rec, revision))
 		for hold in workspace.last_ingest_holds:
 			holds.append(hold)
+		for conflict in workspace.last_ingest_constraint_conflicts:
+			constraint_conflicts.append(conflict)
 		if cid.is_empty():
 			continue
-		landed.append(_candidate_record(workspace, workspace.get_candidate(cid)))
+		var candidate_rec: Dictionary = _candidate_record(workspace, workspace.get_candidate(cid))
+		# docket 019fd0ab5af8: stamp width provenance from the SAME normalized
+		# `rec` that produced this exact candidate (ingest_record above is a
+		# direct one-call-per-rec correspondence) — not a post-hoc match by net
+		# or hint id, so two routes sharing one net can never cross-attribute.
+		_stamp_width_provenance(candidate_rec, rec)
+		_stamp_constraint_revision(candidate_rec, rec)
+		landed.append(candidate_rec)
 	_attach_hint_status(landed, result)
+	# P1-B (Codex 1047): the statuses _attach_hint_status just lifted onto the
+	# reply records become DURABLE candidate state too — matched back by
+	# candidate_id (the recs were built one-per-ingest above), so workspace
+	# listings and sidecar reloads keep reporting what the router said about
+	# each hint at generation time instead of the stamp evaporating with this
+	# reply. constraint_revision took the ingest_record path (the model owns
+	# that stamp); hint_status is derived HERE from result warnings/adherence,
+	# so here is where it lands on the object.
+	for rec in landed:
+		if not (rec is Dictionary) or not (rec as Dictionary).has("hint_status"):
+			continue
+		var cobj = workspace.get_candidate(str((rec as Dictionary).get("candidate_id", "")))
+		if cobj != null:
+			cobj.hint_status = ((rec as Dictionary)["hint_status"] as Array).duplicate(true)
 	var out: Dictionary = {
 		"proposed": landed.size(),
 		"candidates": landed,
@@ -3731,6 +4399,23 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		"stale_candidate_ids": _stale_ids(workspace),
 		"note": "candidates landed in the routing workspace; no proposal annotations were written",
 	}
+	# Epoch UX1 station 11: a non-empty landing gets the compact legal-
+	# successors sentence instead of the bare "landed" note above — the
+	# reroute callers (_workspace_reroute) refresh this again with their own
+	# more specific text, so this default only shows through for
+	# minerva_pcb_workspace_propose itself.
+	if not landed.is_empty():
+		out["note"] = _next_steps("propose", {"count": landed.size()})
+	# docket 019fce3ac3f5 item 2: same split as apply_route_hints — additive,
+	# absent-when-empty so the shared shape stays unchanged when the worker
+	# reports no capability notes.
+	var emitter_notes: Array = _emitter_notes_from_result(result)
+	if not emitter_notes.is_empty():
+		out["emitter_notes"] = emitter_notes
+	# F4: additive, absent-when-empty — the overwhelming common case (no
+	# merge happened, or the merge's absorbed tasks never conflicted).
+	if not constraint_conflicts.is_empty():
+		out["constraint_conflicts"] = constraint_conflicts
 	var cross: Dictionary = await _cross_candidate_check(host, workspace, data)
 	if not cross.is_empty():
 		out["cross_candidate_check"] = cross
@@ -3772,11 +4457,19 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 		out.append(rec)
 	var tasks: Array = []
 	for t in workspace.list_tasks():
-		tasks.append({
+		var trec: Dictionary = {
 			"task_id": str(t.task_id), "net": str(t.net), "state": str(t.state),
 			"span_scoped": bool(t.is_span_scoped()),
-		})
-	return _ok({
+		}
+		# SECONDARY (cold review) / Epoch UX1 station 8's constraint read
+		# surface: additive-only, absent when the task carries no
+		# routing_constraint — a pre-station task record (or any task nobody
+		# ever gave a corridor) stays byte-identical.
+		if t.is_constrained():
+			trec["constrained"] = true
+			trec["constraint_revision"] = int((t.routing_constraint as Dictionary).get("revision", 0))
+		tasks.append(trec)
+	var reply: Dictionary = {
 		"candidates": out,
 		"count": out.size(),
 		"tasks": tasks,
@@ -3785,7 +4478,13 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 		"pinned_candidate_ids": workspace.pinned.keys(),
 		"stale_candidate_ids": _stale_ids(workspace),
 		"include_terminal": include_terminal,
-	})
+	}
+	# Epoch UX1 station 11: additive `note`, present only when this listing
+	# actually shows a live candidate to act on — an empty workspace has
+	# nothing to name a legal successor for.
+	if out.size() > 0:
+		reply["note"] = _next_steps("workspace_list", {"count": out.size()})
+	return _ok(reply)
 
 
 ## The candidate the UI is focused on. Empty active id is a SUCCESS with
@@ -3830,6 +4529,48 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		return ctx.get("reply")
 	var workspace = ctx["ws"]
 	var data = ctx["data"]
+
+	# BATCH FORM (docket 019fd0ab6dd2): candidate_ids commits several
+	# candidates as ONE undoable step through RoutingWorkspace.commit_batch —
+	# one history entry, one revision bump, and every member reporting its
+	# PRE-batch verdict instead of the staleness a batch-mate's own commit
+	# caused. Exactly one of candidate_id / candidate_ids is required, judged
+	# by ARGUMENT PRESENCE, not by normalized emptiness (Codex review P2):
+	# candidate_ids:[] must get the batch form's own named error, and
+	# candidate_id alongside an empty candidate_ids is still the ambiguous ask
+	# — refusing beats guessing which form the caller meant.
+	if args.has("candidate_ids") and args.has("candidate_id"):
+		return _err("pass candidate_id OR candidate_ids, not both")
+	if args.has("candidate_ids"):
+		var batch_ids: Array = _string_list(args.get("candidate_ids", []))
+		if batch_ids.is_empty():
+			return _err("candidate_ids must name at least one candidate (empty batch)")
+		var batch: Dictionary = workspace.commit_batch(batch_ids, data)
+		if not bool(batch.get("ok", false)):
+			return {
+				"success": false,
+				"error": str(batch.get("error", "commit_failed")),
+				"candidate_id": str(batch.get("candidate_id", "")),
+				"note": str(batch.get("message", "")),
+			}
+		# Same MF-2 hint-lifecycle closure the single path performs below, per
+		# member (see that comment for the full contract).
+		var recs: Array = []
+		for r in batch.get("results", []):
+			for hid in (r as Dictionary).get("consumed_hint_ids", []):
+				_set_hint_lifecycle(host, str(hid), "applied")
+			recs.append(_candidate_record(workspace,
+				workspace.get_candidate(str((r as Dictionary).get("candidate_id", "")))))
+		var breply: Dictionary = batch.duplicate(true)
+		breply.erase("ok")
+		breply["candidates"] = recs
+		breply["stale_candidate_ids"] = _stale_ids(workspace)
+		breply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes EVERY batch member's copper AND returns each candidate to its pre-commit disposition — the source hints reopen the next time any workspace tool runs (see _reconcile_hint_lifecycle), not synchronously with this undo"
+		# Epoch UX1 station 11: additive alongside undo_note (a different
+		# question — "what next", not "how to take it back").
+		breply["note"] = _next_steps("commit", {})
+		return _ok(breply)
+
 	var cid: String = str(args.get("candidate_id", ""))
 	if cid.is_empty():
 		return _err("candidate_id is required")
@@ -3862,20 +4603,504 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 	reply["candidate"] = _candidate_record(workspace, workspace.get_candidate(cid))
 	reply["stale_candidate_ids"] = _stale_ids(workspace)
 	reply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes this copper AND returns the candidate to its pre-commit disposition — the source hint(s) reopen the next time any workspace tool runs (see _reconcile_hint_lifecycle), not synchronously with this undo"
+	# Epoch UX1 station 11: additive alongside undo_note (a different
+	# question — "what next", not "how to take it back").
+	reply["note"] = _next_steps("commit", {})
 	return _ok(reply)
 
 
-## TRY-AGAIN over the WHOLE route. Runs the router again scoped to the
-## candidate's own source hints and lands a NEW generation for the same task.
+## TRY-AGAIN over the WHOLE route, with optional TASK STEERING beforehand
+## (Epoch UX1 station 9, DCR 019fd095e694 — docket 019fd057ea0b comment 1028's
+## "surface the choice at REROUTE time" resolution). Runs the router again
+## scoped to the candidate's own source hints and lands a NEW generation for
+## the same task — see _workspace_reroute's own doc for that half, unchanged.
 ##
-## THE ROUTER IS RUN FIRST, then the prior is retired. Retiring first would mean
-## a router failure left the task with no answer at all — the old geometry gone
-## and nothing in its place. A PROPOSED prior is superseded by the ingest itself;
-## only a PINNED prior needs the explicit targeted supersede, which is exactly
-## the consent the workspace's ingest policy demands (acting on THIS candidate)
-## and not the batch consent it refuses.
+## THE ROUTER IS RUN FIRST (inside _workspace_reroute below), then the prior is
+## retired. Retiring first would mean a router failure left the task with no
+## answer at all — the old geometry gone and nothing in its place. A PROPOSED
+## prior is superseded by the ingest itself; only a PINNED prior needs the
+## explicit targeted supersede, which is exactly the consent the workspace's
+## ingest policy demands (acting on THIS candidate) and not the batch consent
+## it refuses.
+##
+## Optional STEERING args, mutually exclusive by ARGUMENT PRESENCE (never
+## guessed from truthiness — same convention this file uses throughout, e.g.
+## _workspace_commit's candidate_id/candidate_ids check):
+##   corridor                     Array of {x_mm,y_mm} — REPLACES the task's
+##                                 routing_constraint with this corridor.
+##   preserve_shape_as_corridor   bool — true DERIVES the new corridor from the
+##                                 candidate's CURRENT geometry polyline, read
+##                                 BEFORE this same call reroutes it into
+##                                 something else. A caller passing `false`
+##                                 alongside neither key present is a plain
+##                                 reroute — this is the one steering key whose
+##                                 own VALUE (not just presence) decides
+##                                 whether steering happens at all, because
+##                                 "false" has an honest meaning ("reroute
+##                                 fresh") that "corridor:[]" does not.
+##   expected_constraint_revision int — optimistic concurrency on the task's
+##                                 CURRENT constraint revision (0 for an
+##                                 unconstrained task). A mismatch refuses
+##                                 `constraint_revision_conflict` naming the
+##                                 actual revision and steers NOTHING. Read
+##                                 only when a steering arg above is also
+##                                 acting — a bare expected_constraint_revision
+##                                 with neither corridor nor
+##                                 preserve_shape_as_corridor:true has nothing
+##                                 to guard and is ignored.
+##
+## DURABILITY INVARIANT (comment 1028: "steering durability does not depend on
+## obtaining a candidate"). When a steering arg IS acting, the task's
+## routing_constraint is written AFTER every refusable precondition has
+## passed (F1, cold review — see below) but still BEFORE the router runs. If
+## the router leg THEN fails — worker unavailable, or the pinned-prior
+## supersede/ingest step that follows it — the bumped constraint STANDS. The
+## operator's steering decision is not undone by a routing failure, because
+## it was never conditioned on one succeeding: a later re-propose or reroute
+## still sees the fresh corridor even if THIS call's router leg never landed
+## a candidate. And (F1's own follow-up) that failure reply now SAYS so —
+## `steered:true` + `constraint_revision` are stamped onto ANY failure this
+## function returns once steering has landed, so the bump is REPORTED, not
+## just durable.
+##
+## F1 (cold review) reordered this function: ALL refusable preconditions —
+## both _workspace_reroute's own (candidate exists, disposition can reach
+## superseded, source hints present/resolvable) and steering's own (task
+## exists, expected_constraint_revision match, corridor present/valid, F3's
+## multi_span_task) — are checked FIRST, via the shared _reroute_precheck,
+## before ANY mutation. Previously steering wrote the constraint BEFORE
+## _workspace_reroute's own checks ran, so a candidate that could never
+## legally reach "superseded" (already committed/rejected/superseded) still
+## took a silent constraint-revision bump on its way to a refusal it was
+## always going to hit.
 static func _workspace_reroute_route(host, args: Dictionary) -> Dictionary:
-	return await _workspace_reroute(host, args, {})
+	var has_corridor: bool = args.has("corridor")
+	var has_preserve_key: bool = args.has("preserve_shape_as_corridor")
+	if has_corridor and has_preserve_key:
+		return {
+			"success": false, "error": "corridor_args_conflict",
+			"note": "pass corridor OR preserve_shape_as_corridor, not both — they are two different ways of stating the task's new routing_constraint",
+		}
+	var preserve: bool = has_preserve_key and bool(args.get("preserve_shape_as_corridor", false))
+	var wants_steer: bool = has_corridor or preserve
+
+	var pre: Dictionary = _reroute_precheck(host, args)
+	if not bool(pre.get("ok", false)):
+		return pre.get("reply")
+
+	if wants_steer:
+		var steer: Dictionary = _steer_task_before_reroute(host, args, preserve, pre)
+		if not bool(steer.get("ok", false)):
+			return steer.get("reply")
+
+	var reply: Dictionary = await _workspace_reroute(host, args, {}, pre)
+	if wants_steer and not bool(reply.get("success", true)):
+		# F1: the bump above already landed durably by this point (every
+		# remaining failure mode — worker unavailable, pinned-supersede,
+		# ingest — happens strictly AFTER the write) — say so on the reply
+		# rather than leaving the caller to infer it. `constraint_revision`
+		# is the revision AFTER this call's steer: a retry that wants to
+		# steer again passes THIS number as expected_constraint_revision, not
+		# whatever it read before making this call.
+		var task = pre["workspace"].get_task(str(pre["candidate"].task_id))
+		reply["steered"] = true
+		reply["constraint_revision"] = int(task.routing_constraint.get("revision", 0)) \
+			if task != null and task.is_constrained() else 0
+	return reply
+
+
+## The steering half of _workspace_reroute_route, run AFTER every reroute-side
+## refusable precondition has already passed (`pre` — the _reroute_precheck
+## result the caller ran first) and to completion BEFORE the router (see that
+## function's DURABILITY INVARIANT doc). Returns {"ok":true} once the task's
+## routing_constraint has been written, or {"ok":false,"reply":<named
+## refusal>} — every error this feature can produce is owned here, and
+## _workspace_reroute_route hands the refusal back unchanged.
+static func _steer_task_before_reroute(host, args: Dictionary, preserve: bool, pre: Dictionary) -> Dictionary:
+	var workspace = pre["workspace"]
+	var data = pre["data"]
+	var c = pre["candidate"]
+	var cid: String = str(pre["cid"])
+
+	var task = workspace.get_task(str(c.task_id))
+	if task == null:
+		return {"ok": false, "reply": {
+			"success": false, "error": "task_not_found", "candidate_id": cid,
+			"task_id": str(c.task_id),
+			"note": "this candidate's task no longer exists in the workspace — there is nothing to steer",
+		}}
+
+	var actual_revision: int = int((task.routing_constraint as Dictionary).get("revision", 0)) \
+		if task.is_constrained() else 0
+	if args.has("expected_constraint_revision"):
+		var expected: int = int(args.get("expected_constraint_revision"))
+		if expected != actual_revision:
+			return {"ok": false, "reply": {
+				"success": false, "error": "constraint_revision_conflict",
+				"candidate_id": cid, "task_id": str(c.task_id),
+				"expected_constraint_revision": expected,
+				"actual_constraint_revision": actual_revision,
+				"note": "the task's routing_constraint has moved since you read it — re-read the current revision (minerva_pcb_workspace_list reports constraint_revision on constrained tasks) before steering it again",
+			}}
+
+	# F3 (cold review): this task's own hint attribution. A SINGLETON key
+	# ("net|hint_id") is the only shape with an unambiguous owner; a MERGED
+	# multi-hint task (H3-1 absorption, "net|hidA,hidB") has no single hint
+	# the constraint this call is about to write could honestly be
+	# attributed to.
+	var task_hints: Array = workspace.task_hint_ids(str(task.task_id))
+	var owner_hint_id: String = str(task_hints[0]) if task_hints.size() == 1 else ""
+
+	var corridor_points: Array
+	if preserve:
+		# F3: preserve_shape_as_corridor DERIVES a corridor and attributes it
+		# to this task — refuse rather than derive-and-misattribute (the
+		# duplicated-authority hazard this follow-up closes) when there is no
+		# single hint to own it.
+		if task_hints.size() != 1:
+			return {"ok": false, "reply": {
+				"success": false, "error": "multi_span_task", "candidate_id": cid,
+				"task_id": str(c.task_id), "hint_ids": task_hints,
+				"note": "preserve_shape_as_corridor needs a task whose key names exactly one hint, so the derived corridor has an unambiguous owner — this task names %d (%s); steer with an explicit `corridor` array instead, or reroute the individual hint's own task" % [task_hints.size(), ", ".join(task_hints)],
+			}}
+		var chained: Dictionary = _corridor_from_candidate_geometry(c)
+		if not bool(chained.get("ok", false)):
+			var runs: int = int(chained.get("runs", 0))
+			if runs <= 1:
+				return {"ok": false, "reply": {
+					"success": false, "error": "no_geometry_to_preserve", "candidate_id": cid,
+					"note": "this candidate has no segment geometry to derive a corridor from",
+				}}
+			# F6 (cold review): this candidate's segments do not
+			# endpoint-chain into ONE continuous path — the old
+			# implementation concatenated every disconnected run anyway,
+			# fabricating a jump across the gap the candidate's own geometry
+			# never drew.
+			return {"ok": false, "reply": {
+				"success": false, "error": "no_single_path", "candidate_id": cid,
+				"runs": runs,
+				"note": "this candidate's geometry is %d disconnected runs, not one continuous path — preserve_shape_as_corridor needs a single chainable polyline" % runs,
+			}}
+		corridor_points = chained["points"]
+	else:
+		# V2 (Codex 1047): the SAME single-owner requirement as the preserve
+		# branch above — an explicit corridor steered onto a MERGED multi-hint
+		# task would write owner_hint_id:"" (there is no single hint to
+		# attribute it to), and _task_constraints_for_hints deliberately emits
+		# an ownerless constraint for NO hint. That is a successful-looking
+		# durable NO-OP: the revision bumps, the reply says steered, and no
+		# future propose is influenced by it. Refuse BEFORE mutation instead.
+		if task_hints.size() != 1:
+			return {"ok": false, "reply": {
+				"success": false, "error": "multi_span_task", "candidate_id": cid,
+				"task_id": str(c.task_id), "hint_ids": task_hints,
+				"note": "steering writes an owner-attributed constraint, and this task's key names %d hints (%s) — no single owner exists, so the corridor would durably steer NOTHING; steer the individual hint's own task instead" % [task_hints.size(), ", ".join(task_hints)],
+			}}
+		var parsed: Variant = _parse_route_intent_corridor(args.get("corridor"))
+		if parsed == null:
+			return {"ok": false, "reply": _err("corridor must be an array of {x_mm, y_mm} points")}
+		corridor_points = parsed
+		if corridor_points.is_empty():
+			# F12 (cold review): named refusal, not prose-as-code — the
+			# reroute path's own copy of the same defect
+			# minerva_pcb_add_route_intent's corridor:[] check already had
+			# (that one is a DIFFERENT call site, out of this fence).
+			return {"ok": false, "reply": {
+				"success": false, "error": "corridor_present_but_empty", "candidate_id": cid,
+				"note": "corridor was present but carried no points — omit the key entirely for \"no corridor\" instead",
+			}}
+
+	var preserved_layer: String = str(task.routing_constraint.get("preferred_layer", "")) \
+		if task.is_constrained() else ""
+	var new_revision: int = actual_revision + 1
+	# DURABILITY INVARIANT (docket 019fd057ea0b comment 1028) — see
+	# _workspace_reroute_route's own doc for the full rationale. Written NOW,
+	# before that caller ever reaches the router: a routing failure below must
+	# not undo this steering decision, because the decision was never
+	# conditioned on the router succeeding.
+	task.routing_constraint = {
+		"corridor_points": corridor_points,
+		"preferred_layer": preserved_layer,
+		"revision": new_revision,
+		"authored_by": "ai",
+		"base_board_revision": int(data.board_revision) if data != null else 0,
+		"owner_hint_id": owner_hint_id,
+	}
+	# F2 (cold review): duplicated-authority guard for legacy waypoints — see
+	# _stamp_waypoints_superseded's own doc for the full contract, including
+	# the deferred render/edit-refusal implications note.
+	_stamp_waypoints_superseded(host, owner_hint_id, new_revision)
+	return {"ok": true}
+
+
+## Endpoint-coincidence epsilon (board mm) for chaining a candidate's OWN
+## segment geometry into one polyline — same constant family as
+## RoutingWorkspace._COMMIT_CHAIN_EPSILON_MM / pcb_canvas.gd
+## CANDIDATE_RUN_CHAIN_EPSILON_MM (each file keeps its own copy of this
+## family rather than a shared cross-file const — it only absorbs float
+## noise, since the router splits at exact shared points, and the three
+## sites already disagreed on nothing but the name before this one existed).
+const _GEOMETRY_CHAIN_EPSILON_MM := 0.0001
+
+## preserve_shape_as_corridor's source: the candidate's CURRENT geometry,
+## chained into ONE ordered Array[Vector2] polyline — but ONLY when every
+## segment endpoint-chains to the next (F6, cold review, Epoch UX1 station
+## 9). The old implementation concatenated every segment's points regardless
+## of adjacency, so a candidate with more than one DISCONNECTED run (the
+## mandatory GATE fixture in test_workspace_tools.gd is exactly this shape —
+## see its own doc) produced one polyline with a fabricated jump across the
+## gap: a corridor claiming a path the candidate's own geometry never drew.
+## Segments are walked in the candidate's own emission order (the route's
+## walk order); a segment whose first point does not endpoint-coincide with
+## the running polyline's last point (within _GEOMETRY_CHAIN_EPSILON_MM)
+## starts a NEW run instead of extending the current one — the SAME EPSILON
+## RoutingWorkspace._chain_seg_plan uses commit-side (mirrored rather than
+## shared; that helper sits inside the commit transaction's own fence). Only
+## the epsilon is shared, deliberately NOT _chain_seg_plan's full merge
+## condition (same layer + same width): a corridor is plain XY steering
+## geometry, layer-agnostic, so a layer-changing via (endpoint-coincident,
+## different layer either side) chains into ONE run here exactly as it did
+## before this fix — only a GENUINE gap between two coordinates breaks the
+## run, never a layer change alone.
+## Returns {"ok":true, "points":[...]} for exactly one run, or
+## {"ok":false, "runs":N} for zero or more than one — the caller refuses BY
+## NAME (no_geometry_to_preserve / no_single_path) rather than silently
+## bridging the gap. Read BEFORE the reroute that follows replaces this
+## candidate's geometry with something else — a snapshot of the shape as the
+## caller last saw/edited it, not a live reference.
+static func _corridor_from_candidate_geometry(c) -> Dictionary:
+	var runs: Array = []  # Array[Array[Vector2]]
+	for seg in c.segments:
+		if not (seg is Dictionary):
+			continue
+		var seg_pts: Array = []
+		for p in (seg as Dictionary).get("points", []):
+			if p is Vector2:
+				seg_pts.append(p)
+		if seg_pts.is_empty():
+			continue
+		if not runs.is_empty():
+			var cur: Array = runs[runs.size() - 1]
+			var last: Vector2 = cur[cur.size() - 1]
+			if last.distance_to(seg_pts[0] as Vector2) <= _GEOMETRY_CHAIN_EPSILON_MM:
+				for k in range(1, seg_pts.size()):
+					cur.append(seg_pts[k])
+				continue
+		runs.append(seg_pts.duplicate())
+	if runs.size() != 1:
+		return {"ok": false, "runs": runs.size()}
+	return {"ok": true, "points": runs[0]}
+
+
+## F2 (cold review, Epoch UX1 station 9): duplicated-authority guard for
+## legacy waypoints. When a task's routing_constraint steers routing AND the
+## hint annotation this constraint is attributed to (`owner_hint_id` — "" is
+## a no-op call, see below) still carries its own kind_payload.waypoints,
+## that legacy field is now DEAD for routing purposes
+## (route_bridge.hints_to_router's task_constraints override already ignores
+## it entirely — see that function's own doc) — but nothing on the
+## annotation itself said so, which is the duplicated-authority hazard: an
+## editor looking at the hint's own waypoints would see geometry that no
+## longer describes what actually steers the route. Stamps
+## kind_payload.waypoints_superseded_by_constraint_revision = N through the
+## standard mutate-with-history seam (host.update_annotation — the same one
+## _set_hint_lifecycle/_add_via use), additive-only, never clearing the
+## legacy waypoints themselves (they stay readable, just marked stale).
+##
+## RENDER / EDIT-REFUSAL IMPLICATIONS (e.g. should the canvas grey out a
+## superseded corridor, or refuse to hand-edit it) are explicitly OUT OF
+## FENCE for this round — deferred to the pre-boundary Codex round per the
+## cold review that raised this finding.
+##
+## Best-effort and silent: an empty `hint_id` (steering a multi-hint task via
+## an explicit `corridor` — F3's owner_hint_id is "" there, nothing to
+## stamp), a host that cannot update annotations, a hint that no longer
+## exists, or a hint with no legacy waypoints to begin with all degrade to a
+## no-op rather than failing the steer that already durably wrote the task's
+## own constraint.
+static func _stamp_waypoints_superseded(host, hint_id: String, constraint_revision: int) -> void:
+	if hint_id.is_empty() or host == null \
+			or not host.has_method("get_by_id") or not host.has_method("update_annotation"):
+		return
+	var ann: Dictionary = host.get_by_id(hint_id)
+	if ann.is_empty():
+		return
+	var kp: Variant = ann.get("kind_payload", {})
+	if not (kp is Dictionary) or (kp.get("waypoints", []) as Array).is_empty():
+		return
+	var updated: Dictionary = ann.duplicate(true)
+	var new_kp: Dictionary = (kp as Dictionary).duplicate(true)
+	new_kp["waypoints_superseded_by_constraint_revision"] = constraint_revision
+	# Codex 1047 fix round, verdict 5: the OFFLINE lock, stamped beside the
+	# marker. Core's MCPAnnotationTools offline (document_path) update path
+	# refuses any sidecar patch that actually CHANGES a kind_payload key named
+	# in _locked_fields (error "live_editor_required", echoing _lock_reason) —
+	# the live host's own guards cannot protect a sidecar edited with no panel
+	# open, and these two fields coordinate with workspace state (the task's
+	# routing_constraint) that only the live editor can see. Removed ONLY by
+	# release_superseded_waypoints (the minerva_pcb_hint_convert_to_detailed
+	# conversion, verdict 4); the host's marker re-injection keeps them from
+	# being stripped by a partial live update. detail_level is locked along
+	# with waypoints because flipping it to 'detailed' offline would silently
+	# exit the seeder's one-time gate without clearing the constraint —
+	# exactly the uncoordinated transition verdict 4's named operation exists
+	# to own.
+	new_kp["_locked_fields"] = ["waypoints", "detail_level"]
+	new_kp["_lock_reason"] = ("waypoints are superseded by the task's routing constraint "
+		+ "(revision %d) — open the board in the live editor and steer via "
+		+ "minerva_pcb_workspace_reroute_route, or reclaim manual waypoint control with "
+		+ "minerva_pcb_hint_convert_to_detailed") % constraint_revision
+	updated["kind_payload"] = new_kp
+	host.update_annotation(hint_id, updated)
+
+
+## Codex 1047 fix round, verdict 6 — DETERMINISTIC LOAD-TIME RECONCILIATION of
+## the two supersession stores. The legacy-waypoint supersession system writes
+## TWO stores that persist in TWO different sidecar files:
+##   1. the routing workspace's task routing_constraint (workspace sidecar,
+##      via to_sidecar_dict/tasks) — written by _seed_legacy_waypoint_
+##      constraints and _steer_task_before_reroute, cleared by
+##      _hint_convert_to_detailed;
+##   2. the annotation's kind_payload.waypoints_superseded_by_constraint_
+##      revision marker + the verdict-5 offline-lock keys (_locked_fields/
+##      _lock_reason) (annotations sidecar) — written by
+##      _stamp_waypoints_superseded, stripped by the host's sanctioned
+##      release.
+## Every writer orders the pair (constraint first, marker second) but nothing
+## makes the pair atomic: a crash/kill between the two writes, a save that
+## lands one sidecar but not the other, or the DOCUMENTED undo-of-conversion
+## asymmetry (release_superseded_waypoints' own doc) all leave a TORN state.
+## Per the verdict-6 ruling, the supported contract is: ordered two-store
+## writes + THIS deterministic reconciliation pass at load + the structured
+## record below — never a claim of atomicity.
+##
+## AUTHORITY RULE: the workspace constraint store is authoritative; the
+## annotation marker is DERIVED. "A constraint governs this hint" is decided
+## by EXACTLY the gate the wire channel uses (_task_constraints_for_hints,
+## mirrored, never re-derived differently): workspace.task_for_hint(hint) is
+## constrained AND its constraint's owner_hint_id == hint — that is precisely
+## the condition under which route_bridge.hints_to_router overrides the
+## hint's own waypoints, i.e. under which the marker tells the truth.
+##
+## Per pcb_route_hint annotation, exactly one of three outcomes:
+##   - CONSTRAINT-WITHOUT-MARKER (governing constraint; hint carries no
+##     marker, e.g. workspace sidecar saved but annotations sidecar not, or a
+##     crash between the seed's constraint write and its stamp): re-stamp the
+##     marker at the constraint's revision via the SAME
+##     _stamp_waypoints_superseded every live writer uses (which also writes
+##     the lock keys — so this doubles as the CX-C backfill for pre-lock-era
+##     stamps). Only when the hint carries waypoints to supersede — the stamp
+##     helper's own empty-waypoints no-op is mirrored here so an intent-only
+##     hint (waypoints [] by construction) never gets a phantom marker or a
+##     phantom record.
+##   - MARKER-OUT-OF-SHAPE (governing constraint AND marker, but the marker
+##     names a different revision or the lock keys are absent — a pre-CX-C
+##     stamp, or a stamp from a superseded save): same re-stamp, same
+##     mechanism, reason "marker_out_of_shape".
+##   - MARKER-WITHOUT-CONSTRAINT (marker present; NO governing constraint —
+##     e.g. annotations sidecar saved but workspace sidecar not, or the
+##     undo-of-conversion torn state): strip marker + lock keys through the
+##     host's sanctioned bookkeeping path (reconcile_strip_superseded_marker
+##     — NEVER a plain update_annotation, whose H2-1 re-injection guard would
+##     put the marker straight back). detail_level is PRESERVED as found —
+##     the deliberate rule; the full rationale (both reachable torn shapes
+##     carry the detail_level that describes the pre-torn intent) lives on
+##     that host method's own doc, the single home for the decision.
+##
+## Every repair emits a STRUCTURED record (the supported contract — the
+## push_warning prose beside it is best-effort narration, per the ruling) in
+## the F4 conflict-record idiom: {hint_id, task_id, action, reason[,
+## constraint_revision]}. Records are returned AND, when the workspace
+## carries the field, published on workspace.last_load_reconciliation (reset
+## at the start of every pass — the last_ingest_* per-call convention).
+##
+## HISTORY: reconciliation is bookkeeping — neither direction creates an
+## undoable step. The strip goes through the host's _suppress_hint_history
+## seam; the stamp touches no _HINT_HISTORY_FIELDS entry (the same property
+## that keeps every live stamp out of history).
+##
+## IDEMPOTENT + DETERMINISTIC: each hint's outcome depends only on that hint
+## and its own governing task (no cross-hint interaction, no ordering
+## dependence), and every repair moves the pair INTO the consistent state its
+## own gate tests — so a second pass over the repaired stores emits nothing.
+##
+## Duck-typed/headless-safe at every hop (a stub host or workspace missing a
+## method degrades to skipping that hint, never crashing), matching this
+## file's off-tree discipline.
+static func reconcile_superseded_waypoint_state(host, workspace) -> Array:
+	var records: Array = []
+	if host == null or workspace == null \
+			or not host.has_method("get_all_annotations") \
+			or not workspace.has_method("task_for_hint"):
+		return records
+	# Per-call reset FIRST (the last_ingest_* convention) so a pass that finds
+	# nothing torn leaves the channel empty rather than describing a stale
+	# earlier load.
+	if "last_load_reconciliation" in workspace:
+		workspace.last_load_reconciliation = []
+	for ann in host.get_all_annotations():
+		if not (ann is Dictionary) or str((ann as Dictionary).get("kind", "")) != "pcb_route_hint":
+			continue
+		var hint_id: String = str((ann as Dictionary).get("id", ""))
+		if hint_id.is_empty():
+			continue
+		var kp: Dictionary = (ann as Dictionary).get("kind_payload", {}) \
+			if (ann as Dictionary).get("kind_payload", {}) is Dictionary else {}
+		var has_marker: bool = kp.has("waypoints_superseded_by_constraint_revision")
+		# The authority gate — _task_constraints_for_hints' exact condition.
+		var task = workspace.task_for_hint(hint_id)
+		var constraint: Dictionary = {}
+		if task != null and task.is_constrained():
+			constraint = task.routing_constraint
+		var governed: bool = not constraint.is_empty() \
+			and str(constraint.get("owner_hint_id", "")) == hint_id
+		if governed:
+			var wp: Array = kp.get("waypoints", []) if kp.get("waypoints", []) is Array else []
+			if wp.is_empty():
+				continue  # nothing to supersede — mirror the stamp's own no-op
+			var rev: int = int(constraint.get("revision", 0))
+			var out_of_shape: bool = has_marker and (
+				int(kp.get("waypoints_superseded_by_constraint_revision", 0)) != rev
+				or not kp.has("_locked_fields") or not kp.has("_lock_reason"))
+			if has_marker and not out_of_shape:
+				continue  # consistent — the common case
+			_stamp_waypoints_superseded(host, hint_id, rev)
+			var record: Dictionary = {
+				"hint_id": hint_id,
+				"task_id": str(task.task_id),
+				"action": "restamped_marker",
+				"reason": "marker_out_of_shape" if has_marker else "constraint_without_marker",
+				"constraint_revision": rev,
+			}
+			records.append(record)
+			push_warning(("[panel_tools] load reconciliation (verdict 6): re-stamped "
+				+ "waypoints_superseded_by_constraint_revision=%d on pcb_route_hint '%s' — task '%s' "
+				+ "carries the governing routing_constraint (the authoritative store) but the "
+				+ "annotation marker was %s (torn two-store save)") % [
+					rev, hint_id, str(task.task_id),
+					"out of shape" if has_marker else "absent"])
+		elif has_marker:
+			if not host.has_method("reconcile_strip_superseded_marker"):
+				continue
+			var stripped: Dictionary = host.reconcile_strip_superseded_marker(hint_id)
+			if not bool(stripped.get("ok", false)) or not bool(stripped.get("changed", false)):
+				continue
+			records.append({
+				"hint_id": hint_id,
+				"task_id": str(task.task_id) if task != null else "",
+				"action": "released_stale_marker",
+				"reason": "marker_without_constraint",
+			})
+			push_warning(("[panel_tools] load reconciliation (verdict 6): stripped a stale "
+				+ "waypoints_superseded_by_constraint_revision marker (+ lock keys) from "
+				+ "pcb_route_hint '%s' — no owner-attributed routing_constraint governs it in the "
+				+ "workspace (the authoritative store), so its waypoints are live authority again; "
+				+ "detail_level preserved as found") % hint_id)
+	# Publish on the workspace's structured channel (per-call reset, same
+	# convention as last_ingest_holds/last_ingest_constraint_conflicts).
+	if "last_load_reconciliation" in workspace:
+		workspace.last_load_reconciliation = records.duplicate(true)
+	return records
 
 
 ## REROUTE-SPAN — DEGRADED, and it says so on every reply.
@@ -3902,20 +5127,30 @@ static func _workspace_reroute_span(host, args: Dictionary) -> Dictionary:
 	})
 
 
-static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dictionary:
+## Preconditions a reroute needs BEFORE any mutation — candidate exists, its
+## disposition can legally reach "superseded", and its source hints are still
+## present/resolvable on the board. Factored out (F1, cold review, Epoch UX1
+## station 9) so _workspace_reroute_route can run every refusable check FIRST
+## — including these — before _steer_task_before_reroute ever writes a task's
+## routing_constraint, and so this function keeps checking the exact same
+## things it always did, just through one shared implementation instead of
+## two copies that could drift.
+## Returns {ok:true, workspace, data, candidate, cid, hint_ids, source_hints}
+## or {ok:false, reply:<named refusal>}.
+static func _reroute_precheck(host, args: Dictionary) -> Dictionary:
 	var ctx: Dictionary = _workspace_ctx(host)
 	if not bool(ctx.get("ok", false)):
-		return ctx.get("reply")
+		return {"ok": false, "reply": ctx.get("reply")}
 	var workspace = ctx["ws"]
 	var data = ctx["data"]
 	var cid: String = str(args.get("candidate_id", ""))
 	if cid.is_empty():
-		return _err("candidate_id is required")
+		return {"ok": false, "reply": _err("candidate_id is required")}
 	var c = workspace.get_candidate(cid)
 	if c == null:
-		return {"success": false, "error": "candidate_not_found", "candidate_id": cid}
+		return {"ok": false, "reply": {"success": false, "error": "candidate_not_found", "candidate_id": cid}}
 	if not workspace.can_transition(cid, "superseded"):
-		return _workspace_refusal_static(cid, str(c.disposition))
+		return {"ok": false, "reply": _workspace_refusal_static(cid, str(c.disposition))}
 
 	var hint_ids: Array = _string_list(c.source_hint_ids)
 	if hint_ids.is_empty():
@@ -3928,20 +5163,39 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dic
 		# so a hint-less candidate could be addressed by task/net scope alone
 		# is a separate, larger change to this function's control flow — not
 		# part of this fence.
-		return {
+		return {"ok": false, "reply": {
 			"success": false, "error": "no_source_hints", "candidate_id": cid,
 			"note": "this candidate carries no source route-hint ids; reroute is gated on hint provenance before the router bridge is even called, so an explicit task/net scope cannot be substituted for it here (see pcb/docs/tools.md's route-request note for what scope/pinned_candidates now cover)",
-		}
+		}}
 	var source_hints: Array = _gather_route_hints(host, hint_ids)
 	if source_hints.is_empty():
-		return {
+		return {"ok": false, "reply": {
 			"success": false, "error": "source_hints_missing", "candidate_id": cid,
 			"hint_ids": hint_ids,
 			"note": "the route hints this candidate came from are no longer on the board, so the run cannot be scoped to it",
-		}
+		}}
+	return {"ok": true, "workspace": workspace, "data": data, "candidate": c,
+		"cid": cid, "hint_ids": hint_ids, "source_hints": source_hints}
+
+
+## `pre` is an already-passed _reroute_precheck result (F1) when the caller
+## has one (_workspace_reroute_route, after its own steering has run); every
+## other caller (_workspace_reroute_span) leaves it at the default {} and
+## this function runs the precheck itself — byte-identical to what it always
+## did.
+static func _workspace_reroute(host, args: Dictionary, extra: Dictionary, pre: Dictionary = {}) -> Dictionary:
+	if not bool(pre.get("ok", false)):
+		pre = _reroute_precheck(host, args)
+		if not bool(pre.get("ok", false)):
+			return pre.get("reply")
+	var workspace = pre["workspace"]
+	var data = pre["data"]
+	var c = pre["candidate"]
+	var cid: String = str(pre["cid"])
+	var source_hints: Array = pre["source_hints"]
 
 	var route_extra: Dictionary = _route_request_extra(
-		workspace, _reroute_scope(c, source_hints, data))
+		workspace, _reroute_scope(c, source_hints, data), _hint_id_list(source_hints))
 	var reply: Dictionary = await _run_router(
 		host, {"mode": "ids", "ids": _hint_id_list(source_hints)}, route_extra)
 	if not bool(reply.get("ok", false)):
@@ -3957,6 +5211,11 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary) -> Dic
 		host, workspace, data, reply.get("result", {}), source_hints, extra)
 	landed["rerouted_candidate_id"] = cid
 	landed["prior_task_id"] = prior_task
+	# Epoch UX1 station 11: reroute's own review-then-commit guidance replaces
+	# _ingest_result_into_workspace's generic "propose" note — a reroute
+	# always names ONE fresh generation, not an open-ended candidate set.
+	if not (landed.get("candidates", []) as Array).is_empty():
+		landed["note"] = _next_steps("reroute_route", {})
 	# A reroute is meant to answer the SAME question again. Say plainly whether
 	# it did: the task key is derived from the worker's own per-route hint
 	# attribution, so a reply that attributes differently lands a NEW task, and
@@ -4358,6 +5617,367 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 			reply["note"] = str(reply["note"]) \
 				+ "; WARNING: the set-scoped check found findings across the live candidate set — see cross_candidate_check"
 	return _ok(reply)
+
+
+## ── Epoch UX1 station 8 (DCR 019fd095e694, converged docket 019fd057ea0b
+## comment 1028): minerva_pcb_add_route_intent — ONE authoring call, ONE
+## router round-trip preserved (comment 1027's scenario requirement), clean
+## object ownership preserved (comment 1026's requirement) by EAGER TASK
+## CREATION rather than by putting steering back on the connectivity object.
+##
+## Atomically, with NO routing performed:
+##   (a) a pcb_route_hint annotation — CONNECTIVITY ONLY. source_pins/dest_pins
+##       + note; waypoints is ALWAYS [] here, by construction — corridor never
+##       lands on this object (the "duplicated authority" hazard 1028 rejected).
+##   (b) an eagerly-created RouteTask in the workspace, task_id "NET|hint_id"
+##       (the SAME key format _task_key/_create_candidate_for_route mint at
+##       ingest — see pcb_routing_workspace.gd — so a later propose of this
+##       hint supersedes THIS task rather than minting a duplicate), via
+##       RoutingWorkspace.ensure_task (reused, not reimplemented).
+##   (c) when `corridor` is given, a routing_constraint STORED on that task
+##       (PcbRouteTask.routing_constraint) — revision 1, authored_by "ai",
+##       base_board_revision stamped from the board's CURRENT revision. This
+##       station only CREATES + ROUND-TRIPS the constraint; CONSUMPTION —
+##       minerva_pcb_workspace_propose/_workspace_reroute_route reading it to
+##       steer the router — is Epoch UX1 station 9 (_route_request_extra /
+##       _task_constraints_for_hints below; see PcbRouteTask's own field doc).
+##
+## Refused BY NAME before anything is created: an unresolvable pin
+## ("pin_unresolvable"), pins that don't share one net ("cross_net_pins"), more
+## than one endpoint per side ("single_endpoint_only" — this tool's signature
+## only accepts one source_pin/dest_pin string; a caller that sends an array is
+## refused rather than silently taking the first), or no live workspace
+## ("workspace_unavailable", via _workspace_ctx).
+static func _add_route_intent(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+	var data = ctx["data"]
+
+	if args.get("source_pin", "") is Array or args.get("dest_pin", "") is Array:
+		return {
+			"success": false, "error": "single_endpoint_only",
+			"note": "minerva_pcb_add_route_intent accepts exactly one source_pin and one dest_pin string — multi-endpoint routing is not expressed by this tool",
+		}
+
+	var source_pin: String = str(args.get("source_pin", "")).strip_edges()
+	var dest_pin: String = str(args.get("dest_pin", "")).strip_edges()
+	if source_pin.is_empty():
+		return _err("source_pin is required")
+	if dest_pin.is_empty():
+		return _err("dest_pin is required")
+
+	var source_resolved: Dictionary = _resolve_route_intent_pin(data, source_pin)
+	if not bool(source_resolved.get("ok", false)):
+		return {
+			"success": false, "error": "pin_unresolvable", "which": "source",
+			"pin_ref": source_pin, "note": str(source_resolved.get("message", "")),
+		}
+	var dest_resolved: Dictionary = _resolve_route_intent_pin(data, dest_pin)
+	if not bool(dest_resolved.get("ok", false)):
+		return {
+			"success": false, "error": "pin_unresolvable", "which": "dest",
+			"pin_ref": dest_pin, "note": str(dest_resolved.get("message", "")),
+		}
+
+	var source_net: String = str(data.find_net_for_pin(source_resolved["component"], source_resolved["pin"]))
+	if source_net.is_empty():
+		return {
+			"success": false, "error": "pin_unresolvable", "which": "source",
+			"pin_ref": source_pin, "note": "pin '%s' is not connected to any net" % source_pin,
+		}
+	var dest_net: String = str(data.find_net_for_pin(dest_resolved["component"], dest_resolved["pin"]))
+	if dest_net.is_empty():
+		return {
+			"success": false, "error": "pin_unresolvable", "which": "dest",
+			"pin_ref": dest_pin, "note": "pin '%s' is not connected to any net" % dest_pin,
+		}
+	if source_net != dest_net:
+		return {
+			"success": false, "error": "cross_net_pins",
+			"source_pin": source_pin, "dest_pin": dest_pin,
+			"source_net": source_net, "dest_net": dest_net,
+			"note": "source_pin (net '%s') and dest_pin (net '%s') are not on the same net — an intent connects two pins already on ONE net; connect them first (minerva_pcb_connect_net) if that is what you mean" % [source_net, dest_net],
+		}
+	var net: String = source_net
+
+	var corridor_points: Variant = null
+	if args.has("corridor"):
+		# SECONDARY (cold review): refuse by ARGUMENT PRESENCE, matching this
+		# file's own P2 convention (_workspace_commit's candidate_ids:[] check
+		# above) — corridor:[] is a caller stating "steer with an empty
+		# corridor", which is not the same ask as omitting the key entirely
+		# ("no corridor"), so it gets its own named refusal rather than
+		# silently degrading to "no corridor" or minting a zero-point constraint.
+		var raw_corridor: Variant = args.get("corridor")
+		if raw_corridor is Array and (raw_corridor as Array).is_empty():
+			return _err("corridor present but empty")
+		corridor_points = _parse_route_intent_corridor(raw_corridor)
+		if corridor_points == null:
+			return _err("corridor must be an array of {x_mm, y_mm} points")
+
+	# ── (a) the connectivity annotation — NO waypoints, ever, by construction ──
+	var source_comp = source_resolved["comp"]
+	var anchor_pos: Vector2 = source_comp.get_pin_world_position(str(source_resolved["pin"]))
+	var note: String = str(args.get("note", ""))
+	var envelope: Dictionary = host.build_route_hint_envelope(
+		anchor_pos.x, anchor_pos.y, note, "F.Cu", "waypoint", [], "ai", "", null,
+		[source_pin], [dest_pin])
+	_maybe_stamp_annotation_ref(envelope)
+	var ref: String = str(envelope.get("ref", ""))
+	var hint_id: String = host.add_annotation_v2(envelope)
+	if hint_id.is_empty():
+		return {
+			"success": false, "error": "annotation_rejected",
+			"note": "the host rejected the route-hint envelope (validation failed) — no intent, task or constraint was created",
+		}
+
+	# ── (b) eager task creation — SAME key format ingest mints, reused verbatim ──
+	var task_id: String = "%s|%s" % [net, hint_id]
+	var task = workspace.ensure_task(task_id, net)
+
+	# ── (c) optional task-owned constraint — NEVER on the annotation ───────────
+	var constraint_revision: Variant = null
+	if corridor_points is Array and (corridor_points as Array).size() > 0:
+		task.routing_constraint = {
+			"corridor_points": corridor_points,
+			"preferred_layer": "",
+			"revision": 1,
+			"authored_by": "ai",
+			"base_board_revision": int(data.board_revision),
+			# F3 (cold review): this task is minted with EXACTLY one hint
+			# ("net|hint_id" — see (b) above), so ownership is unambiguous at
+			# creation. _task_constraints_for_hints (station 9's consumption
+			# side) emits this constraint ONLY under this exact hint id.
+			"owner_hint_id": hint_id,
+		}
+		constraint_revision = 1
+
+	var reply: Dictionary = {
+		"hint_id": hint_id,
+		"task_id": task_id,
+		"net": net,
+	}
+	if not ref.is_empty():
+		reply["ref"] = ref
+	if constraint_revision != null:
+		reply["constraint_revision"] = constraint_revision
+	# Epoch UX1 station 11: normalized through the shared _next_steps helper
+	# (same "route_intent" text as before, byte-identical) rather than built
+	# inline here.
+	reply["note"] = _next_steps("route_intent", {"hint_id": hint_id, "constraint_revision": constraint_revision})
+	return _ok(reply)
+
+
+## Parse an MCP pin ref "Component.Pin" against the board model. Returns
+## {ok:true, component, pin, comp} or {ok:false, message}. Mirrors
+## _get_pin_position's ref-splitting convention (rfind(".") — a pin name can
+## itself be dotted, so only the LAST dot separates component from pin).
+static func _resolve_route_intent_pin(data, ref: String) -> Dictionary:
+	var dot := ref.rfind(".")
+	if dot <= 0 or dot >= ref.length() - 1:
+		return {"ok": false, "message": "malformed pin ref '%s' — expected 'Component.Pin'" % ref}
+	var component := ref.left(dot)
+	var pin := ref.substr(dot + 1)
+	var comp = data.get_component(component)
+	if comp == null:
+		return {"ok": false, "message": "component not found: %s" % component}
+	if not comp.pins.has(pin):
+		return {"ok": false, "message": "pin '%s' not found on component '%s'" % [pin, component]}
+	return {"ok": true, "component": component, "pin": pin, "comp": comp}
+
+
+## Parse an MCP corridor arg ([{x_mm,y_mm}, ...]) into an Array[Vector2], or
+## null when malformed. Mirrors _parse_zone_outline's convention (same wire
+## shape, x_mm/y_mm points) but returns a plain Array rather than a
+## PackedVector2Array — PcbRouteTask.routing_constraint stores corridor_points
+## the same open-Array-of-Vector2 way span stores its "from"/"to" points.
+static func _parse_route_intent_corridor(raw) -> Variant:
+	if not (raw is Array):
+		return null
+	var pts: Array = []
+	for p in raw:
+		if not (p is Dictionary) or not p.has("x_mm") or not p.has("y_mm"):
+			return null
+		pts.append(Vector2(float(p["x_mm"]), float(p["y_mm"])))
+	return pts
+
+
+## ── Epoch UX1 station 10 (DCR 019fd095e694, docket 019fd057ea0b comments
+## 1026/1028): minerva_pcb_workspace_edit_candidate — the ONE discriminated
+## candidate-GEOMETRY-edit verb (Codex Q4: "ADD one candidate-edit tool with a
+## discriminated operation … backed by shared RoutingWorkspace methods", not a
+## family of independent verbs that would each cost a tool-budget slot).
+##
+## EDIT != POLICY. This tool touches ONLY the named candidate's own geometry —
+## never the candidate's task, never its routing_constraint. A caller who wants
+## an edited shape to survive the NEXT re-propose reroutes with
+## minerva_pcb_workspace_reroute_route's preserve_shape_as_corridor:true (Epoch
+## UX1 station 9) — a separate, visible decision, not a side effect of editing a
+## draft. NO AUTO-PIN either (comment 1026 Q5): editing a candidate does not
+## hold it against ingest; pin is its own explicit verb.
+##
+## op == "move_junction": args point:[x_mm,y_mm], to:[x_mm,y_mm]. Junction
+## IDENTITY, not a flattened bend index (see RoutingWorkspace.move_junction's
+## own header for the full docket 1026 rationale) — every segment endpoint AND
+## via coincident with `point` moves atomically to `to`. Refused BY NAME:
+## junction_not_found (nothing coincident with point), ambiguous_junction
+## (point matches junctions on more than one of this candidate's disconnected
+## paths — see INV-3's own header on why a candidate can carry more than one),
+## degenerate_result (the move would collapse a segment to zero length — never
+## emitted, docket 019f9cc3245d).
+##
+## op == "insert_via": args position:[x_mm,y_mm], from_layer, to_layer.
+## DELEGATES to RoutingWorkspace.add_via — the EXISTING path-scoped via/layer
+## edit entry INV-3 names — verbatim, not reimplemented. Its own named
+## refusals (illegal_via_span, no_segment_at_point, degenerate_insert_at_endpoint,
+## degenerate_insert_on_via, segment_locked, from_layer_mismatch) pass through
+## unchanged.
+##
+## CONCURRENCY (comment 1026 Q5, symmetric with station 9's
+## expected_constraint_revision): `expected_candidate_revision`, when given, is
+## checked against the candidate's CURRENT candidate_revision BEFORE either op
+## runs — a mismatch refuses candidate_revision_conflict {expected, actual} and
+## mutates nothing. A successful edit bumps candidate_revision (both model
+## methods do this themselves, mirrored from add_via's own bump) — a caller
+## chaining a second edit passes the NEW revision this reply reports, not the
+## one it read before this call.
+##
+## Both ops refuse a TERMINAL candidate (committed/rejected/superseded) by name
+## — a terminal candidate is a record, not a draft, the same rule add_via
+## already enforced before this station existed.
+static func _workspace_edit_candidate(host, args: Dictionary) -> Dictionary:
+	var ctx: Dictionary = _workspace_ctx(host)
+	if not bool(ctx.get("ok", false)):
+		return ctx.get("reply")
+	var workspace = ctx["ws"]
+
+	var cid: String = str(args.get("candidate_id", ""))
+	if cid.is_empty():
+		return _err("candidate_id is required")
+	var op: String = str(args.get("op", ""))
+	if op.is_empty():
+		return _err("op is required")
+	if not (op in ["move_junction", "insert_via"]):
+		return {
+			"success": false, "error": "unknown_op", "op": op, "candidate_id": cid,
+			"note": "op must be one of: move_junction, insert_via",
+		}
+
+	var c = workspace.get_candidate(cid)
+	if c == null:
+		return {"success": false, "error": "candidate_not_found", "candidate_id": cid}
+
+	# CONCURRENCY, before ANY mutation and before either op's own model-side
+	# checks run — mirrors _steer_task_before_reroute's expected_constraint_revision
+	# guard (station 9), the candidate-scoped twin of that task-scoped one.
+	if args.has("expected_candidate_revision"):
+		var expected: int = int(args.get("expected_candidate_revision"))
+		var actual: int = int(c.candidate_revision)
+		if expected != actual:
+			return {
+				"success": false, "error": "candidate_revision_conflict",
+				"candidate_id": cid,
+				"expected_candidate_revision": expected,
+				"actual_candidate_revision": actual,
+				"note": "this candidate's geometry has moved since you read it — re-read candidate_revision (minerva_pcb_workspace_list/get_active) before editing it again",
+			}
+
+	var out: Dictionary = {}
+	match op:
+		"move_junction":
+			out = _edit_candidate_move_junction(workspace, cid, args)
+		"insert_via":
+			out = _edit_candidate_insert_via(workspace, cid, args)
+	if not bool(out.get("ok", false)):
+		return {
+			"success": false,
+			"error": str(out.get("error", "edit_refused")),
+			"candidate_id": cid,
+			"op": op,
+			"message": str(out.get("message", "")),
+		}
+
+	var reply: Dictionary = out.duplicate()
+	reply.erase("ok")
+	reply["op"] = op
+	# Epoch UX1 station 11: refreshed through the shared helper — same
+	# substance (candidate-local edit, pin/reroute_route to make it durable,
+	# commit when ready) as the longer prose this replaced, one note, not two.
+	reply["note"] = _next_steps("edit_candidate", {})
+	return _ok(reply)
+
+
+## move_junction's own arg parsing, in [x_mm,y_mm] ARRAY shape (matching this
+## candidate's own geometry wire shape — segments' points are [[x,y],…] — rather
+## than the {x_mm,y_mm} dict shape corridor/pin lookups use elsewhere in this
+## file, because the point named here IS a point already living in that wire
+## shape, read back from a prior list/get_active/include_geometry reply).
+static func _edit_candidate_move_junction(workspace, cid: String, args: Dictionary) -> Dictionary:
+	var point: Variant = _parse_xy_pair(args.get("point"))
+	if point == null:
+		return {"ok": false, "error": "invalid_point", "message": "point must be [x_mm, y_mm]"}
+	var to: Variant = _parse_xy_pair(args.get("to"))
+	if to == null:
+		return {"ok": false, "error": "invalid_point", "message": "to must be [x_mm, y_mm]"}
+	return workspace.move_junction(cid, point, to)
+
+
+## insert_via's own arg parsing — delegates the actual edit to
+## RoutingWorkspace.add_via verbatim; this function does nothing but shape the
+## MCP args into that call's own signature.
+static func _edit_candidate_insert_via(workspace, cid: String, args: Dictionary) -> Dictionary:
+	var position: Variant = _parse_xy_pair(args.get("position"))
+	if position == null:
+		return {"ok": false, "error": "invalid_point", "message": "position must be [x_mm, y_mm]"}
+	var from_layer: String = str(args.get("from_layer", ""))
+	var to_layer: String = str(args.get("to_layer", ""))
+	if from_layer.is_empty():
+		return {"ok": false, "error": "invalid_args", "message": "from_layer is required"}
+	if to_layer.is_empty():
+		return {"ok": false, "error": "invalid_args", "message": "to_layer is required"}
+	return workspace.add_via(cid, position, from_layer, to_layer)
+
+
+## Parse an [x_mm, y_mm] wire pair into a Vector2, or null when malformed —
+## the array-shaped twin of _parse_route_intent_corridor's per-point
+## {x_mm,y_mm} dict parsing, used where the wire value is a bare point rather
+## than a polyline.
+static func _parse_xy_pair(raw: Variant) -> Variant:
+	if not (raw is Array) or (raw as Array).size() != 2:
+		return null
+	var arr: Array = raw
+	if not (arr[0] is float or arr[0] is int) or not (arr[1] is float or arr[1] is int):
+		return null
+	return Vector2(float(arr[0]), float(arr[1]))
+
+
+## Best-effort citeable ref (C<n>) stamp, mirroring core MCPAnnotationTools'
+## _annotations_add flow (ProjectIdentity.stamp() called on the envelope BEFORE
+## the host stores it) WITHOUT a class_name reference to ProjectIdentity — an
+## off-tree script cannot resolve one (see PcbAnnotationHost.gd's own off-tree
+## note; core's citeable-annotation-ref machinery, ProjectIdentity.gd, lives
+## entirely in-tree). Duck-typed through the same path ProjectIdentity.current() takes
+## internally: SceneTree -> the "SingletonObject" autoload node -> its
+## project_identity property -> .stamp(envelope) by name by contract.
+## Mutates `envelope` in place, adding "ref"/"ref_project" when a live
+## identity is reachable. A no-op in headless/test contexts (no SceneTree
+## root, no mounted SingletonObject, or a bare test double without a
+## project_identity property) — the caller reads envelope.get("ref","")
+## afterward, so "the C-ref if reachable" degrades to an absent key rather
+## than failing the intent.
+static func _maybe_stamp_annotation_ref(envelope: Dictionary) -> void:
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null or tree.root == null:
+		return
+	var so := tree.root.get_node_or_null("SingletonObject")
+	if so == null:
+		return
+	var pi: Variant = so.get("project_identity")
+	if not (pi is Object) or not (pi as Object).has_method("stamp"):
+		return
+	(pi as Object).call("stamp", envelope)
 
 
 ## minerva_pcb_route_bus_direct — the agent's doorway onto the SAME gesture
