@@ -1,0 +1,493 @@
+version: 1
+name: jlc-coupon-1
+width_mm: 24
+height_mm: 18
+grid_mm: 2.54
+layers:
+    - top
+    - bottom
+design_rules:
+    clearance_mm: 0.1
+    trace_width_mm: 0.25
+    via_diameter_mm: 0.66
+    via_drill_mm: 0.3
+    rule_profile: jlcpcb-2layer
+components:
+    - ref: C1
+      footprint: Minerva_Fixture:SMD_WeirdPads_2P
+      value: WEIRD-2P
+      x_mm: 20
+      y_mm: 8
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: -0.949999988079071
+          y_mm: 0
+        - number: "2"
+          x_mm: 0.949999988079071
+          y_mm: 0
+      mpn: TEST-WEIRDPADS-2P
+      properties:
+        value: WEIRD-2P
+    - ref: DAM1
+      footprint: Minerva_Fixture:DAM_MinWeb_2P
+      x_mm: 9
+      y_mm: 16
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: -0.400000005960464
+          y_mm: 0
+        - number: "2"
+          x_mm: 0.400000005960464
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+    - ref: FID1
+      footprint: Minerva_Fixture:FID_Circle_1mm
+      x_mm: 2
+      y_mm: 2
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+    - ref: FID2
+      footprint: Minerva_Fixture:FID_Circle_1mm
+      x_mm: 22
+      y_mm: 2
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+    - ref: FID3
+      footprint: Minerva_Fixture:FID_Circle_1mm
+      x_mm: 2
+      y_mm: 16
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+    - ref: J1
+      footprint: Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical
+      value: HDR-1x02
+      x_mm: 3.20000004768372
+      y_mm: 6.5
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+        - number: "2"
+          x_mm: 0
+          y_mm: 2.53999996185303
+      mpn: TEST-HDR-1X02
+      properties:
+        value: HDR-1x02
+    - ref: LOGO1
+      footprint: Minerva_Fixture:LOGO_Owl_TestCoupon
+      x_mm: 17.5
+      y_mm: 14
+      rotation_deg: 0
+      layer: top
+      assembly: exclude
+      properties: {}
+    - ref: TP1
+      footprint: Minerva_Fixture:TP_MinAnnular_0p6
+      x_mm: 6.5
+      y_mm: 2.79999995231628
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+    - ref: TP2
+      footprint: TH_TestPoint
+      x_mm: 15.5
+      y_mm: 4.19999980926514
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+    - ref: TP3
+      footprint: TH_TestPoint
+      x_mm: 20.7999992370605
+      y_mm: 4.5
+      rotation_deg: 0
+      layer: top
+      pins:
+        - number: "1"
+          x_mm: 0
+          y_mm: 0
+      assembly: exclude
+      properties: {}
+nets:
+    - name: NET_A
+      pins:
+        - J1.1
+        - C1.1
+      color:
+        a: 1
+        b: 1
+        g: 1
+        r: 1
+      is_power_net: false
+      properties: {}
+    - name: NET_B
+      pins:
+        - J1.2
+        - C1.2
+      color:
+        a: 1
+        b: 1
+        g: 1
+        r: 1
+      is_power_net: false
+      properties: {}
+    - name: NET_CHAIN
+      pins:
+        - TP1.1
+      color:
+        a: 1
+        b: 1
+        g: 1
+        r: 1
+      is_power_net: false
+      properties: {}
+    - name: NET_LAD1
+      pins:
+        - TP2.1
+      color:
+        a: 1
+        b: 1
+        g: 1
+        r: 1
+      is_power_net: false
+      properties: {}
+    - name: NET_LAD2
+      pins:
+        - TP3.1
+      color:
+        a: 1
+        b: 1
+        g: 1
+        r: 1
+      is_power_net: false
+      properties: {}
+traces:
+    - id: trace:1afe85dfe66d9d3b14cb89d77e08bffc
+      net: NET_A
+      layer: top
+      width_mm: 0.25
+      points:
+        - x_mm: 19.0499992370605
+          y_mm: 8
+        - x_mm: 18.5499992370605
+          y_mm: 8.05000019073486
+        - x_mm: 17.4500007629395
+          y_mm: 8.05000019073486
+        - x_mm: 16.8500003814697
+          y_mm: 8.05000019073486
+        - x_mm: 16.8500003814697
+          y_mm: 9.75
+        - x_mm: 16.8500003814697
+          y_mm: 11.4499998092651
+        - x_mm: 10.3500003814697
+          y_mm: 11.4499998092651
+        - x_mm: 10.3500003814697
+          y_mm: 3.84999990463257
+        - x_mm: 10.25
+          y_mm: 3.84999990463257
+        - x_mm: 10.1499996185303
+          y_mm: 3.84999990463257
+        - x_mm: 9.44999980926514
+          y_mm: 3.84999990463257
+        - x_mm: 9.44999980926514
+          y_mm: 13.5500001907349
+        - x_mm: 7.94999980926514
+          y_mm: 13.5500001907349
+        - x_mm: 7.94999980926514
+          y_mm: 4.94999980926514
+        - x_mm: 6.44999980926514
+          y_mm: 4.94999980926514
+        - x_mm: 6.44999980926514
+          y_mm: 13.5500001907349
+        - x_mm: 5.05000019073486
+          y_mm: 13.5500001907349
+        - x_mm: 5.05000019073486
+          y_mm: 7.44999980926514
+        - x_mm: 3.20000004768372
+          y_mm: 7.44999980926514
+        - x_mm: 3.20000004768372
+          y_mm: 6.5
+    - id: trace:3ce51a207c9fd191912d9eb74bb1e923
+      net: NET_B
+      layer: top
+      width_mm: 0.25
+      points:
+        - x_mm: 20.9500007629395
+          y_mm: 8
+        - x_mm: 20.9500007629395
+          y_mm: 8.55000019073486
+        - x_mm: 20.9500007629395
+          y_mm: 9.64999961853027
+        - x_mm: 19.7000007629395
+          y_mm: 9.64999961853027
+    - id: trace:4933475f9ca802233c4e3047e87f5959
+      net: NET_CHAIN
+      layer: top
+      width_mm: 0.2
+      points:
+        - x_mm: 6.5
+          y_mm: 2.79999995231628
+        - x_mm: 9
+          y_mm: 2.79999995231628
+    - id: trace:7868bfd60728fd8d6934e9830ff5e3b6
+      net: NET_B
+      layer: bottom
+      width_mm: 0.25
+      points:
+        - x_mm: 19.7000007629395
+          y_mm: 9.64999961853027
+        - x_mm: 19.4500007629395
+          y_mm: 9.64999961853027
+        - x_mm: 18.4500007629395
+          y_mm: 9.64999961853027
+        - x_mm: 18.4500007629395
+          y_mm: 10.6499996185303
+        - x_mm: 18.4500007629395
+          y_mm: 10.8500003814697
+        - x_mm: 15.0500001907349
+          y_mm: 10.8500003814697
+        - x_mm: 15.0500001907349
+          y_mm: 11.4499998092651
+        - x_mm: 11.5500001907349
+          y_mm: 11.4499998092651
+        - x_mm: 10.25
+          y_mm: 11.4499998092651
+        - x_mm: 6.75
+          y_mm: 11.4499998092651
+        - x_mm: 4.84999990463257
+          y_mm: 11.4499998092651
+        - x_mm: 4.84999990463257
+          y_mm: 10.6499996185303
+        - x_mm: 3.20000004768372
+          y_mm: 10.6499996185303
+        - x_mm: 3.20000004768372
+          y_mm: 9.03999996185303
+    - id: trace:a6cf65e5cd91adaa166f4c3050c25f32
+      net: NET_LAD2
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 20.7999992370605
+          y_mm: 4.5
+        - x_mm: 20.7999992370605
+          y_mm: 1.45000004768372
+        - x_mm: 16.2000007629395
+          y_mm: 1.45000004768372
+        - x_mm: 16.2000007629395
+          y_mm: 1.67499995231628
+        - x_mm: 20.7999992370605
+          y_mm: 1.67499995231628
+    - id: trace:aa86f4d9082ca0f990d22738433ab714
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.15
+      points:
+        - x_mm: 15.5
+          y_mm: 1.89999997615814
+        - x_mm: 19.7999992370605
+          y_mm: 1.89999997615814
+    - id: trace:b26f564c2294a878415012894619b434
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 19.7999992370605
+          y_mm: 0.25
+        - x_mm: 19.7999992370605
+          y_mm: 1.25
+    - id: trace:b4f2585156a00d2919ac99436ec502f7
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 19.7999992370605
+          y_mm: 1.89999997615814
+        - x_mm: 19.7999992370605
+          y_mm: 2.59999990463257
+    - id: trace:b636632cf1132caf17566a28fc8ade9f
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.2
+      points:
+        - x_mm: 15.5
+          y_mm: 2.59999990463257
+        - x_mm: 19.7999992370605
+          y_mm: 2.59999990463257
+    - id: trace:c86fcbf0c8387ecfa99b031af01cf77f
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 15.5
+          y_mm: 1.25
+        - x_mm: 19.7999992370605
+          y_mm: 1.25
+    - id: trace:ca08f335e84f04107f44674b9c395465
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 15.5
+          y_mm: 4.19999980926514
+        - x_mm: 15.5
+          y_mm: 0.25
+    - id: trace:d3dcd65b89e59e02aa6eeb4a272ad4be
+      net: NET_CHAIN
+      layer: bottom
+      width_mm: 0.2
+      points:
+        - x_mm: 9
+          y_mm: 2.79999995231628
+        - x_mm: 11
+          y_mm: 2.79999995231628
+    - id: trace:df543522fe4ff81b78de9545860388e3
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 14.0500001907349
+          y_mm: 4.19999980926514
+        - x_mm: 14.0500001907349
+          y_mm: 10
+        - x_mm: 14.6000003814697
+          y_mm: 10.3999996185303
+    - id: trace:e5bc3be681760b6464763800426612b9
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 15.5
+          y_mm: 4.19999980926514
+        - x_mm: 14.0500001907349
+          y_mm: 4.19999980926514
+    - id: trace:e8800c6313552b6ce29cb64e1b13ac66
+      net: NET_CHAIN
+      layer: top
+      width_mm: 0.2
+      points:
+        - x_mm: 11
+          y_mm: 2.79999995231628
+        - x_mm: 13
+          y_mm: 2.79999995231628
+    - id: trace:eaf449ac7ad35fb6c2514f6765d13d4d
+      net: NET_LAD1
+      layer: top
+      width_mm: 0.1
+      points:
+        - x_mm: 15.5
+          y_mm: 0.25
+        - x_mm: 19.7999992370605
+          y_mm: 0.25
+vias:
+    - id: via:7678364b391fecc6776ead2264757243
+      x_mm: 14.6000003814697
+      y_mm: 10.3999996185303
+      drill_mm: 0.3
+      diameter_mm: 0.66
+      net: NET_LAD1
+      from_layer: top
+      to_layer: bottom
+    - id: via:a5f0d4dbe8798bd48d5c69d9740633f5
+      x_mm: 9
+      y_mm: 2.79999995231628
+      drill_mm: 0.3
+      diameter_mm: 0.66
+      net: NET_CHAIN
+      from_layer: top
+      to_layer: bottom
+    - id: via:77d5410ba81dac37fdac237d52af3e1a
+      x_mm: 11
+      y_mm: 2.79999995231628
+      drill_mm: 0.3
+      diameter_mm: 0.66
+      net: NET_CHAIN
+      from_layer: top
+      to_layer: bottom
+    - id: via:dfdaaffd55762fe863bee75c2db8c97f
+      x_mm: 13
+      y_mm: 2.79999995231628
+      drill_mm: 0.3
+      diameter_mm: 0.66
+      net: NET_CHAIN
+      from_layer: top
+      to_layer: bottom
+    - id: via:2e07e6e93fc6db9d610a596064bdd6bd
+      x_mm: 19.7000007629395
+      y_mm: 9.64999961853027
+      drill_mm: 0.4
+      diameter_mm: 0.8
+      net: NET_B
+      from_layer: top
+      to_layer: bottom
+zones:
+    - id: zone:f6467395db93f08f89fe823e5969cd23
+      kind: keepout
+      net: NET_A
+      layer: bottom
+      outline:
+        - x_mm: 5
+          y_mm: 11.8999996185303
+        - x_mm: 14.5
+          y_mm: 11.8999996185303
+        - x_mm: 14.5
+          y_mm: 15.3999996185303
+        - x_mm: 5
+          y_mm: 15.3999996185303
+    - id: zone:b7b5ef800ca8445d39e189c4429c3460
+      kind: copper_pour
+      net: NET_B
+      layer: bottom
+      outline:
+        - x_mm: 1
+          y_mm: 8.60000038146973
+        - x_mm: 9.5
+          y_mm: 8.60000038146973
+        - x_mm: 9.5
+          y_mm: 17.5
+        - x_mm: 1
+          y_mm: 17.5
+cutouts:
+    - id: cutout:3c3ad8a8c00be466dff4071849f306f2
+      outline:
+        - x_mm: 10.8
+          y_mm: 5
+        - x_mm: 13.8
+          y_mm: 5
+        - x_mm: 13.8
+          y_mm: 11
+        - x_mm: 10.8
+          y_mm: 11

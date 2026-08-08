@@ -69,11 +69,13 @@ from agent_router import layers as _layers
 
 from .geometry import rotate_local_offset
 from .ir_pads import UnsupportedGeometry, iter_ir_pads, pad_copper_shape
+from .ir_projection import outline_cutouts, outline_frame, profile_outer_rect
 from .pad_source import is_th_drill
 from .resolved_board import (
     LayerRole,
     LineGeometry,
     OvalHole,
+    ProfileOutline,
     RectOutline,
     ResolvedBoard,
     RoundHole,
@@ -244,6 +246,12 @@ def board_to_router(canonical_board: dict) -> Board:
     offsets (get_pin_world_position convention), maps ``Ref.Pad`` net refs onto
     pad membership, and carries obstacles (mounting holes) + board size.
 
+    Refuses a board declaring ``cutouts``: this LOOSE path models mounting-hole
+    obstacles only (production routing is :func:`resolved_board_to_router`,
+    methods.py, which projects cutouts as obstacles) — routing a dict board as
+    if its opening did not exist would propose copper through a hole in the
+    board, the silent fail-open this bridge exists to prevent.
+
     Raises ``ValueError`` on a structurally unusable board (not a mapping / no
     components), and its named subclass :class:`UnresolvableComponentLayer` on a
     component whose copper side cannot be resolved. Unresolvable *net* pin refs
@@ -253,6 +261,13 @@ def board_to_router(canonical_board: dict) -> Board:
     """
     if not isinstance(canonical_board, dict):
         raise ValueError("board must be a mapping")
+    raw_cutouts = canonical_board.get("cutouts")
+    if isinstance(raw_cutouts, list) and raw_cutouts:
+        raise UnsupportedGeometry(
+            "board declares cutouts; the loose route bridge does not model "
+            "them as obstacles — route via the compiled path "
+            "(resolved_board_to_router) instead of proposing copper through "
+            "an opening in the board")
     components = canonical_board.get("components")
     if not isinstance(components, list) or not components:
         raise ValueError("board.components must be a non-empty list")
@@ -413,7 +428,16 @@ def _reject_unroutable_board(rb: ResolvedBoard) -> None:
 
     Each of these would otherwise be SILENTLY ABSENT from the grid, and absent
     copper is exactly what lets a proposal cross real copper."""
-    if not isinstance(rb.outline, RectOutline):
+    if isinstance(rb.outline, ProfileOutline):
+        # A rect-outer profile (rim rectangle + interior cutouts) is routable:
+        # the rim is the same rectangle routing always modelled, and each
+        # cutout joins the obstacle set below (_cutout_obstacle) so the grid
+        # genuinely sees it. Any other outer shape stays fail-closed.
+        if profile_outer_rect(rb.outline) is None:
+            raise UnsupportedGeometry(
+                "routing models a rectangular board rim only; this "
+                "ProfileOutline's outer contour is not an axis-aligned rectangle")
+    elif not isinstance(rb.outline, RectOutline):
         raise UnsupportedGeometry(
             f"routing v1 models a rectangular (RectOutline) board only; got "
             f"{type(rb.outline).__name__}")
@@ -578,6 +602,111 @@ def _keepout_obstacle(zone) -> Obstacle:
     )
 
 
+def _cutout_obstacle(cut, edge_clearance_mm: float) -> Obstacle:
+    """An interior board CUTOUT as an all-layer polygon obstacle, PRE-INFLATED
+    by the copper-to-edge rule.
+
+    WHY PRE-INFLATE. The grid's rasteriser blocks cells within its uniform
+    ``keepout_margin`` (clearance + half trace width) of the polygon — the
+    right band for a KEEPOUT, whose rule IS the copper clearance. A cutout's
+    rule is ``copper_to_edge_mm`` (a slot edge is a board edge, GC5), which is
+    usually LARGER, so the raw contour would let a route hug the slot at
+    clearance distance and fail the DRC this projection exists to pre-satisfy.
+    Handing the rasteriser the contour inflated by copper_to_edge makes the
+    reserved band copper_to_edge + clearance + half width — never LESS than
+    the rule, over by the margin's clearance term, which is the legal
+    direction (a slightly shy router, never an illegal route).
+
+    Straight-edged CONVEX cutouts only, both refusals loud: an arc's faithful
+    flattening is a tessellation-tolerance decision this projection must not
+    invent (same doctrine as :func:`_keepout_obstacle`), and mitre-offsetting a
+    REFLEX vertex needs a real offset kernel (the fill kernel uses pyclipper
+    for exactly that) — a hand-rolled reflex mitre under-reserves the concave
+    pocket, the illegal direction.
+
+    MITER JOINS ARE UNCAPPED, deliberately. A needle-sharp convex vertex
+    miters to a long spike (length d/sin(half-angle)) that over-reserves board
+    area — the FAIL-SAFE direction (a shy router, never an illegal route). The
+    tempting cap — beveling the corner — is the ILLEGAL direction: the true
+    offset boundary at a convex vertex is an arc of radius d that bulges
+    outside the bevel chord, so a bevel under-reserves the crescent between
+    them. Cap nothing; a pathologically sharp cutout costs routability, not
+    correctness."""
+    points: list[tuple[float, float]] = []
+    for seg in cut.contour.segments:
+        if not isinstance(seg, LineGeometry):
+            raise UnsupportedGeometry(
+                f"cutout {cut.id}: contour carries a {type(seg).__name__} "
+                f"segment; routing models straight-edged cutouts only")
+        points.append((float(seg.a[0]), float(seg.a[1])))
+    if len(points) < 3:
+        raise UnsupportedGeometry(
+            f"cutout {cut.id}: contour has {len(points)} usable vertices; "
+            f"a region needs at least three")
+
+    count = len(points)
+    # NORMALIZED cross products (unit-edge sines), so the collinearity
+    # threshold is scale-invariant and consistent with the miter branch's
+    # parallel test below (cold review CPN1-S1 finding 6: the raw cross is
+    # mm^2-scaled, so "collinear" depended on edge length). Compile has
+    # already refused self-intersecting rings, so consistent signs on a
+    # SIMPLE polygon genuinely mean convex (a pentagram — consistent signs,
+    # not simple — cannot reach here).
+    cross_signs: list[float] = []
+    for index in range(count):
+        ax, ay = points[index]
+        bx, by = points[(index + 1) % count]
+        cx, cy = points[(index + 2) % count]
+        l1 = math.hypot(bx - ax, by - ay) or 1.0
+        l2 = math.hypot(cx - bx, cy - by) or 1.0
+        cross_signs.append(
+            ((bx - ax) * (cy - by) - (by - ay) * (cx - bx)) / (l1 * l2))
+    nonzero = [c for c in cross_signs if abs(c) > 1e-9]
+    if nonzero and (min(nonzero) < 0 < max(nonzero)):
+        raise UnsupportedGeometry(
+            f"cutout {cut.id}: contour is concave; routing inflates convex "
+            f"cutouts only (a hand-rolled reflex mitre would under-reserve "
+            f"the pocket)")
+
+    area2 = sum((points[i][0] * points[(i + 1) % count][1]
+                 - points[(i + 1) % count][0] * points[i][1])
+                for i in range(count))
+    ccw = area2 > 0
+    d = max(0.0, float(edge_clearance_mm))
+    inflated: list[tuple[float, float]] = []
+    for index in range(count):
+        p_prev = points[index - 1]
+        p = points[index]
+        p_next = points[(index + 1) % count]
+        e1 = (p[0] - p_prev[0], p[1] - p_prev[1])
+        e2 = (p_next[0] - p[0], p_next[1] - p[1])
+        len1 = math.hypot(*e1) or 1.0
+        len2 = math.hypot(*e2) or 1.0
+        u1 = (e1[0] / len1, e1[1] / len1)
+        u2 = (e2[0] / len2, e2[1] / len2)
+        n1 = (u1[1], -u1[0]) if ccw else (-u1[1], u1[0])
+        n2 = (u2[1], -u2[0]) if ccw else (-u2[1], u2[0])
+        a1 = (p_prev[0] + n1[0] * d, p_prev[1] + n1[1] * d)
+        a2 = (p[0] + n2[0] * d, p[1] + n2[1] * d)
+        denom = u1[0] * u2[1] - u1[1] * u2[0]
+        if abs(denom) < 1e-12:
+            inflated.append((p[0] + n1[0] * d, p[1] + n1[1] * d))
+            continue
+        t = ((a2[0] - a1[0]) * u2[1] - (a2[1] - a1[1]) * u2[0]) / denom
+        inflated.append((a1[0] + t * u1[0], a1[1] + t * u1[1]))
+
+    xs = [p[0] for p in inflated]
+    ys = [p[1] for p in inflated]
+    centre = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+    return Obstacle(
+        position=centre,
+        type="cutout",
+        polygon=inflated,
+        blocks_all_layers=True,
+        layer=None,
+    )
+
+
 def _hole_obstacle(hole) -> Obstacle:
     """A board-level hole as a circumscribing disc obstacle.
 
@@ -710,14 +839,20 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
     obstacles.extend(
         _keepout_obstacle(zone) for zone in rb.zones
         if zone.kind is ZoneKind.KEEPOUT)
+    # Interior cutouts join it too (epoch CPN1) — pre-inflated by the
+    # copper-to-edge rule, all layers; see _cutout_obstacle for the math.
+    obstacles.extend(
+        _cutout_obstacle(cut, rb.design_rules.minimums.copper_to_edge_mm)
+        for cut in outline_cutouts(rb.outline))
 
+    frame_ox, frame_oy, frame_w, frame_h = outline_frame(rb.outline)
     return Board(
         pads=pads,
         nets=nets,
         obstacles=obstacles,
-        width=rb.outline.width_mm,
-        height=rb.outline.height_mm,
-        origin=tuple(rb.outline.origin),
+        width=frame_w,
+        height=frame_h,
+        origin=(frame_ox, frame_oy),
         # The board's OWN rules now ride the projection (019f9bc3909c). The IR's
         # ``ResolvedDesignRules`` is handed over UNCHANGED — ``Board.design_rules``
         # is duck-typed on exactly the two paths the precedence chain reads

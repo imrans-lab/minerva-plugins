@@ -111,10 +111,12 @@ from dataclasses import replace
 from agent_router.layers import kicad_to_canon
 
 from .drc_geom_primitives import Capsule, OrientedRect
+from .ir_projection import outline_cutouts, profile_outer_rect
 from .resolved_board import (
     ArcGeometry,
     LineGeometry,
     PolygonGeometry,
+    ProfileOutline,
     RectOutline,
     ResolvedBoard,
     ResolvedZone,
@@ -679,29 +681,68 @@ def _keepout_paths(zone: ResolvedZone, board: ResolvedBoard):
 
 
 def _board_clip_ring(board: ResolvedBoard, zone: ResolvedZone) -> list[tuple[int, int]]:
-    """The board outline inset by the copper-to-edge rule.
+    """The board rim inset by the copper-to-edge rule.
 
     Copper is not allowed to run to the board edge; the router and the DRC both
     know it (GC5) and a pour drawn past the edge would otherwise emit copper into
     the routed slot. Clipping here means an over-drawn outline yields a legal
     pour rather than a DRC violation, and it matches what the oracle does.
+
+    A rect-outer :class:`ProfileOutline` clips to the same rim rectangle; its
+    interior cutouts are handled separately (:func:`_cutout_items`) because
+    they subtract from the middle rather than bound the outside.
     """
     outline = board.outline
-    if not isinstance(outline, RectOutline):
+    if isinstance(outline, ProfileOutline):
+        frame = profile_outer_rect(outline)
+        if frame is None:
+            raise ZoneFillError(
+                zone.id,
+                "v1 fill clips to a rectangular board rim only; this "
+                "ProfileOutline's outer contour is not an axis-aligned rectangle")
+        ox, oy, width_mm, height_mm = frame
+    elif isinstance(outline, RectOutline):
+        ox, oy = outline.origin
+        width_mm, height_mm = outline.width_mm, outline.height_mm
+    else:
         raise ZoneFillError(
             zone.id,
             f"v1 fill clips to a rectangular board only; got "
             f"{type(outline).__name__}")
     inset = board.design_rules.minimums.copper_to_edge_mm
-    ox, oy = outline.origin
     x0, y0 = _to_nm(ox + inset), _to_nm(oy + inset)
-    x1 = _to_nm(ox + outline.width_mm - inset)
-    y1 = _to_nm(oy + outline.height_mm - inset)
+    x1 = _to_nm(ox + width_mm - inset)
+    y1 = _to_nm(oy + height_mm - inset)
     if x1 <= x0 or y1 <= y0:
         raise ZoneFillError(
             zone.id,
             f"copper-to-edge inset {inset} mm leaves no fillable board area")
     return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+def _cutout_items(board: ResolvedBoard):
+    """Every interior board cutout as a ``(ring, closed, offset_nm)``
+    subtraction item: the opening itself plus the copper-to-edge band around
+    it. A slot edge is a board edge (GC5), so a pour keeps the same clearance
+    from a cutout that :func:`_board_clip_ring` keeps from the rim — carved
+    here BY CONSTRUCTION so the fill never emits copper the DRC would flag."""
+    inset = board.design_rules.minimums.copper_to_edge_mm
+    items = []
+    for cut in outline_cutouts(board.outline):
+        ring: list[tuple[int, int]] = []
+        for segment in cut.contour.segments:
+            if not isinstance(segment, LineGeometry):
+                raise ZoneFillError(
+                    cut.id,
+                    f"cutout contour contains a {type(segment).__name__}; v1 "
+                    f"fill has no arc-discretisation policy and will not invent one")
+            ring.append((_to_nm(segment.a[0]), _to_nm(segment.a[1])))
+        if len(ring) < 3:
+            raise ZoneFillError(
+                cut.id, f"cutout contour collapses to {len(ring)} distinct point(s)")
+        _refuse_self_intersecting(cut.id, ring)
+        items.append((ring, True, _to_nm(inset)))
+    return items
 
 
 def _refuse_thermal(zone: ResolvedZone) -> None:
@@ -1079,7 +1120,8 @@ def _fill_one(pc, zone: ResolvedZone, board: ResolvedBoard, projection,
         return ()
 
     subtrahends = _inflate(
-        pc, _obstacle_paths(pc, zone, board, projection, class_clearance))
+        pc, _obstacle_paths(pc, zone, board, projection, class_clearance)
+        + _cutout_items(board))
     subtrahends.extend(_keepout_paths(zone, board))
 
     if subtrahends:

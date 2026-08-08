@@ -314,12 +314,13 @@ def _check_cutouts(cutouts: list, codes: list) -> None:
     board too.  A non-dict item is skipped (a ``None`` item is already
     ``invalid_board_structure`` upstream, so skipping avoids double-coding).
 
-    Unlike zones, there is no fuller re-check downstream: ``compile_board`` REFUSES
-    any board declaring a non-empty ``cutouts`` (``unsupported_board_feature``), so
-    a cutout is authorable and NOT compilable, and this boundary is the only place
-    that ever inspects one.  Containment in the board outline, self-intersection and
-    overlap with other entities are deliberately NOT checked on either side — see
-    the Cutout type's comment in board.go for why that asymmetry would be worse
+    Since epoch CPN1 (docket 019fe2faf76e) there IS a fuller re-check downstream:
+    ``compile_board._build_outline`` compiles cutouts into ``ProfileOutline`` and
+    enforces the geometry this structural mirror never looked at — strictly
+    interior to the rim, pairwise-disjoint bounding boxes, no zero-length
+    segments — all under this same ``invalid_cutout_outline`` code.
+    Self-intersection remains unchecked on either side, matching zones — see the
+    Cutout type's comment in board.go for why a one-sided check would be worse
     than the gap."""
     if not cutouts:
         return

@@ -176,6 +176,16 @@ type Component struct {
 	Layer       string  `json:"layer,omitempty" yaml:"layer,omitempty"`
 	Pins        []Pin   `json:"pins,omitempty" yaml:"pins,omitempty"`
 
+	// Assembly marks board FURNITURE (fiducials, silk logos): "exclude" keeps
+	// the component out of BOM/CPL outputs without tripping the part-identity
+	// contract (epoch CPN1, docket 019fe2fb07f8). First-classed rather than
+	// parked in Extra for the same reason PadWidthMM/PadHeightMM were promoted
+	// (see Pin below): a SEMANTIC field a consumer branches on deserves a
+	// typed home and a validation site (Validate refuses any non-"exclude"
+	// value), not an untyped ride-along whose misspelling travels silently.
+	// Empty means "assembled normally".
+	Assembly string `json:"assembly,omitempty" yaml:"assembly,omitempty"`
+
 	Extra map[string]interface{} `json:"-" yaml:",inline"`
 }
 

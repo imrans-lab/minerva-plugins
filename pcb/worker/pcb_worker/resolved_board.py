@@ -171,6 +171,7 @@ class EntityKind(str, Enum):
     HOLE = "hole"
     GRAPHIC = "graphic"
     ZONE = "zone"
+    CUTOUT = "cutout"
     FOOTPRINT = "footprint"
 
 
@@ -331,12 +332,28 @@ class RectOutline:
 
 
 @dataclass(frozen=True)
+class ResolvedCutout:
+    """An interior board opening: a closed contour the fabricated board does
+    not contain. Carries its canonical id so DRC findings and refusals can
+    name the authored entity, which a bare :class:`Contour` cannot."""
+
+    id: str
+    contour: Contour
+
+    def __post_init__(self) -> None:
+        _nonempty(self.id, "ResolvedCutout.id")
+        _typed(self.contour, Contour, "ResolvedCutout.contour")
+
+
+@dataclass(frozen=True)
 class ProfileOutline:
     outer: Contour
-    cutouts: tuple[Contour, ...] = ()
+    cutouts: tuple[ResolvedCutout, ...] = ()
 
     def __post_init__(self) -> None:
         _tuple(self.cutouts, "ProfileOutline.cutouts")
+        for index, value in enumerate(self.cutouts):
+            _typed(value, ResolvedCutout, f"ProfileOutline.cutouts[{index}]")
 
 
 BoardOutline: TypeAlias = RectOutline | ProfileOutline

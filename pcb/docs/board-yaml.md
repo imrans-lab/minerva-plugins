@@ -286,7 +286,7 @@ states, so a zone cannot be edited into a shape the validator would reject:
   the `zone_unknown_layer` rule has nothing to check against and would otherwise
   accept any name.
 
-### Cut-outs (schema modeled, compilation refused)
+### Cut-outs
 
 A `cutout` is an opening through the **entire board** — an internal slot or
 window milled out of the substrate. Top-level key `cutouts`, a list.
@@ -316,35 +316,32 @@ cutout rule. Go's `validateCutouts` and `board_validate.py`'s `_check_cutouts`
 went in together and are asserted against each other by the committed vectors in
 `spec/vectors/`, so this code string means the same thing on both sides.
 
-**What is NOT checked, deliberately:** that a cutout lies inside the board
-outline; that it avoids pads, traces, vias or zones; that it does not
-self-intersect or overlap another cutout; any minimum internal milling radius.
-None of those check classes exists anywhere in this contract — nothing
-bounds-checks a `mounting_holes` entry or a zone outline either — so enforcing
-containment for cut-outs *alone* would make a mounting hole 3 mm off the board
-edge legal while a cutout there is not. Containment should arrive once, applied
-to holes, zones and cut-outs together.
+**A cutout COMPILES and FABRICATES** (epoch CPN1, docket `019fe2faf76e`; the
+compile refusal that used to live here existed to hold back fail-open
+`019fbd30f7`, which that round fixed by its own oracle — `outline_frame` now
+frames a rect-outer profile faithfully or raises, never a silent bbox). The
+compiled shape is `ProfileOutline(outer=<rim rectangle>, cutouts=(...))`, and
+every consumer genuinely sees it: both fab emitters draw each cutout as a
+second closed Edge.Cuts contour, geometric DRC measures copper-to-edge against
+cutout edges (findings name the cutout via `against_entity_id`), routing
+reserves each cutout as an all-layer obstacle pre-inflated by
+`copper_to_edge_mm`, and zone fill carves pours away from cutouts by the same
+band.
 
-**A cutout is AUTHORABLE and NOT COMPILABLE.** This is the strongest refusal in
-the contract, and it is deliberate rather than unfinished:
+**What compile enforces**, all under `invalid_cutout_outline`, on v1 boards
+too: at least 3 distinct corners with no zero-length segment (explicit closure
+folds to implicit); every vertex **strictly interior** to the rim (a vertex on
+or past the rim would be a NOTCH — a reshape of the outer contour v1 does not
+model); **no self-intersection and no zero area** (a pentagram or bow-tie ring
+has no single interior; a collinear sliver encloses nothing); pairwise
+**disjoint bounding boxes** (conservative: genuinely overlapping contours must
+be merged; a disjoint diagonal pair whose boxes overlap is refused in the
+fail-closed direction); unique ids.
 
-- `compile_board` refuses any board declaring a non-empty `cutouts` with
-  `unsupported_board_feature` — the same denylist that refuses `board_graphics`
-  and `keepouts`, with the same presence-not-truthiness rule: `cutouts: []`
-  declares nothing and is allowed, and `cutouts: {}` fails closed one step
-  earlier as `invalid_board_structure` at the shared boundary.
-- The reason is a **fail-open on the fabrication path** (docket `019fbd30f7`):
-  the IR has a shape for this (`ProfileOutline.cutouts`), but the projection both
-  fab emitters read (`ir_projection.outline_frame`) silently degrades a
-  `ProfileOutline` to its outer axis-aligned bounding box, **discarding every
-  cutout with no warning**. A cutout that compiled today would ship a board with
-  no opening in it. That bug must be fixed before this key leaves the denylist.
-
-Because the compiler refuses it, **this section has no yaml example**:
-`test_every_yaml_example_in_board_yaml_md_compiles` compiles every yaml block in
-this document under both production output profiles, so an example authoring a
-cutout would go red against the very refusal above. The table is the spec here,
-the same way the Zones section handles `diff_pair_gap_mm`.
+**What is NOT checked, deliberately:** that a cutout avoids pads, traces, vias
+or zones (that is DRC's job, and GC5 does it for copper); minimum internal
+milling radius; hole-to-cutout-edge distance (filed: `019fe3286237` — no
+hole-to-edge class exists for the rim either).
 
 ### Compiling the examples
 

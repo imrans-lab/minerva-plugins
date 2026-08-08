@@ -57,6 +57,19 @@ var local_bounds: Rect2 = Rect2(-1.27, -1.27, 5.0, 2.5)
 ## Pin definitions: pin_name -> relative Vector2 offset from anchor (origin)
 var pins: Dictionary = {}
 
+## Canonical component keys this model does NOT represent (assembly, mpn, ...),
+## preserved verbatim from load_from_board_dict and re-emitted by
+## to_board_dict — the GDScript mirror of Go's Extra passthrough. Epoch CPN1
+## found the loss live: `assembly: exclude` and `mpn` vanished across the
+## first real promote.
+var canonical_extra: Dictionary = {}
+
+## Per-pin canonical extras keyed by pin number (drill_mm /
+## annulus_diameter_mm / plated / pad_width_mm / pad_height_mm / name, ...) —
+## same preservation contract as canonical_extra; see the pin-loading note in
+## load_from_board_dict.
+var pin_extra: Dictionary = {}
+
 ## Additional properties (value, package, manufacturer, etc.)
 var properties: Dictionary = {}
 
@@ -1025,13 +1038,25 @@ func to_board_dict() -> Dictionary:
 	if not val.is_empty():
 		d["value"] = val
 
-	# pins: name→offset map → sorted list of {number, x_mm, y_mm}
+	# Re-emit the preserved canonical extras (assembly, mpn, ...) — knowns win
+	# on any collision, so a stale extra can never clobber a modeled field.
+	for extra_key in canonical_extra:
+		if not d.has(extra_key):
+			d[extra_key] = canonical_extra[extra_key]
+
+	# pins: name→offset map → sorted list of {number, x_mm, y_mm} + each pin's
+	# preserved fab-geometry extras (drill_mm/annulus_diameter_mm/...).
 	var pin_keys := pins.keys()
 	pin_keys.sort()
 	var pin_list := []
 	for k in pin_keys:
 		var p: Vector2 = pins[k]
-		pin_list.append({"number": str(k), "x_mm": p.x, "y_mm": p.y})
+		var pin_dict := {"number": str(k), "x_mm": p.x, "y_mm": p.y}
+		var extras: Dictionary = pin_extra.get(str(k), {})
+		for ek in extras:
+			if not pin_dict.has(ek):
+				pin_dict[ek] = extras[ek]
+		pin_list.append(pin_dict)
 	d["pins"] = pin_list
 
 	# Canonical Extra (render detail — mirrors minpcb.go knownComponentFields).
@@ -1082,13 +1107,28 @@ func load_from_board_dict(data: Dictionary) -> void:
 	else:
 		local_bounds = Rect2(-width / 2.0, -height / 2.0, width, height)
 
-	# pins: canonical list of {number,x_mm,y_mm} → name→offset map
+	# pins: canonical list of {number,x_mm,y_mm} → name→offset map. Every key
+	# BEYOND number/x_mm/y_mm (drill_mm, annulus_diameter_mm, plated,
+	# pad_width_mm, pad_height_mm, name, ...) is AUTHORED FAB GEOMETRY the
+	# model does not represent — preserved per pin and re-emitted verbatim by
+	# to_board_dict. Epoch CPN1 found the loss live: the coupon's TP1
+	# min-annular override (drill 0.6 / annulus 0.96) silently reverted to the
+	# library default across the first real promote, killing the witness the
+	# board exists to carry.
 	pins.clear()
+	pin_extra.clear()
 	var pin_list: Array = data.get("pins", [])
 	for pd in pin_list:
 		if pd is Dictionary:
-			pins[str(pd.get("number", ""))] = Vector2(
+			var pnum := str(pd.get("number", ""))
+			pins[pnum] = Vector2(
 				float(pd.get("x_mm", 0.0)), float(pd.get("y_mm", 0.0)))
+			var extras := {}
+			for k in (pd as Dictionary):
+				if k not in ["number", "x_mm", "y_mm"]:
+					extras[k] = pd[k]
+			if not extras.is_empty():
+				pin_extra[pnum] = extras
 
 	has_pad_geometry = data.get("has_pad_geometry", false)
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
@@ -1133,6 +1173,19 @@ func load_from_board_dict(data: Dictionary) -> void:
 			color_data.get("a", 1.0))
 	label_visible = data.get("label_visible", true)
 	locked = data.get("locked", false)
+
+	# Preserve every canonical key this model has no field for (assembly, mpn,
+	# future schema growth) — see canonical_extra's declaration. The known set
+	# below is every key the reads above consumed; anything else is authored
+	# design intent that must survive the round trip verbatim.
+	canonical_extra.clear()
+	var known := ["ref", "id", "footprint", "footprint_id", "x_mm", "y_mm",
+		"rotation_deg", "layer", "width", "height", "local_bounds", "pads",
+		"has_pad_geometry", "graphics", "bbox_center_offset", "properties",
+		"color", "label_visible", "locked", "pins", "value"]
+	for k in data:
+		if k not in known:
+			canonical_extra[k] = data[k]
 
 
 ## Create from a canonical board-contract component dict (static constructor).

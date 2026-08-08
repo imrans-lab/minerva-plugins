@@ -238,6 +238,13 @@ FAMILIES = (
     "drill",
     # The board frame.
     "outline",
+    # One interior board cutout, keyed by its axis-aligned bbox (identity-free
+    # on purpose: canonical cutout ids do not survive into a Gerber). Added in
+    # epoch CPN1 because the outline family alone is bbox-of-everything and an
+    # interior contour does not move the bbox — an emitter silently dropping a
+    # cutout was invisible to parity, which is the exact silent-discard class
+    # bug 019fbd30f7 documents on this surface.
+    "cutout",
     # Copper-layer identity + stack order.
     "copper_layer",
     # Which net owns which pad. Split out of copper_flash so a dropped net
@@ -682,6 +689,7 @@ def tabulate_ir(rb: ResolvedBoard) -> SurfaceTable:
     # bounds — so the CONTRACT value stands in for it. Both emitters import this
     # same constant, so this row is what a drifted emitter is measured against.
     rows.append(_outline_row(*_ir_outline(rb), EDGE_CUTS_WIDTH_MM))
+    rows.extend(_ir_cutout_rows(rb))
     for index, token in enumerate(stack):
         rows.append(ParityRow.make("copper_layer", (token,), stack_index=index))
 
@@ -729,6 +737,110 @@ def _outline_row(ox: float, oy: float, w: float, h: float,
 
 _KICAD_EDGE_STROKE_RE = re.compile(
     r'\(gr_line\b[^\n]*?\(layer\s+"Edge\.Cuts"\)[^\n]*?\(width\s+([0-9.eE+-]+)\)')
+
+
+def _cutout_row(min_x: float, min_y: float, max_x: float, max_y: float,
+                segment_count: int) -> ParityRow:
+    """One interior-cutout row, keyed by rounded bbox (see the family comment
+    in FAMILIES). ``segment_count`` is a compared field: two surfaces agreeing
+    on the box but not on how many edges drew it is a real divergence."""
+    key = tuple(round(v, 6) for v in (min_x, min_y, max_x, max_y))
+    return ParityRow.make("cutout", key, segment_count=segment_count)
+
+
+def _cutout_rows_from_segments(
+        segments: list[tuple[tuple[float, float], tuple[float, float]]]
+) -> list[ParityRow]:
+    """Interior-cutout rows from a surface's FULL Edge.Cuts segment set.
+
+    Groups segments into closed loops by endpoint connectivity (union-find on
+    endpoints rounded to 1e-6 mm), computes each loop's bbox, and drops the
+    loop whose bbox equals the union bbox — that one is the rim, which the
+    ``outline`` family already owns. Everything left is an interior cutout.
+    Shared by the kicad and gerber harvests so both surfaces read their own
+    bytes through ONE grouping convention."""
+    if not segments:
+        return []
+
+    def _key(point: tuple[float, float]) -> tuple[float, float]:
+        return (round(point[0], 6), round(point[1], 6))
+
+    parent: dict[tuple[float, float], tuple[float, float]] = {}
+
+    def _find(node):
+        while parent[node] is not node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def _union(a, b):
+        for node in (a, b):
+            parent.setdefault(node, node)
+        ra, rb = _find(a), _find(b)
+        if ra is not rb:
+            parent[ra] = rb
+
+    for a, b in segments:
+        _union(_key(a), _key(b))
+
+    groups: dict[tuple[float, float], list] = {}
+    for a, b in segments:
+        groups.setdefault(_find(_key(a)), []).append((a, b))
+
+    def _bbox(segs):
+        xs = [c[0] for s in segs for c in s]
+        ys = [c[1] for s in segs for c in s]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    union_box = _bbox(segments)
+    rows = []
+    for segs in groups.values():
+        box = _bbox(segs)
+        if tuple(round(v, 6) for v in box) == tuple(round(v, 6) for v in union_box):
+            continue  # the rim — the outline family's row
+        rows.append(_cutout_row(*box, segment_count=len(segs)))
+    return rows
+
+
+_KICAD_EDGE_LINE_RE = re.compile(
+    r'\(gr_line \(start ([\-0-9.eE+]+) ([\-0-9.eE+]+)\) '
+    r'\(end ([\-0-9.eE+]+) ([\-0-9.eE+]+)\) \(layer "Edge\.Cuts"\)')
+
+
+def _kicad_cutout_rows(text: str) -> list[ParityRow]:
+    """Interior cutouts as kicad.py ACTUALLY wrote them — an independent
+    re-reading of the emitted gr_line set, same doctrine as
+    :func:`_kicad_outline_stroke`."""
+    segments = [((float(x1), float(y1)), (float(x2), float(y2)))
+                for x1, y1, x2, y2 in _KICAD_EDGE_LINE_RE.findall(text)]
+    return _cutout_rows_from_segments(segments)
+
+
+def _gerber_cutout_rows(parsed) -> list[ParityRow]:
+    """Interior cutouts from the parsed Edge_Cuts stream, in the BOARD frame
+    (per-ordinate Y negation undone by :func:`_board_y`)."""
+    segments = []
+    for obj in parsed.objects:
+        x1, y1 = getattr(obj, "x1", None), getattr(obj, "y1", None)
+        x2, y2 = getattr(obj, "x2", None), getattr(obj, "y2", None)
+        if None not in (x1, y1, x2, y2):
+            segments.append(((float(x1), _board_y(y1)),
+                             (float(x2), _board_y(y2))))
+    return _cutout_rows_from_segments(segments)
+
+
+def _ir_cutout_rows(rb: ResolvedBoard) -> list[ParityRow]:
+    """The IR's cutouts, through the same shared projection the emitters read
+    (``cutout_point_loops``) — like :func:`_ir_outline`, the check is that the
+    cutouts SURVIVE emission, not that they are derived twice."""
+    from .ir_projection import cutout_point_loops
+    rows = []
+    for _cut_id, points in cutout_point_loops(rb.outline):
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        rows.append(_cutout_row(min(xs), min(ys), max(xs), max(ys),
+                                segment_count=len(points)))
+    return rows
 
 
 def _kicad_outline_stroke(text: str) -> Any:
@@ -1016,6 +1128,7 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
 
     width, height, ox, oy = _parse_board_outline(text)
     rows.append(_outline_row(ox, oy, width, height, _kicad_outline_stroke(text)))
+    rows.extend(_kicad_cutout_rows(text))
 
     # KiCad's own layer ORDINALS (0, 2, ...) are its internal numbering, not a
     # stack index. The stack order is the order the signal layers are listed.
@@ -1037,7 +1150,7 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
 # parse — verified: every parsed aperture comes back with ``attrs=()`` — so even
 # the pad/via distinction is NA here, not merely unnamed.)
 _GERBER_FAMILIES = frozenset({"copper_flash", "copper_trace", "drill",
-                              "outline", "copper_layer"})
+                              "outline", "cutout", "copper_layer"})
 
 
 class ParitySurfaceUnavailable(RuntimeError):
@@ -1168,6 +1281,7 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
             elif suffix == "Edge_Cuts":
                 rows.append(_outline_row(*_gerber_outline(parsed),
                                          _gerber_outline_stroke(parsed)))
+                rows.extend(_gerber_cutout_rows(parsed))
         elif filename.endswith(".drl"):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

@@ -792,7 +792,12 @@ def _assembly_bom(params: dict) -> dict:
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
-    return {"ok": True, "result": {"files": files, "written": written}}
+    result = {"files": files, "written": written}
+    # Absent-when-empty (the UX4 advisory idiom): furniture skipped by
+    # `assembly: exclude` is REPORTED, never silently missing from the BOM.
+    if files.excluded_refs:
+        result["excluded_components"] = list(files.excluded_refs)
+    return {"ok": True, "result": result}
 
 
 def _assembly_cpl(params: dict) -> dict:
@@ -815,7 +820,11 @@ def _assembly_cpl(params: dict) -> dict:
     written = _write_assembly_files(files, params.get("out_dir"))
     if _is_error_reply(written):
         return written
-    return {"ok": True, "result": {"files": files, "written": written}}
+    result = {"files": files, "written": written}
+    # Absent-when-empty — see _assembly_bom.
+    if files.excluded_refs:
+        result["excluded_components"] = list(files.excluded_refs)
+    return {"ok": True, "result": result}
 
 
 # ---------------------------------------------------------------------------

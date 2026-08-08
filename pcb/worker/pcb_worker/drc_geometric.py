@@ -115,6 +115,8 @@ from .drc_geom_primitives import (
     capsule_edge_witness,
     convex_edge_distance,
     convex_edge_witness,
+    point_segment_distance,
+    segment_segment_distance,
 )
 from .ir_pads import (
     IRPad,
@@ -124,10 +126,12 @@ from .ir_pads import (
     pad_land,
     smd_shape,
 )
+from .ir_projection import cutout_point_loops, outline_frame, profile_outer_rect
 from .resolved_board import (
     Diagnostic,
     LayerRole,
     OvalHole,
+    ProfileOutline,
     RectOutline,
     ResolutionFailure,
     ResolutionResult,
@@ -859,19 +863,99 @@ def _check_gc2_clearance(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     return findings
 
 
+def _point_in_loop(px: float, py: float, loop: list[tuple[float, float]]) -> bool:
+    """Even-odd ray cast for an ARBITRARY (possibly concave) vertex loop —
+    ``drc_geom_primitives._point_in_convex`` deliberately assumes convexity, and
+    a cutout has no convexity guarantee."""
+    inside = False
+    count = len(loop)
+    for index in range(count):
+        x1, y1 = loop[index]
+        x2, y2 = loop[(index + 1) % count]
+        if (y1 > py) != (y2 > py):
+            x_cross = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+            if px < x_cross:
+                inside = not inside
+    return inside
+
+
+def _aabb_loop_clearance(box, loop: list[tuple[float, float]]
+                         ) -> tuple[float, tuple[float, float], tuple[float, float]]:
+    """(measured, copper_point, loop_witness) between a copper AABB and a cutout
+    vertex loop. Separated: exact min over (box edge x loop edge) pairs, witness
+    on the closest loop edge. Overlapping (an edge crossing, a loop vertex inside
+    the box, or the box swallowed by the loop): measured is the NEGATED deepest
+    containment the vertex passes can prove, 0.0 for a pure edge graze —
+    either way below any positive rule, so the violation still fires; the
+    magnitude is witness quality, not the verdict."""
+    corners = ((box.min_x, box.min_y), (box.max_x, box.min_y),
+               (box.max_x, box.max_y), (box.min_x, box.max_y))
+    box_edges = tuple((corners[i], corners[(i + 1) % 4]) for i in range(4))
+    count = len(loop)
+    loop_edges = tuple((loop[i], loop[(i + 1) % count]) for i in range(count))
+
+    overlap_depth = 0.0
+    overlapping = False
+    for (lx, ly) in loop:
+        if box.min_x <= lx <= box.max_x and box.min_y <= ly <= box.max_y:
+            overlapping = True
+            overlap_depth = max(overlap_depth,
+                                min(lx - box.min_x, box.max_x - lx,
+                                    ly - box.min_y, box.max_y - ly))
+    for (cx, cy) in corners:
+        if _point_in_loop(cx, cy, loop):
+            overlapping = True
+            overlap_depth = max(overlap_depth, min(
+                point_segment_distance(cx, cy, a[0], a[1], b[0], b[1])
+                for a, b in loop_edges))
+    if not overlapping:
+        for be in box_edges:
+            for le in loop_edges:
+                if segment_segment_distance(be[0], be[1], le[0], le[1]) == 0.0:
+                    overlapping = True
+                    break
+            if overlapping:
+                break
+
+    centre = ((box.min_x + box.max_x) / 2.0, (box.min_y + box.max_y) / 2.0)
+    best = None
+    for a, b in loop_edges:
+        d = min(segment_segment_distance(be[0], be[1], a, b) for be in box_edges)
+        if best is None or d < best[0]:
+            best = (d, a, b)
+    d, a, b = best
+    # Witness: the closest loop edge's nearest point to the box centre, and the
+    # box boundary point clamped toward it — midpoint-quality anchors, the same
+    # fidelity the outer-rim sides use.
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    seg_len2 = dx * dx + dy * dy
+    t = 0.0 if seg_len2 == 0 else max(0.0, min(1.0, (
+        (centre[0] - a[0]) * dx + (centre[1] - a[1]) * dy) / seg_len2))
+    witness = (a[0] + t * dx, a[1] + t * dy)
+    cop_pt = (max(box.min_x, min(box.max_x, witness[0])),
+              max(box.min_y, min(box.max_y, witness[1])))
+    if overlapping:
+        return -overlap_depth, cop_pt, witness
+    return d, cop_pt, witness
+
+
 def _check_gc5_copper_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]:
-    """Copper-to-board-edge clearance against the RectOutline. The outline is
-    ``origin + width/height`` (a non-RectOutline board is already made indeterminate
-    by the C1 guard in :func:`run_geometric_drc`). For a copper shape the inward
-    clearance to each axis-aligned outline edge is EXACT from the shape's own extent
-    (its AABB is the exact extent of a Capsule/OrientedRect), so ``measured`` is the
-    minimum of the four insets; copper OUTSIDE the outline yields a negative measured
-    on the crossed side. A roundrect's bounding-rect AABB is a superset, so this only
-    ever UNDER-states the inset — the fail-safe direction."""
+    """Copper-to-board-edge clearance against the board rim AND every interior
+    cutout. The rim is the rect frame (a non-rect rim is already indeterminate
+    via the C1 guard). For a copper shape the inward clearance to each
+    axis-aligned rim edge is EXACT from the shape's own extent (its AABB is the
+    exact extent of a Capsule/OrientedRect), so the rim ``measured`` is the
+    minimum of the four insets; copper OUTSIDE the outline yields a negative
+    measured on the crossed side. A roundrect's bounding-rect AABB is a
+    superset, so this only ever UNDER-states the inset — the fail-safe
+    direction. Cutout edges reuse the same rule and the same code
+    (``gc5_copper_to_edge`` — a slot edge IS a board edge to the router bit),
+    measured as exact AABB-to-contour distance; the AABB superset understates
+    here too, the same fail-safe direction."""
     required = rb.design_rules.minimums.copper_to_edge_mm
-    outline: RectOutline = rb.outline  # guaranteed RectOutline by the caller's guard
-    ox, oy = outline.origin
-    ox2, oy2 = ox + outline.width_mm, oy + outline.height_mm
+    ox, oy, width_mm, height_mm = outline_frame(rb.outline)
+    ox2, oy2 = ox + width_mm, oy + height_mm
+    cut_loops = cutout_point_loops(rb.outline)
     findings: list[dict] = []
     for prim in sorted(proj.copper, key=lambda p: p.entity_id):
         box = prim.aabb
@@ -893,6 +977,21 @@ def _check_gc5_copper_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]
                 prim.net_id, layer, measured, required,
                 closest=list(cop_pt), witness=list(edge_pt),
                 ref=prim.ref, pad=prim.pad_number, net_name=prim.net_name))
+        for cut_id, loop in cut_loops:
+            cut_measured, cut_cop, cut_witness = _aabb_loop_clearance(box, loop)
+            if _violates(cut_measured, required):
+                layer = _canon_layer(prim.layers[0]) if prim.layers else None
+                findings.append(_finding(
+                    "gc5_copper_to_edge", prim.entity_id, prim.parent_id,
+                    prim.kind, prim.net_id, layer, cut_measured, required,
+                    closest=list(cut_cop), witness=list(cut_witness),
+                    # Which edge: the rim finding above carries no extra; a
+                    # cutout finding NAMES the cutout (the GC7
+                    # against_entity_id pattern) — on a multi-cutout board the
+                    # witness coordinates alone cannot say which slot
+                    # (ResolvedCutout carries its id for exactly this).
+                    extra={"against_entity_id": cut_id},
+                    ref=prim.ref, pad=prim.pad_number, net_name=prim.net_name))
     return findings
 
 
@@ -1109,7 +1208,16 @@ def run_geometric_drc(rb: ResolvedBoard, *,
     try:
         # Fail-closed guards BEFORE any check: an unmodelable board must be
         # indeterminate, never silently skipped to a clean verdict.
-        if not isinstance(rb.outline, RectOutline):
+        if isinstance(rb.outline, ProfileOutline):
+            # A rect-outer profile (rim rectangle + interior cutouts) IS
+            # modelable: GC5 measures against the rim frame and every cutout
+            # contour. Any other outer shape stays indeterminate.
+            if profile_outer_rect(rb.outline) is None:
+                return _indeterminate(
+                    "unsupported_geometry",
+                    "geometric DRC models a rectangular board rim only; this "
+                    "ProfileOutline's outer contour is not an axis-aligned rectangle")
+        elif not isinstance(rb.outline, RectOutline):
             return _indeterminate(
                 "unsupported_geometry",
                 "geometric DRC v1 models a rectangular (RectOutline) board only; "

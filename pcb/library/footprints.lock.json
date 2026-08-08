@@ -59,6 +59,31 @@
   "sha256": "a5aa6281c453b7a6cdee181c5333a1a0f25eaa73778047eb633a165d5be1809c",
   "size_bytes": 1955
  },
+ "Minerva_Fixture:DAM_MinWeb_2P": {
+  "path": "Minerva_Fixture.pretty/DAM_MinWeb_2P.kicad_mod",
+  "sha256": "1ff51fc0f5b171a3b1cf72dcbbf8368e6e1177891b9afaea36d80fbf582ea4c0",
+  "size_bytes": 623
+ },
+ "Minerva_Fixture:FID_Circle_1mm": {
+  "path": "Minerva_Fixture.pretty/FID_Circle_1mm.kicad_mod",
+  "sha256": "e85eaef9beba0deb4771f837b3d2f184a21a2b19532cec5648965ba3c7497577",
+  "size_bytes": 556
+ },
+ "Minerva_Fixture:LOGO_Owl_TestCoupon": {
+  "path": "Minerva_Fixture.pretty/LOGO_Owl_TestCoupon.kicad_mod",
+  "sha256": "87be4afa99819695804d30c7abd61dc006b4acedf76c11a693d7a11bbd7d10e9",
+  "size_bytes": 9190
+ },
+ "Minerva_Fixture:SMD_WeirdPads_2P": {
+  "path": "Minerva_Fixture.pretty/SMD_WeirdPads_2P.kicad_mod",
+  "sha256": "d46e4016891ffd148bc8853d1aad786cb42a4e62942b8a0a78e3742a61bd637d",
+  "size_bytes": 668
+ },
+ "Minerva_Fixture:TP_MinAnnular_0p6": {
+  "path": "Minerva_Fixture.pretty/TP_MinAnnular_0p6.kicad_mod",
+  "sha256": "16b104eb8076cc1fce5af780a92ebf860ef23d1138a1989b67e38efc9be54526",
+  "size_bytes": 554
+ },
  "MountingHole:MountingHole_3.2mm_M3": {
   "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",
   "sha256": "7875432d1eb0639bfb14f939e2a7894e9c986ed58924b9d00c8a95e50b79fb77",

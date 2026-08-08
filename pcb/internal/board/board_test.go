@@ -308,3 +308,55 @@ func TestMalformedYAMLReturnsError(t *testing.T) {
 		}
 	}
 }
+
+// TestComponentAssemblyExcludeRoundTripsAndValidates covers the epoch-CPN1
+// furniture flag (docket 019fe2fb07f8): Component.Assembly survives both
+// serialization boundaries as a TYPED field, "" and "exclude" validate, and a
+// present unrecognized token refuses with invalid_component — mirroring the
+// worker's assembly_outputs._is_assembly_excluded so a typo never travels as
+// "not excluded".
+func TestComponentAssemblyExcludeRoundTripsAndValidates(t *testing.T) {
+	b := &Board{
+		Version: 1, Name: "furniture", WidthMM: 20, HeightMM: 15,
+		Components: []Component{
+			{Ref: "C1", Footprint: "C_0805", XMM: 5, YMM: 5},
+			{Ref: "FID1", Footprint: "FID", XMM: 2, YMM: 2, Assembly: "exclude"},
+		},
+	}
+	if err := Validate(b); err != nil {
+		t.Fatalf("exclude should validate: %v", err)
+	}
+
+	// YAML round trip keeps the field.
+	y, err := MarshalYAML(b)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	back, err := UnmarshalYAML(y)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	if back.Components[1].Assembly != "exclude" {
+		t.Fatalf("YAML dropped Assembly: %+v", back.Components[1])
+	}
+
+	// JSON round trip keeps the field (the IPC boundary).
+	j, err := json.Marshal(b.Components[1])
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var c Component
+	if err := json.Unmarshal(j, &c); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if c.Assembly != "exclude" {
+		t.Fatalf("JSON dropped Assembly: %s", string(j))
+	}
+
+	// A typo is invalid_component, never silently "not excluded".
+	b.Components[1].Assembly = "exlcude"
+	err = Validate(b)
+	if err == nil || !strings.Contains(err.Error(), "invalid_component") {
+		t.Fatalf("typo token must refuse with invalid_component, got %v", err)
+	}
+}

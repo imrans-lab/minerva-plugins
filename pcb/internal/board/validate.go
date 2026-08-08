@@ -63,6 +63,18 @@ func Validate(b *Board) error {
 	if err := validateCutouts(b); err != nil {
 		return err
 	}
+	// Component.Assembly is a closed token set: "" (assembled normally) or
+	// "exclude" (board furniture, no BOM/CPL row — epoch CPN1). A present
+	// unrecognized value refuses HERE, mirroring the worker's
+	// assembly_outputs._is_assembly_excluded, so a typo ("exlcude") never
+	// travels as "not excluded" and lands furniture in a BOM.
+	for i := range b.Components {
+		if a := b.Components[i].Assembly; a != "" && a != "exclude" {
+			return fmt.Errorf(
+				"invalid_component: components[%d] (%s) assembly must be \"exclude\" when present, got %q",
+				i, b.Components[i].Ref, a)
+		}
+	}
 	if b.Version < 2 {
 		return nil
 	}

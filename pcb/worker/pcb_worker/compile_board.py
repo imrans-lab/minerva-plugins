@@ -78,7 +78,13 @@ from .geometry import (
     TOP_LAYER_NAMES,
     TRANSFORM_VERSION,
 )
-from .zone_fill import ZoneFillError, fill_area_mm2, fill_board_zones
+from .zone_fill import (
+    ZoneFillError,
+    _refuse_self_intersecting as _zone_refuse_self_intersecting,
+    _to_nm as _zone_to_nm,
+    fill_area_mm2,
+    fill_board_zones,
+)
 from .manufacturer_profile import (
     DEFAULT_PROFILE_ROOT,
     LoadedRuleProfile,
@@ -108,9 +114,11 @@ from .resolved_board import (
     PlacedGraphic,
     PlacedPad,
     PolygonGeometry,
+    ProfileOutline,
     RectOutline,
     ResolvedBoard,
     ResolvedComponent,
+    ResolvedCutout,
     ResolvedDesignRules,
     ResolvedHole,
     ResolvedLayer,
@@ -339,7 +347,23 @@ def _require_two_layer(board: dict, diags: _Diagnostics) -> bool:
     return True
 
 
-def _build_outline(board: dict, diags: _Diagnostics) -> Union[RectOutline, None]:
+def _build_outline(board: dict, board_id: str, schema_version: int,
+                   diags: _Diagnostics) -> Union[RectOutline, ProfileOutline, None]:
+    """The board rim: a plain :class:`RectOutline`, or — when the board authors
+    interior ``cutouts`` — a :class:`ProfileOutline` whose outer contour is that
+    same rectangle and whose cutouts are validated closed rings.
+
+    Cutout rules, every one fail-closed under ``invalid_cutout_outline``:
+      * the ring parses by the ONE shared convention (:func:`_zone_contour`) —
+        >= 3 distinct corners, no zero-length segment, explicit closure folded;
+      * every vertex lies STRICTLY inside the outer rectangle. A vertex on or
+        past the rim would make the "cutout" a NOTCH — a reshape of the outer
+        contour itself, which v1 does not model (the rect IS the rim contract
+        every consumer measures against);
+      * cutout bounding boxes are pairwise DISJOINT. Conservative on purpose:
+        two overlapping cutouts describe one opening the emitters would draw as
+        two crossing contours — a shape no board house can interpret. An
+        author with a complex opening merges it into one contour."""
     width, height = board.get("width_mm"), board.get("height_mm")
     if not _is_positive_number(width) or not _is_positive_number(height):
         diags.error("unsupported_outline",
@@ -358,7 +382,113 @@ def _build_outline(board: dict, diags: _Diagnostics) -> Union[RectOutline, None]
                         _board_ref())
             return None
         origin = (float(raw_origin["x_mm"]), float(raw_origin["y_mm"]))
-    return RectOutline(origin=origin, width_mm=float(width), height_mm=float(height))
+    rect = RectOutline(origin=origin, width_mm=float(width), height_mm=float(height))
+
+    raw_cutouts = board.get("cutouts")
+    if not isinstance(raw_cutouts, list) or not raw_cutouts:
+        # Presence-not-truthiness for the CONTAINER is enforced by the shared
+        # validate boundary (`cutouts: {}` is invalid_board_structure there);
+        # an absent or explicitly-empty list declares nothing.
+        return rect
+
+    ox, oy = rect.origin
+    ox2, oy2 = ox + rect.width_mm, oy + rect.height_mm
+    cutouts: list[ResolvedCutout] = []
+    ok = True
+    for ordinal, raw in enumerate(_dict_items(board, "cutouts", "cutout", diags)):
+        cut_ref = SourceRef(EntityKind.CUTOUT, f"cutout:{ordinal}")
+        if not _validate_child_id("cutout", raw, cut_ref, schema_version, diags):
+            ok = False
+            continue
+        contour = _zone_contour(raw.get("outline"), ordinal, cut_ref, diags,
+                                code="invalid_cutout_outline", label="cutout")
+        if contour is None:
+            ok = False
+            continue
+        outside = [seg.a for seg in contour.segments
+                   if not (ox < seg.a[0] < ox2 and oy < seg.a[1] < oy2)]
+        if outside:
+            diags.error("invalid_cutout_outline",
+                        f"cutout {ordinal}: vertex {outside[0]} lies on or outside the "
+                        f"board outline; a cutout must be strictly interior (an edge "
+                        f"notch reshapes the rim, which v1 does not model)", cut_ref)
+            ok = False
+            continue
+        # SELF-INTERSECTION AND ZERO AREA REFUSE AT THE DOORWAY (cold review
+        # CPN1-S1 finding 1: a pentagram ring has consistent winding, passes a
+        # consecutive-cross convexity test, reads as "outside" to an even-odd
+        # point test, and would ship a self-crossing Edge.Cuts contour no board
+        # house can interpret — with DRC blind to copper sitting in the star's
+        # core). Zones learned this lesson at fill time (_refuse_self_
+        # intersecting's own docstring); a cutout has no fill step, so the
+        # compile IS its doorway. Reused from zone_fill: same integer-exact
+        # kernel, no second implementation to drift.
+        ring_nm = [(_zone_to_nm(seg.a[0]), _zone_to_nm(seg.a[1]))
+                   for seg in contour.segments]
+        try:
+            _zone_refuse_self_intersecting(f"cutout:{ordinal}", ring_nm)
+        except ZoneFillError as exc:
+            diags.error("invalid_cutout_outline", f"cutout {ordinal}: {exc}", cut_ref)
+            ok = False
+            continue
+        area2 = sum(ring_nm[i][0] * ring_nm[(i + 1) % len(ring_nm)][1]
+                    - ring_nm[(i + 1) % len(ring_nm)][0] * ring_nm[i][1]
+                    for i in range(len(ring_nm)))
+        if area2 == 0:
+            # A collinear sliver ((2,2) (8,2) (5,2)) encloses nothing: emitted
+            # it would be a zero-width out-and-back slit on Edge.Cuts, and the
+            # router's degenerate "inflation" of it reserves only one side —
+            # a routed board that then fails its own GC5 (review finding 3).
+            diags.error("invalid_cutout_outline",
+                        f"cutout {ordinal}: outline encloses zero area", cut_ref)
+            ok = False
+            continue
+        cutouts.append(ResolvedCutout(
+            id=_resolve_child_id("cutout", board_id, raw, (ordinal,), schema_version),
+            contour=contour))
+
+    seen_ids: dict[str, int] = {}
+    for index, cut in enumerate(cutouts):
+        if cut.id in seen_ids:
+            # v2 boards are defended by the shared minted-id gate; this catches
+            # the v1 case of two cutouts AUTHORING the same id (both derive to
+            # the same board-namespaced id — silently aliased identity).
+            diags.error("invalid_cutout_outline",
+                        f"cutouts {seen_ids[cut.id]} and {index} resolve to the same "
+                        f"id {cut.id}; authored cutout ids must be unique", _board_ref())
+            ok = False
+        seen_ids[cut.id] = index
+    for i in range(len(cutouts)):
+        for j in range(i + 1, len(cutouts)):
+            if _contour_aabbs_intersect(cutouts[i].contour, cutouts[j].contour):
+                diags.error("invalid_cutout_outline",
+                            f"cutouts {cutouts[i].id} and {cutouts[j].id} have "
+                            f"intersecting bounding boxes. v1 models cutouts with "
+                            f"DISJOINT bounding boxes only: genuinely overlapping "
+                            f"contours must be merged into one, and a disjoint "
+                            f"diagonal pair whose boxes overlap is refused "
+                            f"conservatively (the fail-closed direction)",
+                            _board_ref())
+                ok = False
+    if not ok:
+        return None
+    outer = Contour(segments=(
+        LineGeometry((ox, oy), (ox2, oy)),
+        LineGeometry((ox2, oy), (ox2, oy2)),
+        LineGeometry((ox2, oy2), (ox, oy2)),
+        LineGeometry((ox, oy2), (ox, oy)),
+    ))
+    return ProfileOutline(outer=outer, cutouts=tuple(cutouts))
+
+
+def _contour_aabbs_intersect(a: Contour, b: Contour) -> bool:
+    def box(c: Contour) -> tuple[float, float, float, float]:
+        xs = [seg.a[0] for seg in c.segments]
+        ys = [seg.a[1] for seg in c.segments]
+        return min(xs), min(ys), max(xs), max(ys)
+    ax0, ay0, ax1, ay1 = box(a)
+    bx0, by0, bx1, by1 = box(b)
+    return not (ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0)
 
 
 def _build_layer_stack() -> LayerStack:
@@ -1740,8 +1870,15 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
 
 
 def _zone_contour(raw_outline, ordinal: int, ref: SourceRef,
-                  diags: _Diagnostics) -> Union[Contour, None]:
+                  diags: _Diagnostics, *,
+                  code: str = "invalid_zone_outline",
+                  label: str = "zone") -> Union[Contour, None]:
     """The authored zone boundary as a closed :class:`Contour`, or ``None`` on error.
+
+    ``code``/``label`` follow the :func:`_extract_points` convention: a second
+    ring-bearing entity (a CUTOUT, which reports ``invalid_cutout_outline`` —
+    Go's own code string) reuses this ONE ring-parsing convention under its own
+    diagnostic vocabulary. The defaults reproduce the zone wording verbatim.
 
     The Go contract carries an ``outline`` as an ordered ``[]Point`` ring; the IR
     carries a ``Contour`` of segments whose closure is IMPLICIT (each segment's end
@@ -1757,7 +1894,7 @@ def _zone_contour(raw_outline, ordinal: int, ref: SourceRef,
     rather than turned into a zero-length segment.  Both notations must land on the
     identical ``Contour``."""
     points = _extract_points(raw_outline, ordinal, ref, diags,
-                             code="invalid_zone_outline", label="zone")
+                             code=code, label=label)
     if points is None:
         return None
     if len(points) >= 2 and points[0] == points[-1]:
@@ -1767,16 +1904,16 @@ def _zone_contour(raw_outline, ordinal: int, ref: SourceRef,
         # stricter by exactly the explicit-closure case: Go accepts [A, B, A]
         # (three raw points), which is a two-corner degenerate polygon once the
         # duplicate closer is dropped. Stricter in the fail-closed direction.
-        diags.error("invalid_zone_outline",
-                    f"zone {ordinal}: outline describes {len(points)} distinct corner(s); "
+        diags.error(code,
+                    f"{label} {ordinal}: outline describes {len(points)} distinct corner(s); "
                     f"a polygon needs at least 3", ref)
         return None
     count = len(points)
     for index in range(count):
         if points[index] == points[(index + 1) % count]:
             # Would be a zero-length segment, which LineGeometry rejects.
-            diags.error("invalid_zone_outline",
-                        f"zone {ordinal}: outline has a repeated point at "
+            diags.error(code,
+                        f"{label} {ordinal}: outline has a repeated point at "
                         f"{points[index]} (index {index}); a boundary cannot contain a "
                         f"zero-length segment", ref)
             return None
@@ -1788,8 +1925,8 @@ def _zone_contour(raw_outline, ordinal: int, ref: SourceRef,
     except (ValueError, TypeError) as exc:
         # The IR is the authority on its own invariants; surface a rejection as a
         # structured diagnostic rather than an unhandled traceback out of compile.
-        diags.error("invalid_zone_outline",
-                    f"zone {ordinal}: outline rejected by the IR: {exc}", ref)
+        diags.error(code,
+                    f"{label} {ordinal}: outline rejected by the IR: {exc}", ref)
         return None
 
 
@@ -2159,20 +2296,19 @@ def compile_board(
     # ``invalid_board_structure``) rather than here, so ``zones: {}`` keeps failing
     # closed while ``zones: []`` keeps declaring nothing.
     #
-    # ``cutouts`` JOINED this list the day the entity was modeled (campaign 2 epoch
-    # B), and that refusal is the POINT of the entity, not a placeholder for work
-    # not done yet: a cutout is AUTHORABLE and NOT COMPILABLE.  The IR has a shape
-    # for it (``ProfileOutline.cutouts``), but nothing can safely reach it —
-    # ``ir_projection.outline_frame`` silently degrades a ``ProfileOutline`` to its
-    # outer axis-aligned bounding box, DISCARDING every cutout with no warning, and
-    # both fab emitters read exactly that projection.  A cutout that compiled today
-    # would therefore ship a board with no opening in it, silently.  That fail-open
-    # is filed as docket 019fbd30f7 and must be fixed BEFORE this key leaves the
-    # list; ``route_bridge`` and geometric DRC additionally refuse a non-Rect
-    # outline by type, which is the second line of defence.  Same presence-not-
-    # truthiness rule as the others: ``cutouts: {}`` is a declaration and is
-    # refused, ``cutouts: []`` declares nothing and is allowed.
-    for unsupported_key in ("board_graphics", "keepouts", "cutouts"):
+    # ``cutouts`` LEFT this list in epoch CPN1 (docket 019fe2faf76e), the round
+    # that fixed the fail-open its refusal existed to hold back (019fbd30f7):
+    # ``ir_projection.outline_frame`` no longer silently degrades a
+    # ``ProfileOutline`` to its bounding box (it frames a rect outer faithfully
+    # and RAISES on any other), both fab emitters draw cutout contours on
+    # Edge.Cuts, geometric DRC measures copper-to-edge against cutout edges,
+    # routing reserves them as all-layer obstacles, and zone fill carves pours
+    # away from them by the same copper-to-edge rule.  An authored cutout now
+    # compiles into ``ProfileOutline.cutouts`` via :func:`_build_outline`, which
+    # owns the fail-closed geometry rules (strictly-interior, disjoint).
+    # ``cutouts: {}`` is still refused — by the shared validate boundary
+    # (``invalid_board_structure``), same presence-not-truthiness rule as ever.
+    for unsupported_key in ("board_graphics", "keepouts"):
         value = board.get(unsupported_key)
         if value is None or (isinstance(value, list) and not value):
             continue
@@ -2181,7 +2317,7 @@ def compile_board(
                     _board_ref())
 
     two_layer = _require_two_layer(board, diags)
-    outline = _build_outline(board, diags)
+    outline = _build_outline(board, board_id, version, diags)
     layer_stack = _build_layer_stack() if two_layer else None
     built_rules = _build_design_rules(board, board_id, requested_outputs, profile_root, diags)
     design_rules, class_id_by_net = built_rules if built_rules is not None else (None, {})

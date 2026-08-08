@@ -352,3 +352,66 @@ def test_neither_output_mentions_paste():
     cpl_content = next(iter(ao.build_cpl(board, "jlc").values()))
     assert "paste" not in bom_content.lower()
     assert "paste" not in cpl_content.lower()
+
+
+# ---------------------------------------------------------------------------
+# assembly: exclude — board furniture (epoch CPN1, docket 019fe2fb07f8)
+# ---------------------------------------------------------------------------
+
+
+def _furniture_board() -> dict:
+    return {
+        "name": "furniture", "components": [
+            {"ref": "C1", "footprint": "C_0805", "value": "100n", "mpn": "C1525",
+             "x_mm": 5, "y_mm": 5, "layer": "top"},
+            {"ref": "LOGO1", "footprint": "OWL", "x_mm": 10, "y_mm": 10,
+             "layer": "top", "assembly": "exclude"},
+            {"ref": "FID1", "footprint": "FID", "x_mm": 2, "y_mm": 2,
+             "layer": "top", "assembly": "exclude"},
+        ]}
+
+
+def test_excluded_components_skip_bom_and_identity_contract():
+    """LOGO1/FID1 have no mpn; without the exclusion the identity contract
+    would refuse the whole board. With it, they are skipped BEFORE the
+    identity check and RECORDED on the result's side channel (board order),
+    never silently dropped."""
+    result = ao.build_bom(_furniture_board(), "jlc")
+    assert [r.refs for r in result.rows] == [("C1",)]
+    assert result.excluded_refs == ("LOGO1", "FID1")
+    # The rendered CSV carries no furniture refs.
+    csv_text = next(iter(result.values()))
+    assert "LOGO1" not in csv_text and "FID1" not in csv_text
+
+
+def test_excluded_components_skip_cpl_rows():
+    result = ao.build_cpl(_furniture_board(), "jlc")
+    assert [r.ref for r in result.rows] == ["C1"]
+    assert result.excluded_refs == ("LOGO1", "FID1")
+
+
+def test_exclusion_does_not_relax_identity_for_assembled_parts():
+    """The contract is skip-or-enforce, never weaken: a NON-excluded part
+    missing its mpn still refuses even when furniture is present."""
+    board = _furniture_board()
+    del board["components"][0]["mpn"]
+    with pytest.raises(ao.AssemblyIdentityError, match="C1"):
+        ao.build_bom(board, "jlc")
+
+
+def test_unrecognized_assembly_value_is_named_refusal():
+    """Fail-closed on the token: a typo must never be read as 'not excluded'
+    (that lands a fiducial in the BOM with a fabricated identity demand)."""
+    board = _furniture_board()
+    board["components"][1]["assembly"] = "exlcude"
+    with pytest.raises(ao.AssemblyBoardError, match="assembly must be 'exclude'"):
+        ao.build_bom(board, "jlc")
+    with pytest.raises(ao.AssemblyBoardError, match="assembly must be 'exclude'"):
+        ao.build_cpl(board, "jlc")
+
+
+def test_no_exclusions_keeps_side_channel_empty():
+    board = _furniture_board()
+    board["components"] = [board["components"][0]]
+    result = ao.build_bom(board, "jlc")
+    assert result.excluded_refs == ()

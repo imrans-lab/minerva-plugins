@@ -32,7 +32,12 @@ from agent_router import layers as _layers
 
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .geometry import place_point
-from .ir_projection import graphic_to_dict, outline_frame
+from .ir_projection import (
+    cutout_dicts,
+    cutout_loops_from_dict,
+    graphic_to_dict,
+    outline_frame,
+)
 from .pad_source import (
     DEFAULT_MASK_CLEARANCE_MM,
     is_through_hole,
@@ -433,6 +438,20 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
             f'  (gr_line (start {x1} {y1}) (end {x2} {y2}) '
             f'(layer "Edge.Cuts") (width {EDGE_CUTS_WIDTH_MM}))'
         )
+
+    # Interior cutouts — one closed gr_line loop per cutout on Edge.Cuts, in the
+    # SAME frame and stroke as the rim rectangle above (KiCad reads containment,
+    # not order, to tell an opening from the rim — the same convention the
+    # Gerber emitter's second Profile contour relies on).
+    for _cut_id, loop in cutout_loops_from_dict(board):
+        count = len(loop)
+        for index in range(count):
+            x1, y1 = loop[index]
+            x2, y2 = loop[(index + 1) % count]
+            out.append(
+                f'  (gr_line (start {x1} {y1}) (end {x2} {y2}) '
+                f'(layer "Edge.Cuts") (width {EDGE_CUTS_WIDTH_MM}))'
+            )
 
     # Components → footprints.
     for comp in _list(board.get("components")):
@@ -1166,6 +1185,9 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
         "width_mm": width_mm,
         "height_mm": height_mm,
         "origin": {"x_mm": ox, "y_mm": oy},
+        # Canonical loose shape — the sexpr builder reads ONE cutout
+        # representation whether fed from the IR or a raw board dict.
+        "cutouts": cutout_dicts(board.outline),
         "design_rules": {
             "trace_width_mm": rules.defaults.trace_width_mm,
             "via_diameter_mm": rules.defaults.via_diameter_mm,

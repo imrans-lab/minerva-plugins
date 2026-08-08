@@ -53,3 +53,12 @@ env/
 *.dct.cache-shm
 *.dct.cache-wal
 agent-relay/agent_relay_state.json
+
+# PCB panel sidecars — TRANSIENT WORKSPACE STATE, never the design of record.
+# Goal sub-goal S3: ghost traces, candidates, staged drafts, route hints and
+# edit history live in the workspace until DELIBERATELY PROMOTED; what survives
+# a round is the canonical YAML the promote wrote. Committing a sidecar beside
+# a corpus fixture would also restore a stale workspace (candidates + staged
+# audit + a pinned board_revision/fingerprint) on every test load of that board.
+*.annotations.json
+*.routing.json

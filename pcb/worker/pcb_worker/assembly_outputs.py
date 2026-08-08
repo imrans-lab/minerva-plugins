@@ -256,6 +256,26 @@ def _resolve_side(raw_layer, ref: str) -> str:
         f"to default it to top (mirrors compile_board._resolve_side)")
 
 
+def _is_assembly_excluded(comp: dict, ref: str) -> bool:
+    """A component authoring ``assembly: exclude`` is board FURNITURE — a
+    fiducial, a silk logo — physically on the board but never picked, placed,
+    or purchased, so it belongs in NO BOM/CPL row and must not trip the
+    part-identity contract (epoch CPN1, docket 019fe2fb07f8).
+
+    Fail-closed on the value: ``exclude`` is the only recognized token, and a
+    present-but-unrecognized value REFUSES rather than being read as "not
+    excluded" — a typo (``exlcude``) silently landing a fiducial in the BOM
+    with a fabricated identity requirement is exactly the quiet wrong-answer
+    this module's every other refusal exists to prevent."""
+    raw = comp.get("assembly")
+    if raw is None:
+        return False
+    if raw == "exclude":
+        return True
+    raise AssemblyBoardError(
+        f"component {ref!r} assembly must be 'exclude' when present, got {raw!r}")
+
+
 def _check_identity(profile: HouseProfile, ref: str, comp: dict) -> None:
     """Raise AssemblyIdentityError, naming the component, when ``comp`` lacks
     an identity field ``profile`` REQUIRES. Side-effect-only: callers read the
@@ -285,9 +305,17 @@ def _require_optional_str(comp: dict, key: str, ref: str) -> str:
     return raw or ""
 
 
-def _bom_rows(board: dict, profile: HouseProfile) -> list[BomRow]:
+def _bom_rows(board: dict, profile: HouseProfile,
+              excluded: list[str] | None = None) -> list[BomRow]:
     groups: dict[tuple, dict] = {}
     for ref, comp in _iter_components(board):
+        if _is_assembly_excluded(comp, ref):
+            # Skipped BEFORE the identity contract: furniture has no MPN and
+            # must not be refused for lacking one. The ref is RECORDED, never
+            # silently dropped — the reply carries it as an advisory.
+            if excluded is not None:
+                excluded.append(ref)
+            continue
         value = _require_optional_str(comp, "value", ref)
         footprint = _require_optional_str(comp, "footprint", ref)
         _check_identity(profile, ref, comp)
@@ -308,9 +336,16 @@ def _bom_rows(board: dict, profile: HouseProfile) -> list[BomRow]:
     return rows
 
 
-def _cpl_rows(board: dict, profile: HouseProfile) -> list[CplRow]:
+def _cpl_rows(board: dict, profile: HouseProfile,
+              excluded: list[str] | None = None) -> list[CplRow]:
     rows: list[CplRow] = []
     for ref, comp in _iter_components(board):
+        if _is_assembly_excluded(comp, ref):
+            # Same skip-before-identity as _bom_rows; a fiducial is placed by
+            # the FAB (it is bare copper), not by the assembly line.
+            if excluded is not None:
+                excluded.append(ref)
+            continue
         _check_identity(profile, ref, comp)
         mpn = _component_property(comp, "mpn")
         x_mm, y_mm = comp.get("x_mm"), comp.get("y_mm")
@@ -377,11 +412,16 @@ class AssemblyResult(dict):
     """``{filename: content}`` — same "callers can treat this as a plain
     dict" contract as ``gerber.GerberResult`` (it IS one), with the rows that
     produced the file kept as a side channel for tests that want to assert on
-    structured data rather than re-parsing the CSV."""
+    structured data rather than re-parsing the CSV. ``excluded_refs`` is the
+    second side channel (epoch CPN1): the refs skipped by ``assembly:
+    exclude``, in board order — always a tuple, empty when nothing was
+    excluded, so a reply can surface the advisory absent-when-empty."""
 
-    def __init__(self, files: dict[str, str], rows):
+    def __init__(self, files: dict[str, str], rows,
+                 excluded_refs: tuple[str, ...] = ()):
         super().__init__(files)
         self.rows = rows
+        self.excluded_refs = excluded_refs
 
 
 def build_bom(board: dict, profile_id: str, *, name: str | None = None) -> AssemblyResult:
@@ -389,23 +429,27 @@ def build_bom(board: dict, profile_id: str, *, name: str | None = None) -> Assem
     format. Raises AssemblyProfileError / AssemblyIdentityError /
     AssemblyBoardError — never returns a partial or best-guess result."""
     profile = _resolve_profile(profile_id)
-    rows = _bom_rows(board, profile)
+    excluded: list[str] = []
+    rows = _bom_rows(board, profile, excluded)
     base = name or "board"
     if profile.id == "jlc":
         content = _render_jlc_bom(rows)
     else:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
         raise AssemblyProfileError(f"no BOM renderer wired for profile {profile.id!r}")
-    return AssemblyResult({f"{base}-bom-{profile.id}.csv": content}, rows)
+    return AssemblyResult({f"{base}-bom-{profile.id}.csv": content}, rows,
+                          tuple(excluded))
 
 
 def build_cpl(board: dict, profile_id: str, *, name: str | None = None) -> AssemblyResult:
     """House-agnostic CPL/pick-and-place extraction rendered through
     ``profile_id``'s house format. Same fail-closed contract as build_bom."""
     profile = _resolve_profile(profile_id)
-    rows = _cpl_rows(board, profile)
+    excluded: list[str] = []
+    rows = _cpl_rows(board, profile, excluded)
     base = name or "board"
     if profile.id == "jlc":
         content = _render_jlc_cpl(rows)
     else:  # pragma: no cover - unreachable while PROFILES has one assembly-capable entry
         raise AssemblyProfileError(f"no CPL renderer wired for profile {profile.id!r}")
-    return AssemblyResult({f"{base}-cpl-{profile.id}.csv": content}, rows)
+    return AssemblyResult({f"{base}-cpl-{profile.id}.csv": content}, rows,
+                          tuple(excluded))

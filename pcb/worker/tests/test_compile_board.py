@@ -956,25 +956,24 @@ def test_empty_zones_list_is_allowed():
     assert isinstance(compile_board(board), ResolutionSuccess)
 
 
-# --- cutouts: authorable, NOT compilable -------------------------------------
-# These three pin the fail-closed keystone of the cutout contract (campaign 2
-# epoch B). A cutout is a modeled, validated, round-tripping entity that the
-# compiler REFUSES outright — because ir_projection.outline_frame silently
-# degrades a ProfileOutline to its bounding box and drops every cutout, so a
-# compiled cutout would ship a SOLID board (docket 019fbd30f7). If the refusal
-# is ever relaxed, these tests are what says so out loud.
+# --- cutouts: compilable since epoch CPN1 ------------------------------------
+# The campaign-2 refusal ("authorable, NOT compilable") existed to hold back
+# fail-open 019fbd30f7 — outline_frame silently degrading a ProfileOutline to
+# its bbox, so a compiled cutout would have shipped a SOLID board. Epoch CPN1
+# (docket 019fe2faf76e) fixed that by the bug's own oracle and relaxed the
+# denylist; this row is the old tripwire saying so out loud, now pinning the
+# NEW contract (the full geometry rules live in tests/test_cutouts.py).
 
 
-def test_declared_cutouts_fail_closed():
+def test_declared_cutouts_compile_to_profile_outline():
     board = _one_component_board("R_0805")
-    # A STRUCTURALLY VALID cutout — it clears the shared boundary and is refused
-    # by the unsupported-feature denylist, which is the behaviour under test.
-    # (A malformed one would be caught earlier and would prove nothing here.)
     board["cutouts"] = [{"outline": [{"x_mm": 4, "y_mm": 4}, {"x_mm": 8, "y_mm": 4},
                                      {"x_mm": 8, "y_mm": 8}]}]
     result = compile_board(board)
-    assert isinstance(result, ResolutionFailure)
-    assert "unsupported_board_feature" in _errors(result)
+    assert isinstance(result, ResolutionSuccess)
+    from pcb_worker.resolved_board import ProfileOutline
+    assert isinstance(result.board.outline, ProfileOutline)
+    assert len(result.board.outline.cutouts) == 1
 
 
 def test_empty_cutouts_mapping_fails_closed():

@@ -66,7 +66,12 @@ from .geometry import (
     place_point as _transform_point,
     rotate_local_offset as _rotate,
 )
-from .ir_projection import graphic_to_dict, outline_frame
+from .ir_projection import (
+    cutout_dicts,
+    cutout_loops_from_dict,
+    graphic_to_dict,
+    outline_frame,
+)
 from .pad_source import (
     DEFAULT_MASK_CLEARANCE_MM,
     has_paste,
@@ -1196,13 +1201,24 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_paste(b_paste, g.paste_bot)
     out["B_Paste"] = _dump(b_paste, creation_date)
 
-    # F.Mask
-    f_mask = DataLayer("Soldermask,Top", negative=False)
+    # F.Mask / B.Mask — negative=True, and ONLY the mask pair (bug
+    # 019fb0c348f2, fixed in epoch CPN1). ``negative`` here sets the
+    # FILE-level ``TF.FilePolarity`` attribute and nothing else (measured
+    # against gerber-writer 0.4.3.3: the body stays %LPD*% and no coordinate
+    # or aperture moves). A solder-mask file's features are mask OPENINGS —
+    # absence of material — which is what FilePolarity,Negative states; KiCad
+    # 10.0.5 and 7.0.6 both emit Negative + %LPD for mask layers, and our own
+    # job file already said "Negative" (gerber.py job table), so before this
+    # flag flip the package CONTRADICTED ITSELF and a board house trusting
+    # the .gbr attribute over the manifest would fabricate the mask inverted
+    # — mask over every pad, bare laminate everywhere else. Do NOT "fix" the
+    # job file to Positive instead: that makes both halves agree and both
+    # wrong (the criterion the bug names for a lazy fix).
+    f_mask = DataLayer("Soldermask,Top", negative=True)
     _add_mask(f_mask, g.mask_top)
     out["F_Mask"] = _dump(f_mask, creation_date)
 
-    # B.Mask
-    b_mask = DataLayer("Soldermask,Bot", negative=False)
+    b_mask = DataLayer("Soldermask,Bot", negative=True)
     _add_mask(b_mask, g.mask_bot)
     out["B_Mask"] = _dump(b_mask, creation_date)
 
@@ -1260,6 +1276,20 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     profile.lineto((min_x, y1))
     profile.lineto((min_x, y0))
     edge.add_traces_path(profile, EDGE_CUTS_WIDTH_MM, "Profile")
+
+    # Interior cutouts — each a second closed Profile contour on the same layer
+    # (RS-274X profiles distinguish outer/inner by containment, exactly how
+    # KiCad plots a slotted board). Same per-vertex Y negation as the outer
+    # rectangle above, same width, same function label, so a cutout differs
+    # from the rim only by being a different closed path.
+    for _cut_id, loop in cutout_loops_from_dict(board):
+        path = GPath()
+        first = (loop[0][0], -loop[0][1])
+        path.moveto(first)
+        for (x, y) in loop[1:]:
+            path.lineto((x, -y))
+        path.lineto(first)
+        edge.add_traces_path(path, EDGE_CUTS_WIDTH_MM, "Profile")
     out["Edge_Cuts"] = _dump(edge, creation_date)
 
     return out
@@ -1672,7 +1702,10 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
 
     ox, oy, width_mm, height_mm = outline_frame(board.outline)
     outline_dict = {"width_mm": width_mm, "height_mm": height_mm,
-                    "origin": {"x_mm": ox, "y_mm": oy}}
+                    "origin": {"x_mm": ox, "y_mm": oy},
+                    # Canonical loose shape, so _build_gerber_layers reads ONE
+                    # cutout representation on both entry paths.
+                    "cutouts": cutout_dicts(board.outline)}
 
     files: dict[str, str] = {}
     for suffix, text in _build_gerber_layers(outline_dict, g, date).items():

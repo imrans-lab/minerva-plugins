@@ -1158,3 +1158,42 @@ def test_job_file_is_not_mistaken_for_a_gerber_layer():
     assert sum(1 for k in files if k.endswith(".gbr")) == len(EMITTED_GERBER_SUFFIXES)
     assert sum(1 for k in files if k.endswith(".drl")) == 2
     assert not any(k.endswith(".gbr") for k in files if k.endswith(".gbrjob"))
+
+
+# ---------------------------------------------------------------------------
+# Mask polarity self-consistency (bug 019fb0c348f2, fixed epoch CPN1)
+# ---------------------------------------------------------------------------
+
+
+def test_mask_polarity_agrees_between_gbr_and_job_manifest():
+    """The package must never contradict itself about mask polarity: the mask
+    .gbr files declare TF.FilePolarity,Negative (mask features are OPENINGS —
+    absence of material; KiCad 10.0.5 and 7.0.6 both emit Negative), the body
+    stays %LPD, the job manifest says Negative for the same files, and every
+    NON-mask layer stays Positive on both sides of the package. Before the
+    fix the .gbr said Positive while the manifest said Negative — a house
+    trusting the file attribute fabricated the mask inverted."""
+    import json
+
+    from pcb_worker.gerber import build_gerbers
+
+    board = yaml.safe_load(
+        (Path(__file__).resolve().parent / "testdata" / "gerber_boards"
+         / "drilltest.yaml").read_text(encoding="utf-8"))
+    files = build_gerbers(board)
+    job = json.loads(next(t for n, t in files.items() if n.endswith(".gbrjob")))
+    job_polarity = {f["Path"]: f["FilePolarity"]
+                    for f in job["FilesAttributes"]}
+
+    for name, text in files.items():
+        if not name.endswith(".gbr"):
+            continue
+        declared = [ln for ln in text.splitlines() if "FilePolarity" in ln]
+        assert declared, name
+        is_mask = "F_Mask" in name or "B_Mask" in name
+        expected = "Negative" if is_mask else "Positive"
+        assert expected in declared[0], (name, declared[0])
+        assert job_polarity[name] == expected, (name, job_polarity[name])
+        if is_mask and "%LPD*%" in text:
+            # The flag changes the FILE attribute only — bodies stay dark.
+            assert "%LPC*%" not in text.split("%LPD*%")[0]

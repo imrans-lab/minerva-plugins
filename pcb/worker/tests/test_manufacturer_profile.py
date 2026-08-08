@@ -76,11 +76,42 @@ def test_oshpark_profile_loads_to_a_complete_pinned_floor_distinct_from_v1():
     assert loaded.floor.min_trace_width_mm > v1.floor.min_trace_width_mm
 
 
-def test_shipped_profile_root_holds_exactly_the_two_shipped_profiles():
+def test_shipped_profile_root_holds_exactly_the_shipped_profiles():
     # Not a completeness guarantee for all time, just pins today's shipped
-    # set so an accidental extra/missing file is noticed.
+    # set so an accidental extra/missing file is noticed. jlcpcb-2layer
+    # joined in epoch CPN1 (docket 019fe2fb1e76).
     names = sorted(p.stem for p in DEFAULT_PROFILE_ROOT.glob("*.json"))
-    assert names == ["oshpark-2layer", "v1-fab-conservative"]
+    assert names == ["jlcpcb-2layer", "oshpark-2layer", "v1-fab-conservative"]
+
+
+def test_jlcpcb_profile_loads_to_a_complete_pinned_floor():
+    """The epoch CPN1 profile: JLCPCB 2-layer standard, values quoted from the
+    published capabilities page (see the profile's source field). The two
+    discriminating axes vs the other shipped profiles: the loosest published
+    trace floor (0.10 vs 0.127/0.1524) and the FIRST shipped profile to
+    DECLARE the optional hole-to-copper field (0.28, from the published
+    PTH-to-track minimum — enforcement today is the pour carve only; the
+    hole-to-TRACK geometric check is a filed gap, see the profile's
+    ENFORCEMENT SCOPE source note)."""
+    loaded = load_rule_profile("jlcpcb-2layer")
+    assert loaded.ref.id == "jlcpcb-2layer"
+    assert len(loaded.ref.digest) == 64
+    floor = loaded.floor
+    assert floor.min_trace_width_mm == pytest.approx(0.1)
+    assert floor.min_clearance_mm == pytest.approx(0.1)
+    assert floor.min_drill_mm == pytest.approx(0.15)
+    assert floor.min_finished_hole_mm == pytest.approx(0.15)
+    assert floor.min_annular_ring_mm == pytest.approx(0.18)
+    # The PAD hole-to-hole figure, deliberately not the looser via-to-via 0.2
+    # (single-field coarseness resolved fail-closed — see the source note).
+    assert floor.min_hole_to_hole_mm == pytest.approx(0.45)
+    assert floor.min_mask_sliver_mm == pytest.approx(0.1)
+    assert floor.solder_mask_clearance_mm == pytest.approx(0.05)
+    assert floor.solder_mask_expansion_mm == 0.0
+    assert floor.copper_to_edge_mm == pytest.approx(0.2)
+    assert floor.min_hole_to_copper_mm == pytest.approx(0.28)
+    for other in ("v1-fab-conservative", "oshpark-2layer"):
+        assert loaded.ref.digest != load_rule_profile(other).ref.digest
 
 
 # ---------------------------------------------------------------------------
@@ -290,8 +321,13 @@ def test_an_omitted_optional_field_loads_as_None_not_as_a_number(tmp_path):
     assert loaded.floor.min_hole_to_copper_mm is None
 
 
-def test_both_shipped_profiles_state_no_hole_to_copper_rule():
-    """Pinned so that adding the field did not silently give either one a value."""
+def test_original_two_profiles_state_no_hole_to_copper_rule():
+    """Pinned so that adding the field did not silently give either one a value.
+
+    jlcpcb-2layer is deliberately NOT in this list: JLCPCB publishes
+    'PTH to Track: 0.28mm', so that profile DECLARES the optional field —
+    the declaring case is pinned in test_jlcpcb_profile_loads_to_a_complete
+    _pinned_floor."""
     for profile_id in ("v1-fab-conservative", "oshpark-2layer"):
         assert load_rule_profile(profile_id).floor.min_hole_to_copper_mm is None
 

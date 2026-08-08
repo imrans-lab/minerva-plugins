@@ -4197,6 +4197,30 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 			"note": "promotion needs the pcb backend for its DRC gate and serializer — plugin IPC not ready"}
 
 	var board: Dictionary = _data.to_board_dict()
+	# CANONICAL-SOURCE HYGIENE (K2, epoch CPN1): strip DERIVED presentation
+	# state before the gate + serializer see the board. Captured footprint
+	# graphics are attached at LOAD by the worker's footprint resolution
+	# (pcb.deserialize's graphics attach) — re-derivable library projections,
+	# never design intent — and through Go's Extra passthrough they would land
+	# VERBATIM in the canonical YAML. Found live in the coupon round: LOGO1's
+	# baked stroke text pushed the serialized source past the 60KiB payload
+	# cap, so the size ceiling accidentally caught the exact residue class K2
+	# exists to forbid.
+	# The full render-detail key set to_board_dict emits for the HANDOFF path
+	# (see pcb_component.gd's "Canonical Extra (render detail)" block) — every
+	# one is re-derivable from the locked footprint at load and none is design
+	# intent. The first real promote shipped all of them into the corpus file
+	# via Go's Extra passthrough (K2 residue, found by inspection).
+	var render_detail_keys: Array = ["graphics", "pads", "local_bounds",
+		"has_pad_geometry", "bbox_center_offset", "color", "label_visible",
+		"locked", "width", "height", "footprint_id"]
+	for comp in (board.get("components", []) as Array):
+		if comp is Dictionary:
+			for render_key in render_detail_keys:
+				(comp as Dictionary).erase(render_key)
+	for trace in (board.get("traces", []) as Array):
+		if trace is Dictionary:
+			(trace as Dictionary).erase("locked")
 
 	# ── THE GATE, fail closed ────────────────────────────────────────────────
 	var gate_raw: Dictionary = await _request_with_backend_ensure(
@@ -4293,15 +4317,33 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 	if not bool(ser.get("success", false)):
 		return {"success": false, "error": "serialize_failed",
 			"note": str(ser.get("error_message", ser.get("error_code", "")))}
-	var payload: Variant = ser.get("result", null)
-	var yaml_text := ""
-	if payload is Dictionary:
-		yaml_text = str((payload as Dictionary).get("yaml", (payload as Dictionary).get("text", "")))
-	elif payload is String:
-		yaml_text = payload
+	# UNWRAP the channel envelope exactly like the gate call above does
+	# (CPN1 live find: the Go server wraps the handler's {yaml} as
+	# {ok, result:{yaml}}, and the broker wraps THAT as {success, result:...} —
+	# reading ser.result.yaml directly skips a layer and reported the promote
+	# as "empty document" while 6KB of perfectly good YAML sat one level
+	# deeper).
+	var payload_dict: Dictionary = _unwrap_channel_reply(ser)
+	var yaml_text := str(payload_dict.get("yaml", payload_dict.get("text", "")))
 	if yaml_text.is_empty():
+		# The serialize channel's REFUSALS are success-shaped ({error, bytes}
+		# for payload_too_large) — surface them by name instead of the
+		# misleading "empty document" this branch reported before CPN1.
+		if str(payload_dict.get("error", "")) != "":
+			return {"success": false,
+				"error": str(payload_dict.get("error")),
+				"bytes": int(payload_dict.get("bytes", 0)),
+				"note": "pcb.serialize refused — nothing was written"}
+		# Unwrap yielded nothing — surface whatever error the raw envelope
+		# carried rather than a bare "empty document".
+		var raw_result: Variant = ser.get("result", null)
+		var inner_err := ""
+		if raw_result is Dictionary:
+			var e: Variant = (raw_result as Dictionary).get("error", "")
+			inner_err = str((e as Dictionary).get("message", "")) if e is Dictionary else str(e)
 		return {"success": false, "error": "serialize_failed",
-			"note": "pcb.serialize returned an empty document — nothing was written"}
+			"note": inner_err if not inner_err.is_empty()
+				else "pcb.serialize returned an empty document — nothing was written"}
 	# ATOMIC tmp→rename (cold review F6): the design of record must never be
 	# left half-truncated by a crash or full disk mid-write — the same
 	# discipline the routing sidecar's writer already keeps.

@@ -581,8 +581,10 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
     Every key is ALWAYS present here (this is the internal census; reply
     surfaces apply their own absent-when-empty conventions). Nets with fewer
     than two pins are never incomplete — there is nothing to connect.
-    Zone-carrying nets count as having copper (never ``missing_copper``) but
-    are INDETERMINATE, not auto-complete (module note above).
+    Zone-carrying nets count as having copper (never ``missing_copper``);
+    they are COMPLETE when the trace+via graph alone joins every pin (zone
+    copper only ever adds — epoch CPN1 narrowing) and INDETERMINATE when
+    islands remain that the pour may or may not bridge (module note above).
     """
     clr = _board_clearance(board)
     pads = _harvest_pads(board)
@@ -615,15 +617,20 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
                 or name in netted_via_nets):
             missing.append(name)
             continue
+        groups = _net_pin_groups(name, pads, segs, vias, clr)
         if name in zone_nets:
             # 019fd5fdeef3b: a pour IS copper, but pour connectivity is a
-            # geometry question this centerline kernel cannot answer — the
-            # net is INDETERMINATE, never auto-complete (and never falsely
-            # "partial" either; traces it may also carry change nothing,
-            # because the pour could bridge whatever islands they leave).
-            indeterminate.append({"net": name, "reason": "zone_copper"})
+            # geometry question this centerline kernel cannot answer. NARROWED
+            # in epoch CPN1 (the coupon's return pour blocked its own promote):
+            # when the TRACE+VIA graph ALONE already joins every pin into one
+            # group, the net is COMPLETE — zone copper can only ADD connections,
+            # never remove one, so the unanswerable pour question cannot change
+            # the verdict. Only a zone-bearing net whose trace graph leaves
+            # islands stays INDETERMINATE (the pour might bridge them, might
+            # not — never falsely "partial", never auto-complete).
+            if groups > 1:
+                indeterminate.append({"net": name, "reason": "zone_copper"})
             continue
-        groups = _net_pin_groups(name, pads, segs, vias, clr)
         if groups > 1:
             partial.append({"net": name, "pin_groups": groups})
 

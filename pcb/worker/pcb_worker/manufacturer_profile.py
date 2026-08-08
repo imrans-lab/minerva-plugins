@@ -91,8 +91,10 @@ REQUIRED_FLOOR_FIELDS: tuple[str, ...] = (
 # field must fail rather than default. The required ten are quantities every
 # board house publishes, so an absent one means the profile is INCOMPLETE and
 # guessing it would invent a rule. `min_hole_to_copper_mm` is different in kind:
-# neither shipped profile states it, and a fab that does not publish a
-# hole-to-copper number has not thereby set it to zero — it has said nothing.
+# the original two shipped profiles state no such rule (jlcpcb-2layer, added in
+# epoch CPN1, is the first to DECLARE one — 0.28, from its published
+# PTH-to-track minimum), and a fab that does not publish a hole-to-copper
+# number has not thereby set it to zero — it has said nothing.
 # `None` records "said nothing", and the pour falls back to the ordinary copper
 # clearance, which is the behaviour that was already in force.
 #

@@ -554,3 +554,56 @@ def test_completeness_rides_the_worker_drc_method_too():
     assert resp["result"]["complete"] is False
     assert resp["result"]["missing_copper"] == ["VCC_5V"]
     assert resp["result"]["approximate"] is True
+
+
+# ---------------------------------------------------------------------------
+# Census narrowing: zone-bearing nets (epoch CPN1 — the coupon's return pour
+# blocked its own promote)
+# ---------------------------------------------------------------------------
+
+
+def _zone_net_board(with_bridge_trace: bool) -> dict:
+    board = {
+        "name": "pour-census", "width_mm": 20, "height_mm": 15,
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.6, "via_drill_mm": 0.3},
+        "components": [
+            {"ref": "R1", "footprint": "R", "x_mm": 4, "y_mm": 7, "layer": "top",
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "pad_width_mm": 1.0, "pad_height_mm": 1.0}]},
+            {"ref": "R2", "footprint": "R", "x_mm": 16, "y_mm": 7, "layer": "top",
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "pad_width_mm": 1.0, "pad_height_mm": 1.0}]},
+        ],
+        "nets": [{"name": "GNDZ", "pins": ["R1.1", "R2.1"]}],
+        "zones": [{"id": "z1", "net": "GNDZ", "layer": "top", "kind": "copper_pour",
+                   "outline": [{"x_mm": 2, "y_mm": 2}, {"x_mm": 18, "y_mm": 2},
+                               {"x_mm": 18, "y_mm": 13}, {"x_mm": 2, "y_mm": 13}]}],
+        "traces": [],
+    }
+    if with_bridge_trace:
+        board["traces"] = [{"net": "GNDZ", "layer": "top", "width_mm": 0.25,
+                            "points": [{"x_mm": 4, "y_mm": 7},
+                                       {"x_mm": 16, "y_mm": 7}]}]
+    return board
+
+
+def test_zone_net_complete_by_traces_alone_is_complete_not_indeterminate():
+    """The CPN1 narrowing: when the trace+via graph ALONE joins every pin,
+    zone copper can only ADD — the unanswerable pour question cannot change
+    the verdict, so the net is COMPLETE and the board census tri-state is
+    True, not None. (Before this, any pour on a net made the whole board
+    unpromotable: 'an unverifiable board does not promote'.)"""
+    census = drc.connectivity_completeness(_zone_net_board(with_bridge_trace=True))
+    assert census["indeterminate"] == []
+    assert census["complete"] is True
+
+
+def test_zone_net_with_trace_islands_stays_indeterminate():
+    """The fail-closed half survives: no bridging trace -> the pour MIGHT
+    connect the pins, might not — indeterminate, never auto-complete and
+    never falsely partial."""
+    census = drc.connectivity_completeness(_zone_net_board(with_bridge_trace=False))
+    assert census["indeterminate"] == [{"net": "GNDZ", "reason": "zone_copper"}]
+    assert census["complete"] is None
+    assert census["partial"] == []
