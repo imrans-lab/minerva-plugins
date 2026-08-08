@@ -77,29 +77,70 @@ def test_connectivity_finding_refuses():
     assert res["refusals"], res
 
 
-def test_unrouted_board_refuses_promotion():
-    """Cold review F1 (BLOCKER): every run_drc finding check walks EXISTING
-    segments, so a board with NO copper produces zero findings — only the
-    census (`complete`/`missing_copper`) sees absence. An unrouted board must
-    never be a design of record."""
+def test_unrouted_board_promotes_with_completeness_advisory():
+    """DELIBERATELY REVERSED (Epoch UX4 station 9, DCR 019fe07523ca S6 —
+    OWNER RULING 1, epoch record 019fe06d282d comment 1059: "promotion should
+    be granular. For example, I might promote a GND trace, but not another
+    trace because I want to move a component").
+
+    This test previously pinned UX3 cold-review F1's reading — "an unrouted
+    board is not a design of record" — as a REFUSAL. The owner ruled that
+    reading conflates "wrong" with "not finished": a clean-but-partial board
+    PROMOTES, and the census's absence-detection (the F1 machinery, fully
+    intact) now surfaces as result.advisory.completeness naming the unrouted
+    nets. Indeterminate census still refuses (correctness stays absolute —
+    see test_indeterminate_census_still_refuses below)."""
     board = _clean_board()
     board["traces"] = []
     res = _call(board)["result"]
-    assert res["promotable"] is False
-    assert any("missing copper" in r for r in res["refusals"]), res["refusals"]
-    assert "SIG" in str(res["refusals"])
+    assert res["promotable"] is True, res["refusals"]
+    assert res["refusals"] == [], res["refusals"]
+    adv = res.get("advisory", {}).get("completeness")
+    assert adv is not None, "the unrouted nets must ride the advisory block"
+    assert adv["complete"] is False
+    assert "SIG" in [str(n) for n in adv["missing_copper"]]
+
+
+def test_complete_board_reply_carries_no_advisory_block():
+    """Absent-when-empty: a fully routed board's reply is byte-identical to
+    the pre-UX4 shape — no advisory key at all."""
+    res = _call(_clean_board())["result"]
+    assert "advisory" not in res, res.get("advisory")
+
+
+def test_indeterminate_census_still_refuses():
+    """The ruling's own boundary: completeness (False) is advisory, but an
+    INDETERMINATE census (complete is None — the census could not run) is a
+    correctness problem and still refuses. Vehicle: a net pin naming a
+    component that does not exist makes the census unverifiable."""
+    board = _clean_board()
+    board["nets"][0]["pins"] = ["NOPE.1", "R2.1"]
+    res = _call(board)["result"]
+    complete = res["connectivity"].get("complete")
+    if complete is None:
+        assert res["promotable"] is False
+        assert any("indeterminate" in r for r in res["refusals"]), res["refusals"]
+    else:
+        # If the census resolves this board after all, the case is moot for
+        # this vehicle — but it must NOT have promoted with a phantom pin
+        # unverified: either a finding or an advisory must have surfaced.
+        assert (res["refusals"] or res.get("advisory")), res
 
 
 def test_caller_knobs_cannot_weaken_the_gate():
     """Cold review F5: the gate builds its own sub-check params — a caller's
-    resolve_geometry:false (or any other knob) must not ride through."""
+    resolve_geometry:false (or any other knob) must not ride through.
+    RE-VEHICLED with station 9 (the old vehicle was the unrouted refusal,
+    which the owner ruling made advisory): a geometric VIOLATION is the
+    correctness refusal a knob must never suppress."""
     board = _clean_board()
-    board["traces"] = []
+    board["traces"][0]["width_mm"] = 0.05   # under every min-width floor
     reply = _HANDLERS["promote_check"]({"params": {
         "board": board, "resolve_geometry": False}})
     res = reply["result"]
     assert res["promotable"] is False, (
-        "the unrouted refusal must hold regardless of caller knobs")
+        "the geometric refusal must hold regardless of caller knobs")
+    assert any("geometric" in r for r in res["refusals"]), res["refusals"]
 
 
 def test_non_dict_board_refuses_uniformly():
