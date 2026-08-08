@@ -588,7 +588,15 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 	var pre_pins: Dictionary = _pre_transform_pins(data, component_id)
 	var asked_x: float = float(args.get("x", 0.0))
 	var asked_y: float = float(args.get("y", 0.0))
-	var new_pos: Vector2 = data.snap_to_grid(Vector2(asked_x, asked_y))
+	# FREEFORM MOVE (HITL-6, docket 019fdf2b939e — owner: "move to any
+	# specified position"): snap_to_grid:false lands the part EXACTLY where
+	# asked — sub-grid pin alignment (the straight-GND placement the forced
+	# snap made unreachable) is now expressible. Default true: byte-identical
+	# to every pre-existing call, and the snap disclosure below still reports
+	# any snap that does happen.
+	var do_snap: bool = bool(args.get("snap_to_grid", true))
+	var new_pos: Vector2 = data.snap_to_grid(Vector2(asked_x, asked_y)) if do_snap \
+		else Vector2(asked_x, asked_y)
 	# A GROUPED component moves the WHOLE group, offsets preserved — the same
 	# semantics a canvas drag has (A4). Ungrouped: unchanged, byte for byte.
 	var group_reply := _move_component_group(data, component_id, new_pos)
@@ -669,8 +677,11 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 		# UX2 station 6: the reply's new_x/new_y previously echoed the
 		# INTERPRETED point while the move landed on its SNAPPED position —
 		# the reply now reports where the component actually IS, with the
-		# snap disclosed against the interpreted point.
-		var landed: Vector2 = data.snap_to_grid(new_pos)
+		# snap disclosed against the interpreted point. snap_to_grid:false
+		# (HITL-6 freeform, docket 019fdf2b939e) lands on the interpreted
+		# point exactly.
+		var landed: Vector2 = data.snap_to_grid(new_pos) \
+			if bool(args.get("snap_to_grid", true)) else new_pos
 		reply["new_x"] = landed.x
 		reply["new_y"] = landed.y
 		_with_snap_disclosure(reply, new_pos.x, new_pos.y, landed)
@@ -4308,6 +4319,8 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		rec["routed_length_mm"] = quality["routed_length_mm"]
 		if quality.has("length_ratio"):
 			rec["length_ratio"] = quality["length_ratio"]
+		if quality.has("misalignment_mm"):
+			rec["misalignment_mm"] = quality["misalignment_mm"]
 	return rec
 
 
@@ -4395,6 +4408,19 @@ static func _route_quality(c) -> Dictionary:
 	}
 	if manhattan > _GEOMETRY_CHAIN_EPSILON_MM:
 		out["length_ratio"] = snappedf(routed / manhattan, 0.001)
+	# misalignment_mm (HITL-6, docket 019fdf2bce15): for a SINGLE-run
+	# candidate — the 2-pin span case — the perpendicular offset its jog
+	# spans: min(|dx|, |dy|) between the run's endpoints. 0.0 means the pads
+	# align and every bend is a detour; > 0 means at least one bend is
+	# structural (the pads don't line up — HITL-6's GND read 0.54 here) and
+	# the PLACEMENT is the thing to question. ratio 1.0 cannot distinguish
+	# the two — that is exactly the read the owner caught. Multi-run
+	# candidates get no key (no single pad pair to blame).
+	if runs.size() == 1:
+		var run_pts: Array = runs[0]
+		var a0: Vector2 = run_pts[0]
+		var a1: Vector2 = run_pts[run_pts.size() - 1]
+		out["misalignment_mm"] = snappedf(minf(absf(a1.x - a0.x), absf(a1.y - a0.y)), 0.001)
 	return out
 
 

@@ -76,6 +76,7 @@ func _init() -> void:
 	_test_render_mode_superseded()
 	_test_canvas_none_mode_gates()
 	_test_consumed_selection_veto()
+	_test_marker_zoom_curve()
 	_test_superseded_refusal_and_release()
 	_test_reconcile_strip_bookkeeping()
 
@@ -1024,8 +1025,8 @@ func _test_canvas_none_mode_gates() -> void:
 	# ── Claim gate, consumed hint ──
 	router.annotations = [applied_ann]
 	# (canvas.zoom defaults to 4.0 px/mm: hit slack = 8px/4 = 2.0 doc units,
-	# marker ink radius = max(1.25, 6px/4) = 1.5 — so y=1 hits the corridor
-	# while x=50 sits far outside any marker/label ink.)
+	# marker ink radius = _marker_geometry(4.0) = 4px/4 = 1.0mm — so y=1 hits
+	# the corridor while x=50 sits far outside any marker/label ink.)
 	check("press on consumed hint's corridor midpoint -> masked (falls through)",
 			bool(canvas._route_hint_masks_claim(Vector2(50.0, 1.0))))
 	check("press on consumed hint's former ANCHOR marker spot -> still masked",
@@ -1119,6 +1120,52 @@ func _test_consumed_selection_veto() -> void:
 			host.get_selected_annotation_id() == id_a)
 	check("path_editing_locked FALSE again on the reopened hint",
 			not bool(kind.path_editing_locked(host.get_by_id(id_a))))
+
+
+## HITL-6 (docket 019fdf2b5918) — the endpoint-diamond zoom curve. Owner spec:
+## smaller base, NON-LINEAR by zoom (slightly larger zoomed out, shrinking
+## zoomed in), and GONE at high zoom where the diamond hides connection-point
+## geometry (the 0.54mm GND jog). One curve (_marker_geometry) feeds render()
+## AND _visible_ink_hit, so faded ink stops claiming clicks (F1 contract).
+func _test_marker_zoom_curve() -> void:
+	print("\n-- endpoint-marker zoom curve (HITL-6) --")
+	var kind = _Kind.new()
+
+	# Doc-space radius strictly SHRINKS as zoom rises — the owner's curve;
+	# the old maxf(1.25mm, 6px/zoom) grew on screen as you zoomed in.
+	var d1: float = (kind._marker_geometry(1.0) as Vector2).x
+	var d2: float = (kind._marker_geometry(2.0) as Vector2).x
+	var d4: float = (kind._marker_geometry(4.0) as Vector2).x
+	var d8: float = (kind._marker_geometry(8.0) as Vector2).x
+	check("doc radius shrinks monotonically with zoom", d1 > d2 and d2 > d4 and d4 > d8)
+	check("zoomed OUT is only SLIGHTLY larger in screen px (boost is bounded)",
+		d1 * 1.0 <= d4 * 4.0 * 1.6)  # 5.5px vs 4px — under the +50% boost cap + margin
+	check("full alpha through the working zoom range",
+		(kind._marker_geometry(4.0) as Vector2).y == 1.0
+		and (kind._marker_geometry(8.0) as Vector2).y == 1.0)
+
+	# High-zoom band: fades, then disappears entirely.
+	var mid_alpha: float = (kind._marker_geometry(12.0) as Vector2).y
+	check("mid-band alpha strictly between 0 and 1", mid_alpha > 0.0 and mid_alpha < 1.0)
+	check("at the band end the marker is GONE (radius 0, alpha 0)",
+		kind._marker_geometry(16.0) == Vector2.ZERO
+		and kind._marker_geometry(40.0) == Vector2.ZERO)
+
+	# Ink parity: a press exactly ON the anchor of a markers-mode hint is
+	# visible ink at working zoom and NOT ink at high zoom (labels off, so
+	# markers are the only ink in play).
+	kind.labels_visible = false
+	var ann := {
+		"id": "curve_probe", "lifecycle": "open",
+		"anchor": {"plugin": "pcb", "type": "board.point", "id": {"x": 0.0, "y": 0.0},
+				"snapshot": {"position": [0.0, 0.0]}},
+		"kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+				"waypoints": [[0.0, 0.0], [10.0, 0.0]]},
+	}
+	check("anchor press IS visible ink at zoom 4",
+		bool(kind._visible_ink_hit(ann, Vector2.ZERO, 0.5, 4.0)))
+	check("anchor press is NOT ink at zoom 16 (faded markers claim nothing)",
+		not bool(kind._visible_ink_hit(ann, Vector2.ZERO, 0.5, 16.0)))
 
 
 ## Supersession marker in the render gate (Codex 1047 fix round, verdict 1).

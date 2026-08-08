@@ -4247,6 +4247,21 @@ func _run_ux2_route_quality_metrics() -> void:
 	check_eq("no geometry: routed 0", float(qe.get("routed_length_mm", -1.0)), 0.0)
 	check("no geometry: ratio absent", not qe.has("length_ratio"))
 
+	# misalignment_mm (HITL-6, docket 019fdf2bce15): the 2-pin alignment
+	# signal — min(|dx|,|dy|) between a SINGLE run's endpoints. The exact
+	# HITL-6 GND shape: 10.16mm run then a 0.54mm jog — 1 bend, ratio 1.0,
+	# and misalignment says the bend is STRUCTURAL (pads offset 0.54).
+	var gnd_shape := _FakeQualityCandidate.of([
+		[[71.12, 10.7], [60.96, 10.7], [60.96, 10.16]]])
+	var qg: Dictionary = PanelTools._route_quality(gnd_shape)
+	check_eq("HITL-6 GND shape: 1 bend", int(qg.get("bend_count", -1)), 1)
+	check("HITL-6 GND shape: ratio 1.0 (efficient — but not bend-free)",
+		absf(float(qg.get("length_ratio", 0.0)) - 1.0) < 0.001)
+	check("HITL-6 GND shape: misalignment_mm 0.54 (the structural offset)",
+		absf(float(qg.get("misalignment_mm", -1.0)) - 0.54) < 0.001)
+	check("straight run: misalignment_mm 0 (aligned — any bend would be a detour)",
+		absf(float(q.get("misalignment_mm", -1.0))) < 0.001)
+
 	# L-shape: 1 bend, rectilinear ratio exactly 1.0 (manhattan-minimal).
 	var ell := _FakeQualityCandidate.of([[[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]]])
 	var ql: Dictionary = PanelTools._route_quality(ell)
@@ -4286,6 +4301,8 @@ func _run_ux2_route_quality_metrics() -> void:
 	check_eq("multipad record: routed_length_mm 20", float(rec.get("routed_length_mm", 0.0)), 20.0)
 	check_eq("multipad record: length_ratio 1.0 (both runs manhattan-minimal)",
 		float(rec.get("length_ratio", 0.0)), 1.0)
+	check("multipad record: NO misalignment_mm (two runs — no single pad pair to blame)",
+		not rec.has("misalignment_mm"))
 
 
 # ══ 21. EPOCH UX1 STATION 11 — replies name legal successors ═════════════════
@@ -5910,6 +5927,21 @@ func _run_ux2_snap_disclosure_and_pin_groups() -> void:
 	check("on-grid move succeeded", bool(exact.get("success", false)))
 	check("on-grid reply carries NO snapped key", not exact.has("snapped"))
 	check("on-grid reply carries NO requested key", not exact.has("requested"))
+
+	# FREEFORM (HITL-6, docket 019fdf2b939e): snap_to_grid:false lands the
+	# part EXACTLY where asked — the sub-grid pin alignment the forced snap
+	# made unreachable (BAT1 at y=12.16 to zero the 0.54mm GND jog). No snap
+	# happened, so no disclosure keys either.
+	var free: Dictionary = await PanelTools._move_component(shim,
+		_args({"component_id": "U8", "x": 12.16, "y": 25.4, "snap_to_grid": false}))
+	check("freeform move succeeded", bool(free.get("success", false)))
+	check("freeform lands EXACTLY at the asked x (12.16, off-grid)",
+		absf(float(free.get("x", 0.0)) - 12.16) < 0.0005)
+	check("freeform reply carries NO snapped key (nothing was snapped)",
+		not free.has("snapped"))
+	if data.has_component("U8"):
+		check("model position is the exact freeform point",
+			absf(float(data.get_component("U8").position.x) - 12.16) < 0.0005)
 
 	# move_relative: new_x/new_y now report where the part actually IS (the
 	# pre-fix reply echoed the interpreted point even when the snap moved it).

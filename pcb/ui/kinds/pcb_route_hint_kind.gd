@@ -41,12 +41,42 @@ const _ANCHOR_TYPE_PAD := "pcb/pad"
 ## preload() consts.
 const _Self := preload("pcb_route_hint_kind.gd")
 
-## Anchor-marker size: document-space (board mm), so it scales with board
-## features instead of swallowing small parts (HITL-2 feedback: 5mm diamonds
-## completely covered a 2.54mm-pitch header). Render keeps a small pixel
-## floor so hints stay visible when zoomed far out.
+## Anchor-marker HIT-TEST slack, document-space (board mm). Kept for
+## hit_test()'s zoom-less corridor sweep only — DRAWN marker size is
+## _marker_geometry's job since HITL-6 (below).
 const _MARKER_RADIUS: float = 1.25
-const _MARKER_MIN_PX: float = 6.0
+
+## Endpoint-diamond sizing curve (HITL-6, docket 019fdf2b5918 — owner: "a bit
+## too big… non-linear scale by zoom. At zoom out slightly larger than at
+## zoom in. At high zoom, they should disappear — they block seeing if
+## there's a bend at connection", which is exactly what HITL-6's 0.54mm
+## GND jog hid). Base is CONSTANT SCREEN PX (so doc-space presence already
+## grows as you zoom out), with a small extra boost at low zoom and a fade
+## to NOTHING across the high-zoom band where pad geometry is legible ink of
+## its own. The pre-HITL-6 maxf(1.25mm, 6px/zoom) did the OPPOSITE at the
+## top end: the mm floor made markers ever larger on screen as you zoomed in.
+const _MARKER_BASE_PX: float = 4.0
+const _MARKER_BOOST_ZOOM: float = 4.0   # below this px/mm, up to +50% larger
+const _MARKER_BOOST_FRAC: float = 0.5
+const _MARKER_FADE_START_ZOOM: float = 8.0
+const _MARKER_FADE_END_ZOOM: float = 16.0
+
+
+## The curve, one place for render() AND _visible_ink_hit (the F1 contract:
+## hit-test ink == drawn ink, so a faded-out marker also stops claiming
+## clicks). Returns Vector2(doc_radius_mm, alpha); alpha 0.0 ⇒ the marker is
+## not drawn at all at this zoom.
+static func _marker_geometry(zoom: float) -> Vector2:
+	var z := maxf(zoom, 0.001)
+	if z >= _MARKER_FADE_END_ZOOM:
+		return Vector2(0.0, 0.0)
+	var px := _MARKER_BASE_PX \
+		* (1.0 + _MARKER_BOOST_FRAC * clampf(1.0 - z / _MARKER_BOOST_ZOOM, 0.0, 1.0))
+	var alpha := 1.0
+	if z > _MARKER_FADE_START_ZOOM:
+		alpha = clampf(1.0 - (z - _MARKER_FADE_START_ZOOM) \
+			/ (_MARKER_FADE_END_ZOOM - _MARKER_FADE_START_ZOOM), 0.0, 1.0)
+	return Vector2(px / z, alpha)
 
 ## View-flag: draw the per-hint summary label. Set by PcbAnnotationHost when
 ## the canvas's show_hint_labels toggle changes (default ON).
@@ -1547,8 +1577,8 @@ func _far_endpoint(annotation: Dictionary) -> Variant:
 ## within `threshold` of the anchor/far-end marker disc, or inside the
 ## label's drawn rect — the ONLY ink those modes actually put on screen (see
 ## render()'s intent-render branch). `zoom` reproduces render()'s own
-## px-floor marker radius so this matches what is actually drawn at the
-## current view, not a document-space-only approximation.
+## marker curve (_marker_geometry) so this matches what is actually drawn at
+## the current view, not a document-space-only approximation.
 ##
 ## Distinct from hit_test() (which sweeps the WHOLE corridor regardless of
 ## render mode, by design — see hit_test()'s own doc comment): this is the
@@ -1557,11 +1587,16 @@ func _far_endpoint(annotation: Dictionary) -> Variant:
 ## through to whatever candidate or board entity is actually drawn under it,
 ## instead of being swallowed by the hint's now-invisible corridor.
 func _visible_ink_hit(annotation: Dictionary, point: Vector2, threshold: float, zoom: float) -> bool:
-	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(zoom, 0.001))
-	var effective := threshold + d
-	for p in _marker_points(annotation):
-		if (p as Vector2).distance_to(point) <= effective:
-			return true
+	# HITL-6 (docket 019fdf2b5918): sizing + visibility come from the ONE
+	# curve render() draws with — a faded-out marker (alpha 0 at high zoom)
+	# contributes no ink and therefore claims no clicks.
+	var geo := _marker_geometry(zoom)
+	var d := geo.x
+	if geo.y > 0.0:
+		var effective := threshold + d
+		for p in _marker_points(annotation):
+			if (p as Vector2).distance_to(point) <= effective:
+				return true
 	if not labels_visible:
 		return false
 	var font: Font = ThemeDB.fallback_font
@@ -1619,12 +1654,22 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	if width_mm > 0.0:
 		stroke_px = maxf(1.0, width_mm * ctx.zoom)
 
-	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(ctx.zoom, 0.001))
+	# HITL-6 (docket 019fdf2b5918): size + visibility from the shared curve —
+	# smaller base, slightly larger zoomed out, GONE at high zoom, where a
+	# diamond over the pad hides exactly the connection-point geometry
+	# (HITL-6's 0.54mm GND jog) the reviewer needs to see.
+	var marker_geo := _marker_geometry(ctx.zoom)
+	var d := marker_geo.x
+	var markers_on := marker_geo.y > 0.0
 	var marker_color := AnnotationRenderContext.author_color("ai") if is_ai else stroke_color
+	marker_color = Color(marker_color.r, marker_color.g, marker_color.b,
+		marker_color.a * marker_geo.y)
 	# "superseded" (Codex 1047 fix round, verdict 1) dims its markers — no
 	# longer live authoring input, and its own branch below adds the dimmed
 	# corridor + slash. (The consumed-hint "markers_dimmed" mode that shared
 	# this dimming retired at Epoch UX2 station 1: applied renders "none".)
+	# At marker-faded zooms the slash cue fades with its markers — the dimmed
+	# corridor + the "superseded ·" label prefix still carry the state.
 	if mode == "superseded":
 		marker_color = Color(marker_color.r, marker_color.g, marker_color.b, marker_color.a * 0.5)
 
@@ -1689,7 +1734,8 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 
 		# Diamond marker at the anchor (AI keeps the substrate cyan so authorship
 		# stays one-glance even though strokes are now layer-tinted).
-		_draw_endpoint_marker(ctx, pos, d, marker_color)
+		if markers_on:
+			_draw_endpoint_marker(ctx, pos, d, marker_color)
 	elif mode == "superseded":
 		# Superseded render (Codex 1047 fix round, verdict 1): the station-12
 		# marker says these waypoints are INERT — authority moved to a
@@ -1710,25 +1756,27 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 			var ghost := Color(stroke_color.r, stroke_color.g, stroke_color.b,
 				stroke_color.a * _SUPERSEDED_STROKE_DIM)
 			ctx.draw_polyline(ghost_pts, ghost, stroke_px)
-		_draw_endpoint_marker(ctx, pos, d, marker_color)
-		_draw_superseded_slash(ctx, pos, d)
-		var far_end: Variant = _far_endpoint(annotation)
-		if far_end != null:
-			_draw_endpoint_marker(ctx, far_end, d, marker_color)
-			_draw_superseded_slash(ctx, far_end, d)
+		if markers_on:
+			_draw_endpoint_marker(ctx, pos, d, marker_color)
+			_draw_superseded_slash(ctx, pos, d)
+			var far_end: Variant = _far_endpoint(annotation)
+			if far_end != null:
+				_draw_endpoint_marker(ctx, far_end, d, marker_color)
+				_draw_superseded_slash(ctx, far_end, d)
 	else:
 		# Intent render ("markers"): no polyline, no via markers — a live
 		# candidate already owns that ink. Mark BOTH ends so a withheld polyline
 		# doesn't read as a headless pin: the anchor, plus the hint's other known
 		# endpoint (H1: dest_point / last waypoint / a legacy segments-bearing
 		# hint's own far end — see _far_endpoint), when it has one.
-		_draw_endpoint_marker(ctx, pos, d, marker_color)
-		var far: Variant = _far_endpoint(annotation)
-		if far != null:
-			_draw_endpoint_marker(ctx, far, d, marker_color)
+		if markers_on:
+			_draw_endpoint_marker(ctx, pos, d, marker_color)
+			var far: Variant = _far_endpoint(annotation)
+			if far != null:
+				_draw_endpoint_marker(ctx, far, d, marker_color)
 
 	# Label: the enriched summary — gated by the view flag (canvas
-	# show_hint_labels → host relay → this instance property).
+	# show_hint_labels → host relay — this instance property).
 	if not labels_visible:
 		return
 	var font: Font = ThemeDB.fallback_font
