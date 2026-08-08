@@ -275,12 +275,18 @@ own function only `push_warning()`s its reason and returns `{}` either way, so
 the tool asks for the real, verbatim string (the ONE rule a cutout has: an
 outline under 3 points) rather than inventing one.
 
-**A cutout is authorable, not (yet) compilable.** `compile_board` refuses any
-board declaring a non-empty `cutouts` list (`unsupported_board_feature`) — see
-`docs/board-yaml.md`'s "Cut-outs" section. These four tools only ever touch the
-GD panel model, which round-trips a cutout losslessly; routing, DRC and
-Gerber/KiCad export do not see it yet, and an agent should not expect fab
-output to change from authoring one.
+**A cutout COMPILES and FABRICATES** (epoch CPN1, docket `019fe2faf76e`) —
+this paragraph used to say the opposite, and the refusal it described existed
+only to hold back a fail-open (`019fbd30f7`) that round fixed. An authored
+cutout now compiles into `ProfileOutline.cutouts` and reaches every consumer:
+both fab emitters draw it as a second closed Edge.Cuts contour, geometric DRC
+measures copper-to-edge against its edges (findings name the cutout via
+`against_entity_id`), routing reserves it as an all-layer obstacle
+pre-inflated by `copper_to_edge_mm`, and zone fill carves pours away from it
+by the same band. Compile owns the fail-closed geometry rules — strictly
+interior to the rim, pairwise-disjoint bounding boxes, no self-intersection,
+no zero area — all under `invalid_cutout_outline`; see `docs/board-yaml.md`'s
+"Cut-outs" section for the full contract.
 
 ## Group tools (`minerva_pcb_group_components` / `ungroup` / `set_group_member_offset`, B2)
 
