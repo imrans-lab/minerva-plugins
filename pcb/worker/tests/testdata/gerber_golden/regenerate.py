@@ -26,6 +26,7 @@ from tests.gerber_fab import build_fab, build_raw_emitter  # noqa: E402
 
 SPIKE_BOARD = WORKER.parent / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE.parent / "gerber_boards" / "drilltest.yaml"
+COUPON_BOARD = HERE.parent / "coupon_jlc1.yaml"
 
 # (board path, base name, builder) — the SAME helpers the emitter tests use.
 # The spike's footprints (R_0805/C_0805/TH_TestPoint) compile to their real
@@ -38,6 +39,14 @@ DRILL_BOARD = HERE.parent / "gerber_boards" / "drilltest.yaml"
 CASES = [
     (SPIKE_BOARD, "board", build_fab),
     (DRILL_BOARD, "drilltest", build_raw_emitter),
+    # jlc-coupon-1 — the public fabrication coupon (epoch CPN1). Production
+    # path: it is a fully-compiling canonical board, and unlike the two cases
+    # above it carries the features a real fab package needs — an interior
+    # cutout on Edge.Cuts, a filled copper pour, roundrect/oval/circle SMD
+    # aperture families, real silk (owl + stroke text + designators), and a
+    # profile-pinned rule set. This is the golden K18 asks for: one that
+    # certifies fabrication features rather than only its own contents.
+    (COUPON_BOARD, "coupon_jlc1", build_fab),
 ]
 
 

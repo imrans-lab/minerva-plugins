@@ -63,11 +63,19 @@ the first real promote:
 - **NET_A** (J1.1→C1.1, F.Cu): a four-column full-height serpentine through
   the west chamber, then a passage that outlines the slot's south and west
   faces into C1.1.
-- **NET_B** (J1.2→C1.2): B.Cu from J1.2, threading the 0.45 mm channel
-  between the slot's copper-to-edge band and the accepted keepout's north
-  face, rising through its via to the top-only C1.2. The keepout
-  (net-scoped to NET_A) and the NET_B return pour (south-west quadrant,
-  ties to J1.2's barrel) entered as staged drafts and were batch-accepted.
+- **NET_B** (J1.2→C1.2): B.Cu from J1.2, running east through the channel
+  between the slot's copper-to-edge band and the keepout's north face, then
+  rising through its via to the top-only C1.2. The keepout (net-scoped to
+  NET_A) and the NET_B return pour (south-west quadrant, ties to J1.2's
+  barrel) entered as staged drafts and were batch-accepted.
+
+  **Read the keepout's effect carefully** (bug `019fe381c526`): the router
+  ignores a keepout's net scope and blocks every net, so this NET_A-scoped
+  keepout *did* constrain the NET_B route — while zone fill *does* honour
+  the scope, so the NET_B pour fills straight through the same region. Both
+  behaviours are visible in the goldens. When the router is fixed, this
+  route's shape becomes corridor-driven only; the promoted copper does not
+  change, only the explanation.
 
 ## Assembly
 

@@ -17,6 +17,14 @@ python tests/testdata/gerber_golden/regenerate.py
 |--------------|-----------------------------------------------|---------------------------------------------------|
 | `board`      | `../../../../spikes/gerber/board.yaml`         | SMD pads, one TH pad, via, 3 traces, 1 NPTH hole  |
 | `drilltest`  | `../gerber_boards/drilltest.yaml`              | plated + non-plated TH pads, via, 2 NPTH mount holes |
+| `coupon_jlc1`| `../coupon_jlc1.yaml`                          | the PROMOTED public fab coupon (epoch CPN1): interior cutout on Edge.Cuts, filled copper pour, roundrect/oval/circle SMD apertures, real silk (owl + stroke text + designators), profile-pinned rules, mask/paste/drill split |
+
+`coupon_jlc1` is the K18 golden — the one authored to certify what a
+FABRICATED board needs rather than only its own contents. Its layers were
+blessed one at a time against stated intent in epoch CPN1 station S8 (parsed
+independently with gerbonara, measured in integer nanometres, rendered in
+gerbv); the bless record is on docket `019fe2fb843b` and the board's feature
+list is in `../coupon_jlc1.README.md`. Regenerating it means re-blessing it.
 
 ## Pinned versions (byte-stability holds ONLY at these)
 

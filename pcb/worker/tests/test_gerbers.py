@@ -42,6 +42,7 @@ except Exception:  # pragma: no cover - oracle package optional
 HERE = Path(__file__).resolve().parent
 SPIKE_BOARD = HERE.parents[1] / "spikes" / "gerber" / "board.yaml"
 DRILL_BOARD = HERE / "testdata" / "gerber_boards" / "drilltest.yaml"
+COUPON_BOARD = HERE / "testdata" / "coupon_jlc1.yaml"
 GOLDEN_DIR = HERE / "testdata" / "gerber_golden"
 
 BOUNDS_TOL_MM = 2.0  # slack for pad half-extents / real silk graphics past nominal extent
@@ -54,6 +55,14 @@ BOUNDS_TOL_MM = 2.0  # slack for pad half-extents / real silk graphics past nomi
 CASES = [
     pytest.param(SPIKE_BOARD, "board", build_fab, id="board-production"),
     pytest.param(DRILL_BOARD, "drilltest", build_raw_emitter, id="drilltest-raw"),
+    # jlc-coupon-1 (epoch CPN1) — the PROMOTED public fab coupon, production
+    # path. The other two cases certify the emitter against boards authored to
+    # exercise it; this one certifies it against a board authored to be
+    # FABRICATED (K18): interior cutout on Edge.Cuts, filled pour, the
+    # roundrect/oval/circle SMD aperture families, real silk, profile-pinned
+    # rules. Its goldens were blessed layer-by-layer in station S8 — see the
+    # bless record on docket 019fe2fb843b and testdata/coupon_jlc1.README.md.
+    pytest.param(COUPON_BOARD, "coupon_jlc1", build_fab, id="coupon-production"),
 ]
 
 
