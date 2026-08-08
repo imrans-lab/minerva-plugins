@@ -510,10 +510,22 @@ def _promote_check(params: dict) -> dict:
     acknowledge-through on promotion).
 
     params: {board: <canonical board dict>}.
-    Reply: {ok: True, result: {promotable, refusals: [str], connectivity,
-    geometric, assembly}} — the three sub-reports ride whole so a refusing
-    caller can show the actual findings, not just the verdict."""
+    Reply: {ok: True, result: {promotable, refusals: [str], advisory?,
+    connectivity, geometric, assembly}} — the three sub-reports ride whole so
+    a refusing caller can show the actual findings, not just the verdict.
+
+    GRANULAR PROMOTION (Epoch UX4 station 9, DCR 019fe07523ca S6 — OWNER
+    RULING, epoch record 019fe06d282d comment 1059: "promotion should be
+    granular. For example, I might promote a GND trace, but not another trace
+    because I want to move a component"): COMPLETENESS is ADVISORY, not a
+    refusal. A clean-but-partially-routed board promotes, with the unrouted
+    nets named in result.advisory.completeness (absent when complete).
+    CORRECTNESS stays absolute — findings and every indeterminate (census
+    included) still refuse; K13's fail-closed reading is intact for
+    everything that can be WRONG, it just no longer conflates "wrong" with
+    "not finished"."""
     refusals: list = []
+    advisory: dict = {}
 
     # Input contract, uniform across all three legs (cold review F7): the gate
     # takes exactly {board: <canonical dict>} — the two DRC legs' tolerant
@@ -541,25 +553,27 @@ def _promote_check(params: dict) -> dict:
         findings = connectivity.get("findings") or []
         if findings:
             refusals.append("connectivity DRC reports %d finding(s)" % len(findings))
-        # COMPLETENESS is part of the connectivity verdict (cold review F1 —
-        # the BLOCKER: every run_drc finding check walks EXISTING segments, so
-        # a board with NO copper at all produces zero findings; the census
-        # keys `complete`/`missing_copper` ride the same reply and are the
-        # half that sees absence). complete is TRI-STATE: only an explicit
-        # True passes; None (indeterminate census) refuses — an unverifiable
-        # board does not promote.
+        # COMPLETENESS is part of the connectivity verdict (UX3 cold review F1:
+        # every run_drc finding check walks EXISTING segments, so a board with
+        # NO copper produces zero findings; the census keys
+        # `complete`/`missing_copper` are the half that sees absence).
+        # TRI-STATE, split by the UX4 owner ruling (see docstring):
+        #   True  -> nothing to say;
+        #   None  -> REFUSES (indeterminate is "cannot verify", which is a
+        #            correctness problem, not a completeness one);
+        #   False -> ADVISORY — the unrouted nets ride result.advisory so the
+        #            panel can list them, and promotion proceeds.
         complete = connectivity.get("complete")
-        if complete is not True:
-            missing = connectivity.get("missing_copper") or []
-            if missing:
-                refusals.append(
-                    "connectivity census: %d net(s) missing copper (%s) — an "
-                    "unrouted board is not a design of record"
-                    % (len(missing), ", ".join(str(n) for n in missing[:8])))
-            else:
-                refusals.append(
-                    "connectivity census is indeterminate — an unverifiable "
-                    "board does not promote")
+        if complete is None:
+            refusals.append(
+                "connectivity census is indeterminate — an unverifiable "
+                "board does not promote")
+        elif complete is not True:
+            advisory["completeness"] = {
+                "complete": False,
+                "missing_copper": connectivity.get("missing_copper") or [],
+                "partial": connectivity.get("partial") or [],
+            }
 
     geo_reply = _drc_geometric(gate_params)
     geometric: dict = (geo_reply.get("result") or {}) if isinstance(geo_reply, dict) else {}
@@ -589,13 +603,18 @@ def _promote_check(params: dict) -> dict:
         refusals.append("assembly check is indeterminate — an unverifiable "
                         "placement does not promote")
 
-    return {"ok": True, "result": {
+    result = {
         "promotable": not refusals,
         "refusals": refusals,
         "connectivity": connectivity,
         "geometric": geometric,
         "assembly": assembly,
-    }}
+    }
+    # Absent-when-empty, the standing additive-key convention: a complete
+    # board's reply is byte-identical to the pre-UX4 shape.
+    if advisory:
+        result["advisory"] = advisory
+    return {"ok": True, "result": result}
 
 
 def _normalize(params: dict) -> dict:

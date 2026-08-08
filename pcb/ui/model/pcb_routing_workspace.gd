@@ -1027,6 +1027,13 @@ func ingest_record(record: Dictionary, board_revision: int = 0) -> String:
 	# it round-trips through the sidecar with the rest of the candidate.
 	if not cid.is_empty() and candidates.has(cid) and record.has("constraint_revision"):
 		candidates[cid].constraint_revision = int(record.get("constraint_revision"))
+	# UX4 station 10 (019fd0ab5af8): the worker's effective-rules width
+	# provenance becomes DURABLE candidate state, same P1-B idiom as the
+	# constraint stamp above — finer vocabulary than the ingest verdict
+	# _create_candidate_for_route just recorded, so it wins when present.
+	if not cid.is_empty() and candidates.has(cid) \
+			and not str(record.get("effective_width_source", "")).is_empty():
+		candidates[cid].width_source = str(record.get("effective_width_source"))
 	return cid
 
 
@@ -1142,14 +1149,24 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 	cand.source_hint_ids = _to_string_typed_array(hint_ids)
 
 	var width: float
+	var width_hints: Array
 	if use_explicit:
 		cand.endpoints = _endpoints_from_hints(attribution_hints)
 		width = _width_from_hints(attribution_hints)
+		width_hints = attribution_hints
 	else:
 		cand.endpoints = _endpoints_for_net(source_hints, net)
 		width = _width_for_net(source_hints, net)
+		width_hints = _hints_matching_net(source_hints, net)
+	# WIDTH PROVENANCE (UX4 station 10, 019fd0ab5af8): record WHICH source
+	# sized the copper, so _width_from_hints' silent 0.25mm fallback is
+	# distinguishable from an authored 0.25mm at review. ingest_record
+	# upgrades this to the worker's finer vocabulary when the route record
+	# carried effective rules.
+	cand.width_source = "hint" if _hints_supply_width(width_hints) else "default"
 	if width_override > 0.0:
 		width = width_override
+		cand.width_source = "caller_option"
 
 	for seg in segs:
 		if not (seg is Dictionary):
@@ -1656,6 +1673,19 @@ static func _width_from_hints(hints: Array) -> float:
 	if w <= 0.0:
 		w = 0.25
 	return w
+
+
+## Did any hint actually AUTHOR a width? The provenance half of
+## _width_from_hints (UX4 station 10): true = the value above came from a
+## hint, false = it is the silent 0.25mm fallback.
+static func _hints_supply_width(hints: Array) -> bool:
+	for hint in hints:
+		if not (hint is Dictionary):
+			continue
+		var kp: Dictionary = (hint as Dictionary).get("kind_payload", {}) if (hint as Dictionary).get("kind_payload", {}) is Dictionary else {}
+		if float(kp.get("width_mm", 0.0)) > 0.0:
+			return true
+	return false
 
 
 ## Coerce a [x, y] pair (Array/Vector2/{"x","y"} dict) to Vector2.

@@ -26,6 +26,7 @@ extends SceneTree
 ##      net B's hints leaves net A superseded exactly once (no stale duplicate).
 
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
+const StagedEntities := preload("res://../../minerva-plugins/pcb/ui/model/pcb_staged_entities.gd")
 const PcbRoutingSidecar := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_sidecar.gd")
 const PCBData := preload("res://../../minerva-plugins/pcb/ui/model/pcb_data.gd")
 const PluginPanelDriver := preload("res://test/helpers/plugin_panel_driver.gd")
@@ -46,6 +47,7 @@ func _init() -> void:
 	_run_export_isolation()
 	_run_per_net_attribution()
 	_run_mounting_hole_keepout()
+	_run_staged_persistence()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -466,3 +468,121 @@ func _live_candidate_for_net(ws, net: String):
 func _live_task_key_for_net(ws, net: String) -> String:
 	var c = _live_candidate_for_net(ws, net)
 	return str(c.task_id) if c != null else ""
+
+
+# ── 9. STAGED persistence (Epoch UX4 station 6 — DCR S9, A4/K5-staged) ────────
+# The sidecar's "staged_entities" section: round trip, the widened zero-payload
+# delete rule, the QUARANTINE rule (drafts load anyway — accept re-validates),
+# the missing-sidecar reset, absent-key = empty store, and the two isolation
+# rows (fingerprint not a function of drafts; canonical dict never carries them).
+
+func _staged_board_and_store() -> Array:
+	var data = _seed_board()
+	# The zone build needs a declared layer set; _seed_board's traces imply
+	# top/bottom but the AUTHOR validation reads data.layers.
+	data.layers.assign(["top", "bottom"])
+	var store = StagedEntities.new()
+	var payload: Dictionary = data.build_zone_payload("", "top",
+		[Vector2(2, 2), Vector2(8, 2), Vector2(8, 8)], "keepout").get("payload", {})
+	store.stage("zone", payload, "ai", int(data.board_revision), "draft keepout")
+	var audit: Dictionary = data.build_cutout_payload(
+		[Vector2(20, 20), Vector2(26, 20), Vector2(26, 26)]).get("payload", {})
+	var audit_sid := str(store.stage("cutout", audit))
+	store.reject(audit_sid)
+	return [data, store, payload]
+
+
+func _run_staged_persistence() -> void:
+	print("-- 9. staged persistence: section round trip, delete rule, quarantine --")
+	var parts := _staged_board_and_store()
+	var data = parts[0]
+	var store = parts[1]
+	var payload: Dictionary = parts[2]
+	var ws = _seed_workspace()
+	var path := _temp_board_path("staged.pcb.yaml")
+
+	# ROUND TRIP with candidates present.
+	var err: int = PcbRoutingSidecar.save_workspace(path, ws, data.to_board_dict(),
+		int(data.board_revision), store)
+	check("save with a staged store lands", err == OK)
+	var ws2 = PcbRoutingWorkspace.new()
+	var store2 = StagedEntities.new()
+	var status: Dictionary = PcbRoutingSidecar.load_into_workspace(
+		path, ws2, data.to_board_dict(), 0, store2)
+	check_eq("clean load", str(status.get("status", "")), "loaded_clean")
+	check_eq("…reports the LIVE staged count", int(status.get("staged_count", -1)), 1)
+	check_eq("the live draft round-trips", store2.staged_entries().size(), 1)
+	# Codex UX4 F5b: compare STRUCTURALLY (Dictionary ==, order-insensitive) —
+	# str() made JSON key order look like payload corruption.
+	var restored_payload: Dictionary = (store2.staged_entries()[0] as Dictionary).get("payload", {})
+	check_eq("…payload id survives the trip", str(restored_payload.get("id", "")), str(payload.get("id", "")))
+	check("…payload structurally identical through the trip", restored_payload == payload)
+	check_eq("…and the rejected AUDIT entry survives too", store2.entries.size(), 2)
+
+	# FINGERPRINT ISOLATION: drafts are not board content — the envelope's
+	# fingerprint must equal a draft-less save's.
+	var with_staged := str(PcbRoutingSidecar.read_envelope(path).get("board_fingerprint", ""))
+	PcbRoutingSidecar.save_workspace(path, ws, data.to_board_dict(), int(data.board_revision))
+	var without := str(PcbRoutingSidecar.read_envelope(path).get("board_fingerprint", ""))
+	check("fingerprint is NOT a function of the staged store", with_staged == without)
+
+	# WIDENED ZERO-PAYLOAD RULE: no candidates + drafts ⇒ file stays; neither ⇒ deleted.
+	var empty_ws = PcbRoutingWorkspace.new()
+	check("staged-only save keeps the sidecar alive",
+		PcbRoutingSidecar.save_workspace(path, empty_ws, data.to_board_dict(),
+			int(data.board_revision), store) == OK
+		and PcbRoutingSidecar.has_sidecar(path))
+	var empty_store = StagedEntities.new()
+	PcbRoutingSidecar.save_workspace(path, empty_ws, data.to_board_dict(),
+		int(data.board_revision), empty_store)
+	check("no candidates AND no drafts deletes it", not PcbRoutingSidecar.has_sidecar(path))
+
+	# QUARANTINE RULE: mutate the board → candidates stale, drafts LOAD ANYWAY.
+	PcbRoutingSidecar.save_workspace(path, ws, data.to_board_dict(),
+		int(data.board_revision), store)
+	data.set_board_size(100.0, 60.0)
+	var ws3 = PcbRoutingWorkspace.new()
+	var store3 = StagedEntities.new()
+	var q: Dictionary = PcbRoutingSidecar.load_into_workspace(
+		path, ws3, data.to_board_dict(), 0, store3)
+	check_eq("board drift quarantines the candidates", str(q.get("status", "")), "quarantine_stale")
+	check_eq("…but the drafts still load (accept re-validates — the stated rule)",
+		store3.staged_entries().size(), 1)
+
+	# MISSING SIDECAR resets a bound store (the document-switch rule).
+	PcbRoutingSidecar.delete_sidecar(path)
+	var q2: Dictionary = PcbRoutingSidecar.load_into_workspace(
+		path, PcbRoutingWorkspace.new(), data.to_board_dict(), 0, store3)
+	check_eq("(fixture) status missing", str(q2.get("status", "")), "missing")
+	check("a missing sidecar RESETS the bound store", store3.is_empty())
+
+	# Codex UX4 F1: EVERY non-loading path resets — an UNPARSEABLE sidecar on
+	# a document switch must not leave the prior board's drafts alive.
+	var corrupt := FileAccess.open(PcbRoutingSidecar.sidecar_path_for(path), FileAccess.WRITE)
+	corrupt.store_string("{ this is not json")
+	corrupt.close()
+	var store5 = StagedEntities.new()
+	store5.stage("zone", payload)
+	var q3: Dictionary = PcbRoutingSidecar.load_into_workspace(
+		path, PcbRoutingWorkspace.new(), data.to_board_dict(), 0, store5)
+	check_eq("(fixture) corrupt sidecar reads empty", str(q3.get("status", "")), "empty")
+	check("an unparseable sidecar ALSO resets the bound store (F1)", store5.is_empty())
+
+	# ABSENT KEY = empty store (an old sidecar without the section).
+	PcbRoutingSidecar.save_workspace(path, ws, data.to_board_dict(), int(data.board_revision))
+	var store4 = StagedEntities.new()
+	store4.stage("zone", payload)
+	PcbRoutingSidecar.load_into_workspace(path, PcbRoutingWorkspace.new(),
+		data.to_board_dict(), 0, store4)
+	check("an envelope without the section loads an EMPTY store (absent = empty)",
+		store4.is_empty())
+
+	# K5-STAGED: the canonical dict is never a carrier for drafts.
+	var board_dict: Dictionary = data.to_board_dict()
+	check("to_board_dict has no staged_entities key", not board_dict.has("staged_entities"))
+	var zone_ids: Array = []
+	for z in (board_dict.get("zones", []) as Array):
+		zone_ids.append(str((z as Dictionary).get("id", "")))
+	check("…and no staged zone leaked into zones",
+		not (str(payload.get("id", "")) in zone_ids))
+	_cleanup(path)

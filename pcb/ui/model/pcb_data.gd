@@ -1294,12 +1294,27 @@ func zone_layer_error(layer: String) -> String:
 ## the same zone after a save/reload are the SAME dict shape; storing `net: ""`
 ## would make a fresh keepout differ from a reloaded one for no gain.
 func create_zone(net_name: String, layer: String, outline_points, kind: String = "copper_pour") -> Dictionary:
+	# Epoch UX4 (DCR 019fe07523ca S5): create = BUILD + ADD, split so the
+	# staging path can build/validate a payload WITHOUT touching the board.
+	# Byte-compatible with the pre-split verb: {} + push_warning on refusal,
+	# the model's own dict on success.
+	var built := build_zone_payload(net_name, layer, outline_points, kind)
+	if not bool(built.get("ok", false)):
+		push_warning("[PCBData] create_zone refused: %s" % str(built.get("error", "")))
+		return {}
+	return add_zone_payload(built.get("payload", {}))
+
+
+## BUILD half (Epoch UX4, DCR 019fe07523ca S1/S5): validate + construct the
+## CANONICAL zone payload, minting its persistent id — NO board write, NO
+## journal, NO signal. The staging path stores this payload verbatim; the
+## direct path hands it straight to add_zone_payload. Returns
+## {ok:true, payload} or {ok:false, error:<the author refusal, verbatim>}.
+func build_zone_payload(net_name: String, layer: String, outline_points, kind: String = "copper_pour") -> Dictionary:
 	var pts := PackedVector2Array(outline_points)
 	var refusal := zone_author_error(net_name, layer, pts.size(), kind)
 	if not refusal.is_empty():
-		push_warning("[PCBData] create_zone refused: %s" % refusal)
-		return {}
-
+		return {"ok": false, "error": refusal}
 	var zone := {
 		"id": mint_entity_id("zone"),
 		"layer": layer,
@@ -1308,13 +1323,43 @@ func create_zone(net_name: String, layer: String, outline_points, kind: String =
 	}
 	if not net_name.is_empty():
 		zone["net"] = net_name
+	return {"ok": true, "payload": zone}
+
+
+## ADD half: write a BUILT payload onto the board (journal + signal). The id
+## rides THROUGH — this is what lets a staged entity keep the identity its
+## ghost/selection/findings referenced across accept (DCR F3). RE-VALIDATES
+## against the CURRENT board (the load-bearing gate, DCR F11): a payload
+## staged before a net/layer was deleted refuses HERE with the same author
+## refusal a fresh attempt would get — plus the id checks a passthrough
+## makes possible (minted format, unique). Returns the model's own dict, or
+## {} with a push_warning naming the refusal.
+func add_zone_payload(payload: Dictionary) -> Dictionary:
+	if payload.is_empty():
+		return {}
+	var net_name := str(payload.get("net", ""))
+	var layer := str(payload.get("layer", ""))
+	var kind := str(payload.get("kind", "copper_pour"))
+	var outline: Array = payload.get("outline", []) if payload.get("outline", []) is Array else []
+	var refusal := zone_author_error(net_name, layer, outline.size(), kind)
+	if not refusal.is_empty():
+		push_warning("[PCBData] add_zone_payload refused: %s" % refusal)
+		return {}
+	var zid := str(payload.get("id", ""))
+	if zid.is_empty() or not zid.begins_with("zone:"):
+		push_warning("[PCBData] add_zone_payload refused: payload id '%s' is not a minted zone id" % zid)
+		return {}
+	if _zone_index(zid) >= 0:
+		push_warning("[PCBData] add_zone_payload refused: zone id '%s' already on the board" % zid)
+		return {}
+	var zone: Dictionary = payload.duplicate(true)
 	zones.append(zone)
 	record_change("add_zone", {
-		"zone_id": zone["id"],
+		"zone_id": zid,
 		"net_name": net_name,
 		"layer": layer,
 		"kind": kind,
-		"point_count": pts.size(),
+		"point_count": outline.size(),
 	})
 	data_changed.emit()
 	return zone
@@ -1578,20 +1623,48 @@ func cutout_author_error(point_count: int) -> String:
 ## that helper encodes board-mm points into the canonical {x_mm,y_mm} list and
 ## is not zone-specific in its implementation.
 func create_cutout(outline_points) -> Dictionary:
+	# Epoch UX4: build + add, the zone split's cutout twin — see create_zone.
+	var built := build_cutout_payload(outline_points)
+	if not bool(built.get("ok", false)):
+		push_warning("[PCBData] create_cutout refused: %s" % str(built.get("error", "")))
+		return {}
+	return add_cutout_payload(built.get("payload", {}))
+
+
+## BUILD half — see build_zone_payload for the contract.
+func build_cutout_payload(outline_points) -> Dictionary:
 	var pts := PackedVector2Array(outline_points)
 	var refusal := cutout_author_error(pts.size())
 	if not refusal.is_empty():
-		push_warning("[PCBData] create_cutout refused: %s" % refusal)
-		return {}
-
-	var cutout := {
+		return {"ok": false, "error": refusal}
+	return {"ok": true, "payload": {
 		"id": mint_entity_id("cutout"),
 		"outline": zone_outline_to_list(pts),
-	}
+	}}
+
+
+## ADD half — see add_zone_payload for the contract (re-validation, id
+## passthrough with format/uniqueness checks, journal + signal).
+func add_cutout_payload(payload: Dictionary) -> Dictionary:
+	if payload.is_empty():
+		return {}
+	var outline: Array = payload.get("outline", []) if payload.get("outline", []) is Array else []
+	var refusal := cutout_author_error(outline.size())
+	if not refusal.is_empty():
+		push_warning("[PCBData] add_cutout_payload refused: %s" % refusal)
+		return {}
+	var cid := str(payload.get("id", ""))
+	if cid.is_empty() or not cid.begins_with("cutout:"):
+		push_warning("[PCBData] add_cutout_payload refused: payload id '%s' is not a minted cutout id" % cid)
+		return {}
+	if _cutout_index(cid) >= 0:
+		push_warning("[PCBData] add_cutout_payload refused: cutout id '%s' already on the board" % cid)
+		return {}
+	var cutout: Dictionary = payload.duplicate(true)
 	cutouts.append(cutout)
 	record_change("add_cutout", {
-		"cutout_id": cutout["id"],
-		"point_count": pts.size(),
+		"cutout_id": cid,
+		"point_count": outline.size(),
 	})
 	data_changed.emit()
 	return cutout
@@ -1820,9 +1893,27 @@ func set_board_size(new_width: float, new_height: float) -> void:
 ## simply absent from the snapshot and no restore is attempted — never a guess.
 var _workspace_delegate = null
 
+## ── HISTORY BUCKET 9: the staged-entity store's disposition layer ─────────────
+## (Epoch UX4, DCR 019fe07523ca F8.) The bucket-8 pattern verbatim, second
+## participant: ACCEPTING a staged entity is ONE act with two halves — the
+## entity appears on the board AND the entry becomes accepted — and an undo
+## that reverted only the board write would leave the store claiming an
+## acceptance the board no longer shows. Same duck-typed two-method contract
+## (snapshot_dispositions/restore_dispositions), same absent-key rule.
+var _staged_delegate = null
+
 ## Bind (or unbind, with null) the routing-workspace delegate. Idempotent.
 func bind_routing_workspace(delegate) -> void:
 	_workspace_delegate = delegate
+
+
+## Bind (or unbind, with null) the staged-entity store delegate. Idempotent.
+func bind_staged_store(delegate) -> void:
+	_staged_delegate = delegate
+
+
+func staged_store_delegate():
+	return _staged_delegate
 
 
 ## The bound delegate, or null. Read surface for the owner and the tests.
@@ -1837,6 +1928,16 @@ func _workspace_snapshot() -> Dictionary:
 	if not _workspace_delegate.has_method("snapshot_dispositions"):
 		return {}
 	var snap = _workspace_delegate.snapshot_dispositions()
+	return snap if snap is Dictionary else {}
+
+
+## Bucket-9 twin of _workspace_snapshot.
+func _staged_snapshot() -> Dictionary:
+	if _staged_delegate == null or not is_instance_valid(_staged_delegate):
+		return {}
+	if not _staged_delegate.has_method("snapshot_dispositions"):
+		return {}
+	var snap = _staged_delegate.snapshot_dispositions()
 	return snap if snap is Dictionary else {}
 
 
@@ -1863,6 +1964,19 @@ func attach_workspace_snapshot() -> bool:
 	return true
 
 
+## Bucket-9 twin of attach_workspace_snapshot — the ACCEPT site calls this
+## immediately before its board write, for exactly the reason that function's
+## doc records (the pre-accept disposition must sit on the PREVIOUS entry for
+## undo-after-accept to restore it, regardless of when binding happened).
+func attach_staged_snapshot() -> bool:
+	if history_index < 0 or history_index >= history.size():
+		return false
+	var entry: Dictionary = history[history_index]
+	entry["staged"] = _staged_snapshot()
+	history[history_index] = entry
+	return true
+
+
 ## Hand a restored snapshot's workspace layer back to the delegate.
 ## ABSENT KEY ⇒ UNTOUCHED: an entry written before a delegate was bound says
 ## nothing about the workspace, and "says nothing" must never be read as "had no
@@ -1877,6 +1991,18 @@ func _restore_workspace_snapshot(state: Dictionary) -> void:
 		return
 	var snap = state.get("workspace", {})
 	_workspace_delegate.restore_dispositions(snap if snap is Dictionary else {})
+
+
+## Bucket-9 twin — same absent-key-⇒-untouched rule, same rationale.
+func _restore_staged_snapshot(state: Dictionary) -> void:
+	if not state.has("staged"):
+		return
+	if _staged_delegate == null or not is_instance_valid(_staged_delegate):
+		return
+	if not _staged_delegate.has_method("restore_dispositions"):
+		return
+	var snap = state.get("staged", {})
+	_staged_delegate.restore_dispositions(snap if snap is Dictionary else {})
 
 
 ## Save current state to history
@@ -1918,6 +2044,11 @@ func save_to_history(action_name: String = "Change") -> void:
 	# ones it always did, and _restore_state's absent-key rule stays meaningful.
 	if _workspace_delegate != null and is_instance_valid(_workspace_delegate):
 		state["workspace"] = _workspace_snapshot()
+
+	# BUCKET 9 — the staged store's disposition layer (Epoch UX4): same
+	# bound-only rule, so an unbound board's snapshots stay byte-identical.
+	if _staged_delegate != null and is_instance_valid(_staged_delegate):
+		state["staged"] = _staged_snapshot()
 
 	history.append(state)
 	history_index = history.size() - 1
@@ -2069,6 +2200,8 @@ func _restore_state(state: Dictionary) -> void:
 	# whole, so a delegate that reads the board while restoring sees the state
 	# this snapshot describes rather than a half-applied one.
 	_restore_workspace_snapshot(state)
+	# BUCKET 9 — same last-after-board rule (Epoch UX4).
+	_restore_staged_snapshot(state)
 
 	# Batch state belongs to the CALLER's in-flight transaction, not to
 	# whichever board snapshot happens to be restored. Without this, undoing

@@ -55,3 +55,8 @@ test_workspace_persistence.gd
 test_workspace_tools.gd
 test_zone_select_delete.gd
 test_ux3_contracts.gd
+test_staged_entities.gd
+test_draft_composer.gd
+test_staged_canvas.gd
+test_staged_verbs.gd
+test_draft_doorways.gd

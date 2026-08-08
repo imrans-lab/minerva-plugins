@@ -416,12 +416,16 @@ func _test_tool_buttons_render() -> void:
 	var tools_flow: Control = panel.find_child("ToolsFlow", true, false)
 	var draw_flow: Control = panel.find_child("DrawFlow", true, false)
 	var hints_flow: Control = panel.find_child("HintsFlow", true, false)
+	# UX4 station 7 (DCR S7): the Proposals area's DRAFT doorways live in a
+	# fourth flow, swept like the other three.
+	var draft_flow: Control = panel.find_child("DraftFlow", true, false)
 	check("ToolsFlow lives in the sidebar", tools_flow != null)
 	check("DrawFlow lives in the sidebar", draw_flow != null)
 	check("HintsFlow lives in the sidebar", hints_flow != null)
+	check("DraftFlow lives in the sidebar", draft_flow != null)
 
 	var all_buttons: Array[Button] = []
-	for flow in [tools_flow, draw_flow, hints_flow]:
+	for flow in [tools_flow, draw_flow, hints_flow, draft_flow]:
 		if flow == null:
 			continue
 		for child in (flow as Control).get_children():
@@ -477,11 +481,28 @@ func _test_tool_buttons_render() -> void:
 		check("%s node present in the sidebar" % node_name,
 			panel.find_child(node_name, true, false) != null)
 
-	# 16 as of Epoch UX3: stations 3 + 11 added Check (draft-DRC over live
-	# ghosts) and Promote (the K13 gated serialize-back) to the HintsFlow —
-	# deliberate additions, counted here like every prior one.
-	check("16 tool buttons total across ToolsFlow/DrawFlow/HintsFlow (9 radio tools + 3 route-flow + Delete + Propose + Check + Promote; got %d)" % all_buttons.size(),
-		all_buttons.size() == 16)
+	# UX4 station 7: the DRAFT doorway twins, by name and by census — same
+	# ToolMode keys as their direct siblings, different dict, different flow.
+	var expected_draft_modes := [
+		PcbCanvasScript.ToolMode.ZONE_POUR, PcbCanvasScript.ToolMode.ZONE_KEEPOUT,
+		PcbCanvasScript.ToolMode.CUTOUT, PcbCanvasScript.ToolMode.BUS,
+	]
+	var draft_buttons: Dictionary = panel._draft_tool_buttons
+	check("_draft_tool_buttons has exactly the 4 draft doorways (got %d)" % draft_buttons.keys().size(),
+		draft_buttons.keys().size() == expected_draft_modes.size())
+	for mode in expected_draft_modes:
+		check("draft doorway registered + mounted for ToolMode %s" % mode,
+			draft_buttons.has(mode) and (draft_buttons[mode] as Button) in all_buttons)
+	for node_name in ["PourDraftButton", "KeepoutDraftButton", "CutoutDraftButton", "BusDraftButton"]:
+		check("%s node present in the sidebar" % node_name,
+			panel.find_child(node_name, true, false) != null)
+
+	# 20 as of Epoch UX4 station 7: the four DRAFT doorway toggles joined the
+	# Proposals area (deliberate pin bump, the standing convention) on top of
+	# UX3's 16 (9 radio tools + 3 route-flow + Delete + Propose + Check +
+	# Promote).
+	check("20 tool buttons total across the four flows (16 + 4 draft doorways; got %d)" % all_buttons.size(),
+		all_buttons.size() == 20)
 
 	_teardown(panel)
 

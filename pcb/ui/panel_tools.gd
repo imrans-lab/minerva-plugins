@@ -179,6 +179,16 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _create_cutout(host, args)
 		"minerva_pcb_delete_cutout":
 			return _delete_cutout(host, args)
+		"minerva_pcb_propose_zone":
+			return _propose_zone(host, args)
+		"minerva_pcb_propose_cutout":
+			return _propose_cutout(host, args)
+		"minerva_pcb_staged_list":
+			return _staged_list(host, args)
+		"minerva_pcb_staged_accept":
+			return _staged_accept(host, args)
+		"minerva_pcb_staged_reject":
+			return _staged_reject(host, args)
 		"minerva_pcb_group_components":
 			return _group_components(host, args)
 		"minerva_pcb_ungroup":
@@ -1876,6 +1886,12 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	# key. `workspace` may be null (headless/no mount) — _route_request_extra
 	# already null-checks it, same as every other caller.
 	var route_extra: Dictionary = _route_request_extra(workspace, {}, _hint_id_list(source_hints))
+	# Epoch UX4 station 3 (DCR S3/A2): only the CANDIDATE-producing branch is
+	# a draft request — commit=true lands real copper and must route against
+	# the REAL board, uncomposed. The marker is panel-side (route_board's
+	# params allow-list never forwards it to the worker).
+	if not commit:
+		route_extra["draft_request"] = true
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
@@ -2634,8 +2650,9 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 	_pass_through_result_key(reply, result, "island_deltas")
 	# DCR 019fd5fd9084: board_health replaced the worker's old top-level
 	# assembly_advisories key — verbatim pass-through + the two panel-owned
-	# enrichment fields + assembly-cache feed, see _attach_board_health.
-	_attach_board_health(host, reply, result)
+	# enrichment fields; DRAFT reply (composed request), so labeled and
+	# cache-feed SKIPPED (UX4 station 3, A9).
+	_attach_board_health(host, reply, result, true)
 	return _ok(reply)
 
 
@@ -2934,7 +2951,16 @@ static func _pass_through_result_dict(reply: Dictionary, result: Dictionary, key
 ## cache (DCR item 2) at the stamped revision — the commit acknowledgment gate
 ## reads that cache. Absent/empty board_health (older worker) attaches nothing
 ## and feeds nothing, same absent-key contract as every additive key here.
-static func _attach_board_health(host, reply: Dictionary, result: Dictionary) -> void:
+##
+## Epoch UX4 station 3 (DCR S3 cache isolation, A9): `draft` = the reply
+## answers a DRAFT request — its health was computed from the COMPOSED board
+## (real + staged zones), so it is surfaced on the reply LABELED
+## (health.draft = true) but must NEVER feed the assembly cache: that cache
+## is the REAL board's verdict, keyed to its revision, and the commit
+## acknowledgment gate reads it. Draft callers: _propose_into_workspace and
+## _ingest_result_into_workspace (candidate-producing replies).
+## _materialize_routes (direct copper, uncomposed request) keeps feeding.
+static func _attach_board_health(host, reply: Dictionary, result: Dictionary, draft: bool = false) -> void:
 	var bh: Variant = result.get("board_health")
 	if not (bh is Dictionary) or (bh as Dictionary).is_empty():
 		return
@@ -2950,13 +2976,21 @@ static func _attach_board_health(host, reply: Dictionary, result: Dictionary) ->
 				(entry as Dictionary)["pin_groups"] = int((entry as Dictionary)["pin_groups"])
 	var data = _get_data(host)
 	var revision: int = int(data.board_revision) if data != null else 0
+	# For a DRAFT reply this revision is approximate: the verdict was computed
+	# from the COMPOSED board (real + staged zones), not the revision named
+	# here — the draft:true label below is what disambiguates (and why the
+	# cache feed is skipped).
 	health["board_revision"] = revision
 	var rendered := false
 	var panel = _get_panel(host)
 	if panel != null and panel.has_method("get_last_rendered_board_revision"):
 		rendered = int(panel.get_last_rendered_board_revision()) == revision
 	health["preflight"] = {"rendered_this_revision": rendered}
+	if draft:
+		health["draft"] = true
 	reply["board_health"] = health
+	if draft:
+		return
 	var assembly: Variant = health.get("assembly")
 	if assembly is Dictionary and not (assembly as Dictionary).is_empty():
 		_feed_assembly_cache(host, assembly, revision)
@@ -3634,6 +3668,168 @@ static func _create_cutout(host, args: Dictionary) -> Dictionary:
 		"cutout_id": str(cutout.get("id", "")),
 		"point_count": data.zone_outline_points(cutout).size(),
 	})
+
+
+# ── Epoch UX4 station 8 (DCR S8): the STAGING family ──────────────────────────
+# minerva_pcb_propose_zone/_propose_cutout are ARG-IDENTICAL twins of the
+# create_* tools — same validation, same refusal texts — that land a DRAFT in
+# the staged store instead of writing the board. FAMILY NOTE (the naming
+# hazard the DCR review called out): this propose_* family STAGES BOARD
+# ENTITIES; the unrelated workspace_propose_* family runs the ROUTER. The
+# tool descriptions state membership so an agent never conflates them.
+# All five are THIN over the panel's own transactions (stage_built_payload /
+# accept_staged / reject_staged / accept_staged_batch) — the same one-doorway
+# rule (A8) the canvas commit sites keep.
+
+
+static func _staged_panel(host) -> Variant:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("stage_built_payload"):
+		return _err("no live panel — staging is a panel transaction")
+	return panel
+
+
+static func _propose_zone(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var panel = _staged_panel(host)
+	if not (panel is Object):
+		return panel
+	var kind: String = str(args.get("kind", "copper_pour"))
+	var net_name: String = str(args.get("net", ""))
+	var layer: String = str(args.get("layer", ""))
+	if not args.has("outline"):
+		return _err("outline is required: an array of {x_mm, y_mm} points")
+	var pts = _parse_zone_outline(args.get("outline"))
+	if pts == null:
+		return _err("outline points need x_mm and y_mm")
+	var built: Dictionary = data.build_zone_payload(net_name, layer, pts, kind)
+	if not bool(built.get("ok", false)):
+		return _err(str(built.get("error", "Zone was refused.")))
+	var payload: Dictionary = built.get("payload", {})
+	var staged: Dictionary = panel.stage_built_payload("zone", payload, "ai", str(args.get("note", "")))
+	if not bool(staged.get("ok", false)):
+		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
+	return _ok({
+		"entity_id": str(payload.get("id", "")),
+		"staged_id": str(staged.get("staged_id", "")),
+		"kind": data.zone_kind(payload),
+		"net": str(payload.get("net", "")),
+		"layer": str(payload.get("layer", "")),
+		"point_count": pts.size(),
+		"note": "a ghost DRAFT — nothing is on the board until minerva_pcb_staged_accept",
+	})
+
+
+static func _propose_cutout(host, args: Dictionary) -> Dictionary:
+	var data = _resolve_data(host)
+	if not (data is Object):
+		return data
+	var panel = _staged_panel(host)
+	if not (panel is Object):
+		return panel
+	if not args.has("outline"):
+		return _err("outline is required: an array of {x_mm, y_mm} points")
+	var pts = _parse_zone_outline(args.get("outline"))
+	if pts == null:
+		return _err("outline points need x_mm and y_mm")
+	var built: Dictionary = data.build_cutout_payload(pts)
+	if not bool(built.get("ok", false)):
+		return _err(str(built.get("error", "Cutout was refused.")))
+	var payload: Dictionary = built.get("payload", {})
+	var staged: Dictionary = panel.stage_built_payload("cutout", payload, "ai", str(args.get("note", "")))
+	if not bool(staged.get("ok", false)):
+		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
+	return _ok({
+		"entity_id": str(payload.get("id", "")),
+		"staged_id": str(staged.get("staged_id", "")),
+		"point_count": pts.size(),
+		"note": "a ghost DRAFT — nothing is on the board until minerva_pcb_staged_accept",
+	})
+
+
+static func _staged_list(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_staged_store"):
+		return _err("no live panel — the staged store is panel state")
+	var store = panel.get_staged_store()
+	if store == null:
+		return _err("no staged store bound to this panel")
+	var include_terminal: bool = bool(args.get("include_terminal", false))
+	var entries: Array = []
+	if include_terminal:
+		for sid in store.entries:
+			var e: Dictionary = store.get_entry(str(sid))
+			e["staged_id"] = str(sid)
+			entries.append(_staged_list_row(e))
+	else:
+		for e in store.staged_entries():
+			entries.append(_staged_list_row(e))
+	return _ok({"staged": entries, "count": entries.size(),
+		"live_count": store.staged_entries().size()})
+
+
+static func _staged_list_row(e: Dictionary) -> Dictionary:
+	var payload: Dictionary = e.get("payload", {}) if e.get("payload", {}) is Dictionary else {}
+	var row := {
+		"staged_id": str(e.get("staged_id", "")),
+		"entity_id": str(payload.get("id", "")),
+		"kind": str(e.get("kind", "")),
+		"disposition": str(e.get("disposition", "")),
+		"author": str(e.get("author", "")),
+		"base_board_revision": int(e.get("base_board_revision", 0)),
+	}
+	if str(e.get("kind", "")) == "zone":
+		row["zone_kind"] = str(payload.get("kind", ""))
+		row["layer"] = str(payload.get("layer", ""))
+		var net := str(payload.get("net", ""))
+		if not net.is_empty():
+			row["net"] = net
+	var note := str(e.get("note", ""))
+	if not note.is_empty():
+		row["note"] = note
+	return row
+
+
+static func _staged_accept(host, args: Dictionary) -> Dictionary:
+	var panel = _staged_panel(host)
+	if not (panel is Object):
+		return panel
+	# Batch form (DCR S5's batch-accept pattern): entity_ids = all-or-nothing,
+	# one undo step. Singular entity_id stays the simple path.
+	if args.has("entity_ids") and args.get("entity_ids") is Array:
+		var out: Dictionary = panel.accept_staged_batch(args.get("entity_ids"))
+		if not bool(out.get("ok", false)):
+			return {"success": false, "error": str(out.get("error", "batch_refused")),
+				"refusals": out.get("refusals", []),
+				"note": str(out.get("note", ""))}
+		return _ok({"accepted": int(out.get("accepted", 0)),
+			"note": "one history step — a single undo returns the whole batch to ghosts"})
+	var entity_id: String = str(args.get("entity_id", ""))
+	if entity_id.is_empty():
+		return _err("entity_id (or entity_ids for a batch) is required")
+	var res: Dictionary = panel.accept_staged(entity_id)
+	if not bool(res.get("ok", false)):
+		return {"success": false, "error": str(res.get("error", "accept_refused")),
+			"entity_id": entity_id, "note": str(res.get("note", ""))}
+	return _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")),
+		"note": "landed on the board (journalled; undo returns it to a ghost)"})
+
+
+static func _staged_reject(host, args: Dictionary) -> Dictionary:
+	var panel = _staged_panel(host)
+	if not (panel is Object):
+		return panel
+	var entity_id: String = str(args.get("entity_id", ""))
+	if entity_id.is_empty():
+		return _err("entity_id is required")
+	var res: Dictionary = panel.reject_staged(entity_id)
+	if not bool(res.get("ok", false)):
+		return {"success": false, "error": str(res.get("error", "reject_refused")),
+			"entity_id": entity_id}
+	return _ok({"entity_id": entity_id, "kind": str(res.get("kind", "")),
+		"note": "draft discarded (kept as audit; undo revives the ghost)"})
 
 
 ## Delete a cutout. Mirrors _delete_zone's idiom exactly (mutate-then-snapshot,
@@ -4336,6 +4532,14 @@ static func _candidate_record(workspace, c) -> Dictionary:
 	# "generated with no constraint in play" and the key is simply absent.
 	if int(c.constraint_revision) >= 0:
 		rec["constraint_revision"] = int(c.constraint_revision)
+	# UX4 station 10 (019fd0ab5af8): width + its provenance on EVERY listing,
+	# not just the propose reply — the review question "is this 0.25mm meant
+	# or a fallback" is now answerable from any surface. Absent for legacy
+	# candidates ("" = generated before the field existed).
+	if not (c.segments as Array).is_empty() and c.segments[0] is Dictionary:
+		rec["width_mm"] = float((c.segments[0] as Dictionary).get("width", 0.0))
+	if not str(c.width_source).is_empty():
+		rec["width_source"] = str(c.width_source)
 	if not (c.hint_status as Array).is_empty():
 		rec["hint_status"] = (c.hint_status as Array).duplicate(true)
 	if workspace.has_method("committed_copper_ids"):
@@ -4654,6 +4858,10 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	# "open" propose (hint_ids empty, selection {"mode":"open"}) still needs
 	# every ACTUALLY-selected hint's task consulted, not none.
 	var route_extra: Dictionary = _route_request_extra(workspace, scope, _hint_id_list(source_hints))
+	# Epoch UX4 station 3: propose only ever lands ghosts — always a draft
+	# request (staged keepouts detour it; the reply's health never feeds the
+	# real board's assembly cache).
+	route_extra["draft_request"] = true
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
@@ -4878,7 +5086,9 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 	# assembly-cache feed, see _attach_board_health.
 	_pass_through_result_key(out, result, "span_outcomes")
 	_pass_through_result_key(out, result, "island_deltas")
-	_attach_board_health(host, out, result)
+	# DRAFT reply (composed propose/reroute request) — labeled, cache-feed
+	# skipped (UX4 station 3, A9).
+	_attach_board_health(host, out, result, true)
 	# Epoch UX1 station 11: a non-empty landing gets the compact legal-
 	# successors sentence instead of the bare "landed" note above — the
 	# reroute callers (_workspace_reroute) refresh this again with their own
@@ -5054,6 +5264,26 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 				rec["source_intent_notes"] = intents
 		entries.append(rec)
 
+	# UX4 S4: staged drafts — the store entry (entity kind, author, note,
+	# disposition) is the "what's this" answer for an area ghost, same idea
+	# as the candidate record above. `id` is the CANONICAL payload id the
+	# canvas selected; staged_id locates the store entry for the review verbs.
+	var staged_store = panel.get_staged_store() if panel.has_method("get_staged_store") else null
+	for eid in state.get("staged", []):
+		var s_entry: Dictionary = {"kind": "staged", "id": str(eid)}
+		if staged_store != null:
+			var sid := str(staged_store.staged_id_for_entity(str(eid)))
+			if not sid.is_empty():
+				var se: Dictionary = staged_store.get_entry(sid)
+				s_entry["staged_id"] = sid
+				s_entry["entity_kind"] = str(se.get("kind", ""))
+				s_entry["author"] = str(se.get("author", ""))
+				s_entry["disposition"] = str(se.get("disposition", ""))
+				var s_note := str(se.get("note", ""))
+				if not s_note.is_empty():
+					s_entry["note"] = s_note
+		entries.append(s_entry)
+
 	if host != null and host.has_method("get_selected_annotation_ids") \
 			and host.has_method("get_by_id"):
 		for aid in host.get_selected_annotation_ids():
@@ -5220,7 +5450,10 @@ static func _promote(host, args: Dictionary) -> Dictionary:
 	var panel = _get_panel(host)
 	if panel == null or not panel.has_method("promote"):
 		return _err("no live panel — promotion serializes the live board")
-	return await panel.promote(str(args.get("path", "")))
+	# allow_copper_regression (UX4 station 9): the deliberate override for the
+	# panel's regression guard — same arg the button's confirm dialog passes.
+	return await panel.promote(str(args.get("path", "")),
+		bool(args.get("allow_copper_regression", false)))
 
 
 static func _workspace_freeze(host, args: Dictionary) -> Dictionary:
@@ -6257,6 +6490,9 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary, pre: D
 
 	var route_extra: Dictionary = _route_request_extra(
 		workspace, _reroute_scope(c, source_hints, data), _hint_id_list(source_hints))
+	# Epoch UX4 station 3: a reroute replaces one ghost with another — always
+	# a draft request, same contract as propose above.
+	route_extra["draft_request"] = true
 	var reply: Dictionary = await _run_router(
 		host, {"mode": "ids", "ids": _hint_id_list(source_hints)}, route_extra)
 	if not bool(reply.get("ok", false)):

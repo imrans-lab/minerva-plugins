@@ -643,6 +643,103 @@
       }
     },
     {
+      "name": "minerva_pcb_propose_zone",
+      "description": "STAGE a zone (copper pour or keepout) as a DRAFT — the staging family's twin of minerva_pcb_create_zone (same args, same validation, same refusal texts), landing a review ghost instead of writing the board. FAMILY NOTE: propose_* tools STAGE BOARD ENTITIES; the unrelated workspace_propose_* tools run the ROUTER. Nothing is journalled and nothing appears on the board until minerva_pcb_staged_accept; the ghost persists via the routing sidecar without an explicit save. A staged keepout also detours DRAFT route proposals (the composed request). Reply: {entity_id, staged_id, kind, net, layer, point_count}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "kind": {"type": "string", "description": "Zone kind: \"copper_pour\" (default) or \"keepout\""},
+          "net": {"type": "string", "description": "Declared net name. Required for a copper pour; optional for a keepout."},
+          "layer": {"type": "string", "description": "Copper layer — canonical id, not the KiCad alias (e.g. top, bottom, in1..in30; NOT F.Cu/B.Cu)"},
+          "outline": {
+            "type": "array",
+            "description": "Outline points in board mm, in order. At least 3 required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          },
+          "note": {"type": "string", "description": "Optional human-readable rationale stored on the draft"}
+        },
+        "required": ["editor_name", "layer", "outline"]
+      }
+    },
+    {
+      "name": "minerva_pcb_propose_cutout",
+      "description": "STAGE a cutout (an opening through the whole board) as a DRAFT — the staging family's twin of minerva_pcb_create_cutout (same args, same validation), landing a review ghost instead of writing the board. FAMILY NOTE: propose_* tools STAGE BOARD ENTITIES; the unrelated workspace_propose_* tools run the ROUTER. Nothing lands until minerva_pcb_staged_accept. A staged cutout's whole v1 power is review-before-land (ghost + accept/reject + persistence): like a REAL cutout it is authorable, not compilable, and it never enters a route request. Reply: {entity_id, staged_id, point_count}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "outline": {
+            "type": "array",
+            "description": "Outline points in board mm, in order. At least 3 required.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x_mm": {"type": "number"},
+                "y_mm": {"type": "number"}
+              },
+              "required": ["x_mm", "y_mm"]
+            }
+          },
+          "note": {"type": "string", "description": "Optional human-readable rationale stored on the draft"}
+        },
+        "required": ["editor_name", "outline"]
+      }
+    },
+    {
+      "name": "minerva_pcb_staged_list",
+      "description": "List staged entity DRAFTS (the staging family — see minerva_pcb_propose_zone). Read-only. By default only LIVE (disposition \"staged\") entries; include_terminal:true also returns the accepted/rejected audit trail. Each row: {staged_id, entity_id, kind, disposition, author, base_board_revision, zone_kind?, layer?, net?, note?}. entity_id is the canonical board id the ghost/selection/accept all reference.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "include_terminal": {"type": "boolean", "description": "Also list accepted/rejected entries (default false)"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_staged_accept",
+      "description": "ACCEPT staged draft(s) (the staging family): replays the direct create with the STORED payload — same id, byte-identical entity — re-validated against the CURRENT board, so drift since staging (net deleted, layer removed) refuses with the direct verb's own reason and the draft stays live. One journalled history step; undo returns the entity to a ghost. Pass entity_id for one draft, or entity_ids (array) for an ALL-OR-NOTHING batch that lands as ONE undo step (refused whole, per-entity reasons, if any member cannot land).",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "entity_id": {"type": "string", "description": "Canonical id of ONE staged draft (zone:<hex>/cutout:<hex>)"},
+          "entity_ids": {
+            "type": "array",
+            "description": "Canonical ids for an all-or-nothing batch accept (one history step)",
+            "items": {"type": "string"}
+          }
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_staged_reject",
+      "description": "REJECT one staged draft (the staging family): terminal — the ghost disappears, the entry is kept as audit, and the reject is paired with its own history entry, so undo revives the ghost while undoing unrelated edits leaves the rejection standing. Unknown/already-terminal entity_id is an error.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "entity_id": {"type": "string", "description": "Canonical id of the staged draft to reject"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_pcb_group_components",
       "description": "Stamp two or more known components into one persistent group (merging any existing groups among them; Illustrator merge grammar, not nesting). One journalled, undoable step. A selection that is already exactly one flat group is a no-op reply (changed:false) with that group's own id/members, not an error. Refused (as an error) when fewer than two known components remain after expansion. Reply: {group_id, member_ids, changed}. Agrees with minerva_pcb_get_components' group_id/group_members fields by construction.",
       "executor": "panel",
@@ -1007,13 +1104,14 @@
     },
     {
       "name": "minerva_pcb_promote",
-      "description": "PROMOTE the live board to its canonical YAML file (Epoch UX3 station 11 — K13, the serialize-back verb): runs the FULL authoritative gate in one call (connectivity DRC + geometric DRC GC1-GC7 + assembly tri-state, composed fail-closed worker-side) and, ONLY on a clean pass, serializes the live board through pcb.serialize and writes it to the adopted document path (or the explicit `path` arg). ANY finding, error, or indeterminate refuses by name (promotion_gated, with refusals[] and the three sub-reports) — there is NO acknowledge-through: promotion without a passing full DRC is impossible, not merely discouraged. Success reply: {path, digest_sha256, bytes, prior_state, census_delta? (component/net/trace/via count deltas vs the prior file)}. Committed candidates and consumed-hint records are NOT mutated — they already describe the copper this file now carries.",
+      "description": "PROMOTE the live board to its canonical YAML file (K13, the serialize-back verb — CORRECTNESS-GATED, COMPLETENESS-ADVISORY per the Epoch UX4 owner ruling): runs the FULL authoritative gate in one call (connectivity DRC + geometric DRC GC1-GC7 + assembly tri-state, composed fail-closed worker-side) and, only when no CORRECTNESS refusal stands, serializes the live board through pcb.serialize and writes it to the adopted document path (or the explicit `path` arg). Any finding, error, or indeterminate refuses by name (promotion_gated, with refusals[] and the three sub-reports) — there is NO acknowledge-through for correctness. A clean-but-PARTIAL board PROMOTES, with the unrouted nets on the reply as advisory.completeness. PANEL-SIDE REGRESSION GUARD: if the prior file has per-net copper (traces ∪ zones ∪ netted vias — a pour counts) or components this promotion would remove, the call refuses copper_regression (regressed_nets, component_delta) unless allow_copper_regression:true. Success reply: {path, digest_sha256, bytes, prior_state, census_delta?, advisory?, staged_drafts?}. Committed candidates and consumed-hint records are NOT mutated — they already describe the copper this file now carries.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
         "properties": {
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
-          "path": {"type": "string", "description": "Target file path; omit to use the adopted canonical document path"}
+          "path": {"type": "string", "description": "Target file path; omit to use the adopted canonical document path"},
+          "allow_copper_regression": {"type": "boolean", "description": "Deliberate override for the regression guard: promote even though the prior file's copper/components would be removed (default false)"}
         },
         "required": ["editor_name"]
       }

@@ -1012,6 +1012,11 @@ func pin_info(component: String, pin: String) -> Dictionary:
 			if start.distance_to(pad_pos) <= _PAD_HIT_RADIUS_MM or end.distance_to(pad_pos) <= _PAD_HIT_RADIUS_MM:
 				trace_ids.append(str(trace.id))
 
+	# UX4 station 10 (work item 019fd0ab4c65): the pad's WORLD position — an
+	# agent asking "what's on this pin" almost always needs where it is next
+	# (routing a hint to it, pointing at it, checking a witness against it),
+	# and re-deriving it needed a second tool call through get_pin_position.
+	var world_pos: Vector2 = comp.get_pin_world_position(pin)
 	return {
 		"ref": "%s.%s" % [component, pin],
 		"pin_name": pin_name,
@@ -1019,6 +1024,7 @@ func pin_info(component: String, pin: String) -> Dictionary:
 		"net_members": net_members,
 		"trace_ids": trace_ids,
 		"trace_count": trace_ids.size(),
+		"position": {"x_mm": world_pos.x, "y_mm": world_pos.y},
 	}
 
 

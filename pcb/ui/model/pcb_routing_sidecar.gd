@@ -114,18 +114,35 @@ static func write_envelope(board_path: String, envelope: Dictionary) -> Error:
 
 # ── high-level save / load (the seam PCBPanel wires) ──────────────────────────
 
-## Persist `workspace` beside the board file. ZERO candidates ⇒ the sidecar is
-## DELETED (mirrors AnnotationSidecar's zero-payload rule) — a candidate-free
-## workspace leaves no file on disk. The board_document_id is carried forward
-## from any existing sidecar at this path (so re-saving the SAME file keeps a
-## stable id); a Save-As to a NEW path has no sidecar there yet and mints a fresh
-## id for the copy. Returns an Error code.
-static func save_workspace(board_path: String, workspace, board_dict: Dictionary, board_revision: int) -> Error:
+## Reset a bound staged store (Codex UX4 F1): called on EVERY load path that
+## does not load — missing sidecar, unparseable envelope, garbled workspace
+## token — so the previous document's drafts can never survive a switch onto
+## a board whose own sidecar could not answer.
+static func _reset_staged(staged_store) -> void:
+	if staged_store != null and staged_store.has_method("load_from_dict"):
+		staged_store.load_from_dict({})
+
+## Persist `workspace` beside the board file. ZERO payload ⇒ the sidecar is
+## DELETED (mirrors AnnotationSidecar's zero-payload rule) — and since Epoch
+## UX4 station 6 (DCR S9) "zero payload" means NO candidates AND NO staged
+## entities: an area draft alone keeps the file alive. `staged_store` is the
+## panel's StagedEntities store (optional — existing callers without one keep
+## the exact prior candidates-only behavior); its section is written verbatim
+## (store.to_dict()) under "staged_entities", absent when the store is empty.
+## The board_document_id is carried forward from any existing sidecar at this
+## path (so re-saving the SAME file keeps a stable id); a Save-As to a NEW
+## path has no sidecar there yet and mints a fresh id for the copy. Returns an
+## Error code.
+static func save_workspace(board_path: String, workspace, board_dict: Dictionary,
+		board_revision: int, staged_store = null) -> Error:
 	if board_path.is_empty() or workspace == null:
 		return ERR_INVALID_PARAMETER
 	var durable: Dictionary = workspace.to_sidecar_dict()
 	var cands: Dictionary = durable.get("candidates", {}) if durable.get("candidates", {}) is Dictionary else {}
-	if cands.is_empty():
+	var staged_section: Dictionary = {}
+	if staged_store != null and staged_store.has_method("to_dict") and not staged_store.is_empty():
+		staged_section = staged_store.to_dict()
+	if cands.is_empty() and staged_section.is_empty():
 		return delete_sidecar(board_path)
 
 	# Carry a stable document id forward from an existing sidecar, else mint one.
@@ -149,6 +166,11 @@ static func save_workspace(board_path: String, workspace, board_dict: Dictionary
 		"board_revision": int(board_revision),
 		"workspace": durable,
 	}
+	# UX4 S9: additive, absent-when-empty — the frozen-set precedent (a new
+	# key inside the envelope, no schema bump; an old loader ignores it, this
+	# loader treats absence as an empty store).
+	if not staged_section.is_empty():
+		envelope["staged_entities"] = staged_section
 	return write_envelope(board_path, envelope)
 
 
@@ -162,15 +184,23 @@ static func save_workspace(board_path: String, workspace, board_dict: Dictionary
 ##   "quarantine_stale" — future/unknown schema_version OR missing token OR
 ##                        fingerprint MISMATCH → candidates loaded (if possible)
 ##                        with ALL validation=stale, dispositions preserved.
-static func load_into_workspace(board_path: String, workspace, current_board_dict: Dictionary, _current_board_revision: int = 0) -> Dictionary:
+static func load_into_workspace(board_path: String, workspace, current_board_dict: Dictionary,
+		_current_board_revision: int = 0, staged_store = null) -> Dictionary:
 	if workspace == null:
 		return {"status": "missing", "candidate_count": 0}
 	if not has_sidecar(board_path):
+		# UX4 S9: no sidecar means no drafts either — a bound store is RESET so
+		# a document switch cannot carry the prior board's drafts across.
+		_reset_staged(staged_store)
 		return {"status": "missing", "candidate_count": 0}
 
 	var envelope := read_envelope(board_path)
 	if envelope.is_empty():
 		# has_sidecar was true but the file did not parse → treated as empty.
+		# Codex UX4 F1: EVERY non-loading path resets a bound store, not just
+		# the missing-sidecar one — an unparseable envelope on a document
+		# switch must not leave the PRIOR board's drafts alive over this one.
+		_reset_staged(staged_store)
 		return {"status": "empty", "candidate_count": 0, "reason": "unparseable"}
 
 	var version := int(envelope.get("schema_version", -1))
@@ -193,7 +223,9 @@ static func load_into_workspace(board_path: String, workspace, current_board_dic
 			quarantine = true
 			reason = "schema_version %d != %d" % [version, SCHEMA_VERSION]
 	if not (ws_dict is Dictionary):
-		# Missing/garbled workspace token — nothing coherent to load.
+		# Missing/garbled workspace token — nothing coherent to load. Same F1
+		# rule as the unparseable path above: a refused load resets the store.
+		_reset_staged(staged_store)
 		return {"status": "empty", "candidate_count": 0, "reason": "missing workspace token"}
 	if stored_fp.is_empty():
 		quarantine = true
@@ -204,9 +236,24 @@ static func load_into_workspace(board_path: String, workspace, current_board_dic
 	workspace.load_from_dict(ws_dict as Dictionary)
 	var count: int = workspace.candidates.size()
 
+	# UX4 S9 QUARANTINE RULE, stated: staged entries load on EVERY coherent
+	# envelope — including fingerprint-mismatch/schema quarantines — because a
+	# drifted staged payload is SAFE to carry (it mutates nothing until
+	# accept, and accept re-validates against the CURRENT board, refusing by
+	# name). Candidates get marked stale below; drafts have no validation
+	# channel to mark, their gate is the accept itself. Absent section = empty
+	# store (the additive-key contract).
+	var staged_count := 0
+	if staged_store != null and staged_store.has_method("load_from_dict"):
+		var staged_section: Dictionary = envelope.get("staged_entities", {}) \
+			if envelope.get("staged_entities", {}) is Dictionary else {}
+		staged_store.load_from_dict(staged_section)
+		staged_count = staged_store.staged_entries().size()
+
 	if quarantine:
 		workspace.mark_all_stale()
-		return {"status": "quarantine_stale", "candidate_count": count, "reason": reason}
+		return {"status": "quarantine_stale", "candidate_count": count,
+			"staged_count": staged_count, "reason": reason}
 
 	# Fingerprint coherence: recompute from the CURRENT board and compare —
 	# with the SAME algorithm the envelope was written with (F4): v2 envelopes
@@ -220,11 +267,13 @@ static func load_into_workspace(board_path: String, workspace, current_board_dic
 		workspace.mark_all_stale()
 		return {
 			"status": "quarantine_stale", "candidate_count": count,
+			"staged_count": staged_count,
 			"reason": "board_fingerprint mismatch",
 			"stored_fingerprint": stored_fp, "current_fingerprint": current_fp,
 		}
 
-	return {"status": "loaded_clean", "candidate_count": count, "stored_fingerprint": stored_fp}
+	return {"status": "loaded_clean", "candidate_count": count,
+		"staged_count": staged_count, "stored_fingerprint": stored_fp}
 
 
 # ── schema migration (forward hook) ───────────────────────────────────────────

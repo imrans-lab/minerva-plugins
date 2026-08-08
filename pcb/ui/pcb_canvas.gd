@@ -227,6 +227,20 @@ const KIND_CUTOUT := "cutout"
 ##   * MOVE / DELETE / LOCK — deliberately NOT implemented, each with its reason
 ##     stated at the site, exactly as vias and cutouts state theirs.
 const KIND_CANDIDATE := "candidate"
+## Epoch UX4 station 4 (DCR 019fe07523ca S4) — a STAGED ENTITY (zone/cutout
+## draft) from the panel's StagedEntities store. Appended at the END like every
+## kind before it, and it MIRRORS KIND_CANDIDATE's non-board-kind split:
+##   * SELECT + DRAW + PICK — implemented here (ghost fill + long-dash outline;
+##     pick rung between traces and board zones; box-select INCLUDES staged —
+##     the one deliberate divergence from candidates, ruled in the DCR: a
+##     staged area is area geometry the review gestures act on by id).
+##   * MOVE / DELETE / LOCK — deliberately NOT implemented, each refusal
+##     stated at its site naming the real verbs (Accept/Reject — station 5's
+##     staged_verb_requested seam). The entity id in the selection is the
+##     PAYLOAD's canonical minted id (zone:<hex>/cutout:<hex>), never the
+##     store's staged_N key — render/selection/menu all speak canonical ids
+##     and resolve the store entry via staged_id_for_entity.
+const KIND_STAGED := "staged"
 
 var selected_components: Array[String] = []
 var selected_trace_ids: Array[String] = []
@@ -240,6 +254,16 @@ var selected_cutout_ids: Array[String] = []
 ## verbs C4a will add each act on ONE candidate. A shift-click can still put two
 ## in here; that is harmless while no verb reads the list.
 var selected_candidate_ids: Array[String] = []
+## Selected staged entities (UX4 S4), by CANONICAL payload id. Same list-backed
+## shape as every kind above so the selection choke points work unchanged.
+var selected_staged_ids: Array[String] = []
+
+## The staged review verbs, emitted by the context-menu seam
+## (_add_staged_menu_seam) with the CANONICAL entity id. The panel connects
+## these to the accept/reject transactions (station 5) — the canvas never
+## mutates the store or the board itself, exactly as candidate verbs go
+## through the workspace.
+signal staged_verb_requested(verb: String, entity_id: String)
 
 # ── UNIVERSAL SELECT: the annotation half of the selection (B1u3, 019fbb9adc) ──
 #
@@ -864,6 +888,20 @@ const CANDIDATE_PINNED_OUTLINE_MARGIN_PX := 3.0
 ## RouteCandidate.is_stale_for_board_revision), so its geometry is no longer known
 ## to be answering the board on screen.
 const CANDIDATE_STALE_DASH_PX := 6.0
+
+## ── STAGED-ENTITY ghost styling (UX4 S4, DCR A7) ──────────────────────────────
+## THE DASH PAIRING, stated once (A7's rule): dash means two things on this
+## canvas, disambiguated by GEOMETRY CLASS and PERIOD. On a route STROKE a
+## 6px dash (CANDIDATE_STALE_DASH_PX) means STALE — re-check me. On an AREA
+## OUTLINE a 12px dash (here) means STAGED — a draft awaiting Accept/Reject.
+## The staged period is deliberately 2× the stale period so the two never
+## read alike even at a glance, and any future dash user must pick a third
+## meaningfully distinct period or a different channel entirely.
+const STAGED_OUTLINE_DASH_PX := 12.0
+## Staged fill alpha — a FILL needs to sit well below the stroke ghost alpha
+## (CANDIDATE_GHOST_ALPHA 0.45) or an area draft would blot out the copper
+## under it, which is exactly what a ghost must never do.
+const STAGED_GHOST_FILL_ALPHA := 0.18
 ## VIOLATING marker (channel 3): a small ring at each segment midpoint / via
 ## centre when validation is "violating" or "error". Marker colour is deliberately
 ## NOT a copper colour — it is a verdict about the geometry, not the geometry.
@@ -1146,6 +1184,9 @@ const MENU_ID_RECLAIM_HINT_WAYPOINTS := 444
 ## HITL-7c (docket 019fe0395764): per-hint width editing from the right-click
 ## menu — the owner's override of the standing Proposals-area picker.
 const MENU_ID_SET_HINT_WIDTH := 445
+## UX4 station 4 — the staged-entity menu seam's two verbs.
+const MENU_ID_STAGED_ACCEPT := 446
+const MENU_ID_STAGED_REJECT := 447
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1229,6 +1270,14 @@ func _add_context_menu_target_items() -> void:
 	# cannot actually do. See _add_candidate_menu_seam.
 	if kind == KIND_CANDIDATE:
 		_add_candidate_menu_seam(target_id)
+		return
+
+	# ── UX4 S4: staged-entity verbs — same take-the-menu-and-RETURN shape as
+	# the candidate seam above, for the same reason: a draft must not fall
+	# through to the board items ("Delete staged draft" would be a dead entry;
+	# _remove_entity refuses KIND_STAGED by design).
+	if kind == KIND_STAGED:
+		_add_staged_menu_seam(target_id)
 		return
 
 	if kind == KIND_TRACE:
@@ -1322,6 +1371,13 @@ func _on_context_menu_pressed(id: int) -> void:
 			_request_clear_steering(str(_context_menu_target[1]))
 		MENU_ID_CANDIDATE_COMMIT_BATCH:
 			_request_candidate_commit(selected_candidate_ids.duplicate())
+		# UX4 S4 — the staged verbs. Frozen press target, same discipline as
+		# every item above; the canvas only ANNOUNCES (the panel owns the
+		# accept/reject transactions — station 5 connects the signal).
+		MENU_ID_STAGED_ACCEPT:
+			staged_verb_requested.emit("accept", str(_context_menu_target[1]))
+		MENU_ID_STAGED_REJECT:
+			staged_verb_requested.emit("reject", str(_context_menu_target[1]))
 
 
 ## Commit the ONE bend delete the frozen press resolved (station 6 fix F1).
@@ -1493,6 +1549,22 @@ func _draw() -> void:
 	#    previews sit above their own committed geometry.
 	# Gated on show_route_candidates, and NOT on show_traces — see the flag's own
 	# note for why hiding copper must not also hide the proposal against it.
+	# ── STAGED ENTITY GHOSTS (UX4 S4) ────────────────────────────────────────
+	# Same depth rationale as the route candidates directly below: a draft
+	# under review must sit ABOVE the copper it is judged against and BELOW
+	# the in-progress tool previews. Drawn BEFORE candidates so a route ghost
+	# crossing a staged keepout stays the most legible proposal (it is the
+	# one the review verbs act on first). Gated on the KIND toggles
+	# (show_zones/show_cutouts) rather than show_route_candidates: a staged
+	# zone IS a zone the user is deciding about — hiding zones hides its
+	# drafts too, while hiding route candidates must not blank out area
+	# drafts (different review streams). Layer filtering for staged zones
+	# happens inside _draw_zone, same as committed ones.
+	_draw_staged_entities()
+	# UX4 station 10 (019fb98555): the eraser's what-would-delete highlight —
+	# above copper (feedback must be visible over the thing it names), below
+	# the candidate ghosts (which the eraser refuses anyway).
+	_draw_eraser_hover()
 	if show_route_candidates:
 		_draw_route_candidates()
 		# DRC witnesses ride ABOVE the ghosts they testify about (K11) — a
@@ -1801,7 +1873,16 @@ func _is_keepout_zone(zone: Dictionary) -> bool:
 
 ## Draw one zone. `is_keepout` is passed in rather than re-derived so the two
 ## passes above and the colour choice here cannot disagree about a zone's kind.
-func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
+##
+## `ghost` (UX4 S4): the STAGED render — same kind/layer colour, no recolor,
+## but the staged cue instead of the committed one: ghost-alpha FILL (an area
+## draft reads as an area, where committed zones are outline/hatch-only) plus
+## a dashed OUTLINE at STAGED_OUTLINE_DASH_PX. The committed hatch is skipped
+## in ghost mode — the fill already says "area", and hatch-over-fill would
+## read as a cutout. Selection shows the same trace_selected_color emphasis
+## committed zones use (no vertex handles — a draft has no vertex editing;
+## reject + redraw is the edit story, DCR S5).
+func _draw_zone(zone: Dictionary, is_keepout: bool, ghost: bool = false) -> void:
 	# Layer filter: MIRRORS traces exactly — same _layer_visible() predicate, so
 	# selecting "bottom" in the toolbar hides the top-layer keepout alongside the
 	# top-layer traces and leaves the bottom-layer GND pour visible. Zone layer
@@ -1826,6 +1907,22 @@ func _draw_zone(zone: Dictionary, is_keepout: bool) -> void:
 		var net = data.get_net(str(zone.get("net", "")))
 		if net:
 			color = net.color
+
+	if ghost:
+		# THE STAGED CUE (UX4 S4, owner ruling 4 — ghosting is the one proposal
+		# language). Fill at ghost alpha + LONG-dash outline; the dash-period
+		# pairing with the candidate STALE dash is documented at
+		# STAGED_OUTLINE_DASH_PX.
+		draw_colored_polygon(screen_poly, Color(color, STAGED_GHOST_FILL_ALPHA))
+		var outline_g := screen_poly.duplicate()
+		outline_g.append(screen_poly[0])
+		if str(zone.get("id", "")) in selected_staged_ids:
+			draw_polyline(outline_g, trace_selected_color, zone_outline_width_px * 2.0)
+		for i in range(outline_g.size() - 1):
+			_draw_dashed_line(outline_g[i], outline_g[i + 1],
+				Color(color, CANDIDATE_GHOST_ALPHA), zone_outline_width_px,
+				STAGED_OUTLINE_DASH_PX)
+		return
 
 	# ONLY keepouts hatch. A pour outline can legitimately span the whole board
 	# (the smart-remote GND pour is the full 80x110 minus 0.5mm), and hatching it
@@ -1967,7 +2064,7 @@ func _draw_cutouts() -> void:
 ## "not there" in a way a sparse hatch alone would not. Crosshatched (mirrored
 ## in both directions) rather than the keepout's single diagonal, so the two
 ## read as visually distinct region kinds at a glance.
-func _draw_cutout(cutout: Dictionary) -> void:
+func _draw_cutout(cutout: Dictionary, ghost: bool = false) -> void:
 	var world_pts := PCBDataScript.zone_outline_points(cutout)
 	if world_pts.size() < 3:
 		return
@@ -1975,6 +2072,22 @@ func _draw_cutout(cutout: Dictionary) -> void:
 	var screen_poly := PackedVector2Array()
 	for p in world_pts:
 		screen_poly.append(world_to_screen(p))
+
+	if ghost:
+		# STAGED cutout (UX4 S4): own colour, the staged cue — ghost fill +
+		# long-dash outline. The committed crosshatch is skipped for the same
+		# reason the staged zone skips the keepout hatch: the cue must read
+		# as "draft of this kind", not as a second kind.
+		draw_colored_polygon(screen_poly, Color(cutout_color, STAGED_GHOST_FILL_ALPHA))
+		var outline_g := screen_poly.duplicate()
+		outline_g.append(screen_poly[0])
+		if str(cutout.get("id", "")) in selected_staged_ids:
+			draw_polyline(outline_g, trace_selected_color, cutout_outline_width_px * 2.0)
+		for i in range(outline_g.size() - 1):
+			_draw_dashed_line(outline_g[i], outline_g[i + 1],
+				Color(cutout_color, CANDIDATE_GHOST_ALPHA), cutout_outline_width_px,
+				STAGED_OUTLINE_DASH_PX)
+		return
 
 	draw_colored_polygon(screen_poly, Color(cutout_color, cutout_fill_alpha))
 	var pitch: float = clampf(ZONE_HATCH_PITCH_MM * zoom, ZONE_HATCH_MIN_PX, ZONE_HATCH_MAX_PX)
@@ -1984,6 +2097,103 @@ func _draw_cutout(cutout: Dictionary) -> void:
 	var outline := screen_poly.duplicate()
 	outline.append(screen_poly[0])  # close the loop — an outline, not a polyline
 	draw_polyline(outline, Color(cutout_color, cutout_outline_alpha), cutout_outline_width_px)
+
+
+## The eraser's hover target (UX4 station 10, 019fb98555): [kind, id] the
+## pick ladder resolved under the cursor while the ERASER is armed — what the
+## next click would delete. ["", ""] otherwise; components keep their own
+## hovered_component fill (the pre-existing feedback).
+var _eraser_hover: Array = ["", ""]
+
+
+## Highlight the entity the eraser would delete — the SAME hover colour the
+## component fill uses, as an outline/stroke per kind, so "about to act on
+## this" reads identically across kinds.
+func _draw_eraser_hover() -> void:
+	if tool_mode != ToolMode.ERASER or not data or str(_eraser_hover[0]).is_empty():
+		return
+	var id := str(_eraser_hover[1])
+	match str(_eraser_hover[0]):
+		KIND_TRACE:
+			var trace = data.get_trace(id)
+			if trace != null and trace.waypoints.size() >= 2:
+				var pts := PackedVector2Array()
+				for p in trace.waypoints:
+					pts.append(world_to_screen(p))
+				draw_polyline(pts, Color(component_hover_color, 0.9),
+					maxf(float(trace.width) * zoom, 2.0) + 3.0)
+		KIND_ZONE:
+			_draw_hover_outline(PCBDataScript.zone_outline_points(data.get_zone(id)))
+		KIND_CUTOUT:
+			_draw_hover_outline(PCBDataScript.zone_outline_points(data.get_cutout(id)))
+		KIND_VIA:
+			var via: Dictionary = data.get_via(id)
+			if not via.is_empty():
+				draw_arc(world_to_screen(PCBDataScript.via_position(via)),
+					maxf(float(via.get("size", 0.8)) * 0.5 * zoom, 4.0) + 3.0,
+					0.0, TAU, 24, component_hover_color, 2.0)
+		# KIND_COMPONENT deliberately absent: hovered_component already fills
+		# the body through the existing draw path.
+
+
+func _draw_hover_outline(world_pts: PackedVector2Array) -> void:
+	if world_pts.size() < 3:
+		return
+	var poly := PackedVector2Array()
+	for p in world_pts:
+		poly.append(world_to_screen(p))
+	poly.append(poly[0])
+	draw_polyline(poly, component_hover_color, 2.5)
+
+
+## Draw every LIVE staged entity as a ghost (UX4 S4). Zones ride show_zones +
+## the per-zone layer filter inside _draw_zone; cutouts ride show_cutouts —
+## the kind toggles, per the depth comment at the call site. Payload dicts are
+## canonical, so the committed draw functions take them unchanged.
+func _draw_staged_entities() -> void:
+	if _staged_store == null:
+		return
+	for entry in _staged_store.staged_entries():
+		var payload: Dictionary = (entry as Dictionary).get("payload", {})
+		match str((entry as Dictionary).get("kind", "")):
+			"zone":
+				if show_zones:
+					_draw_zone(payload, _is_keepout_zone(payload), true)
+			"cutout":
+				if show_cutouts:
+					_draw_cutout(payload, true)
+
+
+## Which staged entity a click at `world_pos` picks, or "" — by CANONICAL
+## payload id. Point-in-polygon on the draft's outline (an area pick, like
+## _zone_at's), honouring exactly what is drawn: zone drafts respect
+## show_zones + the layer filter, cutout drafts respect show_cutouts. Later
+## entries win (drawn later = on top), mirroring the reversed-pick idiom the
+## witness overlay uses.
+func _staged_at(world_pos: Vector2) -> String:
+	if _staged_store == null:
+		return ""
+	var entries: Array = _staged_store.staged_entries()
+	for i in range(entries.size() - 1, -1, -1):
+		var entry: Dictionary = entries[i]
+		var payload: Dictionary = entry.get("payload", {})
+		var kind := str(entry.get("kind", ""))
+		if kind == "zone":
+			if not show_zones:
+				continue
+			if not _layer_visible(PcbLayerStack.kicad_to_canon(str(payload.get("layer", "")))):
+				continue
+		elif kind == "cutout":
+			if not show_cutouts:
+				continue
+		else:
+			continue
+		var pts := PCBDataScript.zone_outline_points(payload)
+		if pts.size() < 3:
+			continue
+		if Geometry2D.is_point_in_polygon(world_pos, PackedVector2Array(pts)):
+			return str(payload.get("id", ""))
+	return ""
 
 
 ## Selection halo for every selected cutout — SPLIT OUT of _draw_cutout
@@ -3089,6 +3299,22 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 		if new_hover != hovered_component:
 			hovered_component = new_hover
 			queue_redraw()
+		# UX4 station 10 (work item 019fb98555, A3 review note N6): with the
+		# ERASER armed, hover answers "what would this click delete" for the
+		# WHOLE pick ladder, not components only — destructive-tool UX wants
+		# pre-click feedback. Board kinds only: a candidate/staged hit
+		# refuses deletion (notice naming Reject), so highlighting it would
+		# advertise a delete that will not happen.
+		if tool_mode == ToolMode.ERASER:
+			var hover_hit: Array = _entity_at(world_pos)
+			if str(hover_hit[0]) in [KIND_CANDIDATE, KIND_STAGED]:
+				hover_hit = ["", ""]
+			if hover_hit != _eraser_hover:
+				_eraser_hover = hover_hit
+				queue_redraw()
+		elif not str(_eraser_hover[0]).is_empty():
+			_eraser_hover = ["", ""]
+			queue_redraw()
 
 	if is_panning:
 		pan_offset = pan_start_offset + (event.position - pan_start_mouse)
@@ -3385,6 +3611,8 @@ func _selection_of(kind: String) -> Array[String]:
 			return selected_cutout_ids
 		KIND_CANDIDATE:
 			return selected_candidate_ids
+		KIND_STAGED:
+			return selected_staged_ids
 	var empty: Array[String] = []
 	return empty
 
@@ -3406,6 +3634,7 @@ func selection_snapshot() -> Dictionary:
 		"zones": selected_zone_ids.duplicate(),
 		"cutouts": selected_cutout_ids.duplicate(),
 		"candidates": selected_candidate_ids.duplicate(),
+		"staged": selected_staged_ids.duplicate(),
 	}
 
 
@@ -3523,6 +3752,11 @@ func _toggle_entity_selected(kind: String, entity_id: String) -> void:
 ## The same split already exists one function down: has_selection() is BOARD-ONLY
 ## while has_any_selection() speaks for the whole panel.
 ## The candidate selection is read through get_selected_candidate_id().
+## STAGED ENTITIES ARE NOT COUNTED EITHER (UX4 S4) — the identical rationale:
+## a staged draft is neither lockable nor deletable-by-this-gesture (its verbs
+## are Accept/Reject through the store transactions), so it must leave every
+## board-batch gate where it found it. _delete_selection still ANNOUNCES the
+## skip when staged drafts sit in a deleted selection — see its notice.
 func selection_count() -> int:
 	return selected_components.size() + selected_trace_ids.size() \
 		+ selected_zone_ids.size() + selected_via_ids.size() + selected_cutout_ids.size()
@@ -3576,6 +3810,10 @@ func _clear_selection(announce := true) -> void:
 			and str(_routing_workspace.active_candidate_id) in selected_candidate_ids:
 		_routing_workspace.set_active("")
 	selected_candidate_ids.clear()
+	# Staged drafts clear with everything else, for the candidate rationale
+	# above: "clear the selection" means everything this canvas is SHOWING as
+	# selected (staged are likewise excluded from selection_count()).
+	selected_staged_ids.clear()
 	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone
 	# there is nothing for it to belong to (cold-review F1 — the deselect click
@@ -3633,6 +3871,32 @@ func _finalize_box_selection() -> void:
 	if _cutout_visible():
 		for cutout_id in data.cutouts_in_region(select_rect):
 			_add_to_selection(KIND_CUTOUT, cutout_id)
+
+	# STAGED ENTITIES ARE SWEPT (UX4 S4 — the DCR's ruled divergence from the
+	# candidate decision below): a staged area is AREA GEOMETRY under review,
+	# and the marquee is how areas are gathered. The gestures that follow do
+	# not lie about it either — Delete announces the skip by name
+	# (_delete_selection's staged notice) and the menu offers the real verbs.
+	# Sweep rule mirrors the pick (_staged_at): kind toggles + zone layer
+	# filter, membership = any outline vertex inside the box (the polygon
+	# analogue of the trace/zone region sweeps' vertex tests).
+	if _staged_store != null:
+		for entry in _staged_store.staged_entries():
+			var s_payload: Dictionary = (entry as Dictionary).get("payload", {})
+			var s_kind := str((entry as Dictionary).get("kind", ""))
+			if s_kind == "zone":
+				if not show_zones or not _layer_visible(
+						PcbLayerStack.kicad_to_canon(str(s_payload.get("layer", "")))):
+					continue
+			elif s_kind == "cutout":
+				if not _cutout_visible():
+					continue
+			else:
+				continue
+			for p in PCBDataScript.zone_outline_points(s_payload):
+				if select_rect.has_point(p):
+					_add_to_selection(KIND_STAGED, str(s_payload.get("id", "")))
+					break
 
 	# ROUTE CANDIDATES ARE NOT SWEPT (S3), and this comment is the decision — the
 	# extension checklist's "a kind that does not sweep says so THERE" rule.
@@ -3807,6 +4071,16 @@ func _entity_at(world_pos: Vector2) -> Array:
 	var trace_id: String = _trace_at(world_pos)
 	if not trace_id.is_empty():
 		return [KIND_TRACE, trace_id]
+	# STAGED rung (UX4 S4): above the board ZONES it may overlap — a click
+	# inside a draft area picks the DRAFT (the thing under review, the thing
+	# the next gesture acts on), the board zone under it picks anywhere the
+	# draft's own polygon does not cover. Below components/vias/traces for
+	# the same reason the candidate rung sits above them all inverted: an
+	# AREA claim is greedy by nature, and a draft keepout drawn across a
+	# resistor must not make that resistor unclickable.
+	var staged_id: String = _staged_at(world_pos)
+	if not staged_id.is_empty():
+		return [KIND_STAGED, staged_id]
 	var zone_id: String = _zone_at(world_pos)
 	if not zone_id.is_empty():
 		return [KIND_ZONE, zone_id]
@@ -3949,6 +4223,22 @@ func _entity_anchor(kind: String, entity_id: String) -> Vector2:
 				var item_pts: Array = item.get("points", [])
 				if not item_pts.is_empty():
 					return item_pts[0]
+		KIND_STAGED:
+			# Answered for the same mixed-selection snap reason as the three
+			# non-movable kinds above. The anchor is the payload CENTROID
+			# (DCR S4) rather than the first outline point: a draft's outline
+			# order is authoring-gesture accident, and the centroid is what
+			# the identity line and a future zoom-to-draft would agree on.
+			if _staged_store != null:
+				var sid := str(_staged_store.staged_id_for_entity(entity_id))
+				if not sid.is_empty():
+					var pts := PCBDataScript.zone_outline_points(
+						(_staged_store.get_entry(sid) as Dictionary).get("payload", {}))
+					if not pts.is_empty():
+						var sum := Vector2.ZERO
+						for p in pts:
+							sum += p
+						return sum / float(pts.size())
 	return Vector2.ZERO
 
 
@@ -4380,6 +4670,13 @@ func _is_entity_locked(kind: String, entity_id: String) -> bool:
 			# it cannot be dragged or deleted through this canvas at all, which is
 			# a stronger guarantee than a flag.
 			return false
+		KIND_STAGED:
+			# STAGED ENTITIES HAVE NO LOCK (UX4 S4), and the case exists to SAY
+			# SO — the standing idiom above. A draft is protected the way a
+			# candidate is: it cannot be dragged or deleted through this canvas
+			# at all (its verbs are Accept/Reject via the store transactions),
+			# which is stronger than a flag.
+			return false
 	return false
 
 
@@ -4457,6 +4754,15 @@ func _remove_entity(kind: String, entity_id: String) -> bool:
 			# the adjudication is written out there). Anything that still arrives
 			# here is a caller that was not meant to, and gets a false.
 			return false
+		KIND_STAGED:
+			# NEVER REMOVED THROUGH THIS PATH (UX4 S4) — the KIND_CANDIDATE
+			# backstop above, verbatim in spirit: discarding a draft is REJECT,
+			# a store transaction with its own history pairing (see
+			# pcb_staged_entities.stamp). All three callers are blocked before
+			# this line (_delete_selection's literal kind array, the staged
+			# menu seam offers Accept/Reject not Delete, the eraser refuses
+			# with a notice naming Reject); this is the backstop.
+			return false
 	return false
 
 
@@ -4509,6 +4815,17 @@ func _delete_selection() -> void:
 	var ann_deleter = _router_with("delete_selected_annotations")
 	if ann_deleter != null:
 		ann_removed = int(ann_deleter.delete_selected_annotations())
+
+	# STAGED DRAFTS ARE SKIPPED, WITH A NOTICE (UX4 S4 — "skips with notice").
+	# Unlike candidates (uncounted AND unswept, so they rarely sit in a Delete
+	# selection), staged areas ARE box-selected, so a marquee-then-Delete will
+	# routinely hold them. Saying so — and naming the verb that does discard a
+	# draft — is the difference between a skip and a silent lie. Emitted
+	# BEFORE the board guard so a staged-only selection still hears it.
+	if not selected_staged_ids.is_empty():
+		component_lock_changed.emit(
+			"%d staged draft%s skipped — Delete never touches drafts; right-click one and choose Reject."
+			% [selected_staged_ids.size(), "" if selected_staged_ids.size() == 1 else "s"])
 
 	if not data or not has_selection():
 		if ann_removed > 0:
@@ -4617,6 +4934,14 @@ func _handle_eraser_click(world_pos: Vector2) -> void:
 	# eraser will not take it, and the exact verb that will.
 	if str(hit[0]) == KIND_CANDIDATE:
 		trace_tool_message.emit("Route candidate %s is a draft, not copper — the eraser only removes board entities. Right-click it and choose Reject (that discards it and reopens its task)."
+			% str(hit[1]))
+		return
+	# The staged twin of the refusal above (UX4 S4 — "eraser refuses naming
+	# Reject", the candidate-eraser precedent verbatim): same two reasons — the
+	# eraser promises ONE UNDOABLE step while Reject is a terminal store
+	# transaction, and a draft is not board geometry.
+	if str(hit[0]) == KIND_STAGED:
+		trace_tool_message.emit("%s is a staged draft, not board geometry — the eraser only removes board entities. Right-click it and choose Reject to discard the draft."
 			% str(hit[1]))
 		return
 	_delete_picked_entity(str(hit[0]), str(hit[1]), "Erase")
@@ -5399,6 +5724,15 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 		# universal Select is disarmed by the panel on this same transition, so
 		# the release would arrive with nothing to receive it.
 		_annotation_gesture = false
+		# UX4 S7: a destination is the property of ONE arming press — any tool
+		# change (arm, switch, disarm-to-Select) resets it to DIRECT; the
+		# panel's draft toggles re-assert "draft" AFTER this call when they are
+		# the arming press.
+		authoring_destination = DEST_DIRECT
+		# The eraser's what-would-delete highlight dies with its tool (UX4
+		# station 10) — a leftover outline under Select would promise a
+		# delete no click will perform.
+		_eraser_hover = ["", ""]
 		tool_mode = mode
 		tool_mode_changed.emit(mode)
 		if leaving_zone_tool:
@@ -5986,19 +6320,40 @@ func _commit_zone() -> void:
 		zone_tool_message.emit(refusal)
 		return
 
-	var zone: Dictionary = data.create_zone(net, layer, _zone_points, kind)
-	if zone.is_empty():
+	# UX4 S7: ONE build, then the destination branch (A8) — the gesture above
+	# this line is byte-identical for both destinations.
+	var built: Dictionary = data.build_zone_payload(net, layer, _zone_points, kind)
+	if not bool(built.get("ok", false)):
 		# zone_author_error already passed, so this is a model-side refusal we did
 		# not anticipate. Report it rather than leaving a silent no-op behind.
 		zone_tool_message.emit("Zone was refused by the board model — see the log.")
 		return
-	data.save_to_history("Add %s" % ("keepout" if kind == "keepout" else "pour"))
 	var point_count := _zone_points.size()
+	var what := "keepout" if kind == "keepout" else "pour"
+	if authoring_destination == DEST_DRAFT:
+		if not _stage_doorway.is_valid():
+			zone_tool_message.emit("Draft destination unavailable — no stage doorway is bound to this canvas.")
+			return
+		var staged: Dictionary = _stage_doorway.call("zone", built.get("payload", {}), "human", "")
+		if not bool(staged.get("ok", false)):
+			zone_tool_message.emit("Draft was refused: %s" % str(staged.get("error", "")))
+			return
+		# NO board journal, NO board history — staging is not a board
+		# mutation; the store's own changed signal drives redraw + autosave.
+		_reset_zone_draw()
+		zone_tool_message.emit("Staged %s DRAFT on %s (%s%d points) — a ghost for review; right-click it to Accept or Reject." % [
+			what, layer, "" if net.is_empty() else "%s, " % net, point_count])
+		return
+	var zone: Dictionary = data.add_zone_payload(built.get("payload", {}))
+	if zone.is_empty():
+		zone_tool_message.emit("Zone was refused by the board model — see the log.")
+		return
+	data.save_to_history("Add %s" % what)
 	_reset_zone_draw()
 	# The net is named only when there is one — a netless keepout would otherwise
 	# report "(, 3 points)", an empty slot that reads as a bug.
 	zone_tool_message.emit("Added %s on %s (%s%d points)." % [
-		"keepout" if kind == "keepout" else "pour", layer,
+		what, layer,
 		"" if net.is_empty() else "%s, " % net, point_count])
 	queue_redraw()
 
@@ -6124,14 +6479,33 @@ func _commit_cutout() -> void:
 		cutout_tool_message.emit(refusal)
 		return
 
-	var cutout: Dictionary = data.create_cutout(_cutout_points)
-	if cutout.is_empty():
+	# UX4 S7: ONE build, then the destination branch (A8) — mirrors _commit_zone.
+	var built: Dictionary = data.build_cutout_payload(_cutout_points)
+	if not bool(built.get("ok", false)):
 		# cutout_author_error already passed, so this is a model-side refusal we
 		# did not anticipate. Report it rather than leaving a silent no-op behind.
 		cutout_tool_message.emit("Cutout was refused by the board model — see the log.")
 		return
-	data.save_to_history("Add cutout")
 	var point_count := _cutout_points.size()
+	if authoring_destination == DEST_DRAFT:
+		if not _stage_doorway.is_valid():
+			cutout_tool_message.emit("Draft destination unavailable — no stage doorway is bound to this canvas.")
+			return
+		var staged: Dictionary = _stage_doorway.call("cutout", built.get("payload", {}), "human", "")
+		if not bool(staged.get("ok", false)):
+			cutout_tool_message.emit("Draft was refused: %s" % str(staged.get("error", "")))
+			return
+		_reset_cutout_draw()
+		cutout_tool_message.emit(
+			"Staged cutout DRAFT (%d points) — a ghost for review; right-click it to Accept or Reject."
+			% point_count)
+		queue_redraw()
+		return
+	var cutout: Dictionary = data.add_cutout_payload(built.get("payload", {}))
+	if cutout.is_empty():
+		cutout_tool_message.emit("Cutout was refused by the board model — see the log.")
+		return
+	data.save_to_history("Add cutout")
 	_reset_cutout_draw()
 	cutout_tool_message.emit(
 		"Added cutout (%d points) — authored only, not yet compiled: routing/DRC/Gerber export ignore it."
@@ -6598,9 +6972,17 @@ func _start_bus_draw() -> void:
 	_bus_drawing = true
 	_bus_spine_points = PackedVector2Array()
 	_bus_has_preview = false
-	bus_tool_message.emit(
-		"Spine for [%s] on %s — click vertices; Enter/dbl-click commits COPPER, Shift+Enter or Shift+dbl-click PROPOSES ghosts for review (Esc cancels)."
-			% [_bus_nets_joined(), _bus_layer])
+	# UX4 S7: the teach line names the ARMED destination — a draft-armed bus
+	# proposes on the plain commit gesture, and saying otherwise here would
+	# teach the user to expect copper.
+	if authoring_destination == DEST_DRAFT:
+		bus_tool_message.emit(
+			"Spine for [%s] on %s — DRAFT armed: Enter/dbl-click PROPOSES ghosts for review, no copper lands (Esc cancels)."
+				% [_bus_nets_joined(), _bus_layer])
+	else:
+		bus_tool_message.emit(
+			"Spine for [%s] on %s — click vertices; Enter/dbl-click commits COPPER, Shift+Enter or Shift+dbl-click PROPOSES ghosts for review (Esc cancels)."
+				% [_bus_nets_joined(), _bus_layer])
 	queue_redraw()
 
 
@@ -6614,6 +6996,12 @@ func _start_bus_draw() -> void:
 func _commit_bus(propose: bool = false) -> void:
 	if not data or tool_mode != ToolMode.BUS or not _bus_drawing:
 		return
+	# UX4 S7: a DRAFT-armed bus tool proposes on EVERY commit gesture — plain
+	# Enter/double-click included. Shift stays the direct tool's propose
+	# modifier; the Proposals-area toggle is the modifier-free doorway onto
+	# the same bus_propose_plan.
+	if authoring_destination == DEST_DRAFT:
+		propose = true
 	var plan: Dictionary = _PanelToolsScript.bus_plan(data, _bus_nets, _bus_spine_points, _bus_layer)
 	if not bool(plan.get("ok", false)):
 		# Keep the placed vertices AND the net list: the fix for "needs 2
@@ -6798,6 +7186,64 @@ func _draw_bus_preview() -> void:
 ## instance is current, so it is the one place that can disconnect the previous
 ## one. Duck-typed throughout — a workspace missing a signal simply is not
 ## connected to it, and the surface degrades per-signal rather than erroring.
+## The panel's StagedEntities store (UX4 S4), handed over beside the routing
+## workspace. The `changed` signal is the ONE redraw + selection-prune choke
+## point — every store mutation (stage/stamp/restore/load) announces there.
+var _staged_store = null
+
+## ── authoring destination (UX4 station 7, DCR S7) ─────────────────────────────
+## Where a Draw-tool COMMIT lands: DIRECT writes the board (the shipped
+## behavior, byte-identical), DRAFT stages a ghost for review. Set ONLY by
+## which panel button armed the tool (the Proposals-area draft toggles set
+## "draft"; the Tools-area buttons set "direct"); reset to DIRECT on EVERY
+## tool change (set_tool_mode), so a destination can never outlive the arming
+## press that chose it. The GESTURES are byte-identical either way — one
+## commit-site branch per tool is the whole difference (A8).
+const DEST_DIRECT := "direct"
+const DEST_DRAFT := "draft"
+var authoring_destination: String = DEST_DIRECT
+
+## The panel's stage doorway (PCBPanel.stage_built_payload), handed over with
+## the store — the canvas never writes the store directly (the doorway stamps
+## base_board_revision and is the ONE stage entry point, A8).
+var _stage_doorway: Callable = Callable()
+
+
+func set_staged_store(store, stage_doorway: Callable = Callable()) -> void:
+	_stage_doorway = stage_doorway
+	_set_staged_store_only(store)
+
+
+func _set_staged_store_only(store) -> void:
+	if _staged_store == store:
+		return
+	if _staged_store != null and _staged_store is Object and is_instance_valid(_staged_store) \
+			and _staged_store.has_signal("changed") \
+			and _staged_store.changed.is_connected(_on_staged_store_changed):
+		_staged_store.changed.disconnect(_on_staged_store_changed)
+	_staged_store = store
+	if _staged_store != null and _staged_store.has_signal("changed"):
+		_staged_store.changed.connect(_on_staged_store_changed)
+	queue_redraw()
+
+
+## SELECTION FOLLOWS THE DRAWN SET, staged edition — the same rule
+## _on_workspace_changed enforces for candidates: an entry that left the live
+## set (accepted/rejected, or dropped by a load) leaves the selection, or
+## get_selection keeps reporting a lit id for a ghost the canvas no longer
+## paints.
+func _on_staged_store_changed() -> void:
+	if _staged_store != null:
+		var pruned := false
+		for sel_id in selected_staged_ids.duplicate():
+			if str(_staged_store.staged_id_for_entity(str(sel_id))).is_empty():
+				_remove_from_selection(KIND_STAGED, str(sel_id))
+				pruned = true
+		if pruned:
+			selection_changed.emit()
+	queue_redraw()
+
+
 func set_routing_workspace(workspace, cutover = null) -> void:
 	if _routing_workspace == workspace and _routing_cutover == cutover:
 		return
@@ -7725,6 +8171,35 @@ func get_selected_candidates() -> Array[String]:
 ## minerva_pcb_workspace_reroute_route are the two doorways onto it. So the item
 ## does its half and the status line names the other half by name. That is a
 ## split, stated; it is not a silent no-op.
+## The staged-entity context menu (UX4 S4): a disabled IDENTITY line — what
+## the press resolved, its kind and standing — then the two review verbs. The
+## candidate seam's shape, with the store in the workspace's role. Accept and
+## Reject are always offered on a LIVE entry (the only kind the pick can
+## resolve — terminal entries leave the drawn set and the selection); the
+## canvas emits staged_verb_requested and the PANEL owns the transactions
+## (accept must replay the board write; a canvas-side stamp would be exactly
+## the bare-stamp clobber pcb_staged_entities.stamp warns about).
+func _add_staged_menu_seam(entity_id: String) -> void:
+	var label := "Staged draft %s" % entity_id
+	if _staged_store != null:
+		var sid := str(_staged_store.staged_id_for_entity(entity_id))
+		if not sid.is_empty():
+			var entry: Dictionary = _staged_store.get_entry(sid)
+			var payload: Dictionary = entry.get("payload", {})
+			var what := str(entry.get("kind", "draft"))
+			if what == "zone":
+				what = str(payload.get("kind", "zone"))
+				var layer := str(payload.get("layer", ""))
+				if not layer.is_empty():
+					what += ", " + layer
+			label = "Staged %s %s — by %s" % [what, entity_id, str(entry.get("author", "?"))]
+	context_menu.add_item(label, 0)
+	context_menu.set_item_disabled(context_menu.item_count - 1, true)
+	_context_menu_separate()
+	context_menu.add_item("Accept (lands it on the board)", MENU_ID_STAGED_ACCEPT)
+	context_menu.add_item("Reject (discards the draft)", MENU_ID_STAGED_REJECT)
+
+
 func _add_candidate_menu_seam(candidate_id: String) -> void:
 	context_menu.add_item(_candidate_menu_label(candidate_id), 0)
 	context_menu.set_item_disabled(context_menu.item_count - 1, true)

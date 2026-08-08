@@ -1369,13 +1369,16 @@ func _run_removal_manifest_tools_absent() -> void:
 	# + 5 Epoch UX3 station-10 tools (point, hint_move/insert/delete_bend,
 	# clear_hints_by_author — docket 019fdf9101b5) == 82,
 	# + 1 Epoch UX3 station-11 tool (minerva_pcb_promote — K13's gated
-	# serialize-back verb, docket 019fdf91b3ac) == 83.
+	# serialize-back verb, docket 019fdf91b3ac) == 83,
+	# + 5 Epoch UX4 station-8 tools (the STAGING family — propose_zone/
+	# propose_cutout/staged_list/staged_accept/staged_reject, DCR
+	# 019fe07523ca S8) == 88.
 	# This is a SECOND, independent count pin on the same manifest.json this
 	# round's tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (82->83) for the
+	# tests/gd/test_manifest_tool_registration.gd's own pin (83->88) for the
 	# "deliberate bump, its own diff" convention this follows.
-	check_eq("manifest tool count == 83 (ALL manifest.json tools[] entries)",
-		names.size(), 83)
+	check_eq("manifest tool count == 88 (ALL manifest.json tools[] entries)",
+		names.size(), 88)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",
@@ -1464,8 +1467,22 @@ func _run_removal_legacy_load_notice() -> void:
 	check("drop: source hint UNTOUCHED (drop never names the hints it answered)",
 		not host.get_by_id(hint_id).is_empty())
 	check_eq("drop: exactly 1 annotation remains (the hint)", host.get_annotations().size(), 1)
-	check("drop: status label carries the notice (got '%s')" % panel._status_label.text,
-		panel._status_label.text.find("legacy route proposal") != -1)
+	# UX4 station 10 (HITL-3 nit 5, docket 019fce3ac3): this used to read
+	# panel._status_label.text on an UNMOUNTED panel — _status_label is Nil
+	# there, so GDScript printed a SCRIPT ERROR and SKIPPED the statement
+	# while the suite still reported 0 failed: every green run was one
+	# assertion lighter than it claimed. Asserted through the panel's
+	# mount-independent notice seam instead (the same value the status label
+	# renders from when mounted).
+	if panel.has_method("get_last_legacy_drop_notice"):
+		var notice := str(panel.get_last_legacy_drop_notice())
+		check("drop: the load notice names the legacy proposal drop (got '%s')" % notice,
+			notice.find("legacy route proposal") != -1)
+	else:
+		# Fallback pin: the drop COUNT seam (already asserted above) is the
+		# mount-independent half; the prose seam does not exist on this
+		# panel build — say so rather than silently skipping.
+		check("drop: notice seam present (get_last_legacy_drop_notice)", false)
 
 	driver.free_panel(panel)
 	driver.cleanup_sidecar(board_path)
@@ -1553,16 +1570,20 @@ func _run_route_request_extra() -> void:
 	var shim = ctx["shim"]
 	var ws = ctx["ws"]
 
-	# ── NO-REGRESSION: nothing pinned, no explicit-hint selection -> the
-	# pre-existing {mode:"open"} selection and an EMPTY extra (route_board
-	# stamps neither "scope" nor "pinned_candidates" onto params in that case,
-	# reproducing the old {board, route_hints, selection} wire payload exactly).
+	# ── BASELINE: nothing pinned, no explicit-hint selection -> the
+	# pre-existing {mode:"open"} selection; extra carries EXACTLY the
+	# draft_request marker (Epoch UX4 station 3: every candidate-producing
+	# propose is a DRAFT request — the marker is panel-side, and route_board's
+	# allow-list keeps it off the wire) and nothing else (no "scope", no
+	# "pinned_candidates").
 	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
 	check("propose (nothing pinned) succeeded", bool(first.get("success", false)))
 	var call_a: Dictionary = shim.calls[shim.calls.size() - 1]
 	check_eq("open propose: selection unchanged", call_a.get("selection", {}), {"mode": "open"})
-	check_eq("open propose: no-regression — extra is empty",
-		(call_a.get("extra", {}) as Dictionary).size(), 0)
+	var extra_a: Dictionary = call_a.get("extra", {})
+	check_eq("open propose: extra is EXACTLY the draft marker (UX4 st.3)",
+		extra_a.size(), 1)
+	check_eq("…draft_request true", bool(extra_a.get("draft_request", false)), true)
 	var cid := str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
 	check("propose landed a candidate to pin", not cid.is_empty())
 
@@ -2097,16 +2118,22 @@ func _run_ux1_width_provenance() -> void:
 	check_eq("…width_source is relayed verbatim, never reinterpreted",
 		str(rec.get("width_source", "")), "hint")
 
-	# NEGATIVE GATE: no effective_routing_rules on the route ⇒ no width_mm/
-	# width_source — a missing key must never be mistaken for "board default".
+	# NO WORKER PROVENANCE (Epoch UX4 station 10, 019fd0ab5af8 — the oracle
+	# this group existed for, now DEEPENED): the record still carries width_mm
+	# (the candidate's own segment width) and the WORKSPACE's ingest verdict
+	# as width_source — the seeded hint authors NO width, so the 0.25mm
+	# fallback now SAYS "default" instead of being indistinguishable from an
+	# intentional 0.25.
 	var plain: Dictionary = _multipad_reply([hint_id])
 	shim.reply = plain
 	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args())
 	var recs2: Array = out2.get("candidates", [])
 	if recs2.size() > 0:
 		var rec2: Dictionary = recs2[0]
-		check("no effective_routing_rules ⇒ NO width_mm key", not rec2.has("width_mm"))
-		check("no effective_routing_rules ⇒ NO width_source key", not rec2.has("width_source"))
+		check_eq("no worker provenance ⇒ width_mm is the segment width (the fallback)",
+			float(rec2.get("width_mm", -1.0)), 0.25)
+		check_eq("…and width_source says so BY NAME (the silent fallback, visible)",
+			str(rec2.get("width_source", "")), "default")
 
 	ctx["driver"].free_panel(ctx["panel"])
 
@@ -5700,12 +5727,15 @@ func _run_bh_pass_through_and_enrichment() -> void:
 	check_eq("preflight: nothing rendered yet this session -> false",
 		preflight.get("rendered_this_revision", null), false)
 
-	# The pass-through FEEDS the assembly cache at the stamped revision.
-	var cached: Dictionary = panel.get_assembly_state()
-	check("board_health.assembly fed the panel cache", not cached.is_empty())
-	check_eq("…with the assembly status",
-		str((cached.get("assembly", {}) as Dictionary).get("status", "")), "pass")
-	check_eq("…at the stamped revision", int(cached.get("board_revision", -2)), revision)
+	# Epoch UX4 station 3 (A9 — the F6 cache-isolation rule, REVERSING this
+	# group's pre-UX4 expectation): a propose is a DRAFT request, its health
+	# was computed from the COMPOSED board, so it is surfaced LABELED and the
+	# assembly cache — the REAL board's verdict, read by the commit
+	# acknowledgment gate — is NEVER fed by it.
+	check_eq("draft reply's health is labeled draft (UX4 A9)",
+		bool(bh.get("draft", false)), true)
+	check("…and the assembly cache was NOT fed (composed-board verdict never keyed to the real board)",
+		panel.get_assembly_state().is_empty())
 
 	# PREFLIGHT FLIP: simulate a successful get_image capture via the SAME seam
 	# _get_image stamps through (note_render_captured — an unmounted panel has
@@ -5717,13 +5747,14 @@ func _run_bh_pass_through_and_enrichment() -> void:
 		(bh2.get("preflight", {}) as Dictionary).get("rendered_this_revision", null), true)
 
 	# OLDER WORKER: a result with NO board_health attaches nothing (absent-key
-	# contract) and leaves the cache alone.
+	# contract). Cache stance post-UX4: the cache was never fed by any propose
+	# in this group (A9), and an absent health certainly feeds nothing either.
 	shim.reply = _multipad_reply([str(ctx["hint_id"])])
 	out = await PanelTools._workspace_propose(shim, _args())
 	check("absent board_health stays absent on the reply (older worker)",
 		not out.has("board_health"))
-	check("…and the previously fed cache is untouched",
-		not panel.get_assembly_state().is_empty())
+	check("…and the cache is still untouched (never fed by a draft — UX4 A9)",
+		panel.get_assembly_state().is_empty())
 
 	ctx["driver"].free_panel(ctx["panel"])
 

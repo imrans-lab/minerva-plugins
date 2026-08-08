@@ -59,6 +59,11 @@ Same `minerva_pcb_<suffix>` names as legacy; same args; equivalent return JSON.
 | `minerva_pcb_describe_cutout` | read-only; full cutout incl. outline points (`zone_outline_points` → `zone_outline_to_list` round trip, reused) (below) |
 | `minerva_pcb_create_cutout` | `data.create_cutout`; one journalled step, refused verbatim via `cutout_author_error` (below) |
 | `minerva_pcb_delete_cutout` | `data.remove_cutout`; one journalled step, mirrors `delete_zone`'s idiom (below) |
+| `minerva_pcb_propose_zone` | THE STAGING FAMILY (Epoch UX4, DCR `019fe07523ca`) — arg-identical twin of `create_zone` that lands a review GHOST via `build_zone_payload` + `panel.stage_built_payload` (author "ai"); nothing on the board until accept. NOT the router's `workspace_propose_*` family |
+| `minerva_pcb_propose_cutout` | staging twin of `create_cutout`, same contract as `propose_zone` |
+| `minerva_pcb_staged_list` | live staged drafts (+ `include_terminal` audit trail); rows carry canonical `entity_id` + store `staged_id` + kind/disposition/author/note |
+| `minerva_pcb_staged_accept` | `panel.accept_staged` — replays the direct add with the STORED payload (id preserved, re-validated against the CURRENT board; drift refuses with the author's own words); `entity_ids` = all-or-nothing batch, ONE undo step |
+| `minerva_pcb_staged_reject` | `panel.reject_staged` — terminal, history-paired (undo revives the ghost; unrelated undos leave it standing) |
 | `minerva_pcb_group_components` | `data.group_components`; one journalled step, merge-no-op vs. too-few-components disambiguated at the tool layer (below) |
 | `minerva_pcb_ungroup` | `data.ungroup_components`; accepts `group_id` or `component_ids` (below) |
 | `minerva_pcb_set_group_member_offset` | `data.set_member_offset`; every refusal (unknown/ungrouped/anchor/locked) diagnosed at the tool layer, current-value guard (below) |
@@ -550,7 +555,7 @@ other lacks.
 | `minerva_pcb_workspace_reroute_route` | Try-again on the whole route; router runs before the prior is retired |
 | `minerva_pcb_workspace_reroute_span` | **DEGRADED** to a whole-route reroute, named on every reply (below) |
 | `minerva_pcb_workspace_check` | set-scoped draft DRC; findings name candidate/segment/via ids; stale candidates refuse |
-| `minerva_pcb_promote` | K13's serialize-back: full gate (connectivity + geometric + assembly, one fail-closed verdict) → canonical YAML write; refusals name findings, NO acknowledge-through |
+| `minerva_pcb_promote` | K13's serialize-back, correctness-gated + completeness-ADVISORY (UX4 owner ruling: granular promotion): full gate → canonical YAML write; correctness refusals name findings with NO acknowledge-through; a clean-partial board promotes with unrouted nets as advisory; panel-side copper/component regression guard (allow_copper_regression overrides) |
 | `minerva_pcb_point` | the get_selection MIRROR — select an entity FOR the human (deixis both ways) |
 | `minerva_pcb_hint_move_bend` / `_insert_bend` / `_delete_bend` | micro hint edits, one revision each; superseded refuses with the sanctioned exits |
 | `minerva_pcb_clear_hints_by_author` | the dock menu's MCP twin (human/ai/all; workflow-class only) |

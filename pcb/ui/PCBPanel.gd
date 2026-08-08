@@ -78,6 +78,9 @@ const _PcbRoutingSidecarScript: Script = preload("model/pcb_routing_sidecar.gd")
 ## stays annotation-authoritative (mechanism only); T3/T5 flip individual
 ## surfaces once their write path is workspace-backed. Built beside the workspace.
 const _PcbRoutingCutoverScript: Script = preload("model/pcb_routing_cutover.gd")
+## Epoch UX4 (DCR 019fe07523ca S1): the staged-entity store — the draft layer
+## for board entities (zones/cutouts), sibling of the routing workspace.
+const _PcbStagedEntitiesScript: Script = preload("model/pcb_staged_entities.gd")
 ## Plugin-scoped preferences (A7, docket 019fb92f07e2). The panel reads the store
 ## for seeding and writes it when the human turns the width box; the MCP surface
 ## (panel_tools.gd) reaches the SAME process-wide store, which is why an agent's
@@ -134,6 +137,13 @@ var _routing_workspace = null
 ## canvas handoff (S5 — see the flip site there for the criterion it asserts).
 ## An UNMOUNTED panel therefore still reports all-annotation-authoritative.
 var _routing_cutover = null
+
+## Epoch UX4 station 2: the staged-entity store (pcb_staged_entities.gd),
+## built eagerly beside the routing workspace and BOUND to _data at
+## construction (bucket 9 — unlike bucket 8's lazy verb-time binding in
+## panel_tools._workspace_ctx, there is no fence between this store and the
+## panel, so the panel is the natural one-time wiring point).
+var _staged_entities = null
 
 ## ── DCR 019fd5fd9084: panel-owned board_health enrichment state ───────────────
 #
@@ -201,6 +211,9 @@ var _canvas: Control = null
 
 ## Toolbar widgets (built on mount).
 var _tool_buttons: Dictionary = {}   # ToolMode int -> Button
+## UX4 S7: the Proposals-area DRAFT twins (ToolMode int -> Button) — same
+## modes, different destination; _sync_tool_buttons lights exactly one family.
+var _draft_tool_buttons: Dictionary = {}
 var _layer_option: OptionButton = null
 ## Net picker for the zone tools (epoch 6 unit 4). Lives in the sidebar under the
 ## canvas-tools group and is only visible while a zone tool is armed — it is that
@@ -431,6 +444,11 @@ func _init() -> void:
 	# surface defaults annotation-authoritative — nothing is cut over in T2.3.
 	_routing_cutover = _PcbRoutingCutoverScript.new()
 
+	# Epoch UX4 station 2: the staged store, eager like the workspace so
+	# get_staged_store() is valid from construction. Bound to _data below
+	# (after _data exists) — the bind is what turns on history bucket 9.
+	_staged_entities = _PcbStagedEntitiesScript.new()
+
 	# Build the board model and seed the default board WITHOUT dirtying the tab
 	# (from_board_dict emits data_changed; gate it).
 	_data = _PcbDataScript.new()
@@ -442,6 +460,19 @@ func _init() -> void:
 	_data.data_changed.connect(func() -> void:
 		if not _restoring:
 			content_changed.emit())
+	# Epoch UX4 station 2: bucket-9 binding — undo/redo now snapshots and
+	# restores staged dispositions alongside the board (pcb_data.gd
+	# bind_staged_store). Store mutations dirty the tab like every other
+	# observable edit, same _restoring gate.
+	_data.bind_staged_store(_staged_entities)
+	# UX4 station 6 (DCR S9): store mutations ALSO join the sidecar-autosave
+	# debounce — an MCP-staged entity is durable without Ctrl+S, the same
+	# class HITL-4 closed for annotations. Gated by _restoring like the
+	# annotation relay above (a sidecar LOAD emits changed too — F7).
+	_staged_entities.changed.connect(func() -> void:
+		if not _restoring:
+			content_changed.emit()
+			_schedule_sidecar_autosave())
 
 
 func get_annotation_host() -> RefCounted:
@@ -471,6 +502,195 @@ func get_data():
 ## later tasks — see the file-level docstring).
 func get_routing_workspace():
 	return _routing_workspace
+
+
+## Epoch UX4 station 2: the staged-entity store (pcb_staged_entities.gd),
+## bucket-9-bound to _data at construction. Exposed for the composer, the
+## canvas ghost pass, the review verbs, and MCP/tests (later stations).
+func get_staged_store():
+	return _staged_entities
+
+
+# ── Epoch UX4 station 5: the staged review transactions (DCR S5, A1/A5) ───────
+# The PANEL owns these — the canvas only announces (staged_verb_requested),
+# the store only records, and the board only takes journalled writes. Accept's
+# order is load-bearing (station-2 cold review F1): attach the pre-accept
+# disposition layer, WRITE the board, STAMP accepted, THEN snapshot — so the
+# accept history entry records "accepted" and redo restores it instead of
+# reviving the ghost over the landed entity. Reject pairs with its own history
+# entry for the same reason (F3: a bare stamp is silently reverted by undo of
+# any unrelated edit).
+
+
+## The ONE stage doorway (A8's one-branch rule): every authoring surface that
+## lands a DRAFT (canvas commit sites, MCP propose twins — stations 7/8) calls
+## THIS after build_*_payload, so the base-revision stamp and the store write
+## cannot drift between doorways. Returns {ok, staged_id, entity_id} or
+## {ok:false, error:<store refusal name>}.
+func stage_built_payload(kind: String, payload: Dictionary, author: String = "human",
+		note: String = "") -> Dictionary:
+	if _staged_entities == null or _data == null:
+		return {"ok": false, "error": "staged_store_unavailable"}
+	var sid := str(_staged_entities.stage(kind, payload, author, int(_data.board_revision), note))
+	if sid.is_empty():
+		return {"ok": false, "error": str(_staged_entities.last_error.get("error", "stage_refused"))}
+	return {"ok": true, "staged_id": sid, "entity_id": str(payload.get("id", ""))}
+
+
+## Resolve a CANONICAL entity id to its LIVE store entry. {ok, sid, entry} or
+## the named refusal ({ok:false, error:"staged_entry_not_found"} — terminal
+## entries resolve to nothing, same rule the pick/point surfaces keep).
+func _resolve_live_staged(entity_id: String) -> Dictionary:
+	if _staged_entities == null or _data == null:
+		return {"ok": false, "error": "staged_store_unavailable"}
+	var sid := str(_staged_entities.staged_id_for_entity(entity_id))
+	if sid.is_empty():
+		return {"ok": false, "error": "staged_entry_not_found", "entity_id": entity_id}
+	return {"ok": true, "sid": sid, "entry": _staged_entities.get_entry(sid)}
+
+
+## The NAMED refusal this payload would get from add_*_payload against the
+## CURRENT board ("" = it would land). Mirrors add_*_payload's own three gates
+## (author re-validation, minted-id format, board-uniqueness) so the single
+## accept can surface A5's named refusal and the batch can be all-or-nothing
+## WITHOUT a dry-run write path on the model.
+func _staged_payload_refusal(kind: String, payload: Dictionary) -> String:
+	var pid := str(payload.get("id", ""))
+	match kind:
+		"zone":
+			var outline: Array = payload.get("outline", []) if payload.get("outline", []) is Array else []
+			var err: String = _data.zone_author_error(str(payload.get("net", "")),
+				str(payload.get("layer", "")), outline.size(), str(payload.get("kind", "copper_pour")))
+			if not err.is_empty():
+				return err
+			if not pid.begins_with("zone:"):
+				return "payload id '%s' is not a minted zone id" % pid
+			if not (_data.get_zone(pid) as Dictionary).is_empty():
+				return "zone id '%s' is already on the board" % pid
+		"cutout":
+			var c_outline: Array = payload.get("outline", []) if payload.get("outline", []) is Array else []
+			var c_err: String = _data.cutout_author_error(c_outline.size())
+			if not c_err.is_empty():
+				return c_err
+			if not pid.begins_with("cutout:"):
+				return "payload id '%s' is not a minted cutout id" % pid
+			if not (_data.get_cutout(pid) as Dictionary).is_empty():
+				return "cutout id '%s' is already on the board" % pid
+		_:
+			return "unknown staged kind '%s'" % kind
+	return ""
+
+
+## ACCEPT one staged draft: replay the direct add verb with the STORED payload
+## (id preserved — A1 byte-identical including identity), re-validated against
+## the CURRENT board (A5 — drift surfaces as the direct verb's own refusal,
+## returned here by name). One history entry; undo returns the entity to a
+## ghost.
+func accept_staged(entity_id: String) -> Dictionary:
+	var pre := _resolve_live_staged(entity_id)
+	if not bool(pre.get("ok", false)):
+		_show_transient_status("Accept refused: %s" % str(pre.get("error", "")))
+		return pre
+	var entry: Dictionary = pre.get("entry", {})
+	var kind := str(entry.get("kind", ""))
+	var payload: Dictionary = entry.get("payload", {})
+	var refusal := _staged_payload_refusal(kind, payload)
+	if not refusal.is_empty():
+		_show_transient_status("Accept refused: %s" % refusal)
+		return {"ok": false, "error": "accept_refused", "entity_id": entity_id, "note": refusal}
+	_data.attach_staged_snapshot()
+	var landed: Dictionary = _data.add_zone_payload(payload) if kind == "zone" \
+		else _data.add_cutout_payload(payload)
+	if landed.is_empty():
+		# Unreachable after the pre-check above mirrors the add gates; kept as
+		# an honest backstop rather than a stamp over a write that never was.
+		return {"ok": false, "error": "accept_refused", "entity_id": entity_id,
+			"note": "the board write was refused — see the model warning"}
+	_staged_entities.stamp(str(pre.get("sid", "")), "accepted", "accept")
+	_data.save_to_history("Accept staged %s" % kind)
+	_show_transient_status("Accepted staged %s %s — it is on the board now." % [kind, entity_id])
+	return {"ok": true, "entity_id": entity_id, "kind": kind}
+
+
+## REJECT one staged draft: terminal stamp PAIRED with its own history entry
+## (the store's stamp() mandate) — undo of the reject revives the ghost; undo
+## of anything else leaves the reject standing.
+func reject_staged(entity_id: String) -> Dictionary:
+	var pre := _resolve_live_staged(entity_id)
+	if not bool(pre.get("ok", false)):
+		_show_transient_status("Reject refused: %s" % str(pre.get("error", "")))
+		return pre
+	var kind := str((pre.get("entry", {}) as Dictionary).get("kind", "draft"))
+	_data.attach_staged_snapshot()
+	if not _staged_entities.reject(str(pre.get("sid", ""))):
+		return {"ok": false, "error": str(_staged_entities.last_error.get("error", "reject_refused")),
+			"entity_id": entity_id}
+	_data.save_to_history("Reject staged %s" % kind)
+	_show_transient_status("Rejected staged %s %s — the draft is discarded (undo brings it back)." % [kind, entity_id])
+	return {"ok": true, "entity_id": entity_id, "kind": kind}
+
+
+## BATCH accept — the batch-commit pattern (DCR S5): ALL-OR-NOTHING, refused
+## by name per entity, and ONE history step for the lot, so a single undo
+## returns every accepted entity to a ghost together.
+func accept_staged_batch(entity_ids: Array) -> Dictionary:
+	if _staged_entities == null or _data == null:
+		return {"ok": false, "error": "staged_store_unavailable"}
+	var resolved: Array = []
+	var refusals: Array = []
+	var seen: Dictionary = {}
+	for eid in entity_ids:
+		# Codex UX4 F3: a repeated member refuses at PREFLIGHT (the routing
+		# batch's own rule, mirrored) — without this, [id, id] resolved twice,
+		# landed once, refused once mid-write, and reported both as accepted.
+		if seen.has(str(eid)):
+			refusals.append({"entity_id": str(eid), "error": "duplicate_batch_member"})
+			continue
+		seen[str(eid)] = true
+		var pre := _resolve_live_staged(str(eid))
+		if not bool(pre.get("ok", false)):
+			refusals.append({"entity_id": str(eid), "error": str(pre.get("error", ""))})
+			continue
+		var entry: Dictionary = pre.get("entry", {})
+		var refusal := _staged_payload_refusal(str(entry.get("kind", "")), entry.get("payload", {}))
+		if not refusal.is_empty():
+			refusals.append({"entity_id": str(eid), "error": refusal})
+			continue
+		resolved.append({"sid": str(pre.get("sid", "")), "entry": entry, "entity_id": str(eid)})
+	if not refusals.is_empty():
+		return {"ok": false, "error": "batch_refused", "refusals": refusals,
+			"note": "all-or-nothing: no draft was accepted"}
+	if resolved.is_empty():
+		return {"ok": false, "error": "empty_batch"}
+	_data.attach_staged_snapshot()
+	# Codex F3, second half: the reply counts LANDINGS, never intent — the
+	# preflight makes a mid-write refusal unreachable, but if one ever fires
+	# the count must not lie about it.
+	var landed_count := 0
+	for r in resolved:
+		var entry: Dictionary = r.get("entry", {})
+		var kind := str(entry.get("kind", ""))
+		var landed: Dictionary = _data.add_zone_payload(entry.get("payload", {})) if kind == "zone" \
+			else _data.add_cutout_payload(entry.get("payload", {}))
+		if landed.is_empty():
+			push_warning("[PCBPanel] batch accept: unexpected refusal on %s" % str(r.get("entity_id", "")))
+			continue
+		_staged_entities.stamp(str(r.get("sid", "")), "accepted", "accept")
+		landed_count += 1
+	_data.save_to_history("Accept %d staged drafts" % landed_count)
+	_show_transient_status("Accepted %d staged drafts." % landed_count)
+	return {"ok": true, "accepted": landed_count}
+
+
+## The canvas menu's announcement lands here (wired in _build_ui).
+func _on_staged_verb_requested(verb: String, entity_id: String) -> void:
+	match verb:
+		"accept":
+			accept_staged(entity_id)
+		"reject":
+			reject_staged(entity_id)
+		_:
+			_show_transient_status("Unknown staged verb '%s'." % verb)
 
 
 ## T2.3: the cutover coordinator (pcb_routing_cutover.gd). Exposed for MCP/tests
@@ -634,6 +854,18 @@ func _build_ui() -> void:
 	# The canvas connects itself to the workspace's redraw-worthy signals inside
 	# this call — it is the side that knows which workspace instance is current, so
 	# it is the side that can disconnect a previous one.
+	# UX4 station 4: the staged store handoff, symmetric with the workspace
+	# binding below — the canvas draws the area ghosts from it and rides its
+	# `changed` signal for redraw + selection pruning.
+	if _canvas.has_method("set_staged_store"):
+		# The stage doorway rides the same handoff (UX4 S7): a DRAFT-armed
+		# commit calls back through stage_built_payload — the ONE stage entry
+		# point — rather than writing the store from the canvas.
+		_canvas.set_staged_store(_staged_entities, Callable(self, "stage_built_payload"))
+	# UX4 station 5: the menu's Accept/Reject announcements → the panel-owned
+	# transactions (the canvas never touches store or board itself).
+	if _canvas.has_signal("staged_verb_requested"):
+		_canvas.staged_verb_requested.connect(_on_staged_verb_requested)
 	if _canvas.has_method("set_routing_workspace"):
 		_canvas.set_routing_workspace(_routing_workspace, _routing_cutover)
 		# ── THE CUTOVER FLIP (S5 / C4a-C4b, DCR 019f7095c395) ──────────────────
@@ -904,6 +1136,31 @@ func _add_tool_button(tb: Container, mode: int, text: String, tip: String, icon_
 	btn.pressed.connect(func() -> void: _toggle_tool_mode(mode))
 	tb.add_child(btn)
 	_tool_buttons[mode] = btn
+
+
+## The draft twin of _add_tool_button (UX4 S7): SAME icon asset, GHOST-TINTED
+## (icon color at ghost alpha — the one proposal design language, owner ruling
+## 4), arming through _toggle_draft_tool. Named "<text>DraftButton" so the
+## layout suite can tell the families apart.
+const _DRAFT_ICON_TINT := Color(1.0, 1.0, 1.0, 0.55)
+
+
+func _add_draft_tool_button(tb: Container, mode: int, text: String, tip: String, icon_file := "") -> void:
+	var btn := Button.new()
+	btn.name = "%sDraftButton" % text
+	var icon := _load_icon(icon_file) if not icon_file.is_empty() else null
+	if icon != null:
+		btn.icon = icon
+		for state in ["icon_normal_color", "icon_hover_color", "icon_pressed_color", "icon_focus_color"]:
+			btn.add_theme_color_override(state, _DRAFT_ICON_TINT)
+	else:
+		btn.text = text
+		btn.modulate = _DRAFT_ICON_TINT
+	btn.tooltip_text = _wrap_tooltip(tip)
+	btn.toggle_mode = true
+	btn.pressed.connect(func() -> void: _toggle_draft_tool(mode))
+	tb.add_child(btn)
+	_draft_tool_buttons[mode] = btn
 
 
 ## Sidebar section label — the 11px caption idiom shared by all three tool
@@ -1208,6 +1465,25 @@ func _build_sidebar() -> VBoxContainer:
 	_propose_button.tooltip_text = _wrap_tooltip("Run the router over open route hints (board unchanged)")
 	_propose_button.pressed.connect(_on_propose_button_pressed)
 	hints_flow.add_child(_propose_button)
+
+	# ── UX4 station 7 (DCR S7): the DRAFT authoring doorways ─────────────────
+	# The owner's HITL-7 gap ("I can't propose bus, cut-out or keepout"),
+	# answered where proposals live: the SAME four Draw tools, ghost-tinted,
+	# arming with authoring_destination DRAFT — commits stage review ghosts
+	# instead of writing the board. One gesture, two doorways; the commit-site
+	# branch (pcb_canvas _commit_zone/_commit_cutout/_commit_bus) is the whole
+	# difference (A8).
+	var draft_flow := FlowContainer.new()
+	draft_flow.name = "DraftFlow"
+	_sidebar_content.add_child(draft_flow)
+	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.ZONE_POUR, "Pour",
+		"Propose a copper pour as a DRAFT (ghost for review — Accept lands it)", "pour_24.png")
+	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.ZONE_KEEPOUT, "Keepout",
+		"Propose a keep-out region as a DRAFT (ghost for review — Accept lands it)", "keepout_24.png")
+	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.CUTOUT, "Cutout",
+		"Propose a board opening as a DRAFT (ghost for review — Accept lands it)", "cutout_24.png")
+	_add_draft_tool_button(draft_flow, _PcbCanvasScript.ToolMode.BUS, "Bus",
+		"Propose a parallel bus (Enter lands ghost candidates for review, never copper)", "bus_24.png")
 
 	# Per-HINT width row (HITL-7c, docket 019fe0395764 — owner override of
 	# station 8b's standing authoring picker: "feels disconnected from
@@ -2448,9 +2724,16 @@ func point_at_entity(kind: String, id: String) -> Dictionary:
 		"candidate":
 			canvas_kind = _canvas.KIND_CANDIDATE
 			exists = _routing_workspace != null and _routing_workspace.get_candidate(id) != null
+		"staged":
+			# UX4 S4: pointing at a staged draft — id is the CANONICAL payload
+			# id, existence = a LIVE entry resolves to it (terminal entries are
+			# not drawn, so pointing at one would light nothing).
+			canvas_kind = _canvas.KIND_STAGED
+			exists = _staged_entities != null \
+				and not str(_staged_entities.staged_id_for_entity(id)).is_empty()
 		_:
 			return {"ok": false, "error": "unknown_kind",
-				"message": "kind must be one of: component, trace, via, zone, cutout, candidate, annotation"}
+				"message": "kind must be one of: component, trace, via, zone, cutout, candidate, staged, annotation"}
 	if not exists:
 		return {"ok": false, "error": "not_found", "message": "no %s '%s' on this board" % [kind, id]}
 	_canvas._clear_selection_all()
@@ -3325,7 +3608,11 @@ func _toggle_tool_mode(mode: int) -> void:
 	# call). A re-click on Select itself needs no special case — target is
 	# already SELECT, and set_tool_mode's same-mode guard keeps that a no-op
 	# exactly as it is today.
-	var was_armed: bool = _canvas.tool_mode == mode
+	# UX4 S7: "armed" now means armed AS DIRECT — the same mode armed as a
+	# DRAFT (a Proposals-area toggle) is a different doorway, and pressing the
+	# Tools button then means "switch this tool to direct", not "disarm".
+	var was_armed: bool = _canvas.tool_mode == mode \
+		and str(_canvas.authoring_destination) != _PcbCanvasScript.DEST_DRAFT
 	var target: int = _PcbCanvasScript.ToolMode.SELECT if was_armed else mode
 	# `was_armed` doubles as the announce flag: a disarm re-click is an
 	# explicit "get me out" gesture, so any abandoned in-progress zone/trace
@@ -3334,12 +3621,44 @@ func _toggle_tool_mode(mode: int) -> void:
 	# for making that announce actually land AFTER the mode change settles
 	# (cold review F1) — see its doc block.
 	_canvas.set_tool_mode(target, was_armed)
+	# A draft→direct switch of the SAME mode is a no-op for set_tool_mode (its
+	# same-mode guard), so the destination reset must be explicit here.
+	if not was_armed:
+		_canvas.authoring_destination = _PcbCanvasScript.DEST_DIRECT
+	_sync_tool_buttons(_canvas.tool_mode)
+
+
+## The Proposals-area draft twin of _toggle_tool_mode (UX4 S7): arms the SAME
+## canvas tool — the gestures are byte-identical — with authoring_destination
+## DRAFT, re-asserted AFTER set_tool_mode (which resets every change to
+## DIRECT). Re-click on the armed draft toggle disarms to Select, the standing
+## radio rule; pressing it while the same mode is DIRECT-armed switches the
+## destination without disturbing the tool.
+func _toggle_draft_tool(mode: int) -> void:
+	if _canvas == null:
+		return
+	_clear_dock_active_tool()
+	var was_armed: bool = _canvas.tool_mode == mode \
+		and str(_canvas.authoring_destination) == _PcbCanvasScript.DEST_DRAFT
+	var target: int = _PcbCanvasScript.ToolMode.SELECT if was_armed else mode
+	_canvas.set_tool_mode(target, was_armed)
+	if not was_armed:
+		_canvas.authoring_destination = _PcbCanvasScript.DEST_DRAFT
+		# The teach line names the destination (S7): what a commit will do is
+		# the ONE thing the two doorways disagree about.
+		_show_transient_status("DRAFT armed — commits stage review ghosts; the board is untouched until Accept.")
 	_sync_tool_buttons(_canvas.tool_mode)
 
 
 func _sync_tool_buttons(mode: int) -> void:
+	# UX4 S7: the radio shows WHICH DOORWAY armed the tool — the direct button
+	# lights only for a direct arm, the draft toggle only for a draft arm.
+	var draft: bool = _canvas != null \
+		and str(_canvas.authoring_destination) == _PcbCanvasScript.DEST_DRAFT
 	for m in _tool_buttons:
-		(_tool_buttons[m] as Button).set_pressed_no_signal(m == mode)
+		(_tool_buttons[m] as Button).set_pressed_no_signal(m == mode and not draft)
+	for m in _draft_tool_buttons:
+		(_draft_tool_buttons[m] as Button).set_pressed_no_signal(m == mode and draft)
 
 
 ## Trash-can enablement (item 019fb92f8b83): live off the canvas' own
@@ -3851,7 +4170,13 @@ func _on_export_yaml_pressed() -> void:
 ## summary, census_delta? (component/net/trace/via count deltas vs the prior
 ## file, computed by deserializing it — absent when there was no prior file or
 ## it did not parse: prior_state notes why)}.
-func promote(explicit_path: String = "") -> Dictionary:
+## `allow_copper_regression` (UX4 station 9, DCR S6 — owner ruling 1): the
+## explicit override for the panel-side regression guard below. Default false:
+## a promotion that would REMOVE copper a prior design of record had (per-net
+## copper presence = traces ∪ zones ∪ netted vias — pours count, mirroring the
+## census's own definition) or would drop components refuses by name until the
+## caller confirms.
+func promote(explicit_path: String = "", allow_copper_regression: bool = false) -> Dictionary:
 	if _data == null:
 		return {"success": false, "error": "no_board"}
 	# Path guards BEFORE the ipc guard: both are answerable without the
@@ -3888,7 +4213,11 @@ func promote(explicit_path: String = "") -> Dictionary:
 			"connectivity": gate.get("connectivity", {}),
 			"geometric": gate.get("geometric", {}),
 			"assembly": gate.get("assembly", {}),
-			"note": "promotion without a passing full authoritative DRC is impossible, not merely discouraged (K13) — resolve the named findings and promote again; there is no acknowledge-through"}
+			"note": "promotion with correctness findings is impossible, not merely discouraged (K13, correctness-gated) — resolve the named findings and promote again; there is no acknowledge-through. Completeness is ADVISORY (owner ruling: promotion is granular)."}
+	# UX4 station 9: the worker's advisory block (completeness — unrouted
+	# nets) rides the reply and the status line; it never gates.
+	var advisory: Dictionary = gate.get("advisory", {}) \
+		if gate.get("advisory", {}) is Dictionary else {}
 
 	# ── prior-file census, for the reply's what-changed ──────────────────────
 	var census_delta: Dictionary = {}
@@ -3913,6 +4242,50 @@ func promote(explicit_path: String = "") -> Dictionary:
 				"vias": (board.get("vias", []) as Array).size()
 					- (prior_board.get("vias", []) as Array).size(),
 			}
+			# ── THE REGRESSION GUARD (UX4 station 9, DCR S6/A6) ──────────────
+			# Granular promotion cuts both ways: promoting a PARTIAL board is
+			# the owner's right, but silently WIPING copper the prior design
+			# of record carried is the failure mode granularity invites — a
+			# promote fired after "I rejected the GND candidate" must not
+			# erase the GND pour the file already had. Per-net copper
+			# presence mirrors the census's definition (traces ∪ zones ∪
+			# netted vias — a pour COUNTS as copper). Component-count
+			# regression rides the same guard. allow_copper_regression:true
+			# (arg / dialog confirm) is the deliberate override.
+			# GRANULARITY, ruled (Codex UX4 F2, owner-adjudicated): copper is
+			# guarded at per-net PRESENCE — the DCR's own definition — not
+			# per-entity identity, because trace edits are remove+add and an
+			# identity compare would flag every legitimate reroute, teaching
+			# users to always override. The KNOWN LIMIT is stated: removing
+			# one of several traces on a net that keeps other copper is below
+			# this guard's resolution. Components ARE identity-guarded (ref
+			# SET, not count — refs are stable, so a swap that preserves the
+			# count is still caught, with zero false positives).
+			var prior_copper: Dictionary = _nets_with_copper(prior_board)
+			var new_copper: Dictionary = _nets_with_copper(board)
+			var regressed: Array = []
+			for n in prior_copper:
+				if not new_copper.has(n):
+					regressed.append(str(n))
+			regressed.sort()
+			var removed_refs: Array = []
+			var new_refs: Dictionary = {}
+			for c in (board.get("components", []) as Array):
+				if c is Dictionary:
+					new_refs[str((c as Dictionary).get("ref", ""))] = true
+			for c in (prior_board.get("components", []) as Array):
+				if c is Dictionary and not new_refs.has(str((c as Dictionary).get("ref", ""))):
+					removed_refs.append(str((c as Dictionary).get("ref", "")))
+			removed_refs.sort()
+			var comp_delta: int = int(census_delta.get("components", 0))
+			if (not regressed.is_empty() or not removed_refs.is_empty()) \
+					and not allow_copper_regression:
+				return {"success": false, "error": "copper_regression",
+					"regressed_nets": regressed,
+					"removed_component_refs": removed_refs,
+					"component_delta": comp_delta,
+					"path": target,
+					"note": "the prior design of record has copper/components this promotion would remove — pass allow_copper_regression:true (or confirm the dialog) to proceed deliberately"}
 
 	# ── serialize + write ────────────────────────────────────────────────────
 	var ser: Dictionary = await _request_with_backend_ensure(
@@ -3959,8 +4332,40 @@ func promote(explicit_path: String = "") -> Dictionary:
 	}
 	if not census_delta.is_empty():
 		reply["census_delta"] = census_delta
+	# UX4 station 9: the advisory rides the success reply (absent when the
+	# board is complete) + a staged-draft count so a caller knows review work
+	# remains even though the promotion landed.
+	if not advisory.is_empty():
+		reply["advisory"] = advisory
+	if _staged_entities != null and _staged_entities.staged_entries().size() > 0:
+		reply["staged_drafts"] = _staged_entities.staged_entries().size()
 	reply["success"] = true
 	return reply
+
+
+## Per-net copper presence — the CENSUS's own definition (traces ∪ zones ∪
+## netted vias; a POUR counts as copper). The regression guard's read; static
+## and board-dict-pure so the suite pins it headlessly.
+static func _nets_with_copper(board: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+	for t in (board.get("traces", []) as Array):
+		if t is Dictionary:
+			var n := str((t as Dictionary).get("net", ""))
+			if not n.is_empty():
+				out[n] = true
+	for z in (board.get("zones", []) as Array):
+		if z is Dictionary:
+			var zn := str((z as Dictionary).get("net", ""))
+			if not zn.is_empty():
+				out[zn] = true
+	for v in (board.get("vias", []) as Array):
+		if v is Dictionary:
+			# Canonical dicts carry "net"; the GD model's via dicts carry
+			# "net_name" — the guard reads whichever is present.
+			var vn := str((v as Dictionary).get("net", (v as Dictionary).get("net_name", "")))
+			if not vn.is_empty():
+				out[vn] = true
+	return out
 
 
 ## Unwrap the two envelope nestings the broker channels produce ({ok, result}
@@ -3999,8 +4404,48 @@ func _on_promote_button_pressed() -> void:
 		if result.get("census_delta", null) is Dictionary:
 			var d: Dictionary = result.get("census_delta")
 			delta_txt = "  •  Δ traces %+d, vias %+d" % [int(d.get("traces", 0)), int(d.get("vias", 0))]
-		_set_status("PROMOTED → %s (%d bytes)%s" % [str(result.get("path", "")),
-			int(result.get("bytes", 0)), delta_txt])
+		# UX4 station 9: the completeness ADVISORY on the success line — the
+		# owner promoted a partial board on purpose; the status names what is
+		# still unrouted rather than pretending done.
+		var adv_txt := ""
+		var completeness: Dictionary = (result.get("advisory", {}) as Dictionary).get("completeness", {}) \
+			if result.get("advisory", null) is Dictionary else {}
+		if not completeness.is_empty():
+			var missing: Array = completeness.get("missing_copper", [])
+			adv_txt = "  •  ADVISORY: %d net(s) unrouted (%s)" % [missing.size(),
+				", ".join(PackedStringArray(Array(missing.slice(0, 6).map(func(m): return str(m)))))]
+		_set_status("PROMOTED → %s (%d bytes)%s%s" % [str(result.get("path", "")),
+			int(result.get("bytes", 0)), delta_txt, adv_txt])
+		return
+	# UX4 station 9: the regression guard's dialog-confirm half — the named
+	# refusal becomes a question, and ONLY an explicit confirm re-runs with
+	# the override.
+	if str(result.get("error", "")) == "copper_regression":
+		var regressed: Array = result.get("regressed_nets", [])
+		_set_status("Promotion held: copper regression (%d net(s)); see dialog." % regressed.size())
+		if is_inside_tree():
+			var confirm := ConfirmationDialog.new()
+			confirm.name = "CopperRegressionDialog"
+			confirm.title = "Promotion would remove copper"
+			var removed_refs: Array = result.get("removed_component_refs", [])
+			confirm.dialog_text = "The prior design of record has copper this promotion removes:\n\n%s%s\n\nPromote anyway? (The prior file is overwritten.)" % [
+				"\n".join(PackedStringArray(Array(regressed.map(func(r): return "• net %s" % str(r))))),
+				("\n• component(s) removed: %s" % ", ".join(PackedStringArray(Array(removed_refs.map(func(r): return str(r))))))
+					if not removed_refs.is_empty() else ""]
+			confirm.ok_button_text = "Promote anyway"
+			add_child(confirm)
+			confirm.confirmed.connect(func() -> void:
+				_set_status("Promotion gate: re-running with regression override…")
+				var forced: Dictionary = await promote("", true)
+				if bool(forced.get("success", false)):
+					_set_status("PROMOTED (regression confirmed) → %s" % str(forced.get("path", "")))
+				else:
+					_set_status("Promotion failed (%s): %s" % [str(forced.get("error", "")),
+						str(forced.get("note", ""))]))
+			confirm.visibility_changed.connect(func() -> void:
+				if not confirm.visible:
+					confirm.queue_free())
+			confirm.popup_centered()
 		return
 	if str(result.get("error", "")) == "promotion_gated":
 		var refusals: Array = result.get("refusals", [])
@@ -4009,7 +4454,7 @@ func _on_promote_button_pressed() -> void:
 			var dialog := AcceptDialog.new()
 			dialog.name = "PromotionGateDialog"
 			dialog.title = "Promotion gate: the board is not clean"
-			dialog.dialog_text = "K13: promotion without a passing full authoritative DRC is impossible.\n\n%s\n\nResolve the findings (Check, witnesses, assembly) and promote again." \
+			dialog.dialog_text = "K13 (correctness-gated): promotion with correctness findings is impossible. Completeness is advisory — a partial board promotes.\n\n%s\n\nResolve the findings (Check, witnesses, assembly) and promote again." \
 				% "\n".join(PackedStringArray(Array(refusals.map(func(r): return "• %s" % str(r)))))
 			add_child(dialog)
 			dialog.popup_centered()
@@ -4044,6 +4489,21 @@ func _on_promote_button_pressed() -> void:
 ## an absent key is also already what the worker treats "unscoped run" /
 ## "no pinned overlay" to mean (see parse_route_scope / existing_copper_with_pinned
 ## docstrings), so this is additive, never a behavior change on its own.
+## Epoch UX4 station 3 (DCR S3/A2): the board a route request carries. A
+## DRAFT request (extra.draft_request — set by the candidate-producing
+## callers: workspace propose, reroute, apply_route_hints commit=false) gets
+## the COMPOSED effective draft board, so staged keepouts detour the ghosts;
+## a direct-copper request (commit=true) routes against the REAL board only.
+## draft_request is a PANEL-SIDE marker: route_board's params allow-list
+## below never forwards it to the worker. Factored out of route_board so the
+## headless suite can pin the composition decision without an IPC backend.
+func _board_for_route_request(extra: Dictionary) -> Dictionary:
+	var board: Dictionary = _data.to_board_dict()
+	if bool(extra.get("draft_request", false)):
+		return _PcbStagedEntitiesScript.effective_draft_board(board, _staged_entities, "route")
+	return board
+
+
 func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null or _data == null:
@@ -4062,7 +4522,7 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 				else:
 					envelopes.append(ann)
 	var params := {
-		"board": _data.to_board_dict(),
+		"board": _board_for_route_request(extra),
 		"route_hints": envelopes,
 		"selection": selection,
 	}
@@ -4214,8 +4674,12 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 		if _routing_workspace != null:
 			if switched:
 				_routing_workspace.load_from_dict({})
+			# UX4 S9: the staged store rides the same load (drafts restore even
+			# on quarantine; a missing sidecar RESETS a bound store so a
+			# document switch drops the prior board's drafts). Inside the
+			# _restoring gate — load_from_dict emits `changed` unconditionally.
 			_PcbRoutingSidecarScript.load_into_workspace(
-				source_path, _routing_workspace, _data.to_board_dict())
+				source_path, _routing_workspace, _data.to_board_dict(), 0, _staged_entities)
 	_restoring = false
 
 	# Reflect the new board in the toolbar/status and frame it in the canvas —
@@ -4561,13 +5025,28 @@ const _SIDECAR_AUTOSAVE_DEBOUNCE_S := 0.8
 var _sidecar_autosave_pending: bool = false
 
 
+## Write BOTH sidecars now (UX4 station 6, DCR S9): the annotation sidecar and
+## the routing sidecar WITH the staged section. One flush body shared by the
+## debounce, the pre-mount synchronous path and the teardown flush, so the
+## three can never disagree about what "durable" includes.
+func _flush_sidecars() -> void:
+	if _file_path.is_empty():
+		return
+	if _annotation_host != null:
+		_annotation_host.save_sidecar(_file_path)
+	if _routing_workspace != null:
+		_PcbRoutingSidecarScript.save_workspace(
+			_file_path, _routing_workspace, _data.to_board_dict(),
+			int(_data.board_revision), _staged_entities)
+
+
 func _schedule_sidecar_autosave() -> void:
 	if _annotation_host == null or _file_path.is_empty():
 		return  # no durable home yet — adopted on save/load/path-load
 	if not is_inside_tree():
 		# No timer source before mount — write synchronously (rare: mutations
 		# before the panel enters the tree). Durability outranks coalescing.
-		_annotation_host.save_sidecar(_file_path)
+		_flush_sidecars()
 		return
 	if _sidecar_autosave_pending:
 		return
@@ -4578,7 +5057,7 @@ func _schedule_sidecar_autosave() -> void:
 	get_tree().create_timer(_SIDECAR_AUTOSAVE_DEBOUNCE_S).timeout.connect(func() -> void:
 		_sidecar_autosave_pending = false
 		if _annotation_host != null and not _file_path.is_empty():
-			_annotation_host.save_sidecar(_file_path))
+			_flush_sidecars())
 
 
 func _exit_tree() -> void:
@@ -4586,7 +5065,7 @@ func _exit_tree() -> void:
 	# the exact "annotations die with the app" class this station closes.
 	if _sidecar_autosave_pending and _annotation_host != null and not _file_path.is_empty():
 		_sidecar_autosave_pending = false
-		_annotation_host.save_sidecar(_file_path)
+		_flush_sidecars()
 
 ## Return the board's save state. Ctrl+S writes this Dict to the .pcbskel file as
 ## JSON (Editor.gd host_owned path). Canonical from now on (port rule 4): the
@@ -4609,7 +5088,8 @@ func _on_panel_save_request() -> Dictionary:
 	# candidates ⇒ the sidecar is deleted, never written empty.
 	if _routing_workspace != null and not _file_path.is_empty():
 		_PcbRoutingSidecarScript.save_workspace(
-			_file_path, _routing_workspace, board_dict, int(_data.board_revision))
+			_file_path, _routing_workspace, board_dict, int(_data.board_revision),
+			_staged_entities)
 	return board_dict
 
 
@@ -4693,8 +5173,12 @@ func _on_panel_load_request(document: Dictionary) -> void:
 	# rather than trusting them. Missing sidecar → nothing to load; corrupt/
 	# unknown-schema → quarantine, never a crashed load.
 	if _routing_workspace != null and not _file_path.is_empty():
+		# UX4 S9: staged drafts ride the same coherence-gated load (see the
+		# path-adoption site for the quarantine/reset rules). Same _restoring
+		# gate — the store's load emits `changed` unconditionally.
 		_PcbRoutingSidecarScript.load_into_workspace(
-			_file_path, _routing_workspace, _data.to_board_dict(), int(_data.board_revision))
+			_file_path, _routing_workspace, _data.to_board_dict(), int(_data.board_revision),
+			_staged_entities)
 
 	# Codex 1047 fix round, verdict 6: deterministic load-time reconciliation
 	# of the TWO supersession stores, run at the ONE point where both are in
@@ -4786,9 +5270,15 @@ func _drop_legacy_proposal_annotations() -> void:
 	for id in dropped:
 		_annotation_host.remove_annotation(id)
 	_last_legacy_proposals_dropped = dropped.size()
+	_last_legacy_drop_notice = ""
 	if not dropped.is_empty():
-		_set_status("%d legacy route proposal%s dropped (pre-S5 cutover) — repropose from the open hint(s) via Propose or minerva_pcb_workspace_propose." % [
-			dropped.size(), "" if dropped.size() == 1 else "s"])
+		# The notice is KEPT on a mount-independent field (UX4 station 10,
+		# HITL-3 nit 5): _set_status renders into _status_label, which is Nil
+		# on an unmounted panel — the suite asserts the prose through the
+		# field, not the widget.
+		_last_legacy_drop_notice = "%d legacy route proposal%s dropped (pre-S5 cutover) — repropose from the open hint(s) via Propose or minerva_pcb_workspace_propose." % [
+			dropped.size(), "" if dropped.size() == 1 else "s"]
+		_set_status(_last_legacy_drop_notice)
 
 
 ## Count of legacy proposal annotations dropped on the most recent sidecar
@@ -4796,6 +5286,15 @@ func _drop_legacy_proposal_annotations() -> void:
 ## Exposed for tests / telemetry.
 func get_last_legacy_proposals_dropped() -> int:
 	return _last_legacy_proposals_dropped
+
+
+## The drop's status prose, mount-independent (UX4 station 10, HITL-3 nit 5 —
+## docket 019fce3ac3). "" when the most recent load dropped nothing.
+var _last_legacy_drop_notice := ""
+
+
+func get_last_legacy_drop_notice() -> String:
+	return _last_legacy_drop_notice
 
 
 ## True when the loaded document still carries a NON-EMPTY inline annotations or

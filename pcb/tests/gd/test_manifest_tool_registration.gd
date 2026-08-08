@@ -146,20 +146,26 @@ func _init() -> void:
 	# hint_move/insert/delete_bend micro-edit verbs; and
 	# minerva_pcb_clear_hints_by_author, the dock menu's MCP twin) == 82,
 	# + 1 Epoch UX3 station-11 tool (minerva_pcb_promote — K13's gated
-	# serialize-back verb, docket 019fdf91b3ac) == 83.
+	# serialize-back verb, docket 019fdf91b3ac) == 83,
+	# + 5 Epoch UX4 station-8 tools (DCR 019fe07523ca S8 — the STAGING family:
+	# minerva_pcb_propose_zone/_propose_cutout, the create_* twins that land
+	# review ghosts; minerva_pcb_staged_list/_staged_accept/_staged_reject,
+	# the review verbs; distinct from the workspace_propose_* ROUTER family)
+	# == 88.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is the Epoch UX3 station-11 bump
-	# (82 -> 83), sequenced after station-10's (77 -> 82), station-1's
-	# (75 -> 77), HITL-6b's (74 -> 75), Codex 1047 verdict-4's (73 -> 74),
-	# UX1 station 10's (72 -> 73), station 8's (71 -> 72), bus-propose's
-	# (70 -> 71), D0-5's (69 -> 70), C5's (68 -> 69), C4b's (70 -> 68) and
-	# C4a's (60 -> 70) — all queue behind the same serialization point.
-	check("total registered tool count == 83", registered.size() == 83,
+	# entry could hide behind it. This is the Epoch UX4 station-8 bump
+	# (83 -> 88), sequenced after UX3 station-11's (82 -> 83), station-10's
+	# (77 -> 82), station-1's (75 -> 77), HITL-6b's (74 -> 75), Codex 1047
+	# verdict-4's (73 -> 74), UX1 station 10's (72 -> 73), station 8's
+	# (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's
+	# (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the
+	# same serialization point.
+	check("total registered tool count == 88", registered.size() == 88,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

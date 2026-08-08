@@ -155,6 +155,15 @@ var constraint_revision: int = -1
 ## when the router reported it). Empty when the router reported nothing.
 var hint_status: Array = []
 
+## WIDTH PROVENANCE (UX4 station 10, work item 019fd0ab5af8): which source
+## sized this candidate's copper — DURABLE state like constraint_revision
+## (P1-B's precedent), so a review surface can tell an INTENDED 0.25mm from a
+## SILENT fallback to it. Vocabulary: the worker's effective-rules words
+## ("caller_option"/"hint"/"board_rules"/"engine_default"/"net_class") when
+## the route carried them, else the workspace's own ingest verdict ("hint" |
+## "default" | "caller_option"). "" = generated before this field existed.
+var width_source: String = ""
+
 ## ── axis 1: disposition ───────────────────────────────────────────────────────
 var _disposition: String = "proposed"
 var disposition: String:
@@ -340,6 +349,7 @@ func to_dict() -> Dictionary:
 		"validation": _validation,
 		"constraint_revision": constraint_revision,
 		"hint_status": hint_status.duplicate(true),
+		"width_source": width_source,
 	}
 
 
@@ -375,6 +385,8 @@ func load_from_dict(data: Dictionary) -> void:
 	constraint_revision = int(data.get("constraint_revision", -1))
 	hint_status = (data.get("hint_status", []) as Array).duplicate(true) \
 		if data.get("hint_status", []) is Array else []
+	# UX4 station 10: absent on pre-provenance records — "" means unknown.
+	width_source = str(data.get("width_source", ""))
 
 	# Route through the validating setters (bad stored values fall back to defaults).
 	set_disposition(str(data.get("disposition", "proposed")))
