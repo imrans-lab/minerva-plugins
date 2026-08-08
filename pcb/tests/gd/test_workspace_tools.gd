@@ -1334,13 +1334,15 @@ func _run_removal_manifest_tools_absent() -> void:
 	# + 1 Epoch UX1 station 10 tool (minerva_pcb_workspace_edit_candidate, the
 	# ONE discriminated candidate-edit verb, DCR 019fd095e694) == 73,
 	# + 1 Codex-1047 verdict-4 tool (minerva_pcb_hint_convert_to_detailed,
-	# the named guided->detailed conversion) == 74.
+	# the named guided->detailed conversion) == 74,
+	# + 1 HITL-6b tool (minerva_pcb_get_selection — the deictic read behind
+	# "I've selected X, what is it?", docket 019fdf5579) == 75.
 	# This is a SECOND, independent count pin on the same manifest.json this
 	# round's tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (73->74) for the
+	# tests/gd/test_manifest_tool_registration.gd's own pin (74->75) for the
 	# "deliberate bump, its own diff" convention this follows.
-	check_eq("manifest tool count == 74 (ALL manifest.json tools[] entries)",
-		names.size(), 74)
+	check_eq("manifest tool count == 75 (ALL manifest.json tools[] entries)",
+		names.size(), 75)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

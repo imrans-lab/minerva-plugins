@@ -929,6 +929,18 @@
       }
     },
     {
+      "name": "minerva_pcb_get_selection",
+      "description": "THE deictic read (HITL-6b): whatever the human has SELECTED on the canvas right now, every kind in one call — components, traces, vias, zones, cutouts, route candidates (ghosts) and annotations. Use it whenever the human says 'this' ('what's this?', 'delete this', 'make this wider'): selection is the pointing finger of co-working. Returns {selection:[{kind, id, ...enrichment}], count, active_candidate_id?} — a selected GHOST comes back as its full candidate record (net, disposition, validation, quality metrics, provenance, source_intent_notes), a component with position/rotation/value, a trace with its net, an annotation with its kind/summary/ref/lifecycle. Empty selection is a SUCCESS with selection: [] and a note — 'nothing is selected' is an answer, not an error. Read-only; journals nothing. Canvas ghost clicks also feed the workspace's active candidate, so workspace_get_active agrees with this read.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
       "name": "minerva_pcb_workspace_get_active",
       "description": "The route candidate the panel is focused on, with its findings. Read-only. Args {editor_name, include_geometry?}. Returns {active_candidate_id, candidate:{…}, findings:[…]}; include_geometry:true adds the candidate's exact segments/vias (same shape as minerva_pcb_workspace_list's). No active candidate is a SUCCESS with active_candidate_id \"\" — \"nothing is selected\" is an answer, not an error; pass candidate_id explicitly to the verb you meant.",
       "executor": "panel",

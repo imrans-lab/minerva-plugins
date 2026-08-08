@@ -90,16 +90,11 @@ var show_grid: bool = true
 var show_ratsnest: bool = true
 var show_traces: bool = true
 var show_labels: bool = true
-## Route-hint/proposal summary labels (view flag). Setter relays to the
-## annotation host so the pcb_route_hint kind can gate its label draw, then
-## nudges the overlay via view_changed (owner req 2026-07-17: 16 proposals'
-## labels are unreadable clutter without a toggle).
-var show_hint_labels: bool = true:
-	set(value):
-		show_hint_labels = value
-		if _pin_inspector_host != null and _pin_inspector_host.has_method("set_hint_labels_visible"):
-			_pin_inspector_host.set_hint_labels_visible(value)
-		view_changed.emit()
+# (show_hint_labels RETIRED, HITL-6b — docket 019fdf553f: hint labels no
+# longer render at all, owner ruling; "what's this" is the select/ask
+# paradigm — minerva_pcb_get_selection. The 2026-07-17 toggle existed
+# because 16 proposals' labels were unreadable clutter; the labels are gone
+# now, so the toggle has nothing to toggle.)
 var show_pins: bool = true
 var snap_to_grid: bool = true
 var show_pads: bool = true
@@ -3206,6 +3201,21 @@ func is_entity_selected(kind: String, entity_id: String) -> bool:
 	return entity_id in _selection_of(kind)
 
 
+## Read-only snapshot of everything this canvas holds selected, by kind
+## (HITL-6b, docket 019fdf5579 — the MCP "what's this" read behind
+## minerva_pcb_get_selection). Arrays are duplicated — a caller must never
+## mutate live selection state through this.
+func selection_snapshot() -> Dictionary:
+	return {
+		"components": selected_components.duplicate(),
+		"traces": selected_trace_ids.duplicate(),
+		"vias": selected_via_ids.duplicate(),
+		"zones": selected_zone_ids.duplicate(),
+		"cutouts": selected_cutout_ids.duplicate(),
+		"candidates": selected_candidate_ids.duplicate(),
+	}
+
+
 ## Add one entity to the selection (no-op if already in it).
 ##
 ## component_selected/component_deselected stay COMPONENT-ONLY: they are the
@@ -3238,6 +3248,14 @@ func _add_to_selection(kind: String, entity_id: String) -> void:
 		# a candidate becomes selected, which is why the line is emitted here
 		# rather than at each caller.
 		_emit_candidate_teach_line(entity_id)
+		# HITL-6b (docket 019fdf5579): the canvas ghost pick feeds the
+		# workspace's ACTIVE candidate, so an MCP reader (workspace_get_active,
+		# minerva_pcb_get_selection) sees what the human is pointing at —
+		# "what's this?" is the fundamental deictic question of co-working,
+		# and it was unanswerable while this selection stayed canvas-local.
+		# Last-selected wins for a multi-select (active is a single focus).
+		if _routing_workspace != null and _routing_workspace.has_method("set_active"):
+			_routing_workspace.set_active(entity_id)
 
 
 ## The other members of this component's group ([] when it has none). Wrapped so
@@ -3263,6 +3281,13 @@ func _remove_from_selection(kind: String, entity_id: String) -> void:
 	sel.remove_at(idx)
 	if kind == KIND_COMPONENT:
 		component_deselected.emit(entity_id)
+	elif kind == KIND_CANDIDATE:
+		# HITL-6b (docket 019fdf5579): deselecting the ghost the workspace is
+		# focused on clears that focus — an MCP reader must never see an
+		# "active" candidate the human has already deselected.
+		if _routing_workspace != null and _routing_workspace.has_method("set_active") \
+				and str(_routing_workspace.active_candidate_id) == entity_id:
+			_routing_workspace.set_active("")
 
 
 ## Shift-click semantics: in becomes out, out becomes in — for any kind.
@@ -3345,6 +3370,11 @@ func _clear_selection(announce := true) -> void:
 	# asymmetry with selection_count() is deliberate and documented there: this is
 	# about what the canvas is SHOWING as selected, that one is about what a board
 	# DELETE batch may act on.
+	# HITL-6b (docket 019fdf5579): the workspace focus follows — clearing a
+	# selection that held the active ghost clears the MCP-visible focus too.
+	if _routing_workspace != null and _routing_workspace.has_method("set_active") \
+			and str(_routing_workspace.active_candidate_id) in selected_candidate_ids:
+		_routing_workspace.set_active("")
 	selected_candidate_ids.clear()
 	focused_component = ""
 	# An armed edge insertion belongs to a SELECTED zone; with the selection gone

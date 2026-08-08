@@ -651,6 +651,13 @@ func _run_checklist_sites() -> void:
 	check("is_entity_selected sees it", canvas.is_entity_selected(canvas.KIND_CANDIDATE, cid))
 	check_eq("the public singular getter answers", canvas.get_selected_candidate_id(), cid)
 	check_eq("the list getter answers too", canvas.get_selected_candidates().size(), 1)
+	# HITL-6b (docket 019fdf5579): the ghost pick FEEDS the workspace's active
+	# candidate — the seam that makes "I've selected a ghost, what is it?"
+	# answerable over MCP (workspace_get_active / get_selection agree).
+	check_eq("ghost selection feeds workspace.active_candidate_id (HITL-6b)",
+		str(ws.active_candidate_id), cid)
+	check("selection snapshot carries the ghost",
+		cid in (canvas.selection_snapshot().get("candidates", []) as Array))
 
 	# REFUSES: the board count, so no board batch is ever opened for a ghost.
 	check_eq("selection_count() stays BOARD-only — a ghost does not open a delete batch",
@@ -662,6 +669,17 @@ func _run_checklist_sites() -> void:
 	canvas._clear_selection()
 	check_eq("_clear_selection drops the candidate selection too",
 		canvas.get_selected_candidate_id(), "")
+	check_eq("...and releases the workspace focus with it (HITL-6b)",
+		str(ws.active_candidate_id), "")
+
+	# HITL-6b, the toggle-off path: shift-deselecting the focused ghost also
+	# clears the MCP-visible focus — a reader must never see an 'active'
+	# candidate the human already deselected.
+	canvas._add_to_selection(canvas.KIND_CANDIDATE, cid)
+	check_eq("(re-armed: focus back)", str(ws.active_candidate_id), cid)
+	canvas._toggle_entity_selected(canvas.KIND_CANDIDATE, cid)
+	check_eq("toggle-off releases the workspace focus too",
+		str(ws.active_candidate_id), "")
 
 	# REFUSES: movement.
 	canvas._add_to_selection(canvas.KIND_CANDIDATE, cid)

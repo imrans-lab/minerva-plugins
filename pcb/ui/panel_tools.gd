@@ -194,6 +194,8 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _workspace_list(host, args)
 		"minerva_pcb_workspace_get_active":
 			return _workspace_get_active(host, args)
+		"minerva_pcb_get_selection":
+			return _get_selection(host, args)
 		"minerva_pcb_workspace_pin":
 			return _workspace_pin(host, args)
 		"minerva_pcb_workspace_unpin":
@@ -4935,6 +4937,100 @@ static func _workspace_get_active(host, args: Dictionary) -> Dictionary:
 	var reply: Dictionary = {"active_candidate_id": cid, "candidate": rec}
 	if workspace.has_method("findings_for_candidate"):
 		reply["findings"] = workspace.findings_for_candidate(cid)
+	return _ok(reply)
+
+
+## THE deictic read (HITL-6b, docket 019fdf5579): whatever the human has
+## selected on canvas, every kind in one call — components, traces, vias,
+## zones, cutouts, route candidates (ghosts), and annotations — each entry
+## enriched enough to answer "what's this?" without per-kind spelunking.
+## Read-only; journals nothing. Empty selection is a SUCCESS with
+## selection: [] — "nothing is selected" is an answer, not an error.
+static func _get_selection(host, _args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_selection_state"):
+		return _err("no live panel — selection is a canvas concept")
+	var state: Dictionary = panel.get_selection_state()
+	var data = _get_data(host)
+	var workspace = _get_workspace(host)
+	var entries: Array = []
+
+	for comp_id in state.get("components", []):
+		var entry: Dictionary = {"kind": "component", "id": str(comp_id)}
+		if data != null and data.has_component(str(comp_id)):
+			var comp = data.get_component(str(comp_id))
+			entry["x"] = comp.position.x
+			entry["y"] = comp.position.y
+			entry["rotation"] = comp.rotation
+			entry["value"] = str(comp.properties.get("value", "")) \
+				if "properties" in comp else ""
+		entries.append(entry)
+
+	for trace_id in state.get("traces", []):
+		var t_entry: Dictionary = {"kind": "trace", "id": str(trace_id)}
+		if data != null and data.traces.has(str(trace_id)):
+			var t = data.traces[str(trace_id)]
+			t_entry["net"] = str(t.net_name)
+		entries.append(t_entry)
+
+	for via_id in state.get("vias", []):
+		entries.append({"kind": "via", "id": str(via_id)})
+	for zone_id in state.get("zones", []):
+		entries.append({"kind": "zone", "id": str(zone_id)})
+	for cutout_id in state.get("cutouts", []):
+		entries.append({"kind": "cutout", "id": str(cutout_id)})
+
+	for cid in state.get("candidates", []):
+		if workspace == null:
+			entries.append({"kind": "candidate", "id": str(cid)})
+			continue
+		var c = workspace.get_candidate(str(cid))
+		if c == null:
+			continue
+		# The full candidate record — net, disposition, validation, quality
+		# metrics, provenance — IS the "what's this" answer for a ghost.
+		var rec: Dictionary = _candidate_record(workspace, c)
+		rec["kind"] = "candidate"
+		rec["id"] = str(cid)
+		# Source-intent context: the human-readable note the intent was
+		# authored with, when its hint still carries one.
+		if host != null and host.has_method("get_by_id"):
+			var intents: Array = []
+			for hid in rec.get("source_hint_ids", []):
+				var ann: Dictionary = host.get_by_id(str(hid))
+				if not ann.is_empty():
+					var text: String = str((ann.get("kind_payload", {}) as Dictionary).get("text", ""))
+					if not text.is_empty():
+						intents.append(text)
+			if not intents.is_empty():
+				rec["source_intent_notes"] = intents
+		entries.append(rec)
+
+	if host != null and host.has_method("get_selected_annotation_ids") \
+			and host.has_method("get_by_id"):
+		for aid in host.get_selected_annotation_ids():
+			var ann: Dictionary = host.get_by_id(str(aid))
+			if ann.is_empty():
+				continue
+			var a_entry: Dictionary = {
+				"kind": "annotation", "id": str(aid),
+				"annotation_kind": str(ann.get("kind", "")),
+				"lifecycle": str(ann.get("lifecycle", "open")),
+			}
+			var summary: String = str(ann.get("summary", ""))
+			if not summary.is_empty():
+				a_entry["summary"] = summary
+			var ref: String = str(ann.get("ref", ""))
+			if not ref.is_empty():
+				a_entry["ref"] = ref
+			entries.append(a_entry)
+
+	var reply: Dictionary = {"selection": entries, "count": entries.size()}
+	var active: String = str(state.get("active_candidate_id", ""))
+	if not active.is_empty():
+		reply["active_candidate_id"] = active
+	if entries.is_empty():
+		reply["note"] = "nothing is selected on the canvas"
 	return _ok(reply)
 
 

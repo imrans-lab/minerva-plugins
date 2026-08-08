@@ -114,6 +114,7 @@ func _init() -> void:
 	# UX2 station-8 auto-writer for every later mutation — earlier tests
 	# assume no sidecar exists unless they wrote one themselves.
 	await _test_j_sidecar_autosave()
+	await _test_k_get_selection()
 
 	_cleanup_sidecar()
 	panel.queue_free()
@@ -1035,6 +1036,68 @@ func _test_j_sidecar_autosave() -> void:
 		flushed_lifecycle == "applied")
 	check("J: flush cleared the pending flag (idempotent with the real exit)",
 		not panel._sidecar_autosave_pending)
+
+
+# ── K. minerva_pcb_get_selection — the deictic read (HITL-6b) ────────────────
+
+## docket 019fdf5579: "I've selected X — what is it?" answered in ONE call for
+## every entity kind. Against the REAL panel dispatch, real canvas selection
+## state, real host annotation selection, real workspace candidate.
+func _test_k_get_selection() -> void:
+	print("-- K: minerva_pcb_get_selection — every kind, one deictic read (HITL-6b) --")
+
+	# Empty selection is an ANSWER.
+	canvas._clear_selection()
+	host.set_selected_annotation_id("")
+	var empty: Dictionary = await panel.handle_tool("minerva_pcb_get_selection",
+		{"editor_name": EDITOR_NAME})
+	check("K: empty selection succeeds", bool(empty.get("success", false)), str(empty))
+	check("K: empty selection count 0", int(empty.get("count", -1)) == 0)
+	check("K: empty selection carries the note", not str(empty.get("note", "")).is_empty())
+
+	# A component + an annotation + a ghost, all selected at once.
+	canvas._add_to_selection(canvas.KIND_COMPONENT, "U1")
+	host.set_selected_annotation_id(fcu_id)
+	var ws = panel.get_routing_workspace()
+	var probe_cid: String = str(ws.ingest_record({
+		"net": "K_NET",
+		"segments": [{"start": [3.0, 3.0], "end": [8.0, 3.0], "layer": "F.Cu"}],
+		"vias": [], "width": 0.3, "source_hint_ids": [fcu_id], "source_hints": [],
+	}, 0))
+	canvas._add_to_selection(canvas.KIND_CANDIDATE, probe_cid)
+
+	var reply: Dictionary = await panel.handle_tool("minerva_pcb_get_selection",
+		{"editor_name": EDITOR_NAME})
+	check("K: mixed selection succeeds", bool(reply.get("success", false)), str(reply))
+	var by_kind := {}
+	for entry in reply.get("selection", []):
+		by_kind[str((entry as Dictionary).get("kind", ""))] = entry
+	check("K: component entry present", by_kind.has("component"))
+	if by_kind.has("component"):
+		var ce: Dictionary = by_kind["component"]
+		check("K: component id", str(ce.get("id", "")) == "U1")
+		check("K: component carries its position", absf(float(ce.get("x", 0.0)) - 30.0) < 0.001)
+	check("K: annotation entry present", by_kind.has("annotation"))
+	if by_kind.has("annotation"):
+		var ae: Dictionary = by_kind["annotation"]
+		check("K: annotation id is the selected hint", str(ae.get("id", "")) == fcu_id)
+		check("K: annotation kind named", str(ae.get("annotation_kind", "")) == "pcb_route_hint")
+	check("K: candidate entry present (the ghost)", by_kind.has("candidate"))
+	if by_kind.has("candidate"):
+		var ke: Dictionary = by_kind["candidate"]
+		check("K: ghost id", str(ke.get("id", "")) == probe_cid)
+		check("K: ghost carries its net", str(ke.get("net", "")) == "K_NET")
+		check("K: ghost carries quality metrics", ke.has("bend_count"))
+		check("K: ghost carries the source intent note",
+			(ke.get("source_intent_notes", []) as Array).size() == 1
+			and str((ke.get("source_intent_notes", []) as Array)[0]) == "top corridor")
+	check("K: the ghost pick fed active_candidate_id (the HITL-6b seam)",
+		str(reply.get("active_candidate_id", "")) == probe_cid)
+
+	# Cleanup: release everything K selected.
+	canvas._clear_selection()
+	host.set_selected_annotation_id("")
+	check("K: clear released the workspace focus too", str(ws.active_candidate_id) == "")
 
 
 # ── cleanup + assertion helper ────────────────────────────────────────────────

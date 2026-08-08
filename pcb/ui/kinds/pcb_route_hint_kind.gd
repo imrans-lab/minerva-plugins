@@ -78,11 +78,13 @@ static func _marker_geometry(zoom: float) -> Vector2:
 			/ (_MARKER_FADE_END_ZOOM - _MARKER_FADE_START_ZOOM), 0.0, 1.0)
 	return Vector2(px / z, alpha)
 
-## View-flag: draw the per-hint summary label. Set by PcbAnnotationHost when
-## the canvas's show_hint_labels toggle changes (default ON).
-var labels_visible: bool = true
-const _LABEL_COLOR := Color(0.92, 0.96, 0.98, 1.0)
-const _LABEL_FONT_SIZE: int = 12
+# (RETIRED, HITL-6b — docket 019fdf553f: on-canvas hint labels are gone
+# entirely, owner ruling: "don't show them at all… use the select/asking
+# paradigm". They rendered far from their geometry, overlapped, and were too
+# long to read as belonging to anything. The knowledge lives in MCP — the
+# annotation's summary/note/ref via annotations_list, workspace records, and
+# minerva_pcb_get_selection. The labels_visible var, the canvas
+# show_hint_labels toggle, and the host relay died with the ink.)
 
 ## Layer-tinted stroke hues (F.Cu vs B.Cu hue shift). Unknown layers → neutral.
 ## Human-hint palette (HITL-2 feedback): stays in the magenta/violet family so
@@ -111,12 +113,12 @@ const _VIA_MARKER_MIN_PX: float = 4.0
 ## across each endpoint marker of a hint whose waypoints were superseded by a
 ## task-level routing constraint (station 12 marker). Gray on purpose — it must
 ## not read as a layer tint (magenta/green), AI authorship (cyan), a via
-## (amber), or selection (yellow); it reads as "struck out". The slash is the
-## geometry-level half of the superseded treatment: it survives labels_visible
-## being off, where the "superseded" label prefix (the text-level half) does
-## not, so dimmed superseded ink always reads as struck-out rather than merely
-## faded. (A CONSUMED hint renders nothing at all — Epoch UX2 station 1 — so
-## the two states can no longer be confused on canvas.)
+## (amber), or selection (yellow); it reads as "struck out". Since HITL-6b
+## (labels retired) the slash is the ONLY superseded cue on canvas — the
+## "superseded ·" text prefix died with the labels; the state stays readable
+## via MCP (annotation kind_payload / minerva_pcb_get_selection). (A CONSUMED
+## hint renders nothing at all — Epoch UX2 station 1 — so the two states can
+## not be confused on canvas.)
 const _COLOR_SUPERSEDED_CUE := Color(0.8, 0.8, 0.8, 0.9)
 
 ## Dimming factor for the superseded polyline stroke (markers/label use their
@@ -1589,24 +1591,16 @@ func _far_endpoint(annotation: Dictionary) -> Variant:
 func _visible_ink_hit(annotation: Dictionary, point: Vector2, threshold: float, zoom: float) -> bool:
 	# HITL-6 (docket 019fdf2b5918): sizing + visibility come from the ONE
 	# curve render() draws with — a faded-out marker (alpha 0 at high zoom)
-	# contributes no ink and therefore claims no clicks.
+	# contributes no ink and therefore claims no clicks. Marker discs are the
+	# ONLY hint ink since HITL-6b retired the labels (docket 019fdf553f).
 	var geo := _marker_geometry(zoom)
-	var d := geo.x
-	if geo.y > 0.0:
-		var effective := threshold + d
-		for p in _marker_points(annotation):
-			if (p as Vector2).distance_to(point) <= effective:
-				return true
-	if not labels_visible:
+	if geo.y <= 0.0:
 		return false
-	var font: Font = ThemeDB.fallback_font
-	if font == null:
-		return false
-	var pos := _anchor_position(annotation)
-	var size := font.get_string_size(summary(annotation), HORIZONTAL_ALIGNMENT_LEFT, -1, _LABEL_FONT_SIZE)
-	var label_pos := pos + Vector2(d + 3.0, 4.0)
-	var rect := Rect2(label_pos - Vector2(0.0, size.y), size).grow(threshold)
-	return rect.has_point(point)
+	var effective := threshold + geo.x
+	for p in _marker_points(annotation):
+		if (p as Vector2).distance_to(point) <= effective:
+			return true
+	return false
 
 
 # ── Required rendering hooks ──────────────────────────────────────────────────
@@ -1775,22 +1769,11 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 			if far != null:
 				_draw_endpoint_marker(ctx, far, d, marker_color)
 
-	# Label: the enriched summary — gated by the view flag (canvas
-	# show_hint_labels → host relay — this instance property).
-	if not labels_visible:
-		return
-	var font: Font = ThemeDB.fallback_font
-	if font != null:
-		var label_color := _LABEL_COLOR
-		if mode == "superseded":
-			label_color = Color(label_color.r, label_color.g, label_color.b, label_color.a * 0.5)
-		var label_text := summary(annotation)
-		if mode == "superseded":
-			# Text-level half of the superseded cue (Codex 1047 fix round,
-			# verdict 1) — the slash on the markers is the half that survives
-			# labels being toggled off.
-			label_text = "superseded · %s" % label_text
-		ctx.draw_string(font, pos + Vector2(d + 3.0, 4.0), label_text, label_color, _LABEL_FONT_SIZE)
+	# (No label — retired at HITL-6b, docket 019fdf553f: they rendered far
+	# from their geometry, overlapped, and read as noise. "What's this?" is
+	# the select/ask paradigm's job — minerva_pcb_get_selection carries the
+	# summary the label used to truncate. The superseded state's on-canvas
+	# cue is the marker slash alone.)
 
 
 ## Path-based hit-test: distance to any polyline segment (not the AABB), plus the

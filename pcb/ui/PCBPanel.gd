@@ -358,7 +358,6 @@ const _VIEW_FLAGS := [
 	["Traces", "show_traces"],
 	["Silk", "show_silk"],
 	["Courtyard", "show_courtyard"],
-	["Hint labels", "show_hint_labels"],
 ]
 const _VIEW_MENU_EXPORT_ID := 100
 
@@ -3650,6 +3649,19 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 ## panel_tools._assembly_tri_state — an unreachable worker degrades to an
 ## honest "could not check", never a crash and never a silent pass.
 ## Async, mirroring the pcb.serialize / route_board await pattern.
+## MCP selection read (HITL-6b, docket 019fdf5579): whatever the human has
+## selected on the canvas right now, by kind, plus the routing workspace's
+## active candidate — the seam behind minerva_pcb_get_selection, so "I've
+## selected X — what is it?" is answerable. {} headless (no canvas mounted).
+func get_selection_state() -> Dictionary:
+	var out: Dictionary = {}
+	if _canvas != null and _canvas.has_method("selection_snapshot"):
+		out = _canvas.selection_snapshot()
+	if _routing_workspace != null:
+		out["active_candidate_id"] = str(_routing_workspace.active_candidate_id)
+	return out
+
+
 ## Whole-board health without a routing run (Epoch UX2 station 9, docket
 ## 019fde571300): the pcb.board_health channel — census + assembly, the same
 ## object a route reply's board_health carries. Same envelope normalisation

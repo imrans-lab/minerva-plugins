@@ -988,7 +988,8 @@ func _test_render_mode_gate() -> void:
 func _test_canvas_none_mode_gates() -> void:
 	print("\n-- pcb_canvas 'none'-mode gates (Epoch UX2 station 1) --")
 	var kind = _Kind.new()
-	kind.labels_visible = false  # ink = markers only, so ink-miss geometry is exact
+	# (HITL-6b: labels are retired outright — marker discs are the only hint
+	# ink, so ink-miss geometry is exact by construction.)
 
 	var registry := FakeKindRegistry.new()
 	registry.kind = kind
@@ -1152,9 +1153,8 @@ func _test_marker_zoom_curve() -> void:
 		and kind._marker_geometry(40.0) == Vector2.ZERO)
 
 	# Ink parity: a press exactly ON the anchor of a markers-mode hint is
-	# visible ink at working zoom and NOT ink at high zoom (labels off, so
-	# markers are the only ink in play).
-	kind.labels_visible = false
+	# visible ink at working zoom and NOT ink at high zoom (markers are the
+	# ONLY hint ink — labels retired at HITL-6b).
 	var ann := {
 		"id": "curve_probe", "lifecycle": "open",
 		"anchor": {"plugin": "pcb", "type": "board.point", "id": {"x": 0.0, "y": 0.0},

@@ -1117,15 +1117,8 @@ func add_annotation(annotation: Dictionary) -> String:
 ## (PCBPanel.gd), never read by this host once loaded.
 
 
-## View-flag relay (canvas show_hint_labels → kind label gate). The kind's
-## render() has no host/canvas access, so the flag lives on the kind instance
-## in THIS host's registry.
-func set_hint_labels_visible(visible: bool) -> void:
-	if _registry == null:
-		return
-	var kind = _registry.get_annotation_kind(&"pcb_route_hint")
-	if kind != null and "labels_visible" in kind:
-		kind.labels_visible = visible
+# (set_hint_labels_visible relay RETIRED with the labels themselves —
+# HITL-6b, docket 019fdf553f.)
 
 
 ## MCP-authored route hints carry dest_pins but no dest_point (the render/

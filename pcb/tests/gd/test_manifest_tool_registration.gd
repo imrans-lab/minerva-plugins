@@ -134,19 +134,21 @@ func _init() -> void:
 	# conversion that clears a singly-owned task constraint and strips the
 	# station-12 supersession marker in ordered two-store writes; NOT atomic
 	# across the two sidecars — Codex 1047 verdict 6, load-time
-	# reconciliation owns the torn shapes) == 74.
+	# reconciliation owns the torn shapes) == 74,
+	# + 1 HITL-6b tool (minerva_pcb_get_selection — the deictic "what's this"
+	# read over the canvas selection, docket 019fdf5579) == 75.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is the Codex 1047 verdict-4 bump
-	# (73 -> 74), sequenced after station 10's (72 -> 73), station 8's
-	# (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's (68 -> 69),
-	# C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the same
-	# serialization point.
-	check("total registered tool count == 74", registered.size() == 74,
+	# entry could hide behind it. This is the HITL-6b bump (74 -> 75),
+	# sequenced after Codex 1047 verdict-4's (73 -> 74), station 10's
+	# (72 -> 73), station 8's (71 -> 72), bus-propose's (70 -> 71), D0-5's
+	# (69 -> 70), C5's (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) —
+	# all queue behind the same serialization point.
+	check("total registered tool count == 75", registered.size() == 75,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
