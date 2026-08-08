@@ -273,7 +273,10 @@ func _run_golden_parity() -> void:
 	# attaches the tri-state assembly verdict after mutating (headless here →
 	# {status:"indeterminate"} — the channel bridge degrades honestly, never
 	# silently).
-	var ga := await h("minerva_pcb_add_component", _args({"id": "C3", "footprint": "CAPACITOR", "x": 10.0, "y": 50.0}))
+	# ON-GRID (multiples of 2.54): the UX2 station-6 snap disclosure adds
+	# snapped/requested only for off-grid requests — this golden pins the
+	# lean common shape (conditional keys pinned in test_workspace_tools 23f).
+	var ga := await h("minerva_pcb_add_component", _args({"id": "C3", "footprint": "CAPACITOR", "x": 10.16, "y": 50.8}))
 	check_keys("add_component result", ga, ["success", "component_id", "x", "y", "pin_count", "assembly"])
 	check_eq("component_id echoed", ga.get("component_id", ""), "C3")
 	check_eq("placement verb attaches the tri-state assembly verdict (indeterminate headless)",
@@ -281,7 +284,7 @@ func _run_golden_parity() -> void:
 
 	print("\n-- GOLDEN: move_component shape --")
 	# Legacy → {success, component_id, x, y} + the 019fd5fe2724 `assembly` key.
-	var gm := await h("minerva_pcb_move_component", _args({"component_id": "C3", "x": 12.0, "y": 52.0}))
+	var gm := await h("minerva_pcb_move_component", _args({"component_id": "C3", "x": 12.7, "y": 53.34}))
 	check_keys("move_component result", gm, ["success", "component_id", "x", "y", "assembly"])
 
 	print("\n-- GOLDEN: spatial_query shape --")

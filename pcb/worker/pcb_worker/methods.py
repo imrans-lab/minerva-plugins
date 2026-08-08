@@ -477,6 +477,26 @@ def _assembly_check(params: dict) -> dict:
     return {"ok": True, "result": _assembly_tri_state(board)}
 
 
+def _board_health_method(params: dict) -> dict:
+    """Standalone whole-board health ledger (Epoch UX2 station 9, docket
+    019fde571300) — the SAME `board_health` object every ok route reply
+    carries (_board_health: completeness census + tri-state assembly), but
+    computable WITHOUT a routing run, so the load path can announce "8 nets
+    unrouted, GND in 9 islands" at open, before any routing verb.
+
+    params: {board: <canonical board dict>} (anything `_load` accepts).
+    Reply: {ok: True, result: {complete, missing_copper, partial?,
+    indeterminate?, assembly:{...}, approximate: True}} — one kernel, same
+    keys, same tri-state semantics as the propose-time ledger; a census
+    fault degrades inside _completeness_keys ({complete: None,
+    completeness_error}), never a raise."""
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    return {"ok": True, "result": _board_health(board, [], board)}
+
+
 def _normalize(params: dict) -> dict:
     """Rewrite a canonical SOURCE board to its normalized v2 shape (the sync-back
     the compile fold never persists): legacy inline per-pin fabrication geometry is
@@ -1261,6 +1281,51 @@ def _board_health(census_board: dict, routes: list,
     health = _completeness_keys(census_board, routes, None)
     health["assembly"] = _assembly_tri_state(assembly_board)
     return health
+
+
+def _attach_island_deltas(payload: dict, census_board: dict) -> None:
+    """Stamp per-route ``island_delta`` + hoist top-level ``island_deltas``.
+
+    Epoch UX2 station 6 (docket 019fde367b24). Per route:
+    ``{"pin_groups_before": B, "pin_groups_after": A}`` — the net's
+    pin-island count on the PRE-proposal board vs the same board with THIS
+    ONE route's copper added (drc.net_pin_group_count — the same union-find
+    + credits as the census, so the delta can never disagree with
+    board_health.partial about what "island" means). Each route is judged
+    ALONE against the base board deliberately: "what does accepting this
+    candidate buy?" is a per-candidate question, and crediting route 2 with
+    route 1's merges would double-count when the caller accepts only one.
+
+    Absent-key conventions: a net the census cannot judge (single-pin, zone
+    copper) or a fault gets NO key — never zeros a reader could mistake for
+    "merges nothing". The hoisted ``island_deltas`` list (span_outcomes /
+    corridor_adherence convention) carries net + hint_ids attribution and is
+    absent when no route earned a delta. Diagnostic only — never sinks the
+    reply."""
+    deltas: list = []
+    for route in payload.get("routes") or []:
+        if not isinstance(route, dict):
+            continue
+        net = route.get("net")
+        if not isinstance(net, str) or not net:
+            continue
+        try:
+            before = drc.net_pin_group_count(census_board, net)
+            after = drc.net_pin_group_count(
+                _post_route_board(census_board, [route]), net)
+        except Exception:  # noqa: BLE001 - a diagnostic must not sink the reply
+            continue
+        if before is None or after is None:
+            continue
+        route["island_delta"] = {"pin_groups_before": before,
+                                 "pin_groups_after": after}
+        entry = {"net": net, "pin_groups_before": before,
+                 "pin_groups_after": after}
+        if route.get("hint_ids"):
+            entry["hint_ids"] = list(route["hint_ids"])
+        deltas.append(entry)
+    if deltas:
+        payload["island_deltas"] = deltas
 
 
 # ---------------------------------------------------------------------------
@@ -2244,6 +2309,15 @@ def _route(params: dict) -> dict:
     # always set on this path — module comment above — but the raw canonical
     # board is an honest fallback, not a skipped ledger, if that ever
     # changes); assembly over the raw board, re-resolved for courtyards.
+    # ISLAND DELTA (Epoch UX2 station 6, docket 019fde367b24): per-route
+    # census CREDIT, computed against the pre-proposal board — "GND partial,
+    # 9 pin groups" is true but unactionable on its own; "this route merges
+    # 2 islands -> 8 remain" is a decision aid. Rides each route AND is
+    # hoisted top-level as `island_deltas` (the span_outcomes/
+    # corridor_adherence convention), attributed by the same hint_ids stamp.
+    _attach_island_deltas(
+        payload, drc_board if drc_board is not None else board_dict)
+
     payload["board_health"] = _board_health(
         drc_board if drc_board is not None else board_dict,
         payload.get("routes") or [], board_dict)
@@ -2531,6 +2605,9 @@ _HANDLERS = {
     # Tri-state assembly check (DCR 019fd5fd9084 / 019fd5fddc09) — the
     # standalone surface for board_health.assembly.
     "assembly_check": lambda req: _assembly_check(req.get("params") or {}),
+    # Whole-board health without a routing run (Epoch UX2 station 9) — the
+    # load path's census+assembly surface.
+    "board_health": lambda req: _board_health_method(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),

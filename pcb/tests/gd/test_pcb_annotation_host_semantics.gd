@@ -74,6 +74,8 @@ func _init() -> void:
 	_test_build_route_hint_envelope_width_mm_absent_by_default()
 	_test_render_mode_gate()
 	_test_render_mode_superseded()
+	_test_canvas_none_mode_gates()
+	_test_consumed_selection_veto()
 	_test_superseded_refusal_and_release()
 	_test_reconcile_strip_bookkeeping()
 
@@ -772,6 +774,40 @@ class FakeHostNoPanelMethod extends RefCounted:
 		return selected_id
 
 
+## Canvas-gate router stand-in (Epoch UX2 station 1): the annotation-router
+## seam pcb_canvas._route_hint_masks_claim / _filter_masked_route_hints walk —
+## registry + annotation list + screen↔doc transform + visibility — PLUS the
+## host methods _render_mode_for duck-types against (get_panel), because the
+## canvas passes the ROUTER itself as the render-mode host.
+class FakeCanvasRouter extends RefCounted:
+	var registry = null
+	var annotations: Array = []
+	var panel = null
+	func get_registry():
+		return registry
+	func get_annotations() -> Array:
+		return annotations
+	func get_by_id(id: String) -> Dictionary:
+		for a in annotations:
+			if str(a.get("id", "")) == id:
+				return a
+		return {}
+	func transform_screen_to_doc(p: Vector2) -> Vector2:
+		return p
+	func is_annotation_visible(_ann: Dictionary) -> bool:
+		return true
+	func get_panel():
+		return panel
+
+
+## Registry stand-in: returns the one real route-hint kind instance for the
+## pcb_route_hint kind name, null for everything else.
+class FakeKindRegistry extends RefCounted:
+	var kind = null
+	func get_annotation_kind(name: StringName):
+		return kind if str(name) == "pcb_route_hint" else null
+
+
 ## F3 (cold review): a host with a MULTI-selection set —
 ## get_selected_annotation_ids() — plus get_panel(), so _is_selected's plural
 ## branch can be exercised independently of, and together with, the
@@ -804,15 +840,15 @@ func _test_render_mode_gate() -> void:
 	check("no host at all -> full (degrade)",
 			kind._render_mode_for(ann, null) == "full")
 
-	# F4: an APPLIED hint with no host at all must ALSO render "full", not
-	# "markers_dimmed" — the reachability degrade sits ABOVE the lifecycle
-	# check precisely so a headless render (ctx.host == null) of a consumed
-	# hint is byte-identical to pre-station-7 rendering, which never looked at
-	# lifecycle for the polyline at all.
+	# Epoch UX2 station 1 (supersedes cold-review F4): an APPLIED hint renders
+	# "none" EVERYWHERE, host or no host — the owner ruling ("no visible form
+	# once applied") is an unconditional invariant, and the lifecycle read
+	# needs no host, so even a headless overlay export agrees with the canvas
+	# about what accepted means.
 	var applied_no_host_ann := ann.duplicate(true)
 	applied_no_host_ann["lifecycle"] = "applied"
-	check("applied hint, no host at all -> full (F4, headless byte-identical)",
-			kind._render_mode_for(applied_no_host_ann, null) == "full")
+	check("applied hint, no host at all -> none (UX2 station 1, unconditional)",
+			kind._render_mode_for(applied_no_host_ann, null) == "none")
 
 	var workspace := FakeWorkspace.new()
 	var panel := FakePanel.new()
@@ -841,17 +877,36 @@ func _test_render_mode_gate() -> void:
 			kind._render_mode_for(ann, host) == "full")
 	host.selected_id = ""
 
-	# Consumed (lifecycle "applied") -> markers_dimmed, independent of candidate state.
+	# Consumed (lifecycle "applied") -> none, independent of candidate state
+	# (UX2 station 1: real copper owns the geometry; the hint is a record).
 	var applied_ann := ann.duplicate(true)
 	applied_ann["lifecycle"] = "applied"
-	check("consumed (applied) hint -> markers_dimmed",
-			kind._render_mode_for(applied_ann, host) == "markers_dimmed")
+	check("consumed (applied) hint -> none (UX2 station 1)",
+			kind._render_mode_for(applied_ann, host) == "none")
 
-	# Selected still wins over "applied" — editing always needs the full corridor.
+	# Selection does NOT win over "applied" (UX2 station 1 flips the old rule):
+	# canvas selection can't reach zero-ink annotations anyway (F1 gates mask
+	# every claim), and a dock-driven selection of a consumed record must not
+	# resurrect corridor ink on a canvas that shows real parts only.
 	host.selected_id = hint_id
-	check("selected + applied -> full (selection still wins)",
-			kind._render_mode_for(applied_ann, host) == "full")
+	check("selected + applied -> none (invisibility is unconditional)",
+			kind._render_mode_for(applied_ann, host) == "none")
 	host.selected_id = ""
+
+	# The undo pin: commit-undo's lifecycle reconcile flips applied -> open,
+	# and because _render_mode_for is a PURE read (no cached state), the very
+	# same dictionary re-inks immediately — with a live candidate it returns
+	# to "markers", and with none to "full". This is what makes Option A's
+	# "invisible record, not deletion" restorable by construction.
+	var undo_ann := applied_ann.duplicate(true)
+	undo_ann["lifecycle"] = "open"
+	check("applied -> open flip re-inks: live candidate -> markers (undo pin)",
+			kind._render_mode_for(undo_ann, host) == "markers")
+	var undo_ann_other := applied_ann.duplicate(true)
+	undo_ann_other["lifecycle"] = "open"
+	undo_ann_other["id"] = "hint_undo_solo"
+	check("applied -> open flip re-inks: no candidate -> full (undo pin)",
+			kind._render_mode_for(undo_ann_other, host) == "full")
 
 	# Degrade, hop by hop: workspace-unreachable must resolve "full" no matter
 	# WHICH hop is missing, not just a totally absent host.
@@ -919,6 +974,153 @@ func _test_render_mode_gate() -> void:
 			kind._render_mode_for(ann, host_no_field) == "full")
 
 
+## Epoch UX2 station 1 — the CANVAS gates for the "none" render mode, against
+## the REAL pcb_canvas.gd + REAL kind (only the router seam is faked):
+##   * _route_hint_masks_claim: a press ANYWHERE on a consumed (applied) hint
+##     — corridor, or even the exact spot its marker used to occupy — masks
+##     the claim (falls through to the board ladder), because "none" draws
+##     zero ink and there is nothing on screen to click.
+##   * _filter_masked_route_hints: no marquee, however large, can sweep a
+##     consumed hint back into selection.
+##   * Contrast rows pin that "markers" mode keeps its existing ink-reach
+##     behavior — the "none" branches narrow nothing else.
+func _test_canvas_none_mode_gates() -> void:
+	print("\n-- pcb_canvas 'none'-mode gates (Epoch UX2 station 1) --")
+	var kind = _Kind.new()
+	kind.labels_visible = false  # ink = markers only, so ink-miss geometry is exact
+
+	var registry := FakeKindRegistry.new()
+	registry.kind = kind
+
+	# Two hints sharing corridor shape (0,0)→(100,0): one consumed, one open
+	# with a live candidate (markers mode).
+	var applied_ann := {
+		"id": "hint_applied", "kind": "pcb_route_hint", "lifecycle": "applied",
+		"anchor": {"plugin": "pcb", "type": "board.point", "id": {"x": 0.0, "y": 0.0},
+				"snapshot": {"position": [0.0, 0.0]}},
+		"kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+				"waypoints": [[0.0, 0.0], [100.0, 0.0]]},
+	}
+	var markers_ann := {
+		"id": "hint_markers", "kind": "pcb_route_hint", "lifecycle": "open",
+		"anchor": {"plugin": "pcb", "type": "board.point", "id": {"x": 0.0, "y": 0.0},
+				"snapshot": {"position": [0.0, 0.0]}},
+		"kind_payload": {"hint_type": "waypoint", "layer": "F.Cu",
+				"waypoints": [[0.0, 0.0], [100.0, 0.0]]},
+	}
+
+	var workspace := FakeWorkspace.new()
+	workspace.add_live_candidate("cand_m", ["hint_markers"])
+	var panel := FakePanel.new()
+	panel.workspace = workspace
+
+	var router := FakeCanvasRouter.new()
+	router.registry = registry
+	router.panel = panel
+
+	var canvas = _Canvas.new()
+	canvas.set_annotation_router(router)
+
+	# ── Claim gate, consumed hint ──
+	router.annotations = [applied_ann]
+	# (canvas.zoom defaults to 4.0 px/mm: hit slack = 8px/4 = 2.0 doc units,
+	# marker ink radius = max(1.25, 6px/4) = 1.5 — so y=1 hits the corridor
+	# while x=50 sits far outside any marker/label ink.)
+	check("press on consumed hint's corridor midpoint -> masked (falls through)",
+			bool(canvas._route_hint_masks_claim(Vector2(50.0, 1.0))))
+	check("press on consumed hint's former ANCHOR marker spot -> still masked",
+			bool(canvas._route_hint_masks_claim(Vector2(0.0, 0.0))))
+	check("press on consumed hint's former FAR marker spot -> still masked",
+			bool(canvas._route_hint_masks_claim(Vector2(100.0, 0.0))))
+	check("press far from the consumed hint entirely -> no mask (no ink hit at all)",
+			not bool(canvas._route_hint_masks_claim(Vector2(50.0, 60.0))))
+
+	# ── Claim gate, markers-mode contrast (existing behavior preserved) ──
+	router.annotations = [markers_ann]
+	check("markers mode: press on corridor midpoint (ink miss) -> masked",
+			bool(canvas._route_hint_masks_claim(Vector2(50.0, 1.0))))
+	check("markers mode: press ON the anchor marker -> NOT masked (visible ink)",
+			not bool(canvas._route_hint_masks_claim(Vector2(0.0, 0.0))))
+
+	# ── Marquee sweep ──
+	router.annotations = [applied_ann, markers_ann]
+	var everything := Rect2(-20.0, -20.0, 200.0, 100.0)
+	var swept: PackedStringArray = canvas._filter_masked_route_hints(
+			PackedStringArray(["hint_applied", "hint_markers"]), everything, router)
+	check("marquee over EVERYTHING: consumed hint dropped from sweep",
+			not ("hint_applied" in swept))
+	check("marquee over EVERYTHING: markers-mode hint kept (rect reaches its markers)",
+			"hint_markers" in swept)
+
+	var corridor_only := Rect2(40.0, -6.0, 20.0, 12.0)
+	var swept2: PackedStringArray = canvas._filter_masked_route_hints(
+			PackedStringArray(["hint_applied", "hint_markers"]), corridor_only, router)
+	check("marquee over corridor-only span: consumed hint dropped",
+			not ("hint_applied" in swept2))
+	check("marquee over corridor-only span: markers-mode hint ALSO dropped (no ink reached)",
+			not ("hint_markers" in swept2))
+
+	canvas.free()
+
+
+## Epoch UX2 station 1, cold review F1/F2 — the consumed-hint selection veto on
+## the REAL PcbAnnotationHost. An applied hint renders "none", so it must never
+## be selectable: core selection visuals (transform-tool bounds/handles,
+## overlay halo) and claims_point's single-selected gizmo branch all key off
+## selection with no render-mode read — the veto at the host's setters is what
+## keeps them honest. Plus the F2 fence: path_editing_locked on applied hints.
+func _test_consumed_selection_veto() -> void:
+	print("\n-- PcbAnnotationHost consumed-hint selection veto (UX2 station 1 F1/F2) --")
+	var host = _Host.new()
+
+	var wp_a: Array = [[0.0, 0.0], [10.0, 0.0]]
+	var wp_b: Array = [[0.0, 5.0], [10.0, 5.0]]
+	var id_a: String = str(host.add_route_hint_at(0.0, 0.0, "veto A", "F.Cu", "waypoint", wp_a, "human"))
+	var id_b: String = str(host.add_route_hint_at(0.0, 5.0, "veto B", "F.Cu", "waypoint", wp_b, "human"))
+	check("veto fixture: two hints stored", not id_a.is_empty() and not id_b.is_empty())
+
+	# Flip-time deselect: A is selected at the moment it becomes applied.
+	host.set_selected_annotation_id(id_a)
+	check("open hint selectable (baseline)", host.get_selected_annotation_id() == id_a)
+	var flip: Dictionary = host.update_annotation_lifecycle(id_a, "applied")
+	check("lifecycle flip to applied accepted", bool(flip.get("ok", false)))
+	check("flip-time deselect: selection cleared when the selected hint is consumed",
+			host.get_selected_annotation_id() == "")
+
+	# Setter veto, single id: refusal is a NO-OP — prior selection stands.
+	host.set_selected_annotation_id(id_b)
+	host.set_selected_annotation_id(id_a)
+	check("selecting a consumed hint refused; prior selection stands",
+			host.get_selected_annotation_id() == id_b)
+
+	# Setter veto, set form: consumed ids are filtered, the rest pass through.
+	host.set_selected_annotation_ids(PackedStringArray([id_a, id_b]), id_a)
+	var ids: PackedStringArray = host.get_selected_annotation_ids()
+	check("set form filters the consumed id out", not ids.has(id_a) and ids.has(id_b))
+	check("consumed primary demoted to a surviving member",
+			host.get_selected_annotation_id() == id_b)
+
+	# Toggle routes through the set form — same filter.
+	host.toggle_selected_annotation_id(id_a)
+	check("toggle cannot add a consumed hint",
+			not host.get_selected_annotation_ids().has(id_a))
+
+	# F2 fence: consumed geometry is edit-locked (transform tool bend zones).
+	var applied_ann: Dictionary = host.get_by_id(id_a)
+	var kind = _Kind.new()
+	check("path_editing_locked TRUE on a consumed hint",
+			bool(kind.path_editing_locked(applied_ann)))
+
+	# Undo pin: applied -> open makes the hint selectable and unlocked again,
+	# purely from lifecycle state.
+	host.update_annotation_lifecycle(id_a, "open")
+	host.set_selected_annotation_id(id_a)
+	check("reopened hint selectable again (undo pin)",
+			host.get_selected_annotation_id() == id_a)
+	check("path_editing_locked FALSE again on the reopened hint",
+			not bool(kind.path_editing_locked(host.get_by_id(id_a))))
+
+
 ## Supersession marker in the render gate (Codex 1047 fix round, verdict 1).
 ## Station 12 stamps kind_payload.waypoints_superseded_by_constraint_revision
 ## (int >= 1) on legacy waypoint hints whose routing authority moved to a
@@ -966,12 +1168,15 @@ func _test_render_mode_superseded() -> void:
 			kind._render_mode_for(ann, host) == "superseded")
 	host.selected_id = ""
 
-	# Marker outranks lifecycle too — "applied" must not demote it to the
-	# weaker markers_dimmed treatment (which lacks the superseded cue).
+	# Lifecycle outranks the marker (UX2 station 1 flips the old rule): a
+	# superseded hint whose candidate later COMMITTED is consumed — real
+	# copper owns the geometry now, and the slash-corridor would be visible
+	# ink for an accepted intent, exactly what the owner ruled out. The
+	# superseded cue only matters while the hint is live history.
 	var applied := ann.duplicate(true)
 	applied["lifecycle"] = "applied"
-	check("superseded + applied lifecycle -> superseded (marker outranks)",
-			kind._render_mode_for(applied, host) == "superseded")
+	check("superseded + applied lifecycle -> none (applied outranks the marker)",
+			kind._render_mode_for(applied, host) == "none")
 
 	# Host-null: the marker is a pure payload read, so it applies headless
 	# too — no pre-station-7 hint ever carried this (station-12) marker, so

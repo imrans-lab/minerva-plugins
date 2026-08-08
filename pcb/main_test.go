@@ -74,6 +74,10 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// "assembly_check" method. Dotted panel-IPC channel, same namespace
 		// note as pcb.route/pcb.draft_check above.
 		"pcb.assembly_check",
+		// worker-backed — whole-board health (census + assembly) without a
+		// routing run (Epoch UX2 station 9, docket 019fde571300), forwarding
+		// to the worker's "board_health" method. Same channel idiom.
+		"pcb.board_health",
 	}
 	for _, name := range want {
 		if !got[name] {

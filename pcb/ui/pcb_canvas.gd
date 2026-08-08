@@ -3486,7 +3486,11 @@ func _filter_masked_route_hints(ids: PackedStringArray, select_rect: Rect2, rout
 			kind = registry.get_annotation_kind(StringName(str(ann.get("kind", ""))))
 		if kind != null and kind.has_method("_render_mode_for") and kind.has_method("_marker_points"):
 			var mode: String = kind._render_mode_for(ann, router)
-			if mode == "markers" or mode == "markers_dimmed":
+			# "none" (Epoch UX2 station 1): a consumed hint has NO visible ink
+			# at all, so no marquee can ever reach it — drop unconditionally.
+			if mode == "none":
+				continue
+			if mode == "markers":
 				var reaches_ink := false
 				for p in kind._marker_points(ann):
 					if select_rect.has_point(p as Vector2):
@@ -5256,8 +5260,8 @@ func _claim_annotation_press(event: InputEventMouseButton) -> bool:
 	# F1 (cold review, station 7 fix round): "what you see on top is what you
 	# click" — rung 0's OWN justification, restated above — is exactly what
 	# breaks if this claim is honored blind. A route hint whose _render_mode_for
-	# has withheld its polyline ("markers"/"markers_dimmed": a live candidate or
-	# committed copper already owns that corridor) still answers hit_test() as
+	# has withheld its polyline ("markers": a live candidate owns that corridor;
+	# "none": consumed — zero ink at all) still answers hit_test() as
 	# if the whole corridor were drawn — AnnotationKind.hit_test() has no host
 	# param (documented limitation, pcb_route_hint_kind.gd), so it cannot know
 	# its own render mode. The router's claim above is therefore blind to it
@@ -5288,7 +5292,8 @@ func _claim_annotation_press(event: InputEventMouseButton) -> bool:
 
 ## F1 gate (cold review, station 7 fix round): does the press at `screen_pos`
 ## land only on a pcb_route_hint's INVISIBLE corridor while that hint is
-## rendering in a "markers"/"markers_dimmed" mode? See _claim_annotation_press's
+## rendering in "markers" mode (or "none" — a consumed hint, which masks
+## unconditionally)? See _claim_annotation_press's
 ## own comment for why this has to be checked at all.
 ##
 ## Walks annotations topmost-first, testing kind.hit_test() ink — the SAME
@@ -5300,9 +5305,12 @@ func _claim_annotation_press(event: InputEventMouseButton) -> bool:
 ## masking here, same "what's on top wins" rule the rest of the ladder uses.
 ##
 ## Scope, stated honestly: this does not replicate claims_point()'s gizmo-zone
-## or caption-handle branches (those only ever fire for the SINGLE
-## already-selected annotation, which — per _render_mode_for rule 1 — always
-## renders "full" and so never needs masking).
+## or caption-handle branches — those only ever fire for the SINGLE
+## already-selected annotation, and a selected hint never needs masking:
+## selection renders "full" for every selectable hint, and the one mode that
+## renders nothing ("none", consumed) can never BE selected —
+## PcbAnnotationHost's selection veto refuses applied hints at every setter
+## and deselects on the lifecycle flip (Epoch UX2 station 1, cold review F1).
 func _route_hint_masks_claim(screen_pos: Vector2) -> bool:
 	var router = _router_with("get_registry")
 	if router == null or not router.has_method("get_annotations") \
@@ -5330,7 +5338,12 @@ func _route_hint_masks_claim(screen_pos: Vector2) -> bool:
 		# (a different kind, or a "full" hint) is a legitimate claim.
 		if kind.has_method("_render_mode_for") and kind.has_method("_visible_ink_hit"):
 			var mode: String = kind._render_mode_for(ann, router)
-			if mode == "markers" or mode == "markers_dimmed":
+			# "none" (Epoch UX2 station 1): a consumed hint draws nothing, so
+			# EVERY press that lands on its (invisible) corridor falls through
+			# to whatever is actually on screen beneath it.
+			if mode == "none":
+				return true
+			if mode == "markers":
 				return not bool(kind._visible_ink_hit(ann, doc_pos, hit_threshold, zoom))
 		return false
 	return false

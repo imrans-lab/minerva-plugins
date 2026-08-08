@@ -84,14 +84,14 @@ const _VIA_MARKER_MIN_PX: float = 4.0
 ## (amber), or selection (yellow); it reads as "struck out". The slash is the
 ## geometry-level half of the superseded treatment: it survives labels_visible
 ## being off, where the "superseded" label prefix (the text-level half) does
-## not, so a dimmed superseded hint can never be mistaken for a merely
-## consumed ("markers_dimmed") one.
+## not, so dimmed superseded ink always reads as struck-out rather than merely
+## faded. (A CONSUMED hint renders nothing at all — Epoch UX2 station 1 — so
+## the two states can no longer be confused on canvas.)
 const _COLOR_SUPERSEDED_CUE := Color(0.8, 0.8, 0.8, 0.9)
 
-## Dimming factor shared by the superseded polyline stroke and (via the same
-## 0.5 the "markers_dimmed" branch uses for markers/label) the whole
-## superseded treatment: visible enough to show what was authored, dim enough
-## to never compete with the constraint-owned live geometry.
+## Dimming factor for the superseded polyline stroke (markers/label use their
+## own 0.5): visible enough to show what was authored, dim enough to never
+## compete with the constraint-owned live geometry.
 const _SUPERSEDED_STROKE_DIM: float = 0.4
 
 ## Path hit-test tolerance in document (board-mm) units, on top of stroke half-width.
@@ -783,6 +783,11 @@ class BendHandleEditTool:
 			var ann: Dictionary = annotations[i]
 			if str(ann.get("kind", "")) != "pcb_route_hint":
 				continue
+			# Epoch UX2 station 1 (cold review F2): a consumed hint's corridor
+			# lies exactly under its committed copper — it renders nothing and
+			# must not be pickable through that invisible geometry.
+			if str(ann.get("lifecycle", "open")) == "applied":
+				continue
 			if not _host.is_annotation_visible(ann):
 				continue
 			var kind: AnnotationKind = registry.get_annotation_kind(StringName("pcb_route_hint")) if registry != null else null
@@ -963,6 +968,11 @@ class ViaInsertTool:
 		for i in range(annotations.size() - 1, -1, -1):
 			var ann: Dictionary = annotations[i]
 			if str(ann.get("kind", "")) != "pcb_route_hint":
+				continue
+			# Epoch UX2 station 1 (cold review F2): a consumed hint's corridor
+			# lies exactly under its committed copper — it renders nothing and
+			# must not be pickable through that invisible geometry.
+			if str(ann.get("lifecycle", "open")) == "applied":
 				continue
 			if not _host.is_annotation_visible(ann):
 				continue
@@ -1299,25 +1309,51 @@ func validate(annotation: Dictionary) -> Array:
 # job from here is just to say "this is what that candidate is for", which
 # endpoint markers + its label do without the visual collision. A consumed
 # hint (lifecycle "applied" — a candidate built from it has already been
-# committed to copper) gets the same intent-only treatment, additionally
-# dimmed: it is no longer live authoring input, only a historical record of
-# what was asked for. Selecting a hint always wins back the full corridor —
-# editing (bend-drag, via-insert) needs the whole path on screen regardless of
-# candidate/lifecycle state.
+# committed to copper) renders NOTHING AT ALL (Epoch UX2 station 1, owner
+# ruling: "once suggestions are applied, the real parts are what matter. The
+# hints no longer need to exist in any visible form."): the annotation
+# persists as an invisible record — citeable refs, provenance, sidecar — and
+# commit-undo restores its ink for free because the mode is a pure lifecycle
+# read over state that is never deleted. Selecting a hint wins back the full
+# corridor — editing (bend-drag, via-insert) needs the whole path on screen —
+# EXCEPT for applied hints, whose invisibility is unconditional.
 
 ## Pure decision: which render mode `annotation` gets, given `host` (duck-typed,
 ## may be null/incomplete — see _has_live_candidate below). Returns one of
-## "full" | "markers" | "markers_dimmed" | "superseded". Consumed directly by
+## "none" | "full" | "markers" | "superseded". Consumed directly by
 ## render(); kept side-effect-free and host-optional so it is testable in
 ## isolation.
 ##
 ## Priority order (first match wins):
+##  -2. lifecycle == "applied" (consumed)                         -> "none"
 ##  -1. kind_payload.waypoints_superseded_by_constraint_revision  -> "superseded"
 ##   0. host == null (headless / no host at all)                  -> "full"
 ##   1. selected — ANY selection-set membership, not just primary -> "full"
-##   2. lifecycle == "applied" (consumed)                         -> "markers_dimmed"
-##   3. a live candidate's source_hint_ids names this hint        -> "markers"
-##   4. otherwise — the hint is the route's sole representation   -> "full"
+##   2. a live candidate's source_hint_ids names this hint        -> "markers"
+##   3. otherwise — the hint is the route's sole representation   -> "full"
+##
+## Step -2 (Epoch UX2 station 1, owner-ruled Option A) outranks EVERYTHING —
+## supersession, the host-null degrade, selection: "accepted state is
+## invisible; the user sees real parts" is an UNCONDITIONAL invariant, and
+## every conditional version of it leaves a leak path where consumed ink
+## resurfaces (the exact bug class HITL-5 reported as "markers remain" /
+## "parts seem ghosted"). Specifically:
+##   * above "superseded": a superseded hint whose candidate later commits is
+##     consumed — the slash-corridor is history-of-a-history, and real copper
+##     now owns the geometry;
+##   * above host-null: a pure lifecycle read needs no host (the same argument
+##     that lets step -1 sit above step 0 — no PRE-lifecycle hint carries
+##     "applied", so no legacy headless render changes), and a headless
+##     overlay export must agree with the canvas about what accepted means;
+##   * above selection: a consumed hint can never BE selected —
+##     PcbAnnotationHost's selection veto refuses applied hints at every
+##     setter and deselects on the lifecycle flip (cold review F1), canvas
+##     claims are masked by the F1 gates (zero ink), and the bend/via tools
+##     skip applied hints in their own pickers (F2). This rung is the belt
+##     for any host that lacks the veto. Undo-restorability is the lifecycle
+##     reconcile's job (applied↔open, both directions), not a render-time
+##     affordance: the mode is a pure read, so the flip re-inks with no
+##     cached state.
 ##
 ## Step -1 (Codex 1047 fix round, verdict 1) outranks EVERYTHING below,
 ## selection included, and deliberately sits ABOVE even the host-null degrade:
@@ -1335,18 +1371,18 @@ func validate(annotation: Dictionary) -> Array:
 ## conversion strips it) restores the ordinary ladder purely from payload
 ## state — nothing here is cached.
 ##
-## Step 0 (cold review F4) sits ABOVE the "applied" check on purpose: with it
-## below, a headless render (ctx.host == null) of an APPLIED hint fell into
-## step 2 anyway and answered "markers_dimmed" — a behavior change from
-## pre-station rendering that a caller with no host at all never asked for.
-## Checking reachability first is what makes rule 5 (host-null renders
-## EXACTLY as before this station) actually true rather than just documented.
+## (Historical note: pre-UX2, step 0 sat above the then-"markers_dimmed"
+## applied check so a headless render of an applied hint stayed "full" —
+## cold review F4. Station 1's owner ruling supersedes that: applied is now
+## invisible everywhere, headless included, for the reasons above.)
 ##
 ## Degrade rule: any missing hop in step 3's host→panel→workspace duck-typed
 ## walk (see _has_live_candidate) reads as "no live candidate", which falls
 ## through to step 4 — "full". A host predating get_panel()/get_routing_workspace()
 ## therefore renders EXACTLY as before this station too, never errors.
 func _render_mode_for(annotation: Dictionary, host) -> String:
+	if str(annotation.get("lifecycle", "open")) == "applied":
+		return "none"
 	if _is_superseded(annotation):
 		return "superseded"
 	var ann_id := str(annotation.get("id", ""))
@@ -1354,8 +1390,6 @@ func _render_mode_for(annotation: Dictionary, host) -> String:
 		return "full"
 	if not ann_id.is_empty() and _is_selected(ann_id, host):
 		return "full"
-	if str(annotation.get("lifecycle", "open")) == "applied":
-		return "markers_dimmed"
 	if _has_live_candidate(ann_id, host):
 		return "markers"
 	return "full"
@@ -1390,7 +1424,13 @@ static func _is_superseded(annotation: Dictionary) -> bool:
 ## an edit that can never land. Pure payload read — no cached state, so
 ## stripping the marker (guided→detailed conversion) unlocks immediately.
 func path_editing_locked(annotation: Dictionary) -> bool:
-	return _is_superseded(annotation)
+	# Consumed hints (Epoch UX2 station 1) are locked too: the record of what
+	# was asked for must not be editable after its copper landed — an edit
+	# would falsify provenance, and the geometry is invisible anyway. (Second
+	# fence: the selection veto in PcbAnnotationHost normally keeps a consumed
+	# hint out of selection entirely.)
+	return _is_superseded(annotation) \
+		or str(annotation.get("lifecycle", "open")) == "applied"
 
 
 ## True iff `ann_id` is a member of the CURRENT selection (F3, cold review):
@@ -1471,7 +1511,7 @@ func _draw_superseded_slash(ctx: AnnotationRenderContext, pos: Vector2, radius: 
 	ctx.draw_line(pos + Vector2(-r, r), pos + Vector2(r, -r), _COLOR_SUPERSEDED_CUE, 1.5)
 
 
-## The endpoint marker points drawn in "markers"/"markers_dimmed" mode: the
+## The endpoint marker points drawn in "markers" mode: the
 ## anchor, plus the hint's other known endpoint (see _far_endpoint), when it
 ## has one. Single source of truth for render()'s intent-render branch AND
 ## _visible_ink_hit/pcb_canvas.gd's F1 claim gate, so all three agree on
@@ -1502,7 +1542,7 @@ func _far_endpoint(annotation: Dictionary) -> Variant:
 	return null
 
 
-## Visible-ink hit-test for the "markers"/"markers_dimmed" render modes (F1,
+## Visible-ink hit-test for the "markers" render mode (F1,
 ## cold review station 7 fix round): true iff `point` (document space) lands
 ## within `threshold` of the anchor/far-end marker disc, or inside the
 ## label's drawn rect — the ONLY ink those modes actually put on screen (see
@@ -1541,13 +1581,20 @@ func _visible_ink_hit(annotation: Dictionary, point: Vector2, threshold: float, 
 ## the substrate AnnotationOverlay applies the host transform before calling us.
 ##
 ## Render-taxonomy gate (see block above): when _render_mode_for resolves to
-## "markers"/"markers_dimmed" the polyline (and its via markers, which only
+## "markers" the polyline (and its via markers, which only
 ## make sense alongside the polyline) is withheld — a live candidate is
 ## already drawing that corridor — and this draws ENDPOINT MARKERS + the label
-## only. "full" (still the ONLY path when ctx.host is null/incomplete) is
-## byte-identical to pre-station-7 rendering.
+## only. "none" (consumed hint, Epoch UX2 station 1) draws nothing whatsoever.
+## "full" (still the ONLY path when ctx.host is null/incomplete, applied
+## lifecycle aside) is byte-identical to pre-station-7 rendering.
 func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	if ctx == null:
+		return
+	# "none" (Epoch UX2 station 1): a consumed hint puts ZERO ink on screen —
+	# no markers, no label. Checked before any other work; the annotation
+	# itself persists (record/undo), only its rendering retires.
+	var mode := _render_mode_for(annotation, ctx.host)
+	if mode == "none":
 		return
 	var pos := _anchor_position(annotation)
 	var payload: Dictionary = annotation.get("kind_payload", {})
@@ -1565,8 +1612,6 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	var author: Variant = annotation.get("author", null)
 	var is_ai: bool = author is Dictionary and str((author as Dictionary).get("kind", "human")) == "ai"
 
-	var mode := _render_mode_for(annotation, ctx.host)
-
 	# Stroke width: width_mm scaled by zoom (pixels-per-mm), floored to 1px so a
 	# hair-thin hint stays visible when zoomed out.
 	var width_mm := float(payload.get("width_mm", 0.0))
@@ -1576,10 +1621,11 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 
 	var d := maxf(_MARKER_RADIUS, _MARKER_MIN_PX / maxf(ctx.zoom, 0.001))
 	var marker_color := AnnotationRenderContext.author_color("ai") if is_ai else stroke_color
-	# "superseded" (Codex 1047 fix round, verdict 1) shares the consumed-hint
-	# marker dimming — both are "no longer live authoring input" states; what
-	# distinguishes superseded is its own branch below (dimmed corridor + slash).
-	if mode == "markers_dimmed" or mode == "superseded":
+	# "superseded" (Codex 1047 fix round, verdict 1) dims its markers — no
+	# longer live authoring input, and its own branch below adds the dimmed
+	# corridor + slash. (The consumed-hint "markers_dimmed" mode that shared
+	# this dimming retired at Epoch UX2 station 1: applied renders "none".)
+	if mode == "superseded":
 		marker_color = Color(marker_color.r, marker_color.g, marker_color.b, marker_color.a * 0.5)
 
 	if mode == "full":
@@ -1671,9 +1717,8 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 			_draw_endpoint_marker(ctx, far_end, d, marker_color)
 			_draw_superseded_slash(ctx, far_end, d)
 	else:
-		# Intent render (markers/markers_dimmed): no polyline, no via markers — a
-		# live candidate (or the committed copper an "applied" hint already
-		# produced) already owns that ink. Mark BOTH ends so a withheld polyline
+		# Intent render ("markers"): no polyline, no via markers — a live
+		# candidate already owns that ink. Mark BOTH ends so a withheld polyline
 		# doesn't read as a headless pin: the anchor, plus the hint's other known
 		# endpoint (H1: dest_point / last waypoint / a legacy segments-bearing
 		# hint's own far end — see _far_endpoint), when it has one.
@@ -1689,7 +1734,7 @@ func render(ctx: AnnotationRenderContext, annotation: Dictionary) -> void:
 	var font: Font = ThemeDB.fallback_font
 	if font != null:
 		var label_color := _LABEL_COLOR
-		if mode == "markers_dimmed" or mode == "superseded":
+		if mode == "superseded":
 			label_color = Color(label_color.r, label_color.g, label_color.b, label_color.a * 0.5)
 		var label_text := summary(annotation)
 		if mode == "superseded":

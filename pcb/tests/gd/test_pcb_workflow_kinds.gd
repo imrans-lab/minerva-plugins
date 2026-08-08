@@ -106,6 +106,14 @@ func _init() -> void:
 	# post-conditions has to come first. G's own (d) is also what arms the
 	# real universal-select tool this test needs — see H's own doc.
 	await _test_h_canvas_real_input_path()
+	# Runs after H for the same fixture-mutation reason: it flips a hint's
+	# lifecycle (and restores it), so it must not run before the count-pinned
+	# tests above.
+	await _test_i_consumed_filter()
+	# Runs LAST of all: it adopts a document path on the panel, which arms the
+	# UX2 station-8 auto-writer for every later mutation — earlier tests
+	# assume no sidecar exists unless they wrote one themselves.
+	await _test_j_sidecar_autosave()
 
 	_cleanup_sidecar()
 	panel.queue_free()
@@ -909,6 +917,124 @@ func _test_h_canvas_real_input_path() -> void:
 		canvas.context_menu.hide()
 
 	host.set_selected_annotation_id("")
+
+
+# ── I. consumed-record filter (Epoch UX2 station 1) ──────────────────────────
+
+## The dock half of "applied intents render nothing": lifecycle "applied"
+## workflow annotations are hidden from the day-to-day listing behind a
+## "Show consumed (N)" toggle. The record is browsable on opt-in, never
+## deleted, and flipping the lifecycle back (the commit-undo reconcile path)
+## restores the row with the toggle untouched.
+func _test_i_consumed_filter() -> void:
+	print("-- I: consumed-record filter (show-consumed toggle) --")
+	workflow_list.refresh()
+	var before: int = workflow_list.get_listing().size()
+	var consumed_before: int = workflow_list.consumed_count()
+	check("I: filter defaults OFF", not bool(workflow_list.get_show_consumed()))
+
+	var res: Dictionary = host.update_annotation_lifecycle(fcu_id, "applied")
+	check("I: lifecycle flip to applied accepted", bool(res.get("ok", false)),
+		"res=%s" % str(res))
+	workflow_list.refresh()
+	await process_frame
+
+	var listing: Array = workflow_list.get_listing()
+	var ids := []
+	for entry in listing:
+		ids.append(str((entry as Dictionary).get("id", "")))
+	check("I: consumed hint leaves the default listing", not (fcu_id in ids),
+		"ids=%s" % str(ids))
+	check("I: listing shrank by exactly 1", listing.size() == before - 1,
+		"size=%d before=%d" % [listing.size(), before])
+	check("I: consumed_count sees the hidden record", workflow_list.consumed_count() == consumed_before + 1,
+		"count=%d" % workflow_list.consumed_count())
+	check("I: toggle control is visible once a consumed record exists",
+		workflow_list._consumed_toggle != null and workflow_list._consumed_toggle.visible)
+	check("I: toggle label carries the count",
+		workflow_list._consumed_toggle.text == "Show consumed (%d)" % (consumed_before + 1),
+		"text=%s" % workflow_list._consumed_toggle.text)
+
+	# Opt-in: the record comes back, marked with its lifecycle, same #index
+	# discipline as every other row.
+	workflow_list.set_show_consumed(true)
+	var revealed: Array = workflow_list.get_listing()
+	var revealed_entry := {}
+	for entry in revealed:
+		if str((entry as Dictionary).get("id", "")) == fcu_id:
+			revealed_entry = entry
+	check("I: show-consumed reveals the record", not revealed_entry.is_empty())
+	check("I: revealed listing back to full size", revealed.size() == before,
+		"size=%d before=%d" % [revealed.size(), before])
+	check("I: revealed entry carries lifecycle applied",
+		str(revealed_entry.get("lifecycle", "")) == "applied")
+
+	workflow_list.set_show_consumed(false)
+	check("I: toggle off hides it again",
+		workflow_list.get_listing().size() == before - 1)
+
+	# The undo path: applied -> open (what the commit-undo lifecycle reconcile
+	# does) restores the row with the filter still on default.
+	host.update_annotation_lifecycle(fcu_id, "open")
+	workflow_list.refresh()
+	await process_frame
+	var restored: Array = workflow_list.get_listing()
+	var restored_ids := []
+	for entry in restored:
+		restored_ids.append(str((entry as Dictionary).get("id", "")))
+	check("I: applied->open flip restores the row (undo pin)", fcu_id in restored_ids)
+	check("I: consumed_count back to baseline", workflow_list.consumed_count() == consumed_before,
+		"count=%d" % workflow_list.consumed_count())
+	check("I: toggle hidden again when no consumed records remain",
+		workflow_list._consumed_toggle == null or not workflow_list._consumed_toggle.visible
+			or consumed_before > 0)
+
+
+# ── J. sidecar auto-write (Epoch UX2 station 8) ──────────────────────────────
+
+## The durable-by-default half of docket 019fde57027c: once the panel has a
+## document path, every annotation mutation schedules a debounced sidecar
+## write — no Ctrl+S needed (HITL-4 lost three hand-authored annotations to a
+## restart because the write only ran on save). Also pins the teardown flush:
+## a pending debounced write survives panel exit.
+func _test_j_sidecar_autosave() -> void:
+	print("-- J: sidecar auto-write, debounced + teardown flush (UX2 station 8) --")
+	var sidecar_path := SIDECAR_DOC + ".annotations.json"
+	if FileAccess.file_exists(sidecar_path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(sidecar_path))
+
+	panel._file_path = SIDECAR_DOC
+	host.set_document_path(SIDECAR_DOC)
+
+	var auto_id: String = host.add_route_hint_at(5.0, 5.0, "autosave probe", "F.Cu",
+		"waypoint", [[5.0, 5.0], [9.0, 5.0]])
+	check("J: probe hint stored", not auto_id.is_empty())
+	check("J: nothing on disk inside the debounce window",
+		not FileAccess.file_exists(sidecar_path))
+
+	await create_timer(1.2).timeout
+	check("J: sidecar auto-written after the debounce (no save request ran)",
+		FileAccess.file_exists(sidecar_path))
+	var data: Dictionary = AnnotationSidecar.read_sidecar(SIDECAR_DOC)
+	var ids := []
+	for ann in data.get("annotations", []):
+		ids.append(str((ann as Dictionary).get("id", "")))
+	check("J: auto-written sidecar carries the probe annotation", auto_id in ids)
+
+	# Teardown flush: a mutation whose debounce window has NOT elapsed still
+	# lands, because _exit_tree flushes the pending write synchronously.
+	host.update_annotation_lifecycle(auto_id, "applied")
+	check("J: flush precondition — a write is pending", panel._sidecar_autosave_pending)
+	panel._exit_tree()
+	var flushed: Dictionary = AnnotationSidecar.read_sidecar(SIDECAR_DOC)
+	var flushed_lifecycle := ""
+	for ann in flushed.get("annotations", []):
+		if str((ann as Dictionary).get("id", "")) == auto_id:
+			flushed_lifecycle = str((ann as Dictionary).get("lifecycle", ""))
+	check("J: pending write flushed on exit (mutation on disk without the debounce)",
+		flushed_lifecycle == "applied")
+	check("J: flush cleared the pending flag (idempotent with the real exit)",
+		not panel._sidecar_autosave_pending)
 
 
 # ── cleanup + assertion helper ────────────────────────────────────────────────

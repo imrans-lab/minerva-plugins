@@ -1843,6 +1843,24 @@ func _governing_constraint_revision(c) -> int:
 	return rev
 
 
+## The highest constraint_revision_floor among this candidate's governing
+## tasks (Epoch UX2 station 2 follow-up, Codex 1049 finding 1). >0 means a
+## constraint that once governed this candidate's tasks was CLEARED at that
+## revision; 0 = no clear ever happened. Same task walk as
+## _governing_constraint_revision above, reading the floor instead of the
+## live constraint.
+func _governing_constraint_floor(c) -> int:
+	var floor_rev := 0
+	var own = tasks.get(str(c.task_id), null)
+	if own != null and "constraint_revision_floor" in own:
+		floor_rev = max(floor_rev, int(own.constraint_revision_floor))
+	for h in c.source_hint_ids:
+		var t = task_for_hint(str(h))
+		if t != null and "constraint_revision_floor" in t:
+			floor_rev = max(floor_rev, int(t.constraint_revision_floor))
+	return floor_rev
+
+
 ## Per-candidate PRE-FLIGHT: everything the commit transaction can refuse,
 ## checked before ANY mutation. Extracted verbatim from the single-candidate
 ## commit so batch and single share one set of refusals (docket 019fd0ab6dd2).
@@ -1907,8 +1925,23 @@ func _commit_preflight(candidate_id: String, board) -> Dictionary:
 	var governing := _governing_constraint_revision(c)
 	if governing >= 0 and int(c.constraint_revision) < governing:
 		return _verb_error(ERR_CONSTRAINT_STALE,
-			"candidate '%s' was generated against constraint revision %d but the governing constraint has advanced to revision %d — re-propose/reroute under the current constraint (or clear the constraint) before committing"
+			"candidate '%s' was generated against constraint revision %d but the governing constraint has advanced to revision %d — re-propose/reroute under the current constraint (minerva_pcb_workspace_reroute_route), or remove it with reroute_route's clear_constraint:true, before committing"
 				% [candidate_id, int(c.constraint_revision), governing], candidate_id)
+	# CLEARED-CONSTRAINT STALENESS (Codex 1049 finding 1): with no live
+	# constraint (governing -1) a candidate STAMPED with one (constraint_
+	# revision >= 0, at or below a task's clear floor) was generated under a
+	# corridor the user explicitly REMOVED — e.g. clear_constraint whose
+	# router leg failed, leaving the prior constrained candidate live.
+	# Committing it would land the very copper the clear moved away from.
+	# A candidate generated unconstrained (stamp -1 / no key) — including
+	# everything proposed AFTER the clear — commits freely: unguided is
+	# exactly what the clear asked for.
+	if governing < 0 and int(c.constraint_revision) >= 0:
+		var cleared_floor := _governing_constraint_floor(c)
+		if cleared_floor > 0 and int(c.constraint_revision) <= cleared_floor:
+			return _verb_error(ERR_CONSTRAINT_STALE,
+				"candidate '%s' was generated under constraint revision %d, but that constraint has since been CLEARED (clear_constraint) — its copper follows a corridor the user removed; re-propose (unguided) or reroute before committing"
+					% [candidate_id, int(c.constraint_revision)], candidate_id)
 
 	# GEOMETRY PRE-FLIGHT. Everything the board write needs, checked up front.
 	if c.segments.is_empty() and c.vias.is_empty():

@@ -167,6 +167,7 @@ func _init() -> void:
 	await _run_ux1_add_route_intent()
 	await _run_station9_task_constraints()
 	_run_station10_edit_candidate()
+	_run_ux2_route_quality_metrics()
 	await _run_ux1_station11_next_step_guidance()
 	await _run_station12_legacy_seeding()
 	await _run_board_health_and_commit_gate()
@@ -355,6 +356,13 @@ class RouterShim extends RefCounted:
 	## REAL host through this shim, same as every other duck-typed call above.
 	func update_annotation(id: String, new_annotation: Dictionary) -> bool:
 		return bool(real.update_annotation(id, new_annotation))
+
+	## UX2 station 2 (cold review F1): forwarded so clear_constraint's
+	## synchronous marker strip reaches the REAL host's sanctioned release —
+	## without this the strip degrades (has_method false) to the lazy
+	## load-time reconcile and 19j's stripped-marker assertion goes red.
+	func reconcile_strip_superseded_marker(hint_id: String) -> Dictionary:
+		return real.reconcile_strip_superseded_marker(hint_id)
 
 	## DCR 019fd5fd9084 (work item 019fd5fe2724): the placement verbs call
 	## host.assembly_check after mutating. A canned `assembly_reply` SIMULATES
@@ -2289,6 +2297,7 @@ func _run_ux1_add_route_intent() -> void:
 	_run_route_intent_annotation_rejected()
 	_run_route_intent_constraint_json_round_trip()
 	_run_route_intent_corridor_empty_and_workspace_list()
+	await _run_ux2_width_on_intent_and_reroute()
 
 
 ## Happy path WITH a corridor: asserts the atomic triple lands, no routing
@@ -2833,6 +2842,97 @@ func _run_route_intent_corridor_empty_and_workspace_list() -> void:
 #        (owner-keyed emission — no dangling citation).
 
 
+## 17x (Epoch UX2 station 3, docket 019fde363162): width_mm is part of routing
+## intent. add_route_intent lands it on the minted hint's kind_payload (the
+## channel _width_from_hints already reads — HITL-5's workaround was three
+## wholesale kind_payload patches per width change); reroute_route lands a
+## review-time width change on every source hint BEFORE the router leg, with
+## the same validate-before-any-mutation ordering as the steering args.
+func _run_ux2_width_on_intent_and_reroute() -> void:
+	print("-- 17x. width_mm on add_route_intent + reroute_route (UX2 station 3) --")
+
+	# ── intent half (stub-panel context, no router needed) ───────────────────
+	var ictx: Dictionary = _route_intent_context()
+	var ihost = ictx["host"]
+	var anns_before: int = (ihost.get_all_annotations() as Array).size()
+
+	var bad: Dictionary = await PanelTools.handle(ihost, "minerva_pcb_add_route_intent", {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2", "width_mm": 0.0,
+	})
+	check("width_mm 0 refused", not bool(bad.get("success", true)))
+	check_eq("...named invalid_width", str(bad.get("error", "")), "invalid_width")
+	check_eq("...and created NOTHING", (ihost.get_all_annotations() as Array).size(), anns_before)
+
+	var bad2: Dictionary = await PanelTools.handle(ihost, "minerva_pcb_add_route_intent", {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2", "width_mm": "wide",
+	})
+	check_eq("non-numeric width_mm refused invalid_width", str(bad2.get("error", "")), "invalid_width")
+
+	var made: Dictionary = await PanelTools.handle(ihost, "minerva_pcb_add_route_intent", {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2", "width_mm": 0.5,
+	})
+	check("intent with width_mm succeeded", bool(made.get("success", false)))
+	check_eq("reply echoes width_mm", float(made.get("width_mm", 0.0)), 0.5)
+	var made_kp: Dictionary = (ihost.get_by_id(str(made.get("hint_id", ""))) as Dictionary) \
+		.get("kind_payload", {})
+	check_eq("minted hint carries kind_payload.width_mm",
+		float(made_kp.get("width_mm", 0.0)), 0.5)
+
+	var plain: Dictionary = await PanelTools.handle(ihost, "minerva_pcb_add_route_intent", {
+		"editor_name": "PCB", "source_pin": "BAT1.1", "dest_pin": "D1.2",
+	})
+	check("width omitted: intent still succeeds", bool(plain.get("success", false)))
+	check("...reply carries NO width_mm key", not plain.has("width_mm"))
+	check("...hint payload carries NO width_mm key (net class default)",
+		not ((ihost.get_by_id(str(plain.get("hint_id", ""))) as Dictionary)
+			.get("kind_payload", {}) as Dictionary).has("width_mm"))
+
+	# ── reroute half (RouterShim context — real host, canned router) ─────────
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var task = ws.get_task(str(ws.get_candidate(cid).task_id))
+
+	# Validation-before-mutation: invalid width alongside a corridor refuses
+	# BEFORE the steer would land — the task stays unconstrained.
+	var mixed_bad: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 2.0, "y_mm": 2.0}], "width_mm": -1.0,
+	}))
+	check_eq("invalid width refused before any steer", str(mixed_bad.get("error", "")), "invalid_width")
+	check("...task NOT constrained by the refused call", not task.is_constrained())
+
+	var rerouted: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "width_mm": 0.6,
+	}))
+	check("reroute with width_mm succeeded", bool(rerouted.get("success", false)))
+	check_eq("reply echoes width_mm", float(rerouted.get("width_mm", 0.0)), 0.6)
+	check_eq("source hint's kind_payload.width_mm updated",
+		float(((host.get_by_id(hint_id) as Dictionary).get("kind_payload", {}) as Dictionary)
+			.get("width_mm", 0.0)), 0.6)
+
+	# Durability: width lands before the router — a failed leg keeps it, and
+	# the failure reply still echoes it.
+	var cid2: String = str(((rerouted.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	shim.answer_ok = false
+	var wfail: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "width_mm": 0.8,
+	}))
+	check("router leg failed", not bool(wfail.get("success", true)))
+	check_eq("width landed on the hint anyway (write-before-router)",
+		float(((host.get_by_id(hint_id) as Dictionary).get("kind_payload", {}) as Dictionary)
+			.get("width_mm", 0.0)), 0.8)
+	check_eq("failure reply echoes width_mm", float(wfail.get("width_mm", 0.0)), 0.8)
+	shim.answer_ok = true
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
 func _run_station9_task_constraints() -> void:
 	print("-- 19. Station 9: task constraint CONSUMPTION (propose + reroute) --")
 	await _run_station9_propose_reads_constraint()
@@ -2843,6 +2943,7 @@ func _run_station9_task_constraints() -> void:
 	await _run_station9_legacy_hint_steered_stamp()
 	await _run_station9_two_constrained_intents_one_net()
 	await _run_station9_stale_candidate_commit_refused()
+	await _run_ux2_clear_constraint()
 
 
 ## Real 1-pin BAT1/D1 components on net "PWR", layered onto a real mounted
@@ -3432,6 +3533,135 @@ func _run_station9_stale_candidate_commit_refused() -> void:
 	ctx["driver"].free_panel(ctx["panel"])
 
 
+## 19j (Epoch UX2 station 2, docket 019fde361cf0): clear_constraint — a task
+## corridor can now be REMOVED, not only replaced. HITL-5 exposed the gap:
+## after a placement change made stored corridors wrong, "route this unguided
+## now" required reject+delete+recreate, and the constraint_stale_candidate
+## refusal advised a verb that did not exist. A clear IS a steer: same
+## precondition ordering, same expected_constraint_revision guard, same
+## write-before-router durability; what it writes is {} (the
+## _hint_convert_to_detailed cleared-state precedent), and the owner hint's
+## supersession marker is stripped synchronously through the sanctioned
+## release, so its own waypoints are live authority again.
+func _run_ux2_clear_constraint() -> void:
+	print("-- 19j. clear_constraint: remove a task corridor, guarded + durable (UX2 station 2) --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var host = ctx["host"]
+	var hint_id: String = str(ctx["hint_id"])
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("initial propose succeeded", bool(first.get("success", false)))
+	var cid: String = str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var task = ws.get_task(str(ws.get_candidate(cid).task_id))
+
+	# clear on a task with no constraint: refused BY NAME, not no-op success.
+	var clear0: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "clear_constraint": true,
+	}))
+	check("clear on an UNCONSTRAINED task refused", not bool(clear0.get("success", true)))
+	check_eq("...named no_constraint_to_clear", str(clear0.get("error", "")), "no_constraint_to_clear")
+
+	# Steer first (revision 1) so there is something to clear; the seeded
+	# legacy hint gets stamped superseded by this write (19g's contract).
+	var steer: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid, "corridor": [{"x_mm": 8.0, "y_mm": 8.0}],
+	}))
+	check("steer succeeded", bool(steer.get("success", false)))
+	check("task constrained after steer", task.is_constrained())
+	check("owner hint stamped superseded by the steer",
+		(host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
+	var cid2: String = str(((steer.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+
+	# clear + corridor together: refused corridor_args_conflict, nothing moved.
+	var conflict: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "clear_constraint": true, "corridor": [{"x_mm": 1.0, "y_mm": 1.0}],
+	}))
+	check("clear + corridor refused", not bool(conflict.get("success", true)))
+	check_eq("...named corridor_args_conflict", str(conflict.get("error", "")), "corridor_args_conflict")
+	check("...constraint untouched by the refusal", task.is_constrained())
+
+	# Stale expected_constraint_revision guards a clear exactly like a steer.
+	var stale: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "clear_constraint": true, "expected_constraint_revision": 0,
+	}))
+	check("stale-guarded clear refused", not bool(stale.get("success", true)))
+	check_eq("...named constraint_revision_conflict", str(stale.get("error", "")), "constraint_revision_conflict")
+	check("...constraint still standing", task.is_constrained())
+
+	# The real clear, correctly guarded: constraint gone, marker stripped,
+	# reply reports what was cleared, and the reroute landed a fresh candidate.
+	var clear: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid2, "clear_constraint": true, "expected_constraint_revision": 1,
+	}))
+	check("guarded clear succeeded", bool(clear.get("success", false)))
+	check("task UNCONSTRAINED after clear", not task.is_constrained())
+	check("reply carries cleared_constraint:true", bool(clear.get("cleared_constraint", false)))
+	check_eq("reply names the revision that was cleared (1)",
+		int(clear.get("cleared_constraint_revision", -1)), 1)
+	check_eq("reply's constraint_revision is 0 now", int(clear.get("constraint_revision", -1)), 0)
+	check("owner hint's supersession marker STRIPPED (waypoints live again)",
+		not (host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
+			.has("waypoints_superseded_by_constraint_revision"))
+	check("clear's reroute landed a NEW candidate",
+		not str(((clear.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", "")).is_empty() \
+			if not (clear.get("candidates", []) as Array).is_empty() else false)
+
+	# Durability: with the worker DOWN, the clear still lands before the failed
+	# router leg — and the failure reply says so. This leg also pins the
+	# MONOTONIC REVISION FLOOR (cold review F2): the earlier clear left
+	# constraint_revision_floor = 1 on the task, so the re-steer below resumes
+	# at revision 2 — it must NEVER reuse revision 1, or a still-live
+	# pre-clear candidate stamped 1 would pass the constraint_stale_candidate
+	# commit gate against a brand-new corridor.
+	# The generation stamp is WORKER-attached (methods.py puts
+	# constraint_revision on the route it steered) — simulate that half of
+	# the contract on the canned reply, the same way 19i does, so the landed
+	# candidate durably carries the revision the steer below writes (2).
+	var steer_reply: Dictionary = _multipad_reply([hint_id])
+	(steer_reply["routes"][0] as Dictionary)["constraint_revision"] = 2
+	shim.reply = steer_reply
+	var steer_again: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": str(((clear.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", "")),
+		"corridor": [{"x_mm": 3.0, "y_mm": 3.0}],
+	}))
+	check("re-steer for the durability leg succeeded", bool(steer_again.get("success", false)))
+	check("task re-constrained", task.is_constrained())
+	check_eq("re-steer resumed ABOVE the cleared revision (floor): revision 2, not 1",
+		int(task.routing_constraint.get("revision", 0)), 2)
+	var cid4: String = str(((steer_again.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	shim.answer_ok = false
+	var clear_fail: Dictionary = await PanelTools._workspace_reroute_route(shim, _args({
+		"candidate_id": cid4, "clear_constraint": true,
+	}))
+	check("router leg failed (worker down)", not bool(clear_fail.get("success", true)))
+	check("constraint CLEARED anyway — the write happened before the router",
+		not task.is_constrained())
+	check("failure reply carries cleared_constraint:true (never silent)",
+		bool(clear_fail.get("cleared_constraint", false)))
+	check_eq("failure reply names the cleared revision (2 — the floor kept it monotonic)",
+		int(clear_fail.get("cleared_constraint_revision", -1)), 2)
+	shim.answer_ok = true
+
+	# Codex 1049 finding 1: the failed router leg left the PRE-CLEAR candidate
+	# live — stamped with the revision (2) of the corridor the clear just
+	# removed. Committing it must refuse by name: its copper follows steering
+	# the user explicitly removed, and _governing_constraint_revision alone
+	# (-1 on an unconstrained task) cannot see that — the clear FLOOR can.
+	check_eq("pre-clear candidate still carries its generation stamp (revision 2)",
+		int(ws.get_candidate(cid4).constraint_revision), 2)
+	check("pre-clear candidate is still LIVE (failed router leg retired nothing)",
+		cid4 in ws.live_candidate_ids())
+	var stale_commit: Dictionary = PanelTools._workspace_commit(shim, _args({"candidate_id": cid4}))
+	check("committing the pre-clear candidate is refused", not bool(stale_commit.get("success", true)))
+	check_eq("...named constraint_stale_candidate (cleared-floor rule)",
+		str(stale_commit.get("error", "")), "constraint_stale_candidate")
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
 # ══ 20. EPOCH UX1 STATION 10: minerva_pcb_workspace_edit_candidate ═══════════
 #
 # The ONE discriminated candidate-edit tool (DCR 019fd095e694, docket
@@ -3963,6 +4193,99 @@ func _run_station10_unknown_op_refused() -> void:
 	}))
 	check("an unknown op is refused", not bool(out.get("success", true)))
 	check_eq("named unknown_op", str(out.get("error", "")), "unknown_op")
+
+
+# ══ 20x. EPOCH UX2 STATION 4 — route-quality metrics on candidate records ════
+
+## Minimal segments-bearing stand-in for the pure-function rows (the real
+## candidate object's only field _route_quality/_chained_runs read).
+class _FakeQualityCandidate extends RefCounted:
+	var segments: Array = []
+
+	static func of(paths: Array) -> _FakeQualityCandidate:
+		var c := _FakeQualityCandidate.new()
+		for path in paths:
+			var pts: Array = []
+			for p in path:
+				pts.append(Vector2(p[0], p[1]))
+			c.segments.append({"points": pts})
+		return c
+
+
+## docket 019fde36651a — the HITL-5 lesson mechanized: candidate records carry
+## bend_count / routed_length_mm / length_ratio so "this route wants a
+## placement change" is a SIGNAL, not a human catch (the A/B was 5+5+5
+## signal-chasing segments vs 2+2+5 placement-first on identical spans).
+func _run_ux2_route_quality_metrics() -> void:
+	print("-- 20x. route-quality metrics: bend_count / routed_length_mm / length_ratio (UX2 station 4) --")
+
+	# Straight single run: 0 bends, ratio 1.0.
+	var straight := _FakeQualityCandidate.of([[[0.0, 0.0], [10.0, 0.0]]])
+	var q: Dictionary = PanelTools._route_quality(straight)
+	check_eq("straight run: 0 bends", int(q.get("bend_count", -1)), 0)
+	check_eq("straight run: routed length 10", float(q.get("routed_length_mm", 0.0)), 10.0)
+	check_eq("straight run: ratio 1.0", float(q.get("length_ratio", 0.0)), 1.0)
+
+	# Collinear joint (a via splitting a straight run into two segments) is
+	# NOT a bend — the two segments chain and the direction never turns.
+	var split := _FakeQualityCandidate.of([[[0.0, 0.0], [5.0, 0.0]], [[5.0, 0.0], [10.0, 0.0]]])
+	check_eq("collinear via joint: still 0 bends",
+		int(PanelTools._route_quality(split).get("bend_count", -1)), 0)
+
+	# A degenerate ZERO-LENGTH leg sitting exactly AT a corner must not make
+	# the bend vanish (cold review F3): the walk carries the last
+	# non-degenerate direction across it.
+	var dup := _FakeQualityCandidate.of([[[0.0, 0.0], [5.0, 0.0], [5.0, 0.0], [5.0, 5.0]]])
+	check_eq("duplicated corner vertex: the bend still counts",
+		int(PanelTools._route_quality(dup).get("bend_count", -1)), 1)
+
+	# Vias-only / geometry-less candidate: honest zeros, ratio absent (cold
+	# review F2 — uniform record shape, never missing bend/length keys).
+	var empty := _FakeQualityCandidate.of([])
+	var qe: Dictionary = PanelTools._route_quality(empty)
+	check_eq("no geometry: bend_count 0", int(qe.get("bend_count", -1)), 0)
+	check_eq("no geometry: routed 0", float(qe.get("routed_length_mm", -1.0)), 0.0)
+	check("no geometry: ratio absent", not qe.has("length_ratio"))
+
+	# L-shape: 1 bend, rectilinear ratio exactly 1.0 (manhattan-minimal).
+	var ell := _FakeQualityCandidate.of([[[0.0, 0.0], [5.0, 0.0], [5.0, 5.0]]])
+	var ql: Dictionary = PanelTools._route_quality(ell)
+	check_eq("L-shape: 1 bend", int(ql.get("bend_count", -1)), 1)
+	check_eq("L-shape: ratio 1.0 (a rectilinear L is manhattan-minimal)",
+		float(ql.get("length_ratio", 0.0)), 1.0)
+
+	# The HITL-5 smell shape: a detour between near-neighbors — U over an
+	# obstacle. (0,0)→(5,0)→(5,5)→(10,5)→(10,0)→(15,0): routed 25, endpoints
+	# 15 apart → ratio 1.667, 4 bends. THE signal the station exists for.
+	var detour := _FakeQualityCandidate.of([
+		[[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [10.0, 5.0], [10.0, 0.0], [15.0, 0.0]]])
+	var qd: Dictionary = PanelTools._route_quality(detour)
+	check_eq("detour: 4 bends", int(qd.get("bend_count", -1)), 4)
+	check_eq("detour: routed 25", float(qd.get("routed_length_mm", 0.0)), 25.0)
+	# is_equal_approx, not ==: snappedf(25.0/15.0, 0.001) and the literal
+	# 1.667 may differ by one ULP.
+	check("detour: ratio ~1.667 (the placement-change smell)",
+		absf(float(qd.get("length_ratio", 0.0)) - 1.667) < 0.0005)
+
+	# Closed loop: manhattan minimum ~0 — ratio ABSENT (a ratio against zero
+	# is noise), the other two metrics still report.
+	var loop := _FakeQualityCandidate.of([
+		[[0.0, 0.0], [5.0, 0.0], [5.0, 5.0], [0.0, 5.0], [0.0, 0.0]]])
+	var qo: Dictionary = PanelTools._route_quality(loop)
+	check("closed loop: length_ratio absent", not qo.has("length_ratio"))
+	check_eq("closed loop: routed 20 still reported", float(qo.get("routed_length_mm", 0.0)), 20.0)
+
+	# Record level, against the REAL multipad candidate (two disconnected
+	# runs: L-path with a via at the turn + a straight far run): metrics ride
+	# _candidate_record — the ONE shape every workspace tool reports.
+	var ctx: Dictionary = _edit_candidate_context()
+	var ws = ctx["ws"]
+	var rec: Dictionary = PanelTools._candidate_record(ws, ws.get_candidate(str(ctx["cid"])))
+	check_eq("multipad record: bend_count 1 (the L turn; via joint on the far run is straight)",
+		int(rec.get("bend_count", -1)), 1)
+	check_eq("multipad record: routed_length_mm 20", float(rec.get("routed_length_mm", 0.0)), 20.0)
+	check_eq("multipad record: length_ratio 1.0 (both runs manhattan-minimal)",
+		float(rec.get("length_ratio", 0.0)), 1.0)
 
 
 # ══ 21. EPOCH UX1 STATION 11 — replies name legal successors ═════════════════
@@ -5245,8 +5568,12 @@ func _run_station12_recon_undo_of_conversion() -> void:
 	# The guided flow resumes: a fresh propose re-seeds constraint + marker.
 	var out2: Dictionary = await PanelTools._workspace_propose(shim, _args({"hint_ids": [hint_id]}))
 	check("re-propose succeeded", bool(out2.get("success", false)))
-	check("task RE-CONSTRAINED by the seeder (revision 1 — a fresh seed)",
-		task.is_constrained() and int(task.routing_constraint.get("revision", 0)) == 1)
+	# Revision 2, not 1 (Epoch UX2 station 2, cold review F2): the conversion
+	# CLEARED revision 1, which set the task's constraint_revision_floor — the
+	# re-seed resumes ABOVE it, so a stale pre-clear candidate stamped 1 can
+	# never pass the commit gate against this fresh constraint.
+	check("task RE-CONSTRAINED by the seeder (revision 2 — above the cleared floor)",
+		task.is_constrained() and int(task.routing_constraint.get("revision", 0)) == 2)
 	check("hint RE-STAMPED by the seeder",
 		(host.get_by_id(hint_id).get("kind_payload", {}) as Dictionary)
 			.has("waypoints_superseded_by_constraint_revision"))
@@ -5280,6 +5607,7 @@ func _run_board_health_and_commit_gate() -> void:
 	await _run_bh_endpoint_fallback_and_tri_state()
 	await _run_bh_batch_gate()
 	await _run_bh_placement_verb_tri_state()
+	await _run_ux2_snap_disclosure_and_pin_groups()
 
 
 ## The worker-contract board_health fixture (benign completeness by default so
@@ -5544,6 +5872,71 @@ func _run_bh_batch_gate() -> void:
 	if acked.size() == 1:
 		check_eq("…attributed to candidate A",
 			str((acked[0] as Dictionary).get("candidate_id", "")), cid_a)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+## 23f (Epoch UX2 station 6, docket 019fde367b24): snap disclosure + the
+## pin_groups int normalization — two honesty polish items from HITL-5.
+func _run_ux2_snap_disclosure_and_pin_groups() -> void:
+	print("  -- 23f. snap disclosure on placement replies + pin_groups int (UX2 station 6) --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var data = ctx["data"]
+
+	# Off-grid request (the HITL-5 shape: 70.68 asked, 71.12 landed on the
+	# 2.54 grid): reply carries the LANDED coordinates + snapped:true +
+	# requested with the caller's own numbers.
+	var added: Dictionary = await PanelTools._add_component(shim,
+		_args({"id": "U8", "footprint": "RESISTOR", "x": 70.68, "y": 12.7}))
+	check("off-grid add succeeded", bool(added.get("success", false)))
+	check("add reply discloses the snap", bool(added.get("snapped", false)))
+	check_eq("...requested carries the caller's x", float((added.get("requested", []) as Array)[0]), 70.68)
+	check("...landed x is the grid point (~71.12)",
+		absf(float(added.get("x", 0.0)) - 71.12) < 0.001)
+
+	var moved: Dictionary = await PanelTools._move_component(shim,
+		_args({"component_id": "U8", "x": 20.0, "y": 20.0}))
+	check("off-grid move succeeded", bool(moved.get("success", false)))
+	check("move reply discloses the snap (20.0 -> 20.32)", bool(moved.get("snapped", false)))
+	check_eq("...requested echoes the ask", float((moved.get("requested", []) as Array)[0]), 20.0)
+	check("...x is the landed grid point (~20.32)",
+		absf(float(moved.get("x", 0.0)) - 20.32) < 0.001)
+
+	# ON-grid request: no snap keys at all (absent-when-empty — the common
+	# case's reply shape is unchanged).
+	var exact: Dictionary = await PanelTools._move_component(shim,
+		_args({"component_id": "U8", "x": 25.4, "y": 25.4}))
+	check("on-grid move succeeded", bool(exact.get("success", false)))
+	check("on-grid reply carries NO snapped key", not exact.has("snapped"))
+	check("on-grid reply carries NO requested key", not exact.has("requested"))
+
+	# move_relative: new_x/new_y now report where the part actually IS (the
+	# pre-fix reply echoed the interpreted point even when the snap moved it).
+	var mr: Dictionary = await PanelTools._move_relative(shim,
+		_args({"component_id": "U8", "direction": "right"}))
+	check("move_relative succeeded", bool(mr.get("success", false)))
+	if data.has_component("U8"):
+		check_eq("move_relative new_x is the component's ACTUAL position",
+			float(mr.get("new_x", -1.0)), float(data.get_component("U8").position.x))
+
+	# pin_groups int normalization (the F5 constraint_revision class): a
+	# worker board_health whose partial[].pin_groups crossed the JSON hop as
+	# 9.0 reaches the caller as int 9.
+	var reply: Dictionary = _multipad_reply([str(ctx["hint_id"])])
+	var fixture: Dictionary = _board_health_fixture()
+	fixture["complete"] = false
+	fixture["partial"] = [{"net": "GND", "pin_groups": 9.0}]
+	reply["board_health"] = fixture
+	shim.reply = reply
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose succeeded", bool(out.get("success", false)))
+	var partial: Array = (out.get("board_health", {}) as Dictionary).get("partial", [])
+	check_eq("partial passes through", partial.size(), 1)
+	if partial.size() == 1:
+		var pg: Variant = (partial[0] as Dictionary).get("pin_groups")
+		check("pin_groups is an INT after the lift (9, not 9.0)",
+			pg is int and int(pg) == 9)
 
 	ctx["driver"].free_panel(ctx["panel"])
 

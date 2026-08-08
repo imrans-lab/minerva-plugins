@@ -93,6 +93,19 @@ var span: Dictionary = {}
 ## it (constraint CONSUMPTION) is station 9 — see the field's own doc above.
 var routing_constraint: Dictionary = {}
 
+## Monotonic floor for routing_constraint.revision across CLEARS (Epoch UX2
+## station 2, cold review F2). Clearing a constraint writes {} — the canonical
+## cleared state — which forgets the revision counter; without this floor a
+## LATER constraint would restart at revision 1 and a still-live candidate
+## stamped under the OLD revision 1 could pass the constraint_stale_candidate
+## commit gate against a NEW, different corridor. Set to the cleared
+## constraint's revision at clear time; every constraint writer resumes at
+## max(actual, floor) + 1. 0 ⇒ never cleared (every pre-station task).
+## expected_constraint_revision semantics are unaffected: an unconstrained
+## task still reads/guards as revision 0 — the floor only feeds the NEXT
+## write, it is not a revision itself.
+var constraint_revision_floor: int = 0
+
 
 ## True iff this task carries a routing_constraint (steering beyond bare
 ## net/span connectivity). Mirrors is_span_scoped()'s empty-dict-means-none
@@ -189,7 +202,7 @@ func to_dict() -> Dictionary:
 	var eps: Array = []
 	for e in endpoints:
 		eps.append(_endpoint_to_json(e))
-	return {
+	var out := {
 		"task_id": task_id,
 		"net": net,
 		"endpoints": eps,
@@ -197,6 +210,11 @@ func to_dict() -> Dictionary:
 		"routing_constraint": _constraint_to_json(routing_constraint),
 		"state": _state,
 	}
+	# Written only when set — a never-cleared task serialises byte-identically
+	# to every task written before this key existed.
+	if constraint_revision_floor > 0:
+		out["constraint_revision_floor"] = constraint_revision_floor
+	return out
 
 
 func load_from_dict(data: Dictionary) -> void:
@@ -212,6 +230,9 @@ func load_from_dict(data: Dictionary) -> void:
 	# above already documents) — an absent/malformed key loads as {} (unconstrained).
 	var raw_constraint: Variant = data.get("routing_constraint", {})
 	routing_constraint = _constraint_from_json(raw_constraint as Dictionary) if raw_constraint is Dictionary else {}
+	# Absent for any task written before the clear-constraint station — loads
+	# as 0 (never cleared), int-cast for the float-round-trip gotcha.
+	constraint_revision_floor = int(data.get("constraint_revision_floor", 0))
 	# Route through the validating setter — an absent/garbled state falls back to
 	# "open" (the safe default: an unknown task still needs routing).
 	set_state(str(data.get("state", "open")))

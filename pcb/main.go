@@ -243,6 +243,9 @@ func initRegistry() {
 	// forwarding to the worker's "assembly_check" method (DCR 019fd5fd9084,
 	// work items 019fd5fe1241/019fd5fe2724). See worker_tools.go.
 	registry.Register(tools.AssemblyCheckChannel, tools.HandleAssemblyCheckChannel)
+	// pcb.board_health — whole-board health (census + assembly) without a
+	// routing run (Epoch UX2 station 9). See worker_tools.go.
+	registry.Register(tools.BoardHealthChannel, tools.HandleBoardHealthChannel)
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +320,9 @@ var workerBackedTools = map[string]bool{
 	// calls w.Call(ctx, "assembly_check", params)) — same membership rationale
 	// as pcb.route/pcb.draft_check above: worker-dispatch, not naming.
 	"pcb.assembly_check": true,
+	// pcb.board_health dispatches to the worker's "board_health" method
+	// (Epoch UX2 station 9) — same rationale.
+	"pcb.board_health": true,
 }
 
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {

@@ -228,7 +228,11 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	# The placement verbs' `assembly` key is the work-item 019fd5fe2724
 	# (DCR 019fd5fd9084) addition — every placement verb attaches the tri-state
 	# assembly verdict after mutating (indeterminate headless).
-	var add := await d("minerva_pcb_add_component", _args({"id": "U9", "footprint": "IC_DIP", "x": 20.0, "y": 10.0}))
+	# ON-GRID coordinates (multiples of 2.54) on purpose: UX2 station 6's snap
+	# disclosure adds snapped/requested ONLY when the grid moved the request,
+	# so the strict shape here pins the lean COMMON case; the conditional keys
+	# have their own pins (test_workspace_tools 23f).
+	var add := await d("minerva_pcb_add_component", _args({"id": "U9", "footprint": "IC_DIP", "x": 20.32, "y": 10.16}))
 	check("add_component dispatched ok", add.get("success", false), str(add))
 	check_keys("add_component shape", add, ["success", "component_id", "x", "y", "pin_count", "assembly"])
 	check("component landed in the model", data.has_component("U9"))
@@ -245,15 +249,23 @@ func _run_wave1_dispatch_and_shape_checks() -> void:
 	check_keys("get_components entry shape", c0, ["id", "footprint", "x", "y", "rotation", "layer", "pins"])
 
 	print("\n-- move_component --")
-	var mv := await d("minerva_pcb_move_component", _args({"component_id": "U9", "x": 22.0, "y": 12.0}))
+	# On-grid again (see add_component above) — the lean common shape.
+	var mv := await d("minerva_pcb_move_component", _args({"component_id": "U9", "x": 22.86, "y": 12.7}))
 	check_keys("move_component shape", mv, ["success", "component_id", "x", "y", "assembly"])
-	var snapped_pos: Vector2 = data.snap_to_grid(Vector2(22.0, 12.0))
+	var snapped_pos: Vector2 = data.snap_to_grid(Vector2(22.86, 12.7))
 	check_approx("model x mutated (snapped)", data.get_component("U9").position.x, snapped_pos.x)
 
 	print("\n-- move_relative --")
 	var mr := await d("minerva_pcb_move_relative", _args({"component_id": "U9", "direction": "right"}))
 	check("move_relative dispatched ok", mr.get("success", false), str(mr))
-	check_keys("move_relative shape", mr, ["success", "component_id", "new_x", "new_y", "interpreted_direction", "assembly"])
+	# The interpreted destination is the spatial index's choice, not the
+	# caller's — when it lands off-grid the UX2 station-6 disclosure pair
+	# rides along. Pin the shape EITHER way, and that the pair travels
+	# together (snapped ⇒ requested, never one without the other).
+	var mr_expected := ["success", "component_id", "new_x", "new_y", "interpreted_direction", "assembly"]
+	if mr.has("snapped"):
+		mr_expected.append_array(["snapped", "requested"])
+	check_keys("move_relative shape", mr, mr_expected)
 	check("move_relative echoes direction", str(mr.get("interpreted_direction", "")) == "right")
 
 	print("\n-- rotate_component --")

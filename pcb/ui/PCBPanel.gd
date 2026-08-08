@@ -386,9 +386,13 @@ func _init() -> void:
 	# Annotation mutations flip the tab's unsaved glyph via content_changed
 	# (gap register W-14). Gated by _restoring: load_sidecar emits the same
 	# signal and restoring saved state must not mark the tab dirty.
+	# UX2 station 8 (docket 019fde57027c): every mutation ALSO schedules the
+	# debounced sidecar auto-write — annotations are durable-by-default, the
+	# way the docket treats writes; the BOARD file itself stays owner-saved.
 	_annotation_host.annotations_changed.connect(func() -> void:
 		if not _restoring:
-			content_changed.emit())
+			content_changed.emit()
+			_schedule_sidecar_autosave())
 
 	# T2 (S2.2): the shadow routing workspace, built eagerly alongside the
 	# annotation host so get_routing_workspace() is valid immediately.
@@ -3438,7 +3442,7 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 ## connect_net / import_footprint_geometry / import_trace_geometry sequence.
 ## Async, mirroring the pcb.serialize / route_board await pattern. Returns
 ## {ok, result:{component_count, net_count, warnings}} or {ok:false, error:{…}}.
-func load_board_from_yaml(yaml_text: String) -> Dictionary:
+func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null or _data == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
@@ -3465,6 +3469,67 @@ func load_board_from_yaml(yaml_text: String) -> Dictionary:
 	# dirty relay for the whole load like the project-file restore path).
 	_restoring = true
 	_data.from_board_dict(board)
+
+	# SIDECAR ADOPTION (Epoch UX2 station 8, docket 019fde57027c — the HITL-4
+	# loss: annotations authored against a file-loaded canonical YAML lived
+	# only in the panel host and died with the app, because no document path
+	# was ever adopted and so no sidecar was ever written). When the load
+	# names its on-disk source:
+	#   * the panel adopts it as _file_path and the host's document path —
+	#     the annotation auto-writer (see _schedule_sidecar_autosave) and the
+	#     Ctrl+S flush now have a durable home;
+	#   * an EXISTING <path>.annotations.json is restored (the read half
+	#     always worked — it just never ran on this path);
+	#   * no sidecar on disk keeps the LIVE annotations as they stand (a
+	#     load_sidecar miss is a no-op) — first import must not wipe what was
+	#     authored this session; the auto-writer persists them to the new
+	#     home on the next mutation.
+	var sidecar_restored := 0
+	if not source_path.is_empty():
+		var prior_path := _file_path
+		# A DIFFERENT prior document (Codex 1049 finding 2): its annotations
+		# and workspace state belong to IT, not to the incoming board.
+		var switched := not prior_path.is_empty() and prior_path != source_path
+		# Cold review F2: a mutation still inside the debounce window must be
+		# flushed to its CURRENT home before the path (and possibly the whole
+		# annotation list) changes under it — otherwise the pending timer
+		# later writes a stale/replaced list, cementing the loss.
+		if _sidecar_autosave_pending and _annotation_host != null and not prior_path.is_empty():
+			_sidecar_autosave_pending = false
+			_annotation_host.save_sidecar(prior_path)
+		_file_path = source_path
+		if _annotation_host != null:
+			_annotation_host.set_document_path(source_path)
+			if AnnotationSidecar.has_sidecar(source_path):
+				sidecar_restored = int(_annotation_host.load_sidecar(source_path))
+			elif switched:
+				# Codex 1049 finding 2: the previous document's annotations
+				# must not attach to a board they were never authored
+				# against. They are safe in the prior sidecar (the flush
+				# above + the auto-writer keep it current).
+				_annotation_host.clear_annotations_for_document_switch()
+			elif not _annotation_host.get_annotations().is_empty():
+				# Cold review F1: adoption alone must make the LIVE
+				# annotations durable immediately — "the next mutation will
+				# write them" is exactly the restart-loss window this
+				# station closes (author → import-by-path → restart). Only
+				# for a FIRST adoption (no prior document): this session's
+				# unhomed annotations belong to the newly adopted file.
+				_annotation_host.save_sidecar(source_path)
+		# Cold review F3: the ROUTING sidecar's load half must ride the same
+		# adoption, or the first Ctrl+S at the new path deletes/clobbers an
+		# existing <source>.routing.json that was never read (save writes at
+		# _file_path; zero candidates deletes the file). The fingerprint
+		# coherence gate inside load_into_workspace already rejects a stale
+		# sidecar for a changed board. On a SWITCH the workspace is RESET
+		# first (Codex 1049 finding 2, routing half): the prior document's
+		# candidates/tasks must not stay live over the new board when it has
+		# no routing sidecar of its own.
+		if _routing_workspace != null:
+			if switched:
+				_routing_workspace.load_from_dict({})
+			_PcbRoutingSidecarScript.load_into_workspace(
+				source_path, _routing_workspace, _data.to_board_dict())
 	_restoring = false
 
 	# Reflect the new board in the toolbar/status and frame it in the canvas —
@@ -3473,24 +3538,43 @@ func load_board_from_yaml(yaml_text: String) -> Dictionary:
 	_refresh_board_ui()
 	_zoom_to_fit_deferred()
 
-	# LOAD-TIME ASSEMBLY ADVISORY (work item 019fd5fe1241, DCR 019fd5fd9084):
-	# run the worker's assembly_check over the DESERIALIZED board dict — that is
-	# the enriched dict carrying the worker-attached courtyard graphics, which is
-	# exactly what makes the courtyard basis available to the check (the live
-	# board's own to_board_dict() may not round-trip them) — and attach the
-	# tri-state verdict to the load reply as `assembly`, feeding the panel cache.
-	# A channel failure attaches {status:"indeterminate", error} — it NEVER
-	# blocks the load (the board is already rebuilt above) and is never silent.
-	var assembly: Dictionary = _PanelToolsScript._assembly_tri_state(
-		await assembly_check(board))
-	set_assembly_state(assembly, int(_data.board_revision))
-
-	return {"ok": true, "result": {
+	# LOAD-TIME BOARD HEALTH (Epoch UX2 station 9, docket 019fde571300 —
+	# subsuming work item 019fd5fe1241's assembly-only advisory): ONE
+	# pcb.board_health round-trip over the DESERIALIZED board dict — the
+	# enriched dict carrying the worker-attached courtyard graphics (the live
+	# board's own to_board_dict() may not round-trip them) — yields the same
+	# ledger a route reply carries: completeness census ("8 nets unrouted,
+	# GND in 9 islands") + the tri-state assembly verdict, at open, before
+	# any routing verb. The reply keeps the established `assembly` key (read
+	# out of the ledger) AND attaches the full `board_health` with the same
+	# panel enrichment the propose path applies (board_revision, preflight,
+	# pin_groups int-normalization, cache feed — _attach_board_health).
+	# DEGRADE: an old binary without the channel falls back to the plain
+	# assembly_check round-trip — assembly still attaches, board_health is
+	# simply absent. A failure NEVER blocks the load and is never silent.
+	var assembly: Dictionary
+	var load_result := {
 		"component_count": _data.get_component_count(),
 		"net_count": _data.nets.size(),
 		"warnings": warnings,
-		"assembly": assembly,
-	}}
+	}
+	var health_reply: Dictionary = await board_health_check(board)
+	if bool(health_reply.get("ok", false)) and health_reply.get("result", null) is Dictionary:
+		var health: Dictionary = health_reply.get("result")
+		assembly = _PanelToolsScript._assembly_tri_state(
+			{"ok": true, "result": health.get("assembly", {})})
+		_PanelToolsScript._attach_board_health(
+			_annotation_host, load_result, {"board_health": health})
+	else:
+		assembly = _PanelToolsScript._assembly_tri_state(await assembly_check(board))
+	load_result["assembly"] = assembly
+	set_assembly_state(assembly, int(_data.board_revision))
+
+	if not source_path.is_empty():
+		load_result["annotations_sidecar"] = "adopted"
+		if sidecar_restored > 0:
+			load_result["annotations_restored"] = sidecar_restored
+	return {"ok": true, "result": load_result}
 
 
 ## Recursively unwrap broker/worker envelopes ({ok|success, result:{…}}) down to
@@ -3566,6 +3650,28 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 ## panel_tools._assembly_tri_state — an unreachable worker degrades to an
 ## honest "could not check", never a crash and never a silent pass.
 ## Async, mirroring the pcb.serialize / route_board await pattern.
+## Whole-board health without a routing run (Epoch UX2 station 9, docket
+## 019fde571300): the pcb.board_health channel — census + assembly, the same
+## object a route reply's board_health carries. Same envelope normalisation
+## as assembly_check below.
+func board_health_check(board: Dictionary) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var result: Dictionary = await _request_with_backend_ensure(
+		"pcb.board_health", {"board": board}, 30000)
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		var inner: Dictionary = result.get("result")
+		if inner.has("ok"):
+			return inner
+		return {"ok": true, "result": inner}
+	return {"ok": false, "error": {"kind": "worker_error",
+		"message": str(result.get("error_message", result.get("error", "board_health failed")))}}
+
+
 func assembly_check(board: Dictionary) -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null:
@@ -3734,6 +3840,46 @@ func _zoom_to_fit_deferred() -> void:
 
 
 # ── host_owned save/load (board doc + annotation sidecar) ──────────────────────
+
+## Sidecar auto-write debounce (Epoch UX2 station 8, docket 019fde57027c).
+## Owner decision point resolved by the rubric: durable-by-default auto-write
+## (option a) beat tab-dirty-flag + save verb (option b) on the DURABILITY
+## axis — HITL-4 lost three hand-authored annotations to a restart because
+## the sidecar write only ran on Ctrl+S. The debounce bounds write
+## amplification on busy boards: a mutation burst produces at most one write
+## per window, and each write serializes the CURRENT list, so the last write
+## of a burst carries the final state. The BOARD file stays owner-saved —
+## only the annotation sidecar (cheap JSON beside the source) is automatic.
+const _SIDECAR_AUTOSAVE_DEBOUNCE_S := 0.8
+var _sidecar_autosave_pending: bool = false
+
+
+func _schedule_sidecar_autosave() -> void:
+	if _annotation_host == null or _file_path.is_empty():
+		return  # no durable home yet — adopted on save/load/path-load
+	if not is_inside_tree():
+		# No timer source before mount — write synchronously (rare: mutations
+		# before the panel enters the tree). Durability outranks coalescing.
+		_annotation_host.save_sidecar(_file_path)
+		return
+	if _sidecar_autosave_pending:
+		return
+	_sidecar_autosave_pending = true
+	# No is_instance_valid(self) guard on purpose (cold review F4): a lambda
+	# bound to a freed instance is silently dropped by the signal emission —
+	# it never runs — so the guard was unreachable dead code.
+	get_tree().create_timer(_SIDECAR_AUTOSAVE_DEBOUNCE_S).timeout.connect(func() -> void:
+		_sidecar_autosave_pending = false
+		if _annotation_host != null and not _file_path.is_empty():
+			_annotation_host.save_sidecar(_file_path))
+
+
+func _exit_tree() -> void:
+	# Teardown flush: a pending debounced write must not die with the panel —
+	# the exact "annotations die with the app" class this station closes.
+	if _sidecar_autosave_pending and _annotation_host != null and not _file_path.is_empty():
+		_sidecar_autosave_pending = false
+		_annotation_host.save_sidecar(_file_path)
 
 ## Return the board's save state. Ctrl+S writes this Dict to the .pcbskel file as
 ## JSON (Editor.gd host_owned path). Canonical from now on (port rule 4): the

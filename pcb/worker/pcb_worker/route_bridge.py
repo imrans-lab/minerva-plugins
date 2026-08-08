@@ -1584,7 +1584,17 @@ def hints_to_router(
         # (superseded_by_task_constraint / constraint_revision stamping), so
         # nothing goes silent. A hint with NO applying constraint keeps the
         # warning verbatim.
-        if kp.get("detail_level") and not constraint_pts:
+        #
+        # Epoch UX2 station 5 (docket 019fde36491f, refining the F4 fix): ALSO
+        # gated on the hint carrying waypoints at all. The warning's only
+        # content is which bridge path detail_level selects ("route as drawn"
+        # vs engine) — an EMPTY-waypoints hint has nothing to route as drawn,
+        # so the distinction carries zero signal there, constraint or not:
+        # HITL-5's corridor-free intents got the warning back and it read as
+        # doubt about a mechanism that was working. Only a hint whose own
+        # waypoints exist — where detail_level genuinely picks the path —
+        # still warns.
+        if kp.get("detail_level") and not constraint_pts and waypoints:
             warnings.append({"id": str(env.get("id", "")), "message":
                 "detail_level '%s' has no agent_router slot — it selects the "
                 "bridge path (only 'detailed' single-trace hints route as "

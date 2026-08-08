@@ -405,10 +405,11 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 	comp.set_footprint_by_name(footprint_str.to_upper())
 
 	var snap: bool = bool(args.get("snap_to_grid", true))
+	var asked_pos := Vector2(x, y)
 	if snap:
-		comp.position = data.snap_to_grid(Vector2(x, y))
+		comp.position = data.snap_to_grid(asked_pos)
 	else:
-		comp.position = Vector2(x, y)
+		comp.position = asked_pos
 	comp.rotation = float(args.get("rotation", 0.0))
 
 	var pin_count: int = int(args.get("pin_count", 0))
@@ -442,12 +443,12 @@ static func _add_component(host, args: Dictionary) -> Dictionary:
 
 	# Work item 019fd5fe2724: placement changed — invalidate + re-check assembly,
 	# attach the tri-state as `assembly` (coroutine; handle() awaits this verb).
-	return await _with_assembly_after_placement(host, data, _ok({
+	return await _with_assembly_after_placement(host, data, _with_snap_disclosure(_ok({
 		"component_id": component_id,
 		"x": comp.position.x,
 		"y": comp.position.y,
 		"pin_count": comp.pins.size(),
-	}))
+	}), x, y, comp.position))
 
 
 ## Pad-coincidence epsilon (board mm) for the dangling-copper sweep below.
@@ -557,6 +558,23 @@ static func _with_assembly_after_placement(host, data, reply: Dictionary) -> Dic
 	return reply
 
 
+## Snap disclosure (Epoch UX2 station 6, docket 019fde367b24): when the grid
+## snap landed a placement somewhere OTHER than what the caller asked for,
+## the reply says so — snapped:true + requested:[x,y] beside the landed
+## coordinates. HITL-5: move_component silently snapped 70.68 → 71.12; an
+## agent that doesn't diff request-vs-reply carries the stale number into
+## corridor math. No keys when the request landed exactly (the common case).
+## requested_x/requested_y are the caller's OWN 64-bit numbers, echoed
+## verbatim (Codex 1049 finding 5: routing them through a Vector2 truncated
+## them to float32 — 70.68 came back as 70.6800003051758).
+static func _with_snap_disclosure(reply: Dictionary, requested_x: float, requested_y: float,
+		landed: Vector2) -> Dictionary:
+	if Vector2(requested_x, requested_y).distance_to(landed) > 0.0005:
+		reply["snapped"] = true
+		reply["requested"] = [requested_x, requested_y]
+	return reply
+
+
 static func _move_component(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
@@ -568,11 +586,15 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 		return _err("Component not found: %s" % component_id)
 
 	var pre_pins: Dictionary = _pre_transform_pins(data, component_id)
-	var new_pos: Vector2 = data.snap_to_grid(Vector2(float(args.get("x", 0.0)), float(args.get("y", 0.0))))
+	var asked_x: float = float(args.get("x", 0.0))
+	var asked_y: float = float(args.get("y", 0.0))
+	var new_pos: Vector2 = data.snap_to_grid(Vector2(asked_x, asked_y))
 	# A GROUPED component moves the WHOLE group, offsets preserved — the same
 	# semantics a canvas drag has (A4). Ungrouped: unchanged, byte for byte.
 	var group_reply := _move_component_group(data, component_id, new_pos)
 	if not group_reply.is_empty():
+		if bool(group_reply.get("success", false)):
+			_with_snap_disclosure(group_reply, asked_x, asked_y, new_pos)
 		# Work item 019fd5fe2724: assembly re-check on every mutating exit (the
 		# helper no-ops on a locked-group refusal — nothing moved).
 		return await _with_assembly_after_placement(host, data,
@@ -580,7 +602,8 @@ static func _move_component(host, args: Dictionary) -> Dictionary:
 	data.move_component(component_id, new_pos)
 	data.save_to_history("Move " + component_id)
 	return await _with_assembly_after_placement(host, data, _with_dangling_copper(data,
-		_ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y}), pre_pins))
+		_with_snap_disclosure(_ok({"component_id": component_id, "x": new_pos.x, "y": new_pos.y}),
+			asked_x, asked_y, new_pos), pre_pins))
 
 
 ## Shared group-move half of move_component / move_relative.
@@ -643,10 +666,18 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 	}
 	if data.has_component(component_id):
 		var pre_pins: Dictionary = _pre_transform_pins(data, component_id)
+		# UX2 station 6: the reply's new_x/new_y previously echoed the
+		# INTERPRETED point while the move landed on its SNAPPED position —
+		# the reply now reports where the component actually IS, with the
+		# snap disclosed against the interpreted point.
+		var landed: Vector2 = data.snap_to_grid(new_pos)
+		reply["new_x"] = landed.x
+		reply["new_y"] = landed.y
+		_with_snap_disclosure(reply, new_pos.x, new_pos.y, landed)
 		# Group parity with _move_component: a grouped component carries its whole
 		# group to the interpreted destination. The reply keeps new_x/new_y (the
 		# ADDRESSED component's landing point) and adds the group fields.
-		var group_reply := _move_component_group(data, component_id, data.snap_to_grid(new_pos))
+		var group_reply := _move_component_group(data, component_id, landed)
 		if not group_reply.is_empty():
 			if not bool(group_reply.get("success", false)):
 				return group_reply  # locked group — surface the refusal verbatim
@@ -655,7 +686,7 @@ static func _move_relative(host, args: Dictionary) -> Dictionary:
 			# Work item 019fd5fe2724: mutating exit — see _add_component's stamp.
 			return await _with_assembly_after_placement(host, data,
 				_with_dangling_copper(data, _ok(reply), pre_pins))
-		data.move_component(component_id, data.snap_to_grid(new_pos))
+		data.move_component(component_id, landed)
 		data.save_to_history("Move " + component_id)
 		return await _with_assembly_after_placement(host, data,
 			_with_dangling_copper(data, _ok(reply), pre_pins))
@@ -1606,6 +1637,12 @@ static func _hint_convert_to_detailed(host, args: Dictionary) -> Dictionary:
 			# the two-store note in the header: NOT atomic with the annotation
 			# release below; load-time reconciliation owns the torn shapes).
 			cleared_constraint_revision = int((task.routing_constraint as Dictionary).get("revision", 0))
+			# Same monotonic floor as reroute_route's clear_constraint (UX2
+			# station 2 cold review F2) — a later constraint must never reuse
+			# the cleared revision.
+			if "constraint_revision_floor" in task:
+				task.constraint_revision_floor = maxi(
+					int(task.constraint_revision_floor), cleared_constraint_revision)
 			task.routing_constraint = {}
 			cleared = true
 
@@ -2321,17 +2358,21 @@ static func _seed_legacy_waypoint_constraints(host, workspace, data, source_hint
 		if task.is_constrained():
 			continue  # ensure_task resolved onto an already-constrained task
 		var revision_stack: Array = hint.get("revision_stack", []) if hint.get("revision_stack", []) is Array else []
+		# Seed revision resumes above any clear's floor (UX2 station 2 cold
+		# review F2) — for a never-cleared task this is the original 1.
+		var seed_revision: int = (int(task.constraint_revision_floor) \
+			if "constraint_revision_floor" in task else 0) + 1
 		task.routing_constraint = {
 			"corridor_points": corridor_points,
 			"preferred_layer": str(kp.get("layer", "")),
-			"revision": 1,
+			"revision": seed_revision,
 			"authored_by": "migration",
 			"base_board_revision": int(data.board_revision),
 			"owner_hint_id": hint_id,
 			"seeded_from_hint_id": hint_id,
 			"seeded_from_hint_revision": revision_stack.size(),
 		}
-		_stamp_waypoints_superseded(host, hint_id, 1)
+		_stamp_waypoints_superseded(host, hint_id, seed_revision)
 
 
 ## Net resolution mirror of route_bridge._net_for_hint's priority (Python,
@@ -2537,6 +2578,9 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 	if not emitter_summary.is_empty():
 		reply["emitter_notes_summary"] = emitter_summary
 	_pass_through_result_key(reply, result, "span_outcomes")
+	# UX2 station 6: per-route census credit ("merges N islands"), worker-owned
+	# shape, same additive absent-when-empty convention as span_outcomes.
+	_pass_through_result_key(reply, result, "island_deltas")
 	# DCR 019fd5fd9084: board_health replaced the worker's old top-level
 	# assembly_advisories key — verbatim pass-through + the two panel-owned
 	# enrichment fields + assembly-cache feed, see _attach_board_health.
@@ -2725,6 +2769,9 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 	if not emitter_summary.is_empty():
 		reply["emitter_notes_summary"] = emitter_summary
 	_pass_through_result_key(reply, result, "span_outcomes")
+	# UX2 station 6: per-route census credit ("merges N islands"), worker-owned
+	# shape, same additive absent-when-empty convention as span_outcomes.
+	_pass_through_result_key(reply, result, "island_deltas")
 	# DCR 019fd5fd9084: board_health replaced assembly_advisories — see
 	# _attach_board_health (pass-through + panel enrichment + cache feed).
 	_attach_board_health(host, reply, result)
@@ -2841,6 +2888,15 @@ static func _attach_board_health(host, reply: Dictionary, result: Dictionary) ->
 	if not (bh is Dictionary) or (bh as Dictionary).is_empty():
 		return
 	var health: Dictionary = (bh as Dictionary).duplicate(true)
+	# UX2 station 6 (docket 019fde367b24): pin_groups int normalization — the
+	# worker emits ints, but the Go↔GDScript JSON hop parses every number as
+	# float, so partial[].pin_groups reached callers as 9.0. Same
+	# JSON-boundary class as the F5 constraint_revision fix in
+	# _attach_hint_status; normalized once, here at the lift.
+	if health.get("partial", null) is Array:
+		for entry in (health["partial"] as Array):
+			if entry is Dictionary and (entry as Dictionary).has("pin_groups"):
+				(entry as Dictionary)["pin_groups"] = int((entry as Dictionary)["pin_groups"])
 	var data = _get_data(host)
 	var revision: int = int(data.board_revision) if data != null else 0
 	health["board_revision"] = revision
@@ -3938,7 +3994,10 @@ static func _load_board(host, args: Dictionary) -> Dictionary:
 	# to merge. Entity identity is type-level (ids re-mint on load): component
 	# refs, per-net trace counts, via positions, zone/cutout/hole counts.
 	var before: Dictionary = _board_census(_get_data(host))
-	var reply: Dictionary = await host.load_board(yaml_text)
+	# src_path rides along (UX2 station 8): a file-loaded board's annotations
+	# get a durable sidecar home at <path>.annotations.json — see
+	# load_board_from_yaml's adoption rules.
+	var reply: Dictionary = await host.load_board(yaml_text, src_path)
 	if not bool(reply.get("ok", false)):
 		var err_info: Dictionary = reply.get("error", {})
 		return _err(str(err_info.get("message", "load_board failed")))
@@ -4109,6 +4168,10 @@ static func _workspace_ctx(host) -> Dictionary:
 ## the user believes is still open, and risk "iterate lands duplicate copper"
 ## the other direction (a re-authored hint answering the same net getting no
 ## fresh candidate because the stale one still LOOKS live via its hint).
+## Since Epoch UX2 station 1 the reconcile enforces BOTH directions — see the
+## inline comment in the loop: PCBData.redo() re-commits a candidate without
+## touching the annotation store, so open-but-committed needs re-closing
+## exactly the way applied-but-uncommitted needs reopening.
 ##
 ## COMPENSATING HALF: rather than reach into the out-of-fence restore path (or
 ## giving the model a host reference it was deliberately never given), this
@@ -4135,11 +4198,21 @@ static func _reconcile_hint_lifecycle(host, workspace) -> void:
 			continue
 		if str((ann as Dictionary).get("kind", "")) != "pcb_route_hint":
 			continue
-		if str((ann as Dictionary).get("lifecycle", "open")) != "applied":
-			continue
 		var hid := str((ann as Dictionary).get("id", ""))
-		if not committed_hint_ids.has(hid):
+		var lifecycle := str((ann as Dictionary).get("lifecycle", "open"))
+		# BOTH directions of the same invariant (Epoch UX2 station 1, cold
+		# review F3): "applied" is truthful iff a committed candidate backs
+		# the hint RIGHT NOW.
+		#   applied + no committed candidate -> reopen (commit was undone);
+		#   open + committed candidate      -> re-close (the undo was itself
+		#     redone via PCBData.redo(), which restores the candidate's
+		#     committed disposition but never touches the annotation store —
+		#     without this half the hint re-inks its full corridor OVER real
+		#     copper and the next propose re-gathers it: duplicate copper).
+		if lifecycle == "applied" and not committed_hint_ids.has(hid):
 			_set_hint_lifecycle(host, hid, "open")
+		elif lifecycle == "open" and committed_hint_ids.has(hid):
+			_set_hint_lifecycle(host, hid, "applied")
 
 
 ## Mutate ONE hint's top-level `lifecycle` field through the standard
@@ -4156,6 +4229,26 @@ static func _set_hint_lifecycle(host, hint_id: String, lifecycle: String) -> boo
 		return false
 	var updated: Dictionary = ann.duplicate(true)
 	updated["lifecycle"] = lifecycle
+	return bool(host.update_annotation(hint_id, updated))
+
+
+## Mutate ONE hint's kind_payload.width_mm through the same
+## mutate-with-history seam as _set_hint_lifecycle above (UX2 station 3 —
+## reroute_route's width_mm arg). A width change is a REAL edit (unlike the
+## lifecycle bookkeeping above): it rides the hint's revision history, so
+## Ctrl+Z on the hint takes it back. Not a waypoints edit, so the superseded
+## guard does not refuse it.
+static func _set_hint_width(host, hint_id: String, width_mm: float) -> bool:
+	if host == null or not host.has_method("get_by_id") or not host.has_method("update_annotation"):
+		return false
+	var ann: Dictionary = host.get_by_id(hint_id)
+	if ann.is_empty():
+		return false
+	var updated: Dictionary = ann.duplicate(true)
+	var kp: Dictionary = updated.get("kind_payload", {}).duplicate(true) \
+		if updated.get("kind_payload", {}) is Dictionary else {}
+	kp["width_mm"] = width_mm
+	updated["kind_payload"] = kp
 	return bool(host.update_annotation(hint_id, updated))
 
 
@@ -4204,7 +4297,105 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		var f: Array = workspace.findings_for_candidate(cid)
 		if not f.is_empty():
 			rec["finding_count"] = f.size()
+	# Route-quality metrics (Epoch UX2 station 4, docket 019fde36651a — the
+	# HITL-5 lesson mechanized: nothing in the loop scored route QUALITY, so
+	# satisfying-the-collision-signal masqueraded as done and a human had to
+	# catch "this route wants a placement change"). Cheap, always-on, computed
+	# from the candidate's own geometry.
+	var quality: Dictionary = _route_quality(c)
+	if not quality.is_empty():
+		rec["bend_count"] = quality["bend_count"]
+		rec["routed_length_mm"] = quality["routed_length_mm"]
+		if quality.has("length_ratio"):
+			rec["length_ratio"] = quality["length_ratio"]
 	return rec
+
+
+## Chain a candidate's segments into ordered XY polyline runs — the SHARED
+## geometry walk behind _corridor_from_candidate_geometry (single-run
+## enforcement is that caller's own rule) and _route_quality (which accepts
+## any run count). Layer-agnostic on purpose: a layer-changing via with
+## endpoint-coincident copper either side continues the SAME run — only a
+## genuine XY gap starts a new one. Same epsilon family as commit-side
+## chaining (see _GEOMETRY_CHAIN_EPSILON_MM's doc).
+static func _chained_runs(c) -> Array:
+	var runs: Array = []  # Array[Array[Vector2]]
+	for seg in c.segments:
+		if not (seg is Dictionary):
+			continue
+		var seg_pts: Array = []
+		for p in (seg as Dictionary).get("points", []):
+			if p is Vector2:
+				seg_pts.append(p)
+		if seg_pts.is_empty():
+			continue
+		if not runs.is_empty():
+			var cur: Array = runs[runs.size() - 1]
+			var last: Vector2 = cur[cur.size() - 1]
+			if last.distance_to(seg_pts[0] as Vector2) <= _GEOMETRY_CHAIN_EPSILON_MM:
+				for k in range(1, seg_pts.size()):
+					cur.append(seg_pts[k])
+				continue
+		runs.append(seg_pts.duplicate())
+	return runs
+
+
+## Cheap route-quality metrics over a candidate's chained geometry (UX2
+## station 4): {bend_count, routed_length_mm, length_ratio?}.
+##   bend_count        interior vertices where the direction actually turns
+##                     (collinear joints — e.g. a via splitting a straight
+##                     run — do not count). Summed across disconnected runs.
+##   routed_length_mm  total copper centerline length, all runs.
+##   length_ratio      routed_length / manhattan-minimum, where the manhattan
+##                     minimum is Σ per run of |dx|+|dy| between that run's
+##                     endpoints — the shortest rectilinear path pretending
+##                     no obstacle exists. APPROXIMATE by design: a diagonal
+##                     route can score < 1.0, and the metric says nothing
+##                     about which detours were justified. Absent when the
+##                     manhattan minimum is ~0 (loop / zero-length run —
+##                     a ratio against 0 is noise, not signal).
+## The point of these numbers (owner, HITL-5): a HIGH ratio or bend count on
+## a SHORT neighbor hop is the "move the part instead" smell — 5+5+5-segment
+## signal-chasing vs 2+2+5 placement-first was the A/B that filed this.
+static func _route_quality(c) -> Dictionary:
+	if c == null:
+		return {}
+	var runs: Array = _chained_runs(c)
+	# A vias-only / geometry-less candidate reports honest ZEROS rather than
+	# omitting the keys (cold review F2): the record shape stays uniform, and
+	# only length_ratio is ever conditionally absent.
+	var bends: int = 0
+	var routed: float = 0.0
+	var manhattan: float = 0.0
+	for run in runs:
+		var pts: Array = run
+		manhattan += absf((pts[pts.size() - 1] as Vector2).x - (pts[0] as Vector2).x) \
+			+ absf((pts[pts.size() - 1] as Vector2).y - (pts[0] as Vector2).y)
+		# Leg-walk, carrying the last NON-DEGENERATE direction across
+		# zero-length legs (cold review F3): a router that emits a degenerate
+		# zero-length segment AT a corner must not make that genuine bend
+		# vanish — comparing only immediate neighbors skipped both joints.
+		var prev_dir := Vector2.ZERO
+		for i in range(1, pts.size()):
+			var leg: Vector2 = (pts[i] as Vector2) - (pts[i - 1] as Vector2)
+			var leg_len: float = leg.length()
+			routed += leg_len
+			if leg_len <= _GEOMETRY_CHAIN_EPSILON_MM:
+				continue
+			var dir: Vector2 = leg / leg_len
+			if prev_dir != Vector2.ZERO:
+				# A turn is a genuine direction change — cross ≉ 0 (or a
+				# straight reversal, dot < 0: copper doubling back).
+				if absf(prev_dir.cross(dir)) > 0.001 or prev_dir.dot(dir) < 0.0:
+					bends += 1
+			prev_dir = dir
+	var out: Dictionary = {
+		"bend_count": bends,
+		"routed_length_mm": snappedf(routed, 0.001),
+	}
+	if manhattan > _GEOMETRY_CHAIN_EPSILON_MM:
+		out["length_ratio"] = snappedf(routed / manhattan, 0.001)
+	return out
 
 
 ## The candidate's GEOMETRY, JSON-shaped (docket 019fce3ac3f5 item 3): segments
@@ -4611,6 +4802,7 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 	# pass-through + the panel-owned board_revision/preflight enrichment +
 	# assembly-cache feed, see _attach_board_health.
 	_pass_through_result_key(out, result, "span_outcomes")
+	_pass_through_result_key(out, result, "island_deltas")
 	_attach_board_health(host, out, result)
 	# Epoch UX1 station 11: a non-empty landing gets the compact legal-
 	# successors sentence instead of the bare "landed" note above — the
@@ -5068,16 +5260,27 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 ##                                 whether steering happens at all, because
 ##                                 "false" has an honest meaning ("reroute
 ##                                 fresh") that "corridor:[]" does not.
+##   clear_constraint             bool — true REMOVES the task's
+##                                 routing_constraint entirely (Epoch UX2
+##                                 station 2): the reroute this call performs,
+##                                 and every propose after it, runs unguided.
+##                                 Mutually exclusive with corridor /
+##                                 preserve_shape_as_corridor. Refuses
+##                                 `no_constraint_to_clear` by name on an
+##                                 unconstrained task. The owner hint's
+##                                 supersession marker is stripped through the
+##                                 sanctioned release, so its own waypoints
+##                                 (if any) are live authority again. Reports
+##                                 cleared_constraint_revision on every reply.
 ##   expected_constraint_revision int — optimistic concurrency on the task's
 ##                                 CURRENT constraint revision (0 for an
 ##                                 unconstrained task). A mismatch refuses
 ##                                 `constraint_revision_conflict` naming the
-##                                 actual revision and steers NOTHING. Read
-##                                 only when a steering arg above is also
-##                                 acting — a bare expected_constraint_revision
-##                                 with neither corridor nor
-##                                 preserve_shape_as_corridor:true has nothing
-##                                 to guard and is ignored.
+##                                 actual revision and steers/clears NOTHING.
+##                                 Read only when a steering arg above (or
+##                                 clear_constraint) is also acting — a bare
+##                                 expected_constraint_revision with nothing
+##                                 to guard is ignored.
 ##
 ## DURABILITY INVARIANT (comment 1028: "steering durability does not depend on
 ## obtaining a candidate"). When a steering arg IS acting, the task's
@@ -5113,17 +5316,65 @@ static func _workspace_reroute_route(host, args: Dictionary) -> Dictionary:
 		}
 	var preserve: bool = has_preserve_key and bool(args.get("preserve_shape_as_corridor", false))
 	var wants_steer: bool = has_corridor or preserve
+	# clear_constraint (Epoch UX2 station 2, docket 019fde361cf0 — HITL-5: a
+	# corridor could be REPLACED but never REMOVED, and the
+	# constraint_stale_candidate refusal literally advised a verb that did not
+	# exist). A clear IS a steer in the opposite direction: "route this
+	# unguided from now on" — same precondition discipline, same
+	# expected_constraint_revision guard, same durability invariant (the clear
+	# lands before the router and survives a router failure).
+	var wants_clear: bool = args.has("clear_constraint") and bool(args.get("clear_constraint", false))
+	if wants_clear and (has_corridor or has_preserve_key):
+		return {
+			"success": false, "error": "corridor_args_conflict",
+			"note": "clear_constraint removes the task's routing_constraint — it cannot be combined with corridor/preserve_shape_as_corridor, which write a new one",
+		}
+	# width_mm (Epoch UX2 station 3, docket 019fde363162): review-time width
+	# change — lands on the candidate's source hints' kind_payload (the same
+	# durable channel add_route_intent writes and _width_from_hints reads)
+	# before the router leg reroutes. Validated HERE, with every other
+	# args-shape refusal, so a bad width refuses before any steer/clear
+	# mutation lands (precondition-first, F1's ordering discipline).
+	var wants_width: bool = args.has("width_mm")
+	var width_val: float = 0.0
+	if wants_width:
+		var raw_width: Variant = args.get("width_mm")
+		if not (raw_width is float or raw_width is int) or float(raw_width) <= 0.0:
+			return {
+				"success": false, "error": "invalid_width",
+				"note": "width_mm must be a positive number (trace width in mm) — omit the key entirely to keep each hint's current width",
+			}
+		width_val = float(raw_width)
 
 	var pre: Dictionary = _reroute_precheck(host, args)
 	if not bool(pre.get("ok", false)):
 		return pre.get("reply")
 
-	if wants_steer:
+	var cleared_revision: int = 0
+	if wants_clear:
+		var clear: Dictionary = _clear_task_constraint_before_reroute(host, args, pre)
+		if not bool(clear.get("ok", false)):
+			return clear.get("reply")
+		cleared_revision = int(clear.get("cleared_revision", 0))
+	elif wants_steer:
 		var steer: Dictionary = _steer_task_before_reroute(host, args, preserve, pre)
 		if not bool(steer.get("ok", false)):
 			return steer.get("reply")
 
+	if wants_width:
+		# Same write-before-router durability as steer/clear: the width intent
+		# lands on the durable hints whether or not the router leg succeeds.
+		# Applied to EVERY source hint — a candidate answering merged spans is
+		# one route, and "make this route width X" means the whole route (the
+		# per-hint refusal dance is exactly the ergonomic failure this station
+		# removes). The router leg re-reads annotations fresh, so this call's
+		# own reroute already routes at the new width (width_source:"hint").
+		for hid in pre["hint_ids"]:
+			_set_hint_width(host, str(hid), width_val)
+
 	var reply: Dictionary = await _workspace_reroute(host, args, {}, pre)
+	if wants_width:
+		reply["width_mm"] = width_val
 	if wants_steer and not bool(reply.get("success", true)):
 		# F1: the bump above already landed durably by this point (every
 		# remaining failure mode — worker unavailable, pinned-supersede,
@@ -5136,6 +5387,13 @@ static func _workspace_reroute_route(host, args: Dictionary) -> Dictionary:
 		reply["steered"] = true
 		reply["constraint_revision"] = int(task.routing_constraint.get("revision", 0)) \
 			if task != null and task.is_constrained() else 0
+	if wants_clear:
+		# Same durability-reporting rule as the steer half above, on EVERY
+		# reply (success or failure): the constraint is gone whether or not
+		# the router leg landed a fresh candidate.
+		reply["cleared_constraint"] = true
+		reply["cleared_constraint_revision"] = cleared_revision
+		reply["constraint_revision"] = 0
 	return reply
 
 
@@ -5242,7 +5500,12 @@ static func _steer_task_before_reroute(host, args: Dictionary, preserve: bool, p
 
 	var preserved_layer: String = str(task.routing_constraint.get("preferred_layer", "")) \
 		if task.is_constrained() else ""
-	var new_revision: int = actual_revision + 1
+	# Monotonic across clears (UX2 station 2 cold review F2): resume above the
+	# floor a clear left behind, so a pre-clear candidate's stamped revision
+	# can never collide with a fresh constraint's.
+	var floor_rev: int = int(task.constraint_revision_floor) \
+		if "constraint_revision_floor" in task else 0
+	var new_revision: int = maxi(actual_revision, floor_rev) + 1
 	# DURABILITY INVARIANT (docket 019fd057ea0b comment 1028) — see
 	# _workspace_reroute_route's own doc for the full rationale. Written NOW,
 	# before that caller ever reaches the router: a routing failure below must
@@ -5261,6 +5524,78 @@ static func _steer_task_before_reroute(host, args: Dictionary, preserve: bool, p
 	# the deferred render/edit-refusal implications note.
 	_stamp_waypoints_superseded(host, owner_hint_id, new_revision)
 	return {"ok": true}
+
+
+## The clearing half of _workspace_reroute_route (Epoch UX2 station 2, docket
+## 019fde361cf0): remove the task's routing_constraint entirely so the reroute
+## that follows — and every propose after it — runs unguided. Mirrors
+## _steer_task_before_reroute's discipline exactly (same task_not_found /
+## constraint_revision_conflict refusal shapes, same run-before-the-router
+## durability), and _hint_convert_to_detailed's precedent for what "cleared"
+## means: task.routing_constraint = {} (the workspace store is authoritative),
+## then the annotation-side supersession marker is stripped through the
+## host's sanctioned bookkeeping path — the SAME marker-without-constraint
+## repair reconcile_superseded_waypoint_state performs at load, done
+## synchronously here so THIS call's own router leg already routes the hint's
+## waypoints as live authority (an intent-shape hint with no waypoints simply
+## routes unguided).
+##
+## Returns {"ok":true, "cleared_revision":N} or {"ok":false, "reply":<named
+## refusal>}. A task with NO constraint refuses `no_constraint_to_clear` by
+## name rather than no-op-succeeding: the caller believed a constraint
+## governed this task, and silently "clearing" nothing would confirm a false
+## model (minerva_pcb_workspace_list reports constraint_revision to re-read).
+static func _clear_task_constraint_before_reroute(host, args: Dictionary, pre: Dictionary) -> Dictionary:
+	var workspace = pre["workspace"]
+	var c = pre["candidate"]
+	var cid: String = str(pre["cid"])
+
+	var task = workspace.get_task(str(c.task_id))
+	if task == null:
+		return {"ok": false, "reply": {
+			"success": false, "error": "task_not_found", "candidate_id": cid,
+			"task_id": str(c.task_id),
+			"note": "this candidate's task no longer exists in the workspace — there is nothing to clear",
+		}}
+
+	var actual_revision: int = int((task.routing_constraint as Dictionary).get("revision", 0)) \
+		if task.is_constrained() else 0
+	if args.has("expected_constraint_revision"):
+		var expected: int = int(args.get("expected_constraint_revision"))
+		if expected != actual_revision:
+			return {"ok": false, "reply": {
+				"success": false, "error": "constraint_revision_conflict",
+				"candidate_id": cid, "task_id": str(c.task_id),
+				"expected_constraint_revision": expected,
+				"actual_constraint_revision": actual_revision,
+				"note": "the task's routing_constraint has moved since you read it — re-read the current revision (minerva_pcb_workspace_list reports constraint_revision on constrained tasks) before clearing it",
+			}}
+
+	if not task.is_constrained():
+		return {"ok": false, "reply": {
+			"success": false, "error": "no_constraint_to_clear",
+			"candidate_id": cid, "task_id": str(c.task_id),
+			"note": "this candidate's task carries no routing_constraint — a plain reroute (no steering args) already routes it unguided",
+		}}
+
+	var owner_hint_id: String = str((task.routing_constraint as Dictionary).get("owner_hint_id", ""))
+	# Authority store first (the same write order every constraint writer
+	# uses: constraint, then marker) — clearing is the {} write
+	# _hint_convert_to_detailed established as the canonical cleared state.
+	# The revision floor survives the {} (see pcb_route_task.gd's field doc):
+	# a later steer resumes ABOVE the cleared revision, never reusing it.
+	if "constraint_revision_floor" in task:
+		task.constraint_revision_floor = maxi(int(task.constraint_revision_floor), actual_revision)
+	task.routing_constraint = {}
+	# Derived store second: strip the now-orphaned supersession marker through
+	# the sanctioned release (NEVER plain update_annotation — the H2-1
+	# re-injection guard would put it straight back). Best-effort by the same
+	# rule as _stamp_waypoints_superseded: a host without the method degrades
+	# to the lazy load-time reconcile.
+	if not owner_hint_id.is_empty() and host != null \
+			and host.has_method("reconcile_strip_superseded_marker"):
+		host.reconcile_strip_superseded_marker(owner_hint_id)
+	return {"ok": true, "cleared_revision": actual_revision}
 
 
 ## Endpoint-coincidence epsilon (board mm) for chaining a candidate's OWN
@@ -5299,24 +5634,9 @@ const _GEOMETRY_CHAIN_EPSILON_MM := 0.0001
 ## candidate's geometry with something else — a snapshot of the shape as the
 ## caller last saw/edited it, not a live reference.
 static func _corridor_from_candidate_geometry(c) -> Dictionary:
-	var runs: Array = []  # Array[Array[Vector2]]
-	for seg in c.segments:
-		if not (seg is Dictionary):
-			continue
-		var seg_pts: Array = []
-		for p in (seg as Dictionary).get("points", []):
-			if p is Vector2:
-				seg_pts.append(p)
-		if seg_pts.is_empty():
-			continue
-		if not runs.is_empty():
-			var cur: Array = runs[runs.size() - 1]
-			var last: Vector2 = cur[cur.size() - 1]
-			if last.distance_to(seg_pts[0] as Vector2) <= _GEOMETRY_CHAIN_EPSILON_MM:
-				for k in range(1, seg_pts.size()):
-					cur.append(seg_pts[k])
-				continue
-		runs.append(seg_pts.duplicate())
+	# The walk itself is _chained_runs (shared with _route_quality since UX2
+	# station 4); the ONE-run enforcement below is this caller's own rule.
+	var runs: Array = _chained_runs(c)
 	if runs.size() != 1:
 		return {"ok": false, "runs": runs.size()}
 	return {"ok": true, "points": runs[0]}
@@ -6147,12 +6467,28 @@ static func _add_route_intent(host, args: Dictionary) -> Dictionary:
 		if corridor_points == null:
 			return _err("corridor must be an array of {x_mm, y_mm} points")
 
+	# Optional trace width (Epoch UX2 station 3, docket 019fde363162): width is
+	# part of ROUTING INTENT — HITL-5 needed three wholesale kind_payload
+	# patches per width change because only the intent tool never exposed the
+	# end-to-end plumbing that already exists (kind_payload.width_mm →
+	# route_bridge._width_from_hints → candidate width_mm + width_source:
+	# "hint"). Validated here, landed on the minted hint's kind_payload below.
+	var width_mm: Variant = null
+	if args.has("width_mm"):
+		var raw_width: Variant = args.get("width_mm")
+		if not (raw_width is float or raw_width is int) or float(raw_width) <= 0.0:
+			return {
+				"success": false, "error": "invalid_width",
+				"note": "width_mm must be a positive number (trace width in mm) — omit the key entirely for the net class default",
+			}
+		width_mm = float(raw_width)
+
 	# ── (a) the connectivity annotation — NO waypoints, ever, by construction ──
 	var source_comp = source_resolved["comp"]
 	var anchor_pos: Vector2 = source_comp.get_pin_world_position(str(source_resolved["pin"]))
 	var note: String = str(args.get("note", ""))
 	var envelope: Dictionary = host.build_route_hint_envelope(
-		anchor_pos.x, anchor_pos.y, note, "F.Cu", "waypoint", [], "ai", "", null,
+		anchor_pos.x, anchor_pos.y, note, "F.Cu", "waypoint", [], "ai", "", width_mm,
 		[source_pin], [dest_pin])
 	_maybe_stamp_annotation_ref(envelope)
 	var ref: String = str(envelope.get("ref", ""))
@@ -6193,6 +6529,10 @@ static func _add_route_intent(host, args: Dictionary) -> Dictionary:
 		reply["ref"] = ref
 	if constraint_revision != null:
 		reply["constraint_revision"] = constraint_revision
+	# UX2 station 3: echo the landed width so the caller sees the intent took
+	# — the propose reply then closes the loop with width_source:"hint".
+	if width_mm != null:
+		reply["width_mm"] = width_mm
 	# Epoch UX1 station 11: normalized through the shared _next_steps helper
 	# (same "route_intent" text as before, byte-identical) rather than built
 	# inline here.

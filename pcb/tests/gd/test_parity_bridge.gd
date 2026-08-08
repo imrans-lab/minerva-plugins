@@ -430,6 +430,24 @@ func _run_undo_after_commit() -> void:
 	check_eq("hint REOPENS to 'open' the next time any workspace tool runs (compensating half)",
 		str(host.get_by_id(hint_id).get("lifecycle", "")), "open")
 
+	# THE CLOSING DIRECTION (Epoch UX2 station 1, cold review F3): redo
+	# re-commits the candidate through the same board-history bucket — and
+	# just like undo, it never touches the annotation store. Without the
+	# reconciler's closing half the hint would stay "open" forever over real
+	# committed copper: it would re-ink its full corridor over the traces
+	# (the exact leak class station 1's invariant rules out) and the next
+	# propose would re-gather it (duplicate copper). Pin the gap AND the heal.
+	var redone: bool = data.redo()
+	check("data.redo() reports success", redone)
+	check("redo restored the traces", data.traces.size() >= 1)
+	check_eq("candidate disposition restored to committed BY data.redo() alone",
+		ws.get_candidate(cand_id).disposition, "committed")
+	check_eq("hint STAYS open immediately after redo (the gap is real, other direction)",
+		str(host.get_by_id(hint_id).get("lifecycle", "")), "open")
+	PanelTools._workspace_list(host, {})
+	check_eq("hint RE-CLOSES to 'applied' the next time any workspace tool runs (closing half)",
+		str(host.get_by_id(hint_id).get("lifecycle", "")), "applied")
+
 	ctx["driver"].free_panel(panel)
 
 

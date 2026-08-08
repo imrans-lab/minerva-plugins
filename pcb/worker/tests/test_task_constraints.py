@@ -390,13 +390,14 @@ def test_a_constraint_steered_sparse_hint_draws_no_slot_warning():
     assert out.hints.connection_hints[0].constraint_revision == 1
 
 
-def test_an_unconstrained_sparse_hint_still_draws_the_warning_verbatim():
-    """Negative gate: with no constraint applying, the warning is exactly what
-    it always was — the honest bridge-path note stays for the hints it is
-    true of."""
+def test_an_unconstrained_waypoint_carrying_hint_still_draws_the_warning_verbatim():
+    """Negative gate: with no constraint applying AND the hint carrying its
+    own waypoints — the one shape where detail_level genuinely selects the
+    bridge path — the warning is exactly what it always was."""
     board = route_bridge.board_to_router(_rotated_board())
     env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
-                      detail_level="sparse")
+                      detail_level="sparse",
+                      waypoints=[list(w) for w in _LEGACY_WPS])
     out = route_bridge.hints_to_router([env], board)
     warnings = _slot_warnings(out)
     assert len(warnings) == 1, out.warnings
@@ -406,14 +407,41 @@ def test_an_unconstrained_sparse_hint_still_draws_the_warning_verbatim():
         "drawn), not engine behaviour")
 
 
+def test_an_unconstrained_empty_waypoints_hint_draws_no_warning():
+    """Epoch UX2 station 5 (docket 019fde36491f): an EMPTY-waypoints hint has
+    nothing to 'route as drawn', so telling the caller which bridge path
+    detail_level selects carries zero signal — constraint or not. HITL-5's
+    corridor-free intents got the warning back after the F4 fix and it read
+    as doubt about a working mechanism."""
+    board = route_bridge.board_to_router(_rotated_board())
+    env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
+                      detail_level="sparse")
+    out = route_bridge.hints_to_router([env], board)
+    assert _slot_warnings(out) == [], out.warnings
+
+
 def test_a_refused_constraint_entry_keeps_the_warning():
     """A task_constraints entry that does NOT apply (unusable corridor_points
     — the same 'no override' degrade every malformed entry takes) leaves the
-    hint on the legacy path, so the warning stays true and stays emitted."""
+    hint on the legacy path, so — for a hint whose own waypoints exist — the
+    warning stays true and stays emitted."""
+    board = route_bridge.board_to_router(_rotated_board())
+    env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
+                      detail_level="sparse",
+                      waypoints=[list(w) for w in _LEGACY_WPS])
+    out = route_bridge.hints_to_router(
+        [env], board,
+        task_constraints={"ann1": {"corridor_points": "not-points"}})
+    assert len(_slot_warnings(out)) == 1, out.warnings
+
+
+def test_a_refused_constraint_entry_on_an_empty_waypoints_hint_stays_silent():
+    """Station 5's gate composes with the refused-entry degrade: no applying
+    constraint AND no waypoints -> still nothing to say."""
     board = route_bridge.board_to_router(_rotated_board())
     env = _route_hint(source_pins=["U1.2"], dest_pins=["R1.1"],
                       detail_level="sparse")
     out = route_bridge.hints_to_router(
         [env], board,
         task_constraints={"ann1": {"corridor_points": "not-points"}})
-    assert len(_slot_warnings(out)) == 1, out.warnings
+    assert _slot_warnings(out) == [], out.warnings

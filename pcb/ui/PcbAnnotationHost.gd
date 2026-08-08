@@ -326,9 +326,12 @@ func run_router(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 ## Whole-board load bridge (minerva_pcb_load_board). Forwards to the panel, which
 ## owns the broker `request` signal for pcb.deserialize + from_board_dict — same
 ## host→panel duck-typed path as run_router.
-func load_board(yaml_text: String) -> Dictionary:
+func load_board(yaml_text: String, source_path: String = "") -> Dictionary:
+	# source_path (Epoch UX2 station 8, docket 019fde57027c): the on-disk home
+	# of the YAML, when the load came from a file — the panel adopts it as the
+	# document path so the annotation sidecar has somewhere durable to live.
 	if _panel != null and is_instance_valid(_panel) and _panel.has_method("load_board_from_yaml"):
-		return await _panel.load_board_from_yaml(yaml_text)
+		return await _panel.load_board_from_yaml(yaml_text, source_path)
 	return {"ok": false, "error": {"kind": "worker_unavailable",
 		"message": "no panel bound — pcb.deserialize broker unreachable (headless / before mount)"}}
 
@@ -1270,6 +1273,63 @@ func get_by_id(annotation_id: String) -> Dictionary:
 	return {}
 
 
+# ── Consumed-hint selection veto (Epoch UX2 station 1, cold review F1) ────────
+#
+# A consumed route hint (lifecycle "applied") renders NOTHING and must carry no
+# interaction affordance whatsoever — but core selection visuals (transform-tool
+# bounds/handles, overlay halo) key off the SELECTION, not the kind's render
+# mode, and core's claims_point single-selected branch claims presses inside a
+# selected annotation's bounds. So the invariant is enforced where every
+# selection path converges: the host's selection setters (dock row click, MCP,
+# tools — toggle_selected_annotation_id routes through set_selected_annotation_
+# ids too), plus a flip-time deselect in update_annotation for a hint that is
+# ALREADY selected when its commit marks it applied.
+
+## True iff `annotation_id` names a consumed route hint — the one state this
+## host refuses to hold in selection.
+func _is_consumed_hint(annotation_id: String) -> bool:
+	if annotation_id.is_empty():
+		return false
+	for ann in _annotations:
+		if ann is Dictionary and str((ann as Dictionary).get("id", "")) == annotation_id:
+			return str((ann as Dictionary).get("kind", "")) == "pcb_route_hint" \
+				and str((ann as Dictionary).get("lifecycle", "open")) == "applied"
+	return false
+
+
+## Refuse (no-op, prior selection stands) rather than clear: a caller that
+## points at a consumed record has not asked to drop what it already had.
+func set_selected_annotation_id(annotation_id: String) -> void:
+	if _is_consumed_hint(annotation_id):
+		return
+	super.set_selected_annotation_id(annotation_id)
+
+
+func set_selected_annotation_ids(annotation_ids: PackedStringArray, primary: String = "") -> void:
+	var kept := PackedStringArray()
+	for id in annotation_ids:
+		if not _is_consumed_hint(str(id)):
+			kept.append(id)
+	if _is_consumed_hint(primary):
+		primary = ""
+	super.set_selected_annotation_ids(kept, primary)
+
+
+## Drop `annotation_id` from the live selection (single and set) — the
+## flip-time half of the veto: a hint selected at the moment its candidate
+## commits must not stay selected as an invisible record.
+func _deselect_annotation_id(annotation_id: String) -> void:
+	var ids := get_selected_annotation_ids()
+	if ids.has(annotation_id):
+		var kept := PackedStringArray()
+		for id in ids:
+			if str(id) != annotation_id:
+				kept.append(id)
+		super.set_selected_annotation_ids(kept)
+	elif get_selected_annotation_id() == annotation_id:
+		super.set_selected_annotation_id("")
+
+
 ## THE mutate-with-history seam (C4 deliverable 1): both the canvas
 ## manipulation-tool path (AnnotationOverlay._on_tool_annotation_modified,
 ## which every AnnotationAuthorTool subclass — the bend-handle edit tool
@@ -1339,6 +1399,12 @@ func update_annotation(annotation_id: String, new_annotation: Dictionary) -> boo
 			AnnotationHost._stamp_anchor(updated, self)
 			_backfill_route_hint_dest_point(updated)
 			_annotations[i] = updated
+			# Flip-time half of the consumed-hint selection veto (see the
+			# veto block above get_by_id): runs BEFORE annotations_changed so
+			# listeners woken by that signal already see the final selection.
+			if str(updated.get("kind", "")) == "pcb_route_hint" \
+					and str(updated.get("lifecycle", "open")) == "applied":
+				_deselect_annotation_id(annotation_id)
 			annotations_changed.emit()
 			return true
 	return false
@@ -2059,6 +2125,19 @@ class _PcbAnchorResolver:
 
 
 # ── Sidecar persistence (core AnnotationSidecar) ──────────────────────────────
+
+## Wholesale reset for a DOCUMENT SWITCH (Epoch UX2 station 8, Codex 1049
+## finding 2): annotations authored against the PREVIOUS document must not
+## attach to a different board that has no sidecar of its own. Bookkeeping,
+## not deletion-with-history — the caller has already flushed them to the
+## previous document's sidecar, where they live on. Clears the selection too:
+## ids about to vanish must not linger in the selection set.
+func clear_annotations_for_document_switch() -> void:
+	if _annotations.is_empty():
+		return
+	set_selected_annotation_ids(PackedStringArray())
+	_annotations = []
+	annotations_changed.emit()
 
 ## Write the current annotations to <path>.annotations.json. Zero annotations
 ## deletes the sidecar (AnnotationSidecar contract). Returns an Error code.

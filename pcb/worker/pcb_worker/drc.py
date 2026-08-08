@@ -644,6 +644,31 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
             "approximate": True}
 
 
+def net_pin_group_count(board: dict, net: str) -> int | None:
+    """Pin-island count for ONE net over this board's copper, or None.
+
+    Epoch UX2 station 6 (docket 019fde367b24) — the census kernel exposed
+    per-net so a route reply can report its own island DELTA ("merges N
+    islands") instead of leaving the caller with a bare whole-board count.
+    Same union-find + credits as :func:`connectivity_completeness` (which
+    stays the one classifier — this answers a count question, not a
+    missing/partial/indeterminate one). None when the census cannot judge
+    the net: fewer than two pins (nothing to connect), or zone copper on it
+    (pour connectivity is indeterminate for this centerline kernel —
+    019fd5fdeef3b's rule, mirrored)."""
+    pin_count = 0
+    for n in _list(board.get("nets")):
+        if isinstance(n, dict) and n.get("name") == net:
+            pin_count = len(_list(n.get("pins")))
+    if pin_count < 2:
+        return None
+    for z in _list(board.get("zones")):
+        if isinstance(z, dict) and z.get("net") == net:
+            return None
+    return _net_pin_groups(net, _harvest_pads(board), _harvest_segments(board),
+                           _harvest_vias(board), _board_clearance(board))
+
+
 # ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------

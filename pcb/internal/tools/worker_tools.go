@@ -344,6 +344,32 @@ func HandleAssemblyCheckChannel(ctx context.Context, w *bridge.Worker, params js
 	return w.Call(ctx, "assembly_check", params)
 }
 
+// ---- pcb.board_health (worker-backed broker CHANNEL) -----------------------
+//
+// Epoch UX2 station 9 (docket 019fde571300): the whole-board health ledger —
+// the SAME board_health object every ok pcb.route reply carries (connectivity
+// completeness census + tri-state assembly) — computable WITHOUT a routing
+// run, so the load path can announce completeness at open. Same dotted
+// panel-IPC channel idiom as pcb.assembly_check directly above; forwards
+// verbatim to the Python worker's "board_health" method.
+
+var BoardHealthChannel = ToolSpec{
+	Name: "pcb.board_health",
+	Description: "Panel IPC channel for the whole-board health ledger without " +
+		"a routing run (Epoch UX2 station 9). Forwards verbatim to the Python " +
+		"worker's 'board_health' method. Args: {board:<canonical Board dict>}. " +
+		"Returns {ok, result:{complete:true|false|null, missing_copper:[net], " +
+		"partial?:[{net,pin_groups}], indeterminate?:[{net,reason}], " +
+		"assembly:{status,findings,...}, approximate:true}} — the exact keys " +
+		"and tri-state semantics of a route reply's board_health, one census " +
+		"kernel behind both.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleBoardHealthChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "board_health", params)
+}
+
 // ---- minerva_pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

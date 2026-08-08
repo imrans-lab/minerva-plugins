@@ -1321,3 +1321,131 @@ def test_a_zone_bearing_net_reads_indeterminate_on_both_ledgers():
     assert health["missing_copper"] == ["VCC"]
     assert health["indeterminate"] == [
         {"net": "EXIST", "reason": "zone_copper"}]
+
+
+# ---------------------------------------------------------------------------
+# island_delta (Epoch UX2 station 6, docket 019fde367b24) — per-route census
+# CREDIT. "GND partial, 9 pin groups" is true but unactionable; "this route
+# merges 2 islands -> 1" is a decision aid. Each route is judged ALONE
+# against the PRE-proposal board (accepting only one candidate must not
+# inherit a sibling's credit), with the same union-find + credits as the
+# census itself (drc.net_pin_group_count), and the per-route stamps are
+# hoisted as top-level `island_deltas` (the span_outcomes convention).
+# ---------------------------------------------------------------------------
+
+
+def test_a_route_reports_its_island_delta_and_the_hoisted_list():
+    """VCC starts as two unconnected pins (2 islands); one routed span takes
+    it to 1 — stamped on the route AND hoisted, identical numbers."""
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["VCC"]}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    vcc = [rt for rt in r["routes"] if rt["net"] == "VCC"]
+    assert len(vcc) == 1
+    assert vcc[0]["island_delta"] == {"pin_groups_before": 2,
+                                      "pin_groups_after": 1}
+    assert r["island_deltas"] == [{"net": "VCC", "pin_groups_before": 2,
+                                   "pin_groups_after": 1}]
+
+
+def test_island_delta_is_computed_against_the_pre_proposal_board():
+    """The board_health census runs POST-proposal (VCC complete after this
+    run) while the delta's `pin_groups_before` reads the PRE-proposal state —
+    both from one reply, so the split is observable in a single call."""
+    resp = _call("route", {"board": _walled_vcc_board(),
+                           "scope": {"nets": ["VCC"]}})
+    assert resp["ok"] is True, resp
+    r = resp["result"]
+    assert r["board_health"]["complete"] is True  # post-proposal ledger
+    assert r["island_deltas"][0]["pin_groups_before"] == 2  # pre-proposal
+
+
+def test_island_delta_absent_for_a_zone_bearing_net():
+    """019fd5fdeef3b mirrored: pour connectivity is unjudgeable for the
+    centerline kernel, so a zone-bearing net earns NO delta (never a number
+    that pretends the pour was measured). Exercised at the attach seam like
+    the census-correction test above — the routing path fails closed on
+    zone-bearing boards before any ledger exists."""
+    from pcb_worker.methods import _attach_island_deltas
+
+    board = _walled_vcc_board()
+    board["zones"] = [{"net": "VCC", "layer": "bottom",
+                       "points": [{"x_mm": 0, "y_mm": 0},
+                                  {"x_mm": 60, "y_mm": 0},
+                                  {"x_mm": 60, "y_mm": 40},
+                                  {"x_mm": 0, "y_mm": 40}]}]
+    payload: dict = {"routes": [{"net": "VCC", "segments": [
+        {"start": [10.0, 20.0], "end": [50.0, 20.0], "layer": "top"}]}]}
+    _attach_island_deltas(payload, board)
+    assert "island_delta" not in payload["routes"][0]
+    assert "island_deltas" not in payload
+
+
+def test_island_delta_absent_for_a_single_pin_net():
+    """Fewer than two pins: nothing to connect, no delta — mirrors the
+    census's own <2-pin skip."""
+    from pcb_worker.methods import _attach_island_deltas
+
+    board = _walled_vcc_board()
+    board["nets"].append({"name": "LONE", "pins": ["A1.1"]})
+    payload: dict = {"routes": [{"net": "LONE", "segments": [
+        {"start": [30.0, 0.8], "end": [40.0, 0.8], "layer": "top"}]}]}
+    _attach_island_deltas(payload, board)
+    assert "island_delta" not in payload["routes"][0]
+    assert "island_deltas" not in payload
+
+
+def test_island_delta_zero_merge_is_reported_not_hidden():
+    """A route whose copper connects nothing new (both endpoints already on
+    the same island) reports before == after — the 'this candidate buys
+    nothing' smell, which absent-key would hide."""
+    from pcb_worker.methods import _attach_island_deltas
+
+    board = _walled_vcc_board()
+    # EXIST is already fully wired (one island); add a redundant parallel run.
+    payload: dict = {"routes": [{"net": "EXIST", "segments": [
+        {"start": [30.0, 0.8], "end": [30.0, 39.2], "layer": "top"}]}]}
+    _attach_island_deltas(payload, board)
+    assert payload["routes"][0]["island_delta"] == {
+        "pin_groups_before": 1, "pin_groups_after": 1}
+
+
+# ---------------------------------------------------------------------------
+# board_health as a STANDALONE method (Epoch UX2 station 9, docket
+# 019fde571300): the same whole-board ledger a route reply carries, computable
+# with NO routing run — the load path's census+assembly surface, one kernel
+# (_board_health) behind both.
+# ---------------------------------------------------------------------------
+
+
+def test_board_health_method_reports_the_ledger_without_a_routing_run():
+    resp = _call("board_health", {"board": _walled_vcc_board()})
+    assert resp["ok"] is True, resp
+    health = resp["result"]
+    # EXIST is fully wired; VCC has pins and zero copper.
+    assert health["complete"] is False
+    assert health["missing_copper"] == ["VCC"]
+    assert "partial" not in health
+    assert health["approximate"] is True
+    assert health["assembly"]["status"] in ("pass", "findings", "indeterminate")
+
+
+def test_board_health_method_matches_a_route_replys_ledger():
+    """One kernel behind both surfaces: the standalone method over the base
+    board equals the route reply's board_health for a run that landed no new
+    copper (scoped to already-wired EXIST — census unchanged)."""
+    standalone = _call("board_health", {"board": _walled_vcc_board()})["result"]
+    routed = _call("route", {"board": _walled_vcc_board(),
+                             "scope": {"nets": ["EXIST"]}})
+    assert routed["ok"] is True, routed
+    via_route = routed["result"]["board_health"]
+    assert standalone["complete"] == via_route["complete"]
+    assert standalone["missing_copper"] == via_route["missing_copper"]
+    assert standalone["assembly"]["status"] == via_route["assembly"]["status"]
+
+
+def test_board_health_method_parse_failure_is_structured():
+    resp = _call("board_health", {"board": "not-a-board"})
+    assert resp["ok"] is False
+    assert resp["error"]["kind"] == "parse"

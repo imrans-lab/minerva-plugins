@@ -97,7 +97,8 @@ const S_BUILD_FAILED := 7
 ## their manifest declaration — the broker refuses any undeclared channel, so
 ## a manifest drift here would fail the LIVE sections with an opaque
 ## permission_denied; these assertions name the drift instead.
-const PRODUCTION_CHANNELS := ["pcb.deserialize", "pcb.route", "pcb.assembly_check"]
+const PRODUCTION_CHANNELS := ["pcb.deserialize", "pcb.route", "pcb.assembly_check",
+	"pcb.board_health"]
 
 ## The fixture board (see the class doc). Pin offsets and courtyard extents
 ## are the seed library's own (library/footprints/Diode_SMD.pretty/D_SMA
@@ -199,6 +200,7 @@ func _init() -> void:
 		var mounted: bool = await _mount_production_chain(plugin_dir + PCB_MANIFEST_REL)
 		if mounted:
 			await _step_1_load_carries_assembly_findings()
+			await _step_1b_path_load_adopts_sidecar()
 			await _step_2_span_propose_full_contract()
 			await _step_3_commit_refused_unacknowledged()
 			await _step_4_commit_acknowledged_lays_copper()
@@ -416,6 +418,118 @@ func _step_1_load_carries_assembly_findings() -> void:
 	check_eq("1: advisory severity (ergonomics floor, not a DRC gate)",
 			str(pair.get("severity", "")), "advisory")
 	check_eq("1: board starts with zero traces", data.get_trace_count(), 0)
+
+	# BOARD HEALTH AT LOAD (Epoch UX2 station 9, docket 019fde571300): the
+	# load reply now carries the whole-board ledger with NO routing run — the
+	# real pcb.board_health channel through the real Go binary + Python
+	# worker. This board's two nets have zero copper: measurably incomplete
+	# at open, exactly what an agent should know before its first verb.
+	var health: Dictionary = reply.get("board_health", {}) \
+			if reply.get("board_health", {}) is Dictionary else {}
+	check("1: load reply carries board_health", not health.is_empty(), str(reply))
+	check_eq("1: board_health.complete is false (no copper yet)",
+			health.get("complete", null), false)
+	check_eq("1: both nets named missing_copper",
+			(health.get("missing_copper", []) as Array).size(), 2)
+	check("1: board_health.assembly agrees with the assembly key",
+			str((health.get("assembly", {}) as Dictionary).get("status", "")) == "findings")
+	check_eq("1: panel enrichment rode along (board_revision)",
+			int(health.get("board_revision", -1)), int(data.board_revision))
+	check("1: preflight enrichment present",
+			(health.get("preflight", {}) as Dictionary).has("rendered_this_revision"))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Step 1b — path-form load adopts the sidecar home (Epoch UX2 station 8,
+# docket 019fde57027c + cold review F1/F2). The HITL-4 loss class end to end:
+# annotations authored against a file-loaded board must survive without any
+# save request. Leaves the panel exactly as step 1 left it (annotations
+# removed, path un-adopted, temp files deleted) so steps 2-4 are unaffected.
+# ──────────────────────────────────────────────────────────────────────────────
+
+func _step_1b_path_load_adopts_sidecar() -> void:
+	print("-- 1b: minerva_pcb_load_board path form — sidecar adoption + durability (UX2 station 8) --")
+	var tmp_yaml: String = ProjectSettings.globalize_path("user://seam_adopt_board.yaml")
+	var tmp_sidecar := tmp_yaml + ".annotations.json"
+	for f in [tmp_yaml, tmp_sidecar]:
+		if FileAccess.file_exists(f):
+			DirAccess.remove_absolute(f)
+	var out := FileAccess.open(tmp_yaml, FileAccess.WRITE)
+	out.store_string(BOARD_YAML)
+	out.close()
+
+	# A live annotation authored BEFORE any document path exists — the exact
+	# HITL-4 shape (nothing on disk anywhere yet).
+	var host = panel.get_annotation_host()
+	var a1: String = str(host.add_route_hint_at(5.0, 5.0, "pre-adoption note", "F.Cu",
+		"waypoint", [[5.0, 5.0], [9.0, 5.0]], "human"))
+	check("1b: pre-adoption annotation stored", not a1.is_empty())
+
+	var reply: Dictionary = await panel.handle_tool("minerva_pcb_load_board", {"path": tmp_yaml})
+	check("1b: path-form load succeeded", bool(reply.get("success", false)), str(reply))
+	check_eq("1b: reply reports adoption", str(reply.get("annotations_sidecar", "")), "adopted")
+	check("1b: no restored count on first adoption (no sidecar existed)",
+		not reply.has("annotations_restored"))
+	# Cold review F1: adoption ALONE made the live annotation durable —
+	# restart-before-next-mutation loses nothing now.
+	check("1b: sidecar written immediately on adoption (write-on-adopt)",
+		FileAccess.file_exists(tmp_sidecar))
+	check("1b: the live annotation survived the load (no wipe)",
+		not host.get_by_id(a1).is_empty())
+
+	# Cold review F2: a mutation still inside the debounce window survives an
+	# immediate re-import — the pending write is flushed BEFORE load_sidecar
+	# replaces the list, so the restore reads BOTH annotations back.
+	var a2: String = str(host.add_route_hint_at(12.0, 5.0, "debounce-window note", "F.Cu",
+		"waypoint", [[12.0, 5.0], [15.0, 5.0]], "human"))
+	var reply2: Dictionary = await panel.handle_tool("minerva_pcb_load_board", {"path": tmp_yaml})
+	check("1b: immediate re-import succeeded", bool(reply2.get("success", false)))
+	check_eq("1b: BOTH annotations restored (pending write flushed before the switch)",
+		int(reply2.get("annotations_restored", -1)), 2)
+	check("1b: the debounce-window annotation is live after the round trip",
+		not host.get_by_id(a2).is_empty())
+
+	# Codex 1049 finding 2: switching to a DIFFERENT path must not carry the
+	# previous document's annotations or workspace state onto the new board.
+	# Seed a live workspace candidate first so the routing half is observable.
+	var ws = panel.get_routing_workspace()
+	var seeded_cid: String = str(ws.ingest_record({
+		"net": "VBAT",
+		"segments": [{"start": [1.0, 1.0], "end": [2.0, 1.0], "layer": "F.Cu"}],
+		"vias": [], "width": 0.3, "source_hint_ids": [], "source_hints": [],
+	}, 0))
+	check("1b: fixture candidate live before the switch", seeded_cid in ws.live_candidate_ids())
+	var tmp_yaml_b: String = ProjectSettings.globalize_path("user://seam_adopt_board_b.yaml")
+	var tmp_sidecar_b := tmp_yaml_b + ".annotations.json"
+	for f in [tmp_yaml_b, tmp_sidecar_b]:
+		if FileAccess.file_exists(f):
+			DirAccess.remove_absolute(f)
+	var out_b := FileAccess.open(tmp_yaml_b, FileAccess.WRITE)
+	out_b.store_string(BOARD_YAML)
+	out_b.close()
+	var reply3: Dictionary = await panel.handle_tool("minerva_pcb_load_board", {"path": tmp_yaml_b})
+	check("1b: A->B switch load succeeded", bool(reply3.get("success", false)))
+	check("1b: A's annotations did NOT attach to B (cleared on switch)",
+		host.get_by_id(a1).is_empty() and host.get_by_id(a2).is_empty())
+	check("1b: no restored count on B (it had no sidecar)",
+		not reply3.has("annotations_restored"))
+	check("1b: no sidecar fabricated for B (nothing belongs to it)",
+		not FileAccess.file_exists(tmp_sidecar_b))
+	check_eq("1b: A's sidecar still carries both annotations (the record survives on A)",
+		(AnnotationSidecar.read_sidecar(tmp_yaml).get("annotations", []) as Array).size(), 2)
+	check("1b: A's candidates did NOT survive the switch (workspace reset)",
+		not (seeded_cid in ws.live_candidate_ids()))
+
+	# Restore step-1 state for steps 2-4: un-adopt FIRST (so nothing below
+	# schedules an autosave), then drop the probe files. The annotations are
+	# already gone (cleared by the switch); the workspace is already reset.
+	panel._file_path = ""
+	host.set_document_path("")
+	for f in [tmp_yaml, tmp_sidecar, tmp_yaml_b, tmp_sidecar_b]:
+		if FileAccess.file_exists(f):
+			DirAccess.remove_absolute(f)
+	check("1b: probes cleaned up (annotation store back to step-1 state)",
+		host.get_by_id(a1).is_empty() and host.get_by_id(a2).is_empty())
 
 
 # ──────────────────────────────────────────────────────────────────────────────
