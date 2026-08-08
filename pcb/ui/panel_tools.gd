@@ -200,6 +200,22 @@ static func handle(host, tool_name: String, args: Dictionary) -> Dictionary:
 			return _workspace_pin(host, args)
 		"minerva_pcb_workspace_unpin":
 			return _workspace_unpin(host, args)
+		"minerva_pcb_workspace_freeze":
+			return _workspace_freeze(host, args)
+		"minerva_pcb_workspace_unfreeze":
+			return _workspace_unfreeze(host, args)
+		"minerva_pcb_point":
+			return _point(host, args)
+		"minerva_pcb_hint_move_bend":
+			return _hint_bend_edit(host, args, "move")
+		"minerva_pcb_hint_insert_bend":
+			return _hint_bend_edit(host, args, "insert")
+		"minerva_pcb_hint_delete_bend":
+			return _hint_bend_edit(host, args, "delete")
+		"minerva_pcb_clear_hints_by_author":
+			return _clear_hints_by_author(host, args)
+		"minerva_pcb_promote":
+			return await _promote(host, args)
 		"minerva_pcb_workspace_reject":
 			return _workspace_reject(host, args)
 		"minerva_pcb_workspace_commit":
@@ -1715,6 +1731,24 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 		return _err("annotation '%s' is not a pcb_route_hint" % id)
 
 	var kp: Dictionary = ann.get("kind_payload", {})
+
+	# FROZEN GATE, BEFORE the annotation write (cold review, Epoch UX3
+	# station 1, finding 3): this tool's own invariant is "both stores stay
+	# geometrically identical — never one mutated without the other", and
+	# sync_candidate_geometry now refuses on a frozen candidate. Refusing
+	# AFTER host.update_annotation would leave the annotation carrying a via
+	# the settled candidate does not — the divergence the invariant forbids —
+	# under a success:true reply. So the freeze is checked first, and the
+	# whole edit refuses by the same name the direct edit verbs use.
+	var gate_workspace = _get_workspace(host)
+	if gate_workspace != null and gate_workspace.has_method("candidate_for_annotation"):
+		var gate_cid := str(gate_workspace.candidate_for_annotation(id))
+		if not gate_cid.is_empty() and gate_workspace.has_method("is_frozen") \
+				and gate_workspace.is_frozen(gate_cid):
+			return {"success": false, "error": "candidate_frozen",
+				"candidate_id": gate_cid,
+				"note": "annotation '%s' bridges to frozen candidate %s — settled geometry does not edit; minerva_pcb_workspace_unfreeze first" % [id, gate_cid]}
+
 	var result: Dictionary = _PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y", 0.0)))
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "could not insert via")))
@@ -1883,9 +1917,13 @@ static func _run_router(host, selection: Dictionary, extra: Dictionary = {}) -> 
 static func _route_request_extra(workspace, scope, hint_ids: Array = []) -> Dictionary:
 	var out: Dictionary = {}
 	if workspace != null:
-		var pinned: Array = workspace.pinned_candidates_wire()
-		if not pinned.is_empty():
-			out["pinned_candidates"] = pinned
+		# Pinned + FROZEN (Epoch UX3, K8): both ride the `pinned_candidates`
+		# wire key — the worker treats every entry as fixed copper, which is
+		# exactly what "frozen honored as committed copper" means, so no second
+		# param exists to drift from the proven one.
+		var keepouts: Array = workspace.keepout_candidates_wire()
+		if not keepouts.is_empty():
+			out["pinned_candidates"] = keepouts
 	if scope is Dictionary and not (scope as Dictionary).is_empty():
 		out["scope"] = scope
 	var task_constraints: Dictionary = _task_constraints_for_hints(workspace, hint_ids)
@@ -4502,6 +4540,10 @@ static func _workspace_disposition_verb(host, args: Dictionary, verb: String) ->
 			applied = workspace.unpin(cid)
 		"reject":
 			applied = workspace.reject(cid)
+		"freeze":
+			applied = workspace.freeze(cid)
+		"unfreeze":
+			applied = workspace.unfreeze(cid)
 	if not applied:
 		return _workspace_refusal(workspace, verb, cid)
 	var reply: Dictionary = {"verb": verb}
@@ -4514,6 +4556,11 @@ static func _workspace_disposition_verb(host, args: Dictionary, verb: String) ->
 	# self-explanatory holds/releases and are unchanged.
 	if verb == "reject":
 		reply["note"] = _next_steps("reject", {})
+	# Epoch UX3, K7: freezing changes what a candidate will REFUSE from here on
+	# (reject/supersede/edits) — name the contract so the caller is not
+	# surprised by the first refusal.
+	if verb == "freeze":
+		reply["note"] = "frozen: future routing treats this geometry as fixed copper; reject/try-again/edits are refused until minerva_pcb_workspace_unfreeze"
 	return _ok(reply)
 
 
@@ -4909,6 +4956,7 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 		"open_task_ids": workspace.open_task_ids(),
 		"active_candidate_id": str(workspace.active_candidate_id),
 		"pinned_candidate_ids": workspace.pinned.keys(),
+		"frozen_candidate_ids": workspace.frozen.keys(),
 		"stale_candidate_ids": _stale_ids(workspace),
 		"include_terminal": include_terminal,
 	}
@@ -5025,6 +5073,28 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 				a_entry["ref"] = ref
 			entries.append(a_entry)
 
+	# The FOCUSED FINDING (Epoch UX3 station 4, K11's read half): clicking a
+	# DRC witness on the canvas selects the owning candidate AND records
+	# "cid#index" in the workspace's selected_finding_id — this is where that
+	# focus becomes answerable. The entry is the STORED finding verbatim
+	# (type, measured/required, closest/witness geometry, ref/pad/net_name,
+	# subjects…) plus the ids that locate it, so "what is this marker?" gets
+	# the whole verdict, not a summary. A dangling id (findings replaced by a
+	# newer check since the click) contributes nothing rather than a guess.
+	if workspace != null:
+		var fid := str(workspace.selected_finding_id)
+		if not fid.is_empty() and fid.contains("#") \
+				and workspace.has_method("findings_for_candidate"):
+			var fid_cid := fid.get_slice("#", 0)
+			var fid_idx := int(fid.get_slice("#", 1))
+			var stored: Array = workspace.findings_for_candidate(fid_cid)
+			if fid_idx >= 0 and fid_idx < stored.size() and stored[fid_idx] is Dictionary:
+				var f_entry: Dictionary = (stored[fid_idx] as Dictionary).duplicate(true)
+				f_entry["kind"] = "finding"
+				f_entry["id"] = fid
+				f_entry["candidate_id"] = fid_cid
+				entries.append(f_entry)
+
 	var reply: Dictionary = {"selection": entries, "count": entries.size()}
 	var active: String = str(state.get("active_candidate_id", ""))
 	if not active.is_empty():
@@ -5040,6 +5110,125 @@ static func _workspace_pin(host, args: Dictionary) -> Dictionary:
 
 static func _workspace_unpin(host, args: Dictionary) -> Dictionary:
 	return _workspace_disposition_verb(host, args, "unpin")
+
+
+# ── Epoch UX3 station 10 (docket 019fdf9101b5): LLM reverse parity ────────────
+
+## THE MIRROR of minerva_pcb_get_selection: the LLM points AT an entity for
+## the human — selection through the SAME canvas choke points a click uses,
+## so the human sees exactly what a click would have lit. Deixis both ways.
+static func _point(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("point_at_entity"):
+		return _err("no live panel — pointing is a canvas act")
+	var kind: String = str(args.get("kind", "")).strip_edges()
+	var id: String = str(args.get("id", "")).strip_edges()
+	if kind.is_empty() or id.is_empty():
+		return _err("kind and id are required")
+	var res: Dictionary = panel.point_at_entity(kind, id)
+	if not bool(res.get("ok", false)):
+		return {"success": false, "error": str(res.get("error", "point_failed")),
+			"kind": kind, "id": id, "note": str(res.get("message", ""))}
+	return _ok({"pointed": {"kind": kind, "id": id},
+		"note": "the entity is now the canvas selection — the human sees it lit exactly as their own click would show it"})
+
+
+## Micro hint-edit verbs (station 10b): move/insert/delete ONE bend of a
+## route hint — thin wrappers over the SAME storage convention the canvas
+## BendHandleEditTool lands (kind.bend_points/with_bend_points, one
+## host.update_annotation revision per call), so the LLM stops wholesale-
+## patching kind_payload. The superseded lock is respected BY NAME with the
+## sanctioned exits, the same answer every other edit surface gives.
+static func _hint_bend_edit(host, args: Dictionary, op: String) -> Dictionary:
+	if host == null or not host.has_method("get_by_id") \
+			or not host.has_method("update_annotation") or not host.has_method("get_registry"):
+		return _err("PCB annotation host not available")
+	var hint_id: String = str(args.get("hint_id", ""))
+	if hint_id.is_empty():
+		return _err("hint_id is required")
+	var ann: Dictionary = host.get_by_id(hint_id)
+	if ann.is_empty():
+		return {"success": false, "error": "hint_not_found", "hint_id": hint_id}
+	if str(ann.get("kind", "")) != "pcb_route_hint":
+		return {"success": false, "error": "not_a_route_hint", "hint_id": hint_id,
+			"kind": str(ann.get("kind", ""))}
+	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	if kp.has("waypoints_superseded_by_constraint_revision"):
+		return {"success": false, "error": "waypoints_superseded", "hint_id": hint_id,
+			"note": "this hint's waypoints are locked by a governing task constraint — minerva_pcb_hint_convert_to_detailed reclaims them, or steer the task via minerva_pcb_workspace_reroute_route"}
+	var registry = host.get_registry()
+	var kind = registry.get_annotation_kind(StringName("pcb_route_hint")) if registry != null else null
+	if kind == null:
+		return _err("pcb_route_hint kind not registered")
+
+	var bends: Array = kind.bend_points(ann)
+	match op:
+		"move", "insert":
+			if not args.has("x_mm") or not args.has("y_mm"):
+				return _err("x_mm and y_mm are required")
+	var point := Vector2(float(args.get("x_mm", 0.0)), float(args.get("y_mm", 0.0)))
+	match op:
+		"move":
+			var idx_m: int = int(args.get("index", -1))
+			if idx_m < 0 or idx_m >= bends.size():
+				return {"success": false, "error": "bend_index_out_of_range",
+					"hint_id": hint_id, "index": idx_m, "bend_count": bends.size()}
+			bends[idx_m] = point
+		"insert":
+			# index optional: absent/oversized appends (the common "add one
+			# more bend at the end" ask needs no arithmetic).
+			var idx_i: int = int(args.get("index", bends.size()))
+			idx_i = clampi(idx_i, 0, bends.size())
+			bends.insert(idx_i, point)
+		"delete":
+			var idx_d: int = int(args.get("index", -1))
+			if idx_d < 0 or idx_d >= bends.size():
+				return {"success": false, "error": "bend_index_out_of_range",
+					"hint_id": hint_id, "index": idx_d, "bend_count": bends.size()}
+			bends.remove_at(idx_d)
+
+	var new_ann: Dictionary = kind.with_bend_points(ann, bends)
+	if not host.update_annotation(hint_id, new_ann):
+		return {"success": false, "error": "update_refused", "hint_id": hint_id,
+			"note": "the host refused the waypoint update — see the host's structured refusal for the governing lock"}
+	var out_bends: Array = []
+	for b in kind.bend_points(host.get_by_id(hint_id)):
+		out_bends.append([(b as Vector2).x, (b as Vector2).y])
+	return _ok({"hint_id": hint_id, "op": op,
+		"bend_count": out_bends.size(), "bends": out_bends})
+
+
+## The MCP twin of the workflow dock's clear-by-author menu (station 10c) —
+## the SAME host filter, so the two doorways cannot diverge: workflow-class
+## annotations only, review annotations never touched.
+static func _clear_hints_by_author(host, args: Dictionary) -> Dictionary:
+	if host == null or not host.has_method("clear_annotations_by_author"):
+		return _err("PCB annotation host not available")
+	var author: String = str(args.get("author", "")).strip_edges()
+	if not (author in ["human", "ai", "all"]):
+		return _err("author must be one of: human, ai, all")
+	var removed: int = int(host.clear_annotations_by_author(author))
+	return _ok({"removed": removed, "author": author,
+		"note": "route hints only (workflow class) — review annotations are never touched, same filter as the dock menu"})
+
+
+## Epoch UX3 station 11 (K13): gated promotion — a thin tool over
+## PCBPanel.promote, which owns the whole verb (gate → serialize → write →
+## census delta). Both doorways (this tool, the Promote button) run the SAME
+## implementation; neither can acknowledge through the gate.
+static func _promote(host, args: Dictionary) -> Dictionary:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("promote"):
+		return _err("no live panel — promotion serializes the live board")
+	return await panel.promote(str(args.get("path", "")))
+
+
+static func _workspace_freeze(host, args: Dictionary) -> Dictionary:
+	return _workspace_disposition_verb(host, args, "freeze")
+
+
+static func _workspace_unfreeze(host, args: Dictionary) -> Dictionary:
+	return _workspace_disposition_verb(host, args, "unfreeze")
 
 
 static func _workspace_reject(host, args: Dictionary) -> Dictionary:
@@ -6114,7 +6303,12 @@ static func _workspace_refusal_static(candidate_id: String, from: String) -> Dic
 		"candidate_id": candidate_id,
 		"from": from,
 		"to": "superseded",
-		"note": "a %s candidate cannot be rerouted — it has already left the live set" % from,
+		# FROZEN is live-but-locked, not departed (cold review finding 5): the
+		# refusal reaches here because frozen → superseded has no table row,
+		# and the remedy is the unfreeze verb — the prose must not claim the
+		# candidate left the live set when it did not.
+		"note": "a frozen candidate cannot be rerouted — it is settled; minerva_pcb_workspace_unfreeze it first, then reroute" if from == "frozen" \
+			else "a %s candidate cannot be rerouted — it has already left the live set" % from,
 	}
 
 
@@ -6609,9 +6803,25 @@ static func _add_route_intent(host, args: Dictionary) -> Dictionary:
 	var source_comp = source_resolved["comp"]
 	var anchor_pos: Vector2 = source_comp.get_pin_world_position(str(source_resolved["pin"]))
 	var note: String = str(args.get("note", ""))
+	# AUTHOR pass-through (Epoch UX3 station 8a): the pad→pad canvas gesture
+	# delegates here, and the human's own act must not mint an "ai" hint —
+	# authorship drives rendering color and clear-by-author scoping. Default
+	# stays "ai" (the agent's tool); only an explicit "human" flips it.
+	var author: String = "human" if str(args.get("author", "")) == "human" else "ai"
 	var envelope: Dictionary = host.build_route_hint_envelope(
-		anchor_pos.x, anchor_pos.y, note, "F.Cu", "waypoint", [], "ai", "", width_mm,
+		anchor_pos.x, anchor_pos.y, note, "F.Cu", "waypoint", [], author, "", width_mm,
 		[source_pin], [dest_pin])
+	# dest_point: the SAME commit-time-resolved render/hit-test cache the
+	# single-trace tool stamps (see pcb_route_hint_kind.gd's rationale —
+	# hit_test/bounds have no host to resolve dest_pins live). Station 8a made
+	# the pad→pad gesture delegate HERE, so the intent must render and
+	# hit-test as the drawn line the gesture promises; agent-authored intents
+	# gain the same visible line for free. Same accepted-staleness tradeoff.
+	var dest_comp = dest_resolved["comp"]
+	var dest_pos: Vector2 = dest_comp.get_pin_world_position(str(dest_resolved["pin"]))
+	var intent_kp: Dictionary = envelope.get("kind_payload", {})
+	intent_kp["dest_point"] = [dest_pos.x, dest_pos.y]
+	envelope["kind_payload"] = intent_kp
 	_maybe_stamp_annotation_ref(envelope)
 	var ref: String = str(envelope.get("ref", ""))
 	var hint_id: String = host.add_annotation_v2(envelope)
@@ -6738,7 +6948,10 @@ static func _parse_route_intent_corridor(raw) -> Variant:
 ##
 ## Both ops refuse a TERMINAL candidate (committed/rejected/superseded) by name
 ## — a terminal candidate is a record, not a draft, the same rule add_via
-## already enforced before this station existed.
+## already enforced before this station existed. Both ops ALSO refuse a
+## FROZEN candidate (candidate_frozen, Epoch UX3 station 1): settled geometry
+## is live but locked, and the remedy is minerva_pcb_workspace_unfreeze, not
+## a re-propose.
 static func _workspace_edit_candidate(host, args: Dictionary) -> Dictionary:
 	var ctx: Dictionary = _workspace_ctx(host)
 	if not bool(ctx.get("ok", false)):

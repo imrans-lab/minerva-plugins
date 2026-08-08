@@ -1618,3 +1618,50 @@ def test_single_entity_finding_carries_ref_pad_net_name():
     assert f["ref"] == "U1"
     assert f["pad"] == "1"
     assert f["net_name"] == "GND"
+
+
+# ---------------------------------------------------------------------------
+# K11 witness geometry (Epoch UX3 station 4, docket 019fdf916ce6).
+# The canvas witness overlay and the LLM's finding replies both act on the
+# `closest`/`witness` (+ optional `midpoint`) mm pairs — so every finding of
+# every class must carry them, well-formed. `_finding` mandates the pair by
+# construction (keyword-only, no defaults); these pin that contract at the
+# emitted-dict level where a refactor would actually break consumers.
+# ---------------------------------------------------------------------------
+
+
+def _assert_witness_geometry(finding: dict) -> None:
+    for key in ("closest", "witness"):
+        pair = finding.get(key)
+        assert isinstance(pair, list) and len(pair) == 2, (
+            f"{finding['type']}: '{key}' must be a [x, y] pair; got {pair!r}")
+        assert all(isinstance(v, (int, float)) and math.isfinite(v) for v in pair), (
+            f"{finding['type']}: '{key}' must be finite numbers; got {pair!r}")
+    mid = finding.get("midpoint")
+    if mid is not None:
+        assert isinstance(mid, list) and len(mid) == 2, (
+            f"{finding['type']}: optional 'midpoint' must be a [x, y] pair")
+
+
+def test_every_emitted_finding_carries_witness_geometry():
+    """Sweep every finding the suite's violating fixtures produce."""
+    boards = [
+        _trace_board(0.1),                                        # gc1_trace_width
+        _base(components=[_th_pad_comp(drill=0.15, annulus=1.6)]),  # gc3_drill
+        _two_pad_board(11.3),                    # gc2_copper_clearance (gap 0.1)
+    ]
+    swept = 0
+    for board in boards:
+        res = _run(board)
+        assert res["verdict"] == "violations"
+        for finding in res["findings"]:
+            _assert_witness_geometry(finding)
+            swept += 1
+    assert swept >= 2, "the sweep must actually have seen findings"
+
+
+def test_finding_constructor_refuses_to_omit_witness_geometry():
+    """`closest`/`witness` are keyword-only with NO defaults: a new check class
+    cannot compile a finding without placing its evidence."""
+    with pytest.raises(TypeError):
+        dg._finding("gcX", "e1", None, "trace_seg", None, None, 0.1, 0.2)  # type: ignore[call-arg]

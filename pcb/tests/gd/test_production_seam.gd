@@ -98,7 +98,11 @@ const S_BUILD_FAILED := 7
 ## a manifest drift here would fail the LIVE sections with an opaque
 ## permission_denied; these assertions name the drift instead.
 const PRODUCTION_CHANNELS := ["pcb.deserialize", "pcb.route", "pcb.assembly_check",
-	"pcb.board_health"]
+	"pcb.board_health",
+	# Epoch UX3 station 11 (K13): the promotion gate channel — a stale
+	# installed definition predating it would deny promote by allowlist, the
+	# exact blind spot this fixture's refresh path exists to close.
+	"pcb.promote_check"]
 
 ## The fixture board (see the class doc). Pin offsets and courtyard extents
 ## are the seed library's own (library/footprints/Diode_SMD.pretty/D_SMA

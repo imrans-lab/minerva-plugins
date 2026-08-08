@@ -250,3 +250,28 @@ def test_echo_is_verbatim_and_geometryless_candidate_errors():
     assert res["workspace_generation"] == 42
     assert res["per_candidate"]["cand_3"] == "clean"
     assert res["per_candidate"]["cand_empty"] == "error"
+
+
+def test_findings_carry_witness_geometry_and_both_type_spellings():
+    """Epoch UX3 station 4 (K11, cold review F1): the reply must not strip the
+    source finding's keys. The canvas witness overlay reads `type` +
+    `closest`/`witness` [x, y] pairs; the reply's historical consumers read
+    `kind`. Both spellings ride every finding, and a point finding's pair
+    collapses onto its `at` — a finding with no geometry cannot be drawn
+    where the problem is, which was the whole defect."""
+    resp = _call({
+        "board": _board(),
+        "candidates": [_c1(), _c2(), _c3()],
+        "board_token": "t", "workspace_generation": 1,
+    })
+    assert resp["ok"] is True, resp
+    findings = resp["result"]["findings"]
+    assert findings, "fixture must produce findings"
+    for f in findings:
+        assert f.get("kind"), f
+        assert f.get("type") == f.get("kind"), (
+            "both spellings must name the same class")
+        at = f.get("at")
+        if isinstance(at, (list, tuple)) and len(at) == 2:
+            assert f.get("closest") == list(at), f
+            assert f.get("witness") == list(at), f

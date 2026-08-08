@@ -244,3 +244,103 @@ class TestGridOrigin:
 
         grid.mark_obstacle(x=130.0, y=130.0, radius=1.0)
         assert grid.get_cell(130.0, 130.0, "F.Cu").obstacle_type == "hole"
+
+
+class TestKeepoutPolygonMarking:
+    """mark_keepout_polygon (Epoch UX3 station 2, K6 / router item 019fc155bc32).
+
+    The rasteriser the route_bridge keepout refusal waited for: a cell blocks
+    when its centre is inside the polygon or within keepout_margin of its
+    boundary, on exactly the layer(s) named.
+    """
+
+    def _grid(self):
+        # keepout_margin = clearance + trace_width/2 = 0.2 + 0.125 = 0.325
+        return RoutingGrid(width=20, height=20, resolution=0.1,
+                           clearance=0.2, trace_width=0.25)
+
+    RECT = [(5.0, 5.0), (15.0, 5.0), (15.0, 8.0), (5.0, 8.0)]
+
+    def test_inside_blocks_named_layer_only(self):
+        grid = self._grid()
+        grid.mark_keepout_polygon(self.RECT, layer="F.Cu")
+        assert grid.is_blocked(10.0, 6.5, "F.Cu") is True
+        assert grid.is_blocked(10.0, 6.5, "B.Cu") is False, (
+            "a top-only keepout must not block the bottom — the exact fidelity "
+            "the old disc approximation could not offer and refused over")
+
+    def test_no_layer_blocks_all_layers(self):
+        grid = self._grid()
+        grid.mark_keepout_polygon(self.RECT)
+        assert grid.is_blocked(10.0, 6.5, "F.Cu") is True
+        assert grid.is_blocked(10.0, 6.5, "B.Cu") is True
+
+    def test_margin_grows_the_block(self):
+        grid = self._grid()
+        grid.mark_keepout_polygon(self.RECT, layer="F.Cu")
+        # 0.2 beyond the y=8.0 edge: within the 0.325 margin -> blocked.
+        assert grid.is_blocked(10.0, 8.2, "F.Cu") is True
+        # Half a millimetre beyond the margin -> free.
+        assert grid.is_blocked(10.0, 8.9, "F.Cu") is False
+
+    def test_cell_is_absolute_veto_not_clearance(self):
+        grid = self._grid()
+        grid.mark_keepout_polygon(self.RECT, layer="F.Cu")
+        cell = grid.get_cell(10.0, 6.5, "F.Cu")
+        assert cell.obstacle_type == "keepout"
+        assert cell.net is None, (
+            "a prohibition belongs to NO net — inheriting one would let that "
+            "net route straight through (the mounting-hole lesson, restated)")
+
+    def test_prior_pad_claim_does_not_survive(self):
+        # A pad marked first must not leave its net on cells the keepout
+        # covers — can_route_through lets a net cross its own cells.
+        grid = self._grid()
+        grid.mark_pad(x=10.0, y=6.5, size=(1.0, 1.0), net="GND")
+        grid.mark_keepout_polygon(self.RECT, layer="F.Cu")
+        assert grid.can_route_through(10.0, 6.5, "GND", "F.Cu") is False
+
+    def test_degenerate_polygon_is_a_noop(self):
+        grid = self._grid()
+        grid.mark_keepout_polygon([(5.0, 5.0), (15.0, 5.0)], layer="F.Cu")
+        assert grid.is_blocked(10.0, 5.0, "F.Cu") is False
+
+    def test_concave_polygon_blocks_by_containment_not_bbox(self):
+        # L-shape: the notch (bbox minus the L) must stay free apart from the
+        # margin ring — a bbox rasterisation would wrongly block it.
+        l_shape = [(2.0, 2.0), (10.0, 2.0), (10.0, 6.0), (6.0, 6.0),
+                   (6.0, 12.0), (2.0, 12.0)]
+        grid = self._grid()
+        grid.mark_keepout_polygon(l_shape, layer="F.Cu")
+        assert grid.is_blocked(4.0, 4.0, "F.Cu") is True      # inside the L
+        assert grid.is_blocked(8.0, 10.0, "F.Cu") is False, ( # in the notch
+            "containment, not bounding box: the notch is outside the polygon "
+            "and beyond the margin, so it must stay routable")
+
+    def test_cell_centres_are_tested_not_a_sample_lattice(self):
+        """Codex 1056 finding 2 (verbatim repro): the marker must iterate CELL
+        indices and test each cell's own centre. The old bbox-anchored sample
+        lattice was phase-shifted from the cell lattice, so at resolution 1.0
+        this thin triangle left cell centre (1.5, 0.5) — INSIDE the polygon —
+        unmarked, and the router could cross an authored keepout."""
+        grid = RoutingGrid(width=6.0, height=3.0, resolution=1.0,
+                           clearance=0.2, trace_width=0.25)
+        grid.mark_keepout_polygon([(0.25, 0.25), (0.25, 0.75), (4.25, 0.25)],
+                                  layer="F.Cu")
+        assert grid.is_blocked(1.5, 0.5, "F.Cu") is True, (
+            "cell centre inside the keepout must be blocked at ANY resolution "
+            "— grid_resolution is caller-configurable")
+
+    def test_disc_obstacle_tests_cell_centres_too(self):
+        """The same lattice class applied to the shipped disc marker
+        (mark_obstacle): a cell whose CENTRE is inside radius+margin blocks,
+        at coarse resolution included."""
+        grid = RoutingGrid(width=6.0, height=6.0, resolution=1.0,
+                           clearance=0.2, trace_width=0.25)
+        # block_radius = 1.0 + 0.325 = 1.325; cell centre (2.5, 3.5) is
+        # 1.118mm from (3.0, 2.5)... choose centre distances explicitly:
+        grid.mark_obstacle(x=3.0, y=3.0, radius=1.0)
+        # centre (3.5, 3.5): dist ~0.707 <= 1.325 -> blocked
+        assert grid.is_blocked(3.5, 3.5) is True
+        # centre (0.5, 0.5): dist ~3.54 > 1.325 -> free
+        assert grid.is_blocked(0.5, 0.5) is False

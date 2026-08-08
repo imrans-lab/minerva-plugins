@@ -274,26 +274,35 @@ func _test_e2e3_a_human_hints_it() -> void:
 	var ann: Dictionary = host.get_annotations()[0] if host.get_annotations().size() == 1 else {}
 	check("A: kind is pcb_route_hint", str(ann.get("kind", "")) == "pcb_route_hint")
 	var kp: Dictionary = ann.get("kind_payload", {})
-	check("A: hint_type is single_trace", str(kp.get("hint_type", "")) == "single_trace")
+	# ── Epoch UX3 station 8a (docket 019fdf903a4a): a zero-interior-waypoint
+	# pad→pad commit is now a TRUE INTENT — the gesture delegates to
+	# minerva_pcb_add_route_intent, so the minted hint is the intent tool's
+	# own object (hint_type "waypoint", no waypoints, pin provenance, an
+	# EAGER RouteTask "NET|hint") rather than the old single_trace look-alike
+	# with no task and no constraint slot. The old oracle here pinned the
+	# look-alike; this is the parity contract replacing it.
+	check("A: hint_type is waypoint (a TRUE intent, not the single_trace look-alike)",
+		str(kp.get("hint_type", "")) == "waypoint", "kp=%s" % str(kp))
 	check("A: source_pins == [U1.1]", (kp.get("source_pins", []) as Array) == ["U1.1"], "got %s" % str(kp.get("source_pins")))
 	check("A: dest_pins == [U2.1]", (kp.get("dest_pins", []) as Array) == ["U2.1"], "got %s" % str(kp.get("dest_pins")))
-	check("A: no interior waypoints (direct pad-to-pad)", (kp.get("waypoints", []) as Array).is_empty())
+	check("A: no interior waypoints (a bare connectivity intent)", (kp.get("waypoints", []) as Array).is_empty())
 	check("A: layer defaults F.Cu", str(kp.get("layer", "")) == "F.Cu")
-	# D9a-2: the single-trace gesture must NOT stamp a width — no user-facing
-	# width picker exists in this tool, so any authored width_mm key here
-	# (0.25 or otherwise) would silently overrule the board's
-	# design_rules.defaults.trace_width_mm. A stored 0.0 is explicitly NOT an
-	# acceptable stand-in for "absent" (the renderer/summary both gate on
-	# width_mm > 0.0, so a 0.0 sentinel is invisible in the UI and would pass
-	# this check by accident) — assert the key is fully absent.
-	check("A: no width_mm key stamped (falls through to board default)",
+	# D9a-2 (unchanged by station 8): with the width picker at its 0 (auto)
+	# default the gesture stamps NO width — any authored width_mm key would
+	# silently overrule the board's design rule, and a 0.0 sentinel is not an
+	# acceptable stand-in for "absent".
+	check("A: no width_mm key stamped (picker at auto ⇒ board default)",
 		not kp.has("width_mm"), "kp=%s" % str(kp))
 	var author: Dictionary = ann.get("author", {})
-	check("A: author kind human", str(author.get("kind", "")) == "human")
+	check("A: author kind human (the gesture's author pass-through — a human's act never mints an 'ai' hint)",
+		str(author.get("kind", "")) == "human")
 	var anchor: Dictionary = ann.get("anchor", {})
-	check("A: anchor is a semantic pad anchor", str(anchor.get("type", "")) == "pad", "anchor=%s" % str(anchor))
-	check("A: anchor id is U1.1", (anchor.get("id", {}) as Dictionary).get("component", "") == "U1"
-		and (anchor.get("id", {}) as Dictionary).get("pin", "") == "1")
+	# The intent tool anchors at the source pin's position as a board.point
+	# (its existing shape, shared verbatim with the agent's calls).
+	check("A: anchor is the intent tool's board.point at the source pin",
+		str(anchor.get("type", "")) == "board.point", "anchor=%s" % str(anchor))
+	check("A: an EAGER RouteTask exists for the intent (SIG|<hint_id>)",
+		panel.get_routing_workspace().get_task("SIG|%s" % str(ann.get("id", ""))) != null)
 
 	check("A: tool stays armed for continuous tracing (button still pressed)",
 		(panel._route_flow_buttons["single_trace"] as Button).button_pressed)
@@ -358,7 +367,11 @@ func _test_e2e3_b_agent_sees_it() -> void:
 		var kp: Dictionary = ann.get("kind_payload", {})
 		check("B: MCP sees source_pins", (kp.get("source_pins", []) as Array) == ["U1.1"])
 		check("B: MCP sees dest_pins", (kp.get("dest_pins", []) as Array) == ["U2.1"])
-		check("B: MCP sees the semantic pad anchor", str((ann.get("anchor", {}) as Dictionary).get("type", "")) == "pad")
+		# Station 8a (Codex 1056 finding 3c): the pad→pad gesture now mints a
+		# TRUE intent, whose anchor is the intent tool's board.point at the
+		# source pin — section A's oracle moved; this twin moves with it.
+		check("B: MCP sees the intent tool's board.point anchor",
+			str((ann.get("anchor", {}) as Dictionary).get("type", "")) == "board.point")
 
 
 # ── E2E-3C: agent acts — propose → commit → REAL trace ───────────────────────

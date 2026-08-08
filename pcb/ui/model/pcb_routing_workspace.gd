@@ -60,6 +60,12 @@ signal ingest_task_held(task_id: String, held_candidate_id: String, reason: Stri
 ## incoming batch candidate was not created.
 const HOLD_PINNED := "pinned_candidate_held"
 
+## Named ingest-hold reason (Epoch UX3, K7): the task's active candidate is
+## FROZEN — settled geometry holds its task against batch ingest exactly as a
+## pin does, and MORE: unlike a pin, even a targeted supersede is refused (the
+## legality table has no frozen → superseded row). Unfreeze first.
+const HOLD_FROZEN := "frozen_candidate_held"
+
 ## candidate_id -> RouteCandidate.
 var candidates: Dictionary = {}
 ## task_id -> RouteTask. The registry of routing JOBS (the questions) beside the
@@ -72,6 +78,10 @@ var tasks: Dictionary = {}
 var active_candidate_id: String = ""
 ## Set of pinned candidate ids (Dictionary used as a set: id -> true).
 var pinned: Dictionary = {}
+## Set of FROZEN candidate ids (Epoch UX3, K7/K8) — the same derived-index
+## pattern as `pinned` (see _sync_held_indexes): disposition is the authority,
+## this is the O(1) read the keep-out wire and the UI consult.
+var frozen: Dictionary = {}
 ## The finding the UI has selected ("" = none).
 var selected_finding_id: String = ""
 
@@ -232,7 +242,7 @@ func add_candidate(candidate) -> String:
 			via["id"] = next_via_id()
 	var id: String = candidate.candidate_id
 	candidates[id] = candidate
-	_sync_pinned_set(id, str(candidate.disposition))
+	_sync_held_indexes(id, str(candidate.disposition))
 	# Every candidate answers a task — keep the registry complete even for
 	# hand-built candidates (ingest has already ensured its own task).
 	var tid := str(candidate.task_id)
@@ -272,6 +282,7 @@ func remove_candidate(id: String) -> void:
 	var task_id := str(candidates[id].task_id)
 	candidates.erase(id)
 	pinned.erase(id)
+	frozen.erase(id)
 	_findings.erase(id)
 	# Drop the correlation (both directions) so a removed candidate never leaves a
 	# dangling annotation↔candidate link behind.
@@ -340,10 +351,10 @@ func _apply_disposition(id: String, to: String, verb: String, from_transaction :
 		# error record clears exactly as it does on any other legal move (the
 		# record means "the LAST move was refused", not "a move happened").
 		last_transition_error = {}
-		_sync_pinned_set(id, to)
+		_sync_held_indexes(id, to)
 		return true
 	last_transition_error = {}
-	_sync_pinned_set(id, to)
+	_sync_held_indexes(id, to)
 	_refresh_task_state(str(c.task_id))
 	_bump_generation()  # the live set moved → any in-flight draft-check is stale
 	# INV-2 (C4a), live-set half. A move ACROSS the live/terminal boundary
@@ -384,16 +395,21 @@ func _record_refusal(id: String, from: String, to: String, err: String, verb: St
 	transition_refused.emit(id, from, to, err)
 
 
-## `pinned` is a DERIVED index of "disposition == pinned", not an independent
-## store — so a candidate that LEAVES the pinned disposition (superseded by a
-## re-propose, rejected, committed) also leaves the pinned set. That matters
-## beyond tidiness: the pinned set is what future routing treats as a keep-out,
-## and a superseded/committed candidate must stop acting as one.
-func _sync_pinned_set(id: String, disposition: String) -> void:
+## `pinned` and `frozen` are DERIVED indexes of the disposition axis, not
+## independent stores — so a candidate that LEAVES the pinned/frozen
+## disposition (superseded by a re-propose, rejected, committed, demoted) also
+## leaves its held set. That matters beyond tidiness: the held sets are what
+## future routing treats as keep-outs, and a superseded/committed candidate
+## must stop acting as one.
+func _sync_held_indexes(id: String, disposition: String) -> void:
 	if disposition == "pinned":
 		pinned[id] = true
 	else:
 		pinned.erase(id)
+	if disposition == "frozen":
+		frozen[id] = true
+	else:
+		frozen.erase(id)
 
 
 ## True iff `to` is a legal move for this candidate right now (UI verb gating).
@@ -422,29 +438,62 @@ func is_pinned(id: String) -> bool:
 	return pinned.has(id)
 
 
-## PINNED candidates in the wire shape route_bridge.existing_copper_with_pinned
-## / ir_candidates.build_overlay accept — the SAME candidate language begin_check
-## above already speaks (see _candidate_wire), reused rather than invented a
-## second time (DCR finding 7, part 1: "the hold protects the CANDIDATE; it does
-## not yet protect the SPACE"). A caller hands this straight through as the
-## route request's `pinned_candidates` param and the router treats every one as
-## fixed copper — an obstacle at keepout margin on another net, pathable-along on
-## its own — so a future run routes AROUND a pin instead of through it.
+## FREEZE a candidate (Epoch UX3, K7 — the missing loop verb): the user
+## declares this geometry SETTLED. It stays a live draft (checked, rendered)
+## but future routing treats it as fixed copper, batch ingest holds its task
+## (HOLD_FROZEN), and — the teeth — reject/supersede/geometry-edit are refused
+## while frozen. Legal from proposed and pinned.
+func freeze(id: String) -> bool:
+	return _apply_disposition(id, "frozen", "freeze")
+
+
+## UNFREEZE a candidate: the deliberate demotion back to a plain draft
+## (proposed). The ONLY way to make a frozen candidate rejectable/supersedable/
+## editable again — destroying settled work is always this visible two-step.
+func unfreeze(id: String) -> bool:
+	return _apply_disposition(id, "proposed", "unfreeze")
+
+
+func is_frozen(id: String) -> bool:
+	return frozen.has(id)
+
+
+## HELD (pinned + frozen) candidates in the wire shape route_bridge.
+## existing_copper_with_pinned / ir_candidates.build_overlay accept — the SAME
+## candidate language begin_check above already speaks (see _candidate_wire),
+## reused rather than invented a second time (DCR finding 7, part 1: "the hold
+## protects the CANDIDATE; it does not yet protect the SPACE"). A caller hands
+## this straight through as the route request's `pinned_candidates` param and
+## the router treats every one as fixed copper — an obstacle at keepout margin
+## on another net, pathable-along on its own — so a future run routes AROUND a
+## held candidate instead of through it.
 ##
-## `pinned` is a DERIVED index of disposition=="pinned" (_sync_pinned_set), so it
-## already excludes superseded/rejected/committed candidates: a routing run's
-## keep-out set is exactly "what the user is still holding right now", never
-## stale or dead geometry. Empty when nothing is pinned — the caller omits the
-## `pinned_candidates` key entirely in that case (see panel_tools.gd
-## _route_request_extra), which is what "no pin" already means to the worker.
-func pinned_candidates_wire() -> Array:
+## FROZEN candidates ride the SAME wire key (Epoch UX3, K8): "frozen geometry
+## honored exactly as committed copper" is precisely what the worker already
+## does with every entry in `pinned_candidates`, so the obstacle half of freeze
+## is this one union — no second wire param, no worker change, no second code
+## path that could drift from the proven one.
+##
+## `pinned`/`frozen` are DERIVED indexes of the disposition axis
+## (_sync_held_indexes), so the union already excludes superseded/rejected/
+## committed candidates: a routing run's keep-out set is exactly "what the user
+## is still holding right now", never stale or dead geometry. Empty when
+## nothing is held — the caller omits the `pinned_candidates` key entirely in
+## that case (see panel_tools.gd _route_request_extra), which is what "no hold"
+## already means to the worker.
+func keepout_candidates_wire() -> Array:
 	var out: Array = []
-	for id in pinned:
-		var cid := str(id)
-		var c = get_candidate(cid)
-		if c == null:
-			continue
-		out.append(_candidate_wire(cid, c))
+	var seen: Dictionary = {}
+	for held_set in [pinned, frozen]:
+		for id in held_set:
+			var cid := str(id)
+			if seen.has(cid):
+				continue
+			seen[cid] = true
+			var c = get_candidate(cid)
+			if c == null:
+				continue
+			out.append(_candidate_wire(cid, c))
 	return out
 
 
@@ -620,10 +669,15 @@ func _refresh_task_state(task_id: String) -> void:
 		if str(c.task_id) != task_id:
 			continue
 		var d := str(c.disposition)
-		if d == "proposed" or d == "pinned":
-			has_live = true
-		elif d == "committed":
+		# THE live predicate, not a re-enumeration (cold review, Epoch UX3
+		# station 1, finding 1): a hand-listed pair here silently went stale
+		# when "frozen" joined the live set — freezing the re-proposed answer
+		# on a committed-then-reasked task flipped it CLOSED with settled work
+		# outstanding. One predicate, every consumer.
+		if d == "committed":
 			has_committed = true
+		elif _is_live_disposition(d):
+			has_live = true
 	var want := "closed" if (has_committed and not has_live) else "open"
 	if str(t.state) == want:
 		return
@@ -681,8 +735,34 @@ func live_candidate_ids() -> Array:
 ## board_token comes from `board_token` (owner-set) and workspace_generation from
 ## the current counter — both are stamped so apply_check_result can discard a
 ## stale reply. `candidate_ids` empty ⇒ all live candidates.
+##
+## FROZEN candidates are ALWAYS in the check set (Epoch UX3, K9's frozen half:
+## "draft DRC includes frozen geometry in the materialized board"). The worker's
+## draft_check scores the COMPLETE overlay it is sent — candidates against the
+## board AND against each other — so a scoped check that omitted a frozen
+## candidate would silently miss a crossing with settled geometry. Appending
+## them to an explicit subset (the default all-live path already carries them,
+## frozen being live) closes that hole with the proven whole-set mechanism
+## rather than a second "context copper" wire param.
 func begin_check(candidate_ids: Array = []) -> Dictionary:
-	var ids: Array = candidate_ids if not candidate_ids.is_empty() else live_candidate_ids()
+	# duplicate(): the frozen append below must never mutate the CALLER's array.
+	var ids: Array = candidate_ids.duplicate() if not candidate_ids.is_empty() else live_candidate_ids()
+	# FORCE-APPENDED frozen candidates whose verdict must NOT move (cold
+	# review finding 4): a STALE frozen candidate joins the wire — its
+	# geometry must still be in the overlay, or the scoped check misses a
+	# crossing with settled copper — but it is sent as CONTEXT ONLY: no
+	# snapshot, no flip to "checking", so apply_check_result's guard 3
+	# (empty snapshot ⇒ skip) leaves its "stale" verdict standing. Overwriting
+	# stale without the caller's include_stale consent is exactly what the
+	# panel-side gate exists to prevent, and the append must not tunnel it.
+	var context_only: Dictionary = {}
+	if not candidate_ids.is_empty():
+		for fid in frozen:
+			if not (str(fid) in ids) and candidates.has(str(fid)):
+				ids.append(str(fid))
+				var fc = get_candidate(str(fid))
+				if fc != null and str(fc.validation) == "stale":
+					context_only[str(fid)] = true
 	_pending_check = {}
 	var out_candidates: Array = []
 	for raw_id in ids:
@@ -690,8 +770,9 @@ func begin_check(candidate_ids: Array = []) -> Dictionary:
 		var c = get_candidate(cid)
 		if c == null:
 			continue
-		_pending_check[cid] = {"revision": int(c.candidate_revision), "prior": str(c.validation)}
-		set_validation(cid, "checking")  # emits validation_changed
+		if not context_only.has(cid):
+			_pending_check[cid] = {"revision": int(c.candidate_revision), "prior": str(c.validation)}
+			set_validation(cid, "checking")  # emits validation_changed
 		out_candidates.append(_candidate_wire(cid, c))
 	return {
 		"board_token": board_token,
@@ -778,7 +859,7 @@ static func _findings_for_subject(findings: Array, cid: String) -> Array:
 
 
 ## ONE candidate, wire-shaped: {candidate_id, net, revision, segments, vias} —
-## the shape both begin_check (draft_check) and pinned_candidates_wire (routing
+## the shape both begin_check (draft_check) and keepout_candidates_wire (routing
 ## keep-outs) hand to the worker, factored here so the two call sites can never
 ## drift into two different candidate languages.
 func _candidate_wire(cid: String, c) -> Dictionary:
@@ -1035,6 +1116,15 @@ func _create_candidate_for_route(net: String, segs: Array, vias: Array, source_h
 		if str(prior.disposition) == "pinned":
 			_record_ingest_hold(task_key, prior_id, net, HOLD_PINNED)
 			return ""
+		# ── FROZEN PRIOR ⇒ HOLD THE TASK (Epoch UX3, K7) ─────────────────────
+		# Same shape as the pinned hold above, stronger meaning: frozen is
+		# SETTLED, and unlike a pin there is no targeted supersede to retire it
+		# (the legality table has no frozen → superseded row). The one path to
+		# replacing settled geometry is unfreeze() first — a batch re-route can
+		# never do that implicitly.
+		if str(prior.disposition) == "frozen":
+			_record_ingest_hold(task_key, prior_id, net, HOLD_FROZEN)
+			return ""
 		generation = int(prior.generation) + 1
 		# Try-again supersedes the task's current answer — but ONLY when that
 		# answer is still LIVE. A prior that already left the live set
@@ -1222,7 +1312,7 @@ func uncommit(candidate_id: String) -> bool:
 	rec["consumed_hint_ids"] = []
 	correlations[candidate_id] = rec
 	last_transition_error = {}
-	_sync_pinned_set(candidate_id, prior)
+	_sync_held_indexes(candidate_id, prior)
 	_refresh_task_state(str(c.task_id))  # the copper is gone → the task reopens
 	_bump_generation()
 	# INV-2 (C4a), live-set half — stated here as well as in _apply_disposition
@@ -1246,6 +1336,13 @@ func uncommit(candidate_id: String) -> bool:
 func sync_candidate_geometry(candidate_id: String, segs_raw: Array, vias_raw: Array) -> bool:
 	var c = get_candidate(candidate_id)
 	if c == null:
+		return false
+	# FROZEN lock (Epoch UX3, K7): the bridged annotation-edit path is a
+	# geometry write like any other — without this gate it would be the back
+	# door through which "settled" geometry silently reshapes. Same remedy as
+	# add_via/move_junction: unfreeze first.
+	if str(c.disposition) == "frozen":
+		push_warning("[RoutingWorkspace] sync_candidate_geometry refused: %s is frozen (unfreeze first)" % candidate_id)
 		return false
 	var via_span: Array = PcbLayerStack.default_through_via_span()
 	var width := 0.25
@@ -1658,6 +1755,9 @@ const ERR_LAYER_MISMATCH := "from_layer_mismatch"
 ## 1028): move_junction's own named refusals.
 const ERR_CONSTRAINT_STALE := "constraint_stale_candidate"
 const ERR_JUNCTION_NOT_FOUND := "junction_not_found"
+## Epoch UX3, K7: the candidate is FROZEN — settled geometry refuses edits
+## until an explicit unfreeze() demotes it back to a draft.
+const ERR_FROZEN := "candidate_frozen"
 const ERR_AMBIGUOUS_JUNCTION := "ambiguous_junction"
 const ERR_DEGENERATE_RESULT := "degenerate_result"
 
@@ -2159,7 +2259,7 @@ func commit_batch(candidate_ids: Array, board = null) -> Dictionary:
 			for j in range(i):
 				var prev = plans[j]["candidate"]
 				prev.disposition = str(correlations.get(str(plans[j]["candidate_id"]), {}).get("prior_disposition", "proposed"))
-				_sync_pinned_set(str(plans[j]["candidate_id"]), str(prev.disposition))
+				_sync_held_indexes(str(plans[j]["candidate_id"]), str(prev.disposition))
 				_refresh_task_state(str(prev.task_id))
 				var bad_rec: Dictionary = correlations.get(str(plans[j]["candidate_id"]), {})
 				bad_rec.erase("committed_trace_ids")
@@ -2278,6 +2378,14 @@ func add_via(candidate_id: String, position: Vector2, from_layer: String, to_lay
 		return _verb_error(ERR_NOT_EDITABLE,
 			"candidate '%s' is %s — a terminal candidate is a record, not a draft"
 				% [candidate_id, str(c.disposition)], candidate_id)
+	# FROZEN is live but LOCKED (Epoch UX3, K7): settled geometry acts as fixed
+	# copper for routing, so letting it silently reshape would hollow out the
+	# obstacle contract. Unfreeze first — refused by its own name, not
+	# ERR_NOT_EDITABLE, because the remedy differs (a verb, not a re-propose).
+	if str(c.disposition) == "frozen":
+		return _verb_error(ERR_FROZEN,
+			"candidate '%s' is frozen — settled geometry does not edit; unfreeze it first"
+				% candidate_id, candidate_id)
 	var canon_from := PcbLayerStack.kicad_to_canon(from_layer)
 	var canon_to := PcbLayerStack.kicad_to_canon(to_layer)
 	if not PcbLayerStack.is_legal_via_span(canon_from, canon_to):
@@ -2500,6 +2608,11 @@ func move_junction(candidate_id: String, point: Vector2, to: Vector2) -> Diction
 		return _verb_error(ERR_NOT_EDITABLE,
 			"candidate '%s' is %s — a terminal candidate is a record, not a draft"
 				% [candidate_id, str(c.disposition)], candidate_id)
+	# FROZEN lock — same rule and rationale as add_via's, mirrored verbatim.
+	if str(c.disposition) == "frozen":
+		return _verb_error(ERR_FROZEN,
+			"candidate '%s' is frozen — settled geometry does not edit; unfreeze it first"
+				% candidate_id, candidate_id)
 
 	# ── 1. FIND every coincident endpoint, candidate-wide ──────────────────────
 	var hit_seg_indices: Array = []      # distinct segment indices with >=1 hit
@@ -2854,7 +2967,7 @@ func restore_dispositions(snap: Dictionary) -> Array:
 		if str(c.disposition) == want:
 			continue
 		c.set_disposition(want)  # RAW restore setter — see the doc above
-		_sync_pinned_set(cid, want)
+		_sync_held_indexes(cid, want)
 		mark_stale(cid)
 		moved.append(cid)
 		candidate_changed.emit(cid)
@@ -2874,11 +2987,15 @@ func to_dict() -> Dictionary:
 	var pinned_out: Array = []
 	for id in pinned:
 		pinned_out.append(id)
+	var frozen_out: Array = []
+	for id in frozen:
+		frozen_out.append(id)
 	return {
 		"candidates": cand_out,
 		"tasks": _tasks_out(),
 		"active_candidate_id": active_candidate_id,
 		"pinned": pinned_out,
+		"frozen": frozen_out,
 		"selected_finding_id": selected_finding_id,
 		"correlations": _correlations_out(),
 		"counters": {
@@ -2904,12 +3021,18 @@ func to_sidecar_dict() -> Dictionary:
 	var pinned_out: Array = []
 	for id in pinned:
 		pinned_out.append(id)
+	# Freezing is durable user intent exactly as pinning is — a settlement that
+	# evaporated on reload would betray K7's contract.
+	var frozen_out: Array = []
+	for id in frozen:
+		frozen_out.append(id)
 	return {
 		"candidates": cand_out,
 		# Tasks ARE durable: "which nets/spans still need copper" is design
 		# intent, not session state (unlike active/selected, dropped below).
 		"tasks": _tasks_out(),
 		"pinned": pinned_out,
+		"frozen": frozen_out,
 		"correlations": _correlations_out(),
 		"counters": {
 			"candidate": _cand_counter,
@@ -3001,6 +3124,7 @@ func rebase(rev: int) -> Array:
 func load_from_dict(data: Dictionary, board_revision_hint: int = -1) -> void:
 	candidates.clear()
 	pinned.clear()
+	frozen.clear()
 	tasks.clear()
 	_findings.clear()
 	correlations.clear()
@@ -3048,11 +3172,15 @@ func load_from_dict(data: Dictionary, board_revision_hint: int = -1) -> void:
 
 	for id in data.get("pinned", []):
 		pinned[str(id)] = true
-	# `pinned` is DERIVED from the disposition axis (see _sync_pinned_set), so
-	# reconcile it after a load: a stored entry whose candidate is gone or no
-	# longer pinned is dropped, and a pinned candidate missing from the stored
-	# set is added. A hand-edited or partially-written sidecar can therefore
-	# never leave a phantom keep-out behind.
+	for id in data.get("frozen", []):
+		frozen[str(id)] = true
+	# `pinned`/`frozen` are DERIVED from the disposition axis (see
+	# _sync_held_indexes), so reconcile them after a load: a stored entry whose
+	# candidate is gone or no longer holds that disposition is dropped, and a
+	# held candidate missing from the stored set is added. A hand-edited or
+	# partially-written sidecar can therefore never leave a phantom keep-out
+	# behind — and a pre-freeze sidecar (no "frozen" key) reconstructs the set
+	# from the dispositions alone, which is why the key needs no schema bump.
 	for id in pinned.keys():
 		var pc = candidates.get(id, null)
 		if pc == null or str(pc.disposition) != "pinned":
@@ -3060,6 +3188,13 @@ func load_from_dict(data: Dictionary, board_revision_hint: int = -1) -> void:
 	for id in candidates:
 		if str(candidates[id].disposition) == "pinned":
 			pinned[str(id)] = true
+	for id in frozen.keys():
+		var fc = candidates.get(id, null)
+		if fc == null or str(fc.disposition) != "frozen":
+			frozen.erase(id)
+	for id in candidates:
+		if str(candidates[id].disposition) == "frozen":
+			frozen[str(id)] = true
 
 	# Restore counters to a HIGH-WATER MARK: max of the stored counter and the
 	# largest numeric suffix present in loaded ids (int() tolerates JSON floats).

@@ -155,3 +155,52 @@ longer fires for empty-waypoints hints (nothing to "route as drawn").
   unrouted, GND in 9 islands" is known at open, before the first routing verb.
 - F8 closed core-side: plugin_inspect is lean by default with include-arg
   opt-ins.
+
+# Epoch UX3 outcomes ("lock the loop", docket 019fdf9271)
+
+## The missing goal verbs exist
+- **Freeze (K7/K8)**: `workspace_freeze`/`_unfreeze` + the canvas slot — a
+  settlement, stronger than pin: keep-out for every future routing run (the
+  same `pinned_candidates` wire, so frozen is honored exactly as committed
+  copper), always in the draft-check set, and reject/try-again/edits refuse
+  by name (`candidate_frozen`) until an explicit unfreeze. Sidecar-durable.
+- **Avoid-regions honored (K6)**: keepout zones no longer make the board
+  unroutable-by-refusal — the grid rasterises their polygons per layer
+  (`mark_keepout_polygon`) and the router detours around them.
+- **Promotion (K13)**: `minerva_pcb_promote` / the Promote button — the
+  serialize-back verb. Gated on `pcb.promote_check` (connectivity + geometric
+  + assembly in ONE fail-closed verdict); any finding or indeterminate
+  refuses by name with the sub-reports attached; NO acknowledge-through.
+  Success writes the canonical YAML and reports digest + census delta.
+
+## DRC is a feedback loop (K11)
+Stored draft-check findings render WHERE the problem is — gap bar + amber
+ring witnesses on the canvas (zoom-curved, layer-filtered, never occluding at
+inspection zoom). Clicking one focuses the FINDING: the owning ghost selects,
+and `get_selection` answers with the stored finding verbatim (type, measured
+vs required, geometry). The draft_check reply now passes findings through
+whole (both `kind` and `type` spellings, `closest`/`witness` pairs), so the
+canvas and the agent read the same evidence.
+
+## Steered retry has a mouse
+Try Again is a REAL retry (reroute; the prior survives a failed router leg).
+"Retry with corridor…" arms a waypoint-click gesture that emits the reroute
+tool's own `{x_mm,y_mm}` corridor. "Clear steering" is the clear_constraint
+path. The Propose button scopes to selected open hints.
+
+## Parity, both hands
+- Humans: junction drag + via insert on ghosts ride the SAME revision-guarded
+  workspace verbs the MCP tools call; batch "Commit N candidates" is one undo
+  step; the placement-acknowledge dialog answers the commit gate (consent
+  recorded identically to `acknowledge_placement:true`); a superseded hint's
+  mouse exit is "Reclaim waypoints" (the convert tool, one implementation);
+  pad→pad zero-waypoint gestures mint TRUE intents; a width picker stamps
+  human-authored hints.
+- LLM: `minerva_pcb_point` mirrors `get_selection` (deixis both ways);
+  `hint_move/insert/delete_bend` micro-verbs replace wholesale kind_payload
+  patches; `clear_hints_by_author` twins the dock menu.
+
+## Contracts pinned
+K5 (drafts live in sidecars; the canonical file never carries them except via
+commit→promotion) and K12 (repair one, accept a subset, remainder untouched)
+are executable contract tests (`tests/gd/test_ux3_contracts.gd`).

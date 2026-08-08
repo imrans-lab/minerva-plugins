@@ -930,7 +930,7 @@
     },
     {
       "name": "minerva_pcb_get_selection",
-      "description": "THE deictic read (HITL-6b): whatever the human has SELECTED on the canvas right now, every kind in one call — components, traces, vias, zones, cutouts, route candidates (ghosts) and annotations. Use it whenever the human says 'this' ('what's this?', 'delete this', 'make this wider'): selection is the pointing finger of co-working. Returns {selection:[{kind, id, ...enrichment}], count, active_candidate_id?} — a selected GHOST comes back as its full candidate record (net, disposition, validation, quality metrics, provenance, source_intent_notes), a component with position/rotation/value, a trace with its net, an annotation with its kind/summary/ref/lifecycle. Empty selection is a SUCCESS with selection: [] and a note — 'nothing is selected' is an answer, not an error. Read-only; journals nothing. Canvas ghost clicks also feed the workspace's active candidate, so workspace_get_active agrees with this read.",
+      "description": "THE deictic read (HITL-6b): whatever the human has SELECTED on the canvas right now, every kind in one call — components, traces, vias, zones, cutouts, route candidates (ghosts), annotations, and — when the human clicked a DRC witness marker — the focused FINDING (kind 'finding': the stored draft-check finding verbatim, with type/measured_mm/required_mm/closest/witness geometry plus its candidate_id). Use it whenever the human says 'this' ('what's this?', 'delete this', 'make this wider'): selection is the pointing finger of co-working. Returns {selection:[{kind, id, ...enrichment}], count, active_candidate_id?} — a selected GHOST comes back as its full candidate record (net, disposition, validation, quality metrics, provenance, source_intent_notes), a component with position/rotation/value, a trace with its net, an annotation with its kind/summary/ref/lifecycle. Empty selection is a SUCCESS with selection: [] and a note — 'nothing is selected' is an answer, not an error. Read-only; journals nothing. Canvas ghost clicks also feed the workspace's active candidate, so workspace_get_active agrees with this read.",
       "executor": "panel",
       "input_schema": {
         "type": "object",
@@ -977,6 +977,118 @@
           "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
         },
         "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_freeze",
+      "description": "FREEZE a route candidate (Epoch UX3, K7 — the goal's own verb): declare its geometry SETTLED. Stronger than pin: future routing treats it as fixed copper (routes AROUND it), a batch re-propose HOLDS its task (frozen_candidate_held), it is ALWAYS included in draft checks, and — the teeth — reject / try-again / geometry edits are refused by name (candidate_frozen) until minerva_pcb_workspace_unfreeze. Commit still works: settled geometry becoming copper is the loop's happy path. Args {editor_name, candidate_id}. Returns the updated candidate record. Legal from proposed and pinned; refused by name from terminal dispositions.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_workspace_unfreeze",
+      "description": "UNFREEZE a route candidate — the deliberate demotion of settled geometry back to a plain draft (proposed). The ONLY way to make a frozen candidate rejectable, supersedable, or editable again: destroying settled work is always this visible two-step, never a side effect of another verb. Args {editor_name, candidate_id}. Returns the updated candidate record. Unfreezing a non-frozen live candidate is a legal no-op to proposed; a terminal one refuses by name.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "candidate_id": {"type": "string", "description": "Candidate id (from minerva_pcb_workspace_list)"}
+        },
+        "required": ["editor_name", "candidate_id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_promote",
+      "description": "PROMOTE the live board to its canonical YAML file (Epoch UX3 station 11 — K13, the serialize-back verb): runs the FULL authoritative gate in one call (connectivity DRC + geometric DRC GC1-GC7 + assembly tri-state, composed fail-closed worker-side) and, ONLY on a clean pass, serializes the live board through pcb.serialize and writes it to the adopted document path (or the explicit `path` arg). ANY finding, error, or indeterminate refuses by name (promotion_gated, with refusals[] and the three sub-reports) — there is NO acknowledge-through: promotion without a passing full DRC is impossible, not merely discouraged. Success reply: {path, digest_sha256, bytes, prior_state, census_delta? (component/net/trace/via count deltas vs the prior file)}. Committed candidates and consumed-hint records are NOT mutated — they already describe the copper this file now carries.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "path": {"type": "string", "description": "Target file path; omit to use the adopted canonical document path"}
+        },
+        "required": ["editor_name"]
+      }
+    },
+    {
+      "name": "minerva_pcb_point",
+      "description": "POINT at an entity for the human (Epoch UX3 station 10 — THE MIRROR of minerva_pcb_get_selection): makes it the canvas selection through the same choke points a click uses, so the human sees it lit exactly as their own click would show it, with a status-line callout. Deixis runs both ways: get_selection answers 'what is the human pointing at?'; this answers 'look HERE'. Args {editor_name, kind, id} — kind: component | trace | via | zone | cutout | candidate | annotation. A candidate point also sets the workspace's active candidate (the same active-sync the click performs). Refuses not_found/unknown_kind by name.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "kind": {"type": "string", "description": "Entity kind: component | trace | via | zone | cutout | candidate | annotation"},
+          "id": {"type": "string", "description": "Entity id (ref for components, stable id otherwise)"}
+        },
+        "required": ["editor_name", "kind", "id"]
+      }
+    },
+    {
+      "name": "minerva_pcb_hint_move_bend",
+      "description": "Move ONE bend (interior waypoint) of a route hint to a new position — a micro edit riding the same storage convention the canvas bend-edit tool lands, one revision per call. Stop wholesale-patching kind_payload for single-bend changes. Args {editor_name, hint_id, index, x_mm, y_mm} (index from the returned bends array / bend order). Refuses bend_index_out_of_range and waypoints_superseded (the sanctioned exits: minerva_pcb_hint_convert_to_detailed, or steer via reroute_route) by name. Returns {hint_id, op, bend_count, bends}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "hint_id": {"type": "string", "description": "Route-hint annotation id"},
+          "index": {"type": "integer", "description": "Bend index (0-based, interior waypoints only)"},
+          "x_mm": {"type": "number", "description": "New X in board mm"},
+          "y_mm": {"type": "number", "description": "New Y in board mm"}
+        },
+        "required": ["editor_name", "hint_id", "index", "x_mm", "y_mm"]
+      }
+    },
+    {
+      "name": "minerva_pcb_hint_insert_bend",
+      "description": "Insert ONE bend (interior waypoint) into a route hint — micro edit, one revision, same storage convention as the canvas tool. Args {editor_name, hint_id, x_mm, y_mm, index?} — index absent appends; oversized clamps to append. Refuses waypoints_superseded by name (sanctioned exits: convert_to_detailed / reroute_route). Returns {hint_id, op, bend_count, bends}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "hint_id": {"type": "string", "description": "Route-hint annotation id"},
+          "index": {"type": "integer", "description": "Insertion index (0-based); omit to append"},
+          "x_mm": {"type": "number", "description": "X in board mm"},
+          "y_mm": {"type": "number", "description": "Y in board mm"}
+        },
+        "required": ["editor_name", "hint_id", "x_mm", "y_mm"]
+      }
+    },
+    {
+      "name": "minerva_pcb_hint_delete_bend",
+      "description": "Delete ONE bend (interior waypoint) from a route hint — micro edit, one revision, same storage convention as the canvas tool's bend delete. Args {editor_name, hint_id, index}. Refuses bend_index_out_of_range and waypoints_superseded by name. Returns {hint_id, op, bend_count, bends}.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "hint_id": {"type": "string", "description": "Route-hint annotation id"},
+          "index": {"type": "integer", "description": "Bend index to delete (0-based)"}
+        },
+        "required": ["editor_name", "hint_id", "index"]
+      }
+    },
+    {
+      "name": "minerva_pcb_clear_hints_by_author",
+      "description": "Clear route hints by AUTHOR — the MCP twin of the workflow dock's clear-by-author menu, running the SAME host filter so the two doorways cannot diverge: workflow-class annotations (route hints) only, review annotations (arrows/text) never touched. Args {editor_name, author} — author: human | ai | all. Returns {removed, author}. Not undoable — the hints are gone from the sidecar on its next write; prefer targeted deletes when in doubt.",
+      "executor": "panel",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
+          "author": {"type": "string", "description": "Whose hints to clear: human | ai | all"}
+        },
+        "required": ["editor_name", "author"]
       }
     },
     {
@@ -1241,6 +1353,7 @@
           "pcb.draft_check",
           "pcb.assembly_check",
           "pcb.board_health",
+          "pcb.promote_check",
           "ping",
           "capability:mcp.proxy:minerva_plugin_start"
         ],
@@ -1256,6 +1369,7 @@
       "pcb.draft_check",
       "pcb.assembly_check",
       "pcb.board_health",
+      "pcb.promote_check",
       "ping",
       "capability:mcp.proxy:minerva_plugin_start"
     ]

@@ -476,6 +476,34 @@ class SingleTraceAuthorTool:
 		if not as_point and not dest_pad.is_empty():
 			dest_pins.append("%s.%s" % [str(dest_pad.get("component", "")), str(dest_pad.get("pin", ""))])
 
+		# ── TRUE INTENT for the bare pad→pad gesture (Epoch UX3 station 8a) ──
+		# A zero-interior-waypoint pad→pad commit IS the connectivity intent
+		# minerva_pcb_add_route_intent expresses — the old path minted a
+		# look-alike single_trace hint with no eager RouteTask and no task-
+		# owned constraint slot. Delegate to the ONE implementation through
+		# the panel's own tool entry (no second minting path to drift): the
+		# intent tool adds the annotation, mints the eager task ("NET|hint"),
+		# and validates same-net-ness — its refusals (cross_net_pins,
+		# pin_unresolvable) are ANSWERS the old path could never give, so a
+		# refusal consumes the gesture with the reason narrated rather than
+		# minting a doomed hint. Falls through to the legacy envelope only
+		# when no panel/tool doorway exists (older host, headless kind test)
+		# — parity preserved, never regressed. A WAYPOINT-carrying gesture
+		# (interior not empty) keeps its guided-hint semantics untouched (8c).
+		if interior.is_empty() and anchor_is_pad and not as_point and not dest_pad.is_empty():
+			var intent_reply: Variant = _mint_intent_via_panel(
+				source_pins[0], dest_pins[0])
+			if intent_reply is Dictionary:
+				var rd: Dictionary = intent_reply
+				if bool(rd.get("success", false)):
+					_toast_msg("Route intent %s minted for net %s (task %s) — Propose routes it."
+						% [str(rd.get("hint_id", "")), str(rd.get("net", "")), str(rd.get("task_id", ""))])
+				else:
+					_toast_msg("Intent refused (%s): %s"
+						% [str(rd.get("error", "unknown")), str(rd.get("note", ""))])
+				_reset()
+				return true
+
 		var wp_arrays: Array = []
 		for wp in interior:
 			wp_arrays.append([(wp as Vector2).x, (wp as Vector2).y])
@@ -520,6 +548,41 @@ class SingleTraceAuthorTool:
 		if _host == null or not _host.has_method("pad_at"):
 			return {}
 		return _host.pad_at(doc_pos, _PAD_RADIUS_MM)
+
+	## Station 8a's delegation seam: run minerva_pcb_add_route_intent through
+	## the panel's own tool entry. Returns the reply Dictionary, or null when
+	## no doorway exists (older host/panel — the caller falls through to the
+	## legacy envelope). handle_tool is a coroutine, but the intent tool's
+	## whole path is synchronous, so the call completes without suspending
+	## and hands back the Dictionary directly; anything else (an unexpected
+	## suspension) reads as "no doorway" rather than a half-answer.
+	func _mint_intent_via_panel(source_pin: String, dest_pin: String) -> Variant:
+		if _host == null or not _host.has_method("get_panel"):
+			return null
+		var panel = _host.get_panel()
+		if panel == null or not panel.has_method("handle_tool"):
+			return null
+		var args: Dictionary = {"source_pin": source_pin, "dest_pin": dest_pin,
+			"author": "human"}
+		# The width picker rides the intent too (station 8b): the intent tool
+		# builds its envelope with author "ai" (the host choke point stamps
+		# human envelopes only), so the human's picked width is passed
+		# explicitly here, through the tool's own validated width_mm arg.
+		if panel.has_method("get_hint_authoring_width"):
+			var w: float = float(panel.get_hint_authoring_width())
+			if w > 0.0:
+				args["width_mm"] = w
+		var reply: Variant = panel.handle_tool("minerva_pcb_add_route_intent", args)
+		return reply if reply is Dictionary else null
+
+	## Narration relay — same duck-typed toast seam ViaInsertTool uses.
+	func _toast_msg(text: String) -> void:
+		if _host != null and _host.has_method("show_toast"):
+			_host.show_toast(text)
+		elif _host != null and _host.has_method("get_panel"):
+			var panel = _host.get_panel()
+			if panel != null and panel.has_method("_show_transient_status"):
+				panel._show_transient_status(text)
 
 	func _draw_dashed_segment(ctx: AnnotationRenderContext, a: Vector2, b: Vector2, color: Color) -> void:
 		var seg := b - a
@@ -776,7 +839,7 @@ class BendHandleEditTool:
 		# the human phrasing, same idiom as the multi-select notice above.
 		if _path_locked(ann):
 			_Self.draw_disarm_notice(ctx,
-				"Superseded route — waypoints locked; convert to detailed to edit, or steer the route")
+				"Superseded route — waypoints locked; right-click: Reclaim waypoints (convert to detailed), or steer the route")
 			return
 		var bends: Array = kind.bend_points(ann)
 		var half := (_HANDLE_SIZE_PX / _zoom()) * 0.5
@@ -928,6 +991,19 @@ class ViaInsertTool:
 					annotation_modified.emit(sel, new_ann)
 					return true
 
+		# ── CANDIDATE TARGETING (Epoch UX3 station 6b) ────────────────────────
+		# When no hint is the selection but a route CANDIDATE (ghost) is, the
+		# tool targets the candidate instead of silently disarming: the click
+		# routes through RoutingWorkspace.add_via — the SAME revision-guarded,
+		# path-scoped verb minerva_pcb_workspace_edit_candidate's insert_via
+		# op calls, never a parallel mutation path. The workspace resolves the
+		# segment at the point itself and owns every refusal by name
+		# (no_segment_at_point, degenerate inserts, candidate_frozen, …);
+		# refusals surface on the panel status line through the host toast.
+		# Hint-targeting above is UNCHANGED — a selected hint still wins.
+		if sel.is_empty() and _insert_via_into_selected_candidate(doc_pos):
+			return true
+
 		# No via inserted (nothing selected, selection isn't a route hint, or the
 		# click missed every segment of the selection's route) — fall back to
 		# route-hint-only selection, same idiom as BendHandleEditTool.
@@ -953,7 +1029,7 @@ class ViaInsertTool:
 		var ann := _find(sel)
 		if not ann.is_empty() and str(ann.get("kind", "")) == "pcb_route_hint" and _path_locked(ann):
 			_Self.draw_disarm_notice(ctx,
-				"Superseded route — via insert disarmed; convert to detailed to edit, or steer the route")
+				"Superseded route — via insert disarmed; right-click: Reclaim waypoints (convert to detailed), or steer the route")
 
 	# ── internal ──────────────────────────────────────────────────────────────
 
@@ -974,6 +1050,59 @@ class ViaInsertTool:
 		if _host != null and _host.has_method("get_annotation_zoom"):
 			return maxf(float(_host.get_annotation_zoom()), 0.01)
 		return 1.0
+
+	## Station 6b's candidate half: insert a via into the SELECTED ghost at
+	## the clicked point, through the workspace's own gated verb. True when
+	## the click was consumed (applied OR refused-with-notice — a refusal on
+	## the targeted ghost is an answer, not a fall-through to selection).
+	## False when there is no selected candidate to target (duck-typed,
+	## degrades to the pre-station behavior against an older host/panel).
+	func _insert_via_into_selected_candidate(doc_pos: Vector2) -> bool:
+		if _host == null or not _host.has_method("get_panel"):
+			return false
+		var panel = _host.get_panel()
+		if panel == null or not panel.has_method("get_selection_state") \
+				or not panel.has_method("get_routing_workspace"):
+			return false
+		var workspace = panel.get_routing_workspace()
+		if workspace == null or not workspace.has_method("add_via"):
+			return false
+		var state: Dictionary = panel.get_selection_state()
+		var cands: Array = state.get("candidates", []) if state.get("candidates", []) is Array else []
+		# One unambiguous ghost, the same rule the hint half applies to hints.
+		if cands.size() != 1:
+			return false
+		var cid := str(cands[0])
+		var c = workspace.get_candidate(cid)
+		if c == null:
+			return false
+		# The via spans FROM the clicked segment's layer to its opposite —
+		# the same span the workspace verb validates (from_layer must match
+		# the segment under the point; a miss refuses no_segment_at_point).
+		var hit: Dictionary = workspace._segment_hit(c, doc_pos)
+		var from_layer := "top"
+		if not hit.is_empty():
+			var seg_idx := int(hit.get("segment_index", 0))
+			if seg_idx >= 0 and seg_idx < c.segments.size() and c.segments[seg_idx] is Dictionary:
+				from_layer = str((c.segments[seg_idx] as Dictionary).get("layer", "top"))
+		var to_layer := "bottom" if from_layer == "top" else "top"
+		var res: Dictionary = workspace.add_via(cid, doc_pos, from_layer, to_layer)
+		if bool(res.get("ok", false)):
+			_toast("Via inserted on %s — the following run flips to %s; its verdict is stale until the next Check."
+				% [cid, to_layer])
+		else:
+			_toast("Via insert on %s refused (%s): %s"
+				% [cid, str(res.get("error", "unknown")), str(res.get("message", ""))])
+		return true
+
+	## Host toast → the panel status line (duck-typed; silent when absent).
+	func _toast(text: String) -> void:
+		if _host != null and _host.has_method("show_toast"):
+			_host.show_toast(text)
+		elif _host != null and _host.has_method("get_panel"):
+			var panel = _host.get_panel()
+			if panel != null and panel.has_method("_show_transient_status"):
+				panel._show_transient_status(text)
 
 	## See BendHandleEditTool._kind — same registry lookup, mirrored here
 	## because these tool classes deliberately share no base beyond

@@ -136,19 +136,30 @@ func _init() -> void:
 	# across the two sidecars — Codex 1047 verdict 6, load-time
 	# reconciliation owns the torn shapes) == 74,
 	# + 1 HITL-6b tool (minerva_pcb_get_selection — the deictic "what's this"
-	# read over the canvas selection, docket 019fdf5579) == 75.
+	# read over the canvas selection, docket 019fdf5579) == 75,
+	# + 2 Epoch UX3 station-1 tools (minerva_pcb_workspace_freeze /
+	# _unfreeze — K7's settlement verb pair, docket 019fdf913513; frozen rides
+	# the pinned_candidates keep-out wire and always joins the draft-check
+	# set) == 77,
+	# + 5 Epoch UX3 station-10 tools (docket 019fdf9101b5 — LLM reverse
+	# parity: minerva_pcb_point, the get_selection mirror; the three
+	# hint_move/insert/delete_bend micro-edit verbs; and
+	# minerva_pcb_clear_hints_by_author, the dock menu's MCP twin) == 82,
+	# + 1 Epoch UX3 station-11 tool (minerva_pcb_promote — K13's gated
+	# serialize-back verb, docket 019fdf91b3ac) == 83.
 	# Catches a manifest that silently dropped or duplicated an unrelated entry
 	# while a round's diff was being made.
 	#
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is the HITL-6b bump (74 -> 75),
-	# sequenced after Codex 1047 verdict-4's (73 -> 74), station 10's
-	# (72 -> 73), station 8's (71 -> 72), bus-propose's (70 -> 71), D0-5's
-	# (69 -> 70), C5's (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) —
-	# all queue behind the same serialization point.
-	check("total registered tool count == 75", registered.size() == 75,
+	# entry could hide behind it. This is the Epoch UX3 station-11 bump
+	# (82 -> 83), sequenced after station-10's (77 -> 82), station-1's
+	# (75 -> 77), HITL-6b's (74 -> 75), Codex 1047 verdict-4's (73 -> 74),
+	# UX1 station 10's (72 -> 73), station 8's (71 -> 72), bus-propose's
+	# (70 -> 71), D0-5's (69 -> 70), C5's (68 -> 69), C4b's (70 -> 68) and
+	# C4a's (60 -> 70) — all queue behind the same serialization point.
+	check("total registered tool count == 83", registered.size() == 83,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

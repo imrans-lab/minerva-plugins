@@ -139,7 +139,13 @@ static func save_workspace(board_path: String, workspace, board_dict: Dictionary
 	var envelope := {
 		"schema_version": SCHEMA_VERSION,
 		"board_document_id": doc_id,
-		"board_fingerprint": compute_board_fingerprint(board_dict),
+		"board_fingerprint": compute_board_fingerprint_v2(board_dict),
+		# Epoch UX3 station 11 cold review F4: fingerprints are now computed
+		# over the CANONICAL-SURVIVOR projection (v2) so a promotion's
+		# serialize→deserialize round trip — which drops every GD-only key —
+		# cannot orphan this sidecar. Version stamped so the loader compares
+		# old envelopes with the legacy whole-dict hash they were written with.
+		"fingerprint_version": 2,
 		"board_revision": int(board_revision),
 		"workspace": durable,
 	}
@@ -202,8 +208,14 @@ static func load_into_workspace(board_path: String, workspace, current_board_dic
 		workspace.mark_all_stale()
 		return {"status": "quarantine_stale", "candidate_count": count, "reason": reason}
 
-	# Fingerprint coherence: recompute from the CURRENT board and compare.
-	var current_fp := compute_board_fingerprint(current_board_dict)
+	# Fingerprint coherence: recompute from the CURRENT board and compare —
+	# with the SAME algorithm the envelope was written with (F4): v2 envelopes
+	# compare the canonical-survivor projection; legacy envelopes (no
+	# fingerprint_version) compare the whole-dict v1 hash, so every existing
+	# sidecar keeps loading clean until its next write upgrades it.
+	var fp_version := int(envelope.get("fingerprint_version", 1))
+	var current_fp := compute_board_fingerprint_v2(current_board_dict) \
+		if fp_version >= 2 else compute_board_fingerprint(current_board_dict)
 	if current_fp != stored_fp:
 		workspace.mark_all_stale()
 		return {
@@ -247,6 +259,85 @@ static func compute_board_fingerprint(board_dict: Dictionary) -> String:
 		"mounting_holes": board_dict.get("mounting_holes", []),
 	}
 	return _canonical(subset).sha256_text()
+
+
+## V2 fingerprint (Epoch UX3 station 11, cold review F4): SHA-256 over the
+## CANONICAL-SURVIVOR projection of the board — exactly the keys the Go
+## serialize→deserialize round trip preserves (internal/board/board.go's
+## first-classed json fields; every Extra map is json:"-" and DROPPED). The
+## v1 hash covered the whole GD dict, so GD-only session keys (locked,
+## graphics, pads enrichment, colors…) fed it — and the first promotion of
+## any board carrying one changed the recomputed hash and quarantined the
+## sidecar. v2 hashes only what the design of record can actually carry, so
+## "the same canonical board" fingerprints identically before and after a
+## round trip AND across worker-enrichment differences. The projection is an
+## ALLOWLIST on purpose: a new GD-only key defaults to excluded (stable),
+## and a new CANONICAL key must be added here deliberately, beside the Go
+## struct change that first-classes it.
+static func compute_board_fingerprint_v2(board_dict: Dictionary) -> String:
+	var dr: Dictionary = board_dict.get("design_rules", {}) if board_dict.get("design_rules", {}) is Dictionary else {}
+	# One projection per Hole-shaped list (mounting/pth/npth share the Go
+	# struct, so they share the allowlist).
+	var hole_keys := ["id", "x_mm", "y_mm", "diameter_mm", "drill_mm", "plated", "annulus_mm"]
+	var subset := {
+		"width_mm": board_dict.get("width_mm", 0.0),
+		"height_mm": board_dict.get("height_mm", 0.0),
+		# Origin shifts every coordinate's meaning — routing-relevant
+		# (Codex 1056 finding 1).
+		"origin": board_dict.get("origin", null),
+		"layers": board_dict.get("layers", []),
+		"design_rules": _project(dr, ["clearance_mm", "trace_width_mm",
+			"via_diameter_mm", "via_drill_mm", "diff_pair_gap_mm", "diff_pair_width_mm"]),
+		"components": _project_list(board_dict.get("components", []),
+			["ref", "footprint", "value", "x_mm", "y_mm", "rotation_deg", "layer", "pins"]),
+		"nets": _project_list(board_dict.get("nets", []), ["name", "pins"]),
+		"traces": _project_list(board_dict.get("traces", []),
+			["id", "net", "layer", "width_mm", "points"]),
+		"vias": _project_list(board_dict.get("vias", []),
+			["id", "x_mm", "y_mm", "drill_mm", "diameter_mm", "net", "from_layer", "to_layer", "tented"]),
+		# ZONES became routing-relevant in Epoch UX3 station 2 (keepouts are
+		# router obstacles now) — a keepout edit MUST stale candidates routed
+		# around the old region (Codex 1056 finding 1; v1 never covered them
+		# either, but pre-station-2 a keepout board refused to route at all).
+		# Pours matter too: fills carve around committed copper.
+		"zones": _project_list(board_dict.get("zones", []),
+			["id", "kind", "net", "layer", "clearance_mm",
+			 "thermal_gap_mm", "thermal_bridge_width_mm", "outline"]),
+		# Cutouts are through-board openings — physical keepouts.
+		"cutouts": _project_list(board_dict.get("cutouts", []), ["id", "outline"]),
+		"mounting_holes": _project_list(board_dict.get("mounting_holes", []), hole_keys),
+		# PTH/NPTH board holes share the Hole struct and the same routing
+		# relevance as mounting holes (a gap in BOTH v1 and v2 until Codex
+		# 1056 finding 1's class fix — Codex's own list missed them too).
+		"pth_holes": _project_list(board_dict.get("pth_holes", []), hole_keys),
+		"npth_holes": _project_list(board_dict.get("npth_holes", []), hole_keys),
+	}
+	return _canonical(subset).sha256_text()
+	# DELIBERATELY EXCLUDED, so the next reader does not "complete" the list:
+	# name/id/version/grid_mm (identity + snap UI, not routing inputs) and the
+	# annotations/route_hints blobs (the sidecars' own content class — hashing
+	# them would make the fingerprint self-referential and unstable).
+
+
+## Keep only `keys` of a dict, ABSENT keys stay absent (matching omitempty —
+## a key the GD dict never wrote and a key the round trip dropped read alike).
+static func _project(d: Dictionary, keys: Array) -> Dictionary:
+	var out: Dictionary = {}
+	for k in keys:
+		if d.has(k):
+			out[k] = d[k]
+	return out
+
+
+static func _project_list(raw, keys: Array) -> Array:
+	var out: Array = []
+	if raw is Array:
+		for entry in raw:
+			if entry is Dictionary:
+				out.append(_project(entry, keys))
+			else:
+				out.append(entry)
+	return out
 
 
 ## Stable, collision-resistant canonical string for any JSON-ish value.

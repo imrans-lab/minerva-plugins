@@ -50,6 +50,10 @@ func _init() -> void:
 	await _test_reclick_triple_agreement()
 	await _test_first_click_and_cross_tool_unchanged()
 	await _test_width_menu_focus_at_every_tier()
+	await _test_check_button_and_ghost_readout()
+	await _test_propose_selection_scope_and_retry_narration()
+	await _test_intent_parity_and_width_picker()
+	await _test_promote_headless_fail_closed()
 
 	_finish()
 
@@ -681,3 +685,247 @@ func _test_width_menu_focus_at_every_tier() -> void:
 
 	panel.queue_free()
 	await process_frame
+
+
+# ── Epoch UX3 station 3 (docket 019fdf90662a): Check button + ghost readout ───
+# check_draft had NO UI caller and the status bar counted parts but never
+# ghosts. Asserted headlessly: the button exists in the Proposals flow, the
+# no-candidates press narrates rather than no-ops, the headless press (no IPC
+# backend) reverts to prior verdicts AND says so, the steady-state readout
+# carries the tally exactly while live ghosts exist, and the Ghosts view flag
+# joined the one View-menu table.
+
+func _test_check_button_and_ghost_readout() -> void:
+	print("-- UX3-5: Check button, ghost status tally, Ghosts view flag --")
+	# MOUNTED: the button/status assertions read UI that only exists after
+	# _on_panel_loaded's _build_ui — bare load_panel builds no tree.
+	var panel: Variant = await _mount_panel_in_tree()
+
+	var check_btn: Variant = panel.find_child("CheckButton", true, false)
+	check("a CheckButton exists in the sidebar", check_btn != null)
+	var propose_btn: Variant = panel.find_child("ProposeButton", true, false)
+	check("…in the same Proposals flow as Propose",
+		check_btn != null and propose_btn != null
+		and check_btn.get_parent() == propose_btn.get_parent())
+
+	# View flag (c): the ONE view-flags table gained the ghost surface.
+	var flags: Array = panel._VIEW_FLAGS
+	var ghost_row: Array = []
+	for row in flags:
+		if str(row[1]) == "show_route_candidates":
+			ghost_row = row
+	check("_VIEW_FLAGS carries show_route_candidates", not ghost_row.is_empty())
+	check("…labelled Ghosts", not ghost_row.is_empty() and str(ghost_row[0]) == "Ghosts")
+
+	# No candidates: the press must SAY there is nothing, not silently no-op.
+	await panel._on_check_button_pressed()
+	var status: Variant = panel.find_child("StatusBar", true, false)
+	check("status bar exists", status != null)
+	check("no-candidates press narrates ('Nothing to check')",
+		status != null and str(status.text).contains("Nothing to check"))
+
+	# Seed one live candidate directly in the workspace (the same direct-drive
+	# every workspace suite uses) and read the tally.
+	var ws: Variant = panel.get_routing_workspace()
+	check("panel exposes the routing workspace", ws != null)
+	var reply := {"routes": [{"net": "N1",
+		"segments": [{"start": [0.0, 0.0], "end": [5.0, 0.0], "layer": "F.Cu"}],
+		"vias": []}]}
+	var hints := [{"id": "h1", "kind_payload": {"net_names": ["N1"], "width_mm": 0.3}}]
+	var ids: Array = ws.ingest_routing_result(reply, hints, 1)
+	check("seeded one live candidate", ids.size() == 1)
+
+	check("ghost summary reads '1 ghost: 1 unchecked'",
+		str(panel._ghost_status_summary()) == "1 ghost: 1 unchecked",
+		"got '%s'" % str(panel._ghost_status_summary()))
+	panel._update_status()
+	check("the steady-state readout carries the tally",
+		status != null and str(status.text).contains("1 ghost: 1 unchecked"))
+
+	# Headless press over a live candidate: no IPC backend exists, so
+	# check_draft's contract is revert-to-prior + an honest status line —
+	# never a candidate stuck on "checking" and never a fake verdict.
+	await panel._on_check_button_pressed()
+	check("headless check reverts the candidate to its prior verdict",
+		str(ws.get_candidate(str(ids[0])).validation) == "unchecked")
+	check("…and the status line says the worker was unavailable",
+		status != null and str(status.text).contains("could not run"))
+
+	# A verdict written by the model (a later real check) flows into the tally.
+	ws.set_validation(str(ids[0]), "clean")
+	check("verdict flows into the summary",
+		str(panel._ghost_status_summary()) == "1 ghost: 1 clean")
+
+	# The tally leaves when the last live candidate does (reject is terminal).
+	ws.reject(str(ids[0]))
+	check("no live ghosts -> empty summary (readout returns to its old shape)",
+		str(panel._ghost_status_summary()) == "")
+
+	_driver.free_panel(panel)
+
+
+# ── Epoch UX3 station 5d: Propose button respects the hint selection ──────────
+# Selected OPEN pcb_route_hints scope the run; everything else in a mixed
+# selection contributes nothing; no selection keeps all-open. Plus the retry
+# handler's headless refusal narration (5a's panel half, named errors echoed).
+
+func _test_propose_selection_scope_and_retry_narration() -> void:
+	print("-- UX3-1: propose selection scope + retry refusal narration --")
+	# MOUNTED for the same _build_ui reason as the Check-button group above.
+	var panel: Variant = await _mount_panel_in_tree()
+	var host: Variant = panel.get_annotation_host()
+	host.set_panel(panel)
+
+	# Seed one OPEN route hint + select it.
+	var env: Dictionary = host.build_route_hint_envelope(
+		0.0, 0.0, "", "F.Cu", "waypoint", [[0.0, 0.0], [5.0, 0.0]], "human")
+	var open_id: String = str(host.add_annotation_v2(env))
+	host.set_selected_annotation_ids(PackedStringArray([open_id]))
+	var scoped: Array = panel._selected_open_hint_ids()
+	check("a selected open route hint scopes the propose",
+		scoped.size() == 1 and str(scoped[0]) == open_id)
+
+	# A non-open hint in the selection contributes nothing.
+	var ann: Dictionary = host.get_by_id(open_id)
+	ann["lifecycle"] = "applied"
+	host.update_annotation(open_id, ann)
+	check("an applied hint no longer scopes",
+		(panel._selected_open_hint_ids() as Array).is_empty())
+
+	# Empty selection → empty scope (the all-open default path).
+	host.set_selected_annotation_ids(PackedStringArray([]))
+	check("no selection ⇒ empty scope", (panel._selected_open_hint_ids() as Array).is_empty())
+
+	# Retry handler, headless: an unknown candidate refuses BY NAME and the
+	# status line echoes it — the narration contract, no backend needed.
+	await panel._on_candidate_retry_requested("cand_nope", {})
+	var status: Variant = panel.find_child("StatusBar", true, false)
+	check("retry refusal is narrated with the tool's named error",
+		status != null and str(status.text).contains("refused")
+		and str(status.text).contains("cand_nope"))
+
+	_driver.free_panel(panel)
+
+
+# ── Epoch UX3 station 8: intent parity + the width picker ─────────────────────
+# (a) the bare pad→pad gesture delegates to minerva_pcb_add_route_intent (ONE
+# implementation: eager task, same-net validation, same reply); (b) the width
+# picker stamps kind_payload.width_mm on human-authored envelopes at the host
+# choke point and rides the intent delegation as an explicit arg; (c) an
+# explicit width always wins, AI envelopes are never stamped.
+
+func _test_intent_parity_and_width_picker() -> void:
+	print("-- UX3-4: pad→pad mints a TRUE intent; width picker channels --")
+	var panel: Variant = await _mount_panel_in_tree()
+	var host: Variant = panel.get_annotation_host()
+	host.set_panel(panel)
+	var ws: Variant = panel.get_routing_workspace()
+
+	# ── (b) the host choke point ─────────────────────────────────────────────
+	var spin: Variant = panel.find_child("HintWidthSpin", true, false)
+	check("the Proposals group carries the width picker", spin != null)
+	panel._hint_width_spin.value = 0.4
+	var env_h: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
+		[[1.0, 1.0], [2.0, 2.0]], "human")
+	check("a human envelope picks up the spinner width",
+		is_equal_approx(float((env_h.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.4))
+	var env_ai: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
+		[[1.0, 1.0]], "ai")
+	check("an AI envelope is NEVER stamped by the human's picker",
+		not (env_ai.get("kind_payload", {}) as Dictionary).has("width_mm"))
+	var env_explicit: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
+		[[1.0, 1.0]], "human", "", 0.7)
+	check("an explicit width argument beats the picker",
+		is_equal_approx(float((env_explicit.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.7))
+	panel._hint_width_spin.value = 0.0
+	var env_auto: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
+		[[1.0, 1.0]], "human")
+	check("picker at 0 (auto) stamps nothing — absent-key behavior intact",
+		not (env_auto.get("kind_payload", {}) as Dictionary).has("width_mm"))
+
+	# ── (a) the delegation seam mints a TRUE intent ──────────────────────────
+	# _canonical_board wires net VCC = U1.8 + R1.1.
+	var kind_script: Variant = load("res://../../minerva-plugins/pcb/ui/kinds/pcb_route_hint_kind.gd")
+	var tool: Variant = kind_script.SingleTraceAuthorTool.new()
+	tool.on_activate(host)
+	panel._hint_width_spin.value = 0.3
+	var reply: Variant = tool._mint_intent_via_panel("U1.8", "R1.1")
+	check("the delegation returns the intent tool's reply", reply is Dictionary)
+	if reply is Dictionary:
+		var rd: Dictionary = reply
+		check("…success", bool(rd.get("success", false)))
+		check_eq_str("…net resolved from the pins", str(rd.get("net", "")), "VCC")
+		var hint_id := str(rd.get("hint_id", ""))
+		check("…a hint was minted", not hint_id.is_empty())
+		check_eq_str("…the eager task uses the ingest key format",
+			str(rd.get("task_id", "")), "VCC|%s" % hint_id)
+		check("…the eager task EXISTS in the workspace",
+			ws.get_task(str(rd.get("task_id", ""))) != null)
+		check("…the picker width rode the delegation",
+			is_equal_approx(float(rd.get("width_mm", 0.0)), 0.3))
+		var ann: Dictionary = host.get_by_id(hint_id)
+		check("…the intent annotation carries NO waypoints (a true intent)",
+			((ann.get("kind_payload", {}) as Dictionary).get("waypoints", [1]) as Array).is_empty())
+		check("…and the picker width landed on its payload",
+			is_equal_approx(float((ann.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.3))
+
+	# A pin with no net refuses BY NAME — the answer the legacy look-alike
+	# path could never give.
+	var refused: Variant = tool._mint_intent_via_panel("U1.1", "R1.1")
+	check("a netless pin refuses by name",
+		refused is Dictionary and not bool((refused as Dictionary).get("success", true))
+		and str((refused as Dictionary).get("error", "")) == "pin_unresolvable")
+
+	tool.on_deactivate()
+	_driver.free_panel(panel)
+
+
+## String check_eq twin (this suite's check() takes desc/cond/detail).
+func check_eq_str(desc: String, actual: String, expected: String) -> void:
+	check("%s (expected '%s', got '%s')" % [desc, expected, actual], actual == expected)
+
+
+# ── Epoch UX3 station 11: the promotion verb, headless half ───────────────────
+# The full gate needs the live worker (pytest tests/test_promote_check.py owns
+# the verdict composition); what is assertable here: the button exists, the
+# verb FAILS CLOSED with no backend (worker_unavailable — an unverifiable
+# board never promotes), and the channel-reply unwrap discipline.
+
+func _test_promote_headless_fail_closed() -> void:
+	print("-- UX3-10: Promote button + headless fail-closed + unwrap discipline --")
+	var panel: Variant = await _mount_panel_in_tree()
+
+	var btn: Variant = panel.find_child("PromoteButton", true, false)
+	check("the Proposals flow carries the Promote button", btn != null)
+
+	# Path guards answer BEFORE the ipc guard — the specific refusal wins even
+	# with the backend down (cold review F8's coverage gap, closed).
+	var no_path: Dictionary = await panel.promote("")
+	check_eq_str("no adopted canonical source + no arg ⇒ no_target_path",
+		str(no_path.get("error", "")), "no_target_path")
+	var skel: Dictionary = await panel.promote("/tmp/board.pcbskel")
+	check_eq_str("a .pcbskel target refuses OUTRIGHT (the F2 corruption guard)",
+		str(skel.get("error", "")), "pcbskel_target")
+
+	var res: Dictionary = await panel.promote("/tmp/should_never_be_written.yaml")
+	check("headless promote fails CLOSED", not bool(res.get("success", true)))
+	check_eq_str("…named worker_unavailable (the gate could not run)",
+		str(res.get("error", "")), "worker_unavailable")
+	check("…and wrote nothing", not FileAccess.file_exists("/tmp/should_never_be_written.yaml"))
+
+	# Unwrap discipline: only a fully-ok envelope yields the inner result.
+	# The failure rows use the LIVE broker shapes (cold review F3): every real
+	# failure carries success:false with NO result key at all.
+	check("unwrap: ok chain yields the inner dict",
+		str(panel._unwrap_channel_reply({"success": true,
+			"result": {"ok": true, "result": {"x": 1}}})) == str({"x": 1}))
+	check("unwrap: the LIVE resultless timeout shape yields {}",
+		(panel._unwrap_channel_reply({"success": false, "error_code": "timeout",
+			"error_message": "timed out", "reply_id": "r1"}) as Dictionary).is_empty())
+	check("unwrap: the panel's own ipc-null failure shape yields {}",
+		(panel._unwrap_channel_reply({"success": false,
+			"error_code": "ipc_unavailable"}) as Dictionary).is_empty())
+	check("unwrap: worker failure yields {}",
+		(panel._unwrap_channel_reply({"ok": false, "error": {"kind": "x"}}) as Dictionary).is_empty())
+
+	_driver.free_panel(panel)

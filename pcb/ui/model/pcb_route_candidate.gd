@@ -30,7 +30,7 @@ const PcbLayerStack := preload("pcb_layer_stack.gd")
 const PcbRouteTask := preload("pcb_route_task.gd")
 
 ## Legal values for the two orthogonal status axes.
-const DISPOSITIONS := ["proposed", "pinned", "superseded", "rejected", "committed"]
+const DISPOSITIONS := ["proposed", "pinned", "frozen", "superseded", "rejected", "committed"]
 const VALIDATIONS := ["unchecked", "checking", "clean", "violating", "stale", "error"]
 
 ## ── DISPOSITION TRANSITION LEGALITY TABLE ─────────────────────────────────────
@@ -52,6 +52,30 @@ const VALIDATIONS := ["unchecked", "checking", "clean", "violating", "stale", "e
 ##                so nothing is silently lost. → rejected is a later, stronger
 ##                intent than the earlier pin. → committed because pinning must
 ##                not block Accept (the DCR's "Edit … and pin it", then commit).
+##                → frozen is the ESCALATION: the user promotes a hold into a
+##                settlement (Epoch UX3, K7).
+##   frozen     — SETTLED, not copper (K7/K8: "accepted or frozen proposals
+##                become obstacles … good traces stay fixed"). Frozen is a
+##                STRONGER pin, and its teeth are exactly the moves it refuses:
+##                NO reject, NO supersede, NO geometry edit while frozen — a
+##                settled route cannot be discarded or reshaped by a single
+##                verb, targeted or batch; the demotion (unfreeze → proposed)
+##                must come first, so destroying settled work is always a
+##                visible two-step. The two exits: → proposed is Unfreeze (the
+##                deliberate demotion), → committed because freezing must not
+##                block Accept — settled geometry becoming copper is the loop's
+##                happy path. NOT terminal: frozen stays in the LIVE set (it is
+##                draft-checked, rendered, and routed AROUND as fixed copper).
+##                frozen → pinned is deliberately ABSENT: no verb demotes a
+##                settlement into a mere hold, and a legal-but-verbless row
+##                would silently re-enable the Pin menu item on frozen ghosts.
+##                SCOPE (cold review finding 6): "always a two-step" binds the
+##                WORKFLOW-VERB surface this table governs. The RESTORE paths
+##                (load_from_dict, RoutingWorkspace.restore_dispositions — the
+##                compensating half of a board undo) write through the raw
+##                setter by their own documented contract and may reinstate
+##                whatever disposition the snapshot recorded, frozen included;
+##                a board undo rewinding past a freeze rewinds the freeze too.
 ##   superseded — TERMINAL. A superseded candidate is the historical record of a
 ##                replaced generation. Reviving it (→ proposed/pinned) would put
 ##                TWO live candidates on one task and break the one-live-answer
@@ -67,8 +91,9 @@ const VALIDATIONS := ["unchecked", "checking", "clean", "violating", "stale", "e
 ##                which is a COMPENSATING transition mirroring a board undo, not
 ##                a workflow decision.
 const DISPOSITION_TRANSITIONS := {
-	"proposed": ["pinned", "superseded", "rejected", "committed"],
-	"pinned": ["proposed", "superseded", "rejected", "committed"],
+	"proposed": ["pinned", "frozen", "superseded", "rejected", "committed"],
+	"pinned": ["proposed", "frozen", "superseded", "rejected", "committed"],
+	"frozen": ["proposed", "committed"],
 	"superseded": [],
 	"rejected": [],
 	"committed": [],
@@ -80,10 +105,12 @@ const TERMINAL_DISPOSITIONS := ["superseded", "rejected", "committed"]
 ## The ONLY exits from "committed", and NOT a workflow verb: uncommit is the
 ## compensating half of a board undo (the board no longer holds the candidate's
 ## copper, so the candidate must become live again). It may only restore a
-## disposition the candidate could have HELD before commit — proposed or pinned.
+## disposition the candidate could have HELD before commit — proposed, pinned,
+## or frozen (frozen → committed is legal, so a board undo of that commit must
+## be able to reinstate the settlement it consumed).
 ## Reached via uncommit_to(), never via transition_to(), so a caller can never
 ## reach it by accident. Shipped + pinned by test_parity_bridge.gd (GATE INV-1).
-const UNCOMMIT_TARGETS := ["proposed", "pinned"]
+const UNCOMMIT_TARGETS := ["proposed", "pinned", "frozen"]
 
 ## Named refusal codes (the "named error" a refused transition reports).
 const ERR_UNKNOWN_DISPOSITION := "unknown_disposition"

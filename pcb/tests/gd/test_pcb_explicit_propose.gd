@@ -373,7 +373,13 @@ func _test_a_draw_hint_nothing_auto_fires() -> void:
 	var ann: Dictionary = host.get_annotations()[0] if host.get_annotations().size() == 1 else {}
 	_hint_id = str(ann.get("id", ""))
 	check("A: hint id assigned", not _hint_id.is_empty())
-	check("A: hint_type is single_trace", str(ann.get("kind_payload", {}).get("hint_type", "")) == "single_trace")
+	# Epoch UX3 station 8a (docket 019fdf903a4a): a zero-interior-waypoint
+	# pad→pad commit delegates to minerva_pcb_add_route_intent, so the minted
+	# hint is the intent tool's own object ("waypoint", pin provenance, an
+	# eager RouteTask — NOT a candidate, so deliverable 4 below still holds).
+	check("A: hint_type is waypoint (a TRUE intent — station 8a replaced the single_trace look-alike)",
+		str(ann.get("kind_payload", {}).get("hint_type", "")) == "waypoint",
+		"kp=%s" % str(ann.get("kind_payload", {})))
 	check("A: source_pins == [U1.1]", (ann.get("kind_payload", {}).get("source_pins", []) as Array) == ["U1.1"])
 	check("A: dest_pins == [U2.1]", (ann.get("kind_payload", {}).get("dest_pins", []) as Array) == ["U2.1"])
 

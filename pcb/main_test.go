@@ -78,6 +78,11 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// routing run (Epoch UX2 station 9, docket 019fde571300), forwarding
 		// to the worker's "board_health" method. Same channel idiom.
 		"pcb.board_health",
+		// worker-backed — the K13 promotion gate (Epoch UX3 station 11,
+		// docket 019fdf91b3ac): connectivity + geometric DRC + assembly in
+		// one fail-closed verdict, forwarding to the worker's
+		// "promote_check" method. Same channel idiom.
+		"pcb.promote_check",
 	}
 	for _, name := range want {
 		if !got[name] {

@@ -54,3 +54,4 @@ test_workspace_ingest.gd
 test_workspace_persistence.gd
 test_workspace_tools.gd
 test_zone_select_delete.gd
+test_ux3_contracts.gd

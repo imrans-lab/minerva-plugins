@@ -388,14 +388,21 @@ class RoutingGrid:
 
         layers_to_mark = [layer] if layer else self.layers
 
-        for cell_y in self._range_mm(y - block_radius, y + block_radius):
-            for cell_x in self._range_mm(x - block_radius, x + block_radius):
-                # Check if within radius
-                dist = math.sqrt((cell_x - x) ** 2 + (cell_y - y) ** 2)
+        # Iterate CELL INDICES and test each cell's OWN centre — the same
+        # lattice fix mark_keepout_polygon carries (Codex 1056 finding 2's
+        # class: the old bbox-anchored sample lattice was phase-shifted from
+        # the cell lattice the router consults, so at coarse resolution a
+        # cell whose CENTRE sat inside the disc could go unmarked). The cell
+        # semantic is now exact: a cell is blocked iff its centre is within
+        # the blocked disc.
+        for row in self._cell_range(y - block_radius, y + block_radius, 1):
+            for col in self._cell_range(x - block_radius, x + block_radius, 0):
+                if not self._cell_in_bounds(col, row):
+                    continue
+                cx, cy = self._cell_to_pos(col, row)
+                dist = math.sqrt((cx - x) ** 2 + (cy - y) ** 2)
                 if dist <= block_radius:
-                    col, row = self._pos_to_cell(cell_x, cell_y)
-                    if self._cell_in_bounds(col, row):
-                        for lyr in layers_to_mark:
+                    for lyr in layers_to_mark:
                             cell = self._grid[lyr][row][col]
                             cell.occupied = True
                             # A hole belongs to NO net, so it must not inherit
@@ -568,3 +575,96 @@ class RoutingGrid:
         while pos <= end:
             yield pos
             pos += self.resolution
+
+    def mark_keepout_polygon(
+        self,
+        points: list[tuple[float, float]],
+        layer: Optional[str] = None,
+    ) -> None:
+        """Mark an authored KEEPOUT region as an absolute polygon obstacle.
+
+        Epoch UX3 station 2 (K6, router item 019fc155bc32): the rasteriser the
+        keepout refusal in ``pcb_worker.route_bridge`` was waiting for. A cell
+        is blocked when its centre is INSIDE the polygon or within
+        ``keepout_margin`` of its boundary — the same clearance + half-trace
+        growth every other marker applies, so a route centreline hugging the
+        keepout still keeps its fabricated copper out of the forbidden region.
+
+        ``layer`` honours the authored scope: a top-only keepout blocks F.Cu
+        alone (``None`` blocks every layer), which is exactly the fidelity the
+        old disc approximation could not offer and refused over.
+
+        Marked cells follow the ``mark_obstacle`` hole idiom: ``occupied``,
+        ``net = None`` (a prohibition belongs to no net — a pad's prior claim
+        must not let its own net route through), ``obstacle_type = "keepout"``
+        (the GridCell type reserved for this day). An absolute veto, never a
+        downgradeable clearance ring.
+        """
+        if len(points) < 3:
+            return
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        margin = self.keepout_margin
+        layers_to_mark = [layer] if layer else self.layers
+
+        # Iterate CELL INDICES and test each cell's OWN centre (_cell_to_pos)
+        # — never a bbox-anchored sample lattice (Codex 1056 finding 2: a
+        # sample lattice anchored at min(xs)-margin is offset from the cell
+        # lattice the router consults, so at coarse resolution a sampled
+        # point could fall outside the polygon while the CELL CENTRE it maps
+        # to is inside — an unmarked, routable cell inside an authored
+        # keepout, the one direction the invariant forbids). _cell_range
+        # over-claims by up to one cell on the high edge, which is the legal
+        # direction.
+        for row in self._cell_range(min(ys) - margin, max(ys) + margin, 1):
+            for col in self._cell_range(min(xs) - margin, max(xs) + margin, 0):
+                if not self._cell_in_bounds(col, row):
+                    continue
+                cx, cy = self._cell_to_pos(col, row)
+                if not (_point_in_polygon(cx, cy, points)
+                        or _distance_to_polygon(cx, cy, points) <= margin):
+                    continue
+                for lyr in layers_to_mark:
+                    cell = self._grid[lyr][row][col]
+                    cell.occupied = True
+                    cell.net = None
+                    cell.obstacle_type = "keepout"
+
+
+def _point_in_polygon(x: float, y: float, points: list[tuple[float, float]]) -> bool:
+    """Ray-cast containment test (even-odd rule) against a closed polygon.
+
+    Boundary-touching points are not guaranteed either way here — the caller
+    pairs this with a boundary-distance test whose margin is strictly positive,
+    so every boundary cell is blocked regardless (fail-safe direction:
+    over-block, never under-block)."""
+    inside = False
+    j = len(points) - 1
+    for i in range(len(points)):
+        xi, yi = points[i]
+        xj, yj = points[j]
+        if (yi > y) != (yj > y):
+            x_cross = (xj - xi) * (y - yi) / (yj - yi) + xi
+            if x < x_cross:
+                inside = not inside
+        j = i
+    return inside
+
+
+def _distance_to_polygon(x: float, y: float, points: list[tuple[float, float]]) -> float:
+    """Minimum distance from (x, y) to the polygon's boundary segments."""
+    best = math.inf
+    j = len(points) - 1
+    for i in range(len(points)):
+        ax, ay = points[j]
+        bx, by = points[i]
+        seg_dx, seg_dy = bx - ax, by - ay
+        seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+        if seg_len_sq <= 0.0:
+            d = math.hypot(x - ax, y - ay)
+        else:
+            t = max(0.0, min(1.0, ((x - ax) * seg_dx + (y - ay) * seg_dy) / seg_len_sq))
+            d = math.hypot(x - (ax + t * seg_dx), y - (ay + t * seg_dy))
+        best = min(best, d)
+        j = i
+    return best

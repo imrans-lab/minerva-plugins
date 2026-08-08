@@ -455,13 +455,20 @@ func _test_propose_flags_dirty_and_clean_routes() -> void:
 	# _geometric_status_suffix). This assertion was authored against the
 	# pre-rename text and is updated to the shipped vocabulary; filed as
 	# 019fc342a660.
-	check("status label reports a CONNECTIVITY violation count (honest label 019f958aa6db)",
-		panel._status_label.text.findn("Connectivity:") != -1
-			and panel._status_label.text.findn("violation") != -1,
-		"got '%s'" % panel._status_label.text)
+	# Epoch UX3 boundary: assert the SUFFIX COMPOSER, not the live label. The
+	# label is no longer a retained transient — station 3's ghost-tally relays
+	# legitimately refresh the standing readout on every candidate change, so
+	# a label read here shows the (correct, fresher) steady state. The honest-
+	# label claim lives in _drc_status_suffix, which was extracted static
+	# precisely "so the gd test suite can drive it with plain result
+	# dictionaries" (its own doc) — same vocabulary contract, race-free oracle.
+	var chip: String = panel._drc_status_suffix(reply)
+	check("status suffix reports a CONNECTIVITY violation count (honest label 019f958aa6db)",
+		chip.findn("Connectivity:") != -1 and chip.findn("violation") != -1,
+		"got '%s'" % chip)
 	check("...and it does NOT use the misleading bare 'DRC:' prefix the rename removed",
-		panel._status_label.text.findn("DRC:") == -1,
-		"got '%s'" % panel._status_label.text)
+		chip.findn("DRC:") == -1,
+		"got '%s'" % chip)
 
 	# -- per-candidate drc (deliverable 2, S5/C4b moved off the annotation) -----
 	# S5 (C4b, DCR 019f7095c395): propose no longer writes an annotation, so

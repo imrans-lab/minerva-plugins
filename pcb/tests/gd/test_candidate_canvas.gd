@@ -65,6 +65,10 @@ const PCBComponent := preload("res://../../minerva-plugins/pcb/ui/model/pcb_comp
 const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbRoutingCutover := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_cutover.gd")
+## Section 15's cross-seam oracle (cold review F1): the corridor the canvas
+## emits is validated against the reroute TOOL's own parser, not a re-typed
+## expectation.
+const PanelToolsScript := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
 
 const CANVAS_SOURCE := "res://../../minerva-plugins/pcb/ui/pcb_canvas.gd"
 
@@ -93,6 +97,11 @@ func _init() -> void:
 	_run_inv4_no_waypoints()
 	_run_stroke_run_merge()
 	_run_workspace_repaint_edge()
+	_run_frozen_channel_and_menu()
+	_run_drc_witnesses()
+	_run_steered_retry()
+	_run_junction_drag()
+	_run_candidate_via_insert_path()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1132,5 +1141,459 @@ func _run_workspace_repaint_edge() -> void:
 	ws.validation_changed.emit(cid)
 	check_eq("after unbinding, a workspace emission no longer reaches view_changed",
 		_rec_view_changed, 0)
+
+	canvas.free()
+
+
+# ── 13. FROZEN (Epoch UX3 station 1): channel-1's second voice + menu slot ────
+# Frozen renders (it is live), carries the OUTLINE channel with the `frozen`
+# flag that flips the casing to ice blue, keeps the stroke colour untouched
+# (the hard no-recolour rule), stays pickable/selected through the verb, and
+# the context menu offers the one-slot Freeze/Unfreeze pair with freeze's
+# teeth visible as greyed items rather than hidden ones.
+
+func _run_frozen_channel_and_menu() -> void:
+	print("-- 13. frozen: ice casing channel, still rendered, menu slot + teeth --")
+	var acc := _armed_canvas()
+	var canvas = acc[0]
+	var ws = acc[1]
+	var cid: String = str(acc[3])
+
+	var before: Dictionary = _item_by_id(canvas.candidate_draw_items(), "seg_1")
+
+	check("freeze() lands from proposed", ws.freeze(cid))
+	var items: Array = canvas.candidate_draw_items()
+	check_eq("frozen STILL renders — settled is live, not terminal", items.size(), 4)
+	var top: Dictionary = _item_by_id(items, "seg_1")
+	check("frozen sets the OUTLINE flag (channel 1)", bool(top["outlined"]))
+	check("frozen sets the frozen flag on every item of the candidate",
+		bool(top["frozen"]) and bool(_item_by_id(items, "via_1")["frozen"]))
+	check("THE RULE: freezing did NOT change the stroke colour by one bit",
+		(top["color"] as Color).is_equal_approx(before["color"] as Color))
+	check("the two casing colours DIFFER — ice is distinguishable from warm",
+		not canvas.candidate_frozen_outline_color.is_equal_approx(
+			canvas.candidate_pinned_outline_color))
+	check("a non-frozen (proposed) item does not carry the frozen flag",
+		not bool(before.get("frozen", true)))
+	check("frozen is in the rendered-dispositions gate",
+		"frozen" in canvas.CANDIDATE_RENDERED_DISPOSITIONS)
+
+	# Pick parity: a frozen ghost is still selectable (the deictic "what's
+	# this" flow the owner uses must keep working on settled geometry).
+	check_eq("a frozen ghost still picks", canvas._candidate_at(Vector2(5.0, 0.0)), cid)
+
+	# ── the MENU SLOT + the teeth, shown not hidden ──────────────────────────
+	canvas.data = _data_with_part_under_the_ghost()
+	canvas._create_context_menu()
+	canvas._context_menu_target = canvas._entity_at(Vector2(5.0, 0.0))
+	canvas._update_context_menu_for_selection()
+	var by_label: Dictionary = {}
+	for i in range(canvas.context_menu.item_count):
+		by_label[canvas.context_menu.get_item_text(i)] = canvas.context_menu.is_item_disabled(i)
+	check("frozen candidate offers Unfreeze", by_label.has("Unfreeze"))
+	check("...ENABLED (frozen -> proposed is the legal demotion)",
+		by_label.has("Unfreeze") and not bool(by_label["Unfreeze"]))
+	check("no Freeze item beside it — one slot, like Pin/Unpin", not by_label.has("Freeze"))
+	check("Pin is offered but GREYED (no demotion-to-hold row)",
+		by_label.has("Pin") and bool(by_label["Pin"]))
+	check("Reject is offered but GREYED — the teeth are visible",
+		by_label.has("Reject") and bool(by_label["Reject"]))
+	check("Try again is offered but GREYED",
+		by_label.has("Try again") and bool(by_label["Try again"]))
+	check("Commit stays ENABLED — Accept is the happy path",
+		by_label.has("Commit") and not bool(by_label["Commit"]))
+
+	# ── the verb runner: freeze keeps the ghost drawn AND selected ───────────
+	canvas._run_candidate_verb("unfreeze", cid)
+	check_eq("unfreeze demoted", str(ws.get_candidate(cid).disposition), "proposed")
+	# Typed-array gotcha (Codex 1056 finding 3b): selected_candidate_ids
+	# is Array[String]; assigning an untyped [cid] through the Variant-
+	# typed canvas ABORTS at runtime (a class --check-only cannot catch).
+	# clear()+append() is assignment-free and type-safe.
+	canvas.selected_candidate_ids.clear()
+	canvas.selected_candidate_ids.append(cid)
+	canvas._run_candidate_verb("freeze", cid)
+	check_eq("the runner's freeze applied", str(ws.get_candidate(cid).disposition), "frozen")
+	check("the frozen ghost stayed SELECTED (it is still in the drawn set)",
+		cid in canvas.selected_candidate_ids)
+	# A proposed-candidate menu offers Freeze in the slot.
+	canvas._run_candidate_verb("unfreeze", cid)
+	canvas._update_context_menu_for_selection()
+	var labels2: Dictionary = {}
+	for i in range(canvas.context_menu.item_count):
+		labels2[canvas.context_menu.get_item_text(i)] = canvas.context_menu.is_item_disabled(i)
+	check("proposed candidate offers Freeze, enabled",
+		labels2.has("Freeze") and not bool(labels2["Freeze"]))
+	check("...and no Unfreeze beside it", not labels2.has("Unfreeze"))
+
+	canvas.free()
+
+
+# ── 14. DRC WITNESSES (Epoch UX3 station 4, K11) ──────────────────────────────
+# Findings render WHERE the problem is: the derivation (witness_draw_items),
+# the ring's zoom curve (boost out / fade in, never zero), the pick, the
+# click-to-focus seam (selected_finding_id + owning-candidate selection), and
+# the malformed-geometry skip. Findings are seeded through the REAL guarded
+# path (begin_check → apply_check_result with matching tokens), not poked
+# into private state.
+
+func _run_drc_witnesses() -> void:
+	print("-- 14. DRC witnesses: derivation, zoom curve, pick, click focus --")
+	var acc := _armed_canvas()
+	var canvas = acc[0]
+	var ws = acc[1]
+	var cid: String = str(acc[3])
+
+	# Seed ONE stored finding via the guarded reply path. board_token defaults
+	# "" on both sides; workspace_generation is echoed live.
+	ws.begin_check()
+	var finding := {
+		"type": "gc2_copper_clearance",
+		"measured_mm": 0.1, "required_mm": 0.2,
+		"layer": "F.Cu", "net_name": "N7",
+		"closest": [2.0, 0.0], "witness": [2.0, 1.5],
+		"subjects": [{"candidate_id": cid}],
+	}
+	ws.apply_check_result({
+		"board_token": ws.board_token,
+		"workspace_generation": ws.workspace_generation(),
+		"per_candidate": {cid: "violating"},
+		"findings": [finding],
+	})
+	check_eq("the guarded reply landed the verdict",
+		str(ws.get_candidate(cid).validation), "violating")
+	check_eq("...and stored the finding", ws.findings_for_candidate(cid).size(), 1)
+
+	# ── derivation ───────────────────────────────────────────────────────────
+	var items: Array = canvas.witness_draw_items()
+	check_eq("one witness item per stored finding", items.size(), 1)
+	if items.size() == 1:
+		var it: Dictionary = items[0]
+		check_eq("finding_id is candidate#index", str(it["finding_id"]), "%s#0" % cid)
+		check("closest/witness carried as board-mm Vector2s",
+			(it["closest"] as Vector2) == Vector2(2.0, 0.0)
+			and (it["witness"] as Vector2) == Vector2(2.0, 1.5))
+		check("absent midpoint falls back to the pair's average",
+			(it["midpoint"] as Vector2).is_equal_approx(Vector2(2.0, 0.75)))
+		check("measured/required ride along",
+			is_equal_approx(float(it["measured_mm"]), 0.1)
+			and is_equal_approx(float(it["required_mm"]), 0.2))
+		check("nothing is selected yet", not bool(it["selected"]))
+
+	# ── zoom curve: boost zoomed out, fade at inspection zoom, never zero ────
+	var far: Vector2 = canvas._witness_ring_geometry(1.0)
+	var mid_zoom: Vector2 = canvas._witness_ring_geometry(6.0)
+	var deep: Vector2 = canvas._witness_ring_geometry(20.0)
+	check("zoomed OUT the ring is boosted above base", far.x > mid_zoom.x)
+	check("working band renders at full alpha", is_equal_approx(mid_zoom.y, 1.0))
+	check("inspection zoom fades toward the floor",
+		deep.y < mid_zoom.y and is_equal_approx(deep.y, canvas.WITNESS_RING_MIN_ALPHA))
+	check("…but NEVER to zero — an unfindable finding is the K11 defect", deep.y > 0.0)
+
+	# ── pick + click focus ───────────────────────────────────────────────────
+	var picked: Dictionary = canvas._witness_at(Vector2(2.0, 0.75))
+	check("the midpoint picks the witness", not picked.is_empty())
+	var on_bar: Dictionary = canvas._witness_at(Vector2(2.0, 1.2))
+	check("a point along the gap bar picks it too", not on_bar.is_empty())
+	var missed: Dictionary = canvas._witness_at(Vector2(8.0, 8.0))
+	check("empty board picks nothing", missed.is_empty())
+
+	var sel_spy := {"count": 0}
+	canvas.selection_changed.connect(func() -> void: sel_spy.count += 1)
+	check("the click seam takes the witness press", canvas._handle_witness_click(Vector2(2.0, 0.75)))
+	check_eq("…focusing the finding", str(ws.selected_finding_id), "%s#0" % cid)
+	check("…and selecting the owning candidate", cid in canvas.selected_candidate_ids)
+	# Cold review F2: the FINAL selection is announced — the clear's own emit
+	# alone would leave panel chrome reflecting "nothing selected".
+	check("…and the final selection state was announced (>=2 emits: clear + final)",
+		sel_spy.count >= 2)
+	var items2: Array = canvas.witness_draw_items()
+	check("the focused witness now draws selected",
+		items2.size() == 1 and bool((items2[0] as Dictionary)["selected"]))
+
+	# Cold review F7: shift-toggling the owning candidate OUT releases the
+	# finding focus — no orphaned halo, no get_selection ghost report.
+	canvas._toggle_entity_selected(canvas.KIND_CANDIDATE, cid)
+	check_eq("deselecting the owning candidate clears the finding focus",
+		str(ws.selected_finding_id), "")
+
+	# Cold review F3: a witness on a filtered-out layer neither draws nor picks.
+	canvas.trace_layer_filter = "bottom"
+	check_eq("layer filter hides the top-layer witness", canvas.witness_draw_items().size(), 0)
+	check("…and it no longer picks", canvas._witness_at(Vector2(2.0, 0.75)).is_empty())
+	canvas.trace_layer_filter = "all"
+
+	# Cold review F5: the witness never steals a press that resolves to a
+	# BOARD entity — a component under the bar keeps its click.
+	canvas.data = _data_with_part_under_the_ghost()
+	var over_part: Array = canvas._entity_at(Vector2(2.0, 0.75))
+	if str(over_part[0]) == canvas.KIND_COMPONENT:
+		check("a press the ladder resolves to a component falls through",
+			not canvas._handle_witness_click(Vector2(2.0, 0.75)))
+	canvas.data = null
+
+	# Clearing the selection releases the focus (no orphaned halo).
+	canvas._clear_selection_all()
+	check_eq("cleared selection clears the finding focus", str(ws.selected_finding_id), "")
+
+	# Flags gate the click exactly as they gate the draw.
+	canvas.show_drc_witnesses = false
+	check("witness toggle off ⇒ the click falls through to the ladder",
+		not canvas._handle_witness_click(Vector2(2.0, 0.75)))
+	canvas.show_drc_witnesses = true
+	canvas.show_route_candidates = false
+	check("ghosts hidden ⇒ witness clicks fall through too",
+		not canvas._handle_witness_click(Vector2(2.0, 0.75)))
+	canvas.show_route_candidates = true
+
+	# ── malformed geometry is skipped, not invented ──────────────────────────
+	ws.begin_check()
+	ws.apply_check_result({
+		"board_token": ws.board_token,
+		"workspace_generation": ws.workspace_generation(),
+		"per_candidate": {cid: "violating"},
+		"findings": [
+			{"type": "gc9_no_geometry", "subjects": [{"candidate_id": cid}]},
+			finding,
+		],
+	})
+	check_eq("two findings stored", ws.findings_for_candidate(cid).size(), 2)
+	var items3: Array = canvas.witness_draw_items()
+	check_eq("only the well-formed one draws (no invented geometry)", items3.size(), 1)
+	if items3.size() == 1:
+		check_eq("…and its finding_id keeps the STORED index (cand#1), so the",
+			str((items3[0] as Dictionary)["finding_id"]), "%s#1" % cid)
+		# get_selection focus resolves by stored index — the draw-list position
+		# and the stored position must not be conflated.
+
+	canvas.free()
+
+
+# ── 15. STEERED RETRY (Epoch UX3 station 5): one doorway, three intents ──────
+# Try again no longer half-acts (supersede + a pointer at the Propose button):
+# every retry emits candidate_retry_requested and the PANEL runs the reroute,
+# which retires the prior only when a successor actually lands. The corridor
+# gesture and the clear-steering item ride the same signal with options.
+
+var _rec_retries: Array = []
+
+func _on_retry_requested(cid: String, options: Dictionary) -> void:
+	_rec_retries.append({"cid": cid, "options": options})
+
+
+func _run_steered_retry() -> void:
+	print("-- 15. steered retry: try-again signal, corridor gesture, clear steering --")
+	_rec_retries.clear()
+	var acc := _armed_canvas()
+	var canvas = acc[0]
+	var ws = acc[1]
+	var cid: String = str(acc[3])
+	canvas.candidate_retry_requested.connect(_on_retry_requested)
+
+	# ── (a) Try again: emits, does NOT supersede — the prior survives until
+	# the panel's reroute lands a successor.
+	canvas._run_candidate_verb("try_again", cid)
+	check_eq("try_again emitted exactly one retry request", _rec_retries.size(), 1)
+	if _rec_retries.size() == 1:
+		check_eq("…for the candidate", str((_rec_retries[0] as Dictionary)["cid"]), cid)
+		check("…with EMPTY options (plain retry)",
+			((_rec_retries[0] as Dictionary)["options"] as Dictionary).is_empty())
+	check_eq("the prior candidate was NOT superseded by the canvas",
+		str(ws.get_candidate(cid).disposition), "proposed")
+
+	# ── (b) corridor gesture: waypoints → double-click commit → signal ───────
+	# A real double-click arrives as TWO presses: the first (double_click
+	# false) places the final waypoint, the second (double_click true) commits
+	# and places NOTHING — the zone tools' own idiom (cold review F3; the
+	# first cut appended on the second press and epsilon-deduped, which OS
+	# click slop defeats).
+	_rec_retries.clear()
+	canvas._begin_corridor_capture(cid)
+	check("capture armed", canvas._corridor_capture)
+	canvas._handle_corridor_click(Vector2(3.0, 1.0), false)
+	canvas._handle_corridor_click(Vector2(6.0, 2.0), false)
+	canvas._handle_corridor_click(Vector2(6.02, 2.01), true)  # slop-jittered 2nd press
+	check_eq("commit emitted one corridor retry", _rec_retries.size(), 1)
+	if _rec_retries.size() == 1:
+		var opts: Dictionary = (_rec_retries[0] as Dictionary)["options"]
+		var corridor: Array = opts.get("corridor", [])
+		check_eq("corridor carries the two placed waypoints (jittered 2nd press placed none)",
+			corridor.size(), 2)
+		if corridor.size() == 2:
+			# THE CROSS-SEAM ORACLE (cold review F1): the emitted wire is the
+			# {x_mm, y_mm} shape the reroute tool's OWN parser accepts — fed
+			# straight into PanelTools._parse_route_intent_corridor, so the
+			# canvas and the tool can never again bless opposite shapes.
+			check("…as {x_mm, y_mm} dicts",
+				(corridor[0] is Dictionary)
+				and is_equal_approx(float((corridor[0] as Dictionary).get("x_mm", 0.0)), 3.0)
+				and is_equal_approx(float((corridor[1] as Dictionary).get("y_mm", 0.0)), 2.0))
+			var parsed: Variant = PanelToolsScript._parse_route_intent_corridor(corridor)
+			check("…and the reroute tool's corridor parser ACCEPTS the emission",
+				parsed != null)
+	check("capture disarmed after commit", not canvas._corridor_capture)
+
+	# Esc cancels without emitting.
+	_rec_retries.clear()
+	canvas._begin_corridor_capture(cid)
+	canvas._handle_corridor_click(Vector2(1.0, 1.0), false)
+	canvas._cancel_corridor_capture(true)
+	check("cancel emitted nothing", _rec_retries.is_empty())
+	check("cancel disarmed the capture", not canvas._corridor_capture)
+
+	# A double-click with NO points is a cancel, not a zero-point reroute.
+	_rec_retries.clear()
+	canvas._begin_corridor_capture(cid)
+	canvas._commit_corridor_capture()
+	check("empty commit emitted nothing", _rec_retries.is_empty())
+
+	# Arming on a vanished candidate refuses silently (no dangling capture).
+	canvas._begin_corridor_capture("cand_gone")
+	check("no capture for an unknown candidate", not canvas._corridor_capture)
+
+	# ── (c) clear steering: signal with the clear_constraint option ──────────
+	_rec_retries.clear()
+	canvas._request_clear_steering(cid)
+	check_eq("clear steering emitted one request", _rec_retries.size(), 1)
+	if _rec_retries.size() == 1:
+		check("…with clear_constraint true",
+			bool(((_rec_retries[0] as Dictionary)["options"] as Dictionary).get("clear_constraint", false)))
+
+	# ── menu gating: Clear steering greys without a constraint, lives with one
+	canvas.data = _data_with_part_under_the_ghost()
+	canvas._create_context_menu()
+	canvas._context_menu_target = canvas._entity_at(Vector2(5.0, 0.0))
+	canvas._update_context_menu_for_selection()
+	var by_label: Dictionary = {}
+	for i in range(canvas.context_menu.item_count):
+		by_label[canvas.context_menu.get_item_text(i)] = canvas.context_menu.is_item_disabled(i)
+	check("Retry with corridor… is offered and ENABLED on a proposed candidate",
+		by_label.has("Retry with corridor…") and not bool(by_label["Retry with corridor…"]))
+	check("Clear steering is offered but GREYED (no constraint on the task)",
+		by_label.has("Clear steering") and bool(by_label["Clear steering"]))
+	var task = ws.get_task(str(ws.get_candidate(cid).task_id))
+	task.routing_constraint = {"corridor_points": [Vector2(1, 1)], "revision": 1}
+	canvas._update_context_menu_for_selection()
+	var by_label2: Dictionary = {}
+	for i in range(canvas.context_menu.item_count):
+		by_label2[canvas.context_menu.get_item_text(i)] = canvas.context_menu.is_item_disabled(i)
+	check("Clear steering ENABLES once the task is constrained",
+		by_label2.has("Clear steering") and not bool(by_label2["Clear steering"]))
+
+	# ── F2 regression: a retirement that happens OUTSIDE the menu path (the
+	# panel retry's supersession, an MCP reject) prunes the selection through
+	# the workspace signal — no lit id for an unpainted ghost.
+	# Typed-array gotcha (Codex 1056 finding 3b): selected_candidate_ids
+	# is Array[String]; assigning an untyped [cid] through the Variant-
+	# typed canvas ABORTS at runtime (a class --check-only cannot catch).
+	# clear()+append() is assignment-free and type-safe.
+	canvas.selected_candidate_ids.clear()
+	canvas.selected_candidate_ids.append(cid)
+	ws.set_active(cid)
+	check("supersede lands (simulating the retry's panel-side retirement)", ws.supersede(cid))
+	check("the retired ghost left the canvas selection",
+		not (cid in canvas.selected_candidate_ids))
+	check_eq("…and the workspace active focus was released",
+		str(ws.active_candidate_id), "")
+
+	canvas.candidate_retry_requested.disconnect(_on_retry_requested)
+	canvas.free()
+
+
+# ── 16. CANDIDATE GEOMETRY EDIT for humans (Epoch UX3 station 6) ─────────────
+# The junction drag rides RoutingWorkspace.move_junction — the SAME revision-
+# guarded verb minerva_pcb_workspace_edit_candidate calls — so the revision
+# bump, stale marking and every named refusal come for free. Fixture geometry
+# (pinned at the tolerance oracle above): segments A (0,0)->(10,0) top and
+# B (10,0)->(10,5) bottom share the junction (10,0), where via_1 also sits.
+
+func _run_junction_drag() -> void:
+	print("-- 16. junction drag: guarded arm, commit through move_junction, locks --")
+	var acc := _armed_canvas()
+	var canvas = acc[0]
+	var ws = acc[1]
+	var cid: String = str(acc[3])
+	# Typed-array gotcha (Codex 1056 finding 3b): selected_candidate_ids
+	# is Array[String]; assigning an untyped [cid] through the Variant-
+	# typed canvas ABORTS at runtime (a class --check-only cannot catch).
+	# clear()+append() is assignment-free and type-safe.
+	canvas.selected_candidate_ids.clear()
+	canvas.selected_candidate_ids.append(cid)
+
+	# ── arming: ON a junction arms; elsewhere on the ghost does not ─────────
+	check("a press ON the shared junction arms the drag",
+		canvas._begin_candidate_junction_drag(cid, Vector2(10.0, 0.05)))
+	check("…capturing the junction's ORIGINAL position (verb identity)",
+		(canvas._junction_drag_point as Vector2).is_equal_approx(Vector2(10.0, 0.0)))
+	canvas._cancel_candidate_junction_drag()
+	check("mid-segment (no junction within 0.9mm at zoom 10) does NOT arm",
+		not canvas._begin_candidate_junction_drag(cid, Vector2(5.0, 0.0)))
+
+	# ── cancel: nothing moved ────────────────────────────────────────────────
+	check("re-arm", canvas._begin_candidate_junction_drag(cid, Vector2(10.0, 0.0)))
+	canvas._cancel_candidate_junction_drag()
+	check("cancel left the drag disarmed", not canvas._junction_drag_active)
+	var rev_before: int = int(ws.get_candidate(cid).candidate_revision)
+
+	# ── commit: release moves EVERY coincident endpoint + the via ────────────
+	check("arm for the real move", canvas._begin_candidate_junction_drag(cid, Vector2(10.0, 0.0)))
+	canvas._end_candidate_junction_drag(Vector2(12.0, 1.0))
+	var c = ws.get_candidate(cid)
+	check_eq("the revision bumped (same guarded path as the MCP verb)",
+		int(c.candidate_revision), rev_before + 1)
+	check_eq("…and the verdict went stale automatically", str(c.validation), "stale")
+	var seg_a_pts: Array = (c.segments[0] as Dictionary).get("points", [])
+	var seg_b_pts: Array = (c.segments[1] as Dictionary).get("points", [])
+	check("segment A's endpoint followed",
+		(seg_a_pts[1] as Vector2).is_equal_approx(Vector2(12.0, 1.0)))
+	check("segment B's endpoint followed atomically",
+		(seg_b_pts[0] as Vector2).is_equal_approx(Vector2(12.0, 1.0)))
+	var via_pos: Vector2 = (c.vias[0] as Dictionary).get("position", Vector2.ZERO)
+	check("the via at the junction followed too", via_pos.is_equal_approx(Vector2(12.0, 1.0)))
+
+	# ── a release that lands where it started is a no-op, not a verb call ────
+	check("arm again", canvas._begin_candidate_junction_drag(cid, Vector2(12.0, 1.0)))
+	canvas._end_candidate_junction_drag(Vector2(12.0, 1.0))
+	check_eq("unmoved release did not bump the revision",
+		int(ws.get_candidate(cid).candidate_revision), rev_before + 1)
+
+	# ── locks: frozen and terminal ghosts never arm ──────────────────────────
+	check("freeze the candidate", ws.freeze(cid))
+	check("a frozen ghost does not arm the drag",
+		not canvas._begin_candidate_junction_drag(cid, Vector2(12.0, 1.0)))
+	check("unfreeze", ws.unfreeze(cid))
+	check("mark committed", ws.mark_committed(cid, ["t1"], []))
+	check("a committed ghost does not arm either",
+		not canvas._begin_candidate_junction_drag(cid, Vector2(12.0, 1.0)))
+
+	canvas.free()
+
+
+# ── 17. Add Via tool targets the SELECTED ghost (station 6b, kind-level) ─────
+# The ViaInsertTool's candidate half is a host/panel seam the free-floating
+# canvas fixture cannot mount; what IS assertable here is the workspace verb
+# it delegates to, driven with the exact arguments the tool computes (segment
+# layer under the click → opposite layer), plus the refusal surface.
+
+func _run_candidate_via_insert_path() -> void:
+	print("-- 17. via insert into a ghost: the delegated verb + its refusals --")
+	var acc := _armed_canvas()
+	var canvas = acc[0]
+	var ws = acc[1]
+	var cid: String = str(acc[3])
+
+	var rev_before: int = int(ws.get_candidate(cid).candidate_revision)
+	# Mid-segment on A (top layer): the tool computes from=top, to=bottom.
+	var res: Dictionary = ws.add_via(cid, Vector2(4.0, 0.0), "top", "bottom")
+	check("via insert lands mid-segment", bool(res.get("ok", false)))
+	check_eq("the revision bumped", int(ws.get_candidate(cid).candidate_revision), rev_before + 1)
+	check("a via now exists at the click point",
+		((ws.get_candidate(cid).vias[-1] as Dictionary).get("position", Vector2.ZERO) as Vector2)
+			.is_equal_approx(Vector2(4.0, 0.0)))
+
+	# The refusal surface the tool narrates: empty board point.
+	var miss: Dictionary = ws.add_via(cid, Vector2(4.0, 6.0), "top", "bottom")
+	check("a click on empty board refuses by name", not bool(miss.get("ok", true)))
+	check_eq("…no_segment_at_point", str(miss.get("error", "")), "no_segment_at_point")
 
 	canvas.free()

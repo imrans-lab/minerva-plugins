@@ -171,6 +171,11 @@ func _init() -> void:
 	await _run_ux1_station11_next_step_guidance()
 	await _run_station12_legacy_seeding()
 	await _run_board_health_and_commit_gate()
+	await _run_ux3_freeze_tools()
+	await _run_ux3_witness_selection_read()
+	await _run_ux3_commit_dialog()
+	await _run_ux3_reclaim_menu()
+	await _run_ux3_reverse_parity()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -1112,20 +1117,28 @@ func _run_eraser_adjudication() -> void:
 	# ── THE VERB MENU: the human's doorway onto the same workspace verbs ───────
 	# INDEX MAP (hand-derived, and the reason it is spelled out): 0 = the
 	# disabled identity line, 1 = the SEPARATOR _context_menu_separate() inserts,
-	# 2..5 = the four verbs. A separator IS an item in a PopupMenu's item_count,
+	# 2..8 = the verbs. A separator IS an item in a PopupMenu's item_count,
 	# so an index map that forgot it would read Commit's state off the separator.
+	# GREW TWICE in Epoch UX3: station 1 added the Freeze/Unfreeze slot (index
+	# 4), station 5 added Retry with corridor… (7) and Clear steering (8).
 	var state: Array = _menu_state(canvas, cid)
 	var labels: Array = state[0]
 	var disabled: Array = state[1]
-	check_eq("the seam offers identity + separator + four verbs", labels.size(), 6)
+	check_eq("the seam offers identity + separator + seven verbs", labels.size(), 9)
 	check("the identity line is disabled (it is a label, not an action)", bool(disabled[0]))
 	check_eq("index 1 is the separator (empty text)", str(labels[1]), "")
 	check_eq("verb 1 is Commit", str(labels[2]), "Commit")
 	check_eq("verb 2 is Pin (the slot shows the move that is available)", str(labels[3]), "Pin")
-	check_eq("verb 3 is Reject", str(labels[4]), "Reject")
-	check_eq("verb 4 is Try again", str(labels[5]), "Try again")
-	check("every verb is ENABLED for a proposed candidate",
-		not bool(disabled[2]) and not bool(disabled[3]) and not bool(disabled[4]) and not bool(disabled[5]))
+	check_eq("verb 3 is Freeze (station 1's slot)", str(labels[4]), "Freeze")
+	check_eq("verb 4 is Reject", str(labels[5]), "Reject")
+	check_eq("verb 5 is Try again", str(labels[6]), "Try again")
+	check_eq("verb 6 is Retry with corridor…", str(labels[7]), "Retry with corridor…")
+	check_eq("verb 7 is Clear steering", str(labels[8]), "Clear steering")
+	check("every state-gated verb is ENABLED for a proposed candidate",
+		not bool(disabled[2]) and not bool(disabled[3]) and not bool(disabled[4])
+		and not bool(disabled[5]) and not bool(disabled[6]) and not bool(disabled[7]))
+	check("Clear steering is GREYED — this task carries no routing constraint",
+		bool(disabled[8]))
 
 	# PIN through the menu handler — the same path a real click takes, including
 	# the frozen press target.
@@ -1137,17 +1150,28 @@ func _run_eraser_adjudication() -> void:
 	check_eq("it reported the outcome on the status line", _messages.size(), 1)
 	check("the outcome names the act", str(_messages[0]).contains("Pinned"))
 	check_eq("the pinned slot now offers Unpin", str((_menu_state(canvas, cid)[0] as Array)[3]), "Unpin")
+	check_eq("…and the freeze slot still offers Freeze (pinned → frozen is legal)",
+		str((_menu_state(canvas, cid)[0] as Array)[4]), "Freeze")
 
-	# COMMIT through the menu handler — the one verb that touches copper, and it
-	# goes through the workspace's transaction, not through any board path here.
+	# COMMIT through the menu handler — station 7 rewired the mouse commit
+	# through the PANEL's GATED tool (candidate_commit_requested →
+	# _on_candidate_commit_requested → minerva_pcb_workspace_commit): the old
+	# direct workspace.commit bypassed the placement gate. The chain is
+	# SYNCHRONOUS end-to-end for this arm (no await suspends on the commit
+	# path), so the copper is on the board when the press returns. The canvas
+	# narrates INTENT on its message channel; the OUTCOME lands on the panel
+	# status bar (the gated tool's reply, narrated by _narrate_commit_success).
 	_messages.clear()
 	canvas._on_context_menu_pressed(canvas.MENU_ID_CANDIDATE_COMMIT)
 	check_eq("the menu's Commit wrote one trace per segment",
 		int(ctx["data"].traces.size()), traces_before + 3)
 	check_eq("it wrote the via", int(ctx["data"].vias.size()), 1)
 	check_eq("the candidate is committed", str(ws.get_candidate(cid).disposition), "committed")
-	check_eq("it reported the outcome", _messages.size(), 1)
-	check("the outcome names the act", str(_messages[0]).contains("Committed"))
+	check_eq("intent was narrated on the canvas channel", _messages.size(), 1)
+	check("…naming the act in progress", str(_messages[0]).contains("Committing"))
+	var commit_status: Variant = ctx["panel"].find_child("StatusBar", true, false)
+	check("the OUTCOME landed on the status bar, from the gated tool's reply",
+		commit_status != null and str(commit_status.text).contains("Committed"))
 
 	# A COMMITTED candidate is terminal for every workflow verb, and the menu says
 	# so BEFORE the click rather than refusing after it.
@@ -1162,8 +1186,11 @@ func _run_eraser_adjudication() -> void:
 	check("Commit is disabled on a committed candidate (the identity-move trap)",
 		bool(after_disabled[2]))
 	check("Pin is disabled on a committed candidate", bool(after_disabled[3]))
-	check("Reject is disabled on a committed candidate", bool(after_disabled[4]))
-	check("Try again is disabled on a committed candidate", bool(after_disabled[5]))
+	check("Freeze is disabled on a committed candidate", bool(after_disabled[4]))
+	check("Reject is disabled on a committed candidate", bool(after_disabled[5]))
+	check("Try again is disabled on a committed candidate", bool(after_disabled[6]))
+	check("Retry with corridor… is disabled on a committed candidate", bool(after_disabled[7]))
+	check("Clear steering is disabled on a committed candidate", bool(after_disabled[8]))
 
 	var traces_at_commit: int = int(ctx["data"].traces.size())
 	var recommit: Dictionary = ws.commit(cid, ctx["data"])
@@ -1336,13 +1363,19 @@ func _run_removal_manifest_tools_absent() -> void:
 	# + 1 Codex-1047 verdict-4 tool (minerva_pcb_hint_convert_to_detailed,
 	# the named guided->detailed conversion) == 74,
 	# + 1 HITL-6b tool (minerva_pcb_get_selection — the deictic read behind
-	# "I've selected X, what is it?", docket 019fdf5579) == 75.
+	# "I've selected X, what is it?", docket 019fdf5579) == 75,
+	# + 2 Epoch UX3 station-1 tools (minerva_pcb_workspace_freeze/_unfreeze —
+	# K7's settlement verb pair, docket 019fdf913513) == 77,
+	# + 5 Epoch UX3 station-10 tools (point, hint_move/insert/delete_bend,
+	# clear_hints_by_author — docket 019fdf9101b5) == 82,
+	# + 1 Epoch UX3 station-11 tool (minerva_pcb_promote — K13's gated
+	# serialize-back verb, docket 019fdf91b3ac) == 83.
 	# This is a SECOND, independent count pin on the same manifest.json this
 	# round's tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (74->75) for the
+	# tests/gd/test_manifest_tool_registration.gd's own pin (82->83) for the
 	# "deliberate bump, its own diff" convention this follows.
-	check_eq("manifest tool count == 75 (ALL manifest.json tools[] entries)",
-		names.size(), 75)
+	check_eq("manifest tool count == 83 (ALL manifest.json tools[] entries)",
+		names.size(), 83)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",
@@ -6028,5 +6061,373 @@ func _run_bh_placement_verb_tri_state() -> void:
 	check("refusal reply carries no assembly key",
 		not bool(bad.get("success", true)) and not bad.has("assembly"))
 	check_eq("…and did not re-run the channel", int(shim.assembly_calls), calls_before)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 24. Epoch UX3 station 1: FREEZE tools — settlement at the MCP doorway ═════
+# The tool layer's half of K7/K8: the freeze/unfreeze dispatch pair, the
+# frozen-task hold surfaced on a propose reply with its OWN named reason, the
+# frozen candidate riding the pinned_candidates keep-out wire (K8's obstacle
+# half, asserted on the BUILT request exactly as group 11 does for pins), and
+# the named refusals freeze's teeth produce at this layer.
+
+func _run_ux3_freeze_tools() -> void:
+	print("-- 24. UX3 station 1: freeze/unfreeze tools, frozen hold, keep-out wire --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose landed a candidate", bool(first.get("success", false)))
+	var cid := str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+
+	# ── FREEZE dispatches through the shared disposition-verb seam ───────────
+	var frozen: Dictionary = PanelTools._workspace_freeze(shim, _args({"candidate_id": cid}))
+	check("freeze succeeded", bool(frozen.get("success", false)))
+	check_eq("freeze moved the disposition", str(frozen.get("disposition", "")), "frozen")
+	check("freeze reply teaches the contract (note names unfreeze)",
+		str(frozen.get("note", "")).contains("unfreeze"))
+	check("the workspace frozen index agrees", ws.is_frozen(cid))
+	check("workspace_list reports it in frozen_candidate_ids",
+		cid in (PanelTools._workspace_list(shim, _args()).get("frozen_candidate_ids", []) as Array))
+
+	# ── the frozen candidate HOLDS its task on a batch propose, with the
+	# FROZEN reason — not the pinned one ─────────────────────────────────────
+	var held: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	check("propose over a frozen task still succeeded", bool(held.get("success", false)))
+	check_eq("propose landed NOTHING for the frozen task", int(held.get("proposed", 0)), 0)
+	var holds: Array = held.get("holds", [])
+	check_eq("the frozen hold is surfaced exactly once", holds.size(), 1)
+	if holds.size() == 1:
+		check_eq("the hold carries HOLD_FROZEN",
+			str((holds[0] as Dictionary).get("reason", "")), PcbWorkspace.HOLD_FROZEN)
+		check_eq("the hold names the frozen candidate",
+			str((holds[0] as Dictionary).get("held_candidate_id", "")), cid)
+
+	# ── K8's obstacle half at the REQUEST layer: the frozen candidate rides
+	# the pinned_candidates wire (one wire, one worker contract — the same
+	# assertion shape group 11 makes for pins) ───────────────────────────────
+	var call_last: Dictionary = shim.calls[shim.calls.size() - 1]
+	var extra: Dictionary = call_last.get("extra", {})
+	check("frozen-active propose: request carries pinned_candidates", extra.has("pinned_candidates"))
+	var wire: Array = extra.get("pinned_candidates", [])
+	check_eq("the keep-out wire names exactly the frozen candidate", wire.size(), 1)
+	if wire.size() == 1:
+		check_eq("keep-out wire candidate_id matches",
+			str((wire[0] as Dictionary).get("candidate_id", "")), cid)
+		check("keep-out wire speaks the shared candidate language",
+			(wire[0] as Dictionary).has("segments") and (wire[0] as Dictionary).has("revision"))
+
+	# ── the teeth at this layer: reject refuses BY NAME while frozen ─────────
+	var refused: Dictionary = PanelTools._workspace_reject(shim, _args({"candidate_id": cid}))
+	check("reject on a frozen candidate fails", not bool(refused.get("success", true)))
+	check_eq("the refusal is NAMED illegal_disposition_transition (frozen is live, not terminal)",
+		str(refused.get("error", "")), PcbRouteCandidate.ERR_ILLEGAL_TRANSITION)
+	check_eq("the refusal names where it stood", str(refused.get("from", "")), "frozen")
+
+	# edit_candidate's move_junction doorway refuses with the model's own name.
+	var edit_refused: Dictionary = PanelTools._workspace_edit_candidate(shim, _args({
+		"candidate_id": cid, "op": "move_junction",
+		"point": [5.0, 0.0], "to": [5.0, 1.0]}))
+	check("edit_candidate on a frozen candidate fails", not bool(edit_refused.get("success", true)))
+	check_eq("...named candidate_frozen", str(edit_refused.get("error", "")), PcbWorkspace.ERR_FROZEN)
+
+	# Cold-review finding 3: the bridged Add-Via gate fires BEFORE the
+	# annotation write — a frozen bridged candidate refuses the WHOLE edit, so
+	# the two stores can never diverge under a success reply.
+	var bridged_hint: String = str(ctx["hint_id"])
+	ws.correlate(cid, bridged_hint)
+	var ann_before: Dictionary = (ctx["host"].get_by_id(bridged_hint) as Dictionary).duplicate(true)
+	var via_refused: Dictionary = PanelTools._add_via(ctx["host"], {
+		"id": bridged_hint, "x": 2.0, "y": 0.0})
+	check("bridged add_via on a frozen candidate fails", not bool(via_refused.get("success", true)))
+	check_eq("...named candidate_frozen (the same one name every edit doorway uses)",
+		str(via_refused.get("error", "")), "candidate_frozen")
+	var ann_after: Dictionary = ctx["host"].get_by_id(bridged_hint)
+	check("...and the ANNOTATION was not touched either (no store divergence)",
+		str(ann_after.get("kind_payload", {})) == str(ann_before.get("kind_payload", {})))
+
+	# ── UNFREEZE: the demotion, after which reject is legal again ────────────
+	var unfrozen: Dictionary = PanelTools._workspace_unfreeze(shim, _args({"candidate_id": cid}))
+	check("unfreeze succeeded", bool(unfrozen.get("success", false)))
+	check_eq("unfreeze returned to proposed", str(unfrozen.get("disposition", "")), "proposed")
+	check("...and left the frozen index", not ws.is_frozen(cid))
+	var rejected: Dictionary = PanelTools._workspace_reject(shim, _args({"candidate_id": cid}))
+	check("reject is legal after the two-step demotion", bool(rejected.get("success", false)))
+
+	# Unknown candidate refuses identically to the sibling verbs.
+	var missing: Dictionary = PanelTools._workspace_freeze(shim, _args({"candidate_id": "cand_nope"}))
+	check_eq("freeze on an unknown candidate is named candidate_not_found",
+		str(missing.get("error", "")), PcbWorkspace.ERR_NO_CANDIDATE)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 25. Epoch UX3 station 4: the focused FINDING is get_selection-visible ═════
+# Clicking a DRC witness records "cid#index" in workspace.selected_finding_id;
+# minerva_pcb_get_selection then answers with the STORED finding verbatim plus
+# locating ids — the read half of K11's feedback loop.
+
+func _run_ux3_witness_selection_read() -> void:
+	print("-- 25. UX3 station 4: focused finding rides get_selection --")
+	var ctx: Dictionary = await _panel_context()
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var first: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var cid := str(((first.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+
+	ws.begin_check()
+	ws.apply_check_result({
+		"board_token": ws.board_token,
+		"workspace_generation": ws.workspace_generation(),
+		"per_candidate": {cid: "violating"},
+		"findings": [{
+			"type": "gc2_copper_clearance", "measured_mm": 0.1, "required_mm": 0.2,
+			"layer": "F.Cu", "net_name": "N1",
+			"closest": [2.0, 0.0], "witness": [2.0, 1.5],
+			"subjects": [{"candidate_id": cid}],
+		}],
+	})
+	ws.selected_finding_id = "%s#0" % cid
+
+	var sel: Dictionary = PanelTools._get_selection(shim, _args())
+	check("get_selection succeeds", bool(sel.get("success", false)))
+	var finding_entries: Array = []
+	for e in sel.get("selection", []):
+		if e is Dictionary and str((e as Dictionary).get("kind", "")) == "finding":
+			finding_entries.append(e)
+	check_eq("exactly one finding entry", finding_entries.size(), 1)
+	if finding_entries.size() == 1:
+		var fe: Dictionary = finding_entries[0]
+		check_eq("it locates itself", str(fe.get("id", "")), "%s#0" % cid)
+		check_eq("…and its candidate", str(fe.get("candidate_id", "")), cid)
+		check_eq("the stored verdict rides verbatim: type",
+			str(fe.get("type", "")), "gc2_copper_clearance")
+		check("…measured vs required",
+			is_equal_approx(float(fe.get("measured_mm", 0.0)), 0.1)
+			and is_equal_approx(float(fe.get("required_mm", 0.0)), 0.2))
+		check("…witness geometry (the same keys the canvas draws)",
+			(fe.get("closest", []) as Array).size() == 2
+			and (fe.get("witness", []) as Array).size() == 2)
+
+	# A DANGLING focus (findings replaced since the click) contributes nothing.
+	ws.selected_finding_id = "%s#7" % cid
+	var sel2: Dictionary = PanelTools._get_selection(shim, _args())
+	var dangling := 0
+	for e2 in sel2.get("selection", []):
+		if e2 is Dictionary and str((e2 as Dictionary).get("kind", "")) == "finding":
+			dangling += 1
+	check_eq("a dangling finding id contributes NO entry (no guess)", dangling, 0)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 26. Epoch UX3 station 7: mouse commit rides the gate + the ack dialog ═════
+# The canvas signal → panel handler → gated tool chain, and the acknowledge
+# state machine (_pending_ack_commit → confirm/cancel). No new commit
+# semantics — the assertions mirror the tool-level gate group, reached through
+# the HUMAN doorway.
+
+func _run_ux3_commit_dialog() -> void:
+	print("-- 26. UX3 station 7: gated mouse commit, acknowledge state machine --")
+	# MOUNTED: the narration assertions read the StatusBar, which only exists
+	# once _build_ui has run (the same reason group 8 mounts).
+	var ctx: Dictionary = await _panel_context(true)
+	var shim = ctx["shim"]
+	var ws = ctx["ws"]
+	var panel = ctx["panel"]
+	var data = ctx["data"]
+
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var cid := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	var cand = ws.get_candidate(cid)
+	cand.endpoints = [{"component": "U1", "pin": "3"}, {"component": "U2", "pin": "7"}]
+	var finding := {"kind": "courtyard_overlap", "components": ["U1", "D1"],
+		"message": "U1 and D1 courtyards overlap"}
+	panel.set_assembly_state({"status": "findings", "findings": [finding]},
+		int(data.board_revision))
+
+	# ── the handler hits the gate: pending state, no copper, narrated ────────
+	var traces_before: int = int(data.traces.size())
+	await panel._on_candidate_commit_requested([cid])
+	check("the gate parked a pending acknowledgment", not panel._pending_ack_commit.is_empty())
+	check_eq("…for the requested candidate",
+		str((panel._pending_ack_commit.get("candidate_ids", []) as Array)[0]), cid)
+	var pend_blocked: Array = panel._pending_ack_commit.get("blocked", [])
+	check_eq("…carrying the blocking findings in the batch shape", pend_blocked.size(), 1)
+	check_eq("no copper was laid", int(data.traces.size()), traces_before)
+	check_eq("the candidate is still proposed", str(ws.get_candidate(cid).disposition), "proposed")
+	var status: Variant = panel.find_child("StatusBar", true, false)
+	check("the refusal is narrated (acknowledgment named)",
+		status != null and str(status.text).contains("acknowledgment"))
+
+	# ── CANCEL clears the pending state and commits nothing ──────────────────
+	panel._cancel_placement_ack()
+	check("cancel cleared the pending state", panel._pending_ack_commit.is_empty())
+	check_eq("…and still no copper", int(data.traces.size()), traces_before)
+
+	# ── CONFIRM re-runs with acknowledge_placement:true: copper lands and the
+	# consent is recorded on the reply exactly as the MCP path records it ─────
+	await panel._on_candidate_commit_requested([cid])
+	check("pending again", not panel._pending_ack_commit.is_empty())
+	await panel._confirm_placement_ack()
+	check("confirm consumed the pending state", panel._pending_ack_commit.is_empty())
+	check_eq("the acknowledged commit laid the copper",
+		int(data.traces.size()), traces_before + 3)
+	check_eq("the candidate is committed", str(ws.get_candidate(cid).disposition), "committed")
+	check("the outcome narrates the acknowledgment count",
+		status != null and str(status.text).contains("acknowledged"))
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 27. Epoch UX3 station 9: the superseded-hint mouse exit ═══════════════════
+# The press-time resolver gates on exactly one selected, SUPERSEDED route
+# hint; the menu offers "Reclaim waypoints" and the handler runs the SAME
+# convert tool (one implementation). Applied-locked hints (lifecycle lock, no
+# supersession marker) never offer the item — conversion is not their exit.
+
+func _run_ux3_reclaim_menu() -> void:
+	print("-- 27. UX3 station 9: reclaim resolver + menu item + one-tool delegation --")
+	var ctx: Dictionary = await _panel_context(true)
+	var host = ctx["host"]
+	var canvas = ctx["panel"]._canvas
+	var hint_id: String = str(ctx["hint_id"])
+
+	# Not superseded yet: the resolver refuses.
+	host.set_selected_annotation_ids(PackedStringArray([hint_id]))
+	check_eq("an ordinary hint resolves no reclaim target",
+		str(canvas._superseded_hint_selected()), "")
+
+	# Stamp the supersession marker (the shape station 12's seeding writes).
+	var ann: Dictionary = host.get_by_id(hint_id)
+	var kp: Dictionary = ann.get("kind_payload", {})
+	kp["waypoints_superseded_by_constraint_revision"] = 2
+	ann["kind_payload"] = kp
+	check("marker stamped", host.update_annotation(hint_id, ann))
+	check_eq("a superseded hint resolves as the reclaim target",
+		str(canvas._superseded_hint_selected()), hint_id)
+
+	# Multi-selection has no unambiguous target.
+	var second_env: Dictionary = host.build_route_hint_envelope(
+		1.0, 1.0, "", "F.Cu", "waypoint", [[1.0, 1.0], [2.0, 1.0]], "human")
+	var second_id: String = str(host.add_annotation_v2(second_env))
+	host.set_selected_annotation_ids(PackedStringArray([hint_id, second_id]))
+	check_eq("a multi-selection resolves nothing",
+		str(canvas._superseded_hint_selected()), "")
+	host.set_selected_annotation_ids(PackedStringArray([hint_id]))
+
+	# The menu carries the item when the press resolved a target.
+	canvas._create_context_menu()
+	canvas._context_menu_target = ["", ""]
+	canvas._context_menu_superseded_hint = canvas._superseded_hint_selected()
+	canvas._update_context_menu_for_selection()
+	var labels: Array = []
+	for i in range(canvas.context_menu.item_count):
+		labels.append(canvas.context_menu.get_item_text(i))
+	check("the menu offers Reclaim waypoints (convert to detailed)",
+		"Reclaim waypoints (convert to detailed)" in labels)
+
+	# The handler runs the ONE convert tool: marker stripped, hint editable.
+	_messages.clear()
+	canvas.trace_tool_message.connect(_on_canvas_message)
+	canvas._reclaim_superseded_hint(hint_id)
+	var after: Dictionary = host.get_by_id(hint_id)
+	check("the conversion stripped the supersession marker",
+		not (after.get("kind_payload", {}) as Dictionary).has("waypoints_superseded_by_constraint_revision"))
+	check("the outcome was narrated", _messages.size() >= 1
+		and str(_messages[-1]).contains("Reclaimed"))
+	canvas.trace_tool_message.disconnect(_on_canvas_message)
+
+	ctx["driver"].free_panel(ctx["panel"])
+
+
+# ══ 28. Epoch UX3 station 10: reverse deixis + micro hint edits + clear ═══════
+
+func _run_ux3_reverse_parity() -> void:
+	print("-- 28. UX3 station 10: point verb, bend micro-edits, clear-by-author --")
+	var ctx: Dictionary = await _panel_context(true)
+	var shim = ctx["shim"]
+	var host = ctx["host"]
+	var ws = ctx["ws"]
+	var canvas = ctx["panel"]._canvas
+	var hint_id: String = str(ctx["hint_id"])
+
+	# ── (a) POINT: the get_selection mirror, through the click's choke points ─
+	var out: Dictionary = await PanelTools._workspace_propose(shim, _args())
+	var cid := str(((out.get("candidates", []) as Array)[0] as Dictionary).get("candidate_id", ""))
+	ctx["panel"].get_routing_cutover().set_workspace_authoritative("canvas", true)
+	canvas.set_routing_workspace(ws, ctx["panel"].get_routing_cutover())
+
+	var pointed: Dictionary = PanelTools._point(shim, _args({"kind": "candidate", "id": cid}))
+	check("point at a candidate succeeds", bool(pointed.get("success", false)))
+	check("…it became the canvas selection", cid in canvas.selected_candidate_ids)
+	check_eq("…and the workspace active candidate (the click's own active-sync)",
+		str(ws.active_candidate_id), cid)
+	# The round trip: get_selection now reports what point selected.
+	var sel: Dictionary = PanelTools._get_selection(shim, _args())
+	var sel_ids: Array = []
+	for e in sel.get("selection", []):
+		if e is Dictionary and str((e as Dictionary).get("kind", "")) == "candidate":
+			sel_ids.append(str((e as Dictionary).get("id", "")))
+	check("…and get_selection mirrors it back (deixis both ways)", cid in sel_ids)
+
+	var missing: Dictionary = PanelTools._point(shim, _args({"kind": "component", "id": "U404"}))
+	check("pointing at a missing entity refuses by name",
+		not bool(missing.get("success", true))
+		and str(missing.get("error", "")) == "not_found")
+	var bad_kind: Dictionary = PanelTools._point(shim, _args({"kind": "netclass", "id": "x"}))
+	check_eq("an unknown kind refuses by name", str(bad_kind.get("error", "")), "unknown_kind")
+
+	# Point at the seeded hint annotation → host selection.
+	var ann_point: Dictionary = PanelTools._point(shim, _args({"kind": "annotation", "id": hint_id}))
+	check("point at an annotation succeeds", bool(ann_point.get("success", false)))
+	check("…it is the host's selected annotation",
+		str(host.get_selected_annotation_id()) == hint_id)
+
+	# ── (b) bend micro-edits: one verb, one bend, one revision ───────────────
+	# The seeded hint's waypoints are [[0,0],[5,0]] (legacy full-path shape →
+	# zero interior bends).
+	var ins: Dictionary = PanelTools._hint_bend_edit(host, {"hint_id": hint_id,
+		"x_mm": 2.0, "y_mm": 1.0}, "insert")
+	check("insert lands", bool(ins.get("success", false)))
+	check_eq("…bend_count 1", int(ins.get("bend_count", 0)), 1)
+	var mv: Dictionary = PanelTools._hint_bend_edit(host, {"hint_id": hint_id,
+		"index": 0, "x_mm": 2.5, "y_mm": 1.5}, "move")
+	check("move lands", bool(mv.get("success", false)))
+	check("…at the new position",
+		is_equal_approx(float(((mv.get("bends", []) as Array)[0] as Array)[0]), 2.5))
+	var oob: Dictionary = PanelTools._hint_bend_edit(host, {"hint_id": hint_id,
+		"index": 7, "x_mm": 0.0, "y_mm": 0.0}, "move")
+	check_eq("out-of-range refuses by name",
+		str(oob.get("error", "")), "bend_index_out_of_range")
+	var del: Dictionary = PanelTools._hint_bend_edit(host, {"hint_id": hint_id, "index": 0}, "delete")
+	check("delete lands", bool(del.get("success", false)))
+	check_eq("…bend_count back to 0", int(del.get("bend_count", 1)), 0)
+
+	# Superseded lock: the marker refuses every micro verb with the exits named.
+	var ann2: Dictionary = host.get_by_id(hint_id)
+	var kp2: Dictionary = ann2.get("kind_payload", {})
+	kp2["waypoints_superseded_by_constraint_revision"] = 3
+	ann2["kind_payload"] = kp2
+	host.update_annotation(hint_id, ann2)
+	var locked: Dictionary = PanelTools._hint_bend_edit(host, {"hint_id": hint_id,
+		"x_mm": 1.0, "y_mm": 1.0}, "insert")
+	check_eq("a superseded hint refuses by name",
+		str(locked.get("error", "")), "waypoints_superseded")
+	check("…naming the sanctioned exits", str(locked.get("note", "")).contains("convert_to_detailed"))
+
+	# ── (c) clear-by-author: the dock filter, over MCP ───────────────────────
+	var ai_env: Dictionary = host.build_route_hint_envelope(
+		3.0, 3.0, "", "F.Cu", "waypoint", [[3.0, 3.0], [4.0, 3.0]], "ai")
+	var ai_id: String = str(host.add_annotation_v2(ai_env))
+	check("an AI hint exists", not str(ai_id).is_empty())
+	var cleared: Dictionary = PanelTools._clear_hints_by_author(host, {"author": "ai"})
+	check("clear by author=ai succeeds", bool(cleared.get("success", false)))
+	check_eq("…removing exactly the AI hint", int(cleared.get("removed", 0)), 1)
+	check("…the human hint survives", not (host.get_by_id(hint_id) as Dictionary).is_empty())
+	var bad_author: Dictionary = PanelTools._clear_hints_by_author(host, {"author": "codex"})
+	check("an unknown author refuses", not bool(bad_author.get("success", true)))
 
 	ctx["driver"].free_panel(ctx["panel"])

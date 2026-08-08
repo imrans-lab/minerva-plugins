@@ -112,6 +112,12 @@ var _registered_editor_name: String = ""
 
 ## Absolute board file path (host_owned). Empty for anonymous editors.
 var _file_path: String = ""
+## The CANONICAL YAML source this board was loaded from — set ONLY by
+## load_board_from_yaml's path adoption, never by the editor's .pcbskel
+## document flow (which also writes _file_path). Promotion's implicit target
+## (cold review F2): the two flows sharing one variable is exactly what made
+## "Promote overwrites a .pcbskel with YAML" reachable.
+var _canonical_source_path: String = ""
 
 ## Board model (pcb_data.gd) — round-tripped by save/load, edited by the canvas.
 var _data = null
@@ -333,6 +339,8 @@ var _route_flow_mode_label: Label = null
 ## Propose action button (C5) — a non-toggle act, NOT part of
 ## _route_flow_buttons' mutual-exclusion radio set.
 var _propose_button: Button = null
+var _check_button: Button = null
+var _hint_width_spin: SpinBox = null
 ## kind_key of the cluster's own currently-active tool, or "" when none.
 var _active_route_flow_kind: String = ""
 ## The tool instance the cluster itself activated (used to tell apart "the
@@ -358,6 +366,12 @@ const _VIEW_FLAGS := [
 	["Traces", "show_traces"],
 	["Silk", "show_silk"],
 	["Courtyard", "show_courtyard"],
+	# Epoch UX3 station 3 (docket 019fdf90662a): show_route_candidates shipped
+	# as a canvas var with no control — the ghost surface gets the same View
+	# toggle every other draw flag has.
+	["Ghosts", "show_route_candidates"],
+	# Epoch UX3 station 4 (K11, docket 019fdf916ce6): the DRC-witness overlay.
+	["DRC witnesses", "show_drc_witnesses"],
 ]
 const _VIEW_MENU_EXPORT_ID := 100
 
@@ -396,6 +410,15 @@ func _init() -> void:
 	# T2 (S2.2): the shadow routing workspace, built eagerly alongside the
 	# annotation host so get_routing_workspace() is valid immediately.
 	_routing_workspace = _PcbRoutingWorkspaceScript.new()
+	# Epoch UX3 station 3: the steady-state status readout now carries the
+	# ghost tally (_ghost_status_summary), so every candidate-set or verdict
+	# move refreshes it — the same lambda-relay idiom data_changed uses below.
+	# _update_status is cheap and null-guards its own members, so wiring it
+	# eagerly here (before the status label exists) is safe.
+	_routing_workspace.candidate_added.connect(func(_id: String) -> void: _update_status())
+	_routing_workspace.candidate_changed.connect(func(_id: String) -> void: _update_status())
+	_routing_workspace.candidate_removed.connect(func(_id: String) -> void: _update_status())
+	_routing_workspace.validation_changed.connect(func(_id: String) -> void: _update_status())
 
 	# T2.3: the cutover coordinator, built eagerly beside the workspace. Every
 	# surface defaults annotation-authoritative — nothing is cut over in T2.3.
@@ -667,6 +690,12 @@ func _build_ui() -> void:
 	_canvas.pin_selected.connect(_on_pin_selected)
 	_canvas.zone_tool_message.connect(_show_transient_status)
 	_canvas.trace_tool_message.connect(_show_transient_status)
+	# Epoch UX3 station 5: the canvas's steered-retry doorway — the router leg
+	# is async and panel-owned, so the menu/gesture emits and this completes.
+	_canvas.candidate_retry_requested.connect(_on_candidate_retry_requested)
+	# Epoch UX3 station 7: the canvas's commit doorway — single AND batch ride
+	# the gated tool; this panel owns the placement-acknowledge dialog.
+	_canvas.candidate_commit_requested.connect(_on_candidate_commit_requested)
 	_canvas.cutout_tool_message.connect(_show_transient_status)
 	_canvas.bus_tool_message.connect(_show_transient_status)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
@@ -1170,6 +1199,50 @@ func _build_sidebar() -> VBoxContainer:
 	_propose_button.tooltip_text = _wrap_tooltip("Run the router over open route hints (board unchanged)")
 	_propose_button.pressed.connect(_on_propose_button_pressed)
 	hints_flow.add_child(_propose_button)
+
+	# Hint/intent authoring width (Epoch UX3 station 8b, docket 019fdf903a4a):
+	# 0 = auto (net class / router default — the absent-key behavior, byte-
+	# identical); >0 stamps kind_payload.width_mm on every HUMAN-authored hint
+	# and on the pad→pad intent, the channel the router already honors with
+	# width_source:"hint". Applied at ONE choke point per doorway: the host's
+	# build_route_hint_envelope (human envelopes) and the SingleTrace tool's
+	# intent delegation (explicit width_mm arg).
+	var width_row := HBoxContainer.new()
+	width_row.name = "HintWidthRow"
+	var width_label := Label.new()
+	width_label.text = "Width"
+	width_row.add_child(width_label)
+	_hint_width_spin = SpinBox.new()
+	_hint_width_spin.name = "HintWidthSpin"
+	_hint_width_spin.min_value = 0.0
+	_hint_width_spin.max_value = 5.0
+	_hint_width_spin.step = 0.05
+	_hint_width_spin.value = 0.0
+	_hint_width_spin.tooltip_text = _wrap_tooltip("Trace width for newly authored route hints/intents, in mm — 0 = auto (net class default)")
+	width_row.add_child(_hint_width_spin)
+	hints_flow.add_child(width_row)
+
+	# Draft-DRC over the live ghosts (Epoch UX3 station 3, docket
+	# 019fdf90662a): PCBPanel.check_draft shipped with NO UI caller — only the
+	# MCP verb reached it, so a human could propose and commit without ever
+	# seeing a verdict. Same code path as minerva_pcb_workspace_check.
+	_check_button = Button.new()
+	_check_button.name = "CheckButton"
+	_check_button.text = "Check"
+	_check_button.tooltip_text = _wrap_tooltip("Draft-DRC the live route proposals against the board and each other (board unchanged)")
+	_check_button.pressed.connect(_on_check_button_pressed)
+	hints_flow.add_child(_check_button)
+
+	# PROMOTE (Epoch UX3 station 11, K13): the serialize-back verb, DRC-gated
+	# — impossible on a dirty board, refusals listed in a dialog. The one
+	# button that makes the live board the durable design of record.
+	var promote_btn := Button.new()
+	promote_btn.name = "PromoteButton"
+	promote_btn.text = "Promote"
+	# Tooltip stays inside the BT-44 90-char budget; the dialog carries detail.
+	promote_btn.tooltip_text = _wrap_tooltip("Write the board back to canonical YAML — allowed only when the full DRC gate passes")
+	promote_btn.pressed.connect(_on_promote_button_pressed)
+	hints_flow.add_child(promote_btn)
 
 	# RouteFlowModeLabel removed (owner HITL 2026-07-30): its idle text
 	# "Select" read as a duplicate section header under the real ones, and the
@@ -2043,8 +2116,19 @@ func _on_add_via_button_pressed() -> void:
 ## idempotent by construction: it only ever reads open hints and writes fresh
 ## proposal annotations).
 func _on_propose_button_pressed() -> void:
-	_set_status("Proposing routes…")
-	var result: Dictionary = await handle_tool("minerva_pcb_apply_route_hints", {"commit": false})
+	# Epoch UX3 station 5d: the button respects a HINT SELECTION — selected
+	# open route hints scope the run (hint_ids), nothing selected keeps the
+	# all-open behavior byte-identical. The scope is narrated so a user who
+	# forgot a selection is told why only one net rerouted.
+	var scoped: Array = _selected_open_hint_ids()
+	var args: Dictionary = {"commit": false}
+	if not scoped.is_empty():
+		args["hint_ids"] = scoped
+		_set_status("Proposing routes for %d selected hint%s…"
+			% [scoped.size(), "" if scoped.size() == 1 else "s"])
+	else:
+		_set_status("Proposing routes…")
+	var result: Dictionary = await handle_tool("minerva_pcb_apply_route_hints", args)
 
 	if not bool(result.get("success", false)):
 		if str(result.get("error", "")) == "pcb_backend_stopped":
@@ -2062,6 +2146,330 @@ func _on_propose_button_pressed() -> void:
 		_set_status("Nothing to route — no open route hints.")
 	else:
 		_set_status("%d proposal%s%s" % [n, "" if n == 1 else "s", _drc_status_suffix(result)])
+
+
+## The canvas's steered-retry completion (Epoch UX3 station 5): run the SAME
+## reroute tool the agent calls (minerva_pcb_workspace_reroute_route) with the
+## options the gesture/menu chose — {} plain retry, {"corridor": [[x,y],…]}
+## corridor-steered, {"clear_constraint": true} clear-then-unguided — and
+## narrate the outcome on the status line with the tool's own named errors.
+## One implementation for both hands; the menu can never gain a power the
+## tool lacks, or vice versa.
+func _on_candidate_retry_requested(candidate_id: String, options: Dictionary) -> void:
+	var args: Dictionary = {"candidate_id": candidate_id}
+	if options.get("corridor", null) is Array:
+		args["corridor"] = options.get("corridor")
+	if bool(options.get("clear_constraint", false)):
+		args["clear_constraint"] = true
+	var result: Dictionary = await handle_tool("minerva_pcb_workspace_reroute_route", args)
+	if _canvas != null:
+		_canvas.queue_redraw()
+	if not bool(result.get("success", false)):
+		if str(result.get("error", "")) == "pcb_backend_stopped":
+			_set_status("Retry needs the pcb backend — it's stopped. Start it from the Plugin Manager, then retry.")
+		else:
+			_set_status("Retry of %s refused (%s): %s" % [candidate_id,
+				str(result.get("error", "unknown")),
+				str(result.get("note", result.get("message", "")))])
+		return
+	# The reply's `candidates` array carries the fresh generation's records
+	# (reroute names ONE fresh generation; `rerouted_candidate_id` is the
+	# PRIOR). A successful call that landed nothing (task held, router found
+	# no route) is narrated too — silence here would repeat the defect the
+	# holds surface exists to close.
+	var landed: Array = result.get("candidates", []) if result.get("candidates", []) is Array else []
+	var how := "corridor-steered retry" if args.has("corridor") \
+		else ("steering cleared, rerouted unguided" if args.has("clear_constraint") else "retry")
+	if landed.is_empty():
+		# NOT reply.note (cold review F5): the ingest layer's default note is
+		# always present and reads "candidates landed…" even when zero did —
+		# name the actual empty outcome, and the hold if one caused it.
+		var holds: Array = result.get("holds", []) if result.get("holds", []) is Array else []
+		var why := "the router landed no candidate for this task; the prior stands"
+		if not holds.is_empty():
+			why = "its task is HELD (%s) — release the hold first" \
+				% str((holds[0] as Dictionary).get("reason", "held"))
+		_set_status("%s of %s ran but landed no candidate — %s." % [how.capitalize(), candidate_id, why])
+		return
+	var new_id := str((landed[0] as Dictionary).get("candidate_id", ""))
+	_set_status("%s: %s → %s. Review the new ghost, then Commit or Reject."
+		% [how.capitalize(), candidate_id, new_id])
+
+
+# ── station 7: commit through the gate, with the acknowledge dialog ───────────
+
+## The refused-commit state awaiting the human's acknowledgment:
+## {"candidate_ids": Array, "blocked": Array} — blocked entries are the tool's
+## own records (single: blocking_findings; batch: blocked_members flattened).
+## Empty when no acknowledgment is pending. Kept as data (not dialog-local)
+## so headless tests can drive the confirm path without a mounted popup.
+var _pending_ack_commit: Dictionary = {}
+var _placement_dialog: ConfirmationDialog = null
+
+
+## The canvas's commit doorway (station 7): run the SAME gated tool the agent
+## calls, single or batch by arity — no new commit semantics, UI over the
+## shipped verb only. A placement_blocker_unacknowledged refusal raises the
+## acknowledge dialog; every other outcome narrates on the status line.
+func _on_candidate_commit_requested(candidate_ids: Array) -> void:
+	if candidate_ids.is_empty():
+		return
+	var args: Dictionary = {}
+	if candidate_ids.size() == 1:
+		args["candidate_id"] = str(candidate_ids[0])
+	else:
+		args["candidate_ids"] = candidate_ids
+	var result: Dictionary = await handle_tool("minerva_pcb_workspace_commit", args)
+	if _canvas != null:
+		_canvas.queue_redraw()
+	if bool(result.get("success", false)):
+		_narrate_commit_success(candidate_ids, result)
+		return
+	if str(result.get("error", "")) == "placement_blocker_unacknowledged":
+		# Normalise the two reply shapes into one dialog model: single carries
+		# blocking_findings, batch carries blocked_members.
+		var blocked: Array = []
+		if result.get("blocked_members", null) is Array:
+			blocked = result.get("blocked_members")
+		elif result.get("blocking_findings", null) is Array:
+			blocked = [{"candidate_id": str(candidate_ids[0]),
+				"blocking_findings": result.get("blocking_findings")}]
+		_pending_ack_commit = {"candidate_ids": candidate_ids, "blocked": blocked}
+		_show_placement_ack_dialog()
+		return
+	_set_status("Commit refused (%s): %s" % [str(result.get("error", "unknown")),
+		str(result.get("note", ""))])
+
+
+## Confirm path: re-run the SAME call with acknowledge_placement:true — the
+## reply's acknowledged_placement_findings then records the consent
+## identically to the MCP path. Public-ish (no popup dependency) so the
+## dialog's confirmed signal and a headless test drive the same seam.
+func _confirm_placement_ack() -> void:
+	if _pending_ack_commit.is_empty():
+		return
+	var ids: Array = _pending_ack_commit.get("candidate_ids", [])
+	_pending_ack_commit = {}
+	var args: Dictionary = {"acknowledge_placement": true}
+	if ids.size() == 1:
+		args["candidate_id"] = str(ids[0])
+	else:
+		args["candidate_ids"] = ids
+	var result: Dictionary = await handle_tool("minerva_pcb_workspace_commit", args)
+	if _canvas != null:
+		_canvas.queue_redraw()
+	if bool(result.get("success", false)):
+		var acked: Array = result.get("acknowledged_placement_findings", []) \
+			if result.get("acknowledged_placement_findings", []) is Array else []
+		_narrate_commit_success(ids, result,
+			"  •  %d placement finding(s) acknowledged" % acked.size() if not acked.is_empty() else "")
+		return
+	_set_status("Commit refused even with acknowledgment (%s): %s"
+		% [str(result.get("error", "unknown")), str(result.get("note", ""))])
+
+
+func _cancel_placement_ack() -> void:
+	if _pending_ack_commit.is_empty():
+		return
+	var ids: Array = _pending_ack_commit.get("candidate_ids", [])
+	_pending_ack_commit = {}
+	_set_status("Commit cancelled — %d candidate(s) untouched; resolve the placement findings or acknowledge them to proceed."
+		% ids.size())
+
+
+## One sentence per outcome, shared by the direct and acknowledged paths.
+func _narrate_commit_success(ids: Array, result: Dictionary, suffix: String = "") -> void:
+	if ids.size() == 1:
+		_set_status("Committed %s as %d trace(s) and %d via(s) — one undo step reverts the copper AND the candidate.%s"
+			% [str(ids[0]), (result.get("trace_ids", []) as Array).size(),
+				(result.get("via_ids", []) as Array).size(), suffix])
+		return
+	_set_status("Committed %d candidates as ONE undo step — Ctrl+Z reverts every member's copper and disposition.%s"
+		% [ids.size(), suffix])
+
+
+## The dialog itself: built lazily, listing each blocked member's findings —
+## components, class and basis — with Acknowledge & Commit / Cancel. Skipped
+## (state kept) when the panel is not in a tree; the pending state is the
+## contract, the popup is its presentation.
+func _show_placement_ack_dialog() -> void:
+	var blocked: Array = _pending_ack_commit.get("blocked", [])
+	var lines: Array = []
+	for member in blocked:
+		if not (member is Dictionary):
+			continue
+		var mcid := str((member as Dictionary).get("candidate_id", ""))
+		for f in (member as Dictionary).get("blocking_findings", []):
+			if not (f is Dictionary):
+				continue
+			var fd: Dictionary = f
+			lines.append("• %s: %s — components %s%s" % [
+				mcid, str(fd.get("class", fd.get("type", "finding"))),
+				", ".join(_to_str_array(fd.get("components", []))),
+				("" if str(fd.get("basis", "")).is_empty() else " (%s)" % str(fd.get("basis", "")))])
+	var body := "Committing lays real copper against placement findings that are still open:\n\n%s\n\nAcknowledge them and commit anyway? The acknowledgment is recorded on the reply, exactly as the agent's acknowledge_placement flag would be." \
+		% "\n".join(lines)
+	_set_status("Commit needs placement acknowledgment — %d finding group(s); see dialog." % blocked.size())
+	if not is_inside_tree():
+		return
+	if _placement_dialog == null:
+		_placement_dialog = ConfirmationDialog.new()
+		_placement_dialog.name = "PlacementAckDialog"
+		_placement_dialog.ok_button_text = "Acknowledge & Commit"
+		_placement_dialog.confirmed.connect(_confirm_placement_ack)
+		_placement_dialog.canceled.connect(_cancel_placement_ack)
+		add_child(_placement_dialog)
+	_placement_dialog.dialog_text = body
+	_placement_dialog.title = "Placement findings block this commit"
+	_placement_dialog.popup_centered()
+
+
+static func _to_str_array(raw) -> Array:
+	var out: Array = []
+	if raw is Array:
+		for v in raw:
+			out.append(str(v))
+	return out
+
+
+## The Check button's handler (Epoch UX3 station 3): run the set-scoped draft
+## check over every live candidate and put the per-candidate verdict tally on
+## the status line. check_draft owns the whole guarded round-trip (begin_check
+## snapshot → worker → apply_check_result with its token/generation/revision
+## guards); this handler only narrates the outcome. The validation channels
+## (dash/marker) re-render on the same redraw.
+func _on_check_button_pressed() -> void:
+	if _routing_workspace == null:
+		return
+	var live: Array = _routing_workspace.live_candidate_ids()
+	if live.is_empty():
+		_set_status("Nothing to check — no live route proposals. Propose first.")
+		return
+	_set_status("Checking %d proposal%s…" % [live.size(), "" if live.size() == 1 else "s"])
+	var result: Dictionary = await check_draft()
+	if _canvas != null:
+		_canvas.queue_redraw()
+	if result.is_empty():
+		# check_draft's contract: an empty dict means the worker hop could not
+		# run and every candidate was reverted to its prior verdict — say so
+		# rather than leave the "Checking…" line lying.
+		_set_status("Draft check could not run (worker unavailable) — proposals keep their prior verdicts.")
+		return
+	var findings: int = (result.get("findings", []) as Array).size() \
+		if result.get("findings", []) is Array else 0
+	var tally := _ghost_status_summary()
+	var findings_txt := "" if findings == 0 else "  •  %d finding%s — select a ghost for details" \
+		% [findings, "" if findings == 1 else "s"]
+	_set_status("Checked: %s%s" % [tally, findings_txt])
+
+
+## One phrase for "what state are the ghosts in": "3 ghosts: 2 clean, 1 stale".
+## Counts LIVE candidates only (terminal ones are history/board copper) by
+## validation, naming only the states that are present, in a fixed order so
+## the phrase is stable enough to assert on. "" when there are no live ghosts
+## — callers append it conditionally.
+func _ghost_status_summary() -> String:
+	if _routing_workspace == null:
+		return ""
+	var live: Array = _routing_workspace.live_candidate_ids()
+	if live.is_empty():
+		return ""
+	var counts: Dictionary = {}
+	for cid in live:
+		var c = _routing_workspace.get_candidate(str(cid))
+		if c == null:
+			continue
+		var v := str(c.validation)
+		counts[v] = int(counts.get(v, 0)) + 1
+	var parts: Array = []
+	for state in ["clean", "violating", "error", "stale", "checking", "unchecked"]:
+		if counts.has(state):
+			parts.append("%d %s" % [int(counts[state]), state])
+	return "%d ghost%s: %s" % [live.size(), "" if live.size() == 1 else "s", ", ".join(parts)]
+
+
+## Station 10a — the LLM's pointing finger: select ONE entity for the human
+## through the SAME canvas choke points a click uses (clear + add + the
+## candidate active-sync those choke points already perform), then announce
+## it on the status line so the human's eye is drawn. kinds: component /
+## trace / via / zone / cutout / candidate / annotation.
+func point_at_entity(kind: String, id: String) -> Dictionary:
+	if _canvas == null:
+		return {"ok": false, "error": "no_canvas", "message": "pointing needs a live canvas"}
+	if kind == "annotation":
+		if _annotation_host == null or (_annotation_host.get_by_id(id) as Dictionary).is_empty():
+			return {"ok": false, "error": "not_found", "message": "no annotation '%s'" % id}
+		_canvas._clear_selection_all()
+		_annotation_host.set_selected_annotation_ids(PackedStringArray([id]), id)
+		_canvas.queue_redraw()
+		_show_transient_status("Assistant points at annotation %s." % id)
+		return {"ok": true}
+	var canvas_kind := ""
+	var exists := false
+	match kind:
+		"component":
+			canvas_kind = _canvas.KIND_COMPONENT
+			exists = _data != null and _data.get_component(id) != null
+		"trace":
+			canvas_kind = _canvas.KIND_TRACE
+			exists = _data != null and _data.traces.has(id)
+		"via":
+			canvas_kind = _canvas.KIND_VIA
+			if _data != null:
+				for v in _data.vias:
+					if v is Dictionary and str((v as Dictionary).get("id", "")) == id:
+						exists = true
+		"zone":
+			canvas_kind = _canvas.KIND_ZONE
+			exists = _data != null and not (_data.get_zone(id) as Dictionary).is_empty()
+		"cutout":
+			canvas_kind = _canvas.KIND_CUTOUT
+			exists = _data != null and not (_data.get_cutout(id) as Dictionary).is_empty()
+		"candidate":
+			canvas_kind = _canvas.KIND_CANDIDATE
+			exists = _routing_workspace != null and _routing_workspace.get_candidate(id) != null
+		_:
+			return {"ok": false, "error": "unknown_kind",
+				"message": "kind must be one of: component, trace, via, zone, cutout, candidate, annotation"}
+	if not exists:
+		return {"ok": false, "error": "not_found", "message": "no %s '%s' on this board" % [kind, id]}
+	_canvas._clear_selection_all()
+	_canvas._add_to_selection(canvas_kind, id)
+	_canvas.selection_changed.emit()
+	_canvas.queue_redraw()
+	_show_transient_status("Assistant points at %s %s." % [kind, id])
+	return {"ok": true}
+
+
+## The hint-authoring width the picker currently holds (station 8b). 0.0 =
+## auto (net class default — the caller omits width entirely). Read by the
+## host's envelope choke point and the SingleTrace tool's intent delegation.
+func get_hint_authoring_width() -> float:
+	if _hint_width_spin == null:
+		return 0.0
+	return float(_hint_width_spin.value)
+
+
+## The Propose button's selection scope (station 5d): the ids of currently
+## SELECTED annotations that are OPEN pcb_route_hints — the only annotations a
+## propose run consumes. Anything else in the selection (components, closed
+## hints, other kinds) contributes nothing, so a mixed selection scopes to
+## exactly its routable part. Empty when nothing qualifying is selected.
+func _selected_open_hint_ids() -> Array:
+	var out: Array = []
+	if _annotation_host == null or not _annotation_host.has_method("get_selected_annotation_ids") \
+			or not _annotation_host.has_method("get_by_id"):
+		return out
+	for aid in _annotation_host.get_selected_annotation_ids():
+		var ann: Dictionary = _annotation_host.get_by_id(str(aid))
+		if ann.is_empty():
+			continue
+		if str(ann.get("kind", "")) != "pcb_route_hint":
+			continue
+		if str(ann.get("lifecycle", "open")) != "open":
+			continue
+		out.append(str(aid))
+	return out
 
 
 ## DRC-at-propose (docket 019f6f1492e0) status-label suffix: BOTH scopes,
@@ -3337,6 +3745,208 @@ func _on_export_yaml_pressed() -> void:
 		_set_status("YAML export complete.")
 
 
+# ── Epoch UX3 station 11 (K13): GATED PROMOTION to canonical YAML ─────────────
+
+## THE serialize-back verb — the standing loose end of every HITL: the live
+## board (committed copper, moves) becomes the canonical YAML file, and it is
+## IMPOSSIBLE without a passing full authoritative verdict (pcb.promote_check:
+## connectivity DRC + geometric DRC + assembly, composed fail-closed worker-
+## side). There is deliberately NO acknowledge-through here (S7): commit's
+## placement gate takes consent because a draft is cheap to revert; a promoted
+## file is the durable design of record, and the gate is the point.
+##
+## Path resolution (cold review F2 — the .pcbskel corruption BLOCKER):
+## explicit arg wins; otherwise the CANONICAL SOURCE path — recorded ONLY by
+## load_board_from_yaml's adoption (_canonical_source_path), NEVER the
+## editor-flow _file_path, which the ordinary .pcbskel document flow also
+## sets: falling back to it would truncate a JSON .pcbskel document with YAML
+## the next open cannot parse. No canonical source ⇒ refuse by name. And a
+## ".pcbskel" target is refused OUTRIGHT, explicit arg included — promotion
+## writes canonical YAML, and there is no legitimate ask that spells a YAML
+## write onto a .pcbskel.
+##
+## Post-promotion state, the station's recorded decisions: (c) the workspace
+## is NOT mutated — committed candidates already ARE the canonical copper this
+## file now carries, and their consumed-hint records stay consumed (audit);
+## (d) the sidecars need no rewrite — their coherence guard is the BOARD
+## fingerprint (compute_board_fingerprint of the live dict), and promotion
+## changes the file, not the dict, so every fingerprint remains valid; the
+## annotation sidecar already lives beside the adopted path.
+##
+## Reply on success: {success, path, digest_sha256, bytes, promote_check
+## summary, census_delta? (component/net/trace/via count deltas vs the prior
+## file, computed by deserializing it — absent when there was no prior file or
+## it did not parse: prior_state notes why)}.
+func promote(explicit_path: String = "") -> Dictionary:
+	if _data == null:
+		return {"success": false, "error": "no_board"}
+	# Path guards BEFORE the ipc guard: both are answerable without the
+	# worker, and a caller with a bad target deserves the specific refusal
+	# even when the backend is also down.
+	var target := explicit_path.strip_edges()
+	if target.is_empty():
+		target = _canonical_source_path
+	if target.is_empty():
+		return {"success": false, "error": "no_target_path",
+			"note": "no explicit path was given and this board was not loaded from a canonical YAML file (only minerva_pcb_load_board's path form adopts one) — pass path explicitly"}
+	if target.get_extension().to_lower() == "pcbskel":
+		return {"success": false, "error": "pcbskel_target", "path": target,
+			"note": "promotion writes canonical YAML; writing it over a .pcbskel JSON document would destroy it — name a .yaml target"}
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"success": false, "error": "worker_unavailable",
+			"note": "promotion needs the pcb backend for its DRC gate and serializer — plugin IPC not ready"}
+
+	var board: Dictionary = _data.to_board_dict()
+
+	# ── THE GATE, fail closed ────────────────────────────────────────────────
+	var gate_raw: Dictionary = await _request_with_backend_ensure(
+		"pcb.promote_check", {"board": board}, 60000)
+	var gate: Dictionary = _unwrap_channel_reply(gate_raw)
+	# A well-formed gate reply ALWAYS carries `promotable` — a dict without it
+	# is some other shape (F3's lesson) and reads as unavailable, never gated.
+	if gate.is_empty() or not gate.has("promotable"):
+		return {"success": false, "error": "promotion_check_unavailable",
+			"note": "the promotion gate could not run — an unverifiable board does not promote (fail closed)"}
+	if not bool(gate.get("promotable", false)):
+		return {"success": false, "error": "promotion_gated",
+			"refusals": gate.get("refusals", []),
+			"connectivity": gate.get("connectivity", {}),
+			"geometric": gate.get("geometric", {}),
+			"assembly": gate.get("assembly", {}),
+			"note": "promotion without a passing full authoritative DRC is impossible, not merely discouraged (K13) — resolve the named findings and promote again; there is no acknowledge-through"}
+
+	# ── prior-file census, for the reply's what-changed ──────────────────────
+	var census_delta: Dictionary = {}
+	var prior_state := "absent"
+	if FileAccess.file_exists(target):
+		var prior_text := FileAccess.get_file_as_string(target)
+		var prior_reply: Dictionary = _unwrap_channel_reply(
+			await _request_with_backend_ensure("pcb.deserialize", {"yaml": prior_text}, 30000))
+		var prior_board: Dictionary = prior_reply.get("board", {}) \
+			if prior_reply.get("board", {}) is Dictionary else {}
+		if prior_board.is_empty():
+			prior_state = "unreadable"
+		else:
+			prior_state = "parsed"
+			census_delta = {
+				"components": (board.get("components", []) as Array).size()
+					- (prior_board.get("components", []) as Array).size(),
+				"nets": (board.get("nets", []) as Array).size()
+					- (prior_board.get("nets", []) as Array).size(),
+				"traces": (board.get("traces", []) as Array).size()
+					- (prior_board.get("traces", []) as Array).size(),
+				"vias": (board.get("vias", []) as Array).size()
+					- (prior_board.get("vias", []) as Array).size(),
+			}
+
+	# ── serialize + write ────────────────────────────────────────────────────
+	var ser: Dictionary = await _request_with_backend_ensure(
+		"pcb.serialize", {"board": board}, 30000)
+	if not bool(ser.get("success", false)):
+		return {"success": false, "error": "serialize_failed",
+			"note": str(ser.get("error_message", ser.get("error_code", "")))}
+	var payload: Variant = ser.get("result", null)
+	var yaml_text := ""
+	if payload is Dictionary:
+		yaml_text = str((payload as Dictionary).get("yaml", (payload as Dictionary).get("text", "")))
+	elif payload is String:
+		yaml_text = payload
+	if yaml_text.is_empty():
+		return {"success": false, "error": "serialize_failed",
+			"note": "pcb.serialize returned an empty document — nothing was written"}
+	# ATOMIC tmp→rename (cold review F6): the design of record must never be
+	# left half-truncated by a crash or full disk mid-write — the same
+	# discipline the routing sidecar's writer already keeps.
+	var tmp_path := target + ".promote.tmp"
+	var f := FileAccess.open(tmp_path, FileAccess.WRITE)
+	if f == null:
+		return {"success": false, "error": "write_failed", "path": target,
+			"note": "could not open the temp file for writing (error %d)" % FileAccess.get_open_error()}
+	f.store_string(yaml_text)
+	var flush_err := f.get_error()
+	f.close()
+	if flush_err != OK:
+		DirAccess.remove_absolute(tmp_path)
+		return {"success": false, "error": "write_failed", "path": target,
+			"note": "write to the temp file failed (error %d) — the target was not touched" % flush_err}
+	var rename_err := DirAccess.rename_absolute(tmp_path, target)
+	if rename_err != OK:
+		DirAccess.remove_absolute(tmp_path)
+		return {"success": false, "error": "write_failed", "path": target,
+			"note": "atomic rename onto the target failed (error %d) — the target was not touched" % rename_err}
+
+	var reply: Dictionary = {
+		"path": target,
+		"digest_sha256": yaml_text.sha256_text(),
+		"bytes": yaml_text.length(),
+		"prior_state": prior_state,
+		"promote_check": {"promotable": true, "refusals": []},
+	}
+	if not census_delta.is_empty():
+		reply["census_delta"] = census_delta
+	reply["success"] = true
+	return reply
+
+
+## Unwrap the two envelope nestings the broker channels produce ({ok, result}
+## worker envelope, possibly under {success, result}) into the inner result
+## dict — {} when the reply is any failure shape. The same unwrap discipline
+## board_health_check/_unwrap_draft_check apply, factored for promote's three
+## channel hops.
+static func _unwrap_channel_reply(reply: Dictionary) -> Dictionary:
+	# FAILURE FIRST, result presence second (cold review F3): every LIVE
+	# broker failure — the panel's own ipc-null reply and the host's
+	# timeout/invalid replies — carries success:false with NO result key at
+	# all. Guarding on `result is Dictionary` before reading `success` let
+	# those fall through both unwrap layers and return VERBATIM as "the inner
+	# result", so a 60s gate timeout read as a gated refusal with zero
+	# refusals. Any explicit false is a failure regardless of shape.
+	var layer: Dictionary = reply
+	if layer.has("success"):
+		if not bool(layer.get("success", false)):
+			return {}
+		if layer.get("result", null) is Dictionary:
+			layer = layer.get("result")
+	if layer.has("ok"):
+		if not bool(layer.get("ok", false)):
+			return {}
+		return layer.get("result") if layer.get("result", null) is Dictionary else {}
+	return layer
+
+
+## The Promote button (station 11b): the same verb, refusals in a dialog that
+## LISTS the gate's findings — informational only, no acknowledge-through.
+func _on_promote_button_pressed() -> void:
+	_set_status("Promotion gate: running full DRC + assembly…")
+	var result: Dictionary = await promote()
+	if bool(result.get("success", false)):
+		var delta_txt := ""
+		if result.get("census_delta", null) is Dictionary:
+			var d: Dictionary = result.get("census_delta")
+			delta_txt = "  •  Δ traces %+d, vias %+d" % [int(d.get("traces", 0)), int(d.get("vias", 0))]
+		_set_status("PROMOTED → %s (%d bytes)%s" % [str(result.get("path", "")),
+			int(result.get("bytes", 0)), delta_txt])
+		return
+	if str(result.get("error", "")) == "promotion_gated":
+		var refusals: Array = result.get("refusals", [])
+		_set_status("Promotion refused — %d gate failure(s); see dialog." % refusals.size())
+		if is_inside_tree():
+			var dialog := AcceptDialog.new()
+			dialog.name = "PromotionGateDialog"
+			dialog.title = "Promotion gate: the board is not clean"
+			dialog.dialog_text = "K13: promotion without a passing full authoritative DRC is impossible.\n\n%s\n\nResolve the findings (Check, witnesses, assembly) and promote again." \
+				% "\n".join(PackedStringArray(Array(refusals.map(func(r): return "• %s" % str(r)))))
+			add_child(dialog)
+			dialog.popup_centered()
+			dialog.visibility_changed.connect(func() -> void:
+				if not dialog.visible:
+					dialog.queue_free())
+		return
+	_set_status("Promotion failed (%s): %s" % [str(result.get("error", "unknown")),
+		str(result.get("note", ""))])
+
+
 ## Router bridge (route-correction loop, agent-router child 019eb47eb567). Builds
 ## the worker `route` request from the LIVE board + the host's route-hint
 ## annotations and drives it over the plugin IPC channel the same way YAML export
@@ -3497,6 +4107,9 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 			_sidecar_autosave_pending = false
 			_annotation_host.save_sidecar(prior_path)
 		_file_path = source_path
+		# The canonical-source record promotion's implicit target reads (F2)
+		# — this assignment exists ONLY here, on the YAML-load adoption.
+		_canonical_source_path = source_path
 		if _annotation_host != null:
 			_annotation_host.set_document_path(source_path)
 			if AnnotationSidecar.has_sidecar(source_path):
@@ -3817,9 +4430,17 @@ func _update_status() -> void:
 		board_txt = "  •  %s×%smm" % [_data.board_width, _data.board_height]
 	if _layout_mode == _PanelLayoutScript.MODE_NARROW:
 		hint = ""
-	_set_status("%d parts, %d nets, %d traces  •  %d selected%s%s%s" % [
+	# Epoch UX3 station 3 (docket 019fdf90662a): the steady-state readout
+	# counted components but never candidates — the ghost tally joins it,
+	# present only while live ghosts exist so the common no-proposals state is
+	# byte-identical to before.
+	var ghost_txt := ""
+	var ghost_summary := _ghost_status_summary()
+	if not ghost_summary.is_empty():
+		ghost_txt = "  •  %s" % ghost_summary
+	_set_status("%d parts, %d nets, %d traces  •  %d selected%s%s%s%s" % [
 		_data.get_component_count(), _data.get_net_count(), _data.get_trace_count(),
-		sel.size(), mode_txt, board_txt, hint])
+		sel.size(), mode_txt, ghost_txt, board_txt, hint])
 
 
 ## Reflect the current model into the toolbar + canvas (after a load).

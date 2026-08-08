@@ -246,6 +246,10 @@ func initRegistry() {
 	// pcb.board_health — whole-board health (census + assembly) without a
 	// routing run (Epoch UX2 station 9). See worker_tools.go.
 	registry.Register(tools.BoardHealthChannel, tools.HandleBoardHealthChannel)
+	// pcb.promote_check — the K13 promotion gate: full connectivity +
+	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
+	// 11). See worker_tools.go.
+	registry.Register(tools.PromoteCheckChannel, tools.HandlePromoteCheckChannel)
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +327,9 @@ var workerBackedTools = map[string]bool{
 	// pcb.board_health dispatches to the worker's "board_health" method
 	// (Epoch UX2 station 9) — same rationale.
 	"pcb.board_health": true,
+	// pcb.promote_check dispatches to the worker's "promote_check" method
+	// (Epoch UX3 station 11, K13) — same rationale.
+	"pcb.promote_check": true,
 }
 
 func handleToolsCall(id json.RawMessage, params json.RawMessage) rpcResponse {

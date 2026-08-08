@@ -543,16 +543,23 @@ other lacks.
 | `minerva_pcb_workspace_get_active` | the focused candidate + its findings; empty active id is a success, not an error |
 | `minerva_pcb_workspace_pin` | Keep — future routing routes around it; stales nothing |
 | `minerva_pcb_workspace_unpin` | back to a plain draft; stales nothing |
+| `minerva_pcb_workspace_freeze` | Settle (K7) — a stronger pin: keep-out + always draft-checked; reject/try-again/edits refuse (`candidate_frozen`) until unfreeze; commit still legal |
+| `minerva_pcb_workspace_unfreeze` | the deliberate demotion back to `proposed` — the only way settled geometry becomes retirable again |
 | `minerva_pcb_workspace_reject` | discard + reopen the task; terminal; stales every still-live verdict |
 | `minerva_pcb_workspace_commit` | Accept — candidate → real copper, in ONE undoable step (below) |
 | `minerva_pcb_workspace_reroute_route` | Try-again on the whole route; router runs before the prior is retired |
 | `minerva_pcb_workspace_reroute_span` | **DEGRADED** to a whole-route reroute, named on every reply (below) |
 | `minerva_pcb_workspace_check` | set-scoped draft DRC; findings name candidate/segment/via ids; stale candidates refuse |
+| `minerva_pcb_promote` | K13's serialize-back: full gate (connectivity + geometric + assembly, one fail-closed verdict) → canonical YAML write; refusals name findings, NO acknowledge-through |
+| `minerva_pcb_point` | the get_selection MIRROR — select an entity FOR the human (deixis both ways) |
+| `minerva_pcb_hint_move_bend` / `_insert_bend` / `_delete_bend` | micro hint edits, one revision each; superseded refuses with the sanctioned exits |
+| `minerva_pcb_clear_hints_by_author` | the dock menu's MCP twin (human/ai/all; workflow-class only) |
 
 ### Two axes, never coupled
 
-A candidate carries a **disposition** (`proposed` → `pinned` / `superseded` /
-`rejected` / `committed` — the workflow decision) and a **validation**
+A candidate carries a **disposition** (`proposed` → `pinned` / `frozen` /
+`superseded` / `rejected` / `committed` — the workflow decision; `frozen` is
+live-but-locked: its only exits are unfreeze and commit) and a **validation**
 (`unchecked` → `checking` → `clean` / `violating` / `stale` / `error` — the DRC
 health). Setting one never moves the other. Every disposition move goes through
 one legality table (`pcb_route_candidate.gd::DISPOSITION_TRANSITIONS`);
@@ -628,13 +635,15 @@ reach it from `PCBPanel.route_board(selection, extra)`, whose `extra` argument
 `panel_tools.gd` computes at every propose/reroute call site
 (`_route_request_extra`):
 
-- **`pinned_candidates`** — whenever `RoutingWorkspace.pinned` is non-empty,
-  every pinned candidate is serialised to the wire shape
-  `ir_candidates.build_overlay` already accepts (`pinned_candidates_wire`, the
-  same candidate language `begin_check`/draft_check uses) and sent as fixed
-  copper. The router treats it exactly like already-accepted copper: an
-  obstacle at keepout margin on another net, pathable-along on its own. A pin
-  now protects the **space**, not only the candidate.
+- **`pinned_candidates`** — whenever `RoutingWorkspace.pinned` or `.frozen`
+  is non-empty, every HELD (pinned + frozen) candidate is serialised to the
+  wire shape `ir_candidates.build_overlay` already accepts
+  (`keepout_candidates_wire`, the same candidate language
+  `begin_check`/draft_check uses) and sent as fixed copper. The router treats
+  it exactly like already-accepted copper: an obstacle at keepout margin on
+  another net, pathable-along on its own. A hold protects the **space**, not
+  only the candidate — and frozen (Epoch UX3, K8) rides the same wire key
+  precisely so no second code path can drift from this proven one.
 - **`scope`** — added only where it can be stated *completely*, never guessed:
   - a **reroute** always carries `{"tasks": [{"task_id", "net"}]}` from the
     candidate's own task (no `endpoints`, so it names the whole net, never a

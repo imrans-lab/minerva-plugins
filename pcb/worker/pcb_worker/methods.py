@@ -497,6 +497,107 @@ def _board_health_method(params: dict) -> dict:
     return {"ok": True, "result": _board_health(board, [], board)}
 
 
+def _promote_check(params: dict) -> dict:
+    """THE PROMOTION GATE (Epoch UX3 station 11, K13): the full authoritative
+    verdict in ONE call — connectivity DRC (:func:`_drc`), geometric DRC
+    (:func:`_drc_geometric`, GC1-GC7 over real copper) and the assembly
+    advisory — composed fail-closed: ``promotable`` is True ONLY when
+    connectivity ran with zero findings AND the geometric union is a
+    determinate ``clean`` AND assembly reported no findings. ANY error,
+    indeterminate, or finding anywhere makes ``promotable`` False with the
+    reason NAMED in ``refusals`` — "could not check" is a refusal here, never
+    a pass (K13's own words: impossible, not merely discouraged; there is no
+    acknowledge-through on promotion).
+
+    params: {board: <canonical board dict>}.
+    Reply: {ok: True, result: {promotable, refusals: [str], connectivity,
+    geometric, assembly}} — the three sub-reports ride whole so a refusing
+    caller can show the actual findings, not just the verdict."""
+    refusals: list = []
+
+    # Input contract, uniform across all three legs (cold review F7): the gate
+    # takes exactly {board: <canonical dict>} — the two DRC legs' tolerant
+    # _load fallbacks (yaml source etc.) must not make the gate's own contract
+    # leg-dependent.
+    if not isinstance((params or {}).get("board"), dict):
+        return {"ok": True, "result": {
+            "promotable": False,
+            "refusals": ["promote_check requires a canonical board dict under 'board'"],
+            "connectivity": {}, "geometric": {}, "assembly": {},
+        }}
+    # The sub-checks get a FRESH params dict (cold review F5): forwarding the
+    # caller's params verbatim would let knobs like resolve_geometry:false
+    # weaken a leg of a gate whose whole point is that it cannot be weakened.
+    gate_params = {"board": params["board"]}
+
+    conn_reply = _drc(gate_params)
+    connectivity: dict = {}
+    if not conn_reply.get("ok"):
+        refusals.append("connectivity DRC could not run: %s"
+                        % (conn_reply.get("error", {}) or {}).get("message", "unknown"))
+        connectivity = {"error": conn_reply.get("error")}
+    else:
+        connectivity = conn_reply.get("result") or {}
+        findings = connectivity.get("findings") or []
+        if findings:
+            refusals.append("connectivity DRC reports %d finding(s)" % len(findings))
+        # COMPLETENESS is part of the connectivity verdict (cold review F1 —
+        # the BLOCKER: every run_drc finding check walks EXISTING segments, so
+        # a board with NO copper at all produces zero findings; the census
+        # keys `complete`/`missing_copper` ride the same reply and are the
+        # half that sees absence). complete is TRI-STATE: only an explicit
+        # True passes; None (indeterminate census) refuses — an unverifiable
+        # board does not promote.
+        complete = connectivity.get("complete")
+        if complete is not True:
+            missing = connectivity.get("missing_copper") or []
+            if missing:
+                refusals.append(
+                    "connectivity census: %d net(s) missing copper (%s) — an "
+                    "unrouted board is not a design of record"
+                    % (len(missing), ", ".join(str(n) for n in missing[:8])))
+            else:
+                refusals.append(
+                    "connectivity census is indeterminate — an unverifiable "
+                    "board does not promote")
+
+    geo_reply = _drc_geometric(gate_params)
+    geometric: dict = (geo_reply.get("result") or {}) if isinstance(geo_reply, dict) else {}
+    if not geometric:
+        refusals.append("geometric DRC returned no verdict")
+    elif geometric.get("verdict") == "violations":
+        refusals.append("geometric DRC reports %d finding(s)"
+                        % len(geometric.get("findings") or []))
+    elif geometric.get("verdict") != "clean":
+        refusals.append("geometric DRC is indeterminate (%s) — an unverifiable "
+                        "board does not promote"
+                        % ((geometric.get("error") or {}).get("kind", "unknown")))
+
+    raw_board = (params or {}).get("board")
+    if isinstance(raw_board, dict):
+        # The ONE computation behind every assembly verdict (_assembly_tri_state
+        # owns its own fault→indeterminate boundary — a crash inside reads as
+        # indeterminate, which refuses below, never a pass).
+        assembly = _assembly_tri_state(raw_board)
+    else:
+        assembly = {"status": "indeterminate", "error": "no board payload"}
+    status = str(assembly.get("status", "indeterminate"))
+    if status == "findings":
+        refusals.append("assembly check reports %d finding(s)"
+                        % len(assembly.get("findings") or []))
+    elif status != "pass":
+        refusals.append("assembly check is indeterminate — an unverifiable "
+                        "placement does not promote")
+
+    return {"ok": True, "result": {
+        "promotable": not refusals,
+        "refusals": refusals,
+        "connectivity": connectivity,
+        "geometric": geometric,
+        "assembly": assembly,
+    }}
+
+
 def _normalize(params: dict) -> dict:
     """Rewrite a canonical SOURCE board to its normalized v2 shape (the sync-back
     the compile fold never persists): legacy inline per-pin fabrication geometry is
@@ -2549,15 +2650,28 @@ def _draft_check(params: dict) -> dict:
         if not isinstance(f, dict):
             continue
         subjects = _dc_attribute(f, seg_subjects, via_subjects, eps)
-        finding: dict = {"kind": f.get("type"), "subjects": subjects,
-                         "at": f.get("at")}
-        if f.get("type") == "crossing":
-            finding["nets"] = f.get("nets")
-            finding["layer"] = f.get("layer")
-        else:
-            finding["net"] = f.get("net")
-        if f.get("type") == "wrong_net_pad":
-            finding["pad"] = f.get("pad")
+        # PASS THE SOURCE FINDING THROUGH, then stamp the reply's own keys on
+        # top (Epoch UX3 station 4, K11 — cold review F1). The old hand-picked
+        # projection dropped every key it did not know, which silently
+        # stripped the geometry the canvas witness overlay draws: a finding
+        # with no `closest`/`witness` never renders, so the whole feedback
+        # loop was dead against the real pipeline. `kind` (the reply's
+        # historical spelling) and `type` (the geometric checks' spelling, and
+        # what the canvas reads) are BOTH present so neither consumer breaks.
+        finding: dict = dict(f)
+        finding["kind"] = f.get("type")
+        finding.setdefault("type", f.get("type"))
+        finding["subjects"] = subjects
+        finding["at"] = f.get("at")
+        # K11 witness-geometry contract: every stored finding carries a
+        # closest/witness [x, y] pair. Connectivity findings are POINT
+        # findings — their evidence is `at` — so both keys collapse to it,
+        # exactly as the geometric point classes (gc3 drill) already do.
+        # Findings that someday arrive with their own pair keep it.
+        at = f.get("at")
+        if isinstance(at, (list, tuple)) and len(at) == 2:
+            finding.setdefault("closest", list(at))
+            finding.setdefault("witness", list(at))
         findings_out.append(finding)
         for s in subjects:
             scid = str(s.get("candidate_id", ""))
@@ -2608,6 +2722,7 @@ _HANDLERS = {
     # Whole-board health without a routing run (Epoch UX2 station 9) — the
     # load path's census+assembly surface.
     "board_health": lambda req: _board_health_method(req.get("params") or {}),
+    "promote_check": lambda req: _promote_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),

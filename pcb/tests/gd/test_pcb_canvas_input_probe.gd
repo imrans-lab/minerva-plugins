@@ -1259,7 +1259,15 @@ func _probe_locked_component_drag() -> void:
 	u2.id = "U2"
 	u2.position = Vector2(45.0, 20.0)
 	data.add_component(u2)
-	canvas.zoom = 8.0
+	# zoom 4, not 8 (Epoch UX3 boundary): world_to_screen centres on the
+	# CANVAS SIZE, so this press's screen x = width/2 + 45*zoom — at zoom 8
+	# that needs a >720px canvas, and the Epoch UX3 sidebar rows (Check /
+	# Promote / width picker) narrowed the canvas to ~711px at the fixture's
+	# 900px panel, dropping the press 4px past the right edge (the probe then
+	# "fails" on layout, not on the lock rule it exists to pin). The
+	# coordinate is incidental to BT-02's intent; zoom 4 keeps the whole
+	# gesture comfortably on-canvas under future sidebar growth too.
+	canvas.zoom = 4.0
 	canvas.pan_offset = Vector2.ZERO
 	await process_frame
 

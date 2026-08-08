@@ -1322,13 +1322,22 @@ def route_board(
     # _mark_existing_copper for why that position in the order is load-bearing.
     _mark_existing_copper(grid, existing_traces, existing_vias, layers)
 
-    # Mark obstacles
+    # Mark obstacles. Polygon obstacles (authored keepout zones — Epoch UX3
+    # station 2, router item 019fc155bc32) rasterise per-layer through the
+    # grid's own mark_keepout_polygon; disc obstacles keep the original path.
+    # Before that method existed, Obstacle.polygon/layer were declared but
+    # read NOWHERE — the gap pcb_worker.route_bridge fail-closed over.
     for obstacle in board.obstacles:
         if obstacle.radius:
             grid.mark_obstacle(
                 x=obstacle.position[0],
                 y=obstacle.position[1],
                 radius=obstacle.radius
+            )
+        elif obstacle.polygon:
+            grid.mark_keepout_polygon(
+                obstacle.polygon,
+                layer=None if obstacle.blocks_all_layers else obstacle.layer,
             )
 
     existing_by_net = _existing_copper_by_net(existing_traces, existing_vias)
@@ -2110,13 +2119,20 @@ def route_board_with_hints(
     # keeps out of accepted copper exactly as the standard loop does.
     _mark_existing_copper(grid, existing_traces, existing_vias, layers)
 
-    # Mark obstacles
+    # Mark obstacles — the same disc + keepout-polygon pair the standard loop
+    # marks (see the comment there); a bus run keeps out of an authored
+    # keepout exactly as a standard run does.
     for obstacle in board.obstacles:
         if obstacle.radius:
             grid.mark_obstacle(
                 x=obstacle.position[0],
                 y=obstacle.position[1],
                 radius=obstacle.radius
+            )
+        elif obstacle.polygon:
+            grid.mark_keepout_polygon(
+                obstacle.polygon,
+                layer=None if obstacle.blocks_all_layers else obstacle.layer,
             )
 
     existing_by_net = _existing_copper_by_net(existing_traces, existing_vias)

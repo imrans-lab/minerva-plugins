@@ -477,8 +477,11 @@ func _test_tool_buttons_render() -> void:
 		check("%s node present in the sidebar" % node_name,
 			panel.find_child(node_name, true, false) != null)
 
-	check("14 tool buttons total across ToolsFlow/DrawFlow/HintsFlow (9 radio tools + 3 route-flow + Delete + Propose; got %d)" % all_buttons.size(),
-		all_buttons.size() == 14)
+	# 16 as of Epoch UX3: stations 3 + 11 added Check (draft-DRC over live
+	# ghosts) and Promote (the K13 gated serialize-back) to the HintsFlow —
+	# deliberate additions, counted here like every prior one.
+	check("16 tool buttons total across ToolsFlow/DrawFlow/HintsFlow (9 radio tools + 3 route-flow + Delete + Propose + Check + Promote; got %d)" % all_buttons.size(),
+		all_buttons.size() == 16)
 
 	_teardown(panel)
 

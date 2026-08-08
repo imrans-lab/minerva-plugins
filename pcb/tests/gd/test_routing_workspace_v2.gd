@@ -78,6 +78,7 @@ func _init() -> void:
 	_run_transient_not_persisted()
 	_run_id_high_water_and_json_floats()
 	_run_ingest_vs_pinned()
+	_run_freeze_contract()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -126,42 +127,57 @@ func _one_route(net: String, x_end: float = 5.0) -> Dictionary:
 
 # ── 1. legality matrix ────────────────────────────────────────────────────────
 
-## HAND-DERIVED from PcbRouteCandidate.DISPOSITION_TRANSITIONS:
-##   proposed   -> pinned, superseded, rejected, committed        (4 legal)
-##   pinned     -> proposed, superseded, rejected, committed      (4 legal)
+## HAND-DERIVED from PcbRouteCandidate.DISPOSITION_TRANSITIONS (Epoch UX3
+## added "frozen" — K7):
+##   proposed   -> pinned, frozen, superseded, rejected, committed  (5 legal)
+##   pinned     -> proposed, frozen, superseded, rejected, committed (5 legal)
+##   frozen     -> proposed, committed                               (2 legal)
+##              LIVE but LOCKED: no reject/supersede/pin row — settled
+##              geometry demotes (unfreeze -> proposed) before it can die.
 ##   superseded -> (none)                                          terminal
 ##   rejected   -> (none)                                          terminal
 ##   committed  -> (none) except the uncommit compensating exit    terminal
-## Plus the 5 IDENTITY pairs (x -> x), which are legal no-ops.
-## => 4 + 4 + 5 = 13 legal ordered pairs out of 5 x 5 = 25.
-## => 12 illegal ordered pairs, ALL of them leaving a terminal state:
-##      superseded -> {proposed, pinned, rejected, committed}   (4)
-##      rejected   -> {proposed, pinned, superseded, committed} (4)
-##      committed  -> {proposed, pinned, superseded, rejected}  (4)
+## Plus the 6 IDENTITY pairs (x -> x), which are legal no-ops.
+## => 5 + 5 + 2 + 6 = 18 legal ordered pairs out of 6 x 6 = 36.
+## => 18 illegal ordered pairs in TWO named-error classes:
+##    15 leaving a terminal state (terminal_disposition):
+##      superseded -> {proposed, pinned, frozen, rejected, committed}  (5)
+##      rejected   -> {proposed, pinned, frozen, superseded, committed}(5)
+##      committed  -> {proposed, pinned, frozen, superseded, rejected} (5)
+##     3 leaving frozen for a row the table refuses — frozen is NOT
+##       terminal, so these report illegal_disposition_transition:
+##      frozen     -> {pinned, superseded, rejected}                   (3)
 const _LEGAL_PAIRS := [
-	["proposed", "proposed"], ["proposed", "pinned"], ["proposed", "superseded"],
-	["proposed", "rejected"], ["proposed", "committed"],
-	["pinned", "pinned"], ["pinned", "proposed"], ["pinned", "superseded"],
-	["pinned", "rejected"], ["pinned", "committed"],
+	["proposed", "proposed"], ["proposed", "pinned"], ["proposed", "frozen"],
+	["proposed", "superseded"], ["proposed", "rejected"], ["proposed", "committed"],
+	["pinned", "pinned"], ["pinned", "proposed"], ["pinned", "frozen"],
+	["pinned", "superseded"], ["pinned", "rejected"], ["pinned", "committed"],
+	["frozen", "frozen"], ["frozen", "proposed"], ["frozen", "committed"],
 	["superseded", "superseded"], ["rejected", "rejected"], ["committed", "committed"],
 ]
 
-const _ILLEGAL_PAIRS := [
-	["superseded", "proposed"], ["superseded", "pinned"],
+const _ILLEGAL_TERMINAL_PAIRS := [
+	["superseded", "proposed"], ["superseded", "pinned"], ["superseded", "frozen"],
 	["superseded", "rejected"], ["superseded", "committed"],
-	["rejected", "proposed"], ["rejected", "pinned"],
+	["rejected", "proposed"], ["rejected", "pinned"], ["rejected", "frozen"],
 	["rejected", "superseded"], ["rejected", "committed"],
-	["committed", "proposed"], ["committed", "pinned"],
+	["committed", "proposed"], ["committed", "pinned"], ["committed", "frozen"],
 	["committed", "superseded"], ["committed", "rejected"],
+]
+
+## Frozen's refused exits — the verb-shaped teeth of freeze (Epoch UX3, K7).
+const _ILLEGAL_FROZEN_PAIRS := [
+	["frozen", "pinned"], ["frozen", "superseded"], ["frozen", "rejected"],
 ]
 
 
 func _run_legality_matrix() -> void:
-	print("-- 1. legality matrix: 13 legal / 12 illegal ordered pairs --")
-	check_eq("hand-derived legal pair count", _LEGAL_PAIRS.size(), 13)
-	check_eq("hand-derived illegal pair count", _ILLEGAL_PAIRS.size(), 12)
-	check_eq("legal + illegal cover the whole 5x5 matrix",
-		_LEGAL_PAIRS.size() + _ILLEGAL_PAIRS.size(),
+	print("-- 1. legality matrix: 18 legal / 15+3 illegal ordered pairs --")
+	check_eq("hand-derived legal pair count", _LEGAL_PAIRS.size(), 18)
+	check_eq("hand-derived terminal-illegal pair count", _ILLEGAL_TERMINAL_PAIRS.size(), 15)
+	check_eq("hand-derived frozen-illegal pair count", _ILLEGAL_FROZEN_PAIRS.size(), 3)
+	check_eq("legal + illegal cover the whole 6x6 matrix",
+		_LEGAL_PAIRS.size() + _ILLEGAL_TERMINAL_PAIRS.size() + _ILLEGAL_FROZEN_PAIRS.size(),
 		PcbRouteCandidate.DISPOSITIONS.size() * PcbRouteCandidate.DISPOSITIONS.size())
 
 	# EVERY legal pair: transition_error is "" and transition_to applies it.
@@ -174,10 +190,10 @@ func _run_legality_matrix() -> void:
 		check("legal %s -> %s applied" % [from, to], c.transition_to(to).is_empty())
 		check_eq("legal %s -> %s left the candidate in %s" % [from, to, to], c.disposition, to)
 
-	# EVERY illegal pair: named error AND the value is UNCHANGED (never
-	# half-applied). All 12 leave a terminal state, so all 12 report
+	# EVERY terminal-illegal pair: named error AND the value is UNCHANGED
+	# (never half-applied). All 15 leave a terminal state, so all 15 report
 	# "terminal_disposition" — a state-shaped verdict, not a generic refusal.
-	for pair in _ILLEGAL_PAIRS:
+	for pair in _ILLEGAL_TERMINAL_PAIRS:
 		var from: String = pair[0]
 		var to: String = pair[1]
 		var err: String = PcbRouteCandidate.transition_error(from, to)
@@ -188,10 +204,26 @@ func _run_legality_matrix() -> void:
 			c.transition_to(to), PcbRouteCandidate.ERR_TERMINAL_DISPOSITION)
 		check_eq("illegal %s -> %s left the value UNCHANGED" % [from, to], c.disposition, from)
 
-	# The two LIVE states have a FULL fan-out — their only refusal is an
+	# The FROZEN-illegal pairs report illegal_disposition_transition, NOT
+	# terminal_disposition: frozen is a LIVE state whose table row simply
+	# refuses these rows. Mis-reporting it as terminal would tell the caller
+	# "no verb can ever leave this state" when unfreeze/commit legally can.
+	for pair in _ILLEGAL_FROZEN_PAIRS:
+		var from: String = pair[0]
+		var to: String = pair[1]
+		check_eq("frozen-illegal %s -> %s named error" % [from, to],
+			PcbRouteCandidate.transition_error(from, to),
+			PcbRouteCandidate.ERR_ILLEGAL_TRANSITION)
+		var c = _candidate_in(from)
+		check_eq("frozen-illegal %s -> %s refused with the same code" % [from, to],
+			c.transition_to(to), PcbRouteCandidate.ERR_ILLEGAL_TRANSITION)
+		check_eq("frozen-illegal %s -> %s left the value UNCHANGED" % [from, to],
+			c.disposition, from)
+
+	# The LIVE states have a fan-out — their only out-of-table refusal is an
 	# out-of-set value, which is reported as unknown BEFORE any legality verdict
 	# (so a typo is never mis-reported as a workflow violation).
-	for live in ["proposed", "pinned"]:
+	for live in ["proposed", "pinned", "frozen"]:
 		check_eq("%s -> 'bogus' is unknown_disposition" % live,
 			PcbRouteCandidate.transition_error(live, "bogus"),
 			PcbRouteCandidate.ERR_UNKNOWN_DISPOSITION)
@@ -312,11 +344,14 @@ func _run_committed_terminal_and_uncommit() -> void:
 	# uncommit is not a general undo: it refuses on a non-committed candidate.
 	check("uncommit on a non-committed candidate is refused", not ws.uncommit(cid))
 
-	# The uncommit target set is exactly the two live dispositions — the model
-	# can never "uncommit" into a terminal state.
-	check_eq("UNCOMMIT_TARGETS size", PcbRouteCandidate.UNCOMMIT_TARGETS.size(), 2)
+	# The uncommit target set is exactly the three live dispositions — the model
+	# can never "uncommit" into a terminal state. frozen joined in Epoch UX3:
+	# frozen -> committed is legal, so a board undo of that commit must be able
+	# to reinstate the settlement it consumed.
+	check_eq("UNCOMMIT_TARGETS size", PcbRouteCandidate.UNCOMMIT_TARGETS.size(), 3)
 	check("UNCOMMIT_TARGETS has proposed", "proposed" in PcbRouteCandidate.UNCOMMIT_TARGETS)
 	check("UNCOMMIT_TARGETS has pinned", "pinned" in PcbRouteCandidate.UNCOMMIT_TARGETS)
+	check("UNCOMMIT_TARGETS has frozen", "frozen" in PcbRouteCandidate.UNCOMMIT_TARGETS)
 	var raw = PcbRouteCandidate.new()
 	raw.set_disposition("committed")
 	check_eq("uncommit_to a terminal target is refused",
@@ -839,3 +874,169 @@ func _run_ingest_vs_pinned() -> void:
 	check_eq("after unpin the batch ingest replaces normally", ids5.size(), 1)
 	check_eq("the unpinned prior was superseded", ws2.get_candidate(b).disposition, "superseded")
 	check_eq("no hold recorded once nothing is pinned", ws2.last_ingest_holds.size(), 0)
+
+
+# ── 11. FREEZE (Epoch UX3, K7/K8): the settlement verb and its teeth ──────────
+# freeze() promotes a hold into a SETTLEMENT: batch ingest holds the task with
+# its own named reason, the targeted supersede that could retire a pin is
+# REFUSED, geometry edits refuse by name, the keep-out wire carries the frozen
+# geometry to the router, a scoped draft check can never omit it, and the
+# whole state survives a sidecar round-trip. Every claim the manifest/menu
+# make for freeze is asserted here at the model layer that enforces it.
+
+func _run_freeze_contract() -> void:
+	print("-- 11. freeze: settlement verb, holds, locks, wire, check set, sidecar --")
+	_rec_held.clear()
+	var ws = PcbRoutingWorkspace.new()
+	ws.ingest_task_held.connect(_on_held)
+	var hints := [_hint("hf", "NF")]
+	var cid: String = str(ws.ingest_routing_result(_one_route("NF"), hints, 1)[0])
+	var tid: String = str(ws.get_candidate(cid).task_id)
+
+	# ── verb + derived index ─────────────────────────────────────────────────
+	check("freeze() applies from proposed", ws.freeze(cid))
+	check_eq("disposition is frozen", ws.get_candidate(cid).disposition, "frozen")
+	check("is_frozen() reads the derived index", ws.is_frozen(cid))
+	check("frozen is NOT in the pinned index", not ws.is_pinned(cid))
+	check("frozen stays in the LIVE set", cid in ws.live_candidate_ids())
+
+	# ── the teeth: refused verbs while frozen ────────────────────────────────
+	check("reject() is REFUSED on frozen", not ws.reject(cid))
+	check_eq("...with the table's named error",
+		str(ws.last_transition_error.get("error", "")),
+		PcbRouteCandidate.ERR_ILLEGAL_TRANSITION)
+	check("supersede() (targeted Try-again) is REFUSED on frozen — unlike pinned",
+		not ws.supersede(cid))
+	check("pin() is REFUSED on frozen (no demotion-to-hold row)", not ws.pin(cid))
+	check_eq("candidate unchanged through all three refusals",
+		ws.get_candidate(cid).disposition, "frozen")
+
+	# ── geometry locks: every edit doorway refuses by ONE name ───────────────
+	var via_res: Dictionary = ws.add_via(cid, Vector2(2.0, 0.0), "top", "bottom")
+	check_eq("add_via on frozen refuses by name",
+		str(via_res.get("error", "")), PcbRoutingWorkspace.ERR_FROZEN)
+	var mj_res: Dictionary = ws.move_junction(cid, Vector2(5.0, 0.0), Vector2(5.0, 1.0))
+	check_eq("move_junction on frozen refuses by name",
+		str(mj_res.get("error", "")), PcbRoutingWorkspace.ERR_FROZEN)
+	check("sync_candidate_geometry (bridged annotation edit) refuses on frozen",
+		not ws.sync_candidate_geometry(cid,
+			[{"start": [0.0, 0.0], "end": [9.0, 0.0], "layer": "F.Cu"}], []))
+	check_eq("geometry untouched by the refused edits: still 1 segment",
+		ws.get_candidate(cid).segments.size(), 1)
+
+	# ── batch ingest holds with the FROZEN reason ────────────────────────────
+	_rec_held.clear()
+	var ids2: Array = ws.ingest_routing_result(_one_route("NF", 9.0), hints, 2)
+	check_eq("batch ingest created NO candidate for the frozen task", ids2.size(), 0)
+	check_eq("the hold is queryable", ws.last_ingest_holds.size(), 1)
+	check_eq("hold carries HOLD_FROZEN, not HOLD_PINNED",
+		str((ws.last_ingest_holds[0] as Dictionary).get("reason", "")),
+		PcbRoutingWorkspace.HOLD_FROZEN)
+	check_eq("hold announced once with the same reason",
+		str((_rec_held[0] as Dictionary).get("reason", "")), PcbRoutingWorkspace.HOLD_FROZEN)
+	check_eq("the held task stays OPEN", ws.task_state(tid), "open")
+
+	# ── keep-out wire: pinned + frozen union, begin_check's shared language ──
+	var hints2 := [_hint("hg", "NG")]
+	var cid2: String = str(ws.ingest_routing_result(_one_route("NG", 7.0), hints2, 2)[0])
+	check("pin the second candidate", ws.pin(cid2))
+	var wire: Array = ws.keepout_candidates_wire()
+	check_eq("keepout wire carries BOTH held candidates", wire.size(), 2)
+	var wire_ids: Array = []
+	for w in wire:
+		wire_ids.append(str((w as Dictionary).get("candidate_id", "")))
+	check("wire names the frozen candidate", cid in wire_ids)
+	check("wire names the pinned candidate", cid2 in wire_ids)
+	check_eq("wire speaks the begin_check candidate language (segments key)",
+		((wire[0] as Dictionary).has("segments")), true)
+
+	# ── scoped draft check can never omit frozen geometry ────────────────────
+	var subset: Array = [cid2]
+	var req: Dictionary = ws.begin_check(subset)
+	var req_ids: Array = []
+	for rc in req.get("candidates", []):
+		req_ids.append(str((rc as Dictionary).get("candidate_id", "")))
+	check("explicit-subset check still carries the frozen candidate", cid in req_ids)
+	check("...alongside the requested one", cid2 in req_ids)
+	check_eq("the CALLER's subset array was not mutated", subset.size(), 1)
+	ws.apply_check_result({})  # discard: mismatched token reverts the pending set
+
+	# Cold-review finding 4: a STALE frozen candidate joins the scoped wire as
+	# CONTEXT ONLY — its geometry is in the overlay, but its "stale" verdict is
+	# not flipped to "checking" and cannot be overwritten without the
+	# include_stale consent the panel gate guards.
+	ws.set_validation(cid, "stale")
+	var req2: Dictionary = ws.begin_check([cid2])
+	var req2_ids: Array = []
+	for rc2 in req2.get("candidates", []):
+		req2_ids.append(str((rc2 as Dictionary).get("candidate_id", "")))
+	check("stale frozen candidate still rides the scoped wire (overlay context)",
+		cid in req2_ids)
+	check_eq("...but its verdict was NOT flipped to checking",
+		str(ws.get_candidate(cid).validation), "stale")
+	# A reply naming it must not write a verdict either (no snapshot ⇒ guard 3).
+	var forged: Dictionary = {"board_token": ws.board_token,
+		"workspace_generation": ws.workspace_generation(),
+		"per_candidate": {cid: "clean", cid2: "clean"}, "findings": []}
+	ws.apply_check_result(forged)
+	check_eq("a reply cannot launder the stale frozen verdict to clean",
+		str(ws.get_candidate(cid).validation), "stale")
+	check_eq("...while the requested candidate's verdict lands normally",
+		str(ws.get_candidate(cid2).validation), "clean")
+	ws.set_validation(cid, "unchecked")
+
+	# Cold-review finding 1: a committed-then-reasked task whose NEW answer is
+	# then FROZEN stays OPEN — settled-but-uncommitted work is outstanding.
+	# (The stale hand-list of live dispositions in _refresh_task_state closed
+	# it; the fix routes through the one _is_live_disposition predicate.)
+	var wsA = PcbRoutingWorkspace.new()
+	var a1: String = str(wsA.ingest_routing_result(_one_route("NT"), [_hint("ht", "NT")], 1)[0])
+	var t_id: String = str(wsA.get_candidate(a1).task_id)
+	check("commit closes the task", wsA.mark_committed(a1, ["t1"], []) \
+		and wsA.task_state(t_id) == "closed")
+	var a2: String = str(wsA.ingest_routing_result(_one_route("NT", 7.0), [_hint("ht", "NT")], 2)[0])
+	check_eq("re-propose reopens it", wsA.task_state(t_id), "open")
+	check("freeze the new answer", wsA.freeze(a2))
+	check_eq("frozen answer keeps the task OPEN (finding-1 regression)",
+		wsA.task_state(t_id), "open")
+
+	# ── unfreeze: the two-step demotion, then the retired path reopens ───────
+	check("unfreeze() demotes to proposed", ws.unfreeze(cid))
+	check_eq("disposition back to proposed", ws.get_candidate(cid).disposition, "proposed")
+	check("...and it left the frozen index", not ws.is_frozen(cid))
+	check("supersede is legal again after unfreeze", ws.supersede(cid))
+
+	# ── commit + uncommit restore the settlement ─────────────────────────────
+	var ws2 = PcbRoutingWorkspace.new()
+	var c3: String = str(ws2.ingest_routing_result(_one_route("NH"), [_hint("hh", "NH")], 1)[0])
+	check("freeze then mark_committed is legal (Accept is the happy path)",
+		ws2.freeze(c3) and ws2.mark_committed(c3, ["t1"], []))
+	check_eq("committed", ws2.get_candidate(c3).disposition, "committed")
+	check("...and left the frozen keep-out index", not ws2.is_frozen(c3))
+	check("uncommit restores the FROZEN prior disposition", ws2.uncommit(c3))
+	check_eq("disposition restored to frozen", ws2.get_candidate(c3).disposition, "frozen")
+	check("...and it re-entered the frozen index", ws2.is_frozen(c3))
+
+	# ── sidecar round-trip + legacy reconcile ────────────────────────────────
+	var side: Dictionary = ws2.to_sidecar_dict()
+	check("sidecar carries the frozen set", (side.get("frozen", []) as Array).has(c3))
+	var ws3 = PcbRoutingWorkspace.from_dict(side)
+	check("frozen survives the round-trip (index)", ws3.is_frozen(c3))
+	check_eq("frozen survives the round-trip (disposition)",
+		ws3.get_candidate(c3).disposition, "frozen")
+	# A pre-freeze sidecar (no "frozen" key) still reconstructs the index from
+	# the disposition axis alone — the reconcile pass, not the key, is the
+	# authority, which is why the key needed no schema bump.
+	side.erase("frozen")
+	var ws4 = PcbRoutingWorkspace.from_dict(side)
+	check("legacy sidecar without the key reconstructs the frozen index", ws4.is_frozen(c3))
+	# And a hand-edited sidecar whose frozen list names a NON-frozen candidate
+	# drops the phantom entry (same reconcile contract as pinned).
+	var side2: Dictionary = ws.to_sidecar_dict()
+	var phantom: Array = (side2.get("frozen", []) as Array)
+	phantom.append(cid2)  # cid2 is pinned, not frozen
+	side2["frozen"] = phantom
+	var ws5 = PcbRoutingWorkspace.from_dict(side2)
+	check("a phantom frozen entry for a pinned candidate is dropped on load",
+		not ws5.is_frozen(cid2))
+	check("...while its pin stands", ws5.is_pinned(cid2))

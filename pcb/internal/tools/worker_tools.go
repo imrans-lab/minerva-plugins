@@ -370,6 +370,32 @@ func HandleBoardHealthChannel(ctx context.Context, w *bridge.Worker, params json
 	return w.Call(ctx, "board_health", params)
 }
 
+// ---- pcb.promote_check (worker-backed broker CHANNEL) ----------------------
+//
+// Epoch UX3 station 11 (docket 019fdf91b3ac, K13): the PROMOTION GATE — the
+// full authoritative verdict (connectivity DRC + geometric DRC + assembly
+// tri-state) in one call, composed fail-closed worker-side: promotable is
+// true only when every check ran to a determinate clean/pass. Same dotted
+// panel-IPC channel idiom as pcb.board_health directly above; forwards
+// verbatim to the Python worker's "promote_check" method.
+
+var PromoteCheckChannel = ToolSpec{
+	Name: "pcb.promote_check",
+	Description: "Panel IPC channel for the K13 promotion gate: full " +
+		"connectivity DRC + geometric DRC (GC1-GC7) + assembly tri-state in " +
+		"one fail-closed verdict. Forwards verbatim to the Python worker's " +
+		"'promote_check' method. Args: {board:<canonical Board dict>}. " +
+		"Returns {ok, result:{promotable, refusals:[string], connectivity, " +
+		"geometric, assembly}} — any error, indeterminate or finding anywhere " +
+		"makes promotable false with the reason named; 'could not check' is a " +
+		"refusal, never a pass.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandlePromoteCheckChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "promote_check", params)
+}
+
 // ---- minerva_pcb_check_libraries ---------------------------------------------------
 
 var CheckLibraries = ToolSpec{

@@ -137,6 +137,13 @@ var show_cutouts: bool = true
 ## copper the view says is not there.
 var show_route_candidates: bool = true
 
+## DRC WITNESS overlay (Epoch UX3 station 4, K11): draw each stored
+## draft-check finding WHERE its problem is — the measured gap/span between
+## `closest` and `witness`, with a marker at the midpoint. Witnesses are what
+## make DRC a feedback loop rather than a pass/fail oracle; without them a
+## human cannot act on a finding. View-menu toggled like every draw flag.
+var show_drc_witnesses: bool = true
+
 ## Copper-layer view filter driven by the toolbar layer selector. Holds "all" or
 ## a CANONICAL copper-layer id ("top" / "in1".."in30" / "bottom") — the selector
 ## shows KiCad names (F.Cu / In1.Cu / B.Cu) but carries the canonical id as item
@@ -441,6 +448,43 @@ signal bus_tool_message(text: String)
 ## routing and the single journalled set_trace_width call. The canvas must not
 ## grow a second way to set a width.
 signal edit_trace_width_requested(trace_id: String)
+
+## Epoch UX3 station 5 (docket 019fdf8faa15): the canvas asks its PANEL to run
+## a steered retry — the router leg is async and panel-owned, so the menu/
+## gesture side emits and the panel completes (PCBPanel._on_candidate_retry_
+## requested → minerva_pcb_workspace_reroute_route, the same tool the agent
+## calls). options: {} = plain retry (reroute supersedes the prior on
+## success); {"corridor": [[x,y],…]} = corridor-steered retry;
+## {"clear_constraint": true} = clear the task's steering, then reroute
+## unguided. One doorway, three intents — the reroute tool owns the semantics.
+signal candidate_retry_requested(candidate_id: String, options: Dictionary)
+
+## Epoch UX3 station 7 (docket 019fdf9009ef): the canvas asks its PANEL to
+## commit these candidates — single or batch — through the SAME gated tool the
+## agent calls (minerva_pcb_workspace_commit). The panel owns the placement-
+## acknowledge dialog the gate may demand; the canvas's old direct
+## workspace.commit call bypassed that gate entirely, which made a fresh
+## assembly finding render commit unreachable by mouse.
+signal candidate_commit_requested(candidate_ids: Array)
+
+## ── corridor-draw gesture state (station 5b) ──────────────────────────────────
+## Armed by the "Retry with corridor…" menu item: each left-click places a
+## corridor waypoint, double-click commits (emits candidate_retry_requested
+## with the polyline), Esc or right-click cancels. The gesture reuses the
+## zone/trace click-per-point grammar rather than a drag — corridors are
+## sparse guidance, not geometry.
+var _corridor_capture := false
+var _corridor_cid := ""
+var _corridor_points: Array = []
+
+## ── candidate junction-drag state (Epoch UX3 station 6a) ─────────────────────
+## Armed by a press ON a junction of a SELECTED ghost; commits on release
+## through RoutingWorkspace.move_junction — the SAME revision-guarded verb
+## minerva_pcb_workspace_edit_candidate calls, never a parallel mutation path.
+var _junction_drag_active := false
+var _junction_drag_cid := ""
+var _junction_drag_point := Vector2.ZERO   ## the junction's ORIGINAL position (verb identity)
+var _junction_drag_current := Vector2.ZERO ## live preview position
 
 ## Duck-typed back-reference to the PcbAnnotationHost (set by PCBPanel), the
 ## SOLE source of pad/pin hit-test logic (host.pad_at / host.pin_info) — the
@@ -804,6 +848,12 @@ const CANDIDATE_MIN_WIDTH_PX := 1.0
 ## the ghost's own layer colour is untouched — "pinned" reads as a cased line, not
 ## as a differently-coloured one. Width is the ghost width plus this margin.
 var candidate_pinned_outline_color: Color = Color(0.95, 0.95, 0.85, 0.75)
+## FROZEN outline (channel 1's second voice — Epoch UX3, K7): the same casing
+## stroke, in ice blue, so "settled" reads as a DIFFERENT casing rather than a
+## recoloured ghost (the hard rule above stands: the stroke itself is always
+## the layer colour). Casing geometry is shared with pinned — one channel, two
+## named states — so the eye learns "cased = held; warm = pinned, ice = frozen".
+var candidate_frozen_outline_color: Color = Color(0.55, 0.8, 1.0, 0.85)
 const CANDIDATE_PINNED_OUTLINE_MARGIN_PX := 3.0
 ## STALE dash (channel 2), in screen px. Applied when validation == "stale" — the
 ## board moved under the candidate (base_board_revision mismatch, see
@@ -880,6 +930,12 @@ var _context_menu_edge_insert: Dictionary = {}
 ## preserve").
 var _context_menu_annotation_bend: Dictionary = {}
 
+## Station 9: the single-selected SUPERSEDED route hint at press time ("" when
+## the selection is not exactly one path-locked pcb_route_hint) — the target
+## of the "Reclaim waypoints" menu item, resolved beside the bend hit above
+## and cleared by the same _reset_context_menu_target discipline.
+var _context_menu_superseded_hint: String = ""
+
 
 func _enter_tree() -> void:
 	# Input config MUST be re-applied on every tree entry, not just once in
@@ -942,6 +998,13 @@ func _exit_tree() -> void:
 	_zone_edge_insert = {}
 	_annotation_gesture = false
 	_reset_context_menu_target()
+	# Station-5/6 gestures reset on reparent for the same stale-state reason
+	# (silent — the dock mount is not a user act to narrate).
+	_corridor_capture = false
+	_corridor_cid = ""
+	_corridor_points = []
+	_junction_drag_active = false
+	_junction_drag_cid = ""
 
 
 ## Create the right-click context menu (component lock/unlock).
@@ -1027,6 +1090,7 @@ func _reset_context_menu_target() -> void:
 	_context_menu_vertex = {}
 	_context_menu_edge_insert = {}
 	_context_menu_annotation_bend = {}
+	_context_menu_superseded_hint = ""
 
 
 ## A separator BETWEEN sections and never at the top — the rule the group section
@@ -1052,6 +1116,11 @@ const MENU_ID_CANDIDATE_PIN := 431
 const MENU_ID_CANDIDATE_UNPIN := 432
 const MENU_ID_CANDIDATE_REJECT := 433
 const MENU_ID_CANDIDATE_TRY_AGAIN := 434
+const MENU_ID_CANDIDATE_FREEZE := 435
+const MENU_ID_CANDIDATE_UNFREEZE := 436
+const MENU_ID_CANDIDATE_RETRY_CORRIDOR := 437
+const MENU_ID_CANDIDATE_CLEAR_STEERING := 438
+const MENU_ID_CANDIDATE_COMMIT_BATCH := 439
 ## Component transform section (docket 019fcb93d367) — 44x; 43x above belongs
 ## to the candidate verbs. PowerPoint's own right-click vocabulary ("Rotate
 ## Right 90°"), the convention the owner's maker persona actually knows.
@@ -1062,6 +1131,9 @@ const MENU_ID_ROTATE_CCW := 442
 ## _context_menu_annotation_bend's doc for why a menu item and not the
 ## gesture core itself offers.
 const MENU_ID_DELETE_ANNOTATION_BEND := 443
+## Epoch UX3 station 9 (docket 019fdf909b64): the mouse exit from the
+## superseded-hint trap — same sanctioned release the MCP convert tool runs.
+const MENU_ID_RECLAIM_HINT_WAYPOINTS := 444
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1082,6 +1154,18 @@ func _add_context_menu_target_items() -> void:
 	if not _context_menu_annotation_bend.is_empty():
 		context_menu.add_item("Delete bend", MENU_ID_DELETE_ANNOTATION_BEND)
 		return
+
+	# 0.5 — RECLAIM (Epoch UX3 station 9): the single-selected annotation is a
+	# SUPERSEDED route hint, whose every edit tool disarms and whose update
+	# refusal used to name two MCP tools as the only exits — a human at the
+	# mouse was simply stuck. One item, the SAME sanctioned release the MCP
+	# convert tool runs (clears the singly-owned constraint at a floor-
+	# respecting revision, strips the marker); a multi-owner constraint
+	# refusal surfaces on the status line with the tool's own message.
+	# Additive — the press's board target below still gets its items.
+	if not _context_menu_superseded_hint.is_empty():
+		context_menu.add_item("Reclaim waypoints (convert to detailed)",
+			MENU_ID_RECLAIM_HINT_WAYPOINTS)
 
 	# 1 + 2. The zone-outline pair. Mutually exclusive by construction (the press
 	# only looks for an edge insertion when no handle was under the cursor), which
@@ -1190,6 +1274,8 @@ func _on_context_menu_pressed(id: int) -> void:
 			_delete_picked_entity(str(_context_menu_target[0]), str(_context_menu_target[1]), "Delete")
 		MENU_ID_DELETE_ANNOTATION_BEND:  # Station 6 fix F1 — the frozen bend hit
 			_delete_annotation_bend(_context_menu_annotation_bend)
+		MENU_ID_RECLAIM_HINT_WAYPOINTS:  # Station 9 — the frozen press target
+			_reclaim_superseded_hint(_context_menu_superseded_hint)
 		# C4a — the route-candidate verbs. Every one resolves the candidate from
 		# the FROZEN press target (never a re-pick), exactly like the board items.
 		MENU_ID_CANDIDATE_COMMIT:
@@ -1202,6 +1288,16 @@ func _on_context_menu_pressed(id: int) -> void:
 			_run_candidate_verb("reject", str(_context_menu_target[1]))
 		MENU_ID_CANDIDATE_TRY_AGAIN:
 			_run_candidate_verb("try_again", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_FREEZE:
+			_run_candidate_verb("freeze", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_UNFREEZE:
+			_run_candidate_verb("unfreeze", str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_RETRY_CORRIDOR:
+			_begin_corridor_capture(str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_CLEAR_STEERING:
+			_request_clear_steering(str(_context_menu_target[1]))
+		MENU_ID_CANDIDATE_COMMIT_BATCH:
+			_request_candidate_commit(selected_candidate_ids.duplicate())
 
 
 ## Commit the ONE bend delete the frozen press resolved (station 6 fix F1).
@@ -1375,6 +1471,18 @@ func _draw() -> void:
 	# note for why hiding copper must not also hide the proposal against it.
 	if show_route_candidates:
 		_draw_route_candidates()
+		# DRC witnesses ride ABOVE the ghosts they testify about (K11) — a
+		# finding's evidence must not hide under the copper it names. Gated on
+		# BOTH flags: hiding the ghosts hides their findings (a witness with
+		# no visible subject is unactionable), and the witness toggle alone
+		# lets an inspecting user clear the overlay without losing the ghosts.
+		if show_drc_witnesses:
+			_draw_drc_witnesses()
+
+	# Corridor capture preview (station 5b) — the user's hand, above all.
+	_draw_corridor_preview()
+	# Junction drag preview (station 6a) — same altitude, same reason.
+	_draw_junction_drag_preview()
 
 	# The trace being drawn sits with the committed copper (same visual language,
 	# same place in the stack) — and, like the zone preview above, is NOT gated on
@@ -2531,6 +2639,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# silently, which is exactly how the via-drag notice bug happened.
 			_reset_context_menu_target()
 
+			# Corridor-draw capture (Epoch UX3 station 5b): while armed it owns
+			# the click outright, exactly like the drawing tools below — each
+			# click a waypoint, double-click commits the steered retry.
+			if _corridor_capture:
+				_handle_corridor_click(world_pos, event.double_click)
+				return
+
 			# Pin inspector (WC-1): click selects the nearest pad within radius,
 			# or clears when empty space is clicked. Owns the click outright —
 			# no select/drag/box-select fallthrough while the mode is active.
@@ -2650,6 +2765,15 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			#   click on empty space      -> deselect all, begin a box-select
 			# The armed tool is NEVER disarmed by an empty click (owner ruling on
 			# 019fb59b5d86) — that is why this branch only touches selection.
+			# DRC WITNESS rung, ABOVE the entity ladder (Epoch UX3 station 4):
+			# a witness draws on top of everything it testifies about, so it
+			# picks first — clicking one focuses the FINDING (selects the
+			# owning candidate + sets selected_finding_id). Deliberately NOT a
+			# new _entity_at kind: the menu/eraser/drag consumers all treat a
+			# witness click as the candidate click it also is.
+			if _handle_witness_click(world_pos):
+				return
+
 			var hit: Array = _entity_at(world_pos)
 			var hit_kind: String = hit[0]
 			var hit_id: String = hit[1]
@@ -2699,6 +2823,17 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 					# editor edits. Set only when the click leaves it selected.
 					if hit_kind == KIND_COMPONENT:
 						focused_component = hit_id
+					# JUNCTION DRAG on a SELECTED ghost (Epoch UX3 station 6):
+					# a press ON one of the candidate's junctions arms the
+					# guarded move_junction gesture instead of the generic
+					# drag (which deliberately captures no candidate — see
+					# _begin_selection_drag's capture rationale). Anywhere
+					# else on the ghost keeps the old select-yes/drag-no-op.
+					if hit_kind == KIND_CANDIDATE \
+							and _begin_candidate_junction_drag(hit_id, world_pos):
+						selection_changed.emit()
+						queue_redraw()
+						return
 					_begin_selection_drag(hit_kind, hit_id, event.position)
 
 			selection_changed.emit()
@@ -2720,6 +2855,13 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# selection drag or a box-select, so nothing else here concerns it.
 			if not _zone_vertex_drag_id.is_empty():
 				_end_zone_vertex_drag()
+				queue_redraw()
+				return
+
+			# A candidate JUNCTION drag owns its release the same way (Epoch
+			# UX3 station 6) — commit through the guarded workspace verb.
+			if _junction_drag_active:
+				_end_candidate_junction_drag(screen_to_world(event.position))
 				queue_redraw()
 				return
 
@@ -2771,6 +2913,11 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			if tool_mode == ToolMode.BUS and (_bus_drawing or not _bus_nets.is_empty()):
 				_cancel_bus_step(true)
 				return
+			# Corridor capture cancels on right-press like every other draw-in-
+			# progress above (station 5b) — the family's advertised grammar.
+			if _corridor_capture:
+				_cancel_corridor_capture(true)
+				return
 			# THE ONE RIGHT-PRESS PATH (B1u5). Every right-click that is not
 			# cancelling a draw in progress arms a pan AND arms the menu; which of
 			# the two happens is decided at release, by distance alone.
@@ -2800,6 +2947,9 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# Station 6 fix F1: a path-kind annotation's bend handle, resolved
 			# the same way — see _context_menu_annotation_bend's own doc.
 			_context_menu_annotation_bend = _annotation_bend_hit_at(world_pos)
+			# Station 9: a single-selected SUPERSEDED route hint offers its
+			# mouse exit on this same press.
+			_context_menu_superseded_hint = _superseded_hint_selected()
 			# An edge insertion is only looked for when NO handle was hit: the
 			# handle radius (9 px) is deliberately wider than the edge tolerance
 			# (3 px) so "a press near a corner is unambiguously the corner's", and
@@ -2845,6 +2995,13 @@ func _handle_mouse_motion(event: InputEventMouseMotion) -> void:
 	# hover chain under it would fight the handle for the cursor.
 	if not _zone_vertex_drag_id.is_empty():
 		_update_zone_vertex_drag(world_pos)
+		return
+
+	# A candidate junction drag owns the pointer the same way (station 6):
+	# the preview position updates; nothing commits until release.
+	if _junction_drag_active:
+		_junction_drag_current = world_pos
+		queue_redraw()
 		return
 
 	# A rotate drag owns the pointer for its whole life, same rule as the two
@@ -3057,6 +3214,16 @@ func _handle_key_input(event: InputEventKey) -> void:
 			# whole family of gestures, and the release that follows must not
 			# resurrect an insertion the user just called off.
 			_zone_edge_insert = {}
+			# Corridor capture is an innermost gesture like the vertex drag
+			# below: cancelling it must not also wipe the selection (station 5b).
+			if _corridor_capture:
+				_cancel_corridor_capture(true)
+				return
+			# A junction drag in progress cancels the same way (station 6a) —
+			# nothing has committed, the ghost is untouched.
+			if _junction_drag_active:
+				_cancel_candidate_junction_drag()
+				return
 			# Same rule for a resolved right-press target (cold-review B1u5 F5).
 			_reset_context_menu_target()
 			# A vertex drag in progress is what Escape cancels FIRST OF ALL (A5):
@@ -3288,6 +3455,13 @@ func _remove_from_selection(kind: String, entity_id: String) -> void:
 		if _routing_workspace != null and _routing_workspace.has_method("set_active") \
 				and str(_routing_workspace.active_candidate_id) == entity_id:
 			_routing_workspace.set_active("")
+		# The finding focus follows the same rule (station 4, cold review F7):
+		# a focused finding whose candidate leaves the selection is an orphan
+		# — get_selection would report a finding on a ghost nobody has
+		# selected, and its halo would keep drawing.
+		if _routing_workspace != null \
+				and str(_routing_workspace.selected_finding_id).begins_with(entity_id + "#"):
+			_routing_workspace.selected_finding_id = ""
 
 
 ## Shift-click semantics: in becomes out, out becomes in — for any kind.
@@ -5216,6 +5390,14 @@ func set_tool_mode(mode: ToolMode, announce_cancel: bool = false) -> void:
 			# it, the same "switching modes clears in-progress state" rule
 			# TRACE/CUTOUT/zone already follow.
 			_reset_bus_tool(announce_cancel)
+		# The station-5/6 gestures follow the SAME rule (cold review F4): a
+		# tool switch abandons an in-progress corridor capture or junction
+		# drag — while armed they own every left press, so surviving the
+		# switch would make the newly-picked tool unusable.
+		if _corridor_capture:
+			_cancel_corridor_capture(announce_cancel)
+		if _junction_drag_active:
+			_cancel_candidate_junction_drag()
 		queue_redraw()
 
 #endregion
@@ -5403,6 +5585,68 @@ static func _is_path_kind(kind: AnnotationKind) -> bool:
 ## gate (AnnotationTransformTool._is_path_kind is reached only from a
 ## single-selection branch) and BendHandleEditTool's _multi_selected rule:
 ## with more than one thing selected there is no unambiguous edit target.
+## Station 9's press-time resolver: the id of the single-selected SUPERSEDED
+## route hint, or "". Selection-keyed (not a spatial hit) — the same rule the
+## bend resolver above applies: the item acts on what the user has already
+## pointed at, and a multi-selection has no unambiguous target.
+func _superseded_hint_selected() -> String:
+	var router = _router_with("get_selected_annotation_id")
+	if router == null or not router.has_method("get_by_id") \
+			or not router.has_method("get_registry") \
+			or not router.has_method("selected_annotation_count"):
+		return ""
+	if router.selected_annotation_count() != 1:
+		return ""
+	var ann_id: String = router.get_selected_annotation_id()
+	if ann_id.is_empty():
+		return ""
+	var ann: Dictionary = router.get_by_id(ann_id)
+	if ann.is_empty() or str(ann.get("kind", "")) != "pcb_route_hint":
+		return ""
+	var registry = router.get_registry()
+	if registry == null:
+		return ""
+	var kind: AnnotationKind = registry.get_annotation_kind(StringName("pcb_route_hint"))
+	if kind == null or not kind.has_method("path_editing_locked"):
+		return ""
+	# path_editing_locked covers superseded AND applied; only the SUPERSEDED
+	# marker has a sanctioned release (conversion) — an applied hint's lock is
+	# lifecycle, not supersession, and converting it is not a thing.
+	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	if not kp.has("waypoints_superseded_by_constraint_revision"):
+		return ""
+	return ann_id
+
+
+## Run the SAME sanctioned release the MCP convert tool runs, through the
+## panel's tool entry — one implementation, two doorways. The tool's whole
+## path is synchronous, so the coroutine completes in-call and hands back the
+## reply Dictionary; refusals (constraint_not_singly_owned and friends) land
+## on the status line with the tool's own message.
+func _reclaim_superseded_hint(hint_id: String) -> void:
+	if hint_id.is_empty():
+		return
+	var router = _router_with("get_panel")
+	var panel = router.get_panel() if router != null else null
+	if panel == null or not panel.has_method("handle_tool"):
+		trace_tool_message.emit("Reclaim needs the panel's tool doorway — unavailable here.")
+		return
+	var reply: Variant = panel.handle_tool("minerva_pcb_hint_convert_to_detailed", {"hint_id": hint_id})
+	if not (reply is Dictionary):
+		trace_tool_message.emit("Reclaim of %s dispatched." % hint_id)
+		queue_redraw()
+		return
+	var rd: Dictionary = reply
+	if bool(rd.get("success", false)):
+		trace_tool_message.emit("Reclaimed %s — its waypoints are editable again%s."
+			% [hint_id, "" if int(rd.get("cleared_constraint_revision", 0)) == 0
+				else " (cleared the task's steering at revision %d)" % int(rd.get("cleared_constraint_revision", 0))])
+	else:
+		trace_tool_message.emit("Reclaim refused (%s): %s"
+			% [str(rd.get("error", "unknown")), str(rd.get("note", ""))])
+	queue_redraw()
+
+
 func _annotation_bend_hit_at(world_pos: Vector2) -> Dictionary:
 	var router = _router_with("get_selected_annotation_id")
 	if router == null or not router.has_method("get_by_id") \
@@ -5452,6 +5696,12 @@ func _annotation_bend_hit_at(world_pos: Vector2) -> Dictionary:
 ## not silently deselect the annotation the user is reading.
 func _clear_selection_all() -> void:
 	_clear_selection()
+	# The finding focus follows the selection it decorates (station 4): a
+	# cleared selection must not leave a halo'd witness claiming otherwise.
+	# _handle_witness_click re-sets it AFTER calling this, so a witness click
+	# still lands focused.
+	if _routing_workspace != null:
+		_routing_workspace.selected_finding_id = ""
 	var router = _router_with("clear_annotation_selection")
 	if router != null:
 		router.clear_annotation_selection()
@@ -6487,6 +6737,14 @@ func set_routing_workspace(workspace, cutover = null) -> void:
 	if _routing_workspace == workspace and _routing_cutover == cutover:
 		return
 	_disconnect_workspace_signals()
+	# An in-flight corridor capture or junction drag names candidates of the
+	# OUTGOING workspace — committing them against the incoming one would edit
+	# the wrong board's ghosts (cold review F4, the A→B document-switch rule).
+	if _corridor_capture:
+		_cancel_corridor_capture(false)
+	if _junction_drag_active:
+		_junction_drag_active = false
+		_junction_drag_cid = ""
 	_routing_workspace = workspace
 	_routing_cutover = cutover
 	_connect_workspace_signals()
@@ -6544,6 +6802,24 @@ func _disconnect_workspace_signals() -> void:
 ## canvas re-derives the whole candidate set each frame anyway (immediate mode),
 ## so a per-id incremental redraw would be strictly more code for the same pixels.
 func _on_workspace_changed(_a: String = "", _b: String = "", _c: String = "") -> void:
+	# SELECTION FOLLOWS THE DRAWN SET (station 5 cold review F2): a candidate
+	# that left the rendered dispositions — retired by a panel-side retry's
+	# supersession, rejected by an MCP call, committed — must also leave the
+	# selection, or get_selection keeps reporting a lit id for a ghost the
+	# canvas no longer paints. The old local-supersede tail did this for menu
+	# verbs only; the workspace signal is the ONE choke point every retiring
+	# path (menu, panel retry, MCP tool) already announces through.
+	# _remove_from_selection also releases the active-candidate and
+	# finding-focus reads keyed to the id.
+	if _routing_workspace != null:
+		var pruned := false
+		for sel_id in selected_candidate_ids.duplicate():
+			var sc = _routing_workspace.get_candidate(str(sel_id))
+			if sc == null or not (str(sc.disposition) in CANDIDATE_RENDERED_DISPOSITIONS):
+				_remove_from_selection(KIND_CANDIDATE, str(sel_id))
+				pruned = true
+		if pruned:
+			selection_changed.emit()
 	queue_redraw()
 	# F2 (cold review, station 7 fix round): pcb_route_hint_kind.render() now
 	# depends on live-candidate state (its render-taxonomy gate), but that
@@ -6602,7 +6878,7 @@ func _candidates_active() -> bool:
 ##                        DOUBLE-DRAW the same route — a brighter, thicker line
 ##                        that reads as a DRC-worthy overlap and is not one. The
 ##                        board is the display of a committed candidate.
-const CANDIDATE_RENDERED_DISPOSITIONS := ["proposed", "pinned"]
+const CANDIDATE_RENDERED_DISPOSITIONS := ["proposed", "pinned", "frozen"]
 
 
 ## Is this candidate segment drawable in the current view? The candidate twin of
@@ -6642,7 +6918,10 @@ func _candidate_via_visible() -> bool:
 ##                          pick/anchor walks do not have to branch to find it.
 ##   width         float    board mm — stroke width (segments) / diameter (vias)
 ##   color         Color    _trace_layer_color(layer) at CANDIDATE_GHOST_ALPHA
-##   outlined      bool     disposition == "pinned"   (channel 1)
+##   outlined      bool     disposition is HELD — pinned or frozen (channel 1)
+##   frozen        bool     disposition == "frozen" — picks the ICE casing
+##                          colour over the warm pinned one (channel 1's
+##                          second voice, Epoch UX3 K7; never a stroke recolour)
 ##   dashed        bool     validation  == "stale"    (channel 2)
 ##   marked        bool     validation in violating/error (channel 3)
 ##   selected      bool     in selected_candidate_ids (channel 4)
@@ -6663,7 +6942,8 @@ func candidate_draw_items() -> Array:
 		if not (str(cand.disposition) in CANDIDATE_RENDERED_DISPOSITIONS):
 			continue
 		var cid := str(cand.candidate_id)
-		var outlined: bool = str(cand.disposition) == "pinned"
+		var is_frozen: bool = str(cand.disposition) == "frozen"
+		var outlined: bool = str(cand.disposition) == "pinned" or is_frozen
 		var validation := str(cand.validation)
 		var dashed: bool = validation == "stale"
 		var marked: bool = validation == "violating" or validation == "error"
@@ -6691,6 +6971,7 @@ func candidate_draw_items() -> Array:
 				"width": float(seg_dict.get("width", 0.25)),
 				"color": Color(_trace_layer_color(_canonical_layer(layer)), CANDIDATE_GHOST_ALPHA),
 				"outlined": outlined,
+				"frozen": is_frozen,
 				"dashed": dashed,
 				"marked": marked,
 				"selected": selected,
@@ -6719,6 +7000,7 @@ func candidate_draw_items() -> Array:
 				"width": float(via_dict.get("diameter", 0.8)),
 				"color": Color(_trace_layer_color(_canonical_layer(from_layer)), CANDIDATE_GHOST_ALPHA),
 				"outlined": outlined,
+				"frozen": is_frozen,
 				"dashed": dashed,
 				"marked": marked,
 				"selected": selected,
@@ -6798,10 +7080,12 @@ func _draw_candidate_segment(item: Dictionary) -> void:
 		draw_polyline(screen_pts, Color(trace_selected_color, 0.3),
 			stroke_px + CANDIDATE_SELECT_HALO_MARGIN_PX * 2.0)
 
-	# Channel 1 — PINNED OUTLINE. A casing UNDER the stroke, never a recolour of
-	# it (see the styling block's rule).
+	# Channel 1 — HELD OUTLINE. A casing UNDER the stroke, never a recolour of
+	# it (see the styling block's rule). Warm = pinned, ice = frozen.
 	if bool(item["outlined"]):
-		draw_polyline(screen_pts, candidate_pinned_outline_color,
+		var casing: Color = candidate_frozen_outline_color \
+			if bool(item.get("frozen", false)) else candidate_pinned_outline_color
+		draw_polyline(screen_pts, casing,
 			stroke_px + CANDIDATE_PINNED_OUTLINE_MARGIN_PX)
 
 	# THE GHOST ITSELF — always the layer colour, always at ghost alpha, one
@@ -6835,8 +7119,10 @@ func _draw_candidate_via(item: Dictionary) -> void:
 		draw_circle(pos, radius + CANDIDATE_SELECT_HALO_MARGIN_PX,
 			Color(trace_selected_color, 0.3))
 	if bool(item["outlined"]):
+		var casing: Color = candidate_frozen_outline_color \
+			if bool(item.get("frozen", false)) else candidate_pinned_outline_color
 		draw_arc(pos, radius + CANDIDATE_PINNED_OUTLINE_MARGIN_PX * 0.5, 0.0, TAU, 24,
-			candidate_pinned_outline_color, CANDIDATE_VIA_RING_WIDTH_PX)
+			casing, CANDIDATE_VIA_RING_WIDTH_PX)
 
 	# A RING, not a filled disc: a candidate via is a proposed hole, and a solid
 	# disc at ghost alpha over committed copper reads as a pad that exists.
@@ -6857,6 +7143,420 @@ func _draw_candidate_via(item: Dictionary) -> void:
 func _draw_candidate_marker(screen_pos: Vector2) -> void:
 	draw_arc(screen_pos, CANDIDATE_MARKER_RADIUS_PX, 0.0, TAU, 16,
 		candidate_violation_color, 2.0)
+
+
+# ── DRC WITNESS overlay (Epoch UX3 station 4, K11) ────────────────────────────
+# "Witnesses are what make DRC a FEEDBACK LOOP rather than a pass/fail oracle
+# — without them a human cannot act on a finding." Every stored draft-check
+# finding carries `closest`/`witness` mm pairs (+ optional `midpoint`): the
+# worker's draft_check reply passes each source finding through whole and
+# collapses point findings' pair onto `at` (methods.py, cold review F1 — the
+# old projection stripped unknown keys and starved this overlay), and the
+# geometric checks mandate the pair by construction (drc_geometric._finding).
+# This overlay draws that geometry WHERE the problem is: the measured gap as a
+# bar between the two points, a ring at the midpoint, and — when the finding
+# is the selected one — a halo.
+#
+# AMBER, not the violation red: candidate_violation_color is channel 3's
+# per-candidate VERDICT ("this ghost is violating"); a witness is the
+# per-FINDING evidence, a different statement, so it gets its own colour and
+# can sit beside the verdict marker without reading as a duplicate.
+#
+# ZOOM CURVE (the HITL-6 marker lesson, restated for witnesses): the ring is
+# px-sized with a boost when zoomed out and an alpha fade at inspection zoom —
+# at high zoom the GAP BAR (true mm geometry) carries the message and a big
+# ring would occlude the copper being inspected. The bar itself never fades:
+# it is evidence, not decoration.
+
+var drc_witness_color: Color = Color(1.0, 0.72, 0.1, 0.95)
+const WITNESS_BAR_WIDTH_PX := 2.0
+const WITNESS_RING_BASE_PX := 6.0
+const WITNESS_RING_BOOST_ZOOM := 4.0
+const WITNESS_RING_BOOST_FRAC := 0.5
+const WITNESS_RING_FADE_START_ZOOM := 8.0
+const WITNESS_RING_FADE_END_ZOOM := 16.0
+const WITNESS_RING_MIN_ALPHA := 0.35
+const WITNESS_HIT_RADIUS_PX := 8.0
+
+
+## The ring's (radius_px, alpha) at a zoom — same curve shape as the route-hint
+## marker (_marker_geometry): boost below WITNESS_RING_BOOST_ZOOM, unit alpha
+## through the working band, fade toward WITNESS_RING_MIN_ALPHA at inspection
+## zoom. Unlike the hint marker it never reaches zero: a finding the user
+## cannot find is the K11 defect itself.
+static func _witness_ring_geometry(zoom_level: float) -> Vector2:
+	var radius := WITNESS_RING_BASE_PX
+	if zoom_level < WITNESS_RING_BOOST_ZOOM:
+		var t: float = clampf((WITNESS_RING_BOOST_ZOOM - zoom_level) / WITNESS_RING_BOOST_ZOOM, 0.0, 1.0)
+		radius += WITNESS_RING_BASE_PX * WITNESS_RING_BOOST_FRAC * t
+	var alpha := 1.0
+	if zoom_level >= WITNESS_RING_FADE_END_ZOOM:
+		alpha = WITNESS_RING_MIN_ALPHA
+	elif zoom_level > WITNESS_RING_FADE_START_ZOOM:
+		var ft: float = (zoom_level - WITNESS_RING_FADE_START_ZOOM) \
+			/ (WITNESS_RING_FADE_END_ZOOM - WITNESS_RING_FADE_START_ZOOM)
+		alpha = lerpf(1.0, WITNESS_RING_MIN_ALPHA, ft)
+	return Vector2(radius, alpha)
+
+
+## THE DERIVATION (the candidate_draw_items twin): every witness this canvas
+## draws, as flat records, one per stored finding on a RENDERED live candidate.
+## Item: {finding_id ("cand_1#0"), candidate_id, type, closest/witness/midpoint
+## Vector2 (midpoint falls back to the pair's average), measured_mm,
+## required_mm, layer, net_name, selected}. Findings whose geometry keys are
+## absent/malformed are SKIPPED (they remain readable through get_selection —
+## nothing is invented to draw). Returns [] when the surface is off.
+func witness_draw_items() -> Array:
+	var items: Array = []
+	if not _candidates_active():
+		return items
+	if not _routing_workspace.has_method("findings_for_candidate"):
+		return items
+	var selected_fid := str(_routing_workspace.selected_finding_id)
+	for cand in _routing_workspace.list_candidates():
+		if cand == null:
+			continue
+		if not (str(cand.disposition) in CANDIDATE_RENDERED_DISPOSITIONS):
+			continue
+		var cid := str(cand.candidate_id)
+		var findings: Array = _routing_workspace.findings_for_candidate(cid)
+		for i in range(findings.size()):
+			var f = findings[i]
+			if not (f is Dictionary):
+				continue
+			var fd: Dictionary = f
+			var closest_raw: Array = fd.get("closest", []) if fd.get("closest", []) is Array else []
+			var witness_raw: Array = fd.get("witness", []) if fd.get("witness", []) is Array else []
+			if closest_raw.size() < 2 or witness_raw.size() < 2:
+				continue
+			# Layer visibility (cold review F3): a witness whose finding names
+			# a copper layer the view has filtered out would testify about
+			# copper the user cannot see — the station's own "no visible
+			# subject" rule. A layerless finding (board-wide classes) always
+			# shows.
+			var f_layer := str(fd.get("layer", "")) if fd.get("layer", null) != null else ""
+			if not f_layer.is_empty() and not _candidate_segment_visible(f_layer):
+				continue
+			var p_closest := Vector2(float(closest_raw[0]), float(closest_raw[1]))
+			var p_witness := Vector2(float(witness_raw[0]), float(witness_raw[1]))
+			var mid_raw: Array = fd.get("midpoint", []) if fd.get("midpoint", []) is Array else []
+			var p_mid: Vector2 = Vector2(float(mid_raw[0]), float(mid_raw[1])) \
+				if mid_raw.size() >= 2 else (p_closest + p_witness) * 0.5
+			var fid := "%s#%d" % [cid, i]
+			items.append({
+				"finding_id": fid,
+				"candidate_id": cid,
+				"type": str(fd.get("type", "")),
+				"closest": p_closest,
+				"witness": p_witness,
+				"midpoint": p_mid,
+				"measured_mm": float(fd.get("measured_mm", 0.0)),
+				"required_mm": float(fd.get("required_mm", 0.0)),
+				"layer": str(fd.get("layer", "")) if fd.get("layer", null) != null else "",
+				"net_name": str(fd.get("net_name", "")) if fd.get("net_name", null) != null else "",
+				"selected": fid == selected_fid,
+			})
+	return items
+
+
+## Paint every witness. Order per item: gap bar, then ring, then the selection
+## halo under both — so the evidence stays legible over its own emphasis.
+func _draw_drc_witnesses() -> void:
+	var ring := _witness_ring_geometry(zoom)
+	for item in witness_draw_items():
+		var a := world_to_screen(item["closest"] as Vector2)
+		var b := world_to_screen(item["witness"] as Vector2)
+		var m := world_to_screen(item["midpoint"] as Vector2)
+		if bool(item["selected"]):
+			draw_circle(m, ring.x + WITNESS_HIT_RADIUS_PX * 0.75,
+				Color(trace_selected_color, 0.3))
+		# The GAP BAR — true mm geometry between the offending pair; on a
+		# point finding (closest == witness) it degenerates to nothing and
+		# the ring alone marks the spot.
+		if a.distance_to(b) > 0.5:
+			draw_line(a, b, Color(drc_witness_color, drc_witness_color.a), WITNESS_BAR_WIDTH_PX)
+		draw_arc(m, ring.x, 0.0, TAU, 16,
+			Color(drc_witness_color, drc_witness_color.a * ring.y), 2.0)
+
+
+## Which witness a click at `world_pos` picks, or {} — hit on the midpoint ring
+## (its drawn radius + slack) or anywhere along the gap bar. Callers gate on
+## the same flags the draw does (pick exactly what is drawn).
+func _witness_at(world_pos: Vector2) -> Dictionary:
+	var ring := _witness_ring_geometry(zoom)
+	var ring_tol: float = (ring.x + WITNESS_HIT_RADIUS_PX) / zoom
+	var bar_tol: float = WITNESS_HIT_RADIUS_PX / zoom
+	# REVERSED: later items paint on top, so the pick walks back-to-front —
+	# what you see on top is what you click (the _candidate_at rule).
+	var items: Array = witness_draw_items()
+	for i in range(items.size() - 1, -1, -1):
+		var item: Dictionary = items[i]
+		if (item["midpoint"] as Vector2).distance_to(world_pos) <= ring_tol:
+			return item
+		var a: Vector2 = item["closest"]
+		var b: Vector2 = item["witness"]
+		if a.distance_to(b) > 0.0001 \
+				and _project_on_segment_static(world_pos, a, b).distance_to(world_pos) <= bar_tol:
+			return item
+	return {}
+
+
+static func _project_on_segment_static(p: Vector2, a: Vector2, b: Vector2) -> Vector2:
+	var ab := b - a
+	var len_sq := ab.length_squared()
+	if len_sq <= 0.0:
+		return a
+	var t: float = clampf((p - a).dot(ab) / len_sq, 0.0, 1.0)
+	return a + ab * t
+
+
+# ── candidate junction drag (Epoch UX3 station 6a) ───────────────────────────
+
+## Junction press tolerance, screen px — matches the zone vertex handle's 9px:
+## a junction is a handle on an already-selected ghost, same altitude.
+const JUNCTION_HIT_PX := 9.0
+
+
+## The nearest junction of `cid` within tolerance of `world_pos`, or Vector2.INF.
+## A JUNCTION here is what the verb means by one: any segment endpoint (via
+## positions coincide with endpoints by construction, so endpoints cover them).
+func _candidate_junction_at(cid: String, world_pos: Vector2) -> Vector2:
+	var c = _routing_workspace.get_candidate(cid) if _routing_workspace != null else null
+	if c == null:
+		return Vector2.INF
+	var tol: float = JUNCTION_HIT_PX / zoom
+	var best := Vector2.INF
+	var best_d: float = tol
+	for seg in c.segments:
+		if not (seg is Dictionary):
+			continue
+		for p in (seg as Dictionary).get("points", []):
+			if p is Vector2:
+				var d: float = (p as Vector2).distance_to(world_pos)
+				if d <= best_d:
+					best_d = d
+					best = p
+	return best
+
+
+## Arm the junction drag if the press landed on a junction of this (already
+## selected) candidate. False ⇒ the caller falls through to the generic drag.
+## A frozen/terminal candidate never arms: the model verb would refuse at
+## release, but arming a drag that can only refuse teaches a gesture that does
+## not exist — the same reason menu items grey rather than refuse after.
+func _begin_candidate_junction_drag(cid: String, world_pos: Vector2) -> bool:
+	if not _candidates_active():
+		return false
+	var c = _routing_workspace.get_candidate(cid)
+	if c == null:
+		return false
+	# Frozen is live-but-locked; superseded/rejected/committed are records.
+	# The model verb refuses all four at release — but arming a drag that can
+	# only refuse teaches a gesture that does not exist.
+	var d := str(c.disposition)
+	if d == "frozen" or d == "superseded" or d == "rejected" or d == "committed":
+		return false
+	var junction := _candidate_junction_at(cid, world_pos)
+	if junction == Vector2.INF:
+		return false
+	_junction_drag_active = true
+	_junction_drag_cid = cid
+	_junction_drag_point = junction
+	_junction_drag_current = junction
+	trace_tool_message.emit("Moving a junction of %s — release to apply (every coincident endpoint and via moves together), Esc cancels." % cid)
+	return true
+
+
+## Commit the drag through the guarded verb. The verb owns every refusal
+## (ambiguous_junction, junction_not_found, degenerate_result, frozen,
+## commit-in-progress) — a refusal leaves the geometry untouched and lands on
+## the status line by name.
+func _end_candidate_junction_drag(release_pos: Vector2) -> void:
+	var cid := _junction_drag_cid
+	var from := _junction_drag_point
+	_junction_drag_active = false
+	_junction_drag_cid = ""
+	if _routing_workspace == null:
+		return
+	if release_pos.distance_to(from) < 0.0001:
+		trace_tool_message.emit("Junction unmoved — nothing changed on %s." % cid)
+		return
+	var res: Dictionary = _routing_workspace.move_junction(cid, from, release_pos)
+	if bool(res.get("ok", false)):
+		trace_tool_message.emit("Moved a junction of %s: %d segment(s)%s followed — its verdict is stale until the next Check."
+			% [cid, (res.get("moved_segment_ids", []) as Array).size(),
+				"" if (res.get("moved_via_ids", []) as Array).is_empty()
+				else " and %d via(s)" % (res.get("moved_via_ids", []) as Array).size()])
+	else:
+		trace_tool_message.emit("Junction move refused (%s): %s"
+			% [str(res.get("error", "unknown")), str(res.get("message", ""))])
+	queue_redraw()
+
+
+func _cancel_candidate_junction_drag() -> void:
+	var cid := _junction_drag_cid
+	_junction_drag_active = false
+	_junction_drag_cid = ""
+	trace_tool_message.emit("Junction move cancelled — %s is untouched." % cid)
+	queue_redraw()
+
+
+## The drag's live preview: a handle ring at the current position and a thin
+## guide from the original junction, drawn above everything (the user's hand).
+func _draw_junction_drag_preview() -> void:
+	if not _junction_drag_active:
+		return
+	var a := world_to_screen(_junction_drag_point)
+	var b := world_to_screen(_junction_drag_current)
+	if a.distance_to(b) > 0.5:
+		_draw_dashed_line(a, b, Color(1.0, 1.0, 1.0, 0.5), 1.0, 4.0)
+	draw_arc(b, 6.0, 0.0, TAU, 16, Color(1.0, 1.0, 1.0, 0.9), 2.0)
+
+
+# ── corridor-draw capture (Epoch UX3 station 5b) ─────────────────────────────
+
+## Arm the corridor gesture for one candidate ("Retry with corridor…"). The
+## menu resolved the candidate; from here every left-click is a corridor
+## waypoint until double-click commits or Esc/right-click cancels.
+func _begin_corridor_capture(candidate_id: String) -> void:
+	if candidate_id.is_empty() or _routing_workspace == null \
+			or _routing_workspace.get_candidate(candidate_id) == null:
+		return
+	_corridor_capture = true
+	_corridor_cid = candidate_id
+	_corridor_points = []
+	# Wording note (Codex 1056 finding 3b): these teach lines say "corridor
+	# point", never the w-word — the INV-4 region guard greps every CODE line
+	# in this region for it, string literals included, and the guard's
+	# bluntness is deliberate (grep-provable). It is also the truer word: the
+	# gesture places corridor steering points, not hint waypoints.
+	trace_tool_message.emit("Corridor for %s: click the points the new route should follow; double-click the last one to reroute, Esc cancels." % candidate_id)
+	queue_redraw()
+
+
+func _handle_corridor_click(world_pos: Vector2, is_double: bool) -> void:
+	# THE ZONE IDIOM (cold review F3): a double-click's SECOND press commits
+	# and appends NOTHING — its first press (double_click false) already
+	# placed the final waypoint, and appending here would add an OS-slop
+	# near-duplicate the old epsilon dedupe could never catch (2px of jitter
+	# is 2/zoom mm, orders of magnitude over any dedupe epsilon).
+	if is_double:
+		_commit_corridor_capture()
+		return
+	_corridor_points.append(world_pos)
+	trace_tool_message.emit("Corridor point %d at (%.2f, %.2f) — double-click to reroute, Esc cancels."
+		% [_corridor_points.size(), world_pos.x, world_pos.y])
+	queue_redraw()
+
+
+## Commit: hand the polyline to the panel as a corridor-steered retry, in the
+## TOOL'S OWN WIRE SHAPE — [{x_mm, y_mm}, …], exactly what minerva_pcb_
+## workspace_reroute_route's corridor parser accepts (cold review F1: the
+## first cut emitted bare [x, y] pairs, which that parser refuses by name, so
+## the headline gesture never worked end-to-end and each side's tests blessed
+## their own half). A single-point corridor is legal steering; an EMPTY one is
+## a cancel, stated as such.
+func _commit_corridor_capture() -> void:
+	var cid := _corridor_cid
+	var pts: Array = []
+	for p in _corridor_points:
+		pts.append({"x_mm": (p as Vector2).x, "y_mm": (p as Vector2).y})
+	_corridor_capture = false
+	_corridor_cid = ""
+	_corridor_points = []
+	if pts.is_empty():
+		trace_tool_message.emit("Corridor cancelled — no points were placed.")
+		queue_redraw()
+		return
+	trace_tool_message.emit("Rerouting %s along a %d-point corridor…" % [cid, pts.size()])
+	candidate_retry_requested.emit(cid, {"corridor": pts})
+	queue_redraw()
+
+
+func _cancel_corridor_capture(announce: bool) -> void:
+	var cid := _corridor_cid
+	_corridor_capture = false
+	_corridor_cid = ""
+	_corridor_points = []
+	if announce:
+		trace_tool_message.emit("Corridor cancelled — %s is untouched." % cid)
+	queue_redraw()
+
+
+## Commit request (station 7): single or batch, one doorway. The panel runs
+## the gated tool and owns the acknowledge dialog; headless (no connection)
+## the emission is a harmless no-op and the message still narrates intent.
+func _request_candidate_commit(candidate_ids: Array) -> void:
+	if candidate_ids.is_empty():
+		return
+	if candidate_ids.size() == 1:
+		trace_tool_message.emit("Committing %s…" % str(candidate_ids[0]))
+	else:
+		trace_tool_message.emit("Committing %d candidates as one undo step…" % candidate_ids.size())
+	candidate_commit_requested.emit(candidate_ids)
+	queue_redraw()
+
+
+## "Clear steering": ask the panel to clear the task's routing constraint and
+## reroute unguided — the clear_constraint:true path of the same reroute tool.
+func _request_clear_steering(candidate_id: String) -> void:
+	if candidate_id.is_empty():
+		return
+	trace_tool_message.emit("Clearing steering on %s's task and rerouting unguided…" % candidate_id)
+	candidate_retry_requested.emit(candidate_id, {"clear_constraint": true})
+
+
+## The corridor preview: amber dashed polyline + a dot per waypoint, drawn
+## ABOVE everything (it is what the user's hand is doing this instant).
+func _draw_corridor_preview() -> void:
+	if not _corridor_capture or _corridor_points.is_empty():
+		return
+	var screen_pts := PackedVector2Array()
+	for p in _corridor_points:
+		screen_pts.append(world_to_screen(p))
+	if screen_pts.size() >= 2:
+		for i in range(screen_pts.size() - 1):
+			_draw_dashed_line(screen_pts[i], screen_pts[i + 1],
+				Color(drc_witness_color, 0.9), 2.0, 6.0)
+	for sp in screen_pts:
+		draw_circle(sp, 4.0, Color(drc_witness_color, 0.9))
+
+
+## Handle a select-click that landed on a witness: focus the FINDING — select
+## the owning candidate (so every existing candidate affordance applies), set
+## the workspace's selected_finding_id (the get_selection-visible focus, and
+## the draw's halo), and teach what the finding says. Returns true when a
+## witness took the click.
+func _handle_witness_click(world_pos: Vector2) -> bool:
+	if not show_drc_witnesses or not show_route_candidates:
+		return false
+	var item: Dictionary = _witness_at(world_pos)
+	if item.is_empty():
+		return false
+	# NO STEAL from board entities (cold review F5): a witness bar can cross a
+	# component/trace the user is about to drag or double-click. The witness
+	# claims the press only when the entity ladder would resolve to EMPTY
+	# space or to a CANDIDATE — the two cases where focusing the finding is
+	# unambiguously what the click means.
+	var under: Array = _entity_at(world_pos)
+	if not (str(under[0]) in ["", KIND_CANDIDATE]):
+		return false
+	var cid := str(item["candidate_id"])
+	_clear_selection_all()
+	_add_to_selection(KIND_CANDIDATE, cid)
+	_routing_workspace.selected_finding_id = str(item["finding_id"])
+	# ANNOUNCE the final state (cold review F2): _clear_selection_all's own
+	# emit broadcast the intermediate empty set; without this second emit the
+	# panel chrome (status/properties/delete button) would keep reflecting
+	# "nothing selected" while the canvas shows the ghost + halo.
+	selection_changed.emit()
+	trace_tool_message.emit("%s on %s: measured %.3fmm, required %.3fmm%s%s — ask about the selection (minerva_pcb_get_selection) for the full finding."
+		% [str(item["type"]), cid,
+			float(item["measured_mm"]), float(item["required_mm"]),
+			"" if str(item["net_name"]).is_empty() else " (net %s)" % str(item["net_name"]),
+			"" if str(item["layer"]).is_empty() else " on %s" % str(item["layer"])])
+	queue_redraw()
+	return true
 
 
 ## Which candidate a click at `world_pos` picks, or "".
@@ -6969,15 +7669,48 @@ func _add_candidate_menu_seam(candidate_id: String) -> void:
 	if cand == null:
 		return
 	var pinned: bool = str(cand.disposition) == "pinned"
+	var is_frozen: bool = str(cand.disposition) == "frozen"
 
 	_context_menu_separate()
 	_add_candidate_verb_item("Commit", MENU_ID_CANDIDATE_COMMIT, candidate_id, "committed")
+	# BATCH COMMIT (station 7a): when the press target is one of SEVERAL
+	# selected ghosts, offer the whole selection as ONE undoable step — the
+	# batch tool's own contract. Per-member legality is the tool's to judge
+	# (all-or-nothing, refused by name); the item itself only needs plurality.
+	if selected_candidate_ids.size() > 1 and candidate_id in selected_candidate_ids:
+		context_menu.add_item("Commit %d candidates" % selected_candidate_ids.size(),
+			MENU_ID_CANDIDATE_COMMIT_BATCH)
 	if pinned:
 		_add_candidate_verb_item("Unpin", MENU_ID_CANDIDATE_UNPIN, candidate_id, "proposed")
 	else:
 		_add_candidate_verb_item("Pin", MENU_ID_CANDIDATE_PIN, candidate_id, "pinned")
+	# FREEZE/UNFREEZE share one slot exactly as Pin/Unpin do (Epoch UX3, K7):
+	# a candidate is frozen or it is not, so the slot shows the move available
+	# from where it stands. On a frozen candidate the Pin, Reject and Try-again
+	# items grey out through the same can_transition gate every item uses —
+	# the menu SHOWS freeze's teeth rather than hiding them.
+	if is_frozen:
+		_add_candidate_verb_item("Unfreeze", MENU_ID_CANDIDATE_UNFREEZE, candidate_id, "proposed")
+	else:
+		_add_candidate_verb_item("Freeze", MENU_ID_CANDIDATE_FREEZE, candidate_id, "frozen")
 	_add_candidate_verb_item("Reject", MENU_ID_CANDIDATE_REJECT, candidate_id, "rejected")
 	_add_candidate_verb_item("Try again", MENU_ID_CANDIDATE_TRY_AGAIN, candidate_id, "superseded")
+	# ── STEERED RETRY (Epoch UX3 station 5) ──────────────────────────────────
+	# "Retry with corridor…" arms the corridor-draw gesture; availability
+	# mirrors Try again (both end in a reroute that retires this candidate on
+	# success, so both are gated on the supersede row). "Clear steering" is
+	# live only when this candidate's task actually carries a routing
+	# constraint — shown-but-greyed otherwise, the family's "not from here"
+	# idiom, so the item teaches that steering CAN exist even when none does.
+	_add_candidate_verb_item("Retry with corridor…", MENU_ID_CANDIDATE_RETRY_CORRIDOR,
+		candidate_id, "superseded")
+	context_menu.add_item("Clear steering", MENU_ID_CANDIDATE_CLEAR_STEERING)
+	var task = _routing_workspace.get_task(str(cand.task_id)) \
+		if _routing_workspace.has_method("get_task") else null
+	var constrained: bool = task != null and task.has_method("is_constrained") \
+		and task.is_constrained()
+	if not constrained or not cand.can_transition_to("superseded"):
+		context_menu.set_item_disabled(context_menu.item_count - 1, true)
 
 
 ## One verb item, disabled when the legality table says the move is not
@@ -7019,17 +7752,24 @@ func _run_candidate_verb(verb: String, candidate_id: String) -> void:
 		return
 
 	if verb == "commit":
-		if data == null:
-			trace_tool_message.emit("No board to commit onto.")
-			return
-		var res: Dictionary = _routing_workspace.commit(candidate_id, data)
-		if bool(res.get("ok", false)):
-			trace_tool_message.emit("Committed %s as %d trace(s) and %d via(s) — one undo step reverts the copper AND the candidate."
-				% [candidate_id, (res.get("trace_ids", []) as Array).size(),
-					(res.get("via_ids", []) as Array).size()])
-		else:
-			trace_tool_message.emit("Commit refused (%s): %s"
-				% [str(res.get("error", "unknown")), str(res.get("message", ""))])
+		# Station 7c: the mouse commit goes through the PANEL's gated tool —
+		# the old direct workspace.commit here bypassed the placement-
+		# acknowledge gate, making a fresh assembly finding unanswerable by
+		# mouse. The panel narrates the outcome (or raises the dialog).
+		_request_candidate_commit([candidate_id])
+		return
+
+	# ── TRY AGAIN IS NOW A REAL RETRY (Epoch UX3 station 5a) ─────────────────
+	# The old split ("the canvas does its half — supersede — and the status
+	# line names the router half") is closed: the item emits
+	# candidate_retry_requested and the PANEL runs the whole reroute (which
+	# retires this candidate only when the router actually lands a successor —
+	# strictly better than supersede-then-point-at-a-button, where a failed
+	# retry had already destroyed the answer). Legality is still gated by the
+	# menu item (superseded row), and the reroute tool re-checks it by name.
+	if verb == "try_again":
+		trace_tool_message.emit("Retrying %s — rerouting its task (the prior stays until a successor lands)…" % candidate_id)
+		candidate_retry_requested.emit(candidate_id, {})
 		queue_redraw()
 		return
 
@@ -7041,8 +7781,10 @@ func _run_candidate_verb(verb: String, candidate_id: String) -> void:
 			applied = _routing_workspace.unpin(candidate_id)
 		"reject":
 			applied = _routing_workspace.reject(candidate_id)
-		"try_again":
-			applied = _routing_workspace.supersede(candidate_id)
+		"freeze":
+			applied = _routing_workspace.freeze(candidate_id)
+		"unfreeze":
+			applied = _routing_workspace.unfreeze(candidate_id)
 	if not applied:
 		var err: Dictionary = _routing_workspace.last_transition_error \
 			if _routing_workspace.last_transition_error is Dictionary else {}
@@ -7061,10 +7803,11 @@ func _run_candidate_verb(verb: String, candidate_id: String) -> void:
 		"reject":
 			trace_tool_message.emit("Rejected %s — task %s is open again."
 				% [candidate_id, str(cand.task_id)])
-		"try_again":
-			# The half-and-half is named out loud, per the seam's own contract.
-			trace_tool_message.emit("Retired %s — task %s is open again. Run Propose (or minerva_pcb_workspace_reroute_route) for a new route."
-				% [candidate_id, str(cand.task_id)])
+		"freeze":
+			trace_tool_message.emit("Froze %s — settled: future routing routes around it, and Reject/Try again/edits are refused until you Unfreeze."
+				% candidate_id)
+		"unfreeze":
+			trace_tool_message.emit("Unfroze %s — it is a plain draft again." % candidate_id)
 	# Clear the selection of a candidate that just left the drawn set, so the
 	# canvas is not holding a lit id for a ghost it no longer paints.
 	if not (str(cand.disposition) in CANDIDATE_RENDERED_DISPOSITIONS) \
@@ -7091,7 +7834,14 @@ func _emit_candidate_teach_line(candidate_id: String) -> void:
 	var cand = _routing_workspace.get_candidate(candidate_id)
 	if cand == null:
 		return
-	trace_tool_message.emit("%s — right-click for Commit · %s · Reject · Try again."
+	# A FROZEN candidate's sentence names only the verbs its state will accept
+	# (cold review finding 8): offering Pin/Reject/Try-again in prose while the
+	# menu greys them teaches the user a menu that does not exist.
+	if str(cand.disposition) == "frozen":
+		trace_tool_message.emit("%s — right-click for Commit · Unfreeze (settled: other verbs refuse until unfrozen)."
+			% _candidate_menu_label(candidate_id))
+		return
+	trace_tool_message.emit("%s — right-click for Commit · %s · Freeze · Reject · Try again."
 		% [_candidate_menu_label(candidate_id),
 			"Unpin" if str(cand.disposition) == "pinned" else "Pin"])
 

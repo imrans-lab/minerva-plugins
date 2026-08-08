@@ -25,7 +25,7 @@ tests are what says so.
 KEEPOUT is the exception that proves the rule: a keepout emits no copper by
 definition, so it has nothing to compute and nothing to drop. Its constraint is
 on the ROUTER (and on any pour sharing its layer), which is why the router seal
-treats it differently from a pour — see ``test_keepout_still_refuses_routing``.
+treats it differently from a pour — see ``test_keepout_routes_as_polygon_obstacle``.
 """
 
 from __future__ import annotations
@@ -197,27 +197,44 @@ def test_router_accepts_a_pour_bearing_board(pour_board):
     so a trace cannot collide with a pour. Refusing here declined to route the
     exact region a pour exists to make routable.
 
-    See ``test_keepout_still_refuses_routing`` for the half that stays closed.
+    See ``test_keepout_routes_as_polygon_obstacle`` for the keepout half —
+    once a refusal too, now honoured by the grid's rasteriser.
     """
     _reject_unroutable_board(pour_board)  # must not raise
 
 
-def test_keepout_still_refuses_routing():
-    """A KEEPOUT still fails the router closed — the half of the seal that stays.
+def test_keepout_routes_as_polygon_obstacle():
+    """A KEEPOUT no longer refuses routing — the grid honours it (Epoch UX3
+    station 2, K6, router item 019fc155bc32).
 
-    This is the fail-open the narrowing above must not have caused. A keepout is
-    an authored prohibition on copper; the grid does not model it; routing
-    through one would put copper where the author said none may go, and — unlike
-    a pour — the keepout emits no copper of its own for any later check to
-    collide with. Nothing downstream would ever notice. So it is refused until
-    the grid honours it.
+    The predecessor of this test (``test_keepout_still_refuses_routing``)
+    pinned the fail-closed refusal "until the grid honours it". That day
+    arrived: ``RoutingGrid.mark_keepout_polygon`` rasterises the region
+    per-layer and both router obstacle loops read ``Obstacle.polygon``. So the
+    seal's new shape is: the board PROJECTS (no raise), and the projection
+    carries the keepout as a polygon obstacle with its layer scope intact —
+    absent either half, copper could land where the author forbade it with
+    nothing downstream noticing (the keepout emits no copper of its own to
+    collide with).
     """
     board = _compile(_board_with_zone(kind="keepout", net=None))
     assert board.zones[0].kind is ZoneKind.KEEPOUT
-    with pytest.raises(UnsupportedGeometry) as excinfo:
-        _reject_unroutable_board(board)
-    assert "keepout" in str(excinfo.value), (
-        f"refusal must NAME the unmodeled feature; got: {excinfo.value}")
+    _reject_unroutable_board(board)  # must not raise — the refusal is retired
+
+    from pcb_worker.route_bridge import resolved_board_to_router
+    projected = resolved_board_to_router(board)
+    keepouts = [o for o in projected.obstacles if o.type == "keepout"]
+    assert len(keepouts) == 1, (
+        "the keepout zone must reach the engine as exactly one obstacle")
+    ob = keepouts[0]
+    assert ob.polygon and len(ob.polygon) >= 3, (
+        "a keepout blocks by its OWN polygon, never a circumscribing disc")
+    assert ob.radius is None, (
+        "polygon and disc are exclusive: a radius here would double-block")
+    # The fixture authors the zone on "top" — the scope must survive as F.Cu
+    # only, which is the fidelity the old refusal said a disc could not offer.
+    assert ob.blocks_all_layers is False
+    assert ob.layer == "F.Cu"
 
 
 def test_netless_keepout_compiles(pour_board):

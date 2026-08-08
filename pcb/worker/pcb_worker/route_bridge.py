@@ -72,10 +72,12 @@ from .ir_pads import UnsupportedGeometry, iter_ir_pads, pad_copper_shape
 from .pad_source import is_th_drill
 from .resolved_board import (
     LayerRole,
+    LineGeometry,
     OvalHole,
     RectOutline,
     ResolvedBoard,
     RoundHole,
+    Side,
     SlotHole,
     ZoneKind,
 )
@@ -415,44 +417,16 @@ def _reject_unroutable_board(rb: ResolvedBoard) -> None:
         raise UnsupportedGeometry(
             f"routing v1 models a rectangular (RectOutline) board only; got "
             f"{type(rb.outline).__name__}")
-    keepouts = [z for z in rb.zones if z.kind is ZoneKind.KEEPOUT]
-    if keepouts:
-        # A KEEPOUT stays fail-closed, and the distinction from a pour below is
-        # the whole point. A keepout is an authored PROHIBITION on copper.
-        #
-        # THE RIGHT ANSWER IS TO ROUTE AROUND IT, NOT TO REFUSE. A keepout IS a
-        # routing constraint — that is most of what it means — so the correct v1
-        # is to hand its outline to the grid as an obstacle region. That is not
-        # done here because the engine CANNOT EXPRESS ONE, verified by execution
-        # rather than by reading: ``agent_router.board.Obstacle`` declares
-        # ``polygon``, ``layer`` and ``blocks_all_layers``, and ``router.py``
-        # reads NONE of them (0 occurrences of each; its two obstacle loops at
-        # :1099 and :1870 are both ``if obstacle.radius:``). The grid is handed a
-        # centre and a radius, and marks every layer. The same gap is already
-        # recorded a few hundred lines below in ``_hole_obstacle``.
-        #
-        # A disc CAN approximate a polygon — that is exactly what ``_hole_obstacle``
-        # and ``_unaddressable_pad_obstacle`` do for ovals and slots, over-blocking
-        # on the safe side. It is not done for a keepout because the approximation
-        # would over-block on TWO independent axes at once: the circumscribing disc
-        # of a long thin keepout (an antenna cut-out is the motivating case) covers
-        # a large multiple of its area, and the layer field being unread means a
-        # top-only keepout would also block the bottom. A board that "routes" while
-        # a spurious disc blocks half of it is a worse failure than one that says
-        # why it will not route, because the first is silent.
-        #
-        # Closing this belongs in the grid, which owns rasterisation, not in a
-        # second rasteriser bolted on this side of the boundary. Filed for the
-        # router item family (019fc155bc32).
-        raise UnsupportedGeometry(
-            f"routing v1 cannot honour keepout zones; board declares "
-            f"{len(keepouts)} ({', '.join(z.id for z in keepouts)}). A keepout "
-            f"forbids copper in a region the routing grid has no way to represent: "
-            f"agent_router.board.Obstacle declares polygon/layer/blocks_all_layers "
-            f"but router.py reads only (position, radius), so a polygon obstacle "
-            f"handed to it is SILENTLY IGNORED. Routing fails closed rather than "
-            f"lay copper inside a region the author declared must stay clear. "
-            f"Fix belongs in the grid's rasteriser (router item 019fc155bc32)")
+    # KEEPOUT zones are no longer a refusal (Epoch UX3 station 2, K6 —
+    # closing router item 019fc155bc32 the way its refusal message said the
+    # fix belonged: in the grid's rasteriser). The engine's obstacle loops now
+    # read ``Obstacle.polygon``/``layer``/``blocks_all_layers`` and rasterise
+    # them per layer (``RoutingGrid.mark_keepout_polygon``), so an authored
+    # keepout becomes exactly what it means: a region the router routes
+    # AROUND, on the layer(s) it names. The projection happens in
+    # ``_keepout_obstacle`` below; what stays fail-closed there is the
+    # geometry this projection cannot express faithfully (arc contour
+    # segments), same doctrine as every other entry here.
     # COPPER POURS ARE DELIBERATELY NOT AN OBSTACLE — and this is a narrowing of a
     # refusal, so read the reason before widening it back.
     #
@@ -555,6 +529,53 @@ def _unaddressable_copper_obstacle(ir_pad) -> Obstacle:
     centre = ((box.min_x + box.max_x) / 2.0, (box.min_y + box.max_y) / 2.0)
     radius = math.hypot(box.max_x - box.min_x, box.max_y - box.min_y) / 2.0
     return Obstacle(position=centre, type="unaddressable_pad", radius=radius)
+
+
+def _keepout_obstacle(zone) -> Obstacle:
+    """An authored KEEPOUT zone as a polygon obstacle, layer scope intact.
+
+    Epoch UX3 station 2 (K6): the projection the old fail-closed refusal was
+    waiting for. The outline's LINE segments become the polygon vertex loop
+    verbatim — no disc approximation, so a long thin keepout (the antenna
+    cut-out case the refusal named) blocks exactly its own area plus the
+    grid's uniform keepout margin. The layer survives too: a single-side
+    copper zone blocks only its own layer; a wildcard (``*.Cu``) or sideless
+    copper zone blocks every routing layer — the fail-safe reading of "the
+    author did not narrow it".
+
+    What stays fail-closed: an ARC contour segment. Flattening one faithfully
+    is a tessellation-tolerance decision this projection should not invent
+    (an under-flattened arc would UNDER-block its convex side — the illegal
+    direction), so a keepout with arc segments refuses by name instead."""
+    points: list[tuple[float, float]] = []
+    for seg in zone.authored_outline.segments:
+        if not isinstance(seg, LineGeometry):
+            raise UnsupportedGeometry(
+                f"keepout zone {zone.id}: outline carries a "
+                f"{type(seg).__name__} segment; routing models straight-edged "
+                f"keepouts only (an approximated arc could under-block its "
+                f"convex side, which is never legal)")
+        points.append((float(seg.a[0]), float(seg.a[1])))
+    if len(points) < 3:
+        raise UnsupportedGeometry(
+            f"keepout zone {zone.id}: outline has {len(points)} usable "
+            f"vertices; a region needs at least three")
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    centre = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+    layer_alias: str | None = None
+    if not zone.layer.is_wildcard:
+        if zone.layer.side is Side.TOP:
+            layer_alias = "F.Cu"
+        elif zone.layer.side is Side.BOTTOM:
+            layer_alias = "B.Cu"
+    return Obstacle(
+        position=centre,
+        type="keepout",
+        polygon=points,
+        blocks_all_layers=layer_alias is None,
+        layer=layer_alias,
+    )
 
 
 def _hole_obstacle(hole) -> Obstacle:
@@ -684,6 +705,11 @@ def resolved_board_to_router(rb: ResolvedBoard) -> Board:
         nets[resolved_net.name] = net
 
     obstacles.extend(_hole_obstacle(hole) for hole in rb.holes)
+    # Authored keepout zones join the obstacle set with their polygon + layer
+    # scope intact (Epoch UX3 station 2, K6 — see _keepout_obstacle).
+    obstacles.extend(
+        _keepout_obstacle(zone) for zone in rb.zones
+        if zone.kind is ZoneKind.KEEPOUT)
 
     return Board(
         pads=pads,
