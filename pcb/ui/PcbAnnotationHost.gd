@@ -1181,19 +1181,12 @@ func build_route_hint_envelope(
 		dest_pins: Array = []) -> Dictionary:
 	if author_kind != "ai":
 		author_kind = "human"
-	# Epoch UX3 station 8b (docket 019fdf903a4a): the panel's hint-width
-	# picker applies HERE, the one choke point every authoring doorway (both
-	# gesture tools + the toolbar path) already funnels through. HUMAN-only:
-	# an agent expresses width explicitly on its own call (width_mm arg or
-	# add_route_intent's validated width_mm), and the picker is the human's
-	# hand — stamping it onto AI envelopes would silently rewrite the agent's
-	# stated intent. An explicit width_mm arg always wins (null = unset).
-	if width_mm == null and author_kind == "human":
-		var width_panel = get_panel()
-		if width_panel != null and width_panel.has_method("get_hint_authoring_width"):
-			var picker_w: float = float(width_panel.get_hint_authoring_width())
-			if picker_w > 0.0:
-				width_mm = picker_w
+	# Width: the explicit width_mm ARG is the only stamping path (null =
+	# unset = net-class default). Station 8b briefly added a panel-picker
+	# fallback here; HITL-7c (owner override, docket 019fe0395764) removed it
+	# — width is now edited per-hint from the hint's own context menu, after
+	# authoring, so an envelope never carries a width its author did not
+	# explicitly pass.
 	if detail_level.is_empty():
 		detail_level = _derive_detail_level(waypoints.size())
 	var now := int(Time.get_unix_time_from_system())

@@ -83,6 +83,7 @@ func _init() -> void:
 	_test_double_click_does_not_retoggle_during_picking()
 	_test_mixed_width_offsets_reusing_geometry_pins()
 	_test_inner_fold_refusal_three_wide_nets()
+	_test_propose_doorway_teach_line()
 	# AWAITED (unlike every synchronous test above): both call
 	# panel_tools.handle(), a coroutine end to end (see panel_tools.gd's own
 	# class-doc note) because it awaits internally on other branches. A bare
@@ -619,3 +620,27 @@ func _test_esc_ladder_and_reclick_disarm() -> void:
 	check("…but SILENTLY (no new message)", msgs.size() == msg_count_before2)
 
 	canvas.free()
+
+
+# ── HITL-7a (docket 019fe0391d06): the propose doorway is TAUGHT at the mouse ─
+# Shift+dbl-click proposes ghosts (the mouse twin of Shift+Enter — same
+# _commit_bus(propose) call, asserted by reading the same drawing-phase teach
+# line a user reads; the gesture's key-modifier read is untestable headless,
+# so the taught contract is the pin).
+
+func _test_propose_doorway_teach_line() -> void:
+	print("\n-- HITL-7a: drawing teach line names BOTH propose gestures --")
+	var rig := _rig()
+	var canvas = rig[0]
+	var msgs: Array = []
+	canvas.bus_tool_message.connect(func(t: String) -> void: msgs.append(t))
+	canvas._handle_bus_click(Vector2(10.0, 10.0), false)   # N1
+	canvas._handle_bus_click(Vector2(20.0, 10.0), false)   # N2
+	canvas._start_bus_draw()
+	check("drawing started", canvas._bus_drawing)
+	var teach := str(msgs[msgs.size() - 1]) if not msgs.is_empty() else ""
+	check("the teach line names Shift+Enter", teach.contains("Shift+Enter"))
+	check("…AND the mouse twin Shift+dbl-click (HITL-7a: it was keyboard-only and invisible)",
+		teach.contains("Shift+dbl-click"))
+	check("…and says plainly which verb makes COPPER vs PROPOSES",
+		teach.contains("COPPER") and teach.contains("PROPOSES"))

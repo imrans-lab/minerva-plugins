@@ -340,7 +340,14 @@ var _route_flow_mode_label: Label = null
 ## _route_flow_buttons' mutual-exclusion radio set.
 var _propose_button: Button = null
 var _check_button: Button = null
+## HITL-7c: the per-hint width row (hidden until "Set hint width…" reveals
+## it), the spin, its label, the BOUND hint id, and the programmatic-set
+## reentrancy gate (loading a value must not write it back).
+var _hint_width_row: HBoxContainer = null
+var _hint_width_label: Label = null
 var _hint_width_spin: SpinBox = null
+var _hint_width_hint_id: String = ""
+var _hint_width_setting := false
 ## kind_key of the cluster's own currently-active tool, or "" when none.
 var _active_route_flow_kind: String = ""
 ## The tool instance the cluster itself activated (used to tell apart "the
@@ -696,6 +703,8 @@ func _build_ui() -> void:
 	# Epoch UX3 station 7: the canvas's commit doorway — single AND batch ride
 	# the gated tool; this panel owns the placement-acknowledge dialog.
 	_canvas.candidate_commit_requested.connect(_on_candidate_commit_requested)
+	# HITL-7c: "Set hint width…" reveals the per-hint width row.
+	_canvas.edit_hint_width_requested.connect(_on_edit_hint_width_requested)
 	_canvas.cutout_tool_message.connect(_show_transient_status)
 	_canvas.bus_tool_message.connect(_show_transient_status)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
@@ -1200,27 +1209,30 @@ func _build_sidebar() -> VBoxContainer:
 	_propose_button.pressed.connect(_on_propose_button_pressed)
 	hints_flow.add_child(_propose_button)
 
-	# Hint/intent authoring width (Epoch UX3 station 8b, docket 019fdf903a4a):
-	# 0 = auto (net class / router default — the absent-key behavior, byte-
-	# identical); >0 stamps kind_payload.width_mm on every HUMAN-authored hint
-	# and on the pad→pad intent, the channel the router already honors with
-	# width_source:"hint". Applied at ONE choke point per doorway: the host's
-	# build_route_hint_envelope (human envelopes) and the SingleTrace tool's
-	# intent delegation (explicit width_mm arg).
-	var width_row := HBoxContainer.new()
-	width_row.name = "HintWidthRow"
-	var width_label := Label.new()
-	width_label.text = "Width"
-	width_row.add_child(width_label)
+	# Per-HINT width row (HITL-7c, docket 019fe0395764 — owner override of
+	# station 8b's standing authoring picker: "feels disconnected from
+	# anything; should be a right-click context menu option"). HIDDEN until
+	# the selected hint's "Set hint width…" menu item reveals it, bound BY ID
+	# to that hint; edits write kind_payload.width_mm through
+	# update_annotation (0 = auto: the key is erased, net-class default
+	# rules). The same reveal-and-focus idiom the trace-width item
+	# established (comment 962 / BT-68).
+	_hint_width_row = HBoxContainer.new()
+	_hint_width_row.name = "HintWidthRow"
+	_hint_width_row.visible = false
+	_hint_width_label = Label.new()
+	_hint_width_label.text = "Width"
+	_hint_width_row.add_child(_hint_width_label)
 	_hint_width_spin = SpinBox.new()
 	_hint_width_spin.name = "HintWidthSpin"
 	_hint_width_spin.min_value = 0.0
 	_hint_width_spin.max_value = 5.0
 	_hint_width_spin.step = 0.05
 	_hint_width_spin.value = 0.0
-	_hint_width_spin.tooltip_text = _wrap_tooltip("Trace width for newly authored route hints/intents, in mm — 0 = auto (net class default)")
-	width_row.add_child(_hint_width_spin)
-	hints_flow.add_child(width_row)
+	_hint_width_spin.tooltip_text = _wrap_tooltip("This hint's trace width in mm — 0 = auto (net class default)")
+	_hint_width_spin.value_changed.connect(_on_hint_width_changed)
+	_hint_width_row.add_child(_hint_width_spin)
+	hints_flow.add_child(_hint_width_row)
 
 	# Draft-DRC over the live ghosts (Epoch UX3 station 3, docket
 	# 019fdf90662a): PCBPanel.check_draft shipped with NO UI caller — only the
@@ -1228,7 +1240,11 @@ func _build_sidebar() -> VBoxContainer:
 	# seeing a verdict. Same code path as minerva_pcb_workspace_check.
 	_check_button = Button.new()
 	_check_button.name = "CheckButton"
-	_check_button.text = "Check"
+	var check_icon := _load_icon("check_24.png")
+	if check_icon != null:
+		_check_button.icon = check_icon
+	else:
+		_check_button.text = "Check"
 	_check_button.tooltip_text = _wrap_tooltip("Draft-DRC the live route proposals against the board and each other (board unchanged)")
 	_check_button.pressed.connect(_on_check_button_pressed)
 	hints_flow.add_child(_check_button)
@@ -1238,7 +1254,11 @@ func _build_sidebar() -> VBoxContainer:
 	# button that makes the live board the durable design of record.
 	var promote_btn := Button.new()
 	promote_btn.name = "PromoteButton"
-	promote_btn.text = "Promote"
+	var promote_icon := _load_icon("promote_24.png")
+	if promote_icon != null:
+		promote_btn.icon = promote_icon
+	else:
+		promote_btn.text = "Promote"
 	# Tooltip stays inside the BT-44 90-char budget; the dialog carries detail.
 	promote_btn.tooltip_text = _wrap_tooltip("Write the board back to canonical YAML — allowed only when the full DRC gate passes")
 	promote_btn.pressed.connect(_on_promote_button_pressed)
@@ -2441,13 +2461,67 @@ func point_at_entity(kind: String, id: String) -> Dictionary:
 	return {"ok": true}
 
 
-## The hint-authoring width the picker currently holds (station 8b). 0.0 =
-## auto (net class default — the caller omits width entirely). Read by the
-## host's envelope choke point and the SingleTrace tool's intent delegation.
-func get_hint_authoring_width() -> float:
-	if _hint_width_spin == null:
-		return 0.0
-	return float(_hint_width_spin.value)
+## HITL-7c: "Set hint width…" reveal — bind the row to THIS hint, load its
+## current width (0 = no width_mm key = auto), show, and focus the field.
+func _on_edit_hint_width_requested(hint_id: String) -> void:
+	if _annotation_host == null or hint_id.is_empty():
+		return
+	var ann: Dictionary = _annotation_host.get_by_id(hint_id)
+	if ann.is_empty():
+		_show_transient_status("Hint %s is no longer on the board." % hint_id)
+		return
+	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	_hint_width_hint_id = hint_id
+	if _hint_width_label != null:
+		_hint_width_label.text = "Width (%s)" % hint_id
+	if _hint_width_spin != null:
+		_hint_width_setting = true
+		_hint_width_spin.value = float(kp.get("width_mm", 0.0))
+		_hint_width_setting = false
+	if _hint_width_row != null:
+		_hint_width_row.visible = true
+	call_deferred("_reveal_hint_width_spin")
+
+
+## Deferred focus half — same one-layout-pass rule _reveal_trace_width_spin
+## records (a same-frame ensure_control_visible races the reveal above).
+func _reveal_hint_width_spin() -> void:
+	if _hint_width_spin == null or not is_instance_valid(_hint_width_spin):
+		return
+	var line_edit := _hint_width_spin.get_line_edit()
+	if line_edit == null or not line_edit.is_inside_tree() or not line_edit.is_visible_in_tree():
+		return
+	if _sidebar_scroll != null:
+		_sidebar_scroll.ensure_control_visible(_hint_width_spin)
+	line_edit.grab_focus()
+	line_edit.select_all()
+
+
+## Write the bound hint's width. 0 = auto: the key is ERASED (an absent key
+## is the net-class default; a stored 0.0 would be an invisible sentinel —
+## the D9a-2 rule). One update_annotation revision per change.
+func _on_hint_width_changed(value: float) -> void:
+	if _hint_width_setting or _hint_width_hint_id.is_empty() or _annotation_host == null:
+		return
+	var ann: Dictionary = _annotation_host.get_by_id(_hint_width_hint_id)
+	if ann.is_empty():
+		_show_transient_status("Hint %s is no longer on the board — width not applied." % _hint_width_hint_id)
+		_hint_width_hint_id = ""
+		if _hint_width_row != null:
+			_hint_width_row.visible = false
+		return
+	var new_ann: Dictionary = ann.duplicate(true)
+	var kp: Dictionary = (new_ann.get("kind_payload", {}) as Dictionary).duplicate(true)
+	if value > 0.0:
+		kp["width_mm"] = value
+	else:
+		kp.erase("width_mm")
+	new_ann["kind_payload"] = kp
+	if _annotation_host.update_annotation(_hint_width_hint_id, new_ann):
+		_show_transient_status("%s width → %s." % [_hint_width_hint_id,
+			("%.2fmm" % value) if value > 0.0 else "auto (net class)"])
+	else:
+		_show_transient_status("Width update refused — %s's route is locked (see its own notice)." % _hint_width_hint_id)
 
 
 ## The Propose button's selection scope (station 5d): the ids of currently

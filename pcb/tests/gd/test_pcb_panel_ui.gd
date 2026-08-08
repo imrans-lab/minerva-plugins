@@ -807,67 +807,88 @@ func _test_propose_selection_scope_and_retry_narration() -> void:
 	_driver.free_panel(panel)
 
 
-# ── Epoch UX3 station 8: intent parity + the width picker ─────────────────────
+# ── Epoch UX3 station 8 + HITL-7c: intent parity + per-hint width menu ────────
 # (a) the bare pad→pad gesture delegates to minerva_pcb_add_route_intent (ONE
-# implementation: eager task, same-net validation, same reply); (b) the width
-# picker stamps kind_payload.width_mm on human-authored envelopes at the host
-# choke point and rides the intent delegation as an explicit arg; (c) an
-# explicit width always wins, AI envelopes are never stamped.
+# implementation: eager task, same-net validation, same reply); (b) HITL-7c
+# (docket 019fe0395764, owner override of the station-8b authoring picker):
+# width is edited PER HINT from its context menu — the hidden HintWidthRow
+# binds by id, writes kind_payload.width_mm through update_annotation, 0
+# erases the key (auto); an explicit envelope width_mm arg is the only
+# authoring-time stamping path.
 
 func _test_intent_parity_and_width_picker() -> void:
-	print("-- UX3-4: pad→pad mints a TRUE intent; width picker channels --")
+	print("-- UX3-4 + HITL-7c: pad→pad mints a TRUE intent; per-hint width menu --")
 	var panel: Variant = await _mount_panel_in_tree()
 	var host: Variant = panel.get_annotation_host()
 	host.set_panel(panel)
 	var ws: Variant = panel.get_routing_workspace()
+	var canvas: Variant = panel._canvas
 
-	# ── (b) the host choke point ─────────────────────────────────────────────
-	var spin: Variant = panel.find_child("HintWidthSpin", true, false)
-	check("the Proposals group carries the width picker", spin != null)
-	panel._hint_width_spin.value = 0.4
+	# ── (b) authoring: NO picker fallback anywhere ───────────────────────────
 	var env_h: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
 		[[1.0, 1.0], [2.0, 2.0]], "human")
-	check("a human envelope picks up the spinner width",
-		is_equal_approx(float((env_h.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.4))
-	var env_ai: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
-		[[1.0, 1.0]], "ai")
-	check("an AI envelope is NEVER stamped by the human's picker",
-		not (env_ai.get("kind_payload", {}) as Dictionary).has("width_mm"))
+	check("HITL-7c: a human envelope with no width arg carries NO width_mm",
+		not (env_h.get("kind_payload", {}) as Dictionary).has("width_mm"))
 	var env_explicit: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
 		[[1.0, 1.0]], "human", "", 0.7)
-	check("an explicit width argument beats the picker",
+	check("an explicit width argument still stamps",
 		is_equal_approx(float((env_explicit.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.7))
-	panel._hint_width_spin.value = 0.0
-	var env_auto: Dictionary = host.build_route_hint_envelope(1.0, 1.0, "", "F.Cu", "waypoint",
-		[[1.0, 1.0]], "human")
-	check("picker at 0 (auto) stamps nothing — absent-key behavior intact",
-		not (env_auto.get("kind_payload", {}) as Dictionary).has("width_mm"))
+	check("the panel no longer exposes an authoring-default width",
+		not panel.has_method("get_hint_authoring_width"))
 
-	# ── (a) the delegation seam mints a TRUE intent ──────────────────────────
+	# ── (a) the delegation seam mints a TRUE intent (width-free) ─────────────
 	# _canonical_board wires net VCC = U1.8 + R1.1.
 	var kind_script: Variant = load("res://../../minerva-plugins/pcb/ui/kinds/pcb_route_hint_kind.gd")
 	var tool: Variant = kind_script.SingleTraceAuthorTool.new()
 	tool.on_activate(host)
-	panel._hint_width_spin.value = 0.3
 	var reply: Variant = tool._mint_intent_via_panel("U1.8", "R1.1")
 	check("the delegation returns the intent tool's reply", reply is Dictionary)
+	var hint_id := ""
 	if reply is Dictionary:
 		var rd: Dictionary = reply
 		check("…success", bool(rd.get("success", false)))
 		check_eq_str("…net resolved from the pins", str(rd.get("net", "")), "VCC")
-		var hint_id := str(rd.get("hint_id", ""))
+		hint_id = str(rd.get("hint_id", ""))
 		check("…a hint was minted", not hint_id.is_empty())
 		check_eq_str("…the eager task uses the ingest key format",
 			str(rd.get("task_id", "")), "VCC|%s" % hint_id)
 		check("…the eager task EXISTS in the workspace",
 			ws.get_task(str(rd.get("task_id", ""))) != null)
-		check("…the picker width rode the delegation",
-			is_equal_approx(float(rd.get("width_mm", 0.0)), 0.3))
 		var ann: Dictionary = host.get_by_id(hint_id)
 		check("…the intent annotation carries NO waypoints (a true intent)",
 			((ann.get("kind_payload", {}) as Dictionary).get("waypoints", [1]) as Array).is_empty())
-		check("…and the picker width landed on its payload",
-			is_equal_approx(float((ann.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.3))
+		check("…and lands at the net-class default (no width_mm — HITL-7c)",
+			not (ann.get("kind_payload", {}) as Dictionary).has("width_mm"))
+
+	# ── (b') the context-menu width flow, end to end ─────────────────────────
+	var row: Variant = panel.find_child("HintWidthRow", true, false)
+	check("the per-hint width row exists and starts HIDDEN",
+		row != null and not (row as Control).visible)
+	host.set_selected_annotation_ids(PackedStringArray([hint_id]))
+	check_eq_str("the press-time resolver names the selected hint",
+		str(canvas._selected_route_hint_id()), hint_id)
+	canvas._create_context_menu()
+	canvas._context_menu_target = ["", ""]
+	canvas._context_menu_route_hint = canvas._selected_route_hint_id()
+	canvas._update_context_menu_for_selection()
+	var labels: Array = []
+	for i in range(canvas.context_menu.item_count):
+		labels.append(canvas.context_menu.get_item_text(i))
+	check("the menu offers Set hint width…", "Set hint width…" in labels)
+	# The menu item's emit → panel handler binds and reveals the row.
+	canvas.edit_hint_width_requested.emit(hint_id)
+	check("the row is revealed and bound",
+		(row as Control).visible and str(panel._hint_width_hint_id) == hint_id)
+	# A spin change writes THIS hint's width, one revision.
+	panel._hint_width_spin.value = 0.45
+	var after: Dictionary = host.get_by_id(hint_id)
+	check("the width landed on the hint's payload",
+		is_equal_approx(float((after.get("kind_payload", {}) as Dictionary).get("width_mm", 0.0)), 0.45))
+	# 0 = auto: the key is ERASED, never a 0.0 sentinel (D9a-2 rule).
+	panel._hint_width_spin.value = 0.0
+	var cleared: Dictionary = host.get_by_id(hint_id)
+	check("width 0 erases the key (auto = net-class default)",
+		not (cleared.get("kind_payload", {}) as Dictionary).has("width_mm"))
 
 	# A pin with no net refuses BY NAME — the answer the legacy look-alike
 	# path could never give.
@@ -897,6 +918,11 @@ func _test_promote_headless_fail_closed() -> void:
 
 	var btn: Variant = panel.find_child("PromoteButton", true, false)
 	check("the Proposals flow carries the Promote button", btn != null)
+	# HITL-7d (docket 019fe03963df): Check and Promote carry icons like every
+	# sibling button (text stays the load-failure fallback only).
+	check("Promote has its icon", btn != null and (btn as Button).icon != null)
+	var check_btn2: Variant = panel.find_child("CheckButton", true, false)
+	check("Check has its icon", check_btn2 != null and (check_btn2 as Button).icon != null)
 
 	# Path guards answer BEFORE the ipc guard — the specific refusal wins even
 	# with the backend down (cold review F8's coverage gap, closed).

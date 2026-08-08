@@ -562,16 +562,11 @@ class SingleTraceAuthorTool:
 		var panel = _host.get_panel()
 		if panel == null or not panel.has_method("handle_tool"):
 			return null
+		# No width here (HITL-7c removed the authoring picker): the intent
+		# lands at the net-class default; width is edited per-hint afterward
+		# from the hint's own context menu ("Set hint width…").
 		var args: Dictionary = {"source_pin": source_pin, "dest_pin": dest_pin,
 			"author": "human"}
-		# The width picker rides the intent too (station 8b): the intent tool
-		# builds its envelope with author "ai" (the host choke point stamps
-		# human envelopes only), so the human's picked width is passed
-		# explicitly here, through the tool's own validated width_mm arg.
-		if panel.has_method("get_hint_authoring_width"):
-			var w: float = float(panel.get_hint_authoring_width())
-			if w > 0.0:
-				args["width_mm"] = w
 		var reply: Variant = panel.handle_tool("minerva_pcb_add_route_intent", args)
 		return reply if reply is Dictionary else null
 

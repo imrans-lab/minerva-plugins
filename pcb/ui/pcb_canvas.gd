@@ -467,6 +467,10 @@ signal candidate_retry_requested(candidate_id: String, options: Dictionary)
 ## assembly finding render commit unreachable by mouse.
 signal candidate_commit_requested(candidate_ids: Array)
 
+## HITL-7c (docket 019fe0395764): "Set hint width…" — the panel reveals its
+## per-hint width row bound to this id (the trace-width reveal idiom).
+signal edit_hint_width_requested(hint_id: String)
+
 ## ── corridor-draw gesture state (station 5b) ──────────────────────────────────
 ## Armed by the "Retry with corridor…" menu item: each left-click places a
 ## corridor waypoint, double-click commits (emits candidate_retry_requested
@@ -936,6 +940,10 @@ var _context_menu_annotation_bend: Dictionary = {}
 ## and cleared by the same _reset_context_menu_target discipline.
 var _context_menu_superseded_hint: String = ""
 
+## HITL-7c: the single-selected route hint at press time, ANY lifecycle — the
+## target of the "Set hint width…" item. Same frozen-press-target discipline.
+var _context_menu_route_hint: String = ""
+
 
 func _enter_tree() -> void:
 	# Input config MUST be re-applied on every tree entry, not just once in
@@ -1091,6 +1099,7 @@ func _reset_context_menu_target() -> void:
 	_context_menu_edge_insert = {}
 	_context_menu_annotation_bend = {}
 	_context_menu_superseded_hint = ""
+	_context_menu_route_hint = ""
 
 
 ## A separator BETWEEN sections and never at the top — the rule the group section
@@ -1134,6 +1143,9 @@ const MENU_ID_DELETE_ANNOTATION_BEND := 443
 ## Epoch UX3 station 9 (docket 019fdf909b64): the mouse exit from the
 ## superseded-hint trap — same sanctioned release the MCP convert tool runs.
 const MENU_ID_RECLAIM_HINT_WAYPOINTS := 444
+## HITL-7c (docket 019fe0395764): per-hint width editing from the right-click
+## menu — the owner's override of the standing Proposals-area picker.
+const MENU_ID_SET_HINT_WIDTH := 445
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1166,6 +1178,16 @@ func _add_context_menu_target_items() -> void:
 	if not _context_menu_superseded_hint.is_empty():
 		context_menu.add_item("Reclaim waypoints (convert to detailed)",
 			MENU_ID_RECLAIM_HINT_WAYPOINTS)
+
+	# 0.6 — SET HINT WIDTH (HITL-7c, owner override of the standing picker):
+	# width is a property of THIS hint, edited in place from its own menu —
+	# the same reveal idiom the trace-width item established (comment 962).
+	# Greyed on a path-locked hint (superseded/applied): its route is settled
+	# or already copper, so a width edit would claim an effect it cannot have.
+	if not _context_menu_route_hint.is_empty():
+		context_menu.add_item("Set hint width…", MENU_ID_SET_HINT_WIDTH)
+		if _route_hint_path_locked(_context_menu_route_hint):
+			context_menu.set_item_disabled(context_menu.item_count - 1, true)
 
 	# 1 + 2. The zone-outline pair. Mutually exclusive by construction (the press
 	# only looks for an edge insertion when no handle was under the cursor), which
@@ -1276,6 +1298,8 @@ func _on_context_menu_pressed(id: int) -> void:
 			_delete_annotation_bend(_context_menu_annotation_bend)
 		MENU_ID_RECLAIM_HINT_WAYPOINTS:  # Station 9 — the frozen press target
 			_reclaim_superseded_hint(_context_menu_superseded_hint)
+		MENU_ID_SET_HINT_WIDTH:  # HITL-7c — same frozen-target discipline
+			edit_hint_width_requested.emit(_context_menu_route_hint)
 		# C4a — the route-candidate verbs. Every one resolves the candidate from
 		# the FROZEN press target (never a re-pick), exactly like the board items.
 		MENU_ID_CANDIDATE_COMMIT:
@@ -2950,6 +2974,8 @@ func _handle_mouse_button(event: InputEventMouseButton) -> void:
 			# Station 9: a single-selected SUPERSEDED route hint offers its
 			# mouse exit on this same press.
 			_context_menu_superseded_hint = _superseded_hint_selected()
+			# HITL-7c: any single-selected route hint offers width editing.
+			_context_menu_route_hint = _selected_route_hint_id()
 			# An edge insertion is only looked for when NO handle was hit: the
 			# handle radius (9 px) is deliberately wider than the edge tolerance
 			# (3 px) so "a press near a corner is unambiguously the corner's", and
@@ -5585,6 +5611,41 @@ static func _is_path_kind(kind: AnnotationKind) -> bool:
 ## gate (AnnotationTransformTool._is_path_kind is reached only from a
 ## single-selection branch) and BendHandleEditTool's _multi_selected rule:
 ## with more than one thing selected there is no unambiguous edit target.
+## HITL-7c's press-time resolver: the id of the single-selected route hint,
+## ANY lifecycle, or "". Selection-keyed like every hint resolver here — the
+## item acts on what the user already pointed at.
+func _selected_route_hint_id() -> String:
+	var router = _router_with("get_selected_annotation_id")
+	if router == null or not router.has_method("get_by_id") \
+			or not router.has_method("selected_annotation_count"):
+		return ""
+	if router.selected_annotation_count() != 1:
+		return ""
+	var ann_id: String = router.get_selected_annotation_id()
+	if ann_id.is_empty():
+		return ""
+	var ann: Dictionary = router.get_by_id(ann_id)
+	if ann.is_empty() or str(ann.get("kind", "")) != "pcb_route_hint":
+		return ""
+	return ann_id
+
+
+## Is this route hint's path locked (superseded/applied)? The kind owns the
+## predicate; unknown/unregistered degrades to unlocked (the write path still
+## refuses — this only decides menu greying).
+func _route_hint_path_locked(ann_id: String) -> bool:
+	var router = _router_with("get_by_id")
+	if router == null or not router.has_method("get_registry"):
+		return false
+	var ann: Dictionary = router.get_by_id(ann_id)
+	if ann.is_empty():
+		return false
+	var registry = router.get_registry()
+	var kind = registry.get_annotation_kind(StringName("pcb_route_hint")) if registry != null else null
+	return kind != null and kind.has_method("path_editing_locked") \
+		and bool(kind.path_editing_locked(ann))
+
+
 ## Station 9's press-time resolver: the id of the single-selected SUPERSEDED
 ## route hint, or "". Selection-keyed (not a spatial hit) — the same rule the
 ## bend resolver above applies: the item acts on what the user has already
@@ -6460,7 +6521,11 @@ func _bus_net_at(world_pos: Vector2) -> Dictionary:
 
 func _handle_bus_click(world_pos: Vector2, is_double_click: bool) -> void:
 	if is_double_click and _bus_drawing:
-		_commit_bus()
+		# HITL-7a (docket 019fe0391d06): Shift+double-click PROPOSES ghosts —
+		# the mouse twin of Shift+Enter, which was the only propose doorway
+		# and invisible at the mouse. Same _commit_bus(propose) call, so the
+		# gesture and the key can never diverge.
+		_commit_bus(Input.is_key_pressed(KEY_SHIFT))
 		return
 	if not _bus_drawing:
 		# The PICKING grammar has no double-click verb. A physical double-click
@@ -6534,7 +6599,7 @@ func _start_bus_draw() -> void:
 	_bus_spine_points = PackedVector2Array()
 	_bus_has_preview = false
 	bus_tool_message.emit(
-		"Spine for [%s] on %s — click vertices, Enter/dbl-click commits, Shift+Enter proposes ghosts (Esc cancels the spine)."
+		"Spine for [%s] on %s — click vertices; Enter/dbl-click commits COPPER, Shift+Enter or Shift+dbl-click PROPOSES ghosts for review (Esc cancels)."
 			% [_bus_nets_joined(), _bus_layer])
 	queue_redraw()
 
