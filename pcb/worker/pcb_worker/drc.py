@@ -390,6 +390,16 @@ def _check_dangling(segs, pads, vias, clr) -> list[dict]:
                 if rp in seen:
                     continue
                 # Any pad (any net) -> copper-connected (short, not open).
+                #
+                # DEPENDENCY, stated because this check is net-BLIND on purpose
+                # (cold review of the CPN1 repair round): a foreign-net pad or
+                # via that suppresses a dangling finding here is itself either
+                # touching this net's copper (a short — check A) or within
+                # clearance of it (a geometric clearance violation — GC2), so
+                # SOME check fires. That holds only when the geometric DRC runs
+                # too. run_drc ALONE is topology-only and will read such an
+                # endpoint as clean; the promote gate composes both, which is
+                # what makes the silence here safe rather than merely quiet.
                 if any(_dist(pt, p.pt) <= clr for p in pads):
                     continue
                 if any(_dist(pt, v) <= clr for v in vias):
@@ -511,8 +521,10 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
         one island, not two). Cross-layer crossings earn NO such credit —
         different layers overlap freely and only connect at a via/TH pad;
       * a via joins every same-net segment endpoint within ``clr`` of it —
-        the harvest carries via POSITIONS only (see _harvest_vias), which is
-        exactly the "a via exists here" fact layer bridging needs.
+        the harvest carries each via's POSITION and its declared NET (see
+        _harvest_vias); the position is the "a via exists here" fact layer
+        bridging needs, and the net is what keeps a FOREIGN conductor from
+        joining this net's islands.
 
     Segments on different layers joined at a COINCIDENT point are joined here
     without demanding the via: check D (layer_change_no_via) already reports
@@ -631,11 +643,12 @@ def connectivity_completeness(board: dict, scope_nets=None) -> dict:
     trace_nets = {s.net for s in segs}
     zone_nets = {z.get("net") for z in _list(board.get("zones"))
                  if isinstance(z, dict) and z.get("net")}
-    # _harvest_vias deliberately drops net ownership (positions are all the
-    # violation checks need); the copper CENSUS reads it off the raw dicts so
-    # a netted via still counts as that net's copper.
-    netted_via_nets = {v.get("net") for v in _list(board.get("vias"))
-                       if isinstance(v, dict) and v.get("net")}
+    # ONE reader of via ownership. This used to re-read board["vias"] directly
+    # with its own truthiness rule while the harvest applied a stricter
+    # non-empty-str rule — two readers of one fact, and they disagreed: a via
+    # carrying a non-string net (e.g. `net: 123`) was "netless" to the census
+    # gate but not counted here. Both now come off the harvested records.
+    netted_via_nets = {v.net for v in vias if v.net}
 
     missing: list[str] = []
     partial: list[dict] = []

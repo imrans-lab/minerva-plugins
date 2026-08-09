@@ -403,3 +403,103 @@ def test_an_unrecognized_field_is_STILL_rejected(tmp_path):
                         _floor(min_hole_to_coper_mm=0.25))  # note the typo
     with pytest.raises(RuleProfileError, match="unknown field.*min_hole_to_coper_mm"):
         load_rule_profile(profile_id, library_root=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Feature-specific drill floors (Codex review 1086 finding 2)
+# ---------------------------------------------------------------------------
+
+
+def _hole_board(diameter_mm: float, *, plated: bool, profile: str) -> dict:
+    return {
+        "version": 1, "name": "holeprobe", "width_mm": 20, "height_mm": 15,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.1, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.66, "via_drill_mm": 0.3,
+                         "rule_profile": profile},
+        "components": [
+            {"ref": "C1", "footprint": "C_0805", "value": "X", "x_mm": 5,
+             "y_mm": 7, "rotation_deg": 0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": -0.95, "y_mm": 0},
+                      {"number": "2", "x_mm": 0.95, "y_mm": 0}]}],
+        "nets": [{"name": "N1", "pins": ["C1.2"]}],
+        "mounting_holes": [{"x_mm": 15, "y_mm": 7,
+                            "diameter_mm": diameter_mm, "plated": plated}],
+    }
+
+
+def _gc3_required(board: dict):
+    """The gc3_drill floor this board's hole was measured against, or None."""
+    from pcb_worker.compile_board import compile_board
+    from pcb_worker.drc_geometric import run_geometric_drc
+    from pcb_worker.resolved_board import ResolutionSuccess
+
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess), [
+        d.code for d in result.diagnostics if d.severity == "error"]
+    findings = [f for f in run_geometric_drc(result.board).get("findings", ())
+                if f["type"] == "gc3_drill"]
+    return findings[0]["required_mm"] if findings else None
+
+
+def test_npth_floor_is_enforced_when_the_profile_declares_one():
+    """The false clean this field exists to close: JLCPCB publishes a 0.50mm
+    NPTH minimum that the general 'Drill Diameter: 0.15 - 6.3 mm' row does not
+    cover, so a 0.20mm non-plated hole reported CLEAN against 0.15."""
+    assert _gc3_required(_hole_board(0.20, plated=False,
+                                     profile="jlcpcb-2layer")) == 0.5
+    assert _gc3_required(_hole_board(0.45, plated=False,
+                                     profile="jlcpcb-2layer")) == 0.5
+    # At and above the published floor: nothing to report.
+    assert _gc3_required(_hole_board(0.50, plated=False,
+                                     profile="jlcpcb-2layer")) is None
+    assert _gc3_required(_hole_board(3.20, plated=False,
+                                     profile="jlcpcb-2layer")) is None
+
+
+def test_a_profile_that_declares_no_npth_floor_is_unchanged():
+    """ABSENT means 'this profile said nothing', not zero — the general drill
+    floor governs, exactly as it did before the field existed. Without this
+    row the feature could silently start over-refusing on every other
+    profile."""
+    assert load_rule_profile("v1-fab-conservative").floor.min_npth_mm is None
+    # v1's general drill floor is 0.2, so 0.15 fails against THAT, not 0.5.
+    assert _gc3_required(_hole_board(0.15, plated=False,
+                                     profile="v1-fab-conservative")) == 0.2
+    assert _gc3_required(_hole_board(0.25, plated=False,
+                                     profile="v1-fab-conservative")) is None
+
+
+def test_an_oblong_pad_drill_is_measured_as_a_slot():
+    """THE COLD-REVIEW FALSE CLEAN. The first implementation inferred
+    slot-ness from the projected capsule geometry — but a pad's oblong drill
+    is deliberately modelled as a DEGENERATE disc of the major radius (a
+    documented GC6 over-approximation), so it read as a round hole and skipped
+    the slot floor entirely. A plated 0.3mm-wide slot passed while JLCPCB's
+    published minimum plated-slot width is 0.5mm.
+
+    The fix carries the drill KIND as a fact from the source; this row is what
+    keeps anyone from inferring it from geometry again."""
+    from pcb_worker.compile_board import compile_board
+    from pcb_worker.drc_geometric import project_board
+    from pcb_worker.resolved_board import ResolutionSuccess
+
+    board = {
+        "version": 1, "name": "slotpad", "width_mm": 20, "height_mm": 15,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.1, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.66, "via_drill_mm": 0.3,
+                         "rule_profile": "jlcpcb-2layer"},
+        "components": [
+            {"ref": "J1", "footprint": "TH_TestPoint", "value": "X",
+             "x_mm": 10, "y_mm": 7, "rotation_deg": 0, "layer": "top",
+             "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                       "drill_mm": 0.3, "annulus_diameter_mm": 1.6}]}],
+        "nets": [],
+    }
+    result = compile_board(board)
+    assert isinstance(result, ResolutionSuccess)
+    holes = [h for h in project_board(result.board).holes if h.origin == "pad"]
+    assert holes, "the pad drill must reach the projection"
+    # A ROUND pad drill must not be classified as a slot — the converse error.
+    assert all(not h.is_slot for h in holes)

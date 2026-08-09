@@ -155,9 +155,15 @@ def test_every_surface_actually_produced_rows(path):
     """
     tables = tabulate_all(_board(path))
     assert set(tables) == set(ir_parity.SURFACES)
+    # A family the REFERENCE itself has no rows for is one this BOARD has no
+    # content in (a board with no interior cutouts, say) — no surface can be
+    # required to produce rows for it. The guard's real target is a surface
+    # that tabulates nothing for content the board demonstrably HAS, and that
+    # is preserved: `populated` is the IR's own row families.
+    populated = {row.family for row in tables["ir"].rows}
     for name, table in tables.items():
         families = {row.family for row in table.rows}
-        missing = table.families - families
+        missing = (table.families & populated) - families
         assert not missing, f"surface {name!r} claims {missing} but emitted no such rows"
         assert len(table.rows) > 10, f"surface {name!r} produced only {len(table.rows)} rows"
 
@@ -1010,3 +1016,36 @@ def test_a_drifted_kicad_outline_stroke_is_caught_end_to_end(monkeypatch):
     assert {d.surface for d in report.unexplained} == {"kicad"}
     assert {d.field for d in report.unexplained} == {"stroke_width_mm"}
     assert "[kicad]" in format_report(report)
+
+
+def test_every_surface_declares_the_cutout_family_unconditionally():
+    """Declaring a family means "this surface CAN speak to it", not "it has
+    rows". Both board-conditional variants were tried and each hid one
+    direction of emitter error — see the note above tabulate_ir. This pins the
+    declaration so neither is re-introduced."""
+    from pcb_worker import ir_parity as ip
+
+    rb = _board(PARITY_CORNERS)  # cutout-less
+    for table in (ip.tabulate_ir(rb), ip.tabulate_kicad(rb),
+                  ip.tabulate_gerber(rb)):
+        assert "cutout" in table.families, table.surface
+        assert not [r for r in table.rows if r.family == "cutout"]
+
+
+def test_an_invented_cutout_is_reported_as_an_extra_row():
+    """The end-to-end consequence of the union rule: a surface that fabricates
+    a cutout the IR never had must FAIL the diff, not slip through."""
+    from pcb_worker import ir_parity as ip
+
+    rb = _board(PARITY_CORNERS)  # a cutout-less fixture, already compiled
+    ir = ip.tabulate_ir(rb)
+    assert not [r for r in ir.rows if r.family == "cutout"], \
+        "fixture must genuinely have no cutouts"
+
+    phantom_row = ip._cutout_row(1.0, 1.0, 3.0, 3.0, 4)
+    real = ip.tabulate_kicad(rb)
+    phantom = ip.SurfaceTable("kicad", real.families,
+                              tuple(list(real.rows) + [phantom_row]))
+    deltas = ip.diff_against_reference(ir, phantom)
+    assert any(d.family == "cutout" and d.kind == "extra_row" for d in deltas), \
+        [(d.family, d.kind) for d in deltas]

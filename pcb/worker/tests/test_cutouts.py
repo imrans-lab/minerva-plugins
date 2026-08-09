@@ -695,3 +695,58 @@ class TestRouteEndToEnd:
         from pcb_worker.route_bridge import board_to_router
         with pytest.raises(UnsupportedGeometry, match="cutouts"):
             board_to_router(_board())
+
+
+# ---------------------------------------------------------------------------
+# 8. Codex review 1086 finding 1 + its cold-review follow-up: the ring gate is
+#    a SIMPLE-POLYGON gate, not a crossings-only one.
+# ---------------------------------------------------------------------------
+
+
+class TestRingSimplicityGate:
+    """The first gate reused zone_fill's crossing-only checker, so three whole
+    defect classes compiled — and a retraced ring made the router's miter
+    inflation under-reserve the interior. These rows pin every class, and the
+    valid shapes that must KEEP compiling (a gate that refuses legal geometry
+    is its own defect)."""
+
+    def _refused(self, points) -> bool:
+        board = _board(cutouts=[{"id": "c", "outline": [
+            {"x_mm": x, "y_mm": y} for (x, y) in points]}])
+        result = compile_board(board)
+        return (isinstance(result, ResolutionFailure)
+                and "invalid_cutout_outline" in _error_codes(result))
+
+    def test_proper_crossing_refused(self):
+        assert self._refused([(15, 10), (25, 20), (25, 10), (15, 20)])
+
+    def test_pentagram_refused(self):
+        import math
+        star = [(20 + 8 * math.cos(math.pi / 2 + k * 4 * math.pi / 5),
+                 15 + 8 * math.sin(math.pi / 2 + k * 4 * math.pi / 5))
+                for k in range(5)]
+        assert self._refused(star)
+
+    def test_vertex_touching_a_non_adjacent_edge_refused(self):
+        # No PROPER crossing occurs anywhere — the old gate let this through.
+        assert self._refused([(15, 10), (25, 10), (20, 20), (20, 10)])
+
+    def test_retraced_edge_refused(self):
+        # The class that made the router under-reserve: a zero-area spur.
+        assert self._refused([(15, 10), (25, 10), (20, 10), (20, 20)])
+
+    def test_collinear_overlap_refused(self):
+        assert self._refused([(15, 10), (25, 10), (18, 10), (22, 20)])
+
+    def test_valid_shapes_still_compile(self):
+        for name, pts in (
+            ("rectangle", [(18, 10), (22, 10), (22, 20), (18, 20)]),
+            ("concave L", L_CUTOUT),
+            # A collinear vertex that does NOT reverse is a redundant corner,
+            # not a defect — refusing it would reject legal authored geometry.
+            ("collinear midpoint vertex",
+             [(18, 10), (20, 10), (22, 10), (22, 20), (18, 20)]),
+        ):
+            board = _board(cutouts=[{"id": "c", "outline": [
+                {"x_mm": x, "y_mm": y} for (x, y) in pts]}])
+            assert isinstance(compile_board(board), ResolutionSuccess), name

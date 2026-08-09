@@ -607,3 +607,81 @@ def test_zone_net_with_trace_islands_stays_indeterminate():
     assert census["indeterminate"] == [{"net": "GNDZ", "reason": "zone_copper"}]
     assert census["complete"] is None
     assert census["partial"] == []
+
+
+def _two_island_board(via_net):
+    """Two SEPARATE same-net trace islands with a via parked in the gap.
+
+    The gap (14.9 -> 15.1) is inside the 0.2mm clearance the census unions
+    pad/via credits at, so the via genuinely reaches both islands — which is
+    what makes WHOSE via it is the deciding question.
+    """
+    board = {
+        "name": "viaown", "width_mm": 30, "height_mm": 20,
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            {"ref": "R1", "footprint": "R", "x_mm": 5, "y_mm": 10,
+             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                                       "pad_width_mm": 1.0, "pad_height_mm": 1.0}]},
+            {"ref": "R2", "footprint": "R", "x_mm": 25, "y_mm": 10,
+             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0,
+                                       "pad_width_mm": 1.0, "pad_height_mm": 1.0}]}],
+        "nets": [{"name": "SIG", "pins": ["R1.1", "R2.1"]},
+                 {"name": "OTHER", "pins": []}],
+        "traces": [
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 5, "y_mm": 10}, {"x_mm": 14.9, "y_mm": 10}]},
+            {"net": "SIG", "layer": "top", "width_mm": 0.25,
+             "points": [{"x_mm": 15.1, "y_mm": 10}, {"x_mm": 25, "y_mm": 10}]}],
+        "vias": [],
+    }
+    if via_net is not ...:
+        via = {"x_mm": 15, "y_mm": 10, "drill_mm": 0.4, "diameter_mm": 0.8,
+               "from_layer": "top", "to_layer": "bottom"}
+        if via_net is not None:
+            via["net"] = via_net
+        board["vias"] = [via]
+    return board
+
+
+def test_a_foreign_net_via_does_not_join_this_nets_islands():
+    """The false COMPLETE this gate closes. A via on net OTHER may TOUCH net
+    SIG's copper — that is a short, and the geometric DRC's business — but it
+    is a different conductor and does not connect SIG's two islands. Counting
+    it did, and that mattered beyond reporting: `indeterminate`/incomplete
+    feeds the promote gate, so a false complete REMOVES a refusal."""
+    census = drc.connectivity_completeness(_two_island_board("OTHER"))
+    assert census["complete"] is False
+    assert census["partial"] == [{"net": "SIG", "pin_groups": 2}]
+
+
+def test_a_same_net_via_still_joins_them():
+    """The positive control — without it the row above would pass on a gate
+    that simply ignored every via."""
+    census = drc.connectivity_completeness(_two_island_board("SIG"))
+    assert census["complete"] is True
+    assert census["partial"] == []
+
+
+def test_a_netless_via_still_joins_them():
+    """DELIBERATE: an undeclared via is physically a barrel joining whatever
+    copper it lands on, so refusing it would INVENT a disconnection rather
+    than avoid inventing a connection. Only an explicit mismatch excludes."""
+    census = drc.connectivity_completeness(_two_island_board(None))
+    assert census["complete"] is True
+
+
+def test_via_ownership_has_one_reader():
+    """A via whose net is a non-string (`net: 123`) must be treated the same
+    way by BOTH readers of via ownership. They used to disagree — the harvest
+    required a non-empty str while the copper census used plain truthiness —
+    so such a via was 'netless' to the union gate but not counted as that
+    net's copper. Both now read the harvested records."""
+    board = _two_island_board(None)
+    board["vias"][0]["net"] = 123  # not a string
+    census = drc.connectivity_completeness(board)
+    # Treated as netless by BOTH: it unions (physically a barrel) and it does
+    # not make some phantom net "have copper".
+    assert census["complete"] is True
+    assert census["missing_copper"] == []

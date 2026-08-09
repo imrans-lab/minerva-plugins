@@ -204,6 +204,17 @@ class HolePrimitive:
     ref: str | None = None         # component ref (pad-origin holes)
     pad_number: str | None = None  # pad number (pad-origin holes)
     net_name: str | None = None    # net name where the hole carries a net
+    # IS THIS BORE A SLOT (oblong/routed) RATHER THAN A ROUND DRILL?
+    #
+    # Carried as a FACT from the source geometry, never inferred from
+    # ``capsules``. The first attempt at the feature-specific drill floors did
+    # infer it (a degenerate capsule reads as round) and produced a FALSE CLEAN:
+    # ``_hole_from_drill`` deliberately models an oblong PAD drill as a
+    # degenerate disc of the MAJOR radius — a documented GC6 over-approximation
+    # — so an oblong pad drill looked round and skipped the slot floor
+    # entirely. Reading a semantic property off a geometry that is documented
+    # as an approximation is the bug; this field is the fix.
+    is_slot: bool = False
 
 
 @dataclass(frozen=True)
@@ -364,7 +375,8 @@ def project_board(rb: ResolvedBoard) -> Projection:
         holes.append(HolePrimitive(
             entity_id=hole.id, parent_id=None, origin="board_hole",
             net_id=None, plated=hole.plated, capsules=cap_list, minor_mm=minor,
-            position=pos, aabb=aabb_union([c.aabb() for c in cap_list])))
+            position=pos, aabb=aabb_union([c.aabb() for c in cap_list]),
+            is_slot=not isinstance(hole.feature, RoundHole)))
         if hole.plated and hole.annulus_mm is not None:
             # Plated board hole copper is a round annulus (LAND diameter) on all
             # copper layers; the drill is the round bore. Only RoundHole board holes
@@ -428,7 +440,8 @@ def _hole_from_drill(entity_id: str, parent_id: str | None, origin: str,
     return HolePrimitive(
         entity_id=entity_id, parent_id=parent_id, origin=origin, net_id=net_id,
         plated=plated, capsules=(cap,), minor_mm=minor, position=position,
-        aabb=cap.aabb(), ref=ref, pad_number=pad_number, net_name=net_name)
+        aabb=cap.aabb(), ref=ref, pad_number=pad_number, net_name=net_name,
+        is_slot=drill.kind != "round")
 
 
 def _hole_capsules(hole) -> tuple[tuple[Capsule, ...], float, tuple[float, float]]:
@@ -647,11 +660,7 @@ def _check_gc3_drill(proj: Projection, rb: ResolvedBoard) -> list[dict]:
         # profile declares one. An absent (None) feature floor means the
         # profile said nothing about that feature, and the general floor
         # governs exactly as it did before these fields existed.
-        # A round hole is a single DEGENERATE capsule (a == b); an oval or
-        # slot has real length in at least one leg — see HolePrimitive's own
-        # docstring. That is the honest slot test; there is no major_mm here.
-        is_slot = any(c.ax != c.bx or c.ay != c.by for c in hole.capsules)
-        if is_slot:
+        if hole.is_slot:
             specific = (mins.min_plated_slot_mm if hole.plated
                         else mins.min_npth_slot_mm)
         else:

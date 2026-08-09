@@ -2498,6 +2498,19 @@ func from_csv(csv_text: String) -> void:
 			component.properties["value"] = fields[value_idx]
 
 		component.setup_standard_pins()
+		# CSV IMPORT OVERWRITES BY ID, and the CSV columns are the whole of
+		# what it knows — so a component the board already had loses anything
+		# outside them. Carry the canonical passthrough across the overwrite
+		# (cold review of the CPN1 repair round): `assembly: exclude`, `mpn`
+		# and pin drill/annulus overrides are DESIGN INTENT that no placement
+		# CSV carries or contradicts, and silently dropping them here would
+		# reintroduce, through a different doorway, exactly the loss the
+		# codec sweep just closed. Placement/identity fields above still come
+		# from the CSV — it IS authoritative for what it states.
+		var prior = components.get(component.id, null)
+		if prior != null:
+			component.canonical_extra = prior.canonical_extra.duplicate(true)
+			component.pin_extra = prior.pin_extra.duplicate(true)
 		components[component.id] = component
 		imported += 1
 
