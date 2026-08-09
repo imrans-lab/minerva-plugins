@@ -905,8 +905,17 @@ static func _import_csv(host, args: Dictionary) -> Dictionary:
 	var csv_content: String = str(args.get("csv_content", ""))
 	if csv_content.is_empty():
 		return _err("csv_content is required")
-	data.from_csv(csv_content)
-	return _ok({"component_count": data.get_component_count()})
+	var import_result: Dictionary = data.from_csv(csv_content)
+	var result := {"component_count": data.get_component_count()}
+	var dropped: Array = import_result.get("dropped_identity_extras", [])
+	if not dropped.is_empty():
+		result["dropped_identity_extras"] = dropped
+		result["warnings"] = [{
+			"code": "dropped_identity_extras",
+			"message": "CSV identity changes discarded component extras; inspect dropped_identity_extras.",
+			"components": dropped,
+		}]
+	return _ok(result)
 
 
 static func _export_csv(host, args: Dictionary) -> Dictionary:

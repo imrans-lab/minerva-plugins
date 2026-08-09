@@ -83,6 +83,7 @@ the path form, as here. (Found the hard way while writing this file.)
 
 from __future__ import annotations
 
+import collections
 import math
 import re
 from dataclasses import dataclass
@@ -789,15 +790,27 @@ def _loop_from_segments(segs) -> list:
     segments form one ring but arrive in emission order, not walk order. Chain
     them by matching endpoints (rounded to the same 1e-6 the canonical form
     uses) so the loop compared across surfaces is the real ring rather than an
-    artifact of how the emitter happened to order its lines. A set that does
-    not chain cleanly falls back to segment start points — the canonical form
-    is still stable, just coarser, and a genuine divergence still shows.
+    artifact of how the emitter happened to order its lines. Malformed topology
+    is refused: inventing a coarse contour can alias a different valid opening
+    and would turn an unreadable emitted surface into a false clean parity gate.
     """
     if not segs:
         return []
 
     def key(p):
         return (round(float(p[0]), 6), round(float(p[1]), 6))
+
+    degree = collections.Counter()
+    for a, b in segs:
+        ka, kb = key(a), key(b)
+        if ka == kb:
+            raise ParityCanonicalizationUnsupported(
+                "cutout contour contains a zero-length segment")
+        degree[ka] += 1
+        degree[kb] += 1
+    if len(degree) < 3 or any(count != 2 for count in degree.values()):
+        raise ParityCanonicalizationUnsupported(
+            "cutout contour is not a simple closed ring")
 
     remaining = list(segs)
     first = remaining.pop(0)
@@ -814,9 +827,12 @@ def _loop_from_segments(segs) -> list:
                 remaining.pop(index)
                 break
         else:
-            return [seg[0] for seg in segs]  # did not chain — coarser fallback
-    if len(loop) > 1 and key(loop[0]) == key(loop[-1]):
-        loop.pop()  # drop the closing repeat; the ring is implicit
+            raise ParityCanonicalizationUnsupported(
+                "cutout contour segments do not form one connected ring")
+    if len(loop) <= 1 or key(loop[0]) != key(loop[-1]):
+        raise ParityCanonicalizationUnsupported(
+            "cutout contour is open")
+    loop.pop()  # drop the closing repeat; the ring is implicit
     return loop
 
 
@@ -892,6 +908,7 @@ def _cutout_rows_from_segments(
     rows = []
     for segs in groups.values():
         box = _bbox(segs)
+        contour = _loop_from_segments(segs)
         if tuple(round(v, 6) for v in box) == tuple(round(v, 6) for v in union_box):
             continue  # the rim — the outline family's row
         # Chain the grouped segments into a vertex loop for the canonical
@@ -899,7 +916,7 @@ def _cutout_rows_from_segments(
         # connection order so the loop is the real ring, not an arbitrary
         # segment ordering.
         rows.append(_cutout_row(*box, segment_count=len(segs),
-                                contour=_loop_from_segments(segs)))
+                                contour=contour))
     return rows
 
 

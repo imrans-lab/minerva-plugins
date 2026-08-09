@@ -1539,23 +1539,58 @@ func _test_canonical_extras_survive_every_codec() -> void:
 func _test_csv_import_extras_follow_identity() -> void:
 	var header := "id,footprint,value,x,y,rotation,layer\n"
 
-	# --- identity UNCHANGED: extras must survive the overwrite.
+	# --- identity UNCHANGED: the complete imported library geometry and extras
+	# must survive. Rebuilding a blank component's standard pins is not a merge.
 	var data = _PCBData.new()
 	var keeper = _PCBComponent.new()
 	keeper.load_from_board_dict({
-		"ref": "R1", "footprint": "R_0805", "x_mm": 1.0, "y_mm": 1.0,
+		"ref": "J1", "footprint": "Minerva_Fixture:DAM_MinWeb_2P",
+		"x_mm": 1.0, "y_mm": 1.0,
 		"rotation_deg": 0.0, "layer": "top", "value": "10k",
 		"mpn": "TEN-K-PN", "assembly": "exclude",
-		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 0.6}]})
-	data.components["R1"] = keeper
-	data.from_csv(header + "R1,R_0805,10k,5,5,0,top\n")
-	var same: Dictionary = data.components["R1"].to_board_dict()
+		"pins": [
+			{"number": "1", "x_mm": 0.0, "y_mm": 0.0},
+			{"number": "2", "x_mm": 2.54, "y_mm": 0.0,
+				"drill_mm": 0.6, "annulus_diameter_mm": 1.4},
+		]})
+	keeper.pads = [{"number": "2", "position": Vector2(2.54, 0.0)}]
+	keeper.graphics = [{"type": "line", "width": 0.2}]
+	data.components["J1"] = keeper
+	data.from_csv(header + "J1,Minerva_Fixture:DAM_MinWeb_2P,10k,5,5,0,top\n")
+	var same_component = data.components["J1"]
+	var same: Dictionary = same_component.to_board_dict()
 	check("CSV with the SAME identity keeps mpn",
 			str(same.get("mpn", "")) == "TEN-K-PN")
 	check("CSV with the SAME identity keeps assembly",
 			str(same.get("assembly", "")) == "exclude")
+	check("CSV with the SAME library identity keeps both imported pins",
+			(same.get("pins", []) as Array).size() == 2)
+	check("CSV with the SAME library identity keeps pin 2 geometry",
+			float((same["pins"] as Array)[1].get("drill_mm", 0.0)) == 0.6
+			and float((same["pins"] as Array)[1].get("annulus_diameter_mm", 0.0)) == 1.4)
+	check("CSV with the SAME library identity keeps render geometry",
+			same_component.pads.size() == 1 and same_component.graphics.size() == 1)
 	check("CSV with the SAME identity still applies the new placement",
 			abs(float(same.get("x_mm", 0.0)) - 5.0) < 0.001)
+
+	# CSV export must use the same canonical footprint identity as board export,
+	# and a placement-only CSV must not imply a blank identity change.
+	var exported: String = data.to_csv()
+	check("CSV export emits the authored library footprint, not CUSTOM",
+			exported.contains("Minerva_Fixture:DAM_MinWeb_2P"))
+	var exported_import = _PCBData.new()
+	exported_import.from_csv(exported)
+	check("CSV export/import retains the authored library footprint",
+			str(exported_import.components["J1"].to_board_dict().get(
+					"footprint", "")) == "Minerva_Fixture:DAM_MinWeb_2P")
+	data.from_csv("id,x,y\nJ1,7,8\n")
+	var placement_only: Dictionary = data.components["J1"].to_board_dict()
+	check("placement-only CSV retains the library footprint identity",
+			str(placement_only.get("footprint", "")) \
+					== "Minerva_Fixture:DAM_MinWeb_2P")
+	check("placement-only CSV retains pins and identity extras",
+			(placement_only.get("pins", []) as Array).size() == 2 \
+					and str(placement_only.get("mpn", "")) == "TEN-K-PN")
 
 	# --- identity CHANGED (value 10k -> 1k): extras must NOT migrate.
 	var data2 = _PCBData.new()
@@ -1566,7 +1601,8 @@ func _test_csv_import_extras_follow_identity() -> void:
 		"mpn": "TEN-K-PN",
 		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 0.6}]})
 	data2.components["R1"] = changed
-	data2.from_csv(header + "R1,R_0805,1k,5,5,0,top\n")
+	var import_result: Dictionary = data2.from_csv(
+			header + "R1,R_0805,1k,5,5,0,top\n")
 	var after: Dictionary = data2.components["R1"].to_board_dict()
 	check("a CHANGED value does not carry the old mpn onto the new part",
 			not after.has("mpn"))
@@ -1574,6 +1610,16 @@ func _test_csv_import_extras_follow_identity() -> void:
 			not (after["pins"] as Array)[0].has("drill_mm"))
 	check("the CSV's new value is what landed",
 			str(after.get("value", "")) == "1k")
+	var drops: Array = import_result.get("dropped_identity_extras", [])
+	var drop: Dictionary = drops[0] if not drops.is_empty() else {}
+	check("identity-extra report names the affected component and field",
+			str(drop.get("ref", "")) == "R1" \
+					and (drop.get("identity_fields", []) as Array).has("value"))
+	check("identity-extra report names discarded canonical keys",
+			(drop.get("canonical_extra_keys", []) as Array).has("mpn"))
+	var reported_pin_keys: Dictionary = drop.get("pin_extra_keys", {})
+	check("identity-extra report names discarded per-pin keys",
+			(reported_pin_keys.get("1", []) as Array).has("drill_mm"))
 
 	# --- and the drop is REPORTED, never silent.
 	var journal: Array = data2.get_change_journal() if data2.has_method("get_change_journal") else []

@@ -159,6 +159,15 @@ func get_footprint_name() -> String:
 	return FootprintType.keys()[footprint]
 
 
+## Get the canonical authored footprint identity. Library-qualified footprint
+## refs live in footprint_id while the panel uses CUSTOM as its rendering enum;
+## external formats must emit the authored ref, never that implementation bucket.
+func get_canonical_footprint_name() -> String:
+	if footprint == FootprintType.CUSTOM and not footprint_id.is_empty():
+		return footprint_id
+	return get_footprint_name()
+
+
 ## Set footprint enum from a string name; CUSTOM fallback for unknown names.
 func set_footprint_by_name(fp_name: String) -> void:
 	var idx := FootprintType.keys().find(fp_name)
@@ -1043,16 +1052,9 @@ static func from_dict(data: Dictionary):
 
 ## Serialize to a canonical board-contract component dict.
 func to_board_dict() -> Dictionary:
-	# Emit the PRESERVED authored library ref for CUSTOM-enum components (see
-	# load_from_board_dict's read-side preservation note) — "CUSTOM" is a
-	# panel-internal enum bucket, not a board identity, and the hermetic
-	# compiler fail-closes on it. Enum-known footprints keep their enum name.
-	var fp_out := get_footprint_name()
-	if footprint == FootprintType.CUSTOM and not footprint_id.is_empty():
-		fp_out = footprint_id
 	var d := {
 		"ref": id,
-		"footprint": fp_out,
+		"footprint": get_canonical_footprint_name(),
 		"x_mm": position.x,
 		"y_mm": position.y,
 		"rotation_deg": rotation,

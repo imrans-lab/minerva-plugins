@@ -2438,7 +2438,7 @@ func to_csv() -> String:
 		var value: String = comp.properties.get("value", "")
 		lines.append("%s,%s,%.2f,%.2f,%.0f,%s,%s" % [
 			comp.id,
-			comp.get_footprint_name(),
+			comp.get_canonical_footprint_name(),
 			comp.position.x,
 			comp.position.y,
 			comp.rotation,
@@ -2449,15 +2449,40 @@ func to_csv() -> String:
 	return "\n".join(lines)
 
 
-## Import from CSV format
-func from_csv(csv_text: String) -> void:
+## Describe only the NAMES of identity-bound extras an import must discard.
+## Values may contain vendor or sourcing data and are not needed to make the
+## loss actionable at the tool boundary.
+func _csv_extra_drop_report(component, identity_fields: Array) -> Dictionary:
+	var canonical_keys: Array = component.canonical_extra.keys()
+	canonical_keys.sort()
+	var pin_keys := {}
+	var pin_numbers: Array = component.pin_extra.keys()
+	pin_numbers.sort()
+	for pin_number in pin_numbers:
+		var extra = component.pin_extra[pin_number]
+		var keys: Array = extra.keys() if extra is Dictionary else []
+		keys.sort()
+		pin_keys[str(pin_number)] = keys
+	return {
+		"ref": component.id,
+		"identity_fields": identity_fields,
+		"canonical_extra_keys": canonical_keys,
+		"pin_extra_keys": pin_keys,
+	}
+
+
+## Import from CSV format. Existing rows are merged onto a deep copy when the
+## footprint identity is unchanged, because CSV owns placement fields—not pin,
+## pad, or render geometry. The return value lets callers surface any deliberate
+## identity-extra loss; legacy callers may safely ignore it.
+func from_csv(csv_text: String) -> Dictionary:
 	## Component refs whose canonical extras were dropped because the CSV row
 	## changed the part's identity — surfaced on the journal record so the
 	## loss is visible rather than silent (Codex review 1090 finding 2).
 	var dropped_extras: Array = []
 	var lines := csv_text.split("\n")
 	if lines.size() < 2:
-		return
+		return {"imported_count": 0, "dropped_identity_extras": dropped_extras}
 
 	# Parse header
 	var header := lines[0].split(",")
@@ -2471,7 +2496,7 @@ func from_csv(csv_text: String) -> void:
 
 	if id_idx < 0 or x_idx < 0 or y_idx < 0:
 		push_error("[PCBData] Invalid CSV format: missing required columns")
-		return
+		return {"imported_count": 0, "dropped_identity_extras": dropped_extras}
 
 	# Parse data rows
 	var imported := 0
@@ -2484,23 +2509,35 @@ func from_csv(csv_text: String) -> void:
 		if fields.size() <= id_idx:
 			continue
 
-		var component = PCBComponentScript.new()
-		component.id = fields[id_idx]
+		var component_id: String = fields[id_idx].strip_edges()
+		var prior = components.get(component_id, null)
+		var has_authored_fp: bool = footprint_idx >= 0 and fields.size() > footprint_idx
+		var authored_fp: String = fields[footprint_idx].strip_edges() \
+				if has_authored_fp else ""
+		var has_authored_value: bool = value_idx >= 0 and fields.size() > value_idx
+		var authored_value: String = str(fields[value_idx]) if has_authored_value else ""
+		var footprint_changed: bool = prior != null and has_authored_fp \
+				and authored_fp != prior.get_canonical_footprint_name()
+		var value_changed: bool = prior != null and has_authored_value \
+				and authored_value != str(prior.properties.get("value", ""))
 
-		if footprint_idx >= 0 and fields.size() > footprint_idx:
-			var authored_fp := fields[footprint_idx].strip_edges()
-			component.set_footprint_by_name(authored_fp)
-			# PRESERVE THE LIBRARY REF, mirroring load_from_board_dict's
-			# read-side rule. set_footprint_by_name maps any non-enum name
-			# (every canonical "Lib:Name" ref) to the CUSTOM bucket and does
-			# NOT record the string — so without this a CSV import silently
-			# DESTROYED the footprint identity, turning
-			# "Minerva_Fixture:FID_Circle_1mm" into a bare CUSTOM with no ref
-			# and leaving the hermetic compiler nothing to resolve. Found
-			# while making the identity comparison below symmetric.
-			if component.footprint == component.FootprintType.CUSTOM \
-					and authored_fp != "" and authored_fp != "CUSTOM":
-				component.footprint_id = authored_fp
+		# Preserve the full component—not just its extra dictionaries—while the
+		# footprint is unchanged. setup_standard_pins() cannot reconstruct custom
+		# library pin sets, pads, graphics, or imported bounds.
+		var component = prior.duplicate_component() \
+				if prior != null and not footprint_changed else PCBComponentScript.new()
+		component.id = component_id
+
+		if prior == null or footprint_changed:
+			if has_authored_fp:
+				component.set_footprint_by_name(authored_fp)
+				# PRESERVE THE LIBRARY REF, mirroring load_from_board_dict's
+				# read-side rule. Unknown names map to the CUSTOM render bucket,
+				# so the authored string needs its own field.
+				if component.footprint == component.FootprintType.CUSTOM \
+						and authored_fp != "" and authored_fp != "CUSTOM":
+					component.footprint_id = authored_fp
+			component.setup_standard_pins()
 
 		if x_idx >= 0 and fields.size() > x_idx:
 			component.position.x = fields[x_idx].to_float()
@@ -2510,10 +2547,9 @@ func from_csv(csv_text: String) -> void:
 			component.rotation = fields[rot_idx].to_float()
 		if layer_idx >= 0 and fields.size() > layer_idx:
 			component.layer = fields[layer_idx]
-		if value_idx >= 0 and fields.size() > value_idx:
-			component.properties["value"] = fields[value_idx]
+		if has_authored_value:
+			component.properties["value"] = authored_value
 
-		component.setup_standard_pins()
 		# CSV IMPORT OVERWRITES BY ID, so a component the board already had
 		# loses anything outside the CSV's columns — including the canonical
 		# passthrough (`assembly: exclude`, `mpn`, pin drill/annulus
@@ -2535,20 +2571,21 @@ func from_csv(csv_text: String) -> void:
 		# this whole sweep exists to close. Refusing the entire import was
 		# considered and rejected as disproportionate: one edited value should
 		# not reject a bulk placement import.
-		var prior = components.get(component.id, null)
 		if prior != null:
-			var identity_changed: bool = (
-					prior.footprint_id != component.footprint_id
-					or prior.get_footprint_name() != component.get_footprint_name()
-					or str(prior.properties.get("value", "")) \
-							!= str(component.properties.get("value", "")))
+			var identity_changed: bool = footprint_changed or value_changed
 			var had_extras: bool = not prior.canonical_extra.is_empty() \
 					or not prior.pin_extra.is_empty()
-			if not identity_changed:
-				component.canonical_extra = prior.canonical_extra.duplicate(true)
-				component.pin_extra = prior.pin_extra.duplicate(true)
-			elif had_extras:
-				dropped_extras.append(component.id)
+			if identity_changed:
+				if had_extras:
+					var changed_fields: Array = []
+					if footprint_changed:
+						changed_fields.append("footprint")
+					if value_changed:
+						changed_fields.append("value")
+					dropped_extras.append(
+							_csv_extra_drop_report(prior, changed_fields))
+				component.canonical_extra.clear()
+				component.pin_extra.clear()
 		components[component.id] = component
 		imported += 1
 
@@ -2560,11 +2597,11 @@ func from_csv(csv_text: String) -> void:
 	if imported > 0:
 		var record := {"count": imported}
 		if not dropped_extras.is_empty():
-			dropped_extras.sort()
 			record["dropped_identity_extras"] = dropped_extras
 		record_change("import_csv", record)
 	structure_changed.emit()
 	data_changed.emit()
+	return {"imported_count": imported, "dropped_identity_extras": dropped_extras}
 
 #endregion
 

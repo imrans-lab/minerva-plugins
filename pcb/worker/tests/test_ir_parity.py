@@ -1082,3 +1082,21 @@ def test_cutout_contour_is_start_and_winding_invariant():
     reversed_ = ip._cutout_row(2, 2, 8, 8, 4, contour=list(reversed(rect)))
     assert base.fields == rotated.fields
     assert base.fields == reversed_.fields
+
+
+def test_malformed_cutout_graph_refuses_canonicalization():
+    """A broken graph must not fall back to a coarser contour that can alias a
+    valid opening. This exact graph previously produced the rectangle's row and
+    therefore a false clean diff despite not being a closed contour."""
+    from pcb_worker import ir_parity as ip
+
+    outer = [
+        ((0, 0), (10, 0)), ((10, 0), (10, 10)),
+        ((10, 10), (0, 10)), ((0, 10), (0, 0)),
+    ]
+    a, b, c, d = (2, 2), (8, 2), (8, 8), (2, 8)
+    malformed = [(a, b), (b, a), (c, d), (d, b)]
+
+    with pytest.raises(ip.ParityCanonicalizationUnsupported,
+                       match="simple closed ring"):
+        ip._cutout_rows_from_segments(outer + malformed)

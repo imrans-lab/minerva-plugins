@@ -328,6 +328,30 @@ func _run_roundtrips() -> void:
 	check("import_csv ok", im.get("success", false))
 	check_eq("import restored same count", int(im.get("component_count", -1)), before_ids.size())
 
+	# An identity-changing import that deliberately discards extras must surface
+	# that loss to the caller, not only to the model's internal journal.
+	var changing = data.new_component()
+	changing.load_from_board_dict({
+		"ref": "R_WARN", "footprint": "R_0805", "value": "10k",
+		"x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0, "layer": "top",
+		"mpn": "OLD-PART",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+			"drill_mm": 0.6}],
+	})
+	data.components["R_WARN"] = changing
+	var warned := await h("minerva_pcb_import_csv", _args({"csv_content":
+			"id,footprint,x,y,rotation,layer,value\n"
+			+ "R_WARN,R_0805,1,1,0,top,1k\n"}))
+	check("identity-extra loss is returned as a warning",
+			warned.get("warnings", []) is Array \
+					and not (warned.get("warnings", []) as Array).is_empty())
+	var surfaced_drops: Array = warned.get("dropped_identity_extras", [])
+	check("tool warning identifies the component and discarded key",
+			not surfaced_drops.is_empty() \
+					and str((surfaced_drops[0] as Dictionary).get("ref", "")) == "R_WARN" \
+					and ((surfaced_drops[0] as Dictionary).get(
+							"canonical_extra_keys", []) as Array).has("mpn"))
+
 	print("\n-- footprint geometry import --")
 	var geom := {
 		"board_name": "TestBoard",
