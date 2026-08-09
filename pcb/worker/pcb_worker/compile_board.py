@@ -80,10 +80,10 @@ from .geometry import (
 )
 from .zone_fill import (
     ZoneFillError,
-    _refuse_self_intersecting as _zone_refuse_self_intersecting,
     _to_nm as _zone_to_nm,
     fill_area_mm2,
     fill_board_zones,
+    refuse_non_simple_ring as _zone_refuse_non_simple_ring,
 )
 from .manufacturer_profile import (
     DEFAULT_PROFILE_ROOT,
@@ -414,19 +414,27 @@ def _build_outline(board: dict, board_id: str, schema_version: int,
                         f"notch reshapes the rim, which v1 does not model)", cut_ref)
             ok = False
             continue
-        # SELF-INTERSECTION AND ZERO AREA REFUSE AT THE DOORWAY (cold review
-        # CPN1-S1 finding 1: a pentagram ring has consistent winding, passes a
-        # consecutive-cross convexity test, reads as "outside" to an even-odd
-        # point test, and would ship a self-crossing Edge.Cuts contour no board
-        # house can interpret — with DRC blind to copper sitting in the star's
-        # core). Zones learned this lesson at fill time (_refuse_self_
-        # intersecting's own docstring); a cutout has no fill step, so the
-        # compile IS its doorway. Reused from zone_fill: same integer-exact
-        # kernel, no second implementation to drift.
+        # THE RING MUST BE A SIMPLE POLYGON, refused at the doorway.
+        #
+        # Two review rounds shaped this gate. Cold review CPN1-S1 caught the
+        # pentagram: consistent winding, so it passes a consecutive-cross
+        # convexity test, and its core reads as "outside" to an even-odd point
+        # test — it would have shipped a self-crossing Edge.Cuts contour with
+        # DRC blind to copper in the star's core. Codex review 1086 finding 1
+        # then caught that the checker I reached for (zone_fill's
+        # _refuse_self_intersecting) recognises PROPER CROSSINGS ONLY, so a
+        # vertex touching a non-adjacent edge, a collinear overlap, and a
+        # retraced edge all still compiled — and a retraced ring made
+        # route_bridge's miter inflation under-reserve the interior.
+        #
+        # So this calls the STRICT predicate (zone_fill.refuse_non_simple_ring),
+        # not the crossing-only one. A cutout has no fill step and nothing
+        # downstream re-measures its offset, so the compile IS its only doorway.
         ring_nm = [(_zone_to_nm(seg.a[0]), _zone_to_nm(seg.a[1]))
                    for seg in contour.segments]
         try:
-            _zone_refuse_self_intersecting(f"cutout:{ordinal}", ring_nm)
+            _zone_refuse_non_simple_ring(f"cutout:{ordinal}", ring_nm,
+                                         label="cutout outline")
         except ZoneFillError as exc:
             diags.error("invalid_cutout_outline", f"cutout {ordinal}: {exc}", cut_ref)
             ok = False

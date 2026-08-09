@@ -495,6 +495,27 @@ def _copper_stack(rb: ResolvedBoard) -> tuple[str, ...]:
 _IR_FAMILIES = frozenset(FAMILIES)
 
 
+def _families_for(base: frozenset, rb: ResolvedBoard) -> frozenset:
+    """The families a surface participates in FOR THIS BOARD.
+
+    ``cutout`` is conditional: a board with no interior cutouts has no cutout
+    rows on any surface, and a surface that CLAIMS a family it cannot populate
+    trips the harness's own "the check is plugged in" guard.
+
+    Keyed off the BOARD, deliberately, not off the rows a surface produced. If
+    a surface derived its own declaration from its own output, an emitter that
+    DROPPED every cutout would simply stop declaring the family, the diff would
+    skip it, and the regression this family exists to catch would be invisible
+    — the exact failure mode. Deciding from the IR means a cutout board makes
+    every surface accountable for cutout rows, and a surface that emits none
+    fails as `missing_row`.
+    """
+    from .ir_projection import outline_cutouts  # noqa: PLC0415 (cycle-safe, lazy)
+    if outline_cutouts(rb.outline):
+        return base
+    return base - {"cutout"}
+
+
 # A through-hole land only takes a SHAPE in these families; anything else has no
 # faithful non-round aperture. Restated here from the IR contract rather than
 # imported from pad_source — importing it would make the reference agree with the
@@ -693,7 +714,7 @@ def tabulate_ir(rb: ResolvedBoard) -> SurfaceTable:
     for index, token in enumerate(stack):
         rows.append(ParityRow.make("copper_layer", (token,), stack_index=index))
 
-    return SurfaceTable("ir", _IR_FAMILIES, _sorted(rows))
+    return SurfaceTable("ir", _families_for(_IR_FAMILIES, rb), _sorted(rows))
 
 
 def _via_span_tokens(rb: ResolvedBoard, via, tokens: Mapping[str, str],
@@ -1136,7 +1157,7 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
         rows.append(ParityRow.make("copper_layer", (tokens.get(name, name),),
                                    stack_index=index))
 
-    return SurfaceTable("kicad", _KICAD_FAMILIES, _sorted(rows))
+    return SurfaceTable("kicad", _families_for(_KICAD_FAMILIES, rb), _sorted(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -1302,7 +1323,7 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
     for token in sorted(set(copper_suffixes)):
         rows.append(ParityRow.make("copper_layer", (token,), stack_index=NA))
 
-    return SurfaceTable("gerber", _GERBER_FAMILIES, _sorted(rows))
+    return SurfaceTable("gerber", _families_for(_GERBER_FAMILIES, rb), _sorted(rows))
 
 
 def _gerber_outline(parsed) -> tuple[float, float, float, float]:

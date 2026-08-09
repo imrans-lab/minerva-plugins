@@ -9,8 +9,12 @@ one nanometre tighter would flip a witness into a violation (the tightening
 rows prove the witnesses actually sit on their floors — a coupon whose
 "minimum" structures were comfortably legal would certify nothing).
 
-NET_A/NET_B are deliberately unrouted: the featured copper arrives in the S7
-co-working round and is PROMOTED into the canonical corpus artifact.
+SINCE S7 THIS FILE IS THE PROMOTED BOARD, not the seed: NET_A/NET_B carry the
+copper designed through the co-working draft loop, and every coordinate has
+been through the panel's 32-bit float round trip. Selectors here therefore
+match with a TOLERANCE — an exact `== 14.05` silently stops matching when the
+file says 14.0500001907349, and a selector that matches nothing makes its
+test pass vacuously. Each selector asserts its own hit count for that reason.
 """
 
 from __future__ import annotations
@@ -27,6 +31,16 @@ from pcb_worker.gerber import build_gerbers_ir
 from pcb_worker.resolved_board import ProfileOutline, ResolutionSuccess
 
 COUPON = Path(__file__).resolve().parent / "testdata" / "coupon_jlc1.yaml"
+
+
+# One f32 round trip is ~1e-6 mm on these magnitudes; 1e-4 is far inside any
+# geometry this board asserts and far outside float noise.
+_TOL_MM = 1e-4
+
+
+def _near(a: float, b: float) -> bool:
+    return abs(float(a) - float(b)) < _TOL_MM
+
 
 
 def _board() -> dict:
@@ -99,25 +113,34 @@ class TestSeedCoupon:
         slot at 13.8) — the cutout branch of GC5's floor, witnessed on the
         coupon itself rather than only in test_cutouts.py."""
         rb = _compiled().board
-        witness = [t for t in rb.traces
-                   for seg in t.segments
-                   if seg.a[0] == 14.05 and seg.b[0] == 14.05]
+        witness = [seg for t in rb.traces for seg in t.segments
+                   if _near(seg.a[0], 14.05) and _near(seg.b[0], 14.05)]
         assert witness, "the slot-edge witness run is missing"
 
     def test_bom_cpl_carry_exactly_the_two_real_parts(self):
         board = _board()
         bom = build_bom(board, "jlc")
         cpl = build_cpl(board, "jlc")
-        assert [r.refs for r in bom.rows] == [("J1",), ("C1",)]
-        assert bom.excluded_refs == ("LOGO1", "FID1", "FID2", "FID3",
-                                     "TP1", "TP2", "TP3", "DAM1")
-        assert [r.ref for r in cpl.rows] == ["C1", "J1"]
+        assert {r.refs for r in bom.rows} == {("J1",), ("C1",)}
+        # The promoted file's component order is the serializer's, not the
+        # authoring order — compare membership, not sequence.
+        assert set(bom.excluded_refs) == {"LOGO1", "FID1", "FID2", "FID3",
+                                          "TP1", "TP2", "TP3", "DAM1"}
+        assert sorted(r.ref for r in cpl.rows) == ["C1", "J1"]
 
-    def test_featured_nets_are_deliberately_unrouted(self):
+    def test_featured_nets_carry_the_co_designed_copper(self):
+        """INVERTED at S7 and that is the point: this test used to assert
+        NET_A/NET_B were deliberately unrouted, because the file was the SEED
+        and their copper was the thing the co-working round existed to create.
+        The round ran, the board was promoted, and the copper is now IN the
+        design of record — so the same test now pins its presence."""
         rb = _compiled().board
-        routed_nets = {t.net_id for t in rb.traces}
-        featured = {n.id for n in rb.nets if n.name in ("NET_A", "NET_B")}
-        assert not (featured & routed_nets)
+        routed = {t.net_id for t in rb.traces}
+        by_name = {n.name: n.id for n in rb.nets}
+        assert by_name["NET_A"] in routed
+        assert by_name["NET_B"] in routed
+        # NET_B is the two-layer one: it rises through its via into C1.2.
+        assert any(v.net_id == by_name["NET_B"] for v in rb.vias)
 
 
 class TestWitnessesSitOnTheirFloors:
@@ -142,7 +165,7 @@ class TestWitnessesSitOnTheirFloors:
             if trace["net"] == "NET_LAD2" and len(pts) == 5:
                 # Lower the LAD2 finger from y 1.45 to 1.43: gap 0.08 < 0.1
                 for p in pts:
-                    if p["y_mm"] == 1.45:
+                    if _near(p["y_mm"], 1.45):
                         p["y_mm"] = 1.43
                         moved += 1
         assert moved == 2, "the LAD2 finger selector no longer matches the seed"
@@ -154,9 +177,9 @@ class TestWitnessesSitOnTheirFloors:
         for trace in board["traces"]:
             pts = trace["points"]
             if (trace["net"] == "NET_LAD1" and len(pts) == 3
-                    and pts[0]["x_mm"] == 14.05 and pts[1]["y_mm"] == 10):
+                    and _near(pts[0]["x_mm"], 14.05) and _near(pts[1]["y_mm"], 10)):
                 for p in pts:
-                    if p["x_mm"] == 14.05:
+                    if _near(p["x_mm"], 14.05):
                         p["x_mm"] = 14.03  # copper edge 0.18 < 0.2 from slot
                         moved += 1
         assert moved == 2, "the slot-witness selector no longer matches the seed"

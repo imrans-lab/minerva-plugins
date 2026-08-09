@@ -48,6 +48,7 @@ from pcb_worker.board_validate import validate_board_v2
 from pcb_worker.compile_board import compile_board
 from pcb_worker.resolved_board import (
     DiagnosticSeverity,
+    ProfileOutline,
     ResolutionFailure,
     ResolutionSuccess,
 )
@@ -100,28 +101,32 @@ def test_board_validate_accepts_the_gd_authored_board():
     assert validate_board_v2(_board()) == []
 
 
-def test_compile_board_refuses_the_gd_authored_board():
-    """NOT COMPILABLE: the denylist refuses it, by that code."""
+def test_compile_board_compiles_the_gd_authored_board():
+    """COMPILABLE since epoch CPN1 (docket 019fe2faf76e).
+
+    This test is the inverse of what it used to assert, and the flip is the
+    point: it pinned the campaign-2 refusal (``unsupported_board_feature``),
+    which existed only to hold back fail-open 019fbd30f7 — a cutout that
+    compiled would have shipped a board with no opening in it. That fail-open
+    is fixed, so the GD-authored board now compiles and its cutout survives
+    into the IR, which is what the cross-language handoff was always FOR."""
     result = compile_board(_board())
-    assert isinstance(result, ResolutionFailure)
-    assert "unsupported_board_feature" in _errors(result)
-    assert any("cutouts" in d.message for d in result.diagnostics), \
-        "the refusal must name the feature it refused"
-
-
-def test_the_cutout_is_the_sole_reason_for_the_refusal():
-    """ATTRIBUTION.  The identical board with an empty ``cutouts`` compiles
-    CLEANLY, so the refusal above cannot be blamed on anything else the GD
-    serializer happened to emit — which is what makes it a cutout pin rather
-    than a "this fixture does not compile" pin."""
-    board = copy.deepcopy(_board())
-    assert board["cutouts"], "fixture must actually declare a cutout"
-    assert isinstance(compile_board(board), ResolutionFailure)
-
-    board["cutouts"] = []
-    result = compile_board(board)
     assert isinstance(result, ResolutionSuccess), _errors(result)
     assert "unsupported_board_feature" not in _errors(result)
+
+
+def test_the_gd_authored_cutout_survives_into_the_ir():
+    """ATTRIBUTION, inverted with the refusal above: the cutout the GD side
+    authored is present in the compiled outline with its authored geometry —
+    so this stays a CUTOUT pin rather than a "the fixture compiles" pin."""
+    result = compile_board(_board())
+    assert isinstance(result, ResolutionSuccess), _errors(result)
+    outline = result.board.outline
+    assert isinstance(outline, ProfileOutline), type(outline).__name__
+    assert len(outline.cutouts) == 1
+    corners = {(round(seg.a[0], 6), round(seg.a[1], 6))
+               for seg in outline.cutouts[0].contour.segments}
+    assert corners == {(8.0, 6.0), (16.0, 6.0), (16.0, 14.0)}, corners
 
 
 def test_a_two_point_outline_from_the_same_path_is_rejected():

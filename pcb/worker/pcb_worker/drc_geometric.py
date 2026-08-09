@@ -635,11 +635,34 @@ def _check_gc3_drill(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     mins = rb.design_rules.minimums
     findings: list[dict] = []
     for hole in proj.holes:
-        # min_drill_mm — the tool floor — applies to every drilled feature.
-        if _violates(hole.minor_mm, mins.min_drill_mm):
+        # min_drill_mm is the general TOOL floor and applies to every drilled
+        # feature — but a board house publishes SEPARATE, coarser minima for
+        # non-plated holes and for slot widths (JLCPCB: 0.15 general vs 0.50
+        # NPTH, 0.50 plated slot, 1.0 NPTH slot). Checking every hole against
+        # the general floor alone reported a 0.20mm NPTH as CLEAN while it sat
+        # outside the documented process (Codex review 1086 finding 2).
+        #
+        # The applicable floor is therefore the STRICTER of the general one and
+        # whichever feature-specific floor this hole's KIND selects — when the
+        # profile declares one. An absent (None) feature floor means the
+        # profile said nothing about that feature, and the general floor
+        # governs exactly as it did before these fields existed.
+        # A round hole is a single DEGENERATE capsule (a == b); an oval or
+        # slot has real length in at least one leg — see HolePrimitive's own
+        # docstring. That is the honest slot test; there is no major_mm here.
+        is_slot = any(c.ax != c.bx or c.ay != c.by for c in hole.capsules)
+        if is_slot:
+            specific = (mins.min_plated_slot_mm if hole.plated
+                        else mins.min_npth_slot_mm)
+        else:
+            specific = None if hole.plated else mins.min_npth_mm
+        drill_floor = mins.min_drill_mm
+        if specific is not None:
+            drill_floor = max(drill_floor, specific)
+        if _violates(hole.minor_mm, drill_floor):
             findings.append(_finding(
                 "gc3_drill", hole.entity_id, hole.parent_id, hole.origin,
-                hole.net_id, None, hole.minor_mm, mins.min_drill_mm,
+                hole.net_id, None, hole.minor_mm, drill_floor,
                 closest=list(hole.position), witness=list(hole.position),
                 ref=hole.ref, pad=hole.pad_number, net_name=hole.net_name))
         # min_finished_hole_mm — plated (finished) hole floor — plated only.

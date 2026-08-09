@@ -1288,11 +1288,11 @@ def test_board_health_census_faults_degrade_to_indeterminate(monkeypatch):
                                             "indeterminate")
 
 
-def test_a_zone_bearing_net_reads_indeterminate_on_both_ledgers():
-    """CENSUS CORRECTION 019fd5fdeef3b at the propose-reply seams: a poured
-    net is unjudgeable copper — {net, reason: "zone_copper"} — and flips
-    `complete` to None (tri-state) rather than the pre-fix auto-complete, on
-    the scoped summary AND the board ledger alike.
+def test_a_zone_bearing_net_resolved_by_traces_reads_complete_on_both_ledgers():
+    """CENSUS CORRECTION 019fd5fdeef3b at the propose-reply seams, as NARROWED
+    by epoch CPN1: a poured net is unjudgeable copper ONLY when its own traces
+    leave islands. Here EXIST's trace already spans both its pins, so the pour
+    cannot change the verdict and both ledgers read complete.
 
     Exercised at the attach seams (`_attach_route_drc` / `_board_health`)
     rather than through `route`: the routing path fails closed on
@@ -1310,15 +1310,50 @@ def test_a_zone_bearing_net_reads_indeterminate_on_both_ledgers():
     payload: dict = {"routes": []}
     _attach_route_drc(payload, board, scope_nets={"EXIST"})
     summary = payload["drc_summary"]
-    assert summary["complete"] is None  # nothing missing, one net unjudgeable
+    # NARROWED in epoch CPN1 (Codex review 1086 finding 5's neighbour): a
+    # zone-bearing net whose TRACE GRAPH ALONE already joins every pin is
+    # COMPLETE — zone copper can only ADD connections, so the unjudgeable pour
+    # cannot change that verdict. EXIST's trace spans both its pins, so the
+    # seam now reports it complete rather than indeterminate. The
+    # still-indeterminate case is the companion test below.
+    assert summary["complete"] is True
     assert summary["missing_copper"] == []
-    assert summary["indeterminate"] == [
-        {"net": "EXIST", "reason": "zone_copper"}]
+    # ABSENT-when-empty is the reply convention, so assert the key is GONE
+    # rather than present-and-empty — that is the contract this seam keeps.
+    assert "indeterminate" not in summary
     assert summary["approximate"] is True
 
     health = _board_health(board, [], board)
     assert health["complete"] is False  # whole board: VCC is measurably missing
     assert health["missing_copper"] == ["VCC"]
+
+
+def test_a_pour_only_net_still_reads_indeterminate_on_both_ledgers():
+    """The other half of the CPN1 narrowing, at the same seams: when a
+    zone-bearing net's traces DO leave islands, the pour might bridge them or
+    might not, and a centerline kernel cannot tell — so it stays
+    {net, reason: "zone_copper"} and `complete` stays None. This is the case
+    the narrowing deliberately did NOT touch, and it must keep reaching both
+    the scoped summary and the board ledger."""
+    from pcb_worker.methods import _attach_route_drc, _board_health
+
+    board = _walled_vcc_board()
+    board["traces"] = []  # EXIST now has ONLY pour copper
+    board["zones"] = [{"net": "EXIST", "layer": "bottom",
+                       "points": [{"x_mm": 0, "y_mm": 0},
+                                  {"x_mm": 60, "y_mm": 0},
+                                  {"x_mm": 60, "y_mm": 40},
+                                  {"x_mm": 0, "y_mm": 40}]}]
+    payload: dict = {"routes": []}
+    _attach_route_drc(payload, board, scope_nets={"EXIST"})
+    summary = payload["drc_summary"]
+    assert summary["complete"] is None
+    assert summary["missing_copper"] == []
+    assert summary["indeterminate"] == [
+        {"net": "EXIST", "reason": "zone_copper"}]
+
+    health = _board_health(board, [], board)
+    assert {"net": "EXIST", "reason": "zone_copper"} in health["indeterminate"]
     assert health["indeterminate"] == [
         {"net": "EXIST", "reason": "zone_copper"}]
 

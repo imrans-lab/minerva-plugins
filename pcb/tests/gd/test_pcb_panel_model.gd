@@ -56,6 +56,7 @@ func _init() -> void:
 		return
 
 	_test_canonical_roundtrip()
+	_test_canonical_extras_survive_every_codec()
 	_test_canonical_field_names()
 	_test_annotation_tolerance()
 	_test_undo_redo()
@@ -1456,3 +1457,70 @@ func _test_width_bounds_live_in_exactly_one_file() -> void:
 			declarers.has("pcb_trace.gd"))
 	check("exactly ONE file declares the width bounds (%s)" % str(declarers),
 			declarers.size() == 1 and declarers[0] == "pcb_trace.gd")
+
+
+## Codex review 1086 finding 3: the canonical passthrough must ride EVERY
+## component codec, not just the canonical pair.
+##
+## The epoch fixed to_board_dict/load_from_board_dict first and stopped there.
+## But PCBData._serialize_components uses the LEGACY to_dict() for UNDO
+## HISTORY, and history round-trips rebuild components through
+## load_from_dict() — so after a canonical load, one undo silently erased
+## `assembly: exclude`, `mpn`, and the pins' drill/annulus overrides, and the
+## next promote wrote that loss into the design of record. duplicate_component
+## had the same hole. This test walks all three doorways.
+func _test_canonical_extras_survive_every_codec() -> void:
+	var authored := {
+		"ref": "TP1", "footprint": "Minerva_Fixture:TP_MinAnnular_0p6",
+		"x_mm": 6.5, "y_mm": 2.8, "rotation_deg": 0.0, "layer": "top",
+		"assembly": "exclude", "mpn": "TEST-MPN",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+				"drill_mm": 0.6, "annulus_diameter_mm": 0.96}],
+	}
+	var comp = _PCBComponent.new()
+	comp.load_from_board_dict(authored)
+
+	# 1. the canonical pair (already covered elsewhere, asserted here as the
+	#    positive control so a failure below is unambiguous).
+	var direct: Dictionary = comp.to_board_dict()
+	check("canonical round trip keeps assembly",
+			str(direct.get("assembly", "")) == "exclude")
+	check("canonical round trip keeps mpn",
+			str(direct.get("mpn", "")) == "TEST-MPN")
+	check("canonical round trip keeps the pin drill override",
+			float((direct["pins"] as Array)[0].get("drill_mm", 0.0)) == 0.6)
+
+	# 2. THE UNDO DOORWAY: legacy to_dict -> load_from_dict -> canonical out.
+	var snapshot: Dictionary = comp.to_dict()
+	var restored = _PCBComponent.new()
+	restored.load_from_dict(snapshot)
+	var after_undo: Dictionary = restored.to_board_dict()
+	check("UNDO round trip keeps assembly (was silently erased)",
+			str(after_undo.get("assembly", "")) == "exclude")
+	check("UNDO round trip keeps mpn",
+			str(after_undo.get("mpn", "")) == "TEST-MPN")
+	var undo_pin: Dictionary = (after_undo["pins"] as Array)[0]
+	check("UNDO round trip keeps the pin drill override",
+			float(undo_pin.get("drill_mm", 0.0)) == 0.6)
+	check("UNDO round trip keeps the pin annulus override",
+			float(undo_pin.get("annulus_diameter_mm", 0.0)) == 0.96)
+
+	# 3. THE DUPLICATE DOORWAY: a copy that lost these would be a different part.
+	var copied: Dictionary = comp.duplicate_component().to_board_dict()
+	check("DUPLICATE keeps assembly",
+			str(copied.get("assembly", "")) == "exclude")
+	check("DUPLICATE keeps the pin drill override",
+			float((copied["pins"] as Array)[0].get("drill_mm", 0.0)) == 0.6)
+
+	# 4. A component with NO extras must stay clean — the passthrough must not
+	#    invent keys, or every legacy board would gain phantom fields.
+	var plain = _PCBComponent.new()
+	plain.load_from_board_dict({
+		"ref": "R1", "footprint": "R_0805", "x_mm": 1.0, "y_mm": 1.0,
+		"rotation_deg": 0.0, "layer": "top",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0}]})
+	var plain_out: Dictionary = plain.to_board_dict()
+	check("a component with no extras gains no phantom keys",
+			not plain_out.has("assembly") and not plain_out.has("mpn"))
+	check("a plain pin gains no phantom geometry",
+			not (plain_out["pins"] as Array)[0].has("drill_mm"))

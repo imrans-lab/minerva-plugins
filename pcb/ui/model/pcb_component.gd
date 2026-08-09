@@ -767,6 +767,11 @@ func duplicate_component():
 	copy.bbox_center_offset = bbox_center_offset
 	copy.local_bounds = local_bounds
 	copy.locked = locked
+	# Canonical passthrough rides every copy path too — a duplicated component
+	# that lost `assembly: exclude` or its pins' drill/annulus overrides would
+	# be a different PART, silently (Codex review 1086 finding 3's class).
+	copy.canonical_extra = canonical_extra.duplicate(true)
+	copy.pin_extra = pin_extra.duplicate(true)
 	return copy
 
 
@@ -935,7 +940,17 @@ func to_dict() -> Dictionary:
 		"layer": layer,
 		"color": {"r": color.r, "g": color.g, "b": color.b, "a": color.a},
 		"label_visible": label_visible,
-		"locked": locked
+		"locked": locked,
+		# CANONICAL PASSTHROUGH ON THE LEGACY CODEC (Codex review 1086 finding 3).
+		# This shape is not just the .minpcb file format — PCBData._serialize_
+		# components uses it for UNDO HISTORY, and history round-trips
+		# reconstruct components from it. Without these two keys an undo after
+		# a canonical load silently erased `assembly: exclude`, `mpn`, and pin
+		# drill/annulus overrides, and the next promote wrote that loss to the
+		# design of record. Nested under one key each so they cannot collide
+		# with a legacy field name.
+		"canonical_extra": canonical_extra.duplicate(true),
+		"pin_extra": pin_extra.duplicate(true)
 	}
 
 
@@ -1000,6 +1015,15 @@ func load_from_dict(data: Dictionary) -> void:
 
 	label_visible = data.get("label_visible", true)
 	locked = data.get("locked", false)
+	# Restore the canonical passthrough (Codex review 1086 finding 3) — the
+	# write half is in to_dict(). Absent keys leave EMPTY dicts rather than
+	# stale state: a legacy .minpcb that predates these fields genuinely has
+	# no extras, and inheriting the previous component's would be worse than
+	# having none.
+	var ce = data.get("canonical_extra", {})
+	canonical_extra = (ce as Dictionary).duplicate(true) if ce is Dictionary else {}
+	var pe = data.get("pin_extra", {})
+	pin_extra = (pe as Dictionary).duplicate(true) if pe is Dictionary else {}
 
 
 ## Create from dictionary (static constructor, legacy shape)

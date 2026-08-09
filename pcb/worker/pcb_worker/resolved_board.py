@@ -513,6 +513,20 @@ class ManufacturingConstraints:
     # every existing board's pour geometry change on the strength of a constant
     # read off another tool. A profile that wants it says so.
     min_hole_to_copper_mm: float | None = None
+    # FEATURE-SPECIFIC DRILL FLOORS (Codex review 1086 finding 2). A board
+    # house publishes SEPARATE minima for non-plated holes and for slot
+    # widths, and they are typically far coarser than the general drill floor
+    # (JLCPCB: 0.15 general, but 0.50 NPTH, 0.50 plated slot, 1.0 NPTH slot).
+    # With only `min_drill_mm` to check against, a 0.20mm NPTH reported CLEAN
+    # while sitting well outside the documented process.
+    #
+    # OPTIONAL for the same load-bearing reason as min_hole_to_copper_mm above:
+    # `None` records "this profile states no such rule" — not zero, and not an
+    # invented number — and the check then falls back to the general drill
+    # floor, which is exactly what it did before these fields existed.
+    min_npth_mm: float | None = None
+    min_plated_slot_mm: float | None = None
+    min_npth_slot_mm: float | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -523,9 +537,11 @@ class ManufacturingConstraints:
         ):
             _nonnegative(getattr(self, field), f"ManufacturingConstraints.{field}")
         _finite(self.solder_mask_expansion_mm, "ManufacturingConstraints.solder_mask_expansion_mm")
-        if self.min_hole_to_copper_mm is not None:
-            _nonnegative(self.min_hole_to_copper_mm,
-                         "ManufacturingConstraints.min_hole_to_copper_mm")
+        for _opt in ("min_hole_to_copper_mm", "min_npth_mm",
+                     "min_plated_slot_mm", "min_npth_slot_mm"):
+            _value = getattr(self, _opt)
+            if _value is not None:
+                _nonnegative(_value, f"ManufacturingConstraints.{_opt}")
 
 
 class ViaKind(str, Enum):

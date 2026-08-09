@@ -42,8 +42,18 @@ from pcb_worker.footprints import (
 HERE = Path(__file__).resolve().parent
 BOARD_YAML = HERE / "testdata" / "footprints" / "resolve_corners.yaml"
 
-# Expected pad count per footprint ref. From the real KiCad footprints.
+# Expected pad count per footprint ref. From the real KiCad footprints, plus
+# the purpose-built Minerva_Fixture set (epoch CPN1) — the seed library now
+# ships fixtures authored to exercise emitter paths no vendor footprint in the
+# set reaches: the roundrect/oval SMD aperture families, a mask-dam witness, a
+# fabricated-ring min-annular test point, a bare-copper fiducial, and a
+# PAD-LESS silk logo (0 pads is the point, not an omission).
 EXPECTED_PAD_COUNTS = {
+    "Minerva_Fixture:DAM_MinWeb_2P": 2,
+    "Minerva_Fixture:FID_Circle_1mm": 1,
+    "Minerva_Fixture:LOGO_Owl_TestCoupon": 0,
+    "Minerva_Fixture:SMD_WeirdPads_2P": 2,
+    "Minerva_Fixture:TP_MinAnnular_0p6": 1,
     "Espressif:ESP32-S3-DevKitC": 44,
     "Package_DIP:DIP-6_W7.62mm_Socket": 6,
     "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical": 4,
@@ -71,7 +81,16 @@ EXPECTED_PAD_COUNTS = {
 # MountingHole is a purely-mechanical footprint: it carries NO F.SilkS graphics
 # (only an F.CrtYd courtyard circle + an F.Fab/Cmts marker). Every other seed
 # footprint has a real silkscreen body outline.
-NO_SILK_REFS = {"MountingHole:MountingHole_3.2mm_M3"}
+# Footprints with a courtyard but deliberately NO silkscreen: the mechanical
+# mounting hole, and the CPN1 fixtures whose whole job is bare copper (a
+# fiducial must have a clean window; a mask-dam witness and a min-annular test
+# point are measurement structures, not assembled parts).
+NO_SILK_REFS = {
+    "MountingHole:MountingHole_3.2mm_M3",
+    "Minerva_Fixture:DAM_MinWeb_2P",
+    "Minerva_Fixture:FID_Circle_1mm",
+    "Minerva_Fixture:TP_MinAnnular_0p6",
+}
 
 
 def _silk_graphics(parsed: dict) -> list[dict]:

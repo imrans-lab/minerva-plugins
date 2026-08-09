@@ -103,6 +103,12 @@ REQUIRED_FLOOR_FIELDS: tuple[str, ...] = (
 # one. What is optional is its PRESENCE, never its correctness.
 OPTIONAL_FLOOR_FIELDS: tuple[str, ...] = (
     "min_hole_to_copper_mm",
+    # Feature-specific drill floors (Codex review 1086 finding 2). Same tier
+    # and same semantics as the field above: PRESENT means enforced, ABSENT
+    # means this profile said nothing and the general drill floor governs.
+    "min_npth_mm",
+    "min_plated_slot_mm",
+    "min_npth_slot_mm",
 )
 
 

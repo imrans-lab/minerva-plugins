@@ -1860,9 +1860,21 @@ def test_no_seed_library_pad_trips_the_plated_through_hole_copper_guard():
     assert len(modules) >= 10, modules  # the library really was found
 
     by_type: dict[str, int] = {}
+    padless = 0
     for path in modules:
         definition = FootprintDefinition.from_kicad_parsed(parse_kicad_mod(path))
-        assert definition.pads, path
+        if not definition.pads:
+            # A PAD-LESS footprint is legitimate since epoch CPN1: the seed
+            # library now ships silk-only furniture (Minerva_Fixture's logo),
+            # which is a footprint with graphics and no copper at all. It has
+            # no pads to put through the capability guard, so it contributes
+            # none — counted rather than skipped silently, and the floor below
+            # keeps this from degenerating into "checked nothing".
+            padless += 1
+            assert definition.graphics, (
+                f"{path}: a footprint with neither pads nor graphics is not a "
+                f"footprint — it is an empty file")
+            continue
         for pad in definition.pads:
             diags = _Diagnostics()
             assert _check_pad_capabilities(pad, path.stem, diags), \
@@ -1874,6 +1886,9 @@ def test_no_seed_library_pad_trips_the_plated_through_hole_copper_guard():
     assert by_type.get("thru_hole", 0) >= 1, by_type
     assert by_type.get("np_thru_hole", 0) >= 1, by_type
     assert sum(by_type.values()) >= 70, by_type  # 76 pads at the time of writing
+    # The pad-less set is small and deliberate; if it ever grows to swallow the
+    # library this test would be checking almost nothing.
+    assert padless <= 3, f"{padless} pad-less footprints — is the library right?"
 
 
 def test_pin_partial_position_fails_closed():

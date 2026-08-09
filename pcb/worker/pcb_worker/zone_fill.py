@@ -251,6 +251,95 @@ def _refuse_self_intersecting(zone_id: str, ring) -> None:
                     f"rule, and both are copper. Refusing to pick one")
 
 
+def _segments_meet(a, b, c, d) -> bool:
+    """True iff segments ab and cd share ANY point — proper crossing, a touch,
+    or a collinear overlap. The STRICT sibling of :func:`_crosses`, which
+    recognises proper crossings only.
+
+    Both exist on purpose and neither is the other's bug fix. ``_crosses`` is
+    right for the keyhole bridge, which legitimately TOUCHES the rings it joins
+    at its endpoints and must only refuse a bridge passing THROUGH an edge.
+    This one is right for asking "is this ring a simple polygon", where a touch
+    is exactly as disqualifying as a crossing. Exact integer arithmetic — no
+    epsilon, so a coordinate that meets is reported and one that misses by a
+    nanometre is not.
+    """
+    d1, d2 = _orient2(c, d, a), _orient2(c, d, b)
+    d3, d4 = _orient2(a, b, c), _orient2(a, b, d)
+    if ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and 0 not in (d1, d2, d3, d4):
+        return True                                    # proper crossing
+    def _within(p, q, r) -> bool:                      # r collinear with pq
+        return (min(p[0], q[0]) <= r[0] <= max(p[0], q[0])
+                and min(p[1], q[1]) <= r[1] <= max(p[1], q[1]))
+    return ((d1 == 0 and _within(c, d, a)) or (d2 == 0 and _within(c, d, b))
+            or (d3 == 0 and _within(a, b, c)) or (d4 == 0 and _within(a, b, d)))
+
+
+def refuse_non_simple_ring(entity_id: str, ring, *,
+                           error=None, label: str = "outline") -> None:
+    """Refuse a ring that is not a SIMPLE polygon.
+
+    Stricter than :func:`_refuse_self_intersecting` on three axes, each of
+    which Codex review 1086 finding 1 reproduced as compiling and then being
+    mishandled downstream:
+
+      * a vertex TOUCHING a non-adjacent edge (no proper crossing occurs);
+      * a COLLINEAR OVERLAP between non-adjacent edges;
+      * a RETRACED edge — adjacent edges doubling back along the same line,
+        a zero-area spur that has no interior at all.
+
+    Plus zero-length edges, which nm quantisation can collapse a real-looking
+    authored edge into.
+
+    WHY CUTOUTS NEED THIS AND ZONES ARE LEFT ON THE OLDER CHECK (deliberate,
+    not an oversight): a zone's ambiguous ring reaches Clipper, which resolves
+    it by fill rule, and the resulting copper is still measured by GC7 and the
+    pcbnew oracle — wrong, but CHECKED. A cutout's ring reaches
+    ``route_bridge._cutout_obstacle``'s hand-rolled miter offset, whose
+    correctness ASSUMES a simple polygon and which silently under-reserved the
+    interior on a retraced ring; nothing downstream re-measures that. Zones
+    carrying the same latent ambiguity is filed separately rather than widened
+    into a repair round.
+
+    O(n^2) exact-integer, affordable because an authored ring is tens of points.
+    """
+    err = error or (lambda msg: ZoneFillError(entity_id, msg))
+    edges = _edges(ring)
+    count = len(edges)
+
+    for i, (a, b) in enumerate(edges):
+        if a == b:
+            raise err(f"{label} edge {i} has zero length at {a} — a real edge "
+                      f"collapsed by nanometre quantisation, or a repeated point")
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            adjacent = (j == i + 1) or (i == 0 and j == count - 1)
+            a, b = edges[i]
+            c, d = edges[j]
+            if adjacent:
+                # Adjacent edges always meet at their shared vertex; the only
+                # defect is doubling back along the same line (a spur).
+                shared = b if b in (c, d) else a
+                far_a = a if shared == b else b
+                far_b = d if shared == c else c
+                if _orient2(far_a, shared, far_b) == 0:
+                    v1 = (shared[0] - far_a[0], shared[1] - far_a[1])
+                    v2 = (far_b[0] - shared[0], far_b[1] - shared[1])
+                    if v1[0] * v2[0] + v1[1] * v2[1] < 0:
+                        raise err(
+                            f"{label} RETRACES itself at {shared} (edges {i} and "
+                            f"{j} double back along the same line), enclosing no "
+                            f"area there — the region has no interior to cut")
+                continue
+            if _segments_meet(a, b, c, d):
+                raise err(
+                    f"{label} is NOT A SIMPLE POLYGON: segments {i} and {j} meet "
+                    f"(crossing, touching, or overlapping), so the ring has no "
+                    f"unambiguous interior. A shape whose inside is undefined "
+                    f"cannot be offset, reserved, or milled")
+
+
 def _capsule_ring(shape: Capsule) -> list[tuple[int, int]]:
     """A capsule's SEGMENT CORE as an integer-nm path.
 

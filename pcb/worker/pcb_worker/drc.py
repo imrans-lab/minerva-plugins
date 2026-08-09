@@ -39,7 +39,7 @@ wiring and the segment geometry that gerber has no need for.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
+from typing import Any, NamedTuple
 
 from .geometry import is_top as _is_top, rotate_local_offset as _rotate
 from .pad_source import is_through_hole, iter_pads
@@ -258,8 +258,24 @@ def _harvest_segments(board: dict) -> list[_Seg]:
     return segs
 
 
-def _harvest_vias(board: dict) -> list[tuple[float, float]]:
-    """Harvest via POSITIONS only (deliberate — see below).
+class _HarvestedVia(NamedTuple):
+    """A via's position plus its declared ``net`` (``None`` when unstated).
+
+    A NAMEDTUPLE so ``v[0]`` / ``v[1]`` still read as x / y: every distance
+    test here indexes rather than unpacks (:func:`_dist`), so the
+    position-only consumers — check C's dangling credit and check D's
+    layer-change resolution — keep working byte-for-byte unchanged while the
+    ownership rides along for the one consumer that needs it, the copper
+    CENSUS (see :func:`_net_pin_groups`, Codex review 1086 finding 5).
+    """
+
+    x: float
+    y: float
+    net: object
+
+
+def _harvest_vias(board: dict) -> list[_HarvestedVia]:
+    """Harvest via positions, each carrying its declared net (see below).
 
     A canonical via may now carry first-class from_layer/to_layer (top/bottom
     span; see pcb_data.gd / board-yaml.md), but every DRC use of a via
@@ -273,11 +289,13 @@ def _harvest_vias(board: dict) -> list[tuple[float, float]]:
     via needs a layer-aware credit, extend this to a small (x, y, from, to)
     tuple/dataclass and thread the span into checks C/D's distance tests.
     """
-    out: list[tuple[float, float]] = []
+    out: list[_HarvestedVia] = []
     for via in _list(board.get("vias")):
         if not isinstance(via, dict):
             continue
-        out.append((_num(via.get("x_mm")), _num(via.get("y_mm"))))
+        net = via.get("net")
+        out.append(_HarvestedVia(_num(via.get("x_mm")), _num(via.get("y_mm")),
+                                 net if isinstance(net, str) and net else None))
     return out
 
 
@@ -548,6 +566,20 @@ def _net_pin_groups(net: str, pads: list, segs: list, vias: list,
                                                 other.a, other.b))):
                 union(seg_node + si, seg_node + sj)
     for v in vias:
+        # OWNERSHIP GATE (Codex review 1086 finding 5). A via explicitly on a
+        # DIFFERENT net is a different conductor: it may touch this net's
+        # copper (that is a short, and GC2's business), but it does not JOIN
+        # this net's islands, and counting it did — turning two disconnected
+        # islands into a "complete" net. That mattered beyond reporting:
+        # `indeterminate` gates promotion, so a false complete REMOVED a
+        # promote refusal.
+        #
+        # A NETLESS via still unions, deliberately: an undeclared via is
+        # physically a barrel joining whatever copper it lands on, so refusing
+        # it would invent a disconnection rather than avoid inventing a
+        # connection. Only an explicit mismatch is excluded.
+        if v.net is not None and v.net != net:
+            continue
         touching = [seg_node + si for si, seg in enumerate(net_segs)
                     if _dist(seg.a, v) <= clr or _dist(seg.b, v) <= clr]
         touching += [pi for pi, pad in enumerate(net_pads)
