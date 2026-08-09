@@ -23,12 +23,14 @@ Covers, at the LOADER level (this file) and the COMPILER level
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 
 import pytest
 
 from pcb_worker.manufacturer_profile import (
     ALLOWED_TOP_LEVEL_FIELDS,
     DEFAULT_PROFILE_ROOT,
+    OPTIONAL_FLOOR_FIELDS,
     REQUIRED_FLOOR_FIELDS,
     LoadedRuleProfile,
     RuleProfileError,
@@ -176,12 +178,17 @@ def test_non_object_floor_fails_closed(tmp_path):
 
 @pytest.mark.parametrize("missing_field", REQUIRED_FLOOR_FIELDS)
 def test_a_floor_missing_any_single_field_fails_closed_not_merged(tmp_path, missing_field):
-    """THE CENTRAL fail-closed contract (brief R2): a profile supplies all
-    TEN fields or fails -- there is no fallback that fills the missing one
-    from v1 or anywhere else. Parametrized over every field so no single
-    site's check can be silently absent for one of the ten (the exact shape
-    that lost the min_finished_hole_mm enforcement site behind a shared
-    alias upstream in drc_geometric -- this loader must not repeat it)."""
+    """THE CENTRAL fail-closed contract (brief R2): a profile supplies EVERY
+    required field or fails -- there is no fallback that fills the missing one
+    from v1 or anywhere else. Parametrized over the tuple itself so no single
+    site's check can be silently absent for one field (the exact shape that lost
+    the min_finished_hole_mm enforcement site behind a shared alias upstream in
+    drc_geometric -- this loader must not repeat it).
+
+    Parametrizing over REQUIRED_FLOOR_FIELDS rather than a hand-written list is
+    what let this test follow the CP2 S5 tier change with no edit: when
+    solder_mask_expansion_mm was demoted it simply left the parametrisation.
+    """
     floor = _valid_floor()
     del floor[missing_field]
     _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
@@ -189,9 +196,75 @@ def test_a_floor_missing_any_single_field_fails_closed_not_merged(tmp_path, miss
         load_rule_profile("acme", library_root=tmp_path)
 
 
+def test_every_required_floor_field_has_at_least_one_production_reader():
+    """THE PROPERTY THAT MAKES "REQUIRED" MEAN SOMETHING, and the one epoch CP2
+    exists to restore.
+
+    The required tier's whole justification is that these fields are
+    load-bearing, so a MISSING one must fail the load rather than be defaulted.
+    That argument is hollow for any field nothing reads: the loader refuses a
+    profile for omitting a number no code will ever consult. CP2 found FOUR such
+    fields; S5 closed the last two by giving min_mask_sliver_mm a reader (GC8)
+    and DEMOTING solder_mask_expansion_mm, which could not be given a correct
+    one because the two shipped profiles use it for opposite ends of the process.
+
+    This test is a SOURCE SCAN, deliberately, because the property is about the
+    codebase rather than about any one run: a field is "read" if some production
+    module outside the declaration and validation sites mentions it. That is a
+    coarse test and it is meant to be — it cannot tell a real reader from a
+    passing mention, so it will not catch a reader that is wired up but never
+    called. What it does catch is the regression that actually happened four
+    times: a field declared, validated, required, and never referenced again.
+    """
+    import pathlib
+
+    from pcb_worker import manufacturer_profile
+
+    pkg = pathlib.Path(manufacturer_profile.__file__).parent
+    # The two files where a required field is DECLARED and VALIDATED. A mention
+    # in either proves nothing about enforcement, so they are excluded.
+    declaration_sites = {"resolved_board.py", "manufacturer_profile.py"}
+    sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in pkg.glob("*.py")
+        if path.name not in declaration_sites
+    }
+
+    unread = []
+    for field in REQUIRED_FLOOR_FIELDS:
+        readers = sorted(name for name, text in sources.items() if field in text)
+        if not readers:
+            unread.append(field)
+
+    assert not unread, (
+        "these REQUIRED floor fields have no production reader outside their "
+        f"declaration/validation sites: {unread}. A required field nothing "
+        "enforces is a rule that lies about being in force — either give it a "
+        "reader, or move it to OPTIONAL_FLOOR_FIELDS with the reason recorded, "
+        "as CP2 S5 did for solder_mask_expansion_mm")
+
+
 def test_a_floor_with_an_extra_unknown_field_fails_closed(tmp_path):
+    """An unknown floor key is REFUSED, never ignored: a profile naming a rule
+    the schema does not implement has stated a constraint nothing will enforce,
+    which is the fail-open this whole module exists to prevent.
+
+    THE FIXTURE IS SELF-CHECKING, and it is that way because it silently rotted
+    once. It used to spell the unknown field ``min_silk_width_mm`` — genuinely
+    unknown when written, then ADDED to the optional tier by epoch CP2 S6, at
+    which point the profile loaded successfully and this test could no longer
+    pass. Worse than the red: between the schema change and its discovery, the
+    fail-closed property here was guarded by nothing. The assertion below makes
+    that failure mode loud instead of latent — if this name is ever implemented,
+    the test says so in one line rather than dying inside a `pytest.raises`."""
+    unknown = "min_unobtainium_clearance_mm"
+    assert unknown not in {f.name for f in fields(ManufacturingConstraints)}, (
+        f"{unknown} is now a real ManufacturingConstraints field, so it can no "
+        f"longer stand in for an unknown one — pick another name")
+    assert unknown not in REQUIRED_FLOOR_FIELDS + OPTIONAL_FLOOR_FIELDS
+
     floor = _valid_floor()
-    floor["min_silk_width_mm"] = 0.15  # not a ManufacturingConstraints field
+    floor[unknown] = 0.15
     _write_profile(tmp_path, "acme", {"id": "acme", "version": "1", "floor": floor})
     with pytest.raises(RuleProfileError, match="unknown field"):
         load_rule_profile("acme", library_root=tmp_path)

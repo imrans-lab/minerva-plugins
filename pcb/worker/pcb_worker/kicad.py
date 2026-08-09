@@ -30,6 +30,7 @@ from typing import Any
 
 from agent_router import layers as _layers
 
+from . import silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .geometry import place_point
 from .ir_projection import (
@@ -125,31 +126,25 @@ def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-# Silk stroke widths — the kicad-side mirror of gerber.SILK_TEXT_WIDTH_MM /
-# gerber.SILK_GRAPHIC_WIDTH_MM. TWO constants, because KiCad's shipped footprint
-# library uses two numbers: silk TEXT thickness 0.15, silk GRAPHIC line width 0.12
-# (measured on the KiCad 10.0.5 library — F1, comment 872 on 019f783860c8). The
-# single 0.15 that used to serve both jobs here silently widened every width-less
-# footprint outline by 25%.
+# Silk stroke widths — NO LONGER MIRRORED. They come from silk_source, the one
+# owner both CAM emitters and geometric DRC read (epoch CP2 station S2).
 #
-# These are DUPLICATED rather than imported from gerber.py on purpose: gerber.py
-# imports gerber_writer at module level, and kicad.py must stay free of that
-# runtime dependency. The duplication is pinned by a cross-emitter equality test
-# (tests/test_cam_conformance.py::test_silk_widths_agree_across_emitters) — the
-# guard that a bare mirrored literal lacked, which is how the Edge.Cuts stroke
-# drifted to two different numbers in the first place.
-_SILK_TEXT_WIDTH_MM = 0.15
-_SILK_GRAPHIC_WIDTH_MM = 0.12
+# These used to be hand-copied literals, deliberately: "DUPLICATED rather than
+# imported from gerber.py on purpose: gerber.py imports gerber_writer at module
+# level, and kicad.py must stay free of that runtime dependency", with a
+# cross-emitter equality test standing in for the missing single source.
+# silk_source removes the premise — it imports no gerber_writer — so the
+# duplication is retired instead of re-pinned, and the equality test now asserts
+# both emitters resolve to that owner rather than that two literals happen to
+# match.
+_SILK_TEXT_WIDTH_MM = silk_source.SILK_TEXT_WIDTH_MM
+_SILK_GRAPHIC_WIDTH_MM = silk_source.SILK_GRAPHIC_WIDTH_MM
 # Back-compat alias for the historical single name; it means the TEXT width.
-_SILK_LINE_WIDTH_MM = _SILK_TEXT_WIDTH_MM
+_SILK_LINE_WIDTH_MM = silk_source.SILK_LINE_WIDTH_MM
 
-
-def _graphic_width(graphic: dict) -> float:
-    """Stroke width for one silk GRAPHIC primitive — authored width wins, a
-    width-less source falls back to the library GRAPHIC width (0.12), NOT the
-    text width. Byte-identical twin of gerber._graphic_width."""
-    w = _opt_num(graphic.get("width"))
-    return w if (w is not None and w > 0) else _SILK_GRAPHIC_WIDTH_MM
+# Authored width wins; a width-less source falls back to the library GRAPHIC
+# width, NOT the text width. One implementation, shared with gerber.py.
+_graphic_width = silk_source.graphic_width
 
 
 def _graphic_ref(ref: Any, layer: Any) -> SourceRef:
@@ -932,12 +927,34 @@ def _kicad_component_to_dict(board: ResolvedBoard,
         "rotation_deg": rot,
         "layer": "top" if component.placement.side is Side.TOP else "bottom",
         "pads": [_local_pad(pad) for pad in component.placed_pads],
-        # Only F.SilkS is rendered by the kicad emitter (bottom-side B.SilkS silk is
-        # dropped as before — cosmetic, non-fabrication-critical). Localized so the
-        # silk lands correctly under the real footprint (at), not double-transformed.
+        # ALL SILK graphics are forwarded — both sides — and the F-only rendering
+        # decision is left to _footprint_graphics, which WARNS
+        # (`unsupported_graphic_layer`) for anything it will not emit.
+        #
+        # THIS FILTER USED TO READ `g.layer.id == "F.SilkS"`, and that pre-filter
+        # made the emitter's own warning unreachable: B.SilkS never arrived, so
+        # nothing ever reported it. That was harmless only while B.SilkS sat
+        # OUTSIDE fab_capability.EMITTED_LAYERS, because the COMPILER then raised
+        # `captured_geometry_not_emitted` and covered both emitters at once.
+        # Epoch CP2 S3 added a real bottom-silk harvest to the GERBER emitter and
+        # put B.SilkS in EMITTED_LAYERS — which correctly silenced the compiler
+        # warning for gerber and, through this pre-filter, silently silenced it
+        # for kicad too. Measured on the coupon: flipping a silk-carrying
+        # component to the back dropped this emitter's footprint graphics from
+        # 114 to 7 with no diagnostic anywhere. Precisely the "loud gap traded
+        # for a silent one" the fab_capability note warns against.
+        #
+        # Forwarding restores the loudness through the channel that already
+        # exists. It does NOT make this emitter render back silk — that is the
+        # real fix and is filed separately; until then the drop is reported
+        # rather than invisible.
+        #
+        # Non-silk layers (courtyard, fab) stay filtered here and stay silent:
+        # they are documentation, never fabrication, and the compiler already
+        # reports them as captured-not-emitted.
         "graphics": [
             _local_graphic(g) for g in component.placed_graphics
-            if g.layer.id == "F.SilkS"
+            if silk_source.silk_side(g.layer.id) is not None
         ],
     }
 

@@ -58,14 +58,25 @@ from gerber_writer import (
     set_generation_software,
 )
 
-from . import board_model, stroke_font
+# stroke_font is NOT imported here any more: designator glyph synthesis moved to
+# silk_source in CP2 S2, and this module's only remaining references to it are
+# in prose. Re-add the import if code here ever renders glyphs again — but the
+# reason it should not is that a second glyph renderer is a second answer to
+# "what silk is on this board".
+from . import board_model, mask_source, silk_source
 from .fab_capability import EDGE_CUTS_WIDTH_MM
 from .footprint_def import ReferenceTextDefinition
 from .geometry import (
     is_top as _is_top,
-    place_point as _transform_point,
     rotate_local_offset as _rotate,
 )
+# `place_point as _transform_point` was dropped here in CP2 S8: this module's
+# last caller moved out during the S2-S4 silk extraction and the alias survived
+# as an unused import. Unlike DEFAULT_MASK_CLEARANCE_MM below it is NOT a
+# re-export — nothing inside or outside this package reads
+# `gerber._transform_point` (grepped worker, internal and ui). The prose at the
+# two mentions further down names `place_point`, which still exists in
+# geometry.py; those references stay correct.
 from .ir_projection import (
     cutout_dicts,
     cutout_loops_from_dict,
@@ -73,12 +84,16 @@ from .ir_projection import (
     outline_frame,
 )
 from .pad_source import (
+    # RE-EXPORT, not a local dependency — pyflakes reports it unused and it is
+    # not. CP2 S5 moved this module's last internal use of it into
+    # mask_source.resolve_ir_mask_clearance, but four test modules read
+    # `gerber.DEFAULT_MASK_CLEARANCE_MM` (they drive _harvest/_harvest_ir
+    # directly and need the same default the production entry points resolve).
+    # Deleting it on a lint sweep would break them at import time.
     DEFAULT_MASK_CLEARANCE_MM,
     has_paste,
     is_through_hole,
     iter_pads,
-    mask_opening_dim,
-    pad_mask_margin,
     paste_aperture,
     placed_pad_to_geom,
     require_th_annulus,
@@ -120,41 +135,26 @@ DEFAULT_TRACE_WIDTH_MM = 0.25
 DEFAULT_CLEARANCE_MM = 0.2
 # DEFAULT_MASK_CLEARANCE_MM is owned by pad_source (imported above) so both CAM
 # emitters share one raw-board default; re-exported here for back-compat callers.
-# --- Silk line widths: TWO constants, because KiCad's shipped footprint library
-# uses TWO different numbers and one constant cannot say both (F1, decision record
-# comment 872 on 019f783860c8). Measured on the KiCad 10.0.5 shipped library
-# (Resistor_SMD/Capacitor_SMD/Package_QFP, 272 footprints): silk GRAPHIC strokes
-# are 0.12 (1758 occurrences vs 24 at 0.15); silk TEXT thickness is 0.15 (1047
-# occurrences, dominant). Following the LIBRARY is the ratified convention — the
-# virgin-board `board_design_settings.defaults.silk_line_width` is a per-project
-# authored value that varies board to board and is NOT the convention to match.
+# Silk widths + designator text geometry are owned by silk_source (imported
+# above) and re-exported here under their historical names so every call site
+# below — and the several test suites that read `gerber.SILK_*` /
+# `gerber.REFDES_*` directly — stay byte-unchanged.
 #
-# These are FALLBACKS only: a graphic that AUTHORS a positive width keeps it
-# (see _graphic_width). The seed library authors 0.12 explicitly, so the split
-# is byte-neutral on today's fixtures — it governs width-less sources.
-SILK_TEXT_WIDTH_MM = 0.15
-SILK_GRAPHIC_WIDTH_MM = 0.12
-# Back-compat alias for the historical single name. It means the TEXT width (its
-# original 0.15 value); every graphic-line consumer reads SILK_GRAPHIC_WIDTH_MM.
-SILK_LINE_WIDTH_MM = SILK_TEXT_WIDTH_MM
+# THEY ARE NO LONGER DEFINED HERE, and that is the point of epoch CP2 station
+# S2. The note that used to sit at this spot said: "the silk pair has to be
+# mirrored in kicad.py because gerber.py drags gerber_writer, whereas
+# fab_capability imports nothing and BOTH emitters can read it directly. One
+# number, no mirror, no cross-emitter equality test needed." silk_source is that
+# second fab_capability — it imports no gerber_writer — so kicad.py's mirrored
+# literals are retired rather than re-pinned, and geometric DRC can read the
+# same numbers without importing this module.
+SILK_TEXT_WIDTH_MM = silk_source.SILK_TEXT_WIDTH_MM
+SILK_GRAPHIC_WIDTH_MM = silk_source.SILK_GRAPHIC_WIDTH_MM
+SILK_LINE_WIDTH_MM = silk_source.SILK_LINE_WIDTH_MM
+REFDES_TEXT_SIZE_MM = silk_source.REFDES_TEXT_SIZE_MM
+REFDES_LOCAL_Y_MM = silk_source.REFDES_LOCAL_Y_MM
 # EDGE_CUTS_WIDTH_MM is owned by fab_capability (imported above) and re-exported
-# here under its historical name so every call site below is byte-unchanged. It
-# is NOT defined here, unlike the silk widths: the silk pair has to be mirrored
-# in kicad.py because gerber.py drags gerber_writer, whereas fab_capability
-# imports nothing and BOTH emitters can read it directly. One number, no mirror,
-# no cross-emitter equality test needed — the outline family in ir_parity
-# compares it against what each emitter actually wrote.
-
-# Reference-designator TEXT geometry (K17: silk must carry "R1", not just
-# outline graphics — gerber-writer has no text primitive, so this is drawn
-# stroke geometry; see stroke_font.py). Stroke WIDTH is SILK_TEXT_WIDTH_MM: a
-# designator IS text, so it takes the library's TEXT thickness (0.15), not the
-# graphic-line width (0.12) — that distinction is exactly why the one constant
-# these used to share had to be split.
-REFDES_TEXT_SIZE_MM = 1.0
-# Local (component-frame) anchor, mirroring kicad.py's own hard-pinned
-# designator offset precedent: `(fp_text reference ... (at 0 -1.5) ...)`.
-REFDES_LOCAL_Y_MM = -1.5
+# here under its historical name for the same reason.
 
 # Gerber output layer filenames (suffixes appended to the board base name).
 # KiCad's default fab plot set minus F.Fab (which KiCad's own .gbrjob classifies
@@ -208,188 +208,87 @@ def _list(v: Any) -> list:
 # internal callers and drc's historical ``from .gerber import ...`` keep resolving.
 
 
-def _graphic_width(graphic: dict) -> float:
-    """Stroke width for one silk GRAPHIC primitive (line/arc/circle/poly).
-
-    Authored width wins; a width-less source falls back to the library GRAPHIC
-    width (0.12), NOT the text width. kicad._graphic_width is the byte-identical
-    twin and reads the same constant, so the two emitters cannot drift."""
-    w = _opt_num(graphic.get("width"))
-    return w if (w is not None and w > 0) else SILK_GRAPHIC_WIDTH_MM
-
-
-# Collinearity epsilon for the 3-point-arc circumcentre. Points are board mm; a
-# genuine silk arc has a triangle signed-area (|d|) many orders above this, while
-# collinear/coincident points drive it to ~0 (infinite-radius circle => a line).
-_ARC_COLLINEAR_EPS = 1e-9
-# The signed-area epsilon is absolute, so a NEAR-collinear triple can still solve
-# to a huge-but-finite radius whose centre falls outside the plottable board range
-# and would overflow the gerber 4.6 coordinate format. Any arc past this radius is
-# physically a straight silk stroke — fall back to a polyline (cosmetic fail-safe).
-_ARC_MAX_RADIUS_MM = 1.0e4
+# Silk width policy and the 3-point-arc circumcentre now live in silk_source
+# (station S2) so DRC can resolve the same geometry without importing this
+# module. Aliased here because internal call sites and the arc/width test suites
+# reach for these names.
+_graphic_width = silk_source.graphic_width
+_circumcenter = silk_source._circumcenter
+_ARC_COLLINEAR_EPS = silk_source._ARC_COLLINEAR_EPS
+_ARC_MAX_RADIUS_MM = silk_source._ARC_MAX_RADIUS_MM
 
 
-def _circumcenter(a: tuple[float, float], b: tuple[float, float],
-                  c: tuple[float, float]) -> tuple[tuple[float, float], float] | None:
-    """Circumcentre of the triangle (a, b, c) and its orientation denominator.
-
-    Returns ``(center, d)`` where ``d`` is twice the signed area of a->b->c
-    (``d == 2 * cross``): ``d > 0`` means the a->b->c turn is in the
-    INCREASING-angle direction of the frame the points are given in ('+'), ``d < 0``
-    the decreasing one ('-'). Points reach here in the BOARD frame, so the caller's
-    '+'/'-' is a board-frame chirality; _Geometry.to_gerber_frame converts it along
-    with the coordinates. Returns ``None`` when the
-    three points are collinear or coincident (infinite radius — caller falls back
-    to a polyline, since an arc through collinear points IS a line).
-    """
-    ax, ay = a
-    bx, by = b
-    cx, cy = c
-    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
-    if abs(d) < _ARC_COLLINEAR_EPS:
-        return None
-    a2 = ax * ax + ay * ay
-    b2 = bx * bx + by * by
-    c2 = cx * cx + cy * cy
-    ux = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d
-    uy = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d
-    return (ux, uy), d
-
-
-def _silk_ref(ref: Any) -> SourceRef:
+def _silk_ref(ref: Any, layer: str = "F.SilkS") -> SourceRef:
     """A GRAPHIC SourceRef tagged with the owning component ref (or a sentinel
-    when the board component carries none). entity_id must be non-empty."""
+    when the board component carries none). entity_id must be non-empty.
+
+    ``layer`` NAMES THE PHYSICAL LAYER THE WARNING IS ABOUT, and it became a
+    parameter in CP2 because it stopped being a constant. This was hardcoded to
+    F.SilkS back when the emitter had no bottom-silk harvest, so every silk
+    warning really was about the front. S3 gave bottom graphics a real path
+    through the same function, and the hardcode survived — so a malformed
+    B.SilkS primitive reported a defect on the layer it is not on, sending a
+    reader to look at the wrong side of the board. Caller-supplied now, from the
+    bucket the primitive actually lands in.
+
+    The default stays F.SilkS for the refdes/legacy call shape rather than being
+    made required: this is diagnostic detail, and a missing side is a worse
+    failure mode than a defaulted one.
+    """
     rid = ref if isinstance(ref, str) and ref else "<unknown>"
-    return SourceRef(EntityKind.GRAPHIC, rid, "F.SilkS")
+    return SourceRef(EntityKind.GRAPHIC, rid, layer)
 
 
 def _harvest_silk_graphic(g: _Geometry, cx: float, cy: float, rot: float,
-                          graphic: dict, ref: Any = None) -> None:
-    """Transform one footprint F.SilkS graphic (component-LOCAL coords) into
-    board-absolute geometry, appended to the matching ``g.silk_*`` bucket.
+                          graphic: dict, ref: Any = None,
+                          place_side: Side = Side.TOP,
+                          bucket_side: Side = Side.TOP) -> None:
+    """Adapt one silk_source primitive into this emitter's ``g.silk_*`` buckets.
 
-    Supported kinds (see footprints.py's ``_parse_graphics``): line, circle,
-    poly, arc. Arc has two source forms, BOTH drawn as a TRUE gerber arc via
-    gerber-writer's ``add_trace_arc``: legacy KiCad ``(center, start, angle)``
-    (``points`` has 2 entries + an ``angle`` field); and the modern KiCad 7/8
-    3-point ``(start, mid, end)`` form (``points`` has 3 entries, no ``angle``) —
-    emitted as an arc whose centre is the circumcircle of the three transformed
-    points, with chirality taken from the a->b->c turn in the BOARD frame
-    (consistent with the legacy convention, and converted to the gerber frame with
-    the coordinates by _Geometry.to_gerber_frame). Only when the three points are
-    collinear/coincident (infinite radius) does it fall back to a polyline — an
-    arc through collinear points IS a line. Silk is cosmetic, so degenerate
-    forms never raise (contrast R1/R2 copper/mask, which fail closed).
+    THE GEOMETRY LIVES IN :func:`silk_source.harvest_graphic` (station S2), not
+    here — including both arc source forms, the circumcircle resolution and the
+    board-frame chirality. This function is the emitter-side adapter: it maps
+    neutral primitives onto the bucket tuples ``_Geometry`` stores and attaches
+    a GRAPHIC SourceRef — carrying the bucket's own layer — to each warning,
+    which is the one part that genuinely differs per consumer (DRC tags its own
+    entity ids).
+
+    Behaviour is unchanged: silk_source emits at most one primitive and at most
+    one warning per source graphic, so nothing here can interleave differently
+    than the inline version did.
     """
-    kind = graphic.get("kind")
-    width = _graphic_width(graphic)
+    result = silk_source.harvest_graphic(cx, cy, rot, graphic, place_side)
 
-    if kind == "line":
-        st, en = graphic.get("start"), graphic.get("end")
-        if not (isinstance(st, list) and isinstance(en, list)
-                and len(st) >= 2 and len(en) >= 2):
-            # Malformed endpoints — a captured silk line that cannot be emitted.
-            # Cosmetic, so WARN (never fail-closed) so the drop is not silent.
-            g.warn("silk_primitive_unemitted",
-                   "silk line dropped: malformed start/end (need two >=2-length "
-                   "points)", _silk_ref(ref))
-            return
-        p1 = _transform_point(cx, cy, rot, _num(st[0]), _num(st[1]))
-        p2 = _transform_point(cx, cy, rot, _num(en[0]), _num(en[1]))
-        g.silk_lines.append((p1[0], p1[1], p2[0], p2[1], width))
+    bottom = bucket_side is Side.BOTTOM
 
-    elif kind == "circle":
-        ct = graphic.get("center")
-        radius = _opt_num(graphic.get("radius"))
-        if not (isinstance(ct, list) and len(ct) >= 2 and radius and radius > 0):
-            g.warn("silk_primitive_unemitted",
-                   "silk circle dropped: non-positive radius or malformed center",
-                   _silk_ref(ref))
-            return
-        pc = _transform_point(cx, cy, rot, _num(ct[0]), _num(ct[1]))
-        g.silk_circles.append((pc[0], pc[1], radius, width))
+    # The warning names the layer this primitive LANDS ON, not the one silk
+    # warnings used to always be about. bucket_side is the right signal rather
+    # than place_side: they differ precisely for a top-side component authoring
+    # B.SilkS geometry, and the reader needs the layer to go look at.
+    warn_layer = "B.SilkS" if bottom else "F.SilkS"
+    for warning in result.warnings:
+        g.warn(warning.code, warning.message, _silk_ref(ref, warn_layer))
 
-    elif kind == "poly":
-        pts = [p for p in _list(graphic.get("points")) if isinstance(p, list) and len(p) >= 2]
-        if len(pts) < 2:
-            g.warn("silk_primitive_unemitted",
-                   "silk poly dropped: fewer than 2 valid points", _silk_ref(ref))
-            return
-        abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
-        g.silk_polys.append((abs_pts, width, True))
+    lines = g.silk_lines_bot if bottom else g.silk_lines
+    circles = g.silk_circles_bot if bottom else g.silk_circles
+    arcs = g.silk_arcs_bot if bottom else g.silk_arcs
+    polys = g.silk_polys_bot if bottom else g.silk_polys
 
-    elif kind == "arc":
-        pts = [p for p in _list(graphic.get("points")) if isinstance(p, list) and len(p) >= 2]
-        angle = _opt_num(graphic.get("angle"))
-        if angle is not None and angle != 0.0 and len(pts) >= 2:
-            # Legacy KiCad form: pts[0] is the arc CENTER, pts[1] is the arc
-            # START point, and 'angle' is the sweep (same file-coordinate
-            # convention as footprint (at x y rot) — reuse _rotate() as-is).
-            ccx, ccy = _num(pts[0][0]), _num(pts[0][1])
-            sx, sy = _num(pts[1][0]), _num(pts[1][1])
-            vx, vy = sx - ccx, sy - ccy
-            if vx == 0.0 and vy == 0.0:
-                g.warn("silk_primitive_unemitted",
-                       "silk arc dropped: zero-length radius vector "
-                       "(center coincides with start)", _silk_ref(ref))
-                return
-            evx, evy = _rotate(vx, vy, angle)
-            ex, ey = ccx + evx, ccy + evy
-            start_abs = _transform_point(cx, cy, rot, sx, sy)
-            end_abs = _transform_point(cx, cy, rot, ex, ey)
-            center_abs = _transform_point(cx, cy, rot, ccx, ccy)
-            # Chirality is decided HERE, in the BOARD frame (Y-DOWN) that every
-            # other coordinate in this harvest is also expressed in, and is
-            # converted to the gerber frame ONCE by _Geometry.to_gerber_frame —
-            # which flips '+'/'-' along with the Y negation, because a mirror
-            # reverses handedness. Nothing about this line changed when the frame
-            # boundary was introduced (bug 019fa8011555), and nothing about it
-            # should: a second correction here would cancel the conversion instead
-            # of composing with it. Empirically verified in the board frame: the
-            # DIP-6 pin-1 notch (center,start,angle=-180) must bulge INTO the body
-            # (+y in board coords), which is this '-'; the opposite ('+') mirrors it
-            # outside the body. Pinned by test_legacy_arc_bulges_into_body.
-            orientation = "-" if angle < 0 else "+"
-            g.silk_arcs.append((start_abs, end_abs, center_abs, orientation, width))
-        elif len(pts) >= 3:
-            # Modern KiCad 7/8 three-point (start, mid, end) form: emit a TRUE
-            # gerber arc through the circumcircle of the transformed points.
-            a = _transform_point(cx, cy, rot, _num(pts[0][0]), _num(pts[0][1]))
-            b = _transform_point(cx, cy, rot, _num(pts[1][0]), _num(pts[1][1]))
-            c = _transform_point(cx, cy, rot, _num(pts[2][0]), _num(pts[2][1]))
-            solved = _circumcenter(a, b, c)
-            if solved is not None:
-                center, _d = solved
-                r2 = (a[0] - center[0]) ** 2 + (a[1] - center[1]) ** 2
-                if r2 > _ARC_MAX_RADIUS_MM * _ARC_MAX_RADIUS_MM:
-                    # Near-collinear: finite but off-board centre — treat as a line.
-                    solved = None
-            if solved is None:
-                # Collinear / coincident / near-degenerate (infinite or off-board
-                # radius). Fail-SAFE (cosmetic, not fail-closed) — fall back to the
-                # polyline through the points; never risk a coordinate overflow.
-                # The arc IS emitted (as its chord), but its curvature is lost, so
-                # WARN that the shape was approximated (not a silent degrade).
-                g.warn("silk_arc_approximated",
-                       "silk 3-point arc approximated as a polyline: collinear or "
-                       "off-board (infinite/huge) circumradius", _silk_ref(ref))
-                g.silk_polys.append(([a, b, c], width, False))
-            else:
-                center, d = solved
-                # d == 2*cross of a->b->c: positive => CCW turn => gerber '+';
-                # negative => CW => '-'. Same Y-up chirality rule the legacy
-                # (center,start,angle) branch above encodes.
-                orientation = "+" if d > 0 else "-"
-                g.silk_arcs.append((a, c, center, orientation, width))
-        elif len(pts) >= 2:
-            # 2-point arc with no mid and no angle: underspecified — draw the
-            # chord as a polyline (unchanged fallback). Its curvature is
-            # unknowable, so WARN that the arc was approximated (not silent).
-            g.warn("silk_arc_approximated",
-                   "silk 2-point arc approximated as a polyline: underspecified "
-                   "(no mid point and no sweep angle)", _silk_ref(ref))
-            abs_pts = [_transform_point(cx, cy, rot, _num(p[0]), _num(p[1])) for p in pts]
-            g.silk_polys.append((abs_pts, width, False))
+    for prim in result.primitives:
+        if isinstance(prim, silk_source.SilkLine):
+            lines.append((prim.x1, prim.y1, prim.x2, prim.y2, prim.width))
+        elif isinstance(prim, silk_source.SilkCircle):
+            circles.append((prim.cx, prim.cy, prim.radius, prim.width))
+        elif isinstance(prim, silk_source.SilkArc):
+            arcs.append((prim.start, prim.end, prim.center,
+                         prim.orientation, prim.width))
+        elif isinstance(prim, silk_source.SilkPoly):
+            # list(), not the tuple silk_source returns: the downstream region /
+            # path builders and several golden-comparison tests index these as
+            # lists, and this adapter is not the place to change that contract.
+            polys.append((list(prim.points), prim.width, prim.closed))
+        else:  # pragma: no cover - defensive; silk_source owns the union
+            raise TypeError(f"unknown silk primitive {type(prim).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -441,9 +340,16 @@ class _Geometry:
         self.zone_fill_bot: list[list[tuple[float, float]]] = []
         # Drill hits: (x, y, diameter, plated?)
         self.holes: list[tuple[float, float, float, bool]] = []
-        # Real footprint silk (top side, components WITH graphics), harvested
-        # from component["graphics"] (resolve_board) and transformed to board
-        # coords with the same _rotate() convention as pads.
+        # Real footprint silk, harvested from component graphics and placed into
+        # board coords by silk_source.
+        #
+        # NAMING IS ASYMMETRIC ON PURPOSE (`silk_*` = TOP, `silk_*_bot` =
+        # BOTTOM), unlike the mask_top/mask_bot and traces_top/traces_bot pairs
+        # right above. The un-suffixed names predate bottom-side support (epoch
+        # CP2 S3) and are read directly by several suites — test_silk_text.py
+        # drives _emit_refdes and asserts on `g.silk_polys`, for one — so
+        # renaming them to `silk_*_top` for symmetry would break those for
+        # cosmetic gain. Add to the pairs; do not rename the halves.
         self.silk_lines: list[tuple[float, float, float, float, float]] = []  # x1,y1,x2,y2,w
         self.silk_circles: list[tuple[float, float, float, float]] = []       # cx,cy,r,w
         # points, width, closed (fp_poly / mid-less arc fallback is open)
@@ -451,6 +357,15 @@ class _Geometry:
         # start, end, center, orientation('+'/'-'), width
         self.silk_arcs: list[tuple[tuple[float, float], tuple[float, float],
                                    tuple[float, float], str, float]] = []
+        # B.SilkS — same four shapes, back side. Empty on any board with no
+        # bottom-side components, which is the overwhelmingly common case and
+        # is NOT the same thing as the layer being unsupported (it was, until
+        # CP2 S3; see the B.SilkS note in _build_gerber_layers).
+        self.silk_lines_bot: list[tuple[float, float, float, float, float]] = []
+        self.silk_circles_bot: list[tuple[float, float, float, float]] = []
+        self.silk_polys_bot: list[tuple[list[tuple[float, float]], float, bool]] = []
+        self.silk_arcs_bot: list[tuple[tuple[float, float], tuple[float, float],
+                                       tuple[float, float], str, float]] = []
         # Capability-conformance diagnostics (K3 WARNING channel). Built in board
         # order by _harvest, so the list is deterministic. NEVER fatal here — silk
         # is cosmetic and board-level drill is an Extra passthrough; both are
@@ -534,24 +449,74 @@ class _Geometry:
         self.silk_arcs = [((s[0], -s[1]), (e[0], -e[1]), (c[0], -c[1]),
                            "-" if orientation == "+" else "+", w)
                           for (s, e, c, orientation, w) in self.silk_arcs]
+        # B.SilkS gets the IDENTICAL conversion (CP2 S3). The frame change is a
+        # property of the OUTPUT FORMAT, not of which side the artwork is on:
+        # both silk layers are plotted in the same Y-up gerber frame, so both
+        # need the same Y negation and the same arc-chirality flip. The
+        # bottom-side MIRROR is a separate transform applied much earlier, at
+        # placement time by silk_source._place — do not conflate the two, and in
+        # particular do NOT skip the negation here on the theory that the mirror
+        # already handled it.
+        self.silk_lines_bot = [(x1, -y1, x2, -y2, w)
+                               for (x1, y1, x2, y2, w) in self.silk_lines_bot]
+        self.silk_circles_bot = [(cx, -cy, r, w)
+                                 for (cx, cy, r, w) in self.silk_circles_bot]
+        self.silk_polys_bot = [([(px, -py) for (px, py) in pts], w, closed)
+                               for (pts, w, closed) in self.silk_polys_bot]
+        self.silk_arcs_bot = [((s[0], -s[1]), (e[0], -e[1]), (c[0], -c[1]),
+                               "-" if orientation == "+" else "+", w)
+                              for (s, e, c, orientation, w) in self.silk_arcs_bot]
 
         self.frame = "gerber"
         return self
 
 
-# The mask-opening collapse boundary is owned by pad_source.mask_opening_dim so BOTH
-# CAM emitters (this module + kicad) fail closed at the exact same point on a
-# collapsing negative per-pad solder_mask_margin (bug 019f929b1416). Kept under the
-# historical private name so every call site below is byte-unchanged.
-_mask_dim = mask_opening_dim
+# NOTE (station S4): the `_mask_dim = mask_opening_dim` alias that stood here is
+# GONE, along with every call to it. This module no longer computes a mask
+# dimension anywhere — mask_source does, and this module adapts the result. The
+# collapse boundary it guarded (bug 019f929b1416, a negative per-pad
+# solder_mask_margin that collapses the opening) still fails closed, one level
+# further in. An alias with no call sites is a decoy: it suggests this file
+# still owns the rule.
 
 
-def _circle_mask(x: float, y: float, d: float) -> tuple:
-    """A round, unrotated solder-mask opening of diameter ``d`` at ``(x, y)`` —
-    the aperture tuple every circular mask flash shares (round TH land, NPTH
-    drill-size opening, untented via). One place owns the (shape, w==h, no
-    corner-ratio, 0° angle) convention so the mask emitters cannot drift."""
-    return (x, y, "circle", d, d, None, 0.0)
+# `_circle_mask` USED TO BE HERE and is deliberately gone. It was kept for one
+# revision "because call sites and tests reach for the name" — a claim that was
+# simply false (grep: zero references anywhere in pcb_worker/ or tests/), and it
+# was written four lines below the note above condemning exactly this. It also
+# hardcoded a via origin and a TOP side for a supposedly generic helper, so any
+# future caller would have inherited wrong metadata. The convention it encoded
+# lives in `mask_source.circle_opening`.
+
+
+def _adopt_mask_openings(g: _Geometry, openings) -> None:
+    """Adapt neutral :class:`mask_source.MaskOpening` values into this emitter's
+    ``mask_top`` / ``mask_bot`` buckets.
+
+    NAMED FOR WHAT IT DOES, and not ``_add_mask``, which is what it was called
+    first. That name was ALREADY TAKEN by the layer writer further down this
+    module (``_add_mask(layer, openings)``, which flashes the buckets into a
+    DataLayer), so the later definition silently shadowed this one and every
+    call here resolved to the writer — unpacking MaskOpening dataclasses as
+    7-tuples. Nothing static caught it: the module compiles, imports, and
+    collects tests clean, because the collision only fails when a pad is
+    actually emitted. The two functions sit at opposite ends of the same
+    pipeline and deserve names that say which end.
+
+    THE ENUMERATION LIVES IN :mod:`mask_source` (station S4), not here — which
+    entities open the mask, on which sides, at what dimension. This function is
+    the emitter-side adapter and nothing more, the same relationship
+    ``_harvest_silk_graphic`` has to :mod:`silk_source`.
+
+    Bucket ORDER is preserved by construction: mask_source returns TOP before
+    BOTTOM, and each entity contributes at most one opening per side, so the
+    per-bucket sequence is unchanged from the inline version. The Gerber goldens
+    are byte-sensitive to aperture order within a layer, so that is a
+    correctness property, not tidiness.
+    """
+    for opening in openings:
+        bucket = g.mask_top if opening.side is Side.TOP else g.mask_bot
+        bucket.append(opening.as_emitter_tuple())
 
 
 def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
@@ -572,6 +537,16 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
         pad_angle = pad.rotation if pad.rotation is not None else rot
 
         drill = pad.drill
+        # MASK OPENINGS come from the shared owner, once, for every pad kind —
+        # SMD, plated TH (shaped or round) and bare NPTH alike. The copper /
+        # paste branches below still decide their own geometry, but they no
+        # longer also decide where solder mask opens: DRC reads the same
+        # enumeration, and a checker that measured different apertures than the
+        # fab receives would false-clean a mask sliver (station S4).
+        comp_side = Side.TOP if top else Side.BOTTOM
+        _adopt_mask_openings(g, mask_source.pad_openings(
+            pad, px, py, pad_angle, comp_side, ref, mask_clearance))
+
         if is_through_hole(pad):
             # An UNPLATED through-hole pad (np_thru_hole, or a pad flagged not plated)
             # is a BARE drilled hole — NO copper land (just a drill-size mask opening,
@@ -586,15 +561,11 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                 # width x height faithfully; an equal-axis land is the historical
                 # round annulus (finding 019f8b7fd295). The drill stays round.
                 shaped, land_shape, lw, lh, lrratio = th_land(pad)
-                margin = pad_mask_margin(pad, mask_clearance)
                 if shaped:
-                    # Faithful oblong land on F.Cu AND B.Cu, mask opening in the same
-                    # aperture family enlarged per axis (no more circularizing).
+                    # Faithful oblong land on F.Cu AND B.Cu (the matching mask
+                    # opening came from mask_source above, in the same aperture
+                    # family enlarged per axis — no circularizing).
                     g.th_shaped.append((px, py, land_shape, lw, lh, lrratio, pad_angle))
-                    mw = _mask_dim(lw, margin, ref, pad.number)
-                    mh = _mask_dim(lh, margin, ref, pad.number)
-                    g.mask_top.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
-                    g.mask_bot.append((px, py, land_shape, mw, mh, lrratio, pad_angle))
                     _emit_paste(g, pad, px, py, land_shape, lw, lh, lrratio,
                                 pad_angle, ref)
                 else:
@@ -604,24 +575,13 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
                     # identical on this contract.
                     annulus = require_th_annulus(pad, ref)
                     g.th_annuli.append((px, py, annulus, "ComponentPad"))
-                    mask_d = _mask_dim(annulus, margin, ref, pad.number)
-                    # Round land: circular mask opening, enlarged by the per-pad margin.
-                    g.mask_top.append(_circle_mask(px, py, mask_d))
-                    g.mask_bot.append(_circle_mask(px, py, mask_d))
                     # Stencil follows the ROUND land, not pad.shape (a defaulted-rect
                     # TH pad's copper IS a circle here — see th_land).
                     _emit_paste(g, pad, px, py, "circle", annulus, annulus, None,
                                 0.0, ref)
-            else:
-                # UNPLATED (np_thru_hole): NO copper land — just a DRILL-size mask
-                # opening on both sides, matching kicad's np_thru_hole `(size drill
-                # drill)` on "*.Mask": a bare hole, mask open to the drill, no copper
-                # ring (finding 019f8fe77068). Uses the literal drill (no mask margin);
-                # kicad emits the SAME drill-size opening — its np_thru_hole carries an
-                # explicit `(solder_mask_margin 0.0)` — so the two emitters AGREE on the
-                # NPTH mask (R4d closed the earlier board-clearance divergence).
-                g.mask_top.append(_circle_mask(px, py, drill))
-                g.mask_bot.append(_circle_mask(px, py, drill))
+            # An UNPLATED (np_thru_hole) pad emits NO copper at all — its
+            # drill-size mask opening already came from mask_source above, which
+            # is where the rule and its rationale now live.
             g.holes.append((px, py, drill, is_plated))
         else:
             # SMD pad on the component's own side. width/height are guaranteed
@@ -630,15 +590,8 @@ def _emit_pads(g: _Geometry, pads, cx: float, cy: float, rot: float,
             w = pad.width
             h = pad.height
             g.smd_pads.append((px, py, w, h, pad_angle, top, pad.shape, pad.corner_rratio))
-            # Mask opening follows the pad SHAPE (R2), enlarged per side by the
-            # effective margin (per-pad solder_mask_margin, else the global
-            # clearance); a large-negative margin that collapses the opening fails
-            # closed in _mask_dim.
-            margin = pad_mask_margin(pad, mask_clearance)
-            mw = _mask_dim(w, margin, ref, pad.number)
-            mh = _mask_dim(h, margin, ref, pad.number)
-            mask = (px, py, pad.shape, mw, mh, pad.corner_rratio, pad_angle)
-            (g.mask_top if top else g.mask_bot).append(mask)
+            # The mask opening (pad SHAPE, enlarged by the effective margin, on
+            # this component's side only) came from mask_source above.
             # Stencil aperture, from the SAME copper land the flash above used.
             _emit_paste(g, pad, px, py, pad.shape, w, h, pad.corner_rratio,
                         pad_angle, ref)
@@ -673,19 +626,74 @@ def _emit_paste(g: _Geometry, pad, px: float, py: float, shape: str,
 
 
 def _emit_silk(g: _Geometry, graphics, cx: float, cy: float, rot: float,
-               top: bool, ref) -> None:
-    """Emit one component's F.SilkS — the SHARED silk path. A component with resolved
-    footprint graphics gets its REAL F.SilkS outline; one WITHOUT graphics gets NO
-    silk (K4: the procedural courtyard-box placeholder is retired — no resolved silk
-    means no silk output, matching the kicad emitter, which never drew a box). A
-    source that CLAIMED silk it could not emit still WARNs via _harvest_silk_graphic;
-    silk-less-by-design is silent. ``graphics`` is a list of graphic dicts or None.
-    Bottom-side (B.SilkS) is out of scope."""
-    if not (isinstance(graphics, list) and graphics and top):
+               top: bool, ref, *, pre_placed: bool) -> None:
+    """Emit one component's silk — the SHARED silk path, BOTH SIDES since CP2 S3.
+
+    A component with resolved footprint graphics gets its REAL silk outline; one
+    WITHOUT graphics gets NO silk (K4: the procedural courtyard-box placeholder
+    is retired — no resolved silk means no silk output, matching the kicad
+    emitter, which never drew a box). A source that CLAIMED silk it could not
+    emit still WARNs via _harvest_silk_graphic; silk-less-by-design is silent.
+    ``graphics`` is a list of graphic dicts or None.
+
+    ``pre_placed`` NAMES THE CALLER'S FRAME, and it is a required keyword
+    because this function CANNOT INFER IT FROM THE DATA. That was tried, in
+    CP2 S3, and it was wrong:
+
+      * ``pre_placed=True`` — the IR harvest (:func:`_harvest_ir`). The COMPILER
+        has already applied ``geometry.PlacementTransform``: geometry is
+        board-absolute and already mirrored, and the layer has already been
+        flipped. The layer is therefore authoritative for side and NO further
+        mirror may be applied, whatever side the component is on.
+      * ``pre_placed=False`` — the loose-dict harvest (:func:`_harvest`). Its
+        graphics are footprint-LOCAL and carry the footprint's own authored
+        layer, unflipped. A bottom-side component's silk must be mirrored HERE
+        and its layer flipped here, which is what KiCad itself does on flip.
+
+    THE BUG THIS REPLACED, written down because the fix only makes sense against
+    it. The old code inferred the frame: "layer says B.SilkS -> pre-flipped by
+    the compiler; layer says F.SilkS -> loose labelling, mirror if the component
+    is on the back." Its docstring justified this by asserting loose graphics are
+    "labelled F.SilkS whatever side the component is on" — which is false.
+    ``footprints.GRAPHIC_LAYERS`` captures B.SilkS, so a footprint can author
+    back-side artwork directly.
+
+    That makes the inference invert on a reachable input. A bottom-placed
+    footprint that authors B.SilkS reaches the IR with its layer flipped to
+    F.SilkS (``PlacementTransform.layer`` flips BOTH ways) and its geometry
+    already mirrored. The old heuristic read F.SilkS + bottom component as "loose
+    labelling", applied a SECOND mirror, and bucketed it to B.SilkS — while the
+    DRC projection, which correctly trusts the layer, placed it unmirrored on
+    F.SilkS. Emitter and checker disagreed about both the geometry AND the side:
+    a false clean on the artwork that actually ships.
+    """
+    if not (isinstance(graphics, list) and graphics):
         return
+    comp_side = Side.TOP if top else Side.BOTTOM
     for graphic in graphics:
-        if isinstance(graphic, dict) and graphic.get("layer") == "F.SilkS":
-            _harvest_silk_graphic(g, cx, cy, rot, graphic, ref)
+        if not isinstance(graphic, dict):
+            continue
+        layer_side = silk_source.silk_side(graphic.get("layer"))
+        if layer_side is None:
+            continue  # not a silk layer (courtyard, fab, copper) — not ours
+        if pre_placed:
+            # The compiler already placed AND flipped this. Trust the layer for
+            # side, apply no mirror. `top` is deliberately unused on this branch:
+            # the component's side is already baked into both.
+            _harvest_silk_graphic(g, cx, cy, rot, graphic, ref,
+                                  place_side=Side.TOP, bucket_side=layer_side)
+        elif comp_side is Side.TOP:
+            # Footprint-local artwork on a front-side component: the authored
+            # layer is the final layer and no mirror applies.
+            _harvest_silk_graphic(g, cx, cy, rot, graphic, ref,
+                                  place_side=Side.TOP, bucket_side=layer_side)
+        else:
+            # Footprint-local artwork on a BACK-side component. Mirror it, and
+            # flip its layer the way KiCad does on flip — F-authored artwork
+            # lands on the back, B-authored artwork lands on the front.
+            flipped = Side.BOTTOM if layer_side is Side.TOP else Side.TOP
+            _harvest_silk_graphic(g, cx, cy, rot, graphic, ref,
+                                  place_side=Side.BOTTOM, bucket_side=flipped)
 
 
 def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
@@ -696,12 +704,17 @@ def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
 
     Deliberately called OUTSIDE _emit_silk's graphics-present guard, and as a
     SEPARATE call, not folded into it: _emit_silk returns early when a
-    footprint has no captured F.SilkS graphics at all (`if not (... and
-    graphics and top)`), which is correct for outline silk (no graphics really
-    does mean no outline) but would silently drop the designator too if this
-    lived inside that guard — a footprint with no silk graphics must still get
-    its "R1" (K17). Top-side only; B.SilkS is out of scope, matching
-    _emit_silk's own documented restriction.
+    footprint has no captured silk graphics at all, which is correct for
+    outline silk (no graphics really does mean no outline) but would silently
+    drop the designator too if this lived inside that guard — a footprint with
+    no silk graphics must still get its "R1" (K17).
+
+    BOTH SIDES since CP2 S3. A bottom-side component's designator goes to
+    B.SilkS, mirrored, which is what KiCad does and what a fab expects: back
+    legend reads correctly when the board is viewed from the back. Unlike
+    _emit_silk, there is no layer-vs-side ambiguity to resolve here — glyphs
+    are synthesized from scratch in text-local coordinates on both paths, so
+    the component's side is the only signal and is always the right one.
 
     ``cx, cy, rot`` are the component's REAL board placement, independent of
     whatever _emit_silk was called with for this same component: on the
@@ -726,35 +739,18 @@ def _emit_refdes(g: _Geometry, ref: Any, cx: float, cy: float, rot: float,
     which has no footprint definition to consult) keeps today's exact
     single-step placement, unchanged.
     """
-    if not top:
-        return
-    text = ref if isinstance(ref, str) else None
-    if not text or not text.strip():
-        return
-    if reference_text is not None:
-        size = reference_text.size_mm
-        rtx, rty = reference_text.position
-        rt_rot = reference_text.rotation_deg
-    else:
-        size = REFDES_TEXT_SIZE_MM
-        rtx = rty = rt_rot = None
-    for stroke in stroke_font.render(text, size=size, x0=0.0,
-                                     y0=(0.0 if reference_text is not None
-                                         else REFDES_LOCAL_Y_MM)):
-        if reference_text is not None:
-            # Text-local rotate-then-translate to the footprint's authored
-            # anchor, THEN the component's own board placement (see docstring).
-            footprint_local = [_transform_point(rtx, rty, rt_rot, lx, ly) for (lx, ly) in stroke]
-            abs_pts = [_transform_point(cx, cy, rot, lx, ly) for (lx, ly) in footprint_local]
-        else:
-            abs_pts = [_transform_point(cx, cy, rot, lx, ly) for (lx, ly) in stroke]
-        if len(abs_pts) >= 2:
-            # OPEN polyline (closed=False): a glyph stroke must NEVER gain a
-            # closing segment back to its first point (unlike an authored
-            # fp_poly outline, which IS meant to close). _harvest_silk_graphic
-            # is not reused here for exactly this reason — it always marks a
-            # "poly" kind closed=True.
-            g.silk_polys.append((abs_pts, SILK_TEXT_WIDTH_MM, False))
+    # Glyph synthesis + both placement forms live in silk_source (station S2):
+    # a designator exists ONLY as synthesized geometry — it is in no IR — so
+    # any consumer that checks silk has to be able to produce it too, and a
+    # second copy of this would be a checker measuring a board with no
+    # designators on it. The strokes come back OPEN (closed=False), which is
+    # why silk_source.harvest_graphic is not reused for them: its "poly" kind
+    # always closes.
+    side = Side.TOP if top else Side.BOTTOM
+    bucket = g.silk_polys if top else g.silk_polys_bot
+    for prim in silk_source.refdes_strokes(ref, cx, cy, rot, reference_text,
+                                           side):
+        bucket.append((list(prim.points), prim.width, prim.closed))
 
 
 def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
@@ -768,23 +764,21 @@ def _emit_board_hole(g: _Geometry, key: str, idx: int, hx: float, hy: float,
     caller; the live path COMPILES first and fail-closes) drills but WARNs, never
     silent (copper is fabrication-critical)."""
     g.holes.append((hx, hy, dia, plated))
+    # Mask openings from the shared owner — the plated-with-annulus and the
+    # unplated drill-size cases both. It returns nothing for a plated hole with
+    # no annulus, which is the case the warning below is about.
+    _adopt_mask_openings(g, mask_source.board_hole_openings(
+        hx, hy, dia, plated, annulus, mask_clearance, f"{key}[{idx}]"))
     if plated and annulus is not None and annulus > 0:
         g.th_annuli.append((hx, hy, annulus, "ComponentPad"))
-        mask_d = _mask_dim(annulus, mask_clearance, f"{key}[{idx}]", "")
-        g.mask_top.append(_circle_mask(hx, hy, mask_d))
-        g.mask_bot.append(_circle_mask(hx, hy, mask_d))
     elif plated:
         g.warn("plated_hole_no_annulus_copper",
                f"plated hole {key}[{idx}] at ({hx}, {hy}) has no annulus_mm — "
                f"drilled but NO copper ring emitted (author annulus_mm)",
                SourceRef(EntityKind.HOLE, f"{key}[{idx}]", f"({hx}, {hy})"))
-    else:
-        # Unplated: no copper, but a DRILL-size mask opening on both sides — UNIFORM
-        # with a footprint np_thru_hole pad and kicad's np_thru_hole (verified vs
-        # pcbnew 9.0.9: an np pad IS on *.Mask and renders a size==drill opening). The
-        # ratified NPTH mask rule (finding 019f901a9966).
-        g.mask_top.append(_circle_mask(hx, hy, dia))
-        g.mask_bot.append(_circle_mask(hx, hy, dia))
+    # An UNPLATED board hole emits no copper; its drill-size mask opening on both
+    # sides came from mask_source above, which is where that ratified rule
+    # (finding 019f901a9966) and its pcbnew verification now live.
 
 
 def _emit_via(g: _Geometry, vx: float, vy: float, dia: float, drill: float,
@@ -796,12 +790,11 @@ def _emit_via(g: _Geometry, vx: float, vy: float, dia: float, drill: float,
     mask opening (dia enlarged by the board mask clearance, like a plated pad)."""
     g.th_annuli.append((vx, vy, dia, "ViaPad"))
     g.holes.append((vx, vy, drill, True))
-    if not (tented_front and tented_back):
-        md = _mask_dim(dia, mask_clearance, "via", f"({vx}, {vy})")
-        if not tented_front:
-            g.mask_top.append(_circle_mask(vx, vy, md))
-        if not tented_back:
-            g.mask_bot.append(_circle_mask(vx, vy, md))
+    # Per-side tenting is decided by the shared owner. A via is the one entity
+    # where "has copper on this side" and "opens mask on this side" are
+    # different questions, so the checker must read the same answer this does.
+    _adopt_mask_openings(g, mask_source.via_openings(
+        vx, vy, dia, tented_front, tented_back, mask_clearance))
 
 
 def _harvest(board: dict, mask_clearance: float) -> _Geometry:
@@ -830,7 +823,11 @@ def _harvest(board: dict, mask_clearance: float) -> _Geometry:
         # (bug 019f7736b236) — real runs resolve the board first (methods gate).
         _emit_pads(g, iter_pads(comp, require_smd_size=True),
                    cx, cy, rot, top, ref, mask_clearance)
-        _emit_silk(g, comp.get("graphics"), cx, cy, rot, top, ref)
+        # pre_placed=False: resolve_board graphics are footprint-LOCAL and carry
+        # the footprint's own authored layer, so the mirror and the layer flip
+        # for a bottom-side component both happen inside _emit_silk.
+        _emit_silk(g, comp.get("graphics"), cx, cy, rot, top, ref,
+                   pre_placed=False)
         _emit_refdes(g, ref, cx, cy, rot, top)
 
     # --- Vias: copper annulus on both layers + plated drill. ---
@@ -1237,23 +1234,34 @@ def _build_gerber_layers(board: dict, g: _Geometry, creation_date: str) -> dict[
     _add_silk_arcs(f_silks, g.silk_arcs)
     out["F_SilkS"] = _dump(f_silks, creation_date)
 
-    # B.SilkS — STRUCTURALLY PRESENT, ALWAYS EMPTY. Read this before adding to it.
+    # B.SilkS — A REAL LAYER SINCE EPOCH CP2 STATION S3.
     #
-    # The emitter has NO bottom-silk harvest: _emit_silk and _emit_refdes are
-    # top-side only by their own documented restriction, so nothing ever reaches
-    # this layer. It is written anyway, for the same reason B_Paste is: a fab
-    # package that is missing one of KiCad's nine default layers is ambiguous,
-    # and KiCad itself emits a valid aperture-less board-B_Silkscreen.gbo for a
-    # board with no back legend.
+    # This block used to open "STRUCTURALLY PRESENT, ALWAYS EMPTY", because
+    # _emit_silk and _emit_refdes were top-side only and nothing could reach the
+    # layer. It also recorded the condition for changing that: "B.SilkS is
+    # excluded from fab_capability.EMITTED_LAYERS, so a bottom-side component
+    # with captured B.SilkS graphics still raises `captured_geometry_not_emitted`
+    # from the compiler. Adding B.SilkS to EMITTED_LAYERS would silence that
+    # warning without emitting one byte more silk — swapping a loud gap for a
+    # silent one. When a real bottom-silk harvest lands, BOTH changes go in
+    # together."
     #
-    # This file being EMPTY is NOT the same as this board having no back legend,
-    # and that difference is deliberately kept loud: B.SilkS is excluded from
-    # fab_capability.EMITTED_LAYERS, so a bottom-side component with captured
-    # B.SilkS graphics still raises `captured_geometry_not_emitted` from the
-    # compiler. Adding B.SilkS to EMITTED_LAYERS would silence that warning
-    # without emitting one byte more silk — swapping a loud gap for a silent one.
-    # When a real bottom-silk harvest lands, BOTH changes go in together.
+    # S3 is that landing, and both changes DID go in together: the harvest is
+    # real (see _emit_silk's layer-vs-side note and silk_source._place) and
+    # B.SilkS is now in EMITTED_LAYERS. Neither half is valid alone — the
+    # capability list would lie without the harvest, and the harvest would be
+    # shadowed by a spurious warning without the capability list.
+    #
+    # An EMPTY B_SilkS is still the normal case: most boards are single-sided
+    # for components, and the file is written regardless for the same reason
+    # B_Paste is — a fab package missing one of KiCad's nine default layers is
+    # ambiguous, and KiCad itself emits a valid aperture-less
+    # board-B_Silkscreen.gbo for a board with no back legend.
     b_silks = DataLayer("Legend,Bot", negative=False)
+    _add_silk_lines(b_silks, g.silk_lines_bot)
+    _add_silk_circles(b_silks, g.silk_circles_bot)
+    _add_silk_polys(b_silks, g.silk_polys_bot)
+    _add_silk_arcs(b_silks, g.silk_arcs_bot)
     out["B_SilkS"] = _dump(b_silks, creation_date)
 
     # Edge.Cuts — closed board-outline rectangle from origin + width/height.
@@ -1584,12 +1592,17 @@ def _harvest_ir(board: ResolvedBoard, mask_clearance: float) -> _Geometry:
         pads = [placed_pad_to_geom(p, number_of.get(p.source_id, ""))
                 for p in comp.placed_pads]
         _emit_pads(g, pads, 0.0, 0.0, 0.0, top, ref, mask_clearance)
-        # Pass ALL placed graphics (NOT pre-filtered to F.SilkS): _emit_silk's
-        # internal F.SilkS filter does the selecting — exactly as the loose-dict path
-        # does. A component whose graphics are all non-F.SilkS (e.g. F.Fab/F.CrtYd)
-        # simply emits no silk (no procedural box remains to fall back to).
+        # Pass ALL placed graphics (NOT pre-filtered to a silk layer):
+        # _emit_silk's internal silk-layer filter does the selecting — exactly
+        # as the loose-dict path does. A component whose graphics are all
+        # non-silk (e.g. F.Fab/F.CrtYd) simply emits no silk (no procedural box
+        # remains to fall back to).
+        #
+        # pre_placed=True: the compiler has already applied the placement
+        # transform AND flipped the layer, so the layer is authoritative for
+        # side and no further mirror may be applied here.
         graphics = [graphic_to_dict(gr) for gr in comp.placed_graphics]
-        _emit_silk(g, graphics, 0.0, 0.0, 0.0, top, ref)
+        _emit_silk(g, graphics, 0.0, 0.0, 0.0, top, ref, pre_placed=True)
         # UNLIKE _emit_silk above, the designator is NOT called at identity:
         # its geometry is glyph-LOCAL (footprint-frame), not board-absolute
         # like PlacedGraphic, so it needs the component's REAL placement
@@ -1693,10 +1706,9 @@ def build_gerbers_ir(board: ResolvedBoard, out_dir: str | None = None,
     date = creation_date or PINNED_CREATION_DATE
     set_generation_software("Minerva", "pcb_worker/gerber.py", WORKER_VERSION)
 
-    mask_clearance = DEFAULT_MASK_CLEARANCE_MM
-    mc = board.design_rules.minimums.solder_mask_clearance_mm
-    if mc is not None and mc >= 0:
-        mask_clearance = mc
+    # The clearance rule is mask_source's (station S4), not this function's: DRC
+    # sizes the same openings and must not re-derive the fallback.
+    mask_clearance = mask_source.resolve_ir_mask_clearance(board)
 
     g = _harvest_ir(board, mask_clearance)
 
@@ -1743,7 +1755,8 @@ def build_gerbers(board_dict: dict, out_dir: str | None = None,
 
     Returns a GerberResult (a ``dict[str, str]`` subclass — a drop-in for the
     plain files dict every caller indexes / iterates) mapping {filename: content}
-    for six Gerber layers (F_Cu, B_Cu, F_Mask, B_Mask, F_SilkS, Edge_Cuts) plus
+    for the nine Gerber layers in ``_GERBER_SUFFIXES`` (F_Cu, B_Cu, F_Paste,
+    B_Paste, F_SilkS, B_SilkS, F_Mask, B_Mask, Edge_Cuts) plus
     PTH.drl / NPTH.drl (each drill file emitted only when the board actually has
     holes of that class). ``.diagnostics`` carries the emitter's WARNING-channel
     capability-conformance diagnostics (empty on a clean board); it is a side

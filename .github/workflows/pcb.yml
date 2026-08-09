@@ -3,7 +3,34 @@ name: pcb
 # TEST GATES ONLY (round A0a). No packaging/release/registry/NOTICE/runtime
 # bundle here — that is round A0b, a separate follow-up workflow change.
 #
-# Four jobs:
+# Five jobs:
+#
+#   `fab-gate`
+#            — epoch CP2 station S1. Runs pcb/scripts/hermetic-fab-check.sh,
+#              which compiles a board TWICE from a throwaway `git worktree` at
+#              HEAD and byte-compares the two output trees.
+#
+#              WHAT THIS BUYS *ON A RUNNER*, stated precisely because the
+#              obvious pitch for the script is wrong here. Its clean-checkout
+#              dimension (no stale .pyc, no uncommitted edit, no leftover
+#              .pcbskel sidecar) is what makes it valuable LOCALLY and is
+#              close to vacuous in CI, where actions/checkout already hands us
+#              a pristine tree. What it genuinely adds in this job is: a
+#              CROSS-PROCESS two-run compare (fresh interpreter, so a fresh
+#              hash seed, per compile) over REAL boards; BOM and CPL inside
+#              the byte compare, which the determinism gate does not cover;
+#              and the public coupon gated BY NAME.
+#
+#              PRECISE STATEMENT OF WHAT WAS MISSING, because the loose
+#              version ("nothing ran the script") is wrong and was briefly
+#              believed during S1: pcb/worker/tests/test_hermetic_check.py
+#              DOES run in the `test` job and DOES drive the script as a
+#              subprocess — including a full --self-test and a GREEN two-run
+#              compare — but only over a tiny synthetic fixture built to clear
+#              the minimum-manifest bar. What no job did was run any of that
+#              against a REAL board. That is what this job adds, which is why
+#              it names the full-feature fixture and the coupon explicitly
+#              rather than trusting a stand-in.
 #
 #   `test`   — every push (main, dcr/**), every pull_request, and manual
 #              dispatch. Linux only, no kicad-cli installed. This is the fast
@@ -13,6 +40,13 @@ name: pcb
 #              Expected baseline (re-measured 2026-07-25 after the IR-parity
 #              gate landed): 1076 passed, 16 skipped. Measured by running the
 #              suite with kicad-cli off PATH, which is what this job sees.
+#              STALE AS OF EPOCH CP2 — that epoch authors tests across every
+#              station and does not execute any of them until its boundary
+#              (S10), so no honest pass count can be written here before then.
+#              Both baselines in this file are to be re-measured at S10 rather
+#              than adjusted by guesswork. They were never assertions (see the
+#              note at the bottom of this block: pytest's own exit code is the
+#              gate), so a stale count misleads a reader but breaks nothing.
 #
 #   `test-crossplatform`
 #            — round A0c. The SAME gate as `test`, on macos-latest and
@@ -28,7 +62,8 @@ name: pcb
 #              Installs kicad-cli via the KiCad PPA, then runs the full
 #              worker suite so the oracle-gated tests actually execute.
 #              Expected baseline (same measurement, with kicad-cli 9.0.9):
-#              1091 passed, 1 skipped.
+#              1091 passed, 1 skipped. STALE as of epoch CP2 — see the note on
+#              `test`'s baseline above; re-measure at S10.
 #
 #   `panel`  — round A1a. Runs pcb/tests/gd/*.gd, the GDScript layer covering
 #              the plugin's panel + UI models. Nothing ran these before this
@@ -148,6 +183,98 @@ jobs:
       - name: Worker test suite (kicad-cli absent — oracle tests skip)
         working-directory: pcb/worker
         run: python -m pytest tests/ -q
+
+  fab-gate:
+    name: pcb fab gate (hermetic clean-checkout build)
+    # EPOCH CP2 STATION S1.
+    #
+    # Same triggers as `test` (every push + PR) rather than main-only. The
+    # cost argument that keeps `oracle` and `test-crossplatform` off the PR
+    # loop does not apply: there is no KiCad install and no runner-minute
+    # multiplier here — two compiles of a small board, measured at ~20s wall
+    # clock locally. And the failure this catches (an artifact that depends
+    # on local state) is introduced BY A COMMIT, so it has to fail on the PR
+    # that makes it.
+    #
+    # WHY A SEPARATE JOB rather than a step inside `test`: a red `test` job
+    # currently means "a test failed". Folding a fabrication-reproducibility
+    # gate into it would overload that signal with a second, unrelated
+    # meaning. A named job makes "the fab package is not reproducible"
+    # legible at a glance in the checks list.
+    runs-on: ubuntu-22.04
+    # A hung compile (say a pyclipper pour pathology) would otherwise burn
+    # toward the 360-minute default. The pytest wrapper caps the script at 120s
+    # when IT drives it; these steps had no cap at all.
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        # REPO ROOT, not pcb/ — unlike every other job here. Only the SCRIPT's
+        # own invocation path is CWD-relative; the BOARD argument is not, since
+        # the script joins a relative board path to the worktree root
+        # (`${TMPWT}/${BOARD_ARG}`) regardless of where it was called from.
+        # Running from pcb/ would still work, but would make the repo-rooted
+        # board paths below read as pcb-relative — the wrong mental model to
+        # leave for the next editor.
+        working-directory: .
+    steps:
+      # fetch-depth is left at the default (1). VERIFIED, not assumed: a
+      # `git clone --depth 1` of this repo followed by
+      # `git worktree add --detach <HEAD_SHA>` succeeds and the worktree
+      # contains the full tree. The script only ever asks for HEAD, whose
+      # objects a depth-1 clone has. Do not "fix" this to fetch-depth: 0.
+      - uses: actions/checkout@v4
+
+      # The script needs the worker's deps (pyclipper, pyyaml, gerber-writer)
+      # importable — it probes pyclipper in pre-flight and hard-fails as a
+      # NAMED harness error if absent, so a missing toolchain can never read
+      # as a fabrication problem. Go is not needed here, but this action is
+      # the one place the Python setup is maintained and forking it would be
+      # the drift this repo's composite action exists to prevent.
+      - name: Set up Go + Python + worker
+        uses: ./.github/actions/pcb-setup
+
+      # FIRST, and deliberately before any real board: prove the gate can
+      # FAIL. --self-test runs one honest compile, asserts the minimum-manifest
+      # check passes, then deletes a required Gerber and asserts the SAME check
+      # now fails by name.
+      #
+      # BELT-AND-BRACES WITHIN THIS JOB, not unique evidence — be honest about
+      # which: test_min_manifest_fails_on_sub_minimum_tree already runs the
+      # very same --self-test via subprocess in the `test` job on every push
+      # and PR. It is repeated here so that a red fab-gate is diagnosable on
+      # its own (harness broken vs artifact wrong) without cross-referencing
+      # another job's log. If that ever stops being worth ~5 seconds, delete
+      # this step, not the pytest one.
+      - name: Prove the gate fails when it should (--self-test)
+        run: |
+          HERMETIC_FAB_PYTHON="$(command -v python3)" \
+            pcb/scripts/hermetic-fab-check.sh --self-test
+
+      # The synthetic full-feature fixture: pours + a keepout + named refs +
+      # assembly-identity-clean components, i.e. every v1 fab output on one
+      # board.
+      - name: Hermetic fab build — full-feature fixture
+        run: |
+          HERMETIC_FAB_PYTHON="$(command -v python3)" \
+            pcb/scripts/hermetic-fab-check.sh \
+              pcb/worker/tests/testdata/zone_fill.yaml
+
+      # The public fab coupon — the board actually intended for a board-house
+      # order (K21). Its package is the one whose reproducibility has to hold
+      # if the artifacts are ever submitted, so it is gated by name rather
+      # than left to the fixture above to stand in for.
+      #
+      # NOTE ON THE VIEWER STEP: the script's independent-viewer smoke-load
+      # (gerbv) is best-effort and NON-FATAL by its own design, and gerbv is
+      # not installed on this runner, so it degrades to printing the artifact
+      # list. Installing gerbv + xvfb here was considered and rejected: the
+      # step gates nothing, so the apt tax would buy a line of log output.
+      - name: Hermetic fab build — public coupon (jlc-coupon-1)
+        run: |
+          HERMETIC_FAB_PYTHON="$(command -v python3)" \
+            pcb/scripts/hermetic-fab-check.sh \
+              pcb/worker/tests/testdata/coupon_jlc1.yaml
 
   test-crossplatform:
     name: pcb test (${{ matrix.os }})

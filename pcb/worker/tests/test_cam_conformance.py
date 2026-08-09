@@ -16,6 +16,8 @@ now produce its own faithful gerber aperture:
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import math
 import re
 
@@ -24,6 +26,35 @@ import pytest
 from pcb_worker import gerber, stroke_font
 from pcb_worker.fab_capability import SUPPORTED_PAD_SHAPES
 from pcb_worker.gerber import _smd_aperture
+
+
+def _numeric_literal_bindings(module) -> set[str]:
+    """Every MODULE-LEVEL name *module* binds directly to a numeric literal.
+
+    Reads the source, because the question is about provenance and provenance is
+    a source-level fact. At runtime ``X = 0.15`` and ``X = other.X`` are
+    indistinguishable once both are the float 0.15; only the text says which one
+    a module wrote. Module level only — a numeric default or local inside a
+    function is not a shared-constant declaration and is not what this guards.
+    """
+    tree = ast.parse(inspect.getsource(module))
+    bound: set[str] = set()
+    for node in tree.body:
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        # Unary minus counts: `= -1.5` is still a literal declaration.
+        if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.USub, ast.UAdd)):
+            value = value.operand
+        if isinstance(value, ast.Constant) and isinstance(value.value, (int, float)) \
+                and not isinstance(value.value, bool):
+            bound.update(t.id for t in targets if isinstance(t, ast.Name))
+    return bound
 
 # Expected copper-aperture signature per declared pad shape. A signature is the
 # gerber aperture template letter (R/C/O) or the macro name — the thing that would
@@ -921,6 +952,30 @@ def test_refless_component_degenerate_silk_warns_with_sentinel_not_raises():
     assert warns[0].source_ref.entity_id  # non-empty (sentinel), Diagnostic-valid
 
 
+@pytest.mark.parametrize("layer", ["F.SilkS", "B.SilkS"])
+def test_dropped_silk_warns_about_the_layer_it_was_actually_on(layer):
+    """A dropped silk primitive names ITS OWN layer, not a hardcoded front.
+
+    ``_silk_ref`` tagged every silk warning "F.SilkS" from when that was the
+    only layer the emitter harvested. CP2 S3 routed bottom graphics through the
+    same function and the hardcode survived it, so a malformed B.SilkS primitive
+    reported a defect on the layer it is not on. A diagnostic that points at the
+    wrong side of the board is worse than a vague one: it is actionable and
+    wrong, and it sends the reader to inspect artwork that is fine.
+
+    Parametrised over both layers rather than testing only the bug's side —
+    fixing the bottom case by breaking the top one would otherwise pass.
+    """
+    board = _silk_board([{"layer": layer, "kind": "circle",
+                          "center": [0, 0], "radius": 0, "width": 0.15}])
+    result = gerber.build_gerbers(board, name="conf")
+    warns = [d for d in result.diagnostics if d.code == "silk_primitive_unemitted"]
+    assert warns, f"degenerate {layer} circle must warn, not vanish"
+    assert warns[0].source_ref.detail == layer, (
+        f"warning for a {layer} primitive names "
+        f"{warns[0].source_ref.detail!r} instead")
+
+
 # ===========================================================================
 # Round 5: the KiCad emitter (kicad.py) under the SAME K3 bar as gerber.
 # Declared capabilities must be emitted FAITHFULLY into the .kicad_pcb by the
@@ -1424,12 +1479,59 @@ def test_silk_text_and_graphic_widths_are_separate_constants():
 def test_silk_widths_agree_across_both_cam_emitters():
     """The cross-emitter guard the Edge.Cuts stroke never had.
 
-    kicad.py duplicates these literals rather than importing them (gerber.py pulls
-    in gerber_writer at module level and kicad.py must stay free of it), so the
-    duplication needs a test or the two silently drift — which is exactly how
-    Edge.Cuts ended up as 0.1 in one emitter and 0.15 in the other."""
+    RETARGETED IN EPOCH CP2 (station S2). This used to guard a DUPLICATION:
+    kicad.py carried hand-mirrored literals because gerber.py pulls in
+    gerber_writer at module level and kicad.py must stay free of it, so equality
+    had to be asserted or the two would silently drift — which is exactly how
+    Edge.Cuts ended up 0.1 in one emitter and 0.15 in the other.
+
+    The duplication is now GONE: silk_source owns the numbers, imports no
+    gerber_writer, and both emitters (plus geometric DRC) read it. Equality is
+    therefore true by construction, and a test that only asserted
+    ``0.15 == 0.15`` would be a tautology dressed as a guard.
+
+    So this now asserts the SOURCE rather than the values — that each emitter's
+    name still resolves to silk_source's. Re-introducing a bare literal in
+    either emitter fails here, which is the drift this test has always been
+    about."""
+    from pcb_worker import silk_source
+
+    # The VALUE contract first — a plain equality that fails loudly and
+    # legibly if the numbers ever diverge, whatever the mechanism.
     assert gerber.SILK_TEXT_WIDTH_MM == _kicad._SILK_TEXT_WIDTH_MM
     assert gerber.SILK_GRAPHIC_WIDTH_MM == _kicad._SILK_GRAPHIC_WIDTH_MM
+
+    # Then the SOURCE contract, in the order of how much each check proves.
+    #
+    # `is` on the FLOATS is kept but DEMOTED, because the claim first written
+    # here was too strong: it said a re-introduced `= 0.15` literal "is a
+    # distinct object and fails this". CPython does not intern floats, so that
+    # is true of CPython today — but float identity is an implementation
+    # detail, not a language guarantee, and a runtime that did intern equal
+    # float constants would turn this line into a silent tautology. A check
+    # that can quietly stop checking is exactly the failure mode this epoch is
+    # about, so it no longer carries the argument alone.
+    assert gerber.SILK_TEXT_WIDTH_MM is silk_source.SILK_TEXT_WIDTH_MM
+    assert gerber.SILK_GRAPHIC_WIDTH_MM is silk_source.SILK_GRAPHIC_WIDTH_MM
+    assert _kicad._SILK_TEXT_WIDTH_MM is silk_source.SILK_TEXT_WIDTH_MM
+    assert _kicad._SILK_GRAPHIC_WIDTH_MM is silk_source.SILK_GRAPHIC_WIDTH_MM
+
+    # FUNCTION identity, which IS a real guarantee: two `def`s are always
+    # distinct objects in any Python. ONE shared width-policy implementation,
+    # not two byte-identical twins.
+    assert gerber._graphic_width is silk_source.graphic_width
+    assert _kicad._graphic_width is silk_source.graphic_width
+
+    # And the check that actually carries the "no re-introduced literal" claim,
+    # by reading the source rather than inferring from object identity: neither
+    # emitter may BIND these names to a numeric literal. Assignment from
+    # silk_source (an attribute access) is the only accepted form.
+    for module in (gerber, _kicad):
+        for binding in _numeric_literal_bindings(module):
+            assert "SILK" not in binding.upper(), (
+                f"{module.__name__} binds {binding} to a numeric literal — the "
+                "silk width policy belongs to silk_source, and a local literal "
+                "is the drift station S2 removed")
 
 
 def test_widthless_silk_graphic_emits_the_graphic_width_on_gerber():

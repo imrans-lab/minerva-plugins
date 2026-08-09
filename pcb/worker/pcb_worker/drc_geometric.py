@@ -43,6 +43,36 @@ CHECK SET (C1 per-entity + hole-to-hole; C2 pairwise clearance + edge):
                                 outline is a violation). [C2]
   * GC6 hole-to-hole          — edge-to-edge between all drill/hole features
                                 >= min_hole_to_hole_mm.
+  * GC7 zone clearance       — FILLED pour copper vs every foreign-net copper
+                                primitive, in the exact polygon kernel the fill
+                                was computed with (a pour is non-convex and the
+                                convex kernel would answer confidently wrong).
+  * GC8 mask sliver          — the WEB of solder mask left between two openings
+                                on the SAME side >= min_mask_sliver_mm. A BAND,
+                                not a floor: openings that MERGE (web <= 0) have
+                                no web between them and are not violations, so
+                                only 0 < web < floor is flagged. [CP2 S5]
+  * GC9 silkscreen DFM       — legend stroke width >= min_silk_width_mm and
+                                legend-to-pad >= min_silk_to_pad_mm. ADVISORY:
+                                reported in the separate ``advisories`` key and
+                                counted, but NOT in ``findings``, so it never
+                                moves ``verdict``. [CP2 S6]
+  * GC10 hole-to-copper      — every drilled bore to every FOREIGN copper
+                                primitive >= min_hole_to_copper_mm ("how far can
+                                the drill wander", not "how close may two
+                                potentials sit" — that is GC2). [CP2 S7]
+  * GC11 hole-to-edge        — TWO faults. CONTAINMENT (unconditional): a bore
+                                must not cross the rim or enter a cutout.
+                                PROXIMITY: bore-to-edge >= min_hole_to_edge_mm,
+                                an OPTIONAL floor that no shipped profile
+                                declares, so that half does not run on any
+                                fixture in the corpus. [CP2 S8]
+
+  The GC7 and GC9 lines were MISSING from this list until CP2 S7 added GC10
+  beside them — GC7 since it shipped (pre-epoch), GC9 since S6 wrote it. Noted
+  rather than silently corrected: a check set that lists 8 of 10 checks reads as
+  a complete inventory, which is the shape of doc defect this epoch keeps
+  finding.
 
 LAYER NORMALIZATION (C2) — the copper stack ids are ``top``/``bottom`` but
 PlacedPad.layers carry KiCad ``F.Cu``/``B.Cu``; GC2 folds both onto one canonical
@@ -110,6 +140,7 @@ from .drc_geom_primitives import (
     EPS,
     Capsule,
     OrientedRect,
+    RoundedRect,
     aabb_union,
     capsule_edge_distance,
     capsule_edge_witness,
@@ -126,10 +157,19 @@ from .ir_pads import (
     pad_land,
     smd_shape,
 )
-from .ir_projection import cutout_point_loops, outline_frame, profile_outer_rect
+from . import mask_source, silk_source
+from .mask_source import MaskOpening
+from .pad_source import placed_pad_to_geom
+from .ir_projection import (
+    cutout_point_loops,
+    graphic_to_dict,
+    outline_frame,
+    profile_outer_rect,
+)
 from .resolved_board import (
     Diagnostic,
     LayerRole,
+    Side,
     OvalHole,
     ProfileOutline,
     RectOutline,
@@ -254,10 +294,72 @@ class AnnularEntity:
 
 
 @dataclass(frozen=True)
+class SilkPrimitive:
+    """One piece of legend geometry, board frame, as the EMITTER will draw it.
+
+    Carries the neutral :mod:`silk_source` primitive rather than a re-modelled
+    copy, because the whole point of projecting silk is that the checker and the
+    emitter agree about what is on the board. ``geometry`` is a SilkLine /
+    SilkCircle / SilkArc / SilkPoly.
+
+    ``origin`` distinguishes authored footprint artwork ("graphic") from a
+    SYNTHESIZED reference designator ("refdes"). A designator exists in no IR —
+    it is generated at emission — so a checker that projected only authored
+    graphics would measure a board with no designators on it and clear silk
+    rules the fabricated board violates.
+    """
+    entity_id: str
+    parent_id: str | None
+    side: Side
+    geometry: Any
+    width_mm: float
+    origin: str                    # "graphic" | "refdes"
+    ref: str | None = None         # owning component ref, when there is one
+
+
+@dataclass(frozen=True)
 class Projection:
     copper: tuple[CopperPrimitive, ...]
     holes: tuple[HolePrimitive, ...]
     annular: tuple[AnnularEntity, ...]
+    # Legend geometry (epoch CP2 S4). Default-empty so every existing
+    # constructor call and every consumer that predates silk keeps working —
+    # `Projection(copper, holes, annular)` is still valid.
+    silk: tuple[SilkPrimitive, ...] = ()
+    # Diagnostics raised while projecting silk (a malformed primitive the shared
+    # harvest warned about and dropped). Carried rather than discarded: the
+    # emitter surfaces the same warnings, and a checker that silently ignored
+    # them would be quietly narrower than the artwork it is checking.
+    silk_warnings: tuple[tuple[str, str, str | None], ...] = ()
+    # Solder-mask openings (epoch CP2 S4), from the same owner the emitter
+    # adopted. These are :class:`mask_source.MaskOpening` values verbatim, not a
+    # re-modelled copy — a checker holding its own idea of where mask opens is
+    # the false clean this station exists to prevent, and it is worse here than
+    # for silk: a MISSED aperture in a mask-sliver check reports no sliver at
+    # all, which reads as a pass.
+    #
+    # APPENDED, not inserted next to `silk` where it would read better. Every
+    # field here is positional-capable and `project_board` used to construct
+    # this tuple positionally; slotting a new field into the middle would have
+    # silently rebound `silk_warnings` to the mask tuple at every existing call
+    # site. The constructor now passes keywords (below) so the next person is
+    # free to reorder, but the ordering stays append-only regardless.
+    mask: tuple[MaskOpening, ...] = ()
+    # Entities whose mask coverage could NOT be determined, as (entity_id,
+    # reason). Non-empty means the `mask` tuple above is INCOMPLETE, and any
+    # check that consumes mask must refuse to report a mask verdict rather than
+    # reporting one computed from a partial aperture set — a sliver check that
+    # silently skipped an entity would report fewer slivers, which reads as a
+    # healthier board.
+    #
+    # WHY DATA AND NOT A RAISE. _project_mask first raised UnsupportedGeometry
+    # on a non-round board hole, which run_geometric_drc turns into a WHOLESALE
+    # indeterminate. That took down gc1-gc7 — checks that model slots perfectly
+    # well and had real findings on such boards — on behalf of a mask family
+    # that no check consumes yet. Fail-closed, but scoped far wider than the
+    # thing that was actually unknown, and it converted determinate findings
+    # into silence. The unknown is per-entity, so it is carried per-entity.
+    mask_indeterminate: tuple[tuple[str, str], ...] = ()
 
 
 def _copper_layer_ids(rb: ResolvedBoard) -> tuple[str, ...]:
@@ -399,7 +501,197 @@ def project_board(rb: ResolvedBoard) -> Projection:
                 drill=DrillDisc(kind="round", dia_mm=hole.feature.diameter_mm),
                 position=pos))
 
-    return Projection(tuple(copper), tuple(holes), tuple(annular))
+    silk, silk_warnings = _project_silk(rb)
+    # KEYWORDS from here on. Projection has grown two optional families in this
+    # station alone; positional construction makes every future field addition a
+    # chance to silently rebind an existing one.
+    mask, mask_indeterminate = _project_mask(rb)
+    return Projection(copper=tuple(copper), holes=tuple(holes),
+                      annular=tuple(annular), silk=silk,
+                      silk_warnings=silk_warnings, mask=mask,
+                      mask_indeterminate=mask_indeterminate)
+
+
+def _project_silk(rb: ResolvedBoard) -> tuple[tuple[SilkPrimitive, ...],
+                                              tuple[tuple[str, str, str | None], ...]]:
+    """Project LEGEND geometry through the same owner the emitters harvest with.
+
+    THE ONLY CORRECT WAY TO DO THIS is to call :mod:`silk_source`, not to walk
+    PlacedGraphic here and model lines/arcs again. A second harvest would let
+    DRC measure geometry the emitter never draws (or clear geometry it does),
+    which is the false-clean this whole substrate exists to prevent — the
+    reason silk_source was extracted in S2 rather than DRC growing its own
+    reader.
+
+    TWO SOURCES, and missing either one is a silent under-check:
+
+      * authored footprint artwork (``PlacedGraphic``), and
+      * SYNTHESIZED reference designators, which are in NO IR at all — they are
+        generated from a stroke font at emission time. Projecting only the
+        first would hand every silk rule a board with no designators on it.
+
+    Placement here is IDENTITY: the compiler already resolved PlacedGraphic to
+    board-absolute coordinates and already flipped a bottom component's layer to
+    B.SilkS (geometry.PlacementTransform, pinned by the pcbnew oracle). So the
+    LAYER is authoritative for side and no further mirror may be applied —
+    exactly the rule ``gerber._emit_silk`` follows on its IR branch. Designators
+    are different: glyphs are synthesized in text-local coordinates on every
+    path, so they take the component's real placement and its side.
+    """
+    prims: list[SilkPrimitive] = []
+    warnings: list[tuple[str, str, str | None]] = []
+
+    for comp in rb.components:
+        placement = comp.placement
+        for graphic in comp.placed_graphics:
+            side = silk_source.silk_side(graphic.layer.id)
+            if side is None:
+                continue  # courtyard / fab / copper — not legend
+            harvest = silk_source.harvest_graphic(
+                0.0, 0.0, 0.0, graphic_to_dict(graphic))
+            for warning in harvest.warnings:
+                warnings.append((warning.code, warning.message, comp.ref))
+            for prim in harvest.primitives:
+                prims.append(SilkPrimitive(
+                    entity_id=graphic.id, parent_id=comp.id, side=side,
+                    geometry=prim, width_mm=prim.width, origin="graphic",
+                    ref=comp.ref))
+
+        refdes_side = placement.side
+        # rb.footprint_for, NOT a hand-rolled scan of footprint_definitions.
+        # The emitter uses footprint_for (gerber._harvest_ir) and so does
+        # _project_mask forty lines below; a local `next(..., None)` here is a
+        # third reading of one datum with a DIFFERENT failure mode — it yields
+        # None where footprint_for raises, so a missing definition would make
+        # the emitter refuse while this surface quietly drew the designator at
+        # the default anchor. Unreachable today (construction validates the id),
+        # which is exactly when divergences get written down and forgotten.
+        reference_text = rb.footprint_for(comp).reference_text
+        for idx, prim in enumerate(silk_source.refdes_strokes(
+                comp.ref, placement.position[0], placement.position[1],
+                placement.rotation_deg, reference_text, refdes_side)):
+            prims.append(SilkPrimitive(
+                entity_id=f"{comp.id}:refdes[{idx}]", parent_id=comp.id,
+                side=refdes_side, geometry=prim, width_mm=prim.width,
+                origin="refdes", ref=comp.ref))
+
+    return tuple(prims), tuple(warnings)
+
+
+def _project_mask(rb: ResolvedBoard) -> tuple[tuple[MaskOpening, ...],
+                                              tuple[tuple[str, str], ...]]:
+    """Project SOLDER-MASK openings through the owner the emitter adopted.
+
+    Same rule as :func:`_project_silk`, enforced harder. Every opening here comes
+    from :mod:`mask_source`; nothing in this function decides a dimension, a
+    side, or whether an entity opens mask at all. If it did, DRC could measure
+    apertures the fab never receives — and for mask specifically the dangerous
+    direction is the missing one: a sliver check that never sees two openings
+    reports no sliver between them, which is indistinguishable from a pass.
+
+    THE THREE SOURCES, matching ``gerber._harvest_ir``'s three loops exactly:
+    component pads, vias (per-side tenting), and board-level holes. A fourth
+    would be a bug in one of the two surfaces.
+
+    Pads go through ``placed_pad_to_geom`` — the SAME conversion the IR-native
+    emitter harvest uses — rather than reading PlacedPad fields directly here.
+    The conversion is where drilled/plated/shape semantics are settled, and two
+    readings of it is exactly the drift this station removed. Placement is
+    already baked into PlacedPad (board-absolute position, absolute rotation),
+    which is why the coordinates pass through unchanged.
+    """
+    openings: list[MaskOpening] = []
+    indeterminate: list[tuple[str, str]] = []
+    clearance = mask_source.resolve_ir_mask_clearance(rb)
+
+    for comp in rb.components:
+        side = comp.placement.side
+        number_of = {p.source_id: p.number for p in rb.footprint_for(comp).pads}
+        for placed in comp.placed_pads:
+            pad = placed_pad_to_geom(placed, number_of.get(placed.source_id, ""))
+            # POSITION AND ANGLE ARE READ OFF THE PadGeom, not off the PlacedPad
+            # beside it. They carry the same values today — placed_pad_to_geom
+            # copies both across — but reading the PlacedPad here while the
+            # emitter reads the converted PadGeom would be two parallel accesses
+            # of the same datum, and the conversion is exactly where a future
+            # normalisation would land. The `rotation is None` fallback mirrors
+            # gerber._emit_pads, whose component rotation is 0 on the IR path
+            # because PlacedPad geometry is already board-absolute.
+            openings.extend(mask_source.pad_openings(
+                pad, pad.x, pad.y,
+                pad.rotation if pad.rotation is not None else 0.0,
+                side, comp.ref, clearance))
+
+    for via in rb.vias:
+        openings.extend(mask_source.via_openings(
+            via.position[0], via.position[1], via.diameter_mm,
+            via.tented_front, via.tented_back, clearance, via.id))
+
+    for hole in rb.holes:
+        if not isinstance(hole.feature, RoundHole):
+            # NON-ROUND (oval / slot).
+            #
+            # UNPLATED is modeled EXACTLY. Such a hole opens mask to its own
+            # drill with no margin — the same NPTH rule a round hole follows,
+            # differing only in aperture shape. The decomposition into capsules
+            # is REUSED from _hole_capsules rather than rewritten: it is the
+            # same geometry the hole projection already walks, and a second
+            # decomposition of one feature is how two surfaces start disagreeing
+            # about where a slot is.
+            #
+            # PLATED non-round stays undetermined — but NOT for the reason this
+            # comment used to give, and the branch is CURRENTLY UNREACHABLE.
+            #
+            # CORRECTED IN THE CP2 S8 REVIEW ROUND (Fable MEDIUM-2). The old text
+            # claimed "only RoundHole carries an annulus in the IR, so there is
+            # no land for an opening to follow". That is FALSE, and measurably
+            # so: ResolvedHole.__post_init__ REFUSES a plated hole with
+            # annulus_mm=None ("a plated hole must carry an authored copper
+            # annulus"), so every plated hole — round or not — has a land. The
+            # real limitation is ours, not the IR's: nothing here models what a
+            # mask opening around an oblong or routed land should look like.
+            #
+            # UNREACHABLE, ALSO MEASURED: project_board's annular block raises
+            # UnsupportedGeometry on a plated non-round board hole BEFORE this
+            # function is ever called, so no board reaches this line and the
+            # run-level GC8 refusal that consumes `mask_indeterminate` has never
+            # fired. The S4 redesign's stated payoff (keeping gc1-gc7 alive on
+            # such boards) is therefore real only for UNPLATED non-round holes,
+            # which do flow through the branch below.
+            #
+            # KEPT RATHER THAN DELETED, deliberately: it is the fail-closed
+            # backstop for the day the annular raise is narrowed, and deleting it
+            # would make that future change silently produce a partial aperture
+            # set — a false clean. What it must NOT keep is a false explanation.
+            # The open design question (model plated-slot mask openings, and
+            # narrow the wholesale GC8 refusal that would then go live) is filed
+            # rather than answered here.
+            if hole.plated:
+                indeterminate.append((
+                    hole.id,
+                    "a plated non-round board hole has an authored annulus, but "
+                    "this projection does not model the mask opening around a "
+                    "non-round land, so mask coverage for this hole is "
+                    "undetermined"))
+                continue
+            caps, _minor, _pos = _hole_capsules(hole)
+            for cap in caps:
+                length = math.hypot(cap.bx - cap.ax, cap.by - cap.ay)
+                openings.extend(mask_source.npth_feature_openings(
+                    (cap.ax + cap.bx) / 2.0, (cap.ay + cap.by) / 2.0,
+                    length + 2.0 * cap.r, 2.0 * cap.r,
+                    math.degrees(math.atan2(cap.by - cap.ay, cap.bx - cap.ax)),
+                    hole.id))
+            continue
+        # POSITION LIVES ON THE FEATURE, not the hole (`hole.feature.position`)
+        # — the same field `_hole_capsules` reads. `hole.position` does not
+        # exist, and reaching for it is the obvious wrong guess here.
+        openings.extend(mask_source.board_hole_openings(
+            hole.feature.position[0], hole.feature.position[1],
+            hole.feature.diameter_mm, hole.plated, hole.annulus_mm,
+            clearance, hole.id))
+
+    return tuple(openings), tuple(indeterminate)
 
 
 def _shape_aabb(shape: Any) -> AABB:
@@ -748,6 +1040,543 @@ def _check_gc6_hole_to_hole(proj: Projection, rb: ResolvedBoard) -> list[dict]:
     return findings
 
 
+def _hole_copper_exempt(hole: HolePrimitive, prim: CopperPrimitive) -> bool:
+    """Is this (hole, copper) pair outside GC10's rule? Two exemptions, and each
+    one is load-bearing for a different reason.
+
+    1. SAME ENTITY — a drilled feature versus its OWN land. A PTH pad, a via and
+       a plated board hole each project a hole AND the copper ring around it
+       under the SAME ``entity_id``; the gap between them is the annular web,
+       which is governed by GC4 (``min_annular_ring_mm``, 0.18 on JLCPCB) and is
+       by construction far below any hole-to-copper floor (0.28). Without this,
+       GC10 would flag every plated hole on every board against its own ring.
+
+       AND IT MUST BE THE ENTITY, NOT THE NET. The obvious formulation —
+       "exempt same-net copper" — is INSUFFICIENT here, and quietly so. GC2's
+       :func:`_same_net_exempt` requires BOTH net_ids non-null, but a plated
+       board hole carries ``net_id=None`` on the hole AND on its own
+       ``board_hole_copper`` primitive (``project_board``), and an unconnected
+       PTH pad carries None on both halves of itself. A net-only exemption
+       therefore fires on neither, and self-flags both.
+
+       AND IT MUST NOT BE THE PARENT. Exempting a shared ``parent_id`` would
+       exempt one pad's drill from a DIFFERENT pad's copper on the same
+       component — two distinct potentials a hair apart, which is exactly the
+       failure this check exists to catch.
+
+    2. SAME-NET PLATED — a barrel that IS this copper, electrically. This
+       MIRRORS ``zone_fill``'s carve-skip predicate verbatim
+       (``hole.net_id is not None and hole.net_id == zone.net_id and
+       hole.plated``) rather than inventing a second rule, so the pour and the
+       checker exempt the same set. The two halves of it:
+         * PLATED matters. An unplated bore has no copper barrel, so it connects
+           nothing; a matching net field on it is a coincidence and the drill is
+           a mechanical hazard to that net like any other. ``zone_fill`` says
+           this in as many words ("NON-plated holes keep the full carve however
+           their net field reads").
+         * NON-NULL matters. Two unassigned (None) features are not a shared
+           electrical net, the same reading GC2 takes.
+       Without this, the trace that LANDS on a through-hole pad flags against
+       that pad's own barrel on every board that routes anything.
+    """
+    if hole.entity_id == prim.entity_id:
+        return True
+    return hole.plated and hole.net_id is not None and hole.net_id == prim.net_id
+
+
+def _check_gc10_hole_to_copper(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC10 — how far the drill may wander before it eats FOREIGN copper.
+
+    Edge-to-edge distance from every drilled bore to every copper primitive it is
+    not exempt from (:func:`_hole_copper_exempt`) >= ``min_hole_to_copper_mm``.
+
+    OPTIONAL-TIER FLOOR. ``None`` means the profile published no hole-to-copper
+    figure, and this returns no findings — "the profile said nothing", not
+    "checked and clean". The count key still exists and stays 0, which is the
+    same contract GC3's feature-specific drill floors and GC9's silk floors use.
+
+    WHY IT IS NOT GC2. GC2 answers "how close may two POTENTIALS sit" and
+    compares copper to copper. This answers "how far can the DRILL wander", a
+    different physical failure with a different published number
+    (JLCPCB: 0.10 mm spacing versus 0.28 mm PTH-to-track). ``zone_fill``'s
+    ``_hole_clearance_mm`` already draws that distinction for the pour and
+    explains it at length; this is the same rule applied to the copper the
+    filler does not produce.
+
+    WHERE THE MARGINAL VALUE ACTUALLY IS, measured rather than assumed, because
+    it is not where the station brief expected. For a PLATED hole, GC2 already
+    measures its LAND against foreign copper at ``min_clearance_mm`` while this
+    measures its BORE at ``min_hole_to_copper_mm``; the bore is smaller than the
+    land by exactly the annular ring, so GC2 is the STRICTER of the two whenever
+    ``ring >= min_hole_to_copper_mm - min_clearance_mm`` — 0.18 on JLCPCB, which
+    is precisely the ring GC4 already refuses to go below. Every plated hole this
+    profile admits is therefore covered by GC2 before it reaches here. The gap
+    this check actually closes is the UNPLATED bore: it projects no copper
+    primitive at all (``project_board`` gives an NPTH pad no land, and a
+    non-plated board hole no annulus), so GC2 can form no pair and a track may
+    run arbitrarily close to a mounting hole with every other check silent. That
+    is a real board JLCPCB would reject, and it passed clean until this station.
+    Consequence worth carrying: on a profile whose annular floor is LOWER than
+    the hole/copper floor delta, this check starts adding coverage for plated
+    holes too — so it is not dead weight, it is currently redundant by an
+    arithmetic accident of one profile's numbers.
+
+    NO LAYER FILTER, deliberately. ``HolePrimitive`` carries no layer span
+    because every drilled feature this schema can express is a THROUGH feature
+    (``compile_board`` hardcodes ``ViaKind.THROUGH`` and the schema cannot author
+    blind/buried), so a bore is present on every copper layer and comparing it to
+    copper on any layer is exact today. If blind/buried drills ever become
+    expressible, this comparison becomes a SUPERSET — it would over-report
+    against layers the bore never reaches, which is the fail-safe direction — but
+    the honest repair then is to give ``HolePrimitive`` a span, not to relax this.
+
+    POUR COPPER IS OUT OF SCOPE, and this is a ruling rather than an oversight.
+    ``proj.copper`` holds pads/traces/vias/board-hole annuli; filled zone copper
+    is checked separately by GC7 with the polygon kernel. A GC10 arm over pours
+    WOULD be expressible with GC7's inflate-and-intersect idiom, but it would be
+    genuinely circular: ``zone_fill`` carves every hole it does not skip at
+    ``max(copper clearance, min_hole_to_copper_mm)`` and skips exactly the holes
+    this function exempts, so the answer is fixed before the question is asked.
+    (GC7 escapes that objection because the filler carves by the ZONE's authored
+    clearance while GC7 measures against the NET CLASS's — genuinely two rules.
+    There is no second rule here.) THE RESIDUAL, so nobody has to re-derive it:
+    that argument holds only because ``ResolvedZone.fill`` is produced by
+    ``zone_fill.fill_board_zones`` and nothing else (``compile_board`` sets it
+    explicitly to None). The day a fill can arrive from deserialization, a
+    freeze, or an import, the circularity lapses and this needs the pour arm.
+    """
+    required = rb.design_rules.minimums.min_hole_to_copper_mm
+    if required is None:
+        return []
+    findings: list[dict] = []
+    # Deterministic ordering by entity_id on both sides, so findings are stable
+    # regardless of projection order. The AABB gate below is an O(holes x copper)
+    # REJECT test (four comparisons), not a sweep: it exists to keep the exact
+    # convex kernel off pairs that provably cannot violate, the same argument
+    # _broad_phase_pairs makes, without the sweep's per-layer bucketing (which
+    # does not apply — see NO LAYER FILTER above). If hole counts ever make this
+    # the hot loop, the upgrade is a sweep, not a tighter margin.
+    copper = sorted(proj.copper, key=lambda p: p.entity_id)
+    for hole in sorted(proj.holes, key=lambda h: h.entity_id):
+        hbox = hole.aabb
+        for prim in copper:
+            if _hole_copper_exempt(hole, prim):
+                continue
+            box = prim.aabb
+            if (box.min_x - required > hbox.max_x + EPS
+                    or box.max_x + required < hbox.min_x - EPS
+                    or box.min_y - required > hbox.max_y + EPS
+                    or box.max_y + required < hbox.min_y - EPS):
+                continue
+            best = math.inf
+            witness = None
+            for cap in hole.capsules:
+                dist = convex_edge_distance(cap, prim.shape)
+                if dist < best:
+                    best = dist
+                    witness = convex_edge_witness(cap, prim.shape)
+            if _violates(best, required):
+                w1, w2 = witness if witness else (hole.position, hole.position)
+                mid = ((w1[0] + w2[0]) / 2.0, (w1[1] + w2[1]) / 2.0)
+                # THE HOLE IS THE SUBJECT and the copper is named via
+                # `against_entity_id` — the GC5-cutout / GC7-zone idiom, not
+                # GC6's `a|b` pair idiom. The rule is ASYMMETRIC (it is about
+                # where the drill may go), unlike hole-to-hole, and keying the
+                # finding on the hole lets it carry the hole's own ref/pad
+                # attribution in the standard fields.
+                findings.append(_finding(
+                    "gc10_hole_to_copper", hole.entity_id, hole.parent_id,
+                    hole.origin, hole.net_id, None, best, required,
+                    closest=list(w1), witness=list(w2), midpoint=list(mid),
+                    extra={"against_entity_id": prim.entity_id,
+                           "against_kind": prim.kind,
+                           "against_net_id": prim.net_id,
+                           "against_ref": prim.ref,
+                           "against_pad": prim.pad_number,
+                           "against_net_name": prim.net_name,
+                           "plated": hole.plated},
+                    ref=hole.ref, pad=hole.pad_number,
+                    net_name=hole.net_name))
+    return findings
+
+
+def _mask_shape(opening: MaskOpening):
+    """One mask opening as a convex distance primitive, in the board frame.
+
+    EXACT for every aperture family the profile admits, and that exactness is
+    load-bearing rather than fastidious — see :class:`RoundedRect` for why an
+    oversized approximation can hide a sliver instead of over-reporting one.
+
+      circle    -> a degenerate-segment Capsule (a disc)
+      oval      -> a Capsule (stadium): a segment along the MAJOR axis of length
+                   (major - minor), swept by minor/2
+      rect      -> an OrientedRect
+      roundrect -> a RoundedRect, corner radius ``rratio * min(w, h)``, which is
+                   the SAME rule the gerber emitter uses to build the aperture
+                   macro (``gerber._smd_aperture``). If those two ever diverge,
+                   the checker is measuring a differently-shaped hole in the mask
+                   than the fab cuts.
+    """
+    x, y = opening.x, opening.y
+    w, h = opening.width, opening.height
+    angle = math.radians(opening.angle_deg)
+
+    if opening.shape == "circle":
+        return Capsule.disc(x, y, w / 2.0)
+
+    if opening.shape == "oval":
+        minor, major = min(w, h), max(w, h)
+        r = minor / 2.0
+        half = (major - minor) / 2.0
+        # The major axis is local-x when w >= h, else local-y — the same
+        # convention `_hole_capsules` applies to an OvalHole.
+        theta = angle + (0.0 if w >= h else math.pi / 2.0)
+        dx, dy = half * math.cos(theta), half * math.sin(theta)
+        return Capsule(x - dx, y - dy, x + dx, y + dy, r)
+
+    if opening.shape == "roundrect":
+        rratio = opening.corner_rratio
+        radius = (rratio * min(w, h)) if rratio else 0.0
+        return RoundedRect(x, y, w / 2.0, h / 2.0, radius, angle)
+
+    if opening.shape == "rect":
+        return OrientedRect(x, y, w / 2.0, h / 2.0, angle)
+
+    # Fail closed. An aperture family this function cannot model is one whose
+    # slivers cannot be measured, and silently skipping it would remove
+    # candidate pairs from the check — fewer findings, healthier-looking board.
+    raise UnsupportedGeometry(
+        f"mask opening {opening.entity_id or '<unknown>'}: aperture shape "
+        f"{opening.shape!r} has no modelable primitive, so mask slivers "
+        f"involving it cannot be measured")
+
+
+def _silk_anchor(prim: SilkPrimitive) -> tuple[float, float]:
+    """A representative point ON the primitive, for a finding a human can find.
+
+    Used only where the violation is a property of the primitive ITSELF (its
+    stroke width) rather than of a pair, so there is no closest-approach line to
+    report and any point on the artwork is the honest answer. Pair findings use
+    real witness points from the distance kernel instead.
+    """
+    geom = prim.geometry
+    if isinstance(geom, silk_source.SilkLine):
+        return (geom.x1, geom.y1)
+    if isinstance(geom, silk_source.SilkCircle):
+        return (geom.cx, geom.cy)
+    if isinstance(geom, silk_source.SilkPoly):
+        return tuple(geom.points[0]) if geom.points else (0.0, 0.0)
+    return tuple(geom.start)
+
+
+def _silk_capsules(prim: SilkPrimitive) -> tuple[Capsule, ...]:
+    """One silk primitive as swept-segment capsules, in the board frame.
+
+    Silk is DRAWN geometry — every primitive is a stroked path, so its physical
+    extent is the centreline swept by half the stroke width. That is exactly a
+    Capsule, which is why no new primitive is needed here (contrast GC8, where
+    mask apertures are filled regions and a roundrect needed exact modelling).
+
+    A CIRCLE and an ARC are approximated by an inscribed polyline, and the
+    approximation direction is chosen deliberately: chord midpoints sit INSIDE
+    the true curve, so the polyline under-states how far the stroke reaches
+    outward. For a silk-to-pad clearance that makes the measured distance
+    LARGER than the truth — the wrong way for fail-safety. The segment count is
+    therefore chosen so the sagitta (max radial error) stays under a tenth of
+    the stroke half-width, and the capsule radius is then inflated by that
+    residual, so the modelled body always CONTAINS the true stroke.
+    """
+    half = prim.width_mm / 2.0
+    geom = prim.geometry
+
+    if isinstance(geom, silk_source.SilkLine):
+        return (Capsule(geom.x1, geom.y1, geom.x2, geom.y2, half),)
+
+    if isinstance(geom, silk_source.SilkPoly):
+        pts = list(geom.points)
+        if len(pts) < 2:
+            return (Capsule(pts[0][0], pts[0][1], pts[0][0], pts[0][1], half),) if pts else ()
+        pairs = list(zip(pts, pts[1:]))
+        if geom.closed and len(pts) > 2:
+            pairs.append((pts[-1], pts[0]))
+        return tuple(Capsule(a[0], a[1], b[0], b[1], half) for a, b in pairs)
+
+    # Circle / arc -> polyline. Both carry a centre and a radius; an arc also
+    # carries a sweep, and a circle is the full-turn case.
+    if isinstance(geom, silk_source.SilkCircle):
+        cx, cy, radius = geom.cx, geom.cy, geom.radius
+        start_ang, sweep = 0.0, 2.0 * math.pi
+    else:
+        cx, cy = geom.center
+        radius = math.hypot(geom.start[0] - cx, geom.start[1] - cy)
+        start_ang = math.atan2(geom.start[1] - cy, geom.start[0] - cx)
+        end_ang = math.atan2(geom.end[1] - cy, geom.end[0] - cx)
+        sweep = end_ang - start_ang
+        # Orientation "+" is counter-clockwise in the board frame; normalise the
+        # sweep into that direction so a wrap does not silently become a tiny arc.
+        if geom.orientation == "+":
+            while sweep <= 0:
+                sweep += 2.0 * math.pi
+        else:
+            while sweep >= 0:
+                sweep -= 2.0 * math.pi
+
+    if radius <= EPS:
+        return (Capsule(cx, cy, cx, cy, half),)
+
+    # sagitta = r * (1 - cos(step/2)); solve for step given the error budget.
+    budget = max(half * 0.1, EPS)
+    if budget >= radius:
+        segments = 4
+    else:
+        step = 2.0 * math.acos(max(-1.0, min(1.0, 1.0 - budget / radius)))
+        segments = max(4, int(math.ceil(abs(sweep) / step)))
+    step = sweep / segments
+    residual = radius * (1.0 - math.cos(abs(step) / 2.0))
+
+    caps = []
+    for i in range(segments):
+        a0, a1 = start_ang + i * step, start_ang + (i + 1) * step
+        caps.append(Capsule(
+            cx + radius * math.cos(a0), cy + radius * math.sin(a0),
+            cx + radius * math.cos(a1), cy + radius * math.sin(a1),
+            half + residual))
+    return tuple(caps)
+
+
+#: GC9's rows are ADVISORIES, not violations, and this is where that is decided.
+#:
+#: MEASURED JUSTIFICATION, not a judgement call. JLCPCB publishes a 0.15mm
+#: minimum silkscreen line width. KiCad's shipped library — which is what the
+#: seed library vendors and what every real board is authored from — draws silk
+#: at 0.12: of the 21 seed footprints, 17 carry silk GRAPHICS and 15 of those 17
+#: draw below 0.15 — 94 of 202 silk graphic primitives — including R_0805,
+#: C_0805, every PinHeader/PinSocket, and the ESP32 devkit. Enforcing this floor
+#: as a blocking violation would refuse essentially every real board, which is
+#: not a DFM check, it is an outage.
+#:
+#: THE COUNTING METHOD, recorded because the first version of this number was
+#: WRONG and nothing in the text said how to reproduce it. Parse every
+#: `library/footprints/**/*.kicad_mod` with the production
+#: `footprints.parse_kicad_mod`, keep the graphics whose layer
+#: `silk_source.silk_side()` accepts, and measure each with the production
+#: `silk_source.graphic_width()`. This comment previously read "15 of 18 ... 84
+#: of 203 primitives" under the banner "MEASURED JUSTIFICATION": the footprint
+#: ratio was right only by counting a footprint whose sole silk is its reference
+#: TEXT, and the primitive counts were simply wrong. Corrected in the CP2 S8
+#: review round (Fable MEDIUM-3) after re-measuring by the method above. The
+#: decision does not change; the number it rests on now reproduces.
+#:
+#: AND THE DOCTRINE ALREADY SAID SO. `fab_capability.FABRICATION_CRITICAL_OUTPUTS`
+#: deliberately excludes silk, with the ratified rule that "silk/fab/documentation
+#: losses are cosmetic-or-unemitted and are warned, never fatal". Copper, drill,
+#: mask and paste block; legend does not. GC9 applies that existing rule to a new
+#: check rather than inventing a severity tier for it.
+#:
+#: WHAT ADVISORY DOES NOT MEAN: it does not mean hidden. Advisories are returned
+#: on the result and counted in `counts` exactly like findings, so a thin legend
+#: is always reportable. What they do not do is flip `verdict` to "violations".
+GC9_ADVISORY_TYPES: frozenset[str] = frozenset({
+    "gc9_silk_width", "gc9_silk_to_pad", "gc9_silk_indeterminate",
+})
+
+
+def _check_gc9_silk(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC9 — silkscreen DFM: legend stroke WIDTH, and legend-to-PAD clearance.
+
+    Returns ADVISORY rows (see :data:`GC9_ADVISORY_TYPES`): reported and counted,
+    but they do not make a board fail. Silk is cosmetic by this codebase's own
+    ratified output-criticality rule.
+
+    BOTH HALVES ARE FLOOR-GATED on optional profile fields, so a profile that
+    publishes no silkscreen rule enforces none of this ("said nothing" is not
+    "zero"). JLCPCB publishes both figures; OSH Park publishes neither, so this
+    check is silent under that profile by design rather than by omission.
+
+    SILK IS COSMETIC, AND THAT IS WHY THE SECOND HALF MEASURES AGAINST COPPER
+    PADS rather than against everything on the board. Legend over a trace is
+    ugly; legend over a PAD contaminates a solderable surface, which is the
+    failure the published figure is about.
+
+    THE WARN-AND-DROP INHERITANCE, discharged here. ``Projection.silk_warnings``
+    carries primitives the shared harvest could not build and dropped. Until
+    this station nothing read it, so the guarantee it exists for was
+    aspirational. A dropped primitive is NOT silently cleared now: it is
+    surfaced as a finding of its own, because a checker that inherited a
+    narrower artwork set than the emitter draws would clear legend it never
+    measured.
+    """
+    minimums = rb.design_rules.minimums
+    # DIRECT ATTRIBUTE ACCESS, not getattr-with-default. Both fields exist on
+    # ManufacturingConstraints, so a default could only ever mask a RENAME — and
+    # it would mask it as "this profile declared no silk rule", i.e. the check
+    # would silently stop running while reporting the same zero counts it
+    # reports on a profile that legitimately said nothing. Every other check
+    # reads its floor directly; an AttributeError is the correct outcome for a
+    # field that no longer exists. (CP2 S8 review, Fable LOW-1.)
+    min_width = minimums.min_silk_width_mm
+    min_to_pad = minimums.min_silk_to_pad_mm
+    findings: list[dict] = []
+
+    # Dropped-primitive surfacing, unconditional: it is not gated on a floor,
+    # because "the checker could not see this artwork" is true whatever numbers
+    # the profile publishes.
+    #
+    # BUILT AS AN EXPLICIT DICT, not through _finding, and the reason is not
+    # style: _finding rounds `measured`/`required` and requires `closest`/
+    # `witness` points, none of which EXIST for this row. There is no
+    # measurement — that is the entire content of the row. Passing 0.0 to
+    # satisfy the signature would put a number where the honest value is "none",
+    # and a consumer reading measured_mm=0.0 would see a catastrophic violation
+    # rather than an unanswered question.
+    for code, message, ref in proj.silk_warnings:
+        findings.append({
+            "type": "gc9_silk_indeterminate",
+            "entity_id": ref or "<unknown>",
+            "parent": None, "kind": "silk", "net_id": None, "layer": None,
+            "ref": ref, "pad": None, "net_name": None,
+            "measured_mm": None, "required_mm": None,
+            "code": code, "detail": message,
+            "note": ("silk geometry the shared harvest dropped; it is NOT "
+                     "measured by the silk rules below"),
+        })
+
+    if min_width is not None:
+        for prim in proj.silk:
+            if _violates(prim.width_mm, min_width):
+                anchor = _silk_anchor(prim)
+                findings.append(_finding(
+                    "gc9_silk_width", prim.entity_id, prim.parent_id, "silk",
+                    None, "F.SilkS" if prim.side is Side.TOP else "B.SilkS",
+                    prim.width_mm, min_width,
+                    closest=list(anchor), witness=list(anchor),
+                    ref=prim.ref,
+                    extra={"origin": prim.origin}))
+
+    if min_to_pad is not None:
+        # Pads only, and only on the side the legend is printed on. Legend on
+        # the front cannot contaminate a pad that is only on the back.
+        pads_by_side: dict[Side, list[CopperPrimitive]] = {Side.TOP: [], Side.BOTTOM: []}
+        for cp in proj.copper:
+            if cp.kind not in ("smd_pad", "pth_pad"):
+                continue
+            canon = {_canon_layer(lid) for lid in cp.layers}
+            if "top" in canon:
+                pads_by_side[Side.TOP].append(cp)
+            if "bottom" in canon:
+                pads_by_side[Side.BOTTOM].append(cp)
+
+        for prim in proj.silk:
+            pads = pads_by_side[prim.side]
+            if not pads:
+                continue
+            caps = _silk_capsules(prim)
+            for cp in pads:
+                best = math.inf
+                best_cap = None
+                for cap in caps:
+                    d = convex_edge_distance(cap, cp.shape)
+                    if d < best:
+                        best, best_cap = d, cap
+                if best_cap is None or not _violates(best, min_to_pad):
+                    continue
+                # Witness points from the SAME kernel that produced the
+                # distance, so a human opening the board at those coordinates
+                # sees the pair the number came from.
+                w_silk, w_pad = convex_edge_witness(best_cap, cp.shape)
+                findings.append(_finding(
+                    "gc9_silk_to_pad",
+                    f"{prim.entity_id}|{cp.entity_id}", prim.parent_id, "silk",
+                    None, "F.SilkS" if prim.side is Side.TOP else "B.SilkS",
+                    best, min_to_pad,
+                    closest=list(w_silk), witness=list(w_pad),
+                    midpoint=[(w_silk[0] + w_pad[0]) / 2.0,
+                              (w_silk[1] + w_pad[1]) / 2.0],
+                    ref=prim.ref, pad=cp.pad_number,
+                    extra={"origin": prim.origin, "pad_entity": cp.entity_id}))
+    return findings
+
+
+def _check_gc8_mask_sliver(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC8 — the minimum web of SOLDER MASK left standing between two openings.
+
+    THE FLOOR THIS GIVES ITS FIRST READER. ``min_mask_sliver_mm`` is one of the
+    REQUIRED profile fields and, until this station, had ZERO production
+    readers: every appearance outside tests was a declaration or a validation of
+    the declaration. The required tier exists because those fields are supposed
+    to be load-bearing, and a doctrine that makes a MISSING required field a hard
+    failure is hollow while a PRESENT one is never read.
+
+    With this check in place, EVERY required floor has at least one production
+    reader — measured field by field, not asserted. The one that could not be
+    given a reader (``solder_mask_expansion_mm``, whose two shipped profiles use
+    it for opposite ends of the process) was demoted to the optional tier in the
+    same station rather than left standing as a required floor nothing enforces.
+
+    THE THREE REGIMES, and the middle one is the whole check:
+
+      web >= floor    the mask between the openings is thick enough to survive
+                      processing. Clean.
+      0 < web < floor a SLIVER — a ribbon of mask too thin to adhere. It lifts
+                      during processing and lands somewhere else on the board,
+                      or bridges two pads it was supposed to separate. This is
+                      the violation.
+      web <= 0        the openings MERGE. There is no ribbon, because there is no
+                      mask between them at all — one continuous opening. NOT a
+                      violation of this rule. Flagging it would be wrong twice
+                      over: it is not a sliver, and merged openings are a normal,
+                      deliberate authoring outcome (a row of fine-pitch pads under
+                      one opening).
+
+    That third regime is why the sliver test is a BAND rather than a floor
+    comparison, and it is the reason ``_mask_shape`` models every aperture
+    exactly instead of conservatively: an oversized approximation shrinks the
+    measured web, which is harmless near the floor but silently moves a real
+    sliver into the merged regime, where nothing is reported.
+
+    PER SIDE, never across. F.Mask and B.Mask are different physical films;
+    a front opening and a back opening have no mask between them to speak of.
+    """
+    required = rb.design_rules.minimums.min_mask_sliver_mm
+    findings: list[dict] = []
+
+    by_side: dict[Side, list[MaskOpening]] = {Side.TOP: [], Side.BOTTOM: []}
+    for opening in proj.mask:
+        by_side[opening.side].append(opening)
+
+    for side in (Side.TOP, Side.BOTTOM):
+        # Deterministic ordering so a finding's participant order is stable
+        # across runs; entity_id may repeat (two pads can share a number across
+        # components), so position breaks the tie.
+        ordered = sorted(by_side[side],
+                         key=lambda o: (o.entity_id or "", o.ref or "", o.x, o.y))
+        shapes = [_mask_shape(o) for o in ordered]
+        n = len(ordered)
+        for i in range(n):
+            for j in range(i + 1, n):
+                a, b = ordered[i], ordered[j]
+                web = convex_edge_distance(shapes[i], shapes[j])
+                if web <= EPS:
+                    continue  # merged openings — no mask web exists here
+                if not _violates(web, required):
+                    continue
+                mid = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+                findings.append(_finding(
+                    "gc8_mask_sliver",
+                    f"{a.entity_id or '?'}|{b.entity_id or '?'}", None,
+                    "mask_opening_pair", None,
+                    "F.Mask" if side is Side.TOP else "B.Mask",
+                    web, required,
+                    closest=[a.x, a.y], witness=[b.x, b.y], midpoint=list(mid),
+                    extra={"origins": [a.origin, b.origin],
+                           "participants": [
+                               {"entity_id": a.entity_id, "origin": a.origin,
+                                "ref": a.ref},
+                               {"entity_id": b.entity_id, "origin": b.origin,
+                                "ref": b.ref}]}))
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # GC2 / GC5 (C2) — pairwise clearance + copper-to-edge, with a broad phase.
 # ---------------------------------------------------------------------------
@@ -1038,6 +1867,167 @@ def _check_gc5_copper_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]
     return findings
 
 
+def _hole_loop_clearance(cap: Capsule, loop: list[tuple[float, float]]
+                         ) -> tuple[float, tuple[float, float], tuple[float, float]]:
+    """(measured, hole_point, edge_point) between one bore capsule and a cutout
+    vertex loop, SIGNED: negative means the bore has entered the opening.
+
+    EXACT, and deliberately not the AABB treatment ``_aabb_loop_clearance``
+    gives copper. A round bore's bounding square pokes out past the disc at every
+    corner by r(sqrt2 - 1) — about 0.62 mm on a 3 mm mounting hole — so an AABB
+    test near a cutout corner would report the bore inside the opening when it is
+    not. For a CLEARANCE that is merely a conservative over-report, which is the
+    fail-safe direction and why GC5 accepts it. For a CONTAINMENT refusal it is
+    not acceptable in the same way: the finding asserts "this hole is drilled
+    through air", and being wrong about that on a legal board is a bad enough
+    claim to be worth the exact kernel. The capsule spine gives it for free —
+    distance from the spine to the contour, minus the bore radius.
+
+    The witness pair is midpoint-quality (the closest loop edge's nearest point
+    to the spine's midpoint, and the bore-surface point facing it), the same
+    fidelity GC5's rim and cutout witnesses carry. Only the MEASUREMENT has to
+    be exact; the anchors are for rendering.
+    """
+    count = len(loop)
+    spine_a, spine_b = (cap.ax, cap.ay), (cap.bx, cap.by)
+    edges = tuple((loop[i], loop[(i + 1) % count]) for i in range(count))
+    best_d, best_edge = None, edges[0]
+    for edge in edges:
+        d = segment_segment_distance(spine_a, spine_b, edge[0], edge[1])
+        if best_d is None or d < best_d:
+            best_d, best_edge = d, edge
+    # INSIDE-NESS IS TESTED ON THE SPINE, not on the surface: a bore whose centre
+    # line lies within the opening is inside it however small the bore is, and
+    # the distance-to-contour then measures how DEEP it sits, which is the wrong
+    # sign. Testing both endpoints covers a slot that enters the opening at one
+    # end only.
+    inside = (_point_in_loop(spine_a[0], spine_a[1], loop)
+              or _point_in_loop(spine_b[0], spine_b[1], loop))
+    signed = -best_d if inside else best_d
+    centre = ((spine_a[0] + spine_b[0]) / 2.0, (spine_a[1] + spine_b[1]) / 2.0)
+    (ax, ay), (bx, by) = best_edge
+    dx, dy = bx - ax, by - ay
+    seg_len2 = dx * dx + dy * dy
+    t = 0.0 if seg_len2 == 0 else max(0.0, min(1.0, (
+        (centre[0] - ax) * dx + (centre[1] - ay) * dy) / seg_len2))
+    edge_pt = (ax + t * dx, ay + t * dy)
+    span = math.hypot(edge_pt[0] - centre[0], edge_pt[1] - centre[1])
+    if span <= EPS:
+        hole_pt = centre
+    else:
+        hole_pt = (centre[0] + (edge_pt[0] - centre[0]) / span * cap.r,
+                   centre[1] + (edge_pt[1] - centre[1]) / span * cap.r)
+    return signed - cap.r, hole_pt, edge_pt
+
+
+# GC11's two faults share one check but not one authority, and the count keys
+# keep them apart so a consumer can tell a refusal from a tolerance.
+GC11_CONTAINMENT = "gc11_hole_outside_board"
+GC11_PROXIMITY = "gc11_hole_to_edge"
+
+
+def _gc11_rows(hole: HolePrimitive, measured: float,
+               hole_pt: tuple[float, float], edge_pt: tuple[float, float],
+               floor: float | None, edge: str,
+               against: str | None) -> list[dict]:
+    """One measurement -> at most ONE finding, containment taking precedence.
+
+    Never both: a bore that has left the board material has also, trivially,
+    broken any proximity floor, and reporting the same geometry twice under two
+    rule names makes a fault look like two faults."""
+    extra = {"edge": edge}
+    if against is not None:
+        extra["against_entity_id"] = against
+    if measured < -EPS:
+        return [_finding(
+            GC11_CONTAINMENT, hole.entity_id, hole.parent_id, hole.origin,
+            hole.net_id, None, measured, 0.0,
+            closest=list(hole_pt), witness=list(edge_pt), extra=extra,
+            ref=hole.ref, pad=hole.pad_number, net_name=hole.net_name)]
+    if floor is not None and _violates(measured, floor):
+        return [_finding(
+            GC11_PROXIMITY, hole.entity_id, hole.parent_id, hole.origin,
+            hole.net_id, None, measured, floor,
+            closest=list(hole_pt), witness=list(edge_pt), extra=extra,
+            ref=hole.ref, pad=hole.pad_number, net_name=hole.net_name)]
+    return []
+
+
+def _check_gc11_hole_to_edge(proj: Projection, rb: ResolvedBoard) -> list[dict]:
+    """GC11 — a drilled bore against the board rim and every cutout opening.
+
+    SPLIT IN TWO, because the halves have different authority and collapsing
+    them would have made the useful half hostage to a number nobody publishes:
+
+      CONTAINMENT (``gc11_hole_outside_board``) — UNCONDITIONAL. A bore that
+        crosses the outline or enters a cutout is nonsense at any floor value
+        and needs no published figure to refuse. ``required`` is reported as 0.0,
+        which is the literal rule: the bore must not leave the material.
+      PROXIMITY (``gc11_hole_to_edge``) — gated on the OPTIONAL
+        ``min_hole_to_edge_mm``. NO SHIPPED PROFILE DECLARES IT (JLCPCB's 2-layer
+        page publishes no hole-to-edge minimum, and neither do the other two), so
+        this half DOES NOT RUN on any fixture in the corpus. Stated here because
+        a check that silently never fires reads exactly like one that always
+        passes — the count key stays 0 and that 0 means "the profile said
+        nothing", not "checked and clean".
+
+    WHAT WAS FAIL-OPEN BEFORE THIS. Geometric DRC had no hole-to-edge class at
+    all: GC5 measures COPPER to the edge, GC6 measures holes against each other,
+    and the pour carve measures holes against copper. A drill placed inside a
+    slot opening, or half off the rim, compiled, passed DRC clean, and emitted a
+    drill file the fab would run.
+
+    THE RULING THIS ENCODES, recorded so nobody later "fixes" it as a bug:
+    CONTAINMENT PERMANENTLY FORECLOSES CASTELLATED AND MOUSE-BITE EDGE HOLES —
+    the half-holes on a module's rim that are deliberately drilled ON the
+    outline. Those are legitimate, common, and refused here. The justification is
+    that the schema cannot express them: a hole is a bore at a point, with no
+    field saying "this one is meant to be cut through", so an edge-crossing bore
+    is indistinguishable from a misplaced one and the fail-closed reading is the
+    only safe one. If castellations ever become authorable, they arrive as an
+    explicit hole KIND and this check learns to exempt that kind — it must not
+    be repaired by relaxing the geometry test, which would re-open the fault for
+    every genuinely misplaced hole.
+
+    RIM VS CUTOUT USE DIFFERENT KERNELS, and that asymmetry is deliberate. The
+    rim is an axis-aligned rectangle, so a capsule's AABB is its EXACT extent and
+    the four side insets are exact. A cutout is an arbitrary loop, where an AABB
+    would over-report near corners; see :func:`_hole_loop_clearance`.
+    """
+    floor = rb.design_rules.minimums.min_hole_to_edge_mm
+    ox, oy, width_mm, height_mm = outline_frame(rb.outline)
+    ox2, oy2 = ox + width_mm, oy + height_mm
+    cut_loops = cutout_point_loops(rb.outline)
+    findings: list[dict] = []
+    for hole in sorted(proj.holes, key=lambda h: h.entity_id):
+        box = hole.aabb
+        mid_y = (box.min_y + box.max_y) / 2.0
+        mid_x = (box.min_x + box.max_x) / 2.0
+        sides = (
+            (box.min_x - ox, (box.min_x, mid_y), (ox, mid_y)),
+            (ox2 - box.max_x, (box.max_x, mid_y), (ox2, mid_y)),
+            (box.min_y - oy, (mid_x, box.min_y), (mid_x, oy)),
+            (oy2 - box.max_y, (mid_x, box.max_y), (mid_x, oy2)),
+        )
+        measured, hole_pt, edge_pt = min(sides, key=lambda s: s[0])
+        findings += _gc11_rows(hole, measured, hole_pt, edge_pt, floor,
+                               "rim", None)
+        for cut_id, loop in cut_loops:
+            # WORST CAPSULE WINS. A routed slot is several capsules; taking the
+            # first, or the centre, would clear a slot whose far leg runs into
+            # the opening.
+            best = None
+            for cap in hole.capsules:
+                row = _hole_loop_clearance(cap, loop)
+                if best is None or row[0] < best[0]:
+                    best = row
+            if best is None:
+                continue
+            findings += _gc11_rows(hole, best[0], best[1], best[2], floor,
+                                   "cutout", cut_id)
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Result union.
 # ---------------------------------------------------------------------------
@@ -1193,10 +2183,56 @@ def _finding(rule: str, entity_id: str, parent: str | None, kind: str,
     return out
 
 
+# The zero-initialised keys of the result's ``counts`` map. EVERY check must be
+# listed here, including one that finds nothing.
+#
+# WHY THAT IS LOAD-BEARING AND NOT BOOKKEEPING (swept once in epoch CP2 S4, on
+# behalf of stations S5-S8, which add gc8..gc11 between them):
+#
+# The counting loop below is `counts[f["type"]] = counts.get(f["type"], 0) + 1`.
+# That `.get` fallback means a check MISSING from this tuple still counts its
+# findings correctly — so the omission is invisible on a violating board and
+# shows up only on a CLEAN one, where the key is absent instead of zero. A
+# consumer then cannot distinguish "this check ran and found nothing" from
+# "this check did not run", which is the cardinal rule's false-clean shape
+# wearing a different hat. Adding a check without adding its key here is
+# therefore a real defect, not a cosmetic one, and it is one that a clean-board
+# test would pass straight through.
+#
+# THE CONSUMER SWEEP the S4 brief asked for, done once here rather than four
+# times later. Result: NOTHING outside this module enumerates gc keys.
+#   * The Go bridge (pcb/internal/tools/worker_tools.go) forwards the worker's
+#     JSON VERBATIM; its only mention of counts is prose in a tool description.
+#   * pcb/main_test.go touches counts solely to DISCRIMINATE the connectivity
+#     shape (wrong_net_pad) from the geometric one — it does not enumerate gc
+#     keys and is unaffected by new ones.
+#   * The Godot UI (pcb/ui/*.gd) references no gc key at all.
+#   * The GD surface test (pcb/tests/gd/test_geometric_drc_surface.gd) uses
+#     synthetic counts payloads, not real key names.
+# So S5-S8 need to touch exactly ONE place — this tuple — and no downstream
+# consumer requires a coordinated change.
 _COUNT_KEYS = (
     "gc1_trace_width", "gc2_copper_clearance", "gc3_drill", "gc3_finished_hole",
     "gc4_annular_ring", "gc5_copper_to_edge", "gc6_hole_to_hole",
     "gc7_zone_clearance",
+    "gc8_mask_sliver",          # CP2 S5 — min_mask_sliver_mm's first reader
+    # CP2 S6 — silkscreen DFM. Both floors are OPTIONAL-tier, so these stay 0
+    # under a profile that publishes no silk rule; that is "the profile said
+    # nothing", not "checked and clean". `gc9_silk_indeterminate` is the
+    # dropped-artwork row and carries NO measurement by design.
+    "gc9_silk_width",
+    "gc9_silk_to_pad",
+    "gc9_silk_indeterminate",
+    # CP2 S7 — hole-to-copper. OPTIONAL-tier floor, so this stays 0 under a
+    # profile that publishes no PTH-to-track figure; that is "the profile said
+    # nothing", not "checked and clean".
+    "gc10_hole_to_copper",
+    # CP2 S8 — hole-to-edge, in TWO keys because the two faults have different
+    # authority. Containment is unconditional; proximity is gated on the
+    # OPTIONAL min_hole_to_edge_mm, which NO shipped profile declares, so that
+    # key stays 0 on every board in the corpus — "the profile said nothing".
+    GC11_CONTAINMENT,
+    GC11_PROXIMITY,
 )
 
 
@@ -1325,13 +2361,49 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         findings += _check_gc5_copper_to_edge(proj, rb)
         findings += _check_gc6_hole_to_hole(proj, rb)
         findings += _check_gc7_zone_clearance(proj, rb)
+        # Ordered with the copper/hole checks rather than in numeric position:
+        # it consumes only `copper` + `holes`, so it must not sit behind the
+        # mask-projection refusal below, which is about a different family.
+        findings += _check_gc10_hole_to_copper(proj, rb)
+        findings += _check_gc11_hole_to_edge(proj, rb)
+
+        # GC8 CONSUMES THE MASK PROJECTION, so it must first refuse to run on a
+        # KNOWN-INCOMPLETE aperture set. `mask_indeterminate` names entities
+        # whose openings could not be determined (S4); computing a sliver
+        # verdict without them would search fewer pairs and report fewer
+        # slivers, which reads as a healthier board — the false clean this
+        # field was added to prevent.
+        #
+        # The refusal is WHOLESALE here rather than mask-scoped, and that is a
+        # deliberate, narrow reading of the S4 obligation: this result envelope
+        # has one `verdict` for all checks and no per-check scoping, so there is
+        # no way to say "gc1-gc7 ran, gc8 did not" without inventing a shape the
+        # Go bridge and the panel do not consume. Refusing everything is honest
+        # and safe; claiming a clean board while one check silently sat out is
+        # neither. If per-check scoping ever exists, narrow this.
+        if proj.mask_indeterminate:
+            entity, reason = proj.mask_indeterminate[0]
+            return _indeterminate(
+                "unsupported_geometry",
+                f"mask coverage is undetermined for {len(proj.mask_indeterminate)} "
+                f"entity/entities (first: {entity} — {reason}), so the mask "
+                f"sliver check (GC8) cannot run and no geometric verdict is given")
+        findings += _check_gc8_mask_sliver(proj, rb)
+        # ADVISORY channel, kept OUT of `findings` so `verdict` keeps meaning
+        # exactly what it means today: blocking violations only. Silk is
+        # cosmetic (fab_capability's ratified rule), and a legend rule that
+        # refused 15 of the 17 silk-carrying stock footprints would be an
+        # outage, not a check.
+        advisories = _check_gc9_silk(proj, rb)
     except UnsupportedGeometry as exc:
         return _indeterminate("unsupported_geometry", str(exc))
     except Exception as exc:  # noqa: BLE001 - fail-closed: a crash is NOT a clean.
         return _indeterminate("internal", f"geometric DRC raised {exc!r}")
 
+    # Advisories are COUNTED like findings (so a thin legend is never invisible)
+    # but excluded from `findings` and therefore from `verdict`.
     counts = {key: 0 for key in _COUNT_KEYS}
-    for f in findings:
+    for f in findings + advisories:
         counts[f["type"]] = counts.get(f["type"], 0) + 1
 
     profile = rb.design_rules.rule_profile
@@ -1339,6 +2411,11 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         "ok": True,
         "scope": "geometric",
         "verifies_geometry": True,
+        # UNCHANGED SEMANTICS, deliberately: `verdict` still reflects blocking
+        # violations only. Adding cosmetic silk rows to it would have flipped
+        # essentially every real board to "violations" (15 of the 17 stock seed
+        # footprints draw silk below JLCPCB's published 0.15 minimum), which is
+        # an outage dressed as a DFM check.
         "verdict": "violations" if findings else "clean",
         "board_id": rb.id,
         "source_digest": rb.provenance.source_digest,
@@ -1348,6 +2425,14 @@ def run_geometric_drc(rb: ResolvedBoard, *,
             "digest": profile.digest,
         },
         "findings": findings,
+        # NEW KEY (epoch CP2 S6), and additive on purpose. A consumer that does
+        # not know about it behaves exactly as it did before — no false
+        # blocking, no mis-rendered severity. That is why the cosmetic rows went
+        # into a new key rather than into `findings` with a severity flag: the
+        # Go bridge forwards this JSON verbatim and the panel renders findings
+        # as problems, so a flag would have had to be understood everywhere to
+        # avoid harm, whereas an unknown key is simply ignored.
+        "advisories": advisories,
         "counts": counts,
         "warnings": list(warnings),
     }

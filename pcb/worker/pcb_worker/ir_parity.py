@@ -246,6 +246,137 @@ FAMILIES = (
     # cutout was invisible to parity, which is the exact silent-discard class
     # bug 019fbd30f7 documents on this surface.
     "cutout",
+    # NO SILK FAMILY — a RULING (epoch CP2 S4), not an omission, and it comes
+    # with an expiry condition. Read it before adding a silk check anywhere.
+    #
+    # S4 put legend geometry into the DRC projection (Projection.silk), so this
+    # module's DRC surface now has silk available to it. It is deliberately not
+    # tabulated, because parity's job is to catch an emitter SILENTLY DROPPING
+    # geometry that some other surface accounted for — and until a silk CHECK
+    # exists, nothing has been cleared, so there is nothing to drop silently.
+    # Adding rows now would only assert that two harvests which are literally
+    # the same function call agree with each other (both surfaces go through
+    # silk_source), which is a tautology, not a guard.
+    #
+    # THE EXPIRY: station S6 introduces the first real silk DFM checks. At that
+    # point silk becomes a checked subject on two surfaces and an emitter that
+    # dropped silk the checker had cleared WOULD be invisible here — exactly the
+    # hole the `cutout` family above was added to close (see its own note). So
+    # S6 must land a silk family across ir/drc/gerber, or record why not. This
+    # comment is the obligation; do not let it lapse quietly.
+    #
+    # S6 OWES ONE MORE THING, bundled here so it cannot be forgotten separately:
+    # `Projection.silk_warnings` currently has NO consumer. It carries the shared
+    # harvest's warn-and-drop diagnostics precisely so a checker cannot silently
+    # inherit a narrower set of artwork than the emitter draws — but nothing
+    # reads it, so today that guarantee is aspirational. The first silk check
+    # must surface those warnings (at minimum as INFO on the DRC result), or the
+    # field is decoration.
+    #
+    # ---- S6 DISCHARGED BOTH OF THE ABOVE. Answers, in order. ----
+    #
+    # silk_warnings: DONE. GC9 emits a `gc9_silk_indeterminate` finding for every
+    # dropped primitive. A drop is no longer cleared silently — it is reported as
+    # artwork the checker could not measure, carrying no measurement (the row's
+    # measured_mm/required_mm are None, because there is no number to give).
+    #
+    # SILK FAMILY: NOT LANDED, and the reason is structural rather than the
+    # tautology argument used for mask above. Read this before assuming it was
+    # skipped for convenience — it is the SECOND declined family in this module
+    # and that pattern deserves scrutiny.
+    #
+    # The obligation was "a silk family across ir/drc/gerber". Those three
+    # columns cannot share one row key:
+    #
+    #   * For the IR column to be INDEPENDENT it must be keyed PER GRAPHIC —
+    #     straight off PlacedGraphic, without running the shared harvest.
+    #     (Running silk_source to build IR rows would make the ir and drc
+    #     columns the same function call, which is exactly the mask tautology.)
+    #   * For the GERBER column to exist at all it must be keyed PER STROKE
+    #     SEGMENT. Emitted silk is anonymous drawn geometry; a graphic's identity
+    #     does not survive into the file, and grouping parsed strokes back into
+    #     the graphic that produced them is not recoverable (the `cutout` family
+    #     hit the same wall and solved it with an identity-free bbox key, which
+    #     works there because a cutout IS one closed loop — a silk graphic is
+    #     not).
+    #
+    # One family cannot be keyed both ways, so the choice is a two-column family
+    # (ir/drc) or a two-column family (drc/gerber) wearing a three-column name.
+    #
+    # AND THE HOLE THAT MOTIVATED IT IS CLOSED BY A MORE DIRECT ROUTE. The S4
+    # reasoning was: once silk is checked, "an emitter dropping silk the checker
+    # CLEARED becomes invisible". GC9 makes every drop VISIBLE as its own
+    # finding, so the checker never clears dropped artwork — it reports it. A
+    # parity row would restate that, later and less precisely.
+    #
+    # WHAT IS GENUINELY LEFT UNGUARDED, stated so it is not discovered as a
+    # surprise: a graphic the harvest drops WITHOUT warning. Nothing today can do
+    # that (every drop path in silk_source emits a SilkWarning), but nothing
+    # structurally prevents a future one, and parity is what would have caught
+    # it. That is the residual risk of this decision.
+    #
+    # REVIVAL TRIGGERS: a silk_source drop path that does not warn; a second silk
+    # harvest anywhere; or the IR gaining stroke-level silk (at which point the
+    # per-graphic/per-stroke conflict dissolves and the family becomes buildable
+    # as originally specified).
+    #
+    # NO MASK FAMILY EITHER — same ruling, same expiry, one asymmetry that makes
+    # it MORE urgent than the silk one (epoch CP2 S4, mask half).
+    #
+    # The tautology argument is identical: Projection.mask and the gerber
+    # emitter's mask buckets both come from mask_source now, so tabulating them
+    # today would assert that one function call agrees with itself. And the
+    # expiry is nearer — station S5 introduces the mask-sliver check, not S6.
+    #
+    # THE ASYMMETRY, which is why this note is not just a copy of the silk one:
+    # a dropped SILK primitive is cosmetic and the check that cleared it was
+    # cosmetic too. A dropped MASK aperture is fabrication-critical
+    # (fab_capability.FABRICATION_CRITICAL_OUTPUTS lists mask), and the sliver
+    # check S5 adds is one whose failure mode is a FALSE CLEAN — fewer apertures
+    # seen means fewer slivers found, which reads as a healthier board. So the
+    # moment a mask check exists, an emitter that dropped an aperture the
+    # checker had cleared is not merely invisible here, it is invisible in the
+    # direction that ships a defective board.
+    #
+    # S5 DISCHARGED THIS, and the answer is "record why not" — with the reason
+    # stated rather than the obligation quietly dropped.
+    #
+    # GC8 (mask sliver) landed, so mask IS now a checked subject. But the hole
+    # parity would have been designed to close does not exist, because BOTH
+    # surfaces read the same tuple: the emitter's mask buckets and DRC's
+    # Projection.mask are the same mask_source enumeration, and GC8 measures
+    # Projection.mask directly. There is no third surface holding an independent
+    # opinion for parity to compare against — the drc/gerber columns would be
+    # populated from one function call, and the `ir` column has no mask concept
+    # at all (the IR carries pads, drills and margins; mask openings are DERIVED
+    # and exist nowhere in it).
+    #
+    # A family here would therefore tabulate one value under three headings and
+    # report agreement forever. That is not a weaker guard than the cutout
+    # family — it is a guard that CANNOT FAIL, which is worse than none, because
+    # a green row reads as evidence.
+    #
+    # WHAT ACTUALLY GUARDS THIS INSTEAD, and where to look if it breaks:
+    # tests/test_mask_projection.py compares the emitter's serialized buckets
+    # against the projection at full geometry, and asserts structurally that
+    # gerber.py contains no mask enumeration of its own. That is the real
+    # anti-drift mechanism; parity would only have restated it.
+    #
+    # THE CONDITION THAT REVIVES THIS: if a second mask enumeration ever appears
+    # — a kicad.py mask emitter, a Go-side aperture reader, an IR that carries
+    # openings directly — the tautology argument dies immediately and a mask
+    # family becomes mandatory. That is the trigger to watch for, not a date.
+    #
+    # S5 OWES ONE MORE THING, bundled here for the same reason the silk note
+    # bundles silk_warnings: `Projection.mask_indeterminate` has NO consumer.
+    # It names entities whose mask coverage could not be determined (today: a
+    # non-round board hole, which the gerber emitter refuses outright), and it
+    # exists so a mask check cannot compute a verdict from a KNOWN-INCOMPLETE
+    # aperture set. Until something reads it, that guarantee is aspirational —
+    # and unread here is worse than unread for silk_warnings, because the
+    # partial-set failure is a sliver check finding FEWER slivers and reporting
+    # a healthier board. The mask check must refuse a mask verdict (scoped
+    # indeterminate, not a wholesale one) whenever this field is non-empty.
     # Copper-layer identity + stack order.
     "copper_layer",
     # Which net owns which pad. Split out of copper_flash so a dropped net

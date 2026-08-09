@@ -585,7 +585,7 @@ def test_policy_zone_connect_is_context_sensitive():
     assert policy.is_blocking(zc, {"zones": [{}]}, V1_FAB_OUTPUTS) is True  # zones present → fatal
 
 
-def test_v1_requested_outputs_do_not_claim_fab_or_back_silk():
+def test_v1_requested_outputs_do_not_claim_the_fab_layer():
     """Fatal-output profile + emitter layers come from the shared authority
     (review 623 R3/R5), and the aliasing is `is`-identity so the compiler cannot
     drift from the emitter's own accept-set.
@@ -595,10 +595,16 @@ def test_v1_requested_outputs_do_not_claim_fab_or_back_silk():
     judgement too: the paste OUTPUT is now fail-closed (in V1_FAB_OUTPUTS) —
     a lost stencil layer refuses fabrication rather than warning.
 
-    Still excluded, for two different reasons:
-      * F.Fab — KiCad's own .gbrjob calls it ``AssemblyDrawing,Top``. Not fab.
-      * B.SilkS — we WRITE the file but harvest no bottom silk, so claiming it
-        here would silence a real warning without emitting any real geometry.
+    B.SILKS MOVED IN EPOCH CP2 (station S3), and the test name still says "do
+    not claim back silk" only for F.Fab's half now. B.SilkS was excluded because
+    we wrote the file but harvested no bottom silk, so claiming it would silence
+    a real warning without emitting real geometry. S3 added the harvest, which
+    inverts the argument exactly: the warning is now false and the claim is now
+    true.
+
+    F.Fab is still excluded, and permanently: KiCad's own .gbrjob calls it
+    ``AssemblyDrawing,Top``. Not fab. The two exclusions were never the same
+    kind of thing — one was a missing feature, the other is a classification.
     """
     from pcb_worker import fab_capability
     assert V1_FAB_OUTPUTS == fab_capability.FABRICATION_CRITICAL_OUTPUTS
@@ -607,7 +613,7 @@ def test_v1_requested_outputs_do_not_claim_fab_or_back_silk():
     assert "fab" not in V1_FAB_OUTPUTS
     assert {"F.Paste", "B.Paste"} <= K3_EMITTED_LAYERS
     assert "F.Fab" not in K3_EMITTED_LAYERS
-    assert "B.SilkS" not in K3_EMITTED_LAYERS
+    assert "B.SilkS" in K3_EMITTED_LAYERS  # CP2 S3: real bottom-silk harvest
 
 
 def test_policy_blocks_rules_marker_when_rules_requested():
@@ -844,12 +850,21 @@ def test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged(t
     # missing field from v1 would produce a hybrid whose digest still claims
     # to be "acme-fab" while quietly enforcing v1's number on the field it
     # never authored. Prove the compile fails closed instead.
+    #
+    # THE OMITTED FIELD CHANGED IN CP2 S5. This used to omit
+    # solder_mask_expansion_mm, which was demoted to the OPTIONAL tier in that
+    # station (it was the last REQUIRED floor with no production reader, and its
+    # meaning differs between the two shipped profiles, so it could not be given
+    # one). Omitting it is now LEGAL — see the test directly below, which pins
+    # exactly that. This unit needs a still-required field to make its point, so
+    # it omits min_annular_ring_mm.
     incomplete_floor = {
         "min_trace_width_mm": 0.2, "min_clearance_mm": 0.2, "min_drill_mm": 0.3,
-        "min_finished_hole_mm": 0.3, "min_annular_ring_mm": 0.2,
+        "min_finished_hole_mm": 0.3,
+        # min_annular_ring_mm deliberately OMITTED
         "min_hole_to_hole_mm": 0.3, "min_mask_sliver_mm": 0.15,
         "solder_mask_clearance_mm": 0.08,
-        # solder_mask_expansion_mm deliberately OMITTED
+        "solder_mask_expansion_mm": 0.0,
         "copper_to_edge_mm": 0.4,
     }
     (tmp_path / "acme-fab.json").write_text(
@@ -861,7 +876,41 @@ def test_a_profile_missing_a_field_fails_the_whole_compile_closed_never_merged(t
     assert isinstance(result, ResolutionFailure)
     assert "unknown_rule_profile" in _errors(result)
     message = next(d.message for d in result.diagnostics if d.code == "unknown_rule_profile")
-    assert "solder_mask_expansion_mm" in message
+    assert "min_annular_ring_mm" in message
+
+
+def test_a_profile_omitting_the_demoted_mask_expansion_field_still_compiles(tmp_path):
+    """The other half of the CP2 S5 demotion, and the half that would otherwise
+    go unpinned.
+
+    Moving a field between tiers has two consequences and a test suite that only
+    checks one of them will happily pass while the demotion is half-applied:
+    omitting the field must stop being fatal (here), and the required tier must
+    still reject everything else (the test above). Without this, a later revert
+    of the tier change would break nothing.
+
+    The floor below is complete under the NEW required tier and declares no
+    expansion at all, which is the state a profile is now allowed to be in:
+    "this profile said nothing about mask expansion" rather than a substituted
+    number.
+    """
+    floor = {
+        "min_trace_width_mm": 0.2, "min_clearance_mm": 0.2, "min_drill_mm": 0.3,
+        "min_finished_hole_mm": 0.3, "min_annular_ring_mm": 0.2,
+        "min_hole_to_hole_mm": 0.3, "min_mask_sliver_mm": 0.15,
+        "solder_mask_clearance_mm": 0.08, "copper_to_edge_mm": 0.4,
+    }
+    (tmp_path / "acme-fab.json").write_text(
+        json.dumps({"id": "acme-fab", "version": "1", "floor": floor}),
+        encoding="utf-8")
+    board = _one_component_board("R_0805")
+    board["design_rules"]["rule_profile"] = "acme-fab"
+    result = compile_board(board, profile_root=tmp_path)
+    assert isinstance(result, ResolutionSuccess), \
+        [(d.code, d.message) for d in result.diagnostics]
+    # ABSENT is recorded as None — "said nothing" — never as a substituted 0.0,
+    # which is what the jlcpcb profile means when it declares 0.0 explicitly.
+    assert result.board.design_rules.minimums.solder_mask_expansion_mm is None
 
 
 def test_stackup_asserts_no_invented_thickness(corner_board_result):

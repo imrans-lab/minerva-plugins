@@ -15,7 +15,7 @@ too):
 * An unknown id (no matching file) is an ERROR.
 * Malformed JSON, a non-object top level, a missing/wrong-type ``version``,
   a missing/non-object ``floor``, is an ERROR.
-* A floor missing ANY of the ten REQUIRED :class:`ManufacturingConstraints`
+* A floor missing ANY of the REQUIRED :class:`ManufacturingConstraints`
   fields is an ERROR -- there is NO merge with another profile's (e.g. v1's)
   values to fill the gap. A loader that filled missing keys from a default floor
   would produce a hybrid whose digest CLAIMS to be a specific board house while
@@ -37,7 +37,7 @@ a fail-closed compile diagnostic (never a silent fall back to v1).
 
 Pinning reuses the existing shape: :class:`~pcb_worker.resolved_board.RuleProfileRef`
 (``id``/``version``/``digest``) is unchanged; the digest is a JCS content-id
-over ``{"floor": <the ten fields>, "profile": <id>}``, the same formula the
+over ``{"floor": <the declared fields>, "profile": <id>}``, the same formula the
 retired ``compile_board._v1_rule_profile`` used (with ``id`` in place of a
 second hardcoded string), so v1's digest shape is preserved even though its
 numbers now live in a shipped file instead of Python source.
@@ -69,9 +69,11 @@ DEFAULT_PROFILE_ROOT = _PCB_ROOT / "library" / "profiles"
 # the same argument one level down.
 ALLOWED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset({"id", "version", "source", "floor"})
 
-# The exact ManufacturingConstraints field set, in the dataclass's own
-# declaration order. A profile supplies ALL TEN or the load fails -- see the
-# module docstring's fail-closed list.
+# The REQUIRED ManufacturingConstraints field set, in the dataclass's own
+# declaration order. A profile supplies EVERY ONE of these or the load fails --
+# see the module docstring's fail-closed list. Deliberately not restated as a
+# count anywhere: the tier changed once (CP2 S5) and every prose "ten" in this
+# module had to be hunted down afterwards.
 REQUIRED_FLOOR_FIELDS: tuple[str, ...] = (
     "min_trace_width_mm",
     "min_clearance_mm",
@@ -81,14 +83,19 @@ REQUIRED_FLOOR_FIELDS: tuple[str, ...] = (
     "min_hole_to_hole_mm",
     "min_mask_sliver_mm",
     "solder_mask_clearance_mm",
-    "solder_mask_expansion_mm",
     "copper_to_edge_mm",
 )
+# NINE, not ten, since epoch CP2 S5. `solder_mask_expansion_mm` moved to the
+# optional tier below; the ruling and its reasoning live on the dataclass field
+# in resolved_board.py. The number in this comment is worth keeping accurate:
+# after S5 every field in the tuple above has at least one production reader
+# (measured, not asserted), which is the property that makes "required" mean
+# something.
 
 # Floor fields a profile MAY declare and that a reader consumes when present.
 #
 # WHY A SECOND TIER AT ALL, given the module's whole argument is that a missing
-# field must fail rather than default. The required ten are quantities every
+# field must fail rather than default. The required fields are quantities every
 # board house publishes, so an absent one means the profile is INCOMPLETE and
 # guessing it would invent a rule. `min_hole_to_copper_mm` is different in kind:
 # the original two shipped profiles state no such rule (jlcpcb-2layer, added in
@@ -109,6 +116,24 @@ OPTIONAL_FLOOR_FIELDS: tuple[str, ...] = (
     "min_npth_mm",
     "min_plated_slot_mm",
     "min_npth_slot_mm",
+    # Silkscreen DFM floors (epoch CP2 S6). Same tier and semantics: PRESENT
+    # means GC9 enforces it, ABSENT means the profile published no such rule.
+    "min_silk_width_mm",
+    "min_silk_to_pad_mm",
+    # Hole-to-edge (epoch CP2 S8). Same tier and semantics — and NO shipped
+    # profile declares it, because none of the three publishes a hole-to-edge
+    # figure. It is admitted here so a profile that DOES publish one can state
+    # it without a schema change; GC11's containment half runs regardless.
+    "min_hole_to_edge_mm",
+    # DEMOTED from the required tier in epoch CP2 S5 — the last required floor
+    # with no production reader, and one that cannot be given a correct reader
+    # until its semantics are settled (the two shipped profiles use it for
+    # opposite ends of the process: fab-applied vs authoring-side expansion).
+    # The full ruling is on the ManufacturingConstraints field in
+    # resolved_board.py. It sits in THIS tier rather than being deleted because
+    # both shipped profiles legitimately declare it and the value is real
+    # provenance; what changed is the false claim that anything enforces it.
+    "solder_mask_expansion_mm",
 )
 
 
@@ -184,14 +209,21 @@ def load_rule_profile(
     if not isinstance(floor, dict):
         raise RuleProfileError(f"rule profile {profile_id!r} has no 'floor' mapping")
 
-    # ALL TEN fields or fail -- no merge with any other profile (module
+    # EVERY REQUIRED field or fail -- no merge with any other profile (module
     # docstring). Checked as its own pass (not folded into the coercion loop
     # below) so a missing field is reported by NAME, not as a KeyError.
+    #
+    # The count is NINE since CP2 S5 demoted solder_mask_expansion_mm, and this
+    # text no longer states a number: the previous wording ("all ten") was
+    # duplicated here and in the comment above the tuple, so the tier could not
+    # change without two edits and the error message was one of them. It now
+    # derives from the tuple, which is the only place the count should live.
     missing = [key for key in REQUIRED_FLOOR_FIELDS if key not in floor]
     if missing:
         raise RuleProfileError(
             f"rule profile {profile_id!r} floor is missing field(s) {'/'.join(missing)}; "
-            f"a profile must supply all ten ManufacturingConstraints fields or fail "
+            f"a profile must supply all {len(REQUIRED_FLOOR_FIELDS)} required "
+            f"ManufacturingConstraints fields or fail "
             f"(no merge with another profile's defaults)")
     extra = sorted(set(floor) - set(REQUIRED_FLOOR_FIELDS) - set(OPTIONAL_FLOOR_FIELDS))
     if extra:

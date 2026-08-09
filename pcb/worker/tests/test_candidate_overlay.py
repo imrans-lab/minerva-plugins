@@ -452,3 +452,82 @@ def test_route_segment_start_end_shape_is_accepted():
     assert union["verdict"] == "violations"
     assert any(p.get("ref") == "X1"
                for f in union["findings"] for p in f.get("participants") or [])
+
+
+# ---------------------------------------------------------------------------
+# ASYMMETRIC FINDING SHAPES — the false clean found in the CP2 S8 review round.
+# ---------------------------------------------------------------------------
+#
+# Most geometric rules name both parties (GC2/GC6 carry `participants`). Five do
+# NOT: GC5-cutout, GC7, GC9, GC10 and GC11 are ASYMMETRIC on purpose — the
+# finding is keyed on the SUBJECT of the rule (the pour, the bore, the legend
+# stroke) and the other party appears only in `against_entity_id`/`pad_entity`.
+#
+# `_finding_entity_ids` did not read those keys. So when the opposing party was
+# a CANDIDATE, the candidate appeared in no field attribution looked at: the
+# finding was partitioned into `baseline` as a pre-existing board fault and the
+# proposal that CAUSED it was reported CLEAN. That is the exact laundering this
+# module's contract forbids, on the surface a user actually accepts routes
+# through. GC7 has carried this shape since long before CP2, so the hole was
+# pre-existing; GC10/GC11 joined it.
+
+
+def _asymmetric_finding(rule: str, subject: str, opposed: str, key: str) -> dict:
+    return {"type": rule, "entity_id": subject, "parent": None, key: opposed}
+
+
+def test_the_opposed_party_of_an_asymmetric_rule_is_attributed():
+    """Every asymmetric shape must yield BOTH entities, or the opposing party
+    cannot be matched against the overlay and the finding is misfiled."""
+    cases = [
+        ("gc10_hole_to_copper", "hole:A", "candidate-segment:B", "against_entity_id"),
+        ("gc7_zone_clearance", "zone:A", "candidate-segment:B", "against_entity_id"),
+        ("gc11_hole_to_edge", "hole:A", "cutout:B", "against_entity_id"),
+        ("gc5_copper_to_edge", "candidate-segment:A", "cutout:B", "against_entity_id"),
+        ("gc9_silk_to_pad", "graphic:A", "candidate-pad:B", "pad_entity"),
+    ]
+    for rule, subject, opposed, key in cases:
+        ids = ir_candidates._finding_entity_ids(
+            _asymmetric_finding(rule, subject, opposed, key))
+        assert subject in ids, rule
+        assert opposed in ids, (
+            f"{rule} names {opposed!r} only in {key!r}; attribution must read it "
+            f"or a candidate on that side is laundered into baseline")
+
+
+def test_a_candidate_that_causes_a_gc10_violation_is_not_laundered():
+    """END TO END, through the real check_candidates path.
+
+    An unplated bore projects NO copper primitive, so GC2 can form no pair and
+    only GC10 sees a track run too close to it — which makes this the shape that
+    exposed the bug. The candidate must own the violation; baseline must stay
+    clean, because the board without the candidate IS clean."""
+    import copy
+
+    import yaml as _yaml
+
+    with open("tests/testdata/coupon_jlc1.yaml") as fh:
+        board = copy.deepcopy(_yaml.safe_load(fh))
+    # A mounting hole in clear space; the board stays clean with it.
+    board["mounting_holes"] = [
+        {"x_mm": 12.3, "y_mm": 14.0, "diameter_mm": 1.0, "plated": False}]
+    rb = _compile(board)
+
+    from pcb_worker.drc_geometric import run_geometric_drc
+    assert run_geometric_drc(rb)["verdict"] == "clean", "premise: board is clean"
+
+    # A candidate trace whose edge sits 0.125mm from the bore — under the 0.28
+    # min_hole_to_copper_mm floor this profile declares.
+    union = ir_candidates.check_candidates(rb, [{
+        "candidate_id": "ghost-1", "revision": 1, "net": "NET_A",
+        "segments": [{"id": "seg-0", "layer": "top", "width_mm": 0.25,
+                      "points": [[9.0, 14.75], [16.0, 14.75]]}]}])
+
+    assert union["verdict"] == "violations"
+    per = union["per_candidate"]["ghost-1"]
+    assert per["verdict"] == "violations", (
+        "the candidate CAUSED this violation and must own it")
+    assert per["finding_count"] >= 1
+    assert union["baseline"]["verdict"] == "clean", (
+        "the board without the candidate is clean; a laundered finding would "
+        "show up here as a pre-existing fault")

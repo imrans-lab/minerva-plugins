@@ -130,6 +130,60 @@ class OrientedRect:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RoundedRect:
+    """A rectangle with rounded corners, modeled EXACTLY: the Minkowski sum of an
+    inner rectangle (half-extents ``hw - r`` / ``hh - r``) with a disc of radius
+    ``r``, centred at ``(cx, cy)`` and rotated by ``angle`` radians.
+
+    ``hw``/``hh`` are the FULL half-extents of the rounded rectangle (its bounding
+    box), and ``r`` its corner radius — the same numbers the fab aperture carries,
+    so a caller never has to pre-shrink anything.
+
+    WHY THIS EXISTS WHEN OrientedRect ALREADY "COVERS" ROUNDRECT (epoch CP2 S5).
+    Copper checks model a roundrect land by its bounding OrientedRect, a
+    deliberate conservative SUPERSET: bigger copper means less measured
+    clearance, so GC2 over-reports rather than under-reports. That reasoning does
+    NOT carry to solder-mask slivers, and assuming it did would have been a false
+    clean.
+
+    A sliver is the mask WEB BETWEEN two openings, and the rule distinguishes
+    three regimes: web >= floor (fine), 0 < web < floor (a sliver — too thin to
+    adhere), and web <= 0 (the openings merge, so there is no web at all and
+    nothing to flag). Oversizing an aperture shrinks the measured web, which is
+    harmless in the first two regimes but can push a REAL sliver across into the
+    apparent-merge regime — where the check reports nothing. Fewer findings read
+    as a healthier board. Modelling the corners exactly removes the ambiguity
+    instead of documenting it.
+
+    A zero or negative ``r`` degenerates to a plain rectangle, and ``r`` is
+    clamped to half the smaller extent so a caller cannot construct an inner
+    core with negative half-extents.
+    """
+
+    cx: float
+    cy: float
+    hw: float
+    hh: float
+    r: float
+    angle: float
+
+    def _core(self) -> "OrientedRect":
+        """The inner rectangle this shape is the disc-inflation of."""
+        r = max(0.0, min(self.r, min(self.hw, self.hh)))
+        return OrientedRect(self.cx, self.cy, self.hw - r, self.hh - r, self.angle)
+
+    def core_radius(self) -> float:
+        return max(0.0, min(self.r, min(self.hw, self.hh)))
+
+    def aabb(self) -> AABB:
+        # The bounding box of the full shape, which is the bounding box of the
+        # inner core inflated by the corner radius.
+        r = self.core_radius()
+        box = self._core().aabb()
+        return AABB(box.min_x - r, box.min_y - r, box.max_x + r, box.max_y + r)
+
+
 def point_segment_distance(px: float, py: float,
                            ax: float, ay: float, bx: float, by: float) -> float:
     """Exact distance from point (px,py) to segment a->b."""
@@ -296,6 +350,46 @@ def _decompose(shape) -> tuple[tuple[tuple[float, float], ...],
         edges = tuple((corners[i], corners[(i + 1) % len(corners)])
                       for i in range(len(corners)))
         return corners, edges, True, 0.0
+    if isinstance(shape, RoundedRect):
+        # A rounded rectangle IS a polygon core inflated by a radius, which is
+        # precisely the (vertices, edges, is_polygon, radius) view this function
+        # returns — so the existing kernel handles it exactly, with no
+        # special-casing downstream. `convex_edge_distance` already subtracts
+        # both radii from the core distance, and `_core_distance` already
+        # reports 0 for overlapping cores (which, minus the radii, correctly
+        # yields a negative separation).
+        r = shape.core_radius()
+        core = shape._core()
+        chw, chh = core.hw, core.hh
+
+        # DEGENERATE CORES MUST NOT BE REPORTED AS POLYGONS. When the corner
+        # radius reaches a half-extent the core collapses to a segment (an
+        # obround) or to a point (a circle) — both legitimate roundrect
+        # apertures. Passing a collapsed 4-vertex "polygon" to _core_distance
+        # would be actively wrong, not merely imprecise: _point_in_convex sees
+        # every cross product as zero, concludes INSIDE for any query point, and
+        # _core_distance returns 0. Distance minus the radii then goes negative
+        # and the caller reads two far-apart apertures as overlapping — which,
+        # for the mask-sliver rule, is the "merged, nothing to flag" branch. A
+        # false clean, from a shape that is perfectly ordinary.
+        #
+        # The non-polygon view is exactly Capsule semantics, so these fall
+        # through the same segment kernel a disc or obround already uses.
+        c, s = math.cos(core.angle), math.sin(core.angle)
+        if chw <= EPS and chh <= EPS:
+            p = (core.cx, core.cy)
+            return (p, p), ((p, p),), False, r
+        if chw <= EPS or chh <= EPS:
+            hx, hy = (0.0, chh) if chw <= EPS else (chw, 0.0)
+            dx, dy = hx * c - hy * s, hx * s + hy * c
+            a = (core.cx - dx, core.cy - dy)
+            b = (core.cx + dx, core.cy + dy)
+            return (a, b), ((a, b),), False, r
+
+        corners = core.corners()
+        edges = tuple((corners[i], corners[(i + 1) % len(corners)])
+                      for i in range(len(corners)))
+        return corners, edges, True, r
     raise TypeError(f"unsupported copper shape for convex distance: {type(shape).__name__}")
 
 

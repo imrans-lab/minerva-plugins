@@ -415,10 +415,37 @@ def build_overlay(rb: ResolvedBoard, candidates: list, *,
 def _finding_entity_ids(finding: dict) -> list:
     """Every IR entity a geometric finding names, in a stable order.
 
-    Per-entity findings (GC1/GC3/GC4/GC5/GC7) carry a single ``entity_id``; the
-    pairwise ones (GC2/GC6) carry ``"<lo>|<hi>"`` plus a ``participants`` /
-    ``entities`` list. Both are read so attribution does not depend on which rule
-    produced the finding."""
+    THREE FINDING SHAPES, and all three must be read or attribution silently
+    depends on which rule fired:
+
+      PER-ENTITY (GC1/GC3/GC4)      — a single ``entity_id``.
+      PAIRWISE (GC2/GC6)            — ``"<lo>|<hi>"`` plus ``participants`` /
+                                      ``entities``.
+      SUBJECT + OPPOSED (GC5-cutout,
+      GC7, GC9, GC10, GC11)         — one ``entity_id`` for the SUBJECT of the
+                                      rule, with the other party named only in
+                                      ``against_entity_id`` (or ``pad_entity``
+                                      for gc9_silk_to_pad).
+
+    THE THIRD SHAPE WAS NOT READ HERE UNTIL CP2 S8's REVIEW, and the consequence
+    was a FALSE CLEAN on the surface a user actually accepts routes through.
+    These rules are ASYMMETRIC on purpose — GC7's subject is the pour and GC10's
+    is the bore, because that is what the rule is *about* — so when the opposing
+    party is a CANDIDATE, the candidate appeared in no field this function read.
+    ``finding_subjects`` then returned no candidate subject, ``check_candidates``
+    partitioned the finding into ``baseline`` as a pre-existing board fault, and
+    the proposal that CAUSED it was reported ``clean``. That inverts this
+    module's own contract that a clean proposal must not launder a dirty board.
+
+    Demonstrated for gc10_hole_to_copper (a candidate trace inside an unplated
+    hole's floor) and reachable the same way for gc7_zone_clearance, which has
+    carried this shape since long before CP2 — so this repair closes a
+    pre-existing hole as well as the new checks' exposure.
+
+    A key that names a BOARD feature rather than an entity (GC5's cutout id) is
+    harmless here: it resolves to no overlay subject, and its presence correctly
+    marks the finding MIXED, which is what a candidate-too-close-to-a-slot is.
+    """
     out: list = []
     seen: set = set()
 
@@ -436,6 +463,13 @@ def _finding_entity_ids(finding: dict) -> list:
             add(participant.get("entity_id"))
     for entity in finding.get("entities") or []:
         add(entity)
+    # The opposed party of an asymmetric rule. Read from the finding dict rather
+    # than from a per-rule table so a NEW asymmetric check is attributed the day
+    # it is written, without a coordinated edit here that nobody would remember
+    # to make — the omission is invisible until a candidate happens to be on the
+    # opposed side.
+    add(finding.get("against_entity_id"))
+    add(finding.get("pad_entity"))
     add(finding.get("parent"))
     return out
 

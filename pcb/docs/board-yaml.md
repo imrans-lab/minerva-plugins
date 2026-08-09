@@ -244,9 +244,19 @@ Downstream of a successful fill:
   `gerber` emits the computed fill rings directly.
 - `drc_geometric` runs a real clearance check against filled copper instead of
   returning INDETERMINATE for the whole run: finding type `gc7_zone_clearance`
-  fires when foreign-net copper (or a hole) sits closer to a pour than its
-  effective minimum clearance allows — pour copper now participates in
-  clearance like any other copper.
+  fires when a foreign-net COPPER PRIMITIVE (pad, trace segment, via land,
+  plated board-hole annulus) sits closer to a pour than its effective minimum
+  clearance allows — pour copper now participates in clearance like any other
+  copper.
+
+  CORRECTED in epoch CP2 S7: this sentence used to read "foreign-net copper (or
+  a hole)". GC7 iterates `Projection.copper` and nothing else — it has never
+  looked at a drilled bore. Hole-to-pour spacing is enforced one step earlier,
+  at FILL time, by `zone_fill._hole_clearance_mm`, which carves every hole the
+  pour does not skip at `max(copper clearance, min_hole_to_copper_mm)`; and
+  hole-to-copper for the copper the filler does not produce (pads, traces, vias)
+  is `gc10_hole_to_copper` (CP2 S7). Three different mechanisms, and the old
+  wording credited one of them with another's job.
 - `route_bridge` still raises `UnsupportedGeometry`, but now ONLY for a
   `keepout` zone, not for a `copper_pour`. A keepout is an authored
   prohibition on copper the routing grid has no way to represent yet

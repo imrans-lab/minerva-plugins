@@ -533,9 +533,11 @@ def mask_opening_dim(base: float, margin: float, ref: Any, number: Any) -> float
     accepted (symmetry with _require_valid_solder_mask_margin, which accepts finite
     negatives).
 
-    The SINGLE owner of the mask-opening geometry boundary, SHARED by both CAM
-    emitters (gerber._mask_dim aliases this; kicad gates its per-pad
-    solder_mask_margin through it) so the two never disagree on the fail boundary
+    The SINGLE owner of the mask-opening geometry boundary, SHARED by every
+    surface that sizes an opening (mask_source calls this on behalf of the
+    gerber emitter AND the geometric-DRC projection, which is where the
+    enumeration now lives; kicad gates its per-pad solder_mask_margin through it
+    directly) so they never disagree on the fail boundary
     (bug 019f929b1416) — and the last-line guard against a non-finite clearance
     reaching either emitter's aperture text (bug 019f94b686b4)."""
     dim = base + 2 * margin

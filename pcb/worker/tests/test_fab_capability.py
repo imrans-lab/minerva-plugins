@@ -18,36 +18,46 @@ def test_profile_matches_the_emitter_gerber_suffixes():
 def test_emitted_layers_map_to_the_gerber_suffixes():
     """Every FABRICATED layer has a file — but not every file fabricates a layer.
 
-    This used to be an equality. It is deliberately a SUBSET now, because the two
-    constants answer two different questions: EMITTED_LAYERS is "whose captured
-    geometry reaches fabrication" (the compiler's accept-set, which drives the
-    ``captured_geometry_not_emitted`` warning), and EMITTED_GERBER_SUFFIXES is
-    "which files we write".
+    The two constants answer two different questions: EMITTED_LAYERS is "whose
+    captured geometry reaches fabrication" (the compiler's accept-set, which
+    drives the ``captured_geometry_not_emitted`` warning), and
+    EMITTED_GERBER_SUFFIXES is "which files we write".
 
     One direction must stay absolute: a layer we CLAIM to fabricate with no file
     to put it in would be a silent loss, so the subset check below is strict.
-    The other direction is where B_SilkS lives — a file written for fab-package
-    completeness whose captured geometry we do NOT yet emit (no bottom-silk
-    harvest exists). Keeping B.SilkS out of EMITTED_LAYERS is what preserves the
-    warning for a bottom-side component's silk.
+
+    THE OTHER DIRECTION CLOSED IN EPOCH CP2 (station S3). B_SilkS used to be the
+    sole gap — a file written for fab-package completeness whose captured
+    geometry no emitter harvested — and this test pinned that gap at exactly one
+    member. S3 gave the Gerber emitter a real bottom-silk harvest, so the gap is
+    now EMPTY and the two sets correspond one-to-one.
+
+    The pin stays, in the same spirit and now at zero: a NEW write-but-do-not-
+    fabricate layer must be a deliberate, reviewed act, not something that
+    appears because someone added a suffix. Loosening this to a subset check
+    would let exactly that through.
     """
     expected = {layer.replace(".", "_") for layer in fab_capability.EMITTED_LAYERS}
     assert expected <= set(fab_capability.EMITTED_GERBER_SUFFIXES)
-    # The gap is EXACTLY the known write-but-do-not-fabricate case. Pinned so a
-    # future layer cannot join it silently: adding one here is a deliberate act.
-    assert set(fab_capability.EMITTED_GERBER_SUFFIXES) - expected == {"B_SilkS"}
+    assert set(fab_capability.EMITTED_GERBER_SUFFIXES) - expected == set()
 
 
-def test_back_silk_is_written_but_not_claimed_as_fabricated():
-    """The B.SilkS asymmetry, stated once, in the direction that matters.
+def test_back_silk_is_both_written_and_claimed_as_fabricated():
+    """B.SilkS, stated in the direction that matters — REVERSED IN CP2 S3.
 
-    A file is present so the fab package has all nine of KiCad's default layers;
-    the layer is absent from the accept-set so the compiler still warns that a
-    bottom component's silk is not fabricated. Both halves must hold, or the gap
-    goes silent.
+    This test previously asserted the opposite ("written but NOT claimed"), and
+    the reversal is the point of the station rather than a weakening: the old
+    assertion protected a real warning about geometry that genuinely went
+    nowhere. Now that ``gerber._emit_silk``/``_emit_refdes`` harvest the bottom
+    side, that same warning would be FALSE, and claiming the layer is what
+    retires it honestly.
+
+    Both halves must still hold together. Claiming a layer whose file we do not
+    write is a silent loss; writing a file whose layer we do not claim is a
+    silent gap. The pairing is the invariant, not either half alone.
     """
     assert "B_SilkS" in fab_capability.EMITTED_GERBER_SUFFIXES
-    assert "B.SilkS" not in fab_capability.EMITTED_LAYERS
+    assert "B.SilkS" in fab_capability.EMITTED_LAYERS
 
 
 def test_paste_is_fabricated_and_fab_layer_is_not():

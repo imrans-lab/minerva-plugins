@@ -9,8 +9,9 @@ a layer forces a matching, reviewed change here.
 
 Values are today's Gerber surface (``gerber.py`` ``_GERBER_SUFFIXES`` + the
 PTH/NPTH Excellon split): two copper layers, both solder masks, both paste
-stencils, TOP silk, a structurally-valid BACK silk, and the board edge.  No fab
-layer (see the F.Fab note below).
+stencils, BOTH silks, and the board edge.  No fab layer (see the F.Fab note
+below).  Back silk was a structurally-valid but permanently EMPTY file until
+epoch CP2 station S3 gave the gerber emitter a real bottom-silk harvest.
 """
 
 from __future__ import annotations
@@ -24,18 +25,37 @@ from __future__ import annotations
 # classifies F.Fab as ``AssemblyDrawing,Top`` — KiCad itself says it is not a
 # fabrication layer.
 #
-# B.SilkS is likewise ABSENT *on purpose*, even though ``B_SilkS`` IS written
-# below.  The emitter has no bottom-silk harvest at all (``gerber._emit_silk``
-# and ``_emit_refdes`` are top-side only, by their own documented restriction),
-# so a bottom-side component's captured B.SilkS graphics are still NOT
-# fabricated.  Listing B.SilkS here would silence that component's
-# ``captured_geometry_not_emitted`` warning while changing nothing about the
-# emitted bytes — trading a loud, correct gap for a silent one.  This is why
-# EMITTED_LAYERS and EMITTED_GERBER_SUFFIXES are NOT a 1:1 mapping: "we write
-# this file" and "we fabricate this layer's captured geometry" are two different
-# claims, and B.SilkS is exactly the case that separates them.
+# B.SilkS IS PRESENT AS OF EPOCH CP2 STATION S3, and the reason it was absent
+# before is worth keeping, because it is the argument that justifies adding it
+# now rather than a rule that was overturned:
+#
+#   "B.SilkS is ABSENT *on purpose*, even though ``B_SilkS`` IS written below.
+#   The emitter has no bottom-silk harvest at all (``gerber._emit_silk`` and
+#   ``_emit_refdes`` are top-side only, by their own documented restriction), so
+#   a bottom-side component's captured B.SilkS graphics are still NOT
+#   fabricated.  Listing B.SilkS here would silence that component's
+#   ``captured_geometry_not_emitted`` warning while changing nothing about the
+#   emitted bytes — trading a loud, correct gap for a silent one."
+#
+# The premise ("no bottom-silk harvest") is what changed: S3 added a real one,
+# so listing B.SilkS here now silences a warning that has become FALSE rather
+# than one that was true. The two edits are only correct together, and the
+# gerber.py B.SilkS block says the same thing from the other side.
+#
+# ONE CORRECTION TO THE OLD NOTE, because the replacement text first written here
+# was wrong in the same way it was fixing. That note said EMITTED_LAYERS and
+# EMITTED_GERBER_SUFFIXES "are NOT a 1:1 mapping", with B.SilkS as the separating
+# case; I initially rewrote that as "F.Fab is now the only one", which is false —
+# F.Fab is in NEITHER set, so it cannot separate them. Measured after S3: both
+# sets have exactly 9 members and correspond one-to-one.
+#
+# The DISTINCTION the old note drew is still real and still worth stating: "we
+# write this file" and "we fabricate this layer's captured geometry" are
+# different claims, and nothing guarantees they stay aligned. They simply happen
+# to coincide right now. F.Fab separates KiCad's default plot set from ours,
+# which is a different axis entirely.
 EMITTED_LAYERS: frozenset[str] = frozenset({
-    "F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.SilkS", "Edge.Cuts",
+    "F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.SilkS", "B.SilkS", "Edge.Cuts",
     "F.Paste", "B.Paste",
 })
 

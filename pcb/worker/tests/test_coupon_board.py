@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+import pytest
 import yaml
 
 from pcb_worker.assembly_outputs import build_bom, build_cpl
@@ -96,16 +97,67 @@ class TestSeedCoupon:
         assert "G03" in silk or "G02" in silk  # the owl's arcs
 
     def test_dam_witness_mask_apertures_reach_the_stencil_free_mask(self):
-        """The mask-dam witness is otherwise certified only by the YAML header
-        (cold review CPN1-S6 finding 4 — no gc mask-sliver check exists): pin
-        the emitted F_Mask bytes. DAM1's pads are 0.6x0.8 at (8.6,16)/(9.4,16);
-        with the 0.05/side allowance the mask openings are 0.7x0.9 rects whose
-        inner edges leave exactly the 0.10 mm dam [min_mask_sliver 0.10]."""
+        """The mask-dam witness's EMITTED BYTES. DAM1's pads are 0.6x0.8 at
+        (8.6,16)/(9.4,16); with the 0.05/side allowance the mask openings are
+        0.7x0.9 rects whose inner edges leave exactly the 0.10 mm dam
+        [min_mask_sliver 0.10].
+
+        This half stays byte-level on purpose — it pins what the fab receives.
+        The companion test below pins what the CHECKER says about the same
+        geometry, and the pair is the point: bytes alone were all this witness
+        could assert before CP2 S5, because no mask-sliver check existed.
+        """
         files = build_gerbers_ir(_compiled().board)
         mask = next(t for n, t in files.items() if n.endswith("F_Mask.gbr"))
         assert "R,0.7X0.9*%" in mask  # the DAM opening aperture (measured)
         assert "X8600000" in mask and "X9400000" in mask
         assert "Y-16000000" in mask
+
+    def test_dam_witness_now_certifies_a_gc8_verdict_not_just_bytes(self):
+        """WHAT CP2 S5 CHANGED FOR THIS WITNESS.
+
+        Its docstring has always said the dam is "exactly the 0.10 mm dam
+        [min_mask_sliver 0.10]", but until GC8 existed nothing read that floor —
+        so the witness certified an aperture SIZE and the floor reference was
+        decoration. The board could have been authored with a 0.02 dam and this
+        suite would have been just as green, because the only assertions were
+        about bytes.
+
+        Now the same geometry is measured against the floor it names. The dam
+        sits EXACTLY at 0.10, which is a pass (a measurement at the floor
+        satisfies it — see `_violates`), so the coupon stays determinately clean
+        AND the number in the docstring is finally load-bearing.
+
+        Sitting exactly on the floor is deliberate for a witness: it is the only
+        position that fails if the check drifts in EITHER direction. A dam at
+        0.3 would survive a broken check; a dam at 0.05 would only prove the
+        check fires.
+        """
+        from pcb_worker.drc_geometric import project_board
+        from pcb_worker.mask_source import ORIGIN_SMD_PAD
+        from pcb_worker.resolved_board import Side
+
+        rb = _compiled().board
+        proj = project_board(rb)
+        dam = sorted(
+            (o for o in proj.mask
+             if o.ref == "DAM1" and o.side is Side.TOP
+             and o.origin == ORIGIN_SMD_PAD),
+            key=lambda o: o.x)
+        assert len(dam) == 2, f"expected DAM1's two mask openings, got {len(dam)}"
+
+        # Inner edges: right edge of the left opening, left edge of the right.
+        web = (dam[1].x - dam[1].width / 2.0) - (dam[0].x + dam[0].width / 2.0)
+        assert web == pytest.approx(0.10), (
+            f"the dam witness is no longer sitting on the floor it names: {web}")
+        assert web == pytest.approx(
+            rb.design_rules.minimums.min_mask_sliver_mm)
+
+        drc = run_geometric_drc(rb)
+        assert drc["verdict"] == "clean"
+        assert drc["counts"]["gc8_mask_sliver"] == 0, (
+            "a dam exactly AT the floor must PASS — flagging it would reject "
+            "boards authored precisely to a published minimum")
 
     def test_slot_edge_witness_sits_at_the_cutout_floor(self):
         """The slot-adjacent run's copper edge is exactly 0.20 from the

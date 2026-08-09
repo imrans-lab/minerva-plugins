@@ -775,8 +775,8 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
     "use the hardcoded floor" branch left to drift from the shipped file.
 
     FAIL CLOSED (K21, docket 019f762004dc): an unknown, unreadable, or
-    malformed profile -- including one missing any of the ten
-    ``ManufacturingConstraints`` fields -- is a compile ERROR. Never a silent
+    malformed profile -- including one missing any REQUIRED
+    ``ManufacturingConstraints`` field -- is a compile ERROR. Never a silent
     fall back to v1 when a DIFFERENT profile was requested and could not be
     loaded; that would let a board's digest/verdict claim to be one board
     house while actually enforcing another's numbers."""

@@ -495,7 +495,6 @@ class ManufacturingConstraints:
     min_hole_to_hole_mm: float
     min_mask_sliver_mm: float
     solder_mask_clearance_mm: float
-    solder_mask_expansion_mm: float
     copper_to_edge_mm: float
     # HOLE-TO-COPPER: how far copper must stay from a DRILLED hole, as distinct
     # from how far it must stay from other copper.
@@ -527,6 +526,75 @@ class ManufacturingConstraints:
     min_npth_mm: float | None = None
     min_plated_slot_mm: float | None = None
     min_npth_slot_mm: float | None = None
+    # SILKSCREEN DFM (epoch CP2 S6). Same optional-tier semantics: PRESENT means
+    # enforced, ABSENT means this profile published no such rule.
+    #
+    # min_silk_width_mm — the thinnest legend stroke the fab can hold. Below it
+    # the legend prints broken or not at all.
+    #
+    # min_silk_to_pad_mm — how far legend artwork must stay from a COPPER PAD.
+    # Silk printed onto a pad contaminates the solderable surface.
+    #
+    # THE SECOND FIELD IS NAMED FOR WHAT IS PUBLISHED, and this differs from the
+    # station plan, which called for `min_silk_to_mask_mm`. The JLCPCB
+    # capabilities page publishes "The Minimum Distance Between Pad and
+    # Silkscreen" — a silk-to-PAD figure. Silk-to-mask-OPENING is a different
+    # quantity (an opening is the pad plus the mask allowance, 0.05/side here),
+    # and the page publishes no figure for it. Storing a pad clearance in a
+    # field named for mask clearance would have been inventing a semantics, not
+    # merely a name — the same class of error as inventing a number.
+    min_silk_width_mm: float | None = None
+    min_silk_to_pad_mm: float | None = None
+    # HOLE-TO-EDGE (epoch CP2 S8) — how close a drilled bore may come to the
+    # routed board outline or a cutout opening before the router breaks into it.
+    # Same optional-tier semantics: PRESENT means GC11 enforces it, ABSENT means
+    # this profile published no such rule.
+    #
+    # AND ABSENT IS THE STATE OF EVERY SHIPPED PROFILE, deliberately. JLCPCB's
+    # published 2-layer capabilities page states no hole-to-edge minimum, and
+    # neither do the other two; declaring one would be inventing a number, which
+    # is the error this whole tier exists to avoid. So the PROXIMITY half of
+    # GC11 does not run on any board we ship a fixture for — said plainly here
+    # and in the profile source note, because a check that silently never fires
+    # reads exactly like a check that always passes.
+    #
+    # WHAT STILL RUNS WITHOUT IT: GC11's CONTAINMENT half, which needs no
+    # published number. A bore lying outside the outline or inside a cutout is
+    # not a tight tolerance, it is a hole drilled through air; that half is
+    # unconditional and is where the value of the check actually is today.
+    min_hole_to_edge_mm: float | None = None
+    # SOLDER-MASK EXPANSION — DEMOTED from the required tier in epoch CP2 S5,
+    # and the demotion is a ruling, not tidying.
+    #
+    # It was the LAST required floor with no production reader. After S5 gave
+    # min_mask_sliver_mm its first reader (GC8), this was the only one left at
+    # zero — measured, not assumed. A required tier whose whole justification is
+    # "these ten are load-bearing, so a MISSING one must fail" is hollow while a
+    # PRESENT one is never read by anything.
+    #
+    # WHY IT WAS NOT SIMPLY GIVEN A READER INSTEAD, which is what closing the
+    # other gaps looked like: THE FIELD HAS NO SETTLED MEANING. The two shipped
+    # profiles use it for different quantities —
+    #   * jlcpcb-2layer records the FAB-APPLIED expansion (0.0; JLCPCB plots
+    #     solder mask 1:1 and adds nothing of its own), while
+    #   * oshpark-2layer records OSH Park's recommended AUTHORING-side KiCad
+    #     expansion (0.0508), a number the DESIGNER is told to apply.
+    # Those are opposite ends of the process. Any reader would have to pick one
+    # interpretation and would then be silently wrong on the other profile —
+    # sizing every OSH Park mask opening 0.05 mm larger than intended, or
+    # ignoring an expansion JLCPCB never applies. A field whose semantics are
+    # unsettled cannot be read correctly, only read confidently.
+    #
+    # OPTIONAL is therefore the honest tier: PRESENT means a profile stated
+    # something (and it still gets full numeric validation), ABSENT means it
+    # said nothing. This field may return to the required tier once the
+    # semantics are pinned and a reader exists — that is the bar, and it is
+    # deliberately higher than "add a reader".
+    #
+    # _finite, not _nonnegative, preserving the original validation: a NEGATIVE
+    # expansion (a shrink) is physically meaningful even though neither shipped
+    # profile uses one.
+    solder_mask_expansion_mm: float | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -536,9 +604,15 @@ class ManufacturingConstraints:
             "solder_mask_clearance_mm", "copper_to_edge_mm",
         ):
             _nonnegative(getattr(self, field), f"ManufacturingConstraints.{field}")
-        _finite(self.solder_mask_expansion_mm, "ManufacturingConstraints.solder_mask_expansion_mm")
+        # Optional-but-declared fields keep FULL validation — what is optional is
+        # their PRESENCE, never their correctness.
+        if self.solder_mask_expansion_mm is not None:
+            _finite(self.solder_mask_expansion_mm,
+                    "ManufacturingConstraints.solder_mask_expansion_mm")
         for _opt in ("min_hole_to_copper_mm", "min_npth_mm",
-                     "min_plated_slot_mm", "min_npth_slot_mm"):
+                     "min_plated_slot_mm", "min_npth_slot_mm",
+                     "min_silk_width_mm", "min_silk_to_pad_mm",
+                     "min_hole_to_edge_mm"):
             _value = getattr(self, _opt)
             if _value is not None:
                 _nonnegative(_value, f"ManufacturingConstraints.{_opt}")

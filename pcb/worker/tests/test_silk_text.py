@@ -8,19 +8,25 @@ KiCad's own Newstroke font, extracted offline from the dev-only gerbonara
 dependency and cited there; NOT imported at runtime) and gerber._emit_refdes.
 
 ACCEPTANCE (the rewritten, satisfiable criterion — see the D4 brief): every
-TOP-side placed component's reference designator is present in F_SilkS as
-drawn geometry, positioned at that component and rotated with it — INCLUDING
-components whose footprint carries no silk graphics at all. Back-side is out
-of scope (B.SilkS is not an emitted layer at all — _GERBER_SUFFIXES has no
-B_SilkS entry).
+placed component's reference designator is present as drawn geometry on ITS OWN
+side's silk layer, positioned at that component and rotated with it — INCLUDING
+components whose footprint carries no silk graphics at all.
+
+BACK SIDE CAME IN SCOPE IN EPOCH CP2 (station S3). This header used to end
+"Back-side is out of scope (B.SilkS is not an emitted layer at all —
+_GERBER_SUFFIXES has no B_SilkS entry)", which was wrong on both counts by the
+time anyone read it: B_SilkS had been in _GERBER_SUFFIXES since the fab-package
+completeness change (the file was written, just always empty), and S3 gave it
+real content. Corrected rather than deleted because a reader who remembers the
+old rule needs to see it retired, not silently absent.
 
 Coverage:
   1. stroke_font.py: glyph data is well-formed, matches its cited source
      (gerbonara's Newstroke, dev-only) to within rounding, and renders OPEN
      polylines only.
-  2. gerber._emit_refdes: the unit — bottom-side / empty-ref no-ops, output is
-     OPEN polylines at gerber.SILK_LINE_WIDTH_MM, transformed by the REAL
-     component placement (not whatever _emit_silk happened to receive).
+  2. gerber._emit_refdes: the unit — per-side bucketing, empty-ref no-ops,
+     output is OPEN polylines at gerber.SILK_LINE_WIDTH_MM, transformed by the
+     REAL component placement (not whatever _emit_silk happened to receive).
   3. End-to-end through BOTH emitter entry points (build_gerbers_ir — the live
      IR-native path — and build_gerbers — the loose-dict path), each proving
      the headline case revision 1 could not satisfy: a component with NO
@@ -269,10 +275,24 @@ def test_render_advance_matches_text_width(text, size):
 # ---------------------------------------------------------------------------
 
 
-def test_emit_refdes_bottom_side_is_a_noop():
+def test_emit_refdes_bottom_side_fills_the_bottom_bucket_only():
+    """A bottom-side designator lands in the BOTTOM bucket and nowhere else.
+
+    THIS TEST WAS A FALSE PASS and is worth describing, because nothing failed to
+    reveal it. It was ``test_emit_refdes_bottom_side_is_a_noop``, asserting
+    ``g.silk_polys == []`` back when a bottom-side designator was simply dropped.
+    CP2 S3 made it emit — into ``silk_polys_bot`` — so the old assertion stayed
+    true for a completely different reason, and a test named "bottom side is a
+    no-op" went on quietly certifying a contract the code had reversed.
+
+    An empty top bucket proves nothing on its own; it is only meaningful next to
+    a non-empty bottom one. Both are asserted here for that reason.
+    """
     g = gerber._Geometry()
     gerber._emit_refdes(g, "R1", 10.0, 10.0, 0.0, top=False)
-    assert g.silk_polys == []
+    assert g.silk_polys == [], "a bottom designator must not leak onto F.SilkS"
+    assert len(g.silk_polys_bot) == len(stroke_font.render("R1")), \
+        "the bottom designator did not reach the B.SilkS bucket"
 
 
 @pytest.mark.parametrize("ref", [None, "", "   ", 42])
@@ -487,10 +507,29 @@ def test_raw_loose_dict_path_emits_designator_for_a_component_with_no_graphics_k
         "F.SilkS must carry J7's designator even with no 'graphics' key at all"
 
 
-def test_bottom_side_component_gets_no_designator_and_no_bside_layer():
-    """Back-side is explicitly OUT (B.SilkS is not even an emitted layer —
-    _GERBER_SUFFIXES has no B_SilkS entry). A bottom-side component's ref must
-    not leak into F.SilkS."""
+def test_bottom_designator_reaches_the_serialized_b_silks_and_does_not_leak():
+    """A bottom-side designator reaches the SERIALIZED B_SilkS bytes, and the two
+    sides do not cross-contaminate.
+
+    REVERSED IN EPOCH CP2 (station S3). This test used to assert the opposite —
+    that B_SilkS is aperture-less, because back-side silk was "explicitly OUT"
+    and there was no bottom harvest at all. S3 added one, so the old assertion
+    now describes a gap that has been closed, and the honest replacement is the
+    positive form: prove the legend actually lands.
+
+    IT DELIBERATELY GOES THROUGH ``build_gerbers`` TO BYTES rather than
+    inspecting the in-memory ``_Geometry`` buckets. The buckets being right is
+    necessary but not sufficient: every intermediate stage could be correct while
+    ``_build_gerber_layers`` fails to forward the bottom buckets into the
+    B_SilkS output, and a bucket-level test would stay green through exactly that
+    regression while the fab package shipped a blank back legend. The apertures
+    in the file are the claim a board house can act on.
+
+    Both directions are asserted because a mirror bug fails them asymmetrically:
+    geometry sent to the wrong side leaves one layer over-full and the other
+    empty, and only checking the layer you expect content on would miss half of
+    that.
+    """
     board = {
         "version": 1, "name": "twoside", "width_mm": 40, "height_mm": 40,
         "components": [
@@ -504,21 +543,33 @@ def test_bottom_side_component_gets_no_designator_and_no_bside_layer():
                        "pad_width_mm": 0.6, "pad_height_mm": 0.5}]},
         ],
     }
-    # B_SilkS is now WRITTEN (fab packages ship all of KiCad's default layers),
-    # but it must stay EMPTY: there is no bottom-silk harvest, so a bottom-side
-    # component contributes no legend. "File present" and "content emitted" are
-    # different claims and this test guards the second one.
     files = gerber.build_gerbers(board, name="twoside")
     b_silk = next(text for name, text in files.items() if name.endswith("B_SilkS.gbr"))
-    assert "%ADD" not in b_silk, (
-        "B_SilkS must be an aperture-less file -- a bottom designator or outline "
-        f"leaked into it:\n{b_silk}")
+    f_silk = next(text for name, text in files.items() if name.endswith("F_SilkS.gbr"))
 
+    assert "%ADD" in b_silk, (
+        "B_SilkS must carry BOTREF's designator apertures -- the bottom legend "
+        f"never reached the emitted file:\n{b_silk}")
+
+    # STROKE COUNT, not just "non-empty": an aperture-present assertion alone
+    # survives a regression that emits one stroke of the designator. Each glyph
+    # stroke is a separate D02/D01 draw pair, so the D01 count is the number of
+    # segments actually drawn.
+    for text, ref, other_ref in ((b_silk, "BOTREF", "TOPREF"),
+                                 (f_silk, "TOPREF", "BOTREF")):
+        drawn = len(re.findall(r"D01\*", text))
+        expected = sum(len(stroke) - 1 for stroke in stroke_font.render(ref))
+        assert drawn >= expected, (
+            f"{ref}'s designator is under-drawn: {drawn} D01 draws, expected at "
+            f"least {expected} for the glyph strokes alone")
+
+    # And the leak direction, on the in-memory buckets where sidedness is
+    # unambiguous: each side's bucket holds ONLY its own component's strokes.
     g = gerber._harvest(board, gerber.DEFAULT_MASK_CLEARANCE_MM)
-    expected_strokes = len(stroke_font.render("TOPREF"))
-    assert len(g.silk_polys) == expected_strokes, (
-        "expected ONLY the top-side component's designator strokes; "
-        f"got {len(g.silk_polys)}, wanted {expected_strokes}")
+    assert len(g.silk_polys) == len(stroke_font.render("TOPREF")), \
+        f"F.SilkS bucket must hold only TOPREF's strokes; got {len(g.silk_polys)}"
+    assert len(g.silk_polys_bot) == len(stroke_font.render("BOTREF")), \
+        f"B.SilkS bucket must hold only BOTREF's strokes; got {len(g.silk_polys_bot)}"
 
 
 def test_every_top_side_component_gets_a_designator_on_a_mixed_board():
