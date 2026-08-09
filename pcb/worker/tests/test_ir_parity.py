@@ -1049,3 +1049,36 @@ def test_an_invented_cutout_is_reported_as_an_extra_row():
     deltas = ip.diff_against_reference(ir, phantom)
     assert any(d.family == "cutout" and d.kind == "extra_row" for d in deltas), \
         [(d.family, d.kind) for d in deltas]
+
+
+def test_a_reshaped_cutout_is_a_parity_delta_not_a_clean():
+    """A bounding box is not an identity. A rectangle and a diamond share a
+    bbox and an edge count, so before the canonical contour rode along they
+    produced BYTE-IDENTICAL rows — an emitter could materially reshape the
+    milled opening and the parity gate reported clean (Codex review 1090
+    finding 3, reproduced). Geometric DRC does not compensate: it checks the
+    IR contour, never the emitted one."""
+    from pcb_worker import ir_parity as ip
+
+    rect = [(2, 2), (8, 2), (8, 8), (2, 8)]
+    diamond = [(5, 2), (8, 5), (5, 8), (2, 5)]
+    r_rect = ip._cutout_row(2, 2, 8, 8, 4, contour=rect)
+    r_diamond = ip._cutout_row(2, 2, 8, 8, 4, contour=diamond)
+    assert r_rect.key == r_diamond.key, "same bbox is what makes them collide"
+    assert r_rect.fields != r_diamond.fields, "but the SHAPE must differ"
+
+
+def test_cutout_contour_is_start_and_winding_invariant():
+    """The comparison must be exact about SHAPE without being brittle about
+    representation: two surfaces may legitimately begin the same opening at a
+    different vertex, or wind it the other way. Those are not divergences and
+    must not be reported as ones."""
+    from pcb_worker import ir_parity as ip
+
+    rect = [(2, 2), (8, 2), (8, 8), (2, 8)]
+    base = ip._cutout_row(2, 2, 8, 8, 4, contour=rect)
+    rotated = ip._cutout_row(2, 2, 8, 8, 4,
+                             contour=[(8, 2), (8, 8), (2, 8), (2, 2)])
+    reversed_ = ip._cutout_row(2, 2, 8, 8, 4, contour=list(reversed(rect)))
+    assert base.fields == rotated.fields
+    assert base.fields == reversed_.fields

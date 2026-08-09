@@ -57,6 +57,7 @@ func _init() -> void:
 
 	_test_canonical_roundtrip()
 	_test_canonical_extras_survive_every_codec()
+	_test_csv_import_extras_follow_identity()
 	_test_canonical_field_names()
 	_test_annotation_tolerance()
 	_test_undo_redo()
@@ -1524,3 +1525,64 @@ func _test_canonical_extras_survive_every_codec() -> void:
 			not plain_out.has("assembly") and not plain_out.has("mpn"))
 	check("a plain pin gains no phantom geometry",
 			not (plain_out["pins"] as Array)[0].has("drill_mm"))
+
+
+## Codex review 1090 finding 2: the CSV importer must not carry
+## identity-bearing extras onto a part whose identity the CSV just changed.
+##
+## from_csv overwrites by id, and this CSV carries FOOTPRINT and VALUE — both
+## identity. Carrying `mpn` / `assembly: exclude` / pin overrides across a
+## value or footprint change would emit a BOM naming the wrong orderable part,
+## or keep a now-assembly-worthy part excluded. Unchanged identity must still
+## preserve them (that is the loss the codec sweep closed); changed identity
+## must drop them AND say so.
+func _test_csv_import_extras_follow_identity() -> void:
+	var header := "id,footprint,value,x,y,rotation,layer\n"
+
+	# --- identity UNCHANGED: extras must survive the overwrite.
+	var data = _PCBData.new()
+	var keeper = _PCBComponent.new()
+	keeper.load_from_board_dict({
+		"ref": "R1", "footprint": "R_0805", "x_mm": 1.0, "y_mm": 1.0,
+		"rotation_deg": 0.0, "layer": "top", "value": "10k",
+		"mpn": "TEN-K-PN", "assembly": "exclude",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 0.6}]})
+	data.components["R1"] = keeper
+	data.from_csv(header + "R1,R_0805,10k,5,5,0,top\n")
+	var same: Dictionary = data.components["R1"].to_board_dict()
+	check("CSV with the SAME identity keeps mpn",
+			str(same.get("mpn", "")) == "TEN-K-PN")
+	check("CSV with the SAME identity keeps assembly",
+			str(same.get("assembly", "")) == "exclude")
+	check("CSV with the SAME identity still applies the new placement",
+			abs(float(same.get("x_mm", 0.0)) - 5.0) < 0.001)
+
+	# --- identity CHANGED (value 10k -> 1k): extras must NOT migrate.
+	var data2 = _PCBData.new()
+	var changed = _PCBComponent.new()
+	changed.load_from_board_dict({
+		"ref": "R1", "footprint": "R_0805", "x_mm": 1.0, "y_mm": 1.0,
+		"rotation_deg": 0.0, "layer": "top", "value": "10k",
+		"mpn": "TEN-K-PN",
+		"pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0, "drill_mm": 0.6}]})
+	data2.components["R1"] = changed
+	data2.from_csv(header + "R1,R_0805,1k,5,5,0,top\n")
+	var after: Dictionary = data2.components["R1"].to_board_dict()
+	check("a CHANGED value does not carry the old mpn onto the new part",
+			not after.has("mpn"))
+	check("a CHANGED value does not carry the old pin overrides",
+			not (after["pins"] as Array)[0].has("drill_mm"))
+	check("the CSV's new value is what landed",
+			str(after.get("value", "")) == "1k")
+
+	# --- and the drop is REPORTED, never silent.
+	var journal: Array = data2.get_change_journal() if data2.has_method("get_change_journal") else []
+	var reported := false
+	for entry in journal:
+		if entry is Dictionary and str(entry.get("action", "")).find("import_csv") >= 0:
+			var payload = entry.get("payload", entry)
+			if str(payload).find("dropped_identity_extras") >= 0 \
+					or str(entry).find("dropped_identity_extras") >= 0:
+				reported = true
+	check("the dropped extras are reported on the journal record, not silent",
+			reported)

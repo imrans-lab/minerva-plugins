@@ -923,6 +923,26 @@ def _check_pad_capabilities(pad: PadDefinition, ref: str, diags: _Diagnostics) -
              f"shape {pad.shape.value} is outside the supported {sorted(SUPPORTED_PAD_SHAPES)} subset")
     if pad.drill is not None and pad.drill.shape not in SUPPORTED_HOLE_SHAPES:
         fail("unsupported_hole", f"{pad.drill.shape} drill is outside the v1 round-hole subset")
+    elif pad.drill is not None and pad.drill.size[0] != pad.drill.size[1]:
+        # CONTRADICTORY DRILL DATA — the shape token says ROUND but the two
+        # size axes disagree, and every consumer then believes something
+        # different (Codex review 1090 finding 1, verified end to end):
+        #   * DRC infers "oblong" from the unequal axes and measures the MINOR
+        #     axis against the slot floor — so a (1.6, 0.6) drill can read
+        #     CLEAN against a 0.5mm plated-slot minimum;
+        #   * both fab emitters reduce the drill to a SCALAR by taking the
+        #     first axis (pad_source._from_resolved: `dr.get("x")`), so they
+        #     fabricate a 1.6mm ROUND hole and silently discard the 0.6.
+        # Checked geometry and fabricated geometry diverge, silently, which is
+        # the one thing this compiler exists to prevent. v1 emits round holes
+        # only, so the honest answer is to refuse the contradiction rather than
+        # pick an axis: an author who means a slot must say so with a slot
+        # shape (and that is a capability v1 does not yet emit).
+        fail("unsupported_hole",
+             f"drill declares the round shape {pad.drill.shape!r} but its axes "
+             f"differ ({pad.drill.size[0]} x {pad.drill.size[1]}) — v1 fabricates "
+             f"round holes only and would emit the first axis while DRC measured "
+             f"the second; refusing rather than silently picking one")
 
     has_copper = any(layer.role is LayerRole.COPPER for layer in pad.layers)
     if has_copper and pad.size is None:

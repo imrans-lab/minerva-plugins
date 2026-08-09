@@ -441,6 +441,17 @@ def _hole_from_drill(entity_id: str, parent_id: str | None, origin: str,
         entity_id=entity_id, parent_id=parent_id, origin=origin, net_id=net_id,
         plated=plated, capsules=(cap,), minor_mm=minor, position=position,
         aabb=cap.aabb(), ref=ref, pad_number=pad_number, net_name=net_name,
+        # SLOT-NESS FOR A PAD DRILL, and the dependency that makes it sound.
+        #
+        # DrillDisc.kind is itself DERIVED (from whether the two authored size
+        # axes differ), so this is not the authored shape token — an earlier
+        # revision of this code claimed it was, and that claim was wrong
+        # (Codex review 1090 finding 1). It is nonetheless CORRECT here, but
+        # only because compile_board's capability gate now REFUSES a drill
+        # whose shape says round while its axes disagree: with contradictory
+        # data rejected upstream, "axes differ" and "the author declared a
+        # non-round hole" are the same fact. If that gate is ever relaxed,
+        # this line silently starts lying again — the two must move together.
         is_slot=drill.kind != "round")
 
 

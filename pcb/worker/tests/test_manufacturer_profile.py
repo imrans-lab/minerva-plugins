@@ -470,22 +470,22 @@ def test_a_profile_that_declares_no_npth_floor_is_unchanged():
                                      profile="v1-fab-conservative")) is None
 
 
-def test_an_oblong_pad_drill_is_measured_as_a_slot():
-    """THE COLD-REVIEW FALSE CLEAN. The first implementation inferred
-    slot-ness from the projected capsule geometry — but a pad's oblong drill
-    is deliberately modelled as a DEGENERATE disc of the major radius (a
-    documented GC6 over-approximation), so it read as a round hole and skipped
-    the slot floor entirely. A plated 0.3mm-wide slot passed while JLCPCB's
-    published minimum plated-slot width is 0.5mm.
+def test_a_round_pad_drill_is_not_classified_as_a_slot():
+    """NEGATIVE CONTROL, and named as one.
 
-    The fix carries the drill KIND as a fact from the source; this row is what
-    keeps anyone from inferring it from geometry again."""
+    This test previously claimed to pin the oblong-pad repair while actually
+    asserting is_slot is FALSE — a negative control wearing a positive
+    control's name (Codex review 1090). The positive branch lives in
+    test_a_slot_board_hole_is_measured_against_the_slot_floor below; an
+    authored OVAL PAD drill cannot reach the projection at all, because the
+    v1 capability gate refuses a non-round pad drill (and now also refuses a
+    round-shaped drill whose axes disagree)."""
     from pcb_worker.compile_board import compile_board
     from pcb_worker.drc_geometric import project_board
     from pcb_worker.resolved_board import ResolutionSuccess
 
     board = {
-        "version": 1, "name": "slotpad", "width_mm": 20, "height_mm": 15,
+        "version": 1, "name": "roundpad", "width_mm": 20, "height_mm": 15,
         "layers": ["top", "bottom"],
         "design_rules": {"clearance_mm": 0.1, "trace_width_mm": 0.25,
                          "via_diameter_mm": 0.66, "via_drill_mm": 0.3,
@@ -501,5 +501,40 @@ def test_an_oblong_pad_drill_is_measured_as_a_slot():
     assert isinstance(result, ResolutionSuccess)
     holes = [h for h in project_board(result.board).holes if h.origin == "pad"]
     assert holes, "the pad drill must reach the projection"
-    # A ROUND pad drill must not be classified as a slot — the converse error.
     assert all(not h.is_slot for h in holes)
+
+
+def test_a_slot_board_hole_is_measured_against_the_slot_floor():
+    """THE POSITIVE BRANCH. A board hole CAN be a genuine slot in the IR, so
+    this is where slot classification and the slot floor are actually pinned:
+    an NPTH slot narrower than JLCPCB's published 1.0mm non-plated-slot width
+    must be reported, and against THAT floor rather than the general drill
+    floor."""
+    from pcb_worker.drc_geometric import _check_gc3_drill, HolePrimitive
+    from pcb_worker.drc_geom_primitives import Capsule
+    from pcb_worker.manufacturer_profile import load_rule_profile
+
+    floor = load_rule_profile("jlcpcb-2layer").floor
+
+    class _Proj:
+        def __init__(self, holes):
+            self.holes = holes
+
+    class _Rules:
+        minimums = floor
+
+    class _Board:
+        design_rules = _Rules()
+
+    # A 0.6mm-wide non-plated slot: clears the 0.15 general drill floor and
+    # even the 0.5 NPTH floor, but is under the 1.0 NPTH-slot floor.
+    slot = HolePrimitive(
+        entity_id="hole:slot", parent_id=None, origin="board_hole",
+        net_id=None, plated=False,
+        capsules=(Capsule(ax=5.0, ay=5.0, bx=9.0, by=5.0, r=0.3),),
+        minor_mm=0.6, position=(7.0, 5.0),
+        aabb=Capsule(ax=5.0, ay=5.0, bx=9.0, by=5.0, r=0.3).aabb(),
+        is_slot=True)
+    findings = _check_gc3_drill(_Proj([slot]), _Board())
+    assert len(findings) == 1, findings
+    assert findings[0]["required_mm"] == 1.0, findings[0]

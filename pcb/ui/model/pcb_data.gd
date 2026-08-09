@@ -2451,6 +2451,10 @@ func to_csv() -> String:
 
 ## Import from CSV format
 func from_csv(csv_text: String) -> void:
+	## Component refs whose canonical extras were dropped because the CSV row
+	## changed the part's identity — surfaced on the journal record so the
+	## loss is visible rather than silent (Codex review 1090 finding 2).
+	var dropped_extras: Array = []
 	var lines := csv_text.split("\n")
 	if lines.size() < 2:
 		return
@@ -2484,7 +2488,19 @@ func from_csv(csv_text: String) -> void:
 		component.id = fields[id_idx]
 
 		if footprint_idx >= 0 and fields.size() > footprint_idx:
-			component.set_footprint_by_name(fields[footprint_idx])
+			var authored_fp := fields[footprint_idx].strip_edges()
+			component.set_footprint_by_name(authored_fp)
+			# PRESERVE THE LIBRARY REF, mirroring load_from_board_dict's
+			# read-side rule. set_footprint_by_name maps any non-enum name
+			# (every canonical "Lib:Name" ref) to the CUSTOM bucket and does
+			# NOT record the string — so without this a CSV import silently
+			# DESTROYED the footprint identity, turning
+			# "Minerva_Fixture:FID_Circle_1mm" into a bare CUSTOM with no ref
+			# and leaving the hermetic compiler nothing to resolve. Found
+			# while making the identity comparison below symmetric.
+			if component.footprint == component.FootprintType.CUSTOM \
+					and authored_fp != "" and authored_fp != "CUSTOM":
+				component.footprint_id = authored_fp
 
 		if x_idx >= 0 and fields.size() > x_idx:
 			component.position.x = fields[x_idx].to_float()
@@ -2498,19 +2514,41 @@ func from_csv(csv_text: String) -> void:
 			component.properties["value"] = fields[value_idx]
 
 		component.setup_standard_pins()
-		# CSV IMPORT OVERWRITES BY ID, and the CSV columns are the whole of
-		# what it knows — so a component the board already had loses anything
-		# outside them. Carry the canonical passthrough across the overwrite
-		# (cold review of the CPN1 repair round): `assembly: exclude`, `mpn`
-		# and pin drill/annulus overrides are DESIGN INTENT that no placement
-		# CSV carries or contradicts, and silently dropping them here would
-		# reintroduce, through a different doorway, exactly the loss the
-		# codec sweep just closed. Placement/identity fields above still come
-		# from the CSV — it IS authoritative for what it states.
+		# CSV IMPORT OVERWRITES BY ID, so a component the board already had
+		# loses anything outside the CSV's columns — including the canonical
+		# passthrough (`assembly: exclude`, `mpn`, pin drill/annulus
+		# overrides). Carrying it across the overwrite is right ONLY while the
+		# row describes the SAME PART.
+		#
+		# The first version of this carried it unconditionally, on the claim
+		# that a placement CSV cannot contradict those fields. That was wrong
+		# on its own terms (Codex review 1090 finding 2): this CSV carries
+		# FOOTPRINT and VALUE, both identity. Importing a row that changes R1
+		# from 10k to 1k would have kept the 10k `mpn`, and promotion would
+		# emit a BOM naming the wrong orderable part — or keep `assembly:
+		# exclude` on a part that is now assembly-worthy. Pin overrides could
+		# likewise migrate onto a different footprint's same-numbered pin.
+		#
+		# So: identity UNCHANGED -> preserve. Identity CHANGED -> the old
+		# extras describe a part that is no longer here, so they are dropped —
+		# and REPORTED, never silently, because a silent drop is the failure
+		# this whole sweep exists to close. Refusing the entire import was
+		# considered and rejected as disproportionate: one edited value should
+		# not reject a bulk placement import.
 		var prior = components.get(component.id, null)
 		if prior != null:
-			component.canonical_extra = prior.canonical_extra.duplicate(true)
-			component.pin_extra = prior.pin_extra.duplicate(true)
+			var identity_changed: bool = (
+					prior.footprint_id != component.footprint_id
+					or prior.get_footprint_name() != component.get_footprint_name()
+					or str(prior.properties.get("value", "")) \
+							!= str(component.properties.get("value", "")))
+			var had_extras: bool = not prior.canonical_extra.is_empty() \
+					or not prior.pin_extra.is_empty()
+			if not identity_changed:
+				component.canonical_extra = prior.canonical_extra.duplicate(true)
+				component.pin_extra = prior.pin_extra.duplicate(true)
+			elif had_extras:
+				dropped_extras.append(component.id)
 		components[component.id] = component
 		imported += 1
 
@@ -2520,7 +2558,11 @@ func from_csv(csv_text: String) -> void:
 	# (bumps once + journals + respects an active batch). A header-only CSV that
 	# imported nothing is a no-op and is left unbumped.
 	if imported > 0:
-		record_change("import_csv", {"count": imported})
+		var record := {"count": imported}
+		if not dropped_extras.is_empty():
+			dropped_extras.sort()
+			record["dropped_identity_extras"] = dropped_extras
+		record_change("import_csv", record)
 	structure_changed.emit()
 	data_changed.emit()
 

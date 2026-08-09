@@ -762,13 +762,86 @@ _KICAD_EDGE_STROKE_RE = re.compile(
     r'\(gr_line\b[^\n]*?\(layer\s+"Edge\.Cuts"\)[^\n]*?\(width\s+([0-9.eE+-]+)\)')
 
 
+def _canonical_loop(points) -> tuple:
+    """A vertex loop reduced to a START- and ORIENTATION-INVARIANT form.
+
+    Two surfaces may legitimately emit the same opening beginning at a
+    different vertex, or winding the other way — those are not divergences.
+    Everything else about the shape is. Canonicalising by taking the
+    lexicographically smallest rotation of the loop and of its reversal makes
+    the comparison exact without making it brittle.
+    """
+    pts = [(round(float(x), 6), round(float(y), 6)) for (x, y) in points]
+    n = len(pts)
+    if n == 0:
+        return ()
+    candidates = []
+    for seq in (pts, list(reversed(pts))):
+        for i in range(n):
+            candidates.append(tuple(seq[i:] + seq[:i]))
+    return min(candidates)
+
+
+def _loop_from_segments(segs) -> list:
+    """Walk a cutout's grouped segments into a connected vertex loop.
+
+    The grouping that produced ``segs`` is by endpoint connectivity, so the
+    segments form one ring but arrive in emission order, not walk order. Chain
+    them by matching endpoints (rounded to the same 1e-6 the canonical form
+    uses) so the loop compared across surfaces is the real ring rather than an
+    artifact of how the emitter happened to order its lines. A set that does
+    not chain cleanly falls back to segment start points — the canonical form
+    is still stable, just coarser, and a genuine divergence still shows.
+    """
+    if not segs:
+        return []
+
+    def key(p):
+        return (round(float(p[0]), 6), round(float(p[1]), 6))
+
+    remaining = list(segs)
+    first = remaining.pop(0)
+    loop = [first[0], first[1]]
+    while remaining:
+        tail = key(loop[-1])
+        for index, (a, b) in enumerate(remaining):
+            if key(a) == tail:
+                loop.append(b)
+                remaining.pop(index)
+                break
+            if key(b) == tail:
+                loop.append(a)
+                remaining.pop(index)
+                break
+        else:
+            return [seg[0] for seg in segs]  # did not chain — coarser fallback
+    if len(loop) > 1 and key(loop[0]) == key(loop[-1]):
+        loop.pop()  # drop the closing repeat; the ring is implicit
+    return loop
+
+
 def _cutout_row(min_x: float, min_y: float, max_x: float, max_y: float,
-                segment_count: int) -> ParityRow:
-    """One interior-cutout row, keyed by rounded bbox (see the family comment
-    in FAMILIES). ``segment_count`` is a compared field: two surfaces agreeing
-    on the box but not on how many edges drew it is a real divergence."""
+                segment_count: int, contour=()) -> ParityRow:
+    """One interior-cutout row: keyed by rounded bbox, COMPARED on the exact
+    canonical contour.
+
+    THE BBOX IS NOT AN IDENTITY, and treating it as one made this family
+    report clean on materially different openings: a rectangle
+    [(2,2),(8,2),(8,8),(2,8)] and a diamond [(5,2),(8,5),(5,8),(2,5)] share a
+    bounding box and an edge count, so their rows were byte-identical and an
+    emitter could reshape the milled opening undetected (Codex review 1090
+    finding 3, reproduced). Geometric DRC does not compensate — it checks the
+    IR contour, never the emitted one — so this row is the only thing standing
+    between a reshaped cutout and a clean gate.
+
+    The bbox stays as the KEY (it is what lets two surfaces' rows for the same
+    opening find each other), and the canonical contour rides as a COMPARED
+    FIELD, so a mismatch surfaces as a field delta on one row rather than as a
+    missing+extra pair that reads like two unrelated cutouts.
+    """
     key = tuple(round(v, 6) for v in (min_x, min_y, max_x, max_y))
-    return ParityRow.make("cutout", key, segment_count=segment_count)
+    return ParityRow.make("cutout", key, segment_count=segment_count,
+                          contour=_canonical_loop(contour))
 
 
 def _cutout_rows_from_segments(
@@ -821,7 +894,12 @@ def _cutout_rows_from_segments(
         box = _bbox(segs)
         if tuple(round(v, 6) for v in box) == tuple(round(v, 6) for v in union_box):
             continue  # the rim — the outline family's row
-        rows.append(_cutout_row(*box, segment_count=len(segs)))
+        # Chain the grouped segments into a vertex loop for the canonical
+        # contour: each segment contributes its start point, walked in
+        # connection order so the loop is the real ring, not an arbitrary
+        # segment ordering.
+        rows.append(_cutout_row(*box, segment_count=len(segs),
+                                contour=_loop_from_segments(segs)))
     return rows
 
 
@@ -862,7 +940,7 @@ def _ir_cutout_rows(rb: ResolvedBoard) -> list[ParityRow]:
         xs = [p[0] for p in points]
         ys = [p[1] for p in points]
         rows.append(_cutout_row(min(xs), min(ys), max(xs), max(ys),
-                                segment_count=len(points)))
+                                segment_count=len(points), contour=points))
     return rows
 
 

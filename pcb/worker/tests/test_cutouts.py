@@ -630,12 +630,23 @@ class TestParity:
             {"x_mm": 28, "y_mm": 22}, {"x_mm": 32, "y_mm": 22},
             {"x_mm": 32, "y_mm": 26}, {"x_mm": 28, "y_mm": 26}]})
         rb = _compiled(board)
-        expected = {((18.0, 10.0, 22.0, 20.0), (("segment_count", 4),)),
-                    ((28.0, 22.0, 32.0, 26.0), (("segment_count", 4),))}
-        for table in (ir_parity.tabulate_ir(rb), ir_parity.tabulate_kicad(rb),
-                      ir_parity.tabulate_gerber(rb)):
-            rows = {(r.key, r.fields) for r in table.rows if r.family == "cutout"}
-            assert rows == expected, table.surface
+        # Compare the FULL row (key + fields), so this also pins the canonical
+        # contour the rows now carry — a surface emitting the right bbox with
+        # the wrong shape must fail here (Codex review 1090 finding 3).
+        tables = [ir_parity.tabulate_ir(rb), ir_parity.tabulate_kicad(rb),
+                  ir_parity.tabulate_gerber(rb)]
+        per_surface = [
+            {(r.key, r.fields) for r in t.rows if r.family == "cutout"}
+            for t in tables]
+        assert {frozenset(rows) for rows in per_surface}.__len__() == 1, \
+            [(t.surface, rows) for t, rows in zip(tables, per_surface)]
+        assert {r[0] for r in per_surface[0]} == {(18.0, 10.0, 22.0, 20.0),
+                                                 (28.0, 22.0, 32.0, 26.0)}
+        for rows in per_surface:
+            for _key, fields in rows:
+                field_map = dict(fields)
+                assert field_map["segment_count"] == 4
+                assert len(field_map["contour"]) == 4
 
     def test_diff_catches_a_dropped_cutout(self):
         """The seal itself: an emitter that loses a cutout must FAIL the diff

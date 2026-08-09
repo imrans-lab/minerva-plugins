@@ -2394,3 +2394,39 @@ def test_the_kicad_bridge_refuses_a_net_classed_board():
     assert isinstance(classed, ResolutionSuccess), _errors(classed)
     with pytest.raises(ValueError, match="net class"):
         kicad._ir_board_dict(classed.board)
+
+
+def test_a_round_shaped_drill_with_unequal_axes_fails_closed():
+    """CONTRADICTORY DRILL DATA must refuse, not be silently resolved.
+
+    A DrillDefinition whose shape token says round while its two size axes
+    disagree made every consumer believe something different (Codex review
+    1090 finding 1, verified end to end): DRC inferred "oblong" from the
+    unequal axes and measured the MINOR axis against the slot floor, while
+    both fab emitters reduce a drill to a scalar by taking the FIRST axis —
+    so a (1.6, 0.6) drill was checked as a 0.6 slot and fabricated as a 1.6
+    round hole, with the second axis silently discarded. v1 emits round holes
+    only; the honest answer is to refuse rather than pick an axis."""
+    from pcb_worker.footprint_def import DrillDefinition
+
+    diags = _Diagnostics()
+    pad = _synthetic_pad(pad_type="thru_hole", size=(2.0, 2.0),
+                         layers=(Layer.from_id("*.Cu"), Layer.from_id("*.Mask")),
+                         drill=DrillDefinition(shape="round", size=(1.6, 0.6)))
+    assert not _check_pad_capabilities(pad, "J1", diags)
+    codes = [d.code for d in diags.tuple()]
+    assert "unsupported_hole" in codes, codes
+    assert any("axes differ" in d.message for d in diags.tuple())
+
+
+def test_a_round_drill_with_equal_axes_still_passes():
+    """The positive control — without it the row above would pass on a gate
+    that simply refused every drilled pad."""
+    from pcb_worker.footprint_def import DrillDefinition
+
+    diags = _Diagnostics()
+    pad = _synthetic_pad(pad_type="thru_hole", size=(2.0, 2.0),
+                         layers=(Layer.from_id("*.Cu"), Layer.from_id("*.Mask")),
+                         drill=DrillDefinition(shape="round", size=(0.8, 0.8)))
+    assert _check_pad_capabilities(pad, "J1", diags), [
+        d.message for d in diags.tuple()]
