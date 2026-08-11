@@ -8,7 +8,31 @@ emitter can silently diverge from the shared authority.
 
 from __future__ import annotations
 
+import ast
+import inspect
+
 from pcb_worker import fab_capability, gerber
+
+
+def _module_binding_source(module, name: str) -> tuple | None:
+    """The last module-level binding for *name*, including direct imports."""
+    binding = None
+    for node in ast.parse(inspect.getsource(module)).body:
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if (alias.asname or alias.name) == name:
+                    binding = ("from", node.level, node.module, alias.name)
+        elif isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in node.targets):
+            binding = ("assign", ast.dump(node.value, include_attributes=False))
+        elif (isinstance(node, ast.AnnAssign)
+              and isinstance(node.target, ast.Name)
+              and node.target.id == name):
+            value = (ast.dump(node.value, include_attributes=False)
+                     if node.value is not None else "<annotation-only>")
+            binding = ("assign", value)
+    return binding
 
 
 def test_profile_matches_the_emitter_gerber_suffixes():
@@ -76,14 +100,19 @@ def test_edge_cuts_width_is_the_single_source_both_emitters_read():
     one — not a mirrored literal each. The value is KiCad's own default (0.05,
     measured off BOARD_DESIGN_SETTINGS.GetLineThickness(Edge_Cuts) in 10.0.5).
 
-    The identity checks are the load-bearing part: an emitter that reintroduces a
-    literal stops being `is`-identical to the authority and fails here.
+    Float identity is retained as a cheap runtime check, but it is not the
+    provenance proof: Python does not promise that two equal float constants are
+    distinct objects. The AST binding check is load-bearing and proves both
+    modules still import this exact authority rather than reintroducing 0.05.
     """
     from pcb_worker import kicad
 
     assert fab_capability.EDGE_CUTS_WIDTH_MM == 0.05
     assert gerber.EDGE_CUTS_WIDTH_MM is fab_capability.EDGE_CUTS_WIDTH_MM
     assert kicad.EDGE_CUTS_WIDTH_MM is fab_capability.EDGE_CUTS_WIDTH_MM
+    expected = ("from", 1, "fab_capability", "EDGE_CUTS_WIDTH_MM")
+    assert _module_binding_source(gerber, "EDGE_CUTS_WIDTH_MM") == expected
+    assert _module_binding_source(kicad, "EDGE_CUTS_WIDTH_MM") == expected
 
 
 def test_fabrication_critical_outputs_exclude_unemitted_domains():

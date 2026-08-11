@@ -423,6 +423,19 @@ def test_a_gc9_crash_does_not_take_down_the_blocking_verdict(monkeypatch):
     def _boom(proj, rb):
         raise RuntimeError("silk kernel exploded")
 
+    sentinel = {
+        "type": "gc1_trace_width",
+        "entity_id": "sentinel:blocking-finding",
+    }
+
+    def _blocking_finding(proj, rb):
+        # A precise control-flow pin: this row is computed before GC9 raises and
+        # must survive unchanged into the result. Using the otherwise-clean
+        # coupon without this sentinel would let a repair that discarded every
+        # blocking finding pass vacuously with findings == [].
+        return [sentinel]
+
+    monkeypatch.setattr(dg, "_check_gc1_trace_width", _blocking_finding)
     monkeypatch.setattr(dg, "_check_gc9_silk", _boom)
 
     coupon = Path(__file__).resolve().parent / "testdata" / "coupon_jlc1.yaml"
@@ -432,8 +445,10 @@ def test_a_gc9_crash_does_not_take_down_the_blocking_verdict(monkeypatch):
 
     # SURVIVED: a determinate result, not the indeterminate union.
     assert drc["ok"] is True
-    assert drc["verdict"] == "clean"
+    assert drc["verdict"] == "violations"
     assert "error" not in drc
+    assert drc["findings"] == [sentinel]
+    assert drc["counts"]["gc1_trace_width"] == 1
 
     # VISIBLE: exactly one advisory, and it names the failure.
     assert [a["type"] for a in drc["advisories"]] == ["gc9_silk_indeterminate"]
@@ -442,8 +457,9 @@ def test_a_gc9_crash_does_not_take_down_the_blocking_verdict(monkeypatch):
     assert "silk kernel exploded" in row["detail"]
     assert row["measured_mm"] is None and row["required_mm"] is None
 
-    # NOT a manufactured clean: the two measuring rules report zero because they
-    # did not run, and the indeterminate row is what says so.
+    # NOT a manufactured clean on either surface: the blocking finding remains,
+    # while the two measuring rules report zero because they did not run and the
+    # indeterminate row says why.
     assert drc["counts"]["gc9_silk_width"] == 0
     assert drc["counts"]["gc9_silk_to_pad"] == 0
     assert drc["counts"]["gc9_silk_indeterminate"] == 1

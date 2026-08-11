@@ -1697,10 +1697,11 @@ def test_reference_designator_strokes_keep_the_text_width():
     0.15 too, which would leave the two indistinguishable — and a test that can
     no longer tell its two subjects apart is a vacuous test, not a passing one.
 
-    So the graphic now AUTHORS 0.3. The separation is real again and it is
-    testing the same proposition it always was: a refdes is TEXT and takes
-    SILK_TEXT_WIDTH_MM, not whatever the graphic beside it uses. Pointing the
-    refdes stroke at the graphic authority fails here.
+    So the graphic now AUTHORS 0.3. The emitted separation is real again: a
+    refdes takes the 0.15 text policy rather than the authored 0.3 beside it.
+    Because the two fallback authorities both hold 0.15 today, the separate
+    executable-name pin in test_silk_source is what catches a crossed
+    TEXT/GRAPHIC authority inside refdes_strokes itself.
     """
     authored = [{"layer": "F.SilkS", "kind": "line", "start": [-1.0, 0.0],
                  "end": [1.0, 0.0], "width": 0.3}]

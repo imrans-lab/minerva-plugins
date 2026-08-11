@@ -168,8 +168,10 @@ var DRCGeometric = ToolSpec{
 		"`findings` and NEVER change `verdict` — legend is cosmetic and is warned, never " +
 		"fatal. Floors declared OPTIONAL by a profile (hole-to-copper, hole-to-edge, the " +
 		"silk pair, feature-specific drill minima) are enforced only when that profile " +
-		"states them; a zero count for one of those means THE PROFILE SAID NOTHING, not " +
-		"'checked and clean'. " +
+		"states them. `counts` reports ROWS, not check coverage: zero can mean either " +
+		"'the profile stated no floor' or 'the check ran and found no row'. A GC9 failure " +
+		"is explicit as a counted `gc9_silk_indeterminate` advisory, never inferred from " +
+		"the two measuring counts. " +
 		"NEVER a false clean: modeled copper is exact or a superset (fail-safe), and " +
 		"unresolved/unsupported geometry FAILS CLOSED to an indeterminate result. Returns a " +
 		"discriminated union — determinate {ok:true, scope:'geometric', verifies_geometry:true, " +

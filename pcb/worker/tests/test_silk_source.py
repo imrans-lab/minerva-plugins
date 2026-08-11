@@ -24,9 +24,11 @@ station S4), which is the entire reason it exists:
 
 from __future__ import annotations
 
+import ast
 import inspect
 import subprocess
 import sys
+import textwrap
 
 import pytest
 
@@ -34,6 +36,30 @@ from pcb_worker import silk_source
 from pcb_worker.footprint_def import ReferenceTextDefinition
 from pcb_worker.geometry import PlacementTransform
 from pcb_worker.resolved_board import Side
+
+
+def _loaded_names(function) -> set[str]:
+    """Names executably loaded by one function; comments/docstrings earn no credit.
+
+    SCOPE LIMIT, and it matters most in the direction this file uses it. Only
+    BARE ``Name`` loads are seen — an attribute access like
+    ``silk_source.SILK_TEXT_WIDTH_MM`` is an ``ast.Attribute`` and does not
+    appear here. That is correct for functions defined INSIDE silk_source,
+    which reference these constants as bare module globals, and it is the only
+    way this helper is used below.
+
+    Point it at a function in another module and the ``assert X not in loads``
+    half goes VACUOUS: the name is absent because the helper cannot see
+    attribute access, not because the function declined to read it. A guard
+    that passes when it cannot look is the exact failure class this epoch keeps
+    finding, so extend this to walk ``ast.Attribute`` before reusing it across
+    a module boundary (CP2-S11 is the likely first caller).
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    return {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +137,9 @@ def test_authored_width_wins_and_a_widthless_graphic_takes_the_graphic_default()
     # constant, so this reads the fallback back out of the function against the
     # name it must consult — equal values make the name the only witness.
     assert silk_source.graphic_width({}) == silk_source.SILK_GRAPHIC_WIDTH_MM == 0.15
-    assert "SILK_GRAPHIC_WIDTH_MM" in inspect.getsource(silk_source.graphic_width)
-    assert "SILK_TEXT_WIDTH_MM" not in inspect.getsource(silk_source.graphic_width)
+    loads = _loaded_names(silk_source.graphic_width)
+    assert "SILK_GRAPHIC_WIDTH_MM" in loads
+    assert "SILK_TEXT_WIDTH_MM" not in loads
 
 
 def test_circle_radius_is_not_scaled_by_placement():
@@ -218,7 +245,8 @@ def test_unknown_graphic_kind_is_silently_ignored_not_an_error():
 
 def test_refdes_strokes_are_open_polylines_at_the_text_width():
     """A glyph stroke must never close back on itself, and it takes the TEXT
-    width (0.15), not the graphic width (0.12)."""
+    authority rather than the GRAPHIC authority. Both happen to hold 0.15 after
+    CP2 S6, so the executable-name check is the part that distinguishes them."""
     strokes = silk_source.refdes_strokes("R1", 10.0, 10.0, 0.0)
     assert strokes, "R1 produced no glyph geometry"
     for prim in strokes:
@@ -226,6 +254,9 @@ def test_refdes_strokes_are_open_polylines_at_the_text_width():
         assert prim.closed is False
         assert prim.width == silk_source.SILK_TEXT_WIDTH_MM
         assert len(prim.points) >= 2
+    loads = _loaded_names(silk_source.refdes_strokes)
+    assert "SILK_TEXT_WIDTH_MM" in loads
+    assert "SILK_GRAPHIC_WIDTH_MM" not in loads
 
 
 @pytest.mark.parametrize("ref", [None, "", "   ", 42, [], {}])
