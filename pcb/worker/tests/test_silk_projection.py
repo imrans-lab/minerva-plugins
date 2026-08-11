@@ -325,7 +325,49 @@ def test_harvested_silk_reaches_the_serialized_gerber_for_its_own_side(flip_logo
     revision text (station S9 does exactly that), and a test that must be
     edited to keep passing is a test that stops being read. "Whatever the
     harvest holds, the file shows, and nothing more" survives that change.
+
+    IT COMPARES GEOMETRY, NOT APERTURE PRESENCE (CP2, Codex finding 3). The
+    first version asserted only ``("%ADD" in text) == (harvested > 0)`` while
+    promising the equivalence above — so it stayed green if every primitive but
+    one vanished, if coordinates came out mirrored, if widths changed, or if
+    arbitrary extra artwork was added. It could tell "some silk" from "no silk"
+    and nothing else, which on a fabrication boundary is close to no check at
+    all.
+
+    Both directions are now asserted against the parsed bytes:
+
+      NOTHING LOST — every (point, width) the harvest holds appears in the
+      file. Catches a dropped primitive, a dropped side, a mirrored coordinate
+      and a re-widthed stroke, since all four move a point out of the file's
+      set.
+
+      NOTHING INVENTED — every (point, width) in the file is either a harvest
+      point or lies on a harvest CIRCLE of the same width. Circles are the one
+      primitive the emitter decomposes (into arcs whose endpoints sit on the
+      circle and are therefore in no bucket), and that is expressed as the
+      geometric property "this point is at radius r from the centre" rather
+      than by re-deriving the decomposition here — a second copy of the
+      emitter's arc-splitting in the test would drift from the first, which is
+      the failure mode this whole station exists to remove.
+
+    TOLERANCE is 1e-4 mm, and it is quantization, not slack: Gerber coordinates
+    are fixed-point 4.6, so the file rounds to 1e-6 and the harvest carries full
+    float (a measured example is 20.799999 in the bucket, 20.8 in the file).
+    1e-4 absorbs that with three orders of margin and still sits 1000x below the
+    tightest floor any DFM rule in this codebase declares (0.1 mm), so no real
+    geometry error can hide under it.
     """
+    import math
+    import warnings
+
+    pytest.importorskip("gerbonara")
+    from gerbonara import GerberFile
+
+    Q = 4  # decimal places; see the TOLERANCE note above
+
+    def _q(v) -> float:
+        return round(float(v), Q)
+
     rb = _compiled(flip_logo)
     g = gerber._harvest_ir(rb, 0.05)
     files = gerber.build_gerbers_ir(rb, name="silkboundary")
@@ -335,11 +377,68 @@ def test_harvested_silk_reaches_the_serialized_gerber_for_its_own_side(flip_logo
         "B_SilkS": (g.silk_lines_bot, g.silk_circles_bot, g.silk_polys_bot,
                     g.silk_arcs_bot),
     }
-    for suffix, side_buckets in buckets.items():
+    for suffix, (lines, circles, polys, arcs) in buckets.items():
+        # EXPECTED: every stroked vertex the harvest holds, tagged with the
+        # width it must be drawn at. Refdes designator strokes are included
+        # automatically — _emit_refdes appends them to the poly bucket, so they
+        # are harvest content, not an emitter-only addition.
+        expected: set = set()
+        for (x1, y1, x2, y2, w) in lines:
+            expected |= {(_q(x1), _q(y1), _q(w)), (_q(x2), _q(y2), _q(w))}
+        for (pts, w, _closed) in polys:
+            expected |= {(_q(x), _q(y), _q(w)) for (x, y) in pts}
+        for (st, en, _ct, _orient, w) in arcs:
+            expected |= {(_q(st[0]), _q(st[1]), _q(w)),
+                         (_q(en[0]), _q(en[1]), _q(w))}
+        harvest_circles = [(_q(cx), _q(cy), _q(r), _q(w))
+                           for (cx, cy, r, w) in circles]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed = GerberFile.from_string(
+                files[f"silkboundary-{suffix}.gbr"],
+                filename=f"silkboundary-{suffix}.gbr")
+
+        emitted: set = set()
+        for obj in parsed.objects:
+            # FAIL CLOSED on a primitive this canonicalization cannot read,
+            # rather than skipping it. Today every silk object gerbonara hands
+            # back is a stroked Line or Arc (measured on both parametrizations).
+            # If a filled Region or a Flash ever appears, silently skipping it
+            # would quietly shrink `emitted` — and a shrunken emitted set makes
+            # the "nothing invented" half pass more easily, which is a false
+            # clean. Refusing names the gap instead.
+            if not all(hasattr(obj, attr) for attr in ("x1", "y1", "x2", "y2")):
+                raise AssertionError(
+                    f"{suffix}: {type(obj).__name__} is not a stroked segment, "
+                    "so this test cannot canonicalize it — extend the "
+                    "comparison rather than letting it be skipped")
+            width = _q(obj.aperture.diameter)
+            emitted |= {(_q(obj.x1), _q(obj.y1), width),
+                        (_q(obj.x2), _q(obj.y2), width)}
+
+        missing = expected - emitted
+        assert not missing, (
+            f"{suffix}: {len(missing)} harvested silk point(s) never reached "
+            f"the fabricated file (first: {sorted(missing)[:3]}) — the checker "
+            "measures geometry the board house will not receive")
+
+        def _on_a_harvest_circle(point) -> bool:
+            px, py, pw = point
+            return any(pw == cw and abs(math.hypot(px - cx, py - cy) - r) < 1e-3
+                       for (cx, cy, r, cw) in harvest_circles)
+
+        unexplained = [p for p in (emitted - expected)
+                       if not _on_a_harvest_circle(p)]
+        assert not unexplained, (
+            f"{suffix}: {len(unexplained)} point(s) in the fabricated file "
+            f"belong to no harvested primitive (first: {sorted(unexplained)[:3]}) "
+            "— the board house receives legend the checker never measured")
+
+        # The original presence check, kept as the cheap consistency floor: an
+        # empty side must produce an empty file, which the set comparisons above
+        # satisfy vacuously and so cannot assert on their own.
         text = files[f"silkboundary-{suffix}.gbr"]
-        harvested = sum(len(b) for b in side_buckets)
-        has_apertures = "%ADD" in text
-        assert has_apertures == (harvested > 0), (
-            f"{suffix}: harvest holds {harvested} primitives but the emitted "
-            f"file {'has' if has_apertures else 'has no'} apertures — the "
-            "bucket and the fabricated file disagree")
+        assert ("%ADD" in text) == (sum(
+            len(b) for b in (lines, circles, polys, arcs)) > 0), (
+            f"{suffix}: aperture presence disagrees with harvest occupancy")

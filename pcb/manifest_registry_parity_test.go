@@ -191,12 +191,19 @@ func TestManifestInputSchemaMatchesBroker(t *testing.T) {
 // sides together, so they still match EACH OTHER. Only a check tied to the
 // tool's OWN identity catches it.
 var toolIdentityKeyword = map[string]string{
-	"minerva_pcb_validate":        "Structurally validate",
-	"minerva_pcb_generate":        "Generate KiCad files",
-	"minerva_pcb_gerbers":         "Gerber RS-274X",
-	"minerva_pcb_drc":             "CONNECTIVITY/topology",
-	"minerva_pcb_drc_geometric":   "ResolvedBoard IR",
-	"minerva_pcb_resolve":         "silkscreen",
+	"minerva_pcb_validate":      "Structurally validate",
+	"minerva_pcb_generate":      "Generate KiCad files",
+	"minerva_pcb_gerbers":       "Gerber RS-274X",
+	"minerva_pcb_drc":           "CONNECTIVITY/topology",
+	"minerva_pcb_drc_geometric": "ResolvedBoard IR",
+	// WAS "silkscreen" until CP2. GC9 gave drc_geometric a legitimate reason to
+	// say the word, so a keyword naming a LAYER could no longer pin a TOOL: silk
+	// is discussed anywhere the fab surface is discussed, which made every future
+	// description edit a tripwire on an unrelated tool's identity. "coincidence
+	// guard" names the one behaviour only resolve has — the fail-closed refusal
+	// when a declared pin position disagrees with the footprint pad it resolves
+	// to — in words the copper/fab surface has no reason to reuse.
+	"minerva_pcb_resolve":         "coincidence guard",
 	"minerva_pcb_normalize":       "normalized v2 shape",
 	"minerva_pcb_check_libraries": "footprint-library data",
 	"minerva_pcb_check_bom":       "bill of materials",

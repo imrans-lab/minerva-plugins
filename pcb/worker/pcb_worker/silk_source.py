@@ -167,9 +167,14 @@ SILK_LINE_WIDTH_MM = SILK_TEXT_WIDTH_MM
 # Reference-designator TEXT geometry (K17: silk must carry "R1", not just
 # outline graphics — gerber-writer has no text primitive, so this is drawn
 # stroke geometry; see stroke_font.py). Stroke WIDTH is SILK_TEXT_WIDTH_MM: a
-# designator IS text, so it takes the library's TEXT thickness (0.15), not the
-# graphic-line width (0.12) — that distinction is exactly why the one constant
-# these used to share had to be split.
+# designator IS text, so it takes the library's TEXT thickness rather than the
+# graphic-line width — that distinction is exactly why the one constant these
+# used to share had to be split.
+#
+# The two now hold the SAME number (0.15) after the S6 raise, so this line no
+# longer changes any emitted byte. It stays because the constants are two
+# AUTHORITIES, not two values: the day a profile moves the graphic floor, a
+# designator must not follow it. Reading the right name is the whole point.
 REFDES_TEXT_SIZE_MM = 1.0
 # Local (component-frame) anchor, mirroring kicad.py's own hard-pinned
 # designator offset precedent: `(fp_text reference ... (at 0 -1.5) ...)`.

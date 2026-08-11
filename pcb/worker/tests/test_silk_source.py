@@ -24,6 +24,7 @@ station S4), which is the entire reason it exists:
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 
@@ -99,9 +100,19 @@ def test_authored_width_wins_and_a_widthless_graphic_takes_the_graphic_default()
     for widthless in ({}, {"width": None}, {"width": 0}, {"width": -1}):
         assert silk_source.graphic_width(widthless) == \
             silk_source.SILK_GRAPHIC_WIDTH_MM
-    # The distinction the two constants exist for: a GRAPHIC fallback is not
-    # the TEXT width. Re-merging them is the R4 regression.
-    assert silk_source.SILK_GRAPHIC_WIDTH_MM != silk_source.SILK_TEXT_WIDTH_MM
+    # RETARGETED IN CP2 (Codex finding 1). This used to assert the two
+    # constants held DIFFERENT values, which was the R4 property. S6 raised the
+    # graphic fallback to the declared 0.15 floor, so they are equal now and
+    # that assertion could not pass.
+    #
+    # The surviving property is the one that mattered all along: a width-less
+    # graphic resolves through the GRAPHIC authority. Asserting the value 0.15
+    # directly would pass even if graphic_width were re-pointed at the text
+    # constant, so this reads the fallback back out of the function against the
+    # name it must consult — equal values make the name the only witness.
+    assert silk_source.graphic_width({}) == silk_source.SILK_GRAPHIC_WIDTH_MM == 0.15
+    assert "SILK_GRAPHIC_WIDTH_MM" in inspect.getsource(silk_source.graphic_width)
+    assert "SILK_TEXT_WIDTH_MM" not in inspect.getsource(silk_source.graphic_width)
 
 
 def test_circle_radius_is_not_scaled_by_placement():

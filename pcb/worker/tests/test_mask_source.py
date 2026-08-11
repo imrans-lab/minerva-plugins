@@ -86,6 +86,56 @@ def test_through_hole_pads_open_both_sides_top_first(make, kwargs):
     assert {o.origin for o in openings} == {mask_source.ORIGIN_TH_PAD}
 
 
+def test_stable_entity_id_is_carried_and_the_pad_number_is_kept_for_display():
+    """CP2, Codex finding 4: identity is the caller's STABLE id, not the number.
+
+    Pad numbers repeat across components, so keying a finding on "1" or "2"
+    named no particular pad — un-attributable board-wide, and at the candidate
+    surface the same class as the HIGH-1 false clean. The number survives as a
+    display field because "pad 2 of U1" is what a person reads.
+
+    Asserted on all FOUR construction paths the id threads through — SMD, the
+    round TH land, the shaped TH land, and the unplated circle_opening —
+    because a miss on any one of them is silent: a None id reads as "this
+    caller had no id", which is exactly the state this repair removes.
+
+    The unplated fixture says ``plated=False`` and NOT ``pad_type``, per the
+    warning already recorded on
+    test_unplated_th_pad_opens_to_the_bare_drill_with_no_margin: a pad_type
+    spelling silently exercises the PLATED path instead, so this case would
+    have looked covered while testing the wrong branch.
+    """
+    smd, = mask_source.pad_openings(
+        _smd(), 5.0, 5.0, 0.0, Side.TOP, "U1", CLEARANCE,
+        entity_id="pad:U1:2")
+    assert smd.entity_id == "pad:U1:2"
+    assert smd.pad_number == "1"      # the fixture's number, display only
+    assert smd.ref == "U1"
+
+    round_th = _th()
+    shaped_th = _th(pad_width_mm=2.0, pad_height_mm=1.0)
+    unplated = _pad(drill_mm=0.8, plated=False)
+    for pad in (round_th, shaped_th, unplated):
+        openings = mask_source.pad_openings(
+            pad, 3.0, 4.0, 0.0, Side.TOP, "U1", CLEARANCE,
+            entity_id="pad:U1:7")
+        assert len(openings) == 2, openings
+        for opening in openings:
+            assert opening.entity_id == "pad:U1:7"
+            assert opening.pad_number == "1"
+
+    # Identity is metadata, never geometry: supplying an id must not move an
+    # aperture. This is what lets the Gerber emitter pass no id at all while
+    # still adopting the same enumeration the checker measures.
+    with_id = mask_source.pad_openings(
+        _th(), 3.0, 4.0, 0.0, Side.TOP, "U1", CLEARANCE, entity_id="x")
+    without = mask_source.pad_openings(
+        _th(), 3.0, 4.0, 0.0, Side.TOP, "U1", CLEARANCE)
+    assert [o.as_emitter_tuple() for o in with_id] == \
+        [o.as_emitter_tuple() for o in without]
+    assert all(o.entity_id is None for o in without)
+
+
 def test_both_sides_openings_are_geometrically_identical():
     """The two sides of a through-hole opening are the same aperture. If they
     ever differ, one side of the board is being masked to a different size than

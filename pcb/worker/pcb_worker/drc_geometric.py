@@ -620,7 +620,14 @@ def _project_mask(rb: ResolvedBoard) -> tuple[tuple[MaskOpening, ...],
             openings.extend(mask_source.pad_openings(
                 pad, pad.x, pad.y,
                 pad.rotation if pad.rotation is not None else 0.0,
-                side, comp.ref, clearance))
+                side, comp.ref, clearance,
+                # The STABLE pad id, which only this path has (Codex finding
+                # 4). It is the same id the COPPER projection keys pads on a
+                # few hundred lines up (`entity_id=pad.id`), so a GC8 mask
+                # finding and a GC2 clearance finding about the same pad now
+                # join on one key instead of one saying "U1 pad 2" and the
+                # other saying "2".
+                entity_id=placed.id))
 
     for via in rb.vias:
         openings.extend(mask_source.via_openings(
@@ -1546,8 +1553,12 @@ def _check_gc8_mask_sliver(proj: Projection, rb: ResolvedBoard) -> list[dict]:
 
     for side in (Side.TOP, Side.BOTTOM):
         # Deterministic ordering so a finding's participant order is stable
-        # across runs; entity_id may repeat (two pads can share a number across
-        # components), so position breaks the tie.
+        # across runs. entity_id is now the STABLE id and so is unique per
+        # opening SOURCE, but the position tiebreak stays: one pad contributes
+        # openings to BOTH sides, a slot decomposes into several capsules under
+        # one hole id, and any opening may still arrive with entity_id=None
+        # from a caller that has no id to give. Ordering must be total, not
+        # merely usually-total.
         ordered = sorted(by_side[side],
                          key=lambda o: (o.entity_id or "", o.ref or "", o.x, o.y))
         shapes = [_mask_shape(o) for o in ordered]
@@ -1571,9 +1582,9 @@ def _check_gc8_mask_sliver(proj: Projection, rb: ResolvedBoard) -> list[dict]:
                     extra={"origins": [a.origin, b.origin],
                            "participants": [
                                {"entity_id": a.entity_id, "origin": a.origin,
-                                "ref": a.ref},
+                                "ref": a.ref, "pad_number": a.pad_number},
                                {"entity_id": b.entity_id, "origin": b.origin,
-                                "ref": b.ref}]}))
+                                "ref": b.ref, "pad_number": b.pad_number}]}))
     return findings
 
 
@@ -2394,7 +2405,44 @@ def run_geometric_drc(rb: ResolvedBoard, *,
         # cosmetic (fab_capability's ratified rule), and a legend rule that
         # refused 15 of the 17 silk-carrying stock footprints would be an
         # outage, not a check.
-        advisories = _check_gc9_silk(proj, rb)
+        #
+        # SCOPED TRY, added in CP2 (Codex finding 5). GC9 used to run inside the
+        # broad try below, so a crash while measuring COSMETIC legend artwork
+        # returned a whole-run indeterminate and threw away GC1-GC8/GC10/GC11
+        # findings that had already been computed correctly. That is fail-closed
+        # in the sense that it never claims clean — but it directly contradicts
+        # the "silk is warned, never fatal" rule this check was built under, and
+        # it loses real blocking violations to a cosmetic bug.
+        #
+        # A crash therefore becomes a check-scoped advisory instead. The row is
+        # the SAME `gc9_silk_indeterminate` type the per-graphic drop path
+        # already emits, because a consumer's question is identical in both
+        # cases: which legend artwork went unmeasured, and why.
+        #
+        # WHAT THIS MUST NOT DO, and does not: manufacture a clean GC9 result.
+        # gc9_silk_width / gc9_silk_to_pad simply do not appear, and the
+        # indeterminate row is the positive statement that they did not run.
+        # Reading a zero count as "checked and clean" was already wrong under
+        # the optional-floor semantics recorded at _COUNT_KEYS; this row makes
+        # the distinction visible rather than inferable.
+        try:
+            advisories = _check_gc9_silk(proj, rb)
+        except Exception as exc:  # noqa: BLE001 - cosmetic check, never fatal.
+            advisories = [{
+                "type": "gc9_silk_indeterminate",
+                "entity_id": "<gc9>",
+                "parent": None, "kind": "silk", "net_id": None, "layer": None,
+                "ref": None, "pad": None, "net_name": None,
+                "measured_mm": None, "required_mm": None,
+                "code": "gc9_raised",
+                "detail": f"silkscreen DFM check raised {exc!r}",
+                "note": ("GC9 did not run, so NO silk width or silk-to-pad "
+                         "measurement was made on this board — a zero count "
+                         "for those rules here means 'not checked', not "
+                         "'clean'. The blocking verdict beside this row is "
+                         "unaffected: it comes from GC1-GC8/GC10/GC11, which "
+                         "completed."),
+            }]
     except UnsupportedGeometry as exc:
         return _indeterminate("unsupported_geometry", str(exc))
     except Exception as exc:  # noqa: BLE001 - fail-closed: a crash is NOT a clean.

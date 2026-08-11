@@ -56,6 +56,45 @@ def _numeric_literal_bindings(module) -> set[str]:
             bound.update(t.id for t in targets if isinstance(t, ast.Name))
     return bound
 
+
+def _attribute_bindings(module) -> dict[str, str]:
+    """Every MODULE-LEVEL ``X = pkg.attr`` binding, as ``{"X": "pkg.attr"}``.
+
+    The companion to ``_numeric_literal_bindings``, and it exists because CP2
+    S6 raised the graphic silk fallback to 0.15 — the SAME value the text
+    constant already held. Every runtime check that the two names stay
+    correctly wired (``==``, and even ``is``, since equal float constants may
+    be folded to one object) went vacuous the moment the numbers matched: a
+    module that mis-wired ``SILK_TEXT_WIDTH_MM = silk_source.SILK_GRAPHIC_WIDTH_MM``
+    would satisfy all of them.
+
+    Only the SOURCE still distinguishes the two authorities, so only the source
+    can pin them. Attribute chains are flattened to dotted text, so
+    ``silk_source.SILK_TEXT_WIDTH_MM`` reads back exactly as written.
+    """
+    def dotted(node: ast.AST) -> str | None:
+        parts: list[str] = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+
+    tree = ast.parse(inspect.getsource(module))
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Attribute):
+            continue
+        rhs = dotted(node.value)
+        if rhs is None:
+            continue
+        for t in node.targets:
+            if isinstance(t, ast.Name):
+                out[t.id] = rhs
+    return out
+
 # Expected copper-aperture signature per declared pad shape. A signature is the
 # gerber aperture template letter (R/C/O) or the macro name — the thing that would
 # be identical for all four if the emitter were still flattening to a rectangle.
@@ -1444,8 +1483,8 @@ def test_axis_aligned_oval_land_is_unchanged(angle):
 
 
 # ===========================================================================
-# ROUND 4 — SILK LINE WIDTH: text stroke and graphic stroke are DIFFERENT
-# numbers, and both emitters must use the same two.
+# ROUND 4 — SILK LINE WIDTH: text stroke and graphic stroke are two SEPARATE
+# authorities, and both emitters must read the same two.
 #
 # The R4 regression (F1, decision record comment 872 on 019f783860c8): ONE
 # constant (gerber.SILK_LINE_WIDTH_MM = 0.15, mirrored as kicad._SILK_LINE_WIDTH_MM)
@@ -1456,9 +1495,23 @@ def test_axis_aligned_oval_land_is_unchanged(angle):
 # texts at 0.15). Collapsing them onto 0.15 drew every width-less footprint outline
 # 25% too fat.
 #
-# These tests are BEHAVIOURAL, not constant-echoes: they read the width back out of
-# the emitted bytes on BOTH emitters, so swapping the two constants, pointing one
-# emitter at the other's value, or re-merging them into a single number all fail.
+# RETARGETED IN EPOCH CP2 (Codex finding 1). S6 raised the GRAPHIC fallback
+# 0.12 -> 0.15, because JLCPCB publishes a 0.15mm minimum silk line width, GC9
+# now enforces it, and a default that violates our own declared floor is
+# indefensible. The two constants therefore hold the SAME value today.
+#
+# That is a real loss of discriminating power and it is stated rather than
+# papered over: no assertion on the emitted bytes can now tell which of the two
+# constants fed a stroke, because both produce "0.15". What these tests can
+# still prove, and now do:
+#   * the emitted width is 0.15 on BOTH CAM surfaces for a width-less graphic,
+#     and 0.12 appears nowhere (0.12 in the output means a stale local literal);
+#   * an AUTHORED width still wins over the fallback — including the seed
+#     library's authored 0.12, which is why both pinned goldens are byte-
+#     unchanged by the raise;
+#   * the two names remain SEPARATE bindings wired to their own authority,
+#     checked at SOURCE level (_attribute_bindings), since that is the only
+#     check the equal values did not render vacuous.
 # ===========================================================================
 
 from pcb_worker import kicad as _kicad
@@ -1470,10 +1523,26 @@ def _widthless_silk_line() -> list[dict]:
 
 
 def test_silk_text_and_graphic_widths_are_separate_constants():
+    """Two authorities, currently holding one value.
+
+    Both are 0.15 since S6. The R4 property this guards is no longer "the
+    numbers differ" — it is that the two NAMES survive, so a future profile can
+    move one without dragging the other. Equal values make that unprovable at
+    runtime, so it is proven at source level below.
+    """
     assert gerber.SILK_TEXT_WIDTH_MM == 0.15
-    assert gerber.SILK_GRAPHIC_WIDTH_MM == 0.12
-    # The whole point: they must NOT be the same number again.
-    assert gerber.SILK_TEXT_WIDTH_MM != gerber.SILK_GRAPHIC_WIDTH_MM
+    assert gerber.SILK_GRAPHIC_WIDTH_MM == 0.15
+
+    # Both names must still EXIST as independent module-level bindings. A
+    # re-merge (deleting one and aliasing it to the other) is the R4 regression
+    # and is what this now catches in place of the value inequality.
+    from pcb_worker import silk_source
+    for name in ("SILK_TEXT_WIDTH_MM", "SILK_GRAPHIC_WIDTH_MM"):
+        assert name in _attribute_bindings(gerber), \
+            f"gerber.{name} is no longer bound from silk_source"
+        assert name in _numeric_literal_bindings(silk_source), \
+            (f"silk_source.{name} is no longer a declared literal — the two "
+             "silk authorities must not collapse into one")
 
 
 def test_silk_widths_agree_across_both_cam_emitters():
@@ -1516,6 +1585,23 @@ def test_silk_widths_agree_across_both_cam_emitters():
     assert _kicad._SILK_TEXT_WIDTH_MM is silk_source.SILK_TEXT_WIDTH_MM
     assert _kicad._SILK_GRAPHIC_WIDTH_MM is silk_source.SILK_GRAPHIC_WIDTH_MM
 
+    # DEMOTED FURTHER IN CP2, and this is the important part. Since S6 the two
+    # silk constants hold the SAME value, so every assertion above — `==` and
+    # `is` alike — passes on a CROSSED wiring: bind
+    # gerber.SILK_TEXT_WIDTH_MM to silk_source.SILK_GRAPHIC_WIDTH_MM and
+    # nothing above notices, because both sides are the one float 0.15.
+    #
+    # Source is the only surviving witness of which authority each name reads,
+    # so assert the binding TEXT, per name, on both emitters.
+    for module, prefix in ((gerber, ""), (_kicad, "_")):
+        bindings = _attribute_bindings(module)
+        for name in ("SILK_TEXT_WIDTH_MM", "SILK_GRAPHIC_WIDTH_MM"):
+            assert bindings.get(f"{prefix}{name}") == f"silk_source.{name}", (
+                f"{module.__name__}.{prefix}{name} reads "
+                f"{bindings.get(f'{prefix}{name}')!r}, not silk_source.{name} — "
+                "the two silk authorities hold equal values today, so a crossed "
+                "binding is invisible to every runtime check in this test")
+
     # FUNCTION identity, which IS a real guarantee: two `def`s are always
     # distinct objects in any Python. ONE shared width-policy implementation,
     # not two byte-identical twins.
@@ -1535,10 +1621,22 @@ def test_silk_widths_agree_across_both_cam_emitters():
 
 
 def test_widthless_silk_graphic_emits_the_graphic_width_on_gerber():
-    """A width-less silk line flashes a 0.12 circle aperture — NOT 0.15."""
+    """A width-less silk line flashes a 0.15 circle aperture — never 0.12.
+
+    0.15 is the S6 fallback AND the declared JLCPCB floor, so this is the
+    emitted-byte proof that Minerva's own default no longer violates the rule
+    GC9 enforces. A 0.12 aperture here means a stale local literal survived
+    somewhere between silk_source and the file.
+    """
     text = _fsilk(_silk_board(_widthless_silk_line()))
-    assert "%ADD10C,0.12*%" in text, text
-    assert "%ADD10C,0.15*%" not in text
+    assert "%ADD10C,0.15*%" in text, text
+    # Scoped to APERTURE definitions rather than the whole file: a bare
+    # "0.12 not in text" would also be reading the header and coordinate
+    # stream, which is measuring the wrong thing (the _kicad_silk_lines
+    # helper below documents the same trap for Edge.Cuts).
+    apertures = [ln for ln in text.splitlines() if ln.startswith("%ADD")]
+    assert apertures, text
+    assert not any("0.12" in ln for ln in apertures), apertures
 
 
 def _kicad_silk_lines(text: str) -> list[str]:
@@ -1554,8 +1652,8 @@ def test_widthless_silk_graphic_emits_the_graphic_width_on_kicad():
     """Same board, same number, other emitter — read back from the .kicad_pcb."""
     silk = _kicad_silk_lines(_kicad.generate_kicad_pcb(_silk_board(_widthless_silk_line())))
     assert silk, "expected an F.SilkS fp_line"
-    assert all("(width 0.12)" in ln for ln in silk), silk
-    assert not any("(width 0.15)" in ln for ln in silk), silk
+    assert all("(width 0.15)" in ln for ln in silk), silk
+    assert not any("(width 0.12)" in ln for ln in silk), silk
 
 
 def test_authored_silk_width_still_wins_over_the_fallback():
@@ -1569,16 +1667,52 @@ def test_authored_silk_width_still_wins_over_the_fallback():
     assert silk and all("(width 0.3)" in ln for ln in silk), silk
 
 
+def test_authored_012_survives_the_s6_fallback_raise():
+    """The case the S6 raise must NOT have touched, pinned explicitly.
+
+    Four seed footprints (R_0805, C_0805, ESP32-S3-DevKitC, TH_TestPoint)
+    author 0.12 and are sha256-pinned vendored copies, so raising the fallback
+    could not and did not repair them — they still emit 0.12 and still violate
+    the declared 0.15 floor, which GC9 reports as an advisory. That is the
+    recorded S6 disposition, not an oversight.
+
+    It is also precisely why both pinned goldens stayed byte-identical through
+    this epoch. A "fix" that clamped authored widths up to the floor would move
+    every one of those bytes, so it belongs under a test rather than under a
+    comment.
+    """
+    authored = [{"layer": "F.SilkS", "kind": "line", "start": [-1.0, 0.0],
+                 "end": [1.0, 0.0], "width": 0.12}]
+    assert "%ADD10C,0.12*%" in _fsilk(_silk_board(authored))
+    silk = _kicad_silk_lines(_kicad.generate_kicad_pcb(_silk_board(authored)))
+    assert silk and all("(width 0.12)" in ln for ln in silk), silk
+
+
 def test_reference_designator_strokes_keep_the_text_width():
-    """The discriminating half: a refdes is TEXT, so it stays 0.15 while the
-    graphic beside it moves to 0.12. A fix that moved BOTH to 0.12 — the obvious
-    lazy edit — fails here; so does one that left both at 0.15."""
-    board = _silk_board(_widthless_silk_line())
+    """The discriminating half, rebuilt on an AUTHORED width.
+
+    This test used to separate the two authorities using the FALLBACK: a
+    width-less graphic drew 0.12 while the refdes beside it drew 0.15, so both
+    apertures appeared on one layer from one component. S6 made the fallback
+    0.15 too, which would leave the two indistinguishable — and a test that can
+    no longer tell its two subjects apart is a vacuous test, not a passing one.
+
+    So the graphic now AUTHORS 0.3. The separation is real again and it is
+    testing the same proposition it always was: a refdes is TEXT and takes
+    SILK_TEXT_WIDTH_MM, not whatever the graphic beside it uses. Pointing the
+    refdes stroke at the graphic authority fails here.
+    """
+    authored = [{"layer": "F.SilkS", "kind": "line", "start": [-1.0, 0.0],
+                 "end": [1.0, 0.0], "width": 0.3}]
+    board = _silk_board(authored)
     board["components"][0]["ref"] = "R1"
     text = _fsilk(board)
-    # BOTH widths present on the same layer, from the same component.
-    assert "%ADD10C,0.12*%" in text or "%ADD11C,0.12*%" in text, text
-    assert "%ADD10C,0.15*%" in text or "%ADD11C,0.15*%" in text, text
+
+    apertures = [ln for ln in text.splitlines() if ln.startswith("%ADD")]
+    # BOTH widths present on the same layer, from the same component: the
+    # authored graphic at 0.3 and the designator strokes at the text width.
+    assert any("0.3*%" in ln for ln in apertures), apertures
+    assert any(f"{gerber.SILK_TEXT_WIDTH_MM}*%" in ln for ln in apertures), apertures
     assert gerber.SILK_TEXT_WIDTH_MM == 0.15
 
 

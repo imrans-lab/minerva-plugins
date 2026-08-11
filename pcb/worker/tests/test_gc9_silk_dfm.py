@@ -389,3 +389,61 @@ def test_silk_advisories_do_not_flip_the_verdict_but_are_counted():
 
 
 GC9_TYPES = {"gc9_silk_width", "gc9_silk_to_pad", "gc9_silk_indeterminate"}
+
+
+def test_a_gc9_crash_does_not_take_down_the_blocking_verdict(monkeypatch):
+    """CP2, Codex finding 5: a COSMETIC check must not be able to void the run.
+
+    GC9 used to execute inside the broad geometric try, so any exception while
+    measuring legend artwork returned a whole-run indeterminate — discarding
+    GC1-GC8/GC10/GC11 findings that had already been computed correctly. That
+    is fail-closed (it never claims clean) but it contradicts the "silk is
+    warned, never fatal" doctrine GC9 was built under, and it loses real
+    blocking violations to a bug in the one check that cannot block.
+
+    The crash is now scoped to a check-level advisory. Both halves are asserted,
+    because either alone would be the wrong repair:
+
+      * the run SURVIVES — ok stays true, the verdict still comes from the
+        blocking checks, and their findings are still there;
+      * the failure is VISIBLE — a gc9_silk_indeterminate row says GC9 did not
+        run, so a zero gc9_silk_width count cannot be misread as "clean".
+        Swallowing the exception into an empty advisory list would be a false
+        clean on the silk surface, which is the one thing this epoch exists to
+        prevent.
+    """
+    import yaml
+
+    from pathlib import Path
+
+    from pcb_worker import drc_geometric as dg
+    from pcb_worker.compile_board import compile_board
+    from pcb_worker.resolved_board import ResolutionSuccess
+
+    def _boom(proj, rb):
+        raise RuntimeError("silk kernel exploded")
+
+    monkeypatch.setattr(dg, "_check_gc9_silk", _boom)
+
+    coupon = Path(__file__).resolve().parent / "testdata" / "coupon_jlc1.yaml"
+    result = compile_board(yaml.safe_load(coupon.read_text(encoding="utf-8")))
+    assert isinstance(result, ResolutionSuccess)
+    drc = dg.run_geometric_drc(result.board)
+
+    # SURVIVED: a determinate result, not the indeterminate union.
+    assert drc["ok"] is True
+    assert drc["verdict"] == "clean"
+    assert "error" not in drc
+
+    # VISIBLE: exactly one advisory, and it names the failure.
+    assert [a["type"] for a in drc["advisories"]] == ["gc9_silk_indeterminate"]
+    row = drc["advisories"][0]
+    assert row["code"] == "gc9_raised"
+    assert "silk kernel exploded" in row["detail"]
+    assert row["measured_mm"] is None and row["required_mm"] is None
+
+    # NOT a manufactured clean: the two measuring rules report zero because they
+    # did not run, and the indeterminate row is what says so.
+    assert drc["counts"]["gc9_silk_width"] == 0
+    assert drc["counts"]["gc9_silk_to_pad"] == 0
+    assert drc["counts"]["gc9_silk_indeterminate"] == 1

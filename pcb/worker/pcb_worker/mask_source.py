@@ -133,8 +133,26 @@ class MaskOpening:
     angle_deg: float
     side: Side
     origin: str
-    entity_id: str | None = None    # pad number / hole key / via label, when known
+    # STABLE identity, board-wide unique — PlacedPad.id, via id, hole id. This
+    # is what a finding keys on and what an overlay partitions by.
+    #
+    # It was the PAD NUMBER until CP2 (Codex finding 4). Pad numbers repeat
+    # across every component on the board, so a GC8 finding keyed "1|2" named no
+    # particular pads: un-attributable board-wide, and at the candidate surface
+    # it is the same class of defect as the HIGH-1 false clean, where a finding
+    # that cannot be attributed to the entity that caused it gets partitioned to
+    # the wrong side.
+    #
+    # None is honest rather than fail-open: it means THIS CALLER HAD NO STABLE
+    # ID (the Gerber emitter's PadGeom carries none, and it never reads this
+    # field — as_emitter_tuple drops it). Only the DRC projection, which walks
+    # PlacedPads, can supply one, and it does.
+    entity_id: str | None = None
     ref: str | None = None          # owning component ref, when there is one
+    # DISPLAY ONLY — the human-facing pad number ("1", "A3"). Split out from
+    # entity_id rather than dropped, because "pad 2 of U1" is what a person
+    # reads in a finding while the stable id is what a tool joins on.
+    pad_number: str | None = None
 
     def as_emitter_tuple(self) -> tuple:
         """The 7-tuple ``gerber._Geometry.mask_top`` / ``mask_bot`` store.
@@ -149,7 +167,8 @@ class MaskOpening:
 
 def circle_opening(x: float, y: float, diameter: float, side: Side,
                    origin: str, entity_id: str | None = None,
-                   ref: str | None = None) -> MaskOpening:
+                   ref: str | None = None,
+                   pad_number: str | None = None) -> MaskOpening:
     """A round, unrotated mask opening — the shape every circular aperture in
     this module shares (round TH land, NPTH drill-size opening, untented via).
 
@@ -159,7 +178,8 @@ def circle_opening(x: float, y: float, diameter: float, side: Side,
     """
     return MaskOpening(x=x, y=y, shape="circle", width=diameter, height=diameter,
                        corner_rratio=None, angle_deg=0.0, side=side,
-                       origin=origin, entity_id=entity_id, ref=ref)
+                       origin=origin, entity_id=entity_id, ref=ref,
+                       pad_number=pad_number)
 
 
 def _both_sides(make) -> tuple[MaskOpening, ...]:
@@ -175,6 +195,7 @@ def _both_sides(make) -> tuple[MaskOpening, ...]:
 
 def pad_openings(pad: Any, px: float, py: float, pad_angle: float,
                  comp_side: Side, ref: Any, mask_clearance: float,
+                 entity_id: str | None = None,
                  ) -> tuple[MaskOpening, ...]:
     """Every mask opening one PAD contributes, at its placed position.
 
@@ -182,12 +203,22 @@ def pad_openings(pad: Any, px: float, py: float, pad_angle: float,
     board-absolute (the caller has applied the component placement), and
     ``pad_angle`` is the pad's ABSOLUTE aperture rotation.
 
+    ``entity_id`` is the pad's STABLE board-wide id (``PlacedPad.id``), and the
+    caller supplies it because ``PadGeom`` does not carry one — it is built
+    from a loose resolved-pad dict and knows only the pad NUMBER. The DRC
+    projection walks PlacedPads and passes it; the Gerber emitter has no id to
+    give and passes nothing, which costs it nothing since it reads only
+    ``as_emitter_tuple``. Both still get the SAME apertures from this one
+    enumeration — the id is attribution metadata, not geometry, so supplying it
+    on one path only is not the drift station S4 removed.
+
     The branch structure mirrors ``gerber._emit_pads`` exactly, because it IS
     that logic — moved, not reimplemented. Each branch is annotated with the
     finding that established it, since these are ratified fabrication rules and
     several of them are counter-intuitive.
     """
     number = pad.number
+    pad_number = str(number) if number is not None else None
 
     if not is_through_hole(pad):
         # SMD: one opening, on the component's own side, following the pad
@@ -201,13 +232,12 @@ def pad_openings(pad: Any, px: float, py: float, pad_angle: float,
             height=mask_opening_dim(pad.height, margin, ref, number),
             corner_rratio=pad.corner_rratio, angle_deg=pad_angle,
             side=comp_side, origin=ORIGIN_SMD_PAD,
-            entity_id=str(number) if number is not None else None,
+            entity_id=entity_id, pad_number=pad_number,
             ref=ref if isinstance(ref, str) else None),)
 
     # Through-hole. The plating predicate is the same one gerber._emit_pads and
     # kicad._footprint use; an np_thru_hole is a BARE hole whatever its flags.
     is_plated = pad.plated and pad.pad_type != "np_thru_hole"
-    entity_id = str(number) if number is not None else None
     ref_name = ref if isinstance(ref, str) else None
 
     if not is_plated:
@@ -217,7 +247,8 @@ def pad_openings(pad: Any, px: float, py: float, pad_angle: float,
         # copper ring (finding 019f8fe77068; R4d closed the earlier
         # board-clearance divergence between the two emitters).
         return _both_sides(lambda side: circle_opening(
-            px, py, pad.drill, side, ORIGIN_NPTH_PAD, entity_id, ref_name))
+            px, py, pad.drill, side, ORIGIN_NPTH_PAD, entity_id, ref_name,
+            pad_number))
 
     margin = pad_mask_margin(pad, mask_clearance)
     shaped, land_shape, lw, lh, lrratio = th_land(pad)
@@ -230,14 +261,15 @@ def pad_openings(pad: Any, px: float, py: float, pad_angle: float,
         return _both_sides(lambda side: MaskOpening(
             x=px, y=py, shape=land_shape, width=mw, height=mh,
             corner_rratio=lrratio, angle_deg=pad_angle, side=side,
-            origin=ORIGIN_TH_PAD, entity_id=entity_id, ref=ref_name))
+            origin=ORIGIN_TH_PAD, entity_id=entity_id, ref=ref_name,
+            pad_number=pad_number))
 
     # Round land: the plated TH copper ring. FAIL-CLOSED if the pad resolved no
     # annulus — never the retired `pad.annulus or drill*2` invention (K4).
     annulus = require_th_annulus(pad, ref)
     mask_d = mask_opening_dim(annulus, margin, ref, number)
     return _both_sides(lambda side: circle_opening(
-        px, py, mask_d, side, ORIGIN_TH_PAD, entity_id, ref_name))
+        px, py, mask_d, side, ORIGIN_TH_PAD, entity_id, ref_name, pad_number))
 
 
 def board_hole_openings(hx: float, hy: float, dia: float, plated: bool,

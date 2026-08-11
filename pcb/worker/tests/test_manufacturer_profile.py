@@ -210,12 +210,27 @@ def test_every_required_floor_field_has_at_least_one_production_reader():
 
     This test is a SOURCE SCAN, deliberately, because the property is about the
     codebase rather than about any one run: a field is "read" if some production
-    module outside the declaration and validation sites mentions it. That is a
-    coarse test and it is meant to be — it cannot tell a real reader from a
-    passing mention, so it will not catch a reader that is wired up but never
-    called. What it does catch is the regression that actually happened four
-    times: a field declared, validated, required, and never referenced again.
+    module outside the declaration and validation sites EXECUTABLY loads it.
+
+    IT READS THE AST, NOT THE TEXT (CP2, Codex finding 6). The first version
+    did a raw substring search, which a COMMENT or DOCSTRING satisfied — so the
+    test that exists to catch "declared, required, never enforced" could itself
+    be false-greened by prose describing the very field nothing enforces. That
+    is the exact regression it guards, wearing the guard's own uniform.
+
+    Measured when this was tightened: three modules mentioned required fields
+    only in prose (compile_board.py for min_trace_width_mm, route_bridge.py for
+    min_clearance_mm, pad_source.py for solder_mask_clearance_mm). All nine
+    fields still have real readers elsewhere, so the tightening removed false
+    credit without changing the verdict — which is the only kind of tightening
+    worth making to a green test.
+
+    Still coarse, and still meant to be: an attribute load proves the name is
+    consulted somewhere, not that the consulting code is reachable or correct.
+    What it catches is the regression that actually happened four times: a
+    field declared, validated, required, and never referenced again.
     """
+    import ast
     import pathlib
 
     from pcb_worker import manufacturer_profile
@@ -224,15 +239,41 @@ def test_every_required_floor_field_has_at_least_one_production_reader():
     # The two files where a required field is DECLARED and VALIDATED. A mention
     # in either proves nothing about enforcement, so they are excluded.
     declaration_sites = {"resolved_board.py", "manufacturer_profile.py"}
+
+    def executable_loads(text: str) -> set[str]:
+        """Names this module actually READS at runtime.
+
+        Three access forms, because a floor can legitimately be reached by any
+        of them: attribute access (``minimums.min_drill_mm``, the convention),
+        a string subscript (``floor["min_drill_mm"]``), and an explicit
+        ``getattr(obj, "min_drill_mm")``. Comments never appear in an AST at
+        all, and a docstring is a bare Expr constant rather than any of these,
+        so prose cannot satisfy this.
+        """
+        names: set[str] = set()
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Attribute):
+                names.add(node.attr)
+            elif isinstance(node, ast.Subscript) and \
+                    isinstance(node.slice, ast.Constant) and \
+                    isinstance(node.slice.value, str):
+                names.add(node.slice.value)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "getattr" and len(node.args) >= 2 \
+                    and isinstance(node.args[1], ast.Constant) \
+                    and isinstance(node.args[1].value, str):
+                names.add(node.args[1].value)
+        return names
+
     sources = {
-        path.name: path.read_text(encoding="utf-8")
+        path.name: executable_loads(path.read_text(encoding="utf-8"))
         for path in pkg.glob("*.py")
         if path.name not in declaration_sites
     }
 
     unread = []
     for field in REQUIRED_FLOOR_FIELDS:
-        readers = sorted(name for name, text in sources.items() if field in text)
+        readers = sorted(name for name, loaded in sources.items() if field in loaded)
         if not readers:
             unread.append(field)
 
@@ -242,6 +283,15 @@ def test_every_required_floor_field_has_at_least_one_production_reader():
         "enforces is a rule that lies about being in force — either give it a "
         "reader, or move it to OPTIONAL_FLOOR_FIELDS with the reason recorded, "
         "as CP2 S5 did for solder_mask_expansion_mm")
+
+    # SELF-CHECK: prove the scan can still FAIL, on this very corpus. A guard
+    # whose detector has quietly stopped detecting is the failure mode this
+    # epoch keeps finding, and "the assertion above passed" cannot distinguish
+    # "every field has a reader" from "the matcher matches nothing".
+    invented = "min_unobtainium_clearance_mm"
+    assert not any(invented in loaded for loaded in sources.values()), (
+        "the negative control is no longer negative — pick a name that really "
+        "does not appear, or this test proves nothing")
 
 
 def test_a_floor_with_an_extra_unknown_field_fails_closed(tmp_path):
