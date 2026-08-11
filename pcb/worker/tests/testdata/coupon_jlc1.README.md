@@ -52,6 +52,23 @@ K18's "the golden certifies what a real fabricated board needs" and K21's
 - **LOGO1** (`Minerva_Fixture:LOGO_Owl_TestCoupon`) — silk furniture: a
   stroke-art owl exercising all four silk primitive classes + "TEST COUPON"
   stroke text at 0.15 [silk min 0.15].
+- **REV1** (`Minerva_Fixture:TXT_CouponRev`) — "REV A" on **B.SilkS**, the
+  coupon's only bottom-side component (epoch CP2 S9). Silk-only, no pads, no
+  drill, `assembly: exclude`. It exists so the back legend is exercised end to
+  end: before CP2 S3 the emitter had no bottom-silk harvest at all and
+  `B_SilkS` was structurally present and always empty, so every claim about
+  back silk was untestable.
+
+  **Placed at `rotation_deg: 180`, and that is load-bearing.** A bottom-side
+  placement mirrors LOCAL Y — oracle-pinned to pcbnew's own `FOOTPRINT.Flip`
+  and correct for geometry. KiCad's `fp_text` escapes the consequence because
+  it carries a `justify mirror` effect; Minerva has no text primitive, so
+  legend is baked stroke geometry and takes the geometric mirror. Since
+  MirrorY is MirrorX composed with a 180° rotation, stroke legend on the back
+  lands upside down unless the placement pre-rotates. The rotation is a
+  correction, not decoration — `TestBackSilkReadsFromTheBack` fails loudly if
+  it is removed. The underlying gap (every bottom-side component's synthesized
+  designator has the same problem) is filed as `019ff2ba82d8`.
 
 ### The co-designed copper (the S7 round)
 

@@ -176,8 +176,13 @@ class TestSeedCoupon:
         assert {r.refs for r in bom.rows} == {("J1",), ("C1",)}
         # The promoted file's component order is the serializer's, not the
         # authoring order — compare membership, not sequence.
+        # REV1 joined this set in CP2 S9: it is the bottom-side revision-text
+        # fixture, silk-only and assembly:exclude. Its presence HERE rather than
+        # in bom.rows is the assembly-exclusion flag doing its job — a
+        # decorative part must be excluded from BOM/CPL without being refused
+        # an identity, which is the contract CPN1-S3 established.
         assert set(bom.excluded_refs) == {"LOGO1", "FID1", "FID2", "FID3",
-                                          "TP1", "TP2", "TP3", "DAM1"}
+                                          "TP1", "TP2", "TP3", "DAM1", "REV1"}
         assert sorted(r.ref for r in cpl.rows) == ["C1", "J1"]
 
     def test_featured_nets_carry_the_co_designed_copper(self):
@@ -269,3 +274,113 @@ class TestWitnessesSitOnTheirFloors:
             if trace["width_mm"] == 0.1:
                 trace["width_mm"] = 0.08  # < 0.10 floor
         assert "gc1_trace_width" in self._drc_types(board)
+
+
+class TestBackSilkReadsFromTheBack:
+    """CP2 S9's deliverable, pinned as a property rather than as bytes.
+
+    The golden already pins the exact B_SilkS bytes. What a golden CANNOT say
+    is whether those bytes are the RIGHT WAY ROUND — a 180-degree-wrong legend
+    is byte-stable and blesses perfectly. So this reads the emitted file back
+    with an INDEPENDENT parser and asserts the orientation directly, which is
+    what S9's brief demanded ("confirm it by an INDEPENDENT parser/renderer
+    walkthrough rather than by our own emitter's self-report").
+
+    WHY THE COUPON PLACES REV1 AT 180 DEGREES, and why that is not a fudge: a
+    bottom-side placement mirrors LOCAL Y — that is oracle-pinned to pcbnew's
+    own FOOTPRINT.Flip (geometry.PlacementTransform) and is correct for
+    geometry. KiCad's fp_text escapes the consequence because it carries a
+    `justify mirror` effect that the renderer honours. Minerva has no text
+    primitive: legend is BAKED STROKE GEOMETRY, so it takes the geometric
+    mirror. MirrorY is MirrorX composed with a 180-degree rotation, so
+    stroke-baked legend on the back lands upside down unless the placement
+    pre-rotates by 180. This test is what stops that rotation being "cleaned
+    up" by someone who reads it as noise.
+    """
+
+    def _bottom_silk_segments(self):
+        import warnings
+
+        pytest.importorskip("gerbonara")
+        from gerbonara import GerberFile
+
+        result = compile_board(_board())
+        assert isinstance(result, ResolutionSuccess)
+        files = build_gerbers_ir(result.board, name="coupon")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed = GerberFile.from_string(files["coupon-B_SilkS.gbr"],
+                                            filename="coupon-B_SilkS.gbr")
+        return [(float(o.x1), float(o.y1), float(o.x2), float(o.y2))
+                for o in parsed.objects]
+
+    def test_back_silk_is_not_empty(self):
+        """The negative control. Every orientation claim below is vacuous on a
+        blank layer, and B_SilkS WAS blank for this board's whole history —
+        gerber.py emitted no bottom legend at all before CP2 S3."""
+        assert self._bottom_silk_segments(), \
+            "B.SilkS is empty; the orientation assertions below prove nothing"
+
+    def test_back_silk_is_mirror_written_in_the_gerber_frame(self):
+        """A Gerber is drawn as seen from the TOP, through the board. Back
+        legend must therefore be MIRROR-WRITTEN in the file and read correctly
+        once the board is flipped.
+
+        The reference is the SAME fixture rendered by production code on a
+        board that carries nothing else, placed front-side and unrotated. That
+        isolation matters: filtering the coupon's own F_SilkS by a coordinate
+        window would sweep in the neighbouring components' legend and compare
+        two different things. REV1 is the only bottom-side component on the
+        coupon, so its B_SilkS needs no filtering at all.
+        """
+        import warnings
+
+        pytest.importorskip("gerbonara")
+        from gerbonara import GerberFile
+
+        board = _board()
+        rev = next(c for c in board["components"] if c["ref"] == "REV1")
+        # Drop the net-bearing sections along with the other components: the
+        # coupon's nets name J1/C1 pins, and leaving them behind on a
+        # one-component board fails resolution with net_pin_unresolved rather
+        # than producing a reference rendering.
+        only_rev = {k: v for k, v in board.items()
+                    if k not in ("nets", "traces", "vias", "zones")}
+        only_rev["components"] = [dict(rev, layer="top", rotation_deg=0)]
+        result = compile_board(only_rev)
+        assert isinstance(result, ResolutionSuccess)
+        files = build_gerbers_ir(result.board, name="ref")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed = GerberFile.from_string(files["ref-F_SilkS.gbr"],
+                                            filename="ref-F_SilkS.gbr")
+
+        cx, cy = float(rev["x_mm"]), -float(rev["y_mm"])   # GERBER frame
+        def rel(segs):
+            out = set()
+            for x1, y1, x2, y2 in segs:
+                a = (round(x1 - cx, 4), round(y1 - cy, 4))
+                b = (round(x2 - cx, 4), round(y2 - cy, 4))
+                out.add(tuple(sorted((a, b))))
+            return out
+
+        upright = rel([(float(o.x1), float(o.y1), float(o.x2), float(o.y2))
+                       for o in parsed.objects])
+        back = rel(self._bottom_silk_segments())
+        assert upright, "the front-side reference rendering is empty"
+        assert len(back) == len(upright), (
+            f"back legend has {len(back)} segments, the upright reference has "
+            f"{len(upright)} — the two are not the same artwork, so the "
+            "orientation comparison below would be meaningless")
+
+        mirror_x = {tuple(sorted(((-p[0], p[1]), (-q[0], q[1])))) for p, q in upright}
+        mirror_y = {tuple(sorted((( p[0], -p[1]), ( q[0], -q[1])))) for p, q in upright}
+        assert back == mirror_x, (
+            "back legend is not the X-mirror of the upright rendering — it is "
+            "the wrong way round on the fabricated board. If REV1's "
+            "rotation_deg stopped being 180, that is why: a bottom placement "
+            "mirrors LOCAL Y, and MirrorY == MirrorX o rotate(180)")
+        # State what it must NOT be, so an accidentally-symmetric fixture
+        # cannot satisfy the assertion above.
+        assert back != upright, "back legend is unmirrored"
+        assert back != mirror_y, "back legend is upside down (Y-mirrored)"

@@ -84,6 +84,11 @@
   "sha256": "16b104eb8076cc1fce5af780a92ebf860ef23d1138a1989b67e38efc9be54526",
   "size_bytes": 554
  },
+ "Minerva_Fixture:TXT_CouponRev": {
+  "path": "Minerva_Fixture.pretty/TXT_CouponRev.kicad_mod",
+  "sha256": "4f08e41eb0b37a4bdd497fc0bdcfe5b61efc3532459b209e4d41814223ba069b",
+  "size_bytes": 2168
+ },
  "MountingHole:MountingHole_3.2mm_M3": {
   "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",
   "sha256": "7875432d1eb0639bfb14f939e2a7894e9c986ed58924b9d00c8a95e50b79fb77",

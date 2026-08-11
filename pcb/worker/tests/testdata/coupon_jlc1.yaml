@@ -106,6 +106,24 @@ components:
       layer: top
       assembly: exclude
       properties: {}
+    # rotation_deg 180 is REQUIRED, not cosmetic, and is the finding of S9's
+    # independent-renderer walkthrough. A bottom-side placement mirrors LOCAL Y
+    # (oracle-pinned to pcbnew's FOOTPRINT.Flip, geometry.py PlacementTransform),
+    # and MirrorY == MirrorX composed with a 180 rotation. KiCad's own fp_text
+    # escapes this because it carries a `justify mirror` effect, but these glyphs
+    # are BAKED STROKE GEOMETRY (the schema has no text primitive), so they take
+    # the geometric mirror and land upside down. Pre-rotating by 180 turns
+    # MirrorY back into MirrorX, which is what a board house expects: mirror-
+    # written in the top-down Gerber view, reading correctly with the board
+    # flipped over. Verified against gerbonara, not against our own emitter.
+    - ref: REV1
+      footprint: Minerva_Fixture:TXT_CouponRev
+      x_mm: 12
+      y_mm: 11
+      rotation_deg: 180
+      layer: bottom
+      assembly: exclude
+      properties: {}
     - ref: TP1
       footprint: Minerva_Fixture:TP_MinAnnular_0p6
       x_mm: 6.5

@@ -17,7 +17,7 @@ python tests/testdata/gerber_golden/regenerate.py
 |--------------|-----------------------------------------------|---------------------------------------------------|
 | `board`      | `../../../../spikes/gerber/board.yaml`         | SMD pads, one TH pad, via, 3 traces, 1 NPTH hole  |
 | `drilltest`  | `../gerber_boards/drilltest.yaml`              | plated + non-plated TH pads, via, 2 NPTH mount holes |
-| `coupon_jlc1`| `../coupon_jlc1.yaml`                          | the PROMOTED public fab coupon (epoch CPN1): interior cutout on Edge.Cuts, filled copper pour, roundrect/oval/circle SMD apertures, real silk (owl + stroke text + designators), profile-pinned rules, mask/paste/drill split |
+| `coupon_jlc1`| `../coupon_jlc1.yaml`                          | the PROMOTED public fab coupon (epoch CPN1): interior cutout on Edge.Cuts, filled copper pour, roundrect/oval/circle SMD apertures, real silk (owl + stroke text + designators), **legend on BOTH sides since CP2 S9**, profile-pinned rules, mask/paste/drill split |
 
 `coupon_jlc1` is the K18 golden — the one authored to certify what a
 FABRICATED board needs rather than only its own contents. Its layers were
@@ -25,6 +25,18 @@ blessed one at a time against stated intent in epoch CPN1 station S8 (parsed
 independently with gerbonara, measured in integer nanometres, rendered in
 gerbv); the bless record is on docket `019fe2fb843b` and the board's feature
 list is in `../coupon_jlc1.README.md`. Regenerating it means re-blessing it.
+
+**Re-blessed once since, in epoch CP2 station S9** (docket `019fe4c18b8b`),
+when REV1 put "REV A" on the back. Exactly ONE artifact moved —
+`coupon_jlc1-B_SilkS.gbr`, additively, 61 insertions and no deletions — and
+the other ten were byte-identical, which is the check that a silk-only,
+pad-less, drill-less bottom-side fixture must pass. The orientation of the new
+legend was blessed the same way the CPN1 layers were: parsed back with
+gerbonara and compared against an independently-rendered upright reference,
+NOT against our own emitter's self-report. That comparison is now a standing
+test (`test_coupon_board.py::TestBackSilkReadsFromTheBack`) rather than a
+one-off bless, because a legend rotated 180° is perfectly byte-stable and
+would re-bless cleanly forever.
 
 ## Pinned versions (byte-stability holds ONLY at these)
 

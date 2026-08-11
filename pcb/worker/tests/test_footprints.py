@@ -54,6 +54,10 @@ EXPECTED_PAD_COUNTS = {
     "Minerva_Fixture:LOGO_Owl_TestCoupon": 0,
     "Minerva_Fixture:SMD_WeirdPads_2P": 2,
     "Minerva_Fixture:TP_MinAnnular_0p6": 1,
+    # Silk-only revision-text fixture (CP2 S9). ZERO pads, like the owl logo
+    # above it: it exists to put legend on B.SilkS and contributes no copper,
+    # no drill and no assembly identity.
+    "Minerva_Fixture:TXT_CouponRev": 0,
     "Espressif:ESP32-S3-DevKitC": 44,
     "Package_DIP:DIP-6_W7.62mm_Socket": 6,
     "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical": 4,
