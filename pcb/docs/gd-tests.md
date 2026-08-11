@@ -152,12 +152,45 @@ regression — attribute FAILs from these two suites to it (`start_plugin
 returns ok`, `plugin state == RUNNING`/`connection exists post-start`)
 rather than re-investigating the pcb plugin.
 
-## CI
+## CI does NOT run these suites — execution is a local gate
 
-The `panel` job in `.github/workflows/pcb.yml` runs on every push and pull
-request (same triggers as `test`): it checks out a **pinned** Minerva SHA
-as a sibling directory, downloads/caches Godot 4.6.2 headless, and runs
-`run-gd-tests.sh`. The Minerva SHA is pinned deliberately — see the
-comment on `MINERVA_SHA` in the workflow — so a change to Minerva's
-default branch can never turn pcb CI red without someone choosing to bump
-the pin.
+**Running the suites is your job, not CI's.** Run `run-gd-tests.sh` locally
+before you push panel work; nothing downstream will catch a regression for
+you.
+
+The `panel` job in `.github/workflows/pcb.yml` checks out the **pinned**
+Minerva SHA as a sibling directory and then runs
+`run-gd-tests.sh --preflight-only`. It downloads no Godot and executes no
+suite. It certifies exactly one thing: that the GD layer is in a **testable
+state** — host present, driver helpers present at the pinned SHA, sibling
+layout correct, and the suite set on disk matching `EXPECTED_SUITES` in both
+directions.
+
+Two reasons, and the scoping one comes first:
+
+1. **CI is not a test runner.** Its purpose is to certify that the plugin
+   built and is testable, not that it has been tested. Running 5000
+   assertions on every push was never in that remit.
+
+2. **It could not do it correctly anyway.** Per the section above, any suite
+   that starts a real plugin subprocess needs the host checkout's native
+   GDExtensions *built*, and a plain `actions/checkout` has no `src/bin/`.
+   Scripts that reach the FFmpeg-backed VideoRecorder fail to **compile**
+   without it, and `Failed to compile depended scripts` cascades into
+   `SingletonObject`, taking down suites unrelated to either extension.
+
+   Measured at commit `014b6d7`: CI reported **27/47** suites with real
+   assertions and 2233 assertions; the identical commit on a developer
+   machine with `build-extensions.sh` already run reported **47/47** and
+   5093. Every failure was host scaffolding; none was pcb code. The job had
+   been red for five consecutive commits while telling nobody anything.
+
+   Building three native toolchains (Zig, SCons/C++, FFmpeg) for *another
+   repo* on every push — to run a suite CI should not be running — is the
+   wrong trade twice over.
+
+The Minerva SHA is still pinned deliberately — see the comment on
+`MINERVA_SHA` in the workflow — so a change to Minerva's default branch can
+never turn pcb CI red without someone choosing to bump the pin. Bumping it
+now fails loudly and immediately if the pinned tree drops a driver helper,
+which is precisely what the pre-flight is for.

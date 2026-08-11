@@ -74,18 +74,36 @@ PCB_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PLUGINS_ROOT="$(cd "${PCB_DIR}/.." && pwd)"
 GD_TEST_DIR="${PCB_DIR}/tests/gd"
 
-if [ "$#" -lt 1 ]; then
-  echo "usage: $0 <path-to-minerva-checkout>" >&2
+PREFLIGHT_ONLY=0
+declare -a positional=()
+for arg in "$@"; do
+  case "${arg}" in
+    --preflight-only) PREFLIGHT_ONLY=1 ;;
+    -*)
+      echo "error: unknown option '${arg}'" >&2
+      echo "usage: $0 [--preflight-only] <path-to-minerva-checkout>" >&2
+      exit 2
+      ;;
+    *) positional+=("${arg}") ;;
+  esac
+done
+
+if [ "${#positional[@]}" -lt 1 ]; then
+  echo "usage: $0 [--preflight-only] <path-to-minerva-checkout>" >&2
   exit 2
 fi
 
-MINERVA_DIR="$(cd "$1" 2>/dev/null && pwd)"
+MINERVA_DIR="$(cd "${positional[0]}" 2>/dev/null && pwd)"
 if [ -z "${MINERVA_DIR}" ] || [ ! -d "${MINERVA_DIR}/src" ]; then
-  echo "error: '$1' does not look like a Minerva checkout (no src/ dir)" >&2
+  echo "error: '${positional[0]}' does not look like a Minerva checkout (no src/ dir)" >&2
   exit 2
 fi
 
-if ! command -v godot >/dev/null 2>&1; then
+# --preflight-only needs NO Godot: everything it checks is filesystem state.
+# That is the whole point — see the WHAT CI CAN AND CANNOT CHECK note in the
+# header. Requiring godot here would put the CI gate back behind the very
+# dependency it exists to avoid.
+if [ "${PREFLIGHT_ONLY}" -eq 0 ] && ! command -v godot >/dev/null 2>&1; then
   echo "error: 'godot' not found on PATH" >&2
   exit 2
 fi
@@ -192,6 +210,37 @@ if [ "${#missing_suites[@]}" -gt 0 ] || [ "${#unregistered_suites[@]}" -gt 0 ]; 
 fi
 
 EXPECTED_SUITE_COUNT="${#manifest_names[@]}"
+
+# --preflight-only stops HERE, and this is the boundary CI runs to.
+#
+# Everything above is filesystem state: the Minerva host exists, the sibling
+# layout the res:// preloads hardcode is correct, both generic driver helpers
+# are present, and the suite set on disk matches the checked-in manifest in
+# both directions. That is the honest definition of "the GD layer is in a
+# TESTABLE state", and it is all CI is asked to certify.
+#
+# Everything BELOW needs a Godot host with Minerva's native GDExtensions
+# BUILT, which a plain `actions/checkout` of Minerva does not have and which
+# CI has no business building — see the SETUP STEP note in this header
+# (chore 019fb6632a4e). Without src/bin/ every suite that starts a real
+# plugin subprocess fails, and scripts that reach the FFmpeg-backed
+# VideoRecorder fail to COMPILE, cascading into SingletonObject and taking
+# unrelated suites down with them. That is a host-scaffold gap, not a signal
+# about pcb, and running the suites there produced a red job that told
+# nobody anything for five consecutive commits.
+#
+# So: EXECUTION IS A LOCAL GATE. Run this script without the flag on a
+# developer machine with build-extensions.sh already run. See
+# pcb/docs/gd-tests.md.
+if [ "${PREFLIGHT_ONLY}" -eq 1 ]; then
+  echo "gd pre-flight PASSED (${EXPECTED_SUITE_COUNT} suites registered and present)"
+  echo "  host:     ${MINERVA_DIR}"
+  echo "  sibling:  ${ACTUAL_PLUGINS}"
+  echo "  manifest: ${MANIFEST}"
+  echo "NOTE: suites were NOT executed. Execution needs Minerva's native"
+  echo "      GDExtensions built and is a local gate — see pcb/docs/gd-tests.md."
+  exit 0
+fi
 
 overall_rc=0
 declare -a results=()

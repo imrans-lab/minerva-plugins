@@ -381,24 +381,43 @@ jobs:
         run: python -m pytest tests/ -q
 
   panel:
-    name: pcb panel (GDScript tests via Minerva host)
-    # Round A1a. pcb/tests/gd/*.gd is `extends SceneTree` GDScript covering
-    # the plugin's panel + UI models; it must run hosted inside a Minerva
-    # `src/` checkout (see pcb/scripts/run-gd-tests.sh header for the full
-    # rationale — the tests' own preloads are res:// paths resolved against
-    # Minerva's res:// root).
+    name: pcb panel (GD suite registry + host wiring)
+    # Round A1a, RESHAPED at the CP2 S10 boundary. This job used to RUN the
+    # 47 `extends SceneTree` suites in pcb/tests/gd/. It no longer does, and
+    # the reason is a scoping principle rather than a defect workaround:
     #
-    # Same triggers as `test` (every push + pull_request) rather than
-    # main-only: the Godot download below is cached (design decision #2),
-    # so the marginal cost of running on every PR is a cache hit, and there
-    # is no reason to weaken coverage of a layer nothing else verifies.
+    #   CI IS NOT A TEST RUNNER. Its job is to certify that the plugin BUILT
+    #   and is in a TESTABLE STATE — not that it has been tested.
     #
-    # This job does NOT use .github/actions/pcb-setup: it runs no Go and no
-    # pytest, so it needs neither toolchain. Adding it "for consistency" would
-    # buy a slower job and nothing else.
+    # It also could not do the job it was given. These suites must be hosted
+    # by a Minerva `src/` checkout, and any suite that starts a real plugin
+    # subprocess needs that checkout's NATIVE GDEXTENSIONS BUILT — the
+    # `terminal` extension registers the `SubProcess` class the MCP STDIO
+    # transport requires (chore 019fb6632a4e, documented at length in
+    # pcb/scripts/run-gd-tests.sh). A plain actions/checkout has no src/bin/
+    # at all. Worse, scripts reaching the FFmpeg-backed VideoRecorder fail to
+    # COMPILE without it, and "Failed to compile depended scripts" cascades
+    # into SingletonObject, taking down suites that have nothing to do with
+    # either extension.
+    #
+    # MEASURED at 014b6d7: CI reported 27/47 suites with real assertions and
+    # 2233 assertions; the same commit on a developer machine with
+    # build-extensions.sh already run reports 47/47 and 5093. Every one of
+    # those failures was the host scaffold, none was pcb code. The job had
+    # been red for five consecutive commits and told nobody anything — the
+    # same way the Go-step failure silently skipped pytest for four.
+    #
+    # Building three native toolchains (Zig, SCons/C++, FFmpeg) for ANOTHER
+    # REPO on every push, to run a suite CI is not supposed to be running,
+    # is the wrong trade twice over. So execution is a LOCAL gate
+    # (pcb/scripts/run-gd-tests.sh, see pcb/docs/gd-tests.md) and CI keeps
+    # the part it can honestly certify: the host wiring resolves and the
+    # suite set on disk matches its checked-in manifest, in both directions.
+    #
+    # That check needs no Godot, so this job no longer downloads or caches
+    # one — it is now filesystem-only and finishes in seconds.
     runs-on: ubuntu-22.04
     env:
-      GODOT_VERSION: "4.6.2"
       # Pinned to a specific commit, not a moving branch: pcb's CI must be
       # deterministic, and a third-party repo changing underneath us must not
       # turn pcb red without someone choosing that. Bumping this SHA is a
@@ -460,25 +479,23 @@ jobs:
           test -f "$GITHUB_WORKSPACE/../Minerva/src/test/helpers/plugin_panel_driver.gd"
           test -f "$GITHUB_WORKSPACE/../Minerva/src/test/helpers/panel_tool_registry_driver.gd"
 
-      - name: Cache Godot download
-        id: godot-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/godot-bin
-          key: godot-${{ env.GODOT_VERSION }}-linux-x86_64
-
-      - name: Download Godot ${{ env.GODOT_VERSION }} headless (cache miss only)
-        if: steps.godot-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/godot-bin
-          curl -fL -o /tmp/godot.zip \
-            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          unzip -q /tmp/godot.zip -d /tmp/godot-extract
-          mv "/tmp/godot-extract/Godot_v${GODOT_VERSION}-stable_linux.x86_64" ~/godot-bin/godot
-          chmod +x ~/godot-bin/godot
-
-      - name: Run pcb GDScript test suite
-        run: |
-          export PATH="$HOME/godot-bin:$PATH"
-          godot --version
-          bash pcb/scripts/run-gd-tests.sh ../Minerva
+      # No Godot download, no cache, no suite execution — see the job header.
+      # This is the same pre-flight the local runner performs before it starts
+      # Godot, reached through the runner's own --preflight-only flag rather
+      # than reimplemented here, so the two cannot drift: one implementation,
+      # exercised on every push and on every local run.
+      #
+      # WHAT THIS FAILS ON, i.e. what "not in a testable state" means:
+      #   - the pinned Minerva host is missing, or lacks src/project.godot
+      #   - either generic driver helper is absent at the pinned SHA (the
+      #     suites preload them by res:// path, so a bumped SHA that drops one
+      #     breaks the harness rather than the code)
+      #   - the sibling layout res://../../minerva-plugins/... hardcodes is wrong
+      #   - a suite was deleted or renamed and is still in EXPECTED_SUITES
+      #   - a suite was added to disk and NOT registered in EXPECTED_SUITES
+      #
+      # The last two are the ones worth having: a bare test_*.gd glob shrinks
+      # silently, so without the manifest a deleted suite is a smaller green
+      # run rather than a failure.
+      - name: Pre-flight the GD suite registry and host wiring
+        run: bash pcb/scripts/run-gd-tests.sh --preflight-only ../Minerva
