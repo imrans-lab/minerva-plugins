@@ -255,6 +255,11 @@ func initRegistry() {
 	registry.Register(tools.FootprintStage, tools.HandleFootprintStage)
 	registry.Register(tools.FootprintReport, tools.HandleFootprintReport)
 	registry.Register(tools.FootprintBless, tools.HandleFootprintBless)
+	// minerva_pcb_footprint_promote (B7, docket 019ff7c02fd6) — the bless
+	// gate's exit door: a blessed WIP part moves whole into the durable user
+	// layer at <data dir>/library_user, both roots host-forced (see
+	// worker_tools.go's withPromoteRoots).
+	registry.Register(tools.FootprintPromote, tools.HandleFootprintPromote)
 	// minerva_pcb_acquire_footprint (S4/B3, docket 019ff5689732) — the ON-DEMAND
 	// half of the same surface: Go fetches one official KiCad footprint from the
 	// release tag pinned in libraries.lock.json, the worker stages + auto-blesses

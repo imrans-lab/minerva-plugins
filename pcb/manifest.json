@@ -1028,6 +1028,18 @@
       }
     },
     {
+      "name": "minerva_pcb_footprint_promote",
+      "description": "Promote a BLESSED footprint out of the WIP staging layer into the durable USER library layer, where every compile-bearing tool (gerbers, generate, drc, drc_geometric, resolve, route, ...) resolves it from then on. Args {ref:'LibNick:PartName', overwrite?:bool}. Returns {ref, layer:'user', path, entry} — the acquisition-lock entry moves WHOLE (bless record, provenance, assembly) with only its layer rewritten, and the WIP staging slot is freed. Refuses BEFORE any write: a ref that is not staged, staged but not blessed-approved (rejected or never reviewed), whose staged bytes no longer match the blessed sha256 pin, whose destination lock is not schema v2, or that already exists in the user library without overwrite:true. The WIP and user library roots are host-owned paths under the plugin data directory; the caller never chooses them.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ref": {"type": "string", "description": "Full footprint ref, 'LibNick:PartName', of a staged AND blessed WIP entry."},
+          "overwrite": {"type": "boolean", "description": "Replace an existing user-library entry of the same ref (default false: refused)."}
+        },
+        "required": ["ref"]
+      }
+    },
+    {
       "name": "minerva_pcb_export_assembly",
       "description": "Generate a pre-assembly order package (BOM CSV + CPL/pick-and-place CSV) from a canonical PCB board for one assembly house profile — pure Python, no KiCad binary. Args {yaml|board, profile?:<house id, default \"jlc\">, name?:<basename>, out_dir?:<dir>}. \"jlc\" is the only house profile that currently offers assembly service; \"oshpark\" is a KNOWN house that refuses (bare-board only — no assembly service). Returns {profile, bom:{filename,rows,path}, cpl:{filename,rows,path}} — rows counts data rows (header excluded); path is omitted unless out_dir was given, in which case both CSVs are also written to disk. Refusals are NAMED, never a silent best-guess format or a blank identity cell: a component the profile requires identity for (jlc requires mpn) and lacks it refuses naming the component ref; an unrecognized or assembly-incapable house id refuses naming the id. CPL rotation is emitted verbatim from the authored rotation_deg (KiCad-equivalent clockwise convention); CPL Y is the authored y_mm negated, X verbatim. Calls the worker's assembly_bom then assembly_cpl methods over the same board+profile — whichever refuses first is the error this tool surfaces.",
       "input_schema": {

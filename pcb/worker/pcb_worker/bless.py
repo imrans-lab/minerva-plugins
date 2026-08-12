@@ -91,6 +91,7 @@ from . import geometry
 from .footprints import (
     LOCK_SCHEMA_VERSION,
     LOCK_SOURCE_KINDS,
+    USER_LAYER,
     WIP_LAYER,
     FootprintLookupError,
     LibraryLayer,
@@ -313,6 +314,34 @@ def blessed_library_chain(
     # `base` is already precedence-sorted and contains no wip layer, and wip is
     # the highest-precedence name, so prepending preserves the chain order.
     return (blessed_wip_layer(wip_root),) + tuple(base)
+
+
+def live_library_chain(
+    *,
+    wip_root: Union[str, Path, None] = None,
+    layers: Union[Iterable, None] = None,
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+) -> tuple[LoadedLibraryLayer, ...]:
+    """THE one construction point for a LIVE resolution chain (B7).
+
+    Every compile-bearing worker method resolves through the chain this
+    function builds from the host-injected call parameters: the blessed WIP
+    view when ``wip_root`` is present (never a raw one -- see
+    :func:`blessed_library_chain`), stacked on whatever durable ``layers`` the
+    host configured, with the shipped seed always at the base. With neither a
+    ``wip_root`` nor ``layers`` this is exactly the pre-B7 seed-only chain,
+    byte-identical errors included.
+
+    A single constructor rather than an if/else in each of compile_board /
+    normalize_board / resolve_board, so "which chain does a live call use?"
+    has one answer and a future layer (project) lands in one place.
+    """
+    if wip_root is None:
+        return load_library_chain(layers, library_root=library_root,
+                                  lockfile=lockfile)
+    return blessed_library_chain(wip_root, layers=layers,
+                                 library_root=library_root, lockfile=lockfile)
 
 
 def resolve_wip_footprint(
@@ -744,6 +773,119 @@ def auto_bless_footprint(
     return _record_bless(wip_root, ref, tier=TIER_AUTO, verdict=VERDICT_APPROVED,
                          who=who or AUTO_BLESS_ATTRIBUTION,
                          blessed_at=blessed_at, layers=layers)
+
+
+# ---------------------------------------------------------------------------
+# Promotion: a blessed WIP part graduates to a durable layer (B7).
+# ---------------------------------------------------------------------------
+
+
+def promote_footprint(
+    ref: str,
+    wip_root: Union[str, Path],
+    dest_root: Union[str, Path],
+    *,
+    overwrite: bool = False,
+) -> dict:
+    """MOVE a BLESSED footprint out of the WIP layer into a durable layer.
+
+    ``dest_root`` is a layer root laid out like the WIP root itself (and the
+    shipped seed): ``<dest_root>/footprints/<Lib>.pretty/<Part>.kicad_mod``
+    pinned by ``<dest_root>/footprints.lock.json`` -- the layout
+    ``LibraryLayer`` s sibling conventions already assume. The caller of the
+    TOOL never chooses this path; the Go broker forces it to the host-owned
+    user layer for the same write-anywhere reason it forces ``wip_root``.
+
+    Refusals, all before any write:
+
+    * ref not staged, or staged but NOT blessed-approved (:func:`is_blessed`)
+      -- promotion is the bless gate's exit door, not a second way around it;
+    * the staged bytes on disk no longer match the WIP lock's pin (the same
+      disk-vs-lock cross-check staging performs) -- a rotted part must not be
+      laundered into a durable layer under a blessed entry;
+    * the destination lock exists but is not schema v2 -- silently rewriting a
+      v1 file the user owns would change its shape behind their back;
+    * the ref already exists in the destination lock and ``overwrite`` is
+      False -- replacing a durable part must be a stated intention.
+
+    WRITE ORDER makes a crash safe at every point: destination file first,
+    destination lock second, WIP entry removed third, WIP file unlinked last.
+    A crash mid-sequence can only leave (a) an orphan destination file no lock
+    references (inert -- resolution is lock-driven), or (b) the ref present in
+    BOTH layers with IDENTICAL pinned bytes (WIP outranks the destination, and
+    the blessed WIP view serves the same content, so nothing wrong resolves;
+    re-running the promote converges). The entry moves WHOLE -- bless record,
+    provenance, assembly -- with only ``layer`` rewritten, because the review
+    that blessed those bytes is exactly what promotion is durably recording.
+    """
+    lib, part = _split_ref(ref)
+    doc, entry = _staged_entry(wip_root, ref)
+    if not is_blessed(entry):
+        raise BlessError(
+            f"cannot promote {ref!r}: {_unblessed_message(ref, wip_root, entry)}")
+
+    src = wip_footprint_root(wip_root) / f"{lib}.pretty" / f"{part}.kicad_mod"
+    if not src.exists():
+        raise BlessError(
+            f"cannot promote {ref!r}: staged file missing at {src} (the WIP "
+            f"lock pins a file that is no longer there)")
+    actual = sha256_file(src)
+    if actual != entry.get("sha256"):
+        raise BlessError(
+            f"cannot promote {ref!r}: staged file {src} has sha256 {actual} "
+            f"but the WIP lock pins {entry.get('sha256')!r}; the bytes on disk "
+            f"are not the bytes that were blessed. Re-stage and re-review")
+
+    dest_root = Path(dest_root)
+    dest_lock_path = dest_root / WIP_LOCK_FILENAME
+    if dest_lock_path.exists():
+        dest_doc = load_lock_document(dest_lock_path)
+        if dest_doc.get("schema_version") != LOCK_SCHEMA_VERSION:
+            raise BlessError(
+                f"destination lock {dest_lock_path} is schema_version "
+                f"{dest_doc.get('schema_version')!r}; promotion writes v"
+                f"{LOCK_SCHEMA_VERSION} entries and will not silently rewrite "
+                f"a v1 lock the user owns")
+    else:
+        dest_doc = {"schema_version": LOCK_SCHEMA_VERSION, "entries": {}}
+    dest_entries = dest_doc.setdefault("entries", {})
+    if ref in dest_entries and not overwrite:
+        raise BlessError(
+            f"{ref!r} already exists in the destination lock at "
+            f"{dest_lock_path}; pass overwrite=True to replace it (replacing a "
+            f"durable library part must be a stated intention, not a side "
+            f"effect of promoting)")
+
+    dest_file = dest_root / WIP_FOOTPRINT_DIRNAME / f"{lib}.pretty" / f"{part}.kicad_mod"
+    _atomic_write_text(dest_file, src.read_bytes().decode("utf-8"))
+    written = sha256_file(dest_file)
+    if written != entry["sha256"]:
+        raise BlessError(
+            f"promotion of {ref!r} wrote bytes hashing {written} where the "
+            f"blessed pin is {entry['sha256']}; the destination file was left "
+            f"for inspection and NO lock entry references it")
+
+    # Promotion currently targets exactly one durable layer: the host-owned
+    # USER library. The name is fixed (not a parameter) on purpose -- the seed
+    # is the SHIPPED library (promoting into it is a dev/maintainer git
+    # action, not a runtime write), and a project layer has no live anchor yet.
+    promoted = dict(entry)
+    promoted["layer"] = USER_LAYER
+    dest_entries[ref] = promoted
+    _atomic_write_text(dest_lock_path,
+                       json.dumps(dest_doc, indent=2, sort_keys=True) + "\n")
+
+    del doc["entries"][ref]
+    _write_wip_lock(wip_root, doc)
+    try:
+        src.unlink()
+    except OSError:
+        # An unremovable source file is an orphan (its lock entry is gone) --
+        # inert by the same argument as stage's crash window, so a promote
+        # that fully landed must not report failure over cleanup.
+        pass
+    return {"ref": ref, "layer": USER_LAYER,
+            "path": str(dest_file), "entry": dict(promoted)}
 
 
 # ---------------------------------------------------------------------------

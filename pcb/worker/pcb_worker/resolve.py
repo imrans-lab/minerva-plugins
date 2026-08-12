@@ -23,7 +23,9 @@ consistent with how pins are already stored.
 
 Public API
 ----------
-* ``resolve_board(board, library_root=None, lockfile=None) -> dict``  (deep copy)
+* ``resolve_board(board, library_root=None, lockfile=None, *,
+  library_layers=None, wip_root=None) -> dict``  (deep copy; the keyword pair
+  selects the live layer chain — see ``pcb_worker.bless.live_library_chain``)
 """
 
 from __future__ import annotations
@@ -33,8 +35,9 @@ import math
 from pathlib import Path
 from typing import Union
 
+from . import bless
 from .footprint_def import ReferenceTextDefinition
-from .footprints import FootprintLookupError, resolve_footprint
+from .footprints import FootprintLookupError, resolve_footprint_layered
 from .pad_source import has_resolved_pads
 from .silk_source import refdes_strokes
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
@@ -108,6 +111,9 @@ def resolve_board(
     board: dict,
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
+    *,
+    library_layers=None,
+    wip_root: Union[str, Path, None] = None,
 ) -> dict:
     """Resolve every component's footprint and attach its silk/courtyard graphics.
 
@@ -118,16 +124,29 @@ def resolve_board(
     (shape/size/drill/type), both in component-LOCAL coordinates, and flag
     ``component["has_pad_geometry"] = True`` so the panel's accurate pad renderer
     takes over. The input is not mutated — a deep copy is returned.
+
+    ``library_layers``/``wip_root`` (S9/B7) select the SAME live chain
+    compile_board resolves through (:func:`pcb_worker.bless.live_library_chain`);
+    omitted, the chain is the shipped seed alone — the pre-B7 behaviour,
+    error strings included. The chain is loaded ONCE for the whole board, so
+    every component resolves against one reading of each layer's lock — and a
+    chain that cannot be loaded (a configured layer's lock missing or
+    malformed) refuses the resolve outright rather than degrading per
+    component: a broken override layer must never quietly fall away (the
+    anti-shadowing rule in footprints.py).
     """
     resolved = copy.deepcopy(board)
     components = resolved.get("components")
     if not isinstance(components, list):
         return resolved
 
+    chain = bless.live_library_chain(
+        wip_root=wip_root, layers=library_layers,
+        library_root=library_root, lockfile=lockfile)
     for comp in components:
         if not isinstance(comp, dict):
             continue
-        _resolve_component(comp, library_root, lockfile)
+        _resolve_component(comp, chain)
 
     return resolved
 
@@ -136,6 +155,9 @@ def resolve_board_best_effort(
     board: dict,
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
+    *,
+    library_layers=None,
+    wip_root: Union[str, Path, None] = None,
 ) -> dict:
     """TOLERANT resolve for the fabrication path (Stage 2 step 4a-ii, design 2).
 
@@ -159,11 +181,20 @@ def resolve_board_best_effort(
     if not isinstance(components, list):
         return resolved
 
+    # Chain load is OUTSIDE the per-component tolerance on purpose (B7): the
+    # tolerance covers a COMPONENT the library cannot explain; a configured
+    # LAYER whose lock will not load is a chain defect, and letting it demote
+    # every component to inline would be exactly the silent fall-through the
+    # anti-shadowing rule forbids. It propagates as FootprintLookupError and
+    # the caller reports a structured resolve error.
+    chain = bless.live_library_chain(
+        wip_root=wip_root, layers=library_layers,
+        library_root=library_root, lockfile=lockfile)
     for comp in components:
         if not isinstance(comp, dict):
             continue
         try:
-            _resolve_component(comp, library_root, lockfile)
+            _resolve_component(comp, chain)
         except ResolveCoincidenceError:
             raise  # integrity fault: footprint pads disagree with routed pins
         except (ResolveError, FootprintLookupError):
@@ -174,8 +205,7 @@ def resolve_board_best_effort(
 
 def _resolve_component(
     comp: dict,
-    library_root: Union[str, Path, None],
-    lockfile: Union[str, Path, None],
+    chain,
 ) -> None:
     """Resolve ONE component's footprint and attach its graphics + pad geometry.
 
@@ -191,7 +221,7 @@ def _resolve_component(
     if not isinstance(fp_ref, str) or fp_ref == "":
         raise ResolveError(f"component {ref!r} has no footprint ref to resolve")
 
-    parsed = resolve_footprint(fp_ref, library_root=library_root, lockfile=lockfile)
+    parsed = resolve_footprint_layered(fp_ref, chain=chain).parsed
 
     fp_pads = {str(p["number"]): (p["x_mm"], p["y_mm"]) for p in parsed["pads"]}
     _check_coincidence(ref, comp.get("pins") or [], fp_pads)

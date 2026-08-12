@@ -88,7 +88,7 @@ var Generate = ToolSpec{
 }
 
 func HandleGenerate(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "generate", params)
+	return w.Call(ctx, "generate", withLibraryChain(params))
 }
 
 // ---- minerva_pcb_gerbers -----------------------------------------------------------
@@ -117,7 +117,7 @@ var Gerbers = ToolSpec{
 }
 
 func HandleGerbers(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "gerbers", params)
+	return w.Call(ctx, "gerbers", withLibraryChain(params))
 }
 
 // ---- minerva_pcb_drc ---------------------------------------------------------------
@@ -148,7 +148,7 @@ var DRC = ToolSpec{
 }
 
 func HandleDRC(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "drc", params)
+	return w.Call(ctx, "drc", withLibraryChain(params))
 }
 
 // ---- minerva_pcb_drc_geometric -----------------------------------------------------
@@ -192,7 +192,7 @@ var DRCGeometric = ToolSpec{
 }
 
 func HandleDRCGeometric(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "drc_geometric", params)
+	return w.Call(ctx, "drc_geometric", withLibraryChain(params))
 }
 
 // ---- minerva_pcb_resolve -----------------------------------------------------------
@@ -220,7 +220,7 @@ var Resolve = ToolSpec{
 }
 
 func HandleResolve(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "resolve", params)
+	return w.Call(ctx, "resolve", withLibraryChain(params))
 }
 
 // ---- minerva_pcb_normalize ---------------------------------------------------------
@@ -249,7 +249,7 @@ var Normalize = ToolSpec{
 }
 
 func HandleNormalize(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "normalize", params)
+	return w.Call(ctx, "normalize", withLibraryChain(params))
 }
 
 // ---- pcb.route (worker-backed broker CHANNEL, not an LLM tool name) --------
@@ -291,7 +291,7 @@ var RouteChannel = ToolSpec{
 }
 
 func HandleRouteChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "route", params)
+	return w.Call(ctx, "route", withLibraryChain(params))
 }
 
 // ---- pcb.draft_check (worker-backed broker CHANNEL, T2.4) ------------------
@@ -356,7 +356,7 @@ var AssemblyCheckChannel = ToolSpec{
 }
 
 func HandleAssemblyCheckChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "assembly_check", params)
+	return w.Call(ctx, "assembly_check", withLibraryChain(params))
 }
 
 // ---- pcb.board_health (worker-backed broker CHANNEL) -----------------------
@@ -382,7 +382,7 @@ var BoardHealthChannel = ToolSpec{
 }
 
 func HandleBoardHealthChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "board_health", params)
+	return w.Call(ctx, "board_health", withLibraryChain(params))
 }
 
 // ---- pcb.mask_view (worker-backed broker CHANNEL) --------------------------
@@ -409,7 +409,7 @@ var MaskViewChannel = ToolSpec{
 }
 
 func HandleMaskViewChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "mask_view", params)
+	return w.Call(ctx, "mask_view", withLibraryChain(params))
 }
 
 // ---- pcb.promote_check (worker-backed broker CHANNEL) ----------------------
@@ -435,7 +435,7 @@ var PromoteCheckChannel = ToolSpec{
 }
 
 func HandlePromoteCheckChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
-	return w.Call(ctx, "promote_check", params)
+	return w.Call(ctx, "promote_check", withLibraryChain(params))
 }
 
 // ---- minerva_pcb_check_libraries ---------------------------------------------------
@@ -820,6 +820,37 @@ func HandleFootprintBless(ctx context.Context, w *bridge.Worker, params json.Raw
 	return w.Call(ctx, "footprint_bless", withWIPRoot(params))
 }
 
+// ---- minerva_pcb_footprint_promote (B7, docket 019ff7c02fd6) ----------------
+
+var FootprintPromote = ToolSpec{
+	Name: "minerva_pcb_footprint_promote",
+	Description: "Promote a BLESSED footprint out of the WIP staging layer into " +
+		"the durable USER library layer, where every compile-bearing tool " +
+		"(gerbers, generate, drc, drc_geometric, resolve, route, ...) resolves " +
+		"it from then on. Args {ref:'LibNick:PartName', overwrite?:bool}. " +
+		"Returns {ref, layer:'user', path, entry} — the acquisition-lock entry " +
+		"moves WHOLE (bless record, provenance, assembly) with only its layer " +
+		"rewritten, and the WIP staging slot is freed. Refuses BEFORE any " +
+		"write: a ref that is not staged, staged but not blessed-approved " +
+		"(rejected or never reviewed), whose staged bytes no longer match the " +
+		"blessed sha256 pin, whose destination lock is not schema v2, or that " +
+		"already exists in the user library without overwrite:true. The WIP and " +
+		"user library roots are host-owned paths under the plugin data " +
+		"directory; the caller never chooses them.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"ref": {"type": "string", "description": "Full footprint ref, 'LibNick:PartName', of a staged AND blessed WIP entry."},
+			"overwrite": {"type": "boolean", "description": "Replace an existing user-library entry of the same ref (default false: refused)."}
+		},
+		"required": ["ref"]
+	}`),
+}
+
+func HandleFootprintPromote(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "footprint_promote", withPromoteRoots(params))
+}
+
 // ---- acquisition (S4/B3, docket 019ff5689732) ------------------------------
 //
 // One official KiCad footprint, on demand. GO FETCHES; THE WORKER STAGES. The
@@ -949,6 +980,88 @@ func withWIPRoot(params json.RawMessage) json.RawMessage {
 		return params
 	}
 	m["wip_root"] = wipRootDir()
+	out, err := json.Marshal(m)
+	if err != nil {
+		return params
+	}
+	return out
+}
+
+// userLibraryRoot is the durable USER library layer root:
+// <plugin data dir>/library_user, the sibling of library_wip and the
+// destination footprint_promote writes into. Laid out like the WIP root (and
+// the shipped seed): <root>/footprints/<Lib>.pretty/... pinned by
+// <root>/footprints.lock.json, with profiles at <root>/profiles.
+func userLibraryRoot() string {
+	return filepath.Join(sharedruntime.DataDir("pcb"), "library_user")
+}
+
+// withPromoteRoots forces BOTH filesystem roots onto a promote call: wip_root
+// (the source, same value withWIPRoot forces) and dest_root (the user library).
+// Both ALWAYS override — promote moves a file to a path derived from a
+// caller-controlled ref, so honoring a caller-supplied root on either end
+// would make minerva_pcb_footprint_promote a move-anywhere primitive for an
+// LLM. The host owns the data directory; the agent chooses the part, never
+// the path.
+func withPromoteRoots(params json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if len(params) == 0 {
+		m = map[string]interface{}{}
+	} else if err := json.Unmarshal(params, &m); err != nil {
+		return params
+	}
+	m["wip_root"] = wipRootDir()
+	m["dest_root"] = userLibraryRoot()
+	out, err := json.Marshal(m)
+	if err != nil {
+		return params
+	}
+	return out
+}
+
+// withLibraryChain forces the LIVE library-chain configuration onto a
+// compile-bearing worker call (B7, docket 019ff7c02fd6): wip_root (whose
+// BLESSED entries the worker's chain may serve — never raw staged content)
+// and library_layers (the durable layers this host has — today the user
+// layer, included only when its lock exists on disk; the worker appends the
+// shipped seed itself and refuses a "wip" name inside library_layers).
+//
+// Like withWIPRoot — and unlike withDefaultLibDir — this ALWAYS overrides
+// both keys, including with an EMPTY layer list: library roots are READ
+// sources for fabrication geometry, and honoring caller-supplied paths would
+// let an LLM point a compile at footprint bytes and a lock it authored
+// itself, bypassing the bless gate the WIP/user layers exist to enforce. The
+// host owns every layer root; the agent chooses the board, never the
+// library paths.
+//
+// The presence probe is os.Stat on the user lock, per call: a lock created by
+// a promote earlier in the same session joins the chain on the next call,
+// and an absent lock simply means the layer does not exist yet (the worker
+// would refuse a configured layer whose lock is missing — anti-shadowing —
+// so "absent layer" must be decided here, where absence is a fact, not a
+// lock-load failure).
+//
+// Malformed params (not a JSON object) are passed through unchanged so the
+// worker's own uniform parse-error handling reports them.
+func withLibraryChain(params json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if len(params) == 0 {
+		m = map[string]interface{}{}
+	} else if err := json.Unmarshal(params, &m); err != nil {
+		return params
+	}
+	m["wip_root"] = wipRootDir()
+	layers := []interface{}{}
+	userRoot := userLibraryRoot()
+	userLock := filepath.Join(userRoot, "footprints.lock.json")
+	if st, err := os.Stat(userLock); err == nil && st.Mode().IsRegular() {
+		layers = append(layers, map[string]interface{}{
+			"name":     "user",
+			"root":     filepath.Join(userRoot, "footprints"),
+			"lockfile": userLock,
+		})
+	}
+	m["library_layers"] = layers
 	out, err := json.Marshal(m)
 	if err != nil {
 		return params

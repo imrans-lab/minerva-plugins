@@ -403,7 +403,10 @@ func callResolveBestEffort(ctx context.Context, w *bridge.Worker, params json.Ra
 	// already given up on this call.
 	done := make(chan callResult, 1)
 	go func() {
-		raw, err := w.Call(context.Background(), "resolve_best_effort", params)
+		// The LOAD path resolves through the same live chain the fab path
+		// compiles through (B7): a promoted user-layer part must show its
+		// silk when the board opens, not only when it fabricates.
+		raw, err := w.Call(context.Background(), "resolve_best_effort", withLibraryChain(params))
 		done <- callResult{raw: raw, err: err}
 	}()
 

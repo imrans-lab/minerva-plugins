@@ -93,6 +93,69 @@ footprint (`ResolvedFootprint.layer`), never inside it, so it cannot reach
 `FootprintDefinition.content_id`, the pad dicts the emitters serialize, or a
 profile's digest — recording the layer moves no fabricated byte.
 
+### The LIVE chain: what a real call actually resolves through (B7)
+
+Every compile-bearing MCP tool (`gerbers`, `generate`, `drc`, `drc_geometric`,
+`resolve`, `normalize`, `route`, `mask_view`, `assembly_check`, `board_health`,
+`promote_check`, and the panel's board-load `resolve_best_effort`) resolves
+through the chain the **Go broker** injects per call
+(`worker_tools.go::withLibraryChain`), never through caller-supplied paths:
+
+- `wip_root` → `<data dir>/library_wip`, whose **BLESSED** entries top the
+  chain (`bless.live_library_chain` → `blessed_library_chain`; a raw WIP view
+  cannot enter — `normalize_library_layers` refuses the name in
+  `library_layers`, and an unauthorized `LoadedLibraryLayer` is refused at
+  resolution by the capability bit).
+- `library_layers` → the durable layers this host has. Today that is the
+  **user layer** at `<data dir>/library_user` (root
+  `library_user/footprints/`, lock `library_user/footprints.lock.json`,
+  profiles `library_user/profiles/` by the sibling convention), included
+  exactly when its lock exists on disk. Presence is decided in Go, where
+  absence is a fact; a layer that is CONFIGURED but whose lock will not load
+  is refused worker-side (anti-shadowing), never demoted to "absent".
+
+Both keys **always override** whatever the caller sent — including with an
+empty layer list. Library roots are read sources for fabrication geometry, so
+honoring a caller path would let an LLM compile against footprint bytes and a
+lock it authored itself, around the bless gate. Same trust rule as
+`withWIPRoot`: the host owns paths; the agent chooses the board, never the
+library. The worker's single reader of these keys is
+`methods._layer_params`; WIP travels ONLY as `wip_root` (footprints only —
+manufacturer profiles keep resolving through `library_layers`, so a staged
+part can never smuggle a manufacturing floor).
+
+The project layer has **no live anchor yet**: boards travel over the bridge as
+content, not paths, so there is nothing host-known to be "board-adjacent". The
+worker accepts a `project` layer mapping already; wiring it becomes possible
+when boards gain a host-known location.
+
+### PROMOTION: out of WIP, into the user layer (B7)
+
+`minerva_pcb_footprint_promote` (`{ref, overwrite?}`) is the bless gate's exit
+door. Blessing makes a staged part resolvable *while it stays staged*; the WIP
+layer is staging, not a library (S3 ruling), so a part you intend to keep
+**graduates**: `bless.promote_footprint` MOVES the file and its lock entry —
+bless record, provenance, assembly metadata intact, only `layer` rewritten to
+`user` — into `<data dir>/library_user`, and frees the staging slot. Both
+roots are host-forced (`withPromoteRoots`), same write-anywhere argument as
+staging.
+
+Refusals, all before any write: not staged; staged but not blessed-approved
+(never reviewed OR explicitly rejected); the staged bytes no longer hash to
+the blessed pin (rot must not be laundered under a blessed entry); the
+destination lock is not schema v2; the ref already exists in the user library
+without `overwrite:true`. Write order (dest file → dest lock → WIP entry
+removed → WIP file unlinked) makes every crash window inert: the worst cases
+are an orphan file no lock references, or the ref present in BOTH layers with
+identical pinned bytes (WIP outranks user; re-running converges).
+
+The user-facing loop this completes: *"override footprint X with my measured
+version"* → `footprint_stage` (hand_authored) → `footprint_report` → review →
+`footprint_bless` (artifact-bound) → **`footprint_promote`** → every board
+that names X now resolves the override from the user layer, provenance says
+so, and `library_lock_ref` digests the whole chain that could have supplied
+it.
+
 ## RENDERED BLESS: the library trust boundary (S3)
 
 The coincidence guard (`minerva_pcb_resolve`) compares a declared pin position

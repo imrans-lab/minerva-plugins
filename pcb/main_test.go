@@ -76,6 +76,10 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// minerva_pcb_fetch_libraries, only NAME RESOLUTION is asserted here —
 		// invoking it would hit gitlab.com.
 		"minerva_pcb_acquire_footprint",
+		// worker-backed — promotion out of the WIP layer (LIB2 B7, docket
+		// 019ff7c02fd6): a blessed staged part moves whole into the durable
+		// user library layer, both roots host-forced (withPromoteRoots).
+		"minerva_pcb_footprint_promote",
 		// worker-backed — dotted panel-IPC channel forwarding to the worker's
 		// "route" method (this round; docket 019f3815e9f9). NOT renamed by
 		// round D0-expose (019fa486b408) — dotted panel-IPC channels are a
@@ -708,11 +712,14 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 			// half by worker/tests/test_footprint_acquire.py.
 			continue
 		}
-		if name == "minerva_pcb_footprint_stage" || name == "minerva_pcb_footprint_bless" {
-			// WRITE tools on the bless surface (LIB1 B2). Dispatching them
-			// with only this sweep's known values is a NAMED refusal every
-			// time, by design: stage refuses without kicad_mod_text +
-			// provenance fields, and bless refuses a ref nothing has staged —
+		if name == "minerva_pcb_footprint_stage" || name == "minerva_pcb_footprint_bless" ||
+			name == "minerva_pcb_footprint_promote" {
+			// WRITE tools on the bless surface (LIB1 B2 + LIB2 B7's promote).
+			// Dispatching them with only this sweep's known values is a NAMED
+			// refusal every time, by design: stage refuses without
+			// kicad_mod_text + provenance fields, and bless/promote refuse a
+			// ref nothing has staged (promote additionally only moves a
+			// BLESSED one) —
 			// and a "successful" sweep dispatch would MUTATE the ambient
 			// plugin data dir's WIP layer, which a read-only smoke must not.
 			// Same shape as the export_assembly carve-out above. Exercised

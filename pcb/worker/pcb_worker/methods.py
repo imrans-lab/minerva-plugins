@@ -98,17 +98,45 @@ def _maybe_resolve(board: dict, params: dict) -> dict:
         want = RESOLVE_FAB_GEOMETRY_DEFAULT
     if not want:
         return board
-    return _resolve_mapped(board, tolerant=True)
+    return _resolve_mapped(board, tolerant=True, layers=_layer_params(params))
 
 
-def _resolve_mapped(board: dict, *, tolerant: bool) -> dict:
+def _layer_params(params: dict) -> dict:
+    """The HOST-INJECTED library-chain configuration of this call (B7).
+
+    The Go broker's withLibraryChain forces ``wip_root`` (the staging root
+    whose BLESSED entries may resolve) and ``library_layers`` (the durable
+    layers it found on this host — today the user layer, when its lock
+    exists) onto every compile-bearing call, exactly as withWIPRoot forces
+    the bless surface's write root: the HOST chooses library paths, the
+    caller never does. This helper is the single reader of those keys; its
+    return value is splatted into compile_board / normalize_board /
+    resolve_board, so an absent key falls back to each function's None
+    default (the seed-only chain) rather than being re-defaulted here.
+
+    Tests drive the worker methods directly (no broker), so they pass the
+    same keys in params — which is also why this tolerates their absence
+    instead of requiring them."""
+    p = params or {}
+    out: dict = {}
+    layers = p.get("library_layers")
+    if layers:
+        out["library_layers"] = layers
+    wip_root = p.get("wip_root")
+    if isinstance(wip_root, str) and wip_root.strip():
+        out["wip_root"] = wip_root
+    return out
+
+
+def _resolve_mapped(board: dict, *, tolerant: bool, layers: dict | None = None) -> dict:
     """Run resolve (tolerant=best-effort for fab, strict for the resolve action)
     and map its faults to structured error replies (never raise). Single owner of
-    the coincidence/resolve error shape shared by _maybe_resolve and _resolve."""
+    the coincidence/resolve error shape shared by _maybe_resolve and _resolve.
+    ``layers`` is a :func:`_layer_params` dict selecting the live chain."""
     try:
         if tolerant:
-            return resolve.resolve_board_best_effort(board)
-        return resolve.resolve_board(board)
+            return resolve.resolve_board_best_effort(board, **(layers or {}))
+        return resolve.resolve_board(board, **(layers or {}))
     except resolve.ResolveCoincidenceError as exc:
         return {"ok": False, "error": {
             "kind": "coincidence", "message": str(exc),
@@ -132,7 +160,7 @@ def _validate(params: dict) -> dict:
     return {"ok": True, "result": result}
 
 
-def _compile_or_fail(board: dict, *,
+def _compile_or_fail(board: dict, layers: dict | None = None, *,
                      requested_outputs: tuple[str, ...] = compile_board.V1_FAB_OUTPUTS):
     """The SHARED strict-compile prologue: COMPILE → ResolvedBoard IR, or a
     structured fail-closed error reply.
@@ -147,12 +175,14 @@ def _compile_or_fail(board: dict, *,
     Returns the ``ResolutionSuccess`` (carrying ``.board`` + ``.diagnostics`` the
     caller forwards as warnings) on success, or a ``{kind:"compile"}`` error reply
     (detect with :func:`_is_error_reply`) on failure — NO fallback to the legacy
-    best-effort emitter (W9 deletes the dead best-effort fab path). Uses the SAME
-    seed library the legacy resolve used (library_root=lockfile=None, i.e.
-    footprints.DEFAULT_LIBRARY_ROOT/LOCKFILE). ``params["resolve_geometry"]`` is
+    best-effort emitter (W9 deletes the dead best-effort fab path). ``layers``
+    (a :func:`_layer_params` dict, B7) selects the LIVE library chain — blessed
+    WIP + the host's durable layers over the seed; absent, the seed alone, the
+    pre-B7 behaviour. ``params["resolve_geometry"]`` is
     moot on the fab path now (compile ALWAYS resolves): accepted-and-ignored by the
     callers, not consulted here."""
-    compiled = compile_board.compile_board(board, requested_outputs=requested_outputs)
+    compiled = compile_board.compile_board(board, requested_outputs=requested_outputs,
+                                           **(layers or {}))
     if isinstance(compiled, compile_board.ResolutionFailure):
         return _compile_failure_reply(compiled)
     return compiled
@@ -167,7 +197,7 @@ def _generate(params: dict) -> dict:
     # W8.2 CUTOVER: same shape as _gerbers — COMPILE (strict) → ResolvedBoard IR →
     # kicad.generate, replacing the legacy best-effort _maybe_resolve (shared
     # prologue in _compile_or_fail).
-    compiled = _compile_or_fail(board)
+    compiled = _compile_or_fail(board, _layer_params(params))
     if _is_error_reply(compiled):
         return compiled
 
@@ -252,7 +282,7 @@ def _gerbers(params: dict) -> dict:
     # W8.2 CUTOVER: the LIVE fab path now COMPILES (strict) → ResolvedBoard IR →
     # emit, replacing the legacy best-effort _maybe_resolve (shared prologue in
     # _compile_or_fail — fail-closed, NO fallback to the legacy emitter).
-    compiled = _compile_or_fail(board)
+    compiled = _compile_or_fail(board, _layer_params(params))
     if _is_error_reply(compiled):
         return compiled
 
@@ -356,7 +386,7 @@ def _drc_geometric(params: dict) -> dict:
         union = geometric_indeterminate("parse", str(exc))
     else:
         try:
-            result = compile_board.compile_board(board)
+            result = compile_board.compile_board(board, **_layer_params(params))
         except Exception as exc:  # noqa: BLE001 - fail-closed: a compile crash is NOT a clean.
             union = geometric_indeterminate("internal", f"compile_board raised {exc!r}")
         else:
@@ -392,7 +422,7 @@ def _resolve(params: dict) -> dict:
     # error the caller asked to surface (unlike the fab path, which tolerates it
     # and falls back to inline pins). Reuse _resolve_mapped's shared structured
     # error handling — one place owns the coincidence/lookup error shape.
-    resolved = _resolve_mapped(board, tolerant=False)
+    resolved = _resolve_mapped(board, tolerant=False, layers=_layer_params(params))
     if _is_error_reply(resolved):
         return resolved
 
@@ -425,7 +455,7 @@ def _resolve_best_effort(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
-    resolved = _resolve_mapped(board, tolerant=True)
+    resolved = _resolve_mapped(board, tolerant=True, layers=_layer_params(params))
     if _is_error_reply(resolved):
         return resolved
 
@@ -474,7 +504,7 @@ def _assembly_check(params: dict) -> dict:
         board = _load(params)
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
-    return {"ok": True, "result": _assembly_tri_state(board)}
+    return {"ok": True, "result": _assembly_tri_state(board, layers=_layer_params(params))}
 
 
 def _mask_view(params: dict) -> dict:
@@ -503,7 +533,7 @@ def _mask_view(params: dict) -> dict:
         board = _load(params)
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
-    compiled = _compile_or_fail(board)
+    compiled = _compile_or_fail(board, _layer_params(params))
     if _is_error_reply(compiled):
         return compiled
     from .drc_geometric import UnsupportedGeometry, project_board
@@ -547,7 +577,8 @@ def _board_health_method(params: dict) -> dict:
         board = _load(params)
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
-    return {"ok": True, "result": _board_health(board, [], board)}
+    return {"ok": True, "result": _board_health(board, [], board,
+                                                layers=_layer_params(params))}
 
 
 def _promote_check(params: dict) -> dict:
@@ -593,7 +624,11 @@ def _promote_check(params: dict) -> dict:
     # The sub-checks get a FRESH params dict (cold review F5): forwarding the
     # caller's params verbatim would let knobs like resolve_geometry:false
     # weaken a leg of a gate whose whole point is that it cannot be weakened.
-    gate_params = {"board": params["board"]}
+    # The HOST-injected library chain (B7) is the one thing carried across —
+    # it is not a caller knob (withLibraryChain overrides it unconditionally),
+    # and a gate that resolved seed-only while the fab path resolved the live
+    # chain could pass a board whose gerbers use different footprints.
+    gate_params = {"board": params["board"], **_layer_params(params)}
 
     conn_reply = _drc(gate_params)
     connectivity: dict = {}
@@ -645,7 +680,7 @@ def _promote_check(params: dict) -> dict:
         # The ONE computation behind every assembly verdict (_assembly_tri_state
         # owns its own fault→indeterminate boundary — a crash inside reads as
         # indeterminate, which refuses below, never a pass).
-        assembly = _assembly_tri_state(raw_board)
+        assembly = _assembly_tri_state(raw_board, layers=_layer_params(params))
     else:
         assembly = {"status": "indeterminate", "error": "no board payload"}
     status = str(assembly.get("status", "indeterminate"))
@@ -686,7 +721,8 @@ def _normalize(params: dict) -> dict:
     except board_model.BoardParseError as exc:
         return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
 
-    normalized, diagnostics = compile_board.normalize_board(board)
+    normalized, diagnostics = compile_board.normalize_board(
+        board, **_layer_params(params))
     payloads = [_diagnostic_to_payload(d) for d in diagnostics]
     if normalized is None:
         # Fail-closed: an ambiguous pin makes the WHOLE normalize a failure. Surface
@@ -1406,7 +1442,7 @@ def _baseline_for_net(base_summary: dict, net: Any) -> dict:
     return {"clean": len(violations) == 0, "violations": violations}
 
 
-def _assembly_tri_state(board_dict: dict) -> dict:
+def _assembly_tri_state(board_dict: dict, *, layers: dict | None = None) -> dict:
     """The tri-state assembly check over the tolerantly-RESOLVED board.
 
     DCR 019fd5fd9084 / work item 019fd5fddc09 — the one computation behind
@@ -1429,7 +1465,7 @@ def _assembly_tri_state(board_dict: dict) -> dict:
     (same belt-and-braces the old advisory attach used)."""
     try:
         adv_board = board_dict
-        resolved_adv = _resolve_mapped(board_dict, tolerant=True)
+        resolved_adv = _resolve_mapped(board_dict, tolerant=True, layers=layers)
         if isinstance(resolved_adv, dict) and not _is_error_reply(resolved_adv):
             adv_board = resolved_adv
         return assembly_advisory.assembly_check(adv_board)
@@ -1438,7 +1474,7 @@ def _assembly_tri_state(board_dict: dict) -> dict:
 
 
 def _board_health(census_board: dict, routes: list,
-                  assembly_board: dict) -> dict:
+                  assembly_board: dict, *, layers: dict | None = None) -> dict:
     """The WHOLE-BOARD health ledger every ok route reply carries
     (DCR 019fd5fd9084).
 
@@ -1461,7 +1497,7 @@ def _board_health(census_board: dict, routes: list,
     assembly is placement-only, needs the captured graphics the projection
     drops, and _assembly_tri_state re-resolves it tolerantly for courtyards."""
     health = _completeness_keys(census_board, routes, None)
-    health["assembly"] = _assembly_tri_state(assembly_board)
+    health["assembly"] = _assembly_tri_state(assembly_board, layers=layers)
     return health
 
 
@@ -2121,7 +2157,8 @@ def _route(params: dict) -> dict:
     # mask-only limitation must not disable routing, but any dropped
     # copper/drill/rule is still fatal.
     compiled = _compile_or_fail(
-        board_dict, requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
+        board_dict, _layer_params(params),
+        requested_outputs=compile_board.V1_ROUTING_OUTPUTS)
     if _is_error_reply(compiled):
         return compiled
     compile_warnings = [_diagnostic_to_payload(d) for d in compiled.diagnostics]
@@ -2502,7 +2539,8 @@ def _route(params: dict) -> dict:
 
     payload["board_health"] = _board_health(
         drc_board if drc_board is not None else board_dict,
-        payload.get("routes") or [], board_dict)
+        payload.get("routes") or [], board_dict,
+        layers=_layer_params(params))
 
     return {"ok": True, "result": payload}
 
@@ -2947,6 +2985,39 @@ def _footprint_bless(params: dict) -> dict:
                                    "report": _report_summary(report)}}
 
 
+def _footprint_promote(params: dict) -> dict:
+    """Move a BLESSED WIP footprint into the durable USER library layer (B7).
+
+    params: {ref, wip_root, dest_root, overwrite?}
+    Reply:  {ok: True, result: {ref, layer:"user", path, entry}}
+
+    ``wip_root`` AND ``dest_root`` are both host-supplied (the Go side forces
+    them, same write-anywhere argument as staging: the agent chooses the part,
+    never the path). Everything that can refuse — unstaged ref, unblessed or
+    rejected entry, disk-vs-lock sha drift, a v1 destination lock, an existing
+    destination entry without ``overwrite`` — refuses BEFORE any write
+    (bless.promote_footprint). After a promote, the ref resolves from the
+    ``user`` layer in every live chain and the WIP staging slot is free.
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("name")
+    dest_root = params.get("dest_root")
+    try:
+        wip_root = _wip_root(params, required=True)
+        if not (isinstance(dest_root, str) and dest_root.strip()):
+            raise bless.BlessError(
+                "dest_root is required: it names the durable user library "
+                "root (<plugin data dir>/library_user) and is supplied by "
+                "the plugin host, which is the only party that knows the "
+                "data directory")
+        result = bless.promote_footprint(
+            ref, wip_root, dest_root,
+            overwrite=bool(params.get("overwrite")))
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    return {"ok": True, "result": result}
+
+
 #: The provenance class the acquisition path stages under. FIXED HERE, never
 #: taken from params: this method exists to store bytes the Go side fetched from
 #: the pinned OFFICIAL KiCad release, and official_kicad is the one source_kind
@@ -3077,6 +3148,10 @@ _HANDLERS = {
     "footprint_stage": lambda req: _footprint_stage(req.get("params") or {}),
     "footprint_report": lambda req: _footprint_report(req.get("params") or {}),
     "footprint_bless": lambda req: _footprint_bless(req.get("params") or {}),
+    # Promotion (B7) — the bless gate's exit door: a blessed WIP part moves
+    # whole (bless record intact) into the durable user layer, where every
+    # live chain resolves it without a wip_root.
+    "footprint_promote": lambda req: _footprint_promote(req.get("params") or {}),
     # Acquisition (S4/B3) — the Go fetcher's landing point: cross-check the
     # sha the fetcher reported, then stage + auto-bless through the same B2
     # machinery above, in one atomic call. The worker NEVER fetches.

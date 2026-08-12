@@ -43,6 +43,7 @@ from typing import Iterable, Union
 
 from agent_router.layers import CANON_TO_KICAD, STACK_INDEX
 
+from . import bless
 from .board_schema import (
     _BOUNDARY_MESSAGES,
     _OVERRIDE_NUM_KEYS,
@@ -2241,6 +2242,7 @@ def compile_board(
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
     library_layers: Union[Iterable, None] = None,
+    wip_root: Union[str, Path, None] = None,
     profile_root: Union[str, Path, None] = None,
 ) -> ResolutionResult:
     """Compile a canonical board dict into a :class:`ResolutionResult`.
@@ -2262,7 +2264,14 @@ def compile_board(
     layer alone and this compile is byte-identical to a pre-S9 one; the shipped
     seed is always the chain's base, so a configured layer can only SHADOW a
     seed part, never remove one. The supplying layer of each component's
-    footprint is recorded on its :class:`Provenance`."""
+    footprint is recorded on its :class:`Provenance`.
+
+    ``wip_root`` (B7) additionally tops the chain with the BLESSED WIP view
+    (:func:`pcb_worker.bless.live_library_chain`): only entries carrying an
+    approved bless record resolve; staged-but-unreviewed content is
+    structurally absent. The wip name remains REFUSED inside
+    ``library_layers`` itself — WIP enters a compile through this parameter
+    or not at all."""
     if policy is None:
         policy = DefaultCapabilityPolicy()
     diags = _Diagnostics()
@@ -2310,9 +2319,14 @@ def compile_board(
     # broken override must refuse the board, not fall through to the seed).
     # The DEFAULT chain is the seed layer alone, so ``chain[0].lock`` here IS
     # the ``lock`` this function loaded before layering existed (S9).
+    # ``wip_root`` (B7) tops the chain with the BLESSED WIP view — built by
+    # bless.live_library_chain, never a raw one; profiles below keep resolving
+    # through ``library_layers`` alone (normalize_library_layers refuses the
+    # wip name), because WIP stages footprints, not manufacturing floors.
     try:
-        chain = load_library_chain(library_layers, library_root=library_root,
-                                   lockfile=lockfile)
+        chain = bless.live_library_chain(
+            wip_root=wip_root, layers=library_layers,
+            library_root=library_root, lockfile=lockfile)
         if any(not isinstance(loaded.lock, dict) for loaded in chain):
             raise ValueError("lockfile is not a mapping")
     except Exception as exc:  # noqa: BLE001 — surfaced as a structured error, not a crash
@@ -2649,6 +2663,7 @@ def normalize_board(
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
     library_layers: Union[Iterable, None] = None,
+    wip_root: Union[str, Path, None] = None,
 ) -> tuple[Union[dict, None], tuple[Diagnostic, ...]]:
     """Rewrite a canonical SOURCE board to its normalized v2 shape — the "sync-back"
     the compile fold never performs (SB4).  PURE: returns ``(normalized_board,
@@ -2688,16 +2703,17 @@ def normalize_board(
         diags.error("invalid_board", "board must be a mapping", _board_ref())
         return None, diags.tuple()
 
-    # The SAME layer chain compile_board resolves through (``library_layers``,
-    # S9) — normalize's whole contract is that a board it accepts is a board
-    # compile accepts, which it cannot be if the two read different libraries.
-    # Materialized once for the same generator-safety reason compile_board
-    # does it (Codex 1160 P2).
+    # The SAME layer chain compile_board resolves through (``library_layers``
+    # + ``wip_root``, S9/B7) — normalize's whole contract is that a board it
+    # accepts is a board compile accepts, which it cannot be if the two read
+    # different libraries. Materialized once for the same generator-safety
+    # reason compile_board does it (Codex 1160 P2).
     if library_layers is not None:
         library_layers = tuple(library_layers)
     try:
-        chain = load_library_chain(library_layers, library_root=library_root,
-                                   lockfile=lockfile)
+        chain = bless.live_library_chain(
+            wip_root=wip_root, layers=library_layers,
+            library_root=library_root, lockfile=lockfile)
         if any(not isinstance(loaded.lock, dict) for loaded in chain):
             raise ValueError("lockfile is not a mapping")
     except Exception as exc:  # noqa: BLE001 — structured error, not a crash
