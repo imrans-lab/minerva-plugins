@@ -1123,10 +1123,11 @@ def _ir_board_dict(board: ResolvedBoard) -> dict:
     A non-round hole feature still RAISES (the round-only drill seal).
 
     FAIL-CLOSED seals (mirroring the gerber bridge): a captured feature the kicad
-    emitter cannot render — a zone, a board-level graphic, or a NET CLASS — must
-    RAISE, never vanish silently from a fabrication-bound file. compile_board
-    fail-closes zones/board-graphics upstream (always empty today), so those two
-    seal the adapter against a future IR silently dropping copper at the cutover.
+    emitter cannot render — an unfilled copper pour, a board-level graphic, or a
+    NET CLASS — must RAISE, never vanish silently from a fabrication-bound file.
+    Filled pours and keepout rule areas are projected below; the unfilled check
+    prevents a future caller from handing the KiCad oracle copper the kernel did
+    not compute.
 
     NET CLASSES are the case that is live NOW: ``compile_board`` compiles an
     authored ``design_rules.net_classes`` block into real classes with real

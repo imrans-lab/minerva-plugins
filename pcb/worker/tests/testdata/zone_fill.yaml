@@ -53,10 +53,9 @@
 #       through.
 #
 #   NETLESS KEEPOUT (top, overlapping the pour)
-#       Subtracts from the pour and emits no copper of its own. Also the reason
-#       this board is deliberately NOT a routing fixture: the routing grid does
-#       not model keepouts, so route_bridge still fails this board closed. That
-#       is correct — see route_bridge._reject_unroutable_board.
+#       Subtracts from the pour and emits no copper of its own. Routing now
+#       rasterises it as a top-layer polygon obstacle; this remains primarily a
+#       fill fixture because its geometry and assertions target pour carving.
 #
 # WHAT IS DELIBERATELY ABSENT:
 #

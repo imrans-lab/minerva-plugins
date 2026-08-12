@@ -156,7 +156,7 @@ asymmetric:
   passes through lower-cased, so an old or foreign board stays loadable, but it
   now emits a warning instead of being silent.
 
-### Zones (schema modeled, fabrication still refused)
+### Zones (compiled fill, DRC, routing constraints, and fabrication)
 
 `Zone` is the first entity added to this contract since the v2 schema settled
 (docket `019f9a73e5a2`, parent `019f761fda74`) — an authored region on a single
@@ -195,12 +195,11 @@ on v1 boards too, unlike identity, which is v2-only. `kind` is checked BEFORE
 `net`, because `kind` is what decides which net rule applies. These four codes
 are not yet cross-checked by a shared vector, but `board_validate.py`'s
 `_check_zones` mirrors them string-for-string and in the same
-first-violation-wins order. (Zones COMPILE since epoch 4 — the refusal
-lives further downstream; see the fabricability paragraph below.)
+first-violation-wins order.
 
 **A `copper_pour` zone is AUTHORABLE, COMPILABLE, and FABRICABLE (solid connect
-only); a `keepout` zone is AUTHORABLE and COMPILABLE but still refused at
-routing.** It round-trips losslessly (YAML and the `pcb.deserialize` JSON
+only); a `keepout` zone is AUTHORABLE, COMPILABLE, and enforced by routing and
+zone fill.** It round-trips losslessly (YAML and the `pcb.deserialize` JSON
 boundary), and `compile_board`'s `_build_zones` produces a `ResolvedZone`, then
 `fill_board_zones` (`zone_fill.py`) runs as the LAST compile step — on the
 assembled board, sharing the geometric DRC's own copper projection, because a
@@ -257,12 +256,11 @@ Downstream of a successful fill:
   hole-to-copper for the copper the filler does not produce (pads, traces, vias)
   is `gc10_hole_to_copper` (CP2 S7). Three different mechanisms, and the old
   wording credited one of them with another's job.
-- `route_bridge` still raises `UnsupportedGeometry`, but now ONLY for a
-  `keepout` zone, not for a `copper_pour`. A keepout is an authored
-  prohibition on copper the routing grid has no way to represent yet
-  (`agent_router.board.Obstacle` declares a polygon field the router never
-  reads); the fix belongs in the grid's rasteriser, not here, and is filed
-  separately (item family `019fc155bc32`).
+- `route_bridge` projects each straight-edged keepout into a layer-scoped
+  polygon obstacle, and the routing grid rasterises it. A net-scoped keepout is
+  conservative in routing today: it blocks every net on that layer, while zone
+  fill honours its net scope exactly. Arc-bearing keepouts still fail closed
+  rather than being tessellated by an invented tolerance.
 
 A malformed zone *container* still fails closed, but at the shared boundary
 rather than in the compiler: `zones: {}` is `invalid_board_structure`
@@ -409,7 +407,7 @@ any reference to it (Sol K2 review).
 
 ### The `id` field
 
-`Board`, `Trace`, `Via`, `Hole`, and `Zone` carry an opaque string `id`
+`Board`, `Trace`, `Via`, `Hole`, `Zone`, and `Cutout` carry an opaque string `id`
 (`"board:<hex>"`, `"trace:<hex>"`, …):
 
 - **Mint-once, never recomputed.** The id is assigned exactly once — by the
@@ -428,10 +426,9 @@ Entities that already have a stable identity keep it and gain **no** opaque id:
 derived children of a trace (N points → N-1 segments) and are identified by the
 persisted trace id + ordinal — inserting a waypoint renumbers that one trace's
 segments, which is inherent and acceptable since segments are never referenced
-independently. `zone` ids mint and validate exactly like `trace`/`via`/`hole`
-ids — see "Zones" above for what a `Zone` carries; it can be AUTHORED with
-identity from the start even though v1/v2 still cannot FABRICATE one (no
-compiler fills a zone's copper yet).
+independently. `zone` and `cutout` ids mint and validate exactly like
+`trace`/`via`/`hole` ids — see "Zones" and "Cut-outs" above for their compiled
+behavior.
 
 **Where a zone's id comes from.** On the Go side `MigrateV1toV2` is still the
 only minter, and it is gated on `Version == 1`; serialize never mints, it writes

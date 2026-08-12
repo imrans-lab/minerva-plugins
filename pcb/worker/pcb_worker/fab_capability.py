@@ -130,8 +130,9 @@ ROUTING_CRITICAL_OUTPUTS: tuple[str, ...] = ("copper", "drill", "rules")
 # filenames/layers: it also declares the pad shapes, graphic primitives, and
 # hole kinds the IR subset may contain.  The COMPILER consumes these as its
 # accept-set; a matching "the emitter can actually render every supported
-# primitive faithfully" test is a K3 gate (the current gerber.py flattens every
-# SMD to a rectangle, so that gate is not yet green — see K3 019f7aed6d9e).
+# primitive faithfully" test is a K3 gate. Gerber now emits the supported
+# rect/roundrect/circle/oval shapes explicitly, and the parity suite pins that
+# accept-set to emitted geometry.
 # ---------------------------------------------------------------------------
 
 # Pad copper shapes the v1 IR subset admits (KiCad pad-shape tokens).

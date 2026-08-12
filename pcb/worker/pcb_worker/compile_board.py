@@ -1881,22 +1881,15 @@ def _build_holes(board: dict, board_id: str, schema_version: int,
 
 
 # ---------------------------------------------------------------------------
-# Zones (docket 019f9a73e5a2). AUTHORED outline in, NO computed fill.
+# Zones (docket 019f9a73e5a2). Authored outline first; final fill after assembly.
 # ---------------------------------------------------------------------------
 #
-# WHAT THIS DOES AND DOES NOT DO. A zone reaches the IR as an HONESTLY UNFILLED
-# zone: ``ResolvedZone.authored_outline`` carries the polygon the author drew and
-# ``ResolvedZone.fill`` is ``None``, which the IR distinguishes from an empty
-# tuple — ``None`` means "no copper has been COMPUTED for this zone" (its copper
-# is INDETERMINATE), an empty tuple would mean "computed, and it came out empty".
-# Computing the fill (the pour boolean against pads, traces, keepouts and thermal
-# reliefs) is deliberately NOT attempted here: it needs an independent oracle
-# (KiCad's own zone filler) to be checkable at all, so it is its own unit.
-#
-# Consequently every output consumer still refuses a board carrying zones —
-# route_bridge._reject_unroutable_board, kicad._ir_board_dict and
-# gerber.build_gerbers_ir raise, and drc_geometric.run_geometric_drc returns the
-# INDETERMINATE verdict. Nothing in this module relaxes any of those.
+# This builder preserves ``authored_outline`` and initially sets ``fill=None``;
+# the distinction from ``()`` matters because None means uncomputed while an
+# empty tuple is a computed-empty pour. Once the complete ResolvedBoard exists,
+# ``fill_board_zones`` computes every copper pour or fails the compile. Output
+# consumers therefore receive computed fill; keepouts retain None because they
+# are prohibitions rather than copper.
 #
 # CODE VOCABULARY. ``invalid_zone_outline`` / ``zone_unknown_net`` /
 # ``zone_unknown_layer`` are Go's own strings (internal/board/validate.go
@@ -2080,11 +2073,11 @@ def _zone_kind(raw: dict, ordinal: int, ref: SourceRef,
 
 def _build_zones(board: dict, board_id: str, net_id_by_name: dict[str, str],
                  schema_version: int, diags: _Diagnostics) -> tuple[ResolvedZone, ...]:
-    """Compile authored zones into UNFILLED :class:`ResolvedZone` entries.
+    """Compile authored zones into pre-fill :class:`ResolvedZone` entries.
 
-    Every zone gets ``fill=None`` EXPLICITLY (not by relying on the field default)
-    and a WARNING recording that its copper is uncomputed, so "no computed copper"
-    is visible in the diagnostic stream and never reads as "no copper"."""
+    Every zone gets ``fill=None`` explicitly. The completed board is passed to
+    ``fill_board_zones`` at the end of compilation, so no successful compile
+    returns an uncomputed copper pour."""
     zones: list[ResolvedZone] = []
     for ordinal, raw in enumerate(_dict_items(board, "zones", "zone", diags)):
         net_name = raw.get("net")
@@ -2346,16 +2339,12 @@ def compile_board(
     # must refuse rather than treat as absent (review 623 R2).  An explicitly empty
     # list declares nothing and is allowed.
     #
-    # ``zones`` LEFT THIS LIST in epoch 4 (docket 019f9a73e5a2): an authored copper
-    # zone now COMPILES, into ``ResolvedZone`` with ``fill=None`` (see
-    # :func:`_build_zones`).  ``board_graphics`` and ``keepouts`` are a DIFFERENT
-    # capability and stay refused.  Nothing downstream was relaxed: route_bridge,
-    # kicad and gerber each still raise on a non-empty ``rb.zones`` and geometric
-    # DRC still returns INDETERMINATE, so a zone is authorable and compilable but
-    # not routable, DRC-clean, or fabricable.  A malformed ``zones`` CONTAINER is
-    # still refused, now by the shared boundary above (validate_board_v2 →
-    # ``invalid_board_structure``) rather than here, so ``zones: {}`` keeps failing
-    # closed while ``zones: []`` keeps declaring nothing.
+    # ``zones`` LEFT THIS LIST in epoch 4 (docket 019f9a73e5a2). _build_zones
+    # creates pre-fill IR entries and the final compile pass computes copper
+    # pours. Gerber/KiCad emit them, geometric DRC checks them, and routing
+    # rasterises authored keepouts. The separate legacy top-level ``keepouts``
+    # feature stays refused. A malformed ``zones`` CONTAINER is still rejected
+    # by validate_board_v2 (``invalid_board_structure``).
     #
     # ``cutouts`` LEFT this list in epoch CPN1 (docket 019fe2faf76e), the round
     # that fixed the fail-open its refusal existed to hold back (019fbd30f7):

@@ -69,9 +69,9 @@ type Board struct {
 	// Nothing in this codec sorts or dedupes the list, so what an author writes
 	// is what every consumer sees; validateLayers enforces the shape.
 	//
-	// Inner layers are AUTHORABLE, NOT FABRICABLE — the same pattern as Zones
-	// below. A 4-layer stack round-trips and validates here, while the Python
-	// compiler still refuses any stack but exactly ["top","bottom"]
+	// Inner layers are AUTHORABLE, NOT FABRICABLE. A 4-layer stack round-trips
+	// and validates here, while the Python compiler still refuses any stack but
+	// exactly ["top","bottom"]
 	// (compile_board._require_two_layer). A board that declares NO layers is a
 	// 2-layer board by convention; this contract does not invent a stack for it.
 	// See docs/board-yaml.md "Layer stack".
@@ -84,36 +84,21 @@ type Board struct {
 	Traces      []Trace     `json:"traces,omitempty" yaml:"traces,omitempty"`
 	Vias        []Via       `json:"vias,omitempty" yaml:"vias,omitempty"`
 
-	// Zones are authored copper-fill regions (most commonly a ground/power
-	// pour) — the first entity added to this contract since the v2 schema
-	// settled (docket 019f9a73e5a2; its parent is the CAM DCR 019f761ead82,
-	// and 019f761fda74 "Canonical board YAML v2" is a SIBLING under that
-	// parent, which is where the schema half of the zone work belongs). Modeled and
-	// round-tripped losslessly here. A zone now also COMPILES into the Python IR
-	// as ResolvedZone with fill=None (i.e. no computed copper), but every OUTPUT
-	// consumer still refuses one: route_bridge, both fab emitters, and geometric
-	// DRC (which reports indeterminate). So a zone is authorable and compilable
-	// and NOT fabricable. Filling a pour is unimplemented, and until it exists
-	// those refusals are what keep an uncomputed pour out of fabrication.
+	// Zones are authored copper-pour or keepout regions. They round-trip here and
+	// compile into ResolvedZone entries. The final compile pass computes a solid
+	// pour fill (or fails closed); Gerber/KiCad emit it, geometric DRC checks it,
+	// and routing treats keepouts as polygon obstacles. See docs/board-yaml.md for
+	// the deliberately conservative limits (thermal relief and keepout net scope).
 	// See docs/board-yaml.md "Zones".
 	Zones []Zone `json:"zones,omitempty" yaml:"zones,omitempty"`
 
 	// Cutouts are authored openings THROUGH the whole board — an internal slot
 	// or window milled out of the substrate (docket 019fb92108 campaign 2,
-	// epoch B). Modeled and round-tripped losslessly here, and that is ALL:
-	// unlike a zone, a cutout is AUTHORABLE and NOT COMPILABLE. compile_board
-	// refuses any board declaring a non-empty `cutouts` via the
-	// unsupported_board_feature denylist, so a cutout never reaches the Python
-	// IR at all.
-	//
-	// The refusal is the fail-closed keystone, not a stub: the IR HAS a shape
-	// for this (ProfileOutline.cutouts, resolved_board.py) but the projection
-	// every fab emitter reads (ir_projection.outline_frame) silently degrades a
-	// ProfileOutline to its outer axis-aligned bounding box, DISCARDING the
-	// cutouts with no warning — a board authored with a window would ship as
-	// SOLID copper-clad substrate. That fail-open is filed as 019fbd30f7. Until
-	// it is fixed, refusing at compile is the only honest treatment, and it is
-	// exactly how zones started.
+	// epoch B). They round-trip here and compile into ProfileOutline.cutouts.
+	// Both fab emitters draw every opening as a closed Edge.Cuts contour;
+	// geometric DRC, routing, and zone fill use the same cutout geometry. The
+	// compiler validates that contours are strictly interior, simple, nonzero,
+	// and conservatively disjoint before any consumer sees them.
 	Cutouts []Cutout `json:"cutouts,omitempty" yaml:"cutouts,omitempty"`
 
 	// MountingHoles are board-level drilled holes not attached to a pad — the
@@ -380,12 +365,10 @@ type Via struct {
 // Zone is an authored region on a single layer: either a copper fill tied to one
 // net — most commonly a ground or power pour — or a keepout, a KiCad-style rule
 // area that forbids copper and needs no net at all (see Kind and Net below).
-// It carries the AUTHORED outline only;
-// computing the actual filled copper against pads, traces, keepouts, and
-// thermal reliefs is compiler work this contract does not attempt (mirrors the
-// Python IR's split between ResolvedZone.authored_outline and its separate
-// .fill field, pcb/worker/pcb_worker/resolved_board.py) — see docs/board-yaml.md
-// "Zones" for exactly what is modeled here versus what downstream still refuses.
+// It carries the AUTHORED outline only; the Python compiler computes the actual
+// pour after pads, traces, holes, cutouts, and keepouts exist. This mirrors the
+// IR's split between ResolvedZone.authored_outline and .fill. See
+// docs/board-yaml.md "Zones" for the fill and refusal rules.
 //
 // Field-naming choices: Net/Layer match Trace.Net/Trace.Layer. ClearanceMM
 // matches DesignRules.ClearanceMM (this file) and the Python IR's
@@ -446,9 +429,9 @@ type Zone struct {
 	ClearanceMM float64 `json:"clearance_mm,omitempty" yaml:"clearance_mm,omitempty"`
 	// ThermalGapMM is the copper gap left around a same-net pad that is NOT
 	// thermally relieved; ThermalBridgeWidthMM is the spoke width connecting a
-	// relieved pad to the pour. Zero/omitted defers to the compiler's own
-	// default whenever zone filling is implemented (not yet — see
-	// docs/board-yaml.md "Zones").
+	// relieved pad to the pour. Zero/omitted selects the v1 solid-connect fill;
+	// authoring thermal dimensions currently fails closed because thermal-spoke
+	// geometry is not implemented. See docs/board-yaml.md "Zones".
 	ThermalGapMM         float64 `json:"thermal_gap_mm,omitempty" yaml:"thermal_gap_mm,omitempty"`
 	ThermalBridgeWidthMM float64 `json:"thermal_bridge_width_mm,omitempty" yaml:"thermal_bridge_width_mm,omitempty"`
 

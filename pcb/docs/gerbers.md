@@ -23,8 +23,11 @@ convention as `minerva_pcb_generate`. `out_dir` optionally also writes to disk.
 | `<base>-B_Cu.gbr` | Bottom copper: TH/via annuli, bottom traces |
 | `<base>-F_Mask.gbr` | Top solder-mask openings (pad + clearance) |
 | `<base>-B_Mask.gbr` | Bottom solder-mask openings |
-| `<base>-F_SilkS.gbr` | Top silkscreen (resolved footprint silk graphics only; no output when the footprint carries none — K4) |
-| `<base>-Edge_Cuts.gbr` | Board outline rectangle from origin + width/height |
+| `<base>-F_Paste.gbr` | Top stencil apertures from resolved pad paste geometry |
+| `<base>-B_Paste.gbr` | Bottom stencil apertures from resolved pad paste geometry |
+| `<base>-F_SilkS.gbr` | Top legend: resolved footprint silk plus synthesized reference designators |
+| `<base>-B_SilkS.gbr` | Bottom legend: resolved footprint silk plus synthesized reference designators |
+| `<base>-Edge_Cuts.gbr` | Board rim plus every interior cutout contour |
 | `<base>-PTH.drl` | Plated through-holes (Excellon) — only if the board has any |
 | `<base>-NPTH.drl` | Non-plated holes (Excellon) — only if the board has any |
 
@@ -69,16 +72,14 @@ Each file: `M48` header, `;`-comments, `FMAT,2`, `METRIC`, a tool table keyed by
 ascending drill diameter (deterministic), a G90/G05 body of `X..Y..` hits grouped
 per tool, `M30`. Metric, absolute, 3.3 decimal coordinates.
 
-### Silk limitations
+### Silk behavior and limitations
 
-`F_SilkS` emits the component's **real resolved silkscreen primitives** (lines,
-arcs, polygons from the resolved footprint's `F.SilkS` graphics) when the footprint
-carries them; a component **without** resolved silk graphics contributes **no silk
-output** — K4 retired the procedural courtyard-box placeholder, matching the KiCad
-emitter, which never drew one (faithful-or-nothing). Silkscreen **text** (vectorised
-refdes/value glyphs) is still not rendered — `gerber-writer` has no glyph
-primitive — so real silk-text correctness is tracked separately (silk-text
-`019f77fd6d69`; coverage audit `019f77fd9c6c`).
+`F_SilkS` and `B_SilkS` emit the component's **real resolved silkscreen
+primitives** (lines, arcs, circles, and polygons) plus synthesized stroke-font
+**reference designators**. The emitter does not invent a courtyard box for a
+footprint with no authored silk. Arbitrary footprint value/user text is not a
+first-class emitted text primitive; only the reference-designator path is
+vectorized deliberately.
 
 ### Bottom-side components
 
@@ -134,8 +135,9 @@ the same v2 id-minting + structural validation (finding `019f8b7fb07e` c689).
 
 Structural validation + two independent parser round-trips are the automated
 acceptance gate; they are **not** a substitute for a viewer check. Before any
-board's Gerbers are treated as fab-final, a human must open all six layers plus
-both drill files in `gerbv` or KiCad GerbView and confirm (extends the spike's
+board's Gerbers are treated as fab-final, a human must open all nine layers plus
+both drill files in KiCad GerbView (or another viewer proven against the emitted
+aperture shapes) and confirm (extends the spike's
 checklist to the production `minerva_pcb_gerbers` output):
 
 1. **Zero parser warnings** in the viewer for every layer.
@@ -143,14 +145,14 @@ checklist to the production `minerva_pcb_gerbers` output):
    only where the footprint carries real graphics (no courtyard boxes — K4); TH pads
    show their resolved copper land (a round annulus, or an authored square / roundrect
    land — D1) with a drilled hole on both copper layers; traces land exactly on
-   pads/vias; the outline is a clean closed rectangle; mask openings are centered
-   on their pads with visible clearance; NPTH holes get a **drill-size mask
+   pads/vias; the rim and every cutout are clean closed contours; mask openings
+   are centered on their pads with visible clearance; NPTH holes get a **drill-size mask
    opening** (no copper ring) on both sides, matching KiCad's `np_thru_hole` (E3).
 3. **Drill-to-copper alignment:** every PTH hole lands inside its copper annulus
    with no annular-ring violations.
 
-No `gerbv` / GerbView is available in this environment, so this gate remains open
-debt (#5) and must be closed per-board by a human before fabrication.
+This gate must be closed per-board by a human before fabrication; a prior viewer
+check of one golden does not bless a later board's package.
 
 ## Testing
 

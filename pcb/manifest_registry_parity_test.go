@@ -179,6 +179,47 @@ func TestManifestInputSchemaMatchesBroker(t *testing.T) {
 	}
 }
 
+// TestCutoutDescriptionsMatchCompiledSupport pins the agent-facing contract
+// that drifted after CPN1: cutouts are no longer schema-only. These panel tools
+// do not have a duplicate Go ToolSpec, so the backend description-parity test
+// above cannot protect them.
+func TestCutoutDescriptionsMatchCompiledSupport(t *testing.T) {
+	data, err := os.ReadFile("manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest.json: %v", err)
+	}
+	var mf manifestFile
+	if err := json.Unmarshal(data, &mf); err != nil {
+		t.Fatalf("parse manifest.json: %v", err)
+	}
+
+	descriptions := map[string]string{}
+	for _, tool := range mf.Tools {
+		descriptions[tool.Name] = tool.Description
+	}
+	for _, name := range []string{
+		"minerva_pcb_list_cutouts",
+		"minerva_pcb_create_cutout",
+		"minerva_pcb_propose_cutout",
+	} {
+		description, ok := descriptions[name]
+		if !ok {
+			t.Errorf("manifest missing %s", name)
+			continue
+		}
+		for _, claim := range []string{"routing", "DRC", "zone fill", "Edge.Cuts"} {
+			if !strings.Contains(description, claim) {
+				t.Errorf("%s description omits compiled cutout consumer %q: %s", name, claim, description)
+			}
+		}
+		for _, obsolete := range []string{"NOT YET COMPILED", "not compilable", "do not see it"} {
+			if strings.Contains(description, obsolete) {
+				t.Errorf("%s description retains obsolete claim %q: %s", name, obsolete, description)
+			}
+		}
+	}
+}
+
 // toolIdentityKeyword is a HEURISTIC, not a content-quality check (cold
 // review S2, docket 019fa486b408): a keyword string that appears in this
 // tool's OWN description and, verified below, in NO OTHER tool's description.

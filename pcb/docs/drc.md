@@ -107,13 +107,13 @@ against the raised floor: `_effective_min_trace_width` for GC1,
   verdict:"clean"|"violations", findings:[…], counts:{…}, warnings:[…],
   board_id, source_digest, rule_profile}`.
 - **Indeterminate** (compile failed, or the kernel met geometry it cannot
-  model — a non-rectangular outline, a copper zone/pour, …):
+  model — a non-rectangular outer profile, unsupported board graphic, …):
   `{ok:false, scope:"geometric", verifies_geometry:false,
   verdict:"indeterminate", error:{kind, message, diagnostics}}` — carrying **no**
   `clean`/`findings`/zero-counts a caller could mistake for a pass. `kind` is
   `unresolved_geometry` when the board parsed but would not compile/resolve
   (unknown footprint, sizeless pad), or `unsupported_geometry` when the kernel
-  met geometry it does not model — a non-rectangular outline, a copper zone/pour,
+  met geometry it does not model — a non-rectangular outer profile,
   a via **per-layer padstack** (019f95893989), a copper **board/placed graphic**
   (019f95897086), or a referenced net class whose `min_trace_width_mm` or
   `min_clearance_mm` is not a sourceable value (see "Per-net-class minima" above)

@@ -56,10 +56,11 @@ netless keepout subtracts from every pour; a net-scoped keepout (one naming a
 net) subtracts only from pours of that net, mirroring the authored contract and
 both validators.
 
-Note what this does NOT do: a keepout also constrains ROUTING, and the routing
-grid does not model it. That is why ``route_bridge`` still fails closed on a
-keepout — subtracting it from a pour here does not make the board routable, and
-must not be read as making it so.
+Routing also consumes authored keepouts: ``route_bridge`` projects each
+straight-edged keepout into a layer-scoped polygon obstacle and the routing grid
+rasterises it. Net-scoped keepouts are conservative there today (they block all
+nets), while fill honours their net scope exactly. Arc-bearing keepouts still
+fail routing closed rather than being approximated.
 
 === FAIL-CLOSED ===
 
