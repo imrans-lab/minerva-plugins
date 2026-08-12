@@ -369,7 +369,12 @@ class TestBookkeeping:
 def _coupon_with(holes):
     board = copy.deepcopy(yaml.safe_load(COUPON.read_text(encoding="utf-8")))
     if holes:
-        board["mounting_holes"] = holes
+        # The coupon is board-source v2 (strict ids): mint a "<kind>:<32hex>"
+        # id for any added hole, at this one funnel rather than in five
+        # callers. Deterministic per index so failures stay reproducible.
+        board["mounting_holes"] = [
+            dict(hole, id=hole.get("id", f"hole:{index:032x}"))
+            for index, hole in enumerate(holes, start=1)]
     result = compile_board(board)
     assert isinstance(result, ResolutionSuccess), \
         [(d.code, d.message) for d in result.diagnostics]

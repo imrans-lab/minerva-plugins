@@ -499,8 +499,12 @@ class TestTheFloorIsLiveOnARealBoard:
         # x=13.0 sits under the NET_A and NET_B trace pair that both run along
         # y=11.45 at width 0.25. Bore radius 0.5 + trace half-width 0.125 = 0.625,
         # so the edge-to-edge gap is (y_mm - 11.45) - 0.625.
+        # The coupon is board-source v2, whose validation is STRICT: every
+        # trace/via/hole must carry a minted "<kind>:<32hex>" id. A test that
+        # adds an entity mints one too — v1's ordinal tolerance is gone.
         board["mounting_holes"] = [
-            {"x_mm": 13.0, "y_mm": y_mm, "diameter_mm": 1.0, "plated": False}]
+            {"id": "hole:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+             "x_mm": 13.0, "y_mm": y_mm, "diameter_mm": 1.0, "plated": False}]
         result = compile_board(board)
         assert isinstance(result, ResolutionSuccess), \
             [(d.code, d.message) for d in result.diagnostics]

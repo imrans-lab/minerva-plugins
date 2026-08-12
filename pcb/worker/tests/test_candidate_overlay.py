@@ -509,8 +509,10 @@ def test_a_candidate_that_causes_a_gc10_violation_is_not_laundered():
     with open("tests/testdata/coupon_jlc1.yaml") as fh:
         board = copy.deepcopy(_yaml.safe_load(fh))
     # A mounting hole in clear space; the board stays clean with it.
+    # v2 coupon: added entities must carry minted ids (see the gc10 note).
     board["mounting_holes"] = [
-        {"x_mm": 12.3, "y_mm": 14.0, "diameter_mm": 1.0, "plated": False}]
+        {"id": "hole:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+         "x_mm": 12.3, "y_mm": 14.0, "diameter_mm": 1.0, "plated": False}]
     rb = _compile(board)
 
     from pcb_worker.drc_geometric import run_geometric_drc

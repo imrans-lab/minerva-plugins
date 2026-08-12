@@ -74,5 +74,6 @@ No NPTH drill file: the board has no unplated holes (known corpus gap
 
 ## Human review status
 
-- [ ] Viewed in KiCad gerbview (owner) — REQUIRED before ordering
-  (docs/gerbers.md: fab-correctness still needs a human viewer check).
+- [x] Viewed in KiCad gerbview (owner, 2026-08-12) — all layers examined
+  including drills; passed visual inspection. (docs/gerbers.md's required
+  human viewer check.)
