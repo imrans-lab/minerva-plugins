@@ -33,8 +33,10 @@ import math
 from pathlib import Path
 from typing import Union
 
+from .footprint_def import ReferenceTextDefinition
 from .footprints import FootprintLookupError, resolve_footprint
 from .pad_source import has_resolved_pads
+from .silk_source import refdes_strokes
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP
 from .pad_types import normalize_pad_type as _normalize_pad_type
 
@@ -214,6 +216,55 @@ def _resolve_component(
     # geometry when pads actually resolved, else the panel would suppress its
     # fallback pin renderer and draw nothing at all (Stage 2 step 7 collapse).
     comp["has_pad_geometry"] = has_resolved_pads(comp)
+
+    # PRINTED REFERENCE DESIGNATOR (WYSIWYG goal 019ff4a5a75a, gap G2): the
+    # fab silk carries a stroke-font designator that exists NOWHERE in the
+    # authored board — silk_source synthesizes it at emit time. A panel that
+    # draws only comp["graphics"] therefore shows a board with no printed
+    # designators, and clears (or misses) silk collisions the fabricated board
+    # actually has. Attach the SAME strokes, from the SAME owner, in the SAME
+    # footprint-LOCAL frame the graphics above are in, so the panel's one
+    # placement transform co-registers designator, silk and copper.
+    #
+    # A SEPARATE KEY, deliberately — NOT appended to comp["graphics"]. The
+    # loose-dict emitters consume comp["graphics"] (gerber._emit_silk,
+    # kicad._emit_footprint_graphics) and then synthesize the designator
+    # THEMSELVES (gerber._emit_refdes); merging the strokes into graphics
+    # would print every designator twice on that path. Emitters never read
+    # this key; it exists for renderers.
+    comp["refdes_graphics"] = _refdes_graphics(ref, parsed)
+
+
+def _refdes_graphics(ref: str, parsed: dict) -> list:
+    """One component's printed designator as footprint-LOCAL poly graphics.
+
+    The strokes come from :func:`silk_source.refdes_strokes` — the ONE owner
+    every silk consumer (the Gerber emitter, the DRC projection, GC9) already
+    uses — called at IDENTITY placement (0, 0, 0, top), which yields the glyphs
+    in the footprint-local frame with the footprint's own authored fp_text
+    anchor/rotation/size applied. Identity extraction is faithful for both
+    sides because ``refdes_strokes`` does all side handling inside its
+    placement step (``_place``), which identity reduces to a pass-through; a
+    renderer that places these with the same transform it places
+    ``comp["graphics"]`` with reproduces the emitter's board-absolute strokes
+    by construction. Pinned by
+    test_refdes_graphics_placed_by_the_component_transform_match_the_emitter.
+
+    Emitted in the graphics-dict poly shape the panel already parses
+    (layer/kind/points/width), because a designator IS silk — just silk no one
+    authored.
+    """
+    rt = parsed.get("reference_text")
+    ref_def = None
+    if isinstance(rt, dict):
+        ref_def = ReferenceTextDefinition(
+            position=(float(rt["x_mm"]), float(rt["y_mm"])),
+            rotation_deg=float(rt.get("rotation_deg", 0.0)),
+            size_mm=float(rt.get("size_mm", 1.0)))
+    return [{"layer": "F.SilkS", "kind": "poly",
+             "points": [[x, y] for (x, y) in poly.points],
+             "width": poly.width}
+            for poly in refdes_strokes(ref, 0.0, 0.0, 0.0, ref_def)]
 
 
 def _pads_from_parsed(fp_pads: list) -> list:

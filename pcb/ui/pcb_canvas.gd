@@ -2365,7 +2365,7 @@ func _draw_component(comp) -> void:
 		if comp.locked:
 			_draw_locked_hatch(screen_poly)
 
-		if show_silk and comp.graphics.size() > 0:
+		if show_silk and (comp.graphics.size() > 0 or comp.refdes_graphics.size() > 0):
 			_draw_component_silk(comp, xform)
 
 		if show_courtyard and comp.graphics.size() > 0:
@@ -2645,6 +2645,29 @@ func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String
 ## _draw_component_graphics_layer for the transform/geometry contract.
 func _draw_component_silk(comp, xform: Transform2D) -> void:
 	_draw_component_graphics_layer(comp, xform, "F.SilkS", silk_color, silk_min_width_px)
+	_draw_component_refdes(comp, xform)
+
+
+## Draw the PRINTED reference designator (WYSIWYG goal 019ff4a5a75a, gap G2) —
+## the worker-derived stroke-font glyphs the fab actually prints, placed by the
+## SAME transform as the footprint silk above so designator, silk and copper
+## co-register exactly as they do in the emitted Gerber. This is artwork, not
+## chrome: the floating UI name label near the component is a separate,
+## screen-space affordance and deliberately stays. Before this, the two GC9
+## silk-to-pad findings on the seed coupon (a designator printed over a
+## neighbour's pad) were invisible in the editor because only the label —
+## drawn somewhere else entirely — represented the designator.
+func _draw_component_refdes(comp, xform: Transform2D) -> void:
+	for g in comp.refdes_graphics:
+		var w: float = maxf(float(g.get("width", 0.15)) * zoom, silk_min_width_px)
+		var poly_points: PackedVector2Array = []
+		for pt in g.get("points", []):
+			var local_pt: Vector2 = pt
+			poly_points.append(world_to_screen(comp.position + (xform * local_pt)))
+		if poly_points.size() >= 2:
+			# Glyph strokes are OPEN polylines — a closing segment would turn a
+			# "C" into an "O". draw_polyline never closes; keep it that way.
+			draw_polyline(poly_points, silk_color, w)
 
 
 ## Draw F.CrtYd (courtyard) graphics — the module's true extent (also what

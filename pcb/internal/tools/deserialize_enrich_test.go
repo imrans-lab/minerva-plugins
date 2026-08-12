@@ -150,3 +150,38 @@ func TestAdoptionIsPerKeyNotAllOrNothing(t *testing.T) {
 		t.Fatalf("pads should adopt independently of the graphics key")
 	}
 }
+
+func TestAdoptionCarriesThePrintedDesignator(t *testing.T) {
+	strokes := []interface{}{map[string]interface{}{
+		"layer": "F.SilkS", "kind": "poly",
+		"points": []interface{}{[]interface{}{0.0, -1.5}, []interface{}{0.5, -1.5}},
+		"width":  0.15,
+	}}
+	byRef := resolvedByRef(resolveReply(t,
+		// A silk-only footprint: designator + graphics, NO pads. It must still
+		// be indexed (and adopted) — before refdes existed, "resolved to
+		// nothing adoptable" and "silk-only" were indistinguishable.
+		map[string]interface{}{
+			"ref": "REV1", "has_pad_geometry": false,
+			"graphics":        []interface{}{map[string]interface{}{"kind": "line"}},
+			"refdes_graphics": strokes,
+		},
+	))
+	rev1, ok := byRef["REV1"]
+	if !ok || len(rev1.refdesGraphics) != 1 {
+		t.Fatalf("silk-only component's designator strokes not indexed: %+v", rev1)
+	}
+
+	b := &board.Board{Components: []board.Component{{Ref: "REV1"}}}
+	if n := adoptResolvedGeometry(b, byRef); n != 1 {
+		t.Fatalf("attached = %d, want 1", n)
+	}
+	if _, ok := b.Components[0].Extra["refdes_graphics"]; !ok {
+		t.Fatalf("refdes_graphics not adopted — the panel would keep showing "+
+			"UI labels instead of the strokes the fab prints; got %v",
+			b.Components[0].Extra)
+	}
+	if _, ok := b.Components[0].Extra["has_pad_geometry"]; ok {
+		t.Fatalf("has_pad_geometry stamped on a pad-less component")
+	}
+}

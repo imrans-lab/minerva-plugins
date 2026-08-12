@@ -111,6 +111,18 @@ var has_pad_geometry: bool = false
 ##   points: Array[Vector2], angle: float (optional)  (kind == "arc" or "poly")
 var graphics: Array = []
 
+## PRINTED reference designator — the worker-derived stroke-font glyphs the fab
+## actually prints on silk (WYSIWYG goal 019ff4a5a75a, gap G2), in the SAME
+## footprint-local frame as `graphics`, poly entries only. Kept SEPARATE from
+## `graphics` on purpose, in both directions:
+##   * inbound, the worker attaches it under its own key because the loose-dict
+##     emitters consume comp["graphics"] and then synthesize the designator
+##     themselves — merged strokes would print twice;
+##   * outbound, to_board_dict must NOT carry it (derived, re-attached by every
+##     load's resolve enrichment), while to_dict (panel state) does, so a
+##     project restore keeps the printed designator without re-resolving.
+var refdes_graphics: Array = []
+
 ## Bounding box center offset from footprint origin (for origin-based positioning)
 ## When has_pad_geometry is true, position = origin, visual center = position + bbox_center_offset
 var bbox_center_offset: Vector2 = Vector2.ZERO
@@ -330,6 +342,38 @@ func _graphics_to_list() -> Array:
 					entry["angle"] = g["angle"]
 		list.append(entry)
 	return list
+
+
+## Serialize/deserialize the printed-designator strokes (poly-only). The dict
+## shape matches graphics poly entries so a future merge stays trivial.
+func _refdes_to_list() -> Array:
+	var list := []
+	for g in refdes_graphics:
+		var pts_list := []
+		for pt in g.get("points", []):
+			var pv: Vector2 = pt
+			pts_list.append({"x": pv.x, "y": pv.y})
+		list.append({"layer": g.get("layer", "F.SilkS"), "kind": "poly",
+			"points": pts_list, "width": g.get("width", 0.15)})
+	return list
+
+
+func _refdes_from_list(list_data: Array) -> void:
+	refdes_graphics.clear()
+	for g_data in list_data:
+		if not (g_data is Dictionary):
+			continue
+		var pts: Array = []
+		for pt_data in g_data.get("points", []):
+			pts.append(_point_from_any(pt_data))
+		if pts.size() < 2:
+			continue
+		refdes_graphics.append({
+			"layer": str(g_data.get("layer", "F.SilkS")),
+			"kind": "poly",
+			"width": float(g_data.get("width", 0.15)) if g_data.get("width") != null else 0.15,
+			"points": pts,
+		})
 
 
 ## Deserialize a graphics list (shared by from_dict/from_board_dict) into
@@ -944,6 +988,7 @@ func to_dict() -> Dictionary:
 		"pads": _pads_to_list(),
 		"has_pad_geometry": has_pad_geometry,
 		"graphics": _graphics_to_list(),
+		"refdes_graphics": _refdes_to_list(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
 		"properties": properties.duplicate(),
 		"layer": layer,
@@ -1001,6 +1046,7 @@ func load_from_dict(data: Dictionary) -> void:
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
 	_pads_from_list(data.get("pads", []))
 	_graphics_from_list(data.get("graphics", []))
+	_refdes_from_list(data.get("refdes_graphics", []))
 
 	# U1-render unit 2: when the snapshot gave no explicit size (no local_bounds,
 	# no width/height Extra), replace the untouched default/centered bounds with
@@ -1171,6 +1217,7 @@ func load_from_board_dict(data: Dictionary) -> void:
 	else:
 		_pads_from_canonical_pins(pin_list, not (data.has("width") or data.has("height")))
 	_graphics_from_list(data.get("graphics", []))
+	_refdes_from_list(data.get("refdes_graphics", []))
 
 	# U1-render unit 2: when the board dict gave no explicit size (no
 	# local_bounds, no width/height Extra — the same "not (data.has(...))"

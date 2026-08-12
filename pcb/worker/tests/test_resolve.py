@@ -375,3 +375,97 @@ def test_pads_from_parsed_sizeless_matches_footprint_def_projection(tmp_path):
     from_resolve = _pads_from_parsed(parsed["pads"])
     from_fpdef = FootprintDefinition.from_kicad_parsed(parsed).to_board_pad_dicts()
     assert from_resolve == from_fpdef
+
+
+# ---------------------------------------------------------------------------
+# PRINTED REFERENCE DESIGNATORS on the resolve payload (WYSIWYG goal
+# 019ff4a5a75a, gap G2).
+#
+# The fab silk carries a stroke-font designator that exists nowhere in the
+# authored board — silk_source synthesizes it at emit time. Before this, a
+# panel drawing the resolve's graphics showed a board with NO printed
+# designators, so the silk collisions GC9 reports (a designator over a
+# neighbour's pad) were invisible in the editor. The resolve now attaches the
+# same strokes under a SEPARATE key, and these tests pin the three properties
+# that make that safe: same owner, same frame, and never on the emitters' key.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_attaches_refdes_strokes_under_their_own_key():
+    board = resolve_board(_load_board())
+    for comp in board["components"]:
+        rg = comp.get("refdes_graphics")
+        assert isinstance(rg, list) and rg, \
+            f"{comp['ref']}: no refdes_graphics attached"
+        for g in rg:
+            assert g["layer"] == "F.SilkS" and g["kind"] == "poly"
+            assert len(g["points"]) >= 2 and g["width"] > 0
+
+
+def test_refdes_strokes_are_NOT_in_the_graphics_key_the_emitters_consume():
+    """THE DOUBLE-PRINT GUARD. The loose-dict emitters walk comp['graphics']
+    (gerber._emit_silk, kicad's footprint graphics) and then synthesize the
+    designator THEMSELVES (gerber._emit_refdes). If the resolve merged the
+    strokes into 'graphics', every designator on that path would print twice.
+    Compared as geometry, not by count, so an emitter-safe rename of the key
+    cannot slip strokes in under a different label."""
+    board = resolve_board(_load_board())
+    for comp in board["components"]:
+        stroke_points = {tuple(map(tuple, g["points"]))
+                         for g in comp["refdes_graphics"]}
+        graphics_points = {tuple(map(tuple, g.get("points", [])))
+                           for g in comp["graphics"] if g.get("kind") == "poly"}
+        assert not (stroke_points & graphics_points), (
+            f"{comp['ref']}: designator strokes leaked into comp['graphics'] — "
+            f"the loose-dict emitters would print this designator twice")
+
+
+def test_refdes_graphics_placed_by_the_component_transform_match_the_emitter():
+    """THE G2 PARITY CLAIM, stated as the theorem it is: identity-extraction
+    commutes with placement.
+
+    The resolve extracts strokes at IDENTITY placement (footprint-local); a
+    renderer places them with the same transform it places footprint silk
+    with. The emitter instead renders at the REAL placement in one step
+    (refdes_strokes(cx, cy, rot, side)). If the two disagree, the panel shows
+    the designator somewhere the fab does not print it — which is the exact
+    defect class this feature exists to remove. Checked on both sides and at a
+    rotation, against silk_source's own placement function, so this cannot
+    drift from the emitter without failing."""
+    from pcb_worker.footprint_def import ReferenceTextDefinition
+    from pcb_worker.resolved_board import Side
+    from pcb_worker.silk_source import _place, refdes_strokes
+
+    rt = ReferenceTextDefinition(position=(0.4, -1.9), rotation_deg=15.0,
+                                 size_mm=1.2)
+    for side in (Side.TOP, Side.BOTTOM):
+        for cx, cy, rot in ((10.0, 8.0, 0.0), (3.5, 12.25, 90.0),
+                            (7.0, 7.0, 37.5)):
+            local = refdes_strokes("U7", 0.0, 0.0, 0.0, rt)
+            emitted = refdes_strokes("U7", cx, cy, rot, rt, side)
+            placed = [tuple(_place(cx, cy, rot, side, x, y)
+                            for (x, y) in poly.points) for poly in local]
+            assert placed == [poly.points for poly in emitted], \
+                f"identity-extraction does not commute at side={side} rot={rot}"
+
+
+def test_refdes_honours_the_footprints_authored_anchor():
+    """A footprint with an authored fp_text reference anchor must place its
+    designator THERE, not at the default offset — the coupon's TXT_CouponRev
+    authors one, and rendering it at the default would show the wrong board."""
+    resolved = resolve_board(_load_board())
+    # U1's footprint authors its anchor at x=12.7 — far from the default
+    # (x-centred, y=-1.5), so a designator that ignores the anchor cannot
+    # accidentally satisfy this. The fixture carrying an authored anchor is
+    # itself asserted, so this test can never silently go vacuous.
+    comp = next(c for c in resolved["components"] if c["ref"] == "U1")
+    rt = resolve.resolve_footprint(comp["footprint"]).get("reference_text")
+    assert rt is not None and rt["x_mm"] == pytest.approx(12.7), (
+        "the fixture no longer authors the far-offset anchor this test needs")
+
+    xs = [x for g in comp["refdes_graphics"] for (x, _) in g["points"]]
+    ys = [y for g in comp["refdes_graphics"] for (_, y) in g["points"]]
+    assert min(xs) <= rt["x_mm"] <= max(xs), (
+        f"designator ignores the authored anchor x={rt['x_mm']}: "
+        f"strokes span x {min(xs):.2f}..{max(xs):.2f} — it is at the default")
+    assert min(ys) <= rt["y_mm"] <= max(ys) + 1.5

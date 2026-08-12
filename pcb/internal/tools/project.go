@@ -350,6 +350,15 @@ func adoptResolvedGeometry(b *board.Board, byRef map[string]resolvedComponent) i
 				took = true
 			}
 		}
+		// The printed designator (WYSIWYG G2) — derived silk, adopted like
+		// graphics. Nothing authored ever carries this key (the codec has no
+		// field for it), so absent-only is a formality kept for symmetry.
+		if len(r.refdesGraphics) > 0 {
+			if _, exists := b.Components[i].Extra["refdes_graphics"]; !exists {
+				b.Components[i].Extra["refdes_graphics"] = r.refdesGraphics
+				took = true
+			}
+		}
 		// Pads + the resolved marker travel TOGETHER (see the doc comment):
 		// has_pad_geometry asserts "these pads are the footprint's real
 		// geometry", so it must never be stamped over authored pads.
@@ -403,10 +412,14 @@ func callResolveBestEffort(ctx context.Context, w *bridge.Worker, params json.Ra
 }
 
 // resolvedComponent is one component's adoptable enrichment from the resolve
-// reply: its footprint body graphics and its real pad geometry.
+// reply: its footprint body graphics, its real pad geometry, and its printed
+// reference-designator strokes (WYSIWYG G2 — derived silk the emitters
+// synthesize themselves, carried on a separate key so the loose-dict emit
+// path can never print it twice).
 type resolvedComponent struct {
 	graphics       []interface{}
 	pads           []interface{}
+	refdesGraphics []interface{}
 	hasPadGeometry bool
 }
 
@@ -428,6 +441,7 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 				Ref            string        `json:"ref"`
 				Graphics       []interface{} `json:"graphics"`
 				Pads           []interface{} `json:"pads"`
+				RefdesGraphics []interface{} `json:"refdes_graphics"`
 				HasPadGeometry bool          `json:"has_pad_geometry"`
 			} `json:"components"`
 		} `json:"board"`
@@ -440,12 +454,12 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 		if c.Ref == "" {
 			continue
 		}
-		rc := resolvedComponent{graphics: c.Graphics}
+		rc := resolvedComponent{graphics: c.Graphics, refdesGraphics: c.RefdesGraphics}
 		if c.HasPadGeometry {
 			rc.pads = c.Pads
 			rc.hasPadGeometry = true
 		}
-		if len(rc.graphics) == 0 && !rc.hasPadGeometry {
+		if len(rc.graphics) == 0 && len(rc.refdesGraphics) == 0 && !rc.hasPadGeometry {
 			continue
 		}
 		out[c.Ref] = rc
