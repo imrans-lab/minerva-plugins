@@ -83,6 +83,11 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// one fail-closed verdict, forwarding to the worker's
 		// "promote_check" method. Same channel idiom.
 		"pcb.promote_check",
+		// worker-backed — the panel's solder-mask overlay (WYSIWYG goal
+		// 019ff4a5a75a, gap G4), forwarding to the worker's "mask_view"
+		// method: Projection.mask verbatim, the same openings GC8 checks
+		// and the Gerber emitter flashes. Same channel idiom.
+		"pcb.mask_view",
 	}
 	for _, name := range want {
 		if !got[name] {

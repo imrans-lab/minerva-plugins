@@ -107,6 +107,23 @@ var show_unresolved_badges: bool = true
 ## Draws F.SilkS graphics resolved by the worker's footprint-RESOLVE step
 ## (component.graphics — see pcb_component.gd).
 var show_silk: bool = true
+## SOLDER-MASK OVERLAY (WYSIWYG goal 019ff4a5a75a, gap G4). Renders the board's
+## mask OPENINGS — where solder mask is ABSENT — as translucent patches over the
+## copper. The openings are fetched from the worker (pcb.mask_view →
+## Projection.mask): the EXACT collection GC8 measures slivers on and the same
+## shared-owner enumeration the Gerber emitter flashes. This canvas NEVER
+## re-derives an opening from a pad — a second reading of the mask rule is the
+## drift class the WYSIWYG goal exists to remove. Off by default; View menu.
+var show_mask: bool = false
+## Board-absolute opening dicts from the worker (side/shape/x_mm/y_mm/width_mm/
+## height_mm/angle_deg/...). Set via set_mask_view(); never computed here.
+var mask_openings: Array = []
+## Non-empty when the overlay must not be trusted as complete: the worker
+## reported indeterminate entities, the refresh failed, or the board changed
+## and the refetch has not landed. Drawn on screen while the overlay is on —
+## a KNOWN-INCOMPLETE aperture set silently drawn as complete is the same
+## false-clean direction GC8 refuses a verdict over.
+var mask_view_note: String = ""
 ## Draws F.CrtYd (courtyard) graphics from the same resolve step — the real
 ## module extent (also now what local_bounds is derived from, see
 ## pcb_component.gd _derive_bounds_from_graphics). Drawn dimmer/thinner than
@@ -776,6 +793,10 @@ var selection_border_color: Color = Color(0.4, 0.6, 0.9, 1.0)
 var pad_copper_color: Color = Color(0.85, 0.65, 0.3, 1.0)  # Copper/gold for THT
 var pad_smd_color: Color = Color(0.75, 0.55, 0.25, 1.0)    # SMD pads
 var drill_hole_color: Color = Color(0.08, 0.08, 0.08, 1.0) # Drill holes (match background)
+# Mask-opening overlay fills (WYSIWYG G4) — KiCad-adjacent hues: front magenta,
+# back teal, translucent so the copper underneath stays legible.
+var mask_front_color: Color = Color(0.82, 0.28, 0.82, 0.38)
+var mask_back_color: Color = Color(0.20, 0.72, 0.78, 0.38)
 var mounting_hole_color: Color = Color(0.2, 0.2, 0.2, 1.0) # Non-plated holes
 ## Amber warning badge for unresolved-footprint components (see show_unresolved_badges)
 var unresolved_badge_color: Color = Color(0.95, 0.65, 0.1, 1.0)
@@ -1535,6 +1556,11 @@ func _draw() -> void:
 
 	if show_traces:
 		_draw_traces()
+
+	# Mask openings sit ABOVE copper (the film covers the board; an opening is
+	# a hole in it exposing what is underneath) and BELOW previews/overlays.
+	if show_mask:
+		_draw_mask_openings()
 
 	# ── GHOST ROUTE CANDIDATES (S3) ──────────────────────────────────────────
 	# DEPTH, decided here once: ABOVE committed copper, BELOW the in-progress
@@ -2380,8 +2406,7 @@ func _draw_component(comp) -> void:
 		# real pads by construction — so this branch is body-only.
 		_draw_fallback_pins(comp, xform)
 
-	if body_visible and show_unresolved_badges and not has_real_pads \
-			and comp.footprint != PCBComponentScript.FootprintType.MOUNTING_HOLE:
+	if body_visible and show_unresolved_badges and _component_unresolved(comp):
 		# _component_screen_poly is the same transform the body used above (and
 		# what _get_tooltip probes), so badge draw and badge tooltip cannot
 		# disagree about where the badge is.
@@ -2478,9 +2503,7 @@ func _get_tooltip(at_position: Vector2) -> String:
 	var reach := UNRESOLVED_BADGE_SIZE + 3.0
 	for comp_id in data.components:
 		var comp = data.components[comp_id]
-		if comp.has_pad_geometry and comp.pads.size() > 0:
-			continue
-		if comp.footprint == PCBComponentScript.FootprintType.MOUNTING_HOLE:
+		if not _component_unresolved(comp):
 			continue
 		var center := _badge_center(_component_screen_poly(comp))
 		if absf(at_position.x - center.x) <= reach and absf(at_position.y - center.y) <= reach:
@@ -2643,6 +2666,67 @@ func _draw_component_graphics_layer(comp, xform: Transform2D, layer_name: String
 
 ## Draw F.SilkS graphics (component body outline, markings, etc.). See
 ## _draw_component_graphics_layer for the transform/geometry contract.
+## Hand the worker's mask openings to the overlay (PCBPanel fetches them over
+## pcb.mask_view). `note` non-empty marks the overlay untrusted — stale,
+## failed, or indeterminate — and is drawn beside the toggle state on screen.
+func set_mask_view(openings: Array, note: String = "") -> void:
+	mask_openings = openings
+	mask_view_note = note
+	queue_redraw()
+
+
+func _draw_mask_openings() -> void:
+	for o in mask_openings:
+		if not (o is Dictionary):
+			continue
+		var color: Color = mask_front_color if str(o.get("side", "top")) == "top" 			else mask_back_color
+		var center := world_to_screen(Vector2(float(o.get("x_mm", 0.0)),
+			float(o.get("y_mm", 0.0))))
+		var opening_size := Vector2(float(o.get("width_mm", 0.0)),
+			float(o.get("height_mm", 0.0))) * zoom
+		if opening_size.x <= 0.0 or opening_size.y <= 0.0:
+			continue
+		# Same screen-space shape dispatch as _draw_component_pads, minus the
+		# component transform: openings arrive BOARD-ABSOLUTE (placement and
+		# rotation already baked in by the shared owner), so only the pad-local
+		# angle applies — negated exactly as pad_rot negates comp.rotation
+		# (KiCad CW vs Godot CCW).
+		var rot := -float(o.get("angle_deg", 0.0))
+		match str(o.get("shape", "circle")):
+			"circle":
+				_draw_circle_pad(center, opening_size, color)
+			"oval":
+				_draw_oval_pad(center, opening_size, rot, color)
+			"roundrect":
+				_draw_roundrect_pad(center, opening_size, rot, color)
+			_:
+				_draw_rect_pad(center, opening_size, rot, color)
+	if mask_view_note != "":
+		draw_string(font, Vector2(10, 40), "mask view: " + mask_view_note,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, Color(1.0, 0.75, 0.2))
+
+
+## The ONE definition of "this component renders unresolved" (bug 019ff4a9a0d7)
+## — shared by the badge draw and the badge tooltip so they cannot disagree.
+##
+## The old rule was `not (has_pad_geometry and pads.size() > 0)`, a PAD-level
+## fact used as a proxy for the COMPONENT-level one. A silk-only footprint (a
+## logo, a revision text) resolves with ZERO pads, so the proxy branded it
+## "unresolved — resolve before fabrication" forever, falsely — its render was
+## already complete. The worker now states the component fact directly
+## (comp.footprint_resolved, set only on the resolve success path), and the
+## pad-less exemption keys on THAT, not on emptiness alone: a fallback-pin
+## component also has zero render pads and must keep its badge.
+func _component_unresolved(comp) -> bool:
+	if comp.footprint == PCBComponentScript.FootprintType.MOUNTING_HOLE:
+		return false  # legitimately carries no pad geometry
+	if comp.has_pad_geometry and comp.pads.size() > 0:
+		return false  # real footprint pads
+	if comp.footprint_resolved and comp.pads.is_empty():
+		return false  # silk-only footprint: resolved, nothing left to resolve
+	return true
+
+
 func _draw_component_silk(comp, xform: Transform2D) -> void:
 	_draw_component_graphics_layer(comp, xform, "F.SilkS", silk_color, silk_min_width_px)
 	_draw_component_refdes(comp, xform)
@@ -8622,6 +8706,9 @@ func capture_to_image(width: int, height: int, fit: bool = true) -> Image:
 	copy.show_silk = show_silk
 	copy.show_courtyard = show_courtyard
 	copy.show_unresolved_badges = show_unresolved_badges
+	copy.show_mask = show_mask
+	copy.mask_openings = mask_openings
+	copy.mask_view_note = mask_view_note
 	copy.snap_to_grid = snap_to_grid
 	copy.trace_layer_filter = trace_layer_filter
 

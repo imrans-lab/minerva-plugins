@@ -1452,6 +1452,7 @@
           "pcb.assembly_check",
           "pcb.board_health",
           "pcb.promote_check",
+          "pcb.mask_view",
           "ping",
           "capability:mcp.proxy:minerva_plugin_start"
         ],
@@ -1468,6 +1469,7 @@
       "pcb.assembly_check",
       "pcb.board_health",
       "pcb.promote_check",
+      "pcb.mask_view",
       "ping",
       "capability:mcp.proxy:minerva_plugin_start"
     ]

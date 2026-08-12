@@ -477,6 +477,59 @@ def _assembly_check(params: dict) -> dict:
     return {"ok": True, "result": _assembly_tri_state(board)}
 
 
+def _mask_view(params: dict) -> dict:
+    """SOLDER-MASK VIEW for the panel (WYSIWYG goal 019ff4a5a75a, gap G4).
+
+    Returns every mask opening on the board — the collection the panel renders
+    as its mask overlay. The openings are ``project_board(rb).mask``, i.e. the
+    EXACT collection GC8 measures slivers on and the same shared-owner
+    enumeration (mask_source) the Gerber emitter adopts. Nothing here decides a
+    dimension, a side, or whether an entity opens mask at all; a panel that
+    re-derived any of that would drift from the fab, which is the defect class
+    the WYSIWYG goal exists to remove.
+
+    params: {board|yaml} (anything ``_load`` accepts).
+    Reply: {ok: True, result: {openings: [{side:"top"|"bottom", shape, x_mm,
+    y_mm, width_mm, height_mm, corner_rratio, angle_deg, origin, ref,
+    pad_number}], indeterminate: [{entity, reason}]}}.
+
+    ``indeterminate`` is carried, never dropped: it names entities whose mask
+    coverage could not be determined, and a viewer that hid them would show a
+    KNOWN-INCOMPLETE aperture set as complete — the same false-clean direction
+    GC8 refuses a verdict over (drc_geometric's wholesale refusal). The panel
+    must mark the overlay, not silently draw the subset.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+    compiled = _compile_or_fail(board)
+    if _is_error_reply(compiled):
+        return compiled
+    from .drc_geometric import UnsupportedGeometry, project_board
+    from .resolved_board import Side
+    try:
+        proj = project_board(compiled.board)
+    except UnsupportedGeometry as exc:
+        return {"ok": False, "error": {"kind": "unsupported_geometry",
+                                       "message": str(exc)}}
+    return {"ok": True, "result": {
+        "openings": [{
+            "side": "top" if o.side is Side.TOP else "bottom",
+            "shape": o.shape,
+            "x_mm": o.x, "y_mm": o.y,
+            "width_mm": o.width, "height_mm": o.height,
+            "corner_rratio": o.corner_rratio,
+            "angle_deg": o.angle_deg,
+            "origin": o.origin,
+            "ref": o.ref,
+            "pad_number": o.pad_number,
+        } for o in proj.mask],
+        "indeterminate": [{"entity": e, "reason": r}
+                          for (e, r) in proj.mask_indeterminate],
+    }}
+
+
 def _board_health_method(params: dict) -> dict:
     """Standalone whole-board health ledger (Epoch UX2 station 9, docket
     019fde571300) — the SAME `board_health` object every ok route reply
@@ -2750,6 +2803,8 @@ _HANDLERS = {
     # Whole-board health without a routing run (Epoch UX2 station 9) — the
     # load path's census+assembly surface.
     "board_health": lambda req: _board_health_method(req.get("params") or {}),
+    # Solder-mask overlay for the panel (WYSIWYG G4) — Projection.mask verbatim.
+    "mask_view": lambda req: _mask_view(req.get("params") or {}),
     "promote_check": lambda req: _promote_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),

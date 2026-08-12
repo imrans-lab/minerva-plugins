@@ -100,6 +100,12 @@ var pads: Array = []
 ## Whether pad geometry has been loaded from footprint library
 var has_pad_geometry: bool = false
 
+## The COMPONENT-level resolved fact (bug 019ff4a9a0d7), distinct from the
+## PAD-level has_pad_geometry above: a silk-only footprint resolves with zero
+## pads, so the pad marker alone cannot say "this component is resolved". Set
+## by the worker's resolve success path only; absence means unresolved.
+var footprint_resolved: bool = false
+
 ## Silk/courtyard graphics attached by the worker's footprint-RESOLVE step
 ## (pcb/worker/pcb_worker/resolve.py), in component-LOCAL mm coords (same
 ## frame as `pads[].position`). Each entry is a Dictionary:
@@ -987,6 +993,7 @@ func to_dict() -> Dictionary:
 		"pins": pins_dict,
 		"pads": _pads_to_list(),
 		"has_pad_geometry": has_pad_geometry,
+		"footprint_resolved": footprint_resolved,
 		"graphics": _graphics_to_list(),
 		"refdes_graphics": _refdes_to_list(),
 		"bbox_center_offset": {"x": bbox_center_offset.x, "y": bbox_center_offset.y},
@@ -1042,6 +1049,7 @@ func load_from_dict(data: Dictionary) -> void:
 
 	# Load pad geometry
 	has_pad_geometry = data.get("has_pad_geometry", false)
+	footprint_resolved = bool(data.get("footprint_resolved", false))
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
 	_pads_from_list(data.get("pads", []))
@@ -1203,6 +1211,7 @@ func load_from_board_dict(data: Dictionary) -> void:
 				pin_extra[pnum] = extras
 
 	has_pad_geometry = data.get("has_pad_geometry", false)
+	footprint_resolved = bool(data.get("footprint_resolved", false))
 	var bbox_offset_data: Dictionary = data.get("bbox_center_offset", {})
 	bbox_center_offset = Vector2(bbox_offset_data.get("x", 0), bbox_offset_data.get("y", 0))
 	# Render pads: editor-authored boards carry an explicit `pads` array (render

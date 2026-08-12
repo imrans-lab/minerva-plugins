@@ -469,3 +469,21 @@ def test_refdes_honours_the_footprints_authored_anchor():
         f"designator ignores the authored anchor x={rt['x_mm']}: "
         f"strokes span x {min(xs):.2f}..{max(xs):.2f} — it is at the default")
     assert min(ys) <= rt["y_mm"] <= max(ys) + 1.5
+
+
+def test_resolve_states_the_component_level_resolved_fact():
+    """footprint_resolved (bug 019ff4a9a0d7) rides every resolved component —
+    including one whose footprint has pads — and is what a pad-less silk-only
+    footprint has INSTEAD of has_pad_geometry. Absence (best-effort leaves a
+    failing component pristine) is the unresolved signal."""
+    board = resolve_board(_load_board())
+    for comp in board["components"]:
+        assert comp.get("footprint_resolved") is True, comp["ref"]
+
+    from pcb_worker.resolve import resolve_board_best_effort
+    broken = _load_board()
+    broken["components"][0]["footprint"] = "No_Such:Footprint"
+    tolerant = resolve_board_best_effort(broken)
+    assert "footprint_resolved" not in tolerant["components"][0], (
+        "a component whose footprint did NOT resolve must stay pristine — "
+        "stamping the fact here would retire the unresolved badge falsely")

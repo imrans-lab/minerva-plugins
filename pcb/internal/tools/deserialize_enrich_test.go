@@ -185,3 +185,32 @@ func TestAdoptionCarriesThePrintedDesignator(t *testing.T) {
 		t.Fatalf("has_pad_geometry stamped on a pad-less component")
 	}
 }
+
+func TestAdoptionCarriesTheComponentLevelResolvedFact(t *testing.T) {
+	// The COMPONENT-level fact (bug 019ff4a9a0d7): a silk-only footprint
+	// resolves with zero pads, so has_pad_geometry stays honestly false —
+	// footprint_resolved is what lets the badge distinguish "resolved,
+	// nothing left to resolve" from "fallback pins".
+	byRef := resolvedByRef(resolveReply(t,
+		map[string]interface{}{
+			"ref": "LOGO1", "footprint_resolved": true,
+			"has_pad_geometry": false,
+			"graphics":         []interface{}{map[string]interface{}{"kind": "poly"}},
+		},
+		map[string]interface{}{"ref": "X1", "footprint_resolved": false},
+	))
+	if logo, ok := byRef["LOGO1"]; !ok || !logo.footprintResolved {
+		t.Fatalf("resolved silk-only component's fact not indexed: %+v", byRef["LOGO1"])
+	}
+	if _, ok := byRef["X1"]; ok {
+		t.Fatalf("an unresolved component with nothing adoptable must be omitted")
+	}
+
+	b := &board.Board{Components: []board.Component{{Ref: "LOGO1"}}}
+	if n := adoptResolvedGeometry(b, byRef); n != 1 {
+		t.Fatalf("attached = %d, want 1", n)
+	}
+	if got, _ := b.Components[0].Extra["footprint_resolved"].(bool); !got {
+		t.Fatalf("footprint_resolved not adopted: %v", b.Components[0].Extra)
+	}
+}

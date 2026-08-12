@@ -384,3 +384,49 @@ def test_assembly_bom_writes_out_dir(assembly_yaml, tmp_path):
     assert len(written) == 1
     assert (tmp_path / "board-bom-jlc.csv").is_file()
     assert written[0]["bytes_written"] == (tmp_path / "board-bom-jlc.csv").stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# mask_view (WYSIWYG goal 019ff4a5a75a, gap G4) — the panel's mask overlay.
+# ---------------------------------------------------------------------------
+
+
+def test_mask_view_returns_projection_mask_verbatim():
+    """The reply must be Projection.mask — the collection GC8 measures — not a
+    second enumeration. Compared field-by-field against a direct projection of
+    the same compiled board, so the method cannot quietly grow its own reading
+    of the mask rule."""
+    import yaml as _yaml
+
+    from pcb_worker.compile_board import compile_board
+    from pcb_worker.drc_geometric import project_board
+    from pcb_worker.methods import handle_request
+    from pcb_worker.resolved_board import Side
+
+    src = (Path(__file__).parent / "testdata" / "coupon_jlc1.yaml").read_text()
+    reply = handle_request(
+        {"id": 1, "method": "mask_view", "params": {"yaml": src}})
+    result = reply["result"]
+    assert reply.get("result", {}).get("openings"), reply
+
+    rb = compile_board(_yaml.safe_load(src)).board
+    proj = project_board(rb)
+    expected = [{
+        "side": "top" if o.side is Side.TOP else "bottom",
+        "shape": o.shape, "x_mm": o.x, "y_mm": o.y,
+        "width_mm": o.width, "height_mm": o.height,
+        "corner_rratio": o.corner_rratio, "angle_deg": o.angle_deg,
+        "origin": o.origin, "ref": o.ref, "pad_number": o.pad_number,
+    } for o in proj.mask]
+    assert result["openings"] == expected
+    assert result["indeterminate"] == []
+
+
+def test_mask_view_fails_closed_on_an_uncompilable_board():
+    """A board that cannot compile has no trustworthy mask; the reply must be
+    an error, never an empty overlay a viewer would read as 'no openings'."""
+    from pcb_worker.methods import handle_request
+
+    reply = handle_request({"id": 1, "method": "mask_view",
+                            "params": {"yaml": "version: 1\nname: x\n"}})
+    assert reply.get("result", reply).get("ok") is not True, reply

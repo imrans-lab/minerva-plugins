@@ -392,6 +392,10 @@ const _VIEW_FLAGS := [
 	["Ghosts", "show_route_candidates"],
 	# Epoch UX3 station 4 (K11, docket 019fdf916ce6): the DRC-witness overlay.
 	["DRC witnesses", "show_drc_witnesses"],
+	# WYSIWYG goal 019ff4a5a75a gap G4: the solder-mask overlay. Toggling it ON
+	# triggers a worker refetch (see _on_view_menu_id_pressed) — the canvas only
+	# ever draws what pcb.mask_view returned, never a local re-derivation.
+	["Mask openings", "show_mask"],
 ]
 const _VIEW_MENU_EXPORT_ID := 100
 
@@ -459,7 +463,8 @@ func _init() -> void:
 	# gated by _restoring so board load / seeding never dirties the tab.
 	_data.data_changed.connect(func() -> void:
 		if not _restoring:
-			content_changed.emit())
+			content_changed.emit()
+			_schedule_mask_view_refresh())
 	# Epoch UX4 station 2: bucket-9 binding — undo/redo now snapshots and
 	# restores staged dispositions alongside the board (pcb_data.gd
 	# bind_staged_store). Store mutations dirty the tab like every other
@@ -3518,6 +3523,10 @@ func _on_view_menu_id_pressed(id: int) -> void:
 		return
 	var flag: String = _VIEW_FLAGS[id][1]
 	_canvas.set(flag, not bool(_canvas.get(flag)))
+	if flag == "show_mask" and bool(_canvas.get(flag)):
+		# Fetch on demand rather than on every load: the overlay is off by
+		# default and the worker round-trip belongs to the person who asked.
+		_refresh_mask_view()
 	_canvas.queue_redraw()
 
 
@@ -4875,6 +4884,65 @@ func board_health_check(board: Dictionary) -> Dictionary:
 		return {"ok": true, "result": inner}
 	return {"ok": false, "error": {"kind": "worker_error",
 		"message": str(result.get("error_message", result.get("error", "board_health failed")))}}
+
+
+## pcb.mask_view round-trip (WYSIWYG G4) — same channel idiom as
+## board_health_check directly above.
+func mask_view_check(board: Dictionary) -> Dictionary:
+	var ipc := get_node_or_null("_MinervaIPC")
+	if ipc == null:
+		return {"ok": false, "error": {"kind": "worker_unavailable",
+			"message": "plugin IPC channel not ready"}}
+	var result: Dictionary = await _request_with_backend_ensure(
+		"pcb.mask_view", {"board": board}, 30000)
+	if result.has("ok"):
+		return result
+	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
+		var inner: Dictionary = result.get("result")
+		if inner.has("ok"):
+			return inner
+		return {"ok": true, "result": inner}
+	return {"ok": false, "error": {"kind": "worker_error",
+		"message": str(result.get("error_message", result.get("error", "mask_view failed")))}}
+
+
+## Refetch the mask overlay from the worker and hand it to the canvas. The
+## overlay is only ever what Projection.mask said — on ANY failure the canvas
+## gets an empty set plus a visible note, never a stale set drawn as current
+## (a KNOWN-INCOMPLETE aperture set shown as complete is the false-clean
+## direction GC8 refuses a verdict over).
+func _refresh_mask_view() -> void:
+	if _canvas == null or _data == null:
+		return
+	var reply: Dictionary = await mask_view_check(_data.to_board_dict())
+	if _canvas == null or not bool(_canvas.get("show_mask")):
+		return  # toggled off (or panel torn down) while the worker ran
+	if not bool(reply.get("ok", false)):
+		var err: Dictionary = reply.get("error", {})
+		_canvas.set_mask_view([], "unavailable — " + str(err.get("message", err.get("kind", "unknown"))))
+		return
+	var result: Dictionary = reply.get("result", {})
+	var indeterminate: Array = result.get("indeterminate", [])
+	var note := ""
+	if not indeterminate.is_empty():
+		note = "INCOMPLETE — %d entity/entities undetermined" % indeterminate.size()
+	_canvas.set_mask_view(result.get("openings", []), note)
+
+
+## Debounced refetch on board mutation, active only while the overlay is shown.
+## Between the mutation and the refetch landing, the overlay is marked stale
+## rather than silently drawn as current.
+var _mask_view_refresh_pending := false
+func _schedule_mask_view_refresh() -> void:
+	if _canvas == null or not bool(_canvas.get("show_mask")):
+		return
+	_canvas.set_mask_view(_canvas.mask_openings, "stale — board changed, refreshing")
+	if _mask_view_refresh_pending or not is_inside_tree():
+		return
+	_mask_view_refresh_pending = true
+	get_tree().create_timer(0.5).timeout.connect(func() -> void:
+		_mask_view_refresh_pending = false
+		_refresh_mask_view())
 
 
 func assembly_check(board: Dictionary) -> Dictionary:

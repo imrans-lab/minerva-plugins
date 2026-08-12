@@ -384,6 +384,33 @@ func HandleBoardHealthChannel(ctx context.Context, w *bridge.Worker, params json
 	return w.Call(ctx, "board_health", params)
 }
 
+// ---- pcb.mask_view (worker-backed broker CHANNEL) --------------------------
+//
+// WYSIWYG goal 019ff4a5a75a, gap G4: the panel's solder-mask overlay. Forwards
+// verbatim to the Python worker's "mask_view" method, whose reply is
+// Projection.mask — the EXACT collection GC8 measures slivers on and the same
+// shared-owner enumeration (mask_source) the Gerber emitter adopts. The panel
+// renders these openings and must never re-derive them: a second reading of
+// the mask rule is the drift class the WYSIWYG goal exists to remove.
+
+var MaskViewChannel = ToolSpec{
+	Name: "pcb.mask_view",
+	Description: "Panel IPC channel for the solder-mask overlay (WYSIWYG G4). " +
+		"Forwards verbatim to the Python worker's 'mask_view' method. Args: " +
+		"{board:<canonical Board dict>} or {yaml}. Returns {ok, result:{" +
+		"openings:[{side:'top'|'bottom', shape, x_mm, y_mm, width_mm, " +
+		"height_mm, corner_rratio, angle_deg, origin, ref, pad_number}], " +
+		"indeterminate:[{entity, reason}]}} — Projection.mask verbatim, the " +
+		"same openings GC8 checks and the Gerber emitter flashes. A non-empty " +
+		"'indeterminate' means the aperture set is KNOWN-INCOMPLETE; a viewer " +
+		"must mark the overlay, not silently draw the subset.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleMaskViewChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "mask_view", params)
+}
+
 // ---- pcb.promote_check (worker-backed broker CHANNEL) ----------------------
 //
 // Epoch UX3 station 11 (docket 019fdf91b3ac, K13): the PROMOTION GATE — the

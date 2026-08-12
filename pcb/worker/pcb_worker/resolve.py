@@ -216,6 +216,16 @@ def _resolve_component(
     # geometry when pads actually resolved, else the panel would suppress its
     # fallback pin renderer and draw nothing at all (Stage 2 step 7 collapse).
     comp["has_pad_geometry"] = has_resolved_pads(comp)
+    # THE COMPONENT-level resolved fact, distinct from the PAD-level one above
+    # (bug 019ff4a9a0d7): a silk-only footprint (a logo, a revision text) has
+    # ZERO pads, so has_pad_geometry is honestly False forever — yet the
+    # footprint DID resolve and its render is complete. The panel's unresolved
+    # badge used pad-resolution as a proxy for component-resolution and
+    # therefore marked every such fixture "unresolved — resolve before
+    # fabrication", permanently and falsely. This key states the component
+    # fact directly; it is set ONLY on the success path (best-effort leaves a
+    # failing component pristine, so absence still means unresolved).
+    comp["footprint_resolved"] = True
 
     # PRINTED REFERENCE DESIGNATOR (WYSIWYG goal 019ff4a5a75a, gap G2): the
     # fab silk carries a stroke-font designator that exists NOWHERE in the

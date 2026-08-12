@@ -359,6 +359,15 @@ func adoptResolvedGeometry(b *board.Board, byRef map[string]resolvedComponent) i
 				took = true
 			}
 		}
+		// The component-level resolved fact (bug 019ff4a9a0d7). Boolean and
+		// worker-owned: absence means the best-effort resolve left the
+		// component pristine, so absent stays absent.
+		if r.footprintResolved {
+			if _, exists := b.Components[i].Extra["footprint_resolved"]; !exists {
+				b.Components[i].Extra["footprint_resolved"] = true
+				took = true
+			}
+		}
 		// Pads + the resolved marker travel TOGETHER (see the doc comment):
 		// has_pad_geometry asserts "these pads are the footprint's real
 		// geometry", so it must never be stamped over authored pads.
@@ -417,10 +426,11 @@ func callResolveBestEffort(ctx context.Context, w *bridge.Worker, params json.Ra
 // synthesize themselves, carried on a separate key so the loose-dict emit
 // path can never print it twice).
 type resolvedComponent struct {
-	graphics       []interface{}
-	pads           []interface{}
-	refdesGraphics []interface{}
-	hasPadGeometry bool
+	graphics          []interface{}
+	pads              []interface{}
+	refdesGraphics    []interface{}
+	hasPadGeometry    bool
+	footprintResolved bool
 }
 
 // resolvedByRef indexes the resolve reply's per-component enrichment by
@@ -443,6 +453,10 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 				Pads           []interface{} `json:"pads"`
 				RefdesGraphics []interface{} `json:"refdes_graphics"`
 				HasPadGeometry bool          `json:"has_pad_geometry"`
+				// The COMPONENT-level resolved fact (bug 019ff4a9a0d7) — a
+				// silk-only footprint resolves with zero pads, so the pad
+				// marker alone cannot say "this component is resolved".
+				FootprintResolved bool `json:"footprint_resolved"`
 			} `json:"components"`
 		} `json:"board"`
 	}
@@ -454,12 +468,14 @@ func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 		if c.Ref == "" {
 			continue
 		}
-		rc := resolvedComponent{graphics: c.Graphics, refdesGraphics: c.RefdesGraphics}
+		rc := resolvedComponent{graphics: c.Graphics, refdesGraphics: c.RefdesGraphics,
+			footprintResolved: c.FootprintResolved}
 		if c.HasPadGeometry {
 			rc.pads = c.Pads
 			rc.hasPadGeometry = true
 		}
-		if len(rc.graphics) == 0 && len(rc.refdesGraphics) == 0 && !rc.hasPadGeometry {
+		if len(rc.graphics) == 0 && len(rc.refdesGraphics) == 0 &&
+			!rc.hasPadGeometry && !rc.footprintResolved {
 			continue
 		}
 		out[c.Ref] = rc

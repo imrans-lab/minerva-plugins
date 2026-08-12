@@ -246,6 +246,7 @@ func initRegistry() {
 	// pcb.board_health — whole-board health (census + assembly) without a
 	// routing run (Epoch UX2 station 9). See worker_tools.go.
 	registry.Register(tools.BoardHealthChannel, tools.HandleBoardHealthChannel)
+	registry.Register(tools.MaskViewChannel, tools.HandleMaskViewChannel)
 	// pcb.promote_check — the K13 promotion gate: full connectivity +
 	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
 	// 11). See worker_tools.go.
