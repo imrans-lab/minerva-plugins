@@ -674,9 +674,17 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 	// property name. Only properties present in a tool's OWN declared schema
 	// are included in that tool's call — a renamed/removed "yaml" property
 	// means no board content goes out at all.
+	//
+	// "ref" (LIB1 B2): a real SEED footprint ref, so the read-only bless
+	// surface (minerva_pcb_footprint_report) dispatches meaningfully through
+	// this sweep — it resolves R_0805 from the shipped layer and renders it.
+	// NOTE "name" doubles as a legacy ref alias on the bless handlers
+	// (params.get("ref") or params.get("name")); "ref" wins where both are
+	// declared because the handlers read it first.
 	knownValues := map[string]any{
 		"yaml": string(board),
 		"name": "board",
+		"ref":  "R_0805",
 	}
 
 	specs := agentFacingBrokerSpecs(t)
@@ -690,6 +698,28 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 		if name == "minerva_pcb_fetch_libraries" {
 			// Real network fetch with sha256 verification — never invoke from
 			// go test (same carve-out as every other test in this file).
+			continue
+		}
+		if name == "minerva_pcb_acquire_footprint" {
+			// Same network carve-out: this tool's FIRST act is an outbound
+			// HTTPS fetch of the ref from gitlab.com. Its fetch layer is
+			// exercised hermetically by internal/libraries/acquire_test.go
+			// (httptest, redirect/oversize/markup refusals) and its worker
+			// half by worker/tests/test_footprint_acquire.py.
+			continue
+		}
+		if name == "minerva_pcb_footprint_stage" || name == "minerva_pcb_footprint_bless" {
+			// WRITE tools on the bless surface (LIB1 B2). Dispatching them
+			// with only this sweep's known values is a NAMED refusal every
+			// time, by design: stage refuses without kicad_mod_text +
+			// provenance fields, and bless refuses a ref nothing has staged —
+			// and a "successful" sweep dispatch would MUTATE the ambient
+			// plugin data dir's WIP layer, which a read-only smoke must not.
+			// Same shape as the export_assembly carve-out above. Exercised
+			// end-to-end (stage→report→bless→resolve, tiering, artifact
+			// binding) by worker/tests/test_bless.py; the read half of the
+			// surface stays IN this sweep via minerva_pcb_footprint_report
+			// with knownValues["ref"].
 			continue
 		}
 		if name == "minerva_pcb_export_assembly" {
