@@ -857,18 +857,53 @@ def _fold_degenerate_roundrect(shape: str, w: float, h: float,
     return shape
 
 
-def _mask_sort_key(a: _MaskAperture) -> tuple:
+class _MaskCanonical(NamedTuple):
+    """One aperture reduced to the form that is actually COMPARED.
+
+    Every surface's own way of describing a land — the IR's authored roundrect,
+    the obround gerber-writer collapses it to, a quarter-turn folded into the
+    extents — has already been folded out here. Both the row FIELDS and the
+    occurrence ORDER are derived from this and only this.
+    """
+
+    shape: str
+    w: float
+    h: float
+    rot: Any
+    corner_radius_mm: Any
+    polarity: str
+
+
+def _mask_canonical(a: _MaskAperture) -> _MaskCanonical:
+    """Fold one aperture to its canonical form — the SINGLE place the two folds
+    are applied, so ordering and comparison can never see different geometry."""
+    shape = _fold_degenerate_roundrect(a.shape, a.w, a.h, a.corner_radius_mm)
+    w, h, rot = _canonical_land(shape, a.w, a.h, a.rot_deg)
+    return _MaskCanonical(shape, w, h, rot, a.corner_radius_mm, a.polarity)
+
+
+def _mask_sort_key(canon: _MaskCanonical) -> tuple:
     """Deterministic order for apertures that share one POSITION bucket.
 
-    Sorting on the canonical GEOMETRY rather than on any id is what lets the
-    three surfaces agree on which coincident aperture is which: the gerber
-    column has no entity to sort by, so a numbering keyed on identity could
-    never line up with it.
+    THE INPUT IS ALREADY CANONICAL, and that is load-bearing rather than tidy.
+    This function used to take the raw :class:`_MaskAperture` and sort on its
+    authored shape/extents while the ROW was built from the folded ones — so two
+    surfaces describing the SAME multiset the two legal ways numbered it
+    differently and parity failed on a correct board. Measured (Codex cold
+    review of 6360a90, finding 1): a rect beside a fully-rounded roundrect at one
+    position sorts rect-then-roundrect on the IR and oval-then-rect on the
+    gerber, because "oval" < "rect" < "roundrect" as strings — eight false field
+    deltas from an identical multiset.
+
+    Ordering on GEOMETRY rather than on any id is what lets the three surfaces
+    agree on which coincident aperture is which at all: the gerber column has no
+    entity to sort by, so a numbering keyed on identity could never line up.
     """
-    radius = a.corner_radius_mm
-    return (a.shape, round(a.w, 6), round(a.h, 6), round(a.rot_deg, 6),
+    radius = canon.corner_radius_mm
+    return (canon.shape, round(canon.w, 6), round(canon.h, 6),
+            (0, 0.0) if canon.rot is NA else (1, round(float(canon.rot), 6)),
             (0, 0.0) if radius is NA else (1, round(float(radius), 6)),
-            a.polarity)
+            canon.polarity)
 
 
 def _mask_rows(apertures: Iterable[_MaskAperture]) -> list[ParityRow]:
@@ -882,36 +917,51 @@ def _mask_rows(apertures: Iterable[_MaskAperture]) -> list[ParityRow]:
     catch, and under a collapsing key it would read as a clean board.
 
     Rows are grouped by POSITION BUCKET and numbered within the group in
-    canonical-geometry order — not numbered by full canonical form. The
-    difference matters: numbering by full form would make a single wrong WIDTH
-    reshuffle the ordinals and report an illegible missing+extra pair, where
-    this reports it as a ``w_mm`` field delta on occurrence 1.
+    CANONICAL-geometry order (:func:`_mask_canonical`, applied once here and
+    reused for the row's fields).
+
+    WHAT THE ORDINAL DOES AND DOES NOT PROMISE — stated because the first version
+    of this docstring over-claimed. It guarantees MULTIPLICITY: n coincident
+    apertures produce n rows, so a dropped duplicate is a missing_row rather than
+    a silent collapse. It does NOT guarantee that an arbitrary change to one of
+    several coincident apertures is reported as a field delta rather than a
+    missing+extra pair: a change large enough to move that aperture PAST a
+    neighbour in the canonical order renumbers both. The diff stays correct and
+    still fails — it is the legibility of the report that degrades, not the
+    verdict. Ordinals are chosen over a ``Counter`` because a Counter gives up
+    field-level diffs for EVERY difference, not just the order-crossing ones.
     """
-    grouped: dict[tuple, list[_MaskAperture]] = collections.defaultdict(list)
+    grouped: dict[tuple, list[tuple[_MaskAperture, _MaskCanonical]]] = \
+        collections.defaultdict(list)
     for aperture in apertures:
         grouped[(aperture.side_token, _q(aperture.x), _q(aperture.y))].append(
-            aperture)
+            (aperture, _mask_canonical(aperture)))
     rows: list[ParityRow] = []
     for members in grouped.values():
-        for occurrence, aperture in enumerate(sorted(members, key=_mask_sort_key)):
-            rows.append(_mask_row(aperture, occurrence))
+        ordered = sorted(members, key=lambda pair: _mask_sort_key(pair[1]))
+        for occurrence, (aperture, canon) in enumerate(ordered):
+            rows.append(_mask_row(aperture, canon, occurrence))
     return rows
 
 
-def _mask_row(a: _MaskAperture, occurrence: int) -> ParityRow:
+def _mask_row(a: _MaskAperture, canon: _MaskCanonical,
+              occurrence: int) -> ParityRow:
     """The ONE constructor for a ``mask_opening`` row.
 
     Same discipline as :func:`_flash_row`: the centre is BUCKETED in the key and
     RAW in the fields, so an opening displaced inside its own bucket is a field
     delta rather than an invisible pass.
+
+    ``canon`` is passed in rather than recomputed, so the geometry that decided
+    this row's ORDINAL and the geometry it REPORTS are the same object by
+    construction — the divergence between those two was finding 1 of the cold
+    review on 6360a90.
     """
-    shape = _fold_degenerate_roundrect(a.shape, a.w, a.h, a.corner_radius_mm)
-    w, h, rot = _canonical_land(shape, a.w, a.h, a.rot_deg)
     return ParityRow.make(
         "mask_opening", (a.side_token, _q(a.x), _q(a.y), occurrence),
         x_mm=float(a.x), y_mm=float(a.y),
-        shape=shape, w_mm=w, h_mm=h, rot_deg=rot,
-        corner_radius_mm=a.corner_radius_mm, polarity=a.polarity,
+        shape=canon.shape, w_mm=canon.w, h_mm=canon.h, rot_deg=canon.rot,
+        corner_radius_mm=canon.corner_radius_mm, polarity=canon.polarity,
         entity=a.entity, ref=a.ref)
 
 
@@ -1157,10 +1207,18 @@ def _ir_mask_openings(rb: ResolvedBoard) -> list[_MaskAperture]:
                 f"{type(hole.feature).__name__} the mask family cannot tabulate")
         x, y = hole.feature.position
         if hole.plated:
-            # A plated hole with NO authored annulus contributes nothing: there
-            # is no copper ring for an opening to follow. The emitter warns
-            # about the missing ring; inventing a window here would put the
-            # reference ahead of the board (finding 019f8dbb7104).
+            # A plated hole with NO authored annulus has no copper ring for an
+            # opening to follow, so it contributes nothing — inventing a window
+            # would put the reference ahead of the board (finding 019f8dbb7104).
+            #
+            # DEFENSIVE OVER AN IMPOSSIBLE STATE, not a live rule: ResolvedHole
+            # REFUSES to construct plated-without-annulus ("a plated hole must
+            # carry an authored copper annulus"), so no board that compiles can
+            # reach this. Kept as a fail-safe, and the invariant that makes it
+            # dead is pinned by
+            # test_a_plated_hole_with_no_annulus_is_UNREPRESENTABLE_not_merely_untested
+            # — if the IR ever relaxes it, that test fails and this branch
+            # becomes load-bearing and needs a control of its own.
             if not hole.annulus_mm:
                 continue
             diameter = _ir_mask_dim(hole.annulus_mm, clearance,
@@ -1769,20 +1827,43 @@ _GERBER_FAMILIES = frozenset({"copper_flash", "copper_trace", "drill",
 
 
 class ParitySurfaceUnavailable(RuntimeError):
-    """A surface cannot be tabulated on this machine (missing dev-only reader)."""
+    """A surface cannot be tabulated ON THIS MACHINE — and nothing more.
+
+    STRICTLY AN ENVIRONMENT CONDITION: a dev-only reader that is not installed.
+    That is the whole extent of it, because a caller may legitimately convert
+    this into "skip this surface", and anything else raised through it would
+    become skippable too.
+
+    IF THE DATA IS THE PROBLEM, RAISE
+    :class:`ParityCanonicalizationUnsupported` INSTEAD. An unknown aperture, a
+    macro whose parameters do not match its contract, an object kind a family
+    cannot tabulate — none of those get better on another machine, and a
+    caller's environment-skip path must never be able to swallow one. (Cold
+    review of 6360a90, finding 2: the mask family's fail-closed raises were
+    filed under this class and were therefore skippable in principle. Fixed;
+    the boundary is pinned by test_the_two_refusal_classes_stay_distinct.)
+    """
 
 
 class ParityCanonicalizationUnsupported(RuntimeError):
-    """A row cannot be reduced to a canonical orientation, so it cannot be compared.
+    """A value cannot be reduced to a comparable canonical row.
+
+    Covers the WHOLE read-to-canonical-row path, not only orientation folding:
+
+      * a shape the orientation canonicaliser does not know how to fold;
+      * an aperture form or macro this module has no decoding for, or one whose
+        parameter list does not match the contract it is decoded against;
+      * a graphic object kind a family cannot tabulate (a stroked line in a mask
+        file, a routed slot in a round-only drill family).
 
     DELIBERATELY NOT a subclass of :class:`ParitySurfaceUnavailable`, and this is
     load-bearing. That one reports an ENVIRONMENT condition — a reader missing on
     this machine — which a caller may quite reasonably convert into "skip this
-    surface". This one reports a GAP IN THIS MODULE: a shape whose geometry the
-    canonicaliser does not know how to fold. Folding the two together would let a
-    caller's environment-skip path silently disable the gate for a newly-added
-    asymmetric pad shape, which is exactly the class of silent degradation the
-    fail-closed rule exists to prevent. Fix the canonicaliser; never skip past this.
+    surface". This one reports UNSUPPORTED OR CORRUPT FABRICATION DATA, or a gap
+    in this module. Folding the two together would let a caller's environment-skip
+    path silently disable the gate for a newly-added asymmetric pad shape or an
+    unrecognised aperture, which is exactly the class of silent degradation the
+    fail-closed rule exists to prevent. Fix the reader; never skip past this.
     """
 
 
@@ -1815,23 +1896,45 @@ _MACRO_PARAM_COUNTS = {"Rectangle": 3, "RoundedRectangle": 10}
 
 #: Slack for re-deriving one macro parameter from the others. gerber-writer
 #: rounds every calculated AD parameter to 6 decimals (``DECIMALS = 6`` in its
-#: writer), so an identity between two of them can be off by ~5e-7 mm and no
-#: more. 1e-5 is two orders above that and still 10x below
-#: :data:`PARITY_TOLERANCE_MM`, so it cannot mask a real geometry difference.
+#: writer), so each carries up to 5e-7 mm of error. The identity checked below —
+#: ``half_extent - corner_offset == diameter / 2`` — COMBINES THREE ROUNDED
+#: VALUES, so its worst case is 5e-7 + 5e-7 + 2.5e-7 = 1.25e-6 mm, not the 5e-7
+#: an earlier version of this comment claimed. 1e-5 is ~8x that, and still 10x
+#: below :data:`PARITY_TOLERANCE_MM`, so it cannot mask a real geometry
+#: difference.
 _MACRO_PARAM_TOLERANCE_MM = 1e-5
 
-#: Slack for the INDEPENDENT rotation cross-check below. The corner-circle
-#: centre is rounded to 5e-7 mm, so an angle derived from one sits within
-#: 5e-7/r_c radians of the truth; at the smallest centre offset this check runs
-#: on (:data:`_MACRO_MIN_CHECKABLE_OFFSET_MM`) that is ~2.9e-3 deg. 1e-2 leaves
-#: ~3x margin. Deliberately NOT :data:`_ANGLE_TOLERANCE_DEG`, which is a
-#: comparison threshold between SURFACES, not serialization slack inside one.
-_MACRO_ANGLE_CROSSCHECK_TOL_DEG = 1e-2
+#: Slack for the INDEPENDENT rotation cross-check below.
+#:
+#: DERIVATION, corrected (cold review of 6360a90, finding 4 — the earlier
+#: version of this comment claimed ~3x margin and had it about 1.2x). BOTH
+#: vectors are rounded, not one: the corner-circle centre carries up to
+#: sqrt(2) * 5e-7 mm of error in the worst direction, and so does the unrotated
+#: offset it is compared against. Each contributes up to
+#: ``asin(sqrt(2) * 5e-7 / offset)``, so at the smallest offset this check runs
+#: on (:data:`_MACRO_MIN_CHECKABLE_OFFSET_MM` = 1e-2 mm) the difference can
+#: approach 2 * 0.00405 = 0.0081 deg. 5e-2 leaves ~6x margin on that bound; a
+#: two-million-sample probe by the reviewer found a 0.00726 deg maximum.
+#:
+#: WHY LOOSE IS RIGHT HERE, and why this is not a weakened geometry check: this
+#: is a DECODING guard, not an accuracy one. It asks "is the parameter I am
+#: treating as the rotation actually the rotation", and a slot that is not the
+#: rotation holds a value with no relation to the true angle — the defect that
+#: motivated it read 0.11 deg on a pad authored at 0, thirteen times this
+#: threshold. REAL rotation error is caught by the cross-surface field
+#: comparison at :data:`_ANGLE_TOLERANCE_DEG` (1e-3 deg), fifty times tighter.
+#: Trading sensitivity this check does not need for margin against a
+#: false-positive — which would take the whole gerber surface down — is the
+#: right way round.
+_MACRO_ANGLE_CROSSCHECK_TOL_DEG = 5e-2
 
 #: Below this, a corner-circle centre is too close to the aperture's own centre
-#: for its angle to be recoverable at all (and the outline is within rounding of
-#: rotation-invariant anyway), so the cross-check is skipped rather than run on
-#: noise.
+#: for its angle to be recoverable at all — the derived angle becomes
+#: ill-conditioned, the error bound above diverges, and the outline is within
+#: rounding of rotation-invariant anyway. The cross-check is skipped rather than
+#: run on noise. It is the offset the tolerance above is derived AT, so the two
+#: constants move together: raising this floor buys margin, lowering it spends
+#: margin, and neither may be changed without redoing that arithmetic.
 _MACRO_MIN_CHECKABLE_OFFSET_MM = 1e-2
 
 
@@ -1882,13 +1985,13 @@ def _gerbonara_shape(aperture) -> _FlashShape:
         params = [float(p) for p in aperture.parameters]
         expected = _MACRO_PARAM_COUNTS.get(macro)
         if expected is None:
-            raise ParitySurfaceUnavailable(
+            raise ParityCanonicalizationUnsupported(
                 f"ir_parity: gerber aperture macro {macro!r} has no canonical "
                 f"shape mapping — add its parameter contract to "
                 f"_MACRO_PARAM_COUNTS after reading the macro source, rather "
                 f"than decoding it by position")
         if len(params) != expected:
-            raise ParitySurfaceUnavailable(
+            raise ParityCanonicalizationUnsupported(
                 f"ir_parity: gerber aperture macro {macro!r} carries "
                 f"{len(params)} parameters, not the {expected} this reader's "
                 f"decoding is pinned to — the writer's macro changed shape and "
@@ -1905,7 +2008,7 @@ def _gerbonara_shape(aperture) -> _FlashShape:
         radius = diameter / 2.0
         for half, offset, axis in ((params[0], xc, "x"), (params[1], yc, "y")):
             if abs((half - offset) - radius) > _MACRO_PARAM_TOLERANCE_MM:
-                raise ParitySurfaceUnavailable(
+                raise ParityCanonicalizationUnsupported(
                     f"ir_parity: RoundedRectangle macro is self-inconsistent on "
                     f"{axis}: half-extent {half} minus corner offset {offset} is "
                     f"{half - offset}, but $6/2 says the radius is {radius} — "
@@ -1922,13 +2025,13 @@ def _gerbonara_shape(aperture) -> _FlashShape:
                                    - math.atan2(yc, xc))
             skew = abs((derived - rot + 180.0) % 360.0 - 180.0)
             if skew > _MACRO_ANGLE_CROSSCHECK_TOL_DEG:
-                raise ParitySurfaceUnavailable(
+                raise ParityCanonicalizationUnsupported(
                     f"ir_parity: RoundedRectangle macro says rotation {rot} deg "
                     f"($5), but its rotated corner-circle centre implies "
                     f"{derived} deg — the parameter this reader takes as the "
                     f"rotation is not the rotation")
         return _FlashShape(_SHAPE_ROUNDRECT, w, h, rot, radius)
-    raise ParitySurfaceUnavailable(
+    raise ParityCanonicalizationUnsupported(
         f"ir_parity: gerbonara aperture {name} has no canonical shape mapping")
 
 
@@ -2023,7 +2126,7 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                 apertures = []
                 for obj in parsed.objects:
                     if type(obj).__name__ != "Flash":
-                        raise ParitySurfaceUnavailable(
+                        raise ParityCanonicalizationUnsupported(
                             f"ir_parity: {filename} carries a "
                             f"{type(obj).__name__}, which the mask family cannot "
                             f"tabulate — mask output is flashes only; extend "
@@ -2057,7 +2160,7 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
             plated = suffix.upper() == "PTH"
             for obj in parsed.objects:
                 if type(obj).__name__ != "Flash":
-                    raise ParitySurfaceUnavailable(
+                    raise ParityCanonicalizationUnsupported(
                         f"ir_parity: {filename} carries a routed slot the parity "
                         f"harness's round-only drill family cannot tabulate")
                 rows.append(_drill_row(float(obj.x), _board_y(obj.y),
@@ -2086,7 +2189,7 @@ def _gerber_outline(parsed) -> tuple[float, float, float, float]:
                 xs.append(float(x))
                 ys.append(_board_y(y))
     if not xs:
-        raise ParitySurfaceUnavailable("ir_parity: Edge_Cuts carries no geometry")
+        raise ParityCanonicalizationUnsupported("ir_parity: Edge_Cuts carries no geometry")
     return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
 
 
@@ -2117,6 +2220,13 @@ def diff_against_reference(reference: SurfaceTable,
     coordinate on one layer) collapses: the harness compares row IDENTITY, not
     multiplicity. That is a deliberate limit — the fixtures carry no coincident
     copper — and it is stated here rather than discovered later.
+
+    ``mask_opening`` IS EXEMPT, and it is the one family that is. Its key carries
+    an OCCURRENCE ORDINAL (see :func:`_mask_rows`), precisely so coincident
+    apertures cannot collapse: a mask window is fabrication-critical and losing
+    one duplicate would read as a clean board. Any family added later that can
+    carry coincident geometry should do the same rather than inherit the limit
+    above by default.
     """
     deltas: list[Delta] = []
     for family in FAMILIES:

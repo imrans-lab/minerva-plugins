@@ -1258,7 +1258,7 @@ def test_an_unknown_macro_is_refused_rather_than_decoded_by_position():
     so instead of guessing."""
     aperture = ApertureMacroInstance("ChamferedRectangle",
                                      [0.6, 0.3, 0.4, 0.1, 45.0])
-    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+    with pytest.raises(ir_parity.ParityCanonicalizationUnsupported,
                        match="no canonical shape mapping"):
         ir_parity._gerbonara_shape(aperture)
 
@@ -1267,7 +1267,7 @@ def test_a_macro_whose_parameter_count_changed_fails_closed():
     """The arity IS the contract. If gerber-writer reshapes the macro, decoding
     by position would report false geometry — which is how this bug happened."""
     aperture = ApertureMacroInstance("RoundedRectangle", [0.65, 0.55, 0.0])
-    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+    with pytest.raises(ir_parity.ParityCanonicalizationUnsupported,
                        match="not the 10 this reader's decoding is pinned to"):
         ir_parity._gerbonara_shape(aperture)
 
@@ -1281,7 +1281,7 @@ def test_a_self_inconsistent_rounded_rectangle_is_refused():
     aperture = ApertureMacroInstance(
         "RoundedRectangle",
         [0.65, 0.55, 0.10, 0.11, 0.0, 0.88, 0.21, 0.11, -0.21, 0.11])
-    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+    with pytest.raises(ir_parity.ParityCanonicalizationUnsupported,
                        match="self-inconsistent on x"):
         ir_parity._gerbonara_shape(aperture)
 
@@ -1301,7 +1301,7 @@ def test_a_rotation_slot_that_disagrees_with_the_corner_geometry_is_refused():
         "RoundedRectangle",
         [xc + radius, yc + radius, xc, yc, 0.0, 2 * radius, q1[0], q1[1],
          q2[0], q2[1]])
-    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+    with pytest.raises(ir_parity.ParityCanonicalizationUnsupported,
                        match="is not the rotation"):
         ir_parity._gerbonara_shape(aperture)
 
@@ -1524,7 +1524,7 @@ def test_a_non_flash_object_in_a_mask_file_fails_closed(monkeypatch):
 
     monkeypatch.setattr(gerber, "build_gerbers_ir", with_a_stray_draw)
 
-    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+    with pytest.raises(ir_parity.ParityCanonicalizationUnsupported,
                        match="mask output is flashes only"):
         ir_parity.tabulate_gerber(_board(PARITY_CORNERS))
 
@@ -1564,3 +1564,208 @@ def test_a_HALF_tented_via_opens_mask_on_exactly_one_side():
         deltas = [d for d in diff_against_reference(tables["ir"], tables[surface])
                   if d.family == "mask_opening"]
         assert deltas == [], "\n".join(d.render() for d in deltas)
+
+
+# ---------------------------------------------------------------------------
+# COLD-REVIEW REPAIRS (Codex on 6360a90, question 019ff39ea6c9).
+#
+# Three findings, each of which had shipped green: an occurrence ordinal
+# assigned from PRE-canonical geometry (a proven false parity failure), a
+# fail-closed refusal filed under the environment-skippable exception class, and
+# one derivation branch no fixture could reach because its behaviour is ABSENCE.
+# ---------------------------------------------------------------------------
+
+
+def test_coincident_apertures_described_the_two_LEGAL_ways_still_pair_up():
+    """FINDING 1, the P1. Occurrence ordinals were assigned by sorting the RAW
+    aperture while the ROW was built from the folded one, so two surfaces
+    describing the SAME multiset the two legal ways numbered it differently.
+
+    The reproduction is the reviewer's: a rect beside a FULLY-ROUNDED roundrect
+    at one position. The IR calls the second 'roundrect'; the emitted bytes call
+    it an obround, because gerber-writer collapses a fully-rounded RoundedRectangle
+    to the standard `O,` aperture. Sorted raw, that is rect-then-roundrect on one
+    surface and oval-then-rect on the other — "oval" < "rect" < "roundrect" as
+    strings — so occurrence 0 on the IR joined occurrence 0 on the gerber across
+    two DIFFERENT apertures. Measured before the fix: EIGHT false field deltas on
+    a board with nothing wrong with it.
+    """
+    def aperture(shape, w, h, radius):
+        return ir_parity._MaskAperture("F.Mask", 10.0, 8.0, shape, w, h, 0.0,
+                                       radius, "dark", "pad", "C1")
+
+    # A fully-rounded roundrect IS an obround; radius == min(w, h) / 2.
+    reference = _mask_table("ir", [aperture("rect", 1.2, 1.0, 0.0),
+                                   aperture("roundrect", 1.3, 1.1, 0.55)])
+    surface = _mask_table("gerber", [aperture("rect", 1.2, 1.0, 0.0),
+                                     aperture("oval", 1.3, 1.1, 0.55)])
+
+    # Both surfaces must reach the same canonical shape AND the same ordinal.
+    assert [(r.key[3], r.field_map()["shape"]) for r in reference.rows] == \
+           [(r.key[3], r.field_map()["shape"]) for r in surface.rows]
+    deltas = diff_against_reference(reference, surface)
+    assert deltas == [], "\n".join(d.render() for d in deltas)
+
+
+def test_the_ordinal_is_assigned_from_the_geometry_that_is_REPORTED():
+    """The invariant behind the fix, asserted directly rather than through one
+    fixture: for every aperture, the fields the row carries are the same
+    canonical form its ordinal was sorted on.
+
+    Stated as its own test because the bug was not a wrong comparison — both
+    halves were individually correct — it was two halves reading DIFFERENT
+    geometry. A future edit that recomputes either side independently
+    reintroduces it, and this fails.
+    """
+    for shape, w, h, radius in (("roundrect", 1.3, 1.1, 0.55),   # -> oval
+                                ("roundrect", 1.3, 1.1, 0.0),    # -> rect
+                                ("oval", 1.2, 2.4, 0.6),         # 90-deg fold
+                                ("rect", 2.0, 1.0, 0.0)):
+        aperture = ir_parity._MaskAperture("F.Mask", 4.0, 4.0, shape, w, h, 90.0,
+                                           radius, "dark", "pad", "U1")
+        canon = ir_parity._mask_canonical(aperture)
+        row = ir_parity._mask_rows([aperture])[0].field_map()
+        assert (row["shape"], row["w_mm"], row["h_mm"], row["rot_deg"]) == \
+               (canon.shape, canon.w, canon.h, canon.rot)
+
+
+def test_the_two_refusal_classes_stay_distinct():
+    """FINDING 2. Unsupported or corrupt fabrication data must NOT raise the
+    environment-skippable class.
+
+    ``ParitySurfaceUnavailable`` means "a dev-only reader is missing on this
+    machine", which a caller may legitimately turn into "skip this surface".
+    An unknown aperture, a macro whose parameters do not match its contract, or
+    a graphic a family cannot tabulate does not get better on another machine —
+    routing one down the skip path would let the gate go quiet on exactly the
+    data it exists to refuse.
+
+    Asserted STRUCTURALLY, over every raise in the module, so a future raise
+    added at a new site cannot pick the wrong class unnoticed.
+    """
+    assert not issubclass(ParityCanonicalizationUnsupported, ParitySurfaceUnavailable)
+
+    tree = ast.parse(Path(ir_parity.__file__).read_text(encoding="utf-8"))
+    environmental = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        call = node.exc
+        name = getattr(getattr(call, "func", call), "id", None)
+        if name == "ParitySurfaceUnavailable":
+            environmental.append(node.lineno)
+    # Exactly one: the lazy gerbonara import. Every other refusal is about DATA.
+    assert len(environmental) == 1, (
+        f"ParitySurfaceUnavailable is raised at lines {environmental} — it means "
+        f"'a reader is missing on this machine' and nothing else. A refusal about "
+        f"the DATA must raise ParityCanonicalizationUnsupported, or a caller's "
+        f"environment-skip path could swallow it")
+    source = Path(ir_parity.__file__).read_text(encoding="utf-8").splitlines()
+    context = "\n".join(source[environmental[0] - 6:environmental[0]])
+    assert "ImportError" in context, \
+        "the one environmental raise is supposed to be the missing-reader path"
+
+
+def test_a_plated_hole_with_no_annulus_is_UNREPRESENTABLE_not_merely_untested():
+    """FINDING 3, and the review's premise needed one correction.
+
+    The finding asked for a negative control on "plated board hole without an
+    annulus contributes no opening", on the reading that it was a reachable
+    branch no fixture covered. It is not reachable: ``ResolvedHole`` REFUSES to
+    construct in that state (resolved_board.py, "a plated hole must carry an
+    authored copper annulus" — the author-don't-invent invariant of finding
+    019f8dbb7104). No board that compiles can carry one, so no fixture and no
+    constructed IR can exercise the branch, and a test asserting "it contributes
+    nothing" would be asserting something about a value that cannot exist.
+
+    So the guard in ``_ir_mask_openings`` is a DEFENSIVE branch over an
+    already-impossible state, not a live rule — and this test pins the invariant
+    that makes it dead. If the IR ever relaxes it, this fails and says so, which
+    is the moment the guard becomes load-bearing and needs its own control. That
+    is a stronger arrangement than a fixture: it cannot rot into a test of
+    something the type no longer forbids.
+
+    ``mask_source.board_hole_openings`` keeps its own ``annulus is None`` branch
+    for the same defensive reason, and it takes loose arguments rather than a
+    ``ResolvedHole``, so there the state IS representable.
+    """
+    board = _board(PARITY_CORNERS)
+    plated = next(h for h in board.holes if h.plated and h.annulus_mm)
+
+    with pytest.raises(ValueError, match="authored copper annulus"):
+        replace(plated, annulus_mm=None)
+
+    # And the positive half, which IS reachable: the annulus-bearing hole opens
+    # a window on both sides, on all three participating surfaces.
+    tables = tabulate_all(board)
+    where = (ir_parity._q(plated.feature.position[0]),
+             ir_parity._q(plated.feature.position[1]))
+    for surface in ("ir", "drc", "gerber"):
+        rows = [r for r in tables[surface].rows
+                if r.family == "mask_opening" and r.key[1:3] == where]
+        assert {r.key[0] for r in rows} == {"F.Mask", "B.Mask"}, (
+            f"{surface} did not open mask on both sides over the plated hole's "
+            f"copper ring")
+
+    # The UNPLATED board hole is the neighbouring branch and IS reachable — it
+    # opens to the drill on both sides with no margin. Asserted here so the two
+    # hole rules are pinned side by side rather than one of them by accident.
+    unplated = next(h for h in board.holes if not h.plated)
+    bare = (ir_parity._q(unplated.feature.position[0]),
+            ir_parity._q(unplated.feature.position[1]))
+    for surface in ("ir", "drc", "gerber"):
+        rows = [r for r in tables[surface].rows
+                if r.family == "mask_opening" and r.key[1:3] == bare]
+        assert {r.key[0] for r in rows} == {"F.Mask", "B.Mask"}
+        assert all(r.field_map()["w_mm"] == pytest.approx(
+            unplated.feature.diameter_mm, abs=1e-9) for r in rows), (
+            "an unplated board hole opens to the DRILL, with no margin")
+
+
+def test_a_pads_own_side_agrees_with_its_components_placement():
+    """The asymmetry the review asked about (answer d), pinned instead of left
+    implicit.
+
+    ``mask_source`` keys an SMD opening off the COMPONENT's side; this module's
+    reference walk keys it off ``PlacedPad.side``. The compiler makes the two
+    agree on every board it produces, so the difference is invisible — which is
+    exactly why it is worth an assertion rather than a comment. Keeping the
+    distinct read is deliberate (a genuine divergence SHOULD surface as a parity
+    delta), but a hand-built inconsistent IR would otherwise produce a confusing
+    mask failure with no statement anywhere of which reading is authoritative.
+
+    If this ever fails, the mask family is not the bug — the board is.
+    """
+    for path in (PARITY_CORNERS, COUPON_JLC1):
+        board = _board(path)
+        for component in board.components:
+            for pad in component.placed_pads:
+                assert pad.side is component.placement.side, (
+                    f"{path.name}: {component.ref} pad {pad.source_id} sits on "
+                    f"{pad.side} while its component is placed on "
+                    f"{component.placement.side} — mask_source keys the opening "
+                    f"off the COMPONENT and ir_parity off the PAD, so the two "
+                    f"will now disagree")
+
+
+@pytest.mark.parametrize("radius,expected", [
+    # RECT end: at the fold window, and one step outside it.
+    pytest.param(0.0, "rect", id="exactly_zero"),
+    pytest.param(ir_parity.PARITY_TOLERANCE_MM * 0.9, "rect", id="inside_zero_window"),
+    pytest.param(ir_parity.PARITY_TOLERANCE_MM * 10, "roundrect", id="outside_zero_window"),
+    # OVAL end: min(w, h) / 2 == 0.55 for the 1.3 x 1.1 aperture below.
+    pytest.param(0.55, "oval", id="exactly_fully_rounded"),
+    pytest.param(0.55 - ir_parity.PARITY_TOLERANCE_MM * 0.9, "oval",
+                 id="inside_fully_rounded_window"),
+    pytest.param(0.55 - ir_parity.PARITY_TOLERANCE_MM * 10, "roundrect",
+                 id="outside_fully_rounded_window"),
+])
+def test_the_degenerate_fold_windows_are_exactly_where_they_claim(radius, expected):
+    """Answer f: the fold is only honest if its WINDOW is where the comment says.
+
+    Both endpoints are asserted just inside and just outside PARITY_TOLERANCE_MM
+    — a fold even slightly too wide is a suppression, and one too narrow reports
+    a shape defect on a correctly fabricated land."""
+    rows = ir_parity._mask_rows(
+        [_mask_aperture(w=1.3, h=1.1, corner_radius_mm=radius)])
+    assert rows[0].field_map()["shape"] == expected

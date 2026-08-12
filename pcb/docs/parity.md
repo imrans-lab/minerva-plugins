@@ -87,6 +87,22 @@ readings of one call. Three things it carries that copper rows do not:
 | `polarity` | a clear flash has identical extents and the opposite meaning. Geometry alone cannot catch an inverted one. |
 | occurrence ordinal *(in the key)* | `by_family` is a `{key: row}` dict, so without it two coincident identical apertures collapse to one row and **losing one is a clean diff**. |
 
+The ordinal is assigned from the **canonical** form — the same one the row's
+fields carry — and that identity is the whole correctness argument. Sorting the
+raw aperture while reporting the folded one made two surfaces number the *same*
+multiset differently: a rect beside a fully-rounded roundrect sorts
+rect-then-roundrect on the IR and oval-then-rect on the emitted bytes, because
+`"oval" < "rect" < "roundrect"`. That shipped, and produced eight false deltas on
+a correct board (cold review of `6360a90`, finding 1).
+
+What the ordinal promises is **multiplicity**: *n* coincident apertures produce
+*n* rows. It does **not** promise that an arbitrary change to one of several
+coincident apertures reports as a field delta rather than a missing+extra pair —
+a change big enough to move that aperture past a neighbour in canonical order
+renumbers both. The verdict stays correct either way; only the legibility of the
+report degrades. Ordinals are still preferred over a `Counter`, which gives up
+field-level diffs for *every* difference rather than just order-crossing ones.
+
 Two shape folds keep representation differences from reading as defects, and
 both are narrow enough that a wrong value still fails: a quarter-turned land
 folds to its axis-aligned representative (shared with copper), and a roundrect
