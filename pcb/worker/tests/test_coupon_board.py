@@ -384,3 +384,84 @@ class TestBackSilkReadsFromTheBack:
         # cannot satisfy the assertion above.
         assert back != upright, "back legend is unmirrored"
         assert back != mirror_y, "back legend is upside down (Y-mirrored)"
+
+
+class TestSilkStaysOnTheBoard:
+    """Coupon silk-placement regression (WYSIWYG round, 2026-08-12).
+
+    The panel's WYSIWYG render surfaced six silk defects no check caught:
+    designators printed over neighbouring pads (GC9 saw those two), off the
+    board's top edge (FID1/FID2), across the logo face, and REV A artwork
+    reaching into the cutout. Fixed by authoring `hide` on the fixture
+    footprints' references (owner ruling on 019ff2a6ce1b: hide means HIDDEN)
+    and moving REV1 clear of the cutout.
+
+    THESE TESTS ARE STANDING IN FOR A MISSING CHECK: geometric DRC has no
+    silk-to-edge and no silk-over-cutout rule (GC9 is width + silk-to-pad
+    only), so the emitted bytes are swept here directly. If a GC advisory for
+    this class ever lands, these stay as the coupon's own pin — a fixture
+    regression should fail the fixture's suite, not only a generic check.
+    """
+
+    CUTOUT = (10.8, 5.0, 13.8, 11.0)
+
+    def _silk_endpoints(self, filename: str):
+        import warnings
+
+        pytest.importorskip("gerbonara")
+        from gerbonara import GerberFile
+
+        result = _compiled()
+        files = build_gerbers_ir(result.board, name="coupon")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed = GerberFile.from_string(files[filename], filename=filename)
+        pts = []
+        for obj in parsed.objects:
+            if type(obj).__name__ in ("Line", "Arc"):
+                pts += [(float(obj.x1), -float(obj.y1)),
+                        (float(obj.x2), -float(obj.y2))]
+        assert pts, f"{filename} carries no silk — the sweep below is vacuous"
+        return pts
+
+    def test_no_silk_prints_off_the_board(self):
+        """The fab clips silk at the outline; a stroke past the edge is artwork
+        that will not exist on the physical board. Was 60 endpoints (FID1 and
+        FID2's designators hanging over the top edge) before the fix."""
+        board = _board()
+        w, h = float(board["width_mm"]), float(board["height_mm"])
+        for layer in ("coupon-F_SilkS.gbr", "coupon-B_SilkS.gbr"):
+            off = [(x, y) for (x, y) in self._silk_endpoints(layer)
+                   if x < 0 or x > w or y < 0 or y > h]
+            assert off == [], f"{layer}: silk prints off the board at {off[:4]}"
+
+    def test_no_silk_prints_into_the_cutout(self):
+        """There is no substrate inside the cutout — silk there lands on air.
+        Was 7 endpoints (REV A's top band) before REV1 moved to (12, 12)."""
+        x0, y0, x1, y1 = self.CUTOUT
+        for layer in ("coupon-F_SilkS.gbr", "coupon-B_SilkS.gbr"):
+            inside = [(x, y) for (x, y) in self._silk_endpoints(layer)
+                      if x0 <= x <= x1 and y0 <= y <= y1]
+            assert inside == [], f"{layer}: silk prints into the cutout at {inside[:4]}"
+
+    def test_hidden_fixture_designators_do_not_print(self):
+        """The fixture footprints author `hide` on their references; the emitted
+        silk must carry J1's and DAM1's designators (the two kept deliberately —
+        they exercise the authored-anchor and default-anchor paths) and nobody
+        else's. Checked structurally: every F-silk stroke endpoint must belong
+        to a kept component's neighbourhood or to authored footprint artwork."""
+        result = _compiled()
+        from pcb_worker.silk_source import refdes_strokes
+
+        # The suppression is the owner's: a hidden reference yields no strokes.
+        for comp in result.board.components:
+            rt = result.board.footprint_for(comp).reference_text
+            strokes = refdes_strokes(
+                comp.ref, comp.placement.position[0], comp.placement.position[1],
+                comp.placement.rotation_deg, rt, comp.placement.side)
+            if comp.ref in ("J1", "DAM1"):
+                assert strokes, f"{comp.ref} should keep its printed designator"
+            else:
+                assert strokes == (), (
+                    f"{comp.ref} prints a designator; its fixture footprint "
+                    f"should author `hide`")

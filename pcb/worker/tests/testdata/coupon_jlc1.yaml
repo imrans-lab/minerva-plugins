@@ -119,7 +119,7 @@ components:
     - ref: REV1
       footprint: Minerva_Fixture:TXT_CouponRev
       x_mm: 12
-      y_mm: 11
+      y_mm: 12
       rotation_deg: 180
       layer: bottom
       assembly: exclude

@@ -503,8 +503,13 @@ def _is_captured_reference_fp_text(g: list) -> bool:
         return False
     if _graphic_layer(g) != "F.SilkS":
         return False
-    if _fp_text_hidden(g):
-        return False
+    # A HIDDEN reference is CAPTURED, not dropped (bug 019ff2a6ce1b, owner
+    # ruling 2026-08-12: hide means hidden). Dropping it here had two wrong
+    # consequences at once: the authored anchor vanished, so the designator
+    # synthesized at the DEFAULT anchor anyway — hide moved the text instead
+    # of removing it — and the node was warned as an uncaptured graphic.
+    # Visibility rides the parsed dict as its own field; suppression happens
+    # at the one glyph owner (silk_source.refdes_strokes), never here.
     at = _kv(g, "at")
     if not at or len(at) < 3:
         return False
@@ -525,6 +530,7 @@ def _parse_reference_text(root: Any) -> Union[dict, None]:
         at = _kv(g, "at")
         x, y = _num(at[1]), _num(at[2])
         rot = _num(at[3]) if len(at) > 3 else 0.0
+        hidden = _fp_text_hidden(g)
         size_mm = 1.0
         effects = _kv(g, "effects")
         if effects:
@@ -547,7 +553,8 @@ def _parse_reference_text(root: Any) -> Union[dict, None]:
                     if a != b:
                         return None
                     size_mm = a
-        return {"x_mm": x, "y_mm": y, "rotation_deg": rot or 0.0, "size_mm": size_mm}
+        return {"x_mm": x, "y_mm": y, "rotation_deg": rot or 0.0,
+                "size_mm": size_mm, "hidden": hidden}
     return None
 
 

@@ -240,6 +240,12 @@ class ReferenceTextDefinition:
     position: Point
     rotation_deg: float = 0.0
     size_mm: float = 1.0
+    #: The footprint AUTHORED its reference hidden (KiCad's `hide` flag on the
+    #: reference fp_text). Owner ruling 2026-08-12 (bug 019ff2a6ce1b): hidden
+    #: means HIDDEN — the synthesized designator is suppressed at the one glyph
+    #: owner (silk_source.refdes_strokes), on every silk consumer at once.
+    #: Fiducial/test-point/artwork fixtures author this by convention.
+    hidden: bool = False
 
     def __post_init__(self) -> None:
         _point(self.position, "ReferenceTextDefinition.position")
@@ -440,6 +446,7 @@ class FootprintDefinition:
                 "position": self.reference_text.position,
                 "rotation_deg": self.reference_text.rotation_deg,
                 "size_mm": self.reference_text.size_mm,
+                "hidden": self.reference_text.hidden,
             },
         }
         object.__setattr__(self, "content_id", hash_content(payload))
@@ -644,6 +651,7 @@ class FootprintDefinition:
                                     "reference_text.position"),
                     rotation_deg=float(raw_rt.get("rotation_deg") or 0.0),
                     size_mm=float(raw_rt.get("size_mm") or 1.0),
+                    hidden=bool(raw_rt.get("hidden") or False),
                 )
             except (TypeError, ValueError):
                 reference_text = None

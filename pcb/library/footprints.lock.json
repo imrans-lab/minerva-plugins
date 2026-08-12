@@ -66,28 +66,28 @@
  },
  "Minerva_Fixture:FID_Circle_1mm": {
   "path": "Minerva_Fixture.pretty/FID_Circle_1mm.kicad_mod",
-  "sha256": "e85eaef9beba0deb4771f837b3d2f184a21a2b19532cec5648965ba3c7497577",
-  "size_bytes": 556
+  "sha256": "95a17cb5b9228166cebce3fd9786c83d97662237f61c0ae2493c17a5d1c9abf8",
+  "size_bytes": 669
  },
  "Minerva_Fixture:LOGO_Owl_TestCoupon": {
   "path": "Minerva_Fixture.pretty/LOGO_Owl_TestCoupon.kicad_mod",
-  "sha256": "87be4afa99819695804d30c7abd61dc006b4acedf76c11a693d7a11bbd7d10e9",
-  "size_bytes": 9190
+  "sha256": "ea506c4ab201c739694e553b6e3b7a42124c3eb2f5bbc055142e93aaf6305f1d",
+  "size_bytes": 9303
  },
  "Minerva_Fixture:SMD_WeirdPads_2P": {
   "path": "Minerva_Fixture.pretty/SMD_WeirdPads_2P.kicad_mod",
-  "sha256": "d46e4016891ffd148bc8853d1aad786cb42a4e62942b8a0a78e3742a61bd637d",
-  "size_bytes": 668
+  "sha256": "502171832f801f81d3a715e5f781ec8fdf67d863bac0e2e4fa367bbbf90f0185",
+  "size_bytes": 781
  },
  "Minerva_Fixture:TP_MinAnnular_0p6": {
   "path": "Minerva_Fixture.pretty/TP_MinAnnular_0p6.kicad_mod",
-  "sha256": "16b104eb8076cc1fce5af780a92ebf860ef23d1138a1989b67e38efc9be54526",
-  "size_bytes": 554
+  "sha256": "02ed5b7183cef1164aa23a82d3e633fcfdc2ebe894974d888ca468115e8bfae4",
+  "size_bytes": 667
  },
  "Minerva_Fixture:TXT_CouponRev": {
   "path": "Minerva_Fixture.pretty/TXT_CouponRev.kicad_mod",
-  "sha256": "4f08e41eb0b37a4bdd497fc0bdcfe5b61efc3532459b209e4d41814223ba069b",
-  "size_bytes": 2168
+  "sha256": "ab8a445bcf5cfff7254c60464a464fbc9e9cf861a5d583f95863cd4ee373c02c",
+  "size_bytes": 2173
  },
  "MountingHole:MountingHole_3.2mm_M3": {
   "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",
@@ -106,7 +106,7 @@
  },
  "TH_TestPoint": {
   "path": "TestPoint.pretty/TH_TestPoint.kicad_mod",
-  "sha256": "375088fad76a0267cbfa9505f0636dfb6c2eafc4bd42b55e04df83da7ae38167",
-  "size_bytes": 552
+  "sha256": "afa9fd9895bfd84eb3ed97793a2eed64657d875572459c83b9cb704ce326ada0",
+  "size_bytes": 665
  }
 }

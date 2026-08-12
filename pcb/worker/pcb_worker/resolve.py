@@ -270,7 +270,8 @@ def _refdes_graphics(ref: str, parsed: dict) -> list:
         ref_def = ReferenceTextDefinition(
             position=(float(rt["x_mm"]), float(rt["y_mm"])),
             rotation_deg=float(rt.get("rotation_deg", 0.0)),
-            size_mm=float(rt.get("size_mm", 1.0)))
+            size_mm=float(rt.get("size_mm", 1.0)),
+            hidden=bool(rt.get("hidden") or False))
     return [{"layer": "F.SilkS", "kind": "poly",
              "points": [[x, y] for (x, y) in poly.points],
              "width": poly.width}

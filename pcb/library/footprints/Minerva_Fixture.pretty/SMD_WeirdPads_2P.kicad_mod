@@ -1,5 +1,8 @@
 (footprint "SMD_WeirdPads_2P" (version 20221018) (generator pcb_worker_seed)
   (layer "F.Cu")
+  (fp_text reference REF** (at 0 -1.5) (layer F.SilkS) hide
+    (effects (font (size 1 1) (thickness 0.15)))
+  )
   (fp_line (start -1.9 -1.5) (end 1.9 -1.5) (layer "F.CrtYd") (width 0.05))
   (fp_line (start 1.9 -1.5) (end 1.9 1.1) (layer "F.CrtYd") (width 0.05))
   (fp_line (start 1.9 1.1) (end -1.9 1.1) (layer "F.CrtYd") (width 0.05))

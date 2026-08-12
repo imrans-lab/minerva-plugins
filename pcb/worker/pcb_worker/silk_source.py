@@ -557,6 +557,15 @@ def refdes_strokes(ref: Any, cx: float, cy: float, rot: float,
     text = ref if isinstance(ref, str) else None
     if not text or not text.strip():
         return ()
+    # AUTHORED-HIDDEN reference => NO designator, anywhere (owner ruling
+    # 2026-08-12, bug 019ff2a6ce1b — supersedes the earlier ignore-the-flag
+    # disposition). This is the ONE glyph owner, so suppressing here covers the
+    # Gerber emitter, the DRC projection and the panel's resolve payload in a
+    # single decision; a consumer that wanted to print a hidden designator
+    # anyway would be un-WYSIWYG by construction. KiCad itself does not render
+    # a hidden fp_text, so this is fidelity, not a Minerva convention.
+    if reference_text is not None and reference_text.hidden:
+        return ()
 
     if reference_text is not None:
         size = reference_text.size_mm

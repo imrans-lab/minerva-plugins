@@ -435,3 +435,69 @@ def test_authored_reference_text_anchor_is_honored_and_mirrors_once():
     # And the authored anchor is actually used rather than REFDES_LOCAL_Y_MM.
     default = silk_source.refdes_strokes("I", 10.0, 5.0, 0.0, None, Side.TOP)
     assert [p.points for p in top] != [p.points for p in default]
+
+
+# ---------------------------------------------------------------------------
+# HIDDEN reference designators (bug 019ff2a6ce1b, owner ruling 2026-08-12:
+# hide means HIDDEN — supersedes the earlier ignore-the-flag disposition).
+# ---------------------------------------------------------------------------
+
+
+def test_a_hidden_reference_suppresses_the_designator_entirely():
+    """The ONE glyph owner returns no strokes for an authored-hidden reference,
+    which is what makes the decision reach every consumer (gerber emit, DRC
+    projection, panel resolve) at once."""
+    from pcb_worker.footprint_def import ReferenceTextDefinition
+
+    from pcb_worker.resolved_board import Side
+    from pcb_worker.silk_source import refdes_strokes
+
+    rt = ReferenceTextDefinition(position=(0.0, -1.5), hidden=True)
+    assert refdes_strokes("TP3", 10.0, 8.0, 0.0, rt) == ()
+    assert refdes_strokes("TP3", 10.0, 8.0, 0.0, rt, Side.BOTTOM) == ()
+
+    # NON-VACUITY: the same anchor un-hidden produces strokes — the empty
+    # tuple above is the hide flag's doing, not a broken fixture.
+    visible = ReferenceTextDefinition(position=(0.0, -1.5), hidden=False)
+    assert silk_source.refdes_strokes("TP3", 10.0, 8.0, 0.0, visible)
+
+
+def test_the_parser_captures_a_hidden_reference_instead_of_dropping_it(tmp_path):
+    """THE ORIGINAL DEFECT, pinned in its fixed form: `hide` used to make the
+    parser drop reference_text entirely, so the designator synthesized at the
+    DEFAULT anchor anyway — hide MOVED the text instead of removing it. The
+    parser now captures anchor AND visibility as separate facts."""
+    from pcb_worker.footprints import parse_kicad_mod
+
+    fx = tmp_path / "hidden_ref.kicad_mod"
+    fx.write_text('''(footprint "hidden_ref" (version 20221018) (generator t)
+  (layer "F.Cu")
+  (fp_text reference REF** (at 0.4 -2.2 15) (layer F.SilkS) hide
+    (effects (font (size 1 1) (thickness 0.15)))
+  )
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+)''', encoding="utf-8")
+    rt = parse_kicad_mod(fx).get("reference_text")
+    assert rt is not None, (
+        "hidden reference was DROPPED — the designator will synthesize at the "
+        "default anchor, visible: hide moves the text instead of removing it")
+    assert rt["hidden"] is True
+    assert (rt["x_mm"], rt["y_mm"], rt["rotation_deg"]) == (0.4, -2.2, 15.0)
+
+    # And the KiCad 7/8 spelling, plus an explicit (hide no) staying visible.
+    fx.write_text('''(footprint "h2" (version 20221018) (generator t)
+  (layer "F.Cu")
+  (fp_text reference REF** (at 0 -1.5) (layer F.SilkS)
+    (effects (font (size 1 1) (thickness 0.15)) (hide yes))
+  )
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+)''', encoding="utf-8")
+    assert parse_kicad_mod(fx)["reference_text"]["hidden"] is True
+    fx.write_text('''(footprint "h3" (version 20221018) (generator t)
+  (layer "F.Cu")
+  (fp_text reference REF** (at 0 -1.5) (layer F.SilkS)
+    (effects (font (size 1 1) (thickness 0.15)) (hide no))
+  )
+  (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu"))
+)''', encoding="utf-8")
+    assert parse_kicad_mod(fx)["reference_text"]["hidden"] is False
