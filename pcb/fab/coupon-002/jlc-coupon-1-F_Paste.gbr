@@ -1,0 +1,52 @@
+G04 Created with the python gerber_writer 0.4.3.3*
+G04 #@! TF.CreationDate,1970-01-01T00:00:00*
+G04 #@! TF.FileFunction,SolderPaste,Top*
+G04 #@! TF.FilePolarity,Positive*
+G04 #@! TF.GenerationSoftware,Minerva,pcb_worker/gerber.py,0.2.0*
+%MOMM*%
+%FSLAX36Y36*%
+G75*
+%AMRoundedRectangle*
+0 Rectangle with rounded corners*
+0 Uses primitive 1 and 4 only, without calculations*
+0 $1 xsize/2*
+0 $2 ysize/2*
+0 $3 xsize/2-radius*
+0 $4 size/2-radius*
+0 $5 rotation angle*
+0 $6 diameter*
+0 $7 x of center of first quadrant circle*
+0 $8 y of center of first quadrant circle*
+0 $9 x of center of 2nd quadrant circle*
+0 $10 y of center of 2nd quadrant circle*
+4,1,8,
+$3,$2,
+$1,$4,
+$1,-$4,
+$3,-$2,
+-$3,-$2,
+-$1,-$4,
+-$1,$4,
+-$3,$2,
+$3,$2,
+$5*
+1,1,$6,$7,$8*
+1,1,$6,-$7,-$8*
+1,1,$6,$9,$10*
+1,1,$6,-$9,-$10*
+%
+G04 #@! TAShape,RoundedRectangle,1.2,1.0,0.4,0.0*
+%ADD10RoundedRectangle,0.6X0.5X0.2X0.1X0.0X0.8X0.2X0.1X-0.2X0.1*%
+G04 #@! TAShape,RoundedRectangle,0.8,1.6,0.4,0.0*
+%ADD11O,0.8X1.6*%
+G04 #@! TAShape,Rectangle,0.6,0.8,0.0*
+%ADD12R,0.6X0.8*%
+%LPD*%
+D10*
+X19050000Y-8000000D03*
+D11*
+X20950000Y-8000000D03*
+D12*
+X8600000Y-16000000D03*
+X9400000Y-16000000D03*
+M02*
