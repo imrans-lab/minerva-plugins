@@ -500,3 +500,84 @@ def test_silk_over_copper_advisory(tmp_path):
     assert moved["facts"]["silk_over_copper"] == []
     assert moved["facts"]["pads"] == crossing["facts"]["pads"]
     assert moved["artifact_sha256"] != crossing["artifact_sha256"]
+
+
+# ---------------------------------------------------------------------------
+# 6. The content binding (Codex 1173 F1): an approval is not a free token.
+# ---------------------------------------------------------------------------
+
+def test_bless_approval_is_bound_to_the_blessed_bytes(tmp_path):
+    """SEAL for Codex 1173 F1. Bless bytes A; then swap the staged file to
+    bytes B AND update the entry's OUTER sha256 pin to match, leaving the old
+    approval record in place — the hand-edit an attacker (or a confused merge)
+    would make. The disk-vs-lock check now PASSES for B, so before the fix the
+    old approval carried over to bytes nobody reviewed. is_blessed's content
+    binding (bless.content_sha256 == entry.sha256) must make every consumer
+    refuse: the blessed lock view excludes the ref, the attributed resolve
+    names the drift, and promote refuses it as unblessed."""
+    wip = tmp_path / "library_wip"
+    _stage(wip)
+    report = bless.footprint_report(REF, wip_root=wip)
+    bless.bless_footprint(REF, wip, "approved", "owner", WHEN,
+                          report["artifact_sha256"])
+    assert set(bless.blessed_wip_layer(wip).lock) == {REF}
+
+    # The swap: different geometry on disk, outer pin updated to match it,
+    # bless record (bound to the OLD content) left untouched.
+    staged = wip / "footprints" / "TestLib.pretty" / "TWO_PAD_TEST.kicad_mod"
+    swapped = TWO_PAD.replace("(at -1 0)", "(at -1.2 0)")
+    assert swapped != TWO_PAD
+    staged.write_bytes(swapped.encode("utf-8"))
+    doc = bless.load_wip_lock(wip)
+    entry = doc["entries"][REF]
+    assert entry["bless"]["content_sha256"] == entry["sha256"]  # pre-swap state
+    entry["sha256"] = sha256_file(staged)
+    (wip / "footprints.lock.json").write_bytes(
+        json.dumps(doc, indent=2, sort_keys=True).encode("utf-8"))
+
+    # (a) structurally absent from the resolving view: the record no longer
+    # binds the content the entry pins, so it is not blessed AT ALL.
+    assert bless.blessed_wip_layer(wip).lock == {}
+    # (b) attributed by name, with the drift stated (not "malformed").
+    with pytest.raises(bless.BlessError) as excinfo:
+        bless.resolve_wip_footprint(REF, wip)
+    assert "approved for DIFFERENT bytes" in str(excinfo.value)
+    # (c) promotion — the durable exit — refuses the same shape.
+    with pytest.raises(bless.BlessError, match="approved for DIFFERENT bytes"):
+        bless.promote_footprint(REF, wip, tmp_path / "library_user")
+    assert not (tmp_path / "library_user").exists()
+
+
+# A small pad WHOLLY INSIDE a large silk outline circle (the Codex 1173 F5
+# false-positive shape): center-to-pad distance ~0, ring at radius 3 — silk
+# never touches the pad. A second circle at radius 1.0 passes THROUGH pad "2"
+# (pad spans x∈[0.4,1.6] y∈[-0.8,0.8]; nearest point of the rect to origin is
+# (0.4, 0) at distance 0.4 < 1.06 outer, farthest corner (1.6, 0.8) at ~1.789
+# > 0.94 inner — the radial interval straddles the annulus).
+SILK_CIRCLES = """\
+(footprint "SILK_CIRCLES" (version 20221018) (generator pcb_worker_test)
+  (layer "F.Cu")
+  (fp_circle (center 0 0) (end 3 0) (layer "F.SilkS") (width 0.12))
+  (fp_circle (center 0 0) (end 1 0) (layer "F.SilkS") (width 0.12))
+  (pad "1" smd rect (at 0 0) (size 0.4 0.4) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (pad "2" smd rect (at 1 0) (size 1.2 1.6) (layers "F.Cu" "F.Paste" "F.Mask"))
+)
+"""
+
+
+def test_silk_circle_advisory_is_a_ring_not_a_disk(tmp_path):
+    """SEAL for Codex 1173 F5: a silk circle sweeps the ANNULUS
+    [radius-half, radius+half], not the disk inside it. Pad "1" sits at the
+    center of both circles — inside the radius-3 outline (whose ring never
+    comes near it: nearest ring approach 3-0.06-0.283 ≈ 2.66mm away) and
+    inside the radius-1 circle likewise (pad corner at ~0.283 < 0.94 inner
+    sweep) — so it must NOT be flagged. Pad "2" straddles the radius-1 ring
+    and MUST be. Before the fix, pad "1" was flagged by both circles (disk
+    model), which is exactly the review noise the finding predicted."""
+    wip = tmp_path / "library_wip"
+    ref = "TestLib:SILK_CIRCLES"
+    _stage(wip, ref, text=SILK_CIRCLES)
+    report = bless.footprint_report(ref, wip_root=wip)
+    advisories = report["facts"]["silk_over_copper"]
+    assert [(a["pad"], a["stroke"]["kind"], a["stroke"]["radius"])
+            for a in advisories] == [("2", "circle", 1.0)]

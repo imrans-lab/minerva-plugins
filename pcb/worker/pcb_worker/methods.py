@@ -3002,6 +3002,7 @@ def _footprint_promote(params: dict) -> dict:
     params = params or {}
     ref = params.get("ref") or params.get("name")
     dest_root = params.get("dest_root")
+    overwrite = params.get("overwrite", False)
     try:
         wip_root = _wip_root(params, required=True)
         if not (isinstance(dest_root, str) and dest_root.strip()):
@@ -3010,9 +3011,19 @@ def _footprint_promote(params: dict) -> dict:
                 "root (<plugin data dir>/library_user) and is supplied by "
                 "the plugin host, which is the only party that knows the "
                 "data directory")
+        # The DESTRUCTIVE switch takes a JSON boolean and nothing else (Codex
+        # 1173 F2): bool("false") is True in Python, so coercing here would
+        # turn the single most common malformed LLM argument into an
+        # authorization to replace a durable library part. Only an absent
+        # value defaults; every non-boolean is a named pre-write refusal.
+        if not isinstance(overwrite, bool):
+            raise bless.BlessError(
+                f"overwrite must be a JSON boolean (true or false); got "
+                f"{overwrite!r}. A string or number is refused rather than "
+                f"coerced, because this switch authorizes replacing an "
+                f"existing durable library entry. Nothing was written")
         result = bless.promote_footprint(
-            ref, wip_root, dest_root,
-            overwrite=bool(params.get("overwrite")))
+            ref, wip_root, dest_root, overwrite=overwrite)
     except (bless.BlessError, footprints.FootprintLookupError) as exc:
         return _bless_error(exc)
     return {"ok": True, "result": result}

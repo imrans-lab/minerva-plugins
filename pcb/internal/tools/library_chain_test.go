@@ -103,3 +103,38 @@ func TestWithPromoteRoots_ForcesBothEnds(t *testing.T) {
 		t.Fatalf("caller's ref must pass through, got %v", m["ref"])
 	}
 }
+
+// TestInjectionHelpers_NullParamsCannotPanic is the seal for Codex 1173 F4:
+// json.Unmarshal("null", &m) succeeds with m == nil, and before the shared
+// decodeParamsObject helper the injectors' map assignment PANICKED the whole
+// plugin on tools/call with arguments:null — which the broker does not
+// schema-validate away. null now behaves exactly like absent params (an empty
+// object the host keys are injected into), while genuinely malformed shapes
+// (array, scalar) still pass through untouched for the worker's own uniform
+// parse-error reporting. All four injectors ride the one helper, so all four
+// are sealed here.
+func TestInjectionHelpers_NullParamsCannotPanic(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("MINERVA_PLUGIN_DATA_DIR", dataDir)
+
+	helpers := map[string]func(json.RawMessage) json.RawMessage{
+		"withWIPRoot":       withWIPRoot,
+		"withPromoteRoots":  withPromoteRoots,
+		"withLibraryChain":  withLibraryChain,
+		"withDefaultLibDir": withDefaultLibDir,
+	}
+	for name, helper := range helpers {
+		// null → treated as an empty object; must not panic, must inject.
+		out := helper(json.RawMessage(`null`))
+		m := decodeParams(t, out)
+		if len(m) == 0 {
+			t.Errorf("%s(null): injected nothing (%s)", name, out)
+		}
+		// Malformed non-objects pass through unchanged.
+		for _, bad := range []string{`[1,2]`, `"x"`, `7`} {
+			if got := helper(json.RawMessage(bad)); string(got) != bad {
+				t.Errorf("%s(%s): rewrote malformed params to %s", name, bad, got)
+			}
+		}
+	}
+}

@@ -214,3 +214,54 @@ def test_promote_refusals_leave_both_libraries_untouched(tmp_path):
         bless.promote_footprint(REF, wip, v1_user)
     assert (v1_user / "footprints.lock.json").read_bytes() == v1_bytes
     assert not (v1_user / "footprints").exists()
+
+
+# ---------------------------------------------------------------------------
+# The destructive switch takes a boolean and nothing else (Codex 1173 F2).
+# ---------------------------------------------------------------------------
+
+def test_promote_overwrite_refuses_everything_but_json_booleans(tmp_path):
+    """SEAL for Codex 1173 F2, at the SAME dispatch the Go bridge calls.
+    Python's bool("false") is True, so before the fix the single most common
+    malformed LLM argument — the string "false" — silently AUTHORIZED
+    replacing a durable user-library entry. With an existing destination
+    entry in place: absent and false refuse on the collision (proving they
+    did not authorize), true replaces, and every non-boolean spelling
+    ("false", "true", 0, 1) is refused BY NAME before any write."""
+    from pcb_worker.methods import handle_request
+
+    wip = tmp_path / "library_wip"
+    user = tmp_path / "library_user"
+    _stage_and_bless(wip)
+    bless.promote_footprint(REF, wip, user)  # the existing durable entry
+
+    def promote(**overrides) -> dict:
+        params = {"ref": REF, "wip_root": str(wip), "dest_root": str(user)}
+        params.update(overrides)
+        return handle_request({"id": "p1", "method": "footprint_promote",
+                               "params": params})
+
+    def restage():
+        _stage_and_bless(wip)
+
+    # Non-boolean spellings: named refusal, the WIP candidate left staged.
+    restage()
+    for bad in ("false", "true", 0, 1):
+        reply = promote(overwrite=bad)
+        assert reply["ok"] is False, bad
+        assert "JSON boolean" in reply["error"]["message"], bad
+        assert repr(bad) in reply["error"]["message"], bad
+    # ...and none of those calls moved anything: the candidate is still in WIP.
+    assert REF in (bless.load_wip_lock(wip).get("entries") or {})
+
+    # Absent and explicit false: the collision refusal (they do NOT authorize).
+    for kwargs in ({}, {"overwrite": False}):
+        reply = promote(**kwargs)
+        assert reply["ok"] is False, kwargs
+        assert "overwrite" in reply["error"]["message"], kwargs
+
+    # A real JSON true is the one spelling that replaces.
+    reply = promote(overwrite=True)
+    assert reply["ok"] is True
+    assert reply["result"]["layer"] == USER_LAYER
+    assert REF not in (bless.load_wip_lock(wip).get("entries") or {})

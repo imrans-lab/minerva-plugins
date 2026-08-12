@@ -37,6 +37,7 @@ package libraries
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -532,4 +533,51 @@ func TestImportFootprint_ImportsEveryNamedSourceAndRefusesEverythingElse(t *test
 		t.Errorf("a network refusal must state the offline contract: %s", ie.Message)
 	}
 	assertEmptyDir(t, dataDir, "after a network failure")
+}
+
+// TestImportFromArchive_DigestDescribesTheParsedSnapshot is the seal for
+// Codex 1173 F3 (vendor-archive TOCTOU): the size gate, the provenance digest
+// and the zip parse must all consume ONE captured read of the archive. The
+// refactor makes that structural — importFromArchive reads the path exactly
+// once and hands the same []byte to sha256 and to importFromZipBytes (which
+// has no path to re-open) — and this test pins the observable half: the
+// digest recorded in source_ref is the digest of the exact bytes the parser
+// extracted the footprint from, computed here independently from the same
+// on-disk file the importer was pointed at.
+func TestImportFromArchive_DigestDescribesTheParsedSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	archive := writeZip(t, filepath.Join(dir, "vendor.zip"),
+		[][2]string{{"Part.kicad_mod", validKicadMod}})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest := fmt.Sprintf("%x", sha256.Sum256(raw))
+
+	body, original, sourceRef, err := importFromArchive(archive, "Lib:Part")
+	if err != nil {
+		t.Fatalf("importFromArchive: %v", err)
+	}
+	if string(body) != validKicadMod {
+		t.Fatalf("extracted bytes differ from the entry written")
+	}
+	if original != "Part.kicad_mod" {
+		t.Fatalf("original = %q", original)
+	}
+	want := "vendor_export+vendor.zip@sha256:" + wantDigest + "!Part.kicad_mod"
+	if sourceRef != want {
+		t.Fatalf("source_ref = %q, want %q — the digest must describe the bytes the "+
+			"parser consumed", sourceRef, want)
+	}
+
+	// The same snapshot fed directly (no filesystem at all): the parse result
+	// is identical, which is what "the digest describes the parsed bytes"
+	// means — there is no second read the digest could have described.
+	body2, original2, entryName, err := importFromZipBytes(raw, archive, "Lib:Part")
+	if err != nil {
+		t.Fatalf("importFromZipBytes over the captured snapshot: %v", err)
+	}
+	if string(body2) != string(body) || original2 != original || entryName != "Part.kicad_mod" {
+		t.Fatalf("snapshot parse disagrees with the path parse")
+	}
 }

@@ -259,12 +259,22 @@ def _write_wip_lock(wip_root: Union[str, Path], doc: dict) -> None:
 
 
 def is_blessed(entry: Any) -> bool:
-    """True only for a WELL-FORMED APPROVED bless record.
+    """True only for a WELL-FORMED APPROVED bless record BOUND TO THIS CONTENT.
 
     Every departure from that -- ``None``, a non-dict, a rejected verdict, a
     missing tier/artifact/who -- is NOT blessed. A malformed record means
     nobody can say what was reviewed, and "cannot say" must never read as
-    "approved" (the entire fail-closed premise of this module)."""
+    "approved" (the entire fail-closed premise of this module).
+
+    THE CONTENT BINDING (Codex 1173 F1): the record's ``content_sha256`` must
+    EQUAL the entry's own ``sha256`` pin. Without this, an approval is a free
+    token: replace the staged file with different bytes AND update the entry's
+    outer pin, and the old record still reads as approval -- the disk-vs-lock
+    check passes (the file matches the NEW pin) while the human's verdict was
+    recorded against the OLD one. This predicate is the single authority both
+    live resolution (:func:`blessed_wip_layer`) and promotion
+    (:func:`promote_footprint`) consult, so the binding holds on every path
+    with one check."""
     bless = (entry or {}).get("bless") if isinstance(entry, dict) else None
     if not isinstance(bless, dict):
         return False
@@ -277,6 +287,9 @@ def is_blessed(entry: Any) -> bool:
     if not isinstance(bless.get("who"), str) or not bless["who"]:
         return False
     if not isinstance(bless.get("blessed_at"), str) or not bless["blessed_at"]:
+        return False
+    if (not isinstance(bless.get("content_sha256"), str) or not bless["content_sha256"]
+            or bless["content_sha256"] != entry.get("sha256")):
         return False
     return True
 
@@ -396,6 +409,17 @@ def _unblessed_message(ref: str, wip_root: Union[str, Path], entry: dict) -> str
         state = "never reviewed (bless is null)"
     elif bless.get("verdict") == VERDICT_REJECTED:
         state = (f"REJECTED by {bless.get('who')!r} at {bless.get('blessed_at')!r}")
+    elif (bless.get("verdict") == VERDICT_APPROVED
+            and bless.get("content_sha256") != entry.get("sha256")):
+        # The Codex 1173 F1 drift case, attributed by name: the approval is
+        # real but it covers OTHER bytes, and "re-author" vs "re-review" are
+        # different next actions than either rejection or malformation calls
+        # for.
+        state = (f"approved for DIFFERENT bytes (the record binds content "
+                 f"{bless.get('content_sha256')!r}, the entry now pins "
+                 f"{entry.get('sha256')!r}); the staged content changed after "
+                 f"the review, so the approval does not transfer. Re-run "
+                 f"footprint_report and re-bless the current bytes")
     else:
         state = f"a malformed bless record ({bless!r}) which does not count as approval"
     kind = entry.get("source_kind")
@@ -1396,22 +1420,31 @@ def _silk_over_copper(pads: list, graphics: list) -> list:
             if not center or None in center or radius is None:
                 continue
             cx, cy = float(center[0]), float(center[1])
-            # A circle's inflated reach is its OWN radius plus the half stroke
-            # width -- the disk the ring's outer edge sweeps, not the ring
-            # alone, so a copper land fully inside a large silk circle still
-            # counts as touched.
-            reach = float(radius) + half
+            # A silk circle is a RING, not a disk (Codex 1173 F5): the stroke
+            # sweeps the annulus [radius - half, radius + half], and a pad
+            # wholly INSIDE a large outline circle -- nearer the center than
+            # the ring ever reaches -- has no silk on it. The rect touches the
+            # ring iff its radial-distance interval from the center overlaps
+            # the annulus, so both bounds are needed: the nearest point
+            # (inside the outer sweep?) and the farthest corner (outside the
+            # inner sweep?). Strict inequalities, matching the line path's
+            # ``dist < half``: exact tangency does not report.
+            outer = float(radius) + half
+            inner = max(float(radius) - half, 0.0)
             for pad in targets:
                 rect = _bbox_of(_pad_corner_points(pad))
                 if rect is None:
                     continue
-                dist = _dist_point_to_rect(cx, cy, rect)
-                if dist < reach:
+                min_d = _dist_point_to_rect(cx, cy, rect)
+                max_d = max(math.hypot(x - cx, y - cy)
+                            for x in (rect["min_x_mm"], rect["max_x_mm"])
+                            for y in (rect["min_y_mm"], rect["max_y_mm"]))
+                if min_d < outer and max_d > inner:
                     advisories.append({
                         "pad": pad.get("number"), "side": side, "layer": layer,
                         "stroke": {"kind": "circle", "center": [cx, cy],
                                   "radius": float(radius), "width_mm": stroke_width},
-                        "overlap_mm": round(reach - dist, 6),
+                        "overlap_mm": round(min(outer, max_d) - max(inner, min_d), 6),
                         "basis": "pad_bbox",
                     })
         elif kind not in _SILK_OVERLAP_KINDS:

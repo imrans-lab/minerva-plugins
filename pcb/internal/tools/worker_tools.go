@@ -1103,6 +1103,32 @@ func wipRootDir() string {
 	return filepath.Join(sharedruntime.DataDir("pcb"), "library_wip")
 }
 
+// decodeParamsObject returns the call's params as a mutable JSON object, or
+// nil when they cannot be treated as one. Absent params AND an explicit JSON
+// null both become an empty object — the injectors' whole job is to ADD
+// host-owned keys, and null carries nothing worth preserving — while anything
+// that fails to unmarshal returns nil so the caller passes the RAW params
+// through for the worker's uniform parse-error reporting.
+//
+// The null case is load-bearing (Codex 1173 F4): json.Unmarshal("null", &m)
+// succeeds with m == nil, and the injectors' subsequent map assignment would
+// PANIC the whole plugin on a tools/call with arguments:null — which the
+// broker does not schema-validate away. One shared decoder, so the shape
+// cannot be re-copied wrong into the next injector.
+func decodeParamsObject(params json.RawMessage) map[string]interface{} {
+	if len(params) == 0 {
+		return map[string]interface{}{}
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(params, &m); err != nil {
+		return nil
+	}
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	return m
+}
+
 // withWIPRoot forces wip_root onto a bless-surface call.
 //
 // Unlike withDefaultLibDir (which fills in only when the caller omitted the
@@ -1114,10 +1140,8 @@ func wipRootDir() string {
 // Malformed params (not a JSON object) are passed through unchanged so the
 // worker's own uniform parse-error handling reports them.
 func withWIPRoot(params json.RawMessage) json.RawMessage {
-	var m map[string]interface{}
-	if len(params) == 0 {
-		m = map[string]interface{}{}
-	} else if err := json.Unmarshal(params, &m); err != nil {
+	m := decodeParamsObject(params)
+	if m == nil {
 		return params
 	}
 	m["wip_root"] = wipRootDir()
@@ -1145,10 +1169,8 @@ func userLibraryRoot() string {
 // LLM. The host owns the data directory; the agent chooses the part, never
 // the path.
 func withPromoteRoots(params json.RawMessage) json.RawMessage {
-	var m map[string]interface{}
-	if len(params) == 0 {
-		m = map[string]interface{}{}
-	} else if err := json.Unmarshal(params, &m); err != nil {
+	m := decodeParamsObject(params)
+	if m == nil {
 		return params
 	}
 	m["wip_root"] = wipRootDir()
@@ -1185,10 +1207,8 @@ func withPromoteRoots(params json.RawMessage) json.RawMessage {
 // Malformed params (not a JSON object) are passed through unchanged so the
 // worker's own uniform parse-error handling reports them.
 func withLibraryChain(params json.RawMessage) json.RawMessage {
-	var m map[string]interface{}
-	if len(params) == 0 {
-		m = map[string]interface{}{}
-	} else if err := json.Unmarshal(params, &m); err != nil {
+	m := decodeParamsObject(params)
+	if m == nil {
 		return params
 	}
 	m["wip_root"] = wipRootDir()
@@ -1222,10 +1242,8 @@ func withLibraryChain(params json.RawMessage) json.RawMessage {
 // Malformed params (not a JSON object) are passed through unchanged; the
 // worker's own parse-error handling reports that uniformly.
 func withDefaultLibDir(params json.RawMessage) json.RawMessage {
-	var m map[string]interface{}
-	if len(params) == 0 {
-		m = map[string]interface{}{}
-	} else if err := json.Unmarshal(params, &m); err != nil {
+	m := decodeParamsObject(params)
+	if m == nil {
 		return params
 	}
 

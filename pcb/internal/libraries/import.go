@@ -686,36 +686,63 @@ func importFromArchive(archivePath, ref string) ([]byte, string, string, error) 
 				"plugin's working directory is not the one the archive was downloaded into, so a "+
 				"relative path names a different file here than it does to the caller", archivePath)}
 	}
-	st, err := os.Stat(archivePath)
+	// ONE open, ONE read (Codex 1173 F3): the size cap, the provenance digest
+	// and the zip parse all consume THIS captured snapshot. Stat-then-hash-
+	// then-open would be three independent path resolutions, and a path
+	// swapped between any two of them yields a source_ref digest describing an
+	// archive other than the one that was parsed — the exact lie the digest
+	// exists to make impossible. O_NOFOLLOW is not used on purpose: a symlink
+	// to the real download is a legitimate caller shape, and following it ONCE
+	// is safe precisely because nothing re-resolves the path afterwards.
+	f, err := os.Open(archivePath)
 	if err != nil {
 		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
 			Message: fmt.Sprintf("cannot read the vendor archive %s: %v", archivePath, err)}
 	}
-	if !st.Mode().IsRegular() {
+	defer f.Close()
+	if st, err := f.Stat(); err != nil {
+		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
+			Message: fmt.Sprintf("cannot read the vendor archive %s: %v", archivePath, err)}
+	} else if !st.Mode().IsRegular() {
+		// Advisory-only precheck on the OPEN handle (same inode the read
+		// consumes): the real bound is the capped read below.
 		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
 			Message: fmt.Sprintf("%s is not a regular file", archivePath)}
 	}
-	if st.Size() > ArchiveMaxCompressedBytes {
-		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
-			Message: fmt.Sprintf("%s is %d bytes; vendor exports are capped at %d. A larger file is "+
-				"a library dump or a full distribution rather than one part's export",
-				archivePath, st.Size(), ArchiveMaxCompressedBytes)}
-	}
-
-	digest, err := sha256File(archivePath)
+	data, err := io.ReadAll(io.LimitReader(f, ArchiveMaxCompressedBytes+1))
 	if err != nil {
 		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
-			Message: fmt.Sprintf("cannot hash the vendor archive %s: %v", archivePath, err)}
+			Message: fmt.Sprintf("reading the vendor archive %s failed: %v", archivePath, err)}
 	}
+	if int64(len(data)) > ArchiveMaxCompressedBytes {
+		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
+			Message: fmt.Sprintf("%s is more than %d bytes; vendor exports are capped there. A "+
+				"larger file is a library dump or a full distribution rather than one part's export",
+				archivePath, ArchiveMaxCompressedBytes)}
+	}
+	body, original, entryName, err := importFromZipBytes(data, archivePath, ref)
+	if err != nil {
+		return nil, "", "", err
+	}
+	sum := sha256.Sum256(data)
+	sourceRef := fmt.Sprintf("vendor_export+%s@sha256:%s!%s",
+		filepath.Base(archivePath), hex.EncodeToString(sum[:]), entryName)
+	return body, original, sourceRef, nil
+}
 
-	zr, err := zip.OpenReader(archivePath)
+// importFromZipBytes parses ONE captured zip snapshot and extracts its single
+// .kicad_mod. Split from importFromArchive so the single-snapshot property is
+// structural (this function has no path to re-open) and directly testable:
+// hand it bytes, and the digest importFromArchive records is by construction
+// the digest of exactly what this function parsed.
+func importFromZipBytes(data []byte, archivePath, ref string) ([]byte, string, string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
 			Message: fmt.Sprintf("%s is not a readable zip archive: %v. Vendor exports are .zip; a "+
 				"bare .kicad_mod is imported with source_kind=%s or %s",
 				archivePath, err, SourceKindURL, SourceKindGit)}
 	}
-	defer zr.Close()
 
 	if len(zr.File) > ArchiveMaxEntries {
 		return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
@@ -731,13 +758,16 @@ func importFromArchive(archivePath, ref string) ([]byte, string, string, error) 
 		if err := checkArchiveEntryName(f.Name, archivePath, ref); err != nil {
 			return nil, "", "", err
 		}
-		total += f.UncompressedSize64
-		if total > ArchiveMaxTotalBytes {
+		// Compare BEFORE adding (Codex 1173 F3): UncompressedSize64 is
+		// attacker-declared, and two entries near math.MaxUint64 would wrap
+		// the running sum back under the cap if the add came first.
+		if f.UncompressedSize64 > ArchiveMaxTotalBytes-total {
 			return nil, "", "", &ImportError{Kind: "archive", Ref: ref, Source: archivePath,
 				Message: fmt.Sprintf("%s declares more than %d bytes of uncompressed content; that "+
 					"compression ratio is a zip bomb, not a footprint export. Refused from the "+
 					"central directory, so nothing was inflated", archivePath, ArchiveMaxTotalBytes)}
 		}
+		total += f.UncompressedSize64
 		if f.FileInfo().IsDir() || !strings.HasSuffix(strings.ToLower(f.Name), ".kicad_mod") {
 			continue
 		}
@@ -788,9 +818,7 @@ func importFromArchive(archivePath, ref string) ([]byte, string, string, error) 
 				"KB-scale", archivePath, entry.Name, FootprintMaxBytes)}
 	}
 
-	sourceRef := fmt.Sprintf("vendor_export+%s@sha256:%s!%s",
-		filepath.Base(archivePath), digest, entry.Name)
-	return body, path.Base(entry.Name), sourceRef, nil
+	return body, path.Base(entry.Name), entry.Name, nil
 }
 
 // checkArchiveEntryName is the zip-slip gate: an entry name that resolves
@@ -838,19 +866,4 @@ func hasDotDotSegment(p string) bool {
 		}
 	}
 	return false
-}
-
-// sha256File digests a file by streaming it, so the archive's own bytes are
-// never held in memory alongside the entry read out of it.
-func sha256File(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
