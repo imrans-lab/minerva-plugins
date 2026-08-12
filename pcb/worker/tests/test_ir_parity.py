@@ -1607,6 +1607,31 @@ def test_coincident_apertures_described_the_two_LEGAL_ways_still_pair_up():
     assert deltas == [], "\n".join(d.render() for d in deltas)
 
 
+def test_same_geometry_inside_one_position_bucket_is_input_order_independent():
+    """The canonical-geometry repair still needs a TOTAL anonymous ordering.
+
+    These two apertures share the 10 um identity bucket and have identical
+    geometry, but their raw centres differ by 3 um — well above the 0.1 um field
+    tolerance. Geometry alone therefore ties, and a stable sort would preserve
+    whichever surface-specific input order happened to arrive. Reversing the
+    same semantic multiset must not swap its occurrence ordinals and invent two
+    position defects.
+    """
+    def aperture(x):
+        return ir_parity._MaskAperture(
+            "F.Mask", x, 8.0, "circle", 1.0, 1.0, 0.0, ir_parity.NA,
+            "dark", "pad", "C1")
+
+    apertures = [aperture(10.001), aperture(10.004)]
+    reference = _mask_table("ir", apertures)
+    surface = _mask_table("gerber", list(reversed(apertures)))
+
+    assert [(r.key[3], r.field_map()["x_mm"]) for r in reference.rows] == \
+           [(r.key[3], r.field_map()["x_mm"]) for r in surface.rows]
+    deltas = diff_against_reference(reference, surface)
+    assert deltas == [], "\n".join(d.render() for d in deltas)
+
+
 def test_the_ordinal_is_assigned_from_the_geometry_that_is_REPORTED():
     """The invariant behind the fix, asserted directly rather than through one
     fixture: for every aperture, the fields the row carries are the same
@@ -1769,3 +1794,56 @@ def test_the_degenerate_fold_windows_are_exactly_where_they_claim(radius, expect
     rows = ir_parity._mask_rows(
         [_mask_aperture(w=1.3, h=1.1, corner_radius_mm=radius)])
     assert rows[0].field_map()["shape"] == expected
+
+
+def test_the_sort_key_covers_every_field_the_row_compares():
+    """THE RULE BEHIND THE OCCURRENCE ORDINAL, enforced structurally rather than
+    field by field.
+
+    Two apertures that tie on the sort key fall to Python's stable sort and take
+    whatever order their surface happened to enumerate in. That is only safe if
+    a tie means the rows are INTERCHANGEABLE — which requires the key to cover
+    everything ``diff_against_reference`` will compare. Miss one and two correct
+    surfaces enumerating in different orders assign the ordinals differently and
+    report false deltas on that field.
+
+    This has now happened twice, on two different fields: raw position (found in
+    the S11 cold review) and entity/ref (found reviewing the fix for the first).
+    Both were reachable only by constructing them, which is precisely why this
+    is a derived test rather than two more hand-written cases: it enumerates the
+    row's OWN field set, so a field added later is covered the day it appears.
+    """
+    base = _mask_aperture()
+    row_fields = set(ir_parity._mask_rows([base])[0].field_map())
+
+    # Each compared field, paired with a change to the aperture that produces it.
+    perturbations = {
+        "x_mm": {"x": 10.004},
+        "y_mm": {"y": 8.004},
+        "shape": {"shape": "circle", "w": 1.1, "h": 1.1, "corner_radius_mm": NA},
+        "w_mm": {"w": 1.4},
+        "h_mm": {"h": 1.2},
+        "rot_deg": {"rot_deg": 30.0},
+        "corner_radius_mm": {"corner_radius_mm": 0.2},
+        "polarity": {"polarity": "clear"},
+        "entity": {"entity": "via"},
+        "ref": {"ref": "U9"},
+    }
+    assert set(perturbations) == row_fields, (
+        "a mask_opening row carries fields this test does not perturb: "
+        f"{sorted(row_fields - set(perturbations))}. Every COMPARED field must "
+        f"appear in _mask_sort_key, or two surfaces that enumerate coincident "
+        f"apertures in different orders will assign occurrence ordinals "
+        f"differently and report false deltas on it. Add the field here AND to "
+        f"the sort key.")
+
+    base_key = ir_parity._mask_sort_key(base, ir_parity._mask_canonical(base))
+    for field, mutation in perturbations.items():
+        other = _mask_aperture(**mutation)
+        other_key = ir_parity._mask_sort_key(
+            other, ir_parity._mask_canonical(other))
+        assert other_key != base_key, (
+            f"apertures differing in {field!r} produce the SAME sort key, so "
+            f"their order — and therefore their occurrence ordinal — is decided "
+            f"by whichever surface enumerated first. {field!r} is a compared "
+            f"field; add it to _mask_sort_key.")

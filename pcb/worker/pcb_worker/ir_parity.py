@@ -882,28 +882,68 @@ def _mask_canonical(a: _MaskAperture) -> _MaskCanonical:
     return _MaskCanonical(shape, w, h, rot, a.corner_radius_mm, a.polarity)
 
 
-def _mask_sort_key(canon: _MaskCanonical) -> tuple:
+def _orderable(value: Any) -> tuple[int, float, str]:
+    """One possibly-:data:`NA` field as a sortable ``(rank, number, text)``.
+
+    :data:`NA` is a sentinel with no ordering against a float or a string, so it
+    takes its own leading RANK rather than raising. Numbers and strings take
+    separate ranks too, so a field that is numeric on one surface and textual on
+    another still orders deterministically instead of blowing up.
+
+    The three-slot shape keeps numbers ordering NUMERICALLY. Formatting them
+    into the text slot would be just as deterministic — the sort only has to
+    agree across surfaces, not to be meaningful — but it would sort 10.0 before
+    9.0, which is a trap for anyone who later reads or asserts on this order.
+    Rounding matches the quantum the geometry terms already use.
+    """
+    if value is NA:
+        return (0, 0.0, "")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return (1, round(float(value), 6), "")
+    return (2, 0.0, str(value))
+
+
+def _mask_sort_key(a: _MaskAperture, canon: _MaskCanonical) -> tuple:
     """Deterministic order for apertures that share one POSITION bucket.
 
-    THE INPUT IS ALREADY CANONICAL, and that is load-bearing rather than tidy.
-    This function used to take the raw :class:`_MaskAperture` and sort on its
-    authored shape/extents while the ROW was built from the folded ones — so two
-    surfaces describing the SAME multiset the two legal ways numbered it
-    differently and parity failed on a correct board. Measured (Codex cold
-    review of 6360a90, finding 1): a rect beside a fully-rounded roundrect at one
-    position sorts rect-then-roundrect on the IR and oval-then-rect on the
-    gerber, because "oval" < "rect" < "roundrect" as strings — eight false field
-    deltas from an identical multiset.
+    THE RULE, and it is the whole correctness argument: EVERY FIELD THE ROW
+    COMPARES MUST APPEAR HERE. Two apertures that tie on this key fall to
+    Python's stable sort and take whatever order their surface happened to
+    enumerate in — so if they differ in any COMPARED field, the ordinal they
+    receive is order-dependent and two correct surfaces disagree. A tie must
+    therefore mean "these rows are interchangeable", which is only true when the
+    key covers everything the diff will look at. Pinned structurally by
+    test_the_sort_key_covers_every_field_the_row_compares.
 
-    Ordering on GEOMETRY rather than on any id is what lets the three surfaces
-    agree on which coincident aperture is which at all: the gerber column has no
-    entity to sort by, so a numbering keyed on identity could never line up.
+    THE GEOMETRY TERMS ARE CANONICAL; the position and identity terms are RAW —
+    and each matches how the ROW carries that field, which is the invariant that
+    was broken once already. This function used to take only the raw aperture
+    and sort on its authored shape/extents while the row was built from the
+    folded ones, so two surfaces describing the same multiset the two legal ways
+    numbered it differently: a rect beside a fully-rounded roundrect sorts
+    rect-then-roundrect on the IR and oval-then-rect on the gerber, because
+    "oval" < "rect" < "roundrect" as strings. Eight false field deltas from an
+    identical multiset (cold review of 6360a90, finding 1). Read ``canon`` for
+    geometry here; never ``a.shape`` / ``a.w`` / ``a.h`` / ``a.rot_deg``.
+
+    WHY RAW POSITION IS SAFE, given the key bucket is 100x the field tolerance:
+    two openings can share a bucket while carrying centres that genuinely
+    differ, so position must break the tie or the anonymous rows become
+    order-dependent. Serialization noise can only reorder centres that differ by
+    less than that noise (~1e-6 mm), which is far inside the field tolerance
+    (1e-4), so a pair the noise can swap is a pair that compares equal anyway.
+
+    IDENTITY LAST, deliberately. The gerber column has no entity or ref at all,
+    so ordering on identity ahead of geometry could never line up with it. As
+    the final terms they only separate rows that are otherwise identical — where
+    a surface that cannot express them (gerber, whose values are all
+    :data:`NA`) has interchangeable rows regardless.
     """
     radius = canon.corner_radius_mm
     return (canon.shape, round(canon.w, 6), round(canon.h, 6),
-            (0, 0.0) if canon.rot is NA else (1, round(float(canon.rot), 6)),
-            (0, 0.0) if radius is NA else (1, round(float(radius), 6)),
-            canon.polarity)
+            _orderable(canon.rot), _orderable(radius), canon.polarity,
+            float(a.x), float(a.y),
+            _orderable(a.entity), _orderable(a.ref))
 
 
 def _mask_rows(apertures: Iterable[_MaskAperture]) -> list[ParityRow]:
@@ -938,7 +978,8 @@ def _mask_rows(apertures: Iterable[_MaskAperture]) -> list[ParityRow]:
             (aperture, _mask_canonical(aperture)))
     rows: list[ParityRow] = []
     for members in grouped.values():
-        ordered = sorted(members, key=lambda pair: _mask_sort_key(pair[1]))
+        ordered = sorted(members,
+                         key=lambda pair: _mask_sort_key(pair[0], pair[1]))
         for occurrence, (aperture, canon) in enumerate(ordered):
             rows.append(_mask_row(aperture, canon, occurrence))
     return rows
@@ -1920,7 +1961,7 @@ _MACRO_PARAM_TOLERANCE_MM = 1e-5
 #: is a DECODING guard, not an accuracy one. It asks "is the parameter I am
 #: treating as the rotation actually the rotation", and a slot that is not the
 #: rotation holds a value with no relation to the true angle — the defect that
-#: motivated it read 0.11 deg on a pad authored at 0, thirteen times this
+#: motivated it read 0.11 deg on a pad authored at 0, more than twice this
 #: threshold. REAL rotation error is caught by the cross-surface field
 #: comparison at :data:`_ANGLE_TOLERANCE_DEG` (1e-3 deg), fifty times tighter.
 #: Trading sensitivity this check does not need for margin against a
