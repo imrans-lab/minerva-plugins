@@ -161,10 +161,28 @@ you.
 The `panel` job in `.github/workflows/pcb.yml` checks out the **pinned**
 Minerva SHA as a sibling directory and then runs
 `run-gd-tests.sh --preflight-only`. It downloads no Godot and executes no
-suite. It certifies exactly one thing: that the GD layer is in a **testable
-state** — host present, driver helpers present at the pinned SHA, sibling
-layout correct, and the suite set on disk matching `EXPECTED_SUITES` in both
-directions.
+suite. It certifies exactly one thing: **suite-registry and host-contract
+compatibility** — host present, driver helpers present at the pinned SHA,
+sibling layout correct, and the suite set on disk matching `EXPECTED_SUITES`
+in both directions.
+
+> **It is not a build check and not a test.** An earlier version of this
+> section called it evidence that the GD layer is "in a testable state"; cold
+> review (`019ff34dd1cf`, blocking finding 1) rejected that wording, and it
+> was right to. A `.gd` file can be syntactically invalid, fail to preload, or
+> regress outright while its filename sits in `EXPECTED_SUITES` and this job
+> stays green.
+>
+> **There is currently no automated execution check for this layer at all.**
+> The old CI run was removed as unhostable; the local runner it defers to is
+> itself known to false-green on `SCRIPT ERROR` / `Compile Error` output and
+> canned-worker fallback (`019ff2b1fccb`). Treat local green as "the runner
+> exited 0", not as "the layer is verified".
+>
+> The agreed path back: fix `019ff2b1fccb` so the runner fails closed,
+> classify suites into stock-host-safe vs native-extension/real-worker
+> required, and run the stock-safe subset in CI under the fixed runner. Do
+> **not** restore the old full run unchanged.
 
 Two reasons, and the scoping one comes first:
 

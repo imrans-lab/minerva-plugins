@@ -381,7 +381,7 @@ jobs:
         run: python -m pytest tests/ -q
 
   panel:
-    name: pcb panel (GD suite registry + host wiring)
+    name: pcb panel (GD suite-registry compatibility ONLY — nothing executes)
     # Round A1a, RESHAPED at the CP2 S10 boundary. This job used to RUN the
     # 47 `extends SceneTree` suites in pcb/tests/gd/. It no longer does, and
     # the reason is a scoping principle rather than a defect workaround:
@@ -416,6 +416,32 @@ jobs:
     #
     # That check needs no Godot, so this job no longer downloads or caches
     # one — it is now filesystem-only and finishes in seconds.
+    #
+    # ============================================================
+    # THIS JOB IS NOT A BUILD CHECK AND NOT A TEST. READ THIS BEFORE
+    # TREATING IT AS EITHER.
+    # ============================================================
+    # Cold review 019ff34dd1cf (blocking finding 1) landed on the first
+    # version of this job for claiming more than it delivers, and the name
+    # and comments have been narrowed accordingly. What it verifies is
+    # SUITE-REGISTRY AND HOST-CONTRACT COMPATIBILITY — nothing more.
+    #
+    # A .gd file can be syntactically invalid, fail to preload, or regress
+    # behaviourally while its filename sits in EXPECTED_SUITES and this job
+    # stays green. There is currently NO automated execution check for the
+    # GDScript layer anywhere: the old CI run was removed as unhostable, and
+    # the local runner it deferred to is itself known to false-green on
+    # SCRIPT ERROR / Compile Error output and canned-worker fallback
+    # (bug 019ff2b1fccb). That is a real coverage hole, deliberately visible
+    # rather than papered over.
+    #
+    # THE AGREED PATH BACK, not yet done and not this job's to do: repair
+    # 019ff2b1fccb so the runner fails closed, classify which suites are
+    # valid on a STOCK pinned host versus which need native extensions or a
+    # real worker, and run that stock-safe subset here under the fail-closed
+    # runner. Native/real-worker suites stay a local or extension-enabled
+    # gate. Do NOT simply restore the old full run — it was red for five
+    # consecutive commits for host-scaffold reasons and told nobody anything.
     runs-on: ubuntu-22.04
     env:
       # Pinned to a specific commit, not a moving branch: pcb's CI must be

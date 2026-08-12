@@ -99,6 +99,37 @@ if [ -z "${MINERVA_DIR}" ] || [ ! -d "${MINERVA_DIR}/src" ]; then
   exit 2
 fi
 
+# HOST CONTRACT — the three paths the suites cannot load without. Checked HERE,
+# in the script, and not only in the CI workflow (Codex review 019ff34dd1cf,
+# blocking finding 2): the workflow asserted these in its relocation step, so CI
+# happened to be covered, but a direct `--preflight-only` invocation could pass
+# a host that cannot load a single suite — while this script's own comments
+# claimed local and CI run "one implementation" that cannot drift. They did
+# drift, in the direction that made the claim false.
+#
+# `src/` alone is not the contract: 9 relocated suites preload
+# plugin_panel_driver.gd and 7 preload panel_tool_registry_driver.gd (round
+# 019f70a26607), both by res:// path against Minerva's res:// root. A pinned SHA
+# that drops either one breaks the harness rather than the code, which is a
+# failure worth naming precisely rather than discovering as "Cannot open file".
+_host_missing=()
+for _required in \
+  "src/project.godot" \
+  "src/test/helpers/plugin_panel_driver.gd" \
+  "src/test/helpers/panel_tool_registry_driver.gd"
+do
+  [ -f "${MINERVA_DIR}/${_required}" ] || _host_missing+=("${_required}")
+done
+if [ "${#_host_missing[@]}" -gt 0 ]; then
+  echo "error: Minerva host at ${MINERVA_DIR} is missing required file(s):" >&2
+  for _required in "${_host_missing[@]}"; do
+    echo "    - ${_required}" >&2
+  done
+  echo "  (the suites preload the helpers by res:// path; if you just bumped the" >&2
+  echo "   pinned Minerva SHA, re-check that both helpers still exist there)" >&2
+  exit 2
+fi
+
 # --preflight-only needs NO Godot: everything it checks is filesystem state.
 # That is the whole point — see the WHAT CI CAN AND CANNOT CHECK note in the
 # header. Requiring godot here would put the CI gate back behind the very
@@ -213,11 +244,18 @@ EXPECTED_SUITE_COUNT="${#manifest_names[@]}"
 
 # --preflight-only stops HERE, and this is the boundary CI runs to.
 #
-# Everything above is filesystem state: the Minerva host exists, the sibling
-# layout the res:// preloads hardcode is correct, both generic driver helpers
-# are present, and the suite set on disk matches the checked-in manifest in
-# both directions. That is the honest definition of "the GD layer is in a
-# TESTABLE state", and it is all CI is asked to certify.
+# WHAT IT PROVES, stated narrowly because the first version of this comment
+# overclaimed and a cold review caught it (019ff34dd1cf, blocking finding 1):
+# SUITE-REGISTRY AND HOST-CONTRACT COMPATIBILITY. The host exists and carries
+# both driver helpers, the sibling layout the res:// preloads hardcode is
+# correct, and the suite set on disk matches the checked-in manifest in both
+# directions.
+#
+# WHAT IT DOES NOT PROVE, and this is the part the earlier wording blurred: it
+# is NOT evidence that the GDScript layer builds, parses, or behaves. A .gd
+# file can be syntactically invalid, fail to preload, or regress outright while
+# its filename sits happily in EXPECTED_SUITES and this check stays green.
+# Nothing here executes, so nothing here is a test result.
 #
 # Everything BELOW needs a Godot host with Minerva's native GDExtensions
 # BUILT, which a plain `actions/checkout` of Minerva does not have and which
@@ -233,12 +271,16 @@ EXPECTED_SUITE_COUNT="${#manifest_names[@]}"
 # developer machine with build-extensions.sh already run. See
 # pcb/docs/gd-tests.md.
 if [ "${PREFLIGHT_ONLY}" -eq 1 ]; then
-  echo "gd pre-flight PASSED (${EXPECTED_SUITE_COUNT} suites registered and present)"
+  echo "gd pre-flight PASSED: suite-registry + host-contract compatibility only"
+  echo "  (${EXPECTED_SUITE_COUNT} suites registered and present)"
   echo "  host:     ${MINERVA_DIR}"
   echo "  sibling:  ${ACTUAL_PLUGINS}"
   echo "  manifest: ${MANIFEST}"
-  echo "NOTE: suites were NOT executed. Execution needs Minerva's native"
-  echo "      GDExtensions built and is a local gate — see pcb/docs/gd-tests.md."
+  echo "NOTE: NOTHING WAS EXECUTED. This is not evidence that the GDScript layer"
+  echo "      builds, parses or behaves — a .gd file can be invalid while its"
+  echo "      filename sits in EXPECTED_SUITES and this check stays green."
+  echo "      Execution needs Minerva's native GDExtensions built and is a"
+  echo "      local gate — see pcb/docs/gd-tests.md."
   exit 0
 fi
 
