@@ -74,6 +74,15 @@ against the raised floor: `_effective_min_trace_width` for GC1,
   the largest threshold any surviving pair could be compared to; sweeping at the
   global floor while a class demands more would discard a genuinely violating
   pair before it was measured.
+
+  The sweep itself lives in `_sweep_pairs`, over bare boxes, and **GC8 uses the
+  same kernel** (epoch CP2 S11) — the mask-sliver check was all-pairs while GC10
+  next door already had an AABB gate. GC8's margin is simply
+  `min_mask_sliver_mm`: it has no per-net-class term, so the maximum-threshold
+  invariant above is satisfied trivially there. Equivalence with all-pairs is
+  pinned on near-threshold geometry in `test_gc8_mask_sliver.py`, together with a
+  non-vacuity test that the sweep is genuinely pruning — an equivalence test
+  passes trivially against a broad phase that returns every pair.
 - `NetClass.trace_width_mm`, `via_diameter_mm` and `via_drill_mm` are **nominal**
   routing/via sizes, **not** minima. They imply **no** per-class GC1, GC3 or GC4
   floor, and are deliberately not read — the same two `min_`-prefixed fields, and

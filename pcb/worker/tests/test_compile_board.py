@@ -203,9 +203,9 @@ def test_smart_remote_structure(corner_board, corner_board_result):
     # placed_pads is the FOOTPRINT's full pad set, not the authored `pins:`
     # override list (which may cover only a subset of a footprint's pins) —
     # not derivable from the source dict alone, so it stays a literal. Was 76
-    # against the withdrawn smart_remote.yaml; parity_corners.yaml's 4
-    # components (J1=4, U2=6, SW9=2, U3=6 pads) total 18.
-    assert sum(len(c.placed_pads) for c in board.components) == 18
+    # against the withdrawn smart_remote.yaml; parity_corners.yaml's 5
+    # components (J1=4, U2=6, SW9=2, U3=6, SW10=2 pads) total 20.
+    assert sum(len(c.placed_pads) for c in board.components) == 20
 
 
 def test_smart_remote_interned_definitions_marker_free_but_provenanced(corner_board_result):
@@ -341,10 +341,10 @@ def test_complete_pad_projection_parity(corner_board, corner_board_result):
             assert placed.layers == _resolved_pad_layers(local, transform, comp.ref, diags)
             checked += 1
     # Vacuity guard on the loop actually running, not just a count check — was
-    # 76 against the withdrawn smart_remote.yaml (docket 019fbe68c5f8); the 4
-    # components on parity_corners.yaml place 18 pads total (see
+    # 76 against the withdrawn smart_remote.yaml (docket 019fbe68c5f8); the 5
+    # components on parity_corners.yaml place 20 pads total (see
     # test_smart_remote_structure for how that number is derived).
-    assert checked == 18
+    assert checked == 20
     assert not diags.has_error
 
 
@@ -374,8 +374,8 @@ def test_complete_graphic_projection_parity(corner_board, corner_board_result):
             checked += 1
     assert checked == sum(len(c.placed_graphics) for c in corner_board_result.board.components)
     # Was 207 against the withdrawn smart_remote.yaml (docket 019fbe68c5f8);
-    # parity_corners.yaml's 4 components place 83 graphics total.
-    assert checked == 83
+    # parity_corners.yaml's 5 components place 105 graphics total.
+    assert checked == 105
 
 
 def test_pad_position_cross_checks_the_live_path(corner_board, corner_board_result):

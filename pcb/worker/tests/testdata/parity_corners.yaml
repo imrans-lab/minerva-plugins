@@ -37,7 +37,14 @@
 # every reference above to what "smart_remote" covers is now history, not a live
 # division of labour — this file is the primary parity fixture.
 #
-# Deliberately MINIMAL: 4 components and 2 holes, no routing beyond one segment
+# GAPS 6, 7 and 8 were closed on 2026-08-12 (epoch CP2 S11) when the solder-mask
+# parity family landed and made three more classes load-bearing: a BOTTOM-SIDE
+# SMD land, an UNTENTED via beside the tented one, and an UNPLATED through-hole
+# PAD. Each is documented inline at the entity, and each was added because its
+# absence was MEASURED to leave a real mask defect undetected — not because it
+# seemed like good coverage. All three are pinned by GEOMETRY_CLASS_FLOOR.
+#
+# Deliberately MINIMAL: 5 components and 2 holes, no routing beyond one polyline
 # per layer, because this fixture exists to reach geometry the acceptance fixture
 # misses — not to be a second acceptance fixture. Every pad here is authored
 # INLINE (drill_mm / pad_width_mm / pad_height_mm / annulus_diameter_mm) so the
@@ -144,6 +151,39 @@ components:
     pad_width_mm: 2.4
     pad_height_mm: 1.2
 
+# GAP 6 (added 2026-08-12, epoch CP2 S11) — a BOTTOM-SIDE SMD land.
+#
+# Every SMD pad in this fixture used to be on the TOP side, and every BOTTOM-side
+# component (U2) was through-hole. A through-hole pad opens the solder mask on
+# BOTH sides whatever side its component sits on, so it cannot distinguish "the
+# opening follows the pad's side" from "every SMD opening goes on the front" —
+# measured: forcing every SMD mask opening to F.Mask left the whole suite green.
+#
+# An SMD land is the only entity whose mask opening is SINGLE-SIDED, so it is the
+# only one that can catch a side-routing error, in either emitter or in the
+# reference's own walk. Pinned by
+# test_the_synthetic_primary_reaches_every_geometry_class_the_gate_needs.
+- ref: SW10
+  footprint: EVP-ASAC1A:SW_EVP-ASAC1A
+  value: SMD_BOTTOM
+  x_mm: 20.0
+  y_mm: 12.0
+  rotation_deg: 0
+  layer: bottom
+  pins:
+  - number: A
+    name: BSMD_A
+    x_mm: -3.0
+    y_mm: 0.0
+    pad_width_mm: 2.4
+    pad_height_mm: 1.2
+  - number: B
+    name: BSMD_B
+    x_mm: 3.0
+    y_mm: 0.0
+    pad_width_mm: 2.4
+    pad_height_mm: 1.2
+
 # GAP 5 (added 2026-07-31, docket 019fbe68c5f8) — a HALF-TURN placement.
 #
 # Every other component here is turned a QUARTER turn, and a quarter turn SWAPS
@@ -179,6 +219,20 @@ components:
     y_mm: 5.08
     drill_mm: 0.8
     annulus_diameter_mm: 1.6
+  # GAP 8 (added 2026-08-12, epoch CP2 S11) — an UNPLATED through-hole PAD.
+  #
+  # Distinct from the unplated board HOLE further down, and the difference is the
+  # rule applied, not the entity: an np_thru_hole pad carries NO copper land and
+  # its mask opens to the DRILL with NO margin, while every plated pad's opening
+  # is a land plus a margin. Until this existed the corpus had no np pad at all,
+  # so the no-margin branch was unexercised on every surface — measured: adding
+  # 0.2 mm of margin to it left the whole suite green.
+  - number: '3'
+    name: HT_NPTH
+    x_mm: 0.0
+    y_mm: 5.08
+    drill_mm: 1.2
+    plated: false
 
 nets:
 - name: N_OBL
@@ -211,8 +265,13 @@ traces:
     y_mm: 20.0
   - x_mm: 20.0
     y_mm: 20.0
+  - x_mm: 16.0
+    y_mm: 26.0
 
 vias:
+# TENTED (the default, and stated explicitly so the pair below reads as a
+# deliberate contrast rather than an accident of authoring). A tented via has a
+# real copper annulus and NO mask window over it.
 - x_mm: 20.0
   y_mm: 20.0
   drill_mm: 0.4
@@ -220,6 +279,22 @@ vias:
   net: N_BOT
   from_layer: top
   to_layer: bottom
+  tented: true
+# GAP 7 (added 2026-08-12, epoch CP2 S11) — an UNTENTED via, the only entity on
+# this board whose "has copper here" and "opens mask here" answers differ.
+#
+# Until this existed, every via in the corpus was tented, so the mask-opening
+# branch of the tenting rule (019f8fe7cbaf) emitted nothing on any fixture and
+# an emitter that ignored tenting in EITHER direction was invisible to the gate.
+# Keeping the tented one above means both answers are now compared.
+- x_mm: 16.0
+  y_mm: 26.0
+  drill_mm: 0.4
+  diameter_mm: 0.8
+  net: N_BOT
+  from_layer: top
+  to_layer: bottom
+  tented: false
 
 # GAP 3 — one PLATED board hole (copper ring, authored annulus) alongside one
 # unplated one, so the PTH/NPTH drill split and the plated-hole copper ring are

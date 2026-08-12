@@ -46,6 +46,16 @@ reaches the emitted BYTES at all. The ``ir`` surface is the one seam independent
 of ``pad_source``, so a change of mind inside the shared owner shows up as an
 ``ir``-vs-everyone delta — which is precisely the signal the reference exists for.
 
+The SOLDER MASK has the same shape of limit and the same escape from it: ``drc``
+and ``gerber`` both enumerate openings through ``mask_source``, so those two
+agree by construction about WHICH entities open the mask. ``ir`` does not — see
+:func:`_ir_mask_openings`, which re-walks the board and re-derives the
+enlargement rule from IR fields for exactly this reason. Do not "simplify" either
+of those two functions by calling the shared owner: the rule is the same one that
+governs ``pad_source`` above, and tests/test_ir_parity.py enforces it with an AST
+scan plus a behavioural half that detonates the owner and demands the reference
+still tabulate.
+
 ROW FORMAT (the part a sibling GDScript implementation must mirror)
 ------------------------------------------------------------------
 Every surface produces a :class:`SurfaceTable` of :class:`ParityRow`. A row is
@@ -87,10 +97,10 @@ import collections
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, NamedTuple
 
 from .fab_capability import EDGE_CUTS_WIDTH_MM
-from .resolved_board import LayerRole, ResolvedBoard, RoundHole
+from .resolved_board import LayerRole, ResolvedBoard, RoundHole, Side
 
 __all__ = [
     "PARITY_TOLERANCE_MM",
@@ -320,63 +330,65 @@ FAMILIES = (
     # per-graphic/per-stroke conflict dissolves and the family becomes buildable
     # as originally specified).
     #
-    # NO MASK FAMILY EITHER — same ruling, same expiry, one asymmetry that makes
-    # it MORE urgent than the silk one (epoch CP2 S4, mask half).
+    # One SOLDER-MASK APERTURE on one outer mask layer — the opening that decides
+    # whether a piece of copper is solderable. Added in epoch CP2 S11, which
+    # OVERTURNS S4/S5's ruling that this family would be a tautology.
     #
-    # The tautology argument is identical: Projection.mask and the gerber
-    # emitter's mask buckets both come from mask_source now, so tabulating them
-    # today would assert that one function call agrees with itself. And the
-    # expiry is nearer — station S5 introduces the mask-sliver check, not S6.
+    # WHAT S5 ARGUED, and what was right about it: Projection.mask and the gerber
+    # emitter's mask buckets both come from mask_source, so tabulating those two
+    # asserts that one function call agrees with itself. That much is still true,
+    # and both columns are kept anyway — a family's value is the contrast it
+    # enables, and a shared owner is a legitimate thing to hold two independent
+    # readings up against.
     #
-    # THE ASYMMETRY, which is why this note is not just a copy of the silk one:
-    # a dropped SILK primitive is cosmetic and the check that cleared it was
-    # cosmetic too. A dropped MASK aperture is fabrication-critical
-    # (fab_capability.FABRICATION_CRITICAL_OUTPUTS lists mask), and the sliver
-    # check S5 adds is one whose failure mode is a FALSE CLEAN — fewer apertures
-    # seen means fewer slivers found, which reads as a healthier board. So the
-    # moment a mask check exists, an emitter that dropped an aperture the
-    # checker had cleared is not merely invisible here, it is invisible in the
-    # direction that ships a defective board.
+    # WHERE IT WENT WRONG, twice reviewed (Fable, then Codex on question
+    # 019fe66eff55, before any code was written): it said "there is no third
+    # surface holding an independent opinion", and that the IR "has no mask
+    # concept at all". Both are false, and the second is the load-bearing one.
     #
-    # S5 DISCHARGED THIS, and the answer is "record why not" — with the reason
-    # stated rather than the obligation quietly dropped.
+    #   * GERBER is a genuinely independent column, because this module's own
+    #     docstring defines that surface as the EMITTED BYTES parsed back with
+    #     gerbonara. Between mask_source's answer and the F_Mask/B_Mask bytes sit
+    #     _adopt_mask_openings' side-to-bucket routing, to_gerber_frame's Y
+    #     negation, aperture construction, and serialization. Comparing two
+    #     in-memory harvests covers none of it.
+    #   * IR is independent too — because this module FORBIDS the reference from
+    #     borrowing the shared owner (see the honest-limit section of the module
+    #     docstring, and _ir_pad_land, which restates the copper land rule for
+    #     exactly this reason). "Mask openings are derived" is not an argument
+    #     that the reference cannot hold them; it is the instruction for how:
+    #     _ir_mask_openings re-derives the ENUMERATION and the ENLARGEMENT from
+    #     ResolvedBoard fields, so a change of mind inside mask_source shows up
+    #     as an ir-vs-everyone delta instead of propagating silently.
     #
-    # GC8 (mask sliver) landed, so mask IS now a checked subject. But the hole
-    # parity would have been designed to close does not exist, because BOTH
-    # surfaces read the same tuple: the emitter's mask buckets and DRC's
-    # Projection.mask are the same mask_source enumeration, and GC8 measures
-    # Projection.mask directly. There is no third surface holding an independent
-    # opinion for parity to compare against — the drc/gerber columns would be
-    # populated from one function call, and the `ir` column has no mask concept
-    # at all (the IR carries pads, drills and margins; mask openings are DERIVED
-    # and exist nowhere in it).
+    # The family is therefore TWO independent derivations (ir, gerber) against
+    # one shared owner (drc), which is a stronger check than the overturn itself
+    # contemplated. KiCad does not participate: it writes per-pad
+    # solder_mask_margin and never an aperture, so it structurally cannot answer
+    # (see _KICAD_FAMILIES).
     #
-    # A family here would therefore tabulate one value under three headings and
-    # report agreement forever. That is not a weaker guard than the cutout
-    # family — it is a guard that CANNOT FAIL, which is worse than none, because
-    # a green row reads as evidence.
+    # STILL TRUE AND STILL LOAD-BEARING, from the old ruling: a dropped mask
+    # aperture is fabrication-critical (fab_capability.FABRICATION_CRITICAL_
+    # OUTPUTS lists mask) and GC8's failure mode is a FALSE CLEAN — fewer
+    # apertures seen means fewer slivers found, which reads as a healthier board.
+    # That is why this family fails closed on every unreadable object rather than
+    # skipping it, and why its rows COUNT (see _mask_rows) instead of collapsing
+    # duplicates.
     #
-    # WHAT ACTUALLY GUARDS THIS INSTEAD, and where to look if it breaks:
-    # tests/test_mask_projection.py compares the emitter's serialized buckets
-    # against the projection at full geometry, and asserts structurally that
-    # gerber.py contains no mask enumeration of its own. That is the real
-    # anti-drift mechanism; parity would only have restated it.
+    # tests/test_mask_projection.py still guards emitter-vs-projection at full
+    # geometry and still asserts gerber.py owns no mask enumeration. This family
+    # does not replace it; it adds the two readings that module cannot make.
     #
-    # THE CONDITION THAT REVIVES THIS: if a second mask enumeration ever appears
-    # — a kicad.py mask emitter, a Go-side aperture reader, an IR that carries
-    # openings directly — the tautology argument dies immediately and a mask
-    # family becomes mandatory. That is the trigger to watch for, not a date.
-    #
-    # S5 OWES ONE MORE THING, bundled here for the same reason the silk note
-    # bundles silk_warnings: `Projection.mask_indeterminate` has NO consumer.
-    # It names entities whose mask coverage could not be determined (today: a
-    # non-round board hole, which the gerber emitter refuses outright), and it
-    # exists so a mask check cannot compute a verdict from a KNOWN-INCOMPLETE
-    # aperture set. Until something reads it, that guarantee is aspirational —
-    # and unread here is worse than unread for silk_warnings, because the
-    # partial-set failure is a sliver check finding FEWER slivers and reporting
-    # a healthier board. The mask check must refuse a mask verdict (scoped
-    # indeterminate, not a wholesale one) whenever this field is non-empty.
+    # THE INDETERMINATE OBLIGATION IS DISCHARGED, recorded here because this note
+    # used to carry it as outstanding. S5 owed a consumer for
+    # `Projection.mask_indeterminate` — the field naming entities whose openings
+    # could not be determined — because a sliver check run on a KNOWN-INCOMPLETE
+    # aperture set finds fewer slivers and reports a healthier board. It now has
+    # one: drc_geometric refuses the whole geometric verdict when the field is
+    # non-empty, ahead of GC8. The refusal is wholesale rather than mask-scoped
+    # because the result envelope carries one verdict for all checks; that
+    # narrowing is still open, and the reason is stated at the call site.
+    "mask_opening",
     # Copper-layer identity + stack order.
     "copper_layer",
     # Which net owns which pad. Split out of copper_flash so a dropped net
@@ -705,31 +717,28 @@ def _canonical_shape_token(raw: str) -> str:
     return _SHAPE_RECT
 
 
-def _flash_row(layer_token: str, x: float, y: float, *, shape: str, w: float,
-               h: float, rot_deg: float, entity: Any, ref: Any, pad_number: Any,
-               net_name: Any) -> ParityRow:
-    """The ONE constructor for a ``copper_flash`` row. Every surface goes through
-    it so the key shape and field set cannot drift per tabulator.
+def _canonical_land(shape: str, w: float, h: float,
+                    rot_deg: Any) -> tuple[float, float, Any]:
+    """``(w, h, rot)`` folded to ONE representative of the land's orientation.
 
-    The centre appears TWICE and on purpose: BUCKETED in the key (identity) and
-    RAW in ``x_mm``/``y_mm`` (a compared value). Without the raw copy a displaced
-    pad inside the same bucket would be invisible, and one outside it would be an
-    illegible missing/extra pair — position would never actually be CHECKED."""
+    Shared by :func:`_flash_row` and :func:`_mask_row` so copper and mask cannot
+    drift on what "the same land, described the other legal way" means.
+
+    Surfaces legitimately carry DIFFERENT but EQUIVALENT descriptions of one
+    quarter-turned land: the IR keeps the authored (w, h, rot=90), while gerber
+    folds the turn into the aperture's extents and emits (h, w, rot=0) — it has
+    no choice, the standard obround aperture ``O,xXy`` has no rotation parameter
+    at all (see ``gerber._obround_rotation_swap``). Without a single canonical
+    form, that pure REPRESENTATION difference reads as three field defects on a
+    land that is fabricated correctly.
+
+    This folds both to the axis-aligned representative. It is NOT a suppression:
+    it only ever equates two descriptions of the SAME outline, so a land that is
+    genuinely the wrong way round still disagrees — it disagrees on w_mm/h_mm
+    instead of on rot_deg (pinned by
+    test_canonicalization_does_not_mask_a_genuinely_transposed_land).
+    """
     rot = _canonical_rotation(shape, w, h, rot_deg) if rot_deg is not NA else NA
-
-    # ORIENTATION-CANONICAL extents. Surfaces legitimately carry DIFFERENT but
-    # EQUIVALENT descriptions of one quarter-turned land: the IR keeps the authored
-    # (w, h, rot=90), while gerber folds the turn into the aperture's extents and
-    # emits (h, w, rot=0) — it has no choice, the standard obround aperture `O,xXy`
-    # has no rotation parameter at all (see gerber._obround_rotation_swap). Without
-    # a single canonical form, that pure REPRESENTATION difference reads as three
-    # field defects on a land that is fabricated correctly.
-    #
-    # This folds both to the axis-aligned representative. It is NOT a suppression:
-    # it only ever equates two descriptions of the SAME outline, so a land that is
-    # genuinely the wrong way round still disagrees — it disagrees on w_mm/h_mm
-    # instead of on rot_deg (pinned by
-    # test_canonicalization_does_not_mask_a_genuinely_transposed_land).
     if rot is not NA and abs(rot - 90.0) <= _ANGLE_TOLERANCE_DEG:
         if shape not in _TRANSPOSABLE_SHAPES:
             # Fail LOUDLY rather than transpose an outline the identity does not
@@ -741,14 +750,173 @@ def _flash_row(layer_token: str, x: float, y: float, *, shape: str, w: float,
                 f"its transpose only when the outline is symmetric about BOTH axes. "
                 f"Add it to _TRANSPOSABLE_SHAPES only after confirming that, or give "
                 f"it its own canonical form; do NOT transpose it by default.")
-        w, h, rot = h, w, 0.0
+        return h, w, 0.0
+    return w, h, rot
 
+
+def _flash_row(layer_token: str, x: float, y: float, *, shape: str, w: float,
+               h: float, rot_deg: float, entity: Any, ref: Any, pad_number: Any,
+               net_name: Any) -> ParityRow:
+    """The ONE constructor for a ``copper_flash`` row. Every surface goes through
+    it so the key shape and field set cannot drift per tabulator.
+
+    The centre appears TWICE and on purpose: BUCKETED in the key (identity) and
+    RAW in ``x_mm``/``y_mm`` (a compared value). Without the raw copy a displaced
+    pad inside the same bucket would be invisible, and one outside it would be an
+    illegible missing/extra pair — position would never actually be CHECKED."""
+    w, h, rot = _canonical_land(shape, w, h, rot_deg)
     return ParityRow.make(
         "copper_flash", (layer_token, _q(x), _q(y)),
         x_mm=float(x), y_mm=float(y),
         shape=shape, w_mm=w, h_mm=h,
         rot_deg=rot,
         entity=entity, ref=ref, pad_number=pad_number, net_name=net_name)
+
+
+# ---------------------------------------------------------------------------
+# SOLDER-MASK openings (epoch CP2 S11). See the "mask_opening" entry in FAMILIES
+# for why this family exists after S4/S5 declined it.
+# ---------------------------------------------------------------------------
+
+
+class _MaskAperture(NamedTuple):
+    """One mask opening as ANY surface can state it, before rows are built.
+
+    A neutral intermediate on purpose: the three participating surfaces derive
+    their openings by three genuinely different routes (the IR re-derives from
+    ResolvedBoard fields, DRC reads the projection, gerber parses emitted
+    bytes), and this is the one shape they are required to meet in. Only the
+    occurrence NUMBERING is shared — see :func:`_mask_rows`.
+    """
+
+    side_token: str                 # "F.Mask" | "B.Mask"
+    x: float
+    y: float
+    shape: str
+    w: float
+    h: float
+    rot_deg: float
+    #: ABSOLUTE corner radius in mm (never a ratio — gerber has no concept of
+    #: one), or NA where the shape has no corner to round.
+    corner_radius_mm: Any
+    #: "dark" = mask OPENED here, "clear" = mask closed. Carried because
+    #: geometry alone does not decide it: a clear flash has the same extents as
+    #: a dark one and the opposite fabrication meaning.
+    polarity: str
+    entity: Any = NA
+    ref: Any = NA
+
+
+def _mask_corner_radius(shape: str, w: float, h: float, rratio: Any) -> Any:
+    """A land's corner radius in MILLIMETRES, from its shape and KiCad ratio.
+
+    The ratio convention is the IR's (``corner_rratio`` x the SHORT side), and
+    it is restated here rather than imported for the same reason
+    :func:`_ir_pad_land` restates the land rule.
+
+    A circle has no corner, so NA — not 0.0, which would assert "square
+    corners" against a surface that correctly declines to say.
+    """
+    if shape == _SHAPE_CIRCLE:
+        return NA
+    if shape == _SHAPE_OVAL:
+        # An obround IS fully rounded on its short axis by definition; the
+        # radius is not a free parameter and no ratio is consulted.
+        return min(float(w), float(h)) / 2.0
+    if shape == _SHAPE_ROUNDRECT:
+        if rratio is None or rratio is NA:
+            return NA
+        return float(rratio) * min(float(w), float(h))
+    return 0.0
+
+
+def _fold_degenerate_roundrect(shape: str, w: float, h: float,
+                               radius: Any) -> str:
+    """A roundrect at either END of its radius range IS another shape, and the
+    emitter says so in the bytes.
+
+    ``gerber._shape_aperture`` degenerates an authored-zero radius to a plain
+    ``Rectangle``, and gerber-writer collapses a FULLY rounded one to the
+    standard obround ``O,`` aperture. So the emitted file names those two lands
+    "rect" and "oval" while the IR still calls them "roundrect" — a pure
+    representation difference on identical outlines, exactly like the
+    quarter-turn fold in :func:`_canonical_land`.
+
+    Folding both ends here keeps that from reading as a shape defect. It is not
+    a suppression: it fires ONLY at the two radii where the outlines are
+    provably identical, so a roundrect whose radius is merely WRONG still
+    disagrees on ``corner_radius_mm`` (pinned by the negative controls in
+    tests/test_ir_parity.py).
+    """
+    if shape != _SHAPE_ROUNDRECT or radius is NA:
+        return shape
+    if abs(float(radius)) <= PARITY_TOLERANCE_MM:
+        return _SHAPE_RECT
+    if abs(float(radius) - min(float(w), float(h)) / 2.0) <= PARITY_TOLERANCE_MM:
+        return _SHAPE_OVAL
+    return shape
+
+
+def _mask_sort_key(a: _MaskAperture) -> tuple:
+    """Deterministic order for apertures that share one POSITION bucket.
+
+    Sorting on the canonical GEOMETRY rather than on any id is what lets the
+    three surfaces agree on which coincident aperture is which: the gerber
+    column has no entity to sort by, so a numbering keyed on identity could
+    never line up with it.
+    """
+    radius = a.corner_radius_mm
+    return (a.shape, round(a.w, 6), round(a.h, 6), round(a.rot_deg, 6),
+            (0, 0.0) if radius is NA else (1, round(float(radius), 6)),
+            a.polarity)
+
+
+def _mask_rows(apertures: Iterable[_MaskAperture]) -> list[ParityRow]:
+    """Apertures -> ``mask_opening`` rows, with an OCCURRENCE ORDINAL in the key.
+
+    THE ORDINAL IS THE POINT, and it is what makes this family able to COUNT.
+    ``SurfaceTable.by_family`` is a ``{row.key: row}`` dict comprehension, so two
+    rows sharing a key collapse into one and a dropped duplicate becomes
+    invisible. Two coincident identical apertures are two real flash operations
+    in the file; losing one is precisely the silent discard this family exists to
+    catch, and under a collapsing key it would read as a clean board.
+
+    Rows are grouped by POSITION BUCKET and numbered within the group in
+    canonical-geometry order — not numbered by full canonical form. The
+    difference matters: numbering by full form would make a single wrong WIDTH
+    reshuffle the ordinals and report an illegible missing+extra pair, where
+    this reports it as a ``w_mm`` field delta on occurrence 1.
+    """
+    grouped: dict[tuple, list[_MaskAperture]] = collections.defaultdict(list)
+    for aperture in apertures:
+        grouped[(aperture.side_token, _q(aperture.x), _q(aperture.y))].append(
+            aperture)
+    rows: list[ParityRow] = []
+    for members in grouped.values():
+        for occurrence, aperture in enumerate(sorted(members, key=_mask_sort_key)):
+            rows.append(_mask_row(aperture, occurrence))
+    return rows
+
+
+def _mask_row(a: _MaskAperture, occurrence: int) -> ParityRow:
+    """The ONE constructor for a ``mask_opening`` row.
+
+    Same discipline as :func:`_flash_row`: the centre is BUCKETED in the key and
+    RAW in the fields, so an opening displaced inside its own bucket is a field
+    delta rather than an invisible pass.
+    """
+    shape = _fold_degenerate_roundrect(a.shape, a.w, a.h, a.corner_radius_mm)
+    w, h, rot = _canonical_land(shape, a.w, a.h, a.rot_deg)
+    return ParityRow.make(
+        "mask_opening", (a.side_token, _q(a.x), _q(a.y), occurrence),
+        x_mm=float(a.x), y_mm=float(a.y),
+        shape=shape, w_mm=w, h_mm=h, rot_deg=rot,
+        corner_radius_mm=a.corner_radius_mm, polarity=a.polarity,
+        entity=a.entity, ref=a.ref)
+
+
+def _mask_side_token(side: Side) -> str:
+    return "F.Mask" if side is Side.TOP else "B.Mask"
 
 
 def _trace_row(layer_token: str, a: tuple[float, float], b: tuple[float, float],
@@ -847,8 +1015,164 @@ def tabulate_ir(rb: ResolvedBoard) -> SurfaceTable:
     rows.extend(_ir_cutout_rows(rb))
     for index, token in enumerate(stack):
         rows.append(ParityRow.make("copper_layer", (token,), stack_index=index))
+    rows.extend(_mask_rows(_ir_mask_openings(rb)))
 
     return SurfaceTable("ir", _IR_FAMILIES, _sorted(rows))
+
+
+# Restated, NOT imported from ``pad_source`` — same rule as _TH_OBLONG_TOL_MM
+# above, and for the same reason: the reference must not reach the owner the
+# other three surfaces already share. Production never falls back to it (the
+# compiler bakes the v1 manufacturing floor into the IR), so a board reaching
+# this default has authored nothing and neither has the emitter.
+_DEFAULT_MASK_CLEARANCE_MM = 0.1
+
+
+def _ir_mask_clearance(rb: ResolvedBoard) -> float:
+    """The board-global per-side mask clearance, off the IR's design rules.
+
+    A missing or NEGATIVE authored value falls back to the default rather than
+    raising: a negative clearance at BOARD scope has no defensible meaning,
+    unlike a per-pad margin, which is a real KiCad feature and is honoured.
+    """
+    clearance = rb.design_rules.minimums.solder_mask_clearance_mm
+    if clearance is not None and clearance >= 0:
+        return float(clearance)
+    return _DEFAULT_MASK_CLEARANCE_MM
+
+
+def _ir_mask_dim(base: float, margin: float, what: str) -> float:
+    """Enlarge a copper dimension by the per-side margin, FAILING CLOSED unless
+    the opening stays a finite positive dimension.
+
+    The boundary matters as much as the arithmetic: a merely-negative margin
+    whose opening survives is a legitimate KiCad mask-sliver feature and is
+    accepted; one that collapses the opening is not a manufacturable window and
+    must not be tabulated as though it were.
+    """
+    dim = float(base) + 2.0 * float(margin)
+    if not (math.isfinite(dim) and dim > 0):
+        raise ValueError(
+            f"ir_parity: {what}'s mask opening collapses to {dim} mm at margin "
+            f"{margin} — not a manufacturable window, so the reference refuses "
+            f"to state one")
+    return dim
+
+
+def _ir_pad_mask_openings(pad, ref: Any, number: Any,
+                          clearance: float) -> list[_MaskAperture]:
+    """Every mask opening ONE placed pad contributes, re-derived from IR fields.
+
+    This is the reference's own reading of the ENUMERATION rule — which entities
+    open the mask, on which sides, at what size — restated from the IR contract
+    rather than delegated to ``mask_source``. That is the whole reason the family
+    has teeth on this column: ``mask_source`` is what the DRC projection and the
+    Gerber emitter both call, so a reference that called it too would agree by
+    construction and could never report a change of mind inside it.
+
+    The land itself comes from :func:`_ir_pad_land`, which the copper family
+    already uses — so the two families cannot disagree about what the land IS,
+    only about what covering it means.
+
+    The branches, each a ratified fabrication rule:
+
+      * SMD -> ONE opening, on the pad's own side, in the pad's own aperture
+        family, enlarged by the effective margin (the pad's own
+        ``solder_mask_margin`` override if it authored one, else the board
+        clearance).
+      * UNPLATED through-hole (or any ``np_thru_hole``) -> BOTH sides, at the
+        DRILL size, with NO margin. A bare mechanical hole has no copper ring
+        (finding 019f8fe77068).
+      * PLATED through-hole -> BOTH sides, following the land, plus the margin.
+    """
+    plated_th = (pad.drill is not None and pad.drill.plated
+                 and pad.pad_type != "np_thru_hole")
+    who = f"{ref}.{number}"
+
+    if pad.drill is not None and not plated_th:
+        drill = float(pad.drill.size[0])
+        return [_MaskAperture(_mask_side_token(side), pad.position[0],
+                              pad.position[1], _SHAPE_CIRCLE, drill, drill, 0.0,
+                              NA, "dark", entity="pad", ref=ref)
+                for side in (Side.TOP, Side.BOTTOM)]
+
+    margin = (float(pad.solder_mask_margin)
+              if pad.solder_mask_margin is not None else clearance)
+    shape, land_w, land_h, rratio = _ir_pad_land(pad)
+    w = _ir_mask_dim(land_w, margin, who)
+    h = _ir_mask_dim(land_h, margin, who)
+    # The corner radius follows the OPENING, not the land: the emitter builds one
+    # aperture from the enlarged dimensions and the same ratio, so a roundrect's
+    # rounding grows with its window.
+    radius = _mask_corner_radius(shape, w, h, rratio)
+    sides = (pad.side,) if pad.drill is None else (Side.TOP, Side.BOTTOM)
+    return [_MaskAperture(_mask_side_token(side), pad.position[0],
+                          pad.position[1], shape, w, h, pad.rotation_deg,
+                          radius, "dark", entity="pad", ref=ref)
+            for side in sides]
+
+
+def _ir_mask_openings(rb: ResolvedBoard) -> list[_MaskAperture]:
+    """Every mask opening the board carries, walked from the IR itself.
+
+    THE WALK IS PART OF THE CHECK. ``mask_source`` owns the enumeration for the
+    other two surfaces; this one re-walks components -> placed pads, vias and
+    board holes independently, so an entity class that stops opening the mask
+    over there shows up here as a missing row rather than as silence.
+    """
+    clearance = _ir_mask_clearance(rb)
+    out: list[_MaskAperture] = []
+
+    for comp in rb.components:
+        numbers = {p.source_id: p.number for p in rb.footprint_for(comp).pads}
+        for pad in comp.placed_pads:
+            number = numbers.get(pad.source_id) or pad.source_id
+            out.extend(_ir_pad_mask_openings(pad, comp.ref, number, clearance))
+
+    for via in rb.vias:
+        # THE TENTING ASYMMETRY: a via is the one entity whose copper being
+        # present on a side does NOT imply an opening there. Tented is the
+        # default and means no window over a perfectly real annulus, so this is
+        # a first-class per-side question rather than a filter (019f8fe7cbaf).
+        if via.tented_front and via.tented_back:
+            continue
+        diameter = _ir_mask_dim(via.diameter_mm, clearance, f"via {via.id}")
+        for side, tented in ((Side.TOP, via.tented_front),
+                             (Side.BOTTOM, via.tented_back)):
+            if not tented:
+                out.append(_MaskAperture(
+                    _mask_side_token(side), via.position[0], via.position[1],
+                    _SHAPE_CIRCLE, diameter, diameter, 0.0, NA, "dark",
+                    entity="via", ref=NA))
+
+    for hole in rb.holes:
+        if not isinstance(hole.feature, RoundHole):
+            # Unreachable: tabulate_ir's copper walk raises on a non-round hole
+            # before this runs. Restated rather than assumed, because reading
+            # `.diameter_mm` off an OvalHole would be an AttributeError at some
+            # later, less legible point — and because the two walks are separate
+            # loops that a later edit could reorder.
+            raise ValueError(
+                f"ir_parity: hole {hole.id!r} has a non-round feature "
+                f"{type(hole.feature).__name__} the mask family cannot tabulate")
+        x, y = hole.feature.position
+        if hole.plated:
+            # A plated hole with NO authored annulus contributes nothing: there
+            # is no copper ring for an opening to follow. The emitter warns
+            # about the missing ring; inventing a window here would put the
+            # reference ahead of the board (finding 019f8dbb7104).
+            if not hole.annulus_mm:
+                continue
+            diameter = _ir_mask_dim(hole.annulus_mm, clearance,
+                                    f"hole {hole.id}")
+        else:
+            diameter = float(hole.feature.diameter_mm)
+        for side in (Side.TOP, Side.BOTTOM):
+            out.append(_MaskAperture(
+                _mask_side_token(side), x, y, _SHAPE_CIRCLE, diameter,
+                diameter, 0.0, NA, "dark", entity="board_hole", ref=NA))
+
+    return out
 
 
 def _via_span_tokens(rb: ResolvedBoard, via, tokens: Mapping[str, str],
@@ -1160,7 +1484,16 @@ def _sorted(rows: Iterable[ParityRow]) -> tuple[ParityRow, ...]:
 # representation of the board OUTLINE as an entity (GC5 reads rb.outline inline
 # at check time, which would be the IR itself and therefore tautological).
 _DRC_FAMILIES = frozenset({"copper_flash", "copper_trace", "drill",
-                           "copper_layer", "net_ownership"})
+                           "copper_layer", "net_ownership", "mask_opening"})
+
+#: mask_source ORIGIN tokens -> the coarse entity kind the other families use.
+#: Restated here rather than imported, like every other cross-surface vocabulary
+#: in this module. An origin missing from this map falls back to "board_hole",
+#: which is the only kind that carries no ref and so cannot mis-attribute.
+_MASK_ORIGIN_ENTITY = {
+    "smd_pad": "pad", "th_pad": "pad", "npth_pad": "pad", "via": "via",
+    "board_hole": "board_hole", "npth_board_hole": "board_hole",
+}
 
 
 def tabulate_drc(rb: ResolvedBoard) -> SurfaceTable:
@@ -1231,6 +1564,32 @@ def tabulate_drc(rb: ResolvedBoard) -> SurfaceTable:
         rows.append(ParityRow.make("copper_layer", (tokens.get(layer_id, layer_id),),
                                    stack_index=index))
 
+    # MASK OPENINGS AS THE CHECKER SEES THEM. `Projection.mask` is the exact
+    # collection GC8 measures slivers on, so a disagreement here means the
+    # sliver verdict was computed against geometry the fab will not receive —
+    # and GC8's failure direction is a FALSE CLEAN (fewer apertures searched,
+    # fewer slivers found, a healthier-looking board).
+    #
+    # This column DOES share mask_source with the Gerber emitter, and that was
+    # S5's argument for declining the family. It is kept anyway because the
+    # other two columns are independent of it and of each other: this is the
+    # shared owner they are held up against, not a third opinion.
+    rows.extend(_mask_rows(
+        _MaskAperture(
+            _mask_side_token(opening.side), opening.x, opening.y,
+            _canonical_shape_token(opening.shape), opening.width, opening.height,
+            opening.angle_deg,
+            _mask_corner_radius(_canonical_shape_token(opening.shape),
+                                opening.width, opening.height,
+                                opening.corner_rratio),
+            "dark",
+            # The KIND token every other family uses here, derived from the
+            # opening's ORIGIN — not `entity_id`, which is a board-wide unique
+            # id no other surface can produce.
+            entity=_MASK_ORIGIN_ENTITY.get(opening.origin, "board_hole"),
+            ref=opening.ref if opening.ref is not None else NA)
+        for opening in projection.mask))
+
     return SurfaceTable("drc", _DRC_FAMILIES, _sorted(rows))
 
 
@@ -1238,7 +1597,13 @@ def tabulate_drc(rb: ResolvedBoard) -> SurfaceTable:
 # SURFACE 3 — the EMITTED .kicad_pcb text, parsed back.
 # ---------------------------------------------------------------------------
 
-_KICAD_FAMILIES = frozenset(FAMILIES)
+# EXCLUDES mask_opening (epoch CP2 S11). Every other family is declared. The
+# KiCad emitter never writes a mask APERTURE — it writes a per-pad
+# `solder_mask_margin` and leaves the consumer to derive the opening — so there
+# is nothing here to read back. Declaring the family anyway would turn
+# "structurally cannot answer" into a stream of missing rows, which is exactly
+# the distinction a surface's family set exists to keep.
+_KICAD_FAMILIES = frozenset(FAMILIES) - {"mask_opening"}
 
 # Segments and vias, read straight off the emitted s-expression. agent_router's
 # kicad_io parses footprints/pads/nets/outline (reused below) but NOT these —
@@ -1399,7 +1764,8 @@ def tabulate_kicad(rb: ResolvedBoard) -> SurfaceTable:
 # parse — verified: every parsed aperture comes back with ``attrs=()`` — so even
 # the pad/via distinction is NA here, not merely unnamed.)
 _GERBER_FAMILIES = frozenset({"copper_flash", "copper_trace", "drill",
-                              "outline", "cutout", "copper_layer"})
+                              "outline", "cutout", "copper_layer",
+                              "mask_opening"})
 
 
 class ParitySurfaceUnavailable(RuntimeError):
@@ -1420,35 +1786,148 @@ class ParityCanonicalizationUnsupported(RuntimeError):
     """
 
 
-def _gerbonara_shape(aperture) -> tuple[str, float, float, float]:
-    """One parsed gerbonara aperture -> ``(shape, w_mm, h_mm, rot_deg)``.
+class _FlashShape(NamedTuple):
+    """One parsed aperture's canonical geometry, in the BOARD's terms.
 
-    Mirrors ``gerber._shape_aperture`` in reverse — circle/rect/obround map
-    directly; a ROTATED land is emitted as an aperture MACRO whose trailing
-    parameter is the rotation and whose leading parameters are HALF-extents
-    (gerber-writer's Rectangle/RoundRect macro convention, confirmed against
-    emitted bytes for the smart-remote fixture).
+    ``corner_radius_mm`` is ``None`` where the shape has no corner to round (a
+    circle) and 0.0 where it has square corners — those are different facts and
+    are not collapsed.
+    """
+
+    shape: str
+    w_mm: float
+    h_mm: float
+    rot_deg: float
+    corner_radius_mm: float | None
+
+
+#: gerber-writer's aperture MACROS, each with an EXACT parameter contract, read
+#: off the macro SOURCE it emits (``gerber_writer/macros.py``) rather than
+#: inferred from a sample:
+#:
+#:   ``Rectangle``         $1 xsize/2  $2 ysize/2  $3 rotation
+#:   ``RoundedRectangle``  $1 xsize/2  $2 ysize/2  $3 xsize/2-r  $4 ysize/2-r
+#:                         $5 rotation  $6 2r  $7..$10 corner-circle centres
+#:
+#: The COUNT is part of the contract, which is why these are pinned as numbers
+#: and checked exactly. See :func:`_gerbonara_shape` for why.
+_MACRO_PARAM_COUNTS = {"Rectangle": 3, "RoundedRectangle": 10}
+
+#: Slack for re-deriving one macro parameter from the others. gerber-writer
+#: rounds every calculated AD parameter to 6 decimals (``DECIMALS = 6`` in its
+#: writer), so an identity between two of them can be off by ~5e-7 mm and no
+#: more. 1e-5 is two orders above that and still 10x below
+#: :data:`PARITY_TOLERANCE_MM`, so it cannot mask a real geometry difference.
+_MACRO_PARAM_TOLERANCE_MM = 1e-5
+
+#: Slack for the INDEPENDENT rotation cross-check below. The corner-circle
+#: centre is rounded to 5e-7 mm, so an angle derived from one sits within
+#: 5e-7/r_c radians of the truth; at the smallest centre offset this check runs
+#: on (:data:`_MACRO_MIN_CHECKABLE_OFFSET_MM`) that is ~2.9e-3 deg. 1e-2 leaves
+#: ~3x margin. Deliberately NOT :data:`_ANGLE_TOLERANCE_DEG`, which is a
+#: comparison threshold between SURFACES, not serialization slack inside one.
+_MACRO_ANGLE_CROSSCHECK_TOL_DEG = 1e-2
+
+#: Below this, a corner-circle centre is too close to the aperture's own centre
+#: for its angle to be recoverable at all (and the outline is within rounding of
+#: rotation-invariant anyway), so the cross-check is skipped rather than run on
+#: noise.
+_MACRO_MIN_CHECKABLE_OFFSET_MM = 1e-2
+
+
+def _gerbonara_shape(aperture) -> _FlashShape:
+    """One parsed gerbonara aperture -> its canonical :class:`_FlashShape`.
+
+    Mirrors ``gerber._shape_aperture`` in reverse. Circle/rect/obround are
+    standard apertures and map directly. A land the standard apertures cannot
+    express — a rotated rectangle, or any roundrect that is not a
+    quarter-turned obround — is emitted as an aperture MACRO, and each macro is
+    decoded through :data:`_MACRO_PARAM_COUNTS` by NAME and EXACT arity.
+
+    BUG 019ff3696d95, and why the decoding looks paranoid. This function used to
+    read the rotation as ``params[-1]`` for every macro, on a docstring that
+    asserted the rotation was "the trailing parameter". That is true of
+    ``Rectangle`` (3 params) and false of ``RoundedRectangle``, which emits TEN:
+    its tail is a list of CORNER-CIRCLE CENTRES, so a pad authored at exactly 0
+    degrees was reported rotated by whatever its last corner ordinate happened
+    to be (measured: 0.11 deg on the seed coupon's C1 pad 1). That is worse than
+    a wrong number on a surface whose entire job is to be the INDEPENDENT
+    witness: a genuinely rotated land would have been compared against garbage
+    rather than against nothing, so the fabricated error the family exists to
+    catch could pass. Hence:
+
+      * dispatch on the macro's exact NAME, never a substring — ``"rect" in
+        macro`` also matches ``ChamferedRectangle``, which this reader has never
+        been checked against and whose chamfer it would silently flatten;
+      * require the exact parameter COUNT, so a gerber-writer that reshapes a
+        macro fails closed here instead of being re-misread by position; and
+      * re-derive the corner radius from BOTH extents and the rotation from the
+        corner-circle geometry, and fail closed when the re-derivations
+        disagree. Any of those three checks alone would have caught this bug.
     """
     name = type(aperture).__name__
     if name == "CircleAperture":
         d = float(aperture.diameter)
-        return _SHAPE_CIRCLE, d, d, 0.0
+        return _FlashShape(_SHAPE_CIRCLE, d, d, 0.0, None)
     if name == "RectangleAperture":
-        return _SHAPE_RECT, float(aperture.w), float(aperture.h), 0.0
+        return _FlashShape(_SHAPE_RECT, float(aperture.w), float(aperture.h),
+                           0.0, 0.0)
     if name == "ObroundAperture":
-        return _SHAPE_OVAL, float(aperture.w), float(aperture.h), 0.0
+        # A standard obround IS fully rounded on its short axis, by definition
+        # of the `O,` aperture — the radius is not a free parameter.
+        w, h = float(aperture.w), float(aperture.h)
+        return _FlashShape(_SHAPE_OVAL, w, h, 0.0, min(w, h) / 2.0)
     if name == "ApertureMacroInstance":
+        macro = (getattr(aperture.macro, "name", "") or "").strip()
         params = [float(p) for p in aperture.parameters]
-        macro = (getattr(aperture.macro, "name", "") or "").lower()
-        rot = params[-1] if len(params) >= 3 else 0.0
+        expected = _MACRO_PARAM_COUNTS.get(macro)
+        if expected is None:
+            raise ParitySurfaceUnavailable(
+                f"ir_parity: gerber aperture macro {macro!r} has no canonical "
+                f"shape mapping — add its parameter contract to "
+                f"_MACRO_PARAM_COUNTS after reading the macro source, rather "
+                f"than decoding it by position")
+        if len(params) != expected:
+            raise ParitySurfaceUnavailable(
+                f"ir_parity: gerber aperture macro {macro!r} carries "
+                f"{len(params)} parameters, not the {expected} this reader's "
+                f"decoding is pinned to — the writer's macro changed shape and "
+                f"reading it by position would now report false geometry "
+                f"(this is exactly bug 019ff3696d95); re-read the macro source")
+
         w, h = params[0] * 2.0, params[1] * 2.0
-        if "round" in macro and "rect" in macro:
-            return _SHAPE_ROUNDRECT, w, h, rot
-        if "rect" in macro:
-            return _SHAPE_RECT, w, h, rot
-        raise ParitySurfaceUnavailable(
-            f"ir_parity: gerber aperture macro {macro!r} has no canonical shape "
-            f"mapping — extend _gerbonara_shape rather than guessing")
+        if macro == "Rectangle":
+            return _FlashShape(_SHAPE_RECT, w, h, params[2], 0.0)
+
+        # RoundedRectangle. Radius appears three times over ($6 = 2r, and both
+        # extents minus their corner-circle offset); require all three to agree.
+        xc, yc, rot, diameter = params[2], params[3], params[4], params[5]
+        radius = diameter / 2.0
+        for half, offset, axis in ((params[0], xc, "x"), (params[1], yc, "y")):
+            if abs((half - offset) - radius) > _MACRO_PARAM_TOLERANCE_MM:
+                raise ParitySurfaceUnavailable(
+                    f"ir_parity: RoundedRectangle macro is self-inconsistent on "
+                    f"{axis}: half-extent {half} minus corner offset {offset} is "
+                    f"{half - offset}, but $6/2 says the radius is {radius} — "
+                    f"the parameter ORDER is not what this reader assumes")
+
+        # ROTATION, re-derived independently of $5. $7/$8 is the first-quadrant
+        # corner circle's centre AFTER rotation; (xc, yc) is the same point
+        # before it. The angle between them IS the aperture's rotation, computed
+        # from geometry rather than trusted from a slot index — which is the one
+        # check that could not have been fooled by the bug above.
+        offset_mag = math.hypot(xc, yc)
+        if offset_mag >= _MACRO_MIN_CHECKABLE_OFFSET_MM:
+            derived = math.degrees(math.atan2(params[7], params[6])
+                                   - math.atan2(yc, xc))
+            skew = abs((derived - rot + 180.0) % 360.0 - 180.0)
+            if skew > _MACRO_ANGLE_CROSSCHECK_TOL_DEG:
+                raise ParitySurfaceUnavailable(
+                    f"ir_parity: RoundedRectangle macro says rotation {rot} deg "
+                    f"($5), but its rotated corner-circle centre implies "
+                    f"{derived} deg — the parameter this reader takes as the "
+                    f"rotation is not the rotation")
+        return _FlashShape(_SHAPE_ROUNDRECT, w, h, rot, radius)
     raise ParitySurfaceUnavailable(
         f"ir_parity: gerbonara aperture {name} has no canonical shape mapping")
 
@@ -1514,10 +1993,11 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                 for obj in parsed.objects:
                     kind = type(obj).__name__
                     if kind == "Flash":
-                        shape, w, h, rot = _gerbonara_shape(obj.aperture)
+                        geom = _gerbonara_shape(obj.aperture)
                         rows.append(_flash_row(
-                            token, float(obj.x), _board_y(obj.y), shape=shape, w=w,
-                            h=h, rot_deg=rot,
+                            token, float(obj.x), _board_y(obj.y),
+                            shape=geom.shape, w=geom.w_mm, h=geom.h_mm,
+                            rot_deg=geom.rot_deg,
                             # A Gerber flash is anonymous: no component ref, no
                             # pad number, no net, and (gerbonara drops
                             # .AperFunction) not even pad-vs-via.
@@ -1527,6 +2007,43 @@ def tabulate_gerber(rb: ResolvedBoard) -> SurfaceTable:
                             token, (float(obj.x1), _board_y(obj.y1)),
                             (float(obj.x2), _board_y(obj.y2)),
                             float(obj.aperture.diameter), NA))
+            elif suffix.endswith("_Mask"):
+                # THE COLUMN WITH TEETH (epoch CP2 S11). Everything between
+                # mask_source's answer and these bytes is untouched by the IR
+                # and DRC columns: _adopt_mask_openings' side-to-bucket routing,
+                # to_gerber_frame's Y negation, aperture construction, and
+                # serialization. A comparison of two in-memory harvests cannot
+                # reach any of it.
+                #
+                # FAIL CLOSED on anything that is not a Flash. Skipping an
+                # object would SHRINK this surface's row set, and a shrunken set
+                # makes "no extra rows" pass more easily — a false clean in the
+                # direction a reader is least likely to check.
+                side_token = "F.Mask" if suffix.startswith("F") else "B.Mask"
+                apertures = []
+                for obj in parsed.objects:
+                    if type(obj).__name__ != "Flash":
+                        raise ParitySurfaceUnavailable(
+                            f"ir_parity: {filename} carries a "
+                            f"{type(obj).__name__}, which the mask family cannot "
+                            f"tabulate — mask output is flashes only; extend "
+                            f"this reader rather than skipping the object")
+                    geom = _gerbonara_shape(obj.aperture)
+                    apertures.append(_MaskAperture(
+                        side_token, float(obj.x), _board_y(obj.y),
+                        geom.shape, geom.w_mm, geom.h_mm, geom.rot_deg,
+                        NA if geom.corner_radius_mm is None
+                        else geom.corner_radius_mm,
+                        # POLARITY read from the file, not assumed. A clear
+                        # flash has identical extents and the opposite meaning;
+                        # an emitter that inverted one would otherwise be
+                        # geometrically indistinguishable from a correct board.
+                        "dark" if obj.polarity_dark else "clear",
+                        # A mask flash is as anonymous as a copper one:
+                        # gerbonara drops .AperFunction, so there is no ref, no
+                        # pad number, and no pad-vs-via.
+                        entity=NA, ref=NA))
+                rows.extend(_mask_rows(apertures))
             elif suffix == "Edge_Cuts":
                 rows.append(_outline_row(*_gerber_outline(parsed),
                                          _gerber_outline_stroke(parsed)))

@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -82,7 +83,7 @@ from pcb_worker.ir_parity import (
     format_report,
     tabulate_all,
 )
-from pcb_worker.resolved_board import ResolutionSuccess
+from pcb_worker.resolved_board import ResolutionSuccess, Side
 
 HERE = Path(__file__).resolve().parent
 #: The PRIMARY case. Synthetic, purpose-built, and the only fixture the teeth
@@ -216,6 +217,22 @@ def _reached_classes(board, ir_table) -> set[str]:
                - row.field_map().get("h_mm", 0.0)) > 1e-6 for row in flashes):
         reached.add("non_square_land")
 
+    # MASK-side classes. Read off the BOARD rather than off the table, because
+    # what is being pinned is that the fixture still CONTAINS the geometry — a
+    # predicate reading the table would go quiet in exactly the case where the
+    # tabulator, not the fixture, is what broke.
+    for component in getattr(board, "components", ()):
+        for pad in component.placed_pads:
+            if pad.drill is None and pad.side is not Side.TOP:
+                reached.add("smd_land_on_the_bottom_side")
+            if pad.pad_type == "np_thru_hole":
+                reached.add("unplated_through_hole_pad")
+    for via in getattr(board, "vias", ()):
+        if via.tented_front and via.tented_back:
+            reached.add("tented_via")
+        else:
+            reached.add("untented_via")
+
     sides = {c.placement.side for c in board.components}
     turns = {round(c.placement.rotation_deg % 360.0, 3) for c in board.components}
     if len(sides) >= 2:
@@ -240,6 +257,13 @@ GEOMETRY_CLASS_FLOOR = frozenset({
     "components_placed_on_both_sides",
     "quarter_turn_placement",
     "half_turn_placement",
+    # Added with the mask family (epoch CP2 S11). Both are classes whose ABSENCE
+    # was measured to leave a real mask defect undetected — see the GAP 6 and
+    # GAP 7 notes in the fixture.
+    "smd_land_on_the_bottom_side",
+    "untented_via",
+    "tented_via",
+    "unplated_through_hole_pad",
 })
 
 
@@ -376,7 +400,8 @@ def test_tabulation_is_deterministic():
 
 def test_reference_pad_land_is_not_delegated_to_the_shared_owner(monkeypatch):
     """The IR reference must NOT reach the copper-land decision through
-    ``pad_source`` / ``ir_pads``.
+    ``pad_source`` / ``ir_pads``, nor the SOLDER-MASK enumeration through
+    ``mask_source``.
 
     This is the harness's whole claim to independence (module docstring, "honest
     limit"): drc, kicad and gerber all resolve a TH land through
@@ -393,8 +418,14 @@ def test_reference_pad_land_is_not_delegated_to_the_shared_owner(monkeypatch):
       (b) BEHAVIOURAL — detonate the shared owner and demand that the IR
           tabulator still produces a full table. Catches delegation moved OUT of
           ``_ir_pad_land`` and up into ``tabulate_ir``, which (a) alone would not.
+
+    ``mask_source`` was added to both halves in epoch CP2 S11, when the mask
+    family landed. It is the SAME hazard one layer up: drc and gerber both
+    enumerate openings through it, so a reference that called it would agree with
+    them by construction about which entities open the mask at all — and the
+    first attempt at that station did exactly this and had to be reverted.
     """
-    forbidden_modules = {"pad_source", "ir_pads"}
+    forbidden_modules = {"pad_source", "ir_pads", "mask_source"}
     tree = ast.parse(Path(ir_parity.__file__).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -406,21 +437,27 @@ def test_reference_pad_land_is_not_delegated_to_the_shared_owner(monkeypatch):
             for alias in node.names:
                 assert alias.name.split(".")[-1] not in forbidden_modules, alias.name
 
-    from pcb_worker import ir_pads, pad_source
+    from pcb_worker import ir_pads, mask_source, pad_source
 
     def boom(*_args, **_kwargs):
         raise AssertionError(
-            "the IR reference tabulator called the SHARED pad-land owner — that "
+            "the IR reference tabulator called a SHARED geometry owner — that "
             "makes the reference agree with drc/kicad/gerber by construction")
 
     for module, name in ((pad_source, "th_land"), (pad_source, "placed_pad_to_geom"),
                          (ir_pads, "pad_land"), (ir_pads, "smd_shape"),
-                         (ir_pads, "pad_copper_shape"), (ir_pads, "iter_ir_pads")):
+                         (ir_pads, "pad_copper_shape"), (ir_pads, "iter_ir_pads"),
+                         (mask_source, "pad_openings"),
+                         (mask_source, "via_openings"),
+                         (mask_source, "board_hole_openings"),
+                         (mask_source, "circle_opening"),
+                         (mask_source, "resolve_ir_mask_clearance")):
         monkeypatch.setattr(module, name, boom)
 
     table = ir_parity.tabulate_ir(_board(PARITY_CORNERS))
     assert table.by_family("copper_flash"), "tabulate_ir produced no copper"
     assert table.by_family("drill")
+    assert table.by_family("mask_opening"), "tabulate_ir produced no mask openings"
 
 
 # ---------------------------------------------------------------------------
@@ -1100,3 +1137,430 @@ def test_malformed_cutout_graph_refuses_canonicalization():
     with pytest.raises(ip.ParityCanonicalizationUnsupported,
                        match="simple closed ring"):
         ip._cutout_rows_from_segments(outer + malformed)
+
+
+# ---------------------------------------------------------------------------
+# APERTURE-MACRO DECODING (bug 019ff3696d95).
+#
+# The gerber surface's whole value is that it re-reads the EMITTED BYTES, so a
+# reader that decodes an aperture wrongly does not merely report a wrong number
+# — it destroys the independence the family is built on. The specific defect:
+# _gerbonara_shape read `params[-1]` as the rotation for EVERY macro, on a
+# docstring asserting the rotation was always the trailing parameter. True of
+# gerber-writer's Rectangle macro (3 params), false of its RoundedRectangle,
+# whose tail is a list of corner-circle centres. A pad authored at 0 degrees was
+# reported rotated by its last corner ordinate.
+#
+# These tests drive the REAL gerber-writer and the REAL gerbonara, with no
+# pcb_worker emitter in the path, so they pin the macro contract itself and fail
+# loudly if either library reshapes it.
+# ---------------------------------------------------------------------------
+
+#: The fixture that actually contains a roundrect land. PARITY_CORNERS has none
+#: — every macro it emits is a `Rectangle`, the one the old rule got right — so
+#: the bug was invisible to the primary case by construction.
+COUPON_JLC1 = HERE / "testdata" / "coupon_jlc1.yaml"
+
+#: A partially-rounded land: radius is well under half the short side, so
+#: gerber-writer emits the MACRO rather than collapsing to a standard obround.
+_RR_W, _RR_H, _RR_RADIUS = 1.3, 1.1, 0.44
+
+
+def _emitted_aperture(master, angle: float):
+    """One pad master flashed at `angle` through gerber-writer, read back with
+    gerbonara. Both libraries real; nothing of ours in between."""
+    import warnings
+
+    from gerber_writer import DataLayer
+    from gerbonara import GerberFile
+
+    layer = DataLayer("Copper,L1,Top", negative=False)
+    layer.add_pad(master, (10.0, 10.0), angle)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        parsed = GerberFile.from_string(layer.dumps_gerber(), filename="t.gbr")
+    flashes = [o for o in parsed.objects if type(o).__name__ == "Flash"]
+    assert len(flashes) == 1, f"expected one flash, got {len(flashes)}"
+    return flashes[0].aperture
+
+
+class _FakeMacro:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class ApertureMacroInstance:  # noqa: N801 - the reader dispatches on this NAME
+    """Stands in for gerbonara's class of the same name. The reader identifies a
+    macro instance by `type(x).__name__`, so the name here is load-bearing."""
+
+    def __init__(self, macro_name: str, parameters) -> None:
+        self.macro = _FakeMacro(macro_name)
+        self.parameters = tuple(parameters)
+
+
+@pytest.mark.parametrize("angle", [0.0, 17.5, 45.0, 90.0, 137.25])
+def test_a_rounded_rectangle_macro_reports_the_authored_rotation(angle):
+    """THE BUG, stated positively: whatever angle went in comes back out."""
+    from gerber_writer import RoundedRectangle
+
+    aperture = _emitted_aperture(
+        RoundedRectangle(_RR_W, _RR_H, _RR_RADIUS, "SMDPad,CuDef"), angle)
+    assert type(aperture).__name__ == "ApertureMacroInstance", (
+        "this fixture is supposed to exercise the MACRO path; gerber-writer "
+        "collapsed it to a standard aperture, so the test proves nothing")
+
+    geom = ir_parity._gerbonara_shape(aperture)
+    assert geom.shape == "roundrect"
+    assert geom.rot_deg == pytest.approx(angle, abs=1e-6)
+    assert geom.w_mm == pytest.approx(_RR_W, abs=1e-6)
+    assert geom.h_mm == pytest.approx(_RR_H, abs=1e-6)
+    assert geom.corner_radius_mm == pytest.approx(_RR_RADIUS, abs=1e-6)
+
+
+def test_reading_the_macros_last_parameter_as_rotation_would_still_be_wrong():
+    """NON-VACUITY of the test above. It only discriminates the defect if the
+    trailing parameter genuinely differs from the rotation — otherwise the old
+    code would pass it too, and this section would be decorative."""
+    from gerber_writer import RoundedRectangle
+
+    aperture = _emitted_aperture(
+        RoundedRectangle(_RR_W, _RR_H, _RR_RADIUS, "SMDPad,CuDef"), 0.0)
+    params = [float(p) for p in aperture.parameters]
+    assert len(params) == 10, (
+        f"gerber-writer's RoundedRectangle macro no longer emits 10 parameters "
+        f"(got {len(params)}: {params}) — re-read its macro source and update "
+        f"ir_parity._MACRO_PARAM_COUNTS")
+    assert params[-1] != pytest.approx(0.0, abs=1e-9), (
+        "the trailing parameter now happens to equal the rotation, so the old "
+        "params[-1] rule would pass — this fixture no longer proves the fix")
+    assert ir_parity._gerbonara_shape(aperture).rot_deg == 0.0
+
+
+@pytest.mark.parametrize("angle", [30.0, 90.0])
+def test_the_rectangle_macro_the_old_rule_got_right_still_decodes(angle):
+    """The fix must not break the case the trailing-parameter rule handled: a
+    rotated plain rectangle IS emitted as a 3-parameter macro ending in its
+    angle."""
+    from gerber_writer import Rectangle
+
+    aperture = _emitted_aperture(Rectangle(1.2, 0.6, "SMDPad,CuDef"), angle)
+    assert len(aperture.parameters) == 3
+    geom = ir_parity._gerbonara_shape(aperture)
+    assert (geom.shape, geom.corner_radius_mm) == ("rect", 0.0)
+    assert geom.rot_deg == pytest.approx(angle, abs=1e-6)
+    assert (geom.w_mm, geom.h_mm) == pytest.approx((1.2, 0.6), abs=1e-6)
+
+
+def test_an_unknown_macro_is_refused_rather_than_decoded_by_position():
+    """gerber-writer emits ChamferedRectangle too. The old substring test
+    (`"rect" in macro`) claimed it as a plain rectangle and silently flattened
+    the chamfer; this reader has never been checked against it, so it must say
+    so instead of guessing."""
+    aperture = ApertureMacroInstance("ChamferedRectangle",
+                                     [0.6, 0.3, 0.4, 0.1, 45.0])
+    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+                       match="no canonical shape mapping"):
+        ir_parity._gerbonara_shape(aperture)
+
+
+def test_a_macro_whose_parameter_count_changed_fails_closed():
+    """The arity IS the contract. If gerber-writer reshapes the macro, decoding
+    by position would report false geometry — which is how this bug happened."""
+    aperture = ApertureMacroInstance("RoundedRectangle", [0.65, 0.55, 0.0])
+    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+                       match="not the 10 this reader's decoding is pinned to"):
+        ir_parity._gerbonara_shape(aperture)
+
+
+def test_a_self_inconsistent_rounded_rectangle_is_refused():
+    """Radius is stated three times over ($6/2, and each half-extent minus its
+    corner offset). Disagreement means the parameter ORDER is not what the
+    reader assumes, so no extent it reads can be trusted either."""
+    # $3 says the x corner offset is 0.10, but $6/2 says the radius is 0.44,
+    # which would make it 0.21. One of them is not the parameter we think it is.
+    aperture = ApertureMacroInstance(
+        "RoundedRectangle",
+        [0.65, 0.55, 0.10, 0.11, 0.0, 0.88, 0.21, 0.11, -0.21, 0.11])
+    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+                       match="self-inconsistent on x"):
+        ir_parity._gerbonara_shape(aperture)
+
+
+def test_a_rotation_slot_that_disagrees_with_the_corner_geometry_is_refused():
+    """THE CHECK THAT COULD NOT HAVE BEEN FOOLED BY THE ORIGINAL BUG: the
+    rotation is re-derived from where the corner circles actually ended up, and
+    compared against the parameter claiming to be the rotation. Here $5 says 0
+    while the corners are plainly turned 30 degrees."""
+    xc, yc, radius = 0.21, 0.11, 0.44
+    turned = math.radians(30.0)
+    q1 = (xc * math.cos(turned) - yc * math.sin(turned),
+          xc * math.sin(turned) + yc * math.cos(turned))
+    q2 = (-xc * math.cos(turned) - yc * math.sin(turned),
+          -xc * math.sin(turned) + yc * math.cos(turned))
+    aperture = ApertureMacroInstance(
+        "RoundedRectangle",
+        [xc + radius, yc + radius, xc, yc, 0.0, 2 * radius, q1[0], q1[1],
+         q2[0], q2[1]])
+    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+                       match="is not the rotation"):
+        ir_parity._gerbonara_shape(aperture)
+
+    # And the SAME parameters with an honest $5 decode cleanly — otherwise the
+    # guard above could be firing for an unrelated reason.
+    honest = ApertureMacroInstance(
+        "RoundedRectangle",
+        [xc + radius, yc + radius, xc, yc, 30.0, 2 * radius, q1[0], q1[1],
+         q2[0], q2[1]])
+    assert ir_parity._gerbonara_shape(honest).rot_deg == pytest.approx(30.0)
+
+
+def test_the_seed_coupons_roundrect_land_is_not_reported_rotated():
+    """END TO END on the board that surfaced it. Before the fix this produced
+    exactly one delta — `copper_flash rot_deg` at ('F.Cu', 19.05, 8.0), C1 pad 1
+    — on a pad authored at 0 degrees."""
+    tables = tabulate_all(_board(COUPON_JLC1))
+    deltas = diff_against_reference(tables["ir"], tables["gerber"])
+    assert deltas == [], "\n".join(d.render() for d in deltas)
+
+
+# ---------------------------------------------------------------------------
+# THE SOLDER-MASK FAMILY (epoch CP2 S11) — and the proof it can FAIL.
+#
+# S4/S5 declined this family as a tautology; the FAMILIES entry records why that
+# was overturned. The load-bearing consequence is that "ir, drc and gerber all
+# report 17 mask rows and agree" is not, by itself, evidence of anything: three
+# columns that cannot disagree would report exactly that. These tests mutate one
+# axis of the geometry at a time and demand each mutation is named.
+# ---------------------------------------------------------------------------
+
+
+def _mask_aperture(**overrides):
+    """One partially-rounded F.Mask opening, with named overrides."""
+    base = dict(side_token="F.Mask", x=10.0, y=8.0, shape="roundrect",
+                w=1.3, h=1.1, rot_deg=0.0, corner_radius_mm=0.44,
+                polarity="dark", entity="pad", ref="C1")
+    base.update(overrides)
+    return ir_parity._MaskAperture(**base)
+
+
+def _mask_table(surface: str, apertures) -> SurfaceTable:
+    """A mask-only table for `surface`, built through the SAME row constructor
+    and the SAME occurrence numbering every real tabulator uses."""
+    return SurfaceTable(surface=surface,
+                        families=frozenset({"mask_opening"}),
+                        rows=tuple(ir_parity._mask_rows(apertures)))
+
+
+@pytest.mark.parametrize("mutation,expected_field", [
+    pytest.param({"x": 10.0005}, "x_mm", id="position_within_the_bucket"),
+    pytest.param({"w": 1.4}, "w_mm", id="width"),
+    pytest.param({"h": 1.2}, "h_mm", id="height"),
+    pytest.param({"rot_deg": 30.0}, "rot_deg", id="rotation"),
+    # CORNER GEOMETRY. Same outline extents, different rounding — a real
+    # fabrication difference that width and height cannot express, which is why
+    # the family carries an absolute radius rather than trusting the shape name.
+    pytest.param({"corner_radius_mm": 0.20}, "corner_radius_mm", id="corner_radius"),
+    # POLARITY. Identical extents, opposite meaning: mask CLOSED where the
+    # reference says OPEN. Geometry alone cannot catch this one at all.
+    pytest.param({"polarity": "clear"}, "polarity", id="polarity"),
+])
+def test_a_mutated_mask_opening_is_named_as_a_field_delta(mutation, expected_field):
+    reference = _mask_table("ir", [_mask_aperture()])
+    surface = _mask_table("gerber", [_mask_aperture(**mutation)])
+
+    deltas = diff_against_reference(reference, surface)
+    assert [d.field for d in deltas] == [expected_field], \
+        [d.render() for d in deltas]
+    assert deltas[0].family == "mask_opening"
+
+
+def test_an_opening_on_the_wrong_SIDE_is_not_a_field_delta_but_a_lost_row():
+    """SIDE is IDENTITY, not a field. An opening that moved to the other side of
+    the board did not change value — the front lost a window and the back grew
+    one, and reporting it as "field side changed" would let a joined row hide a
+    board that is unsolderable on one face."""
+    reference = _mask_table("ir", [_mask_aperture()])
+    surface = _mask_table("gerber", [_mask_aperture(side_token="B.Mask")])
+
+    deltas = diff_against_reference(reference, surface)
+    assert {d.kind for d in deltas} == {"missing_row", "extra_row"}
+    rendered = " ".join(d.render() for d in deltas)
+    assert "F.Mask" in rendered and "B.Mask" in rendered
+
+
+def test_a_dropped_DUPLICATE_opening_is_caught():
+    """THE MULTIPLICITY CONTROL, and the reason the row key carries an occurrence
+    ordinal at all.
+
+    Two coincident identical apertures are two real flash operations in the
+    emitted file. ``SurfaceTable.by_family`` is a ``{key: row}`` dict, so without
+    the ordinal both would collapse to one row and losing one would be a CLEAN
+    diff — a silent discard of fabrication-critical geometry, reported as a
+    healthy board.
+
+    A fixture with unique centres cannot prove this, which is why the two
+    apertures here are deliberately identical in every field.
+    """
+    twice = [_mask_aperture(), _mask_aperture()]
+    reference = _mask_table("ir", twice)
+    assert len(reference.rows) == 2, "the ordinal must keep both rows distinct"
+    assert {row.key[3] for row in reference.rows} == {0, 1}
+
+    surface = _mask_table("gerber", twice[:1])
+    deltas = diff_against_reference(reference, surface)
+    assert [d.kind for d in deltas] == ["missing_row"], \
+        [d.render() for d in deltas]
+
+
+def test_coincident_openings_that_DIFFER_still_read_as_field_deltas():
+    """The ordinal must not turn a wrong size into an illegible missing+extra
+    pair. Numbering is by canonical geometry WITHIN a position bucket, so the
+    two openings still pair up and only the changed one is reported."""
+    reference = _mask_table("ir", [_mask_aperture(w=1.3), _mask_aperture(w=2.0)])
+    surface = _mask_table("gerber", [_mask_aperture(w=1.3), _mask_aperture(w=2.5)])
+
+    deltas = diff_against_reference(reference, surface)
+    assert [(d.kind, d.field) for d in deltas] == [("field", "w_mm")], \
+        [d.render() for d in deltas]
+
+
+@pytest.mark.parametrize("radius,expected", [
+    pytest.param(0.0, "rect", id="zero_radius_is_a_rectangle"),
+    pytest.param(0.55, "oval", id="fully_rounded_is_an_obround"),
+    pytest.param(0.44, "roundrect", id="partially_rounded_stays_a_roundrect"),
+])
+def test_a_roundrect_at_a_degenerate_radius_folds_to_the_shape_it_IS(radius,
+                                                                    expected):
+    """The emitter degenerates a zero-radius roundrect to a Rectangle and
+    gerber-writer collapses a fully-rounded one to the standard obround, so the
+    bytes name shapes the IR still calls "roundrect". Folding both ends keeps
+    that from reading as a shape defect."""
+    rows = ir_parity._mask_rows(
+        [_mask_aperture(w=1.3, h=1.1, corner_radius_mm=radius)])
+    assert rows[0].field_map()["shape"] == expected
+
+
+def test_the_degenerate_fold_does_not_swallow_a_WRONG_radius():
+    """PROOF THE FOLD IS NOT A SUPPRESSION. It fires only at the two radii where
+    the outlines are provably identical; a roundrect rounded merely differently
+    still disagrees."""
+    reference = _mask_table("ir", [_mask_aperture(corner_radius_mm=0.44)])
+    for wrong in (0.30, 0.10, 0.50):
+        surface = _mask_table("gerber",
+                              [_mask_aperture(corner_radius_mm=wrong)])
+        deltas = diff_against_reference(reference, surface)
+        assert deltas, f"radius {wrong} was swallowed"
+
+
+def test_kicad_cannot_express_the_mask_family_and_says_so():
+    """KiCad writes a per-pad solder_mask_margin and never an aperture, so it
+    must DECLINE the family rather than contribute zero rows to it — the
+    difference between "cannot answer" and "answered nothing" is the whole point
+    of a surface's family set."""
+    tables = tabulate_all(_board(COUPON_JLC1))
+    assert "mask_opening" not in tables["kicad"].families
+    assert not [r for r in tables["kicad"].rows if r.family == "mask_opening"]
+    for surface in ("ir", "drc", "gerber"):
+        assert "mask_opening" in tables[surface].families
+        assert [r for r in tables[surface].rows if r.family == "mask_opening"], \
+            f"{surface} declares the mask family but produced no rows"
+
+
+@pytest.mark.parametrize("path", [PARITY_CORNERS, COUPON_JLC1])
+def test_the_three_mask_columns_are_independently_derived_and_agree(path):
+    """The standing mask assertion. The IR column re-derives openings from
+    ResolvedBoard fields, the gerber column parses emitted bytes, and DRC reads
+    the shared owner they are both held up against."""
+    tables = tabulate_all(_board(path))
+    counts = {s: len([r for r in tables[s].rows if r.family == "mask_opening"])
+              for s in ("ir", "drc", "gerber")}
+    assert len(set(counts.values())) == 1, counts
+    assert counts["ir"] > 0
+    for surface in ("drc", "gerber"):
+        deltas = [d for d in diff_against_reference(tables["ir"], tables[surface])
+                  if d.family == "mask_opening"]
+        assert deltas == [], "\n".join(d.render() for d in deltas)
+
+
+def test_a_real_dropped_mask_aperture_is_caught_end_to_end(monkeypatch):
+    """THE NON-SYNTHETIC MASK TEETH TEST — the one that proves the gerber column
+    reads live bytes rather than restating a harvest.
+
+    Drops the LAST mask opening inside the production emitter, re-emits real
+    Gerber, re-parses it and demands the gate name gerber. A tabulator returning
+    constants, or one wired to mask_source instead of to the file, passes every
+    table-level test above and fails this one.
+    """
+    from pcb_worker import gerber
+
+    original = gerber._add_mask
+
+    def drop_one(layer, openings, *args, **kwargs):
+        return original(layer, list(openings)[:-1], *args, **kwargs)
+
+    monkeypatch.setattr(gerber, "_add_mask", drop_one)
+
+    report = check_parity(_board(PARITY_CORNERS), PARITY_CORNERS_BASELINE)
+    assert not report.ok, "a dropped mask aperture went undetected"
+    assert {d.surface for d in report.unexplained} == {"gerber"}
+    assert {d.family for d in report.unexplained} == {"mask_opening"}
+    assert "missing_row" in {d.kind for d in report.unexplained}
+
+
+def test_a_non_flash_object_in_a_mask_file_fails_closed(monkeypatch):
+    """Skipping an object would SHRINK the gerber surface's row set, and a
+    shrunken set makes "no extra rows" pass more easily. Refuse instead."""
+    from pcb_worker import gerber
+
+    original = gerber.build_gerbers_ir
+
+    def with_a_stray_draw(rb, **kwargs):
+        files = dict(original(rb, **kwargs))
+        name = next(f for f in files if f.endswith("F_Mask.gbr"))
+        files[name] = files[name].replace(
+            "M02*", "%ADD99C,0.20*%\nD99*\nX10000000Y10000000D02*\n"
+                    "X11000000Y10000000D01*\nM02*")
+        return files
+
+    monkeypatch.setattr(gerber, "build_gerbers_ir", with_a_stray_draw)
+
+    with pytest.raises(ir_parity.ParitySurfaceUnavailable,
+                       match="mask output is flashes only"):
+        ir_parity.tabulate_gerber(_board(PARITY_CORNERS))
+
+
+def test_a_HALF_tented_via_opens_mask_on_exactly_one_side():
+    """THE TENTING ASYMMETRY, which no fixture can author.
+
+    A via is the one entity whose "has copper here" and "opens mask here"
+    answers differ, and the rule is PER SIDE (019f8fe7cbaf). Board YAML carries a
+    single symmetric `tented` boolean, so a half-tented via cannot be written
+    into a fixture — it is constructed here on the compiled IR instead, and all
+    three surfaces are re-derived from it.
+
+    Without this, the per-side branch is only ever run with both answers equal,
+    and an emitter (or this module's own walk) that read one side's flag for both
+    would agree with everyone. Measured: with the corpus alone, opening mask over
+    a tented via left the whole suite green.
+    """
+    board = _board(PARITY_CORNERS)
+    tented, untented = sorted(board.vias,
+                              key=lambda v: not (v.tented_front and v.tented_back))
+    half = replace(tented, tented_front=False, tented_back=True)
+    board = replace(board, vias=(half, untented))
+
+    tables = tabulate_all(board)
+    for surface in ("ir", "drc", "gerber"):
+        openings = [r for r in tables[surface].rows
+                    if r.family == "mask_opening"
+                    and r.key[1:3] == (ir_parity._q(half.position[0]),
+                                       ir_parity._q(half.position[1]))]
+        sides = {r.key[0] for r in openings}
+        assert sides == {"F.Mask"}, (
+            f"{surface} put the half-tented via's mask openings on {sides or 'no'} "
+            f"side(s); the untented FRONT must open and the tented BACK must not")
+
+    for surface in ("drc", "gerber"):
+        deltas = [d for d in diff_against_reference(tables["ir"], tables[surface])
+                  if d.family == "mask_opening"]
+        assert deltas == [], "\n".join(d.render() for d in deltas)

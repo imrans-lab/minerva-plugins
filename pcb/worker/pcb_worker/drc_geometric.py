@@ -1562,29 +1562,51 @@ def _check_gc8_mask_sliver(proj: Projection, rb: ResolvedBoard) -> list[dict]:
         ordered = sorted(by_side[side],
                          key=lambda o: (o.entity_id or "", o.ref or "", o.x, o.y))
         shapes = [_mask_shape(o) for o in ordered]
-        n = len(ordered)
-        for i in range(n):
-            for j in range(i + 1, n):
-                a, b = ordered[i], ordered[j]
-                web = convex_edge_distance(shapes[i], shapes[j])
-                if web <= EPS:
-                    continue  # merged openings — no mask web exists here
-                if not _violates(web, required):
-                    continue
-                mid = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
-                findings.append(_finding(
-                    "gc8_mask_sliver",
-                    f"{a.entity_id or '?'}|{b.entity_id or '?'}", None,
-                    "mask_opening_pair", None,
-                    "F.Mask" if side is Side.TOP else "B.Mask",
-                    web, required,
-                    closest=[a.x, a.y], witness=[b.x, b.y], midpoint=list(mid),
-                    extra={"origins": [a.origin, b.origin],
-                           "participants": [
-                               {"entity_id": a.entity_id, "origin": a.origin,
-                                "ref": a.ref, "pad_number": a.pad_number},
-                               {"entity_id": b.entity_id, "origin": b.origin,
-                                "ref": b.ref, "pad_number": b.pad_number}]}))
+        # BROAD PHASE (epoch CP2 S11). GC8 was all-pairs while GC10 next door had
+        # an AABB gate, so a dense board paid the exact convex kernel on every
+        # opening pair on a side, including openings at opposite corners.
+        #
+        # CORRECTNESS-EQUIVALENT, and the margin is the reason: the only pairs
+        # this check can report sit in the band 0 < web < required, so a pair
+        # whose boxes are farther apart than `required` provably cannot violate
+        # and the narrow phase would have cleared it. `required` is a single
+        # board-wide floor here — GC8 has no per-net-class term to fold in — so
+        # the maximum-threshold invariant _sweep_pairs prunes against is
+        # satisfied trivially, which is NOT the case for GC2 (see its margin
+        # note). Pinned against all-pairs on near-threshold geometry in
+        # tests/test_gc8_mask_sliver.py, alongside a NON-VACUITY test that the
+        # sweep really prunes — an equivalence test passes trivially against a
+        # broad phase that returns every pair, which is what a broken margin
+        # does in the safe direction.
+        #
+        # Candidate pairs are re-SORTED so the emitted findings keep the exact
+        # order the all-pairs double loop produced. The sweep's natural order is
+        # x-sweep order, and letting that through would churn every downstream
+        # expectation for no gain.
+        for i, j in sorted(_sweep_pairs(
+                [s.aabb() for s in shapes],
+                [f"{o.entity_id or ''}|{o.ref or ''}|{o.x}|{o.y}" for o in ordered],
+                required)):
+            a, b = ordered[i], ordered[j]
+            web = convex_edge_distance(shapes[i], shapes[j])
+            if web <= EPS:
+                continue  # merged openings — no mask web exists here
+            if not _violates(web, required):
+                continue
+            mid = ((a.x + b.x) / 2.0, (a.y + b.y) / 2.0)
+            findings.append(_finding(
+                "gc8_mask_sliver",
+                f"{a.entity_id or '?'}|{b.entity_id or '?'}", None,
+                "mask_opening_pair", None,
+                "F.Mask" if side is Side.TOP else "B.Mask",
+                web, required,
+                closest=[a.x, a.y], witness=[b.x, b.y], midpoint=list(mid),
+                extra={"origins": [a.origin, b.origin],
+                       "participants": [
+                           {"entity_id": a.entity_id, "origin": a.origin,
+                            "ref": a.ref, "pad_number": a.pad_number},
+                           {"entity_id": b.entity_id, "origin": b.origin,
+                            "ref": b.ref, "pad_number": b.pad_number}]}))
     return findings
 
 
@@ -1653,20 +1675,38 @@ def _broad_phase_pairs(prims: list[CopperPrimitive],
     Deterministic: primitives are swept in (inflated min_x, entity_id) order and
     every emitted pair is returned as ``(i, j)`` with ``i < j`` (indices into the
     input list), so downstream findings are stable regardless of input order."""
-    n = len(prims)
-    order = sorted(range(n),
-                   key=lambda k: (prims[k].aabb.min_x - margin, prims[k].entity_id))
+    return _sweep_pairs([p.aabb for p in prims], [p.entity_id for p in prims],
+                        margin)
+
+
+def _sweep_pairs(boxes: list[AABB], keys: list[str],
+                 margin: float) -> list[tuple[int, int]]:
+    """The sweep itself, over bare boxes — the shared kernel behind every broad
+    phase in this module.
+
+    Split out of :func:`_broad_phase_pairs` (epoch CP2 S11) so GC8's mask-opening
+    broad phase runs the SAME pruning code the copper one has been proved against,
+    rather than a second implementation of an argument that is easy to get subtly
+    wrong. Everything the caller's docstring says about soundness — in particular
+    that ``margin`` must be the MAXIMUM threshold any surviving pair could be
+    compared against — is a property of THIS function and applies to every caller.
+
+    ``keys`` is the deterministic tiebreak for boxes that start at the same
+    inflated x; it needs only to be total, not meaningful.
+    """
+    order = sorted(range(len(boxes)),
+                   key=lambda k: (boxes[k].min_x - margin, keys[k]))
     pairs: list[tuple[int, int]] = []
     active: list[tuple[float, int]] = []  # (inflated max_x, index)
     for oi in order:
-        box = prims[oi].aabb
+        box = boxes[oi]
         lo_x = box.min_x - margin
         hi_x = box.max_x + margin
         lo_y = box.min_y - margin
         hi_y = box.max_y + margin
         active = [a for a in active if a[0] >= lo_x - EPS]
         for _a_hi, aj in active:
-            b2 = prims[aj].aabb
+            b2 = boxes[aj]
             # x already overlaps (sweep invariant); test inflated y overlap.
             if (b2.min_y - margin) <= hi_y + EPS and lo_y <= (b2.max_y + margin) + EPS:
                 pairs.append((aj, oi) if aj < oi else (oi, aj))

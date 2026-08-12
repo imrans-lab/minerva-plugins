@@ -38,7 +38,7 @@ shared owner shows up as `ir`-vs-everyone.
 Every surface produces a `SurfaceTable` of `ParityRow` = `(family, key, fields)`.
 
 - **`family`** — the comparison bucket: `copper_flash`, `copper_trace`, `drill`,
-  `outline`, `copper_layer`, `net_ownership`.
+  `outline`, `cutout`, `mask_opening`, `copper_layer`, `net_ownership`.
 - **`key`** — identity within the family. **Geometric** (quantized position +
   canonical layer token), never an IR id: a parsed Gerber flash is anonymous, so
   an id-based key would be unproducible by one of the four surfaces.
@@ -57,6 +57,41 @@ Two distinct "cannot say" mechanisms, and the difference matters:
 Copper rows are **per layer**: a through-hole pad or a via emits one row per
 copper layer it occupies, because that is what the fab file physically contains
 and it makes "the land vanished from B.Cu" a nameable failure.
+
+### `mask_opening` — the family that had to be argued for twice
+
+Solder-mask apertures are compared by **`ir`, `drc` and `gerber`**; `kicad` opts
+out, because it writes a per-pad `solder_mask_margin` and never an aperture, so
+there is nothing to read back.
+
+Stations S4/S5 declined this family as a tautology — `Projection.mask` and the
+Gerber emitter's buckets both come from `mask_source`, so tabulating those two
+asserts one function call agrees with itself. Two independent cold reviews
+overturned it (epoch CP2 S11), and the reason generalizes:
+
+- `gerber` is independent because that surface is defined as the **emitted
+  bytes**. Between `mask_source`'s answer and the `F_Mask`/`B_Mask` bytes sit
+  side-to-bucket routing, the Y-frame negation, aperture construction and
+  serialization — none of it reachable by comparing two in-memory harvests.
+- `ir` is independent because this module **forbids** the reference from
+  borrowing the shared owner. `_ir_mask_openings` re-derives the enumeration
+  *and* the enlargement rule from `ResolvedBoard` fields, the same discipline
+  `_ir_pad_land` already follows for copper.
+
+So the family is two independent derivations against one shared owner, not three
+readings of one call. Three things it carries that copper rows do not:
+
+| Field | Why |
+|---|---|
+| `corner_radius_mm` | **absolute mm**, never a ratio — Gerber has no concept of one. Same extents with different rounding is a real fabrication difference that `w_mm`/`h_mm` cannot express. |
+| `polarity` | a clear flash has identical extents and the opposite meaning. Geometry alone cannot catch an inverted one. |
+| occurrence ordinal *(in the key)* | `by_family` is a `{key: row}` dict, so without it two coincident identical apertures collapse to one row and **losing one is a clean diff**. |
+
+Two shape folds keep representation differences from reading as defects, and
+both are narrow enough that a wrong value still fails: a quarter-turned land
+folds to its axis-aligned representative (shared with copper), and a roundrect
+folds to `rect` at radius 0 or to `oval` at fully-rounded — the two radii where
+the emitter itself changes aperture family.
 
 ### Two tolerances, because there are two questions
 
@@ -109,11 +144,13 @@ this.
 
 **The exit condition for the migration is both baselines reaching length 0.**
 
-Current entries: 2 for `smart_remote` (the Excellon 1 µm coordinate grid, on
-`x_mm` and on `y_mm`, 3 rows each — accepted), 2 for `parity_corners` (DRC's
-oval→bounding-rect fail-safe superset, accepted; and **one real defect** — an
-oblong oval land loses its rotation in Gerber, see the entry's own comment for
-the emitted bytes).
+Current entries: **1**, for `parity_corners` — DRC's oval→bounding-rect fail-safe
+superset, accepted, and the one entry that should *not* go to zero by "fixing
+DRC" (only by DRC gaining a true obround primitive). The Gerber rotated-oval
+defect this fixture found on its first run is **fixed**, and its entry was
+deleted rather than relaxed; the baseline shrinking is the proof. `smart_remote`
+was withdrawn from the corpus (docket `019fbe68c5f8`, see `testdata/POLICY.md`)
+and `parity_corners` is now the primary case.
 
 ## Fixtures
 
@@ -124,6 +161,19 @@ the emitted bytes).
   square, whose rotation folds away under its own symmetry — so smart-remote
   alone cannot tell a correct rotation from a dropped one. The Gerber rotation
   defect above was found by this fixture on its first run.
+
+  Extended for the mask family (epoch CP2 S11) with a **bottom-side SMD land**
+  (the only entity whose mask opening is single-sided, so the only one that can
+  catch a side-routing error), an **untented via** beside the tented one (the
+  only entity where "has copper here" and "opens mask here" differ), and an
+  **unplated through-hole pad** (drill-sized opening, no margin). Each was added
+  because its absence was *measured* to leave a real mask defect undetected —
+  the corresponding mutation left the whole suite green. `GEOMETRY_CLASS_FLOOR`
+  in `test_ir_parity.py` pins all three so they cannot quietly disappear again.
+
+  A **half-tented** via is not authorable from board YAML (a single symmetric
+  `tented` boolean), so the per-side rule is exercised by constructing one on the
+  compiled IR in `test_a_HALF_tented_via_opens_mask_on_exactly_one_side`.
 
 Still uncovered: non-rect **SMD** shapes (circle/oval/roundrect). A pad shape is
 owned by the locked footprint and is not authorable from board YAML
