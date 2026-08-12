@@ -59,6 +59,23 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// 019fc2f8b903): exposes the worker's assembly_bom + assembly_cpl
 		// methods, shipped worker-side by C8 with no agent-facing tool until now.
 		"minerva_pcb_export_assembly",
+		// worker-backed — the rendered-bless surface (S3/B2, docket
+		// 019ff5687b99): the library TRUST BOUNDARY. Stage a .kicad_mod into
+		// the WIP layer, render the fact table + SVG a human blesses it
+		// against, record the verdict. These carry the full minerva_pcb_
+		// prefix (LLM-facing tools, not dotted panel-IPC channels), so they
+		// are also counted by TestManifestBrokerParity.
+		"minerva_pcb_footprint_stage",
+		"minerva_pcb_footprint_report",
+		"minerva_pcb_footprint_bless",
+		// worker-backed — on-demand acquisition of ONE official KiCad footprint
+		// (S4/B3, docket 019ff5689732). Its first half is an in-process HTTPS
+		// fetch (network code is Go-only in this plugin), but it ENDS in a
+		// w.Call to the worker's footprint_acquire_store, which stages and
+		// auto-blesses through the B2 machinery above. Like
+		// minerva_pcb_fetch_libraries, only NAME RESOLUTION is asserted here —
+		// invoking it would hit gitlab.com.
+		"minerva_pcb_acquire_footprint",
 		// worker-backed — dotted panel-IPC channel forwarding to the worker's
 		// "route" method (this round; docket 019f3815e9f9). NOT renamed by
 		// round D0-expose (019fa486b408) — dotted panel-IPC channels are a

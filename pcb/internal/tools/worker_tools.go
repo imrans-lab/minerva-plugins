@@ -34,6 +34,7 @@ import (
 
 	"github.com/imrans-lab/minerva-plugins/pcb/internal/libraries"
 	"github.com/imrans-lab/minerva-plugins/shared/bridge"
+	sharedruntime "github.com/imrans-lab/minerva-plugins/shared/runtime"
 )
 
 // WorkerToolHandlerFunc is the signature for a worker-backed tool: it threads a
@@ -698,6 +699,261 @@ func HandleExportAssembly(ctx context.Context, w *bridge.Worker, params json.Raw
 		return nil, err
 	}
 	return json.RawMessage(data), nil
+}
+
+// ---- rendered-bless surface (S3/B2, docket 019ff5687b99) -------------------
+//
+// The library trust boundary. The coincidence guard compares pad CENTRES and
+// cannot be a trust boundary; a human blessing a RENDERED footprint against its
+// datasheet is. These three tools are that surface: STAGE a .kicad_mod into the
+// WIP layer, REPORT it (fact table + SVG), BLESS it. The gate lives in the
+// Python worker (pcb_worker/bless.py): an unblessed entry is absent from the
+// resolving chain's lock VIEW, so no resolver path can serve it.
+//
+// WIP ROOT (see withWIPRoot): every one of these forwards with wip_root set to
+// <plugin data dir>/library_wip, ALWAYS overriding any caller value.
+
+var FootprintStage = ToolSpec{
+	Name: "minerva_pcb_footprint_stage",
+	Description: "Stage a .kicad_mod footprint into the WIP library layer, " +
+		"sha256-pinned and UNBLESSED. Args {ref:'LibNick:PartName', " +
+		"kicad_mod_text, source_kind:'official_kicad|vendor_export|git|url|" +
+		"hand_authored|generated', source_ref, license, retrieved_at?, " +
+		"provenance_note?}. Returns {ref, entry:<acquisition-lock v2 entry with " +
+		"bless:null>, report:{facts, not_rendered, svg_sha256, " +
+		"artifact_sha256}}. The text is " +
+		"PARSED FIRST — unparseable or padless input writes no file and mutates " +
+		"no lock. A staged entry cannot supply copper until " +
+		"minerva_pcb_footprint_bless records a verdict against it: unblessed " +
+		"refs are excluded from the resolution chain, so a board resolves the " +
+		"lower layer's part rather than the staged bytes. Re-staging a ref " +
+		"replaces its bytes and RESETS bless to null. Empty source_kind/" +
+		"source_ref/license are refused by name.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"ref": {"type": "string", "description": "Full footprint ref, 'LibNick:PartName' — the library nickname names the .pretty directory the staged file is written into."},
+			"kicad_mod_text": {"type": "string", "description": "The complete .kicad_mod s-expression text to stage."},
+			"source_kind": {"type": "string", "description": "Provenance class: official_kicad, vendor_export, git, url, hand_authored or generated."},
+			"source_ref": {"type": "string", "description": "Where the bytes came from (URL, git rev, datasheet + author, ...)."},
+			"license": {"type": "string", "description": "SPDX id or LicenseRef for the staged text."},
+			"retrieved_at": {"type": "string", "description": "Acquisition date (defaults to UTC now)."},
+			"provenance_note": {"type": "string", "description": "Optional free-text note kept on the lock entry."}
+		},
+		"required": ["ref", "kicad_mod_text", "source_kind", "source_ref", "license"]
+	}`),
+}
+
+func HandleFootprintStage(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "footprint_stage", withWIPRoot(params))
+}
+
+var FootprintReport = ToolSpec{
+	Name: "minerva_pcb_footprint_report",
+	Description: "Render the two artifacts a human blesses a footprint " +
+		"against: a FACT TABLE and a self-contained SVG. Args {ref, " +
+		"max_svg_bytes?}. Returns {ref, facts:{ref, footprint_name, layer, " +
+		"source_kind, license, source_ref, pad_count, pad_numbers, " +
+		"pads:[{number,type,shape,x_mm,y_mm,size,drill,drill_shape,drill_size," +
+		"layers,rotation,roundrect_rratio,solder_mask_margin," +
+		"solder_paste_margin}], courtyard_bbox, body_bbox, assembly}, " +
+		"not_rendered:[{feature,detail,...}], svg, svg_sha256, " +
+		"artifact_sha256, svg_bytes, svg_truncated}. artifact_sha256 digests " +
+		"the staged content sha + the complete facts + not_rendered + the " +
+		"picture — it is what a human-tier bless must quote back as " +
+		"expected_artifact_sha256. Coordinates in facts are footprint-LOCAL " +
+		"with KiCad's y-DOWN sign (verbatim from the .kicad_mod); the SVG " +
+		"negates y so the picture is a conventional top view, and does not " +
+		"mirror x, so back-side geometry is drawn as seen through the board. " +
+		"not_rendered lists EVERY parsed element the picture omits — an empty " +
+		"not_rendered is the only condition under which the render shows the " +
+		"whole part. svg_sha256/svg_bytes always describe the WHOLE artifact " +
+		"even when svg itself is truncated for transport.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"ref": {"type": "string", "description": "Footprint ref to report on ('LibNick:PartName'); resolves through the layer chain, staged WIP parts included."},
+			"max_svg_bytes": {"type": "integer", "description": "Truncate the returned svg body at this many bytes (default 200000). svg_sha256/svg_bytes still describe the whole artifact."}
+		},
+		"required": ["ref"]
+	}`),
+}
+
+func HandleFootprintReport(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "footprint_report", withWIPRoot(params))
+}
+
+var FootprintBless = ToolSpec{
+	Name: "minerva_pcb_footprint_bless",
+	Description: "Record a bless verdict against a staged footprint, which is " +
+		"what lets it supply copper. Args {ref, verdict?:'approved'|'rejected', " +
+		"who?, blessed_at?, expected_artifact_sha256?}. Returns {ref, " +
+		"entry:<entry with bless:{tier, verdict, who, artifact_sha256, " +
+		"content_sha256, blessed_at}>, report:{facts, not_rendered, " +
+		"svg_sha256, artifact_sha256}}. TIERING: source_kind official_kicad " +
+		"AUTO-BLESSES on provenance — omit verdict for it, and passing one is " +
+		"refused rather than silently recorded, so the lock can always " +
+		"distinguish parts a human reviewed from parts policy trusted. Every " +
+		"other source_kind (hand_authored above all — we authored those " +
+		"numbers) requires an explicit human verdict PLUS " +
+		"expected_artifact_sha256: the artifact_sha256 of the " +
+		"minerva_pcb_footprint_report the reviewer actually looked at. If the " +
+		"staged content changed since that review the bless REFUSES — an " +
+		"approval never transfers to an artifact nobody saw. The render is " +
+		"regenerated here and its digest pinned, so a footprint that cannot be " +
+		"rendered cannot be blessed. A 'rejected' verdict is recorded and " +
+		"keeps the ref unresolvable.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"ref": {"type": "string", "description": "Staged footprint ref ('LibNick:PartName')."},
+			"verdict": {"type": "string", "description": "'approved' or 'rejected'. OMIT for an official_kicad entry, which auto-blesses; supplying one for it is refused."},
+			"who": {"type": "string", "description": "Who performed the rendered check. Required for a human-tier verdict."},
+			"blessed_at": {"type": "string", "description": "Timestamp to record (defaults to UTC now)."},
+			"expected_artifact_sha256": {"type": "string", "description": "artifact_sha256 of the report the reviewer looked at. Required with a human-tier verdict; the bless refuses if the staged content renders a different artifact now."}
+		},
+		"required": ["ref"]
+	}`),
+}
+
+func HandleFootprintBless(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "footprint_bless", withWIPRoot(params))
+}
+
+// ---- acquisition (S4/B3, docket 019ff5689732) ------------------------------
+//
+// One official KiCad footprint, on demand. GO FETCHES; THE WORKER STAGES. The
+// bytes are pulled here (internal/libraries/acquire.go — network code is Go-only
+// in this plugin, the Python worker never fetches), then handed to the worker's
+// footprint_acquire_store, which runs the SAME B2 machinery the manual surface
+// runs: stage_footprint parse-validates and sha-pins, auto_bless_footprint
+// records the auto-tier verdict. There is deliberately no second staging path.
+//
+// The sha256 computed here over the wire bytes travels with the text, and the
+// worker recomputes it independently over what it received and REFUSES on
+// disagreement — two derivations of the same bytes, either side of a bridge.
+
+var AcquireFootprint = ToolSpec{
+	Name: "minerva_pcb_acquire_footprint",
+	Description: "Acquire ONE official KiCad footprint by ref and make it usable " +
+		"in a single call. Args {ref:'LibNick:PartName'}. Performs outbound HTTPS " +
+		"to gitlab.com for the kicad-footprints file at the release tag pinned in " +
+		"pcb/libraries.lock.json (the lock is the single source of truth for which " +
+		"official release this plugin tracks — the tag is read, never restated " +
+		"here), then hands the bytes to the worker, which parse-validates them, " +
+		"stages them into the WIP library layer, and records the auto-tier verdict " +
+		"official_kicad provenance earns. Returns {ref, layer:'wip', sha256, " +
+		"source_ref:'kicad-footprints@<tag>/<Lib>.pretty/<Name>.kicad_mod', license, " +
+		"bless:{tier:'auto', verdict, who, artifact_sha256, blessed_at}, entry, " +
+		"report_summary:{facts, not_rendered, svg_sha256, artifact_sha256}} — " +
+		"the ref resolves " +
+		"immediately afterwards. Refuses without writing anything on: a ref with a " +
+		"path separator or traversal segment, a non-200 status (404 = no such part " +
+		"at this release), a body over 1 MiB, non-UTF-8 bytes, or content that is " +
+		"markup rather than a footprint s-expression. The sha256 of the fetched " +
+		"bytes is recomputed independently worker-side and a mismatch is refused. " +
+		"ACQUISITION is the only library operation that needs a network: resolution " +
+		"reads sha-pinned bytes off disk and never opens a socket, so a fetch " +
+		"failure blocks adding this part and nothing else.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"ref": {"type": "string", "description": "Official KiCad footprint ref, 'LibNick:PartName' (e.g. 'Resistor_SMD:R_0402_1005Metric') — the library nickname names the upstream .pretty directory."}
+		},
+		"required": ["ref"]
+	}`),
+}
+
+func HandleAcquireFootprint(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	var p struct {
+		Ref string `json:"ref"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &bridge.WorkerError{Kind: "acquire",
+				Message: fmt.Sprintf("minerva_pcb_acquire_footprint: params are not a JSON object: %v", err)}
+		}
+	}
+
+	fetched, err := libraries.AcquireFootprint(libraries.DefaultLockPath(pluginRoot), p.Ref)
+	if err != nil {
+		return nil, acquireWorkerError(err)
+	}
+
+	// The worker is told the ref, the bytes, the provenance and the sha to
+	// cross-check — and NOT the source_kind. official_kicad is fixed by the
+	// method itself (methods.py _footprint_acquire_store), so this path cannot
+	// be talked into auto-blessing third-party bytes by passing a field.
+	call, err := json.Marshal(map[string]interface{}{
+		"ref":            fetched.Ref,
+		"kicad_mod_text": fetched.Text,
+		"source_ref":     fetched.SourceRef,
+		"license":        fetched.License,
+		"fetched_sha256": fetched.SHA256,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return w.Call(ctx, "footprint_acquire_store", withWIPRoot(call))
+}
+
+// acquireWorkerError converts a libraries.AcquireError into the SAME
+// {ok:false, error:{kind, message, details}} envelope a worker refusal takes
+// (main.go turns a *bridge.WorkerError into MCP tool-result content with
+// isError set, while any other error becomes an opaque JSON-RPC fault). An
+// acquisition refusal is something the caller can act on — fix the ref, retry
+// when the network is back — so it must reach the caller as content, not as a
+// protocol error.
+func acquireWorkerError(err error) error {
+	ae, ok := err.(*libraries.AcquireError)
+	if !ok {
+		return &bridge.WorkerError{Kind: "acquire", Message: err.Error()}
+	}
+	details, mErr := json.Marshal(map[string]interface{}{
+		"reason": ae.Kind,
+		"ref":    ae.Ref,
+		"url":    ae.URL,
+		"offline_contract": "acquisition requires network access to gitlab.com; resolution never " +
+			"does — already-acquired footprints resolve from sha-pinned bytes on disk",
+	})
+	we := &bridge.WorkerError{Kind: "acquire", Message: ae.Message}
+	if mErr == nil {
+		we.Details = details
+	}
+	return we
+}
+
+// wipRootDir is the staging library root: <plugin data dir>/library_wip,
+// resolved through shared/runtime.DataDir (which honors MINERVA_PLUGIN_DATA_DIR)
+// exactly like libraries.DefaultDir's <plugin data dir>/libraries sibling. Not
+// created here — the worker creates it on the first stage.
+func wipRootDir() string {
+	return filepath.Join(sharedruntime.DataDir("pcb"), "library_wip")
+}
+
+// withWIPRoot forces wip_root onto a bless-surface call.
+//
+// Unlike withDefaultLibDir (which fills in only when the caller omitted the
+// value), this ALWAYS overrides. wip_root is a WRITE destination derived from a
+// ref the caller also controls, so honoring a caller-supplied root would turn
+// minerva_pcb_footprint_stage into a write-anywhere primitive for an LLM. The
+// host owns the data directory; the agent chooses the part, never the path.
+//
+// Malformed params (not a JSON object) are passed through unchanged so the
+// worker's own uniform parse-error handling reports them.
+func withWIPRoot(params json.RawMessage) json.RawMessage {
+	var m map[string]interface{}
+	if len(params) == 0 {
+		m = map[string]interface{}{}
+	} else if err := json.Unmarshal(params, &m); err != nil {
+		return params
+	}
+	m["wip_root"] = wipRootDir()
+	out, err := json.Marshal(m)
+	if err != nil {
+		return params
+	}
+	return out
 }
 
 // withDefaultLibDir fills in lib_dir with the fetched-library data directory

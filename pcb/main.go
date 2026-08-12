@@ -247,6 +247,20 @@ func initRegistry() {
 	// routing run (Epoch UX2 station 9). See worker_tools.go.
 	registry.Register(tools.BoardHealthChannel, tools.HandleBoardHealthChannel)
 	registry.Register(tools.MaskViewChannel, tools.HandleMaskViewChannel)
+	// Rendered-bless surface (S3/B2, docket 019ff5687b99) — the library trust
+	// boundary: stage a .kicad_mod into the WIP layer, render the fact
+	// table + SVG a human blesses against, record the verdict. All three
+	// forward to the worker with wip_root forced to <data dir>/library_wip
+	// (see worker_tools.go's withWIPRoot).
+	registry.Register(tools.FootprintStage, tools.HandleFootprintStage)
+	registry.Register(tools.FootprintReport, tools.HandleFootprintReport)
+	registry.Register(tools.FootprintBless, tools.HandleFootprintBless)
+	// minerva_pcb_acquire_footprint (S4/B3, docket 019ff5689732) — the ON-DEMAND
+	// half of the same surface: Go fetches one official KiCad footprint from the
+	// release tag pinned in libraries.lock.json, the worker stages + auto-blesses
+	// it through the B2 machinery above. Worker-backed (it ends in a w.Call), even
+	// though its first half is in-process network work.
+	registry.Register(tools.AcquireFootprint, tools.HandleAcquireFootprint)
 	// pcb.promote_check — the K13 promotion gate: full connectivity +
 	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
 	// 11). See worker_tools.go.
@@ -319,8 +333,19 @@ var workerBackedTools = map[string]bool{
 	"minerva_pcb_check_libraries": true,
 	"minerva_pcb_check_bom":       true,
 	"minerva_pcb_export_assembly": true,
-	"pcb.route":                   true,
-	"pcb.draft_check":             true,
+	// Rendered-bless surface (S3/B2) — all three dispatch to the worker's
+	// footprint_stage/footprint_report/footprint_bless methods.
+	"minerva_pcb_footprint_stage":  true,
+	"minerva_pcb_footprint_report": true,
+	"minerva_pcb_footprint_bless":  true,
+	// minerva_pcb_acquire_footprint (S4/B3) ends in a w.Call to the worker's
+	// footprint_acquire_store method, so it satisfies this map's worker-dispatch
+	// invariant — the in-process HTTPS fetch that precedes the call is the half
+	// that CANNOT live in the worker (network code is Go-only here), not a
+	// reason to treat the tool as in-process.
+	"minerva_pcb_acquire_footprint": true,
+	"pcb.route":                     true,
+	"pcb.draft_check":               true,
 	// pcb.assembly_check dispatches to the worker (HandleAssemblyCheckChannel
 	// calls w.Call(ctx, "assembly_check", params)) — same membership rationale
 	// as pcb.route/pcb.draft_check above: worker-dispatch, not naming.

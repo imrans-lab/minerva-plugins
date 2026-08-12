@@ -39,7 +39,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Union
+from typing import Iterable, Union
 
 from agent_router.layers import CANON_TO_KICAD, STACK_INDEX
 
@@ -68,9 +68,11 @@ from .footprint_def import (
     Provenance,
 )
 from .footprints import (
+    SEED_LAYER,
     FootprintLookupError,
-    load_lockfile,
-    resolve_footprint,
+    load_library_chain,
+    lookup_footprint_layer,
+    resolve_footprint_layered,
 )
 from .geometry import (
     BOTTOM_LAYER_NAMES,
@@ -766,6 +768,7 @@ def _build_net_classes(rules: dict, board_id: str, requested_outputs: tuple[str,
 
 
 def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None],
+                                library_layers: Union[Iterable, None],
                                 diags: _Diagnostics) -> Union[LoadedRuleProfile, None]:
     """Resolve the board's SELECTED manufacturing-floor profile.
 
@@ -789,7 +792,12 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
                     f"pinned board-house profile; got {profile_id!r}", _board_ref())
         return None
     try:
-        return load_rule_profile(profile_id, library_root=profile_root)
+        # THE SAME ordered library chain footprints resolve through (S9, owner
+        # ruling): a user/project layer may ship its own board-house profile,
+        # and a defect in the layer that HAS the id is refused rather than
+        # served from the seed's profile of the same name.
+        return load_rule_profile(profile_id, library_root=profile_root,
+                                 layers=library_layers)
     except RuleProfileError as exc:
         diags.error("unknown_rule_profile", str(exc), _board_ref())
         return None
@@ -797,6 +805,7 @@ def _resolve_board_rule_profile(rules: dict, profile_root: Union[str, Path, None
 
 def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str, ...],
                         profile_root: Union[str, Path, None],
+                        library_layers: Union[Iterable, None],
                         diags: _Diagnostics
                         ) -> Union[tuple[ResolvedDesignRules, dict[str, str]], None]:
     """Build the board's :class:`ResolvedDesignRules` and the net-name -> class-id
@@ -833,7 +842,7 @@ def _build_design_rules(board: dict, board_id: str, requested_outputs: tuple[str
                 "diff_pair_gap_mm/diff_pair_width_mm are declared but not modeled in the v1 IR",
                 requested_outputs, diags):
             return None
-    profile = _resolve_board_rule_profile(rules, profile_root, diags)
+    profile = _resolve_board_rule_profile(rules, profile_root, library_layers, diags)
     if profile is None:
         return None
     net_classes, class_id_by_net = _build_net_classes(rules, board_id, requested_outputs, diags)
@@ -2238,6 +2247,7 @@ def compile_board(
     requested_outputs: tuple[str, ...] = V1_FAB_OUTPUTS,
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
+    library_layers: Union[Iterable, None] = None,
     profile_root: Union[str, Path, None] = None,
 ) -> ResolutionResult:
     """Compile a canonical board dict into a :class:`ResolutionResult`.
@@ -2250,7 +2260,16 @@ def compile_board(
     from (default :data:`manufacturer_profile.DEFAULT_PROFILE_ROOT`, the
     shipped ``pcb/library/profiles/`` directory) -- mirrors ``library_root``/
     ``lockfile`` and exists mainly so tests can exercise the fail-closed
-    profile-loading paths without touching shipped library data."""
+    profile-loading paths without touching shipped library data.
+
+    ``library_layers`` (S9) is the ORDERED LIBRARY CHAIN both footprints and
+    manufacturer profiles resolve through -- a sequence of
+    :class:`~pcb_worker.footprints.LibraryLayer` (or the equivalent mappings the
+    Go side will hand across the bridge). Omitted, the chain is the shipped seed
+    layer alone and this compile is byte-identical to a pre-S9 one; the shipped
+    seed is always the chain's base, so a configured layer can only SHADOW a
+    seed part, never remove one. The supplying layer of each component's
+    footprint is recorded on its :class:`Provenance`."""
     if policy is None:
         policy = DefaultCapabilityPolicy()
     diags = _Diagnostics()
@@ -2283,11 +2302,25 @@ def compile_board(
     # ordinal-id bridge, v2 requires persisted minted ids (item 019f802ca3af Round C).
     version = board.get("version")
 
-    # Load the sha-verified lock ONCE; an unreadable/malformed lock is fatal —
-    # provenance and footprint resolution both depend on it (review 621 MF4).
+    # MATERIALIZE the caller's layer configuration ONCE (Codex 1160 P2): the
+    # chain load below and the profile resolution later both walk it, and a
+    # generator consumed by the first walk would hand the second an EMPTY
+    # config — footprints from the user layer, profile silently from the seed,
+    # violating the same-chain ruling with mutually inconsistent provenance.
+    if library_layers is not None:
+        library_layers = tuple(library_layers)
+
+    # Load the sha-verified lock of every LAYER ONCE; an unreadable/malformed
+    # lock is fatal — provenance and footprint resolution both depend on it
+    # (review 621 MF4), and a layer whose lock will not load must not be quietly
+    # demoted to "absent" (that is the anti-shadowing rule one level up: a
+    # broken override must refuse the board, not fall through to the seed).
+    # The DEFAULT chain is the seed layer alone, so ``chain[0].lock`` here IS
+    # the ``lock`` this function loaded before layering existed (S9).
     try:
-        lock = load_lockfile(lockfile)
-        if not isinstance(lock, dict):
+        chain = load_library_chain(library_layers, library_root=library_root,
+                                   lockfile=lockfile)
+        if any(not isinstance(loaded.lock, dict) for loaded in chain):
             raise ValueError("lockfile is not a mapping")
     except Exception as exc:  # noqa: BLE001 — surfaced as a structured error, not a crash
         diags.error("lock_unreadable", f"footprint lock could not be loaded: {exc}", _board_ref())
@@ -2347,7 +2380,8 @@ def compile_board(
     two_layer = _require_two_layer(board, diags)
     outline = _build_outline(board, board_id, version, diags)
     layer_stack = _build_layer_stack() if two_layer else None
-    built_rules = _build_design_rules(board, board_id, requested_outputs, profile_root, diags)
+    built_rules = _build_design_rules(board, board_id, requested_outputs, profile_root,
+                                     library_layers, diags)
     design_rules, class_id_by_net = built_rules if built_rules is not None else (None, {})
 
     net_id_by_name, _net_index, pin_net, net_descriptors = _build_nets_index(board, board_id, diags)
@@ -2401,7 +2435,12 @@ def compile_board(
         if side is None:
             continue
 
-        entry = lock.get(fp_ref)
+        # The entry is read from the layer that WOULD supply this ref (first in
+        # the chain whose lock contains it), so a malformed entry is judged on
+        # the same layer resolution will use — never the seed's entry beside an
+        # override's file.
+        supplier = lookup_footprint_layer(fp_ref, chain)
+        entry = supplier.lock.get(fp_ref) if supplier is not None else None
         if entry is not None and (not isinstance(entry, dict)
                                   or not isinstance(entry.get("path"), str)
                                   or not isinstance(entry.get("sha256"), str)):
@@ -2409,16 +2448,22 @@ def compile_board(
                         f"component {ref!r}: lock entry for {fp_ref!r} is malformed", comp_ref)
             continue
         try:
-            parsed = resolve_footprint(fp_ref, library_root=library_root, lock=lock)
+            supplied = resolve_footprint_layered(fp_ref, chain=chain)
         except FootprintLookupError as exc:
             diags.error("footprint_unresolved", f"component {ref!r}: {exc}", comp_ref)
             continue
+        parsed = supplied.parsed
 
         entry = entry or {}
         provenance = Provenance(
             source_id=fp_ref,
             sha256=entry.get("sha256"),
             license=entry.get("license"),
+            # WHICH LAYER the bytes came from (S9). Recorded for every compile,
+            # including the default seed-only one, because "the seed supplied
+            # it" is a fact worth stating rather than an absence to infer — and
+            # it costs nothing: Provenance is outside every digest.
+            library_layer=supplied.layer,
         )
         definition = FootprintDefinition.from_kicad_parsed(parsed, provenance=provenance)
         clean = _adjudicate_footprint(definition, fp_ref, policy, requested_outputs, board, diags)
@@ -2479,7 +2524,17 @@ def compile_board(
 
     try:
         source_digest = content_id(board)
-        library_lock_ref = content_id(lock)
+        # THE LIBRARY THIS BOARD WAS COMPILED AGAINST. A default (seed-only)
+        # chain digests the seed lock ALONE — the identical value, over the
+        # identical object, that this line produced before layering — so no
+        # existing board's provenance moves. A CONFIGURED chain digests every
+        # layer's lock keyed by layer name, because "which library" is then a
+        # different question with a different answer, and a provenance that
+        # digested only the seed would claim a board was built from the shipped
+        # library when an override actually supplied its parts.
+        library_lock_ref = content_id(
+            chain[0].lock if len(chain) == 1 and chain[0].layer.name == SEED_LAYER
+            else {loaded.layer.name: loaded.lock for loaded in chain})
     except CanonicalizationError as exc:
         # e.g. an out-of-I-JSON-range integer inside an opaque annotation blob:
         # a digest is a hard requirement, so fail closed rather than raise.
@@ -2566,19 +2621,27 @@ def compile_board(
     return ResolutionSuccess(board=resolved, diagnostics=diags.tuple())
 
 
-def _footprint_pad_map(fp_ref, *, library_root, lock) -> dict[str, PadDefinition]:
+def _footprint_pad_map(fp_ref, *, chain=None, library_root=None,
+                       lock=None) -> dict[str, PadDefinition]:
     """Resolve a component's footprint to a ``{pad_number: PadDefinition}`` map via
     the SAME footprint-resolution path the compile fold classifies against
     (``resolve_footprint`` → :class:`FootprintDefinition`), so normalize correlates
-    each pin to exactly the pad the compiler would.  Best-effort: a missing/invalid
+    each pin to exactly the pad the compiler would.  That sameness now includes the
+    LAYER CHAIN (S9): normalize classifies against the pad an override supplies, not
+    the seed pad it shadows.  Best-effort: a missing/invalid
     ref or an unresolvable footprint yields an empty map, which makes any inline pin
     on that component AMBIGUOUS (fail-closed), never silently migrated.  Marker
     adjudication is intentionally skipped — it only strips feature markers and never
-    alters pad drill/size geometry, which is all the classification reads."""
+    alters pad drill/size geometry, which is all the classification reads.
+
+    A loaded ``chain`` is what ``normalize_board`` passes; ``library_root``/``lock``
+    are the pre-S9 single-seed-layer form, kept working (and kept meaning exactly
+    what they meant) so an existing caller needs no edit."""
     if not isinstance(fp_ref, str) or not fp_ref:
         return {}
     try:
-        parsed = resolve_footprint(fp_ref, library_root=library_root, lock=lock)
+        parsed = resolve_footprint_layered(fp_ref, chain=chain, library_root=library_root,
+                                           lock=lock).parsed
     except (FootprintLookupError, KeyError, TypeError, ValueError, OSError):
         # Unresolvable OR a malformed lock entry (missing path/sha, wrong type) →
         # no pads. Any inline pin then classifies AMBIGUOUS (fail-closed), never
@@ -2596,6 +2659,7 @@ def normalize_board(
     *,
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
+    library_layers: Union[Iterable, None] = None,
 ) -> tuple[Union[dict, None], tuple[Diagnostic, ...]]:
     """Rewrite a canonical SOURCE board to its normalized v2 shape — the "sync-back"
     the compile fold never performs (SB4).  PURE: returns ``(normalized_board,
@@ -2635,9 +2699,17 @@ def normalize_board(
         diags.error("invalid_board", "board must be a mapping", _board_ref())
         return None, diags.tuple()
 
+    # The SAME layer chain compile_board resolves through (``library_layers``,
+    # S9) — normalize's whole contract is that a board it accepts is a board
+    # compile accepts, which it cannot be if the two read different libraries.
+    # Materialized once for the same generator-safety reason compile_board
+    # does it (Codex 1160 P2).
+    if library_layers is not None:
+        library_layers = tuple(library_layers)
     try:
-        lock = load_lockfile(lockfile)
-        if not isinstance(lock, dict):
+        chain = load_library_chain(library_layers, library_root=library_root,
+                                   lockfile=lockfile)
+        if any(not isinstance(loaded.lock, dict) for loaded in chain):
             raise ValueError("lockfile is not a mapping")
     except Exception as exc:  # noqa: BLE001 — structured error, not a crash
         diags.error("lock_unreadable", f"footprint lock could not be loaded: {exc}", _board_ref())
@@ -2660,8 +2732,7 @@ def normalize_board(
         if not isinstance(pins, list):
             continue
         ref = comp.get("ref") if isinstance(comp.get("ref"), str) else ""
-        pad_by_number = _footprint_pad_map(comp.get("footprint"),
-                                           library_root=library_root, lock=lock)
+        pad_by_number = _footprint_pad_map(comp.get("footprint"), chain=chain)
         for pin in pins:
             if not isinstance(pin, dict):
                 continue

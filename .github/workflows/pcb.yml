@@ -234,6 +234,25 @@ jobs:
       - name: Set up Go + Python + worker
         uses: ./.github/actions/pcb-setup
 
+      # Epoch LIB1 station S5/B6: the marketplace release NOTICE gate.
+      # pcb/scripts/gen_notice.py --check reads pcb/library/footprints.lock.json
+      # (the acquisition lock, same authority the census test
+      # test_library_lock.py reads) and refuses (exit 1, naming every
+      # offending ref) if any entry's source_kind/license/source_ref is empty,
+      # its source_kind is outside LOCK_SOURCE_KINDS, or its license contains
+      # "UNKNOWN" — a strictly narrower dev census allows a staged UNKNOWN
+      # license so it does not block unrelated PRs; this is the gate that
+      # stops such an entry from ever reaching a release. --check also
+      # refuses on drift between the committed pcb/NOTICE.md and what the
+      # generator produces from the current lock, so an updated lock with no
+      # regenerated NOTICE fails here rather than shipping a stale file.
+      # Placed here (not in `test`) because fab-gate is this repo's named
+      # release-readiness job — see the job header above — and this check
+      # needs no worktree/compile machinery, only the worker's import path
+      # the setup action above already established.
+      - name: NOTICE release gate (license/attribution inventory drift check)
+        run: python3 pcb/scripts/gen_notice.py --check
+
       # FIRST, and deliberately before any real board: prove the gate can
       # FAIL. --self-test runs one honest compile, asserts the minimum-manifest
       # check passes, then deletes a required Gerber and asserts the SAME check

@@ -24,9 +24,9 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from . import (assembly_advisory, assembly_outputs, board_model, compile_board,
-               drc, footprints, gerber, ir_candidates, ir_connectivity, kicad,
-               libcheck, resolve)
+from . import (assembly_advisory, assembly_outputs, bless, board_model,
+               compile_board, drc, footprints, gerber, ir_candidates,
+               ir_connectivity, kicad, libcheck, resolve)
 from .drc_geometric import geometric_drc_from_resolution, geometric_indeterminate
 
 WORKER_VERSION = "0.2.0"  # tracks plugin manifest version
@@ -2764,6 +2764,271 @@ def _draft_check(params: dict) -> dict:
     return _reply(findings_out, per_candidate)
 
 
+# ---------------------------------------------------------------------------
+# Rendered bless (S3/B2, docket 019ff5687b99) — the library trust boundary.
+# ---------------------------------------------------------------------------
+#
+# Three methods over `pcb_worker.bless`: STAGE a footprint into the WIP layer,
+# REPORT it (fact table + SVG), and BLESS it. The gate itself lives in the
+# library module (an unblessed entry is absent from the resolving chain's lock
+# view); these handlers only carry arguments across the bridge and convert
+# refusals into the structured envelope every sibling method already uses.
+#
+# WHERE "NOW" COMES FROM: `bless.py` never reads the clock, so its records are a
+# pure function of their arguments and its tests assert exact bytes. This layer
+# is the boundary where wall-clock time enters — `blessed_at`/`retrieved_at` are
+# taken from the caller when supplied and defaulted to UTC now when not, so an
+# agent-facing tool stays ergonomic without making the library nondeterministic.
+
+_BLESS_SVG_MAX_BYTES = 200_000
+
+
+def _utc_now_iso() -> str:
+    """UTC 'now' as ``YYYY-MM-DDTHH:MM:SSZ``. The ONE clock read on this
+    surface (see the section note above)."""
+    import datetime
+    return (datetime.datetime.now(datetime.timezone.utc)
+            .replace(microsecond=0).isoformat().replace("+00:00", "Z"))
+
+
+def _bless_error(exc: Exception) -> dict:
+    """Structured refusal envelope for the bless surface.
+
+    The two exception types are kept DISTINCT rather than collapsed to one
+    'error' kind because they mean opposite things to the caller: 'bless' is a
+    policy/provenance refusal the caller can fix by supplying better arguments,
+    while 'footprint' is a lookup/integrity failure of the library itself."""
+    kind = "bless" if isinstance(exc, bless.BlessError) else "footprint"
+    return {"ok": False, "error": {"kind": kind, "message": str(exc)}}
+
+
+def _wip_root(params: dict, *, required: bool):
+    """The WIP library root the Go side supplies (``<plugin data dir>/library_wip``).
+
+    REFUSED rather than defaulted when required: the worker has no business
+    inventing a data directory — it does not know the host's plugin data dir,
+    and guessing one would stage parts into a location nothing else reads."""
+    root = (params or {}).get("wip_root")
+    if isinstance(root, str) and root.strip():
+        return root
+    if required:
+        raise bless.BlessError(
+            "wip_root is required: it names the staging library root "
+            "(<plugin data dir>/library_wip) and is supplied by the plugin "
+            "host, which is the only party that knows the data directory")
+    return None
+
+
+def _report_summary(report: dict) -> dict:
+    """The report WITHOUT its svg body — the shape stage/bless replies carry.
+
+    ``artifact_sha256`` is always present: it is what a bless record pins (and
+    what a human-tier bless must quote back as expected_artifact_sha256), so a
+    caller can verify the artifact it approved without the tool ever having to
+    ship the whole picture back through the bridge."""
+    return {"facts": report["facts"], "not_rendered": report["not_rendered"],
+            "svg_sha256": report["svg_sha256"],
+            "artifact_sha256": report["artifact_sha256"]}
+
+
+def _footprint_stage(params: dict) -> dict:
+    """Stage a .kicad_mod into the WIP library layer, sha-pinned and unblessed.
+
+    params: {ref|name, kicad_mod_text, source_kind, source_ref, license,
+             wip_root, retrieved_at?, provenance_note?}
+    Reply:  {ok: True, result: {ref, entry, report:{facts, not_rendered,
+             svg_sha256}}}
+
+    The staged entry is deliberately born with ``bless: null`` and therefore
+    CANNOT supply copper yet (pcb_worker.bless module docstring). A report is
+    generated here so the same call that stages a part also proves it renders —
+    a part that cannot be rendered can never be blessed, and finding that out at
+    staging time is strictly better than at review time.
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("name")
+    try:
+        wip_root = _wip_root(params, required=True)
+        entry = bless.stage_footprint(
+            ref,
+            params.get("kicad_mod_text"),
+            wip_root,
+            source_kind=params.get("source_kind"),
+            source_ref=params.get("source_ref"),
+            license=params.get("license"),
+            retrieved_at=params.get("retrieved_at") or _utc_now_iso(),
+            provenance_note=params.get("provenance_note"),
+        )
+        report = bless.footprint_report(ref, wip_root=wip_root)
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    return {"ok": True, "result": {"ref": ref, "entry": entry,
+                                   "report": _report_summary(report)}}
+
+
+def _footprint_report(params: dict) -> dict:
+    """Fact table + SVG render for one footprint ref — the bless artifacts.
+
+    params: {ref, wip_root?, max_svg_bytes?}
+    Reply:  {ok: True, result: {ref, facts, not_rendered, svg, svg_sha256,
+             svg_bytes, svg_truncated}}
+
+    ``wip_root`` puts the RAW WIP layer on top of the chain, which is the ONE
+    path in this plugin that can see unblessed content — a part nobody can look
+    at could never be blessed. ``svg`` may be truncated for transport when it is
+    large; ``svg_sha256`` and ``svg_bytes`` always describe the WHOLE artifact,
+    and ``svg_truncated`` says so explicitly rather than letting a caller hash
+    a fragment and think it matches a bless record.
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("name")
+    try:
+        report = bless.footprint_report(
+            ref, wip_root=_wip_root(params, required=False))
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    svg = report["svg"]
+    raw = svg.encode("utf-8")
+    limit = params.get("max_svg_bytes")
+    limit = int(limit) if isinstance(limit, (int, float)) and limit > 0 \
+        else _BLESS_SVG_MAX_BYTES
+    truncated = len(raw) > limit
+    if truncated:
+        svg = raw[:limit].decode("utf-8", errors="ignore")
+    return {"ok": True, "result": {
+        "ref": ref,
+        "facts": report["facts"],
+        "not_rendered": report["not_rendered"],
+        "svg": svg,
+        "svg_sha256": report["svg_sha256"],
+        "artifact_sha256": report["artifact_sha256"],
+        "svg_bytes": len(raw),
+        "svg_truncated": truncated,
+    }}
+
+
+def _footprint_bless(params: dict) -> dict:
+    """Record a bless verdict against a staged footprint.
+
+    params: {ref, wip_root, verdict?, who?, blessed_at?, expected_artifact_sha256?}
+    Reply:  {ok: True, result: {ref, entry, report:{...}}}
+
+    TIER ROUTING, and why it is decided by the ABSENCE of a verdict rather than
+    by a mode flag: an ``official_kicad`` entry auto-blesses on provenance, so
+    passing a verdict for one is refused (bless_footprint) with a message saying
+    exactly that; every other source kind requires an explicit verdict, so
+    omitting one is refused (auto_bless_footprint) naming the tier it needs. The
+    caller therefore cannot get a bless recorded under the wrong tier by
+    guessing at arguments — whichever way it guesses wrong, it is told which.
+
+    A HUMAN verdict additionally requires ``expected_artifact_sha256`` — the
+    ``artifact_sha256`` of the report the reviewer actually looked at; a
+    mismatch against the current staged content refuses (Codex 1160 P1: an
+    approval must not silently transfer to an artifact nobody reviewed).
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("name")
+    verdict = params.get("verdict")
+    who = params.get("who")
+    blessed_at = params.get("blessed_at") or _utc_now_iso()
+    expected = params.get("expected_artifact_sha256")
+    try:
+        wip_root = _wip_root(params, required=True)
+        if verdict is None or (isinstance(verdict, str) and not verdict.strip()):
+            entry = bless.auto_bless_footprint(ref, wip_root, blessed_at,
+                                               who=who or None)
+        else:
+            entry = bless.bless_footprint(ref, wip_root, verdict, who,
+                                          blessed_at, expected)
+        report = bless.footprint_report(ref, wip_root=wip_root)
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    return {"ok": True, "result": {"ref": ref, "entry": entry,
+                                   "report": _report_summary(report)}}
+
+
+#: The provenance class the acquisition path stages under. FIXED HERE, never
+#: taken from params: this method exists to store bytes the Go side fetched from
+#: the pinned OFFICIAL KiCad release, and official_kicad is the one source_kind
+#: that auto-blesses. A caller-supplied source_kind would let any text be posted
+#: to this method and auto-trusted, which is exactly the hole the tiering table
+#: exists to keep shut.
+_ACQUIRE_SOURCE_KIND = "official_kicad"
+
+
+def _footprint_acquire_store(params: dict) -> dict:
+    """Store an ACQUIRED official footprint: cross-check, stage, auto-bless.
+
+    params: {ref, kicad_mod_text, source_ref, fetched_sha256, license, wip_root,
+             retrieved_at?, provenance_note?, blessed_at?}
+    Reply:  {ok: True, result: {ref, layer, sha256, source_ref, license, bless,
+             entry, report_summary:{facts, not_rendered, svg_sha256}}}
+
+    ONE method rather than two tool calls (stage then bless) because the pair is
+    not independently useful on this path: the Go fetcher has already established
+    the only thing the auto tier rests on -- that these bytes came from the
+    pinned official release -- so a caller left holding a staged-but-unblessed
+    entry between two calls would have nothing to decide and no way to finish if
+    the second call never came. Fusing them also means the auto-bless argument
+    (``source_kind``) is decided by THIS method, not passed in.
+
+    It reuses the B2 machinery verbatim (``stage_footprint`` parse-validates and
+    sha-pins; ``auto_bless_footprint`` regenerates the render and records the
+    auto-tier verdict) rather than writing a second staging path -- a second path
+    is a second place the bless gate can be forgotten.
+
+    ORDER, and what each step guarantees:
+
+    1. cross-check the fetched sha against the arrived text -- BEFORE any write,
+       so a corrupted transfer stages nothing;
+    2. stage (which itself validates the text before writing anything);
+    3. re-check the sha of the bytes now ON DISK. Step 1 compared wire to
+       message; this compares message to file. It is expected to be tautological
+       -- and it is cheap, it is the only check that would catch an encoding
+       fault in the write path, and its failure mode is safe: the entry exists
+       but stays UNBLESSED, so it cannot supply copper;
+    4. auto-bless, which is what makes the ref resolvable.
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("name")
+    fetched_sha256 = params.get("fetched_sha256")
+    try:
+        wip_root = _wip_root(params, required=True)
+        bless.cross_check_fetched_sha256(ref, params.get("kicad_mod_text"),
+                                         fetched_sha256)
+        entry = bless.stage_footprint(
+            ref,
+            params.get("kicad_mod_text"),
+            wip_root,
+            source_kind=_ACQUIRE_SOURCE_KIND,
+            source_ref=params.get("source_ref"),
+            license=params.get("license"),
+            retrieved_at=params.get("retrieved_at") or _utc_now_iso(),
+            provenance_note=params.get("provenance_note"),
+        )
+        staged_sha = str(entry.get("sha256") or "").lower()
+        if staged_sha != str(fetched_sha256).strip().lower():
+            raise bless.BlessError(
+                f"{ref}: the staged file's sha256 ({staged_sha}) does not match "
+                f"the fetched sha256 ({fetched_sha256}); the entry is left "
+                f"UNBLESSED and therefore unresolvable")
+        entry = bless.auto_bless_footprint(
+            ref, wip_root, params.get("blessed_at") or _utc_now_iso())
+        report = bless.footprint_report(ref, wip_root=wip_root)
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    return {"ok": True, "result": {
+        "ref": ref,
+        "layer": entry.get("layer"),
+        "sha256": entry.get("sha256"),
+        "source_ref": entry.get("source_ref"),
+        "license": entry.get("license"),
+        "bless": entry.get("bless"),
+        "entry": entry,
+        "report_summary": _report_summary(report),
+    }}
+
+
 def _init() -> dict:
     return {"ok": True, "result": {
         "worker_version": WORKER_VERSION,
@@ -2807,6 +3072,15 @@ _HANDLERS = {
     "mask_view": lambda req: _mask_view(req.get("params") or {}),
     "promote_check": lambda req: _promote_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
+    # Rendered-bless surface (S3/B2) — stage into the WIP layer, render the
+    # bless artifacts, record the verdict. See the section above _init().
+    "footprint_stage": lambda req: _footprint_stage(req.get("params") or {}),
+    "footprint_report": lambda req: _footprint_report(req.get("params") or {}),
+    "footprint_bless": lambda req: _footprint_bless(req.get("params") or {}),
+    # Acquisition (S4/B3) — the Go fetcher's landing point: cross-check the
+    # sha the fetcher reported, then stage + auto-bless through the same B2
+    # machinery above, in one atomic call. The worker NEVER fetches.
+    "footprint_acquire_store": lambda req: _footprint_acquire_store(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "assembly_bom": lambda req: _assembly_bom(req.get("params") or {}),

@@ -23,7 +23,9 @@ Design / reuse notes
 Public API
 ----------
 * ``parse_kicad_mod(path_or_text) -> dict``
-* ``resolve_footprint(ref, ...) -> dict``  (seed-library lookup, sha-verified)
+* ``resolve_footprint(ref, ...) -> dict``  (library lookup, sha-verified)
+* ``resolve_footprint_layered(ref, ...) -> ResolvedFootprint``  (same lookup,
+  plus the SUPPLYING LAYER's name/lock entry/path — see "Layer chain" below)
 """
 
 from __future__ import annotations
@@ -31,8 +33,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Iterable, Union
 
 # Primitive geometry is layer-agnostic: once line/circle/arc/poly/rect is
 # understood, dropping it merely because it is on the back, fab, courtyard, or
@@ -727,14 +730,394 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_lockfile(lockfile: Union[str, Path, None] = None) -> dict:
-    """Load the footprint lockfile: ``{ref: {path, sha256}}``."""
+LOCK_SCHEMA_VERSION = 2
+
+# The provenance vocabulary of acquisition-lock v2 (DCR 019ff567f66b B0).
+# ``source_kind`` on every entry must be one of these; the census test walks
+# the shipped lock and refuses an entry outside the set.
+LOCK_SOURCE_KINDS = frozenset(
+    ("official_kicad", "vendor_export", "git", "url", "hand_authored", "generated")
+)
+
+
+def load_lock_document(lockfile: Union[str, Path, None] = None) -> dict:
+    """Load the footprint lock DOCUMENT: ``{schema_version, entries}``.
+
+    v2 is ``{"schema_version": 2, "entries": {ref: entry}}`` where each entry
+    carries the v1 pin fields (path/sha256/size_bytes) plus provenance
+    (source_kind/source_ref/license/retrieved_at/layer, nullable slots for
+    original_source_path/converter_version/model3d_ref/assembly/bless).
+    A v1 file (flat ``{ref: {path, sha256, ...}}``) is accepted READ-ONLY and
+    normalized to the document shape with ``schema_version: 1`` so callers can
+    tell what they got. Any other shape is refused — an unreadable lock must
+    never resolve footprints (fail-closed).
+    """
     lf = Path(lockfile) if lockfile else DEFAULT_LOCKFILE
-    return json.loads(lf.read_text(encoding="utf-8"))
+    doc = json.loads(lf.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise FootprintLookupError(f"lockfile {lf} is not a JSON object")
+    if "schema_version" in doc:
+        ver = doc.get("schema_version")
+        entries = doc.get("entries")
+        if ver != LOCK_SCHEMA_VERSION or not isinstance(entries, dict):
+            raise FootprintLookupError(
+                f"lockfile {lf}: unsupported schema_version {ver!r} "
+                f"(this reader supports v1 flat and v{LOCK_SCHEMA_VERSION})"
+            )
+        return doc
+    return {"schema_version": 1, "entries": doc}
+
+
+def load_lockfile(lockfile: Union[str, Path, None] = None) -> dict:
+    """Load the footprint lockfile ENTRIES: ``{ref: {path, sha256, ...}}``.
+
+    The shape every existing caller (resolve_footprint, the K2 compiler's
+    snapshot, import-time test parametrization) already consumes; v2 entries
+    simply carry extra provenance fields those callers ignore.
+    """
+    return load_lock_document(lockfile)["entries"]
 
 
 class FootprintLookupError(Exception):
     """Raised when a ref is unknown or its file fails sha verification."""
+
+
+# ---------------------------------------------------------------------------
+# Layer chain (S9, DCR 019ff5685a6a B1).
+# ---------------------------------------------------------------------------
+#
+# A ref no longer resolves from exactly one root + one lock. It resolves from an
+# ORDERED CHAIN of layers -- shipped ``seed``, the user's own parts, the open
+# project's, and a ``wip`` scratch layer -- walked HIGHEST-PRECEDENCE-FIRST. The
+# FIRST layer whose LOCK CONTAINS the ref supplies it; layers below are not
+# consulted at all.
+#
+# TWO PROPERTIES CARRY THE WHOLE DESIGN, and both are load-bearing:
+#
+# * ANTI-SHADOWING. Once a layer is chosen, a defect in ITS file (missing, or
+#   sha-mismatched against ITS lock) is a HARD :class:`FootprintLookupError`. It
+#   does NOT fall through to the next layer. A user layer that overrides
+#   ``Package_DIP:DIP-6`` and then rots on disk must refuse the board, because
+#   the alternative -- silently fabricating the SEED part under the name of the
+#   override the author actually asked for -- is the exact failure a pinned
+#   library exists to prevent, and it is invisible in every output.
+# * THE SEED IS THE BASE AND CANNOT BE DROPPED. :func:`normalize_library_layers`
+#   appends the shipped seed layer when a caller's chain omits it, so an override
+#   layer can only SHADOW a shipped part, never delete one.
+#
+# The default chain is the seed layer ALONE, which is byte-for-byte the single
+# root + single lock this module resolved from before layering existed -- every
+# pre-S9 call site keeps its exact behaviour, error strings included, without an
+# edit (see :func:`resolve_footprint`).
+
+SEED_LAYER = "seed"
+USER_LAYER = "user"
+PROJECT_LAYER = "project"
+WIP_LAYER = "wip"
+
+# HIGHEST precedence first -- the order lookup walks, and the order a chain is
+# sorted into regardless of how a caller listed it. WIP is a scratch layer an
+# author is actively editing, so it outranks the project; the project outranks
+# the user's personal library; the shipped seed is always last, because every
+# other layer exists precisely to override it.
+LAYER_PRECEDENCE: tuple[str, ...] = (WIP_LAYER, PROJECT_LAYER, USER_LAYER, SEED_LAYER)
+
+
+@dataclass(frozen=True)
+class LibraryLayer:
+    """ONE library layer: a name drawn from :data:`LAYER_PRECEDENCE`, the
+    footprint ``root`` its lock's ``path`` values are relative to, and that
+    layer's OWN ``lockfile``. A layer is a complete, independently-pinned
+    library -- never a partial overlay on another layer's lock.
+
+    ``profile_root`` is where this layer's manufacturer profiles live. ``None``
+    means the SIBLING convention the shipped library already uses
+    (``<root>/../profiles``, i.e. ``pcb/library/profiles`` for the seed), so a
+    layer laid out like the shipped one states only its footprint root; an
+    explicit value is for layers that are not.
+
+    Paths are coerced to :class:`~pathlib.Path` so the Go bridge (a later
+    station) can hand this string paths without a conversion step of its own.
+    """
+
+    name: str
+    root: Path
+    lockfile: Path
+    profile_root: Union[Path, None] = None
+
+    def __post_init__(self) -> None:
+        if self.name not in LAYER_PRECEDENCE:
+            raise FootprintLookupError(
+                f"unknown library layer name {self.name!r}; "
+                f"expected one of {'/'.join(LAYER_PRECEDENCE)}")
+        # A layer with no root or no lock of its own is not a layer -- it would
+        # either resolve nothing or borrow another layer's pins. Refuse it by
+        # NAME here rather than as a TypeError from Path() three frames later.
+        if self.root is None or self.lockfile is None:
+            raise FootprintLookupError(
+                f"library layer {self.name!r} must declare both a footprint root "
+                f"and its own lockfile; got root={self.root!r} lockfile={self.lockfile!r}")
+        object.__setattr__(self, "root", Path(self.root))
+        object.__setattr__(self, "lockfile", Path(self.lockfile))
+        if self.profile_root is not None:
+            object.__setattr__(self, "profile_root", Path(self.profile_root))
+
+    @property
+    def profiles(self) -> Path:
+        """This layer's manufacturer-profile directory (see ``profile_root``)."""
+        if self.profile_root is not None:
+            return self.profile_root
+        return self.root.parent / "profiles"
+
+
+@dataclass(frozen=True)
+class LoadedLibraryLayer:
+    """A layer plus its lock ENTRIES, loaded ONCE. Holding the snapshot is what
+    lets a whole compile resolve every ref against ONE reading of each layer's
+    lock -- the same two-authority/TOCTOU argument ``resolve_footprint``'s
+    ``lock`` parameter already made (K2 review 623 R7), now per layer.
+
+    ``wip_view_authorized`` is the WIP capability bit (Codex 1160 P1): a WIP
+    layer may supply footprints ONLY when this is True, and exactly two
+    constructors set it -- ``bless.blessed_wip_layer`` (the lock view filtered
+    to BLESSED entries) and ``bless.footprint_report``'s raw view (reporting is
+    the one authorized raw consumer, because a part nobody can render can never
+    be blessed). A WIP layer built any other way -- including one smuggled in as
+    data through ``normalize_library_layers``, which refuses the name outright
+    -- is refused at resolution, so an unblessed part cannot reach a compile by
+    construction."""
+
+    layer: LibraryLayer
+    lock: dict
+    wip_view_authorized: bool = False
+
+
+@dataclass(frozen=True)
+class ResolvedFootprint:
+    """A resolved footprint AND the provenance of where it came from.
+
+    ``parsed`` is EXACTLY what :func:`parse_kicad_mod` returns -- the layer name
+    is carried HERE, beside it, and is never injected into the parsed dict. That
+    is deliberate: the parsed dict feeds ``FootprintDefinition.from_kicad_parsed``
+    (whose ``content_id`` payload would then have to grow a field) and
+    ``resolve._pads_from_parsed`` (whose output lands in board dicts the emitters
+    serialize). A sibling field cannot reach either, so recording the supplying
+    layer cannot move one fabricated byte.
+    """
+
+    ref: str
+    layer: str
+    entry: dict
+    path: Path
+    parsed: dict
+
+
+def seed_layer(library_root: Union[str, Path, None] = None,
+               lockfile: Union[str, Path, None] = None) -> LibraryLayer:
+    """The shipped seed layer, with the SAME default-or-override semantics
+    ``resolve_footprint``'s ``library_root``/``lockfile`` arguments have always
+    had (falsy -> the shipped default)."""
+    return LibraryLayer(
+        name=SEED_LAYER,
+        root=Path(library_root) if library_root else DEFAULT_LIBRARY_ROOT,
+        lockfile=Path(lockfile) if lockfile else DEFAULT_LOCKFILE,
+    )
+
+
+def normalize_library_layers(
+    layers: Union[Iterable, None] = None,
+    *,
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+) -> tuple[LibraryLayer, ...]:
+    """Normalize a caller's layer configuration into the ORDERED chain lookup
+    walks: highest precedence first, seed last, seed always present.
+
+    Accepts :class:`LibraryLayer` instances or plain mappings
+    (``{"name", "root", "lockfile", "profile_root"}``) -- the mapping form is
+    what the Go side will hand across the bridge. ``None`` or an empty chain
+    yields the DEFAULT: the seed layer alone.
+
+    Two refusals, both fail-closed:
+
+    * a name outside :data:`LAYER_PRECEDENCE` (raised by ``LibraryLayer``);
+    * two layers claiming the SAME name -- their relative precedence would be
+      undefined, and guessing one would decide which library wins by accident.
+    """
+    normalized: list[LibraryLayer] = []
+    for item in (layers or ()):
+        if isinstance(item, LibraryLayer):
+            normalized.append(item)
+        elif isinstance(item, dict):
+            normalized.append(LibraryLayer(
+                name=item.get("name"),
+                root=item.get("root"),
+                lockfile=item.get("lockfile"),
+                profile_root=item.get("profile_root"),
+            ))
+        else:
+            raise FootprintLookupError(
+                f"library layer must be a LibraryLayer or a mapping; got {item!r}")
+
+    # THE WIP LAYER IS NOT CONFIGURATION (Codex 1160 P1). A wip layer carries
+    # unblessed staged content, and this function is the data-driven doorway
+    # every public resolution surface (compile_board, normalize_board,
+    # resolve_footprint) walks through -- accepting the name here would let a
+    # plain dict put unreviewed geometry on the fab path. The only WIP views a
+    # resolver may see are built by bless.blessed_wip_layer (filtered to
+    # blessed entries) and carry wip_view_authorized=True.
+    for layer in normalized:
+        if layer.name == WIP_LAYER:
+            raise FootprintLookupError(
+                "a 'wip' layer cannot be configured through layers: staged "
+                "content resolves only through bless.blessed_library_chain, "
+                "whose WIP lock view is filtered to BLESSED entries")
+
+    seen = [layer.name for layer in normalized]
+    duplicates = sorted({name for name in seen if seen.count(name) > 1})
+    if duplicates:
+        raise FootprintLookupError(
+            f"library layer name(s) {'/'.join(duplicates)} declared more than once; "
+            f"precedence between two layers of the same name is undefined")
+
+    # THE SEED IS THE BASE: a caller may list only the layers it adds, and it
+    # can never (even by mistake) remove the shipped library from the chain --
+    # an override layer shadows a seed part, it does not delete one.
+    if SEED_LAYER not in seen:
+        normalized.append(seed_layer(library_root, lockfile))
+
+    normalized.sort(key=lambda layer: LAYER_PRECEDENCE.index(layer.name))
+    return tuple(normalized)
+
+
+def load_library_chain(
+    layers: Union[Iterable, None] = None,
+    *,
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+) -> tuple[LoadedLibraryLayer, ...]:
+    """Normalize a layer configuration AND load each layer's lock exactly once.
+
+    An unreadable or unsupported lock on ANY layer raises (via
+    :func:`load_lock_document`) -- a chain that cannot state what a layer
+    contains must never resolve a footprint from it, and must not quietly demote
+    that layer to "absent" either, which would let a broken override fall
+    through to the seed exactly like the anti-shadowing rule forbids.
+    """
+    return tuple(
+        LoadedLibraryLayer(layer=layer, lock=load_lockfile(layer.lockfile))
+        for layer in normalize_library_layers(
+            layers, library_root=library_root, lockfile=lockfile)
+    )
+
+
+def lookup_footprint_layer(
+    ref: str, chain: Iterable[LoadedLibraryLayer],
+) -> Union[LoadedLibraryLayer, None]:
+    """The layer that SUPPLIES *ref*: the first in *chain* whose lock contains
+    it, or ``None``. Containment in the LOCK -- not existence on disk -- decides
+    the winner; what happens to a winner whose file is missing or corrupt is the
+    anti-shadowing rule, not a second round of lookup."""
+    for loaded in chain:
+        if ref in loaded.lock:
+            return loaded
+    return None
+
+
+def _layer_clause(layer_name: str) -> str:
+    """The ``(library layer …)`` suffix appended to a lookup failure raised
+    against a NON-seed layer. Empty for the seed so every message a
+    default-chain caller can produce is byte-identical to the pre-S9 text --
+    those strings reach compile diagnostics, and a default compile must not
+    change one character of its output because layering exists."""
+    if layer_name == SEED_LAYER:
+        return ""
+    return (f" (library layer {layer_name!r}; a layer that CLAIMS a ref supplies it, "
+            f"so a failure here is refused rather than served from a lower layer)")
+
+
+def resolve_footprint_layered(
+    ref: str,
+    *,
+    chain: Union[Iterable[LoadedLibraryLayer], None] = None,
+    layers: Union[Iterable, None] = None,
+    library_root: Union[str, Path, None] = None,
+    lockfile: Union[str, Path, None] = None,
+    lock: Union[dict, None] = None,
+) -> ResolvedFootprint:
+    """Resolve *ref* through the layer chain and report WHICH LAYER supplied it.
+
+    The one resolution path in this module: :func:`resolve_footprint` is a thin
+    projection of this function onto its parsed dict, so the two can never drift
+    into disagreeing about what a ref resolves to.
+
+    Chain selection, in order of precedence:
+
+    * ``chain``  -- an already-loaded chain (a compile loads it ONCE and passes
+      it for every component, so one reading of each lock governs the board);
+    * ``layers`` -- a configuration to normalize and load here;
+    * neither    -- the LEGACY single-seed-layer form built from
+      ``library_root``/``lockfile``/``lock``, byte-identical to the pre-S9
+      behaviour of every existing call site.
+
+    ``lock`` (a caller-held snapshot) belongs to that legacy single-layer form;
+    combining it with ``layers`` would leave it ambiguous WHICH layer's lock the
+    snapshot is, so that combination is a programmer error and raises.
+    """
+    if chain is None:
+        if lock is not None:
+            if layers is not None:
+                raise ValueError(
+                    "resolve_footprint: `lock` is a snapshot of the single seed layer; "
+                    "pass a loaded `chain` instead when resolving through `layers`")
+            chain = (LoadedLibraryLayer(seed_layer(library_root, lockfile), lock),)
+        else:
+            chain = load_library_chain(
+                layers, library_root=library_root, lockfile=lockfile)
+    chain = tuple(chain)
+
+    supplier = lookup_footprint_layer(ref, chain)
+    if supplier is None:
+        names = ", ".join(loaded.layer.name for loaded in chain)
+        where = (f"the {names} library lockfile" if len(chain) == 1
+                 else f"any of the {len(chain)} library layers ({names})")
+        raise FootprintLookupError(f"footprint ref {ref!r} is not in {where}")
+
+    # THE WINNER IS FINAL. Every failure below refuses the ref outright; none of
+    # them retries a lower layer (see the anti-shadowing note above).
+    layer = supplier.layer
+    # WIP capability check (Codex 1160 P1): even a pre-loaded chain= cannot
+    # serve a footprint from an unauthorized WIP view. normalize refuses the
+    # name for data-driven chains; this closes the hand-built-chain path too.
+    if layer.name == WIP_LAYER and not supplier.wip_view_authorized:
+        raise FootprintLookupError(
+            f"footprint ref {ref!r} would be supplied by an UNAUTHORIZED wip "
+            f"layer view; staged content resolves only through "
+            f"bless.blessed_library_chain (blessed entries) or is rendered "
+            f"through bless.footprint_report — never compiled raw")
+    entry = supplier.lock[ref]
+    # A layer that CLAIMS a ref with an unusable entry (null, a bare string, a
+    # missing/non-string path or sha) is refused BY NAME rather than crashing on
+    # the subscript below -- and, being the winner, is not retried lower down:
+    # a lock that cannot say what it pins pins nothing.
+    if (not isinstance(entry, dict) or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("sha256"), str)):
+        raise FootprintLookupError(
+            f"lock entry for {ref!r} is malformed (needs string 'path' and 'sha256'); "
+            f"got {entry!r}{_layer_clause(layer.name)}")
+    fp_path = layer.root / entry["path"]
+    if not fp_path.exists():
+        raise FootprintLookupError(
+            f"footprint file missing: {fp_path}{_layer_clause(layer.name)}")
+
+    actual = sha256_file(fp_path)
+    if actual != entry["sha256"]:
+        raise FootprintLookupError(
+            f"sha256 mismatch for {ref!r}: lock={entry['sha256']} disk={actual}"
+            f"{_layer_clause(layer.name)}")
+
+    return ResolvedFootprint(ref=ref, layer=layer.name, entry=entry, path=fp_path,
+                             parsed=parse_kicad_mod(fp_path))
 
 
 def resolve_footprint(
@@ -742,35 +1125,27 @@ def resolve_footprint(
     library_root: Union[str, Path, None] = None,
     lockfile: Union[str, Path, None] = None,
     lock: Union[dict, None] = None,
+    layers: Union[Iterable, None] = None,
 ) -> dict:
     """Resolve a footprint ``ref`` (``"LibNick:Name"``) to a parsed footprint.
 
-    Looks the ref up in the seed-library lockfile, verifies the on-disk file's
+    Looks the ref up in the library lockfile, verifies the on-disk file's
     sha256 against the pin, then parses it. No network access -- on-demand
     fetch of un-vendored footprints is a deferred item.
 
     A caller that already holds a validated lock snapshot (e.g. the K2 compiler,
     which loads it once) may pass it as ``lock`` to avoid a per-call reload and
     the two-authority/TOCTOU risk that creates (K2 review 623 R7).
+
+    ``layers`` (S9) configures the LAYER CHAIN described above; omitting it
+    resolves from the seed layer alone, exactly as this function always has --
+    the return value is the parsed dict and NOTHING about the supplying layer is
+    added to it. A caller that needs to know which layer supplied the footprint
+    calls :func:`resolve_footprint_layered` and reads ``.layer`` beside the same
+    parsed dict; that split is why layering cannot perturb any consumer of this
+    function (``resolve._pads_from_parsed``, ``FootprintDefinition``'s
+    ``content_id`` payload, the coincidence golden).
     """
-    root = Path(library_root) if library_root else DEFAULT_LIBRARY_ROOT
-    if lock is None:
-        lock = load_lockfile(lockfile)
-
-    entry = lock.get(ref)
-    if entry is None:
-        raise FootprintLookupError(
-            f"footprint ref {ref!r} is not in the seed library lockfile"
-        )
-
-    fp_path = root / entry["path"]
-    if not fp_path.exists():
-        raise FootprintLookupError(f"footprint file missing: {fp_path}")
-
-    actual = sha256_file(fp_path)
-    if actual != entry["sha256"]:
-        raise FootprintLookupError(
-            f"sha256 mismatch for {ref!r}: lock={entry['sha256']} disk={actual}"
-        )
-
-    return parse_kicad_mod(fp_path)
+    return resolve_footprint_layered(
+        ref, layers=layers, library_root=library_root, lockfile=lockfile, lock=lock,
+    ).parsed

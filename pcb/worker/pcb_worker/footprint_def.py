@@ -266,10 +266,25 @@ class Model3D:
 
 @dataclass(frozen=True)
 class Provenance:
+    """Where a footprint's bytes came from: its lock ref, the sha the lock
+    pinned, the declared license, and when it was retrieved.
+
+    ``library_layer`` (S9) names the LIBRARY LAYER that supplied it -- ``"seed"``
+    for the shipped library, ``"user"``/``"project"``/``"wip"`` for an override
+    (``footprints.LAYER_PRECEDENCE``). ``None`` means the producer did not state
+    one, which is what every pre-S9 construction site yields, so the field is
+    additive in the strict sense: nothing that did not opt in changes.
+
+    Provenance is NOT part of any digest. ``FootprintDefinition.content_id``
+    hashes name/pads/graphics/model3d/unsupported/reference_text and pointedly
+    not this object, so recording the supplying layer cannot move a footprint's
+    identity, the interning it drives, or a fabricated byte."""
+
     source_id: str | None = None
     sha256: str | None = None
     license: str | None = None
     retrieved_at: str | None = None
+    library_layer: str | None = None
 
 
 def _source_ref(kind: EntityKind, entity_id: str, detail: str | None = None) -> SourceRef:

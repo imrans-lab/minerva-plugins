@@ -48,9 +48,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
+from typing import Iterable, Union
 
 from .canonical_id import CanonicalizationError, content_id
+from .footprints import SEED_LAYER, normalize_library_layers
 from .resolved_board import ManufacturingConstraints, RuleProfileRef
 
 # Repo layout: this file is pcb/worker/pcb_worker/manufacturer_profile.py, so
@@ -147,10 +148,17 @@ class RuleProfileError(ValueError):
 @dataclass(frozen=True)
 class LoadedRuleProfile:
     """A fully-resolved, pinned board-house profile: the digest-pinned
-    identity (``ref``) plus the complete, validated floor (``floor``)."""
+    identity (``ref``) plus the complete, validated floor (``floor``).
+
+    ``layer`` (S9) records WHICH library layer supplied the file -- provenance
+    only. It is deliberately NOT part of ``ref``: the digest pins the profile's
+    RULES, and the same floor authored in a user layer and in the seed is the
+    same floor, so where the bytes came from must not change a board's pinned
+    profile identity (and therefore cannot change one fabricated byte)."""
 
     ref: RuleProfileRef
     floor: ManufacturingConstraints
+    layer: str = SEED_LAYER
 
 
 def _profile_path(profile_id: str, root: Path) -> Path:
@@ -160,15 +168,65 @@ def _profile_path(profile_id: str, root: Path) -> Path:
     return root / f"{profile_id}.json"
 
 
+def _profile_roots(
+    layers: Union[Iterable, None], library_root: Union[str, Path, None],
+) -> tuple[tuple[str, Path], ...]:
+    """The ordered ``(layer_name, profile_dir)`` pairs a lookup walks.
+
+    THE SAME CHAIN footprints resolve through (owner ruling, S9): each layer's
+    profile directory is ``LibraryLayer.profiles`` -- the sibling ``profiles/``
+    of its footprint root, which for the seed IS :data:`DEFAULT_PROFILE_ROOT`.
+    So ``layers=None`` yields exactly one root and exactly today's behaviour.
+
+    ``library_root`` (this module's long-standing profile-root override, used by
+    tests to exercise the fail-closed paths without touching shipped data)
+    REPLACES the seed layer's directory rather than competing with the chain, so
+    the two arguments compose instead of one silently winning.
+    """
+    roots: list[tuple[str, Path]] = []
+    for layer in normalize_library_layers(layers):
+        if layer.name == SEED_LAYER and library_root is not None:
+            roots.append((layer.name, Path(library_root)))
+        else:
+            roots.append((layer.name, layer.profiles))
+    return tuple(roots)
+
+
 def load_rule_profile(
     profile_id: str, *, library_root: Union[str, Path, None] = None,
+    layers: Union[Iterable, None] = None,
 ) -> LoadedRuleProfile:
     """Load and pin ONE board-house profile by id. Fail closed on every
-    defect (see module docstring); never a partial or merged result."""
-    root = Path(library_root) if library_root is not None else DEFAULT_PROFILE_ROOT
-    path = _profile_path(profile_id, root)
-    if not path.is_file():
-        raise RuleProfileError(f"unknown rule profile {profile_id!r}: no such file {path}")
+    defect (see module docstring); never a partial or merged result.
+
+    ``layers`` (S9) resolves the id through the SAME ordered library chain
+    footprints use (:func:`pcb_worker.footprints.normalize_library_layers`):
+    highest-precedence layer first, FIRST layer that HAS the file wins, and a
+    defect in that file is refused outright -- a malformed override is never
+    quietly replaced by the seed's profile of the same id, for the same reason a
+    corrupt footprint override is never replaced by the seed's geometry. Omitted
+    (the default), the chain is the seed layer alone and this function behaves
+    exactly as it did before layering existed.
+    """
+    searched: list[Path] = []
+    for layer_name, root in _profile_roots(layers, library_root):
+        path = _profile_path(profile_id, root)
+        searched.append(path)
+        if path.is_file():
+            return _load_profile_file(profile_id, path, layer_name)
+    if len(searched) == 1:
+        raise RuleProfileError(
+            f"unknown rule profile {profile_id!r}: no such file {searched[0]}")
+    raise RuleProfileError(
+        f"unknown rule profile {profile_id!r}: no such file in any of the "
+        f"{len(searched)} library layers "
+        f"({'; '.join(str(path) for path in searched)})")
+
+
+def _load_profile_file(profile_id: str, path: Path, layer_name: str) -> LoadedRuleProfile:
+    """Read, validate, and pin the profile file the chain SELECTED. Every raise
+    below is a hard refusal of that file -- there is no continue-to-the-next-layer
+    path out of this function, by construction."""
     try:
         raw_text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -273,4 +331,5 @@ def load_rule_profile(
     return LoadedRuleProfile(
         ref=RuleProfileRef(id=profile_id, version=version, digest=digest),
         floor=constraints,
+        layer=layer_name,
     )

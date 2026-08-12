@@ -1,112 +1,454 @@
 {
- "Adafruit:MAX98357A_I2S_1x7_P2.54mm": {
-  "path": "Adafruit.pretty/MAX98357A_I2S_1x7_P2.54mm.kicad_mod",
-  "sha256": "aff24285c1339f129cb866bc21168948b1b5af5815575d1f2994fa12b3cf6fc5",
-  "size_bytes": 2013
+ "entries": {
+  "Adafruit:MAX98357A_I2S_1x7_P2.54mm": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Adafruit.pretty/MAX98357A_I2S_1x7_P2.54mm.kicad_mod",
+   "retrieved_at": "2026-08-03",
+   "sha256": "aff24285c1339f129cb866bc21168948b1b5af5815575d1f2994fa12b3cf6fc5",
+   "size_bytes": 2013,
+   "source_kind": "hand_authored",
+   "source_ref": "authored in-repo 17f9a1e 2026-08-03 from the Adafruit MAX98357A breakout's measured header row"
+  },
+  "Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Adafruit.pretty/MAX98357A_I2S_1x7_P2.54mm_WithTerminals.kicad_mod",
+   "retrieved_at": "2026-08-03",
+   "sha256": "8363aae04230f657c37f7642f1c86fc470cdf86ba1e352baafe862a726f91647",
+   "size_bytes": 2278,
+   "source_kind": "hand_authored",
+   "source_ref": "authored in-repo 17f9a1e 2026-08-03; speaker terminals as pins 8/9 per owner ruling"
+  },
+  "C_0805": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
+   "retrieved_at": "2026-07-18",
+   "sha256": "92f34e5af64d6085e84185973c9fe5886e2968f0bef175fe36ff68f8ea2a5441",
+   "size_bytes": 736,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer (baae81a 2026-07-18)"
+  },
+  "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Connector_JST.pretty/JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal.kicad_mod",
+   "provenance_note": "descr: 'generated with kicad-footprint-generator', tedit 5B7745C6",
+   "retrieved_at": "2026-07-07",
+   "sha256": "b508c63f2a4edff7774276952a7588b628e2ab066c7b241f996ceca84abae8ec",
+   "size_bytes": 3929,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
+  },
+  "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
+   "provenance_note": "name and descr mirror the official KiCad footprint; dimensions are the generic 2.54mm convention — flagged for release-path attribution review",
+   "retrieved_at": "2026-08-03",
+   "sha256": "d5ac19c4d2a8248d6bdb67fee2db15f11d6a63af7c5bd63dd6faf23103b60c1c",
+   "size_bytes": 1496,
+   "source_kind": "hand_authored",
+   "source_ref": "authored in-repo 17f9a1e 2026-08-03 (tedit 0)"
+  },
+  "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x04_P2.54mm_Vertical.kicad_mod",
+   "provenance_note": "descr: '(from Kicad 4.0.7), script generated', tedit 5A19A429",
+   "retrieved_at": "2026-07-07",
+   "sha256": "710e50e4fbfafd5089be6b139ec22364a7086e4af5eebb790affcdf7e711265d",
+   "size_bytes": 2209,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
+  },
+  "Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x05_P2.54mm_Vertical.kicad_mod",
+   "provenance_note": "descr: '(from Kicad 4.0.7), script generated', tedit 5A19A429",
+   "retrieved_at": "2026-07-07",
+   "sha256": "da74f0a4995fec4e9c6d68f2e45bc7d60bd484ea59705580d0eea8bc13c2c3b9",
+   "size_bytes": 2305,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
+  },
+  "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x07_P2.54mm_Vertical.kicad_mod",
+   "provenance_note": "descr: '(from Kicad 4.0.7), script generated', tedit 5A19A429",
+   "retrieved_at": "2026-07-07",
+   "sha256": "daa80f4afdb4d94abaf11e36a9056242730bf75320857144d7e704ade5390f27",
+   "size_bytes": 2464,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
+  },
+  "Diode_SMD:D_SMA": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Diode_SMD.pretty/D_SMA.kicad_mod",
+   "retrieved_at": "2026-08-03",
+   "sha256": "d6a4e8fccab59b1baa2fba3ae6d20865103477c00cf60044749af496e1f9f505",
+   "size_bytes": 1381,
+   "source_kind": "hand_authored",
+   "source_ref": "authored in-repo c90728c 2026-08-03 from the DO-214AC/SMA package convention"
+  },
+  "EVP-ASAC1A:SW_EVP-ASAC1A": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "EVP-ASAC1A.pretty/SW_EVP-ASAC1A.kicad_mod",
+   "retrieved_at": "2026-07-07",
+   "sha256": "d03af0c4bb8f399f3b271e79a116823a3206c9be6104bb231173686c9191ee62",
+   "size_bytes": 2226,
+   "source_kind": "hand_authored",
+   "source_ref": "authored in-repo cdc060f 2026-07-07 from the Panasonic EVP-ASAC1A datasheet"
+  },
+  "Espressif:ESP32-S3-DevKitC": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "Apache-2.0",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Espressif.pretty/ESP32-S3-DevKitC.kicad_mod",
+   "provenance_note": "attribution reconstructed forensically (generator pcbnew, version 20211014, verbatim Espressif descr text); upstream byte-identity NOT re-verified — file predates acquisition tooling",
+   "retrieved_at": "2026-07-07",
+   "sha256": "1e033c202e4ae743955d325da9e8e392c9600b51bf67caec56fb7f7eca723c0a",
+   "size_bytes": 16642,
+   "source_kind": "vendor_export",
+   "source_ref": "github.com/espressif/kicad-libraries (footprint ESP32-S3-DevKitC)"
+  },
+  "INMP441:INMP441_I2S_2x3_P2.54mm": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "INMP441.pretty/INMP441_I2S_2x3_P2.54mm.kicad_mod",
+   "retrieved_at": "2026-08-03",
+   "sha256": "a5aa6281c453b7a6cdee181c5333a1a0f25eaa73778047eb633a165d5be1809c",
+   "size_bytes": 1955,
+   "source_kind": "hand_authored",
+   "source_ref": "authored in-repo 17f9a1e 2026-08-03 (corrected 7.62mm row spacing)"
+  },
+  "Minerva_Fixture:DAM_MinWeb_2P": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Minerva_Fixture.pretty/DAM_MinWeb_2P.kicad_mod",
+   "retrieved_at": "2026-08-08",
+   "sha256": "1ff51fc0f5b171a3b1cf72dcbbf8368e6e1177891b9afaea36d80fbf582ea4c0",
+   "size_bytes": 623,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)"
+  },
+  "Minerva_Fixture:FID_Circle_1mm": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Minerva_Fixture.pretty/FID_Circle_1mm.kicad_mod",
+   "retrieved_at": "2026-08-08",
+   "sha256": "95a17cb5b9228166cebce3fd9786c83d97662237f61c0ae2493c17a5d1c9abf8",
+   "size_bytes": 669,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)"
+  },
+  "Minerva_Fixture:LOGO_Owl_TestCoupon": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Minerva_Fixture.pretty/LOGO_Owl_TestCoupon.kicad_mod",
+   "retrieved_at": "2026-08-08",
+   "sha256": "ea506c4ab201c739694e553b6e3b7a42124c3eb2f5bbc055142e93aaf6305f1d",
+   "size_bytes": 9303,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)"
+  },
+  "Minerva_Fixture:SMD_WeirdPads_2P": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Minerva_Fixture.pretty/SMD_WeirdPads_2P.kicad_mod",
+   "retrieved_at": "2026-08-08",
+   "sha256": "502171832f801f81d3a715e5f781ec8fdf67d863bac0e2e4fa367bbbf90f0185",
+   "size_bytes": 781,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)"
+  },
+  "Minerva_Fixture:TP_MinAnnular_0p6": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Minerva_Fixture.pretty/TP_MinAnnular_0p6.kicad_mod",
+   "retrieved_at": "2026-08-08",
+   "sha256": "02ed5b7183cef1164aa23a82d3e633fcfdc2ebe894974d888ca468115e8bfae4",
+   "size_bytes": 667,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer, CPN1 coupon fixture (4ca1647 2026-08-08)"
+  },
+  "Minerva_Fixture:TXT_CouponRev": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Minerva_Fixture.pretty/TXT_CouponRev.kicad_mod",
+   "retrieved_at": "2026-08-11",
+   "sha256": "ab8a445bcf5cfff7254c60464a464fbc9e9cf861a5d583f95863cd4ee373c02c",
+   "size_bytes": 2173,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer, CP2 S9 revision text (ad072eb 2026-08-11)"
+  },
+  "MountingHole:MountingHole_3.2mm_M3": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",
+   "provenance_note": "official virtual mounting-hole footprint, tedit 56D1B4CB",
+   "retrieved_at": "2026-07-07",
+   "sha256": "7875432d1eb0639bfb14f939e2a7894e9c986ed58924b9d00c8a95e50b79fb77",
+   "size_bytes": 720,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
+  },
+  "Package_DIP:DIP-6_W7.62mm_Socket": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "CC-BY-SA-4.0 WITH KiCad-libraries-exception",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Package_DIP.pretty/DIP-6_W7.62mm_Socket.kicad_mod",
+   "provenance_note": "canonical official descr, tedit 5A02E8C5",
+   "retrieved_at": "2026-07-07",
+   "sha256": "fbb6c473684a825b968346cea08134dad688da20fcb0b9c83d0c7bab1ef22b1a",
+   "size_bytes": 2953,
+   "source_kind": "official_kicad",
+   "source_ref": "kicad-footprints official library (KiCad-era .pretty, copied verbatim at cdc060f 2026-07-07)"
+  },
+  "R_0805": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
+   "provenance_note": "synthetic 0805 land — deliberately NOT the official KiCad R_0805 (comment 599 proof)",
+   "retrieved_at": "2026-07-18",
+   "sha256": "aaa6a6a177248b71877a6ca5e3bbda99c930b84ef7c5b5c08c9861832e7638f7",
+   "size_bytes": 744,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer (baae81a 2026-07-18)"
+  },
+  "TH_TestPoint": {
+   "assembly": {
+    "dist_part_numbers": [],
+    "mpn": null,
+    "orientation_convention": null,
+    "package": null
+   },
+   "bless": null,
+   "converter_version": null,
+   "layer": "seed",
+   "license": "LicenseRef-TurnRock-Proprietary",
+   "model3d_ref": null,
+   "original_source_path": null,
+   "path": "TestPoint.pretty/TH_TestPoint.kicad_mod",
+   "retrieved_at": "2026-07-18",
+   "sha256": "afa9fd9895bfd84eb3ed97793a2eed64657d875572459c83b9cb704ce326ada0",
+   "size_bytes": 665,
+   "source_kind": "generated",
+   "source_ref": "pcb_worker_seed synthesizer (baae81a 2026-07-18)"
+  }
  },
- "Adafruit:MAX98357A_I2S_1x7_P2.54mm_WithTerminals": {
-  "path": "Adafruit.pretty/MAX98357A_I2S_1x7_P2.54mm_WithTerminals.kicad_mod",
-  "sha256": "8363aae04230f657c37f7642f1c86fc470cdf86ba1e352baafe862a726f91647",
-  "size_bytes": 2278
- },
- "C_0805": {
-  "path": "Capacitor_SMD.pretty/C_0805_2012Metric.kicad_mod",
-  "sha256": "92f34e5af64d6085e84185973c9fe5886e2968f0bef175fe36ff68f8ea2a5441",
-  "size_bytes": 736
- },
- "Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal": {
-  "path": "Connector_JST.pretty/JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal.kicad_mod",
-  "sha256": "b508c63f2a4edff7774276952a7588b628e2ab066c7b241f996ceca84abae8ec",
-  "size_bytes": 3929
- },
- "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical": {
-  "path": "Connector_PinHeader_2.54mm.pretty/PinHeader_1x02_P2.54mm_Vertical.kicad_mod",
-  "sha256": "d5ac19c4d2a8248d6bdb67fee2db15f11d6a63af7c5bd63dd6faf23103b60c1c",
-  "size_bytes": 1496
- },
- "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical": {
-  "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x04_P2.54mm_Vertical.kicad_mod",
-  "sha256": "710e50e4fbfafd5089be6b139ec22364a7086e4af5eebb790affcdf7e711265d",
-  "size_bytes": 2209
- },
- "Connector_PinSocket_2.54mm:PinSocket_1x05_P2.54mm_Vertical": {
-  "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x05_P2.54mm_Vertical.kicad_mod",
-  "sha256": "da74f0a4995fec4e9c6d68f2e45bc7d60bd484ea59705580d0eea8bc13c2c3b9",
-  "size_bytes": 2305
- },
- "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical": {
-  "path": "Connector_PinSocket_2.54mm.pretty/PinSocket_1x07_P2.54mm_Vertical.kicad_mod",
-  "sha256": "daa80f4afdb4d94abaf11e36a9056242730bf75320857144d7e704ade5390f27",
-  "size_bytes": 2464
- },
- "Diode_SMD:D_SMA": {
-  "path": "Diode_SMD.pretty/D_SMA.kicad_mod",
-  "sha256": "d6a4e8fccab59b1baa2fba3ae6d20865103477c00cf60044749af496e1f9f505",
-  "size_bytes": 1381
- },
- "EVP-ASAC1A:SW_EVP-ASAC1A": {
-  "path": "EVP-ASAC1A.pretty/SW_EVP-ASAC1A.kicad_mod",
-  "sha256": "d03af0c4bb8f399f3b271e79a116823a3206c9be6104bb231173686c9191ee62",
-  "size_bytes": 2226
- },
- "Espressif:ESP32-S3-DevKitC": {
-  "path": "Espressif.pretty/ESP32-S3-DevKitC.kicad_mod",
-  "sha256": "1e033c202e4ae743955d325da9e8e392c9600b51bf67caec56fb7f7eca723c0a",
-  "size_bytes": 16642
- },
- "INMP441:INMP441_I2S_2x3_P2.54mm": {
-  "path": "INMP441.pretty/INMP441_I2S_2x3_P2.54mm.kicad_mod",
-  "sha256": "a5aa6281c453b7a6cdee181c5333a1a0f25eaa73778047eb633a165d5be1809c",
-  "size_bytes": 1955
- },
- "Minerva_Fixture:DAM_MinWeb_2P": {
-  "path": "Minerva_Fixture.pretty/DAM_MinWeb_2P.kicad_mod",
-  "sha256": "1ff51fc0f5b171a3b1cf72dcbbf8368e6e1177891b9afaea36d80fbf582ea4c0",
-  "size_bytes": 623
- },
- "Minerva_Fixture:FID_Circle_1mm": {
-  "path": "Minerva_Fixture.pretty/FID_Circle_1mm.kicad_mod",
-  "sha256": "95a17cb5b9228166cebce3fd9786c83d97662237f61c0ae2493c17a5d1c9abf8",
-  "size_bytes": 669
- },
- "Minerva_Fixture:LOGO_Owl_TestCoupon": {
-  "path": "Minerva_Fixture.pretty/LOGO_Owl_TestCoupon.kicad_mod",
-  "sha256": "ea506c4ab201c739694e553b6e3b7a42124c3eb2f5bbc055142e93aaf6305f1d",
-  "size_bytes": 9303
- },
- "Minerva_Fixture:SMD_WeirdPads_2P": {
-  "path": "Minerva_Fixture.pretty/SMD_WeirdPads_2P.kicad_mod",
-  "sha256": "502171832f801f81d3a715e5f781ec8fdf67d863bac0e2e4fa367bbbf90f0185",
-  "size_bytes": 781
- },
- "Minerva_Fixture:TP_MinAnnular_0p6": {
-  "path": "Minerva_Fixture.pretty/TP_MinAnnular_0p6.kicad_mod",
-  "sha256": "02ed5b7183cef1164aa23a82d3e633fcfdc2ebe894974d888ca468115e8bfae4",
-  "size_bytes": 667
- },
- "Minerva_Fixture:TXT_CouponRev": {
-  "path": "Minerva_Fixture.pretty/TXT_CouponRev.kicad_mod",
-  "sha256": "ab8a445bcf5cfff7254c60464a464fbc9e9cf861a5d583f95863cd4ee373c02c",
-  "size_bytes": 2173
- },
- "MountingHole:MountingHole_3.2mm_M3": {
-  "path": "MountingHole.pretty/MountingHole_3.2mm_M3.kicad_mod",
-  "sha256": "7875432d1eb0639bfb14f939e2a7894e9c986ed58924b9d00c8a95e50b79fb77",
-  "size_bytes": 720
- },
- "Package_DIP:DIP-6_W7.62mm_Socket": {
-  "path": "Package_DIP.pretty/DIP-6_W7.62mm_Socket.kicad_mod",
-  "sha256": "fbb6c473684a825b968346cea08134dad688da20fcb0b9c83d0c7bab1ef22b1a",
-  "size_bytes": 2953
- },
- "R_0805": {
-  "path": "Resistor_SMD.pretty/R_0805_2012Metric.kicad_mod",
-  "sha256": "aaa6a6a177248b71877a6ca5e3bbda99c930b84ef7c5b5c08c9861832e7638f7",
-  "size_bytes": 744
- },
- "TH_TestPoint": {
-  "path": "TestPoint.pretty/TH_TestPoint.kicad_mod",
-  "sha256": "afa9fd9895bfd84eb3ed97793a2eed64657d875572459c83b9cb704ce326ada0",
-  "size_bytes": 665
- }
+ "schema_version": 2
 }

@@ -123,11 +123,11 @@ func TestManifestBrokerParity(t *testing.T) {
 	// registration-count pin (pcb/tests/gd/test_manifest_tool_registration.gd)
 	// documents; this count is a hard gate (not discretionary), so it moves in
 	// lockstep with the manifest/broker entry rather than trailing it.
-	if len(manifestTools) != 12 {
-		t.Errorf("manifest backend-executor tool count = %d, want 12 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly)", len(manifestTools))
+	if len(manifestTools) != 16 {
+		t.Errorf("manifest backend-executor tool count = %d, want 16 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint)", len(manifestTools))
 	}
-	if len(brokerSpecs) != 12 {
-		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 12", len(brokerSpecs))
+	if len(brokerSpecs) != 16 {
+		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 16", len(brokerSpecs))
 	}
 }
 
@@ -210,6 +210,18 @@ var toolIdentityKeyword = map[string]string{
 	"minerva_pcb_fetch_libraries": "curated KiCAD symbol/footprint library subset",
 	"minerva_pcb_library_status":  "fetched and verified",
 	"minerva_pcb_export_assembly": "pre-assembly order package",
+	// LIB1 B2 (rendered bless): keywords verified unique across all 15
+	// descriptions at authoring time.
+	"minerva_pcb_footprint_stage":  "sha256-pinned and UNBLESSED",
+	"minerva_pcb_footprint_report": "a FACT TABLE and a self-contained SVG",
+	"minerva_pcb_footprint_bless":  "AUTO-BLESSES on provenance",
+	// LIB1 B3 (acquisition). The keyword names the one thing ONLY this tool does
+	// — reach the network — in the exact words its description uses to disclose
+	// it. Verified unique across all 16 manifest descriptions at authoring time,
+	// and it is a claim no sibling can pick up without becoming a fetcher itself:
+	// minerva_pcb_fetch_libraries is the only other tool that touches the network
+	// and it says "Requires network access", never naming the host.
+	"minerva_pcb_acquire_footprint": "outbound HTTPS to gitlab.com",
 }
 
 // TestDescriptionKeywordPinsToolIdentity is the S2 fix: for each of the 12
