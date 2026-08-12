@@ -123,11 +123,11 @@ func TestManifestBrokerParity(t *testing.T) {
 	// registration-count pin (pcb/tests/gd/test_manifest_tool_registration.gd)
 	// documents; this count is a hard gate (not discretionary), so it moves in
 	// lockstep with the manifest/broker entry rather than trailing it.
-	if len(manifestTools) != 17 {
-		t.Errorf("manifest backend-executor tool count = %d, want 17 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote)", len(manifestTools))
+	if len(manifestTools) != 18 {
+		t.Errorf("manifest backend-executor tool count = %d, want 18 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint)", len(manifestTools))
 	}
-	if len(brokerSpecs) != 17 {
-		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 17", len(brokerSpecs))
+	if len(brokerSpecs) != 18 {
+		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 18", len(brokerSpecs))
 	}
 }
 
@@ -268,6 +268,16 @@ var toolIdentityKeyword = map[string]string{
 	// this exact movement phrase; verified unique across all 17 manifest
 	// descriptions at authoring time.
 	"minerva_pcb_footprint_promote": "out of the WIP staging layer into the durable USER library layer",
+	// LIB2 B4 (arbitrary-source import). The keyword is the one CLAIM only this
+	// tool can make — that what it produces is deliberately not usable yet —
+	// and it is the claim a description swap would most quietly invert, since
+	// every sibling on this surface talks about blessing in some form. Its
+	// nearest neighbours say the opposite thing in different words
+	// (footprint_bless: "AUTO-BLESSES on provenance"; acquire_footprint:
+	// "records the auto-tier verdict"), so no sibling can pick this phrase up
+	// without reversing its own behaviour. Verified unique across all 18
+	// manifest descriptions at authoring time.
+	"minerva_pcb_import_footprint": "THE IMPORTED PART IS NEVER AUTO-BLESSED",
 }
 
 // TestDescriptionKeywordPinsToolIdentity is the S2 fix: for each of the 12
