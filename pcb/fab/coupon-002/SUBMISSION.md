@@ -45,8 +45,11 @@ cutout, a bottom pour with keepout, and back-side legend (REV A, mirror-written)
 - Silk placement guards (`TestSilkStaysOnTheBoard`): 0 strokes off-board,
   0 in the cutout, designators only on J1 + DAM1 (fixture footprints author
   hidden references).
-- This package is **byte-identical** to the blessed byte-goldens
-  (`worker/tests/testdata/gerber_golden/coupon_jlc1-*`).
+- All 10 GEOMETRY files are **byte-identical** to the blessed byte-goldens
+  (`worker/tests/testdata/gerber_golden/coupon_jlc1-*`). The one exception is
+  the `.gbrjob`, which embeds the output basename in its Name/GUID/Path fields
+  (`jlc-coupon-1` here vs the goldens' `coupon_jlc1`) — a self-referential
+  naming difference, zero geometry.
 - Worker suite 2345 passed; CI green (3 platforms + hermetic fab gate +
   kicad-cli oracle) at this SHA.
 
