@@ -195,10 +195,18 @@ def _raw_wip_layer(wip_root: Union[str, Path]) -> LibraryLayer:
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write *text* to *path* via temp+rename, so a crash mid-write can never
     leave a half-written lock (which would refuse the whole layer) or a
-    truncated ``.kicad_mod`` (which would refuse the ref on sha mismatch)."""
+    truncated ``.kicad_mod`` (which would refuse the ref on sha mismatch).
+
+    BYTES, not text mode: Windows' newline translation would turn each ``\\n``
+    into ``\\r\\n`` on disk, so the staged file's sha256 would differ from the
+    sha of the text that was pinned — every stage on Windows would then fail
+    the disk-vs-wire cross-check and stay unblessed (caught by exactly that
+    check on the windows-latest CI leg). Same rule as the seed library's
+    ``.gitattributes -text``: the pinned sha covers the bytes, so nothing may
+    rewrite them in transit."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_bytes(text.encode("utf-8"))
     os.replace(tmp, path)
 
 
