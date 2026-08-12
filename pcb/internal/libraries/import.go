@@ -568,6 +568,18 @@ func checkGitURL(gitURL, ref string) error {
 		return &ImportError{Kind: "args", Ref: ref, Source: gitURL,
 			Message: "git_url contains a control character"}
 	}
+	// The scp-style check runs BEFORE url.Parse: "git@host:repo.git" is not a
+	// parse error to a human (git accepts it every day), and url.Parse rejects
+	// it with "first path segment cannot contain colon" — a message that
+	// explains nothing. Anything without "://" gets the scheme refusal that
+	// names scp-style and says what to use instead (first testex caught the
+	// authored seal expecting exactly that attribution).
+	if !strings.Contains(gitURL, "://") {
+		return &ImportError{Kind: "scheme", Ref: ref, Source: gitURL,
+			Message: fmt.Sprintf("git_url %q has no scheme; scp-style addresses (user@host:path) "+
+				"are not accepted because what they mean depends on the local ssh configuration. "+
+				"Use an https:// URL, or file:// for a repository already on this machine", gitURL)}
+	}
 	u, err := url.Parse(gitURL)
 	if err != nil {
 		return &ImportError{Kind: "args", Ref: ref, Source: gitURL,

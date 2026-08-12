@@ -258,9 +258,19 @@ func (e *redirectRefused) Error() string {
 // upstream ever does start redirecting we want to SEE that as a loud refusal
 // naming the new address, then decide deliberately whether that address is still
 // official — not discover it after arbitrary bytes have been blessed.
+// acquisitionTransport lets TESTS substitute a transport that trusts an
+// httptest TLS server's certificate (the import surface is https-only, and a
+// plaintext test server would be refused by the very gate under test). nil —
+// production always — means the default transport. Only the TRANSPORT is
+// substitutable: the redirect refusal and the timeout below are properties
+// several tests exist to prove, and a seam that could replace the whole
+// client could silently replace them too.
+var acquisitionTransport http.RoundTripper
+
 func acquisitionClient() *http.Client {
 	return &http.Client{
-		Timeout: fetchTimeout,
+		Timeout:   fetchTimeout,
+		Transport: acquisitionTransport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			from := ""
 			if len(via) > 0 {

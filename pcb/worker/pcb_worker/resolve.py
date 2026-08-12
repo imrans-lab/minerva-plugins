@@ -37,7 +37,17 @@ from typing import Union
 
 from . import bless
 from .footprint_def import ReferenceTextDefinition
-from .footprints import FootprintLookupError, resolve_footprint_layered
+# resolve_footprint is re-exported on purpose: this module's board-level
+# resolvers stopped using it at B7 (they walk a loaded chain via
+# resolve_footprint_layered), but `resolve.resolve_footprint` is a de-facto
+# public name — the footprint_def/geometry/resolve test suites all reach the
+# single-ref resolver through this module (first testex of epoch LIB2 caught
+# the dropped re-export as 7 AttributeErrors).
+from .footprints import (  # noqa: F401 — resolve_footprint re-exported
+    FootprintLookupError,
+    resolve_footprint,
+    resolve_footprint_layered,
+)
 from .pad_source import has_resolved_pads
 from .silk_source import refdes_strokes
 from .pad_types import PAD_TYPE_MAP as _PAD_TYPE_MAP

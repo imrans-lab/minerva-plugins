@@ -146,8 +146,13 @@ func TestImportFootprint_ImportsEveryNamedSourceAndRefusesEverythingElse(t *test
 	// The second hop of the chain, on the ORIGIN server, is /hop2. Refusing the
 	// FIRST hop means /hop2 is never requested either, which is a stronger
 	// statement than "the last address was not contacted".
+	//
+	// TLS, because the importer is https-ONLY (first testex: a plain httptest
+	// server was refused by the very scheme gate under test). The transport
+	// seam below makes the client trust this server's throwaway certificate;
+	// the redirect refusal and timeout are the real client's, untouched.
 	var hop2Hits int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/good.kicad_mod":
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -185,6 +190,8 @@ func TestImportFootprint_ImportsEveryNamedSourceAndRefusesEverythingElse(t *test
 		}
 	}))
 	defer srv.Close()
+	acquisitionTransport = srv.Client().Transport
+	t.Cleanup(func() { acquisitionTransport = nil })
 
 	repoDir, rev := makeGitRepo(t, map[string]string{
 		"footprints/MyLib.pretty/Part_A.kicad_mod": validKicadMod,
