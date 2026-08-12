@@ -268,7 +268,7 @@ var RouteChannel = ToolSpec{
 	Description: "Panel IPC channel backing ui/PCBPanel.gd's route-correction loop " +
 		"(minerva_pcb_apply_route_hints). Forwards verbatim to the Python worker's " +
 		"'route' method, which autoroutes a canonical board with the vendored " +
-		"agent_router engine. Args: {board:<canonical Board dict with a "+
+		"agent_router engine. Args: {board:<canonical Board dict with a " +
 		"'components' list — see docs/board-yaml.md>, route_hints:[<pcb_route_hint " +
 		"annotation envelope>,...], selection:<optional dict scoping which hints/" +
 		"nets to route — propose vs commit is expressed via the hint/selection " +

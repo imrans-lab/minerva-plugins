@@ -272,19 +272,30 @@ func graphicsSkipped(reason string) string {
 }
 
 // attachFootprintGraphics enriches b's components IN PLACE with their
-// footprint's F.SilkS/F.CrtYd graphics and returns warnings, extended with one
-// entry if the enrichment degraded. It never returns an error: every failure
-// mode is a degrade, because a board must load even when its bodies cannot be
-// drawn.
+// footprint's F.SilkS/F.CrtYd graphics AND its real pad geometry ("pads" +
+// "has_pad_geometry"), returning warnings extended with one entry if the
+// enrichment degraded. It never returns an error: every failure mode is a
+// degrade, because a board must load even when its bodies cannot be drawn.
 //
-// Only the "graphics" key is taken from the resolve. The worker's resolve step
-// ALSO attaches real footprint pad geometry (component "pads" +
-// "has_pad_geometry"), which would change pad rendering and retire the
-// unresolved badge — a separate, deliberate change. Ignoring it here keeps this
-// unit's blast radius to exactly the body outlines.
+// PAD ADOPTION (WYSIWYG goal 019ff4a5a75a, closing gap G1). This unit
+// originally took ONLY "graphics" and deliberately dropped the resolve's pad
+// geometry, deferring "would change pad rendering and retire the unresolved
+// badge" as a separate change. The measured consequence of that deferral:
+// every library-footprint board rendered fallback pad DISCS — no drill
+// barrels, no real pad shapes — with a permanent amber unresolved badge on
+// every component, while the fab path compiled the true geometry from the
+// same footprints. The panel side was already built and waiting: the model's
+// _pads_from_list parses exactly the resolve's pad dict shape, and the canvas
+// gates its drill-hole render on the pad "type" only the resolve can supply.
+// Adopting the two keys here is what connects them.
 //
 // The attach is strictly ADDITIVE: a component whose source already carries
-// graphics keeps what the source gave it (authored data wins over derived).
+// graphics (or pads) keeps what the source gave it — authored data wins over
+// derived, per key, so a board with authored pads but no graphics still gains
+// the body outlines and vice versa. "has_pad_geometry" rides ONLY with pads
+// this unit itself attaches: it is the resolved-vs-fallback marker the badge
+// and the accurate-pad renderer key on, so stamping it while keeping authored
+// pads would launder an unresolved component into a resolved-looking one.
 func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Board, warnings []string) []string {
 	if w == nil || b == nil || len(b.Components) == 0 {
 		return warnings // codec-only path, or nothing to enrich
@@ -307,30 +318,53 @@ func attachFootprintGraphics(ctx context.Context, w *bridge.Worker, b *board.Boa
 		return append(warnings, graphicsSkipped(err.Error()))
 	}
 
-	byRef := graphicsByRef(result)
+	byRef := resolvedByRef(result)
 	if len(byRef) == 0 {
-		return append(warnings, graphicsSkipped("the resolve returned no footprint graphics"))
+		return append(warnings, graphicsSkipped("the resolve returned no footprint geometry"))
 	}
 
+	if adoptResolvedGeometry(b, byRef) == 0 {
+		return append(warnings, graphicsSkipped("no component matched a resolved footprint"))
+	}
+	return warnings
+}
+
+// adoptResolvedGeometry applies the per-key adoption policy (see
+// attachFootprintGraphics's doc comment) and returns how many components took
+// at least one key. Pure over its inputs so the policy is testable without a
+// live worker — the bridge call and this decision are separate concerns.
+func adoptResolvedGeometry(b *board.Board, byRef map[string]resolvedComponent) int {
 	attached := 0
 	for i := range b.Components {
-		g, ok := byRef[b.Components[i].Ref]
+		r, ok := byRef[b.Components[i].Ref]
 		if !ok {
 			continue // footprint unresolvable (best-effort left it inline) — badge stays
 		}
 		if b.Components[i].Extra == nil {
 			b.Components[i].Extra = map[string]interface{}{}
 		}
-		if _, exists := b.Components[i].Extra["graphics"]; exists {
-			continue // the source already carried graphics — do not overwrite it
+		took := false
+		if len(r.graphics) > 0 {
+			if _, exists := b.Components[i].Extra["graphics"]; !exists {
+				b.Components[i].Extra["graphics"] = r.graphics
+				took = true
+			}
 		}
-		b.Components[i].Extra["graphics"] = g
-		attached++
+		// Pads + the resolved marker travel TOGETHER (see the doc comment):
+		// has_pad_geometry asserts "these pads are the footprint's real
+		// geometry", so it must never be stamped over authored pads.
+		if r.hasPadGeometry && len(r.pads) > 0 {
+			if _, exists := b.Components[i].Extra["pads"]; !exists {
+				b.Components[i].Extra["pads"] = r.pads
+				b.Components[i].Extra["has_pad_geometry"] = true
+				took = true
+			}
+		}
+		if took {
+			attached++
+		}
 	}
-	if attached == 0 {
-		return append(warnings, graphicsSkipped("no component matched a resolved footprint"))
-	}
-	return warnings
+	return attached
 }
 
 // callResolveBestEffort runs the worker's tolerant resolve under a wall-clock
@@ -368,28 +402,53 @@ func callResolveBestEffort(ctx context.Context, w *bridge.Worker, params json.Ra
 	}
 }
 
-// graphicsByRef indexes the resolve reply's per-component "graphics" arrays by
-// component ref. A component with no graphics (unresolvable footprint, left
-// inline by the best-effort resolve) is omitted, so callers can distinguish
-// "resolved to nothing" from "not resolved" and leave the latter untouched.
-func graphicsByRef(result json.RawMessage) map[string]interface{} {
+// resolvedComponent is one component's adoptable enrichment from the resolve
+// reply: its footprint body graphics and its real pad geometry.
+type resolvedComponent struct {
+	graphics       []interface{}
+	pads           []interface{}
+	hasPadGeometry bool
+}
+
+// resolvedByRef indexes the resolve reply's per-component enrichment by
+// component ref. A component the best-effort resolve left inline (unresolvable
+// footprint: no graphics AND no resolved pads) is omitted, so callers can
+// distinguish "resolved to nothing" from "not resolved" and leave the latter
+// untouched — its badge stays, which is the honest state.
+//
+// Pads are indexed ONLY when the reply's own has_pad_geometry says they are
+// the footprint's real geometry. The worker echoes the component's inline pads
+// through the resolve even when the footprint did not resolve, so taking
+// "pads" unconditionally would re-import the caller's own fallback data
+// wearing a resolved label.
+func resolvedByRef(result json.RawMessage) map[string]resolvedComponent {
 	var payload struct {
 		Board struct {
 			Components []struct {
-				Ref      string        `json:"ref"`
-				Graphics []interface{} `json:"graphics"`
+				Ref            string        `json:"ref"`
+				Graphics       []interface{} `json:"graphics"`
+				Pads           []interface{} `json:"pads"`
+				HasPadGeometry bool          `json:"has_pad_geometry"`
 			} `json:"components"`
 		} `json:"board"`
 	}
 	if err := json.Unmarshal(result, &payload); err != nil {
 		return nil
 	}
-	out := make(map[string]interface{}, len(payload.Board.Components))
+	out := make(map[string]resolvedComponent, len(payload.Board.Components))
 	for _, c := range payload.Board.Components {
-		if c.Ref == "" || len(c.Graphics) == 0 {
+		if c.Ref == "" {
 			continue
 		}
-		out[c.Ref] = c.Graphics
+		rc := resolvedComponent{graphics: c.Graphics}
+		if c.HasPadGeometry {
+			rc.pads = c.Pads
+			rc.hasPadGeometry = true
+		}
+		if len(rc.graphics) == 0 && !rc.hasPadGeometry {
+			continue
+		}
+		out[c.Ref] = rc
 	}
 	return out
 }
