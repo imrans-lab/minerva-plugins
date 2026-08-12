@@ -1375,14 +1375,16 @@ func _run_removal_manifest_tools_absent() -> void:
 	# 019fe07523ca S8) == 88,
 	# + 4 Epoch LIB1 tools (station-3's rendered-bless trio footprint_stage/
 	# footprint_report/footprint_bless + station-4's acquire_footprint, DCR
-	# 019ff567f66b B2/B3) == 92.
+	# 019ff567f66b B2/B3) == 92,
+	# + Epoch LIB2 station-1's footprint_promote (B7, docket 019ff7c02fd6:
+	# the bless gate's exit door into the durable user layer) == 93.
 	# This is a SECOND, independent count pin on the same manifest.json this
 	# round's tools[] addition touches — see
-	# tests/gd/test_manifest_tool_registration.gd's own pin (88->92 over the
-	# same two LIB1 stations) for the "deliberate bump, its own diff"
+	# tests/gd/test_manifest_tool_registration.gd's own pin (92->93 over the
+	# same station) for the "deliberate bump, its own diff"
 	# convention this follows.
-	check_eq("manifest tool count == 92 (ALL manifest.json tools[] entries)",
-		names.size(), 92)
+	check_eq("manifest tool count == 93 (ALL manifest.json tools[] entries)",
+		names.size(), 93)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

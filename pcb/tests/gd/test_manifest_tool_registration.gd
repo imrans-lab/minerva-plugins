@@ -158,10 +158,13 @@ func _init() -> void:
 	# DELIBERATE PIN BUMP, in its own commit: the number moves only when a round
 	# adds or removes a tool ON PURPOSE, so the bump is reviewed as its own diff
 	# rather than riding along inside a feature change where a silently-dropped
-	# entry could hide behind it. This is the Epoch LIB1 station-4 bump
+	# entry could hide behind it. This is the Epoch LIB2 station-1 bump
+	# (92 -> 93, B7's promote tool — minerva_pcb_footprint_promote, the bless
+	# gate's exit door: a blessed WIP part moves whole into the durable user
+	# layer), sequenced after the Epoch LIB1 station-4 bump
 	# (91 -> 92, B3's acquire tool — minerva_pcb_acquire_footprint, the
 	# on-demand official-KiCad fetch that stages and auto-blesses through B2's
-	# machinery), sequenced after the LIB1 station-3 bump (88 -> 91, B2's
+	# machinery), the LIB1 station-3 bump (88 -> 91, B2's
 	# footprint stage/report/bless trio), the Epoch UX4 station-8 bump
 	# (83 -> 88), UX3 station-11's (82 -> 83),
 	# station-10's (77 -> 82), station-1's (75 -> 77), HITL-6b's (74 -> 75),
@@ -169,7 +172,7 @@ func _init() -> void:
 	# 8's (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's
 	# (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the
 	# same serialization point.
-	check("total registered tool count == 92", registered.size() == 92,
+	check("total registered tool count == 93", registered.size() == 93,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty
