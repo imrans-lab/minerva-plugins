@@ -1001,13 +1001,19 @@ _SVG_MARGIN_MM = 0.6
 _SVG_PX_PER_MM = 24.0
 _DEFAULT_STROKE_MM = 0.05
 
+# DARK background, deliberately (owner finding at the FIRST live bless,
+# 2026-08-12): silk is rendered white, and white-on-white made the entire
+# silk layer invisible in the review — the owner could only see the one
+# stroke that happened to cross a red pad. A review picture that hides a
+# layer cannot honestly claim not_rendered == []. Dark ground is the same
+# choice every gerber viewer makes, for the same reason.
 _SVG_STYLE = """
-.bg{fill:#ffffff}
-.pad-top{fill:#c0392b;fill-opacity:0.85;stroke:#7b1f16;stroke-width:0.02}
-.pad-bot{fill:#2471a3;fill-opacity:0.85;stroke:#154360;stroke-width:0.02}
-.pad-both{fill:#8e44ad;fill-opacity:0.85;stroke:#4a235a;stroke-width:0.02}
-.pad-none{fill:none;stroke:#616a6b;stroke-width:0.04}
-.drill{fill:#ffffff;stroke:#212f3d;stroke-width:0.02}
+.bg{fill:#10171d}
+.pad-top{fill:#c0392b;fill-opacity:0.9;stroke:#e6746a;stroke-width:0.02}
+.pad-bot{fill:#2471a3;fill-opacity:0.9;stroke:#7fb3d5;stroke-width:0.02}
+.pad-both{fill:#8e44ad;fill-opacity:0.9;stroke:#c39bd3;stroke-width:0.02}
+.pad-none{fill:none;stroke:#909497;stroke-width:0.04}
+.drill{fill:#10171d;stroke:#f4f6f6;stroke-width:0.03}
 .silk-top{fill:none;stroke:#f4f6f6;stroke-linecap:round}
 .silk-bot{fill:none;stroke:#aeb6bf;stroke-linecap:round;stroke-dasharray:0.3 0.15}
 .fab{fill:none;stroke:#b7950b;stroke-linecap:round}
