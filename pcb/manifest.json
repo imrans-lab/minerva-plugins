@@ -1040,6 +1040,25 @@
       }
     },
     {
+      "name": "minerva_pcb_import_footprint",
+      "description": "Import ONE footprint from an ARBITRARY source — a git repository at a pinned revision, a direct URL, or a vendor-export archive (SnapEDA, UltraLibrarian, a manufacturer download) already on this disk — and stage it for human review. Args {ref:'LibNick:PartName', source_kind:'git'|'url'|'vendor_export', license, git_url + git_rev + path_in_repo (git), url (url), archive_path (vendor_export), provenance_note?}. THE IMPORTED PART IS NEVER AUTO-BLESSED: it lands in the WIP layer with bless:null and cannot supply copper until minerva_pcb_footprint_report is looked at and minerva_pcb_footprint_bless records an explicit human verdict against its artifact_sha256 — unlike minerva_pcb_acquire_footprint, whose official_kicad provenance is the one thing this plugin trusts without a person. Returns {ref, layer:'wip', sha256, source_kind, source_ref, license, original_source_path, entry, report_summary:{facts, not_rendered, svg_sha256, artifact_sha256}}. The ORIGINAL source bytes are preserved verbatim under originals/<Lib>.pretty/<Part>/<source filename> in the WIP root — outside the resolvable layer, so it is insurance and never geometry — and source_ref records git+<url>@<rev>:<path>, url+<url>, or vendor_export+<archive>@sha256:<digest>!<entry>. Refuses without writing anything, each by name: a missing license (an entry that cannot say whose terms it carries), source_kind carrying another importer's fields, a git_rev that is not a full object id (a branch or tag is not a pin), a non-https URL, ANY redirect (not followed), a Content-Type other than text/plain or application/octet-stream, a body over 1 MiB, a zip entry whose path escapes the archive (zip-slip), a declared decompression ratio that is a zip bomb, and an archive holding zero or several .kicad_mod files (naming the count). The git clone is made with --no-checkout into a temporary directory under a replaced environment, so no repository-named path is ever materialised on disk.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ref": {"type": "string", "description": "Full footprint ref, 'LibNick:PartName' — the library nickname names the .pretty directory the imported file is staged into."},
+          "source_kind": {"type": "string", "description": "Which importer to run: 'git', 'url' or 'vendor_export'. Not free text — it selects the code path, and official_kicad is not importable here."},
+          "license": {"type": "string", "description": "SPDX id or LicenseRef the imported text is under. Required: an entry with no license is refused before anything is fetched."},
+          "url": {"type": "string", "description": "source_kind=url: the https URL of one .kicad_mod file. Redirects are refused, not followed."},
+          "git_url": {"type": "string", "description": "source_kind=git: an https:// repository URL (or file:// for a repository already on this machine)."},
+          "git_rev": {"type": "string", "description": "source_kind=git: the FULL git object id (40 hex chars) to read at. A branch or tag name is refused — it is not a pin."},
+          "path_in_repo": {"type": "string", "description": "source_kind=git: repository-relative path to the .kicad_mod, e.g. 'footprints/MyLib.pretty/Part.kicad_mod'."},
+          "archive_path": {"type": "string", "description": "source_kind=vendor_export: absolute path to a .zip already downloaded to this machine. It must contain exactly one .kicad_mod."},
+          "provenance_note": {"type": "string", "description": "Optional free-text note kept on the lock entry (datasheet revision, who downloaded it, why this source)."}
+        },
+        "required": ["ref", "source_kind", "license"]
+      }
+    },
+    {
       "name": "minerva_pcb_export_assembly",
       "description": "Generate a pre-assembly order package (BOM CSV + CPL/pick-and-place CSV) from a canonical PCB board for one assembly house profile — pure Python, no KiCad binary. Args {yaml|board, profile?:<house id, default \"jlc\">, name?:<basename>, out_dir?:<dir>}. \"jlc\" is the only house profile that currently offers assembly service; \"oshpark\" is a KNOWN house that refuses (bare-board only — no assembly service). Returns {profile, bom:{filename,rows,path}, cpl:{filename,rows,path}} — rows counts data rows (header excluded); path is omitted unless out_dir was given, in which case both CSVs are also written to disk. Refusals are NAMED, never a silent best-guess format or a blank identity cell: a component the profile requires identity for (jlc requires mpn) and lacks it refuses naming the component ref; an unrecognized or assembly-incapable house id refuses naming the id. CPL rotation is emitted verbatim from the authored rotation_deg (KiCad-equivalent clockwise convention); CPL Y is the authored y_mm negated, X verbatim. Calls the worker's assembly_bom then assembly_cpl methods over the same board+profile — whichever refuses first is the error this tool surfaces.",
       "input_schema": {

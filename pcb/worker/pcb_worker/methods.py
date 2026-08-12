@@ -3100,6 +3100,78 @@ def _footprint_acquire_store(params: dict) -> dict:
     }}
 
 
+def _footprint_import_store(params: dict) -> dict:
+    """Store an IMPORTED footprint from an arbitrary source: cross-check, stage.
+
+    params: {ref, kicad_mod_text, source_kind, source_ref, fetched_sha256,
+             license, original_filename, wip_root, retrieved_at?,
+             provenance_note?, converter_version?}
+    Reply:  {ok: True, result: {ref, layer, sha256, source_kind, source_ref,
+             license, original_source_path, bless, entry,
+             report_summary:{facts, not_rendered, svg_sha256, artifact_sha256}}}
+
+    THE SIBLING OF ``_footprint_acquire_store``, AND ITS OPPOSITE. Both land
+    bytes the Go side read, and both cross-check the fetcher's sha256 against
+    the text that arrived before writing anything. Where acquisition then
+    AUTO-BLESSES on the strength of the pinned official release, this one
+    stops: there is no bless call in this method, ``bless`` stays ``None`` on
+    the entry, and the ref therefore resolves from no layer until a human runs
+    ``footprint_report`` and records a verdict. ``bless: None`` in the reply is
+    not an omission -- it is the answer.
+
+    ``source_kind`` comes from the Go importer that ran (git / url /
+    vendor_export), and ``bless.import_footprint`` refuses anything outside that
+    set independently of the Go check -- so posting ``official_kicad`` straight
+    at this method cannot buy an auto-bless, because this method has no way to
+    bless at all and the kind is refused besides.
+
+    A report IS generated (same as ``_footprint_stage``): a part that cannot be
+    rendered can never be blessed, and learning that at import time beats
+    learning it when a reviewer sits down.
+    """
+    params = params or {}
+    ref = params.get("ref") or params.get("name")
+    fetched_sha256 = params.get("fetched_sha256")
+    try:
+        wip_root = _wip_root(params, required=True)
+        bless.cross_check_fetched_sha256(ref, params.get("kicad_mod_text"),
+                                         fetched_sha256)
+        entry = bless.import_footprint(
+            ref,
+            params.get("kicad_mod_text"),
+            wip_root,
+            source_kind=params.get("source_kind"),
+            source_ref=params.get("source_ref"),
+            license=params.get("license"),
+            retrieved_at=params.get("retrieved_at") or _utc_now_iso(),
+            original_filename=params.get("original_filename"),
+            provenance_note=params.get("provenance_note"),
+            converter_version=params.get("converter_version"),
+        )
+        staged_sha = str(entry.get("sha256") or "").lower()
+        if staged_sha != str(fetched_sha256).strip().lower():
+            raise bless.BlessError(
+                f"{ref}: the staged file's sha256 ({staged_sha}) does not match "
+                f"the imported sha256 ({fetched_sha256}); the entry is left "
+                f"UNBLESSED and therefore unresolvable")
+        report = bless.footprint_report(ref, wip_root=wip_root)
+    except (bless.BlessError, footprints.FootprintLookupError) as exc:
+        return _bless_error(exc)
+    return {"ok": True, "result": {
+        "ref": ref,
+        "layer": entry.get("layer"),
+        "sha256": entry.get("sha256"),
+        "source_kind": entry.get("source_kind"),
+        "source_ref": entry.get("source_ref"),
+        "license": entry.get("license"),
+        "original_source_path": entry.get("original_source_path"),
+        "converter_version": entry.get("converter_version"),
+        "bless": entry.get("bless"),
+        "entry": entry,
+        "report_summary": _report_summary(report),
+    }}
+
+
 def _init() -> dict:
     return {"ok": True, "result": {
         "worker_version": WORKER_VERSION,
@@ -3156,6 +3228,11 @@ _HANDLERS = {
     # sha the fetcher reported, then stage + auto-bless through the same B2
     # machinery above, in one atomic call. The worker NEVER fetches.
     "footprint_acquire_store": lambda req: _footprint_acquire_store(req.get("params") or {}),
+    # Arbitrary-source import (B4) — the same landing shape as acquisition and
+    # the opposite trust decision: git/url/vendor_export bytes are staged
+    # UNBLESSED, with the original source file preserved beside them. No bless
+    # call exists on this path.
+    "footprint_import_store": lambda req: _footprint_import_store(req.get("params") or {}),
     "check_libraries": lambda req: _check_libraries(req.get("params") or {}),
     "check_bom": lambda req: _check_bom(req.get("params") or {}),
     "assembly_bom": lambda req: _assembly_bom(req.get("params") or {}),

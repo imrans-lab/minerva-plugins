@@ -318,6 +318,127 @@ from acquired entries **without regression** (parity, measured, not assumed).
 That is a **future station, not this one**: `minerva_pcb_fetch_libraries` and
 `minerva_pcb_library_status` keep working exactly as documented above until then.
 
+## ARBITRARY-SOURCE IMPORT: git, URL, vendor export (B4)
+
+`minerva_pcb_import_footprint {ref, source_kind, license, ...}` is acquisition's
+opposite number. Acquisition reaches ONE pinned upstream whose provenance is the
+entire reason its parts auto-bless. Import reaches wherever the caller says — a
+git repository, a direct URL, a SnapEDA/UltraLibrarian/manufacturer zip already
+downloaded — and therefore **cannot produce a blessed entry**. There is no
+bless call on the path, in Go or in the worker. An imported part is staged with
+`bless: null`, is absent from every resolving chain's lock view, and stays that
+way until a human runs `minerva_pcb_footprint_report` and
+`minerva_pcb_footprint_bless` records a verdict against the artifact they saw.
+That single difference is what the rest of this section protects.
+
+**Three importers, one tool** (`internal/libraries/import.go`):
+
+| `source_kind` | Arguments | What it does |
+|---|---|---|
+| `git` | `git_url` + `git_rev` + `path_in_repo` | `git clone --no-checkout` into a temp dir, then `cat-file blob <rev>:<path>` |
+| `url` | `url` | One bounded HTTPS GET, no redirects |
+| `vendor_export` | `archive_path` | Reads ONE `.kicad_mod` out of a LOCAL zip; nothing is extracted to disk |
+
+`source_kind` is not free text: it selects the code path, and the value recorded
+on the lock entry is **the branch that ran**, never the caller's string. The
+worker refuses anything outside `git`/`url`/`vendor_export` independently
+(`bless.IMPORT_SOURCE_KINDS`) — in particular `official_kicad`, so posting it
+straight at `footprint_import_store` cannot buy an auto-bless. Same both-sides
+duplication as `SplitFootprintRef`/`_split_ref`, for the same reason.
+
+**Why `git` shells out to git rather than fetching a raw URL.** A raw fetch
+works for the two forges whose URL layout we happen to know and silently fails
+for every other host — including a plain self-hosted repo, which is exactly the
+arbitrary-source case. git also is the only thing that can resolve a full object
+id against the real object graph. `--no-checkout` is what keeps the cost
+bounded: a checkout would materialise attacker-named paths, symlinks and modes
+on this machine before anything had been validated, while `cat-file` reads one
+object out of the store. The subprocess runs under a **replaced environment** —
+`HOME` inside the temp dir, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`,
+`GIT_ALLOW_PROTOCOL=https:file` — because a `url.<base>.insteadOf` in the user's
+or the system's gitconfig is a redirect, and it would be incoherent to refuse
+redirects over HTTP and accept them out of a config file.
+
+**`git_rev` must be a full object id.** A branch or tag name is refused by name.
+The lock records what was imported so a future reader can get the same bytes
+back; a name resolves to different bytes on different days, so the provenance
+recorded against a human's bless would stop describing what they approved. An
+abbreviation is refused for the weaker version of the same reason.
+
+**The defense list**, each a NAMED refusal, nothing written on any path:
+
+* **License policy gate** — an empty or missing `license` refuses *before any
+  source is read*. `NOTICE.md` is generated from this field; an entry that
+  cannot say whose terms it carries is a part the plugin cannot answer for.
+* **Ambiguous source combinations** — `{source_kind: "url", url: X,
+  archive_path: Y}` refuses naming the field to delete. No JSON schema can say
+  "these three fields when kind is git and none of the others", and honouring
+  whichever one the switch happens to read would import from X while the call
+  says Y.
+* **Redirects** — refused outright, naming the target, reusing acquisition's
+  `acquisitionClient`. The policy is identical; only the consequence differs
+  (there, bytes would inherit an auto-bless; here, they would inherit the
+  address a human is shown as the thing they are approving).
+* **Scheme** — `url` takes https only; `git_url` takes `https://` or `file://`
+  (a repo already on this machine). `ssh://`, `git://`, scp-style
+  `user@host:path` and `ext::` are refused by name.
+* **Content-Type** — an ALLOWLIST (`text/plain`, `application/octet-stream`, or
+  no header at all), not a `text/html` denylist: fail-closed means enumerating
+  the right answers, not the wrong ones. A legitimate host sending an unusual
+  type is refused naming the type, and the recourse is `vendor_export`.
+* **Size** — 1 MiB per footprint on every importer, enforced on the STREAM
+  (`io.LimitReader`, and a capped writer for git's stdout), never on a size the
+  source declares about itself.
+* **Zip-slip** — every entry name in the archive is checked, not just the one
+  read: absolute paths, `..` segments, backslashes and drive letters refuse the
+  archive WHOLE. This is load-bearing rather than theoretical because the
+  matched entry's base name becomes a path component when the original is
+  preserved, and it is checked again worker-side
+  (`bless._check_original_filename`).
+* **Zip bomb** — the summed *declared* uncompressed sizes are capped off the
+  central directory, so the ratio is refused before a byte is inflated. Entry
+  count is capped too.
+* **Exactly one `.kicad_mod`** — zero or several refuses naming the count and
+  listing them. An import stages one part under one ref, and picking among
+  several would be choosing the geometry a human then blesses.
+* **Converter-version provenance** — `converter_version` stays **null**. No
+  importer transforms anything today; the bytes are vendored verbatim, and an
+  invented version string would be a provenance claim nobody can check.
+
+**The preserved original.** The source bytes are written to
+`<wip_root>/originals/<Lib>.pretty/<Part>/<source filename>` and the entry's
+`original_source_path` points there, **relative to the layer root**. Two
+properties make it worth the duplicate byte it currently is:
+
+* `originals/` is a **sibling** of `footprints/`, so it is outside every layer
+  root and no resolver at any layer can reach it. It is insurance, never a
+  second unpinned source of fabrication geometry.
+* It keeps the **source's own filename**, which staging drops (the staged copy
+  is renamed to `<Part>.kicad_mod` from the ref).
+
+Today the original is byte-identical to the staged text — that is what
+`converter_version: null` means. The discipline is what a converter's INPUT will
+need on the day one lands, at which point the pre-conversion bytes and a real
+`converter_version` arrive here instead and every part imported before then is
+already answerable. **Promotion carries it**: `promote_footprint` copies the
+original into the destination root alongside the footprint (checking the stored
+relative path against the exact canonical shape rather than joining it blind),
+because a layer-root-relative path left behind by a promote is a provenance
+record that reads fine and resolves to nothing.
+
+**`source_ref` formats**, which are what a future reader retrieves the part by:
+
+```
+git+<git_url>@<full object id>:<path_in_repo>
+url+<url>
+vendor_export+<archive basename>@sha256:<digest>!<entry path>
+```
+
+The vendor form names the archive by **basename and digest, never by its path on
+this machine**: `source_ref` is rendered into the generated `NOTICE.md`, and a
+home directory does not belong in a published license file — nor is it
+reproducible anywhere else.
+
 ## LICENSE INVENTORY / NOTICE (S5)
 
 `pcb/NOTICE.md` is the **marketplace-release** license and attribution
@@ -508,6 +629,7 @@ counted as verified (re-hashed, not just checked for existence).
 | `minerva_pcb_footprint_report` | `{ref, max_svg_bytes?}` | `{ref, facts, not_rendered, svg, svg_sha256, svg_bytes, svg_truncated}` |
 | `minerva_pcb_footprint_bless` | `{ref, verdict?, who?, blessed_at?}` | `{ref, entry, report:{…}}` |
 | `minerva_pcb_acquire_footprint` | `{ref}` | `{ref, layer:"wip", sha256, source_ref, license, bless, entry, report_summary:{…}}` |
+| `minerva_pcb_import_footprint` | `{ref, source_kind, license, url? \| git_url+git_rev+path_in_repo? \| archive_path?, provenance_note?}` | `{ref, layer:"wip", sha256, source_kind, source_ref, license, original_source_path, bless:null, entry, report_summary:{…}}` |
 
 The first two are **in-process** Go tools (no Python worker round-trip) — the
 fetch is plain `net/http`, and status is a local sha256 re-verify. The three
@@ -517,6 +639,12 @@ fetch is plain `net/http`, and status is a local sha256 re-verify. The three
 code is Go-only in this plugin — the worker never fetches) followed by a call to
 the worker's `footprint_acquire_store`, which stages and auto-blesses through
 that same B2 machinery. See *ACQUISITION* above.
+
+`minerva_pcb_import_footprint` has the same both-halves shape and the opposite
+trust decision: Go reads (HTTPS, `git`, or a local zip — network and archive
+parsing are both Go-only), the worker's `footprint_import_store` stages, and
+`bless` stays `null` because arbitrary sources are staged FOR a human, never
+blessed by policy. See *ARBITRARY-SOURCE IMPORT* above.
 
 `wip_root` is deliberately **absent from those tools' schemas**: the Go handler
 forces it to `<plugin data dir>/library_wip` on every call, *always overriding*

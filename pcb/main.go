@@ -266,6 +266,11 @@ func initRegistry() {
 	// it through the B2 machinery above. Worker-backed (it ends in a w.Call), even
 	// though its first half is in-process network work.
 	registry.Register(tools.AcquireFootprint, tools.HandleAcquireFootprint)
+	// minerva_pcb_import_footprint (B4, docket 019ff568b56b) — the ARBITRARY-source
+	// half: a git rev, a URL, or a vendor-export zip on disk. Same Go-reads /
+	// worker-stages split as acquire above, and the one difference that matters —
+	// it cannot auto-bless, so every imported part waits for a human verdict.
+	registry.Register(tools.ImportFootprint, tools.HandleImportFootprint)
 	// pcb.promote_check — the K13 promotion gate: full connectivity +
 	// geometric DRC + assembly, one fail-closed verdict (Epoch UX3 station
 	// 11). See worker_tools.go.

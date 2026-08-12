@@ -133,6 +133,16 @@ AUTO_BLESS_SOURCE_KINDS = frozenset({"official_kicad"})
 #: control (we authored the numbers; nothing upstream reviewed them).
 RENDER_CHECK_MANDATORY_SOURCE_KINDS = frozenset({"hand_authored"})
 
+#: Source kinds the ARBITRARY-SOURCE importer may stage under (B4). Stated as
+#: its own set rather than derived as "everything that is not auto" because the
+#: two sets answer different questions -- this one is "which importers exist",
+#: and a future ``hand_authored`` or ``generated`` part still arrives through
+#: :func:`stage_footprint`, not through an importer. :func:`import_footprint`
+#: additionally asserts every member is HUMAN tier, so widening
+#: :data:`AUTO_BLESS_SOURCE_KINDS` to include one of these would make the import
+#: path refuse loudly instead of quietly auto-trusting arbitrary bytes.
+IMPORT_SOURCE_KINDS = frozenset({"git", "url", "vendor_export"})
+
 #: Attribution recorded as ``who`` for an auto-tier bless, so the lock never
 #: carries a human name against a decision no human made.
 AUTO_BLESS_ATTRIBUTION = "auto:source_kind=official_kicad"
@@ -164,6 +174,14 @@ def bless_tier_for(source_kind: str) -> str:
 
 WIP_FOOTPRINT_DIRNAME = "footprints"
 WIP_LOCK_FILENAME = "footprints.lock.json"
+
+#: Where an import preserves the ORIGINAL source bytes (B4). A SIBLING of
+#: ``footprints/``, never a child: the layer root is ``<wip_root>/footprints``,
+#: so nothing under ``originals/`` can be reached by any resolver, at any layer,
+#: under any ref. That is the whole design -- these files are insurance against
+#: a future converter losing something, and insurance that could be resolved
+#: into copper would be a second, unpinned source of fabrication geometry.
+ORIGINALS_DIRNAME = "originals"
 
 
 def wip_footprint_root(wip_root: Union[str, Path]) -> Path:
@@ -625,6 +643,124 @@ def stage_footprint(
     return dict(entry)
 
 
+def _check_original_filename(ref: str, name: Any) -> str:
+    """Refuse a source-side filename that could not become a path component.
+
+    The name comes from a git repository, a URL path, or a zip entry -- three
+    places whose contents are chosen by whoever published them -- and it becomes
+    a filesystem path under ``originals/``. The Go importer refuses these same
+    shapes before it ever reads the bytes (internal/libraries/import.go
+    ``checkOriginalFilename``); the duplication is the same one ``_split_ref``
+    documents, so neither side of the bridge is the weak one."""
+    if not isinstance(name, str) or not name.strip():
+        raise BlessError(
+            f"{ref}: original_filename is required and must be a non-empty "
+            f"string; got {name!r}. The original source bytes are preserved "
+            f"under the name their SOURCE gave them (the staged copy is renamed "
+            f"from the ref), so there is nothing to fall back to")
+    if name in (".", "..") or any(sep in name for sep in ("/", "\\", os.sep, "\x00")):
+        raise BlessError(
+            f"{ref}: original_filename {name!r} contains a path separator or "
+            f"traversal segment; it becomes a path component under "
+            f"<wip_root>/{ORIGINALS_DIRNAME} and must not be able to escape it")
+    return name
+
+
+def import_footprint(
+    ref: str,
+    kicad_mod_text: str,
+    wip_root: Union[str, Path],
+    *,
+    source_kind: str,
+    source_ref: str,
+    license: str,
+    retrieved_at: str,
+    original_filename: str,
+    provenance_note: Union[str, None] = None,
+    converter_version: Union[str, None] = None,
+) -> dict:
+    """Stage a footprint imported from an ARBITRARY source (B4). Returns the entry.
+
+    This is :func:`stage_footprint` plus the two things an arbitrary source
+    obliges: the ORIGINAL bytes are kept, and the provenance class is restricted
+    to the kinds an importer can produce.
+
+    IT CANNOT BLESS, and nothing here has a code path that could. That is the
+    single difference from acquisition (:mod:`~pcb_worker.methods`
+    ``_footprint_acquire_store``, which fuses stage and auto-bless): the official
+    KiCad release is the one provenance this plugin trusts without a person, and
+    a git URL an LLM chose is the opposite end of that scale. The entry is born
+    ``bless: None`` and stays that way until a human runs the report and records
+    a verdict.
+
+    WHY THE ORIGINAL IS KEPT even though it is byte-identical to the staged text
+    TODAY: today no importer transforms anything -- the bytes are vendored
+    verbatim, which is why ``converter_version`` is left ``None`` rather than
+    given an invented value. What the copy carries that the staged file does not
+    is the SOURCE FILENAME (staging renames to ``<Part>.kicad_mod`` from the ref),
+    and what the discipline carries is the place a converter's INPUT goes on the
+    day one lands -- at which point the pre-conversion bytes and a real
+    ``converter_version`` arrive here instead, and every part imported before
+    then is already answerable.
+
+    ORDER, and the crash window it chooses: validate everything (the ref, the
+    provenance, the filename, the text) before touching the filesystem; write the
+    original; then stage. A crash between the last two leaves an ORPHAN under
+    ``originals/`` that no lock entry references -- inert, and outside the layer
+    root so it cannot resolve either. The opposite order would leave a staged,
+    lock-pinned entry whose ``original_source_path`` points at a file that does
+    not exist, which is a provenance record that lies.
+    """
+    _split_ref(ref)
+    source_kind = _require_nonempty("source_kind", source_kind)
+    if source_kind not in IMPORT_SOURCE_KINDS:
+        raise BlessError(
+            f"{ref}: source_kind {source_kind!r} is not importable; expected one "
+            f"of {'/'.join(sorted(IMPORT_SOURCE_KINDS))}. In particular "
+            f"'official_kicad' is refused here: it is the one kind that "
+            f"auto-blesses, and it is reached only by fetching the pinned "
+            f"official release (footprint_acquire_store), never by naming a "
+            f"source")
+    if bless_tier_for(source_kind) != TIER_HUMAN:
+        # Unreachable while AUTO_BLESS_SOURCE_KINDS is {official_kicad}, and
+        # kept because that set is a one-line edit away from making a whole
+        # class of arbitrary sources auto-trusted. This turns that edit into a
+        # loud refusal on the import path rather than a silent widening.
+        raise BlessError(
+            f"{ref}: source_kind {source_kind!r} blesses at tier "
+            f"{bless_tier_for(source_kind)!r}, but an imported part must be "
+            f"reviewed by a human. Refusing rather than staging something the "
+            f"tiering table would then auto-approve")
+    original_filename = _check_original_filename(ref, original_filename)
+    # RESTATED HERE, ahead of the original write, even though stage_footprint
+    # checks both again. This function writes a file BEFORE it stages, so every
+    # refusal stage_footprint owns has to be reachable before that write or the
+    # "bad input writes nothing" property becomes "bad input writes an orphan".
+    _require_nonempty("license", license)
+    _require_nonempty("source_ref", source_ref)
+    _validate_kicad_mod_text(ref, kicad_mod_text)
+
+    # ``original_source_path`` is recorded RELATIVE TO THE LAYER ROOT, not
+    # absolute: the entry outlives the root it was staged in (promotion moves it
+    # to the user layer), and an absolute path would also write this machine's
+    # directory layout into a lock that NOTICE.md is generated from.
+    lib, part = _split_ref(ref)
+    rel_original = f"{ORIGINALS_DIRNAME}/{lib}.pretty/{part}/{original_filename}"
+    _atomic_write_text(Path(wip_root) / ORIGINALS_DIRNAME / f"{lib}.pretty" /
+                       part / original_filename, kicad_mod_text)
+
+    return stage_footprint(
+        ref, kicad_mod_text, wip_root,
+        source_kind=source_kind,
+        source_ref=source_ref,
+        license=license,
+        retrieved_at=retrieved_at,
+        provenance_note=provenance_note,
+        original_source_path=rel_original,
+        converter_version=converter_version,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bless records.
 # ---------------------------------------------------------------------------
@@ -864,6 +1000,35 @@ def promote_footprint(
             f"promotion of {ref!r} wrote bytes hashing {written} where the "
             f"blessed pin is {entry['sha256']}; the destination file was left "
             f"for inspection and NO lock entry references it")
+
+    # The PRESERVED ORIGINAL travels with the entry (B4). ``original_source_path``
+    # is layer-root-relative, so promoting an imported part without copying the
+    # file would leave the durable entry pointing at a path under a WIP root the
+    # promote just emptied -- a provenance record that reads fine and resolves to
+    # nothing. Copied AFTER the footprint itself and BEFORE the destination lock,
+    # so the crash window still only produces orphan files no lock references.
+    #
+    # An ABSENT original is tolerated rather than refused: entries staged before
+    # B4 (and every acquire/stage entry, which set the field to None) have none,
+    # and a promote whose only fault is a missing insurance copy must not block
+    # the blessed part it is actually moving. That keeps this function's stated
+    # refusal list -- the one its tool description enumerates -- exactly true.
+    # The stored string is CHECKED, not trusted, for the same reason this
+    # function recomputes ``dest_file`` from the ref instead of reading
+    # ``entry["path"]``: a lock is a file on disk, and a path taken out of one
+    # and joined to a root is a write-anywhere primitive if it is joined
+    # unexamined. Only the exact canonical shape import_footprint writes is
+    # copied; anything else is left alone rather than followed.
+    original_rel = entry.get("original_source_path")
+    canonical = f"{ORIGINALS_DIRNAME}/{lib}.pretty/{part}/"
+    if isinstance(original_rel, str) and original_rel.startswith(canonical):
+        tail = original_rel[len(canonical):]
+        if tail and tail not in (".", "..") and "/" not in tail and "\\" not in tail:
+            src_original = Path(wip_root) / ORIGINALS_DIRNAME / f"{lib}.pretty" / part / tail
+            if src_original.is_file():
+                _atomic_write_text(
+                    dest_root / ORIGINALS_DIRNAME / f"{lib}.pretty" / part / tail,
+                    src_original.read_bytes().decode("utf-8"))
 
     # Promotion currently targets exactly one durable layer: the host-owned
     # USER library. The name is fixed (not a parameter) on purpose -- the seed

@@ -928,6 +928,147 @@ func HandleAcquireFootprint(ctx context.Context, w *bridge.Worker, params json.R
 	return w.Call(ctx, "footprint_acquire_store", withWIPRoot(call))
 }
 
+// ---- arbitrary-source import (B4, docket 019ff568b56b) ---------------------
+//
+// The supply-chain surface. Acquisition above reaches ONE pinned upstream whose
+// provenance is why its parts auto-bless; this reaches wherever the caller says
+// — a git repo, a URL, a vendor-export zip on disk — and therefore CANNOT
+// produce a blessed entry. Everything an imported part earns is a staging slot
+// and a place in the queue for a human's rendered check.
+//
+// Same split as acquisition: Go reads (internal/libraries/import.go — network
+// and archive parsing are both Go-only, so path traversal is defended in one
+// place), the worker stages through the same B2 machinery. The source_kind the
+// worker records comes from WHICH IMPORTER RAN, never from the caller's string,
+// and the worker refuses anything outside git/url/vendor_export independently.
+
+var ImportFootprint = ToolSpec{
+	Name: "minerva_pcb_import_footprint",
+	Description: "Import ONE footprint from an ARBITRARY source — a git " +
+		"repository at a pinned revision, a direct URL, or a vendor-export " +
+		"archive (SnapEDA, UltraLibrarian, a manufacturer download) already on " +
+		"this disk — and stage it for human review. Args {ref:'LibNick:PartName', " +
+		"source_kind:'git'|'url'|'vendor_export', license, git_url + git_rev + " +
+		"path_in_repo (git), url (url), archive_path (vendor_export), " +
+		"provenance_note?}. THE IMPORTED PART IS NEVER AUTO-BLESSED: it lands in " +
+		"the WIP layer with bless:null and cannot supply copper until " +
+		"minerva_pcb_footprint_report is looked at and " +
+		"minerva_pcb_footprint_bless records an explicit human verdict against " +
+		"its artifact_sha256 — unlike minerva_pcb_acquire_footprint, whose " +
+		"official_kicad provenance is the one thing this plugin trusts without a " +
+		"person. Returns {ref, layer:'wip', sha256, source_kind, source_ref, " +
+		"license, original_source_path, entry, report_summary:{facts, " +
+		"not_rendered, svg_sha256, artifact_sha256}}. The ORIGINAL source bytes " +
+		"are preserved verbatim under originals/<Lib>.pretty/<Part>/<source " +
+		"filename> in the WIP root — outside the resolvable layer, so it is " +
+		"insurance and never geometry — and source_ref records " +
+		"git+<url>@<rev>:<path>, url+<url>, or " +
+		"vendor_export+<archive>@sha256:<digest>!<entry>. Refuses without " +
+		"writing anything, each by name: a missing license (an entry that cannot " +
+		"say whose terms it carries), source_kind carrying another importer's " +
+		"fields, a git_rev that is not a full object id (a branch or tag is not " +
+		"a pin), a non-https URL, ANY redirect (not followed), a Content-Type " +
+		"other than text/plain or application/octet-stream, a body over 1 MiB, a " +
+		"zip entry whose path escapes the archive (zip-slip), a declared " +
+		"decompression ratio that is a zip bomb, and an archive holding zero or " +
+		"several .kicad_mod files (naming the count). The git clone is made with " +
+		"--no-checkout into a temporary directory under a replaced environment, " +
+		"so no repository-named path is ever materialised on disk.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"ref": {"type": "string", "description": "Full footprint ref, 'LibNick:PartName' — the library nickname names the .pretty directory the imported file is staged into."},
+			"source_kind": {"type": "string", "description": "Which importer to run: 'git', 'url' or 'vendor_export'. Not free text — it selects the code path, and official_kicad is not importable here."},
+			"license": {"type": "string", "description": "SPDX id or LicenseRef the imported text is under. Required: an entry with no license is refused before anything is fetched."},
+			"url": {"type": "string", "description": "source_kind=url: the https URL of one .kicad_mod file. Redirects are refused, not followed."},
+			"git_url": {"type": "string", "description": "source_kind=git: an https:// repository URL (or file:// for a repository already on this machine)."},
+			"git_rev": {"type": "string", "description": "source_kind=git: the FULL git object id (40 hex chars) to read at. A branch or tag name is refused — it is not a pin."},
+			"path_in_repo": {"type": "string", "description": "source_kind=git: repository-relative path to the .kicad_mod, e.g. 'footprints/MyLib.pretty/Part.kicad_mod'."},
+			"archive_path": {"type": "string", "description": "source_kind=vendor_export: absolute path to a .zip already downloaded to this machine. It must contain exactly one .kicad_mod."},
+			"provenance_note": {"type": "string", "description": "Optional free-text note kept on the lock entry (datasheet revision, who downloaded it, why this source)."}
+		},
+		"required": ["ref", "source_kind", "license"]
+	}`),
+}
+
+func HandleImportFootprint(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	var p struct {
+		Ref            string `json:"ref"`
+		SourceKind     string `json:"source_kind"`
+		URL            string `json:"url"`
+		GitURL         string `json:"git_url"`
+		GitRev         string `json:"git_rev"`
+		PathInRepo     string `json:"path_in_repo"`
+		ArchivePath    string `json:"archive_path"`
+		License        string `json:"license"`
+		ProvenanceNote string `json:"provenance_note"`
+	}
+	if len(params) > 0 {
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, &bridge.WorkerError{Kind: "import",
+				Message: fmt.Sprintf("minerva_pcb_import_footprint: params are not a JSON object: %v", err)}
+		}
+	}
+
+	imported, err := libraries.ImportFootprint(libraries.ImportRequest{
+		Ref:         p.Ref,
+		SourceKind:  p.SourceKind,
+		URL:         p.URL,
+		GitURL:      p.GitURL,
+		GitRev:      p.GitRev,
+		PathInRepo:  p.PathInRepo,
+		ArchivePath: p.ArchivePath,
+		License:     p.License,
+	})
+	if err != nil {
+		return nil, importWorkerError(err)
+	}
+
+	// source_kind is imported.SourceKind — the branch the importer actually
+	// took — not p.SourceKind. The two are equal today because the switch
+	// validates before it runs, and sending the DERIVED value is what keeps
+	// them equal after some future edit adds an alias or a normalisation.
+	call, err := json.Marshal(map[string]interface{}{
+		"ref":               imported.Ref,
+		"kicad_mod_text":    imported.Text,
+		"source_kind":       imported.SourceKind,
+		"source_ref":        imported.SourceRef,
+		"license":           imported.License,
+		"fetched_sha256":    imported.SHA256,
+		"original_filename": imported.OriginalFilename,
+		"provenance_note":   p.ProvenanceNote,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return w.Call(ctx, "footprint_import_store", withWIPRoot(call))
+}
+
+// importWorkerError is acquireWorkerError's sibling for a libraries.ImportError
+// (see that function for why a refusal must reach the caller as CONTENT rather
+// than as a protocol fault). The details carry the refused SOURCE rather than a
+// URL, because two of the three importers do not have one, and they state the
+// bless contract rather than the offline contract: the single most likely
+// misreading of a successful import is that the part is now usable.
+func importWorkerError(err error) error {
+	ie, ok := err.(*libraries.ImportError)
+	if !ok {
+		return &bridge.WorkerError{Kind: "import", Message: err.Error()}
+	}
+	details, mErr := json.Marshal(map[string]interface{}{
+		"reason": ie.Kind,
+		"ref":    ie.Ref,
+		"source": ie.Source,
+		"bless_contract": "an imported footprint is staged UNBLESSED and cannot supply copper " +
+			"until a human records a verdict with minerva_pcb_footprint_bless",
+	})
+	we := &bridge.WorkerError{Kind: "import", Message: ie.Message}
+	if mErr == nil {
+		we.Details = details
+	}
+	return we
+}
+
 // acquireWorkerError converts a libraries.AcquireError into the SAME
 // {ok:false, error:{kind, message, details}} envelope a worker refusal takes
 // (main.go turns a *bridge.WorkerError into MCP tool-result content with

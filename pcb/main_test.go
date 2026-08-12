@@ -80,6 +80,14 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// 019ff7c02fd6): a blessed staged part moves whole into the durable
 		// user library layer, both roots host-forced (withPromoteRoots).
 		"minerva_pcb_footprint_promote",
+		// worker-backed — arbitrary-source import (LIB2 B4, docket
+		// 019ff568b56b): a git rev, a URL, or a vendor-export zip on disk.
+		// Like minerva_pcb_acquire_footprint its first half is in-process (a
+		// fetch, a clone, or a zip read), and like it it ENDS in a w.Call —
+		// here to footprint_import_store, which stages UNBLESSED. Only NAME
+		// RESOLUTION is asserted here; invoking it would reach whatever
+		// address the arguments named.
+		"minerva_pcb_import_footprint",
 		// worker-backed — dotted panel-IPC channel forwarding to the worker's
 		// "route" method (this round; docket 019f3815e9f9). NOT renamed by
 		// round D0-expose (019fa486b408) — dotted panel-IPC channels are a
@@ -710,6 +718,19 @@ func TestPCBWorkerStdioSmoke_DeclaredSchemaArgsOnly(t *testing.T) {
 			// exercised hermetically by internal/libraries/acquire_test.go
 			// (httptest, redirect/oversize/markup refusals) and its worker
 			// half by worker/tests/test_footprint_acquire.py.
+			continue
+		}
+		if name == "minerva_pcb_import_footprint" {
+			// Both carve-outs at once (LIB2 B4). It is a WRITE tool on the
+			// bless surface — a "successful" sweep dispatch would stage into
+			// the ambient plugin data dir's WIP layer — AND its first act
+			// reaches whatever address the arguments name, which for this
+			// sweep's known values is nothing at all: with no source_kind it
+			// is a NAMED refusal every time, by design. Its read half is
+			// exercised hermetically by internal/libraries/import_test.go
+			// (httptest redirect/oversize/content-type battery, zip-slip,
+			// local-repo git flow) and its worker half by
+			// worker/tests/test_footprint_import.py.
 			continue
 		}
 		if name == "minerva_pcb_footprint_stage" || name == "minerva_pcb_footprint_bless" ||
