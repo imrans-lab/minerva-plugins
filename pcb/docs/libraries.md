@@ -257,6 +257,21 @@ cannot depict (mask/paste margins) are fact rows plus explicit
 `not_rendered` entries, so two parts differing only in mask geometry are
 never review-identical.
 
+`facts["silk_over_copper"]` is a **pre-flight advisory**, not a refusal
+(docket `019ff7da8e51`) — the class of defect the first genuine human bless
+caught (2026-08-12): a hand-authored cathode silk band crossing pad 1's
+copper, visible in the picture but invisible to the machine until now. Every
+F.SilkS/B.SilkS stroke, inflated by half its stroke width, is checked against
+same-side pads' copper land (a pad approximated as its axis-aligned
+**bounding rect**, stated per-entry as `basis: "pad_bbox"` — a rotated or
+non-rectangular pad's true land is not this rect, so the approximation is
+declared, not hidden). It stays **advisory only**: some parts legitimately
+print silk near or over copper, so the human still decides. It lives *inside*
+`facts` rather than beside it, so it rides `_report_summary` and the
+`artifact_sha256` binding digest automatically — a silk edit that changes the
+advisory moves the digest a bless quotes back, the same way a mask-margin
+change already does.
+
 `bless.py` never reads the clock: `blessed_at`/`retrieved_at` arrive from the
 caller. `methods.py` is the one place "now" enters (defaulted when the tool call
 omits it), so the library stays a pure function of its arguments.

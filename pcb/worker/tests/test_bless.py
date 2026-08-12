@@ -318,6 +318,10 @@ def test_fact_table_golden_for_seed_r_0805():
         # ROW is part of the report contract (Codex 1160 P1).
         "assembly": {"dist_part_numbers": [], "mpn": None,
                      "orientation_convention": None, "package": None},
+        # The two F.SilkS lines sit at y=∓0.735 (half stroke 0.06mm), and both
+        # pads' x-extent stops at ∓0.45 — a 0.223mm gap on each side, well
+        # clear of the inflated stroke. MEASURED clear, not merely absent.
+        "silk_over_copper": [],
     }
 
     # A simple two-pad chip part is entirely within what the renderer models,
@@ -421,3 +425,78 @@ def test_raw_wip_chain_injection_is_refused(tmp_path):
                                    "root": str(bless.wip_footprint_root(wip)),
                                    "lockfile": str(bless.wip_lock_path(wip))}])
     assert "blessed_library_chain" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# 5. Silk-over-copper advisory (docket 019ff7da8e51).
+# ---------------------------------------------------------------------------
+
+# Same TWO_PAD shape (courtyard + two 1.2x1.6 pads at x=∓1, so pad "1" spans
+# x∈[-1.6,-0.4] y∈[-0.8,0.8]), but the silk band runs from x=-1.9 to x=-0.1 at
+# y=0 — it crosses ENTIRELY through pad "1" (both endpoints land OUTSIDE the
+# pad rect, on opposite sides) and stays well clear of pad "2" (max x=-0.1,
+# pad "2" starts at x=0.4). This is the shape of the defect the advisory
+# exists for: a band that crosses a pad without either endpoint touching it,
+# so "is an endpoint inside the pad" alone would miss it.
+SILK_CROSSES_PAD1 = """\
+(footprint "SILK_CROSSES_PAD1" (version 20221018) (generator pcb_worker_test)
+  (layer "F.Cu")
+  (fp_line (start -2 -1) (end 2 -1) (layer "F.CrtYd") (width 0.05))
+  (fp_line (start 2 -1) (end 2 1) (layer "F.CrtYd") (width 0.05))
+  (fp_line (start 2 1) (end -2 1) (layer "F.CrtYd") (width 0.05))
+  (fp_line (start -2 1) (end -2 -1) (layer "F.CrtYd") (width 0.05))
+  (fp_line (start -1.9 0) (end -0.1 0) (layer "F.SilkS") (width 0.2))
+  (pad "1" smd rect (at -1 0) (size 1.2 1.6) (layers "F.Cu" "F.Paste" "F.Mask"))
+  (pad "2" smd rect (at 1 0) (size 1.2 1.6) (layers "F.Cu" "F.Paste" "F.Mask"))
+)
+"""
+
+# Same footprint, silk moved to y=-3 — clearly outside the courtyard (y∈[-1,1])
+# and both pads (y∈[-0.8,0.8]). Used both for the "measured clear" case and to
+# prove the advisory (and therefore the digest) tracks silk position, not just
+# file identity.
+SILK_CLEAR_OF_COPPER = SILK_CROSSES_PAD1.replace(
+    '(fp_line (start -1.9 0) (end -0.1 0) (layer "F.SilkS") (width 0.2))',
+    '(fp_line (start -1.9 -3) (end -0.1 -3) (layer "F.SilkS") (width 0.2))')
+
+SILK_REF = "TestLib:SILK_CROSSES_PAD1"
+
+
+def test_silk_over_copper_advisory(tmp_path):
+    """The class of defect the FIRST genuine human bless caught (2026-08-12):
+    a hand-authored silk band crossing a pad's copper land, invisible to the
+    fact table until this check existed. ADVISORY ONLY — it never refuses; it
+    names the pad so a human looks (module docstring: some parts legitimately
+    print silk near/over copper)."""
+    wip = tmp_path / "library_wip"
+    _stage(wip, SILK_REF, text=SILK_CROSSES_PAD1)
+    crossing = bless.footprint_report(SILK_REF, wip_root=wip)
+
+    advisories = crossing["facts"]["silk_over_copper"]
+    assert [a["pad"] for a in advisories] == ["1"]
+    hit = advisories[0]
+    assert hit["side"] == "F"
+    assert hit["layer"] == "F.SilkS"
+    assert hit["basis"] == "pad_bbox"
+    assert hit["stroke"] == {"kind": "line", "start": [-1.9, 0.0],
+                             "end": [-0.1, 0.0], "width_mm": 0.2}
+    assert hit["overlap_mm"] > 0.0
+
+    # --- clean case: silk clearly away from copper -> a MEASURED all-clear,
+    # not merely an absent key (same idiom as not_rendered == []) -----------
+    clean_ref = "TestLib:SILK_CLEAR"
+    _stage(wip, clean_ref, text=SILK_CLEAR_OF_COPPER)
+    clean = bless.footprint_report(clean_ref, wip_root=wip)
+    assert clean["facts"]["silk_over_copper"] == []
+
+    # --- the advisory rides the binding digest (Codex 1160 P1's rule, for
+    # free): re-stage the SAME ref with the silk moved off the pad. The only
+    # fact-table change between the two reports is silk_over_copper itself
+    # (pads are byte-identical), and artifact_sha256 still moves — because
+    # `facts` (which now carries the advisory) is hashed whole into it, with
+    # no extra plumbing beyond the key living inside `facts`. -------------
+    _stage(wip, SILK_REF, text=SILK_CLEAR_OF_COPPER)
+    moved = bless.footprint_report(SILK_REF, wip_root=wip)
+    assert moved["facts"]["silk_over_copper"] == []
+    assert moved["facts"]["pads"] == crossing["facts"]["pads"]
+    assert moved["artifact_sha256"] != crossing["artifact_sha256"]

@@ -1087,6 +1087,11 @@ def footprint_report(
     primitive would hand a reviewer a picture that looks finished and is not,
     and the reviewer would sign it.
 
+    ``facts["silk_over_copper"]`` (docket 019ff7da8e51) is a pre-flight
+    ADVISORY, never a refusal: same-side silk strokes that touch a pad's
+    (bounding-rect-approximated) copper land, so a human sees the class of
+    defect a picture alone makes easy to miss. See :func:`_silk_over_copper`.
+
     Raises :class:`~pcb_worker.footprints.FootprintLookupError` (attributed,
     naming the ref and the layers searched) when the ref does not resolve.
     """
@@ -1231,6 +1236,196 @@ def _pad_corner_points(pad: dict) -> list:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Silk-over-copper advisory (docket 019ff7da8e51).
+#
+# Origin: the FIRST genuine human bless (2026-08-12) rejected a hand-authored
+# part because a cathode silk band crossed pad 1's land -- visible to the
+# human in the SVG, invisible to the machine because nothing compared silk
+# geometry to copper geometry. This is that comparison, made cheap.
+#
+# ADVISORY, NEVER A REFUSAL: some parts legitimately print silk near or over
+# copper (polarity marks on fine-pitch pads are common), so this never blocks
+# a bless -- it names the pad so the human looks. It lives INSIDE
+# ``facts`` (see :func:`_facts`) rather than as a sibling report key, on
+# purpose: ``facts`` is hashed whole into ``artifact_sha256``
+# (:func:`footprint_report`), so a silk move that changes the advisory moves
+# the digest a bless quotes back, with no plumbing beyond adding the key.
+#
+# BASIS: every pad is approximated as its AXIS-ALIGNED bounding rect (the same
+# ``_bbox_of(_pad_corner_points(pad))`` shape courtyard/body bboxes already
+# use), stated per-entry as ``basis: "pad_bbox"`` rather than hidden -- a
+# rotated or non-rectangular pad's true land is not this rect, and a reviewer
+# comparing against the picture needs to know the check is an approximation,
+# not a promise.
+# ---------------------------------------------------------------------------
+
+
+def _point_in_rect(px: float, py: float, rect: dict) -> bool:
+    return (rect["min_x_mm"] <= px <= rect["max_x_mm"]
+            and rect["min_y_mm"] <= py <= rect["max_y_mm"])
+
+
+def _dist_point_to_rect(px: float, py: float, rect: dict) -> float:
+    if _point_in_rect(px, py, rect):
+        return 0.0
+    dx = max(rect["min_x_mm"] - px, 0.0, px - rect["max_x_mm"])
+    dy = max(rect["min_y_mm"] - py, 0.0, py - rect["max_y_mm"])
+    return math.hypot(dx, dy)
+
+
+def _dist_point_to_segment(px: float, py: float, x1: float, y1: float,
+                           x2: float, y2: float) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0.0:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _segment_orientation(ax, ay, bx, by, cx, cy) -> int:
+    val = (by - ay) * (cx - bx) - (bx - ax) * (cy - by)
+    if abs(val) < 1e-12:
+        return 0
+    return 1 if val > 0 else 2
+
+
+def _on_segment(ax, ay, bx, by, px, py) -> bool:
+    return (min(ax, bx) - 1e-9 <= px <= max(ax, bx) + 1e-9
+            and min(ay, by) - 1e-9 <= py <= max(ay, by) + 1e-9)
+
+
+def _segments_intersect(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) -> bool:
+    """Standard orientation test, needed because a silk band can cross a pad
+    ENTIRELY -- both endpoints outside the rect -- which is exactly the shape
+    of the defect this advisory exists to catch (a cathode band spanning past
+    both edges of the pad it marks)."""
+    o1 = _segment_orientation(ax1, ay1, ax2, ay2, bx1, by1)
+    o2 = _segment_orientation(ax1, ay1, ax2, ay2, bx2, by2)
+    o3 = _segment_orientation(bx1, by1, bx2, by2, ax1, ay1)
+    o4 = _segment_orientation(bx1, by1, bx2, by2, ax2, ay2)
+    if o1 != o2 and o3 != o4:
+        return True
+    if o1 == 0 and _on_segment(ax1, ay1, ax2, ay2, bx1, by1):
+        return True
+    if o2 == 0 and _on_segment(ax1, ay1, ax2, ay2, bx2, by2):
+        return True
+    if o3 == 0 and _on_segment(bx1, by1, bx2, by2, ax1, ay1):
+        return True
+    if o4 == 0 and _on_segment(bx1, by1, bx2, by2, ax2, ay2):
+        return True
+    return False
+
+
+def _dist_segment_to_rect(x1: float, y1: float, x2: float, y2: float,
+                          rect: dict) -> float:
+    """Minimum distance from segment (x1,y1)-(x2,y2) to the CLOSED
+    axis-aligned *rect*: zero if either endpoint lies inside/on it, zero if the
+    segment crosses an edge (the through-the-pad case), else the nearest of
+    the four edge-to-segment distances."""
+    if _point_in_rect(x1, y1, rect) or _point_in_rect(x2, y2, rect):
+        return 0.0
+    minx, maxx = rect["min_x_mm"], rect["max_x_mm"]
+    miny, maxy = rect["min_y_mm"], rect["max_y_mm"]
+    edges = ((minx, miny, maxx, miny), (maxx, miny, maxx, maxy),
+             (maxx, maxy, minx, maxy), (minx, maxy, minx, miny))
+    best = math.inf
+    for ex1, ey1, ex2, ey2 in edges:
+        if _segments_intersect(x1, y1, x2, y2, ex1, ey1, ex2, ey2):
+            return 0.0
+        best = min(best,
+                   _dist_point_to_segment(x1, y1, ex1, ey1, ex2, ey2),
+                   _dist_point_to_segment(x2, y2, ex1, ey1, ex2, ey2),
+                   _dist_point_to_segment(ex1, ey1, x1, y1, x2, y2),
+                   _dist_point_to_segment(ex2, ey2, x1, y1, x2, y2))
+    return best
+
+
+#: Silk graphic kinds this advisory actually measures. ``arc`` and ``poly``
+#: (rect normalizes to poly -- see footprints.py) parse on F.SilkS/B.SilkS
+#: just as readily as ``line``/``circle`` (``GRAPHIC_LAYERS`` applies to every
+#: captured tag alike), so they DO reach this function; they are SKIPPED with
+#: an honest entry rather than silently treated as clear, because a rotated
+#: stroke-vs-rect or polygon-vs-rect distance is not modelled here.
+_SILK_OVERLAP_KINDS = frozenset({"line", "circle"})
+
+
+def _silk_over_copper(pads: list, graphics: list) -> list:
+    """The advisory list (docket 019ff7da8e51): every F.SilkS/B.SilkS stroke,
+    inflated by half its stroke width, that touches a SAME-SIDE pad's copper
+    land -- one entry per (stroke, pad) hit, naming the pad. Sides are decided
+    the same way the SVG classifies pad copper (:func:`_pad_copper_class`): a
+    front stroke checks front-and-both pads, a back stroke checks back-and-both,
+    so a through-hole pad is checked against both silk layers."""
+    front_pads = [p for p in pads if _pad_copper_class(p) in ("pad-top", "pad-both")]
+    back_pads = [p for p in pads if _pad_copper_class(p) in ("pad-bot", "pad-both")]
+    advisories: list = []
+    for g in graphics:
+        layer = g.get("layer")
+        if layer not in ("F.SilkS", "B.SilkS"):
+            continue
+        side = "F" if layer == "F.SilkS" else "B"
+        targets = front_pads if side == "F" else back_pads
+        kind = g.get("kind")
+        width = g.get("width")
+        stroke_width = float(width) if width else _DEFAULT_STROKE_MM
+        half = stroke_width / 2.0
+
+        if kind == "line":
+            start, end = g.get("start"), g.get("end")
+            if not start or not end or None in start or None in end:
+                continue
+            for pad in targets:
+                rect = _bbox_of(_pad_corner_points(pad))
+                if rect is None:
+                    continue
+                dist = _dist_segment_to_rect(float(start[0]), float(start[1]),
+                                             float(end[0]), float(end[1]), rect)
+                if dist < half:
+                    advisories.append({
+                        "pad": pad.get("number"), "side": side, "layer": layer,
+                        "stroke": {"kind": "line", "start": [float(start[0]), float(start[1])],
+                                  "end": [float(end[0]), float(end[1])],
+                                  "width_mm": stroke_width},
+                        "overlap_mm": round(half - dist, 6),
+                        "basis": "pad_bbox",
+                    })
+        elif kind == "circle":
+            center, radius = g.get("center"), g.get("radius")
+            if not center or None in center or radius is None:
+                continue
+            cx, cy = float(center[0]), float(center[1])
+            # A circle's inflated reach is its OWN radius plus the half stroke
+            # width -- the disk the ring's outer edge sweeps, not the ring
+            # alone, so a copper land fully inside a large silk circle still
+            # counts as touched.
+            reach = float(radius) + half
+            for pad in targets:
+                rect = _bbox_of(_pad_corner_points(pad))
+                if rect is None:
+                    continue
+                dist = _dist_point_to_rect(cx, cy, rect)
+                if dist < reach:
+                    advisories.append({
+                        "pad": pad.get("number"), "side": side, "layer": layer,
+                        "stroke": {"kind": "circle", "center": [cx, cy],
+                                  "radius": float(radius), "width_mm": stroke_width},
+                        "overlap_mm": round(reach - dist, 6),
+                        "basis": "pad_bbox",
+                    })
+        elif kind not in _SILK_OVERLAP_KINDS:
+            advisories.append({
+                "pad": None, "side": side, "layer": layer, "skipped": True,
+                "kind": kind, "basis": "pad_bbox",
+                "detail": (f"a {kind} on {layer!r} was parsed but this advisory "
+                           f"does not model {kind}-vs-pad geometry; NOT checked "
+                           f"for silk-over-copper (measured clear elsewhere in "
+                           f"this list, unmeasured here)"),
+            })
+    return advisories
+
+
 def _facts(resolved: ResolvedFootprint) -> tuple[dict, dict]:
     """Build the fact table, and the geometry summary the renderer reuses.
 
@@ -1296,6 +1491,14 @@ def _facts(resolved: ResolvedFootprint) -> tuple[dict, dict]:
         # Package/assembly identity rides the report so the reviewer sees the
         # same part-identity fields the lock will carry (Codex 1160 P1).
         "assembly": entry.get("assembly"),
+        # ADVISORY, not a refusal (docket 019ff7da8e51) -- see
+        # _silk_over_copper's module comment. An empty list is a MEASURED
+        # all-clear (the same idiom as not_rendered == []), not "not checked":
+        # the key is always present. Living in `facts` means it rides every
+        # existing surface (report, _report_summary, the artifact digest) with
+        # no extra plumbing, and a silk move that changes it moves
+        # artifact_sha256 the same way a mask-margin change already does.
+        "silk_over_copper": _silk_over_copper(pads, graphics),
     }
     return facts, {"extent": _bbox_of(all_pts)}
 
