@@ -96,13 +96,14 @@ var Gerbers = ToolSpec{
 	Name: "minerva_pcb_gerbers",
 	Description: "Generate fabrication files (Gerber RS-274X/X2 + Excellon drills) from a " +
 		"canonical PCB board — pure Python, no KiCad binary. Args {yaml|board, name?:<basename>, " +
-		"out_dir?:<dir>}. Returns {files:{'<name>-F_Cu.gbr':text, ...'-B_Cu/-F_Mask/-B_Mask/" +
-		"-F_SilkS/-Edge_Cuts.gbr', '<name>-PTH.drl':text, '<name>-NPTH.drl':text}, " +
-		"written:[{path,bytes_written}]}. Six Gerber layers plus separate plated (PTH) and " +
-		"non-plated (NPTH) Excellon drill files (each drill file only when the board has holes " +
-		"of that class). Coordinate format is self-declared per layer (read the %FS line, not " +
-		"assume 4.6). Silk currently renders a courtyard-box placeholder per top component " +
-		"(no glyph text yet). Fab-correctness still needs a human viewer check — see docs/gerbers.md.",
+		"out_dir?:<dir>}. Returns {files:{'<name>-F_Cu.gbr':text, ...}, " +
+		"written:[{path,bytes_written}], warnings:[...]}. NINE Gerber layers — F_Cu/B_Cu, " +
+		"F_Mask/B_Mask, F_Paste/B_Paste, F_SilkS/B_SilkS and Edge_Cuts — plus separate plated " +
+		"(PTH) and non-plated (NPTH) Excellon drill files (each drill file only when the board " +
+		"has holes of that class) and a '<name>-job.gbrjob' naming every layer's function. " +
+		"Coordinate format is self-declared per layer (read the %FS line, not assume 4.6). Silk " +
+		"is REAL footprint legend geometry plus stroke-font reference designators, on BOTH " +
+		"sides. Fab-correctness still needs a human viewer check — see docs/gerbers.md.",
 	InputSchema: json.RawMessage(`{
 		"type": "object",
 		"properties": {
