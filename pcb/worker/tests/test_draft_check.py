@@ -16,8 +16,6 @@ Fixture/call conventions mirror test_route_drc.py (handle_request dispatch).
 
 from __future__ import annotations
 
-import pytest
-
 from pcb_worker.methods import handle_request
 
 
@@ -33,33 +31,37 @@ def _call(params: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _through_hole_pad(ref: str, x: float, y: float) -> dict:
+    return {
+        "ref": ref, "footprint": "TH_TestPoint", "x_mm": x, "y_mm": y,
+        "rotation_deg": 0, "layer": "top",
+        "pins": [{"number": "1", "x_mm": 0.0, "y_mm": 0.0,
+                  "drill_mm": 0.8, "annulus_diameter_mm": 1.6}],
+    }
+
+
 def _board() -> dict:
     return {
         "version": 1,
         "name": "draft-check",
         "width_mm": 80,
         "height_mm": 80,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
         "components": [
             # SIG (C1) endpoints
-            {"ref": "U1", "footprint": "HDR", "x_mm": 10, "y_mm": 20, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
-            {"ref": "J1", "footprint": "HDR", "x_mm": 50, "y_mm": 20, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
+            _through_hole_pad("U1", 10, 20),
+            _through_hole_pad("J1", 50, 20),
             # SIG2 (C2) endpoints
-            {"ref": "U2", "footprint": "HDR", "x_mm": 20, "y_mm": 0, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
-            {"ref": "J2", "footprint": "HDR", "x_mm": 20, "y_mm": 40, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
+            _through_hole_pad("U2", 20, 5),
+            _through_hole_pad("J2", 20, 35),
             # CLEAN (C3) endpoints — far from everything
-            {"ref": "U3", "footprint": "HDR", "x_mm": 5, "y_mm": 60, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
-            {"ref": "J3", "footprint": "HDR", "x_mm": 12, "y_mm": 60, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
+            _through_hole_pad("U3", 5, 60),
+            _through_hole_pad("J3", 12, 60),
             # EXIST committed-trace pads
-            {"ref": "A1", "footprint": "HDR", "x_mm": 30, "y_mm": 5, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
-            {"ref": "A2", "footprint": "HDR", "x_mm": 30, "y_mm": 35, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
+            _through_hole_pad("A1", 30, 5),
+            _through_hole_pad("A2", 30, 35),
         ],
         "nets": [
             {"name": "SIG", "pins": ["U1.1", "J1.1"]},
@@ -85,10 +87,10 @@ def _c1() -> dict:
             "segments": [_seg("s1", "top", [[10, 20], [50, 20]])], "vias": []}
 
 
-# C2 (net SIG2): vertical x=20, (20,0)->(20,40). Crosses C1 at (20,20).
+# C2 (net SIG2): vertical x=20, (20,5)->(20,35). Crosses C1 at (20,20).
 def _c2() -> dict:
     return {"candidate_id": "cand_2", "net": "SIG2", "revision": 7,
-            "segments": [_seg("s2", "top", [[20, 0], [20, 40]])], "vias": []}
+            "segments": [_seg("s2", "top", [[20, 5], [20, 35]])], "vias": []}
 
 
 # C3 (net CLEAN): short segment on its own pads (5,60)->(12,60). No collision.
@@ -158,10 +160,10 @@ def test_draft_check_verdicts_and_subjects():
 def test_different_layer_crossing_is_clean():
     c2_bottom = _c2()
     c2_bottom["segments"][0]["layer"] = "bottom"  # now on the other layer
+    board = _board()
+    board["traces"] = []
     params = {
-        "board": {"version": 1, "name": "x", "width_mm": 80, "height_mm": 80,
-                  "components": _board()["components"], "nets": _board()["nets"],
-                  "traces": [], "vias": []},
+        "board": board,
         "candidates": [_c1(), c2_bottom],
         "board_token": "t", "workspace_generation": 1,
     }
@@ -181,11 +183,12 @@ def test_different_layer_crossing_is_clean():
 def _layer_change_board() -> dict:
     return {
         "version": 1, "name": "lc", "width_mm": 80, "height_mm": 80,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.25,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
         "components": [
-            {"ref": "P1", "footprint": "HDR", "x_mm": 60, "y_mm": 60, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
-            {"ref": "P2", "footprint": "HDR", "x_mm": 70, "y_mm": 60, "rotation_deg": 0,
-             "layer": "top", "pins": [{"number": "1", "x_mm": 0, "y_mm": 0}]},
+            _through_hole_pad("P1", 60, 60),
+            _through_hole_pad("P2", 70, 60),
         ],
         "nets": [{"name": "LC", "pins": ["P1.1", "P2.1"]}],
         "traces": [], "vias": [],
@@ -250,8 +253,11 @@ def test_echo_is_verbatim_and_geometryless_candidate_errors():
     res = _call(params)["result"]
     assert res["board_token"] == "sha256:zzz"
     assert res["workspace_generation"] == 42
-    assert res["per_candidate"]["cand_3"] == "clean"
+    # Candidate geometric checking is batch-atomic: the unmodelable empty/unknown
+    # candidate means no member of the batch may be reported clean.
+    assert res["per_candidate"]["cand_3"] == "error"
     assert res["per_candidate"]["cand_empty"] == "error"
+    assert res.get("geometric_indeterminate"), res
 
 
 def test_findings_carry_witness_geometry_and_both_type_spellings():
@@ -296,10 +302,7 @@ _SEEDED_REF = "Package_DIP:DIP-6_W7.62mm_Socket"
 
 
 def _compiling_board() -> dict:
-    """A board that actually COMPILES — real seed footprint, real design rules —
-    so the geometric kernel can run over it. The fixture above deliberately uses
-    synthetic footprints and does not compile, which is why it exercises the
-    fail-closed path instead."""
+    """A compact seed-library board for the geometric kernel's clean case."""
     return {
         "version": 1, "name": "draft-geo", "width_mm": 40, "height_mm": 40,
         "layers": ["top", "bottom"],
@@ -311,34 +314,92 @@ def _compiling_board() -> dict:
     }
 
 
-def test_a_staged_zone_that_violates_clearance_IS_REPORTED():
-    """THE DECISIVE ORACLE. The previous version of this test asserted only that
-    `geometric_indeterminate` was ABSENT for a compiling board — which deleting
-    the geometric pass entirely also satisfies, so it could not catch the very
-    mutation its docstring claimed (Codex re-review finding 6). Asserting the
-    absence of a failure signal proves nothing about a check having run.
+def _candidate_geometry_board() -> dict:
+    """A compiling three-pad net plus a foreign pad on its straight run."""
+    return {
+        "version": 1, "name": "draft-candidate-geo",
+        "width_mm": 60, "height_mm": 40,
+        "layers": ["top", "bottom"],
+        "design_rules": {"clearance_mm": 0.2, "trace_width_mm": 0.3,
+                         "via_diameter_mm": 0.8, "via_drill_mm": 0.4},
+        "components": [
+            _through_hole_pad("P1", 10, 20),
+            _through_hole_pad("P2", 50, 20),
+            _through_hole_pad("P3", 30, 35),
+            _through_hole_pad("X1", 30, 20),
+            _through_hole_pad("X2", 50, 35),
+        ],
+        "nets": [
+            {"name": "BUS", "pins": ["P1.1", "P2.1", "P3.1"]},
+            {"name": "OTHER", "pins": ["X1.1", "X2.1"]},
+        ],
+        "traces": [], "vias": [],
+    }
 
-    This asserts a POSITIVE result instead: a staged keepout zone overlapping a
-    pad must produce a geometric finding. MUTATION THIS CATCHES: deleting the
-    pass, passing `board` instead of `effective`, or dropping the findings on
-    the floor — none of which can produce this finding."""
-    board = _compiling_board()
-    # A keepout laid directly over the component's pads: the composed draft
-    # board the panel would send once this zone is staged.
-    board["zones"] = [{
-        "id": "zone:violator", "kind": "keepout", "layer": "top", "net": "",
-        "outline": [{"x_mm": 18.0, "y_mm": 18.0}, {"x_mm": 24.0, "y_mm": 18.0},
-                    {"x_mm": 24.0, "y_mm": 24.0}, {"x_mm": 18.0, "y_mm": 24.0}],
-    }]
+
+def test_candidate_geometric_violation_is_reported_and_attributed():
+    """THE DECISIVE ORACLE. The previous version of this test asserted only that
+    a geometric pass can actually SEE candidate copper and return the identity
+    that the workspace uses to retain the finding. A BUS trace runs through X1,
+    a foreign-net plated pad. Deleting the candidate overlay, checking only the
+    base board, or re-attributing the witness with connectivity's point heuristic
+    all fail this oracle."""
+    candidate = {
+        "candidate_id": "cand-short", "revision": 7, "net": "BUS",
+        "segments": [{"id": "run", "layer": "top", "width": 0.3,
+                      "points": [[10, 20], [50, 20]]}],
+    }
+    res = _call({"board": _candidate_geometry_board(), "candidates": [candidate],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert "geometric_indeterminate" not in res, res.get("geometric_indeterminate")
+    assert res["per_candidate"]["cand-short"] == "violating"
+    attributed = [
+        f for f in res.get("findings", [])
+        if f.get("scope") == "geometric"
+        and {"candidate_id": "cand-short", "revision": 7,
+             "segment_id": "run"} in f.get("subjects", [])
+    ]
+    assert attributed, res.get("findings")
+
+
+def test_composed_placement_violation_reaches_the_geometric_kernel():
+    """A staged placement is already materialized into the board by the panel.
+    Coincident foreign-net pads therefore have to appear as a board-baseline
+    geometric finding even when there are no route candidates."""
+    board = _candidate_geometry_board()
+    x1 = next(c for c in board["components"] if c["ref"] == "X1")
+    x1["x_mm"], x1["y_mm"] = 10, 20
     res = _call({"board": board, "candidates": [],
                  "board_token": "t", "workspace_generation": 1})["result"]
-    if res.get("geometric_indeterminate"):
-        pytest.fail("the kernel refused this board rather than checking it: %s"
-                    % res["geometric_indeterminate"])
-    geo = [f for f in res.get("findings", [])
-           if str(f.get("scope", "")) == "geometric"]
-    assert geo, ("a keepout laid over the pads produced no geometric finding; "
-                 "the composed board is not reaching the kernel")
+    assert "geometric_indeterminate" not in res, res.get("geometric_indeterminate")
+    collisions = [
+        f for f in res.get("findings", [])
+        if f.get("scope") == "geometric"
+        and {p.get("ref") for p in f.get("participants", [])} == {"P1", "X1"}
+    ]
+    assert collisions, res.get("findings")
+
+
+def test_dimensionless_candidate_via_uses_the_board_defaults():
+    """Workspace candidates intentionally omit accepted-board via dimensions.
+    The old raw-board overlay sent that incomplete via back through the compiler,
+    poisoning the whole geometric check. The IR overlay must apply the authored
+    board defaults and reach a real verdict instead."""
+    candidate = {
+        "candidate_id": "via-defaults", "revision": 2, "net": "BUS",
+        "segments": [
+            {"id": "top-leg", "layer": "top", "width": 0.3,
+             "points": [[2, 2], [4, 2]]},
+            {"id": "bottom-leg", "layer": "bottom", "width": 0.3,
+             "points": [[4, 2], [6, 2]]},
+        ],
+        "vias": [{"id": "turn", "position": [4, 2],
+                  "from_layer": "top", "to_layer": "bottom"}],
+    }
+    res = _call({"board": _candidate_geometry_board(), "candidates": [candidate],
+                 "board_token": "t", "workspace_generation": 1})["result"]
+    assert "geometric_indeterminate" not in res, res.get("geometric_indeterminate")
+    assert res["per_candidate"]["via-defaults"] in ("clean", "violating")
 
 
 def test_a_clean_compiling_board_declares_no_indeterminate():
@@ -356,9 +417,11 @@ def test_a_board_the_kernel_cannot_model_says_so_rather_than_reading_clean():
     and a draft check that cannot verify geometry must never present itself as
     having verified it — the false-clean K14 forbids.
 
-    The module fixture uses synthetic footprints ("HDR") that do not resolve, so
-    the compile refuses and this is the honest path."""
-    res = _call({"board": _board(), "candidates": [_c3()],
+    Corrupt one otherwise-real fixture footprint so compile refuses; keeping the
+    healthy fixture healthy ensures all other tests exercise the actual kernel."""
+    board = _board()
+    board["components"][0]["footprint"] = "UNRESOLVED_FOR_TEST"
+    res = _call({"board": board, "candidates": [_c3()],
                  "board_token": "t", "workspace_generation": 1})["result"]
     ind = res.get("geometric_indeterminate")
     assert ind, "a board that cannot be compiled reported no geometric verdict at all"

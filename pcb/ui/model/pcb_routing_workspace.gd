@@ -808,8 +808,6 @@ func geometric_indeterminate() -> Dictionary:
 
 func apply_check_result(reply: Dictionary) -> void:
 	var reply_token := str(reply.get("board_token", ""))
-	var gi: Variant = reply.get("geometric_indeterminate")
-	_geometric_indeterminate = (gi as Dictionary).duplicate(true) if gi is Dictionary else {}
 	# workspace_generation round-trips through JSON as a float; int() normalises.
 	var reply_gen := int(reply.get("workspace_generation", -1))
 
@@ -818,6 +816,13 @@ func apply_check_result(reply: Dictionary) -> void:
 		_revert_pending()
 		_pending_check = {}
 		return
+
+	# The diagnostic belongs to the same coherent reply as the verdicts. Writing
+	# it before the whole-reply guards let a late result from an old board replace
+	# the current check's reason — even though every candidate verdict in that
+	# result was correctly discarded.
+	var gi: Variant = reply.get("geometric_indeterminate")
+	_geometric_indeterminate = (gi as Dictionary).duplicate(true) if gi is Dictionary else {}
 
 	var per_candidate: Dictionary = reply.get("per_candidate", {}) if reply.get("per_candidate", {}) is Dictionary else {}
 	var findings: Array = reply.get("findings", []) if reply.get("findings", []) is Array else []

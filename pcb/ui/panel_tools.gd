@@ -5434,12 +5434,34 @@ static func _cross_candidate_check(host, workspace, data) -> Dictionary:
 	var result: Dictionary = await panel.check_draft(live)
 	if result.is_empty() or not result.has("per_candidate"):
 		return {"skipped": "draft_check_no_reply"}
-	return {
+	var validation: Dictionary = {}
+	for cid in live:
+		var c = workspace.get_candidate(str(cid))
+		if c != null:
+			validation[str(cid)] = str(c.validation)
+	var out := {
 		"checked": live,
 		"checked_stale": stale,
-		"per_candidate": result.get("per_candidate", {}),
+		# The workspace has applied coherence guards and fail-closed geometric
+		# indeterminacy. Expose that authoritative verdict under the familiar key;
+		# returning the worker's pre-application value here reintroduced the very
+		# false-clean the state model had rejected.
+		"per_candidate": validation,
 		"findings": result.get("findings", []),
+		"validation": validation,
 	}
+	# Keep the automatic landing check as honest as the explicit workspace-check
+	# verb. A connectivity verdict is not a geometric verdict; if geometry could
+	# not run, expose both the authoritative workspace state and the reason.
+	var indeterminate: Dictionary = workspace.geometric_indeterminate() \
+		if workspace.has_method("geometric_indeterminate") else {}
+	if not indeterminate.is_empty():
+		out["geometric_indeterminate"] = indeterminate
+		out["note"] = "geometry could NOT be verified (%s) — no candidate is reported clean" % str(indeterminate.get("kind", "unknown"))
+	var provenance: Variant = result.get("draft_provenance")
+	if provenance is Array and not (provenance as Array).is_empty():
+		out["draft_provenance"] = provenance
+	return out
 
 
 ## Stamp width PROVENANCE (docket 019fd0ab5af8) from a _normalize_route_records
@@ -5653,6 +5675,9 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		if not (cross.get("findings", []) as Array).is_empty():
 			out["note"] = str(out["note"]) \
 				+ "; WARNING: the set-scoped check found findings across the live candidate set — see cross_candidate_check"
+		elif cross.has("geometric_indeterminate"):
+			out["note"] = str(out["note"]) \
+				+ "; WARNING: the set-scoped check could not verify geometry — see cross_candidate_check"
 	out.merge(extra, true)
 	return _ok(out)
 
@@ -7197,7 +7222,9 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 	var reply: Dictionary = {
 		"checked": targets,
 		"checked_stale": stale,
-		"per_candidate": result.get("per_candidate", {}),
+		# Same authoritative shape as `validation`: coherence guards and geometric
+		# fail-closed policy have already been applied by the workspace.
+		"per_candidate": after,
 		"findings": result.get("findings", []),
 		"validation": after,
 		"board_token": result.get("board_token", ""),
@@ -7214,7 +7241,7 @@ static func _workspace_check(host, args: Dictionary) -> Dictionary:
 		if workspace.has_method("geometric_indeterminate") else {}
 	if not indeterminate.is_empty():
 		reply["geometric_indeterminate"] = indeterminate
-		reply["note"] = "geometry could NOT be verified (%s) — candidate verdicts reflect connectivity only and no candidate is reported clean" % str(indeterminate.get("kind", "unknown"))
+		reply["note"] = "geometry could NOT be verified (%s) — unverified clean verdicts were downgraded to error; definite connectivity violations remain reported" % str(indeterminate.get("kind", "unknown"))
 	var provenance: Variant = result.get("draft_provenance")
 	if provenance is Array and not (provenance as Array).is_empty():
 		reply["draft_provenance"] = provenance
@@ -7510,6 +7537,9 @@ static func _workspace_propose_bus(host, args: Dictionary) -> Dictionary:
 		if not (cross.get("findings", []) as Array).is_empty():
 			reply["note"] = str(reply["note"]) \
 				+ "; WARNING: the set-scoped check found findings across the live candidate set — see cross_candidate_check"
+		elif cross.has("geometric_indeterminate"):
+			reply["note"] = str(reply["note"]) \
+				+ "; WARNING: the set-scoped check could not verify geometry — see cross_candidate_check"
 	return _ok(reply)
 
 

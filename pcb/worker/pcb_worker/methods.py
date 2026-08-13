@@ -2886,7 +2886,8 @@ def _dc_attribute(finding: dict, seg_subjects: list, via_subjects: list,
     return subjects
 
 
-def _draft_geometric(board: dict, layer_params: dict) -> tuple[list, dict]:
+def _draft_geometric(board: dict, candidates: list,
+                     layer_params: dict) -> tuple[list, dict, dict]:
     """Geometric findings over the COMPOSED DRAFT BOARD (K9, 019fa6ed5e23).
 
     WHY THIS EXISTS, and what was wrong without it. The panel composes canonical
@@ -2902,26 +2903,40 @@ def _draft_geometric(board: dict, layer_params: dict) -> tuple[list, dict]:
     That is the difference between composing correctly and CHECKING what was
     composed, and only the first half had been built.
 
-    This runs the shipped geometric kernel — the same compile → project_board →
-    geometric_drc_from_resolution path minerva_pcb_drc_geometric uses — over the
-    composed board, so a staged zone's clearance violation and a staged
-    placement's pad collision surface as attributed findings WITH the witness
-    geometry K11 requires. The kernel is reused, never re-implemented: a second
-    reading of a clearance rule is the drift this goal exists to remove.
+    This compiles the composed board ONCE, then delegates candidate projection,
+    checking and attribution to :func:`ir_candidates.check_candidates` — the
+    existing neutral owner used by propose-time geometric DRC. That owner adds
+    candidates at the ResolvedBoard level, supplies board-authored via defaults,
+    and attributes every geometric finding by the IR entity ids the kernel
+    actually reports. Rebuilding a second raw-board overlay here previously
+    omitted required via fields and then tried to attribute witness-pair findings
+    with the connectivity checker's unrelated ``at``-point heuristic.
 
-    FAIL-CLOSED. Returns (findings, indeterminate). A compile that refuses, or a
-    kernel that meets geometry it cannot model, yields NO findings and a NAMED
-    indeterminate — never an empty finding list a caller could read as clean.
-    The caller must surface it; draft_check does.
+    FAIL-CLOSED. Returns (all_findings, per_candidate, indeterminate). A compile
+    that refuses, an unmodelable candidate, or a kernel that meets geometry it
+    cannot model yields NO findings and a NAMED indeterminate — never an empty
+    finding list a caller could read as clean. ``all_findings`` includes the
+    composed board's baseline findings as well as candidate-introduced findings;
+    only the latter carry candidate subjects and affect per-candidate verdicts.
     """
     try:
         result = compile_board.compile_board(board, **layer_params)
     except board_model.BoardParseError as exc:
-        return [], {"kind": "parse", "message": str(exc)}
+        return [], {}, {"kind": "parse", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001 — data, not a crash
-        return [], {"kind": "internal", "message": f"compile_board raised {exc!r}"}
+        return [], {}, {"kind": "internal", "message": f"compile_board raised {exc!r}"}
 
-    union = geometric_drc_from_resolution(result)
+    if isinstance(result, compile_board.ResolutionSuccess):
+        warnings = tuple(_diagnostic_to_payload(d) for d in result.diagnostics)
+        try:
+            union = ir_candidates.check_candidates(
+                result.board, candidates, warnings=warnings,
+                **_candidate_overlay_defaults(result.board))
+        except Exception as exc:  # noqa: BLE001 — a fault is NOT a clean.
+            union = ir_candidates.candidate_indeterminate(
+                "internal", f"draft candidate geometric DRC raised {exc!r}")
+    else:
+        union = geometric_drc_from_resolution(result)
     if not union.get("verifies_geometry", False):
         # INDETERMINATE: the kernel could not model this board. Reported as
         # itself rather than flattened into "no findings", which is the exact
@@ -2934,12 +2949,20 @@ def _draft_geometric(board: dict, layer_params: dict) -> tuple[list, dict]:
         # into the same default string and the actual cause was lost. An
         # indeterminate that cannot say WHY is barely better than a silent one.
         err = union.get("error") if isinstance(union.get("error"), dict) else {}
-        return [], {
+        return [], {}, {
             "kind": str(err.get("kind", "unresolved_geometry")),
             "message": str(err.get("message", "geometry could not be verified")),
             "details": err.get("diagnostics", []),
         }
-    return list(union.get("findings", []) or []), {}
+
+    findings = list((union.get("baseline") or {}).get("findings", []) or [])
+    findings += list(union.get("findings", []) or [])
+    per_candidate = {}
+    for raw_cid, record in (union.get("per_candidate") or {}).items():
+        verdict = record.get("verdict") if isinstance(record, dict) else None
+        per_candidate[str(raw_cid)] = \
+            "violating" if verdict == "violations" else "clean"
+    return findings, per_candidate, {}
 
 
 def _draft_check(params: dict) -> dict:
@@ -3050,44 +3073,45 @@ def _draft_check(params: dict) -> dict:
             per_candidate[cid] = "error"
         return _reply([], per_candidate, error=str(exc))
 
-    # THE GEOMETRIC HALF (K9). run_drc above is connectivity-only by its own
-    # contract, and the subject set built earlier walks traces and candidates —
-    # so nothing so far has looked at the staged zones and moved components the
-    # panel composed into `board`. This pass does, over the composed board, with
-    # the shipped kernel.
-    # EFFECTIVE, not board (Codex re-review finding 1). `board` is canonical plus
-    # the staged overlay; `effective` is that PLUS the candidates' copper as
-    # traces/vias. Handing the kernel `board` meant a clearance violation
-    # involving CANDIDATE copper could not be seen, so a near-miss between a
-    # proposed route and a staged zone still read clean — the materialized
-    # proposal board K9 names is all three sources at once, not two of them.
-    geo_findings, geo_indeterminate = _draft_geometric(effective, _layer_params(params))
+    # THE GEOMETRIC HALF (K9). Compile the composed canonical+staged board, then
+    # let the neutral candidate-overlay owner add and attribute candidate copper
+    # at the IR level. `effective` above remains connectivity's raw-board union;
+    # feeding its hand-built vias to compile_board used to omit net/size fields
+    # and made every via-bearing candidate permanently indeterminate.
+    geo_findings, geo_per_candidate, geo_indeterminate = _draft_geometric(
+        board, candidates, _layer_params(params))
+
+    # One authoritative per-candidate result. A determinate geometric violation
+    # overrides connectivity clean; indeterminate downgrades every otherwise-
+    # clean candidate to error in the WORKER reply itself, so no consumer can
+    # accidentally expose the connectivity-only clean value.
+    if geo_indeterminate:
+        for cid in per_candidate:
+            if per_candidate[cid] == "clean":
+                per_candidate[cid] = "error"
+    else:
+        for cid, verdict in geo_per_candidate.items():
+            if cid in per_candidate and verdict == "violating":
+                per_candidate[cid] = "violating"
 
     eps = _dc_clearance(board)
     findings_out: list = []
-    # Geometric findings FIRST and passed through whole: they already carry
-    # their own type, subjects and witness geometry from the kernel, and the
-    # attribution loop below is built for connectivity findings whose evidence
-    # is a single point. Re-deriving subjects for them would replace richer
-    # information with poorer.
+    # Geometric findings FIRST and passed through whole. Candidate-introduced
+    # findings already carry exact IR-identity subjects from ir_candidates;
+    # composed-board baseline findings deliberately carry none.
     for gf in geo_findings:
         if not isinstance(gf, dict):
             continue
         finding = dict(gf)
-        finding.setdefault("kind", gf.get("type"))
+        # Geometric payloads use `type` for the rule class and may use `kind`
+        # for the primitive involved (for example "pth_pad"). This draft-check
+        # surface historically defines kind as the rule class, so normalize it
+        # explicitly and preserve the richer primitive detail in its own source
+        # fields rather than emitting two contradictory class spellings.
+        if gf.get("kind") not in (None, gf.get("type")):
+            finding["entity_kind"] = gf.get("kind")
+        finding["kind"] = gf.get("type")
         finding.setdefault("scope", "geometric")
-        # ATTRIBUTED to the same subjects connectivity findings use (Codex
-        # re-review finding 2). Without this a geometric finding carried no
-        # candidate_id, so the workspace — which stores findings BY candidate —
-        # kept none of them, and a candidate whose copper violated a clearance
-        # still showed clean. A finding nothing can attribute is a finding
-        # nothing will act on.
-        subjects = _dc_attribute(gf, seg_subjects, via_subjects, eps)
-        finding["subjects"] = subjects
-        for subj in subjects:
-            cid = str(subj.get("candidate_id", "")) if isinstance(subj, dict) else ""
-            if cid and cid != "board" and cid in per_candidate:
-                per_candidate[cid] = "violating"
         findings_out.append(finding)
     for f in drc_result.get("findings", []):
         if not isinstance(f, dict):
@@ -3118,9 +3142,12 @@ def _draft_check(params: dict) -> dict:
         findings_out.append(finding)
         for s in subjects:
             scid = str(s.get("candidate_id", ""))
-            # Only a real candidate flips to violating; "board" and error
-            # candidates are untouched (an error candidate has no subjects).
-            if scid in per_candidate and per_candidate[scid] != "error":
+            # A definite connectivity violation remains sound even when the
+            # complementary geometric pass was indeterminate. Preserve that
+            # useful result; fail-closed only forbids an unverified CLEAN.
+            # Geometryless error candidates have no subjects and never enter
+            # this branch.
+            if scid in per_candidate:
                 per_candidate[scid] = "violating"
 
     return _reply(findings_out, per_candidate,

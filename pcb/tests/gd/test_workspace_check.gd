@@ -17,9 +17,52 @@ extends SceneTree
 ##        (ii)  stale workspace_generation (set mutated after begin_check)
 ##        (iii) a candidate's revision drifted after begin_check
 ##      A stale reply must NEVER mark a candidate clean.
+##   4. Geometric indeterminacy downgrades connectivity-clean candidates to
+##      error, and a stale reply cannot replace the current diagnostic.
 
 const PcbRoutingWorkspace := preload("res://../../minerva-plugins/pcb/ui/model/pcb_routing_workspace.gd")
 const PcbRouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
+const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+
+
+class FakeDraftData extends RefCounted:
+	var board_revision: int = 0
+
+
+## Simulates a mixed-version/raw worker that still says connectivity-clean while
+## naming geometric indeterminacy. The panel applies the reply to the workspace;
+## the MCP adapter must return that guarded state, not resurrect the raw clean.
+class FakeDraftPanel extends RefCounted:
+	var workspace
+
+	func _init(ws) -> void:
+		workspace = ws
+
+	func check_draft(ids: Array) -> Dictionary:
+		var payload: Dictionary = workspace.begin_check(ids)
+		var per_candidate: Dictionary = {}
+		for cid in ids:
+			per_candidate[str(cid)] = "clean"
+		var reply := {
+			"board_token": payload.get("board_token", ""),
+			"workspace_generation": payload.get("workspace_generation", -1),
+			"per_candidate": per_candidate,
+			"findings": [],
+			"geometric_indeterminate": {
+				"kind": "unsupported_geometry", "message": "synthetic refusal"},
+		}
+		workspace.apply_check_result(reply)
+		return reply
+
+
+class FakeDraftHost extends RefCounted:
+	var panel
+
+	func _init(value) -> void:
+		panel = value
+
+	func get_panel():
+		return panel
 
 var _pass := 0
 var _fail := 0
@@ -32,6 +75,9 @@ func _init() -> void:
 	_run_mismatch_stale_token()
 	_run_mismatch_stale_generation()
 	_run_mismatch_revision_drift()
+	_run_geometric_indeterminate()
+	_run_stale_diagnostic_discard()
+	await _run_cross_check_reply_honesty()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -223,3 +269,81 @@ func _run_mismatch_revision_drift() -> void:
 	# c2 did not drift and its tokens match → legitimately clean.
 	check_eq("undrifted c2 legitimately clean", c2.validation, "clean")
 	check_eq("no finding stored on the discarded c1", ws.findings_for_candidate(c1.candidate_id).size(), 0)
+
+
+# ── 4. geometric indeterminacy is state, subject to the same guards ──────────
+
+func _run_geometric_indeterminate() -> void:
+	print("-- 4(i). geometric indeterminate ⇒ no connectivity-only clean --")
+	var fx := _fresh()
+	var ws = fx["ws"]
+	var c1 = fx["c1"]
+	var c2 = fx["c2"]
+	var reply := _matching_reply(fx, "clean", "clean")
+	reply["geometric_indeterminate"] = {
+		"kind": "unsupported_geometry",
+		"message": "candidate copper could not be modeled",
+	}
+
+	ws.apply_check_result(reply)
+
+	check_eq("indeterminate c1 is error, never clean", c1.validation, "error")
+	check_eq("indeterminate c2 is error, never clean", c2.validation, "error")
+	check_eq("the actionable geometric reason is retained",
+		str(ws.geometric_indeterminate().get("kind", "")), "unsupported_geometry")
+
+
+func _run_stale_diagnostic_discard() -> void:
+	print("-- 4(ii). stale reply cannot overwrite the current diagnostic --")
+	var fx := _fresh()
+	var ws = fx["ws"]
+	var c1 = fx["c1"]
+	var c2 = fx["c2"]
+	var current := _matching_reply(fx, "clean", "clean")
+	current["geometric_indeterminate"] = {
+		"kind": "current_reason", "message": "the coherent check's reason"}
+	ws.apply_check_result(current)
+
+	# Start another check, then deliver a reply for a different board. Its
+	# diagnostic must be discarded with its verdicts; pending candidates return
+	# to the prior error state established by the coherent reply above.
+	fx["payload"] = ws.begin_check()
+	var stale := _matching_reply(fx, "clean", "clean")
+	stale["board_token"] = "sha256:stale-board"
+	stale["geometric_indeterminate"] = {
+		"kind": "stale_reason", "message": "must not become current"}
+	ws.apply_check_result(stale)
+
+	check_eq("stale diagnostic was discarded",
+		str(ws.geometric_indeterminate().get("kind", "")), "current_reason")
+	check_eq("stale reply reverted c1 to its prior error", c1.validation, "error")
+	check_eq("stale reply reverted c2 to its prior error", c2.validation, "error")
+
+	# A later coherent determinate reply clears the diagnostic normally.
+	fx["payload"] = ws.begin_check()
+	ws.apply_check_result(_matching_reply(fx, "clean", "clean"))
+	check("coherent determinate reply clears the diagnostic",
+		ws.geometric_indeterminate().is_empty())
+	check_eq("coherent determinate reply may mark c1 clean", c1.validation, "clean")
+
+
+func _run_cross_check_reply_honesty() -> void:
+	print("-- 4(iii). automatic cross-check exposes guarded verdict + reason --")
+	var fx := _fresh()
+	var ws = fx["ws"]
+	# _fresh starts a model-only pending check; discard it before the fake panel
+	# begins the check owned by this tool call.
+	ws.apply_check_result({})
+	var cross: Dictionary = await PanelTools._cross_candidate_check(
+		FakeDraftHost.new(FakeDraftPanel.new(ws)), ws, FakeDraftData.new())
+	var c1_id := str(fx["c1"].candidate_id)
+
+	check_eq("cross-check per_candidate is guarded, not raw clean",
+		str((cross.get("per_candidate", {}) as Dictionary).get(c1_id, "")), "error")
+	check_eq("cross-check validation agrees with its verdict",
+		str((cross.get("validation", {}) as Dictionary).get(c1_id, "")), "error")
+	check_eq("cross-check exposes the geometric refusal",
+		str((cross.get("geometric_indeterminate", {}) as Dictionary).get("kind", "")),
+		"unsupported_geometry")
+	check("cross-check note makes the refusal visible",
+		str(cross.get("note", "")).contains("could NOT be verified"))
