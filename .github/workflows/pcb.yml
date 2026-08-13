@@ -123,10 +123,16 @@ on:
     # .github/actions/pcb-setup/** is listed for the same reason: the toolchain
     # steps moved there in A0c, so a change to that action changes what every
     # job below actually does.
+    #
+    # scripts/** (repo root) because the package job depends on the shared
+    # build-python-runtime-bundle.sh and smoke/mcp_smoke.py — an edit there
+    # can break pcb's bundle build without touching pcb/** (cad.yml lists it
+    # for the same reason).
     paths:
       - "pcb/**"
       - "shared/**"
       - "go.work"
+      - "scripts/**"
       - ".github/workflows/pcb.yml"
       - ".github/actions/pcb-setup/**"
   pull_request:
@@ -134,6 +140,7 @@ on:
       - "pcb/**"
       - "shared/**"
       - "go.work"
+      - "scripts/**"
       - ".github/workflows/pcb.yml"
       - ".github/actions/pcb-setup/**"
   workflow_dispatch:
@@ -622,7 +629,13 @@ jobs:
       - name: Confirm zstd (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: zstd --version
+        # Git-for-Windows bundles zstd under usr/bin, which the pwsh system
+        # PATH does not include (the later bash steps see it as /usr/bin).
+        # Prepend it so this probe cannot fail spuriously on a runner image
+        # without a system-wide zstd — same workaround cad.yml carries.
+        run: |
+          $env:Path = "C:\Program Files\Git\usr\bin;$env:Path"
+          zstd --version
 
       - name: Cache PBS downloads
         uses: actions/cache@v4
@@ -673,20 +686,34 @@ jobs:
 
       - name: Binary-size assertion (catches go:embed silently consuming empty bundle)
         run: |
-          # The embedded bundle is well over 100MB per platform. A binary
-          # smaller than that means go:embed consumed the committed zero-byte
-          # PLACEHOLDERS instead of a built bundle — the exact failure the
-          # placeholder scheme makes possible, and this assertion prevents.
+          # Threshold is PER-PLUGIN, deliberately NOT cad's 100MB: cad's
+          # bundle carries build123d/OCP (~150-250MB), pcb's is bare CPython
+          # plus three small wheels. Measured from the pinned PBS assets
+          # (tag 20260510 / cpython 3.12.13): windows 46MB, macos slices
+          # ~25MB each, linux-x86_64 111MB — so the smallest legitimate
+          # binary (windows: Go code + ~40MB zstd bundle) sits near 60MB,
+          # while a placeholder-built binary is Go code only (~15-25MB).
+          # 40MB separates the two on every leg with margin both ways.
           BIN="build/pcb-plugin${{ matrix.ext }}"
           if [ ! -f "$BIN" ]; then
             echo "::error::built binary not found at $BIN"; exit 1
           fi
           SIZE=$(wc -c < "$BIN")
           echo "binary size: $SIZE bytes ($((SIZE / 1024 / 1024)) MB)"
-          if [ "$SIZE" -lt 100000000 ]; then
-            echo "::error::binary too small ($SIZE bytes < 100MB) — go:embed likely embedded the placeholders"
+          if [ "$SIZE" -lt 40000000 ]; then
+            echo "::error::binary too small ($SIZE bytes < 40MB) — go:embed likely embedded the zero-byte placeholders"
             exit 1
           fi
+
+      # Run the pcbruntime tests against the REAL bundle (cold GA-4 review
+      # finding 4): the repo-wide `test` job only ever sees the zero-byte
+      # placeholders, so embed_test.go's sha-verification branch is dead
+      # there. Here the bundle is real, so a corrupt or mispaired
+      # bundle/sidecar fails THIS job instead of a user machine (PythonPath
+      # deliberately falls back to system python on embedded-tier failure,
+      # so the smoke below would not catch it).
+      - name: Go test pcbruntime (real bundle)
+        run: go test -count=1 ./internal/pcbruntime/
 
       - name: MCP stdio smoke (initialize + tools/list)
         run: python3 ../scripts/smoke/mcp_smoke.py build/pcb-plugin${{ matrix.ext }}

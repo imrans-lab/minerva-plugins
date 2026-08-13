@@ -10,8 +10,10 @@ import (
 // and its checksum are EITHER both placeholders (empty — dev tree, where
 // sharedruntime falls through to the dev tiers) OR both real (CI package job
 // after the bundle build), never mixed. A bundle with no checksum could not
-// be verified before extraction; a checksum with no bundle would make
-// PythonPath attempt tier 1 against zero bytes.
+// be verified before extraction; a checksum with no bundle is a build
+// mistake this test names precisely (harmless at runtime — extract.go
+// returns ErrPlatformNotBundled on the empty bundle before consulting the
+// sha — but "harmless by accident" is not a state to ship).
 func TestBundleAndChecksumArePlaceholderConsistent(t *testing.T) {
 	bundleEmpty := len(EmbeddedBundle) == 0
 	shaEmpty := EmbeddedSHA256 == ""

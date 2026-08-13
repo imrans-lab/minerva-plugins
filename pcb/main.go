@@ -40,7 +40,12 @@ import (
 const (
 	protocolVersion = "2024-11-05"
 	serverName      = "pcb"
-	serverVersion   = "0.2.0"
+	// MUST bump in lockstep with manifest.json's version: this is the
+	// PluginVersion sharedruntime.PythonPath uses as the extracted-runtime
+	// CACHE KEY, so a manifest-only bump would ship a new bundle that
+	// cache-hits the old extracted runtime. Pinned by
+	// TestServerVersionMatchesManifest.
+	serverVersion   = "0.3.0"
 
 	// workerModule is the python module the worker runs as (python -m <module>).
 	workerModule = "pcb_worker"

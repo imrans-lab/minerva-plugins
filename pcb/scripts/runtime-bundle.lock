@@ -37,6 +37,7 @@ WORKER_PACKAGES="pcb_worker agent_router"
 # bundle must live under the Go source tree). NOTE unlike cad, this dir
 # carries COMMITTED zero-byte placeholders so the plugin compiles without a
 # bundle (empty embed => sharedruntime dev-tier fallback); the CI package job
-# overwrites them and the >100MB size assertion catches a release that
-# didn't.
+# overwrites them and pcb.yml's per-plugin 40MB size assertion catches a
+# release that didn't (pcb bundles are bare-CPython-sized, ~25-110MB — cad's
+# 100MB threshold would red the smaller legs).
 BUNDLE_OUT_DIR="internal/pcbruntime/bundle"

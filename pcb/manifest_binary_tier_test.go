@@ -48,6 +48,29 @@ func TestManifestIsBinaryTier(t *testing.T) {
 	}
 }
 
+// serverVersion is the extracted-runtime CACHE KEY (PluginVersion in
+// sharedruntime.PythonPath): a manifest-only version bump would ship a new
+// bundle that cache-hits the OLD extracted runtime, so users would run the
+// previous Python worker under the new Go binary. Cold GA-4 review finding 2
+// — cad carries this exact skew latent; pcb pins it.
+func TestServerVersionMatchesManifest(t *testing.T) {
+	raw, err := os.ReadFile("manifest.json")
+	if err != nil {
+		t.Fatalf("read manifest.json: %v", err)
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("parse manifest.json: %v", err)
+	}
+	if serverVersion != m.Version {
+		t.Fatalf("main.go serverVersion %q != manifest.json version %q — "+
+			"bump them in lockstep (serverVersion is the runtime-extraction "+
+			"cache key)", serverVersion, m.Version)
+	}
+}
+
 // The files the pack step ships beside the binary. Each is load-bearing:
 // library/ because compilation is hermetic and fails closed without the seed
 // lockfile; libraries.lock.json because minerva_pcb_fetch_libraries reads it
