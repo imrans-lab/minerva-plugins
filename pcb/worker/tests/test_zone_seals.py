@@ -519,3 +519,80 @@ def test_overlapping_different_net_pours_are_still_refused():
     assert not isinstance(result, ResolutionSuccess)
     assert "zone_fill_failed" in [d.code for d in result.diagnostics
                                   if d.severity is DiagnosticSeverity.ERROR]
+
+
+# --------------------------------------------------------------------------
+# Epoch GA-5 (chore 019fb06f2254) — the surviving-raise halves of deferred
+# test Z4 and the emission gaps of Z5 the triage found unpinned. The Z4
+# steps asking for a FOREIGN-pour obstacle are SUPERSEDED by the ruling in
+# route_bridge (pours are deliberately NOT obstacles — the fill carves
+# itself around routed copper after the fact); what must stay pinned is
+# that the raises that SURVIVED the narrowing still fire.
+# --------------------------------------------------------------------------
+
+
+def test_copper_board_graphics_still_refuse_routing(filled_board):
+    """route_bridge's surviving copper-graphics raise (unpinned until GA-5).
+
+    STAND-IN BOARD, stated out loud (same doctrine as the route_rules via
+    stand-in): compile refuses board-level copper graphics upstream, so the
+    real IR cannot reach this guard today — it is defence in depth, and the
+    stand-in exercises the guard, not a compiler-producible state."""
+    from pcb_worker.resolved_board import LayerRole
+
+    class _CopperGraphic:
+        class layer:
+            role = LayerRole.COPPER
+
+    class _BoardWithCopperGraphic:
+        outline = filled_board.outline
+        zones = ()
+        board_graphics = (_CopperGraphic(),)
+        components = ()
+
+    with pytest.raises(UnsupportedGeometry, match="copper board/placed graphics"):
+        _reject_unroutable_board(_BoardWithCopperGraphic())
+
+
+def test_an_arc_keepout_still_refuses_by_name():
+    """The arc-contour refusal inside _keepout_obstacle (unpinned until
+    GA-5): an approximated arc could UNDER-block its convex side, which is
+    never legal, so a keepout carrying one refuses instead."""
+    from types import SimpleNamespace
+
+    from pcb_worker.resolved_board import ArcGeometry
+    from pcb_worker.route_bridge import _keepout_obstacle
+
+    zone = SimpleNamespace(
+        id="kz-arc",
+        authored_outline=SimpleNamespace(segments=(
+            ArcGeometry(start=(0.0, 0.0), mid=(1.0, 1.0), end=(2.0, 0.0)),)),
+    )
+    with pytest.raises(UnsupportedGeometry, match="ArcGeometry"):
+        _keepout_obstacle(zone)
+
+
+def test_a_top_only_pour_emits_nothing_on_the_bottom_copper(filled_board):
+    """Z5's missing negative half: the pour is on "top"; B_Cu must carry ZERO
+    Gerber regions. A bucketing bug that mirrored fill to both faces would
+    pass every existing count assertion (they only read F_Cu)."""
+    files = gerber.build_gerbers_ir(filled_board, name="zone-seal")
+    assert files["zone-seal-B_Cu.gbr"].count("G36") == 0
+
+
+def test_pour_fill_crosses_the_gerber_frame_exactly_once(filled_board):
+    """Z5's missing Y-frame half, pinned at the harvest seam with DOCTORED
+    known coordinates: a Y-asymmetric triangle must come out of _harvest_ir
+    with every Y negated (board frame is Y-down, RS-274X is Y-up — bug
+    019fa8011555's class, which the silk suite pins but no pour test did)."""
+    from dataclasses import replace as _dc_replace
+
+    from pcb_worker.resolved_board import PolygonGeometry
+
+    tri = PolygonGeometry(points=((5.0, 2.0), (15.0, 2.0), (5.0, 8.0)))
+    rb = _dc_replace(filled_board, zones=(
+        _dc_replace(filled_board.zones[0], fill=(tri,)),))
+    g = gerber._harvest_ir(rb, gerber.DEFAULT_MASK_CLEARANCE_MM)
+    assert g.frame == "gerber"
+    assert g.zone_fill_top == [[(5.0, -2.0), (15.0, -2.0), (5.0, -8.0)]], (
+        "pour Y must be negated exactly once by to_gerber_frame")

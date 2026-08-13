@@ -72,6 +72,8 @@ RESOLVE = "pcb_worker/resolve.py"
 RESOLVED_BOARD = "pcb_worker/resolved_board.py"
 MANUFACTURER_PROFILE = "pcb_worker/manufacturer_profile.py"
 ZONE_FILL = "pcb_worker/zone_fill.py"
+FOOTPRINTS = "pcb_worker/footprints.py"
+ROUTE_BRIDGE = "pcb_worker/route_bridge.py"
 #: NOT source: the schema doc is TEST INPUT. Paths are relative to ``pcb/worker``,
 #: so this escapes one level, exactly as ``run_sweep.PCB_SIBLINGS`` copies it.
 BOARD_YAML_DOC = "../docs/board-yaml.md"
@@ -1279,6 +1281,113 @@ MUTANTS: tuple[dict, ...] = (
                      "clearance while every string and list is still rejected and "
                      "the guard looks intact.",
     },
+    # -----------------------------------------------------------------------
+    # Epoch-4 seams (GA-5, chore 019fb06f2254 step 4). These are the surfaces
+    # epoch 4 created under zero-test mods; precedent for the omission is
+    # 019fa80373c5. Each pairs with the deferred tests authored at GA-5.
+    # -----------------------------------------------------------------------
+    {
+        "id": "zone_fill_clearance_ignores_the_foreign_nets_class",
+        "file": ZONE_FILL,
+        "kind": "half",
+        "find": "    for net_id in (zone.net_id, other_net_id):",
+        "replace": "    for net_id in (zone.net_id,):",
+        "rationale": "HALF: one of the two PARTICIPANTS dropped from the "
+                     "clearance floor fold (Z2 step 6's named weakening). The "
+                     "pour still honors its own net's class minimum, so most "
+                     "boards fill identically — but a foreign net whose class "
+                     "demands a wider gap gets the narrower one: copper that "
+                     "passes the filler and fails the DRC that judges it.",
+    },
+    {
+        "id": "zone_fill_carve_inflation_never_applied",
+        "file": ZONE_FILL,
+        "kind": "full",
+        "find": "        out.extend(offset.Execute(distance))",
+        "replace": "        out.extend(offset.Execute(0))",
+        "rationale": "FULL: the carve offset collapses to zero, so every "
+                     "foreign feature is subtracted at its bare outline with NO "
+                     "clearance ring — the pour touches foreign copper "
+                     "everywhere. If no test kills this, no test measures the "
+                     "gap the fill exists to leave.",
+    },
+    {
+        "id": "gc7_same_net_exemption_treats_unassigned_as_shared",
+        "file": DRC_GEOM,
+        "kind": "half",
+        "find": "            if prim.net_id is not None and prim.net_id == zone.net_id:",
+        "replace": "            if prim.net_id == zone.net_id:",
+        "rationale": "HALF: the GC7 zone-clearance exemption's non-null "
+                     "conjunct dropped — the INLINE twin (drc_geometric GC7) of "
+                     "the shared-helper site the corpus already mutates. A "
+                     "netless zone then exempts every netless primitive from "
+                     "zone clearance: a missed encroachment, i.e. a false "
+                     "clean.",
+    },
+    {
+        "id": "gc7_unfilled_zone_no_longer_indeterminate",
+        "file": DRC_GEOM,
+        "kind": "full",
+        "find": "        unfilled = [z.id for z in rb.zones\n"
+                "                    if z.kind is ZoneKind.COPPER_POUR and z.fill is None]",
+        "replace": "        unfilled = []",
+        "rationale": "FULL: the unfilled-pour indeterminate narrowing (epoch 4 "
+                     "C6) silently vanishes — a board whose pour copper was "
+                     "never computed now gets a geometric verdict that ignores "
+                     "that copper entirely. 'Indeterminate is not a pass' is "
+                     "the doctrine; this mutant makes it a pass.",
+    },
+    {
+        "id": "footprints_paste_ratio_refusal_never_fires",
+        "file": FOOTPRINTS,
+        "kind": "full",
+        "find": "        if ratio_value is not None and ratio_value != 0.0:",
+        "replace": "        if False:",
+        "rationale": "FULL: the solder_paste_margin_ratio refusal (deferred "
+                     "test P1's site) never fires, so a footprint asking for a "
+                     "proportional stencil margin silently gets the absolute "
+                     "margin (usually 0.0) instead — wrong paste apertures on "
+                     "a real stencil, with every existing suite green.",
+    },
+    {
+        "id": "footprints_paste_ratio_refusal_overfires_on_zero",
+        "file": FOOTPRINTS,
+        "kind": "half",
+        "find": "        if ratio_value is not None and ratio_value != 0.0:",
+        "replace": "        if ratio_value is not None:",
+        "rationale": "HALF: the != 0.0 conjunct dropped — an authored ratio of "
+                     "exactly 0.0 (KiCad writes these; it means 'no "
+                     "proportional margin') now refuses the whole footprint. "
+                     "The over-firing direction P1's negative half exists to "
+                     "guard: a refusal that fires unconditionally still passes "
+                     "a lazy positive-only test.",
+    },
+    {
+        "id": "route_bridge_keepouts_vanish_from_the_obstacle_set",
+        "file": ROUTE_BRIDGE,
+        "kind": "full",
+        "find": "        if zone.kind is ZoneKind.KEEPOUT)",
+        "replace": "        if False)",
+        "rationale": "FULL: authored keepout zones stop becoming routing "
+                     "obstacles, so the engine routes copper straight through "
+                     "a region the author prohibited — the exact K6 surface "
+                     "epoch UX3 opened when it narrowed the old refuse-all-"
+                     "zones raise (Z4 step 3's surviving half).",
+    },
+    {
+        "id": "route_bridge_wildcard_keepout_blocks_nothing",
+        "file": ROUTE_BRIDGE,
+        "kind": "half",
+        "find": "        blocks_all_layers=layer_alias is None,",
+        "replace": "        blocks_all_layers=False,",
+        "rationale": "HALF: the layer-scope fail-safe inverted — a wildcard or "
+                     "sideless keepout (layer_alias None) now carries "
+                     "blocks_all_layers=False AND layer=None, i.e. it blocks "
+                     "NO layer at all. Single-layer keepouts keep working, so "
+                     "the projection looks intact while the fail-safe reading "
+                     "('the author did not narrow it') is gone — the under-"
+                     "blocking direction that is never legal.",
+    },
 )
 
 
@@ -1365,8 +1474,29 @@ def validate_shape() -> None:
     # considered and rejected: nothing in the existing set covers ground these
     # eight would duplicate. That is the number to re-examine if the ceiling is
     # ever pushed again.
-    if not 24 <= len(MUTANTS) <= 64:
-        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..64 band")
+    #
+    # RAISED 64 -> 72 for the epoch-4 seams (GA-5, chore 019fb06f2254 step 4).
+    # The written reason, at the standard the three earlier raises set:
+    #
+    #   * These eight target seams epoch 4 CREATED under zero-test mods and
+    #     that the existing set provably does not touch: footprints.py and
+    #     route_bridge.py had no path constant at all, the GC7 zone-clearance
+    #     exemption is a separate INLINE site from the shared helper already
+    #     mutated (drcgeo_same_net_exemption_...), and the six zone_fill
+    #     entries above all target sliver/island/hole rules — none touches
+    #     the clearance fold or the carve inflation, the FULL+HALF pair the
+    #     Z2 deferred test declares mandatory.
+    #   * Every one is fabrication- or prohibition-critical: wrong paste
+    #     apertures on a stencil, a pour carved with no clearance, a missed
+    #     zone encroachment, an unfilled pour graded clean, copper routed
+    #     through an authored keepout. None duplicates silk/latent ground.
+    #   * Four FULL/HALF pairs on four sites, same doctrine as D0-3: the
+    #     halves are what separate a guard that exists from one that binds.
+    #
+    # Cost at 72: ~36 minutes over -j 6 at the measured per-entry price —
+    # still a phase-boundary spend. Re-examine at the next push.
+    if not 24 <= len(MUTANTS) <= 72:
+        raise SystemExit(f"corpus size {len(MUTANTS)} outside the 24..72 band")
     for m in MUTANTS:
         for key in ("id", "file", "find", "replace", "kind", "rationale"):
             if key not in m:
