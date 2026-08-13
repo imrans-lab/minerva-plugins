@@ -343,6 +343,23 @@ def build_scratch(tag: str) -> tuple[Path, Path]:
     # .github/workflows/corpus-policy.yml. Workflows only — no CI secrets or
     # state live there, it is plain YAML under version control.
     shutil.copytree(PCB.parent / ".github", tmp / ".github", ignore=COPY_IGNORE)
+    # The scratch is a REAL (throwaway) git repo (GA testex, the second half
+    # of the same control repair): hermetic-fab-check.sh derives REPO_ROOT
+    # and compiles from a `git worktree` at HEAD, and corpus_policy's scan
+    # is `git ls-files`/`git grep` — four control tests are red without a
+    # .git. One synthetic commit of the copied tree gives both their
+    # machinery; identity is pinned locally so the sweep never depends on
+    # host git config. (~1-2s per scratch; mutants restore files in place,
+    # so HEAD stays the clean tree — which is fine: the git-consuming tests
+    # are script/scan pins, not worker-mutant killers.)
+    def _git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp), *args], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _git("init", "-q")
+    _git("config", "user.email", "mutsweep@localhost")
+    _git("config", "user.name", "mutsweep")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "scratch tree")
     return tmp, worker
 
 
