@@ -180,7 +180,7 @@ def find_path(
     if corridor:
         best: Optional[Path] = None
         best_cost = float("inf")
-        for cand_layer, via_cost in _corridor_layer_candidates(layer, allow_via):
+        for cand_layer, via_cost in _corridor_layer_candidates(grid, layer, allow_via):
             found = _corridor_astar(
                 grid, start, end, net, cand_layer, corridor,
                 avoid_areas=avoid_areas, prefer_orthogonal=prefer_orthogonal)
@@ -193,6 +193,14 @@ def find_path(
         # ATOMIC: a corridor route is emitted whole or not at all — a partial
         # corridor walk is never returned.
         if best is not None:
+            # A corridor route planned on a NON-requested layer reaches that
+            # layer through a via — record it (epoch GA-2 fix; before this,
+            # the corridor branch was the one layer-changing path that
+            # reported ZERO vias: copper on the other side with nothing
+            # joining it). Same convention as _try_via_path: the via sits at
+            # the route's start, where the pad's layer transitions.
+            if best.segments and best.segments[0].layer != layer and not best.vias:
+                best.vias = [start]
             return best
         # NO CORRIDOR ROUTE EXISTS (obstacles, or none inside the bounded
         # excursion). Waypoints are NOT mandatory — the approved semantics —
@@ -221,13 +229,24 @@ def find_path(
     if path:
         return path
 
-    # Try with via if allowed
+    # Try with via if allowed. Every OTHER grid layer is a candidate (epoch
+    # GA-2; before that a binary F.Cu<->B.Cu flip), tried nearest-in-stack
+    # first: a through via reaches every layer equally, but preferring the
+    # adjacent plane keeps 2-layer behaviour byte-identical (B.Cu is still the
+    # first and only candidate) and gives deeper stacks a stable, explainable
+    # order rather than a dict-order accident.
     if allow_via:
-        other_layer = "B.Cu" if layer == "F.Cu" else "F.Cu"
-        path = _try_via_path(grid, start, end, net, layer, other_layer,
-                             prefer_orthogonal=prefer_orthogonal)
-        if path:
-            return path
+        try:
+            layer_index = grid.layers.index(layer)
+        except ValueError:
+            layer_index = 0
+        others = sorted((lyr for lyr in grid.layers if lyr != layer),
+                        key=lambda lyr: abs(grid.layers.index(lyr) - layer_index))
+        for other_layer in others:
+            path = _try_via_path(grid, start, end, net, layer, other_layer,
+                                 prefer_orthogonal=prefer_orthogonal)
+            if path:
+                return path
 
     return None
 
@@ -567,17 +586,23 @@ def _segments_from_points(points: list[tuple[float, float]],
 CORRIDOR_VIA_COST_MM: float = 8.0
 
 
-def _corridor_layer_candidates(layer: str, allow_via: bool) -> list[tuple[str, float]]:
+def _corridor_layer_candidates(grid, layer: str,
+                               allow_via: bool) -> list[tuple[str, float]]:
     """Layers a corridor route may be planned on, with each one's via cost.
 
-    The requested layer is free; the opposite layer is offered only when vias
-    are permitted and carries CORRIDOR_VIA_COST_MM. Both candidates are WHOLE
-    paths — this is what keeps layer choice a single, internally consistent
-    decision instead of something threaded across legs.
+    The requested layer is free; every OTHER grid layer (epoch GA-2; formerly
+    a binary flip) is offered only when vias are permitted and carries
+    CORRIDOR_VIA_COST_MM — one flat cost, because the via that reaches any of
+    them is the same through-hole. Candidates keep stack order, so on a
+    2-layer grid this is byte-identically the old [(layer, 0), (other, 8.0)]
+    list. Every candidate is a WHOLE path — this is what keeps layer choice a
+    single, internally consistent decision instead of something threaded
+    across legs.
     """
     out = [(layer, 0.0)]
     if allow_via:
-        out.append(("B.Cu" if layer == "F.Cu" else "F.Cu", CORRIDOR_VIA_COST_MM))
+        out.extend((lyr, CORRIDOR_VIA_COST_MM)
+                   for lyr in grid.layers if lyr != layer)
     return out
 
 

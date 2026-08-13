@@ -272,6 +272,14 @@ class RoutingGrid:
             # Return blocked cell for out-of-bounds
             cell = GridCell(occupied=True, obstacle_type="boundary")
             return cell
+        if layer not in self._grid:
+            # FAIL CLOSED on a layer this grid does not model (epoch GA-2):
+            # before N-layer stacks this KeyError'd — a crash — and the other
+            # tolerable answer, "free cell", would let a route claim space on
+            # a plane nobody allocated. A blocked synthetic cell makes an
+            # unknown layer unroutable rather than fatal or silently free,
+            # matching the out-of-bounds convention above.
+            return GridCell(occupied=True, obstacle_type="unknown_layer")
         return self._grid[layer][row][col]
 
     def is_blocked(self, x: float, y: float, layer: str = "F.Cu") -> bool:

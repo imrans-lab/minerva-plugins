@@ -1229,6 +1229,8 @@ def route_board(
     existing_vias: Sequence[ExistingVia] = (),
     only_nets: Optional[set] = None,
     net_terminals: Optional[dict] = None,
+    layers: Optional[Sequence[str]] = None,
+    via_diameter: Optional[float] = None,
 ) -> RoutingResult:
     """
     Route the board's nets — all of them, or the ones in ``only_nets``.
@@ -1262,6 +1264,15 @@ def route_board(
             None (every pre-scope caller) routes every net, unchanged. A set
             routes only those nets; the rest still occupy the grid as pads,
             obstacles and accepted copper, so they remain obstacles.
+        layers: the ORDERED routable copper stack, outermost-first (epoch
+            GA-2). None (every pre-GA-2 caller) keeps the historical
+            ["F.Cu", "B.Cu"] pair. ``single_layer`` composes: it truncates
+            whatever stack is in force to its first (top) layer, preserving
+            the old flag's exact meaning.
+        via_diameter: the physical diameter a PROPOSED via occupies (epoch
+            GA-2; sourced from design_rules.via_diameter_mm by the worker).
+            None falls back to the routed net's copper width — an under-block
+            no worse than the pre-GA-2 behaviour of reserving nothing.
 
     Returns:
         RoutingResult with routes and unrouted connections
@@ -1277,7 +1288,11 @@ def route_board(
     existing_vias = existing_vias or board.existing_vias
 
     # Create routing grid over the board's OWN extent, anchored at its origin.
-    layers = ["F.Cu"] if single_layer else ["F.Cu", "B.Cu"]
+    # The stack is the CALLER's, ordered outermost-first (GA-2); single_layer
+    # keeps its historical meaning by truncating to the top layer.
+    layers = list(layers) if layers else ["F.Cu", "B.Cu"]
+    if single_layer:
+        layers = layers[:1]
     grid_w, grid_h = _grid_extent(board)
     grid = RoutingGrid(
         width=grid_w,
@@ -1307,7 +1322,11 @@ def route_board(
             # Through-hole pads are accessible on all copper layers
             pad_layers = list(layers)
         else:
-            pad_layers = ["F.Cu"]
+            # Unrecognised pad layer: over-block on the stack's TOP layer
+            # (layers[0]) rather than a literal that may not even be a grid
+            # plane on this stack (GA-2; the old "F.Cu" literal was the same
+            # cell only by 2-layer coincidence).
+            pad_layers = [layers[0]]
         for pl in pad_layers:
             grid.mark_pad(
                 x=pad.position[0],
@@ -1384,8 +1403,8 @@ def route_board(
                 start=pad_a.position,
                 end=pad_b.position,
                 net=net_name,
-                layer="F.Cu",
-                allow_via=allow_vias and not single_layer
+                layer=layers[0],
+                allow_via=allow_vias and len(layers) > 1
             )
 
             if path:
@@ -1409,10 +1428,18 @@ def route_board(
                         net=net_name,
                         layer=segment.layer
                     )
+                # A PROPOSED via occupies EVERY layer — it is a through-hole
+                # (epoch GA-2; before this, freshly-proposed vias reserved
+                # nothing, an under-block that was survivable only because a
+                # 2-layer via always sat on already-marked pad copper).
+                for via_x, via_y in path.vias:
+                    grid.mark_via(via_x, via_y,
+                                  diameter=via_diameter or net_width,
+                                  net=net_name, layers=None)
             else:
                 result.unrouted.append((net_name, pad_a, pad_b))
                 result.unrouted_reasons.append(_unrouted_reason_entry(
-                    grid, net_name, pad_a, pad_b, "F.Cu"))
+                    grid, net_name, pad_a, pad_b, layers[0]))
 
         if route.paths:
             result.routes.append(route)
@@ -2020,6 +2047,8 @@ def route_board_with_hints(
     existing_vias: Sequence[ExistingVia] = (),
     only_nets: Optional[set] = None,
     net_terminals: Optional[dict] = None,
+    layers: Optional[Sequence[str]] = None,
+    via_diameter: Optional[float] = None,
 ) -> RoutingResult:
     """
     Route a board using routing hints for guidance.
@@ -2075,7 +2104,11 @@ def route_board_with_hints(
     existing_vias = existing_vias or board.existing_vias
 
     # Create routing grid over the board's OWN extent, anchored at its origin.
-    layers = ["F.Cu"] if single_layer else ["F.Cu", "B.Cu"]
+    # The stack is the CALLER's, ordered outermost-first (GA-2); single_layer
+    # keeps its historical meaning by truncating to the top layer.
+    layers = list(layers) if layers else ["F.Cu", "B.Cu"]
+    if single_layer:
+        layers = layers[:1]
     grid_w, grid_h = _grid_extent(board)
     grid = RoutingGrid(
         width=grid_w,
@@ -2103,7 +2136,11 @@ def route_board_with_hints(
             # Through-hole pads are accessible on all copper layers
             pad_layers = list(layers)
         else:
-            pad_layers = ["F.Cu"]
+            # Unrecognised pad layer: over-block on the stack's TOP layer
+            # (layers[0]) rather than a literal that may not even be a grid
+            # plane on this stack (GA-2; the old "F.Cu" literal was the same
+            # cell only by 2-layer coincidence).
+            pad_layers = [layers[0]]
         for pl in pad_layers:
             grid.mark_pad(
                 x=pad.position[0],
@@ -2172,7 +2209,7 @@ def route_board_with_hints(
                 board=board,
                 bus_hint=bus_hint,
                 trace_width=trace_width,
-                layer=bus_hint.preferred_layer or "F.Cu",
+                layer=bus_hint.preferred_layer or layers[0],
                 orthogonal=hints.global_hints.prefer_orthogonal,
                 net_widths=net_widths,
             )
@@ -2206,12 +2243,12 @@ def route_board_with_hints(
 
         # Check for net-specific hints
         net_hint = hints.get_hint_for_net(net_name)
-        preferred_layer = net_hint.preferred_layer if net_hint else "F.Cu"
+        preferred_layer = net_hint.preferred_layer if net_hint else layers[0]
         avoid_areas = net_hint.avoid_areas if net_hint else None
         preferred_direction = net_hint.preferred_direction if net_hint else None
 
         # In jumper mode, only allow vias if budget remains
-        can_via = allow_vias and not single_layer
+        can_via = allow_vias and len(layers) > 1
         if jumper_mode and jumpers_used >= max_jumpers:
             can_via = False
 
@@ -2346,6 +2383,12 @@ def route_board_with_hints(
                         net=net_name,
                         layer=segment.layer
                     )
+                # A PROPOSED via occupies EVERY layer (epoch GA-2) — same
+                # note as route_board's twin loop.
+                for via_x, via_y in path.vias:
+                    grid.mark_via(via_x, via_y,
+                                  diameter=via_diameter or net_width,
+                                  net=net_name, layers=None)
             else:
                 result.unrouted.append((net_name, pad_a, pad_b))
                 result.unrouted_reasons.append(_unrouted_reason_entry(

@@ -352,6 +352,45 @@ def board_to_router(canonical_board: dict) -> Board:
     ox = _num(origin.get("x_mm")) if isinstance(origin, dict) else 0.0
     oy = _num(origin.get("y_mm")) if isinstance(origin, dict) else 0.0
 
+    # THE BOARD'S OWN COMMITTED COPPER (epoch GA-2, closing bug 019f6cf2b5f4):
+    # this loose-dict path ignored `traces`/`vias` entirely, so any route run
+    # through it re-routed EVERY net and drew straight through copper a human
+    # had already committed. The IR path fixed this in T7; here the same
+    # copper reaches the Board's own slots (019f9bc3909c), which both engine
+    # entry points already consume — other-net copper becomes an obstacle,
+    # same-net copper reads as already-connected.
+    existing_traces: list[ExistingSegment] = []
+    for trace in canonical_board.get("traces") or []:
+        if not isinstance(trace, dict):
+            continue
+        t_net = str(trace.get("net", "")) or None
+        t_layer = _layers.canon_to_kicad(str(trace.get("layer") or "top"))
+        width = _num(trace.get("width_mm")) or 0.25
+        points = [p for p in (trace.get("points") or [])
+                  if isinstance(p, dict)]
+        for a, b in zip(points, points[1:]):
+            existing_traces.append(ExistingSegment(
+                net=t_net,
+                start=(_num(a.get("x_mm")), _num(a.get("y_mm"))),
+                end=(_num(b.get("x_mm")), _num(b.get("y_mm"))),
+                width=width, layer=t_layer,
+                source_id=str(trace.get("id")) if trace.get("id") else None))
+    existing_vias: list[ExistingVia] = []
+    for via in canonical_board.get("vias") or []:
+        if not isinstance(via, dict):
+            continue
+        # Occupied set, not endpoint pair — through vias reach every layer
+        # (the canonical board dict carries no stack here beyond `layers`, so
+        # the declared stack, defaulted to the 2-layer pair, IS the set).
+        declared = [str(x) for x in (canonical_board.get("layers")
+                                     or ["top", "bottom"])]
+        existing_vias.append(ExistingVia(
+            net=str(via.get("net", "")) or None,
+            position=(_num(via.get("x_mm")), _num(via.get("y_mm"))),
+            diameter=_num(via.get("diameter_mm")) or 0.8,
+            layers=tuple(_layers.canon_to_kicad(lid) for lid in declared),
+            source_id=str(via.get("id")) if via.get("id") else None))
+
     return Board(
         pads=pads,
         nets=nets,
@@ -359,6 +398,8 @@ def board_to_router(canonical_board: dict) -> Board:
         width=_num(canonical_board.get("width_mm")),
         height=_num(canonical_board.get("height_mm")),
         origin=(ox, oy),
+        existing_traces=existing_traces,
+        existing_vias=existing_vias,
     )
 
 
@@ -410,15 +451,20 @@ def _obstacles_from_board(canonical_board: dict) -> list[Obstacle]:
 
 
 def _routing_layer_ids(rb: ResolvedBoard) -> tuple[str, ...]:
-    """The engine-facing copper layer names, or fail closed.
+    """The engine-facing copper layer names, STACK-ORDERED, or fail closed.
 
-    The vendored engine routes F.Cu/B.Cu only. A board with inner copper would be
-    routed as if those layers did not exist — copper the grid never models — so it
-    fails closed here instead."""
+    Epoch GA-2: the engine routes the board's OWN declared stack (an ordered
+    grid plane per layer, through-vias reaching all of them), so the old
+    exactly-F.Cu/B.Cu refusal is gone. What still fails closed is a stack
+    entry whose alias is not a copper name the naming contract knows — a
+    plane the grid would allocate under a name no emitter could ever write.
+    Order is the resolved stack's own (outermost-first), which downstream
+    consumers (via-candidate ordering, layers[0] fallbacks) depend on."""
     aliases = tuple(layer.kicad_alias for layer in rb.layer_stack.copper)
-    if sorted(aliases) != sorted(_ROUTABLE_KICAD_LAYERS):
+    bad = [alias for alias in aliases if not _layers.is_copper(alias)]
+    if bad:
         raise UnsupportedGeometry(
-            f"routing engine models a 2-layer F.Cu/B.Cu stack only; board copper "
+            f"board copper stack carries non-copper layer name(s) {bad}; "
             f"stack is {list(aliases)}")
     return aliases
 
@@ -587,12 +633,14 @@ def _keepout_obstacle(zone) -> Obstacle:
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     centre = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+    # Layer scope by LAYER ID, not by Side (epoch GA-2): an inner-layer
+    # keepout used to fall through the side test to "blocks all layers" —
+    # fail-safe but over-blocking. The zone's own copper layer id names the
+    # exact plane; anything that is not a single copper layer (wildcard,
+    # oddball) keeps the all-layers fail-safe reading.
     layer_alias: str | None = None
-    if not zone.layer.is_wildcard:
-        if zone.layer.side is Side.TOP:
-            layer_alias = "F.Cu"
-        elif zone.layer.side is Side.BOTTOM:
-            layer_alias = "B.Cu"
+    if not zone.layer.is_wildcard and _layers.is_copper(zone.layer.id):
+        layer_alias = _layers.canon_to_kicad(zone.layer.id)
     return Obstacle(
         position=centre,
         type="keepout",
@@ -934,19 +982,29 @@ def resolved_board_existing_copper(
 
     vias: list[ExistingVia] = []
     for via in rb.vias:
-        span = tuple(dict.fromkeys(
+        endpoints = tuple(dict.fromkeys(
             _layers.canon_to_kicad(lid) for lid in (via.from_layer, via.to_layer)))
-        unroutable = [lid for lid in span if lid not in routable]
+        unroutable = [lid for lid in endpoints if lid not in routable]
         if unroutable:
-            # A blind/buried span touching a layer the 2-layer grid does not
-            # carry. The v1 compiler cannot emit one (it validates every span
-            # against [top, bottom]), so this is the same defence-in-depth as
-            # above — but it is the sub-case that MUST keep failing closed if
-            # inner layers ever arrive: half a via's copper modeled and half of
-            # it invisible is worse than not routing the board.
+            # A span whose ENDPOINT names a layer this board's grid does not
+            # carry. The v1 compiler cannot emit one (via_bad_span validates
+            # endpoints against [top, bottom], which every legal stack
+            # contains), so this is the same defence-in-depth as above — half
+            # a via's copper modeled and half of it invisible is worse than
+            # not routing the board.
             raise UnsupportedGeometry(
                 f"accepted via {via.id}: spans {list(unroutable)}, which the "
                 f"routing grid does not model ({list(routable)})")
+        # ``ExistingVia.layers`` is the OCCUPIED set, not the endpoint pair
+        # (epoch GA-2): a through via's annulus exists on EVERY stack layer it
+        # crosses, so the endpoint span expands to the inclusive index range
+        # in stack order. On a 2-layer stack this is byte-identically the old
+        # endpoint tuple; on a deeper one it is what keeps _copper_union
+        # seeing a via↔inner-segment junction and _mark_existing_copper
+        # blocking the inner annuli.
+        indices = [routable.index(lid) for lid in endpoints]
+        lo, hi = min(indices), max(indices)
+        span = tuple(routable[lo:hi + 1])
         # A via's copper is its ANNULUS, and an authored padstack may make that
         # annulus wider on some layer than the nominal diameter. Take the widest
         # — same fail-safe direction as every other keepout in this module: the
@@ -1550,6 +1608,17 @@ def materialize_detailed_hints(
             continue
         if str(kp.get("detail_level", "")) != "detailed":
             continue
+        if bool(kp.get("allow_layer_change")):
+            # U3 (epoch GA-2, item 019f709e9dbd): a detailed hint that OPTS
+            # INTO engine layer changes is NOT materialized verbatim — its
+            # verbatim single-layer segments with vias:[] are exactly the
+            # bypass this item exists to close. It falls through to
+            # hints_to_router, which routes it as a waypoint-carrying
+            # connection hint: the engine follows the drawn line and may
+            # break onto another layer through the normal costed via
+            # machinery, so engine-auto vias reach the board via the
+            # standard lossless path.
+            continue
         ann_id = str(env.get("id", ""))
 
         def _endpoint(key: str):
@@ -1755,7 +1824,12 @@ def hints_to_router(
         # doubt about a mechanism that was working. Only a hint whose own
         # waypoints exist — where detail_level genuinely picks the path —
         # still warns.
-        if kp.get("detail_level") and not constraint_pts and waypoints:
+        # U3 (epoch GA-2): ALSO suppressed for an allow_layer_change hint —
+        # it CHOSE the engine path deliberately (materialize skips it), so
+        # "this doesn't route as drawn" would warn about the exact behaviour
+        # the author opted into.
+        if kp.get("detail_level") and not constraint_pts and waypoints \
+                and not bool(kp.get("allow_layer_change")):
             warnings.append({"id": str(env.get("id", "")), "message":
                 "detail_level '%s' has no agent_router slot — it selects the "
                 "bridge path (only 'detailed' single-trace hints route as "

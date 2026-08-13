@@ -71,10 +71,16 @@ class Via:
         from_layer = via.get("from_layer")
         to_layer = via.get("to_layer")
         if from_layer and to_layer:
+            # FAIL CLOSED on an unmappable span endpoint (epoch GA-2). The old
+            # ``.get(..., "F.Cu")``/``.get(..., "B.Cu")`` fallbacks survived
+            # the epoch-6 fail-closed sweep only because nothing upstream
+            # could produce an unknown name; canon_to_kicad raises instead —
+            # a silently-defaulted via span is copper joined to the wrong
+            # layer in an exported board file.
             return cls(
                 position=(x, y), size=size, drill=drill, net=net_number,
-                layers=(_CANON_TO_KICAD_LAYER.get(str(from_layer), "F.Cu"),
-                        _CANON_TO_KICAD_LAYER.get(str(to_layer), "B.Cu")),
+                layers=(_layers.canon_to_kicad(str(from_layer)),
+                        _layers.canon_to_kicad(str(to_layer))),
             )
         return cls(position=(x, y), size=size, drill=drill, net=net_number)
 

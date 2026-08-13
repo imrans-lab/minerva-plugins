@@ -1117,20 +1117,23 @@ def _serialize_routing_result(result) -> dict:
 # "components"/"nets"/"traces" board to check against.
 # ---------------------------------------------------------------------------
 
-# agent_router segment layers are always "F.Cu"/"B.Cu" (route_bridge._LAYER_MAP,
-# agent_router/router.py literals). The canonical board's OWN traces use
-# "top"/"bottom" (pcb/docs/board-yaml.md). drc.py's crossing/layer-change checks
-# compare `seg.layer` by raw string equality, so a route segment must be
-# normalized to the canonical spelling before merge — otherwise a same-layer
-# collision between a new route and an existing "top" trace would be missed
-# because "F.Cu" != "top" as strings, even though both mean the top layer.
+# agent_router segment layers are KiCad aliases (F.Cu/In<k>.Cu/B.Cu since
+# GA-2). The canonical board's OWN traces use "top"/"in<k>"/"bottom"
+# (pcb/docs/board-yaml.md). drc.py's crossing/layer-change checks compare
+# `seg.layer` by raw string equality, so a route segment must be normalized to
+# the canonical spelling before merge — otherwise a same-layer collision
+# between a new route and an existing "top" trace would be missed because
+# "F.Cu" != "top" as strings, even though both mean the top layer.
 
 
 def _canonical_drc_layer(layer: Any) -> str:
-    from . import route_bridge
-    reverse = {v: k for k, v in route_bridge._LAYER_MAP.items()}
-    s = str(layer or "")
-    return reverse.get(s, s.lower() if s else "top")
+    # The FULL contract fold (epoch GA-2): the old hand-built reverse of the
+    # 2-entry _LAYER_MAP sent "In2.Cu" to "in2.cu" — not a canonical name, so
+    # an inner-layer crossing would have compared unequal to its own layer.
+    # kicad_to_canon knows every copper spelling and keeps the historical
+    # empty→"top" and unknown→lowercase behaviours (fail-visible).
+    from agent_router.layers import kicad_to_canon
+    return kicad_to_canon(layer)
 
 
 def _routes_to_traces(routes: list) -> list:
@@ -2407,6 +2410,16 @@ def _route(params: dict) -> dict:
     # unhinted runs see the identical board.
     kw["existing_traces"] = existing_traces
     kw["existing_vias"] = existing_vias
+    # THE BOARD'S OWN COPPER STACK (epoch GA-2): the engine allocates one grid
+    # plane per declared layer, stack-ordered. Same source _routing_layer_ids
+    # every other projection uses, so the grid, the pads, and the accepted
+    # copper all agree on which planes exist.
+    kw["layers"] = list(route_bridge._routing_layer_ids(compiled.board))
+    # A PROPOSED via now reserves its own annulus on every layer (GA-2); the
+    # diameter is the board's authored via size — the same number the
+    # committed via will fabricate at.
+    kw["via_diameter"] = float(
+        compiled.board.design_rules.defaults.via_diameter_mm)
     # RUN SCOPE (019f80a80123), resolved above. Set HERE, beside the other engine
     # kwargs, and deliberately AFTER the two lines above: `existing_traces` is
     # the whole board's accepted copper and stays that way whatever the scope
