@@ -297,8 +297,15 @@ def _copper_layer_table(content: str) -> tuple[str, ...]:
     header = re.search(r'\(layers\s*\n(.*?)\n\s*\)', content, re.DOTALL)
     if not header:
         return ()
+    # Copper row types per KiCad: `signal` from our emitter and most files,
+    # but a real board may declare inner planes `power`/`mixed`/`jumper`, and
+    # any row may carry a user-rename fourth token ((4 "In1.Cu" power
+    # "GND_PLANE")). Missing such a row would silently SHRINK the table and
+    # the span expansion below would skip that plane's annulus — the exact
+    # under-guarding this function exists to close (cold GA-3 review, P2).
     names = {m.group(1) for m in re.finditer(
-        r'\(\d+\s+"([^"]+)"\s+signal\)', header.group(1))}
+        r'\(\d+\s+"([^"]+)"\s+(?:signal|power|mixed|jumper)(?:\s+"[^"]*")?\s*\)',
+        header.group(1))}
 
     def _stack_key(name: str) -> tuple[int, str]:
         if name == "F.Cu":

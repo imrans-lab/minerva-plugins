@@ -1625,13 +1625,23 @@ def _build_job_file(base: str, filenames: list[str], outline_w: float,
             "BoardThickness": board_thickness_mm,
             "Finish": _GBRJOB_SURFACE_FINISH,
         },
+        # One Outer row always; an Inner row joins it on deeper stacks (epoch
+        # GA-3 — KiCad's own multilayer job files carry both; v1 authors one
+        # blanket rule set, so the two rows state the same numbers). The
+        # conditional keeps every 2-layer manifest byte-identical.
         "DesignRules": [{
             "Layers": "Outer",
             "PadToPad": clearance_mm,
             "PadToTrack": clearance_mm,
             "TrackToTrack": clearance_mm,
             "MinLineWidth": min_line_width_mm,
-        }],
+        }] + ([{
+            "Layers": "Inner",
+            "PadToPad": clearance_mm,
+            "PadToTrack": clearance_mm,
+            "TrackToTrack": clearance_mm,
+            "MinLineWidth": min_line_width_mm,
+        }] if len(copper_names) > 2 else []),
         "FilesAttributes": files_attributes,
         "MaterialStackup": _material_stackup(copper_names, board_thickness_mm),
     }

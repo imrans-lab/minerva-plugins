@@ -80,6 +80,19 @@ def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _declared_layers(board_path: Path) -> list:
+    """The board's declared copper stack (absent key = the 2-layer default)."""
+    return _load(board_path).get("layers") or ["top", "bottom"]
+
+
+def _declared_copper_suffixes(board_path: Path) -> set:
+    """The gerber suffix set THIS board emits: the 9-suffix baseline plus one
+    In{k}_Cu per declared inner layer (epoch GA-3 — the fixed baseline
+    constant is deliberately not the whole story for deeper stacks)."""
+    n = len(_declared_layers(board_path))
+    return set(EMITTED_GERBER_SUFFIXES) | {f"In{k}_Cu" for k in range(1, n - 1)}
+
+
 # ---------------------------------------------------------------------------
 # Structural RS-274X checks (lifted from spike validate.py) as assertions.
 # ---------------------------------------------------------------------------
@@ -159,9 +172,11 @@ def test_gerber_layers_structural(board_path, base, builder):
     gbrs = {n: t for n, t in files.items() if n.endswith(".gbr")}
     # Exactly the capability profile's layer set -- read from the shared authority
     # rather than restated, so adding a layer in one place cannot leave this
-    # assertion behind as the stale definition of "all of them".
+    # assertion behind as the stale definition of "all of them". Epoch GA-3:
+    # "all of them" is per-board now — baseline plus the declared inner
+    # copper (quadlayer adds In1_Cu/In2_Cu; the 2-layer rows are unchanged).
     suffixes = {n[len(base) + 1:-4] for n in gbrs}
-    assert suffixes == set(EMITTED_GERBER_SUFFIXES)
+    assert suffixes == _declared_copper_suffixes(board_path)
     for name, text in gbrs.items():
         _assert_gerber_structural(name, text, bounds)
 
@@ -1062,7 +1077,7 @@ def test_job_file_structure_matches_kicads(board_path, base, builder):
     assert list(job["GeneralSpecs"]["ProjectId"]) == ["Name", "GUID", "Revision"]
     assert list(job["DesignRules"][0]) == ["Layers", "PadToPad", "PadToTrack",
                                            "TrackToTrack", "MinLineWidth"]
-    assert job["GeneralSpecs"]["LayerNumber"] == 2
+    assert job["GeneralSpecs"]["LayerNumber"] == len(_declared_layers(board_path))
     assert job["GeneralSpecs"]["Finish"] == "None"
     assert job["GeneralSpecs"]["ProjectId"]["Name"] == base
 
@@ -1126,7 +1141,9 @@ def test_job_manifest_uses_the_job_files_own_filefunction_vocabulary(
     assert by_path[f"{base}-B_Mask.gbr"] == "SolderMask,Bot"
     assert by_path[f"{base}-Edge_Cuts.gbr"] == "Profile"
     assert by_path[f"{base}-F_Cu.gbr"] == "Copper,L1,Top"
-    assert by_path[f"{base}-B_Cu.gbr"] == "Copper,L2,Bot"
+    # B.Cu's L-number is the STACK DEPTH (L2 on 2-layer, L4 on quadlayer).
+    n = len(_declared_layers(board_path))
+    assert by_path[f"{base}-B_Cu.gbr"] == f"Copper,L{n},Bot"
     assert by_path[f"{base}-F_SilkS.gbr"] == "Legend,Top"
     # ... and the emitted LAYER still carries its own, different token.
     assert "TF.FileFunction,Soldermask,Top" in files[f"{base}-F_Mask.gbr"]

@@ -406,8 +406,16 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
     # cannot load (or worse, loads wrong), and the emitter is the last place
     # that can refuse it. On the IR path the compiler has already validated
     # membership and the capability ceiling; this guards the loose-dict entry.
+    # Entries fold through the read-side namespace map first, so a loose dict
+    # declaring KiCad spellings (["F.Cu","B.Cu"]) keeps exporting exactly as
+    # it did under the GA-1 length-only seal; only a genuinely malformed
+    # SHAPE refuses. Asymmetry with gerber.build_gerbers is deliberate and
+    # directional: that loose path stays sealed at 2 layers because a gerber
+    # set is a FABRICATION package and deep stacks must pass the compile-time
+    # capability ceiling — a .kicad_pcb is a design INTERCHANGE file making
+    # no fabrication claim, so emitting a deep board here is safe.
     declared_stack = board.get("layers")
-    stack_ids = ([str(x) for x in declared_stack]
+    stack_ids = ([_layers.kicad_to_canon(x) for x in declared_stack]
                  if isinstance(declared_stack, list) and declared_stack
                  else ["top", "bottom"])
     shape_err = _stack_shape_error(stack_ids)
@@ -548,6 +556,14 @@ def generate_kicad_pcb(board: dict, diagnostics: list[Diagnostic] | None = None)
         # what it says instead of being silently rewritten.
         span_from = _copper_layer(via.get("from_layer") or "top")
         span_to = _copper_layer(via.get("to_layer") or "bottom")
+        # Normalize to STACK ORDER (cold GA-3 review, P3-5): compile accepts a
+        # reversed authored span (bottom->top), and emitting it reversed would
+        # be the one way a legal 2-layer board's bytes could differ from the
+        # old hardcode. Order is a property of the stack, not of authoring.
+        stack_aliases = [_copper_layer(lid) for lid in stack_ids]
+        if (span_from in stack_aliases and span_to in stack_aliases
+                and stack_aliases.index(span_from) > stack_aliases.index(span_to)):
+            span_from, span_to = span_to, span_from
         out.append(
             f'  (via (at {_num(via.get("x_mm"))} {_num(via.get("y_mm"))}) '
             f'(size {size}) (drill {drill}) (layers "{span_from}" "{span_to}") '
