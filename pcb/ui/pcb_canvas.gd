@@ -388,6 +388,12 @@ var _rotate_drag_pointer_start: float = 0.0           # radians, at press
 var _rotate_drag_applied: float = 0.0                 # degrees, snapped, live-applied to ungrouped comps
 var _rotate_start_rotations: Dictionary = {}          # comp_id -> rotation° at press
 var _rotate_drag_groups: Array[String] = []           # unlocked groups, applied at release
+## SPIKE 019ff8615fbe (owner ruling R2): while a placement GHOST is the
+## selection, the SAME rotate chrome/gesture binds to the ghost's target
+## pose, not the underlying part. Non-empty sid = the rotate drag is a
+## ghost rotate; store writes ride the snap steps, nothing is journalled.
+var _ghost_rotate_sid := ""
+var _ghost_rotate_start_deg := 0.0
 
 ## Armed at press when the selection contains vias, fired ONCE on the first real
 ## motion of that gesture: vias do not move (see _capture_drag_origins), and a
@@ -1223,10 +1229,6 @@ const MENU_ID_SET_HINT_WIDTH := 445
 ## UX4 station 4 — the staged-entity menu seam's two verbs.
 const MENU_ID_STAGED_ACCEPT := 446
 const MENU_ID_STAGED_REJECT := 447
-## SPIKE 019ff8615fbe: revise a placement ghost's rotation from the menu —
-## the cheap stand-in until ghosts carry the universal-select rotate chrome
-## (owner feel-session ask, R2).
-const MENU_ID_STAGED_ROTATE_CCW := 448
 ## SPIKE, owner ruling R2 ("propose move is part of universal select"): a
 ## ONE-SHOT arm on the pressed component — its next drag stages a ghost
 ## instead of moving it. Replaces the rejected "Propose moves" mode toggle.
@@ -1430,10 +1432,6 @@ func _on_context_menu_pressed(id: int) -> void:
 			staged_verb_requested.emit("accept", str(_context_menu_target[1]))
 		MENU_ID_STAGED_REJECT:
 			staged_verb_requested.emit("reject", str(_context_menu_target[1]))
-		# SPIKE: ghost rotation revise — a store write like the ghost drag,
-		# not a board mutation, so the canvas performs it directly.
-		MENU_ID_STAGED_ROTATE_CCW:
-			_rotate_placement_ghost(str(_context_menu_target[1]), 90.0)
 		# SPIKE: one-shot propose-move arm (owner ruling R2). Arming a second
 		# part replaces the first — at most one arm stands at a time.
 		MENU_ID_COMPONENT_PROPOSE_MOVE:
@@ -4545,8 +4543,12 @@ func _selected_components_bbox() -> Rect2:
 ## selection holds at least one ROTATABLE target (an ungrouped component or an
 ## unlocked group) — chrome for a selection that cannot rotate would be a lie.
 func _begin_component_rotate_drag(screen_pos: Vector2) -> bool:
-	if tool_mode != ToolMode.SELECT or data == null or selected_components.is_empty():
+	if tool_mode != ToolMode.SELECT or data == null:
 		return false
+	# SPIKE (owner ruling R2): a ghost-only selection binds the SAME widget
+	# to the ghost — the proposal is what review manipulates, never the part.
+	if selected_components.is_empty():
+		return _begin_ghost_rotate_drag(screen_pos)
 	var bbox := _selected_components_bbox()
 	if bbox.size == Vector2.ZERO:
 		return false
@@ -4585,6 +4587,70 @@ func _begin_component_rotate_drag(screen_pos: Vector2) -> bool:
 	return true
 
 
+## World bbox of the ONE selected live placement ghost, or a zero Rect2 —
+## the chrome/press twin of _selected_components_bbox for ghost selections.
+func _selected_ghost_bbox() -> Rect2:
+	if _staged_store == null or selected_staged_ids.size() != 1:
+		return Rect2()
+	var sid := str(_staged_store.staged_id_for_entity(str(selected_staged_ids[0])))
+	if sid.is_empty():
+		return Rect2()
+	var entry: Dictionary = _staged_store.get_entry(sid)
+	if str(entry.get("kind", "")) != "placement":
+		return Rect2()
+	var poly := _placement_ghost_polygon(entry.get("payload", {}))
+	if poly.size() < 3:
+		return Rect2()
+	var bbox := Rect2(poly[0], Vector2.ZERO)
+	for p in poly:
+		bbox = bbox.expand(p)
+	return bbox
+
+
+## SPIKE 019ff8615fbe: the ghost half of _begin_component_rotate_drag —
+## exactly ONE selected live placement ghost grows the same corner rings,
+## and the drag revises the proposal's target rotation (store writes on the
+## snap steps; the board is never touched, so there is nothing to journal).
+func _begin_ghost_rotate_drag(screen_pos: Vector2) -> bool:
+	if _staged_store == null or selected_staged_ids.size() != 1:
+		return false
+	var entity_id := str(selected_staged_ids[0])
+	var sid := str(_staged_store.staged_id_for_entity(entity_id))
+	if sid.is_empty():
+		return false
+	var entry: Dictionary = _staged_store.get_entry(sid)
+	if str(entry.get("kind", "")) != "placement":
+		return false
+	var payload: Dictionary = entry.get("payload", {})
+	var poly := _placement_ghost_polygon(payload)
+	if poly.size() < 3:
+		return false
+	var bbox := Rect2(poly[0], Vector2.ZERO)
+	for p in poly:
+		bbox = bbox.expand(p)
+	var bbox_screen := Rect2(world_to_screen(bbox.position),
+		world_to_screen(bbox.end) - world_to_screen(bbox.position))
+	if bbox_screen.has_point(screen_pos):
+		return false  # inside is the ghost move-drag's territory
+	var in_zone := false
+	for corner in [bbox.position, Vector2(bbox.end.x, bbox.position.y),
+			bbox.end, Vector2(bbox.position.x, bbox.end.y)]:
+		var d := screen_pos.distance_to(world_to_screen(corner))
+		if d >= _ROTATE_RING_INNER_PX and d <= _ROTATE_RING_OUTER_PX:
+			in_zone = true
+			break
+	if not in_zone:
+		return false
+	var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+	_ghost_rotate_sid = sid
+	_ghost_rotate_start_deg = float(to.get("rotation_deg", 0.0))
+	_rotate_drag_active = true
+	_rotate_drag_center = bbox.get_center()
+	_rotate_drag_pointer_start = (screen_pos - world_to_screen(_rotate_drag_center)).angle()
+	_rotate_drag_applied = 0.0
+	return true
+
+
 ## Snap tier for the CURRENT modifier state: 90° plain (board convention),
 ## 45° with Shift, 1° with Ctrl/Cmd — read live per motion event, so the tier
 ## can change mid-drag exactly like Adobe's constrain modifiers.
@@ -4610,7 +4676,22 @@ func _update_component_rotate_drag(event: InputEventMouseMotion) -> void:
 ## Live-preview a snapped delta on the UNGROUPED components only (direct
 ## set_rotation + changed signal, deliberately no journal entry — the release
 ## owes exactly one). Groups wait for release (see the state-block note).
+## GHOST MODE (SPIKE): the delta lands on the proposal's target rotation via
+## the store instead — same gesture, review's object.
 func _apply_rotate_preview(delta_deg: float) -> void:
+	if not _ghost_rotate_sid.is_empty():
+		if _staged_store == null:
+			return
+		var entry: Dictionary = _staged_store.get_entry(_ghost_rotate_sid)
+		var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
+		if not (to is Dictionary):
+			return
+		# Caller order: preview runs BEFORE _rotate_drag_applied updates, so
+		# the running total for THIS step is applied-so-far + delta.
+		_staged_store.update_placement_target(_ghost_rotate_sid,
+			float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
+			fposmod(_ghost_rotate_start_deg + _rotate_drag_applied + delta_deg, 360.0))
+		return
 	for comp_id in _rotate_start_rotations:
 		var comp = data.get_component(comp_id)
 		if comp:
@@ -4620,6 +4701,13 @@ func _apply_rotate_preview(delta_deg: float) -> void:
 
 func _finish_component_rotate_drag() -> void:
 	_rotate_drag_active = false
+	# GHOST MODE (SPIKE): the store already holds the final target rotation —
+	# nothing to journal (proposal edits carry no history until ratification
+	# rules on it). Just release the binding.
+	if not _ghost_rotate_sid.is_empty():
+		_ghost_rotate_sid = ""
+		queue_redraw()
+		return
 	var net := fposmod(_rotate_drag_applied, 360.0)
 	if is_zero_approx(net):
 		# A no-op gesture reverts any float residue and journals nothing.
@@ -4647,6 +4735,18 @@ func _finish_component_rotate_drag() -> void:
 
 func _cancel_component_rotate_drag() -> void:
 	_rotate_drag_active = false
+	# GHOST MODE (SPIKE): cancel restores the proposal's press-time rotation.
+	if not _ghost_rotate_sid.is_empty():
+		if _staged_store != null:
+			var entry: Dictionary = _staged_store.get_entry(_ghost_rotate_sid)
+			var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
+			if to is Dictionary:
+				_staged_store.update_placement_target(_ghost_rotate_sid,
+					float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
+					_ghost_rotate_start_deg)
+		_ghost_rotate_sid = ""
+		queue_redraw()
+		return
 	_cancel_rotate_revert()
 	_rotate_start_rotations = {}
 	_rotate_drag_groups = []
@@ -4668,9 +4768,15 @@ func _cancel_rotate_revert() -> void:
 ## absent affordances say "components don't scale"). During a drag, the live
 ## angle reads out beside the cursor.
 func _draw_component_rotate_chrome() -> void:
-	if tool_mode != ToolMode.SELECT or selected_components.is_empty():
+	if tool_mode != ToolMode.SELECT:
 		return
-	var bbox := _selected_components_bbox()
+	# SPIKE (owner ruling R2): a ghost-only selection grows the SAME arcs
+	# around the GHOST — the widget follows what review manipulates.
+	var bbox: Rect2
+	if not selected_components.is_empty():
+		bbox = _selected_components_bbox()
+	else:
+		bbox = _selected_ghost_bbox()
 	if bbox.size == Vector2.ZERO:
 		return
 	var tl := world_to_screen(bbox.position)
@@ -8616,33 +8722,9 @@ func _add_staged_menu_seam(entity_id: String) -> void:
 	_context_menu_separate()
 	context_menu.add_item("Accept (lands it on the board)", MENU_ID_STAGED_ACCEPT)
 	context_menu.add_item("Reject (discards the draft)", MENU_ID_STAGED_REJECT)
-	# SPIKE: rotation revise, placements only — the stand-in for ghost rotate
-	# chrome (see MENU_ID_STAGED_ROTATE_CCW).
-	if _staged_store != null:
-		var r_sid := str(_staged_store.staged_id_for_entity(entity_id))
-		if not r_sid.is_empty() \
-				and str((_staged_store.get_entry(r_sid) as Dictionary).get("kind", "")) == "placement":
-			context_menu.add_item("Rotate ghost 90° CCW", MENU_ID_STAGED_ROTATE_CCW)
-
-
-## SPIKE 019ff8615fbe: bump a live placement ghost's proposed rotation by
-## `delta_deg` (KiCad sign: positive = CCW on screen). A store write, same
-## one-write shape as _end_placement_ghost_drag.
-func _rotate_placement_ghost(entity_id: String, delta_deg: float) -> void:
-	if _staged_store == null:
-		return
-	var sid := str(_staged_store.staged_id_for_entity(entity_id))
-	if sid.is_empty():
-		return
-	var entry: Dictionary = _staged_store.get_entry(sid)
-	if str(entry.get("kind", "")) != "placement":
-		return
-	var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
-	if not (to is Dictionary):
-		to = {}
-	_staged_store.update_placement_target(sid,
-		float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
-		fposmod(float(to.get("rotation_deg", 0.0)) + delta_deg, 360.0))
+	# The brief "Rotate ghost 90° CCW" menu item that lived here was replaced
+	# by the REAL binding (owner ruling R2): the universal-select rotate arcs
+	# follow a ghost-only selection — see _begin_ghost_rotate_drag.
 
 
 func _add_candidate_menu_seam(candidate_id: String) -> void:
