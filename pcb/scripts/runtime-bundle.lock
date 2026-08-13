@@ -22,6 +22,54 @@ CPYTHON="3.12.13"
 # the FULL platform matrix including linux-arm64.
 PIP_PKGS="pyyaml==6.0.2 gerber-writer==0.4.3.3 pyclipper==1.4.0"
 
+# ── EXPECTED BYTES (acceptance check K23, work item 019ffc543d1d) ────────────
+#
+# A VERSION IS NOT AN IMMUTABLE IDENTITY. Everything above pins what to ask
+# for; nothing pins what must come back. The same release tag can serve
+# different bytes after a re-upload, through a compromised mirror, or via a
+# truncated transfer that still exits 0 — and these artifacts are EXTRACTED
+# AND EXECUTED during packaging, then shipped to every user of the plugin.
+#
+# build-python-runtime-bundle.sh verifies each of these BEFORE extraction and
+# ALSO on a cache hit (a cached artifact was fetched at some earlier time under
+# conditions nobody can now inspect, and on CI the cache is a shared writable
+# store keyed by a hash of THIS FILE rather than of the payload).
+#
+# HOW TO POPULATE, once per pin: download the asset, sha256 it, paste it here,
+# and record the URL it came from in the same commit. Do NOT copy a hash from
+# anywhere but the bytes you actually fetched — a hash taken from the same page
+# that served the file proves nothing about the file.
+#
+# EMPTY MEANS UNVERIFIED, AND THE BUILD SAYS SO on every run rather than
+# treating silence as safety. tests/test_runtime_input_pins.py turns the
+# omission into a FAILING check, so an unpinned input is tracked work rather
+# than an invisible hole.
+#
+# Provenance for every input below:
+#   python-build-standalone — https://github.com/astral-sh/python-build-standalone
+#     releases/download/$PBS_TAG/cpython-$CPYTHON+$PBS_TAG-<asset>-install_only.tar.gz
+#     License: PSF-2.0 (CPython) plus the project's own BSD-3-Clause tooling.
+#   ripgrep — https://github.com/BurntSushi/ripgrep releases/download/$RG_VERSION/...
+#     License: MIT OR Unlicense.
+#   wheels — PyPI, versions pinned in PIP_PKGS above. Licenses: PyYAML MIT,
+#     gerber-writer MIT, pyclipper MIT (Clipper itself is Boost-1.0).
+PBS_SHA256_LINUX_X86_64=""
+PBS_SHA256_LINUX_ARM64=""
+PBS_SHA256_MACOS_ARM64=""
+PBS_SHA256_MACOS_X86_64=""
+PBS_SHA256_WINDOWS_X86_64=""
+
+RG_SHA256_LINUX_X86_64=""
+RG_SHA256_LINUX_ARM64=""
+RG_SHA256_MACOS_ARM64=""
+RG_SHA256_MACOS_X86_64=""
+RG_SHA256_WINDOWS_X86_64=""
+
+# Wheels are pinned by version above but NOT yet by hash. Closing this needs a
+# generated requirements file consumed with pip --require-hashes, which refuses
+# the whole install if any wheel's bytes differ. Tracked by the same test.
+PIP_REQUIRE_HASHES_FILE=""
+
 # Layer-1 import self-test (native builds only; cross targets skip). Imports
 # every runtime dep plus both first-party worker packages, so an empty or
 # mis-copied site-packages fails the bundle build, not the first user.

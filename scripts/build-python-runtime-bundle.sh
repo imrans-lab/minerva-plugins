@@ -140,6 +140,53 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
 # --------------------------------------------------------------------------
+# input verification (acceptance check K23, DCR/work item 019ffc543d1d)
+# --------------------------------------------------------------------------
+#
+# WHAT THIS IS NOT: the manifest.sha256 generated near the end of this script
+# hashes the bundle's OWN OUTPUT so post-extract tampering is detectable. That
+# is a different guarantee entirely. K23 asks whether the bytes we DOWNLOADED
+# and then EXTRACTED AND EXECUTED were the bytes we intended, and nothing
+# checked that: a version pin is not an immutable identity, because the same
+# tag can serve different bytes after a re-upload, a compromised mirror, or a
+# truncated transfer that still exits 0.
+#
+# VERIFIED BEFORE USE, INCLUDING ON A CACHE HIT. A cached artifact is the more
+# dangerous case, not the safer one: it was fetched at some earlier time under
+# conditions nobody can now inspect, and on CI the cache is a shared, writable
+# store keyed by a hash of the lock file rather than of the payload.
+verify_sha256() {
+  _vf_file="$1"; _vf_expect="$2"; _vf_what="$3"
+  if [ -z "$_vf_expect" ]; then
+    # NOT silently skipped: an unpinned input is a real gap in this bundle's
+    # provenance, and the build says so every single time rather than letting
+    # the omission read as "verified". The gate that turns this into a hard
+    # failure lives in the test suite, so populating a pin is tracked work
+    # instead of an invisible hole. See tests/test_runtime_input_pins.py.
+    echo "[$TRIPLE] WARNING: $_vf_what has NO pinned sha256 — bytes NOT verified (K23 gap)" >&2
+    return 0
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    _vf_actual="$(sha256sum "$_vf_file" | cut -d" " -f1)"
+  else
+    _vf_actual="$(shasum -a 256 "$_vf_file" | cut -d" " -f1)"
+  fi
+  if [ "$_vf_actual" != "$_vf_expect" ]; then
+    echo "[$TRIPLE] FATAL: $_vf_what failed verification" >&2
+    echo "  expected sha256 $_vf_expect" >&2
+    echo "  actual   sha256 $_vf_actual" >&2
+    echo "  file     $_vf_file" >&2
+    # The cached copy is REMOVED. Leaving corrupt bytes in the cache would
+    # make every later build fail the same way with no path out except manual
+    # cleanup, and a poisoned cache entry that merely fails loudly is still a
+    # poisoned cache entry.
+    rm -f "$_vf_file"
+    exit 1
+  fi
+  echo "[$TRIPLE] verified $_vf_what (sha256 $_vf_actual)"
+}
+
+# --------------------------------------------------------------------------
 # download PBS (cached)
 # --------------------------------------------------------------------------
 
@@ -154,6 +201,12 @@ if [ ! -f "$PBS_CACHED" ]; then
 else
   echo "[$TRIPLE] PBS cached: $PBS_CACHED"
 fi
+
+# Verified on BOTH paths — see verify_sha256's note on why the cache hit is the
+# more dangerous one. The expected value is selected per triple, because a PBS
+# asset is platform-specific and one hash cannot cover the matrix.
+eval "PBS_EXPECT=\${PBS_SHA256_$(echo "$TRIPLE" | tr 'a-z-' 'A-Z_'):-}"
+verify_sha256 "$PBS_CACHED" "${PBS_EXPECT:-}" "python-build-standalone $CPYTHON+$PBS_TAG ($TRIPLE)"
 
 # --------------------------------------------------------------------------
 # extract PBS (strip 'python/' prefix so bundle layout matches design §6)
@@ -361,6 +414,13 @@ if [ -n "${RG_ASSET:-}" ]; then
   fi
 
   if [ -n "$RG_CACHED" ] && [ -f "$RG_CACHED" ]; then
+    # Verified before extraction, same rule as PBS. rg is a third-party
+    # EXECUTABLE that ships inside the bundle, so unverified bytes here would
+    # be shipped to every user of the plugin — the highest-consequence input
+    # in this script, and the one whose download path already tolerates
+    # failure most readily.
+    eval "RG_EXPECT=\${RG_SHA256_$(echo "$TRIPLE" | tr 'a-z-' 'A-Z_'):-}"
+    verify_sha256 "$RG_CACHED" "${RG_EXPECT:-}" "ripgrep $RG_VERSION ($TRIPLE)"
     # Extract just the rg binary into a temp dir, then place it in bundle bin/.
     RG_EXTRACT_DIR="$BUILD_DIR/rg-extract-$TRIPLE"
     rm -rf "$RG_EXTRACT_DIR"
