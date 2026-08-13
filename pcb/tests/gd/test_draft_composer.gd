@@ -21,6 +21,7 @@ extends SceneTree
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const StagedEntities := preload("res://../../minerva-plugins/pcb/ui/model/pcb_staged_entities.gd")
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const RouteCandidate := preload("res://../../minerva-plugins/pcb/ui/model/pcb_route_candidate.gd")
 
 var _pass := 0
 var _fail := 0
@@ -35,6 +36,7 @@ func _init() -> void:
 	await process_frame
 	_run_composer_content()
 	_run_composer_placements()
+	await _run_candidate_placement_provenance()
 	_run_composer_fail_safe()
 	_run_panel_request_board()
 	_run_reply_cache_isolation()
@@ -249,6 +251,110 @@ func _run_composer_placements() -> void:
 	check_eq("unknown purpose leaves components at real poses",
 		float(_composed_comp(unknown, "U2").get("x_mm", 0.0)), 25.0)
 	rig["panel"].free()
+
+
+# ── 1c. candidate provenance + the commit gate (OFC-3) ────────────────────────
+
+## One worker-shaped route landing at the ghost's target pad — the geometry is
+## opaque to the gate; what matters is that it was generated DURING a live
+## ghost.
+func _sig_route_result() -> Dictionary:
+	return {"success": true, "via_count": 0, "unrouted": [],
+		"routes": [{"net": "SIG", "vias": [],
+			"segments": [{"start": [20.0, 25.0], "end": [25.0, 5.0],
+				"layer": "F.Cu", "width_mm": 0.3}]}]}
+
+
+func _list_row(host_panel, cid: String) -> Dictionary:
+	var reply: Dictionary = PanelTools._workspace_list(
+		host_panel.get_annotation_host(), {"include_terminal": true})
+	for row in (reply.get("candidates", []) as Array):
+		if str((row as Dictionary).get("candidate_id", "")) == cid:
+			return row
+	return {}
+
+
+func _ghost_status(row: Dictionary) -> String:
+	var dp: Array = row.get("draft_placements", [])
+	if dp.is_empty():
+		return "(absent)"
+	return str((dp[0] as Dictionary).get("status", ""))
+
+
+func _run_candidate_placement_provenance() -> void:
+	print("-- 1c. candidate draft-placement provenance + commit gate --")
+	var rig := _placement_rig()
+	var panel = rig["panel"]
+	var host = panel.get_annotation_host()
+	var workspace = panel.get_routing_workspace()
+	var data = rig["data"]
+	var store = rig["store"]
+	var ghost: Dictionary = rig["placement"]
+	var ghost_id := str(ghost.get("id", ""))
+	var sid := str(store.staged_id_for_entity(ghost_id))
+
+	# (a) ingest while the ghost is live → provenance stamped, status pending.
+	var ingest: Dictionary = await PanelTools._ingest_result_into_workspace(
+		host, workspace, data, _sig_route_result(), [], {})
+	var landed: Array = (ingest.get("result", {}) as Dictionary).get("candidates", []) \
+		if ingest.get("result", null) is Dictionary else ingest.get("candidates", [])
+	check_eq("(fixture) one candidate landed", landed.size(), 1)
+	var cand_row: Dictionary = landed[0] if landed.size() > 0 else {}
+	var cid := str(cand_row.get("candidate_id", ""))
+	var dp: Array = cand_row.get("draft_placements", [])
+	check_eq("ingest reply row carries the ghost dependency", dp.size(), 1)
+	check_eq("…by ghost entity id", str((dp[0] as Dictionary).get("id", "")) if dp.size() > 0 else "", ghost_id)
+	check_eq("…status pending at generation", _ghost_status(cand_row), "pending")
+	check_eq("…and it is DURABLE candidate state (listing agrees)",
+		_ghost_status(_list_row(panel, cid)), "pending")
+
+	# (b) commit refuses while the dependency is pending; no copper lands.
+	var traces_before: int = data.get_trace_count()
+	var refusal: Dictionary = await PanelTools._workspace_commit(host, {"candidate_id": cid})
+	check_eq("commit refused while the move is unaccepted",
+		bool(refusal.get("success", true)), false)
+	check_eq("…by name", str(refusal.get("error", "")), "draft_placement_pending")
+	check_eq("…and no copper landed", data.get_trace_count(), traces_before)
+
+	# (c) retargeting the ghost invalidates the candidate's world.
+	check("(fixture) ghost retargets to (22, 25)",
+		store.update_placement_target(sid, 22.0, 25.0, 90.0))
+	check_eq("listing derives invalidated after retarget",
+		_ghost_status(_list_row(panel, cid)), "invalidated")
+	var refusal2: Dictionary = await PanelTools._workspace_commit(host, {"candidate_id": cid})
+	check_eq("commit refuses invalidated by name",
+		str(refusal2.get("error", "")), "draft_placement_invalidated")
+
+	# (d) retargeting BACK restores pending — derived, not latched.
+	check("(fixture) ghost retargets back to (20, 25)",
+		store.update_placement_target(sid, 20.0, 25.0, 90.0))
+	check_eq("status derives pending again (no sticky invalidation)",
+		_ghost_status(_list_row(panel, cid)), "pending")
+
+	# (e) the move LANDS → dependency satisfied → commit proceeds.
+	check("(fixture) the move lands on the board",
+		not data.add_placement_payload(ghost).is_empty())
+	check_eq("status derives satisfied once the component sits at the target",
+		_ghost_status(_list_row(panel, cid)), "satisfied")
+	var committed: Dictionary = await PanelTools._workspace_commit(host, {"candidate_id": cid})
+	check_eq("commit now succeeds", bool(committed.get("success", false)), true)
+	check_eq("…and the copper landed", data.get_trace_count(), traces_before + 1)
+
+	# (f) provenance survives candidate serialization (sidecar round-trip).
+	var cobj = workspace.get_candidate(cid)
+	var reloaded = RouteCandidate.from_dict(cobj.to_dict())
+	check_eq("draft_placements round-trips through to_dict/from_dict",
+		str(reloaded.draft_placements), str(cobj.draft_placements))
+
+	# (g) no ghost live at generation → no provenance key at all (legacy shape).
+	store.reject(sid)
+	var ingest2: Dictionary = await PanelTools._ingest_result_into_workspace(
+		host, workspace, data, _sig_route_result(), [], {})
+	var landed2: Array = (ingest2.get("result", {}) as Dictionary).get("candidates", []) \
+		if ingest2.get("result", null) is Dictionary else ingest2.get("candidates", [])
+	check("a ghost-free ingest carries NO draft_placements key (absent, not empty)",
+		landed2.size() == 1 and not (landed2[0] as Dictionary).has("draft_placements"))
+	panel.free()
 
 
 # ── 2. composer fail-safe: unknown purpose / absent store compose NOTHING ─────

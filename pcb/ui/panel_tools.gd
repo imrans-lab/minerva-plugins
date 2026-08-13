@@ -2580,6 +2580,10 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 
 	var records: Array = _normalize_route_records(result, source_hints)
 	var revision: int = int(data.board_revision) if data != null else 0
+	# OFC-3: same one-snapshot-per-ingest provenance as
+	# _ingest_result_into_workspace — this is the apply_route_hints
+	# commit=false landing path, also a draft request.
+	var draft_snapshot: Array = _live_placement_snapshot(host)
 	var proposals: Array = []
 	var holds: Array = []
 	for rec in records:
@@ -2593,6 +2597,10 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 			holds.append(hold)
 		if cid.is_empty():
 			continue  # HELD — the task's active candidate is pinned; see `holds`
+		if not draft_snapshot.is_empty():
+			var cobj_stamp = workspace.get_candidate(cid)
+			if cobj_stamp != null:
+				cobj_stamp.draft_placements = draft_snapshot.duplicate(true)
 		var entry: Dictionary = {
 			"id": cid,
 			"candidate_id": cid,
@@ -2621,6 +2629,13 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 		# shape for parity — absent when `rec` carries none.
 		if rec.has("constraint_revision"):
 			entry["constraint_revision"] = int(rec.get("constraint_revision"))
+		# OFC-3 parity: the reply row says what the candidate now durably
+		# knows — which ghost poses this copper depends on, with the derived
+		# status (trivially "pending" at ingest, but one derivation serves
+		# every surface).
+		if not draft_snapshot.is_empty():
+			entry["draft_placements"] = draft_snapshot.duplicate(true)
+			_stamp_draft_placement_status(entry, host)
 		proposals.append(entry)
 
 	var reply: Dictionary = {
@@ -4714,6 +4729,12 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		rec["width_source"] = str(c.width_source)
 	if not (c.hint_status as Array).is_empty():
 		rec["hint_status"] = (c.hint_status as Array).duplicate(true)
+	# OFC-3: draft-placement provenance is durable candidate state (stamped at
+	# ingest) — absent-when-empty like the provenance keys above. The derived
+	# per-ghost status needs board+store context this builder doesn't have;
+	# callers with a host attach it via _stamp_draft_placement_status.
+	if not (c.draft_placements as Array).is_empty():
+		rec["draft_placements"] = (c.draft_placements as Array).duplicate(true)
 	if workspace.has_method("committed_copper_ids"):
 		var copper: Dictionary = workspace.committed_copper_ids(cid)
 		if not (copper.get("trace_ids", []) as Array).is_empty() \
@@ -4738,6 +4759,134 @@ static func _candidate_record(workspace, c) -> Dictionary:
 		if quality.has("misalignment_mm"):
 			rec["misalignment_mm"] = quality["misalignment_mm"]
 	return rec
+
+
+## OFC-3 (epoch 019ff9421d3f): snapshot of every LIVE placement ghost, in the
+## shape candidates carry as draft_placements — taken at ingest so a
+## candidate generated against a composed draft knows exactly which ghost
+## poses its copper depends on. Empty when no ghosts are live (the common
+## real-board propose) or when the panel/store is unreachable (headless
+## harness without a mount) — absent provenance means no gate, the honest
+## legacy behavior.
+static func _live_placement_snapshot(host) -> Array:
+	var panel = _get_panel(host)
+	if panel == null or not panel.has_method("get_staged_store"):
+		return []
+	var store = panel.get_staged_store()
+	if store == null or not store.has_method("staged_payloads"):
+		return []
+	var out: Array = []
+	for p in store.staged_payloads("placement"):
+		if not (p is Dictionary):
+			continue
+		out.append({
+			"id": str((p as Dictionary).get("id", "")),
+			"component_id": str((p as Dictionary).get("component_id", "")),
+			"to": ((p as Dictionary).get("to", {}) as Dictionary).duplicate(true) \
+				if (p as Dictionary).get("to", null) is Dictionary else {},
+		})
+	return out
+
+
+## Pose equality for draft-placement status: exact-assignment poses survive
+## float round-trips bit-identically, but rotation may normalize (450 == 90),
+## so compare mod 360 with a hair of tolerance.
+static func _placement_pose_matches(x: float, y: float, rot: float, to: Dictionary) -> bool:
+	if not (is_equal_approx(x, float(to.get("x_mm", 0.0))) \
+			and is_equal_approx(y, float(to.get("y_mm", 0.0)))):
+		return false
+	var a := fposmod(rot, 360.0)
+	var b := fposmod(float(to.get("rotation_deg", 0.0)), 360.0)
+	return is_equal_approx(a, b) or is_equal_approx(absf(a - b), 360.0)
+
+
+## Derive each snapshot ghost's CURRENT status — at READ time, from the board
+## and store as they are now (one derivation for listings, commit gate and
+## replies; never cached, never event-driven — ghost pose edits are scratch
+## and bump no revision anything could subscribe to):
+##   satisfied   — the component's REAL pose equals the snapshot target: the
+##                 move landed, this dependency is discharged.
+##   pending     — a live ghost still targets the snapshot pose (any ghost —
+##                 reject-then-repropose to the same pose is the same world):
+##                 accept the move first, or reject it and reroute.
+##   invalidated — component gone, ghost gone, or ghost retargeted: the
+##                 candidate routed against a world that no longer exists.
+## Returns the snapshot rows with a "status" key added; [] in ⇒ [] out.
+static func _draft_placement_status(data, store, snapshot: Array) -> Array:
+	var out: Array = []
+	for s in snapshot:
+		if not (s is Dictionary):
+			continue
+		var row: Dictionary = (s as Dictionary).duplicate(true)
+		var comp_id := str(row.get("component_id", ""))
+		var to: Dictionary = row.get("to", {}) if row.get("to", null) is Dictionary else {}
+		var status := "invalidated"
+		var comp = data.get_component(comp_id) if data != null else null
+		if comp != null and not to.is_empty():
+			if _placement_pose_matches(comp.position.x, comp.position.y, comp.rotation, to):
+				status = "satisfied"
+			elif store != null and store.has_method("live_placement_for_component"):
+				var sid := str(store.live_placement_for_component(comp_id))
+				if not sid.is_empty():
+					var live_to: Variant = ((store.get_entry(sid).get("payload", {}) as Dictionary)).get("to")
+					if live_to is Dictionary and _placement_pose_matches(
+							float((live_to as Dictionary).get("x_mm", 0.0)),
+							float((live_to as Dictionary).get("y_mm", 0.0)),
+							float((live_to as Dictionary).get("rotation_deg", 0.0)), to):
+						status = "pending"
+		row["status"] = status
+		out.append(row)
+	return out
+
+
+## Attach derived statuses onto a candidate record's draft_placements rows —
+## the caller-with-a-host half of _candidate_record's OFC-3 note. No-op for
+## records without provenance.
+static func _stamp_draft_placement_status(rec: Dictionary, host) -> void:
+	if not rec.has("draft_placements"):
+		return
+	var data = _get_data(host)
+	var panel = _get_panel(host)
+	var store = panel.get_staged_store() \
+		if panel != null and panel.has_method("get_staged_store") else null
+	rec["draft_placements"] = _draft_placement_status(
+		data, store, rec.get("draft_placements", []))
+
+
+## The commit-side gate (OFC-3 ceremony, option (a) — the fail-safe default
+## pending the owner's feel ruling, recorded on 019ff9428d80): copper routed
+## against a ghost pose is INVALID on the real board until that placement
+## lands. No acknowledge bypass — unlike the assembly gate's advisory
+## findings, this is a factual mismatch, not a judgment call. Returns {} when
+## the candidate carries no provenance or every dependency is satisfied;
+## otherwise the refusal reply.
+static func _draft_placement_block(host, c) -> Dictionary:
+	if c == null or (c.draft_placements as Array).is_empty():
+		return {}
+	var data = _get_data(host)
+	var panel = _get_panel(host)
+	var store = panel.get_staged_store() \
+		if panel != null and panel.has_method("get_staged_store") else null
+	var statuses: Array = _draft_placement_status(data, store, c.draft_placements)
+	var pending: Array = []
+	var invalidated: Array = []
+	for row in statuses:
+		match str((row as Dictionary).get("status", "")):
+			"pending": pending.append(row)
+			"invalidated": invalidated.append(row)
+	if pending.is_empty() and invalidated.is_empty():
+		return {}
+	# Invalidated outranks pending: an accept can cure pending, nothing but a
+	# reroute cures invalidated.
+	if not invalidated.is_empty():
+		return {"success": false, "error": "draft_placement_invalidated",
+			"candidate_id": str(c.candidate_id),
+			"draft_placements": statuses,
+			"note": "this candidate was routed against placement ghost pose(s) that no longer exist (ghost rejected, retargeted, or component gone) — its copper describes a world that isn't coming; reroute it (minerva_pcb_workspace_reroute_route) or reject it"}
+	return {"success": false, "error": "draft_placement_pending",
+		"candidate_id": str(c.candidate_id),
+		"draft_placements": statuses,
+		"note": "this candidate's copper lands at a placement ghost's target pads — accept the move first (minerva_pcb_staged_accept on the ghost id above), then commit; or reject the ghost and reroute"}
 
 
 ## Chain a candidate's segments into ordered XY polyline runs — the SHARED
@@ -4924,6 +5073,7 @@ static func _workspace_disposition_verb(host, args: Dictionary, verb: String) ->
 		return _workspace_refusal(workspace, verb, cid)
 	var reply: Dictionary = {"verb": verb}
 	reply.merge(_candidate_record(workspace, workspace.get_candidate(cid)))
+	_stamp_draft_placement_status(reply, host)  # OFC-3: derived ghost-dependency status
 	# INV-2 is observable, not merely internal: name the candidates whose verdict
 	# this verb invalidated so a caller knows what needs re-checking.
 	reply["stale_candidate_ids"] = _stale_ids(workspace)
@@ -5197,6 +5347,11 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 		source_hints: Array, extra: Dictionary) -> Dictionary:
 	var records: Array = _normalize_route_records(result, source_hints)
 	var revision: int = int(data.board_revision) if data != null else 0
+	# OFC-3: every candidate this ingest lands was routed against the SAME
+	# composed draft, so one snapshot of the live ghosts serves them all —
+	# taken BEFORE the loop so a mid-ingest store change cannot split the
+	# batch's provenance.
+	var draft_snapshot: Array = _live_placement_snapshot(host)
 	var landed: Array = []
 	var holds: Array = []
 	# F4 (cold review): merge absorption's dropped-constraint conflicts —
@@ -5213,7 +5368,15 @@ static func _ingest_result_into_workspace(host, workspace, data, result: Diction
 			constraint_conflicts.append(conflict)
 		if cid.is_empty():
 			continue
+		# OFC-3: draft-placement provenance becomes durable candidate state
+		# BEFORE the record is built, so the reply rows and every later
+		# listing/sidecar reload report it identically.
+		if not draft_snapshot.is_empty():
+			var cobj_stamp = workspace.get_candidate(cid)
+			if cobj_stamp != null:
+				cobj_stamp.draft_placements = draft_snapshot.duplicate(true)
 		var candidate_rec: Dictionary = _candidate_record(workspace, workspace.get_candidate(cid))
+		_stamp_draft_placement_status(candidate_rec, host)
 		# docket 019fd0ab5af8: stamp width provenance from the SAME normalized
 		# `rec` that produced this exact candidate (ingest_record above is a
 		# direct one-call-per-rec correspondence) — not a post-hoc match by net
@@ -5314,6 +5477,10 @@ static func _workspace_list(host, args: Dictionary) -> Dictionary:
 		if not want_net.is_empty() and str(c.net) != want_net:
 			continue
 		var rec: Dictionary = _candidate_record(workspace, c)
+		# OFC-3: listings answer "can this commit right now" — derive each
+		# draft-ghost dependency's current status (satisfied/pending/
+		# invalidated) from the live board + store.
+		_stamp_draft_placement_status(rec, host)
 		if include_geometry:
 			rec["geometry"] = _candidate_geometry(c)
 		out.append(rec)
@@ -5362,6 +5529,7 @@ static func _workspace_get_active(host, args: Dictionary) -> Dictionary:
 		return _ok({"active_candidate_id": "", "candidate": {},
 			"note": "no candidate is active (select one on the canvas, or pass candidate_id to the verb you meant)"})
 	var rec: Dictionary = _candidate_record(workspace, workspace.get_candidate(cid))
+	_stamp_draft_placement_status(rec, host)  # OFC-3: derived ghost-dependency status
 	if bool(args.get("include_geometry", false)):
 		rec["geometry"] = _candidate_geometry(workspace.get_candidate(cid))
 	var reply: Dictionary = {"active_candidate_id": cid, "candidate": rec}
@@ -5420,6 +5588,7 @@ static func _get_selection(host, _args: Dictionary) -> Dictionary:
 		# The full candidate record — net, disposition, validation, quality
 		# metrics, provenance — IS the "what's this" answer for a ghost.
 		var rec: Dictionary = _candidate_record(workspace, c)
+		_stamp_draft_placement_status(rec, host)  # OFC-3: "what's this" includes "can it commit"
 		rec["kind"] = "candidate"
 		rec["id"] = str(cid)
 		# Source-intent context: the human-readable note the intent was
@@ -5823,6 +5992,22 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		var batch_ids: Array = _string_list(args.get("candidate_ids", []))
 		if batch_ids.is_empty():
 			return _err("candidate_ids must name at least one candidate (empty batch)")
+		# OFC-3 DRAFT-PLACEMENT GATE, per member, all-or-nothing, and AHEAD of
+		# the assembly gate below on purpose: that one is advisory (findings a
+		# human may acknowledge past); this one is factual — a member's copper
+		# lands at a ghost pose that hasn't happened, and no acknowledge flag
+		# exists for it. Ceremony ruling pending on 019ff9428d80; option (a)
+		# refuse-until-accepted is the fail-safe default built here.
+		var draft_blocked: Array = []
+		for bid in batch_ids:
+			var member_block: Dictionary = _draft_placement_block(
+				host, workspace.get_candidate(str(bid)))
+			if not member_block.is_empty():
+				draft_blocked.append(member_block)
+		if not draft_blocked.is_empty():
+			return {"success": false, "error": "draft_placement_blocked",
+				"blocked_members": draft_blocked,
+				"note": "batch refused whole (all-or-nothing): member candidate(s) were routed against live placement ghost(s) — accept those moves first, or reject them and reroute; see blocked_members"}
 		# PLACEMENT GATE, per-member, in PREFLIGHT (DCR 019fd5fd9084 item 2 —
 		# before commit_batch lays ANY copper): one unacknowledged blocked
 		# member refuses the WHOLE batch, the existing all-or-nothing
@@ -5865,8 +6050,10 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		for r in batch.get("results", []):
 			for hid in (r as Dictionary).get("consumed_hint_ids", []):
 				_set_hint_lifecycle(host, str(hid), "applied")
-			recs.append(_candidate_record(workspace,
-				workspace.get_candidate(str((r as Dictionary).get("candidate_id", "")))))
+			var member_rec: Dictionary = _candidate_record(workspace,
+				workspace.get_candidate(str((r as Dictionary).get("candidate_id", ""))))
+			_stamp_draft_placement_status(member_rec, host)  # OFC-3: post-commit, dependencies read satisfied
+			recs.append(member_rec)
 		var breply: Dictionary = batch.duplicate(true)
 		breply.erase("ok")
 		breply["candidates"] = recs
@@ -5887,6 +6074,11 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 	var cid: String = str(args.get("candidate_id", ""))
 	if cid.is_empty():
 		return _err("candidate_id is required")
+	# OFC-3 DRAFT-PLACEMENT GATE, single form — same position and same
+	# no-acknowledge contract as the batch gate above.
+	var draft_block: Dictionary = _draft_placement_block(host, workspace.get_candidate(cid))
+	if not draft_block.is_empty():
+		return draft_block
 	# PLACEMENT GATE (DCR 019fd5fd9084 item 2), single form — same preflight
 	# position as the batch gate above: before workspace.commit lays copper.
 	# An unknown cid is skipped (null candidate → no endpoints → no blocking);
@@ -5933,6 +6125,7 @@ static func _workspace_commit(host, args: Dictionary) -> Dictionary:
 		_set_hint_lifecycle(host, str(hid), "applied")
 
 	reply["candidate"] = _candidate_record(workspace, workspace.get_candidate(cid))
+	_stamp_draft_placement_status(reply["candidate"], host)  # OFC-3
 	reply["stale_candidate_ids"] = _stale_ids(workspace)
 	reply["undo_note"] = "one board history step: Ctrl+Z (or PCBData.undo) removes this copper AND returns the candidate to its pre-commit disposition — the source hint(s) reopen the next time any workspace tool runs (see _reconcile_hint_lifecycle), not synchronously with this undo"
 	# Epoch UX1 station 11: additive alongside undo_note (a different

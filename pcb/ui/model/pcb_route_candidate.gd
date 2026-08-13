@@ -155,6 +155,17 @@ var constraint_revision: int = -1
 ## when the router reported it). Empty when the router reported nothing.
 var hint_status: Array = []
 
+## OFC-3 (epoch 019ff9421d3f): the LIVE placement ghosts the composed draft
+## board carried when this candidate was generated — [{id, component_id,
+## to:{x_mm, y_mm, rotation_deg}}]. Empty for candidates routed against the
+## real board (no ghosts live at generation). The candidate's copper is only
+## valid in a world where each snapshot pose LANDS: commit gates on it, and
+## every listing derives a per-ghost status (satisfied/pending/invalidated)
+## from the CURRENT board + store — deliberately not event-driven, because
+## ghost pose edits are scratch (no board-revision bump), so the
+## base_board_revision staleness idiom above cannot see them.
+var draft_placements: Array = []
+
 ## WIDTH PROVENANCE (UX4 station 10, work item 019fd0ab5af8): which source
 ## sized this candidate's copper — DURABLE state like constraint_revision
 ## (P1-B's precedent), so a review surface can tell an INTENDED 0.25mm from a
@@ -350,6 +361,7 @@ func to_dict() -> Dictionary:
 		"constraint_revision": constraint_revision,
 		"hint_status": hint_status.duplicate(true),
 		"width_source": width_source,
+		"draft_placements": draft_placements.duplicate(true),
 	}
 
 
@@ -387,6 +399,10 @@ func load_from_dict(data: Dictionary) -> void:
 		if data.get("hint_status", []) is Array else []
 	# UX4 station 10: absent on pre-provenance records — "" means unknown.
 	width_source = str(data.get("width_source", ""))
+	# OFC-3: absent on pre-provenance records — [] means "routed against the
+	# real board" (also the honest default for legacy sidecars: no gate).
+	draft_placements = (data.get("draft_placements", []) as Array).duplicate(true) \
+		if data.get("draft_placements", []) is Array else []
 
 	# Route through the validating setters (bad stored values fall back to defaults).
 	set_disposition(str(data.get("disposition", "proposed")))
