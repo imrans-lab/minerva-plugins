@@ -96,6 +96,7 @@ func _init() -> void:
 	_test_file_shape_on_disk()
 	_test_corrupt_file_degrades_and_warns_once()
 	await _test_overwide_trace_keeps_its_copper()
+	await _test_menu_revealed_draw_width()
 	_assert_every_section_ran()
 
 	# Restore before exiting: a leaked override outlives this suite.
@@ -117,6 +118,55 @@ func _begin_section(label: String) -> void:
 	_section_marks.append({"label": label, "at": _pass + _fail})
 
 
+# ── BT-OFC5. Drawing width is menu-revealed, never standing furniture ────────
+
+## OFC-5 (docket 019ff937a981, the owner's THIRD width-in-context-menu ruling):
+## arming the Trace tool no longer shows the authoring-width box; the canvas
+## context menu offers "Set drawing width… (<current>)" at the point of use,
+## and the menu request is what reveals (and the disarm what retires) the ONE
+## existing editor. The current width stays visible in the item label, sourced
+## from trace_author_width() — the same derivation the preview and commit use.
+func _test_menu_revealed_draw_width() -> void:
+	_begin_section("BT-OFC5")
+	print("\n-- BT-OFC5: drawing width is menu-revealed, not standing furniture --")
+	var panel := await _mount(_board(RULE_WIDTH))
+	var canvas = panel._canvas
+	var CanvasScript = canvas.get_script()
+
+	canvas.tool_mode = CanvasScript.ToolMode.TRACE
+	panel._sync_draw_arm_ui(CanvasScript.ToolMode.TRACE)
+	var spin := _width_spin(panel)
+	check("arming the Trace tool does NOT show the standing width box",
+			spin != null and not spin.visible)
+
+	canvas._update_context_menu_for_selection()
+	var label := ""
+	for i in range(canvas.context_menu.item_count):
+		if canvas.context_menu.get_item_id(i) == CanvasScript.MENU_ID_SET_DRAW_WIDTH:
+			label = canvas.context_menu.get_item_text(i)
+	check("…the armed tool's context menu offers it instead", not label.is_empty())
+	check("…with the current width in the label (rule %.2f)" % RULE_WIDTH,
+			label.contains("0.40"), "label: '%s'" % label)
+
+	canvas.edit_draw_width_requested.emit()
+	await process_frame
+	check("the menu request reveals the box", spin != null and spin.visible)
+
+	panel._sync_draw_arm_ui(CanvasScript.ToolMode.SELECT)
+	check("disarming the tool retires it again", spin != null and not spin.visible)
+
+	canvas.tool_mode = CanvasScript.ToolMode.SELECT
+	canvas._update_context_menu_for_selection()
+	var offered := false
+	for i in range(canvas.context_menu.item_count):
+		if canvas.context_menu.get_item_id(i) == CanvasScript.MENU_ID_SET_DRAW_WIDTH:
+			offered = true
+	check("universal select's menu never carries a drawing-width item", not offered)
+
+	panel.queue_free()
+	await process_frame
+
+
 func _assert_every_section_ran() -> void:
 	print("\n-- every section actually ran --")
 	var silent: Array = []
@@ -127,8 +177,8 @@ func _assert_every_section_ran() -> void:
 		if next_at - int(mark["at"]) <= 0:
 			silent.append(str(mark["label"]))
 	check("no section produced ZERO assertions (silent: %s)" % str(silent), silent.is_empty())
-	check("all 4 sections declared themselves (%d)" % _section_marks.size(),
-			_section_marks.size() == 4)
+	check("all 5 sections declared themselves (%d)" % _section_marks.size(),
+			_section_marks.size() == 5)
 
 
 func _wipe_scratch() -> void:

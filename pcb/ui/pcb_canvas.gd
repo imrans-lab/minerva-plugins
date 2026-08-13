@@ -496,6 +496,12 @@ signal bus_tool_message(text: String)
 ## grow a second way to set a width.
 signal edit_trace_width_requested(trace_id: String)
 
+## OFC-5: the drawing-width twin of the signal above — asks the panel to
+## reveal + focus its (now menu-revealed, no longer standing) authoring-width
+## box for the armed Trace tool. Same one-editor rule: the canvas never sets
+## a width itself.
+signal edit_draw_width_requested()
+
 ## Epoch UX3 station 5 (docket 019fdf8faa15): the canvas asks its PANEL to run
 ## a steered retry — the router leg is async and panel-owned, so the menu/
 ## gesture side emits and the panel completes (PCBPanel._on_candidate_retry_
@@ -1128,6 +1134,17 @@ func _update_context_menu_for_selection() -> void:
 
 	_add_context_menu_target_items()
 
+	# OFC-5: with the Trace tool armed, every right-click (that is not the
+	# family's cancel-a-draw-in-progress grammar — that branch returns before
+	# the menu arms) offers the drawing width at the point of use. The label
+	# carries the CURRENT width so retiring the always-visible sidebar box
+	# loses no visibility; trace_author_width() is the same derivation the
+	# rubber-band preview and the commit both use.
+	if tool_mode == ToolMode.TRACE:
+		_context_menu_separate()
+		context_menu.add_item("Set drawing width… (%.2f mm)" % trace_author_width(),
+			MENU_ID_SET_DRAW_WIDTH)
+
 	var has_lock_section := false
 	var comp_under_cursor: String = _component_at(context_menu_world_pos)
 	if not comp_under_cursor.is_empty() or not selected_components.is_empty():
@@ -1233,6 +1250,10 @@ const MENU_ID_STAGED_REJECT := 447
 ## ONE-SHOT arm on the pressed component — its next drag stages a ghost
 ## instead of moving it. Replaces the rejected "Propose moves" mode toggle.
 const MENU_ID_COMPONENT_PROPOSE_MOVE := 449
+## OFC-5 (docket 019ff937a981, the owner's THIRD width-in-context-menu ruling):
+## the DRAWING width — the width the armed Trace tool will commit — is chosen
+## at the point of use instead of a standing Tools-area control.
+const MENU_ID_SET_DRAW_WIDTH := 450
 
 
 ## Sections 1-3 of the menu: what the press was actually aimed at.
@@ -1395,6 +1416,8 @@ func _on_context_menu_pressed(id: int) -> void:
 				_insert_zone_vertex(str(ins["zone_id"]), int(ins["index"]), ins["point"])
 		MENU_ID_SET_TRACE_WIDTH:  # B1u5 — reveal the panel's existing width row
 			_request_trace_width_edit(str(_context_menu_target[1]))
+		MENU_ID_SET_DRAW_WIDTH:  # OFC-5 — reveal the panel's authoring-width box
+			edit_draw_width_requested.emit()
 		MENU_ID_DELETE_TARGET:  # B1u5 — delete the entity the press picked
 			_delete_picked_entity(str(_context_menu_target[0]), str(_context_menu_target[1]), "Delete")
 		MENU_ID_DELETE_ANNOTATION_BEND:  # Station 6 fix F1 — the frozen bend hit

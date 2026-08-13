@@ -56,7 +56,9 @@ test_pcb_pin_inspector.gd assertions=49
 test_pcb_plugin_smoke.gd assertions=43
 test_pcb_route_hint_mcp_parity.gd assertions=19
 test_pcb_trace_tool.gd assertions=31
-test_pcb_width_prefs.gd assertions=28
+# Re-pinned 28 → 34 with OFC-5's menu-revealed drawing-width section (BT-OFC5,
+# 6 checks; the section-registry count check updates in place).
+test_pcb_width_prefs.gd assertions=34
 test_pcb_workflow_kinds.gd assertions=131
 test_production_seam.gd assertions=96
 test_proposal_attribution.gd assertions=33

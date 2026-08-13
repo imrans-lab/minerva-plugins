@@ -229,6 +229,12 @@ var _zone_layer_option: OptionButton = null
 ## again; it starts at the board's design-rule width, which is what the tool used
 ## unconditionally before there was any UI for it.
 var _trace_width_spin: SpinBox = null
+## OFC-5 (docket 019ff937a981): the authoring-width box is MENU-REVEALED, not
+## standing — false until the canvas menu's "Set drawing width…" asks for it,
+## dropped again whenever the Trace tool disarms. The owner's third
+## width-in-context-menu ruling retired the always-visible control; the
+## current width stays visible in the menu item's own label.
+var _draw_width_revealed := false
 
 ## ── Zone re-property rows (A5) ────────────────────────────────────────────────
 ## Properties-section controls that EDIT THE SELECTED ZONE, as distinct from the
@@ -1034,6 +1040,7 @@ func _build_ui() -> void:
 	_canvas.cutout_tool_message.connect(_show_transient_status)
 	_canvas.bus_tool_message.connect(_show_transient_status)
 	_canvas.edit_trace_width_requested.connect(_on_edit_trace_width_requested)
+	_canvas.edit_draw_width_requested.connect(_on_edit_draw_width_requested)
 
 	# Right sidebar (legacy layout clone): tool buttons + the platform
 	# annotation dock (mounted by Minerva via get_annotation_dock_parent).
@@ -3823,7 +3830,11 @@ func _sync_draw_arm_ui(mode: int) -> void:
 	var is_trace_tool: bool = mode == _PcbCanvasScript.ToolMode.TRACE
 
 	if _trace_width_spin != null:
-		_trace_width_spin.visible = is_trace_tool
+		# OFC-5: no longer standing-visible with the tool — the reveal is the
+		# menu's to grant and the disarm always takes it back.
+		if not is_trace_tool:
+			_draw_width_revealed = false
+		_trace_width_spin.visible = is_trace_tool and _draw_width_revealed
 		if is_trace_tool:
 			_sync_trace_width_spin()
 
@@ -3979,6 +3990,40 @@ func seeded_trace_width() -> float:
 	if prefs.has_stored(_PcbPrefsScript.KEY_TRACE_WIDTH):
 		return prefs.get_float(_PcbPrefsScript.KEY_TRACE_WIDTH, _PcbTraceScript.DEFAULT_WIDTH_MM)
 	return _PcbTraceScript.DEFAULT_WIDTH_MM
+
+
+## OFC-5: the canvas menu's "Set drawing width…" landing. Same shape as
+## _on_edit_trace_width_requested (menu reveals + focuses the ONE existing
+## editor; commits keep flowing through _on_trace_width_changed, which owns
+## the preference write and the override) — the sidebar box just stops being
+## standing furniture.
+func _on_edit_draw_width_requested() -> void:
+	if _trace_width_spin == null:
+		return
+	_draw_width_revealed = true
+	_trace_width_spin.visible = true
+	_sync_trace_width_spin()
+	# Deferred for the same measured reason _on_edit_trace_width_requested
+	# defers (F3 round 2): a same-frame focus races the layout pass that the
+	# visibility flip just queued.
+	call_deferred("_reveal_draw_width_spin")
+
+
+## The deferred second half of _on_edit_draw_width_requested — mirrors
+## _reveal_trace_width_spin's guards (headless mounts legitimately never
+## have the control in a visible tree).
+func _reveal_draw_width_spin() -> void:
+	if _trace_width_spin == null or not is_instance_valid(_trace_width_spin):
+		return
+	var line_edit := _trace_width_spin.get_line_edit()
+	if line_edit == null or not line_edit.is_inside_tree():
+		return
+	if not line_edit.is_visible_in_tree():
+		return
+	if _sidebar_scroll != null:
+		_sidebar_scroll.ensure_control_visible(_trace_width_spin)
+	line_edit.grab_focus()
+	line_edit.select_all()
 
 
 func _on_trace_width_changed(value: float) -> void:
