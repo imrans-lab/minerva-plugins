@@ -15,11 +15,29 @@ extends RefCounted
 ## surfaces as add_*_payload's own named refusal. Entry validation is a UX
 ## courtesy (fail fast), not the invariant.
 ##
-## ── dispositions (owner ruling 3: minimal first) ──────────────────────────────
-## staged → accepted | rejected, both TERMINAL. No pin/freeze — nothing
-## regenerates staged entities, so the candidate vocabulary would be words
-## without meaning here. "accepted" is stamped ONLY by the accept transaction
-## (the same act that writes the board), never independently.
+## ── dispositions (owner ruling 3: minimal first; amended epoch GA) ────────────
+## staged → accepted | rejected, both TERMINAL. "accepted" is stamped ONLY by
+## the accept transaction (the same act that writes the board), never
+## independently.
+##
+## FROZEN (epoch GA, DCR 019ffc52a541, acceptance check K7) is a fourth
+## disposition and is NOT terminal — staged ⇄ frozen, and either may still be
+## accepted or rejected directly. The original ruling declined it on the
+## grounds that "nothing regenerates staged entities, so the candidate
+## vocabulary would be words without meaning here". That reasoning held while
+## staged entities were inert, and stopped holding at epoch OFC: OFC-3 made
+## route candidates preview against a PLACEMENT ghost's pose, so a live pose
+## now steers generated work. Freezing a placement means THE POSE IS SETTLED —
+## update_placement_target refuses on it — so a candidate routed against that
+## pose cannot be invalidated by a later drag.
+##
+## Freeze is PLACEMENT-ONLY, deliberately. Zone and cutout payloads are already
+## immutable once staged (there is no Update verb for them) and nothing
+## regenerates against them, so for those kinds the original reasoning is
+## untouched and freeze would still be a word without meaning.
+##
+## LIVE = staged OR frozen. That is the set the composer appends, the canvas
+## draws, and the review verbs act on; see staged_entries().
 ##
 ## Off-tree plugin: NO class_name; relative preload + duck typing. Payloads are
 ## already JSON-safe (canonical dicts — {x_mm,y_mm} outlines, string ids).
@@ -39,8 +57,16 @@ const _Self := preload("pcb_staged_entities.gd")
 ## payloads-immutable rule and its undo consequence.
 const KINDS := ["zone", "cutout", "placement"]
 
-const DISPOSITIONS := ["staged", "accepted", "rejected"]
+const DISPOSITIONS := ["staged", "accepted", "rejected", "frozen"]
 const TERMINAL_DISPOSITIONS := ["accepted", "rejected"]
+
+## LIVE dispositions — the entry is still in play: it renders, it composes into
+## the effective draft board, and the review verbs act on it. Every predicate
+## in this file that used to compare against the literal "staged" tests THIS
+## instead, so adding "frozen" could not silently drop a frozen ghost out of
+## the composer, the canvas or the MCP list (the eleven consumers of
+## staged_entries()/staged_payloads() are deliberately left unchanged).
+const LIVE_DISPOSITIONS := ["staged", "frozen"]
 
 ## Named refusal codes.
 const ERR_UNKNOWN_ENTRY := "staged_entry_not_found"
@@ -49,6 +75,14 @@ const ERR_BAD_KIND := "staged_kind_unknown"
 const ERR_BAD_PAYLOAD := "staged_payload_invalid"
 const ERR_BAD_DISPOSITION := "staged_disposition_invalid"
 const ERR_DUPLICATE_ENTITY := "staged_entity_duplicate"
+## The pose of a FROZEN placement is settled — that is what freezing bought.
+## Revising it would silently invalidate any route candidate proposed against
+## that pose, so the edit is refused BY NAME rather than quietly winning.
+const ERR_FROZEN := "staged_entry_frozen"
+## Freeze answers a question only a placement can ask (see the dispositions
+## note at the top): zone/cutout payloads are already immutable and nothing
+## regenerates against them.
+const ERR_NOT_FREEZABLE := "staged_kind_not_freezable"
 
 ## Emitted on EVERY observable mutation (stage/stamp/restore/load) — the
 ## render layer redraws on it and the panel's sidecar autosave debounce rides
@@ -137,16 +171,37 @@ func get_entry(staged_id: String) -> Dictionary:
 	return (entries.get(staged_id, {}) as Dictionary).duplicate(true)
 
 
-## LIVE entries (disposition == "staged") — what the composer appends, the
-## canvas draws, and the review verbs act on. Returns [{staged_id, ...entry}].
+## Is this disposition still in play? "staged" and "frozen" both are — a frozen
+## entry has settled its pose, not left the workspace. Kept as one predicate so
+## the live/terminal split is decided in exactly one place.
+static func is_live_disposition(disposition: String) -> bool:
+	return disposition in LIVE_DISPOSITIONS
+
+
+## LIVE entries (staged OR frozen) — what the composer appends, the canvas
+## draws, and the review verbs act on. Returns [{staged_id, ...entry}].
+## Callers that must distinguish the two read `disposition` off the record;
+## everything that only cares "is this ghost still in play" gets the right
+## answer without changing.
 func staged_entries() -> Array:
 	var out: Array = []
 	for sid in entries:
 		var e: Dictionary = entries[sid]
-		if str(e.get("disposition", "")) == "staged":
+		if is_live_disposition(str(e.get("disposition", ""))):
 			var rec: Dictionary = e.duplicate(true)
 			rec["staged_id"] = str(sid)
 			out.append(rec)
+	return out
+
+
+## The FROZEN live entries only — the set whose poses are settled. Callers that
+## need the split (a status line, a reviewer's "what is held") read this rather
+## than re-deriving the predicate.
+func frozen_entries() -> Array:
+	var out: Array = []
+	for e in staged_entries():
+		if str((e as Dictionary).get("disposition", "")) == "frozen":
+			out.append(e)
 	return out
 
 
@@ -164,7 +219,7 @@ func staged_payloads(kind: String) -> Array:
 func staged_id_for_entity(entity_id: String) -> String:
 	for sid in entries:
 		var e: Dictionary = entries[sid]
-		if str(e.get("disposition", "")) != "staged":
+		if not is_live_disposition(str(e.get("disposition", ""))):
 			continue
 		if str((e.get("payload", {}) as Dictionary).get("id", "")) == entity_id:
 			return str(sid)
@@ -248,6 +303,14 @@ func update_placement_target(staged_id: String, to_x_mm: float, to_y_mm: float,
 	if str(e.get("disposition", "")) in TERMINAL_DISPOSITIONS:
 		last_error = {"staged_id": staged_id, "error": ERR_TERMINAL, "verb": "update_placement"}
 		return false
+	# THE TEETH OF FREEZE (K7): a frozen pose is settled, and a route candidate
+	# may already have been proposed against it. Silently accepting the drag
+	# would invalidate that candidate without saying so — the exact fail-open
+	# this disposition exists to close. Unfreeze first, deliberately.
+	if str(e.get("disposition", "")) == "frozen":
+		last_error = {"staged_id": staged_id, "error": ERR_FROZEN, "verb": "update_placement"}
+		push_warning("[StagedEntities] update_placement refused: '%s' is frozen — unfreeze to revise its pose" % staged_id)
+		return false
 	if str(e.get("kind", "")) != "placement":
 		last_error = {"staged_id": staged_id, "error": ERR_BAD_KIND, "verb": "update_placement"}
 		return false
@@ -260,6 +323,71 @@ func update_placement_target(staged_id: String, to_x_mm: float, to_y_mm: float,
 	last_error = {}
 	changed.emit()
 	return true
+
+
+## FREEZE a live placement: settle its pose so a route candidate proposed
+## against it cannot be invalidated by a later drag. Legal only for the
+## "placement" kind (see the dispositions note at the top of this file), only
+## from "staged", and never for a terminal entry.
+##
+## Freezing does NOT take the ghost out of play: it still renders, still
+## composes into the effective draft board, and may still be accepted or
+## rejected DIRECTLY without unfreezing first. Requiring an unfreeze before
+## accept would be ceremony without meaning — freeze settles the pose, accept
+## lands it, and a user who froze a pose because they were happy with it is
+## the likeliest person to accept it next.
+##
+## HISTORY PAIRING IS MANDATORY, exactly as for stamp(): a disposition written
+## bare is a latent clobber, because every later board snapshot carries the
+## full disposition map and undoing an UNRELATED edit would restore the
+## pre-freeze value and silently thaw the pose. The verb layer owns that
+## transaction (attach_staged_snapshot → set → save_to_history), the same way
+## station 5's reject verb owns reject's. Nothing may call this bare.
+func freeze(staged_id: String) -> bool:
+	return _set_live_disposition(staged_id, "frozen", "freeze")
+
+
+## UNFREEZE back to "staged" — the only way a settled pose becomes editable
+## again. Same history-pairing obligation as freeze().
+func unfreeze(staged_id: String) -> bool:
+	return _set_live_disposition(staged_id, "staged", "unfreeze")
+
+
+## The shared freeze/unfreeze setter. Refuses BY NAME on: unknown entry, a
+## terminal entry, a non-placement kind, and a no-op (already in the requested
+## disposition) — a verb that silently succeeds without changing anything reads
+## as "it worked" to both doorways, so it is refused rather than swallowed.
+func _set_live_disposition(staged_id: String, want: String, verb: String) -> bool:
+	var e: Dictionary = get_entry(staged_id)
+	if e.is_empty():
+		last_error = {"staged_id": staged_id, "error": ERR_UNKNOWN_ENTRY, "verb": verb}
+		push_warning("[StagedEntities] %s refused: no entry '%s'" % [verb, staged_id])
+		return false
+	var have := str(e.get("disposition", ""))
+	if have in TERMINAL_DISPOSITIONS:
+		last_error = {"staged_id": staged_id, "error": ERR_TERMINAL, "verb": verb}
+		push_warning("[StagedEntities] %s refused: '%s' is already %s" % [verb, staged_id, have])
+		return false
+	if str(e.get("kind", "")) != "placement":
+		last_error = {"staged_id": staged_id, "error": ERR_NOT_FREEZABLE, "verb": verb}
+		push_warning("[StagedEntities] %s refused: kind '%s' is not freezable" % [verb, str(e.get("kind", ""))])
+		return false
+	if have == want:
+		last_error = {"staged_id": staged_id, "error": ERR_BAD_DISPOSITION, "verb": verb}
+		push_warning("[StagedEntities] %s refused: '%s' is already %s" % [verb, staged_id, want])
+		return false
+	e["disposition"] = want
+	entries[staged_id] = e
+	last_error = {}
+	changed.emit()
+	return true
+
+
+## Is this live entry's pose settled? The render layer and both doorways ask
+## this rather than string-comparing a disposition they would have to keep in
+## sync with this file.
+func is_frozen(staged_id: String) -> bool:
+	return str((entries.get(staged_id, {}) as Dictionary).get("disposition", "")) == "frozen"
 
 
 # ── bucket-9 history participation (DCR F8) ───────────────────────────────────
@@ -333,7 +461,12 @@ func load_from_dict(data: Dictionary) -> void:
 		if pid.is_empty():
 			push_warning("[StagedEntities] dropped entry '%s': payload empty or id-less" % str(sid))
 			continue
-		if str(e.get("disposition", "")) == "staged":
+		# LIVE, not literally "staged": a frozen entry occupies its canonical id
+		# exactly as a staged one does, so it must reserve that id here too —
+		# otherwise a reload could seat a live twin beside a frozen ghost and
+		# make staged_id_for_entity/selection/accept ambiguous, which is the
+		# very thing this gate exists to prevent.
+		if is_live_disposition(str(e.get("disposition", ""))):
 			if live_ids.has(pid):
 				push_warning("[StagedEntities] dropped entry '%s': a live entry for '%s' already loaded" % [str(sid), pid])
 				continue
@@ -376,10 +509,10 @@ func is_empty() -> bool:
 
 # ── the effective draft board (DCR S3 — ONE composer, per-purpose content) ────
 
-## The purposes a draft board may be composed FOR. Both append staged ZONES
-## only today; the purpose argument is the gate that keeps any future
-## divergence at THIS one site and gives an unknown consumer a refusal
-## instead of a guess.
+## The purposes a draft board may be composed FOR. Both append staged ZONES and
+## apply staged PLACEMENTS today; the purpose argument is the gate that keeps
+## any future divergence at THIS one site and gives an unknown consumer a
+## refusal instead of a guess.
 const COMPOSE_PURPOSES := ["route", "geometric"]
 
 ## Compose the EFFECTIVE DRAFT BOARD: a fresh canonical dict = the real board
@@ -392,10 +525,11 @@ const COMPOSE_PURPOSES := ["route", "geometric"]
 ##                 route_bridge._keepout_obstacle) + staged PLACEMENTS
 ##                 applied (components virtually AT their ghost targets).
 ##   "geometric" — staged ZONES appended (gc7 zone-clearance findings against
-##                 proposed copper) + staged PLACEMENTS applied. No panel-side
-##                 consumer yet — the propose reply's geometric summary is
-##                 computed worker-side from the SAME composed "route"
-##                 request, so A3(b) rides that dict.
+##                 proposed copper) + staged PLACEMENTS applied. Its production
+##                 consumer is PCBPanel.check_draft, which composes the board it
+##                 sends over pcb.draft_check (epoch GA, K9); the propose
+##                 reply's geometric summary is separately computed worker-side
+##                 from the composed "route" request, so A3(b) rides that dict.
 ##
 ## PLACEMENTS compose for BOTH purposes deliberately (OFC-2 decision, epoch
 ## 019ff9421d3f): the whole point of previewing a route or DRC against a

@@ -5147,12 +5147,26 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 			_routing_workspace.apply_check_result({})
 		return {}
 
-	# Board coherence token = the SAME fingerprint the durable sidecar guards with.
+	# Board coherence token = the SAME fingerprint the durable sidecar guards
+	# with, and it is computed from the CANONICAL board deliberately. The token
+	# answers "is the real board still what this reply was scored against"; the
+	# draft overlay is request-scoped and must never enter it, or the sidecar's
+	# guard would compare against a fingerprint no persisted board can ever have.
 	var board_dict: Dictionary = _data.to_board_dict()
 	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint(board_dict)
 
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
-	payload["board"] = board_dict
+	# K9 (019fa6ed5e23): draft DRC must score the MATERIALIZED proposal board —
+	# canonical geometry plus the live staged overlay — not canonical alone.
+	# The composer has supported the "geometric" purpose since OFC-2, and this
+	# is the production consumer it was built for; until this line existed,
+	# check_draft sent the raw board and a staged placement or zone could not
+	# produce a finding at all, however badly it violated. Composition is
+	# fail-safe by construction (an absent store or unknown purpose composes
+	# nothing) and request-scoped: the result is sent and dropped, never
+	# serialized and never fed to a cache keyed to the real board (A9/K5).
+	payload["board"] = _PcbStagedEntitiesScript.effective_draft_board(
+		board_dict, _staged_entities, "geometric")
 
 	var reply_id := "pcb.draft_check:%d" % Time.get_ticks_usec()
 	request.emit("pcb.draft_check", payload, reply_id)

@@ -11,6 +11,7 @@ extends SceneTree
 
 const PANEL_PATH := "res://../../minerva-plugins/pcb/ui/PCBPanel.gd"
 const PanelTools := preload("res://../../minerva-plugins/pcb/ui/panel_tools.gd")
+const StagedEntities := preload("res://../../minerva-plugins/pcb/ui/model/pcb_staged_entities.gd")
 
 var _pass := 0
 var _fail := 0
@@ -31,6 +32,7 @@ func _init() -> void:
 	_run_accept_drift_refusal()
 	_run_dangling_parity_sweep()
 	_run_collision_advisory()
+	_run_freeze_settles_the_pose()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -277,3 +279,112 @@ func _run_collision_advisory() -> void:
 	check("the moving part's own extra body is ignored",
 		(rig["data"].placement_collisions("R1", 5.0, 20.0, 0.0,
 			[{"component_id": "R1", "x_mm": 5.0, "y_mm": 20.0, "rotation_deg": 0.0}]) as Array).is_empty())
+
+
+# ── 9. freeze settles the pose (epoch GA, K7 019fa6ed3f60) ────────────────────
+#
+# ORACLE NOTE. None of these assertions asks the store whether it thinks an
+# entry is frozen — that would be the code grading itself with the same field
+# it just wrote. Each one reads a DIFFERENT representation:
+#   * the PAYLOAD's target pose  (did the refused drag actually not land?)
+#   * the COMPOSED BOARD dict    (does a frozen ghost still reach consumers?)
+#   * the SERIALIZED sidecar     (does frozen survive a round trip and still
+#                                 reserve its canonical id?)
+# The composed-board assertions are the ones that would have caught the
+# tempting-but-wrong implementation of this feature: leaving staged_entries()
+# filtering on the literal "staged" makes a frozen ghost vanish from the
+# composer, the canvas and the MCP list, and every disposition-field assertion
+# would still pass.
+
+func _run_freeze_settles_the_pose() -> void:
+	print("\n-- 9. freeze: the pose is settled, the ghost stays in play --")
+	var rig := _rig()
+	var store = rig["store"]
+	var staged: Dictionary = _stage_move(rig, "R1", 14.0, 8.0, 0.0)
+	var sid := str(staged.get("staged_id", ""))
+	check("a move is staged to freeze", not sid.is_empty())
+
+	check("freeze a live placement", store.freeze(sid))
+
+	# ORACLE 1 — the refusal has teeth: the PAYLOAD is unchanged. A verb that
+	# returns false while still writing the pose would pass a return-value
+	# assertion and fail this one.
+	check("a frozen pose refuses revision", not store.update_placement_target(sid, 30.0, 20.0, 90.0))
+	check_eq("…and names the refusal",
+		str(store.last_error.get("error", "")), StagedEntities.ERR_FROZEN)
+	var held: Dictionary = store.get_entry(sid).get("payload", {}).get("to", {})
+	check_eq("…the target x is UNCHANGED by the refused drag", float(held.get("x_mm", -1.0)), 14.0)
+	check_eq("…the target rotation is UNCHANGED by the refused drag",
+		float(held.get("rotation_deg", -1.0)), 0.0)
+
+	# ORACLE 2 — a frozen ghost is still LIVE: it must still reach the one
+	# composer, or freezing would silently withdraw the proposal from draft DRC
+	# and routing preview. Asserted on the composed board, not on the store.
+	var canonical: Dictionary = rig["data"].to_board_dict()
+	for purpose in ["route", "geometric"]:
+		var composed: Dictionary = StagedEntities.effective_draft_board(canonical, store, purpose)
+		var moved := _comp_x(composed, "R1")
+		check_eq("frozen placement still composes for '%s'" % purpose, moved, 14.0)
+	check_eq("…and the canonical board was NOT mutated by composing",
+		_comp_x(canonical, "R1"), 10.0)
+	check_eq("…the ghost is still listed as live", store.staged_entries().size(), 1)
+	check_eq("…and is reported as frozen in the split view", store.frozen_entries().size(), 1)
+
+	# ORACLE 3 — serialisation round trip. A frozen entry must come back frozen
+	# AND must still reserve its canonical id, or a reload could seat a live
+	# twin beside it.
+	var reloaded = StagedEntities.from_dict(store.to_dict())
+	check_eq("frozen survives a sidecar round trip",
+		str(reloaded.get_entry(sid).get("disposition", "")), "frozen")
+	check_eq("…and still occupies its canonical id after reload",
+		reloaded.staged_id_for_entity(str(staged.get("payload", {}).get("id", ""))), sid)
+
+	# UNFREEZE returns the pose to scratch.
+	check("unfreeze a frozen placement", store.unfreeze(sid))
+	check("…the pose is editable again", store.update_placement_target(sid, 16.0, 9.0, 0.0))
+	check_eq("…and the revision landed",
+		float(store.get_entry(sid).get("payload", {}).get("to", {}).get("x_mm", -1.0)), 16.0)
+
+	# REFUSALS, each by name.
+	check("freeze refuses an unknown entry", not store.freeze("staged_999"))
+	check_eq("…names it", str(store.last_error.get("error", "")), StagedEntities.ERR_UNKNOWN_ENTRY)
+	check("unfreeze refuses an entry that is not frozen", not store.unfreeze(sid))
+	check_eq("…refuses the no-op by name",
+		str(store.last_error.get("error", "")), StagedEntities.ERR_BAD_DISPOSITION)
+
+	# Freeze is PLACEMENT-ONLY: a zone has no regenerating consumer, so the
+	# vocabulary would be a word without meaning there.
+	var zone_payload: Dictionary = rig["data"].build_zone_payload(
+		"", "bottom", [Vector2(2, 2), Vector2(6, 2), Vector2(6, 6)], "keepout").get("payload", {})
+	var zsid := str(store.stage("zone", zone_payload))
+	check("a zone stages", not zsid.is_empty())
+	check("freeze refuses a zone", not store.freeze(zsid))
+	check_eq("…names the kind refusal",
+		str(store.last_error.get("error", "")), StagedEntities.ERR_NOT_FREEZABLE)
+
+	# A terminal entry cannot be frozen — freeze is a live-state verb.
+	check("reject the placement", store.reject(sid))
+	check("freeze refuses a terminal entry", not store.freeze(sid))
+	check_eq("…names the terminal refusal",
+		str(store.last_error.get("error", "")), StagedEntities.ERR_TERMINAL)
+
+	# ACCEPT DIRECTLY FROM FROZEN — freeze settles the pose, it does not add a
+	# ceremony before landing. Fresh rig: the entry above is terminal now.
+	var rig2 := _rig()
+	var store2 = rig2["store"]
+	var staged2: Dictionary = _stage_move(rig2, "R2", 24.0, 8.0, 0.0)
+	var sid2 := str(staged2.get("staged_id", ""))
+	check("freeze the second move", store2.freeze(sid2))
+	var accepted: Dictionary = rig2["panel"].accept_staged(str(staged2.get("entity_id", "")))
+	check("a FROZEN placement accepts without unfreezing first",
+		bool(accepted.get("ok", false)))
+	check_eq("…and the part actually moved on the board",
+		_comp_x(rig2["data"].to_board_dict(), "R2"), 24.0)
+
+
+## The x of a component in a board dict — the composed-board oracle's reader.
+func _comp_x(board: Dictionary, ref: String) -> float:
+	for c in board.get("components", []):
+		if c is Dictionary and str((c as Dictionary).get("ref", "")) == ref:
+			return float((c as Dictionary).get("x_mm", -1.0))
+	return -1.0
