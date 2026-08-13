@@ -117,6 +117,13 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// method: Projection.mask verbatim, the same openings GC8 checks
 		// and the Gerber emitter flashes. Same channel idiom.
 		"pcb.mask_view",
+		// worker-backed — the EXACT fabrication preview (WYSIWYG goal
+		// 019ff4a5a75a, gap G5; DCR 019ffc52b455; K27), forwarding to the
+		// worker's "fab_preview" method: the production emission path, read
+		// back by gerbonara rather than by the gerber_writer that produced
+		// it, so the preview is an independent read of the shipped bytes.
+		// Same channel idiom.
+		"pcb.fab_preview",
 	}
 	for _, name := range want {
 		if !got[name] {

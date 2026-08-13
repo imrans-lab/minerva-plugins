@@ -562,6 +562,138 @@ def _mask_view(params: dict) -> dict:
     }}
 
 
+def _fab_preview(params: dict) -> dict:
+    """EXACT FABRICATION PREVIEW (WYSIWYG goal 019ff4a5a75a, gap G5; approved
+    DCR 019ffc52b455; acceptance check K27).
+
+    Renders THE BYTES THE FAB RECEIVES. This does not re-derive, re-simulate or
+    approximate anything: it runs the production emission path (the same
+    ``build_gerbers_ir`` call ``gerbers`` uses), then reads the resulting
+    artifacts back with **gerbonara** — a DIFFERENT library from the
+    ``gerber_writer`` that produced them, so the preview is an independent read
+    of the output rather than the emitter agreeing with itself. That is the same
+    independence principle K18's oracle rests on, and it is the whole reason
+    this is allowed to be called "exact" while a canvas re-render never could.
+
+    params: {board|yaml} (anything ``_load`` accepts), plus optional ``name``.
+    Reply: {ok: True, result: {
+        layers: [{name, kind, sha256, byte_length, svg}],
+        unrendered: [{name, reason}],
+        bounds_mm: {min_x, min_y, max_x, max_y} | None,
+        warnings: [...]}}
+
+    EVERY EMITTED FILE IS ACCOUNTED FOR, in exactly one of ``layers`` or
+    ``unrendered`` with a named reason. A preview that quietly dropped a layer
+    it could not parse would present an INCOMPLETE artifact set as complete —
+    the same false-clean direction the mask view refuses, and the precise
+    failure this goal exists to remove. The caller must surface ``unrendered``;
+    it is never empty-by-omission.
+
+    ONE SHARED COORDINATE FRAME: every layer is rendered with ``force_bounds``
+    set to the UNION of all layer bounds, so the SVGs overlay exactly. Rendering
+    each file to its own extent would produce images that look right alone and
+    misregister when stacked — a preview whose layers disagree about where the
+    board is would be worse than no preview.
+
+    sha256 + byte_length give the file IDENTITY the DCR requires, so a reviewer
+    can tie what they are looking at to the artifact that would ship.
+    """
+    import hashlib
+
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    compiled = _compile_or_fail(board, _layer_params(params))
+    if _is_error_reply(compiled):
+        return compiled
+
+    base_name = params.get("name") if isinstance(params.get("name"), str) else None
+    try:
+        files = gerber.build_gerbers_ir(compiled.board, name=base_name)
+    except Exception as exc:  # geometry/library faults reported as data, not crash
+        return {"ok": False, "error": {"kind": "gerber", "message": str(exc)}}
+
+    from gerbonara import ExcellonFile, GerberFile
+    from gerbonara.utils import MM
+
+    warnings = [_diagnostic_to_payload(d) for d in getattr(files, "diagnostics", [])]
+    warnings += [_diagnostic_to_payload(d) for d in compiled.diagnostics]
+
+    # PASS 1 — parse every emitted artifact and collect bounds. A .gbrjob is a
+    # JSON manifest, not artwork; it is recorded as unrendered with that reason
+    # rather than treated as a failure.
+    parsed: list[tuple[str, str, Any]] = []
+    unrendered: list[dict] = []
+    for fname, text in files.items():
+        lower = fname.lower()
+        if lower.endswith(".gbrjob"):
+            unrendered.append({"name": fname, "reason":
+                               "job manifest (.gbrjob) — metadata, not artwork; nothing to draw"})
+            continue
+        try:
+            if lower.endswith(".drl"):
+                obj = ExcellonFile.from_string(text, filename=fname)
+                kind = "drill"
+            else:
+                obj = GerberFile.from_string(text, filename=fname)
+                kind = "gerber"
+        except Exception as exc:
+            # NEVER a silent drop: an artifact we emitted but cannot read back
+            # is a finding about our own output, and the caller must see it.
+            unrendered.append({"name": fname,
+                               "reason": f"gerbonara could not parse the emitted file: {exc}"})
+            continue
+        parsed.append((fname, kind, obj))
+
+    bounds = None
+    for _fname, _kind, obj in parsed:
+        try:
+            bb = obj.bounding_box(MM)
+        except Exception:
+            bb = None
+        if bb is None:
+            continue
+        (min_x, min_y), (max_x, max_y) = bb
+        if bounds is None:
+            bounds = [min_x, min_y, max_x, max_y]
+        else:
+            bounds = [min(bounds[0], min_x), min(bounds[1], min_y),
+                      max(bounds[2], max_x), max(bounds[3], max_y)]
+
+    force_bounds = None
+    if bounds is not None:
+        force_bounds = ((bounds[0], bounds[1]), (bounds[2], bounds[3]))
+
+    # PASS 2 — render each parsed artifact in the shared frame.
+    layers: list[dict] = []
+    for fname, kind, obj in parsed:
+        raw = files[fname].encode("utf-8")
+        try:
+            svg = str(obj.to_svg(force_bounds=force_bounds, arg_unit=MM, svg_unit=MM))
+        except Exception as exc:
+            unrendered.append({"name": fname,
+                               "reason": f"parsed but could not be rendered: {exc}"})
+            continue
+        layers.append({
+            "name": fname,
+            "kind": kind,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "byte_length": len(raw),
+            "svg": svg,
+        })
+
+    return {"ok": True, "result": {
+        "layers": layers,
+        "unrendered": unrendered,
+        "bounds_mm": None if bounds is None else {
+            "min_x": bounds[0], "min_y": bounds[1],
+            "max_x": bounds[2], "max_y": bounds[3]},
+        "warnings": warnings,
+    }}
+
+
 def _board_health_method(params: dict) -> dict:
     """Standalone whole-board health ledger (Epoch UX2 station 9, docket
     019fde571300) — the SAME `board_health` object every ok route reply
@@ -3223,6 +3355,7 @@ _HANDLERS = {
     "board_health": lambda req: _board_health_method(req.get("params") or {}),
     # Solder-mask overlay for the panel (WYSIWYG G4) — Projection.mask verbatim.
     "mask_view": lambda req: _mask_view(req.get("params") or {}),
+    "fab_preview": lambda req: _fab_preview(req.get("params") or {}),
     "promote_check": lambda req: _promote_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
     # Rendered-bless surface (S3/B2) — stage into the WIP layer, render the

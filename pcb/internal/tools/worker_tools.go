@@ -412,6 +412,40 @@ func HandleMaskViewChannel(ctx context.Context, w *bridge.Worker, params json.Ra
 	return w.Call(ctx, "mask_view", withLibraryChain(params))
 }
 
+// ---- pcb.fab_preview (worker-backed broker CHANNEL) ------------------------
+//
+// WYSIWYG goal 019ff4a5a75a, gap G5; approved DCR 019ffc52b455; K27. The
+// EXACT fabrication preview: the panel's one honest view of what the fab
+// actually receives. Forwards verbatim to the Python worker's "fab_preview"
+// method, which runs the production emission path and then reads the emitted
+// artifacts back with gerbonara — a DIFFERENT library from the gerber_writer
+// that produced them, so the preview is an independent read of the output and
+// not the emitter agreeing with itself.
+//
+// This is the seam that lets the interactive canvas stay a fast approximation
+// without lying: anything the canvas draws schematically is reviewable here as
+// the bytes that ship.
+
+var FabPreviewChannel = ToolSpec{
+	Name: "pcb.fab_preview",
+	Description: "Panel IPC channel for the exact fabrication preview (WYSIWYG G5). " +
+		"Forwards verbatim to the Python worker's 'fab_preview' method. Args: " +
+		"{board:<canonical Board dict>} or {yaml}, optional {name}. Returns " +
+		"{ok, result:{layers:[{name, kind:'gerber'|'drill', sha256, " +
+		"byte_length, svg}], unrendered:[{name, reason}], bounds_mm, " +
+		"warnings}}. The SVGs are rendered from the emitted bytes by a " +
+		"different library than the one that wrote them, and every layer " +
+		"shares one forced coordinate frame so they overlay exactly. EVERY " +
+		"emitted file appears in exactly one of 'layers' or 'unrendered' with " +
+		"a named reason — a viewer that ignored 'unrendered' would present a " +
+		"KNOWN-INCOMPLETE artifact set as complete.",
+	InputSchema: json.RawMessage(`{"type":"object"}`),
+}
+
+func HandleFabPreviewChannel(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "fab_preview", withLibraryChain(params))
+}
+
 // ---- pcb.promote_check (worker-backed broker CHANNEL) ----------------------
 //
 // Epoch UX3 station 11 (docket 019fdf91b3ac, K13): the PROMOTION GATE — the

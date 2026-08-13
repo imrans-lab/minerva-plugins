@@ -45,7 +45,7 @@ const (
 	// CACHE KEY, so a manifest-only bump would ship a new bundle that
 	// cache-hits the old extracted runtime. Pinned by
 	// TestServerVersionMatchesManifest.
-	serverVersion   = "0.3.0"
+	serverVersion = "0.3.0"
 
 	// workerModule is the python module the worker runs as (python -m <module>).
 	workerModule = "pcb_worker"
@@ -262,6 +262,7 @@ func initRegistry() {
 	// routing run (Epoch UX2 station 9). See worker_tools.go.
 	registry.Register(tools.BoardHealthChannel, tools.HandleBoardHealthChannel)
 	registry.Register(tools.MaskViewChannel, tools.HandleMaskViewChannel)
+	registry.Register(tools.FabPreviewChannel, tools.HandleFabPreviewChannel)
 	// Rendered-bless surface (S3/B2, docket 019ff5687b99) — the library trust
 	// boundary: stage a .kicad_mod into the WIP layer, render the fact
 	// table + SVG a human blesses against, record the verdict. All three
