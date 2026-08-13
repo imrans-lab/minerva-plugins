@@ -1914,7 +1914,8 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	var result: Dictionary = reply.get("result", {})
 	if commit:
 		return _materialize_routes(host, data, result, source_hints)
-	return _propose_into_workspace(host, data, result, source_hints)
+	return _propose_into_workspace(host, data, result, source_hints,
+		reply.get("draft_context", {}) if reply.get("draft_context", null) is Dictionary else {})
 
 
 ## Reach the router worker through the in-fence host bridge (async). The host
@@ -2574,7 +2575,8 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 ## fence) needs no change. `id`/`candidate_id` in each entry is the WORKSPACE
 ## candidate id: resolve it via minerva_pcb_workspace_commit/_reject/pin, or
 ## the canvas candidate menu — never via an annotation id.
-static func _propose_into_workspace(host, data, result: Dictionary, source_hints: Array) -> Dictionary:
+static func _propose_into_workspace(host, data, result: Dictionary, source_hints: Array,
+		draft_context: Dictionary = {}) -> Dictionary:
 	var ctx: Dictionary = _workspace_ctx(host)
 	if not bool(ctx.get("ok", false)):
 		return ctx.get("reply")
@@ -2582,10 +2584,12 @@ static func _propose_into_workspace(host, data, result: Dictionary, source_hints
 
 	var records: Array = _normalize_route_records(result, source_hints)
 	var revision: int = int(data.board_revision) if data != null else 0
-	# OFC-3: same one-snapshot-per-ingest provenance as
-	# _ingest_result_into_workspace — this is the apply_route_hints
-	# commit=false landing path, also a draft request.
-	var draft_snapshot: Array = _live_placement_snapshot(host)
+	# OFC-3 provenance, F1-repaired (Codex 1188): consumed from the
+	# COMPOSE-TIME draft_context the route reply carried — never re-sampled
+	# here, a full worker round-trip after composition. An empty context means
+	# the request was routed against the real board: no provenance, no gate.
+	var draft_snapshot: Array = draft_context.get("draft_placements", []) \
+		if draft_context.get("draft_placements", null) is Array else []
 	var proposals: Array = []
 	var holds: Array = []
 	for rec in records:
@@ -4774,7 +4778,14 @@ static func _live_placement_snapshot(host) -> Array:
 	var panel = _get_panel(host)
 	if panel == null or not panel.has_method("get_staged_store"):
 		return []
-	var store = panel.get_staged_store()
+	return _live_placement_snapshot_from_store(panel.get_staged_store())
+
+
+## The store-walk half, callable where the STORE is already in hand —
+## PCBPanel.route_board captures the compose-time draft context through this
+## (F1, Codex OFC review 1188: provenance must be sampled ATOMICALLY with the
+## request composition, never re-sampled after the worker await).
+static func _live_placement_snapshot_from_store(store) -> Array:
 	if store == null or not store.has_method("staged_payloads"):
 		return []
 	var out: Array = []
@@ -5202,7 +5213,8 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 				+ "beyond the ask was NOT attempted — propose net-level hints "
 				+ "(or omit endpoints) to route whole nets.",
 		}
-	return await _ingest_result_into_workspace(host, workspace, data, result, source_hints, extra)
+	return await _ingest_result_into_workspace(host, workspace, data, result, source_hints, extra,
+		reply.get("draft_context", {}) if reply.get("draft_context", null) is Dictionary else {})
 
 
 ## Reply honesty for every candidate-landing verb (docket 019fce3a6c57): when
@@ -5346,14 +5358,18 @@ static func _attach_hint_status(landed: Array, result: Dictionary) -> void:
 ## identically and a fix to one is a fix to all. `extra` is merged last so a
 ## caller can stamp its own metadata (e.g. the span degrade notice).
 static func _ingest_result_into_workspace(host, workspace, data, result: Dictionary,
-		source_hints: Array, extra: Dictionary) -> Dictionary:
+		source_hints: Array, extra: Dictionary, draft_context: Dictionary = {}) -> Dictionary:
 	var records: Array = _normalize_route_records(result, source_hints)
-	var revision: int = int(data.board_revision) if data != null else 0
-	# OFC-3: every candidate this ingest lands was routed against the SAME
-	# composed draft, so one snapshot of the live ghosts serves them all —
-	# taken BEFORE the loop so a mid-ingest store change cannot split the
-	# batch's provenance.
-	var draft_snapshot: Array = _live_placement_snapshot(host)
+	# F1 (Codex 1188): the request context is captured by route_board
+	# ATOMICALLY with the composition and rides the reply — both halves are
+	# consumed from it here. base_board_revision comes from COMPOSE time when
+	# the context carries it, so a board edited mid-flight lands its candidate
+	# already stale under the existing is_stale_for_board_revision idiom
+	# instead of masquerading as current.
+	var revision: int = int(draft_context.get("board_revision",
+		int(data.board_revision) if data != null else 0))
+	var draft_snapshot: Array = draft_context.get("draft_placements", []) \
+		if draft_context.get("draft_placements", null) is Array else []
 	var landed: Array = []
 	var holds: Array = []
 	# F4 (cold review): merge absorption's dropped-constraint conflicts —
@@ -6881,7 +6897,8 @@ static func _workspace_reroute(host, args: Dictionary, extra: Dictionary, pre: D
 		return _workspace_refusal(workspace, "reroute", cid)
 
 	var landed: Dictionary = await _ingest_result_into_workspace(
-		host, workspace, data, reply.get("result", {}), source_hints, extra)
+		host, workspace, data, reply.get("result", {}), source_hints, extra,
+		reply.get("draft_context", {}) if reply.get("draft_context", null) is Dictionary else {})
 	landed["rerouted_candidate_id"] = cid
 	landed["prior_task_id"] = prior_task
 	# Epoch UX1 station 11: reroute's own review-then-commit guidance replaces

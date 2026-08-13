@@ -282,6 +282,19 @@ func _ghost_status(row: Dictionary) -> String:
 	return str((dp[0] as Dictionary).get("status", ""))
 
 
+## The compose-time capture route_board performs (F1) — the harness twin, one
+## derivation with production via _live_placement_snapshot.
+func _compose_context(data, host) -> Dictionary:
+	return {"board_revision": int(data.board_revision),
+		"draft_placements": PanelTools._live_placement_snapshot(host)}
+
+
+func _first_candidate(ingest_reply: Dictionary) -> Dictionary:
+	var rows: Array = (ingest_reply.get("result", {}) as Dictionary).get("candidates", []) \
+		if ingest_reply.get("result", null) is Dictionary else ingest_reply.get("candidates", [])
+	return rows[0] if rows.size() > 0 else {}
+
+
 func _run_candidate_placement_provenance() -> void:
 	print("-- 1c. candidate draft-placement provenance + commit gate --")
 	var rig := _placement_rig()
@@ -295,8 +308,12 @@ func _run_candidate_placement_provenance() -> void:
 	var sid := str(store.staged_id_for_entity(ghost_id))
 
 	# (a) ingest while the ghost is live → provenance stamped, status pending.
+	# F1 (Codex 1188): provenance rides the COMPOSE-TIME draft_context that
+	# route_board captures atomically with the request and attaches to its
+	# reply — this harness plays route_board's part. Ingest never re-samples.
+	var ctx := _compose_context(data, host)
 	var ingest: Dictionary = await PanelTools._ingest_result_into_workspace(
-		host, workspace, data, _sig_route_result(), [], {})
+		host, workspace, data, _sig_route_result(), [], {}, ctx)
 	var landed: Array = (ingest.get("result", {}) as Dictionary).get("candidates", []) \
 		if ingest.get("result", null) is Dictionary else ingest.get("candidates", [])
 	check_eq("(fixture) one candidate landed", landed.size(), 1)
@@ -350,11 +367,54 @@ func _run_candidate_placement_provenance() -> void:
 	# (g) no ghost live at generation → no provenance key at all (legacy shape).
 	store.reject(sid)
 	var ingest2: Dictionary = await PanelTools._ingest_result_into_workspace(
-		host, workspace, data, _sig_route_result(), [], {})
+		host, workspace, data, _sig_route_result(), [], {}, _compose_context(data, host))
 	var landed2: Array = (ingest2.get("result", {}) as Dictionary).get("candidates", []) \
 		if ingest2.get("result", null) is Dictionary else ingest2.get("candidates", [])
 	check("a ghost-free ingest carries NO draft_placements key (absent, not empty)",
 		landed2.size() == 1 and not (landed2[0] as Dictionary).has("draft_placements"))
+
+	# ── F1 race seams (Codex 1188): the store changes BETWEEN compose and
+	# ingest — provenance must describe the world that was ROUTED, and the
+	# derived status must judge it against the world that IS.
+	# (h) ghost rejected mid-flight: the candidate still carries the routed
+	# ghost, now invalidated — commit refuses instead of landing wrong-pose
+	# copper.
+	var ghost_h: Dictionary = data.build_placement_payload("U1", 5.0, 5.0, 0.0).get("payload", {})
+	store.stage("placement", ghost_h, "ai")
+	var ctx_h := _compose_context(data, host)
+	store.reject(store.staged_id_for_entity(str(ghost_h.get("id", ""))))
+	var ingest_h: Dictionary = await PanelTools._ingest_result_into_workspace(
+		host, workspace, data, _sig_route_result(), [], {}, ctx_h)
+	var row_h: Dictionary = _first_candidate(ingest_h)
+	check_eq("mid-flight REJECT: provenance survives with status invalidated",
+		_ghost_status(row_h), "invalidated")
+	var commit_h: Dictionary = await PanelTools._workspace_commit(
+		host, {"candidate_id": str(row_h.get("candidate_id", ""))})
+	check_eq("…and commit refuses it", str(commit_h.get("error", "")), "draft_placement_invalidated")
+
+	# (i) ghost retargeted A→B mid-flight: copper routed at A must NOT read
+	# satisfied-by-B — the provenance pins A, the live ghost says B.
+	var ghost_i: Dictionary = data.build_placement_payload("U1", 8.0, 8.0, 0.0).get("payload", {})
+	store.stage("placement", ghost_i, "ai")
+	var sid_i := str(store.staged_id_for_entity(str(ghost_i.get("id", ""))))
+	var ctx_i := _compose_context(data, host)
+	store.update_placement_target(sid_i, 9.0, 9.0, 0.0)
+	var ingest_i: Dictionary = await PanelTools._ingest_result_into_workspace(
+		host, workspace, data, _sig_route_result(), [], {}, ctx_i)
+	check_eq("mid-flight RETARGET: candidate pins the ROUTED pose, now invalidated",
+		_ghost_status(_first_candidate(ingest_i)), "invalidated")
+	store.reject(sid_i)
+
+	# (j) ghost staged mid-flight: the request was composed ghost-free, so the
+	# candidate carries NO provenance — a ghost that played no part in the
+	# routing must not be attributed to it.
+	var ctx_j := _compose_context(data, host)
+	var ghost_j: Dictionary = data.build_placement_payload("U2", 12.0, 12.0, 0.0).get("payload", {})
+	store.stage("placement", ghost_j, "ai")
+	var ingest_j: Dictionary = await PanelTools._ingest_result_into_workspace(
+		host, workspace, data, _sig_route_result(), [], {}, ctx_j)
+	check("mid-flight NEW GHOST: the ghost-free request's candidate stays provenance-free",
+		not _first_candidate(ingest_j).has("draft_placements"))
 	panel.free()
 
 
@@ -368,6 +428,9 @@ class FakeGateIPC extends Node:
 	var captured_channel := ""
 	var captured_payload: Dictionary = {}
 	var _reply_id := ""
+	## F3 race seam: when set, the board "edits itself" while the worker is
+	## replying — the revision bumps between snapshot and verdict.
+	var bump_mid_flight = null
 
 	func bind(panel_node) -> void:
 		name = "_MinervaIPC"
@@ -382,6 +445,8 @@ class FakeGateIPC extends Node:
 	func await_reply(reply_id: String, _timeout_ms: int = 0) -> Dictionary:
 		if reply_id != _reply_id:
 			return {"success": false, "error_code": "timeout", "error_message": "no captured request"}
+		if bump_mid_flight != null:
+			bump_mid_flight.board_revision += 1
 		return {"success": true, "result": {"ok": true, "result": verdict.duplicate(true)}}
 
 
@@ -402,12 +467,13 @@ func _run_board_check_census() -> void:
 	ipc.bind(panel)
 	ipc.verdict = {
 		"promotable": false,
-		"refusals": ["connectivity DRC reports 1 finding(s)"],
+		"refusals": ["connectivity DRC reports 2 finding(s)"],
 		"connectivity": {"findings": [
-			{"type": "dangling", "net": "SIG", "at": [25.0, 5.0]}],
+			{"type": "dangling_endpoint", "net": "SIG", "at": [25.0, 5.0]},
+			{"type": "crossing", "nets": ["SIG", "GND"], "at": [15.0, 15.0]}],
 			"complete": false, "missing_copper": ["SIG"]},
 		"geometric": {"verdict": "clean"},
-		"assembly": {"status": "pass", "findings": []},
+		"assembly": {"status": "findings", "findings": [{"ref": "U1", "kind": "courtyard"}]},
 		"advisory": {"completeness": {"complete": false, "missing_copper": ["SIG"]}},
 	}
 	var census: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
@@ -422,18 +488,27 @@ func _run_board_check_census() -> void:
 		str([25.0, 5.0]))
 	check("…advisory present when the worker sent one", census.has("advisory"))
 	check("…and the note says read-only", str(census.get("note", "")).contains("read-only"))
+	# F3 (Codex 1188): the reply names the revision the verdict describes.
+	check_eq("…and names the checked board revision",
+		int(census.get("board_revision", -1)), int(rig["data"].board_revision))
+	# F4 (Codex 1188): the census feeds the assembly cache workspace_commit's
+	# placement gate consults — fresh findings become gate state, not trivia.
+	check("the census fed the assembly cache (commit's gate now sees these findings)",
+		not panel.get_assembly_state().is_empty())
 	# K2 hygiene rides the census's snapshot too: the request board must not
 	# carry render-detail residue.
 	var sent_board: Dictionary = ipc.captured_payload.get("board", {})
 	var first_comp: Dictionary = (sent_board.get("components", []) as Array)[0]
 	check("census request board is K2-stripped (no render-detail keys)",
 		not first_comp.has("width") and not first_comp.has("local_bounds"))
-	# Parity: findings with coordinates became canvas disconnect markers
-	# (when this headless mount carries a canvas at all — one check either
-	# way, so the assertion count stays pinned).
+	# Parity, F5-narrowed (Codex 1188): ONLY the dangling_endpoint finding is
+	# markered — the crossing rides the reply but must not be painted in the
+	# disconnect vocabulary. (One check either way if this headless mount has
+	# no canvas, so the assertion count stays pinned.)
 	var canvas = panel._canvas
-	check("findings became disconnect markers (or no canvas headless)",
-		canvas == null or (canvas._disconnect_markers as Array).size() == 1)
+	check("exactly the dangling_endpoint finding became a marker (crossing did NOT; or no canvas headless)",
+		canvas == null or ((canvas._disconnect_markers as Array).size() == 1
+			and str(((canvas._disconnect_markers as Array)[0] as Dictionary).get("message", "")).contains("dangling")))
 
 	# (c) a clean verdict reports promotable and clears the markers.
 	ipc.verdict = {"promotable": true, "refusals": [],
@@ -445,6 +520,24 @@ func _run_board_check_census() -> void:
 	check("…refusals empty", (clean.get("refusals", []) as Array).is_empty())
 	check("…and healed markers clear (or no canvas headless)",
 		canvas == null or (canvas._disconnect_markers as Array).is_empty())
+
+	# (d) F3 (Codex 1188): the board changes while the worker replies — the
+	# census must refuse as stale and touch NOTHING.
+	var markers_before: int = (canvas._disconnect_markers as Array).size() if canvas != null else -1
+	ipc.bump_mid_flight = rig["data"]
+	ipc.verdict = {"promotable": false, "refusals": ["connectivity DRC reports 1 finding(s)"],
+		"connectivity": {"findings": [
+			{"type": "dangling_endpoint", "net": "SIG", "at": [1.0, 1.0]}], "complete": false},
+		"geometric": {"verdict": "clean"},
+		"assembly": {"status": "pass", "findings": []}}
+	var stale: Dictionary = await PanelTools.handle(host, "minerva_pcb_board_check", {})
+	ipc.bump_mid_flight = null
+	check_eq("a mid-flight board edit makes the census refuse", str(stale.get("error", "")), "stale_census")
+	check("…naming both revisions",
+		stale.has("checked_board_revision") and stale.has("current_board_revision")
+			and int(stale.get("current_board_revision", -1)) > int(stale.get("checked_board_revision", -1)))
+	check("…and the stale verdict painted NO markers (or no canvas headless)",
+		canvas == null or (canvas._disconnect_markers as Array).size() == markers_before)
 	panel.free()
 
 

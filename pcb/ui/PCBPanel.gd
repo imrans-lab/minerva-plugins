@@ -4382,10 +4382,22 @@ func board_check() -> Dictionary:
 	if ipc == null:
 		return {"success": false, "error": "worker_unavailable",
 			"note": "the census needs the pcb backend (same worker the promote gate uses) — plugin IPC not ready"}
+	# F3 (Codex OFC review 1188): the revision the snapshot describes, captured
+	# BESIDE it. The gate await below can take up to 60s; a board edited in
+	# flight makes the verdict describe a world that no longer exists, and a
+	# "LIVE-BOARD CENSUS" must never present that as current — nor repaint
+	# markers or feed caches from it.
+	var checked_revision: int = int(_data.board_revision)
 	var board: Dictionary = _promote_stripped_board()
 	var gate_run: Dictionary = await run_promote_gate(board)
 	if not bool(gate_run.get("ok", false)):
 		return gate_run.get("reply", {"success": false, "error": "promotion_check_unavailable"})
+	if _data == null or int(_data.board_revision) != checked_revision:
+		return {"success": false, "error": "stale_census",
+			"checked_board_revision": checked_revision,
+			"current_board_revision": int(_data.board_revision) if _data != null else -1,
+			"note": "the board changed while the census ran — the verdict describes revision %d, the board is now at %d; markers and caches were NOT touched. Re-run minerva_pcb_board_check." % [
+				checked_revision, int(_data.board_revision) if _data != null else -1]}
 	var gate: Dictionary = gate_run.get("gate", {})
 	var reply: Dictionary = {
 		"success": true,
@@ -4394,30 +4406,41 @@ func board_check() -> Dictionary:
 		"connectivity": gate.get("connectivity", {}),
 		"geometric": gate.get("geometric", {}),
 		"assembly": gate.get("assembly", {}),
+		"board_revision": checked_revision,
 		"note": "read-only census — nothing was written, nothing was gated; these are the findings a promote would refuse on (empty refusals = it would pass)",
 	}
 	var advisory: Variant = gate.get("advisory", {})
 	if advisory is Dictionary and not (advisory as Dictionary).is_empty():
 		reply["advisory"] = advisory
-	# PARITY (the sheet's rule read in both directions): the reply carries
-	# what the panel renders, and the panel renders what the reply carries —
-	# connectivity findings with coordinates become disconnect markers on the
-	# canvas, so the human sees exactly what the agent just learned. The
-	# canvas's self-heal keeps only markers whose stranded endpoint still
-	# exists, same as the accept-time sweep's markers.
+	# F4 (Codex 1188): this census IS the authoritative assembly read — feed
+	# the same cache workspace_commit's placement gate consults, at the
+	# checked revision (a diagnostic cache write, not a board mutation).
+	# Without it, an agent could board_check, SEE fresh findings, and commit
+	# anyway because the gate's cache still said "never checked".
+	var assembly: Variant = gate.get("assembly", {})
+	if assembly is Dictionary and not (assembly as Dictionary).is_empty():
+		set_assembly_state(assembly, checked_revision)
+	# PARITY, narrowed honestly (F5, Codex 1188): only dangling_endpoint
+	# findings become disconnect markers — that is the vocabulary the marker
+	# channel actually renders (its self-heal looks for a trace endpoint on
+	# the marker's net at the coordinate, and its label says "disconnected").
+	# crossing / wrong_net_pad / layer_change_no_via findings ride the REPLY
+	# with full fidelity; painting them as disconnects would be the panel
+	# lying about what it knows. A clean census still clears healed markers.
 	var markers: Array = []
 	var conn: Variant = reply.get("connectivity", {})
 	if conn is Dictionary:
 		for f in ((conn as Dictionary).get("findings", []) as Array):
 			if not (f is Dictionary):
 				continue
+			if str((f as Dictionary).get("type", "")) != "dangling_endpoint":
+				continue
 			var at: Variant = (f as Dictionary).get("at", null)
 			if at is Array and (at as Array).size() >= 2:
 				markers.append({
 					"net": str((f as Dictionary).get("net", "")),
 					"at": (at as Array).duplicate(),
-					"message": "%s on net '%s' at (%.2f, %.2f) — board_check census finding" % [
-						str((f as Dictionary).get("type", "finding")),
+					"message": "dangling endpoint on net '%s' at (%.2f, %.2f) — board_check census finding" % [
 						str((f as Dictionary).get("net", "")),
 						float((at as Array)[0]), float((at as Array)[1])],
 				})
@@ -4771,11 +4794,35 @@ func _board_for_route_request(extra: Dictionary) -> Dictionary:
 	return board
 
 
+## F1 (Codex 1188): stamp route_board's compose-time draft context onto a
+## SUCCESSFUL reply envelope — failures carry none (nothing landed, nothing
+## to attribute). Top-level beside ok/result: panel-side metadata, never part
+## of the worker's own result shape.
+static func _with_draft_context(reply: Dictionary, ctx: Dictionary) -> Dictionary:
+	if not ctx.is_empty() and bool(reply.get("ok", false)):
+		reply["draft_context"] = ctx
+	return reply
+
+
 func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	var ipc := get_node_or_null("_MinervaIPC")
 	if ipc == null or _data == null:
 		return {"ok": false, "error": {"kind": "worker_unavailable",
 			"message": "plugin IPC channel not ready"}}
+	# F1 (Codex OFC review 1188): the DRAFT CONTEXT — which ghost poses and
+	# which board revision the composed request will carry — is captured HERE,
+	# in the same synchronous stretch as the composition below (no await
+	# between this line and _board_for_route_request), and attached to the
+	# reply envelope. The ingest layers consume the reply's context and never
+	# re-sample: a ghost rejected, retargeted, or newly staged while the
+	# worker runs must not rewrite the provenance of copper that was routed
+	# against the OLD world.
+	var draft_context: Dictionary = {}
+	if bool(extra.get("draft_request", false)):
+		draft_context = {
+			"board_revision": int(_data.board_revision),
+			"draft_placements": _PanelToolsScript._live_placement_snapshot_from_store(_staged_entities),
+		}
 	var envelopes: Array = []
 	if _annotation_host != null and _annotation_host.has_method("get_all_annotations"):
 		for ann in _annotation_host.get_all_annotations():
@@ -4812,7 +4859,7 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	# The worker returns {ok, result}; the host IPC wrapper may nest it under
 	# "result"/"success" — normalise to the worker envelope the apply tool wants.
 	if result.has("ok"):
-		return result
+		return _with_draft_context(result, draft_context)
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
 		var inner: Dictionary = result.get("result")
 		# Live broker shape: MinervaIPC wraps the backend reply in
@@ -4822,8 +4869,8 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 		# path. Unwrap it rather than re-wrapping (HITL-2 live bug: the
 		# apply tool read routes one level too high and proposed nothing).
 		if inner.has("ok"):
-			return inner
-		return {"ok": true, "result": inner}
+			return _with_draft_context(inner, draft_context)
+		return _with_draft_context({"ok": true, "result": inner}, draft_context)
 	# Backend-stopped detection (C5, docket 019f6c465fd8, bug 019f6c1e0399):
 	# when the pcb backend subprocess is not RUNNING,
 	# PluginScenePanelBroker._dispatch_to_plugin_backend replies with

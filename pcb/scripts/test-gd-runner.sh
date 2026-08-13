@@ -59,7 +59,11 @@ _case() {
   local name="$1" want="$2" pattern="$3"
   local dir="${SANDBOX_ROOT}/${name}"
   case_num=$((case_num + 1))
-  cp "${REAL_ALLOWLIST}" "${dir}/KNOWN_HARNESS_DIAGNOSTICS"
+  # A case may author its OWN allowlist (the invalid-regex case does); the
+  # real one is the default.
+  if [ ! -f "${dir}/KNOWN_HARNESS_DIAGNOSTICS" ]; then
+    cp "${REAL_ALLOWLIST}" "${dir}/KNOWN_HARNESS_DIAGNOSTICS"
+  fi
   RUN_GD_TESTS_SUITE_DIR="${dir}" "${RUNNER}" "${MINERVA_ARG}" >"${CAPTURE}" 2>&1
   local rc=$?
   local ok=1
@@ -154,6 +158,58 @@ cat > "${d}/EXPECTED_SUITES" <<'EOF'
 test_selftest_runtime_error.gd assertions=2
 EOF
 _case "runtime-error" nonzero "fatal Godot diagnostics not on the known-harness allowlist"
+
+# ── case 6: invalid allowlist regex — the gate must refuse to run, not
+# silently disarm (F2, Codex 1188: grep rc 2 behind `|| true` read as "no
+# residue")
+d="${SANDBOX_ROOT}/bad-allowlist"; mkdir -p "${d}"
+cat > "${d}/test_selftest_ok2.gd" <<'EOF_GD'
+extends SceneTree
+func _init() -> void:
+	print("=== selftest: healthy suite under a broken allowlist ===")
+	print("  PASS: fine")
+	print("\n=== Results: 1 passed, 0 failed ===")
+	quit(0)
+EOF_GD
+cat > "${d}/EXPECTED_SUITES" <<'EOF_M'
+test_selftest_ok2.gd
+EOF_M
+cat > "${d}/KNOWN_HARNESS_DIAGNOSTICS" <<'EOF_A'
+# deliberately malformed ERE (unbalanced group)
+(((
+EOF_A
+_case "bad-allowlist" nonzero "invalid extended regex"
+
+# ── case 7: duplicate manifest row — count inflation (F6) ────────────────────
+d="${SANDBOX_ROOT}/dup-row"; mkdir -p "${d}"
+cat > "${d}/test_selftest_ok3.gd" <<'EOF_GD'
+extends SceneTree
+func _init() -> void:
+	print("=== selftest: duplicate manifest row ===")
+	print("  PASS: fine")
+	print("\n=== Results: 1 passed, 0 failed ===")
+	quit(0)
+EOF_GD
+cat > "${d}/EXPECTED_SUITES" <<'EOF_M'
+test_selftest_ok3.gd assertions=1
+test_selftest_ok3.gd assertions=1
+EOF_M
+_case "dup-row" nonzero "duplicate suite entry"
+
+# ── case 8: duplicate attribute — conflicting pins must not last-one-win (F6)
+d="${SANDBOX_ROOT}/dup-attr"; mkdir -p "${d}"
+cat > "${d}/test_selftest_ok4.gd" <<'EOF_GD'
+extends SceneTree
+func _init() -> void:
+	print("=== selftest: duplicate attribute ===")
+	print("  PASS: fine")
+	print("\n=== Results: 1 passed, 0 failed ===")
+	quit(0)
+EOF_GD
+cat > "${d}/EXPECTED_SUITES" <<'EOF_M'
+test_selftest_ok4.gd assertions=1 assertions=2
+EOF_M
+_case "dup-attr" nonzero "repeats the assertions= attribute"
 
 echo
 if [ "${fails}" -gt 0 ]; then

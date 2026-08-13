@@ -736,6 +736,9 @@ func raw_worker_envelope(params: Dictionary) -> Dictionary:
 	var binary_path := ProjectSettings.globalize_path(PLUGIN_ROOT + "/pcb-plugin")
 	var wrapper_path := ProjectSettings.globalize_path(PLUGIN_ROOT + "/scripts/e2e_route_stdio.py")
 	if not FileAccess.file_exists(binary_path) or not FileAccess.file_exists(wrapper_path):
+		# F7 (Codex 1188): every fallback path latches — a later successful
+		# call must not flip the run's verdict back to true.
+		_worker_fell_back = true
 		_used_real_worker = false
 		push_warning("[test_pcb_hint_refine_loop] real pcb-plugin binary not built — " +
 			"canned 'detailed hint materializes verbatim' fallback")
@@ -743,6 +746,7 @@ func raw_worker_envelope(params: Dictionary) -> Dictionary:
 	var req_uri := "user://c4_hint_refine_route_request.json"
 	var f := FileAccess.open(req_uri, FileAccess.WRITE)
 	if f == null:
+		_worker_fell_back = true
 		_used_real_worker = false
 		printerr("[test_pcb_hint_refine_loop] REAL-WORKER INVOCATION FAILED: cannot write %s" % req_uri)
 		return {"ok": true, "result": _canned_detailed_result()}

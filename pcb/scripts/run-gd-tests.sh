@@ -102,9 +102,10 @@
 #      the green assertion count.
 #
 # All three are covered by negative self-tests: scripts/test-gd-runner.sh
-# plants a compile error, a forced worker-false, an assertion-count drift and
-# a mid-suite SCRIPT ERROR into a sandbox suite dir and asserts this script
-# exits nonzero on each (and zero on the healthy control).
+# plants a compile error, a forced worker-false, an assertion-count drift, a
+# mid-suite SCRIPT ERROR, an invalid allowlist regex, a duplicate manifest
+# row and a duplicate attribute into sandbox suite dirs and asserts this
+# script exits nonzero on each (and zero on the healthy control).
 
 set -u
 
@@ -235,6 +236,11 @@ fi
 declare -a manifest_names=()
 declare -A manifest_assertions=()
 declare -A manifest_real_worker=()
+# F6 (Codex 1188): a DUPLICATE row inflates EXPECTED_SUITE_COUNT while the
+# suite runs once — every suite can pass, the summary prints 50/51, and the
+# runner still exits 0. Duplicate attributes would make conflicting pins
+# "last one wins". Both are manifest corruption: refuse by name, exit 2.
+declare -A manifest_seen=()
 while IFS= read -r line; do
   case "${line}" in
     ""|"#"*) continue ;;
@@ -244,10 +250,19 @@ while IFS= read -r line; do
     continue  # whitespace-only line
   fi
   name="${fields[0]}"
+  if [ -n "${manifest_seen[${name}]:-}" ]; then
+    echo "error: ${MANIFEST}: duplicate suite entry '${name}' (a duplicate inflates the suite count while the suite runs once)" >&2
+    exit 2
+  fi
+  manifest_seen["${name}"]=1
   manifest_names+=("${name}")
   for attr in "${fields[@]:1}"; do
     case "${attr}" in
       assertions=*)
+        if [ -n "${manifest_assertions[${name}]:-}" ]; then
+          echo "error: ${MANIFEST}: suite '${name}' repeats the assertions= attribute (conflicting pins must not be last-one-wins)" >&2
+          exit 2
+        fi
         val="${attr#assertions=}"
         if ! [[ "${val}" =~ ^[0-9]+$ ]] || [ "${val}" -eq 0 ]; then
           echo "error: ${MANIFEST}: suite '${name}' has non-positive-integer assertions pin '${attr}'" >&2
@@ -256,6 +271,10 @@ while IFS= read -r line; do
         manifest_assertions["${name}"]="${val}"
         ;;
       real-worker)
+        if [ -n "${manifest_real_worker[${name}]:-}" ]; then
+          echo "error: ${MANIFEST}: suite '${name}' repeats the real-worker attribute" >&2
+          exit 2
+        fi
         manifest_real_worker["${name}"]=1
         ;;
       *)
@@ -383,6 +402,19 @@ ALLOWLIST_CLEAN="$(mktemp)"
 grep -Ev '^[[:space:]]*(#|$)' "${ALLOWLIST}" > "${ALLOWLIST_CLEAN}" || true
 if [ ! -s "${ALLOWLIST_CLEAN}" ]; then
   echo "error: allowlist ${ALLOWLIST} has no patterns (only comments/blanks)" >&2
+  rm -f "${ALLOWLIST_CLEAN}"
+  exit 2
+fi
+# F2 (Codex OFC review 1188): COMPILE-CHECK the patterns before anything runs.
+# An invalid ERE makes the residue grep exit 2, and an unguarded scan would
+# read that as "no residue" — the gate silently disarming itself on a typo is
+# the exact fail-open this runner exists to prevent. grep against /dev/null:
+# rc 1 = patterns valid (nothing to match), rc 2 = at least one is malformed.
+grep -E -f "${ALLOWLIST_CLEAN}" /dev/null >/dev/null 2>&1
+_allowlist_rc=$?
+if [ "${_allowlist_rc}" -ge 2 ]; then
+  echo "error: allowlist ${ALLOWLIST} contains an invalid extended regex (grep rc ${_allowlist_rc})" >&2
+  echo "  (the diagnostics gate cannot run against a pattern set that does not compile)" >&2
   rm -f "${ALLOWLIST_CLEAN}"
   exit 2
 fi
@@ -536,8 +568,16 @@ for test_path in "${tests[@]}"; do
   # documented: SCRIPT ERROR / failed script loads in the log while the
   # runner printed 47/47.
   if [ "${suite_ok}" -eq 1 ]; then
-    diag_residue="$(_fatal_diagnostics "${RESULTS_TMP}" | grep -Ev -f "${ALLOWLIST_CLEAN}" || true)"
-    if [ -n "${diag_residue}" ]; then
+    # F2 (Codex 1188): grep's rc is consulted, never discarded — 0 = residue
+    # survived the filter, 1 = every diagnostic matched the allowlist, >=2 =
+    # the scan itself failed, which is a harness error and FAILS the suite
+    # (fail closed) rather than reading as an empty residue.
+    diag_residue="$(_fatal_diagnostics "${RESULTS_TMP}" | grep -Ev -f "${ALLOWLIST_CLEAN}")"
+    diag_rc=$?
+    if [ "${diag_rc}" -ge 2 ]; then
+      suite_ok=0
+      fail_reason="fatal-diagnostics scan itself failed (grep rc ${diag_rc}) — a gate that cannot run is not a gate that passed"
+    elif [ -n "${diag_residue}" ]; then
       suite_ok=0
       fail_reason="fatal Godot diagnostics not on the known-harness allowlist (${ALLOWLIST}):"
       echo "!!! ${name}: unexplained fatal diagnostics:" >&2
