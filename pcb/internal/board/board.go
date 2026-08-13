@@ -46,6 +46,22 @@ type Blob = map[string]interface{}
 // Marshaling is deterministic: struct fields emit in declaration order and
 // yaml.v3 sorts inline/map keys, so a given Board always produces byte-identical
 // YAML. That determinism is why this is the pcb.serialize payload format.
+// LibraryLockEntry is one pinned footprint: the content the board consumed and
+// enough provenance to reacquire or explain it.
+//
+// SHA256 is the identity and the only field that decides pass/fail. Layer and
+// Source are PROVENANCE — they make a mismatch actionable ("the seed supplied
+// this, your user layer now overrides it") but never adjudicate, because a
+// board that refused on a changed layer NAME would break the moment someone
+// reorganised their libraries without touching a byte of copper.
+type LibraryLockEntry struct {
+	SHA256 string `json:"sha256" yaml:"sha256"`
+	// Layer that supplied the bytes when the lock was taken.
+	Layer string `json:"layer,omitempty" yaml:"layer,omitempty"`
+	// Where the content can be reacquired from, when it is not local.
+	Source string `json:"source,omitempty" yaml:"source,omitempty"`
+}
+
 type Board struct {
 	Version int `json:"version" yaml:"version"`
 	// ID is the persistent, mint-once board identity (schema v2+). It is an
@@ -69,20 +85,43 @@ type Board struct {
 	// Nothing in this codec sorts or dedupes the list, so what an author writes
 	// is what every consumer sees; validateLayers enforces the shape.
 	//
-	// Inner layers are AUTHORABLE, NOT FABRICABLE. A 4-layer stack round-trips
-	// and validates here, while the Python compiler still refuses any stack but
-	// exactly ["top","bottom"]
-	// (compile_board._require_two_layer). A board that declares NO layers is a
-	// 2-layer board by convention; this contract does not invent a stack for it.
+	// Inner layers are AUTHORABLE AND FABRICABLE as of epoch GA. This comment
+	// previously said they were not, and cited compile_board._require_two_layer
+	// as the refusal — a symbol that no longer exists (GA-1/GA-3 shipped the
+	// N-layer model, router, per-layer DRC and emission). A board that declares
+	// NO layers is a 2-layer board by convention; this contract does not invent
+	// a stack for it.
 	// See docs/board-yaml.md "Layer stack".
 	Layers []string `json:"layers,omitempty" yaml:"layers,omitempty"`
 
 	Origin      *Point      `json:"origin,omitempty" yaml:"origin,omitempty"`
 	DesignRules DesignRules `json:"design_rules" yaml:"design_rules"`
-	Components  []Component `json:"components" yaml:"components"`
-	Nets        []Net       `json:"nets" yaml:"nets"`
-	Traces      []Trace     `json:"traces,omitempty" yaml:"traces,omitempty"`
-	Vias        []Via       `json:"vias,omitempty" yaml:"vias,omitempty"`
+
+	// LibraryLock pins the exact library CONTENT this board consumed, keyed by
+	// footprint ref (acceptance check K20, DCR 019ffc52c358).
+	//
+	// WHY A NAME IS NOT ENOUGH. Component.Footprint is a NAME, and since the
+	// library became layered (epoch LIB1/LIB2) a user layer may legitimately
+	// override a seed footprint with different geometry under the same name.
+	// That is a feature — it is how a user fixes a bad seed part — but it means
+	// a board rebuilt months later can resolve the same names to DIFFERENT
+	// copper without anything saying so. This block is what makes that
+	// detectable: it records what the board actually consumed, so a rebuild
+	// either reproduces it or REFUSES BY NAME.
+	//
+	// SCOPED TO WHAT THE BOARD USES, deliberately. Only refs this board
+	// resolves appear here, so an unrelated library change cannot invalidate
+	// it — the failure mode of a whole-chain digest, which goes red when
+	// anything anywhere moves and teaches everyone to regenerate it unread.
+	//
+	// OPTIONAL AND OMITEMPTY: a board without this block compiles exactly as
+	// before. Locking is something a board GAINS, never a precondition, so no
+	// existing board is invalidated by this field's introduction.
+	LibraryLock map[string]LibraryLockEntry `json:"library_lock,omitempty" yaml:"library_lock,omitempty"`
+	Components  []Component                 `json:"components" yaml:"components"`
+	Nets        []Net                       `json:"nets" yaml:"nets"`
+	Traces      []Trace                     `json:"traces,omitempty" yaml:"traces,omitempty"`
+	Vias        []Via                       `json:"vias,omitempty" yaml:"vias,omitempty"`
 
 	// Zones are authored copper-pour or keepout regions. They round-trip here and
 	// compile into ResolvedZone entries. The final compile pass computes a solid

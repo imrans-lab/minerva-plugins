@@ -1833,6 +1833,23 @@ def _build_traces(board: dict, board_id: str, net_id_by_name: dict[str, str],
     return tuple(traces)
 
 
+def _board_library_lock(board: dict) -> dict:
+    """The board's ``library_lock`` block as ``{ref: entry}``, or empty.
+
+    TOLERANT BY DESIGN, in the one direction that is safe: a malformed or absent
+    block yields NO pins, so the board compiles exactly as an unlocked board
+    would. The alternative — refusing to compile because the lock is unreadable
+    — would turn a bad edit to an optional provenance block into a board that
+    cannot be built, which is a worse failure than the one it guards against.
+    Individual entries are validated where they are USED, so a single malformed
+    entry cannot disarm the pins beside it.
+    """
+    raw = board.get("library_lock")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+
+
 def _build_vias(board: dict, board_id: str, net_id_by_name: dict[str, str],
                 schema_version: int, diags: _Diagnostics) -> tuple[ResolvedVia, ...]:
     vias: list[ResolvedVia] = []
@@ -2577,12 +2594,53 @@ def compile_board(
             diags.error("lock_entry_malformed",
                         f"component {ref!r}: lock entry for {fp_ref!r} is malformed", comp_ref)
             continue
+        # THE BOARD'S OWN LOCK (K20, DCR 019ffc52c358), read before resolution
+        # so a pinned-but-missing ref can say what it was pinned TO.
+        pinned = _board_library_lock(board).get(fp_ref)
         try:
             supplied = resolve_footprint_layered(fp_ref, chain=chain)
         except FootprintLookupError as exc:
-            diags.error("footprint_unresolved", f"component {ref!r}: {exc}", comp_ref)
+            if pinned:
+                # An ACTIONABLE refusal, not just "not found": the board knows
+                # exactly which bytes it wants, so say so and where they came
+                # from. Without this the user is told a name is missing and left
+                # to guess which of several same-named parts was meant.
+                diags.error(
+                    "footprint_pinned_but_missing",
+                    f"component {ref!r}: {fp_ref!r} is pinned to sha256 "
+                    f"{str(pinned.get('sha256', ''))[:12]}… but no library layer supplies it"
+                    + (f"; it came from {pinned.get('source')!r} when the board was locked"
+                       if pinned.get("source") else "")
+                    + (f" (layer {pinned.get('layer')!r})" if pinned.get("layer") else ""),
+                    comp_ref)
+            else:
+                diags.error("footprint_unresolved", f"component {ref!r}: {exc}", comp_ref)
             continue
         parsed = supplied.parsed
+
+        # IDENTITY, NOT NAME. The layer chain has already proven the FILE matches
+        # its own layer's lock; this asks the different question K20 exists for —
+        # is it the content THIS BOARD consumed? A user layer legitimately
+        # overriding a seed part under the same name is exactly the case that
+        # silently changes copper, and it is the case this catches.
+        #
+        # FAIL CLOSED. A mismatch is refused, never resolved-anyway-with-a-
+        # warning: the whole value of a lock is that a rebuild either reproduces
+        # the board or stops. Provenance is reported to make it repairable, but
+        # only the sha adjudicates — refusing because a layer was RENAMED would
+        # break boards whose copper never moved.
+        if pinned:
+            expected = str(pinned.get("sha256", ""))
+            actual = str((entry or {}).get("sha256", ""))
+            if expected and actual and expected != actual:
+                diags.error(
+                    "library_lock_mismatch",
+                    f"component {ref!r}: {fp_ref!r} is pinned to sha256 {expected[:12]}… "
+                    f"but layer {supplied.layer!r} supplies {actual[:12]}…. The board locked "
+                    f"different content than the library now provides; resolve by restoring "
+                    f"the pinned content or re-locking the board deliberately.",
+                    comp_ref)
+                continue
 
         entry = entry or {}
         provenance = Provenance(
