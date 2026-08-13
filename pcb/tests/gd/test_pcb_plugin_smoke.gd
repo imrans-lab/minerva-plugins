@@ -13,8 +13,12 @@ extends SceneTree
 ##        - AnnotationHostRegistry.register + get_host round-trips (the seam the
 ##          MCP annotation tools use to reach a live host by editor_name).
 ##        - AnnotationSidecar write+read round-trips through the host.
-##        - PluginEditorRegistry: `.minpcb` is silently skipped (core-extension
-##          claim; confirms gap register A-10), `.pcbskel` registers cleanly.
+##        - PluginEditorRegistry: `.minpcb` ROUTES TO THE PLUGIN (core dropped
+##          its claim at the 2026-07-07 cutover — singleton_object.gd's note:
+##          ".minpcb falls through to the plugin"; the A-10 silent-skip this
+##          section originally pinned described the PRE-cutover world, and the
+##          stale pin false-failed against every post-cutover scaffold — epoch
+##          task OFC-6, 019ff942f1f8), `.pcbskel` registers cleanly.
 ##      This section is what runs on THIS machine (Go toolchain absent, so the
 ##      backend binary can't be built; project autoloads need Godot 4.5+).
 ##
@@ -272,7 +276,7 @@ func _all_valid(annotations: Array, host: AnnotationHost) -> bool:
 
 
 func _test_editor_registry_extension_routing() -> void:
-	print("\n-- PluginEditorRegistry: .minpcb silently skipped, .pcbskel routes --")
+	print("\n-- PluginEditorRegistry: .minpcb routes to the plugin post-cutover, .pcbskel routes --")
 	var reg_script: Script = load(PLUGIN_EDITOR_REGISTRY_SCRIPT_PATH)
 	check("PluginEditorRegistry loads", reg_script != null)
 	if reg_script == null:
@@ -290,16 +294,22 @@ func _test_editor_registry_extension_routing() -> void:
 	def.editor_items = [{"id": "new_pcb", "name": "New PCB", "panel": "pcb_panel", "default_filename": "untitled.pcbskel"}]
 
 	var warnings: Array = reg.register_plugin(def)
-	# .minpcb is a CORE_EXTENSION → declaration produces a warning + is skipped.
-	var minpcb_skipped := false
+	# OFC-6 (019ff942f1f8): the PRE-cutover pin here expected a core-extension
+	# skip warning. Core REMOVED .minpcb from CORE_EXTENSIONS at the
+	# 2026-07-07 PCBEditor cutover (deliberate — "until the plugin's legacy
+	# .minpcb importer lands ... .minpcb falls through to the plugin",
+	# singleton_object.gd), so the CURRENT contract is: no warning, the
+	# plugin's claim registers and resolves. A scaffold where either check
+	# fails is a PRE-cutover core — no longer a supported host.
+	var minpcb_warned := false
 	for w in warnings:
 		if str(w).find(".minpcb") != -1:
-			minpcb_skipped = true
+			minpcb_warned = true
 			break
-	check("declaring '.minpcb' produces a skip warning (confirms A-10 silent-skip)", minpcb_skipped,
-			"warnings: %s" % str(warnings))
-	check("'.minpcb' does NOT resolve to the plugin (core claim wins)",
-			reg.resolve_extension(".minpcb").is_empty())
+	check("declaring '.minpcb' is accepted without a core-claim warning (post-cutover contract)",
+			not minpcb_warned, "warnings: %s" % str(warnings))
+	check("'.minpcb' resolves to the plugin (core dropped its claim at cutover)",
+			reg.resolve_extension(".minpcb").get("plugin_id", "") == "pcb")
 	# .pcbskel is not a core extension → registers and routes to the pcb panel.
 	var resolved: Dictionary = reg.resolve_extension(".pcbskel")
 	check("'.pcbskel' resolves to plugin 'pcb' / panel 'pcb_panel'",

@@ -50,9 +50,9 @@ test_pcb_panel_tools.gd assertions=206
 test_pcb_panel_tools_migration.gd assertions=68
 test_pcb_panel_ui.gd assertions=154
 test_pcb_pin_inspector.gd assertions=49
-# 41 passed + 2 failed on the dev scaffold (pre-existing drift, epoch task
-# OFC-6 019ff942f1f8) — the suite fails on exit code regardless; OFC-6
-# re-pins when it lands.
+# OFC-6 (019ff942f1f8) flipped the two stale pre-cutover .minpcb checks to
+# the current core contract — same total, now expected all-passing on a
+# post-cutover scaffold.
 test_pcb_plugin_smoke.gd assertions=43
 test_pcb_route_hint_mcp_parity.gd assertions=19
 test_pcb_trace_tool.gd assertions=31
