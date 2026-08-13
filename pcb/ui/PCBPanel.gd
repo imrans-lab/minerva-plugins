@@ -5203,7 +5203,13 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	_routing_workspace.board_token = _PcbRoutingSidecarScript.compute_board_fingerprint(board_dict)
 
 	var payload: Dictionary = _routing_workspace.begin_check(candidate_ids)
-	var composed: Dictionary = draft_check_board()
+	# ONE composition for the whole request (round-2 re-review, finding 3).
+	# Calling draft_check_board() and draft_check_provenance() separately would
+	# compose twice, so the board and the provenance describing it would come
+	# from two passes — the drift shape compose_draft's own docstring forbids,
+	# and double the work besides.
+	var composition: Dictionary = draft_check_composition()
+	var composed: Dictionary = composition.get("board", {})
 	payload["board"] = composed
 	# Provenance rides BESIDE the board, never inside it: the board dict is a
 	# canonical shape the worker consumes, and draft-only metadata has no
@@ -5211,7 +5217,7 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 	# what it does not know, so this is additive. It lets a finding that names
 	# a zone id be traced to a DRAFT rather than read as canonical geometry,
 	# and it names every entity the composer deliberately did NOT materialize.
-	payload["draft_provenance"] = draft_check_provenance()
+	payload["draft_provenance"] = composition.get("provenance", [])
 	# DRAFT-OVERLAY COHERENCE (epoch GA cold review, finding 3). The two guards
 	# apply_check_result already runs cover the canonical board (board_token)
 	# and the candidate set (workspace_generation) — NEITHER covers the staged
@@ -5274,12 +5280,20 @@ func check_draft(candidate_ids: Array = []) -> Dictionary:
 ## construction — an absent store composes nothing and the caller degrades to
 ## the canonical board rather than refusing.
 func draft_check_board() -> Dictionary:
+	return draft_check_composition().get("board", {})
+
+
+## The composed pair {board, provenance} from ONE pass, so the two halves of a
+## draft-check request can never describe different states. Fail-safe by
+## construction: no board composes nothing, and no staged store degrades to the
+## canonical board rather than refusing.
+func draft_check_composition() -> Dictionary:
 	if _data == null:
-		return {}
+		return {"board": {}, "provenance": []}
 	var canonical: Dictionary = _data.to_board_dict()
 	if _staged_entities == null:
-		return canonical
-	return _PcbStagedEntitiesScript.effective_draft_board(
+		return {"board": canonical, "provenance": []}
+	return _PcbStagedEntitiesScript.compose_draft(
 		canonical, _staged_entities, "geometric")
 
 
@@ -5288,10 +5302,7 @@ func draft_check_board() -> Dictionary:
 ## the composed board, and a named reason when it did not. Travels beside the
 ## board in the draft-check request, never inside it.
 func draft_check_provenance() -> Array:
-	if _data == null or _staged_entities == null:
-		return []
-	return _PcbStagedEntitiesScript.compose_draft(
-		_data.to_board_dict(), _staged_entities, "geometric").get("provenance", [])
+	return draft_check_composition().get("provenance", [])
 
 
 ## On-demand assembly advisory check (DCR 019fd5fd9084, work items

@@ -1395,8 +1395,12 @@ func _run_removal_manifest_tools_absent() -> void:
 	# tests/gd/test_manifest_tool_registration.gd's own pin (94->96 over the
 	# same station) for the "deliberate bump, its own diff"
 	# convention this follows.
-	check_eq("manifest tool count == 98 (ALL manifest.json tools[] entries)",
-		names.size(), 98)
+	# Epoch GA round 2 (98 -> 100): minerva_pcb_staged_freeze +
+	# minerva_pcb_staged_unfreeze, K7's freeze doorway. This pin exists
+	# BECAUSE the sibling pin in test_manifest_tool_registration.gd counts a
+	# different set (registered tools) and can agree while this one is wrong.
+	check_eq("manifest tool count == 100 (ALL manifest.json tools[] entries)",
+		names.size(), 100)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

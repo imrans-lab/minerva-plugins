@@ -439,6 +439,16 @@ func _run_freeze_doorway() -> void:
 	var eid := str(staged.get("entity_id", ""))
 	var sid := str(staged.get("staged_id", ""))
 
+	# A CHECKPOINT BETWEEN STAGE AND FREEZE. Without it this whole section is
+	# vacuous (epoch GA round-2 re-review, finding 2): the only earlier history
+	# entry is the seed, taken before anything was staged, so its bucket-9 map
+	# is EMPTY — and restoring an empty map touches nothing, which means the
+	# clobber assertion below would pass even with the history pairing ripped
+	# out. This entry carries {sid: "staged"}, so undoing back past an unpaired
+	# freeze really would thaw the pose, and the assertion has teeth.
+	rig["data"].create_cutout([Vector2(2, 20), Vector2(6, 20), Vector2(6, 23)])
+	rig["data"].save_to_history("pre-freeze checkpoint")
+
 	var out: Dictionary = rig["panel"].freeze_staged(eid)
 	check("the panel doorway freezes", bool(out.get("ok", false)))
 	check_eq("…and reports the state it reached", bool(out.get("frozen", false)), true)
@@ -449,6 +459,9 @@ func _run_freeze_doorway() -> void:
 	rig["data"].create_cutout([Vector2(30, 18), Vector2(34, 18), Vector2(34, 22)])
 	rig["data"].save_to_history("unrelated cutout")
 	check("undo of the UNRELATED edit", rig["data"].undo())
+	# The teeth: the entry this lands on is the freeze's OWN, so the pose stays
+	# settled. Strip the pairing and it lands on the pre-freeze checkpoint
+	# instead, whose map says "staged", and the freeze silently evaporates.
 	check_eq("…leaves the freeze STANDING (no silent thaw)",
 		str(rig["store"].get_entry(sid).get("disposition", "")), "frozen")
 	# …and undoing the freeze itself DOES thaw it, which is what makes the

@@ -187,9 +187,15 @@ func _init() -> void:
 	# Epoch GA round 2 (98 -> 100): minerva_pcb_staged_freeze +
 	# minerva_pcb_staged_unfreeze, the agent's half of K7's freeze verb. Two
 	# tools rather than one flag-taking verb, following the sibling
-	# workspace_pin/workspace_unpin precedent. Both are executor:"panel", so
-	# only THIS pin moves — the Go backend-executor count in
-	# manifest_registry_parity_test.go is unaffected by a panel tool.
+	# workspace_pin/workspace_unpin precedent.
+	#
+	# TWO GD PINS MOVE, NOT ONE. test_workspace_tools.gd carries a SECOND,
+	# independent count over the same manifest.json, and it exists precisely
+	# because this pin counts REGISTERED tools while that one counts every
+	# tools[] entry — they can disagree, and only moving one is how a
+	# previous station broke the gate. The Go pin in
+	# manifest_registry_parity_test.go is genuinely unaffected: it counts
+	# backend-executor tools, and both new tools are executor:"panel".
 	check("total registered tool count == 100", registered.size() == 100,
 			"got %d: %s" % [registered.size(), str(registered)])
 

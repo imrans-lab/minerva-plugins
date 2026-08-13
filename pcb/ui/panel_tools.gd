@@ -4136,9 +4136,13 @@ static func _staged_freeze_common(host, args: Dictionary, want_frozen: bool) -> 
 	if not bool(res.get("ok", false)):
 		# The store's refusals reach the agent BY NAME rather than as a generic
 		# failure: staged_kind_not_freezable (only placements steer routing),
-		# staged_entry_terminal, staged_entry_not_found, and the deliberate
-		# no-op refusal — an agent that cannot tell "wrong kind" from "already
-		# frozen" cannot repair its own call.
+		# staged_entry_not_found, and the deliberate no-op refusal — an agent
+		# that cannot tell "wrong kind" from "already frozen" cannot repair its
+		# own call. NOT staged_entry_terminal: the panel resolves an entity id
+		# through _resolve_live_staged first, which reports a terminal entry as
+		# not-found because it is no longer live. Both doorways agree on that,
+		# so parity holds; it is the store-level refusal that is unreachable
+		# from here, not a divergence.
 		return {"success": false, "error": str(res.get("error", "freeze_refused")),
 			"entity_id": entity_id}
 	if want_frozen:

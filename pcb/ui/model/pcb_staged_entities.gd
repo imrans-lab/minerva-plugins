@@ -607,7 +607,7 @@ static func compose_draft(board_dict: Dictionary, staged_store, purpose: String)
 	# when the entity's fate is decided below; the default is the fail-safe
 	# one, so a path that forgets to mark it reads as "did not reach the
 	# board" rather than claiming a composition that never happened.
-	var record_by_sid := {}
+	var record_by_entity_id := {}
 	for e in live:
 		var entry: Dictionary = e
 		var rec := {
@@ -625,7 +625,7 @@ static func compose_draft(board_dict: Dictionary, staged_store, purpose: String)
 			# reader can tell "deliberately excluded" from "lost".
 			rec["reason"] = "cutouts are never composed into the draft board (bug 019ffcd4a584: the exclusion stands, its original rationale did not)"
 		provenance.append(rec)
-		record_by_sid[str(rec.get("entity_id", ""))] = rec
+		record_by_entity_id[str(rec.get("entity_id", ""))] = rec
 
 	var staged_zones: Array = staged_store.staged_payloads("zone")
 	if not staged_zones.is_empty():
@@ -643,7 +643,7 @@ static func compose_draft(board_dict: Dictionary, staged_store, purpose: String)
 				board_zone_ids[str((z as Dictionary).get("id", ""))] = true
 		for z in staged_zones:
 			var zid := str((z as Dictionary).get("id", ""))
-			var zrec: Dictionary = record_by_sid.get(zid, {})
+			var zrec: Dictionary = record_by_entity_id.get(zid, {})
 			if board_zone_ids.has(zid):
 				if not zrec.is_empty():
 					zrec["reason"] = "a zone with this id is already on the board (two-store drift); the board's copy wins"
@@ -664,7 +664,7 @@ static func compose_draft(board_dict: Dictionary, staged_store, purpose: String)
 				continue
 			var pl: Dictionary = p
 			var comp_id := str(pl.get("component_id", ""))
-			var prec: Dictionary = record_by_sid.get(str(pl.get("id", "")), {})
+			var prec: Dictionary = record_by_entity_id.get(str(pl.get("id", "")), {})
 			var to: Variant = pl.get("to")
 			if not comp_by_ref.has(comp_id) or not (to is Dictionary):
 				if not prec.is_empty():

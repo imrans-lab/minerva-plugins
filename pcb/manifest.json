@@ -772,7 +772,7 @@
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "entity_id": {"type": "string", "description": "Canonical id of the staged placement draft to freeze"}
         },
-        "required": ["editor_name"]
+        "required": ["editor_name", "entity_id"]
       }
     },
     {
@@ -785,7 +785,7 @@
           "editor_name": {"type": "string", "description": "Name of the PCB editor tab"},
           "entity_id": {"type": "string", "description": "Canonical id of the frozen staged placement draft to unfreeze"}
         },
-        "required": ["editor_name"]
+        "required": ["editor_name", "entity_id"]
       }
     },
     {
