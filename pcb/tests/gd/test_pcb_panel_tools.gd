@@ -301,7 +301,21 @@ func _run_golden_parity() -> void:
 		["success", "reference", "radius_mm", "nearby_count", "nearby", "copper"])
 	var copper: Dictionary = gs.get("copper", {})
 	check_keys("spatial_query copper block", copper,
-		["region_mm", "traces", "vias", "zones", "cutouts", "count", "searched", "note"])
+		["region_mm", "traces", "vias", "zones", "cutouts", "count", "searched",
+		 "searched_over", "note"])
+	# The count must agree with the arrays beside it — a total that silently
+	# excludes a kind it also returns means something other than "how many
+	# things are in here".
+	check_eq("count agrees with what was listed", int(copper.get("count", -1)),
+		(copper.get("traces", []) as Array).size()
+			+ (copper.get("vias", []) as Array).size()
+			+ (copper.get("zones", []) as Array).size()
+			+ (copper.get("cutouts", []) as Array).size())
+	# `nearby` came from a radius CIRCLE, the copper from the square that
+	# circle inscribes; listing components among "searched" would imply one
+	# search where there are two, with different shapes.
+	check("searched does not conflate the component radius with the region",
+		not (copper.get("searched", []) as Array).has("components"))
 	# The agent must be able to tell "nothing routed here" from "copper was not
 	# looked for" — the first reading invites routing straight through copper
 	# the query never examined.

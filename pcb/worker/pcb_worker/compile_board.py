@@ -2632,7 +2632,17 @@ def compile_board(
         if pinned:
             expected = str(pinned.get("sha256", ""))
             actual = str((entry or {}).get("sha256", ""))
-            if expected and actual and expected != actual:
+            if not expected:
+                # A pin with no usable sha CANNOT adjudicate, and staying quiet
+                # about it is the worst option available: the board looks
+                # locked, compiles clean, and is pinned to nothing. Say so
+                # rather than let a malformed entry masquerade as protection.
+                diags.warning(
+                    "library_pin_unusable",
+                    f"component {ref!r}: the lock entry for {fp_ref!r} carries no sha256, "
+                    f"so this footprint is NOT pinned — re-lock the board to restore it",
+                    comp_ref)
+            elif expected and actual and expected != actual:
                 diags.error(
                     "library_lock_mismatch",
                     f"component {ref!r}: {fp_ref!r} is pinned to sha256 {expected[:12]}… "

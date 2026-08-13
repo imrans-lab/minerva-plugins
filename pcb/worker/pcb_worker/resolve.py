@@ -153,10 +153,12 @@ def resolve_board(
     chain = bless.live_library_chain(
         wip_root=wip_root, layers=library_layers,
         library_root=library_root, lockfile=lockfile)
+    board_lock = resolved.get("library_lock")
     for comp in components:
         if not isinstance(comp, dict):
             continue
-        _resolve_component(comp, chain)
+        _resolve_component(comp, chain,
+                           board_lock if isinstance(board_lock, dict) else None)
 
     return resolved
 
@@ -200,11 +202,13 @@ def resolve_board_best_effort(
     chain = bless.live_library_chain(
         wip_root=wip_root, layers=library_layers,
         library_root=library_root, lockfile=lockfile)
+    board_lock = resolved.get("library_lock")
     for comp in components:
         if not isinstance(comp, dict):
             continue
         try:
-            _resolve_component(comp, chain)
+            _resolve_component(comp, chain,
+                               board_lock if isinstance(board_lock, dict) else None)
         except ResolveCoincidenceError:
             raise  # integrity fault: footprint pads disagree with routed pins
         except (ResolveError, FootprintLookupError):
@@ -216,6 +220,7 @@ def resolve_board_best_effort(
 def _resolve_component(
     comp: dict,
     chain,
+    lock: Union[dict, None] = None,
 ) -> None:
     """Resolve ONE component's footprint and attach its graphics + pad geometry.
 
@@ -231,7 +236,40 @@ def _resolve_component(
     if not isinstance(fp_ref, str) or fp_ref == "":
         raise ResolveError(f"component {ref!r} has no footprint ref to resolve")
 
-    parsed = resolve_footprint_layered(fp_ref, chain=chain).parsed
+    supplied = resolve_footprint_layered(fp_ref, chain=chain)
+    parsed = supplied.parsed
+
+    # THE BOARD'S LOCK, ON THE DEGRADE PATH (K20; epoch GA task-3 review
+    # finding 2). The compile path REFUSES a lock mismatch outright. This path
+    # must not: it is the tolerant preview/DRC resolve, and the owner's standing
+    # rule is that the CANVAS DEGRADES while FAB FAILS CLOSED — hard-refusing
+    # here would blank the editor for a board that is merely out of date.
+    #
+    # But it must not be SILENT either, and it was: a locked board whose library
+    # changed had the substituted graphics and pads baked straight into the
+    # returned board, so the panel displayed — and persisted — copper the board
+    # never approved, right up until someone happened to compile. That is the
+    # one-path-enforced trap, and a lock honoured on one path and not another is
+    # worse than none because it teaches a trust it cannot keep.
+    #
+    # So the component is MARKED and still drawn. The marker travels on the
+    # component itself, which is where every other per-component honesty signal
+    # in this payload already lives.
+    if isinstance(lock, dict):
+        pinned = lock.get(fp_ref)
+        if isinstance(pinned, dict):
+            expected = str(pinned.get("sha256", ""))
+            actual = str((supplied.entry or {}).get("sha256", ""))
+            if expected and actual and expected != actual:
+                comp["library_lock_mismatch"] = {
+                    "footprint": fp_ref,
+                    "expected_sha256": expected,
+                    "actual_sha256": actual,
+                    "supplying_layer": supplied.layer,
+                    "note": ("this board is pinned to different content than the library "
+                             "now supplies; the geometry shown is the CURRENT library's, "
+                             "not what the board was locked to. A compile will refuse."),
+                }
 
     fp_pads = {str(p["number"]): (p["x_mm"], p["y_mm"]) for p in parsed["pads"]}
     _check_coincidence(ref, comp.get("pins") or [], fp_pads)

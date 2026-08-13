@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pcb_worker.compile_board import compile_board
 from pcb_worker.methods import handle_request
+from pcb_worker import resolve
+from pcb_worker.compile_board import normalize_board
 from pcb_worker.footprints import (DEFAULT_LOCKFILE, SEED_LAYER,
                                    load_lockfile)
 from pcb_worker.resolved_board import DiagnosticSeverity
@@ -196,3 +198,62 @@ def test_locking_does_not_mutate_the_caller_s_board():
     original = _board(SEEDED_REF)
     _lock(original)
     assert "library_lock" not in original
+
+
+# ── the gaps the task-3 review named ────────────────────────────────────────
+
+def test_normalize_PRESERVES_the_lock():
+    """MUTATION THIS CATCHES: a rebuild-style refactor of normalize_board that
+    constructs its output instead of deep-copying the source. Today it copies,
+    so the lock survives by accident of implementation rather than by contract —
+    and that is exactly how the panel lost it (to_board_dict rebuilds). This
+    pins the behaviour so the next refactor cannot quietly strip a board's pins
+    on its way through a normalize."""
+    board = _board(SEEDED_REF, {SEEDED_REF: {"sha256": _seed_sha(SEEDED_REF)}})
+    normalized, _diags = normalize_board(board)
+    assert normalized is not None
+    assert normalized["library_lock"][SEEDED_REF]["sha256"] == _seed_sha(SEEDED_REF)
+
+
+def test_the_degrade_path_MARKS_a_mismatch_instead_of_hiding_it():
+    """THE ONE-PATH TRAP, and the review's most serious finding. compile refuses
+    a mismatch; resolve (the tolerant preview/DRC path the panel draws from)
+    used to bake the substituted geometry in silently, so a locked board whose
+    library changed DISPLAYED and persisted copper it never approved until
+    someone happened to compile.
+
+    MUTATION THIS CATCHES: dropping the marker. It must not raise — the standing
+    rule is that the canvas DEGRADES while fab FAILS CLOSED, so hard-refusing
+    here would blank the editor for a merely out-of-date board — but it must not
+    be silent either."""
+    board = _board(SEEDED_REF, {SEEDED_REF: {"sha256": "0" * 64}})
+    resolved = resolve.resolve_board(board)
+    comp = resolved["components"][0]
+    # Still resolved and drawable: degraded, not refused.
+    assert comp.get("has_pad_geometry") is True
+    # …and honestly marked.
+    mismatch = comp.get("library_lock_mismatch")
+    assert mismatch, "a locked board resolving to different content said nothing"
+    assert mismatch["expected_sha256"] == "0" * 64
+    assert mismatch["actual_sha256"] == _seed_sha(SEEDED_REF)
+    assert mismatch["supplying_layer"] == SEED_LAYER
+
+
+def test_a_matching_pin_leaves_the_degrade_path_unmarked():
+    """MUTATION THIS CATCHES: marking unconditionally. A warning that fires on
+    every board is a warning nobody reads, and it would make the marker useless
+    exactly when it finally means something."""
+    board = _board(SEEDED_REF, {SEEDED_REF: {"sha256": _seed_sha(SEEDED_REF)}})
+    resolved = resolve.resolve_board(board)
+    assert "library_lock_mismatch" not in resolved["components"][0]
+
+
+def test_a_pin_with_no_sha_is_reported_not_silently_ignored():
+    """MUTATION THIS CATCHES: skipping an unusable pin quietly. The board would
+    then LOOK locked, compile clean, and be pinned to nothing — the most
+    dangerous of the three states, because it is indistinguishable from safety."""
+    board = _board(SEEDED_REF, {SEEDED_REF: {"layer": "seed"}})  # no sha256
+    result = compile_board(board)
+    codes = [d.code for d in result.diagnostics]
+    assert "library_pin_unusable" in codes
+    assert "library_lock_mismatch" not in _codes(result)

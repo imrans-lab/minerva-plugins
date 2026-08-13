@@ -999,12 +999,23 @@ static func _copper_in_region(data, region: Rect2) -> Dictionary:
 		"vias": vias,
 		"zones": zones,
 		"cutouts": cutouts,
-		"count": traces.size() + vias.size() + zones.size(),
+		# COUNTS EVERY KIND IT LISTS. An earlier version summed traces, vias and
+		# zones while also returning cutouts, so `count` disagreed with the
+		# arrays beside it — a number that quietly means something other than
+		# "how many things are in here" is worse than no number.
+		"count": traces.size() + vias.size() + zones.size() + cutouts.size(),
 		# NAME WHAT WAS SEARCHED. Without this an agent reading "traces: []"
 		# cannot tell "nothing is routed here" from "traces were not looked
 		# for" — and the first reading is the dangerous one, because it invites
 		# routing straight through copper the query never examined.
-		"searched": ["components", "traces", "vias", "zones", "cutouts"],
+		#
+		# COMPONENTS ARE DELIBERATELY ABSENT from this list even though the
+		# reply carries them: `nearby` was gathered over a RADIUS CIRCLE around
+		# the reference part, while everything here was gathered over
+		# `region_mm`, the square that circle inscribes. Listing them together
+		# would imply one search where there were two, with different shapes.
+		"searched": ["traces", "vias", "zones", "cutouts"],
+		"searched_over": "region_mm (the square bounding the radius); `nearby` components used the radius circle instead",
 		"note": "copper is reported regardless of layer visibility — this answers what the BOARD has, not what the panel currently shows",
 	}
 

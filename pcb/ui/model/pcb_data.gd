@@ -2943,9 +2943,19 @@ func from_board_dict(data: Dictionary) -> void:
 
 	design_rules = (data.get("design_rules", {}) as Dictionary).duplicate()
 
-	# THE BOARD'S LIBRARY LOCK (K20, DCR 019ffc52c358) is carried VERBATIM and
-	# never interpreted here. The panel is not the authority on what a board
-	# consumed — the compiler is — so this model's whole job is to not lose it.
+	# THE BOARD'S LIBRARY LOCK (K20, DCR 019ffc52c358) is carried through this
+	# model rather than interpreted by it. The panel is not the authority on
+	# what a board consumed — the compiler is — so this model's whole job is to
+	# not lose it.
+	#
+	# TWO LIMITS ON "carried", stated because the first draft of this comment
+	# overclaimed and prose is the one artifact with no gate:
+	#   * a block that is not a Dictionary is replaced with {}, not preserved —
+	#     the model cannot hand a malformed value to consumers that index it;
+	#   * unrecognised fields inside an ENTRY survive this hop, but not a Go
+	#     codec round trip: internal/board's LibraryLockEntry is typed, so it
+	#     keeps sha256/layer/source and drops anything else. The durable
+	#     guarantee is those three fields, not arbitrary extension.
 	#
 	# WHY THIS LINE EXISTS AT ALL: to_board_dict rebuilds the canonical dict
 	# from typed fields rather than editing the loaded one, so any top-level key
