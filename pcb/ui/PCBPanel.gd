@@ -5,6 +5,18 @@ extends MinervaPluginPanel
 ## the dispatcher reads this duck-typed property to verify the calling tool's
 ## plugin owns this panel (fail-safe deny otherwise). HITL-caught 2026-07-16.
 var plugin_id: String = "pcb"
+
+
+## THE one type guard for Dictionary reads off worker replies (bug
+## 019fa0f8d575, fixed epoch GA-6). GDScript hard-errors when a value of the
+## wrong TYPE lands in a statically-typed var, and `.get(key, {})` defaults
+## only on an ABSENT key — a JSON null/list/string at the key crashed the
+## whole render. Every `var x: Dictionary = <reply>.get(...)` in this file
+## goes through here; uniformity is the point, so apply it at any new site
+## rather than re-deriving an inline ternary. `fallback` covers the rare
+## site whose absent-key default is another Dictionary, not {}.
+static func _dict_or_empty(v, fallback: Dictionary = {}) -> Dictionary:
+	return v if v is Dictionary else fallback
 ## PCB editor panel — Round B (full board-editing UI port).
 ##
 ## Replaces the walking-skeleton crude renderer with the real ported canvas
@@ -636,9 +648,9 @@ func accept_staged(entity_id: String) -> Dictionary:
 	if not bool(pre.get("ok", false)):
 		_show_transient_status("Accept refused: %s" % str(pre.get("error", "")))
 		return pre
-	var entry: Dictionary = pre.get("entry", {})
+	var entry: Dictionary = _dict_or_empty(pre.get("entry"))
 	var kind := str(entry.get("kind", ""))
-	var payload: Dictionary = entry.get("payload", {})
+	var payload: Dictionary = _dict_or_empty(entry.get("payload"))
 	var refusal := _staged_payload_refusal(kind, payload)
 	if not refusal.is_empty():
 		_show_transient_status("Accept refused: %s" % refusal)
@@ -662,7 +674,7 @@ func accept_staged(entity_id: String) -> Dictionary:
 	_data.save_to_history("Accept staged %s" % kind)
 	var out := {"ok": true, "entity_id": entity_id, "kind": kind}
 	if kind == "placement":
-		var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+		var to: Dictionary = _dict_or_empty(payload.get("to"))
 		var moved_msg := "Accepted move: %s is now at (%.2f, %.2f)." % [
 			str(payload.get("component_id", "")),
 			float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0))]
@@ -723,7 +735,7 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 		if not bool(pre.get("ok", false)):
 			refusals.append({"entity_id": str(eid), "error": str(pre.get("error", ""))})
 			continue
-		var entry: Dictionary = pre.get("entry", {})
+		var entry: Dictionary = _dict_or_empty(pre.get("entry"))
 		var refusal := _staged_payload_refusal(str(entry.get("kind", "")), entry.get("payload", {}))
 		if not refusal.is_empty():
 			refusals.append({"entity_id": str(eid), "error": refusal})
@@ -738,7 +750,7 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 	# batch of moves reports its stranded copper exactly like a single one.
 	var batch_pre_pins: Dictionary = {}
 	for r in resolved:
-		var r_entry: Dictionary = r.get("entry", {})
+		var r_entry: Dictionary = _dict_or_empty(r.get("entry"))
 		if str(r_entry.get("kind", "")) == "placement":
 			batch_pre_pins.merge(_PanelToolsScript._pre_transform_pins(_data,
 				str((r_entry.get("payload", {}) as Dictionary).get("component_id", ""))))
@@ -750,9 +762,9 @@ func accept_staged_batch(entity_ids: Array) -> Dictionary:
 	var placements_landed := 0
 	var midwrite_refusals: Array = []
 	for r in resolved:
-		var entry: Dictionary = r.get("entry", {})
+		var entry: Dictionary = _dict_or_empty(r.get("entry"))
 		var kind := str(entry.get("kind", ""))
-		var landed: Dictionary = _apply_staged_payload(kind, entry.get("payload", {}))
+		var landed: Dictionary = _dict_or_empty(_apply_staged_payload(kind, entry.get("payload"), {}))
 		if landed.is_empty():
 			push_warning("[PCBPanel] batch accept: unexpected refusal on %s" % str(r.get("entity_id", "")))
 			midwrite_refusals.append(str(r.get("entity_id", "")))
@@ -2879,7 +2891,7 @@ func _on_edit_hint_width_requested(hint_id: String) -> void:
 	if ann.is_empty():
 		_show_transient_status("Hint %s is no longer on the board." % hint_id)
 		return
-	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	var kp: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 	_hint_width_hint_id = hint_id
 	if _hint_width_label != null:
 		_hint_width_label.text = "Width (%s)" % hint_id
@@ -2920,7 +2932,7 @@ func _on_hint_width_changed(value: float) -> void:
 			_hint_width_row.visible = false
 		return
 	var new_ann: Dictionary = ann.duplicate(true)
-	var kp: Dictionary = (new_ann.get("kind_payload", {}) as Dictionary).duplicate(true)
+	var kp: Dictionary = _dict_or_empty((new_ann.get("kind_payload"), {}) as Dictionary).duplicate(true)
 	if value > 0.0:
 		kp["width_mm"] = value
 	else:
@@ -2992,7 +3004,7 @@ static func _drc_status_suffix(result: Dictionary) -> String:
 ## because this is the connectivity scope's own pre-existing state, not a
 ## different question). See `_baseline_suffix` below for the absence trap.
 static func _connectivity_status_suffix(result: Dictionary) -> String:
-	var summary: Dictionary = result.get("drc_summary", {})
+	var summary: Dictionary = _dict_or_empty(result.get("drc_summary"))
 	if summary.is_empty():
 		return ""
 	var scope := str(summary.get("scope", "connectivity"))
@@ -3030,7 +3042,7 @@ static func _connectivity_status_suffix(result: Dictionary) -> String:
 ## a count — mirroring `methods.py` `_baseline_for_net`, which refuses to
 ## narrow an indeterminate baseline to an empty list for the same reason.
 static func _baseline_suffix(summary: Dictionary) -> String:
-	var baseline: Dictionary = summary.get("baseline", {})
+	var baseline: Dictionary = _dict_or_empty(summary.get("baseline"))
 	if baseline.is_empty():
 		return ""
 	if baseline.get("clean", null) == null:
@@ -3066,8 +3078,7 @@ static func _baseline_suffix(summary: Dictionary) -> String:
 ## completeness IS a connectivity-scope statement ("·" joins it to that chip
 ## rather than opening a new " — " scope), not a copper-geometry one.
 static func _completeness_status_suffix(result: Dictionary) -> String:
-	var health: Dictionary = result.get("board_health", {}) \
-		if result.get("board_health", {}) is Dictionary else {}
+	var health: Dictionary = _dict_or_empty(result.get("board_health"))
 	if health.is_empty() or not health.has("complete"):
 		return ""
 	var complete: Variant = health.get("complete", null)
@@ -3119,7 +3130,7 @@ static func _completeness_status_suffix(result: Dictionary) -> String:
 ## under summary["baseline"] and are never read here, so a dirty fixture board
 ## (the real fixture carries 12) cannot make a clean proposal look dirty.
 static func _geometric_status_suffix(result: Dictionary) -> String:
-	var summary: Dictionary = result.get("drc_geometric_summary", {})
+	var summary: Dictionary = _dict_or_empty(result.get("drc_geometric_summary"))
 	if summary.is_empty():
 		return ""
 	var verdict := str(summary.get("verdict", "indeterminate"))
@@ -3149,7 +3160,7 @@ static func _geometric_status_suffix(result: Dictionary) -> String:
 			# model yet" and "something faulted". The free-text message is NOT
 			# surfaced here: it can be an exception repr, which does not belong
 			# in a one-line status label.
-			var err: Dictionary = summary.get("error", {})
+			var err: Dictionary = _dict_or_empty(summary.get("error"))
 			var kind := str(err.get("kind", ""))
 			if kind != "":
 				return " — Geometric: unavailable (%s)" % kind
@@ -3171,7 +3182,7 @@ static func _offending_nets(result: Dictionary) -> String:
 	for p in (result.get("proposals", []) as Array):
 		if typeof(p) != TYPE_DICTIONARY:
 			continue
-		var geo: Dictionary = (p as Dictionary).get("drc_geometric", {})
+		var geo: Dictionary = _dict_or_empty((p as Dictionary).get("drc_geometric"))
 		if str(geo.get("verdict", "")) != "violations":
 			continue
 		var net := str((p as Dictionary).get("net", ""))
@@ -4451,7 +4462,7 @@ func board_check() -> Dictionary:
 			"current_board_revision": int(_data.board_revision) if _data != null else -1,
 			"note": "the board changed while the census ran — the verdict describes revision %d, the board is now at %d; markers and caches were NOT touched. Re-run minerva_pcb_board_check." % [
 				checked_revision, int(_data.board_revision) if _data != null else -1]}
-	var gate: Dictionary = gate_run.get("gate", {})
+	var gate: Dictionary = _dict_or_empty(gate_run.get("gate"))
 	var reply: Dictionary = {
 		"success": true,
 		"promotable": bool(gate.get("promotable", false)),
@@ -4534,7 +4545,7 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 	var gate_run: Dictionary = await run_promote_gate(board)
 	if not bool(gate_run.get("ok", false)):
 		return gate_run.get("reply", {"success": false, "error": "promotion_check_unavailable"})
-	var gate: Dictionary = gate_run.get("gate", {})
+	var gate: Dictionary = _dict_or_empty(gate_run.get("gate"))
 	if not bool(gate.get("promotable", false)):
 		return {"success": false, "error": "promotion_gated",
 			"refusals": gate.get("refusals", []),
@@ -4544,8 +4555,7 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 			"note": "promotion with correctness findings is impossible, not merely discouraged (K13, correctness-gated) — resolve the named findings and promote again; there is no acknowledge-through. Completeness is ADVISORY (owner ruling: promotion is granular)."}
 	# UX4 station 9: the worker's advisory block (completeness — unrouted
 	# nets) rides the reply and the status line; it never gates.
-	var advisory: Dictionary = gate.get("advisory", {}) \
-		if gate.get("advisory", {}) is Dictionary else {}
+	var advisory: Dictionary = _dict_or_empty(gate.get("advisory"))
 
 	# ── prior-file census, for the reply's what-changed ──────────────────────
 	var census_delta: Dictionary = {}
@@ -4554,8 +4564,7 @@ func promote(explicit_path: String = "", allow_copper_regression: bool = false) 
 		var prior_text := FileAccess.get_file_as_string(target)
 		var prior_reply: Dictionary = _unwrap_channel_reply(
 			await _request_with_backend_ensure("pcb.deserialize", {"yaml": prior_text}, 30000))
-		var prior_board: Dictionary = prior_reply.get("board", {}) \
-			if prior_reply.get("board", {}) is Dictionary else {}
+		var prior_board: Dictionary = _dict_or_empty(prior_reply.get("board"))
 		if prior_board.is_empty():
 			prior_state = "unreadable"
 		else:
@@ -4748,14 +4757,14 @@ func _on_promote_button_pressed() -> void:
 	if bool(result.get("success", false)):
 		var delta_txt := ""
 		if result.get("census_delta", null) is Dictionary:
-			var d: Dictionary = result.get("census_delta")
+			var d: Dictionary = _dict_or_empty(result.get("census_delta"))
 			delta_txt = "  •  Δ traces %+d, vias %+d" % [int(d.get("traces", 0)), int(d.get("vias", 0))]
 		# UX4 station 9: the completeness ADVISORY on the success line — the
 		# owner promoted a partial board on purpose; the status names what is
 		# still unrouted rather than pretending done.
 		var adv_txt := ""
-		var completeness: Dictionary = (result.get("advisory", {}) as Dictionary).get("completeness", {}) \
-			if result.get("advisory", null) is Dictionary else {}
+		var completeness: Dictionary = _dict_or_empty(
+			_dict_or_empty(result.get("advisory")).get("completeness"))
 		if not completeness.is_empty():
 			var missing: Array = completeness.get("missing_copper", [])
 			adv_txt = "  •  ADVISORY: %d net(s) unrouted (%s)" % [missing.size(),
@@ -4917,7 +4926,7 @@ func route_board(selection: Dictionary, extra: Dictionary = {}) -> Dictionary:
 	if result.has("ok"):
 		return _with_draft_context(result, draft_context)
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = result.get("result")
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
 		# Live broker shape: MinervaIPC wraps the backend reply in
 		# {success, result} while the Go side forwards the worker's own
 		# {ok, result} envelope verbatim (HandleRouteChannel) — so the
@@ -4975,7 +4984,7 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 				"message": msg, "hint": "start via minerva_plugin_start"}}
 		return {"ok": false, "error": {"kind": "worker_error", "message": msg}}
 
-	var board: Dictionary = payload.get("board")
+	var board: Dictionary = _dict_or_empty(payload.get("board"))
 	var warnings: Array = payload.get("warnings", [])
 
 	# Rebuild the live board (from_board_dict emits data_changed; suppress the
@@ -5080,7 +5089,7 @@ func load_board_from_yaml(yaml_text: String, source_path: String = "") -> Dictio
 	}
 	var health_reply: Dictionary = await board_health_check(board)
 	if bool(health_reply.get("ok", false)) and health_reply.get("result", null) is Dictionary:
-		var health: Dictionary = health_reply.get("result")
+		var health: Dictionary = _dict_or_empty(health_reply.get("result"))
 		assembly = _PanelToolsScript._assembly_tri_state(
 			{"ok": true, "result": health.get("assembly", {})})
 		_PanelToolsScript._attach_board_health(
@@ -5197,7 +5206,7 @@ func board_health_check(board: Dictionary) -> Dictionary:
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = result.get("result")
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
 		if inner.has("ok"):
 			return inner
 		return {"ok": true, "result": inner}
@@ -5217,7 +5226,7 @@ func mask_view_check(board: Dictionary) -> Dictionary:
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = result.get("result")
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
 		if inner.has("ok"):
 			return inner
 		return {"ok": true, "result": inner}
@@ -5237,10 +5246,10 @@ func _refresh_mask_view() -> void:
 	if _canvas == null or not bool(_canvas.get("show_mask")):
 		return  # toggled off (or panel torn down) while the worker ran
 	if not bool(reply.get("ok", false)):
-		var err: Dictionary = reply.get("error", {})
+		var err: Dictionary = _dict_or_empty(reply.get("error"))
 		_canvas.set_mask_view([], "unavailable — " + str(err.get("message", err.get("kind", "unknown"))))
 		return
-	var result: Dictionary = reply.get("result", {})
+	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	var indeterminate: Array = result.get("indeterminate", [])
 	var note := ""
 	if not indeterminate.is_empty():
@@ -5276,7 +5285,7 @@ func assembly_check(board: Dictionary) -> Dictionary:
 	if result.has("ok"):
 		return result
 	if bool(result.get("success", false)) and result.get("result", null) is Dictionary:
-		var inner: Dictionary = result.get("result")
+		var inner: Dictionary = _dict_or_empty(result.get("result"))
 		if inner.has("ok"):
 			return inner
 		return {"ok": true, "result": inner}
@@ -5745,7 +5754,7 @@ static func _blob_empty(v: Variant) -> bool:
 ## canonical components sized by width/height with a single origin pin — lossy but
 ## the skeleton carried no pin/net data to lose.
 func _migrate_skeleton_shape(doc: Dictionary) -> Dictionary:
-	var board: Dictionary = doc.get("board", {})
+	var board: Dictionary = _dict_or_empty(doc.get("board"))
 	var canonical := {
 		"version": 1,
 		"name": "Untitled",

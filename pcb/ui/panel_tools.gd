@@ -77,6 +77,19 @@ const _VALID_FOOTPRINTS: Array[String] = [
 
 
 ## Dispatch entry point — called by PCBPanel.handle_tool(tool_name, args).
+## THE one type guard for Dictionary reads off worker replies (bug
+## 019fa0f8d575, fixed epoch GA-6; twin of PCBPanel._dict_or_empty). GDScript
+## hard-errors when a value of the wrong TYPE lands in a statically-typed
+## var, and `.get(key, {})` defaults only on an ABSENT key — a JSON
+## null/list/string at the key crashed the whole tool call. Every
+## `var x: Dictionary = <reply>.get(...)` in this file goes through here;
+## uniformity is the point, so apply it at any new site rather than
+## re-deriving an inline ternary. `fallback` covers the rare site whose
+## absent-key default is another Dictionary, not {}.
+static func _dict_or_empty(v, fallback: Dictionary = {}) -> Dictionary:
+	return v if v is Dictionary else fallback
+
+
 ## `host` is the panel's own PcbAnnotationHost (never null in production: the
 ## panel builds it eagerly in _init()); tests may still pass a fresh host
 ## directly. An unrecognised tool_name returns {} so the PluginToolRegistry
@@ -974,13 +987,13 @@ static func _import_footprint_geometry(host, args: Dictionary) -> Dictionary:
 	var data = _resolve_data(host)
 	if not (data is Object):
 		return data
-	var geometry_data: Dictionary = args.get("geometry", {})
+	var geometry_data: Dictionary = _dict_or_empty(args.get("geometry"))
 	if geometry_data.is_empty():
 		return _err("geometry data is required")
 	var position_is_center: bool = bool(args.get("position_is_center", false))
 	var invert_y: bool = bool(args.get("invert_y", false))
 
-	var components_data: Dictionary = geometry_data.get("components", {})
+	var components_data: Dictionary = _dict_or_empty(geometry_data.get("components"))
 	var updated_count := 0
 	var position_adjusted_count := 0
 	var missing: Array = []
@@ -1054,7 +1067,7 @@ static func _import_trace_geometry(host, args: Dictionary) -> Dictionary:
 	var data = _get_data(host)
 	if data == null:
 		return _err("PCB data not available")
-	var trace_data: Dictionary = args.get("trace_data", {})
+	var trace_data: Dictionary = _dict_or_empty(args.get("trace_data"))
 	if trace_data.is_empty():
 		return _err("trace_data is required")
 
@@ -1701,7 +1714,7 @@ static func _hint_convert_to_detailed(host, args: Dictionary) -> Dictionary:
 			"note": "only a pcb_route_hint can be converted — this annotation is a %s" % str(ann.get("kind", "")),
 		}
 
-	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	var kp: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 	var has_marker: bool = kp.has("waypoints_superseded_by_constraint_revision")
 
 	# ── the workspace half: clear (case a), refuse (case b), or skip (case c) ─
@@ -1798,7 +1811,7 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 	if str(ann.get("kind", "")) != "pcb_route_hint":
 		return _err("annotation '%s' is not a pcb_route_hint" % id)
 
-	var kp: Dictionary = ann.get("kind_payload", {})
+	var kp: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 
 	# FROZEN GATE, BEFORE the annotation write (cold review, Epoch UX3
 	# station 1, finding 3): this tool's own invariant is "both stores stay
@@ -1817,12 +1830,12 @@ static func _add_via(host, args: Dictionary) -> Dictionary:
 				"candidate_id": gate_cid,
 				"note": "annotation '%s' bridges to frozen candidate %s — settled geometry does not edit; minerva_pcb_workspace_unfreeze first" % [id, gate_cid]}
 
-	var result: Dictionary = _PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y", 0.0)))
+	var result: Dictionary = _dict_or_empty(_PcbRouteHintKindScript.apply_via_at_point(kp, float(args.get("x", 0.0)), float(args.get("y"), 0.0)))
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "could not insert via")))
 
 	var new_ann: Dictionary = ann.duplicate(true)
-	var new_kp: Dictionary = result.get("kind_payload", kp)
+	var new_kp: Dictionary = _dict_or_empty(result.get("kind_payload"), kp)
 	new_ann["kind_payload"] = new_kp
 	if not host.update_annotation(id, new_ann):
 		return _err("failed to persist via insertion for '%s'" % id)
@@ -1954,7 +1967,7 @@ static func _apply_route_hints(host, args: Dictionary) -> Dictionary:
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
 
-	var result: Dictionary = reply.get("result", {})
+	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	if commit:
 		return _materialize_routes(host, data, result, source_hints)
 	return _propose_into_workspace(host, data, result, source_hints,
@@ -2132,7 +2145,7 @@ static func _is_bus_branch_hint(kp: Dictionary) -> bool:
 ## resolves to the whole net.
 static func _reroute_scope(c, source_hints: Array, _data) -> Dictionary:
 	for hint in source_hints:
-		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		var kp: Dictionary = _dict_or_empty(hint.get("kind_payload"))
 		if _is_bus_branch_hint(kp):
 			return {}
 	return {"tasks": [{"task_id": str(c.task_id), "net": str(c.net)}]}
@@ -2190,7 +2203,7 @@ static func _propose_scope(hint_ids: Array, source_hints: Array, data) -> Varian
 	var nets := {}
 	var tasks: Array = []
 	for hint in source_hints:
-		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		var kp: Dictionary = _dict_or_empty(hint.get("kind_payload"))
 		if _is_bus_branch_hint(kp):
 			return null  # a different resolution rule — not mirrored here
 		# SPAN FORM first (docket 019fcb6f9d20 — the ask is the task boundary):
@@ -2270,7 +2283,7 @@ static func _span_task_for_hint(hint: Dictionary, kp: Dictionary, data, board_ne
 ## button) key off error=="pcb_backend_stopped"; agents get the same signal
 ## plus recovery_hint="start via minerva_plugin_start" in the machine shape.
 static func _router_unavailable(reply: Dictionary, source_hints: Array) -> Dictionary:
-	var err: Dictionary = reply.get("error", {})
+	var err: Dictionary = _dict_or_empty(reply.get("error"))
 	if str(err.get("kind", "")) == "plugin_not_running":
 		return {
 			"success": false,
@@ -2307,7 +2320,7 @@ static func _gather_route_hints(host, hint_ids: Array) -> Array:
 			continue
 		if str(ann.get("kind", "")) != "pcb_route_hint":
 			continue
-		var payload: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+		var payload: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 		if payload.has("proposal_for"):
 			continue  # an AI proposal — not a source hint
 		if not wanted.is_empty():
@@ -2423,7 +2436,7 @@ static func _seed_legacy_waypoint_constraints(host, workspace, data, source_hint
 	for hint in source_hints:
 		if not (hint is Dictionary):
 			continue
-		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		var kp: Dictionary = _dict_or_empty(hint.get("kind_payload"))
 		if str(kp.get("detail_level", "")) == "detailed":
 			continue
 		# H1-1 (fix round, epoch UX1 station 12): a BUS-BRANCH hint
@@ -2582,8 +2595,8 @@ static func _normalize_route_records(result: Dictionary, source_hints: Array) ->
 		# that never attached effective_routing_rules stamps nothing here, and
 		# _ingest_result_into_workspace's stamping onto the candidate record
 		# stays absent too (never invented).
-		var erules: Dictionary = route.get("effective_routing_rules", {})
-		var width_entry: Dictionary = erules.get("trace_width_mm", {}) if erules.get("trace_width_mm", {}) is Dictionary else {}
+		var erules: Dictionary = _dict_or_empty(route.get("effective_routing_rules"))
+		var width_entry: Dictionary = _dict_or_empty(erules.get("trace_width_mm"))
 		if width_entry.has("value"):
 			rec["effective_width_mm"] = float(width_entry.get("value", 0.0))
 			rec["effective_width_source"] = str(width_entry.get("source", ""))
@@ -2887,7 +2900,7 @@ static func _materialize_routes(host, data, result: Dictionary, source_hints: Ar
 		for ann in host.get_annotations():
 			if not (ann is Dictionary):
 				continue
-			var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+			var kp: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 			var links: Array = kp.get("proposal_for", []) if kp.get("proposal_for", []) is Array else []
 			for linked in links:
 				if str(linked) in consumed_ids:
@@ -3084,7 +3097,7 @@ static func _attach_board_health(host, reply: Dictionary, result: Dictionary, dr
 ## _geometric_status_suffix documents for its verdict string).
 static func _assembly_tri_state(reply: Dictionary) -> Dictionary:
 	if bool(reply.get("ok", false)) and reply.get("result", null) is Dictionary:
-		var tri: Dictionary = (reply.get("result") as Dictionary).duplicate(true)
+		var tri: Dictionary = _dict_or_empty((reply.get("result") as Dictionary).duplicate(true))
 		if str(tri.get("status", "")) in ["pass", "findings", "indeterminate"]:
 			return tri
 		return {"status": "indeterminate",
@@ -3176,7 +3189,7 @@ static func _route_layer(route: Dictionary) -> String:
 static func _width_for_net(source_hints: Array, net: String) -> float:
 	var w := 0.0
 	for hint in source_hints:
-		var kp: Dictionary = hint.get("kind_payload", {}) if hint.get("kind_payload", {}) is Dictionary else {}
+		var kp: Dictionary = _dict_or_empty(hint.get("kind_payload"))
 		if net in _string_list(kp.get("net_names", [])):
 			var hw := float(kp.get("width_mm", 0.0))
 			if hw > w:
@@ -3786,8 +3799,8 @@ static func _propose_zone(host, args: Dictionary) -> Dictionary:
 	var built: Dictionary = data.build_zone_payload(net_name, layer, pts, kind)
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "Zone was refused.")))
-	var payload: Dictionary = built.get("payload", {})
-	var staged: Dictionary = panel.stage_built_payload("zone", payload, "ai", str(args.get("note", "")))
+	var payload: Dictionary = _dict_or_empty(built.get("payload"))
+	var staged: Dictionary = _dict_or_empty(panel.stage_built_payload("zone", payload, "ai", str(args.get("note"), "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
 	return _ok({
@@ -3816,8 +3829,8 @@ static func _propose_cutout(host, args: Dictionary) -> Dictionary:
 	var built: Dictionary = data.build_cutout_payload(pts)
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "Cutout was refused.")))
-	var payload: Dictionary = built.get("payload", {})
-	var staged: Dictionary = panel.stage_built_payload("cutout", payload, "ai", str(args.get("note", "")))
+	var payload: Dictionary = _dict_or_empty(built.get("payload"))
+	var staged: Dictionary = _dict_or_empty(panel.stage_built_payload("cutout", payload, "ai", str(args.get("note"), "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
 	return _ok({
@@ -3839,10 +3852,10 @@ static func _other_ghost_targets(store, exclude_entity_id: String) -> Array:
 		var entry: Dictionary = e
 		if str(entry.get("kind", "")) != "placement":
 			continue
-		var payload: Dictionary = entry.get("payload", {})
+		var payload: Dictionary = _dict_or_empty(entry.get("payload"))
 		if str(payload.get("id", "")) == exclude_entity_id:
 			continue
-		var to: Dictionary = payload.get("to", {}) if payload.get("to", {}) is Dictionary else {}
+		var to: Dictionary = _dict_or_empty(payload.get("to"))
 		extras.append({
 			"component_id": str(payload.get("component_id", "")),
 			"x_mm": float(to.get("x_mm", 0.0)),
@@ -3884,8 +3897,8 @@ static func _propose_placement(host, args: Dictionary) -> Dictionary:
 		float(args.get("x_mm", 0.0)), float(args.get("y_mm", 0.0)), rot)
 	if not bool(built.get("ok", false)):
 		return _err(str(built.get("error", "Placement was refused.")))
-	var payload: Dictionary = built.get("payload", {})
-	var staged: Dictionary = panel.stage_built_payload("placement", payload, "ai", str(args.get("note", "")))
+	var payload: Dictionary = _dict_or_empty(built.get("payload"))
+	var staged: Dictionary = _dict_or_empty(panel.stage_built_payload("placement", payload, "ai", str(args.get("note"), "")))
 	if not bool(staged.get("ok", false)):
 		return {"success": false, "error": str(staged.get("error", "stage_refused"))}
 	var reply := _ok({
@@ -3900,7 +3913,7 @@ static func _propose_placement(host, args: Dictionary) -> Dictionary:
 	# P1 C5 (parity principle): the reply carries what the dragging human
 	# SEES — target-pose overlap vs placed parts and other live ghosts.
 	# Advisory always (A7): nothing refuses on a collision.
-	var to: Dictionary = payload.get("to", {})
+	var to: Dictionary = _dict_or_empty(payload.get("to"))
 	var collisions: Array = data.placement_collisions(component_id,
 		float(to.get("x_mm", 0.0)), float(to.get("y_mm", 0.0)),
 		float(to.get("rotation_deg", 0.0)),
@@ -3928,7 +3941,7 @@ static func _placement_update(host, args: Dictionary) -> Dictionary:
 	var entry: Dictionary = store.get_entry(sid)
 	if str(entry.get("kind", "")) != "placement":
 		return _err("'%s' is a staged %s, not a placement" % [entity_id, str(entry.get("kind", ""))])
-	var to: Dictionary = (entry.get("payload", {}) as Dictionary).get("to", {})
+	var to: Dictionary = _dict_or_empty((entry.get("payload", {}) as Dictionary).get("to"))
 	if not (to is Dictionary):
 		to = {}
 	var x := float(args.get("x_mm", to.get("x_mm", 0.0)))
@@ -3981,7 +3994,7 @@ static func _staged_list(host, args: Dictionary) -> Dictionary:
 
 
 static func _staged_list_row(e: Dictionary, data = null) -> Dictionary:
-	var payload: Dictionary = e.get("payload", {}) if e.get("payload", {}) is Dictionary else {}
+	var payload: Dictionary = _dict_or_empty(e.get("payload"))
 	var row := {
 		"staged_id": str(e.get("staged_id", "")),
 		"entity_id": str(payload.get("id", "")),
@@ -4021,7 +4034,7 @@ static func _staged_accept(host, args: Dictionary) -> Dictionary:
 	# Batch form (DCR S5's batch-accept pattern): entity_ids = all-or-nothing,
 	# one undo step. Singular entity_id stays the simple path.
 	if args.has("entity_ids") and args.get("entity_ids") is Array:
-		var out: Dictionary = panel.accept_staged_batch(args.get("entity_ids"))
+		var out: Dictionary = _dict_or_empty(panel.accept_staged_batch(args.get("entity_ids")))
 		if not bool(out.get("ok", false)):
 			return {"success": false, "error": str(out.get("error", "batch_refused")),
 				"refusals": out.get("refusals", []),
@@ -4395,7 +4408,7 @@ static func _set_preference(host, args: Dictionary) -> Dictionary:
 			key, ", ".join(prefs.known_keys())])
 	if not args.has("value"):
 		return _err("value is required")
-	var res: Dictionary = prefs.set_value(key, args.get("value"))
+	var res: Dictionary = _dict_or_empty(prefs.set_value(key, args.get("value")))
 	if not bool(res.get("ok", false)):
 		return _err(str(res.get("error", "Preference could not be stored.")))
 
@@ -4484,9 +4497,9 @@ static func _load_board(host, args: Dictionary) -> Dictionary:
 	# load_board_from_yaml's adoption rules.
 	var reply: Dictionary = await host.load_board(yaml_text, src_path)
 	if not bool(reply.get("ok", false)):
-		var err_info: Dictionary = reply.get("error", {})
+		var err_info: Dictionary = _dict_or_empty(reply.get("error"))
 		return _err(str(err_info.get("message", "load_board failed")))
-	var out: Dictionary = reply.get("result", {})
+	var out: Dictionary = _dict_or_empty(reply.get("result"))
 	var after: Dictionary = _board_census(_get_data(host))
 	var delta: Dictionary = _census_delta(before, after)
 	if not delta.is_empty():
@@ -4547,8 +4560,8 @@ static func _census_delta(before: Dictionary, after: Dictionary) -> Dictionary:
 		delta["components_removed"] = removed_comps
 		dropped.append("components removed: %s" % str(removed_comps))
 
-	var before_nets: Dictionary = before.get("trace_nets", {})
-	var after_nets: Dictionary = after.get("trace_nets", {})
+	var before_nets: Dictionary = _dict_or_empty(before.get("trace_nets"))
+	var after_nets: Dictionary = _dict_or_empty(after.get("trace_nets"))
 	var trace_changes := {}
 	for net in before_nets:
 		var b: int = int(before_nets[net])
@@ -4730,8 +4743,7 @@ static func _set_hint_width(host, hint_id: String, width_mm: float) -> bool:
 	if ann.is_empty():
 		return false
 	var updated: Dictionary = ann.duplicate(true)
-	var kp: Dictionary = updated.get("kind_payload", {}).duplicate(true) \
-		if updated.get("kind_payload", {}) is Dictionary else {}
+	var kp: Dictionary = _dict_or_empty(updated.get("kind_payload")).duplicate(true)
 	kp["width_mm"] = width_mm
 	updated["kind_payload"] = kp
 	return bool(host.update_annotation(hint_id, updated))
@@ -4877,7 +4889,7 @@ static func _draft_placement_status(data, store, snapshot: Array) -> Array:
 			continue
 		var row: Dictionary = (s as Dictionary).duplicate(true)
 		var comp_id := str(row.get("component_id", ""))
-		var to: Dictionary = row.get("to", {}) if row.get("to", null) is Dictionary else {}
+		var to: Dictionary = _dict_or_empty(row.get("to"))
 		var status := "invalidated"
 		var comp = data.get_component(comp_id) if data != null else null
 		if comp != null and not to.is_empty():
@@ -5245,7 +5257,7 @@ static func _workspace_propose(host, args: Dictionary) -> Dictionary:
 	var reply: Dictionary = await _run_router(host, selection, route_extra)
 	if not bool(reply.get("ok", false)):
 		return _router_unavailable(reply, source_hints)
-	var result: Dictionary = reply.get("result", {})
+	var result: Dictionary = _dict_or_empty(reply.get("result"))
 	# Narrate the ask boundary (docket 019fcb6f9d20): when the run was
 	# span-scoped, say so — the caller should never have to infer from the
 	# candidate list whether net-completion was attempted.
@@ -5786,7 +5798,7 @@ static func _hint_bend_edit(host, args: Dictionary, op: String) -> Dictionary:
 	if str(ann.get("kind", "")) != "pcb_route_hint":
 		return {"success": false, "error": "not_a_route_hint", "hint_id": hint_id,
 			"kind": str(ann.get("kind", ""))}
-	var kp: Dictionary = ann.get("kind_payload", {}) if ann.get("kind_payload", {}) is Dictionary else {}
+	var kp: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 	if kp.has("waypoints_superseded_by_constraint_revision"):
 		return {"success": false, "error": "waypoints_superseded", "hint_id": hint_id,
 			"note": "this hint's waypoints are locked by a governing task constraint — minerva_pcb_hint_convert_to_detailed reclaims them, or steer the task via minerva_pcb_workspace_reroute_route"}
@@ -5933,8 +5945,7 @@ static func _assembly_gate(host, data) -> Dictionary:
 	var cached_revision: int = int(cached.get("board_revision", -1))
 	if cached_revision != revision:
 		return {"mode": "stale", "cached_revision": cached_revision}
-	var assembly: Dictionary = cached.get("assembly", {}) \
-		if cached.get("assembly", {}) is Dictionary else {}
+	var assembly: Dictionary = _dict_or_empty(cached.get("assembly"))
 	var status := str(assembly.get("status", ""))
 	if status == "findings":
 		return {"mode": "findings", "assembly": assembly}
@@ -5958,8 +5969,7 @@ static func _assembly_gate_note(gate: Dictionary) -> Dictionary:
 				"reason": "cached assembly state is stale (computed at board_revision %d) — placement changed since; a load, propose, or placement op refreshes it" \
 					% int(gate.get("cached_revision", -1))}
 		"indeterminate":
-			var assembly: Dictionary = gate.get("assembly", {}) \
-				if gate.get("assembly", {}) is Dictionary else {}
+			var assembly: Dictionary = _dict_or_empty(gate.get("assembly"))
 			return {"status": "indeterminate",
 				"reason": str(assembly.get("error", assembly.get("reason", "assembly check could not run")))}
 	return {}
@@ -5994,8 +6004,7 @@ static func _candidate_endpoint_components(host, workspace, c) -> Array:
 			var ann: Dictionary = host.get_by_id(str(hid))
 			if ann.is_empty():
 				continue
-			var kp: Dictionary = ann.get("kind_payload", {}) \
-				if ann.get("kind_payload", {}) is Dictionary else {}
+			var kp: Dictionary = _dict_or_empty(ann.get("kind_payload"))
 			for key in ["source_pins", "dest_pins"]:
 				var pins: Array = kp.get(key, []) if kp.get(key, []) is Array else []
 				for pin_ref in pins:
@@ -6775,8 +6784,7 @@ static func reconcile_superseded_waypoint_state(host, workspace) -> Array:
 		var hint_id: String = str((ann as Dictionary).get("id", ""))
 		if hint_id.is_empty():
 			continue
-		var kp: Dictionary = (ann as Dictionary).get("kind_payload", {}) \
-			if (ann as Dictionary).get("kind_payload", {}) is Dictionary else {}
+		var kp: Dictionary = _dict_or_empty((ann as Dictionary).get("kind_payload"))
 		var has_marker: bool = kp.has("waypoints_superseded_by_constraint_revision")
 		# The authority gate — _task_constraints_for_hints' exact condition.
 		var task = workspace.task_for_hint(hint_id)
@@ -7493,7 +7501,7 @@ static func _add_route_intent(host, args: Dictionary) -> Dictionary:
 	# gain the same visible line for free. Same accepted-staleness tradeoff.
 	var dest_comp = dest_resolved["comp"]
 	var dest_pos: Vector2 = dest_comp.get_pin_world_position(str(dest_resolved["pin"]))
-	var intent_kp: Dictionary = envelope.get("kind_payload", {})
+	var intent_kp: Dictionary = _dict_or_empty(envelope.get("kind_payload"))
 	intent_kp["dest_point"] = [dest_pos.x, dest_pos.y]
 	envelope["kind_payload"] = intent_kp
 	_maybe_stamp_annotation_ref(envelope)
@@ -7777,7 +7785,7 @@ static func _route_bus_direct(host, args: Dictionary) -> Dictionary:
 	if not bool(plan.get("ok", false)):
 		return _err(str(plan.get("error", "Bus was refused.")))
 
-	var result: Dictionary = bus_commit_plan(data, plan, "Add bus (%d traces)" % (plan.get("nets", []) as Array).size())
+	var result: Dictionary = _dict_or_empty(bus_commit_plan(data, plan, "Add bus (%d traces)" % (plan.get("nets"), []) as Array).size())
 	if not bool(result.get("ok", false)):
 		return _err(str(result.get("error", "Bus was refused by the board model.")))
 

@@ -85,3 +85,7 @@ test_staged_canvas.gd assertions=52
 test_staged_verbs.gd assertions=73
 test_draft_doorways.gd assertions=31
 test_staged_placement.gd assertions=45
+# NEW at epoch GA-6 (bug 019fa0f8d575): the typed-Dictionary guard matrix for
+# both panel files' _dict_or_empty. Assertion count pins at the GA testex
+# from the first trustworthy run.
+test_dict_guard.gd assertions=0
