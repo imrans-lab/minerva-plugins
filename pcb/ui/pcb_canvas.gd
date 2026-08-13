@@ -4845,6 +4845,7 @@ func _end_placement_ghost_drag() -> void:
 func _convert_drag_to_placement_proposals() -> int:
 	var staged_n := 0
 	var revised_n := 0
+	var ghost_ids: Array[String] = []
 	for comp_id in _drag_origins.get(KIND_COMPONENT, {}):
 		var comp = data.get_component(comp_id)
 		var old_pos: Vector2 = _drag_origins[KIND_COMPONENT][comp_id]
@@ -4856,6 +4857,8 @@ func _convert_drag_to_placement_proposals() -> int:
 			var standing := str(_staged_store.live_placement_for_component(str(comp_id)))
 			if not standing.is_empty():
 				_staged_store.update_placement_target(standing, target.x, target.y, comp.rotation)
+				var st_entry: Dictionary = _staged_store.get_entry(standing)
+				ghost_ids.append(str((st_entry.get("payload", {}) as Dictionary).get("id", "")))
 				revised_n += 1
 				continue
 		if not _stage_doorway.is_valid():
@@ -4869,7 +4872,18 @@ func _convert_drag_to_placement_proposals() -> int:
 		if not bool(staged.get("ok", false)):
 			component_lock_changed.emit("Move proposal refused: %s" % str(staged.get("error", "")))
 			continue
+		ghost_ids.append(str(staged.get("entity_id", "")))
 		staged_n += 1
+	# SELECTION FOLLOWS THE PROPOSAL (owner finding, R2): the gesture's product
+	# is the ghost, so the ghost is what the next gesture manipulates — without
+	# this the selection stays on the real part and the rotate arcs bind to it
+	# at its origin instead of the fresh ghost.
+	if not ghost_ids.is_empty():
+		_clear_selection_all()
+		for gid in ghost_ids:
+			if not gid.is_empty():
+				_add_to_selection(KIND_STAGED, gid)
+		selection_changed.emit()
 	if staged_n > 0 or revised_n > 0:
 		var bits: Array = []
 		if staged_n > 0:
