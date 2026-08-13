@@ -998,6 +998,17 @@
       }
     },
     {
+      "name": "minerva_pcb_lock_libraries",
+      "description": "PIN this board to the library content it currently resolves, so a rebuild months later reproduces the same copper or REFUSES (acceptance check K20). Component.footprint is a NAME, and a user library layer may legitimately override a seed part under the same name — so without a lock the same board can resolve to different geometry later with nothing saying so. Records, per footprint the board actually uses, the sha256 that resolved plus the supplying layer; a later compile refuses by name when the sha no longer matches. PURE — returns the locked board for the host to persist; never writes to disk. Relocking REPLACES the block rather than merging. Returns {ok, board, locked:[refs], unresolved:[{ref,reason}]} — `unresolved` names footprints no layer supplies, which cannot be pinned.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "yaml": {"type": "string", "description": "Canonical board YAML source."},
+          "board": {"type": "object", "description": "Canonical board object."}
+        }
+      }
+    },
+    {
       "name": "minerva_pcb_check_libraries",
       "description": "Verify component footprints against KiCAD footprint-library data. Args {yaml|board, lib_dir?:<path to a dir of *.pretty libs>}. With no lib_dir (the library data ships with a later child) returns {ok:true, checked:0, missing_data:true} — never a crash. With lib_dir returns {ok, checked, missing:[{ref,footprint,path}], missing_data:false}.",
       "input_schema": {

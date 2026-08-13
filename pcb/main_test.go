@@ -55,6 +55,9 @@ func TestInitRegistryRegistersWorkerTools(t *testing.T) {
 		// overrides (W8.4 / SB6; exposes the worker "normalize" method, follow-up
 		// 019f8c0b7194).
 		"minerva_pcb_normalize",
+		// worker-backed — K20's library pin (DCR 019ffc52c358), forwarding to
+		// the worker's "lock_libraries" method.
+		"minerva_pcb_lock_libraries",
 		// worker-backed — pre-assembly BOM+CPL package (D0-5, docket
 		// 019fc2f8b903): exposes the worker's assembly_bom + assembly_cpl
 		// methods, shipped worker-side by C8 with no agent-facing tool until now.

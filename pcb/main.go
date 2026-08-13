@@ -240,6 +240,7 @@ func initRegistry() {
 	registry.Register(tools.DRCGeometric, tools.HandleDRCGeometric)
 	registry.Register(tools.Resolve, tools.HandleResolve)
 	registry.Register(tools.Normalize, tools.HandleNormalize)
+	registry.Register(tools.LockLibraries, tools.HandleLockLibraries)
 	registry.Register(tools.CheckLibraries, tools.HandleCheckLibraries)
 	registry.Register(tools.CheckBOM, tools.HandleCheckBOM)
 	// minerva_pcb_export_assembly — pre-assembly BOM+CPL package (D0-5, docket

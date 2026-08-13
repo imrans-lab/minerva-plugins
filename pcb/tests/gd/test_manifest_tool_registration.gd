@@ -48,6 +48,9 @@ const EXPECTED_WORKER_TOOLS := [
 	"minerva_pcb_check_bom",
 	"minerva_pcb_fetch_libraries",
 	"minerva_pcb_library_status",
+	# K20 (DCR 019ffc52c358): the board's library pin. Added to this by-name
+	# list, not just the aggregate count, so a rename reds here too.
+	"minerva_pcb_lock_libraries",
 ]
 
 var _pass := 0
@@ -184,6 +187,10 @@ func _init() -> void:
 	# 8's (71 -> 72), bus-propose's (70 -> 71), D0-5's (69 -> 70), C5's
 	# (68 -> 69), C4b's (70 -> 68) and C4a's (60 -> 70) — all queue behind the
 	# same serialization point.
+	# Epoch GA task 3 (100 -> 101): minerva_pcb_lock_libraries, K20's board
+	# library pin — a WORKER-backed tool, so unlike the two below it ALSO moves
+	# the Go backend-executor count in manifest_registry_parity_test.go.
+	#
 	# Epoch GA round 2 (98 -> 100): minerva_pcb_staged_freeze +
 	# minerva_pcb_staged_unfreeze, the agent's half of K7's freeze verb. Two
 	# tools rather than one flag-taking verb, following the sibling
@@ -196,7 +203,7 @@ func _init() -> void:
 	# previous station broke the gate. The Go pin in
 	# manifest_registry_parity_test.go is genuinely unaffected: it counts
 	# backend-executor tools, and both new tools are executor:"panel".
-	check("total registered tool count == 100", registered.size() == 100,
+	check("total registered tool count == 101", registered.size() == 101,
 			"got %d: %s" % [registered.size(), str(registered)])
 
 	# Each of the 11 must resolve through find_tool() with a non-empty

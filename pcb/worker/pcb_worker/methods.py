@@ -19,6 +19,7 @@ contract (pcb/internal/board/board.go, pcb/docs/board-yaml.md):
 
 from __future__ import annotations
 
+import copy
 import os
 import traceback
 from pathlib import Path
@@ -691,6 +692,92 @@ def _fab_preview(params: dict) -> dict:
             "min_x": bounds[0], "min_y": bounds[1],
             "max_x": bounds[2], "max_y": bounds[3]},
         "warnings": warnings,
+    }}
+
+
+def _lock_libraries(params: dict) -> dict:
+    """PIN this board to the library content it currently resolves (K20, DCR
+    019ffc52c358). The verb that makes ``Board.library_lock`` acquirable.
+
+    PURE, exactly like ``normalize``: returns the board with its lock block
+    populated for the host to persist, and never writes to disk. Locking is a
+    deliberate act with a durable consequence — future rebuilds will REFUSE on
+    a mismatch — so it is something a person asks for, never a side effect of
+    opening or compiling a board.
+
+    RESOLVES THROUGH THE SAME LIVE CHAIN A COMPILE USES
+    (``bless.live_library_chain``), not a raw one. A lock built from the raw
+    chain could pin an unblessed WIP part that the compiler would then refuse,
+    producing a board that is locked to content it cannot build with — a
+    self-inflicted deadlock, and precisely the kind of two-authority drift the
+    single-chain rule exists to prevent.
+
+    RELOCKING IS FULL REPLACEMENT, not a merge. A stale pin for a part the
+    board no longer uses would otherwise survive forever, and the block is
+    meant to describe THIS board's current consumption.
+
+    params: {board|yaml} plus the usual library/layer params.
+    Reply: {ok: True, result: {board, locked: [refs], unresolved: [{ref, reason}]}}
+
+    ``unresolved`` is carried, never dropped: a ref no layer supplies cannot be
+    pinned, and a caller that saw only the lock would believe the board fully
+    pinned when part of it is not. The board is still returned with whatever
+    could be pinned — a partial lock is strictly better than none, as long as
+    the gap is stated.
+    """
+    try:
+        board = _load(params)
+    except board_model.BoardParseError as exc:
+        return {"ok": False, "error": {"kind": "parse", "message": str(exc)}}
+
+    layer_params = _layer_params(params)
+    try:
+        chain = bless.live_library_chain(
+            wip_root=layer_params.get("wip_root"),
+            layers=layer_params.get("library_layers"),
+            library_root=layer_params.get("library_root"),
+            lockfile=layer_params.get("lockfile"))
+    except Exception as exc:  # noqa: BLE001 — structured error, not a crash
+        return {"ok": False, "error": {
+            "kind": "lock_unreadable",
+            "message": f"footprint lock could not be loaded: {exc}"}}
+
+    lock: dict = {}
+    unresolved: list = []
+    seen: set = set()
+    components = board.get("components")
+    for comp in (components if isinstance(components, list) else []):
+        if not isinstance(comp, dict):
+            continue
+        fp_ref = comp.get("footprint")
+        if not isinstance(fp_ref, str) or not fp_ref or fp_ref in seen:
+            continue
+        seen.add(fp_ref)
+        supplier = footprints.lookup_footprint_layer(fp_ref, chain)
+        entry = supplier.lock.get(fp_ref) if supplier is not None else None
+        if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+            unresolved.append({
+                "ref": fp_ref,
+                "reason": ("no library layer supplies this footprint"
+                           if supplier is None
+                           else "the supplying layer's lock entry has no sha256"),
+            })
+            continue
+        pin = {"sha256": entry["sha256"], "layer": supplier.layer.name}
+        source = entry.get("source") or entry.get("origin")
+        if isinstance(source, str) and source:
+            pin["source"] = source
+        lock[fp_ref] = pin
+
+    board = copy.deepcopy(board)
+    if lock:
+        board["library_lock"] = lock
+    else:
+        board.pop("library_lock", None)
+    return {"ok": True, "result": {
+        "board": board,
+        "locked": sorted(lock.keys()),
+        "unresolved": unresolved,
     }}
 
 
@@ -3358,6 +3445,7 @@ _HANDLERS = {
     "fab_preview": lambda req: _fab_preview(req.get("params") or {}),
     "promote_check": lambda req: _promote_check(req.get("params") or {}),
     "normalize": lambda req: _normalize(req.get("params") or {}),
+    "lock_libraries": lambda req: _lock_libraries(req.get("params") or {}),
     # Rendered-bless surface (S3/B2) — stage into the WIP layer, render the
     # bless artifacts, record the verdict. See the section above _init().
     "footprint_stage": lambda req: _footprint_stage(req.get("params") or {}),

@@ -107,6 +107,10 @@ var mounting_holes: Array[Dictionary] = []  # [{position, diameter, plated}]
 ## `net` is likewise unchanged in shape but no longer universal: a keepout may
 ## carry no `net` key at all (Go omits it when empty), so every read of a zone's
 ## net goes through `.get("net", "")`.
+## The board's library lock: {footprint_ref: {sha256, layer?, source?}} (K20,
+## DCR 019ffc52c358). Opaque to this model — carried, never adjudicated.
+var library_lock: Dictionary = {}
+
 var zones: Array[Dictionary] = []
 
 ## Authored cutouts — openings through the ENTIRE board (campaign 2 epoch B, U2
@@ -2898,6 +2902,11 @@ func to_board_dict() -> Dictionary:
 		"vias": via_list,
 		"mounting_holes": hole_list
 	}
+	# Emitted ONLY when the board actually carries a lock, the same rule zones
+	# follow below, so an unlocked board's canonical dict — and the YAML written
+	# from it — is byte-identical to before this field existed.
+	if not library_lock.is_empty():
+		out["library_lock"] = library_lock.duplicate(true)
 	# Emitted ONLY when the board actually has zones, so a zone-free board's
 	# canonical dict — and therefore the YAML pcb.serialize writes from it — is
 	# byte-identical to what it was before zones existed. Go's Zone slice is
@@ -2933,6 +2942,18 @@ func from_board_dict(data: Dictionary) -> void:
 		layers.append(str(layer))
 
 	design_rules = (data.get("design_rules", {}) as Dictionary).duplicate()
+
+	# THE BOARD'S LIBRARY LOCK (K20, DCR 019ffc52c358) is carried VERBATIM and
+	# never interpreted here. The panel is not the authority on what a board
+	# consumed — the compiler is — so this model's whole job is to not lose it.
+	#
+	# WHY THIS LINE EXISTS AT ALL: to_board_dict rebuilds the canonical dict
+	# from typed fields rather than editing the loaded one, so any top-level key
+	# this model does not explicitly carry is DESTROYED the first time a user
+	# opens a locked board and saves it. Silent, total, and indistinguishable
+	# from the board never having been locked.
+	library_lock = (data.get("library_lock", {}) as Dictionary).duplicate(true) \
+		if data.get("library_lock", null) is Dictionary else {}
 
 	# Components (canonical list → id→object map)
 	components.clear()

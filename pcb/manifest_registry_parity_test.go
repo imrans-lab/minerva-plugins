@@ -123,11 +123,11 @@ func TestManifestBrokerParity(t *testing.T) {
 	// registration-count pin (pcb/tests/gd/test_manifest_tool_registration.gd)
 	// documents; this count is a hard gate (not discretionary), so it moves in
 	// lockstep with the manifest/broker entry rather than trailing it.
-	if len(manifestTools) != 18 {
-		t.Errorf("manifest backend-executor tool count = %d, want 18 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint)", len(manifestTools))
+	if len(manifestTools) != 19 {
+		t.Errorf("manifest backend-executor tool count = %d, want 19 (the D0-expose 11 + D0-5's minerva_pcb_export_assembly + LIB1 B2's stage/report/bless trio + LIB1 B3's minerva_pcb_acquire_footprint + LIB2 B7's minerva_pcb_footprint_promote + LIB2 B4's minerva_pcb_import_footprint + K20's minerva_pcb_lock_libraries)", len(manifestTools))
 	}
-	if len(brokerSpecs) != 18 {
-		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 18", len(brokerSpecs))
+	if len(brokerSpecs) != 19 {
+		t.Errorf("broker agent-facing (minerva_pcb_*) tool count = %d, want 19", len(brokerSpecs))
 	}
 }
 

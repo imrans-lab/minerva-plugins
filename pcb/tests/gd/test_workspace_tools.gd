@@ -1399,8 +1399,8 @@ func _run_removal_manifest_tools_absent() -> void:
 	# minerva_pcb_staged_unfreeze, K7's freeze doorway. This pin exists
 	# BECAUSE the sibling pin in test_manifest_tool_registration.gd counts a
 	# different set (registered tools) and can agree while this one is wrong.
-	check_eq("manifest tool count == 100 (ALL manifest.json tools[] entries)",
-		names.size(), 100)
+	check_eq("manifest tool count == 101 (ALL manifest.json tools[] entries)",
+		names.size(), 101)
 	check("the C5 bus tool is the addition this count accounts for",
 		"minerva_pcb_route_bus_direct" in names)
 	check("the bus-propose tool is the addition THIS count accounts for",

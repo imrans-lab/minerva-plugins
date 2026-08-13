@@ -15,6 +15,7 @@ Each test names the mutation it is designed to fail against.
 from __future__ import annotations
 
 from pcb_worker.compile_board import compile_board
+from pcb_worker.methods import handle_request
 from pcb_worker.footprints import (DEFAULT_LOCKFILE, SEED_LAYER,
                                    load_lockfile)
 from pcb_worker.resolved_board import DiagnosticSeverity
@@ -128,3 +129,70 @@ def test_a_malformed_lock_block_does_not_brick_the_board():
     for bad in ("not a dict", ["also", "not"], {SEEDED_REF: "not an entry"}):
         result = compile_board(_board(SEEDED_REF, bad))  # type: ignore[arg-type]
         assert "library_lock_mismatch" not in _codes(result), bad
+
+
+# ── the verb that WRITES a lock (minerva_pcb_lock_libraries) ─────────────────
+
+def _lock(board: dict) -> dict:
+    resp = handle_request({"id": "lk", "method": "lock_libraries",
+                           "params": {"board": board}})
+    assert resp["ok"] is True, resp
+    return resp["result"]
+
+
+def test_locking_pins_the_footprints_the_board_actually_uses():
+    """MUTATION THIS CATCHES: pinning nothing, or pinning a value that is not
+    the resolved content's sha. A lock block that does not match what resolution
+    returns is worse than absent — the very next compile refuses a board nobody
+    changed."""
+    result = _lock(_board(SEEDED_REF))
+    assert result["locked"] == [SEEDED_REF]
+    assert result["board"]["library_lock"][SEEDED_REF]["sha256"] == _seed_sha(SEEDED_REF)
+    assert result["board"]["library_lock"][SEEDED_REF]["layer"] == SEED_LAYER
+
+
+def test_a_freshly_locked_board_compiles_without_a_mismatch():
+    """THE END-TO-END PROPERTY, and the one worth most: lock, then build. If the
+    writer and the verifier disagree about ANYTHING — which sha, which layer,
+    which refs — this fails, and no amount of agreement between either half and
+    a fixture would save it. MUTATION THIS CATCHES: any drift between the two
+    halves of the feature."""
+    locked = _lock(_board(SEEDED_REF))["board"]
+    result = compile_board(locked)
+    assert "library_lock_mismatch" not in _codes(result)
+    assert "footprint_pinned_but_missing" not in _codes(result)
+
+
+def test_relocking_REPLACES_rather_than_merging():
+    """MUTATION THIS CATCHES: merging the new pins into the old block. A pin for
+    a part the board no longer uses would then survive forever, and the block
+    would slowly stop describing this board at all — which is the only thing it
+    is for."""
+    stale = _board(SEEDED_REF, {
+        SEEDED_REF: {"sha256": _seed_sha(SEEDED_REF)},
+        "Ghost_Lib:Part_Long_Since_Removed": {"sha256": "c" * 64},
+    })
+    relocked = _lock(stale)["board"]["library_lock"]
+    assert SEEDED_REF in relocked
+    assert "Ghost_Lib:Part_Long_Since_Removed" not in relocked
+
+
+def test_an_unpinnable_footprint_is_NAMED_not_silently_skipped():
+    """MUTATION THIS CATCHES: dropping refs no layer supplies. A caller reading
+    only `locked` would believe the board fully pinned when part of it is not —
+    the same partial-honesty failure the fab preview's `unrendered` list exists
+    to prevent."""
+    result = _lock(_board("No_Such_Lib:No_Such_Part"))
+    assert result["locked"] == []
+    assert [u["ref"] for u in result["unresolved"]] == ["No_Such_Lib:No_Such_Part"]
+    assert result["unresolved"][0]["reason"].strip()
+
+
+def test_locking_does_not_mutate_the_caller_s_board():
+    """MUTATION THIS CATCHES: writing the lock into the input dict. The method
+    advertises itself as PURE, and a caller that passed a board it still holds
+    would find it silently changed underneath — the kind of aliasing bug that
+    surfaces three layers away from its cause."""
+    original = _board(SEEDED_REF)
+    _lock(original)
+    assert "library_lock" not in original

@@ -44,6 +44,7 @@ func _init() -> void:
 	_run_capture_mirrors_the_draft_layer()
 	_run_fab_preview_accounting()
 	_run_approximation_notice()
+	_run_library_lock_round_trip()
 	print("\n=== Results: %d passed, %d failed ===" % [_pass, _fail])
 	if _fail > 0:
 		printerr("FAILURES: %d" % _fail)
@@ -610,3 +611,55 @@ func _run_approximation_notice() -> void:
 	c2.mirror_capture_state_onto(copy)
 	check_eq("the notice setting reaches the capture copy",
 		bool(copy.show_approximation_notice), true)
+
+
+# ── 11. the panel does not destroy a board's library lock (K20) ──────────────
+#
+# MUTATION THIS SECTION CATCHES: removing either half of the round-trip.
+# to_board_dict REBUILDS the canonical dict from typed fields rather than
+# editing the loaded one, so any top-level key this model does not explicitly
+# carry is destroyed the first time a user opens a locked board and saves it.
+# Silent, total, and indistinguishable from the board never having been locked
+# — the panel would quietly un-pin every board it touched.
+
+func _run_library_lock_round_trip() -> void:
+	print("-- 11. library_lock survives open → save --")
+	var d = PCBData.new()
+	var lock := {"Lib:Part": {"sha256": "abc123", "layer": "seed"}}
+	d.from_board_dict({
+		"version": 1, "name": "locked", "width_mm": 20.0, "height_mm": 20.0,
+		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"], "components": [], "nets": [],
+		"traces": [], "vias": [], "library_lock": lock,
+	})
+	var out: Dictionary = d.to_board_dict()
+	check("the lock survives the round trip", out.has("library_lock"))
+	check_eq("…with its content intact",
+		str((out.get("library_lock", {}) as Dictionary).get("Lib:Part", {}).get("sha256", "")),
+		"abc123")
+
+	# The model must not ADJUDICATE it — the compiler is the authority on what a
+	# board consumed. Anything the panel does not understand still comes back.
+	var d2 = PCBData.new()
+	d2.from_board_dict({
+		"version": 1, "name": "future", "width_mm": 20.0, "height_mm": 20.0,
+		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"], "components": [], "nets": [],
+		"traces": [], "vias": [],
+		"library_lock": {"Lib:Part": {"sha256": "x", "some_future_field": 7}},
+	})
+	check_eq("an unrecognised pin field is carried verbatim",
+		int((d2.to_board_dict().get("library_lock", {}) as Dictionary)
+			.get("Lib:Part", {}).get("some_future_field", 0)), 7)
+
+	# An UNLOCKED board must stay byte-identical to before this field existed:
+	# emitting an empty block would churn every board's YAML on first open.
+	var d3 = PCBData.new()
+	d3.from_board_dict({
+		"version": 1, "name": "plain", "width_mm": 20.0, "height_mm": 20.0,
+		"grid_mm": 2.54, "design_rules": {"clearance_mm": 0.2},
+		"layers": ["top", "bottom"], "components": [], "nets": [],
+		"traces": [], "vias": [],
+	})
+	check("an unlocked board emits NO library_lock key",
+		not d3.to_board_dict().has("library_lock"))

@@ -252,6 +252,41 @@ func HandleNormalize(ctx context.Context, w *bridge.Worker, params json.RawMessa
 	return w.Call(ctx, "normalize", withLibraryChain(params))
 }
 
+// ---- minerva_pcb_lock_libraries ---------------------------------------------
+//
+// K20 / DCR 019ffc52c358: the verb that makes Board.library_lock acquirable.
+// Forwards to the worker's "lock_libraries" method, which resolves every
+// footprint the board uses through the SAME live chain a compile uses and
+// records the content identity it found.
+
+var LockLibraries = ToolSpec{
+	Name: "minerva_pcb_lock_libraries",
+	Description: "PIN a PCB board to the library content it currently resolves, so a rebuild " +
+		"months later reproduces the same copper or REFUSES (acceptance check K20). Args " +
+		"{yaml:<board source>} or {board:<board object>}. Component.footprint is a NAME, and " +
+		"a user library layer may legitimately override a seed part under the same name — so " +
+		"without a lock the same board can resolve to different geometry later with nothing " +
+		"saying so. This records, per footprint the board actually uses, the sha256 of the " +
+		"content that resolved plus the layer that supplied it; a later compile refuses by " +
+		"name when the sha no longer matches. PURE — returns the locked board for the host to " +
+		"persist; never writes to disk. Relocking REPLACES the block rather than merging, so " +
+		"a pin for a part the board no longer uses cannot survive forever. Returns " +
+		"{ok:true, board:<locked>, locked:[refs], unresolved:[{ref,reason}]}; `unresolved` " +
+		"names any footprint no layer supplies — those cannot be pinned, and a caller that " +
+		"ignored it would believe the board fully pinned when part of it is not.",
+	InputSchema: json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"yaml": {"type": "string", "description": "Canonical board YAML source."},
+			"board": {"type": "object", "description": "Canonical board object."}
+		}
+	}`),
+}
+
+func HandleLockLibraries(ctx context.Context, w *bridge.Worker, params json.RawMessage) (json.RawMessage, error) {
+	return w.Call(ctx, "lock_libraries", withLibraryChain(params))
+}
+
 // ---- pcb.route (worker-backed broker CHANNEL, not an LLM tool name) --------
 //
 // Unlike minerva_pcb_validate/minerva_pcb_generate/... (LLM-facing tool names
